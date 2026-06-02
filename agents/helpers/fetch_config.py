@@ -72,7 +72,10 @@ async def fetch_agent_config(agent_id: str) -> Dict:
             "response_schema": agent.get("response_schema"),  # Structured output schema
             "token_in_price_microdollars": agent.get("token_in_price_microdollars"),  # For cost calculation
             "token_out_price_microdollars": agent.get("token_out_price_microdollars"),  # For cost calculation
-            "write_lock_enabled": agent.get("writeLockEnabled", True),  # Write lock for browser actions (default: True)
+            "write_lock_enabled": agent.get(
+                "write_lock_enabled",
+                agent.get("writeLockEnabled", True),
+            ),  # Write lock for browser actions (default: True)
         }
 
         logger.info(

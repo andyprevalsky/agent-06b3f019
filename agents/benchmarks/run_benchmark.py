@@ -32,12 +32,17 @@ import asyncio
 import csv
 import json
 import os
+import re
+import subprocess
 import sys
 import tempfile
 import time
+import uuid
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 import httpx
 
@@ -92,11 +97,42 @@ STALL_THRESHOLD = 120  # seconds without new messages/agents across ENTIRE tree 
 AGENT_STALL_SECONDS = 240
 TREE_POLL_INTERVAL = 15  # seconds between tree-level polls (more expensive than root-only)
 CALENDLY_TASK_NAME = "calendly-schedule-meeting"
+BIOMETRICS_WEBDECOY_TASK_NAME = "browser-biometrics-webdecoy"
+AUTH_BUNDLE_BIOMETRICS_GATE_ENV = "BENCHMARK_AUTH_BUNDLE_BIOMETRICS_GATE"
+MINTED_AGENT_ACCOUNT_TASK_NAME = "minted-agent-accounts-uber"
+MINTED_AGENT_ACCOUNT_X_TASK_NAME = "minted-agent-accounts-x"
+MINTED_AGENT_ACCOUNT_TASK_NAMES = {
+    MINTED_AGENT_ACCOUNT_TASK_NAME,
+    MINTED_AGENT_ACCOUNT_X_TASK_NAME,
+}
+MINTED_AGENT_ACCOUNT_X_POST_GOAL = "Make a post on X.com that says, Hello World"
+MINTED_AGENT_ACCOUNT_X_AUTH_HINT = (
+    "If X asks you to sign in or create an account first, use the minted AgentMail email in auth options "
+    "when an email address is accepted. Click controls like 'Use email instead' when they are available. "
+    "Do not choose the initial 'Continue with phone' or 'Sign up with Phone' path; if X opens a phone-number "
+    "field before you have tried the email route, go back and find the email route instead. "
+    "Use the minted AgentPhone only if X explicitly requires phone/SMS auth after the email route. "
+    "If X shows 'An unexpected error occurred', treats the phone number as invalid, or fails to send an SMS, "
+    "stop and report that as a terminal phone-auth blocker instead of retrying alternate phone formats."
+)
+AMAZON_AUTH_ASSISTANCE_TASK_NAME = "browser-agent"
+AMAZON_COOKIE_PAYMENT_TASK_NAME = "browser-agent-amazon-cookie-payment"
+AMAZON_COOKIE_BOOTSTRAP_TASK_NAMES = {
+    AMAZON_AUTH_ASSISTANCE_TASK_NAME,
+    AMAZON_COOKIE_PAYMENT_TASK_NAME,
+}
+BENCHMARK_FORCE_SHOW_PASSWORDS_ENV = "BENCHMARK_FORCE_SHOW_PASSWORDS"
+BAD_AMAZON_PASSWORD_USERNAME = "andyprevalsky@yahoo.com"
+BAD_AMAZON_COOKIE_SOURCE = "benchmark_bad_auth"
+BAD_AMAZON_COOKIE_PROFILE = "force-show-passwords"
 TEST_ASSETS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "front-end", "public", "test-assets")
+REPO_ROOT = Path(__file__).resolve().parents[2]
 _AGENTS_ENV = os.path.join(os.path.dirname(__file__), "..", ".env")
 _BACKEND_ENV = os.path.join(os.path.dirname(__file__), "..", "..", "back-end", ".env")
 API_KEY = load_env_var("BACKEND_API_KEY", _AGENTS_ENV, _BACKEND_ENV)
 USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
+DEFAULT_MINTED_BENCHMARK_AGENT_EMAIL = "rose.harbor47@mail.roselabs.ai"
+DEFAULT_MINTED_BENCHMARK_AGENT_PHONE = "+18159823405"
 SMOKE_MEMORY_MAX_GROWTH_MB = float(os.environ.get("BENCHMARK_SMOKE_MEMORY_MAX_GROWTH_MB", "256"))
 SMOKE_MEMORY_MAX_END_MB = float(os.environ.get("BENCHMARK_SMOKE_MEMORY_MAX_END_MB", "1800"))
 SMOKE_MEMORY_FORBID_PLAYWRIGHT_DRIVERS = os.environ.get(
@@ -112,6 +148,59 @@ class AgentNotFoundError(Exception):
 
 # Terminal agent statuses
 TERMINAL_STATUSES = {"COMPLETED", "FAILED", "OUT_OF_CREDITS", "COST_LIMIT_REACHED"}
+
+
+def _x_post_prompt() -> str:
+    """Return the X post benchmark prompt with auth guidance for fresh profiles."""
+    return f"{MINTED_AGENT_ACCOUNT_X_POST_GOAL}\n\n{MINTED_AGENT_ACCOUNT_X_AUTH_HINT}"
+
+
+def _benchmark_env_bool(name: str) -> Optional[bool]:
+    """Parse an optional benchmark env bool."""
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return None
+    normalized = value.strip().lower()
+    if normalized in ("1", "true", "yes", "on"):
+        return True
+    if normalized in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"{name} must be one of true/false/1/0/yes/no/on/off")
+
+
+def _apply_benchmark_env_overrides(tasks: List[BenchmarkTask]) -> None:
+    """Apply local benchmark-only task overrides from env vars."""
+    approval_override = os.environ.get("BENCHMARK_APPROVAL_HANDLING_OVERRIDE")
+    if approval_override is None:
+        return
+    normalized = approval_override.strip().lower()
+    if normalized in ("", "none", "null", "disabled", "off", "false", "0"):
+        value = None
+    elif normalized in ("auto_approve", "ignore", "prompt_user", "count_only"):
+        value = normalized
+    else:
+        raise ValueError(
+            "BENCHMARK_APPROVAL_HANDLING_OVERRIDE must be one of "
+            "none/auto_approve/ignore/prompt_user/count_only"
+        )
+    for task in tasks:
+        task.approval_handling = value
+        print(f"  🔧 {task.name}: approval_handling overridden to {value}")
+
+
+def _apply_force_show_passwords_task_overrides(tasks: List[BenchmarkTask]) -> None:
+    if not _force_show_passwords_mode():
+        return
+    for task in tasks:
+        if task.name != AMAZON_AUTH_ASSISTANCE_TASK_NAME:
+            continue
+        task.approval_handling = "auto_approve"
+        task.expected_attention_kind = "auth_assistance"
+        task.timeout_seconds = max(task.timeout_seconds, 900)
+        print(
+            "  🔧 browser-agent: force-show-passwords mode will auto-complete auth assistance "
+            "and validate post-run credential disabling"
+        )
 
 
 def _contains_calendly_link(value) -> bool:
@@ -132,6 +221,43 @@ def _normalize_attention_requests_response(data) -> list:
     if isinstance(data, dict) and isinstance(data.get("requests"), list):
         return data["requests"]
     raise RuntimeError(f"Unexpected attention-requests response shape: {type(data).__name__}")
+
+
+def _attention_request_is_open(req: dict) -> bool:
+    """Return True for unanswered attention requests across API response versions."""
+    if req.get("answered") is True:
+        return False
+    if req.get("user_response") is not None:
+        return False
+    if req.get("response") is not None:
+        return False
+    return True
+
+
+def _attention_request_kind(req: dict) -> str:
+    """Classify attention request metadata for typed benchmark assertions."""
+    metadata = req.get("metadata") if isinstance(req, dict) else None
+    metadata = metadata if isinstance(metadata, dict) else {}
+    explicit_kind = metadata.get("attentionKind") or metadata.get("attention_kind")
+    if isinstance(explicit_kind, str) and explicit_kind:
+        return explicit_kind
+    if isinstance(metadata.get("requestUserAuthentication"), dict) or isinstance(metadata.get("authAssistance"), dict):
+        return "auth_assistance"
+    approval = metadata.get("requestUserApproval")
+    if isinstance(approval, dict) and approval.get("writePermission"):
+        return "write_lock"
+    if metadata.get("writePermission") or metadata.get("toolApproval"):
+        return "write_lock"
+    if isinstance(approval, dict):
+        return "approval"
+    return "unknown"
+
+
+def _attention_request_matches_task(task: BenchmarkTask, req: dict) -> bool:
+    expected_kind = task.expected_attention_kind
+    if not expected_kind:
+        return True
+    return _attention_request_kind(req) == expected_kind
 
 
 def _ci_should_fail(summary: dict) -> bool:
@@ -160,21 +286,38 @@ async def _api_headers() -> dict:
     """Get auth headers — JWT for prod, API key fallback. Caches after first success."""
     global _cached_headers, _auth_mode
 
+    if _cached_headers and _auth_mode in {"jwt", "api_key"}:
+        return dict(_cached_headers)
+
     # If we already know API key is the only option, skip JWT attempts
     if _auth_mode == "api_key":
-        return {
+        _cached_headers = {
             "X-API-Key": API_KEY,
             "X-User-Id": USER_ID,
             "Content-Type": "application/json",
         }
-
-    if _cached_headers and _auth_mode == "jwt":
         return dict(_cached_headers)
 
     try:
         auth = await authenticate()
+        if auth.get("api_key") or auth.get("auth_mode") == "internal_api_key":
+            api_key = auth.get("api_key") or API_KEY
+            user_id = auth.get("user_id") or USER_ID
+            if not api_key:
+                raise RuntimeError("BACKEND_API_KEY env var is required for API key auth.")
+            _cached_headers = {
+                "X-API-Key": api_key,
+                "X-User-Id": user_id,
+                "Content-Type": "application/json",
+            }
+            _auth_mode = "api_key"
+            return dict(_cached_headers)
+
+        access_token = auth.get("access_token")
+        if not access_token:
+            raise RuntimeError("JWT auth returned no access token.")
         _cached_headers = {
-            "Authorization": f"Bearer {auth['access_token']}",
+            "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json",
         }
         _auth_mode = "jwt"
@@ -184,11 +327,12 @@ async def _api_headers() -> dict:
         if not API_KEY:
             raise RuntimeError("BACKEND_API_KEY env var is required when JWT auth is unavailable.")
         _auth_mode = "api_key"
-        return {
+        _cached_headers = {
             "X-API-Key": API_KEY,
             "X-User-Id": USER_ID,
             "Content-Type": "application/json",
         }
+        return dict(_cached_headers)
 
 
 async def create_agent(
@@ -197,9 +341,10 @@ async def create_agent(
 ) -> str:
     """Create a benchmark agent. Returns agent_id."""
     headers = await _api_headers()
+    goal = os.environ.get("BENCHMARK_GOAL_OVERRIDE") or task.prompt
 
     body: dict = {
-        "goal": task.prompt,
+        "goal": goal,
         "model": "rose-labs/rose-1-lite",
         "source": "WEB",
         "price_limit_cents": task.price_limit_cents,
@@ -207,6 +352,9 @@ async def create_agent(
             "type": "FLOAT_LLM_JUDGE",
         },
     }
+    write_lock_enabled = _benchmark_env_bool("BENCHMARK_WRITE_LOCK_ENABLED")
+    if write_lock_enabled is not None:
+        body["write_lock_enabled"] = write_lock_enabled
 
     if task.start_phase:
         body["start_phase"] = task.start_phase
@@ -216,7 +364,25 @@ async def create_agent(
         if resp.status_code not in (200, 201):
             raise Exception(f"Failed to create agent: {resp.status_code} - {resp.text}")
         data = resp.json()
-        return data["agent_id"]
+        agent_id = data["agent_id"]
+        if write_lock_enabled is not None:
+            patch_resp = await client.patch(
+                f"{base_url}/api/agents/{agent_id}",
+                headers=headers,
+                json={"write_lock_enabled": write_lock_enabled},
+            )
+            if patch_resp.status_code != 200:
+                raise Exception(
+                    f"Failed to verify write_lock_enabled override: "
+                    f"{patch_resp.status_code} - {patch_resp.text}"
+                )
+            patched = patch_resp.json().get("agent", {})
+            if patched.get("write_lock_enabled") != write_lock_enabled:
+                raise Exception(
+                    "write_lock_enabled override did not persist: "
+                    f"expected {write_lock_enabled}, got {patched.get('write_lock_enabled')}"
+                )
+        return agent_id
 
 
 async def get_agent(base_url: str, agent_id: str) -> dict:
@@ -864,17 +1030,43 @@ async def poll_agent(
                 pending = _pending_attention
                 for req in pending:
                     req_agent_id = req.get("agentId") or req.get("agent_id", "")
-                    if req_agent_id in tree_agent_ids and not req.get("response"):
+                    if req_agent_id in tree_agent_ids and _attention_request_is_open(req):
                         req_id = req.get("id")
                         if req_id and req_id not in seen_attention_ids:
                             seen_attention_ids.add(req_id)
+                            if not _attention_request_matches_task(task, req):
+                                observed_kind = _attention_request_kind(req)
+                                expected_kind = task.expected_attention_kind
+                                data["_benchmark"] = {
+                                    **data.get("_benchmark", {}),
+                                    "unexpected_attention_kind": observed_kind,
+                                    "expected_attention_kind": expected_kind,
+                                    "unexpected_attention_request_id": req_id,
+                                }
+                                return (
+                                    data,
+                                    approvals_triggered,
+                                    approvals_resolved,
+                                    f"Expected attention kind {expected_kind}, observed {observed_kind}",
+                                )
                             approvals_triggered += 1
+                            if task.expected_attention_kind:
+                                data["_benchmark"] = {
+                                    **data.get("_benchmark", {}),
+                                    "expected_attention_kind_seen": task.expected_attention_kind,
+                                    "expected_attention_request_id": req_id,
+                                }
                             if task.approval_handling == "count_only":
                                 await respond_to_attention_request(base_url, req_id, _count_only_release_response())
                                 approvals_resolved += 1
                                 print(f"    ✅ Counted and released approval request {req_id[:8]}")
                             if task.approval_handling == "ignore":
-                                print(f"    ✅ Approval request observed {req_id[:8]}")
+                                kind_label = (
+                                    f" ({task.expected_attention_kind})"
+                                    if task.expected_attention_kind
+                                    else ""
+                                )
+                                print(f"    ✅ Approval request observed{kind_label} {req_id[:8]}")
                                 return data, approvals_triggered, approvals_resolved, None
                         if task.name == CALENDLY_TASK_NAME and _contains_calendly_link(req):
                             data["_benchmark"] = {"calendly_link_approval_seen": True}
@@ -967,7 +1159,13 @@ def evaluate_task(
     # that the approval was actually triggered (the agent won't complete).
     if task.approval_handling == "ignore":
         if approvals_triggered == 0:
+            if task.expected_attention_kind:
+                return False, f"Expected {task.expected_attention_kind} attention request (to ignore) but none was triggered"
             return False, "Expected approval request (to ignore) but none were triggered"
+        if task.expected_attention_kind:
+            benchmark_state = data.get("_benchmark", {})
+            if benchmark_state.get("expected_attention_kind_seen") != task.expected_attention_kind:
+                return False, f"Expected {task.expected_attention_kind} attention request but it was not observed"
         return True, None
 
     if task.name == CALENDLY_TASK_NAME:
@@ -996,14 +1194,49 @@ def evaluate_task(
         if tool.lower() not in all_metadata:
             return False, f"Expected tool '{tool}' not found in messages"
 
+    if task.name == BIOMETRICS_WEBDECOY_TASK_NAME:
+        passed, reason = _evaluate_webdecoy_biometrics_result(data)
+        if not passed:
+            return False, reason
+
     # Check approval expectations
     if task.approval_handling in ("auto_approve", "prompt_user") and approvals_triggered == 0:
+        if task.name == f"{MINTED_AGENT_ACCOUNT_X_TASK_NAME}-post" and _x_signup_has_terminal_phone_blocker(
+            _agent_data_search_text(data)
+        ):
+            return True, None
         return False, "Expected approval requests but none were triggered"
 
     # Progress score check (verifier gave a score)
     if progress < 0.5:
         return False, f"Low progress score: {progress:.2f}"
 
+    return True, None
+
+
+def evaluate_force_show_passwords_auth_task(
+    task: BenchmarkTask,
+    data: dict,
+    approvals_triggered: int,
+    approvals_resolved: int,
+) -> Tuple[bool, Optional[str]]:
+    """Validate the bad-auth lifecycle for Amazon --anon --force-show-passwords."""
+    if task.name != AMAZON_AUTH_ASSISTANCE_TASK_NAME or not _force_show_passwords_mode():
+        return True, None
+    agent = data.get("agent", {})
+    status = agent.get("status", "UNKNOWN")
+    status_message = agent.get("status_message") or agent.get("statusMessage") or ""
+    if approvals_triggered <= 0:
+        return False, "expected request_user_assistance_for_authentication attention request"
+    if approvals_resolved <= 0:
+        return False, "expected auth assistance request to be auto-approved/resolved"
+    if status != "FAILED":
+        return False, f"expected agent to fail after empty auth assistance approval, got {status}"
+    if "max" not in str(status_message).lower() and "iteration" not in str(status_message).lower():
+        return False, f"expected max-turn/max-iteration failure after resume, got: {status_message or '(empty)'}"
+    rows_ok, rows_reason = _validate_bad_amazon_auth_fixture(USER_ID)
+    if not rows_ok:
+        return False, rows_reason
     return True, None
 
 
@@ -1020,6 +1253,18 @@ def _approval_mode_allows_open_tool_context(
     benchmark_state = data.get("_benchmark", {})
     observed = benchmark_state.get("expected_approval_count_seen", approvals_triggered)
     return observed >= task.expected_approval_count
+
+
+def _final_context_violations_for_result(
+    task: BenchmarkTask,
+    data: dict,
+    approvals_triggered: int,
+    violations: list,
+) -> list:
+    """Drop expected open-tool pairing violations when approval intentionally blocks completion."""
+    if not _approval_mode_allows_open_tool_context(task, data, approvals_triggered):
+        return violations
+    return [v for v in violations if getattr(v, "rule", None) != "tool_result_pairing"]
 
 
 # ============================================================
@@ -1061,7 +1306,1287 @@ def slice_csv(filepath: str, row_start: int, row_end: int) -> str:
 
 def _should_delete_agent_after_run(passed: bool, keep_failed_agents: bool) -> bool:
     """Return whether benchmark cleanup should delete the created agent."""
+    if os.environ.get("BENCHMARK_KEEP_AGENTS") == "true":
+        return False
     return passed or not keep_failed_agents
+
+
+def _local_victoria_db_container() -> Optional[str]:
+    workspace = os.environ.get("CONDUCTOR_WORKSPACE_NAME")
+    if not workspace or not _docker_daemon_ping():
+        return None
+    container = f"victoria-db-{workspace}"
+    ps = subprocess.run(
+        ["docker", "ps", "--filter", f"name=^{container}$", "--format", "{{.Names}}"],
+        capture_output=True,
+        text=True,
+    )
+    return container if container in ps.stdout.splitlines() else None
+
+
+def _local_victoria_database_url() -> Optional[str]:
+    candidates: list[str] = []
+    services_path = REPO_ROOT / ".context" / "services.json"
+    if services_path.exists():
+        try:
+            services = json.loads(services_path.read_text())
+            if (services.get("database") or {}).get("use_system_postgres") is True:
+                candidates.append("postgresql://postgres:postgres@localhost:5432/victoria")
+            port = (services.get("ports") or {}).get("local_db")
+            if port:
+                candidates.append(f"postgresql://postgres:postgres@localhost:{port}/victoria")
+        except Exception:
+            pass
+    candidates.append("postgresql://postgres:postgres@localhost:5432/victoria")
+    configured_url = load_env_var("DATABASE_URL", _BACKEND_ENV)
+    if configured_url:
+        candidates.append(_psql_compatible_database_url(configured_url))
+
+    seen: set[str] = set()
+    for database_url in candidates:
+        if database_url in seen:
+            continue
+        seen.add(database_url)
+        result = subprocess.run(
+            ["psql", database_url, "-t", "-A", "-c", "SELECT 1;"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return database_url
+    return None
+
+
+def _psql_compatible_database_url(database_url: str) -> str:
+    """Drop Prisma-only query params before passing a URL to the psql CLI."""
+    parsed = urlparse(database_url)
+    if not parsed.query:
+        return database_url
+    unsupported = {"pgbouncer", "connection_limit", "pool_timeout"}
+    query = urlencode(
+        [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key not in unsupported]
+    )
+    return urlunparse(parsed._replace(query=query))
+
+
+def _run_local_victoria_sql(sql: str) -> str:
+    container = _local_victoria_db_container()
+    if container:
+        result = subprocess.run(
+            ["docker", "exec", container, "psql", "-U", "postgres", "-d", "victoria", "-t", "-A", "-F", "\t", "-c", sql],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    else:
+        database_url = _local_victoria_database_url()
+        if not database_url:
+            raise RuntimeError(
+                "Local Victoria DB connection not found. Run this benchmark against the local stack "
+                "from a Conductor workspace so minted-account cleanup can use the local DB."
+            )
+        result = subprocess.run(
+            ["psql", database_url, "-t", "-A", "-F", "\t", "-c", sql],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    if result.returncode != 0:
+        raise RuntimeError(f"Local DB SQL failed: {result.stderr.strip()}")
+    return result.stdout.strip()
+
+
+def _sql_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _is_local_base_url(base_url: str) -> bool:
+    parsed = urlparse(base_url if base_url.startswith(("http://", "https://")) else f"http://{base_url}")
+    return (parsed.hostname or "").lower() in {"localhost", "127.0.0.1"}
+
+
+def _skip_cookie_bundle_bootstrap() -> bool:
+    return os.environ.get("BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP", "").lower() in {"1", "true", "yes"}
+
+
+def _force_show_passwords_mode() -> bool:
+    return os.environ.get(BENCHMARK_FORCE_SHOW_PASSWORDS_ENV, "").lower() in {"1", "true", "yes"}
+
+
+def _apply_anon_benchmark_mode(*, force_show_passwords: bool = False) -> None:
+    """Force auth benchmarks to exercise freshly minted credentials."""
+    os.environ["BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP"] = "true"
+    os.environ["BENCHMARK_MINTED_CLEAR_EXISTING_AUTH"] = "true"
+    os.environ["BENCHMARK_ANON_STEEL_PROFILE"] = "true"
+    if force_show_passwords:
+        os.environ[BENCHMARK_FORCE_SHOW_PASSWORDS_ENV] = "true"
+        os.environ.pop("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH", None)
+    else:
+        os.environ["BENCHMARK_DISABLE_SAVED_BROWSER_AUTH"] = "true"
+
+
+def _ensure_local_cookie_bundle_for_realm(user_id: str, auth_realm: str) -> int:
+    """Upsert active CookieBundle rows for an auth realm from existing local cookies."""
+    if _skip_cookie_bundle_bootstrap():
+        return 0
+    realm = _sql_literal(auth_realm.lower())
+    user = _sql_literal(user_id)
+    sql = (
+        'WITH matching_cookies AS ('
+        'SELECT "browserSource", "browserProfile", MAX(COALESCE("creationUtc", 0)) AS "freshestCookieUtc" '
+        'FROM "Cookie" '
+        f'WHERE "userId" = {user} '
+        'AND COALESCE("name", \'\') <> \'\' '
+        'AND COALESCE("value", \'\') <> \'\' '
+        f'AND (LOWER(TRIM(LEADING \'.\' FROM "domain")) = {realm} '
+        f'OR LOWER(TRIM(LEADING \'.\' FROM "domain")) LIKE \'%.\' || {realm}) '
+        'AND ("expiresUtc" IS NULL OR "expiresUtc" <= 0 '
+        'OR (("expiresUtc" / 1000000) - 11644473600) > EXTRACT(EPOCH FROM NOW())) '
+        'GROUP BY "browserSource", "browserProfile"'
+        '), upserted AS ('
+        'INSERT INTO "CookieBundle" '
+        '(id, "userId", "authRealm", "browserSource", "browserProfile", '
+        '"createdAt", "updatedAt", "disabledAt", "disabledReason") '
+        f'SELECT gen_random_uuid(), {user}, {realm}, "browserSource", "browserProfile", '
+        'NOW(), NOW(), NULL, NULL FROM matching_cookies '
+        'ON CONFLICT ("userId", "authRealm", "browserSource", "browserProfile") DO UPDATE SET '
+        '"updatedAt" = NOW(), "disabledAt" = NULL, "disabledReason" = NULL '
+        'RETURNING id'
+        ') SELECT COUNT(*) FROM upserted;'
+    )
+    out = _run_local_victoria_sql(sql)
+    try:
+        return int(out.splitlines()[-1].strip() or "0")
+    except Exception:
+        return 0
+
+
+def _delete_local_minted_accounts_for_user(user_id: str, *, reset_agent_identity: bool = False) -> int:
+    """Delete per-site minted account rows for the benchmark user.
+
+    AgentIdentity is deliberately preserved by default. It owns the one
+    AgentMail inbox and one AgentPhone number for the user, and deleting it
+    forces AgentPhone to provision a fresh paid number on every benchmark run.
+    Set BENCHMARK_MINTED_RESET_AGENT_IDENTITY=true only when intentionally
+    re-proving first-time identity provisioning.
+    """
+    if reset_agent_identity:
+        sql = (
+            'WITH deleted_minted AS (DELETE FROM "MintedAccount" '
+            f'WHERE "userId" = {_sql_literal(user_id)} RETURNING id), '
+            'deleted_identity AS (DELETE FROM "AgentIdentity" '
+            f'WHERE "userId" = {_sql_literal(user_id)} RETURNING id) '
+            'SELECT COUNT(*) FROM deleted_minted;'
+        )
+    else:
+        sql = (
+            'WITH deleted_minted AS (DELETE FROM "MintedAccount" '
+            f'WHERE "userId" = {_sql_literal(user_id)} RETURNING id) '
+            'SELECT COUNT(*) FROM deleted_minted;'
+        )
+    out = _run_local_victoria_sql(sql)
+    try:
+        return int(out.splitlines()[-1].strip() or "0")
+    except Exception:
+        return 0
+
+
+def _disable_local_auth_material_for_realm(user_id: str, auth_realm: str) -> int:
+    """Disable local saved auth for one realm so minted credentials are exposed.
+
+    This is intentionally opt-in for live minted probes. It only touches the
+    benchmark user's local DB rows for the target realm.
+    """
+    now = "NOW()"
+    reason = _sql_literal("disabled by minted benchmark auth probe")
+    realm = _sql_literal(auth_realm)
+    user = _sql_literal(user_id)
+    like_realm = _sql_literal(f"%{auth_realm}%")
+    sql = (
+        'WITH steel AS (UPDATE "SteelSessionAuth" '
+        f'SET "disabledAt" = {now}, "disabledReason" = {reason} '
+        f'WHERE "userId" = {user} AND "authRealm" = {realm} AND "disabledAt" IS NULL RETURNING id), '
+        'bundles AS (UPDATE "CookieBundle" '
+        f'SET "disabledAt" = {now}, "disabledReason" = {reason} '
+        f'WHERE "userId" = {user} AND "authRealm" = {realm} AND "disabledAt" IS NULL RETURNING id), '
+        'passwords AS (UPDATE "BrowserPassword" '
+        f'SET "disabledAt" = {now}, "disabledReason" = {reason} '
+        f'WHERE "userId" = {user} AND "origin" LIKE {like_realm} AND "disabledAt" IS NULL RETURNING id) '
+        'SELECT (SELECT COUNT(*) FROM steel) + '
+        '(SELECT COUNT(*) FROM bundles) + '
+        '(SELECT COUNT(*) FROM passwords);'
+    )
+    out = _run_local_victoria_sql(sql)
+    try:
+        return int(out.splitlines()[-1].strip() or "0")
+    except Exception:
+        return 0
+
+
+def _disable_local_steel_and_cookie_auth_for_realm(user_id: str, auth_realm: str) -> int:
+    """Disable existing local Steel/CookieBundle auth for one realm without hiding passwords."""
+    now = "NOW()"
+    reason = _sql_literal("disabled by force-show-passwords auth benchmark")
+    realm = _sql_literal(auth_realm)
+    user = _sql_literal(user_id)
+    sql = (
+        'WITH steel AS (UPDATE "SteelSessionAuth" '
+        f'SET "disabledAt" = {now}, "disabledReason" = {reason} '
+        f'WHERE "userId" = {user} AND "authRealm" = {realm} AND "disabledAt" IS NULL RETURNING id), '
+        'bundles AS (UPDATE "CookieBundle" '
+        f'SET "disabledAt" = {now}, "disabledReason" = {reason} '
+        f'WHERE "userId" = {user} AND "authRealm" = {realm} AND "disabledAt" IS NULL RETURNING id) '
+        'SELECT (SELECT COUNT(*) FROM steel) + (SELECT COUNT(*) FROM bundles);'
+    )
+    out = _run_local_victoria_sql(sql)
+    try:
+        return int(out.splitlines()[-1].strip() or "0")
+    except Exception:
+        return 0
+
+
+def _encrypt_benchmark_secret(plaintext: str) -> str:
+    """Encrypt a seeded benchmark password with the app's shared RSA public key."""
+    import base64
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    public_key_pem = b"""-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAjSyJhixvre5abdAOA8QK
+MZN9ftryV1ST5bQ/Ne2SsA0LUlsy/t0gVickAHf/iMAI473qBGrJIgYgEBrnQ9Vy
+ak1DpYWG9rC8KNZs/AQnWHiDWKGNUwWTAbT0fZeDHbckgJXiAok2U23F7tHtA1v6
+V65dHj1C+wlb8bBkJtDgSxKIcG6GMZFfR5Arzq8ILQ20mtAP2HW80SeWGiw6Ecnd
+a0RL0kn3Mqzjuw8NB4Iqx7UThKuIZdEnUhdnlVcXhfpEJUngcOm6pqQGNQok+VtL
+MHxsrQsQo0UMgE8zQamTXpTGJEB1G22gPaEY5FB2V8dgWs6PxBTaYZMOH9TRy2G4
+EwIDAQAB
+-----END PUBLIC KEY-----"""
+    public_key = serialization.load_pem_public_key(public_key_pem)
+    aes_key = os.urandom(32)
+    iv = os.urandom(12)
+    cipher = Cipher(algorithms.AES(aes_key), modes.GCM(iv))
+    encryptor = cipher.encryptor()
+    ciphertext = encryptor.update(plaintext.encode("utf-8")) + encryptor.finalize()
+    encrypted_aes_key = public_key.encrypt(
+        aes_key,
+        padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None),
+    )
+    envelope = {
+        "version": 1,
+        "iv": base64.b64encode(iv).decode("utf-8"),
+        "ciphertext": base64.b64encode(ciphertext + encryptor.tag).decode("utf-8"),
+        "encrypted_aes_key": base64.b64encode(encrypted_aes_key).decode("utf-8"),
+    }
+    return base64.b64encode(json.dumps(envelope).encode("utf-8")).decode("utf-8")
+
+
+def _seed_local_bad_amazon_auth_fixture(user_id: str, auth_realm: str) -> dict:
+    """Seed one bad CookieBundle and two bad Amazon password rows for auth e2e coverage."""
+    if auth_realm != "amazon.com":
+        raise RuntimeError("--force-show-passwords currently only supports the amazon.com auth benchmark.")
+    password_ids = [str(uuid.uuid4()), str(uuid.uuid4())]
+    bundle_id = str(uuid.uuid4())
+    cookie_id = str(uuid.uuid4())
+    bad_passwords = [
+        _encrypt_benchmark_secret(f"benchmark-wrong-password-{password_ids[0]}"),
+        _encrypt_benchmark_secret(f"benchmark-wrong-password-{password_ids[1]}"),
+    ]
+    user = _sql_literal(user_id)
+    username = _sql_literal(BAD_AMAZON_PASSWORD_USERNAME)
+    reason = _sql_literal("superseded by force-show-passwords benchmark fixture")
+    source = _sql_literal(BAD_AMAZON_COOKIE_SOURCE)
+    profile = _sql_literal(BAD_AMAZON_COOKIE_PROFILE)
+    realm = _sql_literal(auth_realm)
+    password_values = [
+        (
+            _sql_literal(password_ids[0]),
+            _sql_literal("https://amazon.com"),
+            _sql_literal(bad_passwords[0]),
+            _sql_literal("benchmark bad password 1"),
+        ),
+        (
+            _sql_literal(password_ids[1]),
+            _sql_literal("https://www.amazon.com/ap/signin"),
+            _sql_literal(bad_passwords[1]),
+            _sql_literal("benchmark bad password 2"),
+        ),
+    ]
+    sql = (
+        'WITH disabled_old_passwords AS (UPDATE "BrowserPassword" '
+        f'SET "disabledAt" = NOW(), "disabledReason" = {reason} '
+        f'WHERE "userId" = {user} '
+        "AND (LOWER(origin) LIKE '%amazon.com%' OR LOWER(origin) LIKE '%www.amazon.com%') "
+        f'AND "disabledAt" IS NULL RETURNING id), '
+        'upsert_bundle AS (INSERT INTO "CookieBundle" '
+        '(id, "userId", "authRealm", "browserSource", "browserProfile", "accountLabel", '
+        '"disabledAt", "disabledReason", "createdAt", "updatedAt") VALUES '
+        f'({_sql_literal(bundle_id)}, {user}, {realm}, {source}, {profile}, '
+        f'{_sql_literal(BAD_AMAZON_PASSWORD_USERNAME)}, NULL, NULL, NOW(), NOW()) '
+        'ON CONFLICT ("userId", "authRealm", "browserSource", "browserProfile") DO UPDATE SET '
+        '"accountLabel" = EXCLUDED."accountLabel", "disabledAt" = NULL, "disabledReason" = NULL, '
+        '"updatedAt" = NOW() RETURNING id), '
+        'upsert_cookie AS (INSERT INTO "Cookie" '
+        '(id, "userId", domain, name, path, value, "expiresUtc", "isSecure", "isHttpOnly", '
+        '"browserSource", "browserProfile", "creationUtc", "hasExpires", "isPersistent", '
+        '"lastAccessUtc", "lastUpdateUtc", priority, "sameSite", "sourcePort", "sourceScheme", "topFrameSiteKey") '
+        'VALUES '
+        f'({_sql_literal(cookie_id)}, {user}, {_sql_literal(".amazon.com")}, '
+        f'{_sql_literal("benchmark_bad_auth")}, {_sql_literal("/")}, {_sql_literal("bad-cookie-" + cookie_id)}, '
+        '((EXTRACT(EPOCH FROM NOW() + INTERVAL \'7 days\') + 11644473600) * 1000000)::bigint, '
+        f'true, true, {source}, {profile}, '
+        '((EXTRACT(EPOCH FROM NOW()) + 11644473600) * 1000000)::bigint, '
+        'true, true, '
+        '((EXTRACT(EPOCH FROM NOW()) + 11644473600) * 1000000)::bigint, '
+        '((EXTRACT(EPOCH FROM NOW()) + 11644473600) * 1000000)::bigint, '
+        f'1, -1, -1, 2, {_sql_literal("")}) '
+        'ON CONFLICT ("userId", domain, name, path, "topFrameSiteKey", "browserSource", "browserProfile") '
+        'DO UPDATE SET value = EXCLUDED.value, "expiresUtc" = EXCLUDED."expiresUtc", '
+        '"creationUtc" = EXCLUDED."creationUtc", "lastAccessUtc" = EXCLUDED."lastAccessUtc", '
+        '"lastUpdateUtc" = EXCLUDED."lastUpdateUtc" RETURNING id), '
+        'upsert_pwd1 AS (INSERT INTO "BrowserPassword" '
+        '(id, "userId", origin, username, "encryptedPassword", "dateLastUsed", "dateCreated", '
+        '"browserSource", "browserProfile", "disabledAt", "disabledReason") VALUES '
+        f'({password_values[0][0]}, {user}, {password_values[0][1]}, {username}, {password_values[0][2]}, '
+        '((EXTRACT(EPOCH FROM NOW()) + 11644473600) * 1000000)::bigint, '
+        '((EXTRACT(EPOCH FROM NOW()) + 11644473600) * 1000000)::bigint, '
+        f'{source}, {profile}, NULL, NULL) '
+        'ON CONFLICT ("userId", origin, username) DO UPDATE SET '
+        '"encryptedPassword" = EXCLUDED."encryptedPassword", "dateLastUsed" = EXCLUDED."dateLastUsed", '
+        '"browserSource" = EXCLUDED."browserSource", "browserProfile" = EXCLUDED."browserProfile", '
+        '"disabledAt" = NULL, "disabledReason" = NULL RETURNING id), '
+        'upsert_pwd2 AS (INSERT INTO "BrowserPassword" '
+        '(id, "userId", origin, username, "encryptedPassword", "dateLastUsed", "dateCreated", '
+        '"browserSource", "browserProfile", "disabledAt", "disabledReason") VALUES '
+        f'({password_values[1][0]}, {user}, {password_values[1][1]}, {username}, {password_values[1][2]}, '
+        '((EXTRACT(EPOCH FROM NOW()) + 11644473600) * 1000000)::bigint, '
+        '((EXTRACT(EPOCH FROM NOW()) + 11644473600) * 1000000)::bigint, '
+        f'{source}, {profile}, NULL, NULL) '
+        'ON CONFLICT ("userId", origin, username) DO UPDATE SET '
+        '"encryptedPassword" = EXCLUDED."encryptedPassword", "dateLastUsed" = EXCLUDED."dateLastUsed", '
+        '"browserSource" = EXCLUDED."browserSource", "browserProfile" = EXCLUDED."browserProfile", '
+        '"disabledAt" = NULL, "disabledReason" = NULL RETURNING id) '
+        'SELECT '
+        '(SELECT id FROM upsert_bundle), '
+        '(SELECT id FROM upsert_pwd1), '
+        '(SELECT id FROM upsert_pwd2);'
+    )
+    out = _run_local_victoria_sql(sql)
+    fields = (out.splitlines()[-1] if out else "").split("\t")
+    if len(fields) != 3:
+        raise RuntimeError(f"Failed to seed bad Amazon auth fixture: {out}")
+    fixture = {"cookie_bundle_id": fields[0], "password_ids": [fields[1], fields[2]]}
+    os.environ["BENCHMARK_BAD_AUTH_COOKIE_BUNDLE_ID"] = fixture["cookie_bundle_id"]
+    os.environ["BENCHMARK_BAD_AUTH_PASSWORD_IDS"] = ",".join(fixture["password_ids"])
+    return fixture
+
+
+def _validate_bad_amazon_auth_fixture(user_id: str) -> Tuple[bool, Optional[str]]:
+    cookie_bundle_id = os.environ.get("BENCHMARK_BAD_AUTH_COOKIE_BUNDLE_ID", "")
+    password_ids = [value for value in os.environ.get("BENCHMARK_BAD_AUTH_PASSWORD_IDS", "").split(",") if value]
+    if not cookie_bundle_id or not password_ids:
+        return False, "bad Amazon auth fixture ids were not recorded"
+    ids = ", ".join(_sql_literal(value) for value in [cookie_bundle_id, *password_ids])
+    password_id_list = ", ".join(_sql_literal(value) for value in password_ids)
+    sql = (
+        "SELECT kind, id, disabled FROM ("
+        f"SELECT 'cookie_bundle' AS kind, id, (\"disabledAt\" IS NOT NULL) AS disabled "
+        f"FROM \"CookieBundle\" WHERE \"userId\" = {_sql_literal(user_id)} AND id IN ({ids}) "
+        "UNION ALL "
+        f"SELECT 'password' AS kind, id, (\"disabledAt\" IS NOT NULL) AS disabled "
+        f"FROM \"BrowserPassword\" WHERE \"userId\" = {_sql_literal(user_id)} AND id IN ({password_id_list})"
+        ") rows ORDER BY kind, id;"
+    )
+    rows = [line.split("\t") for line in _run_local_victoria_sql(sql).splitlines() if line.strip()]
+    disabled_by_key = {(row[0], row[1]): row[2] == "t" for row in rows if len(row) == 3}
+    missing = []
+    if ("cookie_bundle", cookie_bundle_id) not in disabled_by_key:
+        missing.append(f"cookie_bundle:{cookie_bundle_id}")
+    for password_id in password_ids:
+        if ("password", password_id) not in disabled_by_key:
+            missing.append(f"password:{password_id}")
+    if missing:
+        return False, "seeded credential rows missing after run: " + ", ".join(missing)
+    not_disabled = [
+        f"{kind}:{credential_id}"
+        for (kind, credential_id), disabled in disabled_by_key.items()
+        if not disabled
+    ]
+    if not_disabled:
+        return False, "seeded credentials were not disabled: " + ", ".join(not_disabled)
+    return True, None
+
+
+def _local_agent_identity_present_for_user(user_id: str) -> bool:
+    sql = (
+        'SELECT 1 FROM "AgentIdentity" '
+        f'WHERE "userId" = {_sql_literal(user_id)} LIMIT 1;'
+    )
+    return bool(_run_local_victoria_sql(sql).strip())
+
+
+def _local_agent_identity_email_for_user(user_id: str) -> Optional[str]:
+    sql = (
+        'SELECT email FROM "AgentIdentity" '
+        f'WHERE "userId" = {_sql_literal(user_id)} LIMIT 1;'
+    )
+    out = _run_local_victoria_sql(sql).strip()
+    return out.splitlines()[0].strip() if out else None
+
+
+def _seed_local_benchmark_agent_identity_if_missing(user_id: str) -> Optional[str]:
+    """Seed the cached local benchmark identity so live runs do not mint new inboxes.
+
+    This is intentionally local-benchmark scoped. First-provisioning tests can opt out
+    by setting BENCHMARK_MINTED_RESET_AGENT_IDENTITY=true.
+    """
+    if _local_agent_identity_present_for_user(user_id):
+        return None
+
+    email = (
+        os.environ.get("BENCHMARK_MINTED_AGENT_EMAIL")
+        or DEFAULT_MINTED_BENCHMARK_AGENT_EMAIL
+    ).strip()
+    phone = (
+        os.environ.get("BENCHMARK_MINTED_AGENT_PHONE")
+        or DEFAULT_MINTED_BENCHMARK_AGENT_PHONE
+    ).strip()
+    if not email:
+        return None
+
+    fields = ['id', '"userId"', 'email', '"createdAt"']
+    values = ['gen_random_uuid()', _sql_literal(user_id), _sql_literal(email), 'NOW()']
+    updates = ['email = EXCLUDED.email']
+
+    if phone:
+        fields.extend(['phone', '"phoneProvider"'])
+        values.extend([_sql_literal(phone), _sql_literal("agentphone")])
+        updates.extend([
+            'phone = EXCLUDED.phone',
+            '"phoneProvider" = EXCLUDED."phoneProvider"',
+        ])
+
+    provider_agent_id = os.environ.get("BENCHMARK_MINTED_AGENTPHONE_AGENT_ID", "").strip()
+    provider_number_id = os.environ.get("BENCHMARK_MINTED_AGENTPHONE_NUMBER_ID", "").strip()
+    if provider_agent_id:
+        fields.append('"phoneProviderAgentId"')
+        values.append(_sql_literal(provider_agent_id))
+        updates.append('"phoneProviderAgentId" = EXCLUDED."phoneProviderAgentId"')
+    if provider_number_id:
+        fields.append('"phoneProviderNumberId"')
+        values.append(_sql_literal(provider_number_id))
+        updates.append('"phoneProviderNumberId" = EXCLUDED."phoneProviderNumberId"')
+
+    sql = (
+        'INSERT INTO "AgentIdentity" '
+        f'({", ".join(fields)}) VALUES ({", ".join(values)}) '
+        'ON CONFLICT ("userId") DO UPDATE SET '
+        f'{", ".join(updates)} '
+        'RETURNING email;'
+    )
+    out = _run_local_victoria_sql(sql).strip()
+    return out.splitlines()[0].strip() if out else email
+
+
+def _local_minted_account_labels_for_user(user_id: str) -> List[str]:
+    sql = (
+        'SELECT "accountLabel" FROM "MintedAccount" '
+        f'WHERE "userId" = {_sql_literal(user_id)} AND "accountLabel" IS NOT NULL;'
+    )
+    out = _run_local_victoria_sql(sql)
+    if not out:
+        return []
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+async def _delete_agentmail_inboxes_by_email(emails: List[str]) -> int:
+    """Delete only the exact AgentMail inboxes listed.
+
+    Do not scan by prefix here: benchmark cleanup must not sweep inboxes that
+    were created for another purpose under the same AgentMail account.
+    """
+    api_key = load_env_var("AGENTMAIL_API_KEY", _BACKEND_ENV, _AGENTS_ENV)
+    if not api_key:
+        return 0
+
+    base_url = load_env_var("AGENTMAIL_BASE_URL", _BACKEND_ENV, _AGENTS_ENV) or "https://api.agentmail.to"
+    base_url = base_url.rstrip("/")
+    email_set = {email.strip().lower() for email in emails if email.strip()}
+    if not email_set:
+        return 0
+    headers = {"Authorization": f"Bearer {api_key}"}
+    deleted = 0
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        for email in sorted(email_set):
+            delete_response = await client.delete(
+                f"{base_url}/v0/inboxes/{quote(email, safe='')}",
+                headers=headers,
+            )
+            if delete_response.status_code in (200, 202, 204, 404):
+                deleted += 1
+            else:
+                raise RuntimeError(
+                    f"AgentMail benchmark inbox cleanup failed for {email}: "
+                    f"HTTP {delete_response.status_code} {delete_response.text[:200]}"
+                )
+    return deleted
+
+
+async def _delete_local_minted_agentmail_inboxes_for_user(user_id: str) -> int:
+    """Delete only AgentMail inboxes referenced by local MintedAccount rows."""
+    emails = _local_minted_account_labels_for_user(user_id)
+    deleted = await _delete_agentmail_inboxes_by_email(emails)
+    print(f"    🧹 Deleted {deleted} AgentMail inbox(es) after minted benchmark run")
+    return deleted
+
+
+async def _agentmail_inbox_has_uber_welcome(email: str) -> bool:
+    """Return whether this exact inbox received Uber account-creation mail."""
+    api_key = load_env_var("AGENTMAIL_API_KEY", _BACKEND_ENV, _AGENTS_ENV)
+    if not api_key or not email.strip():
+        return False
+
+    base_url = load_env_var("AGENTMAIL_BASE_URL", _BACKEND_ENV, _AGENTS_ENV) or "https://api.agentmail.to"
+    base_url = base_url.rstrip("/")
+    headers = {"Authorization": f"Bearer {api_key}"}
+    url = f"{base_url}/v0/inboxes/{quote(email.strip(), safe='')}/messages"
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.get(url, params={"limit": "20"}, headers=headers)
+    if response.status_code == 404:
+        return False
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"AgentMail benchmark inbox evidence fetch failed for {email}: "
+            f"HTTP {response.status_code} {response.text[:200]}"
+        )
+
+    data = response.json()
+    messages = data.get("messages") if isinstance(data, dict) else []
+    if not isinstance(messages, list):
+        return False
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        subject = str(message.get("subject") or "").lower()
+        sender = str(message.get("from") or message.get("sender") or "").lower()
+        if "welcome to uber" in subject and "uber" in sender:
+            return True
+    return False
+
+
+def _get_local_minted_account(user_id: str, auth_realm: str) -> Optional[dict]:
+    sql = (
+        'SELECT id, "accountLabel" FROM "MintedAccount" '
+        f'WHERE "userId" = {_sql_literal(user_id)} AND "authRealm" = {_sql_literal(auth_realm)} '
+        'AND "disabledAt" IS NULL LIMIT 1;'
+    )
+    out = _run_local_victoria_sql(sql)
+    if not out:
+        return None
+    parts = out.splitlines()[0].split("\t")
+    if len(parts) < 2:
+        return None
+    return {"id": parts[0], "account_label": parts[1]}
+
+
+def _local_agent_phone_message_count_for_user(user_id: str) -> int:
+    sql = (
+        'SELECT COUNT(*) FROM "AgentPhoneMessage" '
+        f'WHERE "userId" = {_sql_literal(user_id)};'
+    )
+    out = _run_local_victoria_sql(sql)
+    try:
+        return int(out.splitlines()[-1].strip() or "0")
+    except Exception:
+        return 0
+
+
+async def _agentphone_messages_since_for_user(
+    base_url: str, user_id: str, since: datetime
+) -> List[dict]:
+    """Fetch AgentPhone messages through the same provider-polling path agents use."""
+    api_key = load_env_var("BACKEND_API_KEY", _AGENTS_ENV, _BACKEND_ENV)
+    if not api_key:
+        return []
+
+    since_iso = since.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.get(
+            f"{base_url.rstrip('/')}/api/agentphone/messages",
+            params={"since": since_iso, "limit": "50"},
+            headers={"x-api-key": api_key, "x-user-id": user_id},
+        )
+    if response.status_code == 404:
+        return []
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"AgentPhone benchmark evidence fetch failed: "
+            f"HTTP {response.status_code} {response.text[:200]}"
+        )
+
+    data = response.json()
+    messages = data.get("messages") if isinstance(data, dict) else []
+    return [message for message in messages if isinstance(message, dict)]
+
+
+def _site_label_from_realm(auth_realm: str) -> str:
+    labels = {
+        "instagram.com": "Instagram",
+        "x.com": "X",
+        "uber.com": "Uber",
+    }
+    return labels.get(auth_realm, auth_realm)
+
+
+def _task_result_search_text(result: TaskResult) -> str:
+    chunks: List[str] = [
+        result.failure_reason or "",
+        result.status or "",
+    ]
+    logs = result.logs or {}
+    for message in logs.get("messages", []) or []:
+        if isinstance(message, dict):
+            chunks.append(str(message.get("text") or message.get("message") or ""))
+            metadata = message.get("metadata")
+            if isinstance(metadata, dict):
+                chunks.append(str(metadata.get("title") or ""))
+    for key in ("backend_logs", "worker_logs", "research_logs", "realtime_logs"):
+        for entry in logs.get(key, []) or []:
+            chunks.append(str(entry))
+    return "\n".join(chunks).lower()
+
+
+def _agent_data_search_text(data: dict) -> str:
+    """Collect agent message text for benchmark-specific terminal outcome checks."""
+    chunks: List[str] = []
+    for message in data.get("messages", []) or []:
+        if isinstance(message, dict):
+            chunks.append(str(message.get("text") or message.get("message") or ""))
+            metadata = message.get("metadata")
+            if isinstance(metadata, dict):
+                chunks.append(str(metadata.get("title") or ""))
+    return "\n".join(chunks).lower()
+
+
+def _evaluate_webdecoy_biometrics_result(data: dict) -> Tuple[bool, Optional[str]]:
+    text = _agent_data_search_text(data)
+    if "webdecoy.com/product/fcaptcha-demo" not in text and "fcaptcha" not in text:
+        return False, "No grounded evidence that the WebDecoy FCaptcha demo was visited"
+    if not any(marker in text for marker in ("click", "clicked", "checkbox")):
+        return False, "No grounded evidence of checkbox interaction"
+    if not any(marker in text for marker in ("benchmark-human@example.com", "invisible mode", "submit")):
+        return False, "No grounded evidence of invisible-mode form interaction"
+
+    score_patterns = (
+        r"risk\s*score[^0-9]{0,24}([0-9]+(?:\.[0-9]+)?)",
+        r"([0-9]+(?:\.[0-9]+)?)\s*[^a-z0-9]{0,12}risk\s*score",
+    )
+    scores: list[float] = []
+    for pattern in score_patterns:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            try:
+                scores.append(float(match.group(1)))
+            except ValueError:
+                continue
+    if not scores:
+        return False, "No visible FCaptcha risk score was reported"
+
+    final_score = scores[-1]
+    if final_score != 0:
+        return False, f"FCaptcha risk score must be exactly 0.00 for auth bundle gate, got {final_score:.2f}"
+    return True, None
+
+
+def _x_signup_has_terminal_phone_blocker(signup_text: str) -> bool:
+    """Return true when X forced phone auth and rejected it before account creation."""
+    normalized = signup_text.lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "terminal phone-auth blocker",
+            "terminal phone auth blocker",
+            "an unexpected error occurred",
+            "invalid number",
+            "fails to send sms",
+            "failed to send sms",
+            "phone number is blocked",
+        )
+    )
+
+
+def _x_signup_has_account_creation_evidence(signup_text: str) -> bool:
+    """Return true when the signup task produced grounded X account access evidence."""
+    normalized = signup_text.lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "signed in",
+            "account creation completed",
+            "account created",
+            "account is signed in",
+            "post composer",
+            "home timeline",
+        )
+    )
+
+
+def _default_minted_target_url(base_url: str, task_name: str = MINTED_AGENT_ACCOUNT_TASK_NAME) -> str:
+    if task_name == MINTED_AGENT_ACCOUNT_X_TASK_NAME:
+        return "https://x.com"
+    return f"{base_url.rstrip('/')}/api/test/minted-agent-account-fixture?authRealm=m.uber.com"
+
+
+def _auth_realm_from_target_url(target_url: str) -> str:
+    parsed = urlparse(target_url if target_url.startswith(("http://", "https://")) else f"https://{target_url}")
+    if (parsed.hostname or "").lower() in {"localhost", "127.0.0.1"}:
+        query = dict(part.split("=", 1) for part in parsed.query.split("&") if "=" in part)
+        override = query.get("authRealm") or query.get("auth_realm")
+        if override:
+            return _auth_realm_from_target_url(override)
+    host = (parsed.hostname or parsed.netloc or parsed.path).split("/")[0].lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if host == "uber.com" or host.endswith(".uber.com"):
+        return "uber.com"
+    return host
+
+
+def _auth_bundle_biometrics_gate_enabled() -> bool:
+    raw = os.environ.get(AUTH_BUNDLE_BIOMETRICS_GATE_ENV)
+    if raw is None or raw == "":
+        return True
+    return raw.strip().lower() not in {"0", "false", "no", "off", "disabled"}
+
+
+async def _run_auth_bundle_biometrics_gate(
+    base_url: str,
+    keep_failed_agents: bool,
+) -> TaskResult:
+    """Run the most sensitive public biometrics score gate before auth-bundle probes."""
+    gate_task = get_task_by_name(BIOMETRICS_WEBDECOY_TASK_NAME)
+    print("    🧬 Auth bundle biometrics gate: WebDecoy FCaptcha score must be 0.00")
+    return await run_single_task(base_url, gate_task, keep_failed_agents=keep_failed_agents)
+
+
+async def run_minted_agent_account_task(
+    base_url: str,
+    task: BenchmarkTask,
+    keep_failed_agents: bool = False,
+) -> TaskResult:
+    """Run the stateful minted-account benchmark: signup task, DB assertion, booking task."""
+    if "localhost" not in base_url and "127.0.0.1" not in base_url:
+        return TaskResult(
+            name=task.name,
+            passed=False,
+            agent_id="",
+            status="SKIPPED",
+            progress_score=0,
+            duration_seconds=0,
+            cost_cents=0,
+            message_count=0,
+            failure_reason="Minted account benchmark is local-only because it deletes local DB rows.",
+        )
+
+    start = time.time()
+    target_url = os.environ.get("BENCHMARK_MINTED_TARGET_URL") or _default_minted_target_url(base_url, task.name)
+    target_realm = os.environ.get("BENCHMARK_MINTED_AUTH_REALM") or _auth_realm_from_target_url(target_url)
+    site_label = _site_label_from_realm(target_realm)
+    reset_agent_identity = (
+        os.environ.get("BENCHMARK_MINTED_RESET_AGENT_IDENTITY", "").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    prefer_phone_auth = _benchmark_env_bool("BENCHMARK_MINTED_PREFER_PHONE_AUTH") is True
+    clear_existing_auth = _benchmark_env_bool("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH") is True
+    phone_evidence_since = datetime.now(timezone.utc)
+    identity_was_present = _local_agent_identity_present_for_user(USER_ID)
+    deleted = _delete_local_minted_accounts_for_user(
+        USER_ID, reset_agent_identity=reset_agent_identity
+    )
+    seeded_identity_email = (
+        None
+        if reset_agent_identity
+        else _seed_local_benchmark_agent_identity_if_missing(USER_ID)
+    )
+    disabled_auth = (
+        _disable_local_auth_material_for_realm(USER_ID, target_realm)
+        if clear_existing_auth
+        else 0
+    )
+    print(
+        f"    🧹 Deleted {deleted} minted account row(s), "
+        f"{'reset' if reset_agent_identity else 'preserved'} cached AgentIdentity "
+        f"(present_before={identity_was_present})"
+    )
+    if seeded_identity_email:
+        print(f"    🧪 Seeded cached AgentIdentity for local benchmark: {seeded_identity_email}")
+    if clear_existing_auth:
+        print(f"    🧹 Disabled {disabled_auth} saved auth row(s) for {target_realm}")
+    if prefer_phone_auth:
+        print("    ☎️  Minted benchmark auth preference: AgentPhone first")
+
+    auth_bundle_biometrics_result: Optional[TaskResult] = None
+    if _auth_bundle_biometrics_gate_enabled():
+        auth_bundle_biometrics_result = await _run_auth_bundle_biometrics_gate(
+            base_url,
+            keep_failed_agents,
+        )
+        if not auth_bundle_biometrics_result.passed:
+            return TaskResult(
+                name=task.name,
+                passed=False,
+                agent_id=auth_bundle_biometrics_result.agent_id,
+                status="FAILED",
+                progress_score=auth_bundle_biometrics_result.progress_score,
+                duration_seconds=round(time.time() - start, 1),
+                cost_cents=auth_bundle_biometrics_result.cost_cents,
+                message_count=auth_bundle_biometrics_result.message_count,
+                failure_reason=(
+                    "auth bundle biometrics gate failed: "
+                    f"{auth_bundle_biometrics_result.failure_reason or auth_bundle_biometrics_result.status}"
+                ),
+                approvals_triggered=auth_bundle_biometrics_result.approvals_triggered,
+                approvals_resolved=auth_bundle_biometrics_result.approvals_resolved,
+                cache_read_input_tokens=auth_bundle_biometrics_result.cache_read_input_tokens,
+                cache_creation_input_tokens=auth_bundle_biometrics_result.cache_creation_input_tokens,
+                cache_hit_pct=auth_bundle_biometrics_result.cache_hit_pct,
+                context_violations=auth_bundle_biometrics_result.context_violations,
+                logs={"auth_bundle_biometrics": auth_bundle_biometrics_result.logs},
+            )
+    else:
+        print(f"    🧬 Auth bundle biometrics gate disabled by {AUTH_BUNDLE_BIOMETRICS_GATE_ENV}")
+
+    def _with_gate_agent_ids(*agent_ids: str) -> str:
+        gate_agent_id = auth_bundle_biometrics_result.agent_id if auth_bundle_biometrics_result else ""
+        return ",".join(filter(None, [gate_agent_id, *agent_ids]))
+
+    def _with_gate_cost(*costs: float) -> float:
+        gate_cost = auth_bundle_biometrics_result.cost_cents if auth_bundle_biometrics_result else 0
+        return round(gate_cost + sum(costs), 2)
+
+    def _with_gate_message_count(*counts: int) -> int:
+        gate_count = auth_bundle_biometrics_result.message_count if auth_bundle_biometrics_result else 0
+        return gate_count + sum(counts)
+
+    def _with_gate_cache_read(*counts: int) -> int:
+        gate_count = auth_bundle_biometrics_result.cache_read_input_tokens if auth_bundle_biometrics_result else 0
+        return gate_count + sum(counts)
+
+    def _with_gate_cache_creation(*counts: int) -> int:
+        gate_count = auth_bundle_biometrics_result.cache_creation_input_tokens if auth_bundle_biometrics_result else 0
+        return gate_count + sum(counts)
+
+    def _with_gate_context_violations(*violations: List[dict]) -> List[dict]:
+        gate_violations = auth_bundle_biometrics_result.context_violations if auth_bundle_biometrics_result else []
+        merged = list(gate_violations)
+        for chunk in violations:
+            merged.extend(chunk)
+        return merged
+
+    def _with_gate_progress(*scores: float) -> float:
+        gate_score = auth_bundle_biometrics_result.progress_score if auth_bundle_biometrics_result else 1
+        return min([gate_score, *scores])
+
+    def _with_gate_logs(logs: dict) -> dict:
+        if auth_bundle_biometrics_result is None:
+            return logs
+        return {"auth_bundle_biometrics": auth_bundle_biometrics_result.logs, **logs}
+
+    if target_realm == "x.com":
+        post_task = replace(
+            task,
+            name=f"{task.name}-post",
+            title="Minted Agent Account X Post",
+            prompt=_x_post_prompt(),
+            approval_handling="auto_approve",
+            expected_attention_kind="write_lock",
+            timeout_seconds=max(task.timeout_seconds, 900),
+        )
+        previous_write_lock = os.environ.get("BENCHMARK_WRITE_LOCK_ENABLED")
+        os.environ["BENCHMARK_WRITE_LOCK_ENABLED"] = "true"
+        try:
+            post_result = await run_single_task(base_url, post_task, keep_failed_agents=keep_failed_agents)
+        finally:
+            if previous_write_lock is None:
+                del os.environ["BENCHMARK_WRITE_LOCK_ENABLED"]
+            else:
+                os.environ["BENCHMARK_WRITE_LOCK_ENABLED"] = previous_write_lock
+
+        minted = _get_local_minted_account(USER_ID, target_realm)
+        if minted:
+            print(f"    ✅ Minted account persisted for {target_realm}: {minted['account_label']}")
+        else:
+            print(f"    ❌ No minted account persisted for {target_realm}")
+        post_text = _task_result_search_text(post_result)
+        post_evidence = "hello world" in post_text and any(
+            marker in post_text
+            for marker in ("posted", "post submitted", "post was submitted", "successfully posted")
+        )
+        x_terminal_phone_blocker = _x_signup_has_terminal_phone_blocker(post_text)
+        passed = post_result.passed and minted is not None and post_evidence and not x_terminal_phone_blocker
+        failure_parts = []
+        if minted is None:
+            failure_parts.append(f"no MintedAccount row for {target_realm}")
+        if x_terminal_phone_blocker:
+            failure_parts.append("X forced phone auth and returned a terminal phone-auth blocker")
+        if not post_result.passed:
+            failure_parts.append(f"post failed: {post_result.failure_reason or post_result.status}")
+        if post_result.passed and not post_evidence and not x_terminal_phone_blocker:
+            failure_parts.append("no grounded evidence that the Hello World post was submitted")
+        return TaskResult(
+            name=task.name,
+            passed=passed,
+            agent_id=_with_gate_agent_ids(post_result.agent_id),
+            status="COMPLETED" if passed else "FAILED",
+            progress_score=_with_gate_progress(post_result.progress_score),
+            duration_seconds=round(time.time() - start, 1),
+            cost_cents=_with_gate_cost(post_result.cost_cents),
+            message_count=_with_gate_message_count(post_result.message_count),
+            failure_reason=" | ".join(failure_parts) if failure_parts else None,
+            approvals_triggered=post_result.approvals_triggered,
+            approvals_resolved=post_result.approvals_resolved,
+            cache_read_input_tokens=_with_gate_cache_read(post_result.cache_read_input_tokens),
+            cache_creation_input_tokens=_with_gate_cache_creation(post_result.cache_creation_input_tokens),
+            cache_hit_pct=post_result.cache_hit_pct,
+            context_violations=_with_gate_context_violations(post_result.context_violations),
+            logs=_with_gate_logs({"post": post_result.logs}),
+        )
+
+    signup_auth_instruction = (
+        f"Use the minted AgentPhone number for {site_label}'s initial phone/email/login field. Do not use "
+        f"the minted AgentMail email unless {site_label} accepts the phone number first and then explicitly "
+        f"asks for an email address as an additional account field. Before typing into {site_label}'s "
+        "phone/email field, clear the field completely; do not append the phone and email together. "
+        f"If {site_label} explicitly says the minted phone number is blocked or unsupported, stop and report "
+        "that phone-auth blocker. If a verification code is sent by SMS, wait for the recent OTP "
+        "from the available phone context and use it. "
+        if prefer_phone_auth
+        else f"Use the minted AgentMail email for {site_label}'s initial phone/email login field when an "
+        f"email address is accepted. Use the minted AgentPhone number only if {site_label} explicitly "
+        "requires a phone number or SMS verification. Do not use any other email or phone. Before "
+        f"typing into {site_label}'s phone/email field, clear the field completely; do not append the phone "
+        f"and email together. If {site_label} explicitly says the minted phone number is blocked, choose "
+        "another available login option using the minted AgentMail email; stop and report the "
+        "blocker only if no AgentMail path is available. If a verification code is sent by SMS or "
+        "email, wait for the recent OTP from the available phone/email context and use it. "
+    )
+    if target_realm == "x.com" and not prefer_phone_auth:
+        signup_auth_instruction += (
+            "For X specifically, create a new account through the signup flow and choose the email "
+            "signup route. Click controls like 'Use email instead' when they are available. Do not click "
+            "'Sign up with Phone' or 'Continue with phone' unless X leaves no email signup path. If X "
+            "forces a phone number after the email route, use the minted AgentPhone number exactly once. "
+            "If X then shows 'An unexpected error occurred', treats the number as invalid, or fails to "
+            "send an SMS, stop and report that as a terminal phone-auth blocker instead of retrying "
+            "alternate phone formats. "
+        )
+    signup_prompt = (
+        f"Open {target_url}. Create or sign in to the {site_label} account using the agent minted "
+        f"identity shown in auth options. {signup_auth_instruction}"
+        "If the site asks for a full name, username, birthday, or password while creating an account, "
+        "use non-personal agent account values derived from the agent name plus a random keyword and "
+        "two digits, and use a fresh strong password. Stop only after the site shows the account is "
+        "signed in, account creation completed, a recent SMS OTP was received and used, or the site "
+        "shows a terminal phone-auth blocker. "
+        f"{'Do not book a ride in this task.' if target_realm == 'uber.com' else 'Do not perform unrelated actions after the auth result is clear.'}"
+    )
+    signup_task = replace(
+        task,
+        name=f"{task.name}-signup",
+        title="Minted Agent Account Signup",
+        prompt=signup_prompt,
+        approval_handling=None,
+        expected_attention_kind=None,
+        timeout_seconds=max(task.timeout_seconds, 900),
+    )
+    try:
+        previous_signup_write_lock = os.environ.get("BENCHMARK_WRITE_LOCK_ENABLED")
+        os.environ["BENCHMARK_WRITE_LOCK_ENABLED"] = "false"
+        try:
+            signup_result = await run_single_task(base_url, signup_task, keep_failed_agents=keep_failed_agents)
+        finally:
+            if previous_signup_write_lock is None:
+                del os.environ["BENCHMARK_WRITE_LOCK_ENABLED"]
+            else:
+                os.environ["BENCHMARK_WRITE_LOCK_ENABLED"] = previous_signup_write_lock
+        minted = _get_local_minted_account(USER_ID, target_realm)
+        if minted:
+            print(f"    ✅ Minted account persisted for {target_realm}: {minted['account_label']}")
+        else:
+            print(f"    ❌ No minted account persisted for {target_realm}")
+        signup_account_evidence = False
+        if minted and target_realm == "uber.com":
+            signup_account_evidence = await _agentmail_inbox_has_uber_welcome(
+                minted["account_label"]
+            )
+            if signup_account_evidence:
+                print("    ✅ Uber account creation evidence found in AgentMail welcome email")
+            else:
+                print("    ❌ No Uber account creation evidence found in AgentMail")
+
+        if target_realm == "x.com":
+            signup_text = _task_result_search_text(signup_result)
+            x_terminal_phone_blocker = _x_signup_has_terminal_phone_blocker(signup_text)
+            x_account_access_proven = _x_signup_has_account_creation_evidence(signup_text)
+            if x_terminal_phone_blocker or not x_account_access_proven or minted is None or not signup_result.passed:
+                failure_parts = []
+                if minted is None:
+                    failure_parts.append(f"no MintedAccount row for {target_realm}")
+                if x_terminal_phone_blocker:
+                    failure_parts.append("X forced phone auth and returned a terminal phone-auth blocker")
+                if not x_account_access_proven:
+                    failure_parts.append("no grounded evidence that X account creation/sign-in completed")
+                if not signup_result.passed:
+                    failure_parts.append(f"signup/auth probe failed: {signup_result.failure_reason or signup_result.status}")
+                return TaskResult(
+                    name=task.name,
+                    passed=False,
+                    agent_id=_with_gate_agent_ids(signup_result.agent_id),
+                    status="FAILED",
+                    progress_score=_with_gate_progress(signup_result.progress_score),
+                    duration_seconds=round(time.time() - start, 1),
+                    cost_cents=_with_gate_cost(signup_result.cost_cents),
+                    message_count=_with_gate_message_count(signup_result.message_count),
+                    failure_reason=" | ".join(failure_parts),
+                    approvals_triggered=signup_result.approvals_triggered,
+                    approvals_resolved=signup_result.approvals_resolved,
+                    cache_read_input_tokens=_with_gate_cache_read(signup_result.cache_read_input_tokens),
+                    cache_creation_input_tokens=_with_gate_cache_creation(signup_result.cache_creation_input_tokens),
+                    cache_hit_pct=signup_result.cache_hit_pct,
+                    context_violations=_with_gate_context_violations(signup_result.context_violations),
+                    logs=_with_gate_logs({"signup": signup_result.logs}),
+                )
+
+            post_auth_instruction = (
+                "If X asks for login again, use the minted AgentMail email in the phone/email field "
+                "when email is accepted; use the minted AgentPhone number only if X explicitly requires "
+                "phone/SMS auth. Clear the phone/email input before each attempt. If a verification code "
+                "is sent by SMS or email, wait for the recent OTP from the available phone/email context "
+                "and use it. "
+            )
+            post_prompt = (
+                f"Open {target_url}. Using the already-created X account in this browser profile, "
+                "create a new public post with exactly this text: hello world! "
+                "Confirm the page is signed in with the same agent minted identity from the first task. "
+                f"{post_auth_instruction}"
+                "Submit the post. The benchmark has explicitly authorized this exact post, so if the "
+                "browser write-lock asks for approval on the final Post button, wait for the approval "
+                "to be granted and then finish only after the post is submitted or X shows a clear "
+                "terminal blocker."
+            )
+            post_task = replace(
+                task,
+                name=f"{task.name}-post",
+                title="Minted Agent Account X Post",
+                prompt=post_prompt,
+                approval_handling="auto_approve",
+                expected_attention_kind="write_lock",
+                timeout_seconds=max(task.timeout_seconds, 900),
+            )
+            previous_write_lock = os.environ.get("BENCHMARK_WRITE_LOCK_ENABLED")
+            os.environ["BENCHMARK_WRITE_LOCK_ENABLED"] = "true"
+            try:
+                post_result = await run_single_task(base_url, post_task, keep_failed_agents=keep_failed_agents)
+            finally:
+                if previous_write_lock is None:
+                    del os.environ["BENCHMARK_WRITE_LOCK_ENABLED"]
+                else:
+                    os.environ["BENCHMARK_WRITE_LOCK_ENABLED"] = previous_write_lock
+
+            post_text = _task_result_search_text(post_result)
+            post_evidence = "hello world" in post_text and any(
+                marker in post_text
+                for marker in ("posted", "post submitted", "post was submitted", "successfully posted")
+            )
+            x_terminal_phone_blocker = _x_signup_has_terminal_phone_blocker(post_text)
+            passed = (
+                x_account_access_proven
+                and minted is not None
+                and post_result.passed
+                and post_evidence
+                and not x_terminal_phone_blocker
+            )
+            failure_parts = []
+            if not x_account_access_proven:
+                failure_parts.append(f"signup failed: {signup_result.failure_reason or signup_result.status}")
+            if minted is None:
+                failure_parts.append(f"no MintedAccount row for {target_realm}")
+            if x_terminal_phone_blocker:
+                failure_parts.append("X forced phone auth and returned a terminal phone-auth blocker")
+            if not post_result.passed:
+                failure_parts.append(f"post failed: {post_result.failure_reason or post_result.status}")
+            if post_result.passed and not post_evidence and not x_terminal_phone_blocker:
+                failure_parts.append("no grounded evidence that the hello world post was submitted")
+
+            return TaskResult(
+                name=task.name,
+                passed=passed,
+                agent_id=_with_gate_agent_ids(signup_result.agent_id, post_result.agent_id),
+                status="COMPLETED" if passed else "FAILED",
+                progress_score=_with_gate_progress(signup_result.progress_score, post_result.progress_score),
+                duration_seconds=round(time.time() - start, 1),
+                cost_cents=_with_gate_cost(signup_result.cost_cents, post_result.cost_cents),
+                message_count=_with_gate_message_count(signup_result.message_count, post_result.message_count),
+                failure_reason=" | ".join(failure_parts) if failure_parts else None,
+                approvals_triggered=post_result.approvals_triggered,
+                approvals_resolved=post_result.approvals_resolved,
+                cache_read_input_tokens=_with_gate_cache_read(
+                    signup_result.cache_read_input_tokens,
+                    post_result.cache_read_input_tokens,
+                ),
+                cache_creation_input_tokens=_with_gate_cache_creation(
+                    signup_result.cache_creation_input_tokens,
+                    post_result.cache_creation_input_tokens,
+                ),
+                cache_hit_pct=0.0,
+                context_violations=_with_gate_context_violations(
+                    signup_result.context_violations,
+                    post_result.context_violations,
+                ),
+                logs=_with_gate_logs({"signup": signup_result.logs, "post": post_result.logs}),
+            )
+
+        if target_realm != "uber.com":
+            phone_messages = await _agentphone_messages_since_for_user(
+                base_url, USER_ID, phone_evidence_since
+            )
+            phone_message_delta = len(phone_messages)
+            signup_text = _task_result_search_text(signup_result)
+            phone_blocked = (
+                "phone number you entered is blocked" in signup_text
+                or ("phone" in signup_text and "blocked" in signup_text)
+                or ("phone" in signup_text and "unsupported" in signup_text)
+            )
+            auth_completed = any(
+                marker in signup_text
+                for marker in (
+                    "signed in",
+                    "account creation completed",
+                    "account created",
+                    "verification code",
+                    "otp",
+                )
+            )
+            phone_auth_proven = phone_message_delta > 0 or auth_completed
+            passed = minted is not None and signup_result.passed and phone_auth_proven and not phone_blocked
+            failure_parts = []
+            if minted is None:
+                failure_parts.append(f"no MintedAccount row for {target_realm}")
+            if phone_blocked:
+                failure_parts.append(f"{site_label} blocked or rejected the minted AgentPhone number")
+            if not phone_auth_proven:
+                failure_parts.append("no SMS OTP, verification, sign-in, or account-creation evidence observed")
+            if not signup_result.passed:
+                failure_parts.append(f"signup/auth probe failed: {signup_result.failure_reason or signup_result.status}")
+            if phone_message_delta > 0:
+                print(f"    ✅ AgentPhone received {phone_message_delta} new message(s) during {site_label} auth")
+            else:
+                print(f"    ❌ AgentPhone received no new messages during {site_label} auth")
+
+            return TaskResult(
+                name=task.name,
+                passed=passed,
+                agent_id=_with_gate_agent_ids(signup_result.agent_id),
+                status="COMPLETED" if passed else "FAILED",
+                progress_score=_with_gate_progress(signup_result.progress_score),
+                duration_seconds=round(time.time() - start, 1),
+                cost_cents=_with_gate_cost(signup_result.cost_cents),
+                message_count=_with_gate_message_count(signup_result.message_count),
+                failure_reason=" | ".join(failure_parts) if failure_parts else None,
+                approvals_triggered=signup_result.approvals_triggered,
+                approvals_resolved=signup_result.approvals_resolved,
+                cache_read_input_tokens=_with_gate_cache_read(signup_result.cache_read_input_tokens),
+                cache_creation_input_tokens=_with_gate_cache_creation(signup_result.cache_creation_input_tokens),
+                cache_hit_pct=signup_result.cache_hit_pct,
+                context_violations=_with_gate_context_violations(signup_result.context_violations),
+                logs=_with_gate_logs({
+                    "signup": signup_result.logs,
+                    "phone_message_delta": phone_message_delta,
+                    "phone_messages": phone_messages,
+                }),
+            )
+
+        booking_auth_instruction = (
+        "If Uber asks for login again, use the minted AgentPhone number in the phone/email field. "
+        "Do not switch to AgentMail unless Uber accepts the phone number first and then explicitly "
+        "asks for an email address as an additional account field. Clear the phone/email input "
+        "before each attempt. If Uber says the minted phone number is blocked or unsupported, stop "
+        "and report that phone-auth blocker. "
+        if prefer_phone_auth
+        else "If Uber asks for login again, use the minted AgentMail email in the phone/email field "
+        "when email is accepted; use the minted AgentPhone number only if Uber explicitly requires "
+        "phone/SMS auth. Clear the phone/email input before each attempt. If Uber says the minted "
+        "phone number is blocked, choose another available login option using the minted AgentMail "
+        "email; stop and report the blocker only if no AgentMail path is available. "
+        )
+        booking_prompt = (
+        f"Open {target_url}. Using the already-created Uber account in this browser profile, "
+        "start booking an Uber ride. Confirm the page is signed in with the same agent minted "
+        f"identity from the first task. {booking_auth_instruction}"
+        "Use any reasonable pickup and destination if the site requires them. Continue until the "
+            "final action would submit, request, confirm, or pay for the ride; "
+            "click that final button so the browser write-lock approval request stops you. Do not bypass "
+            "or answer approval."
+        )
+        booking_task = replace(
+            task,
+            name=f"{task.name}-booking",
+            title="Minted Agent Account Sticky Booking",
+            prompt=booking_prompt,
+            approval_handling="ignore",
+            expected_attention_kind="write_lock",
+            timeout_seconds=max(task.timeout_seconds, 900),
+        )
+        previous_write_lock = os.environ.get("BENCHMARK_WRITE_LOCK_ENABLED")
+        os.environ["BENCHMARK_WRITE_LOCK_ENABLED"] = "true"
+        try:
+            booking_result = await run_single_task(base_url, booking_task, keep_failed_agents=keep_failed_agents)
+        finally:
+            if previous_write_lock is None:
+                del os.environ["BENCHMARK_WRITE_LOCK_ENABLED"]
+            else:
+                os.environ["BENCHMARK_WRITE_LOCK_ENABLED"] = previous_write_lock
+
+        signup_proven = signup_result.passed or signup_account_evidence
+        passed = signup_proven and minted is not None and booking_result.passed
+        failure_parts = []
+        if not signup_proven:
+            failure_parts.append(f"signup failed: {signup_result.failure_reason or signup_result.status}")
+        if minted is None:
+            failure_parts.append(f"no MintedAccount row for {target_realm}")
+        if not booking_result.passed:
+            failure_parts.append(f"booking failed: {booking_result.failure_reason or booking_result.status}")
+
+        return TaskResult(
+            name=task.name,
+            passed=passed,
+            agent_id=_with_gate_agent_ids(signup_result.agent_id, booking_result.agent_id),
+            status="COMPLETED" if passed else "FAILED",
+            progress_score=_with_gate_progress(signup_result.progress_score, booking_result.progress_score),
+            duration_seconds=round(time.time() - start, 1),
+            cost_cents=_with_gate_cost(signup_result.cost_cents, booking_result.cost_cents),
+            message_count=_with_gate_message_count(signup_result.message_count, booking_result.message_count),
+            failure_reason=" | ".join(failure_parts) if failure_parts else None,
+            approvals_triggered=booking_result.approvals_triggered,
+            approvals_resolved=booking_result.approvals_resolved,
+            cache_read_input_tokens=_with_gate_cache_read(
+                signup_result.cache_read_input_tokens,
+                booking_result.cache_read_input_tokens,
+            ),
+            cache_creation_input_tokens=_with_gate_cache_creation(
+                signup_result.cache_creation_input_tokens,
+                booking_result.cache_creation_input_tokens,
+            ),
+            cache_hit_pct=0.0,
+            context_violations=_with_gate_context_violations(
+                signup_result.context_violations,
+                booking_result.context_violations,
+            ),
+            logs=_with_gate_logs({"signup": signup_result.logs, "booking": booking_result.logs}),
+        )
+    finally:
+        print("    🧹 Preserved AgentIdentity AgentMail inbox and AgentPhone number")
 
 
 async def run_single_task(
@@ -1070,6 +2595,36 @@ async def run_single_task(
     keep_failed_agents: bool = False,
 ) -> TaskResult:
     """Run a single benchmark task. Returns TaskResult."""
+    if task.name in MINTED_AGENT_ACCOUNT_TASK_NAMES:
+        return await run_minted_agent_account_task(base_url, task, keep_failed_agents)
+
+    if (
+        task.name == AMAZON_AUTH_ASSISTANCE_TASK_NAME
+        and _force_show_passwords_mode()
+        and _is_local_base_url(base_url)
+    ):
+        auth_realm = os.environ.get("BENCHMARK_BROWSER_AUTH_REALM") or "amazon.com"
+        disabled_count = _disable_local_steel_and_cookie_auth_for_realm(USER_ID, auth_realm)
+        fixture = _seed_local_bad_amazon_auth_fixture(USER_ID, auth_realm)
+        print(
+            f"    🔐 Force-show-passwords fixture: disabled {disabled_count} Steel/Cookie auth row(s), "
+            f"seeded CookieBundle {fixture['cookie_bundle_id'][:8]} and "
+            f"{len(fixture['password_ids'])} bad password row(s)"
+        )
+
+    if task.name in AMAZON_COOKIE_BOOTSTRAP_TASK_NAMES and _is_local_base_url(base_url):
+        auth_realm = os.environ.get("BENCHMARK_BROWSER_AUTH_REALM") or "amazon.com"
+        if _skip_cookie_bundle_bootstrap():
+            print(f"    🍪 Skipping local CookieBundle bootstrap for {auth_realm}")
+        else:
+            bundle_count = _ensure_local_cookie_bundle_for_realm(USER_ID, auth_realm)
+            if bundle_count <= 0:
+                raise RuntimeError(
+                    f"No usable local cookies found for {auth_realm}; cannot bootstrap an active CookieBundle "
+                    f"for {task.name}."
+                )
+            print(f"    🍪 Ensured {bundle_count} active local CookieBundle row(s) for {auth_realm}")
+
     resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
     print(f"\n  {'=' * 50}")
     print(f"  📋 {task.name}: {task.title}")
@@ -1204,6 +2759,13 @@ async def run_single_task(
                 failure_reason = early_fail_reason
             else:
                 failure_reason = f"{early_fail_reason} | {failure_reason}"
+        if task.name == AMAZON_AUTH_ASSISTANCE_TASK_NAME and _force_show_passwords_mode():
+            passed, failure_reason = evaluate_force_show_passwords_auth_task(
+                task,
+                data,
+                approvals_triggered,
+                approvals_resolved,
+            )
 
         # Tree agent count check — counts spawn_agent-type sub-agents only
         # (excludes root and explore agents; explore agents have no output_schema)
@@ -1247,14 +2809,19 @@ async def run_single_task(
                 print(f"    ⚠ Tool count check failed: {e}")
 
         # Final context well-formedness check
-        final_violations = validate_context(messages)
-        context_violation_dicts = [v.to_dict() for v in final_violations]
-        context_errors = [v for v in final_violations if v.severity == "error"]
         approval_mode_blocked_on_approval = _approval_mode_allows_open_tool_context(
             task,
             data,
             approvals_triggered,
         )
+        final_violations = _final_context_violations_for_result(
+            task,
+            data,
+            approvals_triggered,
+            validate_context(messages),
+        )
+        context_violation_dicts = [v.to_dict() for v in final_violations]
+        context_errors = [v for v in final_violations if v.severity == "error"]
         if context_errors and passed and not approval_mode_blocked_on_approval:
             # Override pass → fail if context has well-formedness errors
             passed = False
@@ -1446,6 +3013,8 @@ def resolve_tasks(args) -> List[BenchmarkTask]:
     elif args.suite:
         if args.suite == "all":
             tasks = all_tasks()
+        elif args.suite == "auth":
+            tasks = get_tasks_by_tag("auth-anon" if getattr(args, "anon", False) else "auth-cookie")
         else:
             tasks = get_tasks_by_tag(args.suite)
     else:
@@ -1541,17 +3110,27 @@ def _verify_worker_queue_alignment():
         sys.exit(1)
 
     unreadable_pids: list[str] = []
+    mismatched: list[tuple[str, str]] = []
     for pid in pids:
         worker_queue = _read_process_env_var(pid, "TEMPORAL_TASK_QUEUE")
         if worker_queue is None:
             unreadable_pids.append(pid)
             continue
         if worker_queue != expected_queue:
-            print(f"  ❌ Worker (pid {pid}) on queue '{worker_queue}' but benchmark expects '{expected_queue}'")
-            print(f"     Kill it and restart: TEMPORAL_TASK_QUEUE={expected_queue} python worker.py &")
-            sys.exit(1)
+            mismatched.append((pid, worker_queue))
+            continue
         print(f"  ✅ Worker aligned on queue {expected_queue}")
+        if mismatched:
+            skipped = ", ".join(f"{pid}:{queue}" for pid, queue in mismatched[:3])
+            suffix = "..." if len(mismatched) > 3 else ""
+            print(f"  ℹ Ignoring other worker queue(s) in this worktree: {skipped}{suffix}")
         return
+
+    if mismatched:
+        first_pid, first_queue = mismatched[0]
+        print(f"  ❌ Worker (pid {first_pid}) on queue '{first_queue}' but benchmark expects '{expected_queue}'")
+        print(f"     Start a worker with: TEMPORAL_TASK_QUEUE={expected_queue} python worker.py &")
+        sys.exit(1)
 
     print(
         f"  ❌ Worker process(es) {', '.join(unreadable_pids)} found for this workspace, "
@@ -1957,6 +3536,13 @@ async def main_async(args):
     if not tasks:
         print("No tasks matched. Use --list to see available tasks.")
         sys.exit(1)
+    if _force_show_passwords_mode():
+        tasks = [task for task in tasks if task.name == AMAZON_AUTH_ASSISTANCE_TASK_NAME]
+        if not tasks:
+            print("--force-show-passwords only applies to the browser-agent Amazon auth benchmark.")
+            sys.exit(1)
+    _apply_benchmark_env_overrides(tasks)
+    _apply_force_show_passwords_task_overrides(tasks)
 
     # Apply CLI row overrides to all tasks
     if args.row_start is not None or args.row_end is not None:
@@ -1966,7 +3552,7 @@ async def main_async(args):
             if args.row_end is not None:
                 t.row_end = args.row_end
 
-    # Apply CLI sub-agent count override (re-template {n} in prompt + eval_prompt)
+    # Apply CLI sub-agent count override (re-template {n} in prompt)
     if args.sub_agent_count is not None:
         for t in tasks:
             if t.sub_agent_count is None:
@@ -1990,11 +3576,15 @@ async def main_async(args):
     # (which handles the process/container side); this block handles the Temporal + DB side.
     if not args.prod and base_url.startswith("http://localhost"):
         _verify_worker_queue_alignment()
-        try:
-            await asyncio.wait_for(_terminate_stale_workflows(), timeout=30)
-        except asyncio.TimeoutError:
-            print("  ⚠ Temporal stale-workflow cleanup timed out after 30s; continuing")
-        await _fail_stale_active_agents()
+        skip_stale_cleanup = os.environ.get("BENCHMARK_SKIP_STALE_CLEANUP", "").lower() == "true"
+        if skip_stale_cleanup:
+            print("  ⚠ Skipping stale workflow/agent cleanup (BENCHMARK_SKIP_STALE_CLEANUP=true)")
+        else:
+            try:
+                await asyncio.wait_for(_terminate_stale_workflows(), timeout=30)
+            except asyncio.TimeoutError:
+                print("  ⚠ Temporal stale-workflow cleanup timed out after 30s; continuing")
+            await _fail_stale_active_agents()
         await _warmup_edge_functions(base_url)
 
     # Pre-flight: check provider-typed compute credentials for code-agent tests.
@@ -2301,7 +3891,7 @@ def main():
     parser.add_argument(
         "--suite",
         type=str,
-        help="Run tasks matching a tag (basic, browser, claude-code, attachment, for-each, outreach, all)",
+        help="Run tasks matching a tag (basic, browser, auth, auth-anon, auth-cookie, claude-code, attachment, for-each, outreach, all)",
     )
     parser.add_argument(
         "--url",
@@ -2355,7 +3945,7 @@ def main():
         "--sub-agent-count",
         type=int,
         default=None,
-        help="Override sub_agent_count — substitutes {n} in prompt/eval_prompt for load-test tasks",
+        help="Override sub_agent_count — substitutes {n} in prompt for load-test tasks",
     )
     parser.add_argument(
         "--exclude-task",
@@ -2368,6 +3958,18 @@ def main():
         action="store_true",
         help="Do not delete failed/cancelled benchmark agents after log collection. "
         "Useful for local diagnostic wrappers.",
+    )
+    parser.add_argument(
+        "--anon",
+        action="store_true",
+        help="For minted-auth benchmarks, start without saved auth: skip cookie-bundle bootstrap "
+        "and disable existing SteelSessionAuth/CookieBundle rows for the target realm.",
+    )
+    parser.add_argument(
+        "--force-show-passwords",
+        action="store_true",
+        help="With --anon, keep seeded saved password refs visible while disabling real Steel/cookie auth. "
+        "Used by the Amazon bad-auth assistance benchmark.",
     )
     target_group = parser.add_mutually_exclusive_group()
     target_group.add_argument(
@@ -2386,6 +3988,12 @@ def main():
     if not args.list and not args.compare and not args.task and not args.suite:
         parser.print_help()
         sys.exit(1)
+
+    if args.force_show_passwords and not args.anon:
+        parser.error("--force-show-passwords requires --anon")
+
+    if args.anon:
+        _apply_anon_benchmark_mode(force_show_passwords=args.force_show_passwords)
 
     asyncio.run(main_async(args))
 

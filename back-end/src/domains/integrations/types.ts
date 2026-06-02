@@ -98,6 +98,7 @@ export interface PasswordPayloadEntry {
   dateLastUsed: number;
   dateCreated: number;
   browserSource: string;
+  browserProfile?: { id?: string; path?: string } | string | null;
 }
 
 export interface PasswordPayload {

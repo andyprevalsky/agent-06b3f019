@@ -69,6 +69,7 @@ _BACKOFF_CAP_S = 5.0
 _DEFAULT_TTFT_TIMEOUT_S = 60.0
 _COOLDOWN_SECONDS = 5 * 60
 _USAGE_WINDOW_RESET_THRESHOLD_S = 60.0
+_MAX_CACHE_CONTROL_BLOCKS = 4
 
 
 # Claude OAuth tokens require the first two system blocks to be a specific
@@ -110,6 +111,71 @@ def _add_tool_cache_breakpoint(body: Dict[str, Any]) -> None:
     tools = body.get("tools")
     if tools and isinstance(tools, list) and len(tools) > 0:
         tools[-1]["cache_control"] = {"type": "ephemeral"}
+
+
+def _drop_cache_control(obj: Any) -> bool:
+    if isinstance(obj, dict) and "cache_control" in obj:
+        obj.pop("cache_control", None)
+        return True
+    return False
+
+
+def _count_cache_control_blocks(body: Dict[str, Any]) -> int:
+    count = 0
+    system = body.get("system")
+    if isinstance(system, list):
+        count += sum(1 for block in system if isinstance(block, dict) and "cache_control" in block)
+
+    tools = body.get("tools")
+    if isinstance(tools, list):
+        count += sum(1 for tool in tools if isinstance(tool, dict) and "cache_control" in tool)
+
+    messages = body.get("messages")
+    if isinstance(messages, list):
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            content = msg.get("content")
+            if isinstance(content, list):
+                count += sum(1 for block in content if isinstance(block, dict) and "cache_control" in block)
+            elif isinstance(content, dict) and "cache_control" in content:
+                count += 1
+    return count
+
+
+def _enforce_cache_control_cap(body: Dict[str, Any]) -> None:
+    """Anthropic accepts at most 4 blocks with cache_control per request."""
+
+    def over_cap() -> bool:
+        return _count_cache_control_blocks(body) > _MAX_CACHE_CONTROL_BLOCKS
+
+    messages = body.get("messages")
+    if isinstance(messages, list):
+        for msg in reversed(messages):
+            if not over_cap() or not isinstance(msg, dict):
+                break
+            content = msg.get("content")
+            if isinstance(content, list):
+                for block in reversed(content):
+                    if not over_cap():
+                        break
+                    _drop_cache_control(block)
+            elif isinstance(content, dict) and over_cap():
+                _drop_cache_control(content)
+
+    system = body.get("system")
+    if isinstance(system, list):
+        for block in reversed(system):
+            if not over_cap():
+                break
+            _drop_cache_control(block)
+
+    tools = body.get("tools")
+    if isinstance(tools, list):
+        for tool in reversed(tools):
+            if not over_cap():
+                break
+            _drop_cache_control(tool)
 
 
 def _build_system_blocks(static_system: Optional[str], dynamic_system: Optional[str]) -> List[Dict[str, Any]]:
@@ -244,6 +310,7 @@ def build_anthropic_body(
     )
 
     _add_tool_cache_breakpoint(body)
+    _enforce_cache_control_cap(body)
 
     # Same anti-pattern as thinking above: `output_config.effort` is opt-in.
     # claude-haiku-4-5 400s with "This model does not support the effort

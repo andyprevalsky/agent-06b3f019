@@ -71,6 +71,16 @@ reviews:
     - "!agents/**/config.py"
     - "!agents/**/types.py"
     - "!agents/**/repo.py"
+    # 6) Non-runtime assets, dev previews, and local/debug scripts
+    - "!agents/keycap/COPYING"
+    - "!agents/keycap/LICENSE"
+    - "!front-end/browser-chip-preview.html"
+    - "!front-end/src/dev/**"
+    - "!scripts/render_llm_dump.py"
+    - "!scripts/replicate_llm_dump.py"
+    - "!back-end/scripts/e2e-credential-backprop-state.ts"
+    - "!back-end/scripts/run-coverage.sh"
+    - "!back-end/scripts/sync-codex-token.ts"
 
   path_instructions:
     - path: "agents/**"

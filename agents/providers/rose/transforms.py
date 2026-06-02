@@ -319,6 +319,39 @@ def transform_messages_for_anthropic(
     while len(bundled) > 0 and bundled[-1].get("role") == "assistant":
         bundled.pop()
 
+    merged: List[Dict[str, Any]] = []
+
+    def _is_tool_result_message(msg: Dict[str, Any]) -> bool:
+        content = msg.get("content")
+        return bool(
+            msg.get("role") == "user"
+            and isinstance(content, list)
+            and len(content) > 0
+            and all(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+        )
+
+    def _as_content_blocks(content: Any) -> List[Any]:
+        if isinstance(content, list):
+            return content
+        if isinstance(content, str):
+            return [{"type": "text", "text": content}]
+        if content is None:
+            return []
+        return [{"type": "text", "text": json.dumps(content)}]
+
+    for msg in bundled:
+        prev = merged[-1] if merged else None
+        if (
+            prev
+            and prev.get("role") == "user"
+            and msg.get("role") == "user"
+            and not _is_tool_result_message(prev)
+            and not _is_tool_result_message(msg)
+        ):
+            prev["content"] = _as_content_blocks(prev.get("content")) + _as_content_blocks(msg.get("content"))
+        else:
+            merged.append(msg)
+
     system_text: Optional[str] = "\n\n".join(system_parts) if system_parts else None
 
     from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
@@ -332,7 +365,7 @@ def transform_messages_for_anthropic(
     else:
         static_system = system_text
 
-    return static_system, dynamic_system, bundled
+    return static_system, dynamic_system, merged
 
 
 # ---------------------------------------------------------------------------
@@ -494,20 +527,27 @@ def apply_anthropic_tool_config(
     """
     if tools:
         if use_native_tools:
-            body["tools"] = [
-                {
-                    "name": t.get("name"),
-                    "description": t.get("description"),
-                    **({"strict": t.get("strict")} if "strict" in t else {}),
-                    "input_schema": t.get("input_schema"),
+            body["tools"] = []
+            for t in tools:
+                function = t.get("function") if isinstance(t.get("function"), dict) else t
+                tool_body = {
+                    "name": function.get("name"),
+                    "description": function.get("description"),
+                    "input_schema": function.get("input_schema") or function.get("parameters"),
                 }
-                for t in tools
-            ]
+                if "strict" in function:
+                    tool_body["strict"] = function.get("strict")
+                body["tools"].append(tool_body)
             if tool_choice is not None:
                 if tool_choice == "auto":
                     body["tool_choice"] = {"type": "auto"}
                 elif tool_choice in ("required", "any"):
                     body["tool_choice"] = {"type": "any"}
+                elif isinstance(tool_choice, dict) and tool_choice.get("name"):
+                    body["tool_choice"] = {
+                        "type": "tool",
+                        "name": tool_choice["name"],
+                    }
                 elif (
                     isinstance(tool_choice, dict)
                     and isinstance(tool_choice.get("function"), dict)
@@ -754,6 +794,23 @@ def _add_openrouter_cache_breakpoint(msg: Dict[str, Any]) -> None:
             target["cache_control"] = {"type": "ephemeral"}
 
 
+def _strip_system_prompt_boundary(msg: Dict[str, Any]) -> None:
+    """Remove cache-boundary sentinel text from non-cache system messages."""
+    content = msg.get("content")
+    if not isinstance(content, str):
+        return
+    from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+
+    if SYSTEM_PROMPT_DYNAMIC_BOUNDARY not in content:
+        return
+    blocks = []
+    for part in content.split(SYSTEM_PROMPT_DYNAMIC_BOUNDARY):
+        text = part.strip()
+        if text:
+            blocks.append({"type": "text", "text": text})
+    msg["content"] = blocks
+
+
 def transform_messages_for_openai(
     messages: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -783,9 +840,13 @@ def transform_messages_for_openai(
     if not out:
         return out
 
+    first_system_seen = False
     for m in out:
         if m.get("role") == "system":
-            _add_openrouter_cache_breakpoint(m)
-            break
+            if not first_system_seen:
+                _add_openrouter_cache_breakpoint(m)
+                first_system_seen = True
+            else:
+                _strip_system_prompt_boundary(m)
 
     return out

@@ -6,6 +6,11 @@
  *
  * Pure presentational — all state is owned by BrowserStatusBar and handed
  * in via props.
+ *
+ * AGENT OVERLAY STATE:
+ * [ACTIVE] -> border glow + cursor stitch + "Agent in progress" chip
+ * [WAITING_FOR_AUTH_ASSISTANCE] -> no active overlay; "Agent waiting for assistance" chip
+ * [DISCONNECTED] -> blurred resume overlay
  */
 
 import { createPortal } from 'react-dom';
@@ -18,33 +23,55 @@ import BrowserBorderGlow from '../BrowserBorderGlow';
 import BrowserCursorOverlay from '../BrowserCursorOverlay';
 import { SchemaChip } from '../SchemaChip';
 import type { Message } from '../../hooks';
+import { BrowserProxyLocationChip } from './BrowserProxyLocationChip';
 import { BrowserWriteLockApproval } from './BrowserWriteLockApproval';
 import { StepProgressBar } from './StepProgressBar';
-import type { OutputSchemaRef, PendingWriteLockApproval, StepProgress } from './types';
+import type {
+  BrowserSessionMetadata,
+  OutputSchemaRef,
+  PendingWriteLockApproval,
+  StepProgress,
+} from './types';
 
 interface FullscreenProps {
+  agentId?: string | null;
   taskId: string;
   browserUrl: string;
   messages: Message[];
   outputSchema: OutputSchemaRef | undefined;
+  browserSessionMetadata: BrowserSessionMetadata | null;
   stepProgress: StepProgress | null;
   isDisconnected: boolean;
+  isWaitingForAuthAssistance: boolean;
   isResuming: boolean;
   pendingWriteLockApproval: PendingWriteLockApproval | null;
   onClose: (e: MouseEvent) => void;
   onResume: () => void;
 }
 
-function ActiveIndicator({ isDisconnected }: { isDisconnected: boolean }) {
+function ActiveIndicator({
+  isDisconnected,
+  isWaitingForAuthAssistance,
+}: {
+  isDisconnected: boolean;
+  isWaitingForAuthAssistance: boolean;
+}) {
+  const label = isDisconnected
+    ? 'Disconnected'
+    : isWaitingForAuthAssistance
+      ? 'Waiting for assistance'
+      : 'Active';
   return (
     <div className="flex items-center gap-2">
       <div
         className={cn(
           'h-2 w-2 rounded-full',
-          isDisconnected ? 'bg-yellow-500' : 'bg-green-500 animate-pulse',
+          isDisconnected || isWaitingForAuthAssistance
+            ? 'bg-yellow-500'
+            : 'bg-green-500 animate-pulse',
         )}
       />
-      <span className="text-sm font-medium">{isDisconnected ? 'Disconnected' : 'Active'}</span>
+      <span className="text-sm font-medium">{label}</span>
     </div>
   );
 }
@@ -78,6 +105,32 @@ function TakeControlChip({ onResume, isResuming }: { onResume: () => void; isRes
   );
 }
 
+function WaitingForAssistanceChip({
+  onResume,
+  isResuming,
+}: {
+  onResume: () => void;
+  isResuming: boolean;
+}) {
+  return (
+    <div className="absolute bottom-10 left-1/2 -translate-x-1/2 z-10">
+      <div className="flex items-center gap-3 pl-4 pr-2 py-2 rounded-full bg-navi-black shadow-2xl">
+        <span className="text-sm font-medium text-navi-white">Agent waiting for assistance</span>
+        <button
+          onClick={onResume}
+          disabled={isResuming}
+          className={cn(
+            'text-sm font-medium ml-2 px-3 py-1 rounded-full bg-blue-500 text-white hover:bg-blue-400 transition-colors',
+            isResuming && 'opacity-50 cursor-not-allowed',
+          )}
+        >
+          {isResuming ? 'Loading...' : 'Start Agent'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function DisconnectedOverlay({
   onResume,
   isResuming,
@@ -101,14 +154,44 @@ function DisconnectedOverlay({
   );
 }
 
+function BrowserFrameHeader({
+  isDisconnected,
+  isWaitingForAuthAssistance,
+  browserSessionMetadata,
+  onClose,
+}: {
+  isDisconnected: boolean;
+  isWaitingForAuthAssistance: boolean;
+  browserSessionMetadata: BrowserSessionMetadata | null;
+  onClose: (e: MouseEvent) => void;
+}) {
+  return (
+    <div className="flex items-center justify-between p-4 border-b border-border">
+      <ActiveIndicator
+        isDisconnected={isDisconnected}
+        isWaitingForAuthAssistance={isWaitingForAuthAssistance}
+      />
+      <div className="flex items-center gap-2">
+        <BrowserProxyLocationChip metadata={browserSessionMetadata} tooltipPosition="bottom" />
+        <button onClick={onClose} className="p-2 rounded hover:bg-muted transition-colors">
+          <X className="h-5 w-5 text-muted-foreground" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function BrowserStatusBarFullscreen(props: FullscreenProps) {
   const {
+    agentId,
     taskId,
     browserUrl,
     messages,
     outputSchema,
+    browserSessionMetadata,
     stepProgress,
     isDisconnected,
+    isWaitingForAuthAssistance,
     isResuming,
     pendingWriteLockApproval,
     onClose,
@@ -140,7 +223,7 @@ export function BrowserStatusBarFullscreen(props: FullscreenProps) {
               subAgentId={taskId}
               containerClassName="flex flex-col gap-1.5 overflow-x-hidden"
               showStatusBanners={false}
-              showThinkingIndicator={!isDisconnected}
+              showThinkingIndicator={!isDisconnected && !isWaitingForAuthAssistance}
               compact
             />
           </div>
@@ -154,12 +237,12 @@ export function BrowserStatusBarFullscreen(props: FullscreenProps) {
       </div>
 
       <div className="flex-1 flex flex-col">
-        <div className="flex items-center justify-between p-4 border-b border-border">
-          <ActiveIndicator isDisconnected={isDisconnected} />
-          <button onClick={onClose} className="p-2 rounded hover:bg-muted transition-colors">
-            <X className="h-5 w-5 text-muted-foreground" />
-          </button>
-        </div>
+        <BrowserFrameHeader
+          isDisconnected={isDisconnected}
+          isWaitingForAuthAssistance={isWaitingForAuthAssistance}
+          browserSessionMetadata={browserSessionMetadata}
+          onClose={onClose}
+        />
         <div className="flex-1 relative bg-white">
           <iframe
             src={browserUrl}
@@ -168,10 +251,19 @@ export function BrowserStatusBarFullscreen(props: FullscreenProps) {
             sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals"
             title="Browser"
           />
-          <BrowserBorderGlow />
-          <BrowserCursorOverlay taskId={taskId} messages={messages} />
-          {!isDisconnected && <TakeControlChip onResume={onResume} isResuming={isResuming} />}
-          {isDisconnected && <DisconnectedOverlay onResume={onResume} isResuming={isResuming} />}
+          {!isWaitingForAuthAssistance && <BrowserBorderGlow />}
+          {!isWaitingForAuthAssistance && (
+            <BrowserCursorOverlay agentId={agentId} taskId={taskId} messages={messages} />
+          )}
+          {!isDisconnected && !isWaitingForAuthAssistance && (
+            <TakeControlChip onResume={onResume} isResuming={isResuming} />
+          )}
+          {isWaitingForAuthAssistance && (
+            <WaitingForAssistanceChip onResume={onResume} isResuming={isResuming} />
+          )}
+          {isDisconnected && !isWaitingForAuthAssistance && (
+            <DisconnectedOverlay onResume={onResume} isResuming={isResuming} />
+          )}
         </div>
         <div className="px-4 py-2 border-t border-border bg-muted/20">
           <p className="text-xs text-muted-foreground italic">

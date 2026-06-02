@@ -2,19 +2,24 @@
  * BrowserCursorOverlay - Renders cursor on top of browser view
  *
  * STATE MACHINE:
- * [VISIBLE] --> cursor always visible at current position
+ * [MOUNTED] -> subscribe to agent:{agentId} BROWSER_CURSOR broadcast
  *    |
- *    v (new message with coordinates)
- * [MOVING] --> CSS transition animates to new position
+ *    +--> [STREAMING] first realtime sample initializes cursor
+ *    |        |
+ *    |        v
+ *    |     [INTERPOLATING] later samples become animation targets; RAF blends between points
  *    |
- *    v (transition complete)
- * [VISIBLE]
+ *    +--> [MESSAGE_FALLBACK] saved browser action coordinates update position
+ *    |
+ *    v
+ * [UNMOUNTED] -> unsubscribe from realtime channel
  *
- * Coordinates come from browser action messages (IN_PROGRESS) via metadata.auxiliary.coordinates
- * Browser viewport is 1280x800, uses percentage positioning for immediate rendering
+ * Realtime samples mirror BrowserHumanizer cursor motion. Browser action message
+ * coordinates remain the durable fallback for reloads and completed runs.
  */
 
 import { useEffect, useRef, useState, useMemo, useCallback, type RefObject } from 'react';
+import { extractRecord, subscribeToChannel, unsubscribe } from '@/lib/realtime';
 import type { Message } from '../hooks';
 
 // Steel browser dimensions
@@ -27,6 +32,9 @@ const CONTENT_VIEWPORT_HEIGHT = 800;
 const CHROME_OFFSET_X = 4; // Left border
 const CHROME_OFFSET_Y = 91; // Toolbar height
 const WINDOW_ASPECT = BROWSER_WINDOW_WIDTH / BROWSER_WINDOW_HEIGHT;
+const MIN_CURSOR_ANIMATION_MS = 35;
+const MAX_CURSOR_ANIMATION_MS = 120;
+const DEFAULT_CURSOR_ANIMATION_MS = 70;
 
 // Custom cursor SVG - navigation arrow pointing right (from navigate-v2.png, flipped)
 // Auto-traced using potrace from the actual PNG. Black fill, 4px white stroke.
@@ -41,6 +49,7 @@ const CURSOR_SVG = `<svg width="28" height="28" viewBox="0 0 427 427" xmlns="htt
 </svg>`;
 
 interface BrowserCursorOverlayProps {
+  agentId?: string | null;
   taskId: string;
   messages: Message[];
 }
@@ -55,6 +64,26 @@ interface ViewportBounds {
   offsetY: number;
   width: number;
   height: number;
+}
+
+interface BrowserCursorPayload {
+  agentId: string;
+  taskId: string;
+  x: number;
+  y: number;
+  sequence?: number;
+  timestampMs?: number;
+}
+
+function isBrowserCursorPayload(value: unknown): value is BrowserCursorPayload {
+  if (typeof value !== 'object' || value === null) return false;
+  const record = value as Partial<BrowserCursorPayload>;
+  return (
+    typeof record.agentId === 'string' &&
+    typeof record.taskId === 'string' &&
+    typeof record.x === 'number' &&
+    typeof record.y === 'number'
+  );
 }
 
 function computeViewportBounds(container: HTMLDivElement): ViewportBounds {
@@ -113,9 +142,131 @@ function useViewportBounds(containerRef: RefObject<HTMLDivElement | null>): View
   return viewportBounds;
 }
 
-function useCursorPosition(taskId: string, messages: Message[]): CursorPosition {
+function useCursorPosition(
+  agentId: string | null | undefined,
+  taskId: string,
+  messages: Message[],
+): CursorPosition {
   const [cursorPos, setCursorPos] = useState<CursorPosition>({ x: 640, y: 400 });
+  const cursorPosRef = useRef<CursorPosition>(cursorPos);
+  const animationFrameRef = useRef<number | null>(null);
+  const animationStartRef = useRef<{
+    from: CursorPosition;
+    to: CursorPosition;
+    startedAt: number;
+    durationMs: number;
+  } | null>(null);
+  const lastRealtimeSampleRef = useRef<BrowserCursorPayload | null>(null);
   const lastProcessedMessageRef = useRef<string | null>(null);
+
+  const updateCursorPos = useCallback((next: CursorPosition) => {
+    cursorPosRef.current = next;
+    setCursorPos(next);
+  }, []);
+
+  const stopAnimation = useCallback(() => {
+    if (animationFrameRef.current !== null) {
+      window.cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+    animationStartRef.current = null;
+  }, []);
+
+  const runAnimationFrame = useCallback(
+    (now: number) => {
+      const animation = animationStartRef.current;
+      if (!animation) return;
+
+      const elapsed = now - animation.startedAt;
+      const progress = Math.min(1, Math.max(0, elapsed / animation.durationMs));
+      const next = {
+        x: animation.from.x + (animation.to.x - animation.from.x) * progress,
+        y: animation.from.y + (animation.to.y - animation.from.y) * progress,
+      };
+      updateCursorPos(next);
+
+      if (progress < 1) {
+        animationFrameRef.current = window.requestAnimationFrame(runAnimationFrame);
+      } else {
+        animationFrameRef.current = null;
+        animationStartRef.current = null;
+      }
+    },
+    [updateCursorPos],
+  );
+
+  const animateCursorTo = useCallback(
+    (record: BrowserCursorPayload) => {
+      const previous = lastRealtimeSampleRef.current;
+      lastRealtimeSampleRef.current = record;
+
+      const to = { x: record.x, y: record.y };
+      if (!previous) {
+        stopAnimation();
+        updateCursorPos(to);
+        return;
+      }
+
+      const sampleDeltaMs =
+        typeof record.timestampMs === 'number' && typeof previous.timestampMs === 'number'
+          ? record.timestampMs - previous.timestampMs
+          : DEFAULT_CURSOR_ANIMATION_MS;
+      const durationMs = Math.min(
+        MAX_CURSOR_ANIMATION_MS,
+        Math.max(
+          MIN_CURSOR_ANIMATION_MS,
+          sampleDeltaMs > 0 ? sampleDeltaMs : DEFAULT_CURSOR_ANIMATION_MS,
+        ),
+      );
+
+      if (animationFrameRef.current !== null) {
+        window.cancelAnimationFrame(animationFrameRef.current);
+      }
+      animationStartRef.current = {
+        from: cursorPosRef.current,
+        to,
+        startedAt: performance.now(),
+        durationMs,
+      };
+      animationFrameRef.current = window.requestAnimationFrame(runAnimationFrame);
+    },
+    [runAnimationFrame, stopAnimation, updateCursorPos],
+  );
+
+  useEffect(() => {
+    if (!agentId) return;
+
+    let disposed = false;
+    let channel: Awaited<ReturnType<typeof subscribeToChannel>> | null = null;
+
+    void subscribeToChannel(
+      `agent:${agentId}`,
+      {
+        BROWSER_CURSOR: (wrapper: unknown) => {
+          const record = extractRecord<BrowserCursorPayload>(wrapper);
+          if (!isBrowserCursorPayload(record) || record.taskId !== taskId) return;
+          animateCursorTo(record);
+        },
+      },
+      'Browser cursor',
+    )
+      .then((nextChannel) => {
+        if (disposed) {
+          unsubscribe(nextChannel);
+          return;
+        }
+        channel = nextChannel;
+      })
+      .catch((error: unknown) => {
+        console.warn('Failed to subscribe to browser cursor stream', error);
+      });
+
+    return () => {
+      disposed = true;
+      stopAnimation();
+      unsubscribe(channel);
+    };
+  }, [agentId, animateCursorTo, stopAnimation, taskId]);
 
   const latestWithCoords = useMemo(() => {
     const browserMessages = messages.filter(
@@ -133,17 +284,23 @@ function useCursorPosition(taskId: string, messages: Message[]): CursorPosition 
 
     const coords = latestWithCoords.metadata?.auxiliary?.coordinates as CursorPosition | undefined;
     if (coords?.x !== undefined && coords?.y !== undefined) {
-      setCursorPos({ x: coords.x, y: coords.y });
+      lastRealtimeSampleRef.current = null;
+      stopAnimation();
+      updateCursorPos({ x: coords.x, y: coords.y });
     }
-  }, [latestWithCoords]);
+  }, [latestWithCoords, stopAnimation, updateCursorPos]);
 
   return cursorPos;
 }
 
-export default function BrowserCursorOverlay({ taskId, messages }: BrowserCursorOverlayProps) {
+export default function BrowserCursorOverlay({
+  agentId,
+  taskId,
+  messages,
+}: BrowserCursorOverlayProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewportBounds = useViewportBounds(containerRef);
-  const cursorPos = useCursorPosition(taskId, messages);
+  const cursorPos = useCursorPosition(agentId, taskId, messages);
 
   const cursorLeft =
     viewportBounds.offsetX + (cursorPos.x / CONTENT_VIEWPORT_WIDTH) * viewportBounds.width;
@@ -152,6 +309,7 @@ export default function BrowserCursorOverlay({ taskId, messages }: BrowserCursor
 
   return (
     <div
+      data-testid="browser-cursor-overlay"
       ref={containerRef}
       style={{
         position: 'absolute',
@@ -164,6 +322,7 @@ export default function BrowserCursorOverlay({ taskId, messages }: BrowserCursor
       }}
     >
       <div
+        data-testid="browser-cursor"
         style={{
           position: 'absolute',
           left: cursorLeft,
@@ -172,7 +331,6 @@ export default function BrowserCursorOverlay({ taskId, messages }: BrowserCursor
           height: 28,
           pointerEvents: 'none',
           filter: 'drop-shadow(2px 3px 3px rgba(0, 0, 0, 0.5))',
-          transition: 'left 0.3s ease-out, top 0.3s ease-out',
           transform: 'translateX(-28px)',
           willChange: 'left, top',
         }}

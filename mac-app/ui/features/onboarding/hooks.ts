@@ -1,13 +1,15 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { sendOTP, verifyOTP } from '@/features/auth/api';
 import { getErrorMessageOrFallback } from '../../../shared/utils/error';
 import {
   createPlaidLinkToken,
   exchangePlaidPublicToken,
+  fetchCustomPreviewUrl,
   fetchCustomization,
   fetchIntegrations,
   fetchPlaidItems,
   fetchUserSettings,
+  resolvePresetSamplePath,
   saveCustomization,
   sendPasswordIntegrationRequest,
   spawnLinkedInSyncAgent,
@@ -48,6 +50,48 @@ export const useOnboardingCustomizationApi = (): typeof ONBOARDING_CUSTOMIZATION
   ONBOARDING_CUSTOMIZATION_API;
 
 export const useOnboardingDataApi = (): typeof ONBOARDING_DATA_API => ONBOARDING_DATA_API;
+
+const resolveVoicePreviewUrl = async (
+  voiceId: string,
+  isCustom: boolean
+): Promise<string | null> => {
+  if (!isCustom) return resolvePresetSamplePath(voiceId);
+  return fetchCustomPreviewUrl(voiceId);
+};
+
+export const useVoicePreviewAudio = (
+  isCustom: boolean,
+  customVoiceId: string,
+  presetVoiceId: string | null
+): void => {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const lastPlayedRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const id = isCustom ? customVoiceId.trim() : (presetVoiceId ?? '');
+    if (id === '' || id === lastPlayedRef.current) return;
+    lastPlayedRef.current = id;
+    let cancelled = false;
+    void (async () => {
+      const url = await resolveVoicePreviewUrl(id, isCustom);
+      if (cancelled || url === null) return;
+      const audio = audioRef.current ?? new Audio();
+      audioRef.current = audio;
+      audio.pause();
+      audio.src = url;
+      audio.currentTime = 0;
+      try {
+        await audio.play();
+      } catch {
+        /* autoplay blocked / file missing - silent */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (audioRef.current !== null) audioRef.current.pause();
+    };
+  }, [isCustom, customVoiceId, presetVoiceId]);
+};
 
 // Format phone number as user types: +1 (XXX)-XXX-XXXX
 export const formatPhoneNumber = (value: string): string => {

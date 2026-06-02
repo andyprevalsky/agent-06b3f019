@@ -11,30 +11,31 @@ SYSTEM_PROMPT_DYNAMIC_BOUNDARY = "\n__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__\n"
 # SHARED PROMPT SECTIONS
 # ============================================================================
 
-VERIFICATION_RULES = """
-After you call `attempt_completion`, an automated grader scores your work.
-`attempt_completion.result` is only a final-response handoff for unverified
-loops; it is ignored by the grader.
+HOW_YOU_ARE_GRADED_PROMPT = """
+# How you are Graded
 
-THE GRADER READS ONLY:
-- The original goal (USER message)
+After you call `attempt_completion`, an automated
+grader scores your work and if it scores a 1.0 then your task is completed.
+
+The grader takes as input:
+- The original user goal
 - Your prior tool call inputs and tool call results
+- The output schema, a dynamically generated typed python dict, created via LLM from the user's goal, that is meant to define the exact key artifacts that are required in order to consider the goal completed.
 - Browser ground truth for browser tasks (URL + DOM, extracted by the browser)
 
-THE GRADER DOES NOT SEE:
-- Your assistant reasoning, thinking, or any narration
-- The `attempt_completion.result` handoff payload; the grader reads tool
-  results directly
+The grader does not see:
+- Your reasoning, thinking, or any narration
 
-SCORING RULE:
-- Score = 1.0 iff every required output schema field can be populated
-  accurately from grounded tool evidence in a single transformation pass
-  (parse, compute, format). You do NOT need to pre-compute derived
-  values; the grader does the parsing/formatting itself.
-- If the verifier rejects, the rejection arrives as a TOOL message in the
-  next iteration. Take new tool actions to produce updated tool results;
-  do NOT just call `attempt_completion` again without new evidence.
+The grader then outputs:
+- score = 1.0 iff every required output schema field can be populated accurately from grounded tool evidence in a single transformation pass (parse, compute, format). You do NOT need to pre-compute derived values; the grader does the parsing/formatting itself.
+- reasoning if you score <= 1.0
+
+If you score less than 1.0
+- Do not re-call attempt_completion immediately, this is reward hacking behavior and you will be reprimanded
+- Do incorporate the feedback from the grader and perform more tool calls in order to make more progress towards completing the user goal
 """
+
+VERIFICATION_RULES = HOW_YOU_ARE_GRADED_PROMPT
 
 # ----------------------------------------------------------------------------
 # Canonical rule constants (single source of truth; imported by other prompt
@@ -170,7 +171,7 @@ In the words of Paul Graham, founder of Y Combinator, remember to "be relentless
 The beginning of your context might have information generated from the PLAN phase, do not confuse those actions as being part of your current directive.
 """
 
-MAIN_SYSTEM_PROMPT = """
+MAIN_SYSTEM_PROMPT = f"""
 You are a Rose Labs Agent. A single agent in a massive network of agents that together form a super-intelligent system. Each agent, including you, is a nurturer of metaphysical seeds - the user plants a goal and your job
 is to grow it to full fruition using the tools available to you.
 
@@ -185,27 +186,7 @@ human attention, social credibility, or monetary capital. Behave like a world-cl
  - You can call multiple tools in a single response. If you intend to call multiple tools and there are no dependencies between them, make all independent tool calls in parallel. Maximize use of parallel tool calls where possible to increase efficiency. However, if some tool calls depend on previous calls to inform dependent values, do NOT call these tools in parallel and instead call them sequentially. For instance, if one operation must complete before another starts, run these operations sequentially instead.
 - Prefer wait_for(condition=...) over recursive general-purpose agents for polling tasks
 
-# How you are Graded
-
-After you call `attempt_completion`, an automated
-grader scores your work and if it scores a 1.0 then your task is completed.
-
-The grader takes as input:
-- The original user goal
-- Your prior tool call inputs and tool call results
-- The output schema, a dynamically generated typed python dict, created via LLM from the user's goal, that is meant to define the exact key artifacts that are required in order to consider the goal completed.
-- Browser ground truth for browser tasks (URL + DOM, extracted by the browser)
-
-The grader does not see:
-- Your reasoning, thinking, or any narration
-
-The grader then outputs:
-- score = 1.0 iff every required output schema field can be populated accurately from grounded tool evidence in a single transformation pass (parse, compute, format). You do NOT need to pre-compute derived values; the grader does the parsing/formatting itself.
-- reasoning if you score <= 1.0
-
-If you score less than 1.0
-- Do not re-call attempt_completion immediately, this is reward hacking behavior and you will be reprimanded
-- Do incorporate the feedback from the grader and perform more tool calls in order to make more progress towards completing the user goal
+{HOW_YOU_ARE_GRADED_PROMPT.strip()}
 
 # Your Environment
 
@@ -237,11 +218,13 @@ def build_system_prompt(  # noqa: C901
     Build system prompt for the LLM.
 
     System block order:
-    1. Main system prompt
-    2. User context
-    3. Phase prompt
+    1. Static main system prompt
+    2. Dynamic user context
+    3. Dynamic current phase / required output schema
     """
     prompt = MAIN_SYSTEM_PROMPT.strip()
+    prompt += f"\n{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
+
     user_context = user_context_section.strip() if user_context_section.strip() else "No additional user context."
     prompt += f"\n\n# User Context\n\n{user_context}"
     prompt += f"\n{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
@@ -253,6 +236,10 @@ def build_system_prompt(  # noqa: C901
     else:
         prompt += EXECUTE_PHASE_PROMPT.strip()
 
+    output_schema_section = format_required_output_schema_system_section(response_schema)
+    if output_schema_section:
+        prompt += f"\n\n{output_schema_section}"
+
     prompt += f"\n{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
 
     return prompt
@@ -263,7 +250,11 @@ def format_required_output_schema_user_message(
     *,
     for_decomposition: bool = False,
 ) -> str:
-    """Render response_schema as LLM-only user text."""
+    """Render response_schema as LLM-only user text.
+
+    Deprecated for agent prompts: output schema now belongs in the dynamic
+    system prompt. Kept for older call sites/tests that still import it.
+    """
     if not response_schema or not response_schema.get("fields"):
         return ""
 
@@ -284,6 +275,22 @@ def format_required_output_schema_user_message(
         "Gather this data before calling attempt_completion:\n"
         f"{fields_desc}"
     )
+
+
+def format_required_output_schema_system_section(
+    response_schema: Optional[Dict[str, Any]],
+    *,
+    for_decomposition: bool = False,
+) -> str:
+    """Render response_schema as the final section of a dynamic system prompt."""
+    body = format_required_output_schema_user_message(
+        response_schema,
+        for_decomposition=for_decomposition,
+    )
+    if not body:
+        return ""
+    body = body.removeprefix("Required output schema:").strip()
+    return f"# Required Output Schema\n\n{body}"
 
 
 _VERIFIER_STATIC_PROMPT = (
@@ -546,11 +553,20 @@ summarizing the referenced data. This prevents information degradation across th
 
 OUTPUT JSON ONLY; no prose, no commentary outside the JSON structure."""
 
+    dynamic_sections = [f"# Current Phase\n\n{decomposition_phase_prompt.strip()}"]
+    output_schema_section = format_required_output_schema_system_section(
+        response_schema,
+        for_decomposition=True,
+    )
+    if output_schema_section:
+        dynamic_sections.append(output_schema_section)
+
     return (
         MAIN_SYSTEM_PROMPT.strip()
+        + f"\n{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
         + f"\n\n# User Context\n\n{user_context_block}"
         + f"\n{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
-        + f"\n\n# Current Phase\n\n{decomposition_phase_prompt.strip()}"
+        + "\n\n".join(dynamic_sections)
         + f"\n{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
     )
 
@@ -582,6 +598,7 @@ EXPLORE_AGENT_SYSTEM_PROMPT = (
 __all__ = [
     "build_system_prompt",
     "format_required_output_schema_user_message",
+    "format_required_output_schema_system_section",
     "build_verifier_prompt",
     "build_planner_system_prompt",
     "EXPLORE_AGENT_SYSTEM_PROMPT",

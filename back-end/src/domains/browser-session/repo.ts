@@ -42,8 +42,9 @@ export async function findUserSettings(userId: string) {
  */
 export async function findPasswords(userId: string) {
   return prisma.browserPassword.findMany({
-    where: { userId },
+    where: { userId, disabledAt: null },
     select: {
+      id: true,
       origin: true,
       username: true,
       encryptedPassword: true,

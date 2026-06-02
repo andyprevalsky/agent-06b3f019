@@ -8,17 +8,40 @@ The two CDP connections don't conflict because they use different CDP domains:
 - browser-use: DOM, Runtime, Page (reading)
 - Playwright: Input (writing)
 
-Note: Visual cursor rendering is handled by the frontend overlay (BrowserCursorOverlay.tsx),
-not by injecting elements into the browser page.
+Cursor positions are published to a recorder observer for the replay overlay.
+The optional in-page cursor is disabled by default so Steel recordings do not
+capture duplicate cursor layers.
 """
 
 import random
 import asyncio
 import math
-from typing import Tuple, List, Any, Optional
+import os
+import inspect
+import time
+from typing import Tuple, List, Any, Optional, Callable
 import structlog
 
+from browser_tools.input_synthesis import (
+    KeycapTimingSynthesizer,
+    MouseSample,
+    synthesize_click_delay_ms,
+    IDLE_MOUSE_RADIUS_PX,
+    synthesize_idle_mouse_drift,
+    synthesize_mouse_path,
+)
+
 logger = structlog.get_logger()
+
+
+FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
+
+
+def _env_enabled(name: str, default: bool = True) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in FALSE_VALUES
 
 
 def generate_bezier_points(
@@ -127,6 +150,30 @@ class BrowserHumanizer:
         self.input_page = input_page
         self.fast = fast
         self._last_pos = (640, 400)  # Start at center-ish
+        self._input_synthesis_enabled = _env_enabled("BROWSER_AGENT_HUMAN_INPUT_ENABLED", True)
+        self._mouse_synthesis_enabled = self._input_synthesis_enabled and _env_enabled(
+            "BROWSER_AGENT_HUMAN_MOUSE_SYNTHESIS", True
+        )
+        self._keyboard_synthesis_enabled = self._input_synthesis_enabled and _env_enabled(
+            "BROWSER_AGENT_HUMAN_KEYBOARD_SYNTHESIS", True
+        )
+        self._visual_cursor_enabled = _env_enabled("BROWSER_AGENT_VISUAL_CURSOR_ENABLED", False)
+        self._visual_cursor_failed = False
+        self._cdp_mouse_transport_enabled = self._input_synthesis_enabled and _env_enabled(
+            "BROWSER_AGENT_CDP_MOUSE_TRANSPORT", True
+        )
+        self._cdp_session: Optional[Any] = None
+        self._cursor_observer: Optional[Callable[[int, int], Any]] = None
+        self._keycap = KeycapTimingSynthesizer(basis_count=500 if fast else 1500)
+        self._movement_lock = asyncio.Lock()
+        self._closed = False
+        self._idle_mouse_enabled = self._input_synthesis_enabled and _env_enabled(
+            "BROWSER_AGENT_IDLE_MOUSE_ENABLED", True
+        )
+        self._idle_mouse_radius_px = max(0.5, float(os.getenv("BROWSER_AGENT_IDLE_MOUSE_RADIUS_PX", str(IDLE_MOUSE_RADIUS_PX))))
+        self._idle_anchor = self._last_pos
+        self._idle_handle: Optional[asyncio.TimerHandle] = None
+        self._idle_task: Optional[asyncio.Task] = None
 
         # Typing settings
         self._cpm = 320 if fast else 260  # Characters per minute
@@ -134,8 +181,264 @@ class BrowserHumanizer:
         logger.info(
             "BrowserHumanizer initialized",
             fast=fast,
-            cpm=self._cpm
+            cpm=self._cpm,
+            input_synthesis_enabled=self._input_synthesis_enabled,
+            mouse_synthesis_enabled=self._mouse_synthesis_enabled,
+            keyboard_synthesis_enabled=self._keyboard_synthesis_enabled,
+            visual_cursor_enabled=self._visual_cursor_enabled,
+            cdp_mouse_transport_enabled=self._cdp_mouse_transport_enabled,
+            idle_mouse_enabled=self._idle_mouse_enabled,
         )
+
+    def set_cursor_observer(self, observer: Optional[Callable[[int, int], Any]]) -> None:
+        """Register a lightweight callback for cursor replay/stream mirroring."""
+        self._cursor_observer = observer
+
+    async def _publish_cursor(self, x: int, y: int) -> None:
+        await self._publish_visual_cursor(x, y)
+        await self._notify_cursor_observer(x, y)
+
+    async def close(self) -> None:
+        self._closed = True
+        if self._idle_handle:
+            self._idle_handle.cancel()
+            self._idle_handle = None
+        if self._idle_task:
+            self._idle_task.cancel()
+            try:
+                await self._idle_task
+            except asyncio.CancelledError:
+                pass
+            self._idle_task = None
+
+    def start_idle_movement(self) -> None:
+        if not self._idle_mouse_enabled or self._closed or self._idle_handle or self._idle_task:
+            return
+        self._schedule_idle_mouse_step(random.uniform(0.28, 0.6))
+
+    def _schedule_idle_mouse_step(self, delay_s: float) -> None:
+        if self._closed or not self._idle_mouse_enabled:
+            return
+        loop = asyncio.get_running_loop()
+        self._idle_handle = loop.call_later(max(0.02, delay_s), self._start_idle_mouse_step)
+
+    def _start_idle_mouse_step(self) -> None:
+        self._idle_handle = None
+        if self._closed or not self._idle_mouse_enabled:
+            return
+        self._idle_task = asyncio.create_task(self._run_idle_mouse_step())
+
+    async def _run_idle_mouse_step(self) -> None:
+        try:
+            delay_s = await self._idle_mouse_step()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("Idle mouse movement failed; disabling", error=str(exc))
+            self._idle_mouse_enabled = False
+            return
+        finally:
+            self._idle_task = None
+        self._schedule_idle_mouse_step(delay_s if delay_s is not None else random.uniform(0.08, 0.16))
+
+    async def _notify_cursor_observer(self, x: int, y: int) -> None:
+        if not self._cursor_observer:
+            return
+        try:
+            result = self._cursor_observer(int(x), int(y))
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:
+            logger.debug("Cursor observer failed", error=str(exc))
+
+    async def _schedule_visual_cursor_path(self, samples: List[Any]) -> None:
+        if not self._visual_cursor_enabled or self._visual_cursor_failed or not samples:
+            return
+        if not hasattr(self.input_page, "evaluate"):
+            return
+        points = []
+        elapsed_ms = 0
+        for sample in samples:
+            points.append({"x": int(sample.x), "y": int(sample.y), "delayMs": int(round(elapsed_ms))})
+            elapsed_ms += max(0, int(round(sample.delay_s * 1000)))
+        try:
+            await self.input_page.evaluate(
+                """
+                ({ points }) => {
+                    const id = "__rose_visual_cursor";
+                    let el = document.getElementById(id);
+                    if (!el) {
+                        el = document.createElement("div");
+                        el.id = id;
+                        el.setAttribute("aria-hidden", "true");
+                        el.style.position = "fixed";
+                        el.style.left = "0";
+                        el.style.top = "0";
+                        el.style.width = "24px";
+                        el.style.height = "32px";
+                        el.style.pointerEvents = "none";
+                        el.style.zIndex = "2147483647";
+                        el.style.transform = "translate(-100px, -100px)";
+                        el.style.transition = "transform 45ms linear";
+                        el.style.filter = "drop-shadow(0 1px 2px rgba(0,0,0,.75))";
+                        el.innerHTML = `
+                            <svg width="24" height="32" viewBox="0 0 24 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                <path d="M2 2L2 25L8 19L12 30L17 28L13 18L22 18L2 2Z" fill="white" stroke="black" stroke-width="2" stroke-linejoin="round"/>
+                            </svg>`;
+                        (document.documentElement || document.body).appendChild(el);
+                    }
+                    window.__moveRoseCursor = (nextX, nextY) => {
+                        el.style.transform = `translate(${Math.round(nextX)}px, ${Math.round(nextY)}px)`;
+                        el.dataset.x = String(Math.round(nextX));
+                        el.dataset.y = String(Math.round(nextY));
+                    };
+                    for (const point of points) {
+                        window.setTimeout(() => window.__moveRoseCursor(point.x, point.y), point.delayMs);
+                    }
+                }
+                """,
+                {"points": points},
+            )
+        except Exception as exc:
+            self._visual_cursor_failed = True
+            logger.debug("Visual cursor path schedule failed; disabling for this page", error=str(exc))
+
+    async def _publish_visual_cursor(self, x: int, y: int) -> None:
+        """Mirror synthesized mouse position into the page stream."""
+        if not self._visual_cursor_enabled or self._visual_cursor_failed:
+            return
+        if not hasattr(self.input_page, "evaluate"):
+            return
+        try:
+            await self.input_page.evaluate(
+                """
+                ({ x, y }) => {
+                    const id = "__rose_visual_cursor";
+                    let el = document.getElementById(id);
+                    if (!el) {
+                        el = document.createElement("div");
+                        el.id = id;
+                        el.setAttribute("aria-hidden", "true");
+                        el.style.position = "fixed";
+                        el.style.left = "0";
+                        el.style.top = "0";
+                        el.style.width = "24px";
+                        el.style.height = "32px";
+                        el.style.pointerEvents = "none";
+                        el.style.zIndex = "2147483647";
+                        el.style.transform = "translate(-100px, -100px)";
+                        el.style.transition = "transform 45ms linear";
+                        el.style.filter = "drop-shadow(0 1px 2px rgba(0,0,0,.75))";
+                        el.innerHTML = `
+                            <svg width="24" height="32" viewBox="0 0 24 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                <path d="M2 2L2 25L8 19L12 30L17 28L13 18L22 18L2 2Z" fill="white" stroke="black" stroke-width="2" stroke-linejoin="round"/>
+                            </svg>`;
+                        (document.documentElement || document.body).appendChild(el);
+                    }
+                    window.__moveRoseCursor = (nextX, nextY) => {
+                        el.style.transform = `translate(${Math.round(nextX)}px, ${Math.round(nextY)}px)`;
+                        el.dataset.x = String(Math.round(nextX));
+                        el.dataset.y = String(Math.round(nextY));
+                    };
+                    window.__moveRoseCursor(x, y);
+                }
+                """,
+                {"x": int(x), "y": int(y)},
+            )
+        except Exception as exc:
+            self._visual_cursor_failed = True
+            logger.debug("Visual cursor publish failed; disabling for this page", error=str(exc))
+
+    def _viewport_size(self) -> Tuple[int, int]:
+        size = getattr(self.input_page, "viewport_size", None)
+        if isinstance(size, dict):
+            width = size.get("width")
+            height = size.get("height")
+            if isinstance(width, int) and isinstance(height, int):
+                return width, height
+        return (1280, 800)
+
+    async def _get_cdp_session(self) -> Optional[Any]:
+        if not self._cdp_mouse_transport_enabled:
+            return None
+        if self._cdp_session is not None:
+            return self._cdp_session
+        context = getattr(self.input_page, "context", None)
+        if context is None or not hasattr(context, "new_cdp_session"):
+            return None
+        try:
+            self._cdp_session = await context.new_cdp_session(self.input_page)
+        except Exception as exc:
+            logger.debug("CDP mouse transport unavailable", error=str(exc))
+            self._cdp_mouse_transport_enabled = False
+            return None
+        return self._cdp_session
+
+    async def _move_path_with_cdp_fire_and_drain(self, samples: List[Any]) -> bool:
+        cdp_session = await self._get_cdp_session()
+        if cdp_session is None:
+            return False
+
+        await self._schedule_visual_cursor_path(samples)
+        pending = []
+        timestamp = time.time()
+        for sample in samples:
+            timestamp += max(0, float(sample.delay_s))
+            pending.append(
+                asyncio.create_task(
+                    cdp_session.send(
+                        "Input.dispatchMouseEvent",
+                        {
+                            "type": "mouseMoved",
+                            "x": int(sample.x),
+                            "y": int(sample.y),
+                            "button": "none",
+                            "buttons": 0,
+                            "timestamp": timestamp,
+                        },
+                    )
+                )
+            )
+            await self._notify_cursor_observer(sample.x, sample.y)
+            await asyncio.sleep(sample.delay_s)
+
+        if pending:
+            await asyncio.gather(*pending)
+        return True
+
+    async def _dispatch_mouse_position(self, x: int, y: int) -> None:
+        cdp_session = await self._get_cdp_session()
+        if cdp_session is not None:
+            await cdp_session.send(
+                "Input.dispatchMouseEvent",
+                {
+                    "type": "mouseMoved",
+                    "x": int(x),
+                    "y": int(y),
+                    "button": "none",
+                    "buttons": 0,
+                    "timestamp": time.time(),
+                },
+            )
+        else:
+            await self.input_page.mouse.move(int(x), int(y))
+        await self._publish_cursor(int(x), int(y))
+
+    async def _idle_mouse_step(self) -> Optional[float]:
+        if not self._idle_mouse_enabled or self._closed:
+            return None
+        if self._movement_lock.locked():
+            return random.uniform(0.05, 0.12)
+        async with self._movement_lock:
+            sample: MouseSample = synthesize_idle_mouse_drift(
+                self._last_pos,
+                anchor=self._idle_anchor,
+                screen=self._viewport_size(),
+                radius_px=self._idle_mouse_radius_px,
+            )
+            await self._dispatch_mouse_position(sample.x, sample.y)
+            self._last_pos = (sample.x, sample.y)
+            return sample.delay_s
 
     async def initialize_cursor(self, start_pos: Tuple[int, int] = (640, 400)) -> None:
         """Initialize cursor at startup position.
@@ -146,6 +449,8 @@ class BrowserHumanizer:
         # Move mouse to start position
         await self.input_page.mouse.move(start_pos[0], start_pos[1])
         self._last_pos = start_pos
+        self._idle_anchor = start_pos
+        await self._publish_cursor(start_pos[0], start_pos[1])
         logger.info(f"🎯 Cursor initialized at {start_pos}")
 
     async def click_at_coords(
@@ -162,35 +467,36 @@ class BrowserHumanizer:
             pre_hover: Force pre-hover behavior (otherwise 30% chance)
             overshoot: Force overshoot behavior (otherwise 20% chance)
         """
-        # Maybe pre-hover (natural browsing behavior)
-        if pre_hover or random.random() < 0.30:
-            await self._move_to(x, y)
-            dwell = random.uniform(0.08, 0.25)
-            await asyncio.sleep(dwell)
-            logger.debug("Pre-hover dwell", x=x, y=y, dwell_ms=int(dwell * 1000))
+        async with self._movement_lock:
+            # Maybe pre-hover (natural browsing behavior)
+            if pre_hover or random.random() < 0.30:
+                await self._move_to_unlocked(x, y)
+                dwell = random.uniform(0.08, 0.25)
+                await asyncio.sleep(dwell)
+                logger.debug("Pre-hover dwell", x=x, y=y, dwell_ms=int(dwell * 1000))
 
-        # Maybe overshoot and correct (very human!)
-        if overshoot or random.random() < 0.20:
-            overshoot_dist = random.randint(15, 40)
-            angle = random.uniform(0, 2 * math.pi)
-            overshoot_x = x + int(overshoot_dist * math.cos(angle))
-            overshoot_y = y + int(overshoot_dist * math.sin(angle))
+            # Maybe overshoot and correct (very human!)
+            if overshoot or random.random() < 0.20:
+                overshoot_dist = random.randint(15, 28)
+                angle = random.uniform(0, 2 * math.pi)
+                overshoot_x = x + int(overshoot_dist * math.cos(angle))
+                overshoot_y = y + int(overshoot_dist * math.sin(angle))
 
-            await self._move_to(overshoot_x, overshoot_y)
-            await asyncio.sleep(random.uniform(0.04, 0.10))
-            logger.debug("Overshoot", target=(x, y), overshoot=(overshoot_x, overshoot_y))
+                await self._move_to_unlocked(overshoot_x, overshoot_y)
+                await asyncio.sleep(random.uniform(0.04, 0.10))
+                logger.debug("Overshoot", target=(x, y), overshoot=(overshoot_x, overshoot_y))
 
-        # Final movement to target
-        await self._move_to(x, y)
+            # Final movement to target
+            await self._move_to_unlocked(x, y)
 
-        # Small pause before click (human reaction time)
-        await asyncio.sleep(random.uniform(0.03, 0.08))
+            # Small pause before click (human reaction time)
+            await asyncio.sleep(random.uniform(0.03, 0.08))
 
-        # Get Playwright mouse and click
-        mouse = self.input_page.mouse
-        await mouse.click(x, y)
+            mouse = self.input_page.mouse
+            await mouse.click(x, y, delay=synthesize_click_delay_ms())
 
-        self._last_pos = (x, y)
+            self._last_pos = (x, y)
+            self._idle_anchor = (x, y)
         logger.debug("Humanized click", x=x, y=y)
 
     async def click_for_input(
@@ -224,13 +530,15 @@ class BrowserHumanizer:
 
     async def double_click(self, x: int, y: int) -> None:
         """Human-like double click at coordinates."""
-        await self._move_to(x, y)
-        await asyncio.sleep(random.uniform(0.02, 0.05))
+        async with self._movement_lock:
+            await self._move_to_unlocked(x, y)
+            await asyncio.sleep(random.uniform(0.02, 0.05))
 
-        mouse = self.input_page.mouse
-        await mouse.click(x, y, click_count=2)
+            mouse = self.input_page.mouse
+            await mouse.click(x, y, click_count=2, delay=synthesize_click_delay_ms())
 
-        self._last_pos = (x, y)
+            self._last_pos = (x, y)
+            self._idle_anchor = (x, y)
         logger.debug("Humanized double-click", x=x, y=y)
 
     async def type_text(self, text: str) -> None:
@@ -247,19 +555,27 @@ class BrowserHumanizer:
         base_delay = 60 / self._cpm  # seconds per character
 
         for i, char in enumerate(text):
-            # Press the key via keyboard (not page.press which requires selector)
-            await self.input_page.keyboard.press(char)
+            if self._keyboard_synthesis_enabled:
+                timing = self._keycap.next(char)
+                key = "Space" if char == " " else char
+                await self.input_page.keyboard.down(key)
+                await asyncio.sleep(timing.dwell_s)
+                await self.input_page.keyboard.up(key)
+                delay = timing.interval_s
+            else:
+                # Press the key via keyboard (not page.press which requires selector)
+                await self.input_page.keyboard.press(char)
 
-            # Inter-key delay with variation
-            delay = base_delay * random.uniform(0.7, 1.4)
+                # Inter-key delay with variation
+                delay = base_delay * random.uniform(0.7, 1.4)
 
-            # Extra pause after spaces (thinking between words)
-            if char == " ":
-                delay += random.uniform(0.04, 0.12)
+                # Extra pause after spaces (thinking between words)
+                if char == " ":
+                    delay += random.uniform(0.04, 0.12)
 
-            # Occasional longer pause (human hesitation, ~5% chance)
-            if random.random() < 0.05:
-                delay += random.uniform(0.15, 0.35)
+                # Occasional longer pause (human hesitation, ~5% chance)
+                if random.random() < 0.05:
+                    delay += random.uniform(0.15, 0.35)
 
             await asyncio.sleep(delay)
 
@@ -267,8 +583,28 @@ class BrowserHumanizer:
 
     async def press_key(self, key: str) -> None:
         """Press a single key (Enter, Tab, Escape, etc.)."""
-        await asyncio.sleep(random.uniform(0.02, 0.06))
-        await self.input_page.keyboard.press(key)
+        if not self._keyboard_synthesis_enabled:
+            await asyncio.sleep(random.uniform(0.02, 0.06))
+            await self.input_page.keyboard.press(key)
+            logger.debug("Key pressed", key=key)
+            return
+
+        timing = self._keycap.next(key)
+        await asyncio.sleep(timing.interval_s)
+
+        if "+" in key:
+            parts = [part.strip() for part in key.split("+") if part.strip()]
+            modifiers = parts[:-1]
+            final_key = parts[-1] if parts else key
+            for modifier in modifiers:
+                await self.input_page.keyboard.down(modifier)
+                await asyncio.sleep(random.uniform(0.018, 0.055))
+            await self.input_page.keyboard.press(final_key, delay=int(timing.dwell_s * 1000))
+            for modifier in reversed(modifiers):
+                await asyncio.sleep(random.uniform(0.012, 0.04))
+                await self.input_page.keyboard.up(modifier)
+        else:
+            await self.input_page.keyboard.press(key, delay=int(timing.dwell_s * 1000))
         logger.debug("Key pressed", key=key)
 
     async def scroll(self, delta_y: int, at_coords: Optional[Tuple[int, int]] = None) -> None:
@@ -318,9 +654,38 @@ class BrowserHumanizer:
         logger.debug("Hover complete", x=x, y=y, dwell_ms=int(actual_dwell * 1000))
 
     async def _move_to(self, x: int, y: int) -> None:
+        async with self._movement_lock:
+            await self._move_to_unlocked(x, y)
+
+    async def _move_to_unlocked(self, x: int, y: int) -> None:
         """Internal: Move mouse along Bezier curve to target."""
         # Skip if already at position
         if self._last_pos == (x, y):
+            return
+
+        if self._mouse_synthesis_enabled:
+            distance = math.sqrt((x - self._last_pos[0]) ** 2 + (y - self._last_pos[1]) ** 2)
+            duration_s = max(0.08, min(0.72 if self.fast else 0.95, 0.05 + distance / (1600 if self.fast else 1100)))
+            samples = synthesize_mouse_path(
+                self._last_pos,
+                (x, y),
+                screen=self._viewport_size(),
+                frequency_hz=75 if self.fast else 105,
+                duration_s=duration_s,
+                snr=65 if self.fast else 55,
+            )
+            if await self._move_path_with_cdp_fire_and_drain(samples):
+                self._last_pos = (x, y)
+                self._idle_anchor = (x, y)
+                return
+
+            mouse = self.input_page.mouse
+            for sample in samples:
+                await mouse.move(sample.x, sample.y)
+                await self._publish_cursor(sample.x, sample.y)
+                await asyncio.sleep(sample.delay_s)
+            self._last_pos = (x, y)
+            self._idle_anchor = (x, y)
             return
 
         # Generate curved path
@@ -342,6 +707,7 @@ class BrowserHumanizer:
         mouse = self.input_page.mouse
         for point_x, point_y in jittered_points:
             await mouse.move(point_x, point_y)
+            await self._publish_cursor(point_x, point_y)
 
             # Micro-pause (5% chance)
             if random.random() < 0.05:
@@ -350,3 +716,4 @@ class BrowserHumanizer:
                 await asyncio.sleep(step_delay * random.uniform(0.8, 1.2))
 
         self._last_pos = (x, y)
+        self._idle_anchor = (x, y)

@@ -17,14 +17,13 @@ export async function bulkUpsertCookies(
 ) {
   return prisma.$executeRawUnsafe(
     `
-    INSERT INTO "Cookie" (id, "userId", domain, name, path, value, "expiresUtc", "isSecure", "isHttpOnly", "browserSource", "syncedAt", "creationUtc", "topFrameSiteKey", "lastAccessUtc", "hasExpires", "isPersistent", priority, "sameSite", "sourceScheme", "sourcePort", "lastUpdateUtc")
+    INSERT INTO "Cookie" (id, "userId", domain, name, path, value, "expiresUtc", "isSecure", "isHttpOnly", "browserSource", "syncedAt", "creationUtc", "topFrameSiteKey", "lastAccessUtc", "hasExpires", "isPersistent", priority, "sameSite", "sourceScheme", "sourcePort", "lastUpdateUtc", "browserProfile")
     VALUES ${valuesClause}
-    ON CONFLICT ("userId", domain, name, path, "topFrameSiteKey") DO UPDATE SET
+    ON CONFLICT ("userId", domain, name, path, "topFrameSiteKey", "browserSource", "browserProfile") DO UPDATE SET
       value = EXCLUDED.value,
       "expiresUtc" = EXCLUDED."expiresUtc",
       "isSecure" = EXCLUDED."isSecure",
       "isHttpOnly" = EXCLUDED."isHttpOnly",
-      "browserSource" = EXCLUDED."browserSource",
       "syncedAt" = NOW(),
       "creationUtc" = EXCLUDED."creationUtc",
       "lastAccessUtc" = EXCLUDED."lastAccessUtc",
@@ -35,12 +34,126 @@ export async function bulkUpsertCookies(
       "sourceScheme" = EXCLUDED."sourceScheme",
       "sourcePort" = EXCLUDED."sourcePort",
       "lastUpdateUtc" = EXCLUDED."lastUpdateUtc"
-    WHERE
-      EXCLUDED."expiresUtc" > COALESCE("Cookie"."expiresUtc", 0)
-      OR (EXCLUDED."expiresUtc" IS NOT NULL AND "Cookie"."expiresUtc" IS NULL)
   `,
     ...params
   );
+}
+
+export async function cookieBundleSnapshotChanged(params: {
+  userId: string;
+  authRealm: string;
+  browserSource: string;
+  browserProfile: string;
+  snapshot: Array<{ identity: string; signature: string }>;
+  incomingCount: number;
+}) {
+  const existing = await prisma.$queryRaw<{ identity: string; signature: string }[]>`
+    SELECT
+      domain || CHR(31) || name || CHR(31) || path || CHR(31) || "topFrameSiteKey" || CHR(31) || COALESCE("browserProfile", '') AS identity,
+      value || CHR(31) || COALESCE("expiresUtc"::text, '') || CHR(31) ||
+        "isSecure"::text || CHR(31) || "isHttpOnly"::text || CHR(31) ||
+        COALESCE("creationUtc"::text, '') || CHR(31) || COALESCE("lastAccessUtc"::text, '') || CHR(31) ||
+        "hasExpires"::text || CHR(31) || "isPersistent"::text || CHR(31) ||
+        priority::text || CHR(31) || "sameSite"::text || CHR(31) ||
+        "sourceScheme"::text || CHR(31) || "sourcePort"::text || CHR(31) ||
+        COALESCE("lastUpdateUtc"::text, '') AS signature
+    FROM "Cookie"
+    WHERE "userId" = ${params.userId}
+      AND "browserSource" = ${params.browserSource}
+      AND "browserProfile" = ${params.browserProfile}
+      AND (
+        LTRIM(domain, '.') = ${params.authRealm}
+        OR LTRIM(domain, '.') LIKE ${`%.${params.authRealm}`}
+      )
+  `;
+  if (existing.length !== params.incomingCount) return true;
+  const existingSignatures = new Map(existing.map((row) => [row.identity, row.signature]));
+  return params.snapshot.some(
+    (cookie) => existingSignatures.get(cookie.identity) !== cookie.signature
+  );
+}
+
+export async function upsertCookieBundle(params: {
+  userId: string;
+  authRealm: string;
+  browserSource: string;
+  browserProfile: string;
+  clearDisabled: boolean;
+}) {
+  return prisma.$executeRaw`
+    INSERT INTO "CookieBundle" (id, "userId", "authRealm", "browserSource", "browserProfile", "createdAt", "updatedAt", "disabledAt", "disabledReason")
+    VALUES (gen_random_uuid(), ${params.userId}, ${params.authRealm}, ${params.browserSource}, ${params.browserProfile}, NOW(), NOW(), NULL, NULL)
+    ON CONFLICT ("userId", "authRealm", "browserSource", "browserProfile") DO UPDATE SET
+      "updatedAt" = NOW(),
+      "disabledAt" = CASE WHEN ${params.clearDisabled} THEN NULL ELSE "CookieBundle"."disabledAt" END,
+      "disabledReason" = CASE WHEN ${params.clearDisabled} THEN NULL ELSE "CookieBundle"."disabledReason" END
+  `;
+}
+
+export async function deleteCookiesMissingFromProfileSnapshot(params: {
+  userId: string;
+  browserSource: string;
+  browserProfile: string;
+  identities: string[];
+}) {
+  return prisma.$executeRaw`
+    DELETE FROM "Cookie"
+    WHERE "userId" = ${params.userId}
+      AND "browserSource" = ${params.browserSource}
+      AND "browserProfile" = ${params.browserProfile}
+      AND NOT (
+        domain || CHR(31) || name || CHR(31) || path || CHR(31) || "topFrameSiteKey" || CHR(31) || COALESCE("browserProfile", '')
+        = ANY(${params.identities})
+      )
+  `;
+}
+
+export async function deleteCookiesForBrowserSnapshot(params: {
+  userId: string;
+  browserSource: string;
+}) {
+  return prisma.cookie.deleteMany({
+    where: {
+      userId: params.userId,
+      browserSource: params.browserSource,
+    },
+  });
+}
+
+export async function deleteCookieBundlesForBrowserSnapshot(params: {
+  userId: string;
+  browserSource: string;
+}) {
+  return prisma.cookieBundle.deleteMany({
+    where: {
+      userId: params.userId,
+      browserSource: params.browserSource,
+    },
+  });
+}
+
+export async function deleteCookieBundlesWithoutCookiesForProfile(params: {
+  userId: string;
+  browserSource: string;
+  browserProfile: string;
+}) {
+  return prisma.$executeRaw`
+    DELETE FROM "CookieBundle" bundle
+    WHERE bundle."userId" = ${params.userId}
+      AND bundle."browserSource" = ${params.browserSource}
+      AND bundle."browserProfile" = ${params.browserProfile}
+      AND NOT EXISTS (
+        SELECT 1
+        FROM "Cookie" cookie
+        WHERE cookie."userId" = bundle."userId"
+          AND cookie."browserSource" = bundle."browserSource"
+          AND cookie."browserProfile" = bundle."browserProfile"
+          AND (
+            LTRIM(cookie.domain, '.') = bundle."authRealm"
+            OR LTRIM(cookie.domain, '.') LIKE CONCAT('%.', bundle."authRealm")
+          )
+      )
+  `;
 }
 
 // LocalStorage operations
@@ -100,13 +213,17 @@ export async function bulkUpsertPasswords(
 ) {
   return prisma.$executeRawUnsafe(
     `
-    INSERT INTO "BrowserPassword" (id, "userId", origin, username, "encryptedPassword", "dateLastUsed", "dateCreated", "browserSource", "syncedAt")
+    INSERT INTO "BrowserPassword" (id, "userId", origin, username, "encryptedPassword", "dateLastUsed", "dateCreated", "browserSource", "browserProfile", "syncedAt", "disabledAt", "disabledReason")
     VALUES ${valuesClause}
     ON CONFLICT ("userId", origin, username) DO UPDATE SET
       "encryptedPassword" = EXCLUDED."encryptedPassword",
       "dateLastUsed" = EXCLUDED."dateLastUsed",
+      "dateCreated" = EXCLUDED."dateCreated",
       "browserSource" = EXCLUDED."browserSource",
-      "syncedAt" = NOW()
+      "browserProfile" = EXCLUDED."browserProfile",
+      "syncedAt" = NOW(),
+      "disabledAt" = NULL,
+      "disabledReason" = NULL
   `,
     ...params
   );

@@ -61,6 +61,9 @@ export interface ToolMessageData {
   simulated?: boolean; // True if response was auto-generated
   // Browser action type (for icon selection)
   actionType?: string;
+  authAssistance?: {
+    taskId?: string;
+  };
   codeProvider?: CodeProvider;
 }
 

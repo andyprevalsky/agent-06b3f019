@@ -74,6 +74,26 @@ export interface SpawnBrowserAgentMetadata extends BaseToolMetadata {
   error?: boolean;
   /** Output schema for init message */
   output_schema?: OutputSchema;
+  /** Browser provider and proxy metadata captured for this browser session. */
+  browser_session_metadata?: {
+    provider?: string;
+    proxy_source?: string;
+    proxy_location?: {
+      city?: string;
+      state?: string;
+      country?: string;
+    };
+  };
+  /** Live auth handoff payload while the browser agent waits for user login. */
+  requestUserAuthentication?: {
+    requestId: string;
+    authRealm?: string;
+    steelSessionId?: string;
+    taskId?: string;
+    handoffMode?: string;
+    browserUrl?: string;
+    liveViewUrl?: string;
+  };
 }
 
 /**

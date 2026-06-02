@@ -213,6 +213,7 @@ class RoseResponse:
     actual_model: str = ""
     pool_name: str = ""
     usage: Dict[str, Any] = field(default_factory=dict)
+    timing: Dict[str, Any] = field(default_factory=dict)
     request_id: str = ""
     # Set when claudeAuth failed before first content and we fell through to
     # the waterfall — one of the strings classify_claude_token_error returns

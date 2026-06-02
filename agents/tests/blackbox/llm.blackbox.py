@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -141,6 +142,54 @@ def test_convert_context_to_messages_with_declared_tool_call():
 
     assistant_msg = next(m for m in messages if m["role"] == "assistant")
     assert "tool_calls" in assistant_msg
+
+
+def test_convert_context_to_messages_includes_structured_values_not_schema():
+    """Terminal tool results include structured values without repeating raw output_schema."""
+    from helpers.llm import convert_context_to_messages
+
+    message_id = "11111111-1111-1111-1111-111111111111"
+    output_schema = {"fields": [{"name": "selected_url", "type": "str", "required": True}]}
+    context = [
+        {"role": "USER", "text": "buy a beanie", "timestamp": "2024-01-01T00:00:00Z"},
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "timestamp": "2024-01-01T00:00:01Z",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "tool": "spawn_browser_agent",
+                        "tool_call_id": "browser-1",
+                        "goal": "buy a beanie",
+                        "output_schema": output_schema,
+                    }
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "message_id": message_id,
+            "text": f"Browser done\n\nReference: @ref:message:{message_id}",
+            "timestamp": "2024-01-01T00:00:02Z",
+            "metadata": {
+                "toolCallId": "browser-1",
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "title": "Browser automation complete",
+                "output_schema": output_schema,
+                "structured_response": {"selected_url": "https://amazon.com/item"},
+            },
+        },
+    ]
+
+    messages = convert_context_to_messages(context, include_system=False, include_assistant=True)
+    tool_msg = next(m for m in messages if m["role"] == "tool")
+    assert "Structured Response" in tool_msg["content"]
+    assert '"https://amazon.com/item"' in tool_msg["content"]
+    assert "Output Schema" not in tool_msg["content"]
+    assert '"selected_url"' in tool_msg["content"]
+    assert tool_msg["content"].endswith(f"Reference: @ref:message:{message_id}")
 
 
 def test_convert_context_to_messages_verifier_message():
@@ -592,6 +641,32 @@ def test_build_verifier_response_model_requires_nested_object_properties():
         raised = True
         assert "price_usd" in str(exc)
     assert raised
+
+
+def test_normalize_response_schema_for_purchase_goal_adds_confirmation_identifier():
+    """Purchase goals cannot be satisfied by product selection or checkout fields alone."""
+    from helpers.llm import _normalize_response_schema_for_goal
+
+    schema = {
+        "fields": [
+            {"name": "selected_beanie_url", "type": "str", "required": True},
+            {"name": "selected_beanie_price_usd", "type": "float", "required": True},
+        ]
+    }
+
+    result = _normalize_response_schema_for_goal(
+        "Buy me a black beanie on Amazon that costs less than $35 and looks well-made.",
+        schema,
+    )
+
+    field_names = [field["name"] for field in result["fields"]]
+    assert field_names == [
+        "selected_beanie_url",
+        "selected_beanie_price_usd",
+        "order_confirmation_id",
+    ]
+    assert result["fields"][-1]["required"] is True
+    assert "confirmation id" in result["fields"][-1]["description"]
 
 
 async def test_fetch_claude_max_token_activity():
@@ -1830,6 +1905,56 @@ async def test_call_llm_verifier_streaming_parses_score():
     assert usage["pool_name"] == "rose-1-lite"
 
 
+async def test_call_llm_verifier_dump_extra_includes_browser_recording_metadata():
+    """Verifier dumps preserve browser recording metadata for the HTML renderer."""
+    import httpx
+    from config import load_config
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import _call_llm_verifier
+
+    agent_id = "verifier-recording-dump-test"
+    call_site = "verifier-browser-recording-test"
+    dump_dir = Path(__file__).resolve().parents[3] / ".llm-dumps" / agent_id
+    dump_dir.mkdir(parents=True, exist_ok=True)
+    for path in dump_dir.glob(f"*{call_site}.json"):
+        path.unlink()
+
+    body = _sse_body(
+        [
+            {
+                "choices": [{"delta": {"content": '{"reasoning": "done", "score": 1.0}'}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+            }
+        ]
+    )
+
+    def handler(req):
+        return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+
+    with patch("temporalio.activity.heartbeat"):
+        await _call_llm_verifier(
+            messages=[{"role": "user", "content": "verify browser"}],
+            model="rose",
+            config=load_config(),
+            call_site=call_site,
+            agent_id=agent_id,
+            dump_extra={
+                "browser_recording_manifest_path": "/tmp/recording/manifest.json",
+                "browser_recording_path": "/tmp/recording/index.html",
+                "browser_recording_task_id": "task-123",
+            },
+        )
+
+    dumps = sorted(dump_dir.glob(f"*{call_site}.json"))
+    assert dumps
+    payload = json.loads(dumps[-1].read_text())
+    assert payload["extra"]["browser_recording_manifest_path"] == "/tmp/recording/manifest.json"
+    assert payload["extra"]["browser_recording_path"] == "/tmp/recording/index.html"
+    assert payload["extra"]["browser_recording_task_id"] == "task-123"
+
+
 async def test_call_llm_verifier_claude_token_and_schema():
     """Verifier forwards claude_token and embeds response_schema in request body."""
     import httpx
@@ -2094,6 +2219,60 @@ async def test_check_progress_execute_filters_plan_context_before_llm():
     assert "original goal" not in rendered
     assert "plan explore result" not in rendered
     assert "set_plan" not in rendered
+
+
+async def test_check_progress_extracts_browser_recording_metadata_from_context():
+    """Execute verifier dumps inherit recording metadata from browser tool messages."""
+    from helpers.llm import check_progress
+
+    captured_dump_extra = []
+
+    async def fake_call_llm_verifier(messages, *_args, **kwargs):
+        captured_dump_extra.append(kwargs.get("dump_extra"))
+        return {"score": 1.0, "reasoning": "done"}, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    context = [
+        {"role": "USER", "text": "book ride", "timestamp": "2024-01-01T00:00:00Z"},
+        {
+            "role": "TOOL",
+            "text": "Local browser recording: /tmp/browser-run/index.html",
+            "timestamp": "2024-01-01T00:00:01Z",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "action_type": "recording",
+                "task_id": "browser-task-1",
+                "recording_path": "/tmp/browser-run/index.html",
+                "browser_session_metadata": {
+                    "provider": "steel",
+                    "proxy_source": "steel",
+                    "proxy_location": {"city": "DALLAS", "state": "TX", "country": "US"},
+                },
+            },
+        },
+    ]
+
+    with patch("temporalio.activity.heartbeat"), patch("helpers.llm._call_llm_verifier", fake_call_llm_verifier):
+        result = await check_progress(
+            context=context,
+            verifier_system_prompt="VERIFY",
+            model="rose",
+            call_site="verifier_execute",
+        )
+
+    assert result["score"] == 1.0
+    assert captured_dump_extra == [
+        {
+            "browser_recording_path": "/tmp/browser-run/index.html",
+            "browser_recording_manifest_path": "/tmp/browser-run/manifest.json",
+            "browser_recording_task_id": "browser-task-1",
+            "browser_session_metadata": {
+                "provider": "steel",
+                "proxy_source": "steel",
+                "proxy_location": {"city": "DALLAS", "state": "TX", "country": "US"},
+            },
+        }
+    ]
 
 
 async def test_check_progress_accepts_completed_code_task_structured_response():
@@ -2814,6 +2993,45 @@ def test_build_verifier_context_messages_formats_camelcase_structured_response()
     assert '"result": {"answer": "from persisted metadata"}' in content
     assert "structuredResponse" not in content
     assert "fallback text" not in content
+
+
+async def test_build_verifier_context_messages_self_closes_trailing_refs():
+    """Verifier context should not expand terminal message refs inside JSON/batches."""
+    from helpers.context_pointers import resolve_pointers_in_messages
+    from helpers.llm import build_verifier_context_messages
+
+    user_id = "33333333-3333-3333-3333-333333333333"
+    tool_id = "44444444-4444-4444-4444-444444444444"
+    ctx = [
+        {
+            "role": "USER",
+            "message_id": user_id,
+            "text": f"Goal text\n\nReference: @ref:message:{user_id}",
+            "timestamp": "2024-01-01T00:00:00Z",
+        },
+        {
+            "role": "TOOL",
+            "message_id": tool_id,
+            "text": f"Tool body\n\nReference: @ref:message:{tool_id}",
+            "timestamp": "2024-01-01T00:00:01Z",
+            "metadata": {
+                "toolCallId": "tc-3",
+                "toolName": "some_tool",
+                "toolStatus": "FINISHED",
+                "title": "Done",
+            },
+        },
+    ]
+
+    msgs = build_verifier_context_messages(ctx, "system")
+    resolved = await resolve_pointers_in_messages(msgs, local_context=ctx)
+    content = resolved[-1]["content"]
+
+    assert f'Reference: <resolved-ref pointer="@ref:message:{user_id}"/>' in content
+    assert f'Reference: <resolved-ref pointer=\\"@ref:message:{tool_id}\\"/>' in content
+    assert "</resolved-ref>" not in content
+    assert content.count("Goal text") == 1
+    assert content.count("Tool body") == 1
 
 
 def test_build_verifier_context_messages_filters_subagent_tree_rows():
@@ -4451,6 +4669,10 @@ async def run_all_tests():
     r.record(
         "convert_context_to_messages_with_declared_tool_call", test_convert_context_to_messages_with_declared_tool_call
     )
+    r.record(
+        "convert_context_to_messages_includes_structured_values_not_schema",
+        test_convert_context_to_messages_includes_structured_values_not_schema,
+    )
     r.record("convert_context_to_messages_verifier_message", test_convert_context_to_messages_verifier_message)
     r.record(
         "convert_context_to_messages_skip_subagent_and_inprogress",
@@ -4593,6 +4815,10 @@ async def run_all_tests():
         test_call_llm_structured_streaming_model_detected_callback,
     )
     await r.record_async("call_llm_verifier_streaming_parses_score", test_call_llm_verifier_streaming_parses_score)
+    await r.record_async(
+        "call_llm_verifier_dump_extra_includes_browser_recording_metadata",
+        test_call_llm_verifier_dump_extra_includes_browser_recording_metadata,
+    )
     await r.record_async("call_llm_verifier_claude_token_and_schema", test_call_llm_verifier_claude_token_and_schema)
     await r.record_async(
         "call_llm_verifier_fills_structured_tool_output",
@@ -4640,6 +4866,10 @@ async def run_all_tests():
         "verifier_ctx_camelcase_structured_response",
         test_build_verifier_context_messages_formats_camelcase_structured_response,
     )
+    await r.record_async(
+        "verifier_ctx_self_closes_trailing_refs",
+        test_build_verifier_context_messages_self_closes_trailing_refs,
+    )
     r.record("verifier_ctx_filters_subagent_tree_rows", test_build_verifier_context_messages_filters_subagent_tree_rows)
     await r.record_async("extract_response_raw_json", test_extract_response_from_partial_json_raw_json_object)
     await r.record_async("extract_response_tool_calls_only", test_extract_response_from_partial_json_tool_calls_only)
@@ -4679,8 +4909,16 @@ async def run_all_tests():
     await r.record_async(
         "stream_json_parse_failure_raises", test_call_llm_structured_streaming_json_parse_failure_raises
     )
+    r.record(
+        "normalize_response_schema_purchase_confirmation_identifier",
+        test_normalize_response_schema_for_purchase_goal_adds_confirmation_identifier,
+    )
     await r.record_async("stream_no_json_content_raises", test_call_llm_structured_streaming_no_json_content_raises)
     await r.record_async("check_progress_empty_context", test_check_progress_empty_context_runs_verifier)
+    await r.record_async(
+        "check_progress_extracts_browser_recording_metadata",
+        test_check_progress_extracts_browser_recording_metadata_from_context,
+    )
     # Final coverage bumps (W3-*)
     await r.record_async(
         "check_progress_retries_on_transient_failure", test_check_progress_retries_on_transient_failure_then_succeeds

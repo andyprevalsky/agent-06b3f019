@@ -7,8 +7,9 @@ prompt construction, and usage calculation.
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import structlog
 
@@ -20,9 +21,166 @@ from domains.spawn_browser_agent_v3.repo import (
 )
 from providers.rose.browser_use import build_browser_use_system_prompt
 from utils.error_utils import extract_error_message
-from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY, format_required_output_schema_system_section
 
 logger = structlog.get_logger()
+
+EMAIL_OTP_BROWSER_INSTRUCTION = (
+    "Do not open AgentMail, webmail, or inbox websites to retrieve OTP codes. "
+    "Recent email OTPs are fetched automatically and will appear as user messages."
+)
+
+
+def select_auth_assistance_current_url(current_url: str, visited_urls: List[str]) -> str:
+    """Prefer a pre-submit auth URL with continuation query params for live handoff resume."""
+    if not current_url:
+        return current_url
+
+    try:
+        current = urlparse(current_url)
+    except Exception:
+        return current_url
+
+    if current.query:
+        return current_url
+
+    for candidate_url in reversed(visited_urls):
+        if candidate_url == current_url:
+            continue
+        try:
+            candidate = urlparse(candidate_url)
+        except Exception:
+            continue
+        if not candidate.query:
+            continue
+        if (
+            candidate.scheme == current.scheme
+            and candidate.netloc == current.netloc
+            and candidate.path == current.path
+        ):
+            return candidate_url
+
+    return current_url
+
+
+@dataclass
+class AuthRuntimeState:
+    """Tracks auth ladder attempts that are observable inside this worker."""
+
+    password_ids: set[str] = field(default_factory=set)
+    passwords_attempted: set[str] = field(default_factory=set)
+    email_otp_available: bool = False
+    email_otp_attempted: bool = False
+    minted_present: bool = False
+    minted_attemptable: bool = False
+    minted_ids: set[str] = field(default_factory=set)
+    minted_attempted: bool = False
+    guest_unavailable: bool = True
+    guest_attempted: bool = False
+
+    @classmethod
+    def from_auth_options(cls, auth_options: Optional[Dict[str, Any]]) -> "AuthRuntimeState":
+        auth_options = auth_options or {}
+        passwords = auth_options.get("passwords") or []
+        email_otp = auth_options.get("email_otp") or auth_options.get("emailOtp") or {}
+        minted = auth_options.get("minted")
+        email_otp_match = (
+            email_otp.get("match_for_site_account")
+            or email_otp.get("matchForSiteAccount")
+            or email_otp.get("attemptable")
+        )
+
+        state = cls(
+            password_ids={
+                str(p.get("id") or p.get("ref"))
+                for p in passwords
+                if (p.get("id") or p.get("ref")) and not p.get("disabled")
+            },
+            # A connected inbox alone is not an auth path for this realm. Treat
+            # email OTP as a blocker only when auth-options found a site-account
+            # match, or a caller explicitly marks the OTP path attemptable.
+            email_otp_available=bool(email_otp.get("available") and email_otp_match),
+            minted_present=bool(minted),
+        )
+
+        if minted:
+            minted_id = (
+                minted.get("id") or minted.get("accountLabel") or minted.get("account_label") or minted.get("email")
+            )
+            if minted_id:
+                state.minted_ids.add(str(minted_id))
+            state.minted_attemptable = bool(
+                minted.get("email")
+                or minted.get("agentEmail")
+                or minted.get("agent_email")
+                or minted.get("accountLabel")
+                or minted.get("account_label")
+            )
+
+        return state
+
+    def mark_credential_ref(self, credential_ref: Optional[Dict[str, Any]]) -> None:
+        if not credential_ref:
+            return
+        kind = credential_ref.get("kind")
+        credential_id = str(credential_ref.get("id") or "")
+        if kind == "password" and credential_id:
+            self.passwords_attempted.add(credential_id)
+        elif kind in ("email_otp", "sms_otp"):
+            self.email_otp_attempted = True
+        elif kind in ("minted", "minted_account"):
+            self.minted_attempted = True
+            if credential_id:
+                self.minted_ids.add(credential_id)
+
+    def mark_guest_attempted(self) -> None:
+        self.guest_attempted = True
+
+    def restrict_password_ids_to_attemptable(self, attemptable_ids: set[str]) -> None:
+        """Only block user assistance on passwords this session can actually inject."""
+        self.password_ids.intersection_update(attemptable_ids)
+        self.passwords_attempted.intersection_update(attemptable_ids)
+
+    def snapshot(self) -> Dict[str, Any]:
+        password_exhausted = self.password_ids.issubset(self.passwords_attempted)
+        email_exhausted = (not self.email_otp_available) or self.email_otp_attempted
+        minted_exhausted = (not self.minted_present) or (self.minted_attemptable and self.minted_attempted)
+        guest_exhausted = self.guest_unavailable or self.guest_attempted
+        return {
+            "password": {
+                "available": bool(self.password_ids),
+                "attempted_ids": sorted(self.passwords_attempted),
+                "remaining_ids": sorted(self.password_ids - self.passwords_attempted),
+                "exhausted_or_unavailable": password_exhausted,
+            },
+            "email_otp": {
+                "available": self.email_otp_available,
+                "attempted": self.email_otp_attempted,
+                "exhausted_or_unavailable": email_exhausted,
+            },
+            "minted": {
+                "present": self.minted_present,
+                "attemptable": self.minted_attemptable,
+                "attempted": self.minted_attempted,
+                "credential_ids": sorted(self.minted_ids),
+                "exhausted_or_unavailable": minted_exhausted,
+            },
+            "guest": {
+                "unavailable": self.guest_unavailable,
+                "attempted": self.guest_attempted,
+                "exhausted_or_unavailable": guest_exhausted,
+            },
+        }
+
+    def user_assistance_guard(self) -> tuple[bool, str, Dict[str, Any]]:
+        snapshot = self.snapshot()
+        blockers = []
+        for key in ("password", "email_otp", "minted", "guest"):
+            if not snapshot[key]["exhausted_or_unavailable"]:
+                blockers.append(key)
+        if blockers:
+            return False, "Automated authentication options remain: " + ", ".join(blockers), snapshot
+        return True, "All automated authentication options exhausted or unavailable.", snapshot
 
 
 # ========================================
@@ -36,6 +194,27 @@ def safe_time() -> float:
         return time.time()
     except Exception:
         return 0.0
+
+
+def build_auth_assistance_resume_user_message(
+    *,
+    auth_realm: Optional[str],
+    handoff_mode: Optional[str],
+) -> Dict[str, str]:
+    """Build the post-human-auth cue injected into resumed browser-use calls."""
+    realm = auth_realm or "the current site"
+    mode = handoff_mode or "live browser session"
+    return {
+        "role": "user",
+        "content": (
+            "The user has completed the requested authentication assistance for "
+            f"{realm} in the same {mode}. Continue from the current page state exactly as it is now. "
+            "Do not call request_user_assistance_for_authentication again for this same auth realm unless "
+            "the page presents a new authentication blocker that still requires human input. "
+            "Do not undo user-entered changes made during assistance; inspect the current DOM/state and "
+            "continue toward the task from that state."
+        ),
+    }
 
 
 # ========================================
@@ -165,9 +344,7 @@ def get_browser_system_prompt(
     duplicated rules, screenshot guidance, or safety bullets).
 
     Dynamic portion (below the boundary) varies per call: ``goal``,
-    ``custom_instructions``, and ``available_files``. Per-step state
-    (current time + URL) is appended separately by ``build_state_line``
-    on the user message; nothing per-step bleeds into this function.
+    ``custom_instructions``, and ``available_files``.
     """
     # 1. Static (canonical) browser system prompt. Identical across every
     #    spawn and across the Rose pool path. AVAILABLE_ACTIONS is the
@@ -184,7 +361,7 @@ def get_browser_system_prompt(
         files_section = (
             "\n\n# Available Files for Upload\n"
             "The following files are available to upload using the upload_file action.\n"
-            "To upload a file, find a file input element (<input type=\"file\">) and use "
+            'To upload a file, find a file input element (<input type="file">) and use '
             "upload_file with the filename.\n"
             f"AVAILABLE FILES FOR UPLOAD: {', '.join(available_files)}"
         )
@@ -193,26 +370,39 @@ def get_browser_system_prompt(
     if custom_instructions:
         custom_section = f"\n\n# Custom Instructions\n{custom_instructions}"
 
-    dynamic_prompt = (
-        f"\n\n# Current Goal\n{goal}"
-        f"{files_section}"
-        f"{custom_section}"
-        "\n\nYou will receive a [STATE: ...] line at the end of each turn carrying the per-step time and URL."
-    )
+    dynamic_prompt = f"\n\n# Current Goal\n{goal}{files_section}{custom_section}"
 
     return static_prompt + SYSTEM_PROMPT_DYNAMIC_BOUNDARY + dynamic_prompt
 
 
-def build_state_line(current_url: str, now: Optional[datetime] = None) -> str:
-    """Build the per-step dynamic state line appended to the task message.
+def build_browser_dynamic_system_context(
+    custom_instructions: str = "",
+    available_files: Optional[List[str]] = None,
+    response_schema: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Build dynamic system context for one browser-agent task."""
+    files_section = ""
+    if available_files:
+        files_section = (
+            "\n\n# Available Files for Upload\n"
+            "The following files are available to upload using the upload_file action.\n"
+            'To upload a file, find a file input element (<input type="file">) and use '
+            "upload_file with the filename.\n"
+            f"AVAILABLE FILES FOR UPLOAD: {', '.join(available_files)}"
+        )
 
-    Format is strict and parseable: ``[STATE: time=<ISO 8601 UTC> url=<url>]``.
-    Kept terse (~50-80 chars) so it doesn't dwarf the cache benefit of the
-    static prompt above.
-    """
-    ts = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    safe_url = current_url or ""
-    return f"[STATE: time={ts} url={safe_url}]"
+    custom_section = ""
+    if custom_instructions:
+        custom_section = custom_instructions
+
+    schema_section = format_required_output_schema_system_section(response_schema)
+    sections = [section.strip() for section in (custom_section, files_section, schema_section) if section.strip()]
+    return "\n\n".join(sections)
+
+
+def build_browser_task_prompt(goal: str) -> str:
+    """Build the first user message for a browser task."""
+    return f"# Current Goal\n{goal}"
 
 
 # ========================================
@@ -330,5 +520,8 @@ def build_action_titles(  # noqa: C901
     elif action_name == "screenshot":
         title_progress = "Taking screenshot..."
         title_done = "Screenshot captured"
+    elif action_name == "request_user_assistance_for_authentication":
+        title_progress = "Requesting authentication assistance..."
+        title_done = "Requested authentication assistance"
 
     return title_progress, title_done, resolved_action_name

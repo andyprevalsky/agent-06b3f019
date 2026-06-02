@@ -617,7 +617,7 @@ async def parse_responses_sse(
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens or prompt_tokens + completion_tokens,
-            "cache_creation_input_tokens": 0,
+            "cache_creation_input_tokens": max(prompt_tokens - cache_read_tokens, 0),
             "cache_read_input_tokens": cache_read_tokens,
             "finish_reason": finish_reason or "stop",
         },

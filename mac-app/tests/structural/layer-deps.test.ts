@@ -145,7 +145,9 @@ function classify(abs: string): SourceFile {
     return { abs, rel, kind: 'main-domain', domain, layer: mainLayer(abs) ?? undefined };
   }
   if (rel.startsWith('ui/features/')) {
-    const domain = rel.split('/')[2];
+    const parts = rel.split('/');
+    if (parts.length < 4) return { abs, rel, kind: 'other' };
+    const domain = parts[2];
     return { abs, rel, kind: 'ui-feature', domain, layer: featureLayer(abs, domain) ?? undefined };
   }
   if (rel.startsWith('main/base/')) {

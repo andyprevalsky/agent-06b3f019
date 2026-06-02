@@ -94,6 +94,7 @@ def build_benchmark_args(
     *,
     port: int,
     bootstrap: bool = False,
+    anon: bool = False,
     max_concurrency: int = 5,
     keep_failed_agents: bool = True,
 ) -> list[str]:
@@ -102,6 +103,8 @@ def build_benchmark_args(
     args.extend(["--port", str(port), "--ci"])
     if bootstrap:
         args.append("--bootstrap")
+    if anon:
+        args.append("--anon")
     if keep_failed_agents:
         args.append("--keep-failed-agents")
     if len(selected_tasks) > 1:
@@ -116,6 +119,16 @@ def load_services_manifest(path: Path = SERVICES_MANIFEST) -> dict:
     if not isinstance(ports, dict) or not ports.get("backend") or not ports.get("health"):
         raise ValueError(f"Invalid services manifest: missing backend/health ports in {path}")
     return data
+
+
+def services_manifest_anon_enabled(manifest: dict) -> bool:
+    env = manifest.get("env") if isinstance(manifest, dict) else None
+    if not isinstance(env, dict):
+        return False
+    return (
+        env.get("benchmark_anon_steel_profile") is True
+        and env.get("benchmark_disable_saved_browser_auth") is True
+    )
 
 
 def http_ok(url: str, timeout: float = 1.0) -> bool:
@@ -151,12 +164,15 @@ def wait_for_services(
     raise TimeoutError(f"Timed out waiting for benchmark services ({last_error}); see {SERVICE_LOG}")
 
 
-def start_services(clean_first: bool = True) -> tuple[subprocess.Popen, dict]:
+def start_services(clean_first: bool = True, *, anon_steel_profile: bool = False) -> tuple[subprocess.Popen, dict]:
     (REPO_ROOT / ".context").mkdir(exist_ok=True)
     if clean_first:
         subprocess.run(["bash", "scripts/kill-services.sh"], cwd=REPO_ROOT, check=True)
     service_log = open(SERVICE_LOG, "w")
     env = {**os.environ, "DISABLE_GMAIL_SYNC": "1"}
+    if anon_steel_profile:
+        env["BENCHMARK_ANON_STEEL_PROFILE"] = "true"
+        env["BENCHMARK_DISABLE_SAVED_BROWSER_AUTH"] = "true"
     process = subprocess.Popen(
         ["bash", "scripts/run.sh", "--benchmark"],
         cwd=REPO_ROOT,
@@ -280,12 +296,20 @@ def run_diagnostics(
     return diag_root
 
 
-def run_benchmark_invocation(invocation: BenchmarkInvocation, *, port: int, bootstrap: bool, max_concurrency: int) -> Path:
+def run_benchmark_invocation(
+    invocation: BenchmarkInvocation,
+    *,
+    port: int,
+    bootstrap: bool,
+    anon: bool,
+    max_concurrency: int,
+) -> Path:
     started = time.time()
     command = build_benchmark_args(
         invocation.tasks,
         port=port,
         bootstrap=bootstrap,
+        anon=anon,
         max_concurrency=max_concurrency,
         keep_failed_agents=True,
     )
@@ -328,6 +352,11 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--full", action="store_true", help="Run every benchmark; load-test-sias runs by itself")
     parser.add_argument("--rerun-failed", metavar="RUN", help="Rerun failed tasks from a result JSON or 'latest'")
     parser.add_argument("--bootstrap", action="store_true", help="Pass --bootstrap through to run_benchmark.py")
+    parser.add_argument(
+        "--anon",
+        action="store_true",
+        help="Pass --anon through to run_benchmark.py so minted-auth benchmarks start without saved auth",
+    )
     parser.add_argument("--max-concurrency", type=int, default=5, help="Max concurrent non-load benchmark tasks")
     parser.add_argument("--keep-services", action="store_true", help="Leave local services running after benchmarks")
     parser.add_argument("--use-existing", action="store_true", help="Use services from .context/services.json")
@@ -349,14 +378,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.use_existing:
             manifest = wait_for_services()
+            if args.anon and not services_manifest_anon_enabled(manifest):
+                raise RuntimeError(
+                    "Existing local stack was not started with anon browser auth disabled. "
+                    "Run without --use-existing so local.py can restart the stack with --anon."
+                )
         else:
-            process, manifest = start_services(clean_first=not args.no_clean)
+            process, manifest = start_services(
+                clean_first=not args.no_clean,
+                anon_steel_profile=args.anon,
+            )
         port = int(manifest["ports"]["backend"])
         for invocation in plan_invocations(selected_tasks):
             result_path = run_benchmark_invocation(
                 invocation,
                 port=port,
                 bootstrap=args.bootstrap,
+                anon=args.anon,
                 max_concurrency=args.max_concurrency,
             )
             result_paths.append(result_path)

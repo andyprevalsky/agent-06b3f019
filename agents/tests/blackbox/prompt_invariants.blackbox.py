@@ -104,6 +104,28 @@ def test_build_system_prompt_static_prefix_shared_across_phases():
     )
 
 
+def test_build_system_prompt_splits_static_user_context_and_phase_blocks():
+    """Main-agent prompts must keep user context out of the static cache prefix."""
+    from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY, build_system_prompt
+
+    prompt = build_system_prompt(
+        "EXECUTE",
+        [],
+        user_context_section="Name: Alice",
+        response_schema={"fields": [{"name": "done", "type": "bool", "required": True}]},
+    )
+    parts = [part.strip() for part in prompt.split(SYSTEM_PROMPT_DYNAMIC_BOUNDARY) if part.strip()]
+
+    assert len(parts) == 3
+    assert "You are a Rose Labs Agent" in parts[0]
+    assert "# User Context" not in parts[0]
+    assert "Alice" not in parts[0]
+    assert "# User Context" in parts[1]
+    assert "Alice" in parts[1]
+    assert "# Current Phase" in parts[2]
+    assert "# Required Output Schema" in parts[2]
+
+
 def test_build_planner_system_prompt_is_static_across_calls():
     """build_planner_system_prompt with same inputs must be byte-identical."""
     from utils.prompts import build_planner_system_prompt
@@ -190,8 +212,7 @@ def test_get_browser_system_prompt_is_static_across_calls():
     assert a == b, (
         "get_browser_system_prompt is non-deterministic across calls. The "
         "v3 browser prompt is cached per-spawn — any datetime.now()/time.time() "
-        "call inside this function (vs. inside build_state_line, where it's "
-        "expected) breaks the cache."
+        "call inside this function breaks the cache."
     )
     # Sanity: per-step state must not bleed into the static prefix.
     assert "Current time:" not in a, (
@@ -739,47 +760,20 @@ def test_browser_use_catalog_matches_v3_actions_or_is_exempt():
     )
 
 
-def test_browser_use_envelope_is_thinking_and_action_only():
-    """The browser-use system prompt's required JSON envelope is {thinking, action}.
-
-    The legacy fields evaluation_previous_goal/memory/next_goal were dropped
-    from the required envelope. They MAY appear in surrounding prose; what
-    we forbid is them showing up as REQUIRED keys in the JSON template block.
-    """
+def test_browser_use_prompt_requires_native_tool_call():
+    """Browser-use must use native browser-action tool calls, not JSON envelopes."""
     from providers.rose.browser_use import build_browser_use_system_prompt
 
     prompt = build_browser_use_system_prompt([])
-    output_match = re.search(r"<output>(.*?)</output>", prompt, re.DOTALL)
-    assert output_match is not None, (
-        "build_browser_use_system_prompt no longer contains an <output> "
-        "block. The browser-use envelope contract must be advertised."
-    )
-    envelope_block = output_match.group(1)
-
-    # Required envelope fields.
-    assert '"thinking"' in envelope_block, (
-        "Browser-use envelope is missing required 'thinking' field. "
-        "See build_browser_use_system_prompt — the contract is "
-        "{thinking, action} only."
-    )
-    assert '"action"' in envelope_block, (
-        "Browser-use envelope is missing required 'action' field."
-    )
-
-    # Forbidden legacy required fields. These were dropped from the v3
-    # envelope to reduce response tokens; if any reappears as a required
-    # key, callers will start sending bloated responses again.
+    assert "call exactly one available browser action tool" in prompt
+    assert "Do not write a JSON" in prompt
+    assert "<output>" not in prompt
     forbidden = ("evaluation_previous_goal", "memory", "next_goal")
     for legacy in forbidden:
-        # Match as a JSON key: "<name>": somewhere in the envelope template.
-        # We tolerate the word appearing in the surrounding <browser_rules>
-        # prose by only checking the <output> block.
         legacy_key_pat = re.compile(rf'"{re.escape(legacy)}"\s*:')
-        assert not legacy_key_pat.search(envelope_block), (
-            f"Browser-use envelope advertises legacy required field "
-            f"'{legacy}'. The v3 envelope is {{thinking, action}} only — "
-            f"'{legacy}' was dropped to reduce response tokens. Remove it "
-            f"from the JSON template in build_browser_use_system_prompt."
+        assert not legacy_key_pat.search(prompt), (
+            f"Browser-use prompt advertises legacy required field '{legacy}'. "
+            "Browser-use now uses native tools."
         )
 
 
@@ -1786,6 +1780,10 @@ async def run_all_tests():
         test_build_system_prompt_static_prefix_shared_across_phases,
     )
     r.record(
+        "build_system_prompt_splits_static_user_context_and_phase_blocks",
+        test_build_system_prompt_splits_static_user_context_and_phase_blocks,
+    )
+    r.record(
         "build_planner_system_prompt_static_across_calls",
         test_build_planner_system_prompt_is_static_across_calls,
     )
@@ -1883,8 +1881,8 @@ async def run_all_tests():
         test_browser_use_catalog_matches_v3_actions_or_is_exempt,
     )
     r.record(
-        "browser_use_envelope_thinking_and_action_only",
-        test_browser_use_envelope_is_thinking_and_action_only,
+        "browser_use_native_tool_prompt",
+        test_browser_use_prompt_requires_native_tool_call,
     )
 
     # 7. render_tool_list is the canonical, deterministic, typed renderer (B7)

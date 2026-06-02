@@ -42,6 +42,7 @@ import {
   Upload,
   RefreshCw,
   Cloud,
+  LifeBuoy,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -81,6 +82,7 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   send_email: Mail,
   call_phone_number: Phone,
   send_message_to_user: AlertCircle,
+  request_user_assistance_for_authentication: LifeBuoy,
   query_blueprints: BookOpen,
   save_blueprint: Save,
   web_search: Search,
@@ -163,6 +165,7 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   select_dropdown: ListChecks,
   done: CheckCircle,
   attempt_completion: CheckCircle,
+  auth_assistance: LifeBuoy,
 
   // Tab management tools
   switch_tab: Layers,

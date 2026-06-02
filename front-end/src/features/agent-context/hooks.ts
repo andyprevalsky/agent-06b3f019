@@ -258,10 +258,15 @@ export function useAgentProvider({
 
 function syncUrlParam(id: string | null) {
   const url = new URL(window.location.href);
+  const previousAgentId = url.searchParams.get('agent-id');
   if (id) {
     url.searchParams.set('agent-id', id);
+    if (previousAgentId && previousAgentId !== id) {
+      url.searchParams.delete('browser-id');
+    }
   } else {
     url.searchParams.delete('agent-id');
+    url.searchParams.delete('browser-id');
   }
   window.history.replaceState({}, '', url.toString());
 }

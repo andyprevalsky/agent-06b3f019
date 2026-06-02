@@ -1,16 +1,23 @@
 /**
- * Single attention-request card rendered inside the inbox modal.
+ * STATE MACHINE: RequestListItem
  *
- * Composes: remaining-count indicator, image thumbnail, markdown question,
- * optional iMessage automation block, "View agent" link, response textarea,
- * Skip/Reject/Accept actions, and created-at timestamp.
+ * [GENERIC_REQUEST]
+ *   | render optional media / question / response text
+ *   v
+ * [GENERIC_ACTIONS] -- Accept/Skip/Reject --> parent action handler
+ *
+ * [AUTH_ASSISTANCE]
+ *   | Open Live Browser selects the agent and fullscreen-opens the browser task
+ *   v
+ * [LIVE_VIEW_FULLSCREEN]
  */
 
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
+import { Maximize2 } from 'lucide-react';
 import { MarkdownText } from '../MarkdownText';
 import { RequestActionButtons } from './RequestActionButtons';
-import { getSendSmsMetadata, type AttentionRequest } from './types';
+import { getAuthAssistanceMetadata, getSendSmsMetadata, type AttentionRequest } from './types';
 import { hasIMessageBridge } from './macAppBridge';
 
 interface RequestListItemProps {
@@ -22,7 +29,7 @@ interface RequestListItemProps {
   onSelectAgent?: (agentId: string) => void;
   onClose: () => void;
   onChangeResponse: (requestId: string, text: string) => void;
-  onAccept: (requestId: string) => void;
+  onAccept: (requestId: string, overrideResponse?: string) => void;
   onSkip: (requestId: string) => void;
   onReject: (requestId: string) => void;
   onSendViaIMessage: (request: AttentionRequest) => void;
@@ -43,6 +50,7 @@ export function RequestListItem({
   onSendViaIMessage,
 }: RequestListItemProps) {
   const sms = getSendSmsMetadata(request.metadata);
+  const authAssistance = getAuthAssistanceMetadata(request);
 
   return (
     <div className="space-y-3">
@@ -66,7 +74,24 @@ export function RequestListItem({
         <MarkdownText text={request.question} breaks />
       </div>
 
-      {sms && (
+      {authAssistance ? (
+        <AuthAssistanceBlock
+          authRealm={authAssistance.authRealm}
+          liveViewUrl={authAssistance.liveViewUrl}
+          loading={loading}
+          isCompleting={actionRequestId === request.id}
+          onOpenLiveView={() => {
+            openAuthBrowserInApp({
+              agentId: request.agent_id,
+              browserId: authAssistance.browserSessionId ?? authAssistance.taskId,
+              onSelectAgent,
+              onClose,
+            });
+          }}
+        />
+      ) : null}
+
+      {!authAssistance && sms && (
         <IMessageBlock
           to={sms.to}
           message={sms.message}
@@ -90,24 +115,88 @@ export function RequestListItem({
         View agent →
       </Button>
 
-      <Textarea
-        placeholder="Add context (optional)..."
-        value={responseText}
-        onChange={(e) => onChangeResponse(request.id, e.target.value)}
-        className="min-h-[60px]"
-      />
+      {!authAssistance && (
+        <>
+          <Textarea
+            placeholder="Add context (optional)..."
+            value={responseText}
+            onChange={(e) => onChangeResponse(request.id, e.target.value)}
+            className="min-h-[60px]"
+          />
 
-      <RequestActionButtons
-        requestId={request.id}
-        loading={loading}
-        onSkip={onSkip}
-        onReject={onReject}
-        onAccept={onAccept}
-      />
+          <RequestActionButtons
+            requestId={request.id}
+            loading={loading}
+            onSkip={onSkip}
+            onReject={onReject}
+            onAccept={onAccept}
+          />
+        </>
+      )}
 
       <p className="text-xs text-muted-foreground">
         Asked {new Date(request.created_at).toLocaleString()}
       </p>
+    </div>
+  );
+}
+
+function openAuthBrowserInApp({
+  agentId,
+  browserId,
+  onSelectAgent,
+  onClose,
+}: {
+  agentId: string;
+  browserId: string | undefined;
+  onSelectAgent?: (agentId: string) => void;
+  onClose: () => void;
+}) {
+  const url = new URL(window.location.href);
+  url.searchParams.set('agent-id', agentId);
+  if (browserId) {
+    url.searchParams.set('browser-id', browserId);
+  }
+  window.history.replaceState({}, '', url.toString());
+  onSelectAgent?.(agentId);
+  if (browserId) {
+    window.dispatchEvent(new CustomEvent('navi-open-browser', { detail: { taskId: browserId } }));
+  }
+  onClose();
+}
+
+interface AuthAssistanceBlockProps {
+  authRealm?: string;
+  liveViewUrl?: string | null;
+  loading: boolean;
+  isCompleting: boolean;
+  onOpenLiveView: () => void;
+}
+
+function AuthAssistanceBlock({
+  authRealm,
+  liveViewUrl,
+  loading,
+  isCompleting,
+  onOpenLiveView,
+}: AuthAssistanceBlockProps) {
+  return (
+    <div className="rounded-md border border-primary/30 bg-primary/5 p-3 space-y-3">
+      <div className="space-y-1">
+        <p className="text-sm font-semibold text-foreground">Authentication</p>
+        {authRealm && <p className="text-xs text-muted-foreground">{authRealm}</p>}
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <Button
+          size="sm"
+          disabled={loading || !liveViewUrl || isCompleting}
+          onClick={onOpenLiveView}
+          className="bg-primary text-primary-foreground hover:bg-primary/90"
+        >
+          <Maximize2 className="mr-2 h-4 w-4" />
+          Open Live Browser
+        </Button>
+      </div>
     </div>
   );
 }

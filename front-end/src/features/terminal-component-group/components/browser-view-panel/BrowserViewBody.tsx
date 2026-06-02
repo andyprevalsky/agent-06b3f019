@@ -1,3 +1,15 @@
+/**
+ * STATE MACHINE: BrowserViewBody
+ *
+ * FRAME STATE:
+ * [ACTIVE] -> controls + iframe active overlay affordances
+ * [WAITING_FOR_AUTH_ASSISTANCE] -> iframe resume overlay with Start Agent
+ * [DISCONNECTED] -> iframe resume overlay with Take Control
+ *
+ * FULLSCREEN STATE:
+ * [INLINE] <-> [FULLSCREEN]
+ */
+
 import { cn } from '@/lib/utils';
 import type { Message } from '../../hooks';
 import { BrowserControls } from './BrowserControls';
@@ -8,11 +20,13 @@ import type { PendingWriteLockApproval } from './hooks';
 
 interface BrowserViewBodyProps {
   containerRef: React.RefObject<HTMLDivElement>;
+  agentId?: string | null;
   taskId: string;
   messages: Message[];
   currentBrowserUrl: string;
   isThisFullscreen: boolean;
   isDisconnected: boolean;
+  isWaitingForAuthAssistance: boolean;
   isResuming: boolean;
   pendingWriteLockApproval: PendingWriteLockApproval | null;
   onToggleFullscreen: () => void;
@@ -37,11 +51,13 @@ function ControlHint({ isFullscreen }: { isFullscreen: boolean }) {
 
 export function BrowserViewBody({
   containerRef,
+  agentId,
   taskId,
   messages,
   currentBrowserUrl,
   isThisFullscreen,
   isDisconnected,
+  isWaitingForAuthAssistance,
   isResuming,
   pendingWriteLockApproval,
   onToggleFullscreen,
@@ -68,15 +84,18 @@ export function BrowserViewBody({
           <BrowserControls
             isFullscreen={isThisFullscreen}
             isDisconnected={isDisconnected}
+            isWaitingForAuthAssistance={isWaitingForAuthAssistance}
             onToggleFullscreen={onToggleFullscreen}
           />
 
           <BrowserIframe
+            agentId={agentId}
             taskId={taskId}
             url={currentBrowserUrl}
             messages={messages}
             isFullscreen={isThisFullscreen}
             isDisconnected={isDisconnected}
+            isWaitingForAuthAssistance={isWaitingForAuthAssistance}
             isResuming={isResuming}
             onResume={onResume}
           />

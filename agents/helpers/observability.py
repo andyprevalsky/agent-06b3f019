@@ -9,11 +9,8 @@ In production (FLY_APP_NAME set), the helper is a no-op: prod truncates
 payloads inline via existing `[:200]` patterns and relies on exporters,
 not local disk.
 
-Why here and not inline at the call site: every agent-side LLM request
-goes through `call_llm_structured_streaming` / `_call_llm_verifier` in
-`helpers/llm.py`. Instrumenting those two funnels covers the main loop,
-planner, verifier, param populator, reasoning, spawn_agent explore, and
-the spawn_claude_code preflight — so one dump hook catches every path.
+RoseClient also writes and updates dumps directly so direct `collect()` /
+`complete()` callers do not bypass this coverage.
 """
 
 from __future__ import annotations
@@ -52,8 +49,10 @@ def dump_llm_context(
     *,
     agent_id: Optional[str] = None,
     model: Optional[str] = None,
+    config: Optional[Dict[str, Any]] = None,
     response_format: Optional[Dict[str, Any]] = None,
     tools: Optional[List[Dict[str, Any]]] = None,
+    output: Optional[Any] = None,
     extra: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """Persist the full LLM context to disk (dev) and log a pointer to it.
@@ -84,10 +83,14 @@ def dump_llm_context(
             "message_count": len(messages),
             "messages": messages,
         }
+        if config is not None:
+            payload["config"] = config
         if response_format is not None:
             payload["response_format"] = response_format
         if tools is not None:
             payload["tools"] = tools
+        if output is not None:
+            payload["output"] = output
         if extra:
             payload["extra"] = extra
 
@@ -111,3 +114,41 @@ def dump_llm_context(
         # Best-effort. Never fail the LLM call because the dump failed.
         logger.warning("llm.context.dump_failed", call_site=call_site, error=str(e)[:200])
         return None
+
+
+def update_llm_dump(
+    path: Optional[str],
+    *,
+    model: Optional[str] = None,
+    config: Optional[Dict[str, Any]] = None,
+    response_format: Optional[Dict[str, Any]] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    output: Optional[Any] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Merge late-arriving Rose response details into an existing dump."""
+    if _IS_PRODUCTION or not path:
+        return
+
+    try:
+        dump_path = Path(path)
+        payload = json.loads(dump_path.read_text())
+        if model is not None:
+            payload["model"] = model
+        if config is not None:
+            merged_config = dict(payload.get("config") or {})
+            merged_config.update(config)
+            payload["config"] = merged_config
+        if response_format is not None:
+            payload["response_format"] = response_format
+        if tools is not None:
+            payload["tools"] = tools
+        if output is not None:
+            payload["output"] = output
+        if extra:
+            merged_extra = dict(payload.get("extra") or {})
+            merged_extra.update(extra)
+            payload["extra"] = merged_extra
+        dump_path.write_text(json.dumps(payload, ensure_ascii=False, default=str, indent=2))
+    except Exception as e:
+        logger.warning("llm.context.dump_update_failed", path=path, error=str(e)[:200])

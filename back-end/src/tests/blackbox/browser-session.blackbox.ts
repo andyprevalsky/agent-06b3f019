@@ -43,7 +43,9 @@
  */
 
 import { config } from 'dotenv';
+import { randomUUID } from 'crypto';
 import { z } from 'zod';
+import { prisma } from '../../providers/database';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -294,6 +296,118 @@ async function testGetTask_notFound() {
   assertSchema(ErrorResponse, res.data, 'GET /task (404)');
 }
 
+async function testGetTask_validateLivePausedSessionDoesNotCreateReplacement() {
+  const context = await prisma.browserContext.create({
+    data: {
+      userId: `browser-session-validate-${randomUUID()}`,
+      contextId: `steel-profile-${randomUUID()}`,
+    },
+  });
+  const session = await prisma.browserSession.create({
+    data: {
+      contextId: context.id,
+      agentId: randomUUID(),
+      sessionId: `steel-session-${randomUUID()}`,
+      debugUrl: 'https://debug.steel.dev/session/live',
+      wsUrl: 'ws://steel/live',
+      status: 'PAUSED',
+    },
+  });
+
+  try {
+    const res = await request(
+      `${BASE_URL}/api/browser-session/task/${session.id}?validateLive=true`,
+      {
+        headers: apiKeyHeaders(),
+      }
+    );
+    assertStatus(res.status, 200, res.data);
+    const body = res.data as Record<string, unknown>;
+    if (body.session_id !== session.sessionId) {
+      throw new Error(
+        `Expected same session_id ${session.sessionId}, got ${String(body.session_id)}`
+      );
+    }
+    if (body.same_session_available !== false) {
+      throw new Error('Expected paused session to be unavailable for same-session reconnect');
+    }
+    if (body.same_session_unavailable_reason !== 'db_status_paused') {
+      throw new Error(
+        `Expected db_status_paused reason, got ${String(body.same_session_unavailable_reason)}`
+      );
+    }
+  } finally {
+    await prisma.browserContext.delete({ where: { id: context.id } }).catch(() => undefined);
+  }
+}
+
+async function testGetTask_passwordPayloadIncludesStableIds() {
+  const userId = `browser-session-password-id-${randomUUID()}`;
+  const context = await prisma.browserContext.create({
+    data: {
+      userId,
+      contextId: `steel-profile-${randomUUID()}`,
+    },
+  });
+  const session = await prisma.browserSession.create({
+    data: {
+      contextId: context.id,
+      agentId: randomUUID(),
+      sessionId: `steel-session-${randomUUID()}`,
+      debugUrl: 'https://debug.steel.dev/session/live',
+      wsUrl: 'ws://steel/live',
+      status: 'ACTIVE',
+    },
+  });
+  const firstPassword = await prisma.browserPassword.create({
+    data: {
+      userId,
+      origin: 'https://www.amazon.com/ap/signin',
+      username: 'shopper@example.com',
+      encryptedPassword: 'encrypted-password-1',
+      browserSource: 'chrome',
+      dateLastUsed: 1234n,
+    },
+  });
+  const secondPassword = await prisma.browserPassword.create({
+    data: {
+      userId,
+      origin: 'https://amazon.com/login',
+      username: 'shopper@example.com',
+      encryptedPassword: 'encrypted-password-2',
+      browserSource: 'chrome',
+      dateLastUsed: 1200n,
+    },
+  });
+
+  try {
+    const res = await request(`${BASE_URL}/api/browser-session/task/${session.id}`, {
+      headers: apiKeyHeaders(),
+    });
+    assertStatus(res.status, 200, res.data);
+    const body = res.data as { passwords?: Array<Record<string, unknown>> };
+    const returnedIds = new Set((body.passwords ?? []).map((item) => item.id));
+    for (const password of [firstPassword, secondPassword]) {
+      if (!returnedIds.has(password.id)) {
+        throw new Error(`Expected password id ${password.id} in session payload`);
+      }
+    }
+    const returnedFirst = body.passwords?.find((item) => item.id === firstPassword.id);
+    const returnedSecond = body.passwords?.find((item) => item.id === secondPassword.id);
+    if (
+      returnedFirst?.encryptedPassword !== 'encrypted-password-1' ||
+      returnedSecond?.encryptedPassword !== 'encrypted-password-2'
+    ) {
+      throw new Error(
+        'Expected encrypted password material to remain paired with each session payload id'
+      );
+    }
+  } finally {
+    await prisma.browserPassword.deleteMany({ where: { userId } });
+    await prisma.browserContext.delete({ where: { id: context.id } }).catch(() => undefined);
+  }
+}
+
 // ==================== GET /api/browser-session/context/:userId ====================
 
 async function testGetContext_noAuth() {
@@ -471,6 +585,14 @@ async function runAll() {
     // GET /task/:taskId
     { name: 'GET /browser-session/task -- no auth -> 401', fn: testGetTask_noAuth },
     { name: 'GET /browser-session/task -- not found -> 404', fn: testGetTask_notFound },
+    {
+      name: 'GET /browser-session/task -- validateLive paused returns same unavailable session',
+      fn: testGetTask_validateLivePausedSessionDoesNotCreateReplacement,
+    },
+    {
+      name: 'GET /browser-session/task -- password payload includes stable ids',
+      fn: testGetTask_passwordPayloadIncludesStableIds,
+    },
     // GET /context/:userId
     { name: 'GET /browser-session/context -- no auth -> 401', fn: testGetContext_noAuth },
     { name: 'GET /browser-session/context -- happy path', fn: testGetContext_happy },
@@ -525,6 +647,7 @@ async function runAll() {
 
   const passed = results.filter((r) => r.passed).length;
   const failed = results.filter((r) => !r.passed).length;
+  await prisma.$disconnect();
   console.log('\n' + '='.repeat(50));
   console.log(`\nResults: ${passed} passed, ${failed} failed, ${results.length} total`);
   if (failed > 0) {
@@ -536,7 +659,8 @@ async function runAll() {
   process.exit(0);
 }
 
-runAll().catch((error) => {
+runAll().catch(async (error) => {
   console.error('\nCrashed:', error);
+  await prisma.$disconnect().catch(() => undefined);
   process.exit(1);
 });

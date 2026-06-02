@@ -129,16 +129,17 @@ model GoalBlueprint {
 }
 
 model AgentAttentionRequest {
-  id           String   @id @default(cuid())
-  userId       String
-  agentId      String
-  workflowId   String
-  question     String
-  userResponse String?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-  imageUrl     String?
-  metadata     Json?
+  id             String                     @id @default(cuid())
+  userId         String
+  agentId        String
+  workflowId     String
+  question       String
+  userResponse   String?
+  createdAt      DateTime                   @default(now())
+  updatedAt      DateTime                   @updatedAt
+  imageUrl       String?
+  metadata       Json?
+  authAssistance UserAuthAssistanceRequest?
 
   @@index([updatedAt])
   @@index([userId])
@@ -189,23 +190,23 @@ model ToolSideEffect {
 }
 
 model User {
-  id                          String        @id @default(uuid())
-  userId                      String        @unique
+  id                          String                      @id @default(uuid())
+  userId                      String                      @unique
   name                        String?
   addressLine1                String?
   addressLine2                String?
   city                        String?
   state                       String?
   postalCode                  String?
-  country                     String?       @default("United States")
-  createdAt                   DateTime      @default(now())
-  updatedAt                   DateTime      @updatedAt
-  inviteCode                  Int?          @unique
-  inviteCodeUses              Int           @default(0)
+  country                     String?                     @default("United States")
+  createdAt                   DateTime                    @default(now())
+  updatedAt                   DateTime                    @updatedAt
+  inviteCode                  Int?                        @unique
+  inviteCodeUses              Int                         @default(0)
   usedInviteCode              Int?
   encryptedPaymentInformation String?
   phone                       String?
-  isAnonymous                 Boolean       @default(false)
+  isAnonymous                 Boolean                     @default(false)
   onboardingCompletedAt       DateTime?
   systemName                  String?
   profilePicture              String?
@@ -213,6 +214,12 @@ model User {
   voicePreferenceId           String?
   credits                     Credit[]
   subscriptions               Subscription?
+  cookieBundles               CookieBundle[]
+  steelSessionAuths           SteelSessionAuth[]
+  mintedAccounts              MintedAccount[]
+  agentIdentity               AgentIdentity?
+  agentPhoneMessages          AgentPhoneMessage[]
+  authAssistanceRequests      UserAuthAssistanceRequest[]
 
   @@index([userId])
   @@index([inviteCode])
@@ -669,14 +676,16 @@ model Cookie {
   sourcePort      Int      @default(-1)
   sourceScheme    Int      @default(0)
   topFrameSiteKey String   @default("")
+  browserProfile  String   @default("")
 
-  @@unique([userId, domain, name, path, topFrameSiteKey])
+  @@unique([userId, domain, name, path, topFrameSiteKey, browserSource, browserProfile])
   @@index([userId])
   @@index([userId, domain])
+  @@index([userId, browserSource, browserProfile])
 }
 
 model BrowserPassword {
-  id                String   @id @default(uuid())
+  id                String    @id @default(uuid())
   userId            String
   origin            String
   username          String
@@ -684,11 +693,113 @@ model BrowserPassword {
   dateLastUsed      BigInt?
   dateCreated       BigInt?
   browserSource     String
-  syncedAt          DateTime @default(now()) @updatedAt
+  syncedAt          DateTime  @default(now()) @updatedAt
+  browserProfile    String    @default("")
+  disabledAt        DateTime?
+  disabledReason    String?
 
   @@unique([userId, origin, username])
   @@index([userId])
   @@index([userId, origin])
+}
+
+model CookieBundle {
+  id             String    @id @default(uuid())
+  userId         String
+  authRealm      String
+  browserSource  String
+  browserProfile String    @default("")
+  accountLabel   String?
+  disabledAt     DateTime?
+  disabledReason String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  user           User      @relation(fields: [userId], references: [userId], onDelete: Cascade)
+
+  @@unique([userId, authRealm, browserSource, browserProfile])
+  @@index([userId, authRealm])
+}
+
+model SteelSessionAuth {
+  id              String    @id @default(uuid())
+  userId          String
+  contextId       String
+  authRealm       String
+  authenticatedAt DateTime  @default(now())
+  disabledAt      DateTime?
+  disabledReason  String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  user            User      @relation(fields: [userId], references: [userId], onDelete: Cascade)
+
+  @@unique([userId, contextId, authRealm])
+}
+
+model MintedAccount {
+  id             String    @id @default(uuid())
+  userId         String
+  authRealm      String
+  accountLabel   String
+  disabledAt     DateTime?
+  disabledReason String?
+  createdAt      DateTime  @default(now())
+  user           User      @relation(fields: [userId], references: [userId], onDelete: Cascade)
+
+  @@unique([userId, authRealm])
+}
+
+model AgentIdentity {
+  id                    String   @id @default(uuid())
+  userId                String   @unique
+  email                 String
+  phone                 String?
+  phoneProvider         String?
+  phoneProviderAgentId  String?
+  phoneProviderNumberId String?
+  createdAt             DateTime @default(now())
+  user                  User     @relation(fields: [userId], references: [userId], onDelete: Cascade)
+
+  @@index([phone])
+}
+
+model AgentPhoneMessage {
+  id               String   @id @default(uuid())
+  userId           String
+  externalId       String   @unique
+  providerAgentId  String?
+  providerNumberId String?
+  from             String
+  to               String
+  body             String
+  channel          String
+  receivedAt       DateTime
+  createdAt        DateTime @default(now())
+  user             User     @relation(fields: [userId], references: [userId], onDelete: Cascade)
+
+  @@index([userId, receivedAt])
+  @@index([to])
+}
+
+model UserAuthAssistanceRequest {
+  id               String                @id
+  agentId          String
+  userId           String
+  authRealm        String
+  browserSessionId String?
+  steelSessionId   String
+  mode             String
+  createdAt        DateTime              @default(now())
+  completedAt      DateTime?
+  user             User                  @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  attentionRequest AgentAttentionRequest @relation(fields: [id], references: [id], onDelete: Cascade)
+
+  @@index([agentId])
+  @@index([browserSessionId])
+}
+
+model AgentRunCredentialPropagation {
+  agentId   String   @id
+  createdAt DateTime @default(now())
 }
 
 model Feedback {

@@ -36,15 +36,24 @@ const execAsync = promisify(exec);
  * exist), or null if no match survives a `stat` probe.
  */
 export function resolveCookiePath(pattern: string): string | null {
+  return resolveCookiePaths(pattern)[0] ?? null;
+}
+
+/**
+ * Resolve every cookie path matching a pattern, newest file first. Chrome has
+ * one cookies DB per profile, so sync callers can read them all and dedupe
+ * colliding cookie identities locally before upload.
+ */
+export function resolveCookiePaths(pattern: string): string[] {
   // If no wildcards, check directly.
   if (!pattern.includes('*')) {
-    return fs.existsSync(pattern) ? pattern : null;
+    return fs.existsSync(pattern) ? [pattern] : [];
   }
 
   // Wildcard pattern — glob then pick the most recently modified candidate.
   const matches = glob.sync(pattern);
   if (matches.length === 0) {
-    return null;
+    return [];
   }
 
   // Guard each stat against TOCTOU — a file could disappear between
@@ -60,7 +69,7 @@ export function resolveCookiePath(pattern: string): string | null {
     .filter((x): x is { path: string; mtime: number } => x !== null)
     .sort((a, b) => b.mtime - a.mtime);
 
-  return sorted.length > 0 ? sorted[0].path : null;
+  return sorted.map((match) => match.path);
 }
 
 /** Read Safari's `Cookies.binarycookies` file for parsing in the service layer. */

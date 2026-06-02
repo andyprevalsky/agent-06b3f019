@@ -1,32 +1,31 @@
-"""Browser-use sub-flow — message build + JSON-action extraction.
+"""Browser-use sub-flow — message build + tool-call extraction.
 
 Browser-use rides the same claudeAuth -> waterfall machinery as rose-1-lite
 and rose-1-ultra (see `pools.py:rose-1-browser-use`). What's specific:
 
   - The user message bundles a full browser snapshot (URL, viewport,
-    DOM tree, action history, optional screenshot) plus the dynamic
-    system prompt that enumerates the agent's available actions.
-  - The model is expected to reply with a JSON envelope containing a
-    `thinking` string and an `action` array. We extract the JSON from
-    its (possibly markdown-fenced) text reply and normalize the first
-    action into the `UnifiedAction` shape the browser handler expects.
-
-No tools are passed — every supported model in this pool returns the
-JSON in plain text, matching the legacy edge-function behavior.
+    DOM tree, action history, optional screenshot).
+  - Available browser actions are passed as provider tools built from
+    `BROWSER_USE_TOOLS`, then the first native tool call is normalized into
+    the `UnifiedAction` shape the browser handler expects.
+  - Legacy JSON text replies are still normalized defensively for old dumps
+    and mocked streams.
 """
 
 from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import structlog
 
-# Single source of truth for verifier rules. Embedded in the # Verification
-# section below so the browser-use prompt cites the same block as the main
-# agent, planner, verifier, explore agent, and attempt_completion tool prompt.
+# Single source of truth for verifier rules. The browser prompt embeds the
+# same grading block as the main agent so attempt_completion semantics do not
+# drift between agent types.
 from utils.prompts import VERIFICATION_RULES
+from tools.prompts import attempt_completion_prompt
 
 logger = structlog.get_logger()
 
@@ -137,22 +136,21 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
         },
     },
     "attempt_completion": {
-        "description": (
-            "Complete the task. After this call, an automated grader scores your work against the live "
-            "browser DOM, so make sure the page actually shows the answer before completing. Your `reasoning` "
-            "is shown in the UI for the human, NOT read by the grader."
-        ),
-        "params": {
-            "reasoning": {
-                "type": "string",
-                "description": "Brief UI-display summary of what you accomplished. Not graded.",
-                "required": True,
-            },
-        },
+        "description": attempt_completion_prompt.strip(),
+        "params": {},
     },
     "send_message_to_user": {
         "description": "Send a message to the user (for updates or asking for help)",
         "params": {"message": {"type": "string", "description": "Message content", "required": True}},
+    },
+    "request_user_assistance_for_authentication": {
+        "description": (
+            "Request user help signing in only after every automated auth option in the current session is exhausted. "
+            "Before calling, you must have tried every saved password, email OTP if available, SMS OTP if "
+            "available, the minted agent account when it has an email, and guest/anonymous completion if possible. Cookie and "
+            "Steel-session auth are applied automatically before you start."
+        ),
+        "params": {},
     },
     "screenshot": {
         "description": (
@@ -184,28 +182,73 @@ def generate_tool_descriptions(available_actions: List[str]) -> str:
     return "\n".join(descriptions)
 
 
+def build_browser_use_tools(available_actions: List[str]) -> List[Dict[str, Any]]:
+    """Build provider-tool schemas from `BROWSER_USE_TOOLS`.
+
+    The catalog remains the single source of truth for tool descriptions and
+    argument descriptions. This helper only reshapes those strings into native
+    tool schemas.
+    """
+    tools: List[Dict[str, Any]] = []
+    for action_name in available_actions:
+        tool = BROWSER_USE_TOOLS.get(action_name)
+        if not tool:
+            continue
+
+        properties: Dict[str, Any] = {}
+        required: List[str] = []
+        for param_name, info in tool["params"].items():
+            prop: Dict[str, Any] = {"type": info["type"]}
+            description = info.get("description")
+            if description:
+                prop["description"] = description
+            properties[param_name] = prop
+            if info.get("required") is True:
+                required.append(param_name)
+
+        tools.append({
+            "name": action_name,
+            "description": tool["description"],
+            "input_schema": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+                "additionalProperties": False,
+            },
+        })
+    return tools
+
+
 def build_browser_use_system_prompt(available_actions: List[str]) -> str:
     """Canonical browser-automation system prompt.
 
-    Static across calls with the same `available_actions` (no time, no URL,
-    no per-step state). The v3 spawner delegates to this builder so the
-    Rose pool prompt and the v3 prompt share one source of truth; per-spawn
-    extras (goal, custom_instructions, available_files) are appended below
-    the SYSTEM_PROMPT_DYNAMIC_BOUNDARY by the spawner.
+    Static across calls (no time, no URL, no per-step state, no tool list).
+    The v3 spawner delegates to this builder so the Rose pool prompt and the
+    v3 prompt share one source of truth; per-spawn extras (goal,
+    custom_instructions, available_files) are appended below the
+    SYSTEM_PROMPT_DYNAMIC_BOUNDARY by the caller when dynamic context is
+    present. Provider transforms strip the marker before sending the request.
     """
-    tool_descriptions = generate_tool_descriptions(available_actions)
-    return f"""You are a browser-automation agent. You read browser state and emit JSON actions to navigate, click, fill forms, and extract content.
+    _ = available_actions
+    return f"""# Role
+
+You are a browser automation agent. You take in a user goal and complete the goal by interacting with a browser you are exposed to via tools.
 
 # Input
 
-At every step your input consists of:
-1. Current URL, viewport size, scroll position
-2. Interactive elements indexed for actions (format: [index]<type>text</type>)
-3. Previous action results and history
-4. Optional screenshot of the browser
+Each turn you will receive a snapshot of the current browser environment which includes:
+1. Current URL, viewport size, and scroll position
+2. Page stats
+3. Tab information
+4. DOM tree with interactive elements indexed for actions (format: [index]<type>text</type>)
+5. A full-page screenshot if the screenshot tool was called on the previous turn
 
 # Browser Rules
 
+- Your browser is in full screen mode. No search bar or navigation bar.
+- Control+L will NOT focus the address bar - use the goto action to navigate to URLs.
+- Browser cookies have been injected - assume the user is logged in until proven otherwise.
+- Avoid login flows unless the site forces you to login to complete your directed goal.
 - Only interact with elements that have a numeric [index] assigned
 - Only use indexes that are explicitly provided in the current state
 - If expected elements are missing, try scrolling or waiting
@@ -213,37 +256,12 @@ At every step your input consists of:
 - You can scroll by pages using the pages parameter (0.5 for half page, 2.0 for two pages)
 - If you fill an input field and the action is interrupted, suggestions may have appeared
 
-# Available Actions
-
-{tool_descriptions}
-
 # Output Format
 
-You must ALWAYS respond with valid JSON in this exact format:
-<output>
-{{
-  "thinking": "A structured reasoning block: current page state, what you just attempted, what worked/failed, and the next concrete step.",
-  "action": [{{"action_name": {{...params...}}}}]
-}}
-</output>
-The action list must NEVER be empty. Do NOT include any other top-level fields; extras are ignored and waste tokens.
-
-# Verification
+You must call exactly one available browser action tool. Do not write a JSON
+action envelope in text; use the provided tool call.
 
 {VERIFICATION_RULES.strip()}
-
-Browser-specific notes:
-- The grader also reads the live browser state (the current URL, title,
-  scroll position, and the browser-extracted DOM tree) alongside the action
-  history (tool names + non-content params).
-- The grader does NOT see your `thinking` field. It reads the page DOM
-  independently and decides whether the goal is satisfied based on what
-  the page actually shows, NOT on what you reported.
-- Before calling `attempt_completion`, ensure the page DOM actually shows
-  the answer. If the answer isn't on the visible page, navigate, scroll,
-  or use `extract` to expose it first.
-- Match the goal's required output format EXACTLY. If the goal asks for an
-  integer, the page must clearly show that integer.
 
 # Safety Rules
 
@@ -251,14 +269,23 @@ Browser-specific notes:
 - NEVER sign legal agreements on the user's behalf (accepting Terms of Service checkboxes is acceptable)
 - When making payments or posting to social media, you may be asked to confirm with the user first
 
-# Screenshot Tool
+# Authentication
 
-Use the `screenshot` action to capture a full-page screenshot. One call
-captures the ENTIRE page (full-page, not just viewport). Do NOT call
-`screenshot` multiple times for the same page. Per-step viewport screenshots
-returned in browser state are for your own use; the orchestrator only
-receives screenshots you take with the `screenshot` action plus the final
-page screenshot when your task completes."""
+- Use the cheapest viable authentication path for this single site.
+- Priority:
+  - 1. Existing Steel/cookie session
+  - 2. Saved passwords
+  - 3. Email OTP
+  - 4. SMS OTP
+  - 5. Minted account
+  - 6. Guest/anonymous completion, if viable
+- Cookie-based and existing Steel-session auth are applied automatically before you start.
+- For saved passwords, type the listed ref (for example, pwd:andy@email.com) into password fields; the browser tool decrypts it and records credential usage.
+- For multi-account sites, prefer the task-specific user context when present, then the freshest enabled cookie bundle.
+- When a site offers OTP delivery options, prefer email over SMS.
+- OTP codes from email or SMS are automatically injected as user messages into your context as soon as they become available. If no OTP code is received after 60 seconds since requested, request a resend of the OTP code. If after another 60 seconds no OTP code is received, consider that authentication route exhausted and unusable.
+- If authentication blocks the task after all available automated auth options are exhausted, call request_user_assistance_for_authentication. Do not call attempt_completion, send_message_to_user, or report a status instead.
+- Do not open AgentMail, webmail, or inbox websites to retrieve OTP codes."""
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +315,9 @@ def _format_action_history(action_history: List[Dict[str, Any]]) -> str:
 
 def _format_browser_state_text(task: str, browser_state: Dict[str, Any]) -> str:
     bs = browser_state
+    timestamp = bs.get("timestamp") or bs.get("current_timestamp") or bs.get("current_time")
+    if not timestamp:
+        timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     stats_text = ""
     page_stats = bs.get("page_stats")
     if page_stats:
@@ -327,12 +357,78 @@ def _format_browser_state_text(task: str, browser_state: Dict[str, Any]) -> str:
     title_part = f" - {bs['title']}" if bs.get("title") else ""
 
     return (
-        f"Task: {task}\n\n"
+        f"# Current Browser State\n\n"
+        f"Timestamp: {timestamp}\n"
         f"{stats_text}Current URL: {bs.get('url', '')}{title_part}\n"
         f"Viewport: {viewport.get('width', 0)}x{viewport.get('height', 0)}\n"
         f"{scroll_text}{tabs_text}{events_text}{popups_text}"
         f"Interactive elements:\n{bs.get('dom_tree', '')}"
     )
+
+
+def build_browser_state_message_content(
+    *,
+    task: str,
+    browser_state: Dict[str, Any],
+    include_screenshot: bool = True,
+    include_task: bool = False,
+) -> Any:
+    """Build the per-turn browser-state user message content."""
+    text_content = _format_browser_state_text(task, browser_state)
+    display_text = f"Task: {task}\n\n{text_content}" if include_task else text_content
+
+    screenshot = browser_state.get("screenshot")
+    if screenshot and include_screenshot:
+        image_url = screenshot if screenshot.startswith("http") else f"data:image/png;base64,{screenshot}"
+        return [
+            {"type": "text", "text": display_text},
+            {"type": "image_url", "image_url": {"url": image_url}},
+        ]
+    return display_text
+
+
+def _tool_status(message: Dict[str, Any]) -> Optional[str]:
+    metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+    status = metadata.get("toolStatus") or metadata.get("tool_status")
+    if isinstance(status, str):
+        return status
+    content = message.get("content")
+    if isinstance(content, str) and content.strip().startswith("{"):
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(parsed, dict):
+            parsed_status = parsed.get("toolStatus") or parsed.get("tool_status") or parsed.get("status")
+            if isinstance(parsed_status, str):
+                return parsed_status
+    return None
+
+
+def filter_browser_turn_messages(turn_messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drop in-progress tool rows and keep the latest tool result per call id."""
+    latest_tool_index_by_id: Dict[str, int] = {}
+    skipped_indexes: set[int] = set()
+
+    for index, message in enumerate(turn_messages):
+        if message.get("role") != "tool":
+            continue
+        status = (_tool_status(message) or "").upper()
+        if status == "IN_PROGRESS":
+            skipped_indexes.add(index)
+            continue
+        tool_call_id = message.get("tool_call_id")
+        if not tool_call_id:
+            continue
+        tool_call_id = str(tool_call_id)
+        previous = latest_tool_index_by_id.get(tool_call_id)
+        if previous is not None:
+            skipped_indexes.add(previous)
+        latest_tool_index_by_id[tool_call_id] = index
+
+    if not skipped_indexes:
+        return list(turn_messages)
+    return [message for index, message in enumerate(turn_messages) if index not in skipped_indexes]
 
 
 def build_browser_use_messages(
@@ -342,30 +438,57 @@ def build_browser_use_messages(
     action_history: List[Dict[str, Any]],
     available_actions: List[str],
     include_screenshot: bool = True,
+    extra_user_messages: Optional[List[Any]] = None,
+    dynamic_system_context: Optional[str] = None,
+    turn_messages: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """Build the OpenAI-style messages array for one browser-use step.
 
-    Returns `[system, user]`. The user message is multimodal (text + image)
-    when `include_screenshot=True` and a screenshot is present in the
-    browser state — otherwise a plain text user message.
+    When `turn_messages` is provided, returns a full browser-task transcript:
+    `[system, optional dynamic-system, initial user goal, prior turns,
+    current state]`. Legacy callers without `turn_messages` get the older
+    compact single-step shape.
     """
-    text_content = _format_browser_state_text(task, browser_state) + _format_action_history(action_history)
+    user_content = build_browser_state_message_content(
+        task=task,
+        browser_state=browser_state,
+        include_screenshot=include_screenshot,
+        include_task=turn_messages is None,
+    )
+    if turn_messages is None and isinstance(user_content, str):
+        user_content = user_content + _format_action_history(action_history)
+    elif turn_messages is None and isinstance(user_content, list) and user_content:
+        user_content[0]["text"] = str(user_content[0].get("text", "")) + _format_action_history(action_history)
 
-    user_content: Any
-    screenshot = browser_state.get("screenshot")
-    if screenshot and include_screenshot:
-        image_url = screenshot if screenshot.startswith("http") else f"data:image/png;base64,{screenshot}"
-        user_content = [
-            {"type": "text", "text": text_content},
-            {"type": "image_url", "image_url": {"url": image_url}},
-        ]
+    system_content = build_browser_use_system_prompt(available_actions)
+    if dynamic_system_context:
+        from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+
+        system_content = system_content + SYSTEM_PROMPT_DYNAMIC_BOUNDARY + dynamic_system_context
+
+    messages = [{"role": "system", "content": system_content}]
+
+    if turn_messages is not None:
+        messages.append({"role": "user", "content": task})
+        messages.extend(filter_browser_turn_messages(turn_messages))
+        messages.append({"role": "user", "content": user_content})
     else:
-        user_content = text_content
+        messages.append({"role": "user", "content": user_content})
 
-    return [
-        {"role": "system", "content": build_browser_use_system_prompt(available_actions)},
-        {"role": "user", "content": user_content},
-    ]
+    state_extra_user_messages = (
+        browser_state.get("_extra_user_messages")
+        or browser_state.get("extra_user_messages")
+        or []
+    )
+    merged_extra_user_messages = list(extra_user_messages or []) + list(state_extra_user_messages or [])
+    for extra in merged_extra_user_messages:
+        if isinstance(extra, dict):
+            role = extra.get("role", "user")
+            content = extra.get("content", extra.get("text", ""))
+            messages.append({"role": role, "content": content})
+        else:
+            messages.append({"role": "user", "content": str(extra)})
+    return messages
 
 
 # ---------------------------------------------------------------------------
@@ -400,6 +523,53 @@ def _match(regex: re.Pattern[str], text: str, group: int = 0) -> Optional[str]:
     return m.group(group).strip()
 
 
+def normalize_browser_use_tool_call(
+    tool_call: Dict[str, Any],
+    *,
+    thinking: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Convert one provider-native tool call into the UnifiedAction shape."""
+    name = tool_call.get("name")
+    function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+    if not isinstance(name, str) or not name:
+        name = function.get("name")
+    if not isinstance(name, str) or not name:
+        raise ValueError(f"normalize_browser_use_tool_call: missing tool name in {tool_call}")
+
+    raw_args: Any = (
+        tool_call.get("arguments")
+        if "arguments" in tool_call
+        else tool_call.get("input")
+    )
+    if raw_args is None and function:
+        raw_args = function.get("arguments")
+    if raw_args in (None, ""):
+        args: Dict[str, Any] = {}
+    elif isinstance(raw_args, str):
+        try:
+            parsed = json.loads(raw_args)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"normalize_browser_use_tool_call: invalid JSON arguments for {name}: {raw_args[:200]}"
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise ValueError(
+                f"normalize_browser_use_tool_call: arguments for {name} must decode to an object"
+            )
+        args = parsed
+    elif isinstance(raw_args, dict):
+        args = raw_args
+    else:
+        raise ValueError(
+            f"normalize_browser_use_tool_call: unsupported arguments type for {name}: {type(raw_args).__name__}"
+        )
+
+    return normalize_browser_use_response({
+        "thinking": thinking,
+        "action": [{name: args}],
+    })
+
+
 _ACTION_NAME_MAP: Dict[str, str] = {
     "navigate": "goto",
     "go_back": "navback",
@@ -418,7 +588,7 @@ _VALID_ACTIONS = frozenset({
     # BROWSER_USE_TOOLS advertises send_message_to_user so the model can ask
     # the user for help mid-task. Keep the allowlist in sync with the tool
     # schema or normalize_browser_use_response() will reject it.
-    "send_message_to_user",
+    "send_message_to_user", "request_user_assistance_for_authentication",
 })
 
 
@@ -534,6 +704,8 @@ def _normalize_action_params(
         out["text"] = params["text"]
     if params.get("typing_text"):  # Yutori format
         out["text"] = params["typing_text"]
+    if normalized_action == "input_text" and params.get("clear") is not None:
+        out["clear"] = bool(params["clear"])
 
     if first_action.get("filename"):
         out["filename"] = first_action["filename"]
@@ -568,13 +740,12 @@ def _normalize_action_params(
         out["tab_id"] = params["tab_id"]
     if params.get("message"):
         out["message"] = params["message"]
-    # Defensive remap: legacy training data has the LLM emit `result` for
-    # attempt_completion. The Pydantic model (AttemptCompletionBrowserTool)
-    # and downstream handler (handler.py reading params.get("reasoning"))
-    # expect `reasoning`. Accept either; prefer `reasoning` when both are set.
-    reasoning_value = params.get("reasoning") or params.get("result")
-    if reasoning_value:
-        out["reasoning"] = reasoning_value
+    cookie_bundle_id = params.get("cookie_bundle_id") or params.get("cookieBundleId") or first_action.get("cookie_bundle_id")
+    if cookie_bundle_id:
+        out["cookie_bundle_id"] = cookie_bundle_id
+    label = params.get("label") or first_action.get("label")
+    if label:
+        out["label"] = label
     if params.get("reason"):
         out["reason"] = params["reason"]
 

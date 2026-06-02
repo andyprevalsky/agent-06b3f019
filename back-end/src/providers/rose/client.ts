@@ -31,6 +31,7 @@ import { getPool, poolForModel } from './pools';
 import { buildOpenAiResponseFormat } from './schema';
 import type { CompletionChunk, CompletionOptions, RoseStreamChunk } from './types';
 import { waterfallComplete } from './waterfall';
+import { dumpLlmContext, updateLlmDump } from '../llmDump';
 
 const log = createLogger('Rose');
 
@@ -61,6 +62,12 @@ function shortRequestId(): string {
   return randomUUID().replace(/-/g, '').slice(0, 12);
 }
 
+function dumpDisplayModel(actualModel: string): string {
+  if (actualModel.endsWith('-claude')) return actualModel.slice(0, -'-claude'.length);
+  if (actualModel.endsWith('-gpt')) return actualModel.slice(0, -'-gpt'.length);
+  return actualModel;
+}
+
 /**
  * Drop-in replacement for the deleted Supabase edge-function client.
  * Same function signature, same CompletionChunk shape — chat callers
@@ -89,7 +96,7 @@ export async function createStreamingCompletion(
   };
 
   const requestId = shortRequestId();
-  const callSite = 'chat';
+  const callSite = options.dump_context?.call_site ?? 'chat';
 
   log.info('request', {
     request_id: requestId,
@@ -123,11 +130,53 @@ interface WrapOptions {
 async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
   const poolSpec = getPool(opts.pool);
   const startedAt = Date.now();
+  const outputParts: string[] = [];
+  const reasoningParts: string[] = [];
+  const toolCalls: Array<Record<string, unknown>> = [];
+  let finishReason: string | null = null;
+  let dumpPath: string | null = null;
 
   let metadata: { actual_model: string; pool_name: string } = {
     actual_model: '',
     pool_name: '',
   };
+
+  if (opts.options.dump_context) {
+    dumpPath = dumpLlmContext({
+      call_site: opts.options.dump_context.call_site,
+      agent_id: opts.options.dump_context.agent_id,
+      model: opts.options.model,
+      message_count: opts.options.messages.length,
+      messages: opts.options.messages,
+      response_format: opts.options.response_format,
+      tools: opts.options.tools,
+      config: {
+        pool: opts.pool,
+        call_site: opts.callSite,
+        model: opts.options.model,
+        temperature: opts.options.temperature,
+        max_tokens: opts.options.max_tokens,
+        reasoning_effort: opts.options.effort,
+        response_format: opts.options.response_format,
+        tools: opts.options.tools,
+        tool_choice: opts.options.tool_choice,
+        direct_auth: {
+          claude_token: Boolean(opts.options.claude_token),
+          gpt_token: Boolean(opts.options.gpt_token),
+          gpt_account_id: Boolean(opts.options.gpt_account_id),
+        },
+        requested_params: {
+          temperature: opts.options.temperature,
+          max_tokens: opts.options.max_tokens,
+          reasoning_effort: opts.options.effort,
+          response_format: opts.options.response_format,
+          tool_choice: opts.options.tool_choice,
+        },
+        ...(opts.options.dump_context.config ?? {}),
+      },
+      extra: opts.options.dump_context.extra,
+    });
+  }
 
   const emitChunk = (chunk: RoseStreamChunk): CompletionChunk | null => {
     if (chunk.kind === 'metadata') {
@@ -141,6 +190,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
       return null;
     }
     if (chunk.kind === 'content') {
+      outputParts.push(chunk.data.text);
       return {
         choices: [{ index: 0, delta: { content: chunk.data.text }, finish_reason: null }],
         requested_model: opts.options.model,
@@ -150,6 +200,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
       };
     }
     if (chunk.kind === 'reasoning') {
+      reasoningParts.push(chunk.data.text);
       return {
         choices: [{ index: 0, delta: { reasoning: chunk.data.text }, finish_reason: null }],
         requested_model: opts.options.model,
@@ -159,6 +210,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
       };
     }
     if (chunk.kind === 'usage') {
+      finishReason = chunk.data.finish_reason ?? 'stop';
       return {
         choices: [{ index: 0, delta: {}, finish_reason: chunk.data.finish_reason ?? 'stop' }],
         requested_model: opts.options.model,
@@ -175,6 +227,11 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
       };
     }
     if (chunk.kind === 'tool_call') {
+      toolCalls.push({
+        id: chunk.data.id,
+        name: chunk.data.name,
+        arguments: chunk.data.arguments,
+      });
       return {
         choices: [
           {
@@ -210,6 +267,32 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     return null;
   };
 
+  const finalizeDump = (error?: unknown) => {
+    if (!dumpPath) return;
+    const actualModelRaw = metadata.actual_model || '';
+    const actualModel = actualModelRaw ? dumpDisplayModel(actualModelRaw) : null;
+    updateLlmDump(dumpPath, {
+      model: actualModel ?? opts.options.model,
+      config: {
+        actual_model: actualModel,
+        actual_model_raw: actualModelRaw || null,
+        pool_name: metadata.pool_name || null,
+        finish_reason: finishReason,
+      },
+      extra: {
+        output: outputParts.join(''),
+        reasoning: reasoningParts.join(''),
+        tool_calls: toolCalls,
+        error:
+          error instanceof Error
+            ? { name: error.name, message: error.message, stack: error.stack }
+            : error
+              ? String(error)
+              : null,
+      },
+    });
+  };
+
   // 1. claudeAuth attempt (with fall-through buffering)
   let claudeAuthFailed: RoseError | null = null;
   let gptAuthFailed: RoseError | null = null;
@@ -236,6 +319,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
         pool: opts.pool,
         elapsed_ms: Date.now() - startedAt,
       });
+      finalizeDump();
       return;
     } catch (err) {
       if (err instanceof PreContentFallThroughError) {
@@ -245,6 +329,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
           reason: err.cause.name,
         });
       } else {
+        finalizeDump(err);
         throw err;
       }
     }
@@ -276,6 +361,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
         elapsed_ms: Date.now() - startedAt,
         claude_auth_failed: claudeAuthFailed?.name ?? null,
       });
+      finalizeDump();
       return;
     } catch (err) {
       if (err instanceof PreContentFallThroughError) {
@@ -285,6 +371,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
           reason: err.cause.name,
         });
       } else {
+        finalizeDump(err);
         throw err;
       }
     }
@@ -294,7 +381,9 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
   // fall-through sentinel so callers continue to see typed RoseError
   // subclasses (their `instanceof RoseError` checks depend on it).
   if (opts.options.disable_waterfall) {
-    throw gptAuthFailed ?? claudeAuthFailed ?? new Error('Rose waterfall disabled');
+    const error = gptAuthFailed ?? claudeAuthFailed ?? new Error('Rose waterfall disabled');
+    finalizeDump(error);
+    throw error;
   }
 
   try {
@@ -314,8 +403,10 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     });
   } catch (err) {
     if (err instanceof PreContentFallThroughError) {
+      finalizeDump(err.cause);
       throw err.cause;
     }
+    finalizeDump(err);
     throw err;
   }
   log.info('waterfall.done', {
@@ -325,6 +416,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     claude_auth_failed: claudeAuthFailed?.name ?? null,
     gpt_auth_failed: gptAuthFailed?.name ?? null,
   });
+  finalizeDump();
 }
 
 interface RunWithFallThroughOptions {

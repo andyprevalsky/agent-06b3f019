@@ -29,10 +29,15 @@ from providers.rose.browser_use import (
     _normalize_action_params,
     build_browser_use_messages,
     build_browser_use_system_prompt,
+    build_browser_use_tools,
     extract_json,
+    filter_browser_turn_messages,
     generate_tool_descriptions,
     normalize_browser_use_response,
+    normalize_browser_use_tool_call,
 )
+from tools.prompts import attempt_completion_prompt
+from utils.prompts import VERIFICATION_RULES
 
 
 # =====================================================================
@@ -73,26 +78,98 @@ def test_generate_tool_descriptions_no_params_for_navback():
 
 def test_browser_use_tool_catalog_completeness():
     # Sanity: all the actions referenced by the prompt-builder exist.
-    must_have = {"goto", "click", "input_text", "scroll", "screenshot", "attempt_completion"}
+    must_have = {
+        "goto",
+        "click",
+        "input_text",
+        "scroll",
+        "screenshot",
+        "attempt_completion",
+        "request_user_assistance_for_authentication",
+    }
     assert must_have.issubset(set(BROWSER_USE_TOOLS.keys()))
     assert "extract" not in BROWSER_USE_TOOLS
+    assert "restart_auth_with_cookie_bundle" not in BROWSER_USE_TOOLS
 
 
-def test_build_browser_use_system_prompt_includes_actions():
+def test_build_browser_use_system_prompt_uses_native_tools_not_action_list():
     prompt = build_browser_use_system_prompt(["click", "goto"])
-    assert "# Available Actions" in prompt
-    assert "- click:" in prompt
-    assert "- goto:" in prompt
-    assert '"thinking"' in prompt
+    assert "# Role" in prompt
+    assert "You are a browser automation agent. You take in a user goal" in prompt
+    assert "Each turn you will receive a snapshot of the current browser environment" in prompt
+    assert "Page stats" in prompt
+    assert "Tab information" in prompt
+    assert "A full-page screenshot if the screenshot tool was called on the previous turn" in prompt
+    assert "The full prior assistant/tool turn history" not in prompt
+    assert "# Available Actions" not in prompt
+    assert "- click:" not in prompt
+    assert "- goto:" not in prompt
+    assert "call exactly one available browser action tool" in prompt
+    assert "# Screenshot Tool" not in prompt
+    assert "Use the `screenshot` action" not in prompt
 
 
 def test_build_browser_use_system_prompt_does_not_advertise_extract():
     from browser_tools.schemas import AVAILABLE_ACTIONS
 
     assert "extract" not in AVAILABLE_ACTIONS
+    assert "restart_auth_with_cookie_bundle" not in AVAILABLE_ACTIONS
     prompt = build_browser_use_system_prompt(AVAILABLE_ACTIONS)
     assert "- extract:" not in prompt
-    assert '"action"' in prompt
+    assert "use `extract`" not in prompt
+    assert "restart_auth_with_cookie_bundle" not in prompt
+    assert "tool call" in prompt
+
+
+def test_build_browser_use_system_prompt_auth_priority_is_numbered():
+    prompt = build_browser_use_system_prompt([])
+
+    assert "- Use the cheapest viable authentication path for this single site." in prompt
+    assert "- Priority:\n  - 1. Existing Steel/cookie session" in prompt
+    assert "  - 2. Saved passwords" in prompt
+    assert "  - 3. Email OTP" in prompt
+    assert "  - 4. SMS OTP" in prompt
+    assert "OTP codes from email or SMS are automatically injected" in prompt
+    assert "call request_user_assistance_for_authentication" in prompt
+    assert "Do not call attempt_completion, send_message_to_user, or report a status instead." in prompt
+    assert "# OTP Rules" not in prompt
+    assert "Do not classify final credential failures yourself" not in prompt
+
+
+def test_build_browser_use_system_prompt_reuses_main_grading_prompt():
+    prompt = build_browser_use_system_prompt([])
+
+    assert VERIFICATION_RULES.strip() in prompt
+    assert "# Verification" not in prompt
+    assert "Browser-specific notes:" not in prompt
+
+
+def test_build_browser_use_tools_preserves_catalog_descriptions():
+    tools = build_browser_use_tools(["click", "request_user_assistance_for_authentication", "unknown_action"])
+    assert [tool["name"] for tool in tools] == ["click", "request_user_assistance_for_authentication"]
+
+    click = tools[0]
+    assert click["description"] == BROWSER_USE_TOOLS["click"]["description"]
+    assert click["input_schema"]["properties"]["index"]["description"] == (
+        BROWSER_USE_TOOLS["click"]["params"]["index"]["description"]
+    )
+    assert click["input_schema"]["required"] == ["index"]
+
+    auth_help = tools[1]
+    assert auth_help["description"] == BROWSER_USE_TOOLS["request_user_assistance_for_authentication"]["description"]
+    assert auth_help["input_schema"]["properties"] == {}
+    assert auth_help["input_schema"]["required"] == []
+
+
+def test_browser_attempt_completion_uses_canonical_prompt_and_empty_schema():
+    tools = build_browser_use_tools(["attempt_completion"])
+
+    completion = tools[0]
+    assert completion["description"] == attempt_completion_prompt.strip()
+    assert "When you are in PLAN phase" not in completion["description"]
+    assert "When you are in EXECUTE phase" not in completion["description"]
+    assert completion["input_schema"]["properties"] == {}
+    assert completion["input_schema"]["required"] == []
 
 
 # =====================================================================
@@ -130,6 +207,18 @@ def test_build_messages_text_only_when_no_screenshot():
     assert "Task: Click submit" in msgs[1]["content"]
     assert "Current URL: https://example.com - Example" in msgs[1]["content"]
     assert "[1]<button>Submit</button>" in msgs[1]["content"]
+
+
+def test_build_messages_browser_state_includes_timezone_aware_timestamp():
+    msgs = build_browser_use_messages(
+        task="Click submit",
+        browser_state=_browser_state(timestamp="2026-05-27T22:39:24Z"),
+        action_history=[],
+        available_actions=["click"],
+        include_screenshot=False,
+    )
+    assert "Timestamp: 2026-05-27T22:39:24Z" in msgs[1]["content"]
+    assert msgs[1]["content"].index("Timestamp:") < msgs[1]["content"].index("Current URL:")
 
 
 def test_build_messages_multimodal_when_screenshot_present():
@@ -188,6 +277,84 @@ def test_build_messages_include_screenshot_false_drops_image():
         include_screenshot=False,
     )
     assert isinstance(msgs[1]["content"], str)
+
+
+def test_build_messages_appends_extra_user_messages():
+    msgs = build_browser_use_messages(
+        task="t",
+        browser_state=_browser_state(),
+        action_history=[],
+        available_actions=["click"],
+        include_screenshot=False,
+        extra_user_messages=[{"role": "user", "content": "OTP 123456"}],
+    )
+    assert len(msgs) == 3
+    assert msgs[2] == {"role": "user", "content": "OTP 123456"}
+
+
+def test_build_messages_turn_history_keeps_goal_first_and_state_last():
+    msgs = build_browser_use_messages(
+        task="# Current Goal\nBuy socks",
+        browser_state=_browser_state(),
+        action_history=[{"step": 1, "action": "click", "result": {"success": True}}],
+        available_actions=["click"],
+        include_screenshot=False,
+        dynamic_system_context="# User Context\nDelivery address",
+        turn_messages=[
+            {
+                "role": "assistant",
+                "content": "I will click submit.",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "click", "arguments": '{"index":1}'},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "name": "click", "content": '{"success":true}'},
+        ],
+    )
+    assert [m["role"] for m in msgs] == ["system", "user", "assistant", "tool", "user"]
+    assert "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__" in msgs[0]["content"]
+    assert "# User Context\nDelivery address" in msgs[0]["content"]
+    assert msgs[1]["content"] == "# Current Goal\nBuy socks"
+    assert "Previous Actions:" not in msgs[-1]["content"]
+    assert "Current URL: https://example.com - Example" in msgs[-1]["content"]
+
+
+def test_build_messages_turn_history_filters_in_progress_and_duplicate_tool_results():
+    turn_messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "call_1", "type": "function", "function": {"name": "click", "arguments": '{"index":1}'}}
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "name": "click",
+            "content": '{"success":false,"toolStatus":"IN_PROGRESS"}',
+        },
+        {"role": "tool", "tool_call_id": "call_1", "name": "click", "content": '{"success":false}'},
+        {"role": "tool", "tool_call_id": "call_1", "name": "click", "content": '{"success":true}'},
+    ]
+    filtered = filter_browser_turn_messages(turn_messages)
+    assert [message["role"] for message in filtered] == ["assistant", "tool"]
+    assert filtered[-1]["content"] == '{"success":true}'
+
+    msgs = build_browser_use_messages(
+        task="# Current Goal\nBuy socks",
+        browser_state=_browser_state(),
+        action_history=[],
+        available_actions=["click"],
+        include_screenshot=False,
+        turn_messages=turn_messages,
+    )
+    assert [message["role"] for message in msgs] == ["system", "user", "assistant", "tool", "user"]
+    assert msgs[3]["content"] == '{"success":true}'
 
 
 # =====================================================================
@@ -279,6 +446,24 @@ def test_normalize_input_text_remap():
     assert out["action"] == "input_text"
     assert out["index"] == 2
     assert out["params"]["text"] == "hello"
+
+
+def test_normalize_request_user_assistance():
+    out = normalize_browser_use_response({
+        "action": [{"request_user_assistance_for_authentication": {}}],
+    })
+    assert out["action"] == "request_user_assistance_for_authentication"
+    assert out["params"] == {}
+
+
+def test_normalize_provider_tool_call():
+    out = normalize_browser_use_tool_call(
+        {"id": "call_1", "name": "click", "arguments": '{"index": 4}'},
+        thinking="saw submit button",
+    )
+    assert out["action"] == "click"
+    assert out["index"] == 4
+    assert out["thinking"] == "saw submit button"
 
 
 def test_normalize_prefers_thinking_over_next_goal():
@@ -388,6 +573,13 @@ def test_params_typing_text_yutori_alias():
     assert out["text"] == "hi"
 
 
+def test_params_input_text_preserves_clear_false():
+    out = _normalize_action_params("input_text", "input_text", {"text": "hi", "clear": False}, {}, 4)
+    assert out["text"] == "hi"
+    assert out["clear"] is False
+    assert out["index"] == 4
+
+
 def test_params_query_to_instruction():
     out = _normalize_action_params("extract", "extract", {"query": "find headlines"}, {}, None)
     assert out["instruction"] == "find headlines"
@@ -443,20 +635,60 @@ def _anthropic_text_sse(text: str) -> str:
     return "\n".join(lines)
 
 
+def _anthropic_tool_sse(name: str, arguments: str) -> str:
+    lines: list[str] = []
+    lines += _ev("message_start", {
+        "type": "message_start",
+        "message": {"usage": {"input_tokens": 5}},
+    })
+    lines += _ev("content_block_start", {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {"type": "tool_use", "id": "toolu_1", "name": name, "input": {}},
+    })
+    lines += _ev("content_block_delta", {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {"type": "input_json_delta", "partial_json": arguments},
+    })
+    lines += _ev("content_block_stop", {"type": "content_block_stop", "index": 0})
+    lines += _ev("message_delta", {
+        "type": "message_delta",
+        "delta": {"stop_reason": "tool_use"},
+        "usage": {"output_tokens": 4},
+    })
+    lines += _ev("message_stop", {"type": "message_stop"})
+    return "\n".join(lines)
+
+
 _ACTION_TEXT = '{"thinking": "x", "action": [{"action_name": "click", "index": 3}]}'
 
 
 async def test_complete_browser_use_waterfall_only_path():
     """No claudeAuth → goes straight to openrouter → returns waterfall mode."""
     sse_body = _openai_sse([
-        {"choices": [{"delta": {"content": _ACTION_TEXT}, "finish_reason": "stop"}]},
+        {
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_click",
+                        "type": "function",
+                        "function": {"name": "click", "arguments": '{"index": 3}'},
+                    }]
+                },
+                "finish_reason": "tool_calls",
+            }]
+        },
         {"usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20}},
     ])
 
     captured: list[str] = []
+    captured_bodies: list[dict] = []
 
     def handler(req):
         captured.append(str(req.url))
+        captured_bodies.append(json.loads(req.content.decode()))
         return httpx.Response(200, text=sse_body, headers={"Content-Type": "text/event-stream"})
 
     set_mock_handler(handler)
@@ -480,16 +712,24 @@ async def test_complete_browser_use_waterfall_only_path():
     # No anthropic call, only openrouter.
     assert all("api.anthropic.com" not in u for u in captured)
     assert any("openrouter.ai" in u for u in captured)
+    assert captured_bodies
+    body = captured_bodies[0]
+    assert body["tool_choice"] == "required"
+    assert body["tools"][0]["function"]["name"] == "click"
+    assert body["tools"][0]["function"]["description"] == BROWSER_USE_TOOLS["click"]["description"]
+    assert "# Available Actions" not in body["messages"][0]["content"]
 
 
 async def test_complete_browser_use_claude_path_succeeds():
-    """Valid claudeAuth → Anthropic returns JSON in text → mode=claude."""
+    """Valid claudeAuth receives native tools and returns a native tool call."""
+    captured_bodies: list[dict] = []
 
     def handler(req):
         url = str(req.url)
         if "api.anthropic.com" in url:
+            captured_bodies.append(json.loads(req.content.decode()))
             return httpx.Response(
-                200, text=_anthropic_text_sse(_ACTION_TEXT),
+                200, text=_anthropic_tool_sse("click", '{"index": 3}'),
                 headers={"Content-Type": "text/event-stream"},
             )
         return httpx.Response(500, text="should not hit waterfall")
@@ -510,14 +750,24 @@ async def test_complete_browser_use_claude_path_succeeds():
     assert result["mode"] == "claude"
     assert result["action"]["action"] == "click"
     assert result["claude_token_error"] is None
+    assert captured_bodies
+    body = captured_bodies[0]
+    assert body["tool_choice"]["type"] == "any"
+    assert body["tools"][0]["name"] == "click"
+    assert body["tools"][0]["description"] == BROWSER_USE_TOOLS["click"]["description"]
 
 
 async def test_complete_browser_use_gpt_path_succeeds():
-    """Valid gptAuth -> Codex Responses returns JSON in text -> mode=gpt."""
+    """Valid gptAuth -> Codex Responses returns a native tool call -> mode=gpt."""
     sse_lines = []
-    sse_lines += _ev("response.output_text.delta", {
-        "type": "response.output_text.delta",
-        "delta": _ACTION_TEXT,
+    sse_lines += _ev("response.output_item.done", {
+        "type": "response.output_item.done",
+        "item": {
+            "type": "function_call",
+            "call_id": "call_click",
+            "name": "click",
+            "arguments": '{"index": 3}',
+        },
     })
     sse_lines += _ev("response.completed", {
         "type": "response.completed",
@@ -532,11 +782,13 @@ async def test_complete_browser_use_gpt_path_succeeds():
     sse_body = "\n".join(sse_lines)
 
     captured: list[str] = []
+    captured_bodies: list[dict] = []
 
     def handler(req):
         url = str(req.url)
         captured.append(url)
         if "chatgpt.com/backend-api/codex/responses" in url:
+            captured_bodies.append(json.loads(req.content.decode()))
             return httpx.Response(
                 200, text=sse_body, headers={"Content-Type": "text/event-stream"}
             )
@@ -544,6 +796,9 @@ async def test_complete_browser_use_gpt_path_succeeds():
 
     set_mock_handler(handler)
     client = RoseClient(openrouter_key="ork-x")
+    dump_root = ROOT.parent / ".llm-dumps" / "unbound"
+    for path in dump_root.glob("*test-bu-gpt.json"):
+        path.unlink()
 
     result = await client.complete_browser_use(
         task="click submit",
@@ -553,6 +808,10 @@ async def test_complete_browser_use_gpt_path_succeeds():
         include_screenshot=False,
         gpt_auth=gpt_auth_from_token("good-gpt-token", "acct_123"),
         call_site="test-bu-gpt",
+        dump_extra={
+            "browser_recording_manifest_path": "/tmp/browser-recording/manifest.json",
+            "iteration": 7,
+        },
     )
 
     assert result["mode"] == "gpt"
@@ -562,6 +821,31 @@ async def test_complete_browser_use_gpt_path_succeeds():
     assert result["usage"]["total_tokens"] == 20
     assert any("chatgpt.com/backend-api/codex/responses" in u for u in captured)
     assert all("openrouter.ai" not in u for u in captured)
+    assert captured_bodies
+    body = captured_bodies[0]
+    assert body["tool_choice"] == "required"
+    assert body["tools"][0]["name"] == "click"
+    assert body["tools"][0]["description"] == BROWSER_USE_TOOLS["click"]["description"]
+    assert "# Available Actions" not in body["instructions"]
+
+    dumps = sorted(dump_root.glob("*test-bu-gpt.json"))
+    assert dumps, "complete_browser_use should dump exact LLM context"
+    payload = json.loads(dumps[-1].read_text())
+    assert payload["model"] == "gpt-5.5"
+    assert payload["message_count"] == 2
+    assert [message["role"] for message in payload["messages"]] == ["system", "user"]
+    assert payload["config"]["actual_model"] == "gpt-5.5"
+    assert payload["config"]["actual_model_raw"] == "gpt-5.5-gpt"
+    assert payload["config"]["mode"] == "gpt"
+    assert payload["config"]["effective_params"]["model"] == "gpt-5.5"
+    assert payload["config"]["effective_params"]["temperature"] is None
+    assert payload["config"]["effective_params"]["max_tokens"] is None
+    assert payload["config"]["requested_params"]["temperature"] == 1.0
+    assert payload["config"]["requested_params"]["max_tokens"] == 16000
+    assert payload["tools"][0]["name"] == "click"
+    assert payload["config"]["tool_choice"] == "any"
+    assert payload["extra"]["browser_recording_manifest_path"] == "/tmp/browser-recording/manifest.json"
+    assert payload["extra"]["iteration"] == 7
 
 
 async def test_complete_browser_use_claude_401_falls_through_to_waterfall():
@@ -609,14 +893,22 @@ async def run_all_tests():
     r.record("tool_descriptions_filters_and_params", test_generate_tool_descriptions_filters_and_includes_params)
     r.record("tool_descriptions_no_param_for_navback", test_generate_tool_descriptions_no_params_for_navback)
     r.record("tool_catalog_completeness", test_browser_use_tool_catalog_completeness)
-    r.record("system_prompt_includes_actions", test_build_browser_use_system_prompt_includes_actions)
+    r.record("system_prompt_uses_native_tools", test_build_browser_use_system_prompt_uses_native_tools_not_action_list)
     r.record("system_prompt_hides_extract", test_build_browser_use_system_prompt_does_not_advertise_extract)
+    r.record("native_tool_schemas_preserve_catalog", test_build_browser_use_tools_preserves_catalog_descriptions)
 
     r.record("messages_text_only_no_screenshot", test_build_messages_text_only_when_no_screenshot)
+    r.record("messages_timezone_timestamp", test_build_messages_browser_state_includes_timezone_aware_timestamp)
     r.record("messages_multimodal_with_screenshot", test_build_messages_multimodal_when_screenshot_present)
     r.record("messages_http_screenshot_passthrough", test_build_messages_screenshot_url_passthrough_when_http)
     r.record("messages_action_history_formatting", test_build_messages_action_history_formatting)
     r.record("messages_include_screenshot_false", test_build_messages_include_screenshot_false_drops_image)
+    r.record("messages_extra_user_messages", test_build_messages_appends_extra_user_messages)
+    r.record("messages_turn_history", test_build_messages_turn_history_keeps_goal_first_and_state_last)
+    r.record(
+        "messages_turn_history_filters_tools",
+        test_build_messages_turn_history_filters_in_progress_and_duplicate_tool_results,
+    )
 
     r.record("extract_json_raw_object", test_extract_json_raw_object)
     r.record("extract_json_json_fenced", test_extract_json_json_fenced_block)
@@ -631,6 +923,8 @@ async def run_all_tests():
     r.record("normalize_remap_done", test_normalize_remaps_done_to_attempt_completion)
     r.record("normalize_click_coordinates", test_normalize_click_coordinates_to_click_with_coords)
     r.record("normalize_input_text_remap", test_normalize_input_text_remap)
+    r.record("normalize_request_auth_assistance", test_normalize_request_user_assistance)
+    r.record("normalize_provider_tool_call", test_normalize_provider_tool_call)
     r.record("normalize_prefers_thinking", test_normalize_prefers_thinking_over_next_goal)
     r.record("normalize_falls_back_to_next_goal", test_normalize_falls_back_to_next_goal_when_no_thinking)
     r.record("normalize_string_completion", test_normalize_string_completion_extracts_json)
@@ -645,6 +939,7 @@ async def run_all_tests():
     r.record("params_down_true_direction", test_params_down_true_to_direction_and_amount)
     r.record("params_down_false_direction", test_params_down_false_to_direction_up)
     r.record("params_typing_text_alias", test_params_typing_text_yutori_alias)
+    r.record("params_input_clear_false", test_params_input_text_preserves_clear_false)
     r.record("params_query_to_instruction", test_params_query_to_instruction)
     r.record("params_select_dropdown_text_value", test_params_select_dropdown_text_to_value)
 

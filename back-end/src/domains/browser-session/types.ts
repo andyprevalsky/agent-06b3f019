@@ -60,6 +60,7 @@ export class SessionNoWsUrlError extends Error {
 // ---------------------------------------------------------------------------
 
 export interface SerializedPassword {
+  id: string;
   origin: string;
   username: string;
   encryptedPassword: string;

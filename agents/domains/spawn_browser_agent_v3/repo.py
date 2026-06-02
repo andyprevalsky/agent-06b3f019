@@ -219,6 +219,79 @@ async def save_browser_assistant_message(
         logger.error("Failed to save browser assistant message", error=extract_error_message(e))
 
 
+def build_credential_ref_metadata(kind: str, credential_id: str) -> Dict[str, Any]:
+    """Build standard Message metadata for credential outcome propagation."""
+    return {"credential_ref": {"kind": kind, "id": credential_id}}
+
+
+async def save_browser_credential_ref_message(
+    *,
+    agent_id: str,
+    task_id: str,
+    message: str,
+    credential_ref: Dict[str, Any],
+    role: str = "TOOL",
+    tool_name: str = "credential_ref",
+) -> None:
+    """Save a Message row carrying metadata.credential_ref."""
+    from config import load_config
+
+    try:
+        config = load_config()
+        metadata: Dict[str, Any] = {
+            "subAgentId": task_id,
+            "credential_ref": credential_ref,
+        }
+        if role == "TOOL":
+            metadata.update(
+                {
+                    "toolCallId": str(uuid_module.uuid4()),
+                    "toolName": tool_name,
+                    "toolStatus": MessageStatus.FINISHED.value,
+                    "title": "Credential referenced",
+                    "task_id": task_id,
+                    "action_type": "credential_ref",
+                    "auxiliary": {},
+                }
+            )
+
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(
+                f"{config.backend.api_url}/api/agents/{agent_id}/messages",
+                headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
+                json={"message": message, "role": role, "metadata": metadata},
+            )
+    except Exception as e:
+        logger.error("Failed to save credential ref message", error=extract_error_message(e))
+
+
+async def propagate_browser_run_credentials(
+    config: Any,
+    *,
+    agent_id: str,
+    task_id: str,
+    status: str,
+    success: bool,
+    message: str,
+) -> Dict[str, Any]:
+    """Synchronously apply credential liveness updates for a completed browser run."""
+    backend_url = config.backend.api_url.rstrip("/")
+    async with httpx.AsyncClient(timeout=90.0) as client:
+        response = await client.post(
+            f"{backend_url}/api/credential-propagation/browser-run",
+            headers={"X-API-Key": config.backend.api_key or "", "Content-Type": "application/json"},
+            json={
+                "agentId": agent_id,
+                "taskId": task_id,
+                "status": status,
+                "success": success,
+                "message": message,
+            },
+        )
+        response.raise_for_status()
+        return response.json()
+
+
 # ========================================
 # STEEL FILES
 # ========================================
@@ -320,7 +393,7 @@ async def init_browser_session(
     start_url: str,
 ) -> Dict[str, Any]:
     """Initialize a browser session via backend. Returns session data dict."""
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=180.0) as client:
         response = await client.post(
             f"{config.backend.api_url}/api/browser-session/init",
             headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
@@ -333,12 +406,107 @@ async def init_browser_session(
     raise Exception(f"Failed to init session: {response.text}")
 
 
-async def fetch_session_info(config: Any, task_id: str) -> Dict[str, Any]:
+async def resume_browser_session(config: Any, task_id: str) -> Dict[str, Any]:
+    """Resume a paused browser session by asking backend/Steel for a fresh session."""
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        response = await client.post(
+            f"{config.backend.api_url}/api/browser-session/resume",
+            headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
+            json={"task_id": task_id},
+        )
+    if response.status_code in [200, 201]:
+        return response.json()
+    if response.status_code == 429:
+        return {"rate_limited": True, "status_code": 429}
+    raise Exception(f"Failed to resume session: {response.text}")
+
+
+async def fetch_auth_options(config: Any, user_id: str, realm: str) -> Dict[str, Any]:
+    """Fetch single-realm authentication options for a browser agent spawn."""
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.get(
+            f"{config.backend.api_url}/api/auth-options",
+            params={"realm": realm},
+            headers={"x-api-key": config.backend.api_key or "", "x-user-id": user_id},
+        )
+    if response.status_code == 200:
+        data = response.json()
+        return data if isinstance(data, dict) else {}
+    raise RuntimeError(f"Failed to fetch auth options for {realm}: HTTP {response.status_code} {response.text[:200]}")
+
+
+async def mark_steel_session_auth_failed(
+    config: Any,
+    user_id: str,
+    steel_session_auth_id: str,
+    reason: str,
+) -> Dict[str, Any]:
+    """Disable a stale Steel auth marker so the next session can fall through to cookies."""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        response = await client.post(
+            f"{config.backend.api_url}/api/auth-options/steel-sessions/{steel_session_auth_id}/auth-failed",
+            headers={
+                "x-api-key": config.backend.api_key or "",
+                "x-user-id": user_id,
+                "Content-Type": "application/json",
+            },
+            json={"reason": reason},
+        )
+    if response.status_code in (200, 204):
+        return response.json() if response.content else {"ok": True}
+    raise RuntimeError(
+        f"Failed to mark Steel session auth failed for {steel_session_auth_id}: "
+        f"HTTP {response.status_code} {response.text[:200]}"
+    )
+
+
+async def create_user_auth_assistance_request(
+    config: Any,
+    *,
+    agent_id: str,
+    user_id: str,
+    auth_realm: str,
+    browser_session_id: str,
+    steel_session_id: str,
+    browser_url: str,
+    current_url: str,
+    mode: str = "live_view",
+) -> Dict[str, Any]:
+    """Create the backend row/notification for blocking auth assistance."""
+    payload = {
+        "agentId": agent_id,
+        "userId": user_id,
+        "authRealm": auth_realm,
+        "browserSessionId": browser_session_id,
+        "steelSessionId": steel_session_id,
+        "browserUrl": browser_url,
+        "currentUrl": current_url,
+        "mode": mode,
+    }
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.post(
+            f"{config.backend.api_url}/api/auth-assistance",
+            headers={
+                "x-api-key": config.backend.api_key or "",
+                "x-user-id": user_id,
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+    if response.status_code in (200, 201):
+        data = response.json()
+        return data if isinstance(data, dict) else {}
+    raise RuntimeError(f"Failed to create auth assistance request: HTTP {response.status_code} {response.text[:200]}")
+
+
+async def fetch_session_info(config: Any, task_id: str, validate_live: bool = False) -> Dict[str, Any]:
     """Fetch session info for a resumed task."""
+    params = {"validateLive": "true"} if validate_live else None
     async with httpx.AsyncClient(timeout=10.0) as client:
         response = await client.get(
             f"{config.backend.api_url}/api/browser-session/task/{task_id}",
             headers={"x-api-key": config.backend.api_key or ""},
+            params=params,
         )
         if response.status_code == 200:
             return response.json()
@@ -503,4 +671,33 @@ async def fetch_recent_emails(user_id: str, api_url: str, api_key: str, since: s
             return data.get("emails", [])
     except Exception as e:
         logger.warning("Failed to fetch emails", error=str(e))
+        return []
+
+
+async def fetch_recent_sms_messages(
+    user_id: str, api_url: str, api_key: str, since: str, limit: int = 20
+) -> List[Dict]:
+    """Fetch recent agent-phone SMS messages for OTP extraction."""
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                f"{api_url}/api/agentphone/messages",
+                params={"since": since, "limit": limit},
+                headers={
+                    "X-API-Key": api_key,
+                    "x-user-id": user_id,
+                },
+            )
+
+            if response.status_code == 404:
+                return []
+
+            if response.status_code != 200:
+                logger.warning("Failed to fetch SMS messages for OTP", status=response.status_code)
+                return []
+
+            data = response.json()
+            return data.get("messages", [])
+    except Exception as e:
+        logger.warning("Failed to fetch SMS messages", error=str(e))
         return []

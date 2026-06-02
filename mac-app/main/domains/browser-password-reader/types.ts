@@ -52,6 +52,8 @@ export interface ReadPasswordsConfig {
   keychainPassword?: string;
 }
 
+export type BrowserProfileMetadata = string;
+
 /**
  * A single decrypted password row.
  *
@@ -66,6 +68,7 @@ export interface PasswordData {
   dateLastUsed: number;
   dateCreated: number;
   browserSource: string;
+  browserProfile?: BrowserProfileMetadata;
 }
 
 /**

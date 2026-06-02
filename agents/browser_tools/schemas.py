@@ -229,17 +229,10 @@ class DoneTool(BaseModel):
 
 class AttemptCompletionBrowserTool(BaseModel):
     """
-    Signal that the browser task is complete and ready for verification.
-    
-    Call this when you believe the goal has been accomplished.
-    A verifier will run to confirm - if verification passes, the session closes.
-    If not, you'll receive feedback and can continue working.
+    Use this tool when you are finished with your task and are ready for the grader to review your work.
     """
-    
+
     tool: Literal["attempt_completion"]
-    reasoning: str = Field(
-        description="Summary of what was accomplished and why you believe the task is complete"
-    )
 
 
 class SendMessageToUserBrowserTool(BaseModel):
@@ -252,6 +245,12 @@ class SendMessageToUserBrowserTool(BaseModel):
     reason: Literal["login", "payment", "captcha", "verification", "blocked", "other"] = Field(
         description="Category of the user action needed"
     )
+
+
+class RequestUserAssistanceForAuthenticationBrowserTool(BaseModel):
+    """Ask the user to sign in after all automated auth paths are exhausted."""
+
+    tool: Literal["request_user_assistance_for_authentication"]
 
 
 # ============================================================================
@@ -290,6 +289,7 @@ BROWSER_TOOL_MODELS = {
     # "done": DoneTool,  # Use attempt_completion instead - browser-use 'done' maps to attempt_completion
     "attempt_completion": AttemptCompletionBrowserTool,
     # "send_message_to_user": SendMessageToUserBrowserTool,
+    "request_user_assistance_for_authentication": RequestUserAssistanceForAuthenticationBrowserTool,
 }
 
 
@@ -356,6 +356,7 @@ __all__ = [
     "DoneTool",
     "AttemptCompletionBrowserTool",
     "SendMessageToUserBrowserTool",
+    "RequestUserAssistanceForAuthenticationBrowserTool",
     # Registry & Factory
     "BROWSER_TOOL_MODELS",
     "AVAILABLE_ACTIONS",

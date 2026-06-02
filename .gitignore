@@ -90,6 +90,7 @@ moltbot/
 
 # Conductor per-workspace scratch dir (blackbox test artifacts, agent notes, etc.)
 .context/
+browser-agent-recordings/
 
 # DEV-only LLM context dumps (helpers/observability.py) — never committed.
 .llm-dumps/

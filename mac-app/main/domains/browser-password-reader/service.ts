@@ -31,8 +31,10 @@ import {
   fetchKeychainPassword,
   openLoginsDbCopy,
   resolveLoginDataPath,
+  resolveLoginDataPaths,
 } from './repo';
 import type {
+  BrowserProfileMetadata,
   BrowserConfig,
   BrowserInfo,
   BrowserType,
@@ -41,6 +43,7 @@ import type {
   PasswordData,
   ReadPasswordsConfig,
 } from './types';
+import path from 'path';
 
 /**
  * Remove PKCS7 padding from decrypted data. Invalid padding is left intact
@@ -159,7 +162,8 @@ export async function encryptPasswordToEnvelope(password: string): Promise<strin
 function mapRowToPasswordData(
   row: LoginRow,
   password: string,
-  browserType: BrowserType
+  browserType: BrowserType,
+  browserProfile?: BrowserProfileMetadata
 ): PasswordData {
   return {
     origin: row.origin_url,
@@ -168,7 +172,46 @@ function mapRowToPasswordData(
     dateLastUsed: row.date_last_used ?? 0,
     dateCreated: row.date_created ?? 0,
     browserSource: browserType,
+    ...(browserProfile !== undefined ? { browserProfile } : {}),
   };
+}
+
+function getProfileMetadataFromLoginDataPath(loginDataPath: string): BrowserProfileMetadata {
+  const profilePath = path.dirname(loginDataPath);
+  return path.basename(profilePath);
+}
+
+function resolveLoginDataPathsForRead(browser: BrowserConfig): string[] {
+  if (browser.type === 'chrome') {
+    return resolveLoginDataPaths(browser.loginDataPathPattern);
+  }
+  const loginDataPath = resolveLoginDataPath(browser.loginDataPathPattern);
+  return loginDataPath === null ? [] : [loginDataPath];
+}
+
+function passwordKey(password: PasswordData): string {
+  return `${password.origin}\u0000${password.username}`;
+}
+
+function isPasswordNewer(candidate: PasswordData, existing: PasswordData): boolean {
+  const candidateLastUsed = candidate.dateLastUsed ?? 0;
+  const existingLastUsed = existing.dateLastUsed ?? 0;
+  if (candidateLastUsed !== existingLastUsed) {
+    return candidateLastUsed > existingLastUsed;
+  }
+  return (candidate.dateCreated ?? 0) > (existing.dateCreated ?? 0);
+}
+
+function deduplicatePasswordsByCredential(passwords: PasswordData[]): PasswordData[] {
+  const byCredential = new Map<string, PasswordData>();
+  for (const password of passwords) {
+    const key = passwordKey(password);
+    const existing = byCredential.get(key);
+    if (existing === undefined || isPasswordNewer(password, existing)) {
+      byCredential.set(key, password);
+    }
+  }
+  return Array.from(byCredential.values());
 }
 
 /**
@@ -253,61 +296,71 @@ export async function readPasswordsForBrowser(
     throw new Error(`Unknown browser type: ${browserType}`);
   }
 
-  const loginDataPath = resolveLoginDataPath(browser.loginDataPathPattern);
-  if (loginDataPath === null) {
+  const loginDataPaths = resolveLoginDataPathsForRead(browser);
+  if (loginDataPaths.length === 0) {
     console.log(`${BROWSER_PASSWORD_READER_LOG_PREFIX} ${browser.name} Login Data file not found`);
     return [];
   }
 
-  // Copy+open the DB before acquiring the key so that a keychain failure
-  // still hits the cleanup path (matches the original service's behavior).
-  const handle = openLoginsDbCopy(loginDataPath, browserType);
+  let key: Buffer | null = null;
+  const passwords: PasswordData[] = [];
+  let emptyEntries = 0;
+  let decryptionFailures = 0;
 
-  try {
-    const key = await acquireBrowserKey(browser, config?.keychainPassword);
+  for (const loginDataPath of loginDataPaths) {
+    // Copy+open the DB before acquiring the key so that a keychain failure
+    // still hits the cleanup path (matches the original service's behavior).
+    const handle = openLoginsDbCopy(loginDataPath, browserType);
 
-    const rows = handle.queryLoginRows();
-
-    const passwords: PasswordData[] = [];
-    let emptyEntries = 0;
-    let decryptionFailures = 0;
-
-    for (const row of rows) {
-      if (row.username_value === '' || row.password_value.length === 0) {
-        emptyEntries++;
-        continue;
+    try {
+      if (key === null) {
+        key = await acquireBrowserKey(browser, config?.keychainPassword);
       }
 
-      const password = decryptPasswordValue(row.password_value, key);
-      if (password === null || password === '') {
-        decryptionFailures++;
-        continue;
+      const rows = handle.queryLoginRows();
+      const browserProfile =
+        browserType === 'chrome' ? getProfileMetadataFromLoginDataPath(loginDataPath) : undefined;
+
+      for (const row of rows) {
+        if (row.username_value === '' || row.password_value.length === 0) {
+          emptyEntries++;
+          continue;
+        }
+
+        const password = decryptPasswordValue(row.password_value, key);
+        if (password === null || password === '') {
+          decryptionFailures++;
+          continue;
+        }
+
+        passwords.push(mapRowToPasswordData(row, password, browserType, browserProfile));
       }
-
-      passwords.push(mapRowToPasswordData(row, password, browserType));
+    } finally {
+      handle.close();
     }
-
-    console.log(
-      `${BROWSER_PASSWORD_READER_LOG_PREFIX} Read ${passwords.length} ${browser.name} passwords ` +
-        `(empty: ${emptyEntries}, decryption failures: ${decryptionFailures})`
-    );
-
-    // If we had encrypted entries but ALL decryption failed AND a manual
-    // password was supplied, the caller almost certainly typed it wrong.
-    if (
-      passwords.length === 0 &&
-      decryptionFailures > 0 &&
-      config?.keychainPassword !== undefined
-    ) {
-      throw new Error(
-        'Failed to decrypt passwords. Please check that you entered the correct keychain password.'
-      );
-    }
-
-    return passwords;
-  } finally {
-    handle.close();
   }
+
+  const deduplicatedPasswords =
+    browserType === 'chrome' ? deduplicatePasswordsByCredential(passwords) : passwords;
+
+  console.log(
+    `${BROWSER_PASSWORD_READER_LOG_PREFIX} Read ${deduplicatedPasswords.length} ${browser.name} passwords ` +
+      `(empty: ${emptyEntries}, decryption failures: ${decryptionFailures})`
+  );
+
+  // If we had encrypted entries but ALL decryption failed AND a manual
+  // password was supplied, the caller almost certainly typed it wrong.
+  if (
+    deduplicatedPasswords.length === 0 &&
+    decryptionFailures > 0 &&
+    config?.keychainPassword !== undefined
+  ) {
+    throw new Error(
+      'Failed to decrypt passwords. Please check that you entered the correct keychain password.'
+    );
+  }
+
+  return deduplicatedPasswords;
 }
 
 /**
@@ -332,6 +385,7 @@ export async function readAndEncryptPasswordsForBrowser(
         dateLastUsed: p.dateLastUsed,
         dateCreated: p.dateCreated,
         browserSource: p.browserSource,
+        ...(p.browserProfile !== undefined ? { browserProfile: p.browserProfile } : {}),
       };
     })
   );

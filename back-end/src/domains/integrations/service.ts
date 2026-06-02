@@ -22,6 +22,7 @@ import {
 } from '../../providers/gptCredentials';
 import { getValidAccessToken } from '../../services/integrations/gmailSync';
 import { fetchGmailMessagesSince } from '../../services/integrations/gmailParser';
+import { fetchAgentMailMessagesSince } from '../../providers/agentMail';
 import * as repo from './repo';
 
 const log = createLogger('Integrations');
@@ -161,8 +162,6 @@ export async function deleteIntegration(userId: string, name: string) {
 /* c8 ignore start -- fetchEmailsSince and sendEmail require real Gmail OAuth credentials and gmailSync/gmailParser services */
 export async function fetchEmailsSince(userId: string, since: Date, limit: number) {
   const integrations = await repo.findGmailIntegrationsWithCredentials(userId);
-  if (integrations.length === 0) throw new GmailNotConnectedError();
-
   const allCredentials = integrations
     .flatMap((i) => i.emailCredentials)
     .filter(
@@ -174,9 +173,14 @@ export async function fetchEmailsSince(userId: string, since: Date, limit: numbe
         c.accessToken !== undefined &&
         c.accessToken !== ''
     );
-  if (allCredentials.length === 0) throw new GmailCredentialsNotFoundError();
+  const mintedInboxEmails = await repo.findMintedAccountEmails(userId);
+  if (allCredentials.length === 0 && mintedInboxEmails.length === 0) {
+    if (integrations.length === 0) throw new GmailNotConnectedError();
+    throw new GmailCredentialsNotFoundError();
+  }
 
-  const perAccountLimit = Math.ceil(limit / allCredentials.length);
+  const sourceCount = allCredentials.length + mintedInboxEmails.length;
+  const perAccountLimit = Math.max(1, Math.ceil(limit / sourceCount));
   const emailArrays = await Promise.all(
     allCredentials.map(async (credential) => {
       try {
@@ -188,7 +192,12 @@ export async function fetchEmailsSince(userId: string, since: Date, limit: numbe
           });
           return [];
         }
-        return await fetchGmailMessagesSince(accessToken, since, perAccountLimit);
+        const emails = await fetchGmailMessagesSince(accessToken, since, perAccountLimit);
+        return emails.map((email) => ({
+          ...email,
+          credentialId: credential.id,
+          credentialEmail: credential.email,
+        }));
       } catch (err: unknown) {
         log.warn('Failed to fetch from Gmail', {
           email: credential.email,
@@ -198,14 +207,21 @@ export async function fetchEmailsSince(userId: string, since: Date, limit: numbe
       }
     })
   );
+  const agentMailEmails = await fetchAgentMailMessagesSince({
+    inboxEmails: mintedInboxEmails,
+    since,
+    limit: perAccountLimit * Math.max(1, mintedInboxEmails.length),
+  });
 
   const emails = emailArrays
     .flat()
+    .concat(agentMailEmails)
     .sort((a, b) => b.date.getTime() - a.date.getTime())
     .slice(0, limit);
   log.info('Fetched emails', {
     count: emails.length,
     accounts: allCredentials.length,
+    agentMailInboxes: mintedInboxEmails.length,
     since: since.toISOString(),
     userId,
   });

@@ -122,6 +122,8 @@ export async function submitFeedback(feedback: string): Promise<void> {
 
 export {
   respondToAttentionRequest,
+  completeAuthAssistanceRequest,
+  refreshAuthAssistanceSession,
   rejectAttentionRequest,
   skipAttentionRequest,
   getAttentionRequests,

@@ -3,8 +3,9 @@
 /**
  * Black-box tests for /api/agents
  *
- * Every test case owns its own users, agents, and state. Cases run in parallel
- * within the domain (default concurrency 30). No shared mutable fixtures.
+ * Cases run serially within this domain. Several routes start background work
+ * and the suite also asserts shared capture buffers, so serial execution keeps
+ * the same contract coverage without cross-case cleanup races.
  *
  * Usage:
  *   npx tsx src/tests/blackbox/agents.blackbox.ts
@@ -29,6 +30,7 @@ const RUN_ID =
 const rawCaseConcurrency =
   process.env.BLACKBOX_TEST_CASE_CONCURRENCY || process.env.CONTRACT_TEST_CASE_CONCURRENCY;
 const CASE_CONCURRENCY = rawCaseConcurrency ? Number(rawCaseConcurrency) : 30;
+const EFFECTIVE_CASE_CONCURRENCY = 1;
 
 if (!Number.isInteger(CASE_CONCURRENCY) || CASE_CONCURRENCY <= 0) {
   throw new Error(`Invalid BLACKBOX_TEST_CASE_CONCURRENCY: ${rawCaseConcurrency}`);
@@ -2637,10 +2639,36 @@ test('POST / — with write_lock_enabled', async () => {
   const session = await createAnonymousSession('write-lock');
   const res = await postAgentWithRetry(apiKeyHeaders(session.user.id), {
     goal: 'Write lock test',
-    write_lock_enabled: true,
+    write_lock_enabled: false,
   });
   assertStatus(res.status, 201, res.data);
   const body = res.data as { agent_id: string };
+  const detailRes = await request(`${BASE_URL}/api/agents/${body.agent_id}`, {
+    headers: authHeaders(session.session.access_token),
+  });
+  assertStatus(detailRes.status, 200, detailRes.data);
+  const detail = detailRes.data as { agent: { write_lock_enabled: boolean } };
+  assert(detail.agent.write_lock_enabled === false, 'write_lock_enabled should persist on create');
+  await deleteTestAgent(body.agent_id, session.user.id);
+});
+
+test('POST / — API key auth with write_lock_enabled', async () => {
+  const session = await createAnonymousSession('write-lock-api-key');
+  const res = await postAgentWithRetry(apiKeyHeaders(session.user.id), {
+    goal: 'Write lock API key test',
+    write_lock_enabled: false,
+  });
+  assertStatus(res.status, 201, res.data);
+  const body = res.data as { agent_id: string };
+  const detailRes = await request(`${BASE_URL}/api/agents/${body.agent_id}`, {
+    headers: apiKeyHeaders(session.user.id),
+  });
+  assertStatus(detailRes.status, 200, detailRes.data);
+  const detail = detailRes.data as { agent: { write_lock_enabled: boolean } };
+  assert(
+    detail.agent.write_lock_enabled === false,
+    'write_lock_enabled should persist with API key auth'
+  );
   await deleteTestAgent(body.agent_id, session.user.id);
 });
 
@@ -3822,15 +3850,21 @@ async function testBoundary_validationShortCircuitNoOutbound(): Promise<void> {
 // ---------------------------------------------------------------------------
 async function runAll(): Promise<void> {
   console.log(
-    `Agents Black-box Tests (${tests.length} parallel cases, concurrency=${CASE_CONCURRENCY}, runId=${RUN_ID})\n`
+    `Agents Black-box Tests (${tests.length} cases, concurrency=${EFFECTIVE_CASE_CONCURRENCY}, runId=${RUN_ID})\n`
   );
   console.log(`Testing against: ${BASE_URL}\n`);
 
-  // Phase 1: Parallel tests
-  console.log(`Running ${tests.length} parallel tests (concurrency=${CASE_CONCURRENCY})...`);
-  const parallelResults = await runWithConcurrency(tests, CASE_CONCURRENCY, async (tc) => {
-    return runTest(tc.name, tc.fn);
-  });
+  // Phase 1: Route contract tests
+  console.log(
+    `Running ${tests.length} route contract tests (concurrency=${EFFECTIVE_CASE_CONCURRENCY})...`
+  );
+  const parallelResults = await runWithConcurrency(
+    tests,
+    EFFECTIVE_CASE_CONCURRENCY,
+    async (tc) => {
+      return runTest(tc.name, tc.fn);
+    }
+  );
 
   for (const r of parallelResults) {
     console.log(`  ${r.passed ? 'PASS' : 'FAIL'}  ${r.name} (${r.duration}ms)`);

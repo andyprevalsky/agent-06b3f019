@@ -16,8 +16,13 @@ export function getPersonalizedVcardUrl(userId: string): string {
   return `https://navi-j9a9.onrender.com/api/vcard/${userId}.vcf`;
 }
 
-export function getAgentUrl(agentId: string): string {
-  return `${ROSE_LABS_URL}/?agent-id=${agentId}`;
+export function getAgentUrl(agentId: string, browserId?: string | null): string {
+  const url = new URL(ROSE_LABS_URL);
+  url.searchParams.set('agent-id', agentId);
+  if (browserId) {
+    url.searchParams.set('browser-id', browserId);
+  }
+  return url.toString();
 }
 /* c8 ignore stop */
 
@@ -38,6 +43,9 @@ export const SMS_TEMPLATES = {
 
   writeLock: (prefix: string, question: string, shortcode: string) =>
     `[${prefix}] Approval needed: ${question}\n\nReply "Approve ${shortcode}" to continue.`,
+
+  authAssistance: (prefix: string, authRealm: string, url: string) =>
+    `[${prefix}] Login needed for ${authRealm}.\nOpen Rose to sign in: ${url}`,
 
   agentCompleted: (prefix: string, summary: string, url: string) =>
     `[${prefix}] Done: ${summary}\n\nFull report: ${url}`,

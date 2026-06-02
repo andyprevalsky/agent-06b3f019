@@ -24,6 +24,7 @@
  */
 
 import crypto from 'crypto';
+import path from 'path';
 import {
   AES_BLOCK_SIZE,
   BROWSER_COOKIE_READER_LOG_PREFIX,
@@ -39,9 +40,11 @@ import {
   openCookiesDbCopy,
   readSafariCookieFile,
   resolveCookiePath,
+  resolveCookiePaths,
 } from './repo';
 import { parseSafariBinaryCookies } from './safariCookies';
 import type {
+  BrowserProfileMetadata,
   BrowserConfig,
   BrowserInfo,
   BrowserType,
@@ -147,7 +150,11 @@ export function decryptCookieValue(encryptedValue: Buffer, key: Buffer): string 
  * `CookieData` shape. Coerces SQLite 0/1 ints into booleans and a null
  * `top_frame_site_key` into an empty string (the backend expects a string).
  */
-export function mapRowToCookieData(row: CookieRow, value: string): CookieData {
+export function mapRowToCookieData(
+  row: CookieRow,
+  value: string,
+  browserProfile?: BrowserProfileMetadata
+): CookieData {
   return {
     host_key: row.host_key,
     name: row.name,
@@ -166,7 +173,76 @@ export function mapRowToCookieData(row: CookieRow, value: string): CookieData {
     source_scheme: row.source_scheme,
     source_port: row.source_port,
     last_update_utc: row.last_update_utc,
+    ...(browserProfile !== undefined ? { browserProfile } : {}),
   };
+}
+
+function getProfileMetadataFromCookiePath(cookiePath: string): BrowserProfileMetadata {
+  const profilePath = path.dirname(cookiePath);
+  if (path.basename(profilePath) === 'Network') {
+    return path.basename(path.dirname(profilePath));
+  }
+  return path.basename(profilePath);
+}
+
+function resolveCookiePathsForRead(browser: BrowserConfig): string[] {
+  if (browser.type === 'chrome') {
+    const legacyPaths = resolveCookiePaths(browser.cookiePathPattern);
+    const networkCookiePattern = path.join(
+      path.dirname(browser.cookiePathPattern),
+      'Network',
+      'Cookies'
+    );
+    const networkPaths = resolveCookiePaths(networkCookiePattern);
+    return Array.from(new Set([...legacyPaths, ...networkPaths]));
+  }
+  const cookiePath = resolveCookiePath(browser.cookiePathPattern);
+  return cookiePath === null ? [] : [cookiePath];
+}
+
+function resolveInstalledCookiePath(browser: BrowserConfig): string | null {
+  if (browser.type !== 'chrome') {
+    return resolveCookiePath(browser.cookiePathPattern);
+  }
+  return resolveCookiePathsForRead(browser)[0] ?? null;
+}
+
+function cookieKey(cookie: CookieData): string {
+  return `${cookie.browserProfile ?? ''}\u0000${cookie.host_key}\u0000${cookie.name}\u0000${cookie.path}\u0000${cookie.top_frame_site_key}`;
+}
+
+function isCookieNewer(candidate: CookieData, existing: CookieData): boolean {
+  const candidateTimestamps = [
+    candidate.last_update_utc ?? 0,
+    candidate.last_access_utc ?? 0,
+    candidate.creation_utc ?? 0,
+    candidate.expires_utc ?? 0,
+  ];
+  const existingTimestamps = [
+    existing.last_update_utc ?? 0,
+    existing.last_access_utc ?? 0,
+    existing.creation_utc ?? 0,
+    existing.expires_utc ?? 0,
+  ];
+
+  for (let i = 0; i < candidateTimestamps.length; i++) {
+    if (candidateTimestamps[i] !== existingTimestamps[i]) {
+      return candidateTimestamps[i] > existingTimestamps[i];
+    }
+  }
+  return false;
+}
+
+function deduplicateCookiesByIdentity(cookies: CookieData[]): CookieData[] {
+  const byIdentity = new Map<string, CookieData>();
+  for (const cookie of cookies) {
+    const key = cookieKey(cookie);
+    const existing = byIdentity.get(key);
+    if (existing === undefined || isCookieNewer(cookie, existing)) {
+      byIdentity.set(key, cookie);
+    }
+  }
+  return Array.from(byIdentity.values());
 }
 
 /**
@@ -184,7 +260,7 @@ export function findBrowserConfig(browserType: BrowserType): BrowserConfig | nul
  */
 export function listInstalledBrowsers(): BrowserInfo[] {
   const results = Object.values(getBrowserConfigs()).map((browser): BrowserInfo => {
-    const resolvedPath = resolveCookiePath(browser.cookiePathPattern);
+    const resolvedPath = resolveInstalledCookiePath(browser);
     console.log(
       `${BROWSER_COOKIE_READER_LOG_PREFIX} Checking ${browser.name}: pattern=${browser.cookiePathPattern}, resolved=${resolvedPath}`
     );
@@ -250,54 +326,66 @@ export async function readBrowserCookies(
     throw new Error(`Unknown browser type: ${browserType}`);
   }
 
-  const cookiePath = resolveCookiePath(browser.cookiePathPattern);
-  if (cookiePath === null) {
+  const cookiePaths = resolveCookiePathsForRead(browser);
+  if (cookiePaths.length === 0) {
     console.log(`${BROWSER_COOKIE_READER_LOG_PREFIX} ${browser.name} cookies file not found`);
     return [];
   }
 
   if (browser.cookieStore === 'safariBinary') {
-    const cookies = parseSafariBinaryCookies(readSafariCookieFile(cookiePath));
+    const cookies = parseSafariBinaryCookies(readSafariCookieFile(cookiePaths[0]));
     console.log(
       `${BROWSER_COOKIE_READER_LOG_PREFIX} Read ${cookies.length} ${browser.name} cookies`
     );
     return cookies;
   }
 
-  const handle = openCookiesDbCopy(cookiePath, browserType);
-  try {
-    const key = await acquireBrowserKey(browser, config);
-    const rows = handle.queryCookieRows();
-    const cookies: CookieData[] = [];
-    let skipped = 0;
+  let key: Buffer | null = null;
+  const cookies: CookieData[] = [];
+  let skipped = 0;
+  let totalCookies = 0;
 
-    for (const row of rows) {
-      const value = decryptCookieValue(row.encrypted_value, key);
-      if (value === null || value === '') {
-        skipped++;
-        continue;
+  for (const cookiePath of cookiePaths) {
+    const handle = openCookiesDbCopy(cookiePath, browserType);
+    try {
+      if (key === null) {
+        key = await acquireBrowserKey(browser, config);
       }
-      cookies.push(mapRowToCookieData(row, value));
-    }
+      const rows = handle.queryCookieRows();
+      totalCookies += rows.length;
+      const browserProfile =
+        browserType === 'chrome' ? getProfileMetadataFromCookiePath(cookiePath) : undefined;
 
-    // Wrong-password heuristic: with a meaningful row count but near-zero
-    // decryption success, the user's password is almost certainly wrong.
-    const totalCookies = rows.length;
-    const successRate = totalCookies > 0 ? cookies.length / totalCookies : 0;
-    if (totalCookies > WRONG_PASSWORD_ROW_THRESHOLD && successRate < WRONG_PASSWORD_SUCCESS_RATIO) {
-      throw new Error(
-        `Failed to decrypt ${browser.name} cookies. ` +
-          `The keychain password may be incorrect. ` +
-          `(${cookies.length}/${totalCookies} cookies decrypted successfully)`
-      );
+      for (const row of rows) {
+        const value = decryptCookieValue(row.encrypted_value, key);
+        if (value === null || value === '') {
+          skipped++;
+          continue;
+        }
+        cookies.push(mapRowToCookieData(row, value, browserProfile));
+      }
+    } finally {
+      handle.close();
     }
-
-    console.log(
-      `${BROWSER_COOKIE_READER_LOG_PREFIX} Read ${cookies.length} ${browser.name} cookies ` +
-        `(skipped ${skipped} unreadable)`
-    );
-    return cookies;
-  } finally {
-    handle.close();
   }
+
+  const deduplicatedCookies =
+    browserType === 'chrome' ? deduplicateCookiesByIdentity(cookies) : cookies;
+
+  // Wrong-password heuristic: with a meaningful row count but near-zero
+  // decryption success, the user's password is almost certainly wrong.
+  const successRate = totalCookies > 0 ? cookies.length / totalCookies : 0;
+  if (totalCookies > WRONG_PASSWORD_ROW_THRESHOLD && successRate < WRONG_PASSWORD_SUCCESS_RATIO) {
+    throw new Error(
+      `Failed to decrypt ${browser.name} cookies. ` +
+        `The keychain password may be incorrect. ` +
+        `(${cookies.length}/${totalCookies} cookies decrypted successfully)`
+    );
+  }
+
+  console.log(
+    `${BROWSER_COOKIE_READER_LOG_PREFIX} Read ${deduplicatedCookies.length} ${browser.name} cookies ` +
+      `(skipped ${skipped} unreadable)`
+  );
+  return deduplicatedCookies;
 }

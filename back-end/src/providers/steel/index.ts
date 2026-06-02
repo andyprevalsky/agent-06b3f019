@@ -10,6 +10,8 @@ export {
   closeSession,
   resumeSession,
   getSession,
+  getSteelSessionHealth,
+  getSteelSessionCookieSummary,
   closeAllActiveSessions,
 } from './session';
 export { injectUserData } from './injection';

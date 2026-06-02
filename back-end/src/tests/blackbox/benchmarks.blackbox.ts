@@ -54,7 +54,6 @@ const BenchmarkTaskSchema = z.object({
   name: z.string().min(1),
   title: z.string().min(1),
   prompt: z.string().min(1),
-  eval_prompt: z.string().min(1),
   timeout_seconds: z.number().int().positive(),
   is_chat_mode: z.boolean(),
   expected_tools: z.array(z.string()),
@@ -167,6 +166,13 @@ const KNOWN_TAGS = [
   'scale',
   'batch',
   'needs-auth',
+  'auth',
+  'auth-anon',
+  'auth-cookie',
+  'biometrics',
+  'local-only',
+  'minted',
+  'social',
 ];
 
 // ==================== GET /api/benchmarks — CONTRACT TESTS ====================

@@ -8,6 +8,8 @@
 import { useMemo } from 'react';
 import { useAgentContext, type Message } from '../../hooks';
 import type {
+  BrowserSessionMetadata,
+  PendingAuthAssistance,
   BrowserStatusBarViewModel,
   OutputSchemaRef,
   PendingWriteLockApproval,
@@ -17,6 +19,13 @@ import type {
 interface RequestUserApprovalMeta {
   writePermission?: boolean;
   attentionRequestId?: string;
+}
+
+interface RequestUserAuthenticationMeta {
+  requestId?: string;
+  taskId?: string;
+  authRealm?: string;
+  liveViewUrl?: string;
 }
 
 function readRequestUserApproval(m: Message): RequestUserApprovalMeta | undefined {
@@ -29,6 +38,16 @@ function readRequestUserApproval(m: Message): RequestUserApprovalMeta | undefine
   return undefined;
 }
 
+function readRequestUserAuthentication(m: Message): RequestUserAuthenticationMeta | undefined {
+  const meta = m.metadata;
+  if (!meta) return undefined;
+  const raw = meta.requestUserAuthentication;
+  if (raw && typeof raw === 'object') {
+    return raw as RequestUserAuthenticationMeta;
+  }
+  return undefined;
+}
+
 function extractStepProgress(browserMessages: Message[]): StepProgress | null {
   for (let i = browserMessages.length - 1; i >= 0; i--) {
     const msg = browserMessages[i];
@@ -36,6 +55,16 @@ function extractStepProgress(browserMessages: Message[]): StepProgress | null {
     const totalSteps = msg.metadata?.total_steps;
     if (typeof stepsTaken === 'number' && typeof totalSteps === 'number') {
       return { stepsTaken, totalSteps };
+    }
+  }
+  return null;
+}
+
+function extractBrowserSessionMetadata(browserMessages: Message[]): BrowserSessionMetadata | null {
+  for (let i = browserMessages.length - 1; i >= 0; i--) {
+    const raw = browserMessages[i].metadata?.browser_session_metadata;
+    if (raw && typeof raw === 'object') {
+      return raw as BrowserSessionMetadata;
     }
   }
   return null;
@@ -62,6 +91,30 @@ function extractPendingApproval(messages: Message[]): PendingWriteLockApproval |
     attentionRequestId,
     question: approvalMessage.text || 'Approve this write action?',
   };
+}
+
+function extractPendingAuthAssistance(
+  messages: Message[],
+  taskId: string,
+): PendingAuthAssistance | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    const auth = readRequestUserAuthentication(message);
+    if (!auth) continue;
+
+    const authTaskId = auth.taskId ?? message.metadata?.task_id;
+    if (authTaskId !== taskId) continue;
+    if (message.metadata?.toolStatus !== 'IN_PROGRESS') return null;
+    if (!auth.requestId || !auth.liveViewUrl) return null;
+
+    return {
+      requestId: auth.requestId,
+      authRealm: auth.authRealm,
+      liveViewUrl: auth.liveViewUrl,
+    };
+  }
+
+  return null;
 }
 
 export function useBrowserStatusBarState(taskId: string): BrowserStatusBarViewModel {
@@ -96,8 +149,16 @@ export function useBrowserStatusBarState(taskId: string): BrowserStatusBarViewMo
     return undefined;
   }, [browserMessages]);
 
+  const browserSessionMetadata = useMemo(
+    () => extractBrowserSessionMetadata(browserMessages),
+    [browserMessages],
+  );
   const stepProgress = useMemo(() => extractStepProgress(browserMessages), [browserMessages]);
   const pendingWriteLockApproval = useMemo(() => extractPendingApproval(messages), [messages]);
+  const pendingAuthAssistance = useMemo(
+    () => extractPendingAuthAssistance(messages, taskId),
+    [messages, taskId],
+  );
 
   return {
     browserMessages,
@@ -105,7 +166,9 @@ export function useBrowserStatusBarState(taskId: string): BrowserStatusBarViewMo
     lastActionTitle,
     isDisconnected,
     outputSchema,
+    browserSessionMetadata,
     stepProgress,
     pendingWriteLockApproval,
+    pendingAuthAssistance,
   };
 }

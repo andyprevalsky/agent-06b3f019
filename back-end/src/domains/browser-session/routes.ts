@@ -171,7 +171,8 @@ router.get(
         }
       }
 
-      const result = await getTaskInfo(taskId);
+      const validateLive = req.query.validateLive === 'true' || req.query.validate_live === 'true';
+      const result = await getTaskInfo(taskId, { validateLive });
 
       if (!result) {
         res.status(404).json({ error: 'Session not found' });

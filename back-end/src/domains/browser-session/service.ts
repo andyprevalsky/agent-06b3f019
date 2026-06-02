@@ -8,80 +8,27 @@ import {
   getOrCreateContext,
   createSessionWithContext,
   closeSession as steelCloseSession,
-  resumeSession as steelResumeSession,
   getSession as steelGetSession,
   injectUserData,
   uploadFileToSession as steelUploadFile,
   listSessionFiles as steelListFiles,
   getFingerprintInjectionData,
 } from '../../providers/steel';
+import { resumeBrowserSession as resumeBrowserSessionProvider } from '../../providers/browserSessionResume';
 import * as repo from './repo';
-import { SessionNoWsUrlError, type SerializedPassword, type UserSettings } from './types';
-import { injectLocalStorageViaCdp } from './service.cdp';
+import { serializePasswords, toUserSettings } from './service.serializers';
+export { getTaskInfo, getTaskOwnerUserId } from './service.task-info';
+export {
+  injectLocalStorage,
+  SessionNotFoundError,
+  SessionNoUserError,
+} from './service.local-storage';
+export { CdpInjectionError, SessionNoWsUrlError } from './types';
 
 const log = createLogger('BrowserSession');
 
 // ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Serialize BigInt dateLastUsed to number for JSON.
- */
-function serializePasswords(
-  passwords: Array<{
-    origin: string;
-    username: string;
-    encryptedPassword: string;
-    dateLastUsed: bigint | null;
-  }>
-): SerializedPassword[] {
-  return passwords.map((p) => ({
-    origin: p.origin,
-    username: p.username,
-    encryptedPassword: p.encryptedPassword,
-    dateLastUsed: p.dateLastUsed !== null ? Number(p.dateLastUsed) : null,
-  }));
-}
-
-/**
- * Map a user DB row to UserSettings or null.
- */
-function toUserSettings(
-  user: {
-    name: string | null;
-    phone: string | null;
-    addressLine1: string | null;
-    addressLine2: string | null;
-    city: string | null;
-    state: string | null;
-    postalCode: string | null;
-    country: string | null;
-    encryptedPaymentInformation: string | null;
-    systemName: string | null;
-    profilePicture: string | null;
-    customSystemPrompt: string | null;
-  } | null
-): UserSettings | null {
-  if (!user) return null;
-  return {
-    name: user.name,
-    phone: user.phone,
-    addressLine1: user.addressLine1,
-    addressLine2: user.addressLine2,
-    city: user.city,
-    state: user.state,
-    postalCode: user.postalCode,
-    country: user.country,
-    encryptedPaymentInformation: user.encryptedPaymentInformation,
-    systemName: user.systemName,
-    profilePicture: user.profilePicture,
-    customSystemPrompt: user.customSystemPrompt,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Init
 // ---------------------------------------------------------------------------
 
 /* c8 ignore start -- initSession, closeBrowserSession, resumeBrowserSession require Steel SDK */
@@ -138,8 +85,17 @@ export async function initSession(userId: string, agentId: string, startUrl: str
     session_id: session.sessionId,
     debug_url: session.debugUrl,
     ws_url: session.wsUrl,
+    browser_session_metadata: {
+      provider: session.sessionId.startsWith('local-') ? 'local' : 'steel',
+      proxy_source: session.proxySource,
+      proxy_location: session.proxyLocation,
+      steel_profile_id: session.steelProfileId,
+      steel_profile_source: session.profileSource,
+    },
     cookies_injected: injectionResult.cookies.injected,
     cookies_count: injectionResult.cookies.cookieCount,
+    auth_source: injectionResult.cookies.authSource,
+    auth_credential_ref: injectionResult.cookies.credentialRef,
     fingerprint_injected: injectionResult.fingerprint.injected,
     fingerprint_injection: fingerprintInjection,
     passwords: serializedPasswords,
@@ -166,88 +122,8 @@ export async function closeBrowserSession(sessionId: string, pause: boolean, cur
 // Resume
 // ---------------------------------------------------------------------------
 
-export async function resumeBrowserSession(taskId: string) {
-  log.info('Resuming browser task', { taskId });
-
-  const result = await steelResumeSession(taskId);
-
-  // Get user_id from the session's context
-  const session = await repo.findSessionByTaskId(taskId);
-
-  // Inject cookies and fingerprint into resumed session
-  let injectionResult = {
-    cookies: { injected: false, cookieCount: 0 },
-    fingerprint: { injected: false },
-  };
-  let fingerprintInjection = null;
-  if (
-    session !== null &&
-    session !== undefined &&
-    session.context?.userId !== null &&
-    session.context?.userId !== undefined
-  ) {
-    if (result.savedUrl !== null && result.savedUrl !== undefined && result.savedUrl !== '') {
-      injectionResult = await injectUserData(
-        result.sessionId,
-        session.context.userId,
-        result.savedUrl
-      );
-    }
-    fingerprintInjection = await getFingerprintInjectionData(session.context.userId);
-  }
-
-  return {
-    task_id: taskId,
-    session_id: result.sessionId,
-    debug_url: result.debugUrl,
-    ws_url: result.wsUrl,
-    saved_url: result.savedUrl,
-    status: 'ACTIVE' as const,
-    cookies_injected: injectionResult.cookies.injected,
-    cookies_count: injectionResult.cookies.cookieCount,
-    fingerprint_injected: injectionResult.fingerprint.injected,
-    fingerprint_injection: fingerprintInjection,
-  };
-}
+export const resumeBrowserSession = resumeBrowserSessionProvider;
 /* c8 ignore stop */
-
-// ---------------------------------------------------------------------------
-// Get task info
-// ---------------------------------------------------------------------------
-
-/** Get the owner userId for a task, used for ownership checks. */
-export async function getTaskOwnerUserId(taskId: string): Promise<string | undefined> {
-  const session = await repo.findSessionByTaskId(taskId);
-  return session?.context?.userId ?? undefined;
-}
-
-export async function getTaskInfo(taskId: string) {
-  const session = await repo.findSessionByTaskId(taskId);
-
-  if (!session) {
-    return null;
-  }
-
-  let fingerprintInjection = null;
-  let serializedPasswords: SerializedPassword[] = [];
-
-  if (session.context?.userId) {
-    fingerprintInjection = await getFingerprintInjectionData(session.context.userId);
-
-    const passwords = await repo.findPasswords(session.context.userId);
-    serializedPasswords = serializePasswords(passwords);
-  }
-
-  return {
-    task_id: session.id,
-    session_id: session.sessionId,
-    debug_url: session.debugUrl,
-    ws_url: session.wsUrl,
-    status: session.status,
-    fingerprint_injection: fingerprintInjection,
-    passwords: serializedPasswords,
-  };
-}
 
 // ---------------------------------------------------------------------------
 // Get context
@@ -300,96 +176,6 @@ export async function listFiles(sessionId: string) {
     session_id: sessionId,
     files,
     count: files.length,
-  };
-}
-/* c8 ignore stop */
-
-// ---------------------------------------------------------------------------
-// Inject localStorage
-// ---------------------------------------------------------------------------
-
-export class SessionNotFoundError extends Error {
-  constructor() {
-    super('Session not found');
-    this.name = 'SessionNotFoundError';
-  }
-}
-
-export class SessionNoUserError extends Error {
-  constructor() {
-    super('Session has no associated user');
-    this.name = 'SessionNoUserError';
-  }
-}
-
-export { CdpInjectionError, SessionNoWsUrlError } from './types';
-
-/* c8 ignore start -- injectLocalStorage requires Steel session + CDP connection */
-export async function injectLocalStorage(sessionId: string, origin: string) {
-  log.info('Inject localStorage request', { sessionId, origin });
-
-  // 1. Get session with context to find userId
-  const session = await repo.findSessionBySessionId(sessionId);
-
-  if (!session) {
-    throw new SessionNotFoundError();
-  }
-
-  if (!session.context?.userId) {
-    throw new SessionNoUserError();
-  }
-
-  const userId = session.context.userId;
-
-  // 2. Get localStorage for this specific origin (O(1) indexed lookup)
-  const originData = await repo.findLocalStorageOrigin(userId, origin);
-
-  if (!originData) {
-    log.info('No localStorage data for origin', { origin });
-    return { injected: false, reason: 'no_data_for_origin' as const, count: 0 };
-  }
-
-  const entries = originData.entries as { key: string; value: string }[];
-  const currentHash = originData.hash;
-
-  if (entries.length === 0) {
-    log.info('No localStorage entries for origin', { origin });
-    return { injected: false, reason: 'no_data_for_origin' as const, count: 0 };
-  }
-
-  // 3. Check if already injected with same hash
-  const injectedOrigins = (session.injectedOrigins as Record<string, string> | null) ?? {};
-  const injectedHash: string | undefined = injectedOrigins[origin];
-
-  if (injectedHash !== undefined && injectedHash === currentHash) {
-    log.info('Origin already injected with same hash, skipping', { origin });
-    return { injected: false, reason: 'already_injected' as const, count: entries.length };
-  }
-
-  // 4. Inject via CDP
-  if (session.wsUrl === null || session.wsUrl === undefined || session.wsUrl === '') {
-    throw new SessionNoWsUrlError();
-  }
-
-  await injectLocalStorageViaCdp(session.wsUrl, entries, origin);
-
-  // 5. Update session with injected origin and hash
-  const updatedInjectedOrigins = {
-    ...injectedOrigins,
-    [origin]:
-      currentHash !== null && currentHash !== undefined && currentHash !== ''
-        ? currentHash
-        : 'unknown',
-  };
-
-  await repo.updateInjectedOrigins(sessionId, updatedInjectedOrigins);
-
-  log.info('Updated session injectedOrigins', { origin });
-
-  return {
-    injected: true,
-    reason: injectedHash ? ('data_changed' as const) : ('first_injection' as const),
-    count: entries.length,
   };
 }
 /* c8 ignore stop */

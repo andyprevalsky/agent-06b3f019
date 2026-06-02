@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import json
+import os
 import time
 import uuid as uuid_module
 from datetime import timedelta
@@ -25,10 +27,12 @@ from browser_tools.schemas import AVAILABLE_ACTIONS
 from config import load_config
 from helpers.attachments import extract_attachments_from_context, upload_to_storage
 from helpers.file_resolution import resolve_file_pointers_from_extracted, transform_schema_for_remote_session
+from helpers.messages import stream_browser_cursor
 from helpers.model_pricing import get_model_pricing_with_fallback
 from helpers.tracing import span, traced
 from loop.activity_helper import call_temporal_activity_from_activity
 from providers.rose import ClaudeAuthContext, GptAuthContext, RoseClient
+from providers.rose.browser_use import build_browser_state_message_content
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.error_utils import extract_error_message
 from utils.prompts import build_verifier_prompt
@@ -48,49 +52,290 @@ from .config import (
 )
 from .repo import (
     close_browser_session,
+    create_user_auth_assistance_request,
+    fetch_auth_options,
     fetch_claude_token,
     fetch_session_info,
     init_browser_session,
     inject_local_storage,
     list_session_files,
+    propagate_browser_run_credentials,
     report_claude_token_rate_limited,
+    resume_browser_session,
     save_browser_action_message,
     save_browser_assistant_message,
+    save_browser_credential_ref_message,
     upload_file_to_session,
 )
 from .service import (
+    AuthRuntimeState,
+    build_auth_assistance_resume_user_message,
     build_action_titles,
+    build_browser_dynamic_system_context,
+    build_browser_task_prompt,
     build_context_summary,
-    build_state_line,
     build_usage_items,
     extract_session_files,
-    get_browser_system_prompt,
     safe_time,
+    select_auth_assistance_current_url,
 )
 from .service_actions import (
     execute_action,
     get_domain_from_url,
     get_element_description,
 )
+from .recording import BrowserAgentRecorder, BrowserNetworkRecorder, browser_recording_output_dir
 from .service_crypto import (
+    ExtractedOTP,
+    auth_realm_from_url,
     build_autopay_prompt_section,
-    build_passwords_prompt_section,
+    build_auth_options_prompt_section,
     decrypt_payment_info,
     extract_rate_limited_until,
     fetch_recent_otps,
+    format_otp_user_message,
+    is_usable_email_otp,
 )
 from .types import ClaudeTokenState
 
 logger = structlog.get_logger()
 
 
+_FALSE_ENV_VALUES = {"0", "false", "no", "off", "disabled"}
+
+
+def _env_enabled(name: str, default: bool = True) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in _FALSE_ENV_VALUES
+
+
+def _botsigged_diagnostics_enabled(start_url: str) -> bool:
+    if not _env_enabled("BROWSER_AGENT_BOTSIGGED_DIAGNOSTICS", False):
+        return False
+    return "botsigged.com" in (start_url or "").lower()
+
+
+async def _install_botsigged_diagnostics(page: Any, *, agent_id: str, task_id: str) -> None:
+    """Capture BotSigged SDK score events for benchmark attribution."""
+    script = """
+    () => {
+      window.__roseBotSiggedScores = [];
+      window.addEventListener("botsigged:score", (event) => {
+        window.__roseBotSiggedScores.push({
+          t: Math.round(performance.now()),
+          detail: event.detail,
+        });
+      });
+    }
+    """
+    await page.add_init_script(script)
+    logger.info(
+        "BotSigged diagnostics init script installed",
+        agent_id=agent_id,
+        task_id=task_id,
+    )
+
+
+async def _capture_botsigged_diagnostics(
+    page: Any,
+    *,
+    agent_id: str,
+    task_id: Optional[str],
+    checkpoint: str = "final",
+) -> Optional[Dict[str, Any]]:
+    if not task_id:
+        return None
+    diagnostics = await page.evaluate(
+        """
+        (checkpoint) => {
+          const instance = window.BotSiggedInstance || window.botSiggedInstance || null;
+          const safeCall = (name) => {
+            try {
+              if (instance && typeof instance[name] === "function") return instance[name]();
+            } catch (error) {
+              return { error: String(error && error.message ? error.message : error) };
+            }
+            return null;
+          };
+          const currentSignals = safeCall("getCurrentSignals");
+          const count = (items) => Array.isArray(items) ? items.length : 0;
+          return {
+            checkpoint,
+            url: location.href,
+            title: document.title,
+            capturedScoreEvents: (window.__roseBotSiggedScores || []).slice(-50),
+            lastScore: safeCall("getLastScore"),
+            currentSignals,
+            bufferSizes: safeCall("getBufferSizes"),
+            signalCounts: currentSignals ? {
+              mouseEvents: count(currentSignals.mouse && currentSignals.mouse.events),
+              scrollEvents: count(currentSignals.scroll && currentSignals.scroll.events),
+              formKeys: count(currentSignals.form && currentSignals.form.keys),
+              formInputs: count(currentSignals.form && currentSignals.form.inputs),
+              formSubmits: currentSignals.form && currentSignals.form.submits || 0,
+            } : null,
+            visibleTextSample: (document.body && document.body.innerText || "").slice(0, 4000),
+          };
+        }
+        """,
+        checkpoint,
+    )
+    output_dir = browser_recording_output_dir(agent_id, task_id)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    diagnostics_path = output_dir / "botsigged-diagnostics.json"
+    diagnostics_path.write_text(json.dumps(diagnostics, indent=2), encoding="utf-8")
+    last_score = diagnostics.get("lastScore") or {}
+    logger.info(
+        "BotSigged diagnostics captured",
+        agent_id=agent_id,
+        task_id=task_id,
+        diagnostics_path=str(diagnostics_path),
+        bot_score=last_score.get("bot_score"),
+        classification=last_score.get("classification"),
+        triggered_rules=last_score.get("triggered_rules"),
+        signal_counts=diagnostics.get("signalCounts"),
+    )
+    return {"path": str(diagnostics_path), "diagnostics": diagnostics}
+
+
+class BrowserCursorRealtimeStreamer:
+    """Throttled fire-and-forget cursor mirror for the live React overlay."""
+
+    def __init__(self, *, agent_id: str, task_id: str, fps: float = 30.0) -> None:
+        self.agent_id = agent_id
+        self.task_id = task_id
+        self.min_interval_s = 1.0 / fps
+        self.latest: Optional[tuple[int, int, int]] = None
+        self.sequence = 0
+        self.last_sent_at = 0.0
+        self.flush_task: Optional[asyncio.Task[None]] = None
+        self.closed = False
+
+    def set_cursor(self, x: int, y: int) -> None:
+        if self.closed:
+            return
+        self.latest = (int(x), int(y), int(time.time() * 1000))
+        if self.flush_task is None or self.flush_task.done():
+            self.flush_task = asyncio.create_task(self._flush_loop())
+
+    async def close(self) -> None:
+        self.closed = True
+        if self.flush_task is not None and not self.flush_task.done():
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self.flush_task, timeout=1.0)
+
+    async def _flush_loop(self) -> None:
+        while not self.closed:
+            wait_s = self.last_sent_at + self.min_interval_s - time.monotonic()
+            if wait_s > 0:
+                await asyncio.sleep(wait_s)
+
+            sample = self.latest
+            self.latest = None
+            if sample is None:
+                return
+
+            x, y, timestamp_ms = sample
+            self.sequence += 1
+            await stream_browser_cursor(
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                x=x,
+                y=y,
+                sequence=self.sequence,
+                timestamp_ms=timestamp_ms,
+            )
+            self.last_sent_at = time.monotonic()
+
+            if self.latest is None:
+                return
+
+
+async def _propagate_browser_credentials_with_progress(
+    *,
+    config: Any,
+    agent_id: str,
+    task_id: Optional[str],
+    browser_url: str,
+    status: str,
+    success: bool,
+    message: str,
+) -> Optional[Dict[str, Any]]:
+    if not task_id:
+        return None
+
+    is_auth_assistance_pause = status == "awaiting_auth_assistance"
+    progress_message = (
+        "Updating saved credential state before waiting for user authentication assistance."
+        if is_auth_assistance_pause
+        else "Classifying browser authentication outcome and applying credential updates."
+    )
+    tool_call_id = str(uuid_module.uuid4())
+    await save_browser_action_message(
+        agent_id=agent_id,
+        title="Updating credential state",
+        task_id=task_id,
+        message=progress_message,
+        status=MessageStatus.IN_PROGRESS,
+        browser_url=browser_url,
+        action_type="credential_propagation",
+        tool_call_id=tool_call_id,
+    )
+
+    try:
+        result = await propagate_browser_run_credentials(
+            config,
+            agent_id=agent_id,
+            task_id=task_id,
+            status=status,
+            success=success,
+            message=message,
+        )
+    except Exception as e:
+        error_message = extract_error_message(e)
+        await save_browser_action_message(
+            agent_id=agent_id,
+            title="Credential state update failed",
+            task_id=task_id,
+            message=error_message,
+            status=MessageStatus.ERROR,
+            browser_url=browser_url,
+            action_type="credential_propagation",
+            tool_call_id=tool_call_id,
+        )
+        raise
+
+    outcome = result.get("outcome", "unknown")
+    refs = result.get("refs", 0)
+    applied = result.get("applied", 0)
+    await save_browser_action_message(
+        agent_id=agent_id,
+        title="Credential state updated",
+        task_id=task_id,
+        message=f"Outcome: {outcome}. Credential refs: {refs}. Updates applied: {applied}.",
+        status=MessageStatus.FINISHED,
+        browser_url=browser_url,
+        action_type="credential_propagation",
+        tool_call_id=tool_call_id,
+        extra_metadata={
+            "credentialPropagationOutcome": outcome,
+            "credentialRefs": refs,
+            "credentialUpdatesApplied": applied,
+        },
+    )
+    return result
+
+
 async def _stop_playwright_resources(
     playwright_browser: Optional[Any],
     playwright_instance: Optional[Any],
     agent_id: str,
+    close_browser: bool = True,
 ) -> None:
     """Disconnect Playwright's CDP client and stop its local driver process."""
-    if playwright_browser:
+    if playwright_browser and close_browser:
         try:
             await playwright_browser.close()
             logger.info("Playwright browser CDP connection closed", agent_id=agent_id)
@@ -105,10 +350,90 @@ async def _stop_playwright_resources(
             logger.warning("Failed to stop Playwright instance", agent_id=agent_id, error=str(e))
 
 
+async def _append_new_otp_user_messages(
+    *,
+    otps: List[ExtractedOTP],
+    seen_otp_codes: set[str],
+    otp_user_messages: List[Dict[str, str]],
+    credential_refs_by_secret_ref: Optional[Dict[str, Dict[str, str]]] = None,
+    agent_id: str,
+    task_id: Optional[str],
+) -> int:
+    """Append unseen OTPs as USER messages and log credential refs."""
+    new_count = 0
+    for otp in otps:
+        if not is_usable_email_otp(otp):
+            logger.info(
+                "Skipping stale email OTP",
+                agent_id=agent_id,
+                source_message_id=otp.source_message_id,
+                ttl_seconds=otp.ttl_seconds,
+            )
+            continue
+
+        if otp.code in seen_otp_codes:
+            continue
+
+        seen_otp_codes.add(otp.code)
+        message = format_otp_user_message(otp)
+        otp_user_messages.append({"role": "user", "content": message})
+        credential_ref = None
+        if otp.credential_id:
+            credential_ref = {
+                "kind": otp.credential_kind,
+                "id": str(otp.credential_id),
+            }
+        else:
+            logger.warning(
+                "OTP missing credential id; skipping credential-ref logging",
+                agent_id=agent_id,
+                source_message_id=otp.source_message_id,
+            )
+
+        if credential_ref and credential_refs_by_secret_ref is not None:
+            credential_refs_by_secret_ref[otp.code] = credential_ref
+        new_count += 1
+
+        if task_id and credential_ref:
+            await save_browser_credential_ref_message(
+                agent_id=agent_id,
+                task_id=task_id,
+                message=message,
+                role="USER",
+                credential_ref=credential_ref,
+            )
+
+    return new_count
+
+
+async def _fetch_and_append_recent_otp_user_messages(
+    *,
+    user_id: str,
+    api_url: str,
+    api_key: str,
+    seen_otp_codes: set[str],
+    otp_user_messages: List[Dict[str, str]],
+    credential_refs_by_secret_ref: Dict[str, Dict[str, str]],
+    agent_id: str,
+    task_id: Optional[str],
+) -> int:
+    otps = await fetch_recent_otps(user_id, api_url, api_key)
+    return await _append_new_otp_user_messages(
+        otps=otps,
+        seen_otp_codes=seen_otp_codes,
+        otp_user_messages=otp_user_messages,
+        credential_refs_by_secret_ref=credential_refs_by_secret_ref,
+        agent_id=agent_id,
+        task_id=task_id,
+    )
+
+
 async def _call_browser_use_with_rotation(  # noqa: C901
     *,
     rose_client: RoseClient,
     task: str,
+    dynamic_system_context: str,
+    turn_messages: List[Dict[str, Any]],
     browser_state: Dict[str, Any],
     action_entries: List[Dict[str, Any]],
     config: Any,
@@ -121,6 +446,8 @@ async def _call_browser_use_with_rotation(  # noqa: C901
     gpt_token_source: Optional[str],
     gpt_token_pool_id: Optional[str],
     browser_use_mode: Optional[str],
+    extra_user_messages: Optional[List[Dict[str, str]]] = None,
+    dump_extra: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Call rose-1-browser-use with in-activity claudeAuth rotation.
 
@@ -130,32 +457,20 @@ async def _call_browser_use_with_rotation(  # noqa: C901
     replacement, and retry up to MAX_CLAUDE_TOKEN_ROTATIONS. If all rotations
     exhaust (or there's no token to start), fall through to the waterfall.
     """
+    browser_state_for_llm = dict(browser_state)
+    if extra_user_messages:
+        browser_state_for_llm["_extra_user_messages"] = extra_user_messages
+
     rose_kwargs = dict(
         task=task,
-        browser_state=browser_state,
+        browser_state=browser_state_for_llm,
         action_history=action_entries,
         available_actions=AVAILABLE_ACTIONS,
+        dynamic_system_context=dynamic_system_context,
+        turn_messages=turn_messages,
         agent_id=agent_id,
         call_site=f"browser_use_step_{iteration}",
-    )
-
-    from helpers.observability import dump_llm_context
-
-    dump_llm_context(
-        call_site=f"browser_use_step_{iteration}",
-        # Browser-use builds its own messages inside the Rose client; surface
-        # the inputs that would have formed the user turn so the dump is
-        # actionable without reconstructing from the Rose side.
-        messages=[{"role": "user", "content": task}],
-        agent_id=agent_id,
-        model="rose-1-browser-use",
-        extra={
-            "browser_state": browser_state,
-            "action_history": action_entries,
-            "available_actions": AVAILABLE_ACTIONS,
-            "iteration": iteration,
-            "browser_use_mode": browser_use_mode,
-        },
+        dump_extra=dump_extra,
     )
 
     use_claude = browser_use_mode == "claude" and bool(token_state.access_token)
@@ -191,8 +506,7 @@ async def _call_browser_use_with_rotation(  # noqa: C901
 
     rotations = 0
     while (
-        llm_result.get("claude_token_error") in ("auth_error", "rate_limit")
-        and rotations < MAX_CLAUDE_TOKEN_ROTATIONS
+        llm_result.get("claude_token_error") in ("auth_error", "rate_limit") and rotations < MAX_CLAUDE_TOKEN_ROTATIONS
     ):
         rotations += 1
         current_source = token_state.source
@@ -254,6 +568,98 @@ async def _call_browser_use_with_rotation(  # noqa: C901
     return llm_result
 
 
+def _browser_tool_arguments(unified_action: Dict[str, Any]) -> Dict[str, Any]:
+    args = dict(unified_action.get("params") or {})
+    action_name = unified_action.get("action")
+    if unified_action.get("index") is not None and "index" not in args:
+        args["index"] = unified_action["index"]
+    coords = unified_action.get("coordinates")
+    if action_name == "click_coordinates" and isinstance(coords, dict):
+        args.setdefault("x", coords.get("x"))
+        args.setdefault("y", coords.get("y"))
+    return args
+
+
+def _browser_tool_result_for_history(action_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    clean: Dict[str, Any] = {}
+    for key, value in (result or {}).items():
+        if key in {"screenshot", "screenshot_b64", "dom_tree", "base64"}:
+            continue
+        clean[key] = value
+    if action_name == "screenshot" and (result.get("screenshot") or result.get("screenshot_b64")):
+        clean["screenshot_attached"] = True
+    return clean
+
+
+def _append_browser_turn_messages(
+    turn_messages: List[Dict[str, Any]],
+    *,
+    task: str,
+    browser_state: Dict[str, Any],
+    include_screenshot: bool,
+    unified_action: Dict[str, Any],
+    result: Dict[str, Any],
+    tool_call_id: str,
+) -> None:
+    """Append browser state, assistant tool call, and tool result to the next LLM context."""
+    action_name = unified_action.get("action") or "unknown"
+    thinking = unified_action.get("thinking") or ""
+    args = _browser_tool_arguments(unified_action)
+    turn_messages.append(
+        {
+            "role": "user",
+            "content": build_browser_state_message_content(
+                task=task,
+                browser_state=browser_state,
+                include_screenshot=include_screenshot,
+                include_task=False,
+            ),
+        }
+    )
+    turn_messages.append(
+        {
+            "role": "assistant",
+            "content": thinking,
+            "tool_calls": [
+                {
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {
+                        "name": action_name,
+                        "arguments": json_dumps_compact(args),
+                    },
+                }
+            ],
+        }
+    )
+    turn_messages.append(
+        {
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "name": action_name,
+            "content": json_dumps_compact(_browser_tool_result_for_history(action_name, result)),
+        }
+    )
+
+    screenshot_b64 = result.get("screenshot") or result.get("screenshot_b64")
+    if action_name == "screenshot" and screenshot_b64:
+        turn_messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Screenshot captured by the screenshot tool."},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"}},
+                ],
+            }
+        )
+
+
+def json_dumps_compact(value: Any) -> str:
+    import json
+
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
 # ========================================
 # TEMPORAL ACTIVITY (V3 - browser-use)
 # ========================================
@@ -290,8 +696,13 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
     from helpers.llm import check_progress
 
     dom_service = None
+    input_page = None
     playwright_browser = None
     playwright_instance = None
+    humanizer = None
+    browser_recorder: Optional[BrowserAgentRecorder] = None
+    browser_network_recorder: Optional[BrowserNetworkRecorder] = None
+    cursor_streamer: Optional[BrowserCursorRealtimeStreamer] = None
     action_history = ActionHistory()
     browser_url = None
     current_url = ""
@@ -319,15 +730,26 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
     reasoning_messages: List[str] = []
     action_summary: List[str] = []
     write_lock_approvals: Dict[str, Dict] = {}
+    auth_realm = auth_realm_from_url(start_url)
 
     pending_write_lock_action: Optional[Dict[str, Any]] = None
     resume_step_count: int = 0
+    auth_assistance_resume_mode: Optional[str] = None
+    resume_user_messages: List[Dict[str, str]] = []
     if write_lock_resume_state:
         pending_write_lock_action = write_lock_resume_state.get("pending_action")
         write_lock_approvals = write_lock_resume_state.get("write_lock_approvals", {})
         resume_step_count = write_lock_resume_state.get("step_count", 0)
         session_id = write_lock_resume_state.get("session_id") or session_id
         cdp_url = write_lock_resume_state.get("cdp_url") or cdp_url
+        auth_realm = write_lock_resume_state.get("auth_realm") or auth_realm
+        if write_lock_resume_state.get("approval_type") == "auth_assistance":
+            resume_user_messages.append(
+                build_auth_assistance_resume_user_message(
+                    auth_realm=auth_realm,
+                    handoff_mode=write_lock_resume_state.get("handoff_mode"),
+                )
+            )
         logger.info(
             "Resuming from write lock approval",
             has_pending_action=pending_write_lock_action is not None,
@@ -343,6 +765,9 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
     logger.info("Using response schema from tool call", fields=len(response_schema.get("fields", [])))
 
     session_passwords: List[Dict[str, Any]] = []
+    session_auth_options: Optional[Dict[str, Any]] = None
+    session_credential_ref: Optional[Dict[str, Any]] = None
+    browser_session_metadata: Dict[str, Any] = {}
 
     try:
         # ===== SETUP TIMING TRACKER =====
@@ -365,13 +790,71 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             has_write_lock_resume_state=write_lock_resume_state is not None,
         )
         if is_resume and task_id:
-            logger.info("\U0001f50d Fetching session info for resumed task", task_id=task_id)
-            session_info = await fetch_session_info(config, task_id)
+            is_auth_assistance_resume = (
+                write_lock_resume_state is not None
+                and write_lock_resume_state.get("approval_type") == "auth_assistance"
+            )
+            if is_auth_assistance_resume:
+                logger.info("Resuming auth-assistance browser task via existing Steel session", task_id=task_id)
+                session_info = await fetch_session_info(config, task_id, validate_live=True)
+                expected_session_id = write_lock_resume_state.get("session_id") if write_lock_resume_state else None
+                session_matches = (
+                    expected_session_id is None
+                    or session_info.get("session_id") is None
+                    or session_info.get("session_id") == expected_session_id
+                )
+                same_session_available = session_info.get("same_session_available") is True and session_matches
+                if same_session_available:
+                    session_info["resume_mode"] = "same_steel_session"
+                    auth_assistance_resume_mode = "same_steel_session"
+                    logger.info(
+                        "Reconnecting to live Steel session after auth assistance",
+                        task_id=task_id,
+                        session_id=session_info.get("session_id"),
+                    )
+                else:
+                    unavailable_reason = session_info.get("same_session_unavailable_reason")
+                    if not session_matches:
+                        unavailable_reason = "session_id_mismatch"
+                    logger.warning(
+                        "Existing Steel session unavailable after auth assistance; creating replacement session",
+                        task_id=task_id,
+                        session_id=session_info.get("session_id"),
+                        expected_session_id=expected_session_id,
+                        reason=unavailable_reason,
+                    )
+                    _session_wait_start = time.monotonic()
+                    while True:
+                        session_info = await resume_browser_session(config, task_id)
+                        if not session_info.get("rate_limited"):
+                            break
+                        _elapsed = time.monotonic() - _session_wait_start
+                        if _elapsed > SESSION_MAX_WAIT_SECONDS:
+                            raise Exception(
+                                f"Browser session unavailable after {int(_elapsed)}s (rate limited by Steel)"
+                            )
+                        logger.info(
+                            "Steel rate limited during replacement auth-assistance resume",
+                            elapsed_s=int(_elapsed),
+                            retry_in=SESSION_RETRY_INTERVAL_SECONDS,
+                        )
+                        activity.heartbeat(f"Waiting to resume browser availability ({int(_elapsed)}s)")
+                        await asyncio.sleep(SESSION_RETRY_INTERVAL_SECONDS)
+                    session_info["resume_mode"] = "new_steel_session_after_unavailable"
+                    session_info["same_session_unavailable_reason"] = unavailable_reason
+                    auth_assistance_resume_mode = "new_steel_session_after_unavailable"
+            else:
+                logger.info("\U0001f50d Fetching session info for resumed task", task_id=task_id)
+                session_info = await fetch_session_info(config, task_id)
             session_id = session_info.get("session_id")
             browser_url = session_info.get("debug_url")
             cdp_url = session_info.get("ws_url")
             fingerprint_injection = session_info.get("fingerprint_injection")
             session_passwords = session_info.get("passwords", [])
+            session_auth_options = session_info.get("auth_options")
+            session_credential_ref = session_info.get("credential_ref") or session_info.get("auth_credential_ref")
+            browser_session_metadata = session_info.get("browser_session_metadata") or {}
+            auth_realm = auth_realm or auth_realm_from_url(session_info.get("saved_url", ""))
             activity.heartbeat(f"Resuming task {task_id}")
         else:
             activity.heartbeat("Initializing browser session")
@@ -414,11 +897,46 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             cdp_url = session_data.get("ws_url")
             fingerprint_injection = session_data.get("fingerprint_injection")
             session_passwords = session_data.get("passwords", [])
+            session_auth_options = session_data.get("auth_options")
+            session_credential_ref = session_data.get("credential_ref") or session_data.get("auth_credential_ref")
+            browser_session_metadata = session_data.get("browser_session_metadata") or {}
             user_profile = session_data.get("user_settings") or {}
         _record_timing("session_init", t_session)
 
         if not cdp_url:
             raise RuntimeError("No CDP URL provided - backend must return ws_url from Steel")
+
+        t_auth = time.monotonic()
+        auth_options = session_auth_options or {}
+        if auth_options.get("realm"):
+            auth_realm = auth_options["realm"]
+        if not auth_options and auth_realm:
+            auth_options = await fetch_auth_options(config, user_id, auth_realm)
+            auth_realm = auth_options.get("realm") or auth_realm
+        elif not auth_options:
+            auth_options = {"realm": "this site"}
+        auth_runtime_state = AuthRuntimeState.from_auth_options(auth_options)
+        minted_option = auth_options.get("minted") or {}
+        minted_account_label = (
+            minted_option.get("email")
+            or minted_option.get("agentEmail")
+            or minted_option.get("agent_email")
+            or minted_option.get("accountLabel")
+            or minted_option.get("account_label")
+        )
+        minted_phone_label = minted_option.get("phone") or minted_option.get("agentPhone") or minted_option.get("agent_phone")
+        minted_account_labels = {
+            str(label).strip().lower()
+            for label in (minted_account_label, minted_phone_label)
+            if label
+        }
+        minted_primary_label = minted_account_label or minted_phone_label
+        minted_credential_ref = (
+            {"kind": "minted_account", "id": str(minted_option.get("id") or minted_primary_label)}
+            if minted_option and minted_primary_label
+            else None
+        )
+        _record_timing("auth_options", t_auth)
 
         activity.heartbeat(f"Connecting via CDP: {cdp_url[:50]}...")
 
@@ -444,8 +962,12 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             _input_page = _playwright_context.pages[0]
             _record_timing("parallel.browser.playwright_connect", t)
 
+            if _botsigged_diagnostics_enabled(start_url):
+                await _install_botsigged_diagnostics(_input_page, agent_id=agent_id, task_id=task_id)
+
             t = time.monotonic()
-            if fingerprint_injection:
+            fingerprint_injection_enabled = _env_enabled("BROWSER_AGENT_FINGERPRINT_INJECTION_ENABLED", True)
+            if fingerprint_injection and fingerprint_injection_enabled:
                 from helpers.fingerprint_injection import apply_fingerprint_injection
 
                 injection_success = await apply_fingerprint_injection(_input_page, fingerprint_injection)
@@ -455,14 +977,20 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                     logger.warning(
                         "\u26a0\ufe0f Failed to apply fingerprint injection - browser may leak real fingerprint"
                     )
+            elif fingerprint_injection and not fingerprint_injection_enabled:
+                logger.info("\U0001f510 Browser-agent fingerprint injection disabled by env")
             else:
                 logger.info("\U0001f510 No fingerprint injection data provided - using Steel defaults")
             _record_timing("parallel.browser.fingerprint", t)
 
             t = time.monotonic()
-            _humanizer = BrowserHumanizer(dom_page=_dom_page, input_page=_input_page, fast=False)
-            await _humanizer.initialize_cursor(start_pos=(640, 400))
-            logger.info("\U0001f916 BrowserHumanizer initialized (browser-use for DOM, Playwright for input)")
+            _humanizer = None
+            if _env_enabled("BROWSER_AGENT_HUMANIZER_ENABLED", True):
+                _humanizer = BrowserHumanizer(dom_page=_dom_page, input_page=_input_page, fast=False)
+                await _humanizer.initialize_cursor(start_pos=(640, 400))
+                logger.info("\U0001f916 BrowserHumanizer initialized (browser-use for DOM, Playwright for input)")
+            else:
+                logger.info("\U0001f916 BrowserHumanizer disabled by env; using browser-use input events")
             _record_timing("parallel.browser.humanizer", t)
 
             return _dom_service, _dom_page, _input_page, _humanizer, _playwright_browser, _playwright_instance
@@ -497,7 +1025,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                 _record_timing("parallel.data.init_messages", t)
 
             t = time.monotonic()
-            _shipping_section = ""
+            _user_context_sections: List[str] = []
             if user_profile.get("addressLine1"):
                 addr_lines = [
                     user_profile.get("name", ""),
@@ -507,7 +1035,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                     user_profile.get("country", "United States"),
                 ]
                 shipping_address = "\n".join(line for line in addr_lines if line)
-                _shipping_section = f"\n\nUSER DELIVERY ADDRESS:\n{shipping_address}\n\nIMPORTANT: During checkout, verify delivery address matches."
+                _user_context_sections.append(f"## Delivery Address\n{shipping_address}")
 
             _autopay_section = ""
             _card_refs: Dict[str, str] = {}
@@ -518,6 +1046,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                     autopay_limit_cents = payment_data.get("autoagentpaylimit_cents", 0)
                     if autopay_limit_cents > 0:
                         _autopay_section = build_autopay_prompt_section(payment_data, encrypted_payment)
+                        _user_context_sections.append(_autopay_section.strip())
                         _card_refs = {
                             "card_number": payment_data.get("card_number", ""),
                             "card_name": payment_data.get("cardholder_name", ""),
@@ -525,26 +1054,26 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                             "card_cvv": payment_data.get("card_cvv", ""),
                         }
                     else:
-                        _autopay_section = "\n\nPAYMENT AUTHORIZATION:\nAutopay DISABLED. For ALL purchases, use send_message_to_user to get explicit approval."
+                        _user_context_sections.append(
+                            "## Payment Authorization\n"
+                            "Autopay DISABLED. For ALL purchases, use send_message_to_user to get explicit approval."
+                        )
             _record_timing("parallel.data.user_profile", t)
 
             t = time.monotonic()
-            _passwords_section = ""
             _ref_to_encrypted: Dict[str, str] = {}
-            _password_lookup: Dict[str, Dict[str, str]] = {}
+            _password_origins: Dict[str, str] = {}
+            _credential_refs_by_secret_ref: Dict[str, Dict[str, str]] = {}
             if session_passwords:
-                _passwords_section, _ref_to_encrypted = build_passwords_prompt_section(session_passwords)
-                for pwd in session_passwords:
-                    encrypted = pwd.get("encryptedPassword", "")
-                    if encrypted:
-                        _password_lookup[encrypted] = {
-                            "origin": pwd.get("origin", ""),
-                            "username": pwd.get("username", ""),
-                        }
                 logger.info(f"Loaded {len(session_passwords)} passwords from session response")
+            (
+                _auth_options_section,
+                _ref_to_encrypted,
+                _password_origins,
+                _credential_refs_by_secret_ref,
+            ) = build_auth_options_prompt_section(auth_options, session_passwords)
 
             _secret_refs: Dict[str, str] = {}
-            _password_origins: Dict[str, str] = {}
 
             for ref, value in _card_refs.items():
                 if value:
@@ -572,41 +1101,48 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                 for short_ref, decrypted in decrypt_results:
                     if decrypted:
                         _secret_refs[short_ref] = decrypted
-                        encrypted = _ref_to_encrypted[short_ref]
-                        info = _password_lookup.get(encrypted, {})
-                        _password_origins[short_ref] = info.get("origin", "")
+
+            attemptable_password_ids = {
+                str(credential_ref.get("id"))
+                for ref, credential_ref in _credential_refs_by_secret_ref.items()
+                if ref in _secret_refs and credential_ref.get("kind") == "password" and credential_ref.get("id")
+            }
+            auth_runtime_state.restrict_password_ids_to_attemptable(attemptable_password_ids)
 
             logger.info(
                 "Built secret refs for type interception",
                 card_refs_count=len(_card_refs),
                 password_refs_count=len([k for k in _secret_refs if k not in _card_refs]),
+                attemptable_password_count=len(attemptable_password_ids),
             )
             _record_timing("parallel.data.passwords", t)
 
             t = time.monotonic()
-            _base_custom_instructions = (
-                "Your browser is in full screen mode. No search bar or navigation bar. "
-                "Control+L will NOT focus the address bar - use the goto action to navigate to URLs. "
-                "Browser cookies have been injected - assume the user is logged in until proven otherwise. "
-                "Avoid login flows unless the site forces you to login to complete your directed goal."
-                + _shipping_section
-                + _autopay_section
-                + _passwords_section
-                + "\n\nWhen a site offers OTP delivery options, ALWAYS prefer EMAIL over SMS. "
-                "SMS OTPs require the user's Mac to be active; email is more reliable."
-                "\n\nUse send_message_to_user when you need human help (login, CAPTCHA, payments over limit). "
-                "Use attempt_completion tool when the task is done."
+            _user_context_section = (
+                "\n\n# User Context\n\n" + "\n\n".join(_user_context_sections)
+                if _user_context_sections
+                else ""
             )
+            _base_custom_instructions = _user_context_section + "\n\n" + _auth_options_section
+            if session_credential_ref and task_id:
+                await save_browser_credential_ref_message(
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    message="Browser session credential applied at session start.",
+                    role="TOOL",
+                    tool_name="browser_session_auth",
+                    credential_ref=session_credential_ref,
+                )
             _model_pricing = await get_model_pricing_with_fallback("rose-1-browser-use")
             _record_timing("parallel.data.instructions", t)
 
             return (
-                _shipping_section,
+                _user_context_section,
                 _autopay_section,
                 _card_refs,
-                _passwords_section,
+                _auth_options_section,
                 _ref_to_encrypted,
-                _password_lookup,
+                _credential_refs_by_secret_ref,
                 _secret_refs,
                 _password_origins,
                 _base_custom_instructions,
@@ -620,14 +1156,69 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
         _record_timing("parallel_setup_total", t_parallel)
 
         dom_service, dom_page, input_page, humanizer, playwright_browser, playwright_instance = browser_result
+        recording_output_dir = browser_recording_output_dir(agent_id, task_id) if task_id else None
+        browser_recorder = await BrowserAgentRecorder.create(
+            page=input_page,
+            agent_id=agent_id,
+            task_id=task_id,
+            session_id=session_id,
+            browser_url=browser_url,
+            session_metadata=browser_session_metadata,
+        )
+        cursor_streamer = BrowserCursorRealtimeStreamer(agent_id=agent_id, task_id=task_id)
+
+        def observe_cursor(x: int, y: int) -> None:
+            if browser_recorder:
+                browser_recorder.set_cursor(x, y)
+            if cursor_streamer:
+                cursor_streamer.set_cursor(x, y)
+
+        if humanizer:
+            humanizer.set_cursor_observer(observe_cursor)
+            humanizer.start_idle_movement()
+        if recording_output_dir:
+            browser_network_recorder = await BrowserNetworkRecorder.create(
+                browser_session=dom_service.session,
+                agent_id=agent_id,
+                task_id=task_id,
+                session_id=session_id,
+                output_dir=recording_output_dir,
+            )
+        if browser_recorder and task_id:
+            await save_browser_action_message(
+                agent_id=agent_id,
+                title="Browser recording started",
+                task_id=task_id,
+                message=f"Local browser recording will be saved: {browser_recorder.output_dir / 'index.html'}",
+                status=MessageStatus.IN_PROGRESS,
+                browser_url=browser_url,
+                action_type="recording",
+                tool_call_id=str(uuid_module.uuid4()),
+                extra_metadata={
+                    "recording_path": str(browser_recorder.output_dir / "index.html"),
+                    "browser_session_metadata": browser_session_metadata,
+                },
+            )
+        if browser_network_recorder and task_id:
+            await save_browser_action_message(
+                agent_id=agent_id,
+                title="Browser network recording started",
+                task_id=task_id,
+                message=f"Local browser network log will be saved: {browser_network_recorder.network_dir / 'index.json'}",
+                status=MessageStatus.IN_PROGRESS,
+                browser_url=browser_url,
+                action_type="network_recording",
+                tool_call_id=str(uuid_module.uuid4()),
+                extra_metadata={"network_recording_path": str(browser_network_recorder.network_dir / "index.json")},
+            )
 
         (
             shipping_section,
             autopay_section,
             card_refs,
-            passwords_section,
+            auth_options_section,
             ref_to_encrypted,
-            password_lookup,
+            credential_refs_by_secret_ref,
             secret_refs,
             password_origins,
             base_custom_instructions,
@@ -800,6 +1391,8 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                 steps_taken=0,
                 total_steps=MAX_ITERATIONS,
             )
+            if browser_recorder:
+                await browser_recorder.mark(f"Navigated -> {nav_url[:80]}", action="goto")
 
             logger.info(f"\U0001f310 Auto-navigated to start URL: {nav_url}")
         else:
@@ -826,6 +1419,17 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
         rose_client = RoseClient()
         iteration = resume_step_count
         consecutive_api_failures = 0
+        seen_otp_codes: set[str] = set()
+        otp_user_messages: List[Dict[str, str]] = []
+        browser_turn_messages: List[Dict[str, Any]] = []
+        browser_turn_messages.extend(resume_user_messages)
+        otp_history_count = 0
+        task_prompt = build_browser_task_prompt(goal)
+        dynamic_system_context = build_browser_dynamic_system_context(
+            base_custom_instructions,
+            available_files=list(available_file_paths.keys()) if available_file_paths else None,
+            response_schema=response_schema,
+        )
 
         while iteration < MAX_ITERATIONS:
             iteration += 1
@@ -848,6 +1452,8 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                     humanizer=humanizer,
                     secret_refs=secret_refs,
                     password_origins=password_origins,
+                    credential_refs_by_secret_ref=credential_refs_by_secret_ref,
+                    user_id=user_id,
                     current_url=current_url,
                     write_lock_enabled=write_lock_enabled,
                     write_lock_approvals=write_lock_approvals,
@@ -858,7 +1464,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                 logger.info(f"Pending write lock action executed: {action_name}", result=result)
 
                 activity.heartbeat(f"Step {iteration} - fetching browser state")
-                browser_state = await dom_service.get_browser_state(include_screenshot=True)
+                browser_state = await dom_service.get_browser_state(include_screenshot=False)
                 current_url = browser_state.get("url", "")
 
                 await action_history.record_action(
@@ -873,50 +1479,33 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
 
                 continue
 
-            # 0. Fetch recent OTPs
-            otp_section = ""
+            # 0. Fetch recent OTPs and append unseen codes as USER messages.
             try:
-                otp_section = await fetch_recent_otps(user_id, config.backend.api_url, config.backend.api_key)
+                new_otp_count = await _fetch_and_append_recent_otp_user_messages(
+                    user_id=user_id,
+                    api_url=config.backend.api_url,
+                    api_key=config.backend.api_key,
+                    seen_otp_codes=seen_otp_codes,
+                    otp_user_messages=otp_user_messages,
+                    credential_refs_by_secret_ref=credential_refs_by_secret_ref,
+                    agent_id=agent_id,
+                    task_id=task_id,
+                )
+                if new_otp_count:
+                    logger.info("Appended OTP user messages", count=new_otp_count)
+                if len(otp_user_messages) > otp_history_count:
+                    browser_turn_messages.extend(otp_user_messages[otp_history_count:])
+                    otp_history_count = len(otp_user_messages)
             except Exception as e:
                 logger.warning("Failed to fetch OTPs", error=str(e))
 
             # 1. Get current browser state
             activity.heartbeat(f"Step {iteration} - fetching browser state")
-            browser_state = await dom_service.get_browser_state(include_screenshot=True)
+            browser_state = await dom_service.get_browser_state(include_screenshot=False)
             current_url = browser_state.get("url", "")
-
-            # 1b. Composite cursor
-            prev_entries = action_history.get_entries()
-            if prev_entries and browser_state.get("screenshot"):
-                last_coords = prev_entries[-1].get("coordinates")
-                if last_coords:
-                    from browser_tools.cursor_overlay import composite_cursor_on_screenshot
-
-                    browser_state["screenshot"] = composite_cursor_on_screenshot(
-                        browser_state["screenshot"], last_coords["x"], last_coords["y"]
-                    )
 
             if current_url and (not visited_urls or current_url != visited_urls[-1]):
                 visited_urls.append(current_url)
-
-            # 2. Build custom instructions with OTP
-            custom_instructions = base_custom_instructions
-            if otp_section:
-                custom_instructions += f"\n\n{otp_section}"
-
-            # 3. Build enriched task
-            #    The static prompt body (goal/instructions/files/safety rules)
-            #    is byte-identical across iterations from the same spawn — this
-            #    is the cache window. The dynamic per-step state (time + URL)
-            #    is emitted as a separate trailing [STATE: ...] line so it does
-            #    not contaminate the cacheable prefix.
-            static_prompt = get_browser_system_prompt(
-                goal,
-                custom_instructions,
-                available_files=list(available_file_paths.keys()) if available_file_paths else None,
-            )
-            state_line = build_state_line(current_url=current_url)
-            enriched_task = f"{static_prompt}\n\n{state_line}"
 
             # 4. Call Rose API
             try:
@@ -934,7 +1523,9 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                 activity.heartbeat(f"Step {iteration} - calling Rose API")
                 llm_result = await _call_browser_use_with_rotation(
                     rose_client=rose_client,
-                    task=enriched_task,
+                    task=task_prompt,
+                    dynamic_system_context=dynamic_system_context,
+                    turn_messages=browser_turn_messages,
                     browser_state=browser_state,
                     action_entries=action_entries,
                     config=config,
@@ -947,6 +1538,18 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                     gpt_token_source=gpt_token_source,
                     gpt_token_pool_id=gpt_token_pool_id,
                     browser_use_mode=browser_use_mode,
+                    extra_user_messages=[],
+                    dump_extra=(
+                        {
+                            "browser_recording_manifest_path": str(browser_recorder.output_dir / "manifest.json"),
+                            "browser_recording_path": str(browser_recorder.output_dir / "index.html"),
+                            "browser_recording_task_id": browser_recorder.task_id,
+                            "browser_session_metadata": browser_session_metadata,
+                            "iteration": iteration,
+                        }
+                        if browser_recorder
+                        else {"iteration": iteration}
+                    ),
                 )
                 # Track waterfall fall-through so subsequent iterations skip claudeAuth.
                 if llm_result.get("mode") != "claude" and browser_use_mode == "claude":
@@ -993,8 +1596,198 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             action_summary.append(f"{action_name}: {str(unified_action)[:500]}")
             if len(action_summary) > 20:
                 action_summary[:] = action_summary[-20:]
+            if action_name == "attempt_completion":
+                auth_runtime_state.mark_guest_attempted()
 
             # 5. Handle special actions
+            if action_name == "request_user_assistance_for_authentication":
+                tool_call_id_action = str(uuid_module.uuid4())
+                base_site = auth_realm or get_domain_from_url(current_url) or "Current Site"
+                auth_snapshot = auth_runtime_state.snapshot()
+                minted_otp_pending = (
+                    auth_snapshot["minted"]["present"]
+                    and auth_snapshot["minted"]["attempted"]
+                    and not otp_user_messages
+                )
+                if minted_otp_pending:
+                    logger.info(
+                        "Delaying auth assistance while waiting for minted account email/SMS OTP",
+                        base_site=base_site,
+                    )
+                    minted_otp_arrived = False
+                    for _ in range(12):
+                        await asyncio.sleep(10)
+                        try:
+                            new_otp_count = await _fetch_and_append_recent_otp_user_messages(
+                                user_id=user_id,
+                                api_url=config.backend.api_url,
+                                api_key=config.backend.api_key,
+                                seen_otp_codes=seen_otp_codes,
+                                otp_user_messages=otp_user_messages,
+                                credential_refs_by_secret_ref=credential_refs_by_secret_ref,
+                                agent_id=agent_id,
+                                task_id=task_id,
+                            )
+                        except Exception as e:
+                            logger.warning("Failed to fetch OTPs while delaying auth assistance", error=str(e))
+                            new_otp_count = 0
+                        if new_otp_count:
+                            logger.info(
+                                "Blocked auth assistance because minted account OTP arrived",
+                                count=new_otp_count,
+                            )
+                            if len(otp_user_messages) > otp_history_count:
+                                browser_turn_messages.extend(otp_user_messages[otp_history_count:])
+                                otp_history_count = len(otp_user_messages)
+                            minted_otp_arrived = True
+                            break
+                    if minted_otp_arrived:
+                        blocked_result = {
+                            "success": False,
+                            "error": "Recent email/SMS OTP arrived; use it before asking for help.",
+                        }
+                        await action_history.record_action(
+                            dom_service=dom_service,
+                            action="request_user_assistance_for_authentication",
+                            thinking=thinking,
+                            params={},
+                            result=blocked_result,
+                        )
+                        _append_browser_turn_messages(
+                            browser_turn_messages,
+                            task=task_prompt,
+                            browser_state=browser_state,
+                            include_screenshot=False,
+                            unified_action=unified_action,
+                            result=blocked_result,
+                            tool_call_id=tool_call_id_action,
+                        )
+                        continue
+                allowed, guard_reason, guard_state = auth_runtime_state.user_assistance_guard()
+                if not allowed:
+                    logger.info(
+                        "Blocked premature user authentication assistance request",
+                        base_site=base_site,
+                        reason=guard_reason,
+                        auth_guard_state=guard_state,
+                    )
+                    blocked_result = {"success": False, "error": guard_reason, "auth_guard_state": guard_state}
+                    await action_history.record_action(
+                        dom_service=dom_service,
+                        action="request_user_assistance_for_authentication",
+                        thinking=thinking,
+                        params={},
+                        result=blocked_result,
+                    )
+                    _append_browser_turn_messages(
+                        browser_turn_messages,
+                        task=task_prompt,
+                        browser_state=browser_state,
+                        include_screenshot=False,
+                        unified_action=unified_action,
+                        result=blocked_result,
+                        tool_call_id=tool_call_id_action,
+                    )
+                    await save_browser_action_message(
+                        agent_id=agent_id,
+                        title="Authentication assistance blocked",
+                        task_id=task_id,
+                        message=guard_reason,
+                        status=MessageStatus.FINISHED,
+                        browser_url=browser_url,
+                        action_type="request_user_assistance_for_authentication",
+                        tool_call_id=tool_call_id_action,
+                        steps_taken=iteration,
+                        total_steps=MAX_ITERATIONS,
+                        extra_metadata={"auth_guard_state": guard_state},
+                    )
+                    continue
+                logger.info("Browser agent requested user authentication assistance", base_site=base_site)
+                auth_handoff_current_url = select_auth_assistance_current_url(current_url, visited_urls)
+                if auth_handoff_current_url != current_url:
+                    logger.info(
+                        "Using prior auth URL with query params for user assistance handoff",
+                        current_url=current_url,
+                        auth_handoff_current_url=auth_handoff_current_url,
+                    )
+
+                request_info = await create_user_auth_assistance_request(
+                    config,
+                    agent_id=agent_id,
+                    user_id=user_id,
+                    auth_realm=auth_realm or base_site,
+                    browser_session_id=task_id,
+                    steel_session_id=session_id,
+                    browser_url=browser_url,
+                    current_url=auth_handoff_current_url,
+                    mode="live_view",
+                )
+                request_id = (
+                    request_info.get("id")
+                    or request_info.get("requestId")
+                    or request_info.get("request_id")
+                    or request_info.get("attentionRequestId")
+                    or (request_info.get("request") or {}).get("id")
+                )
+
+                success_result = {"success": True, "request_id": request_id}
+                await action_history.record_action(
+                    dom_service=dom_service,
+                    action="request_user_assistance_for_authentication",
+                    thinking=thinking,
+                    params={},
+                    result=success_result,
+                )
+                _append_browser_turn_messages(
+                    browser_turn_messages,
+                    task=task_prompt,
+                    browser_state=browser_state,
+                    include_screenshot=False,
+                    unified_action=unified_action,
+                    result=success_result,
+                    tool_call_id=tool_call_id_action,
+                )
+
+                await dom_service.disconnect()
+                await _stop_playwright_resources(
+                    playwright_browser,
+                    playwright_instance,
+                    agent_id,
+                    close_browser=False,
+                )
+                playwright_browser = None
+                playwright_instance = None
+
+                execution_time_ms = (safe_time() - start_time) * 1000
+                usage_items = build_usage_items(
+                    total_input_tokens, total_output_tokens, model_pricing, execution_time_ms
+                )
+                await _propagate_browser_credentials_with_progress(
+                    config=config,
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    browser_url=browser_url,
+                    status="awaiting_auth_assistance",
+                    success=False,
+                    message="Automated authentication options were exhausted; requesting user assistance.",
+                )
+
+                return {
+                    "status": "awaiting_auth_assistance",
+                    "request_id": request_id,
+                    "auth_assistance_request": request_info,
+                    "base_site": base_site,
+                    "auth_realm": auth_realm or base_site,
+                    "task_id": task_id,
+                    "session_id": session_id,
+                    "browser_url": browser_url,
+                    "cdp_url": cdp_url,
+                    "handoff_mode": "same_steel_session_live_view",
+                    "step_count": iteration,
+                    "execution_time_ms": execution_time_ms,
+                    "usage_items": usage_items,
+                }
+
             if action_name == "send_message_to_user":
                 message = unified_action.get("params", {}).get("message", "")
                 reason = unified_action.get("params", {}).get("reason", "other")
@@ -1191,13 +1984,27 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                             gpt_token_source,
                             gpt_token_pool_id,
                             user_id,
+                            (
+                                {
+                                    "browser_recording_manifest_path": str(
+                                        browser_recorder.output_dir / "manifest.json"
+                                    ),
+                                    "browser_recording_path": str(browser_recorder.output_dir / "index.html"),
+                                    "browser_recording_task_id": browser_recorder.task_id,
+                                    "browser_session_metadata": browser_session_metadata,
+                                }
+                                if browser_recorder
+                                else None
+                            ),
                         ],
                         start_to_close_timeout=timedelta(seconds=VERIFIER_ULTRA_TIMEOUT_SECONDS),
                     )
 
                     v_usage = progress_result.get("usage", {})
                     verifier_actual_model = v_usage.get("actual_model", "")
-                    if not (str(verifier_actual_model).endswith("-claude") or str(verifier_actual_model).endswith("-gpt")):
+                    if not (
+                        str(verifier_actual_model).endswith("-claude") or str(verifier_actual_model).endswith("-gpt")
+                    ):
                         total_input_tokens += v_usage.get("prompt_tokens", 0)
                         total_output_tokens += v_usage.get("completion_tokens", 0)
 
@@ -1214,6 +2021,11 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                         action_type="system",
                         tool_call_id=verifier_call_id,
                     )
+                    if browser_recorder:
+                        await browser_recorder.mark(
+                            f"Verifier progress: {score * 100:.0f}%",
+                            action="verify",
+                        )
 
                     if score >= 1.0:
                         execution_time_ms = (safe_time() - start_time) * 1000
@@ -1280,10 +2092,20 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                             action_type="task_complete",
                             tool_call_id=tool_call_id,
                             is_completion_message=True,
+                            output_schema=response_schema,
                         )
 
                         usage_items = build_usage_items(
                             total_input_tokens, total_output_tokens, model_pricing, execution_time_ms
+                        )
+                        await _propagate_browser_credentials_with_progress(
+                            config=config,
+                            agent_id=agent_id,
+                            task_id=task_id,
+                            browser_url=browser_url,
+                            status="completed",
+                            success=True,
+                            message=context_message,
                         )
 
                         return {
@@ -1291,8 +2113,11 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                             "success": True,
                             "message": context_message,
                             "browser_url": browser_url,
+                            "task_id": task_id,
                             "usage_items": usage_items,
                             "execution_time_ms": execution_time_ms,
+                            "auth_assistance_resume_mode": auth_assistance_resume_mode,
+                            "session_id": session_id,
                             "structured_response": structured_response,
                             "output_files": output_files,
                         }
@@ -1331,8 +2156,24 @@ Based on this feedback, I need to continue working on the task and address the i
                         extra_metadata={"verifierMessage": True},
                     )
 
-                    current_state = await dom_service.get_browser_state(include_screenshot=True)
+                    current_state = await dom_service.get_browser_state(include_screenshot=False)
                     current_screenshot = current_state.get("screenshot")
+
+                    rejection_result = {
+                        "success": False,
+                        "error": "Verifier rejected completion.",
+                        "score": score,
+                        "reasoning": v_reasoning,
+                    }
+                    _append_browser_turn_messages(
+                        browser_turn_messages,
+                        task=task_prompt,
+                        browser_state=browser_state,
+                        include_screenshot=False,
+                        unified_action=unified_action,
+                        result=rejection_result,
+                        tool_call_id=continuing_tool_call_id,
+                    )
 
                     await action_history.record_action(
                         dom_service=dom_service,
@@ -1398,6 +2239,17 @@ Based on this feedback, I need to continue working on the task and address the i
                 total_steps=MAX_ITERATIONS,
                 auxiliary={"coordinates": coords_for_cursor} if coords_for_cursor else None,
             )
+            if browser_recorder:
+                await browser_recorder.mark(
+                    title_progress,
+                    action=action_name,
+                    metadata={
+                        "step": iteration,
+                        "phase": "start",
+                        "action": action_name,
+                        "target_coordinates": coords_for_cursor,
+                    },
+                )
 
             activity.heartbeat(f"Step {iteration} - executing {action_name}")
             result = await execute_action(
@@ -1410,10 +2262,30 @@ Based on this feedback, I need to continue working on the task and address the i
                 humanizer=humanizer,
                 secret_refs=secret_refs,
                 password_origins=password_origins,
+                credential_refs_by_secret_ref=credential_refs_by_secret_ref,
+                user_id=user_id,
                 current_url=current_url,
                 write_lock_enabled=write_lock_enabled,
                 write_lock_approvals=write_lock_approvals,
                 system_name=system_name,
+            )
+            if (
+                not result.get("credential_ref")
+                and action_name == "input_text"
+                and minted_credential_ref
+                and str(unified_action.get("params", {}).get("text", "")).strip().lower()
+                in minted_account_labels
+            ):
+                result["credential_ref"] = minted_credential_ref
+
+            _append_browser_turn_messages(
+                browser_turn_messages,
+                task=task_prompt,
+                browser_state=browser_state,
+                include_screenshot=False,
+                unified_action=unified_action,
+                result=result,
+                tool_call_id=tool_call_id_action,
             )
 
             if result.get("status") == "needs_write_approval":
@@ -1451,6 +2323,18 @@ Based on this feedback, I need to continue working on the task and address the i
 
             if result.get("success", True):
                 logger.info(f"Action {action_name} successful", agent_id=agent_id, title=title_done, task_id=task_id)
+                if input_page and _botsigged_diagnostics_enabled(start_url):
+                    with contextlib.suppress(Exception):
+                        await _capture_botsigged_diagnostics(
+                            input_page,
+                            agent_id=agent_id,
+                            task_id=task_id,
+                            checkpoint=f"after_action_{iteration}_{action_name}",
+                        )
+                extra_metadata = None
+                if result.get("credential_ref"):
+                    auth_runtime_state.mark_credential_ref(result["credential_ref"])
+                    extra_metadata = {"credential_ref": result["credential_ref"]}
                 await save_browser_action_message(
                     agent_id=agent_id,
                     title=title_done,
@@ -1463,7 +2347,19 @@ Based on this feedback, I need to continue working on the task and address the i
                     steps_taken=iteration,
                     total_steps=MAX_ITERATIONS,
                     auxiliary={"coordinates": coords_for_cursor} if coords_for_cursor else None,
+                    extra_metadata=extra_metadata,
                 )
+                if browser_recorder:
+                    await browser_recorder.mark(
+                        title_done,
+                        action=action_name,
+                        metadata={
+                            "step": iteration,
+                            "phase": "finish",
+                            "action": action_name,
+                            "target_coordinates": coords_for_cursor,
+                        },
+                    )
             else:
                 logger.error(
                     f"Action {action_name} failed",
@@ -1489,6 +2385,17 @@ Based on this feedback, I need to continue working on the task and address the i
                     total_steps=MAX_ITERATIONS,
                     auxiliary={"coordinates": coords_for_cursor} if coords_for_cursor else None,
                 )
+                if browser_recorder:
+                    await browser_recorder.mark(
+                        title_done,
+                        action="error",
+                        metadata={
+                            "step": iteration,
+                            "phase": "error",
+                            "action": action_name,
+                            "target_coordinates": coords_for_cursor,
+                        },
+                    )
 
             await asyncio.sleep(ACTION_LOOP_DELAY_SECONDS)
 
@@ -1516,10 +2423,20 @@ Based on this feedback, I need to continue working on the task and address the i
             action_type="task_complete",
             tool_call_id=tool_call_id,
             is_completion_message=True,
+            output_schema=response_schema,
         )
 
         execution_time_ms = (safe_time() - start_time) * 1000
         usage_items = build_usage_items(total_input_tokens, total_output_tokens, model_pricing, execution_time_ms)
+        await _propagate_browser_credentials_with_progress(
+            config=config,
+            agent_id=agent_id,
+            task_id=task_id,
+            browser_url=browser_url,
+            status="max_iterations",
+            success=False,
+            message=context_message,
+        )
 
         return {
             "status": "max_iterations",
@@ -1552,6 +2469,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     action_type="task_complete",
                     tool_call_id=tool_call_id,
                     is_completion_message=True,
+                    output_schema=response_schema,
                 )
 
         return {
@@ -1594,10 +2512,89 @@ Based on this feedback, I need to continue working on the task and address the i
                     action_type="task_complete",
                     tool_call_id=tool_call_id,
                     is_completion_message=True,
+                    output_schema=response_schema,
+                )
+            try:
+                await _propagate_browser_credentials_with_progress(
+                    config=config,
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    browser_url=browser_url or "",
+                    status="error",
+                    success=False,
+                    message=error_message,
+                )
+            except Exception as propagation_error:
+                logger.warning(
+                    "Credential propagation failed after browser error; preserving original browser error",
+                    error=extract_error_message(propagation_error),
                 )
 
         raise
     finally:
+        if cursor_streamer:
+            with contextlib.suppress(Exception):
+                await cursor_streamer.close()
+        if input_page and _botsigged_diagnostics_enabled(start_url):
+            with contextlib.suppress(Exception):
+                capture = await _capture_botsigged_diagnostics(
+                    input_page,
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    checkpoint="final",
+                )
+                if capture and task_id:
+                    await save_browser_action_message(
+                        agent_id=agent_id,
+                        title="BotSigged diagnostics saved",
+                        task_id=task_id,
+                        message=f"Local BotSigged diagnostics: {capture['path']}",
+                        status=MessageStatus.FINISHED,
+                        browser_url=browser_url or "",
+                        action_type="diagnostics",
+                        tool_call_id=str(uuid_module.uuid4()),
+                        extra_metadata={
+                            "botsigged_diagnostics_path": capture["path"],
+                            "botsigged_last_score": capture["diagnostics"].get("lastScore"),
+                            "botsigged_signal_counts": capture["diagnostics"].get("signalCounts"),
+                        },
+                    )
+        if humanizer:
+            with contextlib.suppress(Exception):
+                await humanizer.close()
+        if browser_network_recorder:
+            with contextlib.suppress(Exception):
+                network_index_path = await browser_network_recorder.close()
+                if network_index_path and task_id:
+                    await save_browser_action_message(
+                        agent_id=agent_id,
+                        title="Browser network recording saved",
+                        task_id=task_id,
+                        message=f"Local browser network log: {network_index_path}",
+                        status=MessageStatus.FINISHED,
+                        browser_url=browser_url or "",
+                        action_type="network_recording",
+                        tool_call_id=str(uuid_module.uuid4()),
+                        extra_metadata={"network_recording_path": str(network_index_path)},
+                    )
+        if browser_recorder:
+            with contextlib.suppress(Exception):
+                recording_path = await browser_recorder.close()
+                if recording_path and task_id:
+                    await save_browser_action_message(
+                        agent_id=agent_id,
+                        title="Browser recording saved",
+                        task_id=task_id,
+                        message=f"Local browser recording: {recording_path}",
+                        status=MessageStatus.FINISHED,
+                        browser_url=browser_url or "",
+                        action_type="recording",
+                        tool_call_id=str(uuid_module.uuid4()),
+                        extra_metadata={
+                            "recording_path": str(recording_path),
+                            "browser_session_metadata": browser_session_metadata,
+                        },
+                    )
         await _stop_playwright_resources(playwright_browser, playwright_instance, agent_id)
 
 
@@ -1693,6 +2690,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
             )
 
             write_lock_resume_state = None
+            current_start_url = start_url
             result = None
 
             while True:
@@ -1719,7 +2717,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             output_schema,
                             attachments if attachments else None,
                             write_lock_enabled,
-                            start_url,
+                            current_start_url,
                             write_lock_resume_state,
                             system_name,
                             bool(active_claude_token) and not bool(active_gpt_token),
@@ -1853,6 +2851,103 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         )
                         return
 
+                if result and result.get("status") == "awaiting_auth_assistance":
+                    request_id = result.get("request_id")
+                    base_site = result.get("base_site") or "Current Site"
+                    auth_request = result.get("auth_assistance_request") or {}
+                    auth_handoff = auth_request.get("handoff") or {}
+
+                    logger.info(
+                        "Browser agent needs user authentication assistance",
+                        request_id=request_id,
+                        base_site=base_site,
+                    )
+
+                    yield ToolEvent(
+                        type=EventType.POST_MESSAGE,
+                        title=f"Requesting User Assistance for {base_site} Login",
+                        message="",
+                        status=MessageStatus.IN_PROGRESS,
+                        metadata={
+                            "toolName": "spawn_browser_agent",
+                            "action_type": "auth_assistance",
+                            "task_id": result.get("task_id"),
+                            "requestUserAuthentication": {
+                                "requestId": request_id,
+                                "authRealm": result.get("auth_realm"),
+                                "steelSessionId": result.get("session_id"),
+                                "taskId": result.get("task_id"),
+                                "handoffMode": result.get("handoff_mode"),
+                                "browserUrl": result.get("browser_url"),
+                                "liveViewUrl": (
+                                    auth_request.get("liveViewUrl")
+                                    or auth_request.get("live_view_url")
+                                    or auth_handoff.get("liveViewUrl")
+                                    or auth_handoff.get("live_view_url")
+                                ),
+                            },
+                        },
+                    )
+
+                    if not request_id:
+                        yield ToolEvent(
+                            type=EventType.POST_MESSAGE,
+                            title="Authentication assistance failed",
+                            message="Backend did not return an auth assistance request id.",
+                            status=MessageStatus.ERROR,
+                            metadata={"toolName": "spawn_browser_agent", "action_type": "auth_assistance"},
+                        )
+                        return
+
+                    workflow_instance.is_paused = True
+                    if hasattr(workflow_instance, "_update_tree_state"):
+                        await workflow_instance._update_tree_state(status="PAUSED")
+
+                    await workflow.wait_condition(
+                        lambda: (
+                            request_id in getattr(workflow_instance, "_signal_responses", {})
+                            or not workflow_instance.is_paused
+                        )
+                    )
+                    if request_id in getattr(workflow_instance, "_signal_responses", {}):
+                        workflow_instance._signal_responses.pop(request_id, None)
+                        workflow_instance.is_paused = False
+                        if hasattr(workflow_instance, "_update_tree_state"):
+                            await workflow_instance._update_tree_state(status="ACTIVE")
+
+                    write_lock_resume_state = {
+                        "pending_action": None,
+                        "write_lock_approvals": result.get("write_lock_approvals", {}),
+                        "approval_type": "auth_assistance",
+                        "step_count": result.get("step_count", 0),
+                        "session_id": result.get("session_id"),
+                        "cdp_url": result.get("cdp_url"),
+                        "handoff_mode": result.get("handoff_mode"),
+                        "task_id": result.get("task_id"),
+                        "auth_realm": result.get("auth_realm"),
+                    }
+
+                    yield ToolEvent(
+                        type=EventType.POST_MESSAGE,
+                        title="User Assistance Received",
+                        message="",
+                        status=MessageStatus.FINISHED,
+                        metadata={
+                            "toolName": "spawn_browser_agent",
+                            "action_type": "auth_assistance",
+                            "task_id": result.get("task_id"),
+                            "requestUserAuthentication": {
+                                "requestId": request_id,
+                                "authRealm": result.get("auth_realm"),
+                                "steelSessionId": result.get("session_id"),
+                                "taskId": result.get("task_id"),
+                                "handoffMode": result.get("handoff_mode"),
+                            },
+                        },
+                    )
+
+                    continue
+
                 break
 
             tool_usage: Dict[str, list] = {"llm": [], "service": []}
@@ -1877,12 +2972,23 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
             output_files = result.get("output_files", [])
             final_status = MessageStatus.FINISHED if result.get("success", True) else MessageStatus.ERROR
+            final_metadata = {"toolName": "spawn_browser_agent"}
+            if output_schema:
+                final_metadata["output_schema"] = output_schema
+            if result.get("structured_response") is not None:
+                final_metadata["structured_response"] = result["structured_response"]
+            if result.get("auth_assistance_resume_mode"):
+                final_metadata["requestUserAuthentication"] = {
+                    "steelSessionId": result.get("session_id"),
+                    "taskId": result.get("task_id"),
+                    "resumeMode": result.get("auth_assistance_resume_mode"),
+                }
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="Browser automation complete",
                 message=result.get("message", ""),
                 status=final_status,
-                metadata={"toolName": "spawn_browser_agent"},
+                metadata=final_metadata,
                 data={"usage": tool_usage},
             )
 

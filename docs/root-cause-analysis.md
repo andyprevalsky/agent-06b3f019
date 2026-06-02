@@ -49,7 +49,20 @@ The symptom is where you NOTICE the bug. The root cause could be upstream, downs
 
 **Fix at the most upstream point where the data is wrong.** A rendering bug in the frontend might be caused by a malformed API response, which might be caused by a wrong DB query. Fix the query, not the renderer.
 
-## Step 3: Classify the failure
+## Step 3: Create a fast isolated reproduction
+
+Once you have found the most upstream suspicious point, reproduce the failure in the smallest environment that still exercises the same mechanism. This is required before writing the fix whenever the bug can be isolated without losing the behavior under investigation.
+
+The isolated reproduction should:
+- Use the same critical code path or boundary where the data first goes wrong
+- Remove unrelated services, network calls, benchmarks, retries, and UI layers
+- Run quickly enough to iterate repeatedly while fixing
+- Fail before the fix and pass after the fix
+- Preserve the exact behavior being diagnosed, not a similar but different bug
+
+If an isolated reproduction is not feasible, state why explicitly and use the narrowest available integration test or benchmark rerun instead. Do not use the benchmark itself as the only reproduction when a smaller one can prove the same causal mechanism.
+
+## Step 4: Classify the failure
 
 Not all errors are bugs in our code. Before writing a fix, classify:
 
@@ -63,18 +76,18 @@ Not all errors are bugs in our code. Before writing a fix, classify:
 
 **The critical rule:** Third-party failures and configuration errors are NOT bugs in our code. Never write code to "handle" a 402 by falling back to a different provider silently. Never write code to "handle" a missing env var by using a default. These mask real problems. Surface them to the user.
 
-## Step 4: State your hypothesis explicitly
+## Step 5: State your hypothesis explicitly
 
 Before writing any fix, state ALL of these:
 
 1. **What** — the observed wrong behavior (the symptom)
 2. **Where** — the root cause location (file, function, line)
 3. **Why** — the causal chain from root cause to symptom
-4. **Proof** — the specific log line, DB query result, or reproduction step that confirms causation
+4. **Proof** — the specific log line, DB query result, or isolated reproduction step that confirms causation
 
 If you cannot fill in all four, you have not found the root cause yet. Keep investigating.
 
-## Step 5: Design a generalizable fix
+## Step 6: Design a generalizable fix
 
 Before writing code, ask: "Am I fixing the instance or the class of bug?"
 

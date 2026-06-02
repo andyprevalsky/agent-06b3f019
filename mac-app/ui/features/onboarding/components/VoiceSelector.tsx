@@ -10,9 +10,8 @@
  * voice-ID input inline in the same panel.
  */
 
-import { useEffect, useRef } from 'react';
 import { ChevronLeft, ChevronRight, ExternalLink } from 'lucide-react';
-import { getBackendUrl } from '../config';
+import { useVoicePreviewAudio } from '../hooks';
 import VoiceOrb from './VoiceOrb';
 
 const ELEVENLABS_LIBRARY_URL = 'https://elevenlabs.io/app/voice-library';
@@ -63,78 +62,12 @@ const findPresetIndex = (voiceId: string): number => {
   return idx === -1 ? 0 : idx;
 };
 
-// Preset samples are pre-generated MP3s shipped in mac-app/public/voice-samples/.
-// Custom voices fall through to the backend, which fetches the ElevenLabs
-// auto-generated preview_url for whatever voice ID the user pasted.
-export const resolvePresetSamplePath = (
-  voiceId: string,
-  baseUrl: string = import.meta.env.BASE_URL
-): string => {
-  const normalizedBase = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
-  return `${normalizedBase}voice-samples/${encodeURIComponent(voiceId)}.mp3`;
-};
-
-export const resolveCustomPreviewApiUrl = (
-  voiceId: string,
-  backendUrl: string = getBackendUrl()
-): string => `${backendUrl}/api/voices/${encodeURIComponent(voiceId)}/preview`;
-
-async function fetchCustomPreviewUrl(voiceId: string): Promise<string | null> {
-  try {
-    const response = await fetch(resolveCustomPreviewApiUrl(voiceId));
-    if (!response.ok) return null;
-    const body = (await response.json()) as { url?: string };
-    return typeof body.url === 'string' ? body.url : null;
-  } catch {
-    return null;
-  }
-}
-
-async function resolvePreviewUrl(voiceId: string, isCustom: boolean): Promise<string | null> {
-  if (!isCustom) return resolvePresetSamplePath(voiceId);
-  return fetchCustomPreviewUrl(voiceId);
-}
-
 interface VoiceSelectorProps {
   value: VoicePreference;
   customVoiceId: string;
   disabled: boolean;
   onChange: (value: VoicePreference) => void;
   onCustomVoiceIdChange: (value: string) => void;
-}
-
-function usePreviewAudio(
-  isCustom: boolean,
-  customVoiceId: string,
-  preset: PresetVoice | null
-): void {
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const lastPlayedRef = useRef<string | null>(null);
-
-  useEffect(() => {
-    const id = isCustom ? customVoiceId.trim() : (preset as PresetVoice).voiceId;
-    if (id === '' || id === lastPlayedRef.current) return;
-    lastPlayedRef.current = id;
-    let cancelled = false;
-    void (async () => {
-      const url = await resolvePreviewUrl(id, isCustom);
-      if (cancelled || url === null) return;
-      const audio = audioRef.current ?? new Audio();
-      audioRef.current = audio;
-      audio.pause();
-      audio.src = url;
-      audio.currentTime = 0;
-      try {
-        await audio.play();
-      } catch {
-        /* autoplay blocked / file missing — silent */
-      }
-    })();
-    return () => {
-      cancelled = true;
-      if (audioRef.current !== null) audioRef.current.pause();
-    };
-  }, [isCustom, customVoiceId, preset]);
 }
 
 interface CarouselHeaderProps {
@@ -270,7 +203,7 @@ const VoiceSelector = ({
   const hue = isCustom ? CUSTOM_HUE : (preset as PresetVoice).hue;
   const slotLabel = isCustom ? 'Custom' : (preset as PresetVoice).label;
 
-  usePreviewAudio(isCustom, customVoiceId, preset);
+  useVoicePreviewAudio(isCustom, customVoiceId, preset?.voiceId ?? null);
 
   const selectSlot = (next: number): void => {
     const wrapped = ((next % TOTAL_SLOTS) + TOTAL_SLOTS) % TOTAL_SLOTS;

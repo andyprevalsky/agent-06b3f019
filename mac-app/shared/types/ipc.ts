@@ -239,6 +239,7 @@ export interface CookieData {
   source_scheme: number; // 0=Unset, 1=NonSecure, 2=Secure
   source_port: number;
   last_update_utc: number;
+  browserProfile?: string;
 }
 
 export interface FingerprintData {

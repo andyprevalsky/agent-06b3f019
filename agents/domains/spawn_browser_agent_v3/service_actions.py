@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import time as time_module
 from typing import TYPE_CHECKING, Any, Dict, Optional
 from urllib.parse import urlparse
@@ -152,6 +153,8 @@ async def execute_action(  # noqa: C901
     humanizer: Optional[BrowserHumanizer] = None,
     secret_refs: Optional[Dict[str, str]] = None,
     password_origins: Optional[Dict[str, str]] = None,
+    credential_refs_by_secret_ref: Optional[Dict[str, Dict[str, str]]] = None,
+    user_id: str = "",
     current_url: str = "",
     write_lock_enabled: bool = True,
     write_lock_approvals: Optional[Dict[str, Dict]] = None,
@@ -219,6 +222,7 @@ async def execute_action(  # noqa: C901
                 humanizer=humanizer,
                 secret_refs=secret_refs,
                 password_origins=password_origins,
+                credential_refs_by_secret_ref=credential_refs_by_secret_ref,
                 current_url=current_url,
                 write_lock_enabled=write_lock_enabled,
                 write_lock_approvals=write_lock_approvals,
@@ -474,6 +478,148 @@ async def execute_action(  # noqa: C901
 # ========================================
 
 
+def _element_write_lock_signal(element: Any) -> str:
+    """Collect local DOM-node text and action-bearing attributes."""
+    if not element:
+        return ""
+
+    parts = []
+    try:
+        if hasattr(element, "get_all_children_text"):
+            parts.append(element.get_all_children_text() or "")
+    except Exception:
+        pass
+
+    attrs = getattr(element, "attributes", None) or {}
+    if not isinstance(attrs, dict):
+        attrs = {}
+
+    for attr_name in ("value", "aria-label", "title", "alt", "name", "id", "role", "type"):
+        value = attrs.get(attr_name)
+        if value:
+            parts.append(str(value))
+
+    return "\n".join(part for part in parts if part)
+
+
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _browser_click_write_lock_signal(session: Any, coords: Optional[Dict[str, Any]]) -> str:
+    """Collect text/attributes from the element hit by a click and its composed ancestor path."""
+    if not session or not coords:
+        return ""
+
+    try:
+        get_page = getattr(session, "get_page", None)
+        if not callable(get_page):
+            return ""
+
+        page = await _maybe_await(get_page())
+        if not page or not hasattr(page, "evaluate"):
+            return ""
+
+        signal = await _maybe_await(
+            page.evaluate(
+                """
+                    ({ x, y }) => {
+                        const parts = [];
+                        const seen = new Set();
+                        const maxDepth = 4;
+                        const maxTextLength = 500;
+                        const attrNames = [
+                            'value',
+                            'aria-label',
+                            'title',
+                            'alt',
+                            'name',
+                            'id',
+                            'role',
+                            'type',
+                        ];
+
+                        const add = (value) => {
+                            if (typeof value !== 'string') return;
+                            const trimmed = value.trim();
+                            if (trimmed) parts.push(trimmed);
+                        };
+
+                        const addText = (value) => {
+                            if (typeof value !== 'string') return;
+                            const trimmed = value.trim();
+                            if (!trimmed || trimmed.length > maxTextLength) return;
+                            parts.push(trimmed);
+                        };
+
+                        const isPageContainer = (el) => {
+                            if (!el || !el.tagName) return false;
+                            const tag = el.tagName.toLowerCase();
+                            return tag === 'html' || tag === 'body' || tag === 'main';
+                        };
+
+                        const addElement = (el, includeText) => {
+                            if (!el || seen.has(el)) return;
+                            seen.add(el);
+
+                            if (includeText && !isPageContainer(el)) {
+                                addText(el.innerText);
+                                if (el.textContent !== el.innerText) addText(el.textContent);
+                            }
+
+                            for (const attrName of attrNames) {
+                                if (el.getAttribute) add(el.getAttribute(attrName));
+                            }
+
+                            if (el.labels) {
+                                for (const label of el.labels) {
+                                    add(label.innerText);
+                                    add(label.textContent);
+                                }
+                            }
+                        };
+
+                        const walkAncestors = (start, includeStartText) => {
+                            let current = start;
+                            let depth = 0;
+                            while (current && depth < maxDepth) {
+                                addElement(current, depth === 0 && includeStartText);
+                                if (isPageContainer(current)) break;
+                                if (current.assignedSlot) {
+                                    current = current.assignedSlot;
+                                } else if (current.parentElement) {
+                                    current = current.parentElement;
+                                } else {
+                                    const root = current.getRootNode && current.getRootNode();
+                                    current = root && root.host ? root.host : null;
+                                }
+                                depth += 1;
+                            }
+                        };
+
+                        const hit = document.elementFromPoint(Number(x), Number(y));
+                        const interactive = hit && hit.closest && hit.closest(
+                            'button,input,select,textarea,a,[role="button"],[role="link"],[onclick]'
+                        );
+                        walkAncestors(interactive || hit, true);
+                        if (hit && hit !== interactive) {
+                            addElement(hit, true);
+                        }
+
+                        return parts.join('\\n').slice(0, 20000);
+                    }
+                """,
+                {"x": int(coords["x"]), "y": int(coords["y"])},
+            )
+        )
+        return signal if isinstance(signal, str) else ""
+    except Exception as e:
+        logger.debug("Unable to collect browser click write-lock signal", error=str(e))
+        return ""
+
+
 async def _execute_click(  # noqa: C901
     *,
     session: Any,
@@ -500,9 +646,21 @@ async def _execute_click(  # noqa: C901
         is_submit_button,
     )
 
+    element_coords = None
+    if element:
+        coord_tuple = await _maybe_await(dom_service.get_element_coordinates(index))
+        element_coords = {"x": coord_tuple[0], "y": coord_tuple[1]} if coord_tuple else None
+
     # Write lock checks for index-based clicks
     if write_lock_enabled and element:
-        element_text = element.get_all_children_text() if hasattr(element, "get_all_children_text") else ""
+        element_text = "\n".join(
+            part
+            for part in (
+                _element_write_lock_signal(element),
+                await _browser_click_write_lock_signal(session, element_coords),
+            )
+            if part
+        )
         logger.info(
             "Write lock click check",
             element_text=element_text[:100] if element_text else "(empty)",
@@ -579,21 +737,23 @@ async def _execute_click(  # noqa: C901
                 logger.info("Write lock bypassed: existing approval valid", approval_type="purchase", url=current_url)
 
     if element:
-        coord_tuple = await dom_service.get_element_coordinates(index)
-        element_coords = {"x": coord_tuple[0], "y": coord_tuple[1]} if coord_tuple else None
-
         asyncio.create_task(session.highlight_interaction_element(element))
 
         if humanizer and element_coords:
             await humanizer.click_at_coords(element_coords["x"], element_coords["y"])
         else:
+            if humanizer:
+                logger.error(
+                    "HUMANIZATION BLOCKED: index click has no coordinates; refusing browser-use click fallback",
+                    index=index,
+                )
+                return {
+                    "success": False,
+                    "error": f"Cannot humanize click for element index {index}: no coordinates available",
+                }
             if not humanizer:
                 logger.warning(
                     "\u26a0\ufe0f HUMANIZATION FALLBACK: No humanizer available, using browser-use ClickElementEvent"
-                )
-            else:
-                logger.error(
-                    f"\u26a0\ufe0f HUMANIZATION FALLBACK: No coordinates for element {index}, using browser-use ClickElementEvent (not humanized!)"
                 )
             event = session.event_bus.dispatch(ClickElementEvent(node=element))
             await event
@@ -612,7 +772,14 @@ async def _execute_click(  # noqa: C901
     elif coords:
         # Write lock check for coordinate-based clicks
         if write_lock_enabled:
-            coord_element_text = await dom_service.get_text_at_coordinates(int(coords["x"]), int(coords["y"]))
+            coord_element_text = "\n".join(
+                part
+                for part in (
+                    await _maybe_await(dom_service.get_text_at_coordinates(int(coords["x"]), int(coords["y"]))),
+                    await _browser_click_write_lock_signal(session, coords),
+                )
+                if part
+            )
             logger.info(
                 "Write lock coord click check",
                 element_text=coord_element_text[:100] if coord_element_text else "(empty)",
@@ -749,6 +916,7 @@ async def _execute_input_text(  # noqa: C901
     humanizer: Optional[BrowserHumanizer],
     secret_refs: Optional[Dict[str, str]],
     password_origins: Optional[Dict[str, str]],
+    credential_refs_by_secret_ref: Optional[Dict[str, Dict[str, str]]] = None,
     current_url: str,
     write_lock_enabled: bool,
     write_lock_approvals: Optional[Dict],
@@ -760,7 +928,9 @@ async def _execute_input_text(  # noqa: C901
     from browser_tools.write_lock import get_write_lock_approval_question, is_payment_field
 
     text = params.get("text", "")
+    clear_before_typing = params.get("clear", True) is not False
     display_text = text
+    credential_ref = (credential_refs_by_secret_ref or {}).get(text)
 
     # Check if this is a password or card reference that needs decryption
     if secret_refs and text in secret_refs:
@@ -814,21 +984,32 @@ async def _execute_input_text(  # noqa: C901
 
         if humanizer and element_coords:
             await humanizer.click_at_coords(element_coords["x"], element_coords["y"])
-            await humanizer.press_key("Control+a")
+            if clear_before_typing:
+                await humanizer.press_key("Control+a")
+                await humanizer.press_key("Backspace")
             await humanizer.type_text(text)
         else:
+            if humanizer:
+                logger.error(
+                    "HUMANIZATION BLOCKED: indexed input_text has no coordinates; refusing TypeTextEvent fallback",
+                    index=index,
+                )
+                return {
+                    "success": False,
+                    "error": f"Cannot humanize input_text for element index {index}: no coordinates available",
+                }
             if not humanizer:
                 logger.warning(
                     "\u26a0\ufe0f HUMANIZATION FALLBACK: No humanizer available, using browser-use TypeTextEvent"
                 )
-            else:
-                logger.error(
-                    f"\u26a0\ufe0f HUMANIZATION FALLBACK: No coordinates for element {index}, using browser-use TypeTextEvent (not humanized!)"
-                )
-            clear_event = session.event_bus.dispatch(SendKeysEvent(keys="Control+a"))
-            await clear_event
-            await clear_event.event_result(raise_if_any=True, raise_if_none=False)
-            event = session.event_bus.dispatch(TypeTextEvent(node=element, text=text, clear=True))
+            if clear_before_typing:
+                clear_event = session.event_bus.dispatch(SendKeysEvent(keys="Control+a"))
+                await clear_event
+                await clear_event.event_result(raise_if_any=True, raise_if_none=False)
+                delete_event = session.event_bus.dispatch(SendKeysEvent(keys="Backspace"))
+                await delete_event
+                await delete_event.event_result(raise_if_any=True, raise_if_none=False)
+            event = session.event_bus.dispatch(TypeTextEvent(node=element, text=text, clear=clear_before_typing))
             await event
             await event.event_result(raise_if_any=True, raise_if_none=False)
 
@@ -838,17 +1019,22 @@ async def _execute_input_text(  # noqa: C901
             thinking=thinking,
             index=index,
             coordinates=element_coords,
-            params={"text": display_text},
+            params={"text": display_text, "clear": clear_before_typing},
             result={"success": True},
         )
-        return {"success": True, "message": "", "typed_text": display_text}
+        result = {"success": True, "message": "", "typed_text": display_text}
+        if credential_ref:
+            result["credential_ref"] = credential_ref
+        return result
 
     elif coords:
         asyncio.create_task(session.highlight_coordinate_click(int(coords["x"]), int(coords["y"])))
 
         if humanizer:
             await humanizer.click_at_coords(int(coords["x"]), int(coords["y"]))
-            await humanizer.press_key("Control+a")
+            if clear_before_typing:
+                await humanizer.press_key("Control+a")
+                await humanizer.press_key("Backspace")
             await humanizer.type_text(text)
         else:
             logger.warning("\u26a0\ufe0f HUMANIZATION FALLBACK: No humanizer available, using browser-use events")
@@ -858,9 +1044,13 @@ async def _execute_input_text(  # noqa: C901
             await click_event
             await click_event.event_result(raise_if_any=True, raise_if_none=False)
             await asyncio.sleep(0.1)
-            clear_event = session.event_bus.dispatch(SendKeysEvent(keys="Control+a"))
-            await clear_event
-            await clear_event.event_result(raise_if_any=True, raise_if_none=False)
+            if clear_before_typing:
+                clear_event = session.event_bus.dispatch(SendKeysEvent(keys="Control+a"))
+                await clear_event
+                await clear_event.event_result(raise_if_any=True, raise_if_none=False)
+                delete_event = session.event_bus.dispatch(SendKeysEvent(keys="Backspace"))
+                await delete_event
+                await delete_event.event_result(raise_if_any=True, raise_if_none=False)
             type_event = session.event_bus.dispatch(SendKeysEvent(keys=text))
             await type_event
             await type_event.event_result(raise_if_any=True, raise_if_none=False)
@@ -870,22 +1060,31 @@ async def _execute_input_text(  # noqa: C901
             action="input_text",
             thinking=thinking,
             coordinates=coords,
-            params={"text": display_text},
+            params={"text": display_text, "clear": clear_before_typing},
             result={"success": True},
         )
-        return {"success": True, "message": "", "typed_text": display_text}
+        result = {"success": True, "message": "", "typed_text": display_text}
+        if credential_ref:
+            result["credential_ref"] = credential_ref
+        return result
 
     else:
         if humanizer:
-            await humanizer.press_key("Control+a")
+            if clear_before_typing:
+                await humanizer.press_key("Control+a")
+                await humanizer.press_key("Backspace")
             await humanizer.type_text(text)
         else:
             logger.warning(
                 "\u26a0\ufe0f HUMANIZATION FALLBACK: No humanizer available, using browser-use SendKeysEvent"
             )
-            clear_event = session.event_bus.dispatch(SendKeysEvent(keys="Control+a"))
-            await clear_event
-            await clear_event.event_result(raise_if_any=True, raise_if_none=False)
+            if clear_before_typing:
+                clear_event = session.event_bus.dispatch(SendKeysEvent(keys="Control+a"))
+                await clear_event
+                await clear_event.event_result(raise_if_any=True, raise_if_none=False)
+                delete_event = session.event_bus.dispatch(SendKeysEvent(keys="Backspace"))
+                await delete_event
+                await delete_event.event_result(raise_if_any=True, raise_if_none=False)
             type_event = session.event_bus.dispatch(SendKeysEvent(keys=text))
             await type_event
             await type_event.event_result(raise_if_any=True, raise_if_none=False)
@@ -894,10 +1093,13 @@ async def _execute_input_text(  # noqa: C901
             dom_service=dom_service,
             action="input_text",
             thinking=thinking,
-            params={"text": display_text},
+            params={"text": display_text, "clear": clear_before_typing},
             result={"success": True},
         )
-        return {"success": True, "message": "", "typed_text": display_text}
+        result = {"success": True, "message": "", "typed_text": display_text}
+        if credential_ref:
+            result["credential_ref"] = credential_ref
+        return result
 
 
 async def _execute_goto(
@@ -1156,4 +1358,6 @@ async def _execute_screenshot(
     return {
         "success": True,
         "message": f"Full-page screenshot saved ({len(screenshot_bytes)} bytes)",
+        "screenshot": screenshot_b64,
+        "file_path": saved_path or "screenshot.png",
     }

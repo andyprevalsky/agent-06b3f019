@@ -17,6 +17,15 @@ import * as repo from './repo';
 
 const log = createLogger('Integrations');
 
+function normalizeBrowserProfile(profile: unknown): string {
+  if (typeof profile === 'string') return profile;
+  if (profile !== null && profile !== undefined && typeof profile === 'object') {
+    const id = (profile as { id?: unknown }).id;
+    return typeof id === 'string' ? id : '';
+  }
+  return '';
+}
+
 /**
  * Process CacheStorage upload.
  */
@@ -118,12 +127,13 @@ async function bulkUpsertPasswordEntries(
     dateLastUsed: number | null;
     dateCreated: number | null;
     browserSource: string;
+    browserProfile?: { id?: string; path?: string } | string | null;
   }>
 ) {
   const values = passwords
     .map(
       (_, i) =>
-        `(gen_random_uuid(), $${i * 7 + 1}, $${i * 7 + 2}, $${i * 7 + 3}, $${i * 7 + 4}, $${i * 7 + 5}::bigint, $${i * 7 + 6}::bigint, $${i * 7 + 7}, NOW())`
+        `(gen_random_uuid(), $${i * 8 + 1}, $${i * 8 + 2}, $${i * 8 + 3}, $${i * 8 + 4}, $${i * 8 + 5}::bigint, $${i * 8 + 6}::bigint, $${i * 8 + 7}, $${i * 8 + 8}, NOW(), NULL, NULL)`
     )
     .join(', ');
 
@@ -136,7 +146,8 @@ async function bulkUpsertPasswordEntries(
       pwd.encryptedPassword,
       pwd.dateLastUsed,
       pwd.dateCreated,
-      pwd.browserSource
+      pwd.browserSource,
+      normalizeBrowserProfile(pwd.browserProfile)
     );
   }
 

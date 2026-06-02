@@ -242,6 +242,53 @@ def test_for_each_aggregate_parent_result_pairs_declared_tool_use():
     assert not pairing_errors, f"for_each aggregate result should pair parent id: {pairing_errors}"
 
 
+def test_duplicate_system_messages_are_scoped_to_sub_agent():
+    """Repeated auth-selection notices for different browser task scopes are not duplicates."""
+    from context_validator import validate_context
+
+    base_metadata = {
+        "auth_realm": "amazon.com",
+        "credential_ref": {"kind": "cookie_bundle", "id": "bundle-1"},
+    }
+    messages = [
+        _make_msg(
+            "SYSTEM",
+            "Authentication credential selected for amazon.com",
+            metadata={**base_metadata, "subAgentId": "browser-task-1", "task_id": "browser-task-1"},
+            ts="2024-01-01T00:00:00.000Z",
+        ),
+        _make_msg(
+            "SYSTEM",
+            "Authentication credential selected for amazon.com",
+            metadata={**base_metadata, "subAgentId": "browser-task-2", "task_id": "browser-task-2"},
+            ts="2024-01-01T00:01:00.000Z",
+        ),
+    ]
+
+    violations = validate_context(messages)
+    duplicate_errors = [
+        v for v in violations
+        if v.rule == "no_duplicate_messages" and v.severity == "error"
+    ]
+    assert not duplicate_errors, f"different browser task scopes should not collide: {duplicate_errors}"
+
+    same_scope_messages = [
+        messages[0],
+        _make_msg(
+            "SYSTEM",
+            "Authentication credential selected for amazon.com",
+            metadata={**base_metadata, "subAgentId": "browser-task-1", "task_id": "browser-task-1"},
+            ts="2024-01-01T00:02:00.000Z",
+        ),
+    ]
+    same_scope_violations = validate_context(same_scope_messages)
+    same_scope_duplicate_errors = [
+        v for v in same_scope_violations
+        if v.rule == "no_duplicate_messages" and v.severity == "error"
+    ]
+    assert same_scope_duplicate_errors, "same browser task scope should still flag exact duplicate messages"
+
+
 async def run_all_tests():
     print("context_validator blackbox tests:")
     r = BlackboxResult()
@@ -252,6 +299,7 @@ async def run_all_tests():
     r.record("two_consecutive_text_only_assistants_exempt", test_two_consecutive_text_only_assistants_exempt)
     r.record("file_output_assistant_does_not_break_tool_result_pairing", test_file_output_assistant_does_not_break_tool_result_pairing)
     r.record("for_each_aggregate_parent_result_pairs_declared_tool_use", test_for_each_aggregate_parent_result_pairs_declared_tool_use)
+    r.record("duplicate_system_messages_are_scoped_to_sub_agent", test_duplicate_system_messages_are_scoped_to_sub_agent)
     return r.all_passed
 
 

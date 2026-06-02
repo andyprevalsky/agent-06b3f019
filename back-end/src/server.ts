@@ -26,12 +26,16 @@ import browserSessionRouter from './domains/browser-session/routes';
 import peopleRouter from './domains/people/routes';
 import integrationsRouter from './domains/integrations/routes';
 import authRouter from './domains/auth/routes';
+import authOptionsRouter from './domains/auth-options/routes';
+import authAssistanceRouter from './domains/auth-assistance/routes';
+import agentPhoneRouter from './domains/agent-phone/routes';
 import x402Router from './domains/x402/routes';
 import claudeCodeRouter from './domains/claude-code/routes';
 import codexCodeRouter from './domains/codex-code/routes';
 import billingRouter from './domains/billing/routes';
 import apiKeysRouter from './domains/api-keys/routes';
 import smsWebhookRouter from './domains/sms-webhook/routes';
+import credentialPropagationRouter from './domains/credential-propagation/routes';
 import {
   setSupervisorFixtureOverride,
   clearSupervisorFixtureOverride,
@@ -117,6 +121,11 @@ app.use(
     },
   }),
   smsWebhookRouter
+);
+app.use(
+  '/api/agentphone',
+  express.raw({ type: 'application/json', limit: '1mb' }),
+  agentPhoneRouter
 );
 
 // Middleware
@@ -259,6 +268,100 @@ if (process.env.NODE_ENV !== 'production') {
     fs.appendFileSync(logPath, line);
     res.status(204).send();
   });
+
+  app.get('/api/test/minted-agent-account-fixture', (_req, res) => {
+    res.type('html').send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Uber booking fixture</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 32px; color: #111; max-width: 760px; }
+    main { display: grid; gap: 18px; }
+    label { display: grid; gap: 6px; font-weight: 700; }
+    input { font: inherit; padding: 10px 12px; border: 1px solid #999; border-radius: 4px; }
+    button { font: inherit; padding: 11px 14px; border: 0; border-radius: 4px; background: #111; color: #fff; cursor: pointer; }
+    .panel { border: 1px solid #bbb; padding: 16px; display: grid; gap: 12px; }
+    .hidden { display: none; }
+    .status { font-weight: 700; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Uber booking fixture</h1>
+    <p id="status" class="status"></p>
+
+    <section id="signup" class="panel">
+      <h2>Create rider account</h2>
+      <label>Email
+        <input id="email" name="email" type="email" autocomplete="email" placeholder="agent minted email">
+      </label>
+      <button id="create-account" type="button">Create account</button>
+    </section>
+
+    <section id="booking" class="panel hidden">
+      <h2>Book a ride</h2>
+      <p id="signed-in-email"></p>
+      <label>Pickup
+        <input id="pickup" name="pickup" value="1804 Northern Oak Cir, Irving, TX">
+      </label>
+      <label>Destination
+        <input id="destination" name="destination" value="Dallas Fort Worth International Airport">
+      </label>
+      <button id="show-checkout" type="button">Show ride options</button>
+      <div id="checkout" class="hidden">
+        <p>UberX to DFW, estimated total $32.40.</p>
+        <button id="complete-purchase" type="button" aria-label="Complete purchase">Complete purchase</button>
+      </div>
+    </section>
+  </main>
+  <script>
+    const storageKey = 'mintedAgentAccountEmail';
+    const status = document.getElementById('status');
+    const signup = document.getElementById('signup');
+    const booking = document.getElementById('booking');
+    const signedInEmail = document.getElementById('signed-in-email');
+    const emailInput = document.getElementById('email');
+    const checkout = document.getElementById('checkout');
+
+    function render() {
+      const email = localStorage.getItem(storageKey);
+      if (email) {
+        status.textContent = 'Signed in with agent minted account';
+        signedInEmail.textContent = 'Signed in as ' + email;
+        signup.classList.add('hidden');
+        booking.classList.remove('hidden');
+      } else {
+        status.textContent = 'No rider account is signed in';
+        signup.classList.remove('hidden');
+        booking.classList.add('hidden');
+      }
+    }
+
+    document.getElementById('create-account').addEventListener('click', () => {
+      const email = emailInput.value.trim();
+      if (!email || !email.includes('@')) {
+        status.textContent = 'Enter an email address to create the account';
+        return;
+      }
+      localStorage.setItem(storageKey, email);
+      render();
+    });
+
+    document.getElementById('show-checkout').addEventListener('click', () => {
+      checkout.classList.remove('hidden');
+    });
+
+    document.getElementById('complete-purchase').addEventListener('click', () => {
+      status.textContent = 'Ride requested';
+    });
+
+    render();
+  </script>
+</body>
+</html>`);
+  });
 }
 
 // Public routes (no auth required)
@@ -349,6 +452,9 @@ if (x402ReceivingWallet) {
 // Routes with authentication
 // Note: Each router handles its own auth per-route (hybridAuth for agents)
 app.use('/api/agents', agentsRouter);
+app.use('/api/auth-options', authOptionsRouter);
+app.use('/api/auth-assistance', authAssistanceRouter);
+app.use('/api/credential-propagation', credentialPropagationRouter);
 app.use('/api/blueprints', authenticate, blueprintsRouter);
 app.use('/api/attention-requests', attentionRequestsRouter);
 app.use('/api/user-settings', userSettingsRouter);

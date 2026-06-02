@@ -364,6 +364,7 @@ describe('browser-password-reader blackbox', () => {
         dateLastUsed: 13400000000000000,
         dateCreated: 13399000000000000,
         browserSource: 'chrome',
+        browserProfile: 'Default',
       });
       expect(result[1]).toMatchObject({
         origin: 'https://github.com',
@@ -415,6 +416,67 @@ describe('browser-password-reader blackbox', () => {
       const [entry] = await BrowserPasswordReader.readPasswords('chrome');
       expect(entry.dateLastUsed).toBe(0);
       expect(entry.dateCreated).toBe(0);
+    });
+
+    it('reads all Chrome profile Login Data files and keeps the newest duplicate credential', async () => {
+      fsExistsSync.mockReturnValue(false);
+      globSync.mockImplementation((pattern: string) => {
+        if (pattern.includes('Google/Chrome')) {
+          return [
+            '/tmp/mac-app-test/Library/Application Support/Google/Chrome/Default/Login Data',
+            '/tmp/mac-app-test/Library/Application Support/Google/Chrome/Profile 1/Login Data',
+          ];
+        }
+        return [];
+      });
+      fsStatSync.mockImplementation((p: string) => ({
+        mtime: p.includes('Profile 1')
+          ? new Date('2025-06-01T00:00:00Z')
+          : new Date('2025-01-01T00:00:00Z'),
+      }));
+      installKeychain();
+
+      prepareMock
+        .mockImplementationOnce(() => ({
+          all: vi.fn(() => [
+            makeRow({
+              origin_url: 'https://github.com',
+              username_value: 'same@example.com',
+              password_value: encryptV10Password('new-profile-pw'),
+              date_last_used: 13500000000000000,
+              date_created: 13400000000000000,
+            }),
+          ]),
+          get: vi.fn(() => undefined),
+          run: vi.fn(() => ({ changes: 0 })),
+        }))
+        .mockImplementationOnce(() => ({
+          all: vi.fn(() => [
+            makeRow({
+              origin_url: 'https://github.com',
+              username_value: 'same@example.com',
+              password_value: encryptV10Password('old-profile-pw'),
+              date_last_used: 13500000000000000,
+              date_created: 13300000000000000,
+            }),
+          ]),
+          get: vi.fn(() => undefined),
+          run: vi.fn(() => ({ changes: 0 })),
+        }));
+
+      const { BrowserPasswordReader } = await import('../../main/services/browserPasswordReader');
+      const result = await BrowserPasswordReader.readPasswords('chrome');
+
+      expect(fsCopyFileSync).toHaveBeenCalledTimes(2);
+      expect(execMock).toHaveBeenCalledTimes(1);
+      expect(result).toHaveLength(1);
+      expect(result[0]).toMatchObject({
+        origin: 'https://github.com',
+        username: 'same@example.com',
+        password: 'new-profile-pw',
+        browserSource: 'chrome',
+        browserProfile: 'Profile 1',
+      });
     });
   });
 
@@ -553,6 +615,7 @@ describe('browser-password-reader blackbox', () => {
         dateLastUsed: 13500000000000000,
         dateCreated: 13499000000000000,
         browserSource: 'chrome',
+        browserProfile: 'Default',
       });
       // Plaintext password is never in the returned shape.
       expect(entry).not.toHaveProperty('password');

@@ -31,6 +31,28 @@ export interface PendingWriteLockApproval {
   question: string;
 }
 
+/** Pending auth-assistance live browser handoff extracted from the message list. */
+export interface PendingAuthAssistance {
+  requestId: string;
+  authRealm?: string;
+  liveViewUrl: string;
+}
+
+/** Browser provider/proxy metadata surfaced by browser-session init/resume. */
+export interface BrowserSessionMetadata {
+  provider?: string;
+  proxy_source?: string;
+  proxySource?: string;
+  proxy_location?: BrowserProxyLocation;
+  proxyLocation?: BrowserProxyLocation;
+}
+
+export interface BrowserProxyLocation {
+  city?: string;
+  state?: string;
+  country?: string;
+}
+
 /** Full view-model surfaced by the useBrowserStatusBarState hook. */
 export interface BrowserStatusBarViewModel {
   browserMessages: Message[];
@@ -38,6 +60,8 @@ export interface BrowserStatusBarViewModel {
   lastActionTitle: string;
   isDisconnected: boolean;
   outputSchema: OutputSchemaRef | undefined;
+  browserSessionMetadata: BrowserSessionMetadata | null;
   stepProgress: StepProgress | null;
   pendingWriteLockApproval: PendingWriteLockApproval | null;
+  pendingAuthAssistance: PendingAuthAssistance | null;
 }

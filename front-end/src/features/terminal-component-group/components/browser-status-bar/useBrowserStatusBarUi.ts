@@ -5,8 +5,8 @@
  * max-lines-per-function cap.
  */
 
-import { useCallback, useState, type MouseEvent } from 'react';
-import { resumeBrowserSession } from '../../hooks';
+import { useCallback, useEffect, useState, type MouseEvent } from 'react';
+import { completeAuthAssistanceRequest, resumeBrowserSession } from '../../hooks';
 
 export interface BrowserStatusBarUi {
   isExpanded: boolean;
@@ -18,11 +18,15 @@ export interface BrowserStatusBarUi {
   onFullscreenToggle: (e: MouseEvent) => void;
   onFullscreenClose: (e: MouseEvent) => void;
   onResume: () => void;
+  onCompleteAuthAssistance: (requestId: string) => void;
 }
 
 export function useBrowserStatusBarUi(taskId: string, forceMinimized: boolean): BrowserStatusBarUi {
   const [isExpandedState, setIsExpanded] = useState(false);
-  const [isFullscreenState, setIsFullscreen] = useState(false);
+  const [isFullscreenState, setIsFullscreen] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return new URLSearchParams(window.location.search).get('browser-id') === taskId;
+  });
   const [isResuming, setIsResuming] = useState(false);
 
   const isExpanded = forceMinimized ? false : isExpandedState;
@@ -42,6 +46,29 @@ export function useBrowserStatusBarUi(taskId: string, forceMinimized: boolean): 
   const onResume = useCallback(() => {
     void handleResume();
   }, [handleResume]);
+
+  const onCompleteAuthAssistance = useCallback(async (requestId: string) => {
+    setIsResuming(true);
+    try {
+      await completeAuthAssistanceRequest(requestId);
+    } catch (error) {
+      console.error('Failed to complete authentication assistance:', error);
+    } finally {
+      setIsResuming(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const handleOpenBrowser = (event: Event) => {
+      const detail = (event as CustomEvent<{ taskId?: string }>).detail;
+      if (detail?.taskId === taskId) {
+        setIsFullscreen(true);
+      }
+    };
+
+    window.addEventListener('navi-open-browser', handleOpenBrowser);
+    return () => window.removeEventListener('navi-open-browser', handleOpenBrowser);
+  }, [taskId]);
 
   const onExpand = useCallback(() => setIsExpanded(true), []);
   const onCollapse = useCallback(() => setIsExpanded(false), []);
@@ -71,5 +98,6 @@ export function useBrowserStatusBarUi(taskId: string, forceMinimized: boolean): 
     onFullscreenToggle,
     onFullscreenClose,
     onResume,
+    onCompleteAuthAssistance,
   };
 }

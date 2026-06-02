@@ -23,7 +23,7 @@ import { resolveVoiceOrbSrc } from '../../ui/features/onboarding/components/Voic
 import {
   resolveCustomPreviewApiUrl,
   resolvePresetSamplePath,
-} from '../../ui/features/onboarding/components/VoiceSelector';
+} from '../../ui/features/onboarding/api';
 
 const API_BASE = 'http://localhost:3001/api';
 const SESSION_KEY = 'rose-session';

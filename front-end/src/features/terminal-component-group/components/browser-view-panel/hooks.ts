@@ -6,11 +6,19 @@ interface RequestUserApprovalMeta {
   attentionRequestId?: string;
 }
 
+interface RequestUserAuthenticationMeta {
+  requestId?: string;
+  taskId?: string;
+  authRealm?: string;
+  liveViewUrl?: string;
+}
+
 interface BrowserMessageMeta {
   task_id?: string;
   action_type?: string;
   toolStatus?: string;
   requestUserApproval?: RequestUserApprovalMeta;
+  requestUserAuthentication?: RequestUserAuthenticationMeta;
 }
 
 const DISCONNECT_MESSAGE = 'browserbase-disconnected';
@@ -46,6 +54,12 @@ export interface PendingWriteLockApproval {
   question: string;
 }
 
+export interface PendingAuthAssistance {
+  requestId: string;
+  authRealm?: string;
+  liveViewUrl: string;
+}
+
 /** Find the in-progress write-permission attention request, if any. */
 export function usePendingWriteLockApproval(messages: Message[]): PendingWriteLockApproval | null {
   return useMemo(() => {
@@ -69,6 +83,34 @@ export function usePendingWriteLockApproval(messages: Message[]): PendingWriteLo
       question: approvalMessage.text || 'Approve this write action?',
     };
   }, [messages]);
+}
+
+/** Find the in-progress live browser auth handoff for this browser task, if any. */
+export function usePendingAuthAssistance(
+  messages: Message[],
+  taskId: string,
+): PendingAuthAssistance | null {
+  return useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i];
+      const meta = getMeta(message);
+      const auth = meta?.requestUserAuthentication;
+      if (!meta || !auth) continue;
+
+      const authTaskId = auth.taskId ?? meta.task_id;
+      if (authTaskId !== taskId) continue;
+      if (meta.toolStatus !== 'IN_PROGRESS') return null;
+      if (!auth.requestId || !auth.liveViewUrl) return null;
+
+      return {
+        requestId: auth.requestId,
+        authRealm: auth.authRealm,
+        liveViewUrl: auth.liveViewUrl,
+      };
+    }
+
+    return null;
+  }, [messages, taskId]);
 }
 
 /** Listen for postMessage from the browser iframe to detect disconnects. */

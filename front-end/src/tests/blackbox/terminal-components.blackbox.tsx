@@ -81,6 +81,10 @@ function mockSession() {
   localStorage.setItem('app-user', JSON.stringify({ id: 'test-user', is_anonymous: false }));
 }
 
+function resetTestUrl() {
+  window.history.replaceState({}, '', '/');
+}
+
 function makeAgentDetail(overrides: Partial<AgentDetail> = {}): AgentDetail {
   return {
     agent_id: 'agent-123',
@@ -151,6 +155,7 @@ describe('QueryInput (blackbox)', () => {
 
   afterEach(() => {
     localStorage.clear();
+    resetTestUrl();
   });
 
   const defaultProps = {
@@ -592,6 +597,7 @@ describe('AttentionInbox (blackbox)', () => {
 
   afterEach(() => {
     localStorage.clear();
+    resetTestUrl();
   });
 
   it('renders the bell button even with no requests', async () => {
@@ -891,6 +897,71 @@ describe('AttentionInbox (blackbox)', () => {
     expect(screen.getByText(/Open Mac app to send/)).toBeInTheDocument();
   });
 
+  it('renders auth assistance as a live-browser completion request', async () => {
+    const selectedAgent = vi.fn();
+    const liveViewUrl = 'https://debug.steel.dev/session/auth-1?interactive=true&showControls=true';
+
+    server.use(
+      http.get(`${API_BASE}/attention-requests`, () =>
+        HttpResponse.json({
+          requests: [
+            {
+              id: 'auth-req-1',
+              agent_id: 'agent-auth',
+              workflow_id: 'wf-auth',
+              question: 'Sign in to amazon.com',
+              image_url: null,
+              metadata: {
+                attentionKind: 'auth_assistance',
+                authAssistance: {
+                  requestId: 'auth-req-1',
+                  authRealm: 'amazon.com',
+                  mode: 'live_view',
+                  steelSessionId: 'steel-session-1',
+                  browserSessionId: 'task-auth',
+                  liveViewUrl,
+                },
+              },
+              user_response: null,
+              created_at: '2026-01-01T00:00:00Z',
+              updated_at: '2026-01-01T00:00:00Z',
+              answered: false,
+            },
+          ],
+        }),
+      ),
+      http.post(`${API_BASE}/auth-assistance/:id/refresh-session`, ({ params }) =>
+        HttpResponse.json({
+          request: { id: String(params.id), steelSessionId: 'steel-refreshed' },
+          handoff: { type: 'live_view', steelSessionId: 'steel-refreshed', liveViewUrl },
+          liveViewUrl,
+          refreshed: false,
+        }),
+      ),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<AttentionInbox onSelectAgent={selectedAgent} />);
+
+    await waitFor(() => expect(screen.getByText('1')).toBeInTheDocument());
+    await user.click(screen.getAllByRole('button')[0]);
+
+    await waitFor(() => {
+      expect(screen.getByText('Authentication')).toBeInTheDocument();
+    });
+    expect(screen.getByText('amazon.com')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Accept' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Reject' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Skip' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Authentication Complete' })).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: /Open Live Browser/i }));
+
+    expect(selectedAgent).toHaveBeenCalledWith('agent-auth');
+    expect(new URL(window.location.href).searchParams.get('agent-id')).toBe('agent-auth');
+    expect(new URL(window.location.href).searchParams.get('browser-id')).toBe('task-auth');
+  });
+
   it('clicking "Send via iMessage" with a bridge calls window.api.sendIMessage + respond endpoint', async () => {
     let respondCalled = false;
     server.use(
@@ -1037,6 +1108,58 @@ describe('AttentionInbox (blackbox)', () => {
     await waitFor(() => expect(skipCalled).toBe(true));
   });
 
+  it('Cmd+S keyboard shortcut does not skip auth assistance requests', async () => {
+    let skipCalled = false;
+    server.use(
+      http.get(`${API_BASE}/attention-requests`, () =>
+        HttpResponse.json({
+          requests: [
+            {
+              id: 'req-kbd-auth',
+              agent_id: 'agent-auth',
+              workflow_id: 'wf-auth',
+              question: 'Sign in to amazon.com',
+              image_url: null,
+              metadata: {
+                attentionKind: 'auth_assistance',
+                authAssistance: {
+                  requestId: 'req-kbd-auth',
+                  authRealm: 'amazon.com',
+                  mode: 'live_view',
+                  steelSessionId: 'steel-session-1',
+                  liveViewUrl: 'https://debug.steel.dev/session/auth?interactive=true',
+                },
+              },
+              user_response: null,
+              created_at: '2026-01-01T00:00:00Z',
+              updated_at: '2026-01-01T00:00:00Z',
+              answered: false,
+            },
+          ],
+        }),
+      ),
+      http.post(`${API_BASE}/attention-requests/:id/skip`, () => {
+        skipCalled = true;
+        return HttpResponse.json({ success: true });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<AttentionInbox />);
+
+    await waitFor(() => expect(screen.getByText('1')).toBeInTheDocument());
+    await user.click(screen.getAllByRole('button')[0]);
+    await waitFor(() => expect(screen.getByText('Authentication')).toBeInTheDocument());
+
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 's', metaKey: true, bubbles: true }),
+      );
+    });
+
+    expect(skipCalled).toBe(false);
+  });
+
   it('typing in the textarea updates the response input', async () => {
     server.use(
       http.get(`${API_BASE}/attention-requests`, () =>
@@ -1181,6 +1304,7 @@ describe('BrowserStatusBar (blackbox)', () => {
 
   afterEach(() => {
     localStorage.clear();
+    resetTestUrl();
   });
 
   it('renders minimized with default title when no messages', () => {
@@ -1204,6 +1328,39 @@ describe('BrowserStatusBar (blackbox)', () => {
       withAgentCtx(messages, <BrowserStatusBar taskId="task-9" browserUrl="about:blank" />),
     );
     expect(screen.getByText('Clicked submit')).toBeInTheDocument();
+  });
+
+  it('shows browser proxy location metadata on the location chip tooltip', async () => {
+    const messages: Message[] = [
+      {
+        message_id: 'm1',
+        timestamp: '2026-01-01T00:00:00Z',
+        text: '',
+        role: 'TOOL',
+        metadata: {
+          task_id: 'task-proxy',
+          action_type: 'session_started',
+          title: 'Browser ready',
+          browser_session_metadata: {
+            provider: 'steel',
+            proxy_source: 'steel',
+            proxy_location: { city: 'DALLAS', state: 'TX', country: 'US' },
+          },
+        },
+      },
+    ];
+
+    const user = userEvent.setup();
+    renderWithProviders(
+      withAgentCtx(messages, <BrowserStatusBar taskId="task-proxy" browserUrl="about:blank" />),
+    );
+
+    await user.hover(screen.getByLabelText('Browser proxy location'));
+
+    await waitFor(() => {
+      expect(screen.getAllByText('Proxy: Steel').length).toBeGreaterThan(0);
+      expect(screen.getAllByText('Location: DALLAS, TX, US').length).toBeGreaterThan(0);
+    });
   });
 
   it('shows "Disconnected" state when a session_paused message is present (expanded view)', async () => {
@@ -1332,6 +1489,77 @@ describe('BrowserStatusBar (blackbox)', () => {
       expect(screen.getByText('Approval Required')).toBeInTheDocument();
     });
     expect(screen.getByText('Approve my write?')).toBeInTheDocument();
+  });
+
+  it('uses auth liveViewUrl for the fullscreen browser iframe while auth assistance is pending', async () => {
+    let completedRequestId: string | null = null;
+    server.use(
+      http.post(`${API_BASE}/auth-assistance/:id/complete`, ({ params }) => {
+        completedRequestId = String(params.id);
+        return HttpResponse.json({ success: true });
+      }),
+      http.post(`${API_BASE}/auth-assistance/:id/refresh-session`, ({ params }) =>
+        HttpResponse.json({
+          request: { id: String(params.id), steelSessionId: 'steel-refreshed' },
+          handoff: { type: 'live_view', steelSessionId: 'steel-refreshed', liveViewUrl },
+          liveViewUrl,
+          refreshed: false,
+        }),
+      ),
+    );
+
+    const liveViewUrl =
+      'https://debug.steel.dev/session/auth-live?interactive=true&showControls=true';
+    const messages: Message[] = [
+      {
+        message_id: 'auth-assist-1',
+        timestamp: '2026-01-01T00:00:00Z',
+        text: '',
+        role: 'TOOL',
+        metadata: {
+          task_id: 'task-auth',
+          action_type: 'auth_assistance',
+          title: 'Requesting User Assistance for amazon.com Login',
+          toolStatus: 'IN_PROGRESS',
+          requestUserAuthentication: {
+            requestId: 'auth-req-1',
+            authRealm: 'amazon.com',
+            taskId: 'task-auth',
+            liveViewUrl,
+          },
+        },
+      },
+    ];
+
+    const user = userEvent.setup();
+    renderWithProviders(
+      withAgentCtx(
+        messages,
+        <BrowserStatusBar taskId="task-auth" browserUrl="https://debug.steel.dev/session/base" />,
+      ),
+    );
+
+    await user.click(screen.getByText('Requesting User Assistance for amazon.com Login'));
+    await waitFor(() => expect(screen.getByText("Agent's Browser")).toBeInTheDocument());
+    expect(screen.getByText('Agent waiting for assistance')).toBeInTheDocument();
+    const header = screen.getByText("Agent's Browser").closest('div')!.parentElement!;
+    const hdrButtons = within(header).getAllByRole('button');
+    await user.click(hdrButtons[hdrButtons.length - 2]);
+
+    await waitFor(() => {
+      const iframe = document.querySelector('iframe[title="Browser"]') as HTMLIFrameElement | null;
+      expect(iframe?.src).toBe(liveViewUrl);
+    });
+    expect(screen.getByText('Agent waiting for assistance')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start Agent' })).toBeInTheDocument();
+    expect(screen.queryByText('Agent in progress')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Take control' })).toBeNull();
+    expect(screen.queryByTestId('thinking-animation')).toBeNull();
+    expect(screen.queryByTestId('browser-border-glow')).toBeNull();
+    expect(screen.queryByTestId('browser-cursor-overlay')).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'Start Agent' }));
+    await waitFor(() => expect(completedRequestId).toBe('auth-req-1'));
   });
 
   it('clicking Accept in fullscreen BrowserWriteLockApproval calls respond endpoint', async () => {
@@ -1601,6 +1829,7 @@ describe('BrowserViewPanel (blackbox)', () => {
 
   afterEach(() => {
     localStorage.clear();
+    resetTestUrl();
   });
 
   it('renders an active browser session header with iframe', () => {

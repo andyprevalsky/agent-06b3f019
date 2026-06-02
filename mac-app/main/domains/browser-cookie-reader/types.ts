@@ -50,6 +50,8 @@ export interface ReadCookiesConfig {
   keychainPassword?: string;
 }
 
+export type BrowserProfileMetadata = string;
+
 /**
  * Raw row shape returned by the Chromium `cookies` SQLite table. Mirrors
  * the columns the reader actually consumes; additional columns on the real

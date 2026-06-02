@@ -36,20 +36,28 @@ const execAsync = promisify(exec);
  * exist), or null if no match is found on disk.
  */
 export function resolveLoginDataPath(pattern: string): string | null {
+  return resolveLoginDataPaths(pattern)[0] ?? null;
+}
+
+/**
+ * Resolve every login-data path matching a pattern, newest file first. Used
+ * by Chrome, where each profile owns a separate `Login Data` DB and sync must
+ * consider all profiles before deduping credentials.
+ */
+export function resolveLoginDataPaths(pattern: string): string[] {
   if (!pattern.includes('*')) {
-    return fs.existsSync(pattern) ? pattern : null;
+    return fs.existsSync(pattern) ? [pattern] : [];
   }
 
   const matches = glob.sync(pattern);
   if (matches.length === 0) {
-    return null;
+    return [];
   }
 
-  const sorted = matches
+  return matches
     .map((p) => ({ path: p, mtime: fs.statSync(p).mtime.getTime() }))
-    .sort((a, b) => b.mtime - a.mtime);
-
-  return sorted[0].path;
+    .sort((a, b) => b.mtime - a.mtime)
+    .map((match) => match.path);
 }
 
 /**
