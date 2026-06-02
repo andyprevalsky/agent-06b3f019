@@ -1,17 +1,33 @@
+/**
+ * STATE MACHINE: BrowserControls
+ *
+ * [ACTIVE] -> green pulsing dot + "Browser Session Active"
+ * [WAITING_FOR_AUTH_ASSISTANCE] -> yellow steady dot + "Agent waiting for assistance"
+ * [DISCONNECTED] -> yellow steady dot + "Browser Session Disconnected"
+ */
+
 import { Maximize2, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface BrowserControlsProps {
   isFullscreen: boolean;
   isDisconnected: boolean;
+  isWaitingForAuthAssistance: boolean;
   onToggleFullscreen: () => void;
 }
 
 export function BrowserControls({
   isFullscreen,
   isDisconnected,
+  isWaitingForAuthAssistance,
   onToggleFullscreen,
 }: BrowserControlsProps) {
+  const label = isDisconnected
+    ? 'Browser Session Disconnected'
+    : isWaitingForAuthAssistance
+      ? 'Agent waiting for assistance'
+      : 'Browser Session Active';
+
   return (
     <div
       className={cn(
@@ -23,12 +39,12 @@ export function BrowserControls({
         <div
           className={cn(
             'h-2 w-2 rounded-full',
-            isDisconnected ? 'bg-yellow-500' : 'bg-green-500 animate-pulse',
+            isDisconnected || isWaitingForAuthAssistance
+              ? 'bg-yellow-500'
+              : 'bg-green-500 animate-pulse',
           )}
         />
-        <span className="text-xs font-medium text-muted-foreground">
-          {isDisconnected ? 'Browser Session Disconnected' : 'Browser Session Active'}
-        </span>
+        <span className="text-xs font-medium text-muted-foreground">{label}</span>
       </div>
       <div className="flex items-center gap-2">
         <button

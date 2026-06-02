@@ -122,6 +122,8 @@ router.get(
           date: email.date.toISOString(),
           bodyText: email.bodyText,
           bodyHtml: email.bodyHtml,
+          credentialId: email.credentialId,
+          credentialEmail: email.credentialEmail,
         })),
         count: emails.length,
         since: since.toISOString(),

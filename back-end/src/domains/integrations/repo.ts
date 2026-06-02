@@ -251,6 +251,7 @@ export {
   findGmailIntegrationsWithCredentials,
   findGmailCredentialForSend,
   findAvailableGmailEmails,
+  findMintedAccountEmails,
   updateEmailCredentialToken,
 } from './repo.email';
 
@@ -258,6 +259,12 @@ export {
 export {
   getCookieCount,
   bulkUpsertCookies,
+  cookieBundleSnapshotChanged,
+  upsertCookieBundle,
+  deleteCookiesMissingFromProfileSnapshot,
+  deleteCookiesForBrowserSnapshot,
+  deleteCookieBundlesForBrowserSnapshot,
+  deleteCookieBundlesWithoutCookiesForProfile,
   bulkUpsertLocalStorage,
   bulkUpsertIndexedDB,
   bulkUpsertPermissions,

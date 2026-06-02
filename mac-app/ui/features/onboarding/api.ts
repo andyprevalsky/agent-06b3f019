@@ -240,6 +240,30 @@ export const fetchPlaidItems = async (): Promise<PlaidIntegrationItem[]> => {
   return data?.items ?? [];
 };
 
+export const resolvePresetSamplePath = (
+  voiceId: string,
+  baseUrl: string = import.meta.env.BASE_URL
+): string => {
+  const normalizedBase = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+  return `${normalizedBase}voice-samples/${encodeURIComponent(voiceId)}.mp3`;
+};
+
+export const resolveCustomPreviewApiUrl = (
+  voiceId: string,
+  backendUrl: string = getBackendUrl()
+): string => `${backendUrl}/api/voices/${encodeURIComponent(voiceId)}/preview`;
+
+export const fetchCustomPreviewUrl = async (voiceId: string): Promise<string | null> => {
+  try {
+    const response = await fetch(resolveCustomPreviewApiUrl(voiceId));
+    if (!response.ok) return null;
+    const body = (await response.json()) as { url?: string };
+    return typeof body.url === 'string' ? body.url : null;
+  } catch {
+    return null;
+  }
+};
+
 export const spawnLinkedInSyncAgent = async (): Promise<void> => {
   const backendUrl = getBackendUrl();
   const token = requireToken();

@@ -142,6 +142,46 @@ export async function notifyWriteLock(
 }
 
 /**
+ * Notify user of an authentication handoff request.
+ */
+export async function notifyAuthAssistance(
+  userId: string,
+  agent: { id: string },
+  authRealm: string,
+  browserSessionId?: string | null
+): Promise<void> {
+  const startTime = Date.now();
+
+  log.info('notifyAuthAssistance', {
+    userId,
+    agentId: agent.id,
+    authRealm,
+    browserSessionId,
+  });
+
+  const phone = await getUserPhone(userId);
+  if (!phone) {
+    log.info('No phone for user, skipping', { userId });
+    return;
+  }
+
+  const prefix = agent.id.substring(0, 6);
+  const url = getAgentUrl(agent.id, browserSessionId);
+  const message = SMS_TEMPLATES.authAssistance(prefix, authRealm, url);
+
+  const result = await sendSms(phone, message);
+
+  log.info('authAssistance SMS sent', {
+    userId,
+    agentPrefix: prefix,
+    authRealm,
+    success: result.success,
+    messageSid: result.messageSid,
+    durationMs: Date.now() - startTime,
+  });
+}
+
+/**
  * Notify user that an agent has completed.
  */
 export async function notifyCompletion(

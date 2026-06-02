@@ -489,6 +489,47 @@ async def test_stream_attention_event_handles_errors():
     )
 
 
+async def test_stream_browser_cursor_happy_path():
+    """stream_browser_cursor sends BROWSER_CURSOR event to agent topic."""
+    _setup()
+    _reset_broadcast_client()
+    from helpers.messages import stream_browser_cursor
+
+    await stream_browser_cursor(
+        agent_id="agent-1",
+        task_id="browser-task-1",
+        x=123,
+        y=456,
+        sequence=7,
+        timestamp_ms=1700000001234,
+    )
+
+    captures = get_captured_requests()
+    broadcast = next(c for c in captures if "/realtime/v1/api/broadcast" in c["url"])
+    body = json.loads(broadcast["requestBody"])
+    message = body["messages"][0]
+    record = message["payload"]["record"]
+    assert message["event"] == "BROWSER_CURSOR"
+    assert message["topic"] == "agent:agent-1"
+    assert record["taskId"] == "browser-task-1"
+    assert record["x"] == 123
+    assert record["y"] == 456
+    assert record["sequence"] == 7
+    assert record["timestampMs"] == 1700000001234
+
+
+async def test_stream_browser_cursor_handles_errors():
+    """stream_browser_cursor swallows broadcast errors."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise RuntimeError("fail")
+    setup_mock_fn(handler)
+    _reset_broadcast_client()
+
+    from helpers.messages import stream_browser_cursor
+
+    await stream_browser_cursor(agent_id="a", task_id="t", x=1, y=2)
+
+
 async def test_broadcast_to_bus_happy_path():
     """broadcast_to_bus sends AGENT_STATE_CHANGED event to bus topic."""
     _setup()
@@ -555,6 +596,8 @@ async def run_all_tests():
     await r.record_async("stream_tool_event_errors", test_stream_tool_event_handles_errors)
     await r.record_async("stream_attention_event_broadcasts", test_stream_attention_event_broadcasts)
     await r.record_async("stream_attention_event_errors", test_stream_attention_event_handles_errors)
+    await r.record_async("stream_browser_cursor_happy", test_stream_browser_cursor_happy_path)
+    await r.record_async("stream_browser_cursor_errors", test_stream_browser_cursor_handles_errors)
     await r.record_async("broadcast_to_bus_happy", test_broadcast_to_bus_happy_path)
     await r.record_async("broadcast_to_bus_errors", test_broadcast_to_bus_handles_errors)
     await r.record_async("broadcast_to_bus_non_success", test_broadcast_to_bus_logs_non_success)

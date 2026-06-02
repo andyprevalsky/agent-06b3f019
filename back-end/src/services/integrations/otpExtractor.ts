@@ -18,11 +18,13 @@ export interface ExtractedOTP {
 const OTP_PATTERNS = [
   // 6-digit codes with context
   {
-    pattern: /(?:verification|security|auth|login|sign.?in|confirm)\s*(?:code|pin|otp)[\s:]+(\d{6})\b/i,
+    pattern:
+      /(?:verification|security|auth|login|sign.?in|confirm)\s*(?:code|pin|otp)[\s:]+(\d{6})\b/i,
     confidence: 0.95,
   },
   {
-    pattern: /\b(\d{6})\s*(?:is\s+)?(?:your|the)\s+(?:verification|security|auth|one.?time|otp|login)\s*(?:code|pin)?/i,
+    pattern:
+      /\b(\d{6})\s*(?:is\s+)?(?:your|the)\s+(?:verification|security|auth|one.?time|otp|login)\s*(?:code|pin)?/i,
     confidence: 0.95,
   },
   {
@@ -104,14 +106,10 @@ export function extractOTP(
   const lowerText = text.toLowerCase();
 
   // Check for low confidence keywords first
-  const hasLowConfidenceKeyword = LOW_CONFIDENCE_KEYWORDS.some(kw =>
-    lowerText.includes(kw)
-  );
+  const hasLowConfidenceKeyword = LOW_CONFIDENCE_KEYWORDS.some((kw) => lowerText.includes(kw));
 
   // Check for high confidence keywords
-  const hasHighConfidenceKeyword = HIGH_CONFIDENCE_KEYWORDS.some(kw =>
-    lowerText.includes(kw)
-  );
+  const hasHighConfidenceKeyword = HIGH_CONFIDENCE_KEYWORDS.some((kw) => lowerText.includes(kw));
 
   // Try each pattern in order of specificity
   for (const { pattern, confidence } of OTP_PATTERNS) {
@@ -186,38 +184,11 @@ export function extractOTPsFromMessages(
   const seenCodes = new Set<string>();
   return otps
     .sort((a, b) => b.receivedAt.getTime() - a.receivedAt.getTime())
-    .filter(otp => {
+    .filter((otp) => {
       if (seenCodes.has(otp.code)) {
         return false;
       }
       seenCodes.add(otp.code);
       return true;
     });
-}
-
-/**
- * Format OTPs for injection into agent system prompt.
- */
-export function formatOTPsForPrompt(otps: ExtractedOTP[]): string {
-  if (otps.length === 0) {
-    return '';
-  }
-
-  const lines = otps.map(otp => {
-    const ageSeconds = Math.floor((Date.now() - otp.receivedAt.getTime()) / 1000);
-    const ageStr = ageSeconds < 60
-      ? `${ageSeconds}s ago`
-      : `${Math.floor(ageSeconds / 60)}m ago`;
-    const ttlStr = otp.ttlSeconds < 60
-      ? `${otp.ttlSeconds}s`
-      : `${Math.floor(otp.ttlSeconds / 60)}m`;
-
-    return `- "${otp.code}" from ${otp.sender} (received ${ageStr}, expires in ~${ttlStr})`;
-  });
-
-  return `RECENTLY RECEIVED OTP CODES (auto-refreshed every turn):
-${lines.join('\n')}
-
-When choosing OTP delivery method: PREFER EMAIL over SMS. SMS OTPs require the user's Mac to be actively receiving messages, while email is more reliable.
-If waiting for an OTP that hasn't arrived yet, take another action and check next turn.`;
 }

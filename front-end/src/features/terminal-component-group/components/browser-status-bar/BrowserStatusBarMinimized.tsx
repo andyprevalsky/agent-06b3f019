@@ -5,20 +5,24 @@
  */
 
 import type { ComponentType, MouseEvent } from 'react';
-import { ChevronUp } from 'lucide-react';
+import { ChevronUp, Maximize2 } from 'lucide-react';
 import { getToolIcon } from '@/lib/toolIcons';
 import { SchemaChip } from '../SchemaChip';
+import { BrowserProxyLocationChip } from './BrowserProxyLocationChip';
 import { BrowserThumbnail } from './BrowserThumbnail';
-import type { OutputSchemaRef } from './types';
+import type { BrowserSessionMetadata, OutputSchemaRef } from './types';
 
 interface MinimizedProps {
   browserUrl: string;
   forceMinimized: boolean;
   lastActionType: string | undefined;
   lastActionTitle: string;
+  isWaitingForAuthAssistance: boolean;
   outputSchema: OutputSchemaRef | undefined;
+  browserSessionMetadata: BrowserSessionMetadata | null;
   onExpand: () => void;
   onThumbnailClick: (e: MouseEvent) => void;
+  onFullscreenClick: (e: MouseEvent) => void;
 }
 
 function LastActionRow({
@@ -46,9 +50,12 @@ export function BrowserStatusBarMinimized({
   forceMinimized,
   lastActionType,
   lastActionTitle,
+  isWaitingForAuthAssistance,
   outputSchema,
+  browserSessionMetadata,
   onExpand,
   onThumbnailClick,
+  onFullscreenClick,
 }: MinimizedProps) {
   const cursorClass = forceMinimized ? '' : 'cursor-pointer';
   const thumbnailInteractive = !forceMinimized;
@@ -69,6 +76,21 @@ export function BrowserStatusBarMinimized({
           disabled={forceMinimized}
         />
         <LastActionRow lastActionType={lastActionType} lastActionTitle={lastActionTitle} />
+        {isWaitingForAuthAssistance && !forceMinimized && (
+          <button
+            type="button"
+            onClick={onFullscreenClick}
+            className="hidden sm:inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+          >
+            <Maximize2 className="h-3.5 w-3.5" />
+            Open Browser
+          </button>
+        )}
+        <BrowserProxyLocationChip
+          metadata={browserSessionMetadata}
+          tooltipPosition="bottom"
+          className="hidden sm:inline-flex"
+        />
         <SchemaChip outputSchema={outputSchema} size="sm" tooltipPosition="bottom" />
         <div className="p-1.5 rounded hover:bg-muted transition-colors flex-shrink-0 mr-1">
           <ChevronUp className="h-5 w-5 text-muted-foreground" />

@@ -397,6 +397,22 @@ describe('browser-cookie-reader blackbox', () => {
       expect(atlas?.resolvedCookiePath).toContain('user-1/Cookies');
     });
 
+    it('detects modern Chrome Network/Cookies stores as the owning profile install', async () => {
+      fsExistsSync.mockReturnValue(false);
+      fsStatSync.mockReturnValue({ mtime: new Date('2025-01-01T00:00:00Z') });
+      globSync.mockImplementation((pattern: string) =>
+        pattern.includes('Google/Chrome') && pattern.includes('Network')
+          ? ['/tmp/mac-app-test/Library/Application Support/Google/Chrome/Default/Network/Cookies']
+          : []
+      );
+      const { BrowserCookieReader } = await import('../../main/services/browserCookieReader');
+
+      const installed = BrowserCookieReader.getInstalledBrowsers();
+      const chrome = installed.find((b) => b.type === 'chrome');
+
+      expect(chrome?.resolvedCookiePath).toContain('Default/Network/Cookies');
+    });
+
     it('picks the most-recently-modified match when wildcard has multiple candidates', async () => {
       // Only Atlas wildcard has matches; other browsers absent.
       fsExistsSync.mockReturnValue(false);
@@ -509,6 +525,48 @@ describe('browser-cookie-reader blackbox', () => {
       expect(fsCopyFileSync).not.toHaveBeenCalled();
       expect(dbCtor).not.toHaveBeenCalled();
     });
+
+    it('skips malformed Safari cookie entries while preserving valid session cookies', async () => {
+      const validCookie = buildSafariBinaryCookies([
+        {
+          host: '.example.com',
+          name: 'session_only',
+          path: '/',
+          value: 'plain',
+          flags: 0,
+          expiresAt: 0,
+          createdAt: 7000,
+        },
+        {
+          host: '.bad.example.com',
+          name: 'bad',
+          path: '/',
+          value: 'skip-me',
+        },
+      ]);
+      const pageSize = validCookie.readUInt32BE(8);
+      const pageOffset = 12;
+      const page = Buffer.from(validCookie.subarray(pageOffset, pageOffset + pageSize));
+      const malformedOffset = page.readUInt32LE(12);
+      page.writeUInt32LE(8, malformedOffset);
+      const safariCookieFile = Buffer.concat([validCookie.subarray(0, pageOffset), page]);
+      installSafariFs(safariCookieFile);
+      const { BrowserCookieReader } = await import('../../main/services/browserCookieReader');
+
+      const result = await BrowserCookieReader.readCookies('safari');
+
+      expect(result).toHaveLength(1);
+      expect(result[0]).toMatchObject({
+        name: 'session_only',
+        value: 'plain',
+        is_secure: false,
+        is_httponly: false,
+        has_expires: false,
+        is_persistent: false,
+        source_scheme: 1,
+        source_port: 80,
+      });
+    });
   });
 
   describe('readCookies — Chrome (keychain path)', () => {
@@ -546,6 +604,7 @@ describe('browser-cookie-reader blackbox', () => {
         is_httponly: true,
         has_expires: true,
         is_persistent: true,
+        browserProfile: 'Default',
       });
       expect(result[1]).toMatchObject({ host_key: '.other.com', name: 'b', value: 'valueB' });
     });
@@ -608,6 +667,95 @@ describe('browser-cookie-reader blackbox', () => {
       const result = await BrowserCookieReader.readCookies('chrome');
       expect(result).toHaveLength(1);
       expect(result[0]).toMatchObject({ name: 'plain', value: 'plain-ascii-value' });
+    });
+
+    it('reads all Chrome profile cookie DBs and keeps matching cookie identities profile-scoped', async () => {
+      fsExistsSync.mockReturnValue(false);
+      globSync.mockImplementation((pattern: string) => {
+        if (pattern.includes('Google/Chrome')) {
+          return [
+            '/tmp/mac-app-test/Library/Application Support/Google/Chrome/Default/Cookies',
+            '/tmp/mac-app-test/Library/Application Support/Google/Chrome/Profile 1/Cookies',
+          ];
+        }
+        return [];
+      });
+      fsStatSync.mockImplementation((p: string) => ({
+        mtime: p.includes('Profile 1')
+          ? new Date('2025-06-01T00:00:00Z')
+          : new Date('2025-01-01T00:00:00Z'),
+      }));
+      installKeychain();
+
+      prepareMock
+        .mockImplementationOnce(() => ({
+          all: vi.fn(() => [
+            makeRow({
+              name: 'session',
+              encrypted_value: encryptV10('new-profile-cookie'),
+              last_update_utc: 13500000000000000,
+              last_access_utc: 13400000000000000,
+            }),
+          ]),
+          get: vi.fn(() => undefined),
+          run: vi.fn(() => ({ changes: 0 })),
+        }))
+        .mockImplementationOnce(() => ({
+          all: vi.fn(() => [
+            makeRow({
+              name: 'session',
+              encrypted_value: encryptV10('old-profile-cookie'),
+              last_update_utc: 13500000000000000,
+              last_access_utc: 13300000000000000,
+            }),
+          ]),
+          get: vi.fn(() => undefined),
+          run: vi.fn(() => ({ changes: 0 })),
+        }));
+
+      const { BrowserCookieReader } = await import('../../main/services/browserCookieReader');
+      const result = await BrowserCookieReader.readCookies('chrome');
+
+      expect(fsCopyFileSync).toHaveBeenCalledTimes(2);
+      expect(execMock).toHaveBeenCalledTimes(1);
+      expect(result).toHaveLength(2);
+      expect(result[0]).toMatchObject({
+        host_key: '.example.com',
+        name: 'session',
+        value: 'new-profile-cookie',
+        browserProfile: 'Profile 1',
+      });
+      expect(result[1]).toMatchObject({
+        host_key: '.example.com',
+        name: 'session',
+        value: 'old-profile-cookie',
+        browserProfile: 'Default',
+      });
+    });
+
+    it('records Default as browserProfile for modern Default/Network/Cookies paths', async () => {
+      fsExistsSync.mockReturnValue(false);
+      fsStatSync.mockReturnValue({ mtime: new Date('2025-01-01T00:00:00Z') });
+      globSync.mockImplementation((pattern: string) =>
+        pattern.includes('Google/Chrome') && pattern.includes('Network')
+          ? ['/tmp/mac-app-test/Library/Application Support/Google/Chrome/Default/Network/Cookies']
+          : []
+      );
+      installKeychain();
+      installCookieRows([
+        makeRow({ name: 'session', encrypted_value: encryptV10('network-cookie') }),
+      ]);
+      const { BrowserCookieReader } = await import('../../main/services/browserCookieReader');
+
+      const result = await BrowserCookieReader.readCookies('chrome');
+
+      expect(fsCopyFileSync).toHaveBeenCalledTimes(1);
+      expect(result).toHaveLength(1);
+      expect(result[0]).toMatchObject({
+        name: 'session',
+        value: 'network-cookie',
+        browserProfile: 'Default',
+      });
     });
   });
 

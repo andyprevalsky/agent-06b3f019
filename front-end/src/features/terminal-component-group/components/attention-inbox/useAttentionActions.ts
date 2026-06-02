@@ -1,7 +1,13 @@
 /**
- * Action handlers for the AttentionInbox: respond (accept), skip, reject, and
- * the Mac-app "send via iMessage" automation. Each action updates local state,
- * refetches the list, and shows a toast.
+ * STATE MACHINE: useAttentionActions
+ *
+ * [IDLE]
+ *   | respond / skip / reject / send-iMessage
+ *   v
+ * [MUTATING] -- success --> [REFETCHING] --> [IDLE]
+ *      | failure
+ *      v
+ * [ERROR_TOAST] --> [IDLE]
  */
 
 import { useState } from 'react';
@@ -12,7 +18,7 @@ import {
   useToast,
 } from '../../hooks';
 import { getMacAppBridge } from './macAppBridge';
-import { getSendSmsMetadata, type AttentionRequest } from './types';
+import { getAuthAssistanceMetadata, getSendSmsMetadata, type AttentionRequest } from './types';
 
 type ToastFn = ReturnType<typeof useToast>['toast'];
 
@@ -82,17 +88,31 @@ export function useAttentionActions({
   };
 
   const handleRespond = (requestId: string, overrideResponse?: string) => {
-    const response = overrideResponse ?? (responses[requestId]?.trim() || 'Approved');
+    const request = requests.find((item) => item.id === requestId);
+    const isAuthAssistance = request ? getAuthAssistanceMetadata(request) !== null : false;
+    const response =
+      overrideResponse ??
+      (responses[requestId]?.trim() || (isAuthAssistance ? 'Authentication complete' : 'Approved'));
     const remaining = countRemaining(requests, requestId);
     void run({
       requestId,
       mutate: () => respondToAttentionRequest(requestId, response),
       successToast: {
-        title: 'Response sent',
-        description: remainingDescription(remaining, 'The agent will continue with your response'),
+        title: isAuthAssistance ? 'Authentication complete' : 'Response sent',
+        description: remainingDescription(
+          remaining,
+          isAuthAssistance
+            ? 'The agent will continue'
+            : 'The agent will continue with your response',
+        ),
       },
-      errorToast: { title: 'Error', description: 'Failed to send response' },
-      keepOpen: true,
+      errorToast: {
+        title: 'Error',
+        description: isAuthAssistance
+          ? 'Failed to complete authentication request'
+          : 'Failed to send response',
+      },
+      keepOpen: isAuthAssistance ? remaining > 0 : true,
       clearInput: !overrideResponse,
     });
   };

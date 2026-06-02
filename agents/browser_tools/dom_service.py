@@ -7,6 +7,7 @@ This module provides:
 - Action history recording with dual index/coordinate representation
 """
 
+import asyncio
 import logging
 from dataclasses import dataclass, field, asdict
 from typing import Optional, Tuple, Dict, Any, List
@@ -567,82 +568,139 @@ class DOMService:
     async def get_element_coordinates(self, index: int) -> Optional[Tuple[int, int]]:
         """Convert element index to viewport coordinates.
         
-        Uses browser-use's get_element_coordinates which returns a DOMRect.
-        
         Args:
             index: Element index (backend_node_id) from DOM tree
             
         Returns:
             Tuple of (x, y) viewport coordinates (center of element), or None if not found
         """
-        if not self._session:
-            raise RuntimeError("Not connected. Call connect() first.")
-        
-        try:
-            # browser-use's get_element_coordinates requires the cdp_session for the focused tab
-            target_id = self._session.agent_focus_target_id
-            if not target_id:
-                logger.warning("No focused target, cannot get element coordinates")
-                return None
-            
-            cdp_session = await self._session.get_or_create_cdp_session(target_id, focus=False)
-            rect = await self._session.get_element_coordinates(
-                backend_node_id=index,
-                cdp_session=cdp_session
-            )
-            
-            if rect:
-                # DOMRect has x, y, width, height - calculate center
-                center_x = int(rect.x + rect.width / 2)
-                center_y = int(rect.y + rect.height / 2)
-                return (center_x, center_y)
-                
-        except Exception as e:
-            logger.warning(f"Failed to get coordinates for index {index}: {e}")
-        
-        # Fallback: check if element has center_coords in selector map
-        element = self._selector_map.get(index)
-        if element:
-            if hasattr(element, 'center_coords') and element.center_coords:
-                return (int(element.center_coords[0]), int(element.center_coords[1]))
-        
+        rect = await self.get_element_rect(index)
+        if rect:
+            center_x = int(rect["x"] + rect["width"] / 2)
+            center_y = int(rect["y"] + rect["height"] / 2)
+            return (center_x, center_y)
+
         return None
 
     async def get_element_rect(self, index: int) -> Optional[Dict[str, int]]:
-        """Get full bounding rect for element.
+        """Get the visible viewport rect for an element.
 
-        Similar to get_element_coordinates but returns the full bounding box,
-        useful for input field clicks where we want to click in a specific
-        region of the element (e.g., right side for text inputs).
+        The browser input APIs used by the humanizer expect viewport/client
+        coordinates. Do not use document/page coordinates here.
 
         Args:
             index: Element index (backend_node_id) from DOM tree
 
         Returns:
-            Dict with {x, y, width, height} or None if not found
+            Dict with {x, y, width, height} in viewport coordinates, or None if not found
         """
         if not self._session:
             raise RuntimeError("Not connected. Call connect() first.")
 
         try:
-            target_id = self._session.agent_focus_target_id
-            if not target_id:
-                logger.warning("No focused target, cannot get element rect")
+            element = await self.get_element_by_index(index)
+            backend_node_id = getattr(element, "backend_node_id", index) if element else index
+
+            cdp_session = None
+            if element and hasattr(self._session, "cdp_client_for_node"):
+                cdp_session = await self._session.cdp_client_for_node(element)
+
+            if cdp_session is None:
+                target_id = self._session.agent_focus_target_id
+                if not target_id:
+                    logger.warning("No focused target, cannot get element rect")
+                    return None
+                cdp_session = await self._session.get_or_create_cdp_session(target_id, focus=False)
+
+            session_id = cdp_session.session_id
+
+            try:
+                await cdp_session.cdp_client.send.DOM.scrollIntoViewIfNeeded(
+                    params={"backendNodeId": backend_node_id},
+                    session_id=session_id,
+                )
+                await asyncio.sleep(0.05)
+            except Exception as e:
+                logger.debug(f"Failed to scroll element {index} into view before coordinate lookup: {e}")
+
+            resolved = await cdp_session.cdp_client.send.DOM.resolveNode(
+                params={"backendNodeId": backend_node_id},
+                session_id=session_id,
+            )
+            object_id = resolved.get("object", {}).get("objectId")
+            if not object_id:
+                logger.warning(f"Could not resolve element object for index {index}")
                 return None
 
-            cdp_session = await self._session.get_or_create_cdp_session(target_id, focus=False)
-            rect = await self._session.get_element_coordinates(
-                backend_node_id=index,
-                cdp_session=cdp_session
+            js_result = await cdp_session.cdp_client.send.Runtime.callFunctionOn(
+                params={
+                    "objectId": object_id,
+                    "functionDeclaration": """
+                    function() {
+                        const rect = this.getBoundingClientRect();
+                        const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+                        const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+
+                        const visibleLeft = Math.max(0, rect.left);
+                        const visibleTop = Math.max(0, rect.top);
+                        const visibleRight = Math.min(viewportWidth, rect.right);
+                        const visibleBottom = Math.min(viewportHeight, rect.bottom);
+                        const visibleWidth = visibleRight - visibleLeft;
+                        const visibleHeight = visibleBottom - visibleTop;
+
+                        if (visibleWidth <= 0 || visibleHeight <= 0) {
+                            return {
+                                visible: false,
+                                x: rect.left,
+                                y: rect.top,
+                                width: rect.width,
+                                height: rect.height,
+                                viewportWidth,
+                                viewportHeight
+                            };
+                        }
+
+                        return {
+                            visible: true,
+                            x: visibleLeft,
+                            y: visibleTop,
+                            width: visibleWidth,
+                            height: visibleHeight,
+                            viewportWidth,
+                            viewportHeight
+                        };
+                    }
+                    """,
+                    "returnByValue": True,
+                },
+                session_id=session_id,
             )
 
-            if rect:
-                return {
-                    "x": int(rect.x),
-                    "y": int(rect.y),
-                    "width": int(rect.width),
-                    "height": int(rect.height)
-                }
+            rect_data = js_result.get("result", {}).get("value")
+            if not rect_data:
+                logger.warning(f"Could not read viewport rect for index {index}")
+                return None
+
+            if not rect_data.get("visible"):
+                logger.warning(
+                    "Element has no visible viewport intersection after scroll",
+                    extra={"index": index, "rect": rect_data},
+                )
+                return None
+
+            viewport_width = rect_data.get("viewportWidth") or self.viewport_width
+            viewport_height = rect_data.get("viewportHeight") or self.viewport_height
+            x = max(0, min(int(viewport_width) - 1, int(round(rect_data["x"]))))
+            y = max(0, min(int(viewport_height) - 1, int(round(rect_data["y"]))))
+            right = max(0, min(int(viewport_width), int(round(rect_data["x"] + rect_data["width"]))))
+            bottom = max(0, min(int(viewport_height), int(round(rect_data["y"] + rect_data["height"]))))
+
+            return {
+                "x": x,
+                "y": y,
+                "width": max(1, right - x),
+                "height": max(1, bottom - y),
+            }
 
         except Exception as e:
             logger.warning(f"Failed to get rect for index {index}: {e}")

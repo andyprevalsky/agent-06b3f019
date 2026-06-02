@@ -64,6 +64,15 @@ FORUM_URL_PATTERNS = [
     "vbulletin",
 ]
 
+AUTH_FLOW_URL_PATTERNS = [
+    "login",
+    "auth",
+    "signup",
+    # X hosts signup/login substeps under /i/jf/onboarding/... URLs that do
+    # not always include "login" or "signup" in the current route.
+    "onboarding",
+]
+
 # Payment field patterns (case-insensitive, check name, id, autocomplete, placeholder)
 PAYMENT_FIELD_PATTERNS = [
     "card",
@@ -109,6 +118,16 @@ SUBMIT_BUTTON_PATTERNS = [
     "submit",
 ]
 
+SUBMIT_BUTTON_EXCLUSION_PATTERNS = [
+    "continue",
+    "next",
+    "log in",
+    "login",
+    "sign up",
+    "signup",
+    "create account",
+]
+
 EMAIL_SEND_BUTTON_PATTERNS = [
     "send",
     "send message",
@@ -116,9 +135,15 @@ EMAIL_SEND_BUTTON_PATTERNS = [
     "send mail",
 ]
 
+EMAIL_SEND_BUTTON_EXCLUSION_PATTERNS = [
+    "resend",
+    "re-send",
+]
+
 # Purchase/order button text patterns (case-insensitive)
 # These are matched as full phrases to avoid false positives (e.g. "place" alone)
 PURCHASE_BUTTON_PHRASES = [
+    "buy now",
     "place your order",
     "place order",
     "complete purchase",
@@ -132,6 +157,11 @@ PURCHASE_BUTTON_PHRASES = [
     "checkout now",
     "complete checkout",
 ]
+
+
+def normalize_write_lock_text(text: str) -> str:
+    """Normalize text for write-lock phrase matching."""
+    return re.sub(r"\s+", "", text or "").lower()
 
 
 def is_social_domain(url: str) -> bool:
@@ -150,6 +180,10 @@ def is_social_domain(url: str) -> bool:
         parsed = urlparse(url.lower())
         domain = parsed.netloc
         full_url = url.lower()
+
+        if any(pattern in full_url for pattern in AUTH_FLOW_URL_PATTERNS):
+            logger.debug(f"URL {url} matched auth-flow pattern; skipping social write lock")
+            return False
 
         # Remove www. prefix for matching
         if domain.startswith("www."):
@@ -185,10 +219,15 @@ def is_submit_button(element_text: str) -> bool:
     if not element_text:
         return False
 
-    text_lower = element_text.lower().strip()
+    text_lower = normalize_write_lock_text(element_text)
+
+    for pattern in SUBMIT_BUTTON_EXCLUSION_PATTERNS:
+        if normalize_write_lock_text(pattern) in text_lower:
+            logger.debug(f"Element text '{element_text}' matched submit exclusion pattern: {pattern}")
+            return False
 
     for pattern in SUBMIT_BUTTON_PATTERNS:
-        if pattern in text_lower:
+        if normalize_write_lock_text(pattern) in text_lower:
             logger.debug(f"Element text '{element_text}' matched submit pattern: {pattern}")
             return True
 
@@ -201,6 +240,9 @@ def is_email_send_button(element_text: str) -> bool:
         return False
 
     text_lower = re.sub(r"\s+", " ", element_text.lower()).strip()
+    if any(pattern in text_lower for pattern in EMAIL_SEND_BUTTON_EXCLUSION_PATTERNS):
+        return False
+
     return any(pattern == text_lower or pattern in text_lower for pattern in EMAIL_SEND_BUTTON_PATTERNS)
 
 
@@ -216,10 +258,10 @@ def is_purchase_button(element_text: str) -> bool:
     if not element_text:
         return False
 
-    text_lower = element_text.lower().strip()
+    text_lower = normalize_write_lock_text(element_text)
 
     for phrase in PURCHASE_BUTTON_PHRASES:
-        if phrase in text_lower:
+        if normalize_write_lock_text(phrase) in text_lower:
             logger.debug(f"Element text '{element_text}' matched purchase pattern: {phrase}")
             return True
 

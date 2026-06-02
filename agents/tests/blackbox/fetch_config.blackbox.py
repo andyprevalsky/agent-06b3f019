@@ -29,7 +29,7 @@ def _setup():
                     "response_schema": None,
                     "token_in_price_microdollars": 100,
                     "token_out_price_microdollars": 300,
-                    "writeLockEnabled": True,
+                    "write_lock_enabled": False,
                 },
                 "messages": [],
             },
@@ -48,6 +48,7 @@ async def test_happy_path():
     assert result["model"] == "rose-1-lite"
     assert result["status"] == "ACTIVE"
     assert result["tool_ids"] == ["tool-1", "tool-2"]
+    assert result["write_lock_enabled"] is False
 
 
 async def test_boundary():

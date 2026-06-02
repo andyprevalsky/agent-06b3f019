@@ -738,6 +738,34 @@ async function testRespond_happyPersistsStateAndDecrementsCount() {
   assert(listItem?.user_response === 'Yes, go ahead', 'List should expose the stored response');
 }
 
+async function testRespond_authLookingMetadataWithoutAuthRowIsGeneric() {
+  const fixture = await createFixture('respond-auth-metadata-generic');
+  const created = await createAttentionRequest(fixture, {
+    question: 'auth-looking metadata',
+    metadata: {
+      attentionKind: 'auth_assistance',
+      authAssistance: {
+        requestId: 'metadata-only',
+        authRealm: 'example.com',
+      },
+    },
+  });
+
+  const res = await request(`${BASE_URL}/api/attention-requests/${created.id}/respond`, {
+    method: 'POST',
+    headers: authHeaders(fixture.ownerToken),
+    body: JSON.stringify({ response: 'metadata is not the model' }),
+  });
+  assertStatus(res.status, 200, res.data);
+  assertSchema(ActionResponse, res.data, 'POST /:id/respond');
+
+  const requestAfter = await getRequestById(created.id, authHeaders(fixture.ownerToken));
+  assert(
+    requestAfter.userResponse === 'metadata is not the model',
+    'Auth-looking metadata without a child row should be treated as a generic attention request'
+  );
+}
+
 async function testRespond_noAuth() {
   const fixture = await createFixture('respond-no-auth');
   const created = await createAttentionRequest(fixture);
@@ -1090,6 +1118,10 @@ async function runAll() {
         {
           name: 'happy path persists state and decrements count',
           fn: testRespond_happyPersistsStateAndDecrementsCount,
+        },
+        {
+          name: 'auth-looking metadata without child row responds generically',
+          fn: testRespond_authLookingMetadataWithoutAuthRowIsGeneric,
         },
         { name: 'no auth -> 401', fn: testRespond_noAuth },
         { name: 'not found -> 404', fn: testRespond_notFound },

@@ -615,10 +615,28 @@ def _check_non_empty_content(anthropic_msgs: List[Dict]) -> List[ContextViolatio
 def _check_no_duplicate_messages(raw_messages: List[Dict]) -> List[ContextViolation]:
     """Rule 6: No duplicate messages in raw context.
 
-    Same role + same text + same metadata (ignoring message_id, timestamp, file_pointer)
-    appearing twice indicates the dual-write dedup failure.
+    Same role + same text + same metadata within the same execution scope
+    (ignoring message_id, timestamp, file_pointer) appearing twice indicates
+    the dual-write dedup failure. The scope keeps repeated child-agent events
+    from different browser/task runs from colliding.
     """
     violations: List[ContextViolation] = []
+
+    def message_scope(msg: Dict) -> str:
+        metadata = msg.get("metadata") or {}
+        sub_agent_id = metadata.get("subAgentId")
+        if sub_agent_id:
+            return f"sub:{sub_agent_id}"
+        sub_agent_ids = metadata.get("subAgentIds")
+        if isinstance(sub_agent_ids, list) and sub_agent_ids:
+            return "subs:" + ",".join(str(value) for value in sub_agent_ids)
+        task_id = metadata.get("task_id") or metadata.get("taskId")
+        if task_id:
+            return f"task:{task_id}"
+        agent_id = msg.get("agentId") or msg.get("agent_id")
+        if agent_id:
+            return f"agent:{agent_id}"
+        return "root"
 
     def fingerprint(msg: Dict) -> str:
         role = msg.get("role", "")
@@ -641,6 +659,7 @@ def _check_no_duplicate_messages(raw_messages: List[Dict]) -> List[ContextViolat
                 if isinstance(a, dict)
             ]
         return (
+            f"{message_scope(msg)}|"
             f"{role}|{text[:500]}|"
             f"{json.dumps(semantic_meta, sort_keys=True)}|"
             f"{json.dumps(attachment_fingerprint, sort_keys=True)}"
@@ -648,12 +667,6 @@ def _check_no_duplicate_messages(raw_messages: List[Dict]) -> List[ContextViolat
 
     seen: Dict[str, int] = {}  # fingerprint → first index
     for idx, msg in enumerate(raw_messages):
-        # Sub-agent messages are filtered from the parent LLM context,
-        # so duplicates among them can't cause API errors.
-        metadata = msg.get("metadata") or {}
-        if metadata.get("subAgentId"):
-            continue
-
         fp = fingerprint(msg)
         if fp in seen:
             role = msg.get("role", "")

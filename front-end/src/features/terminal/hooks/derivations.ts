@@ -129,7 +129,14 @@ export function computeActiveBrowserPanels(messages: Message[]): BrowserPanelDat
     const lastMessage = taskMessages[taskMessages.length - 1];
     const initToolCallId = initMessage?.metadata?.toolCallId;
 
+    const hasTerminalTaskMessage = taskMessages.some(
+      (m) =>
+        m.metadata?.action_type === 'task_complete' ||
+        m.metadata?.action_type === 'session_paused',
+    );
+
     const isComplete =
+      hasTerminalTaskMessage ||
       lastMessage?.metadata?.action_type === 'task_complete' ||
       lastMessage?.metadata?.action_type === 'session_paused' ||
       (typeof initToolCallId === 'string' && pausedBrowserToolCallIds.has(initToolCallId));

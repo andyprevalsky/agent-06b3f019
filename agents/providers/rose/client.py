@@ -31,7 +31,12 @@ import structlog
 from pydantic import BaseModel
 
 from config import load_config
-from providers.rose.browser_use import build_browser_use_messages, normalize_browser_use_response
+from providers.rose.browser_use import (
+    build_browser_use_messages,
+    build_browser_use_tools,
+    normalize_browser_use_response,
+    normalize_browser_use_tool_call,
+)
 from providers.rose.claude_auth import claude_auth_complete
 from providers.rose.errors import (
     RoseAuthError,
@@ -196,6 +201,135 @@ def _cache_input_accounting(
     }
 
 
+def _dump_display_model(actual_model: str) -> str:
+    """Human-facing model for debug dumps, without direct-auth route suffixes."""
+    if actual_model.endswith("-claude"):
+        return actual_model[: -len("-claude")]
+    if actual_model.endswith("-gpt"):
+        return actual_model[: -len("-gpt")]
+    return actual_model
+
+
+def _browser_use_dump_config(
+    *,
+    pool_spec: Any,
+    response: RoseResponse,
+    mode: str,
+    max_tokens: int,
+    temperature: float,
+    include_screenshot: bool,
+    call_site: str,
+    deadline_s: float,
+    claude_auth: Optional[ClaudeAuthContext],
+    gpt_auth: Optional[GptAuthContext],
+    available_actions: List[str],
+    tools: List[Dict[str, Any]],
+    tool_choice: Any,
+) -> Dict[str, Any]:
+    """Capture behavior-shaping values for a browser-use LLM call dump."""
+    actual_model = response.actual_model or ""
+    effective_model = _dump_display_model(actual_model)
+    if mode == "gpt":
+        effective_params = {
+            "model": pool_spec.gpt_auth_model,
+            "temperature": None,
+            "max_tokens": None,
+            "reasoning_effort": None,
+            "store": False,
+            "parallel_tool_calls": True,
+            "include": ["reasoning.encrypted_content"],
+        }
+    elif mode == "claude":
+        effective_params = {
+            "model": pool_spec.claude_auth_model,
+            "temperature": 1,
+            "max_tokens": max_tokens or 8192,
+            "reasoning_effort": None,
+            "thinking": None,
+            "stream": True,
+        }
+    else:
+        effective_params = {
+            "model": effective_model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "reasoning_effort": None,
+            "stream": True,
+        }
+    return {
+        "pool": "rose-1-browser-use",
+        "actual_model": effective_model,
+        "actual_model_raw": actual_model,
+        "pool_name": response.pool_name or "rose-1-browser-use",
+        "mode": mode,
+        "call_site": call_site,
+        "effective_params": effective_params,
+        "requested_params": {
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "reasoning_effort": None,
+            "thinking": None,
+            "seed": None,
+            "response_format": None,
+            "tools": tools,
+            "tool_choice": tool_choice,
+        },
+        "max_tokens": effective_params["max_tokens"],
+        "temperature": effective_params["temperature"],
+        "reasoning_effort": effective_params["reasoning_effort"],
+        "thinking": effective_params.get("thinking"),
+        "seed": None,
+        "response_format": None,
+        "tools": tools,
+        "tool_choice": tool_choice,
+        "include_screenshot": include_screenshot,
+        "deadline_s": deadline_s,
+        "direct_auth": {
+            "claude": claude_auth is not None,
+            "gpt": gpt_auth is not None,
+        },
+        "candidate_models": {
+            "claude_auth": pool_spec.claude_auth_model,
+            "gpt_auth": pool_spec.gpt_auth_model,
+            "waterfall": list(pool_spec.waterfall),
+        },
+        "available_actions": list(available_actions),
+    }
+
+
+def _messages_without_internal_system_boundaries(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return dump-safe messages with internal cache sentinels removed.
+
+    Browser-use builds one logical system prompt with
+    SYSTEM_PROMPT_DYNAMIC_BOUNDARY so provider transforms can split static and
+    dynamic cache regions. That marker is never meant to be model-visible, so
+    dumps store the same content as separate system messages instead of
+    persisting the sentinel text.
+    """
+    try:
+        from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+    except Exception:
+        return [dict(message) for message in messages]
+
+    cleaned: List[Dict[str, Any]] = []
+    for message in messages:
+        content = message.get("content")
+        if message.get("role") != "system" or not isinstance(content, str):
+            cleaned.append(dict(message))
+            continue
+        if SYSTEM_PROMPT_DYNAMIC_BOUNDARY not in content:
+            cleaned.append(dict(message))
+            continue
+        for part in content.split(SYSTEM_PROMPT_DYNAMIC_BOUNDARY):
+            text = part.strip()
+            if not text:
+                continue
+            cloned = dict(message)
+            cloned["content"] = text
+            cleaned.append(cloned)
+    return cleaned
+
+
 class RoseClient:
     """Stateless client — one instance can serve many concurrent `complete()`
     calls. Config is read lazily from `load_config()` on first use.
@@ -215,6 +349,8 @@ class RoseClient:
         pool: PoolName,
         messages: List[Dict[str, Any]],
         response_model: Optional[Type[BaseModel]] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Any = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         seed: Optional[int] = None,
@@ -229,6 +365,8 @@ class RoseClient:
         idle_timeout_s: Optional[float] = _DEFAULT_IDLE_TIMEOUT_S,
         thinking: Optional[Dict[str, Any]] = None,
         effort: Optional[str] = None,
+        dump_context: bool = True,
+        dump_extra: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[StreamChunk]:
         """Run a full Rose completion, yielding normalized StreamChunks.
 
@@ -240,16 +378,105 @@ class RoseClient:
         pool_spec = get_pool(pool)
         rid = request_id or uuid.uuid4().hex[:12]
         started = time.monotonic()
+        first_contentful_at: Optional[float] = None
 
         openrouter_response_format = (
             build_openai_response_format(response_model) if response_model is not None else None
         )
+        dump_path: Optional[str] = None
+        dump_result = RoseResponse()
+        if dump_context:
+            try:
+                from helpers.observability import dump_llm_context
+
+                dump_path = dump_llm_context(
+                    call_site=call_site,
+                    messages=_messages_without_internal_system_boundaries(messages),
+                    agent_id=agent_id,
+                    model=pool,
+                    config={
+                        "pool": pool,
+                        "requested_params": {
+                            "temperature": temperature,
+                            "max_tokens": max_tokens,
+                            "seed": seed,
+                            "skip_cache_write": skip_cache_write,
+                            "tool_choice": tool_choice,
+                            "thinking": thinking,
+                            "reasoning_effort": effort,
+                            "deadline_s": deadline_s,
+                            "ttft_timeout_s": ttft_timeout_s,
+                            "idle_timeout_s": idle_timeout_s,
+                        },
+                        "response_model": response_model.__name__ if response_model else None,
+                        "direct_auth": {
+                            "claude": claude_auth is not None,
+                            "gpt": gpt_auth is not None,
+                        },
+                        "candidate_models": {
+                            "claude_auth": pool_spec.claude_auth_model,
+                            "gpt_auth": pool_spec.gpt_auth_model,
+                            "waterfall": list(pool_spec.waterfall),
+                        },
+                    },
+                    response_format=None if tools else openrouter_response_format,
+                    tools=tools,
+                    extra=dump_extra,
+                )
+            except Exception:
+                logger.debug("rose.complete.dump_start_failed", call_site=call_site, exc_info=True)
+
+        def _record_dump_chunk(chunk: StreamChunk) -> None:
+            if not dump_context:
+                return
+            try:
+                _fold(dump_result, chunk)
+            except Exception:
+                logger.debug("rose.complete.dump_chunk_failed", call_site=call_site, exc_info=True)
+
+        def _finalize_dump(error: Optional[BaseException] = None) -> None:
+            if not dump_context or not dump_path:
+                return
+            try:
+                from helpers.observability import update_llm_dump
+
+                output: Dict[str, Any] = {
+                    "content": dump_result.content,
+                    "reasoning": dump_result.reasoning,
+                    "tool_calls": dump_result.tool_calls,
+                    "codex_reasoning_items": dump_result.codex_reasoning_items,
+                    "usage": dump_result.usage,
+                    "timing": dump_result.timing,
+                    "request_id": dump_result.request_id or rid,
+                    "actual_model": dump_result.actual_model,
+                    "pool_name": dump_result.pool_name,
+                    "claude_token_error": dump_result.claude_token_error,
+                    "gpt_token_error": dump_result.gpt_token_error,
+                }
+                if error is not None:
+                    output["error"] = {
+                        "type": type(error).__name__,
+                        "message": str(error),
+                    }
+                update_llm_dump(
+                    dump_path,
+                    model=_dump_display_model(dump_result.actual_model or pool),
+                    output=output,
+                )
+            except Exception:
+                logger.debug("rose.complete.dump_finalize_failed", call_site=call_site, exc_info=True)
+
         claude_auth_tools = None
         claude_auth_tool_choice = None
         gpt_auth_tools = None
         gpt_auth_tool_choice = None
-        direct_auth_tools = None
-        if response_model is not None and (claude_auth is not None or gpt_auth is not None):
+        direct_auth_tools = tools
+        effective_tool_choice = tool_choice
+        if (
+            direct_auth_tools is None
+            and response_model is not None
+            and (claude_auth is not None or gpt_auth is not None)
+        ):
             direct_auth_tools = build_anthropic_tools_from_response_model(
                 response_model,
                 model=pool_spec.claude_auth_model,
@@ -267,7 +494,7 @@ class RoseClient:
                 # the JSON envelope slot and json.loads explodes (Expecting
                 # value: line 1 column 1). Mirror gpt_auth (just below): force
                 # `any` whenever native tools are populated.
-                claude_auth_tool_choice = "any"
+                claude_auth_tool_choice = effective_tool_choice or "any"
         if gpt_auth is not None:
             # Plain structured-output models are better enforced by the
             # Responses `text.format` JSON schema than by a synthetic submit
@@ -275,7 +502,7 @@ class RoseClient:
             if not _is_synthetic_output_toolset(direct_auth_tools):
                 gpt_auth_tools = direct_auth_tools
             if gpt_auth_tools:
-                gpt_auth_tool_choice = "any"
+                gpt_auth_tool_choice = effective_tool_choice or "any"
 
         direct_auth: Optional[ComputeAuthContext] = claude_auth or gpt_auth
 
@@ -314,7 +541,7 @@ class RoseClient:
               window raises `RoseDeadlineError`; the outer deadline still
               caps total time.
             """
-            nonlocal last_heartbeat
+            nonlocal first_contentful_at, last_heartbeat
             ttft_budget = ttft_override if ttft_override is not None else ttft_timeout_s
             it = source.__aiter__()
             saw_productive_chunk = False
@@ -341,12 +568,26 @@ class RoseClient:
                 except StopAsyncIteration:
                     return
                 if chunk.kind in productive_kinds:
+                    if first_contentful_at is None:
+                        first_contentful_at = time.monotonic()
                     saw_productive_chunk = True
                 now = time.monotonic()
                 if now - last_heartbeat >= _HEARTBEAT_INTERVAL_S:
                     _safe_heartbeat(f"rose.complete call_site={call_site} request_id={rid}")
                     last_heartbeat = now
                 yield chunk
+
+        def _with_timing_if_done(chunk: StreamChunk) -> StreamChunk:
+            if chunk.kind != "done":
+                return chunk
+            completed = time.monotonic()
+            timing = {
+                "first_contentful_token_s": (
+                    round(first_contentful_at - started, 3) if first_contentful_at is not None else None
+                ),
+                "round_trip_s": round(completed - started, 3),
+            }
+            return StreamChunk(kind="done", data={**chunk.data, "timing": timing})
 
         # Tracks the legacy `claude_token_error` string when claudeAuth falls
         # through to waterfall — surfaced on waterfall's metadata chunk so the
@@ -451,6 +692,7 @@ class RoseClient:
                         direct_yielded_any = False
                         try:
                             async for chunk in _guarded(source, ttft_override=current_ttft_s):
+                                chunk = _with_timing_if_done(chunk)
                                 direct_yielded_any = True
                                 if chunk.kind == "metadata" and chunk.data.get("actual_model"):
                                     _seen_actual_model = chunk.data["actual_model"]
@@ -467,6 +709,7 @@ class RoseClient:
                                         usage_data["gpt_token_rotated"] = direct_rotations > 0
                                     chunk = StreamChunk(kind="usage", data=usage_data)
                                     _emit_llm_cache(chunk.data)
+                                _record_dump_chunk(chunk)
                                 yield chunk
                         except RoseStallError as exc:
                             if not direct_yielded_any:
@@ -482,6 +725,7 @@ class RoseClient:
                             stall_retries=stall_retry_idx,
                             elapsed_s=round(time.monotonic() - started, 3),
                         )
+                        _finalize_dump()
                         return
                     except _FallThrough as ft:
                         cause = ft.__cause__
@@ -569,9 +813,9 @@ class RoseClient:
                 waterfall_complete(
                     pool_spec=pool_spec,
                     messages=messages,
-                    tools=None,
-                    tool_choice=None,
-                    response_format=openrouter_response_format,
+                    tools=tools,
+                    tool_choice=tool_choice,
+                    response_format=None if tools else openrouter_response_format,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     seed=seed,
@@ -583,6 +827,7 @@ class RoseClient:
                     idle_timeout_s=idle_timeout_s,
                 )
             ):
+                chunk = _with_timing_if_done(chunk)
                 if claude_token_error is not None and chunk.kind == "metadata":
                     chunk = StreamChunk(
                         kind="metadata",
@@ -597,6 +842,7 @@ class RoseClient:
                     _seen_actual_model = chunk.data["actual_model"]
                 elif chunk.kind == "usage":
                     _emit_llm_cache(chunk.data)
+                _record_dump_chunk(chunk)
                 yield chunk
             logger.info(
                 "rose.complete.waterfall.done",
@@ -605,7 +851,9 @@ class RoseClient:
                 call_site=call_site,
                 elapsed_s=round(time.monotonic() - started, 3),
             )
+            _finalize_dump()
         except RoseError as exc:
+            _finalize_dump(exc)
             logger.error(
                 "rose.complete.failed",
                 request_id=rid,
@@ -624,19 +872,22 @@ class RoseClient:
         browser_state: Dict[str, Any],
         action_history: List[Dict[str, Any]],
         available_actions: List[str],
-        include_screenshot: bool = True,
+        include_screenshot: bool = False,
+        dynamic_system_context: Optional[str] = None,
+        turn_messages: Optional[List[Dict[str, Any]]] = None,
         claude_auth: Optional[ClaudeAuthContext] = None,
         gpt_auth: Optional[GptAuthContext] = None,
         agent_id: Optional[str] = None,
         request_id: Optional[str] = None,
         call_site: str = "browser_use",
         deadline_s: float = _DEFAULT_DEADLINE_S,
+        dump_extra: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Run one browser-use step through the rose-1-browser-use pool.
 
-        Builds the browser-use messages, runs the standard claudeAuth ->
-        waterfall pipeline (no tools — model returns JSON in text), parses
-        the JSON action envelope, and returns a dict shaped:
+        Builds the browser-use messages and native browser-action tools, runs
+        the standard claudeAuth -> waterfall pipeline, parses the first tool
+        call, and returns a dict shaped:
 
             {
                 "action":        UnifiedAction,
@@ -651,38 +902,102 @@ class RoseClient:
                     "cache_read_input_tokens"?: int,
                 },
                 "claude_token_error": Optional[str],
-                "mode": "claude" | "waterfall",
+                "mode": "claude" | "gpt" | "waterfall",
             }
 
         Raises `RoseError` on transport / pool failure and `ValueError` if
-        the model's text reply doesn't contain a parseable action envelope.
+        the model does not return a parseable browser action.
         """
+        pool_spec = get_pool("rose-1-browser-use")
+        max_tokens = 16000
+        temperature = 1.0
+        tools = build_browser_use_tools(available_actions)
+        tool_choice = "any"
         messages = build_browser_use_messages(
             task=task,
             browser_state=browser_state,
             action_history=action_history,
             available_actions=available_actions,
             include_screenshot=include_screenshot,
+            dynamic_system_context=dynamic_system_context,
+            turn_messages=turn_messages,
         )
         response = await self.collect(
             pool="rose-1-browser-use",
             messages=messages,
-            max_tokens=16000,
-            temperature=1.0,
+            tools=tools,
+            tool_choice=tool_choice,
+            max_tokens=max_tokens,
+            temperature=temperature,
             claude_auth=claude_auth,
             gpt_auth=gpt_auth,
             agent_id=agent_id,
             request_id=request_id,
             call_site=call_site,
             deadline_s=deadline_s,
+            dump_context=False,
         )
 
-        action = normalize_browser_use_response(response.content)
         actual_model = response.actual_model or ""
         # Only the `-claude` suffix indicates direct Anthropic via claudeAuth
         # (set in claude_auth.py). Plain "anthropic/claude-*" model names came
         # through the waterfall (sequential pool tries via OpenRouter).
         is_claude = actual_model.endswith("-claude")
+        mode = "claude" if is_claude else ("gpt" if actual_model.endswith("-gpt") else "waterfall")
+        if response.tool_calls:
+            action = normalize_browser_use_tool_call(
+                response.tool_calls[0],
+                thinking=(response.reasoning or response.content or None),
+            )
+        else:
+            action = normalize_browser_use_response(response.content)
+
+        try:
+            from helpers.observability import dump_llm_context
+
+            # The renderer shows `output` as its own collapsible section; keep
+            # it beside provider-visible messages/tools. Internal cache
+            # sentinels are split out so dumps never show them as LLM text.
+            dump_messages = _messages_without_internal_system_boundaries(messages)
+            dump_llm_context(
+                call_site=call_site,
+                messages=dump_messages,
+                agent_id=agent_id,
+                model=_dump_display_model(actual_model),
+                config=_browser_use_dump_config(
+                    pool_spec=pool_spec,
+                    response=response,
+                    mode=mode,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    include_screenshot=include_screenshot,
+                    call_site=call_site,
+                    deadline_s=deadline_s,
+                    claude_auth=claude_auth,
+                    gpt_auth=gpt_auth,
+                    available_actions=available_actions,
+                    tools=tools,
+                    tool_choice=tool_choice,
+                ),
+                tools=tools,
+                output={
+                    "action": action,
+                    "content": response.content,
+                    "reasoning": response.reasoning,
+                    "tool_calls": response.tool_calls,
+                    "usage": response.usage,
+                    "timing": response.timing,
+                    "request_id": response.request_id,
+                },
+                extra={
+                    "browser_state": browser_state,
+                    "action_history": action_history,
+                    "turn_messages_count": len(turn_messages or []),
+                    **(dump_extra or {}),
+                },
+            )
+        except Exception:
+            logger.debug("rose.browser_use.dump_output_failed", call_site=call_site, exc_info=True)
 
         return {
             "action": action,
@@ -692,7 +1007,7 @@ class RoseClient:
             "usage": response.usage,
             "claude_token_error": response.claude_token_error,
             "gpt_token_error": response.gpt_token_error,
-            "mode": "claude" if is_claude else ("gpt" if actual_model.endswith("-gpt") else "waterfall"),
+            "mode": mode,
         }
 
     async def collect(
@@ -701,6 +1016,8 @@ class RoseClient:
         pool: PoolName,
         messages: List[Dict[str, Any]],
         response_model: Optional[Type[BaseModel]] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Any = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         seed: Optional[int] = None,
@@ -711,6 +1028,8 @@ class RoseClient:
         request_id: Optional[str] = None,
         call_site: str = "unspecified",
         deadline_s: float = _DEFAULT_DEADLINE_S,
+        dump_context: bool = True,
+        dump_extra: Optional[Dict[str, Any]] = None,
     ) -> RoseResponse:
         """Consume the stream into a single `RoseResponse` — convenience for
         non-streaming callers who don't care about incremental chunks."""
@@ -719,6 +1038,8 @@ class RoseClient:
             pool=pool,
             messages=messages,
             response_model=response_model,
+            tools=tools,
+            tool_choice=tool_choice,
             temperature=temperature,
             max_tokens=max_tokens,
             seed=seed,
@@ -729,6 +1050,8 @@ class RoseClient:
             request_id=request_id,
             call_site=call_site,
             deadline_s=deadline_s,
+            dump_context=dump_context,
+            dump_extra=dump_extra,
         ):
             _fold(result, chunk)
         return result
@@ -756,7 +1079,10 @@ def _fold(result: RoseResponse, chunk: StreamChunk) -> None:
         result.tool_calls.append(dict(chunk.data))
     elif kind == "usage":
         result.usage = dict(chunk.data)
-    # `done` is terminal — nothing to fold.
+    elif kind == "done":
+        timing = chunk.data.get("timing")
+        if isinstance(timing, dict):
+            result.timing = dict(timing)
 
 
 async def _try_claude_auth(

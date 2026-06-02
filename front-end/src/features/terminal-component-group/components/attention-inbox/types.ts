@@ -33,6 +33,16 @@ export interface SendSmsMetadata {
   message: string;
 }
 
+export interface AuthAssistanceMetadata {
+  requestId: string;
+  taskId?: string;
+  browserSessionId?: string;
+  authRealm?: string;
+  mode?: string;
+  steelSessionId?: string;
+  liveViewUrl?: string | null;
+}
+
 /**
  * Narrow a request's metadata field to the iMessage-send variant when
  * `onSuccess === 'sendSmsThroughIMessage'` and `to`/`message` are present.
@@ -50,4 +60,43 @@ export function getSendSmsMetadata(metadata: AttentionRequest['metadata']): Send
     return { onSuccess, to, message };
   }
   return null;
+}
+
+function readRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' ? (value as Record<string, unknown>) : null;
+}
+
+function readString(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  return typeof value === 'string' ? value : undefined;
+}
+
+export function getAuthAssistanceMetadata(
+  request: AttentionRequest,
+): AuthAssistanceMetadata | null {
+  const metadata = readRecord(request.metadata);
+  if (!metadata) return null;
+
+  const authAssistance = readRecord(metadata.authAssistance);
+  const requestUserAuthentication = readRecord(metadata.requestUserAuthentication);
+  const source =
+    metadata.attentionKind === 'auth_assistance'
+      ? (authAssistance ?? requestUserAuthentication ?? metadata)
+      : (authAssistance ?? requestUserAuthentication);
+  if (!source) return null;
+
+  const requestId =
+    readString(source, 'requestId') ?? readString(source, 'request_id') ?? request.id;
+  const liveViewUrl = readString(source, 'liveViewUrl') ?? readString(source, 'live_view_url');
+
+  return {
+    requestId,
+    taskId: readString(source, 'taskId') ?? readString(source, 'task_id'),
+    browserSessionId:
+      readString(source, 'browserSessionId') ?? readString(source, 'browser_session_id'),
+    authRealm: readString(source, 'authRealm') ?? readString(source, 'auth_realm'),
+    mode: readString(source, 'mode') ?? readString(source, 'handoffMode'),
+    steelSessionId: readString(source, 'steelSessionId') ?? readString(source, 'steel_session_id'),
+    liveViewUrl: liveViewUrl ?? null,
+  };
 }

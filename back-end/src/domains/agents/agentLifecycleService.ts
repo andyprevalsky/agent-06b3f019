@@ -224,6 +224,7 @@ export async function createAgent(
     proxyState: proxyGeo.state,
     proxyCity: proxyGeo.city,
     priceLimitCents: body.price_limit_cents,
+    writeLockEnabled: body.write_lock_enabled,
     verifierType: verifier.type,
     attachments: body.attachments as Array<Record<string, unknown>> | undefined,
     temporalWorkflowId: willStartWorkflow ? agentId : null,

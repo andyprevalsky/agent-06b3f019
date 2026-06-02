@@ -85,11 +85,28 @@ function testInnerViewportDimensionsAreNotSpoofed(): void {
   );
 }
 
+function testFingerprintScriptDoesNotReferenceBackendLogger(): void {
+  const script = buildFingerprintScript(makeFingerprint());
+
+  assert(
+    !script.includes('log.info('),
+    'fingerprint script runs in the browser and must not reference the backend logger'
+  );
+  assert(
+    !script.includes('console.'),
+    'fingerprint script should not write page-console logs; use backend central logging around injection instead'
+  );
+}
+
 function main(): void {
   const tests = [
     {
       name: 'inner viewport dimensions are not spoofed',
       fn: testInnerViewportDimensionsAreNotSpoofed,
+    },
+    {
+      name: 'fingerprint script does not reference backend logger',
+      fn: testFingerprintScriptDoesNotReferenceBackendLogger,
     },
   ];
   const failures: string[] = [];

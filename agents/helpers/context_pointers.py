@@ -97,6 +97,15 @@ def _apply_slice(text: str, start: Optional[str], end: Optional[str]) -> str:
     return text[start_idx : end_idx + len(end)]
 
 
+def _is_inside_resolved_ref_tag(text: str, index: int) -> bool:
+    """Return True when index is inside an existing <resolved-ref ...> tag."""
+    tag_start = text.rfind("<resolved-ref", 0, index)
+    if tag_start == -1:
+        return False
+    last_close = text.rfind(">", 0, index)
+    return last_close < tag_start
+
+
 async def _fetch_messages_batch(
     message_ids: List[str],
     user_id: Optional[str] = None,
@@ -202,9 +211,22 @@ async def resolve_pointers_in_text(
     last_end = 0
 
     for match in POINTER_PATTERN.finditer(text):
+        if _is_inside_resolved_ref_tag(text, match.start()):
+            continue
+
         p_id = match.group(1)
         p_start = match.group(2)
         p_end = match.group(3)
+
+        # `annotate_with_pointer()` appends this suffix to messages so future
+        # turns can reference the exact row. Do not expand that suffix inside
+        # the same message, or the LLM sees `message + resolved copy of message`.
+        annotation_match = re.search(r"(?:^|\n\n)Reference:\s*$", text[: match.start()])
+        if annotation_match and not text[match.end() :].strip():
+            result_parts.append(text[last_end : match.start()])
+            result_parts.append(f'<resolved-ref pointer="{match.group(0)}"/>')
+            last_end = match.end()
+            continue
 
         raw_text = resolutions.get(p_id)
         if raw_text is None:

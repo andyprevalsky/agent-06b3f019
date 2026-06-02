@@ -68,6 +68,7 @@ function buildBatchItem(
     ...(meta.proxyGeo.state !== undefined ? { proxyState: meta.proxyGeo.state } : {}),
     ...(meta.proxyGeo.city !== undefined ? { proxyCity: meta.proxyGeo.city } : {}),
     ...(body.price_limit_cents !== undefined ? { priceLimitCents: body.price_limit_cents } : {}),
+    ...(body.write_lock_enabled !== undefined ? { writeLockEnabled: body.write_lock_enabled } : {}),
     verifierType,
     ...(body.attachments !== undefined
       ? { attachments: body.attachments as Array<Record<string, unknown>> }

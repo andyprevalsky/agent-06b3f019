@@ -99,7 +99,7 @@ function CarouselItem({ browser, idx, activeIndex, total, onSelect }: CarouselIt
 }
 
 function BrowserStatusBarCarouselImpl({ browsers }: BrowserStatusBarCarouselProps) {
-  const [activeIndex, setActiveIndex] = useState(0);
+  const [activeIndex, setActiveIndex] = useState(() => findInitialBrowserIndex(browsers));
   const hasMultipleBrowsers = browsers.length > 1;
 
   useEffect(() => {
@@ -107,6 +107,25 @@ function BrowserStatusBarCarouselImpl({ browsers }: BrowserStatusBarCarouselProp
       setActiveIndex(Math.max(0, browsers.length - 1));
     }
   }, [browsers.length, activeIndex]);
+
+  useEffect(() => {
+    const browserId = new URLSearchParams(window.location.search).get('browser-id');
+    if (!browserId) return;
+    const idx = browsers.findIndex((browser) => browser.taskId === browserId);
+    if (idx >= 0) setActiveIndex(idx);
+  }, [browsers]);
+
+  useEffect(() => {
+    const handleOpenBrowser = (event: Event) => {
+      const taskId = (event as CustomEvent<{ taskId?: string }>).detail?.taskId;
+      if (!taskId) return;
+      const idx = browsers.findIndex((browser) => browser.taskId === taskId);
+      if (idx >= 0) setActiveIndex(idx);
+    };
+
+    window.addEventListener('navi-open-browser', handleOpenBrowser);
+    return () => window.removeEventListener('navi-open-browser', handleOpenBrowser);
+  }, [browsers]);
 
   const handlePrevBrowser = useCallback(() => {
     setActiveIndex((prev) => (prev - 1 + browsers.length) % browsers.length);
@@ -153,3 +172,11 @@ function BrowserStatusBarCarouselImpl({ browsers }: BrowserStatusBarCarouselProp
 
 const BrowserStatusBarCarousel = memo(BrowserStatusBarCarouselImpl);
 export default BrowserStatusBarCarousel;
+
+function findInitialBrowserIndex(browsers: BrowserSession[]): number {
+  if (typeof window === 'undefined') return 0;
+  const browserId = new URLSearchParams(window.location.search).get('browser-id');
+  if (!browserId) return 0;
+  const idx = browsers.findIndex((browser) => browser.taskId === browserId);
+  return idx >= 0 ? idx : 0;
+}

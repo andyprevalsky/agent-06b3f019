@@ -3,6 +3,7 @@ import type { CreateAttentionRequestInput, RespondInput } from './types';
 import { REJECTED_RESPONSE } from './config';
 import { createMessage } from '../../providers/messages';
 import { createLogger } from '../../providers/logger';
+import { completeAuthAssistanceForUser } from '../../providers/authAssistanceCompletion';
 import { logJson } from '../../utils/log';
 
 const log = createLogger('Attention');
@@ -13,6 +14,11 @@ export class NotFoundError extends Error {
   }
 }
 export class ForbiddenError extends Error {
+  constructor(msg: string) {
+    super(msg);
+  }
+}
+export class BadRequestError extends Error {
   constructor(msg: string) {
     super(msg);
   }
@@ -114,6 +120,16 @@ export async function respond(id: string, userId: string, data: RespondInput) {
   const request = await repo.findById(id);
   if (request === null) throw new NotFoundError('Attention request not found');
   if (request.userId !== userId) throw new ForbiddenError('Not authorized');
+
+  if (request.authAssistance !== null) {
+    const result = await completeAuthAssistanceForUser(id, userId);
+    if (result.status === 'not_found') throw new NotFoundError('Attention request not found');
+    if (result.status === 'forbidden') throw new ForbiddenError('Not authorized');
+    if (result.status === 'missing_steel_context') {
+      throw new BadRequestError('Steel context is not available for this live_view request');
+    }
+    return { success: true, request_id: id };
+  }
 
   await repo.updateResponse(id, data.response);
   await signalWorkflow(request.workflowId, request.agentId, id, data.response);

@@ -30,6 +30,7 @@ from providers.rose.pools import PoolSpec
 from providers.rose.streaming import parse_responses_sse
 from providers.rose.transport import get_error_body, post_codex_stream
 from providers.rose.types import GptAuthContext, StreamChunk
+from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 
 logger = structlog.get_logger()
 
@@ -290,7 +291,15 @@ def _build_instructions(messages: List[Dict[str, Any]]) -> Optional[str]:
         if msg.get("role") == "system"
     ]
     text = "\n\n".join(p for p in parts if p)
-    return text or None
+    if not text:
+        return None
+    if SYSTEM_PROMPT_DYNAMIC_BOUNDARY not in text:
+        return text
+    return "\n\n".join(
+        part.strip()
+        for part in text.split(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
+        if part.strip()
+    ) or None
 
 
 def _build_prompt_cache_key(

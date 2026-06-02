@@ -82,6 +82,7 @@ export const createAgentSchema = z.object({
   bus_id: z.string().uuid().optional(), // Optional: shared bus channel for sub-agent tree updates
   max_iterations: z.number().int().min(1).optional(), // Optional: step limit for execute phase (sub-agents use 25)
   price_limit_cents: z.number().int().min(1).optional(), // Price limit in cents (default 100 = $1.00)
+  write_lock_enabled: z.boolean().optional(), // Write lock for browser agent actions
   // Verifier is now optional and schema-driven only - the only per-agent
   // signal is the response_schema; type is fixed to FLOAT_LLM_JUDGE.
   verifier: z

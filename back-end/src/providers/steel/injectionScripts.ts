@@ -232,7 +232,6 @@ export function buildFingerprintScript(fp: FingerprintData): string {
                 }
               } catch (e) {}
 
-              log.info('[Fingerprint] ✅ Comprehensive fingerprint spoofing injected');
             })();
   `;
 }

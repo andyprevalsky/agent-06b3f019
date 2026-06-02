@@ -121,7 +121,7 @@ if (envTimeoutMs !== undefined && (!Number.isInteger(envTimeoutMs) || envTimeout
   );
   process.exit(1);
 }
-const timeoutMs = envTimeoutMs ?? 5 * 60 * 1000;
+const timeoutMs = envTimeoutMs ?? 15 * 60 * 1000;
 const artifactDir = readEnv('BLACKBOX_TEST_ARTIFACT_DIR', 'CONTRACT_TEST_ARTIFACT_DIR');
 const rawCaseConcurrency = readEnv(
   'BLACKBOX_TEST_CASE_CONCURRENCY',

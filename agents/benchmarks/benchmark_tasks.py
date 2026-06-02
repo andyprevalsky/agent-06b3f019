@@ -11,7 +11,6 @@ class BenchmarkTask:
     name: str
     title: str
     prompt: str
-    eval_prompt: str
     timeout_seconds: int
     is_chat_mode: bool
     expected_tools: List[str]
@@ -26,11 +25,12 @@ class BenchmarkTask:
     row_start: Optional[int] = None  # Slice CSV attachments starting at this 1-indexed data row
     row_end: Optional[int] = None    # Slice CSV attachments ending at this 1-indexed data row (inclusive)
     expected_approval_count: Optional[int] = None  # Exact number of approvals expected (used with count_only)
+    expected_attention_kind: Optional[str] = None  # metadata.attentionKind expected for approval-style tasks
     min_agent_count: Optional[int] = None  # Minimum total agents in tree (root + sub-agents)
     expected_tool_counts: Optional[dict] = None  # Exact tool call counts across entire agent tree (toolName → count)
     min_tool_counts: Optional[dict] = None  # Minimum tool call counts across entire agent tree (toolName → min count)
     forbidden_tools: List[str] = field(default_factory=list)  # Tool names that must not be called
-    sub_agent_count: Optional[int] = None  # Default fan-out for load-test style tasks; substitutes {n} in prompt/eval_prompt
+    sub_agent_count: Optional[int] = None  # Default fan-out for load-test style tasks; substitutes {n} in prompt
 
 
 _TASKS_FILE = os.path.join(os.path.dirname(__file__), "tasks.json")
@@ -89,19 +89,16 @@ def _load_tasks() -> List[BenchmarkTask]:
 
 
 def apply_sub_agent_count(task: BenchmarkTask, n: int) -> None:
-    """Substitute count placeholders in prompt + eval_prompt with the chosen count.
+    """Substitute count placeholders in prompt with the chosen count.
 
     Caches the original templates on the task so repeat calls (e.g. CLI override
     after JSON load already substituted) work correctly.
     """
     prompt_tpl = getattr(task, "_prompt_template", None) or task.prompt
-    eval_tpl = getattr(task, "_eval_prompt_template", None) or task.eval_prompt
     expected_sum = sum((i * i) + (i * 3) + 7 for i in range(1, n + 1))
     task._prompt_template = prompt_tpl
-    task._eval_prompt_template = eval_tpl
     task.sub_agent_count = n
     task.prompt = prompt_tpl.replace("{n}", str(n)).replace("{expected_sum}", str(expected_sum))
-    task.eval_prompt = eval_tpl.replace("{n}", str(n)).replace("{expected_sum}", str(expected_sum))
 
 
 _cached_tasks: Optional[List[BenchmarkTask]] = None

@@ -12,7 +12,7 @@
  * RESPONDING TO REQUEST:
  * [IDLE] <-- actionRequestId: null
  *     |
- *     | (click Accept/Skip/Reject)
+ *     | (click Accept/Skip/Reject/Authentication Complete)
  *     v
  * [PENDING_ACTION] <-- loading: true
  *     |

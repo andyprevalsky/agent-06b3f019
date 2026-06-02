@@ -7,6 +7,8 @@ import { prisma } from '../database';
 import { logJson } from '../../utils/log';
 import { type ProxyGeoLocation, DEFAULT_GEOLOCATION } from '../geoip';
 import { SteelRateLimitError, type FingerprintData, log } from './types';
+import { createLocalBrowserSession, validateSessionConnection } from './sessionConnection';
+export { resumeSession } from './sessionResume';
 
 // Validate required environment variables
 if (!process.env.STEEL_API_KEY) {
@@ -18,97 +20,135 @@ export const steel = new Steel({
 });
 
 // Max retries when session validation fails
-const MAX_SESSION_RETRIES = 3;
-const SESSION_VALIDATION_TIMEOUT = 10000; // 10 seconds
+export const MAX_SESSION_RETRIES = 3;
 
-// WebSocket connection retry config
-const WS_CONNECTION_RETRIES = 3;
-const WS_BACKOFF_DELAYS = [100, 400, 800]; // ms
+const benchmarkAnonProfilesByAgent = new Map<string, string>();
+
+export function envEnabled(name: string, defaultValue = true): boolean {
+  const raw = process.env[name];
+  if (raw === undefined) return defaultValue;
+  return !['0', 'false', 'no', 'off', 'disabled'].includes(raw.trim().toLowerCase());
+}
+
+function benchmarkAnonSteelProfileEnabled(): boolean {
+  return ['1', 'true', 'yes'].includes(
+    (process.env.BENCHMARK_ANON_STEEL_PROFILE ?? '').trim().toLowerCase()
+  );
+}
+
+export function resolveSteelProfileForSession(
+  agentId: string | null,
+  persistedProfileId: string | null
+) {
+  if (!envEnabled('BROWSER_AGENT_STEEL_PROFILE_ENABLED', true)) {
+    return {
+      profileId: undefined,
+      profileSource: 'disabled',
+    } as const;
+  }
+
+  if (!benchmarkAnonSteelProfileEnabled()) {
+    return {
+      profileId: persistedProfileId ?? undefined,
+      profileSource: persistedProfileId ? 'user_persistent' : 'new_user_persistent',
+    } as const;
+  }
+
+  const benchmarkProfileId =
+    agentId === null ? undefined : benchmarkAnonProfilesByAgent.get(agentId);
+  return {
+    profileId: benchmarkProfileId,
+    profileSource: benchmarkProfileId ? 'benchmark_anon_persistent' : 'benchmark_anon_fresh',
+  } as const;
+}
+
+export function rememberBenchmarkAnonSteelProfile(
+  agentId: string | null,
+  profileId: string | null | undefined
+) {
+  if (agentId === null || !benchmarkAnonSteelProfileEnabled() || !profileId) return;
+  if (!benchmarkAnonProfilesByAgent.has(agentId)) {
+    benchmarkAnonProfilesByAgent.set(agentId, profileId);
+    log.info(`  🧪 Captured benchmark anon Steel profileId for agent ${agentId}: ${profileId}`);
+  }
+}
 
 interface SteelSessionResult {
   id: string;
   debugUrl: string;
   profileId?: string | null;
+  proxySource?: string | null;
 }
 
-/**
- * Sleep helper for backoff delays
- */
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+interface SteelSessionHealth {
+  sessionId: string;
+  status: string | null;
+  createdAt: string | null;
+  timeoutMs: number | null;
+  expiresAt: string | null;
+  ttlMs: number | null;
+  profileId: string | null;
 }
 
-/**
- * Validate that a Steel session's WebSocket connection actually works.
- * This catches cases where Steel.dev returns a session but the connection is broken.
- * Retries with exponential backoff: 100ms, 400ms, 800ms
- *
- * @param wsUrl - The CDP WebSocket URL to test
- * @returns true if connection works, false otherwise
- */
-async function validateSessionConnection(wsUrl: string): Promise<boolean> {
-  const { chromium } = await import('playwright');
+interface SteelSessionCookieSummary {
+  sessionId: string;
+  authRealm: string;
+  cookieCount: number;
+  checkedAt: string;
+}
 
-  log.info(`  🔍 Validating session connection (up to ${WS_CONNECTION_RETRIES} attempts)...`);
+type SteelProxyConfig =
+  | false
+  | { server: string }
+  | {
+      geolocation: {
+        country: string;
+        state?: string;
+        city?: string;
+      };
+    };
 
-  // eslint-disable-next-line no-restricted-syntax -- CDP connection validation manages browser object lifecycle (connect/close) per attempt
-  for (let attempt = 1; attempt <= WS_CONNECTION_RETRIES; attempt++) {
-    let browser;
+type SteelProxySettings = {
+  config: SteelProxyConfig;
+  source: 'none' | 'steel' | 'byop';
+};
 
-    try {
-      log.info(`    [WS] Attempt ${attempt}/${WS_CONNECTION_RETRIES}: Connecting to CDP...`);
-
-      // Try to connect with a timeout
-      browser = await Promise.race([
-        chromium.connectOverCDP(wsUrl),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('Connection timeout')), SESSION_VALIDATION_TIMEOUT)
-        ),
-      ]);
-
-      // Check that we can access the browser context
-      const contexts = browser.contexts();
-      if (!contexts || contexts.length === 0) {
-        log.info(
-          `    [WS] Attempt ${attempt}/${WS_CONNECTION_RETRIES}: ❌ No browser contexts available`
-        );
-        await browser.close().catch(() => {});
-
-        if (attempt < WS_CONNECTION_RETRIES) {
-          const delay = WS_BACKOFF_DELAYS[attempt - 1];
-          log.info(`    [WS] Retrying in ${delay}ms...`);
-          await sleep(delay);
-          continue;
-        }
-        return false;
-      }
-
-      // Try to get pages - this confirms the connection is working
-      const pages = contexts[0].pages();
-      log.info(
-        `    [WS] Attempt ${attempt}/${WS_CONNECTION_RETRIES}: ✅ Connected (${contexts.length} context(s), ${pages.length} page(s))`
-      );
-
-      await browser.close().catch(() => {});
-      return true;
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
-      log.info(`    [WS] Attempt ${attempt}/${WS_CONNECTION_RETRIES}: ❌ ${errorMsg}`);
-
-      if (browser) {
-        await browser.close().catch(() => {});
-      }
-
-      if (attempt < WS_CONNECTION_RETRIES) {
-        const delay = WS_BACKOFF_DELAYS[attempt - 1];
-        log.info(`    [WS] Retrying in ${delay}ms...`);
-        await sleep(delay);
-      }
+function redactProxyServerForLog(server: string): string {
+  try {
+    const url = new URL(server);
+    if (url.username || url.password) {
+      url.username = '***';
+      url.password = '***';
     }
+    return url.toString();
+  } catch {
+    return '<invalid proxy URL>';
+  }
+}
+
+export function buildSteelProxySettings(geolocation: ProxyGeoLocation): SteelProxySettings {
+  const byopProxyServer = process.env.STEEL_PROXY_SERVER?.trim();
+  if (byopProxyServer) {
+    log.info(`  Using BYOP proxy server: ${redactProxyServerForLog(byopProxyServer)}`);
+    return { config: { server: byopProxyServer }, source: 'byop' };
   }
 
-  log.info(`  ❌ Session validation failed after ${WS_CONNECTION_RETRIES} attempts`);
-  return false;
+  const useSteelProxy = envEnabled('BROWSER_AGENT_STEEL_PROXY_ENABLED', true);
+  if (!useSteelProxy) {
+    return { config: false, source: 'none' };
+  }
+
+  return {
+    config: {
+      geolocation: {
+        country: geolocation.country,
+        // Steel only supports state for US proxies
+        ...(geolocation.country === 'US' && geolocation.state && { state: geolocation.state }),
+        ...(geolocation.city && { city: geolocation.city }),
+      },
+    },
+    source: 'steel',
+  };
 }
 
 /**
@@ -163,7 +203,16 @@ export async function createSessionWithContext(
   agentId: string,
   geolocation: ProxyGeoLocation = DEFAULT_GEOLOCATION,
   startUrl?: string
-): Promise<{ sessionId: string; debugUrl: string; taskId: string; wsUrl: string }> {
+): Promise<{
+  sessionId: string;
+  debugUrl: string;
+  taskId: string;
+  wsUrl: string;
+  proxySource: string;
+  proxyLocation: ProxyGeoLocation;
+  steelProfileId: string | null;
+  profileSource: string;
+}> {
   log.info(`Creating Steel browser session for context ${dbContextId}...`);
   log.info(
     `  Proxy geolocation: ${geolocation.city}, ${geolocation.state}, ${geolocation.country}`
@@ -188,6 +237,9 @@ export async function createSessionWithContext(
     log.info(`  Using user's fingerprint User-Agent: ${userAgent.substring(0, 60)}...`);
   }
 
+  const localSession = await createLocalBrowserSession(dbContextId, agentId, startUrl);
+  if (localSession) return localSession;
+
   let lastError: Error | null = null;
 
   for (let attempt = 1; attempt <= MAX_SESSION_RETRIES; attempt++) {
@@ -198,19 +250,20 @@ export async function createSessionWithContext(
       // Steel's headful mode has ~91px chrome (toolbar). To get 1280x800 content area:
       // - Width: 1280 + 8 = 1288 (fine-tuned: was 1303→1295, need -15)
       // - Height: 800 + 91 = 891 (accounts for browser toolbar) ✓ working
+      const proxySettings = buildSteelProxySettings(geolocation);
+      const profile = resolveSteelProfileForSession(agentId, dbContext.contextId);
       const session = (await steel.sessions.create({
-        profileId: dbContext.contextId ?? undefined, // Use existing profile if available
-        persistProfile: true, // Auto-persist browser state to profile on session close
-        userAgent: userAgent || undefined, // Use user's real User-Agent from fingerprint
-        useProxy: {
-          geolocation: {
-            country: geolocation.country,
-            // Steel only supports state for US proxies
-            ...(geolocation.country === 'US' && geolocation.state && { state: geolocation.state }),
-            ...(geolocation.city && { city: geolocation.city }),
-          },
-        }, // Residential proxy based on user's location
-        solveCaptcha: true, // Auto-solve CAPTCHAs
+        profileId: profile.profileId, // Use existing profile if available
+        persistProfile: envEnabled('BROWSER_AGENT_STEEL_PROFILE_ENABLED', true), // Auto-persist browser state to profile on session close
+        userAgent:
+          userAgent && envEnabled('BROWSER_AGENT_STEEL_USER_AGENT_ENABLED', true)
+            ? userAgent
+            : undefined, // Use user's real User-Agent from fingerprint
+        useProxy: proxySettings.config,
+        solveCaptcha: envEnabled('BROWSER_AGENT_STEEL_CAPTCHA_SOLVER_ENABLED', true), // Auto-solve CAPTCHAs
+        debugConfig: {
+          systemCursor: false, // Browser-agent recordings render the Rose cursor overlay from cursor events.
+        },
         stealthConfig: {
           humanizeInteractions: false, // Disabled - we handle humanization with BrowserHumanizer
           skipFingerprintInjection: true, // We inject user's real fingerprint ourselves
@@ -223,6 +276,7 @@ export async function createSessionWithContext(
       })) as SteelSessionResult;
 
       log.info(`Steel Session: ${logJson(session)}`);
+      rememberBenchmarkAnonSteelProfile(agentId, session.profileId);
 
       // Steel provides debugUrl for unauthenticated live viewing (anyone with URL can view)
       // sessionViewerUrl requires Steel dashboard login - don't use that
@@ -251,7 +305,11 @@ export async function createSessionWithContext(
       // If this was the first session for the user, claim the provider profile
       // atomically. Concurrent first sessions can each get a new Steel profile;
       // only one should become the persistent profile for future sessions.
-      if (session.profileId && dbContext.contextId === null) {
+      if (benchmarkAnonSteelProfileEnabled()) {
+        log.info(
+          `  🧪 Benchmark anon profile mode active; not writing Steel profileId ${session.profileId || '(pending)'} to BrowserContext`
+        );
+      } else if (session.profileId && dbContext.contextId === null) {
         log.info(`  📝 Claiming new Steel profileId: ${session.profileId}`);
         const claim = await prisma.browserContext.updateMany({
           where: { id: dbContextId, contextId: null },
@@ -312,6 +370,10 @@ export async function createSessionWithContext(
         debugUrl,
         wsUrl,
         taskId: dbSession.id,
+        proxySource: session.proxySource ?? proxySettings.source,
+        proxyLocation: geolocation,
+        steelProfileId: session.profileId ?? null,
+        profileSource: profile.profileSource,
       };
     } catch (error) {
       // Steel 429 = concurrent session limit. Don't retry locally — bubble up so agent can backoff.
@@ -385,167 +447,6 @@ export async function closeSession(
  * @param taskId - The stable task ID (BrowserSession.id)
  * @returns Session info including saved URL to navigate back to
  */
-export async function resumeSession(
-  taskId: string
-): Promise<{ debugUrl: string; sessionId: string; wsUrl: string; savedUrl?: string }> {
-  log.info(`Resuming browser task ${taskId}...`);
-
-  // Look up the old session to get context/profile
-  const oldSession = await prisma.browserSession.findUnique({
-    where: { id: taskId },
-    include: { context: true },
-  });
-
-  if (!oldSession) {
-    throw new Error(`Browser task not found: ${taskId}`);
-  }
-
-  log.info(`  Found old session with currentUrl: ${oldSession.currentUrl || 'NONE'}`);
-
-  // Look up agent's proxy geolocation
-  let proxyGeo = DEFAULT_GEOLOCATION;
-  if (oldSession.agentId) {
-    const agent = await prisma.agent.findUnique({
-      where: { id: oldSession.agentId },
-      select: { proxyCountry: true, proxyState: true, proxyCity: true },
-    });
-    if (agent?.proxyCountry) {
-      proxyGeo = {
-        country: agent.proxyCountry,
-        ...(agent.proxyState && { state: agent.proxyState }),
-        ...(agent.proxyCity && { city: agent.proxyCity }),
-      };
-    }
-  }
-  log.info(`  Using proxy location: ${proxyGeo.city}, ${proxyGeo.state}, ${proxyGeo.country}`);
-
-  // Fetch user's fingerprint to get their User-Agent for Steel session
-  const fingerprint = await prisma.integration.findUnique({
-    where: { userId_name: { userId: oldSession.context.userId, name: 'browser_fingerprint' } },
-  });
-  const fp = (fingerprint?.config as { fingerprint?: FingerprintData } | null)?.fingerprint;
-  const userAgent = fp?.navigator?.userAgent;
-  if (userAgent) {
-    log.info(`  Using user's fingerprint User-Agent: ${userAgent.substring(0, 60)}...`);
-  }
-
-  let lastError: Error | null = null;
-
-  for (let attempt = 1; attempt <= MAX_SESSION_RETRIES; attempt++) {
-    log.info(`  📡 Resume session attempt ${attempt}/${MAX_SESSION_RETRIES}...`);
-
-    try {
-      // Create NEW Steel session with same profile
-      // Dimensions adjusted for browser chrome (see createSessionWithContext comments)
-      const session = await steel.sessions.create({
-        profileId: oldSession.context.contextId ?? undefined,
-        userAgent: userAgent || undefined, // Use user's real User-Agent from fingerprint
-        useProxy: {
-          geolocation: {
-            country: proxyGeo.country,
-            // Steel only supports state for US proxies
-            ...(proxyGeo.country === 'US' && proxyGeo.state && { state: proxyGeo.state }),
-            ...(proxyGeo.city && { city: proxyGeo.city }),
-          },
-        }, // Residential proxy based on user's location
-        solveCaptcha: true,
-        stealthConfig: {
-          humanizeInteractions: false, // Disabled - we handle humanization with BrowserHumanizer
-          skipFingerprintInjection: true, // We inject user's real fingerprint ourselves
-        },
-        timeout: 900000, // 15 minutes (hobby plan max)
-        dimensions: {
-          width: 1288, // 1280 + 8 for borders → 1280 viewport
-          height: 891, // 800 + 91 for browser chrome → 800 viewport
-        },
-      });
-
-      log.info(`  ✓ Created new Steel session: ${session.id}`);
-
-      // Use debugUrl for unauthenticated live viewing (not sessionViewerUrl which requires login)
-      const debugUrl = `${session.debugUrl}?interactive=false`;
-      // IMPORTANT: Per Steel docs, CDP connection URL must include apiKey parameter
-      const wsUrl = `wss://connect.steel.dev?apiKey=${process.env.STEEL_API_KEY}&sessionId=${session.id}`;
-
-      // VALIDATE: Test that the WebSocket connection actually works before proceeding
-      const isValid = await validateSessionConnection(wsUrl);
-
-      if (!isValid) {
-        log.info(`  ⚠️ Session ${session.id} failed validation, releasing...`);
-        try {
-          await steel.sessions.release(session.id);
-        } catch (releaseErr) {
-          log.info(`  ⚠️ Failed to release invalid session: ${releaseErr}`);
-        }
-        lastError = new Error(`Session validation failed on attempt ${attempt}`);
-        continue; // Retry
-      }
-
-      // Navigate to saved URL if available
-      if (oldSession.currentUrl) {
-        log.info(`  📍 Navigating session to saved URL: ${oldSession.currentUrl}`);
-        try {
-          const { chromium } = await import('playwright');
-          const browser = await chromium.connectOverCDP(wsUrl);
-          const context = browser.contexts()[0];
-          const page = context.pages()[0];
-          await page.goto(oldSession.currentUrl, { waitUntil: 'domcontentloaded', timeout: 10000 });
-          log.info(`  ✅ Navigation complete`);
-          await browser.close();
-        } catch (navError) {
-          log.error('Failed to navigate to saved URL', {
-            error: navError instanceof Error ? navError.message : String(navError),
-          });
-        }
-      }
-
-      // Update DB record with NEW sessionId, debugUrl, and wsUrl
-      await prisma.browserSession.update({
-        where: { id: taskId },
-        data: {
-          sessionId: session.id,
-          debugUrl,
-          wsUrl,
-          status: 'ACTIVE',
-          closedAt: null,
-        },
-      });
-
-      log.info(`✓ Task resumed with new session`);
-      log.info(`  Task ID (stable): ${taskId}`);
-      log.info(`  New session ID: ${session.id}`);
-      log.info(`  Profile ID: ${oldSession.context.contextId}`);
-      log.info(`  New debug URL: ${debugUrl}`);
-      log.info(`  CDP WebSocket URL: ${wsUrl}`);
-
-      return {
-        debugUrl,
-        sessionId: session.id,
-        wsUrl,
-        savedUrl: oldSession.currentUrl || oldSession.startUrl || undefined,
-      };
-    } catch (error) {
-      const status =
-        (error as Record<string, unknown>)?.status ??
-        (error as Record<string, unknown>)?.statusCode;
-      if (status === 429) {
-        const msg = error instanceof Error ? error.message : 'Steel session rate limit exceeded';
-        log.info(`  ⚠️ Steel rate limit (429): ${msg}`);
-        throw new SteelRateLimitError(msg);
-      }
-      log.info(
-        `  ❌ Attempt ${attempt} failed: ${error instanceof Error ? error.message : 'Unknown error'}`
-      );
-      lastError = error instanceof Error ? error : new Error('Unknown error');
-    }
-  }
-
-  // All retries exhausted
-  throw new Error(
-    `Failed to resume session after ${MAX_SESSION_RETRIES} attempts: ${lastError?.message}`
-  );
-}
-
 /**
  * Get session info from database.
  */
@@ -554,6 +455,54 @@ export async function getSession(sessionId: string) {
     where: { sessionId },
     include: { context: true },
   });
+}
+
+export async function getSteelSessionHealth(sessionId: string): Promise<SteelSessionHealth> {
+  const remote = (await steel.sessions.retrieve(sessionId)) as {
+    id?: string;
+    status?: string;
+    createdAt?: string;
+    timeout?: number;
+    profileId?: string | null;
+  };
+  const createdAtMs =
+    remote.createdAt !== undefined ? new Date(remote.createdAt).getTime() : Number.NaN;
+  const timeoutMs = typeof remote.timeout === 'number' ? remote.timeout : null;
+  const expiresAtMs =
+    Number.isFinite(createdAtMs) && timeoutMs !== null ? createdAtMs + timeoutMs : Number.NaN;
+  return {
+    sessionId: remote.id ?? sessionId,
+    status: remote.status ?? null,
+    createdAt: remote.createdAt ?? null,
+    timeoutMs,
+    expiresAt: Number.isFinite(expiresAtMs) ? new Date(expiresAtMs).toISOString() : null,
+    ttlMs: Number.isFinite(expiresAtMs) ? Math.max(0, expiresAtMs - Date.now()) : null,
+    profileId: remote.profileId ?? null,
+  };
+}
+
+export async function getSteelSessionCookieSummary(
+  sessionId: string,
+  authRealm: string
+): Promise<SteelSessionCookieSummary> {
+  const context = (await steel.sessions.context(sessionId)) as {
+    cookies?: Array<{ domain?: string; expires?: number }>;
+  };
+  const normalizedRealm = authRealm.toLowerCase().replace(/^\./, '');
+  const nowSeconds = Date.now() / 1000;
+  const cookieCount = (context.cookies ?? []).filter((cookie) => {
+    const domain = (cookie.domain ?? '').toLowerCase().replace(/^\./, '');
+    const domainMatches = domain === normalizedRealm || domain.endsWith(`.${normalizedRealm}`);
+    const expires = cookie.expires;
+    const live = expires === undefined || expires <= 0 || expires > nowSeconds;
+    return domainMatches && live;
+  }).length;
+  return {
+    sessionId,
+    authRealm: normalizedRealm,
+    cookieCount,
+    checkedAt: new Date().toISOString(),
+  };
 }
 
 /**

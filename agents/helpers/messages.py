@@ -347,6 +347,60 @@ async def stream_attention_event(
         logger.debug(f"Attention stream error (non-fatal): {str(e)}")
 
 
+async def stream_browser_cursor(
+    agent_id: str,
+    task_id: str,
+    x: int,
+    y: int,
+    sequence: int = 0,
+    timestamp_ms: int | None = None,
+) -> None:
+    """
+    Broadcast browser cursor position DIRECTLY to Supabase Realtime.
+
+    This is intentionally ephemeral like ASSISTANT_STREAM/TOOL_STREAM: the durable
+    browser action messages still carry coordinates for replay/fallback, while this
+    stream keeps the live React cursor synced to synthesized mouse motion.
+    """
+    try:
+        config = load_config()
+        broadcast_url = f"{config.supabase.url}/realtime/v1/api/broadcast"
+        record = {
+            "agentId": agent_id,
+            "taskId": task_id,
+            "x": int(x),
+            "y": int(y),
+            "sequence": sequence,
+        }
+        if timestamp_ms is not None:
+            record["timestampMs"] = timestamp_ms
+
+        payload = {
+            "messages": [{
+                "topic": f"agent:{agent_id}",
+                "event": "BROWSER_CURSOR",
+                "payload": {"record": record},
+                "private": _is_production
+            }]
+        }
+        broadcast_key = config.supabase.service_role_key or config.supabase.anon_key
+        client = _get_broadcast_client()
+        response = await client.post(
+            broadcast_url,
+            json=payload,
+            headers={
+                "apikey": broadcast_key,
+                "Authorization": f"Bearer {broadcast_key}",
+                "Content-Type": "application/json"
+            }
+        )
+
+        if response.status_code not in (200, 202):
+            logger.debug(f"Browser cursor stream broadcast failed: status={response.status_code}")
+    except Exception as e:
+        logger.debug(f"Browser cursor stream error (non-fatal): {str(e)}")
+
+
 async def broadcast_to_bus(bus_id: str, payload: Dict[str, Any]) -> None:
     """
     Broadcast agent state update to the shared bus channel.

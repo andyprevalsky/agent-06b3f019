@@ -55,7 +55,7 @@ from providers.rose.claude_auth import (
     build_anthropic_body,
     claude_auth_complete,
 )
-from providers.rose.client import _cache_input_accounting
+from providers.rose.client import _cache_input_accounting, _messages_without_internal_system_boundaries
 from providers.rose.gpt_auth import build_codex_responses_body
 from providers.rose.schema import (
     build_anthropic_tools_from_response_model,
@@ -259,6 +259,46 @@ def test_transform_messages_for_anthropic_splits_on_boundary():
     assert static_sys == "static instructions"
     assert dynamic_sys == "Current time: April 28"
     assert len(msgs) == 1
+
+
+def test_transform_messages_for_anthropic_preserves_repeated_boundaries_for_cache_blocks():
+    from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+
+    combined = (
+        f"static instructions{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
+        f"Current time: April 28{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
+    )
+    static_sys, dynamic_sys, msgs = transform_messages_for_anthropic(
+        [
+            {"role": "system", "content": combined},
+            {"role": "user", "content": "hi"},
+        ]
+    )
+    assert static_sys == "static instructions"
+    assert dynamic_sys == f"Current time: April 28{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
+    assert "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__" not in static_sys
+    assert len(msgs) == 1
+
+
+def test_browser_dump_messages_split_internal_system_boundary():
+    from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+
+    messages = [
+        {
+            "role": "system",
+            "content": f"static rules{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}dynamic rules{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}",
+        },
+        {"role": "user", "content": "hello"},
+    ]
+
+    cleaned = _messages_without_internal_system_boundaries(messages)
+
+    assert cleaned == [
+        {"role": "system", "content": "static rules"},
+        {"role": "system", "content": "dynamic rules"},
+        {"role": "user", "content": "hello"},
+    ]
+    assert "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__" not in json.dumps(cleaned)
 
 
 def test_transform_messages_for_anthropic_strips_trailing_assistant():
@@ -799,6 +839,22 @@ def test_transform_messages_for_openai_multi_boundary_system_blocks_are_cached()
     assert out[1] == {"role": "user", "content": "hello"}
 
 
+def test_transform_messages_for_openai_strips_boundary_from_later_system_messages():
+    from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+
+    msgs = [
+        {"role": "system", "content": "static instructions"},
+        {"role": "system", "content": f"{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}dynamic instructions"},
+        {"role": "user", "content": "hello"},
+    ]
+    out = transform_messages_for_openai(msgs)
+    assert out[0]["content"] == [
+        {"type": "text", "text": "static instructions", "cache_control": {"type": "ephemeral"}}
+    ]
+    assert out[1]["content"] == [{"type": "text", "text": "dynamic instructions"}]
+    assert SYSTEM_PROMPT_DYNAMIC_BOUNDARY not in json.dumps(out)
+
+
 # =====================================================================
 # claude_auth — body assembly
 # =====================================================================
@@ -882,6 +938,7 @@ def test_build_anthropic_body_multi_boundary_system_blocks_are_cached():
     sys = body["system"]
     assert [b["text"] for b in sys[2:]] == ["static instructions", "user context", "phase prompt"]
     assert all(b["cache_control"] == {"type": "ephemeral", "scope": "global"} for b in sys[2:])
+    assert "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__" not in json.dumps(body)
 
 
 def test_build_anthropic_body_message_cache_breakpoint():
@@ -1731,6 +1788,7 @@ async def test_parse_responses_sse_content_and_usage():
     assert usage["completion_tokens"] == 3
     assert usage["total_tokens"] == 10
     assert usage["cache_read_input_tokens"] == 2
+    assert usage["cache_creation_input_tokens"] == 5
 
 
 async def test_parse_responses_sse_ignores_deprecated_idle_timeout_before_first_line():
@@ -1930,6 +1988,21 @@ def test_build_codex_responses_body_contract():
     )
     assert no_system_body["instructions"] == "You are a helpful assistant."
     assert "reasoning" not in no_system_body
+    from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+
+    split_system_body = build_codex_responses_body(
+        pool_spec=pool,
+        messages=[
+            {
+                "role": "system",
+                "content": f"static rules{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}dynamic rules",
+            },
+            {"role": "user", "content": "hi"},
+        ],
+        request_id="split-system",
+    )
+    assert split_system_body["instructions"] == "static rules\n\ndynamic rules"
+    assert "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__" not in split_system_body["instructions"]
     max_effort_body = build_codex_responses_body(
         pool_spec=pool,
         messages=[{"role": "user", "content": "hi"}],
@@ -3109,7 +3182,7 @@ async def test_claude_auth_stream_reports_cache_hit_rate():
 
 def test_build_anthropic_body_cache_structure_from_real_prompt():
     """build_system_prompt output produces correct cache structure when passed
-    through build_anthropic_body: main+user-context and phase blocks get
+    through build_anthropic_body: main, user-context, and phase blocks get
     global cache markers, and the last message gets a breakpoint."""
     from utils.prompts import build_system_prompt
 
@@ -3134,19 +3207,23 @@ def test_build_anthropic_body_cache_structure_from_real_prompt():
     )
 
     sys_blocks = body["system"]
-    # identity + disclaimer + main/user context + phase = 4 blocks
-    assert len(sys_blocks) == 4, f"Expected 4 system blocks, got {len(sys_blocks)}"
+    # identity + disclaimer + main + user context + phase = 5 blocks
+    assert len(sys_blocks) == 5, f"Expected 5 system blocks, got {len(sys_blocks)}"
 
-    main_context_block = sys_blocks[2]
-    phase_block = sys_blocks[3]
+    main_block = sys_blocks[2]
+    user_context_block = sys_blocks[3]
+    phase_block = sys_blocks[4]
 
-    for block in (main_context_block, phase_block):
+    for block in (main_block, user_context_block, phase_block):
         assert block["cache_control"] == {"type": "ephemeral", "scope": "global"}
-    assert "You are a Rose Labs Agent" in main_context_block["text"]
-    assert "Andy" in main_context_block["text"]
+    assert "You are a Rose Labs Agent" in main_block["text"]
+    assert "Andy" not in main_block["text"]
+    assert "# User Context" in user_context_block["text"]
+    assert "Andy" in user_context_block["text"]
     assert "# Current Phase" in phase_block["text"]
     # Timestamp is now in message headers, not the system prompt dynamic section
-    assert "Current time:" not in main_context_block["text"]
+    assert "Current time:" not in main_block["text"]
+    assert "Current time:" not in user_context_block["text"]
     assert "Current time:" not in phase_block["text"]
 
     msgs = body["messages"]
@@ -3397,6 +3474,11 @@ async def run_all_tests():
     r.record("transform_block_file_data", test_transform_content_block_file_data_uri)
     r.record("transform_msgs_pulls_system", test_transform_messages_for_anthropic_pulls_system)
     r.record("transform_msgs_splits_boundary", test_transform_messages_for_anthropic_splits_on_boundary)
+    r.record(
+        "transform_msgs_preserves_repeated_boundaries_for_cache",
+        test_transform_messages_for_anthropic_preserves_repeated_boundaries_for_cache_blocks,
+    )
+    r.record("browser_dump_messages_split_boundary", test_browser_dump_messages_split_internal_system_boundary)
     r.record("transform_msgs_strips_trailing", test_transform_messages_for_anthropic_strips_trailing_assistant)
     r.record(
         "transform_msgs_assistant_tool_calls", test_transform_messages_for_anthropic_assistant_tool_calls_to_tool_use
@@ -3440,6 +3522,10 @@ async def run_all_tests():
     r.record(
         "openai_messages_multi_boundary_cached",
         test_transform_messages_for_openai_multi_boundary_system_blocks_are_cached,
+    )
+    r.record(
+        "openai_messages_later_system_boundary_stripped",
+        test_transform_messages_for_openai_strips_boundary_from_later_system_messages,
     )
 
     r.record("anthropic_body_identity_cache", test_build_anthropic_body_identity_and_cache_block)

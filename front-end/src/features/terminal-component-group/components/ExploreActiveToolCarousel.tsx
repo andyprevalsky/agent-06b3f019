@@ -103,6 +103,7 @@ function CarouselItemContent({
     resetCountFromZero ? 0 : undefined,
   );
   const elapsedSeconds = useElapsedSeconds(displayStartedAtMs ?? item.startedAtMs);
+  const displayElapsedSeconds = elapsedSeconds < 0.2 ? 0 : elapsedSeconds;
 
   if (item.kind === 'thinking') {
     return (
@@ -112,7 +113,7 @@ function CarouselItemContent({
           textClassName,
         )}
       >
-        {elapsedSeconds.toFixed(1)}s<span className="mx-1 text-muted-foreground/35">·</span>
+        {displayElapsedSeconds.toFixed(1)}s<span className="mx-1 text-muted-foreground/35">·</span>
         <ArrowDown
           aria-hidden="true"
           className="mr-0.5 h-2.5 w-2.5 flex-shrink-0 text-muted-foreground/35"

@@ -36,6 +36,8 @@ export { deduplicateToolMessages } from './hooks/deduplicateToolMessages';
 // ── Imperative API functions (used by components in event handlers) ───────
 export {
   respondToAttentionRequest,
+  completeAuthAssistanceRequest,
+  refreshAuthAssistanceSession,
   rejectAttentionRequest,
   skipAttentionRequest,
   getAttentionRequests,

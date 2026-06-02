@@ -77,6 +77,33 @@ def test_worker_pids_for_workspace_filters_short_macos_commands_by_cwd():
     assert _worker_pids_for_workspace(ps_output, Path("/Users/me/workspaces/current"), Proc) == ["111"]
 
 
+def test_worker_queue_preflight_accepts_aligned_worker_among_other_local_queues():
+    """Queue preflight must not require killing sibling benchmark workers."""
+    import os
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from benchmarks import run_benchmark
+
+    queues = {
+        "111": "navi-agent-tasks-other-local-run",
+        "222": "navi-agent-tasks-nagoya-instagram-rerun2",
+    }
+
+    previous = os.environ.get("CONDUCTOR_WORKSPACE_NAME")
+    os.environ["CONDUCTOR_WORKSPACE_NAME"] = "nagoya-instagram-rerun2"
+    try:
+        with patch("subprocess.run", return_value=SimpleNamespace(stdout="")):
+            with patch.object(run_benchmark, "_worker_pids_for_workspace", return_value=["111", "222"]):
+                with patch.object(run_benchmark, "_read_process_env_var", side_effect=lambda pid, _name: queues[pid]):
+                    run_benchmark._verify_worker_queue_alignment()
+    finally:
+        if previous is None:
+            os.environ.pop("CONDUCTOR_WORKSPACE_NAME", None)
+        else:
+            os.environ["CONDUCTOR_WORKSPACE_NAME"] = previous
+
+
 def test_read_process_env_var_uses_portable_process_environ():
     """Queue preflight can verify env vars on macOS where /proc is unavailable."""
     from benchmarks.run_benchmark import _read_process_env_var
@@ -126,6 +153,401 @@ def test_timeout_default_respects_explicit_floor():
     task = get_task_by_name("outreach-batch")
 
     assert _default_timeout_for_task(task, max_seconds=120) == 600
+
+
+def test_minted_benchmark_cleanup_preserves_cached_agent_identity_by_default():
+    """Repeated live minted-account benchmarks should not buy a fresh AgentPhone number."""
+    import benchmarks.run_benchmark as bench
+
+    queries = []
+    original_run_sql = bench._run_local_victoria_sql
+
+    try:
+        bench._run_local_victoria_sql = lambda sql: queries.append(sql) or "2"
+
+        assert bench._delete_local_minted_accounts_for_user("user-123") == 2
+    finally:
+        bench._run_local_victoria_sql = original_run_sql
+
+    assert len(queries) == 1
+    assert 'DELETE FROM "MintedAccount"' in queries[0]
+    assert 'DELETE FROM "AgentIdentity"' not in queries[0]
+
+
+def test_minted_benchmark_cleanup_can_reset_agent_identity_when_explicit():
+    """First-provisioning benchmark runs can opt into deleting the cached identity."""
+    import benchmarks.run_benchmark as bench
+
+    queries = []
+    original_run_sql = bench._run_local_victoria_sql
+
+    try:
+        bench._run_local_victoria_sql = lambda sql: queries.append(sql) or "1"
+
+        assert (
+            bench._delete_local_minted_accounts_for_user(
+                "user-123", reset_agent_identity=True
+            )
+            == 1
+        )
+    finally:
+        bench._run_local_victoria_sql = original_run_sql
+
+    assert len(queries) == 1
+    assert 'DELETE FROM "MintedAccount"' in queries[0]
+    assert 'DELETE FROM "AgentIdentity"' in queries[0]
+
+
+def test_minted_benchmark_seeds_cached_agent_identity_when_missing():
+    """Fresh local DBs reuse the benchmark AgentMail/AgentPhone instead of re-minting."""
+    import benchmarks.run_benchmark as bench
+
+    queries = []
+    original_run_sql = bench._run_local_victoria_sql
+
+    def fake_sql(sql):
+        queries.append(sql)
+        if 'SELECT 1 FROM "AgentIdentity"' in sql:
+            return ""
+        if 'INSERT INTO "AgentIdentity"' in sql:
+            return "rose.harbor47@mail.roselabs.ai"
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+    try:
+        bench._run_local_victoria_sql = fake_sql
+        seeded = bench._seed_local_benchmark_agent_identity_if_missing("user-123")
+    finally:
+        bench._run_local_victoria_sql = original_run_sql
+
+    assert seeded == "rose.harbor47@mail.roselabs.ai"
+    assert len(queries) == 2
+    assert 'INSERT INTO "AgentIdentity"' in queries[1]
+    assert "rose.harbor47@mail.roselabs.ai" in queries[1]
+    assert "+18159823405" in queries[1]
+    assert '"phoneProvider"' in queries[1]
+    assert "agentphone" in queries[1]
+
+
+def test_minted_benchmark_does_not_seed_cached_agent_identity_when_present():
+    """Existing cached identities remain owned by the local DB."""
+    import benchmarks.run_benchmark as bench
+
+    queries = []
+    original_run_sql = bench._run_local_victoria_sql
+
+    def fake_sql(sql):
+        queries.append(sql)
+        if 'SELECT 1 FROM "AgentIdentity"' in sql:
+            return "1"
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+    try:
+        bench._run_local_victoria_sql = fake_sql
+        assert bench._seed_local_benchmark_agent_identity_if_missing("user-123") is None
+    finally:
+        bench._run_local_victoria_sql = original_run_sql
+
+    assert len(queries) == 1
+    assert 'SELECT 1 FROM "AgentIdentity"' in queries[0]
+
+
+def test_minted_x_benchmark_uses_live_x_default_target():
+    """The X minted-account benchmark points at the real site, not the local Uber fixture."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    import benchmarks.run_benchmark as bench
+
+    task = get_task_by_name("minted-agent-accounts-x")
+
+    assert task.name in bench.MINTED_AGENT_ACCOUNT_TASK_NAMES
+    assert task.prompt == "Make a post on X.com that says, Hello World"
+    assert bench.MINTED_AGENT_ACCOUNT_X_POST_GOAL == task.prompt
+    assert bench._default_minted_target_url("http://localhost:56151", task.name) == "https://x.com"
+    assert bench._auth_realm_from_target_url("https://x.com") == "x.com"
+    assert bench._site_label_from_realm("x.com") == "X"
+
+
+def test_minted_x_signup_evidence_rejects_terminal_phone_blocker():
+    """X benchmark must not treat a minted row alone as account-creation proof."""
+    import benchmarks.run_benchmark as bench
+
+    blocker = (
+        "X forced phone auth. Final DOM showed: "
+        "An unexpected error occurred. Please try again."
+    )
+    success = "Account creation completed and the account is signed in on the home timeline."
+
+    assert bench._x_signup_has_terminal_phone_blocker(blocker) is True
+    assert bench._x_signup_has_account_creation_evidence(blocker) is False
+    assert bench._x_signup_has_terminal_phone_blocker(success) is False
+    assert bench._x_signup_has_account_creation_evidence(success) is True
+
+
+def test_browser_agent_cookie_bundle_bootstrap_upserts_active_bundle_from_cookies():
+    """Amazon auth-assistance bench activates CookieBundle rows from existing local cookies."""
+    import benchmarks.run_benchmark as bench
+
+    queries = []
+    original_run_sql = bench._run_local_victoria_sql
+
+    try:
+        bench._run_local_victoria_sql = lambda sql: queries.append(sql) or "1"
+
+        assert bench._ensure_local_cookie_bundle_for_realm("user-123", "amazon.com") == 1
+    finally:
+        bench._run_local_victoria_sql = original_run_sql
+
+    assert len(queries) == 1
+    assert 'FROM "Cookie"' in queries[0]
+    assert 'INSERT INTO "CookieBundle"' in queries[0]
+    assert 'ON CONFLICT ("userId", "authRealm", "browserSource", "browserProfile") DO UPDATE' in queries[0]
+    assert '"disabledAt" = NULL' in queries[0]
+    assert '"disabledReason" = NULL' in queries[0]
+    assert "amazon.com" in queries[0]
+
+
+def test_browser_agent_cookie_bundle_bootstrap_can_be_skipped_with_env():
+    """Local auth-assistance reruns can intentionally exercise password auth without cookies."""
+    import os
+
+    import benchmarks.run_benchmark as bench
+
+    queries = []
+    original_run_sql = bench._run_local_victoria_sql
+    original_env = os.environ.get("BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP")
+
+    try:
+        bench._run_local_victoria_sql = lambda sql: queries.append(sql) or "1"
+        os.environ["BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP"] = "true"
+
+        assert bench._ensure_local_cookie_bundle_for_realm("user-123", "amazon.com") == 0
+    finally:
+        bench._run_local_victoria_sql = original_run_sql
+        if original_env is None:
+            os.environ.pop("BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP", None)
+        else:
+            os.environ["BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP"] = original_env
+
+    assert queries == []
+
+
+def test_anon_benchmark_mode_disables_saved_auth_material():
+    """--anon should force minted auth benches through fresh account credentials."""
+    import os
+
+    import benchmarks.run_benchmark as bench
+
+    previous_skip = os.environ.get("BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP")
+    previous_clear = os.environ.get("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH")
+    previous_steel_profile = os.environ.get("BENCHMARK_ANON_STEEL_PROFILE")
+    previous_disable_saved_auth = os.environ.get("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH")
+    try:
+        os.environ.pop("BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP", None)
+        os.environ.pop("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH", None)
+        os.environ.pop("BENCHMARK_ANON_STEEL_PROFILE", None)
+        os.environ.pop("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH", None)
+
+        bench._apply_anon_benchmark_mode()
+
+        assert os.environ["BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP"] == "true"
+        assert os.environ["BENCHMARK_MINTED_CLEAR_EXISTING_AUTH"] == "true"
+        assert os.environ["BENCHMARK_ANON_STEEL_PROFILE"] == "true"
+        assert os.environ["BENCHMARK_DISABLE_SAVED_BROWSER_AUTH"] == "true"
+    finally:
+        if previous_skip is None:
+            os.environ.pop("BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP", None)
+        else:
+            os.environ["BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP"] = previous_skip
+        if previous_clear is None:
+            os.environ.pop("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH", None)
+        else:
+            os.environ["BENCHMARK_MINTED_CLEAR_EXISTING_AUTH"] = previous_clear
+        if previous_steel_profile is None:
+            os.environ.pop("BENCHMARK_ANON_STEEL_PROFILE", None)
+        else:
+            os.environ["BENCHMARK_ANON_STEEL_PROFILE"] = previous_steel_profile
+        if previous_disable_saved_auth is None:
+            os.environ.pop("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH", None)
+        else:
+            os.environ["BENCHMARK_DISABLE_SAVED_BROWSER_AUTH"] = previous_disable_saved_auth
+
+
+def test_x_post_prompt_keeps_goal_and_prefers_email_auth():
+    """Fresh X benchmark profiles need explicit guidance away from the fragile phone-first path."""
+    import benchmarks.run_benchmark as bench
+
+    prompt = bench._x_post_prompt()
+
+    assert prompt.startswith("Make a post on X.com that says, Hello World")
+    assert "minted AgentMail email" in prompt
+    assert "Use email instead" in prompt
+    assert "Do not choose the initial 'Continue with phone'" in prompt
+    assert "terminal phone-auth blocker" in prompt
+
+
+def test_browser_agent_cookie_bundle_bootstrap_is_local_only():
+    """Amazon cookie-bundle bootstrap only runs for localhost benchmark targets."""
+    from benchmarks.run_benchmark import _is_local_base_url
+
+    assert _is_local_base_url("http://localhost:55120") is True
+    assert _is_local_base_url("http://127.0.0.1:55120") is True
+    assert _is_local_base_url("https://navi-j9a9.onrender.com") is False
+
+
+async def test_agentmail_cleanup_deletes_only_exact_inboxes():
+    """Minted benchmark cleanup must not sweep unrelated AgentMail inboxes by prefix."""
+    import benchmarks.run_benchmark as bench
+
+    calls = []
+
+    class FakeResponse:
+        status_code = 202
+        text = ""
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, *_args, **_kwargs):
+            raise AssertionError("cleanup should not list AgentMail inboxes")
+
+        async def delete(self, url, *, headers):
+            calls.append((url, headers))
+            return FakeResponse()
+
+    original_client = bench.httpx.AsyncClient
+    original_load_env = bench.load_env_var
+    try:
+        def fake_load_env(name, *_paths):
+            if name == "AGENTMAIL_API_KEY":
+                return "agentmail-key"
+            if name == "AGENTMAIL_BASE_URL":
+                return "https://agentmail.test"
+            return None
+
+        bench.httpx.AsyncClient = FakeClient
+        bench.load_env_var = fake_load_env
+
+        deleted = await bench._delete_agentmail_inboxes_by_email(
+            ["rose.harbor22@agentmail.to", "rose.harbor22@agentmail.to", ""]
+        )
+    finally:
+        bench.httpx.AsyncClient = original_client
+        bench.load_env_var = original_load_env
+
+    assert deleted == 1
+    assert calls == [
+        (
+            "https://agentmail.test/v0/inboxes/rose.harbor22%40agentmail.to",
+            {"Authorization": "Bearer agentmail-key"},
+        )
+    ]
+
+
+async def test_agentmail_uber_welcome_evidence_uses_exact_inbox():
+    """Live Uber minted benchmark can prove account creation from exact AgentMail inbox mail."""
+    import benchmarks.run_benchmark as bench
+
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {
+                "messages": [
+                    {
+                        "subject": "Welcome to Uber",
+                        "from": "Uber <admin@uber.com>",
+                    }
+                ]
+            }
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url, *, params, headers):
+            calls.append((url, params, headers))
+            return FakeResponse()
+
+    original_client = bench.httpx.AsyncClient
+    original_load_env = bench.load_env_var
+    try:
+        def fake_load_env(name, *_paths):
+            if name == "AGENTMAIL_API_KEY":
+                return "agentmail-key"
+            if name == "AGENTMAIL_BASE_URL":
+                return "https://agentmail.test"
+            return None
+
+        bench.httpx.AsyncClient = FakeClient
+        bench.load_env_var = fake_load_env
+
+        assert await bench._agentmail_inbox_has_uber_welcome("rose.harbor22@agentmail.to")
+    finally:
+        bench.httpx.AsyncClient = original_client
+        bench.load_env_var = original_load_env
+
+    assert calls == [
+        (
+            "https://agentmail.test/v0/inboxes/rose.harbor22%40agentmail.to/messages",
+            {"limit": "20"},
+            {"Authorization": "Bearer agentmail-key"},
+        )
+    ]
+
+
+async def test_api_headers_honors_internal_api_key_auth():
+    """Benchmark auth accepts the shared E2E helper's internal API-key mode."""
+    import benchmarks.run_benchmark as bench
+
+    original_authenticate = bench.authenticate
+    original_cached_headers = bench._cached_headers
+    original_auth_mode = bench._auth_mode
+    original_api_key = bench.API_KEY
+    original_user_id = bench.USER_ID
+
+    async def fake_authenticate():
+        return {
+            "access_token": None,
+            "api_key": "live-api-key",
+            "user_id": "user-123",
+            "auth_mode": "internal_api_key",
+        }
+
+    try:
+        bench.authenticate = fake_authenticate
+        bench._cached_headers = None
+        bench._auth_mode = None
+        bench.API_KEY = "fallback-api-key"
+        bench.USER_ID = "fallback-user"
+
+        headers = await bench._api_headers()
+        assert headers == {
+            "X-API-Key": "live-api-key",
+            "X-User-Id": "user-123",
+            "Content-Type": "application/json",
+        }
+        assert await bench._api_headers() == headers
+    finally:
+        bench.authenticate = original_authenticate
+        bench._cached_headers = original_cached_headers
+        bench._auth_mode = original_auth_mode
+        bench.API_KEY = original_api_key
+        bench.USER_ID = original_user_id
 
 
 async def test_code_agent_preflight_accepts_gpt_compute_token():
@@ -218,6 +640,121 @@ def test_normalize_attention_requests_accepts_backend_contract():
     assert _normalize_attention_requests_response([req]) == [req]
 
 
+def test_attention_request_kind_distinguishes_auth_from_write_lock():
+    """Typed benchmark assertions must not pass auth checks on purchase approvals."""
+    from benchmarks.run_benchmark import _attention_request_kind, _attention_request_matches_task
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("browser-agent")
+    auth_req = {
+        "metadata": {
+            "attentionKind": "auth_assistance",
+            "requestUserAuthentication": {"requestId": "auth-1"},
+        }
+    }
+    write_lock_req = {
+        "metadata": {
+            "requestUserApproval": {"attentionRequestId": "approval-1", "writePermission": True}
+        }
+    }
+    raw_write_lock_req = {"metadata": {"toolApproval": True, "writePermission": True}}
+
+    assert task.expected_attention_kind == "auth_assistance"
+    assert _attention_request_kind(auth_req) == "auth_assistance"
+    assert _attention_request_matches_task(task, auth_req) is True
+    assert _attention_request_kind(write_lock_req) == "write_lock"
+    assert _attention_request_matches_task(task, write_lock_req) is False
+    assert _attention_request_kind(raw_write_lock_req) == "write_lock"
+
+
+def test_attention_request_open_check_honors_backend_answered_fields():
+    """The benchmark should not recount answered attention requests."""
+    from benchmarks.run_benchmark import _attention_request_is_open
+
+    assert _attention_request_is_open({"id": "new", "answered": False, "user_response": None}) is True
+    assert _attention_request_is_open({"id": "old", "answered": True, "user_response": None}) is False
+    assert _attention_request_is_open({"id": "old", "user_response": "approved"}) is False
+    assert _attention_request_is_open({"id": "old", "response": "approved"}) is False
+
+
+def test_webdecoy_biometrics_evaluator_requires_interaction_and_low_score():
+    """The WebDecoy benchmark should be grounded in real page interaction and score output."""
+    from benchmarks.run_benchmark import _evaluate_webdecoy_biometrics_result
+
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": (
+                    "Visited https://webdecoy.com/product/fcaptcha-demo/. "
+                    "Clicked the checkbox mode verification control. "
+                    "Entered benchmark-human@example.com in invisible mode and clicked Submit. "
+                    "Final visible FCaptcha Risk Score: 0.00."
+                ),
+            }
+        ]
+    }
+
+    assert _evaluate_webdecoy_biometrics_result(data) == (True, None)
+
+    sensitive = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": (
+                    "Visited https://webdecoy.com/product/fcaptcha-demo/. "
+                    "Clicked the checkbox mode verification control. "
+                    "Entered benchmark-human@example.com in invisible mode and clicked Submit. "
+                    "Final visible FCaptcha Risk Score: 0.10."
+                ),
+            }
+        ]
+    }
+
+    passed, reason = _evaluate_webdecoy_biometrics_result(sensitive)
+    assert passed is False
+    assert "exactly 0.00" in reason
+
+    blocked = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": (
+                    "Visited https://webdecoy.com/product/fcaptcha-demo/. "
+                    "Clicked checkbox and submitted benchmark-human@example.com. Risk Score: 0.91."
+                ),
+            }
+        ]
+    }
+
+    passed, reason = _evaluate_webdecoy_biometrics_result(blocked)
+    assert passed is False
+    assert "exactly 0.00" in reason
+
+
+def test_auth_bundle_biometrics_gate_defaults_on_and_can_be_disabled():
+    """Minted auth-bundle probes should include the strict WebDecoy score gate by default."""
+    import os
+
+    import benchmarks.run_benchmark as bench
+
+    original = os.environ.get(bench.AUTH_BUNDLE_BIOMETRICS_GATE_ENV)
+    try:
+        os.environ.pop(bench.AUTH_BUNDLE_BIOMETRICS_GATE_ENV, None)
+        assert bench._auth_bundle_biometrics_gate_enabled() is True
+
+        os.environ[bench.AUTH_BUNDLE_BIOMETRICS_GATE_ENV] = "false"
+        assert bench._auth_bundle_biometrics_gate_enabled() is False
+
+        os.environ[bench.AUTH_BUNDLE_BIOMETRICS_GATE_ENV] = "true"
+        assert bench._auth_bundle_biometrics_gate_enabled() is True
+    finally:
+        if original is None:
+            os.environ.pop(bench.AUTH_BUNDLE_BIOMETRICS_GATE_ENV, None)
+        else:
+            os.environ[bench.AUTH_BUNDLE_BIOMETRICS_GATE_ENV] = original
+
+
 def test_calendly_benchmark_passes_on_link_approval_marker():
     """Calendly task can pass before agent completion when approval has a link."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -260,11 +797,195 @@ def test_count_only_approval_context_allows_open_tool_call():
     assert _approval_mode_allows_open_tool_context(task, data, approvals_triggered=task.expected_approval_count or 0) is True
 
 
+def test_open_approval_context_filters_expected_tool_pairing_violation():
+    """Final artifacts should not report open approval waits as context corruption."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.context_validator import ContextViolation
+    from benchmarks.run_benchmark import _final_context_violations_for_result
+
+    task = get_task_by_name("browser-agent")
+    data = {"agent": {"status": "ACTIVE"}, "messages": []}
+    violations = [
+        ContextViolation("tool_result_pairing", "error", "open tool is waiting for approval"),
+        ContextViolation("role_alternation", "error", "real context issue"),
+    ]
+
+    filtered = _final_context_violations_for_result(task, data, approvals_triggered=1, violations=violations)
+
+    assert [v.rule for v in filtered] == ["role_alternation"]
+
+
 def test_count_only_releases_observed_approvals_by_denial():
     """count_only should unblock observed approvals without approving side effects."""
     from benchmarks.run_benchmark import _count_only_release_response
 
     assert _count_only_release_response() == "denied"
+
+
+def test_benchmark_env_bool_parses_optional_write_lock_override():
+    """Benchmark env bools are optional and reject ambiguous values."""
+    import os
+
+    from benchmarks.run_benchmark import _benchmark_env_bool
+
+    original = os.environ.get("BENCHMARK_WRITE_LOCK_ENABLED")
+    try:
+        os.environ.pop("BENCHMARK_WRITE_LOCK_ENABLED", None)
+        assert _benchmark_env_bool("BENCHMARK_WRITE_LOCK_ENABLED") is None
+        os.environ["BENCHMARK_WRITE_LOCK_ENABLED"] = "false"
+        assert _benchmark_env_bool("BENCHMARK_WRITE_LOCK_ENABLED") is False
+        os.environ["BENCHMARK_WRITE_LOCK_ENABLED"] = "yes"
+        assert _benchmark_env_bool("BENCHMARK_WRITE_LOCK_ENABLED") is True
+        os.environ["BENCHMARK_WRITE_LOCK_ENABLED"] = "maybe"
+        try:
+            _benchmark_env_bool("BENCHMARK_WRITE_LOCK_ENABLED")
+        except ValueError as exc:
+            assert "BENCHMARK_WRITE_LOCK_ENABLED" in str(exc)
+        else:
+            raise AssertionError("invalid bool should raise ValueError")
+    finally:
+        if original is None:
+            os.environ.pop("BENCHMARK_WRITE_LOCK_ENABLED", None)
+        else:
+            os.environ["BENCHMARK_WRITE_LOCK_ENABLED"] = original
+
+
+def test_benchmark_env_override_can_disable_approval_handling():
+    """No-lock purchase benchmarks can require terminal completion instead of approval observation."""
+    import os
+    from dataclasses import replace
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _apply_benchmark_env_overrides
+
+    original = os.environ.get("BENCHMARK_APPROVAL_HANDLING_OVERRIDE")
+    task = replace(get_task_by_name("browser-agent"))
+    assert task.approval_handling == "ignore"
+    try:
+        os.environ["BENCHMARK_APPROVAL_HANDLING_OVERRIDE"] = "none"
+        _apply_benchmark_env_overrides([task])
+    finally:
+        if original is None:
+            os.environ.pop("BENCHMARK_APPROVAL_HANDLING_OVERRIDE", None)
+        else:
+            os.environ["BENCHMARK_APPROVAL_HANDLING_OVERRIDE"] = original
+
+    assert task.approval_handling is None
+
+
+async def test_create_agent_sends_write_lock_override_when_env_set():
+    """Agent creation includes write_lock_enabled only when explicitly requested by the benchmark."""
+    import os
+
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    posts = []
+    patches = []
+
+    class FakeResponse:
+        def __init__(self, status_code=201, payload=None):
+            self.status_code = status_code
+            self.text = ""
+            self.payload = payload or {"agent_id": "agent-123"}
+
+        def json(self):
+            return self.payload
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _url, *, headers, json):
+            posts.append(json)
+            return FakeResponse()
+
+        async def patch(self, _url, *, headers, json):
+            patches.append(json)
+            return FakeResponse(200, {"agent": {"write_lock_enabled": json["write_lock_enabled"]}})
+
+    original_headers = bench._api_headers
+    original_client = bench.httpx.AsyncClient
+    original_env = os.environ.get("BENCHMARK_WRITE_LOCK_ENABLED")
+    try:
+        async def fake_headers():
+            return {"X-API-Key": "test-key"}
+
+        bench._api_headers = fake_headers
+        bench.httpx.AsyncClient = FakeClient
+        os.environ["BENCHMARK_WRITE_LOCK_ENABLED"] = "false"
+
+        agent_id = await bench.create_agent("http://localhost:55120", get_task_by_name("browser-agent"))
+    finally:
+        bench._api_headers = original_headers
+        bench.httpx.AsyncClient = original_client
+        if original_env is None:
+            os.environ.pop("BENCHMARK_WRITE_LOCK_ENABLED", None)
+        else:
+            os.environ["BENCHMARK_WRITE_LOCK_ENABLED"] = original_env
+
+    assert agent_id == "agent-123"
+    assert posts[0]["write_lock_enabled"] is False
+    assert patches[0]["write_lock_enabled"] is False
+
+
+async def test_create_agent_uses_goal_override_when_env_set():
+    """Purchase-flow experiments can force a stricter task prompt without editing tasks.json."""
+    import os
+
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    bodies = []
+
+    class FakeResponse:
+        status_code = 201
+        text = ""
+
+        def json(self):
+            return {"agent_id": "agent-123"}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _url, *, headers, json):
+            bodies.append(json)
+            return FakeResponse()
+
+    original_headers = bench._api_headers
+    original_client = bench.httpx.AsyncClient
+    original_env = os.environ.get("BENCHMARK_GOAL_OVERRIDE")
+    try:
+        async def fake_headers():
+            return {"X-API-Key": "test-key"}
+
+        bench._api_headers = fake_headers
+        bench.httpx.AsyncClient = FakeClient
+        os.environ["BENCHMARK_GOAL_OVERRIDE"] = "Override benchmark goal"
+
+        await bench.create_agent("http://localhost:55120", get_task_by_name("browser-agent"))
+    finally:
+        bench._api_headers = original_headers
+        bench.httpx.AsyncClient = original_client
+        if original_env is None:
+            os.environ.pop("BENCHMARK_GOAL_OVERRIDE", None)
+        else:
+            os.environ["BENCHMARK_GOAL_OVERRIDE"] = original_env
+
+    assert bodies[0]["goal"] == "Override benchmark goal"
 
 
 def test_keep_failed_agents_only_preserves_failures():
@@ -383,6 +1104,16 @@ def test_local_benchmark_args_for_multi_task_exclude_complement():
     assert args[args.index("--max-concurrency") + 1] == "5"
 
 
+def test_local_benchmark_args_pass_anon_to_run_benchmark():
+    """Local --anon must reach the underlying benchmark harness."""
+    from benchmarks.local import build_benchmark_args
+
+    args = build_benchmark_args(["minted-agent-accounts-x"], port=55120, anon=True)
+
+    assert args[args.index("--task") + 1] == "minted-agent-accounts-x"
+    assert "--anon" in args
+
+
 def test_local_benchmark_args_for_single_load_task_not_parallel():
     """A single load-test invocation is not run with --parallel."""
     from benchmarks.local import build_benchmark_args
@@ -450,6 +1181,22 @@ def test_local_services_manifest_validation_requires_ports():
             assert "backend/health" in str(exc)
         else:
             raise AssertionError("expected invalid manifest to fail")
+
+
+def test_local_services_manifest_reports_anon_capability():
+    """--use-existing --anon must only target a stack started with anon backend env."""
+    from benchmarks.local import services_manifest_anon_enabled
+
+    assert services_manifest_anon_enabled(
+        {
+            "env": {
+                "benchmark_anon_steel_profile": True,
+                "benchmark_disable_saved_browser_auth": True,
+            }
+        }
+    )
+    assert not services_manifest_anon_enabled({"env": {"benchmark_anon_steel_profile": True}})
+    assert not services_manifest_anon_enabled({"ports": {"backend": 55120}})
 
 
 def test_local_extract_results_path_and_diagnostic_commands():
@@ -765,22 +1512,94 @@ async def run_all_tests():
     r.record("extract_worker_pids_workspace_filter", test_extract_worker_pids_from_ps_filters_to_workspace_root)
     r.record("process_cwd_workspace_filter", test_process_cwd_is_under_accepts_nested_paths)
     r.record("worker_pids_workspace_cwd_filter", test_worker_pids_for_workspace_filters_short_macos_commands_by_cwd)
+    r.record(
+        "worker_queue_preflight_accepts_sibling_workers",
+        test_worker_queue_preflight_accepts_aligned_worker_among_other_local_queues,
+    )
     r.record("read_process_env_var_portable", test_read_process_env_var_uses_portable_process_environ)
     r.record("ci_fails_on_skipped", test_ci_should_fail_on_skipped_required_task)
     r.record("outreach_batch_timeout_floor", test_outreach_batch_has_timeout_floor)
     r.record("timeout_default_uses_task_config", test_timeout_default_uses_task_config_when_history_is_missing)
     r.record("timeout_default_respects_floor", test_timeout_default_respects_explicit_floor)
+    r.record(
+        "minted_cleanup_preserves_identity",
+        test_minted_benchmark_cleanup_preserves_cached_agent_identity_by_default,
+    )
+    r.record(
+        "minted_cleanup_can_reset_identity",
+        test_minted_benchmark_cleanup_can_reset_agent_identity_when_explicit,
+    )
+    r.record(
+        "minted_seed_identity_when_missing",
+        test_minted_benchmark_seeds_cached_agent_identity_when_missing,
+    )
+    r.record(
+        "minted_seed_identity_skips_existing",
+        test_minted_benchmark_does_not_seed_cached_agent_identity_when_present,
+    )
+    r.record(
+        "minted_x_default_target",
+        test_minted_x_benchmark_uses_live_x_default_target,
+    )
+    r.record(
+        "minted_x_signup_evidence_terminal_blocker",
+        test_minted_x_signup_evidence_rejects_terminal_phone_blocker,
+    )
+    r.record(
+        "browser_agent_cookie_bundle_bootstrap_upserts",
+        test_browser_agent_cookie_bundle_bootstrap_upserts_active_bundle_from_cookies,
+    )
+    r.record(
+        "browser_agent_cookie_bundle_bootstrap_skip_env",
+        test_browser_agent_cookie_bundle_bootstrap_can_be_skipped_with_env,
+    )
+    r.record(
+        "anon_benchmark_mode_disables_saved_auth",
+        test_anon_benchmark_mode_disables_saved_auth_material,
+    )
+    r.record(
+        "browser_agent_cookie_bundle_bootstrap_local_only",
+        test_browser_agent_cookie_bundle_bootstrap_is_local_only,
+    )
+    await r.record_async(
+        "agentmail_cleanup_exact_only",
+        test_agentmail_cleanup_deletes_only_exact_inboxes,
+    )
+    await r.record_async(
+        "agentmail_uber_welcome_evidence_exact_inbox",
+        test_agentmail_uber_welcome_evidence_uses_exact_inbox,
+    )
+    await r.record_async("api_headers_internal_api_key", test_api_headers_honors_internal_api_key_auth)
     await r.record_async("code_agent_preflight_accepts_gpt_compute", test_code_agent_preflight_accepts_gpt_compute_token)
     await r.record_async("code_agent_preflight_rejects_missing_compute", test_code_agent_preflight_rejects_missing_compute_token)
     r.record("normalize_attention_requests", test_normalize_attention_requests_accepts_backend_contract)
+    r.record("attention_kind_auth_vs_write_lock", test_attention_request_kind_distinguishes_auth_from_write_lock)
+    r.record("attention_open_backend_fields", test_attention_request_open_check_honors_backend_answered_fields)
+    r.record(
+        "webdecoy_biometrics_evaluator",
+        test_webdecoy_biometrics_evaluator_requires_interaction_and_low_score,
+    )
+    r.record(
+        "auth_bundle_biometrics_gate_env",
+        test_auth_bundle_biometrics_gate_defaults_on_and_can_be_disabled,
+    )
     r.record("calendly_passes_on_link_approval", test_calendly_benchmark_passes_on_link_approval_marker)
     r.record("count_only_passes_on_approval_count", test_count_only_benchmark_passes_on_expected_approval_count)
     r.record("count_only_allows_open_tool_context", test_count_only_approval_context_allows_open_tool_call)
+    r.record(
+        "open_approval_filters_tool_pairing_violation",
+        test_open_approval_context_filters_expected_tool_pairing_violation,
+    )
     r.record("count_only_releases_by_denial", test_count_only_releases_observed_approvals_by_denial)
+    r.record("benchmark_env_bool", test_benchmark_env_bool_parses_optional_write_lock_override)
+    r.record("benchmark_env_disable_approval", test_benchmark_env_override_can_disable_approval_handling)
+    await r.record_async("create_agent_write_lock_override", test_create_agent_sends_write_lock_override_when_env_set)
+    await r.record_async("create_agent_goal_override", test_create_agent_uses_goal_override_when_env_set)
     r.record("keep_failed_agents_cleanup_policy", test_keep_failed_agents_only_preserves_failures)
     r.record("local_plan_load_separate", test_local_plan_runs_load_tests_separately)
     await r.record_async("tree_log_supabase_once", test_tree_log_collection_fetches_supabase_once)
     r.record("local_args_multi_exclude", test_local_benchmark_args_for_multi_task_exclude_complement)
+    r.record("local_args_anon", test_local_benchmark_args_pass_anon_to_run_benchmark)
     r.record("local_args_single_load", test_local_benchmark_args_for_single_load_task_not_parallel)
     r.record("local_failed_tasks_from_run", test_local_failed_tasks_from_run_reads_result_json)
     r.record("local_services_manifest_validation", test_local_services_manifest_validation_requires_ports)

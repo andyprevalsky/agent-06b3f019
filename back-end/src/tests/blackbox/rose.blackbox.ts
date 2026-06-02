@@ -31,6 +31,8 @@
  */
 
 import { z } from 'zod';
+import fs from 'node:fs';
+import path from 'node:path';
 
 import {
   buildOpenAiResponseFormat,
@@ -53,7 +55,13 @@ import {
   parseOpenAISSE,
   parseResponsesSSE,
 } from '../../providers/rose/streaming';
-import { transformSchemaForAnthropic } from '../../providers/rose/transforms';
+import {
+  applyAnthropicResponseFormat,
+  applyAnthropicToolConfig,
+  extractToolsFromResponseFormat,
+  transformMessagesForAnthropic,
+  transformSchemaForAnthropic,
+} from '../../providers/rose/transforms';
 import type { RoseStreamChunk } from '../../providers/rose/types';
 import {
   ANTHROPIC_API_URL,
@@ -429,6 +437,26 @@ async function testGptAuth_happyPathUsesCodexResponses() {
       noSystemBody.instructions,
       'You are a helpful assistant.',
       'Codex instructions default present'
+    );
+    const splitSystemBody = buildCodexResponsesBody({
+      poolSpec: getPool('rose-1-lite'),
+      messages: [
+        {
+          role: 'system',
+          content: `static rules${SYSTEM_PROMPT_DYNAMIC_BOUNDARY}dynamic rules`,
+        },
+        { role: 'user', content: 'hi' },
+      ],
+      requestId: 'split-system',
+    });
+    assertEqual(
+      splitSystemBody.instructions,
+      'static rules\n\ndynamic rules',
+      'Codex instructions strip internal system prompt boundary'
+    );
+    assert(
+      !String(splitSystemBody.instructions).includes('__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__'),
+      'Codex instructions do not send boundary sentinel'
     );
     const maxEffortBody = buildCodexResponsesBody({
       poolSpec: getPool('rose-1-lite'),
@@ -815,6 +843,93 @@ async function testClaudeAuth_noTokenGoesDirectToWaterfall() {
   }
 }
 
+async function testClient_dumpContextWritesRequestAndOutput() {
+  process.env.OPENROUTER_API_KEY = 'or-test-key';
+  const agentId = 'rose-dump-test-agent';
+  const dumpDir = path.resolve(__dirname, '../../../..', '.llm-dumps', agentId);
+  fs.rmSync(dumpDir, { recursive: true, force: true });
+
+  installFetchStub((url) => {
+    if (url === OPENROUTER_API_URL) {
+      return sseResponse(OPENROUTER_OK_SSE);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+
+  try {
+    const responseFormat = {
+      type: 'json_schema' as const,
+      json_schema: {
+        name: 'credential_failure_classification',
+        strict: true,
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: { reason: { type: 'string' } },
+          required: ['reason'],
+        },
+      },
+    };
+    const stream = await createStreamingCompletion({
+      model: 'rose-labs/rose-1-lite',
+      temperature: 0,
+      max_tokens: 200,
+      messages: [
+        { role: 'system', content: 'classify credentials' },
+        { role: 'user', content: '{"status":"FAILED"}' },
+      ],
+      response_format: responseFormat,
+      dump_context: {
+        call_site: 'credential_failure_classifier_test',
+        agent_id: agentId,
+        config: { classifier: 'browser_run_credential_outcomes' },
+        extra: { task_id: 'task-1' },
+      },
+    });
+    await collect(stream);
+
+    const dumps = fs
+      .readdirSync(dumpDir)
+      .filter((name) => name.endsWith('-credential_failure_classifier_test.json'));
+    assertEqual(dumps.length, 1, 'one dump file written');
+    const payload = JSON.parse(fs.readFileSync(path.join(dumpDir, dumps[0]), 'utf8')) as {
+      call_site: string;
+      agent_id: string;
+      message_count: number;
+      messages: Array<{ role: string; content: string }>;
+      config: Record<string, unknown>;
+      response_format: unknown;
+      extra: Record<string, unknown>;
+    };
+    assertEqual(payload.call_site, 'credential_failure_classifier_test', 'dump call site');
+    assertEqual(payload.agent_id, agentId, 'dump agent id');
+    assertEqual(payload.message_count, 2, 'dump message count');
+    assertEqual(payload.messages[0].role, 'system', 'system message preserved');
+    assertEqual(payload.config.temperature, 0, 'temperature dumped');
+    assertEqual(payload.config.max_tokens, 200, 'max tokens dumped');
+    assertEqual(
+      payload.config.classifier,
+      'browser_run_credential_outcomes',
+      'caller config dumped'
+    );
+    assertEqual(
+      payload.config.actual_model,
+      'google/gemini-3-flash-preview',
+      'actual model dumped'
+    );
+    assertEqual(
+      JSON.stringify(payload.response_format),
+      JSON.stringify(responseFormat),
+      'response format dumped'
+    );
+    assertEqual(payload.extra.task_id, 'task-1', 'caller extra dumped');
+    assertEqual(payload.extra.output, 'Hi there', 'raw model output dumped');
+  } finally {
+    restoreFetch();
+    fs.rmSync(dumpDir, { recursive: true, force: true });
+  }
+}
+
 // ==================== WATERFALL TESTS ====================
 
 async function testWaterfall_firstFailsSecondSucceeds() {
@@ -939,6 +1054,174 @@ async function testTransforms_anyOfOneOfAllOfRecursed() {
   assert(!('minLength' in out.anyOf[1]), 'anyOf[1].minLength stripped');
   assert(!('multipleOf' in out.oneOf[0]), 'oneOf[0].multipleOf stripped');
   assert(!('minItems' in out.allOf[0]), 'allOf[0].minItems stripped');
+
+  const dictionary = transformSchemaForAnthropic({
+    type: 'object',
+    additionalProperties: { type: 'string', minLength: 1 },
+  }) as { additionalProperties: Record<string, unknown> };
+  assert(
+    !('minLength' in dictionary.additionalProperties),
+    'dictionary additionalProperties schema recursed'
+  );
+}
+
+async function testTransforms_messagesForAnthropicContentBlocks() {
+  const result = transformMessagesForAnthropic([
+    {
+      role: 'system',
+      content: `static instructions${SYSTEM_PROMPT_DYNAMIC_BOUNDARY}dynamic user context`,
+    },
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: 'look at these' },
+        {
+          type: 'image_url',
+          image_url: { url: 'data:image/png;base64,abc123' },
+        },
+        {
+          type: 'image_url',
+          image_url: { url: 'https://example.com/image.png' },
+        },
+        {
+          type: 'file',
+          file: { file_data: 'data:application/pdf;base64,pdf123' },
+        },
+      ],
+    },
+    { role: 'assistant', content: 'trailing assistant should be removed' },
+  ]);
+
+  assertEqual(result.staticSystem, 'static instructions', 'static system split');
+  assertEqual(result.dynamicSystem, 'dynamic user context', 'dynamic system split');
+  assertEqual(result.messages.length, 1, 'trailing assistant removed');
+  const content = result.messages[0].content as Array<Record<string, unknown>>;
+  assertEqual(content[1].type, 'image', 'data image converted');
+  assertEqual(
+    (content[1].source as Record<string, unknown>).media_type,
+    'image/png',
+    'image media type'
+  );
+  assertEqual((content[2].source as Record<string, unknown>).type, 'url', 'remote image URL');
+  assertEqual(content[3].type, 'document', 'data file converted to document');
+}
+
+async function testTransforms_toolConfigExtractionAndFallback() {
+  const responseFormat = {
+    type: 'json_schema' as const,
+    json_schema: {
+      name: 'tool_envelope',
+      schema: {
+        type: 'object',
+        properties: {
+          response: { type: 'string' },
+          tool_calls: {
+            type: 'array',
+            items: {
+              anyOf: [
+                {
+                  description: 'Search the web',
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['tool', 'query'],
+                  properties: {
+                    tool: { const: 'web_search' },
+                    query: { type: 'string', minLength: 1 },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      },
+    },
+  };
+
+  const extracted = extractToolsFromResponseFormat(responseFormat);
+  assert(extracted !== null, 'expected tool extraction');
+  assertEqual(extracted.tools[0].name, 'web_search', 'tool name lifted');
+  const inputSchema = extracted.tools[0].input_schema as {
+    properties: { query: Record<string, unknown> };
+    required: string[];
+    additionalProperties: boolean;
+  };
+  assert(!('minLength' in inputSchema.properties.query), 'tool schema stripped');
+  assertEqual(inputSchema.required.join(','), 'query', 'tool discriminator removed');
+  assert(inputSchema.additionalProperties === false, 'additionalProperties preserved');
+
+  const nativeBody: Record<string, unknown> = {
+    output_config: { effort: 'medium', format: { type: 'json_schema' } },
+    output_format: { legacy: true },
+  };
+  const native = applyAnthropicToolConfig(nativeBody, responseFormat, null, 'required');
+  assert(native === true, 'expected native tool mode');
+  assert(Array.isArray(nativeBody.tools), 'native tools installed');
+  assertEqual((nativeBody.tool_choice as Record<string, unknown>).type, 'any', 'required maps any');
+  assertEqual(
+    (nativeBody.output_config as Record<string, unknown>).effort,
+    'medium',
+    'effort preserved'
+  );
+  assert(!('output_format' in nativeBody), 'legacy output_format removed');
+
+  const explicitBody: Record<string, unknown> = {};
+  const explicit = applyAnthropicToolConfig(
+    explicitBody,
+    null,
+    [
+      {
+        name: 'finish',
+        description: 'Finish',
+        strict: true,
+        input_schema: { type: 'object', properties: {} },
+      },
+    ],
+    { function: { name: 'finish' } }
+  );
+  assert(explicit === true, 'explicit tools should use native mode');
+  assertEqual(
+    (explicitBody.tool_choice as Record<string, unknown>).name,
+    'finish',
+    'function choice normalized'
+  );
+
+  const preNormalizedBody: Record<string, unknown> = {};
+  applyAnthropicToolConfig(
+    preNormalizedBody,
+    null,
+    [{ name: 'lookup', description: 'Lookup', input_schema: { type: 'object' } }],
+    { type: 'tool', name: 'lookup' }
+  );
+  assertEqual(
+    (preNormalizedBody.tool_choice as Record<string, unknown>).name,
+    'lookup',
+    'pre-normalized tool choice preserved'
+  );
+
+  const fallbackBody: Record<string, unknown> = { output_config: { effort: 'low' } };
+  const fallback = applyAnthropicToolConfig(
+    fallbackBody,
+    {
+      type: 'json_schema',
+      json_schema: {
+        name: 'plain',
+        schema: { type: 'object', additionalProperties: true, properties: {} },
+      },
+    },
+    null,
+    undefined
+  );
+  assert(fallback === false, 'plain schema should use output_config fallback');
+  const format = (fallbackBody.output_config as { format: { schema: Record<string, unknown> } })
+    .format;
+  assert(format.schema.additionalProperties === false, 'additionalProperties true normalized');
+
+  const responseBody: Record<string, unknown> = {};
+  applyAnthropicResponseFormat(responseBody, {
+    type: 'json_schema',
+    json_schema: { name: 'plain', schema: { type: 'object', maxLength: 1 } },
+  });
+  assert('output_config' in responseBody, 'response_format encoded as output_config');
 }
 
 // ==================== STREAMING-PARSER TESTS ====================
@@ -2138,6 +2421,10 @@ async function main(): Promise<void> {
       name: 'claudeAuth / no token goes direct to waterfall',
       fn: testClaudeAuth_noTokenGoesDirectToWaterfall,
     },
+    {
+      name: 'client / dump context writes request and output',
+      fn: testClient_dumpContextWritesRequestAndOutput,
+    },
     { name: 'waterfall / first 500 → second succeeds', fn: testWaterfall_firstFailsSecondSucceeds },
     { name: 'waterfall / all fail → RoseAllFailed', fn: testWaterfall_allFailRaisesRoseAllFailed },
     {
@@ -2145,6 +2432,14 @@ async function main(): Promise<void> {
       fn: testTransforms_stripUnsupportedSchemaKeywords,
     },
     { name: 'transforms / anyOf/oneOf/allOf recursed', fn: testTransforms_anyOfOneOfAllOfRecursed },
+    {
+      name: 'transforms / messages convert Anthropic content blocks',
+      fn: testTransforms_messagesForAnthropicContentBlocks,
+    },
+    {
+      name: 'transforms / native tool config extraction and fallback',
+      fn: testTransforms_toolConfigExtractionAndFallback,
+    },
     {
       name: 'streaming / anthropic parse error tolerated',
       fn: testStreaming_anthropic_parseErrorTolerated,

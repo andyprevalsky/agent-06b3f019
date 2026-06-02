@@ -42,6 +42,39 @@ logger = structlog.get_logger()
 _PER_STEP_TIMEOUT_S = 60.0
 
 
+def _openrouter_tools(tools: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, Any]]]:
+    if not tools:
+        return None
+    out: List[Dict[str, Any]] = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+        name = function.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        parameters = function.get("parameters") or function.get("input_schema") or {}
+        if not isinstance(parameters, dict):
+            parameters = {}
+        function_body: Dict[str, Any] = {
+            "name": name,
+            "description": function.get("description") or "",
+            "parameters": parameters,
+        }
+        if "strict" in function:
+            function_body["strict"] = bool(function.get("strict"))
+        out.append({"type": "function", "function": function_body})
+    return out or None
+
+
+def _openrouter_tool_choice(tool_choice: Any) -> Any:
+    if tool_choice == "any":
+        return "required"
+    if isinstance(tool_choice, dict) and isinstance(tool_choice.get("name"), str):
+        return {"type": "function", "function": {"name": tool_choice["name"]}}
+    return tool_choice
+
+
 def build_openrouter_body(
     *,
     model: str,
@@ -64,10 +97,11 @@ def build_openrouter_body(
         "stream": True,
         "stream_options": {"include_usage": True},
     }
-    if tools:
-        body["tools"] = tools
-    if tool_choice is not None:
-        body["tool_choice"] = tool_choice
+    openrouter_tools = _openrouter_tools(tools)
+    if openrouter_tools:
+        body["tools"] = openrouter_tools
+    if tool_choice is not None and openrouter_tools:
+        body["tool_choice"] = _openrouter_tool_choice(tool_choice)
     if response_format is not None:
         body["response_format"] = response_format
     if temperature is not None:

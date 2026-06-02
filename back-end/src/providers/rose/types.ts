@@ -58,6 +58,12 @@ export interface CompletionOptions {
   gpt_token?: string;
   gpt_account_id?: string;
   disable_waterfall?: boolean;
+  dump_context?: {
+    call_site: string;
+    agent_id?: string;
+    config?: Record<string, unknown>;
+    extra?: Record<string, unknown>;
+  };
 }
 
 /**

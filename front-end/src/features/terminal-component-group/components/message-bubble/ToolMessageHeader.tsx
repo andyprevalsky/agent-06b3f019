@@ -10,7 +10,7 @@
  *   - title wraps inside the tool row instead of forcing horizontal overflow
  */
 import { cn } from '@/lib/utils';
-import { ChevronRight } from 'lucide-react';
+import { ChevronRight, Maximize2 } from 'lucide-react';
 import { ToolMessageIcon } from './ToolMessageIcon';
 import type { ToolMessageData } from './types';
 
@@ -49,6 +49,7 @@ export function ToolMessageHeader({
       'animate-shimmer bg-gradient-to-r from-foreground via-muted-foreground to-foreground bg-[length:200%_100%] bg-clip-text text-transparent',
     !isThought && !data.error && data.status === 'FINISHED' && 'text-foreground',
   );
+  const authTaskId = data.authAssistance?.taskId;
 
   return (
     <div
@@ -69,6 +70,19 @@ export function ToolMessageHeader({
       <span className={cn('min-w-0 break-words', titleClassName)}>
         {isThought ? (data.status === 'IN_PROGRESS' ? 'Thinking' : 'Thought') : titleText}
       </span>
+      {authTaskId && data.status === 'IN_PROGRESS' && (
+        <button
+          type="button"
+          className="ml-1 inline-flex h-7 shrink-0 items-center gap-1 rounded-md bg-primary px-2 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+          onClick={(event) => {
+            event.stopPropagation();
+            openBrowserFullscreen(authTaskId);
+          }}
+        >
+          <Maximize2 className="h-3.5 w-3.5" />
+          Open Browser
+        </button>
+      )}
       {showChevron && (
         <ChevronRight
           className={cn(
@@ -79,4 +93,11 @@ export function ToolMessageHeader({
       )}
     </div>
   );
+}
+
+function openBrowserFullscreen(taskId: string) {
+  const url = new URL(window.location.href);
+  url.searchParams.set('browser-id', taskId);
+  window.history.replaceState({}, '', url.toString());
+  window.dispatchEvent(new CustomEvent('navi-open-browser', { detail: { taskId } }));
 }

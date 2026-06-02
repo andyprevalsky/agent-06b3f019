@@ -9,6 +9,7 @@ import re
 import time  # Import at module level for Temporal workflow sandbox compatibility
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple, Type, TypeVar
 
 import httpx  # Used with instructor
@@ -28,7 +29,6 @@ from helpers.attachments import (
 from helpers.context_scope import is_internal_subagent_message
 from helpers.context_pointers import resolve_pointers_in_messages
 from helpers.messages import stream_assistant_chunk, stream_plan_event, stream_tool_event
-from helpers.observability import dump_llm_context
 from helpers.tracing import backend_api_headers, current_request_id, traced
 from providers.rose import (
     ClaudeAuthContext,
@@ -46,7 +46,6 @@ from providers.rose.schema import (
 )
 from providers.rose.transforms import reconstruct_agent_response
 from utils.error_utils import extract_error_message
-from utils.prompts import format_required_output_schema_user_message
 from utils.tool_schemas import (
     create_agent_action_model,
 )
@@ -54,6 +53,72 @@ from utils.tool_schemas import (
 logger = structlog.get_logger()
 
 CLOUD_AGENT_TOOL_NAME = "cloud_agent"
+
+TRAILING_MESSAGE_REFERENCE_RE = re.compile(
+    r"(?P<prefix>(?:^|\n\n)Reference:\s*)"
+    r"(?P<ref>@ref:message:[a-f0-9-]{36}(?:\[start=\"[^\"]+\"\|end=\"[^\"]+\"\])?)"
+    r"(?P<trailing>\s*)$"
+)
+
+
+def _split_trailing_message_reference(text: str) -> tuple[str, str]:
+    """Split the trailing context-pointer annotation from message text."""
+    match = TRAILING_MESSAGE_REFERENCE_RE.search(text)
+    if not match:
+        return text, ""
+    return text[: match.start()], f"{match.group('prefix')}{match.group('ref')}{match.group('trailing')}"
+
+
+def _append_llm_context_sections_preserving_reference(text: str, sections: List[str]) -> str:
+    """Append LLM-only sections before the terminal Reference annotation."""
+    body, reference = _split_trailing_message_reference(text)
+    parts = [body.rstrip()] if body.strip() else []
+    parts.extend(section for section in sections if section)
+    result = "\n\n".join(parts)
+    if reference:
+        result = f"{result}\n\n{reference.strip()}" if result else reference.strip()
+    return result
+
+
+def _self_close_trailing_message_reference(text: str) -> str:
+    """Render a terminal Reference annotation as a non-expanding pointer tag."""
+    match = TRAILING_MESSAGE_REFERENCE_RE.search(text)
+    if not match:
+        return text
+    return (
+        text[: match.start()]
+        + f'{match.group("prefix")}<resolved-ref pointer="{match.group("ref")}"/>'
+        + match.group("trailing")
+    )
+
+
+def _extract_browser_recording_dump_extra(context: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
+    """Return the latest browser recording metadata present in agent messages."""
+    if not context:
+        return {}
+
+    for message in reversed(context):
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            continue
+        if metadata.get("action_type") != "recording":
+            continue
+
+        recording_path = metadata.get("recording_path")
+        if not recording_path:
+            continue
+
+        index_path = Path(str(recording_path))
+        return {
+            "browser_recording_path": str(index_path),
+            "browser_recording_manifest_path": str(index_path.with_name("manifest.json")),
+            "browser_recording_task_id": metadata.get("task_id") or metadata.get("subAgentId"),
+            "browser_session_metadata": metadata.get("browser_session_metadata") or {},
+        }
+
+    return {}
 
 
 class VerifierSessionFilePointer(BaseModel):
@@ -129,8 +194,6 @@ Always replace with a goal-anchored name. Examples:
   - list[object]: List of objects — MUST include properties describing each item shape
   - file_pointer: Reference to a file produced by the agent
   - list[file_pointer]: List of file references
-  - session_file_pointer: Cheap cloud-session file reference; verifier extracts only an absolute path
-  - list[session_file_pointer]: List of cloud-session file references
 
 # WORKED EXAMPLES
 
@@ -150,6 +213,17 @@ GOOD fields: [{ "name": "cities", "type": "list[object]", "properties": [{ "name
 
 Goal: "Generate a logo as a PNG."
 GOOD fields: [{ "name": "logo", "type": "file_pointer" }]
+
+Goal: "Buy me a black beanie on Amazon that costs less than $35 and looks well-made."
+GOOD fields: [{ "name": "selected_beanie_url", "type": "str" }, { "name": "selected_beanie_price_usd", "type": "float" }, { "name": "order_confirmation_id", "type": "str" }]
+BAD fields: [{ "name": "selected_beanie_url", "type": "str" }, { "name": "selected_beanie_price_usd", "type": "float" }]
+BAD fields: [{ "name": "selected_beanie_url", "type": "str" }, { "name": "selected_beanie_price_usd", "type": "float" }, { "name": "added_to_cart", "type": "bool" }, { "name": "checkout_status", "type": "str" }]
+BAD fields: [{ "name": "selected_beanie_url", "type": "str" }, { "name": "selected_beanie_price_usd", "type": "float" }, { "name": "item_acquired", "type": "bool" }]
+
+For shopping goals phrased as "buy", "purchase", "order", or "complete checkout",
+the schema MUST require a grounded order/confirmation identifier proving that the item was actually acquired
+(for example, an order id, confirmation id, receipt number, or purchase confirmation number).
+Selecting a product URL, adding an item to cart, or reaching checkout is not enough to verify a purchase goal.
 
 # YOUR JOB
 
@@ -371,6 +445,69 @@ def _schema_from_generated_model(generated: _GeneratedResponseSchema) -> Dict[st
     return {"fields": fields}
 
 
+_PURCHASE_GOAL_MARKERS = (
+    "buy me",
+    "purchase",
+    "order",
+    "place an order",
+    "complete checkout",
+    "checkout",
+)
+
+
+def _is_purchase_goal(goal: str) -> bool:
+    normalized = f" {goal.lower()} "
+    return any(marker in normalized for marker in _PURCHASE_GOAL_MARKERS)
+
+
+def _schema_has_purchase_confirmation_identifier(schema: Dict[str, Any]) -> bool:
+    fields = schema.get("fields", []) if isinstance(schema, dict) else []
+    for field in fields:
+        name = str(field.get("name", "")).lower()
+        description = str(field.get("description", "")).lower()
+        searchable = f"{name} {description}"
+        if any(
+            token in searchable
+            for token in (
+                "order_id",
+                "order id",
+                "order number",
+                "order_confirmation_id",
+                "order confirmation id",
+                "order confirmation number",
+                "confirmation_id",
+                "confirmation id",
+                "confirmation number",
+                "receipt_number",
+                "receipt number",
+                "purchase_confirmation_id",
+                "purchase confirmation id",
+                "purchase confirmation number",
+            )
+        ):
+            return True
+    return False
+
+
+def _normalize_response_schema_for_goal(goal: str, schema: Dict[str, Any]) -> Dict[str, Any]:
+    """Ensure goal-critical fields are present when the model under-specifies a schema."""
+    if not _is_purchase_goal(goal) or _schema_has_purchase_confirmation_identifier(schema):
+        return schema
+
+    normalized = {"fields": list(schema.get("fields", []))}
+    field_names = {str(field.get("name", "")).lower() for field in normalized["fields"]}
+
+    if "order_confirmation_id" not in field_names:
+        normalized["fields"].append({
+            "name": "order_confirmation_id",
+            "type": "str",
+            "required": True,
+            "description": "Grounded order id, confirmation id, receipt number, or purchase confirmation number proving the item was actually acquired.",
+        })
+
+    return normalized
+
+
 async def _generate_response_schema_with_rose(
     goal: str,
     *,
@@ -422,7 +559,8 @@ async def _generate_response_schema_with_rose(
                 prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
                 completion_tokens = int(usage.get("completion_tokens", 0) or 0)
                 total_tokens = int(usage.get("total_tokens", prompt_tokens + completion_tokens) or 0)
-                return _schema_from_generated_model(generated), {
+                schema = _normalize_response_schema_for_goal(goal, _schema_from_generated_model(generated))
+                return schema, {
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
                     "total_tokens": total_tokens or prompt_tokens + completion_tokens,
@@ -594,7 +732,7 @@ def build_verifier_context_messages(  # noqa: C901
 
     for msg in sorted_context:
         role = msg.get("role", "")
-        text = msg.get("text", "")
+        text = _self_close_trailing_message_reference(msg.get("text", ""))
         metadata = msg.get("metadata", {}) or {}
 
         if is_internal_subagent_message(msg):
@@ -891,9 +1029,10 @@ def convert_context_to_messages(  # noqa: C901
                 tool_content = content
                 if metadata.get("title"):
                     tool_content = f"{metadata['title']}: {content}"
-                # Include structured_response for verifier extraction of full FilePointers
+                sections = []
                 if metadata.get("structured_response"):
-                    tool_content += f"\n\nStructured Response: {json.dumps(metadata['structured_response'])}"
+                    sections.append(f"Structured Response: {json.dumps(metadata['structured_response'])}")
+                tool_content = _append_llm_context_sections_preserving_reference(tool_content, sections)
                 tool_msg = {"role": "tool", "content": tool_content}
                 tool_msg["tool_call_id"] = tool_call_id
                 if metadata.get("toolName"):
@@ -906,9 +1045,10 @@ def convert_context_to_messages(  # noqa: C901
                 system_content = content
                 if metadata.get("title"):
                     system_content = f"{metadata['title']}: {content}"
-                # Include structured_response for verifier extraction of full FilePointers
+                sections = []
                 if metadata.get("structured_response"):
-                    system_content += f"\n\nStructured Response: {json.dumps(metadata['structured_response'])}"
+                    sections.append(f"Structured Response: {json.dumps(metadata['structured_response'])}")
+                system_content = _append_llm_context_sections_preserving_reference(system_content, sections)
                 messages.append({"role": "system", "content": system_content})
 
     return messages
@@ -1260,17 +1400,19 @@ async def build_llm_messages(  # noqa: C901
                     tool_content = text
                     if metadata.get("title"):
                         tool_content = f"{metadata['title']}: {tool_content}"
+                    sections = []
                     if metadata.get("structured_response"):
-                        tool_content += "\n\nStructured Response: " + json.dumps(metadata["structured_response"])
+                        sections.append("Structured Response: " + json.dumps(metadata["structured_response"]))
                     if metadata_texts:
-                        tool_content = tool_content + "\n\n" + "\n\n".join(metadata_texts)
+                        sections.extend(metadata_texts)
                     if content:
                         for block in content:
                             if block.get("type") == "image_url":
-                                tool_content += "\n\n[Attached image]"
+                                sections.append("[Attached image]")
                             elif block.get("type") == "file":
                                 fname = block.get("file", {}).get("filename", "file")
-                                tool_content += f"\n\n[Attached file: {fname}]"
+                                sections.append(f"[Attached file: {fname}]")
+                    tool_content = _append_llm_context_sections_preserving_reference(tool_content, sections)
                     label = tool_name or "tool"
                     messages.append({"role": "user", "content": f"{ts_prefix}[{label} result]: {tool_content}"})
                     continue
@@ -1278,17 +1420,19 @@ async def build_llm_messages(  # noqa: C901
                 tool_content = ts_prefix + text
                 if metadata.get("title"):
                     tool_content = f"{ts_prefix}{metadata['title']}: {text}"
+                sections = []
                 if metadata.get("structured_response"):
-                    tool_content += f"\n\nStructured Response: {json.dumps(metadata['structured_response'])}"
+                    sections.append(f"Structured Response: {json.dumps(metadata['structured_response'])}")
                 if metadata_texts:
-                    tool_content = tool_content + "\n\n" + "\n\n".join(metadata_texts)
+                    sections.extend(metadata_texts)
                 if content:
                     for block in content:
                         if block.get("type") == "image_url":
-                            tool_content += "\n\n[Attached image]"
+                            sections.append("[Attached image]")
                         elif block.get("type") == "file":
                             fname = block.get("file", {}).get("filename", "file")
-                            tool_content += f"\n\n[Attached file: {fname}]"
+                            sections.append(f"[Attached file: {fname}]")
+                tool_content = _append_llm_context_sections_preserving_reference(tool_content, sections)
 
                 tool_msg: Dict[str, Any] = {
                     "role": "tool",
@@ -1586,21 +1730,6 @@ async def call_llm_structured_streaming(  # noqa: C901
         detected_tools_ordered: List of (tool_name, tool_call_id, timestamp) tuples in detection order
     """
     config = load_config()
-
-    dump_llm_context(
-        call_site=call_site,
-        messages=messages,
-        agent_id=agent_id,
-        model=model,
-        extra={
-            "response_model": response_model.__name__ if response_model else None,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "reasoning_max_tokens": reasoning_max_tokens,
-            "skip_cache_write": skip_cache_write,
-            "has_claude_token": claude_token is not None,
-        },
-    )
 
     # Check if this is a Rose model — route in-process via RoseClient (replaces
     # the Supabase edge function).
@@ -2646,22 +2775,6 @@ async def call_llm(
         if response_model is not None:
             effective_response_format = build_openai_response_format(response_model)
 
-        dump_llm_context(
-            call_site=call_site,
-            messages=messages,
-            agent_id=agent_id,
-            model=model,
-            response_format=effective_response_format,
-            extra={
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-                "skip_cache_write": skip_cache_write,
-                "has_claude_token": claude_token is not None,
-                "has_gpt_token": gpt_token is not None,
-                "response_model": response_model.__name__ if response_model else None,
-            },
-        )
-
         # Check if this is a Rose model — route directly to Anthropic / OpenRouter
         # via the in-process RoseClient (replaces the Supabase edge function).
         pool = pool_for_model(model) if model else None
@@ -2849,6 +2962,7 @@ async def _call_llm_verifier(  # noqa: C901
     gpt_token_user_id: Optional[str] = None,
     call_site: str = "verifier",
     agent_id: Optional[str] = None,
+    dump_extra: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Sole LLM helper for the verifier — no streaming UI, no tool detection.
@@ -2881,15 +2995,6 @@ async def _call_llm_verifier(  # noqa: C901
 
     response_model = _build_verifier_response_model(response_schema)
     response_format = _build_verifier_json_schema(response_schema)
-
-    dump_llm_context(
-        call_site=call_site,
-        messages=messages,
-        agent_id=agent_id,
-        model=model,
-        response_format=response_format,
-        extra={"pool": pool, "has_claude_token": claude_token is not None},
-    )
 
     accumulated_reasoning = ""
     accumulated_json = ""
@@ -2928,6 +3033,7 @@ async def _call_llm_verifier(  # noqa: C901
             agent_id=agent_id,
             request_id=verifier_request_id,
             call_site=call_site,
+            dump_extra=dump_extra,
         ):
             chunk_count += 1
             if chunk_count % 10 == 0:
@@ -3559,6 +3665,7 @@ async def check_progress(  # noqa: C901
     gpt_token_source: Optional[str] = None,
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
+    dump_extra: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Use LLM judge to check progress toward goal. Canonical entry point — all
@@ -3699,6 +3806,10 @@ async def check_progress(  # noqa: C901
 
         config = load_config()
         system_prompt = verifier_system_prompt
+        verifier_dump_extra = {
+            **_extract_browser_recording_dump_extra(context),
+            **(dump_extra or {}),
+        }
 
         messages = build_verifier_context_messages(context, system_prompt)
 
@@ -3744,6 +3855,7 @@ async def check_progress(  # noqa: C901
                     gpt_token_user_id=gpt_token_user_id,
                     call_site=call_site,
                     agent_id=agent_id,
+                    dump_extra=verifier_dump_extra or None,
                 )
                 break
             except Exception as e:
@@ -4578,13 +4690,6 @@ async def call_planner_llm_activity(
 
     # Prepend system message
     full_messages = [{"role": "system", "content": system_prompt}] + messages
-    schema_preamble = format_required_output_schema_user_message(
-        response_schema,
-        for_decomposition=True,
-    )
-    if schema_preamble:
-        full_messages = inject_llm_only_user_preamble(full_messages, schema_preamble)
-
     # Resolve context pointers
     full_messages = await resolve_pointers_in_messages(
         full_messages,

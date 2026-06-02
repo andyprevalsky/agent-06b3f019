@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import crypto from 'crypto';
 import { stubAllElectron } from './electron-stubs';
 import {
   fetchCaptures,
@@ -52,16 +53,16 @@ vi.mock('../../main/services/sync/IntegrationCache', () => ({
   },
 }));
 
-vi.mock('../../main/services/cookieReader', () => ({
-  CookieReader: {
-    readCookies: vi.fn<() => Promise<CookieData[]>>(),
+vi.mock('../../main/services/browserCookieReader', () => ({
+  BrowserCookieReader: {
+    readCookies: vi.fn<(browser: string) => Promise<CookieData[]>>(),
   },
 }));
 
 import { CookieSync } from '../../main/services/cookieSync';
 import { AuthService } from '../../main/services/auth';
 import { IntegrationCache } from '../../main/services/sync/IntegrationCache';
-import { CookieReader } from '../../main/services/cookieReader';
+import { BrowserCookieReader } from '../../main/services/browserCookieReader';
 
 const SESSION: AuthSession = {
   access_token: 'test-access-token',
@@ -91,6 +92,37 @@ const makeCookie = (overrides: Partial<CookieData> = {}): CookieData => ({
   ...overrides,
 });
 
+function decryptPayload(encrypted: string, iv: string, key: string): string {
+  const decipher = crypto.createDecipheriv(
+    'aes-256-cbc',
+    Buffer.from(key, 'hex'),
+    Buffer.from(iv, 'hex')
+  );
+  return Buffer.concat([decipher.update(Buffer.from(encrypted, 'hex')), decipher.final()]).toString(
+    'utf8'
+  );
+}
+
+async function parseFormData(
+  rawBody: string,
+  contentType: string | undefined
+): Promise<Record<string, string>> {
+  const response = new Response(rawBody, {
+    headers: contentType ? { 'content-type': contentType } : {},
+  });
+  const form = await response.formData();
+  return Object.fromEntries(Array.from(form.entries()).map(([k, v]) => [k, String(v)]));
+}
+
+async function decryptCookieUploadPayload(captureIndex = 0): Promise<unknown> {
+  const req = fetchCaptures[captureIndex];
+  if (req.body === null) {
+    throw new Error('Expected multipart body to be captured');
+  }
+  const form = await parseFormData(req.body, req.headers['content-type']);
+  return JSON.parse(decryptPayload(form.data, form.iv, form.key));
+}
+
 describe('cookie-sync blackbox', () => {
   let restoreFetch: (() => void) | null = null;
 
@@ -98,7 +130,7 @@ describe('cookie-sync blackbox', () => {
     clearFetchCaptures();
     vi.mocked(AuthService.getSession).mockReset();
     vi.mocked(IntegrationCache.isConnected).mockReset();
-    vi.mocked(CookieReader.readCookies).mockReset();
+    vi.mocked(BrowserCookieReader.readCookies).mockReset();
   });
 
   afterEach(() => {
@@ -116,7 +148,7 @@ describe('cookie-sync blackbox', () => {
     it('reads cookies, encrypts, and POSTs to the cookies upload endpoint', async () => {
       vi.mocked(AuthService.getSession).mockResolvedValue(SESSION);
       vi.mocked(IntegrationCache.isConnected).mockResolvedValue(true);
-      vi.mocked(CookieReader.readCookies).mockResolvedValue([
+      vi.mocked(BrowserCookieReader.readCookies).mockResolvedValue([
         makeCookie({ name: 'a', value: 'v1' }),
         makeCookie({ name: 'b', value: 'v2' }),
       ]);
@@ -144,7 +176,61 @@ describe('cookie-sync blackbox', () => {
       expect(req.body).toContain('name="key"');
     });
 
-    it('calls AuthService, IntegrationCache, and CookieReader in the correct order', async () => {
+    it('preserves browserProfile in the encrypted cookie upload payload', async () => {
+      vi.mocked(AuthService.getSession).mockResolvedValue(SESSION);
+      vi.mocked(IntegrationCache.isConnected).mockResolvedValue(true);
+      vi.mocked(BrowserCookieReader.readCookies).mockResolvedValue([
+        makeCookie({ name: 'default-session', value: 'v1', browserProfile: 'Default' }),
+        makeCookie({ name: 'profile-session', value: 'v2', browserProfile: 'Profile 1' }),
+      ]);
+      installUploadFetch(() => new Response(JSON.stringify({ success: true }), { status: 200 }));
+
+      await CookieSync.sync();
+
+      const payload = await decryptCookieUploadPayload();
+      expect(payload).toEqual([
+        expect.objectContaining({
+          name: 'default-session',
+          value: 'v1',
+          browserProfile: 'Default',
+        }),
+        expect.objectContaining({
+          name: 'profile-session',
+          value: 'v2',
+          browserProfile: 'Profile 1',
+        }),
+      ]);
+    });
+
+    it('uploads the current reader snapshot without carrying deleted profile cookies forward', async () => {
+      vi.mocked(AuthService.getSession).mockResolvedValue(SESSION);
+      vi.mocked(IntegrationCache.isConnected).mockResolvedValue(true);
+      vi.mocked(BrowserCookieReader.readCookies)
+        .mockResolvedValueOnce([
+          makeCookie({ name: 'stale', value: 'old', browserProfile: 'Default' }),
+          makeCookie({ name: 'kept', value: 'fresh', browserProfile: 'Default' }),
+        ])
+        .mockResolvedValueOnce([
+          makeCookie({ name: 'kept', value: 'fresh', browserProfile: 'Default' }),
+        ]);
+      installUploadFetch(() => new Response(JSON.stringify({ success: true }), { status: 200 }));
+
+      await CookieSync.sync();
+      await CookieSync.sync();
+
+      expect(fetchCaptures).toHaveLength(2);
+      const firstPayload = await decryptCookieUploadPayload(0);
+      const secondPayload = await decryptCookieUploadPayload(1);
+      expect(firstPayload).toEqual([
+        expect.objectContaining({ name: 'stale', browserProfile: 'Default' }),
+        expect.objectContaining({ name: 'kept', browserProfile: 'Default' }),
+      ]);
+      expect(secondPayload).toEqual([
+        expect.objectContaining({ name: 'kept', browserProfile: 'Default' }),
+      ]);
+    });
+
+    it('calls AuthService, IntegrationCache, and BrowserCookieReader in the correct order', async () => {
       const callOrder: string[] = [];
       vi.mocked(AuthService.getSession).mockImplementation(async () => {
         callOrder.push('auth');
@@ -154,16 +240,17 @@ describe('cookie-sync blackbox', () => {
         callOrder.push('integration-cache');
         return true;
       });
-      vi.mocked(CookieReader.readCookies).mockImplementation(async () => {
-        callOrder.push('cookie-reader');
+      vi.mocked(BrowserCookieReader.readCookies).mockImplementation(async () => {
+        callOrder.push('browser-cookie-reader');
         return [makeCookie()];
       });
       installUploadFetch(() => new Response(JSON.stringify({ success: true }), { status: 200 }));
 
       await CookieSync.sync();
 
-      expect(callOrder).toEqual(['auth', 'integration-cache', 'cookie-reader']);
+      expect(callOrder).toEqual(['auth', 'integration-cache', 'browser-cookie-reader']);
       expect(vi.mocked(IntegrationCache.isConnected)).toHaveBeenCalledWith('chrome');
+      expect(vi.mocked(BrowserCookieReader.readCookies)).toHaveBeenCalledWith('chrome');
     });
   });
 
@@ -176,7 +263,7 @@ describe('cookie-sync blackbox', () => {
 
       expect(fetchCaptures).toHaveLength(0);
       expect(vi.mocked(IntegrationCache.isConnected)).not.toHaveBeenCalled();
-      expect(vi.mocked(CookieReader.readCookies)).not.toHaveBeenCalled();
+      expect(vi.mocked(BrowserCookieReader.readCookies)).not.toHaveBeenCalled();
     });
 
     it('skips upload when chrome integration is not connected', async () => {
@@ -187,13 +274,13 @@ describe('cookie-sync blackbox', () => {
       await CookieSync.sync();
 
       expect(fetchCaptures).toHaveLength(0);
-      expect(vi.mocked(CookieReader.readCookies)).not.toHaveBeenCalled();
+      expect(vi.mocked(BrowserCookieReader.readCookies)).not.toHaveBeenCalled();
     });
 
     it('skips upload when cookie reader returns an empty list', async () => {
       vi.mocked(AuthService.getSession).mockResolvedValue(SESSION);
       vi.mocked(IntegrationCache.isConnected).mockResolvedValue(true);
-      vi.mocked(CookieReader.readCookies).mockResolvedValue([]);
+      vi.mocked(BrowserCookieReader.readCookies).mockResolvedValue([]);
       installUploadFetch(() => new Response(JSON.stringify({ success: true }), { status: 200 }));
 
       await CookieSync.sync();
@@ -206,7 +293,7 @@ describe('cookie-sync blackbox', () => {
     it('does not throw when upload returns a non-OK status', async () => {
       vi.mocked(AuthService.getSession).mockResolvedValue(SESSION);
       vi.mocked(IntegrationCache.isConnected).mockResolvedValue(true);
-      vi.mocked(CookieReader.readCookies).mockResolvedValue([makeCookie()]);
+      vi.mocked(BrowserCookieReader.readCookies).mockResolvedValue([makeCookie()]);
       installUploadFetch(
         () =>
           new Response(JSON.stringify({ error: 'boom' }), {
@@ -221,10 +308,10 @@ describe('cookie-sync blackbox', () => {
       expect(fetchCaptures[0].responseStatus).toBe(500);
     });
 
-    it('does not throw when CookieReader rejects', async () => {
+    it('does not throw when BrowserCookieReader rejects', async () => {
       vi.mocked(AuthService.getSession).mockResolvedValue(SESSION);
       vi.mocked(IntegrationCache.isConnected).mockResolvedValue(true);
-      vi.mocked(CookieReader.readCookies).mockRejectedValue(new Error('keychain denied'));
+      vi.mocked(BrowserCookieReader.readCookies).mockRejectedValue(new Error('keychain denied'));
       installUploadFetch(() => new Response(JSON.stringify({ success: true }), { status: 200 }));
 
       await expect(CookieSync.sync()).resolves.toBeUndefined();
@@ -237,7 +324,7 @@ describe('cookie-sync blackbox', () => {
     it('sends multipart/form-data with Bearer auth for the encrypted payload', async () => {
       vi.mocked(AuthService.getSession).mockResolvedValue(SESSION);
       vi.mocked(IntegrationCache.isConnected).mockResolvedValue(true);
-      vi.mocked(CookieReader.readCookies).mockResolvedValue([makeCookie()]);
+      vi.mocked(BrowserCookieReader.readCookies).mockResolvedValue([makeCookie()]);
       installUploadFetch(() => new Response(JSON.stringify({ success: true }), { status: 200 }));
 
       await CookieSync.sync();

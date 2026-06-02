@@ -1,3 +1,17 @@
+/**
+ * STATE MACHINE: BrowserIframe
+ *
+ * [ACTIVE]
+ *   - iframe + BrowserBorderGlow + BrowserCursorOverlay
+ *
+ * [WAITING_FOR_AUTH_ASSISTANCE]
+ *   - iframe + blurred Start Agent overlay
+ *   - no active-agent glow/cursor indicators
+ *
+ * [DISCONNECTED]
+ *   - iframe + blurred Take Control overlay
+ */
+
 import { useRef } from 'react';
 import { cn } from '@/lib/utils';
 import BrowserBorderGlow from '../BrowserBorderGlow';
@@ -6,21 +20,25 @@ import { StatusOverlay } from './StatusOverlay';
 import type { Message } from '../../hooks';
 
 interface BrowserIframeProps {
+  agentId?: string | null;
   taskId: string;
   url: string;
   messages: Message[];
   isFullscreen: boolean;
   isDisconnected: boolean;
+  isWaitingForAuthAssistance: boolean;
   isResuming: boolean;
   onResume: () => void;
 }
 
 export function BrowserIframe({
+  agentId,
   taskId,
   url,
   messages,
   isFullscreen,
   isDisconnected,
+  isWaitingForAuthAssistance,
   isResuming,
   onResume,
 }: BrowserIframeProps) {
@@ -42,10 +60,22 @@ export function BrowserIframe({
         title="Browser Session"
       />
 
-      <BrowserBorderGlow />
-      <BrowserCursorOverlay taskId={taskId} messages={messages} />
+      {!isWaitingForAuthAssistance && <BrowserBorderGlow />}
+      {!isWaitingForAuthAssistance && (
+        <BrowserCursorOverlay agentId={agentId} taskId={taskId} messages={messages} />
+      )}
 
-      {isDisconnected && <StatusOverlay isResuming={isResuming} onResume={onResume} />}
+      {isDisconnected && !isWaitingForAuthAssistance && (
+        <StatusOverlay isResuming={isResuming} onResume={onResume} />
+      )}
+      {isWaitingForAuthAssistance && (
+        <StatusOverlay
+          isResuming={isResuming}
+          onResume={onResume}
+          buttonLabel="Start Agent"
+          loadingLabel="Loading..."
+        />
+      )}
     </div>
   );
 }

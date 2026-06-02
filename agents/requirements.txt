@@ -23,6 +23,7 @@ playwright>=1.40.0  # For humanized input via CDP (separate from browser-use)
 python-dotenv>=1.0.0
 pydantic>=2.5.0
 python-dateutil>=2.9.0
+numpy>=2.0.0
 
 # Terminal emulator for Claude Code output filtering
 pyte>=0.8.0
@@ -48,4 +49,3 @@ tenacity>=8.2.3
 # Test runner + coverage
 pytest>=7.0
 coverage>=7.6.0
-

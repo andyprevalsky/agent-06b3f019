@@ -37,7 +37,6 @@ from helpers.llm import (
     call_llm_activity,
     call_llm_structured_streaming,
     check_progress,
-    inject_llm_only_user_preamble,
 )
 from helpers.summarize import compress_context
 from helpers.tracing import span, traced
@@ -46,7 +45,6 @@ from loop.activity_helper import call_temporal_activity_from_activity
 from loop.context_utils import poll_and_update_context
 from tools.base import EventType, MessageStatus, ToolEvent
 from tools.knowledge_base import query_blueprints
-from utils.prompts import format_required_output_schema_user_message
 from utils.tool_schemas import PLAN_TOOL_MODELS, create_agent_action_model
 
 logger = structlog.get_logger()
@@ -461,13 +459,6 @@ async def run_agent(  # noqa: C901
 
         # 6. Build system prompt (calls API for fresh shared memory each iteration)
         current_system_prompt = await system_prompt()
-        current_response_schema = response_schema
-        if get_response_schema:
-            try:
-                current_response_schema = await get_response_schema()
-            except Exception as e:
-                logger.warning(f"Failed to fetch response schema for LLM preamble: {e}")
-        schema_preamble = format_required_output_schema_user_message(current_response_schema)
 
         # 7. Build messages for LLM
         # Use custom builder if provided (e.g., browser uses compress_messages for multimodal)
@@ -475,8 +466,6 @@ async def run_agent(  # noqa: C901
 
         if build_messages:
             messages = build_messages(llm_context, current_system_prompt)
-            if schema_preamble:
-                messages = inject_llm_only_user_preamble(messages, schema_preamble)
         elif not is_inside_temporal_activity:
             # Workflow context: pre-download files, then defer message building to call_llm_activity
             # so that base64 content never crosses Temporal's 2MB payload boundary.
@@ -507,7 +496,6 @@ async def run_agent(  # noqa: C901
             messages = await build_llm_messages(
                 llm_context,
                 current_system_prompt,
-                llm_only_user_preamble=schema_preamble,
                 user_id=user_id,
             )
 
@@ -677,7 +665,7 @@ async def run_agent(  # noqa: C901
                         None,
                         None,
                         False,
-                        schema_preamble,
+                        "",
                         current_claude_token_source,
                         current_claude_token_pool_id,
                         user_id,

@@ -24,8 +24,19 @@ class TestPrompt:
     requires_browser_agent: bool = False  # Whether it needs browser agent
     requires_claude_code: bool = False  # Whether it needs Claude Code agent
     expected_patterns: Optional[list[str]] = None  # Patterns to verify in output
+    expected_patterns_env: Optional[list[str]] = None  # Env values that must appear in output
     expected_tools: Optional[list[str]] = None  # Tools that should be called
+    expected_credential_ref_kinds: Optional[list[str]] = None  # Credential refs that must be logged
+    expected_credential_ref_kinds_env: Optional[list[str]] = None  # Env-provided credential refs to assert
+    expected_same_steel_session_auth_handoff: bool = False  # Auth assistance must stay on one Steel session
+    auth_handoff_state: Optional[dict[str, str]] = None  # Direct live input handoff check values
+    auth_handoff_state_env: Optional[dict[str, str]] = None  # Env names for live input handoff check
+    credential_backprop_cases: Optional[list[dict]] = None  # DB-backed success/failure credential propagation cases
+    start_phase: Optional[str] = None  # "plan" or "execute" to bypass chat-mode startup
     is_chat_mode: bool = False  # If True, poll for response messages instead of COMPLETED status
+    required_env: Optional[list[str]] = None  # Live-service prerequisites for this e2e
+    live_fixture: Optional[str] = None  # TTL-backed generated fixture name
+    live_fixture_ttl_seconds: Optional[int] = None  # Per-fixture cache TTL override
 
 
 # All test prompts - mirroring front-end/src/components/terminal/TestPromptsSelector.tsx
@@ -241,6 +252,183 @@ TEST_PROMPTS: dict[str, TestPrompt] = {
         requires_browser_agent=True,
         requires_claude_code=True,
         expected_tools=["spawn_browser_agent", "spawn_claude_code_agent", "spawn_sub_agents"],
+    ),
+    "e2e_sync_to_agent": TestPrompt(
+        name="e2e_sync_to_agent",
+        title="Browser Auth: Sync To Agent",
+        description="Real mac-app scrape -> backend sync -> browser agent sees the freshly synced CookieBundle",
+        prompt=(
+            "Use the browser agent to open {{E2E_BROWSER_AUTH_SYNC_TARGET_URL}}. "
+            "Verify the synced browser profile authentication is available for exactly "
+            "{{E2E_BROWSER_AUTH_EXPECTED_ACCOUNT}}, then report the observed account label verbatim."
+        ),
+        timeout=900,
+        requires_browser_agent=True,
+        expected_patterns_env=["E2E_BROWSER_AUTH_EXPECTED_ACCOUNT"],
+        expected_tools=["spawn_browser_agent"],
+        expected_credential_ref_kinds=["cookie_bundle"],
+        required_env=["E2E_BROWSER_AUTH_SYNC_TARGET_URL", "E2E_BROWSER_AUTH_EXPECTED_ACCOUNT"],
+        live_fixture="browser_auth.sync_to_agent",
+    ),
+    "e2e_auth_options_scoped": TestPrompt(
+        name="e2e_auth_options_scoped",
+        title="Browser Auth: Scoped Options",
+        description="Real browser agent receives only the target realm's auth_options",
+        prompt=(
+            "Use the browser agent to open {{E2E_BROWSER_AUTH_SCOPED_TARGET_URL}}. "
+            "Confirm only the target realm account {{E2E_BROWSER_AUTH_EXPECTED_ACCOUNT}} is available "
+            "and do not use credentials for any other realm. Report the account label verbatim."
+        ),
+        timeout=600,
+        requires_browser_agent=True,
+        expected_patterns_env=["E2E_BROWSER_AUTH_EXPECTED_ACCOUNT"],
+        expected_tools=["spawn_browser_agent"],
+        expected_credential_ref_kinds=["cookie_bundle"],
+        required_env=["E2E_BROWSER_AUTH_SCOPED_TARGET_URL", "E2E_BROWSER_AUTH_EXPECTED_ACCOUNT"],
+        live_fixture="browser_auth.auth_options_scoped",
+    ),
+    "e2e_steel_precedence": TestPrompt(
+        name="e2e_steel_precedence",
+        title="Browser Auth: Steel Precedence",
+        description="Live Steel context auth is used ahead of scraped cookie injection",
+        prompt=(
+            "Use the browser agent to open {{E2E_STEEL_PRECEDENCE_TARGET_URL}}. "
+            "Verify the existing Steel session is already signed in as {{E2E_BROWSER_AUTH_EXPECTED_ACCOUNT}} "
+            "and complete without re-login. Report the account label verbatim."
+        ),
+        timeout=900,
+        requires_browser_agent=True,
+        expected_patterns_env=["E2E_BROWSER_AUTH_EXPECTED_ACCOUNT"],
+        expected_tools=["spawn_browser_agent"],
+        expected_credential_ref_kinds=["steel_session"],
+        required_env=["E2E_STEEL_PRECEDENCE_TARGET_URL", "E2E_BROWSER_AUTH_EXPECTED_ACCOUNT"],
+        live_fixture="browser_auth.steel_precedence",
+    ),
+    "e2e_cookie_fallthrough": TestPrompt(
+        name="e2e_cookie_fallthrough",
+        title="Browser Auth: Cookie Fallthrough",
+        description="Empty Steel context falls through to a real CookieBundle and lands authenticated",
+        prompt=(
+            "Use the browser agent to open {{E2E_COOKIE_FALLTHROUGH_TARGET_URL}}. "
+            "Verify the account authenticates through the synced browser cookies for "
+            "{{E2E_BROWSER_AUTH_EXPECTED_ACCOUNT}} and record the account label verbatim."
+        ),
+        timeout=900,
+        requires_browser_agent=True,
+        expected_patterns_env=["E2E_BROWSER_AUTH_EXPECTED_ACCOUNT"],
+        expected_tools=["spawn_browser_agent"],
+        expected_credential_ref_kinds=["cookie_bundle"],
+        required_env=["E2E_COOKIE_FALLTHROUGH_TARGET_URL", "E2E_BROWSER_AUTH_EXPECTED_ACCOUNT"],
+        live_fixture="browser_auth.cookie_fallthrough",
+    ),
+    "e2e_email_otp_user_message": TestPrompt(
+        name="e2e_email_otp_user_message",
+        title="Browser Auth: Email OTP User Message",
+        description="Real emailed OTP enters the browser-use conversation as a user message and completes login",
+        prompt=(
+            "Use the browser agent to open {{E2E_EMAIL_OTP_TARGET_URL}}. "
+            "Request email OTP login for {{E2E_CONNECTED_EMAIL_ACCOUNT}}, use the received email code, "
+            "and report successful authentication for that email address."
+        ),
+        timeout=1200,
+        requires_browser_agent=True,
+        expected_patterns_env=["E2E_CONNECTED_EMAIL_ACCOUNT"],
+        expected_tools=["spawn_browser_agent"],
+        expected_credential_ref_kinds=["email_otp"],
+        required_env=["E2E_EMAIL_OTP_TARGET_URL", "E2E_CONNECTED_EMAIL_ACCOUNT"],
+        live_fixture="browser_auth.email_otp_user_message",
+    ),
+    "e2e_user_assistance_handoff": TestPrompt(
+        name="e2e_user_assistance_handoff",
+        title="Browser Auth: User Assistance Handoff",
+        description="Automation writes page state, live-view user mutates it, automation resumes in that same state",
+        prompt=(
+            "Use the browser agent to open https://www.selenium.dev/selenium/web/web-form.html. "
+            "Find the text input identified by selector input[name=\"my-text\"] and type "
+            "rose-auth-handoff-auto-20260522 into it with no leading or trailing spaces. "
+            "Do not submit the form, press Enter, navigate away, or refresh. "
+            "After the value is visibly present, call request_user_assistance_for_authentication exactly once. "
+            "After user assistance completes, the expected final value is rose-auth-handoff-user-20260522. "
+            "Do not navigate, refresh, or change the input after assistance; read the current value from that same "
+            "input and report the observed value verbatim."
+        ),
+        timeout=1800,
+        requires_browser_agent=True,
+        expected_patterns=["rose-auth-handoff-user-20260522"],
+        expected_tools=["spawn_browser_agent"],
+        expected_credential_ref_kinds=["steel_session"],
+        expected_same_steel_session_auth_handoff=True,
+        auth_handoff_state={
+            "input_selector": "input[name='my-text']",
+            "automation_value": "rose-auth-handoff-auto-20260522",
+            "interactive_value": "rose-auth-handoff-user-20260522",
+        },
+        start_phase="execute",
+    ),
+    "e2e_passkey_qr_handoff": TestPrompt(
+        name="e2e_passkey_qr_handoff",
+        title="Browser Auth: Passkey QR Handoff",
+        description="Gating real Steel passkey QR flow with a real phone",
+        prompt=(
+            "Use the browser agent to open {{E2E_PASSKEY_TARGET_URL}}. "
+            "Reach the passkey prompt, use the other-device QR handoff, and verify the Steel session is authenticated."
+        ),
+        timeout=1800,
+        requires_browser_agent=True,
+        expected_tools=["spawn_browser_agent"],
+        expected_credential_ref_kinds=["steel_session"],
+        required_env=["E2E_PASSKEY_TARGET_URL", "E2E_PASSKEY_PHONE_READY"],
+        live_fixture="browser_auth.passkey_qr_handoff",
+        live_fixture_ttl_seconds=60 * 60,
+    ),
+    "e2e_credential_backprop": TestPrompt(
+        name="e2e_credential_backprop",
+        title="Browser Auth: Credential Backprop",
+        description="Real browser-agent outcomes clear disabledAt on success and set disabledAt/failureReason on auth failure",
+        prompt="Runs the credential backprop success and auth-failure live fixture cases.",
+        timeout=1200,
+        requires_browser_agent=True,
+        expected_tools=["spawn_browser_agent"],
+        credential_backprop_cases=[
+            {
+                "name": "success",
+                "title": "Credential Backprop Success",
+                "description": "Successful browser run clears disabledAt/disabledReason on the referenced credential",
+                "credential_fixture_case": "success",
+                "credential_ref_kind": "password",
+                "expected_terminal_status": "COMPLETED",
+                "expected_before_disabled": True,
+                "expected_after_disabled": False,
+                "expected_propagation_outcome": "success",
+                "prompt": (
+                    "Use the browser agent to open {{TARGET_URL}}. "
+                    "Use the saved credential for this site and complete the credential-backprop success path. "
+                    "Do not ask questions, request user assistance, or use alternate credentials. "
+                    "After the site shows the authenticated success state, report the credential-backprop success outcome."
+                ),
+            },
+            {
+                "name": "auth_failure",
+                "title": "Credential Backprop Auth Failure",
+                "description": "Observed auth failure disables the referenced credential and exposes failureReason",
+                "credential_fixture_case": "auth_failure",
+                "credential_ref_kind": "password",
+                "expected_terminal_status": "COMPLETED",
+                "expected_before_disabled": False,
+                "expected_after_disabled": True,
+                "expected_propagation_outcome": "auth_failed",
+                "expected_failure_reason": "auth_exhausted",
+                "prompt": (
+                    "Use the browser agent to open {{TARGET_URL}}. "
+                    "Use the saved credential for this site exactly as provided and attempt login once through the "
+                    "normal username/password flow. Do not ask questions, request user assistance, use alternate "
+                    "credentials, reset the password, or recover with a new login method. If the saved credential "
+                    "is rejected, stop after confirming the site's authentication failure message and report that "
+                    "the credential-backprop auth failure was observed."
+                ),
+            },
+        ],
+        start_phase="execute",
     ),
 }
 

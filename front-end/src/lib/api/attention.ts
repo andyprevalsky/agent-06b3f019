@@ -15,6 +15,24 @@ export interface AttentionRequest {
   answered: boolean;
 }
 
+export interface AuthAssistanceHandoff {
+  type?: string;
+  steelSessionId?: string | null;
+  liveViewUrl?: string | null;
+}
+
+export interface AuthAssistanceRefreshResponse {
+  request?: {
+    id: string;
+    steelSessionId?: string;
+    completedAt?: string | null;
+  };
+  handoff?: AuthAssistanceHandoff;
+  liveViewUrl?: string | null;
+  refreshed?: boolean;
+  alreadyCompleted?: boolean;
+}
+
 // Fetch all pending attention requests for the current user
 export async function getAttentionRequests(): Promise<AttentionRequest[]> {
   const headers = getAuthHeaders();
@@ -108,6 +126,38 @@ export async function respondToAttentionRequest(
   if (!res.ok) {
     const error = await res.json().catch(() => ({}));
     throw new Error(error.error || 'Failed to respond to attention request');
+  }
+}
+
+export async function refreshAuthAssistanceSession(
+  requestId: string,
+): Promise<AuthAssistanceRefreshResponse> {
+  const headers = getAuthHeaders();
+
+  const res = await fetch(`${API_BASE_WITH_PATH}/auth-assistance/${requestId}/refresh-session`, {
+    method: 'POST',
+    headers,
+  });
+
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    throw new Error(error.error || 'Failed to refresh auth assistance session');
+  }
+
+  return (await res.json()) as AuthAssistanceRefreshResponse;
+}
+
+export async function completeAuthAssistanceRequest(requestId: string): Promise<void> {
+  const headers = getAuthHeaders();
+
+  const res = await fetch(`${API_BASE_WITH_PATH}/auth-assistance/${requestId}/complete`, {
+    method: 'POST',
+    headers,
+  });
+
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    throw new Error(error.error || 'Failed to complete authentication assistance');
   }
 }
 

@@ -3,15 +3,241 @@
  */
 
 import { prisma } from '../database';
+import { canonicalAuthRealm } from '../authRealm';
 import { buildFingerprintScript } from './injectionScripts';
 import { type FingerprintData, log } from './types';
+import {
+  injectCacheStorageState,
+  injectIndexedDBState,
+  injectLocalStorageState,
+  injectPermissionState,
+  injectScrollbarState,
+} from './injectionState';
+
+interface CookieBundleCandidate {
+  id: string;
+  browserSource: string;
+  browserProfile: string;
+  disabledAt: Date | null;
+  freshestCookieUtc: bigint | null;
+}
+
+export type BrowserAuthCredentialSource =
+  | {
+      kind: 'steel_session';
+      id: string;
+      contextId: string;
+      credentialRef: { kind: 'steel_session'; id: string };
+    }
+  | {
+      kind: 'cookie_bundle';
+      id: string;
+      browserSource: string;
+      browserProfile: string;
+      disabledAt: Date | null;
+      freshestCookieUtc: bigint | null;
+      credentialRef: { kind: 'cookie_bundle'; id: string };
+    }
+  | { kind: 'none'; credentialRef: null };
+
+interface SteelRealmCookieSummary {
+  cookieCount: number;
+  hasRealmCookies: boolean;
+  checkedAt: string;
+}
+
+function cookieDomainWhere(authRealm: string) {
+  return {
+    OR: [
+      { domain: authRealm },
+      { domain: `.${authRealm}` },
+      { domain: { endsWith: `.${authRealm}` } },
+    ],
+  };
+}
+
+function benchmarkSavedBrowserAuthDisabled(): boolean {
+  return ['1', 'true', 'yes', 'on'].includes(
+    (process.env.BENCHMARK_DISABLE_SAVED_BROWSER_AUTH ?? '').trim().toLowerCase()
+  );
+}
+
+function envEnabled(name: string, defaultValue = true): boolean {
+  const raw = process.env[name];
+  if (raw === undefined) return defaultValue;
+  return !['0', 'false', 'no', 'off', 'disabled'].includes(raw.trim().toLowerCase());
+}
+
+export function steelCookieMatchesAuthRealm(cookieDomain: string | undefined, authRealm: string) {
+  const normalizedDomain = (cookieDomain ?? '').trim().toLowerCase().replace(/^\./, '');
+  return normalizedDomain === authRealm || normalizedDomain.endsWith(`.${authRealm}`);
+}
+
+function cookieExpiryIsLive(expires: unknown, nowEpochSeconds: number) {
+  if (expires === undefined || expires === null) return true;
+  const numeric = typeof expires === 'number' ? expires : Number(expires);
+  if (!Number.isFinite(numeric) || numeric <= 0) return true;
+  return numeric > nowEpochSeconds;
+}
+
+export function summarizeSteelCookiesForRealm(
+  cookies: Array<{ domain?: string; expires?: unknown; expirationDate?: unknown }>,
+  authRealm: string,
+  nowEpochSeconds: number = Math.floor(Date.now() / 1000)
+): SteelRealmCookieSummary {
+  const realmCookies = cookies.filter((cookie) => {
+    const expires = cookie.expires ?? cookie.expirationDate;
+    return (
+      steelCookieMatchesAuthRealm(cookie.domain, authRealm) &&
+      cookieExpiryIsLive(expires, nowEpochSeconds)
+    );
+  });
+  return {
+    cookieCount: realmCookies.length,
+    hasRealmCookies: realmCookies.length > 0,
+    checkedAt: new Date(nowEpochSeconds * 1000).toISOString(),
+  };
+}
+
+async function getSteelSessionRealmCookieSummary(
+  sessionId: string,
+  authRealm: string
+): Promise<SteelRealmCookieSummary> {
+  const { steel } = await import('./session');
+  const context = (await steel.sessions.context(sessionId)) as {
+    cookies?: Array<{ domain?: string; expires?: unknown; expirationDate?: unknown }>;
+  };
+  return summarizeSteelCookiesForRealm(context.cookies ?? [], authRealm);
+}
+
+async function freshestCookieUtcForBundle(params: {
+  userId: string;
+  authRealm: string;
+  browserSource: string;
+  browserProfile: string;
+}) {
+  const result = await prisma.cookie.aggregate({
+    where: {
+      userId: params.userId,
+      browserSource: params.browserSource,
+      browserProfile: params.browserProfile,
+      ...cookieDomainWhere(params.authRealm),
+    },
+    _max: { creationUtc: true },
+  });
+  return result._max.creationUtc;
+}
+
+async function selectTopCookieBundle(params: {
+  userId: string;
+  authRealm: string;
+}): Promise<CookieBundleCandidate | null> {
+  const bundles = await prisma.cookieBundle.findMany({
+    where: { userId: params.userId, authRealm: params.authRealm },
+  });
+  if (bundles.length === 0) return null;
+
+  const candidates = await Promise.all(
+    bundles
+      .filter((bundle) => bundle.disabledAt === null)
+      .map(async (bundle) => ({
+        id: bundle.id,
+        browserSource: bundle.browserSource,
+        browserProfile: bundle.browserProfile,
+        disabledAt: bundle.disabledAt,
+        freshestCookieUtc: await freshestCookieUtcForBundle({
+          userId: params.userId,
+          authRealm: params.authRealm,
+          browserSource: bundle.browserSource,
+          browserProfile: bundle.browserProfile,
+        }),
+      }))
+  );
+
+  candidates.sort((a, b) => {
+    if ((a.disabledAt === null) !== (b.disabledAt === null)) {
+      return a.disabledAt === null ? -1 : 1;
+    }
+    const aFresh = a.freshestCookieUtc ?? 0n;
+    const bFresh = b.freshestCookieUtc ?? 0n;
+    return aFresh > bFresh ? -1 : aFresh < bFresh ? 1 : 0;
+  });
+  return candidates[0] ?? null;
+}
+
+export async function resolveBrowserAuthCredentialSource(params: {
+  userId: string;
+  authRealm: string;
+  steelContextId: string | null;
+  steelSessionHasRealmCookies?: boolean;
+}): Promise<BrowserAuthCredentialSource> {
+  if (benchmarkSavedBrowserAuthDisabled()) {
+    log.info('  [cookies] Benchmark anon mode active; skipping saved browser auth selection', {
+      userId: params.userId,
+      authRealm: params.authRealm,
+      steelContextId: params.steelContextId,
+    });
+    return { kind: 'none', credentialRef: null };
+  }
+
+  const steelAuth =
+    params.steelContextId !== null && params.authRealm !== ''
+      ? await prisma.steelSessionAuth.findUnique({
+          where: {
+            userId_contextId_authRealm: {
+              userId: params.userId,
+              contextId: params.steelContextId,
+              authRealm: params.authRealm,
+            },
+          },
+        })
+      : null;
+
+  if (
+    steelAuth !== null &&
+    steelAuth.disabledAt === null &&
+    params.steelSessionHasRealmCookies !== false
+  ) {
+    return {
+      kind: 'steel_session',
+      id: steelAuth.id,
+      contextId: steelAuth.contextId,
+      credentialRef: { kind: 'steel_session', id: steelAuth.id },
+    };
+  }
+
+  if (params.authRealm !== '') {
+    const topBundle = await selectTopCookieBundle({
+      userId: params.userId,
+      authRealm: params.authRealm,
+    });
+    if (topBundle !== null) {
+      return {
+        kind: 'cookie_bundle',
+        id: topBundle.id,
+        browserSource: topBundle.browserSource,
+        browserProfile: topBundle.browserProfile,
+        disabledAt: topBundle.disabledAt,
+        freshestCookieUtc: topBundle.freshestCookieUtc,
+        credentialRef: { kind: 'cookie_bundle', id: topBundle.id },
+      };
+    }
+  }
+
+  return { kind: 'none', credentialRef: null };
+}
 
 export async function injectUserData(
   sessionId: string,
   userId: string,
   startUrl: string
 ): Promise<{
-  cookies: { injected: boolean; cookieCount: number };
+  cookies: {
+    injected: boolean;
+    cookieCount: number;
+    authSource: BrowserAuthCredentialSource['kind'];
+    credentialRef: BrowserAuthCredentialSource['credentialRef'];
+  };
   fingerprint: { injected: boolean };
   indexedDB: { injected: boolean; originCount: number };
   localStorage: { injected: boolean; originCount: number };
@@ -32,6 +258,7 @@ export async function injectUserData(
   // Extract registrable domain (e.g. "www.amazon.com" → "amazon.com")
   const parts = hostname.split('.');
   const registrableDomain = parts.length > 2 ? parts.slice(-2).join('.') : hostname;
+  const authRealm = canonicalAuthRealm(url);
   // Match: exact domain, with leading dot, and registrable domain variants
   const domainVariants = [
     hostname, // "www.amazon.com"
@@ -40,7 +267,6 @@ export async function injectUserData(
     `.${registrableDomain}`, // ".amazon.com"
   ];
   const uniqueDomains = [...new Set(domainVariants)];
-  const cookieDomainFilter = { userId, domain: { in: uniqueDomains } };
   // Origin-based tables (localStorage, IndexedDB, cacheStorage, permissions) store
   // origins like "https://domain.com". Use boundary-aware endsWith matching to
   // avoid false positives (e.g. "evilamazon.com" matching "amazon.com").
@@ -57,17 +283,22 @@ export async function injectUserData(
     `  [cookies] Filtering to domains for start_url "${startUrl}": ${uniqueDomains.join(', ')}`
   );
 
-  // Fetch cookies, fingerprint, localStorage, IndexedDB, permissions, and cacheStorage in parallel
+  // Fetch session, fingerprint, localStorage, IndexedDB, permissions, and cacheStorage in parallel.
+  // Cookie rows are intentionally fetched after selecting one credential source
+  // for this auth realm: either the persistent Steel context or one CookieBundle.
   log.info(`  [1/9] Fetching user data from DB...`);
   const [
-    cookies,
+    dbSession,
     integration,
     localStorageOrigins,
     indexedDBOrigins,
     permissions,
     cacheStorageOrigins,
   ] = await Promise.all([
-    prisma.cookie.findMany({ where: cookieDomainFilter }),
+    prisma.browserSession.findUnique({
+      where: { sessionId },
+      include: { context: true },
+    }),
     prisma.integration.findUnique({
       where: { userId_name: { userId, name: 'browser_fingerprint' } },
     }),
@@ -78,9 +309,75 @@ export async function injectUserData(
   ]);
   log.info(`  [1/9] DB fetch complete (${Date.now() - startTime}ms)`);
 
+  if (!dbSession?.wsUrl) {
+    throw new Error('No WebSocket URL found for session');
+  }
+
+  let cookies: Awaited<ReturnType<typeof prisma.cookie.findMany>> = [];
+  const steelContextId = dbSession.context.contextId;
+  const steelAuthForVerification =
+    steelContextId !== null && authRealm !== ''
+      ? await prisma.steelSessionAuth.findUnique({
+          where: {
+            userId_contextId_authRealm: {
+              userId,
+              contextId: steelContextId,
+              authRealm,
+            },
+          },
+        })
+      : null;
+  const steelCookieSummary =
+    steelAuthForVerification !== null && steelAuthForVerification.disabledAt === null
+      ? await getSteelSessionRealmCookieSummary(sessionId, authRealm)
+      : null;
+  const authSource = await resolveBrowserAuthCredentialSource({
+    userId,
+    authRealm,
+    steelContextId,
+    steelSessionHasRealmCookies: steelCookieSummary?.hasRealmCookies,
+  });
+
+  if (authSource.kind === 'steel_session') {
+    log.info('  [cookies] Steel context has prioritized auth; skipping cookie injection', {
+      userId,
+      authRealm,
+      contextId: steelContextId,
+      steelSessionAuthId: authSource.id,
+      steelCookieCount: steelCookieSummary?.cookieCount ?? null,
+    });
+  } else if (authSource.kind === 'cookie_bundle') {
+    if (steelCookieSummary !== null && !steelCookieSummary.hasRealmCookies) {
+      log.info(
+        '  [cookies] Steel auth marker exists but current session has no realm cookies; falling through to CookieBundle',
+        {
+          userId,
+          authRealm,
+          contextId: steelContextId,
+        }
+      );
+    }
+    log.info('  [cookies] Selected CookieBundle for injection', {
+      userId,
+      authRealm,
+      cookieBundleId: authSource.id,
+      browserSource: authSource.browserSource,
+      browserProfile: authSource.browserProfile,
+      disabled: authSource.disabledAt !== null,
+    });
+    cookies = await prisma.cookie.findMany({
+      where: {
+        userId,
+        ...cookieDomainWhere(authRealm),
+        browserSource: authSource.browserSource,
+        browserProfile: authSource.browserProfile,
+      },
+    });
+  }
+
   const hasCookies = cookies.length > 0;
   const fp = (integration?.config as { fingerprint?: FingerprintData } | null)?.fingerprint;
-  const hasFingerprint = !!fp;
+  const hasFingerprint = !!fp && envEnabled('BROWSER_AGENT_FINGERPRINT_INJECTION_ENABLED', true);
   const hasLocalStorage = localStorageOrigins.length > 0;
   const hasIndexedDB = indexedDBOrigins.length > 0;
   const hasPermissions = permissions.length > 0;
@@ -93,17 +390,6 @@ export async function injectUserData(
   // Note: We always need CDP connection now to inject scrollbar CSS
   // (previously returned early when no cookies/fingerprint)
 
-  // Get session info to get WebSocket URL
-  log.info(`  [2/9] Fetching session wsUrl from DB...`);
-  const dbSession = await prisma.browserSession.findUnique({
-    where: { sessionId },
-  });
-  log.info(`  [2/9] Session fetch complete (${Date.now() - startTime}ms)`);
-
-  if (!dbSession?.wsUrl) {
-    throw new Error('No WebSocket URL found for session');
-  }
-
   // Connect via Playwright (single connection for both operations)
   const { chromium } = await import('playwright');
   let browser;
@@ -114,7 +400,12 @@ export async function injectUserData(
     const context = browser.contexts()[0];
     log.info(`  [3/9] CDP connected (${Date.now() - startTime}ms)`);
 
-    let cookieResult = { injected: false, cookieCount: 0 };
+    let cookieResult = {
+      injected: false,
+      cookieCount: 0,
+      authSource: authSource.kind,
+      credentialRef: authSource.credentialRef,
+    };
     let fingerprintResult = { injected: false };
     let localStorageResult = { injected: false, originCount: 0 };
     let indexedDBResult = { injected: false, originCount: 0 };
@@ -163,7 +454,12 @@ export async function injectUserData(
             log.info(`  [cookies] Injecting via CDP...`);
             await context.addCookies(validCookies);
             log.info(`  [cookies] ✅ Injected (${Date.now() - startTime}ms)`);
-            cookieResult = { injected: true, cookieCount: validCookies.length };
+            cookieResult = {
+              injected: true,
+              cookieCount: validCookies.length,
+              authSource: authSource.kind,
+              credentialRef: authSource.credentialRef,
+            };
           } catch (error) {
             log.error('Failed to inject cookies', {
               error: error instanceof Error ? error.message : String(error),
@@ -253,53 +549,11 @@ export async function injectUserData(
       injectionPromises.push(
         (async () => {
           try {
-            log.info(`  [localStorage] Injecting for ${localStorageOrigins.length} origins...`);
-
-            // Build origin -> entries map
-            const localStorageByOrigin: Record<string, Array<{ key: string; value: string }>> = {};
-            for (const origin of localStorageOrigins) {
-              // Fix origin format if needed
-              let cleanOrigin = origin.origin;
-              if (cleanOrigin.startsWith('ttps://')) {
-                cleanOrigin = 'https://' + cleanOrigin.slice(7);
-              } else if (!cleanOrigin.startsWith('http')) {
-                cleanOrigin = 'https://' + cleanOrigin;
-              }
-              // Handle partitioned storage format
-              if (cleanOrigin.includes('/^0')) {
-                cleanOrigin = cleanOrigin.split('/^0')[0];
-              }
-              localStorageByOrigin[cleanOrigin] = origin.entries as Array<{
-                key: string;
-                value: string;
-              }>;
-            }
-
-            const localStorageScript = `
-            (function() {
-              const allLocalStorage = ${JSON.stringify(localStorageByOrigin)};
-              const currentOrigin = window.location.origin;
-
-              for (const [origin, entries] of Object.entries(allLocalStorage)) {
-                // Check if current origin matches
-                if (currentOrigin === origin ||
-                    currentOrigin.endsWith(origin.replace('https://', '.')) ||
-                    origin.includes(currentOrigin.replace('https://', ''))) {
-
-                  for (const entry of entries) {
-                    try {
-                      localStorage.setItem(entry.key, entry.value);
-                    } catch (e) {}
-                  }
-                  log.info('[localStorage] ✅ Injected', entries.length, 'entries for', currentOrigin);
-                }
-              }
-            })();
-          `;
-
-            await context.addInitScript(localStorageScript);
-            log.info(`  [localStorage] ✅ Injected (${Date.now() - startTime}ms)`);
-            localStorageResult = { injected: true, originCount: localStorageOrigins.length };
+            localStorageResult = await injectLocalStorageState(
+              context,
+              localStorageOrigins,
+              startTime
+            );
           } catch (error) {
             log.error('Failed to inject localStorage', {
               error: error instanceof Error ? error.message : String(error),
@@ -314,126 +568,7 @@ export async function injectUserData(
       injectionPromises.push(
         (async () => {
           try {
-            log.info(`  [indexedDB] Injecting for ${indexedDBOrigins.length} origins...`);
-
-            // Build origin -> databases map
-            interface IDBRecord {
-              key: unknown;
-              value: unknown;
-            }
-            interface IDBObjectStore {
-              name: string;
-              records: IDBRecord[];
-            }
-            interface IDBDatabase {
-              name: string;
-              objectStores: IDBObjectStore[];
-            }
-
-            const indexedDBByOrigin: Record<string, IDBDatabase[]> = {};
-            for (const origin of indexedDBOrigins) {
-              indexedDBByOrigin[origin.origin] = origin.databases as unknown as IDBDatabase[];
-            }
-
-            // IndexedDB injection is more complex - we need to recreate databases, object stores, and records
-            const indexedDBScript = `
-            (function() {
-              const allIndexedDB = ${JSON.stringify(indexedDBByOrigin)};
-              const currentOrigin = window.location.origin;
-
-              // Find matching data for current origin
-              let matchingDatabases = null;
-              for (const [origin, databases] of Object.entries(allIndexedDB)) {
-                if (currentOrigin === origin ||
-                    currentOrigin.includes(origin.replace('https://', '').replace('http://', ''))) {
-                  matchingDatabases = databases;
-                  break;
-                }
-              }
-
-              if (!matchingDatabases) return;
-
-              // Helper to inject data into a database
-              async function injectDatabase(dbInfo) {
-                return new Promise((resolve) => {
-                  // First, try to open existing database to get version
-                  const checkRequest = indexedDB.open(dbInfo.name);
-
-                  checkRequest.onerror = () => {
-                    log.warn('[IndexedDB] Failed to check database:', dbInfo.name);
-                    resolve(false);
-                  };
-
-                  checkRequest.onsuccess = (e) => {
-                    const existingDb = e.target.result;
-                    const currentVersion = existingDb.version;
-                    existingDb.close();
-
-                    // Open with incremented version to trigger upgrade
-                    const request = indexedDB.open(dbInfo.name, currentVersion + 1);
-
-                    request.onerror = () => {
-                      log.warn('[IndexedDB] Failed to open database:', dbInfo.name);
-                      resolve(false);
-                    };
-
-                    request.onupgradeneeded = (e) => {
-                      const db = e.target.result;
-
-                      // Create object stores that don't exist
-                      for (const store of dbInfo.objectStores) {
-                        if (!db.objectStoreNames.contains(store.name)) {
-                          try {
-                            db.createObjectStore(store.name);
-                          } catch (err) {}
-                        }
-                      }
-                    };
-
-                    request.onsuccess = (e) => {
-                      const db = e.target.result;
-
-                      // Add records to each object store
-                      for (const store of dbInfo.objectStores) {
-                        if (db.objectStoreNames.contains(store.name) && store.records && store.records.length > 0) {
-                          try {
-                            const tx = db.transaction(store.name, 'readwrite');
-                            const objectStore = tx.objectStore(store.name);
-
-                            for (const record of store.records) {
-                              try {
-                                objectStore.put(record.value, record.key);
-                              } catch (e) {}
-                            }
-                          } catch (e) {}
-                        }
-                      }
-
-                      db.close();
-                      log.info('[IndexedDB] ✅ Injected database:', dbInfo.name);
-                      resolve(true);
-                    };
-                  };
-
-                  checkRequest.onblocked = () => {
-                    log.warn('[IndexedDB] Database blocked:', dbInfo.name);
-                    resolve(false);
-                  };
-                });
-              }
-
-              // Inject all databases
-              (async () => {
-                for (const dbInfo of matchingDatabases) {
-                  await injectDatabase(dbInfo);
-                }
-              })();
-            })();
-          `;
-
-            await context.addInitScript(indexedDBScript);
-            log.info(`  [indexedDB] ✅ Injected (${Date.now() - startTime}ms)`);
-            indexedDBResult = { injected: true, originCount: indexedDBOrigins.length };
+            indexedDBResult = await injectIndexedDBState(context, indexedDBOrigins, startTime);
           } catch (error) {
             log.error('Failed to inject indexedDB', {
               error: error instanceof Error ? error.message : String(error),
@@ -449,71 +584,7 @@ export async function injectUserData(
       injectionPromises.push(
         (async () => {
           try {
-            log.info(`  [permissions] Injecting ${permissions.length} permission grants...`);
-
-            // Build permission data for JavaScript injection
-            const permissionGrants = permissions.map((p) => ({
-              origin: p.origin,
-              permission: p.permission,
-              setting: p.setting,
-            }));
-
-            // JavaScript injection to override navigator.permissions.query
-            const permissionScript = `
-            (function() {
-              'use strict';
-
-              const grants = ${JSON.stringify(permissionGrants)};
-
-              // Helper to match origin patterns
-              function matchOrigin(pattern, origin) {
-                // Exact match
-                if (pattern === origin) return true;
-
-                // Wildcard pattern: "[*.]example.com" matches "*.example.com"
-                if (pattern.startsWith('[*.]')) {
-                  const domain = pattern.slice(4);
-                  const originHost = new URL(origin).hostname;
-                  return originHost === domain || originHost.endsWith('.' + domain);
-                }
-
-                return false;
-              }
-
-              // Override navigator.permissions.query
-              const originalQuery = navigator.permissions.query.bind(navigator.permissions);
-              navigator.permissions.query = async function(descriptor) {
-                const permName = descriptor.name;
-                const currentOrigin = window.location.origin;
-
-                // Find matching grant
-                const grant = grants.find(g =>
-                  g.permission === permName && matchOrigin(g.origin, currentOrigin)
-                );
-
-                if (grant) {
-                  const state = grant.setting === 1 ? 'granted' : 'denied';
-                  return {
-                    state,
-                    name: permName,
-                    onchange: null,
-                    addEventListener: function() {},
-                    removeEventListener: function() {},
-                    dispatchEvent: function() { return true; },
-                  };
-                }
-
-                // Fall back to original for unmatched permissions
-                return originalQuery(descriptor);
-              };
-
-              log.info('[Permissions] ✅ Permission overrides injected for', grants.length, 'grants');
-            })();
-          `;
-
-            await context.addInitScript(permissionScript);
-            log.info(`  [permissions] ✅ Injected (${Date.now() - startTime}ms)`);
-            permissionsResult = { injected: true, grantCount: permissions.length };
+            permissionsResult = await injectPermissionState(context, permissions, startTime);
           } catch (error) {
             log.error('Failed to inject permissions', {
               error: error instanceof Error ? error.message : String(error),
@@ -529,53 +600,11 @@ export async function injectUserData(
       injectionPromises.push(
         (async () => {
           try {
-            log.info(
-              `  [cacheStorage] Injecting metadata for ${cacheStorageOrigins.length} origins...`
+            cacheStorageResult = await injectCacheStorageState(
+              context,
+              cacheStorageOrigins,
+              startTime
             );
-
-            // Build origin -> caches map
-            const cachesByOrigin: Record<string, Array<{ name: string }>> = {};
-            for (const origin of cacheStorageOrigins) {
-              const caches = origin.caches as Array<{ name: string; size?: number }>;
-              cachesByOrigin[origin.origin] = caches.map((c) => ({ name: c.name }));
-            }
-
-            const cacheStorageScript = `
-            (function() {
-              'use strict';
-
-              const cachesByOrigin = ${JSON.stringify(cachesByOrigin)};
-              const currentOrigin = window.location.origin;
-
-              // Find matching caches for current origin
-              let matchingCaches = null;
-              for (const [origin, caches] of Object.entries(cachesByOrigin)) {
-                if (currentOrigin === origin ||
-                    currentOrigin.includes(origin.replace('https://', '').replace('http://', ''))) {
-                  matchingCaches = caches;
-                  break;
-                }
-              }
-
-              if (!matchingCaches || matchingCaches.length === 0) return;
-
-              // Pre-open caches (doesn't add any data, just creates empty caches)
-              (async function() {
-                for (const cache of matchingCaches) {
-                  try {
-                    await caches.open(cache.name);
-                    log.info('[CacheStorage] ✅ Opened cache:', cache.name);
-                  } catch (e) {
-                    log.warn('[CacheStorage] Failed to open cache:', cache.name, e);
-                  }
-                }
-              })();
-            })();
-          `;
-
-            await context.addInitScript(cacheStorageScript);
-            log.info(`  [cacheStorage] ✅ Injected (${Date.now() - startTime}ms)`);
-            cacheStorageResult = { injected: true, originCount: cacheStorageOrigins.length };
           } catch (error) {
             log.error('Failed to inject cacheStorage', {
               error: error instanceof Error ? error.message : String(error),
@@ -590,33 +619,7 @@ export async function injectUserData(
     injectionPromises.push(
       (async () => {
         try {
-          const scrollbarHideScript = `
-          (function() {
-            const style = document.createElement('style');
-            style.id = 'yutori-scrollbar-hide';
-            style.textContent = \`
-              /* Hide scrollbars on ALL elements for consistent 1280x800 viewport */
-              *::-webkit-scrollbar {
-                display: none !important;
-                width: 0 !important;
-                height: 0 !important;
-              }
-              * {
-                -ms-overflow-style: none !important;
-                scrollbar-width: none !important;
-              }
-            \`;
-            if (document.head) {
-              document.head.appendChild(style);
-            } else {
-              document.addEventListener('DOMContentLoaded', () => document.head.appendChild(style));
-            }
-          })();
-        `;
-          await context.addInitScript(scrollbarHideScript);
-          log.info(
-            `  [scrollbar] ✅ CSS injected for consistent 1280x800 viewport (${Date.now() - startTime}ms)`
-          );
+          await injectScrollbarState(context, startTime);
         } catch (error) {
           log.error('Failed to inject scrollbar CSS', {
             error: error instanceof Error ? error.message : String(error),

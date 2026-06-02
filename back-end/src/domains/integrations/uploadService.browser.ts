@@ -5,11 +5,20 @@
  * Split from uploadService.ts for max-lines compliance.
  */
 
-import { type Prisma, type LocalStoragePayload, type IndexedDBPayload, type PermissionPayload, IntegrationType, IntegrationStatus } from './types';
+import {
+  type Prisma,
+  type LocalStoragePayload,
+  type IndexedDBPayload,
+  type PermissionPayload,
+  IntegrationType,
+  IntegrationStatus,
+} from './types';
 import { createLogger } from '../../providers/logger';
+import { authRealmFromCookieDomain } from '../../providers/authRealm';
 import { VALID_BROWSERS } from './config';
 import * as repo from './repo';
 const log = createLogger('Integrations');
+const COOKIE_SNAPSHOT_SEPARATOR = '\u001f';
 
 /**
  * Sanitize string: remove null bytes that PostgreSQL can't store.
@@ -68,6 +77,7 @@ interface CookieInput {
   samesite?: number;
   source_scheme?: number;
   source_port?: number;
+  browserProfile?: { id?: string; path?: string } | string | null;
 }
 
 interface SanitizedCookie extends CookieInput {
@@ -77,6 +87,35 @@ interface SanitizedCookie extends CookieInput {
   domain: string;
   path: string;
   top_frame_site_key: string;
+  browserProfile: string;
+}
+
+function normalizeBrowserProfile(profile: CookieInput['browserProfile']): string {
+  if (typeof profile === 'string') {
+    const sanitized = sanitizeString(profile);
+    return sanitized;
+  }
+  if (profile !== null && profile !== undefined && typeof profile === 'object') {
+    return sanitizeString(String(profile.id ?? ''));
+  }
+  return '';
+}
+
+function cookieIdentity(cookie: {
+  domain: string;
+  name: string;
+  path: string;
+  top_frame_site_key?: string;
+  topFrameSiteKey?: string;
+  browserProfile?: string;
+}): string {
+  return [
+    cookie.domain,
+    cookie.name,
+    cookie.path,
+    cookie.top_frame_site_key ?? cookie.topFrameSiteKey ?? '',
+    cookie.browserProfile ?? '',
+  ].join(COOKIE_SNAPSHOT_SEPARATOR);
 }
 
 /** Deduplicate cookies within a batch, keeping the one with latest expiry. */
@@ -84,7 +123,7 @@ function dedupeBatch(batch: SanitizedCookie[]) {
   const cookiesByKey = new Map<string, SanitizedCookie>();
   let dupCount = 0;
   for (const cookie of batch) {
-    const uniqueKey = `${cookie.domain}|${cookie.name}|${cookie.path}|${cookie.top_frame_site_key}`;
+    const uniqueKey = cookieIdentity(cookie);
     const existing = cookiesByKey.get(uniqueKey);
     if (existing !== undefined) {
       dupCount++;
@@ -135,10 +174,72 @@ function buildCookieParams(
       cookie.source_port ?? -1,
       cookie.last_update_utc !== undefined && cookie.last_update_utc !== null
         ? BigInt(cookie.last_update_utc)
-        : null
+        : null,
+      cookie.browserProfile
     );
   }
   return params;
+}
+
+function groupByProfileAndRealm(cookies: SanitizedCookie[]) {
+  const groups = new Map<
+    string,
+    { authRealm: string; browserProfile: string; cookies: SanitizedCookie[] }
+  >();
+  for (const cookie of cookies) {
+    const authRealm = authRealmFromCookieDomain(cookie.domain);
+    if (authRealm === '') continue;
+    const key = `${authRealm}\u0000${cookie.browserProfile}`;
+    const existing = groups.get(key);
+    if (existing) {
+      existing.cookies.push(cookie);
+    } else {
+      groups.set(key, { authRealm, browserProfile: cookie.browserProfile, cookies: [cookie] });
+    }
+  }
+  return [...groups.values()];
+}
+
+function groupByProfile(cookies: SanitizedCookie[]) {
+  const groups = new Map<string, SanitizedCookie[]>();
+  for (const cookie of cookies) {
+    const existing = groups.get(cookie.browserProfile);
+    if (existing) {
+      existing.push(cookie);
+    } else {
+      groups.set(cookie.browserProfile, [cookie]);
+    }
+  }
+  return [...groups.entries()].map(([browserProfile, profileCookies]) => ({
+    browserProfile,
+    cookies: profileCookies,
+  }));
+}
+
+function cookieSignature(cookie: SanitizedCookie): string {
+  return [
+    cookie.value,
+    cookie.expires_utc !== undefined && cookie.expires_utc !== null
+      ? BigInt(cookie.expires_utc).toString()
+      : '',
+    String(cookie.is_secure ?? false),
+    String(cookie.is_httponly ?? false),
+    cookie.creation_utc !== undefined && cookie.creation_utc !== null
+      ? BigInt(cookie.creation_utc).toString()
+      : '',
+    cookie.last_access_utc !== undefined && cookie.last_access_utc !== null
+      ? BigInt(cookie.last_access_utc).toString()
+      : '',
+    String(cookie.has_expires ?? true),
+    String(cookie.is_persistent ?? true),
+    String(cookie.priority ?? 1),
+    String(cookie.samesite ?? -1),
+    String(cookie.source_scheme ?? 0),
+    String(cookie.source_port ?? -1),
+    cookie.last_update_utc !== undefined && cookie.last_update_utc !== null
+      ? BigInt(cookie.last_update_utc).toString()
+      : '',
+  ].join(COOKIE_SNAPSHOT_SEPARATOR);
 }
 
 /**
@@ -166,6 +267,7 @@ export async function processCookiesUpload(
         ),
         path: sanitizeString((c.path as string | undefined) ?? '/') || '/',
         top_frame_site_key: sanitizeString((c.top_frame_site_key as string | undefined) ?? ''),
+        browserProfile: normalizeBrowserProfile(c.browserProfile),
       };
     })
     .filter((cookie): cookie is SanitizedCookie => cookie.name !== '' && cookie.value !== '');
@@ -190,6 +292,9 @@ export async function processCookiesUpload(
 
   if (sanitizedCookies.length > 0) {
     await upsertCookieBatches(userId, browser, sanitizedCookies);
+  } else {
+    await repo.deleteCookiesForBrowserSnapshot({ userId, browserSource: browser });
+    await repo.deleteCookieBundlesForBrowserSnapshot({ userId, browserSource: browser });
   }
 
   return { cookieCount: sanitizedCookies.length, integration };
@@ -204,6 +309,38 @@ async function upsertCookieBatches(
   const BATCH_SIZE = 100;
   let processedCount = 0;
   const countBefore = await repo.getCookieCount(userId);
+  const groups = groupByProfileAndRealm(sanitizedCookies);
+  const profileGroups = groupByProfile(sanitizedCookies);
+
+  for (const group of groups) {
+    const changed = await repo.cookieBundleSnapshotChanged({
+      userId,
+      authRealm: group.authRealm,
+      browserSource: browser,
+      browserProfile: group.browserProfile,
+      snapshot: group.cookies.map((cookie) => ({
+        identity: cookieIdentity(cookie),
+        signature: cookieSignature(cookie),
+      })),
+      incomingCount: group.cookies.length,
+    });
+    await repo.upsertCookieBundle({
+      userId,
+      authRealm: group.authRealm,
+      browserSource: browser,
+      browserProfile: group.browserProfile,
+      clearDisabled: changed,
+    });
+  }
+
+  for (const group of profileGroups) {
+    await repo.deleteCookiesMissingFromProfileSnapshot({
+      userId,
+      browserSource: browser,
+      browserProfile: group.browserProfile,
+      identities: group.cookies.map(cookieIdentity),
+    });
+  }
 
   for (let i = 0; i < sanitizedCookies.length; i += BATCH_SIZE) {
     const batch = sanitizedCookies.slice(i, i + BATCH_SIZE);
@@ -220,14 +357,22 @@ async function upsertCookieBatches(
 
     const values = deduped
       .map((_, idx) => {
-        const base = idx * 19;
-        return `(gen_random_uuid(), $${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}::bigint, $${base + 7}::boolean, $${base + 8}::boolean, $${base + 9}, NOW(), $${base + 10}::bigint, $${base + 11}, $${base + 12}::bigint, $${base + 13}::boolean, $${base + 14}::boolean, $${base + 15}::int, $${base + 16}::int, $${base + 17}::int, $${base + 18}::int, $${base + 19}::bigint)`;
+        const base = idx * 20;
+        return `(gen_random_uuid(), $${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}::bigint, $${base + 7}::boolean, $${base + 8}::boolean, $${base + 9}, NOW(), $${base + 10}::bigint, $${base + 11}, $${base + 12}::bigint, $${base + 13}::boolean, $${base + 14}::boolean, $${base + 15}::int, $${base + 16}::int, $${base + 17}::int, $${base + 18}::int, $${base + 19}::bigint, $${base + 20})`;
       })
       .join(', ');
 
     const params = buildCookieParams(userId, browser, deduped);
     await repo.bulkUpsertCookies(values, params);
     processedCount += deduped.length;
+  }
+
+  for (const group of profileGroups) {
+    await repo.deleteCookieBundlesWithoutCookiesForProfile({
+      userId,
+      browserSource: browser,
+      browserProfile: group.browserProfile,
+    });
   }
 
   const countAfter = await repo.getCookieCount(userId);

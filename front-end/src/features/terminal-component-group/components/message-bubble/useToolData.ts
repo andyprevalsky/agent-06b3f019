@@ -49,6 +49,13 @@ export function useToolData({
       (metadata.requestUserAttention as Record<string, unknown> | undefined) ||
       null;
     const attentionMeta = actionMetadata ?? {};
+    const authMeta = metadata.requestUserAuthentication as Record<string, unknown> | undefined;
+    const authTaskId =
+      typeof authMeta?.taskId === 'string'
+        ? authMeta.taskId
+        : typeof metadata.task_id === 'string'
+          ? metadata.task_id
+          : undefined;
 
     const rawStatus = metadata.toolStatus;
     const toolStatus: ToolMessageData['status'] =
@@ -64,6 +71,7 @@ export function useToolData({
       error: Boolean(metadata.error),
       progressComplete: metadata.progressComplete as number | undefined,
       actionMetadata,
+      authAssistance: authMeta ? { taskId: authTaskId } : undefined,
       // Countdown fields live on either the root or the attention sub-object.
       timeout:
         (metadata.timeout as number | undefined) ?? (attentionMeta.timeout as number | undefined),

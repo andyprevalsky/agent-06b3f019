@@ -4,7 +4,7 @@ import { asyncHandler } from '../../utils/asyncHandler';
 import { hybridAuth, type HybridAuthRequest } from '../../providers/hybridAuth';
 import { createLogger } from '../../providers/logger';
 import * as service from './service';
-import { NotFoundError, ForbiddenError } from './service';
+import { BadRequestError, NotFoundError, ForbiddenError } from './service';
 import { createAttentionRequestSchema, respondSchema } from './types';
 
 const log = createLogger('Attention');
@@ -15,6 +15,10 @@ function errMsg(error: unknown): string {
 }
 
 function mapError(error: unknown, res: Response): void {
+  if (error instanceof BadRequestError) {
+    res.status(400).json({ error: error.message });
+    return;
+  }
   if (error instanceof NotFoundError) {
     res.status(404).json({ error: error.message });
     return;
@@ -118,7 +122,11 @@ router.post(
         res.status(400).json({ error: 'Invalid response data', details: error.errors });
         return;
       }
-      if (error instanceof NotFoundError || error instanceof ForbiddenError) {
+      if (
+        error instanceof BadRequestError ||
+        error instanceof NotFoundError ||
+        error instanceof ForbiddenError
+      ) {
         mapError(error, res);
         return;
       }

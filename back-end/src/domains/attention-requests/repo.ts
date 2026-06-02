@@ -17,6 +17,11 @@ export async function create(data: CreateAttentionRequestInput) {
 export async function findById(id: string) {
   return prisma.agentAttentionRequest.findUnique({
     where: { id },
+    include: {
+      authAssistance: {
+        select: { id: true },
+      },
+    },
   });
 }
 

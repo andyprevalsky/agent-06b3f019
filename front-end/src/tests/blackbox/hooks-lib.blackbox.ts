@@ -292,6 +292,43 @@ describe('derivations.ts', () => {
       ] as any;
       expect(computeActiveBrowserPanels(msgs)).toEqual([]);
     });
+    it('excludes completed tasks even when later cleanup messages exist', () => {
+      const msgs = [
+        {
+          metadata: {
+            task_id: 'failed',
+            toolName: 'spawn_browser_agent',
+            action_type: 'browser',
+            browser_url: 'x',
+          },
+        },
+        {
+          metadata: {
+            task_id: 'failed',
+            toolName: 'spawn_browser_agent',
+            action_type: 'task_complete',
+            toolStatus: 'ERROR',
+          },
+        },
+        {
+          metadata: {
+            task_id: 'failed',
+            toolName: 'spawn_browser_agent',
+            action_type: 'recording',
+            toolStatus: 'FINISHED',
+          },
+        },
+        {
+          metadata: {
+            task_id: 'active',
+            toolName: 'spawn_browser_agent',
+            action_type: 'browser',
+            browser_url: 'y',
+          },
+        },
+      ] as any;
+      expect(computeActiveBrowserPanels(msgs)).toEqual([{ taskId: 'active', browserUrl: 'y' }]);
+    });
     it('excludes tasks when parent browser tool pauses before task-scoped cleanup arrives', () => {
       const msgs = [
         {

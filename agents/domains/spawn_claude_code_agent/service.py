@@ -149,9 +149,7 @@ Files in this directory will be automatically uploaded and returned to the user.
     #     every claude-code spawn.
     #   - Dynamic portion (below the marker): the original goal. Varies per
     #     spawn so it must NOT contaminate the cacheable prefix.
-    # Per-call timestamps live in the [STATE: ...] line on the user message,
-    # mirroring the v3 browser-agent pattern (see build_state_line in
-    # domains/spawn_browser_agent_v3/service.py).
+    # Per-call timestamps live in the [STATE: ...] line on the user message.
     static_system = (
         "You are the parent agent monitoring Claude Code, a terminal-based coding agent. "
         "You read its terminal output and decide when to respond, intervene, or mark the task complete.\n\n"

@@ -416,6 +416,37 @@ async def test_resolve_pointers_strip_existing_annotation():
     assert "Reference: @ref:message:" not in inner
 
 
+async def test_resolve_pointers_leaves_trailing_self_reference_annotation():
+    """Trailing Reference annotations are pointer handles, not inline content."""
+    _clear_cache()
+    from helpers.context_pointers import resolve_pointers_in_text
+
+    mid = "bbbb0003-0000-0000-0000-000000000000"
+    text = f"Actual content\n\nReference: @ref:message:{mid}"
+    local_context = [{"message_id": mid, "role": "TOOL", "text": text}]
+
+    result = await resolve_pointers_in_text(text, local_context)
+
+    assert result == f'Actual content\n\nReference: <resolved-ref pointer="@ref:message:{mid}"/>'
+    assert result.count("Actual content") == 1
+    assert "</resolved-ref>" not in result
+
+
+async def test_resolve_pointers_skips_existing_resolved_ref_pointer_attrs():
+    """Already-rendered resolved-ref pointer attributes must not be re-expanded."""
+    _clear_cache()
+    from helpers.context_pointers import resolve_pointers_in_text
+
+    mid = "bbbb0004-0000-0000-0000-000000000000"
+    text = f'Reference: <resolved-ref pointer="@ref:message:{mid}"/>'
+    local_context = [{"message_id": mid, "role": "TOOL", "text": "Duplicated body"}]
+
+    result = await resolve_pointers_in_text(text, local_context)
+
+    assert result == text
+    assert "Duplicated body" not in result
+
+
 async def test_resolve_pointers_in_messages_string_content():
     """resolve_pointers_in_messages resolves in string content."""
     _clear_cache()
@@ -554,6 +585,14 @@ async def run_all_tests():
     await r.record_async("resolve_slice_missing_anchor", test_resolve_pointers_slice_missing_anchor)
     await r.record_async("resolve_slice_missing_end_anchor", test_resolve_pointers_slice_missing_end_anchor)
     await r.record_async("resolve_strip_existing_annotation", test_resolve_pointers_strip_existing_annotation)
+    await r.record_async(
+        "resolve_leaves_trailing_self_reference_annotation",
+        test_resolve_pointers_leaves_trailing_self_reference_annotation,
+    )
+    await r.record_async(
+        "resolve_skips_existing_resolved_ref_pointer_attrs",
+        test_resolve_pointers_skips_existing_resolved_ref_pointer_attrs,
+    )
     await r.record_async("resolve_in_messages_string", test_resolve_pointers_in_messages_string_content)
     await r.record_async("resolve_in_messages_list", test_resolve_pointers_in_messages_list_content)
     await r.record_async("resolve_in_messages_none_content", test_resolve_pointers_in_messages_none_content)

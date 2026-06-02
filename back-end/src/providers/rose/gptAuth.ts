@@ -17,6 +17,7 @@
 
 import { createHash } from 'node:crypto';
 
+import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from './cache';
 import {
   RoseAuthError,
   RoseError,
@@ -260,7 +261,14 @@ function buildInstructions(messages: CompletionMessage[]): string | undefined {
     .map((msg) => contentToText(msg.content).trim())
     .filter((text) => text.length > 0)
     .join('\n\n');
-  return systemText.length > 0 ? systemText : undefined;
+  if (systemText.length === 0) return undefined;
+  if (!systemText.includes(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)) return systemText;
+  const stripped = systemText
+    .split(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0)
+    .join('\n\n');
+  return stripped.length > 0 ? stripped : undefined;
 }
 
 function buildPromptCacheKey(opts: BuildBodyOptions, instructions?: string): string {

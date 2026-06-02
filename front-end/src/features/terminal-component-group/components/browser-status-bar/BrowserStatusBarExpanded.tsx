@@ -2,6 +2,11 @@
  * BrowserStatusBarExpanded — expanded/inline variant that shows the thumbnail,
  * task progress, and a scrollable MessageList beneath. Fullscreen and collapse
  * actions are in the header.
+ *
+ * AGENT ACTIVITY STATE:
+ * [ACTIVE] -> green pulsing indicator + thinking row
+ * [WAITING_FOR_AUTH_ASSISTANCE] -> yellow steady indicator, no thinking row
+ * [DISCONNECTED] -> yellow steady disconnected indicator
  */
 
 import type { MouseEvent } from 'react';
@@ -9,15 +14,18 @@ import { ChevronDown, Maximize2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { MessageList } from '../MessageList';
 import { SchemaChip } from '../SchemaChip';
+import { BrowserProxyLocationChip } from './BrowserProxyLocationChip';
 import { BrowserThumbnail } from './BrowserThumbnail';
 import { StepProgressBar } from './StepProgressBar';
-import type { OutputSchemaRef, StepProgress } from './types';
+import type { BrowserSessionMetadata, OutputSchemaRef, StepProgress } from './types';
 
 interface ExpandedProps {
   taskId: string;
   browserUrl: string;
   isDisconnected: boolean;
+  isWaitingForAuthAssistance: boolean;
   outputSchema: OutputSchemaRef | undefined;
+  browserSessionMetadata: BrowserSessionMetadata | null;
   stepProgress: StepProgress | null;
   onThumbnailClick: (e: MouseEvent) => void;
   onFullscreenToggle: (e: MouseEvent) => void;
@@ -27,18 +35,28 @@ interface ExpandedProps {
 function ExpandedHeader({
   browserUrl,
   isDisconnected,
+  isWaitingForAuthAssistance,
   outputSchema,
+  browserSessionMetadata,
   onThumbnailClick,
   onFullscreenToggle,
   onCollapse,
 }: {
   browserUrl: string;
   isDisconnected: boolean;
+  isWaitingForAuthAssistance: boolean;
   outputSchema: OutputSchemaRef | undefined;
+  browserSessionMetadata: BrowserSessionMetadata | null;
   onThumbnailClick: (e: MouseEvent) => void;
   onFullscreenToggle: (e: MouseEvent) => void;
   onCollapse: () => void;
 }) {
+  const statusLabel = isDisconnected
+    ? 'Disconnected'
+    : isWaitingForAuthAssistance
+      ? 'Agent waiting for assistance'
+      : 'Agent is using Browser';
+
   return (
     <div className="relative flex items-center gap-3 p-3 pl-3 sm:pl-40 border-b border-border">
       <BrowserThumbnail
@@ -57,15 +75,20 @@ function ExpandedHeader({
           <div
             className={cn(
               'h-1.5 w-1.5 rounded-full',
-              isDisconnected ? 'bg-yellow-500' : 'bg-green-500 animate-pulse',
+              isDisconnected || isWaitingForAuthAssistance
+                ? 'bg-yellow-500'
+                : 'bg-green-500 animate-pulse',
             )}
           />
-          <span className="text-xs text-muted-foreground">
-            {isDisconnected ? 'Disconnected' : 'Agent is using Browser'}
-          </span>
+          <span className="text-xs text-muted-foreground">{statusLabel}</span>
         </div>
       </div>
       <div className="flex items-center gap-1 flex-shrink-0">
+        <BrowserProxyLocationChip
+          metadata={browserSessionMetadata}
+          tooltipPosition="bottom"
+          className="hidden sm:inline-flex"
+        />
         <SchemaChip outputSchema={outputSchema} size="sm" tooltipPosition="bottom" />
         <button
           onClick={onFullscreenToggle}
@@ -86,7 +109,9 @@ export function BrowserStatusBarExpanded(props: ExpandedProps) {
     taskId,
     browserUrl,
     isDisconnected,
+    isWaitingForAuthAssistance,
     outputSchema,
+    browserSessionMetadata,
     stepProgress,
     onThumbnailClick,
     onFullscreenToggle,
@@ -99,7 +124,9 @@ export function BrowserStatusBarExpanded(props: ExpandedProps) {
         <ExpandedHeader
           browserUrl={browserUrl}
           isDisconnected={isDisconnected}
+          isWaitingForAuthAssistance={isWaitingForAuthAssistance}
           outputSchema={outputSchema}
+          browserSessionMetadata={browserSessionMetadata}
           onThumbnailClick={onThumbnailClick}
           onFullscreenToggle={onFullscreenToggle}
           onCollapse={onCollapse}
@@ -118,7 +145,7 @@ export function BrowserStatusBarExpanded(props: ExpandedProps) {
               subAgentId={taskId}
               containerClassName="flex flex-col gap-1.5 overflow-x-hidden"
               showStatusBanners={false}
-              showThinkingIndicator={!isDisconnected}
+              showThinkingIndicator={!isDisconnected && !isWaitingForAuthAssistance}
               compact
             />
           </div>

@@ -159,6 +159,7 @@ if ! $IS_CLOUD; then
     export MAX_CONCURRENT_ACTIVITY_TASK_POLLERS="${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-80}"
 fi
 
+export NODE_ENV="${NODE_ENV:-development}"
 export TEMPORAL_TASK_QUEUE=navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME
 echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT mac-app=$MAC_APP_PORT metrics=$SDK_METRICS_PORT db=$LOCAL_DB_PORT queue=$TEMPORAL_TASK_QUEUE benchmark_mode=$BENCHMARK_MODE activity_max_slots=${MAX_CONCURRENT_ACTIVITIES:-100} activity_pollers=${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-8}"
 
@@ -529,6 +530,10 @@ data = {
         "container": os.environ.get("DB_CONTAINER", ""),
         "owned_by_run_sh": os.environ.get("DB_OWNED_BY_US", "false").lower() == "true",
         "use_system_postgres": os.environ.get("USE_SYSTEM_PG", "false").lower() == "true",
+    },
+    "env": {
+        "benchmark_anon_steel_profile": os.environ.get("BENCHMARK_ANON_STEEL_PROFILE", "").lower() in ("1", "true", "yes", "on"),
+        "benchmark_disable_saved_browser_auth": os.environ.get("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH", "").lower() in ("1", "true", "yes", "on"),
     },
     "logs": {
         "backend": os.path.join(root, "back-end", "backend-logs.log"),

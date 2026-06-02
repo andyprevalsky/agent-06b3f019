@@ -5,12 +5,15 @@
 import { getTemporalClient, startAgentWorkflow } from '../../providers/temporal';
 import { broadcastAgentUpdate, broadcastAgentModeStarted } from '../../providers/chat';
 import { createLogger } from '../../providers/logger';
+import { resumeAgentWorkflow } from '../../providers/agentResume';
+import { classifyAgentFailureForSurface } from '../../providers/credentialPropagation';
 import type { Prisma, UpdateStatusBody } from './types';
 import * as repo from './repo';
 
 export { updateAgentConfig } from './agentConfigService';
 
 const log = createLogger('Agents');
+const TERMINAL_STATUSES = new Set(['COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED']);
 
 // ---------------------------------------------------------------------------
 // Pause / Resume
@@ -49,28 +52,7 @@ export async function pauseAgent(agentId: string): Promise<void> {
 
 /** Resume a single agent. Children discover parent's resumed state via pull-based queries. */
 export async function resumeAgent(agentId: string): Promise<void> {
-  const agent = await repo.findAgentById(agentId);
-
-  if (!agent) {
-    return;
-  }
-
-  await repo.updateAgent(agentId, { status: 'ACTIVE' });
-
-  /* c8 ignore start -- Temporal signal requires live Temporal server */
-  if (agent.temporalWorkflowId !== null) {
-    try {
-      const client = await getTemporalClient();
-      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
-      await handle.signal('resume');
-    } catch (error) {
-      log.warn('Resume signal failed, DB updated. Workflow will sync next iteration', {
-        agent_id: agentId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-  /* c8 ignore stop */
+  await resumeAgentWorkflow(agentId);
 }
 
 /** Pause an agent for a user (verifies ownership first). */
@@ -275,7 +257,28 @@ export async function updateAgentStatus(agentId: string, body: UpdateStatusBody)
   });
 
   const fields = updated as unknown as AgentStatusFields;
-  await broadcastAgentUpdate(agentId, {
+  let failureSurface: { rawError?: string; failureReason?: string | null } = {};
+  if (TERMINAL_STATUSES.has(fields.status) && fields.status !== 'COMPLETED') {
+    failureSurface = {
+      rawError: body.statusMessage ?? fields.statusMessage ?? undefined,
+      failureReason: null,
+    };
+    try {
+      const decision = await classifyAgentFailureForSurface(agentId);
+      failureSurface.failureReason = decision?.failureReason ?? null;
+      failureSurface.rawError = decision?.rawError ?? failureSurface.rawError;
+    } catch (error) {
+      log.warn('Failure classification unavailable for terminal status broadcast', {
+        agent_id: agentId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  const broadcastPayload: Parameters<typeof broadcastAgentUpdate>[1] & {
+    rawError?: string;
+    failureReason?: string | null;
+  } = {
     progress: fields.progress,
     status: fields.status,
     statusMessage: fields.statusMessage ?? undefined,
@@ -284,7 +287,10 @@ export async function updateAgentStatus(agentId: string, body: UpdateStatusBody)
     tokensOut: fields.tokensOut,
     contextSize: fields.contextSize,
     messageCount: fields.messageCount,
-  });
+    ...failureSurface,
+  };
+
+  await broadcastAgentUpdate(agentId, broadcastPayload);
 
   return updated;
 }
