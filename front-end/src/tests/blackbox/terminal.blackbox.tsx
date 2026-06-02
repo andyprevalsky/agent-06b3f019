@@ -145,6 +145,33 @@ describe('Terminal page', () => {
       });
     });
 
+    it('keeps grid energy pills in the background layer below terminal content', async () => {
+      renderWithProviders(<Terminal />);
+
+      const energyLayer = await screen.findByTestId('terminal-grid-energy-layer');
+      const gridLayer = screen.getByTestId('terminal-grid-background-layer');
+
+      expect(gridLayer).toHaveClass('z-[3]');
+      expect(energyLayer).toHaveClass('z-[4]');
+      expect(screen.getByPlaceholderText('Enter any goal').closest('.z-\\[4\\]')).not.toBeNull();
+      expect(screen.getByRole('banner')).toHaveClass('z-50');
+      expect(screen.getByRole('complementary', { hidden: true })).toHaveClass('z-[50]');
+    });
+
+    it('clips grid energy pills below the landing popular goals controls', async () => {
+      renderWithProviders(<Terminal />);
+
+      const landingInput = await screen.findByPlaceholderText('Enter any goal');
+      const inputAreaMask = screen.getByTestId('terminal-energy-input-area-mask');
+      const landingControlsClearance = window.innerWidth < 768 ? 340 : 300;
+
+      expect(landingInput).toBeInTheDocument();
+      expect(Number(inputAreaMask.getAttribute('y'))).toBe(
+        Math.max(0, window.innerHeight - landingControlsClearance),
+      );
+      expect(Number(inputAreaMask.getAttribute('height'))).toBe(landingControlsClearance + 5000);
+    });
+
     it('renders Privacy and Terms links', async () => {
       renderWithProviders(<Terminal />);
       await waitFor(() => {
@@ -223,7 +250,7 @@ describe('Terminal page', () => {
             r.url.includes('/api/agents') && r.method === 'POST' && !r.url.includes('/messages'),
         );
         expect(createReq).toBeDefined();
-        expect((createReq!.body as any).goal).toBe('Build me a website');
+        expect(createReq?.body).toEqual(expect.objectContaining({ goal: 'Build me a website' }));
       });
     });
   });

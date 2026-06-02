@@ -1,14 +1,32 @@
 /**
  * STATE MACHINE: BackgroundPattern
  *
- * STATIC: Renders SVG grid pattern, animated tile overlays,
+ * STATIC: Renders SVG grid pattern, energy pills, animated tile overlays,
  *         large tile border, and corner decorations.
  *         No internal state transitions — purely derived from props.
+ *
+ * ENERGY MASK:
+ *   AGENT_SELECTED    → clip energy below the query input chrome
+ *   NO_AGENT_SELECTED → clip energy below the taller landing controls
+ *
+ * LAYER CONTRACT:
+ * [CANVAS_ANIMATION z-2] -> [GRID_BACKGROUND z-3] -> [ENERGY_PILLS z-4]
+ * -> [PAGE_CONTENT z-4, later sibling] -> [CHROME z-50]
  */
 
 import { SmallTileAnimationCanvas } from '@/features/terminal-component-group';
 
 import { GridEnergyPills } from './GridEnergyPills';
+
+const QUERY_INPUT_CLEARANCE = {
+  desktop: 220,
+  mobile: 260,
+} as const;
+
+const LANDING_CONTROLS_CLEARANCE = {
+  desktop: 300,
+  mobile: 340,
+} as const;
 
 interface BackgroundPatternProps {
   patternOffset: { x: number; y: number };
@@ -32,6 +50,7 @@ export function BackgroundPattern({
   return (
     <>
       <svg
+        data-testid="terminal-grid-background-layer"
         className="absolute inset-0 w-full h-full pointer-events-none z-[3]"
         xmlns="http://www.w3.org/2000/svg"
         style={{ left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }}
@@ -44,11 +63,12 @@ export function BackgroundPattern({
       </svg>
 
       <svg
-        className="absolute inset-0 w-full h-full pointer-events-none z-[5]"
+        data-testid="terminal-grid-energy-layer"
+        className="absolute inset-0 w-full h-full pointer-events-none z-[4]"
         xmlns="http://www.w3.org/2000/svg"
         style={{ left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }}
       >
-        <TerminalEnergyMask />
+        <TerminalEnergyMask selectedAgentId={selectedAgentId} />
         <GridEnergyPills
           idPrefix="terminal-grid-energy"
           patternOffset={patternOffset}
@@ -68,11 +88,14 @@ export function BackgroundPattern({
   );
 }
 
-function TerminalEnergyMask() {
+function TerminalEnergyMask({ selectedAgentId }: { selectedAgentId: string | null }) {
   const viewportWidth = typeof window === 'undefined' ? 1440 : window.innerWidth;
   const viewportHeight = typeof window === 'undefined' ? 900 : window.innerHeight;
-  const queryBoxClearance = viewportWidth < 768 ? 260 : 220;
-  const queryBoxCutoutY = Math.max(0, viewportHeight - queryBoxClearance);
+  const isMobile = viewportWidth < 768;
+  const clearanceByViewport =
+    selectedAgentId === null ? LANDING_CONTROLS_CLEARANCE : QUERY_INPUT_CLEARANCE;
+  const clearance = isMobile ? clearanceByViewport.mobile : clearanceByViewport.desktop;
+  const inputAreaCutoutY = Math.max(0, viewportHeight - clearance);
 
   return (
     <defs>
@@ -87,10 +110,11 @@ function TerminalEnergyMask() {
           fill="black"
         />
         <rect
+          data-testid="terminal-energy-input-area-mask"
           x="-5000"
-          y={queryBoxCutoutY}
+          y={inputAreaCutoutY}
           width="10000"
-          height={queryBoxClearance + 5000}
+          height={clearance + 5000}
           fill="black"
         />
       </mask>
