@@ -860,6 +860,23 @@ def test_transform_messages_for_openai_strips_boundary_from_later_system_message
 # =====================================================================
 
 
+def _count_cache_control_blocks(body):
+    count = 0
+    for block in body.get("system", []):
+        if isinstance(block, dict) and "cache_control" in block:
+            count += 1
+    for tool in body.get("tools", []):
+        if isinstance(tool, dict) and "cache_control" in tool:
+            count += 1
+    for msg in body.get("messages", []):
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if isinstance(content, list):
+            count += sum(1 for block in content if isinstance(block, dict) and "cache_control" in block)
+        elif isinstance(content, dict) and "cache_control" in content:
+            count += 1
+    return count
+
+
 def test_build_anthropic_body_identity_and_cache_block():
     spec = get_pool("rose-1-lite")
     body = build_anthropic_body(
@@ -939,6 +956,37 @@ def test_build_anthropic_body_multi_boundary_system_blocks_are_cached():
     assert [b["text"] for b in sys[2:]] == ["static instructions", "user context", "phase prompt"]
     assert all(b["cache_control"] == {"type": "ephemeral", "scope": "global"} for b in sys[2:])
     assert "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__" not in json.dumps(body)
+
+
+def test_build_anthropic_body_caps_anthropic_cache_control_blocks():
+    from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+
+    spec = get_pool("rose-1-lite")
+    system_content = (
+        f"static instructions{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
+        f"user context{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
+        f"phase prompt{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
+    )
+    body = build_anthropic_body(
+        pool_spec=spec,
+        messages=[
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": "hi"},
+        ],
+        tools=[
+            {"name": "web_search", "description": "search", "input_schema": {"type": "object", "properties": {}}},
+        ],
+        tool_choice=None,
+        response_format=None,
+        max_tokens=128,
+        skip_cache_write=False,
+    )
+
+    assert _count_cache_control_blocks(body) == 4
+    assert all("cache_control" in block for block in body["system"][2:])
+    assert body["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+    for block in body["messages"][-1]["content"]:
+        assert "cache_control" not in block
 
 
 def test_build_anthropic_body_message_cache_breakpoint():
@@ -3531,6 +3579,7 @@ async def run_all_tests():
     r.record("anthropic_body_identity_cache", test_build_anthropic_body_identity_and_cache_block)
     r.record("anthropic_body_static_dynamic_split", test_build_anthropic_body_static_dynamic_split)
     r.record("anthropic_body_multi_boundary_cached", test_build_anthropic_body_multi_boundary_system_blocks_are_cached)
+    r.record("anthropic_body_cache_control_cap", test_build_anthropic_body_caps_anthropic_cache_control_blocks)
     r.record("anthropic_body_message_breakpoint", test_build_anthropic_body_message_cache_breakpoint)
     r.record("anthropic_body_skip_cache_write", test_build_anthropic_body_skip_cache_write_keeps_system_markers)
 
