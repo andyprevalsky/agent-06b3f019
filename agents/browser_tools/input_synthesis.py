@@ -328,26 +328,20 @@ def synthesize_mouse_path(
 
     # Inject per-sample speed variation. A clean Sigma-Lognormal profile can yield
     # velocityVariance < 0.02 (px/ms)^2 on slower/shorter moves, which behavioral
-    # biometrics flag as "mouse velocity too consistent". Real hand movement has
-    # irregular micro-accelerations — brief dashes and hesitations — so jitter the
-    # per-sample delays (occasionally by a large factor). Since velocity is
-    # distance/dt, varying dt scatters consecutive velocities; a few outliers are
-    # enough to clear the variance floor while keeping the mean cadence intact.
+    # biometrics flag as "mouse velocity too consistent". Real hand movement varies
+    # speed mainly on the LOW end — brief hesitations / decelerations — never with
+    # super-fast jumps (those are themselves a bot tell, guarded by the
+    # max-velocity invariant). So scatter velocities by occasionally LENGTHENING a
+    # sample's delay (slowing it down): velocity = distance/dt only ever drops,
+    # the peak velocity is untouched, and a handful of low-velocity outliers is
+    # enough to clear the variance floor.
     if len(samples) > 3:
         varied: List[MouseSample] = []
         for sample in samples:
-            factor = rng.uniform(0.72, 1.4)
-            if rng.random() < 0.2:
-                factor *= rng.choice((0.45, 2.3))  # occasional dash / hesitation
-            varied.append(MouseSample(sample.x, sample.y, max(0.002, sample.delay_s * factor)))
-        # Renormalize so the total move duration (hence the mouse-event RATE the
-        # detector measures) is preserved — we only redistribute time between
-        # samples to scatter velocities, not slow the move down.
-        orig_total = sum(s.delay_s for s in samples)
-        new_total = sum(s.delay_s for s in varied)
-        if new_total > 0 and orig_total > 0:
-            scale = orig_total / new_total
-            varied = [MouseSample(s.x, s.y, max(0.002, s.delay_s * scale)) for s in varied]
+            factor = 1.0
+            if rng.random() < 0.18:
+                factor = rng.uniform(1.4, 2.2)  # brief hesitation -> low-velocity outlier
+            varied.append(MouseSample(sample.x, sample.y, sample.delay_s * factor))
         samples = varied
 
     return samples
