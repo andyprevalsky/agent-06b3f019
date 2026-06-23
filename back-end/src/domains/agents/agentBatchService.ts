@@ -157,7 +157,8 @@ async function runPhaseTwoStarts(
  *  collapse to a single parent-proxy lookup and one model-pricing lookup. */
 async function resolveAllMetadata(
   bodies: CreateAgentBody[],
-  clientIP: string | null
+  clientIP: string | null,
+  userId: string
 ): Promise<Map<CreateAgentBody, ResolvedMetadata>> {
   const cache = new Map<string, ResolvedMetadata>();
   const out = new Map<CreateAgentBody, ResolvedMetadata>();
@@ -165,7 +166,12 @@ async function resolveAllMetadata(
     const key = `${body.model} ${body.parent_agent_id ?? ''}`;
     let cached = cache.get(key);
     if (!cached) {
-      cached = await resolveCreateMetadata(body.model, clientIP, body.parent_agent_id ?? null);
+      cached = await resolveCreateMetadata(
+        body.model,
+        clientIP,
+        body.parent_agent_id ?? null,
+        userId
+      );
       cache.set(key, cached);
     }
     out.set(body, cached);
@@ -187,7 +193,7 @@ export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<Ba
   const existingById = new Map(existing.map((a) => [a.id, a]));
 
   const newBodies = bodies.filter((b) => !existingById.has(b.agent_id!));
-  const metaMap = await resolveAllMetadata(newBodies, clientIP);
+  const metaMap = await resolveAllMetadata(newBodies, clientIP, userId);
   const newItems = newBodies.map((b) => buildBatchItem(b, userId, metaMap.get(b)!, verifierType));
 
   if (newItems.length > 0) {

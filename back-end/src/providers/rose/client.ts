@@ -25,7 +25,8 @@ import { randomUUID } from 'node:crypto';
 import { createLogger } from '../logger';
 import { logJson } from '../../utils/log';
 import { claudeAuthComplete } from './claudeAuth';
-import { isFallThroughError, RoseError } from './errors';
+import { isAnthropicApiKeyOnCooldown, markAnthropicApiKeyOnCooldown } from '../computeCredentials';
+import { isFallThroughError, RoseAuthError, RoseError, RosePaymentRequiredError } from './errors';
 import { gptAuthComplete } from './gptAuth';
 import { getPool, poolForModel } from './pools';
 import { buildOpenAiResponseFormat } from './schema';
@@ -51,6 +52,15 @@ class PreContentFallThroughError extends Error {
 }
 
 const OPENROUTER_API_KEY_ENV = 'OPENROUTER_API_KEY';
+// Optional funded default: a plain Anthropic API key. When set, it serves any
+// request that has no working user/pool compute token, ahead of the OpenRouter
+// waterfall — so completions stay up even when the compute-token pool is empty.
+const ANTHROPIC_API_KEY_ENV = 'ANTHROPIC_API_KEY';
+
+// Shared circuit breaker for the global ANTHROPIC_API_KEY lives in the DB (see
+// computeCredentials) so every backend instance and Fly worker respects one
+// backoff — no cross-workflow hammering when the key is out of credits.
+export { __resetAnthropicApiKeyCooldown } from '../computeCredentials';
 
 function requiredEnv(name: string): string {
   const v = process.env[name];
@@ -308,7 +318,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
             toolChoice: opts.options.tool_choice,
             maxTokens: opts.options.max_tokens,
             temperature: opts.options.temperature,
-            claudeToken: opts.options.claude_token!,
+            auth: { mode: 'oauth', token: opts.options.claude_token! },
             requestId: opts.requestId,
             callSite: opts.callSite,
           }),
@@ -377,11 +387,77 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     }
   }
 
+  // 2.5 Anthropic API-key fallback — a funded default for any user. Engages
+  // when no compute token served (or it fell through) and an ANTHROPIC_API_KEY
+  // is configured, ahead of the OpenRouter waterfall. Direct Anthropic via
+  // x-api-key (billed), reusing the claudeAuth request body.
+  let anthropicApiKeyFailed: RoseError | null = null;
+  const anthropicApiKey = process.env[ANTHROPIC_API_KEY_ENV];
+  // Shared DB-backed cooldown: skip the key entirely while it's backed off so
+  // no worker/workflow hammers an exhausted key. Only query when a key exists.
+  const apiKeyOnCooldown = anthropicApiKey ? await isAnthropicApiKeyOnCooldown() : false;
+  if (anthropicApiKey && apiKeyOnCooldown) {
+    log.info('anthropic_apikey.skipped_cooldown', {
+      request_id: opts.requestId,
+    });
+  }
+  if (anthropicApiKey && !apiKeyOnCooldown) {
+    try {
+      yield* runWithFallThrough({
+        produce: () =>
+          claudeAuthComplete({
+            poolSpec,
+            messages: opts.options.messages,
+            responseFormat: opts.options.response_format,
+            tools: opts.options.tools,
+            toolChoice: opts.options.tool_choice,
+            maxTokens: opts.options.max_tokens,
+            temperature: opts.options.temperature,
+            auth: { mode: 'apiKey', key: anthropicApiKey },
+            requestId: opts.requestId,
+            callSite: opts.callSite,
+          }),
+        emit: emitChunk,
+      });
+      log.info('anthropic_apikey.done', {
+        request_id: opts.requestId,
+        pool: opts.pool,
+        elapsed_ms: Date.now() - startedAt,
+        claude_auth_failed: claudeAuthFailed?.name ?? null,
+        gpt_auth_failed: gptAuthFailed?.name ?? null,
+      });
+      finalizeDump();
+      return;
+    } catch (err) {
+      if (err instanceof PreContentFallThroughError) {
+        anthropicApiKeyFailed = err.cause;
+        // Out-of-credits (402) or bad-key (401/403) means the shared key is
+        // unusable right now — back it off in the DB so no other request, on any
+        // worker or workflow, retries it for the cooldown window. Transient
+        // errors (5xx/stall/429) do NOT trip it: those can recover next call.
+        if (err.cause instanceof RosePaymentRequiredError || err.cause instanceof RoseAuthError) {
+          await markAnthropicApiKeyOnCooldown(err.cause.name);
+        }
+        log.info('fall_through_from_anthropic_apikey', {
+          request_id: opts.requestId,
+          reason: err.cause.name,
+        });
+      } else {
+        finalizeDump(err);
+        throw err;
+      }
+    }
+  }
+
   // 3. Waterfall — this is the terminal pipeline; unwrap the internal
   // fall-through sentinel so callers continue to see typed RoseError
   // subclasses (their `instanceof RoseError` checks depend on it).
   if (opts.options.disable_waterfall) {
-    const error = gptAuthFailed ?? claudeAuthFailed ?? new Error('Rose waterfall disabled');
+    const error =
+      anthropicApiKeyFailed ??
+      gptAuthFailed ??
+      claudeAuthFailed ??
+      new Error('Rose waterfall disabled');
     finalizeDump(error);
     throw error;
   }
@@ -415,6 +491,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     elapsed_ms: Date.now() - startedAt,
     claude_auth_failed: claudeAuthFailed?.name ?? null,
     gpt_auth_failed: gptAuthFailed?.name ?? null,
+    anthropic_apikey_failed: anthropicApiKeyFailed?.name ?? null,
   });
   finalizeDump();
 }

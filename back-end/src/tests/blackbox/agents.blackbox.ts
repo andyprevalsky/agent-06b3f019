@@ -16,6 +16,7 @@ import { config } from 'dotenv';
 import { randomUUID } from 'crypto';
 import { z } from 'zod';
 import { prisma } from '../../providers/database';
+import { geoFromDeliveryAddress } from '../../providers/geoip';
 
 config();
 
@@ -3282,6 +3283,75 @@ test('POST /agents — with X-Forwarded-For header (geoip path)', async () => {
   // Agent creation should succeed (geoip lookup happens asynchronously)
   assertStatus(res.status, 201, res.data);
   const body = res.data as { agent_id: string };
+  await deleteTestAgent(body.agent_id, session.user.id);
+});
+
+// 2b. geoFromDeliveryAddress — pure-function normalization (item: proxy follows
+//     delivery location when no client IP is available).
+test('geoFromDeliveryAddress — full US state name normalizes to abbrev + uppercase city', () => {
+  const geo = geoFromDeliveryAddress({
+    city: 'San Francisco',
+    state: 'California',
+    country: 'United States',
+  });
+  if (!geo || geo.country !== 'US' || geo.state !== 'CA' || geo.city !== 'SAN FRANCISCO') {
+    throw new Error(`Expected {US, CA, SAN FRANCISCO}, got ${JSON.stringify(geo)}`);
+  }
+});
+
+test('geoFromDeliveryAddress — accepts a 2-letter state abbreviation as-is', () => {
+  const geo = geoFromDeliveryAddress({ city: 'San Francisco', state: 'CA' });
+  if (!geo || geo.country !== 'US' || geo.state !== 'CA' || geo.city !== 'SAN FRANCISCO') {
+    throw new Error(`Expected {US, CA, SAN FRANCISCO}, got ${JSON.stringify(geo)}`);
+  }
+});
+
+test('geoFromDeliveryAddress — returns null when no city or state', () => {
+  if (geoFromDeliveryAddress({ city: '', state: null, country: 'United States' }) !== null) {
+    throw new Error('Expected null for an address with no city/state');
+  }
+});
+
+test('geoFromDeliveryAddress — city-only address still resolves', () => {
+  const geo = geoFromDeliveryAddress({ city: 'Austin' });
+  if (!geo || geo.country !== 'US' || geo.city !== 'AUSTIN' || 'state' in geo) {
+    throw new Error(`Expected {US, AUSTIN, no state}, got ${JSON.stringify(geo)}`);
+  }
+});
+
+// 2c. Integration: a server-originated agent (no resolvable client IP) inherits
+//     the user's delivery-address city instead of the default Dallas proxy.
+test('POST /agents — no resolvable IP falls back to user delivery address', async () => {
+  const session = await createAnonymousSession('geo-delivery');
+  await prisma.user.upsert({
+    where: { userId: session.user.id },
+    update: { city: 'San Francisco', state: 'California', country: 'United States' },
+    create: {
+      userId: session.user.id,
+      isAnonymous: true,
+      city: 'San Francisco',
+      state: 'California',
+      country: 'United States',
+    },
+  });
+  const res = await request(`${BASE_URL}/api/agents`, {
+    method: 'POST',
+    headers: {
+      ...apiKeyHeaders(session.user.id),
+      // Private IP → geoip returns null → delivery-address fallback engages.
+      'X-Forwarded-For': '10.0.0.5',
+    },
+    body: JSON.stringify({ goal: 'Delivery-address proxy test', model: 'rose-1-lite' }),
+  });
+  assertStatus(res.status, 201, res.data);
+  const body = res.data as { agent_id: string };
+  const agent = await prisma.agent.findUnique({
+    where: { id: body.agent_id },
+    select: { proxyCountry: true, proxyState: true, proxyCity: true },
+  });
+  if (!agent || agent.proxyCity !== 'SAN FRANCISCO' || agent.proxyState !== 'CA') {
+    throw new Error(`Expected SF/CA proxy from delivery address, got ${JSON.stringify(agent)}`);
+  }
   await deleteTestAgent(body.agent_id, session.user.id);
 });
 

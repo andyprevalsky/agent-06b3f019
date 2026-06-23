@@ -6,7 +6,7 @@
  * pools.py). If you change one, change the other.
  */
 
-export { createStreamingCompletion } from './client';
+export { createStreamingCompletion, __resetAnthropicApiKeyCooldown } from './client';
 export { markCacheable, SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from './cache';
 export { buildOpenAiResponseFormat, responseModel, zodToStrictJsonSchema } from './schema';
 export type { ZodResponseModel } from './schema';

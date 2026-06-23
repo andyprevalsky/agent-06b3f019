@@ -1,4 +1,3 @@
-// @ts-expect-error - vcards-js doesn't have type declarations
 // eslint-disable-next-line no-restricted-imports -- domain-specific vCard library, single consumer
 import vCardsJS from 'vcards-js';
 import * as repo from './repo';
@@ -32,7 +31,10 @@ function applyDefaultPhoto(vCard: VCard) {
 }
 
 function buildBaseVCard(name: string): VCard {
-  const vCard = vCardsJS();
+  // vcards-js (>=2.11) ships its own VCard type whose shape is a superset of the
+  // minimal fields we use; cast to our local interface, which documents exactly
+  // what this domain touches.
+  const vCard = vCardsJS() as unknown as VCard;
   vCard.firstName = name;
   vCard.lastName = '';
   vCard.cellPhone = ROSE_PHONE;

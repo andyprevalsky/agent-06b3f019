@@ -35,6 +35,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import {
+  __resetAnthropicApiKeyCooldown,
   buildOpenAiResponseFormat,
   createStreamingCompletion,
   getPool,
@@ -82,6 +83,11 @@ interface TestResult {
 async function runTest(name: string, fn: () => Promise<void>): Promise<TestResult> {
   const start = Date.now();
   try {
+    // Deterministic baseline: the real ANTHROPIC_API_KEY lives in back-end/.env,
+    // so without this every test would engage the api-key tier. Clear it (and the
+    // shared cooldown) before each case; tests that exercise the tier opt back in.
+    delete process.env.ANTHROPIC_API_KEY;
+    await __resetAnthropicApiKeyCooldown();
     await fn();
     return { name, passed: true, duration: Date.now() - start };
   } catch (error) {
@@ -815,6 +821,8 @@ async function testClaudeAuth_400FallsThroughNoRetry() {
 
 async function testClaudeAuth_noTokenGoesDirectToWaterfall() {
   process.env.OPENROUTER_API_KEY = 'or-test-key';
+  // No ANTHROPIC_API_KEY funded default configured for this test.
+  delete process.env.ANTHROPIC_API_KEY;
   let anthropicCalls = 0;
   let openrouterCalls = 0;
   installFetchStub((url) => {
@@ -839,6 +847,139 @@ async function testClaudeAuth_noTokenGoesDirectToWaterfall() {
     assertEqual(anthropicCalls, 0, 'no anthropic call without claude_token');
     assertEqual(openrouterCalls, 1, 'direct to openrouter');
   } finally {
+    restoreFetch();
+  }
+}
+
+// ANTHROPIC_API_KEY funded default: when no compute token is available but the
+// key is configured, the request goes direct to Anthropic via x-api-key (NOT
+// the OpenRouter waterfall), and the call carries the API-key headers — never
+// the OAuth Bearer/oauth-beta combo.
+async function testAnthropicApiKey_servesAsDefaultWhenNoToken() {
+  process.env.OPENROUTER_API_KEY = 'or-test-key';
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-api03-test-key';
+  await __resetAnthropicApiKeyCooldown();
+  let anthropicCalls = 0;
+  let openrouterCalls = 0;
+  let capturedHeaders: Record<string, string> = {};
+  installFetchStub((url, init) => {
+    if (url === ANTHROPIC_API_URL) {
+      anthropicCalls++;
+      capturedHeaders = (init?.headers as Record<string, string>) ?? {};
+      return sseResponse(ANTHROPIC_OK_SSE);
+    }
+    if (url === OPENROUTER_API_URL) {
+      openrouterCalls++;
+      return sseResponse(OPENROUTER_OK_SSE);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+
+  try {
+    const stream = await createStreamingCompletion({
+      model: 'rose-labs/rose-1-lite',
+      messages: [{ role: 'user', content: 'hi' }],
+      // no claude_token / gpt_token — api-key default should engage
+    });
+    const chunks = await collect(stream);
+    assertEqual(anthropicCalls, 1, 'served by anthropic api-key path');
+    assertEqual(openrouterCalls, 0, 'did NOT fall through to openrouter');
+    assertEqual(capturedHeaders['x-api-key'], 'sk-ant-api03-test-key', 'sent x-api-key header');
+    assert(
+      !('Authorization' in capturedHeaders),
+      'api-key path must not send Authorization Bearer'
+    );
+    assert(
+      !(capturedHeaders['anthropic-beta'] ?? '').includes('oauth-2025-04-20'),
+      'api-key path must not send the oauth beta flag'
+    );
+    assert(chunks.length > 0, 'chunks emitted from api-key path');
+    assert(
+      chunks[0].actual_model.endsWith('-anthropic'),
+      `actual_model should carry -anthropic suffix, got ${chunks[0].actual_model}`
+    );
+  } finally {
+    delete process.env.ANTHROPIC_API_KEY;
+    restoreFetch();
+  }
+}
+
+// A working compute token wins over the API-key default ($0 OAuth preferred).
+async function testAnthropicApiKey_computeTokenTakesPrecedence() {
+  process.env.OPENROUTER_API_KEY = 'or-test-key';
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-api03-test-key';
+  await __resetAnthropicApiKeyCooldown();
+  let oauthCalls = 0;
+  let apiKeyCalls = 0;
+  installFetchStub((url, init) => {
+    if (url === ANTHROPIC_API_URL) {
+      const headers = (init?.headers as Record<string, string>) ?? {};
+      if (headers['x-api-key']) apiKeyCalls++;
+      else oauthCalls++;
+      return sseResponse(ANTHROPIC_OK_SSE);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+
+  try {
+    const stream = await createStreamingCompletion({
+      model: 'rose-labs/rose-1-lite',
+      messages: [{ role: 'user', content: 'hi' }],
+      claude_token: 'test-oauth-token',
+    });
+    await collect(stream);
+    assertEqual(oauthCalls, 1, 'served by OAuth claudeAuth');
+    assertEqual(apiKeyCalls, 0, 'api-key default not used when OAuth token works');
+  } finally {
+    delete process.env.ANTHROPIC_API_KEY;
+    restoreFetch();
+  }
+}
+
+// Out-of-credits (402) opens the breaker: the failing call falls through to the
+// waterfall, AND subsequent calls skip the api-key tier entirely (no hammering)
+// until the cooldown elapses.
+async function testAnthropicApiKey_402OpensCircuitAndStopsHammering() {
+  process.env.OPENROUTER_API_KEY = 'or-test-key';
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-api03-test-key';
+  await __resetAnthropicApiKeyCooldown();
+  let anthropicCalls = 0;
+  let openrouterCalls = 0;
+  installFetchStub((url) => {
+    if (url === ANTHROPIC_API_URL) {
+      anthropicCalls++;
+      return errorResponse(402, JSON.stringify({ error: { message: 'Insufficient credits' } }));
+    }
+    if (url === OPENROUTER_API_URL) {
+      openrouterCalls++;
+      return sseResponse(OPENROUTER_OK_SSE);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+
+  try {
+    // First call: api-key 402 → falls through to waterfall.
+    await collect(
+      await createStreamingCompletion({
+        model: 'rose-labs/rose-1-lite',
+        messages: [{ role: 'user', content: 'hi' }],
+      })
+    );
+    assertEqual(anthropicCalls, 1, 'api-key attempted once');
+    assertEqual(openrouterCalls, 1, 'fell through to waterfall after 402');
+
+    // Second call: breaker is open → api-key tier skipped, straight to waterfall.
+    await collect(
+      await createStreamingCompletion({
+        model: 'rose-labs/rose-1-lite',
+        messages: [{ role: 'user', content: 'hi again' }],
+      })
+    );
+    assertEqual(anthropicCalls, 1, 'api-key NOT retried while circuit open (no hammering)');
+    assertEqual(openrouterCalls, 2, 'second call served by waterfall');
+  } finally {
+    delete process.env.ANTHROPIC_API_KEY;
+    await __resetAnthropicApiKeyCooldown();
     restoreFetch();
   }
 }
@@ -2420,6 +2561,18 @@ async function main(): Promise<void> {
     {
       name: 'claudeAuth / no token goes direct to waterfall',
       fn: testClaudeAuth_noTokenGoesDirectToWaterfall,
+    },
+    {
+      name: 'anthropic api-key / serves as funded default when no compute token',
+      fn: testAnthropicApiKey_servesAsDefaultWhenNoToken,
+    },
+    {
+      name: 'anthropic api-key / compute token takes precedence',
+      fn: testAnthropicApiKey_computeTokenTakesPrecedence,
+    },
+    {
+      name: 'anthropic api-key / 402 opens circuit and stops hammering',
+      fn: testAnthropicApiKey_402OpensCircuitAndStopsHammering,
     },
     {
       name: 'client / dump context writes request and output',

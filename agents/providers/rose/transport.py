@@ -59,6 +59,18 @@ def _anthropic_headers(claude_token: str) -> Dict[str, str]:
     }
 
 
+def _anthropic_api_key_headers(api_key: str) -> Dict[str, str]:
+    """Headers for the funded ANTHROPIC_API_KEY default — standard `x-api-key`
+    auth (billed), as opposed to the Claude Max OAuth `Authorization: Bearer`
+    path. No `oauth-2025-04-20` beta, which is OAuth-only."""
+    return {
+        "x-api-key": api_key,
+        "anthropic-version": ANTHROPIC_VERSION,
+        "anthropic-beta": ANTHROPIC_BETA_HEADER,
+        "Content-Type": "application/json",
+    }
+
+
 def _openrouter_headers(openrouter_key: str, referer: str = "https://roselabs.ai") -> Dict[str, str]:
     return {
         "Authorization": f"Bearer {openrouter_key}",
@@ -92,13 +104,17 @@ def _codex_extra_headers_from_body(body: Dict[str, Any]) -> Dict[str, str]:
 async def post_anthropic_stream(
     *,
     body: Dict[str, Any],
-    claude_token: str,
+    claude_token: Optional[str] = None,
+    api_key: Optional[str] = None,
     request_id: str,
     agent_id: Optional[str] = None,
     call_site: Optional[str] = None,
     connect_timeout_s: float = DEFAULT_CONNECT_TIMEOUT_S,
 ) -> AsyncIterator[httpx.Response]:
     """Open a streaming POST to Anthropic Messages API.
+
+    Pass exactly one of `claude_token` (Claude Max OAuth, `Authorization: Bearer`)
+    or `api_key` (the funded ANTHROPIC_API_KEY default, `x-api-key`, billed).
 
     Yields an `httpx.Response` whose body the caller iterates via
     `streaming.parse_anthropic_sse`. The response is closed automatically
@@ -107,7 +123,9 @@ async def post_anthropic_stream(
     The body MUST include `"stream": true`. Caller is responsible for the
     request shape (system blocks, messages, tools, thinking, etc.).
     """
-    headers = _anthropic_headers(claude_token)
+    if (claude_token is None) == (api_key is None):
+        raise ValueError("post_anthropic_stream requires exactly one of claude_token / api_key")
+    headers = _anthropic_api_key_headers(api_key) if api_key is not None else _anthropic_headers(claude_token)
     timeout = httpx.Timeout(connect=connect_timeout_s, read=None, write=connect_timeout_s, pool=connect_timeout_s)
     logger.info(
         "rose.transport.anthropic.start",

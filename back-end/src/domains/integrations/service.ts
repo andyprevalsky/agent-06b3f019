@@ -13,7 +13,11 @@ import {
   markPoolTokenRateLimited,
   markUserTokenRateLimited,
 } from '../../providers/claudeCredentials';
-import { fetchComputeTokenForUser } from '../../providers/computeCredentials';
+import {
+  fetchComputeTokenForUser,
+  isAnthropicApiKeyOnCooldown,
+  markAnthropicApiKeyOnCooldown,
+} from '../../providers/computeCredentials';
 import {
   fetchGptCodeAccessToken,
   fetchGptPoolToken,
@@ -488,7 +492,20 @@ export async function markComputeTokenRateLimited(
   if (type === 'gpt') {
     return markGptTokenRateLimited(source, params);
   }
-  throw new Error('Invalid type. Must be "claude" or "gpt".');
+  if (type === 'anthropic') {
+    // The shared ANTHROPIC_API_KEY funded default. Not a per-user/pool token —
+    // a single global credential — so source/poolTokenId are ignored and we
+    // back off the shared DB cooldown (same row the backend chat path reads).
+    await markAnthropicApiKeyOnCooldown(params.failureReason ?? 'rate_limit');
+    return { ok: true, type, rateLimitedUntil: null };
+  }
+  throw new Error('Invalid type. Must be "claude", "gpt", or "anthropic".');
+}
+
+/** Read the shared ANTHROPIC_API_KEY cooldown — lets the agents Rose client
+ *  skip the funded-default tier when it's backed off, without DB access. */
+export async function getAnthropicApiKeyCooldown() {
+  return { onCooldown: await isAnthropicApiKeyOnCooldown() };
 }
 
 export async function markGptTokenRateLimited(
