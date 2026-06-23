@@ -81,14 +81,14 @@ FULL_SPOOF = r"""
   try { if (typeof Notification!=='undefined') Object.defineProperty(Notification,'permission',{get:()=>'default',configurable:true}); } catch(e){}
   try { if(!window.chrome){Object.defineProperty(window,'chrome',{value:{runtime:{},app:{isInstalled:false},csi:function(){},loadTimes:function(){}},configurable:true,writable:true});} else if(!window.chrome.runtime){window.chrome.runtime={};} } catch(e){}
   try {
-    let seed=(Math.random()*1e9|0)^0x811c9dc5;
-    const rand=()=>{seed=(seed+0x6d2b79f5)|0;let t=Math.imul(seed^(seed>>>15),1|seed);t=(t+Math.imul(t^(t>>>7),61|t))^t;return((t^(t>>>14))>>>0)/4294967296;};
-    const perturb=(img)=>{const d=img&&img.data;if(!d||d.length===0)return img;const px=d.length>>>2,n=Math.min(64,px);for(let k=0;k<n;k++){const o=(Math.floor(rand()*px))<<2;d[o]=(d[o]+(rand()<0.5?1:-1)+256)&255;d[o+1]=(d[o+1]+(rand()<0.5?1:-1)+256)&255;d[o+2]=(d[o+2]+(rand()<0.5?1:-1)+256)&255;if(d[o+3]===0)d[o+3]=255;}return img;};
+    const sessionSeed=((Math.random()*1e9)|0)^0x811c9dc5;
+    const mkRand=(s)=>()=>{s=(s+0x6d2b79f5)|0;let t=Math.imul(s^(s>>>15),1|s);t=(t+Math.imul(t^(t>>>7),61|t))^t;return((t^(t>>>14))>>>0)/4294967296;};
+    const perturb=(img)=>{const d=img&&img.data;if(!d||d.length===0)return img;const px=d.length>>>2;if(px===0||px>600*600)return img;const rand=mkRand((sessionSeed^Math.imul(px,2654435761))>>>0);for(let i=0;i<px;i++){const o=i<<2;d[o]=(d[o]+((rand()*6)|0))&255;d[o+1]=(d[o+1]+((rand()*6)|0))&255;d[o+2]=(d[o+2]+((rand()*6)|0))&255;}return img;};
     const mask=(fn,name)=>{try{Object.defineProperty(fn,'toString',{value:()=>'function '+name+'() { [native code] }',configurable:true});}catch(e){}return fn;};
     const origGID=CanvasRenderingContext2D.prototype.getImageData;
     CanvasRenderingContext2D.prototype.getImageData=mask(function(sx,sy,sw,sh){const img=origGID.call(this,sx,sy,sw,sh);try{return perturb(img);}catch(e){return img;}},'getImageData');
     const origTDU=HTMLCanvasElement.prototype.toDataURL;
-    HTMLCanvasElement.prototype.toDataURL=mask(function(){try{const w=this.width,h=this.height;if(w>0&&h>0){const ctx=this.getContext('2d');if(ctx){const img=origGID.call(ctx,0,0,w,h);perturb(img);ctx.putImageData(img,0,0);}}}catch(e){}return origTDU.apply(this,arguments);},'toDataURL');
+    HTMLCanvasElement.prototype.toDataURL=mask(function(...args){try{const w=this.width,h=this.height;if(w>0&&h>0&&w<=600&&h<=600){const ctx=this.getContext('2d');if(ctx){const img=origGID.call(ctx,0,0,w,h);perturb(img);const tmp=document.createElement('canvas');tmp.width=w;tmp.height=h;const tctx=tmp.getContext('2d');if(tctx){tctx.putImageData(img,0,0);return origTDU.apply(tmp,args);}}}}catch(e){}return origTDU.apply(this,args);},'toDataURL');
   } catch(e){}
 })();
 """
@@ -109,6 +109,28 @@ DESCRIPTOR_PROBE = """() => {
     enumerable: d ? d.enumerable : null,
     getterNative: d && d.get ? /\\[native code\\]/.test(d.get.toString()) : null,
   };
+}"""
+
+# Mirrors FCaptcha's _getCanvasHash exactly so we can see why it reports
+# "canvas blocked or failed" (exception => supported:false, or a short/blank
+# dataUrl) and whether our toDataURL spoof produced a substantial value.
+CANVAS_PROBE = """() => {
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = 200; canvas.height = 50;
+    const ctx = canvas.getContext('2d');
+    ctx.textBaseline = 'top'; ctx.font = '14px Arial';
+    ctx.fillStyle = '#f60'; ctx.fillRect(125, 1, 62, 20);
+    ctx.fillStyle = '#069'; ctx.fillText('FCaptcha', 2, 15);
+    ctx.fillStyle = 'rgba(102, 204, 0, 0.7)'; ctx.fillText('FCaptcha', 4, 17);
+    const dataUrl = canvas.toDataURL();
+    const dataUrl2 = canvas.toDataURL();
+    return { supported: true, dataLength: dataUrl.length, head: dataUrl.slice(0, 40),
+             stableAcrossReads: dataUrl === dataUrl2,
+             toDataURLNative: /\\[native code\\]/.test(HTMLCanvasElement.prototype.toDataURL.toString()) };
+  } catch (e) {
+    return { supported: false, error: String(e) };
+  }
 }"""
 
 
@@ -153,6 +175,8 @@ async def run(args) -> None:
 
             desc = await page.evaluate(DESCRIPTOR_PROBE)
             print(f"[{args.label}] webdriver descriptor: {json.dumps(desc)}")
+            canvas = await page.evaluate(CANVAS_PROBE)
+            print(f"[{args.label}] canvas probe: {json.dumps(canvas)}")
 
             # Interact: checkbox (if present) + invisible-mode form submit.
             try:

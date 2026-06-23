@@ -215,7 +215,11 @@ class BrowserHumanizer:
     def start_idle_movement(self) -> None:
         if not self._idle_mouse_enabled or self._closed or self._idle_handle or self._idle_task:
             return
-        self._schedule_idle_mouse_step(random.uniform(0.28, 0.6))
+        # Dense cadence: humans move the cursor near-continuously. Sparse idle
+        # drift leaves long mouse-silent gaps during LLM thinking, which reads as
+        # "mouse event rate abnormally low" to behavioral biometrics. Keep the
+        # pointer alive with frequent small drifts.
+        self._schedule_idle_mouse_step(random.uniform(0.10, 0.22))
 
     def _schedule_idle_mouse_step(self, delay_s: float) -> None:
         if self._closed or not self._idle_mouse_enabled:
@@ -240,7 +244,7 @@ class BrowserHumanizer:
             return
         finally:
             self._idle_task = None
-        self._schedule_idle_mouse_step(delay_s if delay_s is not None else random.uniform(0.08, 0.16))
+        self._schedule_idle_mouse_step(delay_s if delay_s is not None else random.uniform(0.06, 0.14))
 
     async def _notify_cursor_observer(self, x: int, y: int) -> None:
         if not self._cursor_observer:
@@ -479,22 +483,28 @@ class BrowserHumanizer:
                 await asyncio.sleep(dwell)
                 logger.debug("Pre-hover dwell", x=x, y=y, dwell_ms=int(dwell * 1000))
 
-            # Overshoot then correct — forced on long trajectories. Humans
-            # overshoot the target and settle back; "no overshoot corrections on
-            # a long trajectory" is a behavioral-biometrics bot tell. Aim the
-            # overshoot ALONG the travel vector so the corrective move re-enters
-            # the target (in->out->in), which is what detectors actually count.
-            if overshoot or travel > 120 or random.random() < 0.25:
-                angle = math.atan2(y - start_y, x - start_x) if travel > 1 else random.uniform(0, 2 * math.pi)
-                overshoot_dist = random.randint(18, 30)
-                overshoot_x = x + int(overshoot_dist * math.cos(angle))
-                overshoot_y = y + int(overshoot_dist * math.sin(angle))
-                await self._move_to_unlocked(overshoot_x, overshoot_y)
-                await asyncio.sleep(random.uniform(0.05, 0.12))
-                logger.debug("Overshoot", target=(x, y), overshoot=(overshoot_x, overshoot_y))
-
             # Final movement to target
             await self._move_to_unlocked(x, y)
+
+            # Overshoot-then-correct as the LAST samples before the click. Humans
+            # overshoot the target and settle back; "no overshoot corrections on a
+            # long trajectory" is a behavioral-biometrics bot tell. Detectors only
+            # inspect the final ~20 mouse samples for an inside->outside->inside
+            # pattern, so the correction MUST be the last thing before the click —
+            # a long corrective path (via _move_to_unlocked) buries it out of the
+            # window. Use short direct moves along the travel vector: settled(in)
+            # -> past target(out) -> back(in).
+            if overshoot or travel > 120 or random.random() < 0.35:
+                angle = math.atan2(y - start_y, x - start_x) if travel > 1 else random.uniform(0, 2 * math.pi)
+                overshoot_dist = random.randint(20, 34)
+                overshoot_x = x + int(overshoot_dist * math.cos(angle))
+                overshoot_y = y + int(overshoot_dist * math.sin(angle))
+                await self.input_page.mouse.move(overshoot_x, overshoot_y)
+                await asyncio.sleep(random.uniform(0.03, 0.07))
+                await self.input_page.mouse.move(x, y)
+                await self._notify_cursor_observer(x, y)
+                await asyncio.sleep(random.uniform(0.02, 0.05))
+                logger.debug("Overshoot", target=(x, y), overshoot=(overshoot_x, overshoot_y))
 
             # Small pause before click (human reaction time)
             await asyncio.sleep(random.uniform(0.03, 0.08))

@@ -356,26 +356,34 @@ class DOMService:
     } else if (!window.chrome.runtime) { window.chrome.runtime = {}; }
   } catch (e) {}
   try {
-    let seed = (Math.random() * 1e9 | 0) ^ 0x811c9dc5;
-    const rand = () => { seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+    // Per-SESSION seed (fixed for the page's lifetime). A real canvas
+    // fingerprint is STABLE across repeated reads; a stateful PRNG that advances
+    // each read returns a different hash every time, which detectors classify as
+    // a canvas-blocker ("canvas blocked/failed"). So the noise must be
+    // DETERMINISTIC within a session (re-seeded to the same value each call) yet
+    // unique per session — the latter also varies the fingerprint identity hash
+    // across our rotating proxy IPs, defeating "seen from many IPs".
+    const sessionSeed = ((Math.random() * 1e9) | 0) ^ 0x811c9dc5;
+    const mkRand = (s) => () => {
+      s = (s + 0x6d2b79f5) | 0;
+      let t = Math.imul(s ^ (s >>> 15), 1 | s);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
     const perturb = (img) => {
       const d = img && img.data; if (!d || d.length === 0) return img;
       const px = d.length >>> 2;
-      // Only touch small canvases (fingerprinting probes are <=600x600). Leave
-      // large canvases (screenshots, real rendering) untouched. Under Steel's
-      // software GL the probe canvas reads back blank, which the detector scores
-      // as "canvas blocked/failed" AND, being identical across our proxy IPs,
-      // as "fingerprint seen from many IPs". Writing a DENSE, per-session-seeded,
-      // fully-opaque noise field guarantees a non-degenerate, session-unique
-      // dataURL — defeating both signals at once.
+      // Only touch small canvases (fingerprinting probes are <=600x600); leave
+      // large canvases (screenshots, real rendering) untouched.
       if (px === 0 || px > 600 * 600) return img;
+      // Re-seed deterministically per (session, canvas size) so every read of the
+      // same canvas yields the SAME perturbation (stable hash, not "blocked").
+      const rand = mkRand((sessionSeed ^ Math.imul(px, 2654435761)) >>> 0);
       for (let i = 0; i < px; i++) {
         const o = i << 2;
-        const nz = (rand() * 24) | 0;
-        d[o] = (d[o] + nz) & 255;
-        d[o + 1] = (d[o + 1] + ((rand() * 24) | 0)) & 255;
-        d[o + 2] = (d[o + 2] + ((rand() * 24) | 0)) & 255;
-        d[o + 3] = 255;
+        d[o] = (d[o] + ((rand() * 6) | 0)) & 255;
+        d[o + 1] = (d[o + 1] + ((rand() * 6) | 0)) & 255;
+        d[o + 2] = (d[o + 2] + ((rand() * 6) | 0)) & 255;
       }
       return img;
     };
@@ -383,9 +391,30 @@ class DOMService:
     const origGID = CanvasRenderingContext2D.prototype.getImageData;
     CanvasRenderingContext2D.prototype.getImageData = mask(function (sx, sy, sw, sh) { const img = origGID.call(this, sx, sy, sw, sh); try { return perturb(img); } catch (e) { return img; } }, 'getImageData');
     const origTDU = HTMLCanvasElement.prototype.toDataURL;
-    HTMLCanvasElement.prototype.toDataURL = mask(function () {
-      try { const w = this.width, h = this.height; if (w > 0 && h > 0) { const ctx = this.getContext('2d'); if (ctx) { const img = origGID.call(ctx, 0, 0, w, h); perturb(img); ctx.putImageData(img, 0, 0); } } } catch (e) {}
-      return origTDU.apply(this, arguments);
+    HTMLCanvasElement.prototype.toDataURL = mask(function (...args) {
+      try {
+        const w = this.width, h = this.height;
+        if (w > 0 && h > 0 && w <= 600 && h <= 600) {
+          const ctx = this.getContext('2d');
+          if (ctx) {
+            // Read the ORIGINAL pixels, perturb a copy, and render to a TEMP
+            // canvas — never write back to the source. Mutating the source made
+            // each read accumulate noise (different hash every call = looks like
+            // a canvas-blocker). The original stays pristine, so deterministic
+            // per-session noise yields a STABLE, session-unique fingerprint.
+            const img = origGID.call(ctx, 0, 0, w, h);
+            perturb(img);
+            const tmp = document.createElement('canvas');
+            tmp.width = w; tmp.height = h;
+            const tctx = tmp.getContext('2d');
+            if (tctx) {
+              tctx.putImageData(img, 0, 0);
+              return origTDU.apply(tmp, args);
+            }
+          }
+        }
+      } catch (e) {}
+      return origTDU.apply(this, args);
     }, 'toDataURL');
   } catch (e) {}
 })();
