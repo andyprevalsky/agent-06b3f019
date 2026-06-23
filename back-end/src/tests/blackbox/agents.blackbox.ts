@@ -3319,6 +3319,25 @@ test('geoFromDeliveryAddress — city-only address still resolves', () => {
   }
 });
 
+test('geoFromDeliveryAddress — non-US full country name normalizes to a 2-letter code', () => {
+  // state is only emitted for US; non-US drops it and truncates the country name.
+  const geo = geoFromDeliveryAddress({
+    city: 'London',
+    state: 'England',
+    country: 'United Kingdom',
+  });
+  if (!geo || geo.country !== 'UN' || geo.city !== 'LONDON') {
+    throw new Error(`Expected {country: 'UN' (truncated), LONDON}, got ${JSON.stringify(geo)}`);
+  }
+});
+
+test('geoFromDeliveryAddress — non-US 2-letter country code is uppercased as-is', () => {
+  const geo = geoFromDeliveryAddress({ city: 'Toronto', state: 'ON', country: 'ca' });
+  if (!geo || geo.country !== 'CA' || geo.city !== 'TORONTO') {
+    throw new Error(`Expected {CA, TORONTO}, got ${JSON.stringify(geo)}`);
+  }
+});
+
 // 2c. Integration: a server-originated agent (no resolvable client IP) inherits
 //     the user's delivery-address city instead of the default Dallas proxy.
 test('POST /agents — no resolvable IP falls back to user delivery address', async () => {
