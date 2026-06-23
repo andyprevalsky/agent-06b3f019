@@ -24,7 +24,6 @@ import numpy as np
 
 from keycap import Controller, Plant
 
-
 Point = Tuple[float, float]
 
 CLICK_DURATION_MEAN_MS = 85.0
@@ -326,6 +325,30 @@ def synthesize_mouse_path(
         if samples and segment and (segment[0].x, segment[0].y) == (samples[-1].x, samples[-1].y):
             segment = segment[1:]
         samples.extend(segment)
+
+    # Inject per-sample speed variation. A clean Sigma-Lognormal profile can yield
+    # velocityVariance < 0.02 (px/ms)^2 on slower/shorter moves, which behavioral
+    # biometrics flag as "mouse velocity too consistent". Real hand movement has
+    # irregular micro-accelerations — brief dashes and hesitations — so jitter the
+    # per-sample delays (occasionally by a large factor). Since velocity is
+    # distance/dt, varying dt scatters consecutive velocities; a few outliers are
+    # enough to clear the variance floor while keeping the mean cadence intact.
+    if len(samples) > 3:
+        varied: List[MouseSample] = []
+        for sample in samples:
+            factor = rng.uniform(0.72, 1.4)
+            if rng.random() < 0.2:
+                factor *= rng.choice((0.45, 2.3))  # occasional dash / hesitation
+            varied.append(MouseSample(sample.x, sample.y, max(0.002, sample.delay_s * factor)))
+        # Renormalize so the total move duration (hence the mouse-event RATE the
+        # detector measures) is preserved — we only redistribute time between
+        # samples to scatter velocities, not slow the move down.
+        orig_total = sum(s.delay_s for s in samples)
+        new_total = sum(s.delay_s for s in varied)
+        if new_total > 0 and orig_total > 0:
+            scale = orig_total / new_total
+            varied = [MouseSample(s.x, s.y, max(0.002, s.delay_s * scale)) for s in varied]
+        samples = varied
 
     return samples
 
