@@ -26,7 +26,7 @@ from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY, format_required_output
 logger = structlog.get_logger()
 
 EMAIL_OTP_BROWSER_INSTRUCTION = (
-    "Do not open AgentMail, webmail, or inbox websites to retrieve OTP codes. "
+    "Do not open webmail or inbox websites to retrieve OTP codes. "
     "Recent email OTPs are fetched automatically and will appear as user messages."
 )
 

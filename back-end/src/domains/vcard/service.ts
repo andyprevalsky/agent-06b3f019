@@ -14,17 +14,10 @@ import {
 
 const log = createLogger('VCard');
 
-interface VCard {
-  firstName: string;
-  lastName: string;
-  cellPhone: string;
-  email: string;
-  organization: string;
-  url: string;
-  birthday: Date;
-  photo: { embedFromString: (data: string, type: string) => void };
-  getFormattedString: () => string;
-}
+// vcards-js (2.11+) ships its own types; derive ours from the library's return
+// type so field shapes (several are string | string[]) stay in sync rather than
+// drifting against a hand-rolled interface.
+type VCard = ReturnType<typeof vCardsJS>;
 
 function applyDefaultPhoto(vCard: VCard) {
   vCard.photo.embedFromString(DEFAULT_PHOTO_BASE64, 'PNG');

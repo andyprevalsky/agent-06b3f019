@@ -21,6 +21,15 @@ export interface AuthOptionsResponse {
     disabled: boolean;
     dateLastUsed: number | null;
   }>;
+  // Cloud-custody passkeys (Model A). Metadata only — the encrypted private key
+  // never travels here; it rides the session-init channel and is decrypted
+  // server-side, then injected into a CDP virtual authenticator at runtime.
+  passkeys: Array<{
+    id: string;
+    rpId: string;
+    credentialId: string;
+    disabled: boolean;
+  }>;
   email_otp: {
     available: boolean;
     connected_emails: string[];
@@ -31,7 +40,7 @@ export interface AuthOptionsResponse {
     accountLabel: string;
     email: string;
     phone: string | null;
-    provider: 'agentmail';
+    provider: 'primitive';
     phoneProvider: 'agentphone' | null;
     disabled: boolean;
   };

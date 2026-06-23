@@ -67,6 +67,19 @@ export interface SerializedPassword {
   dateLastUsed: number | null;
 }
 
+// Passkey material for runtime injection into a CDP virtual authenticator.
+// encryptedPrivateKey stays encrypted over the wire (decrypted in the agent
+// activity, never shown to the LLM). signCount is the block-reserved base the
+// authenticator is seeded with — see repo.reservePasskeysForRealm.
+export interface SerializedPasskey {
+  id: string;
+  credentialId: string;
+  encryptedPrivateKey: string;
+  rpId: string;
+  userHandle: string | null;
+  signCount: number;
+}
+
 export interface UserSettings {
   name: string | null;
   phone: string | null;

@@ -139,30 +139,23 @@ test('disabled user credentials do not suppress minted fallback', async () => {
   }
 });
 
-test('missing minted account provisions a real AgentMail inbox before returning fallback', async () => {
+test('missing minted account mints a primitive inbox before returning fallback', async () => {
   const userId = await createUser('Rose Pilot');
-  const previousApiKey = process.env.AGENTMAIL_API_KEY;
-  const previousBaseUrl = process.env.AGENTMAIL_BASE_URL;
-  const previousDomain = process.env.AGENTMAIL_DOMAIN;
+  const previousApiKey = process.env.PRIMITIVE_API_KEY;
+  const previousDomain = process.env.PRIMITIVE_DOMAIN;
   const previousAgentPhoneApiKey = process.env.AGENTPHONE_API_KEY;
   const previousAgentPhoneBaseUrl = process.env.AGENTPHONE_BASE_URL;
   const previousFetch = globalThis.fetch;
   const calls: Array<{ url: string; method: string; body: Record<string, unknown> }> = [];
-  let createdEmail = '';
-  process.env.AGENTMAIL_API_KEY = 'test-agentmail-key';
-  process.env.AGENTMAIL_BASE_URL = 'https://agentmail.test';
-  process.env.AGENTMAIL_DOMAIN = 'agentmail.test';
+  process.env.PRIMITIVE_API_KEY = 'test-primitive-key';
+  process.env.PRIMITIVE_DOMAIN = 'mail.roselabs.test';
   process.env.AGENTPHONE_API_KEY = 'test-agentphone-key';
   process.env.AGENTPHONE_BASE_URL = 'https://agentphone.test/v1';
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const method = init?.method ?? 'GET';
     const url = String(input);
     const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
-    calls.push({
-      url,
-      method,
-      body,
-    });
+    calls.push({ url, method, body });
     if (url === 'https://agentphone.test/v1/agents') {
       return {
         ok: true,
@@ -179,26 +172,7 @@ test('missing minted account provisions a real AgentMail inbox before returning 
         text: async () => '',
       } as Response;
     }
-    if (method === 'GET') {
-      return {
-        ok: false,
-        status: 404,
-        json: async () => ({}),
-        text: async () => '',
-      } as Response;
-    }
-    const email = `${String(body.username)}@${String(body.domain)}`;
-    createdEmail = email;
-    return {
-      ok: true,
-      status: 200,
-      json: async () => ({
-        inbox_id: email,
-        email,
-        client_id: 'client-id',
-      }),
-      text: async () => '',
-    } as Response;
+    throw new Error(`unexpected fetch to ${url}`);
   }) as typeof fetch;
 
   try {
@@ -207,39 +181,29 @@ test('missing minted account provisions a real AgentMail inbox before returning 
       where: { userId_authRealm: { userId, authRealm: 'uber.com' } },
     });
     const identity = await prisma.agentIdentity.findUniqueOrThrow({ where: { userId } });
+    const mintedEmail = options.minted?.email;
 
-    const createCall = calls.find((call) => call.method === 'POST');
+    // Primitive mints addresses locally under the catch-all domain — there is no
+    // inbox-provisioning API call, only AgentPhone provisioning hits the network.
     assert(
-      calls.some((call) => call.method === 'GET'),
-      'expected AgentMail inbox lookup request'
-    );
-    assert(createCall !== undefined, 'expected AgentMail inbox creation request');
-    assert(
-      createCall.url === 'https://agentmail.test/v0/inboxes',
-      'expected AgentMail create endpoint'
-    );
-    assert(createCall.body.domain === 'agentmail.test', 'expected configured AgentMail domain');
-    assert(
-      typeof createCall.body.client_id === 'string' && createCall.body.client_id !== '',
-      'expected idempotent client_id'
-    );
-    assert(
-      createCall.body.display_name === 'Rose Pilot',
-      'expected user-created agent name as display name'
-    );
-    assert(
-      typeof createCall.body.username === 'string' &&
-        createCall.body.username.startsWith('rose.pilot.'),
-      `expected minted username to start with agent name, got ${String(createCall.body.username)}`
+      calls.every((call) => call.url.startsWith('https://agentphone.test/')),
+      'expected no primitive inbox HTTP calls — addresses are minted locally'
     );
     assert(options.realm === 'uber.com', 'expected canonical Uber realm');
-    assert(options.minted?.accountLabel === createdEmail, 'expected minted email');
-    assert(options.minted?.email === createdEmail, 'expected minted email alias');
+    assert(
+      typeof mintedEmail === 'string' && mintedEmail.startsWith('rose.pilot.'),
+      `expected minted address to start with agent name, got ${String(mintedEmail)}`
+    );
+    assert(
+      mintedEmail.endsWith('@mail.roselabs.test'),
+      'expected minted email on the configured primitive domain'
+    );
+    assert(options.minted?.accountLabel === mintedEmail, 'expected minted email');
+    assert(identity.email === mintedEmail, 'expected persisted agent identity');
     assert(options.minted?.phone === '+19125550199', 'expected minted phone alias');
-    assert(options.minted?.provider === 'agentmail', 'expected AgentMail provider marker');
+    assert(options.minted?.provider === 'primitive', 'expected primitive provider marker');
     assert(options.minted?.phoneProvider === 'agentphone', 'expected AgentPhone provider marker');
-    assert(persisted.accountLabel === createdEmail, 'expected persisted minted email');
-    assert(identity.email === createdEmail, 'expected persisted agent identity');
+    assert(persisted.accountLabel === mintedEmail, 'expected persisted minted email');
     assert(identity.phone === '+19125550199', 'expected persisted agent phone');
     assert(identity.phoneProvider === 'agentphone', 'expected persisted phone provider');
     assert(
@@ -252,12 +216,10 @@ test('missing minted account provisions a real AgentMail inbox before returning 
     );
   } finally {
     globalThis.fetch = previousFetch;
-    if (previousApiKey === undefined) delete process.env.AGENTMAIL_API_KEY;
-    else process.env.AGENTMAIL_API_KEY = previousApiKey;
-    if (previousBaseUrl === undefined) delete process.env.AGENTMAIL_BASE_URL;
-    else process.env.AGENTMAIL_BASE_URL = previousBaseUrl;
-    if (previousDomain === undefined) delete process.env.AGENTMAIL_DOMAIN;
-    else process.env.AGENTMAIL_DOMAIN = previousDomain;
+    if (previousApiKey === undefined) delete process.env.PRIMITIVE_API_KEY;
+    else process.env.PRIMITIVE_API_KEY = previousApiKey;
+    if (previousDomain === undefined) delete process.env.PRIMITIVE_DOMAIN;
+    else process.env.PRIMITIVE_DOMAIN = previousDomain;
     if (previousAgentPhoneApiKey === undefined) delete process.env.AGENTPHONE_API_KEY;
     else process.env.AGENTPHONE_API_KEY = previousAgentPhoneApiKey;
     if (previousAgentPhoneBaseUrl === undefined) delete process.env.AGENTPHONE_BASE_URL;
@@ -266,21 +228,18 @@ test('missing minted account provisions a real AgentMail inbox before returning 
   }
 });
 
-test('minted identity reuses one AgentMail inbox and one AgentPhone number per user', async () => {
+test('minted identity reuses one primitive inbox and one AgentPhone number per user', async () => {
   const userId = await createUser('Rose Pilot');
-  const previousAgentMailApiKey = process.env.AGENTMAIL_API_KEY;
-  const previousAgentMailBaseUrl = process.env.AGENTMAIL_BASE_URL;
-  const previousAgentMailDomain = process.env.AGENTMAIL_DOMAIN;
+  const previousApiKey = process.env.PRIMITIVE_API_KEY;
+  const previousDomain = process.env.PRIMITIVE_DOMAIN;
   const previousAgentPhoneApiKey = process.env.AGENTPHONE_API_KEY;
   const previousAgentPhoneBaseUrl = process.env.AGENTPHONE_BASE_URL;
   const previousFetch = globalThis.fetch;
   const calls: Array<{ url: string; method: string; body: Record<string, unknown> }> = [];
-  process.env.AGENTMAIL_API_KEY = 'test-agentmail-key';
-  process.env.AGENTMAIL_BASE_URL = 'https://agentmail.test';
-  process.env.AGENTMAIL_DOMAIN = 'agentmail.test';
+  process.env.PRIMITIVE_API_KEY = 'test-primitive-key';
+  process.env.PRIMITIVE_DOMAIN = 'mail.roselabs.test';
   process.env.AGENTPHONE_API_KEY = 'test-agentphone-key';
   process.env.AGENTPHONE_BASE_URL = 'https://agentphone.test/v1';
-  let createdEmail: string | null = null;
 
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const method = init?.method ?? 'GET';
@@ -303,37 +262,7 @@ test('minted identity reuses one AgentMail inbox and one AgentPhone number per u
         text: async () => '',
       } as Response;
     }
-    if (method === 'GET') {
-      if (
-        createdEmail !== null &&
-        (url.includes(createdEmail) || url.includes(encodeURIComponent(createdEmail)))
-      ) {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({
-            inbox_id: createdEmail,
-            email: createdEmail,
-            client_id: 'client-id',
-          }),
-          text: async () => '',
-        } as Response;
-      }
-      return {
-        ok: false,
-        status: 404,
-        json: async () => ({}),
-        text: async () => '',
-      } as Response;
-    }
-    const email = `${String(body.username)}@${String(body.domain)}`;
-    createdEmail = email;
-    return {
-      ok: true,
-      status: 200,
-      json: async () => ({ inbox_id: email, email, client_id: 'client-id' }),
-      text: async () => '',
-    } as Response;
+    throw new Error(`unexpected fetch to ${url}`);
   }) as typeof fetch;
 
   try {
@@ -349,16 +278,20 @@ test('minted identity reuses one AgentMail inbox and one AgentPhone number per u
     assert(lyftOptions.minted?.email === identity.email, 'expected Lyft to use shared email');
     assert(uberOptions.minted?.phone === identity.phone, 'expected Uber to use shared phone');
     assert(lyftOptions.minted?.phone === identity.phone, 'expected Lyft to use shared phone');
+    assert(
+      identity.email.endsWith('@mail.roselabs.test'),
+      'expected shared email on primitive domain'
+    );
     assert(mintedAccounts.length === 2, 'expected per-realm minted account rows');
     assert(
       mintedAccounts.every((account) => account.accountLabel === identity.email),
       'expected each realm row to point at shared identity email'
     );
+    // No inbox-provisioning API exists for primitive; the shared address is reused
+    // purely from the persisted identity, so the only network call is AgentPhone.
     assert(
-      calls.filter(
-        (call) => call.url === 'https://agentmail.test/v0/inboxes' && call.method === 'POST'
-      ).length === 1,
-      'expected exactly one AgentMail inbox create'
+      calls.every((call) => call.url.startsWith('https://agentphone.test/')),
+      'expected no primitive inbox HTTP calls'
     );
     assert(
       calls.filter((call) => call.url === 'https://agentphone.test/v1/numbers').length === 1,
@@ -366,12 +299,10 @@ test('minted identity reuses one AgentMail inbox and one AgentPhone number per u
     );
   } finally {
     globalThis.fetch = previousFetch;
-    if (previousAgentMailApiKey === undefined) delete process.env.AGENTMAIL_API_KEY;
-    else process.env.AGENTMAIL_API_KEY = previousAgentMailApiKey;
-    if (previousAgentMailBaseUrl === undefined) delete process.env.AGENTMAIL_BASE_URL;
-    else process.env.AGENTMAIL_BASE_URL = previousAgentMailBaseUrl;
-    if (previousAgentMailDomain === undefined) delete process.env.AGENTMAIL_DOMAIN;
-    else process.env.AGENTMAIL_DOMAIN = previousAgentMailDomain;
+    if (previousApiKey === undefined) delete process.env.PRIMITIVE_API_KEY;
+    else process.env.PRIMITIVE_API_KEY = previousApiKey;
+    if (previousDomain === undefined) delete process.env.PRIMITIVE_DOMAIN;
+    else process.env.PRIMITIVE_DOMAIN = previousDomain;
     if (previousAgentPhoneApiKey === undefined) delete process.env.AGENTPHONE_API_KEY;
     else process.env.AGENTPHONE_API_KEY = previousAgentPhoneApiKey;
     if (previousAgentPhoneBaseUrl === undefined) delete process.env.AGENTPHONE_BASE_URL;
@@ -380,25 +311,25 @@ test('minted identity reuses one AgentMail inbox and one AgentPhone number per u
   }
 });
 
-test('minted identity replaces deleted AgentMail inbox without reprovisioning AgentPhone', async () => {
+test('minted identity migrates a legacy-domain inbox onto primitive without reprovisioning AgentPhone', async () => {
   const userId = await createUser('Rose Pilot');
-  const previousAgentMailApiKey = process.env.AGENTMAIL_API_KEY;
-  const previousAgentMailBaseUrl = process.env.AGENTMAIL_BASE_URL;
-  const previousAgentMailDomain = process.env.AGENTMAIL_DOMAIN;
+  const previousApiKey = process.env.PRIMITIVE_API_KEY;
+  const previousDomain = process.env.PRIMITIVE_DOMAIN;
   const previousAgentPhoneApiKey = process.env.AGENTPHONE_API_KEY;
   const previousAgentPhoneBaseUrl = process.env.AGENTPHONE_BASE_URL;
   const previousFetch = globalThis.fetch;
   const calls: Array<{ url: string; method: string; body: Record<string, unknown> }> = [];
-  process.env.AGENTMAIL_API_KEY = 'test-agentmail-key';
-  process.env.AGENTMAIL_BASE_URL = 'https://agentmail.test';
-  process.env.AGENTMAIL_DOMAIN = 'agentmail.test';
+  process.env.PRIMITIVE_API_KEY = 'test-primitive-key';
+  process.env.PRIMITIVE_DOMAIN = 'mail.roselabs.test';
   process.env.AGENTPHONE_API_KEY = 'test-agentphone-key';
   process.env.AGENTPHONE_BASE_URL = 'https://agentphone.test/v1';
 
+  // Pre-existing identity is on the legacy AgentMail domain — the migration must
+  // re-mint it onto the primitive domain while preserving the phone number.
   await prisma.agentIdentity.create({
     data: {
       userId,
-      email: 'old.deleted@agentmail.test',
+      email: 'old.legacy@agentmail.to',
       phone: '+19125550199',
       phoneProvider: 'agentphone',
       phoneProviderAgentId: 'agt-existing',
@@ -409,7 +340,7 @@ test('minted identity replaces deleted AgentMail inbox without reprovisioning Ag
     data: {
       userId,
       authRealm: 'uber.com',
-      accountLabel: 'old.deleted@agentmail.test',
+      accountLabel: 'old.legacy@agentmail.to',
     },
   });
 
@@ -418,24 +349,7 @@ test('minted identity replaces deleted AgentMail inbox without reprovisioning Ag
     const url = String(input);
     const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
     calls.push({ url, method, body });
-    if (url.startsWith('https://agentphone.test/')) {
-      throw new Error('AgentPhone should not be called when cached phone exists');
-    }
-    if (method === 'GET') {
-      return {
-        ok: false,
-        status: 404,
-        json: async () => ({}),
-        text: async () => '',
-      } as Response;
-    }
-    const email = `${String(body.username)}@${String(body.domain)}`;
-    return {
-      ok: true,
-      status: 200,
-      json: async () => ({ inbox_id: email, email, client_id: String(body.client_id) }),
-      text: async () => '',
-    } as Response;
+    throw new Error(`unexpected fetch to ${url}`);
   }) as typeof fetch;
 
   try {
@@ -444,10 +358,16 @@ test('minted identity replaces deleted AgentMail inbox without reprovisioning Ag
     const minted = await prisma.mintedAccount.findUniqueOrThrow({
       where: { userId_authRealm: { userId, authRealm: 'uber.com' } },
     });
+    const mintedEmail = options.minted?.email;
 
-    assert(options.minted?.email !== 'old.deleted@agentmail.test', 'expected replacement email');
+    assert(mintedEmail !== 'old.legacy@agentmail.to', 'expected replacement email');
+    assert(
+      typeof mintedEmail === 'string' && mintedEmail.endsWith('@mail.roselabs.test'),
+      'expected replacement email on primitive domain'
+    );
+    assert(mintedEmail.startsWith('rose.pilot.'), 'expected replacement to keep agent-name prefix');
     assert(options.minted?.phone === '+19125550199', 'expected cached phone in auth options');
-    assert(identity.email === options.minted?.email, 'expected identity email replaced');
+    assert(identity.email === mintedEmail, 'expected identity email replaced');
     assert(identity.phone === '+19125550199', 'expected identity phone preserved');
     assert(
       identity.phoneProviderAgentId === 'agt-existing',
@@ -457,30 +377,16 @@ test('minted identity replaces deleted AgentMail inbox without reprovisioning Ag
       identity.phoneProviderNumberId === 'num-existing',
       'expected AgentPhone number id preserved'
     );
-    assert(
-      minted.accountLabel === options.minted?.email,
-      'expected minted row to point at new email'
-    );
-    assert(
-      calls.some(
-        (call) => call.method === 'GET' && call.url.includes('old.deleted%40agentmail.test')
-      ),
-      'expected lookup of stored AgentMail inbox'
-    );
-    assert(
-      calls.filter(
-        (call) => call.method === 'POST' && call.url === 'https://agentmail.test/v0/inboxes'
-      ).length === 1,
-      'expected exactly one replacement AgentMail inbox'
-    );
+    assert(minted.accountLabel === mintedEmail, 'expected minted row to point at new email');
+    // Re-minting is local and the cached phone short-circuits AgentPhone, so nothing
+    // should hit the network at all.
+    assert(calls.length === 0, 'expected no network calls during local re-mint');
   } finally {
     globalThis.fetch = previousFetch;
-    if (previousAgentMailApiKey === undefined) delete process.env.AGENTMAIL_API_KEY;
-    else process.env.AGENTMAIL_API_KEY = previousAgentMailApiKey;
-    if (previousAgentMailBaseUrl === undefined) delete process.env.AGENTMAIL_BASE_URL;
-    else process.env.AGENTMAIL_BASE_URL = previousAgentMailBaseUrl;
-    if (previousAgentMailDomain === undefined) delete process.env.AGENTMAIL_DOMAIN;
-    else process.env.AGENTMAIL_DOMAIN = previousAgentMailDomain;
+    if (previousApiKey === undefined) delete process.env.PRIMITIVE_API_KEY;
+    else process.env.PRIMITIVE_API_KEY = previousApiKey;
+    if (previousDomain === undefined) delete process.env.PRIMITIVE_DOMAIN;
+    else process.env.PRIMITIVE_DOMAIN = previousDomain;
     if (previousAgentPhoneApiKey === undefined) delete process.env.AGENTPHONE_API_KEY;
     else process.env.AGENTPHONE_API_KEY = previousAgentPhoneApiKey;
     if (previousAgentPhoneBaseUrl === undefined) delete process.env.AGENTPHONE_BASE_URL;

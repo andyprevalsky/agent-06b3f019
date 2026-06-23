@@ -7,7 +7,7 @@
  */
 
 import { canonicalAuthRealm, hostnameFromRealmInput } from '../../providers/authRealm';
-import { agentMailDomain, createMintedInbox, findAgentMailInbox } from '../../providers/agentMail';
+import { primitiveDomain, createMintedInbox, findMintedInbox } from '../../providers/primitive';
 import { createAgentPhoneNumber } from '../../providers/agentPhone';
 import { createLogger } from '../../providers/logger';
 import { benchmarkSavedBrowserAuthDisabled } from './config';
@@ -21,8 +21,8 @@ const CHROMIUM_UNIX_EPOCH_OFFSET_MS = 11644473600000n;
 const CHROMIUM_ONE_DAY_MICROSECONDS = 86400000000n;
 const UNIX_MS_VS_CHROMIUM_MICROSECONDS_BOUNDARY = 10000000000000n;
 
-function emailUsesCurrentAgentMailDomain(email: string): boolean {
-  const currentDomain = agentMailDomain().toLowerCase();
+function emailUsesCurrentMintedDomain(email: string): boolean {
+  const currentDomain = primitiveDomain().toLowerCase();
   return email.trim().toLowerCase().endsWith(`@${currentDomain}`);
 }
 
@@ -70,10 +70,11 @@ export async function getAuthOptions(
     throw new Error('realm query parameter is required');
   }
 
-  const [steelAuth, bundles, passwordsAll, minted, agentIdentity] = await Promise.all([
+  const [steelAuth, bundles, passwordsAll, passkeysAll, minted, agentIdentity] = await Promise.all([
     repo.findSteelSessionAuth(userId, realm),
     repo.findCookieBundles(userId, realm),
     repo.findBrowserPasswords(userId),
+    repo.findPasskeys(userId, realm),
     repo.findMintedAccount(userId, realm),
     repo.findAgentIdentity(userId),
   ]);
@@ -81,12 +82,24 @@ export async function getAuthOptions(
   const hideSavedBrowserAuth = benchmarkSavedBrowserAuthDisabled();
   const cookieBundles = await resolveCookieBundles(userId, realm, bundles, hideSavedBrowserAuth);
   const passwordOptions = resolvePasswordOptions(realm, passwordsAll, hideSavedBrowserAuth);
+  // Passkeys are intentionally NOT hidden by hideSavedBrowserAuth: the passkey
+  // benchmark strips cookies + passwords but must keep the passkey available.
+  const passkeyOptions = passkeysAll.map((pk) => ({
+    id: pk.id,
+    rpId: pk.rpId,
+    credentialId: pk.credentialId,
+    disabled: pk.disabledAt !== null,
+  }));
   const emailOtpEmails: string[] = [];
   const emailOtpAvailable = false;
   const enabledCookieBundles = cookieBundles.filter((bundle) => !bundle.disabled);
   const enabledPasswordOptions = passwordOptions.filter((password) => !password.disabled);
+  const enabledPasskeys = passkeyOptions.filter((pk) => !pk.disabled);
   const shouldExposeMinted =
-    enabledCookieBundles.length === 0 && enabledPasswordOptions.length === 0 && !emailOtpAvailable;
+    enabledCookieBundles.length === 0 &&
+    enabledPasswordOptions.length === 0 &&
+    enabledPasskeys.length === 0 &&
+    !emailOtpAvailable;
   const mintedIdentity = shouldExposeMinted
     ? await ensureMintedIdentity(userId, agentIdentity, minted)
     : agentIdentity;
@@ -110,6 +123,7 @@ export async function getAuthOptions(
         : null,
     cookie_bundles: cookieBundles,
     passwords: passwordOptions,
+    passkeys: passkeyOptions,
     email_otp: {
       available: emailOtpAvailable,
       connected_emails: emailOtpEmails,
@@ -122,7 +136,7 @@ export async function getAuthOptions(
             accountLabel: mintedIdentity?.email ?? mintedAccount.accountLabel,
             email: mintedIdentity?.email ?? mintedAccount.accountLabel,
             phone: mintedIdentity?.phone ?? null,
-            provider: 'agentmail',
+            provider: 'primitive',
             phoneProvider: mintedIdentity?.phoneProvider === 'agentphone' ? 'agentphone' : null,
             disabled: mintedAccount.disabledAt !== null,
           }
@@ -255,9 +269,9 @@ async function ensureMintedIdentity(
       identity = await repo.upsertAgentIdentityEmail(userId, inbox.email);
     }
   } else {
-    const hasCurrentAgentMailDomain = emailUsesCurrentAgentMailDomain(identity.email);
-    const inbox = hasCurrentAgentMailDomain ? await findAgentMailInbox(identity.email) : null;
-    if (!hasCurrentAgentMailDomain || inbox === null) {
+    const hasCurrentMintedDomain = emailUsesCurrentMintedDomain(identity.email);
+    const inbox = hasCurrentMintedDomain ? await findMintedInbox(identity.email) : null;
+    if (!hasCurrentMintedDomain || inbox === null) {
       const replacement = await createMintedInbox({
         userId,
         authRealm: 'agent-identity',

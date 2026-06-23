@@ -1,4 +1,24 @@
-import type { SerializedPassword, UserSettings } from './types';
+import type { SerializedPasskey, SerializedPassword, UserSettings } from './types';
+
+export function serializePasskeys(
+  passkeys: Array<{
+    id: string;
+    credentialId: string;
+    encryptedPrivateKey: string;
+    rpId: string;
+    userHandle: string | null;
+    signCount: number;
+  }>
+): SerializedPasskey[] {
+  return passkeys.map((p) => ({
+    id: p.id,
+    credentialId: p.credentialId,
+    encryptedPrivateKey: p.encryptedPrivateKey,
+    rpId: p.rpId,
+    userHandle: p.userHandle,
+    signCount: p.signCount,
+  }));
+}
 
 export function serializePasswords(
   passwords: Array<{
