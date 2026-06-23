@@ -217,6 +217,7 @@ model User {
   cookieBundles               CookieBundle[]
   steelSessionAuths           SteelSessionAuth[]
   mintedAccounts              MintedAccount[]
+  passkeyCredentials          PasskeyCredential[]
   agentIdentity               AgentIdentity?
   agentPhoneMessages          AgentPhoneMessage[]
   authAssistanceRequests      UserAuthAssistanceRequest[]
@@ -746,6 +747,34 @@ model MintedAccount {
   user           User      @relation(fields: [userId], references: [userId], onDelete: Cascade)
 
   @@unique([userId, authRealm])
+}
+
+// Cloud-custody passkey (Model A): a software-authenticator credential whose
+// private key we hold encrypted at rest and re-inject into a CDP virtual
+// authenticator at agent runtime. signCount is advanced via an ATOMIC block
+// reservation at session start (never read-modify-write) so concurrent agent
+// runs seed disjoint, strictly-increasing WebAuthn counter ranges — otherwise
+// the relying party rejects duplicate counters as a cloned authenticator.
+model PasskeyCredential {
+  id                  String    @id @default(uuid())
+  userId              String
+  authRealm           String
+  rpId                String
+  credentialId        String
+  encryptedPrivateKey String
+  userHandle          String?
+  signCount           BigInt    @default(0)
+  origin              String?
+  browserSource       String    @default("cdp_virtual")
+  disabledAt          DateTime?
+  disabledReason      String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @default(now()) @updatedAt
+  user                User      @relation(fields: [userId], references: [userId], onDelete: Cascade)
+
+  @@unique([userId, rpId, credentialId])
+  @@index([userId])
+  @@index([userId, authRealm])
 }
 
 model AgentIdentity {

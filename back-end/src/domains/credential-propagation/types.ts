@@ -5,7 +5,8 @@ export type CredentialKind =
   | 'password'
   | 'steel_session'
   | 'email_otp'
-  | 'minted';
+  | 'minted'
+  | 'passkey';
 
 export interface CredentialRef {
   kind: CredentialKind;

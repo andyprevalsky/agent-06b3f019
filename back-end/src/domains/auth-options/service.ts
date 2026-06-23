@@ -70,10 +70,11 @@ export async function getAuthOptions(
     throw new Error('realm query parameter is required');
   }
 
-  const [steelAuth, bundles, passwordsAll, minted, agentIdentity] = await Promise.all([
+  const [steelAuth, bundles, passwordsAll, passkeysAll, minted, agentIdentity] = await Promise.all([
     repo.findSteelSessionAuth(userId, realm),
     repo.findCookieBundles(userId, realm),
     repo.findBrowserPasswords(userId),
+    repo.findPasskeys(userId, realm),
     repo.findMintedAccount(userId, realm),
     repo.findAgentIdentity(userId),
   ]);
@@ -81,12 +82,24 @@ export async function getAuthOptions(
   const hideSavedBrowserAuth = benchmarkSavedBrowserAuthDisabled();
   const cookieBundles = await resolveCookieBundles(userId, realm, bundles, hideSavedBrowserAuth);
   const passwordOptions = resolvePasswordOptions(realm, passwordsAll, hideSavedBrowserAuth);
+  // Passkeys are intentionally NOT hidden by hideSavedBrowserAuth: the passkey
+  // benchmark strips cookies + passwords but must keep the passkey available.
+  const passkeyOptions = passkeysAll.map((pk) => ({
+    id: pk.id,
+    rpId: pk.rpId,
+    credentialId: pk.credentialId,
+    disabled: pk.disabledAt !== null,
+  }));
   const emailOtpEmails: string[] = [];
   const emailOtpAvailable = false;
   const enabledCookieBundles = cookieBundles.filter((bundle) => !bundle.disabled);
   const enabledPasswordOptions = passwordOptions.filter((password) => !password.disabled);
+  const enabledPasskeys = passkeyOptions.filter((pk) => !pk.disabled);
   const shouldExposeMinted =
-    enabledCookieBundles.length === 0 && enabledPasswordOptions.length === 0 && !emailOtpAvailable;
+    enabledCookieBundles.length === 0 &&
+    enabledPasswordOptions.length === 0 &&
+    enabledPasskeys.length === 0 &&
+    !emailOtpAvailable;
   const mintedIdentity = shouldExposeMinted
     ? await ensureMintedIdentity(userId, agentIdentity, minted)
     : agentIdentity;
@@ -110,6 +123,7 @@ export async function getAuthOptions(
         : null,
     cookie_bundles: cookieBundles,
     passwords: passwordOptions,
+    passkeys: passkeyOptions,
     email_otp: {
       available: emailOtpAvailable,
       connected_emails: emailOtpEmails,

@@ -9,8 +9,8 @@ This module provides:
 
 import asyncio
 import logging
-from dataclasses import dataclass, field, asdict
-from typing import Optional, Tuple, Dict, Any, List
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +192,14 @@ class DOMService:
         self.viewport_height = viewport_height
         self._session = None
         self._selector_map: Dict[int, Any] = {}
+        # Passkey (cloud-custody) state. The WebAuthn CDP session created at
+        # connect time is kept alive so a re-injected virtual authenticator
+        # persists for the whole run. _passkey_seed_counts maps credentialId ->
+        # the seeded (block-reserved) base, so we can detect at session end
+        # whether the relying party actually exercised the passkey.
+        self._webauthn_cdp = None
+        self._passkey_authenticator_id: Optional[str] = None
+        self._passkey_seed_counts: Dict[str, int] = {}
         
     async def connect(self) -> None:
         """Connect to the browser via CDP.
@@ -199,8 +207,8 @@ class DOMService:
         This must be called before any other methods.
         """
         try:
-            from browser_use.browser.session import BrowserSession
             from browser_use.browser.profile import BrowserProfile
+            from browser_use.browser.session import BrowserSession
 
             # Create profile with CDP URL for remote browser
             # downloads_path="/files" is required for Steel's Files API to capture downloads
@@ -286,6 +294,11 @@ class DOMService:
             #    fail gracefully and sites fall back to password login.
             try:
                 await cdp_session.send("WebAuthn.enable", {"enableUI": False})
+                # Keep this session for passkey injection/readback: a virtual
+                # authenticator only lives as long as the CDP session that added
+                # it. enableUI=false is exactly right for cloud custody — the
+                # virtual authenticator auto-signs with no blocking native modal.
+                self._webauthn_cdp = cdp_session
                 logger.info("🛡️ [overlay-suppress] WebAuthn native UI disabled (passkey popups suppressed)")
             except Exception as e:
                 logger.warning(f"⚠️ [overlay-suppress] Failed to disable WebAuthn UI: {e}")
@@ -302,6 +315,102 @@ class DOMService:
             # (same pattern as fingerprint_injection.py)
         except Exception as e:
             logger.warning(f"⚠️ [overlay-suppress] Failed to suppress browser overlays: {e}")
+
+    async def inject_passkeys(self, passkeys: List[Dict[str, Any]]) -> None:
+        """Seed a CDP virtual authenticator with cloud-custody passkeys.
+
+        Each passkey dict must carry a DECRYPTED PKCS#8 private key (base64),
+        credentialId (base64), rpId, userHandle (base64 or None) and signCount
+        (the block-reserved base). Once seeded, when a site calls
+        navigator.credentials.get() the virtual authenticator signs
+        automatically — no agent click required for auto-invoked flows, and the
+        agent can also click "Sign in with a passkey" for gated flows.
+        """
+        if not passkeys:
+            return
+        if self._webauthn_cdp is None:
+            logger.warning("⚠️ [passkey] no WebAuthn CDP session; cannot inject passkeys")
+            return
+        try:
+            result = await self._webauthn_cdp.send(
+                "WebAuthn.addVirtualAuthenticator",
+                {
+                    "options": {
+                        "protocol": "ctap2",
+                        "transport": "internal",
+                        "hasResidentKey": True,
+                        "hasUserVerification": True,
+                        "isUserVerified": True,
+                        "automaticPresenceSimulation": True,
+                    }
+                },
+            )
+            self._passkey_authenticator_id = result.get("authenticatorId")
+        except Exception as e:
+            logger.warning(f"⚠️ [passkey] addVirtualAuthenticator failed: {e}")
+            return
+
+        seeded = 0
+        for pk in passkeys:
+            credential_id = pk.get("credentialId")
+            private_key = pk.get("privateKey")
+            rp_id = pk.get("rpId")
+            if not credential_id or not private_key or not rp_id:
+                continue
+            credential: Dict[str, Any] = {
+                "credentialId": credential_id,
+                "privateKey": private_key,
+                "rpId": rp_id,
+                "signCount": int(pk.get("signCount") or 0),
+                "isResidentCredential": True,
+            }
+            user_handle = pk.get("userHandle")
+            if user_handle:
+                credential["userHandle"] = user_handle
+            try:
+                await self._webauthn_cdp.send(
+                    "WebAuthn.addCredential",
+                    {"authenticatorId": self._passkey_authenticator_id, "credential": credential},
+                )
+                self._passkey_seed_counts[credential_id] = int(pk.get("signCount") or 0)
+                seeded += 1
+            except Exception as e:
+                logger.warning(f"⚠️ [passkey] addCredential failed for {rp_id}: {e}")
+        logger.info(f"🔑 [passkey] seeded {seeded} passkey credential(s) on virtual authenticator for the session")
+
+    async def read_passkey_signcounts(self) -> Dict[str, int]:
+        """Return {credentialId: signCount} for the seeded authenticator.
+
+        Compared against the seeded base, a higher value means the relying party
+        actually invoked our passkey — the signal we use to record a passkey
+        credential_ref so post-run propagation can mark success/failure.
+        """
+        if self._webauthn_cdp is None or self._passkey_authenticator_id is None:
+            return {}
+        try:
+            result = await self._webauthn_cdp.send(
+                "WebAuthn.getCredentials",
+                {"authenticatorId": self._passkey_authenticator_id},
+            )
+        except Exception as e:
+            logger.warning(f"⚠️ [passkey] getCredentials failed: {e}")
+            return {}
+        counts: Dict[str, int] = {}
+        for cred in result.get("credentials", []) or []:
+            cid = cred.get("credentialId")
+            if cid is not None:
+                counts[cid] = int(cred.get("signCount") or 0)
+        return counts
+
+    async def get_used_passkey_credential_ids(self) -> List[str]:
+        """Return credentialIds whose signCount advanced past the seeded base.
+
+        An advance means the relying party invoked our passkey during this run.
+        """
+        if not self._passkey_seed_counts:
+            return []
+        counts = await self.read_passkey_signcounts()
+        return [cid for cid, base in self._passkey_seed_counts.items() if counts.get(cid, base) > base]
 
     async def get_browser_state(self, include_screenshot: bool = True) -> Dict[str, Any]:
         """Get current browser state with full context like browser-use provides.
@@ -446,6 +555,7 @@ class DOMService:
             try:
                 import base64
                 from io import BytesIO
+
                 from PIL import Image
 
                 blank_img = Image.new('RGB', (viewport_width, viewport_height), color='white')
@@ -460,9 +570,9 @@ class DOMService:
 
             # Debug: analyze and save screenshot
             import base64
-            from io import BytesIO
             import os
             import time as time_module
+            from io import BytesIO
 
             try:
                 screenshot_bytes = base64.b64decode(screenshot_to_use)

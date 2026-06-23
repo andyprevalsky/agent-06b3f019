@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { config } from 'dotenv';
 import { IntegrationStatus, IntegrationType, EmailProvider } from '@prisma/client';
 import { prisma } from '../../providers/database';
-import { getAuthOptions } from '../../domains/auth-options/service';
+import { getAuthOptions, markSteelSessionAuthFailed } from '../../domains/auth-options/service';
 
 config();
 
@@ -51,7 +51,29 @@ async function cleanup(userId: string) {
   await prisma.browserPassword.deleteMany({ where: { userId } });
   await prisma.steelSessionAuth.deleteMany({ where: { userId } });
   await prisma.mintedAccount.deleteMany({ where: { userId } });
+  await prisma.passkeyCredential.deleteMany({ where: { userId } });
+  await prisma.browserContext.deleteMany({ where: { userId } });
   await prisma.user.deleteMany({ where: { userId } });
+}
+
+async function createPasskey(params: {
+  userId: string;
+  authRealm: string;
+  rpId?: string;
+  disabled?: boolean;
+}) {
+  return prisma.passkeyCredential.create({
+    data: {
+      userId: params.userId,
+      authRealm: params.authRealm,
+      rpId: params.rpId ?? params.authRealm,
+      credentialId: `cred-${randomUUID()}`,
+      encryptedPrivateKey: 'enc-stub',
+      userHandle: 'uh-stub',
+      signCount: 0,
+      disabledAt: params.disabled === true ? new Date() : null,
+    },
+  });
 }
 
 async function createBundleWithCookie(params: {
@@ -493,6 +515,101 @@ test('minted account is returned only when no user credentials exist for realm',
   } finally {
     if (previousAgentPhoneApiKey === undefined) delete process.env.AGENTPHONE_API_KEY;
     else process.env.AGENTPHONE_API_KEY = previousAgentPhoneApiKey;
+    await cleanup(userId);
+  }
+});
+
+test('enabled passkey is returned for its realm', async () => {
+  const userId = await createUser();
+  try {
+    const pk = await createPasskey({ userId, authRealm: 'amazon.com', rpId: 'amazon.com' });
+    const options = await getAuthOptions(userId, 'https://www.amazon.com/ap/signin');
+    assert(options.passkeys.length === 1, 'expected one passkey');
+    assert(options.passkeys[0].id === pk.id, 'expected matching passkey id');
+    assert(options.passkeys[0].rpId === 'amazon.com', 'expected rpId amazon.com');
+    assert(options.passkeys[0].credentialId === pk.credentialId, 'expected credentialId echoed');
+    assert(options.passkeys[0].disabled === false, 'expected enabled passkey');
+  } finally {
+    await cleanup(userId);
+  }
+});
+
+test('disabled passkey is surfaced but marked disabled', async () => {
+  const userId = await createUser();
+  try {
+    await createPasskey({ userId, authRealm: 'amazon.com', disabled: true });
+    const options = await getAuthOptions(userId, 'amazon.com');
+    assert(options.passkeys.length === 1, 'expected the disabled passkey to be listed');
+    assert(options.passkeys[0].disabled === true, 'expected passkey marked disabled');
+  } finally {
+    await cleanup(userId);
+  }
+});
+
+test('an enabled passkey suppresses the minted fallback', async () => {
+  const userId = await createUser();
+  const previousAgentPhoneApiKey = process.env.AGENTPHONE_API_KEY;
+  delete process.env.AGENTPHONE_API_KEY;
+  try {
+    await createPasskey({ userId, authRealm: 'example.com' });
+    const options = await getAuthOptions(userId, 'example.com');
+    assert(options.passkeys.length === 1, 'expected the passkey to be present');
+    assert(options.minted === null, 'expected minted to be suppressed when a passkey exists');
+  } finally {
+    if (previousAgentPhoneApiKey === undefined) delete process.env.AGENTPHONE_API_KEY;
+    else process.env.AGENTPHONE_API_KEY = previousAgentPhoneApiKey;
+    await cleanup(userId);
+  }
+});
+
+test('markSteelSessionAuthFailed disables the session and resets its browser context', async () => {
+  const userId = await createUser();
+  try {
+    const contextId = `ctx-${randomUUID()}`;
+    await prisma.browserContext.create({ data: { userId, contextId } });
+    const steel = await prisma.steelSessionAuth.create({
+      data: { userId, contextId, authRealm: 'amazon.com' },
+    });
+
+    const result = await markSteelSessionAuthFailed(userId, steel.id, 'passkey + cookie rejected');
+    assert(result !== null, 'expected a non-null result');
+    assert(result?.authRealm === 'amazon.com', 'expected realm echoed');
+    assert(result?.disabledReason === 'passkey + cookie rejected', 'expected reason echoed');
+
+    const updatedSteel = await prisma.steelSessionAuth.findUniqueOrThrow({
+      where: { id: steel.id },
+    });
+    assert(updatedSteel.disabledAt !== null, 'expected steel session disabled');
+    const updatedContext = await prisma.browserContext.findUniqueOrThrow({ where: { userId } });
+    assert(updatedContext.contextId === null, 'expected browser context reset on auth failure');
+
+    // Unknown id resolves to null without throwing.
+    const missing = await markSteelSessionAuthFailed(userId, randomUUID(), 'noop');
+    assert(missing === null, 'expected null for unknown steel session id');
+  } finally {
+    await cleanup(userId);
+  }
+});
+
+test('passwords last used over a year ago are excluded', async () => {
+  const userId = await createUser();
+  try {
+    await prisma.browserPassword.create({
+      data: {
+        userId,
+        origin: 'https://www.amazon.com',
+        username: 'stale@example.com',
+        encryptedPassword: 'enc-stale',
+        browserSource: 'chrome',
+        dateLastUsed: chromiumMicrosDaysAgo(400),
+      },
+    });
+    const options = await getAuthOptions(userId, 'amazon.com');
+    assert(
+      !options.passwords.some((p) => p.username === 'stale@example.com'),
+      'expected stale password to be excluded'
+    );
+  } finally {
     await cleanup(userId);
   }
 });
