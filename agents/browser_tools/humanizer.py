@@ -13,20 +13,21 @@ The optional in-page cursor is disabled by default so Steel recordings do not
 capture duplicate cursor layers.
 """
 
-import random
 import asyncio
+import inspect
 import math
 import os
-import inspect
+import random
 import time
-from typing import Tuple, List, Any, Optional, Callable
+from typing import Any, Callable, List, Optional, Tuple
+
 import structlog
 
 from browser_tools.input_synthesis import (
+    IDLE_MOUSE_RADIUS_PX,
     KeycapTimingSynthesizer,
     MouseSample,
     synthesize_click_delay_ms,
-    IDLE_MOUSE_RADIUS_PX,
     synthesize_idle_mouse_drift,
     synthesize_mouse_path,
 )
@@ -468,6 +469,9 @@ class BrowserHumanizer:
             overshoot: Force overshoot behavior (otherwise 20% chance)
         """
         async with self._movement_lock:
+            start_x, start_y = self._last_pos
+            travel = math.hypot(x - start_x, y - start_y)
+
             # Maybe pre-hover (natural browsing behavior)
             if pre_hover or random.random() < 0.30:
                 await self._move_to_unlocked(x, y)
@@ -475,15 +479,18 @@ class BrowserHumanizer:
                 await asyncio.sleep(dwell)
                 logger.debug("Pre-hover dwell", x=x, y=y, dwell_ms=int(dwell * 1000))
 
-            # Maybe overshoot and correct (very human!)
-            if overshoot or random.random() < 0.20:
-                overshoot_dist = random.randint(15, 28)
-                angle = random.uniform(0, 2 * math.pi)
+            # Overshoot then correct — forced on long trajectories. Humans
+            # overshoot the target and settle back; "no overshoot corrections on
+            # a long trajectory" is a behavioral-biometrics bot tell. Aim the
+            # overshoot ALONG the travel vector so the corrective move re-enters
+            # the target (in->out->in), which is what detectors actually count.
+            if overshoot or travel > 120 or random.random() < 0.25:
+                angle = math.atan2(y - start_y, x - start_x) if travel > 1 else random.uniform(0, 2 * math.pi)
+                overshoot_dist = random.randint(18, 30)
                 overshoot_x = x + int(overshoot_dist * math.cos(angle))
                 overshoot_y = y + int(overshoot_dist * math.sin(angle))
-
                 await self._move_to_unlocked(overshoot_x, overshoot_y)
-                await asyncio.sleep(random.uniform(0.04, 0.10))
+                await asyncio.sleep(random.uniform(0.05, 0.12))
                 logger.debug("Overshoot", target=(x, y), overshoot=(overshoot_x, overshoot_y))
 
             # Final movement to target
@@ -492,8 +499,20 @@ class BrowserHumanizer:
             # Small pause before click (human reaction time)
             await asyncio.sleep(random.uniform(0.03, 0.08))
 
+            # Motor noise at the click instant: the press lands a hair off the
+            # settled cursor and the release drifts again, with sub-pixel offsets.
+            # "Unnaturally accurate click precision" (last-move == down == up,
+            # pixel-perfect) is a vision-AI bot tell; real fingers micro-move.
             mouse = self.input_page.mouse
-            await mouse.click(x, y, delay=synthesize_click_delay_ms())
+            down_x = x + random.gauss(0, 0.7)
+            down_y = y + random.gauss(0, 0.7)
+            up_x = down_x + random.gauss(0, 0.4)
+            up_y = down_y + random.gauss(0, 0.4)
+            await mouse.move(down_x, down_y)
+            await mouse.down()
+            await asyncio.sleep(synthesize_click_delay_ms() / 1000)
+            await mouse.move(up_x, up_y)
+            await mouse.up()
 
             self._last_pos = (x, y)
             self._idle_anchor = (x, y)

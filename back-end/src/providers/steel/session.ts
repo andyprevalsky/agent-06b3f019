@@ -126,7 +126,10 @@ function redactProxyServerForLog(server: string): string {
   }
 }
 
-export function buildSteelProxySettings(geolocation: ProxyGeoLocation): SteelProxySettings {
+export function buildSteelProxySettings(
+  geolocation: ProxyGeoLocation,
+  dropCity = false
+): SteelProxySettings {
   const byopProxyServer = process.env.STEEL_PROXY_SERVER?.trim();
   if (byopProxyServer) {
     log.info(`  Using BYOP proxy server: ${redactProxyServerForLog(byopProxyServer)}`);
@@ -144,7 +147,12 @@ export function buildSteelProxySettings(geolocation: ProxyGeoLocation): SteelPro
         country: geolocation.country,
         // Steel only supports state for US proxies
         ...(geolocation.country === 'US' && geolocation.state && { state: geolocation.state }),
-        ...(geolocation.city && { city: geolocation.city }),
+        // City-level targeting is best-effort: Steel only has residential
+        // proxies in a subset of cities and 400s ("Invalid proxy configuration")
+        // for unsupported ones (e.g. SAN FRANCISCO). dropCity is set by the
+        // session-create retry loop after such a rejection so we fall back to
+        // country+state, which Steel always supports.
+        ...(!dropCity && geolocation.city && { city: geolocation.city }),
       },
     },
     source: 'steel',
@@ -241,6 +249,9 @@ export async function createSessionWithContext(
   if (localSession) return localSession;
 
   let lastError: Error | null = null;
+  // Set after Steel rejects a city-level proxy ("400 Invalid proxy
+  // configuration") so the next attempt retries with country+state only.
+  let dropProxyCity = false;
 
   for (let attempt = 1; attempt <= MAX_SESSION_RETRIES; attempt++) {
     log.info(`  📡 Session creation attempt ${attempt}/${MAX_SESSION_RETRIES}...`);
@@ -250,7 +261,7 @@ export async function createSessionWithContext(
       // Steel's headful mode has ~91px chrome (toolbar). To get 1280x800 content area:
       // - Width: 1280 + 8 = 1288 (fine-tuned: was 1303→1295, need -15)
       // - Height: 800 + 91 = 891 (accounts for browser toolbar) ✓ working
-      const proxySettings = buildSteelProxySettings(geolocation);
+      const proxySettings = buildSteelProxySettings(geolocation, dropProxyCity);
       const profile = resolveSteelProfileForSession(agentId, dbContext.contextId);
       const session = (await steel.sessions.create({
         profileId: profile.profileId, // Use existing profile if available
@@ -389,6 +400,15 @@ export async function createSessionWithContext(
         `  ❌ Attempt ${attempt} failed: ${error instanceof Error ? error.message : 'Unknown error'}`
       );
       lastError = error instanceof Error ? error : new Error('Unknown error');
+
+      // Steel rejects city-level proxies it can't fulfill ("400 Invalid proxy
+      // configuration"). Drop the city and retry with country+state, which Steel
+      // always supports — otherwise every retry repeats the same bad config.
+      const msg = (lastError.message || '').toLowerCase();
+      if (!dropProxyCity && (status === 400 || msg.includes('invalid proxy'))) {
+        dropProxyCity = true;
+        log.info('  🌎 Dropping unsupported proxy city; retrying with country+state only');
+      }
     }
   }
 

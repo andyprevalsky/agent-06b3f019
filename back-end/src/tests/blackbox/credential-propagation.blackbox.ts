@@ -121,9 +121,18 @@ test('provider classifier extracts normalized credential refs and aggregates by 
   ]);
 
   assert(refs.length === 3, `expected 3 refs, got ${refs.length}`);
-  assert(refs.some((ref) => ref.kind === 'password' && ref.id === 'pw-1'), 'password ref');
-  assert(refs.some((ref) => ref.kind === 'cookie_bundle'), 'cookie bundle ref');
-  assert(refs.some((ref) => ref.kind === 'steel_session'), 'steel ref');
+  assert(
+    refs.some((ref) => ref.kind === 'password' && ref.id === 'pw-1'),
+    'password ref'
+  );
+  assert(
+    refs.some((ref) => ref.kind === 'cookie_bundle'),
+    'cookie bundle ref'
+  );
+  assert(
+    refs.some((ref) => ref.kind === 'steel_session'),
+    'steel ref'
+  );
 
   const aggregate = aggregateDecision(
     [
@@ -183,8 +192,12 @@ test('provider classifier parses mock LLM outcomes and fills missing credentials
 
   assert(result.reason === 'per credential classification', 'expected classifier reason');
   assert(result.decisions.length === 2, 'expected one decision per credential');
-  const passwordDecision = result.decisions.find((decision) => decision.credentialRef.id === 'pw-1');
-  const cookieDecision = result.decisions.find((decision) => decision.credentialRef.id === 'cookie-1');
+  const passwordDecision = result.decisions.find(
+    (decision) => decision.credentialRef.id === 'pw-1'
+  );
+  const cookieDecision = result.decisions.find(
+    (decision) => decision.credentialRef.id === 'cookie-1'
+  );
   assert(passwordDecision?.outcome === 'rate_limited', 'expected parsed password outcome');
   assert(passwordDecision.failureReason === 'rate_limited', 'expected mapped failure reason');
   assert(cookieDecision?.outcome === 'unused', 'expected missing credential to be unused');

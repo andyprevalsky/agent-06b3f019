@@ -807,3 +807,4 @@
 {"task": "parallel-tool-calls", "duration_seconds": 136.3, "cost_cents": 14.0, "timestamp": "2026-05-28T18:25:47.058768+00:00", "agent_id": "c15522aa-e512-4299-8d64-02392dc249a9"}
 {"task": "claude-code-agent", "duration_seconds": 61.0, "cost_cents": 0.0, "timestamp": "2026-05-28T18:25:47.058768+00:00", "agent_id": "95f03bb9-a91d-47b2-ad45-6f38c02b6538"}
 {"task": "browser-smoke", "duration_seconds": 51.0, "cost_cents": 0.0, "timestamp": "2026-05-28T18:25:47.058768+00:00", "agent_id": "50bafd45-9c1f-4c65-81f9-50b89abd91c1"}
+{"task": "browser-biometrics-webdecoy", "duration_seconds": 860.7, "cost_cents": 0.0, "timestamp": "2026-06-23T17:12:09.484829+00:00", "agent_id": "c4aa44b0-b0d8-47ff-9c1b-38bc81a573c9"}

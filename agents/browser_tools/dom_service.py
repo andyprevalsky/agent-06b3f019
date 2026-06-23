@@ -9,8 +9,9 @@ This module provides:
 
 import asyncio
 import logging
-from dataclasses import dataclass, field, asdict
-from typing import Optional, Tuple, Dict, Any, List
+import random
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -199,8 +200,8 @@ class DOMService:
         This must be called before any other methods.
         """
         try:
-            from browser_use.browser.session import BrowserSession
             from browser_use.browser.profile import BrowserProfile
+            from browser_use.browser.session import BrowserSession
 
             # Create profile with CDP URL for remote browser
             # downloads_path="/files" is required for Steel's Files API to capture downloads
@@ -240,6 +241,14 @@ class DOMService:
             # and confuse the agent. Instead of trying to capture them, we suppress them.
             await self._suppress_browser_overlays()
 
+            # Inject browser-side anti-detection spoofs on THIS connection. The
+            # backend's fingerprint injection (injection.ts addInitScript) is
+            # registered on a Playwright connection that closes before the agent
+            # connects, so its webdriver/canvas/console spoofs never reach the
+            # pages the agent drives. Re-register them here via CDP so they apply
+            # on every new document of the agent's own session.
+            await self._inject_anti_detection()
+
         except ImportError as e:
             logger.error(f"browser-use not installed or import error: {e}")
             raise
@@ -277,15 +286,21 @@ class DOMService:
         screenshots always accurately represent what's interactive on the page.
         """
         try:
-            page = await self._session.get_current_page()
-            cdp_session = await page.context.new_cdp_session(page)
+            target_id = self._session.agent_focus_target_id
+            if not target_id:
+                logger.warning("⚠️ [overlay-suppress] No focused target; cannot suppress overlays")
+                return
+            cdp_session = await self._session.get_or_create_cdp_session(target_id, focus=False)
+            session_id = cdp_session.session_id
 
             # 1. WebAuthn: suppress native passkey/credential popup
             #    Without this, Chrome shows a modal passkey chooser that blocks the page
             #    but is invisible to CDP screenshots. With enableUI=false, WebAuthn requests
             #    fail gracefully and sites fall back to password login.
             try:
-                await cdp_session.send("WebAuthn.enable", {"enableUI": False})
+                await cdp_session.cdp_client.send.WebAuthn.enable(
+                    params={"enableUI": False}, session_id=session_id
+                )
                 logger.info("🛡️ [overlay-suppress] WebAuthn native UI disabled (passkey popups suppressed)")
             except Exception as e:
                 logger.warning(f"⚠️ [overlay-suppress] Failed to disable WebAuthn UI: {e}")
@@ -293,15 +308,106 @@ class DOMService:
             # 2. File chooser: intercept so native file dialog doesn't block
             #    The agent can handle file uploads programmatically instead.
             try:
-                await cdp_session.send("Page.setInterceptFileChooserDialog", {"enabled": True})
+                await cdp_session.cdp_client.send.Page.setInterceptFileChooserDialog(
+                    params={"enabled": True}, session_id=session_id
+                )
                 logger.info("🛡️ [overlay-suppress] File chooser dialog interception enabled")
             except Exception as e:
                 logger.warning(f"⚠️ [overlay-suppress] Failed to intercept file chooser: {e}")
 
             # Don't detach — CDP session must stay alive for WebAuthn state to persist
-            # (same pattern as fingerprint_injection.py)
         except Exception as e:
             logger.warning(f"⚠️ [overlay-suppress] Failed to suppress browser overlays: {e}")
+
+    # Self-contained browser-side anti-detection script. Static spoofs only (no
+    # per-user fingerprint needed) targeting the signals the backend injection
+    # fails to deliver to the agent's connection:
+    #   - console.* no-op  → defeats CDP console-consumer bait (cdp signal)
+    #   - navigator.webdriver get:()=>false, configurable:false → defeats
+    #     both webdriver_configurable and webdriver_deleted
+    #   - stable noised canvas → defeats "canvas blocked or failed"
+    #   - Notification.permission='default', window.chrome present
+    # All overrides keep a native-looking toString.
+    _ANTI_DETECTION_SCRIPT = r"""
+(function () {
+  'use strict';
+  try {
+    for (const m of ['debug','log','info','warn','error','trace','dir','dirxml','table','group','groupCollapsed','groupEnd','assert','count','countReset','time','timeEnd','timeLog','profile','profileEnd']) {
+      try {
+        const fn = function () {};
+        Object.defineProperty(fn, 'toString', { value: () => 'function ' + m + '() { [native code] }', configurable: true });
+        Object.defineProperty(console, m, { value: fn, writable: true, configurable: true });
+      } catch (e) {}
+    }
+  } catch (e) {}
+  try {
+    Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => false, configurable: false, enumerable: true });
+  } catch (e) {
+    try { delete Navigator.prototype.webdriver; } catch (e2) {}
+  }
+  try {
+    if (typeof Notification !== 'undefined') {
+      Object.defineProperty(Notification, 'permission', { get: () => 'default', configurable: true });
+    }
+  } catch (e) {}
+  try {
+    if (!window.chrome) {
+      Object.defineProperty(window, 'chrome', { value: { runtime: {}, app: { isInstalled: false }, csi: function () {}, loadTimes: function () {} }, configurable: true, writable: true });
+    } else if (!window.chrome.runtime) { window.chrome.runtime = {}; }
+  } catch (e) {}
+  try {
+    let seed = (Math.random() * 1e9 | 0) ^ 0x811c9dc5;
+    const rand = () => { seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+    const perturb = (img) => {
+      const d = img && img.data; if (!d || d.length === 0) return img;
+      const px = d.length >>> 2;
+      // Only touch small canvases (fingerprinting probes are <=600x600). Leave
+      // large canvases (screenshots, real rendering) untouched. Under Steel's
+      // software GL the probe canvas reads back blank, which the detector scores
+      // as "canvas blocked/failed" AND, being identical across our proxy IPs,
+      // as "fingerprint seen from many IPs". Writing a DENSE, per-session-seeded,
+      // fully-opaque noise field guarantees a non-degenerate, session-unique
+      // dataURL — defeating both signals at once.
+      if (px === 0 || px > 600 * 600) return img;
+      for (let i = 0; i < px; i++) {
+        const o = i << 2;
+        const nz = (rand() * 24) | 0;
+        d[o] = (d[o] + nz) & 255;
+        d[o + 1] = (d[o + 1] + ((rand() * 24) | 0)) & 255;
+        d[o + 2] = (d[o + 2] + ((rand() * 24) | 0)) & 255;
+        d[o + 3] = 255;
+      }
+      return img;
+    };
+    const mask = (fn, name) => { try { Object.defineProperty(fn, 'toString', { value: () => 'function ' + name + '() { [native code] }', configurable: true }); } catch (e) {} return fn; };
+    const origGID = CanvasRenderingContext2D.prototype.getImageData;
+    CanvasRenderingContext2D.prototype.getImageData = mask(function (sx, sy, sw, sh) { const img = origGID.call(this, sx, sy, sw, sh); try { return perturb(img); } catch (e) { return img; } }, 'getImageData');
+    const origTDU = HTMLCanvasElement.prototype.toDataURL;
+    HTMLCanvasElement.prototype.toDataURL = mask(function () {
+      try { const w = this.width, h = this.height; if (w > 0 && h > 0) { const ctx = this.getContext('2d'); if (ctx) { const img = origGID.call(ctx, 0, 0, w, h); perturb(img); ctx.putImageData(img, 0, 0); } } } catch (e) {}
+      return origTDU.apply(this, arguments);
+    }, 'toDataURL');
+  } catch (e) {}
+})();
+"""
+
+    async def _inject_anti_detection(self) -> None:
+        """Register the anti-detection script on the agent's CDP connection so it
+        runs before page scripts on every new document (the backend's init-script
+        injection doesn't survive to the agent's connection)."""
+        try:
+            target_id = self._session.agent_focus_target_id
+            if not target_id:
+                logger.warning("⚠️ [anti-detect] No focused target; cannot inject anti-detection script")
+                return
+            cdp_session = await self._session.get_or_create_cdp_session(target_id, focus=False)
+            await cdp_session.cdp_client.send.Page.addScriptToEvaluateOnNewDocument(
+                params={"source": self._ANTI_DETECTION_SCRIPT, "runImmediately": True},
+                session_id=cdp_session.session_id,
+            )
+            logger.info("🛡️ [anti-detect] Injected console/webdriver/canvas spoofs on agent connection")
+        except Exception as e:
+            logger.warning(f"⚠️ [anti-detect] Failed to inject anti-detection script: {e}")
 
     async def get_browser_state(self, include_screenshot: bool = True) -> Dict[str, Any]:
         """Get current browser state with full context like browser-use provides.
@@ -446,6 +552,7 @@ class DOMService:
             try:
                 import base64
                 from io import BytesIO
+
                 from PIL import Image
 
                 blank_img = Image.new('RGB', (viewport_width, viewport_height), color='white')
@@ -460,9 +567,9 @@ class DOMService:
 
             # Debug: analyze and save screenshot
             import base64
-            from io import BytesIO
             import os
             import time as time_module
+            from io import BytesIO
 
             try:
                 screenshot_bytes = base64.b64decode(screenshot_to_use)
@@ -572,13 +679,24 @@ class DOMService:
             index: Element index (backend_node_id) from DOM tree
             
         Returns:
-            Tuple of (x, y) viewport coordinates (center of element), or None if not found
+            Tuple of (x, y) viewport coordinates near the element center, or None
+            if not found. A small Gaussian off-center jitter (bounded well inside
+            the element) is applied so click landing points aren't pixel-perfect —
+            humans never click the exact mathematical center, and "unnaturally
+            accurate click precision" is itself a behavioral-biometrics bot tell.
         """
         rect = await self.get_element_rect(index)
         if rect:
-            center_x = int(rect["x"] + rect["width"] / 2)
-            center_y = int(rect["y"] + rect["height"] / 2)
-            return (center_x, center_y)
+            center_x = rect["x"] + rect["width"] / 2
+            center_y = rect["y"] + rect["height"] / 2
+            # Jitter up to ~30% of the half-extent, capped at 6px, so the point
+            # stays comfortably inside the element (no missed clicks) while still
+            # scattering naturally around the center.
+            jitter_x = min(rect["width"] * 0.3, 6.0)
+            jitter_y = min(rect["height"] * 0.3, 6.0)
+            offset_x = max(-jitter_x, min(jitter_x, random.gauss(0, jitter_x / 2)))
+            offset_y = max(-jitter_y, min(jitter_y, random.gauss(0, jitter_y / 2)))
+            return (int(center_x + offset_x), int(center_y + offset_y))
 
         return None
 
