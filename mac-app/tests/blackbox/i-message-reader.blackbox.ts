@@ -29,6 +29,12 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { installFetchCapture, clearFetchCaptures, fetchCaptures } from './fetch-capture';
+import {
+  extractTextFromAttributedBody,
+  extractTextFromStreamtyped,
+  isLikelyOtpMessage,
+  readTypedstreamLength,
+} from '../../main/domains/i-message-reader/service.clean';
 
 // Config reads env vars at module-load time for any transitively-imported main modules.
 process.env.VITE_SUPABASE_URL = 'https://test.supabase.co';
@@ -221,6 +227,27 @@ function makeRow(overrides: Partial<RawRow> = {}): RawRow {
     contact_name: 'Alice Example',
     ...overrides,
   };
+}
+
+// Build a minimal `streamtyped` (NSArchiver typedstream) attributedBody blob
+// the way modern macOS stores message text: a `streamtyped` header, the class
+// chain, then the body NSString introduced by `+` (0x2B) and a typedstream
+// length prefix (single byte < 128, else 0x81 + little-endian uint16).
+function makeStreamtyped(text: string): Buffer {
+  const textBuf = Buffer.from(text, 'utf8');
+  const len = textBuf.length;
+  const lenBytes =
+    len < 0x80 ? Buffer.from([len]) : Buffer.from([0x81, len & 0xff, (len >> 8) & 0xff]);
+  return Buffer.concat([
+    Buffer.from([0x04, 0x0b]),
+    Buffer.from('streamtyped', 'latin1'),
+    Buffer.from('NSAttributedString', 'latin1'),
+    Buffer.from('NSMutableString', 'latin1'),
+    Buffer.from('NSString', 'latin1'),
+    Buffer.from([0x2b]),
+    lenBytes,
+    textBuf,
+  ]);
 }
 
 function resetSqliteState(): void {
@@ -541,6 +568,96 @@ describe('blackbox: i-message-reader (main-service)', () => {
     expect(mainQuery).toContain('m.associated_message_text');
   });
 
+  // ── attributedBody: streamtyped decoding ──────────────────────────────
+
+  it('attributedBody: decodes a streamtyped NSArchiver body to plaintext (not raw binary)', async () => {
+    sqliteState.rows = [
+      makeRow({
+        id: 700,
+        text: null,
+        associated_message_text: null,
+        attributedBody: makeStreamtyped('Your Amazon verification code is 123456'),
+        handle_id: '+15555551212',
+      }),
+    ];
+    const { IMessageReader } = await loadReader();
+    // Real-time path applies no reply/name filter — exercises cleanRow directly.
+    const out = await IMessageReader.readMessagesSinceRowId(699);
+    expect(out).toHaveLength(1);
+    expect(out[0].text).toContain('123456');
+    // The raw archive markers must NOT leak into the stored text.
+    expect(out[0].text).not.toMatch(/streamtyped|NSString|NSAttributedString/);
+  });
+
+  it('attributedBody: decodes a streamtyped body using the 16-bit (0x81) length prefix', async () => {
+    const longText = `Your one-time passcode is 445566. ${'x'.repeat(200)}`;
+    sqliteState.rows = [
+      makeRow({
+        id: 720,
+        text: null,
+        associated_message_text: null,
+        attributedBody: makeStreamtyped(longText),
+        handle_id: '+15555551212',
+      }),
+    ];
+    const { IMessageReader } = await loadReader();
+    const out = await IMessageReader.readMessagesSinceRowId(719);
+    expect(out).toHaveLength(1);
+    expect(out[0].text).toContain('445566');
+  });
+
+  // ── OTP short codes ────────────────────────────────────────────────────
+
+  it('shortcode OTP: retains a verification text from a numeric short code', async () => {
+    sqliteState.rows = [
+      makeRow({
+        id: 701,
+        handle_id: '262966',
+        chat_identifier: '262966',
+        contact_name: null,
+        text: 'Your Amazon OTP is 123456. Do not share it.',
+      }),
+    ];
+    const { IMessageReader } = await loadReader();
+    const out = await IMessageReader.readMessagesSinceRowId(700);
+    expect(out).toHaveLength(1);
+    expect(out[0].contact_id).toBe('262966');
+    expect(out[0].text).toContain('123456');
+  });
+
+  it('shortcode non-OTP: still drops a marketing text from a short code', async () => {
+    sqliteState.rows = [
+      makeRow({
+        id: 702,
+        handle_id: '88888',
+        chat_identifier: '88888',
+        contact_name: null,
+        text: 'Flash sale! 20% off today only — shop now',
+      }),
+    ];
+    const { IMessageReader } = await loadReader();
+    const out = await IMessageReader.readMessagesSinceRowId(701);
+    expect(out).toHaveLength(0);
+  });
+
+  it('readMessages: keeps an OTP text even from a never-replied, unnamed sender', async () => {
+    sqliteState.rows = [
+      makeRow({
+        id: 710,
+        handle_id: '+18005551234',
+        chat_identifier: '+18005551234',
+        is_from_me: 0,
+        contact_name: null,
+        text: 'Your verification code is 998877',
+      }),
+    ];
+    contactsState.getAllContacts.mockReturnValue([]);
+    const { IMessageReader } = await loadReader();
+    const out = await IMessageReader.readMessages();
+    // Without the OTP exemption this would be filtered as "never replied".
+    expect(out.map((m) => m.id)).toContain(710);
+  });
+
   // ── Error state ────────────────────────────────────────────────────────
 
   it('error state: contacts enrichment throws → readMessages still returns messages without enrichment', async () => {
@@ -690,5 +807,109 @@ describe('blackbox: i-message-reader (main-service)', () => {
 
     // The reader never calls fetch — this is the boundary contract.
     expect(fetchCaptures).toHaveLength(0);
+  });
+});
+
+// ── service.clean pure helpers: attributedBody decoding + OTP detection ─────
+
+describe('i-message-reader: service.clean attributedBody + OTP helpers', () => {
+  describe('readTypedstreamLength', () => {
+    it('reads a single-byte length (< 0x80)', () => {
+      expect(readTypedstreamLength(Buffer.from([0x05]), 0)).toEqual({ length: 5, next: 1 });
+    });
+    it('reads a 0x81 marker as a little-endian uint16', () => {
+      expect(readTypedstreamLength(Buffer.from([0x81, 0xc8, 0x00]), 0)).toEqual({
+        length: 200,
+        next: 3,
+      });
+    });
+    it('reads a 0x82 marker as a little-endian uint32', () => {
+      expect(readTypedstreamLength(Buffer.from([0x82, 0x00, 0x00, 0x01, 0x00]), 0)).toEqual({
+        length: 65536,
+        next: 5,
+      });
+    });
+    it('rejects an out-of-range marker byte (>= 0x80, not 0x81/0x82)', () => {
+      expect(readTypedstreamLength(Buffer.from([0x90]), 0)).toBeNull();
+    });
+    it('returns null when the offset is past the end', () => {
+      expect(readTypedstreamLength(Buffer.from([0x05]), 5)).toBeNull();
+    });
+    it('returns null on a truncated 0x81 / 0x82 length', () => {
+      expect(readTypedstreamLength(Buffer.from([0x81, 0x01]), 0)).toBeNull();
+      expect(readTypedstreamLength(Buffer.from([0x82, 0x01]), 0)).toBeNull();
+    });
+  });
+
+  describe('extractTextFromStreamtyped', () => {
+    const body = (cls: string, text: string): Buffer => {
+      const t = Buffer.from(text, 'utf8');
+      return Buffer.concat([Buffer.from(cls, 'latin1'), Buffer.from([0x2b, t.length]), t]);
+    };
+    it('decodes the body after an NSString marker', () => {
+      expect(extractTextFromStreamtyped(body('NSString', 'hello world'))).toBe('hello world');
+    });
+    it('falls back to an NSMutableString marker', () => {
+      expect(extractTextFromStreamtyped(body('NSMutableString', 'mutable body'))).toBe(
+        'mutable body'
+      );
+    });
+    it('returns null when no class marker is present', () => {
+      expect(extractTextFromStreamtyped(Buffer.from('nothing here', 'latin1'))).toBeNull();
+    });
+    it("returns null when there is no '+' body marker", () => {
+      expect(extractTextFromStreamtyped(Buffer.from('NSString and more', 'latin1'))).toBeNull();
+    });
+    it('returns null when the declared length runs past the buffer', () => {
+      const buf = Buffer.concat([Buffer.from('NSString', 'latin1'), Buffer.from([0x2b, 0x50])]);
+      expect(extractTextFromStreamtyped(buf)).toBeNull();
+    });
+    it('returns null on a zero-length body', () => {
+      const buf = Buffer.concat([Buffer.from('NSString', 'latin1'), Buffer.from([0x2b, 0x00])]);
+      expect(extractTextFromStreamtyped(buf)).toBeNull();
+    });
+  });
+
+  describe('extractTextFromAttributedBody', () => {
+    it('returns null for null / empty buffers', () => {
+      expect(extractTextFromAttributedBody(null)).toBeNull();
+      expect(extractTextFromAttributedBody(undefined)).toBeNull();
+      expect(extractTextFromAttributedBody(Buffer.alloc(0))).toBeNull();
+    });
+    it('decodes a streamtyped buffer', () => {
+      const t = Buffer.from('Your code is 246810', 'utf8');
+      const buf = Buffer.concat([
+        Buffer.from([0x04, 0x0b]),
+        Buffer.from('streamtyped', 'latin1'),
+        Buffer.from('NSString', 'latin1'),
+        Buffer.from([0x2b, t.length]),
+        t,
+      ]);
+      expect(extractTextFromAttributedBody(buf)).toContain('246810');
+    });
+    it('decodes a bplist buffer via the plist parser', () => {
+      // bplist-parser is mocked to return an archive with a candidate string.
+      const buf = Buffer.concat([Buffer.from('bplist00', 'latin1'), Buffer.alloc(8)]);
+      expect(extractTextFromAttributedBody(buf)).toBe('decoded attributed body text');
+    });
+    it('falls back to a plain UTF-8 string for non-archive buffers', () => {
+      expect(extractTextFromAttributedBody(Buffer.from('just plain text', 'utf8'))).toBe(
+        'just plain text'
+      );
+    });
+  });
+
+  describe('isLikelyOtpMessage', () => {
+    it('is true for a digit run plus OTP context', () => {
+      expect(isLikelyOtpMessage('Your verification code is 123456')).toBe(true);
+      expect(isLikelyOtpMessage('G-445566 is your Google code')).toBe(true);
+      expect(isLikelyOtpMessage('Your one-time passcode is 998877. Do not share it.')).toBe(true);
+    });
+    it('is false when there is no 4-8 digit run', () => {
+      expect(isLikelyOtpMessage('your verification code is on its way')).toBe(false);
+    });
+    it('is false when there is no OTP keyword', () => {
+      expect(isLikelyOtpMessage('see you at 12345 Main Street at 7pm')).toBe(false);
+    });
   });
 });

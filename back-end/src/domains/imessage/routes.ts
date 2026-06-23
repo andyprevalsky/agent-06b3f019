@@ -3,7 +3,13 @@ import { asyncHandler } from '../../utils/asyncHandler';
 import { type AuthRequest, authenticate } from '../../providers/auth';
 import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { createLogger } from '../../providers/logger';
-import { queueMessage, popNextMessage, ValidationError } from './service';
+import {
+  fetchRecentInboundMessages,
+  queueMessage,
+  popNextMessage,
+  ValidationError,
+} from './service';
+import { MessageChannel } from './types';
 
 const log = createLogger('iMessage');
 const router = Router();
@@ -89,6 +95,70 @@ router.get(
       });
       res.status(500).json({ error: 'Failed to pop message' });
     }
+  })
+);
+
+/**
+ * GET /api/imessage/recent-inbound
+ * Auth: API Key (internal — called by the browser-agent worker) or Bearer token.
+ *
+ * Returns recent inbound messages (`to = 'me'`) for the user, newest first.
+ * Used by the browser agent's OTP relay to read codes that arrived over
+ * iMessage/SMS. Query params: `since` (required ISO timestamp), `limit`
+ * (1-100, default 50), `channel` (optional MessageChannel, e.g. IMESSAGE).
+ */
+router.get(
+  '/recent-inbound',
+  authenticate,
+  asyncHandler<AuthRequest>(async (req: AuthRequest, res: Response) => {
+    const userId =
+      req.user?.id ?? (req.isInternal === true ? (req.headers['x-user-id'] as string) : undefined);
+    if (userId === undefined || userId === '') {
+      res
+        .status(400)
+        .json({ error: 'Missing user ID. Use JWT auth or x-user-id header with API key.' });
+      return;
+    }
+
+    const sinceParam = req.query.since as string | undefined;
+    if (sinceParam === undefined || sinceParam === '') {
+      res.status(400).json({ error: 'Missing required query param: since (ISO timestamp)' });
+      return;
+    }
+    const since = new Date(sinceParam);
+    if (Number.isNaN(since.getTime())) {
+      res.status(400).json({ error: 'Invalid since timestamp' });
+      return;
+    }
+
+    const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 50, 1), 100);
+
+    const channelParam = (req.query.channel as string | undefined)?.toUpperCase();
+    let channel: MessageChannel | undefined;
+    if (channelParam !== undefined && channelParam !== '') {
+      if (!(channelParam in MessageChannel)) {
+        res.status(400).json({
+          error: `Invalid channel. Must be one of: ${Object.values(MessageChannel).join(', ')}`,
+        });
+        return;
+      }
+      channel = channelParam as MessageChannel;
+    }
+
+    const messages = await fetchRecentInboundMessages({ userId, since, limit, channel });
+    res.json({
+      messages: messages.map((m) => ({
+        id: m.id,
+        from: m.from,
+        to: m.to,
+        body: m.body,
+        channel: m.channel,
+        date: m.date.toISOString(),
+        personId: m.personId,
+      })),
+      count: messages.length,
+      since: since.toISOString(),
+    });
   })
 );
 

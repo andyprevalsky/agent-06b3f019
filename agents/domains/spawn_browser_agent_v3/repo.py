@@ -701,3 +701,34 @@ async def fetch_recent_sms_messages(
     except Exception as e:
         logger.warning("Failed to fetch SMS messages", error=str(e))
         return []
+
+
+async def fetch_recent_imessages(user_id: str, api_url: str, api_key: str, since: str, limit: int = 20) -> List[Dict]:
+    """Fetch recent inbound iMessages (synced from the user's Mac) for OTP extraction.
+
+    Returns the same ``{id, from, to, body, date}`` shape as the agent-phone SMS
+    endpoint so callers can treat both as a single SMS-style source.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                f"{api_url}/api/imessage/recent-inbound",
+                params={"since": since, "limit": limit, "channel": "IMESSAGE"},
+                headers={
+                    "X-API-Key": api_key,
+                    "x-user-id": user_id,
+                },
+            )
+
+            if response.status_code == 404:
+                return []
+
+            if response.status_code != 200:
+                logger.warning("Failed to fetch iMessages for OTP", status=response.status_code)
+                return []
+
+            data = response.json()
+            return data.get("messages", [])
+    except Exception as e:
+        logger.warning("Failed to fetch iMessages", error=str(e))
+        return []
