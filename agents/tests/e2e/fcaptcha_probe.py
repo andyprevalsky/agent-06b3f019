@@ -134,6 +134,59 @@ CANVAS_PROBE = """() => {
 }"""
 
 
+async def humanized_submit(page, args) -> None:
+    """Drive a human-like cursor path to the submit button via CDP mouse input.
+
+    Mirrors what humanizer.py does in the real agent: a wobbling approach, an
+    overshoot that crosses the target's bounding-rect edge, a re-entry, then a
+    decoupled down/up. Produces overshootCorrections>=1 and keeps the mouse-event
+    window dense enough for mouseEventRate to clear FCaptcha's >=10/sec floor.
+    """
+    import math
+
+    # The live demo triggers verification on the FCaptcha checkbox, not a form
+    # submit. analyzeClick uses the clicked element's rect, so the overshoot must
+    # cross THIS element's edge.
+    target = await page.query_selector(".fcaptcha-checkbox")
+    if not target:
+        target = await page.query_selector("button[type=submit], button:has-text('Submit')")
+    if not target:
+        print(f"[{args.label}] no checkbox/submit target found")
+        return
+    box = await target.bounding_box()
+    if not box:
+        await target.click()
+        return
+    cx = box["x"] + box["width"] / 2
+    cy = box["y"] + box["height"] / 2
+    # Start the approach from up-and-left of the button.
+    sx, sy = cx - 280, cy - 190
+
+    steps = max(4, args.approach_steps)
+    delay = args.step_delay_ms
+    await page.mouse.move(sx, sy)
+    for i in range(1, steps + 1):
+        t = i / steps
+        # Lateral wobble (sinusoid) keeps approachDirectness < 0.95 (vision_ai).
+        wob = math.sin(t * math.pi) * 14
+        x = sx + (cx - sx) * t + wob
+        y = sy + (cy - sy) * t - wob * 0.4
+        await page.mouse.move(x, y)
+        await page.wait_for_timeout(delay)
+
+    # Overshoot: cross the bottom edge by overshoot_px so the cursor exits the
+    # rect (enter->exit), then re-enter to register an overshoot correction.
+    oy = box["y"] + box["height"] + args.overshoot_px
+    await page.mouse.move(cx + 6, oy)
+    await page.wait_for_timeout(args.dwell_ms)
+    # Re-enter to just inside the button (slightly off-center, human imprecision).
+    await page.mouse.move(cx - 3, cy + 2)
+    await page.wait_for_timeout(args.dwell_ms)
+    await page.mouse.down()
+    await page.wait_for_timeout(45)
+    await page.mouse.up()
+
+
 async def run(args) -> None:
     from playwright.async_api import async_playwright
 
@@ -142,7 +195,7 @@ async def run(args) -> None:
     ws = f"wss://connect.steel.dev?apiKey={steel_key()}&sessionId={sid}"
     print(f"[{args.label}] session={sid} skip_fp={args.skip_fp} proxy={not args.no_proxy} "
           f"auto_override={args.auto_override} js_webdriver={args.js_webdriver}")
-    verify_payload = {"holder": None}
+    cap = {"resp": None, "req_signals": None}
     try:
         async with async_playwright() as p:
             browser = await p.chromium.connect_over_cdp(ws, timeout=60000)
@@ -162,13 +215,25 @@ async def run(args) -> None:
                 await context.add_init_script(js)
             page = context.pages[0] if context.pages else await context.new_page()
 
+            def on_request(req):
+                if "/api/verify" in req.url and req.method == "POST":
+                    try:
+                        body = req.post_data
+                        if body:
+                            data = json.loads(body)
+                            sj = data.get("signalsJson")
+                            cap["req_signals"] = json.loads(sj) if sj else data.get("signals")
+                    except Exception as e:
+                        print(f"[{args.label}] req parse err: {e}")
+
             async def on_response(resp):
                 if "/api/verify" in resp.url and resp.request.method == "POST":
                     try:
-                        verify_payload["holder"] = await resp.json()
+                        cap["resp"] = await resp.json()
                     except Exception:
                         pass
 
+            page.on("request", on_request)
             page.on("response", on_response)
             await page.goto(DEMO_URL, wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(1500)
@@ -178,40 +243,70 @@ async def run(args) -> None:
             canvas = await page.evaluate(CANVAS_PROBE)
             print(f"[{args.label}] canvas probe: {json.dumps(canvas)}")
 
-            # Interact: checkbox (if present) + invisible-mode form submit.
+            # A human scrolls + reads before interacting (clears the no-scroll flag
+            # and pushes first-interaction-timing well past the 100ms floor).
             try:
-                cb = await page.query_selector("input[type=checkbox], [role=checkbox]")
-                if cb:
-                    await cb.click(timeout=5000)
-                    await page.wait_for_timeout(800)
+                await page.mouse.wheel(0, 240)
+                await page.wait_for_timeout(350)
+                await page.mouse.wheel(0, -120)
+                await page.wait_for_timeout(400)
             except Exception:
                 pass
+
+            # Fill the form (keyboard only — no stray mouse moves to pollute the
+            # cursor-event budget that the CDP "never coalesced" detector watches).
             try:
                 email = await page.query_selector("input[type=email], input[name*=email i]")
                 if email:
-                    await email.click()
+                    await email.focus()
                     await email.type("benchmark-human@example.com", delay=90)
                 msg = await page.query_selector("textarea, input[name*=message i]")
                 if msg:
-                    await msg.click()
+                    await msg.focus()
                     await msg.type("Hello, I am interested in this product.", delay=85)
-                submit = await page.query_selector("button[type=submit], button:has-text('Submit')")
-                if submit:
-                    await submit.click()
             except Exception as e:
-                print(f"[{args.label}] interaction error: {e}")
+                print(f"[{args.label}] fill error: {e}")
 
-            for _ in range(30):
-                if verify_payload["holder"]:
+            # Submit with a tunable humanized cursor path (approach -> overshoot
+            # past an edge -> re-enter -> click), so overshootCorrections>=1 and
+            # mouseEventRate lands in (10,200) without exceeding the coalesced cap.
+            try:
+                if args.humanize:
+                    await humanized_submit(page, args)
+                else:
+                    trigger = await page.query_selector(".fcaptcha-checkbox")
+                    if not trigger:
+                        trigger = await page.query_selector("button[type=submit], button:has-text('Submit')")
+                    if trigger:
+                        await trigger.click()
+            except Exception as e:
+                print(f"[{args.label}] submit error: {e}")
+
+            for _ in range(40):
+                if cap["resp"]:
                     break
                 await page.wait_for_timeout(500)
             await browser.close()
     finally:
         release(sid)
 
-    v = verify_payload["holder"]
+    sig = cap["req_signals"] or {}
+    beh = sig.get("behavioral", {}) if isinstance(sig, dict) else {}
+    fcs = beh.get("inputForensics", {}) if isinstance(beh, dict) else {}
+    if beh:
+        print(f"[{args.label}] BEHAVIORAL signals: "
+              f"totalPoints={beh.get('totalPoints')} "
+              f"mouseEventRate={round(beh.get('mouseEventRate',0),2)} "
+              f"trajLen={round(beh.get('trajectoryLength',0),1)} "
+              f"overshoots={beh.get('overshootCorrections')} "
+              f"coalescedSamples={fcs.get('coalescedSamples')} "
+              f"coalescedMax={fcs.get('coalescedMax')} "
+              f"ptrMoveSamples={fcs.get('pointerMoveSamples')} "
+              f"ptrMoveZeroRatio={round(fcs.get('pointerMoveZeroRatio',0),3)}")
+
+    v = cap["resp"]
     if not v:
-        print(f"[{args.label}] NO /api/verify captured")
+        print(f"[{args.label}] NO /api/verify response captured")
         return
     print(f"[{args.label}] === SCORE {round(v.get('score',0),3)} rec={v.get('recommendation')} ===")
     print(f"[{args.label}] categoryScores: {json.dumps(v.get('categoryScores',{}))}")
@@ -226,6 +321,11 @@ def main() -> None:
     ap.add_argument("--auto-override", action="store_true", help="apply Emulation.setAutomationOverride{enabled:false}")
     ap.add_argument("--js-webdriver", choices=list(WEBDRIVER_SPOOFS), default="none")
     ap.add_argument("--full-spoof", action="store_true", help="inject the full anti-detection script (console/webdriver/canvas/notifications/chrome)")
+    ap.add_argument("--humanize", action="store_true", help="drive a humanized cursor path (overshoot+reentry) to the submit button")
+    ap.add_argument("--approach-steps", type=int, default=10, help="number of approach mousemoves before overshoot")
+    ap.add_argument("--overshoot-px", type=int, default=14, help="px past the button's bottom edge to overshoot")
+    ap.add_argument("--dwell-ms", type=int, default=70, help="dwell after overshoot and after re-entry")
+    ap.add_argument("--step-delay-ms", type=int, default=40, help="delay between approach mousemoves (controls event rate)")
     ap.add_argument("--label", default="probe")
     asyncio.run(run(ap.parse_args()))
 

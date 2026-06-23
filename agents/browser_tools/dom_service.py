@@ -9,11 +9,45 @@ This module provides:
 
 import asyncio
 import logging
+import math
 import random
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+def offcenter_click_point(
+    center_x: float, center_y: float, width: float, height: float
+) -> Tuple[int, int]:
+    """Pick a human-like off-center landing point inside an element.
+
+    Humans never click the exact mathematical center, and FCaptcha-class
+    behavioral biometrics flag "unnaturally accurate click precision" when the
+    click lands < 2px from the element center. A per-axis Gaussian centered on 0
+    lands sub-2px a meaningful fraction of the time (both axes near zero), which
+    makes that flag fire flakily. Instead we sample a POLAR offset with a radius
+    FLOOR, so the landing point is reliably a few px off-center (clearing the 2px
+    floor even after the humanizer's sub-pixel motor noise) while staying well
+    inside the element (no missed clicks).
+    """
+    # Max offset from center per axis: ~30% of the extent, capped at 6px so the
+    # point stays comfortably inside the element.
+    max_x = min(width * 0.3, 6.0)
+    max_y = min(height * 0.3, 6.0)
+    bound = max(0.0, min(max_x, max_y))
+    if bound <= 0.0:
+        return (int(center_x), int(center_y))
+    # Radius floor: aim for >=4px off-center when the element allows it, but never
+    # exceed the per-axis bound. Sub-pixel motor noise (~1px) downstream still
+    # leaves us clear of the 2px "unnaturally accurate" threshold.
+    r_min = min(4.0, bound * 0.85)
+    radius = random.uniform(r_min, bound)
+    angle = random.uniform(0.0, 2.0 * math.pi)
+    return (
+        int(round(center_x + radius * math.cos(angle))),
+        int(round(center_y + radius * math.sin(angle))),
+    )
 
 
 @dataclass
@@ -417,6 +451,20 @@ class DOMService:
       return origTDU.apply(this, args);
     }, 'toDataURL');
   } catch (e) {}
+  try {
+    // Real displays jitter a few tenths of a millisecond frame-to-frame; Steel's
+    // software renderer (no vsync) produces metronomic requestAnimationFrame
+    // timing (frame-time variance ~0), which behavioral detectors flag as
+    // "RequestAnimationFrame timing too consistent". Perturb the high-res
+    // timestamp passed to rAF callbacks by a small, realistic amount. Jitter is
+    // far smaller than a frame interval, so the sequence stays monotonic and
+    // page animations are unaffected — it merely restores natural variance.
+    const origRAF = window.requestAnimationFrame.bind(window);
+    const rafMask = (fn, name) => { try { Object.defineProperty(fn, 'toString', { value: () => 'function ' + name + '() { [native code] }', configurable: true }); } catch (e) {} return fn; };
+    window.requestAnimationFrame = rafMask(function (cb) {
+      return origRAF(function (ts) { return cb(ts + (Math.random() - 0.5) * 2.4); });
+    }, 'requestAnimationFrame');
+  } catch (e) {}
 })();
 """
 
@@ -716,16 +764,12 @@ class DOMService:
         """
         rect = await self.get_element_rect(index)
         if rect:
-            center_x = rect["x"] + rect["width"] / 2
-            center_y = rect["y"] + rect["height"] / 2
-            # Jitter up to ~30% of the half-extent, capped at 6px, so the point
-            # stays comfortably inside the element (no missed clicks) while still
-            # scattering naturally around the center.
-            jitter_x = min(rect["width"] * 0.3, 6.0)
-            jitter_y = min(rect["height"] * 0.3, 6.0)
-            offset_x = max(-jitter_x, min(jitter_x, random.gauss(0, jitter_x / 2)))
-            offset_y = max(-jitter_y, min(jitter_y, random.gauss(0, jitter_y / 2)))
-            return (int(center_x + offset_x), int(center_y + offset_y))
+            return offcenter_click_point(
+                rect["x"] + rect["width"] / 2,
+                rect["y"] + rect["height"] / 2,
+                rect["width"],
+                rect["height"],
+            )
 
         return None
 

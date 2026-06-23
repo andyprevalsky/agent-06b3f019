@@ -175,6 +175,10 @@ class BrowserHumanizer:
         self._idle_anchor = self._last_pos
         self._idle_handle: Optional[asyncio.TimerHandle] = None
         self._idle_task: Optional[asyncio.Task] = None
+        # Monotonic deadline before which idle drift is suppressed. Set right after
+        # a click so the FCaptcha PoW worker (triggered by the click) solves on an
+        # uncontended main thread.
+        self._idle_suppress_until = 0.0
 
         # Typing settings
         self._cpm = 320 if fast else 260  # Characters per minute
@@ -215,10 +219,15 @@ class BrowserHumanizer:
     def start_idle_movement(self) -> None:
         if not self._idle_mouse_enabled or self._closed or self._idle_handle or self._idle_task:
             return
-        # Dense cadence: humans move the cursor near-continuously. Sparse idle
-        # drift leaves long mouse-silent gaps during LLM thinking, which reads as
-        # "mouse event rate abnormally low" to behavioral biometrics. Keep the
-        # pointer alive with frequent small drifts.
+        # Dense cadence keeps the recent mouse-event window packed so behavioral
+        # biometrics don't flag "mouse event rate abnormally low" (rate is
+        # count/window; a sparse stream lets old samples stretch the window and
+        # drag the rate under the 10/sec floor). The competing risk — dense idle
+        # starving the FCaptcha Proof-of-Work worker ("PoW timing suggests
+        # external processing") — is handled separately by suppressing idle for a
+        # few seconds AFTER each click (see _suppress_idle), which is exactly when
+        # the click-triggered PoW runs. So: dense BEFORE the click for rate,
+        # silent AFTER it for PoW.
         self._schedule_idle_mouse_step(random.uniform(0.10, 0.22))
 
     def _schedule_idle_mouse_step(self, delay_s: float) -> None:
@@ -231,7 +240,21 @@ class BrowserHumanizer:
         self._idle_handle = None
         if self._closed or not self._idle_mouse_enabled:
             return
+        remaining = self._idle_suppress_until - time.monotonic()
+        if remaining > 0:
+            # Idle is suppressed (a click just happened / PoW may be solving);
+            # defer rather than drift, so the worker thread runs uncontended.
+            self._schedule_idle_mouse_step(min(remaining, 1.1))
+            return
         self._idle_task = asyncio.create_task(self._run_idle_mouse_step())
+
+    def _suppress_idle(self, seconds: float) -> None:
+        """Hold off idle drift for `seconds` (cancels any pending step)."""
+        self._idle_suppress_until = max(self._idle_suppress_until, time.monotonic() + seconds)
+        if self._idle_handle:
+            self._idle_handle.cancel()
+            self._idle_handle = None
+            self._schedule_idle_mouse_step(seconds)
 
     async def _run_idle_mouse_step(self) -> None:
         try:
@@ -526,6 +549,14 @@ class BrowserHumanizer:
 
             self._last_pos = (x, y)
             self._idle_anchor = (x, y)
+        # A click can trigger a behavioral-biometrics verification whose
+        # Proof-of-Work runs in a page web worker. Idle mouse drift on the main
+        # thread starves that worker on Steel's constrained VM ("PoW timing
+        # suggests external processing"). Hold idle off long enough for the PoW
+        # to complete before resuming the alive-pointer drift. The detector flags
+        # PoW only when it exceeds ~3.9s (expectedMax*3 at difficulty 4), so a 4s
+        # quiet window covers the entire solve under normal load.
+        self._suppress_idle(4.0)
         logger.debug("Humanized click", x=x, y=y)
 
     async def click_for_input(
