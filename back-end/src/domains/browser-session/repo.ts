@@ -57,6 +57,47 @@ export async function findPasswords(userId: string) {
 }
 
 /**
+ * Reserve a signCount block for each enabled passkey of a realm, ATOMICALLY.
+ *
+ * Returns the encrypted key material plus the pre-reservation signCount (`base`)
+ * the agent seeds the virtual authenticator with. The single UPDATE advances the
+ * DB by RESERVE_BLOCK per row so concurrent sessions seed disjoint,
+ * strictly-increasing counter ranges — preventing the relying party from seeing
+ * a duplicate counter and rejecting our key as a cloned authenticator. Blocks
+ * may be skipped (a crashed session wastes its block); WebAuthn permits gaps.
+ */
+const PASSKEY_SIGNCOUNT_RESERVE_BLOCK = 100n;
+
+export async function reservePasskeysForRealm(userId: string, authRealm: string) {
+  const rows = await prisma.$queryRaw<
+    Array<{
+      id: string;
+      credentialId: string;
+      encryptedPrivateKey: string;
+      rpId: string;
+      userHandle: string | null;
+      base: bigint;
+    }>
+  >`
+    UPDATE "PasskeyCredential"
+    SET "signCount" = "signCount" + ${PASSKEY_SIGNCOUNT_RESERVE_BLOCK}
+    WHERE "userId" = ${userId}
+      AND "authRealm" = ${authRealm}
+      AND "disabledAt" IS NULL
+    RETURNING id, "credentialId", "encryptedPrivateKey", "rpId", "userHandle",
+              ("signCount" - ${PASSKEY_SIGNCOUNT_RESERVE_BLOCK}) AS base
+  `;
+  return rows.map((r) => ({
+    id: r.id,
+    credentialId: r.credentialId,
+    encryptedPrivateKey: r.encryptedPrivateKey,
+    rpId: r.rpId,
+    userHandle: r.userHandle,
+    signCount: Number(r.base),
+  }));
+}
+
+/**
  * Find a browser session by task ID (includes context).
  */
 export async function findSessionByTaskId(taskId: string) {

@@ -21,11 +21,12 @@ from typing import Any, Dict, List, Optional
 
 import structlog
 
+from tools.prompts import attempt_completion_prompt
+
 # Single source of truth for verifier rules. The browser prompt embeds the
 # same grading block as the main agent so attempt_completion semantics do not
 # drift between agent types.
 from utils.prompts import VERIFICATION_RULES
-from tools.prompts import attempt_completion_prompt
 
 logger = structlog.get_logger()
 
@@ -274,12 +275,14 @@ action envelope in text; use the provided tool call.
 - Use the cheapest viable authentication path for this single site.
 - Priority:
   - 1. Existing Steel/cookie session
-  - 2. Saved passwords
-  - 3. Email OTP
-  - 4. SMS OTP
-  - 5. Minted account
-  - 6. Guest/anonymous completion, if viable
+  - 2. Passkey (if one is listed in Auth Options)
+  - 3. Saved passwords
+  - 4. Email OTP
+  - 5. SMS OTP
+  - 6. Minted account
+  - 7. Guest/anonymous completion, if viable
 - Cookie-based and existing Steel-session auth are applied automatically before you start.
+- If a passkey is listed for this site and you are not already logged in, prefer it: start the login and choose the passkey / "Sign in with a passkey" option. The passkey is pre-loaded into the browser's authenticator and signs automatically, with no code or password needed, and may complete on its own as soon as the login page loads. If passkey sign-in is offered but does not complete, fall through to the next option. A site may still require an additional OTP step after the passkey; handle that OTP normally.
 - For saved passwords, type the listed ref (for example, pwd:andy@email.com) into password fields; the browser tool decrypts it and records credential usage.
 - For multi-account sites, prefer the task-specific user context when present, then the freshest enabled cookie bundle.
 - When a site offers OTP delivery options, prefer email over SMS.
