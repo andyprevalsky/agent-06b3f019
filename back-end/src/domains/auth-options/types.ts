@@ -40,7 +40,7 @@ export interface AuthOptionsResponse {
     accountLabel: string;
     email: string;
     phone: string | null;
-    provider: 'agentmail';
+    provider: 'primitive';
     phoneProvider: 'agentphone' | null;
     disabled: boolean;
   };

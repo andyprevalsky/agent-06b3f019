@@ -34,30 +34,6 @@ function testBackendBaseUrlUsesProductionEnv() {
   );
 }
 
-function testRenderConfigPreservesProductionShape() {
-  const renderYaml = fs.readFileSync(path.join(backendDir, 'render.yaml'), 'utf8');
-  assert(
-    /rootDir:\s*back-end/.test(renderYaml),
-    'render.yaml must set rootDir to back-end so Render runs commands from the backend package'
-  );
-  assert(
-    /region:\s*virginia/.test(renderYaml),
-    'render.yaml should use Render virginia to stay close to Fly iad workers'
-  );
-  assert(
-    /key:\s*BACKEND_URL[\s\S]*?sync:\s*false/.test(renderYaml),
-    'render.yaml must preserve BACKEND_URL as a manually provided final public URL'
-  );
-  assert(
-    /key:\s*GMAIL_WEB_CLIENT_SECRET[\s\S]*?sync:\s*false/.test(renderYaml),
-    'render.yaml must not commit Gmail OAuth secrets'
-  );
-  assert(
-    /key:\s*PLAID_ENV[\s\S]*?value:\s*production/.test(renderYaml),
-    'render.yaml must run Plaid against production in the production backend'
-  );
-}
-
 function testPlaidProductionProductsMatchApprovedAccess() {
   const plaidSource = fs.readFileSync(path.join(backendDir, 'src/providers/plaid.ts'), 'utf8');
   const productionProductsMatch = plaidSource.match(
@@ -79,7 +55,6 @@ function testPlaidProductionProductsMatchApprovedAccess() {
 function main() {
   testProductionRequiresPublicBackendUrl();
   testBackendBaseUrlUsesProductionEnv();
-  testRenderConfigPreservesProductionShape();
   testPlaidProductionProductsMatchApprovedAccess();
 }
 

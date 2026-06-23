@@ -1240,7 +1240,7 @@ async def test_fetch_recent_otps_extracts_codes_from_html_body():
                             "bodyHtml": "<p>Verification code:</p><p>8148</p><p>Enter this code.</p>",
                             "date": now,
                             "fromName": "Uber",
-                            "credentialId": "agentmail-inbox",
+                            "credentialId": "primitive-inbox",
                         }
                     ]
                 },
@@ -1252,7 +1252,7 @@ async def test_fetch_recent_otps_extracts_codes_from_html_body():
     assert len(result) == 1
     assert result[0].code == "8148"
     assert result[0].sender == "Uber"
-    assert result[0].credential_id == "agentmail-inbox"
+    assert result[0].credential_id == "primitive-inbox"
 
 
 async def test_fetch_recent_otps_dedupes_old_emails():

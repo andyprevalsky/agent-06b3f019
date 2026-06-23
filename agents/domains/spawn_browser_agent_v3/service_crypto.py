@@ -347,7 +347,7 @@ def extract_otp_from_text(text: str) -> Optional[str]:
 
 
 def _email_otp_search_text(email: Dict) -> str:
-    """Build searchable email text; AgentMail often has OTPs only in HTML."""
+    """Build searchable email text; minted inboxes often have OTPs only in HTML."""
     body_text = str(email.get("bodyText") or "")
     body_html = str(email.get("bodyHtml") or "")
     if not body_html:
