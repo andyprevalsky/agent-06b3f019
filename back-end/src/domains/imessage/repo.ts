@@ -1,4 +1,41 @@
+import type { MessageChannel } from '@prisma/client';
 import { prisma } from '../../providers/database';
+
+/**
+ * Fetch recent INBOUND messages (`to = 'me'`) for a user, newest first.
+ *
+ * Used by the browser agent's OTP relay. The `since` window (typically the last
+ * ~10 minutes) is the selective filter and is served by the
+ * `MessageRecord_channel_timestamp_idx` composite index when a channel is
+ * supplied, falling back to the `timestamp` index otherwise.
+ */
+export async function findRecentInboundMessages(params: {
+  userId: string;
+  since: Date;
+  limit: number;
+  channel?: MessageChannel;
+}) {
+  const { userId, since, limit, channel } = params;
+  return prisma.messageRecord.findMany({
+    where: {
+      person: { userId },
+      to: 'me',
+      timestamp: { gte: since },
+      ...(channel !== undefined ? { channel } : {}),
+    },
+    orderBy: { timestamp: 'desc' },
+    take: limit,
+    select: {
+      id: true,
+      channel: true,
+      from: true,
+      to: true,
+      timestamp: true,
+      message: true,
+      personId: true,
+    },
+  });
+}
 
 /** Create a new iMessage queue entry. */
 export async function createQueueEntry(

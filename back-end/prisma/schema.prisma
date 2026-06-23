@@ -335,6 +335,7 @@ model MessageRecord {
   @@index([personId, channel])
   @@index([timestamp])
   @@index([personId, timestamp])
+  @@index([channel, timestamp]) // Recent-inbound OTP relay: channel filter + time window
 }
 
 model Person {

@@ -17,7 +17,7 @@ import {
   queryMessagesSinceRowId,
   readContacts,
 } from './repo';
-import { cleanRow, normalizeHandle } from './service.clean';
+import { cleanRow, isLikelyOtpMessage, normalizeHandle } from './service.clean';
 import type { ContactRecord, IMessageData, NormalizedMessage } from './types';
 
 // ── timestamp helpers ─────────────────────────────────────────────────────
@@ -179,7 +179,12 @@ export async function readMessages(
     }
 
     const filteredMessages = cleanedMessages.filter(
-      (msg) => repliedHandles.has(msg.contact_id) || namedHandles.has(msg.contact_id)
+      (msg) =>
+        repliedHandles.has(msg.contact_id) ||
+        namedHandles.has(msg.contact_id) ||
+        // OTP / verification texts are kept even from senders the user never
+        // replied to (e.g. Amazon, banks) so the browser agent can relay codes.
+        isLikelyOtpMessage(msg.text)
     );
 
     if (filteredMessages.length !== cleanedMessages.length) {

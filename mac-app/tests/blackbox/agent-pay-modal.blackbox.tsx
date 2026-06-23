@@ -171,7 +171,12 @@ describe('AgentPayModal — initial render (no saved card)', () => {
       expect(screen.getByText('Agent Pay')).toBeInTheDocument();
     });
 
-    expect(screen.getByText(/All card credentials are end-to-end encrypted/)).toBeInTheDocument();
+    // The SecurityNotice + card form render only once the initial GET resolves
+    // (initialLoading → false). The header above is present even while loading,
+    // so wait for the post-fetch content before asserting on it.
+    await waitFor(() => {
+      expect(screen.getByText(/All card credentials are end-to-end encrypted/)).toBeInTheDocument();
+    });
     expect(screen.getByRole('link', { name: /Create Card via Privacy\.com/ })).toHaveAttribute(
       'href',
       'https://privacy.com'
