@@ -807,3 +807,5 @@
 {"task": "parallel-tool-calls", "duration_seconds": 136.3, "cost_cents": 14.0, "timestamp": "2026-05-28T18:25:47.058768+00:00", "agent_id": "c15522aa-e512-4299-8d64-02392dc249a9"}
 {"task": "claude-code-agent", "duration_seconds": 61.0, "cost_cents": 0.0, "timestamp": "2026-05-28T18:25:47.058768+00:00", "agent_id": "95f03bb9-a91d-47b2-ad45-6f38c02b6538"}
 {"task": "browser-smoke", "duration_seconds": 51.0, "cost_cents": 0.0, "timestamp": "2026-05-28T18:25:47.058768+00:00", "agent_id": "50bafd45-9c1f-4c65-81f9-50b89abd91c1"}
+{"task": "parallel-tool-calls", "duration_seconds": 216.8, "cost_cents": 7.0, "timestamp": "2026-06-23T16:53:55.866628+00:00", "agent_id": "ce091b6e-4629-40d3-ab79-b9950897a29e"}
+{"task": "claude-code-agent", "duration_seconds": 86.2, "cost_cents": 0.0, "timestamp": "2026-06-23T16:59:15.975590+00:00", "agent_id": "eda636bb-64ba-4091-bb55-eb164582d3f6"}

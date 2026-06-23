@@ -470,12 +470,13 @@ Per-task timeouts are **dynamic** — derived from p95 × 1.5 of past passes in 
 
 2. **Normal run** (history exists): the command at the top of Step 6 runs as-is, without `--bootstrap`. On success, passes auto-append to the JSONL.
 
-**After Step 6 passes: stage and commit the updated history** before Phase 2:
+**After Step 6 passes: stage, commit, AND PUSH the updated history** before Phase 2. The PR was already pushed in Step 4d, so this commit MUST be pushed too — otherwise it stays local-only and never reaches the PR head, so the merge (Step 12) silently drops the recorded durations:
 
 ```bash
 if ! git diff --quiet -- agents/benchmarks/history/task_durations.jsonl; then
   git add agents/benchmarks/history/task_durations.jsonl
   git commit -m "benchmarks: record smoke pass durations"
+  git push   # land it on the PR head so the merge includes it (the early Step 4d push is stale)
 fi
 ```
 
@@ -991,6 +992,15 @@ cd "$(git rev-parse --show-toplevel)/back-end" && npx tsx scripts/cleanup-stale-
 This is best-effort — if it fails (e.g., no Temporal API key, no Docker), proceed to merge anyway.
 
 ## Step 12: Merge
+
+**First, push any unpushed local commits so the PR head is current.** Because the PR was pushed early (Step 4d), any commit made afterward — recorded smoke durations (Step 6), the archived plan (Step 11), or test-loop fix commits — may be local-only. Merging would silently drop them. Push before merging:
+
+```bash
+# Land any commits made after the early Step 4d push onto the PR branch.
+if [ -n "$(git log @{u}..HEAD --oneline 2>/dev/null)" ]; then
+  git push
+fi
+```
 
 Merge without deleting the branch. Do not delete the local branch or the remote branch unless the user explicitly asks for that.
 
