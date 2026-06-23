@@ -15,8 +15,9 @@ import {
   getFingerprintInjectionData,
 } from '../../providers/steel';
 import { resumeBrowserSession as resumeBrowserSessionProvider } from '../../providers/browserSessionResume';
+import { canonicalAuthRealm } from '../../providers/authRealm';
 import * as repo from './repo';
-import { serializePasswords, toUserSettings } from './service.serializers';
+import { serializePasskeys, serializePasswords, toUserSettings } from './service.serializers';
 export { getTaskInfo, getTaskOwnerUserId } from './service.task-info';
 export {
   injectLocalStorage,
@@ -39,13 +40,17 @@ export async function initSession(userId: string, agentId: string, startUrl: str
     startUrl: startUrl !== '' ? startUrl : 'none',
   });
 
-  // Phase 1: All independent queries in parallel
-  const [agent, contextId, user, fingerprintInjection, passwords] = await Promise.all([
+  // Phase 1: All independent queries in parallel. The passkey reservation is a
+  // mutation (atomic signCount block reserve) keyed on the start_url's realm; it
+  // returns nothing for sites without a stored passkey.
+  const realm = canonicalAuthRealm(startUrl);
+  const [agent, contextId, user, fingerprintInjection, passwords, passkeys] = await Promise.all([
     repo.findAgentProxy(agentId),
     getOrCreateContext(userId),
     repo.findUserSettings(userId),
     getFingerprintInjectionData(userId),
     repo.findPasswords(userId),
+    repo.reservePasskeysForRealm(userId, realm),
   ]);
 
   const proxyGeo: ProxyGeoLocation =
@@ -75,9 +80,13 @@ export async function initSession(userId: string, agentId: string, startUrl: str
   const injectionResult = await injectUserData(session.sessionId, userId, startUrl);
 
   const serializedPasswords = serializePasswords(passwords);
+  const serializedPasskeys = serializePasskeys(passkeys);
   const userSettings = toUserSettings(user);
 
   log.info('Including passwords in init response', { count: serializedPasswords.length });
+  if (serializedPasskeys.length > 0) {
+    log.info('Including passkeys in init response', { count: serializedPasskeys.length, realm });
+  }
 
   return {
     task_id: session.taskId,
@@ -99,6 +108,7 @@ export async function initSession(userId: string, agentId: string, startUrl: str
     fingerprint_injected: injectionResult.fingerprint.injected,
     fingerprint_injection: fingerprintInjection,
     passwords: serializedPasswords,
+    passkeys: serializedPasskeys,
     user_settings: userSettings,
   };
 }

@@ -20,6 +20,7 @@ import {
   propagateCredentialInTransaction,
   tryCreatePropagationMarker,
 } from '../../domains/credential-propagation/repo';
+import { propagateBrowserRunCredentials } from '../../providers/credentialPropagation';
 
 config();
 
@@ -83,6 +84,7 @@ async function cleanup(userId: string) {
   await prisma.browserPassword.deleteMany({ where: { userId } });
   await prisma.steelSessionAuth.deleteMany({ where: { userId } });
   await prisma.mintedAccount.deleteMany({ where: { userId } });
+  await prisma.passkeyCredential.deleteMany({ where: { userId } });
   await prisma.browserContext.deleteMany({ where: { userId } });
   await prisma.user.deleteMany({ where: { userId } });
 }
@@ -112,6 +114,7 @@ test('provider classifier extracts normalized credential refs and aggregates by 
         credential_ref: [
           { kind: 'browserPassword', id: 'pw-1' },
           { kind: 'cookie', id: 'cookie-1' },
+          { kind: 'webauthn', id: 'pk-1' },
           { kind: 'unknown', id: 'skip-me' },
         ],
       },
@@ -120,10 +123,23 @@ test('provider classifier extracts normalized credential refs and aggregates by 
     { metadata: null },
   ]);
 
-  assert(refs.length === 3, `expected 3 refs, got ${refs.length}`);
-  assert(refs.some((ref) => ref.kind === 'password' && ref.id === 'pw-1'), 'password ref');
-  assert(refs.some((ref) => ref.kind === 'cookie_bundle'), 'cookie bundle ref');
-  assert(refs.some((ref) => ref.kind === 'steel_session'), 'steel ref');
+  assert(refs.length === 4, `expected 4 refs, got ${refs.length}`);
+  assert(
+    refs.some((ref) => ref.kind === 'password' && ref.id === 'pw-1'),
+    'password ref'
+  );
+  assert(
+    refs.some((ref) => ref.kind === 'cookie_bundle'),
+    'cookie bundle ref'
+  );
+  assert(
+    refs.some((ref) => ref.kind === 'steel_session'),
+    'steel ref'
+  );
+  assert(
+    refs.some((ref) => ref.kind === 'passkey' && ref.id === 'pk-1'),
+    'passkey ref (webauthn alias)'
+  );
 
   const aggregate = aggregateDecision(
     [
@@ -183,8 +199,12 @@ test('provider classifier parses mock LLM outcomes and fills missing credentials
 
   assert(result.reason === 'per credential classification', 'expected classifier reason');
   assert(result.decisions.length === 2, 'expected one decision per credential');
-  const passwordDecision = result.decisions.find((decision) => decision.credentialRef.id === 'pw-1');
-  const cookieDecision = result.decisions.find((decision) => decision.credentialRef.id === 'cookie-1');
+  const passwordDecision = result.decisions.find(
+    (decision) => decision.credentialRef.id === 'pw-1'
+  );
+  const cookieDecision = result.decisions.find(
+    (decision) => decision.credentialRef.id === 'cookie-1'
+  );
   assert(passwordDecision?.outcome === 'rate_limited', 'expected parsed password outcome');
   assert(passwordDecision.failureReason === 'rate_limited', 'expected mapped failure reason');
   assert(cookieDecision?.outcome === 'unused', 'expected missing credential to be unused');
@@ -441,6 +461,116 @@ test('credential propagation route returns no-credential decision for existing a
     assert(body.refs === 0, 'expected zero refs');
     assert(body.applied === 0, 'expected zero applied credentials');
     assert(body.outcome === 'task_level', 'expected task-level outcome');
+  } finally {
+    await cleanup(userId);
+  }
+});
+
+test('domain repo disables and re-enables a passkey credential', async () => {
+  const userId = await createUser();
+  try {
+    const passkey = await prisma.passkeyCredential.create({
+      data: {
+        userId,
+        authRealm: 'amazon.com',
+        rpId: 'amazon.com',
+        credentialId: `cred-${randomUUID()}`,
+        encryptedPrivateKey: 'enc',
+        userHandle: 'uh',
+        signCount: 3,
+      },
+    });
+
+    await propagateCredentialInTransaction(
+      `${userId}:passkey-fail:${randomUUID()}`,
+      { kind: 'passkey', id: passkey.id },
+      {
+        outcome: 'auth_failed',
+        reason: 'auth_exhausted',
+        rawError: 'passkey rejected by relying party',
+        failureReason: 'auth_exhausted',
+      }
+    );
+    let row = await prisma.passkeyCredential.findUniqueOrThrow({ where: { id: passkey.id } });
+    assert(row.disabledAt !== null, 'expected passkey disabled after auth_failed');
+    assert(
+      row.disabledReason?.includes('passkey rejected') === true,
+      'expected raw reason recorded'
+    );
+
+    await propagateCredentialInTransaction(
+      `${userId}:passkey-ok:${randomUUID()}`,
+      { kind: 'passkey', id: passkey.id },
+      { outcome: 'success', reason: 'agent_completed', rawError: null, failureReason: null }
+    );
+    row = await prisma.passkeyCredential.findUniqueOrThrow({ where: { id: passkey.id } });
+    assert(row.disabledAt === null, 'expected success to clear passkey disabledAt');
+    assert(row.disabledReason === null, 'expected success to clear passkey disabledReason');
+  } finally {
+    await cleanup(userId);
+  }
+});
+
+test('provider browser-run propagation disables a failed passkey end to end', async () => {
+  const userId = await createUser();
+  try {
+    const agent = await prisma.agent.create({
+      data: {
+        userId,
+        goal: 'Sign in with passkey',
+        status: 'FAILED',
+        statusMessage: 'passkey failed',
+      },
+    });
+    const passkey = await prisma.passkeyCredential.create({
+      data: {
+        userId,
+        authRealm: 'amazon.com',
+        rpId: 'amazon.com',
+        credentialId: `cred-${randomUUID()}`,
+        encryptedPrivateKey: 'enc',
+        userHandle: 'uh',
+        signCount: 0,
+      },
+    });
+    const taskId = `browser-task-${randomUUID()}`;
+    await prisma.message.create({
+      data: {
+        agentId: agent.id,
+        role: 'TOOL',
+        text: 'Passkey assertion was rejected',
+        metadata: { task_id: taskId, credential_ref: { kind: 'passkey', id: passkey.id } },
+      },
+    });
+
+    const result = await withEnv(
+      {
+        CREDENTIAL_PROPAGATION_DISABLE_LLM: undefined,
+        CREDENTIAL_PROPAGATION_MOCK_LLM_RESPONSE: JSON.stringify({
+          reason: 'passkey rejected by relying party',
+          credentialOutcomes: [
+            { kind: 'passkey', id: passkey.id, outcome: 'auth_failed', reason: 'rp rejected' },
+          ],
+        }),
+      },
+      () =>
+        propagateBrowserRunCredentials({
+          agentId: agent.id,
+          taskId,
+          success: false,
+          status: 'failed',
+          message: 'passkey failed',
+        })
+    );
+
+    assert(result !== null, 'expected a propagation decision');
+    assert(result.refs === 1, `expected one passkey ref, got ${result.refs}`);
+    assert(
+      result.credentialOutcomes.some((o) => o.kind === 'passkey' && o.outcome === 'auth_failed'),
+      'expected passkey auth_failed outcome'
+    );
+    const row = await prisma.passkeyCredential.findUniqueOrThrow({ where: { id: passkey.id } });
+    assert(row.disabledAt !== null, 'expected provider path to disable the failed passkey');
   } finally {
     await cleanup(userId);
   }

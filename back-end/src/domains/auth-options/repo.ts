@@ -25,6 +25,12 @@ export async function findBrowserPasswords(userId: string) {
   });
 }
 
+export async function findPasskeys(userId: string, authRealm: string) {
+  return prisma.passkeyCredential.findMany({
+    where: { userId, authRealm },
+  });
+}
+
 export async function findConnectedEmailCredentials(userId: string) {
   return prisma.emailIntegrationCredential.findMany({
     where: { userId, email: { not: null }, accessToken: { not: null } },

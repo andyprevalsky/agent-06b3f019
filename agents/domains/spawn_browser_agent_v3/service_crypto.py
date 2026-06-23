@@ -718,6 +718,19 @@ def build_auth_options_prompt_section(
     else:
         lines.append("  - none")
 
+    passkeys = auth_options.get("passkeys") or []
+    enabled_passkeys = [pk for pk in passkeys if not pk.get("disabled")]
+    if enabled_passkeys:
+        rp_ids = ", ".join(sorted({pk.get("rpId", realm) for pk in enabled_passkeys}))
+        lines.append(
+            f"- Passkey: available for {rp_ids}. It is already loaded into the browser's authenticator. "
+            "If you are not already logged in, start the login and choose the passkey / "
+            '"Sign in with a passkey" option. It signs automatically, with no code or password needed. '
+            "The passkey may also complete the moment the login page loads."
+        )
+    else:
+        lines.append("- Passkey: none")
+
     available = bool(email_otp.get("available"))
     connected = email_otp.get("connected_emails") or email_otp.get("connectedEmails") or []
     match = email_otp.get("match_for_site_account") or email_otp.get("matchForSiteAccount")

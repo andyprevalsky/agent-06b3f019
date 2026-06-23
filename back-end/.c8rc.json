@@ -29,6 +29,7 @@
     "src/domains/agents/service.ts",
     "src/domains/tool-usage/types.ts",
     "src/domains/auth/types.ts",
+    "src/domains/auth-options/types.ts",
     "src/types/person.ts",
     "src/domains/browser-session/repo.ts",
     "src/domains/integrations/repo.email.ts",

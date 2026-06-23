@@ -1,5 +1,5 @@
 // eslint-disable-next-line no-restricted-imports -- domain-specific vCard library, single consumer
-import vCardsJS, { type VCard } from 'vcards-js';
+import vCardsJS from 'vcards-js';
 import * as repo from './repo';
 import { createLogger } from '../../providers/logger';
 import {
@@ -13,6 +13,11 @@ import {
 } from './config';
 
 const log = createLogger('VCard');
+
+// vcards-js (2.11+) ships its own types; derive ours from the library's return
+// type so field shapes (several are string | string[]) stay in sync rather than
+// drifting against a hand-rolled interface.
+type VCard = ReturnType<typeof vCardsJS>;
 
 function applyDefaultPhoto(vCard: VCard) {
   vCard.photo.embedFromString(DEFAULT_PHOTO_BASE64, 'PNG');
