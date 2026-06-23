@@ -1,6 +1,5 @@
-// @ts-expect-error - vcards-js doesn't have type declarations
 // eslint-disable-next-line no-restricted-imports -- domain-specific vCard library, single consumer
-import vCardsJS from 'vcards-js';
+import vCardsJS, { type VCard } from 'vcards-js';
 import * as repo from './repo';
 import { createLogger } from '../../providers/logger';
 import {
@@ -14,18 +13,6 @@ import {
 } from './config';
 
 const log = createLogger('VCard');
-
-interface VCard {
-  firstName: string;
-  lastName: string;
-  cellPhone: string;
-  email: string;
-  organization: string;
-  url: string;
-  birthday: Date;
-  photo: { embedFromString: (data: string, type: string) => void };
-  getFormattedString: () => string;
-}
 
 function applyDefaultPhoto(vCard: VCard) {
   vCard.photo.embedFromString(DEFAULT_PHOTO_BASE64, 'PNG');

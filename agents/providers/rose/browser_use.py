@@ -21,11 +21,12 @@ from typing import Any, Dict, List, Optional
 
 import structlog
 
+from tools.prompts import attempt_completion_prompt
+
 # Single source of truth for verifier rules. The browser prompt embeds the
 # same grading block as the main agent so attempt_completion semantics do not
 # drift between agent types.
 from utils.prompts import VERIFICATION_RULES
-from tools.prompts import attempt_completion_prompt
 
 logger = structlog.get_logger()
 
@@ -285,7 +286,7 @@ action envelope in text; use the provided tool call.
 - When a site offers OTP delivery options, prefer email over SMS.
 - OTP codes from email or SMS are automatically injected as user messages into your context as soon as they become available. If no OTP code is received after 60 seconds since requested, request a resend of the OTP code. If after another 60 seconds no OTP code is received, consider that authentication route exhausted and unusable.
 - If authentication blocks the task after all available automated auth options are exhausted, call request_user_assistance_for_authentication. Do not call attempt_completion, send_message_to_user, or report a status instead.
-- Do not open AgentMail, webmail, or inbox websites to retrieve OTP codes."""
+- Do not open webmail or inbox websites to retrieve OTP codes."""
 
 
 # ---------------------------------------------------------------------------

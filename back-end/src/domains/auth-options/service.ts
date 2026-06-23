@@ -7,7 +7,7 @@
  */
 
 import { canonicalAuthRealm, hostnameFromRealmInput } from '../../providers/authRealm';
-import { agentMailDomain, createMintedInbox, findAgentMailInbox } from '../../providers/agentMail';
+import { primitiveDomain, createMintedInbox, findMintedInbox } from '../../providers/primitive';
 import { createAgentPhoneNumber } from '../../providers/agentPhone';
 import { createLogger } from '../../providers/logger';
 import { benchmarkSavedBrowserAuthDisabled } from './config';
@@ -21,8 +21,8 @@ const CHROMIUM_UNIX_EPOCH_OFFSET_MS = 11644473600000n;
 const CHROMIUM_ONE_DAY_MICROSECONDS = 86400000000n;
 const UNIX_MS_VS_CHROMIUM_MICROSECONDS_BOUNDARY = 10000000000000n;
 
-function emailUsesCurrentAgentMailDomain(email: string): boolean {
-  const currentDomain = agentMailDomain().toLowerCase();
+function emailUsesCurrentMintedDomain(email: string): boolean {
+  const currentDomain = primitiveDomain().toLowerCase();
   return email.trim().toLowerCase().endsWith(`@${currentDomain}`);
 }
 
@@ -122,7 +122,7 @@ export async function getAuthOptions(
             accountLabel: mintedIdentity?.email ?? mintedAccount.accountLabel,
             email: mintedIdentity?.email ?? mintedAccount.accountLabel,
             phone: mintedIdentity?.phone ?? null,
-            provider: 'agentmail',
+            provider: 'primitive',
             phoneProvider: mintedIdentity?.phoneProvider === 'agentphone' ? 'agentphone' : null,
             disabled: mintedAccount.disabledAt !== null,
           }
@@ -255,9 +255,9 @@ async function ensureMintedIdentity(
       identity = await repo.upsertAgentIdentityEmail(userId, inbox.email);
     }
   } else {
-    const hasCurrentAgentMailDomain = emailUsesCurrentAgentMailDomain(identity.email);
-    const inbox = hasCurrentAgentMailDomain ? await findAgentMailInbox(identity.email) : null;
-    if (!hasCurrentAgentMailDomain || inbox === null) {
+    const hasCurrentMintedDomain = emailUsesCurrentMintedDomain(identity.email);
+    const inbox = hasCurrentMintedDomain ? await findMintedInbox(identity.email) : null;
+    if (!hasCurrentMintedDomain || inbox === null) {
       const replacement = await createMintedInbox({
         userId,
         authRealm: 'agent-identity',
