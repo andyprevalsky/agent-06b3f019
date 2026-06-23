@@ -819,6 +819,43 @@ async function testClaudeAuth_400FallsThroughNoRetry() {
   }
 }
 
+async function testClaudeAuth_429RetriesWithBackoffThenSucceeds() {
+  process.env.OPENROUTER_API_KEY = 'or-test-key';
+  let anthropicCalls = 0;
+  installFetchStub((url) => {
+    if (url === ANTHROPIC_API_URL) {
+      anthropicCalls++;
+      if (anthropicCalls === 1) {
+        // 429 with a Retry-After header exercises backoffFor429's header-parse
+        // branch + the in-place retry/sleep path before the second attempt.
+        return new Response(JSON.stringify({ error: { message: 'rate limited' } }), {
+          status: 429,
+          headers: { 'Content-Type': 'application/json', 'retry-after': '1' },
+        });
+      }
+      return sseResponse(ANTHROPIC_OK_SSE);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+
+  try {
+    const stream = await createStreamingCompletion({
+      model: 'rose-labs/rose-1-lite',
+      messages: [{ role: 'user', content: 'hi' }],
+      claude_token: 'test-token',
+    });
+    const chunks = await collect(stream);
+    assertEqual(anthropicCalls, 2, 'anthropic retried once after 429, then succeeded in place');
+    assert(chunks.length > 0, 'chunks emitted after retry');
+    assert(
+      chunks[0].actual_model.endsWith('-claude'),
+      `served by claudeAuth after retry, got ${chunks[0].actual_model}`
+    );
+  } finally {
+    restoreFetch();
+  }
+}
+
 async function testClaudeAuth_noTokenGoesDirectToWaterfall() {
   process.env.OPENROUTER_API_KEY = 'or-test-key';
   // No ANTHROPIC_API_KEY funded default configured for this test.
@@ -2557,6 +2594,10 @@ async function main(): Promise<void> {
     {
       name: 'claudeAuth / 400 falls through (no retry)',
       fn: testClaudeAuth_400FallsThroughNoRetry,
+    },
+    {
+      name: 'claudeAuth / 429 retries with backoff then succeeds',
+      fn: testClaudeAuth_429RetriesWithBackoffThenSucceeds,
     },
     {
       name: 'claudeAuth / no token goes direct to waterfall',
