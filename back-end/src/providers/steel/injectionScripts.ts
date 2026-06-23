@@ -17,8 +17,8 @@ export function buildFingerprintScript(fp: FingerprintData): string {
               // Detectors (FCaptcha _detectCDPRuntime) plant an Error whose
               // .message getter fires only when an attached CDP client has
               // Runtime enabled and Chrome serializes a console-logged object.
-              // browser-use enables Runtime, so any console.* call trips it.
-              // Route console.* through no-ops that never reach the native sink
+              // browser-use enables Runtime, so any console method call trips it.
+              // Route the console methods through no-ops that never reach the sink
               // → Chrome emits no consoleAPICalled → the bait getter never fires.
               // Keep toString native-looking so the override isn't itself a tell.
               try {
