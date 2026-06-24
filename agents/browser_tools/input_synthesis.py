@@ -24,7 +24,6 @@ import numpy as np
 
 from keycap import Controller, Plant
 
-
 Point = Tuple[float, float]
 
 CLICK_DURATION_MEAN_MS = 85.0
@@ -327,6 +326,24 @@ def synthesize_mouse_path(
             segment = segment[1:]
         samples.extend(segment)
 
+    # Inject per-sample speed variation. A clean Sigma-Lognormal profile can yield
+    # velocityVariance < 0.02 (px/ms)^2 on slower/shorter moves, which behavioral
+    # biometrics flag as "mouse velocity too consistent". Real hand movement varies
+    # speed mainly on the LOW end — brief hesitations / decelerations — never with
+    # super-fast jumps (those are themselves a bot tell, guarded by the
+    # max-velocity invariant). So scatter velocities by occasionally LENGTHENING a
+    # sample's delay (slowing it down): velocity = distance/dt only ever drops,
+    # the peak velocity is untouched, and a handful of low-velocity outliers is
+    # enough to clear the variance floor.
+    if len(samples) > 3:
+        varied: List[MouseSample] = []
+        for sample in samples:
+            factor = 1.0
+            if rng.random() < 0.18:
+                factor = rng.uniform(1.4, 2.2)  # brief hesitation -> low-velocity outlier
+            varied.append(MouseSample(sample.x, sample.y, sample.delay_s * factor))
+        samples = varied
+
     return samples
 
 
@@ -346,8 +363,8 @@ def synthesize_idle_mouse_drift(
     radius_px = max(0.5, min(12.0, radius_px))
 
     pull = rng.uniform(0.08, 0.22)
-    next_x = current[0] + (anchor[0] - current[0]) * pull + rng.gauss(0, radius_px * 0.18)
-    next_y = current[1] + (anchor[1] - current[1]) * pull + rng.gauss(0, radius_px * 0.18)
+    next_x = current[0] + (anchor[0] - current[0]) * pull + rng.gauss(0, radius_px * 0.24)
+    next_y = current[1] + (anchor[1] - current[1]) * pull + rng.gauss(0, radius_px * 0.24)
 
     dx = next_x - anchor[0]
     dy = next_y - anchor[1]
@@ -359,7 +376,25 @@ def synthesize_idle_mouse_drift(
 
     bounded_x = int(round(max(0, min(width - 1, next_x))))
     bounded_y = int(round(max(0, min(height - 1, next_y))))
-    delay_s = rng.uniform(0.18, 0.48)
+    if (bounded_x, bounded_y) == (int(round(current[0])), int(round(current[1]))):
+        # Browser mousemove listeners only receive an event when the integer
+        # client coordinate changes. Keep each idle step visible while staying
+        # inside the small hand-tremor radius around the anchor.
+        for _ in range(8):
+            angle = rng.uniform(0, 2 * math.pi)
+            step = rng.uniform(1.0, min(2.8, radius_px))
+            candidate_x = int(round(max(0, min(width - 1, current[0] + math.cos(angle) * step))))
+            candidate_y = int(round(max(0, min(height - 1, current[1] + math.sin(angle) * step))))
+            if (candidate_x, candidate_y) != (bounded_x, bounded_y):
+                cdx = candidate_x - anchor[0]
+                cdy = candidate_y - anchor[1]
+                if math.hypot(cdx, cdy) <= radius_px + 0.5:
+                    bounded_x, bounded_y = candidate_x, candidate_y
+                    break
+    # Keep background pointer activity dense enough for long form-fill sessions.
+    # FCaptcha computes mouseEventRate over the whole interaction window, so
+    # sparse idle drift lets typing time dilute an otherwise human click path.
+    delay_s = rng.uniform(0.018, 0.034)
     return MouseSample(bounded_x, bounded_y, delay_s)
 
 

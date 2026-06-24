@@ -35,6 +35,7 @@ assign_ports() {
     export MAC_APP_PORT=$((base + 3))
     export SDK_METRICS_PORT=$((base + 4))
     export LOCAL_DB_PORT=$((base + 5))
+    export NGROK_WEB_PORT=$((base + 9))
     export BACKEND_API_URL=http://localhost:$BACKEND_PORT
     export VITE_BACKEND_API_URL=http://localhost:$BACKEND_PORT
     export BACKEND_URL=http://localhost:$BACKEND_PORT
@@ -111,7 +112,7 @@ assign_ports "$CONDUCTOR_PORT"
 
 # If any port in our range is held by another worktree, find a safe range
 COLLISION=false
-for port in $BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $MAC_APP_PORT $SDK_METRICS_PORT $LOCAL_DB_PORT; do
+for port in $BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $MAC_APP_PORT $SDK_METRICS_PORT $LOCAL_DB_PORT $NGROK_WEB_PORT; do
     if port_held_by_other_worktree "$port"; then
         COLLISION=true
         break
@@ -125,7 +126,7 @@ if $COLLISION; then
     FOUND=false
     while [ $CANDIDATE -lt 65500 ]; do
         RANGE_FREE=true
-        for offset in 0 1 2 3 4 5; do
+        for offset in 0 1 2 3 4 5 9; do
             p=$((CANDIDATE + offset))
             if lsof -ti :"$p" >/dev/null 2>&1; then
                 RANGE_FREE=false
@@ -161,7 +162,7 @@ fi
 
 export NODE_ENV="${NODE_ENV:-development}"
 export TEMPORAL_TASK_QUEUE=navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME
-echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT mac-app=$MAC_APP_PORT metrics=$SDK_METRICS_PORT db=$LOCAL_DB_PORT queue=$TEMPORAL_TASK_QUEUE benchmark_mode=$BENCHMARK_MODE activity_max_slots=${MAX_CONCURRENT_ACTIVITIES:-100} activity_pollers=${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-8}"
+echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT mac-app=$MAC_APP_PORT metrics=$SDK_METRICS_PORT db=$LOCAL_DB_PORT ngrok_api=$NGROK_WEB_PORT queue=$TEMPORAL_TASK_QUEUE benchmark_mode=$BENCHMARK_MODE activity_max_slots=${MAX_CONCURRENT_ACTIVITIES:-100} activity_pollers=${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-8}"
 
 # ── Cloud instance: aggressive port cleanup ──
 # On cloud there's exactly one worktree — no multi-workspace concern.
@@ -169,7 +170,7 @@ echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_P
 # run.sh invocations or crashed services. Retry until every port is free.
 
 if $IS_CLOUD; then
-    CLOUD_PORTS=($BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $SDK_METRICS_PORT)
+    CLOUD_PORTS=($BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $SDK_METRICS_PORT $NGROK_WEB_PORT)
 
     kill_port() {
         local port=$1
@@ -425,7 +426,7 @@ if ! $IS_CLOUD; then
             pid=$ppid
         done
     }
-    SERVICE_PORTS=($BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $SDK_METRICS_PORT)
+    SERVICE_PORTS=($BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $SDK_METRICS_PORT $NGROK_WEB_PORT)
     $IS_MAC && SERVICE_PORTS+=($MAC_APP_PORT)
     for port in "${SERVICE_PORTS[@]}"; do
         for pid in $(lsof -ti :"$port" 2>/dev/null); do
@@ -466,8 +467,153 @@ fi
 
 PIDS=()
 NAMES=()
+NGROK_PID=""
+NGROK_CONFIG_FILE=""
 SHUTTING_DOWN=false
 SERVICE_STATUS=starting
+
+dns_label_from_workspace() {
+    python3 - <<'PY'
+import os
+import re
+import sys
+
+raw = os.environ.get("CONDUCTOR_WORKSPACE_NAME", "").strip()
+if not raw:
+    sys.exit("CONDUCTOR_WORKSPACE_NAME is required to derive a stable public domain")
+label = re.sub(r"[^a-z0-9-]+", "-", raw.lower()).strip("-")
+label = re.sub(r"-+", "-", label)
+if not label:
+    sys.exit(f"CONDUCTOR_WORKSPACE_NAME={raw!r} does not contain DNS-safe characters")
+print(label[:50].strip("-"))
+PY
+}
+
+ensure_ngrok_domain_reserved() {
+    if [ -z "${NGROK_API_KEY:-}" ]; then
+        return 0
+    fi
+    echo "🌐 Checking ngrok reserved domain $WORKTREE_DOMAIN"
+    local domains_json
+    domains_json=$(ngrok api reserved-domains list --api-key "$NGROK_API_KEY" --limit 1000 2>&1) || {
+        echo "$domains_json"
+        echo "❌ Could not list ngrok reserved domains with NGROK_API_KEY."
+        exit 1
+    }
+    if printf '%s\n' "$domains_json" | grep -q "\"domain\"[[:space:]]*:[[:space:]]*\"$WORKTREE_DOMAIN\""; then
+        echo "🌐 Reserved domain already exists: $WORKTREE_DOMAIN"
+        return 0
+    fi
+    echo "🌐 Reserving ngrok domain $WORKTREE_DOMAIN"
+    local create_output
+    create_output=$(ngrok api reserved-domains create \
+        --api-key "$NGROK_API_KEY" \
+        --domain "$WORKTREE_DOMAIN" \
+        --description "Conductor workspace $CONDUCTOR_WORKSPACE_NAME public frontend" 2>&1) || {
+        echo "$create_output"
+        echo "❌ Could not reserve $WORKTREE_DOMAIN. Confirm the ngrok account is on Pay-as-you-go and the domain is available."
+        exit 1
+    }
+}
+
+start_public_tunnel() {
+    if ! command -v ngrok >/dev/null 2>&1; then
+        echo "❌ ngrok is required for scripts/run.sh. Install it and configure an authtoken."
+        exit 1
+    fi
+    ngrok config check >/dev/null 2>&1 || {
+        echo "❌ ngrok config is invalid or missing an authtoken. Run: ngrok config add-authtoken <token>"
+        exit 1
+    }
+
+    WORKSPACE_DNS_LABEL="$(dns_label_from_workspace)"
+    NGROK_DOMAIN_SUFFIX="${NGROK_DOMAIN_SUFFIX:-ngrok.app}"
+    WORKTREE_DOMAIN="${NGROK_WORKTREE_DOMAIN:-rose-${WORKSPACE_DNS_LABEL}.${NGROK_DOMAIN_SUFFIX}}"
+    export WORKTREE_DOMAIN
+    export PUBLIC_BASE_URL="https://$WORKTREE_DOMAIN"
+    export VITE_ALLOWED_HOSTS="$WORKTREE_DOMAIN"
+    export ALLOWED_ORIGINS="$ALLOWED_ORIGINS,$PUBLIC_BASE_URL"
+    export NGROK_API_URL="http://127.0.0.1:$NGROK_WEB_PORT/api/tunnels"
+
+    ensure_ngrok_domain_reserved
+
+    mkdir -p .context
+    local ngrok_base_config="$HOME/Library/Application Support/ngrok/ngrok.yml"
+    if [ ! -f "$ngrok_base_config" ]; then
+        ngrok_base_config="$HOME/.config/ngrok/ngrok.yml"
+    fi
+    if [ ! -f "$ngrok_base_config" ]; then
+        echo "❌ Could not find the ngrok config file after ngrok config check succeeded."
+        exit 1
+    fi
+
+    NGROK_CONFIG_FILE=".context/ngrok-${WORKSPACE_DNS_LABEL}.yml"
+    cat > "$NGROK_CONFIG_FILE" <<EOF
+version: "3"
+agent:
+  web_addr: 127.0.0.1:$NGROK_WEB_PORT
+EOF
+
+    echo "🌐 Starting public frontend tunnel: $PUBLIC_BASE_URL → localhost:$FRONTEND_PORT"
+    ngrok http "$FRONTEND_PORT" \
+        --config "$ngrok_base_config" \
+        --config "$NGROK_CONFIG_FILE" \
+        --domain "$WORKTREE_DOMAIN" \
+        --log stdout \
+        --log-format logfmt \
+        --log-level info > .context/ngrok.log 2>&1 &
+    NGROK_PID=$!
+    PIDS+=($NGROK_PID); NAMES+=("ngrok")
+
+    local tunnel_ready=false
+    for attempt in $(seq 1 45); do
+        if ! kill -0 "$NGROK_PID" 2>/dev/null; then
+            echo "❌ ngrok exited before the public tunnel became ready."
+            tail -60 .context/ngrok.log || true
+            echo ""
+            echo "Required ngrok billing state: Pay-as-you-go plan (\$20/month + usage) with reserved domain $WORKTREE_DOMAIN."
+            echo "Checkout: https://dashboard.ngrok.com/billing/choose-a-plan"
+            exit 1
+        fi
+        if python3 - "$NGROK_API_URL" "$FRONTEND_PORT" "$PUBLIC_BASE_URL" <<'PY'
+import json
+import sys
+import urllib.request
+
+api_url, frontend_port, public_url = sys.argv[1:4]
+try:
+    with urllib.request.urlopen(api_url, timeout=1) as response:
+        data = json.load(response)
+except Exception:
+    sys.exit(1)
+
+target = f":{frontend_port}"
+for tunnel in data.get("tunnels", []):
+    config = tunnel.get("config", {})
+    if tunnel.get("public_url") == public_url and str(config.get("addr", "")).endswith(target):
+        sys.exit(0)
+sys.exit(1)
+PY
+        then
+            tunnel_ready=true
+            break
+        fi
+        sleep 1
+    done
+
+    if ! $tunnel_ready; then
+        echo "❌ ngrok tunnel did not become ready for $PUBLIC_BASE_URL → :$FRONTEND_PORT"
+        echo "   API: $NGROK_API_URL"
+        tail -80 .context/ngrok.log || true
+        exit 1
+    fi
+
+    echo ""
+    echo "═══════════════════════════════════════════════════"
+    echo "  PUBLIC FRONTEND: $PUBLIC_BASE_URL"
+    echo "═══════════════════════════════════════════════════"
+    echo ""
+}
 
 write_services_manifest() {
     mkdir -p .context
@@ -517,11 +663,13 @@ data = {
         "mac_app": env_int("MAC_APP_PORT"),
         "sdk_metrics": env_int("SDK_METRICS_PORT"),
         "local_db": env_int("LOCAL_DB_PORT"),
+        "ngrok_api": env_int("NGROK_WEB_PORT"),
     },
     "urls": {
         "backend": os.environ.get("BACKEND_URL", ""),
         "backend_api": os.environ.get("BACKEND_API_URL", ""),
         "frontend": f"http://localhost:{os.environ.get('FRONTEND_PORT', '')}",
+        "public": os.environ.get("PUBLIC_BASE_URL", ""),
         "health": f"http://localhost:{os.environ.get('HEALTH_PORT', '')}",
         "sdk_metrics": f"http://localhost:{os.environ.get('SDK_METRICS_PORT', '')}",
     },
@@ -578,11 +726,15 @@ cleanup() {
     for pid in "${PIDS[@]}"; do
         kill_tree_hard "$pid"
     done
+    if [ -n "$NGROK_PID" ] && kill -0 "$NGROK_PID" 2>/dev/null; then
+        kill_tree_hard "$NGROK_PID"
+    fi
     if $DB_OWNED_BY_US && ! $USE_SYSTEM_PG; then
         docker stop "$DB_CONTAINER" 2>/dev/null || true
     fi
     SERVICE_STATUS=stopped
     write_services_manifest || true
+    [ -n "$NGROK_CONFIG_FILE" ] && rm -f "$NGROK_CONFIG_FILE"
     [ -n "$FAIL_DIR" ] && rm -rf "$FAIL_DIR"
     wait 2>/dev/null
 }
@@ -601,6 +753,12 @@ run_service() {
     fi
     return $code
 }
+
+# Public URL flow:
+#   CONDUCTOR_WORKSPACE_NAME -> rose-<workspace>.<suffix>
+#   ngrok reserved domain -> Vite dev server on FRONTEND_PORT
+#   backend exposes PUBLIC_BASE_URL for /api/test-payment/public-url
+start_public_tunnel
 
 # Launch each service
 if $BENCHMARK_MODE; then
@@ -628,6 +786,10 @@ PIDS+=($!); NAMES+=("agents")
 SERVICE_STATUS=running
 write_services_manifest
 echo "🧭 Service manifest: .context/services.json"
+echo "🌐 Public frontend: $PUBLIC_BASE_URL"
+
+echo "⏳ Verifying public tunnel smoke..."
+bash scripts/test-public-tunnel.sh
 
 # ── Post-launch: verify exactly one listener per service port ──
 # Wait for services to bind, then confirm no duplicate listeners.

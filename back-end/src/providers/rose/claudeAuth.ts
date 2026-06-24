@@ -19,6 +19,7 @@ import {
   RoseAuthError,
   RoseError,
   RoseInvalidRequest,
+  RosePaymentRequiredError,
   RoseRateLimitError,
   RoseServerError,
   RoseStallError,
@@ -27,8 +28,16 @@ import type { PoolSpec } from './pools';
 import { parseAnthropicSSE } from './streaming';
 import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from './cache';
 import { applyAnthropicToolConfig, transformMessagesForAnthropic } from './transforms';
-import { postAnthropicStream } from './transport';
+import { postAnthropicApiKeyStream, postAnthropicStream } from './transport';
 import type { CompletionMessage, ResponseFormat, RoseStreamChunk } from './types';
+
+/**
+ * How to authenticate the direct-Anthropic call. `oauth` uses a Claude Max
+ * compute token (Bearer, $0 to Rose); `apiKey` uses a plain `sk-ant-api03` key
+ * (x-api-key, billed) and serves as a funded default for any user when no
+ * compute token is available — see client.ts tier ordering.
+ */
+export type AnthropicAuth = { mode: 'oauth'; token: string } | { mode: 'apiKey'; key: string };
 
 const MAX_ATTEMPTS = 3;
 const BACKOFF_CAP_MS = 5_000;
@@ -177,7 +186,7 @@ interface ClaudeAuthOptions {
   toolChoice?: unknown;
   maxTokens?: number;
   temperature?: number;
-  claudeToken: string;
+  auth: AnthropicAuth;
   requestId: string;
   callSite?: string;
   idleTimeoutMs?: number;
@@ -199,20 +208,36 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
     maxTokens: opts.maxTokens,
     temperature: opts.temperature,
   });
-  const actualModel = `${opts.poolSpec.claudeAuthModel}-claude`;
+  // `-claude` marks the $0 OAuth path (used for cost detection downstream);
+  // `-anthropic` marks the billed direct-API-key path. Both keep the claude-*
+  // model name so "claude family" assertions still hold.
+  const actualModel =
+    opts.auth.mode === 'oauth'
+      ? `${opts.poolSpec.claudeAuthModel}-claude`
+      : `${opts.poolSpec.claudeAuthModel}-anthropic`;
+  const poolName = opts.auth.mode === 'oauth' ? 'claude-token' : 'anthropic-apikey';
 
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     let response;
     try {
-      response = await postAnthropicStream({
-        body,
-        claudeToken: opts.claudeToken,
-        requestId: opts.requestId,
-        callSite: opts.callSite,
-        abortSignal: opts.abortSignal,
-      });
+      response =
+        opts.auth.mode === 'oauth'
+          ? await postAnthropicStream({
+              body,
+              claudeToken: opts.auth.token,
+              requestId: opts.requestId,
+              callSite: opts.callSite,
+              abortSignal: opts.abortSignal,
+            })
+          : await postAnthropicApiKeyStream({
+              body,
+              apiKey: opts.auth.key,
+              requestId: opts.requestId,
+              callSite: opts.callSite,
+              abortSignal: opts.abortSignal,
+            });
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
       if (attempt < MAX_ATTEMPTS - 1) {
@@ -230,7 +255,7 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
       }
       yield* parseAnthropicSSE(response.body, {
         actualModel,
-        poolName: 'claude-token',
+        poolName,
         requestId: opts.requestId,
         idleTimeoutMs: opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
       });
@@ -249,6 +274,16 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
 
     if (status === 401 || status === 403) {
       throw new RoseAuthError(`Anthropic ${status}: ${errorBody.substring(0, 200)}`, status);
+    }
+
+    // 402 = out of credits/quota. Terminal for this credential (a retry won't
+    // help until it's topped up), so surface a distinct typed error the client
+    // uses to back the API key off — see ANTHROPIC_API_KEY cooldown in client.ts.
+    if (status === 402) {
+      throw new RosePaymentRequiredError(
+        `Anthropic 402 (out of credits): ${errorBody.substring(0, 200)}`,
+        status
+      );
     }
 
     if (status === 400) {

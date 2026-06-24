@@ -16,7 +16,6 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { Check, CreditCard, Loader2, ShoppingCart } from 'lucide-react';
-import { confirmTestPayment, fetchTestPaymentItems } from '../api';
 import {
   EMPTY_CARD_FORM,
   REQUIRED_ITEM_IDS,
@@ -24,6 +23,7 @@ import {
   TAX_LABEL,
   TEST_PAYMENT_MERCHANT_NAME,
 } from '../config';
+import { confirmTestPayment, fetchTestPaymentItems } from '../hooks';
 import type { TestPaymentCardForm, TestPaymentConfirmation, TestPaymentItem } from '../types';
 
 function formatCents(value: number): string {

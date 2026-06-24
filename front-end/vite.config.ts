@@ -7,7 +7,12 @@ export default defineConfig(() => ({
   server: {
     host: '::',
     port: parseInt(process.env.VITE_DEV_PORT || '8080'),
-    allowedHosts: ['.ngrok-free.dev', '.ngrok.app', '.ngrok.io'],
+    allowedHosts: process.env.VITE_ALLOWED_HOSTS?.split(',').filter(Boolean),
+    hmr: process.env.VITE_ALLOWED_HOSTS
+      ? {
+          clientPort: 443,
+        }
+      : undefined,
     proxy: {
       '/api': {
         target: process.env.VITE_BACKEND_API_URL || 'http://localhost:3001',

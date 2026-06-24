@@ -16,14 +16,14 @@ Model contract (P1):
         waterfall  = google/gemini-3-flash-preview -> moonshotai/kimi-k2.5
 
     rose-1-ultra:
-        claudeAuth = claude-opus-4-7
+        claudeAuth = claude-opus-4-8
         gptAuth    = gpt-5.5
-        waterfall  = anthropic/claude-opus-4.7 -> google/gemini-3.1-pro-preview
+        waterfall  = anthropic/claude-opus-4.8 -> google/gemini-3.1-pro-preview
 
     rose-1-browser-use:
-        claudeAuth = claude-opus-4-7
+        claudeAuth = claude-opus-4-8
         gptAuth    = gpt-5.5
-        waterfall  = anthropic/claude-opus-4.7 -> openai/gpt-5.4
+        waterfall  = anthropic/claude-opus-4.8 -> openai/gpt-5.4
 
 Note: today's research/.../claude-token.ts hardcodes claudeAuth to
 claude-sonnet-4-6 for *both* pools. The ultra->opus mapping below is a
@@ -80,10 +80,10 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
     ),
     "rose-1-ultra": PoolSpec(
         name="rose-1-ultra",
-        claude_auth_model="claude-opus-4-7",
+        claude_auth_model="claude-opus-4-8",
         gpt_auth_model="gpt-5.5",
         waterfall=(
-            "anthropic/claude-opus-4.7",
+            "anthropic/claude-opus-4.8",
             "google/gemini-3.1-pro-preview",
         ),
     ),
@@ -92,10 +92,10 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
     # for AVAILABLE_ACTIONS) and the response extractor (tool_use -> UnifiedAction).
     "rose-1-browser-use": PoolSpec(
         name="rose-1-browser-use",
-        claude_auth_model="claude-opus-4-7",
+        claude_auth_model="claude-opus-4-8",
         gpt_auth_model="gpt-5.5",
         waterfall=(
-            "anthropic/claude-opus-4.7",
+            "anthropic/claude-opus-4.8",
             "openai/gpt-5.4",
         ),
     ),

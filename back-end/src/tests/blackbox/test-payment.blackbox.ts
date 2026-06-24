@@ -1,5 +1,4 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
 /**
  * Black-box tests for the dev-only /api/test-payment benchmark fixture.
  *
@@ -14,6 +13,12 @@ import { confirmTestPayment } from '../../domains/test-payment/service';
 import { stripe } from '../../providers/stripe';
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
+const writeLine = (message = ''): void => {
+  process.stdout.write(`${message}\n`);
+};
+const writeErrorLine = (message: string): void => {
+  process.stderr.write(`${message}\n`);
+};
 
 const ErrorResponse = z.object({ error: z.string() });
 const ItemsResponse = z.object({
@@ -111,6 +116,20 @@ async function withFakeStripe<T>(
 
 const tests: Array<[string, () => Promise<void>]> = [
   [
+    'public URL reports PUBLIC_BASE_URL when configured',
+    async () => {
+      const expectedUrl = process.env.PUBLIC_BASE_URL;
+      if (!expectedUrl) return;
+
+      const response = await request('/api/test-payment/public-url');
+      assertStatus(response.status, 200, response.data);
+      assert(
+        JSON.stringify(response.data) === JSON.stringify({ url: expectedUrl }),
+        `Expected public URL ${expectedUrl}, got ${JSON.stringify(response.data)}`
+      );
+    },
+  ],
+  [
     'items exposes five benchmark products with images and prices',
     async () => {
       const response = await request('/api/test-payment/items');
@@ -180,7 +199,10 @@ const tests: Array<[string, () => Promise<void>]> = [
         });
 
         assert(result.status === 'succeeded', 'expected payment confirmation to succeed');
-        assert(calls.paymentMethods.length === 0, 'AgentCard sandbox PAN should not be raw-tokenized');
+        assert(
+          calls.paymentMethods.length === 0,
+          'AgentCard sandbox PAN should not be raw-tokenized'
+        );
         assert(calls.paymentIntents.length === 1, 'expected one Stripe payment intent');
         const paymentIntent = JSON.parse(calls.paymentIntents[0]) as {
           payment_method?: string;
@@ -200,19 +222,19 @@ const tests: Array<[string, () => Promise<void>]> = [
 ];
 
 async function main(): Promise<void> {
-  console.log(`Running test-payment black-box tests (${tests.length} tests)...`);
+  writeLine(`Running test-payment black-box tests (${tests.length} tests)...`);
   const results: TestResult[] = [];
   for (const [name, fn] of tests) results.push(await runTest(name, fn));
   const passed = results.filter((result) => result.passed).length;
   for (const result of results) {
-    console.log(`${result.passed ? 'PASS' : 'FAIL'} ${result.name} (${result.duration}ms)`);
-    if (!result.passed) console.log(`  ${result.error}`);
+    writeLine(`${result.passed ? 'PASS' : 'FAIL'} ${result.name} (${result.duration}ms)`);
+    if (!result.passed) writeLine(`  ${result.error}`);
   }
-  console.log(`\nTest-payment black-box tests: ${passed}/${results.length} passed`);
+  writeLine(`\nTest-payment black-box tests: ${passed}/${results.length} passed`);
   if (passed !== results.length) process.exit(1);
 }
 
 main().catch((error) => {
-  console.error(error instanceof Error ? error.stack || error.message : String(error));
+  writeErrorLine(error instanceof Error ? error.stack || error.message : String(error));
   process.exit(1);
 });

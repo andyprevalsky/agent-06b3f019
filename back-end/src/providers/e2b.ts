@@ -8,6 +8,7 @@ import {
   fetchClaudeCodeCredentialsWithMeta,
   type ClaudeCodeCredentialResult,
 } from './claudeCredentials';
+import { isAnthropicApiKeyOnCooldown } from './computeCredentials';
 import {
   fetchGptCodeCredentialsWithMeta,
   type GptCodeCredentialEnvelopeResult,
@@ -66,6 +67,45 @@ function workDirForGithubRepo(githubRepoUrl?: string): string {
  * @param githubRepoUrl - Optional GitHub repo URL to clone before starting Claude
  * @returns Session info including WebSocket URL for terminal streaming
  */
+/**
+ * Decide which auth env vars the Claude Code CLI sandbox should receive.
+ *
+ * Preference order (mirrors the Rose completions fallback so the code agent
+ * stays usable everywhere an OAuth token would be):
+ *   1. A synced/pool Claude OAuth credential → CLAUDE_CODE_CREDENTIALS (+ token).
+ *   2. The funded ANTHROPIC_API_KEY (billed) — Claude Code CLI reads it natively
+ *      — when no OAuth credential is available and the shared key isn't on its
+ *      out-of-credits cooldown.
+ *   3. Otherwise throw — nothing usable.
+ *
+ * Pure + exported so the selection is unit-testable without spinning an E2B
+ * sandbox (the real session path isn't otherwise reachable in tests).
+ */
+export function resolveClaudeCodeAuthEnvs(
+  credentialMeta: ClaudeCodeCredentialResult | null,
+  anthropicApiKey: string | undefined,
+  anthropicApiKeyOnCooldown: boolean
+): Record<string, string> {
+  const envs: Record<string, string> = {};
+  if (credentialMeta) {
+    if (credentialMeta.credentials) {
+      envs.CLAUDE_CODE_CREDENTIALS = credentialMeta.credentials;
+    }
+    if (credentialMeta.credentialMode === 'oauth_token' && credentialMeta.accessToken) {
+      envs.CLAUDE_CODE_OAUTH_TOKEN = credentialMeta.accessToken;
+    }
+    return envs;
+  }
+  if (anthropicApiKey && !anthropicApiKeyOnCooldown) {
+    envs.ANTHROPIC_API_KEY = anthropicApiKey;
+    return envs;
+  }
+  throw new Error(
+    'No Claude Code credentials available: no synced user credentials, no available pool tokens, ' +
+      'and no usable ANTHROPIC_API_KEY fallback (unset or on cooldown)'
+  );
+}
+
 export async function createClaudeCodeSession(
   agentId: string,
   goal: string,
@@ -95,23 +135,20 @@ export async function createClaudeCodeSession(
   let credentialMeta: ClaudeCodeCredentialResult | null = null;
   if (userId) {
     credentialMeta = await fetchClaudeCodeCredentialsWithMeta(userId);
-    if (credentialMeta) {
-      if (credentialMeta.credentials) {
-        envs.CLAUDE_CODE_CREDENTIALS = credentialMeta.credentials;
-      }
-      if (credentialMeta.credentialMode === 'oauth_token' && credentialMeta.accessToken) {
-        envs.CLAUDE_CODE_OAUTH_TOKEN = credentialMeta.accessToken;
-      }
-      log.info(
-        `Using ${credentialMeta.source} Claude Code credentials for agent ${agentId} (integration ${credentialMeta.poolTokenId ?? 'user-owned'}, mode ${credentialMeta.credentialMode})`
-      );
-    }
   }
 
-  if (!credentialMeta) {
-    throw new Error(
-      'No Claude Code OAuth credentials available: no synced user credentials and no available pool tokens (all rate-limited, invalid, or none configured)'
+  const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
+  // Only consult the shared cooldown when we'd actually need the fallback.
+  const apiKeyOnCooldown =
+    !credentialMeta && anthropicApiKey ? await isAnthropicApiKeyOnCooldown() : false;
+  Object.assign(envs, resolveClaudeCodeAuthEnvs(credentialMeta, anthropicApiKey, apiKeyOnCooldown));
+
+  if (credentialMeta) {
+    log.info(
+      `Using ${credentialMeta.source} Claude Code credentials for agent ${agentId} (integration ${credentialMeta.poolTokenId ?? 'user-owned'}, mode ${credentialMeta.credentialMode})`
     );
+  } else {
+    log.info(`Using ANTHROPIC_API_KEY funded fallback for Claude Code agent ${agentId}`);
   }
 
   // Add GitHub config if repo specified

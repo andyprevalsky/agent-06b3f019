@@ -27,6 +27,7 @@ import time
 import uuid
 from typing import Any, AsyncIterator, Dict, List, Optional, Type, cast
 
+import httpx
 import structlog
 from pydantic import BaseModel
 
@@ -37,12 +38,13 @@ from providers.rose.browser_use import (
     normalize_browser_use_response,
     normalize_browser_use_tool_call,
 )
-from providers.rose.claude_auth import claude_auth_complete
+from providers.rose.claude_auth import anthropic_api_key_complete, claude_auth_complete
 from providers.rose.errors import (
     RoseAuthError,
     RoseDeadlineError,
     RoseError,
     RoseInvalidRequest,
+    RosePaymentRequiredError,
     RoseRateLimitError,
     RoseServerError,
     RoseStallError,
@@ -95,6 +97,7 @@ _FALL_THROUGH_ERRORS = (
     RoseServerError,
     RoseAuthError,
     RoseRateLimitError,
+    RosePaymentRequiredError,
 )
 
 # Stall-retry budget for direct-auth attempts. Empty: the new 45s TTFT
@@ -117,6 +120,73 @@ def _is_synthetic_output_toolset(tools: Optional[List[Dict[str, Any]]]) -> bool:
 
 class _FallThrough(Exception):
     """Internal signal — claudeAuth failed cleanly before emitting content."""
+
+
+# ── Shared ANTHROPIC_API_KEY cooldown ──────────────────────────────────────
+# The funded ANTHROPIC_API_KEY default is one global credential. Agents have no
+# DB, so its out-of-credits backoff is read/written through the backend (the
+# same DB row the backend chat path uses) — one shared cooldown across all
+# workers + workflows, no hammering. A short in-memory cache keeps the LLM hot
+# path off the backend on the common (clear) case.
+_ANTHROPIC_COOLDOWN_RECHECK_S = 15.0
+_anthropic_cooldown_skip_until = 0.0  # time.monotonic() < this ⇒ locally known cooled
+_anthropic_cooldown_last_check = 0.0
+
+
+def _reset_anthropic_api_key_cooldown_cache() -> None:
+    """Test-only: clear the in-memory cooldown cache between cases."""
+    global _anthropic_cooldown_skip_until, _anthropic_cooldown_last_check
+    _anthropic_cooldown_skip_until = 0.0
+    _anthropic_cooldown_last_check = 0.0
+
+
+async def _anthropic_api_key_on_cooldown() -> bool:
+    """Whether the shared funded key is backed off (in-memory fast path, then
+    a throttled backend read). Failures are treated as 'not on cooldown' so a
+    transient backend blip never disables the fallback."""
+    global _anthropic_cooldown_skip_until, _anthropic_cooldown_last_check
+    now = time.monotonic()
+    if now < _anthropic_cooldown_skip_until:
+        return True
+    if now - _anthropic_cooldown_last_check < _ANTHROPIC_COOLDOWN_RECHECK_S:
+        return False
+    _anthropic_cooldown_last_check = now
+    cfg = load_config()
+    base = (cfg.backend.api_url or "").rstrip("/")
+    if not base:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(
+                f"{base}/api/integrations/compute-code/anthropic-key/cooldown",
+                headers={"X-API-Key": cfg.backend.api_key or ""},
+            )
+            if resp.status_code == 200 and resp.json().get("onCooldown") is True:
+                _anthropic_cooldown_skip_until = now + _ANTHROPIC_COOLDOWN_RECHECK_S
+                return True
+    except Exception:
+        return False
+    return False
+
+
+async def _mark_anthropic_api_key_cooldown(reason: str) -> None:
+    """Back the shared funded key off (in-memory + backend DB) so no other
+    worker/workflow retries it until it recovers."""
+    global _anthropic_cooldown_skip_until
+    _anthropic_cooldown_skip_until = time.monotonic() + _ANTHROPIC_COOLDOWN_RECHECK_S
+    cfg = load_config()
+    base = (cfg.backend.api_url or "").rstrip("/")
+    if not base:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(
+                f"{base}/api/integrations/compute-code/token/rate-limited",
+                headers={"X-API-Key": cfg.backend.api_key or "", "Content-Type": "application/json"},
+                json={"type": "anthropic", "source": "pool", "failureReason": reason},
+            )
+    except Exception:
+        logger.warning("rose.anthropic_apikey.cooldown_mark_failed", reason=reason)
 
 
 def _single_attempt_auth(auth: ComputeAuthContext) -> ComputeAuthContext:
@@ -809,6 +879,66 @@ class RoseClient:
                 claude_token_error = direct_token_errors.get("claude", claude_token_error)
                 gpt_token_error = direct_token_errors.get("gpt", gpt_token_error)
 
+            # ── Anthropic API-key funded default ───────────────────────────
+            # After compute tokens (claude/gpt) are exhausted and before the
+            # OpenRouter waterfall: if a funded ANTHROPIC_API_KEY is configured
+            # and not on the shared cooldown, try it (billed, `-anthropic`
+            # suffix so cost is recorded). On out-of-credits/bad-key before
+            # first content, back it off (shared DB cooldown) and fall through.
+            anthropic_api_key = (load_config().anthropic.api_key or "").strip()
+            if anthropic_api_key and not await _anthropic_api_key_on_cooldown():
+                api_yielded_any = False
+                try:
+                    async for chunk in _guarded(
+                        _try_anthropic_api_key(
+                            pool_spec=pool_spec,
+                            messages=messages,
+                            api_key=anthropic_api_key,
+                            tools=claude_auth_tools,
+                            tool_choice=claude_auth_tool_choice,
+                            response_format=None if claude_auth_tools else openrouter_response_format,
+                            max_tokens=max_tokens,
+                            skip_cache_write=skip_cache_write,
+                            thinking=thinking,
+                            effort=effort,
+                            request_id=rid,
+                            agent_id=agent_id,
+                            call_site=call_site,
+                            ttft_timeout_s=ttft_timeout_s,
+                            idle_timeout_s=idle_timeout_s,
+                        )
+                    ):
+                        chunk = _with_timing_if_done(chunk)
+                        api_yielded_any = True
+                        if chunk.kind == "metadata" and chunk.data.get("actual_model"):
+                            _seen_actual_model = chunk.data["actual_model"]
+                        elif chunk.kind == "usage":
+                            _emit_llm_cache(chunk.data)
+                        _record_dump_chunk(chunk)
+                        yield chunk
+                    logger.info(
+                        "rose.complete.anthropic_apikey.done",
+                        request_id=rid,
+                        agent_id=agent_id,
+                        call_site=call_site,
+                        elapsed_s=round(time.monotonic() - started, 3),
+                    )
+                    _finalize_dump()
+                    return
+                except (_FallThrough, RoseStallError) as exc:
+                    if api_yielded_any:
+                        raise
+                    cause = exc.__cause__ if isinstance(exc, _FallThrough) else exc
+                    if isinstance(cause, (RosePaymentRequiredError, RoseAuthError)):
+                        await _mark_anthropic_api_key_cooldown(type(cause).__name__)
+                    logger.info(
+                        "rose.complete.anthropic_apikey.fall_through",
+                        request_id=rid,
+                        agent_id=agent_id,
+                        call_site=call_site,
+                        reason=type(cause).__name__ if cause else "unknown",
+                    )
+
             async for chunk in _guarded(
                 waterfall_complete(
                     pool_spec=pool_spec,
@@ -891,7 +1021,7 @@ class RoseClient:
 
             {
                 "action":        UnifiedAction,
-                "actual_model":  "anthropic/claude-opus-4.7" | ...,
+                "actual_model":  "anthropic/claude-opus-4.8" | ...,
                 "pool_name":     "rose-1-browser-use",
                 "request_id":    str,
                 "usage": {
@@ -1175,6 +1305,61 @@ async def _try_gpt_auth(
         temperature=temperature,
         effort=effort,
         auth=auth,
+        request_id=request_id,
+        agent_id=agent_id,
+        call_site=call_site,
+        ttft_timeout_s=ttft_timeout_s,
+        idle_timeout_s=idle_timeout_s,
+    )
+    try:
+        async for chunk in gen:
+            if chunk.kind == "metadata" and buffered is None and not yielded_any:
+                buffered = chunk
+                continue
+            if buffered is not None:
+                yield buffered
+                buffered = None
+            yield chunk
+            yielded_any = True
+    except _FALL_THROUGH_ERRORS as exc:
+        if not yielded_any:
+            raise _FallThrough() from exc
+        raise
+
+
+async def _try_anthropic_api_key(
+    *,
+    pool_spec: Any,
+    messages: List[Dict[str, Any]],
+    api_key: str,
+    tools: Optional[List[Dict[str, Any]]],
+    tool_choice: Any,
+    response_format: Optional[Dict[str, Any]],
+    max_tokens: Optional[int],
+    skip_cache_write: bool,
+    request_id: str,
+    agent_id: Optional[str],
+    call_site: Optional[str],
+    thinking: Optional[Dict[str, Any]] = None,
+    effort: Optional[str] = None,
+    ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
+    idle_timeout_s: Optional[float] = _DEFAULT_IDLE_TIMEOUT_S,
+) -> AsyncIterator[StreamChunk]:
+    """Yield from the funded Anthropic API-key path, buffering metadata so a
+    pre-content failure raises `_FallThrough` (caller falls to the waterfall)."""
+    buffered: Optional[StreamChunk] = None
+    yielded_any = False
+    gen = anthropic_api_key_complete(
+        pool_spec=pool_spec,
+        messages=messages,
+        api_key=api_key,
+        tools=tools,
+        tool_choice=tool_choice,
+        response_format=response_format,
+        max_tokens=max_tokens,
+        skip_cache_write=skip_cache_write,
+        thinking=thinking,
+        effort=effort,
         request_id=request_id,
         agent_id=agent_id,
         call_site=call_site,

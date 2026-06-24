@@ -51,6 +51,17 @@ router.get(
   })
 );
 
+/** GET /api/integrations/compute-code/anthropic-key/cooldown
+ *  Whether the shared ANTHROPIC_API_KEY funded default is currently backed off.
+ *  Read by the agents Rose client (which has no DB) so it can skip the tier. */
+router.get(
+  '/compute-code/anthropic-key/cooldown',
+  authenticate,
+  asyncHandler(async (_req: AuthRequest, res: Response) => {
+    return res.json(await service.getAnthropicApiKeyCooldown());
+  })
+);
+
 /** POST /api/integrations/compute-code/token/rate-limited */
 router.post(
   '/compute-code/token/rate-limited',

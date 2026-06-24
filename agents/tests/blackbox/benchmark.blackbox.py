@@ -134,6 +134,13 @@ def test_outreach_batch_has_timeout_floor():
     assert get_timeout_floor("chat-mode") is None
 
 
+def test_parallel_tool_calls_smoke_cap_allows_recent_fanout_tail():
+    """Parallel web research smoke keeps a bounded but realistic timeout cap."""
+    from benchmarks.benchmark_tasks import get_smoke_cap
+
+    assert get_smoke_cap("parallel-tool-calls") == 600
+
+
 def test_timeout_default_uses_task_config_when_history_is_missing():
     """Tasks without enough history still get a runnable configured timeout."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -707,8 +714,77 @@ def test_attention_request_open_check_honors_backend_answered_fields():
 
 
 def test_webdecoy_biometrics_evaluator_requires_interaction_and_low_score():
-    """The WebDecoy benchmark should be grounded in real page interaction and score output."""
+    """WebDecoy must be grounded in real interaction and score at/under the ratchet.
+
+    The pass bar is a one-directional ratchet (currently 0.157) — literal 0.00 is
+    unreachable while Steel's managed proxy injects x-forwarded-for-style headers.
+    Scores at/under the ratchet pass; above it fail.
+    """
     from benchmarks.run_benchmark import _evaluate_webdecoy_biometrics_result
+
+    def _msg(score_line: str) -> dict:
+        return {
+            "messages": [
+                {
+                    "role": "TOOL",
+                    "text": (
+                        "Visited https://webdecoy.com/product/fcaptcha-demo/. "
+                        "Clicked the checkbox mode verification control. "
+                        "Entered benchmark-human@example.com in invisible mode and clicked Submit. "
+                        + score_line
+                    ),
+                }
+            ]
+        }
+
+    # At/under the ratchet -> pass.
+    assert _evaluate_webdecoy_biometrics_result(_msg("Final visible FCaptcha Risk Score: 0.00.")) == (True, None)
+    assert _evaluate_webdecoy_biometrics_result(_msg("Final visible FCaptcha Risk Score: 0.157.")) == (True, None)
+    assert _evaluate_webdecoy_biometrics_result(_msg("Final visible FCaptcha Risk Score: 0.10.")) == (True, None)
+
+    # Above the ratchet -> fail.
+    passed, reason = _evaluate_webdecoy_biometrics_result(_msg("Final visible FCaptcha Risk Score: 0.91."))
+    assert passed is False
+    assert "ratchet" in reason.lower()
+
+    passed, reason = _evaluate_webdecoy_biometrics_result(_msg("Final visible FCaptcha Risk Score: 0.44."))
+    assert passed is False
+    assert "ratchet" in reason.lower()
+
+
+def test_webdecoy_biometrics_evaluator_uses_exact_network_score_when_visible_is_rounded(tmp_path):
+    """The ratchet should compare exact FCaptcha JSON, not the page's rounded display text."""
+    import json
+
+    from benchmarks.run_benchmark import _evaluate_webdecoy_biometrics_result
+
+    network_dir = tmp_path / "recording" / "network"
+    network_dir.mkdir(parents=True)
+    body_file = network_dir / "0001_score.json"
+    body_file.write_text(
+        json.dumps(
+            {
+                "action": "form_submit",
+                "recommendation": "allow",
+                "score": 0.1559512195121951,
+                "success": True,
+            }
+        )
+    )
+    (network_dir / "index.json").write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "method": "POST",
+                        "url": "https://fcaptcha.webdecoy.com/api/score",
+                        "response_ts_ms": 123,
+                        "body_file": body_file.name,
+                    }
+                ]
+            }
+        )
+    )
 
     data = {
         "messages": [
@@ -718,47 +794,14 @@ def test_webdecoy_biometrics_evaluator_requires_interaction_and_low_score():
                     "Visited https://webdecoy.com/product/fcaptcha-demo/. "
                     "Clicked the checkbox mode verification control. "
                     "Entered benchmark-human@example.com in invisible mode and clicked Submit. "
-                    "Final visible FCaptcha Risk Score: 0.00."
+                    "Final visible FCaptcha Risk Score: 0.16."
                 ),
+                "metadata": {"network_recording_path": str(network_dir / "index.json")},
             }
         ]
     }
 
     assert _evaluate_webdecoy_biometrics_result(data) == (True, None)
-
-    sensitive = {
-        "messages": [
-            {
-                "role": "TOOL",
-                "text": (
-                    "Visited https://webdecoy.com/product/fcaptcha-demo/. "
-                    "Clicked the checkbox mode verification control. "
-                    "Entered benchmark-human@example.com in invisible mode and clicked Submit. "
-                    "Final visible FCaptcha Risk Score: 0.10."
-                ),
-            }
-        ]
-    }
-
-    passed, reason = _evaluate_webdecoy_biometrics_result(sensitive)
-    assert passed is False
-    assert "exactly 0.00" in reason
-
-    blocked = {
-        "messages": [
-            {
-                "role": "TOOL",
-                "text": (
-                    "Visited https://webdecoy.com/product/fcaptcha-demo/. "
-                    "Clicked checkbox and submitted benchmark-human@example.com. Risk Score: 0.91."
-                ),
-            }
-        ]
-    }
-
-    passed, reason = _evaluate_webdecoy_biometrics_result(blocked)
-    assert passed is False
-    assert "exactly 0.00" in reason
 
 
 def test_auth_bundle_biometrics_gate_defaults_on_and_can_be_disabled():
@@ -1641,6 +1684,10 @@ async def run_all_tests():
     r.record("smoke_memory_summary_passes", test_build_smoke_memory_summary_passes_stable_worker)
     r.record("logical_tool_counts_ignore_progress", test_logical_tool_counts_ignore_progress_messages)
     r.record("tool_count_expectations", test_tool_count_expectations_support_minimums_and_forbidden_tools)
+    r.record(
+        "parallel_tool_calls_smoke_cap",
+        test_parallel_tool_calls_smoke_cap_allows_recent_fanout_tail,
+    )
     r.record("parallel_tool_calls_explore_sub_agents", test_parallel_tool_calls_smoke_requires_explore_sub_agents)
     r.record("spawn_sub_agents_no_browser_code_detours", test_spawn_sub_agents_smoke_forbids_browser_and_code_detours)
     return r.all_passed

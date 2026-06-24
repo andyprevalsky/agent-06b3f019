@@ -44,6 +44,19 @@ export class RoseServerError extends RoseError {
   }
 }
 
+/**
+ * HTTP 402 — the credential is out of credits/quota (e.g. an exhausted
+ * Anthropic API key). Distinct from rate-limit (429): it won't clear on a short
+ * retry, so callers should back the credential off for a while rather than
+ * hammer it. Falls through like the other typed errors.
+ */
+export class RosePaymentRequiredError extends RoseError {
+  constructor(message: string, status?: number) {
+    super(message, status);
+    this.name = 'RosePaymentRequiredError';
+  }
+}
+
 export class RoseStallError extends RoseError {
   constructor(message: string) {
     super(message);
@@ -82,6 +95,7 @@ export function isFallThroughError(err: unknown): boolean {
     err instanceof RoseStallError ||
     err instanceof RoseServerError ||
     err instanceof RoseAuthError ||
-    err instanceof RoseRateLimitError
+    err instanceof RoseRateLimitError ||
+    err instanceof RosePaymentRequiredError
   );
 }

@@ -68,6 +68,67 @@ ESTIMATE_SAFETY_MULTIPLIER = 1.4
 MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3
 
 
+def _assistant_declared_explore_spawn(msg: Dict[str, Any]) -> bool:
+    metadata = msg.get("metadata") or {}
+    tool_calls = metadata.get("tool_calls")
+    if not isinstance(tool_calls, list):
+        return False
+    return any(
+        isinstance(call, dict)
+        and call.get("tool") == "spawn_agent"
+        and call.get("type") == "explore"
+        and isinstance(call.get("tool_call_id"), str)
+        for call in tool_calls
+    )
+
+
+def _finished_tool_call_ids(context: List[Dict[str, Any]]) -> set[str]:
+    finished: set[str] = set()
+    for msg in context:
+        if msg.get("role") != "TOOL":
+            continue
+        metadata = msg.get("metadata") or {}
+        if metadata.get("toolStatus") != "FINISHED":
+            continue
+        tool_call_id = metadata.get("toolCallId")
+        if isinstance(tool_call_id, str):
+            finished.add(tool_call_id)
+    return finished
+
+
+def _completed_explore_spawn_count(context: List[Dict[str, Any]]) -> int:
+    finished = _finished_tool_call_ids(context)
+    count = 0
+    for msg in context:
+        if msg.get("role") != "ASSISTANT" or not _assistant_declared_explore_spawn(msg):
+            continue
+        metadata = msg.get("metadata") or {}
+        for call in metadata.get("tool_calls") or []:
+            if (
+                isinstance(call, dict)
+                and call.get("tool") == "spawn_agent"
+                and call.get("type") == "explore"
+                and call.get("tool_call_id") in finished
+            ):
+                count += 1
+    return count
+
+
+def _is_redundant_synthesis_delegate(
+    tool_name: str,
+    tool_args: Dict[str, Any],
+    context: List[Dict[str, Any]],
+) -> bool:
+    """Detect attempts to outsource final synthesis after explore results exist."""
+    if tool_name != "spawn_agent" or tool_args.get("type") != "general_purpose":
+        return False
+    if _completed_explore_spawn_count(context) < 2:
+        return False
+
+    goal = str(tool_args.get("goal") or "").lower()
+    return any(term in goal for term in ("synthes", "summar", "compare", "comparison", "table"))
+
+
 @traced("run_agent")
 async def run_agent(  # noqa: C901
     # Identity
@@ -942,6 +1003,37 @@ async def run_agent(  # noqa: C901
 
             async def execute_single_tool(tool_name: str, tool_args: dict, tool_call_id: str):
                 """Execute a single tool and return result with metadata."""
+                if (
+                    not is_plan_loop
+                    and _is_redundant_synthesis_delegate(tool_name, tool_args, context)
+                ):
+                    result_message = (
+                        "Rejected redundant general-purpose synthesis delegation after completed "
+                        "explore-agent results. Complete the synthesis in this agent."
+                    )
+                    logger.warning(
+                        "Rejected redundant synthesis delegation",
+                        agent_id=agent_id,
+                        tool_call_id=tool_call_id,
+                    )
+                    if post_message:
+                        await post_message(
+                            f"Error: {result_message}",
+                            "TOOL",
+                            {
+                                "toolCallId": tool_call_id,
+                                "toolName": tool_name,
+                                "toolStatus": "ERROR",
+                                "error": True,
+                            },
+                        )
+                    return {
+                        "tool_name": tool_name,
+                        "tool_call_id": tool_call_id,
+                        "result": {"error": True, "message": result_message},
+                        "error": None,
+                    }
+
                 try:
                     async with span(
                         "tool_dispatch",

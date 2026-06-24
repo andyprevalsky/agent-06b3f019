@@ -7,7 +7,7 @@ import { startAgentWorkflow, getTemporalClient } from '../../providers/temporal'
 import { getModelPricing, dollarsToMicrodollars } from '../../providers/modelPricing';
 import { getX402Endpoints } from '../../providers/x402Endpoints';
 import { handleChatMessage, broadcastAgentModeStarted } from '../../providers/chat';
-import { getGeoFromIP, DEFAULT_GEOLOCATION } from '../../providers/geoip';
+import { getGeoFromIP, geoFromDeliveryAddress, DEFAULT_GEOLOCATION } from '../../providers/geoip';
 import { cleanupAgentSessions } from '../../providers/agentCleanup';
 import { createGithubRepo } from '../../providers/github';
 import { createLogger } from '../../providers/logger';
@@ -38,11 +38,18 @@ export function resolvePromptSecrets(text: string): string {
 /** Fetch model pricing and resolve geolocation. Sub-agents inherit their
  *  parent's stored proxy fields rather than geolocating the worker IP, which
  *  would otherwise stamp every sub-agent with the Fly.io worker's location.
+ *
+ *  Root agents prefer the client IP. When the "client" is a server (no IP, e.g.
+ *  SMS/scheduled runs) or the IP can't be resolved, fall back to the user's
+ *  delivery address city/state so the proxy follows where the user lives; only
+ *  if there's no usable address do we use DEFAULT_GEOLOCATION.
+ *
  *  Exported so agentBatchService can reuse the exact same path. */
 export async function resolveCreateMetadata(
   model: string,
   clientIP: string | null,
-  parentAgentId: string | null
+  parentAgentId: string | null,
+  userId: string
 ) {
   const pricing = await getModelPricing(model);
   let tokenInPriceMicrodollars: number | null = null;
@@ -63,8 +70,16 @@ export async function resolveCreateMetadata(
         ...(parentProxy.proxyCity !== null ? { city: parentProxy.proxyCity } : {}),
       };
     }
-  } else if (clientIP !== null) {
-    const geo = await getGeoFromIP(clientIP);
+  } else {
+    let geo = clientIP !== null ? await getGeoFromIP(clientIP) : null;
+    if (geo === null || geo === undefined) {
+      // No client IP (server-originated) or unresolved — fall back to the
+      // user's delivery address before the hard-coded default.
+      const address = await repo.findUserDeliveryAddress(userId);
+      if (address !== null && address !== undefined) {
+        geo = geoFromDeliveryAddress(address);
+      }
+    }
     if (geo !== null && geo !== undefined) {
       proxyGeo = geo;
     }
@@ -197,7 +212,7 @@ export async function createAgent(
   const verifier = { type: 'FLOAT_LLM_JUDGE' as const };
   const isSubAgent = body.parent_agent_id !== undefined;
   const { tokenInPriceMicrodollars, tokenOutPriceMicrodollars, proxyGeo } =
-    await resolveCreateMetadata(body.model, clientIP, body.parent_agent_id ?? null);
+    await resolveCreateMetadata(body.model, clientIP, body.parent_agent_id ?? null, userId);
   const agentId = body.agent_id ?? randomUUID();
   // Workflow ID === agent ID by convention (see providers/temporal.ts:88).
   // For sub-agents and direct (plan/execute) root agents, the workflow always

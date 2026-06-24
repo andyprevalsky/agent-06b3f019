@@ -63,6 +63,7 @@ import crypto from 'crypto';
 import { execFileSync } from 'child_process';
 import jwt from 'jsonwebtoken';
 import { prisma } from '../../providers/database';
+import { resolveClaudeCodeAuthEnvs } from '../../providers/e2b';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -392,6 +393,54 @@ async function seedClaudeIntegration(): Promise<{ integrationId: string; userId:
 }
 
 // ==================== POST /create ====================
+
+// ── resolveClaudeCodeAuthEnvs (pure auth-env selection) ──────────────────────
+const OAUTH_META = {
+  credentials: 'encrypted-envelope',
+  credentialMode: 'oauth_token',
+  accessToken: 'sk-ant-oat01-xxx',
+  source: 'pool',
+  poolTokenId: 'p1',
+} as unknown as Parameters<typeof resolveClaudeCodeAuthEnvs>[0];
+
+function testResolveAuthEnvs_oauthPreferred() {
+  const envs = resolveClaudeCodeAuthEnvs(OAUTH_META, 'sk-ant-api03-key', false);
+  assert(
+    envs.CLAUDE_CODE_OAUTH_TOKEN === 'sk-ant-oat01-xxx',
+    'OAuth token set when credential present'
+  );
+  assert(envs.CLAUDE_CODE_CREDENTIALS === 'encrypted-envelope', 'credentials envelope set');
+  assert(envs.ANTHROPIC_API_KEY === undefined, 'api-key NOT used when OAuth credential present');
+}
+
+function testResolveAuthEnvs_apiKeyFallback() {
+  const envs = resolveClaudeCodeAuthEnvs(null, 'sk-ant-api03-key', false);
+  assert(
+    envs.ANTHROPIC_API_KEY === 'sk-ant-api03-key',
+    'falls back to api-key when no OAuth credential'
+  );
+  assert(envs.CLAUDE_CODE_OAUTH_TOKEN === undefined, 'no OAuth token in fallback');
+}
+
+function testResolveAuthEnvs_apiKeyOnCooldownThrows() {
+  let threw = false;
+  try {
+    resolveClaudeCodeAuthEnvs(null, 'sk-ant-api03-key', true);
+  } catch {
+    threw = true;
+  }
+  assert(threw, 'throws when no OAuth credential and api-key is on cooldown');
+}
+
+function testResolveAuthEnvs_noCredsNoKeyThrows() {
+  let threw = false;
+  try {
+    resolveClaudeCodeAuthEnvs(null, undefined, false);
+  } catch {
+    threw = true;
+  }
+  assert(threw, 'throws when no OAuth credential and no api-key configured');
+}
 
 async function testCreate_noAuth() {
   const res = await request(`${BASE_URL}/api/claude-code-session/create`, {
@@ -1162,6 +1211,23 @@ async function runAll() {
 
   // Phase 2: Parallel independent tests
   const parallelTests = [
+    // resolveClaudeCodeAuthEnvs — OAuth preferred, ANTHROPIC_API_KEY fallback
+    {
+      name: 'authEnvs -- OAuth credential preferred',
+      fn: async () => testResolveAuthEnvs_oauthPreferred(),
+    },
+    {
+      name: 'authEnvs -- api-key fallback when no OAuth',
+      fn: async () => testResolveAuthEnvs_apiKeyFallback(),
+    },
+    {
+      name: 'authEnvs -- throws when api-key on cooldown',
+      fn: async () => testResolveAuthEnvs_apiKeyOnCooldownThrows(),
+    },
+    {
+      name: 'authEnvs -- throws when no creds + no key',
+      fn: async () => testResolveAuthEnvs_noCredsNoKeyThrows(),
+    },
     // POST /create
     { name: 'POST /create -- no auth -> 401', fn: testCreate_noAuth },
     { name: 'POST /create -- no auth error schema', fn: testCreate_noAuth_errorSchema },

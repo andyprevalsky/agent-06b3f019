@@ -175,6 +175,21 @@ export async function findAgentProxy(agentId: string) {
   });
 }
 
+/** Look up a user's delivery address (city/state/country). Used as the proxy
+ *  geolocation fallback for server-originated agents (no client IP), e.g. SMS
+ *  or scheduled runs — see resolveCreateMetadata. Returns null if the user has
+ *  no address on file. */
+export async function findUserDeliveryAddress(userId: string) {
+  return prisma.user.findUnique({
+    where: { userId },
+    select: {
+      city: true,
+      state: true,
+      country: true,
+    },
+  });
+}
+
 /** Look up existing agents by IDs scoped to a user. Used by the batch-create
  *  endpoint to skip duplicate inserts on retry — the worker mints stable
  *  agent_ids upfront, so a re-POST with the same ids returns the existing

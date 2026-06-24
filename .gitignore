@@ -110,3 +110,6 @@ prompt-review/data.json
 prompt-review/extracts/
 prompt-review/checkpoints/
 prompt-review/.cache/
+
+# FCaptcha upstream source (reference only, not committed)
+agents/tests/e2e/fcaptcha_src/

@@ -204,6 +204,41 @@ async function _fetchGeo(ip: string): Promise<ProxyGeoLocation | null> {
 }
 
 /**
+ * Build a proxy geolocation from a user's stored delivery address. Used when no
+ * client IP is available (server-originated agents) or IP lookup failed, so the
+ * proxy follows where the user actually lives rather than the default. Mirrors
+ * the normalization in _fetchGeo: full US state names → 2-letter abbreviation,
+ * city uppercased, common country names → 2-letter code. Returns null when the
+ * address has no usable city/state so the caller can fall back to the default.
+ */
+export function geoFromDeliveryAddress(input: {
+  city?: string | null;
+  state?: string | null;
+  country?: string | null;
+}): ProxyGeoLocation | null {
+  const city = (input.city ?? '').trim();
+  const stateRaw = (input.state ?? '').trim();
+  if (!city && !stateRaw) return null;
+
+  const countryRaw = (input.country ?? '').trim();
+  let country = 'US';
+  if (countryRaw && !/^(us|usa|united states)$/i.test(countryRaw)) {
+    country =
+      countryRaw.length === 2 ? countryRaw.toUpperCase() : countryRaw.toUpperCase().substring(0, 2);
+  }
+
+  // Accept either a full US state name ("California") or an abbreviation ("CA").
+  let state = stateRaw;
+  if (US_STATE_ABBREVS[stateRaw]) state = US_STATE_ABBREVS[stateRaw];
+
+  return {
+    country,
+    ...(state && { state: state.toUpperCase().substring(0, 2) }),
+    ...(city && { city: city.toUpperCase() }),
+  };
+}
+
+/**
  * Default geolocation to use when IP lookup fails or is unavailable.
  */
 export const DEFAULT_GEOLOCATION: ProxyGeoLocation = {

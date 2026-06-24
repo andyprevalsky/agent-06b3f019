@@ -49,6 +49,12 @@ class RoseServerError(RoseError):
     """5xx from a provider — retried in-place with exponential backoff."""
 
 
+class RosePaymentRequiredError(RoseError):
+    """402 from a provider — out of credits/quota (e.g. an exhausted Anthropic
+    API key). Unlike a 429 it won't clear on a short retry, so the caller backs
+    the credential off for a while instead of hammering it. Falls through."""
+
+
 class RoseStallError(RoseError):
     """Provider opened the stream but produced no content within the TTFT window.
 

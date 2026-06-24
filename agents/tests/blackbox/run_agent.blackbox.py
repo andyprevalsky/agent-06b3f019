@@ -178,6 +178,68 @@ async def test_assistant_tool_call_ids_match_execution_and_context_results():
     assert set(tool_post_ids) == set(executed_ids) == set(persisted_ids)
 
 
+async def test_redundant_synthesis_delegate_is_rejected_after_explore_results():
+    """Final synthesis should happen in the current agent after explore children finish."""
+    initial_context = [
+        {"role": "USER", "text": "Compare three cities", "timestamp": "2024-01-01T00:00:00Z"},
+    ]
+    for idx, city in enumerate(("Austin", "Denver", "Lisbon"), start=1):
+        tool_call_id = f"explore-{idx}"
+        initial_context.append({
+            "role": "ASSISTANT",
+            "text": "",
+            "timestamp": f"2024-01-01T00:00:0{idx}Z",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "tool": "spawn_agent",
+                        "tool_call_id": tool_call_id,
+                        "type": "explore",
+                        "goal": f"Research {city}",
+                    }
+                ]
+            },
+        })
+        initial_context.append({
+            "role": "TOOL",
+            "text": f"{city} research complete",
+            "timestamp": f"2024-01-01T00:00:1{idx}Z",
+            "metadata": {
+                "toolCallId": tool_call_id,
+                "toolName": "spawn_agent",
+                "toolStatus": "FINISHED",
+            },
+        })
+
+    tool_calls = [
+        {
+            "tool": "spawn_agent",
+            "type": "general_purpose",
+            "goal": "Synthesize the city findings into a comparison table",
+            "start_phase": "execute",
+            "output_schema": {"fields": [{"name": "summary", "type": "str", "required": True}]},
+        }
+    ]
+    detected_tools = [("spawn_agent", "tc-general-synthesis", 1.0)]
+
+    result, posted, executed = await _run_single_iteration(
+        tool_calls,
+        detected_tools,
+        initial_context=initial_context,
+        max_iterations=1,
+    )
+
+    assert result["status"] == "max_iterations"
+    assert executed == []
+    tool_errors = [
+        m for m in posted
+        if m["role"] == "TOOL" and (m["metadata"] or {}).get("toolStatus") == "ERROR"
+    ]
+    assert len(tool_errors) == 1
+    assert tool_errors[0]["metadata"]["toolCallId"] == "tc-general-synthesis"
+    assert "redundant general-purpose synthesis" in tool_errors[0]["text"]
+
+
 async def test_attempt_completion_skip_verification_returns_completed():
     """When attempt_completion fires with skip_verification, status is 'completed'.
     Without an explicit result, final_response falls back to assistant narration.
@@ -669,6 +731,7 @@ async def run_all_tests():
     r = BlackboxResult()
     await r.record_async("tool_only_assistant_turn_persists_tool_calls", test_tool_only_assistant_turn_persists_tool_calls)
     await r.record_async("assistant_tool_call_ids_match_execution_and_context_results", test_assistant_tool_call_ids_match_execution_and_context_results)
+    await r.record_async("redundant_synthesis_delegate_rejected", test_redundant_synthesis_delegate_is_rejected_after_explore_results)
     await r.record_async("attempt_completion_skip_verification_returns_completed", test_attempt_completion_skip_verification_returns_completed)
     await r.record_async("attempt_completion_result_used_when_skip_verification", test_attempt_completion_result_used_when_skip_verification)
     await r.record_async("attempt_completion_plan_loop_requires_set_plan", test_attempt_completion_plan_loop_requires_set_plan)

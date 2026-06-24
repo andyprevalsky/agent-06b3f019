@@ -19,6 +19,7 @@ from typing import Dict, Optional
 _PROVIDER_PRICING: Dict[str, Dict[str, float]] = {
     "google/gemini-3-flash-preview": {"prompt": 0.50 / 1_000_000, "completion": 3.00 / 1_000_000},
     "moonshotai/kimi-k2.5":           {"prompt": 0.38 / 1_000_000, "completion": 1.72 / 1_000_000},
+    "anthropic/claude-opus-4.8":      {"prompt": 5.00 / 1_000_000, "completion": 25.00 / 1_000_000},
     "anthropic/claude-opus-4.7":      {"prompt": 5.00 / 1_000_000, "completion": 25.00 / 1_000_000},
     "google/gemini-3.1-pro-preview":  {"prompt": 2.00 / 1_000_000, "completion": 12.00 / 1_000_000},
     "openai/gpt-5.4":                 {"prompt": 1.75 / 1_000_000, "completion": 14.00 / 1_000_000},
@@ -29,6 +30,7 @@ _PROVIDER_PRICING: Dict[str, Dict[str, float]] = {
 # Detected via the `-claude` / `-gpt` suffix actual_model carries on direct
 # auth paths.
 _DIRECT_TOKEN_PRICING: Dict[str, Dict[str, float]] = {
+    "claude-opus-4-8-claude":   {"input_cents_per_1k": 0.0, "output_cents_per_1k": 0.0},
     "claude-opus-4-7-claude":   {"input_cents_per_1k": 0.0, "output_cents_per_1k": 0.0},
     "claude-sonnet-4-6-claude": {"input_cents_per_1k": 0.0, "output_cents_per_1k": 0.0},
     "gpt-5.4-gpt":              {"input_cents_per_1k": 0.0, "output_cents_per_1k": 0.0},
@@ -50,6 +52,7 @@ ANTHROPIC_MODEL_PRICING: Dict[str, Dict[str, float]] = {
     "claude-opus-4.5":   {"input_cents_per_1k": 0.5, "output_cents_per_1k": 2.5},
     "claude-opus-4-5":   {"input_cents_per_1k": 0.5, "output_cents_per_1k": 2.5},
     "claude-opus-4-7":   {"input_cents_per_1k": 0.5, "output_cents_per_1k": 2.5},
+    "claude-opus-4-8":   {"input_cents_per_1k": 0.5, "output_cents_per_1k": 2.5},
     "claude-haiku-4.5":  {"input_cents_per_1k": 0.1, "output_cents_per_1k": 0.5},
     "claude-haiku-4-5":  {"input_cents_per_1k": 0.1, "output_cents_per_1k": 0.5},
 }
@@ -58,8 +61,8 @@ ANTHROPIC_MODEL_PRICING: Dict[str, Dict[str, float]] = {
 # Pool waterfall composition — must stay in sync with pools.py.
 _POOL_WATERFALLS: Dict[str, tuple[str, ...]] = {
     "rose-1-lite":         ("google/gemini-3-flash-preview", "moonshotai/kimi-k2.5"),
-    "rose-1-ultra":        ("anthropic/claude-opus-4.7", "google/gemini-3.1-pro-preview"),
-    "rose-1-browser-use":  ("anthropic/claude-opus-4.7", "openai/gpt-5.4"),
+    "rose-1-ultra":        ("anthropic/claude-opus-4.8", "google/gemini-3.1-pro-preview"),
+    "rose-1-browser-use":  ("anthropic/claude-opus-4.8", "openai/gpt-5.4"),
 }
 
 

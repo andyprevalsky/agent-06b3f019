@@ -78,6 +78,8 @@ def model_supports_anthropic_strict_tools(model: Optional[str]) -> bool:
         or "claude-opus-4-1" in canonical
         or "claude-opus-4-5" in canonical
         or "claude-opus-4-6" in canonical
+        or "claude-opus-4-7" in canonical
+        or "claude-opus-4-8" in canonical
         or "claude-haiku-4-5" in canonical
     )
 

@@ -2406,6 +2406,167 @@ async def test_waterfall_reports_cache_metrics_from_openrouter():
 
 
 # =====================================================================
+# Anthropic API-key funded default + shared cooldown
+# =====================================================================
+
+
+def test_anthropic_api_key_headers_use_x_api_key():
+    from providers.rose.transport import _anthropic_api_key_headers, _anthropic_headers
+
+    api_hdr = _anthropic_api_key_headers("sk-ant-api03-test")
+    assert api_hdr["x-api-key"] == "sk-ant-api03-test"
+    assert "Authorization" not in api_hdr  # api-key path must NOT use Bearer
+    # OAuth path is the inverse: Bearer, no x-api-key.
+    oauth_hdr = _anthropic_headers("oat-token")
+    assert oauth_hdr["Authorization"] == "Bearer oat-token"
+    assert "x-api-key" not in oauth_hdr
+
+
+async def test_anthropic_api_key_complete_402_raises_payment_required():
+    """402 (out of credits) is classified as RosePaymentRequiredError so the
+    client backs the key off rather than retrying it."""
+    from providers.rose.claude_auth import anthropic_api_key_complete
+    from providers.rose.errors import RosePaymentRequiredError
+
+    def handler(req):
+        return httpx.Response(402, json={"error": {"message": "Insufficient credits"}})
+
+    set_mock_handler(handler)
+    raised = False
+    try:
+        await _drain(
+            anthropic_api_key_complete(
+                pool_spec=get_pool("rose-1-lite"),
+                messages=[{"role": "user", "content": "hi"}],
+                api_key="sk-ant-api03-test",
+                request_id="r-apikey-402",
+            )
+        )
+    except RosePaymentRequiredError:
+        raised = True
+    assert raised, "expected RosePaymentRequiredError on HTTP 402"
+
+
+async def test_anthropic_api_key_complete_sets_anthropic_suffix():
+    """actual_model carries the `-anthropic` suffix (billed), NOT `-claude` ($0)."""
+    from providers.rose.claude_auth import anthropic_api_key_complete
+
+    lines = []
+    lines += _ev("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 1}}})
+    lines += _ev(
+        "content_block_start",
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+    )
+    lines += _ev(
+        "content_block_delta",
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "hi"}},
+    )
+    lines += _ev("content_block_stop", {"type": "content_block_stop", "index": 0})
+    lines += _ev(
+        "message_delta",
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}},
+    )
+    lines += _ev("message_stop", {"type": "message_stop"})
+    sse_ok = "\n".join(lines)
+
+    def handler(req):
+        return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+    chunks = await _drain(
+        anthropic_api_key_complete(
+            pool_spec=get_pool("rose-1-lite"),
+            messages=[{"role": "user", "content": "hi"}],
+            api_key="sk-ant-api03-test",
+            request_id="r-apikey-suffix",
+        )
+    )
+    meta = next(c for c in chunks if c.kind == "metadata")
+    am = meta.data.get("actual_model", "")
+    assert am.endswith("-anthropic"), f"expected -anthropic suffix, got {am!r}"
+    assert not am.endswith("-claude")
+
+
+async def test_anthropic_api_key_cooldown_mark_then_on_cooldown():
+    """Marking the cooldown flips the in-memory fast path to 'on cooldown'."""
+    import providers.rose.client as rc
+
+    rc._reset_anthropic_api_key_cooldown_cache()
+
+    def handler(req):
+        # Backend cooldown read/write — answer both harmlessly.
+        if req.url.path.endswith("/anthropic-key/cooldown"):
+            return httpx.Response(200, json={"onCooldown": False})
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+    assert await rc._anthropic_api_key_on_cooldown() is False
+    await rc._mark_anthropic_api_key_cooldown("RosePaymentRequiredError")
+    assert await rc._anthropic_api_key_on_cooldown() is True  # in-memory fast path
+    rc._reset_anthropic_api_key_cooldown_cache()
+
+
+async def test_client_api_key_tier_402_falls_through_to_waterfall():
+    """End-to-end: no compute token → funded api-key tier hit → 402 → backs off
+    and falls through to the OpenRouter waterfall (which serves the response)."""
+    import os
+
+    import providers.rose.client as rc
+
+    rc._reset_anthropic_api_key_cooldown_cache()
+    sse_ok = "\n".join(
+        _openai_sse(
+            [
+                {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]},
+                {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+            ]
+        )
+    )
+    seen = {"anthropic": 0, "openrouter": 0, "cooldown_post": 0}
+
+    def handler(req):
+        host = req.url.host
+        path = req.url.path
+        if host == "api.anthropic.com":
+            seen["anthropic"] += 1
+            return httpx.Response(402, json={"error": {"message": "Insufficient credits"}})
+        if host == "openrouter.ai":
+            seen["openrouter"] += 1
+            return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
+        if path.endswith("/anthropic-key/cooldown"):
+            return httpx.Response(200, json={"onCooldown": False})
+        if path.endswith("/token/rate-limited"):
+            seen["cooldown_post"] += 1
+            return httpx.Response(200, json={"ok": True})
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+    prev = os.environ.get("ANTHROPIC_API_KEY")
+    os.environ["ANTHROPIC_API_KEY"] = "sk-ant-api03-test"
+    try:
+        chunks = await _drain(
+            RoseClient().complete(
+                pool="rose-1-lite",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+        )
+    finally:
+        if prev is None:
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+        else:
+            os.environ["ANTHROPIC_API_KEY"] = prev
+        rc._reset_anthropic_api_key_cooldown_cache()
+
+    assert seen["anthropic"] == 1, f"api-key tier should be tried once, got {seen['anthropic']}"
+    assert seen["openrouter"] >= 1, "should fall through to waterfall"
+    assert seen["cooldown_post"] >= 1, "402 should back off the shared key (cooldown POST)"
+    assert any(c.kind == "content" for c in chunks), "waterfall should serve content"
+    # actual_model must be a waterfall model, NOT the -anthropic api-key suffix.
+    meta = next((c for c in chunks if c.kind == "metadata"), None)
+    assert meta is not None and not meta.data.get("actual_model", "").endswith("-anthropic")
+
+
+# =====================================================================
 # RoseClient — top-level orchestration
 # =====================================================================
 
@@ -3649,6 +3810,20 @@ async def run_all_tests():
     )
     await r.record_async("waterfall_all_failed", test_waterfall_all_failed_raises_with_step_errors)
     await r.record_async("waterfall_cache_metrics", test_waterfall_reports_cache_metrics_from_openrouter)
+
+    r.record("anthropic_apikey_headers_x_api_key", test_anthropic_api_key_headers_use_x_api_key)
+    await r.record_async(
+        "anthropic_apikey_402_payment_required", test_anthropic_api_key_complete_402_raises_payment_required
+    )
+    await r.record_async(
+        "anthropic_apikey_suffix", test_anthropic_api_key_complete_sets_anthropic_suffix
+    )
+    await r.record_async(
+        "anthropic_apikey_cooldown_mark", test_anthropic_api_key_cooldown_mark_then_on_cooldown
+    )
+    await r.record_async(
+        "anthropic_apikey_tier_402_to_waterfall", test_client_api_key_tier_402_falls_through_to_waterfall
+    )
 
     await r.record_async("client_collect_waterfall", test_client_collect_waterfall_only_path)
     await r.record_async("client_fallthrough_to_waterfall", test_client_falls_through_from_claude_auth_to_waterfall)
