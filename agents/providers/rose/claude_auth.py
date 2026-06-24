@@ -47,6 +47,7 @@ from providers.rose.errors import (
     RoseAuthError,
     RoseError,
     RoseInvalidRequest,
+    RosePaymentRequiredError,
     RoseRateLimitError,
     RoseServerError,
     RoseStallError,
@@ -420,6 +421,90 @@ async def claude_auth_complete(
                     status=rotate.status,
                 )
             current_auth = fresh
+
+
+async def anthropic_api_key_complete(
+    *,
+    pool_spec: PoolSpec,
+    messages: List[Dict[str, Any]],
+    api_key: str,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tool_choice: Any = None,
+    response_format: Optional[Dict[str, Any]] = None,
+    max_tokens: Optional[int] = None,
+    skip_cache_write: bool = False,
+    thinking: Optional[Dict[str, Any]] = None,
+    effort: Optional[str] = None,
+    request_id: str,
+    agent_id: Optional[str] = None,
+    call_site: Optional[str] = None,
+    ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
+    idle_timeout_s: Optional[float] = None,
+) -> AsyncIterator[StreamChunk]:
+    """Funded ANTHROPIC_API_KEY fallback (billed, `x-api-key`). Mirrors
+    `claude_auth_complete` but without pool rotation — it's a single global
+    credential — and classifies HTTP 402 as `RosePaymentRequiredError` so the
+    client backs the key off. `actual_model` carries the `-anthropic` suffix so
+    downstream cost accounting bills it (unlike the `-claude` $0 OAuth path)."""
+    body = build_anthropic_body(
+        pool_spec=pool_spec,
+        messages=messages,
+        tools=tools,
+        tool_choice=tool_choice,
+        response_format=response_format,
+        max_tokens=max_tokens,
+        skip_cache_write=skip_cache_write,
+        thinking=thinking,
+        effort=effort,
+    )
+    actual_model = f"{pool_spec.claude_auth_model}-anthropic"
+
+    for attempt in range(_MAX_ATTEMPTS_PER_TOKEN):
+        try:
+            async with post_anthropic_stream(
+                body=body,
+                api_key=api_key,
+                request_id=request_id,
+                agent_id=agent_id,
+                call_site=call_site,
+                connect_timeout_s=ttft_timeout_s,
+            ) as response:
+                status = response.status_code
+                if status == 200:
+                    async for chunk in parse_anthropic_sse(
+                        response,
+                        actual_model=actual_model,
+                        pool_name="anthropic-apikey",
+                        request_id=request_id,
+                        idle_timeout_s=idle_timeout_s,
+                    ):
+                        yield chunk
+                    return
+
+                error_body = get_error_body(response)
+                if status == 402:
+                    raise RosePaymentRequiredError(
+                        f"Anthropic 402 (out of credits): {error_body[:2000]}", status=status
+                    )
+                if status in (401, 403):
+                    raise RoseAuthError(f"Anthropic {status}: {error_body[:2000]}", status=status)
+                if status == 429:
+                    raise RoseRateLimitError(f"Anthropic 429: {error_body[:2000]}", status=status)
+                if status == 400:
+                    raise RoseInvalidRequest(f"Anthropic 400: {error_body[:2000]}", status=status)
+                if status >= 500:
+                    if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
+                        await asyncio.sleep(min(2 ** attempt, _BACKOFF_CAP_S))
+                        continue
+                    raise RoseServerError(f"Anthropic {status}: {error_body[:2000]}", status=status)
+                raise RoseError(f"Anthropic {status}: {error_body[:2000]}", status=status)
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
+            if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
+                await asyncio.sleep(min(2 ** attempt, _BACKOFF_CAP_S))
+                continue
+            raise RoseServerError(f"Anthropic connect/read error: {exc}") from exc
+
+    raise RoseServerError("Anthropic API key: exhausted retries with no error captured")
 
 
 class _RotateToken(Exception):

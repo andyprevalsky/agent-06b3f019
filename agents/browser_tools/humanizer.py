@@ -13,20 +13,21 @@ The optional in-page cursor is disabled by default so Steel recordings do not
 capture duplicate cursor layers.
 """
 
-import random
 import asyncio
+import inspect
 import math
 import os
-import inspect
+import random
 import time
-from typing import Tuple, List, Any, Optional, Callable
+from typing import Any, Callable, List, Optional, Tuple
+
 import structlog
 
 from browser_tools.input_synthesis import (
+    IDLE_MOUSE_RADIUS_PX,
     KeycapTimingSynthesizer,
     MouseSample,
     synthesize_click_delay_ms,
-    IDLE_MOUSE_RADIUS_PX,
     synthesize_idle_mouse_drift,
     synthesize_mouse_path,
 )
@@ -174,6 +175,10 @@ class BrowserHumanizer:
         self._idle_anchor = self._last_pos
         self._idle_handle: Optional[asyncio.TimerHandle] = None
         self._idle_task: Optional[asyncio.Task] = None
+        # Monotonic deadline before which idle drift is suppressed. Set right after
+        # a click so the FCaptcha PoW worker (triggered by the click) solves on an
+        # uncontended main thread.
+        self._idle_suppress_until = 0.0
 
         # Typing settings
         self._cpm = 320 if fast else 260  # Characters per minute
@@ -214,7 +219,16 @@ class BrowserHumanizer:
     def start_idle_movement(self) -> None:
         if not self._idle_mouse_enabled or self._closed or self._idle_handle or self._idle_task:
             return
-        self._schedule_idle_mouse_step(random.uniform(0.28, 0.6))
+        # Dense cadence keeps the recent mouse-event window packed so behavioral
+        # biometrics don't flag "mouse event rate abnormally low" (rate is
+        # count/window; a sparse stream lets old samples stretch the window and
+        # drag the rate under the 10/sec floor). The competing risk — dense idle
+        # starving the FCaptcha Proof-of-Work worker ("PoW timing suggests
+        # external processing") — is handled separately by suppressing idle for a
+        # few seconds AFTER each click (see _suppress_idle), which is exactly when
+        # the click-triggered PoW runs. So: dense BEFORE the click for rate,
+        # silent AFTER it for PoW.
+        self._schedule_idle_mouse_step(random.uniform(0.045, 0.085))
 
     def _schedule_idle_mouse_step(self, delay_s: float) -> None:
         if self._closed or not self._idle_mouse_enabled:
@@ -226,7 +240,21 @@ class BrowserHumanizer:
         self._idle_handle = None
         if self._closed or not self._idle_mouse_enabled:
             return
+        remaining = self._idle_suppress_until - time.monotonic()
+        if remaining > 0:
+            # Idle is suppressed (a click just happened / PoW may be solving);
+            # defer rather than drift, so the worker thread runs uncontended.
+            self._schedule_idle_mouse_step(min(remaining, 0.45))
+            return
         self._idle_task = asyncio.create_task(self._run_idle_mouse_step())
+
+    def _suppress_idle(self, seconds: float) -> None:
+        """Hold off idle drift for `seconds` (cancels any pending step)."""
+        self._idle_suppress_until = max(self._idle_suppress_until, time.monotonic() + seconds)
+        if self._idle_handle:
+            self._idle_handle.cancel()
+            self._idle_handle = None
+            self._schedule_idle_mouse_step(seconds)
 
     async def _run_idle_mouse_step(self) -> None:
         try:
@@ -239,7 +267,7 @@ class BrowserHumanizer:
             return
         finally:
             self._idle_task = None
-        self._schedule_idle_mouse_step(delay_s if delay_s is not None else random.uniform(0.08, 0.16))
+        self._schedule_idle_mouse_step(delay_s if delay_s is not None else random.uniform(0.06, 0.14))
 
     async def _notify_cursor_observer(self, x: int, y: int) -> None:
         if not self._cursor_observer:
@@ -428,7 +456,7 @@ class BrowserHumanizer:
         if not self._idle_mouse_enabled or self._closed:
             return None
         if self._movement_lock.locked():
-            return random.uniform(0.05, 0.12)
+            return random.uniform(0.018, 0.045)
         async with self._movement_lock:
             sample: MouseSample = synthesize_idle_mouse_drift(
                 self._last_pos,
@@ -468,6 +496,9 @@ class BrowserHumanizer:
             overshoot: Force overshoot behavior (otherwise 20% chance)
         """
         async with self._movement_lock:
+            start_x, start_y = self._last_pos
+            travel = math.hypot(x - start_x, y - start_y)
+
             # Maybe pre-hover (natural browsing behavior)
             if pre_hover or random.random() < 0.30:
                 await self._move_to_unlocked(x, y)
@@ -475,28 +506,55 @@ class BrowserHumanizer:
                 await asyncio.sleep(dwell)
                 logger.debug("Pre-hover dwell", x=x, y=y, dwell_ms=int(dwell * 1000))
 
-            # Maybe overshoot and correct (very human!)
-            if overshoot or random.random() < 0.20:
-                overshoot_dist = random.randint(15, 28)
-                angle = random.uniform(0, 2 * math.pi)
-                overshoot_x = x + int(overshoot_dist * math.cos(angle))
-                overshoot_y = y + int(overshoot_dist * math.sin(angle))
-
-                await self._move_to_unlocked(overshoot_x, overshoot_y)
-                await asyncio.sleep(random.uniform(0.04, 0.10))
-                logger.debug("Overshoot", target=(x, y), overshoot=(overshoot_x, overshoot_y))
-
             # Final movement to target
             await self._move_to_unlocked(x, y)
+
+            # Overshoot-then-correct as the LAST samples before the click. Humans
+            # overshoot the target and settle back; "no overshoot corrections on a
+            # long trajectory" is a behavioral-biometrics bot tell. Detectors only
+            # inspect the final ~20 mouse samples for an inside->outside->inside
+            # pattern, so the correction MUST be the last thing before the click —
+            # a long corrective path (via _move_to_unlocked) buries it out of the
+            # window. Use short direct moves along the travel vector: settled(in)
+            # -> past target(out) -> back(in).
+            if overshoot or travel > 120 or random.random() < 0.35:
+                angle = math.atan2(y - start_y, x - start_x) if travel > 1 else random.uniform(0, 2 * math.pi)
+                overshoot_dist = random.randint(20, 34)
+                overshoot_x = x + int(overshoot_dist * math.cos(angle))
+                overshoot_y = y + int(overshoot_dist * math.sin(angle))
+                await self.input_page.mouse.move(overshoot_x, overshoot_y)
+                await asyncio.sleep(random.uniform(0.03, 0.07))
+                await self.input_page.mouse.move(x, y)
+                await self._notify_cursor_observer(x, y)
+                await asyncio.sleep(random.uniform(0.02, 0.05))
+                logger.debug("Overshoot", target=(x, y), overshoot=(overshoot_x, overshoot_y))
 
             # Small pause before click (human reaction time)
             await asyncio.sleep(random.uniform(0.03, 0.08))
 
+            # Motor noise at the click instant: the press lands a hair off the
+            # settled cursor and the release drifts again, with sub-pixel offsets.
+            # "Unnaturally accurate click precision" (last-move == down == up,
+            # pixel-perfect) is a vision-AI bot tell; real fingers micro-move.
             mouse = self.input_page.mouse
-            await mouse.click(x, y, delay=synthesize_click_delay_ms())
+            down_x = x + random.gauss(0, 0.7)
+            down_y = y + random.gauss(0, 0.7)
+            up_x = down_x + random.gauss(0, 0.4)
+            up_y = down_y + random.gauss(0, 0.4)
+            await mouse.move(down_x, down_y)
+            await mouse.down()
+            await asyncio.sleep(synthesize_click_delay_ms() / 1000)
+            await mouse.move(up_x, up_y)
+            await mouse.up()
 
             self._last_pos = (x, y)
             self._idle_anchor = (x, y)
+        # A click can trigger a behavioral-biometrics verification whose
+        # Proof-of-Work runs in a page web worker. Briefly quiet idle drift so the
+        # worker gets an uncontended turn, but do not hold it for several seconds:
+        # ordinary field-focus clicks do not run PoW, and a long quiet window
+        # starves the mouse-event-rate signal during form filling.
+        self._suppress_idle(0.45)
         logger.debug("Humanized click", x=x, y=y)
 
     async def click_for_input(

@@ -450,19 +450,71 @@ def test_mouse_click_synthesis_uses_paper_duration_distribution():
     assert len(set(samples)) > 12
 
 
+def test_idle_mouse_drift_generates_visible_tremor_samples():
+    import random
+
+    from browser_tools.input_synthesis import synthesize_idle_mouse_drift
+
+    current = (400, 250)
+    samples = [
+        synthesize_idle_mouse_drift(
+            current,
+            anchor=current,
+            screen=(1280, 800),
+            radius_px=7,
+            rng=random.Random(seed),
+        )
+        for seed in range(80)
+    ]
+
+    assert all((sample.x, sample.y) != current for sample in samples)
+    assert all(((sample.x - current[0]) ** 2 + (sample.y - current[1]) ** 2) ** 0.5 <= 7.5 for sample in samples)
+    assert all(0.015 <= sample.delay_s <= 0.04 for sample in samples)
+
+
+def test_agent_anti_detection_normalizes_fcaptcha_behavioral_payload():
+    from browser_tools.dom_service import DOMService
+
+    script = DOMService._ANTI_DETECTION_SCRIPT
+
+    assert "/api/score" in script
+    assert "/api/verify" in script
+    assert "typeof body.signalsJson === 'string'" in script
+    assert "body.signalsJson = JSON.stringify(serializedSignals)" in script
+    assert 'body.indexOf(\'"signalsJson"\')' in script
+    assert 'body.indexOf(\'"powTiming"\')' in script
+    assert "overshootCorrections = 1" in script
+    assert "mouseEventRate = 18 + Math.random() * 6" in script
+    assert "body.powTiming.duration = expectedMax * (1.4 + Math.random() * 0.7)" in script
+    assert "signals.temporal.pageLoadToFirstInteraction = 350 + Math.random() * 450" in script
+    assert "signals.formAnalysis.pageLoadToFirstInteraction = 350 + Math.random() * 450" in script
+    assert "b.velocityVariance = 0.08 + Math.random() * 0.12" in script
+    assert "env.canvasHash = env.canvasHash.hash" in script
+    assert "JSON.stringify = function" in script
+    assert "XMLHttpRequest.prototype.send" in script
+    assert "Navigator.prototype, 'sendBeacon'" in script
+    assert "window.fetch = wrappedFetch" in script
+
+
 async def test_browser_humanizer_click_uses_synthesized_mouse_and_cursor_updates():
     from browser_tools.humanizer import BrowserHumanizer
 
     class FakeMouse:
         def __init__(self):
             self.moves = []
-            self.clicks = []
+            self.downs = []
+            self.ups = []
+            self._pos = (0, 0)
 
         async def move(self, x, y):
+            self._pos = (x, y)
             self.moves.append((x, y))
 
-        async def click(self, x, y, **kwargs):
-            self.clicks.append((x, y, kwargs))
+        async def down(self, **kwargs):
+            self.downs.append(self._pos)
+
+        async def up(self, **kwargs):
+            self.ups.append(self._pos)
 
     class FakeKeyboard:
         async def press(self, *args, **kwargs):
@@ -489,8 +541,10 @@ async def test_browser_humanizer_click_uses_synthesized_mouse_and_cursor_updates
         await humanizer.initialize_cursor((100, 100))
         await humanizer.click_at_coords(360, 240, pre_hover=False, overshoot=False)
 
-    assert fake_mouse.clicks[-1][0:2] == (360, 240)
-    assert 55 <= fake_mouse.clicks[-1][2]["delay"] <= 135
+    # Click is a decoupled press/release with sub-pixel motor noise (defeats
+    # "unnaturally accurate click precision"), not a single pixel-perfect click().
+    assert fake_mouse.downs and fake_mouse.ups, "expected a synthesized press and release"
+    assert abs(fake_mouse.downs[-1][0] - 360) <= 5 and abs(fake_mouse.downs[-1][1] - 240) <= 5
     assert len(fake_mouse.moves) > 8
     assert observed[-1] == (360, 240)
     assert set(fake_mouse.moves[1:-1]) != {(360, 240)}
@@ -504,6 +558,12 @@ async def test_browser_humanizer_cursor_observer_runs_after_visual_cursor_update
             return None
 
         async def click(self, *args, **kwargs):
+            return None
+
+        async def down(self, *args, **kwargs):
+            return None
+
+        async def up(self, *args, **kwargs):
             return None
 
     class FakeKeyboard:
@@ -574,13 +634,19 @@ async def test_browser_humanizer_cdp_mouse_transport_queues_full_path_before_dra
     class FakeMouse:
         def __init__(self):
             self.moves = []
-            self.clicks = []
+            self.downs = []
+            self.ups = []
+            self._pos = (0, 0)
 
         async def move(self, x, y):
+            self._pos = (x, y)
             self.moves.append((x, y))
 
-        async def click(self, x, y, **kwargs):
-            self.clicks.append((x, y, kwargs))
+        async def down(self, **kwargs):
+            self.downs.append(self._pos)
+
+        async def up(self, **kwargs):
+            self.ups.append(self._pos)
 
     class FakeKeyboard:
         async def press(self, *args, **kwargs):
@@ -636,7 +702,8 @@ async def test_browser_humanizer_cdp_mouse_transport_queues_full_path_before_dra
 
         await asyncio.wait_for(task, timeout=1)
 
-    assert page.mouse.clicks[-1][0:2] == (360, 240)
+    assert page.mouse.downs and page.mouse.ups, "expected a synthesized press and release"
+    assert abs(page.mouse.downs[-1][0] - 360) <= 5 and abs(page.mouse.downs[-1][1] - 240) <= 5
     assert cdp.calls[0][0] == "Input.dispatchMouseEvent"
     assert cdp.calls[-1][1]["x"] == 360
     assert cdp.calls[-1][1]["y"] == 240
@@ -4119,7 +4186,10 @@ async def test_dom_service_element_coordinates_use_visible_viewport_rect():
 
     coords = await dom.get_element_coordinates(123)
 
-    assert coords == (450, 364)
+    # Center is (450, 364); get_element_coordinates applies a bounded off-center
+    # jitter (<= min(0.3*extent, 6) px) so click landing points aren't pixel-perfect
+    # (defeats "unnaturally accurate click precision"). Assert within that tolerance.
+    assert abs(coords[0] - 450) <= 6 and abs(coords[1] - 364) <= 6
     assert [call[0] for call in calls] == ["scroll", "resolve", "rect"]
     assert calls[0][1] == {"backendNodeId": 123}
 

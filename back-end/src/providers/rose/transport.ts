@@ -28,6 +28,20 @@ export const ANTHROPIC_BETA_HEADER = [
   'effort-2025-11-24',
 ].join(',');
 
+/**
+ * Beta header for the direct Anthropic API-key path. Identical to the OAuth set
+ * minus the two claude-code/OAuth-only flags (`claude-code-20250219`,
+ * `oauth-2025-04-20`), which a plain `sk-ant-api03` key neither needs nor
+ * accepts. The feature betas (thinking/caching/tool-use/effort) work with a
+ * standard key, so the same request body streams unchanged.
+ */
+export const ANTHROPIC_BETA_HEADER_API_KEY = [
+  'interleaved-thinking-2025-05-14',
+  'prompt-caching-scope-2026-01-05',
+  'advanced-tool-use-2025-11-20',
+  'effort-2025-11-24',
+].join(',');
+
 const ANTHROPIC_VERSION = '2023-06-01';
 const ANTHROPIC_X_APP = 'cli';
 const ANTHROPIC_USER_AGENT = 'claude-cli/2.1.81 (external, sdk-ts, agent-sdk/0.2.75)';
@@ -49,6 +63,15 @@ function anthropicHeaders(claudeToken: string): Record<string, string> {
     'anthropic-beta': ANTHROPIC_BETA_HEADER,
     'x-app': ANTHROPIC_X_APP,
     'User-Agent': ANTHROPIC_USER_AGENT,
+    'Content-Type': 'application/json',
+  };
+}
+
+function anthropicApiKeyHeaders(apiKey: string): Record<string, string> {
+  return {
+    'x-api-key': apiKey,
+    'anthropic-version': ANTHROPIC_VERSION,
+    'anthropic-beta': ANTHROPIC_BETA_HEADER_API_KEY,
     'Content-Type': 'application/json',
   };
 }
@@ -134,6 +157,44 @@ export async function postAnthropicStream(
   if (!response.ok) {
     errorBody = await response.text();
     log.warn('anthropic.error', {
+      request_id: options.requestId,
+      status: response.status,
+      body: errorBody.substring(0, 500),
+    });
+  }
+
+  return {
+    status: response.status,
+    ok: response.ok,
+    headers: response.headers,
+    body: response.body,
+    errorBody,
+  };
+}
+
+export async function postAnthropicApiKeyStream(
+  options: PostOptions & { apiKey: string; abortSignal?: AbortSignal }
+): Promise<StreamResponse> {
+  const timeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+  const upstream = options.abortSignal ?? new AbortController().signal;
+  log.info('anthropic_apikey.start', {
+    request_id: options.requestId,
+    call_site: options.callSite,
+    model: options.body.model,
+  });
+  const response = await withTimeout(upstream, timeoutMs, (signal) =>
+    fetch(ANTHROPIC_API_URL, {
+      method: 'POST',
+      headers: anthropicApiKeyHeaders(options.apiKey),
+      body: JSON.stringify(options.body),
+      signal,
+    })
+  );
+
+  let errorBody: string | undefined;
+  if (!response.ok) {
+    errorBody = await response.text();
+    log.warn('anthropic_apikey.error', {
       request_id: options.requestId,
       status: response.status,
       body: errorBody.substring(0, 500),

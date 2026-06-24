@@ -10,6 +10,7 @@
  */
 
 import { buildFingerprintScript } from '../../providers/steel/injectionScripts';
+import { buildSteelProxySettings } from '../../providers/steel/session';
 import type { FingerprintData } from '../../providers/steel/types';
 
 function makeFingerprint(): FingerprintData {
@@ -98,6 +99,35 @@ function testFingerprintScriptDoesNotReferenceBackendLogger(): void {
   );
 }
 
+function testProxySettingsDropCityFallsBackToStateLevel(): void {
+  const prevServer = process.env.STEEL_PROXY_SERVER;
+  const prevEnabled = process.env.BROWSER_AGENT_STEEL_PROXY_ENABLED;
+  delete process.env.STEEL_PROXY_SERVER; // ensure the Steel-geolocation path (not BYOP)
+  process.env.BROWSER_AGENT_STEEL_PROXY_ENABLED = 'true';
+  try {
+    const geo = { country: 'US', state: 'CA', city: 'SAN FRANCISCO' };
+
+    const withCity = buildSteelProxySettings(geo) as {
+      config: { geolocation: Record<string, string> };
+    };
+    assert(withCity.config.geolocation.city === 'SAN FRANCISCO', 'city included by default');
+    assert(withCity.config.geolocation.state === 'CA', 'state included by default');
+
+    // Steel 400s on cities it can't fulfill; dropCity retries with country+state.
+    const dropped = buildSteelProxySettings(geo, true) as {
+      config: { geolocation: Record<string, string> };
+    };
+    assert(!('city' in dropped.config.geolocation), 'city dropped on Steel city rejection');
+    assert(dropped.config.geolocation.state === 'CA', 'state retained on city-drop fallback');
+    assert(dropped.config.geolocation.country === 'US', 'country retained on city-drop fallback');
+  } finally {
+    if (prevServer === undefined) delete process.env.STEEL_PROXY_SERVER;
+    else process.env.STEEL_PROXY_SERVER = prevServer;
+    if (prevEnabled === undefined) delete process.env.BROWSER_AGENT_STEEL_PROXY_ENABLED;
+    else process.env.BROWSER_AGENT_STEEL_PROXY_ENABLED = prevEnabled;
+  }
+}
+
 function main(): void {
   const tests = [
     {
@@ -107,6 +137,10 @@ function main(): void {
     {
       name: 'fingerprint script does not reference backend logger',
       fn: testFingerprintScriptDoesNotReferenceBackendLogger,
+    },
+    {
+      name: 'proxy settings drop unsupported city and fall back to country+state',
+      fn: testProxySettingsDropCityFallsBackToStateLevel,
     },
   ];
   const failures: string[] = [];

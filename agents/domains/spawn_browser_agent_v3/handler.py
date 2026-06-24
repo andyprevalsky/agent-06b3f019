@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import random
 import json
 import os
 import time
@@ -1463,6 +1464,19 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                 await browser_recorder.mark(f"Navigated -> {nav_url[:80]}", action="goto")
 
             logger.info(f"\U0001f310 Auto-navigated to start URL: {nav_url}")
+
+            # Warm-up human activity after the page loads, before the agent's
+            # first deliberate action. Clears two behavioral-biometrics tells:
+            # "first interaction too soon after page load" (reading dwell) and
+            # "no scroll activity during session" (a scroll down + partial up).
+            try:
+                if humanizer is not None:
+                    await asyncio.sleep(random.uniform(1.0, 2.0))
+                    await humanizer.scroll(random.randint(120, 320))
+                    await asyncio.sleep(random.uniform(0.4, 0.9))
+                    await humanizer.scroll(-random.randint(60, 160))
+            except Exception as warmup_err:
+                logger.warning(f"⚠️ Warm-up scroll failed: {warmup_err}")
         else:
             logger.info("\U0001f504 Resuming from write lock approval - skipping start URL navigation")
         _record_timing("navigation_total", t_nav)

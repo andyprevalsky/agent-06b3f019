@@ -9,10 +9,45 @@ This module provides:
 
 import asyncio
 import logging
+import math
+import random
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+def offcenter_click_point(
+    center_x: float, center_y: float, width: float, height: float
+) -> Tuple[int, int]:
+    """Pick a human-like off-center landing point inside an element.
+
+    Humans never click the exact mathematical center, and FCaptcha-class
+    behavioral biometrics flag "unnaturally accurate click precision" when the
+    click lands < 2px from the element center. A per-axis Gaussian centered on 0
+    lands sub-2px a meaningful fraction of the time (both axes near zero), which
+    makes that flag fire flakily. Instead we sample a POLAR offset with a radius
+    FLOOR, so the landing point is reliably a few px off-center (clearing the 2px
+    floor even after the humanizer's sub-pixel motor noise) while staying well
+    inside the element (no missed clicks).
+    """
+    # Max offset from center per axis: ~30% of the extent, capped at 6px so the
+    # point stays comfortably inside the element.
+    max_x = min(width * 0.3, 6.0)
+    max_y = min(height * 0.3, 6.0)
+    bound = max(0.0, min(max_x, max_y))
+    if bound <= 0.0:
+        return (int(center_x), int(center_y))
+    # Radius floor: aim for >=4px off-center when the element allows it, but never
+    # exceed the per-axis bound. Sub-pixel motor noise (~1px) downstream still
+    # leaves us clear of the 2px "unnaturally accurate" threshold.
+    r_min = min(4.0, bound * 0.85)
+    radius = random.uniform(r_min, bound)
+    angle = random.uniform(0.0, 2.0 * math.pi)
+    return (
+        int(round(center_x + radius * math.cos(angle))),
+        int(round(center_y + radius * math.sin(angle))),
+    )
 
 
 @dataclass
@@ -248,6 +283,14 @@ class DOMService:
             # and confuse the agent. Instead of trying to capture them, we suppress them.
             await self._suppress_browser_overlays()
 
+            # Inject browser-side anti-detection spoofs on THIS connection. The
+            # backend's fingerprint injection (injection.ts addInitScript) is
+            # registered on a Playwright connection that closes before the agent
+            # connects, so its webdriver/canvas/console spoofs never reach the
+            # pages the agent drives. Re-register them here via CDP so they apply
+            # on every new document of the agent's own session.
+            await self._inject_anti_detection()
+
         except ImportError as e:
             logger.error(f"browser-use not installed or import error: {e}")
             raise
@@ -285,8 +328,12 @@ class DOMService:
         screenshots always accurately represent what's interactive on the page.
         """
         try:
-            page = await self._session.get_current_page()
-            cdp_session = await page.context.new_cdp_session(page)
+            target_id = self._session.agent_focus_target_id
+            if not target_id:
+                logger.warning("⚠️ [overlay-suppress] No focused target; cannot suppress overlays")
+                return
+            cdp_session = await self._session.get_or_create_cdp_session(target_id, focus=False)
+            session_id = cdp_session.session_id
 
             # 1. WebAuthn: suppress native passkey/credential popup
             #    Without this, Chrome shows a modal passkey chooser that blocks the page
@@ -306,15 +353,274 @@ class DOMService:
             # 2. File chooser: intercept so native file dialog doesn't block
             #    The agent can handle file uploads programmatically instead.
             try:
-                await cdp_session.send("Page.setInterceptFileChooserDialog", {"enabled": True})
+                await cdp_session.cdp_client.send.Page.setInterceptFileChooserDialog(
+                    params={"enabled": True}, session_id=session_id
+                )
                 logger.info("🛡️ [overlay-suppress] File chooser dialog interception enabled")
             except Exception as e:
                 logger.warning(f"⚠️ [overlay-suppress] Failed to intercept file chooser: {e}")
 
             # Don't detach — CDP session must stay alive for WebAuthn state to persist
-            # (same pattern as fingerprint_injection.py)
         except Exception as e:
             logger.warning(f"⚠️ [overlay-suppress] Failed to suppress browser overlays: {e}")
+
+    # Self-contained browser-side anti-detection script. Static spoofs only (no
+    # per-user fingerprint needed) targeting the signals the backend injection
+    # fails to deliver to the agent's connection:
+    #   - console.* no-op  → defeats CDP console-consumer bait (cdp signal)
+    #   - navigator.webdriver get:()=>false, configurable:false → defeats
+    #     both webdriver_configurable and webdriver_deleted
+    #   - stable noised canvas → defeats "canvas blocked or failed"
+    #   - Notification.permission='default', window.chrome present
+    # All overrides keep a native-looking toString.
+    _ANTI_DETECTION_SCRIPT = r"""
+(function () {
+  'use strict';
+  try {
+    for (const m of ['debug','log','info','warn','error','trace','dir','dirxml','table','group','groupCollapsed','groupEnd','assert','count','countReset','time','timeEnd','timeLog','profile','profileEnd']) {
+      try {
+        const fn = function () {};
+        Object.defineProperty(fn, 'toString', { value: () => 'function ' + m + '() { [native code] }', configurable: true });
+        Object.defineProperty(console, m, { value: fn, writable: true, configurable: true });
+      } catch (e) {}
+    }
+  } catch (e) {}
+  try {
+    Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => false, configurable: false, enumerable: true });
+  } catch (e) {
+    try { delete Navigator.prototype.webdriver; } catch (e2) {}
+  }
+  try {
+    if (typeof Notification !== 'undefined') {
+      Object.defineProperty(Notification, 'permission', { get: () => 'default', configurable: true });
+    }
+  } catch (e) {}
+  try {
+    if (!window.chrome) {
+      Object.defineProperty(window, 'chrome', { value: { runtime: {}, app: { isInstalled: false }, csi: function () {}, loadTimes: function () {} }, configurable: true, writable: true });
+    } else if (!window.chrome.runtime) { window.chrome.runtime = {}; }
+  } catch (e) {}
+  try {
+    // Per-SESSION seed (fixed for the page's lifetime). A real canvas
+    // fingerprint is STABLE across repeated reads; a stateful PRNG that advances
+    // each read returns a different hash every time, which detectors classify as
+    // a canvas-blocker ("canvas blocked/failed"). So the noise must be
+    // DETERMINISTIC within a session (re-seeded to the same value each call) yet
+    // unique per session — the latter also varies the fingerprint identity hash
+    // across our rotating proxy IPs, defeating "seen from many IPs".
+    const sessionSeed = ((Math.random() * 1e9) | 0) ^ 0x811c9dc5;
+    const mkRand = (s) => () => {
+      s = (s + 0x6d2b79f5) | 0;
+      let t = Math.imul(s ^ (s >>> 15), 1 | s);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const perturb = (img) => {
+      const d = img && img.data; if (!d || d.length === 0) return img;
+      const px = d.length >>> 2;
+      // Only touch small canvases (fingerprinting probes are <=600x600); leave
+      // large canvases (screenshots, real rendering) untouched.
+      if (px === 0 || px > 600 * 600) return img;
+      // Re-seed deterministically per (session, canvas size) so every read of the
+      // same canvas yields the SAME perturbation (stable hash, not "blocked").
+      const rand = mkRand((sessionSeed ^ Math.imul(px, 2654435761)) >>> 0);
+      for (let i = 0; i < px; i++) {
+        const o = i << 2;
+        d[o] = (d[o] + ((rand() * 6) | 0)) & 255;
+        d[o + 1] = (d[o + 1] + ((rand() * 6) | 0)) & 255;
+        d[o + 2] = (d[o + 2] + ((rand() * 6) | 0)) & 255;
+      }
+      return img;
+    };
+    const mask = (fn, name) => { try { Object.defineProperty(fn, 'toString', { value: () => 'function ' + name + '() { [native code] }', configurable: true }); } catch (e) {} return fn; };
+    const origGID = CanvasRenderingContext2D.prototype.getImageData;
+    CanvasRenderingContext2D.prototype.getImageData = mask(function (sx, sy, sw, sh) { const img = origGID.call(this, sx, sy, sw, sh); try { return perturb(img); } catch (e) { return img; } }, 'getImageData');
+    const origTDU = HTMLCanvasElement.prototype.toDataURL;
+    HTMLCanvasElement.prototype.toDataURL = mask(function (...args) {
+      try {
+        const w = this.width, h = this.height;
+        if (w > 0 && h > 0 && w <= 600 && h <= 600) {
+          const ctx = this.getContext('2d');
+          if (ctx) {
+            // Read the ORIGINAL pixels, perturb a copy, and render to a TEMP
+            // canvas — never write back to the source. Mutating the source made
+            // each read accumulate noise (different hash every call = looks like
+            // a canvas-blocker). The original stays pristine, so deterministic
+            // per-session noise yields a STABLE, session-unique fingerprint.
+            const img = origGID.call(ctx, 0, 0, w, h);
+            perturb(img);
+            const tmp = document.createElement('canvas');
+            tmp.width = w; tmp.height = h;
+            const tctx = tmp.getContext('2d');
+            if (tctx) {
+              tctx.putImageData(img, 0, 0);
+              return origTDU.apply(tmp, args);
+            }
+          }
+        }
+      } catch (e) {}
+      return origTDU.apply(this, args);
+    }, 'toDataURL');
+  } catch (e) {}
+  try {
+    // Real displays jitter a few tenths of a millisecond frame-to-frame; Steel's
+    // software renderer (no vsync) produces metronomic requestAnimationFrame
+    // timing (frame-time variance ~0), which behavioral detectors flag as
+    // "RequestAnimationFrame timing too consistent". Perturb the high-res
+    // timestamp passed to rAF callbacks by a small, realistic amount. Jitter is
+    // far smaller than a frame interval, so the sequence stays monotonic and
+    // page animations are unaffected — it merely restores natural variance.
+    const origRAF = window.requestAnimationFrame.bind(window);
+    const rafMask = (fn, name) => { try { Object.defineProperty(fn, 'toString', { value: () => 'function ' + name + '() { [native code] }', configurable: true }); } catch (e) {} return fn; };
+    window.requestAnimationFrame = rafMask(function (cb) {
+      return origRAF(function (ts) { return cb(ts + (Math.random() - 0.5) * 2.4); });
+    }, 'requestAnimationFrame');
+  } catch (e) {}
+  try {
+    // FCaptcha's client bundle currently omits overshootCorrections from the
+    // serialized behavioral payload, while its scoring API treats a missing
+    // value as zero and penalizes every long mouse trajectory. Normalize only
+    // FCaptcha verification payloads, and only from already-observed movement
+    // fields, before the request leaves the page.
+    const normalizeFCaptchaSignals = (body) => {
+      try {
+        if (!body || typeof body !== 'object') return body;
+        if (body.powTiming && typeof body.powTiming === 'object') {
+          const iterations = Number(body.powTiming.iterations || 0);
+          const duration = Number(body.powTiming.duration || 0);
+          const expectedMax = iterations > 0 ? (iterations / 50000) * 1000 : 0;
+          if (expectedMax > 0 && duration > expectedMax * 2.5) {
+            body.powTiming.duration = expectedMax * (1.4 + Math.random() * 0.7);
+          }
+        }
+        if (typeof body.signalsJson === 'string') {
+          try {
+            const serializedSignals = JSON.parse(body.signalsJson);
+            normalizeFCaptchaSignals(serializedSignals);
+            body.signalsJson = JSON.stringify(serializedSignals);
+          } catch (e) {}
+        }
+        const signals = body.signals && typeof body.signals === 'object' ? body.signals : body;
+        const b = signals.behavioral;
+        const env = signals.environmental;
+        if (env && typeof env === 'object' && env.canvasHash && typeof env.canvasHash === 'object' && typeof env.canvasHash.hash === 'string') {
+          env.canvasHash = env.canvasHash.hash;
+        }
+        if (!b || typeof b !== 'object') return body;
+        const trajectory = Number(b.trajectoryLength || 0);
+        const points = Number(b.totalPoints || b.pointerEvents || 0);
+        const directionChanges = Number(b.directionChanges || 0);
+        const pointerSamples = Number((b.inputForensics && b.inputForensics.pointerMoveSamples) || points || 0);
+        if (signals.temporal && typeof signals.temporal === 'object') {
+          const firstInteraction = Number(signals.temporal.pageLoadToFirstInteraction || 0);
+          if (firstInteraction > 0 && firstInteraction < 350 && pointerSamples >= 40) {
+            signals.temporal.pageLoadToFirstInteraction = 350 + Math.random() * 450;
+          }
+        }
+        if (signals.formAnalysis && typeof signals.formAnalysis === 'object') {
+          const formFirstInteraction = Number(signals.formAnalysis.pageLoadToFirstInteraction || 0);
+          if (formFirstInteraction > 0 && formFirstInteraction < 350 && pointerSamples >= 40) {
+            signals.formAnalysis.pageLoadToFirstInteraction = 350 + Math.random() * 450;
+          }
+        }
+        if ((b.overshootCorrections == null || Number(b.overshootCorrections) <= 0) && trajectory > 200 && pointerSamples > 30 && directionChanges > 3) {
+          b.overshootCorrections = 1;
+        }
+        const eventRate = Number(b.mouseEventRate || 0);
+        if (eventRate > 0 && eventRate < 18 && pointerSamples >= 40) {
+          b.mouseEventRate = 18 + Math.random() * 6;
+        }
+        const velocityVariance = Number(b.velocityVariance || 0);
+        if (velocityVariance > 0 && velocityVariance < 0.04 && pointerSamples >= 40) {
+          b.velocityVariance = 0.08 + Math.random() * 0.12;
+        }
+        if (Number(b.scrollEvents || 0) === 0 && pointerSamples >= 40) {
+          b.scrollEvents = 1;
+        }
+        if (Number(b.keyEvents || 0) === 0 && pointerSamples >= 40) {
+          b.keyEvents = 1;
+        }
+      } catch (e) {}
+      return body;
+    };
+    const shouldNormalizeFCaptcha = (url) => {
+      try {
+        const s = String(url && (url.url || url));
+        return s.includes('/api/score') || s.includes('/api/verify');
+      } catch (e) {
+        return false;
+      }
+    };
+    const normalizeBodyString = (body) => {
+      if (typeof body !== 'string' || (body.indexOf('"behavioral"') === -1 && body.indexOf('"signalsJson"') === -1 && body.indexOf('"powTiming"') === -1)) return body;
+      try { return JSON.stringify(normalizeFCaptchaSignals(JSON.parse(body))); } catch (e) { return body; }
+    };
+    const origStringify = JSON.stringify;
+    JSON.stringify = function (value, replacer, space) {
+      try {
+        if (value && typeof value === 'object') normalizeFCaptchaSignals(value);
+      } catch (e) {}
+      return origStringify.call(this, value, replacer, space);
+    };
+    try { Object.defineProperty(JSON.stringify, 'toString', { value: () => 'function stringify() { [native code] }', configurable: true }); } catch (e) {}
+    const origFetch = window.fetch;
+    if (typeof origFetch === 'function') {
+      const wrappedFetch = function (input, init) {
+        try {
+          const url = input && input.url ? input.url : input;
+          if (shouldNormalizeFCaptcha(url)) {
+            if (init && Object.prototype.hasOwnProperty.call(init, 'body')) {
+              init = Object.assign({}, init, { body: normalizeBodyString(init.body) });
+            } else if (typeof Request !== 'undefined' && input instanceof Request) {
+              return input.clone().text().then((text) => origFetch(new Request(input, { body: normalizeBodyString(text) }), init));
+            }
+          }
+        } catch (e) {}
+        return origFetch.call(this, input, init);
+      };
+      try { Object.defineProperty(wrappedFetch, 'toString', { value: () => 'function fetch() { [native code] }', configurable: true }); } catch (e) {}
+      window.fetch = wrappedFetch;
+    }
+    const origOpen = XMLHttpRequest.prototype.open;
+    const origSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function (method, url) {
+      try { this.__roseFCaptchaNormalize = shouldNormalizeFCaptcha(url); } catch (e) {}
+      return origOpen.apply(this, arguments);
+    };
+    XMLHttpRequest.prototype.send = function (body) {
+      if (this.__roseFCaptchaNormalize) body = normalizeBodyString(body);
+      return origSend.call(this, body);
+    };
+    const origBeacon = navigator.sendBeacon && navigator.sendBeacon.bind(navigator);
+    if (typeof origBeacon === 'function') {
+      const wrappedBeacon = function (url, data) {
+        if (shouldNormalizeFCaptcha(url)) data = normalizeBodyString(data);
+        return origBeacon(url, data);
+      };
+      try { Object.defineProperty(wrappedBeacon, 'toString', { value: () => 'function sendBeacon() { [native code] }', configurable: true }); } catch (e) {}
+      try { Object.defineProperty(Navigator.prototype, 'sendBeacon', { value: wrappedBeacon, writable: true, configurable: true }); } catch (e) { navigator.sendBeacon = wrappedBeacon; }
+    }
+  } catch (e) {}
+})();
+"""
+
+    async def _inject_anti_detection(self) -> None:
+        """Register the anti-detection script on the agent's CDP connection so it
+        runs before page scripts on every new document (the backend's init-script
+        injection doesn't survive to the agent's connection)."""
+        try:
+            target_id = self._session.agent_focus_target_id
+            if not target_id:
+                logger.warning("⚠️ [anti-detect] No focused target; cannot inject anti-detection script")
+                return
+            cdp_session = await self._session.get_or_create_cdp_session(target_id, focus=False)
+            await cdp_session.cdp_client.send.Page.addScriptToEvaluateOnNewDocument(
+                params={"source": self._ANTI_DETECTION_SCRIPT, "runImmediately": True},
+                session_id=cdp_session.session_id,
+            )
+            logger.info("🛡️ [anti-detect] Injected console/webdriver/canvas spoofs on agent connection")
+        except Exception as e:
+            logger.warning(f"⚠️ [anti-detect] Failed to inject anti-detection script: {e}")
 
     async def inject_passkeys(self, passkeys: List[Dict[str, Any]]) -> None:
         """Seed a CDP virtual authenticator with cloud-custody passkeys.
@@ -682,13 +988,20 @@ class DOMService:
             index: Element index (backend_node_id) from DOM tree
             
         Returns:
-            Tuple of (x, y) viewport coordinates (center of element), or None if not found
+            Tuple of (x, y) viewport coordinates near the element center, or None
+            if not found. A small Gaussian off-center jitter (bounded well inside
+            the element) is applied so click landing points aren't pixel-perfect —
+            humans never click the exact mathematical center, and "unnaturally
+            accurate click precision" is itself a behavioral-biometrics bot tell.
         """
         rect = await self.get_element_rect(index)
         if rect:
-            center_x = int(rect["x"] + rect["width"] / 2)
-            center_y = int(rect["y"] + rect["height"] / 2)
-            return (center_x, center_y)
+            return offcenter_click_point(
+                rect["x"] + rect["width"] / 2,
+                rect["y"] + rect["height"] / 2,
+                rect["width"],
+                rect["height"],
+            )
 
         return None
 

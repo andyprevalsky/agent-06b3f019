@@ -577,6 +577,27 @@ async function testClaudeCodeRateLimited_noAuth() {
   assertStatus(res.status, 401, res.data);
 }
 
+// The shared ANTHROPIC_API_KEY funded default: marking it out-of-credits via
+// the rate-limited endpoint (type=anthropic) backs off a shared DB cooldown the
+// agents Rose client reads (it has no DB). Mark → cooldown GET reports true.
+async function testAnthropicApiKeyCooldown_markThenOnCooldown() {
+  const mark = await request(`${BASE_URL}/api/integrations/compute-code/token/rate-limited`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({ type: 'anthropic', source: 'pool', failureReason: 'out_of_credits' }),
+  });
+  assertStatus(mark.status, 200, mark.data);
+
+  const status = await request(`${BASE_URL}/api/integrations/compute-code/anthropic-key/cooldown`, {
+    headers: apiKeyHeaders(),
+  });
+  assertStatus(status.status, 200, status.data);
+  assert(
+    (status.data as { onCooldown?: boolean }).onCooldown === true,
+    'anthropic key should report on-cooldown after being marked rate-limited'
+  );
+}
+
 async function testClaudeCodePoolRateLimited_noAuth() {
   const res = await request(`${BASE_URL}/api/integrations/claude-code/pool-token/rate-limited`, {
     method: 'POST',
@@ -5093,6 +5114,10 @@ async function runAll() {
   // Phase 3: Sequential tests (state-dependent + boundary capture)
   const sequentialTests: { name: string; fn: () => Promise<void> }[] = [
     { name: 'state transition -- full lifecycle', fn: testStateTransition_fullLifecycle },
+    {
+      name: 'anthropic api-key cooldown -- mark then on-cooldown',
+      fn: testAnthropicApiKeyCooldown_markThenOnCooldown,
+    },
     {
       name: 'rotation -- user rate-limited falls back to pool',
       fn: testRotation_userRateLimitedFallsBackToPool,
