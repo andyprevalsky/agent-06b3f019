@@ -494,10 +494,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         if needs_payment_fixture(selected_tasks):
             seed_payment_fixture(manifest)
         if needs_frontend_tunnel(selected_tasks):
-            frontend_tunnel = start_frontend_tunnel(int(manifest["ports"]["backend"]))
-            benchmark_frontend_url = frontend_tunnel.public_url.replace("https://", "http://", 1)
-            os.environ["BENCHMARK_FRONTEND_URL"] = benchmark_frontend_url
-            print(f"Test payment tunnel: {benchmark_frontend_url}")
+            # Prefer the stable public URL run.sh assigned at startup (reserved ngrok domain →
+            # frontend port, where /test_payment is now served). Only spin an ad-hoc tunnel if
+            # run.sh did not publish one.
+            stable_public = ((manifest.get("urls") or {}).get("public") or "").strip()
+            if stable_public:
+                os.environ["BENCHMARK_FRONTEND_URL"] = stable_public.rstrip("/")
+                print(f"Test payment public URL (run.sh): {stable_public}")
+            else:
+                frontend_tunnel = start_frontend_tunnel(int(manifest["ports"]["frontend"]))
+                os.environ["BENCHMARK_FRONTEND_URL"] = frontend_tunnel.public_url.rstrip("/")
+                print(f"Test payment tunnel (fallback): {frontend_tunnel.public_url}")
         port = int(manifest["ports"]["backend"])
         for invocation in plan_invocations(selected_tasks):
             result_path = run_benchmark_invocation(

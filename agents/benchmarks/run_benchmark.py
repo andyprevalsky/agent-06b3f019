@@ -269,6 +269,21 @@ def _frontend_url_for_benchmark(base_url: str) -> str:
     explicit = os.environ.get("BENCHMARK_FRONTEND_URL", "").strip()
     if explicit:
         return explicit.rstrip("/")
+    # Stable public URL assigned by run.sh at startup (reserved ngrok domain → frontend port).
+    # This is the only URL the cloud browser agent can actually reach, so prefer it over any
+    # localhost fallback. run.sh exports PUBLIC_BASE_URL and records it in services.json.
+    public_env = os.environ.get("PUBLIC_BASE_URL", "").strip()
+    if public_env:
+        return public_env.rstrip("/")
+    services_path = REPO_ROOT / ".context" / "services.json"
+    if services_path.exists():
+        try:
+            services = json.loads(services_path.read_text())
+            public_url = ((services.get("urls") or {}).get("public") or "").strip()
+            if public_url:
+                return public_url.rstrip("/")
+        except Exception:
+            pass
     conductor_port = os.environ.get("CONDUCTOR_PORT", "").strip()
     if conductor_port.isdigit():
         return f"http://localhost:{int(conductor_port) + 1}"
