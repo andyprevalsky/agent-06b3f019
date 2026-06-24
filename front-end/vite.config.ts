@@ -6,7 +6,13 @@ import path from "path";
 export default defineConfig(() => ({
   server: {
     host: "::",
-    port: parseInt(process.env.VITE_DEV_PORT || '8080'),
+    port: parseInt(process.env.VITE_DEV_PORT || "8080"),
+    allowedHosts: process.env.VITE_ALLOWED_HOSTS?.split(",").filter(Boolean),
+    hmr: process.env.VITE_ALLOWED_HOSTS
+      ? {
+          clientPort: 443,
+        }
+      : undefined,
   },
   plugins: [
     react(),
