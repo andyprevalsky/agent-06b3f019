@@ -9,46 +9,47 @@ datasource db {
 }
 
 model Agent {
-  id                        String      @id @default(uuid())
+  id                        String          @id @default(uuid())
   userId                    String
   goal                      String
-  progress                  Float       @default(0.0)
-  status                    AgentStatus @default(STARTING_UP)
+  progress                  Float           @default(0.0)
+  status                    AgentStatus     @default(STARTING_UP)
   statusMessage             String?
   deletedAt                 DateTime?
-  createdAt                 DateTime    @default(now())
-  updatedAt                 DateTime    @updatedAt
+  createdAt                 DateTime        @default(now())
+  updatedAt                 DateTime        @updatedAt
   temporalWorkflowId        String?
-  model                     String      @default("rose-labs/rose-1-lite")
-  contextSize               Int         @default(0)
-  messageCount              Int         @default(0)
-  tokenCount                Int         @default(0)
-  tokensIn                  Int         @default(0)
-  tokensOut                 Int         @default(0)
+  model                     String          @default("rose-labs/rose-1-lite")
+  contextSize               Int             @default(0)
+  messageCount              Int             @default(0)
+  tokenCount                Int             @default(0)
+  tokensIn                  Int             @default(0)
+  tokensOut                 Int             @default(0)
   parentAgentId             String?
   tokenInPriceMicrodollars  Int?
   tokenOutPriceMicrodollars Int?
-  source                    AgentSource @default(WEB)
-  depth                     Int         @default(0)
+  source                    AgentSource     @default(WEB)
+  depth                     Int             @default(0)
   parentWorkflowId          String?
-  reasoningMaxTokens        Int         @default(2048)
+  reasoningMaxTokens        Int             @default(2048)
   responseSchema            Json?
   busId                     String?
-  toolsInUse                String[]    @default([])
+  toolsInUse                String[]        @default([])
   structuredResponse        Json?
   proxyCity                 String?
   proxyCountry              String?
   proxyState                String?
-  priceLimitCents           Int         @default(100)
-  treeCostCents             Int         @default(0)
-  ownCostCents              Float       @default(0)
-  writeLockEnabled          Boolean     @default(true)
+  priceLimitCents           Int             @default(100)
+  treeCostCents             Int             @default(0)
+  ownCostCents              Float           @default(0)
+  writeLockEnabled          Boolean         @default(true)
   githubRepoUrl             String?
-  parent                    Agent?      @relation("AgentHierarchy", fields: [parentAgentId], references: [id])
-  children                  Agent[]     @relation("AgentHierarchy")
+  parent                    Agent?          @relation("AgentHierarchy", fields: [parentAgentId], references: [id])
+  children                  Agent[]         @relation("AgentHierarchy")
   tools                     AgentTool[]
   messages                  Message[]
   toolUsages                ToolUsage[]
+  purchaseSpends            PurchaseSpend[]
   verifier                  Verifier?
 
   @@index([userId, deletedAt])
@@ -221,6 +222,7 @@ model User {
   agentIdentity               AgentIdentity?
   agentPhoneMessages          AgentPhoneMessage[]
   authAssistanceRequests      UserAuthAssistanceRequest[]
+  purchaseSpends              PurchaseSpend[]
 
   @@index([userId])
   @@index([inviteCode])
@@ -253,6 +255,30 @@ model Subscription {
 
   @@index([userId])
   @@index([stripeSubscriptionId])
+}
+
+model PurchaseSpend {
+  id                    String              @id @default(uuid())
+  userId                String
+  agentId               String?
+  fingerprint           String
+  cardId                String?
+  merchant              String
+  lineItemsJson         Json
+  totalCents            Int
+  status                PurchaseSpendStatus @default(PENDING_APPROVAL)
+  stripePaymentIntentId String?
+  provider              String              @default("agentcard")
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+  user                  User                @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  agent                 Agent?              @relation(fields: [agentId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, fingerprint])
+  @@index([agentId])
+  @@index([cardId])
+  @@index([status])
+  @@index([createdAt])
 }
 
 model BrowserContext {
@@ -881,6 +907,16 @@ enum ClaudeCodeSessionStatus {
   COMPLETED
   CLOSED
   ERROR
+}
+
+enum PurchaseSpendStatus {
+  PENDING_APPROVAL
+  CHARGING
+  HELD
+  CLEARED
+  VOIDED
+  REFUNDED
+  FAILED
 }
 
 enum MessageChannel {

@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 import structlog
 
 from domains.spawn_browser_agent_v3.config import WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS
+from domains.spawn_browser_agent_v3.service_crypto import has_payment_card_secret_refs
 
 if TYPE_CHECKING:
     from browser_tools.dom_service import ActionHistory, DOMService
@@ -228,6 +229,35 @@ async def execute_action(  # noqa: C901
                 write_lock_approvals=write_lock_approvals,
                 system_name=system_name,
             )
+
+        elif action_name == "request_payment_card":
+            if has_payment_card_secret_refs(secret_refs):
+                return {
+                    "success": False,
+                    "error": (
+                        "Payment approval is already complete. Do not call request_payment_card again. "
+                        "Type the existing secret refs card_number, card_name, card_expiry, and card_cvv "
+                        "into the payment fields, then submit the checkout form."
+                    ),
+                }
+            missing_fields = [
+                field
+                for field in ("merchant", "line_items", "subtotal_cents", "total_cents")
+                if not params.get(field)
+            ]
+            if missing_fields:
+                return {
+                    "success": False,
+                    "error": (
+                        "request_payment_card requires merchant, line_items, subtotal_cents, "
+                        f"and total_cents before approval. Missing: {', '.join(missing_fields)}"
+                    ),
+                }
+            return {
+                "status": "awaiting_payment_card_approval",
+                "payment_request": params,
+                "current_url": current_url,
+            }
 
         elif action_name == "press_key":
             key = params.get("key", "")
@@ -925,7 +955,7 @@ async def _execute_input_text(  # noqa: C901
     """Execute an input_text action with secret decryption and write lock checks."""
     from browser_use.browser.events import ClickCoordinateEvent, SendKeysEvent, TypeTextEvent
 
-    from browser_tools.write_lock import get_write_lock_approval_question, is_payment_field
+    from browser_tools.write_lock import is_payment_field
 
     text = params.get("text", "")
     clear_before_typing = params.get("clear", True) is not False
@@ -962,13 +992,11 @@ async def _execute_input_text(  # noqa: C901
 
             logger.info("Write lock triggered: payment field detected", url=current_url, field_desc=field_desc)
             return {
-                "status": "needs_write_approval",
-                "approval_type": "payment",
-                "question": get_write_lock_approval_question(
-                    action_type="payment",
-                    url=current_url,
-                    field_description=field_desc,
-                    system_name=system_name,
+                "success": False,
+                "error": (
+                    "Payment fields require a one-time virtual card. Extract the full itemized receipt "
+                    "from the checkout page, call request_payment_card, then type the returned refs "
+                    "card_number, card_name, card_expiry, and card_cvv."
                 ),
                 "field_description": field_desc,
                 "url": current_url,

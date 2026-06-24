@@ -1488,21 +1488,54 @@ def test_build_autopay_prompt_section():
     }
     out = build_autopay_prompt_section(payment_data, "envelope-b64")
     assert "$100.00" in out
-    assert "ending in 1111" in out
     assert "123 Main St" in out
     assert "555-1234" in out
     assert "test@example.com" in out
     assert "# User Context" not in out
     assert out.lstrip().startswith("## Billing Address")
     assert "## Payment Information" in out
-    assert "Always verify the total" not in out
+    assert "call request_payment_card" in out
+    assert "card_number" in out
+    assert "4111111111111111" not in out
 
 
 def test_build_autopay_prompt_section_no_card():
     from domains.spawn_browser_agent_v3.service_crypto import build_autopay_prompt_section
 
     out = build_autopay_prompt_section({"autoagentpaylimit_cents": 0, "card_number": ""}, "env")
-    assert "****" in out  # masked last four
+    assert "call request_payment_card" in out
+    assert "card_cvv" in out
+
+
+def test_build_payment_card_resume_prompt_section():
+    from domains.spawn_browser_agent_v3.service_crypto import build_payment_card_resume_prompt_section
+
+    out = build_payment_card_resume_prompt_section(
+        {
+            "card_number": "4111111111111111",
+            "card_name": "Rose Labs",
+            "card_expiry": "12/30",
+            "card_cvv": "123",
+        }
+    )
+
+    assert "Payment approval is complete" in out
+    assert "Do not call request_payment_card again" in out
+    assert "card_number" in out
+    assert "card_name" in out
+    assert "card_expiry" in out
+    assert "card_cvv" in out
+    assert "4111111111111111" not in out
+    assert "12/30" not in out
+    assert "123" not in out
+
+
+def test_build_payment_card_resume_prompt_section_requires_all_refs():
+    from domains.spawn_browser_agent_v3.service_crypto import build_payment_card_resume_prompt_section
+
+    out = build_payment_card_resume_prompt_section({"card_number": "4111111111111111"})
+
+    assert out == ""
 
 
 def test_build_passwords_prompt_section_empty():
@@ -3527,6 +3560,84 @@ async def test_execute_action_unknown_action():
     assert "Unknown action" in out["error"]
 
 
+async def test_execute_action_request_payment_card_requests_workflow_approval():
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom = MagicMock()
+    dom.session = MagicMock()
+    dom.selector_map = {}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    payment_request = {
+        "merchant": "Rose Labs Test Payment",
+        "line_items": [{"name": "Aurora Notebook", "unit_price_cents": 1200, "quantity": 1, "line_total_cents": 1200}],
+        "subtotal_cents": 1200,
+        "total_cents": 4396,
+    }
+
+    out = await execute_action(
+        dom,
+        ah,
+        {"action": "request_payment_card", "params": payment_request},
+        current_url="https://example.test/checkout",
+    )
+
+    assert out["status"] == "awaiting_payment_card_approval"
+    assert out["payment_request"] == payment_request
+    assert out["current_url"] == "https://example.test/checkout"
+
+
+async def test_execute_action_request_payment_card_rejects_empty_receipt():
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom = MagicMock()
+    dom.session = MagicMock()
+    dom.selector_map = {}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+
+    out = await execute_action(
+        dom,
+        ah,
+        {"action": "request_payment_card", "params": {"merchant": "Rose Labs Test Payment"}},
+        current_url="https://example.test/checkout",
+    )
+
+    assert out["success"] is False
+    assert "line_items" in out["error"]
+    assert "subtotal_cents" in out["error"]
+    assert "total_cents" in out["error"]
+
+
+async def test_execute_action_request_payment_card_rejects_duplicate_after_card_ready():
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom = MagicMock()
+    dom.session = MagicMock()
+    dom.selector_map = {}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+
+    out = await execute_action(
+        dom,
+        ah,
+        {"action": "request_payment_card", "params": {}},
+        current_url="https://example.test/checkout",
+        secret_refs={
+            "card_number": "4111111111111111",
+            "card_name": "Rose Labs",
+            "card_expiry": "12/30",
+            "card_cvv": "123",
+        },
+    )
+
+    assert out["success"] is False
+    assert "already complete" in out["error"]
+    assert "Do not call request_payment_card again" in out["error"]
+    assert "card_number" in out["error"]
+    assert "line_items" not in out["error"]
+
+
 async def test_execute_action_dropdown_options_missing_element():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
@@ -4681,8 +4792,8 @@ async def test_execute_input_text_payment_triggers_approval():
             write_lock_approvals=None,
             system_name="Rose",
         )
-    assert out["status"] == "needs_write_approval"
-    assert out["approval_type"] == "payment"
+    assert out["success"] is False
+    assert "call request_payment_card" in out["error"]
 
 
 async def test_execute_input_text_coords_no_humanizer():
@@ -5997,6 +6108,11 @@ async def run_all_tests():
 
     r.record("build_autopay_prompt_section", test_build_autopay_prompt_section)
     r.record("build_autopay_prompt_section_no_card", test_build_autopay_prompt_section_no_card)
+    r.record("build_payment_card_resume_prompt_section", test_build_payment_card_resume_prompt_section)
+    r.record(
+        "build_payment_card_resume_prompt_section_requires_all_refs",
+        test_build_payment_card_resume_prompt_section_requires_all_refs,
+    )
     r.record("build_passwords_prompt_section_empty", test_build_passwords_prompt_section_empty)
     r.record("build_passwords_prompt_section_unique", test_build_passwords_prompt_section_unique_usernames)
     r.record("build_passwords_prompt_section_duplicate", test_build_passwords_prompt_section_duplicate_usernames)
@@ -6150,6 +6266,18 @@ async def run_all_tests():
     await r.record_async("execute_action_no_session", test_execute_action_no_session)
     await r.record_async("execute_action_element_not_found", test_execute_action_element_not_found)
     await r.record_async("execute_action_unknown", test_execute_action_unknown_action)
+    await r.record_async(
+        "execute_action_request_payment_card",
+        test_execute_action_request_payment_card_requests_workflow_approval,
+    )
+    await r.record_async(
+        "execute_action_request_payment_card_rejects_empty_receipt",
+        test_execute_action_request_payment_card_rejects_empty_receipt,
+    )
+    await r.record_async(
+        "execute_action_request_payment_card_rejects_duplicate_after_card_ready",
+        test_execute_action_request_payment_card_rejects_duplicate_after_card_ready,
+    )
     await r.record_async("execute_action_dropdown_options_no_el", test_execute_action_dropdown_options_missing_element)
     await r.record_async("execute_action_select_dropdown_no_el", test_execute_action_select_dropdown_missing_element)
     await r.record_async("execute_action_attempt_completion", test_execute_action_attempt_completion)

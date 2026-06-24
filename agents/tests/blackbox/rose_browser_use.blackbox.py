@@ -456,6 +456,63 @@ def test_normalize_request_user_assistance():
     assert out["params"] == {}
 
 
+def test_normalize_request_payment_card_preserves_receipt():
+    out = normalize_browser_use_response({
+        "thinking": "checkout total is ready",
+        "action": [
+            {
+                "request_payment_card": {
+                    "merchant": "Rose Labs Test Payment",
+                    "currency": "USD",
+                    "line_items": [
+                        {
+                            "name": "Aurora Notebook",
+                            "image_url": "https://example.test/notebook.png",
+                            "unit_price_cents": 1200,
+                            "quantity": 1,
+                            "line_total_cents": 1200,
+                        }
+                    ],
+                    "fees": [{"label": "Tax", "amount_cents": 99}],
+                    "subtotal_cents": 1200,
+                    "total_cents": 1299,
+                }
+            }
+        ],
+    })
+
+    assert out["action"] == "request_payment_card"
+    assert out["thinking"] == "checkout total is ready"
+    assert out["params"]["merchant"] == "Rose Labs Test Payment"
+    assert out["params"]["line_items"][0]["image_url"] == "https://example.test/notebook.png"
+    assert out["params"]["fees"][0]["amount_cents"] == 99
+    assert out["params"]["subtotal_cents"] == 1200
+    assert out["params"]["total_cents"] == 1299
+
+
+def test_normalize_request_payment_card_parses_tool_string_arguments():
+    out = normalize_browser_use_response({
+        "action": [
+            {
+                "request_payment_card": {
+                    "merchant": "Rose Labs Test Payment",
+                    "currency": "USD",
+                    "line_items": '[{"name":"Aurora Notebook","image_url":"https://example.test/notebook.png","unit_price_cents":1200,"quantity":1,"line_total_cents":1200}]',
+                    "fees": '[{"name":"Tax","amount_cents":99}]',
+                    "subtotal_cents": "1200",
+                    "total_cents": "1299",
+                }
+            }
+        ],
+    })
+
+    assert out["action"] == "request_payment_card"
+    assert out["params"]["line_items"][0]["name"] == "Aurora Notebook"
+    assert out["params"]["fees"][0]["amount_cents"] == 99
+    assert out["params"]["subtotal_cents"] == 1200
+    assert out["params"]["total_cents"] == 1299
+
+
 def test_normalize_provider_tool_call():
     out = normalize_browser_use_tool_call(
         {"id": "call_1", "name": "click", "arguments": '{"index": 4}'},

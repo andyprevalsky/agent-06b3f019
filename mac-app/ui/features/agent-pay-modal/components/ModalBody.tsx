@@ -1,37 +1,47 @@
+/**
+ * STATE MACHINE: AgentPayModal Body
+ *
+ * [LOADING] -- settings loaded --> [EDITING_LIMIT_AND_ADDRESS]
+ * [EDITING_LIMIT_AND_ADDRESS] -- validation error --> [EDITING_WITH_ERRORS]
+ * [EDITING_LIMIT_AND_ADDRESS] -- save clicked --> [SAVING]
+ * [SAVING] -- failure --> [EDITING_WITH_ERRORS]
+ * [SAVING] -- success/close --> [CLOSED]
+ *
+ * Card-entry states are intentionally absent. The modal now persists only an
+ * autopay limit plus delivery address data; checkout cards are minted later.
+ */
+
 import type { UseAgentPayModalResult } from '../types';
-import { CardForm } from './CardForm';
 import { DeliveryAddressForm } from './DeliveryAddressForm';
-import { SavedCardSummary } from './SavedCardSummary';
 import { SecurityNotice } from './SecurityNotice';
 
 /**
- * The scrollable body region of the modal — security notice, saved-card
- * summary (or card form), delivery-address block, and any save-error
- * banner. Factored out so `AgentPayModal` stays under the 80-line strict
- * function cap.
+ * The scrollable body region of the modal — security notice, autopay limit,
+ * delivery-address block, and any save-error banner.
  */
 export const ModalBody = ({ modal }: { modal: UseAgentPayModalResult }) => (
   <>
     <SecurityNotice />
 
-    {modal.savedEnvelope !== null && !modal.editingCard && (
-      <SavedCardSummary envelope={modal.savedEnvelope} onEdit={() => modal.setEditingCard(true)} />
-    )}
-
-    {modal.showCardForm && (
-      <CardForm
-        paymentData={modal.paymentData}
-        paymentErrors={modal.paymentErrors}
-        autopayLimitDisplay={modal.autopayLimitDisplay}
-        saving={modal.saving}
-        setAutopayLimitDisplay={modal.setAutopayLimitDisplay}
-        handleAutopayBlur={modal.handleAutopayBlur}
-        handleCardNumber={modal.handleCardNumber}
-        handleExpiry={modal.handleExpiry}
-        handleCVV={modal.handleCVV}
-        setPaymentField={modal.setPaymentField}
+    <div className="space-y-2">
+      <label htmlFor="agent-pay-autopay-limit" className="block text-sm font-medium">
+        Autopay limit ($)
+      </label>
+      <input
+        id="agent-pay-autopay-limit"
+        type="number"
+        min="0"
+        step="0.01"
+        value={modal.autopayLimitDisplay}
+        onChange={(event) => modal.setAutopayLimitDisplay(event.target.value)}
+        onBlur={modal.handleAutopayBlur}
+        disabled={modal.saving}
+        className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
       />
-    )}
+      {modal.paymentErrors.autoagentpaylimit_cents !== undefined && (
+        <p className="text-sm text-red-500">{modal.paymentErrors.autoagentpaylimit_cents}</p>
+      )}
+    </div>
 
     <DeliveryAddressForm
       shippingAddress={modal.shippingAddress}

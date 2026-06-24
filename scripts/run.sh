@@ -613,10 +613,8 @@ PIDS+=($!); NAMES+=("back-end")
 
 # Front-end is always launched — benchmark mode needs it for semantic tests
 # (Chrome CDP drives a real browser against the dev server in parallel with smoke).
-if ! $BENCHMARK_MODE; then
-    run_service "front-end" bash -c 'set -eo pipefail; cd front-end && rm -f frontend-logs.log && VITE_DEV_PORT=$FRONTEND_PORT npx vite 2>&1 | tee frontend-logs.log' &
-    PIDS+=($!); NAMES+=("front-end")
-fi
+run_service "front-end" bash -c 'set -eo pipefail; cd front-end && rm -f frontend-logs.log && VITE_DEV_PORT=$FRONTEND_PORT npx vite 2>&1 | tee frontend-logs.log' &
+PIDS+=($!); NAMES+=("front-end")
 
 # mac-app is skipped in benchmark mode (Electron is heavy and smoke doesn't touch it).
 if ! $BENCHMARK_MODE && $IS_MAC; then

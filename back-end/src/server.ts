@@ -36,6 +36,10 @@ import billingRouter from './domains/billing/routes';
 import apiKeysRouter from './domains/api-keys/routes';
 import smsWebhookRouter from './domains/sms-webhook/routes';
 import credentialPropagationRouter from './domains/credential-propagation/routes';
+import purchasesRouter, { purchasesWebhookRouter } from './domains/purchases/routes';
+import testPaymentRouter from './domains/test-payment/routes';
+import { TEST_PAYMENT_ENABLED } from './domains/test-payment/config';
+import { renderTestPaymentPage } from './domains/test-payment/service';
 import {
   setSupervisorFixtureOverride,
   clearSupervisorFixtureOverride,
@@ -475,6 +479,16 @@ app.use('/api/api-keys', apiKeysRouter);
 app.use('/api/upload', uploadRouter);
 app.use('/api/feedback', feedbackRouter);
 app.use('/api/data', dataRouter);
+app.use('/api/purchases', purchasesRouter);
+app.use('/api/webhooks', purchasesWebhookRouter);
+app.use('/api/test-payment', testPaymentRouter);
+app.get('/test_payment', (_req, res) => {
+  if (!TEST_PAYMENT_ENABLED) {
+    res.status(404).send('Not found');
+    return;
+  }
+  res.type('html').send(renderTestPaymentPage());
+});
 
 // Catch-all authenticated route (must be AFTER x402 routes)
 app.use('/api', authenticate, formatRouter);

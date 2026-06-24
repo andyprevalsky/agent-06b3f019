@@ -25,6 +25,27 @@ import { fetchTestPromptFiles } from './test-prompts-selector/fetchTestPromptFil
 import { useAutoLoadDefaultPrompt } from './test-prompts-selector/useAutoLoadDefaultPrompt';
 import { TEST_PROMPTS } from './test-prompts-selector/prompts';
 import type { TestPrompt, TestPromptsSelectorProps } from './test-prompts-selector/types';
+import { BACKEND_BASE_URL } from '@/lib/backendUrl';
+import { fetchTestPaymentPublicUrl } from '@/features/test-payment/api';
+
+const TEST_PAYMENT_BASE_URL_TOKEN = '{{TEST_PAYMENT_BASE_URL}}';
+
+/**
+ * Resolve the `{{TEST_PAYMENT_BASE_URL}}` token to this backend's live ngrok tunnel so the
+ * cloud browser agent gets a reachable URL. Falls back to the localhost backend (only
+ * reachable from the same machine) with a console warning when no tunnel is up.
+ */
+async function resolvePromptText(prompt: string): Promise<string> {
+  if (!prompt.includes(TEST_PAYMENT_BASE_URL_TOKEN)) return prompt;
+  const tunnelUrl = await fetchTestPaymentPublicUrl();
+  if (!tunnelUrl) {
+    console.warn(
+      `[TestPrompts] No ngrok tunnel for the local backend — using ${BACKEND_BASE_URL}, ` +
+        `which the cloud browser agent cannot reach. Start one: ngrok http <backend-port>.`,
+    );
+  }
+  return prompt.replaceAll(TEST_PAYMENT_BASE_URL_TOKEN, tunnelUrl ?? BACKEND_BASE_URL);
+}
 
 export default function TestPromptsSelector({ onSelectPrompt }: TestPromptsSelectorProps) {
   const [isOpen, setIsOpen] = useState(false);
@@ -35,14 +56,17 @@ export default function TestPromptsSelector({ onSelectPrompt }: TestPromptsSelec
   const handleSelectPrompt = async (testPrompt: TestPrompt): Promise<void> => {
     setIsLoading(true);
     try {
-      const files =
-        testPrompt.attachmentUrls && testPrompt.attachmentUrls.length > 0
-          ? await fetchTestPromptFiles(testPrompt.attachmentUrls)
-          : undefined;
-
-      onSelectPrompt(testPrompt.prompt, files);
-    } catch {
-      onSelectPrompt(testPrompt.prompt);
+      const promptText = await resolvePromptText(testPrompt.prompt);
+      let files: File[] | undefined;
+      try {
+        files =
+          testPrompt.attachmentUrls && testPrompt.attachmentUrls.length > 0
+            ? await fetchTestPromptFiles(testPrompt.attachmentUrls)
+            : undefined;
+      } catch {
+        files = undefined;
+      }
+      onSelectPrompt(promptText, files);
     } finally {
       setIsLoading(false);
       setIsOpen(false);

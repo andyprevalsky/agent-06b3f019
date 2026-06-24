@@ -1,0 +1,3 @@
+export const MAX_PURCHASE_CENTS = Number(process.env.MAX_PURCHASE_CENTS ?? '5000');
+export const PURCHASE_APPROVAL_CACHE_HOURS = 24;
+export const AGENTCARD_WEBHOOK_SECRET = process.env.AGENTCARD_WEBHOOK_SECRET ?? '';

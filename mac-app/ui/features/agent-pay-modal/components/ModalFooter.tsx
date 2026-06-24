@@ -1,3 +1,15 @@
+/**
+ * STATE MACHINE: AgentPayModal Footer
+ *
+ * [READY] -- save clicked --> [SAVING]
+ * [SAVING] -- success --> [READY_OR_CLOSED]
+ * [SAVING] -- failure --> [READY]
+ * [READY] -- cancel clicked --> [CLOSED]
+ *
+ * The primary action saves the autopay limit settings; it no longer submits
+ * saved card details.
+ */
+
 import { Loader2 } from 'lucide-react';
 
 interface ModalFooterProps {
@@ -8,13 +20,11 @@ interface ModalFooterProps {
 }
 
 /**
- * Bottom action row: Cancel + Save buttons. Save button label flips between
- * "Save Payment" (when the card form is visible) and "Save" (when only the
- * delivery address is being updated); the blackbox suite asserts both.
+ * Bottom action row: Cancel + Save buttons.
  */
 export const ModalFooter = ({ saving, showCardForm, onClose, onSave }: ModalFooterProps) => {
-  const savingLabel = showCardForm ? 'Encrypting...' : 'Saving...';
-  const idleLabel = showCardForm ? 'Save Payment' : 'Save';
+  const savingLabel = 'Saving...';
+  const idleLabel = 'Save Autopay Limit';
   return (
     <div className="flex justify-end gap-2 px-5 py-4 border-t border-border bg-muted/30 shrink-0">
       <button

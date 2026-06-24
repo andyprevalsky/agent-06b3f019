@@ -1,9 +1,4 @@
-import {
-  encryptPaymentData,
-  parsePaymentEnvelope,
-  type EncryptedPaymentEnvelope,
-  type PaymentData,
-} from '@/lib/encryption';
+import { parsePaymentEnvelope, type EncryptedPaymentEnvelope, type PaymentData } from '@/lib/encryption';
 import type { ShippingAddress, UserSettingsPatchBody, UserSettingsResponse } from './types';
 
 /**
@@ -36,6 +31,19 @@ export const parseInitialFetch = (data: UserSettingsResponse): InitialFetchOutco
   };
   const envelopeStr = data.encryptedPaymentInformation;
   if (envelopeStr !== undefined && envelopeStr !== '') {
+    try {
+      const parsed = JSON.parse(envelopeStr) as { autoagentpaylimit_cents?: unknown };
+      if (typeof parsed.autoagentpaylimit_cents === 'number') {
+        return {
+          shippingAddress,
+          savedEnvelope: null,
+          editingCard: false,
+          autopayLimitDisplay: (parsed.autoagentpaylimit_cents / 100).toFixed(2),
+        };
+      }
+    } catch {
+      // Fall through to legacy encrypted envelope parsing.
+    }
     const envelope = parsePaymentEnvelope(envelopeStr);
     if (envelope !== null) {
       return {
@@ -50,9 +58,9 @@ export const parseInitialFetch = (data: UserSettingsResponse): InitialFetchOutco
 };
 
 /**
- * Builds the PATCH body. When `showCardForm` is false we deliberately omit
- * `encryptedPaymentInformation` so the backend keeps the previously saved
- * envelope untouched (asserted by the "saved card, no edit" blackbox).
+ * Builds the PATCH body. Shopping card credentials are no longer collected;
+ * `encryptedPaymentInformation` carries only the autopay limit marker until
+ * a dedicated settings column is approved.
  */
 export const buildPatchBody = async (
   paymentData: PaymentData,
@@ -62,12 +70,12 @@ export const buildPatchBody = async (
   sameAsBilling: boolean
 ): Promise<UserSettingsPatchBody> => {
   const updatePayload: UserSettingsPatchBody = {};
-  if (showCardForm) {
-    const dollars = parseFloat(autopayLimitDisplay) || 0;
-    const cents = Math.round(dollars * 100);
-    const dataToSave: PaymentData = { ...paymentData, autoagentpaylimit_cents: cents };
-    updatePayload.encryptedPaymentInformation = await encryptPaymentData(dataToSave);
-  }
+  const dollars = parseFloat(autopayLimitDisplay) || 0;
+  const cents = Math.round(dollars * 100);
+  updatePayload.encryptedPaymentInformation = JSON.stringify({
+    version: 'agentcard-autopay-v1',
+    autoagentpaylimit_cents: cents,
+  });
   const shippingData = sameAsBilling
     ? {
         name: paymentData.cardholder_name,

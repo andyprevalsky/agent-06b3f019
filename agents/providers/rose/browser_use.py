@@ -592,6 +592,7 @@ _VALID_ACTIONS = frozenset({
     # the user for help mid-task. Keep the allowlist in sync with the tool
     # schema or normalize_browser_use_response() will reject it.
     "send_message_to_user", "request_user_assistance_for_authentication",
+    "request_payment_card",
 })
 
 
@@ -738,6 +739,40 @@ def _normalize_action_params(
         out["value"] = params["text"]
     elif params.get("value"):
         out["value"] = params["value"]
+
+    if normalized_action == "request_payment_card":
+        def _maybe_json_list(value: Any) -> Any:
+            if isinstance(value, str):
+                try:
+                    parsed = json.loads(value)
+                except json.JSONDecodeError:
+                    return value
+                return parsed if isinstance(parsed, list) else value
+            return value
+
+        def _maybe_int(value: Any) -> Any:
+            if isinstance(value, str) and value.strip().isdigit():
+                return int(value.strip())
+            return value
+
+        for key in (
+            "merchant",
+            "currency",
+            "line_items",
+            "lineItems",
+            "fees",
+            "subtotal_cents",
+            "subtotalCents",
+            "total_cents",
+            "totalCents",
+        ):
+            if params.get(key) is not None:
+                value = params[key]
+                if key in {"line_items", "lineItems", "fees"}:
+                    value = _maybe_json_list(value)
+                if key in {"subtotal_cents", "subtotalCents", "total_cents", "totalCents"}:
+                    value = _maybe_int(value)
+                out[key] = value
 
     if params.get("tab_id"):
         out["tab_id"] = params["tab_id"]

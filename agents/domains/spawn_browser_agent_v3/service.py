@@ -523,5 +523,10 @@ def build_action_titles(  # noqa: C901
     elif action_name == "request_user_assistance_for_authentication":
         title_progress = "Requesting authentication assistance..."
         title_done = "Requested authentication assistance"
+    elif action_name == "request_payment_card":
+        total_cents = unified_action.get("params", {}).get("total_cents", 0)
+        merchant = unified_action.get("params", {}).get("merchant", "merchant")
+        title_progress = f"Requesting payment card for {merchant}"
+        title_done = f"Payment card requested (${total_cents / 100:.2f})"
 
     return title_progress, title_done, resolved_action_name

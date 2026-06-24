@@ -243,7 +243,7 @@ export const useAgentPayModal = (
 ): UseAgentPayModalResult => {
   const state = useAgentPayFormState();
   useInitialSettingsFetch(isOpen, state);
-  const showCardForm = state.savedEnvelope === null || state.editingCard;
+  const showCardForm = false;
   const inputs = useInputHandlers(state);
   const handleSave = buildHandleSave(state, showCardForm, onSuccess);
   const handleClose = buildHandleClose(state, onClose);

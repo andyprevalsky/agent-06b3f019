@@ -248,6 +248,24 @@ export interface RequestUserSignupMetadata extends BaseToolMetadata {
   };
 }
 
+export interface RequestPaymentCardPayload {
+  fingerprint?: string;
+  merchant?: string;
+  currency?: string;
+  lineItems?: Array<{
+    name?: string;
+    imageUrl?: string | null;
+    unitPriceCents?: number;
+    quantity?: number;
+    lineTotalCents?: number;
+  }>;
+  fees?: Array<{ label?: string; amountCents?: number }>;
+  subtotalCents?: number;
+  totalCents?: number;
+  paymentMethodLast4?: string;
+  autopayLimitCents?: number;
+}
+
 /**
  * Metadata for request_user_approval tool messages.
  */
@@ -255,6 +273,10 @@ export interface RequestUserApprovalMetadata extends BaseToolMetadata {
   toolName: 'request_user_approval';
   requestUserApproval: {
     attentionRequestId: string;
+    toolApproval?: boolean;
+    writePermission?: boolean;
+    url?: string;
+    requestPaymentCard?: RequestPaymentCardPayload;
   };
 }
 

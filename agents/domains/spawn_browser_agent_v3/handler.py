@@ -90,6 +90,7 @@ from .service_crypto import (
     auth_realm_from_url,
     build_auth_options_prompt_section,
     build_autopay_prompt_section,
+    build_payment_card_resume_prompt_section,
     decrypt_payment_info,
     extract_rate_limited_until,
     fetch_recent_otps,
@@ -1041,7 +1042,6 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                 _user_context_sections.append(f"## Delivery Address\n{shipping_address}")
 
             _autopay_section = ""
-            _card_refs: Dict[str, str] = {}
             encrypted_payment = user_profile.get("encryptedPaymentInformation")
             if encrypted_payment and config.payment.decryption_key:
                 payment_data = decrypt_payment_info(encrypted_payment, config.payment.decryption_key)
@@ -1050,17 +1050,17 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                     if autopay_limit_cents > 0:
                         _autopay_section = build_autopay_prompt_section(payment_data, encrypted_payment)
                         _user_context_sections.append(_autopay_section.strip())
-                        _card_refs = {
-                            "card_number": payment_data.get("card_number", ""),
-                            "card_name": payment_data.get("cardholder_name", ""),
-                            "card_expiry": payment_data.get("card_expiry", ""),
-                            "card_cvv": payment_data.get("card_cvv", ""),
-                        }
                     else:
                         _user_context_sections.append(
                             "## Payment Authorization\n"
-                            "Autopay DISABLED. For ALL purchases, use send_message_to_user to get explicit approval."
+                            "Autopay DISABLED. For ALL purchases, call request_payment_card with the full itemized receipt."
                         )
+            else:
+                _user_context_sections.append(
+                    "## Payment Authorization\n"
+                    "For purchases, extract the full itemized receipt and call request_payment_card. "
+                    "Never ask the user to type a payment card into chat."
+                )
             _record_timing("parallel.data.user_profile", t)
 
             t = time.monotonic()
@@ -1077,10 +1077,14 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             ) = build_auth_options_prompt_section(auth_options, session_passwords)
 
             _secret_refs: Dict[str, str] = {}
-
-            for ref, value in _card_refs.items():
+            payment_card_refs = (write_lock_resume_state or {}).get("payment_card_refs") or {}
+            for ref in ("card_number", "card_name", "card_expiry", "card_cvv"):
+                value = payment_card_refs.get(ref)
                 if value:
                     _secret_refs[ref] = value
+            _payment_card_resume_section = build_payment_card_resume_prompt_section(payment_card_refs)
+            if _payment_card_resume_section:
+                _user_context_sections.append(_payment_card_resume_section.strip())
 
             if config.payment.decryption_key and _ref_to_encrypted:
                 from cryptography.hazmat.backends import default_backend
@@ -1114,8 +1118,8 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
 
             logger.info(
                 "Built secret refs for type interception",
-                card_refs_count=len(_card_refs),
-                password_refs_count=len([k for k in _secret_refs if k not in _card_refs]),
+                card_refs_count=len(payment_card_refs),
+                password_refs_count=len([k for k in _secret_refs if k not in payment_card_refs]),
                 attemptable_password_count=len(attemptable_password_ids),
             )
             _record_timing("parallel.data.passwords", t)
@@ -1142,7 +1146,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             return (
                 _user_context_section,
                 _autopay_section,
-                _card_refs,
+                payment_card_refs,
                 _auth_options_section,
                 _ref_to_encrypted,
                 _credential_refs_by_secret_ref,
@@ -2390,6 +2394,26 @@ Based on this feedback, I need to continue working on the task and address the i
                     "task_id": task_id,
                 }
 
+            if result.get("status") in {"needs_payment_card_approval", "awaiting_payment_card_approval"}:
+                logger.info("Payment card approval required - returning to workflow", url=current_url)
+
+                if dom_service:
+                    try:
+                        await dom_service.disconnect()
+                    except Exception as e:
+                        logger.warning(f"Failed to disconnect browser before payment card return: {e}")
+
+                return {
+                    "status": "awaiting_payment_card_approval",
+                    "payment_request": result.get("payment_request", {}),
+                    "current_url": current_url,
+                    "write_lock_approvals": write_lock_approvals,
+                    "step_count": iteration,
+                    "session_id": session_id,
+                    "cdp_url": cdp_url,
+                    "task_id": task_id,
+                }
+
             if result.get("success", True):
                 logger.info(f"Action {action_name} successful", agent_id=agent_id, title=title_done, task_id=task_id)
                 if input_page and _botsigged_diagnostics_enabled(start_url):
@@ -2919,6 +2943,91 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             metadata={"toolName": "spawn_browser_agent", "action_type": "write_lock_rejected"},
                         )
                         return
+
+                if result and result.get("status") == "awaiting_payment_card_approval":
+                    from tools.request_payment_card import (
+                        build_payment_question,
+                        lookup_purchase_activity,
+                        mint_purchase_card_activity,
+                        normalize_payment_payload,
+                    )
+                    from tools.request_user_approval import request_user_approval_direct
+
+                    payment_payload = normalize_payment_payload(
+                        result.get("payment_request", {}),
+                        workflow_instance.user_id or "",
+                    )
+                    payment_payload["agentId"] = workflow_instance.agent_id
+                    lookup_result = await workflow.execute_activity(
+                        lookup_purchase_activity,
+                        args=[workflow_instance.user_id or "", payment_payload["fingerprint"]],
+                        start_to_close_timeout=timedelta(seconds=30),
+                        retry_policy=RetryPolicy(maximum_attempts=3),
+                    )
+
+                    approval_response = {"attention_request_id": None}
+                    if not lookup_result.get("reusable"):
+                        approval_response = await request_user_approval_direct(
+                            workflow_instance,
+                            question=build_payment_question(payment_payload),
+                            metadata={
+                                "toolApproval": True,
+                                "writePermission": True,
+                                "url": result.get("current_url", ""),
+                                "requestPaymentCard": payment_payload,
+                            },
+                        )
+
+                    card = await workflow.execute_activity(
+                        mint_purchase_card_activity,
+                        args=[workflow_instance.user_id or "", payment_payload],
+                        start_to_close_timeout=timedelta(seconds=90),
+                        retry_policy=RetryPolicy(maximum_attempts=1),
+                    )
+                    card_number = card.get("pan") or card.get("cardNumber") or card.get("card_number") or ""
+                    card_expiry = card.get("expiry") or card.get("expiration") or card.get("cardExpiry") or ""
+                    card_cvv = card.get("cvv") or card.get("cvc") or card.get("cardCvv") or ""
+                    payment_card_refs = {
+                        "card_number": card_number,
+                        "card_name": card.get("name") or "Rose Labs",
+                        "card_expiry": card_expiry,
+                        "card_cvv": card_cvv,
+                    }
+
+                    current_approvals = result.get("write_lock_approvals", {})
+                    current_approvals["payment"] = {
+                        "domain": get_domain_from_url(result.get("current_url", "")),
+                        "approved_at": workflow.now().timestamp(),
+                    }
+
+                    write_lock_resume_state = {
+                        "pending_action": None,
+                        "write_lock_approvals": current_approvals,
+                        "approval_type": "payment",
+                        "step_count": result.get("step_count", 0),
+                        "session_id": result.get("session_id"),
+                        "cdp_url": result.get("cdp_url"),
+                        "task_id": result.get("task_id"),
+                        "payment_card_refs": payment_card_refs,
+                    }
+
+                    yield ToolEvent(
+                        type=EventType.POST_MESSAGE,
+                        title="Payment card ready",
+                        message=f"One-time card ending in {card.get('last4', '****')} is ready for checkout.",
+                        status=MessageStatus.FINISHED,
+                        metadata={
+                            "toolName": "spawn_browser_agent",
+                            "task_id": result.get("task_id"),
+                            "requestUserApproval": {
+                                "writePermission": True,
+                                "attentionRequestId": approval_response.get("attention_request_id"),
+                                "requestPaymentCard": payment_payload,
+                            },
+                        },
+                    )
+
+                    continue
 
                 if result and result.get("status") == "awaiting_auth_assistance":
                     request_id = result.get("request_id")

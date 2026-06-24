@@ -31,6 +31,7 @@ class BenchmarkTask:
     min_tool_counts: Optional[dict] = None  # Minimum tool call counts across entire agent tree (toolName → min count)
     forbidden_tools: List[str] = field(default_factory=list)  # Tool names that must not be called
     sub_agent_count: Optional[int] = None  # Default fan-out for load-test style tasks; substitutes {n} in prompt
+    expected_payment_receipt: Optional[dict] = None  # Expected request_payment_card approval receipt metadata
 
 
 _TASKS_FILE = os.path.join(os.path.dirname(__file__), "tasks.json")

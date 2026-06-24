@@ -1,11 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
-  encryptPaymentData,
   parsePaymentEnvelope,
-  detectCardType,
-  validateCardNumber,
-  validateExpiry,
-  validateCVV,
   type PaymentData,
   type EncryptedPaymentEnvelope,
 } from '@/lib/encryption';
@@ -51,34 +46,21 @@ const INITIAL_PAYMENT: PaymentData = {
 
 function validatePaymentFields(pd: PaymentData): Record<string, string> {
   const errors: Record<string, string> = {};
-  if (!pd.card_number) {
-    errors.card_number = 'Card number is required';
-  } else if (!validateCardNumber(pd.card_number)) {
-    errors.card_number = 'Invalid card number';
-  }
-  if (!pd.cardholder_name.trim()) errors.cardholder_name = 'Cardholder name is required';
-  if (!pd.card_expiry) {
-    errors.card_expiry = 'Expiry date is required';
-  } else if (!validateExpiry(pd.card_expiry)) {
-    errors.card_expiry = 'Invalid or expired date';
-  }
-  const cardType = detectCardType(pd.card_number);
-  if (!pd.card_cvv) {
-    errors.card_cvv = 'CVV is required';
-  } else if (!validateCVV(pd.card_cvv, cardType)) {
-    errors.card_cvv = cardType === 'amex' ? 'Must be 4 digits' : 'Must be 3 digits';
-  }
-  if (!pd.billing_street_address.trim())
-    errors.billing_street_address = 'Street address is required';
-  if (!pd.billing_city.trim()) errors.billing_city = 'City is required';
-  if (!pd.billing_state.trim()) errors.billing_state = 'State is required';
-  if (!pd.billing_zipcode.trim()) errors.billing_zipcode = 'ZIP code is required';
-  if (!pd.billing_country.trim()) errors.billing_country = 'Country is required';
-  if (pd.billing_email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(pd.billing_email)) {
-    errors.billing_email = 'Invalid email format';
-  }
   if (pd.autoagentpaylimit_cents < 0) errors.autoagentpaylimit_cents = 'Must be 0 or greater';
   return errors;
+}
+
+function parseAutopayLimit(raw: string | null): number | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as { autoagentpaylimit_cents?: unknown };
+    return typeof parsed.autoagentpaylimit_cents === 'number'
+      ? parsed.autoagentpaylimit_cents
+      : null;
+  } catch {
+    const envelope = parsePaymentEnvelope(raw);
+    return envelope?.autoagentpaylimit_cents ?? null;
+  }
 }
 
 /** Manages payment form state, validation, and saving. */
@@ -99,16 +81,14 @@ export function usePayment(
   );
 
   useEffect(() => {
-    if (userData.encryptedPaymentInformation) {
-      const envelope = parsePaymentEnvelope(userData.encryptedPaymentInformation);
-      setSavedPaymentEnvelope(envelope);
-      if (envelope) {
-        setAutopayLimitDisplay((envelope.autoagentpaylimit_cents / 100).toFixed(2));
-        setPaymentData((prev) => ({
-          ...prev,
-          autoagentpaylimit_cents: envelope.autoagentpaylimit_cents,
-        }));
-      }
+    const autopayLimit = parseAutopayLimit(userData.encryptedPaymentInformation);
+    if (autopayLimit !== null) {
+      setSavedPaymentEnvelope(parsePaymentEnvelope(userData.encryptedPaymentInformation));
+      setAutopayLimitDisplay((autopayLimit / 100).toFixed(2));
+      setPaymentData((prev) => ({
+        ...prev,
+        autoagentpaylimit_cents: autopayLimit,
+      }));
     } else {
       setSavedPaymentEnvelope(null);
     }
@@ -125,8 +105,12 @@ export function usePayment(
       setSavingPayment(true);
       setError(null);
       setSavedPayment(false);
-      const encryptedData = await encryptPaymentData(dataToSave);
-      const data = await savePaymentApi(encryptedData);
+      const data = await savePaymentApi(
+        JSON.stringify({
+          version: 'agentcard-autopay-v1',
+          autoagentpaylimit_cents: cents,
+        }),
+      );
       setUserData((prev) => ({
         ...prev,
         encryptedPaymentInformation: data.encryptedPaymentInformation as string,
@@ -145,22 +129,9 @@ export function usePayment(
     }
   }, [autopayLimitDisplay, paymentData, setError, setUserData]);
 
-  const handleCardNumber = useCallback((value: string) => {
-    const digits = value.replace(/\D/g, '').slice(0, 16);
-    const formatted = digits.replace(/(.{4})/g, '$1 ').trim();
-    setPaymentData((prev) => ({ ...prev, card_number: formatted }));
-  }, []);
-
-  const handleExpiry = useCallback((value: string) => {
-    const digits = value.replace(/\D/g, '').slice(0, 4);
-    const formatted = digits.length > 2 ? `${digits.slice(0, 2)}/${digits.slice(2)}` : digits;
-    setPaymentData((prev) => ({ ...prev, card_expiry: formatted }));
-  }, []);
-
-  const handleCVV = useCallback((value: string) => {
-    const digits = value.replace(/\D/g, '').slice(0, 4);
-    setPaymentData((prev) => ({ ...prev, card_cvv: digits }));
-  }, []);
+  const handleCardNumber = useCallback(() => {}, []);
+  const handleExpiry = useCallback(() => {}, []);
+  const handleCVV = useCallback(() => {}, []);
 
   const handleAutopayBlur = useCallback(() => {
     const dollars = parseFloat(autopayLimitDisplay) || 0;
@@ -179,7 +150,7 @@ export function usePayment(
     autopayLimitDisplay,
     setAutopayLimitDisplay,
     savedPaymentEnvelope,
-    currentCardType: detectCardType(paymentData.card_number),
+    currentCardType: 'unknown',
     savePaymentInfo,
     handleCardNumber,
     handleExpiry,

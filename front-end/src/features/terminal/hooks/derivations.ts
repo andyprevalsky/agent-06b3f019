@@ -185,6 +185,7 @@ export function derivePendingApproval(messages: Message[]): PendingApproval | nu
     attentionRequestId,
     question: activeApproval.text || '',
     imageUrl: activeApproval.metadata?.imageUrl || null,
+    requestPaymentCard: activeApproval.metadata?.requestUserApproval?.requestPaymentCard,
   };
 }
 

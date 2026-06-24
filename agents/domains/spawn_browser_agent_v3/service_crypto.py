@@ -28,6 +28,7 @@ logger = structlog.get_logger()
 MIN_USABLE_EMAIL_OTP_TTL_SECONDS = 30
 CHROMIUM_UNIX_EPOCH_OFFSET_SECONDS = 11644473600
 UNIX_MS_VS_CHROMIUM_MICROSECONDS_BOUNDARY = 10000000000000
+PAYMENT_CARD_SECRET_REFS = ("card_number", "card_name", "card_expiry", "card_cvv")
 
 
 # ========================================
@@ -817,9 +818,6 @@ def build_autopay_prompt_section(payment_data: Dict[str, Any], encrypted_envelop
     autopay_limit_cents = payment_data.get("autoagentpaylimit_cents", 0)
     autopay_limit_dollars = autopay_limit_cents / 100
 
-    card_number = payment_data.get("card_number", "")
-    card_last_four = card_number[-4:] if len(card_number) >= 4 else "****"
-
     billing_lines = [
         payment_data.get("billing_street_address", ""),
         payment_data.get("billing_address_line2", ""),
@@ -839,16 +837,39 @@ def build_autopay_prompt_section(payment_data: Dict[str, Any], encrypted_envelop
 {billing_address}{contact_info}
 
 ## Payment Information
-AUTOPAY ENABLED (limit: ${autopay_limit_dollars:.2f}): Payment card ending in {card_last_four} is available for checkout.
+AUTOPAY ENABLED (limit: ${autopay_limit_dollars:.2f}): When you reach checkout, extract the full itemized receipt and call request_payment_card.
 
-When you reach a payment page, type these exact secret refs into the corresponding fields. The browser tool resolves each ref to the user's saved card data at input time:
+request_payment_card returns one-time secret refs after approval. Type only these refs into payment fields:
 - Card number field: card_number
 - Cardholder name field: card_name
 - Expiry field: card_expiry
 - CVV field: card_cvv
 
-- If order total <= ${autopay_limit_dollars:.2f}: Complete payment using the card refs above
-- If order total > ${autopay_limit_dollars:.2f}: Use send_message_to_user with is_question=true to request approval before paying"""
+Do not ask the user to enter a card. Do not type stored card details. The payment card is minted on demand."""
+
+
+def has_payment_card_secret_refs(secret_refs: Optional[Dict[str, Any]]) -> bool:
+    """Return true when a one-time payment card is already available as secret refs."""
+    refs = secret_refs or {}
+    return all(bool(refs.get(ref)) for ref in PAYMENT_CARD_SECRET_REFS)
+
+
+def build_payment_card_resume_prompt_section(payment_card_refs: Dict[str, Any]) -> str:
+    """Build resume instructions for an already approved one-time payment card."""
+    if not has_payment_card_secret_refs(payment_card_refs):
+        return ""
+
+    return """
+## One-Time Payment Card
+Payment approval is complete and the one-time card is ready. Do not call request_payment_card again for this checkout.
+
+Type only these secret refs into the payment fields:
+- Card number field: card_number
+- Cardholder name field: card_name
+- Expiry field: card_expiry
+- CVV field: card_cvv
+
+After filling the payment fields, submit the checkout form and continue until the merchant confirmation page is shown."""
 
 
 def build_passwords_prompt_section(passwords: List[Dict[str, Any]]) -> Tuple[str, Dict[str, str]]:
