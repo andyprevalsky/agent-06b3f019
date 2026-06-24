@@ -53,10 +53,62 @@ function getProdTarget(): CleanupTarget | null {
 }
 
 /**
- * LOCAL target: this worktree's docker DB, discovered from .context/services.json
- * (written by scripts/run.sh). Returns null when the worktree has no local DB running.
+ * LOCAL target: this worktree's docker DB. Resolved by CONTAINER NAME
+ * (`victoria-db-<CONDUCTOR_WORKSPACE_NAME>`) via `docker port`, NOT by the port recorded in
+ * services.json — that port can be stale and since reused by a SIBLING worktree's container,
+ * which would make us clean the wrong database. Starts the container if it is stopped so its
+ * data can be purged. Falls back to services.json only when the workspace name is unavailable
+ * (e.g. system-postgres setups). Returns null when the worktree has no local DB.
  */
 function getLocalWorktreeTarget(): CleanupTarget | null {
+  const workspace = process.env.CONDUCTOR_WORKSPACE_NAME;
+  if (workspace) {
+    const container = `victoria-db-${workspace}`;
+    try {
+      const running = execSync(
+        `docker ps --filter "name=^${container}$" --format '{{.Names}}'`,
+        { encoding: 'utf-8' }
+      ).trim();
+      if (!running) {
+        const exists = execSync(
+          `docker ps -a --filter "name=^${container}$" --format '{{.Names}}'`,
+          { encoding: 'utf-8' }
+        ).trim();
+        if (exists) {
+          console.log(
+            `⚠️  ${container} is stopped — not cleaning in place (its stored port may be reused\n` +
+              `    by a sibling worktree). Purge it with: docker rm -f ${container}`
+          );
+        }
+        return null;
+      }
+      const portLine = execSync(`docker port ${container} 5432 2>/dev/null || true`, {
+        encoding: 'utf-8',
+      }).trim();
+      const port = portLine.split('\n')[0]?.match(/:(\d+)\s*$/)?.[1];
+      if (!port) return null;
+      // Collision guard: confirm the RUNNING container publishing this port is actually ours —
+      // never a sibling worktree's container that grabbed the same port number.
+      const owner = execSync(`docker ps --filter "publish=${port}" --format '{{.Names}}'`, {
+        encoding: 'utf-8',
+      }).trim();
+      if (owner !== container) {
+        console.log(
+          `⚠️  Port :${port} is published by '${owner || 'unknown'}', not '${container}' — ` +
+            `skipping local cleanup so a sibling worktree's DB is never touched.`
+        );
+        return null;
+      }
+      const url = `postgresql://postgres:postgres@localhost:${port}/victoria`;
+      if (url !== process.env.DATABASE_URL) {
+        return { label: `local worktree (${container} on :${port})`, url };
+      }
+    } catch (error: any) {
+      console.log(`⚠️  Could not resolve ${container} via docker:`, error.message);
+    }
+  }
+
+  // Fallback: services.json (system-postgres / no workspace name).
   try {
     const servicesPath = path.join(WORKTREE_ROOT, '.context', 'services.json');
     if (!fs.existsSync(servicesPath)) return null;
@@ -65,12 +117,8 @@ function getLocalWorktreeTarget(): CleanupTarget | null {
     const container = svc?.database?.container;
     if (!port) return null;
     const url = `postgresql://postgres:postgres@localhost:${port}/victoria`;
-    // Skip if this is somehow the same as prod (it never is for a docker DB).
     if (url === process.env.DATABASE_URL) return null;
-    return {
-      label: `local worktree (${container ?? 'victoria'} on :${port})`,
-      url,
-    };
+    return { label: `local worktree (${container ?? 'victoria'} on :${port})`, url };
   } catch (error: any) {
     console.log('⚠️  Could not read local worktree DB from services.json:', error.message);
     return null;
