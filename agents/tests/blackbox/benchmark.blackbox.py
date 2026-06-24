@@ -134,6 +134,13 @@ def test_outreach_batch_has_timeout_floor():
     assert get_timeout_floor("chat-mode") is None
 
 
+def test_parallel_tool_calls_smoke_cap_allows_recent_fanout_tail():
+    """Parallel web research smoke keeps a bounded but realistic timeout cap."""
+    from benchmarks.benchmark_tasks import get_smoke_cap
+
+    assert get_smoke_cap("parallel-tool-calls") == 600
+
+
 def test_timeout_default_uses_task_config_when_history_is_missing():
     """Tasks without enough history still get a runnable configured timeout."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -1677,6 +1684,10 @@ async def run_all_tests():
     r.record("smoke_memory_summary_passes", test_build_smoke_memory_summary_passes_stable_worker)
     r.record("logical_tool_counts_ignore_progress", test_logical_tool_counts_ignore_progress_messages)
     r.record("tool_count_expectations", test_tool_count_expectations_support_minimums_and_forbidden_tools)
+    r.record(
+        "parallel_tool_calls_smoke_cap",
+        test_parallel_tool_calls_smoke_cap_allows_recent_fanout_tail,
+    )
     r.record("parallel_tool_calls_explore_sub_agents", test_parallel_tool_calls_smoke_requires_explore_sub_agents)
     r.record("spawn_sub_agents_no_browser_code_detours", test_spawn_sub_agents_smoke_forbids_browser_and_code_detours)
     return r.all_passed
