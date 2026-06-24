@@ -88,11 +88,11 @@ async function createBundleWithCookie(params: {
 test('benchmark anon auth options hide saved auth and expose minted identity', async () => {
   const userId = await createUser('Rose Harbor');
   const previousDisableSaved = process.env.BENCHMARK_DISABLE_SAVED_BROWSER_AUTH;
-  const previousAgentMailKey = process.env.AGENTMAIL_API_KEY;
+  const previousPrimitiveKey = process.env.PRIMITIVE_API_KEY;
   const previousAgentPhoneKey = process.env.AGENTPHONE_API_KEY;
   try {
     process.env.BENCHMARK_DISABLE_SAVED_BROWSER_AUTH = 'true';
-    delete process.env.AGENTMAIL_API_KEY;
+    delete process.env.PRIMITIVE_API_KEY;
     delete process.env.AGENTPHONE_API_KEY;
 
     await prisma.agentIdentity.create({
@@ -144,8 +144,8 @@ test('benchmark anon auth options hide saved auth and expose minted identity', a
   } finally {
     if (previousDisableSaved === undefined) delete process.env.BENCHMARK_DISABLE_SAVED_BROWSER_AUTH;
     else process.env.BENCHMARK_DISABLE_SAVED_BROWSER_AUTH = previousDisableSaved;
-    if (previousAgentMailKey === undefined) delete process.env.AGENTMAIL_API_KEY;
-    else process.env.AGENTMAIL_API_KEY = previousAgentMailKey;
+    if (previousPrimitiveKey === undefined) delete process.env.PRIMITIVE_API_KEY;
+    else process.env.PRIMITIVE_API_KEY = previousPrimitiveKey;
     if (previousAgentPhoneKey === undefined) delete process.env.AGENTPHONE_API_KEY;
     else process.env.AGENTPHONE_API_KEY = previousAgentPhoneKey;
     await cleanup(userId);

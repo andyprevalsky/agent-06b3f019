@@ -170,7 +170,10 @@ async def test_browser_agent_recording_writes_local_html_replay():
             assert "cursorByFrame" in html_text
             assert "cursorAtTime" in html_text
             assert "Clicked submit" in html_text
-            assert "#wrap { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 0; height: calc(100vh - 48px); overflow: hidden; }" in html_text
+            assert (
+                "#wrap { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 0; height: calc(100vh - 48px); overflow: hidden; }"
+                in html_text
+            )
             assert "#stage { display: flex; align-items: flex-start;" in html_text
             assert "aside { min-height: 0;" in html_text
     finally:
@@ -292,7 +295,7 @@ def test_browser_agent_recording_steel_video_player_uses_debug_recording_and_win
     )
 
     assert "Source: Steel MP4/HLS debug recording" in html_text
-    assert "const mp4Src = \"media/recording.mp4\"" in html_text
+    assert 'const mp4Src = "media/recording.mp4"' in html_text
     assert "const BROWSER_WINDOW_WIDTH = 1288" in html_text
     assert "const CONTENT_OFFSET_Y = 91" in html_text
     assert "cursorAtTime(video.currentTime * 1000)" in html_text
@@ -353,16 +356,12 @@ def test_mouse_input_synthesis_generates_bounded_non_linear_path():
     dy = end[1] - start[1]
     line_len = (dx * dx + dy * dy) ** 0.5
     max_line_error = max(
-        abs(dy * sample.x - dx * sample.y + end[0] * start[1] - end[1] * start[0]) / line_len
-        for sample in path[2:-2]
+        abs(dy * sample.x - dx * sample.y + end[0] * start[1] - end[1] * start[0]) / line_len for sample in path[2:-2]
     )
     assert max_line_error > 3
     assert max_line_error < line_len * 0.14
 
-    projections = [
-        ((sample.x - start[0]) * dx + (sample.y - start[1]) * dy) / (line_len * line_len)
-        for sample in path
-    ]
+    projections = [((sample.x - start[0]) * dx + (sample.y - start[1]) * dy) / (line_len * line_len) for sample in path]
     assert min(projections) >= -0.08
     assert max(projections) <= 1.08
 
@@ -389,8 +388,7 @@ def test_mouse_input_synthesis_rejects_unrealistic_sample_jumps():
             rng=random.Random(seed),
         )
         steps = [
-            math.hypot(current.x - previous.x, current.y - previous.y)
-            for previous, current in zip(path, path[1:])
+            math.hypot(current.x - previous.x, current.y - previous.y) for previous, current in zip(path, path[1:])
         ]
         velocities = [
             math.hypot(current.x - previous.x, current.y - previous.y) / max(1e-6, current.delay_s)
@@ -1077,6 +1075,98 @@ def test_extract_rate_limited_until_from_headers_retry_after():
     assert out3 is None
 
 
+# ========================================
+# service_crypto: OTP extraction + iMessage source
+# ========================================
+
+
+def test_extract_otp_comprehensive_formats():
+    from domains.spawn_browser_agent_v3.service_crypto import extract_otp_from_text
+
+    assert extract_otp_from_text("Your verification code is 123456") == "123456"
+    assert extract_otp_from_text("123456 is your Amazon one-time code") == "123456"
+    assert extract_otp_from_text("G-456789 is your Google verification code") == "456789"
+    assert extract_otp_from_text("[Uber] Your code: 2744. Never share this code.") == "2744"
+    assert extract_otp_from_text("Your one-time passcode is 998877") == "998877"
+    assert extract_otp_from_text("Enter 135790 to verify your account") == "135790"
+
+
+def test_extract_otp_ignores_non_otp_numbers():
+    from domains.spawn_browser_agent_v3.service_crypto import extract_otp_from_text
+
+    # Conversational / commercial numbers must not be mistaken for codes.
+    assert extract_otp_from_text("Let's meet at 4021 Main St at 7pm") is None
+    assert extract_otp_from_text("Your order 12345678 has shipped") is None
+    assert extract_otp_from_text("I'll send you $5500 tomorrow") is None
+
+
+def test_format_otp_user_message_shows_sms_label_and_sender():
+    from domains.spawn_browser_agent_v3.service_crypto import ExtractedOTP, format_otp_user_message
+
+    otp = ExtractedOTP(
+        code="123456",
+        sender="262966",
+        received_at="",
+        age_seconds=45,
+        ttl_seconds=255,
+        channel="sms",
+    )
+    msg = format_otp_user_message(otp)
+    assert "SMS OTP" in msg
+    assert "123456" in msg
+    # The source (sender) is surfaced to the agent.
+    assert "262966" in msg
+
+
+async def test_fetch_recent_otps_includes_imessage_and_prefers_agentphone():
+    import domains.spawn_browser_agent_v3.service_crypto as sc
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    agentphone = [
+        {"id": "ap1", "from": "+18885551234", "to": "agentnum", "body": "Your code is 123456", "date": now_iso}
+    ]
+    imessages = [
+        # Duplicate code from iMessage — agent-phone should win the dedup.
+        {"id": "im1", "from": "262966", "to": "me", "body": "Your Amazon code is 123456", "date": now_iso},
+        # iMessage-only code — should be surfaced, mapped to the SMS channel.
+        {"id": "im2", "from": "729000", "to": "me", "body": "Your verification code is 999888", "date": now_iso},
+    ]
+
+    with (
+        patch.object(sc, "fetch_recent_emails", AsyncMock(return_value=[])),
+        patch.object(sc, "fetch_recent_sms_messages", AsyncMock(return_value=agentphone)),
+        patch.object(sc, "fetch_recent_imessages", AsyncMock(return_value=imessages)),
+    ):
+        otps = await sc.fetch_recent_otps("user-1", "http://backend", "api-key")
+
+    by_code = {o.code: o for o in otps}
+    assert "123456" in by_code, f"expected agent-phone code, got {list(by_code)}"
+    assert "999888" in by_code, f"expected iMessage-only code, got {list(by_code)}"
+    # Agent-phone won the dedup for the shared code.
+    assert by_code["123456"].sender == "+18885551234"
+    # iMessage-sourced OTP is mapped to the SMS channel for the agent prompt.
+    assert by_code["999888"].sender == "729000"
+    assert by_code["999888"].channel == "sms"
+
+
+async def test_fetch_recent_otps_skips_imessage_without_otp_context():
+    import domains.spawn_browser_agent_v3.service_crypto as sc
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    imessages = [
+        {"id": "im1", "from": "5551212", "to": "me", "body": "see you at 4021 Main St", "date": now_iso},
+    ]
+
+    with (
+        patch.object(sc, "fetch_recent_emails", AsyncMock(return_value=[])),
+        patch.object(sc, "fetch_recent_sms_messages", AsyncMock(return_value=[])),
+        patch.object(sc, "fetch_recent_imessages", AsyncMock(return_value=imessages)),
+    ):
+        otps = await sc.fetch_recent_otps("user-1", "http://backend", "api-key")
+
+    assert otps == []
+
+
 def test_extract_rate_limited_until_from_text_iso():
     from domains.spawn_browser_agent_v3.service_crypto import extract_rate_limited_until
 
@@ -1307,7 +1397,7 @@ async def test_fetch_recent_otps_extracts_codes_from_html_body():
                             "bodyHtml": "<p>Verification code:</p><p>8148</p><p>Enter this code.</p>",
                             "date": now,
                             "fromName": "Uber",
-                            "credentialId": "agentmail-inbox",
+                            "credentialId": "primitive-inbox",
                         }
                     ]
                 },
@@ -1319,7 +1409,7 @@ async def test_fetch_recent_otps_extracts_codes_from_html_body():
     assert len(result) == 1
     assert result[0].code == "8148"
     assert result[0].sender == "Uber"
-    assert result[0].credential_id == "agentmail-inbox"
+    assert result[0].credential_id == "primitive-inbox"
 
 
 async def test_fetch_recent_otps_dedupes_old_emails():
@@ -2850,10 +2940,7 @@ def test_select_auth_assistance_current_url_restores_pre_submit_query_params():
         ],
     )
 
-    assert selected == (
-        "https://www.amazon.com/ap/signin?"
-        "openid.return_to=https%3A%2F%2Fwww.amazon.com%2Fcheckout"
-    )
+    assert selected == ("https://www.amazon.com/ap/signin?openid.return_to=https%3A%2F%2Fwww.amazon.com%2Fcheckout")
 
 
 def test_select_auth_assistance_current_url_keeps_current_when_it_has_query_params():
@@ -5935,6 +6022,17 @@ async def run_all_tests():
     r.record("extract_rate_limited_until_canonical", test_extract_rate_limited_until_canonical_field)
     r.record("extract_rate_limited_until_headers_reset", test_extract_rate_limited_until_from_headers_reset)
     r.record("extract_rate_limited_until_headers_retry_after", test_extract_rate_limited_until_from_headers_retry_after)
+    r.record("extract_otp_comprehensive_formats", test_extract_otp_comprehensive_formats)
+    r.record("extract_otp_ignores_non_otp_numbers", test_extract_otp_ignores_non_otp_numbers)
+    r.record("format_otp_user_message_sms_label_and_sender", test_format_otp_user_message_shows_sms_label_and_sender)
+    await r.record_async(
+        "fetch_recent_otps_includes_imessage_prefers_agentphone",
+        test_fetch_recent_otps_includes_imessage_and_prefers_agentphone,
+    )
+    await r.record_async(
+        "fetch_recent_otps_skips_imessage_without_otp_context",
+        test_fetch_recent_otps_skips_imessage_without_otp_context,
+    )
     r.record("extract_rate_limited_until_text_iso", test_extract_rate_limited_until_from_text_iso)
     r.record("extract_rate_limited_until_text_epoch", test_extract_rate_limited_until_from_text_epoch)
     r.record("extract_rate_limited_until_text_retry_after", test_extract_rate_limited_until_from_text_retry_after)
@@ -6261,7 +6359,9 @@ async def run_all_tests():
         "browser_humanizer_keyboard_synthesis",
         test_browser_humanizer_keyboard_uses_keycap_timing_for_text_and_shortcuts,
     )
-    await r.record_async("browser_network_recording_captures_body", test_browser_network_recording_captures_response_body)
+    await r.record_async(
+        "browser_network_recording_captures_body", test_browser_network_recording_captures_response_body
+    )
 
     # handler statics
     r.record("claude_token_state_defaults", test_claude_token_state_defaults)

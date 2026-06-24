@@ -16,7 +16,11 @@ from urllib.parse import parse_qs, urlparse
 
 import structlog
 
-from domains.spawn_browser_agent_v3.repo import fetch_recent_emails, fetch_recent_sms_messages
+from domains.spawn_browser_agent_v3.repo import (
+    fetch_recent_emails,
+    fetch_recent_imessages,
+    fetch_recent_sms_messages,
+)
 from utils.error_utils import extract_error_message
 
 logger = structlog.get_logger()
@@ -301,42 +305,65 @@ class ExtractedOTP:
     channel: str = "email"
 
 
-def extract_otp_from_text(text: str) -> Optional[str]:
-    """Extract OTP code from email text using regex patterns."""
-    # Patterns ordered by specificity (most specific first)
-    patterns = [
-        # 6-digit codes with context
-        r"(?:verification|security|auth|login|sign.?in|confirm)\s*(?:code|pin|otp)[\s:]+(\d{6})\b",
-        r"\b(\d{6})\s*(?:is\s+)?(?:your|the)\s+(?:verification|security|auth|one.?time|otp|login)\s*(?:code|pin)?",
-        r"(?:code|pin|otp)[\s:]+(\d{6})\b",
-        r"\b(\d{6})\b.*(?:expires?|valid|verify|enter|use)",
-        # 4-digit PINs
-        r"\b(?:your|the)\s+[A-Za-z0-9][A-Za-z0-9 ._-]{0,30}\s+(?:code|pin|otp)\s+(?:is\s+)?(\d{4,8})\b",
-        r"(?:verification|security|auth|login|sign.?in|confirm)\s*(?:code|pin|otp)[\s:]+(\d{4})\b",
-        r"(?:pin|code)[\s:]+(\d{4})\b",
-        r"\b(\d{4})\s*(?:is\s+)?(?:your|the)\s+(?:pin|code|otp)",
-        # 8-digit codes
-        r"(?:code|otp)[\s:]+(\d{8})\b",
-    ]
+# Keyword groups shared across OTP patterns. Kept broad so we catch the common
+# providers (Google "G-123456", "one-time passcode", "access code", etc.) while
+# still requiring OTP context adjacent to the digits — this is the comprehensive
+# filter that keeps conversational numbers (addresses, prices) from being read
+# as codes. Mirrors isLikelyOtpMessage in the mac-app i-message-reader.
+_OTP_CONTEXT = r"verification|security|auth|login|sign.?in|confirm|access|one.?time|2fa|two.?factor"
+_OTP_NOUN = r"code|pin|otp|passcode|password"
 
-    # Skip if text contains low-confidence keywords
-    low_confidence_keywords = [
-        "order",
-        "tracking",
-        "receipt",
-        "invoice",
-        "account number",
-        "reference",
-        "transaction id",
-    ]
+# High-confidence patterns: an explicit OTP keyword sits right next to the
+# digits, so these are safe even when low-confidence words (order, invoice…)
+# are also present in the message.
+HIGH_CONFIDENCE_OTP_PATTERNS = [
+    # Google-style "G-123456"
+    r"\bG-(\d{4,8})\b",
+    # "<context> <noun>: 123456"
+    rf"(?:{_OTP_CONTEXT})\s*(?:{_OTP_NOUN})[\s:#=]+(\d{{4,8}})\b",
+    # "123456 is your <context> code"
+    rf"\b(\d{{4,8}})\s*(?:is\s+)?(?:your|the)\s+(?:[A-Za-z][A-Za-z0-9 ._-]{{0,20}}\s+)?(?:{_OTP_CONTEXT})\s*(?:{_OTP_NOUN})?\b",
+    # "code/otp/passcode is/=/: 123456"
+    rf"(?:{_OTP_NOUN})\s*(?:is|:|=|#)\s*(\d{{4,8}})\b",
+    # "your [Brand] code is 123456"
+    rf"(?:your|the)\s+(?:[A-Za-z0-9][A-Za-z0-9 ._-]{{0,30}}\s+)?(?:{_OTP_NOUN})\s+(?:is\s+)?(\d{{4,8}})\b",
+]
+
+# General patterns add looser matches used only when no low-confidence keyword is
+# present in the message.
+GENERAL_OTP_PATTERNS = HIGH_CONFIDENCE_OTP_PATTERNS + [
+    # digits followed by expiry/usage context
+    r"\b(\d{4,8})\b[^\n]{0,40}?(?:expires?|valid for|verify|enter|use this|do not share|don.?t share)",
+    # bare "code: 1234" / "1234 is your code"
+    r"(?:pin|code)[\s:#=]+(\d{4})\b",
+    r"\b(\d{4})\s*(?:is\s+)?(?:your|the)\s+(?:pin|code|otp)",
+]
+
+LOW_CONFIDENCE_KEYWORDS = [
+    "order",
+    "tracking",
+    "receipt",
+    "invoice",
+    "account number",
+    "reference",
+    "transaction id",
+]
+
+
+def extract_otp_from_text(text: str) -> Optional[str]:
+    """Extract an OTP/verification code from message text using regex patterns.
+
+    Requires OTP context adjacent to the digits, so ordinary numbers (addresses,
+    prices, order totals) are not mistaken for codes. When the message also
+    contains low-confidence words (order, invoice, …) only the high-confidence
+    patterns run.
+    """
     lower_text = text.lower()
-    if any(kw in lower_text for kw in low_confidence_keywords):
-        high_confidence_patterns = patterns[:3] + [patterns[4]]
-        for pattern in high_confidence_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                return match.group(1)
-        return None
+    patterns = (
+        HIGH_CONFIDENCE_OTP_PATTERNS
+        if any(kw in lower_text for kw in LOW_CONFIDENCE_KEYWORDS)
+        else GENERAL_OTP_PATTERNS
+    )
 
     for pattern in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
@@ -347,7 +374,7 @@ def extract_otp_from_text(text: str) -> Optional[str]:
 
 
 def _email_otp_search_text(email: Dict) -> str:
-    """Build searchable email text; AgentMail often has OTPs only in HTML."""
+    """Build searchable email text; minted inboxes often have OTPs only in HTML."""
     body_text = str(email.get("bodyText") or "")
     body_html = str(email.get("bodyHtml") or "")
     if not body_html:
@@ -392,7 +419,12 @@ async def fetch_recent_otps(user_id: str, api_url: str, api_key: str) -> List[Ex
     try:
         since = (datetime.utcnow() - timedelta(minutes=10)).isoformat() + "Z"
         emails = await fetch_recent_emails(user_id, api_url, api_key, since, limit=20)
-        sms_messages = await fetch_recent_sms_messages(user_id, api_url, api_key, since, limit=20)
+        agentphone_messages = await fetch_recent_sms_messages(user_id, api_url, api_key, since, limit=20)
+        imessages = await fetch_recent_imessages(user_id, api_url, api_key, since, limit=20)
+        # Treat agent-phone SMS and inbound iMessages as one SMS-style source.
+        # Agent-phone is listed first so it wins on duplicate codes (the loop
+        # below dedups by code via ``seen_codes``).
+        sms_messages = agentphone_messages + imessages
 
         if not emails and not sms_messages:
             return []
@@ -663,12 +695,9 @@ def build_auth_options_prompt_section(
             bundle_id = bundle.get("id", "(missing id)")
             source = bundle.get("browserSource") or bundle.get("browser_source") or "unknown"
             profile = bundle.get("browserProfile") or bundle.get("browser_profile") or "default"
-            freshest = _cookie_timestamp_iso(
-                bundle.get("freshestCookieUtc") or bundle.get("freshest_cookie_utc")
-            )
+            freshest = _cookie_timestamp_iso(bundle.get("freshestCookieUtc") or bundle.get("freshest_cookie_utc"))
             lines.append(
-                f"  - id: {bundle_id} | {source}/{profile} | {_disabled_label(bundle)} | "
-                f"freshestCookieUtc: {freshest}"
+                f"  - id: {bundle_id} | {source}/{profile} | {_disabled_label(bundle)} | freshestCookieUtc: {freshest}"
             )
     else:
         lines.append("  - none")
@@ -718,6 +747,19 @@ def build_auth_options_prompt_section(
     else:
         lines.append("  - none")
 
+    passkeys = auth_options.get("passkeys") or []
+    enabled_passkeys = [pk for pk in passkeys if not pk.get("disabled")]
+    if enabled_passkeys:
+        rp_ids = ", ".join(sorted({pk.get("rpId", realm) for pk in enabled_passkeys}))
+        lines.append(
+            f"- Passkey: available for {rp_ids}. It is already loaded into the browser's authenticator. "
+            "If you are not already logged in, start the login and choose the passkey / "
+            '"Sign in with a passkey" option. It signs automatically, with no code or password needed. '
+            "The passkey may also complete the moment the login page loads."
+        )
+    else:
+        lines.append("- Passkey: none")
+
     available = bool(email_otp.get("available"))
     connected = email_otp.get("connected_emails") or email_otp.get("connectedEmails") or []
     match = email_otp.get("match_for_site_account") or email_otp.get("matchForSiteAccount")
@@ -740,9 +782,7 @@ def build_auth_options_prompt_section(
         minted_phone = minted.get("phone") or minted.get("agentPhone") or minted.get("agent_phone")
         if minted_email:
             phone_clause = f" | Phone -> {minted_phone}" if minted_phone else ""
-            lines.append(
-                f"- Minted account: Email -> {minted_email}{phone_clause} | {_disabled_label(minted)}"
-            )
+            lines.append(f"- Minted account: Email -> {minted_email}{phone_clause} | {_disabled_label(minted)}")
             credential_refs_by_secret_ref[str(minted_email)] = {
                 "kind": "minted_account",
                 "id": str(minted_id or minted_email),

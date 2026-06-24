@@ -14,26 +14,18 @@ import {
 
 const log = createLogger('VCard');
 
-interface VCard {
-  firstName: string;
-  lastName: string;
-  cellPhone: string;
-  email: string;
-  organization: string;
-  url: string;
-  birthday: Date;
-  photo: { embedFromString: (data: string, type: string) => void };
-  getFormattedString: () => string;
-}
+// vcards-js (2.11+) ships its own types; derive ours from the library's return
+// type so field shapes (several are string | string[]) stay in sync rather than
+// drifting against a hand-rolled interface.
+type VCard = ReturnType<typeof vCardsJS>;
 
 function applyDefaultPhoto(vCard: VCard) {
   vCard.photo.embedFromString(DEFAULT_PHOTO_BASE64, 'PNG');
 }
 
 function buildBaseVCard(name: string): VCard {
-  // vcards-js (>=2.11) ships its own VCard type whose shape is a superset of the
-  // minimal fields we use; cast to our local interface, which documents exactly
-  // what this domain touches.
+  // vcards-js ships its own types as of 2.11; cast to our explicit local
+  // contract for the subset of fields this domain uses.
   const vCard = vCardsJS() as unknown as VCard;
   vCard.firstName = name;
   vCard.lastName = '';

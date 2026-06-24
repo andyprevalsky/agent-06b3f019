@@ -1,7 +1,30 @@
 import { createLogger } from '../../providers/logger';
-import { createQueueEntry, popOldestForUser } from './repo';
+import { createQueueEntry, findRecentInboundMessages, popOldestForUser } from './repo';
+import type { MessageChannel, RecentInboundMessage } from './types';
 
 const log = createLogger('iMessage');
+
+/**
+ * Fetch recent inbound messages for a user, mapped to the agent-facing shape.
+ * Optionally scoped to a single channel (e.g. IMESSAGE for the OTP relay).
+ */
+export async function fetchRecentInboundMessages(params: {
+  userId: string;
+  since: Date;
+  limit: number;
+  channel?: MessageChannel;
+}): Promise<RecentInboundMessage[]> {
+  const rows = await findRecentInboundMessages(params);
+  return rows.map((row) => ({
+    id: row.id,
+    from: row.from,
+    to: row.to,
+    body: row.message,
+    channel: row.channel,
+    date: row.timestamp,
+    personId: row.personId,
+  }));
+}
 
 /**
  * Validate and queue an iMessage for sending via the Mac app.

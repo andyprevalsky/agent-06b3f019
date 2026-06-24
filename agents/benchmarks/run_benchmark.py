@@ -107,7 +107,7 @@ MINTED_AGENT_ACCOUNT_TASK_NAMES = {
 }
 MINTED_AGENT_ACCOUNT_X_POST_GOAL = "Make a post on X.com that says, Hello World"
 MINTED_AGENT_ACCOUNT_X_AUTH_HINT = (
-    "If X asks you to sign in or create an account first, use the minted AgentMail email in auth options "
+    "If X asks you to sign in or create an account first, use the minted email in auth options "
     "when an email address is accepted. Click controls like 'Use email instead' when they are available. "
     "Do not choose the initial 'Continue with phone' or 'Sign up with Phone' path; if X opens a phone-number "
     "field before you have tried the email route, go back and find the email route instead. "
@@ -1466,7 +1466,7 @@ def _delete_local_minted_accounts_for_user(user_id: str, *, reset_agent_identity
     """Delete per-site minted account rows for the benchmark user.
 
     AgentIdentity is deliberately preserved by default. It owns the one
-    AgentMail inbox and one AgentPhone number for the user, and deleting it
+    primitive inbox and one AgentPhone number for the user, and deleting it
     forces AgentPhone to provision a fresh paid number on every benchmark run.
     Set BENCHMARK_MINTED_RESET_AGENT_IDENTITY=true only when intentionally
     re-proving first-time identity provisioning.
@@ -1800,78 +1800,116 @@ def _local_minted_account_labels_for_user(user_id: str) -> List[str]:
     return [line.strip() for line in out.splitlines() if line.strip()]
 
 
-async def _delete_agentmail_inboxes_by_email(emails: List[str]) -> int:
-    """Delete only the exact AgentMail inboxes listed.
+async def _delete_primitive_emails_by_recipient(recipients: List[str]) -> int:
+    """Delete stored primitive mail for the exact recipient addresses listed.
 
-    Do not scan by prefix here: benchmark cleanup must not sweep inboxes that
-    were created for another purpose under the same AgentMail account.
+    Primitive is a catch-all domain with no per-inbox object to delete —
+    addresses are virtual — so benchmark cleanup removes the stored messages
+    addressed to each minted recipient. Match recipients exactly so cleanup
+    never sweeps mail for another minted address under the same domain.
     """
-    api_key = load_env_var("AGENTMAIL_API_KEY", _BACKEND_ENV, _AGENTS_ENV)
+    api_key = load_env_var("PRIMITIVE_API_KEY", _BACKEND_ENV, _AGENTS_ENV)
     if not api_key:
         return 0
 
-    base_url = load_env_var("AGENTMAIL_BASE_URL", _BACKEND_ENV, _AGENTS_ENV) or "https://api.agentmail.to"
+    base_url = (
+        load_env_var("PRIMITIVE_BASE_URL", _BACKEND_ENV, _AGENTS_ENV)
+        or "https://api.primitive.dev/v1"
+    )
     base_url = base_url.rstrip("/")
-    email_set = {email.strip().lower() for email in emails if email.strip()}
-    if not email_set:
+    recipient_set = {recipient.strip().lower() for recipient in recipients if recipient.strip()}
+    if not recipient_set:
         return 0
     headers = {"Authorization": f"Bearer {api_key}"}
     deleted = 0
 
     async with httpx.AsyncClient(timeout=30) as client:
-        for email in sorted(email_set):
-            delete_response = await client.delete(
-                f"{base_url}/v0/inboxes/{quote(email, safe='')}",
+        for recipient in sorted(recipient_set):
+            list_response = await client.get(
+                f"{base_url}/emails",
+                params={"search": recipient, "limit": "100"},
                 headers=headers,
             )
-            if delete_response.status_code in (200, 202, 204, 404):
-                deleted += 1
-            else:
+            if list_response.status_code == 404:
+                continue
+            if list_response.status_code != 200:
                 raise RuntimeError(
-                    f"AgentMail benchmark inbox cleanup failed for {email}: "
-                    f"HTTP {delete_response.status_code} {delete_response.text[:200]}"
+                    f"Primitive benchmark mail list failed for {recipient}: "
+                    f"HTTP {list_response.status_code} {list_response.text[:200]}"
                 )
+            payload = list_response.json()
+            rows = payload.get("data") if isinstance(payload, dict) else []
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get("recipient") or "").strip().lower() != recipient:
+                    continue
+                email_id = str(row.get("id") or "").strip()
+                if not email_id:
+                    continue
+                delete_response = await client.delete(
+                    f"{base_url}/emails/{quote(email_id, safe='')}",
+                    headers=headers,
+                )
+                if delete_response.status_code in (200, 202, 204, 404):
+                    deleted += 1
+                else:
+                    raise RuntimeError(
+                        f"Primitive benchmark mail cleanup failed for {recipient}: "
+                        f"HTTP {delete_response.status_code} {delete_response.text[:200]}"
+                    )
     return deleted
 
 
-async def _delete_local_minted_agentmail_inboxes_for_user(user_id: str) -> int:
-    """Delete only AgentMail inboxes referenced by local MintedAccount rows."""
+async def _delete_local_minted_primitive_mail_for_user(user_id: str) -> int:
+    """Delete primitive mail referenced by local MintedAccount rows."""
     emails = _local_minted_account_labels_for_user(user_id)
-    deleted = await _delete_agentmail_inboxes_by_email(emails)
-    print(f"    🧹 Deleted {deleted} AgentMail inbox(es) after minted benchmark run")
+    deleted = await _delete_primitive_emails_by_recipient(emails)
+    print(f"    🧹 Deleted {deleted} primitive message(s) after minted benchmark run")
     return deleted
 
 
-async def _agentmail_inbox_has_uber_welcome(email: str) -> bool:
-    """Return whether this exact inbox received Uber account-creation mail."""
-    api_key = load_env_var("AGENTMAIL_API_KEY", _BACKEND_ENV, _AGENTS_ENV)
+async def _primitive_inbox_has_uber_welcome(email: str) -> bool:
+    """Return whether this exact minted address received Uber account-creation mail."""
+    api_key = load_env_var("PRIMITIVE_API_KEY", _BACKEND_ENV, _AGENTS_ENV)
     if not api_key or not email.strip():
         return False
 
-    base_url = load_env_var("AGENTMAIL_BASE_URL", _BACKEND_ENV, _AGENTS_ENV) or "https://api.agentmail.to"
+    base_url = (
+        load_env_var("PRIMITIVE_BASE_URL", _BACKEND_ENV, _AGENTS_ENV)
+        or "https://api.primitive.dev/v1"
+    )
     base_url = base_url.rstrip("/")
     headers = {"Authorization": f"Bearer {api_key}"}
-    url = f"{base_url}/v0/inboxes/{quote(email.strip(), safe='')}/messages"
+    target = email.strip().lower()
 
     async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.get(url, params={"limit": "20"}, headers=headers)
+        response = await client.get(
+            f"{base_url}/emails",
+            params={"search": email.strip(), "limit": "20"},
+            headers=headers,
+        )
     if response.status_code == 404:
         return False
     if response.status_code != 200:
         raise RuntimeError(
-            f"AgentMail benchmark inbox evidence fetch failed for {email}: "
+            f"Primitive benchmark inbox evidence fetch failed for {email}: "
             f"HTTP {response.status_code} {response.text[:200]}"
         )
 
     data = response.json()
-    messages = data.get("messages") if isinstance(data, dict) else []
-    if not isinstance(messages, list):
+    rows = data.get("data") if isinstance(data, dict) else []
+    if not isinstance(rows, list):
         return False
-    for message in messages:
-        if not isinstance(message, dict):
+    for row in rows:
+        if not isinstance(row, dict):
             continue
-        subject = str(message.get("subject") or "").lower()
-        sender = str(message.get("from") or message.get("sender") or "").lower()
+        if str(row.get("recipient") or "").strip().lower() != target:
+            continue
+        subject = str(row.get("subject") or "").lower()
+        sender = str(row.get("sender") or "").lower()
         if "welcome to uber" in subject and "uber" in sender:
             return True
     return False
@@ -2370,20 +2408,20 @@ async def run_minted_agent_account_task(
 
     signup_auth_instruction = (
         f"Use the minted AgentPhone number for {site_label}'s initial phone/email/login field. Do not use "
-        f"the minted AgentMail email unless {site_label} accepts the phone number first and then explicitly "
+        f"the minted email unless {site_label} accepts the phone number first and then explicitly "
         f"asks for an email address as an additional account field. Before typing into {site_label}'s "
         "phone/email field, clear the field completely; do not append the phone and email together. "
         f"If {site_label} explicitly says the minted phone number is blocked or unsupported, stop and report "
         "that phone-auth blocker. If a verification code is sent by SMS, wait for the recent OTP "
         "from the available phone context and use it. "
         if prefer_phone_auth
-        else f"Use the minted AgentMail email for {site_label}'s initial phone/email login field when an "
+        else f"Use the minted email for {site_label}'s initial phone/email login field when an "
         f"email address is accepted. Use the minted AgentPhone number only if {site_label} explicitly "
         "requires a phone number or SMS verification. Do not use any other email or phone. Before "
         f"typing into {site_label}'s phone/email field, clear the field completely; do not append the phone "
         f"and email together. If {site_label} explicitly says the minted phone number is blocked, choose "
-        "another available login option using the minted AgentMail email; stop and report the "
-        "blocker only if no AgentMail path is available. If a verification code is sent by SMS or "
+        "another available login option using the minted email; stop and report the "
+        "blocker only if no minted-email path is available. If a verification code is sent by SMS or "
         "email, wait for the recent OTP from the available phone/email context and use it. "
     )
     if target_realm == "x.com" and not prefer_phone_auth:
@@ -2432,13 +2470,13 @@ async def run_minted_agent_account_task(
             print(f"    ❌ No minted account persisted for {target_realm}")
         signup_account_evidence = False
         if minted and target_realm == "uber.com":
-            signup_account_evidence = await _agentmail_inbox_has_uber_welcome(
+            signup_account_evidence = await _primitive_inbox_has_uber_welcome(
                 minted["account_label"]
             )
             if signup_account_evidence:
-                print("    ✅ Uber account creation evidence found in AgentMail welcome email")
+                print("    ✅ Uber account creation evidence found in primitive welcome email")
             else:
-                print("    ❌ No Uber account creation evidence found in AgentMail")
+                print("    ❌ No Uber account creation evidence found in primitive mail")
 
         if target_realm == "x.com":
             signup_text = _task_result_search_text(signup_result)
@@ -2474,7 +2512,7 @@ async def run_minted_agent_account_task(
                 )
 
             post_auth_instruction = (
-                "If X asks for login again, use the minted AgentMail email in the phone/email field "
+                "If X asks for login again, use the minted email in the phone/email field "
                 "when email is accepted; use the minted AgentPhone number only if X explicitly requires "
                 "phone/SMS auth. Clear the phone/email input before each attempt. If a verification code "
                 "is sent by SMS or email, wait for the recent OTP from the available phone/email context "
@@ -2624,16 +2662,16 @@ async def run_minted_agent_account_task(
 
         booking_auth_instruction = (
         "If Uber asks for login again, use the minted AgentPhone number in the phone/email field. "
-        "Do not switch to AgentMail unless Uber accepts the phone number first and then explicitly "
+        "Do not switch to the minted email unless Uber accepts the phone number first and then explicitly "
         "asks for an email address as an additional account field. Clear the phone/email input "
         "before each attempt. If Uber says the minted phone number is blocked or unsupported, stop "
         "and report that phone-auth blocker. "
         if prefer_phone_auth
-        else "If Uber asks for login again, use the minted AgentMail email in the phone/email field "
+        else "If Uber asks for login again, use the minted email in the phone/email field "
         "when email is accepted; use the minted AgentPhone number only if Uber explicitly requires "
         "phone/SMS auth. Clear the phone/email input before each attempt. If Uber says the minted "
-        "phone number is blocked, choose another available login option using the minted AgentMail "
-        "email; stop and report the blocker only if no AgentMail path is available. "
+        "phone number is blocked, choose another available login option using the minted "
+        "email; stop and report the blocker only if no minted-email path is available. "
         )
         booking_prompt = (
         f"Open {target_url}. Using the already-created Uber account in this browser profile, "
@@ -2701,7 +2739,7 @@ async def run_minted_agent_account_task(
             logs=_with_gate_logs({"signup": signup_result.logs, "booking": booking_result.logs}),
         )
     finally:
-        print("    🧹 Preserved AgentIdentity AgentMail inbox and AgentPhone number")
+        print("    🧹 Preserved AgentIdentity primitive inbox and AgentPhone number")
 
 
 async def run_single_task(

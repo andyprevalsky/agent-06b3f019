@@ -51,6 +51,7 @@ from .config import (
     VERIFIER_ULTRA_MODEL,
     VERIFIER_ULTRA_TIMEOUT_SECONDS,
 )
+from .recording import BrowserAgentRecorder, BrowserNetworkRecorder, browser_recording_output_dir
 from .repo import (
     close_browser_session,
     create_user_auth_assistance_request,
@@ -70,8 +71,8 @@ from .repo import (
 )
 from .service import (
     AuthRuntimeState,
-    build_auth_assistance_resume_user_message,
     build_action_titles,
+    build_auth_assistance_resume_user_message,
     build_browser_dynamic_system_context,
     build_browser_task_prompt,
     build_context_summary,
@@ -85,12 +86,11 @@ from .service_actions import (
     get_domain_from_url,
     get_element_description,
 )
-from .recording import BrowserAgentRecorder, BrowserNetworkRecorder, browser_recording_output_dir
 from .service_crypto import (
     ExtractedOTP,
     auth_realm_from_url,
-    build_autopay_prompt_section,
     build_auth_options_prompt_section,
+    build_autopay_prompt_section,
     decrypt_payment_info,
     extract_rate_limited_until,
     fetch_recent_otps,
@@ -766,6 +766,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
     logger.info("Using response schema from tool call", fields=len(response_schema.get("fields", [])))
 
     session_passwords: List[Dict[str, Any]] = []
+    session_passkeys: List[Dict[str, Any]] = []
     session_auth_options: Optional[Dict[str, Any]] = None
     session_credential_ref: Optional[Dict[str, Any]] = None
     browser_session_metadata: Dict[str, Any] = {}
@@ -852,6 +853,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             cdp_url = session_info.get("ws_url")
             fingerprint_injection = session_info.get("fingerprint_injection")
             session_passwords = session_info.get("passwords", [])
+            session_passkeys = session_info.get("passkeys", [])
             session_auth_options = session_info.get("auth_options")
             session_credential_ref = session_info.get("credential_ref") or session_info.get("auth_credential_ref")
             browser_session_metadata = session_info.get("browser_session_metadata") or {}
@@ -898,6 +900,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             cdp_url = session_data.get("ws_url")
             fingerprint_injection = session_data.get("fingerprint_injection")
             session_passwords = session_data.get("passwords", [])
+            session_passkeys = session_data.get("passkeys", [])
             session_auth_options = session_data.get("auth_options")
             session_credential_ref = session_data.get("credential_ref") or session_data.get("auth_credential_ref")
             browser_session_metadata = session_data.get("browser_session_metadata") or {}
@@ -1225,6 +1228,71 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             base_custom_instructions,
             model_pricing,
         ) = data_result
+
+        # Cloud-custody passkeys: decrypt the private keys server-side (never to
+        # the LLM) and seed a CDP virtual authenticator on the Steel session.
+        # passkey_ref_by_credential_id lets us record a passkey credential_ref at
+        # session end if the relying party actually exercised the credential.
+        passkey_ref_by_credential_id: Dict[str, Dict[str, str]] = {}
+        if session_passkeys and config.payment.decryption_key:
+            from cryptography.hazmat.backends import default_backend
+            from cryptography.hazmat.primitives import serialization
+
+            from .service_crypto import decrypt_password_with_key
+
+            _pk_private_key = serialization.load_pem_private_key(
+                base64.b64decode(config.payment.decryption_key), password=None, backend=default_backend()
+            )
+
+            async def _decrypt_passkey(pk: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+                decrypted = await asyncio.to_thread(
+                    decrypt_password_with_key, pk.get("encryptedPrivateKey", ""), _pk_private_key
+                )
+                if not decrypted:
+                    return None
+                return {
+                    "credentialId": pk.get("credentialId"),
+                    "privateKey": decrypted,
+                    "rpId": pk.get("rpId"),
+                    "userHandle": pk.get("userHandle"),
+                    "signCount": pk.get("signCount") or 0,
+                }
+
+            _decrypted_passkeys = [pk for pk in await asyncio.gather(*[_decrypt_passkey(p) for p in session_passkeys]) if pk]
+            for src in session_passkeys:
+                cid = src.get("credentialId")
+                if cid and src.get("id"):
+                    passkey_ref_by_credential_id[cid] = {"kind": "passkey", "id": str(src.get("id"))}
+            await dom_service.inject_passkeys(_decrypted_passkeys)
+            logger.info(
+                "Injected cloud-custody passkeys into Steel virtual authenticator",
+                count=len(_decrypted_passkeys),
+            )
+
+        _passkey_usage_recorded = {"done": False}
+
+        async def record_passkey_usage_once() -> None:
+            """If the relying party exercised a stored passkey, record a
+            credential_ref so post-run propagation can mark success/failure."""
+            if _passkey_usage_recorded["done"] or not passkey_ref_by_credential_id:
+                return
+            _passkey_usage_recorded["done"] = True
+            try:
+                used = await dom_service.get_used_passkey_credential_ids()
+            except Exception as e:
+                logger.warning("Failed to read passkey usage", error=extract_error_message(e))
+                return
+            for cid in used:
+                ref = passkey_ref_by_credential_id.get(cid)
+                if ref and task_id:
+                    await save_browser_credential_ref_message(
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        message="Passkey used for authentication.",
+                        role="TOOL",
+                        tool_name="browser_session_auth",
+                        credential_ref=ref,
+                    )
 
         # ===== PHASE 3: POST-SETUP =====
         t_post = time.monotonic()
@@ -2085,6 +2153,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                                 file_count=len(output_files),
                             )
 
+                        await record_passkey_usage_once()
                         await dom_service.disconnect()
                         await close_browser_session(config, session_id, pause=False)
 

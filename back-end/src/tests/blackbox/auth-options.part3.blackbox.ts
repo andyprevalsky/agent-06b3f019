@@ -6,7 +6,11 @@ import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
 import { getAuthOptions } from '../../domains/auth-options/service';
 import { fetchEmailsSince } from '../../domains/integrations/service';
-import { createMintedInbox, mintedInboxUsername } from '../../providers/agentMail';
+import {
+  createMintedInbox,
+  mintedInboxUsername,
+  mintedInboxAddress,
+} from '../../providers/primitive';
 
 config();
 
@@ -51,18 +55,16 @@ async function cleanup(userId: string) {
   await prisma.user.deleteMany({ where: { userId } });
 }
 
-test('minted identity migrates to configured AgentMail domain without reprovisioning AgentPhone', async () => {
+test('minted identity migrates to the configured primitive domain without reprovisioning AgentPhone', async () => {
   const userId = await createUser('Rose Pilot');
-  const previousAgentMailApiKey = process.env.AGENTMAIL_API_KEY;
-  const previousAgentMailBaseUrl = process.env.AGENTMAIL_BASE_URL;
-  const previousAgentMailDomain = process.env.AGENTMAIL_DOMAIN;
+  const previousApiKey = process.env.PRIMITIVE_API_KEY;
+  const previousDomain = process.env.PRIMITIVE_DOMAIN;
   const previousAgentPhoneApiKey = process.env.AGENTPHONE_API_KEY;
   const previousAgentPhoneBaseUrl = process.env.AGENTPHONE_BASE_URL;
   const previousFetch = globalThis.fetch;
   const calls: Array<{ url: string; method: string; body: Record<string, unknown> }> = [];
-  process.env.AGENTMAIL_API_KEY = 'test-agentmail-key';
-  process.env.AGENTMAIL_BASE_URL = 'https://agentmail.test';
-  process.env.AGENTMAIL_DOMAIN = 'mail.roselabs.ai';
+  process.env.PRIMITIVE_API_KEY = 'test-primitive-key';
+  process.env.PRIMITIVE_DOMAIN = 'mail.roselabs.ai';
   process.env.AGENTPHONE_API_KEY = 'test-agentphone-key';
   process.env.AGENTPHONE_BASE_URL = 'https://agentphone.test/v1';
 
@@ -89,36 +91,7 @@ test('minted identity migrates to configured AgentMail domain without reprovisio
     const url = String(input);
     const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
     calls.push({ url, method, body });
-    if (url.startsWith('https://agentphone.test/')) {
-      throw new Error('AgentPhone should not be called when cached phone exists');
-    }
-    if (method === 'GET') {
-      if (!url.includes('rose.pilot.river07%40agentmail.to')) {
-        return {
-          ok: false,
-          status: 404,
-          json: async () => ({}),
-          text: async () => '',
-        } as Response;
-      }
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({
-          inbox_id: 'rose.pilot.river07@agentmail.to',
-          email: 'rose.pilot.river07@agentmail.to',
-          client_id: 'old-client-id',
-        }),
-        text: async () => '',
-      } as Response;
-    }
-    const email = `${String(body.username)}@${String(body.domain)}`;
-    return {
-      ok: true,
-      status: 200,
-      json: async () => ({ inbox_id: email, email, client_id: String(body.client_id) }),
-      text: async () => '',
-    } as Response;
+    throw new Error(`unexpected fetch to ${url}`);
   }) as typeof fetch;
 
   try {
@@ -130,7 +103,7 @@ test('minted identity migrates to configured AgentMail domain without reprovisio
 
     assert(
       options.minted?.email.endsWith('@mail.roselabs.ai'),
-      `expected configured AgentMail domain, got ${options.minted?.email}`
+      `expected configured primitive domain, got ${options.minted?.email}`
     );
     assert(options.minted?.phone === '+19125550199', 'expected cached phone in auth options');
     assert(identity.email === options.minted?.email, 'expected identity email migrated');
@@ -147,28 +120,15 @@ test('minted identity migrates to configured AgentMail domain without reprovisio
       minted.accountLabel === options.minted?.email,
       'expected minted row to point at new email'
     );
-    assert(
-      calls.every((call) => !call.url.includes('rose.pilot.river07%40agentmail.to')),
-      'expected old-domain inbox lookup to be skipped'
-    );
-    assert(
-      calls.filter(
-        (call) => call.method === 'POST' && call.url === 'https://agentmail.test/v0/inboxes'
-      ).length === 1,
-      'expected exactly one replacement AgentMail inbox'
-    );
-    assert(
-      calls.find((call) => call.method === 'POST')?.body.domain === 'mail.roselabs.ai',
-      'expected replacement on configured AgentMail domain'
-    );
+    // Re-minting is local and the cached phone short-circuits AgentPhone, so nothing
+    // should hit the network at all.
+    assert(calls.length === 0, 'expected no network calls during local re-mint');
   } finally {
     globalThis.fetch = previousFetch;
-    if (previousAgentMailApiKey === undefined) delete process.env.AGENTMAIL_API_KEY;
-    else process.env.AGENTMAIL_API_KEY = previousAgentMailApiKey;
-    if (previousAgentMailBaseUrl === undefined) delete process.env.AGENTMAIL_BASE_URL;
-    else process.env.AGENTMAIL_BASE_URL = previousAgentMailBaseUrl;
-    if (previousAgentMailDomain === undefined) delete process.env.AGENTMAIL_DOMAIN;
-    else process.env.AGENTMAIL_DOMAIN = previousAgentMailDomain;
+    if (previousApiKey === undefined) delete process.env.PRIMITIVE_API_KEY;
+    else process.env.PRIMITIVE_API_KEY = previousApiKey;
+    if (previousDomain === undefined) delete process.env.PRIMITIVE_DOMAIN;
+    else process.env.PRIMITIVE_DOMAIN = previousDomain;
     if (previousAgentPhoneApiKey === undefined) delete process.env.AGENTPHONE_API_KEY;
     else process.env.AGENTPHONE_API_KEY = previousAgentPhoneApiKey;
     if (previousAgentPhoneBaseUrl === undefined) delete process.env.AGENTPHONE_BASE_URL;
@@ -177,7 +137,7 @@ test('minted identity migrates to configured AgentMail domain without reprovisio
   }
 });
 
-test('minted AgentMail username uses agent name plus keyword and two digits', async () => {
+test('minted username uses agent name plus keyword and two digits', async () => {
   const username = mintedInboxUsername('Rose Pilot', 'river', 7);
   const fallbackUsername = mintedInboxUsername(null, 'maple', 42);
 
@@ -190,51 +150,16 @@ test('minted AgentMail username uses agent name plus keyword and two digits', as
   assert(!username.includes('uber'), 'username should not advertise target site');
 });
 
-test('minted AgentMail inbox generation retries local-part collisions', async () => {
-  const previousApiKey = process.env.AGENTMAIL_API_KEY;
-  const previousBaseUrl = process.env.AGENTMAIL_BASE_URL;
-  const previousDomain = process.env.AGENTMAIL_DOMAIN;
+test('minted primitive inbox is generated locally with a deterministic per-user suffix', async () => {
+  const previousApiKey = process.env.PRIMITIVE_API_KEY;
+  const previousDomain = process.env.PRIMITIVE_DOMAIN;
   const previousFetch = globalThis.fetch;
-  const generated = ['rose.river07', 'rose.maple42'];
-  const posts: Record<string, unknown>[] = [];
-  process.env.AGENTMAIL_API_KEY = 'test-agentmail-key';
-  process.env.AGENTMAIL_BASE_URL = 'https://agentmail.test';
-  process.env.AGENTMAIL_DOMAIN = 'agentmail.test';
-  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = String(input);
-    const method = init?.method ?? 'GET';
-    if (method === 'GET' && url.endsWith(`/${encodeURIComponent('rose.river07@agentmail.test')}`)) {
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({
-          inbox_id: 'rose.river07@agentmail.test',
-          email: 'rose.river07@agentmail.test',
-        }),
-        text: async () => '',
-      } as Response;
-    }
-    if (method === 'GET') {
-      return {
-        ok: false,
-        status: 404,
-        json: async () => ({}),
-        text: async () => '',
-      } as Response;
-    }
-    const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
-    posts.push(body);
-    const email = `${String(body.username)}@${String(body.domain)}`;
-    return {
-      ok: true,
-      status: 200,
-      json: async () => ({
-        inbox_id: email,
-        email,
-        client_id: String(body.client_id),
-      }),
-      text: async () => '',
-    } as Response;
+  let fetchCalls = 0;
+  process.env.PRIMITIVE_API_KEY = 'test-primitive-key';
+  process.env.PRIMITIVE_DOMAIN = 'mail.roselabs.test';
+  globalThis.fetch = (async () => {
+    fetchCalls += 1;
+    throw new Error('primitive minting must not hit the network — addresses are virtual');
   }) as typeof fetch;
 
   try {
@@ -242,32 +167,54 @@ test('minted AgentMail inbox generation retries local-part collisions', async ()
       userId: 'user-1',
       authRealm: 'uber.com',
       agentName: 'Rose',
-      usernameGenerator: () => generated.shift() ?? 'rose.cedar99',
+      usernameGenerator: () => 'rose.river07',
     });
 
-    assert(inbox?.email === 'rose.maple42@agentmail.test', 'expected second generated username');
-    assert(posts.length === 1, 'expected one create call after collision lookup');
-    assert(posts[0].username === 'rose.maple42', 'expected collided username to be skipped');
+    assert(fetchCalls === 0, 'expected no network call when minting a primitive inbox');
+    assert(
+      inbox?.email === mintedInboxAddress('user-1', 'rose.river07'),
+      'expected deterministic per-user address'
+    );
+    assert(inbox?.email.startsWith('rose.river07.'), 'expected username preserved with suffix');
+    assert(inbox?.email.endsWith('@mail.roselabs.test'), 'expected configured primitive domain');
+
+    // The per-user suffix is deterministic, so the same user reusing the same
+    // generated username resolves to a stable address across realms.
+    const again = await createMintedInbox({
+      userId: 'user-1',
+      authRealm: 'lyft.com',
+      agentName: 'Rose',
+      usernameGenerator: () => 'rose.river07',
+    });
+    assert(again?.email === inbox?.email, 'expected stable per-user address for same username');
+
+    // A different user with an identical generated username must not collide,
+    // otherwise two agents would share one inbox and read each other's mail.
+    const other = await createMintedInbox({
+      userId: 'user-2',
+      authRealm: 'uber.com',
+      agentName: 'Rose',
+      usernameGenerator: () => 'rose.river07',
+    });
+    assert(other?.email !== inbox?.email, 'expected different users to get distinct addresses');
   } finally {
     globalThis.fetch = previousFetch;
-    if (previousApiKey === undefined) delete process.env.AGENTMAIL_API_KEY;
-    else process.env.AGENTMAIL_API_KEY = previousApiKey;
-    if (previousBaseUrl === undefined) delete process.env.AGENTMAIL_BASE_URL;
-    else process.env.AGENTMAIL_BASE_URL = previousBaseUrl;
-    if (previousDomain === undefined) delete process.env.AGENTMAIL_DOMAIN;
-    else process.env.AGENTMAIL_DOMAIN = previousDomain;
+    if (previousApiKey === undefined) delete process.env.PRIMITIVE_API_KEY;
+    else process.env.PRIMITIVE_API_KEY = previousApiKey;
+    if (previousDomain === undefined) delete process.env.PRIMITIVE_DOMAIN;
+    else process.env.PRIMITIVE_DOMAIN = previousDomain;
   }
 });
 
-test('existing user credentials suppress AgentMail minted inbox provisioning', async () => {
+test('existing user credentials suppress primitive minted inbox provisioning', async () => {
   const userId = await createUser();
-  const previousApiKey = process.env.AGENTMAIL_API_KEY;
+  const previousApiKey = process.env.PRIMITIVE_API_KEY;
   const previousFetch = globalThis.fetch;
   let calls = 0;
-  process.env.AGENTMAIL_API_KEY = 'test-agentmail-key';
+  process.env.PRIMITIVE_API_KEY = 'test-primitive-key';
   globalThis.fetch = (async () => {
     calls += 1;
-    throw new Error('AgentMail should not be called when a password exists');
+    throw new Error('primitive should not be called when a password exists');
   }) as typeof fetch;
 
   try {
@@ -289,49 +236,64 @@ test('existing user credentials suppress AgentMail minted inbox provisioning', a
     assert(options.realm === 'uber.com', 'expected canonical Uber realm');
     assert(options.minted === null, 'expected minted fallback suppressed');
     assert(mintedCount === 0, 'expected no minted account row');
-    assert(calls === 0, 'expected no AgentMail call');
+    assert(calls === 0, 'expected no primitive call');
   } finally {
     globalThis.fetch = previousFetch;
-    if (previousApiKey === undefined) delete process.env.AGENTMAIL_API_KEY;
-    else process.env.AGENTMAIL_API_KEY = previousApiKey;
+    if (previousApiKey === undefined) delete process.env.PRIMITIVE_API_KEY;
+    else process.env.PRIMITIVE_API_KEY = previousApiKey;
     await cleanup(userId);
   }
 });
 
-test('email fetch includes AgentMail messages from minted inboxes', async () => {
+test('email fetch includes primitive messages from minted inboxes', async () => {
   const userId = await createUser();
-  const previousApiKey = process.env.AGENTMAIL_API_KEY;
-  const previousBaseUrl = process.env.AGENTMAIL_BASE_URL;
+  const previousApiKey = process.env.PRIMITIVE_API_KEY;
+  const previousBaseUrl = process.env.PRIMITIVE_BASE_URL;
   const previousFetch = globalThis.fetch;
-  process.env.AGENTMAIL_API_KEY = 'test-agentmail-key';
-  process.env.AGENTMAIL_BASE_URL = 'https://agentmail.test';
+  process.env.PRIMITIVE_API_KEY = 'test-primitive-key';
+  process.env.PRIMITIVE_BASE_URL = 'https://primitive.test';
   const since = new Date('2026-05-25T12:00:00Z');
   const calls: string[] = [];
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const url = String(input);
     calls.push(url);
-    if (url.includes('/messages?')) {
+    // List endpoint: GET /emails?search=...&date_from=...
+    if (url.includes('/emails?')) {
       return {
         ok: true,
         status: 200,
         json: async () => ({
-          count: 1,
-          messages: [{ message_id: 'msg-1', timestamp: '2026-05-25T12:01:00Z' }],
+          success: true,
+          data: [
+            {
+              id: 'em-1',
+              recipient: 'navi-created@mail.roselabs.test',
+              subject: 'Your Uber code',
+              received_at: '2026-05-25T12:01:00Z',
+            },
+          ],
+          meta: { total: 1, limit: 50, cursor: null },
         }),
         text: async () => '',
       } as Response;
     }
+    // Detail endpoint: GET /emails/em-1
     return {
       ok: true,
       status: 200,
       json: async () => ({
-        message_id: 'msg-1',
-        timestamp: '2026-05-25T12:01:00Z',
-        from: 'Uber <noreply@uber.com>',
-        to: ['navi-created@agentmail.test'],
-        subject: 'Your Uber code',
-        text: 'Your verification code is 123456.',
-        html: '<p>Your verification code is 123456.</p>',
+        success: true,
+        data: {
+          id: 'em-1',
+          message_id: '<msg-1@uber.com>',
+          recipient: 'navi-created@mail.roselabs.test',
+          from_email: 'noreply@uber.com',
+          from_header: 'Uber <noreply@uber.com>',
+          subject: 'Your Uber code',
+          body_text: 'Your verification code is 123456.',
+          body_html: '<p>Your verification code is 123456.</p>',
+          received_at: '2026-05-25T12:01:00Z',
+        },
       }),
       text: async () => '',
     } as Response;
@@ -342,26 +304,26 @@ test('email fetch includes AgentMail messages from minted inboxes', async () => 
       data: {
         userId,
         authRealm: 'uber.com',
-        accountLabel: 'navi-created@agentmail.test',
+        accountLabel: 'navi-created@mail.roselabs.test',
       },
     });
 
     const emails = await fetchEmailsSince(userId, since, 10);
 
-    assert(calls.length === 2, 'expected AgentMail list and message fetch calls');
-    assert(emails.length === 1, 'expected one AgentMail email');
+    assert(calls.length === 2, 'expected primitive list and detail fetch calls');
+    assert(emails.length === 1, 'expected one primitive email');
     assert(
-      emails[0].credentialEmail === 'navi-created@agentmail.test',
+      emails[0].credentialEmail === 'navi-created@mail.roselabs.test',
       'expected minted inbox source'
     );
     assert(emails[0].from === 'noreply@uber.com', 'expected parsed sender email');
     assert(emails[0].bodyText.includes('123456'), 'expected verification body text');
   } finally {
     globalThis.fetch = previousFetch;
-    if (previousApiKey === undefined) delete process.env.AGENTMAIL_API_KEY;
-    else process.env.AGENTMAIL_API_KEY = previousApiKey;
-    if (previousBaseUrl === undefined) delete process.env.AGENTMAIL_BASE_URL;
-    else process.env.AGENTMAIL_BASE_URL = previousBaseUrl;
+    if (previousApiKey === undefined) delete process.env.PRIMITIVE_API_KEY;
+    else process.env.PRIMITIVE_API_KEY = previousApiKey;
+    if (previousBaseUrl === undefined) delete process.env.PRIMITIVE_BASE_URL;
+    else process.env.PRIMITIVE_BASE_URL = previousBaseUrl;
     await cleanup(userId);
   }
 });

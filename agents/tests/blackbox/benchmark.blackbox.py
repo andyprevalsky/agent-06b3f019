@@ -199,7 +199,7 @@ def test_minted_benchmark_cleanup_can_reset_agent_identity_when_explicit():
 
 
 def test_minted_benchmark_seeds_cached_agent_identity_when_missing():
-    """Fresh local DBs reuse the benchmark AgentMail/AgentPhone instead of re-minting."""
+    """Fresh local DBs reuse the benchmark primitive inbox/AgentPhone instead of re-minting."""
     import benchmarks.run_benchmark as bench
 
     queries = []
@@ -378,7 +378,7 @@ def test_x_post_prompt_keeps_goal_and_prefers_email_auth():
     prompt = bench._x_post_prompt()
 
     assert prompt.startswith("Make a post on X.com that says, Hello World")
-    assert "minted AgentMail email" in prompt
+    assert "minted email" in prompt
     assert "Use email instead" in prompt
     assert "Do not choose the initial 'Continue with phone'" in prompt
     assert "terminal phone-auth blocker" in prompt
@@ -393,13 +393,27 @@ def test_browser_agent_cookie_bundle_bootstrap_is_local_only():
     assert _is_local_base_url("https://navi-j9a9.onrender.com") is False
 
 
-async def test_agentmail_cleanup_deletes_only_exact_inboxes():
-    """Minted benchmark cleanup must not sweep unrelated AgentMail inboxes by prefix."""
+async def test_primitive_cleanup_deletes_only_exact_recipients():
+    """Minted benchmark cleanup must delete only mail for the exact minted recipient."""
     import benchmarks.run_benchmark as bench
 
-    calls = []
+    list_calls = []
+    delete_calls = []
 
-    class FakeResponse:
+    class FakeListResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {
+                "data": [
+                    {"id": "em-1", "recipient": "rose.harbor22@mail.roselabs.test"},
+                    # Different recipient under the same catch-all domain must be ignored.
+                    {"id": "em-2", "recipient": "someone.else@mail.roselabs.test"},
+                ]
+            }
+
+    class FakeDeleteResponse:
         status_code = 202
         text = ""
 
@@ -413,44 +427,52 @@ async def test_agentmail_cleanup_deletes_only_exact_inboxes():
         async def __aexit__(self, *_args):
             return None
 
-        async def get(self, *_args, **_kwargs):
-            raise AssertionError("cleanup should not list AgentMail inboxes")
+        async def get(self, url, *, params, headers):
+            list_calls.append((url, params, headers))
+            return FakeListResponse()
 
         async def delete(self, url, *, headers):
-            calls.append((url, headers))
-            return FakeResponse()
+            delete_calls.append((url, headers))
+            return FakeDeleteResponse()
 
     original_client = bench.httpx.AsyncClient
     original_load_env = bench.load_env_var
     try:
         def fake_load_env(name, *_paths):
-            if name == "AGENTMAIL_API_KEY":
-                return "agentmail-key"
-            if name == "AGENTMAIL_BASE_URL":
-                return "https://agentmail.test"
+            if name == "PRIMITIVE_API_KEY":
+                return "primitive-key"
+            if name == "PRIMITIVE_BASE_URL":
+                return "https://primitive.test"
             return None
 
         bench.httpx.AsyncClient = FakeClient
         bench.load_env_var = fake_load_env
 
-        deleted = await bench._delete_agentmail_inboxes_by_email(
-            ["rose.harbor22@agentmail.to", "rose.harbor22@agentmail.to", ""]
+        deleted = await bench._delete_primitive_emails_by_recipient(
+            ["rose.harbor22@mail.roselabs.test", "rose.harbor22@mail.roselabs.test", ""]
         )
     finally:
         bench.httpx.AsyncClient = original_client
         bench.load_env_var = original_load_env
 
     assert deleted == 1
-    assert calls == [
+    assert list_calls == [
         (
-            "https://agentmail.test/v0/inboxes/rose.harbor22%40agentmail.to",
-            {"Authorization": "Bearer agentmail-key"},
+            "https://primitive.test/emails",
+            {"search": "rose.harbor22@mail.roselabs.test", "limit": "100"},
+            {"Authorization": "Bearer primitive-key"},
+        )
+    ]
+    assert delete_calls == [
+        (
+            "https://primitive.test/emails/em-1",
+            {"Authorization": "Bearer primitive-key"},
         )
     ]
 
 
-async def test_agentmail_uber_welcome_evidence_uses_exact_inbox():
-    """Live Uber minted benchmark can prove account creation from exact AgentMail inbox mail."""
+async def test_primitive_uber_welcome_evidence_uses_exact_recipient():
+    """Live Uber minted benchmark can prove account creation from exact primitive mail."""
     import benchmarks.run_benchmark as bench
 
     calls = []
@@ -461,11 +483,18 @@ async def test_agentmail_uber_welcome_evidence_uses_exact_inbox():
 
         def json(self):
             return {
-                "messages": [
+                "data": [
                     {
+                        "recipient": "rose.harbor22@mail.roselabs.test",
                         "subject": "Welcome to Uber",
-                        "from": "Uber <admin@uber.com>",
-                    }
+                        "sender": "admin@uber.com",
+                    },
+                    # Mail for another recipient under the same domain must be ignored.
+                    {
+                        "recipient": "someone.else@mail.roselabs.test",
+                        "subject": "Welcome to Uber",
+                        "sender": "admin@uber.com",
+                    },
                 ]
             }
 
@@ -487,25 +516,25 @@ async def test_agentmail_uber_welcome_evidence_uses_exact_inbox():
     original_load_env = bench.load_env_var
     try:
         def fake_load_env(name, *_paths):
-            if name == "AGENTMAIL_API_KEY":
-                return "agentmail-key"
-            if name == "AGENTMAIL_BASE_URL":
-                return "https://agentmail.test"
+            if name == "PRIMITIVE_API_KEY":
+                return "primitive-key"
+            if name == "PRIMITIVE_BASE_URL":
+                return "https://primitive.test"
             return None
 
         bench.httpx.AsyncClient = FakeClient
         bench.load_env_var = fake_load_env
 
-        assert await bench._agentmail_inbox_has_uber_welcome("rose.harbor22@agentmail.to")
+        assert await bench._primitive_inbox_has_uber_welcome("rose.harbor22@mail.roselabs.test")
     finally:
         bench.httpx.AsyncClient = original_client
         bench.load_env_var = original_load_env
 
     assert calls == [
         (
-            "https://agentmail.test/v0/inboxes/rose.harbor22%40agentmail.to/messages",
-            {"limit": "20"},
-            {"Authorization": "Bearer agentmail-key"},
+            "https://primitive.test/emails",
+            {"search": "rose.harbor22@mail.roselabs.test", "limit": "20"},
+            {"Authorization": "Bearer primitive-key"},
         )
     ]
 
@@ -1598,12 +1627,12 @@ async def run_all_tests():
         test_browser_agent_cookie_bundle_bootstrap_is_local_only,
     )
     await r.record_async(
-        "agentmail_cleanup_exact_only",
-        test_agentmail_cleanup_deletes_only_exact_inboxes,
+        "primitive_cleanup_exact_only",
+        test_primitive_cleanup_deletes_only_exact_recipients,
     )
     await r.record_async(
-        "agentmail_uber_welcome_evidence_exact_inbox",
-        test_agentmail_uber_welcome_evidence_uses_exact_inbox,
+        "primitive_uber_welcome_evidence_exact_recipient",
+        test_primitive_uber_welcome_evidence_uses_exact_recipient,
     )
     await r.record_async("api_headers_internal_api_key", test_api_headers_honors_internal_api_key_auth)
     await r.record_async("code_agent_preflight_accepts_gpt_compute", test_code_agent_preflight_accepts_gpt_compute_token)

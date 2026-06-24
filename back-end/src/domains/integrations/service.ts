@@ -26,7 +26,7 @@ import {
 } from '../../providers/gptCredentials';
 import { getValidAccessToken } from '../../services/integrations/gmailSync';
 import { fetchGmailMessagesSince } from '../../services/integrations/gmailParser';
-import { fetchAgentMailMessagesSince } from '../../providers/agentMail';
+import { fetchPrimitiveMessagesSince } from '../../providers/primitive';
 import * as repo from './repo';
 
 const log = createLogger('Integrations');
@@ -211,7 +211,7 @@ export async function fetchEmailsSince(userId: string, since: Date, limit: numbe
       }
     })
   );
-  const agentMailEmails = await fetchAgentMailMessagesSince({
+  const mintedEmails = await fetchPrimitiveMessagesSince({
     inboxEmails: mintedInboxEmails,
     since,
     limit: perAccountLimit * Math.max(1, mintedInboxEmails.length),
@@ -219,13 +219,13 @@ export async function fetchEmailsSince(userId: string, since: Date, limit: numbe
 
   const emails = emailArrays
     .flat()
-    .concat(agentMailEmails)
+    .concat(mintedEmails)
     .sort((a, b) => b.date.getTime() - a.date.getTime())
     .slice(0, limit);
   log.info('Fetched emails', {
     count: emails.length,
     accounts: allCredentials.length,
-    agentMailInboxes: mintedInboxEmails.length,
+    mintedInboxes: mintedInboxEmails.length,
     since: since.toISOString(),
     userId,
   });

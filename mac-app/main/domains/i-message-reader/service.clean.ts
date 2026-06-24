@@ -83,6 +83,30 @@ function applyAttributedSplitHeuristic(value: string): string {
   return result.trim();
 }
 
+// ── OTP detection ─────────────────────────────────────────────────────────
+
+/**
+ * A 4-8 digit run, the shape of virtually every SMS/iMessage one-time code.
+ */
+const OTP_DIGIT_REGEX = /\d{4,8}/;
+
+/**
+ * Context words that distinguish an OTP/verification text from ordinary
+ * conversation or marketing. Kept deliberately broad — see the mirrored Python
+ * list in agents/domains/spawn_browser_agent_v3/service_crypto.py.
+ */
+const OTP_CONTEXT_REGEX =
+  /(\botp\b|2fa|2-factor|two[\s-]?factor|one[\s-]?time|passcode|verification|verify|verif\w*|security code|access code|login code|log[\s-]?in code|sign[\s-]?in code|sign[\s-]?in|authentication|authenticate|confirmation code|do ?n['o]t share|never share|your code|code is|code:|enter\s+(?:the\s+|this\s+)?code|g-\d{4,8})/i;
+
+/**
+ * Whether a message body looks like a one-time passcode / verification code.
+ * Requires both a digit run and OTP context so promo codes and chit-chat that
+ * merely contain numbers are not mistaken for OTPs.
+ */
+export function isLikelyOtpMessage(text: string): boolean {
+  return OTP_DIGIT_REGEX.test(text) && OTP_CONTEXT_REGEX.test(text);
+}
+
 function sanitizeMessageCandidate(
   candidate: unknown,
   messageId: number,
@@ -145,7 +169,69 @@ function searchValue(value: unknown, depth: number): string | null {
   return null;
 }
 
-function extractTextFromAttributedBody(buffer: Buffer | null | undefined): string | null {
+/**
+ * Read a typedstream variable-length integer (used for string-byte lengths).
+ *
+ * Apple's `streamtyped` archive encodes an unsigned int as a single byte for
+ * values 0-127, or a marker byte (0x81 → uint16, 0x82 → uint32) followed by a
+ * little-endian value. Returns the length plus the offset just past it, or
+ * null if the encoding is malformed / runs off the end of the buffer.
+ */
+export function readTypedstreamLength(
+  buffer: Buffer,
+  offset: number
+): { length: number; next: number } | null {
+  if (offset >= buffer.length) return null;
+  const marker = buffer.readUInt8(offset);
+  if (marker === 0x81) {
+    if (offset + 3 > buffer.length) return null;
+    return { length: buffer.readUInt16LE(offset + 1), next: offset + 3 };
+  }
+  if (marker === 0x82) {
+    if (offset + 5 > buffer.length) return null;
+    return { length: buffer.readUInt32LE(offset + 1), next: offset + 5 };
+  }
+  // Single-byte length is only valid for 0-127; anything else is unexpected.
+  if (marker >= 0x80) return null;
+  return { length: marker, next: offset + 1 };
+}
+
+/**
+ * Decode the message body out of a `streamtyped` (NSArchiver typedstream)
+ * `attributedBody`. Modern macOS stores message text here as an NSString
+ * introduced by a `+` (0x2B) marker and a typedstream length prefix, rather
+ * than in the legacy `text` column or a binary plist. Returns the decoded
+ * UTF-8 text, or null when the buffer is not a recognisable typedstream.
+ */
+export function extractTextFromStreamtyped(buffer: Buffer): string | null {
+  // The value string is declared after an NSString / NSMutableString class
+  // marker. NSString is emitted last (after NSAttributedString / NSMutableString),
+  // immediately before the body bytes.
+  let markerEnd = -1;
+  for (const className of ['NSString', 'NSMutableString']) {
+    const idx = buffer.indexOf(className, 0, 'latin1');
+    if (idx !== -1) {
+      markerEnd = idx + className.length;
+      break;
+    }
+  }
+  if (markerEnd === -1) return null;
+
+  // The body is introduced by the first '+' (0x2B) after the class marker,
+  // then a typedstream length prefix, then the UTF-8 bytes.
+  const plus = buffer.indexOf(0x2b, markerEnd);
+  if (plus === -1) return null;
+
+  const lengthInfo = readTypedstreamLength(buffer, plus + 1);
+  if (lengthInfo === null) return null;
+  const { length, next } = lengthInfo;
+  if (length <= 0 || next + length > buffer.length) return null;
+
+  const decoded = stripControlCharacters(buffer.toString('utf8', next, next + length));
+  return decoded === '' ? null : decoded;
+}
+
+export function extractTextFromAttributedBody(buffer: Buffer | null | undefined): string | null {
   if (buffer === null || buffer === undefined || buffer.length === 0) return null;
   const tryPlainString = (): string | null => {
     const asString = buffer.toString('utf8').replace(/\0/g, '').trim();
@@ -154,6 +240,12 @@ function extractTextFromAttributedBody(buffer: Buffer | null | undefined): strin
 
   const header = buffer.slice(0, 6).toString('utf8');
   if (header !== 'bplist') {
+    // Modern macOS uses the `streamtyped` (NSArchiver) format, not a binary
+    // plist. Decode it properly before falling back to the raw-string heuristic.
+    if (buffer.indexOf('streamtyped', 0, 'latin1') !== -1) {
+      const streamtyped = extractTextFromStreamtyped(buffer);
+      if (streamtyped !== null) return streamtyped;
+    }
     return tryPlainString();
   }
 
@@ -282,14 +374,19 @@ export function cleanRow(row: RawMessageRow, options: CleanRowOptions): IMessage
     return null;
   }
 
-  if (/^\d+$/.test(contactId) && contactId.length <= SHORT_CODE_MAX_LENGTH) {
-    onSkipShortCode?.();
-    return null;
-  }
-
   const cleanedText = resolveCleanedText(row, columns);
   if (cleanedText === null || cleanedText === '') {
     onSkipEmptyText?.();
+    return null;
+  }
+
+  // Numeric short codes (alerts / 2FA / marketing senders) are normally dropped
+  // to keep the contact graph clean. OTP / verification texts are the exception:
+  // they're retained so the browser agent can relay login codes (Amazon, banks,
+  // etc.), which almost always arrive from a short code.
+  const isShortCode = /^\d+$/.test(contactId) && contactId.length <= SHORT_CODE_MAX_LENGTH;
+  if (isShortCode && !isLikelyOtpMessage(cleanedText)) {
+    onSkipShortCode?.();
     return null;
   }
 

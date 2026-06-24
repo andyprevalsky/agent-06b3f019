@@ -121,6 +121,11 @@ async function applyCredentialDecision(
     case 'minted':
       await tx.mintedAccount.updateMany({ where: { id: credentialRef.id }, data });
       return;
+    case 'passkey':
+      // auth_failed here means the relying party rejected our stored passkey
+      // (revoked, counter mismatch) -> disable so auth-options stops surfacing it.
+      await tx.passkeyCredential.updateMany({ where: { id: credentialRef.id }, data });
+      return;
   }
 }
 

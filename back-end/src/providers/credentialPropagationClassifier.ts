@@ -19,7 +19,8 @@ export type CredentialKind =
   | 'password'
   | 'steel_session'
   | 'email_otp'
-  | 'minted';
+  | 'minted'
+  | 'passkey';
 
 export interface CredentialRef {
   kind: CredentialKind;
@@ -93,6 +94,7 @@ const CREDENTIAL_KINDS = new Set<CredentialKind>([
   'steel_session',
   'email_otp',
   'minted',
+  'passkey',
 ]);
 
 const CLASSIFIER_OUTCOMES = [
@@ -144,6 +146,7 @@ function normalizeKind(kind: string): CredentialKind | null {
   if (normalized === 'email' || normalized === 'email_otp' || normalized === 'otp') {
     return 'email_otp';
   }
+  if (normalized === 'passkey' || normalized === 'webauthn') return 'passkey';
   return CREDENTIAL_KINDS.has(normalized as CredentialKind) ? (normalized as CredentialKind) : null;
 }
 
@@ -195,7 +198,7 @@ async function loadCredentialInventory(
   }
 
   const entries = new Map<string, CredentialInventoryEntry>();
-  const [bundles, passwords, steelSessions, mintedAccounts] = await Promise.all([
+  const [bundles, passwords, steelSessions, mintedAccounts, passkeys] = await Promise.all([
     prisma.cookieBundle.findMany({
       where: {
         userId,
@@ -223,6 +226,13 @@ async function loadCredentialInventory(
         id: { in: credentialRefs.filter((r) => r.kind === 'minted').map((r) => r.id) },
       },
       select: { id: true, authRealm: true, accountLabel: true },
+    }),
+    prisma.passkeyCredential.findMany({
+      where: {
+        userId,
+        id: { in: credentialRefs.filter((r) => r.kind === 'passkey').map((r) => r.id) },
+      },
+      select: { id: true, authRealm: true, rpId: true },
     }),
   ]);
 
@@ -256,6 +266,14 @@ async function loadCredentialInventory(
       ...ref,
       label: minted.accountLabel,
       details: minted,
+    });
+  }
+  for (const passkey of passkeys) {
+    const ref = { kind: 'passkey' as const, id: passkey.id };
+    entries.set(credentialKey(ref), {
+      ...ref,
+      label: `passkey:${passkey.rpId}`,
+      details: passkey,
     });
   }
 
