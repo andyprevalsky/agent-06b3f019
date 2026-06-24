@@ -72,11 +72,7 @@ Return to me:
     title: 'Test Agent Debit Card',
     description:
       'Tests minting a single-use AgentCard debit card at the /test_payment store via request_payment_card (itemized receipt approval)',
-    prompt: `Use a browser agent to go to {{TEST_PAYMENT_BASE_URL}}/test_payment. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote.
-Before entering any payment fields, read the full checkout receipt and call request_payment_card for the exact order total, then show me the full itemized receipt to approve before paying.
-After approval, fill the one-time card details into the checkout form and submit payment.
-Continue until the page shows the Payment confirmed confirmation.
-no questions asked otherwise`,
+    prompt: `Use a browser agent to go to {{TEST_PAYMENT_BASE_URL}}/test_payment. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote.`,
   },
   {
     title: 'Test Spawn General-Purpose Agents',

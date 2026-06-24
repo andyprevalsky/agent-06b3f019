@@ -178,7 +178,7 @@
   {
     "name": "agent-payment-test-shop",
     "title": "Agent Payment Test Shop",
-    "prompt": "Use a browser agent to go to {frontend_url}/test_payment. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Before entering any payment fields, read the full checkout receipt and call request_payment_card with merchant \"Rose Labs Test Payment\", currency USD, line_items containing each selected product name, product image URL from the product image src, unit_price_cents, quantity 1, and line_total_cents, fees containing Tax and Shipping, subtotal_cents 3600, and total_cents 4396. After approval, fill the one-time card details into the checkout form and submit payment. Continue until the page shows the Payment confirmed confirmation. Return the confirmation heading and order id.",
+    "prompt": "Use a browser agent to go to {frontend_url}/test_payment. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
