@@ -129,7 +129,7 @@ class AgentWorkflow:
         self.agent_id: Optional[str] = None
         self.user_id: Optional[str] = None
         self.goal: Optional[str] = None
-        self.model: str = "anthropic/claude-sonnet-4.5"
+        self.model: str = "anthropic/claude-sonnet-4.6"
         self.reasoning_max_tokens: int = 256
         self.verifier: Optional[Dict] = None
         self.last_message_check: Optional[datetime] = datetime(1970, 1, 1).replace(tzinfo=timezone.utc)

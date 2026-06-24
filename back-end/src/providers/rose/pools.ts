@@ -30,15 +30,15 @@ export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
   },
   'rose-1-ultra': {
     name: 'rose-1-ultra',
-    claudeAuthModel: 'claude-opus-4-7',
+    claudeAuthModel: 'claude-opus-4-8',
     gptAuthModel: 'gpt-5.5',
-    waterfall: ['anthropic/claude-opus-4.7', 'google/gemini-3.1-pro-preview'],
+    waterfall: ['anthropic/claude-opus-4.8', 'google/gemini-3.1-pro-preview'],
   },
   'rose-1-browser-use': {
     name: 'rose-1-browser-use',
-    claudeAuthModel: 'claude-opus-4-7',
+    claudeAuthModel: 'claude-opus-4-8',
     gptAuthModel: 'gpt-5.5',
-    waterfall: ['anthropic/claude-opus-4.7', 'openai/gpt-5.4'],
+    waterfall: ['anthropic/claude-opus-4.8', 'openai/gpt-5.4'],
   },
 };
 

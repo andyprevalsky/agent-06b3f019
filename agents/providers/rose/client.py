@@ -1021,7 +1021,7 @@ class RoseClient:
 
             {
                 "action":        UnifiedAction,
-                "actual_model":  "anthropic/claude-opus-4.7" | ...,
+                "actual_model":  "anthropic/claude-opus-4.8" | ...,
                 "pool_name":     "rose-1-browser-use",
                 "request_id":    str,
                 "usage": {
