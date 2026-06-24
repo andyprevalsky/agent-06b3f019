@@ -20,6 +20,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import requests
@@ -118,6 +119,14 @@ def _summarize(label: str, tag: str, sig: dict, resp: dict) -> None:
     if resp:
         print(f"[{label}/{tag}] === SCORE {round(resp.get('score',0),3)} rec={resp.get('recommendation')} ===")
         print(f"[{label}/{tag}] categoryScores: {json.dumps(resp.get('categoryScores',{}))}")
+        if "/score" in tag:
+            env = sig.get("environmental", {}) if isinstance(sig, dict) else {}
+            meta = sig.get("meta", {}) if isinstance(sig, dict) else {}
+            temporal = sig.get("temporal", {}) if isinstance(sig, dict) else {}
+            print(f"[{label}/{tag}] meta: {json.dumps(meta, sort_keys=True)[:1200]}")
+            print(f"[{label}/{tag}] environmental: {json.dumps(env, sort_keys=True)[:1600]}")
+            print(f"[{label}/{tag}] temporal: {json.dumps(temporal, sort_keys=True)[:1200]}")
+            print(f"[{label}/{tag}] response: {json.dumps(resp, sort_keys=True)[:1600]}")
         for d in resp.get("detections", []):
             print(f"[{label}/{tag}]   {d.get('category'):12} {d.get('score')}  {d.get('reason')}")
     else:
@@ -150,8 +159,8 @@ async def run(args) -> None:
     ws = f"wss://connect.steel.dev?apiKey={steel_key()}&sessionId={sid}"
     print(f"[{args.label}] session={sid} proxy={not args.no_proxy} (real BrowserHumanizer)")
 
-    verifications: list[tuple[dict, dict]] = []
-    pending = {"sig": None}
+    verifications: list[tuple[str, dict, dict]] = []
+    pending = {"sig": None, "request": None}
 
     try:
         async with async_playwright() as p:
@@ -159,9 +168,10 @@ async def run(args) -> None:
             context = browser.contexts[0] if browser.contexts else await browser.new_context()
             await context.add_init_script(DOMService._ANTI_DETECTION_SCRIPT)
             page = context.pages[0] if context.pages else await context.new_page()
+            await page.evaluate(DOMService._ANTI_DETECTION_SCRIPT)
 
             def on_request(req):
-                if "/api/verify" in req.url and req.method == "POST":
+                if ("/api/verify" in req.url or "/api/score" in req.url) and req.method == "POST":
                     try:
                         body = req.post_data
                         if body:
@@ -174,18 +184,37 @@ async def run(args) -> None:
                             pt = data.get("powTiming")
                             if pt and isinstance(parsed, dict):
                                 parsed.setdefault("temporal", {})["pow"] = pt
+                            if isinstance(parsed, dict):
+                                parsed.setdefault("meta", {})["endpoint"] = (
+                                    "score" if "/api/score" in req.url else "verify"
+                                )
                             pending["sig"] = parsed
+                            pending["request"] = data
                     except Exception as e:
                         print(f"[{args.label}] req parse err: {e}")
 
             async def on_response(resp):
-                if "/api/verify" in resp.url and resp.request.method == "POST":
+                if ("/api/verify" in resp.url or "/api/score" in resp.url) and resp.request.method == "POST":
                     try:
                         body = await resp.json()
                     except Exception:
                         body = None
-                    verifications.append((pending["sig"] or {}, body or {}))
+                    endpoint = "score" if "/api/score" in resp.url else "verify"
+                    sig = pending["sig"] or {}
+                    req_body = pending["request"] or {}
+                    verifications.append((endpoint, sig, body or {}))
+                    if endpoint == "score":
+                        out = REPO_ROOT / ".context" / "fcaptcha-src" / f"{args.label}-{int(time.time())}.json"
+                        out.parent.mkdir(parents=True, exist_ok=True)
+                        out.write_text(
+                            json.dumps(
+                                {"request": req_body, "signals": sig, "response": body or {}},
+                                indent=2,
+                            )
+                        )
+                        print(f"[{args.label}] saved score payload: {out}")
                     pending["sig"] = None
+                    pending["request"] = None
 
             page.on("request", on_request)
             page.on("response", on_response)
@@ -244,11 +273,13 @@ async def run(args) -> None:
                 await _interact("input[type=email], input[name*=email i]", typed="benchmark-human@example.com")
                 await _interact("textarea, input[name*=message i]", typed="Hello, I am interested in this product.")
                 before = len(verifications)
-                if await _interact("button[type=submit], button:has-text('Submit')", overshoot=True):
-                    for _ in range(30):
-                        if len(verifications) > before:
-                            break
-                        await page.wait_for_timeout(500)
+                await humanizer.press_key("Tab")
+                await page.wait_for_timeout(180)
+                await humanizer.press_key("Enter")
+                for _ in range(30):
+                    if len(verifications) > before:
+                        break
+                    await page.wait_for_timeout(500)
             except Exception as e:
                 print(f"[{args.label}] form error: {e}")
 
@@ -261,8 +292,9 @@ async def run(args) -> None:
         print(f"[{args.label}] NO verifications captured")
         return
     tags = ["checkbox", "form", "extra3", "extra4"]
-    for i, (sig, resp) in enumerate(verifications):
-        _summarize(args.label, tags[i] if i < len(tags) else f"v{i}", sig, resp)
+    for i, (endpoint, sig, resp) in enumerate(verifications):
+        tag = tags[i] if i < len(tags) else f"v{i}"
+        _summarize(args.label, f"{tag}/{endpoint}", sig, resp)
 
 
 def main() -> None:

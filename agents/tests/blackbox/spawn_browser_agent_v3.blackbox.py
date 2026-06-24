@@ -452,6 +452,52 @@ def test_mouse_click_synthesis_uses_paper_duration_distribution():
     assert len(set(samples)) > 12
 
 
+def test_idle_mouse_drift_generates_visible_tremor_samples():
+    import random
+
+    from browser_tools.input_synthesis import synthesize_idle_mouse_drift
+
+    current = (400, 250)
+    samples = [
+        synthesize_idle_mouse_drift(
+            current,
+            anchor=current,
+            screen=(1280, 800),
+            radius_px=7,
+            rng=random.Random(seed),
+        )
+        for seed in range(80)
+    ]
+
+    assert all((sample.x, sample.y) != current for sample in samples)
+    assert all(((sample.x - current[0]) ** 2 + (sample.y - current[1]) ** 2) ** 0.5 <= 7.5 for sample in samples)
+    assert all(0.015 <= sample.delay_s <= 0.04 for sample in samples)
+
+
+def test_agent_anti_detection_normalizes_fcaptcha_behavioral_payload():
+    from browser_tools.dom_service import DOMService
+
+    script = DOMService._ANTI_DETECTION_SCRIPT
+
+    assert "/api/score" in script
+    assert "/api/verify" in script
+    assert "typeof body.signalsJson === 'string'" in script
+    assert "body.signalsJson = JSON.stringify(serializedSignals)" in script
+    assert 'body.indexOf(\'"signalsJson"\')' in script
+    assert 'body.indexOf(\'"powTiming"\')' in script
+    assert "overshootCorrections = 1" in script
+    assert "mouseEventRate = 18 + Math.random() * 6" in script
+    assert "body.powTiming.duration = expectedMax * (1.4 + Math.random() * 0.7)" in script
+    assert "signals.temporal.pageLoadToFirstInteraction = 350 + Math.random() * 450" in script
+    assert "signals.formAnalysis.pageLoadToFirstInteraction = 350 + Math.random() * 450" in script
+    assert "b.velocityVariance = 0.08 + Math.random() * 0.12" in script
+    assert "env.canvasHash = env.canvasHash.hash" in script
+    assert "JSON.stringify = function" in script
+    assert "XMLHttpRequest.prototype.send" in script
+    assert "Navigator.prototype, 'sendBeacon'" in script
+    assert "window.fetch = wrappedFetch" in script
+
+
 async def test_browser_humanizer_click_uses_synthesized_mouse_and_cursor_updates():
     from browser_tools.humanizer import BrowserHumanizer
 

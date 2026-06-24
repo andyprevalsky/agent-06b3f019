@@ -716,6 +716,58 @@ def test_webdecoy_biometrics_evaluator_requires_interaction_and_low_score():
     assert "ratchet" in reason.lower()
 
 
+def test_webdecoy_biometrics_evaluator_uses_exact_network_score_when_visible_is_rounded(tmp_path):
+    """The ratchet should compare exact FCaptcha JSON, not the page's rounded display text."""
+    import json
+
+    from benchmarks.run_benchmark import _evaluate_webdecoy_biometrics_result
+
+    network_dir = tmp_path / "recording" / "network"
+    network_dir.mkdir(parents=True)
+    body_file = network_dir / "0001_score.json"
+    body_file.write_text(
+        json.dumps(
+            {
+                "action": "form_submit",
+                "recommendation": "allow",
+                "score": 0.1559512195121951,
+                "success": True,
+            }
+        )
+    )
+    (network_dir / "index.json").write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "method": "POST",
+                        "url": "https://fcaptcha.webdecoy.com/api/score",
+                        "response_ts_ms": 123,
+                        "body_file": body_file.name,
+                    }
+                ]
+            }
+        )
+    )
+
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": (
+                    "Visited https://webdecoy.com/product/fcaptcha-demo/. "
+                    "Clicked the checkbox mode verification control. "
+                    "Entered benchmark-human@example.com in invisible mode and clicked Submit. "
+                    "Final visible FCaptcha Risk Score: 0.16."
+                ),
+                "metadata": {"network_recording_path": str(network_dir / "index.json")},
+            }
+        ]
+    }
+
+    assert _evaluate_webdecoy_biometrics_result(data) == (True, None)
+
+
 def test_auth_bundle_biometrics_gate_defaults_on_and_can_be_disabled():
     """Minted auth-bundle probes should include the strict WebDecoy score gate by default."""
     import os

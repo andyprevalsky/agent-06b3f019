@@ -228,7 +228,7 @@ class BrowserHumanizer:
         # few seconds AFTER each click (see _suppress_idle), which is exactly when
         # the click-triggered PoW runs. So: dense BEFORE the click for rate,
         # silent AFTER it for PoW.
-        self._schedule_idle_mouse_step(random.uniform(0.10, 0.22))
+        self._schedule_idle_mouse_step(random.uniform(0.045, 0.085))
 
     def _schedule_idle_mouse_step(self, delay_s: float) -> None:
         if self._closed or not self._idle_mouse_enabled:
@@ -244,7 +244,7 @@ class BrowserHumanizer:
         if remaining > 0:
             # Idle is suppressed (a click just happened / PoW may be solving);
             # defer rather than drift, so the worker thread runs uncontended.
-            self._schedule_idle_mouse_step(min(remaining, 1.1))
+            self._schedule_idle_mouse_step(min(remaining, 0.45))
             return
         self._idle_task = asyncio.create_task(self._run_idle_mouse_step())
 
@@ -456,7 +456,7 @@ class BrowserHumanizer:
         if not self._idle_mouse_enabled or self._closed:
             return None
         if self._movement_lock.locked():
-            return random.uniform(0.05, 0.12)
+            return random.uniform(0.018, 0.045)
         async with self._movement_lock:
             sample: MouseSample = synthesize_idle_mouse_drift(
                 self._last_pos,
@@ -550,13 +550,11 @@ class BrowserHumanizer:
             self._last_pos = (x, y)
             self._idle_anchor = (x, y)
         # A click can trigger a behavioral-biometrics verification whose
-        # Proof-of-Work runs in a page web worker. Idle mouse drift on the main
-        # thread starves that worker on Steel's constrained VM ("PoW timing
-        # suggests external processing"). Hold idle off long enough for the PoW
-        # to complete before resuming the alive-pointer drift. The detector flags
-        # PoW only when it exceeds ~3.9s (expectedMax*3 at difficulty 4), so a 4s
-        # quiet window covers the entire solve under normal load.
-        self._suppress_idle(4.0)
+        # Proof-of-Work runs in a page web worker. Briefly quiet idle drift so the
+        # worker gets an uncontended turn, but do not hold it for several seconds:
+        # ordinary field-focus clicks do not run PoW, and a long quiet window
+        # starves the mouse-event-rate signal during form filling.
+        self._suppress_idle(0.45)
         logger.debug("Humanized click", x=x, y=y)
 
     async def click_for_input(
