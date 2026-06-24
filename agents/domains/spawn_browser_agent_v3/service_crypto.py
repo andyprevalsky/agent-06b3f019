@@ -837,15 +837,9 @@ def build_autopay_prompt_section(payment_data: Dict[str, Any], encrypted_envelop
 {billing_address}{contact_info}
 
 ## Payment Information
-AUTOPAY ENABLED (limit: ${autopay_limit_dollars:.2f}): When you reach checkout, extract the full itemized receipt and call request_payment_card.
+AUTOPAY ENABLED (limit: ${autopay_limit_dollars:.2f}): When you reach a checkout/payment page, read the full itemized receipt off the page (each product: name, image URL if visible, unit price in cents, quantity, line total in cents; plus every fee, the subtotal, and the final total) and call request_payment_card with it — BEFORE touching any payment field.
 
-request_payment_card returns one-time secret refs after approval. Type only these refs into payment fields:
-- Card number field: card_number
-- Cardholder name field: card_name
-- Expiry field: card_expiry
-- CVV field: card_cvv
-
-Do not ask the user to enter a card. Do not type stored card details. The payment card is minted on demand."""
+Do not type any card details yet, and do not ask the user to enter a card. The one-time card is minted on demand only after you call request_payment_card and the user approves; its secret refs are then provided for you to type into the payment fields."""
 
 
 def has_payment_card_secret_refs(secret_refs: Optional[Dict[str, Any]]) -> bool:

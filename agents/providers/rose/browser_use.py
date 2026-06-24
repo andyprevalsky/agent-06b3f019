@@ -153,6 +153,34 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
         ),
         "params": {},
     },
+    "request_payment_card": {
+        "description": (
+            "Request a one-time virtual payment card for the current checkout. Call this when you reach a "
+            "checkout/payment page and BEFORE typing any card details. First read the full itemized receipt off "
+            "the page (each product's name, image URL if visible, unit price in cents, quantity, line total in "
+            "cents; plus every fee, the subtotal, and the final total). After the user approves, the card is "
+            "minted on demand and the one-time card refs are returned for you to type into the payment fields. "
+            "Never ask the user to enter a card and never type stored card details."
+        ),
+        "params": {
+            "merchant": {"type": "string", "description": "Merchant or site name for the purchase", "required": True},
+            "currency": {"type": "string", "description": "Purchase currency (currently only USD)"},
+            "line_items": {
+                "type": "array",
+                "description": (
+                    "Full itemized receipt. One object per product/service: "
+                    "{name, image_url (if visible), unit_price_cents, quantity, line_total_cents}."
+                ),
+                "required": True,
+            },
+            "fees": {
+                "type": "array",
+                "description": "Taxes, shipping, service fees, discounts, etc. One object each: {label, amount_cents}.",
+            },
+            "subtotal_cents": {"type": "integer", "description": "Subtotal before fees, in cents", "required": True},
+            "total_cents": {"type": "integer", "description": "Final checkout total, in cents", "required": True},
+        },
+    },
     "screenshot": {
         "description": (
             "Take a full-page screenshot of the current page (captures entire page, not just viewport). "
