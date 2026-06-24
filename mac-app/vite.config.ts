@@ -7,6 +7,18 @@ export default defineConfig({
   base: './',
   server: {
     port: parseInt(process.env.MAC_APP_PORT || '5174'),
+    // Proxy /api to the backend, mirroring front-end/vite.config.ts. The mac-app renders the
+    // SHARED front-end Terminal (via the `@` -> front-end/src alias), and some shared code
+    // (e.g. test-payment's fetchTestPaymentPublicUrl) issues RELATIVE `/api/...` requests in
+    // dev. Without this proxy those hit the mac-app's own origin and get index.html back,
+    // so e.g. the "Test Agent Debit Card" prompt can't resolve the public ngrok URL and
+    // falls back to localhost.
+    proxy: {
+      '/api': {
+        target: process.env.VITE_BACKEND_API_URL || 'http://localhost:3001',
+        changeOrigin: true,
+      },
+    },
   },
   build: {
     outDir: 'dist/ui',
