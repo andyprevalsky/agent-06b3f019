@@ -10,5 +10,5 @@
       <stop offset="100%" stop-color="#7A63FF" />
     </linearGradient>
   </defs>
-  <rect x="96" y="96" width="832" height="832" rx="300" fill="url(#rose)" />
+  <rect width="1024" height="1024" fill="url(#rose)" />
 </svg>
