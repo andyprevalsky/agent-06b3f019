@@ -37,6 +37,11 @@
 import { config } from 'dotenv';
 config();
 
+import { prisma } from '../../providers/database';
+import { stripe } from '../../providers/stripe';
+
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET ?? '';
+
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
 const CASE_CONCURRENCY = Number(
   process.env.BLACKBOX_TEST_CASE_CONCURRENCY ?? process.env.CONTRACT_TEST_CASE_CONCURRENCY ?? 30
@@ -300,6 +305,133 @@ async function testReproducibility_threeSequential() {
 
 // ==================== RUN ====================
 
+// ==================== signed-event integration (handler logic) ====================
+// These construct a VALID Stripe signature (generateTestHeaderString) so the request
+// reaches the switch and exercises the real handlers, then assert DB side effects.
+// Skipped (logged) when STRIPE_WEBHOOK_SECRET is absent, since signing is impossible.
+
+function rid(prefix: string): string {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function postSignedEvent(eventType: string, dataObject: Record<string, unknown>) {
+  const payload = JSON.stringify({
+    id: rid('evt_test'),
+    type: eventType,
+    data: { object: dataObject },
+  });
+  const header = stripe.webhooks.generateTestHeaderString({
+    payload,
+    secret: STRIPE_WEBHOOK_SECRET,
+  });
+  return req(`${BASE_URL}/webhooks/stripe`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'stripe-signature': header },
+    body: payload,
+  });
+}
+
+async function seedSubscription(userId: string, stripeSubscriptionId: string) {
+  await prisma.user.upsert({ where: { userId }, create: { userId }, update: {} });
+  await prisma.subscription.create({
+    data: {
+      userId,
+      subscriptionTier: 25,
+      stripeSubscriptionId,
+      stripeCustomerId: 'cus_test_webhook',
+      currentPeriodEnd: new Date(Date.now() + 86_400_000),
+    },
+  });
+}
+
+async function cleanupSubscription(userId: string) {
+  await prisma.subscription.deleteMany({ where: { userId } });
+  await prisma.user.deleteMany({ where: { userId } });
+}
+
+// customer.subscription.deleted -> revokes (deletes) the local subscription record
+async function testStripe_subscriptionDeleted_revokesRecord() {
+  if (STRIPE_WEBHOOK_SECRET === '') {
+    console.warn(
+      '  [skip] STRIPE_WEBHOOK_SECRET not set — cannot sign customer.subscription.deleted'
+    );
+    return;
+  }
+  const userId = rid('wh-del');
+  const subId = rid('sub_del');
+  await seedSubscription(userId, subId);
+  try {
+    const res = await postSignedEvent('customer.subscription.deleted', {
+      id: subId,
+      customer: 'cus_test_webhook',
+      status: 'canceled',
+      current_period_end: Math.floor(Date.now() / 1000),
+      items: { data: [{ price: { unit_amount: 2500 } }] },
+    });
+    assertStatus(res.status, 200, res.data);
+    const after = await prisma.subscription.findUnique({ where: { stripeSubscriptionId: subId } });
+    if (after !== null) {
+      throw new Error('subscription record should be deleted after customer.subscription.deleted');
+    }
+  } finally {
+    await cleanupSubscription(userId);
+  }
+}
+
+// customer.subscription.updated -> syncs tier + currentPeriodEnd on the local record
+async function testStripe_subscriptionUpdated_syncsRecord() {
+  if (STRIPE_WEBHOOK_SECRET === '') {
+    console.warn(
+      '  [skip] STRIPE_WEBHOOK_SECRET not set — cannot sign customer.subscription.updated'
+    );
+    return;
+  }
+  const userId = rid('wh-upd');
+  const subId = rid('sub_upd');
+  await seedSubscription(userId, subId);
+  try {
+    const newPeriodEnd = Math.floor(Date.now() / 1000) + 30 * 86_400;
+    const res = await postSignedEvent('customer.subscription.updated', {
+      id: subId,
+      customer: 'cus_test_webhook',
+      status: 'active',
+      current_period_end: newPeriodEnd,
+      items: { data: [{ price: { unit_amount: 5000 } }] }, // tier 50
+    });
+    assertStatus(res.status, 200, res.data);
+    const after = await prisma.subscription.findUnique({ where: { stripeSubscriptionId: subId } });
+    if (after === null) throw new Error('subscription record missing after update');
+    if (after.subscriptionTier !== 50) {
+      throw new Error(`expected synced tier 50, got ${after.subscriptionTier}`);
+    }
+    if (Math.abs(after.currentPeriodEnd.getTime() - newPeriodEnd * 1000) > 2000) {
+      throw new Error('currentPeriodEnd not synced from the updated event');
+    }
+  } finally {
+    await cleanupSubscription(userId);
+  }
+}
+
+// invoice.payment_failed -> handler runs (200) for a known subscription
+async function testStripe_paymentFailed_handled() {
+  if (STRIPE_WEBHOOK_SECRET === '') {
+    console.warn('  [skip] STRIPE_WEBHOOK_SECRET not set — cannot sign invoice.payment_failed');
+    return;
+  }
+  const userId = rid('wh-fail');
+  const subId = rid('sub_fail');
+  await seedSubscription(userId, subId);
+  try {
+    const res = await postSignedEvent('invoice.payment_failed', {
+      id: rid('in_test'),
+      subscription: subId,
+    });
+    assertStatus(res.status, 200, res.data);
+  } finally {
+    await cleanupSubscription(userId);
+  }
+}
+
 async function runAll() {
   console.log('Webhooks (Stripe) Black-box Tests\n');
   console.log(`Testing against: ${BASE_URL}`);
@@ -318,6 +450,19 @@ async function runAll() {
       fn: testStripe_malformedSignatureFormat,
     },
     { name: 'GET /webhooks/stripe -- not allowed', fn: testStripe_getNotAllowed },
+    // signed-event integration — exercise the real handlers + assert DB side effects
+    {
+      name: 'POST /webhooks/stripe -- customer.subscription.deleted revokes record',
+      fn: testStripe_subscriptionDeleted_revokesRecord,
+    },
+    {
+      name: 'POST /webhooks/stripe -- customer.subscription.updated syncs record',
+      fn: testStripe_subscriptionUpdated_syncsRecord,
+    },
+    {
+      name: 'POST /webhooks/stripe -- invoice.payment_failed handled',
+      fn: testStripe_paymentFailed_handled,
+    },
     // additional coverage — event types and edge cases
     {
       name: 'POST /webhooks/stripe -- unhandled event type (customer.created)',
