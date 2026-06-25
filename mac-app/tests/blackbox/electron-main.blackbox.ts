@@ -70,6 +70,10 @@ const manualCheckForUpdatesMock = vi.fn();
 const restartToUpdateMock = vi.fn();
 const isUpdateDownloadedMock = vi.fn(() => false);
 const registerUpdateIpcMock = vi.fn();
+const getSessionMock = vi.fn(() => Promise.resolve({ access_token: 'test-access-token' }));
+const importPasskeysFromTokenMock = vi.fn(() =>
+  Promise.resolve({ success: true, count: 1, passkeyCount: 1, passwordCount: 0 })
+);
 
 vi.mock('../../main/domains/auto-updater/runtime', () => ({
   initAutoUpdater: initAutoUpdaterMock,
@@ -78,6 +82,14 @@ vi.mock('../../main/domains/auto-updater/runtime', () => ({
   restartToUpdate: restartToUpdateMock,
   isUpdateDownloaded: isUpdateDownloadedMock,
   registerUpdateIpc: registerUpdateIpcMock,
+}));
+
+vi.mock('../../main/services/auth', () => ({
+  AuthService: { getSession: getSessionMock },
+}));
+
+vi.mock('../../main/domains/passkey-import/service', () => ({
+  importPasskeysFromToken: importPasskeysFromTokenMock,
 }));
 
 // ── Test helpers ────────────────────────────────────────────────────────────
@@ -145,6 +157,8 @@ async function loadMainEntry(
   vi.mocked(electron.app.on).mockReset();
   vi.mocked(electron.app.setAsDefaultProtocolClient).mockClear();
   vi.mocked(electron.app.setAsDefaultProtocolClient).mockImplementation(() => true);
+  vi.mocked(electron.app.requestSingleInstanceLock).mockClear();
+  vi.mocked(electron.app.requestSingleInstanceLock).mockImplementation(() => true);
   vi.mocked(electron.ipcMain.handle).mockClear();
   vi.mocked(electron.app.whenReady).mockClear();
   vi.mocked(electron.BrowserWindow).mockClear();
@@ -179,6 +193,15 @@ describe('blackbox: electron-main (main-wiring)', () => {
     initAutoUpdaterMock.mockClear();
     setAutoUpdaterWindowMock.mockClear();
     registerUpdateIpcMock.mockClear();
+    getSessionMock.mockClear();
+    getSessionMock.mockResolvedValue({ access_token: 'test-access-token' });
+    importPasskeysFromTokenMock.mockClear();
+    importPasskeysFromTokenMock.mockResolvedValue({
+      success: true,
+      count: 1,
+      passkeyCount: 1,
+      passwordCount: 0,
+    });
     clearFetchCaptures();
 
     // Neutralise process.stdin side effects so the test runner is not affected.
@@ -212,6 +235,7 @@ describe('blackbox: electron-main (main-wiring)', () => {
 
     const electron = await import('electron');
     expect(electron.app.name).toBe('Rose');
+    expect(vi.mocked(electron.app.disableHardwareAcceleration)).not.toHaveBeenCalled();
 
     // Exactly one protocol registration for the production scheme (isDev=false stub).
     const protoCalls = vi.mocked(electron.app.setAsDefaultProtocolClient).mock.calls;
@@ -219,15 +243,37 @@ describe('blackbox: electron-main (main-wiring)', () => {
     const registeredSchemes = protoCalls.map((c) => c[0]);
     expect(registeredSchemes).toContain('roselabs');
 
-    const lifecycleEvents = ['open-url', 'window-all-closed', 'activate', 'will-quit'];
+    expect(electron.app.requestSingleInstanceLock).toHaveBeenCalledTimes(1);
+
+    const lifecycleEvents = [
+      'open-url',
+      'window-all-closed',
+      'activate',
+      'second-instance',
+      'will-quit',
+    ];
     for (const ev of lifecycleEvents) {
       const listeners = await appListenersFor(ev);
       expect(listeners.length, `expected a listener for app '${ev}'`).toBeGreaterThanOrEqual(1);
     }
 
-    // stdin 'close' listener installed for parent-death handling.
+    // stdin 'close' parent-death handling is dev-only; production must not
+    // exit when launched by Finder/LaunchServices without an attached stdin.
     const closeCalls = stdinOnMock.mock.calls.filter((c) => c[0] === 'close');
-    expect(closeCalls.length).toBe(1);
+    expect(closeCalls.length).toBe(0);
+  });
+
+  it('single-instance: duplicate launch requests quit instead of creating another importer', async () => {
+    await loadMainEntry((electron) => {
+      vi.mocked(electron.app.requestSingleInstanceLock).mockReturnValue(false);
+    });
+
+    const electron = await import('electron');
+    expect(electron.app.quit).toHaveBeenCalled();
+    expect(electron.app.exit).toHaveBeenCalledWith(0);
+
+    const continueActivityListeners = await appListenersFor('continue-activity');
+    expect(continueActivityListeners.length).toBe(0);
   });
 
   it('module-load: constructs a window-state electron-store with name "window-state"', async () => {
@@ -268,6 +314,63 @@ describe('blackbox: electron-main (main-wiring)', () => {
     expect(initAutoUpdaterMock).toHaveBeenCalledTimes(1);
   });
 
+  it('whenReady: resets stale offscreen saved main-window placement to the primary display', async () => {
+    const staleWindowState = {
+      x: -376,
+      y: -1410,
+      width: 2560,
+      height: 1410,
+      isMaximized: true,
+    };
+
+    await loadMainEntry(async (electron) => {
+      const Store = (await import('electron-store')).default;
+      vi.mocked(Store).mockImplementation(
+        () =>
+          ({
+            get: vi.fn((key: string, fallback?: unknown) =>
+              key === 'mainWindow' ? staleWindowState : fallback
+            ),
+            set: vi.fn(),
+            delete: vi.fn(),
+            clear: vi.fn(),
+            has: vi.fn(() => false),
+          }) as never
+      );
+      vi.mocked(electron.screen.getPrimaryDisplay).mockReturnValue({
+        workArea: { x: 0, y: 38, width: 1728, height: 1079 },
+        bounds: { x: 0, y: 0, width: 1728, height: 1117 },
+      } as Electron.Display);
+      vi.mocked(electron.screen.getAllDisplays).mockReturnValue([
+        {
+          workArea: { x: 0, y: 38, width: 1728, height: 1079 },
+          bounds: { x: 0, y: 0, width: 1728, height: 1117 },
+        },
+        {
+          workArea: { x: -376, y: -1410, width: 2560, height: 1410 },
+          bounds: { x: -376, y: -1410, width: 2560, height: 1410 },
+        },
+      ] as Electron.Display[]);
+    });
+    await flushWhenReady();
+
+    const electron = await import('electron');
+    const BrowserWindow = vi.mocked(electron.BrowserWindow);
+    const mainWindowOptions = BrowserWindow.mock
+      .calls[0][0] as Electron.BrowserWindowConstructorOptions;
+    const mainWindow = BrowserWindow.mock.results[0]?.value as {
+      maximize: ReturnType<typeof vi.fn>;
+    };
+
+    expect(mainWindowOptions).toMatchObject({
+      x: 0,
+      y: 38,
+      width: 1728,
+      height: 1079,
+    });
+    expect(mainWindow.maximize).not.toHaveBeenCalled();
+  });
+
   it('whenReady: registers global shortcuts when onboarding is complete', async () => {
     onboardingCompleteFlag = true;
     await loadMainEntry();
@@ -278,6 +381,25 @@ describe('blackbox: electron-main (main-wiring)', () => {
     // Both primary and fallback shortcut are attempted.
     expect(registered).toContain('Alt+Space');
     expect(registered).toContain('Alt+Shift+Space');
+  });
+
+  it('activate before ready: waits for app readiness before creating screen-backed windows', async () => {
+    await loadMainEntry((electron) => {
+      vi.mocked(electron.app.isReady).mockReturnValue(false);
+    });
+
+    const activateListeners = await appListenersFor('activate');
+    expect(activateListeners.length).toBeGreaterThanOrEqual(1);
+
+    const electron = await import('electron');
+    activateListeners[0].listener();
+
+    expect(vi.mocked(electron.BrowserWindow)).not.toHaveBeenCalled();
+
+    vi.mocked(electron.app.isReady).mockReturnValue(true);
+    await flushWhenReady();
+
+    expect(vi.mocked(electron.BrowserWindow).mock.calls.length).toBe(2);
   });
 
   // ── Empty state: first launch (onboarding not complete) ──────────────────
@@ -338,6 +460,110 @@ describe('blackbox: electron-main (main-wiring)', () => {
     const fakeEvent = { preventDefault: vi.fn() } as unknown as Electron.Event;
     expect(() => openUrlListeners[0].listener(fakeEvent, 'not a valid url')).not.toThrow();
     expect(mainInstance.webContents.send).not.toHaveBeenCalled();
+  });
+
+  it('credential exchange handoff: observes will-continue and claims continue before importing', async () => {
+    await loadMainEntry();
+
+    const willContinueListeners = await appListenersFor('will-continue-activity');
+    const continueListeners = await appListenersFor('continue-activity');
+    expect(willContinueListeners.length).toBeGreaterThanOrEqual(1);
+    expect(continueListeners.length).toBeGreaterThanOrEqual(1);
+
+    const willEvent = { preventDefault: vi.fn() };
+    willContinueListeners[0].listener(willEvent, 'ASCredentialExchangeActivity');
+    expect(willEvent.preventDefault).not.toHaveBeenCalled();
+
+    const continueEvent = { preventDefault: vi.fn() };
+    continueListeners[0].listener(
+      continueEvent,
+      'ASCredentialExchangeActivity',
+      {},
+      { webpageURL: undefined }
+    );
+    expect(continueEvent.preventDefault).toHaveBeenCalledTimes(1);
+  });
+
+  it('credential exchange handoff: imports a valid token and notifies the renderer', async () => {
+    await loadMainEntry();
+    await flushWhenReady();
+
+    const continueListeners = await appListenersFor('continue-activity');
+    expect(continueListeners.length).toBeGreaterThanOrEqual(1);
+
+    const electron = await import('electron');
+    const BrowserWindow = vi.mocked(electron.BrowserWindow);
+    const mainInstance = BrowserWindow.mock.results[0]?.value as {
+      webContents: { send: ReturnType<typeof vi.fn> };
+    };
+    const result = { success: true, count: 1, passkeyCount: 1, passwordCount: 0 };
+    importPasskeysFromTokenMock.mockResolvedValueOnce(result);
+
+    const continueEvent = { preventDefault: vi.fn() };
+    continueListeners[0].listener(
+      continueEvent,
+      'ASCredentialExchangeActivity',
+      { ASCredentialImportToken: '123e4567-e89b-12d3-a456-426614174099' },
+      { webpageURL: undefined }
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(continueEvent.preventDefault).toHaveBeenCalledTimes(1);
+    expect(getSessionMock).toHaveBeenCalledTimes(1);
+    expect(importPasskeysFromTokenMock).toHaveBeenCalledWith(
+      '123e4567-e89b-12d3-a456-426614174099',
+      'test-access-token'
+    );
+    expect(mainInstance.webContents.send).toHaveBeenCalledWith('passkeys:importComplete', result);
+  });
+
+  it('credential exchange handoff: ignores duplicate deliveries for the same token', async () => {
+    await loadMainEntry();
+    await flushWhenReady();
+
+    const continueListeners = await appListenersFor('continue-activity');
+    expect(continueListeners.length).toBeGreaterThanOrEqual(1);
+
+    const token = '123e4567-e89b-12d3-a456-426614174077';
+    const continueEvent = { preventDefault: vi.fn() };
+    continueListeners[0].listener(
+      continueEvent,
+      'ASCredentialExchangeActivity',
+      { ASCredentialImportToken: token },
+      { webpageURL: undefined }
+    );
+    continueListeners[0].listener(
+      continueEvent,
+      'ASCredentialExchangeActivity',
+      { ASCredentialImportToken: token.toUpperCase() },
+      { webpageURL: undefined }
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(importPasskeysFromTokenMock).toHaveBeenCalledTimes(1);
+    expect(importPasskeysFromTokenMock).toHaveBeenCalledWith(token, 'test-access-token');
+  });
+
+  it('credential exchange handoff: second-instance focuses the existing window', async () => {
+    await loadMainEntry();
+    await flushWhenReady();
+
+    const secondInstanceListeners = await appListenersFor('second-instance');
+    expect(secondInstanceListeners.length).toBeGreaterThanOrEqual(1);
+
+    const electron = await import('electron');
+    const BrowserWindow = vi.mocked(electron.BrowserWindow);
+    const mainInstance = BrowserWindow.mock.results[0]?.value as {
+      show: ReturnType<typeof vi.fn>;
+      focus: ReturnType<typeof vi.fn>;
+    };
+    const showCallsBefore = mainInstance.show.mock.calls.length;
+    const focusCallsBefore = mainInstance.focus.mock.calls.length;
+
+    secondInstanceListeners[0].listener();
+
+    expect(mainInstance.show).toHaveBeenCalledTimes(showCallsBefore + 1);
+    expect(mainInstance.focus).toHaveBeenCalledTimes(focusCallsBefore + 1);
   });
 
   // ── Error state: BrowserWindow creation failure ──────────────────────────

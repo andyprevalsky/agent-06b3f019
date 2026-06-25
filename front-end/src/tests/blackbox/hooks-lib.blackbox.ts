@@ -64,6 +64,8 @@ import { useRealtimeSubscription } from '@/features/agent-context/hooks/useRealt
 
 // useTerminalMessages
 import { useTerminalMessages } from '@/features/terminal/hooks/useTerminalMessages';
+import { useTickerCarousel } from '@/features/terminal/hooks/useTickerCarousel';
+import { useTileAnimation } from '@/features/terminal/hooks/useTileAnimation';
 
 // usePayment
 import { usePayment } from '@/features/settings/hooks/usePayment';
@@ -417,6 +419,61 @@ describe('derivations.ts', () => {
       expect(derivePendingApproval(msgs)).toBeNull();
       expect(deriveHasActiveAttentionRequest(msgs)).toBe(false);
     });
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// terminal animation hooks
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('useTickerCarousel', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    Reflect.deleteProperty(window, 'api');
+  });
+
+  it('starts the popular-goals requestAnimationFrame loop in Electron', () => {
+    Object.defineProperty(window, 'api', {
+      value: {},
+      configurable: true,
+    });
+    const requestAnimationFrameSpy = vi
+      .spyOn(window, 'requestAnimationFrame')
+      .mockImplementation(() => 1);
+
+    renderHook(() => useTickerCarousel(null));
+
+    expect(requestAnimationFrameSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('starts the popular-goals requestAnimationFrame loop on web when no agent is selected', () => {
+    const requestAnimationFrameSpy = vi
+      .spyOn(window, 'requestAnimationFrame')
+      .mockImplementation(() => 1);
+
+    renderHook(() => useTickerCarousel(null));
+
+    expect(requestAnimationFrameSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('useTileAnimation', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    Reflect.deleteProperty(window, 'api');
+  });
+
+  it('starts incomplete and schedules tile animation timers in Electron', () => {
+    Object.defineProperty(window, 'api', {
+      value: {},
+      configurable: true,
+    });
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+
+    const { result } = renderHook(() => useTileAnimation());
+
+    expect(result.current.animationComplete).toBe(false);
+    expect(setIntervalSpy).not.toHaveBeenCalled();
   });
 });
 

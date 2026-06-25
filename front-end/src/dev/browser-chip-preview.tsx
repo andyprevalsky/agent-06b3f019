@@ -93,10 +93,7 @@ function PreviewApp() {
                 <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                   Browser status preview
                 </div>
-                <BrowserStatusBar
-                  taskId="browser-preview"
-                  browserUrl="about:blank"
-                />
+                <BrowserStatusBar taskId="browser-preview" browserUrl="about:blank" />
               </div>
             </div>
           </AgentContext.Provider>

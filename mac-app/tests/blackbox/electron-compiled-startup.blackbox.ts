@@ -11,6 +11,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import plist from 'plist';
 import { describe, expect, it } from 'vitest';
 
 const ROOT = path.resolve(__dirname, '../..');
@@ -20,6 +21,7 @@ const STARTUP_MARKER = '@@ROSE_COMPILED_STARTUP@@';
 interface StartupProbe {
   windowCount: number;
   preloadPath: string;
+  loadUrlPaths: string[];
   loadFilePaths: string[];
   sandboxValues: Array<boolean | null>;
   exposedKey: string | null;
@@ -63,8 +65,12 @@ const marker = ${JSON.stringify(STARTUP_MARKER)};
 const appPath = ${JSON.stringify(options.appPath ?? path.dirname(path.dirname(mainEntry)))};
 const isPackaged = ${JSON.stringify(options.isPackaged ?? false)};
 const rootRequire = Module.createRequire(${JSON.stringify(path.join(ROOT, 'package.json'))});
+if (isPackaged) {
+  process.resourcesPath = path.join(appPath, 'Contents', 'Resources');
+}
 const windows = [];
 const ipcHandles = [];
+const loadUrlPaths = [];
 const loadFilePaths = [];
 let exposed = null;
 
@@ -105,7 +111,10 @@ function BrowserWindow(options) {
     setVisibleOnAllWorkspaces() {},
     setAlwaysOnTop() {},
     setWindowButtonVisibility() {},
-    loadURL() { return Promise.resolve(); },
+    loadURL(url) {
+      loadUrlPaths.push(url);
+      return Promise.resolve();
+    },
     loadFile(filePath) {
       loadFilePaths.push(filePath);
       return Promise.resolve();
@@ -186,6 +195,7 @@ const electronStub = {
     getAppPath() { return appPath; },
     getName() { return 'rose-desktop-test'; },
     getVersion() { return '0.0.0-test'; },
+    requestSingleInstanceLock() { return true; },
     on() {},
     whenReady() { return Promise.resolve(); },
     quit() {},
@@ -297,6 +307,7 @@ function finish() {
     console.log(marker + JSON.stringify({
       windowCount: windows.length,
       preloadPath,
+      loadUrlPaths,
       loadFilePaths,
       sandboxValues,
       exposedKey: exposed && exposed.key,
@@ -336,6 +347,77 @@ function runStartupProbe(mainEntry: string, options: StartupProbeOptions = {}): 
 }
 
 describe('compiled Electron startup blackbox', () => {
+  it('keeps credential-provider entitlement off inherited Electron helper entitlements', () => {
+    const packageJson = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')) as {
+      build: {
+        mac: {
+          entitlements: string;
+          entitlementsInherit: string;
+        };
+      };
+    };
+
+    expect(packageJson.build.mac.entitlements).toBe('entitlements.mac.plist');
+    expect(packageJson.build.mac.entitlementsInherit).toBe('entitlements.inherit.mac.plist');
+
+    const appEntitlements = plist.parse(
+      fs.readFileSync(path.join(ROOT, packageJson.build.mac.entitlements), 'utf8')
+    ) as Record<string, unknown>;
+    const inheritedEntitlements = plist.parse(
+      fs.readFileSync(path.join(ROOT, packageJson.build.mac.entitlementsInherit), 'utf8')
+    ) as Record<string, unknown>;
+
+    expect(
+      appEntitlements['com.apple.developer.authentication-services.autofill-credential-provider']
+    ).toBe(true);
+    expect(appEntitlements['com.apple.application-identifier']).toBe('P3HATASMP9.com.rose.desktop');
+    expect(appEntitlements['com.apple.developer.team-identifier']).toBe('P3HATASMP9');
+    expect(appEntitlements['keychain-access-groups']).toEqual(['P3HATASMP9.*']);
+    expect(
+      inheritedEntitlements[
+        'com.apple.developer.authentication-services.autofill-credential-provider'
+      ]
+    ).toBeUndefined();
+    expect(inheritedEntitlements['com.apple.security.cs.allow-jit']).toBe(true);
+    expect(inheritedEntitlements['com.apple.security.cs.allow-unsigned-executable-memory']).toBe(
+      true
+    );
+    expect(inheritedEntitlements['com.apple.security.cs.disable-library-validation']).toBe(true);
+  });
+
+  it('signs the credential-provider extension with the app identifier from its profile', () => {
+    const providerEntitlements = plist.parse(
+      fs.readFileSync(
+        path.join(ROOT, 'native', 'passkey-provider', 'provider.entitlements'),
+        'utf8'
+      )
+    ) as Record<string, unknown>;
+
+    expect(
+      providerEntitlements[
+        'com.apple.developer.authentication-services.autofill-credential-provider'
+      ]
+    ).toBe(true);
+    expect(providerEntitlements['com.apple.application-identifier']).toBe(
+      'P3HATASMP9.com.rose.desktop.PasskeyProvider'
+    );
+    expect(providerEntitlements['com.apple.developer.team-identifier']).toBe('P3HATASMP9');
+    expect(providerEntitlements['keychain-access-groups']).toEqual(['P3HATASMP9.*']);
+  });
+
+  it('packages Python helpers outside app.asar so child processes can execute them', () => {
+    const packageJson = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')) as {
+      build: {
+        extraResources: Array<{ from: string; to: string }>;
+      };
+    };
+
+    expect(packageJson.build.extraResources).toContainEqual({
+      from: 'scripts/read_indexeddb.py',
+      to: 'scripts/read_indexeddb.py',
+    });
+  });
+
   it('compiles main/preload output and starts with window.api installed', () => {
     const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rose-compiled-startup-'));
     try {

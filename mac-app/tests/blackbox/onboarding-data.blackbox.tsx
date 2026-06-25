@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 
@@ -144,12 +144,23 @@ function installOnboardingApiMocks(): ReturnType<typeof installIpcMock> {
     getInstalledBrowsers: vi.fn(async () => INSTALLED_BROWSERS),
     syncBrowser: vi.fn(async () => ({ success: true })),
     syncBrowserPasswords: vi.fn(async () => ({ success: true })),
+    openAutoFillSettings: vi.fn(async () => ({
+      success: true,
+      enabled: true,
+      credentialExchangeEnabled: true,
+    })),
+    checkAutoFillSettings: vi.fn(async () => ({
+      success: true,
+      enabled: true,
+      credentialExchangeEnabled: true,
+    })),
     checkIMessageAccess: vi.fn(async () => true),
     openFullDiskAccessSettings: vi.fn(async () => ({ success: true })),
     startIMessageUpload: vi.fn(async () => ({ success: true })),
     openExternal: vi.fn(async () => ({ success: true })),
     openKeychainAccess: vi.fn(async () => ({ success: true })),
     openPasswordsApp: vi.fn(async () => ({ success: true })),
+    onPasskeysImportComplete: vi.fn(() => vi.fn()),
     atlas: {
       storePassword: vi.fn(async () => ({ success: true })),
       hasPassword: vi.fn(async () => false),
@@ -248,12 +259,12 @@ describe('OnboardingData', () => {
     expect(api.getInstalledBrowsers).toHaveBeenCalledTimes(1);
     expect(screen.getByText('Browser Sync')).toBeInTheDocument();
     expect(screen.getByText('Passwords')).toBeInTheDocument();
-    expect(screen.getByText('Messages Sync')).toBeInTheDocument();
+    expect(screen.getByText('Messages')).toBeInTheDocument();
     expect(screen.getByText('Socials')).toBeInTheDocument();
     expect(screen.getByText('Agent Pay')).toBeInTheDocument();
     expect(screen.queryByText('andy@example.com')).not.toBeInTheDocument();
 
-    await user.click(sectionToggle('Messages Sync'));
+    await user.click(sectionToggle('Messages'));
     expect(screen.getByText('andy@example.com')).toBeInTheDocument();
 
     const continueButton = screen.getByRole('button', { name: /continue/i });
@@ -296,11 +307,12 @@ describe('OnboardingData', () => {
 
     await user.click(rowAction(section('Browser Sync'), 'ChatGPT Atlas'));
     expect(screen.getByText('Sync Atlas')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /cancel/i }));
 
     await user.click(sectionToggle('Passwords'));
     const passwords = section('Passwords');
     expect(within(passwords).getByText('Chrome')).toBeInTheDocument();
-    expect(within(passwords).getByText('Apple Passwords')).toBeInTheDocument();
+    expect(within(passwords).getByText('Apple Passwords & Passkeys')).toBeInTheDocument();
     expect(within(passwords).getByText('ChatGPT Atlas')).toBeInTheDocument();
 
     await user.click(rowAction(passwords, 'Chrome'));
@@ -308,13 +320,28 @@ describe('OnboardingData', () => {
       expect(api.syncBrowserPasswords).toHaveBeenCalledWith('chrome');
     });
 
-    await user.click(within(passwords).getByText(/Request one/i));
-    await user.type(screen.getByPlaceholderText(/1Password/i), 'Bitwarden');
-    await user.click(screen.getByRole('button', { name: /send/i }));
-    expect(await screen.findByText(/Request sent/i)).toBeInTheDocument();
+    await user.click(rowAction(passwords, 'Apple Passwords & Passkeys'));
+    expect(screen.getByText('Sync Apple Passwords & Passkeys')).toBeInTheDocument();
 
-    await user.click(sectionToggle('Messages Sync'));
-    const messages = section('Messages Sync');
+    const modalSyncButtons = screen.getAllByRole('button', { name: /^Sync$/i });
+    await user.click(modalSyncButtons[modalSyncButtons.length - 1]);
+    await waitFor(() => {
+      expect(api.openAutoFillSettings).toHaveBeenCalledTimes(1);
+      expect(api.openPasswordsApp).toHaveBeenCalledTimes(1);
+    });
+    expect(screen.getByRole('button', { name: /Syncing/i })).toBeDisabled();
+
+    const importComplete = vi.mocked(api.onPasskeysImportComplete).mock.calls[0]?.[0];
+    expect(importComplete).toEqual(expect.any(Function));
+    act(() => {
+      importComplete?.({ success: true, count: 1, passkeyCount: 1, passwordCount: 0 });
+    });
+    await waitFor(() => {
+      expect(screen.queryByText('Sync Apple Passwords & Passkeys')).not.toBeInTheDocument();
+    });
+
+    await user.click(sectionToggle('Messages'));
+    const messages = section('Messages');
     expect(within(messages).getByText('iMessage')).toBeInTheDocument();
     expect(within(messages).getByText('WhatsApp')).toBeInTheDocument();
     expect(within(messages).getByText('Telegram')).toBeInTheDocument();

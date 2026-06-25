@@ -13,6 +13,12 @@ import type { BrowserType, BrowserInfo } from '@/features/integration-handlers-c
 import { Button } from '@/components/ui/button';
 
 import BrowserIcon from './BrowserIcon';
+import ConnectedStatusText from './ConnectedStatusText';
+import DropdownIconFrame, {
+  browserDropdownIconPreset,
+  dropdownIconImageClassName,
+  dropdownIconPreset,
+} from './DropdownIconFrame';
 import SectionToggleButton from './SectionToggleButton';
 import SyncItemButton from './SyncItemButton';
 
@@ -48,9 +54,9 @@ function DesktopOnlyFallback() {
   return (
     <div className="flex items-center justify-between flex-wrap gap-2 p-4 border border-border rounded-lg bg-card/60">
       <div className="flex items-center gap-3">
-        <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-background">
+        <DropdownIconFrame {...dropdownIconPreset.browserMain}>
           <BrowserCookiesIcon />
-        </div>
+        </DropdownIconFrame>
         <div className="flex flex-col">
           <div className="flex items-center gap-2">
             <h3 className="font-medium">Browser Cookies</h3>
@@ -85,9 +91,12 @@ export default function BrowserCookiesSection({
     <div className="rounded-lg border border-border bg-card/60 overflow-hidden">
       <div className="p-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-background">
+          <DropdownIconFrame
+            {...dropdownIconPreset.browserMain}
+            isSynced={connectedBrowsers.size > 0}
+          >
             <BrowserCookiesIcon />
-          </div>
+          </DropdownIconFrame>
           <div className="flex flex-col">
             <h3 className="font-medium">Browser Cookies</h3>
             <span className="text-xs text-muted-foreground">
@@ -115,8 +124,16 @@ export default function BrowserCookiesSection({
                 }`}
               >
                 <div className="flex items-center gap-3">
-                  <BrowserIcon type={browser.type} className="w-6 h-6" />
-                  <span className="text-sm">{browser.name}</span>
+                  <DropdownIconFrame
+                    {...browserDropdownIconPreset(browser.type)}
+                    isSynced={connectedBrowsers.has(browser.type)}
+                  >
+                    <BrowserIcon type={browser.type} className={dropdownIconImageClassName} />
+                  </DropdownIconFrame>
+                  <div className="flex flex-col items-start">
+                    <span className="text-sm">{browser.name}</span>
+                    <ConnectedStatusText isConnected={connectedBrowsers.has(browser.type)} />
+                  </div>
                 </div>
 
                 <SyncItemButton

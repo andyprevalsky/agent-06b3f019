@@ -8,7 +8,6 @@
 
 import type { CSSProperties, FormEvent, KeyboardEvent, RefObject } from 'react';
 import { ArrowUp } from 'lucide-react';
-import LiquidWhiteButton from '@/components/ui/liquid-white-button';
 
 interface QueryFormProps {
   query: string;
@@ -39,6 +38,21 @@ const FORM_STYLE: CSSProperties = {
   paddingRight: 4,
 };
 
+const SUBMIT_BUTTON_STYLE: CSSProperties = {
+  width: 40,
+  height: 40,
+  borderRadius: '50%',
+  border: '1px solid rgba(255, 255, 255, 0.85)',
+  background: 'linear-gradient(180deg, #f4f4f4 0%, #cfcfcf 45%, #9f9f9f 100%)',
+  boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15), inset 0 1px 2px rgba(255, 255, 255, 0.8)',
+  color: '#ffffff',
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  flexShrink: 0,
+  padding: 0,
+};
+
 const QueryForm = ({
   query,
   setQuery,
@@ -66,15 +80,21 @@ const QueryForm = ({
         style={INPUT_STYLE}
       />
 
-      <LiquidWhiteButton
+      <button
+        type="button"
+        data-testid="submit-button"
         onClick={() => {
           void handleSubmit();
         }}
         disabled={submitting}
-        size="sm"
+        style={{
+          ...SUBMIT_BUTTON_STYLE,
+          opacity: submitting ? 0.5 : 1,
+          cursor: submitting ? 'not-allowed' : 'pointer',
+        }}
       >
         <ArrowUp className="w-5 h-5" strokeWidth={2.5} />
-      </LiquidWhiteButton>
+      </button>
     </form>
   );
 };

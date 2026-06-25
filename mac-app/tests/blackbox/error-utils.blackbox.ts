@@ -7,6 +7,7 @@ describe('shared error utilities', () => {
     expect(getErrorMessage(new Error('boom'))).toBe('boom');
     expect(getErrorMessage('plain failure')).toBe('plain failure');
     expect(getErrorMessage({ code: 'E_TEST' })).toBe('{"code":"E_TEST"}');
+    expect(getErrorMessage(undefined, 'fallback message')).toBe('fallback message');
 
     const circular: { self?: unknown } = {};
     circular.self = circular;

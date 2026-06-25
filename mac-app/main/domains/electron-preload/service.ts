@@ -24,6 +24,8 @@ import type {
   BrowserType,
   BrowserInfo,
   ReadBrowserCookiesConfig,
+  PasskeyEnrollParams,
+  AutoFillSettingsResult,
 } from '../../../shared/types/ipc';
 import {
   buildEventBridge,
@@ -102,6 +104,12 @@ function buildAtlasBridge(ipcRenderer: IpcRenderer): IPC['atlas'] {
       }>,
     hasPassword: () => ipcRenderer.invoke('atlas:hasPassword') as Promise<boolean>,
     clearPassword: () => ipcRenderer.invoke('atlas:clearPassword') as Promise<{ success: boolean }>,
+  };
+}
+
+function buildPasskeysBridge(ipcRenderer: IpcRenderer): IPC['passkeys'] {
+  return {
+    enroll: (params: PasskeyEnrollParams) => ipcRenderer.invoke('passkeys:enroll', params),
   };
 }
 
@@ -212,6 +220,8 @@ function buildSystemAndUpdateBridge(
   | 'openFullDiskAccessSettings'
   | 'openKeychainAccess'
   | 'openPasswordsApp'
+  | 'openAutoFillSettings'
+  | 'checkAutoFillSettings'
   | 'submitQuickQuery'
   | 'hideQuickQuery'
   | 'checkForUpdates'
@@ -227,6 +237,10 @@ function buildSystemAndUpdateBridge(
       ipcRenderer.invoke('system:openKeychainAccess', searchQuery) as Promise<{ success: boolean }>,
     openPasswordsApp: () =>
       ipcRenderer.invoke('system:openPasswordsApp') as Promise<{ success: boolean }>,
+    openAutoFillSettings: () =>
+      ipcRenderer.invoke('system:openAutoFillSettings') as Promise<AutoFillSettingsResult>,
+    checkAutoFillSettings: () =>
+      ipcRenderer.invoke('system:checkAutoFillSettings') as Promise<AutoFillSettingsResult>,
     submitQuickQuery: (payload: string | QuickQueryPayload) =>
       ipcRenderer.invoke('quick-query:submit', payload) as Promise<{ success: boolean }>,
     hideQuickQuery: () => ipcRenderer.invoke('quick-query:hide') as Promise<{ success: boolean }>,
@@ -255,6 +269,7 @@ export function buildIpcApi(ipcRenderer: IpcRenderer): IPC {
     claudeCode: buildClaudeCodeBridge(ipcRenderer),
     gptCode: buildGptCodeBridge(ipcRenderer),
     atlas: buildAtlasBridge(ipcRenderer),
+    passkeys: buildPasskeysBridge(ipcRenderer),
     whatsapp: buildWhatsAppBridge(ipcRenderer),
     telegram: buildTelegramBridge(ipcRenderer),
     ...buildMessagingBridge(ipcRenderer),

@@ -8,10 +8,10 @@
  *       |           |              |    |                  |
  *       | (file)    | (browser)    |    |  (provider)      | (handler/passwords)
  *       v           v              |    v                  v
- * [FILE_UPLOADING] [BROWSER_SYNC]  |  [CONNECTING]  [HANDLER/PASSWORD_UPLOADING]
+ * [FILE_UPLOADING] [BROWSER_SYNC]  |  [CONNECTING]  [HANDLER/CREDENTIAL_EXCHANGE]
  *       |           |              |       |               |
  *       v           v              v       v               v
- *       +----------(atlas modal?)--+-------+----(apple passwords modal?)
+ *       +----------(atlas modal?)--+-------+----(Apple Passwords & Passkeys modal)
  *                              v
  *                         [IDLE/READY]
  *
@@ -26,7 +26,6 @@ import {
   useIntegrationData,
   useBrowserSync,
   usePasswordSync,
-  usePasswordRequest,
   useComputeSync,
   useMessagesSync,
   useFileUpload,
@@ -50,7 +49,6 @@ export default function Integrations() {
   const data = useIntegrationData();
   const browser = useBrowserSync(handlers, data.fetchIntegrations);
   const passwords = usePasswordSync(handlers, data.fetchIntegrations);
-  const passwordRequest = usePasswordRequest();
   const compute = useComputeSync(handlers, data.fetchIntegrations);
   const messages = useMessagesSync(handlers, data.fetchIntegrations);
   const fileUpload = useFileUpload();
@@ -60,9 +58,8 @@ export default function Integrations() {
   const actions = useIntegrationActions({
     handleBrowserSync: browser.handleBrowserSync,
     handleChromePasswordsSync: passwords.handleChromePasswordsSync,
-    handleApplePasswordsSync: passwords.handleApplePasswordsSync,
     handleAtlasPasswordsSync: passwords.handleAtlasPasswordsSync,
-    handlePasswordRequest: passwordRequest.handlePasswordRequest,
+    handlePasskeysConnect: passwords.handlePasskeysConnect,
     handleClaudeCodeSync: compute.handleClaudeCodeSync,
     handleGptCodeSync: compute.handleGptCodeSync,
     handleIMessageSync: messages.handleIMessageSync,
@@ -101,6 +98,7 @@ export default function Integrations() {
           ) : (
             <IntegrationSections
               isBrowserCookiesAvailable={!!handlers.browserCookies?.isAvailable}
+              isPasskeysAvailable={!!handlers.passkeys?.isAvailable}
               isIMessageAvailable={!!handlers.iMessage?.isAvailable}
               isClaudeCodeAvailable={!!handlers.claudeCode?.isAvailable}
               isGptCodeAvailable={!!handlers.gptCode?.isAvailable}
@@ -109,7 +107,6 @@ export default function Integrations() {
               data={data}
               browser={browser}
               passwords={passwords}
-              passwordRequest={passwordRequest}
               compute={compute}
               messages={messages}
               gmail={gmail}

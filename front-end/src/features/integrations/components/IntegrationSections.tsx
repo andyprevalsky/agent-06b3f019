@@ -8,7 +8,6 @@ import type { useAccordion } from '../hooks/useAccordion';
 import type { useIntegrationData } from '../hooks/useIntegrationData';
 import type { useBrowserSync } from '../hooks/useBrowserSync';
 import type { usePasswordSync } from '../hooks/usePasswordSync';
-import type { usePasswordRequest } from '../hooks/usePasswordRequest';
 import type { useComputeSync } from '../hooks/useComputeSync';
 import type { useMessagesSync } from '../hooks/useMessagesSync';
 import type { useGmailConnect } from '../hooks/useGmailConnect';
@@ -24,6 +23,7 @@ import PlaidSection from './PlaidSection';
 
 interface IntegrationSectionsProps {
   isBrowserCookiesAvailable: boolean;
+  isPasskeysAvailable: boolean;
   isIMessageAvailable: boolean;
   isClaudeCodeAvailable: boolean;
   isGptCodeAvailable: boolean;
@@ -32,7 +32,6 @@ interface IntegrationSectionsProps {
   data: ReturnType<typeof useIntegrationData>;
   browser: ReturnType<typeof useBrowserSync>;
   passwords: ReturnType<typeof usePasswordSync>;
-  passwordRequest: ReturnType<typeof usePasswordRequest>;
   compute: ReturnType<typeof useComputeSync>;
   messages: ReturnType<typeof useMessagesSync>;
   gmail: ReturnType<typeof useGmailConnect>;
@@ -40,21 +39,14 @@ interface IntegrationSectionsProps {
   plaid: ReturnType<typeof usePlaidIntegration>;
 }
 
-function PlaidIntegrationSection({
-  accordion,
-  plaid,
-}: Pick<IntegrationSectionsProps, 'accordion' | 'plaid'>) {
+function PlaidIntegrationSection({ plaid }: Pick<IntegrationSectionsProps, 'plaid'>) {
   return (
     <PlaidSection
-      expanded={accordion.plaidExpanded}
-      onToggle={() => accordion.toggleSection('plaid')}
       items={plaid.items}
       itemsLoading={plaid.itemsLoading}
       connectLoading={plaid.connectLoading}
-      disconnectingItemId={plaid.disconnectingItemId}
       error={plaid.error}
       onConnect={plaid.onConnect}
-      onDisconnect={plaid.onDisconnect}
     />
   );
 }
@@ -89,6 +81,7 @@ function ComputeIntegrationSection({
 
 export default function IntegrationSections({
   isBrowserCookiesAvailable,
+  isPasskeysAvailable,
   isIMessageAvailable,
   isClaudeCodeAvailable,
   isGptCodeAvailable,
@@ -97,7 +90,6 @@ export default function IntegrationSections({
   data,
   browser,
   passwords,
-  passwordRequest,
   compute,
   messages,
   gmail,
@@ -120,20 +112,15 @@ export default function IntegrationSections({
         expanded={accordion.passwordsExpanded}
         onToggle={() => accordion.toggleSection('passwords')}
         isBrowserCookiesAvailable={isBrowserCookiesAvailable}
+        isPasskeysAvailable={isPasskeysAvailable}
         chromePasswordsSynced={data.chromePasswordsSynced}
         applePasswordsSynced={data.applePasswordsSynced}
+        passkeysSynced={data.passkeysSynced}
         atlasPasswordsSynced={data.atlasPasswordsSynced}
         passwordSyncLoading={passwords.passwordSyncLoading}
         onChromeSync={() => void actions.onChromePasswordsSync()}
-        onApplePasswordsOpen={() => passwords.setApplePasswordsModalOpen(true)}
+        onPasskeysOpen={() => passwords.openCredentialExchangeModal()}
         onAtlasPasswordsOpen={() => passwords.setAtlasPasswordsModalOpen(true)}
-        passwordRequestExpanded={passwordRequest.passwordRequestExpanded}
-        onPasswordRequestExpand={() => passwordRequest.setPasswordRequestExpanded(true)}
-        passwordRequestInput={passwordRequest.passwordRequestInput}
-        onPasswordRequestInputChange={passwordRequest.setPasswordRequestInput}
-        passwordRequestSending={passwordRequest.passwordRequestSending}
-        passwordRequestSent={passwordRequest.passwordRequestSent}
-        onPasswordRequestSubmit={() => void actions.onPasswordRequest()}
       />
 
       <MessagesSyncSection
@@ -159,7 +146,7 @@ export default function IntegrationSections({
         />
       )}
 
-      {isFullySignedIn && <PlaidIntegrationSection accordion={accordion} plaid={plaid} />}
+      {isFullySignedIn && <PlaidIntegrationSection plaid={plaid} />}
 
       <SocialsSection
         expanded={accordion.socialsExpanded}

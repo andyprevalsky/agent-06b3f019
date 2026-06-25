@@ -15,15 +15,9 @@ export interface ConnectedIntegration {
   lastSuccessfulSyncAt?: string;
 }
 
-export type AccordionSection =
-  | 'browsers'
-  | 'passwords'
-  | 'messagesSync'
-  | 'compute'
-  | 'plaid'
-  | 'socials';
+export type AccordionSection = 'browsers' | 'passwords' | 'messagesSync' | 'compute' | 'socials';
 
-export type PasswordSyncType = 'chrome' | 'apple' | 'atlas';
+export type PasswordSyncType = 'chrome' | 'apple' | 'passkeys' | 'atlas';
 
 export type MessageSyncType = 'imessage' | 'whatsapp' | 'telegram';
 

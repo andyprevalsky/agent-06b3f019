@@ -4,8 +4,6 @@
  *   [DISPLAY] ──(click Get Started)──> seed prefill query → onGetStarted()
  */
 
-import { useEffect, useRef } from 'react';
-import { liquidMetalFragmentShader, ShaderMount } from '@paper-design/shaders';
 import {
   ArrowRight,
   Mail,
@@ -28,52 +26,16 @@ const ClaudeCodeIcon = (): JSX.Element => (
 );
 
 const ShaderLogo = (): JSX.Element => {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const shaderRef = useRef<ShaderMount | null>(null);
-
-  useEffect(() => {
-    const container = containerRef.current;
-    if (container === null) return;
-
-    if (shaderRef.current !== null) {
-      shaderRef.current.dispose();
-      shaderRef.current = null;
-    }
-
-    shaderRef.current = new ShaderMount(
-      container,
-      liquidMetalFragmentShader,
-      {
-        u_repetition: 0.3,
-        u_softness: 0.9,
-        u_shiftRed: 0.1,
-        u_shiftBlue: 0.1,
-        u_distortion: 0,
-        u_contour: 0,
-        u_angle: 45,
-        u_scale: 2,
-        u_shape: 0,
-        u_offsetX: 0,
-        u_offsetY: 0,
-      },
-      undefined,
-      0.5
-    );
-
-    return () => {
-      if (shaderRef.current !== null) {
-        shaderRef.current.dispose();
-        shaderRef.current = null;
-      }
-    };
-  }, []);
-
   return (
     <div className="relative w-32 h-32 rounded-3xl overflow-hidden shadow-2xl">
       <div
-        ref={containerRef}
         className="absolute inset-0"
-        style={{ width: '100%', height: '100%' }}
+        style={{
+          width: '100%',
+          height: '100%',
+          background:
+            'linear-gradient(135deg, #f4f4f4 0%, #b5b5b5 32%, #ffffff 52%, #8f8f8f 76%, #dfdfdf 100%)',
+        }}
       />
       <div className="absolute inset-0 flex items-center justify-center">
         <svg className="w-16 h-16 drop-shadow-lg" viewBox="21 62 220 222" fill="white">

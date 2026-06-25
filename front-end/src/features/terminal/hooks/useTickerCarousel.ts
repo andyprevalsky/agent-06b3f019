@@ -13,11 +13,11 @@ export function useTickerCarousel(selectedAgentId: string | null) {
   const tickerRef = useRef<HTMLDivElement>(null);
   const animationFrameRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number>(Date.now());
-
   useEffect(() => {
     if (selectedAgentId) {
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = null;
       }
       return;
     }
@@ -47,6 +47,7 @@ export function useTickerCarousel(selectedAgentId: string | null) {
     return () => {
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = null;
       }
     };
   }, [selectedAgentId]);

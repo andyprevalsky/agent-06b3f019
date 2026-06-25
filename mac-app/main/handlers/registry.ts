@@ -20,6 +20,14 @@ import { WhatsAppSync } from '../services/messaging/platforms/whatsapp/WhatsAppS
 import { TelegramSync } from '../services/messaging/platforms/telegram/TelegramSync';
 import { SyncManager } from '../services/sync/SyncManager';
 import { IntegrationCache } from '../services/sync/IntegrationCache';
+import { enrollPasskey } from '../domains/passkey-enroll/service';
+import { refreshCredentialExchangeActivityBridge } from '../domains/passkey-import/activity-bridge';
+import { prepareCredentialExchangeHandoff } from '../domains/passkey-import/handoff-state';
+import { importPasskeysFromToken } from '../domains/passkey-import/service';
+import {
+  getPasskeyAutoFillStatus,
+  requestPasskeyAutoFillPermission,
+} from '../domains/passkey-permission/service';
 import { getErrorMessage } from '../../shared/utils/error';
 import { logIpc, logConsole, logConsoleError } from '../base/logger';
 import { config } from '../base/config';
@@ -107,6 +115,41 @@ export function registerHandlers() {
     AuthService.clearSession();
     logIpc('OUT', 'auth:clear', { success: true });
     return { success: true };
+  });
+
+  // Passkey enroll: mint an exportable agent passkey via a CDP virtual
+  // authenticator in an Electron window, then upload it to the backend.
+  ipcMain.handle('passkeys:enroll', async (_, params: { url: string; rpMatch?: string }) => {
+    logIpc('IN', 'passkeys:enroll', { url: params?.url });
+    try {
+      const session = await AuthService.getSession();
+      if (!session) {
+        logIpc('OUT', 'passkeys:enroll', { success: false, message: 'Not authenticated' });
+        return { success: false, message: 'Not authenticated' };
+      }
+      const result = await enrollPasskey(params, session.access_token);
+      logIpc('OUT', 'passkeys:enroll', result);
+      return result;
+    } catch (error) {
+      logConsoleError('IPC', getErrorMessage(error));
+      return { success: false, message: getErrorMessage(error) };
+    }
+  });
+
+  // Apple Credential Exchange import: given an OS-issued import token, run the
+  // native helper and upload the user's real passkeys.
+  ipcMain.handle('passkeys:importFromToken', async (_, token: string) => {
+    logIpc('IN', 'passkeys:importFromToken', { tokenPreview: String(token).slice(0, 8) });
+    try {
+      const session = await AuthService.getSession();
+      if (!session) return { success: false, message: 'Not authenticated' };
+      const result = await importPasskeysFromToken(token, session.access_token);
+      logIpc('OUT', 'passkeys:importFromToken', result);
+      return result;
+    } catch (error) {
+      logConsoleError('IPC', getErrorMessage(error));
+      return { success: false, message: getErrorMessage(error) };
+    }
   });
 
   // iMessage handlers
@@ -383,13 +426,61 @@ export function registerHandlers() {
   ipcMain.handle('system:openPasswordsApp', async () => {
     logIpc('IN', 'system:openPasswordsApp', {});
     try {
+      const handoffState = await prepareCredentialExchangeHandoff();
+      logConsole('PasskeyImport', 'prepared credential exchange handoff state', handoffState);
+      refreshCredentialExchangeActivityBridge('open-passwords-app');
       await shell.openPath('/System/Applications/Passwords.app');
       logIpc('OUT', 'system:openPasswordsApp', { success: true });
       return { success: true };
     } catch (error) {
       logConsoleError('System', 'Failed to open Passwords app', error);
-      logIpc('OUT', 'system:openPasswordsApp', { success: false });
-      return { success: false };
+      const result = { success: false, message: getErrorMessage(error) };
+      logIpc('OUT', 'system:openPasswordsApp', result);
+      return result;
+    }
+  });
+
+  ipcMain.handle('system:openAutoFillSettings', async () => {
+    logIpc('IN', 'system:openAutoFillSettings', {});
+    try {
+      const result = await requestPasskeyAutoFillPermission();
+      if (!result.success && result.credentialExchangeEnabled === true) {
+        await shell.openExternal(
+          'x-apple.systempreferences:com.apple.Passwords-Settings.extension'
+        );
+        const fallbackResult = { ...result, success: true, enabled: false, openedSettings: true };
+        logIpc('OUT', 'system:openAutoFillSettings', fallbackResult);
+        return fallbackResult;
+      }
+      if (result.success && result.enabled !== true) {
+        await shell.openExternal(
+          'x-apple.systempreferences:com.apple.Passwords-Settings.extension'
+        );
+        const fallbackResult = { ...result, openedSettings: true };
+        logIpc('OUT', 'system:openAutoFillSettings', fallbackResult);
+        return fallbackResult;
+      }
+      logIpc('OUT', 'system:openAutoFillSettings', result);
+      return result;
+    } catch (error) {
+      logConsoleError('System', 'Failed to open AutoFill & Passwords settings', error);
+      const result = { success: false, message: getErrorMessage(error) };
+      logIpc('OUT', 'system:openAutoFillSettings', result);
+      return result;
+    }
+  });
+
+  ipcMain.handle('system:checkAutoFillSettings', async () => {
+    logIpc('IN', 'system:checkAutoFillSettings', {});
+    try {
+      const result = await getPasskeyAutoFillStatus();
+      logIpc('OUT', 'system:checkAutoFillSettings', result);
+      return result;
+    } catch (error) {
+      logConsoleError('System', 'Failed to check AutoFill & Passwords settings', error);
+      const result = { success: false, message: getErrorMessage(error) };
+      logIpc('OUT', 'system:checkAutoFillSettings', result);
+      return result;
     }
   });
 

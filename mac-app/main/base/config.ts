@@ -3,13 +3,11 @@ import path from 'path';
 import dotenv from 'dotenv';
 import { app } from 'electron';
 
-// Load .env file from project root
-// When compiled, __dirname will be dist/main/main/base/, so go up 4 levels to project root
-const projectRoot = path.resolve(__dirname, '../../../../');
-
 // app.isPackaged = true when running from built .app, false when running npm run dev
 const envFile = app.isPackaged ? '.env.production' : '.env';
-const envPath = path.join(projectRoot, envFile);
+const envPath = app.isPackaged
+  ? path.join(app.getAppPath(), envFile)
+  : path.join(path.resolve(__dirname, '../../../../'), envFile);
 
 if (fs.existsSync(envPath)) {
   dotenv.config({ path: envPath });
@@ -18,8 +16,14 @@ if (fs.existsSync(envPath)) {
   console.warn(`[Config] Env file not found: ${envPath}`);
 }
 
+const apiUrl = process.env.VITE_BACKEND_API_URL ?? (app.isPackaged ? '' : 'http://localhost:3001');
+
+if (!apiUrl) {
+  throw new Error('Missing VITE_BACKEND_API_URL');
+}
+
 export const config = {
-  apiUrl: process.env.VITE_BACKEND_API_URL || 'http://localhost:3001',
+  apiUrl,
   supabase: {
     url: process.env.VITE_SUPABASE_URL!,
     anonKey: process.env.VITE_SUPABASE_ANON_KEY!,
