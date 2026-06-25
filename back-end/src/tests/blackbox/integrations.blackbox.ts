@@ -1374,6 +1374,39 @@ async function testPasswordsUpload_happyPath() {
   assertSchema(PasswordsUploadResponse, res.data, 'passwords happy');
 }
 
+async function testPasswordsUpload_appleSourceMarksApplePasswordsIntegration() {
+  const { accessToken, userId } = await createAnonSession();
+  const payload = {
+    passwords: [
+      {
+        origin: 'https://apple-transfer.example',
+        username: 'apple-user',
+        encryptedPassword: 'encrypted_apple_password_here',
+        dateLastUsed: Date.now(),
+        dateCreated: Date.now(),
+        browserSource: 'apple_passwords',
+      },
+    ],
+  };
+  const encrypted = encryptPayload(payload);
+  const res = await request(`${BASE_URL}/api/integrations/passwords/upload`, {
+    method: 'POST',
+    headers: authHeaders(accessToken),
+    body: JSON.stringify(encrypted),
+  });
+  assertStatus(res.status, 200, res.data);
+  assertSchema(PasswordsUploadResponse, res.data, 'passwords apple source');
+
+  const appleIntegration = await prisma.integration.findUnique({
+    where: { userId_name: { userId, name: 'apple_passwords' } },
+  });
+  assert(appleIntegration !== null, 'Expected apple_passwords integration to be marked connected');
+  assert(
+    appleIntegration.status === 'CONNECTED',
+    `Expected CONNECTED, got ${appleIntegration.status}`
+  );
+}
+
 // ==================== ENCRYPTED UPLOAD ERROR-PATH COVERAGE ====================
 // These tests cover routes.browser.ts decryption-failure and shape-validation
 // branches (lines 81-82, 124-128, 135-138, 155-156, 167-181, 205-209, 240-251,
@@ -2294,6 +2327,18 @@ async function testApplePasswordsUpload_validCsv() {
   assertStatus(res.status, 200, res.data);
   const body = res.data as { message: string; passwordCount: number };
   assert(body.passwordCount === 3, `Expected 3 passwords, got ${body.passwordCount}`);
+
+  const appleIntegration = await prisma.integration.findUnique({
+    where: { userId_name: { userId: ctx.userId1!, name: 'apple_passwords' } },
+  });
+  assert(appleIntegration !== null, 'Expected apple_passwords integration to be created');
+  assert(
+    appleIntegration.status === 'CONNECTED',
+    `Expected CONNECTED, got ${appleIntegration.status}`
+  );
+  assert(appleIntegration.isActive === true, 'Expected apple_passwords integration to be active');
+  assert(appleIntegration.lastSyncAt !== null, 'Expected lastSyncAt to be set');
+  assert(appleIntegration.lastSuccessfulSyncAt !== null, 'Expected lastSuccessfulSyncAt to be set');
 }
 
 async function testApplePasswordsUpload_tabDelimited() {
@@ -4762,6 +4807,10 @@ async function runAll() {
     { name: 'POST /cacheStorage/upload happy path', fn: testCacheStorageUpload_happyPath },
     { name: 'POST /passwords/upload missing fields -> 400', fn: testPasswordsUpload_missingFields },
     { name: 'POST /passwords/upload happy path', fn: testPasswordsUpload_happyPath },
+    {
+      name: 'POST /passwords/upload apple source marks Apple Passwords connected',
+      fn: testPasswordsUpload_appleSourceMarksApplePasswordsIntegration,
+    },
 
     // Encrypted upload error-path coverage (decryption-failure + shape-validation branches)
     {

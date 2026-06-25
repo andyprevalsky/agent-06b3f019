@@ -17,6 +17,13 @@ import * as repo from './repo';
 
 const log = createLogger('Integrations');
 
+function passwordIntegrationName(browserSource: string): string {
+  if (browserSource === 'apple_passwords') {
+    return 'apple_passwords';
+  }
+  return `${browserSource}_passwords`;
+}
+
 function normalizeBrowserProfile(profile: unknown): string {
   if (typeof profile === 'string') return profile;
   if (profile !== null && profile !== undefined && typeof profile === 'object') {
@@ -82,9 +89,10 @@ export async function processPasswordsUpload(userId: string, passwordData: Passw
   const browserSources = new Set(deduplicatedPasswords.map((p) => p.browserSource));
   for (const source of browserSources) {
     const sourceCount = deduplicatedPasswords.filter((p) => p.browserSource === source).length;
+    const integrationName = passwordIntegrationName(source);
     await repo.upsertIntegration({
       userId,
-      name: `${source}_passwords`,
+      name: integrationName,
       type: IntegrationType.DATA_SOURCE,
       status: IntegrationStatus.CONNECTED,
       isActive: true,
@@ -96,7 +104,7 @@ export async function processPasswordsUpload(userId: string, passwordData: Passw
         uploadedAt: new Date().toISOString(),
       },
     });
-    log.info('Upserted password integration', { integrationName: `${source}_passwords`, userId });
+    log.info('Upserted password integration', { integrationName, userId });
   }
 
   return { passwordCount: deduplicatedPasswords.length };
@@ -356,6 +364,9 @@ export async function processApplePasswordsUpload(userId: string, csvContent: st
     name: 'apple_passwords',
     type: IntegrationType.DATA_SOURCE,
     status: IntegrationStatus.CONNECTED,
+    isActive: true,
+    lastSyncAt: new Date(),
+    lastSuccessfulSyncAt: new Date(),
     config: { passwordCount: deduplicatedPasswords.length, lastImportAt: new Date().toISOString() },
   });
 

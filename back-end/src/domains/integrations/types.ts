@@ -105,6 +105,24 @@ export interface PasswordPayload {
   passwords: PasswordPayloadEntry[];
 }
 
+export interface PasskeyPayloadEntry {
+  // rpId is required; authRealm/origin are derived from it if omitted.
+  rpId: string;
+  credentialId: string;
+  // Raw PKCS#8 private key (base64). Encrypted in transit by the AES envelope;
+  // re-encrypted server-side with the RSA storage envelope before persistence.
+  privateKey: string;
+  userHandle?: string | null;
+  signCount?: number;
+  authRealm?: string;
+  origin?: string | null;
+  browserSource?: string;
+}
+
+export interface PasskeyPayload {
+  passkeys: PasskeyPayloadEntry[];
+}
+
 export interface ApplePasswordEntry {
   title: string;
   url: string;

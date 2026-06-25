@@ -269,6 +269,7 @@ export {
   bulkUpsertIndexedDB,
   bulkUpsertPermissions,
   bulkUpsertPasswords,
+  bulkUpsertPasskeys,
   bulkUpsertCacheStorage,
   findUserById,
   findIntegrationById,

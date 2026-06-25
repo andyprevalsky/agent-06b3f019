@@ -43,6 +43,8 @@ export {
   processApplePasswordsUpload,
 } from './uploadService.passwords';
 
+export { processPasskeysUpload } from './uploadService.passkeys';
+
 // ---------------------------------------------------------------------------
 // Shared crypto helpers
 // ---------------------------------------------------------------------------
