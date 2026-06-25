@@ -41,6 +41,9 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+!mac-app/build/
+!mac-app/build/RoseDesktop.provisionprofile
+!mac-app/build/PasskeyProvider.provisionprofile
 .eggs/
 pip-wheel-metadata/
 *.manifest

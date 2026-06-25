@@ -139,6 +139,7 @@
       },
       "entitlements": "entitlements.mac.plist",
       "entitlementsInherit": "entitlements.inherit.mac.plist",
+      "provisioningProfile": "build/RoseDesktop.provisionprofile",
       "identity": "Rose Ai Labs, Inc. (P3HATASMP9)",
       "notarize": false
     },
