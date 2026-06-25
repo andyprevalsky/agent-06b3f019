@@ -131,8 +131,7 @@ export function computeActiveBrowserPanels(messages: Message[]): BrowserPanelDat
 
     const hasTerminalTaskMessage = taskMessages.some(
       (m) =>
-        m.metadata?.action_type === 'task_complete' ||
-        m.metadata?.action_type === 'session_paused',
+        m.metadata?.action_type === 'task_complete' || m.metadata?.action_type === 'session_paused',
     );
 
     const isComplete =

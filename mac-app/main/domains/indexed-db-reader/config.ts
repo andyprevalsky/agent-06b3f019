@@ -6,6 +6,7 @@
  */
 
 import path from 'path';
+import { app } from 'electron';
 
 /** Log prefix used for every domain console line. */
 export const LOG_COMPONENT = 'IndexedDBReader';
@@ -25,15 +26,10 @@ export const ORIGIN_HASH_PREFIX_LENGTH = 16;
  *
  * In dev mode `__dirname` is `dist/main/main/domains/indexed-db-reader`; going
  * up five levels lands at `mac-app/`, where `scripts/read_indexeddb.py` lives.
- * In prod the script is bundled alongside the app at the same relative layout.
+ * In prod the script is bundled outside `app.asar` at
+ * `Contents/Resources/scripts/read_indexeddb.py` so Python can execute it.
  */
-export const SCRIPT_PATH = path.join(
-  __dirname,
-  '..',
-  '..',
-  '..',
-  '..',
-  '..',
-  'scripts',
-  'read_indexeddb.py'
-);
+export const SCRIPT_PATH =
+  app.isPackaged === true
+    ? path.join(process.resourcesPath, 'scripts', 'read_indexeddb.py')
+    : path.join(__dirname, '..', '..', '..', '..', '..', 'scripts', 'read_indexeddb.py');

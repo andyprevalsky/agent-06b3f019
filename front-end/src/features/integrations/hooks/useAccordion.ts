@@ -7,7 +7,6 @@ export function useAccordion() {
   const [passwordsExpanded, setPasswordsExpanded] = useState(false);
   const [messagesSyncExpanded, setMessagesSyncExpanded] = useState(false);
   const [computeExpanded, setComputeExpanded] = useState(false);
-  const [plaidExpanded, setPlaidExpanded] = useState(false);
   const [socialsExpanded, setSocialsExpanded] = useState(false);
 
   const toggleSection = useCallback((section: AccordionSection) => {
@@ -15,7 +14,6 @@ export function useAccordion() {
     setPasswordsExpanded((prev) => (section === 'passwords' ? !prev : false));
     setMessagesSyncExpanded((prev) => (section === 'messagesSync' ? !prev : false));
     setComputeExpanded((prev) => (section === 'compute' ? !prev : false));
-    setPlaidExpanded((prev) => (section === 'plaid' ? !prev : false));
     setSocialsExpanded((prev) => (section === 'socials' ? !prev : false));
   }, []);
 
@@ -24,7 +22,6 @@ export function useAccordion() {
     passwordsExpanded,
     messagesSyncExpanded,
     computeExpanded,
-    plaidExpanded,
     socialsExpanded,
     toggleSection,
   } as const;

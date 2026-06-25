@@ -56,6 +56,7 @@ export function initLogger(): void {
 
   // Truncate existing files
   try {
+    fs.mkdirSync(logDir, { recursive: true });
     fs.writeFileSync(consolePath, '');
     fs.writeFileSync(ipcPath, '');
   } catch (err) {
@@ -64,6 +65,8 @@ export function initLogger(): void {
 
   consoleStream = fs.createWriteStream(consolePath, { flags: 'a' });
   ipcStream = fs.createWriteStream(ipcPath, { flags: 'a' });
+  consoleStream.on('error', (err) => originalConsoleError('Console log stream error:', err));
+  ipcStream.on('error', (err) => originalConsoleError('IPC log stream error:', err));
 
   // Override console.log to capture all output
   console.log = (...args: unknown[]) => {

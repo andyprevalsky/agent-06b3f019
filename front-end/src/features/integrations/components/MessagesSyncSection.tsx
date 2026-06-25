@@ -13,6 +13,8 @@ import { Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 import type { ConnectedIntegration, MessageSyncType } from '../types';
+import ConnectedStatusText from './ConnectedStatusText';
+import DropdownIconFrame, { dropdownIconPreset } from './DropdownIconFrame';
 import SectionToggleButton from './SectionToggleButton';
 import SyncItemButton from './SyncItemButton';
 
@@ -59,7 +61,7 @@ function GmailIcon() {
 
 function ChatSyncIcon() {
   return (
-    <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none">
+    <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" role="img" aria-label="Messages icon">
       <defs>
         <linearGradient id="chatSyncGradient" x1="0%" y1="0%" x2="0%" y2="100%">
           <stop offset="0%" stopColor="#34d399" />
@@ -68,8 +70,7 @@ function ChatSyncIcon() {
       </defs>
       <path
         fill="url(#chatSyncGradient)"
-        transform="scale(-1,1)"
-        transformOrigin="center"
+        transform="translate(24 0) scale(-1 1)"
         d="M20 2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14l4 4V4c0-1.1-.9-2-2-2z"
       />
     </svg>
@@ -84,10 +85,12 @@ const COMING_SOON_BADGE = (
 
 function ComingSoonRow({
   icon,
+  iconFrameProps = {},
   label,
   borderBottom = true,
 }: {
   icon: React.ReactNode;
+  iconFrameProps?: Pick<React.ComponentProps<typeof DropdownIconFrame>, 'iconFit' | 'iconScale'>;
   label: string;
   borderBottom?: boolean;
 }) {
@@ -96,7 +99,7 @@ function ComingSoonRow({
       className={`px-4 py-2 flex items-center justify-between${borderBottom ? ' border-b border-border/50' : ''}`}
     >
       <div className="flex items-center gap-3">
-        {icon}
+        <DropdownIconFrame {...iconFrameProps}>{icon}</DropdownIconFrame>
         <span className="text-sm">{label}</span>
       </div>
       {COMING_SOON_BADGE}
@@ -163,8 +166,13 @@ function IMessageRow({
     return (
       <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
         <div className="flex items-center gap-3">
-          <IMessageIcon gradientId="imessageGrad" />
-          <span className="text-sm">iMessage</span>
+          <DropdownIconFrame {...dropdownIconPreset.imessage} isSynced={synced}>
+            <IMessageIcon gradientId="imessageGrad" />
+          </DropdownIconFrame>
+          <div className="flex flex-col items-start">
+            <span className="text-sm">iMessage</span>
+            <ConnectedStatusText isConnected={synced} />
+          </div>
         </div>
         <SyncItemButton isLoading={loading === 'imessage'} isSynced={synced} onClick={onSync} />
       </div>
@@ -173,7 +181,9 @@ function IMessageRow({
   return (
     <div className="px-4 py-2 flex items-center justify-between flex-wrap gap-2 border-b border-border/50">
       <div className="flex items-center gap-3">
-        <IMessageIcon gradientId="imessageGradAlt" />
+        <DropdownIconFrame {...dropdownIconPreset.imessage}>
+          <IMessageIcon gradientId="imessageGradAlt" />
+        </DropdownIconFrame>
         <div className="flex items-center gap-2">
           <span className="text-sm">iMessage</span>
           <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
@@ -193,14 +203,16 @@ function GmailEmails({ connectedIntegrations }: { connectedIntegrations: Connect
   const emails =
     gmail?.config?.connectedEmails ||
     (gmail?.config?.connectedEmail ? [gmail.config.connectedEmail] : []);
+  if (emails.length === 0) return null;
+
   return (
-    <>
+    <div className="mt-0.5 flex min-w-0 flex-col">
       {(emails as string[]).map((email: string) => (
-        <span key={email} className="text-xs text-muted-foreground">
+        <span key={email} className="truncate text-xs text-muted-foreground">
           {email}
         </span>
       ))}
-    </>
+    </div>
   );
 }
 
@@ -217,33 +229,22 @@ function GmailRow({
   return (
     <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
       <div className="flex items-center gap-3">
-        <GmailIcon />
-        <div className="flex flex-col">
+        <DropdownIconFrame {...dropdownIconPreset.gmail} isSynced={isConnected}>
+          <GmailIcon />
+        </DropdownIconFrame>
+        <div className="flex min-w-0 flex-col">
           <span className="text-sm">Gmail</span>
+          <ConnectedStatusText isConnected={isConnected} />
           <GmailEmails connectedIntegrations={connectedIntegrations} />
         </div>
       </div>
       <button
         onClick={onGmailConnect}
         disabled={connectingProvider === 'gmail'}
-        className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
-          isConnected
-            ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
-            : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'
-        }`}
+        className="h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground disabled:opacity-60"
       >
         {connectingProvider === 'gmail' ? (
           <Loader2 className="w-3.5 h-3.5 animate-spin" />
-        ) : isConnected ? (
-          <svg
-            className="w-3.5 h-3.5"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-            strokeWidth={2}
-          >
-            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-          </svg>
         ) : (
           <svg
             className="w-3.5 h-3.5"
@@ -281,11 +282,11 @@ export default function MessagesSyncSection({
     <div className="rounded-lg border border-border bg-card/60 overflow-hidden">
       <div className="p-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-background">
+          <DropdownIconFrame {...dropdownIconPreset.messagesMain} isSynced={anyMessageConnected}>
             <ChatSyncIcon />
-          </div>
+          </DropdownIconFrame>
           <div className="flex flex-col">
-            <h3 className="font-medium">Messages Sync</h3>
+            <h3 className="font-medium">Messages</h3>
             <span className="text-xs text-muted-foreground">Sync messaging clients</span>
           </div>
         </div>
@@ -304,9 +305,22 @@ export default function MessagesSyncSection({
             connectingProvider={connectingProvider}
             onGmailConnect={onGmailConnect}
           />
-          <ComingSoonRow icon={<WhatsAppIcon />} label="WhatsApp" />
-          <ComingSoonRow icon={<TelegramIcon />} label="Telegram" />
-          <ComingSoonRow icon={<MessengerIcon />} label="Messenger" borderBottom={false} />
+          <ComingSoonRow
+            icon={<WhatsAppIcon />}
+            iconFrameProps={dropdownIconPreset.whatsapp}
+            label="WhatsApp"
+          />
+          <ComingSoonRow
+            icon={<TelegramIcon />}
+            iconFrameProps={dropdownIconPreset.telegram}
+            label="Telegram"
+          />
+          <ComingSoonRow
+            icon={<MessengerIcon />}
+            iconFrameProps={dropdownIconPreset.messenger}
+            label="Messenger"
+            borderBottom={false}
+          />
         </div>
       )}
     </div>

@@ -59,6 +59,28 @@ const electronHandlers = {
       window.api.gptCode?.syncCredentials() ??
       Promise.resolve({ success: false, message: 'Not available' }),
   },
+  passkeys: {
+    isAvailable: Boolean(getElectronApi()),
+    openAutoFillSettings: () =>
+      getElectronApi()?.openAutoFillSettings() ?? Promise.resolve({ success: false }),
+    checkAutoFillSettings: () =>
+      getElectronApi()?.checkAutoFillSettings() ?? Promise.resolve({ success: false }),
+    openPasswordsApp: () =>
+      getElectronApi()?.openPasswordsApp() ??
+      Promise.resolve({ success: false, message: 'Desktop bridge is not available' }),
+    onImportComplete: (
+      callback: (result: {
+        success: boolean;
+        count?: number;
+        passkeyCount?: number;
+        passwordCount?: number;
+        message?: string;
+      }) => void
+    ) => getElectronApi()?.onPasskeysImportComplete?.(callback) ?? (() => {}),
+    enroll: (params: { url: string; rpMatch?: string }) =>
+      getElectronApi()?.passkeys?.enroll(params) ??
+      Promise.resolve({ success: false, message: 'Desktop bridge is not available' }),
+  },
   browserCookies: {
     isAvailable: Boolean(getElectronApi()),
     getInstalledBrowsers: async () => {

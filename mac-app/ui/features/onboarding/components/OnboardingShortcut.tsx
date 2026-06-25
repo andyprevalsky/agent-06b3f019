@@ -8,8 +8,6 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { ArrowRight, ArrowUp } from 'lucide-react';
-import { liquidMetalFragmentShader, ShaderMount } from '@paper-design/shaders';
-import LiquidWhiteButton from '@/components/ui/liquid-white-button';
 import { DEFAULT_SHORTCUT, MODIFIER_DISPLAY, KEY_DISPLAY, MODIFIER_KEY_CODES } from '../config';
 import type { ShortcutConfig } from '../types';
 
@@ -23,51 +21,9 @@ const formatShortcut = (config: ShortcutConfig): string => {
   return `${mods} ${key}`.trim();
 };
 
-// Quick Launcher preview shader
 const LauncherShaderTile = ({ size }: { size: number }): JSX.Element => {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const shaderRef = useRef<ShaderMount | null>(null);
-
-  useEffect(() => {
-    const container = containerRef.current;
-    if (container === null) return;
-
-    if (shaderRef.current !== null) {
-      shaderRef.current.dispose();
-      shaderRef.current = null;
-    }
-
-    shaderRef.current = new ShaderMount(
-      container,
-      liquidMetalFragmentShader,
-      {
-        u_repetition: 0.5,
-        u_softness: 0.8,
-        u_shiftRed: 0.15,
-        u_shiftBlue: 0.15,
-        u_distortion: 0,
-        u_contour: 0,
-        u_angle: 90,
-        u_scale: 1.5,
-        u_shape: 0,
-        u_offsetX: 0,
-        u_offsetY: 0,
-      },
-      undefined,
-      0.5
-    );
-
-    return () => {
-      if (shaderRef.current !== null) {
-        shaderRef.current.dispose();
-        shaderRef.current = null;
-      }
-    };
-  }, []);
-
   return (
     <div
-      ref={containerRef}
       style={{
         position: 'absolute',
         top: 0,
@@ -76,6 +32,8 @@ const LauncherShaderTile = ({ size }: { size: number }): JSX.Element => {
         bottom: 0,
         width: '100%',
         height: size,
+        background:
+          'linear-gradient(110deg, #d8d8d8 0%, #f7f7f7 18%, #9a9a9a 38%, #f2f2f2 58%, #b6b6b6 78%, #ededed 100%)',
         maskImage:
           'linear-gradient(to right, rgba(0,0,0,1) 0%, rgba(0,0,0,0.3) 50%, rgba(0,0,0,0) 100%)',
         WebkitMaskImage:
@@ -136,9 +94,25 @@ const QuickLauncherPreview = (): JSX.Element => (
           Enter any desire
         </span>
 
-        <LiquidWhiteButton disabled size="sm">
+        <button
+          type="button"
+          disabled
+          style={{
+            width: 40,
+            height: 40,
+            borderRadius: '50%',
+            border: '1px solid rgba(255, 255, 255, 0.85)',
+            background: 'linear-gradient(180deg, #f4f4f4 0%, #cfcfcf 45%, #9f9f9f 100%)',
+            boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15), inset 0 1px 2px rgba(255, 255, 255, 0.8)',
+            color: '#ffffff',
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 0,
+          }}
+        >
           <ArrowUp className="w-5 h-5" strokeWidth={2.5} />
-        </LiquidWhiteButton>
+        </button>
       </div>
     </div>
   </div>

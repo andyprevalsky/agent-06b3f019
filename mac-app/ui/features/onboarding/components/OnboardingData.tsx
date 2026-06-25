@@ -6,14 +6,23 @@
  * once the file has been decomposed.
  */
 import { useState, useEffect, useRef } from 'react';
-import { Check, Loader2, ArrowRight, RefreshCw } from 'lucide-react';
+import { Loader2, ArrowRight, RefreshCw } from 'lucide-react';
 import { usePlaidLink, type PlaidLinkOnSuccessMetadata } from 'react-plaid-link';
 import AtlasPasswordModal from '../../../components/AtlasPasswordModal';
-import ApplePasswordsModal from '../../../components/ApplePasswordsModal';
 import WhatsAppQRModal from '../../../components/WhatsAppQRModal';
 import TelegramAuthModal from '../../../components/TelegramAuthModal';
 import AgentPayModal from '../../../components/AgentPayModal';
+import PasskeysModal from '@/components/PasskeysModal';
+import ConnectedStatusText from '@/features/integrations/components/ConnectedStatusText';
+import DropdownIconFrame, {
+  browserDropdownIconPreset,
+  dropdownIconImageClassName,
+  dropdownIconPreset,
+} from '@/features/integrations/components/DropdownIconFrame';
+import PasskeysConnectRow from '@/features/integrations/components/PasskeysConnectRow';
+import PlaidLogoIcon from '@/features/integrations/components/PlaidLogoIcon';
 import type { BrowserInfo, BrowserType, Integration } from '../types';
+import type { AutoFillSettingsResult, PasskeyImportResult } from '../../../../shared/types/ipc';
 import { useOnboardingDataApi } from '../hooks';
 import { getErrorMessageOrFallback } from '../../../../shared/utils/error';
 
@@ -21,10 +30,22 @@ import { getErrorMessageOrFallback } from '../../../../shared/utils/error';
 import chromeIcon from '../../../assets/chrome-icon.png';
 import chatgptIcon from '../../../assets/chatgpt-icon.webp';
 import braveIcon from '../../../assets/brave-icon.webp';
-import applePasswordsIcon from '../../../assets/apple-passwords-icon.png';
 
 interface OnboardingDataProps {
   onComplete: () => void;
+}
+
+const AUTO_FILL_PERMISSION_TIMEOUT_MS = 120_000;
+const AUTO_FILL_PERMISSION_POLL_MS = 250;
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function hasPasskeysIntegration(integrations: Integration[]): boolean {
+  return integrations.some(
+    (i) => i.status === 'CONNECTED' && i.isActive === true && i.name.endsWith('_passkeys')
+  );
 }
 
 // Browser icon component
@@ -161,19 +182,20 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
 
   // Passwords state
   const [passwordsExpanded, setPasswordsExpanded] = useState(false);
-  const [applePasswordsModalOpen, setApplePasswordsModalOpen] = useState(false);
+  const [passkeysModalOpen, setPasskeysModalOpen] = useState(false);
   const [atlasPasswordsModalOpen, setAtlasPasswordsModalOpen] = useState(false);
   const [chromePasswordsSynced, setChromePasswordsSynced] = useState(false);
   const [applePasswordsSynced, setApplePasswordsSynced] = useState(false);
+  const [passkeysSynced, setPasskeysSynced] = useState(false);
   const [atlasPasswordsSynced, setAtlasPasswordsSynced] = useState(false);
   const [passwordSyncLoading, setPasswordSyncLoading] = useState<
-    'chrome' | 'apple' | 'atlas' | null
+    'chrome' | 'passkeys' | 'atlas' | null
   >(null);
-  const [passwordRequestExpanded, setPasswordRequestExpanded] = useState(false);
-  const [passwordRequestInput, setPasswordRequestInput] = useState('');
-  const [passwordRequestSending, setPasswordRequestSending] = useState(false);
-  const [passwordRequestSent, setPasswordRequestSent] = useState(false);
-
+  const pendingPasskeyImport = useRef<{
+    resolve: (result: PasskeyImportResult) => void;
+    reject: (error: Error) => void;
+    timeoutId: number;
+  } | null>(null);
   // Chat Sync state
   const [chatSyncExpanded, setChatSyncExpanded] = useState(false);
 
@@ -294,6 +316,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
           (i: Integration) => i.name === 'atlas_passwords' && i.status === 'CONNECTED'
         );
         setAtlasPasswordsSynced(!!atlasPasswordsIntegration);
+        setPasskeysSynced(hasPasskeysIntegration(integrations));
 
         // Check for gmail integration(s) - use connectedEmails array if available, fallback to connectedEmail
         // Treat CONNECTED or SYNCING as connected (SYNCING means OAuth succeeded, just processing emails)
@@ -357,6 +380,94 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
 
   // Continue is only available when at least one browser is connected and at least one email
   const canContinue = connectedBrowsers.size > 0 && connectedEmails.length > 0;
+
+  const refreshCredentialIntegrations = async () => {
+    const integrations = await onboardingDataApi.fetchIntegrations();
+    const applePasswordsIntegration = integrations.find(
+      (i: Integration) =>
+        i.name === 'apple_passwords' && i.status === 'CONNECTED' && i.isActive === true
+    );
+    setApplePasswordsSynced(!!applePasswordsIntegration);
+    setPasskeysSynced(hasPasskeysIntegration(integrations));
+  };
+
+  const finishPendingPasskeyImport = (result: PasskeyImportResult) => {
+    const pending = pendingPasskeyImport.current;
+    if (pending === null) return;
+
+    window.clearTimeout(pending.timeoutId);
+    pendingPasskeyImport.current = null;
+
+    const importedPasskeys = result.passkeyCount ?? result.count ?? 0;
+    const importedPasswords = result.passwordCount ?? 0;
+    if (result.success && (importedPasskeys > 0 || importedPasswords > 0)) {
+      pending.resolve(result);
+      return;
+    }
+
+    pending.reject(new Error(result.message ?? 'No credentials were transferred'));
+  };
+
+  const waitForPasskeyImport = () => {
+    if (pendingPasskeyImport.current !== null) {
+      window.clearTimeout(pendingPasskeyImport.current.timeoutId);
+      pendingPasskeyImport.current.reject(new Error('A newer Apple Passwords sync was started'));
+      pendingPasskeyImport.current = null;
+    }
+
+    return new Promise<PasskeyImportResult>((resolve, reject) => {
+      const timeoutId = window.setTimeout(() => {
+        pendingPasskeyImport.current = null;
+        reject(new Error('Apple Passwords did not send Rose an import token'));
+      }, 120_000);
+      pendingPasskeyImport.current = { resolve, reject, timeoutId };
+    });
+  };
+
+  const waitForAutoFillEnabled = async (
+    initialResult: AutoFillSettingsResult
+  ): Promise<AutoFillSettingsResult> => {
+    if (initialResult.enabled === true) {
+      return initialResult;
+    }
+    if (!window.api?.checkAutoFillSettings) {
+      throw new Error('Enable Rose in AutoFill, then click Sync again');
+    }
+
+    const deadline = Date.now() + AUTO_FILL_PERMISSION_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      await wait(AUTO_FILL_PERMISSION_POLL_MS);
+      const status = await window.api.checkAutoFillSettings();
+      if (status.success && status.enabled === true) {
+        return status;
+      }
+    }
+
+    throw new Error('Timed out waiting for Rose AutoFill permission');
+  };
+
+  useEffect(() => {
+    return window.api?.onPasskeysImportComplete?.((result) => {
+      const importedPasskeys = result.passkeyCount ?? result.count ?? 0;
+      const importedPasswords = result.passwordCount ?? 0;
+      if (result.success && (importedPasskeys > 0 || importedPasswords > 0)) {
+        setPasskeysModalOpen(false);
+      }
+      finishPendingPasskeyImport(result);
+      setPasswordSyncLoading(null);
+      void refreshCredentialIntegrations();
+    });
+  }, [onboardingDataApi]);
+
+  useEffect(() => {
+    return () => {
+      if (pendingPasskeyImport.current !== null) {
+        window.clearTimeout(pendingPasskeyImport.current.timeoutId);
+        pendingPasskeyImport.current.reject(new Error('Apple Passwords sync was cancelled'));
+        pendingPasskeyImport.current = null;
+      }
+    };
+  }, []);
 
   // Handle browser sync click - syncs all browser data in parallel
   const handleBrowserSync = async (browserType: BrowserType) => {
@@ -433,17 +544,24 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
     }
   };
 
-  // Handle Apple Passwords CSV upload
-  const handleApplePasswordsSync = async (file: File) => {
-    setPasswordSyncLoading('apple');
+  const handlePasskeysConnect = async () => {
+    if (!window.api?.openAutoFillSettings) return;
+    setPasswordSyncLoading('passkeys');
     try {
-      const result = await onboardingDataApi.uploadApplePasswords(file);
-      setApplePasswordsSynced(true);
-      setApplePasswordsModalOpen(false);
-      console.log(`[OnboardingData] Imported ${result.passwordCount} Apple passwords`);
+      const result = await window.api.openAutoFillSettings();
+      if (!result.success) {
+        throw new Error(result.message ?? 'Failed to open AutoFill settings');
+      }
+      const enabledResult = await waitForAutoFillEnabled(result);
+      const passwordsResult = await window.api.openPasswordsApp();
+      if (!passwordsResult.success) {
+        throw new Error('Failed to open Apple Passwords');
+      }
+      await waitForPasskeyImport();
+      return { ...enabledResult, openedPasswordsApp: true };
     } catch (err) {
-      console.error('Failed to import Apple passwords:', err);
-      throw err; // Let the modal handle the error display
+      console.error('Failed to connect passkeys:', err);
+      throw err;
     } finally {
       setPasswordSyncLoading(null);
     }
@@ -466,24 +584,6 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
       throw err; // Let the modal handle the error display
     } finally {
       setPasswordSyncLoading(null);
-    }
-  };
-
-  // Handle password integration request
-  const handlePasswordRequest = async () => {
-    if (!passwordRequestInput.trim()) return;
-
-    setPasswordRequestSending(true);
-
-    try {
-      await onboardingDataApi.sendPasswordIntegrationRequest(passwordRequestInput.trim());
-      setPasswordRequestSent(true);
-      setPasswordRequestInput('');
-      console.log('[OnboardingData] Password integration request sent');
-    } catch (err) {
-      console.error('Failed to send password request:', err);
-    } finally {
-      setPasswordRequestSending(false);
     }
   };
 
@@ -764,7 +864,10 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
             {/* Main row */}
             <div className="p-4 flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-surface">
+                <DropdownIconFrame
+                  {...dropdownIconPreset.browserMain}
+                  isSynced={connectedBrowsers.size > 0}
+                >
                   <svg className="w-5 h-5" viewBox="0 0 24 24">
                     <defs>
                       <radialGradient id="browserCookieGradient" cx="30%" cy="30%" r="70%">
@@ -778,7 +881,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                       d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"
                     />
                   </svg>
-                </div>
+                </DropdownIconFrame>
                 <div>
                   <div className="font-medium text-sm text-foreground">Browser Sync</div>
                   <div className="text-xs text-muted-foreground">
@@ -789,17 +892,9 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
 
               <button
                 onClick={handleBrowsersExpand}
-                className={`h-10 w-10 rounded-lg flex items-center justify-center transition-all duration-200 ${
-                  connectedBrowsers.size > 0
-                    ? 'bg-green-100 text-green-700'
-                    : 'bg-foreground text-background hover:bg-foreground/90'
-                }`}
+                className="h-10 w-10 rounded-lg flex items-center justify-center transition-all duration-200 bg-foreground text-background hover:bg-foreground/90"
               >
-                {connectedBrowsers.size > 0 ? (
-                  <Check className="w-4 h-4" />
-                ) : (
-                  <RefreshCw className="w-4 h-4" />
-                )}
+                <RefreshCw className="w-4 h-4" />
               </button>
             </div>
 
@@ -824,23 +919,28 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                         }`}
                       >
                         <div className="flex items-center gap-3">
-                          <BrowserIcon type={browser.type} className="w-6 h-6" />
-                          <span className="text-sm text-foreground">{browser.name}</span>
+                          <DropdownIconFrame
+                            {...browserDropdownIconPreset(browser.type)}
+                            isSynced={isConnected}
+                          >
+                            <BrowserIcon
+                              type={browser.type}
+                              className={dropdownIconImageClassName}
+                            />
+                          </DropdownIconFrame>
+                          <div className="flex flex-col items-start">
+                            <span className="text-sm text-foreground">{browser.name}</span>
+                            <ConnectedStatusText isConnected={isConnected} />
+                          </div>
                         </div>
 
                         <button
                           onClick={() => handleBrowserSync(browser.type)}
                           disabled={isLoading}
-                          className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
-                            isConnected
-                              ? 'bg-green-100 text-green-700'
-                              : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'
-                          }`}
+                          className="h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground"
                         >
                           {isLoading ? (
                             <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          ) : isConnected ? (
-                            <Check className="w-3.5 h-3.5" />
                           ) : (
                             <RefreshCw className="w-3.5 h-3.5" />
                           )}
@@ -858,7 +958,15 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
             {/* Main row */}
             <div className="p-4 flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-surface">
+                <DropdownIconFrame
+                  {...dropdownIconPreset.passwordsMain}
+                  isSynced={
+                    chromePasswordsSynced ||
+                    applePasswordsSynced ||
+                    passkeysSynced ||
+                    atlasPasswordsSynced
+                  }
+                >
                   <svg
                     className="w-5 h-5"
                     viewBox="0 0 24 24"
@@ -882,7 +990,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                     </defs>
                     <path d="m21 2-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0 3 3L22 7l-3-3m-3.5 3.5L19 4" />
                   </svg>
-                </div>
+                </DropdownIconFrame>
                 <div>
                   <div className="font-medium text-sm text-foreground">Passwords</div>
                   <div className="text-xs text-muted-foreground">Auto-fill login credentials</div>
@@ -891,17 +999,9 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
 
               <button
                 onClick={handlePasswordsExpand}
-                className={`h-10 w-10 rounded-lg flex items-center justify-center transition-all duration-200 ${
-                  chromePasswordsSynced || applePasswordsSynced || atlasPasswordsSynced
-                    ? 'bg-green-100 text-green-700'
-                    : 'bg-foreground text-background hover:bg-foreground/90'
-                }`}
+                className="h-10 w-10 rounded-lg flex items-center justify-center transition-all duration-200 bg-foreground text-background hover:bg-foreground/90"
               >
-                {chromePasswordsSynced || applePasswordsSynced || atlasPasswordsSynced ? (
-                  <Check className="w-4 h-4" />
-                ) : (
-                  <RefreshCw className="w-4 h-4" />
-                )}
+                <RefreshCw className="w-4 h-4" />
               </button>
             </div>
 
@@ -911,134 +1011,87 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                 {/* Chrome passwords */}
                 <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
                   <div className="flex items-center gap-3">
-                    <img src={chromeIcon} alt="Chrome" className="w-6 h-6" />
-                    <span className="text-sm text-foreground">Chrome</span>
+                    <DropdownIconFrame
+                      {...dropdownIconPreset.chrome}
+                      isSynced={chromePasswordsSynced}
+                    >
+                      <img src={chromeIcon} alt="Chrome" className={dropdownIconImageClassName} />
+                    </DropdownIconFrame>
+                    <div className="flex flex-col items-start">
+                      <span className="text-sm text-foreground">Chrome</span>
+                      <ConnectedStatusText isConnected={chromePasswordsSynced} />
+                    </div>
                   </div>
 
                   <button
                     onClick={handleChromePasswordsSync}
                     disabled={passwordSyncLoading === 'chrome'}
-                    className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
-                      chromePasswordsSynced
-                        ? 'bg-green-100 text-green-700'
-                        : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'
-                    }`}
+                    className="h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground"
                   >
                     {passwordSyncLoading === 'chrome' ? (
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : chromePasswordsSynced ? (
-                      <Check className="w-3.5 h-3.5" />
                     ) : (
                       <RefreshCw className="w-3.5 h-3.5" />
                     )}
                   </button>
                 </div>
 
-                {/* Apple Passwords */}
-                <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
-                  <div className="flex items-center gap-3">
-                    <img src={applePasswordsIcon} alt="Apple Passwords" className="w-6 h-6" />
-                    <span className="text-sm text-foreground">Apple Passwords</span>
-                  </div>
-
-                  <button
-                    onClick={() => setApplePasswordsModalOpen(true)}
-                    disabled={passwordSyncLoading === 'apple'}
-                    className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
-                      applePasswordsSynced
-                        ? 'bg-green-100 text-green-700'
-                        : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'
-                    }`}
-                  >
-                    {passwordSyncLoading === 'apple' ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : applePasswordsSynced ? (
-                      <Check className="w-3.5 h-3.5" />
-                    ) : (
-                      <RefreshCw className="w-3.5 h-3.5" />
-                    )}
-                  </button>
-                </div>
+                <PasskeysConnectRow
+                  isAvailable={Boolean(window.api?.openAutoFillSettings)}
+                  isSynced={applePasswordsSynced || passkeysSynced}
+                  isLoading={passwordSyncLoading === 'passkeys'}
+                  onConnect={() => setPasskeysModalOpen(true)}
+                />
 
                 {/* ChatGPT Atlas Passwords */}
                 <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
                   <div className="flex items-center gap-3">
-                    <img src={chatgptIcon} alt="ChatGPT Atlas" className="w-6 h-6" />
-                    <span className="text-sm text-foreground">ChatGPT Atlas</span>
+                    <DropdownIconFrame
+                      {...dropdownIconPreset.atlas}
+                      isSynced={atlasPasswordsSynced}
+                    >
+                      <img
+                        src={chatgptIcon}
+                        alt="ChatGPT Atlas"
+                        className={dropdownIconImageClassName}
+                      />
+                    </DropdownIconFrame>
+                    <div className="flex flex-col items-start">
+                      <span className="text-sm text-foreground">ChatGPT Atlas</span>
+                      <ConnectedStatusText isConnected={atlasPasswordsSynced} />
+                    </div>
                   </div>
 
                   <button
                     onClick={() => setAtlasPasswordsModalOpen(true)}
                     disabled={passwordSyncLoading === 'atlas'}
-                    className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
-                      atlasPasswordsSynced
-                        ? 'bg-green-100 text-green-700'
-                        : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'
-                    }`}
+                    className="h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground"
                   >
                     {passwordSyncLoading === 'atlas' ? (
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : atlasPasswordsSynced ? (
-                      <Check className="w-3.5 h-3.5" />
                     ) : (
                       <RefreshCw className="w-3.5 h-3.5" />
                     )}
                   </button>
                 </div>
-
-                {/* Request new password integration */}
-                <div className="px-4 py-2">
-                  {!passwordRequestExpanded ? (
-                    <button
-                      onClick={() => setPasswordRequestExpanded(true)}
-                      className="text-xs text-muted-foreground hover:text-foreground transition-colors"
-                    >
-                      Don't see your password client? <span className="underline">Request one</span>{' '}
-                      and we'll add it in &lt; 1 day
-                    </button>
-                  ) : passwordRequestSent ? (
-                    <p className="text-xs text-green-600">
-                      Request sent! We'll add the integration within 24 hours.
-                    </p>
-                  ) : (
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="text"
-                        value={passwordRequestInput}
-                        onChange={(e) => setPasswordRequestInput(e.target.value)}
-                        placeholder="e.g., 1Password, Bitwarden, LastPass..."
-                        disabled={passwordRequestSending}
-                        className="flex-1 px-2 py-1 text-xs bg-background border border-border rounded focus:outline-none focus:ring-1 focus:ring-primary/50 disabled:opacity-50"
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' && !passwordRequestSending) {
-                            handlePasswordRequest();
-                          }
-                        }}
-                      />
-                      <button
-                        onClick={handlePasswordRequest}
-                        disabled={passwordRequestSending || !passwordRequestInput.trim()}
-                        className="h-7 px-2 text-xs font-medium bg-foreground text-background rounded hover:bg-foreground/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
-                      >
-                        {passwordRequestSending ? (
-                          <Loader2 className="w-3 h-3 animate-spin" />
-                        ) : (
-                          'Send'
-                        )}
-                      </button>
-                    </div>
-                  )}
-                </div>
               </div>
             )}
           </div>
 
-          {/* Messages Sync - Expandable */}
+          {/* Messages - Expandable */}
           <div className="rounded-xl border transition-all duration-200 bg-card border-border overflow-hidden">
             {/* Main row */}
             <div className="p-4 flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-surface">
+                <DropdownIconFrame
+                  {...dropdownIconPreset.messagesMain}
+                  isSynced={
+                    iMessageSynced ||
+                    whatsAppConnected ||
+                    telegramConnected ||
+                    connectedEmails.length > 0
+                  }
+                >
                   <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none">
                     <defs>
                       <linearGradient id="chatSyncGradient" x1="0%" y1="0%" x2="0%" y2="100%">
@@ -1053,32 +1106,18 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                       d="M20 2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14l4 4V4c0-1.1-.9-2-2-2z"
                     />
                   </svg>
-                </div>
+                </DropdownIconFrame>
                 <div>
-                  <div className="font-medium text-sm text-foreground">Messages Sync</div>
+                  <div className="font-medium text-sm text-foreground">Messages</div>
                   <div className="text-xs text-muted-foreground">Sync messaging clients</div>
                 </div>
               </div>
 
               <button
                 onClick={handleChatSyncExpand}
-                className={`h-10 w-10 rounded-lg flex items-center justify-center transition-all duration-200 ${
-                  iMessageSynced ||
-                  whatsAppConnected ||
-                  telegramConnected ||
-                  connectedEmails.length > 0
-                    ? 'bg-green-100 text-green-700'
-                    : 'bg-foreground text-background hover:bg-foreground/90'
-                }`}
+                className="h-10 w-10 rounded-lg flex items-center justify-center transition-all duration-200 bg-foreground text-background hover:bg-foreground/90"
               >
-                {iMessageSynced ||
-                whatsAppConnected ||
-                telegramConnected ||
-                connectedEmails.length > 0 ? (
-                  <Check className="w-4 h-4" />
-                ) : (
-                  <RefreshCw className="w-4 h-4" />
-                )}
+                <RefreshCw className="w-4 h-4" />
               </button>
             </div>
 
@@ -1088,35 +1127,34 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                 {/* iMessage */}
                 <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
                   <div className="flex items-center gap-3">
-                    <svg className="w-6 h-6" viewBox="0 0 24 24">
-                      <defs>
-                        <linearGradient id="imessageGrad" x1="0%" y1="0%" x2="0%" y2="100%">
-                          <stop offset="0%" stopColor="#5bf675" />
-                          <stop offset="100%" stopColor="#1fcc3f" />
-                        </linearGradient>
-                      </defs>
-                      <rect width="24" height="24" rx="5" fill="url(#imessageGrad)" />
-                      <path
-                        fill="white"
-                        d="M12 5C7.58 5 4 8.13 4 12c0 1.65.67 3.15 1.76 4.35L5 19l2.88-.93C9.05 18.66 10.48 19 12 19c4.42 0 8-3.13 8-7s-3.58-7-8-7z"
-                      />
-                    </svg>
-                    <span className="text-sm text-foreground">iMessage</span>
+                    <DropdownIconFrame {...dropdownIconPreset.imessage} isSynced={iMessageSynced}>
+                      <svg className="w-6 h-6" viewBox="0 0 24 24">
+                        <defs>
+                          <linearGradient id="imessageGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+                            <stop offset="0%" stopColor="#5bf675" />
+                            <stop offset="100%" stopColor="#1fcc3f" />
+                          </linearGradient>
+                        </defs>
+                        <rect width="24" height="24" rx="5" fill="url(#imessageGrad)" />
+                        <path
+                          fill="white"
+                          d="M12 5C7.58 5 4 8.13 4 12c0 1.65.67 3.15 1.76 4.35L5 19l2.88-.93C9.05 18.66 10.48 19 12 19c4.42 0 8-3.13 8-7s-3.58-7-8-7z"
+                        />
+                      </svg>
+                    </DropdownIconFrame>
+                    <div className="flex flex-col items-start">
+                      <span className="text-sm text-foreground">iMessage</span>
+                      <ConnectedStatusText isConnected={iMessageSynced} />
+                    </div>
                   </div>
 
                   <button
                     onClick={handleIMessageSync}
                     disabled={chatSyncLoading === 'imessage'}
-                    className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
-                      iMessageSynced
-                        ? 'bg-green-100 text-green-700'
-                        : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'
-                    }`}
+                    className="h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground"
                   >
                     {chatSyncLoading === 'imessage' ? (
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : iMessageSynced ? (
-                      <Check className="w-3.5 h-3.5" />
                     ) : (
                       <RefreshCw className="w-3.5 h-3.5" />
                     )}
@@ -1126,29 +1164,31 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                 {/* WhatsApp */}
                 <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
                   <div className="flex items-center gap-3">
-                    <svg className="w-6 h-6" viewBox="0 0 24 24">
-                      <rect width="24" height="24" rx="5" fill="#25D366" />
-                      <path
-                        fill="white"
-                        d="M12 4c-4.42 0-8 3.58-8 8 0 1.41.37 2.73 1.01 3.88L4 20l4.26-1.12A7.93 7.93 0 0 0 12 20c4.42 0 8-3.58 8-8s-3.58-8-8-8zm4.14 11.07c-.17.48-1 .93-1.38.99-.37.06-.84.09-1.35-.09-.31-.11-.71-.25-1.23-.49-2.16-1-3.57-3.18-3.68-3.33-.1-.15-.86-1.14-.86-2.18s.55-1.55.74-1.76c.2-.21.43-.27.57-.27h.42c.13 0 .31-.05.48.37.18.43.61 1.49.66 1.59.05.1.08.22.02.35-.07.14-.1.22-.2.34-.1.12-.21.26-.3.35-.1.1-.2.2-.09.4.12.2.53.87 1.13 1.41.78.7 1.43.91 1.63 1.02.2.1.32.09.44-.06.12-.14.5-.58.64-.78.13-.2.27-.16.45-.1.18.07 1.15.54 1.34.64.2.1.33.15.38.23.05.09.05.51-.12.99z"
-                      />
-                    </svg>
-                    <span className="text-sm text-foreground">WhatsApp</span>
+                    <DropdownIconFrame
+                      {...dropdownIconPreset.whatsapp}
+                      isSynced={whatsAppConnected}
+                    >
+                      <svg className="w-6 h-6" viewBox="0 0 24 24">
+                        <rect width="24" height="24" rx="5" fill="#25D366" />
+                        <path
+                          fill="white"
+                          d="M12 4c-4.42 0-8 3.58-8 8 0 1.41.37 2.73 1.01 3.88L4 20l4.26-1.12A7.93 7.93 0 0 0 12 20c4.42 0 8-3.58 8-8s-3.58-8-8-8zm4.14 11.07c-.17.48-1 .93-1.38.99-.37.06-.84.09-1.35-.09-.31-.11-.71-.25-1.23-.49-2.16-1-3.57-3.18-3.68-3.33-.1-.15-.86-1.14-.86-2.18s.55-1.55.74-1.76c.2-.21.43-.27.57-.27h.42c.13 0 .31-.05.48.37.18.43.61 1.49.66 1.59.05.1.08.22.02.35-.07.14-.1.22-.2.34-.1.12-.21.26-.3.35-.1.1-.2.2-.09.4.12.2.53.87 1.13 1.41.78.7 1.43.91 1.63 1.02.2.1.32.09.44-.06.12-.14.5-.58.64-.78.13-.2.27-.16.45-.1.18.07 1.15.54 1.34.64.2.1.33.15.38.23.05.09.05.51-.12.99z"
+                        />
+                      </svg>
+                    </DropdownIconFrame>
+                    <div className="flex flex-col items-start">
+                      <span className="text-sm text-foreground">WhatsApp</span>
+                      <ConnectedStatusText isConnected={whatsAppConnected} />
+                    </div>
                   </div>
 
                   <button
                     onClick={handleWhatsAppConnect}
                     disabled={chatSyncLoading === 'whatsapp'}
-                    className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
-                      whatsAppConnected
-                        ? 'bg-green-100 text-green-700'
-                        : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'
-                    }`}
+                    className="h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground"
                   >
                     {chatSyncLoading === 'whatsapp' ? (
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : whatsAppConnected ? (
-                      <Check className="w-3.5 h-3.5" />
                     ) : (
                       <RefreshCw className="w-3.5 h-3.5" />
                     )}
@@ -1158,30 +1198,32 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                 {/* Telegram */}
                 <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
                   <div className="flex items-center gap-3">
-                    <svg className="w-6 h-6" viewBox="0 0 24 24">
-                      <rect width="24" height="24" rx="5" fill="#229ED9" />
-                      <path
-                        fill="white"
-                        d="M5.5 11.5l10.7-4.3c.6-.24 1.1.12.9.92l-1.9 9c-.14.64-.52.8-1.06.5l-2.9-2.1-1.4 1.4c-.12.1-.2.2-.4.2-.26 0-.37-.15-.5-.52l-1.1-3.5-2.7-.84c-.32-.11-.34-.41.06-.56zm4.7 1.7l.6 2.55.17-1.85 4.5-4c.2-.18-.05-.27-.32-.1l-5.5 3.4z"
-                        transform="translate(12, 12) scale(1.05) translate(-12, -12)"
-                      />
-                    </svg>
-                    <span className="text-sm text-foreground">Telegram</span>
+                    <DropdownIconFrame
+                      {...dropdownIconPreset.telegram}
+                      isSynced={telegramConnected}
+                    >
+                      <svg className="w-6 h-6" viewBox="0 0 24 24">
+                        <rect width="24" height="24" rx="5" fill="#229ED9" />
+                        <path
+                          fill="white"
+                          d="M5.5 11.5l10.7-4.3c.6-.24 1.1.12.9.92l-1.9 9c-.14.64-.52.8-1.06.5l-2.9-2.1-1.4 1.4c-.12.1-.2.2-.4.2-.26 0-.37-.15-.5-.52l-1.1-3.5-2.7-.84c-.32-.11-.34-.41.06-.56zm4.7 1.7l.6 2.55.17-1.85 4.5-4c.2-.18-.05-.27-.32-.1l-5.5 3.4z"
+                          transform="translate(12, 12) scale(1.05) translate(-12, -12)"
+                        />
+                      </svg>
+                    </DropdownIconFrame>
+                    <div className="flex flex-col items-start">
+                      <span className="text-sm text-foreground">Telegram</span>
+                      <ConnectedStatusText isConnected={telegramConnected} />
+                    </div>
                   </div>
 
                   <button
                     onClick={handleTelegramConnect}
                     disabled={chatSyncLoading === 'telegram'}
-                    className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
-                      telegramConnected
-                        ? 'bg-green-100 text-green-700'
-                        : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'
-                    }`}
+                    className="h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground"
                   >
                     {chatSyncLoading === 'telegram' ? (
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : telegramConnected ? (
-                      <Check className="w-3.5 h-3.5" />
                     ) : (
                       <RefreshCw className="w-3.5 h-3.5" />
                     )}
@@ -1191,35 +1233,39 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                 {/* Gmail */}
                 <div className="px-4 py-2 flex items-center justify-between">
                   <div className="flex items-center gap-3">
-                    <svg className="w-6 h-6" viewBox="0 0 24 24">
-                      <path
-                        fill="#EA4335"
-                        d="M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 0 1 0 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457z"
-                      />
-                    </svg>
-                    <div className="flex flex-col">
+                    <DropdownIconFrame
+                      {...dropdownIconPreset.gmail}
+                      isSynced={connectedEmails.length > 0}
+                    >
+                      <svg className="w-6 h-6" viewBox="0 0 24 24">
+                        <path
+                          fill="#EA4335"
+                          d="M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 0 1 0 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457z"
+                        />
+                      </svg>
+                    </DropdownIconFrame>
+                    <div className="flex min-w-0 flex-col">
                       <span className="text-sm text-foreground">Gmail</span>
-                      {connectedEmails.map((email) => (
-                        <span key={email} className="text-xs text-muted-foreground">
-                          {email}
-                        </span>
-                      ))}
+                      <ConnectedStatusText isConnected={connectedEmails.length > 0} />
+                      {connectedEmails.length > 0 && (
+                        <div className="mt-0.5 flex min-w-0 flex-col">
+                          {connectedEmails.map((email) => (
+                            <span key={email} className="truncate text-xs text-muted-foreground">
+                              {email}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
 
                   <button
                     onClick={handleGmailConnect}
                     disabled={gmailLoading}
-                    className={`h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${
-                      connectedEmails.length > 0
-                        ? 'bg-green-100 text-green-700'
-                        : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'
-                    }`}
+                    className="h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground"
                   >
                     {gmailLoading ? (
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : connectedEmails.length > 0 ? (
-                      <Check className="w-3.5 h-3.5" />
                     ) : (
                       <RefreshCw className="w-3.5 h-3.5" />
                     )}
@@ -1234,7 +1280,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
             {/* Main row */}
             <div className="p-4 flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-surface">
+                <DropdownIconFrame {...dropdownIconPreset.socialsMain}>
                   <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none">
                     <defs>
                       <linearGradient
@@ -1268,7 +1314,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                       strokeWidth="1.5"
                     />
                   </svg>
-                </div>
+                </DropdownIconFrame>
                 <div>
                   <div className="font-medium text-sm text-foreground">Socials</div>
                   <div className="text-xs text-muted-foreground">Connect social media accounts</div>
@@ -1289,14 +1335,16 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                 {/* X */}
                 <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
                   <div className="flex items-center gap-3">
-                    <svg className="w-6 h-6" viewBox="0 0 24 24">
-                      <rect width="24" height="24" rx="5" fill="#000000" />
-                      <path
-                        fill="white"
-                        d="M13.3 10.75L18.18 5h-1.16l-4.23 4.99L9.26 5H5l5.11 7.55L5 19h1.16l4.47-5.27L14.74 19H19l-5.7-8.25zm-1.58 1.87l-.52-.75L6.68 5.92h1.77l3.32 4.83.52.75 4.33 6.29h-1.77l-3.53-5.17z"
-                        transform="scale(0.72) translate(4.7, 4.7)"
-                      />
-                    </svg>
+                    <DropdownIconFrame {...dropdownIconPreset.x}>
+                      <svg className="w-6 h-6" viewBox="0 0 24 24">
+                        <rect width="24" height="24" rx="5" fill="#000000" />
+                        <path
+                          fill="white"
+                          d="M13.3 10.75L18.18 5h-1.16l-4.23 4.99L9.26 5H5l5.11 7.55L5 19h1.16l4.47-5.27L14.74 19H19l-5.7-8.25zm-1.58 1.87l-.52-.75L6.68 5.92h1.77l3.32 4.83.52.75 4.33 6.29h-1.77l-3.53-5.17z"
+                          transform="scale(0.72) translate(4.7, 4.7)"
+                        />
+                      </svg>
+                    </DropdownIconFrame>
                     <span className="text-sm text-foreground">X</span>
                   </div>
                   <span className="text-xs text-muted-foreground italic">Coming soon</span>
@@ -1305,14 +1353,16 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                 {/* LinkedIn */}
                 <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
                   <div className="flex items-center gap-3">
-                    <svg className="w-6 h-6" viewBox="0 0 24 24">
-                      <rect width="24" height="24" rx="5" fill="#0A66C2" />
-                      <path
-                        fill="white"
-                        d="M8.34 18H5.66V9.75h2.68V18zM7 8.62a1.56 1.56 0 1 1 0-3.12 1.56 1.56 0 0 1 0 3.12zM18.34 18h-2.67v-4.02c0-.96-.02-2.19-1.33-2.19-1.34 0-1.54 1.04-1.54 2.12V18h-2.68V9.75h2.57v1.12h.04c.36-.68 1.23-1.39 2.53-1.39 2.7 0 3.2 1.78 3.2 4.1V18z"
-                        transform="scale(0.85) translate(2.1, 2.1)"
-                      />
-                    </svg>
+                    <DropdownIconFrame {...dropdownIconPreset.linkedin}>
+                      <svg className="w-6 h-6" viewBox="0 0 24 24">
+                        <rect width="24" height="24" rx="5" fill="#0A66C2" />
+                        <path
+                          fill="white"
+                          d="M8.34 18H5.66V9.75h2.68V18zM7 8.62a1.56 1.56 0 1 1 0-3.12 1.56 1.56 0 0 1 0 3.12zM18.34 18h-2.67v-4.02c0-.96-.02-2.19-1.33-2.19-1.34 0-1.54 1.04-1.54 2.12V18h-2.68V9.75h2.57v1.12h.04c.36-.68 1.23-1.39 2.53-1.39 2.7 0 3.2 1.78 3.2 4.1V18z"
+                          transform="scale(0.85) translate(2.1, 2.1)"
+                        />
+                      </svg>
+                    </DropdownIconFrame>
                     <span className="text-sm text-foreground">LinkedIn</span>
                   </div>
                   <button
@@ -1331,30 +1381,39 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                 {/* Instagram */}
                 <div className="px-4 py-2 flex items-center justify-between">
                   <div className="flex items-center gap-3">
-                    <svg className="w-6 h-6" viewBox="0 0 24 24">
-                      <defs>
-                        <linearGradient id="igGradOnboarding" x1="0%" y1="100%" x2="100%" y2="0%">
-                          <stop offset="0%" stopColor="#FFDC80" />
-                          <stop offset="25%" stopColor="#F77737" />
-                          <stop offset="50%" stopColor="#E1306C" />
-                          <stop offset="75%" stopColor="#C13584" />
-                          <stop offset="100%" stopColor="#833AB4" />
-                        </linearGradient>
-                      </defs>
-                      <rect width="24" height="24" rx="5" fill="url(#igGradOnboarding)" />
-                      <rect
-                        x="6"
-                        y="6"
-                        width="12"
-                        height="12"
-                        rx="3.5"
-                        stroke="white"
-                        strokeWidth="1.5"
-                        fill="none"
-                      />
-                      <circle cx="12" cy="12" r="3" stroke="white" strokeWidth="1.5" fill="none" />
-                      <circle cx="16.5" cy="7.5" r="1" fill="white" />
-                    </svg>
+                    <DropdownIconFrame {...dropdownIconPreset.instagram}>
+                      <svg className="w-6 h-6" viewBox="0 0 24 24">
+                        <defs>
+                          <linearGradient id="igGradOnboarding" x1="0%" y1="100%" x2="100%" y2="0%">
+                            <stop offset="0%" stopColor="#FFDC80" />
+                            <stop offset="25%" stopColor="#F77737" />
+                            <stop offset="50%" stopColor="#E1306C" />
+                            <stop offset="75%" stopColor="#C13584" />
+                            <stop offset="100%" stopColor="#833AB4" />
+                          </linearGradient>
+                        </defs>
+                        <rect width="24" height="24" rx="5" fill="url(#igGradOnboarding)" />
+                        <rect
+                          x="6"
+                          y="6"
+                          width="12"
+                          height="12"
+                          rx="3.5"
+                          stroke="white"
+                          strokeWidth="1.5"
+                          fill="none"
+                        />
+                        <circle
+                          cx="12"
+                          cy="12"
+                          r="3"
+                          stroke="white"
+                          strokeWidth="1.5"
+                          fill="none"
+                        />
+                        <circle cx="16.5" cy="7.5" r="1" fill="white" />
+                      </svg>
+                    </DropdownIconFrame>
                     <span className="text-sm text-foreground">Instagram</span>
                   </div>
                   <span className="text-xs text-muted-foreground italic">Coming soon</span>
@@ -1367,7 +1426,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
           <div className="rounded-xl border transition-all duration-200 bg-card border-border overflow-hidden">
             <div className="p-4 flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-surface">
+                <DropdownIconFrame {...dropdownIconPreset.agentPay} isSynced={agentPayConfigured}>
                   <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none">
                     <rect x="1" y="4" width="22" height="16" rx="2.5" fill="#1a1a1a" />
                     <rect x="1" y="8.5" width="22" height="3" fill="#333" />
@@ -1376,9 +1435,10 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                     <circle cx="18.5" cy="15" r="2" fill="#444" />
                     <circle cx="20" cy="15" r="2" fill="#555" />
                   </svg>
-                </div>
+                </DropdownIconFrame>
                 <div>
                   <div className="font-medium text-sm text-foreground">Agent Pay</div>
+                  <ConnectedStatusText isConnected={agentPayConfigured} />
                   <div className="text-xs text-muted-foreground">
                     Payment method for agent purchases
                   </div>
@@ -1387,17 +1447,9 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
 
               <button
                 onClick={() => setAgentPayModalOpen(true)}
-                className={`h-10 w-10 rounded-lg flex items-center justify-center transition-all duration-200 ${
-                  agentPayConfigured
-                    ? 'bg-green-100 text-green-700'
-                    : 'bg-foreground text-background hover:bg-foreground/90'
-                }`}
+                className="h-10 w-10 rounded-lg flex items-center justify-center transition-all duration-200 bg-foreground text-background hover:bg-foreground/90"
               >
-                {agentPayConfigured ? (
-                  <Check className="w-4 h-4" />
-                ) : (
-                  <RefreshCw className="w-4 h-4" />
-                )}
+                <RefreshCw className="w-4 h-4" />
               </button>
             </div>
           </div>
@@ -1406,23 +1458,16 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
           <div className="rounded-xl border transition-all duration-200 bg-card border-border overflow-hidden">
             <div className="p-4 flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-surface">
-                  <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none">
-                    <defs>
-                      <linearGradient id="plaidBankingGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                        <stop offset="0%" stopColor="#10b981" />
-                        <stop offset="100%" stopColor="#22c55e" />
-                      </linearGradient>
-                    </defs>
-                    <path
-                      d="M12 2L3 7v10l9 5 9-5V7l-9-5zm0 2.2L18.8 8 12 11.8 5.2 8 12 4.2zM5 9.5l6 3.4v7.3l-6-3.4V9.5zm14 0v7.3l-6 3.4v-7.3l6-3.4z"
-                      fill="url(#plaidBankingGradient)"
-                    />
-                  </svg>
-                </div>
+                <DropdownIconFrame
+                  {...dropdownIconPreset.plaid}
+                  isSynced={connectedBanks.length > 0}
+                >
+                  <PlaidLogoIcon />
+                </DropdownIconFrame>
                 <div>
                   <div className="font-medium text-sm text-foreground">Banking</div>
-                  <div className="text-xs text-muted-foreground">
+                  <ConnectedStatusText isConnected={connectedBanks.length > 0} />
+                  <div className="truncate text-xs text-muted-foreground">
                     {connectedBanks.length > 0
                       ? connectedBanks.join(', ')
                       : 'Connect a bank account via Plaid'}
@@ -1436,16 +1481,10 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                 }}
                 disabled={plaidLoading}
                 aria-label="Connect a bank via Plaid"
-                className={`h-10 w-10 rounded-lg flex items-center justify-center transition-all duration-200 ${
-                  connectedBanks.length > 0
-                    ? 'bg-green-100 text-green-700'
-                    : 'bg-foreground text-background hover:bg-foreground/90'
-                } disabled:opacity-60`}
+                className="h-10 w-10 rounded-lg flex items-center justify-center transition-all duration-200 bg-foreground text-background hover:bg-foreground/90 disabled:opacity-60"
               >
                 {plaidLoading ? (
                   <Loader2 className="w-4 h-4 animate-spin" />
-                ) : connectedBanks.length > 0 ? (
-                  <Check className="w-4 h-4" />
                 ) : (
                   <RefreshCw className="w-4 h-4" />
                 )}
@@ -1489,11 +1528,11 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
         syncType="browser data"
       />
 
-      {/* Apple Passwords Modal */}
-      <ApplePasswordsModal
-        isOpen={applePasswordsModalOpen}
-        onClose={() => setApplePasswordsModalOpen(false)}
-        onSync={handleApplePasswordsSync}
+      {/* Apple Passwords & Passkeys Modal */}
+      <PasskeysModal
+        isOpen={passkeysModalOpen}
+        onClose={() => setPasskeysModalOpen(false)}
+        onSync={handlePasskeysConnect}
       />
 
       {/* Atlas Passwords Modal (reuses AtlasPasswordModal for keychain password entry) */}

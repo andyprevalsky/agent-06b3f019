@@ -9,6 +9,7 @@ import type { BrowserType } from '@/features/integration-handlers-context';
 import chromeIcon from '@/assets/chrome-icon.png';
 import chatgptIcon from '@/assets/chatgpt-icon.webp';
 import braveIcon from '@/assets/brave-icon.webp';
+import safariIcon from '@/assets/safari-icon.png';
 
 interface BrowserIconProps {
   type: BrowserType;
@@ -119,6 +120,8 @@ export default function BrowserIcon({ type, className = 'w-4 h-4' }: BrowserIcon
       return <ChromiumIcon className={className} />;
     case 'atlas':
       return <img src={chatgptIcon} alt="ChatGPT" className={`${className} rounded`} />;
+    case 'safari':
+      return <img src={safariIcon} alt="Safari" className={className} />;
     default:
       return <DefaultBrowserIcon className={className} />;
   }

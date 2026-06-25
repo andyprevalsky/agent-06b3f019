@@ -1,0 +1,105 @@
+/**
+ * STATE MACHINE: DropdownIconFrame
+ *
+ * [RAW_ICON_ASSET|RAW_GLYPH] --wrap--> [FRAMED_DROPDOWN_ICON]
+ *
+ * System context:
+ *   Integrations dropdown row -> DropdownIconFrame -> consistent 32px icon art
+ *     inside a 1px diagonal border shared by row icons and parent dropdown icons.
+ *     Synced rows keep their original icon and signal status with a green glow.
+ */
+
+import type { CSSProperties, ReactNode } from 'react';
+
+interface DropdownIconFrameProps {
+  children: ReactNode;
+  className?: string;
+  iconFit?: 'contain' | 'cover' | 'fill';
+  iconScale?: number;
+  isSynced?: boolean;
+}
+
+export const dropdownIconImageClassName = 'h-8 w-8 object-cover';
+
+export const dropdownIconPreset = {
+  browserMain: { iconScale: 62, iconFit: 'contain' },
+  chrome: { iconScale: 100, iconFit: 'cover' },
+  brave: { iconScale: 88, iconFit: 'cover' },
+  safari: { iconScale: 87, iconFit: 'cover' },
+  edge: { iconScale: 66, iconFit: 'cover' },
+  arc: { iconScale: 71, iconFit: 'cover' },
+  opera: { iconScale: 67, iconFit: 'cover' },
+  vivaldi: { iconScale: 67, iconFit: 'cover' },
+  chromium: { iconScale: 60, iconFit: 'cover' },
+  applePasswords: { iconScale: 108, iconFit: 'cover' },
+  atlas: { iconScale: 100, iconFit: 'cover' },
+  passwordsMain: { iconScale: 62, iconFit: 'contain' },
+  computeMain: { iconScale: 62, iconFit: 'contain' },
+  claude: { iconScale: 56, iconFit: 'contain' },
+  chatgpt: { iconScale: 66, iconFit: 'contain' },
+  gemini: { iconScale: 60, iconFit: 'cover' },
+  messagesMain: { iconScale: 69, iconFit: 'contain' },
+  imessage: { iconScale: 100, iconFit: 'cover' },
+  gmail: { iconScale: 58, iconFit: 'contain' },
+  whatsapp: { iconScale: 100, iconFit: 'cover' },
+  telegram: { iconScale: 100, iconFit: 'cover' },
+  messenger: { iconScale: 104, iconFit: 'cover' },
+  socialsMain: { iconScale: 73, iconFit: 'contain' },
+  x: { iconScale: 100, iconFit: 'cover' },
+  linkedin: { iconScale: 100, iconFit: 'cover' },
+  instagram: { iconScale: 100, iconFit: 'cover' },
+  agentPay: { iconScale: 82, iconFit: 'contain' },
+  plaid: { iconScale: 64, iconFit: 'contain' },
+} as const;
+
+export function browserDropdownIconPreset(
+  type: string,
+): Pick<DropdownIconFrameProps, 'iconFit' | 'iconScale'> {
+  switch (type) {
+    case 'chrome':
+      return dropdownIconPreset.chrome;
+    case 'brave':
+      return dropdownIconPreset.brave;
+    case 'safari':
+      return dropdownIconPreset.safari;
+    case 'edge':
+      return dropdownIconPreset.edge;
+    case 'arc':
+      return dropdownIconPreset.arc;
+    case 'opera':
+      return dropdownIconPreset.opera;
+    case 'vivaldi':
+      return dropdownIconPreset.vivaldi;
+    case 'chromium':
+      return dropdownIconPreset.chromium;
+    case 'atlas':
+      return dropdownIconPreset.atlas;
+    default:
+      return dropdownIconPreset.chromium;
+  }
+}
+
+export default function DropdownIconFrame({
+  children,
+  className = '',
+  iconFit = 'cover',
+  iconScale = 100,
+  isSynced = false,
+}: DropdownIconFrameProps): JSX.Element {
+  return (
+    <div
+      className={`flex h-[34px] w-[34px] shrink-0 items-center justify-center overflow-hidden rounded-lg border border-transparent shadow-[0_1px_2px_rgba(0,0,0,0.16)] [&>*]:h-full [&>*]:w-full [&>*]:scale-[var(--dropdown-icon-scale)] [&>*]:[object-fit:var(--dropdown-icon-fit)] ${className}`}
+      style={
+        {
+          '--dropdown-icon-fit': iconFit,
+          '--dropdown-icon-scale': String(iconScale / 100),
+          animation: isSynced ? 'dropdownIconGlow 1.8s ease-in-out infinite' : undefined,
+          background:
+            'linear-gradient(#f5f5f5, #f5f5f5) padding-box, conic-gradient(from 45deg, rgba(16,16,16,0.9) 0deg, rgba(255,255,255,0.96) 90deg, rgba(16,16,16,0.9) 180deg, rgba(255,255,255,0.96) 270deg, rgba(16,16,16,0.9) 360deg) border-box',
+        } as CSSProperties
+      }
+    >
+      {children}
+    </div>
+  );
+}

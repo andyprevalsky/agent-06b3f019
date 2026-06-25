@@ -258,6 +258,33 @@ vi.mock('../../main/services/sync/SyncManager', () => ({
   SyncManager: { startAll: (...a: unknown[]) => syncManagerStart(...a) },
 }));
 
+const requestPasskeyAutoFillPermission = vi.fn(async () => ({
+  success: true,
+  enabled: true,
+  openedSettings: false,
+}));
+const getPasskeyAutoFillStatus = vi.fn(async () => ({
+  success: true,
+  enabled: true,
+  credentialExchangeEnabled: true,
+}));
+vi.mock('../../main/domains/passkey-permission/service', () => ({
+  requestPasskeyAutoFillPermission: (...a: unknown[]) => requestPasskeyAutoFillPermission(...a),
+  getPasskeyAutoFillStatus: (...a: unknown[]) => getPasskeyAutoFillStatus(...a),
+}));
+
+const prepareCredentialExchangeHandoff = vi.fn(async () => ({
+  activityPath: '/tmp/credential-exchange-activity.json',
+  appPath: '/Applications/Rose.app',
+  pluginPath: '/Applications/Rose.app/Contents/PlugIns/PasskeyProvider.appex',
+  restartedProcesses: [],
+  staleLaunchServicesRecords: [],
+  credentialExchangeLaunchServicesRecords: [],
+}));
+vi.mock('../../main/domains/passkey-import/handoff-state', () => ({
+  prepareCredentialExchangeHandoff: (...a: unknown[]) => prepareCredentialExchangeHandoff(...a),
+}));
+
 const integrationCacheInvalidate = vi.fn();
 vi.mock('../../main/services/sync/IntegrationCache', () => ({
   IntegrationCache: { invalidate: (...a: unknown[]) => integrationCacheInvalidate(...a) },
@@ -600,6 +627,16 @@ describe('ipc-registry: system channels', () => {
   beforeEach(() => {
     shellOpenExternal.mockClear();
     shellOpenPath.mockClear();
+    requestPasskeyAutoFillPermission.mockClear();
+    prepareCredentialExchangeHandoff.mockClear();
+    prepareCredentialExchangeHandoff.mockResolvedValue({
+      activityPath: '/tmp/credential-exchange-activity.json',
+      appPath: '/Applications/Rose.app',
+      pluginPath: '/Applications/Rose.app/Contents/PlugIns/PasskeyProvider.appex',
+      restartedProcesses: [],
+      staleLaunchServicesRecords: [],
+      credentialExchangeLaunchServicesRecords: [],
+    });
   });
 
   it('system:openFullDiskAccess opens the Privacy_AllFiles pref pane', async () => {
@@ -620,14 +657,83 @@ describe('ipc-registry: system channels', () => {
 
   it('system:openPasswordsApp opens the Passwords app', async () => {
     const result = await invoke('system:openPasswordsApp');
+    expect(prepareCredentialExchangeHandoff).toHaveBeenCalledTimes(1);
     expect(shellOpenPath).toHaveBeenCalledWith('/System/Applications/Passwords.app');
     expect(result).toEqual({ success: true });
+  });
+
+  it('system:openPasswordsApp fails before opening Passwords when handoff preparation fails', async () => {
+    prepareCredentialExchangeHandoff.mockRejectedValueOnce(new Error('PluginKit stale'));
+
+    const result = await invoke('system:openPasswordsApp');
+
+    expect(shellOpenPath).not.toHaveBeenCalledWith('/System/Applications/Passwords.app');
+    expect(result).toEqual({ success: false, message: 'PluginKit stale' });
   });
 
   it('system:openPasswordsApp returns {success:false} when shell fails', async () => {
     shellOpenPath.mockRejectedValueOnce(new Error('x'));
     const result = await invoke('system:openPasswordsApp');
-    expect(result).toEqual({ success: false });
+    expect(result).toEqual({ success: false, message: 'x' });
+  });
+
+  it('system:openAutoFillSettings requests credential provider permission', async () => {
+    const result = await invoke('system:openAutoFillSettings');
+    expect(requestPasskeyAutoFillPermission).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ success: true, enabled: true, openedSettings: false });
+    expect(shellOpenExternal).not.toHaveBeenCalledWith(
+      'x-apple.systempreferences:com.apple.Passwords-Settings.extension'
+    );
+  });
+
+  it('system:openAutoFillSettings opens AutoFill settings when Rose is not enabled', async () => {
+    requestPasskeyAutoFillPermission.mockResolvedValueOnce({
+      success: true,
+      enabled: false,
+      openedSettings: false,
+    });
+
+    const result = await invoke('system:openAutoFillSettings');
+
+    expect(requestPasskeyAutoFillPermission).toHaveBeenCalledTimes(1);
+    expect(shellOpenExternal).toHaveBeenCalledWith(
+      'x-apple.systempreferences:com.apple.Passwords-Settings.extension'
+    );
+    expect(result).toEqual({ success: true, enabled: false, openedSettings: true });
+  });
+
+  it('system:openAutoFillSettings falls back to settings when the native helper is killed', async () => {
+    requestPasskeyAutoFillPermission.mockResolvedValueOnce({
+      success: false,
+      message: 'rose-passkey-permission exited code=null signal=SIGKILL',
+      credentialExchangeEnabled: true,
+    });
+
+    const result = await invoke('system:openAutoFillSettings');
+
+    expect(shellOpenExternal).toHaveBeenCalledWith(
+      'x-apple.systempreferences:com.apple.Passwords-Settings.extension'
+    );
+    expect(result).toEqual({
+      success: true,
+      enabled: false,
+      openedSettings: true,
+      credentialExchangeEnabled: true,
+      message: 'rose-passkey-permission exited code=null signal=SIGKILL',
+    });
+  });
+
+  it('system:checkAutoFillSettings reads Rose credential provider status without opening settings', async () => {
+    const result = await invoke('system:checkAutoFillSettings');
+    expect(getPasskeyAutoFillStatus).toHaveBeenCalledTimes(1);
+    expect(shellOpenExternal).not.toHaveBeenCalledWith(
+      'x-apple.systempreferences:com.apple.Passwords-Settings.extension'
+    );
+    expect(result).toEqual({
+      success: true,
+      enabled: true,
+      credentialExchangeEnabled: true,
+    });
   });
 });
 

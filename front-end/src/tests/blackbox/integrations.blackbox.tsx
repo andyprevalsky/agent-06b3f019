@@ -6,6 +6,8 @@ import { server } from './msw/server';
 import { capturedRequests, clearCaptures } from './msw/capture';
 import { renderWithProviders } from './test-wrapper';
 import Integrations from '@/pages/Integrations';
+import { IntegrationHandlersProvider } from '@/features/integration-handlers-context';
+import type { IntegrationHandlers } from '@/features/integration-handlers-context';
 
 const API_BASE = 'http://localhost:3001/api';
 
@@ -60,7 +62,7 @@ describe('Integrations page', () => {
       });
 
       expect(screen.getByText('Passwords')).toBeInTheDocument();
-      expect(screen.getByText('Messages Sync')).toBeInTheDocument();
+      expect(screen.getByText('Messages')).toBeInTheDocument();
       expect(screen.getByText('Socials')).toBeInTheDocument();
     });
 
@@ -87,14 +89,29 @@ describe('Integrations page', () => {
       expect(screen.getByText('Auto-fill login credentials')).toBeInTheDocument();
     });
 
-    it('shows Messages Sync section with subtitle', async () => {
+    it('shows Messages section with subtitle', async () => {
       renderWithProviders(<Integrations />);
 
       await waitFor(() => {
-        expect(screen.getByText('Messages Sync')).toBeInTheDocument();
+        expect(screen.getByText('Messages')).toBeInTheDocument();
       });
 
       expect(screen.getByText('Sync messaging clients')).toBeInTheDocument();
+    });
+
+    it('renders the Messages icon inside its viewBox', async () => {
+      renderWithProviders(<Integrations />);
+
+      await waitFor(() => {
+        expect(screen.getByText('Messages')).toBeInTheDocument();
+      });
+
+      const icon = screen.getByLabelText('Messages icon');
+      expect(icon).toBeInTheDocument();
+      expect(icon.querySelector('path')).toHaveAttribute(
+        'transform',
+        'translate(24 0) scale(-1 1)',
+      );
     });
 
     it('shows Socials section with subtitle', async () => {
@@ -158,15 +175,55 @@ describe('Integrations page', () => {
 
       // Wait for the page to load
       await waitFor(() => {
-        expect(screen.getByText('Messages Sync')).toBeInTheDocument();
+        expect(screen.getByText('Messages')).toBeInTheDocument();
       });
 
-      // The Messages Sync section button should reflect connected status
+      // The Messages section button should reflect connected status
       // Connected sections get a green background with a Check icon
       // We verify the section loaded with data rather than asserting on SVG internals
       await waitFor(() => {
-        expect(screen.getByText('Messages Sync')).toBeInTheDocument();
+        expect(screen.getByText('Messages')).toBeInTheDocument();
       });
+    });
+
+    it('renders Safari browser rows with a first-class icon from the Mac handler', async () => {
+      const user = userEvent.setup();
+      const handlers: IntegrationHandlers = {
+        browserCookies: {
+          isAvailable: true,
+          getInstalledBrowsers: vi.fn(async () => [
+            {
+              type: 'safari',
+              name: 'Safari',
+              isInstalled: true,
+              needsManualPassword: false,
+            },
+          ]),
+          syncBrowser: vi.fn(async () => {}),
+          syncBrowserPasswords: vi.fn(async () => ({ success: true })),
+          storeAtlasPassword: vi.fn(async () => ({ success: true })),
+          openKeychainAccess: vi.fn(async () => ({ success: true })),
+        },
+      };
+
+      renderWithProviders(
+        <IntegrationHandlersProvider handlers={handlers}>
+          <Integrations />
+        </IntegrationHandlersProvider>,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Browser Cookies')).toBeInTheDocument();
+      });
+
+      const browserSection = screen.getByText('Browser Cookies').closest('.rounded-lg')!;
+      const toggleButton = within(browserSection).getAllByRole('button')[0];
+      await user.click(toggleButton);
+
+      await waitFor(() => {
+        expect(screen.getByText('Safari')).toBeInTheDocument();
+      });
+      expect(screen.getByRole('img', { name: 'Safari' })).toBeInTheDocument();
     });
   });
 
@@ -188,22 +245,22 @@ describe('Integrations page', () => {
       const toggleButton = within(passwordsSection).getAllByRole('button')[0];
       await user.click(toggleButton);
 
-      // Should show Apple Passwords sub-item
+      // Should show the unified Apple credential exchange sub-item
       await waitFor(() => {
-        expect(screen.getByText('Apple Passwords')).toBeInTheDocument();
+        expect(screen.getByText('Apple Passwords & Passkeys')).toBeInTheDocument();
       });
     });
 
-    it('expands Messages Sync section and shows messaging clients', async () => {
+    it('expands Messages section and shows messaging clients', async () => {
       const user = userEvent.setup();
       renderWithProviders(<Integrations />);
 
       await waitFor(() => {
-        expect(screen.getByText('Messages Sync')).toBeInTheDocument();
+        expect(screen.getByText('Messages')).toBeInTheDocument();
       });
 
-      // Click the Messages Sync toggle
-      const messagesSection = screen.getByText('Messages Sync').closest('.rounded-lg')!;
+      // Click the Messages toggle
+      const messagesSection = screen.getByText('Messages').closest('.rounded-lg')!;
       const toggleButton = within(messagesSection).getAllByRole('button')[0];
       await user.click(toggleButton);
 
@@ -251,11 +308,11 @@ describe('Integrations page', () => {
       await user.click(passwordsToggle);
 
       await waitFor(() => {
-        expect(screen.getByText('Apple Passwords')).toBeInTheDocument();
+        expect(screen.getByText('Apple Passwords & Passkeys')).toBeInTheDocument();
       });
 
-      // Now expand Messages Sync - should close Passwords
-      const messagesSection = screen.getByText('Messages Sync').closest('.rounded-lg')!;
+      // Now expand Messages - should close Passwords
+      const messagesSection = screen.getByText('Messages').closest('.rounded-lg')!;
       const messagesToggle = within(messagesSection).getAllByRole('button')[0];
       await user.click(messagesToggle);
 
@@ -263,8 +320,8 @@ describe('Integrations page', () => {
         expect(screen.getByText('Gmail')).toBeInTheDocument();
       });
 
-      // Apple Passwords should no longer be visible (Passwords section collapsed)
-      expect(screen.queryByText('Apple Passwords')).not.toBeInTheDocument();
+      // Apple credential exchange row should no longer be visible (Passwords section collapsed)
+      expect(screen.queryByText('Apple Passwords & Passkeys')).not.toBeInTheDocument();
     });
 
     it('shows "Coming Soon" badges for WhatsApp, Telegram, and Messenger', async () => {
@@ -272,10 +329,10 @@ describe('Integrations page', () => {
       renderWithProviders(<Integrations />);
 
       await waitFor(() => {
-        expect(screen.getByText('Messages Sync')).toBeInTheDocument();
+        expect(screen.getByText('Messages')).toBeInTheDocument();
       });
 
-      const messagesSection = screen.getByText('Messages Sync').closest('.rounded-lg')!;
+      const messagesSection = screen.getByText('Messages').closest('.rounded-lg')!;
       const toggleButton = within(messagesSection).getAllByRole('button')[0];
       await user.click(toggleButton);
 
@@ -327,11 +384,11 @@ describe('Integrations page', () => {
       renderWithProviders(<Integrations />);
 
       await waitFor(() => {
-        expect(screen.getByText('Messages Sync')).toBeInTheDocument();
+        expect(screen.getByText('Messages')).toBeInTheDocument();
       });
 
-      // Expand Messages Sync
-      const messagesSection = screen.getByText('Messages Sync').closest('.rounded-lg')!;
+      // Expand Messages
+      const messagesSection = screen.getByText('Messages').closest('.rounded-lg')!;
       const toggleButton = within(messagesSection).getAllByRole('button')[0];
       await user.click(toggleButton);
 
@@ -373,11 +430,11 @@ describe('Integrations page', () => {
       renderWithProviders(<Integrations />);
 
       await waitFor(() => {
-        expect(screen.getByText('Messages Sync')).toBeInTheDocument();
+        expect(screen.getByText('Messages')).toBeInTheDocument();
       });
 
-      // Expand Messages Sync
-      const messagesSection = screen.getByText('Messages Sync').closest('.rounded-lg')!;
+      // Expand Messages
+      const messagesSection = screen.getByText('Messages').closest('.rounded-lg')!;
       const toggleButton = within(messagesSection).getAllByRole('button')[0];
       await user.click(toggleButton);
 
@@ -389,11 +446,11 @@ describe('Integrations page', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Password request flow
+  // Password request bar
   // ---------------------------------------------------------------------------
 
-  describe('password request flow', () => {
-    it('shows the request input when clicking "Request one"', async () => {
+  describe('password request bar', () => {
+    it('does not show the removed password client request bar', async () => {
       const user = userEvent.setup();
       renderWithProviders(<Integrations />);
 
@@ -406,66 +463,10 @@ describe('Integrations page', () => {
       const toggleButton = within(passwordsSection).getAllByRole('button')[0];
       await user.click(toggleButton);
 
-      // Find and click the "Request one" link
-      await waitFor(() => {
-        expect(screen.getByText(/Request one/)).toBeInTheDocument();
-      });
-      await user.click(screen.getByText(/Request one/));
-
-      // Should show the text input for requesting a new integration
-      await waitFor(() => {
-        expect(screen.getByPlaceholderText(/1Password, Bitwarden, LastPass/i)).toBeInTheDocument();
-      });
-    });
-
-    it('sends password request and shows success message', async () => {
-      const user = userEvent.setup();
-
-      server.use(
-        http.post(`${API_BASE}/integrations/passwords/request`, () => {
-          return HttpResponse.json({ success: true });
-        }),
-      );
-
-      renderWithProviders(<Integrations />);
-
-      await waitFor(() => {
-        expect(screen.getByText('Passwords')).toBeInTheDocument();
-      });
-
-      // Expand Passwords
-      const passwordsSection = screen.getByText('Passwords').closest('.rounded-lg')!;
-      const toggleButton = within(passwordsSection).getAllByRole('button')[0];
-      await user.click(toggleButton);
-
-      await waitFor(() => {
-        expect(screen.getByText(/Request one/)).toBeInTheDocument();
-      });
-      await user.click(screen.getByText(/Request one/));
-
-      // Type into the request input
-      const input = await screen.findByPlaceholderText(/1Password, Bitwarden, LastPass/i);
-      await user.type(input, 'Dashlane');
-
-      clearCaptures();
-
-      // Click Send
-      await user.click(screen.getByRole('button', { name: /send/i }));
-
-      // Should have made API call
-      await waitFor(() => {
-        const requestCalls = capturedRequests.filter(
-          (r) => r.url.includes('/integrations/passwords/request') && r.method === 'POST',
-        );
-        expect(requestCalls.length).toBe(1);
-        expect(requestCalls[0].body).toEqual({ request: 'Dashlane' });
-      });
-
-      // Should show success message (appears in both the banner and inline text)
-      await waitFor(() => {
-        const matches = screen.getAllByText(/Request sent/);
-        expect(matches.length).toBeGreaterThanOrEqual(1);
-      });
+      expect(screen.queryByText(/Request one/)).not.toBeInTheDocument();
+      expect(
+        screen.queryByPlaceholderText(/1Password, Bitwarden, LastPass/i),
+      ).not.toBeInTheDocument();
     });
   });
 
@@ -550,11 +551,11 @@ describe('Integrations page', () => {
       renderWithProviders(<Integrations />);
 
       await waitFor(() => {
-        expect(screen.getByText('Messages Sync')).toBeInTheDocument();
+        expect(screen.getByText('Messages')).toBeInTheDocument();
       });
 
-      // Expand Messages Sync
-      const messagesSection = screen.getByText('Messages Sync').closest('.rounded-lg')!;
+      // Expand Messages
+      const messagesSection = screen.getByText('Messages').closest('.rounded-lg')!;
       const toggleButton = within(messagesSection).getAllByRole('button')[0];
       await user.click(toggleButton);
 
@@ -603,11 +604,11 @@ describe('Integrations page', () => {
       await user.click(toggleButton);
 
       await waitFor(() => {
-        expect(screen.getByText('Apple Passwords')).toBeInTheDocument();
+        expect(screen.getByText('Apple Passwords & Passkeys')).toBeInTheDocument();
       });
     });
 
-    it('shows connected Gmail with multiple emails in Messages Sync', async () => {
+    it('shows connected Gmail with multiple emails in Messages', async () => {
       const user = userEvent.setup();
 
       server.use(
@@ -625,10 +626,10 @@ describe('Integrations page', () => {
       renderWithProviders(<Integrations />);
 
       await waitFor(() => {
-        expect(screen.getByText('Messages Sync')).toBeInTheDocument();
+        expect(screen.getByText('Messages')).toBeInTheDocument();
       });
 
-      const messagesSection = screen.getByText('Messages Sync').closest('.rounded-lg')!;
+      const messagesSection = screen.getByText('Messages').closest('.rounded-lg')!;
       const toggleButton = within(messagesSection).getAllByRole('button')[0];
       await user.click(toggleButton);
 
