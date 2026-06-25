@@ -155,9 +155,9 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
     },
     "screenshot": {
         "description": (
-            "Take a full-page screenshot of the current page (captures entire page, not just viewport). "
+            "Take a screenshot of the visible page viewport. Coordinates in this image match click_coordinates. "
             "The screenshot is saved and returned to the orchestrating agent. "
-            "Only call once per page; one call captures everything."
+            "Use this for visual confirmation of the current visible page state."
         ),
         "params": {},
     },
@@ -282,7 +282,7 @@ action envelope in text; use the provided tool call.
   - 6. Minted account
   - 7. Guest/anonymous completion, if viable
 - Cookie-based and existing Steel-session auth are applied automatically before you start.
-- If a passkey is listed for this site and you are not already logged in, prefer it: start the login and choose the passkey / "Sign in with a passkey" option. The passkey is pre-loaded into the browser's authenticator and signs automatically, with no code or password needed, and may complete on its own as soon as the login page loads. If passkey sign-in is offered but does not complete, fall through to the next option. A site may still require an additional OTP step after the passkey; handle that OTP normally.
+- If a passkey is listed for this site and you are not already logged in, you MUST try the passkey path before any saved password. The passkey is pre-loaded into the browser's authenticator and signs silently once the site starts WebAuthn; no browser passkey popup is expected. First focus/click the username, email, or account field to trigger any passkey autofill/conditional WebAuthn. If the site asks for an identifier, enter the relevant account email/username from the page or saved credentials and continue, but do not type a password yet. If a "Sign in with a passkey", "Use passkey", or similar option appears, choose it. Wait briefly for navigation, OTP, or account access. Only fall through to saved passwords after the passkey option is absent, unavailable, or visibly fails.
 - For saved passwords, type the listed ref (for example, pwd:andy@email.com) into password fields; the browser tool decrypts it and records credential usage.
 - For multi-account sites, prefer the task-specific user context when present, then the freshest enabled cookie bundle.
 - When a site offers OTP delivery options, prefer email over SMS.
