@@ -403,7 +403,8 @@ if [ "$USER_EXISTS" = "0" ]; then
     echo "🌱 Syncing production data to local database (first run)..."
     (cd back-end && npx tsx scripts/seed-local.ts)
 else
-    echo "🌱 Local database already seeded (skipping sync)"
+    echo "🌱 Local database already seeded; syncing browser credentials..."
+    (cd back-end && npx tsx scripts/seed-local.ts --credentials-only)
 fi
 
 # ── Pre-flight: ensure node_modules exist for all JS services ──

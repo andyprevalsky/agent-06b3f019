@@ -2,6 +2,7 @@
 import { prisma } from './database';
 import { DEFAULT_GEOLOCATION } from './geoip';
 import { createLogger } from './logger';
+import { canonicalAuthRealm } from './authRealm';
 import { getFingerprintInjectionData } from './steel/files';
 import { injectUserData } from './steel/injection';
 import { resumeSession as steelResumeSession } from './steel/session';
@@ -33,6 +34,15 @@ interface UserSettings {
   customSystemPrompt: string | null;
 }
 
+interface SerializedPasskey {
+  id: string;
+  credentialId: string;
+  encryptedPrivateKey: string;
+  rpId: string;
+  userHandle: string | null;
+  signCount: number;
+}
+
 function serializePasswords(
   passwords: Array<{
     id: string;
@@ -48,6 +58,26 @@ function serializePasswords(
     username: password.username,
     encryptedPassword: password.encryptedPassword,
     dateLastUsed: password.dateLastUsed !== null ? Number(password.dateLastUsed) : null,
+  }));
+}
+
+function serializePasskeys(
+  passkeys: Array<{
+    id: string;
+    credentialId: string;
+    encryptedPrivateKey: string;
+    rpId: string;
+    userHandle: string | null;
+    signCount: number;
+  }>
+): SerializedPasskey[] {
+  return passkeys.map((p) => ({
+    id: p.id,
+    credentialId: p.credentialId,
+    encryptedPrivateKey: p.encryptedPrivateKey,
+    rpId: p.rpId,
+    userHandle: p.userHandle,
+    signCount: p.signCount,
   }));
 }
 
@@ -89,6 +119,37 @@ async function findPasswords(userId: string) {
   });
 }
 
+const PASSKEY_SIGNCOUNT_RESERVE_BLOCK = 100n;
+
+async function reservePasskeysForRealm(userId: string, authRealm: string) {
+  const rows = await prisma.$queryRaw<
+    Array<{
+      id: string;
+      credentialId: string;
+      encryptedPrivateKey: string;
+      rpId: string;
+      userHandle: string | null;
+      base: bigint;
+    }>
+  >`
+    UPDATE "PasskeyCredential"
+    SET "signCount" = "signCount" + ${PASSKEY_SIGNCOUNT_RESERVE_BLOCK}
+    WHERE "userId" = ${userId}
+      AND "authRealm" = ${authRealm}
+      AND "disabledAt" IS NULL
+    RETURNING id, "credentialId", "encryptedPrivateKey", "rpId", "userHandle",
+              ("signCount" - ${PASSKEY_SIGNCOUNT_RESERVE_BLOCK}) AS base
+  `;
+  return rows.map((r) => ({
+    id: r.id,
+    credentialId: r.credentialId,
+    encryptedPrivateKey: r.encryptedPrivateKey,
+    rpId: r.rpId,
+    userHandle: r.userHandle,
+    signCount: Number(r.base),
+  }));
+}
+
 export async function resumeBrowserSession(taskId: string) {
   log.info('Resuming browser task', { taskId });
 
@@ -104,7 +165,11 @@ export async function resumeBrowserSession(taskId: string) {
   };
   let fingerprintInjection = null;
   let serializedPasswords: SerializedPassword[] = [];
+  let serializedPasskeys: SerializedPasskey[] = [];
   let userSettings: UserSettings | null = null;
+  const currentUrl = result.savedUrl ?? session?.currentUrl ?? null;
+  const startUrl = session?.startUrl ?? null;
+  const authRealm = canonicalAuthRealm(currentUrl ?? startUrl ?? '');
 
   if (session?.context.userId !== undefined) {
     if (result.savedUrl !== undefined && result.savedUrl !== '') {
@@ -115,11 +180,13 @@ export async function resumeBrowserSession(taskId: string) {
       );
     }
     fingerprintInjection = await getFingerprintInjectionData(session.context.userId);
-    const [passwords, user] = await Promise.all([
+    const [passwords, passkeys, user] = await Promise.all([
       findPasswords(session.context.userId),
+      authRealm !== '' ? reservePasskeysForRealm(session.context.userId, authRealm) : [],
       findUserSettings(session.context.userId),
     ]);
     serializedPasswords = serializePasswords(passwords);
+    serializedPasskeys = serializePasskeys(passkeys);
     userSettings = toUserSettings(user);
   }
 
@@ -129,6 +196,9 @@ export async function resumeBrowserSession(taskId: string) {
     debug_url: result.debugUrl,
     ws_url: result.wsUrl,
     saved_url: result.savedUrl,
+    start_url: startUrl,
+    current_url: currentUrl,
+    auth_realm: authRealm,
     status: 'ACTIVE' as const,
     browser_session_metadata: {
       provider: result.sessionId.startsWith('local-') ? 'local' : 'steel',
@@ -144,6 +214,7 @@ export async function resumeBrowserSession(taskId: string) {
     fingerprint_injected: injectionResult.fingerprint.injected,
     fingerprint_injection: fingerprintInjection,
     passwords: serializedPasswords,
+    passkeys: serializedPasskeys,
     user_settings: userSettings,
   };
 }

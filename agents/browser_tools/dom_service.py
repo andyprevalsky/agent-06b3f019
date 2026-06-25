@@ -315,7 +315,32 @@ class DOMService:
                 self._session = None
                 self._selector_map = {}
                 logger.info("🔌 Disconnected from browser")
-    
+
+    async def _send_cdp_command(
+        self,
+        cdp_session: Any,
+        method: str,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Send a CDP command across the two session shapes used in this repo."""
+        session_id = getattr(cdp_session, "session_id", None)
+        send = getattr(cdp_session, "send", None)
+        if callable(send):
+            return await send(method, params or {})
+
+        cdp_client = getattr(cdp_session, "cdp_client", None)
+        if cdp_client is None:
+            raise RuntimeError("CDP session has neither send() nor cdp_client")
+
+        send_raw = getattr(cdp_client, "send_raw", None)
+        if callable(send_raw):
+            return await send_raw(method=method, params=params or {}, session_id=session_id)
+
+        domain_name, command_name = method.split(".", 1)
+        domain = getattr(cdp_client.send, domain_name)
+        command = getattr(domain, command_name)
+        return await command(params=params or {}, session_id=session_id)
+
     async def _suppress_browser_overlays(self) -> None:
         """Suppress native browser-chrome overlays that CDP screenshots can't capture.
 
@@ -340,7 +365,7 @@ class DOMService:
             #    but is invisible to CDP screenshots. With enableUI=false, WebAuthn requests
             #    fail gracefully and sites fall back to password login.
             try:
-                await cdp_session.send("WebAuthn.enable", {"enableUI": False})
+                await self._send_cdp_command(cdp_session, "WebAuthn.enable", {"enableUI": False})
                 # Keep this session for passkey injection/readback: a virtual
                 # authenticator only lives as long as the CDP session that added
                 # it. enableUI=false is exactly right for cloud custody — the
@@ -638,7 +663,8 @@ class DOMService:
             logger.warning("⚠️ [passkey] no WebAuthn CDP session; cannot inject passkeys")
             return
         try:
-            result = await self._webauthn_cdp.send(
+            result = await self._send_cdp_command(
+                self._webauthn_cdp,
                 "WebAuthn.addVirtualAuthenticator",
                 {
                     "options": {
@@ -674,7 +700,8 @@ class DOMService:
             if user_handle:
                 credential["userHandle"] = user_handle
             try:
-                await self._webauthn_cdp.send(
+                await self._send_cdp_command(
+                    self._webauthn_cdp,
                     "WebAuthn.addCredential",
                     {"authenticatorId": self._passkey_authenticator_id, "credential": credential},
                 )
@@ -683,6 +710,16 @@ class DOMService:
             except Exception as e:
                 logger.warning(f"⚠️ [passkey] addCredential failed for {rp_id}: {e}")
         logger.info(f"🔑 [passkey] seeded {seeded} passkey credential(s) on virtual authenticator for the session")
+        if seeded:
+            counts = await self.read_passkey_signcounts()
+            expected_ids = set(self._passkey_seed_counts)
+            observed_ids = set(counts)
+            missing = expected_ids - observed_ids
+            logger.info(
+                "🔑 [passkey] virtual authenticator readback: "
+                f"expected_count={len(expected_ids)} observed_count={len(observed_ids)} "
+                f"missing_count={len(missing)}"
+            )
 
     async def read_passkey_signcounts(self) -> Dict[str, int]:
         """Return {credentialId: signCount} for the seeded authenticator.
@@ -694,7 +731,8 @@ class DOMService:
         if self._webauthn_cdp is None or self._passkey_authenticator_id is None:
             return {}
         try:
-            result = await self._webauthn_cdp.send(
+            result = await self._send_cdp_command(
+                self._webauthn_cdp,
                 "WebAuthn.getCredentials",
                 {"authenticatorId": self._passkey_authenticator_id},
             )
