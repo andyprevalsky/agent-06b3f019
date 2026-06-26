@@ -141,6 +141,36 @@ def test_agent_latency_records_span_history_from_embedded_logs():
                 os.environ["SPAN_HISTORY_FILE"] = old
 
 
+def test_agent_latency_parses_nested_fly_clickhouse_json():
+    from benchmarks.agent_latency import _event_agent_id, _parse_fly_line_to_raw_event
+
+    agent_id = "11111111-1111-4111-8111-111111111111"
+    inner = {
+        "timestamp": "2026-06-26T03:17:48.651205Z",
+        "event": "span.start",
+        "agent_id": agent_id,
+        "span_id": "abc123",
+        "parent_span_id": "parent123",
+        "span_name": "call_llm",
+    }
+    outer = {
+        "event": {"provider": "app"},
+        "fly": {"app": {"name": "navi-whisper-lux"}},
+        "host": "ef14",
+        "message": json.dumps(inner),
+        "timestamp": "2026-06-26T03:17:48.651205221Z",
+    }
+
+    event = _parse_fly_line_to_raw_event(json.dumps(outer))
+
+    assert event is not None
+    assert event.event == "span.start"
+    assert event.data["span_name"] == "call_llm"
+    assert event.data["span_id"] == "abc123"
+    assert event.data["fly_host"] == "ef14"
+    assert _event_agent_id(event) == agent_id
+
+
 def test_agent_latency_inline_baseline_requires_20_samples():
     from benchmarks.agent_latency import Span, _format_span_baseline, _span_baseline_map
     from benchmarks.span_history import record_span_observations
@@ -197,6 +227,7 @@ async def run_all_tests():
     r.record("record_and_summarize", test_record_and_summarize_span_history)
     r.record("compare_marks_regression", test_compare_observations_marks_regression)
     r.record("record_from_embedded_logs", test_agent_latency_records_span_history_from_embedded_logs)
+    r.record("parse_nested_fly_clickhouse_json", test_agent_latency_parses_nested_fly_clickhouse_json)
     r.record("inline_baseline_requires_20_samples", test_agent_latency_inline_baseline_requires_20_samples)
     teardown_mock()
     return r.all_passed

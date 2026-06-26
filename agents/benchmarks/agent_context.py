@@ -1,9 +1,10 @@
 """Print an agent's LLM context exactly as it was sent to the model.
 
-Reads the dumps written by `helpers.llm.dump_llm_context` to
-``<repo_root>/.llm-dumps/<agent_id>/<ts>-<span_id>-<call_site>.json`` and
-emits them as one plain-text chunk per LLM call — no markdown, no truncation,
-no decoration. Each turn is delimited by a fixed-width separator and a single
+Reads the local dumps written by `helpers.observability.dump_llm_context`,
+or materializes production dump events from ClickHouse into
+``<repo_root>/.llm-dumps/<agent_id>/<ts>-<span_id>-<call_site>.json``.
+Emits one plain-text chunk per LLM call — no markdown, no truncation, no
+decoration. Each turn is delimited by a fixed-width separator and a single
 ROLE/CALL_SITE header line so it can be diffed across iterations.
 
 Usage:
@@ -12,16 +13,22 @@ Usage:
     python benchmarks/agent_context.py <agent_id> --span d92418e460f9
     python benchmarks/agent_context.py <agent_id> --iter 12         # nth dump only (1-indexed)
     python benchmarks/agent_context.py <agent_id> --list            # one-line summary per dump
+    python benchmarks/agent_context.py <agent_id> --from-clickhouse --list
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
+import gzip
+import hashlib
 import json
-import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+import httpx
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DUMP_DIR = REPO_ROOT / ".llm-dumps"
@@ -45,6 +52,131 @@ def parse_dump_filename(p: Path) -> Dict[str, str]:
         "span_id": parts[1] if len(parts) > 1 else "",
         "call_site": parts[2] if len(parts) > 2 else "",
     }
+
+
+def _safe_filename_segment(value: str) -> str:
+    return "".join(c if c.isalnum() or c in "-_." else "_" for c in value)[:64] or "unbound"
+
+
+def _parse_fly_raw_message(raw: str) -> Optional[Dict[str, Any]]:
+    try:
+        outer = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    message = outer.get("message")
+    if isinstance(message, str) and message.startswith("{"):
+        try:
+            inner = json.loads(message)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(inner, dict):
+            return inner
+    if isinstance(outer, dict):
+        return outer
+    return None
+
+
+def _decode_payload(event: Dict[str, Any]) -> Dict[str, Any]:
+    if event.get("payload_encoding") != "gzip+base64":
+        raise ValueError(f"unsupported payload encoding: {event.get('payload_encoding')}")
+    compressed = base64.b64decode(event["payload_gzip_b64"])
+    payload_bytes = gzip.decompress(compressed)
+    expected_sha = event.get("payload_sha256")
+    actual_sha = hashlib.sha256(payload_bytes).hexdigest()
+    if expected_sha and expected_sha != actual_sha:
+        raise ValueError(f"payload sha mismatch: expected {expected_sha}, got {actual_sha}")
+    return json.loads(payload_bytes.decode("utf-8"))
+
+
+def _dump_path_for_payload(agent_id: str, payload: Dict[str, Any]) -> Path:
+    ts_ms = payload.get("ts_ms")
+    if not ts_ms:
+        ts_ms = str(int(datetime.now(timezone.utc).timestamp() * 1000))
+    dump_id = _safe_filename_segment(str(payload.get("dump_id") or payload.get("span_id") or "dump"))
+    call_site = _safe_filename_segment(str(payload.get("call_site") or "unspecified"))
+    return DUMP_DIR / agent_id / f"{ts_ms}-{dump_id}-{call_site}.json"
+
+
+def materialize_dump_events(agent_id: str, events: List[Dict[str, Any]]) -> int:
+    by_dump_id: Dict[str, Path] = {}
+    written = 0
+    for event in events:
+        event_name = event.get("event")
+        payload = _decode_payload(event)
+        dump_id = str(payload.get("dump_id") or event.get("dump_id") or "")
+        if event_name == "llm.context.dumped":
+            payload.setdefault("ts_ms", str(int(datetime.now(timezone.utc).timestamp() * 1000)))
+            path = _dump_path_for_payload(agent_id, payload)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, ensure_ascii=False, default=str, indent=2))
+            if dump_id:
+                by_dump_id[dump_id] = path
+            written += 1
+            continue
+        if event_name == "llm.context.dump_updated" and dump_id and dump_id in by_dump_id:
+            path = by_dump_id[dump_id]
+            existing = json.loads(path.read_text())
+            for key, value in payload.items():
+                if key in {"config", "extra"} and isinstance(value, dict):
+                    merged = dict(existing.get(key) or {})
+                    merged.update(value)
+                    existing[key] = merged
+                elif key not in {"agent_id", "span_id", "dump_id"}:
+                    existing[key] = value
+            path.write_text(json.dumps(existing, ensure_ascii=False, default=str, indent=2))
+    return written
+
+
+def fetch_clickhouse_dump_events(agent_id: str, *, since_hours: int, limit: int) -> List[Dict[str, Any]]:
+    from benchmarks.logs import (
+        CLICKHOUSE_DATABASE,
+        CLICKHOUSE_ENDPOINT,
+        CLICKHOUSE_PASSWORD,
+        CLICKHOUSE_TABLE,
+        CLICKHOUSE_USER,
+    )
+
+    if not (CLICKHOUSE_ENDPOINT and CLICKHOUSE_USER and CLICKHOUSE_PASSWORD):
+        raise RuntimeError("CLICKHOUSE_ENDPOINT, CLICKHOUSE_USER, and CLICKHOUSE_PASSWORD are required")
+
+    table = f"{CLICKHOUSE_DATABASE}.{CLICKHOUSE_TABLE}"
+    query = f"""
+SELECT raw
+FROM {table}
+WHERE ingested_at >= now64(3) - toIntervalHour({{since_hours:UInt32}})
+  AND raw LIKE '%llm.context.dump%'
+  AND raw LIKE concat('%', {{agent_id:String}}, '%')
+ORDER BY ingested_at ASC
+LIMIT {{limit:UInt32}}
+FORMAT JSONEachRow
+"""
+    params = {
+        "param_since_hours": str(since_hours),
+        "param_agent_id": agent_id,
+        "param_limit": str(limit),
+    }
+    with httpx.Client(timeout=30) as client:
+        resp = client.post(
+            CLICKHOUSE_ENDPOINT,
+            params=params,
+            content=query,
+            auth=(CLICKHOUSE_USER, CLICKHOUSE_PASSWORD),
+        )
+    if resp.status_code != 200:
+        raise RuntimeError(f"ClickHouse API {resp.status_code}: {resp.text[:300]}")
+
+    events: List[Dict[str, Any]] = []
+    for line in resp.text.splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        raw = row.get("raw")
+        if not isinstance(raw, str):
+            continue
+        event = _parse_fly_raw_message(raw)
+        if event and event.get("event") in {"llm.context.dumped", "llm.context.dump_updated"}:
+            events.append(event)
+    return events
 
 
 def render_content(content: Any) -> str:
@@ -123,7 +255,15 @@ def main() -> int:
     ap.add_argument("--span", default=None, help="Filter by span_id")
     ap.add_argument("--iter", type=int, default=None, help="Only print the N-th dump (1-indexed) after filtering")
     ap.add_argument("--list", action="store_true", help="One-line summary per dump, no body")
+    ap.add_argument("--from-clickhouse", action="store_true", help="Fetch prod dump events from ClickHouse first")
+    ap.add_argument("--since-hours", type=int, default=168, help="ClickHouse lookback window")
+    ap.add_argument("--limit", type=int, default=1000, help="Max ClickHouse dump rows to fetch")
     args = ap.parse_args()
+
+    if args.from_clickhouse:
+        events = fetch_clickhouse_dump_events(args.agent_id, since_hours=args.since_hours, limit=args.limit)
+        count = materialize_dump_events(args.agent_id, events)
+        print(f"Materialized {count} dump(s) from ClickHouse into {DUMP_DIR / args.agent_id}", file=sys.stderr)
 
     dumps = find_dumps(args.agent_id)
     if not dumps:

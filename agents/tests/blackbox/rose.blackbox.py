@@ -2723,6 +2723,73 @@ async def test_client_direct_auth_stall_falls_through_immediately():
     assert any(c.kind == "content" and c.data.get("text") == "fallback" for c in chunks)
 
 
+async def test_client_reproduces_rotated_gpt_direct_auth_deadline():
+    """Fast local repro for the prod explore stall pattern.
+
+    The prod run waited 90s for TTFT, fetched a fresh compute token, then
+    exhausted the 170s rose.complete deadline on the rotated direct GPT route.
+    This shrinks those timers to milliseconds while exercising the same client
+    branches: direct GPT stall -> fetch_fresh -> rotated direct GPT stall ->
+    RoseDeadlineError.
+    """
+
+    attempts: list[str] = []
+    fetches: list[str] = []
+
+    async def silent_gpt_auth(**kwargs):
+        attempts.append(kwargs["auth"].token)
+        await asyncio.sleep(1.0)
+        yield StreamChunk(kind="metadata", data={"actual_model": "gpt-5.4-gpt"})
+
+    async def fetch_fresh(user_id: str):
+        fetches.append(user_id)
+        return GptAuthContext(
+            token="fresh-token",
+            source="user",
+            user_id=user_id,
+            account_id="acct_123",
+            fetch_fresh=None,
+            max_rotations=1,
+        )
+
+    async def silent_waterfall(**kwargs):
+        await asyncio.sleep(1.0)
+        yield StreamChunk(kind="metadata", data={"actual_model": "fallback"})
+
+    auth = GptAuthContext(
+        token="stale-token",
+        source="user",
+        user_id="user-123",
+        account_id="acct_123",
+        fetch_fresh=fetch_fresh,
+        max_rotations=1,
+    )
+    client = RoseClient(openrouter_key="ork-x")
+
+    raised = False
+    with (
+        patch("providers.rose.client._try_gpt_auth", silent_gpt_auth),
+        patch("providers.rose.client.waterfall_complete", silent_waterfall),
+    ):
+        try:
+            async for _ in client.complete(
+                pool="rose-1-lite",
+                messages=[{"role": "user", "content": "repro final explore synthesis"}],
+                gpt_auth=auth,
+                call_site="explore_agent",
+                deadline_s=0.06,
+                ttft_timeout_s=0.05,
+                idle_timeout_s=0.5,
+            ):
+                pass
+        except RoseDeadlineError as exc:
+            raised = "deadline exceeded" in str(exc)
+
+    assert raised, "expected the shrunken prod stall to exhaust rose.complete deadline"
+    assert attempts == ["stale-token", "fresh-token"]
+    assert fetches == ["user-123"]
+
+
 async def test_client_does_not_use_supplied_gpt_auth_as_fallback():
     """If Claude direct auth fails, a separate supplied GPT auth is not fallback.
 
@@ -3834,6 +3901,10 @@ async def run_all_tests():
     await r.record_async(
         "client_direct_auth_stall_falls_through",
         test_client_direct_auth_stall_falls_through_immediately,
+    )
+    await r.record_async(
+        "client_rotated_gpt_direct_auth_deadline_repro",
+        test_client_reproduces_rotated_gpt_direct_auth_deadline,
     )
     await r.record_async("client_no_supplied_gpt_fallback", test_client_does_not_use_supplied_gpt_auth_as_fallback)
     await r.record_async(
