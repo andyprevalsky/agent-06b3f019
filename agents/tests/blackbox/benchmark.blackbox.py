@@ -337,6 +337,49 @@ def test_browser_agent_cookie_bundle_bootstrap_can_be_skipped_with_env():
     assert queries == []
 
 
+def test_benchmark_agent_source_override_validates_known_sources():
+    """Benchmark source override accepts only real AgentSource values."""
+    import os
+
+    import pytest
+    import benchmarks.run_benchmark as bench
+
+    original_env = os.environ.get("BENCHMARK_AGENT_SOURCE")
+
+    try:
+        os.environ["BENCHMARK_AGENT_SOURCE"] = "sms"
+        assert bench._benchmark_agent_source_override() == "SMS"
+
+        os.environ["BENCHMARK_AGENT_SOURCE"] = "bogus"
+        with pytest.raises(ValueError):
+            bench._benchmark_agent_source_override()
+    finally:
+        if original_env is None:
+            os.environ.pop("BENCHMARK_AGENT_SOURCE", None)
+        else:
+            os.environ["BENCHMARK_AGENT_SOURCE"] = original_env
+
+
+def test_benchmark_sms_source_override_updates_local_agent_source():
+    """Local SMS notification benchmarks can use normal create-agent auth bootstrap."""
+    import benchmarks.run_benchmark as bench
+
+    queries = []
+    original_run_sql = bench._run_local_victoria_sql
+
+    try:
+        bench._run_local_victoria_sql = lambda sql: queries.append(sql) or "UPDATE 1"
+
+        bench._apply_local_agent_source_override("agent-123", "SMS")
+    finally:
+        bench._run_local_victoria_sql = original_run_sql
+
+    assert len(queries) == 1
+    assert 'UPDATE "Agent"' in queries[0]
+    assert "source = 'SMS'" in queries[0]
+    assert "agent-123" in queries[0]
+
+
 def test_anon_benchmark_mode_disables_saved_auth_material():
     """--anon should force minted auth benches through fresh account credentials."""
     import os

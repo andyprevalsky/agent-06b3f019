@@ -12,6 +12,7 @@ import contextlib
 import random
 import json
 import os
+import re
 import time
 import uuid as uuid_module
 from datetime import timedelta
@@ -477,6 +478,8 @@ async def _call_browser_use_with_rotation(  # noqa: C901
     gpt_token_pool_id: Optional[str],
     browser_use_mode: Optional[str],
     extra_user_messages: Optional[List[Dict[str, str]]] = None,
+    call_site: Optional[str] = None,
+    skip_cache_write: bool = False,
     dump_extra: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Call rose-1-browser-use with in-activity claudeAuth rotation.
@@ -499,7 +502,8 @@ async def _call_browser_use_with_rotation(  # noqa: C901
         dynamic_system_context=dynamic_system_context,
         turn_messages=turn_messages,
         agent_id=agent_id,
-        call_site=f"browser_use_step_{iteration}",
+        call_site=call_site or f"browser_use_step_{iteration}",
+        skip_cache_write=skip_cache_write,
         dump_extra=dump_extra,
     )
 
@@ -707,6 +711,438 @@ def json_dumps_compact(value: Any) -> str:
     import json
 
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
+def _write_lock_notification_prompt(
+    *,
+    approval_type: str,
+    current_url: str,
+    pending_action: Dict[str, Any],
+    write_lock_result: Dict[str, Any],
+    media_candidates: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """Prompt appended only to the forked write-lock notification call."""
+    evidence = {
+        "approval_type": approval_type,
+        "current_url": current_url,
+        "pending_action": pending_action,
+        "write_lock_result": {
+            key: value
+            for key, value in write_lock_result.items()
+            if key not in {"question"}
+        },
+    }
+    if media_candidates:
+        evidence["media_candidates"] = media_candidates[:12]
+    return (
+        "WRITE_LOCK_NOTIFICATION_FORK_REQUEST\n\n"
+        "A write lock was triggered. Call generate_write_lock_notification exactly once using the "
+        "current conversation, browser trajectory, latest page context, and pending action.\n\n"
+        "Do not perform any browser action. Do not continue the task. Do not ask the user for "
+        "approval. Generate structured approval metadata only.\n\n"
+        "Describe the real-world action the user is approving, not the clicked button or DOM "
+        "mechanic. For purchases, include every visible item being bought and set media to exactly one "
+        "image when any product, checkout, or page image is visible; for multiple items, use one "
+        "rendered_summary image if available. For each "
+        "purchase item, use the item key title, not name. Include visible price, quantity, description "
+        "under 80 characters, rating/reviews, seller, delivery details, product image URL, order totals, "
+        "delivery address, and payment method when visible. If Runtime evidence includes media_candidates, use only those "
+        "URLs for media and item image_url, preferring the candidate whose alt or nearby_text best "
+        "matches the purchased item. For payment, never include secrets such as card numbers, CVV, "
+        "passwords, tokens, or one-time codes.\n\n"
+        f"Runtime evidence:\n{json_dumps_compact(evidence)}"
+    )
+
+
+def _format_write_lock_value(label: str, value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return f"{label}: {text}"
+
+
+def _sentence_case_action(action: str) -> str:
+    if not action:
+        return action
+    if action[:2].isupper():
+        return action
+    return action[0].lower() + action[1:]
+
+
+def _render_write_lock_notification_question(
+    notification: Dict[str, Any],
+    *,
+    system_name: str,
+    fallback_question: str,
+) -> str:
+    """Render approval text from structured write-lock metadata."""
+    if not isinstance(notification, dict):
+        return fallback_question
+
+    service = notification.get("service") if isinstance(notification.get("service"), dict) else {}
+    service_name = service.get("name") or service.get("domain") or "the current site"
+    action = _sentence_case_action(str(notification.get("action") or "perform a write action").strip())
+    trigger_type = notification.get("trigger_type")
+
+    lines = [f"**Approval Needed**\n", f"{system_name} wants to {action} on **{service_name}**."]
+
+    if trigger_type == "purchase" and isinstance(notification.get("purchase"), dict):
+        purchase = notification["purchase"]
+        items = purchase.get("items") if isinstance(purchase.get("items"), list) else []
+        if items:
+            lines.append("\n**Items:**")
+            for idx, item in enumerate(items, start=1):
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("title") or "Item").strip()
+                lines.append(f"{idx}. {title}")
+                for label, key in (
+                    ("Price", "price"),
+                    ("Qty", "quantity"),
+                    ("Description", "description"),
+                    ("Rating", "rating"),
+                    ("Reviews", "review_count"),
+                    ("Seller", "seller"),
+                    ("Shipping", "shipping"),
+                ):
+                    formatted = _format_write_lock_value(f"   {label}", item.get(key))
+                    if formatted:
+                        lines.append(formatted)
+        totals = purchase.get("totals") if isinstance(purchase.get("totals"), dict) else {}
+        total_lines = [
+            _format_write_lock_value("Subtotal", totals.get("subtotal")),
+            _format_write_lock_value("Shipping", totals.get("shipping")),
+            _format_write_lock_value("Tax", totals.get("tax")),
+            _format_write_lock_value("Total", totals.get("total")),
+        ]
+        total_lines = [line for line in total_lines if line]
+        if total_lines:
+            lines.append("\n**Totals:**")
+            lines.extend(total_lines)
+        for label, key in (("Payment", "payment_method"), ("Delivery", "delivery_address")):
+            formatted = _format_write_lock_value(label, purchase.get(key))
+            if formatted:
+                lines.append(formatted)
+
+    elif trigger_type == "message" and isinstance(notification.get("message"), dict):
+        message = notification["message"]
+        for label, key in (("To", "to"), ("Cc", "cc"), ("Bcc", "bcc")):
+            value = message.get(key)
+            if isinstance(value, list) and value:
+                lines.append(f"{label}: {', '.join(str(v) for v in value if v)}")
+        subject = _format_write_lock_value("Subject", message.get("subject"))
+        if subject:
+            lines.append(subject)
+        body = str(message.get("body") or "").strip()
+        if body:
+            lines.append(f"\n**Body:**\n{body}")
+
+    elif trigger_type == "social_post" and isinstance(notification.get("social_post"), dict):
+        post = notification["social_post"]
+        for label, key in (("Destination", "destination"), ("Audience", "audience")):
+            formatted = _format_write_lock_value(label, post.get(key))
+            if formatted:
+                lines.append(formatted)
+        body = str(post.get("body") or "").strip()
+        if body:
+            lines.append(f"\n**Post:**\n{body}")
+
+    elif trigger_type == "payment" and isinstance(notification.get("payment"), dict):
+        payment = notification["payment"]
+        for label, key in (("Merchant", "merchant"), ("Amount", "amount"), ("Purpose", "purpose")):
+            formatted = _format_write_lock_value(label, payment.get(key))
+            if formatted:
+                lines.append(formatted)
+        fields = payment.get("fields")
+        if isinstance(fields, list) and fields:
+            lines.append(f"Fields: {', '.join(str(field) for field in fields if field)}")
+        lines.append("\nPayment secrets are not included in this message.")
+
+    elif trigger_type == "generic_write" and isinstance(notification.get("generic_write"), dict):
+        operation = notification["generic_write"]
+        for label, key in (("Action", "label"), ("Target", "target"), ("Change", "payload_summary")):
+            formatted = _format_write_lock_value(label, operation.get(key))
+            if formatted:
+                lines.append(formatted)
+
+    media = notification.get("media")
+    if isinstance(media, list) and media:
+        first = next((m for m in media if isinstance(m, dict) and m.get("url")), None)
+        if first:
+            lines.append(f"\n**Image:** {first['url']}")
+
+    url = service.get("url")
+    if url:
+        lines.append(f"\n**Page:** {url}")
+
+    return "\n".join(lines)
+
+
+def _notification_media_url(notification: Dict[str, Any]) -> Optional[str]:
+    media = notification.get("media")
+    if isinstance(media, list):
+        for entry in media:
+            if not isinstance(entry, dict):
+                continue
+            url = entry.get("url")
+            if isinstance(url, str) and url.strip():
+                return url.strip()
+    return None
+
+
+def _first_purchase_item_image_url(notification: Dict[str, Any]) -> Optional[str]:
+    purchase = notification.get("purchase")
+    if not isinstance(purchase, dict):
+        return None
+    items = purchase.get("items")
+    if not isinstance(items, list):
+        return None
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        image_url = item.get("image_url")
+        if isinstance(image_url, str) and image_url.strip():
+            return image_url.strip()
+    return None
+
+
+def _text_tokens(value: Any) -> set[str]:
+    text = str(value or "").lower()
+    tokens = set(re.findall(r"[a-z0-9]+", text))
+    return {
+        token
+        for token in tokens
+        if len(token) > 2
+        and token
+        not in {
+            "the",
+            "and",
+            "for",
+            "with",
+            "one",
+            "size",
+            "from",
+            "your",
+            "item",
+            "product",
+        }
+    }
+
+
+def _media_candidate_url_score(url: str, bounds: Dict[str, Any]) -> int:
+    lower = url.lower()
+    width = int(bounds.get("width") or 0)
+    height = int(bounds.get("height") or 0)
+    area = width * height
+    score = 0
+    if "/images/i/" in lower:
+        score += 25
+    if re.search(r"\._[^/]*(?:ac|aa|sx|sy|ul|ux|uy)\d+", lower):
+        score += 30
+    size_match = re.search(r"\._[^/]*(?:ac|aa|sx|sy|ul|ux|uy)(\d+)", lower)
+    if size_match:
+        score += min(int(size_match.group(1)), 1000) // 20
+    if lower.endswith((".jpg", ".jpeg", ".webp")):
+        score += 25
+    if lower.endswith(".png"):
+        score -= 5
+    if area and area < 32 * 32:
+        score -= 40
+    if any(marker in lower for marker in ("cardart", "logo", "sprite", "icon")):
+        score -= 35
+    return score
+
+
+def _best_media_candidate_for_purchase(
+    notification: Dict[str, Any],
+    browser_state: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    candidates = browser_state.get("media_candidates")
+    if not isinstance(candidates, list):
+        return None
+    purchase = notification.get("purchase")
+    items = purchase.get("items") if isinstance(purchase, dict) else []
+    item_text = " ".join(
+        str(item.get("title") or item.get("description") or "")
+        for item in items
+        if isinstance(item, dict)
+    )
+    item_tokens = _text_tokens(item_text)
+
+    best: Optional[Dict[str, Any]] = None
+    best_score = -1
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        url = candidate.get("url")
+        if not isinstance(url, str) or not url.strip():
+            continue
+        candidate_text = f"{candidate.get('alt') or ''} {candidate.get('nearby_text') or ''}"
+        overlap = len(item_tokens & _text_tokens(candidate_text))
+        score = overlap * 10
+        if candidate.get("visible"):
+            score += 3
+        if "media-amazon" in url or "ssl-images-amazon" in url:
+            score += 2
+        bounds = candidate.get("bounds") if isinstance(candidate.get("bounds"), dict) else {}
+        score += _media_candidate_url_score(url, bounds)
+        score += min(int(bounds.get("width") or 0) * int(bounds.get("height") or 0), 10000) // 5000
+        if score > best_score:
+            best = candidate
+            best_score = score
+
+    if not best or best_score <= 0:
+        return None
+    return best
+
+
+def _normalize_write_lock_notification_media(
+    notification: Dict[str, Any],
+    *,
+    browser_state: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Ensure purchase approvals have one renderer image when visual evidence exists."""
+    if notification.get("trigger_type") != "purchase":
+        return notification
+    if _notification_media_url(notification):
+        return notification
+
+    item_image_url = _first_purchase_item_image_url(notification)
+    if item_image_url:
+        notification["media"] = [
+            {
+                "url": item_image_url,
+                "alt": "Purchase item image",
+                "kind": "product",
+            }
+        ]
+        return notification
+
+    media_candidate = _best_media_candidate_for_purchase(notification, browser_state)
+    if media_candidate:
+        notification["media"] = [
+            {
+                "url": media_candidate["url"].strip(),
+                "alt": media_candidate.get("alt")
+                or media_candidate.get("nearby_text")
+                or "Purchase item image",
+                "kind": "product",
+            }
+        ]
+        purchase = notification.get("purchase")
+        items = purchase.get("items") if isinstance(purchase, dict) else []
+        if len(items) == 1 and isinstance(items[0], dict) and not items[0].get("image_url"):
+            items[0]["image_url"] = media_candidate["url"].strip()
+        return notification
+
+    screenshot = browser_state.get("screenshot")
+    if isinstance(screenshot, str) and screenshot.strip():
+        screenshot_url = (
+            screenshot.strip()
+            if screenshot.strip().startswith("http")
+            else f"data:image/png;base64,{screenshot.strip()}"
+        )
+        notification["media"] = [
+            {
+                "url": screenshot_url,
+                "alt": "Checkout page preview",
+                "kind": "page_preview",
+            }
+        ]
+
+    return notification
+
+
+async def _generate_write_lock_notification(
+    *,
+    rose_client: RoseClient,
+    task_prompt: str,
+    dynamic_system_context: str,
+    browser_turn_messages: List[Dict[str, Any]],
+    browser_state: Dict[str, Any],
+    action_entries: List[Dict[str, Any]],
+    config: Any,
+    user_id: str,
+    agent_id: str,
+    iteration: int,
+    token_state: ClaudeTokenState,
+    gpt_token: Optional[str],
+    gpt_account_id: Optional[str],
+    gpt_token_source: Optional[str],
+    gpt_token_pool_id: Optional[str],
+    browser_use_mode: Optional[str],
+    approval_type: str,
+    current_url: str,
+    pending_action: Dict[str, Any],
+    write_lock_result: Dict[str, Any],
+    system_name: str,
+    fallback_question: str,
+) -> Dict[str, Any]:
+    """Fork browser-use context to generate write-lock approval metadata."""
+    prompt = _write_lock_notification_prompt(
+        approval_type=approval_type,
+        current_url=current_url,
+        pending_action=pending_action,
+        write_lock_result=write_lock_result,
+        media_candidates=browser_state.get("media_candidates"),
+    )
+    fork_result = await _call_browser_use_with_rotation(
+        rose_client=rose_client,
+        task=task_prompt,
+        dynamic_system_context=dynamic_system_context,
+        turn_messages=browser_turn_messages,
+        browser_state=browser_state,
+        action_entries=action_entries,
+        config=config,
+        user_id=user_id,
+        agent_id=agent_id,
+        iteration=iteration,
+        token_state=token_state,
+        gpt_token=gpt_token,
+        gpt_account_id=gpt_account_id,
+        gpt_token_source=gpt_token_source,
+        gpt_token_pool_id=gpt_token_pool_id,
+        browser_use_mode=browser_use_mode,
+        extra_user_messages=[{"role": "user", "content": prompt}],
+        call_site=f"write_lock_notification_fork_{iteration}",
+        skip_cache_write=True,
+        dump_extra={
+            "write_lock_notification_fork": True,
+            "approval_type": approval_type,
+            "current_url": current_url,
+        },
+    )
+    action = fork_result.get("action") or {}
+    if action.get("action") != "generate_write_lock_notification":
+        raise ValueError(
+            "write-lock notification fork did not call generate_write_lock_notification; "
+            f"got {action.get('action')!r}"
+        )
+    from browser_tools.schemas import GenerateWriteLockNotificationTool
+
+    validated_notification = GenerateWriteLockNotificationTool.model_validate(
+        {"tool": "generate_write_lock_notification", **dict(action.get("params") or {})}
+    )
+    notification = validated_notification.model_dump(exclude={"tool"}, exclude_none=True)
+    notification = _normalize_write_lock_notification_media(
+        notification,
+        browser_state=browser_state,
+    )
+    question = _render_write_lock_notification_question(
+        notification,
+        system_name=system_name,
+        fallback_question=fallback_question,
+    )
+    return {
+        "notification": notification,
+        "question": question,
+        "usage": fork_result.get("usage") or {},
+        "actual_model": fork_result.get("actual_model"),
+        "request_id": fork_result.get("request_id"),
+        "mode": fork_result.get("mode"),
+    }
 
 
 # ========================================
@@ -2673,6 +3109,67 @@ Based on this feedback, I need to continue working on the task and address the i
                     "question",
                     f"{system_name} wants to perform a write action. Approve?",
                 )
+                write_lock_notification = None
+                write_lock_notification_usage = None
+
+                try:
+                    activity.heartbeat(
+                        f"Step {iteration} - generating write lock notification"
+                    )
+                    notification_result = await _generate_write_lock_notification(
+                        rose_client=rose_client,
+                        task_prompt=task_prompt,
+                        dynamic_system_context=dynamic_system_context,
+                        browser_turn_messages=browser_turn_messages,
+                        browser_state=browser_state,
+                        action_entries=action_entries,
+                        config=config,
+                        user_id=user_id,
+                        agent_id=agent_id,
+                        iteration=iteration,
+                        token_state=token_state,
+                        gpt_token=gpt_token,
+                        gpt_account_id=gpt_account_id,
+                        gpt_token_source=gpt_token_source,
+                        gpt_token_pool_id=gpt_token_pool_id,
+                        browser_use_mode=browser_use_mode,
+                        approval_type=approval_type,
+                        current_url=current_url,
+                        pending_action=unified_action,
+                        write_lock_result=result,
+                        system_name=system_name,
+                        fallback_question=question,
+                    )
+                    write_lock_notification = notification_result.get("notification")
+                    write_lock_notification_usage = {
+                        "usage": notification_result.get("usage", {}),
+                        "actual_model": notification_result.get("actual_model"),
+                        "request_id": notification_result.get("request_id"),
+                        "mode": notification_result.get("mode"),
+                    }
+                    question = notification_result.get("question") or question
+                    logger.info(
+                        "Generated write lock notification metadata",
+                        approval_type=approval_type,
+                        request_id=write_lock_notification_usage.get("request_id"),
+                        mode=write_lock_notification_usage.get("mode"),
+                        cache_read_input_tokens=(
+                            write_lock_notification_usage.get("usage", {}).get(
+                                "cache_read_input_tokens", 0
+                            )
+                        ),
+                        cache_creation_input_tokens=(
+                            write_lock_notification_usage.get("usage", {}).get(
+                                "cache_creation_input_tokens", 0
+                            )
+                        ),
+                    )
+                except Exception as notification_error:
+                    logger.warning(
+                        "Failed to generate write lock notification metadata; using fallback question",
+                        approval_type=approval_type,
+                        error=str(notification_error),
+                    )
 
                 logger.info(
                     "Write lock approval required - returning to workflow",
@@ -2700,6 +3197,8 @@ Based on this feedback, I need to continue working on the task and address the i
                     "question": question,
                     "current_url": current_url,
                     "pending_action": unified_action,
+                    "write_lock_notification": write_lock_notification,
+                    "write_lock_notification_usage": write_lock_notification_usage,
                     "write_lock_approvals": write_lock_approvals,
                     "step_count": iteration,
                     "session_id": session_id,
@@ -3225,6 +3724,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 "toolApproval": True,
                                 "writePermission": True,
                                 "url": result.get("current_url", ""),
+                                "writeLockNotification": result.get(
+                                    "write_lock_notification"
+                                ),
+                                "writeLockNotificationUsage": result.get(
+                                    "write_lock_notification_usage"
+                                ),
                             },
                         )
 

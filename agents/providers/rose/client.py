@@ -1011,6 +1011,7 @@ class RoseClient:
         request_id: Optional[str] = None,
         call_site: str = "browser_use",
         deadline_s: float = _DEFAULT_DEADLINE_S,
+        skip_cache_write: bool = False,
         dump_extra: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Run one browser-use step through the rose-1-browser-use pool.
@@ -1065,6 +1066,7 @@ class RoseClient:
             request_id=request_id,
             call_site=call_site,
             deadline_s=deadline_s,
+            skip_cache_write=skip_cache_write,
             dump_context=False,
         )
 
