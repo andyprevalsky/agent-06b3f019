@@ -465,6 +465,17 @@ async def execute_action(  # noqa: C901
                 config=config,
             )
 
+        elif action_name == "generate_write_lock_notification":
+            return {
+                "success": False,
+                "error": (
+                    "Tool call error: generate_write_lock_notification is only for write-lock "
+                    "notification forks. Do not call this tool unless the latest user message "
+                    'explicitly contains the keyword "WRITE_LOCK_NOTIFICATION_FORK_REQUEST". '
+                    "Continue the browser task with a normal browser action."
+                ),
+            }
+
         else:
             return {"success": False, "error": f"Unknown action: {action_name}"}
 

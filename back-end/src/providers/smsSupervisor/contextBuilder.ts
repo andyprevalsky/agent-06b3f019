@@ -77,7 +77,6 @@ interface AttentionRequestContext {
   imageUrl: string | null;
   metadata: Prisma.JsonValue;
   createdAt: Date;
-  shortcode?: string;
 }
 
 interface VisibleMessage {
@@ -166,12 +165,6 @@ export async function buildSmsContext(userId: string): Promise<SmsContext> {
     durationMs: Date.now() - startTime,
   });
 
-  // Fetch shortcodes for attention requests that need them
-  const shortcodeMap = await fetchShortcodesForRequests(
-    attentionRequests.map((r) => r.id),
-    userId
-  );
-
   // STATIC: identity, user profile (rarely changes), tool guidance, response
   // format, and custom system prompt — cacheable up to the boundary marker.
   const userContextSection = formatUserContext(user);
@@ -185,7 +178,7 @@ export async function buildSmsContext(userId: string): Promise<SmsContext> {
   // these change on every SMS and live in a trailing user message so they
   // don't invalidate the cached system prefix.
   const hierarchySection = formatAgentHierarchy(rootAgents);
-  const attentionSection = formatAttentionRequests(attentionRequests, shortcodeMap);
+  const attentionSection = formatAttentionRequests(attentionRequests);
   const messagesSection = formatVisibleMessages(visibleMessages, rootAgents);
   const contextUserMessage = assembleContextUserMessage({
     hierarchySection,
@@ -394,27 +387,6 @@ async function fetchVisibleMessages(agentIds: string[]): Promise<VisibleMessage[
   return visible;
 }
 
-async function fetchShortcodesForRequests(
-  requestIds: string[],
-  userId: string
-): Promise<Map<string, string>> {
-  if (requestIds.length === 0) return new Map();
-
-  const shortcodes = await prisma.smsShortcode.findMany({
-    where: {
-      attentionRequestId: { in: requestIds },
-      userId,
-      expiresAt: { gt: new Date() },
-    },
-    select: {
-      attentionRequestId: true,
-      code: true,
-    },
-  });
-
-  return new Map(shortcodes.map((s) => [s.attentionRequestId, s.code]));
-}
-
 // ============================================
 // Formatters
 // ============================================
@@ -467,10 +439,7 @@ function formatStatus(status: string, progress: number): string {
   }
 }
 
-function formatAttentionRequests(
-  requests: AttentionRequestContext[],
-  shortcodeMap: Map<string, string>
-): string {
+function formatAttentionRequests(requests: AttentionRequestContext[]): string {
   if (requests.length === 0) {
     return '# Pending Requests\n\nNo pending requests.';
   }
@@ -480,7 +449,6 @@ function formatAttentionRequests(
   for (let i = 0; i < requests.length; i++) {
     const r = requests[i];
     const agentPrefix = r.agentId.substring(0, 6);
-    const shortcode = shortcodeMap.get(r.id);
     const questionPreview =
       r.question.length > 200 ? r.question.substring(0, 197) + '...' : r.question;
 
@@ -489,12 +457,7 @@ function formatAttentionRequests(
     const isApproval = metadata?.requestUserApproval || metadata?.writePermission;
     const type = isApproval ? 'APPROVAL' : 'QUESTION';
 
-    let line = `${i + 1}. [${agentPrefix}] ${type}: "${questionPreview}" (attn_id: ${r.id})`;
-    if (shortcode) {
-      line += `, Approve ${shortcode}`;
-    }
-
-    lines.push(line);
+    lines.push(`${i + 1}. [${agentPrefix}] ${type}: "${questionPreview}" (attn_id: ${r.id})`);
   }
 
   return lines.join('\n');
@@ -617,7 +580,7 @@ Agent Hierarchy
 - Indentation dictates the hierarchy of tasks — indented agents are spawned from their parent agent at the previous indentation level.
 
 Pending Requests
-- Open requests from agents — write-lock approvals or clarifying questions. Approvals include a shortcode the user can text to approve.
+- Open requests from agents — write-lock approvals or clarifying questions. Use attn_id values internally for reply_to_agent calls; never show them to the user.
 
 Recent Activity
 - Messages your agents have sent to the user and their completion summaries.
@@ -628,11 +591,10 @@ Think step by step. Use tools as needed to gather information or take actions. W
 
 Parallelize as many tool calls per turn as reasonable so you respond quickly with grounded, accurate answers.
 
-- Use the agent ID prefix [XXXXXX] when referring to specific agents
-- If your reply does not address a pending write-lock approval shown in the state block, briefly mention its shortcode (e.g. "Approve 7K2F9 when ready")
+- Never expose agent IDs, agent prefixes, attention request IDs, or shortcodes to the user. Use internal IDs only for tool calls.
+- Resolve natural approval language against pending requests. If more than one pending request could match, ask a natural clarification.
 - Be conversational but concise, this is texting, not email
 - If the user's message is ambiguous about which agent, ask for clarification
-- The trace URL for any agent is: https://roselabs.ai?agent-id={full_agent_id}
 - Calling attempt_completion both sends your SMS and commits every write-tool call you made this turn. There is no separate commit step and no retraction after you call it.
 
 Only call tools when the user's intent is clear. Don't guess.`;

@@ -4003,6 +4003,43 @@ async def test_execute_action_unknown_action():
     assert "Unknown action" in out["error"]
 
 
+async def test_execute_action_generate_write_lock_notification_is_internal_only():
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom = MagicMock()
+    dom.session = MagicMock()
+    dom.selector_map = {}
+    ah = MagicMock()
+
+    out = await execute_action(
+        dom,
+        ah,
+        {
+            "action": "generate_write_lock_notification",
+            "params": {
+                "trigger_type": "purchase",
+                "action": "buy item",
+                "service": {
+                    "name": "Amazon",
+                    "domain": "amazon.com",
+                    "url": "https://www.amazon.com/dp/example",
+                },
+                "media": [],
+                "purchase": {"items": [], "totals": None},
+                "payment": None,
+                "message": None,
+                "social_post": None,
+                "generic_write": None,
+            },
+        },
+    )
+
+    assert out["success"] is False
+    assert "Tool call error" in out["error"]
+    assert "WRITE_LOCK_NOTIFICATION_FORK_REQUEST" in out["error"]
+    assert "Continue the browser task with a normal browser action." in out["error"]
+
+
 async def test_execute_action_dropdown_options_missing_element():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
@@ -5786,6 +5823,350 @@ def test_get_manager_singleton():
     assert m1.tool_name == "spawn_browser_agent"
 
 
+def test_render_write_lock_notification_question_uses_purchase_metadata():
+    from domains.spawn_browser_agent_v3.handler import _render_write_lock_notification_question
+
+    question = _render_write_lock_notification_question(
+        {
+            "trigger_type": "purchase",
+            "action": "Buy one black Carhartt beanie",
+            "service": {
+                "name": "Amazon",
+                "domain": "amazon.com",
+                "url": "https://www.amazon.com/checkout/spc",
+            },
+            "media": [
+                {
+                    "url": "https://m.media-amazon.com/images/I/beanie.jpg",
+                    "alt": "Carhartt beanie",
+                    "kind": "product",
+                }
+            ],
+            "purchase": {
+                "items": [
+                    {
+                        "title": "Carhartt Mens Knit Cuffed Beanie Hat, Black",
+                        "price": "$19.99",
+                        "quantity": "1",
+                        "seller": "Amazon.com",
+                        "shipping": "FREE Two Day delivery, arriving Saturday, Jun 27, 2026",
+                    }
+                ],
+                "totals": {
+                    "subtotal": "$19.99",
+                    "shipping": "$0.00",
+                    "tax": "$1.72",
+                    "total": "$21.71",
+                },
+                "payment_method": "Visa ending in 9857",
+                "delivery_address": "Aman Gottumukkala, 88 HOWARD ST APT 1413, SAN FRANCISCO, CA 94105",
+            },
+        },
+        system_name="Rose",
+        fallback_question="fallback question",
+    )
+
+    assert "Rose wants to buy one black Carhartt beanie on **Amazon**." in question
+    assert "Carhartt Mens Knit Cuffed Beanie Hat, Black" in question
+    assert "Price: $19.99" in question
+    assert "Seller: Amazon.com" in question
+    assert "Shipping: FREE Two Day delivery" in question
+    assert "Total: $21.71" in question
+    assert "Payment: Visa ending in 9857" in question
+    assert "Delivery: Aman Gottumukkala" in question
+    assert "**Image:** https://m.media-amazon.com/images/I/beanie.jpg" in question
+    assert "fallback question" not in question
+    assert "click" not in question.lower()
+
+
+def test_normalize_write_lock_notification_media_promotes_item_image():
+    from domains.spawn_browser_agent_v3.handler import (
+        _normalize_write_lock_notification_media,
+    )
+
+    notification = {
+        "trigger_type": "purchase",
+        "media": [],
+        "purchase": {
+            "items": [
+                {
+                    "title": "Carhartt beanie",
+                    "image_url": "https://m.media-amazon.com/images/I/beanie.jpg",
+                }
+            ]
+        },
+    }
+
+    out = _normalize_write_lock_notification_media(notification, browser_state={})
+
+    assert out["media"] == [
+        {
+            "url": "https://m.media-amazon.com/images/I/beanie.jpg",
+            "alt": "Purchase item image",
+            "kind": "product",
+        }
+    ]
+
+
+def test_extract_media_candidates_from_dom_state_keeps_image_urls_outside_llm_dom_text():
+    from browser_tools.dom_service import _extract_media_candidates_from_dom_state
+
+    class Node(SimpleNamespace):
+        def get_all_children_text(self, max_depth=-1):
+            return getattr(self, "text", "")
+
+    product = Node(
+        tag_name="img",
+        attributes={
+            "alt": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+            "data-a-dynamic-image": json.dumps(
+                {
+                    "https://m.media-amazon.com/images/I/71yRzB6pknL._AC_SX679_.jpg": [
+                        679,
+                        679,
+                    ]
+                }
+            ),
+        },
+        is_visible=True,
+        parent_node=Node(
+            tag_name="div",
+            attributes={},
+            text="Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US $19.99 Ships from Amazon.com",
+        ),
+    )
+    logo = Node(
+        tag_name="img",
+        attributes={"alt": "Amazon logo", "src": "/logo.svg"},
+        is_visible=True,
+        parent_node=None,
+    )
+    root = SimpleNamespace(
+        original_node=Node(tag_name="body", attributes={}, is_visible=True),
+        should_display=True,
+        children=[
+            SimpleNamespace(original_node=logo, should_display=True, children=[]),
+            SimpleNamespace(original_node=product, should_display=True, children=[]),
+        ],
+    )
+
+    candidates = _extract_media_candidates_from_dom_state(
+        SimpleNamespace(_root=root),
+        page_url="https://www.amazon.com/checkout/spc",
+    )
+
+    assert candidates[0]["url"] == "https://m.media-amazon.com/images/I/71yRzB6pknL._AC_SX679_.jpg"
+    assert candidates[0]["alt"] == "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US"
+    assert "Ships from Amazon.com" in candidates[0]["nearby_text"]
+    assert all(not candidate["url"].endswith(".svg") for candidate in candidates)
+
+
+def test_extract_media_candidates_prefers_checkout_product_jpeg_over_small_art():
+    from browser_tools.dom_service import _extract_media_candidates_from_dom_state
+
+    class Node(SimpleNamespace):
+        def get_all_children_text(self, max_depth=-1):
+            return getattr(self, "text", "")
+
+    nodes = [
+        Node(
+            tag_name="img",
+            attributes={"src": "https://m.media-amazon.com/images/I/01+F-I5m3TL.png"},
+            is_visible=True,
+            parent_node=Node(tag_name="div", attributes={}, text="As fast as 3 hours"),
+            snapshot_node=SimpleNamespace(
+                clientRects=SimpleNamespace(x=0, y=0, width=12, height=16)
+            ),
+        ),
+        Node(
+            tag_name="img",
+            attributes={
+                "alt": "Prime Store Card",
+                "src": "https://m.media-amazon.com/images/G/01/credit/PLCC/CardArt/prime-storecard_default_marketing_edge1._CB583933359_.png",
+            },
+            is_visible=True,
+            parent_node=Node(tag_name="div", attributes={}, text="Prime Store Card"),
+        ),
+        Node(
+            tag_name="img",
+            attributes={
+                "src": "https://m.media-amazon.com/images/I/81W5UTTEaYL._AC_AA540_.jpg",
+            },
+            is_visible=True,
+            parent_node=Node(tag_name="div", attributes={}, text=""),
+        ),
+    ]
+    root = SimpleNamespace(
+        original_node=Node(tag_name="body", attributes={}, is_visible=True),
+        should_display=True,
+        children=[
+            SimpleNamespace(original_node=node, should_display=True, children=[])
+            for node in nodes
+        ],
+    )
+
+    candidates = _extract_media_candidates_from_dom_state(
+        SimpleNamespace(_root=root),
+        page_url="https://www.amazon.com/checkout/spc",
+    )
+
+    assert candidates[0]["url"] == "https://m.media-amazon.com/images/I/81W5UTTEaYL._AC_AA540_.jpg"
+
+
+def test_write_lock_notification_prompt_includes_media_candidates():
+    from domains.spawn_browser_agent_v3.handler import _write_lock_notification_prompt
+
+    prompt = _write_lock_notification_prompt(
+        approval_type="purchase",
+        current_url="https://www.amazon.com/checkout/spc",
+        pending_action={"action": "click", "params": {"index": 123}},
+        write_lock_result={"status": "needs_write_approval"},
+        media_candidates=[
+            {
+                "url": "https://m.media-amazon.com/images/I/beanie.jpg",
+                "alt": "Carhartt beanie",
+                "nearby_text": "Carhartt beanie $19.99",
+            }
+        ],
+    )
+
+    assert "media_candidates" in prompt
+    assert "https://m.media-amazon.com/images/I/beanie.jpg" in prompt
+    assert "use only those URLs for media and item image_url" in prompt
+    assert "description under 80 characters" in prompt
+
+
+def test_normalize_write_lock_notification_media_uses_matching_media_candidate():
+    from domains.spawn_browser_agent_v3.handler import (
+        _normalize_write_lock_notification_media,
+    )
+
+    notification = {
+        "trigger_type": "purchase",
+        "media": [],
+        "purchase": {
+            "items": [
+                {
+                    "title": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+                    "price": "$19.99",
+                }
+            ]
+        },
+    }
+
+    out = _normalize_write_lock_notification_media(
+        notification,
+        browser_state={
+            "media_candidates": [
+                {
+                    "url": "https://example.com/logo.jpg",
+                    "alt": "Amazon logo",
+                    "nearby_text": "Amazon",
+                    "visible": True,
+                },
+                {
+                    "url": "https://m.media-amazon.com/images/I/beanie.jpg",
+                    "alt": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+                    "nearby_text": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US $19.99",
+                    "visible": True,
+                },
+            ]
+        },
+    )
+
+    assert out["media"] == [
+        {
+            "url": "https://m.media-amazon.com/images/I/beanie.jpg",
+            "alt": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+            "kind": "product",
+        }
+    ]
+    assert out["purchase"]["items"][0]["image_url"] == "https://m.media-amazon.com/images/I/beanie.jpg"
+
+
+def test_normalize_write_lock_notification_media_prefers_product_jpeg_without_text_match():
+    from domains.spawn_browser_agent_v3.handler import (
+        _normalize_write_lock_notification_media,
+    )
+
+    notification = {
+        "trigger_type": "purchase",
+        "media": [],
+        "purchase": {
+            "items": [
+                {
+                    "title": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+                    "price": "$19.99",
+                }
+            ]
+        },
+    }
+
+    out = _normalize_write_lock_notification_media(
+        notification,
+        browser_state={
+            "media_candidates": [
+                {
+                    "url": "https://m.media-amazon.com/images/I/01+F-I5m3TL.png",
+                    "alt": None,
+                    "nearby_text": "As fast as 3 hours",
+                    "visible": True,
+                    "bounds": {"x": 0, "y": 0, "width": 12, "height": 16},
+                },
+                {
+                    "url": "https://m.media-amazon.com/images/G/01/credit/PLCC/CardArt/prime-storecard_default_marketing_edge1._CB583933359_.png",
+                    "alt": "Prime Store Card",
+                    "nearby_text": "Prime Store Card",
+                    "visible": True,
+                    "bounds": {"x": 0, "y": 0, "width": 0, "height": 0},
+                },
+                {
+                    "url": "https://m.media-amazon.com/images/I/81W5UTTEaYL._AC_AA135_.jpg",
+                    "alt": None,
+                    "nearby_text": "",
+                    "visible": True,
+                    "bounds": {"x": 0, "y": 0, "width": 0, "height": 0},
+                },
+                {
+                    "url": "https://m.media-amazon.com/images/I/81W5UTTEaYL._AC_AA540_.jpg",
+                    "alt": None,
+                    "nearby_text": "",
+                    "visible": True,
+                    "bounds": {"x": 0, "y": 0, "width": 0, "height": 0},
+                },
+            ]
+        },
+    )
+
+    assert out["media"][0]["url"] == "https://m.media-amazon.com/images/I/81W5UTTEaYL._AC_AA540_.jpg"
+    assert out["purchase"]["items"][0]["image_url"] == "https://m.media-amazon.com/images/I/81W5UTTEaYL._AC_AA540_.jpg"
+
+
+def test_normalize_write_lock_notification_media_uses_checkout_screenshot():
+    from domains.spawn_browser_agent_v3.handler import (
+        _normalize_write_lock_notification_media,
+    )
+
+    notification = {
+        "trigger_type": "purchase",
+        "media": [],
+        "purchase": {"items": [{"title": "Carhartt beanie"}]},
+    }
+
+    out = _normalize_write_lock_notification_media(
+        notification,
+        browser_state={"screenshot": "AAAA"},
+    )
+
+    assert out["media"] == [
+        {
+            "url": "data:image/png;base64,AAAA",
+            "alt": "Checkout page preview",
+            "kind": "page_preview",
+        }
+    ]
+
+
 def test_botsigged_diagnostics_enabled_requires_flag_and_domain():
     from domains.spawn_browser_agent_v3.handler import _botsigged_diagnostics_enabled
 
@@ -7197,6 +7578,10 @@ async def run_all_tests():
     )
     await r.record_async("execute_action_unknown", test_execute_action_unknown_action)
     await r.record_async(
+        "execute_action_write_lock_notification_internal",
+        test_execute_action_generate_write_lock_notification_is_internal_only,
+    )
+    await r.record_async(
         "execute_action_dropdown_options_no_el",
         test_execute_action_dropdown_options_missing_element,
     )
@@ -7492,6 +7877,38 @@ async def run_all_tests():
     # handler statics
     r.record("claude_token_state_defaults", test_claude_token_state_defaults)
     r.record("claude_token_state_mutation", test_claude_token_state_mutation)
+    r.record(
+        "render_write_lock_notification_purchase",
+        test_render_write_lock_notification_question_uses_purchase_metadata,
+    )
+    r.record(
+        "normalize_write_lock_notification_media_item_image",
+        test_normalize_write_lock_notification_media_promotes_item_image,
+    )
+    r.record(
+        "extract_media_candidates_from_dom_state",
+        test_extract_media_candidates_from_dom_state_keeps_image_urls_outside_llm_dom_text,
+    )
+    r.record(
+        "extract_media_candidates_prefers_product_jpeg",
+        test_extract_media_candidates_prefers_checkout_product_jpeg_over_small_art,
+    )
+    r.record(
+        "write_lock_notification_prompt_media_candidates",
+        test_write_lock_notification_prompt_includes_media_candidates,
+    )
+    r.record(
+        "normalize_write_lock_notification_media_candidate",
+        test_normalize_write_lock_notification_media_uses_matching_media_candidate,
+    )
+    r.record(
+        "normalize_write_lock_notification_media_product_jpeg",
+        test_normalize_write_lock_notification_media_prefers_product_jpeg_without_text_match,
+    )
+    r.record(
+        "normalize_write_lock_notification_media_screenshot",
+        test_normalize_write_lock_notification_media_uses_checkout_screenshot,
+    )
     r.record(
         "botsigged_diagnostics_enabled",
         test_botsigged_diagnostics_enabled_requires_flag_and_domain,

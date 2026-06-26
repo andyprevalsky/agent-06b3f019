@@ -3,10 +3,10 @@
 # backend, agents worker, front-end, mac-app). Preserves the Postgres container
 # and its volume so subsequent runs can reuse them.
 #
-# Scope: only kills PIDs whose command line OR current working directory sits
-# inside $PWD, so sibling worktrees are untouched. Walks each root's descendant
-# tree (via pgrep -P) so orphaned grandchildren (node under a dead bash, etc.)
-# are reached.
+# Scope: only kills PIDs tied to $PWD by manifest PID, current working
+# directory, or listener ownership on this workspace's service ports. Sibling
+# worktrees are untouched. Walks descendants and worktree-local ancestors so
+# orphaned grandchildren and wrapper shells are reached.
 #
 # Usage:
 #   scripts/kill-services.sh            # kill
@@ -15,12 +15,13 @@
 # No `set -e`/`pipefail`: ps|head|cut races can SIGPIPE benignly and we don't
 # want that to abort the teardown mid-list.
 
-WORKTREE_DIR="$PWD"
+WORKTREE_DIR="$(pwd -P)"
 DRY=0
 [[ "${1:-}" == "--dry-run" ]] && DRY=1
 
 SELF=$$
 SELF_PPID=$PPID
+MANIFEST="$WORKTREE_DIR/.context/services.json"
 
 # Emit this pid + all descendants, one per line.
 pid_tree() {
@@ -31,26 +32,163 @@ pid_tree() {
     done
 }
 
-# A pid belongs to us if its CWD (or any ancestor's CWD) is under $WORKTREE_DIR.
-# We check the pid's own CWD via lsof; the patterns below already filter to ones
-# whose command line mentions the worktree path, so this is a belt-and-braces
-# check against pgrep matching a sibling worktree's scripts/run.sh.
-cwd_matches() {
+cwd_of() {
     local pid=$1
+    lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1
+}
+
+cmd_of() {
+    ps -p "$1" -o command= 2>/dev/null | head -1
+}
+
+cwd_matches() {
     local cwd
-    cwd=$(lsof -p "$pid" -Fn 2>/dev/null | awk '/^fcwd$/ {getline; sub(/^n/,""); print; exit}')
-    # If we can't read cwd (permission / race), accept the match — the pattern
-    # already scoped it.
-    [[ -z "$cwd" || "$cwd" == "$WORKTREE_DIR"* ]]
+    cwd=$(cwd_of "$1")
+    [[ "$cwd" == "$WORKTREE_DIR" || "$cwd" == "$WORKTREE_DIR"/* ]]
+}
+
+is_self_or_parent() {
+    [[ "$1" == "$SELF" || "$1" == "$SELF_PPID" ]]
+}
+
+is_self_ancestor() {
+    local candidate=$1
+    local current=$SELF
+    while true; do
+        local ppid
+        ppid=$(ps -p "$current" -o ppid= 2>/dev/null | tr -d ' ') || return 1
+        [ -z "$ppid" ] || [ "$ppid" = "0" ] || [ "$ppid" = "1" ] && return 1
+        [ "$ppid" = "$candidate" ] && return 0
+        current="$ppid"
+    done
+}
+
+is_protected_process() {
+    is_self_or_parent "$1" || is_self_ancestor "$1"
+}
+
+service_like_process() {
+    local pid=$1
+    local cwd cmd
+    cwd=$(cwd_of "$pid")
+    [[ "$cwd" == "$WORKTREE_DIR" || "$cwd" == "$WORKTREE_DIR"/* ]] || return 1
+
+    cmd=$(cmd_of "$pid")
+    case "$cwd" in
+        "$WORKTREE_DIR/back-end"|"$WORKTREE_DIR/back-end"/*)
+            echo "$cmd" | grep -Eq 'tsx.*src/server\.ts|tsx.*server\.ts|node .*src/server\.ts|npm exec tsx src/server\.ts'
+            return
+            ;;
+        "$WORKTREE_DIR/front-end"|"$WORKTREE_DIR/front-end"/*)
+            echo "$cmd" | grep -Eq '(^|/| )(vite|npm|npx)( |$|/)'
+            return
+            ;;
+        "$WORKTREE_DIR/agents"|"$WORKTREE_DIR/agents"/*)
+            echo "$cmd" | grep -Eq 'worker\.py|run_local_worker|playwright.*/driver|package/cli\.js run-driver'
+            return
+            ;;
+        "$WORKTREE_DIR/mac-app"|"$WORKTREE_DIR/mac-app"/*)
+            echo "$cmd" | grep -Eq 'electron|npm run dev|vite'
+            return
+            ;;
+    esac
+
+    echo "$cmd" | grep -Fq "$WORKTREE_DIR"
+}
+
+manifest_pids() {
+    [ -f "$MANIFEST" ] || return 0
+    python3 - "$MANIFEST" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+
+for pid in [data.get("run_sh_pid"), *[service.get("pid") for service in data.get("services", [])]]:
+    if isinstance(pid, int) and pid > 0:
+        print(pid)
+PY
+}
+
+service_ports() {
+    [ -f "$MANIFEST" ] || return 0
+    python3 - "$MANIFEST" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+
+ports = data.get("ports", {})
+for key in ("backend", "frontend", "health", "mac_app", "sdk_metrics"):
+    value = ports.get(key)
+    if isinstance(value, int) and value > 0:
+        print(value)
+PY
+}
+
+service_dir_cwd_pids() {
+    local dir
+    for dir in "$WORKTREE_DIR/back-end" "$WORKTREE_DIR/front-end" "$WORKTREE_DIR/agents" "$WORKTREE_DIR/mac-app"; do
+        [ -d "$dir" ] || continue
+        lsof -n -w -t -a -d cwd +d "$dir" 2>/dev/null || true
+    done
+}
+
+mark_manifest_stopped() {
+    [ -f "$MANIFEST" ] || return 0
+    python3 - "$MANIFEST" <<'PY' 2>/dev/null || true
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+path = sys.argv[1]
+with open(path) as f:
+    data = json.load(f)
+data["status"] = "stopped"
+data["generated_at"] = datetime.now(timezone.utc).isoformat()
+tmp = f"{path}.tmp"
+with open(tmp, "w") as f:
+    json.dump(data, f, indent=2, sort_keys=True)
+    f.write("\n")
+os.replace(tmp, path)
+PY
+}
+
+add_pid_with_tree_and_ancestors() {
+    local pid=$1
+    is_protected_process "$pid" && return
+    kill -0 "$pid" 2>/dev/null || return
+
+    pid_tree "$pid" >> "$ALL_FILE"
+
+    local current=$pid
+    while true; do
+        local ppid
+        ppid=$(ps -p "$current" -o ppid= 2>/dev/null | tr -d ' ') || return
+        [ -z "$ppid" ] || [ "$ppid" = "0" ] || [ "$ppid" = "1" ] && return
+        is_protected_process "$ppid" && return
+        if cwd_matches "$ppid"; then
+            echo "$ppid" >> "$ALL_FILE"
+            current="$ppid"
+            continue
+        fi
+        return
+    done
 }
 
 ROOTS_FILE=$(mktemp)
 trap 'rm -f "$ROOTS_FILE" "$ALL_FILE"' EXIT
 ALL_FILE=$(mktemp)
 
-# Patterns that identify service roots. run.sh is matched by path fragment +
-# PWD scope. The worktree-prefixed patterns catch grandchildren (node, python,
-# vite) that carry the absolute path in their argv.
+# Manifest PIDs are authoritative when present. They catch wrappers whose argv
+# is generic after cd'ing into a service directory.
+manifest_pids >> "$ROOTS_FILE"
+
+# Patterns that identify service roots. The worktree-prefixed patterns catch
+# grandchildren (node, python, vite) that carry the absolute path in argv.
 for pattern in \
     "scripts/run\.sh" \
     "$WORKTREE_DIR/back-end/src/server\.ts" \
@@ -60,23 +198,43 @@ for pattern in \
     "$WORKTREE_DIR/front-end.*vite" \
     "$WORKTREE_DIR/mac-app/node_modules"; do
     for pid in $(pgrep -f "$pattern" 2>/dev/null); do
-        # Never kill ourselves or our invoking shell
-        [[ "$pid" == "$SELF" || "$pid" == "$SELF_PPID" ]] && continue
+        is_protected_process "$pid" && continue
+        cwd_matches "$pid" || echo "$(cmd_of "$pid")" | grep -Fq "$WORKTREE_DIR" || continue
+        echo "$pid" >> "$ROOTS_FILE"
+    done
+done
+
+for port in $(service_ports); do
+    for pid in $(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null); do
+        is_protected_process "$pid" && continue
         cwd_matches "$pid" || continue
         echo "$pid" >> "$ROOTS_FILE"
     done
 done
 
+# Last-resort cwd sweep for service-shaped processes. This catches leaked
+# children like `python worker.py` or `node ...` whose argv no longer includes
+# the absolute worktree path and whose original run.sh parent is gone.
+while read -r pid; do
+    [ -n "$pid" ] || continue
+    is_protected_process "$pid" && continue
+    service_like_process "$pid" || continue
+    echo "$pid" >> "$ROOTS_FILE"
+done < <(service_dir_cwd_pids | sort -un)
+
 sort -un "$ROOTS_FILE" -o "$ROOTS_FILE"
 
 while read -r pid; do
     [[ -z "$pid" ]] && continue
-    pid_tree "$pid" >> "$ALL_FILE"
+    add_pid_with_tree_and_ancestors "$pid"
 done < "$ROOTS_FILE"
 
 PIDS=$(sort -un "$ALL_FILE" | grep -v "^$SELF$" | grep -v "^$SELF_PPID$" || true)
 
 if [[ -z "$PIDS" ]]; then
+    if [[ $DRY -eq 0 ]]; then
+        mark_manifest_stopped
+    fi
     echo "No services to kill in $WORKTREE_DIR"
     exit 0
 fi
@@ -117,4 +275,19 @@ if [[ -n "$STILL" ]]; then
     echo "⚠️  Survived TERM+KILL:$STILL"
     exit 1
 fi
+
+PORT_SURVIVORS=""
+for port in $(service_ports); do
+    for pid in $(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null); do
+        cwd_matches "$pid" || continue
+        PORT_SURVIVORS="$PORT_SURVIVORS $pid:$port"
+    done
+done
+if [[ -n "$PORT_SURVIVORS" ]]; then
+    echo "⚠️  Worktree listeners survived cleanup:$PORT_SURVIVORS"
+    exit 1
+fi
+
+mark_manifest_stopped
+
 echo "✅ Killed $count service pid(s); DB container untouched"

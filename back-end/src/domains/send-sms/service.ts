@@ -194,7 +194,8 @@ async function dispatchByEventType(
         { id: data.agent_id },
         (payload.question as string | undefined) ?? '',
         (payload.attention_request_id as string | undefined) ?? '',
-        (payload.workflow_id as string | undefined) ?? ''
+        (payload.workflow_id as string | undefined) ?? '',
+        payload.metadata
       );
       break;
 

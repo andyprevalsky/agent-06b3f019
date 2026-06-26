@@ -153,6 +153,54 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
         ),
         "params": {},
     },
+    "generate_write_lock_notification": {
+        "description": (
+            "Internal approval-metadata tool. Never call this tool during normal task execution. "
+            "Only call it when the latest user message contains WRITE_LOCK_NOTIFICATION_FORK_REQUEST. "
+            "When called, describe the real-world action the user is approving, not the clicked button "
+            "or DOM mechanic that triggered the write lock. Do not execute, approve, reject, browse, "
+            "or continue the task."
+        ),
+        "params": {
+            "trigger_type": {
+                "type": "string",
+                "description": "One of: purchase, payment, message, social_post, generic_write",
+                "required": True,
+            },
+            "action": {
+                "type": "string",
+                "description": "User-level action, such as buy items, send email, or enter payment details",
+                "required": True,
+            },
+            "service": {
+                "type": "object",
+                "description": "Service metadata: name, domain, and current URL",
+                "required": True,
+            },
+            "media": {
+                "type": "array",
+                "description": (
+                    "Renderer media. For purchase approvals, provide exactly one image whenever any product, "
+                    "checkout, or page image is visible; use a stitched/rendered summary if multiple items are involved."
+                ),
+            },
+            "purchase": {
+                "type": "object",
+                "description": (
+                    "Purchase details when trigger_type is purchase. Use items[].title for item names, plus "
+                    "visible price, quantity, description under 80 chars, rating, review_count, image_url, seller, shipping, "
+                    "totals, payment_method, and delivery_address when available."
+                ),
+            },
+            "payment": {"type": "object", "description": "Payment details when trigger_type is payment"},
+            "message": {"type": "object", "description": "Outbound message details when trigger_type is message"},
+            "social_post": {"type": "object", "description": "Social post details when trigger_type is social_post"},
+            "generic_write": {
+                "type": "object",
+                "description": "Generic write details when trigger_type is generic_write",
+            },
+        },
+    },
     "screenshot": {
         "description": (
             "Take a screenshot of the visible page viewport. Coordinates in this image match click_coordinates. "
@@ -592,6 +640,7 @@ _VALID_ACTIONS = frozenset({
     # the user for help mid-task. Keep the allowlist in sync with the tool
     # schema or normalize_browser_use_response() will reject it.
     "send_message_to_user", "request_user_assistance_for_authentication",
+    "generate_write_lock_notification",
 })
 
 
@@ -699,6 +748,9 @@ def _normalize_action_params(
     first_action: Dict[str, Any],
     index: Any,
 ) -> Dict[str, Any]:
+    if normalized_action == "generate_write_lock_notification":
+        return dict(params)
+
     out: Dict[str, Any] = {}
 
     if params.get("url"):
