@@ -31,6 +31,9 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+AGENTS_ROOT = REPO_ROOT / "agents"
+if str(AGENTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(AGENTS_ROOT))
 DUMP_DIR = REPO_ROOT / ".llm-dumps"
 SEP = "=" * 100
 SUB = "-" * 100
@@ -91,6 +94,8 @@ def _decode_payload(event: Dict[str, Any]) -> Dict[str, Any]:
 def _dump_path_for_payload(agent_id: str, payload: Dict[str, Any]) -> Path:
     ts_ms = payload.get("ts_ms")
     if not ts_ms:
+        ts_ms = payload.get("ingested_ms")
+    if not ts_ms:
         ts_ms = str(int(datetime.now(timezone.utc).timestamp() * 1000))
     dump_id = _safe_filename_segment(str(payload.get("dump_id") or payload.get("span_id") or "dump"))
     call_site = _safe_filename_segment(str(payload.get("call_site") or "unspecified"))
@@ -142,6 +147,7 @@ def fetch_clickhouse_dump_events(agent_id: str, *, since_hours: int, limit: int)
     table = f"{CLICKHOUSE_DATABASE}.{CLICKHOUSE_TABLE}"
     query = f"""
 SELECT raw
+     , toString(toUnixTimestamp64Milli(ingested_at)) AS ingested_ms
 FROM {table}
 WHERE ingested_at >= now64(3) - toIntervalHour({{since_hours:UInt32}})
   AND raw LIKE '%llm.context.dump%'
@@ -175,6 +181,8 @@ FORMAT JSONEachRow
             continue
         event = _parse_fly_raw_message(raw)
         if event and event.get("event") in {"llm.context.dumped", "llm.context.dump_updated"}:
+            if row.get("ingested_ms"):
+                event["ingested_ms"] = row["ingested_ms"]
             events.append(event)
     return events
 
