@@ -1734,11 +1734,26 @@ class AgentWorkflow:
             model = llm.get("model") or self.model
             provider = llm.get("provider") or model
             effective_call_site = call_site or tool_name or "unknown"
+            cache_read = llm.get("cache_read_input_tokens", 0)
+            cache_write = llm.get("cache_creation_input_tokens", 0)
 
             if isinstance(model, str) and (model.endswith("-claude") or model.endswith("-gpt")):
                 workflow.logger.info(
                     f"💰 $0 cost (direct compute token): actual_model={model}, "
                     f"in={tokens_in}, out={tokens_out}, call_site={effective_call_site}"
+                )
+                usage_items_for_db.append(
+                    {
+                        "type": "llm",
+                        "cost_cents": 0,
+                        "call_site": effective_call_site,
+                        "provider": provider,
+                        "tokens_in": tokens_in,
+                        "tokens_out": tokens_out,
+                        "model": model,
+                        "cache_read_input_tokens": cache_read,
+                        "cache_creation_input_tokens": cache_write,
+                    }
                 )
                 continue
 
@@ -1754,8 +1769,6 @@ class AgentWorkflow:
             output_rate = pricing["output_cents_per_1k"]
 
             # Apply provider-specific cache discounts if cache fields present
-            cache_read = llm.get("cache_read_input_tokens", 0)
-            cache_write = llm.get("cache_creation_input_tokens", 0)
             is_anthropic = model and ("claude" in model.lower() or model.lower().endswith("-claude"))
             cache_read_mult = 0.1 if is_anthropic else 0.25
             cache_write_mult = 1.25 if is_anthropic else 1.0
@@ -1766,22 +1779,23 @@ class AgentWorkflow:
                 + (cache_write * input_rate * cache_write_mult / 1000)
                 + (tokens_out * output_rate / 1000)
             )
+            usage_item = {
+                "type": "llm",
+                "cost_cents": cost_cents,
+                "call_site": effective_call_site,
+                "provider": provider,
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "model": model,
+                "cache_read_input_tokens": cache_read,
+                "cache_creation_input_tokens": cache_write,
+            }
             if cost_cents > 0:
                 total_cost_cents += cost_cents
                 workflow.logger.info(
                     f"💰 LLM cost: +{cost_cents:.2f}c ({provider}, in={tokens_in}, out={tokens_out}, call_site={effective_call_site})"
                 )
-                usage_items_for_db.append(
-                    {
-                        "type": "llm",
-                        "cost_cents": cost_cents,
-                        "call_site": effective_call_site,
-                        "provider": provider,
-                        "tokens_in": tokens_in,
-                        "tokens_out": tokens_out,
-                        "model": model,
-                    }
-                )
+                usage_items_for_db.append(usage_item)
 
         # Process service usage items (pre-calculated costs)
         for svc in usage.get("service", []):
@@ -1805,21 +1819,23 @@ class AgentWorkflow:
             self.own_cost_cents += total_cost_cents
             workflow.logger.info(f"💰 Total own_cost_cents: {self.own_cost_cents}c (+{total_cost_cents}c)")
 
-            # Write to ToolUsage table (if tool_name provided)
-            effective_call_site = call_site or tool_name or "unknown"
-            if tool_name and usage_items_for_db:
-                try:
-                    await workflow.execute_activity(
-                        save_tool_usage,
-                        args=[self.agent_id, self.user_id, effective_call_site, usage_items_for_db],
-                        start_to_close_timeout=timedelta(seconds=15),
-                        retry_policy=RetryPolicy(maximum_attempts=2),
-                    )
-                except Exception as e:
-                    workflow.logger.warning(f"Failed to save tool usage to DB: {e}")
-
             # Signal parent for hierarchical cost relay
             await self._update_cost_and_signal_parent()
+
+        # Write to ToolUsage table (if tool_name provided). This intentionally
+        # includes zero-cost direct-token LLM rows so cache/accounting diagnostics
+        # can see the same LLM calls that worker logs emit.
+        effective_call_site = call_site or tool_name or "unknown"
+        if tool_name and usage_items_for_db:
+            try:
+                await workflow.execute_activity(
+                    save_tool_usage,
+                    args=[self.agent_id, self.user_id, effective_call_site, usage_items_for_db],
+                    start_to_close_timeout=timedelta(seconds=15),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+            except Exception as e:
+                workflow.logger.warning(f"Failed to save tool usage to DB: {e}")
 
     async def _get_model_pricing(self, model: str) -> Optional[Dict[str, float]]:
         """Get pricing for a model, using cache or fetching if needed."""

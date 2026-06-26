@@ -11,7 +11,7 @@ One entry point, `RoseClient.complete()`, that:
   3. Falls through to the pool's waterfall on any typed direct-token error
      (`RoseInvalidRequest`, `RoseStallError`, `RoseServerError`,
      `RoseAuthError`, `RoseRateLimitError`) **before first content**.
-  4. Enforces a top-level deadline (default 120s).
+  4. Enforces a top-level deadline (default 590s).
   5. Heartbeats every 10s so a long stream doesn't drop its Temporal
      activity.
 
@@ -69,11 +69,11 @@ from providers.rose.waterfall import waterfall_complete
 
 logger = structlog.get_logger()
 
-# Wall-clock cap for the whole streaming call. Sits just under the 180s
-# Temporal start_to_close for call_llm_activity (PLAN/EXECUTE). Raw-wire
-# repros show 150k Anthropic contexts completing at 91-113s; 170s gives
-# headroom without bleeding into the activity-kill window.
-_DEFAULT_DEADLINE_S = 170.0
+# Wall-clock cap for the whole streaming call. Sits under the Temporal
+# start_to_close for call_llm_activity so Rose can fail cleanly before the
+# activity is killed. This budget covers the complete direct-auth/fallback
+# waterfall, not a single provider attempt.
+_DEFAULT_DEADLINE_S = 590.0
 # TTFT: Anthropic 150k cache-warm contexts TTFB at 6-15s; 45s was sufficient
 # there. But Codex Responses API on gpt-5.5 with large explore-agent contexts
 # (network metadata + 200-contact rollup + tool results) regularly TTFBs at
@@ -88,6 +88,7 @@ _DEFAULT_TTFT_TIMEOUT_S = 90.0
 # while still catching half-closed connections.
 _DEFAULT_IDLE_TIMEOUT_S: Optional[float] = 120.0
 _HEARTBEAT_INTERVAL_S = 10.0
+_STALL_TOKEN_COOLDOWN_S = 10 * 60
 
 # Errors from claude_auth that mean "try the waterfall next" — as long as
 # they fire before the first non-metadata chunk reaches the caller.
@@ -226,6 +227,68 @@ def _compute_token_payload(auth: ComputeAuthContext) -> Dict[str, Any]:
         "source": auth.source,
         "poolTokenId": auth.pool_token_id,
     }
+
+
+async def _mark_direct_auth_stalled(
+    auth: ComputeAuthContext,
+    *,
+    request_id: str,
+    agent_id: Optional[str],
+    call_site: Optional[str],
+) -> None:
+    """Temporarily back off a compute token that produced no first token."""
+    if auth.mark_rate_limited is None:
+        logger.warning(
+            "rose.complete.direct_auth.stall_cooldown_unavailable",
+            request_id=request_id,
+            agent_id=agent_id,
+            call_site=call_site,
+            token_type=auth.token_type,
+            source=auth.source,
+            pool_token_id=auth.pool_token_id,
+        )
+        return
+    try:
+        ok = await auth.mark_rate_limited(
+            auth,
+            _STALL_TOKEN_COOLDOWN_S,
+            None,
+            "stall",
+        )
+        if ok:
+            logger.info(
+                "rose.complete.direct_auth.stall_cooldown_marked",
+                request_id=request_id,
+                agent_id=agent_id,
+                call_site=call_site,
+                token_type=auth.token_type,
+                source=auth.source,
+                pool_token_id=auth.pool_token_id,
+                cooldown_seconds=_STALL_TOKEN_COOLDOWN_S,
+            )
+        else:
+            logger.warning(
+                "rose.complete.direct_auth.stall_cooldown_not_marked",
+                request_id=request_id,
+                agent_id=agent_id,
+                call_site=call_site,
+                token_type=auth.token_type,
+                source=auth.source,
+                pool_token_id=auth.pool_token_id,
+                cooldown_seconds=_STALL_TOKEN_COOLDOWN_S,
+            )
+    except Exception as exc:
+        logger.warning(
+            "rose.complete.direct_auth.stall_cooldown_failed",
+            request_id=request_id,
+            agent_id=agent_id,
+            call_site=call_site,
+            token_type=auth.token_type,
+            source=auth.source,
+            pool_token_id=auth.pool_token_id,
+            cooldown_seconds=_STALL_TOKEN_COOLDOWN_S,
+            error=str(exc),
+        )
 
 
 def _safe_heartbeat(message: str) -> None:
@@ -847,9 +910,16 @@ class RoseClient:
                     rotations=direct_rotations,
                     stall_retries=stall_retry_idx,
                 )
+                if token_error == "stall":
+                    await _mark_direct_auth_stalled(
+                        direct_auth,
+                        request_id=rid,
+                        agent_id=agent_id,
+                        call_site=call_site,
+                    )
 
                 # Stalls are rotation-eligible immediately: cold-start jitter
-                # is absorbed by the 45s TTFT, and Anthropic's batched-response
+                # is absorbed by the 90s TTFT, and Anthropic's batched-response
                 # silences are absorbed by the 120s idle window. A stall here
                 # means the token/route itself is unhealthy, so rotate.
                 can_rotate = (

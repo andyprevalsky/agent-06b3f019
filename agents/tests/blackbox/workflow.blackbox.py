@@ -1700,15 +1700,21 @@ async def test_workflow_track_usage_direct_compute_token_is_zero_cost():
                     "tokens_out": 539,
                     "model": "gpt-5.4-gpt",
                     "provider": "Explore Agent",
-                    "cache_read_input_tokens": 0,
-                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 8576,
+                    "cache_creation_input_tokens": 7984,
                 }
             ]
         }
         await wf._track_usage(usage, tool_name="spawn_sub_agent", call_site="explore_agent")
         assert wf.own_cost_cents == 0.0
         activity_names = [c[0] for c in fake.activity_calls]
-        assert "save_tool_usage" not in activity_names
+        assert "save_tool_usage" in activity_names
+        save_call = next(c for c in fake.activity_calls if c[0] == "save_tool_usage")
+        saved_item = save_call[1][3][0]
+        assert saved_item["cost_cents"] == 0
+        assert saved_item["model"] == "gpt-5.4-gpt"
+        assert saved_item["cache_read_input_tokens"] == 8576
+        assert saved_item["cache_creation_input_tokens"] == 7984
     finally:
         _restore_workflow(original)
 
