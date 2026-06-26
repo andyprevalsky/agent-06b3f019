@@ -595,7 +595,7 @@ async def _execute_single_task(
                 # cost is consistently 80-110 s — start-to-close has to clear
                 # 90 s of streaming + post-processing, otherwise Temporal kills
                 # the activity mid-stream and the retry hits the same wall.
-                start_to_close_timeout=timedelta(seconds=180),
+                start_to_close_timeout=timedelta(seconds=600),
                 retry_policy=RetryPolicy(maximum_attempts=2),
                 # Heartbeat-timeout is the per-chunk safety net. The LLM stream
                 # heartbeats every chunk via _safe_heartbeat; a 90 s gap means
@@ -701,7 +701,7 @@ async def _execute_single_task(
                     user_id,
                     user_id,
                 ],
-                start_to_close_timeout=timedelta(seconds=180),
+                start_to_close_timeout=timedelta(seconds=600),
                 retry_policy=RetryPolicy(maximum_attempts=2),
                 heartbeat_timeout=timedelta(seconds=60),
             )

@@ -286,7 +286,7 @@ def _build_claude_auth_context(
     source: Optional[str] = None,
     user_id: Optional[str] = None,
     pool_token_id: Optional[str] = None,
-    max_rotations: int = 3,
+    max_rotations: int = 2,
 ) -> Optional[ClaudeAuthContext]:
     """Build the rotation-capable claudeAuth context RoseClient.complete needs."""
     if not claude_token:
@@ -335,7 +335,7 @@ def _build_gpt_auth_context(
     source: Optional[str] = None,
     user_id: Optional[str] = None,
     pool_token_id: Optional[str] = None,
-    max_rotations: int = 3,
+    max_rotations: int = 2,
 ) -> Optional[GptAuthContext]:
     """Build the gptAuth context RoseClient.complete needs."""
     if not gpt_token:
@@ -382,7 +382,7 @@ def _build_compute_auth_context(
     result: Dict[str, Any],
     user_id: str,
     *,
-    max_rotations: int = 3,
+    max_rotations: int = 2,
 ) -> Optional[ComputeAuthContext]:
     """Build a direct auth context from the unified compute-token endpoint."""
     token = result.get("accessToken")

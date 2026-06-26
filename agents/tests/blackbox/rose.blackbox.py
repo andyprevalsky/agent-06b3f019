@@ -2723,6 +2723,78 @@ async def test_client_direct_auth_stall_falls_through_immediately():
     assert any(c.kind == "content" and c.data.get("text") == "fallback" for c in chunks)
 
 
+async def test_client_direct_auth_stall_marks_token_before_rotation():
+    """A TTFT stall backs the compute token off before fetching a replacement."""
+    events: list[str] = []
+    marked: list[tuple[str, int, str | None]] = []
+    fetches: list[str] = []
+
+    async def mark_rate_limited(ctx, cooldown_seconds, rate_limited_until=None, failure_reason=None):
+        events.append("mark")
+        marked.append((ctx.token, cooldown_seconds, failure_reason))
+        return True
+
+    async def fetch_fresh(user_id: str):
+        events.append("fetch")
+        fetches.append(user_id)
+        return GptAuthContext(
+            token="fresh-token",
+            source="user",
+            user_id=user_id,
+            account_id="acct_123",
+            mark_rate_limited=mark_rate_limited,
+            fetch_fresh=None,
+            max_rotations=1,
+        )
+
+    async def first_token_stalls_then_fresh_succeeds(**kwargs):
+        auth = kwargs["auth"]
+        if auth.token == "stale-token":
+            await asyncio.sleep(1.0)
+            yield StreamChunk(kind="metadata", data={"actual_model": "gpt-5.4-gpt"})
+            return
+        yield StreamChunk(kind="metadata", data={"actual_model": "gpt-5.4-gpt", "pool_name": "gpt-token"})
+        yield StreamChunk(kind="content", data={"text": "fresh ok"})
+        yield StreamChunk(
+            kind="usage",
+            data={
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "actual_model": "gpt-5.4-gpt",
+                "finish_reason": "stop",
+            },
+        )
+        yield StreamChunk(kind="done", data={})
+
+    auth = GptAuthContext(
+        token="stale-token",
+        source="user",
+        user_id="user-123",
+        account_id="acct_123",
+        mark_rate_limited=mark_rate_limited,
+        fetch_fresh=fetch_fresh,
+        max_rotations=1,
+    )
+    client = RoseClient(openrouter_key="ork-x")
+    with patch("providers.rose.client._try_gpt_auth", first_token_stalls_then_fresh_succeeds):
+        chunks = await _drain(
+            client.complete(
+                pool="rose-1-lite",
+                messages=[{"role": "user", "content": "hi"}],
+                gpt_auth=auth,
+                call_site="test-stall-cooldown",
+                deadline_s=2.0,
+                ttft_timeout_s=0.01,
+                idle_timeout_s=0.5,
+            )
+        )
+
+    assert events == ["mark", "fetch"]
+    assert marked == [("stale-token", 600, "stall")]
+    assert fetches == ["user-123"]
+    assert any(c.kind == "content" and c.data.get("text") == "fresh ok" for c in chunks)
+
+
 async def test_client_reproduces_rotated_gpt_direct_auth_deadline():
     """Fast local repro for the prod explore stall pattern.
 
@@ -3901,6 +3973,10 @@ async def run_all_tests():
     await r.record_async(
         "client_direct_auth_stall_falls_through",
         test_client_direct_auth_stall_falls_through_immediately,
+    )
+    await r.record_async(
+        "client_direct_auth_stall_marks_token",
+        test_client_direct_auth_stall_marks_token_before_rotation,
     )
     await r.record_async(
         "client_rotated_gpt_direct_auth_deadline_repro",

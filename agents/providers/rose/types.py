@@ -105,7 +105,7 @@ class ComputeAuthContext:
 
     # Per-request rotation budget — caps how many tokens we burn before giving
     # up on direct compute-token routing and falling through to waterfall.
-    max_rotations: int = 3
+    max_rotations: int = 2
 
 
 class ClaudeAuthContext(ComputeAuthContext):
@@ -123,7 +123,7 @@ class ClaudeAuthContext(ComputeAuthContext):
         pool_token_id: Optional[str] = None,
         mark_rate_limited: Optional[MarkRateLimitedFn] = None,
         fetch_fresh: Optional[FetchFreshTokenFn] = None,
-        max_rotations: int = 3,
+        max_rotations: int = 2,
     ) -> None:
         super().__init__(
             token_type="claude",
@@ -150,7 +150,7 @@ class GptAuthContext(ComputeAuthContext):
         pool_token_id: Optional[str] = None,
         mark_rate_limited: Optional[MarkRateLimitedFn] = None,
         fetch_fresh: Optional[FetchFreshTokenFn] = None,
-        max_rotations: int = 3,
+        max_rotations: int = 2,
     ) -> None:
         super().__init__(
             token_type="gpt",

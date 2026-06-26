@@ -749,7 +749,7 @@ async def run_agent(  # noqa: C901
                         user_id,
                         user_id,
                     ],
-                    start_to_close_timeout=timedelta(seconds=180),
+                    start_to_close_timeout=timedelta(seconds=600),
                     retry_policy=RetryPolicy(maximum_attempts=3),
                     heartbeat_timeout=timedelta(seconds=60),
                 )
