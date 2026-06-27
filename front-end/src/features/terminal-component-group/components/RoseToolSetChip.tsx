@@ -16,7 +16,7 @@
  */
 
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { TOOL_ICONS, isX402Tool, x402IconSrc } from '@/lib/toolIcons';
+import { TOOL_ICONS } from '@/lib/toolIcons';
 import { useState } from 'react';
 import ClaudeIcon from '@/assets/claude-color.svg';
 
@@ -25,7 +25,6 @@ interface RoseTool {
   displayName: string;
   description: string;
   desktopOnly?: boolean;
-  link?: string;
 }
 
 const ROSE_SYSTEM_TOOLS: RoseTool[] = [
@@ -34,13 +33,6 @@ const ROSE_SYSTEM_TOOLS: RoseTool[] = [
     displayName: 'Spawn Agent',
     description:
       'Spawn autonomous agents: explore (research), browser (web tasks), code (coding), or general-purpose agents for complex delegation. Unified tool for all agent types.',
-  },
-  {
-    name: 'x402',
-    displayName: 'x402',
-    description:
-      'Rose agents can search for and use any service in the x402 Bazaar to execute a myriad of complex tasks.',
-    link: 'https://www.x402.org/ecosystem?category=services-endpoints',
   },
   {
     name: 'claude_code',
@@ -97,19 +89,10 @@ const ROSE_SYSTEM_TOOLS: RoseTool[] = [
     description: 'Comprehensive multi-step research analyzing hundreds of sources.',
   },
   {
-    name: 'monitor',
-    displayName: 'Monitor',
-    description: 'Track the web for material changes relevant to a query on schedule.',
-  },
-  {
-    name: 'send_message_to_user',
-    displayName: 'Message User (PLAN)',
-    description: 'Share the plan or request clarifications directly from the user.',
-  },
-  {
-    name: 'wait_seconds',
-    displayName: 'Wait',
-    description: 'Pause execution for a specified number of seconds.',
+    name: 'wait_for',
+    displayName: 'Wait For',
+    description:
+      'Pause until a timestamp or repeatedly check a natural-language condition with explore agents. Fast Mode replays recorded waits instead of waiting in real time.',
   },
   {
     name: 'send_sms_as_user',
@@ -120,15 +103,6 @@ const ROSE_SYSTEM_TOOLS: RoseTool[] = [
 ];
 
 function ToolIcon({ name }: { name: string }) {
-  if (isX402Tool(name)) {
-    return (
-      <img
-        src={x402IconSrc}
-        alt="x402"
-        className="h-4 w-4 opacity-50 dark:invert dark:opacity-60"
-      />
-    );
-  }
   if (name === 'claude_code') {
     return <img src={ClaudeIcon} alt="Claude" className="h-4 w-4" />;
   }
@@ -161,17 +135,6 @@ function ToolRow({ tool }: { tool: RoseTool }) {
             onClick={(e) => e.stopPropagation()}
           >
             Download for Mac
-          </a>
-        )}
-        {tool.link && (
-          <a
-            href={tool.link}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-block mt-2 text-[10px] px-2 py-1 rounded bg-gradient-to-r from-[#FE7503]/10 via-[#E062CC]/10 to-[#7A6BEC]/10 hover:from-[#FE7503]/20 hover:via-[#E062CC]/20 hover:to-[#7A6BEC]/20 text-foreground font-medium transition-colors"
-            onClick={(e) => e.stopPropagation()}
-          >
-            View x402 Ecosystem →
           </a>
         )}
       </div>

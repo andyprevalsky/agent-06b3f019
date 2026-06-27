@@ -17,6 +17,7 @@ import { createMessage } from '../messages';
 import { callRouterLlm, RouterDecision, type ChatLlmUsage } from './routerLlm';
 import { callGeneratorLlm } from './generatorLlm';
 import { executeWebSearch } from './chatTools';
+import { agentFastMode } from '../fastCacheStore';
 import { callWithChatComputeRotation, fetchChatComputeAuth } from './computeRotation';
 import {
   broadcastToolEvent,
@@ -201,8 +202,15 @@ export async function handleChatMessage(config: {
       },
     });
 
-    // Execute search
-    const searchResult = await executeWebSearch(decision.query);
+    // Execute search. Backend chat mode does not go through the Python
+    // web_search_activity, so it has to pass Fast Mode context explicitly.
+    const fastMode = await agentFastMode(config.agentId);
+    const searchResult = await executeWebSearch(
+      decision.query,
+      fastMode.goal,
+      fastMode.enabled,
+      fastMode.writeEnabled
+    );
 
     // Save tool result as TOOL message using shared helper
     // createMessage() auto-broadcasts INSERT event to frontend
@@ -341,6 +349,7 @@ async function startTemporalWorkflowForChat(
     },
     startPhase, // 'plan' or 'execute' - determines whether to skip PLAN phase
     priceLimitCents: agent.priceLimitCents,
+    fastModeCacheEnabled: agent.fastModeCacheEnabled,
   });
 
   // Update agent with workflow ID

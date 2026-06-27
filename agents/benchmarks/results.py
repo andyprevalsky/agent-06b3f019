@@ -24,6 +24,7 @@ class TaskResult:
     cache_read_input_tokens: int = 0
     cache_creation_input_tokens: int = 0
     cache_hit_pct: float = 0.0
+    fast_mode_cache_enabled: bool = False
     context_violations: List[dict] = field(default_factory=list)  # [{rule, severity, message}]
     logs: Optional[dict] = None  # {messages, backend_logs, worker_logs, research_logs}
 
@@ -114,18 +115,21 @@ class BenchmarkRun:
         for r in self.task_results:
             if not r.passed or r.status == "SKIPPED":
                 continue
-            try:
-                record_pass(
-                    task_name=r.name,
-                    duration_seconds=r.duration_seconds,
-                    cost_cents=r.cost_cents,
-                    agent_id=r.agent_id,
-                    timestamp=self.timestamp,
-                )
-            except Exception as e:
-                print(f"⚠️  _record_history failed for {r.name} ({r.agent_id}) (non-fatal): {e}")
-            if record_span_history_from_logs and r.logs:
+            if r.fast_mode_cache_enabled:
+                print(f"    Timeout history skipped for {r.name}: fast mode cache was enabled")
+            else:
                 try:
+                    record_pass(
+                        task_name=r.name,
+                        duration_seconds=r.duration_seconds,
+                        cost_cents=r.cost_cents,
+                        agent_id=r.agent_id,
+                        timestamp=self.timestamp,
+                    )
+                except Exception as e:
+                    print(f"⚠️  _record_history failed for {r.name} ({r.agent_id}) (non-fatal): {e}")
+            try:
+                if record_span_history_from_logs and r.logs:
                     count = record_span_history_from_logs(
                         agent_id=r.agent_id,
                         logs=r.logs,
@@ -136,8 +140,8 @@ class BenchmarkRun:
                     )
                     if count:
                         print(f"    Span history recorded: {count} spans for {r.name}")
-                except Exception as e:
-                    print(f"⚠️  span-history recording failed for {r.name} ({r.agent_id}) (non-fatal): {e}")
+            except Exception as e:
+                print(f"⚠️  span-history recording failed for {r.name} ({r.agent_id}) (non-fatal): {e}")
 
     @staticmethod
     def load(path: str) -> "BenchmarkRun":

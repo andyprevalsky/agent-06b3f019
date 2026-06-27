@@ -146,6 +146,7 @@ async def populate_tool_params(
         skip_cache_write=True,
         call_site=CALL_SITE,
         claude_token=claude_token,
+        agent_id=agent_id,  # lets Fast Mode auto-resolve the cache context
     )
 
     tool_calls: list[dict[str, Any]] = []

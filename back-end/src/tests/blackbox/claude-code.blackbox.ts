@@ -403,6 +403,11 @@ const OAUTH_META = {
   poolTokenId: 'p1',
 } as unknown as Parameters<typeof resolveClaudeCodeAuthEnvs>[0];
 
+const OAUTH_ENVELOPE_META = {
+  ...OAUTH_META,
+  credentialMode: 'oauth_envelope',
+} as unknown as Parameters<typeof resolveClaudeCodeAuthEnvs>[0];
+
 function testResolveAuthEnvs_oauthPreferred() {
   const envs = resolveClaudeCodeAuthEnvs(OAUTH_META, 'sk-ant-api03-key', false);
   assert(
@@ -411,6 +416,16 @@ function testResolveAuthEnvs_oauthPreferred() {
   );
   assert(envs.CLAUDE_CODE_CREDENTIALS === 'encrypted-envelope', 'credentials envelope set');
   assert(envs.ANTHROPIC_API_KEY === undefined, 'api-key NOT used when OAuth credential present');
+}
+
+function testResolveAuthEnvs_oauthEnvelopeAlsoSetsToken() {
+  const envs = resolveClaudeCodeAuthEnvs(OAUTH_ENVELOPE_META, 'sk-ant-api03-key', false);
+  assert(
+    envs.CLAUDE_CODE_OAUTH_TOKEN === 'sk-ant-oat01-xxx',
+    'OAuth token set even when full credentials envelope is present'
+  );
+  assert(envs.CLAUDE_CODE_CREDENTIALS === 'encrypted-envelope', 'credentials envelope kept');
+  assert(envs.ANTHROPIC_API_KEY === undefined, 'api-key NOT used when OAuth envelope present');
 }
 
 function testResolveAuthEnvs_apiKeyFallback() {
@@ -1215,6 +1230,10 @@ async function runAll() {
     {
       name: 'authEnvs -- OAuth credential preferred',
       fn: async () => testResolveAuthEnvs_oauthPreferred(),
+    },
+    {
+      name: 'authEnvs -- OAuth envelope also sets token',
+      fn: async () => testResolveAuthEnvs_oauthEnvelopeAlsoSetsToken(),
     },
     {
       name: 'authEnvs -- api-key fallback when no OAuth',

@@ -32,6 +32,8 @@ from helpers.messages import stream_browser_cursor
 from helpers.model_pricing import get_model_pricing_with_fallback
 from helpers.tracing import span, traced
 from loop.activity_helper import call_temporal_activity_from_activity
+from providers.fast_cache.browser_use_cache import cached_browser_decision
+from providers.fast_cache.context import write_through_enabled_for_user
 from providers.rose import ClaudeAuthContext, GptAuthContext, RoseClient
 from providers.rose.browser_use import build_browser_state_message_content
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
@@ -103,6 +105,17 @@ logger = structlog.get_logger()
 
 
 _FALSE_ENV_VALUES = {"0", "false", "no", "off", "disabled"}
+_BROWSER_REPLAY_TARGET_ATTRS = (
+    "id",
+    "name",
+    "type",
+    "role",
+    "aria-label",
+    "placeholder",
+    "title",
+    "href",
+    "value",
+)
 
 
 def _env_enabled(name: str, default: bool = True) -> bool:
@@ -116,6 +129,130 @@ def _botsigged_diagnostics_enabled(start_url: str) -> bool:
     if not _env_enabled("BROWSER_AGENT_BOTSIGGED_DIAGNOSTICS", False):
         return False
     return "botsigged.com" in (start_url or "").lower()
+
+
+def _stable_target_text(value: Any, *, max_length: int = 500) -> str:
+    return " ".join(str(value or "").split())[:max_length]
+
+
+def _browser_element_signature(element: Any, *, index: Any = None) -> Dict[str, Any]:
+    if not element:
+        return {}
+    attrs = getattr(element, "attributes", None) or {}
+    if not isinstance(attrs, dict):
+        attrs = {}
+    tag = (getattr(element, "tag_name", None) or getattr(element, "node_name", "") or "").lower()
+    text = ""
+    try:
+        text = element.get_all_children_text() or ""
+    except Exception:
+        text = getattr(element, "text_content", "") or ""
+    signature: Dict[str, Any] = {
+        "index": index,
+        "tag": tag,
+        "text": _stable_target_text(text),
+        "description": get_element_description(element, max_length=120),
+        "attrs": {
+            key: _stable_target_text(attrs.get(key), max_length=240)
+            for key in _BROWSER_REPLAY_TARGET_ATTRS
+            if attrs.get(key) not in (None, "")
+        },
+    }
+    return {key: value for key, value in signature.items() if value not in (None, "", {})}
+
+
+def _browser_target_score(expected: Dict[str, Any], candidate: Dict[str, Any]) -> int:
+    if not expected or not candidate:
+        return 0
+    score = 0
+    if expected.get("tag") and candidate.get("tag"):
+        score += 6 if expected["tag"] == candidate["tag"] else -8
+    expected_attrs = expected.get("attrs") if isinstance(expected.get("attrs"), dict) else {}
+    candidate_attrs = candidate.get("attrs") if isinstance(candidate.get("attrs"), dict) else {}
+    for key, expected_value in expected_attrs.items():
+        candidate_value = candidate_attrs.get(key)
+        if not candidate_value:
+            continue
+        if candidate_value == expected_value:
+            score += 80 if key in {"id", "name", "aria-label"} else 45
+        elif expected_value in candidate_value or candidate_value in expected_value:
+            score += 25
+    expected_text = expected.get("text") or ""
+    candidate_text = candidate.get("text") or ""
+    if expected_text and candidate_text:
+        if expected_text == candidate_text:
+            score += 70
+        elif expected_text in candidate_text or candidate_text in expected_text:
+            score += 40
+        else:
+            expected_tokens = set(expected_text.lower().split())
+            candidate_tokens = set(candidate_text.lower().split())
+            if expected_tokens and candidate_tokens:
+                overlap = len(expected_tokens & candidate_tokens) / max(len(expected_tokens), len(candidate_tokens))
+                score += int(overlap * 35)
+    if expected.get("description") and expected.get("description") == candidate.get("description"):
+        score += 20
+    return score
+
+
+def _attach_browser_replay_target(llm_result: Dict[str, Any], dom_service: Any) -> Dict[str, Any]:
+    action = llm_result.get("action") if isinstance(llm_result, dict) else None
+    if not isinstance(action, dict):
+        return llm_result
+    index = action.get("index")
+    if index is None:
+        return llm_result
+    element = getattr(dom_service, "selector_map", {}).get(index)
+    if not element:
+        return llm_result
+    target = _browser_element_signature(element, index=index)
+    if not target:
+        return llm_result
+    enriched = dict(llm_result)
+    enriched["_fast_cache_browser_target"] = target
+    return enriched
+
+
+def _remap_cached_browser_action_target(
+    unified_action: Dict[str, Any],
+    *,
+    cached_target: Optional[Dict[str, Any]],
+    dom_service: Any,
+) -> Dict[str, Any]:
+    if not isinstance(unified_action, dict) or not cached_target:
+        return unified_action
+    action_index = unified_action.get("index")
+    selector_map = getattr(dom_service, "selector_map", {}) or {}
+    if action_index is not None and action_index in selector_map:
+        current_signature = _browser_element_signature(selector_map[action_index], index=action_index)
+        if _browser_target_score(cached_target, current_signature) >= 35:
+            return unified_action
+
+    best_index = None
+    best_score = 0
+    for candidate_index, element in selector_map.items():
+        score = _browser_target_score(cached_target, _browser_element_signature(element, index=candidate_index))
+        if score > best_score:
+            best_index = candidate_index
+            best_score = score
+
+    if best_index is None or best_score < 35 or best_index == action_index:
+        return unified_action
+
+    remapped = dict(unified_action)
+    remapped["index"] = best_index
+    params = dict(remapped.get("params") or {})
+    if "index" in params:
+        params["index"] = best_index
+        remapped["params"] = params
+    logger.info(
+        "fast_cache.browser_use_replay_target_remapped",
+        old_index=action_index,
+        new_index=best_index,
+        score=best_score,
+        target=cached_target.get("description") or cached_target.get("text"),
+    )
+    return remapped
 
 
 async def _install_botsigged_diagnostics(page: Any, *, agent_id: str, task_id: str) -> None:
@@ -666,6 +803,79 @@ def json_dumps_compact(value: Any) -> str:
 # ========================================
 
 
+async def _install_fast_mode_network_cache(
+    context: Any,
+    goal: str,
+    *,
+    read_enabled: bool = True,
+    write_enabled: bool = True,
+) -> None:
+    """Attach a CDP Fetch route that records/replays the browser's HTTPS responses.
+
+    HIT → fulfill from cache (no internet). MISS → continue live, capture the body
+    via a response listener. Browser session + actions stay live; only network
+    responses are cached. Failures degrade to live (never break the session).
+    """
+    from providers.fast_cache.browser_http import BrowserHttpCache
+
+    http_cache = BrowserHttpCache(goal, read_enabled=read_enabled, write_enabled=write_enabled)
+
+    async def _request_body(req: Any) -> Optional[Any]:
+        post_data = getattr(req, "post_data", None)
+        if callable(post_data):
+            post_data = post_data()
+        if asyncio.iscoroutine(post_data):
+            post_data = await post_data
+        if post_data is not None:
+            return post_data
+        post_data_buffer = getattr(req, "post_data_buffer", None)
+        if callable(post_data_buffer):
+            post_data_buffer = post_data_buffer()
+        if asyncio.iscoroutine(post_data_buffer):
+            post_data_buffer = await post_data_buffer
+        return post_data_buffer
+
+    async def _route(route: Any) -> None:
+        req = route.request
+        try:
+            hit = await http_cache.lookup(
+                req.method,
+                req.url,
+                req.resource_type,
+                dict(req.headers),
+                await _request_body(req),
+            )
+        except Exception:
+            hit = None
+        if hit is not None:
+            try:
+                await route.fulfill(status=hit["status"], headers=hit["headers"], body=hit["body"])
+                return
+            except Exception:
+                pass
+        await route.continue_()
+
+    async def _record(response: Any) -> None:
+        try:
+            req = response.request
+            body = await response.body()
+            await http_cache.record(
+                req.method,
+                req.url,
+                req.resource_type,
+                response.status,
+                dict(response.headers),
+                body,
+                request_headers=dict(req.headers),
+                request_body=await _request_body(req),
+            )
+        except Exception:  # recording is best-effort, never break the page
+            pass
+
+    await context.route("**/*", _route)
+    context.on("response", lambda r: asyncio.ensure_future(_record(r)))
+
+
 @activity.defn
 @traced("spawn_browser_agent_activity_v3")
 async def spawn_browser_agent_activity_v3(  # noqa: C901
@@ -688,6 +898,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
     gpt_account_id: Optional[str] = None,
     gpt_token_source: Optional[str] = None,
     gpt_token_pool_id: Optional[str] = None,
+    fast_mode_cache_enabled: bool = False,
 ) -> Dict[str, Any]:
     """Browser agent activity using browser-use BrowserSession + Rose API."""
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
@@ -965,6 +1176,19 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             _playwright_context = _playwright_browser.contexts[0]
             _input_page = _playwright_context.pages[0]
             _record_timing("parallel.browser.playwright_connect", t)
+
+            # Fast Mode: record/replay the page's HTTPS responses via a CDP Fetch route.
+            # On a hit we fulfill from cache (no internet); on a miss we let the request
+            # go live and capture the response body. Write-through mode records without
+            # fulfilling from cache. The browser session + actions stay live.
+            fast_mode_write_through = write_through_enabled_for_user(user_id)
+            if goal and (fast_mode_cache_enabled or fast_mode_write_through):
+                await _install_fast_mode_network_cache(
+                    _playwright_context,
+                    goal,
+                    read_enabled=fast_mode_cache_enabled,
+                    write_enabled=fast_mode_cache_enabled or fast_mode_write_through,
+                )
 
             if _botsigged_diagnostics_enabled(start_url):
                 await _install_botsigged_diagnostics(_input_page, agent_id=agent_id, task_id=task_id)
@@ -1603,35 +1827,57 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                     )
 
                 activity.heartbeat(f"Step {iteration} - calling Rose API")
-                llm_result = await _call_browser_use_with_rotation(
-                    rose_client=rose_client,
-                    task=task_prompt,
-                    dynamic_system_context=dynamic_system_context,
-                    turn_messages=browser_turn_messages,
-                    browser_state=browser_state,
-                    action_entries=action_entries,
-                    config=config,
-                    user_id=user_id,
-                    agent_id=agent_id,
-                    iteration=iteration,
-                    token_state=token_state,
-                    gpt_token=gpt_token,
-                    gpt_account_id=gpt_account_id,
-                    gpt_token_source=gpt_token_source,
-                    gpt_token_pool_id=gpt_token_pool_id,
-                    browser_use_mode=browser_use_mode,
-                    extra_user_messages=[],
-                    dump_extra=(
-                        {
-                            "browser_recording_manifest_path": str(browser_recorder.output_dir / "manifest.json"),
-                            "browser_recording_path": str(browser_recorder.output_dir / "index.html"),
-                            "browser_recording_task_id": browser_recorder.task_id,
-                            "browser_session_metadata": browser_session_metadata,
-                            "iteration": iteration,
-                        }
-                        if browser_recorder
-                        else {"iteration": iteration}
-                    ),
+                # Fast Mode: replay the recorded decision when the browser request
+                # fingerprint matches. The live browser session still executes the
+                # action — only the LLM "what next" decision is cached.
+                async def _live_browser_decision() -> Dict[str, Any]:
+                    live_result = await _call_browser_use_with_rotation(
+                        rose_client=rose_client,
+                        task=task_prompt,
+                        dynamic_system_context=dynamic_system_context,
+                        turn_messages=browser_turn_messages,
+                        browser_state=browser_state,
+                        action_entries=action_entries,
+                        config=config,
+                        user_id=user_id,
+                        agent_id=agent_id,
+                        iteration=iteration,
+                        token_state=token_state,
+                        gpt_token=gpt_token,
+                        gpt_account_id=gpt_account_id,
+                        gpt_token_source=gpt_token_source,
+                        gpt_token_pool_id=gpt_token_pool_id,
+                        browser_use_mode=browser_use_mode,
+                        extra_user_messages=[],
+                        dump_extra=(
+                            {
+                                "browser_recording_manifest_path": str(browser_recorder.output_dir / "manifest.json"),
+                                "browser_recording_path": str(browser_recorder.output_dir / "index.html"),
+                                "browser_recording_task_id": browser_recorder.task_id,
+                                "browser_session_metadata": browser_session_metadata,
+                                "iteration": iteration,
+                            }
+                            if browser_recorder
+                            else {"iteration": iteration}
+                        ),
+                    )
+                    return _attach_browser_replay_target(live_result, dom_service)
+
+                llm_result = await cached_browser_decision(
+                    enabled=fast_mode_cache_enabled,
+                    goal=goal,
+                    request={
+                        "task": task_prompt,
+                        "dynamic_system_context": dynamic_system_context,
+                        "turn_messages": browser_turn_messages,
+                        "browser_state": browser_state,
+                        "action_entries": action_entries,
+                        "config": {
+                            "browser_use_mode": browser_use_mode,
+                        },
+                    },
+                    call_llm=_live_browser_decision,
+                    write_enabled=fast_mode_cache_enabled or write_through_enabled_for_user(user_id),
                 )
                 # Track waterfall fall-through so subsequent iterations skip claudeAuth.
                 if llm_result.get("mode") != "claude" and browser_use_mode == "claude":
@@ -1668,6 +1914,14 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
 
             # 4. Extract action from response
             unified_action = llm_result.get("action", {})
+            unified_action = _remap_cached_browser_action_target(
+                unified_action,
+                cached_target=llm_result.get("_fast_cache_browser_target"),
+                dom_service=dom_service,
+            )
+            if unified_action is not llm_result.get("action"):
+                llm_result = dict(llm_result)
+                llm_result["action"] = unified_action
             action_name = unified_action.get("action", "")
             thinking = unified_action.get("thinking", "")
 
@@ -1675,7 +1929,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                 reasoning_messages.append(thinking)
                 await save_browser_assistant_message(agent_id, thinking, task_id)
 
-            action_summary.append(f"{action_name}: {str(unified_action)[:500]}")
+            action_summary.append(f"{action_name}: {json.dumps(unified_action, sort_keys=True, default=str)[:500]}")
             if len(action_summary) > 20:
                 action_summary[:] = action_summary[-20:]
             if action_name == "attempt_completion":
@@ -2808,6 +3062,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             active_gpt_account_id,
                             active_gpt_source,
                             active_gpt_pool_id,
+                            getattr(workflow_instance, "fast_mode_cache_enabled", False),
                         ],
                         start_to_close_timeout=timedelta(minutes=ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES),
                         heartbeat_timeout=timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS),

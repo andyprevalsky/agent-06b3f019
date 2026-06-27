@@ -24,9 +24,7 @@ function applyDefaultPhoto(vCard: VCard) {
 }
 
 function buildBaseVCard(name: string): VCard {
-  // vcards-js ships its own types as of 2.11; cast to our explicit local
-  // contract for the subset of fields this domain uses.
-  const vCard = vCardsJS() as unknown as VCard;
+  const vCard = vCardsJS();
   vCard.firstName = name;
   vCard.lastName = '';
   vCard.cellPhone = ROSE_PHONE;

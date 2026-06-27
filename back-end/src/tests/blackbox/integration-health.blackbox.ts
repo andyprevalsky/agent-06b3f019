@@ -10,9 +10,9 @@
  * Each check:
  *   - Reads the real env var from the shell (same one the backend uses)
  *   - Hits a cheap authenticated endpoint on the provider
- *   - FAILS if the env var is missing, or if the response is 401/402/403
- *   - PASSES on any other status (200, 400 validation, 404, 5xx, etc.) —
- *     the contract is "credential is accepted", not "provider is healthy"
+ *   - FAILS if the env var is missing, if the response is 401/402/403,
+ *     or if the provider returns 5xx while probing a smoke-critical endpoint
+ *   - PASSES on other non-auth statuses (200, 400 validation, 404, etc.)
  *
  * Failure messages include the exact env var name to refresh and the provider
  * dashboard URL so the human knows where to go.
@@ -45,6 +45,10 @@ async function fetchWithTimeout(url: string, init: RequestInit): Promise<Respons
 
 function authFailed(status: number): boolean {
   return status === 401 || status === 402 || status === 403;
+}
+
+function providerUnavailable(status: number): boolean {
+  return status >= 500;
 }
 
 function requireEnv(name: string): string {
@@ -84,6 +88,12 @@ async function checkE2B(): Promise<void> {
     const body = await res.text().catch(() => '');
     throw new Error(
       `E2B auth rejected (HTTP ${res.status}). Refresh E2B_API_KEY from https://e2b.dev/dashboard. Body: ${body.slice(0, 200)}`
+    );
+  }
+  if (providerUnavailable(res.status)) {
+    const body = await res.text().catch(() => '');
+    throw new Error(
+      `E2B provisioning API unavailable (HTTP ${res.status}). Sandbox creation cannot run. Body: ${body.slice(0, 200)}`
     );
   }
 }

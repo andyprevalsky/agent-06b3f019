@@ -233,9 +233,19 @@ async def spawn_explore_agent_activity(  # noqa: C901
 
     from loop.activity_helper import call_temporal_activity_from_activity
     from loop.run_agent import run_agent
+    from providers.fast_cache.client import resolve_agent_fast_mode
     from tools.grep import GrepManager
     from tools.web_fetch import WebFetchManager
     from tools.web_search import WebSearchManager
+
+    # Fast Mode is inherited from the parent (explore agents share the parent's
+    # agent_id, which carries the persisted flag). Resolve it once for inner
+    # request caches only. Do not cache the terminal explore result: replaying the
+    # whole tool hides the inner LLM/web_search/web_fetch waterfall from the UI.
+    _explore_fast_mode_enabled, _explore_fast_mode_goal, _explore_fast_mode_write_enabled = (
+        await resolve_agent_fast_mode(agent_id)
+    )
+    _explore_fast_mode_goal = goal or _explore_fast_mode_goal
 
     activity.heartbeat(f"Starting explore agent: {goal[:100]}...")
 
@@ -313,6 +323,9 @@ async def spawn_explore_agent_activity(  # noqa: C901
                 tool_call_id=tool_call_id,
                 agent_id=agent_id,
                 user_id=user_id,
+                fast_mode_cache_enabled=_explore_fast_mode_enabled,
+                fast_mode_goal=_explore_fast_mode_goal,
+                fast_mode_cache_write_enabled=_explore_fast_mode_write_enabled,
             )
         elif tool_name == "web_fetch":
             manager = WebFetchManager()
@@ -329,6 +342,9 @@ async def spawn_explore_agent_activity(  # noqa: C901
                 gpt_account_id=gpt_account_id,
                 gpt_token_source=gpt_token_source,
                 gpt_token_pool_id=gpt_token_pool_id,
+                fast_mode_cache_enabled=_explore_fast_mode_enabled,
+                fast_mode_goal=_explore_fast_mode_goal,
+                fast_mode_cache_write_enabled=_explore_fast_mode_write_enabled,
             )
         elif tool_name == "grep":
             manager = GrepManager()
@@ -407,6 +423,11 @@ async def spawn_explore_agent_activity(  # noqa: C901
         get_gpt_token_pool_id=(lambda: gpt_token_pool_id),
         on_tokens=on_tokens,
         call_site_override="explore_agent",
+        # Fast Mode: key this explore agent by ITS OWN goal (not the shared parent
+        # agent_id), so the N parallel explore agents under one sub-agent don't all
+        # collide on (parent_goal, explore_agent, iteration) and bust each other.
+        fast_mode_cache_enabled=_explore_fast_mode_enabled,
+        goal_text=_explore_fast_mode_goal,
     )
 
     # Defensive fallback: when the explore agent terminates with attempt_completion
@@ -428,7 +449,7 @@ async def spawn_explore_agent_activity(  # noqa: C901
             f"{joined}"
         )
 
-    return {
+    result_payload = {
         "status": "completed" if result.get("status") == "completed" else "error",
         "result": final_response,
         "tokens_in": result.get("tokens_in", 0),
@@ -437,3 +458,4 @@ async def spawn_explore_agent_activity(  # noqa: C901
         "llm_iteration_usage": llm_iteration_usage,
         "tool_call_results": tool_call_results,
     }
+    return result_payload

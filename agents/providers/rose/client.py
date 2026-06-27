@@ -413,7 +413,70 @@ class RoseClient:
             return self._openrouter_key
         return load_config().openrouter.api_key
 
-    async def complete(
+    async def complete(self, **kwargs: Any) -> AsyncIterator[StreamChunk]:
+        """CENTRAL Fast Mode cache notch. EVERY agent LLM call funnels through
+        `RoseClient.complete()`, so record/replay lives here — one place, no gaps,
+        no per-call-site wiring. The cache context is read from the contextvar
+        (position keying, set by the main loop for drift-robustness) or auto-resolved
+        from `agent_id` (content keying, for every other call). On a hit the stored
+        response is re-emitted as a synthetic stream; on a miss the live stream is
+        teed and written when the `done` chunk arrives (never in a finally — see the
+        GeneratorExit note in fast_cache.rose_cache). Allowlisted accounts can
+        write-through with Fast Mode off: no read/replay, but successful calls are
+        recorded for future Fast Mode runs.
+        """
+        from providers.fast_cache import client as _fc
+        from providers.fast_cache.context import current_context
+        from providers.fast_cache.rose_cache import (
+            accumulate_chunk as _fc_accumulate,
+        )
+        from providers.fast_cache.rose_cache import (
+            empty_response as _fc_empty,
+        )
+        from providers.fast_cache.rose_cache import (
+            replay as _fc_replay,
+        )
+        from providers.fast_cache.rose_cache import (
+            request_key_material as _fc_request_key_material,
+        )
+
+        call_site = kwargs.get("call_site", "unspecified")
+        agent_id = kwargs.get("agent_id")
+        messages = kwargs.get("messages")
+
+        ctx = current_context()
+        if ctx is None or not ctx.active:
+            ctx = await _fc.ensure_context(agent_id)
+
+        if ctx is not None and ctx.active and "provider_fast_mode" not in kwargs:
+            kwargs = {**kwargs, "provider_fast_mode": bool(ctx.provider_fast_mode)}
+
+        if ctx is None or not ctx.active or messages is None:
+            async for chunk in self._complete_impl(**kwargs):
+                yield chunk
+            return
+
+        key = ctx.llm_key(call_site, _fc_request_key_material(kwargs))
+        if ctx.read_enabled:
+            stored = await _fc.cache_get(key)
+            if stored is not None:
+                logger.info("llm.cache.replay", call_site=call_site, key=key)
+                async for chunk in _fc_replay(stored):
+                    yield chunk
+                return
+            logger.info("llm.cache.miss", call_site=call_site, key=key)
+        else:
+            logger.info("llm.cache.write_only", call_site=call_site, key=key)
+
+        acc = _fc_empty()
+        async for chunk in self._complete_impl(**kwargs):
+            _fc_accumulate(acc, chunk)
+            if chunk.kind == "done" and ctx.should_write:
+                await _fc.cache_set(key, "llm", ctx.goal_hash, acc)
+                logger.info("llm.cache.stored", call_site=call_site, key=key)
+            yield chunk
+
+    async def _complete_impl(
         self,
         *,
         pool: PoolName,
@@ -435,6 +498,7 @@ class RoseClient:
         idle_timeout_s: Optional[float] = _DEFAULT_IDLE_TIMEOUT_S,
         thinking: Optional[Dict[str, Any]] = None,
         effort: Optional[str] = None,
+        provider_fast_mode: bool = False,
         dump_context: bool = True,
         dump_extra: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[StreamChunk]:
@@ -477,6 +541,7 @@ class RoseClient:
                             "deadline_s": deadline_s,
                             "ttft_timeout_s": ttft_timeout_s,
                             "idle_timeout_s": idle_timeout_s,
+                            "provider_fast_mode": provider_fast_mode,
                         },
                         "response_model": response_model.__name__ if response_model else None,
                         "direct_auth": {
@@ -591,7 +656,9 @@ class RoseClient:
             idle_timeout_s=idle_timeout_s,
         )
 
-        remaining = lambda: deadline_s - (time.monotonic() - started)
+        def remaining() -> float:
+            return deadline_s - (time.monotonic() - started)
+
         last_heartbeat = started
 
         async def _guarded(
@@ -739,6 +806,7 @@ class RoseClient:
                                 call_site=call_site,
                                 thinking=thinking,
                                 effort=effort,
+                                provider_fast_mode=provider_fast_mode,
                                 ttft_timeout_s=current_ttft_s,
                                 idle_timeout_s=idle_timeout_s,
                             )
@@ -755,6 +823,7 @@ class RoseClient:
                                 request_id=rid,
                                 agent_id=agent_id,
                                 call_site=call_site,
+                                provider_fast_mode=provider_fast_mode,
                                 ttft_timeout_s=current_ttft_s,
                                 idle_timeout_s=idle_timeout_s,
                             )
@@ -901,6 +970,7 @@ class RoseClient:
                             skip_cache_write=skip_cache_write,
                             thinking=thinking,
                             effort=effort,
+                            provider_fast_mode=provider_fast_mode,
                             request_id=rid,
                             agent_id=agent_id,
                             call_site=call_site,
@@ -949,6 +1019,7 @@ class RoseClient:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     seed=seed,
+                    provider_fast_mode=provider_fast_mode,
                     openrouter_key=self._or_key(),
                     request_id=rid,
                     agent_id=agent_id,
@@ -1230,6 +1301,7 @@ async def _try_claude_auth(
     call_site: Optional[str],
     thinking: Optional[Dict[str, Any]] = None,
     effort: Optional[str] = None,
+    provider_fast_mode: bool = False,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = _DEFAULT_IDLE_TIMEOUT_S,
 ) -> AsyncIterator[StreamChunk]:
@@ -1253,6 +1325,7 @@ async def _try_claude_auth(
         call_site=call_site,
         thinking=thinking,
         effort=effort,
+        provider_fast_mode=provider_fast_mode,
         ttft_timeout_s=ttft_timeout_s,
         idle_timeout_s=idle_timeout_s,
     )
@@ -1290,6 +1363,7 @@ async def _try_gpt_auth(
     request_id: str,
     agent_id: Optional[str],
     call_site: Optional[str],
+    provider_fast_mode: bool = False,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = _DEFAULT_IDLE_TIMEOUT_S,
 ) -> AsyncIterator[StreamChunk]:
@@ -1308,6 +1382,7 @@ async def _try_gpt_auth(
         request_id=request_id,
         agent_id=agent_id,
         call_site=call_site,
+        provider_fast_mode=provider_fast_mode,
         ttft_timeout_s=ttft_timeout_s,
         idle_timeout_s=idle_timeout_s,
     )
@@ -1342,6 +1417,7 @@ async def _try_anthropic_api_key(
     call_site: Optional[str],
     thinking: Optional[Dict[str, Any]] = None,
     effort: Optional[str] = None,
+    provider_fast_mode: bool = False,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = _DEFAULT_IDLE_TIMEOUT_S,
 ) -> AsyncIterator[StreamChunk]:
@@ -1360,6 +1436,7 @@ async def _try_anthropic_api_key(
         skip_cache_write=skip_cache_write,
         thinking=thinking,
         effort=effort,
+        provider_fast_mode=provider_fast_mode,
         request_id=request_id,
         agent_id=agent_id,
         call_site=call_site,

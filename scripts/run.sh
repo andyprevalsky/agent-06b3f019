@@ -13,13 +13,18 @@ done
 # scripts/cloud-build.sh during Cord's build phase). When .cloud-env exists,
 # it is authoritative — always source it so the cloud-generated workspace
 # name cannot be overridden by stale env vars or command-line params.
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_SOURCE="${BASH_SOURCE[0]:-$0}"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SOURCE")" && pwd)"
 if [ -f "$SCRIPT_DIR/../.cloud-env" ]; then
     . "$SCRIPT_DIR/../.cloud-env"
 elif [ -z "${CONDUCTOR_PORT:-}" ]; then
     echo '❌ CONDUCTOR_PORT not set. Run via Conductor, or run scripts/cloud-build.sh first on cloud envs.'
     exit 1
 fi
+
+. "$SCRIPT_DIR/lib/workspace-env.sh"
+normalize_conductor_workspace_env
+. "$SCRIPT_DIR/lib/run-process-cleanup.sh"
 
 # mac-app is Electron + requires nvm/Node 20.10.0; only runs on macOS.
 IS_MAC=false
@@ -35,6 +40,7 @@ assign_ports() {
     export MAC_APP_PORT=$((base + 3))
     export SDK_METRICS_PORT=$((base + 4))
     export LOCAL_DB_PORT=$((base + 5))
+    export NGROK_WEB_PORT=$((base + 9))
     export BACKEND_API_URL=http://localhost:$BACKEND_PORT
     export VITE_BACKEND_API_URL=http://localhost:$BACKEND_PORT
     export BACKEND_URL=http://localhost:$BACKEND_PORT
@@ -143,7 +149,7 @@ assign_ports "$CONDUCTOR_PORT"
 
 # If any port in our range is held by another process, find a safe range
 COLLISION=false
-for port in $BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $MAC_APP_PORT $SDK_METRICS_PORT $LOCAL_DB_PORT; do
+for port in $BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $MAC_APP_PORT $SDK_METRICS_PORT $LOCAL_DB_PORT $NGROK_WEB_PORT; do
     if port_requires_reassign "$port"; then
         COLLISION=true
         break
@@ -157,7 +163,7 @@ if $COLLISION; then
     FOUND=false
     while [ $CANDIDATE -lt 65500 ]; do
         RANGE_FREE=true
-        for offset in 0 1 2 3 4 5; do
+        for offset in 0 1 2 3 4 5 9; do
             p=$((CANDIDATE + offset))
             if ! port_is_free_for_candidate_range "$p"; then
                 RANGE_FREE=false
@@ -188,7 +194,69 @@ fi
 
 export NODE_ENV="${NODE_ENV:-development}"
 export TEMPORAL_TASK_QUEUE=navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME
-echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT mac-app=$MAC_APP_PORT metrics=$SDK_METRICS_PORT db=$LOCAL_DB_PORT queue=$TEMPORAL_TASK_QUEUE benchmark_mode=$BENCHMARK_MODE activity_max_slots=${MAX_CONCURRENT_ACTIVITIES:-100} activity_pollers=${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-8}"
+echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT mac-app=$MAC_APP_PORT metrics=$SDK_METRICS_PORT db=$LOCAL_DB_PORT ngrok_api=$NGROK_WEB_PORT queue=$TEMPORAL_TASK_QUEUE benchmark_mode=$BENCHMARK_MODE activity_max_slots=${MAX_CONCURRENT_ACTIVITIES:-100} activity_pollers=${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-8}"
+
+run_kill_stale_same_task_queue_workers "$PWD" "$TEMPORAL_TASK_QUEUE" "$BACKEND_API_URL" "$$"
+
+is_current_process_family() {
+    local pid=$1
+    while [ -n "$pid" ] && [ "$pid" != "0" ]; do
+        [ "$pid" = "$$" ] && return 0
+        pid=$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d ' ') || return 1
+    done
+    return 1
+}
+
+process_cwd_in_this_worktree() {
+    local pid=$1
+    local cwd
+    cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1) || true
+    case "$cwd" in
+        "$PWD"|"$PWD"/*) return 0 ;;
+    esac
+    return 1
+}
+
+kill_stale_tree() {
+    local pid=$1
+    for child in $(pgrep -P "$pid" 2>/dev/null); do
+        kill_stale_tree "$child"
+    done
+    kill "$pid" 2>/dev/null || true
+}
+
+kill_stale_same_worktree_benchmark_stack() {
+    $BENCHMARK_MODE || return 0
+
+    local killed_any=false
+    local pattern='scripts/run\.sh --benchmark|worker\.py|tsx.*src/server\.ts|node_modules/.bin/vite|ngrok http'
+    for pid in $(pgrep -f "$pattern" 2>/dev/null); do
+        [ "$pid" = "$$" ] && continue
+        is_current_process_family "$pid" && continue
+
+        local cmd
+        cmd=$(ps -p "$pid" -o command= 2>/dev/null) || true
+        if echo "$cmd" | grep -q "$PWD" || process_cwd_in_this_worktree "$pid"; then
+            echo "🧹 Killing stale benchmark process from this worktree (PID $pid)"
+            kill_stale_tree "$pid"
+            killed_any=true
+        fi
+    done
+
+    if $killed_any; then
+        sleep 1
+        for pid in $(pgrep -f "$pattern" 2>/dev/null); do
+            [ "$pid" = "$$" ] && continue
+            is_current_process_family "$pid" && continue
+            if process_cwd_in_this_worktree "$pid"; then
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+        done
+        echo "✅ Stale same-worktree benchmark processes stopped"
+    fi
+}
+
+kill_stale_same_worktree_benchmark_stack
 
 # ── Cloud instance: aggressive port cleanup ──
 # On cloud there's exactly one worktree — no multi-workspace concern.
@@ -196,7 +264,7 @@ echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_P
 # run.sh invocations or crashed services. Retry until every port is free.
 
 if $IS_CLOUD; then
-    CLOUD_PORTS=($BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $SDK_METRICS_PORT)
+    CLOUD_PORTS=($BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $SDK_METRICS_PORT $NGROK_WEB_PORT)
 
     kill_port() {
         local port=$1
@@ -384,7 +452,40 @@ else
         | grep -q 1 || PGPASSWORD=postgres createdb -h localhost -U postgres victoria 2>/dev/null || true
 fi
 
-export DATABASE_URL="$LOCAL_DB_URL"
+# Fast Mode cache is intentionally shared across local/dev/prod so recorded runs
+# survive local DB resets. Capture the prod DB URL from back-end/.env before this
+# script overwrites DATABASE_URL with the local app database below.
+if [ -z "${FAST_MODE_CACHE_DATABASE_URL:-}" ] && [ -f "back-end/.env" ]; then
+    PROD_CACHE_DATABASE_URL=$(python3 - <<'PY'
+from pathlib import Path
+
+for raw in Path("back-end/.env").read_text().splitlines():
+    line = raw.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+    key, value = line.split("=", 1)
+    if key.strip() != "DATABASE_URL":
+        continue
+    value = value.strip()
+    if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+        value = value[1:-1]
+    print(value)
+    break
+PY
+)
+    if [ -n "$PROD_CACHE_DATABASE_URL" ]; then
+        export FAST_MODE_CACHE_DATABASE_URL="$PROD_CACHE_DATABASE_URL"
+    fi
+fi
+if [ -n "${FAST_MODE_CACHE_DATABASE_URL:-}" ]; then
+    echo "🧠 Ensuring Fast Mode cache schema..."
+    (cd back-end && npx tsx scripts/ensure-fast-mode-cache-schema.ts)
+fi
+
+# Larger Prisma pool: Fast Mode adds cache get/set on every LLM call, which under
+# sub-agent fan-out competes with the agent's own writes for the connection pool
+# (the known P2024 timeout signature). A bigger local pool absorbs the burst.
+export DATABASE_URL="${LOCAL_DB_URL}?connection_limit=50&pool_timeout=30"
 export DIRECT_URL="$LOCAL_DB_URL"
 
 # Sync Prisma schema to local DB (idempotent, dev-only)
@@ -452,7 +553,7 @@ if ! $IS_CLOUD; then
             pid=$ppid
         done
     }
-    SERVICE_PORTS=($BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $SDK_METRICS_PORT)
+    SERVICE_PORTS=($BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $SDK_METRICS_PORT $NGROK_WEB_PORT)
     $IS_MAC && SERVICE_PORTS+=($MAC_APP_PORT)
     for port in "${SERVICE_PORTS[@]}"; do
         for pid in $(lsof -ti :"$port" 2>/dev/null); do
@@ -493,8 +594,138 @@ fi
 
 PIDS=()
 NAMES=()
+NGROK_PID=""
+NGROK_CONFIG_FILE=""
 SHUTTING_DOWN=false
 SERVICE_STATUS=starting
+
+dns_label_from_workspace() {
+    python3 - <<'PY'
+import os
+import re
+import sys
+
+raw = os.environ.get("CONDUCTOR_WORKSPACE_NAME", "").strip()
+if not raw:
+    sys.exit("CONDUCTOR_WORKSPACE_NAME is required to derive a stable public domain")
+label = re.sub(r"[^a-z0-9-]+", "-", raw.lower()).strip("-")
+label = re.sub(r"-+", "-", label)
+if not label:
+    sys.exit(f"CONDUCTOR_WORKSPACE_NAME={raw!r} does not contain DNS-safe characters")
+print(label[:50].strip("-"))
+PY
+}
+
+ensure_ngrok_domain_reserved() {
+    if [ -z "${NGROK_API_KEY:-}" ]; then
+        return 0
+    fi
+    echo "🌐 Checking ngrok reserved domain $WORKTREE_DOMAIN"
+    local domains_json
+    domains_json=$(ngrok api reserved-domains list --api-key "$NGROK_API_KEY" --limit 1000 2>&1) || {
+        echo "$domains_json"
+        echo "❌ Could not list ngrok reserved domains with NGROK_API_KEY."
+        exit 1
+    }
+    if printf '%s\n' "$domains_json" | grep -q "\"domain\"[[:space:]]*:[[:space:]]*\"$WORKTREE_DOMAIN\""; then
+        echo "🌐 Reserved domain already exists: $WORKTREE_DOMAIN"
+        return 0
+    fi
+    echo "🌐 Reserving ngrok domain $WORKTREE_DOMAIN"
+    local create_output
+    create_output=$(ngrok api reserved-domains create \
+        --api-key "$NGROK_API_KEY" \
+        --domain "$WORKTREE_DOMAIN" \
+        --description "Conductor workspace $CONDUCTOR_WORKSPACE_NAME public frontend" 2>&1) || {
+        echo "$create_output"
+        echo "❌ Could not reserve $WORKTREE_DOMAIN. Confirm the ngrok account is on Pay-as-you-go and the domain is available."
+        exit 1
+    }
+}
+
+start_public_tunnel() {
+    if ! command -v ngrok >/dev/null 2>&1; then
+        echo "❌ ngrok is required for scripts/run.sh. Install it and configure an authtoken."
+        exit 1
+    fi
+    ngrok config check >/dev/null 2>&1 || {
+        echo "❌ ngrok config is invalid or missing an authtoken. Run: ngrok config add-authtoken <token>"
+        exit 1
+    }
+
+    WORKSPACE_DNS_LABEL="$(dns_label_from_workspace)"
+    NGROK_DOMAIN_SUFFIX="${NGROK_DOMAIN_SUFFIX:-ngrok.app}"
+    WORKTREE_DOMAIN="${NGROK_WORKTREE_DOMAIN:-rose-${WORKSPACE_DNS_LABEL}.${NGROK_DOMAIN_SUFFIX}}"
+    export WORKTREE_DOMAIN
+    export PUBLIC_BASE_URL="https://$WORKTREE_DOMAIN"
+    export VITE_ALLOWED_HOSTS="$WORKTREE_DOMAIN"
+    export ALLOWED_ORIGINS="$ALLOWED_ORIGINS,$PUBLIC_BASE_URL"
+    export NGROK_API_URL="http://127.0.0.1:$NGROK_WEB_PORT/api/tunnels"
+
+    ensure_ngrok_domain_reserved
+
+    mkdir -p .context
+    local ngrok_base_config="$HOME/Library/Application Support/ngrok/ngrok.yml"
+    if [ ! -f "$ngrok_base_config" ]; then
+        ngrok_base_config="$HOME/.config/ngrok/ngrok.yml"
+    fi
+    if [ ! -f "$ngrok_base_config" ]; then
+        echo "❌ Could not find the ngrok config file after ngrok config check succeeded."
+        exit 1
+    fi
+
+    NGROK_CONFIG_FILE=".context/ngrok-${WORKSPACE_DNS_LABEL}.yml"
+    cat > "$NGROK_CONFIG_FILE" <<EOF
+version: "3"
+agent:
+  web_addr: 127.0.0.1:$NGROK_WEB_PORT
+EOF
+
+    echo "🌐 Starting public frontend tunnel: $PUBLIC_BASE_URL → localhost:$FRONTEND_PORT"
+    ngrok http "$FRONTEND_PORT" \
+        --config "$ngrok_base_config" \
+        --config "$NGROK_CONFIG_FILE" \
+        --domain "$WORKTREE_DOMAIN" \
+        --log stdout \
+        --log-format logfmt \
+        --log-level info > .context/ngrok.log 2>&1 &
+    NGROK_PID=$!
+    PIDS+=($NGROK_PID); NAMES+=("ngrok")
+
+    for attempt in $(seq 1 60); do
+        if ! kill -0 "$NGROK_PID" 2>/dev/null; then
+            echo "❌ ngrok exited before the public tunnel became ready."
+            tail -60 .context/ngrok.log || true
+            echo ""
+            echo "Required ngrok billing state: Pay-as-you-go plan (\$20/month + usage) with reserved domain $WORKTREE_DOMAIN."
+            echo "Checkout: https://dashboard.ngrok.com/billing/choose-a-plan"
+            exit 1
+        fi
+        if curl -fsS "$NGROK_API_URL" >/tmp/rose-ngrok-tunnels.json 2>/dev/null; then
+            if python3 - <<'PY'
+import json
+from pathlib import Path
+
+data = json.loads(Path("/tmp/rose-ngrok-tunnels.json").read_text())
+for tunnel in data.get("tunnels", []):
+    if tunnel.get("proto") == "https" and tunnel.get("public_url"):
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+            then
+                rm -f /tmp/rose-ngrok-tunnels.json
+                echo "🌐 Public tunnel ready: $PUBLIC_BASE_URL"
+                return 0
+            fi
+        fi
+        sleep 1
+    done
+
+    echo "❌ ngrok tunnel did not become ready for $PUBLIC_BASE_URL → :$FRONTEND_PORT"
+    echo "   ngrok API: $NGROK_API_URL"
+    tail -80 .context/ngrok.log || true
+    exit 1
+}
 
 write_services_manifest() {
     mkdir -p .context
@@ -544,11 +775,13 @@ data = {
         "mac_app": env_int("MAC_APP_PORT"),
         "sdk_metrics": env_int("SDK_METRICS_PORT"),
         "local_db": env_int("LOCAL_DB_PORT"),
+        "ngrok_api": env_int("NGROK_WEB_PORT"),
     },
     "urls": {
         "backend": os.environ.get("BACKEND_URL", ""),
         "backend_api": os.environ.get("BACKEND_API_URL", ""),
         "frontend": f"http://localhost:{os.environ.get('FRONTEND_PORT', '')}",
+        "public": os.environ.get("PUBLIC_BASE_URL", ""),
         "health": f"http://localhost:{os.environ.get('HEALTH_PORT', '')}",
         "sdk_metrics": f"http://localhost:{os.environ.get('SDK_METRICS_PORT', '')}",
     },
@@ -610,6 +843,7 @@ cleanup() {
     fi
     SERVICE_STATUS=stopped
     write_services_manifest || true
+    [ -n "$NGROK_CONFIG_FILE" ] && rm -f "$NGROK_CONFIG_FILE"
     [ -n "$FAIL_DIR" ] && rm -rf "$FAIL_DIR"
     wait 2>/dev/null
 }
@@ -629,6 +863,14 @@ run_service() {
     return $code
 }
 
+# Public URL flow:
+#   CONDUCTOR_WORKSPACE_NAME -> rose-<workspace>.<suffix>
+#   ngrok reserved domain -> Vite dev server on FRONTEND_PORT
+#   backend exposes PUBLIC_BASE_URL for /api/test-payment/public-url
+start_public_tunnel
+export FAST_MODE_ANTHROPIC_PROXY_URL="$PUBLIC_BASE_URL/anthropic-proxy"
+export FAST_MODE_CODEX_PROXY_URL="$PUBLIC_BASE_URL/codex-proxy"
+
 # Launch each service
 if $BENCHMARK_MODE; then
     # In benchmark mode, use plain tsx (no watch) to prevent file-change restarts from killing the backend mid-run
@@ -640,10 +882,8 @@ PIDS+=($!); NAMES+=("back-end")
 
 # Front-end is always launched — benchmark mode needs it for semantic tests
 # (Chrome CDP drives a real browser against the dev server in parallel with smoke).
-if ! $BENCHMARK_MODE; then
-    run_service "front-end" bash -c 'set -eo pipefail; cd front-end && rm -f frontend-logs.log && VITE_DEV_PORT=$FRONTEND_PORT npx vite 2>&1 | tee frontend-logs.log' &
-    PIDS+=($!); NAMES+=("front-end")
-fi
+run_service "front-end" bash -c 'set -eo pipefail; cd front-end && rm -f frontend-logs.log && VITE_DEV_PORT=$FRONTEND_PORT npx vite 2>&1 | tee frontend-logs.log' &
+PIDS+=($!); NAMES+=("front-end")
 
 # mac-app is skipped in benchmark mode (Electron is heavy and smoke doesn't touch it).
 if ! $BENCHMARK_MODE && $IS_MAC; then
@@ -657,6 +897,10 @@ PIDS+=($!); NAMES+=("agents")
 SERVICE_STATUS=running
 write_services_manifest
 echo "🧭 Service manifest: .context/services.json"
+echo "🌐 Public frontend: $PUBLIC_BASE_URL"
+
+echo "⏳ Verifying public tunnel smoke..."
+bash scripts/test-public-tunnel.sh
 
 # ── Post-launch: verify exactly one listener per service port ──
 # Wait for services to bind, then confirm no duplicate listeners.

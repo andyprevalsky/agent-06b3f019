@@ -10,6 +10,10 @@ if [ -z "$CONDUCTOR_PORT" ]; then
   exit 1
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SCRIPT_DIR/lib/workspace-env.sh"
+normalize_conductor_workspace_env
+
 export LOCAL_DB_PORT=$(($CONDUCTOR_PORT + 5))
 DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME}"
 DB_VOLUME="victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME}"
@@ -33,7 +37,7 @@ fi
 
 # Create Postgres container (recreate if port mapping drifted)
 if docker ps -a --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
-    EXISTING_PORT=$(docker port "$DB_CONTAINER" 5432/tcp 2>/dev/null | head -1 | awk -F: '{print $NF}')
+    EXISTING_PORT=$(docker port "$DB_CONTAINER" 5432/tcp 2>/dev/null | head -1 | awk -F: '{print $NF}' || true)
     if [ "$EXISTING_PORT" != "$LOCAL_DB_PORT" ]; then
         echo "🐘 Postgres container port drift ($EXISTING_PORT → $LOCAL_DB_PORT), recreating..."
         docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true

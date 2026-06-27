@@ -203,6 +203,8 @@ function ChatQueryInputBox({
         placeholder={a.selectedAgentId ? 'Type your message...' : 'Enter any goal'}
         selectedModel={a.selectedModel}
         onModelChange={a.setSelectedModel}
+        fastMode={a.fastMode}
+        onFastModeChange={a.setFastMode}
         availableModels={models.filter(
           (m) => m.id === 'rose-labs/rose-1-lite' || m.id === 'rose-labs/rose-1-ultra',
         )}

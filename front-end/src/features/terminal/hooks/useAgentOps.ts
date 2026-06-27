@@ -53,6 +53,7 @@ export function useAgentOps({
     agentDetail: ctx.agent,
     canSubmitGoals,
     isFullySignedIn: auth.isFullySignedIn,
+    userId: auth.user?.id,
     clientSource,
     setSelectedAgentIdContext: ctx.setSelectedAgentId,
     setCurrentView,

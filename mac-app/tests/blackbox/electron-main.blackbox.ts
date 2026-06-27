@@ -44,13 +44,16 @@ stubElectronUpdater();
 
 // ── Stub domain-internal heavy imports so we test *wiring*, not deps ────────
 let onboardingCompleteFlag = true;
+let configIsDev = false;
 
 vi.mock('../../main/base/config', () => ({
   config: {
     apiUrl: 'http://localhost:3001',
     supabase: { url: 'https://test.supabase.co', anonKey: 'test-anon-key' },
     encryptionKey: 'test-key',
-    isDev: false,
+    get isDev() {
+      return configIsDev;
+    },
   },
 }));
 
@@ -159,6 +162,8 @@ async function loadMainEntry(
   vi.mocked(electron.app.setAsDefaultProtocolClient).mockImplementation(() => true);
   vi.mocked(electron.app.requestSingleInstanceLock).mockClear();
   vi.mocked(electron.app.requestSingleInstanceLock).mockImplementation(() => true);
+  vi.mocked(electron.app.quit).mockClear();
+  vi.mocked(electron.app.exit).mockClear();
   vi.mocked(electron.ipcMain.handle).mockClear();
   vi.mocked(electron.app.whenReady).mockClear();
   vi.mocked(electron.BrowserWindow).mockClear();
@@ -190,6 +195,7 @@ describe('blackbox: electron-main (main-wiring)', () => {
 
   beforeEach(async () => {
     onboardingCompleteFlag = true;
+    configIsDev = false;
     initAutoUpdaterMock.mockClear();
     setAutoUpdaterWindowMock.mockClear();
     registerUpdateIpcMock.mockClear();
@@ -274,6 +280,21 @@ describe('blackbox: electron-main (main-wiring)', () => {
 
     const continueActivityListeners = await appListenersFor('continue-activity');
     expect(continueActivityListeners.length).toBe(0);
+  });
+
+  it('single-instance: dev mode skips the global lock so parallel workspaces can run', async () => {
+    configIsDev = true;
+    await loadMainEntry((electron) => {
+      vi.mocked(electron.app.requestSingleInstanceLock).mockReturnValue(false);
+    });
+
+    const electron = await import('electron');
+    expect(electron.app.requestSingleInstanceLock).not.toHaveBeenCalled();
+    expect(electron.app.quit).not.toHaveBeenCalled();
+    expect(electron.app.exit).not.toHaveBeenCalled();
+
+    const continueActivityListeners = await appListenersFor('continue-activity');
+    expect(continueActivityListeners.length).toBeGreaterThanOrEqual(1);
   });
 
   it('module-load: constructs a window-state electron-store with name "window-state"', async () => {

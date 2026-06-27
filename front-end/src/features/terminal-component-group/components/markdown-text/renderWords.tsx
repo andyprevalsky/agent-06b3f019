@@ -6,6 +6,7 @@
  *   1. Inline groups (consecutive words sharing bold/italic/code/link formatting)
  *   2. Block content (paragraphs, headings, list items, blockquotes, pre)
  *   3. Lists (ul/ol wrappers that batch consecutive <li> children)
+ *   4. Monotonic inline-group keys independent of whitespace/block children
  *
  * On every block-boundary transition, it flushes the inline group, then the
  * block, then (when appropriate) the accumulated list.
@@ -37,6 +38,7 @@ interface RenderState {
   inlineGroup: WordItem[];
   lastFormatting: string;
   inlineGroupFirstWordIndex: number;
+  inlineGroupCount: number;
 }
 
 function createState(
@@ -63,6 +65,7 @@ function createState(
     inlineGroup: [],
     lastFormatting: '',
     inlineGroupFirstWordIndex: 0,
+    inlineGroupCount: 0,
   };
 }
 
@@ -70,7 +73,7 @@ function flushInlineGroup(s: RenderState): void {
   if (s.inlineGroup.length === 0) return;
   const rendered = renderInlineGroup({
     group: s.inlineGroup,
-    groupKey: `group-${s.currentBlock.length}`,
+    groupKey: `group-${s.inlineGroupCount}`,
     groupFirstWordIndex: s.inlineGroupFirstWordIndex,
     wordIndexRef: s.wordIndexRef,
     lastWordItem: s.lastWordItem,
@@ -78,6 +81,7 @@ function flushInlineGroup(s: RenderState): void {
     perWordDelay: s.perWordDelay,
     onLastWordComplete: s.onLastWordComplete,
   });
+  s.inlineGroupCount += 1;
   if (rendered) s.currentBlock.push(rendered);
   s.inlineGroup = [];
 }

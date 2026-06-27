@@ -27,6 +27,7 @@ export const ANTHROPIC_BETA_HEADER = [
   'advanced-tool-use-2025-11-20',
   'effort-2025-11-24',
 ].join(',');
+const ANTHROPIC_FAST_MODE_BETA = 'fast-mode-2026-02-01';
 
 /**
  * Beta header for the direct Anthropic API-key path. Identical to the OAuth set
@@ -74,6 +75,19 @@ function anthropicApiKeyHeaders(apiKey: string): Record<string, string> {
     'anthropic-beta': ANTHROPIC_BETA_HEADER_API_KEY,
     'Content-Type': 'application/json',
   };
+}
+
+function withFastModeBeta(
+  headers: Record<string, string>,
+  body: Record<string, unknown>
+): Record<string, string> {
+  if (body.speed !== 'fast') return headers;
+  const betas = headers['anthropic-beta']
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (!betas.includes(ANTHROPIC_FAST_MODE_BETA)) betas.push(ANTHROPIC_FAST_MODE_BETA);
+  return { ...headers, 'anthropic-beta': betas.join(',') };
 }
 
 function openrouterHeaders(openrouterKey: string): Record<string, string> {
@@ -147,7 +161,7 @@ export async function postAnthropicStream(
   const response = await withTimeout(upstream, timeoutMs, (signal) =>
     fetch(ANTHROPIC_API_URL, {
       method: 'POST',
-      headers: anthropicHeaders(options.claudeToken),
+      headers: withFastModeBeta(anthropicHeaders(options.claudeToken), options.body),
       body: JSON.stringify(options.body),
       signal,
     })
@@ -185,7 +199,7 @@ export async function postAnthropicApiKeyStream(
   const response = await withTimeout(upstream, timeoutMs, (signal) =>
     fetch(ANTHROPIC_API_URL, {
       method: 'POST',
-      headers: anthropicApiKeyHeaders(options.apiKey),
+      headers: withFastModeBeta(anthropicApiKeyHeaders(options.apiKey), options.body),
       body: JSON.stringify(options.body),
       signal,
     })

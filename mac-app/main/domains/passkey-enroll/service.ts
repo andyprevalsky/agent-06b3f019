@@ -131,10 +131,9 @@ async function pollForCapture(
   isWindowClosed: () => boolean
 ): Promise<PageCapture | null | 'closed'> {
   const deadline = Date.now() + ENROLL_TIMEOUT_MS;
-  while (Date.now() < deadline) {
+  while (true) {
     if (isWindowClosed()) return 'closed';
-    await sleep(POLL_INTERVAL_MS);
-    if (isWindowClosed()) return 'closed';
+    if (Date.now() >= deadline) return null;
 
     let capture: PageCapture | null = null;
     try {
@@ -142,11 +141,12 @@ async function pollForCapture(
         'window.__PASSKEY_CAPTURE ?? null'
       )) as PageCapture | null;
     } catch {
+      await sleep(POLL_INTERVAL_MS);
       continue; // mid-navigation; retry next tick
     }
     if (capture && typeof capture.privateKey === 'string' && capture.privateKey !== '') {
       return capture;
     }
+    await sleep(POLL_INTERVAL_MS);
   }
-  return null;
 }

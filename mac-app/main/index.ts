@@ -29,8 +29,9 @@ logConsole('Config', `Backend API URL: ${config.apiUrl}`);
 
 const PROTOCOL = config.isDev ? 'roselabs-dev' : 'roselabs';
 
-const hasSingleInstanceLock = app.requestSingleInstanceLock();
-if (!hasSingleInstanceLock) {
+const enforceSingleInstance = !config.isDev;
+const hasSingleInstanceLock = enforceSingleInstance ? app.requestSingleInstanceLock() : true;
+if (enforceSingleInstance && !hasSingleInstanceLock) {
   logConsole('App', 'another Rose instance is already running; quitting duplicate');
   app.quit();
   app.exit(0);

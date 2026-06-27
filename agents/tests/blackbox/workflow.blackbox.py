@@ -2756,15 +2756,19 @@ async def test_workflow_poll_messages_merges_and_sorts():
         _restore_workflow(original)
 
 
-async def test_workflow_poll_messages_exception_returns_empty():
+async def test_workflow_poll_messages_exception_raises():
     wf = _bare_workflow_instance()
     wf.agent_id = "a1"
     fake = _FakeWorkflowModule()
     fake.activity_fail_for.add("poll_new_messages")
     original = _patch_workflow(fake)
     try:
-        msgs = await wf._poll_messages(datetime(2025, 1, 1, tzinfo=timezone.utc))
-        assert msgs == []
+        raised = False
+        try:
+            await wf._poll_messages(datetime(2025, 1, 1, tzinfo=timezone.utc))
+        except Exception:
+            raised = True
+        assert raised, "Expected _poll_messages to raise on activity failure"
     finally:
         _restore_workflow(original)
 
@@ -2853,6 +2857,81 @@ async def test_workflow_execute_tool_invalid_params_returns_error_and_posts_tool
         assert tname == "spawn_agent"
         assert getattr(event, "status", None).name == "ERROR"
     finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_execute_tool_legacy_spawn_agent_receives_phase():
+    """Legacy spawn_agent dispatch must pass current_phase to runtime validators."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a1"
+    wf.user_id = "u1"
+    wf.current_phase = "PLAN"
+    captured: Dict[str, Any] = {}
+
+    import workflows.agent_workflow as workflow_module
+    from tools.base import MessageStatus
+
+    async def fake_spawn_agent(workflow_instance, tool_call, tool_call_id):
+        captured["workflow_instance"] = workflow_instance
+        captured["tool_call"] = tool_call
+        captured["tool_call_id"] = tool_call_id
+        return MessageStatus.ERROR, "blocked in plan"
+
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    original_executor = workflow_module.TOOL_EXECUTORS["spawn_agent"]
+    workflow_module.TOOL_EXECUTORS["spawn_agent"] = fake_spawn_agent
+    try:
+        result = await wf._execute_tool(
+            "spawn_agent",
+            {
+                "type": "general_purpose",
+                "goal": "research city populations",
+                "start_phase": "EXECUTE",
+                "output_schema": {"fields": [{"name": "population", "type": "int", "required": True}]},
+            },
+            "tc-spawn",
+        )
+        assert result.get("error") is True
+        assert captured["tool_call"]["_phase"] == "PLAN"
+        assert captured["tool_call_id"] == "tc-spawn"
+    finally:
+        workflow_module.TOOL_EXECUTORS["spawn_agent"] = original_executor
+        _restore_workflow(original)
+
+
+async def test_workflow_execute_tool_web_fetch_preserves_fast_mode_kwargs():
+    """web_fetch auth kwargs must merge with, not replace, Fast Mode cache kwargs."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-1"
+    wf.user_id = "user-1"
+    wf.goal = "root goal"
+    wf.fast_mode_cache_enabled = True
+    captured_kwargs: Dict[str, Any] = {}
+
+    import workflows.agent_workflow as workflow_module
+
+    async def fake_web_fetch_executor(**kwargs):
+        captured_kwargs.update(kwargs)
+        return {"content": "ok"}
+
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    original_executor = workflow_module.TOOL_EXECUTORS["web_fetch"]
+    workflow_module.TOOL_EXECUTORS["web_fetch"] = fake_web_fetch_executor
+    try:
+        result = await wf._execute_tool(
+            "web_fetch",
+            {"url": "https://example.com", "objective": "summarize"},
+            "tc-web-fetch",
+        )
+        assert result["result"] == {"content": "ok"}
+        assert captured_kwargs["fast_mode_cache_enabled"] is True
+        assert captured_kwargs["fast_mode_goal"] == "root goal"
+        assert "claude_token" in captured_kwargs
+        assert "gpt_token" in captured_kwargs
+    finally:
+        workflow_module.TOOL_EXECUTORS["web_fetch"] = original_executor
         _restore_workflow(original)
 
 
@@ -3289,7 +3368,7 @@ async def run_all_tests():
 
     # W3-A/W3-D additional coverage tests
     await r.record_async("wf_poll_messages_merges", test_workflow_poll_messages_merges_and_sorts)
-    await r.record_async("wf_poll_messages_exception", test_workflow_poll_messages_exception_returns_empty)
+    await r.record_async("wf_poll_messages_exception", test_workflow_poll_messages_exception_raises)
     await r.record_async("wf_execute_tool_unknown", test_workflow_execute_tool_unknown_tool_returns_error)
     await r.record_async(
         "wf_plan_schema_rejects_nonexplore", test_plan_phase_spawn_agent_schema_rejects_non_explore_types
@@ -3297,6 +3376,14 @@ async def run_all_tests():
     await r.record_async(
         "wf_execute_tool_invalid_params_posts_event",
         test_workflow_execute_tool_invalid_params_returns_error_and_posts_tool_event,
+    )
+    await r.record_async(
+        "wf_execute_tool_legacy_spawn_agent_phase",
+        test_workflow_execute_tool_legacy_spawn_agent_receives_phase,
+    )
+    await r.record_async(
+        "wf_execute_tool_web_fetch_fast_mode_kwargs",
+        test_workflow_execute_tool_web_fetch_preserves_fast_mode_kwargs,
     )
     await r.record_async("wf_refresh_claude_token_missing", test_workflow_refresh_claude_token_missing_fetches_and_sets)
     await r.record_async(

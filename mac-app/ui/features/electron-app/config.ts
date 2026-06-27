@@ -7,11 +7,22 @@
 /**
  * Backend API base URL for user-settings and onboarding-complete calls.
  *
- * Resolved at build time from `VITE_BACKEND_API_URL`; defaults to localhost so
- * local dev runs against the Node backend on :3001.
+ * Resolved at build time from `VITE_BACKEND_API_URL`. Production builds must
+ * provide it so packaged apps cannot silently call a developer localhost.
  */
-export const BACKEND_URL: string =
-  (import.meta.env.VITE_BACKEND_API_URL as string | undefined) ?? 'http://localhost:3001';
+export function resolveBackendUrl(rawUrl: string | undefined, isProd: boolean): string {
+  const url = rawUrl?.trim();
+  if (url !== undefined && url !== '') return url;
+  if (isProd) {
+    throw new Error('Missing VITE_BACKEND_API_URL for packaged Mac app');
+  }
+  return 'http://localhost:3001';
+}
+
+export const BACKEND_URL: string = resolveBackendUrl(
+  import.meta.env.VITE_BACKEND_API_URL as string | undefined,
+  import.meta.env.PROD
+);
 
 /**
  * Dev-only override: when true, always render the Onboarding flow regardless

@@ -32,3 +32,11 @@ export async function persistSessionOutput(taskId: string, output: string) {
     },
   });
 }
+
+export async function findAgentFastModeCache(agentId: string): Promise<boolean> {
+  const agent = await prisma.agent.findUnique({
+    where: { id: agentId },
+    select: { fastModeCacheEnabled: true },
+  });
+  return agent?.fastModeCacheEnabled ?? false;
+}

@@ -2,6 +2,7 @@
 import { WebSocketServer } from 'ws';
 import { appendFileSync, mkdirSync, writeFileSync } from 'fs';
 import { spawn, execFileSync } from 'child_process';
+import { createServer } from 'http';
 import { homedir } from 'os';
 import { join } from 'path';
 
@@ -25,6 +26,8 @@ const CODEX_MODEL = process.env.CODEX_MODEL || 'gpt-5.4';
 const CODE_AGENT_SYSTEM_PROMPT = process.env.CODE_AGENT_SYSTEM_PROMPT || '';
 const GITHUB_REPO_URL = process.env.GITHUB_REPO_URL;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const CODEX_FAST_MODE_PROXY_URL = process.env.CODEX_FAST_MODE_PROXY_URL;
+const CODEX_FAST_MODE_PROXY_PORT = Number(process.env.CODEX_FAST_MODE_PROXY_PORT || '37441');
 
 if (!GOAL) {
   log('error', 'CODEX_GOAL not set');
@@ -160,6 +163,9 @@ function appendCodexStdout(data) {
 
 async function shutdown(code = 0) {
   log('info', 'Starting graceful shutdown', { code });
+  if (codexFastModeProxy) {
+    await new Promise((resolve) => codexFastModeProxy.server.close(resolve));
+  }
   for (const client of clients) {
     if (client.readyState === 1) client.send(JSON.stringify({ type: 'exit', code }));
     client.close();
@@ -202,6 +208,86 @@ process.on('SIGTERM', () => shutdown(exitCode ?? 0));
 
 log('info', 'Server listening', { port: PORT });
 
+function collectBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+function proxyHeaders(headers) {
+  const out = {};
+  const skip = new Set([
+    'connection',
+    'content-length',
+    'host',
+    'keep-alive',
+    'proxy-authenticate',
+    'proxy-authorization',
+    'te',
+    'trailer',
+    'transfer-encoding',
+    'upgrade',
+  ]);
+  for (const [key, value] of Object.entries(headers)) {
+    if (skip.has(key.toLowerCase()) || value === undefined) continue;
+    out[key] = Array.isArray(value) ? value.join(', ') : String(value);
+  }
+  return out;
+}
+
+async function startCodexFastModeProxy() {
+  if (!CODEX_FAST_MODE_PROXY_URL) return null;
+
+  const targetBase = new URL(CODEX_FAST_MODE_PROXY_URL.replace(/\/$/, ''));
+  const server = createServer(async (req, res) => {
+    try {
+      const body = await collectBody(req);
+      const target = new URL(`${targetBase.pathname}${req.url || '/'}`, targetBase.origin);
+      const headers = proxyHeaders(req.headers);
+      const method = req.method || 'GET';
+      const upstream = await fetch(target, {
+        method,
+        headers,
+        body: method === 'GET' || method === 'HEAD' ? undefined : body,
+      });
+      res.statusCode = upstream.status;
+      upstream.headers.forEach((value, key) => {
+        if (!['content-encoding', 'content-length', 'connection', 'transfer-encoding'].includes(key.toLowerCase())) {
+          res.setHeader(key, value);
+        }
+      });
+      const responseBody = Buffer.from(await upstream.arrayBuffer());
+      res.end(responseBody);
+      log('info', 'Codex Fast Mode proxy request', {
+        method,
+        path: req.url,
+        status: upstream.status,
+        cache: upstream.headers.get('x-fast-mode-cache') || null,
+      });
+    } catch (err) {
+      log('error', 'Codex Fast Mode proxy failed', { error: err.message });
+      res.statusCode = 502;
+      res.end(JSON.stringify({ error: 'Codex Fast Mode proxy failed' }));
+    }
+  });
+
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(CODEX_FAST_MODE_PROXY_PORT, '127.0.0.1', resolve);
+  });
+  const baseUrl = `http://127.0.0.1:${CODEX_FAST_MODE_PROXY_PORT}`;
+  log('info', 'Codex Fast Mode proxy listening', {
+    baseUrl,
+    target: CODEX_FAST_MODE_PROXY_URL.replace(/\/[^/]*$/, '/<goalHash>'),
+  });
+  return { server, baseUrl };
+}
+
+let codexFastModeProxy = await startCodexFastModeProxy();
+
 const home = homedir();
 const codexHome = join(home, '.codex');
 mkdirSync(codexHome, { recursive: true });
@@ -233,12 +319,14 @@ if (CODEX_AUTH_JSON) {
 }
 
 let workDir = '/home/user';
+const REPO_WORKDIR = '/home/user/workspace';
 if (GITHUB_REPO_URL) {
   try {
     const parsed = new URL(GITHUB_REPO_URL);
-    const repoName = parsed.pathname.split('/').filter(Boolean).pop()?.replace(/\.git$/, '');
-    if (!repoName) throw new Error(`Invalid GitHub URL: ${GITHUB_REPO_URL}`);
-    workDir = `/home/user/${repoName}`;
+    if (!parsed.pathname.split('/').filter(Boolean).pop()) {
+      throw new Error(`Invalid GitHub URL: ${GITHUB_REPO_URL}`);
+    }
+    workDir = REPO_WORKDIR;
     if (GITHUB_TOKEN) {
       parsed.username = 'x-access-token';
       parsed.password = GITHUB_TOKEN;
@@ -288,6 +376,18 @@ const args = [
   CODEX_MODEL,
   sanitizedGoal,
 ];
+if (codexFastModeProxy) {
+  args.splice(
+    1,
+    0,
+    '-c',
+    `chatgpt_base_url="${codexFastModeProxy.baseUrl}"`,
+    '-c',
+    'model_provider="fastmode"',
+    '-c',
+    `model_providers.fastmode={name="fastmode",base_url="${codexFastModeProxy.baseUrl}/backend-api/codex",wire_api="responses"}`
+  );
+}
 
 log('info', 'Starting Codex exec', { model: CODEX_MODEL, workDir, goal: sanitizedGoal.slice(0, 120) });
 const codex = spawn('codex', args, {

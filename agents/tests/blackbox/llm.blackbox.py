@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -533,6 +534,8 @@ def test_build_verifier_json_schema_object_type():
                 "properties": [
                     {"name": "title", "type": "str"},
                     {"name": "price_usd", "type": "float"},
+                    {"name": "preview", "type": "file_pointer"},
+                    {"name": "remote_preview", "type": "session_file_pointer"},
                 ],
             },
         ]
@@ -544,9 +547,12 @@ def test_build_verifier_json_schema_object_type():
     beanie = props["selected_beanie"]
     assert beanie["type"] == "object"
     assert beanie["additionalProperties"] is False
-    assert beanie["required"] == ["title", "price_usd"]
+    assert beanie["required"] == ["title", "price_usd", "preview", "remote_preview"]
     assert beanie["properties"]["title"]["type"] == "string"
     assert beanie["properties"]["price_usd"]["type"] == "number"
+    assert beanie["properties"]["preview"]["type"] == "object"
+    assert "storage_path" in beanie["properties"]["preview"]["properties"]
+    assert beanie["properties"]["remote_preview"]["required"] == ["path"]
     assert result["json_schema"]["strict"] is True
 
 
@@ -562,6 +568,8 @@ def test_build_verifier_json_schema_list_object_type():
                 "properties": [
                     {"name": "name", "type": "str"},
                     {"name": "rank", "type": "int"},
+                    {"name": "asset", "type": "file_pointer"},
+                    {"name": "remote_asset", "type": "session_file_pointer"},
                 ],
             },
         ]
@@ -573,7 +581,9 @@ def test_build_verifier_json_schema_list_object_type():
     assert props["items"]["type"] == "array"
     assert props["items"]["items"]["type"] == "object"
     assert props["items"]["items"]["additionalProperties"] is False
-    assert props["items"]["items"]["required"] == ["name", "rank"]
+    assert props["items"]["items"]["required"] == ["name", "rank", "asset", "remote_asset"]
+    assert props["items"]["items"]["properties"]["asset"]["type"] == "object"
+    assert props["items"]["items"]["properties"]["remote_asset"]["required"] == ["path"]
     assert result["json_schema"]["strict"] is True
 
 
@@ -1112,7 +1122,7 @@ async def test_call_llm_rose_path():
         }
     )
 
-    with patch("temporalio.activity.heartbeat"):
+    with patch("temporalio.activity.heartbeat"), patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}):
         from helpers.llm import call_llm
 
         result = await call_llm(
@@ -3431,6 +3441,82 @@ async def test_call_llm_structured_streaming_tool_detection_callback():
     assert any(t == "web_search" for t, _, _ in detected_ordered)
 
 
+async def _call_llm_structured_streaming_replayed_native_tool_call_without_json_case():
+    """Fast Mode replayed native tool calls parse even when stored model label is -anthropic."""
+    from helpers.llm import call_llm_structured_streaming
+    from providers.rose.types import StreamChunk
+    from utils.tool_schemas import create_agent_action_model
+
+    async def fake_cached_complete(*args, **kwargs):
+        yield StreamChunk(
+            kind="metadata",
+            data={
+                "actual_model": "claude-sonnet-4-6-anthropic",
+                "pool_name": "rose-1-lite",
+                "request_id": "cached-r1",
+                "from_fast_cache": True,
+            },
+        )
+        yield StreamChunk(
+            kind="tool_call",
+            data={
+                "id": "toolu_cached",
+                "name": "web_search",
+                "arguments": json.dumps({"query": "best cities to live in your 20s"}),
+            },
+        )
+        yield StreamChunk(
+            kind="usage",
+            data={
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "cache_read_input_tokens": 100,
+                "finish_reason": "tool_calls",
+            },
+        )
+        yield StreamChunk(kind="done", data={"from_fast_cache": True})
+
+    import helpers.llm as llm_module
+
+    original_cached_complete = llm_module.cached_complete
+    llm_module.cached_complete = fake_cached_complete
+    try:
+        AgentAction = create_agent_action_model(["web_search"])
+        detected = []
+
+        async def on_chunk(text: str, tokens: int):
+            pass
+
+        async def on_tool_detected(name, tool_call_id):
+            detected.append((name, tool_call_id))
+
+        response, usage, detected_ordered = await call_llm_structured_streaming(
+            messages=[{"role": "user", "content": "Do a web search"}],
+            model="rose",
+            temperature=1.0,
+            max_tokens=512,
+            response_model=AgentAction,
+            on_chunk=on_chunk,
+            on_tool_detected=on_tool_detected,
+            call_site="execute_loop",
+        )
+
+        assert response.response == ""
+        assert len(response.tool_calls) == 1
+        assert response.tool_calls[0].tool == "web_search"
+        assert response.tool_calls[0].query == "best cities to live in your 20s"
+        assert usage["cache_read_input_tokens"] == 100
+        assert detected == [("web_search", "toolu_cached")]
+        assert [(name, tid) for name, tid, _ in detected_ordered] == [("web_search", "toolu_cached")]
+    finally:
+        llm_module.cached_complete = original_cached_complete
+
+
+def test_call_llm_structured_streaming_replayed_native_tool_call_without_json():
+    asyncio.run(_call_llm_structured_streaming_replayed_native_tool_call_without_json_case())
+
+
+
 async def test_call_llm_structured_streaming_attention_streaming():
     """on_attention_stream fires for send_message_to_user tool message."""
     import httpx
@@ -4884,6 +4970,10 @@ async def run_all_tests():
         "convert_ctx_in_progress_tool", test_convert_context_to_messages_non_terminal_tool_becomes_user
     )
     await r.record_async("stream_tool_detection_cb", test_call_llm_structured_streaming_tool_detection_callback)
+    await r.record_async(
+        "stream_replayed_native_tool_call_without_json",
+        _call_llm_structured_streaming_replayed_native_tool_call_without_json_case,
+    )
     await r.record_async("stream_attention_streaming", test_call_llm_structured_streaming_attention_streaming)
     await r.record_async("call_llm_openrouter_path", test_call_llm_openrouter_path)
     await r.record_async("verifier_claude_token_error", test_call_llm_verifier_claude_token_error_surfaces)

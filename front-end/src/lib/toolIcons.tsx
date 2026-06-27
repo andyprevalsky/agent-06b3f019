@@ -76,6 +76,7 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   // Main agent tools
   spawn_agent: Search, // Unified agent tool (explore/browser/code/general_purpose)
   grep: FileSearch, // Local data search (message threads)
+  browser_agent: Globe,
   spawn_browser_agent: Globe,
   send_sms: MessageSquare,
   send_sms_as_user: MessageSquare,

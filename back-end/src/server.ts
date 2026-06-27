@@ -47,6 +47,8 @@ import feedbackRouter from './domains/feedback/routes';
 import imessageRouter from './domains/imessage/routes';
 import dataRouter from './domains/data/routes';
 import benchmarksRouter from './domains/benchmarks/routes';
+import fastCacheRouter from './domains/fast-cache/routes';
+import { anthropicProxyRouter, codexProxyRouter } from './domains/fast-cache/routes.proxy';
 import { prisma } from './providers/database';
 import { createLogger } from './providers/logger';
 import { installFetchCapture, captureTokenMiddleware } from './providers/fetchCapture';
@@ -477,6 +479,11 @@ app.use('/api/upload', uploadRouter);
 app.use('/api/feedback', feedbackRouter);
 app.use('/api/data', dataRouter);
 app.use('/api/test-payment', testPaymentRouter);
+app.use('/api/fast-cache', fastCacheRouter); // Fast Mode aggressive cache get/set/purge
+// Anthropic tee-proxy for the code agent. Mounted OUTSIDE /api so the injected
+// ANTHROPIC_BASE_URL = <backend>/anthropic-proxy/<goalHash> resolves to /v1/messages.
+app.use('/anthropic-proxy', anthropicProxyRouter);
+app.use('/codex-proxy', codexProxyRouter);
 
 // Catch-all authenticated route (must be AFTER x402 routes)
 app.use('/api', authenticate, formatRouter);
