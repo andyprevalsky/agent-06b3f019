@@ -42,6 +42,7 @@ export interface Agent {
   message_count: number;
   price_limit_cents: number; // Price limit in cents (100 = $1.00)
   tree_cost_cents: number; // Total tree cost in cents
+  fast_mode_cache_enabled?: boolean;
   created_at: string;
   updated_at: string;
   write_lock_enabled: boolean;
@@ -111,6 +112,7 @@ export interface CreateAgentPayload {
   attachments?: FilePointer[]; // Optional file attachments for the initial goal message
   price_limit_cents?: number; // Price limit for new agent (default 100 = $1.00)
   depth?: number; // Depth >= 1 auto-responds to questions (used for agentic integrations)
+  fast_mode_cache_enabled?: boolean; // Fast Mode aggressive cache (record/replay third-party responses)
 }
 
 // Sub-agent Tree Types

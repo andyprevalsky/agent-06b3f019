@@ -131,12 +131,15 @@ export async function createSession(params: CreateSessionParams): Promise<Create
     log.info(`GitHub access granted for ${normalizedRepoUrl}`);
   }
 
+  const fastModeCacheEnabled = await repo.findAgentFastModeCache(agent_id);
+
   const session = await createClaudeCodeSession(
     agent_id,
     goal,
     attachments,
     normalizedRepoUrl,
-    effectiveUserId
+    effectiveUserId,
+    fastModeCacheEnabled
   );
 
   return {

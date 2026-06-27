@@ -38,6 +38,7 @@ ANTHROPIC_BETA_HEADER = (
     "advanced-tool-use-2025-11-20,"
     "effort-2025-11-24"
 )
+ANTHROPIC_FAST_MODE_BETA = "fast-mode-2026-02-01"
 ANTHROPIC_VERSION = "2023-06-01"
 ANTHROPIC_X_APP = "cli"
 ANTHROPIC_USER_AGENT = "claude-cli/2.1.81 (external, sdk-ts, agent-sdk/0.2.75)"
@@ -69,6 +70,15 @@ def _anthropic_api_key_headers(api_key: str) -> Dict[str, str]:
         "anthropic-beta": ANTHROPIC_BETA_HEADER,
         "Content-Type": "application/json",
     }
+
+
+def _with_fast_mode_beta(headers: Dict[str, str], body: Dict[str, Any]) -> Dict[str, str]:
+    if body.get("speed") != "fast":
+        return headers
+    betas = [item.strip() for item in headers.get("anthropic-beta", "").split(",") if item.strip()]
+    if ANTHROPIC_FAST_MODE_BETA not in betas:
+        betas.append(ANTHROPIC_FAST_MODE_BETA)
+    return {**headers, "anthropic-beta": ",".join(betas)}
 
 
 def _openrouter_headers(openrouter_key: str, referer: str = "https://roselabs.ai") -> Dict[str, str]:
@@ -126,6 +136,7 @@ async def post_anthropic_stream(
     if (claude_token is None) == (api_key is None):
         raise ValueError("post_anthropic_stream requires exactly one of claude_token / api_key")
     headers = _anthropic_api_key_headers(api_key) if api_key is not None else _anthropic_headers(claude_token)
+    headers = _with_fast_mode_beta(headers, body)
     timeout = httpx.Timeout(connect=connect_timeout_s, read=None, write=connect_timeout_s, pool=connect_timeout_s)
     logger.info(
         "rose.transport.anthropic.start",

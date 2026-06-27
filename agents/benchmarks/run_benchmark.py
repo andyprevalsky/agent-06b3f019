@@ -82,19 +82,23 @@ from benchmarks.timeout_history import (
 from tests.e2e.test_helpers import (
     authenticate,
 )
+from domains.set_plan.config import (
+    PLANNER_ACTIVITY_MAX_ATTEMPTS,
+    PLANNER_ACTIVITY_TIMEOUT_SECONDS,
+)
 
 # Defaults — benchmarks run against PROD by default (no local services needed)
 DEFAULT_BASE_URL = os.environ.get("BENCHMARK_BASE_URL", "https://navi-j9a9.onrender.com")
 PROD_BASE_URL = "https://navi-j9a9.onrender.com"
 POLL_INTERVAL = 5  # seconds
 STALL_THRESHOLD = 120  # seconds without new messages/agents across ENTIRE tree → warning
-# Per-agent early-fail threshold: if a single agent emits no new messages for
-# this many seconds, fail fast instead of burning the full task timeout on a
-# silent worker. Matches STALL_THRESHOLD because DAG reasoning activities can
-# stream for 60–90s via Supabase Realtime without posting intermediate rows to
-# the messages table — 60s here produces false-positive stalls on the synthesis
-# step of research-heavy smoke tasks.
-AGENT_STALL_SECONDS = 240
+# Per-agent early-fail threshold: if every non-terminal leaf emits no durable
+# messages for this many seconds, fail fast instead of burning the full task
+# timeout on a silent worker. This must be longer than one configured planner
+# activity retry envelope because planner progress is realtime-only until the
+# plan result is persisted; otherwise cold smoke runs can fail while a valid
+# planner retry is still inside its workflow budget.
+AGENT_STALL_SECONDS = max(240, PLANNER_ACTIVITY_TIMEOUT_SECONDS * PLANNER_ACTIVITY_MAX_ATTEMPTS + 30)
 TREE_POLL_INTERVAL = 15  # seconds between tree-level polls (more expensive than root-only)
 CALENDLY_TASK_NAME = "calendly-schedule-meeting"
 BIOMETRICS_WEBDECOY_TASK_NAME = "browser-biometrics-webdecoy"
@@ -376,6 +380,12 @@ async def create_agent(
     if write_lock_enabled is not None:
         body["write_lock_enabled"] = write_lock_enabled
 
+    # Fast Mode aggressive cache: opt-in via env (mirrors write-lock override). Does
+    # NOT change task definitions — just flips the per-run cache flag for A/B timing.
+    fast_mode_cache = _benchmark_env_bool("BENCHMARK_FAST_MODE_CACHE")
+    if fast_mode_cache is not None:
+        body["fast_mode_cache_enabled"] = fast_mode_cache
+
     if task.start_phase:
         body["start_phase"] = task.start_phase
 
@@ -530,6 +540,12 @@ def _count_logical_tool_calls_from_messages(messages: List[dict]) -> Dict[str, i
     counts: Dict[str, int] = {}
     for msg in messages:
         meta = msg.get("metadata") or {}
+        if meta.get("fromFastCache") and meta.get("toolStatus") == "FINISHED":
+            child_counts = meta.get("childToolCounts")
+            if isinstance(child_counts, dict):
+                for tool_name, count in child_counts.items():
+                    if isinstance(tool_name, str) and isinstance(count, int) and count > 0:
+                        counts[tool_name] = counts.get(tool_name, 0) + count
         key = _logical_tool_count_key(meta)
         if not key or key in seen:
             continue
@@ -2332,6 +2348,7 @@ async def run_minted_agent_account_task(
                 cache_read_input_tokens=auth_bundle_biometrics_result.cache_read_input_tokens,
                 cache_creation_input_tokens=auth_bundle_biometrics_result.cache_creation_input_tokens,
                 cache_hit_pct=auth_bundle_biometrics_result.cache_hit_pct,
+                fast_mode_cache_enabled=auth_bundle_biometrics_result.fast_mode_cache_enabled,
                 context_violations=auth_bundle_biometrics_result.context_violations,
                 logs={"auth_bundle_biometrics": auth_bundle_biometrics_result.logs},
             )
@@ -2373,6 +2390,14 @@ async def run_minted_agent_account_task(
         if auth_bundle_biometrics_result is None:
             return logs
         return {"auth_bundle_biometrics": auth_bundle_biometrics_result.logs, **logs}
+
+    def _with_gate_fast_mode(*results: TaskResult) -> bool:
+        gate_enabled = (
+            auth_bundle_biometrics_result.fast_mode_cache_enabled
+            if auth_bundle_biometrics_result
+            else False
+        )
+        return gate_enabled or any(result.fast_mode_cache_enabled for result in results)
 
     if target_realm == "x.com":
         post_task = replace(
@@ -2430,6 +2455,7 @@ async def run_minted_agent_account_task(
             cache_read_input_tokens=_with_gate_cache_read(post_result.cache_read_input_tokens),
             cache_creation_input_tokens=_with_gate_cache_creation(post_result.cache_creation_input_tokens),
             cache_hit_pct=post_result.cache_hit_pct,
+            fast_mode_cache_enabled=_with_gate_fast_mode(post_result),
             context_violations=_with_gate_context_violations(post_result.context_violations),
             logs=_with_gate_logs({"post": post_result.logs}),
         )
@@ -2535,6 +2561,7 @@ async def run_minted_agent_account_task(
                     cache_read_input_tokens=_with_gate_cache_read(signup_result.cache_read_input_tokens),
                     cache_creation_input_tokens=_with_gate_cache_creation(signup_result.cache_creation_input_tokens),
                     cache_hit_pct=signup_result.cache_hit_pct,
+                    fast_mode_cache_enabled=_with_gate_fast_mode(signup_result),
                     context_violations=_with_gate_context_violations(signup_result.context_violations),
                     logs=_with_gate_logs({"signup": signup_result.logs}),
                 )
@@ -2621,6 +2648,7 @@ async def run_minted_agent_account_task(
                     post_result.cache_creation_input_tokens,
                 ),
                 cache_hit_pct=0.0,
+                fast_mode_cache_enabled=_with_gate_fast_mode(signup_result, post_result),
                 context_violations=_with_gate_context_violations(
                     signup_result.context_violations,
                     post_result.context_violations,
@@ -2680,6 +2708,7 @@ async def run_minted_agent_account_task(
                 cache_read_input_tokens=_with_gate_cache_read(signup_result.cache_read_input_tokens),
                 cache_creation_input_tokens=_with_gate_cache_creation(signup_result.cache_creation_input_tokens),
                 cache_hit_pct=signup_result.cache_hit_pct,
+                fast_mode_cache_enabled=_with_gate_fast_mode(signup_result),
                 context_violations=_with_gate_context_violations(signup_result.context_violations),
                 logs=_with_gate_logs({
                     "signup": signup_result.logs,
@@ -2760,6 +2789,7 @@ async def run_minted_agent_account_task(
                 booking_result.cache_creation_input_tokens,
             ),
             cache_hit_pct=0.0,
+            fast_mode_cache_enabled=_with_gate_fast_mode(signup_result, booking_result),
             context_violations=_with_gate_context_violations(
                 signup_result.context_violations,
                 booking_result.context_violations,
@@ -3046,6 +3076,7 @@ async def run_single_task(
             cache_read_input_tokens=cache_read_input_tokens,
             cache_creation_input_tokens=cache_creation_input_tokens,
             cache_hit_pct=cache_hit_pct,
+            fast_mode_cache_enabled=agent.get("fast_mode_cache_enabled") is True,
             context_violations=context_violation_dicts,
             logs=logs,
         )

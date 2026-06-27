@@ -4,7 +4,7 @@
  *
  * STATE MACHINES (one per hook):
  *   useMessageAnimationBuffer  — single-slot animation queue
- *   useThinkingVisibility      — debounced + persistence-based show/hide
+ *   useThinkingVisibility      — debounced show, immediate terminal/blocking hide
  *   useStreamingAutoScroll     — sub-agent-panel auto-scroll to latest
  *   useMessageListState        — composite aggregating all of the above
  */
@@ -210,6 +210,11 @@ export function useThinkingVisibility(opts: UseThinkingVisibilityOptions): boole
     if (assistantInsertedRef.current) {
       setThinkingVisible(false);
       assistantInsertedRef.current = false;
+      return;
+    }
+
+    if (!shouldShow && thinkingVisible) {
+      setThinkingVisible(false);
       return;
     }
 

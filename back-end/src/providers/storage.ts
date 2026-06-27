@@ -1,6 +1,7 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import crypto from 'crypto';
 import { createLogger } from './logger';
+import { retryWithBackoff } from './retry';
 
 const log = createLogger('Storage');
 
@@ -24,6 +25,55 @@ function getSupabaseClient(): SupabaseClient {
 const ATTACHMENT_BUCKET = 'attachments';
 const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB per file
 const MAX_TOTAL_SIZE = 100 * 1024 * 1024; // 100MB total per message
+
+function storageErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === 'object' && 'message' in error) {
+    return String((error as { message: unknown }).message);
+  }
+  return String(error);
+}
+
+function storageErrorStatus(error: unknown): number | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+
+  const candidate =
+    (error as { status?: unknown }).status ?? (error as { statusCode?: unknown }).statusCode;
+  if (typeof candidate === 'number') return candidate;
+  if (typeof candidate === 'string') {
+    const parsed = Number(candidate);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
+
+function isRetryableStorageError(error: unknown): boolean {
+  if (error instanceof TypeError) return true;
+  if (error instanceof Error && 'retryable' in error) {
+    return Boolean((error as { retryable: unknown }).retryable);
+  }
+
+  const status = storageErrorStatus(error);
+  if (status !== undefined && [408, 429, 500, 502, 503, 504].includes(status)) return true;
+
+  const message = storageErrorMessage(error).toLowerCase();
+  return (
+    message.includes('fetch failed') ||
+    message.includes('network') ||
+    message.includes('timeout') ||
+    message.includes('connection') ||
+    message.includes('econnreset') ||
+    message.includes('etimedout')
+  );
+}
+
+function isAlreadyUploadedStorageError(error: unknown): boolean {
+  const status = storageErrorStatus(error);
+  if (status !== undefined && status !== 409) return false;
+
+  const message = storageErrorMessage(error).toLowerCase();
+  return message.includes('already exists') || message.includes('resource already exists');
+}
 
 // All files are stored in Supabase Storage - no inline base64
 export interface FilePointer {
@@ -50,14 +100,43 @@ export async function uploadToStorage(
   const safeFilename = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
   const storagePath = `${userId}/${fileId}_${safeFilename}`;
 
-  const { error } = await client.storage.from(ATTACHMENT_BUCKET).upload(storagePath, fileBuffer, {
-    contentType: mimeType,
-    upsert: false,
-  });
+  let error: unknown;
+  try {
+    const uploadResult = await retryWithBackoff(
+      async () => {
+        const result = await client.storage
+          .from(ATTACHMENT_BUCKET)
+          .upload(storagePath, fileBuffer, {
+            contentType: mimeType,
+            upsert: false,
+          });
+
+        if (result.error && isAlreadyUploadedStorageError(result.error)) {
+          return { ...result, error: null };
+        }
+
+        if (result.error && isRetryableStorageError(result.error)) {
+          throw result.error;
+        }
+
+        return result;
+      },
+      {
+        maxRetries: 3,
+        initialBackoffMs: 500,
+        component: 'StorageUpload',
+        isRetryable: isRetryableStorageError,
+      }
+    );
+    error = uploadResult.error;
+  } catch (caught) {
+    error = caught;
+  }
 
   if (error) {
-    log.error('Upload failed', { error: error.message });
-    throw new Error(`Failed to upload file: ${error.message}`);
+    const message = storageErrorMessage(error);
+    log.error('Upload failed', { error: message });
+    throw new Error(`Failed to upload file: ${message}`);
   }
 
   log.info(`Uploaded file to ${storagePath} (${fileBuffer.length} bytes)`);

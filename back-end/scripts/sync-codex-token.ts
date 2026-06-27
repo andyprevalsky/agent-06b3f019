@@ -14,6 +14,7 @@
  *   CODEX_TOKEN_USER_ID=<user id>
  *   CODEX_TOKEN_POOLING_ENABLED=true
  */
+import 'dotenv/config';
 import { IntegrationStatus, IntegrationType, PrismaClient } from '@prisma/client';
 import * as crypto from 'crypto';
 import { readFileSync } from 'fs';

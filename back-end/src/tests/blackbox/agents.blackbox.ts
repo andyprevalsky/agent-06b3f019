@@ -3107,6 +3107,9 @@ test('POST / — with response_schema parameter', async () => {
         properties: [
           { name: 'label', type: 'str' },
           { name: 'count', type: 'int' },
+          { name: 'asset', type: 'file_pointer' },
+          { name: 'remote_asset', type: 'session_file_pointer' },
+          { name: 'remote_frames', type: 'list[session_file_pointer]' },
         ],
       },
       {

@@ -76,6 +76,7 @@ export async function startAgentWorkflow(params: {
     custom_system_prompt?: boolean;
     shared_files?: boolean;
   };
+  fastModeCacheEnabled?: boolean; // Optional: Fast Mode aggressive cache (own flag, not a gate)
 }): Promise<string> {
   const client = await getTemporalClient();
   // Use provided task queue or default to environment-specific queue
@@ -113,6 +114,7 @@ export async function startAgentWorkflow(params: {
       params.maxIterations || null, // Step limit for execute phase (sub-agents use 25)
       params.priceLimitCents || 100, // Price limit in cents (default $1.00)
       params.contextGates || null, // Context gates: which user context sections to include
+      params.fastModeCacheEnabled ?? false, // Fast Mode aggressive cache flag
     ],
   });
 

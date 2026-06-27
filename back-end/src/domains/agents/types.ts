@@ -18,7 +18,18 @@ export const filePointerSchema = z.object({
 // Response schema field type
 export const NestedResponseSchemaFieldSchema = z.object({
   name: z.string(),
-  type: z.enum(['str', 'int', 'float', 'bool', 'list[str]', 'list[int]']),
+  type: z.enum([
+    'str',
+    'int',
+    'float',
+    'bool',
+    'list[str]',
+    'list[int]',
+    'file_pointer',
+    'list[file_pointer]',
+    'session_file_pointer',
+    'list[session_file_pointer]',
+  ]),
 });
 
 export const ResponseSchemaFieldSchema = z
@@ -104,6 +115,9 @@ export const createAgentSchema = z.object({
     .optional(),
   // File attachments for the initial goal message
   attachments: z.array(filePointerSchema).optional(),
+  // Fast Mode aggressive cache: record/replay third-party responses for clean demos.
+  // Own first-class flag — NOT a context gate. Default off (no read, no write).
+  fast_mode_cache_enabled: z.boolean().optional(),
 });
 
 export const postMessageSchema = z.object({

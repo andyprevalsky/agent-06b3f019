@@ -43,6 +43,7 @@ model Agent {
   treeCostCents             Int         @default(0)
   ownCostCents              Float       @default(0)
   writeLockEnabled          Boolean     @default(true)
+  fastModeCacheEnabled      Boolean     @default(false)
   githubRepoUrl             String?
   parent                    Agent?      @relation("AgentHierarchy", fields: [parentAgentId], references: [id])
   children                  Agent[]     @relation("AgentHierarchy")
@@ -64,6 +65,23 @@ model Tool {
   description String?
   createdAt   DateTime    @default(now())
   agents      AgentTool[]
+}
+
+// Fast Mode aggressive cache. Record/replay store for third-party responses so a
+// slow real run can be replayed instantly. Entries live forever (no TTL); re-record
+// is a manual purge by goalHash. Writes only happen when Fast Mode is enabled.
+// `value` holds JSON (LLM responses, search/fetch results, browser response metadata);
+// `blobPath` references a Supabase storage object for large binary bodies.
+model FastModeCacheEntry {
+  key       String   @id
+  kind      String // llm | browser_use | browser_http | web_search | web_fetch | file | anthropic | codex
+  goalHash  String
+  value     Json?
+  blobPath  String?
+  createdAt DateTime @default(now())
+
+  @@index([goalHash])
+  @@index([kind])
 }
 
 model AgentTool {

@@ -1,0 +1,310 @@
+import { Sandbox } from 'e2b';
+import mime from 'mime-types';
+import { CODE_AGENT_OUTPUT_DIR } from './codeAgentPrompt';
+import { randomUUID } from './crypto';
+import { prisma } from './database';
+import { createLogger } from './logger';
+import { type FilePointer, uploadToStorage } from './storage';
+
+const log = createLogger('E2B');
+const OUTPUT_DIR = CODE_AGENT_OUTPUT_DIR;
+
+export interface ClaudeCodeUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+}
+
+/**
+ * Parse Claude Code JSONL logs to extract token usage.
+ * Claude Code logs each message with usage data in ~/.claude/projects/
+ */
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function numericUsageValue(usage: Record<string, unknown>, key: string): number {
+  const value = usage[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+export function parseClaudeCodeUsage(jsonlContent: string): ClaudeCodeUsage {
+  const usage: ClaudeCodeUsage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadInputTokens: 0,
+    cacheCreationInputTokens: 0,
+  };
+
+  const lines = jsonlContent.split('\n').filter((line) => line.trim());
+
+  for (const line of lines) {
+    try {
+      const entry = JSON.parse(line) as unknown;
+      if (!isJsonObject(entry)) continue;
+
+      const message = isJsonObject(entry.message) ? entry.message : undefined;
+      const rawUsage = isJsonObject(entry.usage)
+        ? entry.usage
+        : message !== undefined && isJsonObject(message.usage)
+          ? message.usage
+          : undefined;
+
+      if (rawUsage === undefined) continue;
+
+      usage.inputTokens += numericUsageValue(rawUsage, 'input_tokens');
+      usage.outputTokens += numericUsageValue(rawUsage, 'output_tokens');
+      usage.cacheReadInputTokens += numericUsageValue(rawUsage, 'cache_read_input_tokens');
+      usage.cacheCreationInputTokens += numericUsageValue(rawUsage, 'cache_creation_input_tokens');
+    } catch {
+      // Skip malformed lines
+    }
+  }
+
+  return usage;
+}
+
+export async function closeClaudeCodeSession(
+  taskId: string,
+  userId?: string,
+  agentId?: string,
+  additionalPaths?: string[]
+): Promise<{ outputFiles: FilePointer[]; usage?: ClaudeCodeUsage }> {
+  log.info(`Closing Claude Code session ${taskId}`);
+
+  const session = await prisma.claudeCodeSession.findUnique({
+    where: { id: taskId },
+  });
+
+  if (!session) {
+    throw new Error(`Claude Code session not found: ${taskId}`);
+  }
+
+  const outputFiles: FilePointer[] = [];
+  let usage: ClaudeCodeUsage | undefined;
+
+  try {
+    // Connect to sandbox
+    const sandbox = await Sandbox.connect(session.sandboxId, {
+      apiKey: process.env.E2B_API_KEY,
+    });
+
+    // Extract Claude Code usage from JSONL logs before killing sandbox
+    try {
+      // Find the most recent JSONL file in ~/.claude/projects/
+      // Claude Code creates project-specific dirs with conversation logs
+      const findJsonlResult = await sandbox.commands.run(
+        `find /home/user/.claude/projects -name "*.jsonl" -type f 2>/dev/null | head -5`,
+        { timeoutMs: 5000 }
+      );
+
+      if (findJsonlResult.stdout && findJsonlResult.stdout.trim()) {
+        const jsonlFiles = findJsonlResult.stdout.split('\n').filter((f) => f.trim());
+        log.info(`Found ${jsonlFiles.length} JSONL files for usage extraction`);
+
+        const totalUsage: ClaudeCodeUsage = {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0,
+        };
+
+        for (const jsonlFile of jsonlFiles) {
+          try {
+            const content = await sandbox.files.read(jsonlFile.trim(), { format: 'text' });
+            const fileUsage = parseClaudeCodeUsage(content as string);
+            totalUsage.inputTokens += fileUsage.inputTokens;
+            totalUsage.outputTokens += fileUsage.outputTokens;
+            totalUsage.cacheReadInputTokens += fileUsage.cacheReadInputTokens;
+            totalUsage.cacheCreationInputTokens += fileUsage.cacheCreationInputTokens;
+            log.info(
+              `Parsed usage from ${jsonlFile}: in=${fileUsage.inputTokens}, out=${fileUsage.outputTokens}`
+            );
+          } catch (readErr) {
+            log.error(`Failed to read JSONL file ${jsonlFile}`, {
+              error: readErr instanceof Error ? readErr.message : String(readErr),
+            });
+          }
+        }
+
+        if (totalUsage.inputTokens > 0 || totalUsage.outputTokens > 0) {
+          usage = totalUsage;
+          log.info(
+            `Total Claude Code usage: in=${usage.inputTokens}, out=${usage.outputTokens}, cache_read=${usage.cacheReadInputTokens}, cache_create=${usage.cacheCreationInputTokens}`
+          );
+        }
+      } else {
+        log.info('No JSONL files found for usage extraction');
+      }
+    } catch (usageErr) {
+      log.error('Failed to extract Claude Code usage', {
+        error: usageErr instanceof Error ? usageErr.message : String(usageErr),
+      });
+    }
+
+    // Extract output files if userId and agentId provided
+    if (userId && agentId) {
+      try {
+        // List files in output directory (using find for reliable filename handling)
+        const findResult = await sandbox.commands.run(
+          `find ${OUTPUT_DIR} -maxdepth 1 -type f -printf '%f\\n' 2>/dev/null || echo "NO_DIR"`,
+          { timeoutMs: 5000 }
+        );
+
+        if (findResult.stdout && !findResult.stdout.includes('NO_DIR')) {
+          const filenames = findResult.stdout.split('\n').filter((name) => name.trim());
+
+          for (const filename of filenames) {
+            try {
+              const remotePath = `${OUTPUT_DIR}/${filename}`;
+              // Read as binary (Uint8Array) to avoid corrupting images and other binary files
+              const content = await sandbox.files.read(remotePath, { format: 'bytes' });
+
+              // Determine MIME type
+              const mimeType = mime.lookup(filename) || 'application/octet-stream';
+
+              // Upload to Supabase Storage (stored under userId, not agent-scoped)
+              const fileId = randomUUID();
+              const { storage_path } = await uploadToStorage(
+                userId,
+                Buffer.from(content),
+                filename,
+                mimeType
+              );
+
+              outputFiles.push({
+                id: fileId,
+                storage_path,
+                original_filename: filename,
+                mime_type: mimeType,
+                size_bytes: content.length,
+                created_at: new Date().toISOString(),
+              });
+
+              log.info(`Extracted output file: ${filename} (${content.length} bytes)`);
+            } catch (fileErr) {
+              log.error(`Failed to extract file ${filename}`, {
+                error: fileErr instanceof Error ? fileErr.message : String(fileErr),
+              });
+            }
+          }
+        }
+
+        log.info(`Extracted ${outputFiles.length} output files from ${OUTPUT_DIR}`);
+      } catch (extractErr) {
+        log.error('Failed to extract output files', {
+          error: extractErr instanceof Error ? extractErr.message : String(extractErr),
+        });
+      }
+
+      // Also extract any additional file paths specified (e.g., from verifier structured_response)
+      if (additionalPaths && additionalPaths.length > 0) {
+        log.info(`Extracting ${additionalPaths.length} additional file paths`);
+
+        for (const filePath of additionalPaths) {
+          // Skip if already extracted (might be in output dir)
+          const filename = filePath.split('/').pop() || '';
+          if (outputFiles.some((f) => f.original_filename === filename)) {
+            log.info(`Skipping ${filename} - already extracted from ${OUTPUT_DIR}`);
+            continue;
+          }
+
+          try {
+            // Verify file exists
+            const checkResult = await sandbox.commands.run(
+              `test -f "${filePath}" && echo "EXISTS"`,
+              { timeoutMs: 3000 }
+            );
+            if (!checkResult.stdout?.includes('EXISTS')) {
+              log.info(`File not found: ${filePath}`);
+              continue;
+            }
+
+            // Read file content
+            const content = await sandbox.files.read(filePath, { format: 'bytes' });
+            const mimeType = mime.lookup(filename) || 'application/octet-stream';
+
+            // Upload to Supabase Storage
+            const fileId = randomUUID();
+            const { storage_path } = await uploadToStorage(
+              userId,
+              Buffer.from(content),
+              filename,
+              mimeType
+            );
+
+            outputFiles.push({
+              id: fileId,
+              storage_path,
+              original_filename: filename,
+              mime_type: mimeType,
+              size_bytes: content.length,
+              created_at: new Date().toISOString(),
+            });
+
+            log.info(`Extracted additional file: ${filePath} (${content.length} bytes)`);
+          } catch (fileErr) {
+            log.error(`Failed to extract additional file ${filePath}`, {
+              error: fileErr instanceof Error ? fileErr.message : String(fileErr),
+            });
+          }
+        }
+      }
+    }
+
+    // Kill the sandbox
+    await sandbox.kill();
+    log.info(`Killed sandbox: ${session.sandboxId}`);
+  } catch (error) {
+    log.error('Failed to kill sandbox', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    // Continue to update DB even if kill fails
+  }
+
+  // Update DB
+  await prisma.claudeCodeSession.update({
+    where: { id: taskId },
+    data: {
+      status: 'CLOSED',
+      closedAt: new Date(),
+    },
+  });
+
+  log.info(`Session closed: ${taskId}`);
+
+  return { outputFiles, usage };
+}
+
+/**
+ * Get session info from database.
+ */
+export async function getClaudeCodeSession(taskId: string) {
+  return await prisma.claudeCodeSession.findUnique({
+    where: { id: taskId },
+  });
+}
+
+/**
+ * Get session by sandbox ID.
+ */
+export async function getClaudeCodeSessionBySandboxId(sandboxId: string) {
+  return await prisma.claudeCodeSession.findUnique({
+    where: { sandboxId },
+  });
+}
+
+/**
+ * Connect to an existing sandbox for automation.
+ * Returns the sandbox instance for running commands.
+ */
+export async function connectToSandbox(sandboxId: string): Promise<Sandbox> {
+  if (!process.env.E2B_API_KEY) {
+    throw new Error('E2B_API_KEY not configured');
+  }
+
+  return await Sandbox.connect(sandboxId, {
+    apiKey: process.env.E2B_API_KEY,
+  });
+}

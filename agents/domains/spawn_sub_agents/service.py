@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import random
 import uuid
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import structlog
 import structlog.contextvars
@@ -56,26 +56,60 @@ def extract_file_pointers_from_structured_response(
         return []
 
     file_pointers: list[Dict[str, Any]] = []
-    fields = output_schema.get("fields", [])
+    fields_by_name = _schema_fields_by_name(output_schema.get("fields", []))
 
-    for field in fields:
-        field_name = field.get("name")
-        field_type = field.get("type")
-
-        if not field_name or field_name not in structured_response:
-            continue
-
-        value = structured_response[field_name]
-
-        if field_type == "file_pointer":
-            if value and isinstance(value, dict) and value.get("id") and value.get("storage_path"):
-                file_pointers.append(value)
-        elif field_type == "list[file_pointer]" and isinstance(value, list):
-            for item in value:
-                if item and isinstance(item, dict) and item.get("id") and item.get("storage_path"):
-                    file_pointers.append(item)
+    for key, value in structured_response.items():
+        file_pointers.extend(_extract_file_pointers_by_schema(value, fields_by_name.get(key)))
 
     return file_pointers
+
+
+def _schema_fields_by_name(fields: Any) -> Dict[str, Dict[str, Any]]:
+    if not isinstance(fields, list):
+        return {}
+    by_name: Dict[str, Dict[str, Any]] = {}
+    for field in fields:
+        if isinstance(field, dict) and isinstance(field.get("name"), str):
+            by_name[field["name"]] = field
+    return by_name
+
+
+def _extract_file_pointers_by_schema(value: Any, field_schema: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    field_type = field_schema.get("type") if isinstance(field_schema, dict) else None
+
+    if field_type == "file_pointer":
+        return [value] if _is_full_file_pointer(value) else []
+
+    if field_type == "list[file_pointer]" and isinstance(value, list):
+        return [item for item in value if _is_full_file_pointer(item)]
+
+    if field_type == "object" and isinstance(value, dict):
+        return _extract_file_pointers_from_object(
+            value,
+            field_schema.get("properties") if isinstance(field_schema, dict) else None,
+        )
+
+    if field_type == "list[object]" and isinstance(value, list):
+        file_pointers: list[Dict[str, Any]] = []
+        properties = field_schema.get("properties") if isinstance(field_schema, dict) else None
+        for item in value:
+            if isinstance(item, dict):
+                file_pointers.extend(_extract_file_pointers_from_object(item, properties))
+        return file_pointers
+
+    return []
+
+
+def _extract_file_pointers_from_object(value: Dict[str, Any], fields: Any) -> List[Dict[str, Any]]:
+    file_pointers: list[Dict[str, Any]] = []
+    fields_by_name = _schema_fields_by_name(fields)
+    for key, item in value.items():
+        file_pointers.extend(_extract_file_pointers_by_schema(item, fields_by_name.get(key)))
+    return file_pointers
+
+
+def _is_full_file_pointer(value: Any) -> bool:
+    return bool(isinstance(value, dict) and value.get("id") and value.get("storage_path"))
 
 
 def resolve_attachments_for_sub_agent(

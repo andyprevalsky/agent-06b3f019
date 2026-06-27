@@ -181,6 +181,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
           reasoning_effort: opts.options.effort,
           response_format: opts.options.response_format,
           tool_choice: opts.options.tool_choice,
+          provider_fast_mode: opts.options.provider_fast_mode,
         },
         ...(opts.options.dump_context.config ?? {}),
       },
@@ -321,6 +322,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
             auth: { mode: 'oauth', token: opts.options.claude_token! },
             requestId: opts.requestId,
             callSite: opts.callSite,
+            providerFastMode: opts.options.provider_fast_mode,
           }),
         emit: emitChunk,
       });
@@ -362,6 +364,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
             accountId: opts.options.gpt_account_id,
             requestId: opts.requestId,
             callSite: opts.callSite,
+            providerFastMode: opts.options.provider_fast_mode,
           }),
         emit: emitChunk,
       });
@@ -416,6 +419,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
             auth: { mode: 'apiKey', key: anthropicApiKey },
             requestId: opts.requestId,
             callSite: opts.callSite,
+            providerFastMode: opts.options.provider_fast_mode,
           }),
         emit: emitChunk,
       });
@@ -474,6 +478,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
           openrouterKey: requiredEnv(OPENROUTER_API_KEY_ENV),
           requestId: opts.requestId,
           callSite: opts.callSite,
+          providerFastMode: opts.options.provider_fast_mode,
         }),
       emit: emitChunk,
     });

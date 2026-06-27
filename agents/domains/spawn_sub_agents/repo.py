@@ -69,6 +69,21 @@ async def fetch_parent_attachments(
     return filename_to_pointer, all_pointers_by_id
 
 
+async def fetch_agent_messages(
+    backend_url: str,
+    api_key: str,
+    agent_id: str,
+) -> list[dict[str, Any]]:
+    """Fetch persisted messages for an agent from the backend."""
+    async with spawn_http_client() as client:
+        response = await client.get(
+            f"{backend_url}/api/agents/{agent_id}",
+            headers=backend_api_headers(api_key),
+        )
+        response.raise_for_status()
+        return response.json().get("messages", [])
+
+
 async def create_sub_agent(
     client: httpx.AsyncClient,
     backend_url: str,
