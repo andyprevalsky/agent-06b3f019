@@ -19,6 +19,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { TOOL_ICONS } from '@/lib/toolIcons';
 import { useState } from 'react';
 import ClaudeIcon from '@/assets/claude-color.svg';
+import CodexIcon from '@/assets/codex-color.svg';
 
 interface RoseTool {
   name: string;
@@ -30,27 +31,27 @@ interface RoseTool {
 const ROSE_SYSTEM_TOOLS: RoseTool[] = [
   {
     name: 'spawn_agent',
-    displayName: 'Spawn Agent',
+    displayName: 'Spawn Cloud Agent',
     description:
-      'Spawn autonomous agents: explore (research), browser (web tasks), code (coding), or general-purpose agents for complex delegation. Unified tool for all agent types.',
+      'Spawn autonomous agents into their own persistent, fault-tolerant cloud environment. Each agent can live for years at a time and wields the full tool suite to solve problems of unbounded complexity.',
   },
   {
     name: 'claude_code',
-    displayName: 'Claude Code',
+    displayName: 'Coding Agent',
     description:
-      'Run Claude CLI on your local machine to write, edit, and analyze code with direct access to your file system.',
-    desktopOnly: true,
-  },
-  {
-    name: 'find_all',
-    displayName: 'Find All',
-    description: 'Discover entities matching criteria using natural language queries.',
+      'Write, edit, and run code in a secure, isolated E2B cloud container with a Claude or Codex agent, with full file-system access for building, debugging, and automating real engineering work.',
   },
   {
     name: 'browser_agent',
-    displayName: 'Browser Agent',
+    displayName: 'Stealth Browser Agent',
     description:
-      'Complete complex, multi-step web tasks autonomously using AI to navigate and interact.',
+      'Complete complex, multi-step web tasks autonomously with a fully humanized, undetectable browser. Mimics real human behavior to evade bot detection and solve CAPTCHAs.',
+  },
+  {
+    name: 'make_payment',
+    displayName: 'Payment Enabled',
+    description:
+      'Pay any online service or merchant on your behalf. Each agent is issued an ephemeral, single-use virtual card per payment, so your real card details are never exposed and every transaction is capped and isolated.',
   },
   {
     name: 'send_email',
@@ -68,15 +69,9 @@ const ROSE_SYSTEM_TOOLS: RoseTool[] = [
     description: 'Make phone calls and conduct voice conversations.',
   },
   {
-    name: 'enrich',
-    displayName: 'Enrich',
-    description: 'Enrich entities with structured data using web research.',
-  },
-  {
     name: 'search_user_network_for_people',
-    displayName: 'Personal Network Search',
-    description: 'Search your network for people matching specific criteria.',
-    desktopOnly: true,
+    displayName: 'People Search',
+    description: 'Find any person for any criteria.',
   },
   {
     name: 'web_search',
@@ -84,27 +79,22 @@ const ROSE_SYSTEM_TOOLS: RoseTool[] = [
     description: 'Search the web for real-time information and answers.',
   },
   {
-    name: 'deep_research',
-    displayName: 'Deep Research',
-    description: 'Comprehensive multi-step research analyzing hundreds of sources.',
-  },
-  {
     name: 'wait_for',
     displayName: 'Wait For',
     description:
-      'Pause until a timestamp or repeatedly check a natural-language condition with explore agents. Fast Mode replays recorded waits instead of waiting in real time.',
-  },
-  {
-    name: 'send_sms_as_user',
-    displayName: 'Send SMS As User',
-    description: "Send SMS messages through your Mac's iMessage account.",
-    desktopOnly: true,
+      'Pause until a timestamp or repeatedly check a natural-language condition with explore agents.',
   },
 ];
 
 function ToolIcon({ name }: { name: string }) {
   if (name === 'claude_code') {
-    return <img src={ClaudeIcon} alt="Claude" className="h-4 w-4" />;
+    // Coding Agent: Claude logo stacked above a Codex logo, in their normal colors.
+    return (
+      <span className="inline-flex flex-col gap-1" aria-label="Claude or Codex">
+        <img src={ClaudeIcon} alt="Claude" className="h-4 w-4" />
+        <img src={CodexIcon} alt="Codex" className="h-4 w-4" />
+      </span>
+    );
   }
   const Icon = TOOL_ICONS[name] || TOOL_ICONS.default;
   return <Icon className="h-4 w-4 text-muted-foreground" />;
