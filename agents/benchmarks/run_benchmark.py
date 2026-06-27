@@ -339,6 +339,24 @@ async def _api_headers() -> dict:
         return dict(_cached_headers)
 
 
+def _benchmark_agent_source_override() -> str:
+    source = (os.environ.get("BENCHMARK_AGENT_SOURCE") or "WEB").strip().upper()
+    if source not in {"WEB", "MAC_APP", "SMS"}:
+        raise ValueError(
+            "BENCHMARK_AGENT_SOURCE must be one of WEB, MAC_APP, or SMS; "
+            f"got {source!r}"
+        )
+    return source
+
+
+def _apply_local_agent_source_override(agent_id: str, source: str) -> None:
+    _run_local_victoria_sql(
+        'UPDATE "Agent" '
+        f'SET source = {_sql_literal(source)} '
+        f'WHERE id = {_sql_literal(agent_id)} AND "userId" = {_sql_literal(USER_ID)};'
+    )
+
+
 async def create_agent(
     base_url: str,
     task: BenchmarkTask,
@@ -346,11 +364,13 @@ async def create_agent(
     """Create a benchmark agent. Returns agent_id."""
     headers = await _api_headers()
     goal = os.environ.get("BENCHMARK_GOAL_OVERRIDE") or task.prompt
+    source_override = _benchmark_agent_source_override()
+    request_source = source_override if source_override in {"WEB", "MAC_APP"} else "WEB"
 
     body: dict = {
         "goal": goal,
         "model": "rose-labs/rose-1-lite",
-        "source": "WEB",
+        "source": request_source,
         "price_limit_cents": task.price_limit_cents,
         "verifier": {
             "type": "FLOAT_LLM_JUDGE",
@@ -375,6 +395,14 @@ async def create_agent(
             raise Exception(f"Failed to create agent: {resp.status_code} - {resp.text}")
         data = resp.json()
         agent_id = data["agent_id"]
+        if source_override == "SMS":
+            if not _is_local_base_url(base_url):
+                raise RuntimeError(
+                    "BENCHMARK_AGENT_SOURCE=SMS is local-only because the public create-agent API "
+                    "does not accept SMS as a client-supplied source."
+                )
+            _apply_local_agent_source_override(agent_id, source_override)
+            print(f"     source_override={source_override} (applied via local DB)")
         if write_lock_enabled is not None:
             patch_resp = await client.patch(
                 f"{base_url}/api/agents/{agent_id}",

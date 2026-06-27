@@ -664,26 +664,38 @@ async def run_agent(  # noqa: C901
                 max_llm_attempts = 3
                 for llm_attempt in range(1, max_llm_attempts + 1):
                     try:
-                        pydantic_result, usage, detected_tools_ordered = await call_llm_structured_streaming(
-                            messages=messages,
-                            model=model,
-                            temperature=1.0,
-                            max_tokens=8192,
-                            response_model=AgentAction,
-                            on_chunk=on_chunk,
-                            reasoning_max_tokens=reasoning_max_tokens,
+                        async with span(
+                            "call_llm",
                             agent_id=agent_id,
-                            claude_token=current_claude_token,
-                            claude_token_source=current_claude_token_source,
-                            claude_token_pool_id=current_claude_token_pool_id,
-                            claude_token_user_id=user_id,
-                            gpt_token=current_gpt_token,
-                            gpt_account_id=current_gpt_account_id,
-                            gpt_token_source=current_gpt_token_source,
-                            gpt_token_pool_id=current_gpt_token_pool_id,
-                            gpt_token_user_id=user_id,
+                            model=model,
                             call_site=cache_call_site,
-                        )
+                            llm_attempt=llm_attempt,
+                            agent_type="explore" if cache_call_site == "explore_agent" else None,
+                            context_messages=len(llm_context),
+                            request_message_count=len(messages) if messages is not None else None,
+                            gpt_auth_present=bool(current_gpt_token),
+                            claude_auth_present=bool(current_claude_token),
+                        ):
+                            pydantic_result, usage, detected_tools_ordered = await call_llm_structured_streaming(
+                                messages=messages,
+                                model=model,
+                                temperature=1.0,
+                                max_tokens=8192,
+                                response_model=AgentAction,
+                                on_chunk=on_chunk,
+                                reasoning_max_tokens=reasoning_max_tokens,
+                                agent_id=agent_id,
+                                claude_token=current_claude_token,
+                                claude_token_source=current_claude_token_source,
+                                claude_token_pool_id=current_claude_token_pool_id,
+                                claude_token_user_id=user_id,
+                                gpt_token=current_gpt_token,
+                                gpt_account_id=current_gpt_account_id,
+                                gpt_token_source=current_gpt_token_source,
+                                gpt_token_pool_id=current_gpt_token_pool_id,
+                                gpt_token_user_id=user_id,
+                                call_site=cache_call_site,
+                            )
                         break  # Success
                     except (ValueError, Exception) as e:
                         if llm_attempt < max_llm_attempts and "Failed to parse" in str(e):
@@ -772,7 +784,7 @@ async def run_agent(  # noqa: C901
                         goal_text,
                         iteration,
                     ],
-                    start_to_close_timeout=timedelta(seconds=180),
+                    start_to_close_timeout=timedelta(seconds=600),
                     retry_policy=RetryPolicy(maximum_attempts=3),
                     heartbeat_timeout=timedelta(seconds=60),
                 )

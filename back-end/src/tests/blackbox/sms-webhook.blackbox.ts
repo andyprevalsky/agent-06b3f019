@@ -49,9 +49,8 @@ const CASE_CONCURRENCY = Number(
   process.env.BLACKBOX_TEST_CASE_CONCURRENCY ?? process.env.CONTRACT_TEST_CASE_CONCURRENCY ?? 30
 );
 
-// Direct Prisma client for assigning a phone number to a User (so the
-// webhook hits the "known phone" branch) and seeding SmsShortcode rows
-// for the shortcode-approval fast path.
+// Direct Prisma client for assigning a phone number to a User so the webhook
+// hits the "known phone" branch.
 const prisma = new PrismaClient();
 
 // ==================== TEST INFRASTRUCTURE ====================
@@ -329,8 +328,8 @@ async function testReproducibility_threeSequential() {
 
 // ==================== KNOWN-PHONE COVERAGE TESTS ====================
 // These tests assign a phone number to a real User row, then exercise the
-// "user found" branches of handleInboundSms (lines 348-374): /clear,
-// shortcode approval, and the supervisor route. The supervisor LLM call is
+// "user found" branches of handleInboundSms: /clear and the supervisor route.
+// The supervisor LLM call is
 // fire-and-forget (c8-ignored) — we assert the webhook returns 200
 // immediately and side effects on DB rows we own are visible synchronously.
 
@@ -399,35 +398,30 @@ async function testCoverage_clearCommandFromKnownPhone() {
   }
 }
 
-// Covers service.ts lines 81-115, 140-156 — handleShortcodeApproval path:
-// regex match, lookupAndConsumeShortcode hit, repo.updateAttentionRequest,
-// the shortcode-confirm sendSms reply. Skips the Temporal signal block (c8-ignored).
-async function testCoverage_shortcodeApprovalFromKnownPhone() {
+async function testCoverage_codeLikeApprovalRoutesToSupervisor() {
   const phone = uniqueSmsPhone();
   const userId = await provisionUserWithPhone(phone);
 
-  // Need an Agent row + AgentAttentionRequest row to reference from the
-  // shortcode. The webhook calls repo.updateAttentionRequest(id, ...) so the
-  // row must exist; otherwise Prisma throws and we'd cover the wrong branch.
+  // Seed a legacy-looking shortcode row. Code-shaped SMS text should no longer
+  // bypass the supervisor, consume this row, or update the attention request.
   const agent = await prisma.agent.create({
     data: {
       userId,
-      goal: 'sms shortcode coverage agent',
+      goal: 'sms natural approval coverage agent',
       status: 'ACTIVE',
       source: 'SMS',
-      temporalWorkflowId: 'wf-bb-sms-shortcode',
+      temporalWorkflowId: 'wf-bb-sms-natural-approval',
     },
   });
   const attention = await prisma.agentAttentionRequest.create({
     data: {
       userId,
       agentId: agent.id,
-      workflowId: 'wf-bb-sms-shortcode',
-      question: 'Test attention request for shortcode approval',
+      workflowId: 'wf-bb-sms-natural-approval',
+      question: 'Can I place the Amazon order for $42?',
     },
   });
 
-  // 5-char alphanumeric, alphabet matches SHORTCODE_ALPHABET in shortcodes.ts
   const code = 'AB23K';
   await prisma.smsShortcode.create({
     data: {
@@ -435,7 +429,7 @@ async function testCoverage_shortcodeApprovalFromKnownPhone() {
       userId,
       attentionRequestId: attention.id,
       agentId: agent.id,
-      workflowId: 'wf-bb-sms-shortcode',
+      workflowId: 'wf-bb-sms-natural-approval',
       expiresAt: new Date(Date.now() + 60 * 60 * 1000),
     },
   });
@@ -455,41 +449,30 @@ async function testCoverage_shortcodeApprovalFromKnownPhone() {
     });
     assertStatus(res.status, 200, res.data);
 
-    // The shortcode should be consumed (deleted) after a successful approval.
     const remaining = await prisma.smsShortcode.findFirst({ where: { code, userId } });
-    if (remaining) {
-      throw new Error('Shortcode should have been consumed after approval');
+    if (!remaining) {
+      throw new Error('Code-like SMS should not consume a shortcode row');
     }
 
-    // The attention request should be updated with the user's response.
     const updated = await prisma.agentAttentionRequest.findUnique({
       where: { id: attention.id },
     });
-    if (!updated || updated.userResponse !== 'Approved via SMS shortcode') {
+    if (!updated || updated.userResponse !== null) {
       throw new Error(
-        `Expected attention.userResponse="Approved via SMS shortcode", got "${updated?.userResponse}"`
+        `Code-like SMS should not update attention directly, got "${updated?.userResponse}"`
       );
     }
-  } finally {
-    await prisma.smsShortcode.deleteMany({ where: { userId } });
-    await prisma.agentAttentionRequest.deleteMany({ where: { agentId: agent.id } });
-    await prisma.agent.deleteMany({ where: { id: agent.id } });
-    await prisma.user.deleteMany({ where: { userId } });
-  }
-}
 
-// Covers service.ts lines 99-100, 152-155 — invalid/expired shortcode path:
-// the regex matches but lookupAndConsumeShortcode returns null, so we send
-// the "Code not found or expired" reply.
-async function testCoverage_invalidShortcodeFromKnownPhone() {
-  const phone = uniqueSmsPhone();
-  const userId = await provisionUserWithPhone(phone);
-  try {
-    const res = await request(`${BASE_URL}/api/sms/inbound`, {
+    const session = await prisma.smsSession.findUnique({ where: { userId } });
+    if (!session || session.lastInboundSeq < 1) {
+      throw new Error('Code-like SMS should route to supervisor and bump lastInboundSeq');
+    }
+
+    await request(`${BASE_URL}/api/sms/inbound`, {
       method: 'POST',
       body: JSON.stringify({
         data: {
-          body: 'yes ZZZZZ', // valid regex shape, but no shortcode row exists
+          body: '/clear',
           conversation: {
             contact: { phone_number: phone },
             phone_number: { number: '+14154498072' },
@@ -497,8 +480,12 @@ async function testCoverage_invalidShortcodeFromKnownPhone() {
         },
       }),
     });
-    assertStatus(res.status, 200, res.data);
+    await new Promise((r) => setTimeout(r, 200));
   } finally {
+    await prisma.smsSession.deleteMany({ where: { userId } });
+    await prisma.smsShortcode.deleteMany({ where: { userId } });
+    await prisma.agentAttentionRequest.deleteMany({ where: { agentId: agent.id } });
+    await prisma.agent.deleteMany({ where: { id: agent.id } });
     await prisma.user.deleteMany({ where: { userId } });
   }
 }
@@ -598,20 +585,16 @@ async function runAll() {
   ];
 
   const sequentialTests = [
-    // ---- known-phone branch coverage (handleClearCommand, handleShortcodeApproval,
-    // routeToSupervisor call site). Each test provisions its own User row keyed
+    // ---- known-phone branch coverage (handleClearCommand and routeToSupervisor
+    // call site). Each test provisions its own User row keyed
     // by a synthetic phone so they don't collide with seed data.
     {
       name: 'coverage -- /clear from known phone clears SmsSession',
       fn: testCoverage_clearCommandFromKnownPhone,
     },
     {
-      name: 'coverage -- shortcode approval consumes code + updates AttentionRequest',
-      fn: testCoverage_shortcodeApprovalFromKnownPhone,
-    },
-    {
-      name: 'coverage -- invalid shortcode replies "not found or expired"',
-      fn: testCoverage_invalidShortcodeFromKnownPhone,
+      name: 'coverage -- code-like approval routes to supervisor',
+      fn: testCoverage_codeLikeApprovalRoutesToSupervisor,
     },
     {
       name: 'coverage -- regular message routes to supervisor (returns 200 immediately)',

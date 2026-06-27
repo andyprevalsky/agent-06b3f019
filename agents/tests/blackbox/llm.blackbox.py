@@ -1099,22 +1099,16 @@ async def test_set_response_schema_activity_http_error():
 
 
 async def test_call_llm_rose_path():
-    """call_llm routes Rose models through the in-process Rose client (waterfall via OpenRouter)."""
-    sse = _sse_body(
-        [
-            {
-                "choices": [{"delta": {"content": "hello from rose"}, "finish_reason": "stop"}],
-                "usage": {
-                    "prompt_tokens": 10,
-                    "completion_tokens": 20,
-                    "total_tokens": 30,
-                },
-            }
-        ]
+    """call_llm routes Rose models through the in-process Rose client."""
+    sse = _anthropic_sse_body(
+        text="hello from rose",
+        input_tokens=10,
+        output_tokens=20,
+        stop_reason="end_turn",
     )
     setup_mock(
         {
-            "openrouter.ai/api/v1/chat/completions": {
+            "api.anthropic.com/v1/messages": {
                 "status": 200,
                 "text": sse,
                 "headers": {"Content-Type": "text/event-stream"},
@@ -1136,6 +1130,7 @@ async def test_call_llm_rose_path():
     assert result["usage"]["prompt_tokens"] == 10
     assert result["usage"]["completion_tokens"] == 20
     assert result["usage"]["total_tokens"] == 30
+    assert result["usage"]["actual_model"] == "claude-sonnet-4-6-anthropic"
 
 
 async def test_call_llm_rose_with_claude_token_and_skip_cache_write():

@@ -933,6 +933,6 @@ async def _fetch_fresh_or_none(auth: ClaudeAuthContext) -> Optional[ClaudeAuthCo
     # Preserve the caller's callbacks + rotation budget across the swap.
     fresh.mark_rate_limited = fresh.mark_rate_limited or auth.mark_rate_limited
     fresh.fetch_fresh = fresh.fetch_fresh or auth.fetch_fresh
-    if fresh.max_rotations is None or fresh.max_rotations == 3:
+    if fresh.max_rotations is None or fresh.max_rotations == 2:
         fresh.max_rotations = auth.max_rotations
     return fresh

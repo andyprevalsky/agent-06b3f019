@@ -10,14 +10,12 @@
  */
 
 import * as repo from './repo';
-import { SHORTCODE_REGEX, SURGE_SIGNING_SECRET, IS_PRODUCTION } from './config';
-import type { ShortcodeResult } from './types';
+import { SURGE_SIGNING_SECRET, IS_PRODUCTION } from './config';
 import { validateSurgeSignature, parseSurgePayload } from './service.validation';
 import { getTemporalClient } from '../../providers/temporal';
 import { sendSms } from '../../providers/smsQueue';
 import { SMS_TEMPLATES } from '../../providers/smsTemplates';
 import { handleSmsSupervisorMessage } from '../../providers/smsSupervisor';
-import { lookupAndConsumeShortcode } from '../../providers/smsSupervisor/shortcodes';
 import { createLogger } from '../../providers/logger';
 
 const log = createLogger('SMS Webhook');
@@ -72,87 +70,6 @@ function abortAllSupervisorRuns(userId: string): void {
     runs.clear();
     activeSupervisorRuns.delete(userId);
   }
-}
-
-// ---------------------------------------------------------------------------
-// Shortcode approval fast-path
-// ---------------------------------------------------------------------------
-
-export async function handleShortcodeApproval(
-  messageBody: string,
-  userId: string,
-  fromPhone: string,
-  requestStart: number
-): Promise<boolean> {
-  const shortcodeMatch = messageBody.match(SHORTCODE_REGEX);
-  if (!shortcodeMatch) {
-    return false;
-  }
-
-  const code = shortcodeMatch[1].toUpperCase();
-
-  log.info('Shortcode approval attempt', {
-    code,
-    userId,
-  });
-
-  const shortcodeResult: ShortcodeResult | null = await lookupAndConsumeShortcode(code, userId);
-
-  if (shortcodeResult) {
-    log.info('Shortcode valid, approving', {
-      code,
-      attentionRequestId: shortcodeResult.attentionRequestId,
-      agentId: shortcodeResult.agentId,
-      workflowId: shortcodeResult.workflowId,
-    });
-
-    // Update the attention request
-    await repo.updateAttentionRequest(
-      shortcodeResult.attentionRequestId,
-      'Approved via SMS shortcode'
-    );
-
-    // Signal the workflow
-    /* c8 ignore start -- Temporal signal requires live Temporal server */
-    try {
-      const client = await getTemporalClient();
-      const handle = client.workflow.getHandle(shortcodeResult.workflowId);
-      await handle.signal(
-        'receive_user_response',
-        JSON.stringify({
-          request_id: shortcodeResult.attentionRequestId,
-          response: 'Approved via SMS shortcode',
-        })
-      );
-
-      log.info('Signaled workflow with shortcode approval', {
-        workflowId: shortcodeResult.workflowId,
-        agentId: shortcodeResult.agentId,
-      });
-    } catch (error) {
-      log.error('Failed to signal workflow for shortcode', {
-        workflowId: shortcodeResult.workflowId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-    /* c8 ignore stop */
-
-    // Send confirmation
-    const agentPrefix = shortcodeResult.agentId.substring(0, 6);
-    await sendSms(fromPhone, `[${agentPrefix}] Approved! Agent is continuing.`);
-
-    log.info('Shortcode approval complete', {
-      code,
-      durationMs: Date.now() - requestStart,
-    });
-
-    return true;
-  }
-
-  // Invalid/expired shortcode
-  log.info('Shortcode not found or expired', { code });
-  await sendSms(fromPhone, `Code "${code}" not found or expired. Check the code and try again.`);
-  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -376,17 +293,6 @@ export async function handleInboundSms(input: InboundSmsInput): Promise<InboundS
     userId: user.userId,
     phone: fromPhone?.substring(0, 7) + '****',
   });
-
-  // FAST PATH: Shortcode approval (no LLM needed)
-  const wasShortcode = await handleShortcodeApproval(
-    messageBody,
-    user.userId,
-    fromPhone,
-    requestStart
-  );
-  if (wasShortcode) {
-    return { ok: true };
-  }
 
   // FAST PATH: /clear command (reset SMS session)
   if (messageBody.toLowerCase() === '/clear') {

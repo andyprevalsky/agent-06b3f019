@@ -62,6 +62,23 @@ The isolated reproduction should:
 
 If an isolated reproduction is not feasible, state why explicitly and use the narrowest available integration test or benchmark rerun instead. Do not use the benchmark itself as the only reproduction when a smaller one can prove the same causal mechanism.
 
+### Step 3a: Reconstruct failing LLM calls
+
+If the suspected root cause is an LLM call, provider call, model gateway call, compute-token acquisition, tool-call parser response, or any other model-facing boundary, the isolated reproduction must start by reconstructing the exact failing LLM request locally from captured evidence.
+
+Required reconstruction evidence:
+- The full message list/context sent to the model
+- The system prompt and tool/schema set
+- The model name and provider/auth path used
+- Generation config that can affect behavior, including reasoning budget, max tokens, response schema, tool choice, cache controls, and timeout/deadline settings
+- The captured failure span/log line, including provider, request/span id, duration, timeout type, and any token/auth rotation metadata
+
+The RCA is incomplete until you either:
+1. Re-run the reconstructed call through the same local client path and reproduce the failure, then iteratively reduce or vary the request to identify which input/config/provider condition makes it fail; or
+2. Prove the failure cannot be reproduced locally because it depends on an unavailable external state, such as an expired provider token, provider incident, or production-only compute-token lease, and document the narrowest replay that was attempted plus the exact missing state.
+
+Do not classify an LLM issue as "model/provider timeout" and stop there. Treat the LLM request as data: preserve it, replay it, diff it against nearby successful calls, and identify whether the failing condition is in our prompt/context/schema/config, our provider-routing/auth code, or a third-party service state.
+
 ## Step 4: Classify the failure
 
 Not all errors are bugs in our code. Before writing a fix, classify:

@@ -8,13 +8,228 @@ This module provides:
 """
 
 import asyncio
+import json
 import logging
 import math
 import random
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urljoin, urlparse
 
 logger = logging.getLogger(__name__)
+
+
+_IMAGE_ATTR_KEYS = (
+    "currentSrc",
+    "current-src",
+    "src",
+    "data-src",
+    "data-lazy-src",
+    "data-old-hires",
+    "data-a-hires",
+    "srcset",
+    "data-srcset",
+    "data-a-dynamic-image",
+)
+
+
+def _best_url_from_srcset(value: str) -> Optional[str]:
+    candidates: List[Tuple[float, str]] = []
+    for part in value.split(","):
+        tokens = part.strip().split()
+        if not tokens:
+            continue
+        url = tokens[0].strip()
+        weight = 0.0
+        if len(tokens) > 1:
+            descriptor = tokens[-1].strip().lower()
+            match = re.match(r"^(\d+(?:\.\d+)?)(w|x)$", descriptor)
+            if match:
+                weight = float(match.group(1))
+        candidates.append((weight, url))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
+
+
+def _urls_from_dynamic_image_attr(value: str) -> List[str]:
+    text = value.strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        # Amazon occasionally stores this as a JS-ish object; URL extraction is
+        # still safe because we only keep http(s) image candidates below.
+        return re.findall(r"https?://[^\"'\s]+", text)
+    if isinstance(parsed, dict):
+        return [str(key) for key in parsed.keys()]
+    if isinstance(parsed, list):
+        return [str(item) for item in parsed if isinstance(item, str)]
+    return []
+
+
+def _normalize_image_url(raw_url: str, page_url: str) -> Optional[str]:
+    raw_url = (raw_url or "").strip().strip("\"'")
+    if not raw_url:
+        return None
+    if raw_url.startswith("//"):
+        raw_url = f"https:{raw_url}"
+    if raw_url.startswith("data:"):
+        return None
+    url = urljoin(page_url, raw_url)
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    lower_path = parsed.path.lower()
+    if lower_path.endswith((".svg", ".gif")):
+        return None
+    if any(marker in url.lower() for marker in ("transparent-pixel", "spacer", "pixel.gif")):
+        return None
+    return url
+
+
+def _image_url_quality_score(url: str, area: int) -> int:
+    lower = url.lower()
+    score = 0
+    if "/images/i/" in lower:
+        score += 25
+    if re.search(r"\._[^/]*(?:ac|aa|sx|sy|ul|ux|uy)\d+", lower):
+        score += 30
+    size_match = re.search(r"\._[^/]*(?:ac|aa|sx|sy|ul|ux|uy)(\d+)", lower)
+    if size_match:
+        score += min(int(size_match.group(1)), 1000) // 20
+    if lower.endswith((".jpg", ".jpeg", ".webp")):
+        score += 25
+    if lower.endswith(".png"):
+        score -= 5
+    if area and area < 32 * 32:
+        score -= 40
+    if any(marker in lower for marker in ("cardart", "logo", "sprite", "icon")):
+        score -= 35
+    return score
+
+
+def _image_urls_from_attrs(attrs: Dict[str, str], page_url: str) -> List[str]:
+    urls: List[str] = []
+    for key in _IMAGE_ATTR_KEYS:
+        value = attrs.get(key)
+        if not value:
+            continue
+        if key in {"srcset", "data-srcset"}:
+            raw_urls = [_best_url_from_srcset(value)]
+        elif key == "data-a-dynamic-image":
+            raw_urls = _urls_from_dynamic_image_attr(value)
+        else:
+            raw_urls = [value]
+        for raw_url in raw_urls:
+            if not raw_url:
+                continue
+            url = _normalize_image_url(raw_url, page_url)
+            if url and url not in urls:
+                urls.append(url)
+    return urls
+
+
+def _candidate_text_from_node(original: Any) -> str:
+    parts: List[str] = []
+    attrs = getattr(original, "attributes", None) or {}
+    for key in ("alt", "aria-label", "title"):
+        value = attrs.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+    parent = getattr(original, "parent_node", None)
+    for node in (original, parent):
+        if not node or not hasattr(node, "get_all_children_text"):
+            continue
+        try:
+            text = node.get_all_children_text(max_depth=2)
+        except TypeError:
+            text = node.get_all_children_text()
+        except Exception:
+            text = ""
+        if text:
+            parts.append(str(text).strip())
+    compact = re.sub(r"\s+", " ", " ".join(parts)).strip()
+    return compact[:300]
+
+
+def _extract_media_candidates_from_dom_state(
+    dom_state: Any,
+    *,
+    page_url: str,
+    max_candidates: int = 12,
+) -> List[Dict[str, Any]]:
+    """Extract compact image evidence from the DOM object before LLM serialization."""
+    root = getattr(dom_state, "_root", None)
+    if not root:
+        return []
+
+    candidates_by_url: Dict[str, Dict[str, Any]] = {}
+
+    def traverse(node: Any) -> None:
+        if not node:
+            return
+        original = getattr(node, "original_node", node)
+        tag = (getattr(original, "tag_name", "") or getattr(original, "node_name", "") or "").lower()
+        attrs = getattr(original, "attributes", None) or {}
+        if tag in {"img", "source", "picture"} and attrs:
+            urls = _image_urls_from_attrs(attrs, page_url)
+            if urls:
+                bounds = None
+                snapshot_node = getattr(original, "snapshot_node", None)
+                rect = getattr(snapshot_node, "clientRects", None) or getattr(original, "absolute_position", None)
+                if rect:
+                    bounds = {
+                        "x": round(getattr(rect, "x", 0) or 0),
+                        "y": round(getattr(rect, "y", 0) or 0),
+                        "width": round(getattr(rect, "width", 0) or 0),
+                        "height": round(getattr(rect, "height", 0) or 0),
+                    }
+                alt = attrs.get("alt") or attrs.get("aria-label") or attrs.get("title")
+                nearby_text = _candidate_text_from_node(original)
+                visible = bool(getattr(original, "is_visible", True)) and bool(
+                    getattr(node, "should_display", True)
+                )
+                for url in urls:
+                    candidate = {
+                        "url": url,
+                        "alt": alt,
+                        "nearby_text": nearby_text,
+                        "tag": tag,
+                        "visible": visible,
+                    }
+                    if bounds:
+                        candidate["bounds"] = bounds
+                    candidates_by_url.setdefault(url, candidate)
+
+        for child in getattr(node, "children", []) or []:
+            traverse(child)
+
+    traverse(root)
+
+    def score(candidate: Dict[str, Any]) -> Tuple[int, int]:
+        url = str(candidate.get("url") or "").lower()
+        text = f"{candidate.get('alt') or ''} {candidate.get('nearby_text') or ''}".lower()
+        bounds = candidate.get("bounds") if isinstance(candidate.get("bounds"), dict) else {}
+        area = int(bounds.get("width") or 0) * int(bounds.get("height") or 0)
+        value = 0
+        if candidate.get("visible"):
+            value += 40
+        if any(host in url for host in ("media-amazon", "images-na.ssl-images-amazon", "ssl-images-amazon")):
+            value += 35
+        value += _image_url_quality_score(url, area)
+        if any(word in text for word in ("price", "$", "bought", "seller", "ships from", "color", "size")):
+            value += 20
+        if area >= 80 * 80:
+            value += 15
+        if any(word in text for word in ("logo", "sprite", "icon", "premium brands", "trending")):
+            value -= 30
+        return (value, area)
+
+    ranked = sorted(candidates_by_url.values(), key=score, reverse=True)
+    return ranked[:max_candidates]
 
 
 def offcenter_click_point(
@@ -315,7 +530,32 @@ class DOMService:
                 self._session = None
                 self._selector_map = {}
                 logger.info("🔌 Disconnected from browser")
-    
+
+    async def _send_cdp_command(
+        self,
+        cdp_session: Any,
+        method: str,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Send a CDP command across the two session shapes used in this repo."""
+        session_id = getattr(cdp_session, "session_id", None)
+        send = getattr(cdp_session, "send", None)
+        if callable(send):
+            return await send(method, params or {})
+
+        cdp_client = getattr(cdp_session, "cdp_client", None)
+        if cdp_client is None:
+            raise RuntimeError("CDP session has neither send() nor cdp_client")
+
+        send_raw = getattr(cdp_client, "send_raw", None)
+        if callable(send_raw):
+            return await send_raw(method=method, params=params or {}, session_id=session_id)
+
+        domain_name, command_name = method.split(".", 1)
+        domain = getattr(cdp_client.send, domain_name)
+        command = getattr(domain, command_name)
+        return await command(params=params or {}, session_id=session_id)
+
     async def _suppress_browser_overlays(self) -> None:
         """Suppress native browser-chrome overlays that CDP screenshots can't capture.
 
@@ -340,7 +580,7 @@ class DOMService:
             #    but is invisible to CDP screenshots. With enableUI=false, WebAuthn requests
             #    fail gracefully and sites fall back to password login.
             try:
-                await cdp_session.send("WebAuthn.enable", {"enableUI": False})
+                await self._send_cdp_command(cdp_session, "WebAuthn.enable", {"enableUI": False})
                 # Keep this session for passkey injection/readback: a virtual
                 # authenticator only lives as long as the CDP session that added
                 # it. enableUI=false is exactly right for cloud custody — the
@@ -638,7 +878,8 @@ class DOMService:
             logger.warning("⚠️ [passkey] no WebAuthn CDP session; cannot inject passkeys")
             return
         try:
-            result = await self._webauthn_cdp.send(
+            result = await self._send_cdp_command(
+                self._webauthn_cdp,
                 "WebAuthn.addVirtualAuthenticator",
                 {
                     "options": {
@@ -674,7 +915,8 @@ class DOMService:
             if user_handle:
                 credential["userHandle"] = user_handle
             try:
-                await self._webauthn_cdp.send(
+                await self._send_cdp_command(
+                    self._webauthn_cdp,
                     "WebAuthn.addCredential",
                     {"authenticatorId": self._passkey_authenticator_id, "credential": credential},
                 )
@@ -683,6 +925,16 @@ class DOMService:
             except Exception as e:
                 logger.warning(f"⚠️ [passkey] addCredential failed for {rp_id}: {e}")
         logger.info(f"🔑 [passkey] seeded {seeded} passkey credential(s) on virtual authenticator for the session")
+        if seeded:
+            counts = await self.read_passkey_signcounts()
+            expected_ids = set(self._passkey_seed_counts)
+            observed_ids = set(counts)
+            missing = expected_ids - observed_ids
+            logger.info(
+                "🔑 [passkey] virtual authenticator readback: "
+                f"expected_count={len(expected_ids)} observed_count={len(observed_ids)} "
+                f"missing_count={len(missing)}"
+            )
 
     async def read_passkey_signcounts(self) -> Dict[str, int]:
         """Return {credentialId: signCount} for the seeded authenticator.
@@ -694,7 +946,8 @@ class DOMService:
         if self._webauthn_cdp is None or self._passkey_authenticator_id is None:
             return {}
         try:
-            result = await self._webauthn_cdp.send(
+            result = await self._send_cdp_command(
+                self._webauthn_cdp,
                 "WebAuthn.getCredentials",
                 {"authenticatorId": self._passkey_authenticator_id},
             )
@@ -791,6 +1044,10 @@ class DOMService:
         
         # Extract page statistics
         page_stats = self._extract_page_statistics(state)
+        media_candidates = _extract_media_candidates_from_dom_state(
+            state.dom_state,
+            page_url=state.url or "",
+        )
         
         # Build tabs list
         tabs = []
@@ -821,6 +1078,8 @@ class DOMService:
             "tabs": tabs,
             "page_stats": page_stats,
         }
+        if media_candidates:
+            result["media_candidates"] = media_candidates
         
         # Add recent events if available
         if hasattr(state, 'recent_events') and state.recent_events:

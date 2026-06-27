@@ -11,7 +11,8 @@
 # No `set -e` on purpose: lsof/ps can fail transiently on exiting pids and we
 # don't want to abort the whole listing when one row can't be inspected.
 
-WORKTREE_DIR="$PWD"
+WORKTREE_DIR="$(pwd -P)"
+MANIFEST="$WORKTREE_DIR/.context/services.json"
 
 pid_tree() {
     local root=$1
@@ -22,11 +23,100 @@ pid_tree() {
 }
 
 cwd_of() {
-    lsof -p "$1" -Fn 2>/dev/null | awk '/^fcwd$/ {getline; sub(/^n/,""); print; exit}'
+    lsof -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1
+}
+
+cmd_of() {
+    ps -p "$1" -o command= 2>/dev/null | head -1
+}
+
+cwd_matches() {
+    local cwd
+    cwd=$(cwd_of "$1")
+    [[ "$cwd" == "$WORKTREE_DIR" || "$cwd" == "$WORKTREE_DIR"/* ]]
+}
+
+service_like_process() {
+    local pid=$1
+    local cwd cmd
+    cwd=$(cwd_of "$pid")
+    [[ "$cwd" == "$WORKTREE_DIR" || "$cwd" == "$WORKTREE_DIR"/* ]] || return 1
+    cmd=$(cmd_of "$pid")
+    case "$cwd" in
+        "$WORKTREE_DIR/back-end"|"$WORKTREE_DIR/back-end"/*)
+            echo "$cmd" | grep -Eq 'tsx.*src/server\.ts|tsx.*server\.ts|node .*src/server\.ts|npm exec tsx src/server\.ts'
+            return
+            ;;
+        "$WORKTREE_DIR/front-end"|"$WORKTREE_DIR/front-end"/*)
+            echo "$cmd" | grep -Eq '(^|/| )(vite|npm|npx)( |$|/)'
+            return
+            ;;
+        "$WORKTREE_DIR/agents"|"$WORKTREE_DIR/agents"/*)
+            echo "$cmd" | grep -Eq 'worker\.py|run_local_worker|playwright.*/driver|package/cli\.js run-driver'
+            return
+            ;;
+        "$WORKTREE_DIR/mac-app"|"$WORKTREE_DIR/mac-app"/*)
+            echo "$cmd" | grep -Eq 'electron|npm run dev|vite'
+            return
+            ;;
+    esac
+    echo "$cmd" | grep -Fq "$WORKTREE_DIR"
+}
+
+manifest_pids() {
+    [ -f "$MANIFEST" ] || return 0
+    python3 - "$MANIFEST" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+
+for pid in [data.get("run_sh_pid"), *[service.get("pid") for service in data.get("services", [])]]:
+    if isinstance(pid, int) and pid > 0:
+        print(pid)
+PY
+}
+
+service_ports() {
+    [ -f "$MANIFEST" ] || return 0
+    python3 - "$MANIFEST" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+
+ports = data.get("ports", {})
+for key in ("backend", "frontend", "health", "mac_app", "sdk_metrics"):
+    value = ports.get(key)
+    if isinstance(value, int) and value > 0:
+        print(value)
+PY
+}
+
+service_dir_cwd_pids() {
+    local dir
+    for dir in "$WORKTREE_DIR/back-end" "$WORKTREE_DIR/front-end" "$WORKTREE_DIR/agents" "$WORKTREE_DIR/mac-app"; do
+        [ -d "$dir" ] || continue
+        lsof -n -w -t -a -d cwd +d "$dir" 2>/dev/null || true
+    done
+}
+
+add_pid() {
+    local pid=$1
+    [ -n "$pid" ] || return
+    [ "$pid" = "$$" ] && return
+    kill -0 "$pid" 2>/dev/null || return
+    pid_tree "$pid" >> "$ALL"
 }
 
 ALL=$(mktemp)
 trap 'rm -f "$ALL"' EXIT
+
+for pid in $(manifest_pids); do
+    add_pid "$pid"
+done
 
 for pattern in \
     "scripts/run\.sh" \
@@ -35,11 +125,23 @@ for pattern in \
     "$WORKTREE_DIR/front-end" \
     "$WORKTREE_DIR/mac-app"; do
     for pid in $(pgrep -f "$pattern" 2>/dev/null); do
-        cwd=$(cwd_of "$pid")
-        [[ -z "$cwd" || "$cwd" == "$WORKTREE_DIR"* ]] || continue
-        pid_tree "$pid" >> "$ALL"
+        cwd_matches "$pid" || echo "$(cmd_of "$pid")" | grep -Fq "$WORKTREE_DIR" || continue
+        add_pid "$pid"
     done
 done
+
+for port in $(service_ports); do
+    for pid in $(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null); do
+        cwd_matches "$pid" || continue
+        add_pid "$pid"
+    done
+done
+
+while read -r pid; do
+    [ -n "$pid" ] || continue
+    service_like_process "$pid" || continue
+    add_pid "$pid"
+done < <(service_dir_cwd_pids | sort -un)
 
 PIDS=$(sort -un "$ALL")
 

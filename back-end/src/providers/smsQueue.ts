@@ -63,7 +63,6 @@ export async function sendSms(
   }
 }
 
-/* c8 ignore start -- sendMms is effectively unused; only caller is a dead code path in auth/service.ts */
 /**
  * Send MMS with media attachment via Surge (for vCard, images, etc.)
  */
@@ -112,7 +111,6 @@ export async function sendMms(
     return { success: false, error: String(error) };
   }
 }
-/* c8 ignore stop */
 
 /**
  * Get user's phone number by userId

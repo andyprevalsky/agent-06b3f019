@@ -504,7 +504,8 @@ if [ "$USER_EXISTS" = "0" ]; then
     echo "🌱 Syncing production data to local database (first run)..."
     (cd back-end && npx tsx scripts/seed-local.ts)
 else
-    echo "🌱 Local database already seeded (skipping sync)"
+    echo "🌱 Local database already seeded; syncing browser credentials..."
+    (cd back-end && npx tsx scripts/seed-local.ts --credentials-only)
 fi
 
 # ── Pre-flight: ensure node_modules exist for all JS services ──
@@ -540,19 +541,6 @@ fi
 # handles macOS multi-worktree scenarios where we must distinguish our
 # processes from another workspace's.
 if ! $IS_CLOUD; then
-    KILLED_ANY=false
-    has_live_runsh_ancestor() {
-        local pid=$1
-        while true; do
-            local ppid
-            ppid=$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d ' ') || return 1
-            [ -z "$ppid" ] || [ "$ppid" = "0" ] || [ "$ppid" = "1" ] && return 1
-            local pcmd
-            pcmd=$(ps -p "$ppid" -o command= 2>/dev/null) || return 1
-            echo "$pcmd" | grep -q "scripts/run.sh" && return 0
-            pid=$ppid
-        done
-    }
     SERVICE_PORTS=($BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $SDK_METRICS_PORT $NGROK_WEB_PORT)
     $IS_MAC && SERVICE_PORTS+=($MAC_APP_PORT)
     for port in "${SERVICE_PORTS[@]}"; do
@@ -560,36 +548,14 @@ if ! $IS_CLOUD; then
             cmd=$(ps -p "$pid" -o command= 2>/dev/null) || true
             echo "$cmd" | grep -qi docker && continue
             if process_belongs_to_this_worktree "$pid"; then
-                if has_live_runsh_ancestor "$pid"; then
-                    echo "✅ Services already running for this worktree (PID $pid on port $port). Exiting."
-                    exit 0
-                fi
-                echo "⚠️  Killing orphaned process on port $port (PID $pid)"
-                kill -9 "$pid" 2>/dev/null || true
-                KILLED_ANY=true
                 continue
             fi
             echo "❌ Port $port in use by unknown process (PID $pid). Kill it manually or choose a different port range."
             exit 1
         done
     done
-    for pattern in \
-        "$PWD/back-end/src/server.ts" \
-        "$PWD/front-end.*vite" \
-        "$PWD/mac-app/node_modules" \
-        "$PWD/agents/scripts/run_local_worker"; do
-        for pid in $(pgrep -f "$pattern" 2>/dev/null); do
-            has_live_runsh_ancestor "$pid" && continue
-            echo "⚠️  Killing orphaned process (PID $pid)"
-            kill -9 "$pid" 2>/dev/null || true
-            KILLED_ANY=true
-        done
-    done
-    if $KILLED_ANY; then
-        echo -n "   Waiting for ports to free..."
-        sleep 2
-        echo " done"
-    fi
+    echo "🧹 Cleaning stale services for this worktree before startup..."
+    bash "$SCRIPT_DIR/kill-services.sh" || exit 1
 fi
 
 PIDS=()
@@ -838,6 +804,9 @@ cleanup() {
     for pid in "${PIDS[@]}"; do
         kill_tree_hard "$pid"
     done
+    # Sweep by manifest, cwd, and service ports in case a wrapper exited before
+    # its child, or a descendant reparented during a cascade shutdown.
+    bash "$SCRIPT_DIR/kill-services.sh" || true
     if $DB_OWNED_BY_US && ! $USE_SYSTEM_PG; then
         docker stop "$DB_CONTAINER" 2>/dev/null || true
     fi

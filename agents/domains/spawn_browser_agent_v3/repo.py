@@ -573,6 +573,32 @@ async def upload_file_to_session(
         return None
 
 
+async def take_steel_computer_screenshot(session_id: str) -> Dict[str, Any]:
+    """Capture the actual Steel browser window via the Computer API."""
+    if not STEEL_API_KEY:
+        raise RuntimeError("STEEL_API_KEY not set, cannot take Steel computer screenshot")
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(
+            f"https://api.steel.dev/v1/sessions/{session_id}/computer",
+            headers={"steel-api-key": STEEL_API_KEY, "Content-Type": "application/json"},
+            json={"action": "take_screenshot"},
+        )
+        response.raise_for_status()
+        result = response.json()
+
+    screenshot_b64 = result.get("base64_image")
+    if not screenshot_b64:
+        details = (
+            result.get("error")
+            or result.get("output")
+            or result.get("system")
+            or "missing base64_image"
+        )
+        raise RuntimeError(f"Steel computer screenshot did not return an image: {details}")
+    return result
+
+
 # ========================================
 # EXTRACT LLM CALL (gpt-4.1-mini)
 # ========================================

@@ -12,6 +12,7 @@ import { PrismaClient } from '@prisma/client';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import dotenv from 'dotenv';
+import { syncPasskeyCredentials } from './seed-local-credentials';
 
 // Parse .env file directly to get remote DB URL
 // (process.env.DATABASE_URL is already overridden to local by run.sh)
@@ -25,6 +26,7 @@ if (!REMOTE_URL) {
 }
 
 const DEV_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+const CREDENTIALS_ONLY = process.argv.includes('--credentials-only');
 
 const remote = new PrismaClient({ datasources: { db: { url: REMOTE_URL } } });
 const local = new PrismaClient(); // uses process.env.DATABASE_URL (local)
@@ -46,6 +48,19 @@ async function upsertById(model: any, records: any[]): Promise<number> {
   return records.length;
 }
 
+async function syncBrowserCredentials(): Promise<void> {
+  // ── Browser Passwords ──
+  await syncTable('Browser Passwords', async () => {
+    const passwords = await remote.browserPassword.findMany({ where: { userId: DEV_USER_ID } });
+    return upsertById(local.browserPassword, passwords);
+  });
+
+  // ── Passkey Credentials ──
+  await syncTable('Passkey Credentials', async () => {
+    return syncPasskeyCredentials(remote.passkeyCredential, local.passkeyCredential, DEV_USER_ID);
+  });
+}
+
 async function sync() {
   console.log('🔄 Syncing from production database...');
   console.log(`   Remote: ${REMOTE_URL.replace(/:[^:@]+@/, ':***@')}`);
@@ -54,6 +69,12 @@ async function sync() {
 
   // Verify remote connectivity
   await remote.$queryRaw`SELECT 1`;
+
+  if (CREDENTIALS_ONLY) {
+    await syncBrowserCredentials();
+    console.log('\n🔄 Credential sync complete.');
+    return;
+  }
 
   // ── Global: Tools ──
   await syncTable('Tools', async () => {
@@ -250,11 +271,7 @@ async function sync() {
     return upsertById(local.cacheStorageOrigin, caches);
   });
 
-  // ── Browser Passwords ──
-  await syncTable('Browser Passwords', async () => {
-    const passwords = await remote.browserPassword.findMany({ where: { userId: DEV_USER_ID } });
-    return upsertById(local.browserPassword, passwords);
-  });
+  await syncBrowserCredentials();
 
   // ── Goal Blueprints ──
   await syncTable('Goal Blueprints', async () => {

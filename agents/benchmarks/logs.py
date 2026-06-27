@@ -973,10 +973,32 @@ def format_tree_diagnostics(
 
     visited: set = set()
 
+    def _normalized_log_text(log_line: Any) -> str:
+        if not isinstance(log_line, str):
+            return ""
+        try:
+            outer = json.loads(log_line)
+        except json.JSONDecodeError:
+            return log_line
+
+        if not isinstance(outer, dict):
+            return log_line
+
+        message = outer.get("message")
+        if isinstance(message, str) and message.startswith("{"):
+            try:
+                inner = json.loads(message)
+            except json.JSONDecodeError:
+                return message
+            if isinstance(inner, dict):
+                return json.dumps(inner, separators=(",", ":"), default=str)
+        return json.dumps(outer, separators=(",", ":"), default=str)
+
     def _scan_log_errors(log_list: List, source_name: str) -> List[str]:
         found = []
         for log_line in log_list:
-            lower = log_line.lower() if isinstance(log_line, str) else ""
+            text = _normalized_log_text(log_line)
+            lower = text.lower()
             if any(
                 kw in lower
                 for kw in (
@@ -986,12 +1008,15 @@ def format_tree_diagnostics(
                     "exception",
                     "error:",
                     "failed",
-                    "500 ",
-                    "502 ",
-                    "503 ",
+                    '"status":500',
+                    '"status":502',
+                    '"status":503',
+                    " status=500",
+                    " status=502",
+                    " status=503",
                 )
             ):
-                found.append(f"[{source_name}] {log_line[:200]}")
+                found.append(f"[{source_name}] {text[:200]}")
         return found
 
     def _walk(agent_id: str, depth: int = 0):
