@@ -1108,6 +1108,10 @@ async def test_call_llm_rose_path():
     )
     setup_mock(
         {
+            "/api/integrations/compute-code/anthropic-key/cooldown": {
+                "status": 200,
+                "json": {"onCooldown": False},
+            },
             "api.anthropic.com/v1/messages": {
                 "status": 200,
                 "text": sse,
@@ -1116,14 +1120,22 @@ async def test_call_llm_rose_path():
         }
     )
 
-    with patch("temporalio.activity.heartbeat"), patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}):
-        from helpers.llm import call_llm
+    from providers.rose import client as rose_client
 
-        result = await call_llm(
-            messages=[{"role": "user", "content": "hi"}],
-            model="rose-labs/rose-1-lite",
-            call_site="test",
-        )
+    rose_client._reset_anthropic_api_key_cooldown_cache()
+    try:
+        with patch("temporalio.activity.heartbeat"), patch.dict(
+            os.environ, {"ANTHROPIC_API_KEY": "sk-ant-api03-test"}
+        ):
+            from helpers.llm import call_llm
+
+            result = await call_llm(
+                messages=[{"role": "user", "content": "hi"}],
+                model="rose-labs/rose-1-lite",
+                call_site="test",
+            )
+    finally:
+        rose_client._reset_anthropic_api_key_cooldown_cache()
 
     assert result["content"] == "hello from rose"
     assert result["finish_reason"] == "stop"
