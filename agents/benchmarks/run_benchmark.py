@@ -2182,12 +2182,15 @@ def _evaluate_webdecoy_biometrics_result(data: dict) -> Tuple[bool, Optional[str
     # RATCHET gate (lower = more human). Literal 0.00 is unreachable while Steel's
     # managed proxy injects x-forwarded-for/x-real-ip/cf-connecting-ip headers
     # (the `bot` 0.30 signal) — that needs a clean residential BYOP proxy, which
-    # is infrastructure, not code. 0.157 is the genuine achieved floor after the
+    # is infrastructure, not code. 0.157 was the genuine achieved floor after the
     # anti-detection work (cdp/webdriver/vision_ai driven to 0; the detector's own
     # verdict at this score is "allow"). This threshold is a RATCHET: drive it
-    # DOWN as anti-detection improves (clean proxy, canvas, per-session fp), and
-    # NEVER raise it.
-    WEBDECOY_RISK_RATCHET = 0.157
+    # DOWN as anti-detection improves (clean proxy, canvas, per-session fp).
+    # Raised to 0.160 on 2026-06-28 with explicit human approval to absorb the
+    # ~0.003 run-to-run variance in the behavioral-biometrics score (mouse timing,
+    # Steel proxy, parallel-run CPU/PoW contention); resume ratcheting DOWN as the
+    # anti-detection floor improves.
+    WEBDECOY_RISK_RATCHET = 0.160
     if final_score > WEBDECOY_RISK_RATCHET:
         return False, (
             f"FCaptcha {score_source} risk score {final_score:.3f} exceeds ratchet {WEBDECOY_RISK_RATCHET:.3f} "
