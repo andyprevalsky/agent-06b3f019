@@ -13,6 +13,7 @@ from tools.prompts.attempt_completion_with_result import (
 from tools.prompts.call_phone_number import PROMPT as call_phone_number_prompt
 from tools.prompts.grep import PROMPT as grep_prompt
 from tools.prompts.message_person import PROMPT as message_person_prompt
+from tools.prompts.people_search import PROMPT as people_search_prompt
 from tools.prompts.reasoning import PROMPT as reasoning_prompt
 from tools.prompts.send_message_to_user import PROMPT as send_message_to_user_prompt
 from tools.prompts.send_message_to_user_execute_phase import (
@@ -36,6 +37,7 @@ TOOL_PROMPTS: dict[str, str] = {
     # Research
     "grep": grep_prompt,
     "web_search": web_search_prompt,
+    "people_search": people_search_prompt,
     "web_fetch": web_fetch_prompt,
     # Workflow
     "set_plan": set_plan_prompt,

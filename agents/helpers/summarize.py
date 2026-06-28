@@ -54,6 +54,7 @@ TOOL_RESULT_HARD_CAP_CHARS = 50_000
 # Tool name → Human-readable label mapping for summary display
 TOOL_DISPLAY_NAMES = {
     "web_search": "Web Searches",
+    "people_search": "People Searches",
     "spawn_sub_agent": "Sub Agent Spawned",
     "spawn_browser_agent": "Browser Agents Spawned",
     "spawn_claude_code_agent": "Code Agents Spawned",

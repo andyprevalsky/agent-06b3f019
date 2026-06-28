@@ -235,6 +235,7 @@ async def spawn_explore_agent_activity(  # noqa: C901
     from loop.run_agent import run_agent
     from providers.fast_cache.client import resolve_agent_fast_mode
     from tools.grep import GrepManager
+    from tools.people_search import PeopleSearchManager
     from tools.web_fetch import WebFetchManager
     from tools.web_search import WebSearchManager
 
@@ -326,6 +327,15 @@ async def spawn_explore_agent_activity(  # noqa: C901
                 fast_mode_cache_enabled=_explore_fast_mode_enabled,
                 fast_mode_goal=_explore_fast_mode_goal,
                 fast_mode_cache_write_enabled=_explore_fast_mode_write_enabled,
+            )
+        elif tool_name == "people_search":
+            manager = PeopleSearchManager()
+            result = await manager.execute_tool(
+                execute_activity=tagged_execute_activity,
+                tool_call=tool_call_dict,
+                tool_call_id=tool_call_id,
+                agent_id=agent_id,
+                user_id=user_id,
             )
         elif tool_name == "web_fetch":
             manager = WebFetchManager()
