@@ -506,7 +506,6 @@ def test_verifier_schema_no_score_reasoning_field():
 _DELETED_TOOLS = (
     "add_memory",
     "read_memories",
-    "people_search",
     "deep_research",
     "find_all",
     "enrich",
@@ -582,7 +581,6 @@ def test_no_deleted_tool_names_in_tool_registries():
 _DELETED_TOOLS_UNAMBIGUOUS = (
     "add_memory",
     "read_memories",
-    "people_search",
     "deep_research",
     "check_monitor_events",
     "x402_bazaar",
@@ -596,7 +594,7 @@ def test_no_deleted_tool_names_as_string_literals_in_production_code():
     """No unambiguous deleted tool name should appear as a string literal in code.
 
     This catches cases like:
-        toolName="read_memories", "tool": "deep_research", await call("people_search").
+        toolName="read_memories", "tool": "deep_research", await call("add_memory").
     Restricted to unambiguous tool names (see _DELETED_TOOLS_UNAMBIGUOUS) to
     avoid false positives on common English words that overlap with deleted
     tools (e.g. "monitor", "enrich", "find_all").

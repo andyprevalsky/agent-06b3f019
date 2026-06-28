@@ -352,5 +352,49 @@
     "attachment": null,
     "approval_handling": "auto_approve",
     "start_phase": "plan"
+  },
+  {
+    "name": "people-search-criteria",
+    "title": "People Search — Criteria Discovery via Explore Agent",
+    "prompt": "Find five people who are partners at venture capital firms that invest in AI infrastructure startups and are based in the San Francisco Bay Area. For each person, report their name and a one-line description of their firm or focus. This is a single criteria-based discovery — do NOT drill into individual firms one at a time. Use explore-agent research to find real people on the public web; do NOT use a browser agent, Claude Code, or code sandbox.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "tags": ["basic"],
+    "price_limit_cents": 150,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "min_tool_counts": {
+      "people_search": 1
+    },
+    "expected_tool_counts": {
+      "spawn_browser_agent": 0,
+      "spawn_claude_code_agent": 0
+    }
+  },
+  {
+    "name": "people-search-targeted",
+    "title": "People Search — Targeted Lookup via Explore Agent",
+    "prompt": "Find the current professional profile of Andy Prevalsky, founder of Rose Labs, on the public web. Report his current title, company, location, and LinkedIn profile URL, with a source link. He is not a public figure, so you cannot rely on prior knowledge — you must look him up. Use explore-agent research; do NOT use a browser agent, Claude Code, or code sandbox.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "tags": ["basic"],
+    "price_limit_cents": 150,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "min_tool_counts": {
+      "people_search": 1
+    },
+    "expected_tool_counts": {
+      "spawn_browser_agent": 0,
+      "spawn_claude_code_agent": 0
+    }
   }
 ]
