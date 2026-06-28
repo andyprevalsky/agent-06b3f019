@@ -78,7 +78,7 @@ export const createAgentSchema = z.object({
   // mints child ids upfront and passes the same ids on retry.
   agent_id: z.string().uuid().optional(),
   goal: z.string().min(1),
-  model: z.string().optional().default('rose-labs/rose-1-lite'),
+  model: z.string().optional().default('rose-labs/rose-1-ultra'),
   reasoning_max_tokens: z.number().int().min(0).optional().default(256),
   source: z.enum(['WEB', 'MAC_APP']).optional().default('WEB'),
   start_phase: z.enum(['plan', 'execute']).optional(), // Optional: bypass chat mode and start Temporal workflow directly

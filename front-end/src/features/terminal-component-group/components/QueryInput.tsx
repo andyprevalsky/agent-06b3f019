@@ -111,7 +111,7 @@ function QueryInputBody(props: QueryInputBodyProps) {
     onChange,
     disabled = false,
     placeholder = 'Type your message...',
-    selectedModel = 'rose-labs/rose-1-lite',
+    selectedModel = 'rose-labs/rose-1-ultra',
     onModelChange,
     fastMode = false,
     onFastModeChange,

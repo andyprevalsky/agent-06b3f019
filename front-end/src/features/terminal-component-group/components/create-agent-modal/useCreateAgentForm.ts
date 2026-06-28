@@ -8,7 +8,7 @@ interface UseCreateAgentFormArgs {
   onSubmit: (data: CreateAgentSubmitData) => Promise<void>;
 }
 
-const DEFAULT_MODEL = 'rose-labs/rose-1-lite';
+const DEFAULT_MODEL = 'rose-labs/rose-1-ultra';
 const DEFAULT_EFFORT: ReasoningEffort = 'high';
 
 /**
