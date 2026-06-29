@@ -1,4 +1,4 @@
-"""Web fetch domain service — Firecrawl scrape + file download orchestration.
+"""Web fetch domain service — provider scrape + file download orchestration.
 
 The Haiku filter pass (markdown summarization + link curation) is owned by
 ``helpers/summarize.py::summarize_and_filter_links`` and invoked as a separate
@@ -6,7 +6,7 @@ Temporal activity by the handler so claude/gpt token rotation signals flow
 through the workflow.
 
 This module owns the two side-effecting steps that don't need LLM tokens:
-  1. Firecrawl scrape (``fetch_firecrawl_scrape``).
+  1. Provider scrape (Firecrawl primary, Parallel Extract fallback).
   2. Batch file download + Supabase upload after Haiku picks the file URLs.
 """
 
@@ -19,6 +19,7 @@ from temporalio import activity
 from domains.web_fetch.repo import (
     download_files_batch,
     fetch_firecrawl_scrape,
+    fetch_parallel_extract,
     upload_file_to_storage,
 )
 
@@ -33,14 +34,29 @@ def get_filename_from_url(url: str) -> str:
 
 
 async def scrape_url(url: str) -> Dict[str, Any]:
-    """Fetch a URL via Firecrawl and return ``{markdown, links, metadata}``.
+    """Fetch a URL and return ``{markdown, links, metadata}``.
 
-    Pure delegation today — split out so the Temporal activity wrapper stays
-    a thin shim and so tests can mock the network call by patching
-    ``fetch_firecrawl_scrape``.
+    Firecrawl is primary. Parallel Extract is the public-page fallback when
+    Firecrawl rejects a site, times out, or otherwise fails.
     """
     activity.heartbeat(f"Firecrawl scrape: {url[:80]}")
-    return await fetch_firecrawl_scrape(url)
+    try:
+        return await fetch_firecrawl_scrape(url)
+    except Exception as firecrawl_error:
+        logger.warning(
+            "[web_fetch] Firecrawl scrape failed; falling back to Parallel Extract",
+            url=url,
+            error=str(firecrawl_error),
+        )
+
+        activity.heartbeat(f"Parallel Extract fallback: {url[:80]}")
+        try:
+            return await fetch_parallel_extract(url)
+        except Exception as parallel_error:
+            raise RuntimeError(
+                "web_fetch failed with Firecrawl and Parallel Extract. "
+                f"Firecrawl error: {firecrawl_error}; Parallel Extract error: {parallel_error}"
+            ) from parallel_error
 
 
 async def download_and_attach(

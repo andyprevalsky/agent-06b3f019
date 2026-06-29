@@ -3,9 +3,11 @@
 Uses _fetch_agent_data_impl from fetch_config.py (single source for GET /api/agents/{agent_id}).
 """
 
+import asyncio
 import os
+from contextlib import suppress
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import httpx
 import structlog
@@ -14,11 +16,17 @@ from temporalio import activity
 from config import load_config
 from helpers.context_scope import filter_internal_subagent_messages
 from helpers.fetch_config import _fetch_agent_data_impl
+from helpers.tracing import span
 
 logger = structlog.get_logger()
 
 # In dev (non-production), use public channels since agents live in a local DB
 _is_production = os.environ.get("FLY_APP_NAME") is not None
+
+# How often the coalescing broadcaster flushes accumulated stream deltas.
+# Decouples token reading from the Supabase round-trip (see da938195 diagnosis:
+# per-chunk inline broadcasts collapsed per-stream throughput under fan-out).
+_STREAM_COALESCE_INTERVAL_S = float(os.getenv("STREAM_COALESCE_INTERVAL_S", "0.15"))
 
 # Module-level HTTP client for streaming broadcasts (connection reuse)
 _broadcast_client: Optional[httpx.AsyncClient] = None
@@ -120,6 +128,149 @@ async def stream_assistant_chunk(
     except Exception as e:
         # Don't fail the workflow if streaming fails - it's best-effort
         logger.debug(f"Stream chunk error (non-fatal): {str(e)}")
+
+
+class CoalescingStreamBroadcaster:
+    """Decouples LLM token reading from Supabase stream broadcasting.
+
+    The original path awaited a Supabase broadcast inside the token-read loop on
+    every ~18 chars (run_agent.on_chunk → handle_tool_event → stream_assistant_chunk).
+    Under high agent fan-out (e.g. 50 sub-agents) those inline awaits funnelled
+    through one shared httpx client and, when contended, blocked token reading —
+    collapsing per-stream throughput from ~60 tok/s to ~1-3 tok/s while TTFT
+    stayed flat (root-caused on agent da938195).
+
+    This broadcaster fixes that: ``update()`` is non-blocking — it only appends to
+    a pending buffer and ensures a background drainer is running. The drainer
+    flushes the accumulated delta at most once per ``interval_s``. Token reading
+    therefore never waits on a broadcast. Broadcasts are best-effort UI updates;
+    the authoritative message is persisted separately, so dropping/merging
+    intermediate deltas is safe (the FE appends deltas, so concatenation is
+    equivalent to sending each delta individually).
+
+    Lifecycle: create before streaming, ``update()`` per chunk, ``reset()`` if the
+    stream restarts (parse retry), and ``await aclose(...)`` exactly once when the
+    stream finishes (sends the final delta + done marker synchronously).
+    """
+
+    def __init__(
+        self,
+        *,
+        agent_id: str,
+        stream_id: str,
+        sub_agent_id: Optional[str] = None,
+        llm_started_at_ms: Optional[int] = None,
+        is_claude: "bool | Callable[[], bool]" = False,
+        is_gpt: "bool | Callable[[], bool]" = False,
+        interval_s: float = _STREAM_COALESCE_INTERVAL_S,
+    ) -> None:
+        self._agent_id = agent_id
+        self._stream_id = stream_id
+        self._sub_agent_id = sub_agent_id
+        self._llm_started_at_ms = llm_started_at_ms
+        # bool or zero-arg callable — model flags are detected mid-stream, so the
+        # caller can pass a ref (lambda) read at flush time, not construction.
+        self._is_claude = is_claude
+        self._is_gpt = is_gpt
+        self._interval_s = interval_s
+        self._pending: List[str] = []
+        self._sequence = 0
+        self._drainer: Optional[asyncio.Task] = None
+        self._closed = False
+
+    def update(self, delta: str, sequence: int) -> None:
+        """Record a new delta. Non-blocking — never awaits a broadcast."""
+        if self._closed or not delta:
+            return
+        self._pending.append(delta)
+        self._sequence = sequence
+        if self._drainer is None:
+            self._drainer = asyncio.create_task(self._drain_loop())
+
+    def reset(self) -> None:
+        """Drop buffered deltas when the stream restarts (e.g. parse retry)."""
+        self._pending.clear()
+        self._sequence = 0
+
+    async def adispose(self) -> None:
+        """Stop the drainer without sending a done marker. Idempotent — safe to
+        call in a finally to guarantee the background task never leaks on error."""
+        self._closed = True
+        if self._drainer is not None:
+            self._drainer.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._drainer
+            self._drainer = None
+
+    async def _drain_loop(self) -> None:
+        try:
+            while not self._closed:
+                await asyncio.sleep(self._interval_s)
+                await self._flush()
+        except asyncio.CancelledError:
+            pass
+
+    def _flags(self) -> "tuple[bool, bool]":
+        ic = self._is_claude() if callable(self._is_claude) else self._is_claude
+        ig = self._is_gpt() if callable(self._is_gpt) else self._is_gpt
+        return bool(ic), bool(ig)
+
+    async def _flush(self) -> None:
+        if not self._pending:
+            return
+        delta = "".join(self._pending)
+        self._pending.clear()
+        is_claude, is_gpt = self._flags()
+        async with span(
+            "stream.broadcast",
+            agent_id=self._agent_id,
+            stream_id=self._stream_id,
+            chars=len(delta),
+            coalesced=True,
+        ):
+            await stream_assistant_chunk(
+                agent_id=self._agent_id,
+                stream_id=self._stream_id,
+                delta=delta,
+                done=False,
+                sequence=self._sequence,
+                sub_agent_id=self._sub_agent_id,
+                is_claude=is_claude,
+                is_gpt=is_gpt,
+                llm_started_at_ms=self._llm_started_at_ms,
+            )
+
+    async def aclose(self, *, final_delta: str = "", final_sequence: Optional[int] = None) -> None:
+        """Stop the drainer, flush any remainder, then send the done marker."""
+        self._closed = True
+        if self._drainer is not None:
+            self._drainer.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._drainer
+            self._drainer = None
+        # Flush whatever the drainer hadn't sent yet (best-effort).
+        with suppress(Exception):
+            await self._flush()
+        done_seq = final_sequence if final_sequence is not None else self._sequence + 1
+        is_claude, is_gpt = self._flags()
+        with suppress(Exception):
+            async with span(
+                "stream.broadcast",
+                agent_id=self._agent_id,
+                stream_id=self._stream_id,
+                done=True,
+            ):
+                await stream_assistant_chunk(
+                    agent_id=self._agent_id,
+                    stream_id=self._stream_id,
+                    delta=final_delta,
+                    done=True,
+                    sequence=done_seq,
+                    sub_agent_id=self._sub_agent_id,
+                    is_claude=is_claude,
+                    is_gpt=is_gpt,
+                    llm_started_at_ms=self._llm_started_at_ms,
+                )
 
 
 async def stream_plan_event(

@@ -276,7 +276,7 @@ def load_config() -> AppConfig:
     )
 
     parallel = ParallelConfig(
-        api_key=os.getenv("PARRALLEL_API_KEY", ""),
+        api_key=os.getenv("PARRALLEL_API_KEY") or os.getenv("PARALLEL_API_KEY", ""),
     )
 
     firecrawl = FirecrawlConfig(

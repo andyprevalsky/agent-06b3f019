@@ -26,9 +26,14 @@ from helpers.attachments import (
     get_cached_file,
     get_file_from_pointer,
 )
-from helpers.context_scope import is_internal_subagent_message
 from helpers.context_pointers import resolve_pointers_in_messages
-from helpers.messages import stream_assistant_chunk, stream_plan_event, stream_tool_event
+from helpers.context_scope import is_internal_subagent_message
+from helpers.messages import (
+    CoalescingStreamBroadcaster,
+    stream_assistant_chunk,
+    stream_plan_event,
+    stream_tool_event,
+)
 from helpers.tracing import backend_api_headers, current_request_id, traced
 from providers.rose import (
     ClaudeAuthContext,
@@ -1818,24 +1823,41 @@ async def call_llm_structured_streaming(  # noqa: C901
         if idle_timeout_s is not None:
             rose_kwargs["idle_timeout_s"] = None if idle_timeout_s < 0 else idle_timeout_s
 
+        # Per-stream wall-time profiler: splits stream duration into time spent in
+        # inline per-chunk callbacks (broadcasts / tool-progress events, which do
+        # network round-trips) vs everything else (socket wait + parse). Attributes
+        # a slow stream to a specific cause instead of guessing.
+        _prof = {"on_chunk": 0.0, "raw_progress": 0.0, "tool_detected": 0.0}
+        _prof_calls = {"on_chunk": 0, "raw_progress": 0, "tool_detected": 0}
+        _await_s = 0.0  # cumulative time awaiting the next chunk (byte-wait / event-loop)
+        _stream_t0 = _safe_time()
+        # Manual __anext__ drive (vs `async for`) so we can time byte-wait separately
+        # from per-chunk processing, regardless of the `continue`s in the body.
+        _stream_iter = rose_client.complete(
+            pool=pool,
+            messages=messages,
+            response_model=response_model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            seed=model_seed,
+            skip_cache_write=skip_cache_write,
+            claude_auth=claude_auth_context,
+            gpt_auth=gpt_auth_context,
+            agent_id=agent_id,
+            request_id=request_id,
+            call_site=call_site,
+            thinking=thinking,
+            effort=effort,
+            **rose_kwargs,
+        ).__aiter__()
         try:
-            async for chunk in rose_client.complete(
-                pool=pool,
-                messages=messages,
-                response_model=response_model,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                seed=model_seed,
-                skip_cache_write=skip_cache_write,
-                claude_auth=claude_auth_context,
-                gpt_auth=gpt_auth_context,
-                agent_id=agent_id,
-                request_id=request_id,
-                call_site=call_site,
-                thinking=thinking,
-                effort=effort,
-                **rose_kwargs,
-            ):
+            while True:
+                _t_await = _safe_time()
+                try:
+                    chunk = await _stream_iter.__anext__()
+                except StopAsyncIteration:
+                    break
+                _await_s += _safe_time() - _t_await
                 chunk_count += 1
 
                 if not ttft_logged:
@@ -1897,7 +1919,10 @@ async def call_llm_structured_streaming(  # noqa: C901
                         logger.info(
                             f"🔧 Tool detected (native): {tool_name} #{position + 1}, tool_call_id={tool_call_id}"
                         )
+                        _t = _safe_time()
                         await on_tool_detected(tool_name, tool_call_id)
+                        _prof["tool_detected"] += _safe_time() - _t
+                        _prof_calls["tool_detected"] += 1
 
                     # send_message_to_user on the native direct-token path arrives complete; emit
                     # the full message immediately rather than streaming partials.
@@ -1991,7 +2016,10 @@ async def call_llm_structured_streaming(  # noqa: C901
                             logger.info(
                                 f"🔧 Tool detected: {tool_name} #{current_position + 1}, tool_call_id={tool_call_id}"
                             )
-                            await on_tool_detected(tool_name, tool_call_id)
+                            _t = _safe_time()
+                        await on_tool_detected(tool_name, tool_call_id)
+                        _prof["tool_detected"] += _safe_time() - _t
+                        _prof_calls["tool_detected"] += 1
 
                 # Attention streaming on waterfall path — progressive partial emit.
                 if (
@@ -2027,7 +2055,10 @@ async def call_llm_structured_streaming(  # noqa: C901
                         last_emitted_text = visible_text
                         pending_delta = len(visible_text) - len(last_emitted_for_chunk)
                         if pending_delta >= 18:
+                            _t = _safe_time()
                             await on_chunk(visible_text, token_count)
+                            _prof["on_chunk"] += _safe_time() - _t
+                            _prof_calls["on_chunk"] += 1
                             last_emitted_for_chunk = visible_text
                 else:
                     response_text = _extract_response_from_partial_json(accumulated_reasoning, accumulated_json)
@@ -2035,7 +2066,10 @@ async def call_llm_structured_streaming(  # noqa: C901
                         last_emitted_text = response_text
                         pending_delta = len(response_text) - len(last_emitted_for_chunk)
                         if pending_delta >= 18:
+                            _t = _safe_time()
                             await on_chunk(response_text, token_count)
+                            _prof["on_chunk"] += _safe_time() - _t
+                            _prof_calls["on_chunk"] += 1
                             last_emitted_for_chunk = response_text
 
                 if chunk_count % 5 == 0:
@@ -2055,13 +2089,43 @@ async def call_llm_structured_streaming(  # noqa: C901
                     )
 
                 if on_raw_progress:
+                    _t = _safe_time()
                     await on_raw_progress(len(accumulated_reasoning) + len(accumulated_json) + len(text_buffer))
+                    _prof["raw_progress"] += _safe_time() - _t
+                    _prof_calls["raw_progress"] += 1
         except asyncio.CancelledError:
             logger.info("⏹️ Rose streaming cancelled (asyncio.CancelledError)")
             was_cancelled = True
         except RoseError as exc:
             logger.error(f"❌ [{request_id}] [{call_site}] Rose streaming failed: {type(exc).__name__}: {exc}")
             raise ValueError(f"Rose streaming failed: {exc}") from exc
+        finally:
+            with contextlib.suppress(Exception):
+                await _stream_iter.aclose()  # manual __anext__ drive → close explicitly
+            # Attribute the stream's wall-time three ways:
+            #   callbacks  = inline per-chunk network round-trips (broadcasts/tool-events)
+            #   await      = time blocked awaiting the next chunk (provider/network OR
+            #                event-loop starvation — distinguish via worker CPU)
+            #   parse      = per-chunk CPU processing (json accumulate, tool detect, etc.)
+            _total = _safe_time() - _stream_t0
+            _cb = _prof["on_chunk"] + _prof["raw_progress"] + _prof["tool_detected"]
+            _parse = max(0.0, _total - _cb - _await_s)
+            logger.info(
+                "stream.profile",
+                request_id=request_id,
+                call_site=call_site,
+                actual_model=actual_model,
+                chunk_count=chunk_count,
+                total_s=round(_total, 2),
+                await_s=round(_await_s, 2),
+                parse_s=round(_parse, 2),
+                callbacks_s=round(_cb, 2),
+                on_chunk_s=round(_prof["on_chunk"], 2),
+                raw_progress_s=round(_prof["raw_progress"], 2),
+                tool_detected_s=round(_prof["tool_detected"], 2),
+                raw_progress_calls=_prof_calls["raw_progress"],
+                tool_detected_calls=_prof_calls["tool_detected"],
+            )
 
         # On the native direct-token path, rebuild the response-model JSON once the
         # stream is fully drained. The shape depends on the caller's schema:
@@ -4077,22 +4141,32 @@ async def call_llm_activity(  # noqa: C901
             )
             sequence[0] += 1
 
+        # Decouple Supabase broadcasting from the token-read loop. Awaiting a
+        # broadcast per chunk inline (the old behavior here) blocked token reading
+        # under high sub-agent fan-out — per-turn LLM time spiked to ~190s at
+        # 50-wide because round_trip includes the inline broadcast wait. The
+        # broadcaster accepts deltas non-blocking and flushes them coalesced in
+        # the background. is_claude/is_gpt are passed as refs since they're only
+        # detected mid-stream (on_model_detected).
+        broadcaster = (
+            CoalescingStreamBroadcaster(
+                agent_id=agent_id,
+                stream_id=stream_id,
+                sub_agent_id=task_id,
+                llm_started_at_ms=llm_started_at_ms,
+                is_claude=lambda: _is_claude[0],
+                is_gpt=lambda: _is_gpt[0],
+            )
+            if agent_id and stream_id
+            else None
+        )
+
         async def on_chunk(text_so_far: str, tokens: int):
             _safe_heartbeat(f"LLM streaming... {len(text_so_far)} chars")
-            if agent_id and stream_id:
+            if broadcaster is not None:
                 delta = text_so_far[len(last_text[0]) :]
                 if delta:
-                    await stream_assistant_chunk(
-                        agent_id=agent_id,
-                        stream_id=stream_id,
-                        delta=delta,
-                        done=False,
-                        sequence=sequence[0],
-                        sub_agent_id=task_id,
-                        is_claude=_is_claude[0],
-                        is_gpt=_is_gpt[0],
-                        llm_started_at_ms=llm_started_at_ms,
-                    )
+                    broadcaster.update(delta, sequence[0])  # non-blocking
                     sequence[0] += 1
                 last_text[0] = text_so_far
 
@@ -4138,48 +4212,43 @@ async def call_llm_activity(  # noqa: C901
                 llm_started_at_ms=llm_started_at_ms,
             )
 
-        result, usage, detected_tools_ordered = await call_llm_structured_streaming(
-            messages=messages,
-            model=model,
-            temperature=1.0,
-            max_tokens=8192,
-            response_model=AgentActionModel,
-            on_chunk=on_chunk,
-            reasoning_max_tokens=reasoning_max_tokens if reasoning_max_tokens > 0 else None,
-            agent_id=agent_id,
-            on_tool_detected=on_tool_detected_callback,
-            on_raw_progress=on_raw_progress,
-            claude_token=claude_token,
-            claude_token_source=claude_token_source,
-            claude_token_pool_id=claude_token_pool_id,
-            claude_token_user_id=claude_token_user_id,
-            gpt_token=gpt_token,
-            gpt_account_id=gpt_account_id,
-            gpt_token_source=gpt_token_source,
-            gpt_token_pool_id=gpt_token_pool_id,
-            gpt_token_user_id=gpt_token_user_id,
-            on_model_detected=on_model_detected,
-            call_site=call_site,
-            skip_cache_write=skip_cache_write,
-        )
+        try:
+            result, usage, detected_tools_ordered = await call_llm_structured_streaming(
+                messages=messages,
+                model=model,
+                temperature=1.0,
+                max_tokens=8192,
+                response_model=AgentActionModel,
+                on_chunk=on_chunk,
+                reasoning_max_tokens=reasoning_max_tokens if reasoning_max_tokens > 0 else None,
+                agent_id=agent_id,
+                on_tool_detected=on_tool_detected_callback,
+                on_raw_progress=on_raw_progress,
+                claude_token=claude_token,
+                claude_token_source=claude_token_source,
+                claude_token_pool_id=claude_token_pool_id,
+                claude_token_user_id=claude_token_user_id,
+                gpt_token=gpt_token,
+                gpt_account_id=gpt_account_id,
+                gpt_token_source=gpt_token_source,
+                gpt_token_pool_id=gpt_token_pool_id,
+                gpt_token_user_id=gpt_token_user_id,
+                on_model_detected=on_model_detected,
+                call_site=call_site,
+                skip_cache_write=skip_cache_write,
+            )
+        finally:
+            # Guarantee the background drainer never leaks if streaming raises.
+            if broadcaster is not None:
+                await broadcaster.adispose()
 
-        # Send final done=True chunk
-        if agent_id and stream_id:
+        # Send final done=True chunk via the broadcaster (flushes remainder + done).
+        if broadcaster is not None:
             try:
                 final_delta = ""
                 if hasattr(result, "response") and result.response:
                     final_delta = result.response[len(last_text[0]) :]
-                await stream_assistant_chunk(
-                    agent_id=agent_id,
-                    stream_id=stream_id,
-                    delta=final_delta,
-                    done=True,
-                    sequence=sequence[0],
-                    sub_agent_id=task_id,
-                    is_claude=_is_claude[0],
-                    is_gpt=_is_gpt[0],
-                    llm_started_at_ms=llm_started_at_ms,
-                )
+                await broadcaster.aclose(final_delta=final_delta, final_sequence=sequence[0])
             except Exception as e:
                 logger.warning(f"Final stream chunk failed (non-fatal): {e}")
 

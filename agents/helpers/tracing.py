@@ -322,6 +322,49 @@ async def span(name: str, **metadata: Any) -> AsyncIterator[str]:
         structlog.contextvars.reset_contextvars(**tokens)
 
 
+@asynccontextmanager
+async def stream_span(name: str, **metadata: Any) -> AsyncIterator[str]:
+    """Span safe to hold open across `async for ... yield` inside an async generator.
+
+    Unlike span(), it does NOT bind the span_id contextvar. Binding would fail
+    with "Token was created in a different Context": when a generator yields out
+    of the with-block and is resumed (or finalized) later, __aexit__ runs in a
+    different context than __aenter__, so reset_contextvars() raises. This variant
+    still emits span.start/span.end with parent linkage + duration; children nest
+    under it via the tracer's time-window containment rather than the contextvar.
+    Use it to wrap streaming regions (SSE reads, per-attempt token streams); use
+    span() everywhere an await does not cross a yield.
+    """
+    span_id = _new_span_id()
+    parent_span_id = current_span_id()
+    started = time.monotonic()
+    span_metadata = _span_metadata(name, metadata)
+    logger.info(
+        "span.start",
+        span_name=name,
+        span_id=span_id,
+        parent_span_id=parent_span_id,
+        **span_metadata,
+    )
+    status = "ok"
+    try:
+        yield span_id
+    except BaseException:
+        status = "error"
+        raise
+    finally:
+        duration_ms = int((time.monotonic() - started) * 1000)
+        logger.info(
+            "span.end",
+            span_name=name,
+            span_id=span_id,
+            parent_span_id=parent_span_id,
+            duration_ms=duration_ms,
+            status=status,
+            **span_metadata,
+        )
+
+
 @contextmanager
 def sync_span(name: str, **metadata: Any) -> Iterator[str]:
     """Sync variant — same semantics as `span()` but for non-async code."""

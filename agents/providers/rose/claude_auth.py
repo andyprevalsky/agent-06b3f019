@@ -32,17 +32,18 @@ module only handles pre-stream HTTP error classification and orchestration.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
-from email.utils import parsedate_to_datetime
 import hashlib
 import json
 import random
 import re
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 import httpx
 import structlog
 
+from helpers.tracing import span, stream_span
 from providers.rose.errors import (
     RoseAuthError,
     RoseError,
@@ -302,7 +303,9 @@ def build_anthropic_body(
     if came_from_response_format and tool_choice is None:
         effective_tool_choice = "any"
 
-    native_tool_mode = apply_anthropic_tool_config(
+    # Mutates `body` in place to attach native tool config; the returned mode
+    # is unused on the claudeAuth path.
+    apply_anthropic_tool_config(
         body,
         response_format,
         True,  # always native tools on claudeAuth
@@ -381,31 +384,54 @@ async def claude_auth_complete(
 
     while True:
         try:
-            async for chunk in _attempt_with_token(
-                body=body,
-                auth=current_auth,
-                pool_spec=pool_spec,
+            # One span per token attempt — makes the waterfall show which token
+            # (and how many rotations in) produced this call's latency, instead
+            # of lumping every attempt into the opaque parent call_llm span.
+            async with stream_span(
+                "llm.attempt",
+                provider="claudeAuth",
                 actual_model=actual_model,
+                rotation=rotations,
+                call_site=call_site,
                 request_id=request_id,
                 agent_id=agent_id,
-                call_site=call_site,
-                ttft_timeout_s=ttft_timeout_s,
-                idle_timeout_s=idle_timeout_s,
             ):
-                yield chunk
+                async for chunk in _attempt_with_token(
+                    body=body,
+                    auth=current_auth,
+                    pool_spec=pool_spec,
+                    actual_model=actual_model,
+                    request_id=request_id,
+                    agent_id=agent_id,
+                    call_site=call_site,
+                    ttft_timeout_s=ttft_timeout_s,
+                    idle_timeout_s=idle_timeout_s,
+                ):
+                    yield chunk
             return
         except _RotateToken as rotate:
             setattr(auth, "rotated", True)
             setattr(auth, "last_rotation_reason", rotate.reason)
             setattr(auth, "last_rate_limited_until", rotate.rate_limited_until)
-            await _cool_down(
-                current_auth,
-                rotate.reason,
-                request_id,
-                agent_id,
-                call_site,
+            # Cooldown is a silent asyncio.sleep today; span it so the time a
+            # rotation costs is attributable instead of invisible.
+            async with span(
+                "llm.cooldown",
+                reason=rotate.reason,
                 rate_limited_until=rotate.rate_limited_until,
-            )
+                rotation=rotations,
+                call_site=call_site,
+                request_id=request_id,
+                agent_id=agent_id,
+            ):
+                await _cool_down(
+                    current_auth,
+                    rotate.reason,
+                    request_id,
+                    agent_id,
+                    call_site,
+                    rate_limited_until=rotate.rate_limited_until,
+                )
             rotations += 1
             if rotations > current_auth.max_rotations:
                 error_cls = RoseRateLimitError if rotate.reason == "rate_limit" else RoseAuthError
@@ -471,14 +497,21 @@ async def anthropic_api_key_complete(
             ) as response:
                 status = response.status_code
                 if status == 200:
-                    async for chunk in parse_anthropic_sse(
-                        response,
+                    async with stream_span(
+                        "llm.provider_read",
                         actual_model=actual_model,
-                        pool_name="anthropic-apikey",
+                        attempt=attempt,
                         request_id=request_id,
-                        idle_timeout_s=idle_timeout_s,
+                        agent_id=agent_id,
                     ):
-                        yield chunk
+                        async for chunk in parse_anthropic_sse(
+                            response,
+                            actual_model=actual_model,
+                            pool_name="anthropic-apikey",
+                            request_id=request_id,
+                            idle_timeout_s=idle_timeout_s,
+                        ):
+                            yield chunk
                     return
 
                 error_body = get_error_body(response)
@@ -551,14 +584,24 @@ async def _attempt_with_token(
 
                 if status == 200:
                     try:
-                        async for chunk in parse_anthropic_sse(
-                            response,
+                        # Spans the SSE generation phase only — separating "the
+                        # model streamed slowly" from connect/TTFT (= llm.attempt
+                        # minus llm.provider_read) and from broadcast stalls.
+                        async with stream_span(
+                            "llm.provider_read",
                             actual_model=actual_model,
-                            pool_name="claude-token",
+                            attempt=attempt,
                             request_id=request_id,
-                            idle_timeout_s=idle_timeout_s,
+                            agent_id=agent_id,
                         ):
-                            yield chunk
+                            async for chunk in parse_anthropic_sse(
+                                response,
+                                actual_model=actual_model,
+                                pool_name="claude-token",
+                                request_id=request_id,
+                                idle_timeout_s=idle_timeout_s,
+                            ):
+                                yield chunk
                         return
                     except RoseRateLimitError as exc:
                         # HTTP 200 + in-band rate_limit_error from SSE.
@@ -574,7 +617,14 @@ async def _attempt_with_token(
                                 rate_limited_until=rate_limited_until,
                             )
                         if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
-                            await asyncio.sleep(_backoff_for_429(response, attempt))
+                            async with span(
+                                "llm.backoff",
+                                reason="rate_limit_inband",
+                                attempt=attempt,
+                                request_id=request_id,
+                                agent_id=agent_id,
+                            ):
+                                await asyncio.sleep(_backoff_for_429(response, attempt))
                             continue
                         raise _RotateToken(
                             "rate_limit",
@@ -608,7 +658,14 @@ async def _attempt_with_token(
                             rate_limited_until=rate_limited_until,
                         )
                     if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
-                        await asyncio.sleep(_backoff_for_429(response, attempt))
+                        async with span(
+                            "llm.backoff",
+                            reason="rate_limit_http",
+                            attempt=attempt,
+                            request_id=request_id,
+                            agent_id=agent_id,
+                        ):
+                            await asyncio.sleep(_backoff_for_429(response, attempt))
                         continue
                     raise _RotateToken(
                         "rate_limit",

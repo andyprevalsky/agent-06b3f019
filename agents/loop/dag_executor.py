@@ -674,12 +674,18 @@ async def _execute_single_task(
             # second task falls back to backend API after the first cleans up.
             _pending_llm_context[agent_id] = (list(context), system_prompt_text, None)
 
+            # Constrain the param-population schema to ONLY the required tool.
+            # call_llm_activity uses structured output (create_agent_action_model),
+            # so passing the full tool-set lets a weak model (e.g. rose-1-lite)
+            # emit send_message instead of the planned tool — which fails the
+            # required_tool check and silently kills the DAG node (e.g. a for_each
+            # that never fans out). A single-tool union forces the right call.
             llm_result = await execute_activity(
                 call_llm_activity,
                 args=[
                     agent_id,
                     model,
-                    tool_names or [],
+                    [actual_tool],
                     256,
                     agent_id,
                     None,
@@ -752,6 +758,11 @@ async def _execute_single_task(
                     params.pop("output_schema", None)
                     params.pop("start_url", None)
                     params.pop("github_repo_link", None)
+                    # Clamp planner/DAG explores to a fast breadth-scan. The param-populator
+                    # LLM tends to pick depth="deep" for "comprehensive" goals, turning a
+                    # gating "identify the list" explore into a 50-turn crawl that blocks
+                    # fan-out. Force quick here; deliberate deep research should be its own task.
+                    params["depth"] = "quick"
 
             # Execute tool (uses existing flow - posts result to context)
             result = await execute_tool(actual_tool, params, tool_call_id)

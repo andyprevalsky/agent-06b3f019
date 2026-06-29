@@ -19,13 +19,14 @@ from temporalio.exceptions import ActivityError
 from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 from domains.spawn_agent.config import (
-    EXPLORE_ACTIVITY_TIMEOUT,
+    EXPLORE_DEFAULT_DEPTH,
     EXPLORE_DEFAULT_MODEL,
     EXPLORE_GOAL_DISPLAY_LEN,
     EXPLORE_HEARTBEAT_TIMEOUT,
     FOR_EACH_MAX_DEPTH,
     SUB_ACTIVITY_MAX_ATTEMPTS,
     SUB_ACTIVITY_TIMEOUT,
+    explore_limits_for_depth,
 )
 from domains.spawn_agent.service import (
     _resolve_explore_attachments_activity,
@@ -119,6 +120,9 @@ class SpawnAgentManager(ToolManager):
         goal = tool_call.get("goal", "")
         ui_goal = display_goal or goal
         task_id = task_id or str(uuid_module.uuid4())
+        # Caller-controlled thoroughness → turn cap + activity timeout. Default quick.
+        depth = tool_call.get("depth") or EXPLORE_DEFAULT_DEPTH
+        explore_max_iterations, explore_activity_timeout = explore_limits_for_depth(depth)
 
         # IN_PROGRESS
         yield ToolEvent(
@@ -223,8 +227,10 @@ class SpawnAgentManager(ToolManager):
                         gpt_token_pool_id,
                         attachment_texts,
                         getattr(workflow_instance, "max_context_tokens", None) or 200_000,
+                        depth,
+                        explore_max_iterations,
                     ],
-                    start_to_close_timeout=EXPLORE_ACTIVITY_TIMEOUT,
+                    start_to_close_timeout=explore_activity_timeout,
                     heartbeat_timeout=EXPLORE_HEARTBEAT_TIMEOUT,
                     cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
                     retry_policy=RetryPolicy(maximum_attempts=1),

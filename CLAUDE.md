@@ -187,6 +187,8 @@ Typical signatures to look for: `peer closed connection` during streaming, `[NO 
 
 ## Critical Rules
 
+0. **Bias toward execution — each pause to check for user approval has an extremely high cost.**
+
 1. **TDD loop** - Don't return until tests pass:
 
    ```

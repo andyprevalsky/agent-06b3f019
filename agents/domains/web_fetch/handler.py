@@ -27,7 +27,7 @@ import structlog
 from temporalio import activity
 from temporalio.common import RetryPolicy
 
-from domains.web_fetch.config import FIRECRAWL_COST_CENTS, MAX_MARKDOWN_LENGTH
+from domains.web_fetch.config import FIRECRAWL_COST_CENTS, MAX_MARKDOWN_LENGTH, PARALLEL_EXTRACT_COST_CENTS
 from domains.web_fetch.service import download_and_attach, scrape_url
 from domains.web_fetch.types import ExecuteActivityCallable
 from helpers.handle_tool_event import handle_tool_event
@@ -144,6 +144,13 @@ class WebFetchManager(ToolManager):
             )
             markdown: str = scrape_result.get("markdown", "") if isinstance(scrape_result, dict) else ""
             links: List[str] = scrape_result.get("links", []) if isinstance(scrape_result, dict) else []
+            scrape_metadata: Dict[str, Any] = (
+                scrape_result.get("metadata", {}) if isinstance(scrape_result, dict) else {}
+            )
+            service_provider = scrape_metadata.get("provider") or "Firecrawl scrape"
+            service_cost_cents = (
+                PARALLEL_EXTRACT_COST_CENTS if service_provider == "Parallel Extract" else FIRECRAWL_COST_CENTS
+            )
 
             # 2) Haiku filter — structured output via WebFetchHaikuResponse
             haiku_result = await execute_activity(
@@ -218,7 +225,7 @@ class WebFetchManager(ToolManager):
                 params=tool_call,
                 result=result,
                 time_elapsed=elapsed_time,
-                cost_cents=FIRECRAWL_COST_CENTS,
+                cost_cents=service_cost_cents,
             )
 
             await handle_tool_event(
@@ -237,7 +244,7 @@ class WebFetchManager(ToolManager):
 
             usage_dict: Dict[str, Any] = {
                 "llm": [summarizer_llm_item] if summarizer_llm_item else [],
-                "service": [{"cost_cents": FIRECRAWL_COST_CENTS, "provider": "Firecrawl scrape"}],
+                "service": [{"cost_cents": service_cost_cents, "provider": service_provider}],
             }
             # Surface raw Haiku usage so the workflow can route claude_token_error /
             # claude_token_rotated / compute_token_used signals through _on_tokens
@@ -315,17 +322,16 @@ async def web_fetch(
 @activity.defn
 @traced("web_fetch_activity")
 async def web_fetch_activity(url: str) -> Dict[str, Any]:
-    """Activity: Firecrawl scrape (JS rendering, main-content extraction).
+    """Activity: scrape URL via Firecrawl primary and Parallel Extract fallback.
 
-    Returns ``{markdown, links, metadata}``. Raises on Firecrawl HTTP errors —
-    the caller surfaces the error to the agent rather than silently degrading.
+    Returns ``{markdown, links, metadata}``. Raises only if both providers fail.
     """
     from domains.web_fetch.service import scrape_url
 
     try:
         return await scrape_url(url)
     except Exception as e:
-        logger.error("Web fetch (Firecrawl) failed", error=str(e), url=url)
+        logger.error("Web fetch scrape failed", error=str(e), url=url)
         raise
 
 

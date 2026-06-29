@@ -1088,12 +1088,31 @@ def _span_baseline_map(
     return baselines
 
 
+# Spans must be at least this slow (absolute) AND past p95 to be flagged
+# out-of-band — keeps the report focused on real anomalies, not sub-100ms noise.
+_OUT_OF_BAND_FLOOR_MS = 100
+
+
+def _out_of_band_ratio(sp: Span, stats: Dict[str, Any]) -> Optional[float]:
+    """How far past the historical p95 this span ran, as a multiple.
+
+    Returns None when there is no baseline, the span is within band, or the
+    absolute duration is too small to be worth flagging (avoids noise on
+    sub-100ms spans that trip p95 by a hair).
+    """
+    p95 = stats.get("p95_ms") or 0
+    if not p95 or sp.duration_ms <= p95 or sp.duration_ms < _OUT_OF_BAND_FLOOR_MS:
+        return None
+    return sp.duration_ms / p95
+
+
 def _format_span_baseline(sp: Span, baselines: Dict[str, Dict[str, Any]], color: bool) -> str:
     stats = baselines.get(_span_history_key(sp))
     if not stats:
         return ""
-    is_slow = sp.duration_ms > stats["p95_ms"]
-    marker = f"{_c('SLOW', RED, color)} " if is_slow else ""
+    ratio = _out_of_band_ratio(sp, stats)
+    is_slow = ratio is not None
+    marker = f"{_c(f'⚠ OUT-OF-BAND {ratio:.1f}× p95', RED, color)} " if is_slow else ""
     return _c(
         "  "
         + marker
@@ -1263,6 +1282,7 @@ def _render_executive_summary(
     code_cache: Dict[str, str],
     slow_threshold_ms: int,
     color: bool,
+    span_baselines: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> str:
     all_spans = _flatten(roots)
     total_ms = int((t1 - t0).total_seconds() * 1000)
@@ -1332,6 +1352,43 @@ def _render_executive_summary(
     lines.append(_c("Re-run with full tree:", BOLD, color))
     lines.append(f"  python agents/benchmarks/agent_latency.py {agent_id} --verbose")
     lines.append("")
+
+    # OUT-OF-BAND SPANS — every span running past its historical p95, ranked by
+    # how far out of band. This is the "single parse → critical span is obvious"
+    # view: whatever sub-stage actually misbehaved (provider read, broadcast,
+    # backoff, cooldown…) surfaces here by name with its multiple over p95.
+    if span_baselines:
+        flagged = []
+        for sp in all_spans:
+            stats_b = span_baselines.get(_span_history_key(sp))
+            if not stats_b:
+                continue
+            ratio = _out_of_band_ratio(sp, stats_b)
+            if ratio is not None:
+                excess_ms = sp.duration_ms - int(stats_b["p95_ms"])
+                flagged.append((excess_ms, ratio, sp, stats_b))
+        # Rank by EXCESS wall-time (dur − p95), not raw ratio: the critical span
+        # is the one burning the most anomalous time, not a 50ms span at 10× p95.
+        flagged.sort(key=lambda x: x[0], reverse=True)
+        lines.append(_c("⚠ OUT-OF-BAND SPANS (dur > historical p95, ranked by excess wall-time)", BOLD, color))
+        lines.append("-" * 100)
+        if not flagged:
+            lines.append(_c("  (none — all spans within historical band)", DIM, color))
+        for excess_ms, ratio, sp, stats_b in flagged[:15]:
+            ptr = _span_code_pointer(sp, code_cache)
+            ptr_s = f"  @ {ptr}" if ptr else ""
+            frag = sp.name
+            if sp.metadata.get("actual_model"):
+                frag += f"[{str(sp.metadata['actual_model']).split('/')[-1]}]"
+            elif sp.metadata.get("call_site"):
+                frag += f"[{sp.metadata['call_site']}]"
+            lines.append(
+                f"  +{_c(_fmt_dur(excess_ms).strip(), RED, color)} over p95  "
+                f"{_c(_fmt_dur(sp.duration_ms), BOLD, color)} "
+                f"({ratio:.1f}× p95={_fmt_dur(int(stats_b['p95_ms'])).strip()}, n={stats_b['count']})  "
+                f"{frag}{_c(ptr_s, DIM, color)}"
+            )
+        lines.append("")
 
     bad = _top_bad_paths(roots, code_cache, 10)
     lines.append(_c("TOP 10 SLOW PATHS (root → leaf, worst duration)", BOLD, color))
@@ -1996,7 +2053,7 @@ def main() -> int:
 
     summary = _render_executive_summary(
         args.agent_id, roots, t0, t1, stats, code_cache,
-        args.slow_threshold, color,
+        args.slow_threshold, color, span_baselines,
     )
     print(summary)
 

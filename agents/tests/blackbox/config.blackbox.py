@@ -117,6 +117,37 @@ def test_load_config_temporal_activity_slot_overrides():
     assert result.temporal.activity_admission_open_memory_percent == 74.5
 
 
+def test_load_config_parallel_accepts_correct_spelling():
+    """PARALLEL_API_KEY is accepted when the legacy misspelled key is absent."""
+    _reset_config_cache()
+
+    env = {**_MINIMAL_ENV, "PARALLEL_API_KEY": "correct-parallel-key"}
+    env.pop("PARRALLEL_API_KEY", None)
+    with patch.dict(os.environ, env, clear=True):
+        from config import load_config
+
+        result = load_config()
+
+    assert result.parallel.api_key == "correct-parallel-key"
+
+
+def test_load_config_parallel_keeps_legacy_spelling_precedence():
+    """Existing Render PARRALLEL_API_KEY remains the preferred key when present."""
+    _reset_config_cache()
+
+    env = {
+        **_MINIMAL_ENV,
+        "PARRALLEL_API_KEY": "legacy-parallel-key",
+        "PARALLEL_API_KEY": "correct-parallel-key",
+    }
+    with patch.dict(os.environ, env, clear=True):
+        from config import load_config
+
+        result = load_config()
+
+    assert result.parallel.api_key == "legacy-parallel-key"
+
+
 async def run_all_tests():
     print("config blackbox tests:")
     r = BlackboxResult()
@@ -124,6 +155,8 @@ async def run_all_tests():
     r.record("load_config_backend_defaults", test_load_config_backend_defaults)
     r.record("load_config_temporal_defaults", test_load_config_temporal_defaults)
     r.record("load_config_temporal_activity_slot_overrides", test_load_config_temporal_activity_slot_overrides)
+    r.record("parallel_correct_spelling", test_load_config_parallel_accepts_correct_spelling)
+    r.record("parallel_legacy_spelling_precedence", test_load_config_parallel_keeps_legacy_spelling_precedence)
     teardown_mock()
     return r.summary()
 
