@@ -79,7 +79,6 @@ from helpers import (
     summarize_tool_result,
     update_agent_status,
 )
-from helpers.summarize import summarize_and_filter_links
 from helpers.attachments import fetch_parent_attachments_activity, resolve_attachments_activity
 from helpers.llm import (
     call_planner_llm_activity,
@@ -99,7 +98,9 @@ from helpers.sms_activities import (
     notify_sms_event_activity,
     send_direct_sms_activity,
 )
+from helpers.summarize import summarize_and_filter_links
 from helpers.update_tokens import update_agent_tokens_activity, update_agent_tree_cost_activity
+from tools.people_search import people_search_activity  # not yet refactored into domains/
 from tools.web_search import web_search_activity  # not yet refactored into domains/
 from workflows import AgentWorkflow
 
@@ -881,6 +882,7 @@ async def main():
             spawn_claude_code_activity,  # Claude Code in E2B sandbox
             # New event-driven tool activities
             web_search_activity,
+            people_search_activity,
             web_fetch_activity,
             web_fetch_download_activity,
             save_tool_usage,

@@ -43,6 +43,7 @@ interface BuildBodyOptions {
   toolChoice?: unknown;
   temperature?: number;
   effort?: string;
+  providerFastMode?: boolean;
   requestId: string;
 }
 
@@ -314,6 +315,9 @@ export function buildCodexResponsesBody(opts: BuildBodyOptions): Record<string, 
       },
     };
   }
+  if (opts.providerFastMode === true) {
+    body.service_tier = 'priority';
+  }
 
   return body;
 }
@@ -330,6 +334,7 @@ interface GptAuthOptions {
   accountId?: string;
   requestId: string;
   callSite?: string;
+  providerFastMode?: boolean;
   idleTimeoutMs?: number;
   abortSignal?: AbortSignal;
 }
@@ -343,6 +348,7 @@ export async function* gptAuthComplete(opts: GptAuthOptions): AsyncIterable<Rose
     toolChoice: opts.toolChoice,
     temperature: opts.temperature,
     effort: opts.effort,
+    providerFastMode: opts.providerFastMode,
     requestId: opts.requestId,
   });
   const actualModel = `${opts.poolSpec.gptAuthModel}-gpt`;

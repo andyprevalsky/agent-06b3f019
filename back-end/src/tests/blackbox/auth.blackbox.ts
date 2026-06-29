@@ -504,6 +504,23 @@ function seedSupabaseAdminCreate(
 }
 
 /**
+ * Seed Supabase Admin GET /auth/v1/admin/users for the phone_exists recovery path.
+ */
+function seedSupabaseAdminListUsers(users: Array<{ id: string; phone?: string }>): boolean {
+  if (SUPABASE_URL === '') return false;
+  const url = new URL(`${SUPABASE_URL}/auth/v1/admin/users`);
+  url.searchParams.set('page', '1');
+  url.searchParams.set('per_page', '1000');
+  seedFastForward(url.toString(), 'GET', null, {
+    status: 200,
+    statusText: 'OK',
+    body: JSON.stringify({ users }),
+    headers: { 'content-type': 'application/json' },
+  });
+  return true;
+}
+
+/**
  * Generate a unique fake phone number for a test, in E.164 format.
  * Uses an unused-but-syntactically-valid number block so seeded cache entries
  * never collide with real Twilio responses recorded for legitimate test phones.
@@ -2109,27 +2126,37 @@ async function testVerifyOtp_seededGenericTwilioError() {
 }
 
 /**
- * Twilio approved but Supabase admin returns 422 phone_exists → service.twilio.ts
- * findOrCreateSupabaseUser returns null → verify-otp returns 500 with
- * "Failed to create user session".
+ * Twilio approved but Supabase admin returns 422 phone_exists. This can happen
+ * when Supabase Auth still has the phone but the current app DB was reset. The
+ * auth path should resolve the existing Supabase user and recreate the DB user.
  */
 async function testVerifyOtp_seededSupabasePhoneExists() {
   if (!canSeedAuthFlow()) return;
   const phone = uniqueFakePhone();
+  const userId = randomUUID();
   seedTwilioVerifyCheck(phone, SEED_OTP, true);
   seedSupabaseAdminCreate(phone, {
     httpStatus: 422,
     errorCode: 'phone_exists',
     msg: 'Phone already in use',
   });
+  seedSupabaseAdminListUsers([{ id: userId, phone }]);
 
   const res = await request(`${BASE_URL}/api/auth/verify-otp`, {
     method: 'POST',
     body: JSON.stringify({ phone, token: SEED_OTP }),
   });
-  assertStatus(res.status, 500, res.data);
-  const body = assertSchema(ErrorResponse, res.data, 'supabase-phone-exists');
-  assert(/create user session/i.test(body.error), `Got error: ${body.error}`);
+  assertStatus(res.status, 200, res.data);
+  const body = res.data as {
+    success?: boolean;
+    user?: { id?: string; phone?: string; is_anonymous?: boolean };
+    session?: { access_token?: string };
+  };
+  assert(body.success === true, 'Expected success=true after Supabase phone_exists recovery');
+  assert(body.user?.id === userId, `Expected user.id=${userId}, got ${body.user?.id}`);
+  assert(body.user?.phone === phone, `Expected user.phone=${phone}, got ${body.user?.phone}`);
+  assert(body.user?.is_anonymous === false, 'Expected is_anonymous=false');
+  assert(typeof body.session?.access_token === 'string', 'Expected session.access_token');
 }
 
 /**

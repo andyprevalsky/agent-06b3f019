@@ -12,6 +12,7 @@ import contextlib
 import random
 import json
 import os
+import re
 import time
 import uuid as uuid_module
 from datetime import timedelta
@@ -35,6 +36,8 @@ from helpers.messages import stream_browser_cursor
 from helpers.model_pricing import get_model_pricing_with_fallback
 from helpers.tracing import span, traced
 from loop.activity_helper import call_temporal_activity_from_activity
+from providers.fast_cache.browser_use_cache import cached_browser_decision
+from providers.fast_cache.context import write_through_enabled_for_user
 from providers.rose import ClaudeAuthContext, GptAuthContext, RoseClient
 from providers.rose.browser_use import build_browser_state_message_content
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
@@ -110,6 +113,17 @@ logger = structlog.get_logger()
 
 
 _FALSE_ENV_VALUES = {"0", "false", "no", "off", "disabled"}
+_BROWSER_REPLAY_TARGET_ATTRS = (
+    "id",
+    "name",
+    "type",
+    "role",
+    "aria-label",
+    "placeholder",
+    "title",
+    "href",
+    "value",
+)
 
 
 def _env_enabled(name: str, default: bool = True) -> bool:
@@ -125,6 +139,130 @@ def _botsigged_diagnostics_enabled(start_url: str) -> bool:
     return "botsigged.com" in (start_url or "").lower()
 
 
+def _stable_target_text(value: Any, *, max_length: int = 500) -> str:
+    return " ".join(str(value or "").split())[:max_length]
+
+
+def _browser_element_signature(element: Any, *, index: Any = None) -> Dict[str, Any]:
+    if not element:
+        return {}
+    attrs = getattr(element, "attributes", None) or {}
+    if not isinstance(attrs, dict):
+        attrs = {}
+    tag = (getattr(element, "tag_name", None) or getattr(element, "node_name", "") or "").lower()
+    text = ""
+    try:
+        text = element.get_all_children_text() or ""
+    except Exception:
+        text = getattr(element, "text_content", "") or ""
+    signature: Dict[str, Any] = {
+        "index": index,
+        "tag": tag,
+        "text": _stable_target_text(text),
+        "description": get_element_description(element, max_length=120),
+        "attrs": {
+            key: _stable_target_text(attrs.get(key), max_length=240)
+            for key in _BROWSER_REPLAY_TARGET_ATTRS
+            if attrs.get(key) not in (None, "")
+        },
+    }
+    return {key: value for key, value in signature.items() if value not in (None, "", {})}
+
+
+def _browser_target_score(expected: Dict[str, Any], candidate: Dict[str, Any]) -> int:
+    if not expected or not candidate:
+        return 0
+    score = 0
+    if expected.get("tag") and candidate.get("tag"):
+        score += 6 if expected["tag"] == candidate["tag"] else -8
+    expected_attrs = expected.get("attrs") if isinstance(expected.get("attrs"), dict) else {}
+    candidate_attrs = candidate.get("attrs") if isinstance(candidate.get("attrs"), dict) else {}
+    for key, expected_value in expected_attrs.items():
+        candidate_value = candidate_attrs.get(key)
+        if not candidate_value:
+            continue
+        if candidate_value == expected_value:
+            score += 80 if key in {"id", "name", "aria-label"} else 45
+        elif expected_value in candidate_value or candidate_value in expected_value:
+            score += 25
+    expected_text = expected.get("text") or ""
+    candidate_text = candidate.get("text") or ""
+    if expected_text and candidate_text:
+        if expected_text == candidate_text:
+            score += 70
+        elif expected_text in candidate_text or candidate_text in expected_text:
+            score += 40
+        else:
+            expected_tokens = set(expected_text.lower().split())
+            candidate_tokens = set(candidate_text.lower().split())
+            if expected_tokens and candidate_tokens:
+                overlap = len(expected_tokens & candidate_tokens) / max(len(expected_tokens), len(candidate_tokens))
+                score += int(overlap * 35)
+    if expected.get("description") and expected.get("description") == candidate.get("description"):
+        score += 20
+    return score
+
+
+def _attach_browser_replay_target(llm_result: Dict[str, Any], dom_service: Any) -> Dict[str, Any]:
+    action = llm_result.get("action") if isinstance(llm_result, dict) else None
+    if not isinstance(action, dict):
+        return llm_result
+    index = action.get("index")
+    if index is None:
+        return llm_result
+    element = getattr(dom_service, "selector_map", {}).get(index)
+    if not element:
+        return llm_result
+    target = _browser_element_signature(element, index=index)
+    if not target:
+        return llm_result
+    enriched = dict(llm_result)
+    enriched["_fast_cache_browser_target"] = target
+    return enriched
+
+
+def _remap_cached_browser_action_target(
+    unified_action: Dict[str, Any],
+    *,
+    cached_target: Optional[Dict[str, Any]],
+    dom_service: Any,
+) -> Dict[str, Any]:
+    if not isinstance(unified_action, dict) or not cached_target:
+        return unified_action
+    action_index = unified_action.get("index")
+    selector_map = getattr(dom_service, "selector_map", {}) or {}
+    if action_index is not None and action_index in selector_map:
+        current_signature = _browser_element_signature(selector_map[action_index], index=action_index)
+        if _browser_target_score(cached_target, current_signature) >= 35:
+            return unified_action
+
+    best_index = None
+    best_score = 0
+    for candidate_index, element in selector_map.items():
+        score = _browser_target_score(cached_target, _browser_element_signature(element, index=candidate_index))
+        if score > best_score:
+            best_index = candidate_index
+            best_score = score
+
+    if best_index is None or best_score < 35 or best_index == action_index:
+        return unified_action
+
+    remapped = dict(unified_action)
+    remapped["index"] = best_index
+    params = dict(remapped.get("params") or {})
+    if "index" in params:
+        params["index"] = best_index
+        remapped["params"] = params
+    logger.info(
+        "fast_cache.browser_use_replay_target_remapped",
+        old_index=action_index,
+        new_index=best_index,
+        score=best_score,
+        target=cached_target.get("description") or cached_target.get("text"),
+    )
+    return remapped
+
+
 def _resume_context_from_session_info(
     session_info: Dict[str, Any], current_auth_realm: str
 ) -> tuple[Dict[str, Any], str]:
@@ -132,16 +270,11 @@ def _resume_context_from_session_info(
     if session_info.get("auth_realm"):
         return user_profile, session_info["auth_realm"]
     return user_profile, current_auth_realm or auth_realm_from_url(
-        session_info.get("current_url")
-        or session_info.get("saved_url")
-        or session_info.get("start_url")
-        or ""
+        session_info.get("current_url") or session_info.get("saved_url") or session_info.get("start_url") or ""
     )
 
 
-async def _install_botsigged_diagnostics(
-    page: Any, *, agent_id: str, task_id: str
-) -> None:
+async def _install_botsigged_diagnostics(page: Any, *, agent_id: str, task_id: str) -> None:
     """Capture BotSigged SDK score events for benchmark attribution."""
     script = """
     () => {
@@ -375,9 +508,7 @@ async def _stop_playwright_resources(
             await playwright_instance.stop()
             logger.info("Playwright instance stopped", agent_id=agent_id)
         except Exception as e:
-            logger.warning(
-                "Failed to stop Playwright instance", agent_id=agent_id, error=str(e)
-            )
+            logger.warning("Failed to stop Playwright instance", agent_id=agent_id, error=str(e))
 
 
 async def _append_new_otp_user_messages(
@@ -477,6 +608,8 @@ async def _call_browser_use_with_rotation(  # noqa: C901
     gpt_token_pool_id: Optional[str],
     browser_use_mode: Optional[str],
     extra_user_messages: Optional[List[Dict[str, str]]] = None,
+    call_site: Optional[str] = None,
+    skip_cache_write: bool = False,
     dump_extra: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Call rose-1-browser-use with in-activity claudeAuth rotation.
@@ -499,7 +632,8 @@ async def _call_browser_use_with_rotation(  # noqa: C901
         dynamic_system_context=dynamic_system_context,
         turn_messages=turn_messages,
         agent_id=agent_id,
-        call_site=f"browser_use_step_{iteration}",
+        call_site=call_site or f"browser_use_step_{iteration}",
+        skip_cache_write=skip_cache_write,
         dump_extra=dump_extra,
     )
 
@@ -529,17 +663,14 @@ async def _call_browser_use_with_rotation(  # noqa: C901
         else None
     )
 
-    llm_result = await rose_client.complete_browser_use(
-        claude_auth=claude_auth, gpt_auth=gpt_auth, **rose_kwargs
-    )
+    llm_result = await rose_client.complete_browser_use(claude_auth=claude_auth, gpt_auth=gpt_auth, **rose_kwargs)
 
     if not use_claude:
         return llm_result
 
     rotations = 0
     while (
-        llm_result.get("claude_token_error") in ("auth_error", "rate_limit")
-        and rotations < MAX_CLAUDE_TOKEN_ROTATIONS
+        llm_result.get("claude_token_error") in ("auth_error", "rate_limit") and rotations < MAX_CLAUDE_TOKEN_ROTATIONS
     ):
         rotations += 1
         current_source = token_state.source
@@ -588,9 +719,7 @@ async def _call_browser_use_with_rotation(  # noqa: C901
             rotations=rotations,
         )
 
-        activity.heartbeat(
-            f"Step {iteration} - retrying Rose API (rotation {rotations})"
-        )
+        activity.heartbeat(f"Step {iteration} - retrying Rose API (rotation {rotations})")
         rotated_auth = ClaudeAuthContext(
             token=token_state.access_token or "",
             source=token_state.source or "user",  # type: ignore[arg-type]
@@ -598,9 +727,7 @@ async def _call_browser_use_with_rotation(  # noqa: C901
             pool_token_id=token_state.pool_token_id,
             max_rotations=0,
         )
-        llm_result = await rose_client.complete_browser_use(
-            claude_auth=rotated_auth, **rose_kwargs
-        )
+        llm_result = await rose_client.complete_browser_use(claude_auth=rotated_auth, **rose_kwargs)
 
     return llm_result
 
@@ -617,17 +744,13 @@ def _browser_tool_arguments(unified_action: Dict[str, Any]) -> Dict[str, Any]:
     return args
 
 
-def _browser_tool_result_for_history(
-    action_name: str, result: Dict[str, Any]
-) -> Dict[str, Any]:
+def _browser_tool_result_for_history(action_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
     clean: Dict[str, Any] = {}
     for key, value in (result or {}).items():
         if key in {"screenshot", "screenshot_b64", "dom_tree", "base64"}:
             continue
         clean[key] = value
-    if action_name == "screenshot" and (
-        result.get("screenshot") or result.get("screenshot_b64")
-    ):
+    if action_name == "screenshot" and (result.get("screenshot") or result.get("screenshot_b64")):
         clean["screenshot_attached"] = True
     return clean
 
@@ -678,9 +801,7 @@ def _append_browser_turn_messages(
             "role": "tool",
             "tool_call_id": tool_call_id,
             "name": action_name,
-            "content": json_dumps_compact(
-                _browser_tool_result_for_history(action_name, result)
-            ),
+            "content": json_dumps_compact(_browser_tool_result_for_history(action_name, result)),
         }
     )
 
@@ -709,9 +830,505 @@ def json_dumps_compact(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
+def _write_lock_notification_prompt(
+    *,
+    approval_type: str,
+    current_url: str,
+    pending_action: Dict[str, Any],
+    write_lock_result: Dict[str, Any],
+    media_candidates: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """Prompt appended only to the forked write-lock notification call."""
+    evidence = {
+        "approval_type": approval_type,
+        "current_url": current_url,
+        "pending_action": pending_action,
+        "write_lock_result": {key: value for key, value in write_lock_result.items() if key not in {"question"}},
+    }
+    if media_candidates:
+        evidence["media_candidates"] = media_candidates[:12]
+    return (
+        "WRITE_LOCK_NOTIFICATION_FORK_REQUEST\n\n"
+        "A write lock was triggered. Call generate_write_lock_notification exactly once using the "
+        "current conversation, browser trajectory, latest page context, and pending action.\n\n"
+        "Do not perform any browser action. Do not continue the task. Do not ask the user for "
+        "approval. Generate structured approval metadata only.\n\n"
+        "Describe the real-world action the user is approving, not the clicked button or DOM "
+        "mechanic. For purchases, include every visible item being bought and set media to exactly one "
+        "image when any product, checkout, or page image is visible; for multiple items, use one "
+        "rendered_summary image if available. For each "
+        "purchase item, use the item key title, not name. Include visible price, quantity, description "
+        "under 80 characters, rating/reviews, seller, delivery details, product image URL, order totals, "
+        "delivery address, and payment method when visible. If Runtime evidence includes media_candidates, use only those "
+        "URLs for media and item image_url, preferring the candidate whose alt or nearby_text best "
+        "matches the purchased item. For payment, never include secrets such as card numbers, CVV, "
+        "passwords, tokens, or one-time codes.\n\n"
+        f"Runtime evidence:\n{json_dumps_compact(evidence)}"
+    )
+
+
+def _format_write_lock_value(label: str, value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return f"{label}: {text}"
+
+
+def _sentence_case_action(action: str) -> str:
+    if not action:
+        return action
+    if action[:2].isupper():
+        return action
+    return action[0].lower() + action[1:]
+
+
+def _render_write_lock_notification_question(
+    notification: Dict[str, Any],
+    *,
+    system_name: str,
+    fallback_question: str,
+) -> str:
+    """Render approval text from structured write-lock metadata."""
+    if not isinstance(notification, dict):
+        return fallback_question
+
+    service = notification.get("service") if isinstance(notification.get("service"), dict) else {}
+    service_name = service.get("name") or service.get("domain") or "the current site"
+    action = _sentence_case_action(str(notification.get("action") or "perform a write action").strip())
+    trigger_type = notification.get("trigger_type")
+
+    lines = [f"**Approval Needed**\n", f"{system_name} wants to {action} on **{service_name}**."]
+
+    if trigger_type == "purchase" and isinstance(notification.get("purchase"), dict):
+        purchase = notification["purchase"]
+        items = purchase.get("items") if isinstance(purchase.get("items"), list) else []
+        if items:
+            lines.append("\n**Items:**")
+            for idx, item in enumerate(items, start=1):
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("title") or "Item").strip()
+                lines.append(f"{idx}. {title}")
+                for label, key in (
+                    ("Price", "price"),
+                    ("Qty", "quantity"),
+                    ("Description", "description"),
+                    ("Rating", "rating"),
+                    ("Reviews", "review_count"),
+                    ("Seller", "seller"),
+                    ("Shipping", "shipping"),
+                ):
+                    formatted = _format_write_lock_value(f"   {label}", item.get(key))
+                    if formatted:
+                        lines.append(formatted)
+        totals = purchase.get("totals") if isinstance(purchase.get("totals"), dict) else {}
+        total_lines = [
+            _format_write_lock_value("Subtotal", totals.get("subtotal")),
+            _format_write_lock_value("Shipping", totals.get("shipping")),
+            _format_write_lock_value("Tax", totals.get("tax")),
+            _format_write_lock_value("Total", totals.get("total")),
+        ]
+        total_lines = [line for line in total_lines if line]
+        if total_lines:
+            lines.append("\n**Totals:**")
+            lines.extend(total_lines)
+        for label, key in (("Payment", "payment_method"), ("Delivery", "delivery_address")):
+            formatted = _format_write_lock_value(label, purchase.get(key))
+            if formatted:
+                lines.append(formatted)
+
+    elif trigger_type == "message" and isinstance(notification.get("message"), dict):
+        message = notification["message"]
+        for label, key in (("To", "to"), ("Cc", "cc"), ("Bcc", "bcc")):
+            value = message.get(key)
+            if isinstance(value, list) and value:
+                lines.append(f"{label}: {', '.join(str(v) for v in value if v)}")
+        subject = _format_write_lock_value("Subject", message.get("subject"))
+        if subject:
+            lines.append(subject)
+        body = str(message.get("body") or "").strip()
+        if body:
+            lines.append(f"\n**Body:**\n{body}")
+
+    elif trigger_type == "social_post" and isinstance(notification.get("social_post"), dict):
+        post = notification["social_post"]
+        for label, key in (("Destination", "destination"), ("Audience", "audience")):
+            formatted = _format_write_lock_value(label, post.get(key))
+            if formatted:
+                lines.append(formatted)
+        body = str(post.get("body") or "").strip()
+        if body:
+            lines.append(f"\n**Post:**\n{body}")
+
+    elif trigger_type == "payment" and isinstance(notification.get("payment"), dict):
+        payment = notification["payment"]
+        for label, key in (("Merchant", "merchant"), ("Amount", "amount"), ("Purpose", "purpose")):
+            formatted = _format_write_lock_value(label, payment.get(key))
+            if formatted:
+                lines.append(formatted)
+        fields = payment.get("fields")
+        if isinstance(fields, list) and fields:
+            lines.append(f"Fields: {', '.join(str(field) for field in fields if field)}")
+        lines.append("\nPayment secrets are not included in this message.")
+
+    elif trigger_type == "generic_write" and isinstance(notification.get("generic_write"), dict):
+        operation = notification["generic_write"]
+        for label, key in (("Action", "label"), ("Target", "target"), ("Change", "payload_summary")):
+            formatted = _format_write_lock_value(label, operation.get(key))
+            if formatted:
+                lines.append(formatted)
+
+    media = notification.get("media")
+    if isinstance(media, list) and media:
+        first = next((m for m in media if isinstance(m, dict) and m.get("url")), None)
+        if first:
+            lines.append(f"\n**Image:** {first['url']}")
+
+    url = service.get("url")
+    if url:
+        lines.append(f"\n**Page:** {url}")
+
+    return "\n".join(lines)
+
+
+def _notification_media_url(notification: Dict[str, Any]) -> Optional[str]:
+    media = notification.get("media")
+    if isinstance(media, list):
+        for entry in media:
+            if not isinstance(entry, dict):
+                continue
+            url = entry.get("url")
+            if isinstance(url, str) and url.strip():
+                return url.strip()
+    return None
+
+
+def _first_purchase_item_image_url(notification: Dict[str, Any]) -> Optional[str]:
+    purchase = notification.get("purchase")
+    if not isinstance(purchase, dict):
+        return None
+    items = purchase.get("items")
+    if not isinstance(items, list):
+        return None
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        image_url = item.get("image_url")
+        if isinstance(image_url, str) and image_url.strip():
+            return image_url.strip()
+    return None
+
+
+def _text_tokens(value: Any) -> set[str]:
+    text = str(value or "").lower()
+    tokens = set(re.findall(r"[a-z0-9]+", text))
+    return {
+        token
+        for token in tokens
+        if len(token) > 2
+        and token
+        not in {
+            "the",
+            "and",
+            "for",
+            "with",
+            "one",
+            "size",
+            "from",
+            "your",
+            "item",
+            "product",
+        }
+    }
+
+
+def _media_candidate_url_score(url: str, bounds: Dict[str, Any]) -> int:
+    lower = url.lower()
+    width = int(bounds.get("width") or 0)
+    height = int(bounds.get("height") or 0)
+    area = width * height
+    score = 0
+    if "/images/i/" in lower:
+        score += 25
+    if re.search(r"\._[^/]*(?:ac|aa|sx|sy|ul|ux|uy)\d+", lower):
+        score += 30
+    size_match = re.search(r"\._[^/]*(?:ac|aa|sx|sy|ul|ux|uy)(\d+)", lower)
+    if size_match:
+        score += min(int(size_match.group(1)), 1000) // 20
+    if lower.endswith((".jpg", ".jpeg", ".webp")):
+        score += 25
+    if lower.endswith(".png"):
+        score -= 5
+    if area and area < 32 * 32:
+        score -= 40
+    if any(marker in lower for marker in ("cardart", "logo", "sprite", "icon")):
+        score -= 35
+    return score
+
+
+def _best_media_candidate_for_purchase(
+    notification: Dict[str, Any],
+    browser_state: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    candidates = browser_state.get("media_candidates")
+    if not isinstance(candidates, list):
+        return None
+    purchase = notification.get("purchase")
+    items = purchase.get("items") if isinstance(purchase, dict) else []
+    item_text = " ".join(
+        str(item.get("title") or item.get("description") or "") for item in items if isinstance(item, dict)
+    )
+    item_tokens = _text_tokens(item_text)
+
+    best: Optional[Dict[str, Any]] = None
+    best_score = -1
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        url = candidate.get("url")
+        if not isinstance(url, str) or not url.strip():
+            continue
+        candidate_text = f"{candidate.get('alt') or ''} {candidate.get('nearby_text') or ''}"
+        overlap = len(item_tokens & _text_tokens(candidate_text))
+        score = overlap * 10
+        if candidate.get("visible"):
+            score += 3
+        if "media-amazon" in url or "ssl-images-amazon" in url:
+            score += 2
+        bounds = candidate.get("bounds") if isinstance(candidate.get("bounds"), dict) else {}
+        score += _media_candidate_url_score(url, bounds)
+        score += min(int(bounds.get("width") or 0) * int(bounds.get("height") or 0), 10000) // 5000
+        if score > best_score:
+            best = candidate
+            best_score = score
+
+    if not best or best_score <= 0:
+        return None
+    return best
+
+
+def _normalize_write_lock_notification_media(
+    notification: Dict[str, Any],
+    *,
+    browser_state: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Ensure purchase approvals have one renderer image when visual evidence exists."""
+    if notification.get("trigger_type") != "purchase":
+        return notification
+    if _notification_media_url(notification):
+        return notification
+
+    item_image_url = _first_purchase_item_image_url(notification)
+    if item_image_url:
+        notification["media"] = [
+            {
+                "url": item_image_url,
+                "alt": "Purchase item image",
+                "kind": "product",
+            }
+        ]
+        return notification
+
+    media_candidate = _best_media_candidate_for_purchase(notification, browser_state)
+    if media_candidate:
+        notification["media"] = [
+            {
+                "url": media_candidate["url"].strip(),
+                "alt": media_candidate.get("alt") or media_candidate.get("nearby_text") or "Purchase item image",
+                "kind": "product",
+            }
+        ]
+        purchase = notification.get("purchase")
+        items = purchase.get("items") if isinstance(purchase, dict) else []
+        if len(items) == 1 and isinstance(items[0], dict) and not items[0].get("image_url"):
+            items[0]["image_url"] = media_candidate["url"].strip()
+        return notification
+
+    screenshot = browser_state.get("screenshot")
+    if isinstance(screenshot, str) and screenshot.strip():
+        screenshot_url = (
+            screenshot.strip()
+            if screenshot.strip().startswith("http")
+            else f"data:image/png;base64,{screenshot.strip()}"
+        )
+        notification["media"] = [
+            {
+                "url": screenshot_url,
+                "alt": "Checkout page preview",
+                "kind": "page_preview",
+            }
+        ]
+
+    return notification
+
+
+async def _generate_write_lock_notification(
+    *,
+    rose_client: RoseClient,
+    task_prompt: str,
+    dynamic_system_context: str,
+    browser_turn_messages: List[Dict[str, Any]],
+    browser_state: Dict[str, Any],
+    action_entries: List[Dict[str, Any]],
+    config: Any,
+    user_id: str,
+    agent_id: str,
+    iteration: int,
+    token_state: ClaudeTokenState,
+    gpt_token: Optional[str],
+    gpt_account_id: Optional[str],
+    gpt_token_source: Optional[str],
+    gpt_token_pool_id: Optional[str],
+    browser_use_mode: Optional[str],
+    approval_type: str,
+    current_url: str,
+    pending_action: Dict[str, Any],
+    write_lock_result: Dict[str, Any],
+    system_name: str,
+    fallback_question: str,
+) -> Dict[str, Any]:
+    """Fork browser-use context to generate write-lock approval metadata."""
+    prompt = _write_lock_notification_prompt(
+        approval_type=approval_type,
+        current_url=current_url,
+        pending_action=pending_action,
+        write_lock_result=write_lock_result,
+        media_candidates=browser_state.get("media_candidates"),
+    )
+    fork_result = await _call_browser_use_with_rotation(
+        rose_client=rose_client,
+        task=task_prompt,
+        dynamic_system_context=dynamic_system_context,
+        turn_messages=browser_turn_messages,
+        browser_state=browser_state,
+        action_entries=action_entries,
+        config=config,
+        user_id=user_id,
+        agent_id=agent_id,
+        iteration=iteration,
+        token_state=token_state,
+        gpt_token=gpt_token,
+        gpt_account_id=gpt_account_id,
+        gpt_token_source=gpt_token_source,
+        gpt_token_pool_id=gpt_token_pool_id,
+        browser_use_mode=browser_use_mode,
+        extra_user_messages=[{"role": "user", "content": prompt}],
+        call_site=f"write_lock_notification_fork_{iteration}",
+        skip_cache_write=True,
+        dump_extra={
+            "write_lock_notification_fork": True,
+            "approval_type": approval_type,
+            "current_url": current_url,
+        },
+    )
+    action = fork_result.get("action") or {}
+    if action.get("action") != "generate_write_lock_notification":
+        raise ValueError(
+            f"write-lock notification fork did not call generate_write_lock_notification; got {action.get('action')!r}"
+        )
+    from browser_tools.schemas import GenerateWriteLockNotificationTool
+
+    validated_notification = GenerateWriteLockNotificationTool.model_validate(
+        {"tool": "generate_write_lock_notification", **dict(action.get("params") or {})}
+    )
+    notification = validated_notification.model_dump(exclude={"tool"}, exclude_none=True)
+    notification = _normalize_write_lock_notification_media(
+        notification,
+        browser_state=browser_state,
+    )
+    question = _render_write_lock_notification_question(
+        notification,
+        system_name=system_name,
+        fallback_question=fallback_question,
+    )
+    return {
+        "notification": notification,
+        "question": question,
+        "usage": fork_result.get("usage") or {},
+        "actual_model": fork_result.get("actual_model"),
+        "request_id": fork_result.get("request_id"),
+        "mode": fork_result.get("mode"),
+    }
+
+
 # ========================================
 # TEMPORAL ACTIVITY (V3 - browser-use)
 # ========================================
+
+
+async def _install_fast_mode_network_cache(
+    context: Any,
+    goal: str,
+    *,
+    read_enabled: bool = True,
+    write_enabled: bool = True,
+) -> None:
+    """Attach a CDP Fetch route that records/replays the browser's HTTPS responses.
+
+    HIT → fulfill from cache (no internet). MISS → continue live, capture the body
+    via a response listener. Browser session + actions stay live; only network
+    responses are cached. Failures degrade to live (never break the session).
+    """
+    from providers.fast_cache.browser_http import BrowserHttpCache
+
+    http_cache = BrowserHttpCache(goal, read_enabled=read_enabled, write_enabled=write_enabled)
+
+    async def _request_body(req: Any) -> Optional[Any]:
+        post_data = getattr(req, "post_data", None)
+        if callable(post_data):
+            post_data = post_data()
+        if asyncio.iscoroutine(post_data):
+            post_data = await post_data
+        if post_data is not None:
+            return post_data
+        post_data_buffer = getattr(req, "post_data_buffer", None)
+        if callable(post_data_buffer):
+            post_data_buffer = post_data_buffer()
+        if asyncio.iscoroutine(post_data_buffer):
+            post_data_buffer = await post_data_buffer
+        return post_data_buffer
+
+    async def _route(route: Any) -> None:
+        req = route.request
+        try:
+            hit = await http_cache.lookup(
+                req.method,
+                req.url,
+                req.resource_type,
+                dict(req.headers),
+                await _request_body(req),
+            )
+        except Exception:
+            hit = None
+        if hit is not None:
+            try:
+                await route.fulfill(status=hit["status"], headers=hit["headers"], body=hit["body"])
+                return
+            except Exception:
+                pass
+        await route.continue_()
+
+    async def _record(response: Any) -> None:
+        try:
+            req = response.request
+            body = await response.body()
+            await http_cache.record(
+                req.method,
+                req.url,
+                req.resource_type,
+                response.status,
+                dict(response.headers),
+                body,
+                request_headers=dict(req.headers),
+                request_body=await _request_body(req),
+            )
+        except Exception:  # recording is best-effort, never break the page
+            pass
+
+    await context.route("**/*", _route)
+    context.on("response", lambda r: asyncio.ensure_future(_record(r)))
 
 
 @activity.defn
@@ -736,6 +1353,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
     gpt_account_id: Optional[str] = None,
     gpt_token_source: Optional[str] = None,
     gpt_token_pool_id: Optional[str] = None,
+    fast_mode_cache_enabled: bool = False,
 ) -> Dict[str, Any]:
     """Browser agent activity using browser-use BrowserSession + Rose API."""
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
@@ -768,9 +1386,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             token_state.access_token = token_data.get("accessToken")
             token_state.source = token_data.get("source")
             token_state.pool_token_id = token_data.get("poolTokenId")
-            logger.info(
-                f"[ClaudeAuth] Got token (source={token_state.source})", user_id=user_id
-            )
+            logger.info(f"[ClaudeAuth] Got token (source={token_state.source})", user_id=user_id)
         else:
             logger.info(
                 "[ClaudeAuth] No token available, falling back to waterfall",
@@ -835,9 +1451,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
         def _record_timing(name: str, start: float, end: Optional[float] = None):
             if end is None:
                 end = time.monotonic()
-            timing_events.append(
-                (name, (start - setup_origin) * 1000, (end - setup_origin) * 1000)
-            )
+            timing_events.append((name, (start - setup_origin) * 1000, (end - setup_origin) * 1000))
 
         # ===== PHASE 1: SESSION INIT =====
         t_session = time.monotonic()
@@ -859,23 +1473,14 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                     "Resuming auth-assistance browser task via existing Steel session",
                     task_id=task_id,
                 )
-                session_info = await fetch_session_info(
-                    config, task_id, validate_live=True
-                )
-                expected_session_id = (
-                    write_lock_resume_state.get("session_id")
-                    if write_lock_resume_state
-                    else None
-                )
+                session_info = await fetch_session_info(config, task_id, validate_live=True)
+                expected_session_id = write_lock_resume_state.get("session_id") if write_lock_resume_state else None
                 session_matches = (
                     expected_session_id is None
                     or session_info.get("session_id") is None
                     or session_info.get("session_id") == expected_session_id
                 )
-                same_session_available = (
-                    session_info.get("same_session_available") is True
-                    and session_matches
-                )
+                same_session_available = session_info.get("same_session_available") is True and session_matches
                 if same_session_available:
                     session_info["resume_mode"] = "same_steel_session"
                     auth_assistance_resume_mode = "same_steel_session"
@@ -885,9 +1490,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                         session_id=session_info.get("session_id"),
                     )
                 else:
-                    unavailable_reason = session_info.get(
-                        "same_session_unavailable_reason"
-                    )
+                    unavailable_reason = session_info.get("same_session_unavailable_reason")
                     if not session_matches:
                         unavailable_reason = "session_id_mismatch"
                     logger.warning(
@@ -912,17 +1515,13 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                             elapsed_s=int(_elapsed),
                             retry_in=SESSION_RETRY_INTERVAL_SECONDS,
                         )
-                        activity.heartbeat(
-                            f"Waiting to resume browser availability ({int(_elapsed)}s)"
-                        )
+                        activity.heartbeat(f"Waiting to resume browser availability ({int(_elapsed)}s)")
                         await asyncio.sleep(SESSION_RETRY_INTERVAL_SECONDS)
                     session_info["resume_mode"] = "new_steel_session_after_unavailable"
                     session_info["same_session_unavailable_reason"] = unavailable_reason
                     auth_assistance_resume_mode = "new_steel_session_after_unavailable"
             else:
-                logger.info(
-                    "\U0001f50d Fetching session info for resumed task", task_id=task_id
-                )
+                logger.info("\U0001f50d Fetching session info for resumed task", task_id=task_id)
                 session_info = await fetch_session_info(config, task_id)
             session_id = session_info.get("session_id")
             browser_url = session_info.get("debug_url")
@@ -931,15 +1530,9 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             session_passwords = session_info.get("passwords", [])
             session_passkeys = session_info.get("passkeys", [])
             session_auth_options = session_info.get("auth_options")
-            session_credential_ref = session_info.get(
-                "credential_ref"
-            ) or session_info.get("auth_credential_ref")
-            browser_session_metadata = (
-                session_info.get("browser_session_metadata") or {}
-            )
-            user_profile, auth_realm = _resume_context_from_session_info(
-                session_info, auth_realm
-            )
+            session_credential_ref = session_info.get("credential_ref") or session_info.get("auth_credential_ref")
+            browser_session_metadata = session_info.get("browser_session_metadata") or {}
+            user_profile, auth_realm = _resume_context_from_session_info(session_info, auth_realm)
             activity.heartbeat(f"Resuming task {task_id}")
         else:
             activity.heartbeat("Initializing browser session")
@@ -947,18 +1540,14 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             _waiting_msg_sent = False
 
             while True:
-                session_data = await init_browser_session(
-                    config, user_id, agent_id, start_url
-                )
+                session_data = await init_browser_session(config, user_id, agent_id, start_url)
 
                 if not session_data.get("rate_limited"):
                     break
 
                 _elapsed = time.monotonic() - _session_wait_start
                 if _elapsed > SESSION_MAX_WAIT_SECONDS:
-                    raise Exception(
-                        f"Browser session unavailable after {int(_elapsed)}s (rate limited by Steel)"
-                    )
+                    raise Exception(f"Browser session unavailable after {int(_elapsed)}s (rate limited by Steel)")
 
                 if not _waiting_msg_sent:
                     await save_browser_action_message(
@@ -977,9 +1566,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                     elapsed_s=int(_elapsed),
                     retry_in=SESSION_RETRY_INTERVAL_SECONDS,
                 )
-                activity.heartbeat(
-                    f"Waiting for browser availability ({int(_elapsed)}s)"
-                )
+                activity.heartbeat(f"Waiting for browser availability ({int(_elapsed)}s)")
                 await asyncio.sleep(SESSION_RETRY_INTERVAL_SECONDS)
 
             task_id = session_data["task_id"]
@@ -990,19 +1577,13 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             session_passwords = session_data.get("passwords", [])
             session_passkeys = session_data.get("passkeys", [])
             session_auth_options = session_data.get("auth_options")
-            session_credential_ref = session_data.get(
-                "credential_ref"
-            ) or session_data.get("auth_credential_ref")
-            browser_session_metadata = (
-                session_data.get("browser_session_metadata") or {}
-            )
+            session_credential_ref = session_data.get("credential_ref") or session_data.get("auth_credential_ref")
+            browser_session_metadata = session_data.get("browser_session_metadata") or {}
             user_profile = session_data.get("user_settings") or {}
         _record_timing("session_init", t_session)
 
         if not cdp_url:
-            raise RuntimeError(
-                "No CDP URL provided - backend must return ws_url from Steel"
-            )
+            raise RuntimeError("No CDP URL provided - backend must return ws_url from Steel")
 
         t_auth = time.monotonic()
         auth_options = session_auth_options or {}
@@ -1023,14 +1604,10 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             or minted_option.get("account_label")
         )
         minted_phone_label = (
-            minted_option.get("phone")
-            or minted_option.get("agentPhone")
-            or minted_option.get("agent_phone")
+            minted_option.get("phone") or minted_option.get("agentPhone") or minted_option.get("agent_phone")
         )
         minted_account_labels = {
-            str(label).strip().lower()
-            for label in (minted_account_label, minted_phone_label)
-            if label
+            str(label).strip().lower() for label in (minted_account_label, minted_phone_label) if label
         }
         minted_primary_label = minted_account_label or minted_phone_label
         minted_credential_ref = (
@@ -1062,60 +1639,53 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             from playwright.async_api import async_playwright
 
             _playwright_instance = await async_playwright().start()
-            _playwright_browser = await _playwright_instance.chromium.connect_over_cdp(
-                cdp_url
-            )
+            _playwright_browser = await _playwright_instance.chromium.connect_over_cdp(cdp_url)
             _playwright_context = _playwright_browser.contexts[0]
             _input_page = _playwright_context.pages[0]
             _record_timing("parallel.browser.playwright_connect", t)
 
-            if _botsigged_diagnostics_enabled(start_url):
-                await _install_botsigged_diagnostics(
-                    _input_page, agent_id=agent_id, task_id=task_id
+            # Fast Mode: record/replay the page's HTTPS responses via a CDP Fetch route.
+            # On a hit we fulfill from cache (no internet); on a miss we let the request
+            # go live and capture the response body. Write-through mode records without
+            # fulfilling from cache. The browser session + actions stay live.
+            fast_mode_write_through = write_through_enabled_for_user(user_id)
+            if goal and (fast_mode_cache_enabled or fast_mode_write_through):
+                await _install_fast_mode_network_cache(
+                    _playwright_context,
+                    goal,
+                    read_enabled=fast_mode_cache_enabled,
+                    write_enabled=fast_mode_cache_enabled or fast_mode_write_through,
                 )
 
+            if _botsigged_diagnostics_enabled(start_url):
+                await _install_botsigged_diagnostics(_input_page, agent_id=agent_id, task_id=task_id)
+
             t = time.monotonic()
-            fingerprint_injection_enabled = _env_enabled(
-                "BROWSER_AGENT_FINGERPRINT_INJECTION_ENABLED", True
-            )
+            fingerprint_injection_enabled = _env_enabled("BROWSER_AGENT_FINGERPRINT_INJECTION_ENABLED", True)
             if fingerprint_injection and fingerprint_injection_enabled:
                 from helpers.fingerprint_injection import apply_fingerprint_injection
 
-                injection_success = await apply_fingerprint_injection(
-                    _input_page, fingerprint_injection
-                )
+                injection_success = await apply_fingerprint_injection(_input_page, fingerprint_injection)
                 if injection_success:
-                    logger.info(
-                        "\U0001f510 Applied fingerprint injection via CDP (Sec-CH-UA-Platform, init scripts)"
-                    )
+                    logger.info("\U0001f510 Applied fingerprint injection via CDP (Sec-CH-UA-Platform, init scripts)")
                 else:
                     logger.warning(
                         "\u26a0\ufe0f Failed to apply fingerprint injection - browser may leak real fingerprint"
                     )
             elif fingerprint_injection and not fingerprint_injection_enabled:
-                logger.info(
-                    "\U0001f510 Browser-agent fingerprint injection disabled by env"
-                )
+                logger.info("\U0001f510 Browser-agent fingerprint injection disabled by env")
             else:
-                logger.info(
-                    "\U0001f510 No fingerprint injection data provided - using Steel defaults"
-                )
+                logger.info("\U0001f510 No fingerprint injection data provided - using Steel defaults")
             _record_timing("parallel.browser.fingerprint", t)
 
             t = time.monotonic()
             _humanizer = None
             if _env_enabled("BROWSER_AGENT_HUMANIZER_ENABLED", True):
-                _humanizer = BrowserHumanizer(
-                    dom_page=_dom_page, input_page=_input_page, fast=False
-                )
+                _humanizer = BrowserHumanizer(dom_page=_dom_page, input_page=_input_page, fast=False)
                 await _humanizer.initialize_cursor(start_pos=(640, 400))
-                logger.info(
-                    "\U0001f916 BrowserHumanizer initialized (browser-use for DOM, Playwright for input)"
-                )
+                logger.info("\U0001f916 BrowserHumanizer initialized (browser-use for DOM, Playwright for input)")
             else:
-                logger.info(
-                    "\U0001f916 BrowserHumanizer disabled by env; using browser-use input events"
-                )
+                logger.info("\U0001f916 BrowserHumanizer disabled by env; using browser-use input events")
             _record_timing("parallel.browser.humanizer", t)
 
             return (
@@ -1167,23 +1737,17 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                     user_profile.get("country", "United States"),
                 ]
                 shipping_address = "\n".join(line for line in addr_lines if line)
-                _user_context_sections.append(
-                    f"## Delivery Address\n{shipping_address}"
-                )
+                _user_context_sections.append(f"## Delivery Address\n{shipping_address}")
 
             _autopay_section = ""
             _card_refs: Dict[str, str] = {}
             encrypted_payment = user_profile.get("encryptedPaymentInformation")
             if encrypted_payment and config.payment.decryption_key:
-                payment_data = decrypt_payment_info(
-                    encrypted_payment, config.payment.decryption_key
-                )
+                payment_data = decrypt_payment_info(encrypted_payment, config.payment.decryption_key)
                 if payment_data:
                     autopay_limit_cents = payment_data.get("autoagentpaylimit_cents", 0)
                     if autopay_limit_cents > 0:
-                        _autopay_section = build_autopay_prompt_section(
-                            payment_data, encrypted_payment
-                        )
+                        _autopay_section = build_autopay_prompt_section(payment_data, encrypted_payment)
                         _user_context_sections.append(_autopay_section.strip())
                         _card_refs = {
                             "card_number": payment_data.get("card_number", ""),
@@ -1203,9 +1767,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             _password_origins: Dict[str, str] = {}
             _credential_refs_by_secret_ref: Dict[str, Dict[str, str]] = {}
             if session_passwords:
-                logger.info(
-                    f"Loaded {len(session_passwords)} passwords from session response"
-                )
+                logger.info(f"Loaded {len(session_passwords)} passwords from session response")
             (
                 _auth_options_section,
                 _ref_to_encrypted,
@@ -1227,21 +1789,14 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                 private_key = serialization.load_pem_private_key(
                     private_key_pem, password=None, backend=default_backend()
                 )
-                logger.info(
-                    f"Pre-loaded RSA key, decrypting {len(_ref_to_encrypted)} passwords in parallel..."
-                )
+                logger.info(f"Pre-loaded RSA key, decrypting {len(_ref_to_encrypted)} passwords in parallel...")
 
-                async def decrypt_one(
-                    short_ref: str, encrypted: str
-                ) -> tuple[str, Optional[str]]:
-                    decrypted = await asyncio.to_thread(
-                        decrypt_password_with_key, encrypted, private_key
-                    )
+                async def decrypt_one(short_ref: str, encrypted: str) -> tuple[str, Optional[str]]:
+                    decrypted = await asyncio.to_thread(decrypt_password_with_key, encrypted, private_key)
                     return (short_ref, decrypted)
 
                 decrypt_tasks = [
-                    decrypt_one(short_ref, encrypted)
-                    for short_ref, encrypted in _ref_to_encrypted.items()
+                    decrypt_one(short_ref, encrypted) for short_ref, encrypted in _ref_to_encrypted.items()
                 ]
                 decrypt_results = await asyncio.gather(*decrypt_tasks)
 
@@ -1252,33 +1807,23 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             attemptable_password_ids = {
                 str(credential_ref.get("id"))
                 for ref, credential_ref in _credential_refs_by_secret_ref.items()
-                if ref in _secret_refs
-                and credential_ref.get("kind") == "password"
-                and credential_ref.get("id")
+                if ref in _secret_refs and credential_ref.get("kind") == "password" and credential_ref.get("id")
             }
-            auth_runtime_state.restrict_password_ids_to_attemptable(
-                attemptable_password_ids
-            )
+            auth_runtime_state.restrict_password_ids_to_attemptable(attemptable_password_ids)
 
             logger.info(
                 "Built secret refs for type interception",
                 card_refs_count=len(_card_refs),
-                password_refs_count=len(
-                    [k for k in _secret_refs if k not in _card_refs]
-                ),
+                password_refs_count=len([k for k in _secret_refs if k not in _card_refs]),
                 attemptable_password_count=len(attemptable_password_ids),
             )
             _record_timing("parallel.data.passwords", t)
 
             t = time.monotonic()
             _user_context_section = (
-                "\n\n# User Context\n\n" + "\n\n".join(_user_context_sections)
-                if _user_context_sections
-                else ""
+                "\n\n# User Context\n\n" + "\n\n".join(_user_context_sections) if _user_context_sections else ""
             )
-            _base_custom_instructions = (
-                _user_context_section + "\n\n" + _auth_options_section
-            )
+            _base_custom_instructions = _user_context_section + "\n\n" + _auth_options_section
             if session_credential_ref and task_id:
                 await save_browser_credential_ref_message(
                     agent_id=agent_id,
@@ -1318,9 +1863,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             playwright_browser,
             playwright_instance,
         ) = browser_result
-        recording_output_dir = (
-            browser_recording_output_dir(agent_id, task_id) if task_id else None
-        )
+        recording_output_dir = browser_recording_output_dir(agent_id, task_id) if task_id else None
         browser_recorder = await BrowserAgentRecorder.create(
             page=input_page,
             agent_id=agent_id,
@@ -1329,9 +1872,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             browser_url=browser_url,
             session_metadata=browser_session_metadata,
         )
-        cursor_streamer = BrowserCursorRealtimeStreamer(
-            agent_id=agent_id, task_id=task_id
-        )
+        cursor_streamer = BrowserCursorRealtimeStreamer(agent_id=agent_id, task_id=task_id)
 
         def observe_cursor(x: int, y: int) -> None:
             if browser_recorder:
@@ -1375,11 +1916,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                 browser_url=browser_url,
                 action_type="network_recording",
                 tool_call_id=str(uuid_module.uuid4()),
-                extra_metadata={
-                    "network_recording_path": str(
-                        browser_network_recorder.network_dir / "index.json"
-                    )
-                },
+                extra_metadata={"network_recording_path": str(browser_network_recorder.network_dir / "index.json")},
             )
 
         (
@@ -1429,11 +1966,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                 }
 
             _decrypted_passkeys = [
-                pk
-                for pk in await asyncio.gather(
-                    *[_decrypt_passkey(p) for p in session_passkeys]
-                )
-                if pk
+                pk for pk in await asyncio.gather(*[_decrypt_passkey(p) for p in session_passkeys]) if pk
             ]
             for src in session_passkeys:
                 cid = src.get("credentialId")
@@ -1459,9 +1992,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             try:
                 used = await dom_service.get_used_passkey_credential_ids()
             except Exception as e:
-                logger.warning(
-                    "Failed to read passkey usage", error=extract_error_message(e)
-                )
+                logger.warning("Failed to read passkey usage", error=extract_error_message(e))
                 return
             for cid in used:
                 ref = passkey_ref_by_credential_id.get(cid)
@@ -1482,9 +2013,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
         available_file_paths: Dict[str, str] = {}
         if attachments:
             t = time.monotonic()
-            logger.info(
-                f"\U0001f4ce Uploading {len(attachments)} attachments to Steel session"
-            )
+            logger.info(f"\U0001f4ce Uploading {len(attachments)} attachments to Steel session")
             from helpers.attachments import download_from_storage
 
             for fp in attachments:
@@ -1511,14 +2040,10 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                         available_file_paths[filename] = remote_path
                         logger.info(f"\U0001f4ce Uploaded {filename} -> {remote_path}")
                 except Exception as e:
-                    logger.error(
-                        f"Failed to upload attachment {fp.get('original_filename', '?')}: {e}"
-                    )
+                    logger.error(f"Failed to upload attachment {fp.get('original_filename', '?')}: {e}")
 
             if available_file_paths:
-                logger.info(
-                    f"\U0001f4ce Available files for browser: {list(available_file_paths.keys())}"
-                )
+                logger.info(f"\U0001f4ce Available files for browser: {list(available_file_paths.keys())}")
             _record_timing("post_setup.attachments", t)
 
         # Logo hijack
@@ -1559,9 +2084,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                     };
                 })();
             """
-            logo_cdp_session = await dom_service._session.get_or_create_cdp_session(
-                focus=True
-            )
+            logo_cdp_session = await dom_service._session.get_or_create_cdp_session(focus=True)
             await logo_cdp_session.cdp_client.send.Page.addScriptToEvaluateOnNewDocument(
                 params={"source": logo_hijack_script, "runImmediately": True},
                 session_id=logo_cdp_session.session_id,
@@ -1585,11 +2108,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                     try:
                         target_id = target.get("targetId")
                         if target_id:
-                            temp_session = (
-                                await dom_service._session.get_or_create_cdp_session(
-                                    target_id, focus=False
-                                )
-                            )
+                            temp_session = await dom_service._session.get_or_create_cdp_session(target_id, focus=False)
                             await temp_session.cdp_client.send.Runtime.evaluate(
                                 params={"expression": immediate_replace_script},
                                 session_id=temp_session.session_id,
@@ -1599,9 +2118,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             except Exception as e:
                 logger.debug(f"Could not replace logos on existing pages: {e}")
 
-            logger.info(
-                "\U0001f3a8 Hijacked img.src to replace browser-use logo with Rose logo"
-            )
+            logger.info("\U0001f3a8 Hijacked img.src to replace browser-use logo with Rose logo")
         except Exception as e:
             logger.warning(f"Failed to replace logo: {e}")
         _record_timing("post_setup.logo_hijack", t)
@@ -1631,9 +2148,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             )
 
             t = time.monotonic()
-            event = dom_service.session.event_bus.dispatch(
-                NavigateToUrlEvent(url=nav_url)
-            )
+            event = dom_service.session.event_bus.dispatch(NavigateToUrlEvent(url=nav_url))
             await event
             await event.event_result(raise_if_any=True, raise_if_none=False)
             _record_timing("navigation.navigate", t)
@@ -1646,9 +2161,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                 origin = f"{parsed.scheme}://{parsed.netloc}"
                 result_data = await inject_local_storage(config, session_id, origin)
                 if result_data and result_data.get("injected"):
-                    logger.info(
-                        f"\U0001f4be Injected {result_data.get('count', 0)} localStorage entries for {origin}"
-                    )
+                    logger.info(f"\U0001f4be Injected {result_data.get('count', 0)} localStorage entries for {origin}")
             except Exception as e:
                 logger.warning(f"Failed to inject localStorage for {nav_url}: {e}")
             _record_timing("navigation.inject_localStorage", t)
@@ -1666,9 +2179,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                 total_steps=MAX_ITERATIONS,
             )
             if browser_recorder:
-                await browser_recorder.mark(
-                    f"Navigated -> {nav_url[:80]}", action="goto"
-                )
+                await browser_recorder.mark(f"Navigated -> {nav_url[:80]}", action="goto")
 
             logger.info(f"\U0001f310 Auto-navigated to start URL: {nav_url}")
 
@@ -1685,9 +2196,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             except Exception as warmup_err:
                 logger.warning(f"⚠️ Warm-up scroll failed: {warmup_err}")
         else:
-            logger.info(
-                "\U0001f504 Resuming from write lock approval - skipping start URL navigation"
-            )
+            logger.info("\U0001f504 Resuming from write lock approval - skipping start URL navigation")
         _record_timing("navigation_total", t_nav)
 
         # ===== LOG SETUP TIMING SUMMARY =====
@@ -1718,9 +2227,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
         task_prompt = build_browser_task_prompt(goal)
         dynamic_system_context = build_browser_dynamic_system_context(
             base_custom_instructions,
-            available_files=(
-                list(available_file_paths.keys()) if available_file_paths else None
-            ),
+            available_files=(list(available_file_paths.keys()) if available_file_paths else None),
             response_schema=response_schema,
         )
 
@@ -1734,9 +2241,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                 unified_action = pending_write_lock_action
                 pending_write_lock_action = None
 
-                activity.heartbeat(
-                    f"Step {iteration} - executing pending write lock action"
-                )
+                activity.heartbeat(f"Step {iteration} - executing pending write lock action")
                 result = await execute_action(
                     dom_service,
                     action_history,
@@ -1756,14 +2261,10 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                 )
 
                 action_name = unified_action.get("action", "unknown")
-                logger.info(
-                    f"Pending write lock action executed: {action_name}", result=result
-                )
+                logger.info(f"Pending write lock action executed: {action_name}", result=result)
 
                 activity.heartbeat(f"Step {iteration} - fetching browser state")
-                browser_state = await dom_service.get_browser_state(
-                    include_screenshot=False
-                )
+                browser_state = await dom_service.get_browser_state(include_screenshot=False)
                 current_url = browser_state.get("url", "")
 
                 await action_history.record_action(
@@ -1800,9 +2301,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
 
             # 1. Get current browser state
             activity.heartbeat(f"Step {iteration} - fetching browser state")
-            browser_state = await dom_service.get_browser_state(
-                include_screenshot=False
-            )
+            browser_state = await dom_service.get_browser_state(include_screenshot=False)
             current_url = browser_state.get("url", "")
 
             if current_url and (not visited_urls or current_url != visited_urls[-1]):
@@ -1818,47 +2317,62 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                         action=last.get("action"),
                         has_thinking=bool(last.get("thinking")),
                         has_screenshot=bool(last.get("screenshot")),
-                        thinking_preview=(
-                            last.get("thinking", "")[:100]
-                            if last.get("thinking")
-                            else "NONE"
-                        ),
+                        thinking_preview=(last.get("thinking", "")[:100] if last.get("thinking") else "NONE"),
                     )
 
                 activity.heartbeat(f"Step {iteration} - calling Rose API")
-                llm_result = await _call_browser_use_with_rotation(
-                    rose_client=rose_client,
-                    task=task_prompt,
-                    dynamic_system_context=dynamic_system_context,
-                    turn_messages=browser_turn_messages,
-                    browser_state=browser_state,
-                    action_entries=action_entries,
-                    config=config,
-                    user_id=user_id,
-                    agent_id=agent_id,
-                    iteration=iteration,
-                    token_state=token_state,
-                    gpt_token=gpt_token,
-                    gpt_account_id=gpt_account_id,
-                    gpt_token_source=gpt_token_source,
-                    gpt_token_pool_id=gpt_token_pool_id,
-                    browser_use_mode=browser_use_mode,
-                    extra_user_messages=[],
-                    dump_extra=(
-                        {
-                            "browser_recording_manifest_path": str(
-                                browser_recorder.output_dir / "manifest.json"
-                            ),
-                            "browser_recording_path": str(
-                                browser_recorder.output_dir / "index.html"
-                            ),
-                            "browser_recording_task_id": browser_recorder.task_id,
-                            "browser_session_metadata": browser_session_metadata,
-                            "iteration": iteration,
-                        }
-                        if browser_recorder
-                        else {"iteration": iteration}
-                    ),
+
+                # Fast Mode: replay the recorded decision when the browser request
+                # fingerprint matches. The live browser session still executes the
+                # action — only the LLM "what next" decision is cached.
+                async def _live_browser_decision() -> Dict[str, Any]:
+                    live_result = await _call_browser_use_with_rotation(
+                        rose_client=rose_client,
+                        task=task_prompt,
+                        dynamic_system_context=dynamic_system_context,
+                        turn_messages=browser_turn_messages,
+                        browser_state=browser_state,
+                        action_entries=action_entries,
+                        config=config,
+                        user_id=user_id,
+                        agent_id=agent_id,
+                        iteration=iteration,
+                        token_state=token_state,
+                        gpt_token=gpt_token,
+                        gpt_account_id=gpt_account_id,
+                        gpt_token_source=gpt_token_source,
+                        gpt_token_pool_id=gpt_token_pool_id,
+                        browser_use_mode=browser_use_mode,
+                        extra_user_messages=[],
+                        dump_extra=(
+                            {
+                                "browser_recording_manifest_path": str(browser_recorder.output_dir / "manifest.json"),
+                                "browser_recording_path": str(browser_recorder.output_dir / "index.html"),
+                                "browser_recording_task_id": browser_recorder.task_id,
+                                "browser_session_metadata": browser_session_metadata,
+                                "iteration": iteration,
+                            }
+                            if browser_recorder
+                            else {"iteration": iteration}
+                        ),
+                    )
+                    return _attach_browser_replay_target(live_result, dom_service)
+
+                llm_result = await cached_browser_decision(
+                    enabled=fast_mode_cache_enabled,
+                    goal=goal,
+                    request={
+                        "task": task_prompt,
+                        "dynamic_system_context": dynamic_system_context,
+                        "turn_messages": browser_turn_messages,
+                        "browser_state": browser_state,
+                        "action_entries": action_entries,
+                        "config": {
+                            "browser_use_mode": browser_use_mode,
+                        },
+                    },
+                    call_llm=_live_browser_decision,
+                    write_enabled=(fast_mode_cache_enabled or write_through_enabled_for_user(user_id)),
                 )
                 # Track waterfall fall-through so subsequent iterations skip claudeAuth.
                 if llm_result.get("mode") != "claude" and browser_use_mode == "claude":
@@ -1895,6 +2409,14 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
 
             # 4. Extract action from response
             unified_action = llm_result.get("action", {})
+            unified_action = _remap_cached_browser_action_target(
+                unified_action,
+                cached_target=llm_result.get("_fast_cache_browser_target"),
+                dom_service=dom_service,
+            )
+            if unified_action is not llm_result.get("action"):
+                llm_result = dict(llm_result)
+                llm_result["action"] = unified_action
             action_name = unified_action.get("action", "")
             thinking = unified_action.get("thinking", "")
 
@@ -1902,7 +2424,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                 reasoning_messages.append(thinking)
                 await save_browser_assistant_message(agent_id, thinking, task_id)
 
-            action_summary.append(f"{action_name}: {str(unified_action)[:500]}")
+            action_summary.append(f"{action_name}: {json.dumps(unified_action, sort_keys=True, default=str)[:500]}")
             if len(action_summary) > 20:
                 action_summary[:] = action_summary[-20:]
             if action_name == "attempt_completion":
@@ -1911,9 +2433,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             # 5. Handle special actions
             if action_name == "request_user_assistance_for_authentication":
                 tool_call_id_action = str(uuid_module.uuid4())
-                base_site = (
-                    auth_realm or get_domain_from_url(current_url) or "Current Site"
-                )
+                base_site = auth_realm or get_domain_from_url(current_url) or "Current Site"
                 auth_snapshot = auth_runtime_state.snapshot()
                 minted_otp_pending = (
                     auth_snapshot["minted"]["present"]
@@ -1951,9 +2471,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                                 count=new_otp_count,
                             )
                             if len(otp_user_messages) > otp_history_count:
-                                browser_turn_messages.extend(
-                                    otp_user_messages[otp_history_count:]
-                                )
+                                browser_turn_messages.extend(otp_user_messages[otp_history_count:])
                                 otp_history_count = len(otp_user_messages)
                             minted_otp_arrived = True
                             break
@@ -1979,9 +2497,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                             tool_call_id=tool_call_id_action,
                         )
                         continue
-                allowed, guard_reason, guard_state = (
-                    auth_runtime_state.user_assistance_guard()
-                )
+                allowed, guard_reason, guard_state = auth_runtime_state.user_assistance_guard()
                 if not allowed:
                     logger.info(
                         "Blocked premature user authentication assistance request",
@@ -2028,9 +2544,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                     "Browser agent requested user authentication assistance",
                     base_site=base_site,
                 )
-                auth_handoff_current_url = select_auth_assistance_current_url(
-                    current_url, visited_urls
-                )
+                auth_handoff_current_url = select_auth_assistance_current_url(current_url, visited_urls)
                 if auth_handoff_current_url != current_url:
                     logger.info(
                         "Using prior auth URL with query params for user assistance handoff",
@@ -2125,9 +2639,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                 logger.info("Browser agent requested user attention", reason=reason)
                 await dom_service.disconnect()
 
-                await close_browser_session(
-                    config, session_id, pause=True, current_url=current_url
-                )
+                await close_browser_session(config, session_id, pause=True, current_url=current_url)
 
                 await save_browser_action_message(
                     agent_id=agent_id,
@@ -2160,9 +2672,9 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                 }
 
             if action_name in ("attempt_completion", "done"):
-                close_reasoning = unified_action.get("params", {}).get(
-                    "reasoning", ""
-                ) or unified_action.get("params", {}).get("text", "")
+                close_reasoning = unified_action.get("params", {}).get("reasoning", "") or unified_action.get(
+                    "params", {}
+                ).get("text", "")
 
                 verifier_call_id = str(uuid_module.uuid4())
                 try:
@@ -2184,28 +2696,18 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                         ea = entry.get("action", "unknown")
                         er = entry.get("result", {})
                         esuccess = er.get("success", False)
-                        estatus = (
-                            "\u2705 Success"
-                            if esuccess
-                            else f"\u274c Failed: {er.get('error', 'unknown')}"
-                        )
+                        estatus = "\u2705 Success" if esuccess else f"\u274c Failed: {er.get('error', 'unknown')}"
 
                         line = f"Step {step}: {ea} - {estatus}"
                         if ea == "screenshot" and esuccess:
                             line += " (visible viewport capture)"
                         eparams = entry.get("params", {})
                         if eparams:
-                            display_params = {
-                                k: v
-                                for k, v in eparams.items()
-                                if k not in ["screenshot", "dom_tree"]
-                            }
+                            display_params = {k: v for k, v in eparams.items() if k not in ["screenshot", "dom_tree"]}
                             if display_params:
                                 line += f"\n  Params: {display_params}"
                         display_result = {
-                            k: v
-                            for k, v in er.items()
-                            if k not in ["success", "error", "screenshot", "dom_tree"]
+                            k: v for k, v in er.items() if k not in ["success", "error", "screenshot", "dom_tree"]
                         }
                         if display_result:
                             line += f"\n  Result: {display_result}"
@@ -2303,14 +2805,10 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                     ]
 
                     verifier_prompt = build_verifier_prompt(
-                        response_schema=transform_schema_for_remote_session(
-                            response_schema
-                        )
+                        response_schema=transform_schema_for_remote_session(response_schema)
                     )
 
-                    remote_session_schema = transform_schema_for_remote_session(
-                        response_schema
-                    )
+                    remote_session_schema = transform_schema_for_remote_session(response_schema)
 
                     # B2: `check_progress` now forces rose-1-ultra + claude_token
                     # internally. One call site, no LITE fallback — the model arg
@@ -2344,9 +2842,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                                     "browser_recording_manifest_path": str(
                                         browser_recorder.output_dir / "manifest.json"
                                     ),
-                                    "browser_recording_path": str(
-                                        browser_recorder.output_dir / "index.html"
-                                    ),
+                                    "browser_recording_path": str(browser_recorder.output_dir / "index.html"),
                                     "browser_recording_task_id": browser_recorder.task_id,
                                     "browser_session_metadata": browser_session_metadata,
                                 }
@@ -2354,16 +2850,13 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                                 else None
                             ),
                         ],
-                        start_to_close_timeout=timedelta(
-                            seconds=VERIFIER_ULTRA_TIMEOUT_SECONDS
-                        ),
+                        start_to_close_timeout=timedelta(seconds=VERIFIER_ULTRA_TIMEOUT_SECONDS),
                     )
 
                     v_usage = progress_result.get("usage", {})
                     verifier_actual_model = v_usage.get("actual_model", "")
                     if not (
-                        str(verifier_actual_model).endswith("-claude")
-                        or str(verifier_actual_model).endswith("-gpt")
+                        str(verifier_actual_model).endswith("-claude") or str(verifier_actual_model).endswith("-gpt")
                     ):
                         total_input_tokens += v_usage.get("prompt_tokens", 0)
                         total_output_tokens += v_usage.get("completion_tokens", 0)
@@ -2391,11 +2884,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                         execution_time_ms = (safe_time() - start_time) * 1000
                         structured_response = progress_result.get("structured_response")
 
-                        uploaded_paths = (
-                            list(available_file_paths.values())
-                            if available_file_paths
-                            else []
-                        )
+                        uploaded_paths = list(available_file_paths.values()) if available_file_paths else []
                         output_files = await extract_session_files(
                             session_id, user_id, config, exclude_paths=uploaded_paths
                         )
@@ -2498,9 +2987,7 @@ Reasoning: {v_reasoning}
 
 Based on this feedback, I need to continue working on the task and address the issues mentioned."""
 
-                    await save_browser_assistant_message(
-                        agent_id, verifier_feedback_thinking, task_id
-                    )
+                    await save_browser_assistant_message(agent_id, verifier_feedback_thinking, task_id)
 
                     # C5: When the verifier rejects (score < 1.0), surface the
                     # feedback as the natural TOOL result of the agent's
@@ -2526,9 +3013,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         extra_metadata={"verifierMessage": True},
                     )
 
-                    current_state = await dom_service.get_browser_state(
-                        include_screenshot=False
-                    )
+                    current_state = await dom_service.get_browser_state(include_screenshot=False)
                     current_screenshot = current_state.get("screenshot")
 
                     rejection_result = {
@@ -2612,9 +3097,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 tool_call_id=tool_call_id_action,
                 steps_taken=iteration,
                 total_steps=MAX_ITERATIONS,
-                auxiliary=(
-                    {"coordinates": coords_for_cursor} if coords_for_cursor else None
-                ),
+                auxiliary=({"coordinates": coords_for_cursor} if coords_for_cursor else None),
             )
             if browser_recorder:
                 await browser_recorder.mark(
@@ -2650,10 +3133,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 not result.get("credential_ref")
                 and action_name == "input_text"
                 and minted_credential_ref
-                and str(unified_action.get("params", {}).get("text", ""))
-                .strip()
-                .lower()
-                in minted_account_labels
+                and str(unified_action.get("params", {}).get("text", "")).strip().lower() in minted_account_labels
             ):
                 result["credential_ref"] = minted_credential_ref
 
@@ -2673,6 +3153,61 @@ Based on this feedback, I need to continue working on the task and address the i
                     "question",
                     f"{system_name} wants to perform a write action. Approve?",
                 )
+                write_lock_notification = None
+                write_lock_notification_usage = None
+
+                try:
+                    activity.heartbeat(f"Step {iteration} - generating write lock notification")
+                    notification_result = await _generate_write_lock_notification(
+                        rose_client=rose_client,
+                        task_prompt=task_prompt,
+                        dynamic_system_context=dynamic_system_context,
+                        browser_turn_messages=browser_turn_messages,
+                        browser_state=browser_state,
+                        action_entries=action_entries,
+                        config=config,
+                        user_id=user_id,
+                        agent_id=agent_id,
+                        iteration=iteration,
+                        token_state=token_state,
+                        gpt_token=gpt_token,
+                        gpt_account_id=gpt_account_id,
+                        gpt_token_source=gpt_token_source,
+                        gpt_token_pool_id=gpt_token_pool_id,
+                        browser_use_mode=browser_use_mode,
+                        approval_type=approval_type,
+                        current_url=current_url,
+                        pending_action=unified_action,
+                        write_lock_result=result,
+                        system_name=system_name,
+                        fallback_question=question,
+                    )
+                    write_lock_notification = notification_result.get("notification")
+                    write_lock_notification_usage = {
+                        "usage": notification_result.get("usage", {}),
+                        "actual_model": notification_result.get("actual_model"),
+                        "request_id": notification_result.get("request_id"),
+                        "mode": notification_result.get("mode"),
+                    }
+                    question = notification_result.get("question") or question
+                    logger.info(
+                        "Generated write lock notification metadata",
+                        approval_type=approval_type,
+                        request_id=write_lock_notification_usage.get("request_id"),
+                        mode=write_lock_notification_usage.get("mode"),
+                        cache_read_input_tokens=(
+                            write_lock_notification_usage.get("usage", {}).get("cache_read_input_tokens", 0)
+                        ),
+                        cache_creation_input_tokens=(
+                            write_lock_notification_usage.get("usage", {}).get("cache_creation_input_tokens", 0)
+                        ),
+                    )
+                except Exception as notification_error:
+                    logger.warning(
+                        "Failed to generate write lock notification metadata; using fallback question",
+                        approval_type=approval_type,
+                        error=str(notification_error),
+                    )
 
                 logger.info(
                     "Write lock approval required - returning to workflow",
@@ -2684,9 +3219,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     try:
                         await dom_service.disconnect()
                     except Exception as e:
-                        logger.warning(
-                            f"Failed to disconnect browser before write lock return: {e}"
-                        )
+                        logger.warning(f"Failed to disconnect browser before write lock return: {e}")
 
                 logger.info(
                     "Returning to workflow for write lock approval",
@@ -2700,6 +3233,8 @@ Based on this feedback, I need to continue working on the task and address the i
                     "question": question,
                     "current_url": current_url,
                     "pending_action": unified_action,
+                    "write_lock_notification": write_lock_notification,
+                    "write_lock_notification_usage": write_lock_notification_usage,
                     "write_lock_approvals": write_lock_approvals,
                     "step_count": iteration,
                     "session_id": session_id,
@@ -2737,11 +3272,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     tool_call_id=tool_call_id_action,
                     steps_taken=iteration,
                     total_steps=MAX_ITERATIONS,
-                    auxiliary=(
-                        {"coordinates": coords_for_cursor}
-                        if coords_for_cursor
-                        else None
-                    ),
+                    auxiliary=({"coordinates": coords_for_cursor} if coords_for_cursor else None),
                     extra_metadata=extra_metadata,
                 )
                 if browser_recorder:
@@ -2778,11 +3309,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     tool_call_id=tool_call_id_action,
                     steps_taken=iteration,
                     total_steps=MAX_ITERATIONS,
-                    auxiliary=(
-                        {"coordinates": coords_for_cursor}
-                        if coords_for_cursor
-                        else None
-                    ),
+                    auxiliary=({"coordinates": coords_for_cursor} if coords_for_cursor else None),
                 )
                 if browser_recorder:
                     await browser_recorder.mark(
@@ -2826,9 +3353,7 @@ Based on this feedback, I need to continue working on the task and address the i
         )
 
         execution_time_ms = (safe_time() - start_time) * 1000
-        usage_items = build_usage_items(
-            total_input_tokens, total_output_tokens, model_pricing, execution_time_ms
-        )
+        usage_items = build_usage_items(total_input_tokens, total_output_tokens, model_pricing, execution_time_ms)
         await _propagate_browser_credentials_with_progress(
             config=config,
             agent_id=agent_id,
@@ -2856,9 +3381,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 await dom_service.disconnect()
 
         if session_id:
-            await close_browser_session(
-                config, session_id, pause=True, current_url=current_url
-            )
+            await close_browser_session(config, session_id, pause=True, current_url=current_url)
 
         if task_id:
             with contextlib.suppress(Exception):
@@ -2958,12 +3481,8 @@ Based on this feedback, I need to continue working on the task and address the i
                         tool_call_id=str(uuid_module.uuid4()),
                         extra_metadata={
                             "botsigged_diagnostics_path": capture["path"],
-                            "botsigged_last_score": capture["diagnostics"].get(
-                                "lastScore"
-                            ),
-                            "botsigged_signal_counts": capture["diagnostics"].get(
-                                "signalCounts"
-                            ),
+                            "botsigged_last_score": capture["diagnostics"].get("lastScore"),
+                            "botsigged_signal_counts": capture["diagnostics"].get("signalCounts"),
                         },
                     )
         if humanizer:
@@ -2982,9 +3501,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         browser_url=browser_url or "",
                         action_type="network_recording",
                         tool_call_id=str(uuid_module.uuid4()),
-                        extra_metadata={
-                            "network_recording_path": str(network_index_path)
-                        },
+                        extra_metadata={"network_recording_path": str(network_index_path)},
                     )
         if browser_recorder:
             with contextlib.suppress(Exception):
@@ -3004,9 +3521,7 @@ Based on this feedback, I need to continue working on the task and address the i
                             "browser_session_metadata": browser_session_metadata,
                         },
                     )
-        await _stop_playwright_resources(
-            playwright_browser, playwright_instance, agent_id
-        )
+        await _stop_playwright_resources(playwright_browser, playwright_instance, agent_id)
 
 
 # ========================================
@@ -3032,12 +3547,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
         attachments: List[Dict[str, Any]] = []
         if requested_attachments and hasattr(workflow_instance, "context"):
-            context_attachments = extract_attachments_from_context(
-                workflow_instance.context
-            )
-            filename_to_pointer = {
-                fp.original_filename: fp for fp in context_attachments
-            }
+            context_attachments = extract_attachments_from_context(workflow_instance.context)
+            filename_to_pointer = {fp.original_filename: fp for fp in context_attachments}
 
             for filename in requested_attachments:
                 if filename in filename_to_pointer:
@@ -3125,21 +3636,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             agent_id,
                             goal,
                             tool_call_id,
-                            (
-                                write_lock_resume_state.get("task_id")
-                                if write_lock_resume_state
-                                else None
-                            ),
-                            (
-                                write_lock_resume_state.get("session_id")
-                                if write_lock_resume_state
-                                else None
-                            ),
-                            (
-                                write_lock_resume_state.get("cdp_url")
-                                if write_lock_resume_state
-                                else None
-                            ),
+                            (write_lock_resume_state.get("task_id") if write_lock_resume_state else None),
+                            (write_lock_resume_state.get("session_id") if write_lock_resume_state else None),
+                            (write_lock_resume_state.get("cdp_url") if write_lock_resume_state else None),
                             write_lock_resume_state is not None,
                             output_schema,
                             attachments if attachments else None,
@@ -3152,19 +3651,16 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             active_gpt_account_id,
                             active_gpt_source,
                             active_gpt_pool_id,
+                            getattr(workflow_instance, "fast_mode_cache_enabled", False),
                         ],
-                        start_to_close_timeout=timedelta(
-                            minutes=ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES
-                        ),
+                        start_to_close_timeout=timedelta(minutes=ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES),
                         heartbeat_timeout=timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS),
                         cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
                         retry_policy=RetryPolicy(maximum_attempts=MAX_ACTIVITY_RETRIES),
                     )
 
                     was_cancelled = False
-                    await workflow.wait_condition(
-                        lambda: activity_handle.done() or workflow_instance.is_paused
-                    )  # noqa: B023
+                    await workflow.wait_condition(lambda: activity_handle.done() or workflow_instance.is_paused)  # noqa: B023
                     if workflow_instance.is_paused and not activity_handle.done():
                         logger.info("\U0001f534 Cancelling browser agent due to pause")
                         activity_handle.cancel()
@@ -3225,6 +3721,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 "toolApproval": True,
                                 "writePermission": True,
                                 "url": result.get("current_url", ""),
+                                "writeLockNotification": result.get("write_lock_notification"),
+                                "writeLockNotificationUsage": result.get("write_lock_notification_usage"),
                             },
                         )
 
@@ -3232,9 +3730,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         current_approvals = result.get("write_lock_approvals", {})
 
                         current_approvals[approval_type] = {
-                            "domain": get_domain_from_url(
-                                result.get("current_url", "")
-                            ),
+                            "domain": get_domain_from_url(result.get("current_url", "")),
                             "approved_at": workflow.now().timestamp(),
                         }
 
@@ -3265,9 +3761,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 "task_id": write_lock_resume_state.get("task_id"),
                                 "requestUserApproval": {
                                     "writePermission": True,
-                                    "attentionRequestId": approval_response.get(
-                                        "attention_request_id"
-                                    ),
+                                    "attentionRequestId": approval_response.get("attention_request_id"),
                                 },
                             },
                         )
@@ -3278,9 +3772,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         rejection_feedback = e.rejection_message
                         logger.info(
                             "Write lock approval rejected by user",
-                            rejection_feedback=(
-                                rejection_feedback[:100] if rejection_feedback else ""
-                            ),
+                            rejection_feedback=(rejection_feedback[:100] if rejection_feedback else ""),
                         )
                         error_msg = f"User denied permission for {result.get('approval_type', 'action')}"
                         if rejection_feedback:
@@ -3354,14 +3846,11 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
                     await workflow.wait_condition(
                         lambda: (
-                            request_id
-                            in getattr(workflow_instance, "_signal_responses", {})
+                            request_id in getattr(workflow_instance, "_signal_responses", {})
                             or not workflow_instance.is_paused
                         )
                     )
-                    if request_id in getattr(
-                        workflow_instance, "_signal_responses", {}
-                    ):
+                    if request_id in getattr(workflow_instance, "_signal_responses", {}):
                         workflow_instance._signal_responses.pop(request_id, None)
                         workflow_instance.is_paused = False
                         if hasattr(workflow_instance, "_update_tree_state"):
@@ -3423,11 +3912,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         )
 
             output_files = result.get("output_files", [])
-            final_status = (
-                MessageStatus.FINISHED
-                if result.get("success", True)
-                else MessageStatus.ERROR
-            )
+            final_status = MessageStatus.FINISHED if result.get("success", True) else MessageStatus.ERROR
             final_metadata = {"toolName": "spawn_browser_agent"}
             if output_schema:
                 final_metadata["output_schema"] = output_schema
@@ -3493,17 +3978,13 @@ def get_manager() -> SpawnBrowserAgentManagerV3:
 # ========================================
 
 
-async def spawn_browser_agent(
-    workflow_instance: Any, tool_call: Dict[str, Any], tool_call_id: str
-):
+async def spawn_browser_agent(workflow_instance: Any, tool_call: Dict[str, Any], tool_call_id: str):
     """Workflow helper for spawn_browser_agent."""
     manager = get_manager()
     last_status = None
 
     async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
-        await workflow_instance._handle_tool_event(
-            event, tool_call_id, "spawn_browser_agent"
-        )
+        await workflow_instance._handle_tool_event(event, tool_call_id, "spawn_browser_agent")
         if isinstance(event, ToolEvent) and event.status:
             last_status = event.status
         if isinstance(event, ToolEvent) and event.data and event.data.get("usage"):

@@ -101,6 +101,9 @@ class WebFetchManager(ToolManager):
         gpt_account_id: Optional[str] = None,
         gpt_token_source: Optional[str] = None,
         gpt_token_pool_id: Optional[str] = None,
+        fast_mode_cache_enabled: bool = False,
+        fast_mode_goal: Optional[str] = None,
+        fast_mode_cache_write_enabled: bool = False,
     ) -> Dict[str, Any]:
         """Execute web fetch and post events via handle_tool_event."""
         url = tool_call.get("url", "")
@@ -130,10 +133,10 @@ class WebFetchManager(ToolManager):
         try:
             logger.info("Calling web_fetch_activity", url=url, objective_len=len(objective))
 
-            # 1) Firecrawl scrape
+            # 1) Firecrawl scrape (Fast Mode caches the scrape by normalized URL)
             scrape_result = await execute_activity(
                 web_fetch_activity,
-                args=[url],
+                args=[url, fast_mode_cache_enabled, fast_mode_goal, fast_mode_cache_write_enabled],
                 start_to_close_timeout=timedelta(seconds=180),
                 retry_policy=RetryPolicy(
                     maximum_attempts=3,
@@ -179,7 +182,13 @@ class WebFetchManager(ToolManager):
             if files_to_download:
                 file_pointers = await execute_activity(
                     web_fetch_download_activity,
-                    args=[files_to_download, user_id],
+                    args=[
+                        files_to_download,
+                        user_id,
+                        fast_mode_cache_enabled,
+                        fast_mode_goal,
+                        fast_mode_cache_write_enabled,
+                    ],
                     start_to_close_timeout=timedelta(seconds=180),
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
@@ -297,6 +306,16 @@ async def web_fetch(
     tool_call_id: str,
     agent_id: str,
     user_id: Optional[str] = None,
+    claude_token: Optional[str] = None,
+    claude_token_source: Optional[str] = None,
+    claude_token_pool_id: Optional[str] = None,
+    gpt_token: Optional[str] = None,
+    gpt_account_id: Optional[str] = None,
+    gpt_token_source: Optional[str] = None,
+    gpt_token_pool_id: Optional[str] = None,
+    fast_mode_cache_enabled: bool = False,
+    fast_mode_goal: Optional[str] = None,
+    fast_mode_cache_write_enabled: bool = False,
 ) -> Dict[str, Any]:
     """Execute web fetch tool."""
     manager = get_manager()
@@ -306,6 +325,16 @@ async def web_fetch(
         tool_call_id=tool_call_id,
         agent_id=agent_id,
         user_id=user_id,
+        claude_token=claude_token,
+        claude_token_source=claude_token_source,
+        claude_token_pool_id=claude_token_pool_id,
+        gpt_token=gpt_token,
+        gpt_account_id=gpt_account_id,
+        gpt_token_source=gpt_token_source,
+        gpt_token_pool_id=gpt_token_pool_id,
+        fast_mode_cache_enabled=fast_mode_cache_enabled,
+        fast_mode_goal=fast_mode_goal,
+        fast_mode_cache_write_enabled=fast_mode_cache_write_enabled,
     )
 
 
@@ -314,19 +343,48 @@ async def web_fetch(
 
 @activity.defn
 @traced("web_fetch_activity")
-async def web_fetch_activity(url: str) -> Dict[str, Any]:
+async def web_fetch_activity(
+    url: str,
+    fast_mode_cache_enabled: bool = False,
+    fast_mode_goal: Optional[str] = None,
+    fast_mode_cache_write_enabled: bool = False,
+) -> Dict[str, Any]:
     """Activity: Firecrawl scrape (JS rendering, main-content extraction).
 
     Returns ``{markdown, links, metadata}``. Raises on Firecrawl HTTP errors —
     the caller surfaces the error to the agent rather than silently degrading.
+
+    Fast Mode: when read-enabled, the scrape is replayed by normalized URL.
+    Allowlisted write-through mode stores live Firecrawl responses without first
+    reading from cache.
     """
-    from domains.web_fetch.service import scrape_url
+    from providers.fast_cache import client as fast_cache_client
+    from providers.fast_cache import normalize as fast_cache_normalize
+
+    read_cache = fast_mode_cache_enabled and bool(fast_mode_goal)
+    write_cache = (fast_mode_cache_enabled or fast_mode_cache_write_enabled) and bool(fast_mode_goal)
+    cache_key = fast_cache_normalize.web_fetch_key(fast_mode_goal, url) if write_cache else None
+    if cache_key is not None and read_cache:
+        stored = await fast_cache_client.cache_get(cache_key)
+        if stored is not None:
+            logger.info("fast_cache.web_fetch_hit", key=cache_key, url=url)
+            return stored
+        logger.info("fast_cache.web_fetch_miss", key=cache_key, url=url)
+    elif cache_key is not None:
+        logger.info("fast_cache.web_fetch_write_only", key=cache_key, url=url)
 
     try:
-        return await scrape_url(url)
+        result = await scrape_url(url)
     except Exception as e:
         logger.error("Web fetch (Firecrawl) failed", error=str(e), url=url)
         raise
+
+    if cache_key is not None and write_cache:
+        await fast_cache_client.cache_set(
+            cache_key, "web_fetch", fast_cache_normalize.goal_hash(fast_mode_goal), result
+        )
+        logger.info("fast_cache.web_fetch_stored", key=cache_key, url=url)
+    return result
 
 
 @activity.defn
@@ -334,10 +392,19 @@ async def web_fetch_activity(url: str) -> Dict[str, Any]:
 async def web_fetch_download_activity(
     file_urls: List[str],
     user_id: Optional[str] = None,
+    fast_mode_cache_enabled: bool = False,
+    fast_mode_goal: Optional[str] = None,
+    fast_mode_cache_write_enabled: bool = False,
 ) -> List[Dict[str, Any]]:
     """Activity: download Haiku-curated file URLs and upload to Supabase storage.
 
     Returns file_pointer dicts. Best-effort — individual download failures are
     logged and skipped, not raised.
     """
-    return await download_and_attach(file_urls=file_urls, user_id=user_id)
+    return await download_and_attach(
+        file_urls=file_urls,
+        user_id=user_id,
+        fast_mode_cache_enabled=fast_mode_cache_enabled,
+        fast_mode_goal=fast_mode_goal,
+        fast_mode_cache_write_enabled=fast_mode_cache_write_enabled,
+    )

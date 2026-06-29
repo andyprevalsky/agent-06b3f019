@@ -260,6 +260,65 @@ class WebSearchTool(BaseModel):
     query: str = Field(description="Search query or question about current information.")
 
 
+class PeopleSearchTool(BaseModel):
+    """Find or enrich real people on the public web using dedicated people-search providers. Use when web_search is insufficient for a people goal: you need comprehensiveness (a broad list matching criteria) or depth (a field-level profile for a specific person). For a quick one-off people fact, web_search is fine."""
+
+    tool: Literal["people_search"]
+    query: str = Field(
+        description=(
+            "Natural-language people request. For mode='enrich', a specific "
+            "person plus disambiguating context (e.g. 'Patrick Collison, "
+            "co-founder of Stripe'). For mode='discover', the criteria (e.g. "
+            "'partners at AI-infra VC firms in the SF Bay Area')."
+        )
+    )
+    mode: Literal["enrich", "discover"] = Field(
+        description=(
+            "'enrich': resolve ONE specific person and return a field-level "
+            "profile. 'discover': return a LIST of people matching a role, "
+            "company, geography, or seniority."
+        )
+    )
+    provider: Literal["exa", "parallel"] = Field(
+        description=(
+            "Which backend. Exa is strongest for depth/enrichment (structured "
+            "work and education history); Parallel is strongest for broad "
+            "discovery (high recall). If the chosen provider returns "
+            "insufficient or low-quality data, re-call with the other provider. "
+            "On a provider rate-limit or error the tool auto-retries the other "
+            "provider."
+        )
+    )
+    limit: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=25,
+        description=(
+            "mode='discover' ONLY: max number of people to return (1-25, default "
+            "10). Not used for 'enrich', which resolves a single person."
+        ),
+    )
+    fields: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "mode='enrich' ONLY: the attributes to return for the resolved "
+            "person. These DEFINE the output params, e.g. ['current_title', "
+            "'current_company','location','linkedin_url','email','education']. "
+            "Maps to the provider's structured-output/enrichment schema. If "
+            "omitted, the provider returns its native default profile and no "
+            "field list is imposed."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_mode_params(self) -> "PeopleSearchTool":
+        if self.mode == "enrich" and self.limit is not None:
+            raise ValueError("limit is only valid for mode='discover'.")
+        if self.mode == "discover" and self.fields is not None:
+            raise ValueError("fields is only valid for mode='enrich'.")
+        return self
+
+
 class WebFetchTool(BaseModel):
     """Fetch a URL with JavaScript rendering; a small fast model filters the page to your objective."""
 
@@ -652,6 +711,7 @@ ToolRegistry = Dict[str, Type[BaseModel]]
 TOOL_MODELS: ToolRegistry = {
     "wait_for": WaitForTool,
     "web_search": WebSearchTool,
+    "people_search": PeopleSearchTool,
     "web_fetch": WebFetchTool,
     "send_message_to_user": SendMessageToUserTool,
     "send_message_to_user_execute_phase": SendMessageToUserExecutePhaseTool,
@@ -678,7 +738,7 @@ PLAN_TOOL_MODELS: ToolRegistry = {
 }
 
 # Tools available inside the explore agent (subset of read-only tools)
-EXPLORE_AGENT_TOOLS = ["web_search", "web_fetch", "grep", "attempt_completion_with_result"]
+EXPLORE_AGENT_TOOLS = ["web_search", "people_search", "web_fetch", "grep", "attempt_completion_with_result"]
 
 
 # ============================================================================
@@ -837,6 +897,7 @@ class ProgressScore(BaseModel):
 __all__ = [
     "WaitForTool",
     "WebSearchTool",
+    "PeopleSearchTool",
     "WebFetchTool",
     "SendMessageToUserTool",
     "SendMessageToUserExecutePhaseTool",

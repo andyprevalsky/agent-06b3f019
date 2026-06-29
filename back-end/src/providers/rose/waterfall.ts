@@ -32,14 +32,16 @@ interface WaterfallOptions {
   perStepTimeoutMs?: number;
   idleTimeoutMs?: number;
   abortSignal?: AbortSignal;
+  providerFastMode?: boolean;
 }
 
-function buildOpenRouterBody(opts: {
+export function buildOpenRouterBody(opts: {
   model: string;
   messages: CompletionMessage[];
   responseFormat?: ResponseFormat;
   temperature?: number;
   maxTokens?: number;
+  providerFastMode?: boolean;
 }): Record<string, unknown> {
   const body: Record<string, unknown> = {
     model: opts.model,
@@ -50,6 +52,7 @@ function buildOpenRouterBody(opts: {
   if (opts.responseFormat) body.response_format = opts.responseFormat;
   if (opts.temperature !== undefined) body.temperature = opts.temperature;
   if (opts.maxTokens !== undefined) body.max_tokens = opts.maxTokens;
+  if (opts.providerFastMode === true) body.speed = 'fast';
   return body;
 }
 
@@ -74,6 +77,7 @@ export async function* waterfallComplete(opts: WaterfallOptions): AsyncIterable<
       responseFormat: opts.responseFormat,
       temperature: opts.temperature,
       maxTokens: opts.maxTokens,
+      providerFastMode: opts.providerFastMode,
     });
 
     // Only pre-content failures are eligible for waterfall fallback — once a

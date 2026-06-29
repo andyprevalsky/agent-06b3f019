@@ -1026,7 +1026,7 @@ Determine which deploy workflows are relevant based on what files changed in the
 
 - Changes in `agents/` → poll `deploy-agents.yml`
 - Changes in `research/supabase/functions/` or `research/deploy.sh` → poll `deploy-research.yml`
-- Changes in `back-end/` → Render auto-deploys (no workflow to poll, just wait ~60s)
+- Changes in `back-end/` → Render auto-deploys (no workflow to poll). **Do NOT just "wait ~60s" — run Step 13a to confirm the merged commit went live AND the app is functionally healthy.**
 - Changes in `front-end/` → Vercel auto-deploys (no workflow to poll, just wait ~60s)
 - Changes in `mac-app/` → check if PR had `MAC-APP-RELEASE` label; if so, poll `release-mac-app.yml`
 
@@ -1049,6 +1049,86 @@ If a deploy fails:
 
 1. Show the failure to the user
 2. If fixable, create a new fix branch/commit, push, create a new PR (Step 8), then continue from Step 9.
+
+## Step 13a: Verify prod backend health (functional, not just liveness)
+
+**Skip if `$CHANGED_BACKEND` is empty.** Run this whenever the PR touched `back-end/` (code, `schema.prisma`, or `migrations/`).
+
+Render has no GitHub Actions run to watch, so the only proof a backend deploy is good is to (1) confirm Render brought the **merged commit** live and (2) hit a **real DB-backed endpoint** in prod. A `200` on `/health` is NOT sufficient — `/health` does no DB work, so a missing migration column, a broken Prisma client, or a bad env var returns `200` on `/health` while every real endpoint `500`s. (This exact failure took prod down on 2026-06-27: `Agent.fastModeCacheEnabled` was absent from the prod DB, so `/health`=200 but `GET /api/agents`=500 for everyone.)
+
+### Step 1 — Wait for Render to bring the merged commit live
+
+```bash
+cd "$(git rev-parse --show-toplevel)/back-end" && source .env
+MERGED_SHA=$(git rev-parse main)   # the commit that just merged
+echo "Waiting for Render to deploy ${MERGED_SHA:0:7}..."
+DEPLOY_OK=""
+for i in $(seq 1 90); do  # up to ~15 min at 10s (Render builds can be slow)
+  read -r STATUS COMMIT < <(curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
+    "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys?limit=1" \
+    | python3 -c "import sys,json; d=json.load(sys.stdin)[0]['deploy']; print(d.get('status',''), (d.get('commit') or {}).get('id','')[:7])")
+  echo "  Render: status=$STATUS commit=$COMMIT (want ${MERGED_SHA:0:7})"
+  case "$STATUS" in
+    live)
+      if [ "$COMMIT" = "${MERGED_SHA:0:7}" ]; then DEPLOY_OK=1; break; fi ;;
+    build_failed|update_failed|canceled|pre_deploy_failed)
+      echo "❌ Render deploy $STATUS for $COMMIT"; DEPLOY_OK="failed"; break ;;
+  esac
+  sleep 10
+done
+[ "$DEPLOY_OK" = "1" ] || { echo "❌ Render did not bring ${MERGED_SHA:0:7} live (last status: $STATUS)"; exit 1; }
+echo "✅ Render live on ${MERGED_SHA:0:7}"
+```
+
+If Render reports `build_failed`/`update_failed`, fetch the deploy logs (`GET /v1/services/$RENDER_SERVICE_ID/deploys/<id>` + the events/log API, or the Render dashboard) and treat it like any deploy failure above — fix, new PR, continue from Step 9.
+
+### Step 2 — Functional health probe (liveness + DB/Prisma path)
+
+```bash
+PROD_URL="https://navi-j9a9.onrender.com"
+API_KEY="AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag="
+USER_ID="1f85ff25-6e29-4c1b-8739-f917bd101a30"
+
+# (a) Liveness — process is up.
+curl -sf "$PROD_URL/health" >/dev/null || { echo "❌ /health failed"; exit 1; }
+
+# (b) Functional — exercises the DB/Prisma layer. Catches schema/migration
+#     mismatches, broken Prisma client, and missing env that /health hides.
+#     Poll briefly: Render flips to "live" a beat before the new process serves traffic.
+HEALTHY=""
+for i in $(seq 1 12); do  # ~1 min
+  CODE=$(curl -s -o /tmp/prod-agents.json -w "%{http_code}" "$PROD_URL/api/agents" \
+    -H "X-API-Key: $API_KEY" -H "X-User-Id: $USER_ID")
+  [ "$CODE" = "200" ] && { HEALTHY=1; break; }
+  echo "  /api/agents -> $CODE (retry $i)"; sleep 5
+done
+[ "$HEALTHY" = "1" ] || { echo "❌ FUNCTIONAL CHECK FAILED: /api/agents -> $CODE"; head -c 500 /tmp/prod-agents.json; exit 1; }
+echo "✅ /api/agents -> 200 (DB/Prisma path healthy)"
+```
+
+`GET /api/agents` is the canonical probe because it runs an authenticated `prisma.agent.findMany()` — the same query class that broke on 2026-06-27. If you added a new domain whose runtime path is independent of `Agent`, add a second probe for it here.
+
+### Step 3 — Scan post-deploy prod logs for runtime errors
+
+A `200` from one probe doesn't prove the whole surface is clean. Pull recent prod logs and fail on any `prisma:error`, `does not exist`, or `-> 500` that appears after the deploy:
+
+```bash
+cd "$(git rev-parse --show-toplevel)/back-end" && source .env
+curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
+  "https://api.render.com/v1/logs?ownerId=$RENDER_OWNER_ID&resource=$RENDER_SERVICE_ID&limit=100&direction=backward" \
+  | python3 -c "
+import sys, json
+logs = json.load(sys.stdin)['logs']
+bad = [l for l in logs if any(s in l['message'] for s in ('prisma:error', 'does not exist', '-> 500', '\"status\":500'))]
+print(f'post-deploy error lines: {len(bad)}')
+for l in bad[:10]: print(l['timestamp'][11:19], l['message'][:160])
+sys.exit(1 if bad else 0)
+"
+```
+
+If this exits non-zero, the deploy is **unhealthy even though it's live** — treat as a deploy failure: diagnose the error (most likely a schema/migration mismatch or missing env var — see the 2026-06-27 incident for the migration-vs-DB drift pattern), fix it, new PR, continue from Step 9. Do NOT proceed to Step 14 with errors in the prod log.
+
+**Migration-specific note:** if the error is a Prisma "column/table does not exist", the deployed code expects a schema the prod DB doesn't have. Verify the migration is both present in `back-end/prisma/migrations/` AND actually applied to prod (the migration row in `_prisma_migrations` can be marked applied while the column is absent if a stray `prisma db push` from another workspace dropped it — `back-end/.env` `DATABASE_URL` points at prod). Re-apply the missing DDL idempotently (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS ...`) and re-run Step 2.
 
 ## Step 14: New branch
 

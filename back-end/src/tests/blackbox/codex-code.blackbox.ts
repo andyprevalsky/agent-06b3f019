@@ -152,14 +152,18 @@ async function testPromptBuilder_sharedContractMentionsOutputRules() {
 
   const prompt = buildCodeAgentSystemPrompt({
     githubRepoUrl: 'https://github.com/acme/widgets.git',
-    workDir: '/home/user/widgets',
+    workDir: '/home/user/workspace',
   });
 
   assert(prompt.includes(CODE_AGENT_INSTRUCTIONS_VERSION), 'Prompt version missing');
   assert(prompt.includes('/home/user/attachments'), 'Attachments directory missing');
   assert(prompt.includes('/home/user/output'), 'Output directory missing');
   assert(prompt.includes('Do not return the original attachment path'), 'Transform rule missing');
-  assert(prompt.includes('/home/user/widgets'), 'Repo workDir missing');
+  assert(
+    prompt.includes('Do not launch a separate claude/Claude Code CLI'),
+    'Nested Claude CLI guard missing'
+  );
+  assert(prompt.includes('/home/user/workspace'), 'Repo workDir missing');
 }
 
 async function testSmoke_codexCompletesE2bTask() {

@@ -7,6 +7,7 @@ dispatches to the activity, and yields ToolEvents for the workflow.
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import timedelta
 from typing import Any, AsyncGenerator, Dict, Optional
 
@@ -97,6 +98,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                 if callable(active_gpt_pool_id)
                 else getattr(workflow_instance, "gpt_code_token_pool_id", None)
             )
+            fast_mode_cache_enabled = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
             code_provider = _select_code_provider(workflow_instance, gpt_token)
             logger.info(
                 "[ClaudeCode] Selected code sandbox provider",
@@ -131,6 +133,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                         gpt_account_id,
                         gpt_token_source,
                         gpt_token_pool_id,
+                        fast_mode_cache_enabled,
                     ],
                     start_to_close_timeout=timedelta(minutes=50),
                     heartbeat_timeout=timedelta(minutes=5),
@@ -294,8 +297,16 @@ def _resolve_attachments(
     return attachments
 
 
+def _forced_code_provider() -> Optional[str]:
+    value = os.getenv("ROSE_CODE_AGENT_PROVIDER", "").strip().lower()
+    return value if value in {"claude", "codex"} else None
+
+
 def _select_code_provider(workflow_instance: Any, gpt_token: Optional[str]) -> str:
     """Use Codex for GPT compute tokens; keep Claude Code for Claude tokens."""
+    forced = _forced_code_provider()
+    if forced is not None:
+        return forced
     provider = getattr(workflow_instance, "compute_token_provider", None)
     if provider == "gpt" and gpt_token:
         return "codex"

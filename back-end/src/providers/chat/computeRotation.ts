@@ -52,6 +52,11 @@ export function toChatComputeAuth(
 }
 
 export async function fetchChatComputeAuth(userId: string): Promise<ChatComputeAuth> {
+  if (process.env.CHAT_FORCE_WATERFALL === 'true') {
+    log.warn('CHAT_FORCE_WATERFALL enabled; skipping chat compute token lookup', { userId });
+    return toChatComputeAuth(null);
+  }
+
   try {
     const token = await fetchComputeTokenForUser(userId);
     if (token) {

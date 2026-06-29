@@ -122,6 +122,7 @@ class _FakeWFModule:
         self._activity_results = activity_results or {}
         self._wait_sets_context = wait_condition_sets_context  # callable to mutate wf
         self.logger = type("L", (), {"info": lambda *a, **kw: None, "error": lambda *a, **kw: None})()
+        self.activity_calls = []
 
     def info(self):
         return type("I", (), {"workflow_id": "wf-123"})()
@@ -131,6 +132,7 @@ class _FakeWFModule:
 
     async def execute_activity(self, fn, args=None, **kwargs):
         name = getattr(fn, "__name__", "?")
+        self.activity_calls.append({"name": name, "args": args or [], "kwargs": kwargs})
         if name in self._activity_results:
             value = self._activity_results[name]
             if isinstance(value, Exception):
@@ -418,12 +420,15 @@ async def test_direct_sms_source_attempts_sms_notify():
         await request_user_approval_direct(
             workflow_instance=wf,
             question="q",
-            metadata=None,
+            metadata={"writeLockNotification": {"action": "Buy item"}},
         )
     finally:
         restore()
 
     assert "notify" in activity_calls
+    notify_call = next(c for c in fake.activity_calls if c["name"] == "notify_sms_event_activity")
+    payload = notify_call["args"][3]
+    assert payload["metadata"]["writeLockNotification"]["action"] == "Buy item"
 
 
 async def run_all_tests():

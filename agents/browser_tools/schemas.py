@@ -7,9 +7,9 @@ INDEX-BASED APPROACH: Elements are referenced by their index in the DOM tree.
 The DOM tree is serialized with indices like [1] button "Submit", [2] input[type=text], etc.
 """
 
-from typing import List, Literal, Optional, Type
+from typing import Any, List, Literal, Optional, Type
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
 # ============================================================================
 # OBSERVATION TOOLS
@@ -254,6 +254,293 @@ class RequestUserAssistanceForAuthenticationBrowserTool(BaseModel):
 
 
 # ============================================================================
+# INTERNAL WRITE-LOCK APPROVAL TOOL
+# ============================================================================
+
+
+def _format_write_lock_usd(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return f"${value:.2f}"
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.startswith("$"):
+        return text
+    try:
+        return f"${float(text):.2f}"
+    except ValueError:
+        return text
+
+
+class WriteLockService(BaseModel):
+    """The website or service where the write-locked action would happen."""
+
+    name: Optional[str] = Field(default=None, description="Human-readable service name, such as Amazon or Gmail.")
+    domain: str = Field(description="Domain from the current page URL, such as amazon.com.")
+    url: str = Field(
+        description="Current page URL where the write lock was triggered.",
+        validation_alias=AliasChoices("url", "current_url"),
+    )
+
+
+class WriteLockMedia(BaseModel):
+    """A media asset useful for rendering an approval notification."""
+
+    url: str = Field(description="Publicly accessible image, attachment, page preview, or rendered summary URL.")
+    alt: Optional[str] = Field(default=None, description="Short accessible description of this media.")
+    kind: Literal["product", "attachment", "page_preview", "rendered_summary"] = Field(
+        default="product",
+        description="How this media should be used by the approval renderer.",
+        validation_alias=AliasChoices("kind", "type"),
+    )
+
+    @field_validator("kind", mode="before")
+    @classmethod
+    def normalize_kind(cls, value: Any) -> Any:
+        if value == "image":
+            return "product"
+        return value
+
+
+class WriteLockPurchaseItem(BaseModel):
+    """One item included in a purchase approval."""
+
+    title: str = Field(
+        description="Visible item title.",
+        validation_alias=AliasChoices("title", "name"),
+    )
+    price: Optional[str] = Field(
+        default=None,
+        description="Visible item price, preserving currency and formatting.",
+        validation_alias=AliasChoices("price", "unit_price", "price_usd"),
+    )
+    quantity: Optional[str] = Field(default=None, description="Visible quantity.")
+    description: Optional[str] = Field(
+        default=None,
+        description="Short visible item description or variant details. Keep under 80 characters.",
+    )
+    rating: Optional[str] = Field(default=None, description="Visible rating, such as '4.6 stars'.")
+    review_count: Optional[str] = Field(
+        default=None,
+        description="Visible review count, preserving formatting.",
+        validation_alias=AliasChoices("review_count", "reviews"),
+    )
+    image_url: Optional[str] = Field(default=None, description="Best image URL for this item.")
+    product_url: Optional[str] = Field(default=None, description="Product detail URL for this item.")
+    seller: Optional[str] = Field(default=None, description="Visible seller or merchant for this item.")
+    shipping: Optional[str] = Field(default=None, description="Visible item shipping or delivery details.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_provider_item_fields(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        value = dict(value)
+        if "price" not in value and "price_usd" in value:
+            value["price"] = _format_write_lock_usd(value.get("price_usd"))
+        return value
+
+    @field_validator("price", "quantity", "review_count", mode="before")
+    @classmethod
+    def stringify_visible_value(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        return str(value)
+
+
+class WriteLockPurchaseTotals(BaseModel):
+    """Visible purchase totals."""
+
+    subtotal: Optional[str] = Field(default=None, description="Visible subtotal.")
+    shipping: Optional[str] = Field(default=None, description="Visible shipping cost or label.")
+    tax: Optional[str] = Field(default=None, description="Visible tax.")
+    total: Optional[str] = Field(default=None, description="Visible order total.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_usd_totals(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        value = dict(value)
+        alias_map = {
+            "subtotal": ("items", "cart_subtotal"),
+            "shipping": ("shipping_and_handling",),
+            "tax": ("estimated_tax",),
+            "total": ("order_total",),
+        }
+        for field_name, aliases in alias_map.items():
+            if field_name not in value:
+                for alias in aliases:
+                    if value.get(alias) is not None:
+                        value[field_name] = value.get(alias)
+                        break
+        for field_name in ("subtotal", "shipping", "tax", "total"):
+            usd_key = f"{field_name}_usd"
+            if field_name not in value and usd_key in value:
+                value[field_name] = _format_write_lock_usd(value.get(usd_key))
+        return value
+
+
+class WriteLockPurchaseDetails(BaseModel):
+    """Purchase details for one or more items."""
+
+    items: List[WriteLockPurchaseItem] = Field(
+        default_factory=list,
+        description="Every visible item being purchased, not just the clicked button's nearest item.",
+    )
+    totals: Optional[WriteLockPurchaseTotals] = Field(default=None, description="Visible order totals.")
+    payment_method: Optional[str] = Field(default=None, description="Visible payment method, without secrets.")
+    delivery_address: Optional[str] = Field(default=None, description="Visible delivery address or recipient.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_flat_totals(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        if isinstance(value.get("totals"), dict):
+            return value
+        totals = {
+            "subtotal": (
+                value.get("subtotal")
+                or value.get("cart_subtotal")
+                or _format_write_lock_usd(value.get("subtotal_usd"))
+            ),
+            "shipping": value.get("shipping") or _format_write_lock_usd(value.get("shipping_usd")),
+            "tax": (
+                value.get("tax")
+                or value.get("estimated_tax")
+                or _format_write_lock_usd(value.get("tax_usd"))
+                or _format_write_lock_usd(value.get("estimated_tax_usd"))
+            ),
+            "total": value.get("total") or value.get("order_total") or _format_write_lock_usd(value.get("total_usd")),
+        }
+        if any(totals.values()):
+            value = dict(value)
+            value["totals"] = totals
+        return value
+
+
+class WriteLockMessageAttachment(BaseModel):
+    """Attachment included with an outbound message."""
+
+    name: Optional[str] = Field(default=None, description="Attachment filename or label.")
+    url: Optional[str] = Field(default=None, description="Attachment URL or preview URL when visible.")
+    description: Optional[str] = Field(default=None, description="Short visible attachment description.")
+
+
+class WriteLockMessageDetails(BaseModel):
+    """Outbound message details."""
+
+    to: List[str] = Field(default_factory=list, description="Visible recipients.")
+    cc: List[str] = Field(default_factory=list, description="Visible CC recipients.")
+    bcc: List[str] = Field(default_factory=list, description="Visible BCC recipients.")
+    subject: Optional[str] = Field(default=None, description="Visible subject line.")
+    body: Optional[str] = Field(default=None, description="Visible message body.")
+    attachments: List[WriteLockMessageAttachment] = Field(
+        default_factory=list,
+        description="Visible outbound attachments.",
+    )
+
+
+class WriteLockSocialPostAttachment(BaseModel):
+    """Attachment included with a social post."""
+
+    url: Optional[str] = Field(default=None, description="Attachment or preview URL when visible.")
+    description: Optional[str] = Field(default=None, description="Short visible attachment description.")
+
+
+class WriteLockSocialPostDetails(BaseModel):
+    """Social post details."""
+
+    destination: Optional[str] = Field(
+        default=None,
+        description="Visible destination, such as profile, subreddit, or channel.",
+    )
+    audience: Optional[str] = Field(default=None, description="Visible audience, such as Public or followers.")
+    body: Optional[str] = Field(default=None, description="Visible post body.")
+    attachments: List[WriteLockSocialPostAttachment] = Field(
+        default_factory=list,
+        description="Visible post attachments.",
+    )
+
+
+class WriteLockPaymentDetails(BaseModel):
+    """Payment entry details without secrets."""
+
+    merchant: Optional[str] = Field(default=None, description="Visible merchant or payee.")
+    amount: Optional[str] = Field(default=None, description="Visible payment amount.")
+    purpose: Optional[str] = Field(default=None, description="Visible reason for payment.")
+    fields: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Payment fields being entered, such as card number, expiration date, CVV, "
+            "or billing ZIP. Never include actual secrets."
+        ),
+    )
+
+
+class WriteLockGenericOperationDetails(BaseModel):
+    """Fallback write operation details."""
+
+    label: str = Field(description="Human-level operation label.")
+    target: Optional[str] = Field(default=None, description="Visible target of the operation.")
+    payload_summary: Optional[str] = Field(
+        default=None,
+        description="Concise summary of the data or setting being changed.",
+    )
+
+
+class GenerateWriteLockNotificationTool(BaseModel):
+    """Internal approval-metadata tool.
+
+    Never call this tool during normal task execution. Only call it when the
+    latest user message contains WRITE_LOCK_NOTIFICATION_FORK_REQUEST. Describe
+    the real-world action the user is approving, not the clicked button or DOM
+    mechanic that triggered the write lock. Do not execute, approve, reject,
+    browse, or continue the task.
+    """
+
+    tool: Literal["generate_write_lock_notification"]
+    trigger_type: Literal["purchase", "payment", "message", "social_post", "generic_write"] = Field(
+        description="Category of write lock that triggered approval."
+    )
+    action: str = Field(
+        description="User-level action, such as 'buy items', 'send email', 'post publicly', or 'enter payment details'."
+    )
+    service: WriteLockService = Field(description="Website or service where the action would happen.")
+    media: List[WriteLockMedia] = Field(
+        default_factory=list,
+        description=(
+            "Media for the renderer. For purchase approvals, provide exactly one image whenever any "
+            "product, checkout, or page image is visible. For multiple purchase items, this should be "
+            "a single rendered_summary image stitched from the item photos when available."
+        ),
+    )
+    purchase: Optional[WriteLockPurchaseDetails] = Field(
+        default=None,
+        description="Required when trigger_type is purchase; otherwise null.",
+    )
+    payment: Optional[WriteLockPaymentDetails] = Field(
+        default=None,
+        description="Required when trigger_type is payment; otherwise null. Never include secrets.",
+    )
+    message: Optional[WriteLockMessageDetails] = Field(
+        default=None,
+        description="Required when trigger_type is message; otherwise null.",
+    )
+    social_post: Optional[WriteLockSocialPostDetails] = Field(
+        default=None,
+        description="Required when trigger_type is social_post; otherwise null.",
+    )
+    generic_write: Optional[WriteLockGenericOperationDetails] = Field(
+        default=None,
+        description="Required when trigger_type is generic_write; otherwise null.",
+    )
+
+
+# ============================================================================
 # Tool Registry (Index-Based)
 # ============================================================================
 
@@ -290,6 +577,9 @@ BROWSER_TOOL_MODELS = {
     "attempt_completion": AttemptCompletionBrowserTool,
     # "send_message_to_user": SendMessageToUserBrowserTool,
     "request_user_assistance_for_authentication": RequestUserAssistanceForAuthenticationBrowserTool,
+    # Internal write-lock approval metadata. Kept in the stable tool surface
+    # so a forked request can append only a user message and preserve cache reads.
+    "generate_write_lock_notification": GenerateWriteLockNotificationTool,
 }
 
 
@@ -357,6 +647,18 @@ __all__ = [
     "AttemptCompletionBrowserTool",
     "SendMessageToUserBrowserTool",
     "RequestUserAssistanceForAuthenticationBrowserTool",
+    "WriteLockService",
+    "WriteLockMedia",
+    "WriteLockPurchaseItem",
+    "WriteLockPurchaseTotals",
+    "WriteLockPurchaseDetails",
+    "WriteLockMessageAttachment",
+    "WriteLockMessageDetails",
+    "WriteLockSocialPostAttachment",
+    "WriteLockSocialPostDetails",
+    "WriteLockPaymentDetails",
+    "WriteLockGenericOperationDetails",
+    "GenerateWriteLockNotificationTool",
     # Registry & Factory
     "BROWSER_TOOL_MODELS",
     "AVAILABLE_ACTIONS",

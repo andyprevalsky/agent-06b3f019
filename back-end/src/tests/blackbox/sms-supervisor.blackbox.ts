@@ -20,7 +20,6 @@ import { config } from 'dotenv';
 import { PrismaClient } from '@prisma/client';
 import {
   BASE_URL,
-  BYPASS_FIXTURE_REAL_LLM,
   TestResult,
   assertStatus,
   assertRecentCompletedRootStaysInHierarchy,
@@ -32,15 +31,18 @@ import {
   findSurgeCallForReply,
   fixtureSmsReply,
   provisionUserWithPhone,
-  readCapturesAfter,
-  readCapturesForToken,
-  capturedSmsBody,
   request,
   runTest,
   setFixtureOverride,
   uniqueSmsPhone,
   waitFor,
 } from './sms-supervisor.helpers';
+import {
+  testNaturalApproval_ambiguousApprovalAsksClarification,
+  testNaturalApproval_resolvesPendingAttentionRequest,
+  testPrompt_neverExposeRoutingIds,
+  testRealLlm_supervisorRoundTrip,
+} from './sms-supervisor.behavior';
 import { buildToolFailureMessage } from '../../providers/smsSupervisor/supervisorHandler';
 import { commitPendingWrites, PendingOp } from '../../providers/smsSupervisor/supervisorTools';
 config();
@@ -509,124 +511,6 @@ async function testWs2_suppressedRunDiscardsStartNewAgent() {
   }
 }
 
-// ==================== REAL LLM — full stack, opt-in via BLACKBOX_SMS_SUPERVISOR_REAL_LLM=1 ====================
-
-async function testRealLlm_supervisorRoundTrip() {
-  if (process.env.BLACKBOX_SMS_SUPERVISOR_REAL_LLM !== '1') {
-    console.warn('  ⚠ BLACKBOX_SMS_SUPERVISOR_REAL_LLM != 1 — skipping real-LLM smoke');
-    return;
-  }
-  const probeRes = await request(`${BASE_URL}/api/test/captures`);
-  if (probeRes.status !== 200) {
-    console.warn('  ⚠ capture harness not active — skipping real-LLM smoke');
-    return;
-  }
-  const cursor = (probeRes.data as { nextId: number }).nextId - 1;
-
-  const phone = uniqueSmsPhone();
-  const userId = await provisionUserWithPhone(prisma, phone);
-  const token = captureToken('sms-supervisor-real-llm');
-  // Simple prompt — model should pick attempt_completion immediately. We don't
-  // pin the exact reply text; just assert SOMETHING came back on this phone.
-  const inboundText = 'Hi, please reply with a short greeting and nothing else.';
-
-  try {
-    // Opt this user out of fixtures — run hits real Anthropic via claudeAuth
-    // (or Rose waterfall if claudeAuth unavailable). Exercises native tool_use
-    // SSE parsing, real tool-dispatch loop, real Surge call (captured).
-    await setFixtureOverride(userId, BYPASS_FIXTURE_REAL_LLM);
-
-    const res = await request(`${BASE_URL}/api/sms/inbound`, {
-      method: 'POST',
-      headers: { 'X-Capture-Token': token },
-      body: JSON.stringify({
-        data: {
-          body: inboundText,
-          conversation: {
-            contact: { phone_number: phone },
-            phone_number: { number: '+14154498072' },
-          },
-        },
-      }),
-    });
-    assertStatus(res.status, 200, res.data);
-
-    // Generous timeout — real LLM call + streaming + tool loop. 45s upper bound.
-    const surgeCall = await waitFor(
-      async () => {
-        const tokenCalls = await readCapturesForToken(token);
-        const cursorCalls = await readCapturesAfter(cursor);
-        const calls = [...tokenCalls, ...cursorCalls];
-        return (
-          calls.find((call) => {
-            if (!call.url.includes('surge.app') || !call.url.endsWith('/messages')) {
-              return false;
-            }
-            const body = capturedSmsBody(call);
-            return (
-              body?.to === phone &&
-              typeof body?.body === 'string' &&
-              (body.body as string).length > 0
-            );
-          }) ?? null
-        );
-      },
-      45000,
-      500
-    );
-
-    const replyBody = capturedSmsBody(surgeCall);
-    const replyText = typeof replyBody?.body === 'string' ? replyBody.body : '';
-    if (replyText.length === 0) {
-      throw new Error('Expected non-empty outbound SMS body from real LLM');
-    }
-
-    // Pool tokens exhausted is an environmental fact, not a wiring bug. The
-    // webhook fallback fires this exact string when the supervisor crashes
-    // (e.g. mid-suite OpenRouter 402, or no claude/gpt pool tokens). Skip in
-    // that case — the WS-3 stack can't be exercised without creds, but the
-    // fixture-mode tests have already proven the rest of the pipeline.
-    if (replyText === 'Sorry, something went wrong. Please try again.') {
-      console.warn(
-        '  ⚠ pool tokens unavailable (supervisor crashed with fallback) — skipping real-LLM assertions'
-      );
-      return;
-    }
-
-    // Session shape invariant must hold even with real LLM: only user inbound +
-    // assistant reply are persisted (no leaked tool turns). Proves WS-1.
-    const session = await prisma.smsSession.findUnique({ where: { userId } });
-    if (!session) {
-      throw new Error('Expected SmsSession after real-LLM run');
-    }
-    const messages = JSON.parse(session.messages) as { role?: string; content?: string }[];
-    const userMsgs = messages.filter((m) => m.role === 'user');
-    const asstMsgs = messages.filter((m) => m.role === 'assistant');
-    if (userMsgs.length !== 1) {
-      throw new Error(
-        `Expected exactly one user turn persisted, got ${userMsgs.length}: ${JSON.stringify(
-          userMsgs.map((m) => m.content?.substring(0, 40))
-        )}`
-      );
-    }
-    if (asstMsgs.length !== 1) {
-      throw new Error(
-        `Expected exactly one assistant turn persisted, got ${asstMsgs.length}: ${JSON.stringify(
-          asstMsgs.map((m) => m.content?.substring(0, 40))
-        )}`
-      );
-    }
-    if (asstMsgs[0].content !== replyText) {
-      throw new Error(
-        `Persisted assistant text should match outbound SMS body. ` +
-          `Session: "${asstMsgs[0].content?.substring(0, 80)}" vs Surge: "${replyText.substring(0, 80)}"`
-      );
-    }
-  } finally {
-    await cleanupAgentScopedUser(prisma, userId);
-  }
-}
-
 // ==================== RUN ====================
 
 async function runAll() {
@@ -663,12 +547,24 @@ async function runAll() {
       fn: testWriteCommit_failureBuildsUserVisibleError,
     },
     {
+      name: 'natural approval -- resolves matching pending request',
+      fn: () => testNaturalApproval_resolvesPendingAttentionRequest(prisma),
+    },
+    {
+      name: 'natural approval -- ambiguous approval asks clarification',
+      fn: () => testNaturalApproval_ambiguousApprovalAsksClarification(prisma),
+    },
+    {
+      name: 'prompt -- supervisor never exposes routing identifiers',
+      fn: () => testPrompt_neverExposeRoutingIds(prisma),
+    },
+    {
       name: 'ws2 -- suppressed run discards queued start_new_agent',
       fn: testWs2_suppressedRunDiscardsStartNewAgent,
     },
     {
       name: 'real-llm -- full stack roundtrip (opt-in via BLACKBOX_SMS_SUPERVISOR_REAL_LLM=1)',
-      fn: testRealLlm_supervisorRoundTrip,
+      fn: () => testRealLlm_supervisorRoundTrip(prisma),
     },
   ];
 

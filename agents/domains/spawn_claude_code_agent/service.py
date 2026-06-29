@@ -854,6 +854,9 @@ async def _run_verifier(
     gpt_token_source: Optional[str] = None,
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
+    fast_mode_cache_enabled: bool = False,
+    fast_mode_goal: Optional[str] = None,
+    fast_mode_step: int = 0,
     attempt_completion: bool = False,
     exit_code: Optional[int] = None,
     code_provider: str = "claude",
@@ -963,6 +966,10 @@ async def _run_verifier(
                 gpt_token_source,
                 gpt_token_pool_id,
                 gpt_token_user_id,
+                None,
+                fast_mode_cache_enabled,
+                fast_mode_goal or goal,
+                fast_mode_step,
             ],
             start_to_close_timeout=timedelta(seconds=VERIFIER_ACTIVITY_TIMEOUT_SECONDS),
             retry_policy=RetryPolicy(maximum_attempts=2),
@@ -1162,6 +1169,7 @@ async def spawn_claude_code_activity(  # noqa: C901
     gpt_account_id: Optional[str] = None,
     gpt_token_source: Optional[str] = None,
     gpt_token_pool_id: Optional[str] = None,
+    fast_mode_cache_enabled: bool = False,
 ) -> Dict[str, Any]:
     """Claude Code agent activity using E2B Desktop Sandbox.
 
@@ -1198,6 +1206,7 @@ async def spawn_claude_code_activity(  # noqa: C901
         raise ValueError(
             "output_schema is required for Claude Code agent - parent agent must provide structured output schema in tool call"
         )
+
     logger.info(
         "[ClaudeCode] Using response schema from tool call",
         agent_id=agent_id,
@@ -1349,6 +1358,9 @@ async def spawn_claude_code_activity(  # noqa: C901
             gpt_token_source=gpt_token_source,
             gpt_token_pool_id=gpt_token_pool_id,
             gpt_token_user_id=user_id if gpt_token else None,
+            fast_mode_cache_enabled=fast_mode_cache_enabled,
+            fast_mode_goal=goal,
+            fast_mode_step=0,
             attempt_completion=attempt_completion,
             exit_code=exit_code,
             code_provider=code_provider,
@@ -1415,7 +1427,7 @@ async def spawn_claude_code_activity(  # noqa: C901
         if log_collector:
             await log_collector.stop()
 
-        return {
+        result = {
             "status": "completed",
             "success": success,
             "message": context_message,
@@ -1426,6 +1438,7 @@ async def spawn_claude_code_activity(  # noqa: C901
             "structured_response": structured_response,
             "output_files": output_files,
         }
+        return result
 
     except asyncio.CancelledError:
         logger.info("[ClaudeCode] Activity cancelled", agent_id=agent_id, task_id=task_id)

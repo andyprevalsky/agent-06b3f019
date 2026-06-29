@@ -12,7 +12,7 @@ const state = vi.hoisted(() => ({
 
 vi.mock('../../main/domains/passkey-enroll/config', () => ({
   APPLE_PASSWORDS_PASSKEY_SOURCE: 'apple_passwords',
-  ENROLL_TIMEOUT_MS: 5,
+  ENROLL_TIMEOUT_MS: 5_000,
   ENROLL_WINDOW: {
     height: 820,
     title: 'Add agent passkey',
@@ -192,12 +192,14 @@ describe('passkey enroll service', () => {
   });
 
   it('times out when the page never exposes a capture', async () => {
+    vi.useFakeTimers();
     state.loadURL.mockResolvedValue(undefined);
     state.executeJavaScript.mockResolvedValue(null);
 
-    await expect(
-      enrollPasskey({ url: 'https://example.com/security' }, 'access-token')
-    ).resolves.toEqual({
+    const result = enrollPasskey({ url: 'https://example.com/security' }, 'access-token');
+    await vi.advanceTimersByTimeAsync(5_001);
+
+    await expect(result).resolves.toEqual({
       success: false,
       message: 'No passkey was added before the timeout',
     });
@@ -205,6 +207,7 @@ describe('passkey enroll service', () => {
   });
 
   it('keeps polling when the page capture is incomplete', async () => {
+    vi.useFakeTimers();
     state.loadURL.mockResolvedValue(undefined);
     state.executeJavaScript.mockResolvedValue({
       credentialId: 'credential',
@@ -212,9 +215,10 @@ describe('passkey enroll service', () => {
       rpId: 'example.com',
     });
 
-    await expect(
-      enrollPasskey({ url: 'https://example.com/security' }, 'access-token')
-    ).resolves.toEqual({
+    const result = enrollPasskey({ url: 'https://example.com/security' }, 'access-token');
+    await vi.advanceTimersByTimeAsync(5_001);
+
+    await expect(result).resolves.toEqual({
       success: false,
       message: 'No passkey was added before the timeout',
     });

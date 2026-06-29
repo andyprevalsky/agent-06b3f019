@@ -604,7 +604,7 @@ async def poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict[
         logger.error(
             f"Failed to poll messages: agent_id={agent_id}, error={str(e)}"
         )
-        return []
+        raise
 
 
 @activity.defn

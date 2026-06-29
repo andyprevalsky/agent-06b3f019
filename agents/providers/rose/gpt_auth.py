@@ -337,6 +337,7 @@ def build_codex_responses_body(
     tool_choice: Any = None,
     temperature: Optional[float] = None,
     effort: Optional[str] = None,
+    provider_fast_mode: bool = False,
     request_id: str,
 ) -> Dict[str, Any]:
     """Assemble the Codex Responses request body.
@@ -375,6 +376,8 @@ def build_codex_responses_body(
                 "schema": json_schema.get("schema") or {},
             }
         }
+    if provider_fast_mode:
+        body["service_tier"] = "priority"
     return body
 
 
@@ -391,6 +394,7 @@ async def gpt_auth_complete(
     request_id: str,
     agent_id: Optional[str] = None,
     call_site: Optional[str] = None,
+    provider_fast_mode: bool = False,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = None,
 ) -> AsyncIterator[StreamChunk]:
@@ -402,6 +406,7 @@ async def gpt_auth_complete(
         tool_choice=tool_choice,
         temperature=temperature,
         effort=effort,
+        provider_fast_mode=provider_fast_mode,
         request_id=request_id,
     )
     actual_model = f"{pool_spec.gpt_auth_model}-gpt"

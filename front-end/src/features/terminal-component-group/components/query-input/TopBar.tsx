@@ -1,10 +1,11 @@
 /**
- * TopBar — row above the textarea: write-lock toggle, tool-set chip,
- * test-prompt selector (dev/admin only), cost indicator, context meter,
- * and the settings dialog.
+ * TopBar — row above the textarea: write-lock toggle, Fast Mode toggle,
+ * tool-set chip, test-prompt selector (dev/admin only), cost indicator,
+ * context meter, and the settings dialog.
  */
 
 import WriteLockToggle from '../WriteLockToggle';
+import FastModeToggle from '../FastModeToggle';
 import RoseToolSetChip from '../RoseToolSetChip';
 import TestPromptsSelector from '../TestPromptsSelector';
 import AgentSettingsDialog from '../AgentSettingsDialog';
@@ -18,6 +19,9 @@ interface TopBarProps {
   onAgentUpdate?: () => void;
   onAgentDelete?: () => void;
   showTestPrompts: boolean;
+  showFastMode?: boolean;
+  fastMode?: boolean;
+  onFastModeChange?: (enabled: boolean) => void;
   onSelectPrompt: (prompt: string, files?: File[]) => void;
   pendingPriceLimitCents: number;
   priceLimit: UsePriceLimitResult;
@@ -31,6 +35,9 @@ export function TopBar({
   onAgentUpdate,
   onAgentDelete,
   showTestPrompts,
+  showFastMode = false,
+  fastMode = false,
+  onFastModeChange,
   onSelectPrompt,
   pendingPriceLimitCents,
   priceLimit,
@@ -48,6 +55,9 @@ export function TopBar({
             onUpdate={onAgentUpdate}
           />
         </div>
+        {showFastMode && (
+          <FastModeToggle enabled={fastMode} onChange={onFastModeChange ?? (() => {})} />
+        )}
         <RoseToolSetChip />
         {showTestPrompts && <TestPromptsSelector onSelectPrompt={onSelectPrompt} />}
       </div>

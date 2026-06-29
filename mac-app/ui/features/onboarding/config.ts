@@ -45,12 +45,17 @@ export const BYPASS_CODE = '181818';
 
 export const RESEND_COOLDOWN_SECONDS = 30;
 
-export const getBackendUrl = (): string => {
-  const fromEnv = import.meta.env.VITE_BACKEND_API_URL;
-  if (typeof fromEnv === 'string' && fromEnv.length > 0) {
-    return fromEnv;
+export function resolveBackendUrl(rawUrl: string | undefined, isProd: boolean): string {
+  const url = rawUrl?.trim();
+  if (url !== undefined && url !== '') return url;
+  if (isProd) {
+    throw new Error('Missing VITE_BACKEND_API_URL for packaged Mac app');
   }
   return 'http://localhost:3001';
+}
+
+export const getBackendUrl = (): string => {
+  return resolveBackendUrl(import.meta.env.VITE_BACKEND_API_URL, import.meta.env.PROD);
 };
 
 export const getStripePaymentUrl = (): string => {

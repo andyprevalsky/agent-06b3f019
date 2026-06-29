@@ -15,7 +15,12 @@
 
 import { startAgentWorkflow } from '../../providers/temporal';
 import { createLogger } from '../../providers/logger';
-import { resolveCreateMetadata, resolvePromptSecrets } from './agentLifecycleService';
+import {
+  applyFastModeInheritance,
+  applyFastModeDefault,
+  resolvePromptSecrets,
+} from './agentLifecycleService';
+import { resolveCreateMetadata } from './agentCreateMetadata';
 import type { CreateAgentBody } from './types';
 import * as repo from './repo';
 import type { BatchCreateAgentParams } from './repo';
@@ -69,6 +74,9 @@ function buildBatchItem(
     ...(meta.proxyGeo.city !== undefined ? { proxyCity: meta.proxyGeo.city } : {}),
     ...(body.price_limit_cents !== undefined ? { priceLimitCents: body.price_limit_cents } : {}),
     ...(body.write_lock_enabled !== undefined ? { writeLockEnabled: body.write_lock_enabled } : {}),
+    ...(body.fast_mode_cache_enabled !== undefined
+      ? { fastModeCacheEnabled: body.fast_mode_cache_enabled }
+      : {}),
     verifierType,
     ...(body.attachments !== undefined
       ? { attachments: body.attachments as Array<Record<string, unknown>> }
@@ -100,6 +108,9 @@ async function startBatchWorkflow(
     ...(body.max_iterations !== undefined ? { maxIterations: body.max_iterations } : {}),
     priceLimitCents: body.price_limit_cents ?? 100,
     ...(body.context_gates !== undefined ? { contextGates: body.context_gates } : {}),
+    ...(body.fast_mode_cache_enabled !== undefined
+      ? { fastModeCacheEnabled: body.fast_mode_cache_enabled }
+      : {}),
   });
 }
 /* c8 ignore stop */
@@ -179,6 +190,26 @@ async function resolveAllMetadata(
   return out;
 }
 
+async function applyFastModeInheritanceForBatch(bodies: CreateAgentBody[]): Promise<void> {
+  const parentIds = Array.from(
+    new Set(
+      bodies
+        .filter(
+          (body) => body.fast_mode_cache_enabled === undefined && body.parent_agent_id !== undefined
+        )
+        .map((body) => body.parent_agent_id!)
+    )
+  );
+  if (parentIds.length === 0) return;
+
+  const parents = await repo.findFastModeFlagsByIds(parentIds);
+  const parentFlagById = new Map(parents.map((parent) => [parent.id, parent.fastModeCacheEnabled]));
+  for (const body of bodies) {
+    if (body.parent_agent_id === undefined) continue;
+    applyFastModeInheritance(body, parentFlagById.get(body.parent_agent_id));
+  }
+}
+
 export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<BatchAgentResult[]> {
   const { bodies, userId, isInternal, clientIP } = args;
   const verifierType = 'FLOAT_LLM_JUDGE';
@@ -186,6 +217,8 @@ export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<Ba
   if (isInternal) {
     for (const body of bodies) body.goal = resolvePromptSecrets(body.goal);
   }
+  for (const body of bodies) applyFastModeDefault(body, userId);
+  await applyFastModeInheritanceForBatch(bodies);
 
   // Idempotency: existing rows are returned untouched.
   const allAgentIds = bodies.map((b) => b.agent_id!);

@@ -4,6 +4,9 @@
  */
 
 import { createLogger } from '../logger';
+import { cacheGet, cacheSet } from '../fastCacheStore';
+import { goalHash } from '../fastCacheNormalizeCore';
+import { webSearchKey } from '../fastCacheNormalizeKeys';
 
 const log = createLogger('WebSearch');
 
@@ -52,8 +55,30 @@ function formatSearchResults(results: SearchResult[]): string {
  * Execute a web search using Parallel AI's Search API.
  * This is the same approach used by the Python implementation.
  */
-export async function executeWebSearch(query: string): Promise<WebSearchResult> {
+export async function executeWebSearch(
+  query: string,
+  fastModeGoal?: string | null,
+  fastModeReadEnabled = fastModeGoal !== null && fastModeGoal !== undefined,
+  fastModeWriteEnabled = fastModeReadEnabled
+): Promise<WebSearchResult> {
   log.info('Executing search', { query });
+
+  const cacheKey =
+    fastModeGoal !== null &&
+    fastModeGoal !== undefined &&
+    (fastModeReadEnabled || fastModeWriteEnabled)
+      ? webSearchKey(fastModeGoal, query, 10)
+      : null;
+  if (cacheKey !== null && fastModeReadEnabled) {
+    const hit = await cacheGet(cacheKey);
+    if (hit.hit && hit.value) {
+      log.info('fast_cache.chat_web_search_hit', { key: cacheKey });
+      return hit.value as WebSearchResult;
+    }
+    log.info('fast_cache.chat_web_search_miss', { key: cacheKey });
+  } else if (cacheKey !== null) {
+    log.info('fast_cache.chat_web_search_write_only', { key: cacheKey });
+  }
 
   try {
     const apiKey = process.env.PARRALLEL_API_KEY;
@@ -137,10 +162,28 @@ export async function executeWebSearch(query: string): Promise<WebSearchResult> 
       sourceCount: sources.length,
     });
 
-    return {
+    const result = {
       answer,
       sources,
     };
+
+    if (cacheKey !== null && fastModeGoal && fastModeWriteEnabled) {
+      await cacheSet({
+        key: cacheKey,
+        kind: 'web_search',
+        goalHash: goalHash(fastModeGoal),
+        value: result,
+      })
+        .then(() => log.info('fast_cache.chat_web_search_stored', { key: cacheKey }))
+        .catch((error) =>
+          log.warn('fast_cache.chat_web_search_store_failed', {
+            key: cacheKey,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        );
+    }
+
+    return result;
   } catch (error) {
     log.error('Error executing search', {
       error: error instanceof Error ? error.message : String(error),

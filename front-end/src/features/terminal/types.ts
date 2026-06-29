@@ -124,6 +124,8 @@ export interface AgentSlice {
   setSelectedModel: (m: string) => void;
   pendingPriceLimitCents: number;
   setPendingPriceLimitCents: (c: number) => void;
+  fastMode: boolean;
+  setFastMode: (enabled: boolean) => void;
   isChatMode: boolean;
   isPausing: boolean;
   ancestors: AncestorNode[];

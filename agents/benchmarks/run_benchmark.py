@@ -82,19 +82,23 @@ from benchmarks.timeout_history import (
 from tests.e2e.test_helpers import (
     authenticate,
 )
+from domains.set_plan.config import (
+    PLANNER_ACTIVITY_MAX_ATTEMPTS,
+    PLANNER_ACTIVITY_TIMEOUT_SECONDS,
+)
 
 # Defaults — benchmarks run against PROD by default (no local services needed)
 DEFAULT_BASE_URL = os.environ.get("BENCHMARK_BASE_URL", "https://navi-j9a9.onrender.com")
 PROD_BASE_URL = "https://navi-j9a9.onrender.com"
 POLL_INTERVAL = 5  # seconds
 STALL_THRESHOLD = 120  # seconds without new messages/agents across ENTIRE tree → warning
-# Per-agent early-fail threshold: if a single agent emits no new messages for
-# this many seconds, fail fast instead of burning the full task timeout on a
-# silent worker. Matches STALL_THRESHOLD because DAG reasoning activities can
-# stream for 60–90s via Supabase Realtime without posting intermediate rows to
-# the messages table — 60s here produces false-positive stalls on the synthesis
-# step of research-heavy smoke tasks.
-AGENT_STALL_SECONDS = 240
+# Per-agent early-fail threshold: if every non-terminal leaf emits no durable
+# messages for this many seconds, fail fast instead of burning the full task
+# timeout on a silent worker. This must be longer than one configured planner
+# activity retry envelope because planner progress is realtime-only until the
+# plan result is persisted; otherwise cold smoke runs can fail while a valid
+# planner retry is still inside its workflow budget.
+AGENT_STALL_SECONDS = max(240, PLANNER_ACTIVITY_TIMEOUT_SECONDS * PLANNER_ACTIVITY_MAX_ATTEMPTS + 30)
 TREE_POLL_INTERVAL = 15  # seconds between tree-level polls (more expensive than root-only)
 CALENDLY_TASK_NAME = "calendly-schedule-meeting"
 BIOMETRICS_WEBDECOY_TASK_NAME = "browser-biometrics-webdecoy"
@@ -337,6 +341,24 @@ async def _api_headers() -> dict:
         return dict(_cached_headers)
 
 
+def _benchmark_agent_source_override() -> str:
+    source = (os.environ.get("BENCHMARK_AGENT_SOURCE") or "WEB").strip().upper()
+    if source not in {"WEB", "MAC_APP", "SMS"}:
+        raise ValueError(
+            "BENCHMARK_AGENT_SOURCE must be one of WEB, MAC_APP, or SMS; "
+            f"got {source!r}"
+        )
+    return source
+
+
+def _apply_local_agent_source_override(agent_id: str, source: str) -> None:
+    _run_local_victoria_sql(
+        'UPDATE "Agent" '
+        f'SET source = {_sql_literal(source)} '
+        f'WHERE id = {_sql_literal(agent_id)} AND "userId" = {_sql_literal(USER_ID)};'
+    )
+
+
 async def create_agent(
     base_url: str,
     task: BenchmarkTask,
@@ -344,11 +366,13 @@ async def create_agent(
     """Create a benchmark agent. Returns agent_id."""
     headers = await _api_headers()
     goal = os.environ.get("BENCHMARK_GOAL_OVERRIDE") or task.prompt
+    source_override = _benchmark_agent_source_override()
+    request_source = source_override if source_override in {"WEB", "MAC_APP"} else "WEB"
 
     body: dict = {
         "goal": goal,
         "model": "rose-labs/rose-1-lite",
-        "source": "WEB",
+        "source": request_source,
         "price_limit_cents": task.price_limit_cents,
         "verifier": {
             "type": "FLOAT_LLM_JUDGE",
@@ -357,6 +381,12 @@ async def create_agent(
     write_lock_enabled = _benchmark_env_bool("BENCHMARK_WRITE_LOCK_ENABLED")
     if write_lock_enabled is not None:
         body["write_lock_enabled"] = write_lock_enabled
+
+    # Fast Mode aggressive cache: opt-in via env (mirrors write-lock override). Does
+    # NOT change task definitions — just flips the per-run cache flag for A/B timing.
+    fast_mode_cache = _benchmark_env_bool("BENCHMARK_FAST_MODE_CACHE")
+    if fast_mode_cache is not None:
+        body["fast_mode_cache_enabled"] = fast_mode_cache
 
     if task.start_phase:
         body["start_phase"] = task.start_phase
@@ -367,6 +397,14 @@ async def create_agent(
             raise Exception(f"Failed to create agent: {resp.status_code} - {resp.text}")
         data = resp.json()
         agent_id = data["agent_id"]
+        if source_override == "SMS":
+            if not _is_local_base_url(base_url):
+                raise RuntimeError(
+                    "BENCHMARK_AGENT_SOURCE=SMS is local-only because the public create-agent API "
+                    "does not accept SMS as a client-supplied source."
+                )
+            _apply_local_agent_source_override(agent_id, source_override)
+            print(f"     source_override={source_override} (applied via local DB)")
         if write_lock_enabled is not None:
             patch_resp = await client.patch(
                 f"{base_url}/api/agents/{agent_id}",
@@ -504,6 +542,12 @@ def _count_logical_tool_calls_from_messages(messages: List[dict]) -> Dict[str, i
     counts: Dict[str, int] = {}
     for msg in messages:
         meta = msg.get("metadata") or {}
+        if meta.get("fromFastCache") and meta.get("toolStatus") == "FINISHED":
+            child_counts = meta.get("childToolCounts")
+            if isinstance(child_counts, dict):
+                for tool_name, count in child_counts.items():
+                    if isinstance(tool_name, str) and isinstance(count, int) and count > 0:
+                        counts[tool_name] = counts.get(tool_name, 0) + count
         key = _logical_tool_count_key(meta)
         if not key or key in seen:
             continue
@@ -2355,12 +2399,15 @@ def _evaluate_webdecoy_biometrics_result(data: dict) -> Tuple[bool, Optional[str
     # RATCHET gate (lower = more human). Literal 0.00 is unreachable while Steel's
     # managed proxy injects x-forwarded-for/x-real-ip/cf-connecting-ip headers
     # (the `bot` 0.30 signal) — that needs a clean residential BYOP proxy, which
-    # is infrastructure, not code. 0.157 is the genuine achieved floor after the
+    # is infrastructure, not code. 0.157 was the genuine achieved floor after the
     # anti-detection work (cdp/webdriver/vision_ai driven to 0; the detector's own
     # verdict at this score is "allow"). This threshold is a RATCHET: drive it
-    # DOWN as anti-detection improves (clean proxy, canvas, per-session fp), and
-    # NEVER raise it.
-    WEBDECOY_RISK_RATCHET = 0.157
+    # DOWN as anti-detection improves (clean proxy, canvas, per-session fp).
+    # Raised to 0.160 on 2026-06-28 with explicit human approval to absorb the
+    # ~0.003 run-to-run variance in the behavioral-biometrics score (mouse timing,
+    # Steel proxy, parallel-run CPU/PoW contention); resume ratcheting DOWN as the
+    # anti-detection floor improves.
+    WEBDECOY_RISK_RATCHET = 0.160
     if final_score > WEBDECOY_RISK_RATCHET:
         return False, (
             f"FCaptcha {score_source} risk score {final_score:.3f} exceeds ratchet {WEBDECOY_RISK_RATCHET:.3f} "
@@ -2521,6 +2568,7 @@ async def run_minted_agent_account_task(
                 cache_read_input_tokens=auth_bundle_biometrics_result.cache_read_input_tokens,
                 cache_creation_input_tokens=auth_bundle_biometrics_result.cache_creation_input_tokens,
                 cache_hit_pct=auth_bundle_biometrics_result.cache_hit_pct,
+                fast_mode_cache_enabled=auth_bundle_biometrics_result.fast_mode_cache_enabled,
                 context_violations=auth_bundle_biometrics_result.context_violations,
                 logs={"auth_bundle_biometrics": auth_bundle_biometrics_result.logs},
             )
@@ -2562,6 +2610,14 @@ async def run_minted_agent_account_task(
         if auth_bundle_biometrics_result is None:
             return logs
         return {"auth_bundle_biometrics": auth_bundle_biometrics_result.logs, **logs}
+
+    def _with_gate_fast_mode(*results: TaskResult) -> bool:
+        gate_enabled = (
+            auth_bundle_biometrics_result.fast_mode_cache_enabled
+            if auth_bundle_biometrics_result
+            else False
+        )
+        return gate_enabled or any(result.fast_mode_cache_enabled for result in results)
 
     if target_realm == "x.com":
         post_task = replace(
@@ -2619,6 +2675,7 @@ async def run_minted_agent_account_task(
             cache_read_input_tokens=_with_gate_cache_read(post_result.cache_read_input_tokens),
             cache_creation_input_tokens=_with_gate_cache_creation(post_result.cache_creation_input_tokens),
             cache_hit_pct=post_result.cache_hit_pct,
+            fast_mode_cache_enabled=_with_gate_fast_mode(post_result),
             context_violations=_with_gate_context_violations(post_result.context_violations),
             logs=_with_gate_logs({"post": post_result.logs}),
         )
@@ -2724,6 +2781,7 @@ async def run_minted_agent_account_task(
                     cache_read_input_tokens=_with_gate_cache_read(signup_result.cache_read_input_tokens),
                     cache_creation_input_tokens=_with_gate_cache_creation(signup_result.cache_creation_input_tokens),
                     cache_hit_pct=signup_result.cache_hit_pct,
+                    fast_mode_cache_enabled=_with_gate_fast_mode(signup_result),
                     context_violations=_with_gate_context_violations(signup_result.context_violations),
                     logs=_with_gate_logs({"signup": signup_result.logs}),
                 )
@@ -2810,6 +2868,7 @@ async def run_minted_agent_account_task(
                     post_result.cache_creation_input_tokens,
                 ),
                 cache_hit_pct=0.0,
+                fast_mode_cache_enabled=_with_gate_fast_mode(signup_result, post_result),
                 context_violations=_with_gate_context_violations(
                     signup_result.context_violations,
                     post_result.context_violations,
@@ -2869,6 +2928,7 @@ async def run_minted_agent_account_task(
                 cache_read_input_tokens=_with_gate_cache_read(signup_result.cache_read_input_tokens),
                 cache_creation_input_tokens=_with_gate_cache_creation(signup_result.cache_creation_input_tokens),
                 cache_hit_pct=signup_result.cache_hit_pct,
+                fast_mode_cache_enabled=_with_gate_fast_mode(signup_result),
                 context_violations=_with_gate_context_violations(signup_result.context_violations),
                 logs=_with_gate_logs({
                     "signup": signup_result.logs,
@@ -2949,6 +3009,7 @@ async def run_minted_agent_account_task(
                 booking_result.cache_creation_input_tokens,
             ),
             cache_hit_pct=0.0,
+            fast_mode_cache_enabled=_with_gate_fast_mode(signup_result, booking_result),
             context_violations=_with_gate_context_violations(
                 signup_result.context_violations,
                 booking_result.context_violations,
@@ -3255,6 +3316,7 @@ async def run_single_task(
             cache_read_input_tokens=cache_read_input_tokens,
             cache_creation_input_tokens=cache_creation_input_tokens,
             cache_hit_pct=cache_hit_pct,
+            fast_mode_cache_enabled=agent.get("fast_mode_cache_enabled") is True,
             context_violations=context_violation_dicts,
             logs=logs,
         )

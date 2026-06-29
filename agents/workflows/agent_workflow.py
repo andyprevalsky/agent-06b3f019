@@ -37,8 +37,8 @@ with workflow.unsafe.imports_passed_through():
         post_agent_message,
         update_agent_status,
     )
-    from helpers.handle_tool_event import handle_tool_event
     from helpers.context_scope import filter_internal_subagent_messages
+    from helpers.handle_tool_event import handle_tool_event
     from helpers.llm import (
         check_progress,
         fetch_compute_token_activity,
@@ -87,6 +87,7 @@ CLOUD_AGENT_IN_PROGRESS_TITLES = {
     PREPARING_CLOUD_AGENT_TITLE,
     STARTING_REASONING_TITLE,
 }
+FAST_MODE_WRITE_THROUGH_USER_IDS = {"1f85ff25-6e29-4c1b-8739-f917bd101a30"}
 
 # =============================================================================
 # TOOL CONFIGURATION
@@ -129,6 +130,7 @@ class AgentWorkflow:
         self.agent_id: Optional[str] = None
         self.user_id: Optional[str] = None
         self.goal: Optional[str] = None
+        self.fast_mode_cache_enabled: bool = False
         self.model: str = "anthropic/claude-sonnet-4.6"
         self.reasoning_max_tokens: int = 256
         self.verifier: Optional[Dict] = None
@@ -468,6 +470,7 @@ class AgentWorkflow:
         max_iterations: Optional[int] = None,  # Step limit for execute phase (sub-agents use 25)
         price_limit_cents: int = 100,  # Price limit in cents (default $1.00)
         context_gates: Optional[Dict[str, bool]] = None,  # Control which user context sections to include
+        fast_mode_cache_enabled: bool = False,  # Fast Mode aggressive cache (own flag, NOT a context gate)
     ) -> Dict:
         """Execute agent task: optionally PLAN phase → EXECUTE phase."""
         # Bind agent_id to structlog context so ALL downstream structlog calls
@@ -487,6 +490,7 @@ class AgentWorkflow:
         self.depth = depth
         self.bus_id = bus_id
         self.context_gates = context_gates or {}  # Empty dict = all gates open (default)
+        self.fast_mode_cache_enabled = fast_mode_cache_enabled  # Record/replay third-party responses
         self.max_iterations = max_iterations
         self.price_limit_cents = price_limit_cents  # Use passed value instead of hardcoded default
         self.start_time = workflow.now()  # Track start time for duration calculation
@@ -673,7 +677,12 @@ class AgentWorkflow:
             try:
                 generated = await workflow.execute_activity(
                     set_response_schema_activity,
-                    args=[agent_id, [self.goal], self._active_compute_token_payload()],
+                    args=[
+                        agent_id,
+                        [self.goal],
+                        self._active_compute_token_payload(),
+                        self.fast_mode_cache_enabled,
+                    ],
                     start_to_close_timeout=timedelta(seconds=90),
                     retry_policy=RetryPolicy(maximum_attempts=3),
                 )
@@ -788,6 +797,8 @@ class AgentWorkflow:
                 get_gpt_account_id=self._active_gpt_account_id,
                 get_gpt_token_source=self._active_gpt_source,
                 get_gpt_token_pool_id=self._active_gpt_pool_id,
+                fast_mode_cache_enabled=self.fast_mode_cache_enabled,
+                goal_text=self.goal,
             )
 
             await self._track_tokens_and_cost(plan_result)
@@ -929,6 +940,8 @@ class AgentWorkflow:
             get_gpt_account_id=self._active_gpt_account_id,
             get_gpt_token_source=self._active_gpt_source,
             get_gpt_token_pool_id=self._active_gpt_pool_id,
+            fast_mode_cache_enabled=self.fast_mode_cache_enabled,
+            goal_text=self.goal,
             **({"max_iterations": self.max_iterations} if self.max_iterations else {}),
         )
 
@@ -1003,6 +1016,12 @@ class AgentWorkflow:
                     self._active_gpt_source(),
                     self._active_gpt_pool_id(),
                     user_id,
+                    None,  # dump_extra
+                    # Fast Mode: verifier keys by canonical request fingerprint;
+                    # fast_mode_step is retained only for activity signature compatibility.
+                    self.fast_mode_cache_enabled,
+                    self.goal,
+                    0,
                 ],
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(maximum_attempts=3),
@@ -1132,6 +1151,7 @@ class AgentWorkflow:
                 self.max_iterations,
                 self.price_limit_cents,
                 self.context_gates or None,  # Preserve context gates across continue_as_new
+                self.fast_mode_cache_enabled,  # Preserve Fast Mode cache flag
             ]
         )
 
@@ -1385,8 +1405,9 @@ class AgentWorkflow:
                 self.context.sort(key=lambda x: x.get("timestamp", ""))
 
             return messages
-        except Exception:
-            return []
+        except Exception as e:
+            workflow.logger.error(f"Failed to poll messages for {self.agent_id}: {e}")
+            raise
 
     async def _execute_tool(self, tool_name: str, tool_args: Dict, tool_call_id: str) -> Dict:  # noqa: C901
         """Execute a tool - supports both new and legacy signatures during migration.
@@ -1471,16 +1492,29 @@ class AgentWorkflow:
                 # large bodies; pass auth so the summarizer can use claudeAuth
                 # ($0) instead of falling through OpenRouter waterfall.
                 extra_executor_kwargs: Dict[str, Any] = {}
+                # Fast Mode: pass the goal so web_search/web_fetch can either
+                # read+write (Fast Mode on) or write-only for allowlisted accounts.
+                fast_mode_write_through = self.user_id in FAST_MODE_WRITE_THROUGH_USER_IDS
+                if tool_name in ("web_search", "web_fetch") and (
+                    self.fast_mode_cache_enabled or fast_mode_write_through
+                ):
+                    extra_executor_kwargs["fast_mode_cache_enabled"] = self.fast_mode_cache_enabled
+                    extra_executor_kwargs["fast_mode_goal"] = self.goal
+                    extra_executor_kwargs["fast_mode_cache_write_enabled"] = (
+                        self.fast_mode_cache_enabled or fast_mode_write_through
+                    )
                 if tool_name == "web_fetch":
-                    extra_executor_kwargs = {
-                        "claude_token": self._active_claude_token(),
-                        "claude_token_source": self._active_claude_source(),
-                        "claude_token_pool_id": self._active_claude_pool_id(),
-                        "gpt_token": self._active_gpt_token(),
-                        "gpt_account_id": self._active_gpt_account_id(),
-                        "gpt_token_source": self._active_gpt_source(),
-                        "gpt_token_pool_id": self._active_gpt_pool_id(),
-                    }
+                    extra_executor_kwargs.update(
+                        {
+                            "claude_token": self._active_claude_token(),
+                            "claude_token_source": self._active_claude_source(),
+                            "claude_token_pool_id": self._active_claude_pool_id(),
+                            "gpt_token": self._active_gpt_token(),
+                            "gpt_account_id": self._active_gpt_account_id(),
+                            "gpt_token_source": self._active_gpt_source(),
+                            "gpt_token_pool_id": self._active_gpt_pool_id(),
+                        }
+                    )
 
                 result = await executor(
                     execute_activity=workflow.execute_activity,
@@ -1539,7 +1573,10 @@ class AgentWorkflow:
             else:
                 # Legacy signature: (workflow_instance, tool_call, tool_call_id)
                 # These yield ToolEvents and call workflow_instance._handle_tool_event
-                executor_result = await executor(self, {"tool": tool_name, **tool_args}, tool_call_id)
+                tool_call_dict = {"tool": tool_name, **tool_args}
+                if tool_name == "spawn_agent":
+                    tool_call_dict["_phase"] = self.current_phase
+                executor_result = await executor(self, tool_call_dict, tool_call_id)
                 # spawn_agent returns (last_status, summary) tuple
                 if isinstance(executor_result, tuple):
                     last_status, result_text = executor_result
@@ -1734,11 +1771,26 @@ class AgentWorkflow:
             model = llm.get("model") or self.model
             provider = llm.get("provider") or model
             effective_call_site = call_site or tool_name or "unknown"
+            cache_read = llm.get("cache_read_input_tokens", 0)
+            cache_write = llm.get("cache_creation_input_tokens", 0)
 
             if isinstance(model, str) and (model.endswith("-claude") or model.endswith("-gpt")):
                 workflow.logger.info(
                     f"💰 $0 cost (direct compute token): actual_model={model}, "
                     f"in={tokens_in}, out={tokens_out}, call_site={effective_call_site}"
+                )
+                usage_items_for_db.append(
+                    {
+                        "type": "llm",
+                        "cost_cents": 0,
+                        "call_site": effective_call_site,
+                        "provider": provider,
+                        "tokens_in": tokens_in,
+                        "tokens_out": tokens_out,
+                        "model": model,
+                        "cache_read_input_tokens": cache_read,
+                        "cache_creation_input_tokens": cache_write,
+                    }
                 )
                 continue
 
@@ -1754,8 +1806,6 @@ class AgentWorkflow:
             output_rate = pricing["output_cents_per_1k"]
 
             # Apply provider-specific cache discounts if cache fields present
-            cache_read = llm.get("cache_read_input_tokens", 0)
-            cache_write = llm.get("cache_creation_input_tokens", 0)
             is_anthropic = model and ("claude" in model.lower() or model.lower().endswith("-claude"))
             cache_read_mult = 0.1 if is_anthropic else 0.25
             cache_write_mult = 1.25 if is_anthropic else 1.0
@@ -1766,22 +1816,23 @@ class AgentWorkflow:
                 + (cache_write * input_rate * cache_write_mult / 1000)
                 + (tokens_out * output_rate / 1000)
             )
+            usage_item = {
+                "type": "llm",
+                "cost_cents": cost_cents,
+                "call_site": effective_call_site,
+                "provider": provider,
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "model": model,
+                "cache_read_input_tokens": cache_read,
+                "cache_creation_input_tokens": cache_write,
+            }
             if cost_cents > 0:
                 total_cost_cents += cost_cents
                 workflow.logger.info(
                     f"💰 LLM cost: +{cost_cents:.2f}c ({provider}, in={tokens_in}, out={tokens_out}, call_site={effective_call_site})"
                 )
-                usage_items_for_db.append(
-                    {
-                        "type": "llm",
-                        "cost_cents": cost_cents,
-                        "call_site": effective_call_site,
-                        "provider": provider,
-                        "tokens_in": tokens_in,
-                        "tokens_out": tokens_out,
-                        "model": model,
-                    }
-                )
+                usage_items_for_db.append(usage_item)
 
         # Process service usage items (pre-calculated costs)
         for svc in usage.get("service", []):
@@ -1805,21 +1856,23 @@ class AgentWorkflow:
             self.own_cost_cents += total_cost_cents
             workflow.logger.info(f"💰 Total own_cost_cents: {self.own_cost_cents}c (+{total_cost_cents}c)")
 
-            # Write to ToolUsage table (if tool_name provided)
-            effective_call_site = call_site or tool_name or "unknown"
-            if tool_name and usage_items_for_db:
-                try:
-                    await workflow.execute_activity(
-                        save_tool_usage,
-                        args=[self.agent_id, self.user_id, effective_call_site, usage_items_for_db],
-                        start_to_close_timeout=timedelta(seconds=15),
-                        retry_policy=RetryPolicy(maximum_attempts=2),
-                    )
-                except Exception as e:
-                    workflow.logger.warning(f"Failed to save tool usage to DB: {e}")
-
             # Signal parent for hierarchical cost relay
             await self._update_cost_and_signal_parent()
+
+        # Write to ToolUsage table (if tool_name provided). This intentionally
+        # includes zero-cost direct-token LLM rows so cache/accounting diagnostics
+        # can see the same LLM calls that worker logs emit.
+        effective_call_site = call_site or tool_name or "unknown"
+        if tool_name and usage_items_for_db:
+            try:
+                await workflow.execute_activity(
+                    save_tool_usage,
+                    args=[self.agent_id, self.user_id, effective_call_site, usage_items_for_db],
+                    start_to_close_timeout=timedelta(seconds=15),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+            except Exception as e:
+                workflow.logger.warning(f"Failed to save tool usage to DB: {e}")
 
     async def _get_model_pricing(self, model: str) -> Optional[Dict[str, float]]:
         """Get pricing for a model, using cache or fetching if needed."""
@@ -2405,6 +2458,7 @@ class AgentWorkflow:
                     self.max_iterations,
                     self.price_limit_cents,
                     self.context_gates or None,  # Preserve context gates across pause/resume
+                    self.fast_mode_cache_enabled,  # Preserve Fast Mode cache flag
                 ]
             )
             return result
@@ -2742,6 +2796,8 @@ class AgentWorkflow:
                     self._active_gpt_pool_id(),
                     self.user_id,
                     self.agent_id,
+                    self.fast_mode_cache_enabled,
+                    0,  # Fast Mode step — one completion summary per agent
                 ],
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(maximum_attempts=3),
