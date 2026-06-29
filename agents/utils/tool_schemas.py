@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Type, Union
 
 import structlog
-from pydantic import BaseModel, Field, create_model, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, create_model, field_validator, model_validator
 
 from utils.prompts import (
     PLANNER_RESPONSE_JOIN_DESCRIPTION,
@@ -336,49 +336,79 @@ class WebFetchTool(BaseModel):
 
 
 class GrepTool(BaseModel):
-    """Search the user's local data (messages, contact network, agent network) by substring."""
+    """Search local data sources with regex grep semantics."""
 
     tool: Literal["grep"]
     pattern: str = Field(
         description=(
-            "Substring to match. Case-insensitive. Pass empty string to return all records up to limit. "
-            "Matches across any column in the database for the given data source."
+            "Regular expression pattern to search for. Plain text works as a literal regex. "
+            "Use -i for case-insensitive matching and multiline for cross-line patterns."
         ),
     )
-    source: str = Field(
-        default="messages",
-        description=(
-            "Data source to search. One of: "
-            "messages: iMessage/email records. Searches only message body text by case-insensitive substring. "
-            "Results are grouped by person/thread and include surrounding messages with channel, from, to, "
-            "timestamp, message, and is_match. Supports person_id and since. "
-            "Empty pattern returns the most recent messages within the `since` window (default 365 days). "
-            "network: Contact database. Searches firstName, lastName, email, phoneNumber, company, title, "
-            "relation, and communicationFrequency by case-insensitive substring. Results include person_id, "
-            "first_name, last_name, phone_number, email, company, title, relation, communication_frequency, "
-            "and messages_exchanged. Empty pattern returns top contacts by message volume. "
-            "agent_network_user_messages: User messages across all agents in this workflow tree. Searches "
-            "Message.text for messages with role='USER'. Results include agent_id, message_id, role, text, "
-            "timestamp, and pointer. "
-            "agent_network_tool_results: Finished tool-result messages across all agents in this workflow tree. "
-            "Searches Message.text for messages with role='TOOL' and metadata.toolStatus='FINISHED'. Results "
-            "include agent_id, message_id, role, text, timestamp, and pointer."
-        ),
-    )
-    person_id: Optional[str] = Field(
+    source: Optional[Literal["messages", "network", "agent_network"]] = Field(
         default=None,
         description=(
-            "Optional person identifier to scope search to one thread (messages source only). "
-            "Accepts email, phone, or full name."
+            "Optional source bucket. Omit to search messages, network, and the current agent_network. "
+            "messages searches user communication records. network searches contact records. "
+            "agent_network searches all message roles in the current agent tree and returns role/location metadata."
+        ),
+    )
+    before: Optional[int] = Field(
+        default=None,
+        alias="-B",
+        description="Number of logical lines to show before each match.",
+    )
+    after: Optional[int] = Field(
+        default=None,
+        alias="-A",
+        description="Number of logical lines to show after each match.",
+    )
+    context_c: Optional[int] = Field(
+        default=None,
+        alias="-C",
+        description="Number of logical lines to show before and after each match. Alias for context.",
+    )
+    context: Optional[int] = Field(
+        default=None,
+        description="Number of logical lines to show before and after each match.",
+    )
+    line_numbers: Optional[bool] = Field(
+        default=None,
+        alias="-n",
+        description="Show logical line numbers in content output. Defaults to true.",
+    )
+    case_insensitive: Optional[bool] = Field(
+        default=None,
+        alias="-i",
+        description="Enable case-insensitive regex matching.",
+    )
+    head_limit: Optional[int] = Field(
+        default=None,
+        description="Maximum number of returned result snippets. Defaults to 20.",
+    )
+    offset: Optional[int] = Field(
+        default=None,
+        description="Skip this many matched snippets before applying head_limit.",
+    )
+    multiline: Optional[bool] = Field(
+        default=None,
+        description="Allow regex patterns to match across newlines within a record.",
+    )
+    person: Optional[str] = Field(
+        default=None,
+        description=(
+            "messages source only: narrow to one contact by email, phone, or full name. "
+            "Ignored for network and agent_network."
         ),
     )
     since: Optional[str] = Field(
         default=None,
         description=(
-            "ISO 8601 timestamp cutoff; only return messages after this time (messages source only). "
-            "Defaults to 365 days ago."
+            "messages source only: only return messages at or after this time. "
+            "ISO 8601 timestamp or a relative form like 7d, 24h, 30m. Ignored for other sources."
         ),
     )
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class SendMessageToUserTool(BaseModel):

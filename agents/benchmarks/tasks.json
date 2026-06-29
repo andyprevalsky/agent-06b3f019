@@ -62,6 +62,33 @@
     ]
   },
   {
+    "name": "grep-explore-stress",
+    "title": "Grep Explore Stress",
+    "prompt": "Run a comprehensive local-data Grep validation using only explore agents.\n\nCritical execution rules:\n- Do not call send_message_to_user_execute_phase or any progress-message tool. Your first actions must be spawn_agent calls.\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn the explore agents below, wait for them, then provide one final checklist report.\n\nA deterministic benchmark fixture has been seeded into local data with these named records:\n\nMessages:\n- \"Quarterly Lighthouse Brief\" contains a regex-searchable line about the Aurora budget.\n- \"Multiline Incident Note\" contains a multiline block where START and END are on different lines.\n- \"Pagination Ledger\" contains many numbered ledger entries.\n\nNetwork:\n- \"Mara Voss\" has contact details where the match appears in company, title, relation, and communication frequency fields.\n\nAgent network:\n- This agent tree already contains seeded USER, ASSISTANT, TOOL, and SYSTEM messages about the Atlas handoff.\n\nSpawn separate explore agents with these exact assignments. Each explore agent must use grep directly and return exact evidence from the Grep tool result:\n\n1. Omitted-source coverage: call grep without source and find evidence from messages, network, and agent_network.\n2. Messages regex: source=\"messages\", regex pattern for Aurora budget evidence in \"Quarterly Lighthouse Brief\".\n3. Network regex: source=\"network\", use pattern \"Northstar Calibration Group|Principal Signal Cartographer|benchmark verification contact\" and return exact matches for all three non-name fields.\n4. Agent-network roles: source=\"agent_network\", find USER, ASSISTANT, and TOOL Atlas handoff evidence, including location metadata and role.\n5. Case-insensitive: source=\"messages\", use \"-i\": true for mixed-case evidence.\n6. Multiline: source=\"messages\", use multiline: true for a match spanning START to END in \"Multiline Incident Note\".\n7. After context: source=\"messages\", use \"-A\" to return following logical lines.\n8. Before/context: source=\"messages\", use \"-B\" plus either \"-C\" or context to return surrounding logical lines.\n9. No line numbers: source=\"messages\", use \"-n\": false and prove line numbers are suppressed.\n10. Pagination: source=\"messages\", use pattern \"Ledger entry\", head_limit: 3, and offset: 20 so the result includes exact evidence \"Ledger entry 21: offset target confirmed\".\n\nAfter all explore agents complete, synthesize a final report with PASS or FAIL for each assignment. Include source searched, grep flags used, exact matched evidence, and for agent_network matches, the message role and location metadata returned by Grep. Only mark PASS when the explore agent found exact evidence from Grep.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "tags": ["grep", "local-only"],
+    "price_limit_cents": 250,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "min_tool_counts": {
+      "spawn_agent": 8,
+      "grep": 12
+    },
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_browser_agent",
+      "spawn_claude_code_agent",
+      "message_person",
+      "send_message_to_user_execute_phase"
+    ]
+  },
+  {
     "name": "message-person",
     "title": "Send Email + iMessage",
     "prompt": "Send a friendly hello message to the phone number 972-977-7432 via both email and iMessage. The email should go to test@example.com. Keep both messages short and friendly.",

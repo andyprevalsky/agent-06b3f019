@@ -1140,6 +1140,12 @@
 {"task": "spawn-sub-agents", "duration_seconds": 146.2, "cost_cents": 2.0, "timestamp": "2026-06-25T22:46:31.286498+00:00", "agent_id": "9832d6bf-b8e2-4d36-bafd-ae59ffe0ada5"}
 {"task": "parallel-tool-calls", "duration_seconds": 181.4, "cost_cents": 8.0, "timestamp": "2026-06-25T22:46:31.286498+00:00", "agent_id": "cb605bf5-5f7d-4673-ad10-24d17c5e6f13"}
 {"task": "browser-biometrics-webdecoy", "duration_seconds": 291.8, "cost_cents": 6.0, "timestamp": "2026-06-25T22:46:31.286498+00:00", "agent_id": "6bd6066a-36a5-43fc-a467-282cb8e40847"}
+{"task": "chat-mode", "duration_seconds": 5.4, "cost_cents": 0.0, "timestamp": "2026-06-29T21:18:43.335602+00:00", "agent_id": "f33e0360-bcde-42b6-8024-607c1a65dae1"}
+{"task": "claude-code-agent", "duration_seconds": 56.2, "cost_cents": 0.0, "timestamp": "2026-06-29T21:18:43.335602+00:00", "agent_id": "8b7db0f8-3b3b-47d0-8c57-35f33bed3e7c"}
+{"task": "browser-smoke", "duration_seconds": 85.7, "cost_cents": 1.0, "timestamp": "2026-06-29T21:18:43.335602+00:00", "agent_id": "a0d8b3d5-9790-4922-9186-d619ebbb4da2"}
+{"task": "spawn-sub-agents", "duration_seconds": 146.0, "cost_cents": 2.0, "timestamp": "2026-06-29T21:18:43.335602+00:00", "agent_id": "20944636-0d1f-4382-932f-9c07bb3f3ad2"}
+{"task": "parallel-tool-calls", "duration_seconds": 301.8, "cost_cents": 7.0, "timestamp": "2026-06-29T21:18:43.335602+00:00", "agent_id": "d5481a8b-366e-44b1-b77a-87b51532feed"}
+{"task": "browser-biometrics-webdecoy", "duration_seconds": 723.4, "cost_cents": 17.0, "timestamp": "2026-06-29T21:18:43.335602+00:00", "agent_id": "385b0d33-c706-4ac9-b715-1b4d4f5f55e9"}
 {"task": "browser-agent-amazon-cookie-payment", "duration_seconds": 267.6, "cost_cents": 0.0, "timestamp": "2026-06-26T02:35:16.558343+00:00", "agent_id": "86b3a546-2e8e-41e6-ac0e-76e57f641b89"}
 {"task": "browser-agent-amazon-cookie-payment", "duration_seconds": 529.1, "cost_cents": 0.0, "timestamp": "2026-06-26T03:28:56.153382+00:00", "agent_id": "c74bfef8-4025-4802-85e4-03b8467293ff"}
 {"task": "browser-agent-amazon-cookie-payment", "duration_seconds": 293.1, "cost_cents": 0.0, "timestamp": "2026-06-26T16:07:19.863954+00:00", "agent_id": "cdadc492-e2b5-4855-bc5e-49d01e02c22a"}

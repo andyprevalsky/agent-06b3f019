@@ -41,7 +41,7 @@ import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 import httpx
@@ -110,6 +110,8 @@ MINTED_AGENT_ACCOUNT_TASK_NAMES = {
     MINTED_AGENT_ACCOUNT_X_TASK_NAME,
 }
 MINTED_AGENT_ACCOUNT_X_POST_GOAL = "Make a post on X.com that says, Hello World"
+GREP_EXPLORE_STRESS_TASK_NAME = "grep-explore-stress"
+GREP_BASE_SNAPSHOT_ENV = "BENCHMARK_GREP_BASE_SNAPSHOT"
 MINTED_AGENT_ACCOUNT_X_AUTH_HINT = (
     "If X asks you to sign in or create an account first, use the minted email in auth options "
     "when an email address is accepted. Click controls like 'Use email instead' when they are available. "
@@ -1243,6 +1245,9 @@ def evaluate_task(
         if not passed:
             return False, reason
 
+    if task.name == GREP_EXPLORE_STRESS_TASK_NAME:
+        return True, None
+
     # Check approval expectations
     if task.approval_handling in ("auto_approve", "prompt_user") and approvals_triggered == 0:
         if task.name == f"{MINTED_AGENT_ACCOUNT_X_TASK_NAME}-post" and _x_signup_has_terminal_phone_blocker(
@@ -1448,6 +1453,218 @@ def _sql_literal(value: str) -> str:
 def _is_local_base_url(base_url: str) -> bool:
     parsed = urlparse(base_url if base_url.startswith(("http://", "https://")) else f"http://{base_url}")
     return (parsed.hostname or "").lower() in {"localhost", "127.0.0.1"}
+
+
+def _grep_base_snapshot_path() -> Path:
+    configured = os.environ.get(GREP_BASE_SNAPSHOT_ENV, "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return REPO_ROOT / ".context" / "benchmarks" / "grep-base-snapshot.sql"
+
+
+def _run_local_db_process(args: List[str], *, stdin_path: Optional[Path] = None, timeout: int = 120) -> str:
+    container = _local_victoria_db_container()
+    if container:
+        command = ["docker", "exec"]
+        if stdin_path:
+            command.append("-i")
+        command.extend([container, *args])
+    else:
+        command = args
+
+    stdin_handle = stdin_path.open("rb") if stdin_path else None
+    try:
+        result = subprocess.run(
+            command,
+            stdin=stdin_handle,
+            capture_output=True,
+            text=False,
+            timeout=timeout,
+        )
+    finally:
+        if stdin_handle:
+            stdin_handle.close()
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"Local DB command failed: {stderr}")
+    return result.stdout.decode("utf-8", errors="replace")
+
+
+def _ensure_grep_frozen_base_snapshot() -> Path:
+    path = _grep_base_snapshot_path()
+    if path.exists() and path.stat().st_size > 0:
+        return path
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    container = _local_victoria_db_container()
+    if container:
+        args = ["pg_dump", "-U", "postgres", "-d", "victoria", "--clean", "--if-exists", "--no-owner", "--no-privileges"]
+    else:
+        database_url = _local_victoria_database_url()
+        if not database_url:
+            raise RuntimeError("Cannot create frozen grep benchmark DB snapshot: local Victoria DB not found")
+        args = ["pg_dump", database_url, "--clean", "--if-exists", "--no-owner", "--no-privileges"]
+
+    dump = _run_local_db_process(args, timeout=180)
+    path.write_text(dump)
+    print(f"    🧊 Created frozen grep DB snapshot: {path}")
+    return path
+
+
+def _restore_grep_frozen_base_snapshot() -> None:
+    snapshot = _ensure_grep_frozen_base_snapshot()
+    container = _local_victoria_db_container()
+    if container:
+        args = ["psql", "-U", "postgres", "-d", "victoria", "-v", "ON_ERROR_STOP=1"]
+    else:
+        database_url = _local_victoria_database_url()
+        if not database_url:
+            raise RuntimeError("Cannot restore frozen grep benchmark DB snapshot: local Victoria DB not found")
+        args = ["psql", database_url, "-v", "ON_ERROR_STOP=1"]
+    _run_local_db_process(args, stdin_path=snapshot, timeout=180)
+    print(f"    🧊 Restored frozen grep DB snapshot: {snapshot}")
+
+
+def _grep_fixture_env() -> dict:
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        raise RuntimeError("Local Victoria DB connection not found for grep benchmark fixture")
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["BENCHMARK_USER_ID"] = USER_ID
+    return env
+
+
+def _run_grep_fixture(action: str, *args: str) -> dict:
+    result = subprocess.run(
+        ["npx", "tsx", "scripts/grep-benchmark-fixture.ts", action, *args],
+        cwd=REPO_ROOT / "back-end",
+        env=_grep_fixture_env(),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"grep benchmark fixture {action} failed: {result.stderr.strip()}")
+    stdout = result.stdout.strip()
+    return json.loads(stdout) if stdout else {}
+
+
+def _message_text(message: dict) -> str:
+    return str(message.get("text") or message.get("message") or message.get("content") or "")
+
+
+def _tool_messages(messages: List[dict], tool_name: str) -> List[dict]:
+    rows = []
+    for message in messages:
+        meta = message.get("metadata") or {}
+        if meta.get("toolName") == tool_name and meta.get("toolStatus") == "FINISHED":
+            rows.append(message)
+    return rows
+
+
+async def _grep_explore_stress_tree_messages(base_url: str, root_agent_id: str) -> List[dict]:
+    agents = await get_agent_tree(base_url, root_agent_id)
+    agent_ids = [a.get("agent_id") for a in agents if a.get("agent_id")] or [root_agent_id]
+    messages: List[dict] = []
+    for agent_id in agent_ids:
+        try:
+            data = await get_agent(base_url, str(agent_id))
+        except Exception:
+            continue
+        messages.extend(data.get("messages", []))
+    return messages
+
+
+def _near(text: str, left: str, right: str, window: int = 600) -> bool:
+    for match in re.finditer(re.escape(left), text):
+        start = max(0, match.start() - window)
+        end = min(len(text), match.end() + window)
+        if right in text[start:end]:
+            return True
+    return False
+
+
+async def evaluate_grep_explore_stress(
+    base_url: str,
+    root_agent_id: str,
+    manifest: dict,
+) -> Tuple[bool, Optional[str]]:
+    messages = await _grep_explore_stress_tree_messages(base_url, root_agent_id)
+    grep_messages = _tool_messages(messages, "grep")
+    grep_text = "\n".join(_message_text(message) for message in grep_messages)
+    grep_text_lower = grep_text.lower()
+
+    if len(grep_messages) < 12:
+        return False, f"Expected at least 12 completed Grep calls, found {len(grep_messages)}"
+
+    forbidden_key_patterns = [
+        ("person_id", r'(^|\n)- \*\*person_id\*\*:|"person_id"\s*:'),
+        ("since", r'(^|\n)- \*\*since\*\*:|"since"\s*:'),
+        ("limit", r'(^|\n)- \*\*limit\*\*:|"limit"\s*:'),
+        ("output_mode", r'(^|\n)- \*\*output_mode\*\*:|"output_mode"\s*:'),
+        ("search_in", r'(^|\n)- \*\*search_in\*\*:|"search_in"\s*:'),
+        ("tool_name", r'(^|\n)- \*\*tool_name\*\*:|"tool_name"\s*:'),
+        ("tool_status", r'(^|\n)- \*\*tool_status\*\*:|"tool_status"\s*:'),
+    ]
+    for label, pattern in forbidden_key_patterns:
+        if re.search(pattern, grep_text_lower):
+            return False, f"Unsupported Grep parameter appeared in transcript: {label}"
+
+    forbidden_sources = ["agent_network_user_messages", "agent_network_tool_results"]
+    for source in forbidden_sources:
+        if source in grep_text_lower:
+            return False, f"Unsupported Grep source appeared in transcript: {source}"
+
+    required_tokens = [
+        "source: messages",
+        "source: network",
+        "source: agent_network",
+        "-i",
+        "multiline",
+        "-a",
+        "-b",
+        "context",
+        "-n",
+        "head_limit",
+        "offset",
+    ]
+    missing = [token for token in required_tokens if token not in grep_text_lower]
+    if missing:
+        return False, "Missing required Grep flag/source coverage: " + ", ".join(missing)
+
+    expected_evidence = [
+        manifest["messages"]["regex"],
+        manifest["messages"]["multiline_start"],
+        manifest["messages"]["multiline_end"],
+        manifest["messages"]["after_context"],
+        manifest["messages"]["before_context"],
+        manifest["messages"]["pagination"],
+        manifest["messages"]["mixed_case"],
+        manifest["network"]["company"],
+        manifest["network"]["title"],
+        manifest["network"]["relation"],
+        manifest["agent_network"]["user"],
+        manifest["agent_network"]["assistant"],
+    ]
+    missing_evidence = [value for value in expected_evidence if value not in grep_text]
+    if missing_evidence:
+        return False, "Missing exact overlay evidence in Grep results: " + "; ".join(missing_evidence)
+
+    for role in ["USER", "ASSISTANT", "TOOL"]:
+        if not _near(grep_text, "role", role):
+            return False, f"agent_network match metadata did not include role {role}"
+
+    if "1:" in grep_text and "-n: false" in grep_text_lower:
+        no_number_blocks = [
+            _message_text(message)
+            for message in grep_messages
+            if "-n: false" in _message_text(message).lower()
+        ]
+        if any(re.search(r"^\d+:", block, re.MULTILINE) for block in no_number_blocks):
+            return False, "-n:false Grep result still included line numbers"
+
+    return True, None
 
 
 def _skip_cookie_bundle_bootstrap() -> bool:
@@ -2839,6 +3056,14 @@ async def run_single_task(
                 )
             print(f"    🍪 Ensured {bundle_count} active local CookieBundle row(s) for {auth_realm}")
 
+    grep_fixture_manifest: Optional[dict] = None
+    if task.name == GREP_EXPLORE_STRESS_TASK_NAME:
+        if not _is_local_base_url(base_url):
+            raise RuntimeError("grep-explore-stress must run against the local benchmark stack")
+        _restore_grep_frozen_base_snapshot()
+        grep_fixture_manifest = _run_grep_fixture("apply")
+        print("    🔎 Applied deterministic grep benchmark overlay")
+
     resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
     print(f"\n  {'=' * 50}")
     print(f"  📋 {task.name}: {task.title}")
@@ -2934,6 +3159,9 @@ async def run_single_task(
         else:
             agent_id = await create_agent(base_url, task)
             print(f"    Agent created: {agent_id[:12]}...")
+            if task.name == GREP_EXPLORE_STRESS_TASK_NAME:
+                grep_fixture_manifest = _run_grep_fixture("apply-agent-network", agent_id)
+                print("    🔎 Attached seeded agent_network branch")
             await start_realtime_capture()
             await start_realtime_monitor()
 
@@ -2980,6 +3208,15 @@ async def run_single_task(
                 approvals_triggered,
                 approvals_resolved,
             )
+        if task.name == GREP_EXPLORE_STRESS_TASK_NAME:
+            grep_passed, grep_reason = await evaluate_grep_explore_stress(
+                base_url,
+                agent_id,
+                grep_fixture_manifest or {},
+            )
+            if not grep_passed:
+                passed = False
+                failure_reason = grep_reason
 
         # Tree agent count check — counts spawn_agent-type sub-agents only
         # (excludes root and explore agents; explore agents have no output_schema)

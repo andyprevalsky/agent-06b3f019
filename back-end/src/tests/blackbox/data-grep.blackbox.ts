@@ -1,721 +1,477 @@
 #!/usr/bin/env tsx
 /* eslint-disable no-console */
 /**
- * Black-box tests for /api/data — deep grep coverage
- *
- * Covers: default source resolution, no-matches diagnostics, limit/since boundaries,
- * person_id resolution (email/phone/name), explicit source routing, unicode patterns,
- * API-key + body user_id, parallel summary consistency, fresh-user date-range shape.
- *
- * Usage:
- *   npx tsx src/tests/blackbox/data-grep.blackbox.ts
+ * Black-box tests for the DB-backed Grep contract.
  */
 
+import { randomUUID } from 'crypto';
 import { config } from 'dotenv';
 import { z } from 'zod';
+import { prisma } from '../../providers/database';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
 const API_KEY = process.env.BACKEND_API_KEY || '';
-const CASE_CONCURRENCY = Number(
-  process.env.BLACKBOX_TEST_CASE_CONCURRENCY ?? process.env.CONTRACT_TEST_CASE_CONCURRENCY ?? 30
-);
 
-// ==================== RESPONSE SCHEMAS ====================
+const GrepMatch = z.object({
+  source: z.enum(['messages', 'network', 'agent_network']),
+  path: z.string(),
+  pointer: z.string(),
+  timestamp: z.string(),
+  role: z.enum(['SYSTEM', 'ASSISTANT', 'USER', 'TOOL']).optional(),
+  location: z.object({
+    source: z.enum(['messages', 'network', 'agent_network']),
+    path: z.string(),
+    agent_id: z.string().optional(),
+    message_id: z.string().optional(),
+    role: z.enum(['SYSTEM', 'ASSISTANT', 'USER', 'TOOL']).optional(),
+    thread: z.string().optional(),
+    contact_id: z.string().optional(),
+    field: z.string().optional(),
+  }),
+  content: z.string(),
+});
 
 const GrepResponse = z.object({
-  matches: z.array(
-    z.object({
-      thread: z.string(),
-      person: z.object({
-        firstName: z.string().nullable(),
-        lastName: z.string().nullable(),
-        phoneNumber: z.string().nullable(),
-        email: z.string().nullable(),
-      }),
-      messages: z.array(
-        z.object({
-          channel: z.string(),
-          from: z.string(),
-          to: z.string(),
-          timestamp: z.string(),
-          message: z.string(),
-          is_match: z.boolean(),
-        })
-      ),
-    })
-  ),
+  matches: z.array(GrepMatch),
   total_matches: z.number(),
   truncated: z.boolean(),
-  pattern: z.string().optional(),
-  source: z.string().optional(),
-  since: z.string().optional(),
-  message: z.string().optional(),
-  truncation_message: z.string().optional(),
-});
-
-const NetworkGrepResponse = z.object({
-  matches: z.array(
-    z.object({
-      person_id: z.string(),
-      first_name: z.string().nullable(),
-      last_name: z.string().nullable(),
-      phone_number: z.string().nullable(),
-      email: z.string().nullable(),
-      company: z.string().nullable(),
-      title: z.string().nullable(),
-      relation: z.string().nullable(),
-      communication_frequency: z.string().nullable(),
-      messages_exchanged: z.number().nullable(),
-    })
-  ),
-  total_matches: z.number(),
-  truncated: z.boolean(),
+  pattern: z.string(),
+  sources: z.array(z.enum(['messages', 'network', 'agent_network'])),
+  applied_limit: z.number(),
+  applied_offset: z.number(),
   message: z.string().optional(),
 });
 
-const SummaryResponse = z.object({
-  sources: z.object({
-    messages: z.object({
-      total_threads: z.number(),
-      total_messages: z.number(),
-      channels: z.record(z.number()),
-      date_range: z.object({
-        from: z.string().nullable(),
-        to: z.string().nullable(),
-      }),
-      threads: z.array(
-        z.object({
-          name: z.string(),
-          message_count: z.number(),
-          last_message: z.string(),
-        })
-      ),
-    }),
-  }),
-});
+type GrepBody = z.infer<typeof GrepResponse>;
 
-// ==================== TEST INFRASTRUCTURE ====================
-
-interface TestResult {
-  name: string;
-  passed: boolean;
-  error?: string;
-  duration: number;
+function apiHeaders(userId: string): Record<string, string> {
+  return {
+    'Content-Type': 'application/json',
+    'X-API-Key': API_KEY,
+    'X-User-Id': userId,
+  };
 }
 
-interface TestContext {
-  accessToken?: string;
-  userId?: string;
-}
-
-const ctx: TestContext = {};
-
-async function request(
-  url: string,
-  options: RequestInit = {}
-): Promise<{ status: number; data: unknown; headers: Headers }> {
-  const response = await fetch(url, {
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...options.headers },
+async function requestGrep(userId: string, body: Record<string, unknown>) {
+  const response = await fetch(`${BASE_URL}/api/data/grep`, {
+    method: 'POST',
+    headers: apiHeaders(userId),
+    body: JSON.stringify(body),
   });
-  let data: unknown;
-  const ct = response.headers.get('content-type');
-  if (ct?.includes('application/json')) {
-    data = await response.json();
-  } else {
-    data = await response.text();
-  }
-  return { status: response.status, data, headers: response.headers };
-}
-
-function authHeaders(token: string): Record<string, string> {
-  return { Authorization: `Bearer ${token}` };
-}
-
-function apiKeyHeaders(): Record<string, string> {
-  return { 'X-API-Key': API_KEY };
-}
-
-async function runTest(name: string, fn: () => Promise<void>): Promise<TestResult> {
-  const start = Date.now();
-  try {
-    await fn();
-    return { name, passed: true, duration: Date.now() - start };
-  } catch (error) {
-    return {
-      name,
-      passed: false,
-      error: error instanceof Error ? error.message : String(error),
-      duration: Date.now() - start,
-    };
-  }
+  const data = await response.json();
+  return { status: response.status, data };
 }
 
 function assertStatus(actual: number, expected: number, data: unknown): void {
   if (actual !== expected) {
-    throw new Error(
-      `Expected status ${expected}, got ${actual}: ${JSON.stringify(data).substring(0, 300)}`
-    );
+    throw new Error(`Expected HTTP ${expected}, got ${actual}: ${JSON.stringify(data)}`);
   }
 }
 
-function assertSchema<T>(schema: z.ZodType<T>, data: unknown, label: string): T {
-  const result = schema.safeParse(data);
-  if (!result.success) {
-    throw new Error(`${label} schema validation failed: ${result.error.message}`);
-  }
-  return result.data;
+function assertBody(data: unknown): GrepBody {
+  return GrepResponse.parse(data);
 }
 
-async function runPool(
-  tests: { name: string; fn: () => Promise<void> }[],
-  concurrency: number
-): Promise<TestResult[]> {
-  const results: TestResult[] = new Array(tests.length);
-  let nextIndex = 0;
-  async function worker(): Promise<void> {
-    while (true) {
-      const idx = nextIndex++;
-      if (idx >= tests.length) return;
-      results[idx] = await runTest(tests[idx].name, tests[idx].fn);
-    }
+function requireContent(body: GrepBody, expected: string): void {
+  if (!body.matches.some((match) => match.content.includes(expected))) {
+    throw new Error(`Expected grep result containing ${expected}, got ${JSON.stringify(body)}`);
   }
-  const workerCount = Math.min(concurrency, tests.length);
-  await Promise.all(Array.from({ length: workerCount }, () => worker()));
-  return results;
 }
 
-// ==================== SETUP ====================
-
-async function setup(): Promise<void> {
-  const res = await request(`${BASE_URL}/api/auth/anonymous`, { method: 'POST' });
-  if (res.status !== 200) {
-    throw new Error(
-      `Setup failed: expected status 200, got ${res.status}: ${JSON.stringify(res.data).substring(0, 300)}`
-    );
-  }
-  const d = res.data as { session: { access_token: string }; user: { id: string } };
-  ctx.accessToken = d.session.access_token;
-  ctx.userId = d.user.id;
-}
-
-// ==================== DEEP COVERAGE TESTS ====================
-
-// --- grep: exercises default source resolution (messages) ---
-
-async function testGrep_defaultSourceMessages() {
-  // Omit source entirely → should default to 'messages'
-  const res = await request(`${BASE_URL}/api/data/grep`, {
-    method: 'POST',
-    headers: authHeaders(ctx.accessToken!),
-    body: JSON.stringify({ pattern: 'hello', limit: 5 }),
-  });
-  assertStatus(res.status, 200, res.data);
-  const body = assertSchema(GrepResponse, res.data, 'POST /grep (default source)');
-  // For fresh user, should return 0 matches with source=messages
-  if (body.source) {
-    if (body.source !== 'messages') {
-      throw new Error(`Expected default source=messages, got ${body.source}`);
+function forbidLineNumbers(body: GrepBody): void {
+  for (const match of body.matches) {
+    if (/^\d+:/m.test(match.content)) {
+      throw new Error(`Expected no line numbers, got ${match.content}`);
     }
   }
 }
 
-// --- grep: exercises no-matches path with thread/message counts ---
+async function cleanup(userId: string): Promise<void> {
+  await prisma.agent.deleteMany({ where: { userId } });
+  await prisma.person.deleteMany({ where: { userId } });
+  await prisma.user.deleteMany({ where: { userId } });
+}
 
-async function testGrep_noMatchesDiagnosticCounts() {
-  const res = await request(`${BASE_URL}/api/data/grep`, {
-    method: 'POST',
-    headers: authHeaders(ctx.accessToken!),
-    body: JSON.stringify({ pattern: 'zzz_unique_nonexistent_pattern_xyz' }),
+async function seedFixture() {
+  const userId = `grep-contract-${randomUUID()}`;
+  await cleanup(userId);
+  await prisma.user.create({ data: { userId, isAnonymous: true } });
+
+  const lighthouse = await prisma.person.create({
+    data: {
+      userId,
+      firstName: 'Lighthouse',
+      lastName: 'Archive',
+      email: `lighthouse-${randomUUID()}@grep-benchmark.local`,
+      messagesExchanged: 40,
+    },
   });
-  assertStatus(res.status, 200, res.data);
-  const body = assertSchema(GrepResponse, res.data, 'POST /grep (diagnostic counts)');
-  if (body.total_matches !== 0) {
-    throw new Error(`Expected 0 total_matches, got ${body.total_matches}`);
+  await prisma.messageRecord.createMany({
+    data: [
+      {
+        personId: lighthouse.id,
+        channel: 'EMAIL',
+        from: 'lighthouse@example.com',
+        to: 'benchmark@example.com',
+        timestamp: new Date('2026-01-01T10:00:00Z'),
+        externalId: `quarterly-${randomUUID()}`,
+        message: [
+          'Before-context evidence: finance owner noted',
+          'Aurora budget: phase-17 approved',
+          'After-context evidence: forecast packet delivered',
+        ].join('\n'),
+      },
+      {
+        personId: lighthouse.id,
+        channel: 'EMAIL',
+        from: 'lighthouse@example.com',
+        to: 'benchmark@example.com',
+        timestamp: new Date('2026-01-02T10:00:00Z'),
+        externalId: `multiline-${randomUUID()}`,
+        message: [
+          'Multiline incident START',
+          'requires cross-line search',
+          'incident END',
+          'MiXeDcAsE Beacon',
+        ].join('\n'),
+      },
+      ...Array.from({ length: 30 }, (_, idx) => ({
+        personId: lighthouse.id,
+        channel: 'EMAIL' as const,
+        from: 'ledger@example.com',
+        to: 'benchmark@example.com',
+        timestamp: new Date(`2026-01-03T10:${String(idx).padStart(2, '0')}:00Z`),
+        externalId: `ledger-${idx + 1}-${randomUUID()}`,
+        message: `Ledger entry ${idx + 1}: ${idx + 1 === 21 ? 'offset target confirmed' : 'ordinary ledger row'}`,
+      })),
+    ],
+  });
+
+  await prisma.person.create({
+    data: {
+      userId,
+      firstName: 'Mara',
+      lastName: 'Voss',
+      email: `mara-${randomUUID()}@grep-benchmark.local`,
+      company: 'Northstar Calibration Group',
+      title: 'Principal Signal Cartographer',
+      relation: 'benchmark verification contact',
+      communicationFrequency: 'quarterly lighthouse cadence',
+      messagesExchanged: 90,
+    },
+  });
+
+  const root = await prisma.agent.create({
+    data: {
+      userId,
+      goal: 'grep contract root',
+      status: 'COMPLETED',
+      depth: 0,
+    },
+  });
+  const child = await prisma.agent.create({
+    data: {
+      userId,
+      goal: 'grep contract child',
+      status: 'COMPLETED',
+      parentAgentId: root.id,
+      depth: 1,
+    },
+  });
+  await prisma.message.createMany({
+    data: [
+      {
+        agentId: root.id,
+        role: 'USER',
+        text: 'Atlas handoff was confirmed by the user.',
+        metadata: { benchmark: 'grep', roleCase: 'user' },
+        createdAt: new Date('2026-01-04T10:00:00Z'),
+      },
+      {
+        agentId: child.id,
+        role: 'ASSISTANT',
+        text: 'Atlas handoff confirmed in assistant response.',
+        metadata: { benchmark: 'grep', roleCase: 'assistant' },
+        createdAt: new Date('2026-01-04T10:01:00Z'),
+      },
+      {
+        agentId: child.id,
+        role: 'TOOL',
+        text: 'Grep tool returned Atlas handoff tool evidence.',
+        metadata: { benchmark: 'grep', roleCase: 'tool', toolStatus: 'FINISHED' },
+        createdAt: new Date('2026-01-04T10:02:00Z'),
+      },
+      {
+        agentId: child.id,
+        role: 'SYSTEM',
+        text: 'Atlas handoff system breadcrumb.',
+        metadata: { benchmark: 'grep', roleCase: 'system' },
+        createdAt: new Date('2026-01-04T10:03:00Z'),
+      },
+    ],
+  });
+
+  return { userId, agentId: child.id };
+}
+
+async function testSchemaAndRemovedParams(userId: string): Promise<void> {
+  for (const param of [
+    'path',
+    'glob',
+    'type',
+    'output_mode',
+    'person_id',
+    'limit',
+    'roles',
+    'search_in',
+    'tool_name',
+    'tool_status',
+  ]) {
+    const res = await requestGrep(userId, { pattern: 'x', [param]: 'bad' });
+    assertStatus(res.status, 400, res.data);
+    if ((res.data as { error?: string }).error !== 'INVALID_GREP_PARAM') {
+      throw new Error(`Expected INVALID_GREP_PARAM for ${param}, got ${JSON.stringify(res.data)}`);
+    }
   }
-  // Verify the message includes thread/message count information
-  if (!body.message) {
-    throw new Error('Expected diagnostic message in no-matches response');
-  }
-  if (!body.message.includes('messages') || !body.message.includes('threads')) {
-    throw new Error(
-      `Expected message to contain 'messages' and 'threads' counts, got: ${body.message}`
-    );
+
+  for (const source of ['agent_network_user_messages', 'agent_network_tool_results']) {
+    const res = await requestGrep(userId, { pattern: 'x', source });
+    assertStatus(res.status, 400, res.data);
+    if ((res.data as { error?: string }).error !== 'SOURCE_NOT_FOUND') {
+      throw new Error(`Expected SOURCE_NOT_FOUND for ${source}, got ${JSON.stringify(res.data)}`);
+    }
   }
 }
 
-// --- grep: exercises default since (last N days) ---
-
-async function testGrep_defaultSincePeriod() {
-  // When since is omitted, uses default (last DEFAULT_SINCE_DAYS days)
-  const res = await request(`${BASE_URL}/api/data/grep`, {
-    method: 'POST',
-    headers: authHeaders(ctx.accessToken!),
-    body: JSON.stringify({ pattern: '' }),
+async function testAllSources(userId: string, agentId: string): Promise<void> {
+  const res = await requestGrep(userId, {
+    pattern: 'Aurora|Northstar|Atlas',
+    agent_id: agentId,
+    head_limit: 20,
   });
   assertStatus(res.status, 200, res.data);
-  const body = assertSchema(GrepResponse, res.data, 'POST /grep (default since)');
-  // Check that since is set to a recent date (within last year)
-  if (body.since) {
-    const sinceDate = new Date(body.since);
-    const now = new Date();
-    const diffDays = (now.getTime() - sinceDate.getTime()) / (1000 * 60 * 60 * 24);
-    if (diffDays < 0 || diffDays > 400) {
+  const body = assertBody(res.data);
+  if (body.sources.join(',') !== 'messages,network,agent_network') {
+    throw new Error(`Expected all sources, got ${body.sources.join(',')}`);
+  }
+  for (const source of ['messages', 'network', 'agent_network'] as const) {
+    if (!body.matches.some((match) => match.source === source)) {
+      throw new Error(`Expected omitted source search to include ${source}`);
+    }
+  }
+}
+
+async function testRegexAndSources(userId: string, agentId: string): Promise<void> {
+  let res = await requestGrep(userId, { pattern: 'phase-[0-9]+ approved', source: 'messages' });
+  assertStatus(res.status, 200, res.data);
+  requireContent(assertBody(res.data), 'phase-17 approved');
+
+  res = await requestGrep(userId, { pattern: 'Signal Cartographer', source: 'network' });
+  assertStatus(res.status, 200, res.data);
+  requireContent(assertBody(res.data), 'Principal Signal Cartographer');
+
+  res = await requestGrep(userId, {
+    pattern: 'Atlas handoff',
+    source: 'agent_network',
+    agent_id: agentId,
+  });
+  assertStatus(res.status, 200, res.data);
+  const body = assertBody(res.data);
+  for (const role of ['USER', 'ASSISTANT', 'TOOL', 'SYSTEM'] as const) {
+    if (!body.matches.some((match) => match.role === role && match.location.role === role)) {
       throw new Error(
-        `Expected default since within ~365 days, got ${diffDays.toFixed(0)} days ago`
+        `Expected agent_network result with role ${role}, got ${JSON.stringify(body)}`
       );
     }
   }
 }
 
-// --- grep: exercises no-matches message with explicit since label ---
-
-async function testGrep_noMatchesExplicitSinceLabel() {
-  const sinceDate = '2025-03-15T00:00:00Z';
-  const res = await request(`${BASE_URL}/api/data/grep`, {
-    method: 'POST',
-    headers: authHeaders(ctx.accessToken!),
-    body: JSON.stringify({ pattern: 'totally_unique_nomatch_zzz', since: sinceDate }),
+async function testFlags(userId: string): Promise<void> {
+  let res = await requestGrep(userId, {
+    pattern: 'mixedcase beacon',
+    source: 'messages',
+    '-i': true,
   });
   assertStatus(res.status, 200, res.data);
-  const body = assertSchema(GrepResponse, res.data, 'POST /grep (explicit since label)');
-  if (!body.message) {
-    throw new Error('Expected message in no-matches response');
-  }
-  // The message should include "since <date>" when explicit since is provided
-  if (!body.message.includes('since')) {
-    throw new Error(`Expected message to contain 'since', got: ${body.message}`);
+  requireContent(assertBody(res.data), 'MiXeDcAsE Beacon');
+
+  res = await requestGrep(userId, {
+    pattern: 'Multiline incident START.*incident END',
+    source: 'messages',
+    multiline: true,
+  });
+  assertStatus(res.status, 200, res.data);
+  const multiline = assertBody(res.data);
+  requireContent(multiline, 'Multiline incident START');
+  requireContent(multiline, 'incident END');
+
+  res = await requestGrep(userId, {
+    pattern: 'Aurora budget',
+    source: 'messages',
+    '-A': 1,
+  });
+  assertStatus(res.status, 200, res.data);
+  requireContent(assertBody(res.data), 'After-context evidence');
+
+  res = await requestGrep(userId, {
+    pattern: 'Aurora budget',
+    source: 'messages',
+    '-B': 1,
+  });
+  assertStatus(res.status, 200, res.data);
+  requireContent(assertBody(res.data), 'Before-context evidence');
+
+  res = await requestGrep(userId, {
+    pattern: 'Aurora budget',
+    source: 'messages',
+    context: 1,
+  });
+  assertStatus(res.status, 200, res.data);
+  const context = assertBody(res.data);
+  requireContent(context, 'Before-context evidence');
+  requireContent(context, 'After-context evidence');
+
+  res = await requestGrep(userId, {
+    pattern: 'Aurora budget',
+    source: 'messages',
+    '-n': false,
+  });
+  assertStatus(res.status, 200, res.data);
+  forbidLineNumbers(assertBody(res.data));
+
+  res = await requestGrep(userId, {
+    pattern: 'Ledger entry',
+    source: 'messages',
+    head_limit: 5,
+    offset: 20,
+  });
+  assertStatus(res.status, 200, res.data);
+  const paged = assertBody(res.data);
+  requireContent(paged, 'Ledger entry 10');
+  if (paged.applied_limit !== 5 || paged.applied_offset !== 20) {
+    throw new Error(`Expected pagination metadata, got ${JSON.stringify(paged)}`);
   }
 }
 
-// --- grep: exercises default since label (last N days) in no-matches ---
-
-async function testGrep_noMatchesDefaultSinceLabel() {
-  const res = await request(`${BASE_URL}/api/data/grep`, {
-    method: 'POST',
-    headers: authHeaders(ctx.accessToken!),
-    body: JSON.stringify({ pattern: 'unique_nomatch_def_since_qqq' }),
-  });
-  assertStatus(res.status, 200, res.data);
-  const body = assertSchema(GrepResponse, res.data, 'POST /grep (default since label)');
-  if (!body.message) {
-    throw new Error('Expected message in no-matches response');
-  }
-  // The message should include "last N days" when no since param is provided
-  if (!body.message.includes('last')) {
-    throw new Error(
-      `Expected message to contain 'last' for default since period, got: ${body.message}`
-    );
-  }
-}
-
-// --- grep: limit boundary at MAX_RESULTS ---
-
-async function testGrep_limitAtMax() {
-  // Very large limit should be clamped to MAX_RESULTS
-  const res = await request(`${BASE_URL}/api/data/grep`, {
-    method: 'POST',
-    headers: authHeaders(ctx.accessToken!),
-    body: JSON.stringify({ pattern: '', limit: 100000 }),
-  });
-  assertStatus(res.status, 200, res.data);
-  assertSchema(GrepResponse, res.data, 'POST /grep (limit at max)');
-}
-
-// --- grep: since as recent timestamp ---
-
-async function testGrep_sinceRecentTimestamp() {
-  // Exercises cutoff time from recent since param
-  const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-  const res = await request(`${BASE_URL}/api/data/grep`, {
-    method: 'POST',
-    headers: authHeaders(ctx.accessToken!),
-    body: JSON.stringify({ pattern: '', since: fiveMinutesAgo }),
-  });
-  assertStatus(res.status, 200, res.data);
-  assertSchema(GrepResponse, res.data, 'POST /grep (recent since)');
-}
-
-// --- grep: exercises person_id resolution by email ---
-
-async function testGrep_personByEmailNotFound() {
-  const res = await request(`${BASE_URL}/api/data/grep`, {
-    method: 'POST',
-    headers: authHeaders(ctx.accessToken!),
-    body: JSON.stringify({ pattern: 'test', person_id: 'totally.fake@nowhere.invalid' }),
-  });
+async function testInvalidRegex(userId: string): Promise<void> {
+  const res = await requestGrep(userId, { pattern: '[' });
   assertStatus(res.status, 400, res.data);
-  const body = res.data as { error: string; message: string };
-  if (body.error !== 'PERSON_NOT_FOUND') {
-    throw new Error(`Expected PERSON_NOT_FOUND, got: ${body.error}`);
-  }
-  // Verify error message includes helpful suggestion
-  if (
-    !body.message.includes('email') &&
-    !body.message.includes('phone') &&
-    !body.message.includes('name')
-  ) {
-    throw new Error(`Expected helpful error message, got: ${body.message}`);
+  if ((res.data as { error?: string }).error !== 'INVALID_PATTERN') {
+    throw new Error(`Expected INVALID_PATTERN, got ${JSON.stringify(res.data)}`);
   }
 }
 
-// --- grep: exercises person_id resolution by phone ---
-
-async function testGrep_personByPhoneNotFound() {
-  const res = await request(`${BASE_URL}/api/data/grep`, {
-    method: 'POST',
-    headers: authHeaders(ctx.accessToken!),
-    body: JSON.stringify({ pattern: 'test', person_id: '+19999999999' }),
-  });
-  assertStatus(res.status, 400, res.data);
-  const body = res.data as { error: string };
-  if (body.error !== 'PERSON_NOT_FOUND') {
-    throw new Error(`Expected PERSON_NOT_FOUND, got: ${body.error}`);
+// Catastrophic-backtracking patterns must be rejected (fast 400) before they
+// reach Postgres `~`, which would otherwise run for seconds-to-minutes.
+async function testRedosGuardRejects(userId: string): Promise<void> {
+  for (const pattern of ['(a+)+$', '([a-z]+)*$', '(.*a){20}$', '(\\w+\\s?)+$', '(a|a)*$']) {
+    const res = await requestGrep(userId, { pattern, source: 'messages' });
+    assertStatus(res.status, 400, res.data);
+    if ((res.data as { error?: string }).error !== 'INVALID_PATTERN') {
+      throw new Error(
+        `Expected INVALID_PATTERN for ReDoS pattern ${pattern}, got ${JSON.stringify(res.data)}`
+      );
+    }
   }
 }
 
-// --- grep: exercises person_id resolution by name ---
+// Regex features that are valid in JS but not Postgres ARE must be normalized
+// and succeed (200), not 500: named groups → plain groups, inline (?i) → -i.
+async function testDialectNormalization(userId: string): Promise<void> {
+  let res = await requestGrep(userId, { pattern: '(?<grp>phase)-17', source: 'messages' });
+  assertStatus(res.status, 200, res.data);
+  requireContent(assertBody(res.data), 'phase-17 approved');
 
-async function testGrep_personByNameNotFound() {
-  const res = await request(`${BASE_URL}/api/data/grep`, {
-    method: 'POST',
-    headers: authHeaders(ctx.accessToken!),
-    body: JSON.stringify({ pattern: 'test', person_id: 'Nonexistent PersonName' }),
-  });
-  assertStatus(res.status, 400, res.data);
-  const body = res.data as { error: string };
-  if (body.error !== 'PERSON_NOT_FOUND') {
-    throw new Error(`Expected PERSON_NOT_FOUND, got: ${body.error}`);
+  res = await requestGrep(userId, { pattern: '(?i)aurora budget', source: 'messages' });
+  assertStatus(res.status, 200, res.data);
+  requireContent(assertBody(res.data), 'Aurora budget');
+}
+
+// Realistic, safe (degree ≤ 2) regexes the model actually emits must NOT be
+// caught by the ReDoS guard — guards against false-positives nerfing the model.
+async function testRealisticPatternsAllowed(userId: string): Promise<void> {
+  for (const pattern of [
+    '\\$[0-9,]+(\\.[0-9]{2})?',
+    '(invoice|receipt|order)\\s+#?[0-9]+',
+    'meeting.*tomorrow',
+    '[\\w.]+@[\\w.]+',
+    'v[0-9]+\\.[0-9]+\\.[0-9]+',
+    '\\bphase-[0-9]+\\b',
+    '[A-Z]{2,4}-[0-9]{2,5}',
+  ]) {
+    const res = await requestGrep(userId, { pattern, source: 'messages' });
+    assertStatus(res.status, 200, res.data);
   }
 }
 
-// --- summary: exercises complete summary shape for fresh user ---
-
-async function testSummary_freshUserDateRange() {
-  const anonRes = await request(`${BASE_URL}/api/auth/anonymous`, { method: 'POST' });
-  if (anonRes.status !== 200) {
-    throw new Error(`Anonymous auth failed: ${anonRes.status}`);
-  }
-  const anonData = anonRes.data as { session: { access_token: string }; user: { id: string } };
-  const accessToken = anonData.session.access_token;
-
-  const res = await request(`${BASE_URL}/api/data/summary`, {
-    headers: authHeaders(accessToken),
+// messages-only narrowing: `person` scopes to one contact, `since` to a time cutoff.
+async function testPersonAndSinceFilters(userId: string): Promise<void> {
+  // person resolves Lighthouse Archive (who has the seeded messages).
+  let res = await requestGrep(userId, {
+    pattern: 'Ledger entry',
+    source: 'messages',
+    person: 'Lighthouse Archive',
   });
   assertStatus(res.status, 200, res.data);
-  const body = assertSchema(SummaryResponse, res.data, 'GET /summary (fresh date range)');
-  const msgs = body.sources.messages;
-  // Fresh user should have null date range
-  if (msgs.date_range.from !== null || msgs.date_range.to !== null) {
-    throw new Error(
-      `Expected null date range for fresh user, got from=${msgs.date_range.from} to=${msgs.date_range.to}`
-    );
-  }
-  // No channels
-  if (Object.keys(msgs.channels).length !== 0) {
-    throw new Error(`Expected empty channels for fresh user, got ${JSON.stringify(msgs.channels)}`);
-  }
-}
+  requireContent(assertBody(res.data), 'Ledger entry');
 
-// --- summary: exercises concurrent consistency ---
-
-async function testSummary_parallelConsistency() {
-  const results = await Promise.all(
-    Array.from({ length: 5 }, () =>
-      request(`${BASE_URL}/api/data/summary`, {
-        headers: authHeaders(ctx.accessToken!),
-      })
-    )
-  );
-  // All should succeed
-  for (const r of results) {
-    assertStatus(r.status, 200, r.data);
-    assertSchema(SummaryResponse, r.data, 'GET /summary (parallel)');
-  }
-  // All should return same total_messages
-  const totals = results.map(
-    (r) =>
-      (r.data as { sources: { messages: { total_messages: number } } }).sources.messages
-        .total_messages
-  );
-  const uniqueTotals = new Set(totals);
-  if (uniqueTotals.size !== 1) {
-    throw new Error(
-      `Parallel summaries returned different total_messages: ${[...uniqueTotals].join(', ')}`
-    );
-  }
-}
-
-// --- grep: exercises source=messages explicitly ---
-
-async function testGrep_explicitMessagesSource() {
-  const res = await request(`${BASE_URL}/api/data/grep`, {
-    method: 'POST',
-    headers: authHeaders(ctx.accessToken!),
-    body: JSON.stringify({ pattern: '', source: 'messages', limit: 3 }),
+  // unknown person → zero matches (not a silent unscoped search).
+  res = await requestGrep(userId, {
+    pattern: 'Ledger entry',
+    source: 'messages',
+    person: 'Nobody Here',
   });
   assertStatus(res.status, 200, res.data);
-  const body = assertSchema(GrepResponse, res.data, 'POST /grep (explicit messages source)');
-  if (body.source && body.source !== 'messages') {
-    throw new Error(`Expected source=messages, got ${body.source}`);
+  if (assertBody(res.data).total_matches !== 0) {
+    throw new Error(`Expected 0 matches for unknown person, got ${JSON.stringify(res.data)}`);
   }
-}
 
-// --- grep: omitted person_id should be ignored ---
-
-async function testGrep_omittedPersonId() {
-  const res = await request(`${BASE_URL}/api/data/grep`, {
-    method: 'POST',
-    headers: authHeaders(ctx.accessToken!),
-    body: JSON.stringify({ pattern: 'test' }),
+  // since excludes the 2026-01-01 Aurora message but keeps the 2026-01-03 ledger.
+  res = await requestGrep(userId, {
+    pattern: 'Aurora budget|Ledger entry',
+    source: 'messages',
+    since: '2026-01-03T00:00:00Z',
   });
   assertStatus(res.status, 200, res.data);
-  assertSchema(GrepResponse, res.data, 'POST /grep (omitted person_id)');
-}
-
-// --- grep: pattern with special characters ---
-
-async function testGrep_specialCharPattern() {
-  const res = await request(`${BASE_URL}/api/data/grep`, {
-    method: 'POST',
-    headers: authHeaders(ctx.accessToken!),
-    body: JSON.stringify({ pattern: "what's up?" }),
-  });
-  assertStatus(res.status, 200, res.data);
-  assertSchema(GrepResponse, res.data, 'POST /grep (special chars)');
-}
-
-// --- grep: pattern with unicode ---
-
-async function testGrep_unicodePattern() {
-  const res = await request(`${BASE_URL}/api/data/grep`, {
-    method: 'POST',
-    headers: authHeaders(ctx.accessToken!),
-    body: JSON.stringify({ pattern: '\u{1F600} emoji test' }),
-  });
-  assertStatus(res.status, 200, res.data);
-  assertSchema(GrepResponse, res.data, 'POST /grep (unicode pattern)');
-}
-
-// --- summary: via internal API key without X-User-Id ---
-
-async function testSummary_apiKeyNoUserId() {
-  const res = await request(`${BASE_URL}/api/data/summary`, {
-    headers: apiKeyHeaders(),
-  });
-  // Missing X-User-Id should return 401 (no user identified)
-  assertStatus(res.status, 401, res.data);
-}
-
-// --- grep: via internal API key with user_id in body ---
-
-async function testGrep_apiKeyBodyUserId() {
-  const res = await request(`${BASE_URL}/api/data/grep`, {
-    method: 'POST',
-    headers: apiKeyHeaders(),
-    body: JSON.stringify({ pattern: 'test', user_id: ctx.userId }),
-  });
-  assertStatus(res.status, 200, res.data);
-  assertSchema(GrepResponse, res.data, 'POST /grep (API key body user_id)');
-}
-
-// --- grep: network source -- empty pattern returns top contacts ---
-
-async function testGrepNetwork_emptyPatternFreshUser() {
-  const res = await request(`${BASE_URL}/api/data/grep`, {
-    method: 'POST',
-    headers: authHeaders(ctx.accessToken!),
-    body: JSON.stringify({ pattern: '', source: 'network' }),
-  });
-  assertStatus(res.status, 200, res.data);
-  const body = assertSchema(NetworkGrepResponse, res.data, 'POST /grep (network empty)');
-  // Fresh user: zero contacts → no-match diagnostic message
-  if (body.total_matches !== 0) {
-    throw new Error(`Expected 0 matches for fresh user, got ${body.total_matches}`);
-  }
-  if (!body.message) {
-    throw new Error('Expected diagnostic message on zero matches');
+  const body = assertBody(res.data);
+  requireContent(body, 'Ledger entry');
+  for (const match of body.matches) {
+    if (match.content.includes('Aurora budget: phase-17 approved')) {
+      throw new Error(
+        `Expected 'since' to exclude the older Aurora message, got ${JSON.stringify(match)}`
+      );
+    }
   }
 }
 
-// --- grep: network source -- keyword pattern on fresh user ---
+async function runAll(): Promise<void> {
+  const { userId, agentId } = await seedFixture();
+  const tests = [
+    ['schema rejects removed params/sources', () => testSchemaAndRemovedParams(userId)],
+    ['omitted source searches all buckets', () => testAllSources(userId, agentId)],
+    ['regex and explicit sources work', () => testRegexAndSources(userId, agentId)],
+    ['grep flags work', () => testFlags(userId)],
+    ['invalid regex returns 400', () => testInvalidRegex(userId)],
+    ['ReDoS-catastrophic patterns rejected with 400', () => testRedosGuardRejects(userId)],
+    ['dialect patterns normalized and succeed', () => testDialectNormalization(userId)],
+    ['realistic safe patterns are allowed', () => testRealisticPatternsAllowed(userId)],
+    ['person and since narrow messages', () => testPersonAndSinceFilters(userId)],
+  ] as const;
 
-async function testGrepNetwork_keywordFreshUser() {
-  const res = await request(`${BASE_URL}/api/data/grep`, {
-    method: 'POST',
-    headers: authHeaders(ctx.accessToken!),
-    body: JSON.stringify({ pattern: 'acme', source: 'network' }),
-  });
-  assertStatus(res.status, 200, res.data);
-  const body = assertSchema(NetworkGrepResponse, res.data, 'POST /grep (network keyword)');
-  if (body.total_matches !== 0) {
-    throw new Error(`Expected 0 matches for fresh user keyword, got ${body.total_matches}`);
-  }
-  if (body.truncated !== false) {
-    throw new Error('Expected truncated=false on zero matches');
-  }
-  if (!body.message?.toLowerCase().includes('acme')) {
-    throw new Error(`Expected diagnostic to include pattern 'acme', got: ${body.message}`);
-  }
-}
-
-// --- grep: network source -- invalid pattern type returns 400 ---
-
-async function testGrepNetwork_invalidPattern() {
-  const res = await request(`${BASE_URL}/api/data/grep`, {
-    method: 'POST',
-    headers: authHeaders(ctx.accessToken!),
-    body: JSON.stringify({ pattern: 42, source: 'network' }),
-  });
-  assertStatus(res.status, 400, res.data);
-  const body = res.data as { error: string };
-  if (body.error !== 'INVALID_PATTERN') {
-    throw new Error(`Expected INVALID_PATTERN, got: ${body.error}`);
+  try {
+    for (const [name, fn] of tests) {
+      await fn();
+      console.log(`PASS ${name}`);
+    }
+  } finally {
+    await cleanup(userId);
+    await prisma.$disconnect();
   }
 }
 
-// --- grep: network source -- ignores person_id/since ---
-
-async function testGrepNetwork_ignoresPersonIdAndSince() {
-  // Network source should not error on person_id or since — they are meaningless
-  // and must be ignored rather than rejected.
-  const res = await request(`${BASE_URL}/api/data/grep`, {
-    method: 'POST',
-    headers: authHeaders(ctx.accessToken!),
-    body: JSON.stringify({
-      pattern: '',
-      source: 'network',
-      person_id: 'not-a-real-person-id',
-      since: '2024-01-01T00:00:00Z',
-    }),
-  });
-  assertStatus(res.status, 200, res.data);
-  assertSchema(NetworkGrepResponse, res.data, 'POST /grep (network ignores person_id/since)');
-}
-
-// ==================== RUN ====================
-
-async function runAll() {
-  console.log('Data Grep Deep-Coverage Black-box Tests\n');
-  console.log(`Testing against: ${BASE_URL}`);
-  console.log(`Case concurrency: ${CASE_CONCURRENCY}\n`);
-
-  console.log('Setting up auth session...');
-  await setup();
-  console.log(`  User: ${ctx.userId}\n`);
-
-  const parallelTests = [
-    // deep coverage — default source / since / limits
-    {
-      name: 'POST /data/grep -- default source resolves to messages',
-      fn: testGrep_defaultSourceMessages,
-    },
-    {
-      name: 'POST /data/grep -- no-matches diagnostic includes thread/msg counts',
-      fn: testGrep_noMatchesDiagnosticCounts,
-    },
-    {
-      name: 'POST /data/grep -- default since period within ~365 days',
-      fn: testGrep_defaultSincePeriod,
-    },
-    {
-      name: "POST /data/grep -- no-matches explicit since includes 'since'",
-      fn: testGrep_noMatchesExplicitSinceLabel,
-    },
-    {
-      name: "POST /data/grep -- no-matches default since includes 'last'",
-      fn: testGrep_noMatchesDefaultSinceLabel,
-    },
-    { name: 'POST /data/grep -- limit=100000 clamped to MAX_RESULTS', fn: testGrep_limitAtMax },
-    {
-      name: 'POST /data/grep -- since=5min ago returns valid shape',
-      fn: testGrep_sinceRecentTimestamp,
-    },
-    // deep coverage — person_id resolution paths
-    {
-      name: 'POST /data/grep -- person_id by email not found -> 400',
-      fn: testGrep_personByEmailNotFound,
-    },
-    {
-      name: 'POST /data/grep -- person_id by phone not found -> 400',
-      fn: testGrep_personByPhoneNotFound,
-    },
-    {
-      name: 'POST /data/grep -- person_id by name not found -> 400',
-      fn: testGrep_personByNameNotFound,
-    },
-    // deep coverage — summary
-    {
-      name: 'GET /data/summary -- fresh user has null date range',
-      fn: testSummary_freshUserDateRange,
-    },
-    {
-      name: 'GET /data/summary -- 5 parallel requests consistent total_messages',
-      fn: testSummary_parallelConsistency,
-    },
-    // deep coverage — source routing & input edge cases
-    {
-      name: "POST /data/grep -- source='messages' explicit echoed in response",
-      fn: testGrep_explicitMessagesSource,
-    },
-    { name: 'POST /data/grep -- omitted person_id ignored', fn: testGrep_omittedPersonId },
-    {
-      name: "POST /data/grep -- special-char pattern (what's up?)",
-      fn: testGrep_specialCharPattern,
-    },
-    { name: 'POST /data/grep -- unicode emoji pattern', fn: testGrep_unicodePattern },
-    // deep coverage — API key combinations
-    {
-      name: 'GET /data/summary -- API key without X-User-Id -> 401',
-      fn: testSummary_apiKeyNoUserId,
-    },
-    {
-      name: 'POST /data/grep -- API key with user_id in body -> 200',
-      fn: testGrep_apiKeyBodyUserId,
-    },
-    // deep coverage — network source
-    {
-      name: "POST /data/grep -- source='network' empty pattern on fresh user",
-      fn: testGrepNetwork_emptyPatternFreshUser,
-    },
-    {
-      name: "POST /data/grep -- source='network' keyword pattern (no matches)",
-      fn: testGrepNetwork_keywordFreshUser,
-    },
-    {
-      name: "POST /data/grep -- source='network' invalid pattern type -> 400",
-      fn: testGrepNetwork_invalidPattern,
-    },
-    {
-      name: "POST /data/grep -- source='network' ignores person_id and since",
-      fn: testGrepNetwork_ignoresPersonIdAndSince,
-    },
-  ];
-
-  console.log(`Running ${parallelTests.length} tests (concurrency=${CASE_CONCURRENCY})...`);
-  const results = await runPool(parallelTests, CASE_CONCURRENCY);
-
-  for (const r of results) {
-    console.log(
-      `  ${r.passed ? 'PASS' : 'FAIL'}  ${r.name}${r.passed ? '' : ` -- ${r.error}`} (${r.duration}ms)`
-    );
-  }
-
-  const passed = results.filter((r) => r.passed).length;
-  const failed = results.filter((r) => !r.passed).length;
-  console.log('\n' + '='.repeat(50));
-  console.log(`\nResults: ${passed} passed, ${failed} failed, ${results.length} total`);
-  if (failed > 0) {
-    console.log('\nFAILURES:');
-    results.filter((r) => !r.passed).forEach((r) => console.log(`   ${r.name}: ${r.error}`));
-    process.exit(1);
-  }
-  console.log('\nALL DATA GREP DEEP-COVERAGE TESTS PASSED\n');
-  process.exit(0);
-}
-
-runAll().catch((error) => {
-  console.error('\nCrashed:', error);
+runAll().catch(async (error) => {
+  console.error(error);
+  await prisma.$disconnect();
   process.exit(1);
 });

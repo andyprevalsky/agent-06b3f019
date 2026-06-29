@@ -13,11 +13,10 @@ import {
   getSummary,
   InvalidPatternError,
   SourceNotFoundError,
-  PersonNotFoundError,
-  InvalidSinceError,
+  InvalidGrepParamError,
+  MissingAgentIdError,
+  AgentNotFoundError,
 } from './service';
-import { grepAgentNetwork, MissingAgentIdError, AgentNotFoundError } from './agentNetworkService';
-import { grepNetwork, InvalidNetworkPatternError } from './networkService';
 import { createLogger } from '../../providers/logger';
 
 const log = createLogger('Data');
@@ -50,17 +49,7 @@ router.post(
         return;
       }
 
-      // Dispatch sources to dedicated handlers
-      const source = req.body.source as string | undefined;
-      const isAgentNetwork =
-        source === 'agent_network_user_messages' || source === 'agent_network_tool_results';
-      const isNetwork = source === 'network';
-
-      const result = isAgentNetwork
-        ? await grepAgentNetwork(userId, req.body)
-        : isNetwork
-          ? await grepNetwork(userId, req.body)
-          : await grep(userId, req.body);
+      const result = await grep(userId, req.body);
 
       const elapsed = Date.now() - startTime;
       log.info(`grep [${elapsed}ms]`);
@@ -69,8 +58,12 @@ router.post(
     } catch (error) {
       const elapsed = Date.now() - startTime;
 
-      if (error instanceof InvalidPatternError || error instanceof InvalidNetworkPatternError) {
+      if (error instanceof InvalidPatternError) {
         res.status(400).json({ error: 'INVALID_PATTERN', message: error.message });
+        return;
+      }
+      if (error instanceof InvalidGrepParamError) {
+        res.status(400).json({ error: 'INVALID_GREP_PARAM', message: error.message });
         return;
       }
       if (error instanceof SourceNotFoundError) {
@@ -79,14 +72,6 @@ router.post(
           message: error.message,
           available_sources: error.availableSources,
         });
-        return;
-      }
-      if (error instanceof PersonNotFoundError) {
-        res.status(400).json({ error: 'PERSON_NOT_FOUND', message: error.message });
-        return;
-      }
-      if (error instanceof InvalidSinceError) {
-        res.status(400).json({ error: 'INVALID_SINCE', message: error.message });
         return;
       }
       if (error instanceof MissingAgentIdError) {

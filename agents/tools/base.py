@@ -270,6 +270,27 @@ def format_result(result: Dict[str, Any]) -> str:  # noqa: C901
     if "content" in result and "answer" not in result:
         lines.append(f"{result['content']}")
 
+    # Handle Grep results. Keep match content visible so local-data searches are
+    # auditable in transcripts and benchmark validators can inspect evidence.
+    if "matches" in result and "total_matches" in result:
+        matches = result.get("matches", [])
+        lines.append(
+            f"**Grep Matches:** {len(matches)} shown / {result.get('total_matches', 0)} total"
+        )
+        for i, match in enumerate(matches, 1):
+            source = match.get("source", "unknown")
+            path = match.get("path", "")
+            role = match.get("role")
+            location = match.get("location", {})
+            lines.append(f"\n**{i}. source: {source} path: {path}**")
+            if role:
+                lines.append(f"role: {role}")
+            if location:
+                lines.append(f"location: {json.dumps(location, default=str)}")
+            content = match.get("content")
+            if content:
+                lines.append(str(content))
+
     if "candidates" in result:
         candidates = result["candidates"]
         if isinstance(candidates, list):
