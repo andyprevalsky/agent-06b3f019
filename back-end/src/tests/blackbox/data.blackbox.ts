@@ -341,17 +341,14 @@ async function testGrep_withSource() {
   assertSchema(GrepResponse, res.data, 'POST /grep (with source)');
 }
 
-async function testGrep_rejectsSince() {
+async function testGrep_acceptsSince() {
+  // `since` is a valid messages-only narrowing param (ISO or relative like 7d).
   const res = await request(`${BASE_URL}/api/data/grep`, {
     method: 'POST',
     headers: authHeaders(ctx.accessToken!),
     body: JSON.stringify({ pattern: 'test', source: 'messages', since: '2024-01-01T00:00:00Z' }),
   });
-  assertStatus(res.status, 400, res.data);
-  const body = res.data as { error?: string };
-  if (body.error !== 'INVALID_GREP_PARAM') {
-    throw new Error(`Expected INVALID_GREP_PARAM, got: ${JSON.stringify(body)}`);
-  }
+  assertStatus(res.status, 200, res.data);
 }
 
 async function testGrep_rejectsLimit() {
@@ -663,7 +660,7 @@ async function runAll() {
     { name: 'POST /data/grep -- happy path', fn: testGrep_happy },
     { name: 'POST /data/grep -- empty pattern returns all', fn: testGrep_emptyPattern },
     { name: 'POST /data/grep -- with source=messages', fn: testGrep_withSource },
-    { name: 'POST /data/grep -- since param rejected', fn: testGrep_rejectsSince },
+    { name: 'POST /data/grep -- since param accepted', fn: testGrep_acceptsSince },
     { name: 'POST /data/grep -- limit param rejected', fn: testGrep_rejectsLimit },
     { name: 'POST /data/grep -- via API key', fn: testGrep_viaApiKey },
     { name: 'POST /data/grep -- no matches shape', fn: testGrep_noMatchesShape },

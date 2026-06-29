@@ -243,6 +243,15 @@ async function testGrep_removedSourceRejected(source: string) {
   }
 }
 
+async function testGrep_acceptedParam(param: string, value: unknown) {
+  const res = await request(`${BASE_URL}/api/data/grep`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken!),
+    body: JSON.stringify({ pattern: 'test', source: 'messages', [param]: value }),
+  });
+  assertStatus(res.status, 200, res.data);
+}
+
 async function testSummary_freshUserShapeDeep() {
   const res = await request(`${BASE_URL}/api/data/summary`, {
     headers: authHeaders(ctx.accessToken!),
@@ -404,8 +413,12 @@ async function runAll() {
       fn: () => testGrep_removedParamRejected('person_id', 'nonexistent-person@example.com'),
     },
     {
-      name: 'POST /data/grep -- removed param since rejected',
-      fn: () => testGrep_removedParamRejected('since', '2025-06-01T00:00:00Z'),
+      name: 'POST /data/grep -- since param accepted (messages narrowing)',
+      fn: () => testGrep_acceptedParam('since', '2025-06-01T00:00:00Z'),
+    },
+    {
+      name: 'POST /data/grep -- person param accepted (messages narrowing)',
+      fn: () => testGrep_acceptedParam('person', 'nobody@example.com'),
     },
     {
       name: 'POST /data/grep -- removed param limit rejected',
