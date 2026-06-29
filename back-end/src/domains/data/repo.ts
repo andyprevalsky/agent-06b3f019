@@ -2,55 +2,7 @@
  * Data domain repo — all Prisma calls for data search and summary.
  */
 
-import type { Prisma } from '@prisma/client';
 import { prisma } from '../../providers/database';
-
-/**
- * Resolve a person identifier (UUID, email, phone, or name) to a person ID.
- * Returns the person's id or null if not found.
- */
-export async function resolvePersonId(
-  personIdentifier: string,
-  userId: string
-): Promise<string | null> {
-  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-    personIdentifier
-  );
-
-  let person;
-  if (isUuid) {
-    person = await prisma.person.findFirst({
-      where: { id: personIdentifier, userId },
-      select: { id: true },
-    });
-  } else {
-    // Try email, phone, or name match
-    person = await prisma.person.findFirst({
-      where: {
-        userId,
-        OR: [
-          { email: { equals: personIdentifier, mode: 'insensitive' } },
-          { phoneNumber: personIdentifier },
-          { firstName: { equals: personIdentifier, mode: 'insensitive' } },
-          {
-            AND: [
-              { firstName: { equals: personIdentifier.split(' ')[0], mode: 'insensitive' } },
-              {
-                lastName: {
-                  equals: personIdentifier.split(' ').slice(1).join(' '),
-                  mode: 'insensitive',
-                },
-              },
-            ],
-          },
-        ],
-      },
-      select: { id: true },
-    });
-  }
-
-  return person?.id ?? null;
-}
 
 /**
  * Search message records by pattern with optional person and time filters.
@@ -91,30 +43,6 @@ export async function searchMessages(params: {
           email: true,
         },
       },
-    },
-  });
-}
-
-/**
- * Count total messages for a user within a time range.
- */
-export async function countMessages(userId: string, cutoffTime: Date): Promise<number> {
-  return prisma.messageRecord.count({
-    where: {
-      person: { userId },
-      timestamp: { gte: cutoffTime },
-    },
-  });
-}
-
-/**
- * Count threads (persons with messages) for a user within a time range.
- */
-export async function countThreads(userId: string, cutoffTime: Date): Promise<number> {
-  return prisma.person.count({
-    where: {
-      userId,
-      messageRecords: { some: { timestamp: { gte: cutoffTime } } },
     },
   });
 }
@@ -220,63 +148,6 @@ export async function getNewestMessage(userId: string) {
 }
 
 // ---------------------------------------------------------------------------
-// Network (contacts) queries
-// ---------------------------------------------------------------------------
-
-/**
- * Search user's contact network by ILIKE across name, phone, email, company,
- * title, relation, and communicationFrequency. Ranked by messagesExchanged DESC.
- */
-export async function searchContacts(params: {
-  userId: string;
-  pattern: string;
-  limit: number;
-}) {
-  const { userId, pattern, limit } = params;
-
-  const where: Prisma.PersonWhereInput = {
-    userId,
-    ...(pattern.length > 0
-      ? {
-          OR: [
-            { firstName: { contains: pattern, mode: 'insensitive' as const } },
-            { lastName: { contains: pattern, mode: 'insensitive' as const } },
-            { email: { contains: pattern, mode: 'insensitive' as const } },
-            { phoneNumber: { contains: pattern, mode: 'insensitive' as const } },
-            { company: { contains: pattern, mode: 'insensitive' as const } },
-            { title: { contains: pattern, mode: 'insensitive' as const } },
-            { relation: { contains: pattern, mode: 'insensitive' as const } },
-            { communicationFrequency: { contains: pattern, mode: 'insensitive' as const } },
-          ],
-        }
-      : {}),
-  };
-
-  const [total, matches] = await Promise.all([
-    prisma.person.count({ where }),
-    prisma.person.findMany({
-      where,
-      orderBy: [{ messagesExchanged: 'desc' }, { lastName: 'asc' }],
-      take: limit,
-      select: {
-        id: true,
-        firstName: true,
-        lastName: true,
-        phoneNumber: true,
-        email: true,
-        company: true,
-        title: true,
-        relation: true,
-        communicationFrequency: true,
-        messagesExchanged: true,
-      },
-    }),
-  ]);
-
-  return { total, matches };
-}
-
-// ---------------------------------------------------------------------------
 // Agent network queries
 // ---------------------------------------------------------------------------
 
@@ -327,38 +198,4 @@ export async function findAgentTreeIds(rootId: string, userId: string): Promise<
     queue.push(...children.filter((c) => !seen.has(c.id)).map((c) => c.id));
   }
   return treeIds;
-}
-
-/** Search agent network messages by pattern across a set of agent IDs. */
-export async function searchAgentNetworkMessages(params: {
-  agentIds: string[];
-  pattern: string;
-  role: 'USER' | 'TOOL';
-  limit: number;
-}) {
-  const { agentIds, pattern, role, limit } = params;
-
-  const whereClause: Prisma.MessageWhereInput = {
-    agentId: { in: agentIds },
-    role,
-    ...(pattern.length > 0 ? { text: { contains: pattern, mode: 'insensitive' as const } } : {}),
-  };
-
-  // For tool results, filter to FINISHED only
-  if (role === 'TOOL') {
-    whereClause.metadata = { path: ['toolStatus'], equals: 'FINISHED' };
-  }
-
-  return prisma.message.findMany({
-    where: whereClause,
-    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-    take: limit,
-    select: {
-      id: true,
-      text: true,
-      role: true,
-      agentId: true,
-      createdAt: true,
-    },
-  });
 }

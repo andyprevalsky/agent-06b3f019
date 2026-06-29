@@ -138,8 +138,42 @@ def test_planner_response_schema_is_compact():
 
     assert fields == {"title", "tasks", "join"}
     assert "reasoning" not in fields
-    assert "content" not in fields
-    assert "dependencies_graph" not in fields
+
+
+def test_grep_tool_schema_exact_contract():
+    """Grep exposes only the v1 DB-backed grep params."""
+    from utils.tool_schemas import GrepTool
+
+    schema = GrepTool.model_json_schema()
+    props = set(schema["properties"].keys())
+    assert props == {
+        "tool",
+        "pattern",
+        "source",
+        "-B",
+        "-A",
+        "-C",
+        "context",
+        "-n",
+        "-i",
+        "head_limit",
+        "offset",
+        "multiline",
+        "person",
+        "since",
+    }
+
+    source_schema = schema["properties"]["source"]
+    enum_values = set()
+    for option in source_schema.get("anyOf", []):
+        enum_values.update(option.get("enum", []))
+    assert enum_values == {"messages", "network", "agent_network"}
+
+    removed = {
+        "path", "glob", "type", "output_mode", "person_id", "limit",
+        "roles", "search_in", "tool_name", "tool_status",
+    }
+    assert props.isdisjoint(removed)
 
 
 # ── WaitForTool validation ─────────────────────────────────────────────
@@ -650,6 +684,7 @@ async def run_all_tests():
     )
     r.record("planner_assignable_tools", test_planner_assignable_tools)
     r.record("planner_response_schema_compact", test_planner_response_schema_is_compact)
+    r.record("grep_tool_schema_exact_contract", test_grep_tool_schema_exact_contract)
     # WaitForTool validation
     r.record("wait_for_mutually_exclusive", test_wait_for_tool_mutually_exclusive_raises)
     r.record("wait_for_neither", test_wait_for_tool_neither_raises)
