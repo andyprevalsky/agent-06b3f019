@@ -345,6 +345,7 @@ class WaitForManager(ToolManager):
                     "checkIntervalSeconds": check_interval_seconds,
                     "maxChecks": max_checks_param,
                     "checkNum": check_num,
+                    "exploreTaskId": task_id,
                     "conditionMet": False,
                 },
             )
