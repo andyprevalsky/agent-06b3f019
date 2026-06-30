@@ -222,8 +222,27 @@ def _temporal_activity_metadata() -> Dict[str, Any]:
     return _sanitize_metadata(metadata)
 
 
+# Process-wide TTL cache for the RSS snapshot. `proc.children(recursive=True)`
+# walks the ENTIRE system process table (builds a full ppid map) — ~1k syscalls
+# per call on a busy machine. It is called on every activity-span start/end AND
+# by a 0.5s-interval background sampler PER open activity span, so under a
+# 50-agent fan-out (~50+ concurrent activity spans) it ran ~100+ full
+# process-table walks/second and pinned a CPU core, starving the event loop and
+# stalling LLM stream reads (~1s/chunk). The snapshot is a coarse memory gauge,
+# so all concurrent callers share one computation per TTL window instead of each
+# walking the table. Single event loop per process → no await between the check
+# and the store, so a plain time guard is race-free.
+_RSS_CACHE_TTL_S = 1.0
+_rss_cache: Dict[str, int] = {}
+_rss_cache_at: float = -1e9
+
+
 def _rss_snapshot() -> Dict[str, int]:
-    """Return current worker process and child RSS, in bytes."""
+    """Return current worker process and child RSS, in bytes (TTL-cached)."""
+    global _rss_cache, _rss_cache_at
+    now = time.monotonic()
+    if _rss_cache and (now - _rss_cache_at) < _RSS_CACHE_TTL_S:
+        return _rss_cache
     try:
         import psutil
 
@@ -233,11 +252,13 @@ def _rss_snapshot() -> Dict[str, int]:
         for child in proc.children(recursive=True):
             with suppress(psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 child_rss += child.memory_info().rss
-        return {
+        _rss_cache = {
             "process_rss_bytes": process_rss,
             "child_rss_bytes": child_rss,
             "tree_rss_bytes": process_rss + child_rss,
         }
+        _rss_cache_at = now
+        return _rss_cache
     except Exception:
         return {}
 
