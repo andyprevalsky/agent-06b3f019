@@ -1,7 +1,14 @@
 /**
- * TopBar — row above the textarea: write-lock toggle, Fast Mode toggle,
- * tool-set chip, test-prompt selector (dev/admin only), cost indicator,
- * context meter, and the settings dialog.
+ * STATE MACHINE: TopBar
+ *
+ * VISIBILITY STATE:
+ * [BASE_CONTROLS] --> always renders write-lock, toolset, cost, context, settings
+ *     |
+ *     +--> [FAST_MODE_VISIBLE] when parent says the account is allow-listed
+ *     |
+ *     +--> [TEST_PROMPTS_VISIBLE] when parent says viewport is desktop and account is dev/admin
+ *
+ * TopBar owns layout only; account and viewport gating stay in QueryInputBody.
  */
 
 import WriteLockToggle from '../WriteLockToggle';

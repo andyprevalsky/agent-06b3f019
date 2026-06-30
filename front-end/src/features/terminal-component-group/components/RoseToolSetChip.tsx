@@ -13,10 +13,12 @@
  *
  * State:
  * - isOpen: boolean (popover open state)
+ * - trigger is icon-only; text remains in title/aria-label for accessibility
  */
 
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { TOOL_ICONS } from '@/lib/toolIcons';
+import { Wrench } from 'lucide-react';
 import { useState } from 'react';
 import ClaudeIcon from '@/assets/claude-color.svg';
 import CodexIcon from '@/assets/codex-color.svg';
@@ -139,14 +141,13 @@ export default function RoseToolSetChip() {
     <Popover open={isOpen} onOpenChange={setIsOpen}>
       <PopoverTrigger asChild>
         <button
-          className="flex items-center gap-2 px-2 py-1 rounded-md border border-border bg-gradient-to-br from-[#FE7503]/5 via-[#E062CC]/5 to-[#7A6BEC]/5 text-muted-foreground text-xs hover:from-[#FE7503]/10 hover:via-[#E062CC]/10 hover:to-[#7A6BEC]/10 transition-colors"
+          className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-gradient-to-br from-[#FE7503]/5 via-[#E062CC]/5 to-[#7A6BEC]/5 text-[#E062CC] hover:from-[#FE7503]/10 hover:via-[#E062CC]/10 hover:to-[#7A6BEC]/10 transition-colors"
           title="View Rose system tools"
+          aria-label="View Rose system tools"
           onMouseEnter={() => setIsOpen(true)}
           onMouseLeave={() => setIsOpen(false)}
         >
-          <span className="font-semibold bg-gradient-to-br from-[#FE7503] via-[#E062CC] to-[#7A6BEC] bg-clip-text text-transparent">
-            Rose-ToolSet
-          </span>
+          <Wrench className="h-3.5 w-3.5" />
         </button>
       </PopoverTrigger>
       <PopoverContent

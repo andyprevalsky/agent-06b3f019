@@ -8,7 +8,7 @@
  */
 import React from 'react';
 import { act, fireEvent, render, screen } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import FastModeToggle from '@/features/terminal-component-group/components/FastModeToggle';
 import QueryInput from '@/features/terminal-component-group/components/QueryInput';
@@ -20,6 +20,16 @@ import { TOOL_ICONS } from '@/lib/toolIcons';
 const hookMocks = vi.hoisted(() => ({
   authUserId: '1f85ff25-6e29-4c1b-8739-f917bd101a30',
 }));
+
+const originalInnerWidth = window.innerWidth;
+
+function setViewportWidth(width: number) {
+  Object.defineProperty(window, 'innerWidth', {
+    configurable: true,
+    writable: true,
+    value: width,
+  });
+}
 
 vi.mock('@/features/terminal-component-group/hooks', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/features/terminal-component-group/hooks')>();
@@ -64,6 +74,10 @@ function renderTopBar(showFastMode: boolean, fastMode = false, onFastModeChange 
     </TooltipProvider>,
   );
 }
+
+afterEach(() => {
+  setViewportWidth(originalInnerWidth);
+});
 
 describe('Fast Mode account gating', () => {
   it('#2 shows the toggle in an existing-agent query box for allow-listed users', () => {
@@ -120,7 +134,30 @@ describe('Fast Mode account gating', () => {
     expect(fastMode.compareDocumentPosition(toolSet) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(
       0,
     );
-    expect(container.textContent).toMatch(/Safe Writes.*Fast Mode Off.*Rose-ToolSet/s);
+    expect(container.textContent).toContain('Safe Writes');
+    expect(screen.getByTestId('fast-mode-toggle')).toHaveTextContent('');
+    expect(screen.getByTitle('View Rose system tools')).toHaveTextContent('');
+  });
+
+  it('hides Test-Prompts on mobile for admin accounts', () => {
+    hookMocks.authUserId = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+    setViewportWidth(390);
+
+    render(
+      <TooltipProvider>
+        <QueryInput
+          value=""
+          onChange={vi.fn()}
+          onSubmit={vi.fn()}
+          fastMode={false}
+          onFastModeChange={vi.fn()}
+          showModelSelector={false}
+        />
+      </TooltipProvider>,
+    );
+
+    expect(screen.queryByTitle('Select a test prompt')).toBeNull();
+    expect(screen.queryByText('Test-Prompts')).toBeNull();
   });
 
   it('config allow-list contains exactly the two intended accounts', () => {
@@ -139,7 +176,8 @@ describe('FastModeToggle behavior', () => {
     );
     const btn = screen.getByTestId('fast-mode-toggle');
     expect(btn.getAttribute('aria-pressed')).toBe('false');
-    expect(btn.textContent).toContain('Fast Mode Off');
+    expect(btn).toHaveAccessibleName('Fast Mode Off');
+    expect(btn).toHaveTextContent('');
   });
 
   it('#3 toggling fires onChange with the flipped value', () => {
@@ -174,7 +212,8 @@ describe('FastModeToggle behavior', () => {
       </TooltipProvider>,
     );
     expect(screen.getByTestId('fast-mode-toggle').getAttribute('aria-pressed')).toBe('true');
-    expect(screen.getByTestId('fast-mode-toggle').textContent).toContain('Fast Mode On');
+    expect(screen.getByTestId('fast-mode-toggle')).toHaveAccessibleName('Fast Mode On');
+    expect(screen.getByTestId('fast-mode-toggle')).toHaveTextContent('');
   });
 
   it('updates the visible state after a click in the controlled querybox path', () => {
@@ -189,7 +228,8 @@ describe('FastModeToggle behavior', () => {
     );
 
     const btn = screen.getByTestId('fast-mode-toggle');
-    expect(btn).toHaveTextContent('Fast Mode Off');
+    expect(btn).toHaveAccessibleName('Fast Mode Off');
+    expect(btn).toHaveTextContent('');
 
     act(() => {
       btn.click();
@@ -202,7 +242,8 @@ describe('FastModeToggle behavior', () => {
       </TooltipProvider>,
     );
     expect(btn).toHaveAttribute('aria-pressed', 'true');
-    expect(btn).toHaveTextContent('Fast Mode On');
+    expect(btn).toHaveAccessibleName('Fast Mode On');
+    expect(btn).toHaveTextContent('');
   });
 });
 
@@ -210,7 +251,10 @@ describe('RoseToolSetChip contents', () => {
   it('removes deprecated tools and explains Wait For', () => {
     render(<RoseToolSetChip />);
 
-    fireEvent.mouseEnter(screen.getByTitle('View Rose system tools'));
+    const trigger = screen.getByTitle('View Rose system tools');
+    expect(trigger).toHaveTextContent('');
+
+    fireEvent.mouseEnter(trigger);
 
     expect(screen.queryByText('x402')).toBeNull();
     expect(screen.queryByText('Monitor')).toBeNull();

@@ -14,6 +14,8 @@
  * State:
  * - enabled: boolean (controlled by parent; query-box scoped, session-only, never persisted client-side)
  *
+ * UI: icon-only trigger; accessible label still reports Fast Mode On/Off.
+ *
  * Gating: only rendered when the current user is in FAST_MODE_USER_IDS (Andy / Tamy).
  * The value is threaded into the create-agent payload as `fastMode`; default off means
  * the cache is completely inert (no read, no write).
@@ -43,14 +45,13 @@ export default function FastModeToggle({ enabled, onChange }: FastModeToggleProp
       data-state={enabled ? 'on' : 'off'}
       data-testid="fast-mode-toggle"
       className={cn(
-        'flex items-center gap-1.5 px-2 py-1 rounded-md border text-xs transition-colors',
+        'inline-flex h-7 w-7 items-center justify-center rounded-md border text-xs transition-colors',
         enabled
           ? 'border-amber-500/70 bg-amber-400/20 text-amber-700 shadow-sm ring-1 ring-amber-400/40 dark:text-amber-200'
           : 'border-border bg-muted/50 text-muted-foreground',
       )}
     >
       <Zap className={cn('h-3.5 w-3.5', enabled && 'fill-current')} />
-      <span className="font-medium">{label}</span>
     </button>
   );
 }
