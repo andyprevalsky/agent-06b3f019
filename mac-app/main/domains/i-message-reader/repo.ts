@@ -187,8 +187,7 @@ export function queryMessagesSinceRowId(
  */
 export function queryMaxRowId(db: Database.Database): number {
   const result = db.prepare('SELECT MAX(ROWID) as maxId FROM message').get() as
-    | { maxId: number | null }
-    | undefined;
+    { maxId: number | null } | undefined;
   return result?.maxId ?? 0;
 }
 
