@@ -274,7 +274,10 @@ model PurchaseSpend {
   user                  User                @relation(fields: [userId], references: [userId], onDelete: Cascade)
   agent                 Agent?              @relation(fields: [agentId], references: [id], onDelete: SetNull)
 
-  @@unique([userId, fingerprint])
+  // NOT unique: a user may legitimately re-buy the same cart. Idempotency for in-flight retries
+  // is enforced in application logic (status checks + a Stripe idempotency key per purchase row)
+  // plus the 24h reuse window — not a DB constraint.
+  @@index([userId, fingerprint])
   @@index([agentId])
   @@index([cardId])
   @@index([status])

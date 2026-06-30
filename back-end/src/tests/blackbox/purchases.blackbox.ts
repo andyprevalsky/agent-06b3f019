@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
+/* eslint-disable no-console -- CLI test runner prints results to stdout */
 /**
  * Black-box tests for /api/purchases and /api/webhooks/agentcard.
  *
@@ -20,10 +20,18 @@ import { config } from 'dotenv';
 import { z } from 'zod';
 import { PurchaseSpendStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
-import { stripe } from '../../providers/stripe';
 import type { CardProvider } from '../../providers/card-provider';
 import { cleanupAgentPurchaseCards } from '../../providers/purchaseCleanup';
 import * as purchasesService from '../../domains/purchases/service';
+import {
+  assert,
+  assertStatus,
+  FakeCardProvider,
+  RepurchaseProvider,
+  StubCardStateProvider,
+  seedHeldPurchase,
+  withFakeStripe,
+} from './purchases.testkit';
 
 config();
 
@@ -63,44 +71,6 @@ const OkResponse = z.object({
   ok: z.literal(true),
 });
 
-class FakeCardProvider implements CardProvider {
-  mintCalls = 0;
-  detailCalls = 0;
-  closeCalls = 0;
-  readonly cardId = `fake-card-${randomUUID()}`;
-  readonly pan = '4242424242424242';
-  readonly cvv = '123';
-  readonly expiry = '12/30';
-
-  async mintCard() {
-    this.mintCalls += 1;
-    return {
-      cardId: this.cardId,
-      last4: '4242',
-      expiry: this.expiry,
-      spendLimitCents: 1000,
-      status: 'active',
-    };
-  }
-
-  async getDetails(cardId: string) {
-    this.detailCalls += 1;
-    assert(cardId === this.cardId, `unexpected card id ${cardId}`);
-    return {
-      pan: this.pan,
-      cvv: this.cvv,
-      expiry: this.expiry,
-      balanceCents: 1000,
-      status: 'active',
-    };
-  }
-
-  async closeCard(cardId: string) {
-    this.closeCalls += 1;
-    assert(cardId === this.cardId, `unexpected card id ${cardId}`);
-  }
-}
-
 interface TestResult {
   name: string;
   passed: boolean;
@@ -136,21 +106,12 @@ function apiKeyHeaders(userId?: string): Record<string, string> {
 function webhookHeaders(payload: unknown): Record<string, string> {
   const secret = process.env.AGENTCARD_WEBHOOK_SECRET;
   if (!secret) return {};
+  const t = Math.floor(Date.now() / 1000).toString();
   const signature = crypto
     .createHmac('sha256', secret)
-    .update(JSON.stringify(payload))
+    .update(`${t}.${JSON.stringify(payload)}`)
     .digest('hex');
-  return { 'agentcard-signature': `sha256=${signature}` };
-}
-
-function assert(condition: boolean, message: string): void {
-  if (!condition) throw new Error(message);
-}
-
-function assertStatus(actual: number, expected: number, data: unknown): void {
-  if (actual !== expected) {
-    throw new Error(`Expected status ${expected}, got ${actual}: ${JSON.stringify(data)}`);
-  }
+  return { 'agentcard-signature': `t=${t},v1=${signature}` };
 }
 
 function assertSchema<T>(schema: z.ZodType<T>, data: unknown, label: string): T {
@@ -205,51 +166,6 @@ function validMintBody(overrides: Record<string, unknown> = {}): Record<string, 
     totalCents: 1080,
     ...overrides,
   };
-}
-
-async function withFakeStripe<T>(
-  fn: (calls: { charges: string[]; refunds: string[] }) => Promise<T>
-) {
-  const paymentIntents = stripe.paymentIntents as unknown as {
-    create: (params: unknown) => Promise<{ id: string }>;
-  };
-  const refunds = stripe.refunds as unknown as {
-    create: (params: unknown) => Promise<{ id: string }>;
-  };
-  const customers = stripe.customers as unknown as {
-    retrieve: (customerId: string) => Promise<{
-      id: string;
-      deleted?: boolean;
-      invoice_settings: { default_payment_method: string };
-    }>;
-  };
-  const originalPaymentIntentCreate = paymentIntents.create;
-  const originalRefundCreate = refunds.create;
-  const originalCustomerRetrieve = customers.retrieve;
-  const calls = { charges: [] as string[], refunds: [] as string[] };
-
-  customers.retrieve = async (customerId: string) => ({
-    id: customerId,
-    invoice_settings: { default_payment_method: 'pm_fake_default' },
-  });
-  paymentIntents.create = async (params: unknown) => {
-    const id = `pi_${randomUUID()}`;
-    calls.charges.push(JSON.stringify(params));
-    return { id };
-  };
-  refunds.create = async (params: unknown) => {
-    const id = `re_${randomUUID()}`;
-    calls.refunds.push(JSON.stringify(params));
-    return { id };
-  };
-
-  try {
-    return await fn(calls);
-  } finally {
-    paymentIntents.create = originalPaymentIntentCreate;
-    refunds.create = originalRefundCreate;
-    customers.retrieve = originalCustomerRetrieve;
-  }
 }
 
 async function runTest(name: string, fn: () => Promise<void>): Promise<TestResult> {
@@ -312,8 +228,9 @@ const tests: Array<[string, () => Promise<void>]> = [
           `expected details for both responses, got ${provider.detailCalls}`
         );
 
-        const row = await prisma.purchaseSpend.findUnique({
-          where: { userId_fingerprint: { userId, fingerprint } },
+        const row = await prisma.purchaseSpend.findFirst({
+          where: { userId, fingerprint },
+          orderBy: { createdAt: 'desc' },
         });
         assert(row?.status === PurchaseSpendStatus.HELD, `expected HELD, got ${row?.status}`);
         assert(row?.cardId === provider.cardId, 'purchase spend should store the card id');
@@ -325,6 +242,95 @@ const tests: Array<[string, () => Promise<void>]> = [
           calls.charges[0].includes('"statement_descriptor_suffix":"Test Merchant"'),
           'charge should set merchant descriptor suffix'
         );
+      });
+    },
+  ],
+  [
+    'lookup keeps a still-live held card reusable (auto-approve)',
+    async () => {
+      const userId = await createUser('lookup-live');
+      const fingerprint = `lookup-live-${randomUUID()}`;
+      await seedHeldPurchase(userId, fingerprint, `held-card-${randomUUID()}`);
+      const provider = new StubCardStateProvider({ status: 'OPEN', balanceCents: 4396 });
+
+      const result = await purchasesService.lookupPurchase(userId, fingerprint, provider);
+      assert(result.found === true, 'should find the held purchase');
+      assert(result.reusable === true, 'a live, unspent held card should remain reusable');
+      assert(provider.getDetailsCalls === 1, 'should verify card liveness via the provider');
+    },
+  ],
+  [
+    'lookup re-prompts (not reusable) and clears a held card the network already settled',
+    async () => {
+      const userId = await createUser('lookup-consumed');
+      const fingerprint = `lookup-consumed-${randomUUID()}`;
+      const seeded = await seedHeldPurchase(userId, fingerprint, `held-card-${randomUUID()}`);
+      // Card was charged + auto-closed by the network, but transaction.cleared hasn't landed.
+      const provider = new StubCardStateProvider({ status: 'CLOSED', balanceCents: 0 });
+
+      const result = await purchasesService.lookupPurchase(userId, fingerprint, provider);
+      assert(result.reusable === false, 'a consumed card must NOT silently auto-approve');
+      assert(provider.getDetailsCalls === 1, 'should verify card liveness via the provider');
+
+      const updated = await prisma.purchaseSpend.findUnique({ where: { id: seeded.id } });
+      assert(
+        updated?.status === PurchaseSpendStatus.CLEARED,
+        `consumed card should be marked CLEARED, got ${updated?.status}`
+      );
+    },
+  ],
+  [
+    'lookup fails safe (re-prompt) when the held card is unreadable',
+    async () => {
+      const userId = await createUser('lookup-unreadable');
+      const fingerprint = `lookup-unreadable-${randomUUID()}`;
+      const seeded = await seedHeldPurchase(userId, fingerprint, `held-card-${randomUUID()}`);
+      const provider: CardProvider = {
+        async mintCard() {
+          throw new Error('unused');
+        },
+        async getDetails() {
+          throw new Error('card not found');
+        },
+        async closeCard() {},
+      };
+
+      const result = await purchasesService.lookupPurchase(userId, fingerprint, provider);
+      assert(result.reusable === false, 'an unverifiable card must fail safe to re-approval');
+      const updated = await prisma.purchaseSpend.findUnique({ where: { id: seeded.id } });
+      assert(
+        updated?.status === PurchaseSpendStatus.CLEARED,
+        `unreadable card should be marked CLEARED, got ${updated?.status}`
+      );
+    },
+  ],
+  [
+    'mint re-purchases (new card, fresh charge) when the prior held card was already settled',
+    async () => {
+      const userId = await createSubscribedUser('mint-repurchase');
+      const fingerprint = `mint-repurchase-${randomUUID()}`;
+      const consumedCardId = `held-card-${randomUUID()}`;
+      const seeded = await seedHeldPurchase(userId, fingerprint, consumedCardId);
+      const provider = new RepurchaseProvider(consumedCardId);
+
+      await withFakeStripe(async (calls) => {
+        const result = await purchasesService.mintPurchaseCard(
+          validMintBody({ userId, fingerprint, totalCents: 1080 }) as never,
+          provider
+        );
+        assert(result.cardId === provider.newCardId, 're-purchase should mint a NEW card');
+        assert(provider.mintCalls === 1, 'should mint exactly one new card');
+        assert(calls.charges.length === 1, 're-purchase should charge exactly once');
+
+        const oldRow = await prisma.purchaseSpend.findUnique({ where: { id: seeded.id } });
+        assert(
+          oldRow?.status === PurchaseSpendStatus.CLEARED,
+          `prior purchase should be CLEARED, got ${oldRow?.status}`
+        );
+        const rows = await prisma.purchaseSpend.findMany({ where: { userId, fingerprint } });
+        assert(rows.length === 2, `expected 2 rows for the re-bought cart, got ${rows.length}`);
+        const held = rows.find((r) => r.status === PurchaseSpendStatus.HELD);
+        assert(held?.cardId === provider.newCardId, 'the new row should hold the new card');
       });
     },
   ],
@@ -355,8 +361,9 @@ const tests: Array<[string, () => Promise<void>]> = [
           `expected one Stripe refund, got ${calls.refunds.length}`
         );
 
-        const row = await prisma.purchaseSpend.findUnique({
-          where: { userId_fingerprint: { userId, fingerprint } },
+        const row = await prisma.purchaseSpend.findFirst({
+          where: { userId, fingerprint },
+          orderBy: { createdAt: 'desc' },
         });
         assert(
           row?.status === PurchaseSpendStatus.REFUNDED,
@@ -460,8 +467,9 @@ const tests: Array<[string, () => Promise<void>]> = [
           `expected one Stripe refund, got ${calls.refunds.length}`
         );
 
-        const row = await prisma.purchaseSpend.findUnique({
-          where: { userId_fingerprint: { userId, fingerprint } },
+        const row = await prisma.purchaseSpend.findFirst({
+          where: { userId, fingerprint },
+          orderBy: { createdAt: 'desc' },
         });
         assert(
           row?.status === PurchaseSpendStatus.REFUNDED,
@@ -538,8 +546,9 @@ const tests: Array<[string, () => Promise<void>]> = [
         'error should identify missing Stripe customer'
       );
 
-      const row = await prisma.purchaseSpend.findUnique({
-        where: { userId_fingerprint: { userId, fingerprint } },
+      const row = await prisma.purchaseSpend.findFirst({
+        where: { userId, fingerprint },
+        orderBy: { createdAt: 'desc' },
       });
       assert(row !== null, 'failed mint should persist a purchase spend row');
       assert(row?.status === PurchaseSpendStatus.FAILED, `expected FAILED, got ${row?.status}`);

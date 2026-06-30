@@ -4,7 +4,8 @@
  *
  * STATE MACHINES (one per hook):
  *   useMessageAnimationBuffer  — single-slot animation queue
- *   useThinkingVisibility      — debounced + persistence-based show/hide
+ *   useThinkingVisibility      — debounced + persistence-based show/hide,
+ *                                dismissed by active plan/completed status
  *   useStreamingAutoScroll     — sub-agent-panel auto-scroll to latest
  *   useMessageListState        — composite aggregating all of the above
  */
@@ -133,6 +134,7 @@ interface UseThinkingVisibilityOptions {
   filteredMessages: Message[];
   isChatMode: boolean;
   hasStreamingBubbles: boolean;
+  hasStreamingPlan: boolean;
   selectedAgentId: string | null;
   assistantInsertedRef: MutableRefObject<boolean>;
 }
@@ -157,7 +159,14 @@ function isLastToolInProgress(last: Message | undefined): boolean {
 }
 
 function computeShouldShow(opts: UseThinkingVisibilityOptions): boolean {
-  const { showThinkingIndicator, agent, filteredMessages, isChatMode, hasStreamingBubbles } = opts;
+  const {
+    showThinkingIndicator,
+    agent,
+    filteredMessages,
+    isChatMode,
+    hasStreamingBubbles,
+    hasStreamingPlan,
+  } = opts;
   if (!showThinkingIndicator) return false;
 
   const isAgentActive =
@@ -179,7 +188,7 @@ function computeShouldShow(opts: UseThinkingVisibilityOptions): boolean {
       m.metadata?.toolStatus === 'IN_PROGRESS' &&
       !m.metadata?.isUserAttentionMessage,
   );
-  if (hasInProgressTool) return false;
+  if (hasInProgressTool || hasStreamingPlan) return false;
 
   if (hasStreamingBubbles) return true;
 
@@ -193,6 +202,8 @@ export function useThinkingVisibility(opts: UseThinkingVisibilityOptions): boole
   const showDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const shouldShow = computeShouldShow(opts);
+  const shouldDismissPersistedThinking =
+    opts.hasStreamingPlan || opts.agent?.status === 'COMPLETED';
 
   useEffect(() => {
     if (showDebounceRef.current) {
@@ -204,6 +215,11 @@ export function useThinkingVisibility(opts: UseThinkingVisibilityOptions): boole
       prevAgentIdRef.current = selectedAgentId;
       setThinkingVisible(shouldShow);
       assistantInsertedRef.current = false;
+      return;
+    }
+
+    if (shouldDismissPersistedThinking) {
+      setThinkingVisible(false);
       return;
     }
 
@@ -223,7 +239,13 @@ export function useThinkingVisibility(opts: UseThinkingVisibilityOptions): boole
         showDebounceRef.current = null;
       }
     };
-  }, [shouldShow, selectedAgentId, assistantInsertedRef, thinkingVisible]);
+  }, [
+    shouldShow,
+    shouldDismissPersistedThinking,
+    selectedAgentId,
+    assistantInsertedRef,
+    thinkingVisible,
+  ]);
 
   return thinkingVisible;
 }
@@ -303,6 +325,7 @@ export function useMessageListState({
     filteredMessages,
     isChatMode: ctx.isChatMode,
     hasStreamingBubbles: streaming.bubbles.size > 0,
+    hasStreamingPlan: streaming.plan !== null,
     selectedAgentId: ctx.selectedAgentId,
     assistantInsertedRef,
   });

@@ -1,9 +1,13 @@
 import { PurchaseSpendStatus, type Prisma } from '@prisma/client';
 import { prisma } from '../../providers/database';
 
-export async function findPurchaseByUserAndFingerprint(userId: string, fingerprint: string) {
-  return prisma.purchaseSpend.findUnique({
-    where: { userId_fingerprint: { userId, fingerprint } },
+export async function findMostRecentPurchaseByUserAndFingerprint(
+  userId: string,
+  fingerprint: string
+) {
+  return prisma.purchaseSpend.findFirst({
+    where: { userId, fingerprint },
+    orderBy: { createdAt: 'desc' },
   });
 }
 
@@ -58,7 +62,9 @@ export async function updatePurchaseStatus(
     data: {
       status,
       ...rest,
-      ...(lineItemsJson !== undefined ? { lineItemsJson: lineItemsJson as Prisma.InputJsonValue } : {}),
+      ...(lineItemsJson !== undefined
+        ? { lineItemsJson: lineItemsJson as Prisma.InputJsonValue }
+        : {}),
     },
   });
 }

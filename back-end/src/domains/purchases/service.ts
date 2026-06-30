@@ -1,20 +1,28 @@
-import crypto from 'node:crypto';
-import { createCardProvider, type CardProvider } from '../../providers/card-provider';
+import {
+  createCardProvider,
+  type CardProvider,
+  type CardProviderDetailsResult,
+} from '../../providers/card-provider';
 import { createLogger } from '../../providers/logger';
 import { stripe } from '../../providers/stripe';
-import {
-  AGENTCARD_WEBHOOK_SECRET,
-  MAX_PURCHASE_CENTS,
-  PURCHASE_APPROVAL_CACHE_HOURS,
-} from './config';
+import { MAX_PURCHASE_CENTS, PURCHASE_APPROVAL_CACHE_HOURS } from './config';
+import { PurchaseError } from './errors';
 import * as repo from './repo';
-import { PurchaseSpendStatus } from './types';
-import type {
-  AgentCardWebhookEvent,
-  MintPurchaseInput,
-  MintPurchaseResult,
-  PurchaseLookupResult,
+import {
+  PurchaseSpendStatus,
+  type MintPurchaseInput,
+  type MintPurchaseResult,
+  type PurchaseLookupResult,
+  type PurchaseSpend,
 } from './types';
+
+// Public surface preserved across the reconcile/errors split.
+export { PurchaseError };
+export {
+  closePurchaseCard,
+  handleAgentCardWebhook,
+  verifyAgentCardWebhookSignature,
+} from './reconcile';
 
 const log = createLogger('Purchases');
 const RETRYABLE_PURCHASE_STATUSES = new Set<PurchaseSpendStatus>([
@@ -22,15 +30,6 @@ const RETRYABLE_PURCHASE_STATUSES = new Set<PurchaseSpendStatus>([
   PurchaseSpendStatus.REFUNDED,
   PurchaseSpendStatus.VOIDED,
 ]);
-
-export class PurchaseError extends Error {
-  constructor(
-    message: string,
-    readonly statusCode = 400
-  ) {
-    super(message);
-  }
-}
 
 function assertPositiveCents(value: number, field: string): void {
   if (!Number.isInteger(value) || value <= 0) {
@@ -81,23 +80,44 @@ function isReusableStatus(status: PurchaseSpendStatus): boolean {
   return status === PurchaseSpendStatus.HELD;
 }
 
-function isTerminalNoRepurchaseStatus(status: PurchaseSpendStatus): boolean {
-  return status === PurchaseSpendStatus.CLEARED;
+/** Card statuses (from the provider) where the card is still live and can be reused. */
+const LIVE_CARD_STATUSES = new Set(['OPEN', 'ACTIVE']);
+
+/**
+ * Whether a minted card is still live and unspent — the source of truth for whether a purchase
+ * has actually been consumed. A single-use AgentCard card flips to `CLOSED` / `balanceCents 0`
+ * the moment a merchant settles a charge (verified against `sk_test_`). We ask the card itself
+ * rather than trusting that the `transaction.cleared` webhook was delivered.
+ */
+function isCardLive(details: CardProviderDetailsResult): boolean {
+  return details.balanceCents > 0 && LIVE_CARD_STATUSES.has(details.status.trim().toUpperCase());
 }
 
-function extractWebhookCardId(event: AgentCardWebhookEvent): string | undefined {
-  return (
-    event.cardId ??
-    event.card_id ??
-    event.data?.cardId ??
-    event.data?.card_id ??
-    event.data?.card?.id
-  );
+/**
+ * Returns the card details only if the card is still live; `null` if it has been
+ * settled/closed/deleted or can't be read. Fail-safe: an unreadable card is treated as consumed
+ * so we re-prompt instead of silently re-issuing a dead, already-charged card.
+ */
+async function tryGetLiveCardDetails(
+  cardId: string,
+  cardProvider?: CardProvider
+): Promise<CardProviderDetailsResult | null> {
+  try {
+    const details = await (cardProvider ?? createCardProvider()).getDetails(cardId);
+    return isCardLive(details) ? details : null;
+  } catch (error) {
+    log.warn('Reuse liveness check failed; treating card as consumed', {
+      card_id: cardId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
 }
 
 export async function lookupPurchase(
   userId: string,
-  fingerprint: string
+  fingerprint: string,
+  cardProvider?: CardProvider
 ): Promise<PurchaseLookupResult> {
   if (fingerprint.trim() === '') {
     throw new PurchaseError('fingerprint is required');
@@ -109,9 +129,26 @@ export async function lookupPurchase(
     return { found: false, reusable: false, purchase: null };
   }
 
+  let reusable = isReusableStatus(purchase.status) && purchase.cardId !== null;
+  let status = purchase.status;
+
+  // Webhook-independent consume guard. `reusable` makes the workflow SKIP the user-approval
+  // prompt and re-issue the held card. Never do that for a card the network has already settled:
+  // ask the card itself (live + unspent?) instead of trusting that `transaction.cleared` was
+  // delivered. If the webhook was delayed or lost, this still forces a fresh approval rather than
+  // silently handing back a dead, already-charged card.
+  if (reusable && purchase.cardId !== null) {
+    const liveDetails = await tryGetLiveCardDetails(purchase.cardId, cardProvider);
+    if (!liveDetails) {
+      await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CLEARED);
+      reusable = false;
+      status = PurchaseSpendStatus.CLEARED;
+    }
+  }
+
   return {
     found: true,
-    reusable: isReusableStatus(purchase.status) && purchase.cardId !== null,
+    reusable,
     purchase: {
       id: purchase.id,
       agentId: purchase.agentId,
@@ -119,11 +156,148 @@ export async function lookupPurchase(
       cardId: purchase.cardId,
       merchant: purchase.merchant,
       totalCents: purchase.totalCents,
-      status: purchase.status,
+      status,
       createdAt: purchase.createdAt,
       updatedAt: purchase.updatedAt,
     },
   };
+}
+
+/**
+ * Resolve the most-recent same-fingerprint purchase. Returns a reuse result for a still-live held
+ * card (idempotent retry — no re-charge, no second user prompt). Throws 409 only for an in-flight
+ * purchase. Returns `null` for a consumed/cleared/failed row so the caller opens a FRESH purchase —
+ * i.e. the same cart can be legitimately bought again.
+ */
+async function tryReuseExistingPurchase(
+  existing: PurchaseSpend,
+  cardProvider?: CardProvider
+): Promise<MintPurchaseResult | null> {
+  // Another mint for this exact cart is mid-flight — don't double-charge.
+  if (
+    existing.status === PurchaseSpendStatus.CHARGING ||
+    existing.status === PurchaseSpendStatus.PENDING_APPROVAL
+  ) {
+    throw new PurchaseError('This purchase is already in progress', 409);
+  }
+
+  // Idempotent retry within the reuse window: hand back the held card while it's still live and
+  // unspent (e.g. a transient browser-agent error retried the identical cart).
+  if (isReusableStatus(existing.status) && existing.cardId !== null) {
+    const liveDetails = await tryGetLiveCardDetails(existing.cardId, cardProvider);
+    if (liveDetails) {
+      return {
+        purchaseId: existing.id,
+        cardId: existing.cardId,
+        pan: liveDetails.pan,
+        cvv: liveDetails.cvv,
+        expiry: liveDetails.expiry,
+        last4: liveDetails.pan.slice(-4),
+        status: existing.status,
+      };
+    }
+    // Held card already settled/closed — record it consumed; fall through to a fresh purchase.
+    await repo.updatePurchaseStatus(existing.id, PurchaseSpendStatus.CLEARED);
+  }
+
+  // CLEARED / consumed / FAILED / REFUNDED / VOIDED → caller opens a fresh (or retried) purchase.
+  return null;
+}
+
+/** Open (or re-open a retryable) PENDING_APPROVAL purchase row for this fingerprint. */
+async function openPendingPurchase(
+  input: MintPurchaseInput,
+  existing: PurchaseSpend | null
+): Promise<PurchaseSpend> {
+  const receipt = {
+    currency: input.currency,
+    lineItems: input.lineItems,
+    fees: input.fees,
+    subtotalCents: input.subtotalCents,
+    totalCents: input.totalCents,
+  };
+
+  if (existing && RETRYABLE_PURCHASE_STATUSES.has(existing.status)) {
+    return repo.updatePurchaseStatus(existing.id, PurchaseSpendStatus.PENDING_APPROVAL, {
+      lineItemsJson: receipt,
+      cardId: null,
+      stripePaymentIntentId: null,
+    });
+  }
+  return repo.createPendingPurchase({
+    userId: input.userId,
+    agentId: input.agentId,
+    fingerprint: input.fingerprint,
+    merchant: input.merchant,
+    lineItemsJson: receipt,
+    totalCents: input.totalCents,
+  });
+}
+
+/** Charge the user's saved card off-session, then mint the order-sized single-use card (→ HELD). */
+async function chargeAndIssueCard(
+  purchaseId: string,
+  input: MintPurchaseInput,
+  stripeCustomerId: string,
+  cardProvider?: CardProvider
+): Promise<MintPurchaseResult> {
+  let paymentIntentId: string | undefined;
+  try {
+    const paymentMethodId = await getCustomerDefaultPaymentMethodId(stripeCustomerId);
+    const paymentIntent = await stripe.paymentIntents.create(
+      {
+        amount: input.totalCents,
+        currency: 'usd',
+        customer: stripeCustomerId,
+        payment_method: paymentMethodId,
+        confirm: true,
+        off_session: true,
+        statement_descriptor_suffix: sanitizeDescriptorSuffix(input.merchant),
+        metadata: {
+          userId: input.userId,
+          agentId: input.agentId ?? '',
+          fingerprint: input.fingerprint,
+          purchaseSpendId: purchaseId,
+        },
+      },
+      // Per-row idempotency: a retried mint of the SAME purchase never double-charges Stripe.
+      { idempotencyKey: `purchase-charge:${purchaseId}` }
+    );
+    paymentIntentId = paymentIntent.id;
+
+    const activeCardProvider = cardProvider ?? createCardProvider();
+    const minted = await activeCardProvider.mintCard({
+      amountCents: input.totalCents,
+      idempotencyKey: `purchase:${purchaseId}`,
+    });
+    const details = await activeCardProvider.getDetails(minted.cardId);
+
+    await repo.updatePurchaseStatus(purchaseId, PurchaseSpendStatus.HELD, {
+      cardId: minted.cardId,
+      stripePaymentIntentId: paymentIntent.id,
+    });
+
+    return {
+      purchaseId,
+      cardId: minted.cardId,
+      pan: details.pan,
+      cvv: details.cvv,
+      expiry: details.expiry,
+      last4: minted.last4,
+      status: PurchaseSpendStatus.HELD,
+    };
+  } catch (error) {
+    log.error('Failed to mint purchase card', {
+      purchase_id: purchaseId,
+      user_id: input.userId,
+      agent_id: input.agentId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    await repo.updatePurchaseStatus(purchaseId, PurchaseSpendStatus.FAILED, {
+      stripePaymentIntentId: paymentIntentId ?? null,
+    });
+    throw error;
+  }
 }
 
 export async function mintPurchaseCard(
@@ -143,195 +317,24 @@ export async function mintPurchaseCard(
     );
   }
 
-  const existing = await repo.findPurchaseByUserAndFingerprint(input.userId, input.fingerprint);
+  const existing = await repo.findMostRecentPurchaseByUserAndFingerprint(
+    input.userId,
+    input.fingerprint
+  );
   if (existing) {
-    if (isReusableStatus(existing.status) && existing.cardId !== null) {
-      const details = await (cardProvider ?? createCardProvider()).getDetails(existing.cardId);
-      return {
-        purchaseId: existing.id,
-        cardId: existing.cardId,
-        pan: details.pan,
-        cvv: details.cvv,
-        expiry: details.expiry,
-        last4: details.pan.slice(-4),
-        status: existing.status,
-      };
-    }
-    if (isTerminalNoRepurchaseStatus(existing.status)) {
-      throw new PurchaseError('This purchase has already been completed', 409);
-    }
-    if (
-      existing.status === PurchaseSpendStatus.CHARGING ||
-      existing.status === PurchaseSpendStatus.PENDING_APPROVAL
-    ) {
-      throw new PurchaseError('This purchase is already in progress', 409);
-    }
+    const reused = await tryReuseExistingPurchase(existing, cardProvider);
+    if (reused) return reused;
   }
 
-  const receipt = {
-    currency: input.currency,
-    lineItems: input.lineItems,
-    fees: input.fees,
-    subtotalCents: input.subtotalCents,
-    totalCents: input.totalCents,
-  };
-
-  const purchase =
-    existing && RETRYABLE_PURCHASE_STATUSES.has(existing.status)
-      ? await repo.updatePurchaseStatus(existing.id, PurchaseSpendStatus.PENDING_APPROVAL, {
-          lineItemsJson: receipt,
-          cardId: null,
-          stripePaymentIntentId: null,
-        })
-      : await repo.createPendingPurchase({
-          userId: input.userId,
-          agentId: input.agentId,
-          fingerprint: input.fingerprint,
-          merchant: input.merchant,
-          lineItemsJson: receipt,
-          totalCents: input.totalCents,
-        });
+  const purchase = await openPendingPurchase(input, existing);
 
   const subscription = await repo.findSubscriptionByUserId(input.userId);
-  if (!subscription?.stripeCustomerId) {
+  const stripeCustomerId = subscription?.stripeCustomerId;
+  if (stripeCustomerId === undefined || stripeCustomerId === null || stripeCustomerId === '') {
     await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.FAILED);
     throw new PurchaseError('User does not have a Stripe billing customer', 402);
   }
 
   await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CHARGING);
-
-  let paymentIntentId: string | undefined;
-  try {
-    const paymentMethodId = await getCustomerDefaultPaymentMethodId(subscription.stripeCustomerId);
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: input.totalCents,
-      currency: 'usd',
-      customer: subscription.stripeCustomerId,
-      payment_method: paymentMethodId,
-      confirm: true,
-      off_session: true,
-      statement_descriptor_suffix: sanitizeDescriptorSuffix(input.merchant),
-      metadata: {
-        userId: input.userId,
-        agentId: input.agentId ?? '',
-        fingerprint: input.fingerprint,
-        purchaseSpendId: purchase.id,
-      },
-    });
-    paymentIntentId = paymentIntent.id;
-
-    const activeCardProvider = cardProvider ?? createCardProvider();
-    const minted = await activeCardProvider.mintCard({
-      amountCents: input.totalCents,
-      idempotencyKey: `purchase:${purchase.id}`,
-    });
-    const details = await activeCardProvider.getDetails(minted.cardId);
-
-    await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.HELD, {
-      cardId: minted.cardId,
-      stripePaymentIntentId: paymentIntent.id,
-    });
-
-    return {
-      purchaseId: purchase.id,
-      cardId: minted.cardId,
-      pan: details.pan,
-      cvv: details.cvv,
-      expiry: details.expiry,
-      last4: minted.last4,
-      status: PurchaseSpendStatus.HELD,
-    };
-  } catch (error) {
-    log.error('Failed to mint purchase card', {
-      purchase_id: purchase.id,
-      user_id: input.userId,
-      agent_id: input.agentId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.FAILED, {
-      stripePaymentIntentId: paymentIntentId ?? null,
-    });
-    throw error;
-  }
-}
-
-export async function closePurchaseCard(
-  cardId: string,
-  cardProvider: CardProvider = createCardProvider()
-): Promise<{ ok: true; status: PurchaseSpendStatus }> {
-  if (cardId.trim() === '') {
-    throw new PurchaseError('cardId is required');
-  }
-
-  const purchase = await repo.findPurchaseByCardId(cardId);
-  if (!purchase) {
-    throw new PurchaseError('Purchase card not found', 404);
-  }
-
-  if (
-    purchase.status === PurchaseSpendStatus.REFUNDED ||
-    purchase.status === PurchaseSpendStatus.VOIDED
-  ) {
-    return { ok: true, status: purchase.status };
-  }
-
-  if (purchase.status !== PurchaseSpendStatus.CLEARED) {
-    await cardProvider.closeCard(cardId);
-    if (purchase.stripePaymentIntentId) {
-      await stripe.refunds.create({
-        payment_intent: purchase.stripePaymentIntentId,
-        metadata: { purchaseSpendId: purchase.id },
-      });
-    }
-    await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.REFUNDED);
-    return { ok: true, status: PurchaseSpendStatus.REFUNDED };
-  }
-
-  await cardProvider.closeCard(cardId);
-  return { ok: true, status: PurchaseSpendStatus.CLEARED };
-}
-
-export function verifyAgentCardWebhookSignature(rawBody: string, signatureHeader?: string): void {
-  if (!AGENTCARD_WEBHOOK_SECRET) return;
-  if (!signatureHeader) throw new PurchaseError('Missing AgentCard webhook signature', 400);
-
-  const expected = crypto
-    .createHmac('sha256', AGENTCARD_WEBHOOK_SECRET)
-    .update(rawBody)
-    .digest('hex');
-  const received = signatureHeader.replace(/^sha256=/, '');
-  if (
-    expected.length !== received.length ||
-    !crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(received))
-  ) {
-    throw new PurchaseError('Invalid AgentCard webhook signature', 403);
-  }
-}
-
-export async function handleAgentCardWebhook(event: AgentCardWebhookEvent): Promise<{ ok: true }> {
-  const cardId = extractWebhookCardId(event);
-  if (!cardId) {
-    log.warn('Ignoring AgentCard webhook without card id', { type: event.type });
-    return { ok: true };
-  }
-
-  const purchase = await repo.findPurchaseByCardId(cardId);
-  if (!purchase) {
-    log.warn('Ignoring AgentCard webhook for unknown card', { card_id: cardId, type: event.type });
-    return { ok: true };
-  }
-
-  if (event.type === 'transaction.cleared') {
-    await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CLEARED);
-  } else if (event.type === 'transaction.voided') {
-    if (purchase.stripePaymentIntentId) {
-      await stripe.refunds.create({
-        payment_intent: purchase.stripePaymentIntentId,
-        metadata: { purchaseSpendId: purchase.id, agentcardEventType: event.type },
-      });
-    }
-    await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.VOIDED);
-  }
-
-  return { ok: true };
+  return chargeAndIssueCard(purchase.id, input, stripeCustomerId, cardProvider);
 }

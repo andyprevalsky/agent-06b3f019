@@ -9,9 +9,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
-import random
 import json
 import os
+import random
 import time
 import uuid as uuid_module
 from datetime import timedelta
@@ -2410,6 +2410,25 @@ Based on this feedback, I need to continue working on the task and address the i
 
             if result.get("status") in {"needs_payment_card_approval", "awaiting_payment_card_approval"}:
                 logger.info("Payment card approval required - returning to workflow", url=current_url)
+
+                # Close out the request_payment_card action message. This activity returns to the
+                # workflow here, BEFORE the generic success branch below that saves the FINISHED
+                # row. Without this, the IN_PROGRESS row saved at the top of the loop (same
+                # tool_call_id_action) never gets a matching FINISHED row and the tool call spins
+                # forever in the UI. The request itself succeeded — the approval/mint that follows
+                # is surfaced separately by the workflow's "Payment card ready" event.
+                await save_browser_action_message(
+                    agent_id=agent_id,
+                    title=title_done,
+                    task_id=task_id,
+                    message="",
+                    status=MessageStatus.FINISHED,
+                    browser_url=browser_url,
+                    action_type=action_name,
+                    tool_call_id=tool_call_id_action,
+                    steps_taken=iteration,
+                    total_steps=MAX_ITERATIONS,
+                )
 
                 if dom_service:
                     try:

@@ -1,13 +1,12 @@
-import { Router, type Response } from 'express';
+import { Router, type Request, type Response } from 'express';
 import { hybridAuth, type HybridAuthRequest } from '../../providers/hybridAuth';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import * as service from './service';
-import type { MintPurchaseInput } from './types';
+import type { AgentCardWebhookEvent, MintPurchaseInput } from './types';
 
 const log = createLogger('Purchases');
 const router = Router();
-export const purchasesWebhookRouter = Router();
 
 function getAuthenticatedUserId(req: HybridAuthRequest): string | undefined {
   return req.userId ?? req.user?.id;
@@ -23,15 +22,15 @@ function asNumber(value: unknown): number | undefined {
 
 router.get(
   '/lookup',
-  hybridAuth,
+  asyncHandler(hybridAuth),
   asyncHandler<HybridAuthRequest>(async (req: HybridAuthRequest, res: Response) => {
     const userId = getAuthenticatedUserId(req);
     const fingerprint = asString(req.query.fingerprint);
-    if (!userId) {
+    if (userId === undefined) {
       res.status(401).json({ error: 'Authenticated user required' });
       return;
     }
-    if (!fingerprint) {
+    if (fingerprint === undefined) {
       res.status(400).json({ error: 'fingerprint query parameter required' });
       return;
     }
@@ -43,10 +42,10 @@ router.get(
 
 router.post(
   '/mint',
-  hybridAuth,
+  asyncHandler(hybridAuth),
   asyncHandler<HybridAuthRequest>(async (req: HybridAuthRequest, res: Response) => {
     const userId = getAuthenticatedUserId(req);
-    if (!userId) {
+    if (userId === undefined) {
       res.status(401).json({ error: 'Authenticated user required' });
       return;
     }
@@ -84,9 +83,9 @@ router.post(
 
 router.post(
   '/:cardId/close',
-  hybridAuth,
+  asyncHandler(hybridAuth),
   asyncHandler<HybridAuthRequest>(async (req: HybridAuthRequest, res: Response) => {
-    if (!getAuthenticatedUserId(req)) {
+    if (getAuthenticatedUserId(req) === undefined) {
       res.status(401).json({ error: 'Authenticated user required' });
       return;
     }
@@ -107,14 +106,20 @@ router.post(
   })
 );
 
-const agentCardWebhookHandler = asyncHandler(async (req, res) => {
+/**
+ * AgentCard webhook handler. Mounted in server.ts BEFORE express.json() with a scoped parser that
+ * preserves the raw body (`req.rawBody`) — AgentCard signs the exact received bytes, so a
+ * re-stringified parse would fail signature verification.
+ */
+export const agentCardWebhookHandler = asyncHandler(async (req: Request, res: Response) => {
   try {
-    const rawBody = JSON.stringify(req.body ?? {});
+    const rawBody =
+      (req as Request & { rawBody?: string }).rawBody ?? JSON.stringify(req.body ?? {});
     service.verifyAgentCardWebhookSignature(
       rawBody,
       req.headers['agentcard-signature'] as string | undefined
     );
-    const result = await service.handleAgentCardWebhook(req.body);
+    const result = await service.handleAgentCardWebhook(req.body as AgentCardWebhookEvent);
     res.json(result);
   } catch (error) {
     if (error instanceof service.PurchaseError) {
@@ -127,8 +132,5 @@ const agentCardWebhookHandler = asyncHandler(async (req, res) => {
     res.status(500).json({ error: 'Failed to process AgentCard webhook' });
   }
 });
-
-router.post('/webhooks/agentcard', agentCardWebhookHandler);
-purchasesWebhookRouter.post('/agentcard', agentCardWebhookHandler);
 
 export default router;
