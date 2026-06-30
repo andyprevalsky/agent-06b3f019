@@ -5,30 +5,51 @@
  * [MEASURE_VIEWPORT] --> derives visible grid-line coordinates from patternOffset
  *   |
  *   v
- * [RENDER_FLOWS] --> draws deterministic SVG pill paths on existing grid lines
+ * [SELECT_FLOW_BUDGET] --> keeps the full desktop layer and a reduced mobile layer
+ *   |
+ *   v
+ * [RENDER_ACTIVE_THEME_FLOWS] --> draws one SVG tree with theme-aware gradients
  *
  * MOTION:
  * [FLOWING] --> SVG animateTransform moves each pill along a grid line
+ *   |
+ *   v (mobile viewport)
+ * [LEAN_FLOWING] --> uses fewer flows without the desktop blur filter
  *   |
  *   v (prefers-reduced-motion: reduce)
  * [HIDDEN] --> CSS hides animated pills
  *
  * System context:
  * BackgroundTiles / BackgroundPattern provide the grid pattern.
- * GridEnergyPills overlays light, diffused motion using the same patternOffset.
+ * GridEnergyPills overlays desktop SVG motion using the same patternOffset.
+ * MobileGridEnergyPillsCanvas keeps the mobile motion in canvas to avoid
+ * WebKit's SVG animation bottleneck.
  */
+
+import { useEffect, useRef } from 'react';
 
 const GRID_SIZE = 143;
 const HORIZONTAL_PILL_HEIGHT = 5;
 const VERTICAL_PILL_WIDTH = 5;
 const DIAMOND_SIZE = 22;
 const DIAMOND_HALF = DIAMOND_SIZE / 2;
+const MOBILE_VIEWPORT_MAX_WIDTH = 767;
+const MOBILE_CANVAS_DPR_MAX = 2;
+const QUERY_INPUT_MOBILE_CLEARANCE = 260;
+const LANDING_CONTROLS_MOBILE_CLEARANCE = 340;
+const LARGE_TILE_MASK_SIZE = 426.8;
+const LARGE_TILE_MASK_HALF = LARGE_TILE_MASK_SIZE / 2;
 const SMALL_DIAMOND_PATH = 'M 0,-11 Q 0,0 11,0 Q 0,0 0,11 Q 0,0 -11,0 Q 0,0 0,-11 Z';
 
 interface GridEnergyPillsProps {
   idPrefix: string;
   patternOffset: { x: number; y: number };
   maskId?: string;
+}
+
+interface MobileGridEnergyPillsCanvasProps {
+  patternOffset: { x: number; y: number };
+  selectedAgentId: string | null;
 }
 
 type Flow = {
@@ -74,6 +95,9 @@ const FLOWS: Flow[] = [
   { id: 'v-14', axis: 'y', lineRatio: 0.96, length: 64, duration: 10, delay: -3, reverse: true },
 ];
 
+const MOBILE_FLOW_IDS = new Set(['h-01', 'h-05', 'h-09', 'h-13', 'v-02', 'v-06', 'v-10', 'v-14']);
+const MOBILE_FLOWS = FLOWS.filter((flow) => MOBILE_FLOW_IDS.has(flow.id));
+
 const viewportSize = (): { width: number; height: number } => {
   if (typeof window === 'undefined') return { width: 1440, height: 900 };
   return { width: window.innerWidth, height: window.innerHeight };
@@ -96,6 +120,8 @@ const gridLinesForExtent = (offset: number, extent: number): number[] => {
 
 export function GridEnergyPills({ idPrefix, patternOffset, maskId }: GridEnergyPillsProps) {
   const { width, height } = viewportSize();
+  const isMobileViewport = width <= MOBILE_VIEWPORT_MAX_WIDTH;
+  const flows = isMobileViewport ? MOBILE_FLOWS : FLOWS;
   const minX = -GRID_SIZE;
   const minY = -GRID_SIZE;
   const maxX = width + GRID_SIZE;
@@ -105,7 +131,7 @@ export function GridEnergyPills({ idPrefix, patternOffset, maskId }: GridEnergyP
   const maskProps = maskId === undefined ? {} : { mask: `url(#${maskId})` };
 
   return (
-    <g className="grid-energy-pill-flow" {...maskProps}>
+    <g className="grid-energy-pill-flow" data-flow-count={flows.length} {...maskProps}>
       <style>
         {`
           @media (prefers-reduced-motion: reduce) {
@@ -113,91 +139,183 @@ export function GridEnergyPills({ idPrefix, patternOffset, maskId }: GridEnergyP
               display: none;
             }
           }
+
+          .grid-energy-pill-flow {
+            --energy-pill-soft-stop: 0.34;
+            --energy-pill-core-stop: 0.95;
+            --energy-pill-tail-stop: 0.28;
+          }
+
+          .dark .grid-energy-pill-flow {
+            --energy-pill-soft-stop: 0.42;
+            --energy-pill-core-stop: 1;
+            --energy-pill-tail-stop: 0.34;
+          }
         `}
       </style>
 
       <defs>
-        <filter id={`${idPrefix}-soft-glow`} x="-50%" y="-250%" width="200%" height="600%">
-          <feGaussianBlur stdDeviation="2.2" />
-        </filter>
+        {!isMobileViewport && (
+          <filter id={`${idPrefix}-soft-glow`} x="-50%" y="-250%" width="200%" height="600%">
+            <feGaussianBlur stdDeviation="2.2" />
+          </filter>
+        )}
 
-        <linearGradient id={`${idPrefix}-light-x`} x1="0%" y1="0%" x2="100%" y2="0%">
+        <linearGradient id={`${idPrefix}-energy-x`} x1="0%" y1="0%" x2="100%" y2="0%">
           <stop offset="0%" stopColor="rgb(255, 255, 255)" stopOpacity="0" />
-          <stop offset="20%" stopColor="rgb(255, 255, 255)" stopOpacity="0.34" />
-          <stop offset="52%" stopColor="rgb(255, 255, 255)" stopOpacity="0.95" />
-          <stop offset="82%" stopColor="rgb(255, 255, 255)" stopOpacity="0.28" />
+          <stop
+            offset="20%"
+            stopColor="rgb(255, 255, 255)"
+            stopOpacity="var(--energy-pill-soft-stop)"
+          />
+          <stop
+            offset="52%"
+            stopColor="rgb(255, 255, 255)"
+            stopOpacity="var(--energy-pill-core-stop)"
+          />
+          <stop
+            offset="82%"
+            stopColor="rgb(255, 255, 255)"
+            stopOpacity="var(--energy-pill-tail-stop)"
+          />
           <stop offset="100%" stopColor="rgb(255, 255, 255)" stopOpacity="0" />
         </linearGradient>
 
-        <linearGradient id={`${idPrefix}-light-y`} x1="0%" y1="0%" x2="0%" y2="100%">
+        <linearGradient id={`${idPrefix}-energy-y`} x1="0%" y1="0%" x2="0%" y2="100%">
           <stop offset="0%" stopColor="rgb(255, 255, 255)" stopOpacity="0" />
-          <stop offset="20%" stopColor="rgb(255, 255, 255)" stopOpacity="0.34" />
-          <stop offset="52%" stopColor="rgb(255, 255, 255)" stopOpacity="0.95" />
-          <stop offset="82%" stopColor="rgb(255, 255, 255)" stopOpacity="0.28" />
-          <stop offset="100%" stopColor="rgb(255, 255, 255)" stopOpacity="0" />
-        </linearGradient>
-
-        <linearGradient id={`${idPrefix}-dark-x`} x1="0%" y1="0%" x2="100%" y2="0%">
-          <stop offset="0%" stopColor="rgb(255, 255, 255)" stopOpacity="0" />
-          <stop offset="20%" stopColor="rgb(255, 255, 255)" stopOpacity="0.42" />
-          <stop offset="52%" stopColor="rgb(255, 255, 255)" stopOpacity="1" />
-          <stop offset="82%" stopColor="rgb(255, 255, 255)" stopOpacity="0.34" />
-          <stop offset="100%" stopColor="rgb(255, 255, 255)" stopOpacity="0" />
-        </linearGradient>
-
-        <linearGradient id={`${idPrefix}-dark-y`} x1="0%" y1="0%" x2="0%" y2="100%">
-          <stop offset="0%" stopColor="rgb(255, 255, 255)" stopOpacity="0" />
-          <stop offset="20%" stopColor="rgb(255, 255, 255)" stopOpacity="0.42" />
-          <stop offset="52%" stopColor="rgb(255, 255, 255)" stopOpacity="1" />
-          <stop offset="82%" stopColor="rgb(255, 255, 255)" stopOpacity="0.34" />
+          <stop
+            offset="20%"
+            stopColor="rgb(255, 255, 255)"
+            stopOpacity="var(--energy-pill-soft-stop)"
+          />
+          <stop
+            offset="52%"
+            stopColor="rgb(255, 255, 255)"
+            stopOpacity="var(--energy-pill-core-stop)"
+          />
+          <stop
+            offset="82%"
+            stopColor="rgb(255, 255, 255)"
+            stopOpacity="var(--energy-pill-tail-stop)"
+          />
           <stop offset="100%" stopColor="rgb(255, 255, 255)" stopOpacity="0" />
         </linearGradient>
       </defs>
 
-      <g className="dark:hidden">
-        {FLOWS.map((flow) => (
-          <EnergyPill
-            key={flow.id}
-            flow={flow}
-            width={width}
-            height={height}
-            minX={minX}
-            minY={minY}
-            maxX={maxX}
-            maxY={maxY}
-            travelX={travelX}
-            travelY={travelY}
-            patternOffset={patternOffset}
-            fillX={`url(#${idPrefix}-light-x)`}
-            fillY={`url(#${idPrefix}-light-y)`}
-            filterId={`${idPrefix}-soft-glow`}
-            clipId={`${idPrefix}-${flow.id}-clip-light`}
-          />
-        ))}
-      </g>
-
-      <g className="hidden dark:inline">
-        {FLOWS.map((flow) => (
-          <EnergyPill
-            key={flow.id}
-            flow={flow}
-            width={width}
-            height={height}
-            minX={minX}
-            minY={minY}
-            maxX={maxX}
-            maxY={maxY}
-            travelX={travelX}
-            travelY={travelY}
-            patternOffset={patternOffset}
-            fillX={`url(#${idPrefix}-dark-x)`}
-            fillY={`url(#${idPrefix}-dark-y)`}
-            filterId={`${idPrefix}-soft-glow`}
-            clipId={`${idPrefix}-${flow.id}-clip-dark`}
-          />
-        ))}
-      </g>
+      {flows.map((flow) => (
+        <EnergyPill
+          key={flow.id}
+          flow={flow}
+          width={width}
+          height={height}
+          minX={minX}
+          minY={minY}
+          maxX={maxX}
+          maxY={maxY}
+          travelX={travelX}
+          travelY={travelY}
+          patternOffset={patternOffset}
+          fillX={`url(#${idPrefix}-energy-x)`}
+          fillY={`url(#${idPrefix}-energy-y)`}
+          filterId={isMobileViewport ? undefined : `${idPrefix}-soft-glow`}
+          clipId={`${idPrefix}-${flow.id}-clip`}
+        />
+      ))}
     </g>
+  );
+}
+
+export function MobileGridEnergyPillsCanvas({
+  patternOffset,
+  selectedAgentId,
+}: MobileGridEnergyPillsCanvasProps) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const patternOffsetRef = useRef(patternOffset);
+  const selectedAgentIdRef = useRef(selectedAgentId);
+
+  useEffect(() => {
+    patternOffsetRef.current = patternOffset;
+  }, [patternOffset]);
+
+  useEffect(() => {
+    selectedAgentIdRef.current = selectedAgentId;
+  }, [selectedAgentId]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext('2d', { alpha: true });
+    if (!canvas || !ctx) return;
+
+    let animationFrame = 0;
+
+    const resize = () => {
+      const width = window.innerWidth;
+      const height = window.innerHeight;
+      const dpr = Math.min(window.devicePixelRatio || 1, MOBILE_CANVAS_DPR_MAX);
+      canvas.width = Math.ceil(width * dpr);
+      canvas.height = Math.ceil(height * dpr);
+      canvas.style.width = `${width}px`;
+      canvas.style.height = `${height}px`;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    };
+
+    const draw = (now: number) => {
+      const width = window.innerWidth;
+      const height = window.innerHeight;
+      ctx.clearRect(0, 0, width, height);
+      ctx.save();
+      applyMobileEnergyMask(ctx, width, height, selectedAgentIdRef.current);
+
+      const darkMode = document.documentElement.classList.contains('dark');
+      const softStop = darkMode ? 0.42 : 0.34;
+      const coreStop = darkMode ? 1 : 0.95;
+      const tailStop = darkMode ? 0.34 : 0.28;
+      const minX = -GRID_SIZE;
+      const minY = -GRID_SIZE;
+      const maxX = width + GRID_SIZE;
+      const maxY = height + GRID_SIZE;
+      const travelX = maxX - minX;
+      const travelY = maxY - minY;
+
+      for (const flow of MOBILE_FLOWS) {
+        drawMobileEnergyFlow(ctx, {
+          flow,
+          now,
+          width,
+          height,
+          minX,
+          minY,
+          maxX,
+          maxY,
+          travelX,
+          travelY,
+          patternOffset: patternOffsetRef.current,
+          softStop,
+          coreStop,
+          tailStop,
+        });
+      }
+
+      ctx.restore();
+      animationFrame = window.requestAnimationFrame(draw);
+    };
+
+    resize();
+    window.addEventListener('resize', resize);
+    animationFrame = window.requestAnimationFrame(draw);
+
+    return () => {
+      window.cancelAnimationFrame(animationFrame);
+      window.removeEventListener('resize', resize);
+    };
+  }, []);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      data-testid="terminal-grid-energy-canvas"
+      className="absolute inset-0 w-full h-full pointer-events-none z-[4]"
+    />
   );
 }
 
@@ -214,8 +332,131 @@ interface EnergyPillProps {
   patternOffset: { x: number; y: number };
   fillX: string;
   fillY: string;
-  filterId: string;
+  filterId?: string;
   clipId: string;
+}
+
+type MobileDrawParams = {
+  flow: Flow;
+  now: number;
+  width: number;
+  height: number;
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+  travelX: number;
+  travelY: number;
+  patternOffset: { x: number; y: number };
+  softStop: number;
+  coreStop: number;
+  tailStop: number;
+};
+
+const roundedRect = (
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number,
+) => {
+  const safeRadius = Math.min(radius, width / 2, height / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + safeRadius, y);
+  ctx.lineTo(x + width - safeRadius, y);
+  ctx.quadraticCurveTo(x + width, y, x + width, y + safeRadius);
+  ctx.lineTo(x + width, y + height - safeRadius);
+  ctx.quadraticCurveTo(x + width, y + height, x + width - safeRadius, y + height);
+  ctx.lineTo(x + safeRadius, y + height);
+  ctx.quadraticCurveTo(x, y + height, x, y + height - safeRadius);
+  ctx.lineTo(x, y + safeRadius);
+  ctx.quadraticCurveTo(x, y, x + safeRadius, y);
+  ctx.closePath();
+};
+
+const applyMobileEnergyMask = (
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  selectedAgentId: string | null,
+) => {
+  const inputClearance =
+    selectedAgentId === null ? LANDING_CONTROLS_MOBILE_CLEARANCE : QUERY_INPUT_MOBILE_CLEARANCE;
+  const inputAreaCutoutY = Math.max(0, height - inputClearance);
+  const largeTileX = width / 2 - LARGE_TILE_MASK_HALF;
+  const largeTileY = height * 0.4 - LARGE_TILE_MASK_HALF;
+
+  ctx.beginPath();
+  ctx.rect(0, 0, width, height);
+  ctx.rect(largeTileX, largeTileY, LARGE_TILE_MASK_SIZE, LARGE_TILE_MASK_SIZE);
+  ctx.rect(0, inputAreaCutoutY, width, inputClearance);
+  ctx.clip('evenodd');
+};
+
+const flowProgress = (flow: Flow, now: number): number => {
+  const elapsedSeconds = now / 1000 - flow.delay;
+  return (elapsedSeconds % flow.duration) / flow.duration;
+};
+
+const addGradientStops = (
+  gradient: CanvasGradient,
+  softStop: number,
+  coreStop: number,
+  tailStop: number,
+) => {
+  gradient.addColorStop(0, 'rgba(255, 255, 255, 0)');
+  gradient.addColorStop(0.2, `rgba(255, 255, 255, ${softStop})`);
+  gradient.addColorStop(0.52, `rgba(255, 255, 255, ${coreStop})`);
+  gradient.addColorStop(0.82, `rgba(255, 255, 255, ${tailStop})`);
+  gradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
+};
+
+function drawMobileEnergyFlow(
+  ctx: CanvasRenderingContext2D,
+  {
+    flow,
+    now,
+    width,
+    height,
+    minX,
+    minY,
+    maxX,
+    maxY,
+    travelX,
+    travelY,
+    patternOffset,
+    softStop,
+    coreStop,
+    tailStop,
+  }: MobileDrawParams,
+) {
+  const progress = flowProgress(flow, now);
+
+  if (flow.axis === 'x') {
+    const startX = flow.reverse ? maxX : minX - flow.length;
+    const to = flow.reverse ? -travelX - flow.length : travelX + flow.length;
+    const x = startX + to * progress;
+    const lineY = gridLineAtRatio(patternOffset.y, height, flow.lineRatio);
+    const y = lineY - HORIZONTAL_PILL_HEIGHT / 2;
+    const gradient = ctx.createLinearGradient(x, lineY, x + flow.length, lineY);
+    addGradientStops(gradient, softStop, coreStop, tailStop);
+    roundedRect(ctx, x, y, flow.length, HORIZONTAL_PILL_HEIGHT, HORIZONTAL_PILL_HEIGHT / 2);
+    ctx.fillStyle = gradient;
+    ctx.fill();
+    return;
+  }
+
+  const lineX = gridLineAtRatio(patternOffset.x, width, flow.lineRatio);
+  const startY = flow.reverse ? maxY : minY - flow.length;
+  const to = flow.reverse ? -travelY - flow.length : travelY + flow.length;
+  const y = startY + to * progress;
+  const x = lineX - VERTICAL_PILL_WIDTH / 2;
+  const gradient = ctx.createLinearGradient(lineX, y, lineX, y + flow.length);
+  addGradientStops(gradient, softStop, coreStop, tailStop);
+  roundedRect(ctx, x, y, VERTICAL_PILL_WIDTH, flow.length, VERTICAL_PILL_WIDTH / 2);
+  ctx.fillStyle = gradient;
+  ctx.fill();
 }
 
 function EnergyPill({
@@ -263,16 +504,18 @@ function EnergyPill({
 
         <g clipPath={`url(#${clipId})`}>
           <g>
-            <rect
-              x={x}
-              y={y}
-              width={flow.length}
-              height={DIAMOND_SIZE}
-              rx={DIAMOND_HALF}
-              fill={fillX}
-              opacity="0.95"
-              filter={`url(#${filterId})`}
-            />
+            {filterId !== undefined && (
+              <rect
+                x={x}
+                y={y}
+                width={flow.length}
+                height={DIAMOND_SIZE}
+                rx={DIAMOND_HALF}
+                fill={fillX}
+                opacity="0.95"
+                filter={`url(#${filterId})`}
+              />
+            )}
             <rect
               x={x}
               y={y}
@@ -325,16 +568,18 @@ function EnergyPill({
 
       <g clipPath={`url(#${clipId})`}>
         <g>
-          <rect
-            x={lineX - DIAMOND_HALF}
-            y={y}
-            width={DIAMOND_SIZE}
-            height={flow.length}
-            rx={DIAMOND_HALF}
-            fill={fillY}
-            opacity="0.95"
-            filter={`url(#${filterId})`}
-          />
+          {filterId !== undefined && (
+            <rect
+              x={lineX - DIAMOND_HALF}
+              y={y}
+              width={DIAMOND_SIZE}
+              height={flow.length}
+              rx={DIAMOND_HALF}
+              fill={fillY}
+              opacity="0.95"
+              filter={`url(#${filterId})`}
+            />
+          )}
           <rect
             x={lineX - DIAMOND_HALF}
             y={y}

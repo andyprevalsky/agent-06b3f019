@@ -9,6 +9,10 @@
  *   AGENT_SELECTED    → clip energy below the query input chrome
  *   NO_AGENT_SELECTED → clip energy below the taller landing controls
  *
+ * ENERGY RENDERER:
+ *   DESKTOP → SVG energy pills
+ *   MOBILE  → canvas energy pills to avoid iOS WebKit SVG animation jank
+ *
  * LAYER CONTRACT:
  * [CANVAS_ANIMATION z-2] -> [GRID_BACKGROUND z-3] -> [ENERGY_PILLS z-4]
  * -> [PAGE_CONTENT z-4, later sibling] -> [CHROME z-50]
@@ -16,7 +20,7 @@
 
 import { SmallTileAnimationCanvas } from '@/features/terminal-component-group';
 
-import { GridEnergyPills } from './GridEnergyPills';
+import { GridEnergyPills, MobileGridEnergyPillsCanvas } from './GridEnergyPills';
 
 const QUERY_INPUT_CLEARANCE = {
   desktop: 220,
@@ -47,6 +51,8 @@ export function BackgroundPattern({
   currentFrame,
   selectedAgentId,
 }: BackgroundPatternProps) {
+  const isMobileViewport = typeof window !== 'undefined' && window.innerWidth < 768;
+
   return (
     <>
       <svg
@@ -62,19 +68,26 @@ export function BackgroundPattern({
         <LargeTileCorners />
       </svg>
 
-      <svg
-        data-testid="terminal-grid-energy-layer"
-        className="absolute inset-0 w-full h-full pointer-events-none z-[4]"
-        xmlns="http://www.w3.org/2000/svg"
-        style={{ left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }}
-      >
-        <TerminalEnergyMask selectedAgentId={selectedAgentId} />
-        <GridEnergyPills
-          idPrefix="terminal-grid-energy"
+      {isMobileViewport ? (
+        <MobileGridEnergyPillsCanvas
           patternOffset={patternOffset}
-          maskId="terminal-energy-large-tile-mask"
+          selectedAgentId={selectedAgentId}
         />
-      </svg>
+      ) : (
+        <svg
+          data-testid="terminal-grid-energy-layer"
+          className="absolute inset-0 w-full h-full pointer-events-none z-[4]"
+          xmlns="http://www.w3.org/2000/svg"
+          style={{ left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }}
+        >
+          <TerminalEnergyMask selectedAgentId={selectedAgentId} />
+          <GridEnergyPills
+            idPrefix="terminal-grid-energy"
+            patternOffset={patternOffset}
+            maskId="terminal-energy-large-tile-mask"
+          />
+        </svg>
+      )}
 
       <SmallTileAnimationCanvas
         key={animationResetKey}
