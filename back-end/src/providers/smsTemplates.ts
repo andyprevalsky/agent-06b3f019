@@ -50,8 +50,8 @@ export const SMS_TEMPLATES = {
   agentCompleted: (_prefix: string, summary: string, _url: string) =>
     `Done: ${summary}\n\nFull report: ${ROSE_LABS_URL}`,
 
-  costLimit: (_prefix: string, costCents: number, limitCents: number) =>
-    `Budget limit hit ($${(costCents / 100).toFixed(2)}/$${(limitCents / 100).toFixed(2)}). Reply with the amount to add if you want me to continue.`,
+  costLimit: (_prefix: string, taskLabel: string, costCents: number, limitCents: number) =>
+    `I hit the $${(limitCents / 100).toFixed(2)} budget limit for "${taskLabel}". Reply with the amount to add if you want me to continue.`,
 
   onboardingWelcome: (name: string) =>
     `Hi ${name}! Welcome to Rose.\n\nText this number anytime you want something done and our superintelligence will ensure the task gets resolved optimally and quickly.\n\nI'll text you updates and ask for approval when needed.`,

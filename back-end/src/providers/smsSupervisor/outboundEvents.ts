@@ -474,7 +474,7 @@ export async function notifyCompletion(
  */
 export async function notifyCostLimit(
   userId: string,
-  agent: { id: string; treeCostCents: number; priceLimitCents: number }
+  agent: { id: string; goal: string; treeCostCents: number; priceLimitCents: number }
 ): Promise<void> {
   const startTime = Date.now();
 
@@ -492,7 +492,13 @@ export async function notifyCostLimit(
   }
 
   const prefix = agent.id.substring(0, 6);
-  const message = SMS_TEMPLATES.costLimit(prefix, agent.treeCostCents, agent.priceLimitCents);
+  const taskLabel = truncateText(sanitizeSmsText(agent.goal), 80);
+  const message = SMS_TEMPLATES.costLimit(
+    prefix,
+    taskLabel,
+    agent.treeCostCents,
+    agent.priceLimitCents
+  );
 
   const result = await sendSms(phone, message);
 
