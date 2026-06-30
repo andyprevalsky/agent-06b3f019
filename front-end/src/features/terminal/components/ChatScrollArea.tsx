@@ -1,3 +1,17 @@
+/**
+ * STATE MACHINE: ChatScrollArea
+ *
+ * LOADER:
+ *   NO_AGENT_OR_EMPTY_MESSAGES → centered opening animation / network loader
+ *   HAS_MESSAGES               → dim loader and show message list
+ *
+ * MOBILE LAYOUT:
+ *   OPENING_ANIMATION → centered inside the chat area above the input stack
+ *   MOBILE_LOADER     → keeps the desktop ASCII scale and positions below the header
+ *   MOBILE_ASCII      → visual-only transform, no layout shift for text/input
+ *   MESSAGE_LIST      → normal scrollable message area
+ */
+
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { AsciiLoader } from '@/features/terminal-component-group';
 import { MessageList } from '@/features/terminal-component-group';
@@ -35,16 +49,21 @@ export function ChatScrollArea({ agents: a, drip, opening, messagesEndRef }: Cha
       {a.selectedAgentId && a.agentDetail?.parent_agent_id && <div className="h-14" />}
 
       <div
-        className="absolute inset-0 flex items-center justify-center pointer-events-none transition-all duration-700 ease-in-out"
+        data-testid="terminal-opening-loader"
+        className="pointer-events-none absolute inset-x-0 bottom-0 top-16 flex items-center justify-center transition-all duration-700 ease-in-out md:inset-0 md:h-[100dvh]"
         style={{
           opacity: showLoader ? 1 : 0.2,
           transform: showLoader ? 'translateY(0)' : 'translateY(8px)',
           zIndex: 18,
-          height: '100dvh',
         }}
       >
-        <div className="text-center space-y-6" style={{ marginBottom: '20vh' }}>
-          <AsciiLoader showWarmingUp={false} size="large" variant="engine" />
+        <div className="space-y-6 text-center md:mb-[20vh]">
+          <div
+            data-testid="terminal-opening-ascii-transform"
+            className="translate-y-[5%] scale-95 md:translate-y-0 md:scale-100"
+          >
+            <AsciiLoader showWarmingUp={false} size="large" variant="engine" />
+          </div>
           {showLoader && (
             <div className="-mt-3">
               {!a.selectedAgentId ||

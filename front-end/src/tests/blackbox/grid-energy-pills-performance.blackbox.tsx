@@ -74,7 +74,20 @@ describe('grid energy pill performance budget', () => {
     expect(
       container.querySelector('[data-testid="terminal-grid-energy-layer"]'),
     ).not.toBeInTheDocument();
+    expect(
+      container.querySelector('[data-testid="terminal-small-tile-animation-canvas"]'),
+    ).not.toBeInTheDocument();
     expect(container.querySelectorAll('[attributeName="transform"]')).toHaveLength(0);
+  });
+
+  it('keeps the square/dot tile animation canvas on desktop only', () => {
+    setViewport(1440, 900);
+
+    const { container } = renderBackgroundPattern();
+
+    expect(
+      container.querySelector('[data-testid="terminal-small-tile-animation-canvas"]'),
+    ).toBeInTheDocument();
   });
 
   it('draws mobile energy motion through canvas animation frames', () => {
