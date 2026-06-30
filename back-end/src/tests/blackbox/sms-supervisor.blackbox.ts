@@ -410,6 +410,48 @@ async function testWriteCommit_failureBuildsUserVisibleError() {
   }
 }
 
+async function testWriteCommit_increaseBudgetResultIncludesTaskGoal() {
+  const phone = uniqueSmsPhone();
+  const userId = await provisionUserWithPhone(prisma, phone);
+  const goal = 'Book the Belo Horizonte dinner reservation and confirm the final guest count';
+
+  try {
+    const agent = await prisma.agent.create({
+      data: {
+        userId,
+        goal,
+        status: 'COST_LIMIT_REACHED',
+        priceLimitCents: 100,
+        treeCostCents: 100,
+      },
+    });
+    const op: PendingOp = {
+      kind: 'increase_budget',
+      args: { agent_id_or_prefix: agent.id.substring(0, 6), amount_dollars: 2 },
+      agentId: agent.id,
+    };
+
+    const results = await commitPendingWrites([op], userId);
+    const result = results[0];
+    if (!result?.success) {
+      throw new Error(`Expected budget commit to succeed, got ${JSON.stringify(results)}`);
+    }
+    if (!result.result.includes(goal)) {
+      throw new Error(`Expected budget confirmation to include task goal, got: ${result.result}`);
+    }
+    if (!result.result.includes('$3.00')) {
+      throw new Error(`Expected updated budget in confirmation, got: ${result.result}`);
+    }
+
+    const updatedAgent = await prisma.agent.findUnique({ where: { id: agent.id } });
+    if (updatedAgent?.priceLimitCents !== 300) {
+      throw new Error(`Expected priceLimitCents=300, got ${updatedAgent?.priceLimitCents}`);
+    }
+  } finally {
+    await cleanupAgentScopedUser(prisma, userId);
+  }
+}
+
 // ==================== WS-2 SUPPRESSED-RUN DISCARD — pendingWrites dropped ====================
 
 async function testWs2_suppressedRunDiscardsStartNewAgent() {
@@ -545,6 +587,10 @@ async function runAll() {
     {
       name: 'write-commit -- commit failure produces user-visible error',
       fn: testWriteCommit_failureBuildsUserVisibleError,
+    },
+    {
+      name: 'write-commit -- increase_budget result includes task goal',
+      fn: testWriteCommit_increaseBudgetResultIncludesTaskGoal,
     },
     {
       name: 'natural approval -- resolves matching pending request',

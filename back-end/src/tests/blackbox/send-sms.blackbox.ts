@@ -868,6 +868,47 @@ async function testBoundary_notifyAgentStartedCallsSurgeApi() {
   }
 }
 
+async function testBoundary_notifyCostLimitIncludesTaskGoal() {
+  const token = captureToken('notify-cost-limit');
+  const goal = 'boundary cost limit dinner booking task';
+  const agent = await createNotifyAgent(goal);
+  try {
+    const res = await request(`${BASE_URL}/api/send-sms/notify`, {
+      method: 'POST',
+      headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
+      body: JSON.stringify({
+        user_id: TEST_USER_ID,
+        event_type: 'cost_limit',
+        agent_id: agent.id,
+        payload: { tree_cost_cents: 150, price_limit_cents: 150 },
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+    const calls = await readCapturesForToken(token);
+    const surgeCalls = filterSurgeCalls(calls, goal);
+    if (surgeCalls.length === 0) {
+      console.log('    [skipped] No Surge calls -- Surge may not be configured');
+      return;
+    }
+    assert(surgeCalls.length === 1, `Expected 1 Surge call, got ${surgeCalls.length}`);
+    const call = surgeCalls[0];
+    assert(call.requestBody !== null, 'Expected non-null request body');
+    const body = JSON.parse(call.requestBody!);
+    assert(body.to === TEST_PHONE, `Expected to=${TEST_PHONE}`);
+    assert(
+      body.body.includes(`budget limit for "${goal}"`),
+      `Expected cost-limit message to include task goal, got: ${body.body.substring(0, 160)}`
+    );
+    assert(
+      !body.body.includes('after spending'),
+      `Expected cost-limit spend details, got: ${body.body.substring(0, 160)}`
+    );
+    assertNoInternalRoutingTokens(body.body, agent.id);
+  } finally {
+    await prisma.agent.deleteMany({ where: { id: agent.id } });
+  }
+}
+
 async function testBoundary_notifyWriteLockNaturalLanguageOnly() {
   const token = captureToken('notify-write-lock');
   const agent = await createNotifyAgent('boundary write lock agent');
@@ -1270,6 +1311,10 @@ async function runAll() {
         {
           name: 'notify agent_started calls Surge API',
           fn: testBoundary_notifyAgentStartedCallsSurgeApi,
+        },
+        {
+          name: 'notify cost_limit includes task goal',
+          fn: testBoundary_notifyCostLimitIncludesTaskGoal,
         },
         {
           name: 'notify write_lock uses natural language only',
