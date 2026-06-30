@@ -426,7 +426,7 @@ async def test_handler_execute_tool_happy_path():
     calls = []
 
     async def fake_execute_activity(fn, args=None, **kwargs):
-        calls.append({"activity": getattr(fn, "__name__", "?"), "args": args})
+        calls.append({"activity": getattr(fn, "__name__", "?"), "args": args, "kwargs": kwargs})
         # Activity name is post_agent_message for handle_tool_event; web_fetch_activity for work
         name = getattr(fn, "__name__", "")
         captured.append(name)
@@ -457,6 +457,8 @@ async def test_handler_execute_tool_happy_path():
     assert "web_fetch_activity" in captured
     assert "summarize_and_filter_links" in captured
     assert "web_fetch_download_activity" in captured
+    scrape_call = next(call for call in calls if call["activity"] == "web_fetch_activity")
+    assert scrape_call["kwargs"]["retry_policy"].maximum_attempts == 1
 
     # Result wires the file_pointer through
     assert out["result"]["downloaded_files"][0]["original_filename"] == "file.pdf"

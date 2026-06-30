@@ -135,12 +135,10 @@ class WebFetchManager(ToolManager):
                 web_fetch_activity,
                 args=[url],
                 start_to_close_timeout=timedelta(seconds=180),
-                retry_policy=RetryPolicy(
-                    maximum_attempts=3,
-                    backoff_coefficient=2.0,
-                    initial_interval=timedelta(seconds=1),
-                    maximum_interval=timedelta(seconds=10),
-                ),
+                # scrape_url already tries Firecrawl and then Parallel Extract.
+                # Retrying this activity repeats the same provider pair for
+                # scrape-blocked URLs and creates long fan-out tail latency.
+                retry_policy=RetryPolicy(maximum_attempts=1),
             )
             markdown: str = scrape_result.get("markdown", "") if isinstance(scrape_result, dict) else ""
             links: List[str] = scrape_result.get("links", []) if isinstance(scrape_result, dict) else []

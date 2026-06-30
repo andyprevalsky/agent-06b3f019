@@ -3376,6 +3376,18 @@ def _structured_response_satisfies_schema(
     return True
 
 
+def _item_satisfies_nested_fields(item: Any, nested_fields: List[Dict[str, Any]]) -> bool:
+    if not isinstance(item, dict):
+        return False
+    for nested in nested_fields:
+        name = nested.get("name")
+        if not isinstance(name, str) or name not in item:
+            return False
+        if not _has_schema_value(item.get(name), nested.get("type")):
+            return False
+    return True
+
+
 def _completed_code_task_structured_response(
     context: List[Dict[str, Any]],
     response_schema: Optional[Dict[str, Any]],
@@ -3406,6 +3418,75 @@ def _completed_code_task_structured_response(
             structured_response = structured_response["output"]
         if _structured_response_satisfies_schema(structured_response, response_schema):
             return structured_response
+
+    return None
+
+
+def _completed_for_each_structured_response(
+    context: List[Dict[str, Any]],
+    response_schema: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Return completed for_each child outputs when they satisfy a list schema.
+
+    The for_each tool already waits for every child verifier and persists each
+    child's structured response under metadata. When the parent output schema is
+    a single list[object] field, asking another verifier LLM to recopy that
+    list is redundant and can exceed the verifier activity deadline on wide
+    fan-outs.
+    """
+    if not context or not response_schema:
+        return None
+
+    fields = response_schema.get("fields", []) if isinstance(response_schema, dict) else []
+    if len(fields) != 1 or not isinstance(fields[0], dict):
+        return None
+
+    field = fields[0]
+    field_name = field.get("name")
+    field_type = _normalize_schema_field_type(field.get("type"))
+    if not isinstance(field_name, str) or field_type != "list[object]":
+        return None
+
+    nested_fields = _nested_fields_for_object_field(field)
+
+    for message in reversed(context):
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if metadata.get("toolName") != "spawn_general_purpose_agent_for_each":
+            continue
+        # The live for_each aggregate is emitted from spawn_agent as a terminal
+        # ToolEvent whose metadata only carries toolName + structured_response;
+        # child-specific routed messages may carry toolStatus. Treat an absent
+        # status as eligible only if the aggregated children below are all
+        # completed and schema-valid.
+        tool_status = metadata.get("toolStatus")
+        if tool_status is not None and tool_status != "FINISHED":
+            continue
+
+        structured_response = metadata.get("structured_response")
+        if not isinstance(structured_response, dict):
+            continue
+        items = structured_response.get("items")
+        if not isinstance(items, list) or not items:
+            continue
+
+        child_outputs: List[Dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict) or item.get("status") != "completed":
+                return None
+            child_structured = item.get("structured_response")
+            if not isinstance(child_structured, dict):
+                return None
+            if nested_fields and not _item_satisfies_nested_fields(child_structured, nested_fields):
+                return None
+            child_outputs.append(child_structured)
+
+        output = {field_name: child_outputs}
+        if _structured_response_satisfies_schema(output, response_schema):
+            return output
 
     return None
 
@@ -3866,6 +3947,38 @@ async def check_progress(  # noqa: C901
                         "gpt_token_error": None,
                     },
                     "structured_response": completed_code_output,
+                }
+
+            completed_for_each_output = _completed_for_each_structured_response(context, schema_for_call)
+            if completed_for_each_output is not None:
+                field_names = _schema_field_names(schema_for_call)
+                count = sum(len(v) for v in completed_for_each_output.values() if isinstance(v, list))
+                reasoning = (
+                    "A completed for_each delegation returned grounded structured responses "
+                    f"covering the required fields: {', '.join(field_names)}."
+                )
+                logger.info(
+                    "Progress satisfied by completed for_each structured response",
+                    fields=field_names,
+                    item_count=count,
+                    call_site=call_site,
+                )
+                return {
+                    "score": 1.0,
+                    "reasoning": reasoning,
+                    "message": f"{reasoning}\n\nScore: 1.0",
+                    "usage": {
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0,
+                        "actual_model": "structured_response",
+                        "pool_name": "completed_for_each",
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                        "claude_token_error": None,
+                        "gpt_token_error": None,
+                    },
+                    "structured_response": completed_for_each_output,
                 }
 
         config = load_config()

@@ -324,6 +324,13 @@ For each field:
    invent a value, and do NOT credit empty strings, "TODO",
    "[placeholder]", or null as populated.
 
+If a field explicitly asks for an estimate, typical cadence, frequency, or
+similar approximate value, a grounded approximation in a tool result counts as
+populatable. The evidence must still support the estimate (for example, profile
+post counts, recent post dates, or a sourced summary); do not require an exact
+authoritative cadence statement when the requested field is approximate by
+design.
+
 Score using the 3-band rubric (1.0 / 0.5 / 0.0). A load-bearing field with
 no tool-result evidence forbids 1.0; if at least one required field cannot
 be populated from grounded evidence, score is 0.5 (partial) or 0.0 (no
