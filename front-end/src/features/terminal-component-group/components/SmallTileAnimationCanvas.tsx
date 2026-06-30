@@ -98,7 +98,10 @@ export default function SmallTileAnimationCanvas({
   });
 
   return (
-    <div className="pointer-events-none fixed inset-0 z-[2]">
+    <div
+      data-testid="terminal-small-tile-animation-canvas"
+      className="pointer-events-none fixed inset-0 z-[2]"
+    >
       <canvas
         ref={dotsCanvasRef}
         className="pointer-events-none fixed inset-0 z-[-3]"

@@ -13,6 +13,10 @@
  *   DESKTOP → SVG energy pills
  *   MOBILE  → canvas energy pills to avoid iOS WebKit SVG animation jank
  *
+ * SMALL TILE ANIMATION:
+ *   DESKTOP → render decorative square/dot animation canvas
+ *   MOBILE  → do not mount the square/dot animation canvas
+ *
  * LAYER CONTRACT:
  * [CANVAS_ANIMATION z-2] -> [GRID_BACKGROUND z-3] -> [ENERGY_PILLS z-4]
  * -> [PAGE_CONTENT z-4, later sibling] -> [CHROME z-50]
@@ -89,14 +93,16 @@ export function BackgroundPattern({
         </svg>
       )}
 
-      <SmallTileAnimationCanvas
-        key={animationResetKey}
-        enabled={true}
-        tileAnimationComplete={animationComplete}
-        currentFrame={currentFrame}
-        tileColors={tileColors}
-        selectedAgentId={selectedAgentId}
-      />
+      {!isMobileViewport && (
+        <SmallTileAnimationCanvas
+          key={animationResetKey}
+          enabled={true}
+          tileAnimationComplete={animationComplete}
+          currentFrame={currentFrame}
+          tileColors={tileColors}
+          selectedAgentId={selectedAgentId}
+        />
+      )}
     </>
   );
 }
