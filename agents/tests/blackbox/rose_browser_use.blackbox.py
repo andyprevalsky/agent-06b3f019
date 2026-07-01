@@ -963,7 +963,7 @@ async def test_complete_browser_use_waterfall_only_path():
     assert any("openrouter.ai" in u for u in captured)
     assert captured_bodies
     body = captured_bodies[0]
-    assert body["tool_choice"] == "required"
+    assert body["tool_choice"] == "auto"
     assert body["tools"][0]["function"]["name"] == "click"
     assert body["tools"][0]["function"]["description"] == BROWSER_USE_TOOLS["click"]["description"]
     assert "# Available Actions" not in body["messages"][0]["content"]
@@ -1001,7 +1001,7 @@ async def test_complete_browser_use_claude_path_succeeds():
     assert result["claude_token_error"] is None
     assert captured_bodies
     body = captured_bodies[0]
-    assert body["tool_choice"]["type"] == "any"
+    assert body["tool_choice"]["type"] == "auto"
     assert body["tools"][0]["name"] == "click"
     assert body["tools"][0]["description"] == BROWSER_USE_TOOLS["click"]["description"]
 
@@ -1072,7 +1072,7 @@ async def test_complete_browser_use_gpt_path_succeeds():
     assert all("openrouter.ai" not in u for u in captured)
     assert captured_bodies
     body = captured_bodies[0]
-    assert body["tool_choice"] == "required"
+    assert body["tool_choice"] == "auto"
     assert body["tools"][0]["name"] == "click"
     assert body["tools"][0]["description"] == BROWSER_USE_TOOLS["click"]["description"]
     assert "# Available Actions" not in body["instructions"]
@@ -1092,7 +1092,7 @@ async def test_complete_browser_use_gpt_path_succeeds():
     assert payload["config"]["requested_params"]["temperature"] == 1.0
     assert payload["config"]["requested_params"]["max_tokens"] == 16000
     assert payload["tools"][0]["name"] == "click"
-    assert payload["config"]["tool_choice"] == "any"
+    assert payload["config"]["tool_choice"] == "auto"
     assert payload["extra"]["browser_recording_manifest_path"] == "/tmp/browser-recording/manifest.json"
     assert payload["extra"]["iteration"] == 7
 

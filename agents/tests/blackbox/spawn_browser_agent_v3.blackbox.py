@@ -1725,7 +1725,7 @@ def test_build_autopay_prompt_section():
     assert out.lstrip().startswith("## Billing Address")
     assert "## Payment Information" in out
     assert "call request_payment_card" in out
-    assert "card_number" in out
+    # Card field names are emitted by the RESUME prompt (after mint), not the autopay prompt.
     assert "4111111111111111" not in out
 
 
@@ -1736,7 +1736,6 @@ def test_build_autopay_prompt_section_no_card():
 
     out = build_autopay_prompt_section({"autoagentpaylimit_cents": 0, "card_number": ""}, "env")
     assert "call request_payment_card" in out
-    assert "card_cvv" in out
 
 
 def test_build_payment_card_resume_prompt_section():
