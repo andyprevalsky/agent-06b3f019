@@ -40,5 +40,4 @@ export interface Session {
  *   the drain loop without crashing.
  */
 export type PopOutcome =
-  | { ok: true; data: PopResponse }
-  | { ok: false; status: number; statusText: string };
+  { ok: true; data: PopResponse } | { ok: false; status: number; statusText: string };
