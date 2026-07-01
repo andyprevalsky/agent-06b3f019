@@ -28,25 +28,27 @@ beforeEach(() => {
   canGoForwardValue = false;
 
   const originalCreateElement = document.createElement.bind(document);
-  vi.spyOn(document, 'createElement').mockImplementation((tagName: string, options?: ElementCreationOptions) => {
-    if (tagName === 'webview') {
-      const el = originalCreateElement('div', options) as unknown as FakeWebview;
-      Object.defineProperty(el, 'src', { writable: true, value: DEFAULT_BROWSE_URL });
-      el.canGoBack = () => canGoBackValue;
-      el.canGoForward = () => canGoForwardValue;
-      el.goBack = () => {
-        backCalls += 1;
-      };
-      el.goForward = () => {
-        forwardCalls += 1;
-      };
-      el.reload = () => {
-        reloadCalls += 1;
-      };
-      return el as unknown as HTMLElement;
-    }
-    return originalCreateElement(tagName, options);
-  });
+  vi.spyOn(document, 'createElement').mockImplementation(
+    (tagName: string, options?: ElementCreationOptions) => {
+      if (tagName === 'webview') {
+        const el = originalCreateElement('div', options) as unknown as FakeWebview;
+        Object.defineProperty(el, 'src', { writable: true, value: DEFAULT_BROWSE_URL });
+        el.canGoBack = () => canGoBackValue;
+        el.canGoForward = () => canGoForwardValue;
+        el.goBack = () => {
+          backCalls += 1;
+        };
+        el.goForward = () => {
+          forwardCalls += 1;
+        };
+        el.reload = () => {
+          reloadCalls += 1;
+        };
+        return el as unknown as HTMLElement;
+      }
+      return originalCreateElement(tagName, options);
+    },
+  );
 });
 
 afterEach(() => {

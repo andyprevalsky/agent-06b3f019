@@ -239,6 +239,7 @@ async def request_user_approval_direct(
                             "question": question,
                             "attention_request_id": request_id,
                             "workflow_id": workflow_id,
+                            "metadata": metadata or None,
                         },
                     ],
                     start_to_close_timeout=timedelta(seconds=SMS_NOTIFY_TIMEOUT_SECONDS),

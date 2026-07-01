@@ -26,10 +26,21 @@ from helpers.attachments import (
     get_cached_file,
     get_file_from_pointer,
 )
-from helpers.context_scope import is_internal_subagent_message
 from helpers.context_pointers import resolve_pointers_in_messages
+from helpers.context_scope import is_internal_subagent_message
 from helpers.messages import stream_assistant_chunk, stream_plan_event, stream_tool_event
 from helpers.tracing import backend_api_headers, current_request_id, traced
+from providers.fast_cache.client import (
+    ensure_position_context as ensure_fast_cache_position_context,
+)
+from providers.fast_cache.context import (
+    FastCacheContext,
+)
+from providers.fast_cache.context import (
+    set_context as set_fast_cache_context,
+)
+from providers.fast_cache.context import write_through_enabled_for_user
+from providers.fast_cache.rose_cache import cached_complete
 from providers.rose import (
     ClaudeAuthContext,
     ComputeAuthContext,
@@ -194,6 +205,8 @@ Always replace with a goal-anchored name. Examples:
   - list[object]: List of objects — MUST include properties describing each item shape
   - file_pointer: Reference to a file produced by the agent
   - list[file_pointer]: List of file references
+  - session_file_pointer: Internal remote-session file reference
+  - list[session_file_pointer]: List of internal remote-session file references
 
 # WORKED EXAMPLES
 
@@ -249,7 +262,18 @@ _SchemaFieldType = Literal[
     "list[session_file_pointer]",
 ]
 
-_SchemaNestedFieldType = Literal["str", "int", "float", "bool", "list[str]", "list[int]"]
+_SchemaNestedFieldType = Literal[
+    "str",
+    "int",
+    "float",
+    "bool",
+    "list[str]",
+    "list[int]",
+    "file_pointer",
+    "list[file_pointer]",
+    "session_file_pointer",
+    "list[session_file_pointer]",
+]
 
 
 class _GeneratedResponseSchemaNestedField(BaseModel):
@@ -286,7 +310,7 @@ def _build_claude_auth_context(
     source: Optional[str] = None,
     user_id: Optional[str] = None,
     pool_token_id: Optional[str] = None,
-    max_rotations: int = 3,
+    max_rotations: int = 2,
 ) -> Optional[ClaudeAuthContext]:
     """Build the rotation-capable claudeAuth context RoseClient.complete needs."""
     if not claude_token:
@@ -335,7 +359,7 @@ def _build_gpt_auth_context(
     source: Optional[str] = None,
     user_id: Optional[str] = None,
     pool_token_id: Optional[str] = None,
-    max_rotations: int = 3,
+    max_rotations: int = 2,
 ) -> Optional[GptAuthContext]:
     """Build the gptAuth context RoseClient.complete needs."""
     if not gpt_token:
@@ -382,7 +406,7 @@ def _build_compute_auth_context(
     result: Dict[str, Any],
     user_id: str,
     *,
-    max_rotations: int = 3,
+    max_rotations: int = 2,
 ) -> Optional[ComputeAuthContext]:
     """Build a direct auth context from the unified compute-token endpoint."""
     token = result.get("accessToken")
@@ -1756,7 +1780,6 @@ async def call_llm_structured_streaming(  # noqa: C901
         claude_token_error: Optional[str] = None  # Set when claudeAuth fell through to waterfall
         gpt_token_error: Optional[str] = None  # Set when gptAuth fell through to waterfall
         final_finish_reason = ""  # From usage chunk (parsers normalize to OpenAI vocabulary)
-        was_cancelled = False
         chunk_count = 0
         stream_usage: Optional[Dict[str, Any]] = None
 
@@ -1819,7 +1842,11 @@ async def call_llm_structured_streaming(  # noqa: C901
             rose_kwargs["idle_timeout_s"] = None if idle_timeout_s < 0 else idle_timeout_s
 
         try:
-            async for chunk in rose_client.complete(
+            # Fast Mode record/replay: transparent passthrough when off; on a cache
+            # hit this re-streams the stored response without touching Rose/Anthropic.
+            async for chunk in cached_complete(
+                rose_client,
+                call_site=call_site,
                 pool=pool,
                 messages=messages,
                 response_model=response_model,
@@ -1831,7 +1858,6 @@ async def call_llm_structured_streaming(  # noqa: C901
                 gpt_auth=gpt_auth_context,
                 agent_id=agent_id,
                 request_id=request_id,
-                call_site=call_site,
                 thinking=thinking,
                 effort=effort,
                 **rose_kwargs,
@@ -1874,6 +1900,12 @@ async def call_llm_structured_streaming(  # noqa: C901
 
                 if kind == "tool_call":
                     # Native direct-token tool call — buffer for envelope rebuild.
+                    # Fast Mode replays stored provider streams, and retained
+                    # provider labels may be "-anthropic" even though the chunks
+                    # are native tool_use blocks. Classify by the stream shape
+                    # itself so replayed tool-only responses do not fall through
+                    # to the JSON-content parser with an empty accumulated_json.
+                    using_native_direct_tools = True
                     args_raw = chunk.data.get("arguments", "")
                     try:
                         parsed_args = json.loads(args_raw) if args_raw else {}
@@ -2058,7 +2090,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                     await on_raw_progress(len(accumulated_reasoning) + len(accumulated_json) + len(text_buffer))
         except asyncio.CancelledError:
             logger.info("⏹️ Rose streaming cancelled (asyncio.CancelledError)")
-            was_cancelled = True
+            raise
         except RoseError as exc:
             logger.error(f"❌ [{request_id}] [{call_site}] Rose streaming failed: {type(exc).__name__}: {exc}")
             raise ValueError(f"Rose streaming failed: {exc}") from exc
@@ -2070,7 +2102,7 @@ async def call_llm_structured_streaming(  # noqa: C901
         #   - Any other schema (PlannerResponse, ReasoningResponse, etc.): serialize
         #     the first tool's `input` dict directly. The verifier path at
         #     `_call_llm_verifier` does the same.
-        if not was_cancelled and using_native_direct_tools:
+        if using_native_direct_tools:
             model_fields = set(response_model.model_fields.keys())
             is_agent_envelope = {"response", "tool_calls"}.issubset(model_fields)
             if tool_use_blocks:
@@ -2089,47 +2121,6 @@ async def call_llm_structured_streaming(  # noqa: C901
                 # Native text only (no tool_use) — treat as the JSON envelope
                 # body; existing markdown/balanced-brace extraction handles it.
                 accumulated_json = text_buffer
-
-        if was_cancelled:
-            logger.info(f"🛑 Rose streaming cancelled, returning partial usage: {token_count} tokens")
-            # Return empty response with partial usage - workflow will handle the pause
-            empty_response = response_model.model_validate(
-                {"reasoning": "Streaming cancelled by user", "response": "", "tool_calls": []}
-            )
-            # Use stream_usage if captured before cancellation, otherwise estimate
-            if stream_usage:
-                usage = {
-                    "prompt_tokens": stream_usage.get("prompt_tokens", 0),
-                    "completion_tokens": stream_usage.get("completion_tokens", 0),
-                    "total_tokens": stream_usage.get("total_tokens", 0),
-                    "actual_model": actual_model,
-                    "pool_name": pool_name,
-                    "pool_size": pool_size,
-                    "claude_token_error": claude_token_error,
-                    "gpt_token_error": gpt_token_error,
-                    "claude_token_rotated": stream_usage.get("claude_token_rotated", False),
-                    "gpt_token_rotated": stream_usage.get("gpt_token_rotated", False),
-                    "compute_token_rotated": stream_usage.get("compute_token_rotated", False),
-                    "compute_token_used": stream_usage.get("compute_token_used"),
-                    "cancelled": True,
-                }
-            else:
-                usage = {
-                    "prompt_tokens": 0,
-                    "completion_tokens": token_count,
-                    "total_tokens": token_count,
-                    "actual_model": actual_model,
-                    "pool_name": pool_name,
-                    "pool_size": pool_size,
-                    "claude_token_error": claude_token_error,
-                    "gpt_token_error": gpt_token_error,
-                    "claude_token_rotated": False,
-                    "gpt_token_rotated": False,
-                    "compute_token_rotated": False,
-                    "compute_token_used": None,
-                    "cancelled": True,
-                }
-            return empty_response, usage, detected_tools_ordered
 
         logger.info(
             f"🏁 [{call_site}] Rose streaming complete, received {chunk_count} chunks, "
@@ -2469,7 +2460,6 @@ async def call_llm_structured_streaming(  # noqa: C901
     last_emitted_for_chunk = ""  # Track what we've actually sent to on_chunk (for 18-char batching)
     accumulated_text = ""
     final_response = None
-    was_cancelled = False
     chunk_count = 0
 
     # Use create_partial for streaming
@@ -2505,30 +2495,15 @@ async def call_llm_structured_streaming(  # noqa: C901
             final_response = partial
 
         # Final emit - flush any remaining content that wasn't sent (under 18 chars)
-        if not was_cancelled and accumulated_text and accumulated_text != last_emitted_for_chunk:
+        if accumulated_text and accumulated_text != last_emitted_for_chunk:
             await on_chunk(accumulated_text, len(accumulated_text) // 4)
 
     except asyncio.CancelledError:
         logger.info("⏹️ OpenRouter streaming cancelled (asyncio.CancelledError)")
-        was_cancelled = True
+        raise
     except Exception as e:
         logger.error(f"Streaming LLM call failed: {str(e)}", model=model)
         raise
-
-    # Handle cancellation
-    if was_cancelled:
-        logger.info("🛑 OpenRouter streaming cancelled, returning partial usage")
-        empty_response = response_model.model_validate(
-            {"reasoning": "Streaming cancelled by user", "response": "", "tool_calls": []}
-        )
-        estimated_tokens = len(accumulated_text) // 4
-        usage = {
-            "prompt_tokens": 0,
-            "completion_tokens": estimated_tokens,
-            "total_tokens": estimated_tokens,
-            "cancelled": True,
-        }
-        return empty_response, usage, []  # No tool detection in OpenRouter path
 
     if final_response is None:
         raise ValueError(f"Streaming LLM returned no response (model={model})")
@@ -2994,7 +2969,6 @@ async def _call_llm_verifier(  # noqa: C901
     )
 
     response_model = _build_verifier_response_model(response_schema)
-    response_format = _build_verifier_json_schema(response_schema)
 
     accumulated_reasoning = ""
     accumulated_json = ""
@@ -3022,7 +2996,10 @@ async def _call_llm_verifier(  # noqa: C901
         pool_token_id=gpt_token_pool_id,
     )
     try:
-        async for chunk in rose_client.complete(
+        # Fast Mode record/replay (verifier path).
+        async for chunk in cached_complete(
+            rose_client,
+            call_site=call_site,
             pool=pool,
             messages=messages,
             response_model=response_model,
@@ -3032,7 +3009,6 @@ async def _call_llm_verifier(  # noqa: C901
             gpt_auth=gpt_auth_context,
             agent_id=agent_id,
             request_id=verifier_request_id,
-            call_site=call_site,
             dump_extra=dump_extra,
         ):
             chunk_count += 1
@@ -3666,6 +3642,9 @@ async def check_progress(  # noqa: C901
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
     dump_extra: Optional[Dict[str, Any]] = None,
+    fast_mode_cache_enabled: bool = False,
+    fast_mode_goal: Optional[str] = None,
+    fast_mode_step: int = 0,
 ) -> Dict[str, Any]:
     """
     Use LLM judge to check progress toward goal. Canonical entry point — all
@@ -3730,6 +3709,20 @@ async def check_progress(  # noqa: C901
             ``result["output"]`` regardless of score — callers decide what
             to do with partial output (C2).
     """
+    # Fast Mode: set the cache context so the verifier's Rose call (via
+    # _call_llm_verifier → cached_complete) records/replays by canonical request
+    # fingerprint. Prompt/schema/message changes intentionally miss.
+    write_through_enabled = write_through_enabled_for_user(claude_token_user_id or gpt_token_user_id)
+    if fast_mode_goal and (fast_mode_cache_enabled or write_through_enabled):
+        set_fast_cache_context(
+            FastCacheContext(
+                enabled=fast_mode_cache_enabled,
+                goal=fast_mode_goal,
+                base_step=fast_mode_step,
+                write_enabled=fast_mode_cache_enabled or write_through_enabled,
+            )
+        )
+
     # B2: Force verifier model and ignore the caller-passed model arg.
     forced_model = VERIFIER_MODEL
     if model != forced_model:
@@ -3950,6 +3943,9 @@ async def call_llm_activity(  # noqa: C901
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
     user_id: Optional[str] = None,
+    fast_mode_cache_enabled: bool = False,
+    fast_mode_goal: Optional[str] = None,
+    fast_mode_step: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Activity wrapper for LLM calls with structured output and streaming.
@@ -3987,6 +3983,23 @@ async def call_llm_activity(  # noqa: C901
         - tool_calls: List of tool call dicts
         - usage: Token usage dict
     """
+    # Fast Mode: set the per-activity cache context so the Rose wrapper (deep
+    # inside call_llm_structured_streaming) records/replays. Each Temporal activity
+    # runs as its own asyncio task, so this contextvar is naturally scoped to it.
+    # Keys are canonical request fingerprints, so prompt/schema/message changes miss.
+    write_through_enabled = write_through_enabled_for_user(user_id)
+    if fast_mode_goal and (fast_mode_cache_enabled or write_through_enabled):
+        set_fast_cache_context(
+            FastCacheContext(
+                enabled=fast_mode_cache_enabled,
+                goal=fast_mode_goal,
+                base_step=fast_mode_step,
+                write_enabled=fast_mode_cache_enabled or write_through_enabled,
+            )
+        )
+    elif fast_mode_step is not None:
+        await ensure_fast_cache_position_context(agent_id, fast_mode_step)
+
     try:
         _safe_heartbeat("Calling LLM for structured output")
 
@@ -4237,6 +4250,7 @@ async def set_response_schema_activity(
     agent_id: str,
     user_messages: List[str],
     compute_auth: Optional[Dict[str, Any]] = None,
+    fast_mode_cache_enabled: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """
     Generate and save a structured response schema for an agent.
@@ -4274,16 +4288,61 @@ async def set_response_schema_activity(
     _safe_heartbeat("Generating response schema via Rose")
     logger.info(f"[TIMING] Starting response schema generation for agent {agent_id}")
 
+    # Fast Mode: the schema is deterministic given the goal + schema prompt/settings,
+    # so cache it and skip the (≈2s) generation LLM call on replay. We still persist
+    # it to the agent row.
+    _fc_key = None
+    _fc_cached: Optional[Dict[str, Any]] = None
+    write_through_enabled = False
+    if compute_auth:
+        write_through_enabled = write_through_enabled_for_user(
+            compute_auth.get("user_id") or compute_auth.get("userId")
+        )
+    if not write_through_enabled and agent_id:
+        from providers.fast_cache import client as _fc_client
+
+        _, _, write_through_enabled = await _fc_client.resolve_agent_fast_mode(agent_id)
+    if goal and (fast_mode_cache_enabled or write_through_enabled):
+        from providers.fast_cache import client as _fc_client
+        from providers.fast_cache import normalize as _fc_norm
+
+        _fc_key = _fc_norm.content_key(
+            goal,
+            "response_schema",
+            {
+                "pool": "rose-1-lite",
+                "system": _RESPONSE_SCHEMA_SYSTEM_PROMPT,
+                "user": f"Goal: {goal}",
+                "response_model": "_GeneratedResponseSchema",
+                "temperature": 0.3,
+                "max_tokens": [2000, 4000],
+            },
+        )
+        if fast_mode_cache_enabled:
+            _fc_cached = await _fc_client.cache_get(_fc_key)
+
     try:
         async with httpx.AsyncClient(timeout=90.0) as client:
-            # 1. Generate schema in-process so the stable agents-side Rose
-            # routing owns claudeAuth/gptAuth selection, waterfall, and token rotation.
+            # 1. Generate schema in-process (or replay from the Fast Mode cache) so the
+            # stable agents-side Rose routing owns claudeAuth/gptAuth selection,
+            # waterfall, and token rotation.
             generate_start = time.perf_counter()
-            schema, usage = await _generate_response_schema_with_rose(
-                goal,
-                agent_id=agent_id,
-                compute_auth=compute_auth,
-            )
+            if _fc_cached is not None:
+                schema = _fc_cached.get("schema", {})
+                usage = _fc_cached.get("usage", {})
+            else:
+                schema, usage = await _generate_response_schema_with_rose(
+                    goal,
+                    agent_id=agent_id,
+                    compute_auth=compute_auth,
+                )
+                if _fc_key is not None:
+                    from providers.fast_cache import client as _fc_client
+                    from providers.fast_cache import normalize as _fc_norm
+
+                    await _fc_client.cache_set(
+                        _fc_key, "llm", _fc_norm.goal_hash(goal), {"schema": schema, "usage": usage}
+                    )
             generate_elapsed = time.perf_counter() - generate_start
             logger.info(
                 f"[TIMING] Schema generation Rose call: {generate_elapsed * 1000:.1f}ms ({generate_elapsed:.2f}s)"
@@ -4650,6 +4709,9 @@ async def call_planner_llm_activity(
     gpt_token_source: Optional[str] = None,
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
+    fast_mode_cache_enabled: bool = False,
+    fast_mode_goal: Optional[str] = None,
+    fast_mode_step: int = 0,
 ) -> Dict[str, Any]:
     """
     Temporal activity for calling the dedicated planner LLM.
@@ -4681,6 +4743,20 @@ async def call_planner_llm_activity(
 
     activity_start = time.perf_counter()
     _safe_heartbeat("Calling planner LLM")
+
+    # Fast Mode: set the cache context so the planner's Rose call (via
+    # call_llm_structured_streaming → cached_complete) records/replays by canonical
+    # request fingerprint. call_site "planner" keeps it distinct.
+    write_through_enabled = write_through_enabled_for_user(claude_token_user_id or gpt_token_user_id)
+    if fast_mode_goal and (fast_mode_cache_enabled or write_through_enabled):
+        set_fast_cache_context(
+            FastCacheContext(
+                enabled=fast_mode_cache_enabled,
+                goal=fast_mode_goal,
+                base_step=fast_mode_step,
+                write_enabled=fast_mode_cache_enabled or write_through_enabled,
+            )
+        )
 
     # Build system prompt for planner
     prompt_start = time.perf_counter()

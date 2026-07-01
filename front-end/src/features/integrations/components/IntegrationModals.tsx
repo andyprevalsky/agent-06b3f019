@@ -5,7 +5,7 @@
  */
 
 import AtlasPasswordModal from '@/components/AtlasPasswordModal';
-import ApplePasswordsModal from '@/components/ApplePasswordsModal';
+import PasskeysModal from '@/components/PasskeysModal';
 
 import type { useBrowserSync } from '../hooks/useBrowserSync';
 import type { usePasswordSync } from '../hooks/usePasswordSync';
@@ -29,11 +29,11 @@ export default function IntegrationModals({ browser, passwords, actions }: Integ
         syncType="browser data"
       />
 
-      {/* Apple Passwords Modal */}
-      <ApplePasswordsModal
-        isOpen={passwords.applePasswordsModalOpen}
-        onClose={() => passwords.setApplePasswordsModalOpen(false)}
-        onSync={actions.onApplePasswordsSync}
+      {/* Apple Passwords & Passkeys Modal */}
+      <PasskeysModal
+        isOpen={passwords.passkeysModalOpen}
+        onClose={() => passwords.setPasskeysModalOpen(false)}
+        onSync={actions.onPasskeysConnect}
       />
 
       {/* Atlas Passwords Modal */}

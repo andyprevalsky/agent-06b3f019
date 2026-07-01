@@ -23,6 +23,15 @@ from tools.base import EventType, MessageStatus, ToolEvent, format_error_message
 
 logger = structlog.get_logger()
 
+_GREP_DISPLAY_KEY_ALIASES = {
+    "before": "-B",
+    "after": "-A",
+    "context_c": "-C",
+    "line_numbers": "-n",
+    "case_insensitive": "-i",
+}
+_GREP_INTERNAL_DISPLAY_KEYS = {"tool", "tool_call_id"}
+
 
 def _safe_time() -> float:
     """Get current time, returning 0 if in workflow sandbox."""
@@ -43,20 +52,20 @@ def _format_source(source: str) -> str:
     return source.replace("_", " ") if source else "messages"
 
 
-def _format_grep_title(prefix: str, pattern: str, source: str, person_id: Optional[str], since: Optional[str]) -> str:
+def _format_grep_title(prefix: str, pattern: str, source: str) -> str:
     display_pattern = _truncate_pattern(pattern)
-    source_label = _format_source(source)
+    source_label = _format_source(source) if source else "all local data"
     query = f'"{display_pattern}"' if display_pattern else "all messages"
-    qualifiers = []
-    if person_id:
-        qualifiers.append("selected person")
-    if since:
-        qualifiers.append(f"since {since}")
+    return f"{prefix} {source_label} for {query}"
 
-    title = f"{prefix} {source_label} for {query}"
-    if qualifiers:
-        title += f" ({', '.join(qualifiers)})"
-    return title
+
+def _public_grep_params(tool_call: Dict[str, Any]) -> Dict[str, Any]:
+    params: Dict[str, Any] = {}
+    for key, value in tool_call.items():
+        if key in _GREP_INTERNAL_DISPLAY_KEYS or value is None:
+            continue
+        params[_GREP_DISPLAY_KEY_ALIASES.get(key, key)] = value
+    return params
 
 
 async def execute_grep(
@@ -68,13 +77,11 @@ async def execute_grep(
 ) -> Dict[str, Any]:
     """Execute grep search and post events via handle_tool_event."""
     pattern = tool_call.get("pattern", "")
-    source = tool_call.get("source", "messages")
-    person_id = tool_call.get("person_id")
-    since = tool_call.get("since")
+    source = tool_call.get("source", "")
 
-    progress_title = _format_grep_title("Searching", pattern, source, person_id, since)
-    completed_title = _format_grep_title("Searched", pattern, source, person_id, since)
-    failed_title = _format_grep_title("Grep failed searching", pattern, source, person_id, since)
+    progress_title = _format_grep_title("Searching", pattern, source)
+    completed_title = _format_grep_title("Searched", pattern, source)
+    failed_title = _format_grep_title("Grep failed searching", pattern, source)
 
     start_time = _safe_time()
 
@@ -98,13 +105,11 @@ async def execute_grep(
             "Calling grep_activity",
             pattern=pattern[:LOG_PATTERN_MAX_LENGTH],
             source=source,
-            person_id=person_id[:8] if person_id else None,
-            since=since,
         )
 
         result = await execute_activity(
             grep_activity,
-            args=[pattern, source, person_id, since, user_id, agent_id],
+            args=[tool_call, user_id, agent_id],
             start_to_close_timeout=timedelta(seconds=ACTIVITY_TIMEOUT_SECONDS),
             retry_policy=RetryPolicy(
                 maximum_attempts=ACTIVITY_MAX_ATTEMPTS,
@@ -117,7 +122,7 @@ async def execute_grep(
         elapsed_time = _safe_time() - start_time
 
         message = format_tool_message(
-            params=tool_call,
+            params=_public_grep_params(tool_call),
             result=result,
             time_elapsed=elapsed_time,
             cost_cents=0,
@@ -149,7 +154,7 @@ async def execute_grep(
         elapsed_time = _safe_time() - start_time
 
         error_message = format_error_message(
-            params=tool_call,
+            params=_public_grep_params(tool_call),
             error=e,
             time_elapsed=elapsed_time,
             cost_cents=0,

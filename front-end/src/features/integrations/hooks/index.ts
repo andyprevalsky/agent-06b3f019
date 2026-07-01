@@ -2,7 +2,6 @@ export { useAccordion } from './useAccordion';
 export { useIntegrationData } from './useIntegrationData';
 export { useBrowserSync } from './useBrowserSync';
 export { usePasswordSync } from './usePasswordSync';
-export { usePasswordRequest } from './usePasswordRequest';
 export { useComputeSync } from './useComputeSync';
 export { useMessagesSync } from './useMessagesSync';
 export { useFileUpload } from './useFileUpload';

@@ -167,6 +167,8 @@ function buildReturn(a: BuildArgs) {
     setSelectedModel: a.messaging.setSelectedModel,
     pendingPriceLimitCents: a.messaging.pendingPriceLimitCents,
     setPendingPriceLimitCents: a.messaging.setPendingPriceLimitCents,
+    fastMode: a.messaging.fastMode,
+    setFastMode: a.messaging.setFastMode,
     createModalOpen: a.modals.createModalOpen,
     setCreateModalOpen: a.modals.setCreateModalOpen,
     loginModalOpen: a.modals.loginModalOpen,

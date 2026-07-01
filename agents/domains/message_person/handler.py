@@ -114,7 +114,8 @@ class MessagePersonManager(ToolManager):
         context_gates = tool_call.get("context_gates") or getattr(workflow_instance, "context_gates", None) or {}
         general_messages_context = await self._fetch_voice_context(context_gates, user_id)
 
-        # -- Step 2: Exa enrichment removed (people_search tool deleted) --
+        # -- Step 2: Exa enrichment not used here (people_search is an explore-only
+        # research tool; message_person does not enrich inline) --
         exa_context = ""
 
         # -- Step 3: Generate message via LLM --

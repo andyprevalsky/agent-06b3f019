@@ -70,7 +70,7 @@ This tool handles shadow DOM traversal automatically. Set iframes=true to also s
             "type": "function",
             "function": {
                 "name": "screenshot",
-                "description": "Take a screenshot of the current page. Use this for visual confirmation of page state.",
+                "description": "Take a screenshot of the visible viewport. Screenshot pixels match viewport coordinates used by clickAtCoordinates.",
                 "parameters": {
                     "type": "object",
                     "properties": {},
@@ -224,6 +224,7 @@ Use this ONLY when:
 - The element cannot be found with observe()
 
 Coordinates are relative to the top-left corner of the viewport.
+If using a screenshot, use the screenshot image's top-left corner as (0, 0).
 
 Examples:
 - clickAtCoordinates(x=500, y=300)

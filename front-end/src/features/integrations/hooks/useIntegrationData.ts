@@ -11,6 +11,7 @@ interface IntegrationSyncState {
   connectedBrowsers: Set<BrowserType>;
   chromePasswordsSynced: boolean;
   applePasswordsSynced: boolean;
+  passkeysSynced: boolean;
   atlasPasswordsSynced: boolean;
   claudeCodeSynced: boolean;
   gptCodeSynced: boolean;
@@ -27,7 +28,9 @@ function deriveStateFromIntegrations(integrations: ConnectedIntegration[]): Inte
     }
   }
 
-  const find = (name: string) => integrations.some((i) => i.name === name);
+  const isConnected = (integration: ConnectedIntegration) =>
+    integration.status === 'CONNECTED' && integration.isActive;
+  const find = (name: string) => integrations.some((i) => i.name === name && isConnected(i));
 
   return {
     connectedIntegrations: integrations,
@@ -36,6 +39,7 @@ function deriveStateFromIntegrations(integrations: ConnectedIntegration[]): Inte
       (i) => i.name === 'chrome_passwords' || i.name === 'chrome',
     ),
     applePasswordsSynced: find('apple_passwords'),
+    passkeysSynced: integrations.some((i) => isConnected(i) && i.name.endsWith('_passkeys')),
     atlasPasswordsSynced: find('atlas_passwords'),
     claudeCodeSynced: find('claude_code'),
     gptCodeSynced: find('gpt_code'),
@@ -52,6 +56,7 @@ export function useIntegrationData() {
     connectedBrowsers: new Set(),
     chromePasswordsSynced: false,
     applePasswordsSynced: false,
+    passkeysSynced: false,
     atlasPasswordsSynced: false,
     claudeCodeSynced: false,
     gptCodeSynced: false,

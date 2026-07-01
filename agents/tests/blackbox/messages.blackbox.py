@@ -186,8 +186,8 @@ async def test_poll_messages_happy_path():
     assert result[0]["role"] == "USER"
 
 
-async def test_poll_messages_returns_empty_on_error():
-    """poll_new_messages returns [] when the underlying fetch raises."""
+async def test_poll_messages_raises_on_error():
+    """poll_new_messages raises when the underlying fetch fails."""
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, json={"error": "boom"})
     setup_mock_fn(handler)
@@ -196,12 +196,16 @@ async def test_poll_messages_returns_empty_on_error():
         from helpers.messages import poll_new_messages
 
         epoch = datetime(2020, 1, 1, tzinfo=timezone.utc)
-        result = await poll_new_messages(
-            agent_id="agent-err-poll",
-            last_checked=epoch,
-        )
+        raised = False
+        try:
+            await poll_new_messages(
+                agent_id="agent-err-poll",
+                last_checked=epoch,
+            )
+        except Exception:
+            raised = True
 
-    assert result == []
+    assert raised, "Expected poll_new_messages to raise on backend failure"
 
 
 async def test_update_agent_tree_state_happy_path():
@@ -583,7 +587,7 @@ async def run_all_tests():
     await r.record_async("post_message_no_metadata", test_post_message_no_metadata)
     await r.record_async("post_message_raises_on_http_error", test_post_message_raises_on_http_error)
     await r.record_async("poll_messages_happy_path", test_poll_messages_happy_path)
-    await r.record_async("poll_messages_returns_empty_on_error", test_poll_messages_returns_empty_on_error)
+    await r.record_async("poll_messages_raises_on_error", test_poll_messages_raises_on_error)
     await r.record_async("update_tree_state_happy_path", test_update_agent_tree_state_happy_path)
     await r.record_async("update_tree_state_no_broadcast", test_update_agent_tree_state_no_broadcast)
     await r.record_async("update_tree_state_broadcast_failure", test_update_agent_tree_state_handles_broadcast_failure)

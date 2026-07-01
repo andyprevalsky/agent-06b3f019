@@ -36,6 +36,60 @@ function shouldBypassOtpCheck(phone: string, code: string): boolean {
 
 const log = createLogger('Auth');
 
+const SUPABASE_ADMIN_USERS_PAGE_SIZE = 1000;
+const SUPABASE_ADMIN_USERS_MAX_PAGES = 20;
+
+function normalizePhoneForComparison(phone: string | null | undefined): string {
+  return (phone ?? '').replace(/[\s\-()]/g, '').replace(/^\+/, '');
+}
+
+async function findExistingSupabaseUserByPhone(
+  phone: string,
+  supabaseUrl: string,
+  serviceRoleKey: string
+): Promise<SupabaseAdminUserResponse | null> {
+  const targetPhone = normalizePhoneForComparison(phone);
+  if (targetPhone === '') return null;
+
+  for (let page = 1; page <= SUPABASE_ADMIN_USERS_MAX_PAGES; page++) {
+    const listUrl = new URL(`${supabaseUrl}/auth/v1/admin/users`);
+    listUrl.searchParams.set('page', String(page));
+    listUrl.searchParams.set('per_page', String(SUPABASE_ADMIN_USERS_PAGE_SIZE));
+
+    const listResponse = await fetch(listUrl.toString(), {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${serviceRoleKey}`,
+        apikey: serviceRoleKey,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    const listData = (await listResponse.json()) as {
+      users?: SupabaseAdminUserResponse[];
+      error_code?: string;
+      msg?: string;
+    };
+
+    if (!listResponse.ok) {
+      log.error('Supabase user lookup failed after phone_exists', {
+        status: listResponse.status,
+        error_code: listData.error_code,
+        msg: listData.msg,
+      });
+      return null;
+    }
+
+    const users = Array.isArray(listData.users) ? listData.users : [];
+    const match = users.find((user) => normalizePhoneForComparison(user.phone) === targetPhone);
+    if (match !== undefined) return match;
+
+    if (users.length < SUPABASE_ADMIN_USERS_PAGE_SIZE) break;
+  }
+
+  return null;
+}
+
 /**
  * Send OTP via Twilio Verify
  */
@@ -195,6 +249,9 @@ export async function findOrCreateSupabaseUser(
     return null;
   }
 
+  const supabaseUrl = SUPABASE_URL;
+  const serviceRoleKey = SUPABASE_SERVICE_ROLE_KEY;
+
   try {
     const existingDbUser = await repo.findUserByPhone(phone);
 
@@ -207,12 +264,12 @@ export async function findOrCreateSupabaseUser(
     }
 
     log.info('User not in our DB, creating in Supabase...');
-    const createUrl = `${SUPABASE_URL}/auth/v1/admin/users`;
+    const createUrl = `${supabaseUrl}/auth/v1/admin/users`;
     const createResponse = await fetch(createUrl, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-        apikey: SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${serviceRoleKey}`,
+        apikey: serviceRoleKey,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ phone, phone_confirm: true }),
@@ -237,7 +294,23 @@ export async function findOrCreateSupabaseUser(
     });
 
     if (createResponse.status === 422 && errorData.error_code === 'phone_exists') {
-      log.error('User exists in Supabase but not in our DB', {
+      log.info('User exists in Supabase but not in our DB; resolving existing auth user', {
+        phone: phone.slice(0, -4) + '****',
+      });
+      const existingSupabaseUser = await findExistingSupabaseUserByPhone(
+        phone,
+        supabaseUrl,
+        serviceRoleKey
+      );
+      if (existingSupabaseUser !== null) {
+        log.info('Resolved existing Supabase user after phone_exists', {
+          user_id: existingSupabaseUser.id,
+          phone: phone.slice(0, -4) + '****',
+        });
+        return { userId: existingSupabaseUser.id, isNew: false };
+      }
+
+      log.error('User exists in Supabase but could not be resolved by phone', {
         phone: phone.slice(0, -4) + '****',
       });
     }

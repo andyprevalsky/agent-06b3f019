@@ -3,14 +3,14 @@ name: Release Mac App
 on:
   push:
     tags:
-      - 'v*' # Triggers on version tags like v1.0.0, v1.2.3
+      - "v*" # Triggers on version tags like v1.0.0, v1.2.3
 
 permissions:
   contents: write # softprops/action-gh-release creates the GitHub Release entry
 
 jobs:
   build-and-release:
-    runs-on: macos-latest
+    runs-on: macos-26
 
     steps:
       - name: Checkout code
@@ -29,7 +29,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20.10.0'
+          node-version: "20.10.0"
 
       # ============================================
       # CERTIFICATE AND CREDENTIAL SETUP
@@ -103,11 +103,14 @@ jobs:
         working-directory: mac-app
         run: npm install
 
+      - name: Install native build tools
+        run: brew install xcodegen
+
       - name: Generate production env file
         working-directory: mac-app
         run: |
-          if [ -z "${{ secrets.VITE_SUPABASE_URL }}" ] || [ -z "${{ secrets.VITE_SUPABASE_ANON_KEY }}" ]; then
-            echo "VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY secrets are required."
+          if [ -z "${{ secrets.VITE_SUPABASE_URL }}" ] || [ -z "${{ secrets.VITE_SUPABASE_ANON_KEY }}" ] || [ -z "${{ secrets.VITE_BACKEND_API_URL }}" ]; then
+            echo "VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY, and VITE_BACKEND_API_URL secrets are required."
             exit 1
           fi
           cat <<'EOF' | sed 's/^ *//' > .env.production
@@ -122,9 +125,58 @@ jobs:
       - name: Build and sign Electron app
         working-directory: mac-app
         run: |
+          set -euo pipefail
+
+          APP_PROFILE="build/RoseDesktop.provisionprofile"
+          EXT_PROFILE="build/PasskeyProvider.provisionprofile"
+          IDENTITY="Developer ID Application: Rose Ai Labs, Inc. (P3HATASMP9)"
+
+          test -f "$APP_PROFILE"
+          test -f "$EXT_PROFILE"
+
           npm run build:vite
-          # Build without notarization (we'll do it separately)
-          SKIP_NOTARIZATION=true npx electron-builder --publish=never
+
+          rm -rf dist/native dist/appex
+          bash native/passkey-import/build.sh "$PWD/dist/native"
+          bash native/user-activity-bridge/build.sh "$PWD/dist/native"
+
+          ( cd native/passkey-provider && xcodegen generate >/dev/null )
+          xcodebuild -project native/passkey-provider/PasskeyProvider.xcodeproj \
+            -scheme PasskeyProvider -configuration Release \
+            -derivedDataPath native/passkey-provider/.build \
+            CODE_SIGNING_ALLOWED=NO build >/dev/null
+          mkdir -p dist/appex
+          cp -R native/passkey-provider/.build/Build/Products/Release/PasskeyProvider.appex dist/appex/
+
+          SKIP_NOTARIZATION=true npx electron-builder --mac dir --publish=never \
+            -c.mac.provisioningProfile="$APP_PROFILE"
+
+          APP="dist/mac-arm64/Rose.app"
+          test -d "$APP"
+
+          rm -rf "$APP/Contents/PlugIns/PasskeyProvider.appex"
+          mkdir -p "$APP/Contents/PlugIns"
+          cp -R dist/appex/PasskeyProvider.appex "$APP/Contents/PlugIns/PasskeyProvider.appex"
+          cp "$APP_PROFILE" "$APP/Contents/embedded.provisionprofile"
+          cp "$EXT_PROFILE" "$APP/Contents/PlugIns/PasskeyProvider.appex/Contents/embedded.provisionprofile"
+
+          codesign --force --options runtime --timestamp --sign "$IDENTITY" \
+            --identifier com.rose.desktop \
+            "$APP/Contents/Resources/native/rose-passkey-import"
+          codesign --force --options runtime --timestamp --sign "$IDENTITY" \
+            "$APP/Contents/Resources/native/rose-passkey-permission"
+          codesign --force --options runtime --timestamp --sign "$IDENTITY" \
+            "$APP/Contents/Resources/native/librose_passkey_import.dylib"
+          codesign --force --options runtime --timestamp --sign "$IDENTITY" \
+            "$APP/Contents/Resources/native/rose-user-activity-bridge.node"
+          codesign --force --options runtime --timestamp --sign "$IDENTITY" \
+            --entitlements native/passkey-provider/provider.entitlements \
+            "$APP/Contents/PlugIns/PasskeyProvider.appex"
+          codesign --force --options runtime --timestamp --sign "$IDENTITY" \
+            --entitlements entitlements.mac.plist "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+
+          SKIP_NOTARIZATION=true npx electron-builder --prepackaged "$APP" --mac dmg zip --publish=never
         env:
           NODE_OPTIONS: --max-old-space-size=4096
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -134,6 +186,32 @@ jobs:
         run: |
           echo "Verifying .app signature..."
           codesign --verify --deep --strict --verbose=2 dist/mac-arm64/Rose.app
+          echo "Verifying embedded provisioning profile..."
+          test -f dist/mac-arm64/Rose.app/Contents/embedded.provisionprofile
+          test -d dist/mac-arm64/Rose.app/Contents/PlugIns/PasskeyProvider.appex
+          test -f dist/mac-arm64/Rose.app/Contents/PlugIns/PasskeyProvider.appex/Contents/embedded.provisionprofile
+          security cms -D -i dist/mac-arm64/Rose.app/Contents/embedded.provisionprofile > "$RUNNER_TEMP/embedded-profile.plist"
+          security cms -D -i dist/mac-arm64/Rose.app/Contents/PlugIns/PasskeyProvider.appex/Contents/embedded.provisionprofile > "$RUNNER_TEMP/embedded-provider-profile.plist"
+          APP_ID=$(/usr/libexec/PlistBuddy -c "Print :Entitlements:com.apple.application-identifier" "$RUNNER_TEMP/embedded-profile.plist")
+          PROVIDER_APP_ID=$(/usr/libexec/PlistBuddy -c "Print :Entitlements:com.apple.application-identifier" "$RUNNER_TEMP/embedded-provider-profile.plist")
+          AUTOFILL=$(/usr/libexec/PlistBuddy -c "Print :Entitlements:com.apple.developer.authentication-services.autofill-credential-provider" "$RUNNER_TEMP/embedded-profile.plist")
+          PROVIDER_AUTOFILL=$(/usr/libexec/PlistBuddy -c "Print :Entitlements:com.apple.developer.authentication-services.autofill-credential-provider" "$RUNNER_TEMP/embedded-provider-profile.plist")
+          if [[ "$APP_ID" != "P3HATASMP9.com.rose.desktop" ]]; then
+            echo "Unexpected provisioning profile app identifier: $APP_ID"
+            exit 1
+          fi
+          if [[ "$PROVIDER_APP_ID" != "P3HATASMP9.com.rose.desktop.PasskeyProvider" ]]; then
+            echo "Unexpected provider provisioning profile app identifier: $PROVIDER_APP_ID"
+            exit 1
+          fi
+          if [[ "$AUTOFILL" != "true" ]]; then
+            echo "Provisioning profile is missing AutoFill credential provider entitlement"
+            exit 1
+          fi
+          if [[ "$PROVIDER_AUTOFILL" != "true" ]]; then
+            echo "Provider provisioning profile is missing AutoFill credential provider entitlement"
+            exit 1
+          fi
           echo "Verifying DMG signature..."
           codesign --verify --verbose=2 dist/Rose-mac.dmg || true
 

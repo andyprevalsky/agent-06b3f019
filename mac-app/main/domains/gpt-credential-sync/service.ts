@@ -18,6 +18,7 @@ import { hasCodexAuthFile, readCodexAuthFile } from './repo';
 import type { CodexAuthJson, HybridEncryptionEnvelope, SyncResult } from './types';
 
 const LOG_COMPONENT = 'GptCredentialSync';
+let lastUploadedCredentialsHash: string | null = null;
 
 export function hasCredentials(): boolean {
   return hasCodexAuthFile();
@@ -97,6 +98,10 @@ async function uploadCredentials(credentialsJson: string, accessToken: string): 
   }
 }
 
+function credentialHash(credentialsJson: string): string {
+  return crypto.createHash('sha256').update(credentialsJson).digest('hex');
+}
+
 export async function syncCredentials(): Promise<SyncResult> {
   const session = await AuthService.getSession();
   if (!session) {
@@ -117,12 +122,48 @@ export async function syncCredentials(): Promise<SyncResult> {
 
   try {
     await uploadCredentials(credentialsJson, session.access_token);
+    lastUploadedCredentialsHash = credentialHash(credentialsJson);
     IntegrationCache.invalidate();
     logConsole(LOG_COMPONENT, 'Credentials synced successfully');
     return { success: true };
   } catch (error) {
     const message = getErrorMessage(error);
     logConsoleError(LOG_COMPONENT, 'Upload failed', error);
+    return { success: false, message };
+  }
+}
+
+export async function syncExistingCredentialsIfChanged(): Promise<SyncResult> {
+  const session = await AuthService.getSession();
+  if (!session) {
+    return { success: false, message: 'Not authenticated' };
+  }
+
+  const credentialsJson = readCodexAuthFile();
+  if (credentialsJson === null) {
+    return {
+      success: false,
+      message: 'Codex credentials not found. Please run codex login in Terminal.',
+    };
+  }
+
+  const validation = validateCredentials(credentialsJson);
+  if (validation !== null) return validation;
+
+  const nextHash = credentialHash(credentialsJson);
+  if (nextHash === lastUploadedCredentialsHash) {
+    return { success: true, message: 'unchanged' };
+  }
+
+  try {
+    await uploadCredentials(credentialsJson, session.access_token);
+    lastUploadedCredentialsHash = nextHash;
+    IntegrationCache.invalidate();
+    logConsole(LOG_COMPONENT, 'Periodic credentials sync uploaded changed credentials');
+    return { success: true };
+  } catch (error) {
+    const message = getErrorMessage(error);
+    logConsoleError(LOG_COMPONENT, 'Periodic upload failed', error);
     return { success: false, message };
   }
 }

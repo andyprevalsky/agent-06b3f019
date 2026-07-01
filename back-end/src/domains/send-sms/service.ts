@@ -154,7 +154,7 @@ export async function dispatchNotification(data: NotifyInput): Promise<NotifyRes
 
   const payload = data.payload ?? {};
 
-  await dispatchByEventType(data, payload);
+  await dispatchByEventType(data, payload, agent.goal);
 
   log.info('SMS Notify processed', {
     eventType: data.event_type,
@@ -169,7 +169,8 @@ export async function dispatchNotification(data: NotifyInput): Promise<NotifyRes
 /** Route to the correct outbound event handler based on event_type. */
 async function dispatchByEventType(
   data: NotifyInput,
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  agentGoal: string
 ): Promise<void> {
   switch (data.event_type) {
     case 'agent_started':
@@ -194,7 +195,8 @@ async function dispatchByEventType(
         { id: data.agent_id },
         (payload.question as string | undefined) ?? '',
         (payload.attention_request_id as string | undefined) ?? '',
-        (payload.workflow_id as string | undefined) ?? ''
+        (payload.workflow_id as string | undefined) ?? '',
+        payload.metadata
       );
       break;
 
@@ -209,6 +211,7 @@ async function dispatchByEventType(
     case 'cost_limit':
       await notifyCostLimit(data.user_id, {
         id: data.agent_id,
+        goal: agentGoal,
         treeCostCents: (payload.tree_cost_cents as number | undefined) ?? 0,
         priceLimitCents: (payload.price_limit_cents as number | undefined) ?? 0,
       });

@@ -10,6 +10,7 @@ export interface Integration {
   id: string;
   name: string;
   status: string;
+  isActive?: boolean;
   config?: {
     connectedEmail?: string;
     connectedEmails?: string[];

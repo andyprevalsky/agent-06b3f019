@@ -2,6 +2,11 @@
  * Presentational shell for MessageList. Receives all state/derived values
  * as props; performs no hook calls of its own. Extracted to keep the
  * MessageList top-level function body below the 80-line strict limit.
+ *
+ * MOBILE ENTRY ANIMATION:
+ * The container scope lets CSS disable only direct message root entry
+ * animations on mobile while preserving nested chip/SVG/text animations and
+ * non-message panel flashes.
  */
 import type { AgentDetail, Message } from '../hooks';
 import type { ExploreStep, FeedbackData, WaitForCheck } from '../types';
@@ -69,7 +74,10 @@ export function MessageListView(props: MessageListViewProps) {
   const thinkingStreamTokenCount = Math.round(streaming.charCount / 4);
 
   return (
-    <div ref={containerRef} className={containerClassName}>
+    <div
+      ref={containerRef}
+      className={`${containerClassName} mobile-disable-message-entry-spawn`}
+    >
       <MessageListItems
         filteredMessages={filteredMessages}
         currentAnimatingId={animation.currentAnimatingId}

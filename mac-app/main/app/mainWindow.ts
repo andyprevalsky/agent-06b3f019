@@ -2,12 +2,19 @@ import { app, BrowserWindow, nativeImage, screen, shell } from 'electron';
 import path from 'path';
 import { config } from '../base/config';
 import { getPackagedIconBasePath, getPackagedRendererPath } from './packagedPaths';
-import { getWindowState } from './windowState';
+import { getWindowState, type WindowState } from './windowState';
 
 interface IconPaths {
   iconPath: string;
   macIcnsPath: string;
   macPngPath: string;
+}
+
+interface Rect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 interface CreateMainWindowOptions {
@@ -39,6 +46,62 @@ function getAppOrigin(): string {
   return config.isDev ? getDevRendererUrl() : 'file://';
 }
 
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function clamp(value: number, min: number, max: number): number {
+  if (max < min) return min;
+  return Math.min(Math.max(value, min), max);
+}
+
+function containsPoint(rect: Rect, x: number, y: number): boolean {
+  return x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height;
+}
+
+function getCurrentWorkAreas(): Rect[] {
+  const primaryWorkArea = screen.getPrimaryDisplay().workArea;
+  const displayWorkAreas = screen.getAllDisplays().map((display) => display.workArea);
+  const workAreas = displayWorkAreas.length > 0 ? displayWorkAreas : [primaryWorkArea];
+
+  if (!workAreas.some((area) => area === primaryWorkArea)) {
+    workAreas.unshift(primaryWorkArea);
+  }
+
+  return workAreas;
+}
+
+export function getVisibleWindowState(windowState = getWindowState()): Required<WindowState> {
+  const primaryWorkArea = screen.getPrimaryDisplay().workArea;
+  const workAreas = getCurrentWorkAreas();
+  const savedX = windowState.x;
+  const savedY = windowState.y;
+  const savedTopLeftArea =
+    isFiniteNumber(savedX) && isFiniteNumber(savedY)
+      ? workAreas.find((area) => containsPoint(area, savedX, savedY))
+      : undefined;
+  const hasUsableSavedPosition =
+    windowState.isMaximized !== true &&
+    savedTopLeftArea !== undefined &&
+    isFiniteNumber(savedX) &&
+    isFiniteNumber(savedY);
+  const targetArea = hasUsableSavedPosition ? savedTopLeftArea : primaryWorkArea;
+  const width = Math.min(Math.max(windowState.width, 900), targetArea.width);
+  const height = Math.min(Math.max(windowState.height, 600), targetArea.height);
+
+  return {
+    x: hasUsableSavedPosition
+      ? clamp(savedX, targetArea.x, targetArea.x + targetArea.width - width)
+      : targetArea.x,
+    y: hasUsableSavedPosition
+      ? clamp(savedY, targetArea.y, targetArea.y + targetArea.height - height)
+      : targetArea.y,
+    width,
+    height,
+    isMaximized: false,
+  };
+}
+
 function installNavigationGuards(mainWindow: BrowserWindow): void {
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url);
@@ -57,16 +120,14 @@ export function createMainWindow({
   onClosed,
 }: CreateMainWindowOptions): BrowserWindow {
   const { iconPath, macIcnsPath, macPngPath } = getIconPaths();
-  const windowState = getWindowState();
+  const windowState = getVisibleWindowState();
   const { width: screenWidth, height: screenHeight } = screen.getPrimaryDisplay().workArea;
-  const width = Math.min(windowState.width, screenWidth);
-  const height = Math.min(windowState.height, screenHeight);
 
   const mainWindow = new BrowserWindow({
     x: windowState.x,
     y: windowState.y,
-    width,
-    height,
+    width: windowState.width,
+    height: windowState.height,
     minWidth: Math.min(900, screenWidth),
     minHeight: Math.min(600, screenHeight),
     titleBarStyle: 'hiddenInset',

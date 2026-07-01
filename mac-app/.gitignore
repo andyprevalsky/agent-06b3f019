@@ -29,6 +29,10 @@ Thumbs.db
 # electron-builder output
 /dist_electron
 
+# Native passkey provider generated artifacts
+native/passkey-provider/.build/
+native/passkey-provider/PasskeyProvider.xcodeproj/
+
 # Blackbox test artifacts
 .context/test-runs/
 

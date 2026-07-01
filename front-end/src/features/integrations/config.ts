@@ -14,6 +14,7 @@ export const VALID_BROWSER_TYPES: BrowserType[] = [
   'vivaldi',
   'chromium',
   'atlas',
+  'safari',
 ];
 
 /** How long (ms) to poll for Gmail OAuth completion in Electron. */

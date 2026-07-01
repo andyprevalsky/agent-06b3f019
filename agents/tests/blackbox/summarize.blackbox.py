@@ -438,6 +438,46 @@ async def test_generate_completion_summary_forwards_compute_auth():
     assert observed_kwargs[0]["user_id"] == "user-1"
 
 
+async def test_generate_completion_summary_fast_mode_uses_call_llm_cache_only():
+    """Fast Mode summary caching is owned by call_llm; no outer summary cache."""
+    from helpers import summarize
+    import helpers.llm as llm_mod
+    import providers.fast_cache.client as fast_cache_client
+
+    observed_kwargs = []
+
+    async def fake_llm(messages, **kwargs):
+        observed_kwargs.append(kwargs)
+        return {
+            "content": "Completed from call_llm cache path.",
+            "usage": {"total_tokens": 10, "prompt_tokens": 0, "completion_tokens": 10},
+        }
+
+    def fake_convert(context, include_system=False, include_assistant=True):
+        return [{"role": "user", "content": "done"}]
+
+    async def fail_outer_cache(*args, **kwargs):
+        raise AssertionError("generate_completion_summary should not call fast-cache directly")
+
+    with patch("temporalio.activity.heartbeat"):
+        with patch.object(llm_mod, "call_llm", fake_llm):
+            with patch.object(llm_mod, "convert_context_to_messages", fake_convert):
+                with patch.object(fast_cache_client, "cache_get", fail_outer_cache):
+                    with patch.object(fast_cache_client, "cache_set", fail_outer_cache):
+                        out = await summarize.generate_completion_summary(
+                            context=[{"role": "TOOL", "metadata": {"toolName": "web_search", "toolStatus": "FINISHED"}}],
+                            goal="G",
+                            model="m",
+                            fast_mode_cache_enabled=True,
+                            agent_id="agent-1",
+                        )
+
+    assert out["summary"] == "Completed from call_llm cache path."
+    assert out["tool_counts"]["web_search"] == 1
+    assert observed_kwargs[0]["call_site"] == "completion_summary"
+    assert observed_kwargs[0]["agent_id"] == "agent-1"
+
+
 async def test_generate_completion_summary_on_error():
     from helpers import summarize
     import helpers.llm as llm_mod
@@ -508,6 +548,10 @@ async def run_all_tests():
     await r.record_async(
         "generate_completion_summary_forwards_compute_auth",
         test_generate_completion_summary_forwards_compute_auth,
+    )
+    await r.record_async(
+        "generate_completion_summary_fast_mode_uses_call_llm_cache_only",
+        test_generate_completion_summary_fast_mode_uses_call_llm_cache_only,
     )
     await r.record_async("generate_completion_summary_error", test_generate_completion_summary_on_error)
     await r.record_async("generate_completion_summary_no_structured", test_generate_completion_summary_no_structured_response)

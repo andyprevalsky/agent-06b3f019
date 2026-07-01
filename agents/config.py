@@ -276,7 +276,9 @@ def load_config() -> AppConfig:
     )
 
     parallel = ParallelConfig(
-        api_key=os.getenv("PARRALLEL_API_KEY", ""),
+        # Preserve the legacy misspelled env var while also accepting the
+        # correctly spelled PARALLEL_API_KEY. Legacy wins when both are set.
+        api_key=os.getenv("PARRALLEL_API_KEY") or os.getenv("PARALLEL_API_KEY", ""),
     )
 
     firecrawl = FirecrawlConfig(

@@ -38,6 +38,7 @@ export function buildCodeAgentSystemPrompt(args: BuildCodeAgentPromptArgs = {}):
     '- Prefer direct, verifiable commands over prose-only claims.',
     '- Finish only after the requested artifacts exist and have been checked.',
     '- Surface real configuration or credential failures directly.',
+    '- If task text says to use Claude Code or a code agent, treat that as this current Rose Labs code-agent session. Do not launch a separate claude/Claude Code CLI, run claude login, or start any interactive authentication flow.',
     ...repoLines,
   ].join('\n');
 }

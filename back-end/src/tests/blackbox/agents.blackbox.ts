@@ -109,7 +109,7 @@ const CreateAgentResponse = z.object({
   progress: z.number(),
   goal: z.string(),
   model: z.string(),
-  source: z.enum(['WEB', 'MAC_APP']),
+  source: z.enum(['WEB', 'MAC_APP', 'SMS']),
   reasoning_max_tokens: z.number(),
   status: z.string(),
   status_message: z.string().nullable(),
@@ -3107,6 +3107,9 @@ test('POST / — with response_schema parameter', async () => {
         properties: [
           { name: 'label', type: 'str' },
           { name: 'count', type: 'int' },
+          { name: 'asset', type: 'file_pointer' },
+          { name: 'remote_asset', type: 'session_file_pointer' },
+          { name: 'remote_frames', type: 'list[session_file_pointer]' },
         ],
       },
       {

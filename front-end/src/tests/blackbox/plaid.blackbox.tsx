@@ -2,19 +2,17 @@
  * Blackbox tests for the Plaid integration feature.
  *
  * Covers:
- *   - PlaidSection rendering (collapsed / expanded)
+ *   - PlaidSection rendering as a direct-action card
  *   - usePlaidConnect lifecycle: link-token -> Link open -> exchange -> connected
  *   - usePlaidConnect error surfaces
- *   - disconnect path
  *   - tenant-shape: list-items happy path, empty, error
  *   - Plaid attribution is not rendered as an extra card row
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { screen, waitFor, within } from '@testing-library/react';
+import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
-import React from 'react';
 
 import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
@@ -23,19 +21,10 @@ import PlaidSection from '@/features/integrations/components/PlaidSection';
 import type { PlaidItem } from '@/features/integrations/types';
 import { usePlaidIntegration } from '@/features/integrations/hooks/usePlaidIntegration';
 
-/**
- * The CTA row in PlaidSection has no button text (uses an icon-only
- * SyncItemButton). Find it by locating the row's identifying text and
- * traversing up to the row container, then grabbing the button inside.
- */
-function clickConnectRowButton(): Promise<void> {
-  const label = screen.getByText(/connect (a bank|another account)/i);
-  const row = label.closest('div.flex.items-center.justify-between') as HTMLElement | null;
-  if (row === null) {
-    throw new Error('Could not locate Plaid connect row');
-  }
-  const button = within(row).getByRole('button');
-  return userEvent.click(button);
+function clickPlaidActionButton(): Promise<void> {
+  return userEvent.click(
+    screen.getByRole('button', { name: /connect (a bank|another financial account)/i }),
+  );
 }
 
 const API_BASE = 'http://localhost:3001/api';
@@ -170,20 +159,15 @@ function makeItem(overrides: Partial<PlaidItem> = {}): PlaidItem {
   };
 }
 
-function PlaidIntegrationHarness({ initialExpanded = false }: { initialExpanded?: boolean }) {
+function PlaidIntegrationHarness() {
   const plaid = usePlaidIntegration();
-  const [expanded, setExpanded] = React.useState(initialExpanded);
   return (
     <PlaidSection
-      expanded={expanded}
-      onToggle={() => setExpanded((v) => !v)}
       items={plaid.items}
       itemsLoading={plaid.itemsLoading}
       connectLoading={plaid.connectLoading}
-      disconnectingItemId={plaid.disconnectingItemId}
       error={plaid.error}
       onConnect={plaid.onConnect}
-      onDisconnect={plaid.onDisconnect}
     />
   );
 }
@@ -220,64 +204,72 @@ describe('PlaidSection (rendering)', () => {
     });
   });
 
-  it('does NOT show item rows or Connect when collapsed', async () => {
-    renderWithProviders(<PlaidIntegrationHarness initialExpanded={false} />);
+  it('does not render an expanded connect sub-row', async () => {
+    renderWithProviders(<PlaidIntegrationHarness />);
     await waitFor(() => {
       expect(screen.getByText(/banks/i)).toBeInTheDocument();
     });
     expect(screen.queryByText(/connect a bank/i)).not.toBeInTheDocument();
   });
 
-  it('shows the "Connect a bank" CTA when expanded and no items', async () => {
-    renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
+  it('exposes the card action button when no items are connected', async () => {
+    renderWithProviders(<PlaidIntegrationHarness />);
+    let actionButton: HTMLElement | null = null;
     await waitFor(() => {
-      expect(screen.getByText(/connect a bank or financial account/i)).toBeInTheDocument();
+      actionButton = screen.getByRole('button', {
+        name: /connect a bank or financial account/i,
+      });
+      expect(actionButton).toBeInTheDocument();
     });
+    expect(actionButton).toHaveClass('bg-foreground', 'text-background');
   });
 
   it('does not render an extra "Powered by Plaid" attribution row', async () => {
-    renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
+    renderWithProviders(<PlaidIntegrationHarness />);
     await waitFor(() => {
-      expect(screen.getByText(/connect a bank or financial account/i)).toBeInTheDocument();
+      expect(screen.getByText(/balances, transactions, investments/i)).toBeInTheDocument();
     });
     expect(screen.queryByRole('link', { name: /plaid/i })).not.toBeInTheDocument();
   });
 
-  it('renders connected item rows when items exist', async () => {
+  it('renders connected institution names on the card when items exist', async () => {
     server.use(
       http.get(`${API_BASE}/integrations/plaid/items`, () =>
         HttpResponse.json({ items: [makeItem()] }),
       ),
     );
-    renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
+    renderWithProviders(<PlaidIntegrationHarness />);
     await waitFor(() => {
       expect(screen.getByText('First Platypus Bank')).toBeInTheDocument();
     });
-    expect(screen.getByText(/Plaid Checking/)).toBeInTheDocument();
+    expect(screen.getByText('Connected')).toBeInTheDocument();
   });
 
-  it('shows account count and mask for a connected item', async () => {
+  it('does not render account-row details for a connected item', async () => {
     server.use(
       http.get(`${API_BASE}/integrations/plaid/items`, () =>
         HttpResponse.json({ items: [makeItem()] }),
       ),
     );
-    renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
+    renderWithProviders(<PlaidIntegrationHarness />);
     await waitFor(() => {
-      expect(screen.getByText(/1 account/i)).toBeInTheDocument();
-      expect(screen.getByText(/••0000/)).toBeInTheDocument();
+      expect(screen.getByText('First Platypus Bank')).toBeInTheDocument();
     });
+    expect(screen.queryByText(/1 account/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/••0000/)).not.toBeInTheDocument();
   });
 
-  it('shows "Connect another account" when at least one item is connected', async () => {
+  it('uses the action button to connect another account when already connected', async () => {
     server.use(
       http.get(`${API_BASE}/integrations/plaid/items`, () =>
         HttpResponse.json({ items: [makeItem()] }),
       ),
     );
-    renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
+    renderWithProviders(<PlaidIntegrationHarness />);
     await waitFor(() => {
-      expect(screen.getByText(/connect another account/i)).toBeInTheDocument();
+      expect(
+        screen.getByRole('button', { name: /connect another financial account/i }),
+      ).toBeInTheDocument();
     });
   });
 });
@@ -308,9 +300,13 @@ describe('PlaidSection (connect flow)', () => {
         });
       }),
     );
-    renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
-    await waitFor(() => expect(screen.getByText(/connect a bank/i)).toBeInTheDocument());
-    await clickConnectRowButton();
+    renderWithProviders(<PlaidIntegrationHarness />);
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: /connect a bank or financial account/i }),
+      ).toBeInTheDocument(),
+    );
+    await clickPlaidActionButton();
     await waitFor(() => expect(calls).toBe(1));
   });
 
@@ -324,9 +320,13 @@ describe('PlaidSection (connect flow)', () => {
         }),
       ),
     );
-    renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
-    await waitFor(() => expect(screen.getByText(/connect a bank/i)).toBeInTheDocument());
-    await clickConnectRowButton();
+    renderWithProviders(<PlaidIntegrationHarness />);
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: /connect a bank or financial account/i }),
+      ).toBeInTheDocument(),
+    );
+    await clickPlaidActionButton();
     await waitFor(() => expect(linkController.opened).toBe(true));
   });
 
@@ -350,9 +350,13 @@ describe('PlaidSection (connect flow)', () => {
         HttpResponse.json({ items: itemsResponse }),
       ),
     );
-    renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
-    await waitFor(() => expect(screen.getByText(/connect a bank/i)).toBeInTheDocument());
-    await clickConnectRowButton();
+    renderWithProviders(<PlaidIntegrationHarness />);
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: /connect a bank or financial account/i }),
+      ).toBeInTheDocument(),
+    );
+    await clickPlaidActionButton();
     await waitFor(() => expect(linkController.opened).toBe(true));
     linkController.fireSuccess('public-sandbox-token');
     await waitFor(() => expect(exchanged).toBe(true));
@@ -369,9 +373,13 @@ describe('PlaidSection (connect flow)', () => {
         }),
       ),
     );
-    renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
-    await waitFor(() => expect(screen.getByText(/connect a bank/i)).toBeInTheDocument());
-    await clickConnectRowButton();
+    renderWithProviders(<PlaidIntegrationHarness />);
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: /connect a bank or financial account/i }),
+      ).toBeInTheDocument(),
+    );
+    await clickPlaidActionButton();
     await waitFor(() =>
       expect(localStorage.getItem('rose:plaid:oauth:link_token')).toBe('link-oauth-token'),
     );
@@ -391,9 +399,13 @@ describe('PlaidSection (connect flow)', () => {
         HttpResponse.json({ item: makeItem() }),
       ),
     );
-    renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
-    await waitFor(() => expect(screen.getByText(/connect a bank/i)).toBeInTheDocument());
-    await clickConnectRowButton();
+    renderWithProviders(<PlaidIntegrationHarness />);
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: /connect a bank or financial account/i }),
+      ).toBeInTheDocument(),
+    );
+    await clickPlaidActionButton();
     await waitFor(() => expect(linkController.opened).toBe(true));
     linkController.fireSuccess('public-sandbox-token');
     await waitFor(() => expect(localStorage.getItem('rose:plaid:oauth:link_token')).toBeNull());
@@ -409,9 +421,13 @@ describe('PlaidSection (connect flow)', () => {
         }),
       ),
     );
-    renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
-    await waitFor(() => expect(screen.getByText(/connect a bank/i)).toBeInTheDocument());
-    await clickConnectRowButton();
+    renderWithProviders(<PlaidIntegrationHarness />);
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: /connect a bank or financial account/i }),
+      ).toBeInTheDocument(),
+    );
+    await clickPlaidActionButton();
     await waitFor(() => expect(linkController.opened).toBe(true));
     linkController.fireExit();
     await waitFor(() => expect(localStorage.getItem('rose:plaid:oauth:link_token')).toBeNull());
@@ -423,9 +439,13 @@ describe('PlaidSection (connect flow)', () => {
         HttpResponse.json({ error: 'Plaid client unavailable' }, { status: 502 }),
       ),
     );
-    renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
-    await waitFor(() => expect(screen.getByText(/connect a bank/i)).toBeInTheDocument());
-    await clickConnectRowButton();
+    renderWithProviders(<PlaidIntegrationHarness />);
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: /connect a bank or financial account/i }),
+      ).toBeInTheDocument(),
+    );
+    await clickPlaidActionButton();
     await waitFor(() => expect(screen.getByText(/plaid client unavailable/i)).toBeInTheDocument());
   });
 
@@ -442,9 +462,13 @@ describe('PlaidSection (connect flow)', () => {
         HttpResponse.json({ error: 'Bad token' }, { status: 400 }),
       ),
     );
-    renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
-    await waitFor(() => expect(screen.getByText(/connect a bank/i)).toBeInTheDocument());
-    await clickConnectRowButton();
+    renderWithProviders(<PlaidIntegrationHarness />);
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: /connect a bank or financial account/i }),
+      ).toBeInTheDocument(),
+    );
+    await clickPlaidActionButton();
     await waitFor(() => expect(linkController.opened).toBe(true));
     linkController.fireSuccess('public-bad-token');
     await waitFor(() => expect(screen.getByText(/bad token/i)).toBeInTheDocument());
@@ -460,9 +484,13 @@ describe('PlaidSection (connect flow)', () => {
         }),
       ),
     );
-    renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
-    await waitFor(() => expect(screen.getByText(/connect a bank/i)).toBeInTheDocument());
-    await clickConnectRowButton();
+    renderWithProviders(<PlaidIntegrationHarness />);
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: /connect a bank or financial account/i }),
+      ).toBeInTheDocument(),
+    );
+    await clickPlaidActionButton();
     await waitFor(() => expect(linkController.opened).toBe(true));
     linkController.fireExit({ display_message: 'Institution authentication failed' });
     await waitFor(() =>
@@ -471,7 +499,7 @@ describe('PlaidSection (connect flow)', () => {
   });
 });
 
-describe('PlaidSection (disconnect flow)', () => {
+describe('PlaidSection (non-expandable card)', () => {
   beforeEach(() => {
     mockSession();
     linkController.opened = false;
@@ -482,40 +510,15 @@ describe('PlaidSection (disconnect flow)', () => {
     server.resetHandlers();
   });
 
-  it('clicking the trash icon calls DELETE and refreshes the list', async () => {
-    let listCalls = 0;
-    let deleted = false;
-    server.use(
-      http.get(`${API_BASE}/integrations/plaid/items`, () => {
-        listCalls += 1;
-        return HttpResponse.json({ items: deleted ? [] : [makeItem()] });
-      }),
-      http.delete(`${API_BASE}/integrations/plaid/items/:id`, () => {
-        deleted = true;
-        return HttpResponse.json({ ok: true });
-      }),
-    );
-    renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
-    await waitFor(() => expect(screen.getByText('First Platypus Bank')).toBeInTheDocument());
-    await userEvent.click(screen.getByRole('button', { name: /disconnect first platypus bank/i }));
-    await waitFor(() => expect(deleted).toBe(true));
-    await waitFor(() => expect(listCalls).toBeGreaterThan(1));
-    await waitFor(() => expect(screen.queryByText('First Platypus Bank')).not.toBeInTheDocument());
-  });
-
-  it('shows an error if DELETE fails', async () => {
+  it('does not render item-row disconnect controls', async () => {
     server.use(
       http.get(`${API_BASE}/integrations/plaid/items`, () =>
         HttpResponse.json({ items: [makeItem()] }),
       ),
-      http.delete(`${API_BASE}/integrations/plaid/items/:id`, () =>
-        HttpResponse.json({ error: 'Item is locked' }, { status: 409 }),
-      ),
     );
-    renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
+    renderWithProviders(<PlaidIntegrationHarness />);
     await waitFor(() => expect(screen.getByText('First Platypus Bank')).toBeInTheDocument());
-    await userEvent.click(screen.getByRole('button', { name: /disconnect first platypus bank/i }));
-    await waitFor(() => expect(screen.getByText(/item is locked/i)).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: /disconnect/i })).not.toBeInTheDocument();
   });
 });
 
@@ -529,17 +532,19 @@ describe('PlaidSection (items list)', () => {
     server.resetHandlers();
   });
 
-  it('renders nothing in the items list when API returns empty', async () => {
+  it('renders the direct action when API returns empty', async () => {
     server.use(
       http.get(`${API_BASE}/integrations/plaid/items`, () => HttpResponse.json({ items: [] })),
     );
-    renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
+    renderWithProviders(<PlaidIntegrationHarness />);
     await waitFor(() =>
-      expect(screen.getByText(/connect a bank or financial account/i)).toBeInTheDocument(),
+      expect(
+        screen.getByRole('button', { name: /connect a bank or financial account/i }),
+      ).toBeInTheDocument(),
     );
   });
 
-  it('renders multiple items when API returns multiple', async () => {
+  it('renders multiple institution names in the card summary', async () => {
     server.use(
       http.get(`${API_BASE}/integrations/plaid/items`, () =>
         HttpResponse.json({
@@ -550,17 +555,18 @@ describe('PlaidSection (items list)', () => {
         }),
       ),
     );
-    renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
-    await waitFor(() => expect(screen.getByText('Bank A')).toBeInTheDocument());
-    expect(screen.getByText('Bank B')).toBeInTheDocument();
+    renderWithProviders(<PlaidIntegrationHarness />);
+    await waitFor(() => expect(screen.getByText('Bank A, Bank B')).toBeInTheDocument());
   });
 
   it('surfaces an items-list error message', async () => {
     server.use(http.get(`${API_BASE}/integrations/plaid/items`, () => HttpResponse.error()));
-    renderWithProviders(<PlaidIntegrationHarness initialExpanded />);
+    renderWithProviders(<PlaidIntegrationHarness />);
     // The hook swallows fetch errors and returns []; assert the CTA still renders.
     await waitFor(() =>
-      expect(screen.getByText(/connect a bank or financial account/i)).toBeInTheDocument(),
+      expect(
+        screen.getByRole('button', { name: /connect a bank or financial account/i }),
+      ).toBeInTheDocument(),
     );
   });
 });

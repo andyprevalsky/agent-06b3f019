@@ -754,9 +754,10 @@ def build_auth_options_prompt_section(
         rp_ids = ", ".join(sorted({pk.get("rpId", realm) for pk in enabled_passkeys}))
         lines.append(
             f"- Passkey: available for {rp_ids}. It is already loaded into the browser's authenticator. "
-            "If you are not already logged in, start the login and choose the passkey / "
-            '"Sign in with a passkey" option. It signs automatically, with no code or password needed. '
-            "The passkey may also complete the moment the login page loads."
+            "Try this before any saved password. Focus the username/email/account field first to trigger "
+            "passkey autofill or conditional WebAuthn. If the site asks for an identifier, enter the relevant "
+            'account email/username and continue, but do not type a password yet. Choose "Sign in with a passkey", '
+            '"Use passkey", or similar if offered. No browser passkey popup is expected; the authenticator signs silently.'
         )
     else:
         lines.append("- Passkey: none")

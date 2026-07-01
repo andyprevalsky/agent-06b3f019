@@ -141,6 +141,36 @@ def test_parallel_tool_calls_smoke_cap_allows_recent_fanout_tail():
     assert get_smoke_cap("parallel-tool-calls") == 600
 
 
+def test_cached_sub_agent_child_tool_counts_are_counted_once():
+    """Fast Mode sub-agent result replay preserves logical child tool counts."""
+    from benchmarks.run_benchmark import _count_logical_tool_calls_from_messages
+
+    messages = [
+        {
+            "metadata": {
+                "toolName": "spawn_general_purpose_agent",
+                "toolStatus": "FINISHED",
+                "toolCallId": "spawn-1",
+                "fromFastCache": True,
+                "childToolCounts": {"web_search": 2},
+            }
+        },
+        {
+            "metadata": {
+                "toolName": "spawn_general_purpose_agent",
+                "toolStatus": "FINISHED",
+                "toolCallId": "spawn-2",
+                "childToolCounts": {"web_search": 99},
+            }
+        },
+    ]
+
+    assert _count_logical_tool_calls_from_messages(messages) == {
+        "spawn_general_purpose_agent": 2,
+        "web_search": 2,
+    }
+
+
 def test_timeout_default_uses_task_config_when_history_is_missing():
     """Tasks without enough history still get a runnable configured timeout."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -160,6 +190,78 @@ def test_timeout_default_respects_explicit_floor():
     task = get_task_by_name("outreach-batch")
 
     assert _default_timeout_for_task(task, max_seconds=120) == 600
+
+
+def test_fast_mode_pass_does_not_seed_timeout_history():
+    """Fast-mode smoke passes must not tighten cold-cache timeout pXX ranges."""
+    import benchmarks.timeout_history as timeout_history
+    from benchmarks.results import BenchmarkRun, TaskResult
+
+    recorded = []
+    original_record_pass = timeout_history.record_pass
+    try:
+        timeout_history.record_pass = lambda **kwargs: recorded.append(kwargs)
+
+        run = BenchmarkRun(suite="smoke", base_url="https://navi-j9a9.onrender.com")
+        run.task_results.append(
+            TaskResult(
+                name="chat-mode",
+                passed=True,
+                agent_id="agent-fast",
+                status="COMPLETED",
+                progress_score=1.0,
+                duration_seconds=3.0,
+                cost_cents=1.0,
+                message_count=1,
+                fast_mode_cache_enabled=True,
+            )
+        )
+
+        run._record_history()
+    finally:
+        timeout_history.record_pass = original_record_pass
+
+    assert recorded == []
+
+
+def test_non_fast_mode_pass_still_seeds_timeout_history():
+    """Cold-cache passes still update the timeout pXX corpus."""
+    import benchmarks.timeout_history as timeout_history
+    from benchmarks.results import BenchmarkRun, TaskResult
+
+    recorded = []
+    original_record_pass = timeout_history.record_pass
+    try:
+        timeout_history.record_pass = lambda **kwargs: recorded.append(kwargs)
+
+        run = BenchmarkRun(suite="smoke", base_url="https://navi-j9a9.onrender.com")
+        run.task_results.append(
+            TaskResult(
+                name="chat-mode",
+                passed=True,
+                agent_id="agent-cold",
+                status="COMPLETED",
+                progress_score=1.0,
+                duration_seconds=42.0,
+                cost_cents=1.0,
+                message_count=1,
+                fast_mode_cache_enabled=False,
+            )
+        )
+
+        run._record_history()
+    finally:
+        timeout_history.record_pass = original_record_pass
+
+    assert recorded == [
+        {
+            "task_name": "chat-mode",
+            "duration_seconds": 42.0,
+            "cost_cents": 1.0,
+            "agent_id": "agent-cold",
+            "timestamp": run.timestamp,
+        }
+    ]
 
 
 def test_minted_benchmark_cleanup_preserves_cached_agent_identity_by_default():
@@ -335,6 +437,49 @@ def test_browser_agent_cookie_bundle_bootstrap_can_be_skipped_with_env():
             os.environ["BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP"] = original_env
 
     assert queries == []
+
+
+def test_benchmark_agent_source_override_validates_known_sources():
+    """Benchmark source override accepts only real AgentSource values."""
+    import os
+
+    import pytest
+    import benchmarks.run_benchmark as bench
+
+    original_env = os.environ.get("BENCHMARK_AGENT_SOURCE")
+
+    try:
+        os.environ["BENCHMARK_AGENT_SOURCE"] = "sms"
+        assert bench._benchmark_agent_source_override() == "SMS"
+
+        os.environ["BENCHMARK_AGENT_SOURCE"] = "bogus"
+        with pytest.raises(ValueError):
+            bench._benchmark_agent_source_override()
+    finally:
+        if original_env is None:
+            os.environ.pop("BENCHMARK_AGENT_SOURCE", None)
+        else:
+            os.environ["BENCHMARK_AGENT_SOURCE"] = original_env
+
+
+def test_benchmark_sms_source_override_updates_local_agent_source():
+    """Local SMS notification benchmarks can use normal create-agent auth bootstrap."""
+    import benchmarks.run_benchmark as bench
+
+    queries = []
+    original_run_sql = bench._run_local_victoria_sql
+
+    try:
+        bench._run_local_victoria_sql = lambda sql: queries.append(sql) or "UPDATE 1"
+
+        bench._apply_local_agent_source_override("agent-123", "SMS")
+    finally:
+        bench._run_local_victoria_sql = original_run_sql
+
+    assert len(queries) == 1
+    assert 'UPDATE "Agent"' in queries[0]
+    assert "source = 'SMS'" in queries[0]
+    assert "agent-123" in queries[0]
 
 
 def test_anon_benchmark_mode_disables_saved_auth_material():
@@ -1593,6 +1738,8 @@ async def run_all_tests():
     r.record("outreach_batch_timeout_floor", test_outreach_batch_has_timeout_floor)
     r.record("timeout_default_uses_task_config", test_timeout_default_uses_task_config_when_history_is_missing)
     r.record("timeout_default_respects_floor", test_timeout_default_respects_explicit_floor)
+    r.record("fast_mode_pass_skips_timeout_history", test_fast_mode_pass_does_not_seed_timeout_history)
+    r.record("non_fast_mode_pass_records_timeout_history", test_non_fast_mode_pass_still_seeds_timeout_history)
     r.record(
         "minted_cleanup_preserves_identity",
         test_minted_benchmark_cleanup_preserves_cached_agent_identity_by_default,
@@ -1687,6 +1834,10 @@ async def run_all_tests():
     r.record(
         "parallel_tool_calls_smoke_cap",
         test_parallel_tool_calls_smoke_cap_allows_recent_fanout_tail,
+    )
+    r.record(
+        "cached_sub_agent_child_tool_counts",
+        test_cached_sub_agent_child_tool_counts_are_counted_once,
     )
     r.record("parallel_tool_calls_explore_sub_agents", test_parallel_tool_calls_smoke_requires_explore_sub_agents)
     r.record("spawn_sub_agents_no_browser_code_detours", test_spawn_sub_agents_smoke_forbids_browser_and_code_detours)

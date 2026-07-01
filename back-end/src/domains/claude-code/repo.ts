@@ -77,3 +77,12 @@ export async function findAgentById(agentId: string) {
     select: { userId: true },
   });
 }
+
+/** Read the per-agent Fast Mode flag (used to decide ANTHROPIC_BASE_URL injection). */
+export async function findAgentFastModeCache(agentId: string): Promise<boolean> {
+  const agent = await prisma.agent.findUnique({
+    where: { id: agentId },
+    select: { fastModeCacheEnabled: true },
+  });
+  return agent?.fastModeCacheEnabled ?? false;
+}

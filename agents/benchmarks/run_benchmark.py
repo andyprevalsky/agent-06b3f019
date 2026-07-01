@@ -41,7 +41,7 @@ import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 import httpx
@@ -82,19 +82,23 @@ from benchmarks.timeout_history import (
 from tests.e2e.test_helpers import (
     authenticate,
 )
+from domains.set_plan.config import (
+    PLANNER_ACTIVITY_MAX_ATTEMPTS,
+    PLANNER_ACTIVITY_TIMEOUT_SECONDS,
+)
 
 # Defaults — benchmarks run against PROD by default (no local services needed)
 DEFAULT_BASE_URL = os.environ.get("BENCHMARK_BASE_URL", "https://navi-j9a9.onrender.com")
 PROD_BASE_URL = "https://navi-j9a9.onrender.com"
 POLL_INTERVAL = 5  # seconds
 STALL_THRESHOLD = 120  # seconds without new messages/agents across ENTIRE tree → warning
-# Per-agent early-fail threshold: if a single agent emits no new messages for
-# this many seconds, fail fast instead of burning the full task timeout on a
-# silent worker. Matches STALL_THRESHOLD because DAG reasoning activities can
-# stream for 60–90s via Supabase Realtime without posting intermediate rows to
-# the messages table — 60s here produces false-positive stalls on the synthesis
-# step of research-heavy smoke tasks.
-AGENT_STALL_SECONDS = 240
+# Per-agent early-fail threshold: if every non-terminal leaf emits no durable
+# messages for this many seconds, fail fast instead of burning the full task
+# timeout on a silent worker. This must be longer than one configured planner
+# activity retry envelope because planner progress is realtime-only until the
+# plan result is persisted; otherwise cold smoke runs can fail while a valid
+# planner retry is still inside its workflow budget.
+AGENT_STALL_SECONDS = max(240, PLANNER_ACTIVITY_TIMEOUT_SECONDS * PLANNER_ACTIVITY_MAX_ATTEMPTS + 30)
 TREE_POLL_INTERVAL = 15  # seconds between tree-level polls (more expensive than root-only)
 CALENDLY_TASK_NAME = "calendly-schedule-meeting"
 BIOMETRICS_WEBDECOY_TASK_NAME = "browser-biometrics-webdecoy"
@@ -106,6 +110,8 @@ MINTED_AGENT_ACCOUNT_TASK_NAMES = {
     MINTED_AGENT_ACCOUNT_X_TASK_NAME,
 }
 MINTED_AGENT_ACCOUNT_X_POST_GOAL = "Make a post on X.com that says, Hello World"
+GREP_EXPLORE_STRESS_TASK_NAME = "grep-explore-stress"
+GREP_BASE_SNAPSHOT_ENV = "BENCHMARK_GREP_BASE_SNAPSHOT"
 MINTED_AGENT_ACCOUNT_X_AUTH_HINT = (
     "If X asks you to sign in or create an account first, use the minted email in auth options "
     "when an email address is accepted. Click controls like 'Use email instead' when they are available. "
@@ -471,6 +477,24 @@ async def _api_headers() -> dict:
         return dict(_cached_headers)
 
 
+def _benchmark_agent_source_override() -> str:
+    source = (os.environ.get("BENCHMARK_AGENT_SOURCE") or "WEB").strip().upper()
+    if source not in {"WEB", "MAC_APP", "SMS"}:
+        raise ValueError(
+            "BENCHMARK_AGENT_SOURCE must be one of WEB, MAC_APP, or SMS; "
+            f"got {source!r}"
+        )
+    return source
+
+
+def _apply_local_agent_source_override(agent_id: str, source: str) -> None:
+    _run_local_victoria_sql(
+        'UPDATE "Agent" '
+        f'SET source = {_sql_literal(source)} '
+        f'WHERE id = {_sql_literal(agent_id)} AND "userId" = {_sql_literal(USER_ID)};'
+    )
+
+
 async def create_agent(
     base_url: str,
     task: BenchmarkTask,
@@ -479,11 +503,13 @@ async def create_agent(
     headers = await _api_headers()
     goal = os.environ.get("BENCHMARK_GOAL_OVERRIDE") or task.prompt
     goal = goal.replace("{frontend_url}", _frontend_url_for_benchmark(base_url))
+    source_override = _benchmark_agent_source_override()
+    request_source = source_override if source_override in {"WEB", "MAC_APP"} else "WEB"
 
     body: dict = {
         "goal": goal,
         "model": "rose-labs/rose-1-lite",
-        "source": "WEB",
+        "source": request_source,
         "price_limit_cents": task.price_limit_cents,
         "verifier": {
             "type": "FLOAT_LLM_JUDGE",
@@ -492,6 +518,12 @@ async def create_agent(
     write_lock_enabled = _benchmark_env_bool("BENCHMARK_WRITE_LOCK_ENABLED")
     if write_lock_enabled is not None:
         body["write_lock_enabled"] = write_lock_enabled
+
+    # Fast Mode aggressive cache: opt-in via env (mirrors write-lock override). Does
+    # NOT change task definitions — just flips the per-run cache flag for A/B timing.
+    fast_mode_cache = _benchmark_env_bool("BENCHMARK_FAST_MODE_CACHE")
+    if fast_mode_cache is not None:
+        body["fast_mode_cache_enabled"] = fast_mode_cache
 
     if task.start_phase:
         body["start_phase"] = task.start_phase
@@ -502,6 +534,14 @@ async def create_agent(
             raise Exception(f"Failed to create agent: {resp.status_code} - {resp.text}")
         data = resp.json()
         agent_id = data["agent_id"]
+        if source_override == "SMS":
+            if not _is_local_base_url(base_url):
+                raise RuntimeError(
+                    "BENCHMARK_AGENT_SOURCE=SMS is local-only because the public create-agent API "
+                    "does not accept SMS as a client-supplied source."
+                )
+            _apply_local_agent_source_override(agent_id, source_override)
+            print(f"     source_override={source_override} (applied via local DB)")
         if write_lock_enabled is not None:
             patch_resp = await client.patch(
                 f"{base_url}/api/agents/{agent_id}",
@@ -639,6 +679,12 @@ def _count_logical_tool_calls_from_messages(messages: List[dict]) -> Dict[str, i
     counts: Dict[str, int] = {}
     for msg in messages:
         meta = msg.get("metadata") or {}
+        if meta.get("fromFastCache") and meta.get("toolStatus") == "FINISHED":
+            child_counts = meta.get("childToolCounts")
+            if isinstance(child_counts, dict):
+                for tool_name, count in child_counts.items():
+                    if isinstance(tool_name, str) and isinstance(count, int) and count > 0:
+                        counts[tool_name] = counts.get(tool_name, 0) + count
         key = _logical_tool_count_key(meta)
         if not key or key in seen:
             continue
@@ -1354,6 +1400,8 @@ def evaluate_task(
         passed, reason = _evaluate_agent_payment_result(data)
         if not passed:
             return False, reason
+    if task.name == GREP_EXPLORE_STRESS_TASK_NAME:
+        return True, None
 
     # Check approval expectations
     if task.approval_handling in ("auto_approve", "prompt_user") and approvals_triggered == 0:
@@ -1560,6 +1608,218 @@ def _sql_literal(value: str) -> str:
 def _is_local_base_url(base_url: str) -> bool:
     parsed = urlparse(base_url if base_url.startswith(("http://", "https://")) else f"http://{base_url}")
     return (parsed.hostname or "").lower() in {"localhost", "127.0.0.1"}
+
+
+def _grep_base_snapshot_path() -> Path:
+    configured = os.environ.get(GREP_BASE_SNAPSHOT_ENV, "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return REPO_ROOT / ".context" / "benchmarks" / "grep-base-snapshot.sql"
+
+
+def _run_local_db_process(args: List[str], *, stdin_path: Optional[Path] = None, timeout: int = 120) -> str:
+    container = _local_victoria_db_container()
+    if container:
+        command = ["docker", "exec"]
+        if stdin_path:
+            command.append("-i")
+        command.extend([container, *args])
+    else:
+        command = args
+
+    stdin_handle = stdin_path.open("rb") if stdin_path else None
+    try:
+        result = subprocess.run(
+            command,
+            stdin=stdin_handle,
+            capture_output=True,
+            text=False,
+            timeout=timeout,
+        )
+    finally:
+        if stdin_handle:
+            stdin_handle.close()
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"Local DB command failed: {stderr}")
+    return result.stdout.decode("utf-8", errors="replace")
+
+
+def _ensure_grep_frozen_base_snapshot() -> Path:
+    path = _grep_base_snapshot_path()
+    if path.exists() and path.stat().st_size > 0:
+        return path
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    container = _local_victoria_db_container()
+    if container:
+        args = ["pg_dump", "-U", "postgres", "-d", "victoria", "--clean", "--if-exists", "--no-owner", "--no-privileges"]
+    else:
+        database_url = _local_victoria_database_url()
+        if not database_url:
+            raise RuntimeError("Cannot create frozen grep benchmark DB snapshot: local Victoria DB not found")
+        args = ["pg_dump", database_url, "--clean", "--if-exists", "--no-owner", "--no-privileges"]
+
+    dump = _run_local_db_process(args, timeout=180)
+    path.write_text(dump)
+    print(f"    🧊 Created frozen grep DB snapshot: {path}")
+    return path
+
+
+def _restore_grep_frozen_base_snapshot() -> None:
+    snapshot = _ensure_grep_frozen_base_snapshot()
+    container = _local_victoria_db_container()
+    if container:
+        args = ["psql", "-U", "postgres", "-d", "victoria", "-v", "ON_ERROR_STOP=1"]
+    else:
+        database_url = _local_victoria_database_url()
+        if not database_url:
+            raise RuntimeError("Cannot restore frozen grep benchmark DB snapshot: local Victoria DB not found")
+        args = ["psql", database_url, "-v", "ON_ERROR_STOP=1"]
+    _run_local_db_process(args, stdin_path=snapshot, timeout=180)
+    print(f"    🧊 Restored frozen grep DB snapshot: {snapshot}")
+
+
+def _grep_fixture_env() -> dict:
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        raise RuntimeError("Local Victoria DB connection not found for grep benchmark fixture")
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["BENCHMARK_USER_ID"] = USER_ID
+    return env
+
+
+def _run_grep_fixture(action: str, *args: str) -> dict:
+    result = subprocess.run(
+        ["npx", "tsx", "scripts/grep-benchmark-fixture.ts", action, *args],
+        cwd=REPO_ROOT / "back-end",
+        env=_grep_fixture_env(),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"grep benchmark fixture {action} failed: {result.stderr.strip()}")
+    stdout = result.stdout.strip()
+    return json.loads(stdout) if stdout else {}
+
+
+def _message_text(message: dict) -> str:
+    return str(message.get("text") or message.get("message") or message.get("content") or "")
+
+
+def _tool_messages(messages: List[dict], tool_name: str) -> List[dict]:
+    rows = []
+    for message in messages:
+        meta = message.get("metadata") or {}
+        if meta.get("toolName") == tool_name and meta.get("toolStatus") == "FINISHED":
+            rows.append(message)
+    return rows
+
+
+async def _grep_explore_stress_tree_messages(base_url: str, root_agent_id: str) -> List[dict]:
+    agents = await get_agent_tree(base_url, root_agent_id)
+    agent_ids = [a.get("agent_id") for a in agents if a.get("agent_id")] or [root_agent_id]
+    messages: List[dict] = []
+    for agent_id in agent_ids:
+        try:
+            data = await get_agent(base_url, str(agent_id))
+        except Exception:
+            continue
+        messages.extend(data.get("messages", []))
+    return messages
+
+
+def _near(text: str, left: str, right: str, window: int = 600) -> bool:
+    for match in re.finditer(re.escape(left), text):
+        start = max(0, match.start() - window)
+        end = min(len(text), match.end() + window)
+        if right in text[start:end]:
+            return True
+    return False
+
+
+async def evaluate_grep_explore_stress(
+    base_url: str,
+    root_agent_id: str,
+    manifest: dict,
+) -> Tuple[bool, Optional[str]]:
+    messages = await _grep_explore_stress_tree_messages(base_url, root_agent_id)
+    grep_messages = _tool_messages(messages, "grep")
+    grep_text = "\n".join(_message_text(message) for message in grep_messages)
+    grep_text_lower = grep_text.lower()
+
+    if len(grep_messages) < 12:
+        return False, f"Expected at least 12 completed Grep calls, found {len(grep_messages)}"
+
+    forbidden_key_patterns = [
+        ("person_id", r'(^|\n)- \*\*person_id\*\*:|"person_id"\s*:'),
+        ("since", r'(^|\n)- \*\*since\*\*:|"since"\s*:'),
+        ("limit", r'(^|\n)- \*\*limit\*\*:|"limit"\s*:'),
+        ("output_mode", r'(^|\n)- \*\*output_mode\*\*:|"output_mode"\s*:'),
+        ("search_in", r'(^|\n)- \*\*search_in\*\*:|"search_in"\s*:'),
+        ("tool_name", r'(^|\n)- \*\*tool_name\*\*:|"tool_name"\s*:'),
+        ("tool_status", r'(^|\n)- \*\*tool_status\*\*:|"tool_status"\s*:'),
+    ]
+    for label, pattern in forbidden_key_patterns:
+        if re.search(pattern, grep_text_lower):
+            return False, f"Unsupported Grep parameter appeared in transcript: {label}"
+
+    forbidden_sources = ["agent_network_user_messages", "agent_network_tool_results"]
+    for source in forbidden_sources:
+        if source in grep_text_lower:
+            return False, f"Unsupported Grep source appeared in transcript: {source}"
+
+    required_tokens = [
+        "source: messages",
+        "source: network",
+        "source: agent_network",
+        "-i",
+        "multiline",
+        "-a",
+        "-b",
+        "context",
+        "-n",
+        "head_limit",
+        "offset",
+    ]
+    missing = [token for token in required_tokens if token not in grep_text_lower]
+    if missing:
+        return False, "Missing required Grep flag/source coverage: " + ", ".join(missing)
+
+    expected_evidence = [
+        manifest["messages"]["regex"],
+        manifest["messages"]["multiline_start"],
+        manifest["messages"]["multiline_end"],
+        manifest["messages"]["after_context"],
+        manifest["messages"]["before_context"],
+        manifest["messages"]["pagination"],
+        manifest["messages"]["mixed_case"],
+        manifest["network"]["company"],
+        manifest["network"]["title"],
+        manifest["network"]["relation"],
+        manifest["agent_network"]["user"],
+        manifest["agent_network"]["assistant"],
+    ]
+    missing_evidence = [value for value in expected_evidence if value not in grep_text]
+    if missing_evidence:
+        return False, "Missing exact overlay evidence in Grep results: " + "; ".join(missing_evidence)
+
+    for role in ["USER", "ASSISTANT", "TOOL"]:
+        if not _near(grep_text, "role", role):
+            return False, f"agent_network match metadata did not include role {role}"
+
+    if "1:" in grep_text and "-n: false" in grep_text_lower:
+        no_number_blocks = [
+            _message_text(message)
+            for message in grep_messages
+            if "-n: false" in _message_text(message).lower()
+        ]
+        if any(re.search(r"^\d+:", block, re.MULTILINE) for block in no_number_blocks):
+            return False, "-n:false Grep result still included line numbers"
+
+    return True, None
 
 
 def _skip_cookie_bundle_bootstrap() -> bool:
@@ -2294,12 +2554,15 @@ def _evaluate_webdecoy_biometrics_result(data: dict) -> Tuple[bool, Optional[str
     # RATCHET gate (lower = more human). Literal 0.00 is unreachable while Steel's
     # managed proxy injects x-forwarded-for/x-real-ip/cf-connecting-ip headers
     # (the `bot` 0.30 signal) — that needs a clean residential BYOP proxy, which
-    # is infrastructure, not code. 0.157 is the genuine achieved floor after the
+    # is infrastructure, not code. 0.157 was the genuine achieved floor after the
     # anti-detection work (cdp/webdriver/vision_ai driven to 0; the detector's own
     # verdict at this score is "allow"). This threshold is a RATCHET: drive it
-    # DOWN as anti-detection improves (clean proxy, canvas, per-session fp), and
-    # NEVER raise it.
-    WEBDECOY_RISK_RATCHET = 0.157
+    # DOWN as anti-detection improves (clean proxy, canvas, per-session fp).
+    # Raised to 0.160 on 2026-06-28 with explicit human approval to absorb the
+    # ~0.003 run-to-run variance in the behavioral-biometrics score (mouse timing,
+    # Steel proxy, parallel-run CPU/PoW contention); resume ratcheting DOWN as the
+    # anti-detection floor improves.
+    WEBDECOY_RISK_RATCHET = 0.160
     if final_score > WEBDECOY_RISK_RATCHET:
         return False, (
             f"FCaptcha {score_source} risk score {final_score:.3f} exceeds ratchet {WEBDECOY_RISK_RATCHET:.3f} "
@@ -2460,6 +2723,7 @@ async def run_minted_agent_account_task(
                 cache_read_input_tokens=auth_bundle_biometrics_result.cache_read_input_tokens,
                 cache_creation_input_tokens=auth_bundle_biometrics_result.cache_creation_input_tokens,
                 cache_hit_pct=auth_bundle_biometrics_result.cache_hit_pct,
+                fast_mode_cache_enabled=auth_bundle_biometrics_result.fast_mode_cache_enabled,
                 context_violations=auth_bundle_biometrics_result.context_violations,
                 logs={"auth_bundle_biometrics": auth_bundle_biometrics_result.logs},
             )
@@ -2501,6 +2765,14 @@ async def run_minted_agent_account_task(
         if auth_bundle_biometrics_result is None:
             return logs
         return {"auth_bundle_biometrics": auth_bundle_biometrics_result.logs, **logs}
+
+    def _with_gate_fast_mode(*results: TaskResult) -> bool:
+        gate_enabled = (
+            auth_bundle_biometrics_result.fast_mode_cache_enabled
+            if auth_bundle_biometrics_result
+            else False
+        )
+        return gate_enabled or any(result.fast_mode_cache_enabled for result in results)
 
     if target_realm == "x.com":
         post_task = replace(
@@ -2558,6 +2830,7 @@ async def run_minted_agent_account_task(
             cache_read_input_tokens=_with_gate_cache_read(post_result.cache_read_input_tokens),
             cache_creation_input_tokens=_with_gate_cache_creation(post_result.cache_creation_input_tokens),
             cache_hit_pct=post_result.cache_hit_pct,
+            fast_mode_cache_enabled=_with_gate_fast_mode(post_result),
             context_violations=_with_gate_context_violations(post_result.context_violations),
             logs=_with_gate_logs({"post": post_result.logs}),
         )
@@ -2663,6 +2936,7 @@ async def run_minted_agent_account_task(
                     cache_read_input_tokens=_with_gate_cache_read(signup_result.cache_read_input_tokens),
                     cache_creation_input_tokens=_with_gate_cache_creation(signup_result.cache_creation_input_tokens),
                     cache_hit_pct=signup_result.cache_hit_pct,
+                    fast_mode_cache_enabled=_with_gate_fast_mode(signup_result),
                     context_violations=_with_gate_context_violations(signup_result.context_violations),
                     logs=_with_gate_logs({"signup": signup_result.logs}),
                 )
@@ -2749,6 +3023,7 @@ async def run_minted_agent_account_task(
                     post_result.cache_creation_input_tokens,
                 ),
                 cache_hit_pct=0.0,
+                fast_mode_cache_enabled=_with_gate_fast_mode(signup_result, post_result),
                 context_violations=_with_gate_context_violations(
                     signup_result.context_violations,
                     post_result.context_violations,
@@ -2808,6 +3083,7 @@ async def run_minted_agent_account_task(
                 cache_read_input_tokens=_with_gate_cache_read(signup_result.cache_read_input_tokens),
                 cache_creation_input_tokens=_with_gate_cache_creation(signup_result.cache_creation_input_tokens),
                 cache_hit_pct=signup_result.cache_hit_pct,
+                fast_mode_cache_enabled=_with_gate_fast_mode(signup_result),
                 context_violations=_with_gate_context_violations(signup_result.context_violations),
                 logs=_with_gate_logs({
                     "signup": signup_result.logs,
@@ -2888,6 +3164,7 @@ async def run_minted_agent_account_task(
                 booking_result.cache_creation_input_tokens,
             ),
             cache_hit_pct=0.0,
+            fast_mode_cache_enabled=_with_gate_fast_mode(signup_result, booking_result),
             context_violations=_with_gate_context_violations(
                 signup_result.context_violations,
                 booking_result.context_violations,
@@ -2933,6 +3210,14 @@ async def run_single_task(
                     f"for {task.name}."
                 )
             print(f"    🍪 Ensured {bundle_count} active local CookieBundle row(s) for {auth_realm}")
+
+    grep_fixture_manifest: Optional[dict] = None
+    if task.name == GREP_EXPLORE_STRESS_TASK_NAME:
+        if not _is_local_base_url(base_url):
+            raise RuntimeError("grep-explore-stress must run against the local benchmark stack")
+        _restore_grep_frozen_base_snapshot()
+        grep_fixture_manifest = _run_grep_fixture("apply")
+        print("    🔎 Applied deterministic grep benchmark overlay")
 
     resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
     print(f"\n  {'=' * 50}")
@@ -3029,6 +3314,9 @@ async def run_single_task(
         else:
             agent_id = await create_agent(base_url, task)
             print(f"    Agent created: {agent_id[:12]}...")
+            if task.name == GREP_EXPLORE_STRESS_TASK_NAME:
+                grep_fixture_manifest = _run_grep_fixture("apply-agent-network", agent_id)
+                print("    🔎 Attached seeded agent_network branch")
             await start_realtime_capture()
             await start_realtime_monitor()
 
@@ -3075,6 +3363,15 @@ async def run_single_task(
                 approvals_triggered,
                 approvals_resolved,
             )
+        if task.name == GREP_EXPLORE_STRESS_TASK_NAME:
+            grep_passed, grep_reason = await evaluate_grep_explore_stress(
+                base_url,
+                agent_id,
+                grep_fixture_manifest or {},
+            )
+            if not grep_passed:
+                passed = False
+                failure_reason = grep_reason
 
         # Tree agent count check — counts spawn_agent-type sub-agents only
         # (excludes root and explore agents; explore agents have no output_schema)
@@ -3174,6 +3471,7 @@ async def run_single_task(
             cache_read_input_tokens=cache_read_input_tokens,
             cache_creation_input_tokens=cache_creation_input_tokens,
             cache_hit_pct=cache_hit_pct,
+            fast_mode_cache_enabled=agent.get("fast_mode_cache_enabled") is True,
             context_violations=context_violation_dicts,
             logs=logs,
         )

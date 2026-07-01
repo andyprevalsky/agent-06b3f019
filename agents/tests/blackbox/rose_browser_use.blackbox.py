@@ -12,8 +12,10 @@ Covers:
 
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
@@ -126,9 +128,10 @@ def test_build_browser_use_system_prompt_auth_priority_is_numbered():
 
     assert "- Use the cheapest viable authentication path for this single site." in prompt
     assert "- Priority:\n  - 1. Existing Steel/cookie session" in prompt
-    assert "  - 2. Saved passwords" in prompt
-    assert "  - 3. Email OTP" in prompt
-    assert "  - 4. SMS OTP" in prompt
+    assert "  - 2. Passkey (if one is listed in Auth Options)" in prompt
+    assert "  - 3. Saved passwords" in prompt
+    assert "  - 4. Email OTP" in prompt
+    assert "  - 5. SMS OTP" in prompt
     assert "OTP codes from email or SMS are automatically injected" in prompt
     assert "call request_user_assistance_for_authentication" in prompt
     assert "Do not call attempt_completion, send_message_to_user, or report a status instead." in prompt
@@ -159,6 +162,194 @@ def test_build_browser_use_tools_preserves_catalog_descriptions():
     assert auth_help["description"] == BROWSER_USE_TOOLS["request_user_assistance_for_authentication"]["description"]
     assert auth_help["input_schema"]["properties"] == {}
     assert auth_help["input_schema"]["required"] == []
+
+
+def test_write_lock_notification_tool_is_stable_internal_action_schema():
+    from browser_tools.schemas import AVAILABLE_ACTIONS, create_browser_agent_action_model
+
+    assert "generate_write_lock_notification" in AVAILABLE_ACTIONS
+    assert "generate_write_lock_notification" in BROWSER_USE_TOOLS
+    assert (
+        "WRITE_LOCK_NOTIFICATION_FORK_REQUEST"
+        in BROWSER_USE_TOOLS["generate_write_lock_notification"]["description"]
+    )
+
+    ActionModel = create_browser_agent_action_model()
+    result = ActionModel.model_validate(
+        {
+            "response": "Preparing approval metadata.",
+            "tool_calls": [
+                {
+                    "tool": "generate_write_lock_notification",
+                    "trigger_type": "purchase",
+                    "action": "buy item",
+                    "service": {
+                        "name": "Amazon",
+                        "domain": "amazon.com",
+                        "url": "https://www.amazon.com/dp/example",
+                    },
+                    "media": [
+                        {
+                            "url": "https://example.com/rendered-summary.png",
+                            "alt": "Approval summary for Amazon purchase",
+                            "kind": "rendered_summary",
+                        }
+                    ],
+                    "purchase": {
+                        "items": [
+                            {
+                                "title": "Amazon Basics USB-C Cable",
+                                "price": "$12.99",
+                                "quantity": "1",
+                                "description": "6-foot braided charging cable",
+                                "rating": "4.6 stars",
+                                "review_count": "8,421 reviews",
+                                "image_url": "https://example.com/cable.png",
+                                "product_url": "https://www.amazon.com/dp/example",
+                            }
+                        ],
+                        "totals": {
+                            "subtotal": "$12.99",
+                            "shipping": "Free",
+                            "tax": "$1.07",
+                            "total": "$14.06",
+                        },
+                    },
+                    "payment": None,
+                    "message": None,
+                    "social_post": None,
+                    "generic_write": None,
+                }
+            ],
+        }
+    )
+
+    call = result.tool_calls[0]
+    assert call.tool == "generate_write_lock_notification"
+    assert call.trigger_type == "purchase"
+    assert call.purchase.items[0].title == "Amazon Basics USB-C Cable"
+    assert call.media[0].kind == "rendered_summary"
+
+
+def test_write_lock_notification_schema_normalizes_provider_aliases():
+    from browser_tools.schemas import GenerateWriteLockNotificationTool
+
+    result = GenerateWriteLockNotificationTool.model_validate(
+        {
+            "tool": "generate_write_lock_notification",
+            "trigger_type": "purchase",
+            "action": "Buy 1 Carhartt Men's Knit Cuffed Beanie on Amazon",
+            "service": {
+                "name": "Amazon",
+                "domain": "amazon.com",
+                "current_url": "https://www.amazon.com/gp/buy/spc/handlers/display.html",
+            },
+            "media": [
+                {
+                    "type": "image",
+                    "url": "https://m.media-amazon.com/images/I/example.jpg",
+                    "alt": "Carhartt Men's Knit Cuffed Beanie, Black",
+                }
+            ],
+            "purchase": {
+                "items": [
+                    {
+                        "name": "Carhartt Men's Knit Cuffed Beanie, Black",
+                        "quantity": 1,
+                        "price_usd": 19.99,
+                        "reviews": "167,432 ratings",
+                        "seller": "Amazon.com",
+                        "shipping": "FREE Two Day delivery, arriving Saturday, Jun 27, 2026",
+                    }
+                ],
+                "subtotal_usd": 19.99,
+                "shipping_usd": 0,
+                "estimated_tax_usd": 1.75,
+                "total_usd": 21.74,
+                "payment_method": "Visa ending in 9857",
+                "delivery_address": "Aman Gottumukkala, 88 HOWARD ST APT 1413, SAN FRANCISCO, CA 94105",
+            },
+        }
+    )
+
+    dumped = result.model_dump(exclude={"tool"}, exclude_none=True)
+    assert dumped["service"]["url"] == "https://www.amazon.com/gp/buy/spc/handlers/display.html"
+    assert dumped["media"][0]["kind"] == "product"
+    assert dumped["purchase"]["items"][0]["title"] == "Carhartt Men's Knit Cuffed Beanie, Black"
+    assert dumped["purchase"]["items"][0]["price"] == "$19.99"
+    assert dumped["purchase"]["items"][0]["quantity"] == "1"
+    assert dumped["purchase"]["items"][0]["review_count"] == "167,432 ratings"
+    assert dumped["purchase"]["items"][0]["seller"] == "Amazon.com"
+    assert dumped["purchase"]["items"][0]["shipping"] == "FREE Two Day delivery, arriving Saturday, Jun 27, 2026"
+    assert dumped["purchase"]["totals"]["subtotal"] == "$19.99"
+    assert dumped["purchase"]["totals"]["shipping"] == "$0.00"
+    assert dumped["purchase"]["totals"]["tax"] == "$1.75"
+    assert dumped["purchase"]["totals"]["total"] == "$21.74"
+    assert dumped["purchase"]["payment_method"] == "Visa ending in 9857"
+    assert dumped["purchase"]["delivery_address"].startswith("Aman Gottumukkala")
+
+
+def test_write_lock_notification_schema_normalizes_nested_total_aliases():
+    from browser_tools.schemas import GenerateWriteLockNotificationTool
+
+    result = GenerateWriteLockNotificationTool.model_validate(
+        {
+            "tool": "generate_write_lock_notification",
+            "trigger_type": "purchase",
+            "action": "Place an Amazon order",
+            "service": {
+                "name": "Amazon",
+                "domain": "amazon.com",
+                "current_url": "https://www.amazon.com/checkout",
+            },
+            "purchase": {
+                "items": [{"title": "Carhartt beanie", "price": "$19.99"}],
+                "totals": {
+                    "items": "$19.99",
+                    "shipping_and_handling": "$0.00",
+                    "estimated_tax": "$1.72",
+                    "order_total": "$21.71",
+                },
+            },
+        }
+    )
+
+    totals = result.model_dump(exclude={"tool"}, exclude_none=True)["purchase"]["totals"]
+    assert totals["subtotal"] == "$19.99"
+    assert totals["shipping"] == "$0.00"
+    assert totals["tax"] == "$1.72"
+    assert totals["total"] == "$21.71"
+
+
+def test_normalize_write_lock_notification_tool_call_preserves_params():
+    out = normalize_browser_use_tool_call(
+        {
+            "id": "call_1",
+            "name": "generate_write_lock_notification",
+            "arguments": json.dumps(
+                {
+                    "trigger_type": "purchase",
+                    "action": "buy item",
+                    "service": {
+                        "name": "Amazon",
+                        "domain": "amazon.com",
+                        "url": "https://www.amazon.com/gp/buy/spc",
+                    },
+                    "purchase": {
+                        "items": [{"title": "Beanie", "price": "$19.99"}],
+                        "totals": {"total": "$21.74"},
+                    },
+                }
+            ),
+        },
+        thinking="approval metadata",
+    )
+
+    assert out["action"] == "generate_write_lock_notification"
+    assert out["thinking"] == "approval metadata"
+    assert out["params"]["trigger_type"] == "purchase"
+    assert out["params"]["service"]["domain"] == "amazon.com"
+    assert out["params"]["purchase"]["items"][0]["title"] == "Beanie"
 
 
 def test_browser_attempt_completion_uses_canonical_prompt_and_empty_schema():
@@ -751,14 +942,15 @@ async def test_complete_browser_use_waterfall_only_path():
     set_mock_handler(handler)
     client = RoseClient(openrouter_key="ork-x")
 
-    result = await client.complete_browser_use(
-        task="click submit",
-        browser_state=_browser_state(),
-        action_history=[],
-        available_actions=["click", "goto"],
-        include_screenshot=False,
-        call_site="test-bu-waterfall",
-    )
+    with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}):
+        result = await client.complete_browser_use(
+            task="click submit",
+            browser_state=_browser_state(),
+            action_history=[],
+            available_actions=["click", "goto"],
+            include_screenshot=False,
+            call_site="test-bu-waterfall",
+        )
 
     assert result["mode"] == "waterfall"
     assert result["action"]["action"] == "click"
@@ -953,6 +1145,11 @@ async def run_all_tests():
     r.record("system_prompt_uses_native_tools", test_build_browser_use_system_prompt_uses_native_tools_not_action_list)
     r.record("system_prompt_hides_extract", test_build_browser_use_system_prompt_does_not_advertise_extract)
     r.record("native_tool_schemas_preserve_catalog", test_build_browser_use_tools_preserves_catalog_descriptions)
+    r.record("write_lock_notification_schema", test_write_lock_notification_tool_is_stable_internal_action_schema)
+    r.record(
+        "write_lock_notification_alias_schema",
+        test_write_lock_notification_schema_normalizes_provider_aliases,
+    )
 
     r.record("messages_text_only_no_screenshot", test_build_messages_text_only_when_no_screenshot)
     r.record("messages_timezone_timestamp", test_build_messages_browser_state_includes_timezone_aware_timestamp)
@@ -982,6 +1179,10 @@ async def run_all_tests():
     r.record("normalize_input_text_remap", test_normalize_input_text_remap)
     r.record("normalize_request_auth_assistance", test_normalize_request_user_assistance)
     r.record("normalize_provider_tool_call", test_normalize_provider_tool_call)
+    r.record(
+        "normalize_write_lock_notification_tool_call",
+        test_normalize_write_lock_notification_tool_call_preserves_params,
+    )
     r.record("normalize_prefers_thinking", test_normalize_prefers_thinking_over_next_goal)
     r.record("normalize_falls_back_to_next_goal", test_normalize_falls_back_to_next_goal_when_no_thinking)
     r.record("normalize_string_completion", test_normalize_string_completion_extracts_json)

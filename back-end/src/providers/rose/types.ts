@@ -54,6 +54,7 @@ export interface CompletionOptions {
   tools?: Array<Record<string, unknown>>;
   tool_choice?: unknown;
   effort?: string;
+  provider_fast_mode?: boolean;
   claude_token?: string;
   gpt_token?: string;
   gpt_account_id?: string;

@@ -6,15 +6,7 @@ export interface ShortcutConfig {
 
 // Browser types for multi-browser cookie sync
 export type BrowserType =
-  | 'chrome'
-  | 'edge'
-  | 'brave'
-  | 'arc'
-  | 'opera'
-  | 'vivaldi'
-  | 'chromium'
-  | 'atlas'
-  | 'safari';
+  'chrome' | 'edge' | 'brave' | 'arc' | 'opera' | 'vivaldi' | 'chromium' | 'atlas' | 'safari';
 
 export interface BrowserInfo {
   type: BrowserType;
@@ -25,6 +17,37 @@ export interface BrowserInfo {
 
 export interface ReadBrowserCookiesConfig {
   keychainPassword?: string;
+}
+
+export interface PasskeyEnrollParams {
+  /** URL to open (the site's login & security / add-a-passkey page). */
+  url: string;
+  /** Optional rpId to match; defaults to the URL's hostname. */
+  rpMatch?: string;
+}
+
+export interface PasskeyEnrollResult {
+  success: boolean;
+  rpId?: string;
+  credentialId?: string;
+  message?: string;
+}
+
+export interface PasskeyImportResult {
+  success: boolean;
+  count?: number;
+  passkeyCount?: number;
+  passwordCount?: number;
+  message?: string;
+}
+
+export interface AutoFillSettingsResult {
+  success: boolean;
+  enabled?: boolean;
+  credentialExchangeEnabled?: boolean;
+  openedSettings?: boolean;
+  openedPasswordsApp?: boolean;
+  message?: string;
 }
 
 // IPC method signatures
@@ -80,6 +103,12 @@ export interface IPC {
     config?: { keychainPassword?: string }
   ) => Promise<UploadResult>;
 
+  // Passkeys: mint an exportable agent passkey via a CDP virtual authenticator
+  // in an Electron window and upload it to the backend.
+  passkeys?: {
+    enroll: (params: PasskeyEnrollParams) => Promise<PasskeyEnrollResult>;
+  };
+
   // Fingerprint
   collectFingerprint: () => Promise<FingerprintData | null>;
   uploadFingerprint: (data: FingerprintData) => Promise<UploadResult>;
@@ -88,6 +117,8 @@ export interface IPC {
   openFullDiskAccessSettings: () => Promise<{ success: boolean }>;
   openKeychainAccess: (searchQuery?: string) => Promise<{ success: boolean }>;
   openPasswordsApp: () => Promise<{ success: boolean }>;
+  openAutoFillSettings: () => Promise<AutoFillSettingsResult>;
+  checkAutoFillSettings: () => Promise<AutoFillSettingsResult>;
 
   // Events
   onProgress: (callback: (progress: UploadProgress) => void) => void;
@@ -110,6 +141,7 @@ export interface IPC {
   // Payment events
   onPaymentComplete: (callback: (data: { success: boolean }) => void) => void;
   removePaymentCompleteListener: () => void;
+  onPasskeysImportComplete?: (callback: (result: PasskeyImportResult) => void) => () => void;
 
   // Claude Code credentials
   claudeCode?: {
@@ -331,14 +363,7 @@ export interface QuickQueryToggleState {
 }
 
 export type UpdateStatusState =
-  | 'idle'
-  | 'checking'
-  | 'available'
-  | 'downloading'
-  | 'downloaded'
-  | 'none'
-  | 'building'
-  | 'error';
+  'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'none' | 'building' | 'error';
 
 export interface UpdateStatusPayload {
   state: UpdateStatusState;

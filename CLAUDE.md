@@ -301,6 +301,7 @@ Always log these events (use `[Component]` prefix, include IDs, truncate payload
 - Test phone: `+19729777432`
 - Test OTP: `181818`
 - Backend API Key: `AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=`
+- If a test fails due to an invalid GPT auth token or invalid Claude auth token, retry with the token stored locally on the computer, or refetch the ones stored in the prod database — do not escalate before trying these.
 
 **Query backend locally:**
 

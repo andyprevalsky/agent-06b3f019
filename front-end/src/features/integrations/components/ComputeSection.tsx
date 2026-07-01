@@ -15,6 +15,11 @@ import { Button } from '@/components/ui/button';
 import claudeIcon from '@/assets/claude-color.svg';
 import geminiIcon from '@/assets/gemini-icon.png';
 
+import ConnectedStatusText from './ConnectedStatusText';
+import DropdownIconFrame, {
+  dropdownIconImageClassName,
+  dropdownIconPreset,
+} from './DropdownIconFrame';
 import SectionToggleButton from './SectionToggleButton';
 import SyncItemButton from './SyncItemButton';
 
@@ -76,8 +81,13 @@ function ClaudeRow({
     return (
       <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
         <div className="flex items-center gap-3">
-          <img src={claudeIcon} alt="Claude" className="w-6 h-6" />
-          <span className="text-sm">Claude Subscription</span>
+          <DropdownIconFrame {...dropdownIconPreset.claude} isSynced={synced}>
+            <img src={claudeIcon} alt="Claude" className={dropdownIconImageClassName} />
+          </DropdownIconFrame>
+          <div className="flex flex-col items-start">
+            <span className="text-sm">Claude Subscription</span>
+            <ConnectedStatusText isConnected={synced} />
+          </div>
         </div>
         <SyncItemButton isLoading={loading} isSynced={synced} onClick={onSync} />
       </div>
@@ -86,7 +96,9 @@ function ClaudeRow({
   return (
     <div className="px-4 py-2 flex items-center justify-between flex-wrap gap-2 border-b border-border/50">
       <div className="flex items-center gap-3">
-        <img src={claudeIcon} alt="Claude" className="w-6 h-6" />
+        <DropdownIconFrame {...dropdownIconPreset.claude}>
+          <img src={claudeIcon} alt="Claude" className={dropdownIconImageClassName} />
+        </DropdownIconFrame>
         <div className="flex items-center gap-2">
           <span className="text-sm">Claude Subscription</span>
           <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
@@ -118,8 +130,13 @@ function GptRow({
     return (
       <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
         <div className="flex items-center gap-3">
-          <ChatGPTIcon />
-          <span className="text-sm">ChatGPT Subscription</span>
+          <DropdownIconFrame {...dropdownIconPreset.chatgpt} isSynced={synced}>
+            <ChatGPTIcon />
+          </DropdownIconFrame>
+          <div className="flex flex-col items-start">
+            <span className="text-sm">ChatGPT Subscription</span>
+            <ConnectedStatusText isConnected={synced} />
+          </div>
         </div>
         <SyncItemButton isLoading={loading} isSynced={synced} onClick={onSync} />
       </div>
@@ -128,7 +145,9 @@ function GptRow({
   return (
     <div className="px-4 py-2 flex items-center justify-between flex-wrap gap-2 border-b border-border/50">
       <div className="flex items-center gap-3">
-        <ChatGPTIcon />
+        <DropdownIconFrame {...dropdownIconPreset.chatgpt}>
+          <ChatGPTIcon />
+        </DropdownIconFrame>
         <div className="flex items-center gap-2">
           <span className="text-sm">ChatGPT Subscription</span>
           <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
@@ -162,9 +181,12 @@ export default function ComputeSection({
     <div className="rounded-lg border border-border bg-card/60 overflow-hidden">
       <div className="p-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-background">
+          <DropdownIconFrame
+            {...dropdownIconPreset.computeMain}
+            isSynced={claudeCodeSynced || gptCodeSynced}
+          >
             <ComputeIcon />
-          </div>
+          </DropdownIconFrame>
           <div className="flex flex-col">
             <h3 className="font-medium">Compute</h3>
             <span className="text-xs text-muted-foreground">Connect AI subscriptions</span>
@@ -194,7 +216,9 @@ export default function ComputeSection({
           />
           <div className="px-4 py-2 flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <img src={geminiIcon} alt="Gemini" className="w-6 h-6" />
+              <DropdownIconFrame {...dropdownIconPreset.gemini}>
+                <img src={geminiIcon} alt="Gemini" className={dropdownIconImageClassName} />
+              </DropdownIconFrame>
               <span className="text-sm">Gemini Subscription</span>
             </div>
             <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">

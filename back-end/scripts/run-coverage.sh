@@ -39,6 +39,14 @@ fi
 export TEST_BASE_URL="http://localhost:$COV_PORT"
 COV_LOG="$BACKEND_DIR/coverage/server.log"
 
+# Coverage starts only a local backend. E2B smoke sandboxes cannot reach stale
+# developer ngrok URLs from .env, so keep those smoke sessions on direct provider
+# calls unless the caller explicitly opts into a known-live tunnel.
+if [[ "${BACKEND_COVERAGE_USE_FAST_MODE_PROXY:-0}" != "1" ]]; then
+  export FAST_MODE_ANTHROPIC_PROXY_URL=""
+  export FAST_MODE_CODEX_PROXY_URL=""
+fi
+
 # Pin the blackbox artifact dir so failures leave a known log path. Without this
 # the blackbox runner mints a random RUN_ID dir, which gets lost if the caller
 # tails output — forcing a full rerun just to find failures.
@@ -92,6 +100,12 @@ if $DB_FOUND; then
   LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria"
   export DATABASE_URL="$LOCAL_DB_URL"
   export DIRECT_URL="$LOCAL_DB_URL"
+  echo "Syncing Prisma schema to local test database..."
+  npx prisma db push --skip-generate --accept-data-loss >/dev/null
+  if [[ "${BACKEND_CODEX_SMOKE_SKIP:-0}" != "1" ]]; then
+    echo "Syncing local Codex credentials to local test database..."
+    npx tsx scripts/sync-codex-token.ts >/dev/null
+  fi
 fi
 
 echo "Starting backend with coverage collection on port $COV_PORT..."
@@ -140,6 +154,12 @@ TEST_EXIT=0
 NODE_V8_COVERAGE="$COV_TMP" \
 BLACKBOX_TEST_USE_EXISTING_BACKEND=1 CONTRACT_TEST_USE_EXISTING_BACKEND=1 \
   bash scripts/run-blackbox-tests.sh || TEST_EXIT=$?
+
+echo "Running unit tests..."
+UNIT_EXIT=0
+while IFS= read -r test_file; do
+  NODE_V8_COVERAGE="$COV_TMP" npx tsx "$test_file" || UNIT_EXIT=$?
+done < <(find src/tests/unit -type f -name '*.test.ts' | sort)
 
 # Stop the server so NODE_V8_COVERAGE flushes data
 echo "Stopping backend and collecting coverage data..."
@@ -229,10 +249,10 @@ fi
 
 # If blackbox tests failed, surface the runner log path + failure tail so the
 # caller can diagnose without rerunning the whole coverage suite.
-if [[ "$TEST_EXIT" -ne 0 ]]; then
+if [[ "$TEST_EXIT" -ne 0 || "$UNIT_EXIT" -ne 0 ]]; then
   RUNNER_LOG="$BLACKBOX_ARTIFACT_DIR/runner.log"
   echo ""
-  echo "⚠️  Blackbox tests failed (exit code $TEST_EXIT). Coverage data may be incomplete."
+  echo "⚠️  Tests failed (blackbox exit $TEST_EXIT, unit exit $UNIT_EXIT). Coverage data may be incomplete."
   echo "    Full runner log: $RUNNER_LOG"
   echo "    Backend log:     $BLACKBOX_ARTIFACT_DIR/backend.log"
   if [[ -f "$RUNNER_LOG" ]]; then
@@ -241,5 +261,8 @@ if [[ "$TEST_EXIT" -ne 0 ]]; then
     tail -n 120 "$RUNNER_LOG"
     echo "=== End failure tail ==="
   fi
-  exit "$TEST_EXIT"
+  if [[ "$TEST_EXIT" -ne 0 ]]; then
+    exit "$TEST_EXIT"
+  fi
+  exit "$UNIT_EXIT"
 fi

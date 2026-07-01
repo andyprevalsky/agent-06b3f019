@@ -12,8 +12,9 @@
   },
   "main": "dist/main/main/index.js",
   "scripts": {
-    "dev": "MAC_APP_PORT=${MAC_APP_PORT:-5174} && tsc -p tsconfig.main.json && concurrently \"tsc -p tsconfig.main.json --watch\" \"vite\" \"wait-on http://localhost:$MAC_APP_PORT && electron .\"",
-    "build": "vite build && tsc -p tsconfig.main.json && electron-builder",
+    "dev": "MAC_APP_PORT=${MAC_APP_PORT:-5174} && tsc -p tsconfig.main.json && bash native/passkey-import/build.sh && concurrently \"tsc -p tsconfig.main.json --watch\" \"vite\" \"wait-on http://localhost:$MAC_APP_PORT && electron .\"",
+    "build": "vite build && tsc -p tsconfig.main.json && npm run build:native && electron-builder",
+    "build:native": "bash native/passkey-import/build.sh && bash native/user-activity-bridge/build.sh",
     "build:vite": "vite build && tsc -p tsconfig.main.json",
     "postinstall": "node -e \"const v=require('electron/package.json').version;require('child_process').execSync('npx --yes node-gyp rebuild --target='+v+' --arch='+process.arch+' --dist-url=https://electronjs.org/headers',{cwd:'node_modules/better-sqlite3',stdio:'inherit'})\"",
     "type-check": "tsc --noEmit && tsc -p tsconfig.main.json --noEmit",
@@ -98,14 +99,22 @@
     "appId": "com.rose.desktop",
     "productName": "Rose",
     "artifactName": "${productName}-mac.${ext}",
+    "extraResources": [
+      {
+        "from": "dist/native",
+        "to": "native"
+      },
+      {
+        "from": "scripts/read_indexeddb.py",
+        "to": "scripts/read_indexeddb.py"
+      }
+    ],
     "afterSign": "scripts/notarize.js",
     "afterAllArtifactBuild": "scripts/staple-dmg.js",
     "protocols": {
       "name": "Rose",
       "schemes": [
-        "roselabs",
-        "http",
-        "https"
+        "roselabs"
       ]
     },
     "publish": {
@@ -121,8 +130,14 @@
       ],
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
+      "extendInfo": {
+        "NSUserActivityTypes": [
+          "ASCredentialExchangeActivity"
+        ]
+      },
       "entitlements": "entitlements.mac.plist",
-      "entitlementsInherit": "entitlements.mac.plist",
+      "entitlementsInherit": "entitlements.inherit.mac.plist",
+      "provisioningProfile": "build/RoseDesktop.provisionprofile",
       "identity": "Rose Ai Labs, Inc. (P3HATASMP9)",
       "notarize": false
     },

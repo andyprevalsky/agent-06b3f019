@@ -173,6 +173,7 @@ const KNOWN_TAGS = [
   'local-only',
   'minted',
   'social',
+  'grep',
 ];
 
 // ==================== GET /api/benchmarks — CONTRACT TESTS ====================

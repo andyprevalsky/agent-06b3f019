@@ -4,17 +4,17 @@
 
 import { randomUUID } from '../../providers/crypto';
 import { startAgentWorkflow, getTemporalClient } from '../../providers/temporal';
-import { getModelPricing, dollarsToMicrodollars } from '../../providers/modelPricing';
 import { getX402Endpoints } from '../../providers/x402Endpoints';
 import { handleChatMessage, broadcastAgentModeStarted } from '../../providers/chat';
-import { getGeoFromIP, geoFromDeliveryAddress, DEFAULT_GEOLOCATION } from '../../providers/geoip';
 import { cleanupAgentSessions } from '../../providers/agentCleanup';
 import { createGithubRepo } from '../../providers/github';
 import { createLogger } from '../../providers/logger';
 import type { CreateAgentBody } from './types';
 import * as repo from './repo';
+import { resolveCreateMetadata } from './agentCreateMetadata';
 
 const log = createLogger('Agents');
+const DEFAULT_FAST_MODE_USER_IDS = new Set(['1f85ff25-6e29-4c1b-8739-f917bd101a30']);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -35,62 +35,25 @@ export function resolvePromptSecrets(text: string): string {
   });
 }
 
-/** Fetch model pricing and resolve geolocation. Sub-agents inherit their
- *  parent's stored proxy fields rather than geolocating the worker IP, which
- *  would otherwise stamp every sub-agent with the Fly.io worker's location.
- *
- *  Root agents prefer the client IP. When the "client" is a server (no IP, e.g.
- *  SMS/scheduled runs) or the IP can't be resolved, fall back to the user's
- *  delivery address city/state so the proxy follows where the user lives; only
- *  if there's no usable address do we use DEFAULT_GEOLOCATION.
- *
- *  Exported so agentBatchService can reuse the exact same path. */
-export async function resolveCreateMetadata(
-  model: string,
-  clientIP: string | null,
-  parentAgentId: string | null,
-  userId: string
-) {
-  const pricing = await getModelPricing(model);
-  let tokenInPriceMicrodollars: number | null = null;
-  let tokenOutPriceMicrodollars: number | null = null;
-
-  if (pricing !== null && pricing !== undefined) {
-    tokenInPriceMicrodollars = dollarsToMicrodollars(pricing.prompt);
-    tokenOutPriceMicrodollars = dollarsToMicrodollars(pricing.completion);
-  }
-
-  let proxyGeo = DEFAULT_GEOLOCATION;
-  if (parentAgentId !== null) {
-    const parentProxy = await repo.findAgentProxy(parentAgentId);
-    if (parentProxy !== null && parentProxy !== undefined && parentProxy.proxyCountry !== null) {
-      proxyGeo = {
-        country: parentProxy.proxyCountry,
-        ...(parentProxy.proxyState !== null ? { state: parentProxy.proxyState } : {}),
-        ...(parentProxy.proxyCity !== null ? { city: parentProxy.proxyCity } : {}),
-      };
-    }
-  } else {
-    let geo = clientIP !== null ? await getGeoFromIP(clientIP) : null;
-    if (geo === null || geo === undefined) {
-      // No client IP (server-originated) or unresolved — fall back to the
-      // user's delivery address before the hard-coded default.
-      const address = await repo.findUserDeliveryAddress(userId);
-      if (address !== null && address !== undefined) {
-        geo = geoFromDeliveryAddress(address);
-      }
-    }
-    if (geo !== null && geo !== undefined) {
-      proxyGeo = geo;
-    }
-  }
-
-  return { tokenInPriceMicrodollars, tokenOutPriceMicrodollars, proxyGeo };
+/** Apply account-scoped Fast Mode defaults for root agents only. */
+export function applyFastModeDefault(body: CreateAgentBody, userId: string): void {
+  if (body.fast_mode_cache_enabled !== undefined) return;
+  if (body.parent_agent_id !== undefined) return;
+  if (!DEFAULT_FAST_MODE_USER_IDS.has(userId)) return;
+  body.fast_mode_cache_enabled = true;
 }
 
-// Note: the batch service composes resolveCreateMetadata via a wrapper there;
-// see agentBatchService.ts. Resolving here directly avoids exporting the
-// private helper and keeps this file under the lint budget.
+/** A sub-agent inherits Fast Mode reads from its parent unless explicitly set. */
+export function applyFastModeInheritance(
+  body: CreateAgentBody,
+  parentFastModeCacheEnabled: boolean | null | undefined
+): void {
+  if (body.fast_mode_cache_enabled !== undefined) return;
+  if (body.parent_agent_id === undefined) return;
+  if (parentFastModeCacheEnabled === true) {
+    body.fast_mode_cache_enabled = true;
+  }
+}
 
 /* c8 ignore start -- startSubAgentWorkflow, startDirectWorkflow, startChatMode require Temporal/GitHub/LLM infrastructure */
 /** Start a sub-agent workflow. The Agent row already has temporalWorkflowId
@@ -119,6 +82,9 @@ async function startSubAgentWorkflow(
     ...(body.max_iterations !== undefined ? { maxIterations: body.max_iterations } : {}),
     priceLimitCents,
     ...(body.context_gates !== undefined ? { contextGates: body.context_gates } : {}),
+    ...(body.fast_mode_cache_enabled !== undefined
+      ? { fastModeCacheEnabled: body.fast_mode_cache_enabled }
+      : {}),
   });
 }
 
@@ -140,6 +106,10 @@ async function startDirectWorkflow(
     verifier: { type: verifier.type },
     startPhase,
     priceLimitCents,
+    ...(body.fast_mode_cache_enabled !== undefined
+      ? { fastModeCacheEnabled: body.fast_mode_cache_enabled }
+      : {}),
+    ...(body.context_gates !== undefined ? { contextGates: body.context_gates } : {}),
   });
   // temporalWorkflowId was set during createAgentTransaction (see comment on
   // startSubAgentWorkflow above), so no UPDATE is needed here.
@@ -211,6 +181,18 @@ export async function createAgent(
   }
   const verifier = { type: 'FLOAT_LLM_JUDGE' as const };
   const isSubAgent = body.parent_agent_id !== undefined;
+  applyFastModeDefault(body, userId);
+
+  // Fast Mode inheritance (#6): a sub-agent with no explicit flag inherits the
+  // parent's persisted setting, so the whole agent tree records/replays together.
+  if (
+    isSubAgent &&
+    body.fast_mode_cache_enabled === undefined &&
+    body.parent_agent_id !== undefined
+  ) {
+    const parent = await repo.findAgentById(body.parent_agent_id);
+    applyFastModeInheritance(body, parent?.fastModeCacheEnabled);
+  }
   const { tokenInPriceMicrodollars, tokenOutPriceMicrodollars, proxyGeo } =
     await resolveCreateMetadata(body.model, clientIP, body.parent_agent_id ?? null, userId);
   const agentId = body.agent_id ?? randomUUID();
@@ -240,6 +222,7 @@ export async function createAgent(
     proxyCity: proxyGeo.city,
     priceLimitCents: body.price_limit_cents,
     writeLockEnabled: body.write_lock_enabled,
+    fastModeCacheEnabled: body.fast_mode_cache_enabled,
     verifierType: verifier.type,
     attachments: body.attachments as Array<Record<string, unknown>> | undefined,
     temporalWorkflowId: willStartWorkflow ? agentId : null,
@@ -257,6 +240,7 @@ export async function createAgent(
     status: isSubAgent ? agent.agent.status : 'ACTIVE',
     status_message: agent.agent.statusMessage,
     temporal_workflow_id: workflowId,
+    fast_mode_cache_enabled: agent.agent.fastModeCacheEnabled,
     created_at: agent.agent.createdAt,
     updated_at: agent.agent.updatedAt,
     available_endpoints: getX402Endpoints(agent.agent.id),
@@ -347,6 +331,8 @@ export async function deleteAgentRecursive(agentId: string): Promise<void> {
     log.info('No workflow id for agent, skipping termination', { agent_id: agentId });
   }
   await repo.deleteAttentionRequests(agentId);
+  // Fast Mode cache entries intentionally outlive agent deletion. They are keyed by
+  // goal hash and only removed by the explicit fast-cache purge endpoint.
   await repo.softDeleteAgent(agentId);
 }
 

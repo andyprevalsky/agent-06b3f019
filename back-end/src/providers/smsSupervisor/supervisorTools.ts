@@ -27,6 +27,13 @@ const log = createLogger('SmsSupervisorTools');
 
 export { TOOL_SCHEMAS } from './supervisorTools.schemas';
 
+function formatTaskLabel(goal: string, maxLength = 80): string {
+  const normalized = goal.replace(/\s+/g, ' ').trim();
+  return normalized.length > maxLength
+    ? `${normalized.substring(0, maxLength - 3)}...`
+    : normalized;
+}
+
 // ============================================
 // Tool Call Type
 // ============================================
@@ -553,7 +560,7 @@ async function commitIncreaseBudget(
   return {
     tool: 'increase_budget',
     success: true,
-    result: `Budget for [${agent.id.substring(0, 6)}] increased to $${(newLimitCents / 100).toFixed(2)}${agent.status === 'COST_LIMIT_REACHED' ? ' — agent resuming' : ''}`,
+    result: `Budget increased to $${(newLimitCents / 100).toFixed(2)} for [${agent.id.substring(0, 6)}] "${formatTaskLabel(agent.goal)}"${agent.status === 'COST_LIMIT_REACHED' ? ' — agent resuming' : ''}`,
   };
 }
 

@@ -45,6 +45,7 @@
  */
 
 import { config } from 'dotenv';
+import { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
 config();
 
@@ -58,6 +59,7 @@ const CASE_CONCURRENCY = Number(
 const TEST_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 const TEST_PHONE = '+19729777432';
 const FAKE_AGENT_ID = '00000000-0000-0000-0000-fakeagent001';
+const prisma = new PrismaClient();
 
 // ==================== RESPONSE SCHEMAS ====================
 
@@ -152,6 +154,36 @@ function assertSchema<T>(schema: z.ZodType<T>, data: unknown, label: string): T 
 
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
+}
+
+async function createNotifyAgent(goal: string) {
+  return prisma.agent.create({
+    data: {
+      userId: TEST_USER_ID,
+      goal,
+      status: 'ACTIVE',
+      source: 'SMS',
+      progress: 0.25,
+    },
+  });
+}
+
+function assertNoInternalRoutingTokens(message: string, agentId: string): void {
+  const prefix = agentId.substring(0, 6);
+  assert(!message.includes(agentId), `Expected no full agent id in SMS, got: ${message}`);
+  assert(!message.includes(`[${prefix}]`), `Expected no agent prefix in SMS, got: ${message}`);
+  assert(
+    !message.includes(`agent-id=${agentId}`),
+    `Expected no agent-id URL in SMS, got: ${message}`
+  );
+  assert(
+    !/\battn[_-][a-z0-9-]+/i.test(message),
+    `Expected no attention id in SMS, got: ${message}`
+  );
+  assert(
+    !/\b(?:reply\s+)?approve\s+[A-Z0-9]{5}\b/i.test(message),
+    `Expected no approval shortcode instruction in SMS, got: ${message}`
+  );
 }
 
 // ==================== CAPTURE HELPERS ====================
@@ -753,40 +785,48 @@ async function testBoundary_directCallsSurgeApi() {
  */
 async function testBoundary_notifyCompletionCallsSurgeApi() {
   const token = captureToken('notify-completion');
-  const res = await request(`${BASE_URL}/api/send-sms/notify`, {
-    method: 'POST',
-    headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
-    body: JSON.stringify({
-      user_id: TEST_USER_ID,
-      event_type: 'completion',
-      agent_id: FAKE_AGENT_ID,
-      payload: { summary: 'boundary test completed' },
-    }),
-  });
-  assertStatus(res.status, 200, res.data);
-  const calls = await readCapturesForToken(token);
-  const surgeCalls = filterSurgeCalls(calls, 'boundary test completed');
-  if (surgeCalls.length === 0) {
-    console.log('    [skipped] No Surge calls -- Surge may not be configured');
-    return;
+  const agent = await createNotifyAgent('boundary completion agent');
+  try {
+    const res = await request(`${BASE_URL}/api/send-sms/notify`, {
+      method: 'POST',
+      headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
+      body: JSON.stringify({
+        user_id: TEST_USER_ID,
+        event_type: 'completion',
+        agent_id: agent.id,
+        payload: { summary: 'boundary test completed' },
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+    const calls = await readCapturesForToken(token);
+    const surgeCalls = filterSurgeCalls(calls, 'boundary test completed');
+    if (surgeCalls.length === 0) {
+      console.log('    [skipped] No Surge calls -- Surge may not be configured');
+      return;
+    }
+    assert(surgeCalls.length === 1, `Expected 1 Surge call, got ${surgeCalls.length}`);
+    const call = surgeCalls[0];
+    assert(
+      call.url.startsWith('https://api.surge.app/accounts/') && call.url.endsWith('/messages'),
+      `Unexpected Surge URL: ${call.url}`
+    );
+    assert(call.method === 'POST', `Expected POST, got ${call.method}`);
+    assert(
+      call.requestHeaders['Content-Type'] === 'application/json',
+      'Expected JSON content type'
+    );
+    assert(call.requestHeaders['Authorization']?.startsWith('Bearer '), 'Expected Bearer auth');
+    assert(call.requestBody !== null, 'Expected non-null request body');
+    const body = JSON.parse(call.requestBody!);
+    assert(body.to === TEST_PHONE, `Expected to=${TEST_PHONE}, got to=${body.to}`);
+    assert(
+      body.body.includes('boundary test completed'),
+      `Expected completion summary in SMS, got: ${body.body.substring(0, 100)}`
+    );
+    assertNoInternalRoutingTokens(body.body, agent.id);
+  } finally {
+    await prisma.agent.deleteMany({ where: { id: agent.id } });
   }
-  assert(surgeCalls.length === 1, `Expected 1 Surge call, got ${surgeCalls.length}`);
-  const call = surgeCalls[0];
-  assert(
-    call.url.startsWith('https://api.surge.app/accounts/') && call.url.endsWith('/messages'),
-    `Unexpected Surge URL: ${call.url}`
-  );
-  assert(call.method === 'POST', `Expected POST, got ${call.method}`);
-  assert(call.requestHeaders['Content-Type'] === 'application/json', 'Expected JSON content type');
-  assert(call.requestHeaders['Authorization']?.startsWith('Bearer '), 'Expected Bearer auth');
-  assert(call.requestBody !== null, 'Expected non-null request body');
-  const body = JSON.parse(call.requestBody!);
-  assert(body.to === TEST_PHONE, `Expected to=${TEST_PHONE}, got to=${body.to}`);
-  const prefix = FAKE_AGENT_ID.substring(0, 6);
-  assert(
-    body.body.includes(prefix) && body.body.includes('boundary test completed'),
-    `Expected completion message with prefix '${prefix}', ` + `got: ${body.body.substring(0, 100)}`
-  );
 }
 
 /**
@@ -794,33 +834,225 @@ async function testBoundary_notifyCompletionCallsSurgeApi() {
  */
 async function testBoundary_notifyAgentStartedCallsSurgeApi() {
   const token = captureToken('notify-started');
-  const res = await request(`${BASE_URL}/api/send-sms/notify`, {
-    method: 'POST',
-    headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
-    body: JSON.stringify({
-      user_id: TEST_USER_ID,
-      event_type: 'agent_started',
-      agent_id: FAKE_AGENT_ID,
-      payload: { goal: 'boundary test goal' },
-    }),
-  });
-  assertStatus(res.status, 200, res.data);
-  const calls = await readCapturesForToken(token);
-  const surgeCalls = filterSurgeCalls(calls, 'boundary test goal');
-  if (surgeCalls.length === 0) {
-    console.log('    [skipped] No Surge calls -- Surge may not be configured');
-    return;
+  const agent = await createNotifyAgent('boundary started agent');
+  try {
+    const res = await request(`${BASE_URL}/api/send-sms/notify`, {
+      method: 'POST',
+      headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
+      body: JSON.stringify({
+        user_id: TEST_USER_ID,
+        event_type: 'agent_started',
+        agent_id: agent.id,
+        payload: { goal: 'boundary test goal' },
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+    const calls = await readCapturesForToken(token);
+    const surgeCalls = filterSurgeCalls(calls, 'boundary test goal');
+    if (surgeCalls.length === 0) {
+      console.log('    [skipped] No Surge calls -- Surge may not be configured');
+      return;
+    }
+    assert(surgeCalls.length === 1, `Expected 1 Surge call, got ${surgeCalls.length}`);
+    const call = surgeCalls[0];
+    assert(call.requestBody !== null, 'Expected non-null request body');
+    const body = JSON.parse(call.requestBody!);
+    assert(body.to === TEST_PHONE, `Expected to=${TEST_PHONE}`);
+    assert(
+      body.body.includes('boundary test goal'),
+      `Expected started message to include goal, got: ${body.body.substring(0, 100)}`
+    );
+    assertNoInternalRoutingTokens(body.body, agent.id);
+  } finally {
+    await prisma.agent.deleteMany({ where: { id: agent.id } });
   }
-  assert(surgeCalls.length === 1, `Expected 1 Surge call, got ${surgeCalls.length}`);
-  const call = surgeCalls[0];
-  assert(call.requestBody !== null, 'Expected non-null request body');
-  const body = JSON.parse(call.requestBody!);
-  assert(body.to === TEST_PHONE, `Expected to=${TEST_PHONE}`);
-  const prefix = FAKE_AGENT_ID.substring(0, 6);
-  assert(
-    body.body.includes(prefix) && body.body.includes('boundary test goal'),
-    `Expected started message with prefix '${prefix}', ` + `got: ${body.body.substring(0, 100)}`
-  );
+}
+
+async function testBoundary_notifyCostLimitIncludesTaskGoal() {
+  const token = captureToken('notify-cost-limit');
+  const goal = 'boundary cost limit dinner booking task';
+  const agent = await createNotifyAgent(goal);
+  try {
+    const res = await request(`${BASE_URL}/api/send-sms/notify`, {
+      method: 'POST',
+      headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
+      body: JSON.stringify({
+        user_id: TEST_USER_ID,
+        event_type: 'cost_limit',
+        agent_id: agent.id,
+        payload: { tree_cost_cents: 150, price_limit_cents: 150 },
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+    const calls = await readCapturesForToken(token);
+    const surgeCalls = filterSurgeCalls(calls, goal);
+    if (surgeCalls.length === 0) {
+      console.log('    [skipped] No Surge calls -- Surge may not be configured');
+      return;
+    }
+    assert(surgeCalls.length === 1, `Expected 1 Surge call, got ${surgeCalls.length}`);
+    const call = surgeCalls[0];
+    assert(call.requestBody !== null, 'Expected non-null request body');
+    const body = JSON.parse(call.requestBody!);
+    assert(body.to === TEST_PHONE, `Expected to=${TEST_PHONE}`);
+    assert(
+      body.body.includes(`budget limit for "${goal}"`),
+      `Expected cost-limit message to include task goal, got: ${body.body.substring(0, 160)}`
+    );
+    assert(
+      !body.body.includes('after spending'),
+      `Expected cost-limit spend details, got: ${body.body.substring(0, 160)}`
+    );
+    assertNoInternalRoutingTokens(body.body, agent.id);
+  } finally {
+    await prisma.agent.deleteMany({ where: { id: agent.id } });
+  }
+}
+
+async function testBoundary_notifyWriteLockNaturalLanguageOnly() {
+  const token = captureToken('notify-write-lock');
+  const agent = await createNotifyAgent('boundary write lock agent');
+  const attentionRequestId = `attn-bb-${crypto.randomUUID()}`;
+  const question = 'Can I place the Amazon order for $42?';
+  try {
+    const res = await request(`${BASE_URL}/api/send-sms/notify`, {
+      method: 'POST',
+      headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
+      body: JSON.stringify({
+        user_id: TEST_USER_ID,
+        event_type: 'write_lock',
+        agent_id: agent.id,
+        payload: {
+          question,
+          attention_request_id: attentionRequestId,
+          workflow_id: 'wf-boundary-write-lock',
+        },
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+    const calls = await readCapturesForToken(token);
+    const surgeCalls = filterSurgeCalls(calls, question);
+    if (surgeCalls.length === 0) {
+      console.log('    [skipped] No Surge calls -- Surge may not be configured');
+      return;
+    }
+    assert(surgeCalls.length === 1, `Expected 1 Surge call, got ${surgeCalls.length}`);
+    const call = surgeCalls[0];
+    assert(call.requestBody !== null, 'Expected non-null request body');
+    const body = JSON.parse(call.requestBody!);
+    assert(body.to === TEST_PHONE, `Expected to=${TEST_PHONE}`);
+    assert(body.body.includes(question), `Expected write-lock question in SMS, got: ${body.body}`);
+    assertNoInternalRoutingTokens(body.body, agent.id);
+    assert(
+      !body.body.includes(attentionRequestId),
+      `Expected no attention request id in SMS, got: ${body.body}`
+    );
+  } finally {
+    await prisma.agent.deleteMany({ where: { id: agent.id } });
+  }
+}
+
+async function testBoundary_notifyWriteLockStructuredMms() {
+  const token = captureToken('notify-write-lock-mms');
+  const agent = await createNotifyAgent('boundary write lock mms agent');
+  const imageUrl = 'https://httpbin.org/image/jpeg';
+  const itemTitle = "Carhartt Men's Knit Cuffed Beanie, Black";
+  const itemDescription = 'Soft rib-knit acrylic, fold-up cuff, Carhartt patch label.';
+  try {
+    const res = await request(`${BASE_URL}/api/send-sms/notify`, {
+      method: 'POST',
+      headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
+      body: JSON.stringify({
+        user_id: TEST_USER_ID,
+        event_type: 'write_lock',
+        agent_id: agent.id,
+        payload: {
+          question: 'legacy markdown question should not be the primary renderer',
+          attention_request_id: `attn-bb-${crypto.randomUUID()}`,
+          workflow_id: 'wf-boundary-write-lock-mms',
+          metadata: {
+            writeLockNotification: {
+              trigger_type: 'purchase',
+              action: 'Place an Amazon order for one selected black beanie',
+              service: {
+                name: 'Amazon',
+                domain: 'amazon.com',
+                url: 'https://www.amazon.com/gp/buy/spc/handlers/display.html',
+              },
+              media: [],
+              purchase: {
+                items: [
+                  {
+                    title: itemTitle,
+                    price: '$19.99',
+                    quantity: '1',
+                    description: itemDescription,
+                    rating: '4.8 out of 5 stars',
+                    review_count: '167,432 ratings',
+                    image_url: imageUrl,
+                  },
+                ],
+                totals: { subtotal: '$19.99', tax: '$1.75', total: '$21.74' },
+              },
+            },
+          },
+        },
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+    const calls = await readCapturesForToken(token);
+    const surgeCalls = filterSurgeCalls(calls, itemTitle);
+    if (surgeCalls.length === 0) {
+      console.log('    [skipped] No Surge calls -- Surge may not be configured');
+      return;
+    }
+    assert(surgeCalls.length === 1, `Expected 1 Surge call, got ${surgeCalls.length}`);
+    const call = surgeCalls[0];
+    assert(call.requestBody !== null, 'Expected non-null request body');
+    const body = JSON.parse(call.requestBody!) as {
+      to?: string;
+      body?: string;
+      attachments?: { url?: string }[];
+    };
+    assert(body.to === TEST_PHONE, `Expected to=${TEST_PHONE}`);
+    assert(
+      body.body?.includes('Approval needed') === true,
+      `Expected approval header: ${body.body}`
+    );
+    assert(
+      body.body?.includes('Rose needs your approval for Amazon checkout.') === true,
+      `Expected carrier-safe checkout approval copy: ${body.body}`
+    );
+    assert(
+      body.body?.includes(`Description: ${itemDescription}`) === true,
+      `Expected renderer to preserve the LLM-provided description: ${body.body}`
+    );
+    assert(body.body?.includes(itemTitle) === true, `Expected item title in MMS: ${body.body}`);
+    assert(body.body?.includes('Price: $19.99') === true, `Expected price in MMS: ${body.body}`);
+    assert(
+      body.body?.includes('Rating: 4.8 out of 5 stars') === true,
+      `Expected rating: ${body.body}`
+    );
+    assert(body.body?.includes('Total: $21.74') === true, `Expected total in MMS: ${body.body}`);
+    assert(!body.body?.includes('Page:'), `Expected no page URL in carrier SMS body: ${body.body}`);
+    assert(
+      !/https?:\/\//i.test(body.body ?? ''),
+      `Expected no URL in carrier SMS body: ${body.body}`
+    );
+    assert(
+      !/\bAmazon\.com\b/i.test(body.body ?? ''),
+      `Expected no bare domain in SMS body: ${body.body}`
+    );
+    assert(
+      Array.isArray(body.attachments) &&
+        typeof body.attachments[0]?.url === 'string' &&
+        body.attachments[0].url !== imageUrl,
+      `Expected rehosted MMS attachment, got: ${JSON.stringify(body.attachments)}`
+    );
+    assertNoInternalRoutingTokens(body.body ?? '', agent.id);
+  } finally {
+    await prisma.agent.deleteMany({ where: { id: agent.id } });
+  }
 }
 
 /** POST /api/send-sms validation failure -> 0 outbound calls. */
@@ -1080,6 +1312,18 @@ async function runAll() {
           name: 'notify agent_started calls Surge API',
           fn: testBoundary_notifyAgentStartedCallsSurgeApi,
         },
+        {
+          name: 'notify cost_limit includes task goal',
+          fn: testBoundary_notifyCostLimitIncludesTaskGoal,
+        },
+        {
+          name: 'notify write_lock uses natural language only',
+          fn: testBoundary_notifyWriteLockNaturalLanguageOnly,
+        },
+        {
+          name: 'notify write_lock sends structured MMS with image',
+          fn: testBoundary_notifyWriteLockStructuredMms,
+        },
       ],
     });
   }
@@ -1158,8 +1402,10 @@ async function runAll() {
   if (failed > 0) {
     console.log('\nFAILURES:');
     allResults.filter((r) => !r.passed).forEach((r) => console.log(`   ${r.name}: ${r.error}`));
+    await prisma.$disconnect();
     process.exit(1);
   }
+  await prisma.$disconnect();
   console.log('\nALL BLACK-BOX TESTS PASSED\n');
   process.exit(0);
 }

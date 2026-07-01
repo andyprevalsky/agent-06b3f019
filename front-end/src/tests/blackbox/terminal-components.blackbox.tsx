@@ -162,6 +162,10 @@ describe('QueryInput (blackbox)', () => {
     value: '',
     onChange: vi.fn(),
     onSubmit: vi.fn(),
+    // Pin the selected model so these tests are decoupled from the component's
+    // default (which is rose-1-ultra); they assert chip rendering/clicking, not
+    // the default value.
+    selectedModel: 'rose-labs/rose-1-lite',
     availableModels: [
       {
         id: 'rose-labs/rose-1-lite',

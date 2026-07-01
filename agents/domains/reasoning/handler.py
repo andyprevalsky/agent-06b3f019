@@ -38,11 +38,19 @@ async def execute_reasoning_activity(
     gpt_token_source: str | None = None,
     gpt_token_pool_id: str | None = None,
     gpt_token_user_id: str | None = None,
+    fast_mode_step: int | None = None,
 ) -> dict:
     """Execute a reasoning task using LLM with streaming.
 
     Thin handler: validates inputs, delegates to service, handles errors.
     """
+    # Fast Mode: set a cache context so this reasoning node uses canonical request
+    # fingerprinting (enabled+goal auto-resolve from the agent row).
+    if fast_mode_step is not None:
+        from providers.fast_cache.client import ensure_position_context
+
+        await ensure_position_context(agent_id, fast_mode_step)
+
     try:
         return await execute_reasoning(
             goal=goal,

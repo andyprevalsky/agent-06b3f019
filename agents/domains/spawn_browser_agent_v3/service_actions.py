@@ -8,11 +8,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import inspect
+from io import BytesIO
 import time as time_module
 from typing import TYPE_CHECKING, Any, Dict, Optional
 from urllib.parse import urlparse
 
 import structlog
+from PIL import Image
 
 from domains.spawn_browser_agent_v3.config import WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS
 from domains.spawn_browser_agent_v3.service_crypto import has_payment_card_secret_refs
@@ -22,6 +24,13 @@ if TYPE_CHECKING:
     from browser_tools.humanizer import BrowserHumanizer
 
 logger = structlog.get_logger()
+
+STEEL_COMPUTER_SCREENSHOT_WIDTH = 1288
+STEEL_COMPUTER_SCREENSHOT_HEIGHT = 891
+STEEL_VIEWPORT_CROP_X = 4
+STEEL_VIEWPORT_CROP_Y = 87
+STEEL_VIEWPORT_CROP_WIDTH = 1283
+STEEL_VIEWPORT_CROP_HEIGHT = 800
 
 
 # ========================================
@@ -485,6 +494,17 @@ async def execute_action(  # noqa: C901
                 session_id=session_id,
                 config=config,
             )
+
+        elif action_name == "generate_write_lock_notification":
+            return {
+                "success": False,
+                "error": (
+                    "Tool call error: generate_write_lock_notification is only for write-lock "
+                    "notification forks. Do not call this tool unless the latest user message "
+                    'explicitly contains the keyword "WRITE_LOCK_NOTIFICATION_FORK_REQUEST". '
+                    "Continue the browser task with a normal browser action."
+                ),
+            }
 
         else:
             return {"success": False, "error": f"Unknown action: {action_name}"}
@@ -1323,57 +1343,31 @@ async def _execute_screenshot(
     session_id: Optional[str],
     config: Any,
 ) -> Dict[str, Any]:
-    """Execute a full-page screenshot action."""
-    from domains.spawn_browser_agent_v3.repo import upload_file_to_session
+    """Execute a screenshot action using Steel's actual browser-window capture."""
+    from domains.spawn_browser_agent_v3.repo import (
+        take_steel_computer_screenshot,
+        upload_file_to_session,
+    )
 
-    target_id = session.agent_focus_target_id
-    cdp_sess = await session.get_or_create_cdp_session(target_id, focus=False)
-    try:
-        layout = await cdp_sess.cdp_client.send_raw(
-            "Page.getLayoutMetrics",
-            {},
-            session_id=cdp_sess.session_id,
-        )
-        content_size = layout.get("contentSize", layout.get("cssContentSize", {}))
-        doc_width = content_size.get("width", 1280)
-        doc_height = content_size.get("height", 800)
+    if not session_id:
+        raise RuntimeError("Steel session id is required for screenshot capture")
 
-        cdp_result = await cdp_sess.cdp_client.send_raw(
-            "Page.captureScreenshot",
-            {
-                "format": "png",
-                "fromSurface": True,
-                "captureBeyondViewport": True,
-                "clip": {
-                    "x": 0,
-                    "y": 0,
-                    "width": doc_width,
-                    "height": doc_height,
-                    "scale": 1,
-                },
-            },
-            session_id=cdp_sess.session_id,
-        )
-        logger.info(f"\U0001f4f8 Full-page screenshot: {doc_width}x{doc_height}")
-    except Exception as e:
-        logger.warning(f"Full-page screenshot failed, falling back to viewport: {e}")
-        cdp_result = await cdp_sess.cdp_client.send_raw(
-            "Page.captureScreenshot",
-            {"format": "png", "fromSurface": True},
-            session_id=cdp_sess.session_id,
-        )
-
-    screenshot_b64 = cdp_result.get("data", "")
-    screenshot_bytes = base64.b64decode(screenshot_b64)
+    screenshot_result = await take_steel_computer_screenshot(session_id)
+    full_screenshot_b64 = screenshot_result["base64_image"]
+    full_screenshot_bytes = base64.b64decode(full_screenshot_b64)
+    screenshot_bytes = _crop_steel_computer_screenshot_to_viewport(full_screenshot_bytes)
+    screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
 
     saved_path = None
-    if session_id and config:
+    if config:
         upload_result = await upload_file_to_session(
             config, session_id, "screenshot.png", screenshot_bytes, "image/png"
         )
         if upload_result:
             saved_path = upload_result.get("path", "/tmp/screenshot.png")
-            logger.info(f"\U0001f4f8 Screenshot saved to Steel session: {saved_path} ({len(screenshot_bytes)} bytes)")
+            logger.info(
+                f"\U0001f4f8 Screenshot saved to Steel session: {saved_path} ({len(screenshot_bytes)} bytes)"
+            )
 
     await action_history.record_action(
         dom_service=dom_service,
@@ -1385,7 +1379,40 @@ async def _execute_screenshot(
 
     return {
         "success": True,
-        "message": f"Full-page screenshot saved ({len(screenshot_bytes)} bytes)",
+        "message": f"Screenshot captured from Steel viewport crop ({len(screenshot_bytes)} bytes)",
         "screenshot": screenshot_b64,
         "file_path": saved_path or "screenshot.png",
     }
+
+
+def _crop_steel_computer_screenshot_to_viewport(screenshot_bytes: bytes) -> bytes:
+    """Crop Steel's full browser-window screenshot to the viewport coordinate space."""
+    with Image.open(BytesIO(screenshot_bytes)) as img:
+        if img.size != (STEEL_COMPUTER_SCREENSHOT_WIDTH, STEEL_COMPUTER_SCREENSHOT_HEIGHT):
+            logger.warning(
+                "Steel computer screenshot dimensions differ from expected fixed window size",
+                actual_width=img.width,
+                actual_height=img.height,
+                expected_width=STEEL_COMPUTER_SCREENSHOT_WIDTH,
+                expected_height=STEEL_COMPUTER_SCREENSHOT_HEIGHT,
+            )
+
+        crop_box = (
+            STEEL_VIEWPORT_CROP_X,
+            STEEL_VIEWPORT_CROP_Y,
+            STEEL_VIEWPORT_CROP_X + STEEL_VIEWPORT_CROP_WIDTH,
+            STEEL_VIEWPORT_CROP_Y + STEEL_VIEWPORT_CROP_HEIGHT,
+        )
+        cropped = img.crop(crop_box)
+        if cropped.size != (STEEL_VIEWPORT_CROP_WIDTH, STEEL_VIEWPORT_CROP_HEIGHT):
+            logger.warning(
+                "Steel viewport screenshot crop dimensions differ from expected viewport size",
+                actual_width=cropped.width,
+                actual_height=cropped.height,
+                expected_width=STEEL_VIEWPORT_CROP_WIDTH,
+                expected_height=STEEL_VIEWPORT_CROP_HEIGHT,
+            )
+
+        output = BytesIO()
+        cropped.save(output, format="PNG")
+        return output.getvalue()

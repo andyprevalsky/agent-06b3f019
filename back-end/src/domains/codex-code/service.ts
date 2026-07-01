@@ -96,12 +96,14 @@ export async function createSession(params: CreateSessionParams) {
     normalizedRepoUrl = accessCheck.normalizedUrl!;
   }
 
+  const fastModeCacheEnabled = await repo.findAgentFastModeCache(agent_id);
   const session = await createCodexCodeSession(
     agent_id,
     goal,
     attachments,
     normalizedRepoUrl,
-    effectiveUserId
+    effectiveUserId,
+    fastModeCacheEnabled
   );
 
   return {

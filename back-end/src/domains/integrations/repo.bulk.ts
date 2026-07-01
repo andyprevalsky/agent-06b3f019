@@ -229,6 +229,27 @@ export async function bulkUpsertPasswords(
   );
 }
 
+// Passkey operations
+
+export async function bulkUpsertPasskeys(valuesClause: string, params: (string | number | null)[]) {
+  return prisma.$executeRawUnsafe(
+    `
+    INSERT INTO "PasskeyCredential" (id, "userId", "authRealm", "rpId", "credentialId", "encryptedPrivateKey", "userHandle", "signCount", origin, "browserSource", "createdAt", "updatedAt", "disabledAt", "disabledReason")
+    VALUES ${valuesClause}
+    ON CONFLICT ("userId", "rpId", "credentialId") DO UPDATE SET
+      "encryptedPrivateKey" = EXCLUDED."encryptedPrivateKey",
+      "userHandle" = EXCLUDED."userHandle",
+      "signCount" = EXCLUDED."signCount",
+      origin = EXCLUDED.origin,
+      "browserSource" = EXCLUDED."browserSource",
+      "updatedAt" = NOW(),
+      "disabledAt" = NULL,
+      "disabledReason" = NULL
+  `,
+    ...params
+  );
+}
+
 // CacheStorage operations
 
 export async function bulkUpsertCacheStorage(valuesClause: string, params: (string | object)[]) {

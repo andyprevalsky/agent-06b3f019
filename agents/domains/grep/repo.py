@@ -22,13 +22,28 @@ logger = structlog.get_logger()
 # Module-level cache for data summaries
 _data_summary_cache: Dict[str, Dict[str, Any]] = {}
 
+_GREP_HTTP_KEY_ALIASES = {
+    "before": "-B",
+    "after": "-A",
+    "context_c": "-C",
+    "line_numbers": "-n",
+    "case_insensitive": "-i",
+}
+_GREP_INTERNAL_KEYS = {"tool", "tool_call_id"}
+
+
+def _normalize_grep_payload(grep_params: Dict[str, Any]) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {}
+    for key, value in grep_params.items():
+        if key in _GREP_INTERNAL_KEYS or value is None:
+            continue
+        payload[_GREP_HTTP_KEY_ALIASES.get(key, key)] = value
+    return payload
+
 
 @activity.defn
 async def grep_activity(
-    pattern: str,
-    source: str = "messages",
-    person_id: Optional[str] = None,
-    since: Optional[str] = None,
+    grep_params: Dict[str, Any],
     user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
 ) -> GrepResult:
@@ -36,32 +51,25 @@ async def grep_activity(
     Activity: Search user's local data via backend POST /api/data/grep.
 
     Args:
-        pattern: Text to search for (plain text, not regex). Empty string returns all.
-        source: Data source to search (default: "messages")
-        person_id: Optional person ID to scope search to one thread
-        since: Optional ISO 8601 timestamp cutoff. Defaults to 365 days ago.
+        grep_params: Grep request payload. Exposed keys are pattern, source,
+            -A, -B, -C, context, -n, -i, head_limit, offset, multiline.
         user_id: User ID for auth
-        agent_id: Agent ID (used for agent_network_ source scoping)
+        agent_id: Agent ID for current-tree agent_network scoping
 
     Returns:
         Dict with matches, total_matches, truncated, message
     """
     try:
+        pattern = str(grep_params.get("pattern", ""))
+        source = grep_params.get("source", "all")
         activity.heartbeat(f"Searching {source} for: {pattern[:80]}")
 
         config = load_config()
 
-        payload: Dict[str, Any] = {
-            "pattern": pattern,
-            "source": source,
-        }
-        if since:
-            payload["since"] = since
-        if person_id:
-            payload["person_id"] = person_id
+        payload = _normalize_grep_payload(grep_params)
         if user_id:
             payload["user_id"] = user_id
-        if agent_id and source.startswith("agent_network_"):
+        if agent_id:
             payload["agent_id"] = agent_id
 
         async with httpx.AsyncClient(timeout=GREP_HTTP_TIMEOUT) as client:
@@ -103,8 +111,8 @@ async def grep_activity(
         logger.error(
             "Grep failed",
             error=str(e),
-            pattern=pattern[:LOG_PATTERN_MAX_LENGTH],
-            source=source,
+            pattern=str(grep_params.get("pattern", ""))[:LOG_PATTERN_MAX_LENGTH],
+            source=grep_params.get("source", "all"),
         )
         raise
 

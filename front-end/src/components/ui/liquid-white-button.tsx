@@ -18,6 +18,7 @@ const LiquidWhiteButton = forwardRef<HTMLButtonElement, LiquidWhiteButtonProps>(
   ({ onClick, disabled = false, className, children, size = 'md', ...props }, ref) => {
     const shaderContainerRef = useRef<HTMLDivElement>(null);
     const shaderMountRef = useRef<ShaderMount | null>(null);
+    const enableShader = !(typeof window !== 'undefined' && 'api' in window);
 
     // Scaled down proportionally for button:
     const sizeConfig = {
@@ -38,6 +39,7 @@ const LiquidWhiteButton = forwardRef<HTMLButtonElement, LiquidWhiteButtonProps>(
     const innerCircleSize = chromeRingSize - chromeRingThickness * 2; // Inner button face
 
     useEffect(() => {
+      if (!enableShader) return;
       const container = shaderContainerRef.current;
       if (!container) return;
 
@@ -46,26 +48,30 @@ const LiquidWhiteButton = forwardRef<HTMLButtonElement, LiquidWhiteButtonProps>(
         shaderMountRef.current = null;
       }
 
-      // Light/white version - adjusted shader params for brighter appearance
-      shaderMountRef.current = new ShaderMount(
-        container,
-        liquidMetalFragmentShader,
-        {
-          u_repetition: 1.5,
-          u_softness: 0.6,
-          u_shiftRed: 0.2,
-          u_shiftBlue: 0.2,
-          u_distortion: 0,
-          u_contour: 0,
-          u_angle: 100,
-          u_scale: 1.5,
-          u_shape: 1,
-          u_offsetX: 0.1,
-          u_offsetY: -0.1,
-        },
-        undefined,
-        0.5,
-      );
+      try {
+        // Light/white version - adjusted shader params for brighter appearance.
+        shaderMountRef.current = new ShaderMount(
+          container,
+          liquidMetalFragmentShader,
+          {
+            u_repetition: 1.5,
+            u_softness: 0.6,
+            u_shiftRed: 0.2,
+            u_shiftBlue: 0.2,
+            u_distortion: 0,
+            u_contour: 0,
+            u_angle: 100,
+            u_scale: 1.5,
+            u_shape: 1,
+            u_offsetX: 0.1,
+            u_offsetY: -0.1,
+          },
+          undefined,
+          0.5,
+        );
+      } catch (error) {
+        console.warn('[LiquidWhiteButton] Shader disabled', error);
+      }
 
       return () => {
         if (shaderMountRef.current) {
@@ -73,7 +79,7 @@ const LiquidWhiteButton = forwardRef<HTMLButtonElement, LiquidWhiteButtonProps>(
           shaderMountRef.current = null;
         }
       };
-    }, []);
+    }, [enableShader]);
 
     return (
       <button
@@ -101,6 +107,9 @@ const LiquidWhiteButton = forwardRef<HTMLButtonElement, LiquidWhiteButtonProps>(
           style={{
             position: 'relative',
             width: `${liquidMetalSize}px`,
+            background: enableShader
+              ? undefined
+              : 'linear-gradient(180deg, #f4f4f4 0%, #cfcfcf 45%, #9f9f9f 100%)',
             boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15), 0 2px 4px rgba(0, 0, 0, 0.1)',
             height: `${liquidMetalSize}px`,
             borderRadius: '50%',

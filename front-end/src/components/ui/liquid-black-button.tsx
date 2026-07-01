@@ -18,6 +18,7 @@ const LiquidBlackButton = forwardRef<HTMLButtonElement, LiquidBlackButtonProps>(
   ({ onClick, disabled = false, className, children, size = 'md', ...props }, ref) => {
     const shaderContainerRef = useRef<HTMLDivElement>(null);
     const shaderMountRef = useRef<ShaderMount | null>(null);
+    const enableShader = !(typeof window !== 'undefined' && 'api' in window);
 
     // Reference sizes in rem (1rem = 10px at 62.5% base):
     // #liquid-metal: 38.5rem = 385px
@@ -42,6 +43,7 @@ const LiquidBlackButton = forwardRef<HTMLButtonElement, LiquidBlackButtonProps>(
     const outlinePadding = Math.max(Math.round(5 * scale), 1); // 0.5rem equivalent
 
     useEffect(() => {
+      if (!enableShader) return;
       const container = shaderContainerRef.current;
       if (!container) return;
 
@@ -50,25 +52,29 @@ const LiquidBlackButton = forwardRef<HTMLButtonElement, LiquidBlackButtonProps>(
         shaderMountRef.current = null;
       }
 
-      shaderMountRef.current = new ShaderMount(
-        container,
-        liquidMetalFragmentShader,
-        {
-          u_repetition: 1.5,
-          u_softness: 0.5,
-          u_shiftRed: 0.3,
-          u_shiftBlue: 0.3,
-          u_distortion: 0,
-          u_contour: 0,
-          u_angle: 100,
-          u_scale: 1.5,
-          u_shape: 1,
-          u_offsetX: 0.1,
-          u_offsetY: -0.1,
-        },
-        undefined,
-        0.6,
-      );
+      try {
+        shaderMountRef.current = new ShaderMount(
+          container,
+          liquidMetalFragmentShader,
+          {
+            u_repetition: 1.5,
+            u_softness: 0.5,
+            u_shiftRed: 0.3,
+            u_shiftBlue: 0.3,
+            u_distortion: 0,
+            u_contour: 0,
+            u_angle: 100,
+            u_scale: 1.5,
+            u_shape: 1,
+            u_offsetX: 0.1,
+            u_offsetY: -0.1,
+          },
+          undefined,
+          0.6,
+        );
+      } catch (error) {
+        console.warn('[LiquidBlackButton] Shader disabled', error);
+      }
 
       return () => {
         if (shaderMountRef.current) {
@@ -76,7 +82,7 @@ const LiquidBlackButton = forwardRef<HTMLButtonElement, LiquidBlackButtonProps>(
           shaderMountRef.current = null;
         }
       };
-    }, []);
+    }, [enableShader]);
 
     return (
       <button
@@ -106,6 +112,9 @@ const LiquidBlackButton = forwardRef<HTMLButtonElement, LiquidBlackButtonProps>(
             width: `${liquidMetalSize}px`,
             height: `${liquidMetalSize}px`,
             borderRadius: '50%',
+            background: enableShader
+              ? undefined
+              : 'linear-gradient(180deg, #444 0%, #1b1b1b 48%, #000 100%)',
             boxShadow: '0 4px 12px rgba(0, 0, 0, 0.25), 0 2px 4px rgba(0, 0, 0, 0.15)',
           }}
         >

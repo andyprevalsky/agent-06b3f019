@@ -13,6 +13,8 @@ USAGE:
 """
 
 import asyncio
+import json
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -55,6 +57,100 @@ ALIAS_TYPE_OVERRIDES = {
     "spawn_general_purpose_agent": {"type": "general_purpose"},
     "spawn_general_purpose_agent_for_each": {"type": "for_each"},
 }
+
+_PARAM_SELECTION_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "be",
+    "by",
+    "do",
+    "for",
+    "from",
+    "has",
+    "in",
+    "is",
+    "it",
+    "its",
+    "no",
+    "not",
+    "of",
+    "on",
+    "or",
+    "only",
+    "the",
+    "to",
+    "use",
+    "with",
+    "you",
+}
+
+
+def _param_selection_tokens(value: Any) -> set[str]:
+    """Tokenize a task/candidate string for deterministic param-call disambiguation."""
+    text = value if isinstance(value, str) else json.dumps(value, sort_keys=True, default=str)
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", text.lower())
+        if len(token) > 1 and token not in _PARAM_SELECTION_STOPWORDS
+    }
+
+
+def _tool_call_task_text(tool_call: Dict[str, Any]) -> Any:
+    """Return the task-bearing field from a populated tool call."""
+    for key in ("goal", "query", "url", "condition", "message"):
+        value = tool_call.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return {k: v for k, v in tool_call.items() if k != "tool"}
+
+
+def _select_param_tool_call(tool_calls: List[Dict[str, Any]], actual_tool: str, task: "DAGTask") -> Dict[str, Any]:
+    """Select exactly one param-populator tool call for a DAG task.
+
+    The param-populator prompt requires exactly one tool call. If the model
+    returns several matching calls anyway, choose the one whose task-bearing
+    fields best match the DAG node instead of executing the first call blindly.
+    """
+    if not tool_calls:
+        raise ValueError(f"LLM returned no tool calls for task {task.index}")
+
+    matching = [tc for tc in tool_calls if tc.get("tool") == actual_tool]
+    if not matching:
+        if len(tool_calls) == 1:
+            workflow.logger.warning(
+                f"[DAG] Expected tool {actual_tool}, got {tool_calls[0].get('tool')}"
+            )
+            return tool_calls[0]
+        raise ValueError(
+            f"LLM returned {len(tool_calls)} tool calls for task {task.index}, none for {actual_tool}"
+        )
+
+    if len(matching) == 1:
+        return matching[0]
+
+    task_tokens = _param_selection_tokens(task.goal)
+    ranked: list[tuple[int, int, Dict[str, Any]]] = []
+    for order, tool_call in enumerate(matching):
+        candidate_tokens = _param_selection_tokens(_tool_call_task_text(tool_call))
+        score = len(task_tokens & candidate_tokens)
+        ranked.append((score, -order, tool_call))
+
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    best_score = ranked[0][0]
+    second_score = ranked[1][0]
+    if best_score > second_score:
+        workflow.logger.warning(
+            f"[DAG] Param populator returned {len(matching)} {actual_tool} calls for task {task.index}; "
+            f"selected best task match"
+        )
+        return ranked[0][2]
+
+    raise ValueError(
+        f"LLM returned multiple ambiguous {actual_tool} tool calls for task {task.index}"
+    )
 
 
 def _build_param_population_message(goal: str, tool_name: str, alias_hint: str = "") -> str:
@@ -379,6 +475,9 @@ async def execute_dag(
                     claude_token_source, claude_token_pool_id, user_id,
                     gpt_token, gpt_account_id, gpt_token_source, gpt_token_pool_id, user_id,
                     user_id,
+                    # Fast Mode: cache-warm keys by canonical request fingerprint;
+                    # enabled+goal auto-resolve from the agent row.
+                    False, None, 0,
                 ],
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=1),
@@ -581,6 +680,8 @@ async def _execute_single_task(
                 gpt_token_source,
                 gpt_token_pool_id,
                 user_id,
+                # Fast Mode: reasoning keys by canonical request fingerprint.
+                task.index,
             ]
             # Fail fast if context has grown past Temporal's 2 MiB payload limit —
             # otherwise the workflow-task encoder loops silently on replay.
@@ -595,7 +696,7 @@ async def _execute_single_task(
                 # cost is consistently 80-110 s — start-to-close has to clear
                 # 90 s of streaming + post-processing, otherwise Temporal kills
                 # the activity mid-stream and the retry hits the same wall.
-                start_to_close_timeout=timedelta(seconds=180),
+                start_to_close_timeout=timedelta(seconds=600),
                 retry_policy=RetryPolicy(maximum_attempts=2),
                 # Heartbeat-timeout is the per-chunk safety net. The LLM stream
                 # heartbeats every chunk via _safe_heartbeat; a 90 s gap means
@@ -700,24 +801,18 @@ async def _execute_single_task(
                     gpt_token_pool_id,
                     user_id,
                     user_id,
+                    # Fast Mode: DAG node keys by canonical request fingerprint.
+                    False, None, task.index,
                 ],
-                start_to_close_timeout=timedelta(seconds=180),
+                start_to_close_timeout=timedelta(seconds=600),
                 retry_policy=RetryPolicy(maximum_attempts=2),
-                heartbeat_timeout=timedelta(seconds=60),
+                heartbeat_timeout=timedelta(seconds=180),
             )
 
             # Extract params from the matching tool call
             tool_calls = llm_result.get("tool_calls", [])
-            matching = [tc for tc in tool_calls if tc.get("tool") == actual_tool]
-            if matching:
-                params = {k: v for k, v in matching[0].items() if k != "tool"}
-            elif tool_calls:
-                workflow.logger.warning(
-                    f"[DAG] Expected tool {actual_tool}, got {tool_calls[0].get('tool')}"
-                )
-                params = {k: v for k, v in tool_calls[0].items() if k != "tool"}
-            else:
-                raise ValueError(f"LLM returned no tool calls for task {task.index}")
+            tool_call = _select_param_tool_call(tool_calls, actual_tool, task)
+            params = {k: v for k, v in tool_call.items() if k != "tool"}
 
             # Track param population LLM cost
             param_usage = llm_result.get("usage", {})

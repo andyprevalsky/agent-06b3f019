@@ -70,6 +70,7 @@ export const ROSE_MODEL_DESCRIPTIONS: Record<string, string> = {
 /** Tool name to human-readable label mapping (mirrors backend TOOL_DISPLAY_NAMES). */
 export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   web_search: 'Web Searches',
+  people_search: 'People Searches',
   spawn_agent: 'Agents Spawned',
   spawn_general_purpose_agent: 'General-purpose Agents Spawned',
   spawn_general_purpose_agent_for_each: 'General-purpose Agent Batches',

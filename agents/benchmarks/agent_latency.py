@@ -1519,6 +1519,20 @@ def _parse_fly_line_to_raw_event(line: str) -> Optional[_RawEvent]:
     ts_str = d.get("timestamp")
     if not ts_str:
         return None
+    # Fly/ClickHouse retained logs wrap app structlog JSON in an outer Fly
+    # envelope. The useful span fields live in the JSON-encoded `message`
+    # string, while ClickHouse top-level parsed columns may be empty.
+    message = d.get("message")
+    if isinstance(message, str) and message.startswith("{"):
+        try:
+            inner = json.loads(message)
+        except json.JSONDecodeError:
+            inner = None
+        if isinstance(inner, dict) and inner.get("timestamp"):
+            inner.setdefault("fly_timestamp", ts_str)
+            inner.setdefault("fly_event", d.get("event"))
+            inner.setdefault("fly_host", d.get("host"))
+            return _RawEvent(parse_ts(str(inner["timestamp"])), "worker", inner.get("event", ""), inner)
     return _RawEvent(parse_ts(ts_str), "worker", d.get("event", ""), d)
 
 

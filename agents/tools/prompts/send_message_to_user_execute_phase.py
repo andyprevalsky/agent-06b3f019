@@ -8,4 +8,4 @@ Keep messages tight.
 
 Usage:
 - Use for status updates or sharing findings mid-execution.
-- Do not use to ask a question; the user cannot reply during the EXECUTE phase."""
+- Don't ask questions; the user can't reply in EXECUTE. If info is missing, make the best assumption and proceed; never wait for the user."""

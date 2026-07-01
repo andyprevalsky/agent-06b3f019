@@ -66,6 +66,11 @@ interface BuildBodyOptions {
   toolChoice?: unknown;
   maxTokens?: number;
   temperature?: number;
+  providerFastMode?: boolean;
+}
+
+function supportsAnthropicFastMode(model: string): boolean {
+  return ['claude-opus-4-6', 'claude-opus-4-7', 'claude-opus-4-8'].includes(model);
 }
 
 function addCacheBreakpoint(messages: Array<{ role: string; content: unknown }>): void {
@@ -139,6 +144,9 @@ export function buildAnthropicBody(opts: BuildBodyOptions): Record<string, unkno
     temperature: 1,
     output_config: { effort: 'high' },
   };
+  if (opts.providerFastMode === true && supportsAnthropicFastMode(opts.poolSpec.claudeAuthModel)) {
+    body.speed = 'fast';
+  }
 
   // Detect whether tools were synthesized from response_format below — when
   // they are, we MUST force tool_choice so the model emits a tool_use block
@@ -191,6 +199,7 @@ interface ClaudeAuthOptions {
   callSite?: string;
   idleTimeoutMs?: number;
   abortSignal?: AbortSignal;
+  providerFastMode?: boolean;
 }
 
 /**
@@ -207,6 +216,7 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
     toolChoice: opts.toolChoice,
     maxTokens: opts.maxTokens,
     temperature: opts.temperature,
+    providerFastMode: opts.providerFastMode,
   });
   // `-claude` marks the $0 OAuth path (used for cost detection downstream);
   // `-anthropic` marks the billed direct-API-key path. Both keep the claude-*
@@ -282,6 +292,16 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
     if (status === 402) {
       throw new RosePaymentRequiredError(
         `Anthropic 402 (out of credits): ${errorBody.substring(0, 200)}`,
+        status
+      );
+    }
+
+    if (
+      status === 400 &&
+      /credit balance is too low|out of credits|purchase credits/i.test(errorBody)
+    ) {
+      throw new RosePaymentRequiredError(
+        `Anthropic 400 (out of credits): ${errorBody.substring(0, 200)}`,
         status
       );
     }

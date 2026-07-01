@@ -33,25 +33,25 @@ export const SMS_TEMPLATES = {
     `Sorry, we don't recognize this phone number. Please sign up at roselabs.ai first.`,
 
   /* c8 ignore start -- SMS Supervisor templates only called from excluded smsSupervisor module */
-  // SMS Supervisor templates (with [prefix] format)
-  agentStarted: (prefix: string, goal: string, url: string) =>
-    `[${prefix}] Started: "${goal}"\nTrack: ${url}`,
+  // SMS Supervisor templates. Keep routing identifiers out of user-facing copy.
+  agentStarted: (_prefix: string, goal: string, _url: string) =>
+    `Started: "${goal}"\nTrack in Rose: ${ROSE_LABS_URL}`,
 
-  plannerQuestion: (prefix: string, question: string) => `[${prefix}] Rose asks: ${question}`,
+  plannerQuestion: (_prefix: string, question: string) => `Rose asks: ${question}`,
 
-  plannerFyi: (prefix: string, message: string) => `[${prefix}] FYI: ${message}`,
+  plannerFyi: (_prefix: string, message: string) => `FYI: ${message}`,
 
-  writeLock: (prefix: string, question: string, shortcode: string) =>
-    `[${prefix}] Approval needed: ${question}\n\nReply "Approve ${shortcode}" to continue.`,
+  writeLock: (_prefix: string, question: string, _shortcode?: string) =>
+    `Approval needed: ${question}`,
 
-  authAssistance: (prefix: string, authRealm: string, url: string) =>
-    `[${prefix}] Login needed for ${authRealm}.\nOpen Rose to sign in: ${url}`,
+  authAssistance: (_prefix: string, authRealm: string, _url: string) =>
+    `Login needed for ${authRealm}.\nOpen Rose to sign in: ${ROSE_LABS_URL}`,
 
-  agentCompleted: (prefix: string, summary: string, url: string) =>
-    `[${prefix}] Done: ${summary}\n\nFull report: ${url}`,
+  agentCompleted: (_prefix: string, summary: string, _url: string) =>
+    `Done: ${summary}\n\nFull report: ${ROSE_LABS_URL}`,
 
-  costLimit: (prefix: string, costCents: number, limitCents: number) =>
-    `[${prefix}] Budget limit hit ($${(costCents / 100).toFixed(2)}/$${(limitCents / 100).toFixed(2)}). Increase budget by replying "juice ${prefix} 5.00"`,
+  costLimit: (_prefix: string, taskLabel: string, costCents: number, limitCents: number) =>
+    `I hit the $${(limitCents / 100).toFixed(2)} budget limit for "${taskLabel}". Reply with the amount to add if you want me to continue.`,
 
   onboardingWelcome: (name: string) =>
     `Hi ${name}! Welcome to Rose.\n\nText this number anytime you want something done and our superintelligence will ensure the task gets resolved optimally and quickly.\n\nI'll text you updates and ask for approval when needed.`,

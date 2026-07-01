@@ -13,13 +13,18 @@ done
 # scripts/cloud-build.sh during Cord's build phase). When .cloud-env exists,
 # it is authoritative — always source it so the cloud-generated workspace
 # name cannot be overridden by stale env vars or command-line params.
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_SOURCE="${BASH_SOURCE[0]:-$0}"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SOURCE")" && pwd)"
 if [ -f "$SCRIPT_DIR/../.cloud-env" ]; then
     . "$SCRIPT_DIR/../.cloud-env"
 elif [ -z "${CONDUCTOR_PORT:-}" ]; then
     echo '❌ CONDUCTOR_PORT not set. Run via Conductor, or run scripts/cloud-build.sh first on cloud envs.'
     exit 1
 fi
+
+. "$SCRIPT_DIR/lib/workspace-env.sh"
+normalize_conductor_workspace_env
+. "$SCRIPT_DIR/lib/run-process-cleanup.sh"
 
 # mac-app is Electron + requires nvm/Node 20.10.0; only runs on macOS.
 IS_MAC=false
@@ -80,8 +85,23 @@ docker_info_quick() {
     return 1
 }
 
-# Check if a port is held by a process from a DIFFERENT worktree (not stale from ours).
-port_held_by_other_worktree() {
+# Check cwd first because many service command lines are just "node" or
+# "python3" and do not include the worktree path.
+process_belongs_to_this_worktree() {
+    local pid=$1
+    local cwd cmd
+    cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1) || true
+    if [ "$cwd" = "$PWD" ] || [[ "$cwd" == "$PWD"/* ]]; then
+        return 0
+    fi
+    cmd=$(ps -p "$pid" -o command= 2>/dev/null) || true
+    echo "$cmd" | grep -Fq "$PWD"
+}
+
+# Check if a port requires moving this workspace to a different range.
+# Current-worktree processes are handled later as stale/running services; any
+# other listener should trigger reassignment before services or Postgres start.
+port_requires_reassign() {
     local port=$1
     local pids
     pids=$(lsof -ti :"$port" 2>/dev/null) || true
@@ -90,37 +110,54 @@ port_held_by_other_worktree() {
         cmd=$(ps -p "$pid" -o command= 2>/dev/null) || true
         # Docker daemon is a single process for all containers — check containers separately below
         echo "$cmd" | grep -qi docker && continue
-        # Check if it belongs to a different worktree
-        if echo "$cmd" | grep -q "conductor/workspaces" && ! echo "$cmd" | grep -q "$PWD"; then
-            return 0  # yes, foreign process
+        if ! process_belongs_to_this_worktree "$pid"; then
+            return 0  # another process already owns this port
         fi
     done
-    # Check if a Docker container from a DIFFERENT workspace maps to this port
-    local foreign_container
-    foreign_container=$(docker_ps_ports_quick '{{.Names}}\t{{.Ports}}' \
-        | grep ":${port}->" \
-        | grep -vw "${CONDUCTOR_WORKSPACE_NAME}" \
-        | head -1 | cut -f1)
-    if [ -n "$foreign_container" ]; then
-        return 0  # foreign Docker container on our port
-    fi
-    return 1  # no foreign process
+
+    # Check if a Docker container from another workspace maps to this port.
+    local docker_ports name ports
+    docker_ports=$(docker_ps_ports_quick '{{.Names}}\t{{.Ports}}' | grep ":${port}->" || true)
+    while IFS=$'\t' read -r name ports; do
+        [ -z "$name" ] && continue
+        if [ -n "${CONDUCTOR_WORKSPACE_NAME:-}" ] && echo "$name" | grep -Fq "$CONDUCTOR_WORKSPACE_NAME"; then
+            continue
+        fi
+        return 0
+    done <<< "$docker_ports"
+
+    return 1
 }
+
+port_is_free_for_candidate_range() {
+    local port=$1
+    if lsof -ti :"$port" >/dev/null 2>&1; then
+        return 1
+    fi
+    if docker_ps_ports_quick '{{.Ports}}' | grep -q ":${port}->"; then
+        return 1
+    fi
+    return 0
+}
+
+if [ "${RUN_SH_SOURCE_ONLY:-false}" = "true" ]; then
+    return 0 2>/dev/null || exit 0
+fi
 
 # Try the Conductor-assigned port first
 assign_ports "$CONDUCTOR_PORT"
 
-# If any port in our range is held by another worktree, find a safe range
+# If any port in our range is held by another process, find a safe range
 COLLISION=false
 for port in $BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $MAC_APP_PORT $SDK_METRICS_PORT $LOCAL_DB_PORT $NGROK_WEB_PORT; do
-    if port_held_by_other_worktree "$port"; then
+    if port_requires_reassign "$port"; then
         COLLISION=true
         break
     fi
 done
 
 if $COLLISION; then
-    echo "⚠️  Port range $CONDUCTOR_PORT collides with another workspace — scanning for free range..."
+    echo "⚠️  Port range $CONDUCTOR_PORT is already occupied — scanning for free range..."
     # Scan upward in steps of 20 from the assigned port
     CANDIDATE=$((CONDUCTOR_PORT + 20))
     FOUND=false
@@ -128,12 +165,7 @@ if $COLLISION; then
         RANGE_FREE=true
         for offset in 0 1 2 3 4 5 9; do
             p=$((CANDIDATE + offset))
-            if lsof -ti :"$p" >/dev/null 2>&1; then
-                RANGE_FREE=false
-                break
-            fi
-            # Also check Docker containers binding to this port
-            if docker_ps_ports_quick '{{.Ports}}' | grep -q ":${p}->"; then
+            if ! port_is_free_for_candidate_range "$p"; then
                 RANGE_FREE=false
                 break
             fi
@@ -163,6 +195,68 @@ fi
 export NODE_ENV="${NODE_ENV:-development}"
 export TEMPORAL_TASK_QUEUE=navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME
 echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT mac-app=$MAC_APP_PORT metrics=$SDK_METRICS_PORT db=$LOCAL_DB_PORT ngrok_api=$NGROK_WEB_PORT queue=$TEMPORAL_TASK_QUEUE benchmark_mode=$BENCHMARK_MODE activity_max_slots=${MAX_CONCURRENT_ACTIVITIES:-100} activity_pollers=${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-8}"
+
+run_kill_stale_same_task_queue_workers "$PWD" "$TEMPORAL_TASK_QUEUE" "$BACKEND_API_URL" "$$"
+
+is_current_process_family() {
+    local pid=$1
+    while [ -n "$pid" ] && [ "$pid" != "0" ]; do
+        [ "$pid" = "$$" ] && return 0
+        pid=$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d ' ') || return 1
+    done
+    return 1
+}
+
+process_cwd_in_this_worktree() {
+    local pid=$1
+    local cwd
+    cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1) || true
+    case "$cwd" in
+        "$PWD"|"$PWD"/*) return 0 ;;
+    esac
+    return 1
+}
+
+kill_stale_tree() {
+    local pid=$1
+    for child in $(pgrep -P "$pid" 2>/dev/null); do
+        kill_stale_tree "$child"
+    done
+    kill "$pid" 2>/dev/null || true
+}
+
+kill_stale_same_worktree_benchmark_stack() {
+    $BENCHMARK_MODE || return 0
+
+    local killed_any=false
+    local pattern='scripts/run\.sh --benchmark|worker\.py|tsx.*src/server\.ts|node_modules/.bin/vite|ngrok http'
+    for pid in $(pgrep -f "$pattern" 2>/dev/null); do
+        [ "$pid" = "$$" ] && continue
+        is_current_process_family "$pid" && continue
+
+        local cmd
+        cmd=$(ps -p "$pid" -o command= 2>/dev/null) || true
+        if echo "$cmd" | grep -q "$PWD" || process_cwd_in_this_worktree "$pid"; then
+            echo "🧹 Killing stale benchmark process from this worktree (PID $pid)"
+            kill_stale_tree "$pid"
+            killed_any=true
+        fi
+    done
+
+    if $killed_any; then
+        sleep 1
+        for pid in $(pgrep -f "$pattern" 2>/dev/null); do
+            [ "$pid" = "$$" ] && continue
+            is_current_process_family "$pid" && continue
+            if process_cwd_in_this_worktree "$pid"; then
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+        done
+        echo "✅ Stale same-worktree benchmark processes stopped"
+    fi
+}
+
+kill_stale_same_worktree_benchmark_stack
 
 # ── Cloud instance: aggressive port cleanup ──
 # On cloud there's exactly one worktree — no multi-workspace concern.
@@ -358,7 +452,40 @@ else
         | grep -q 1 || PGPASSWORD=postgres createdb -h localhost -U postgres victoria 2>/dev/null || true
 fi
 
-export DATABASE_URL="$LOCAL_DB_URL"
+# Fast Mode cache is intentionally shared across local/dev/prod so recorded runs
+# survive local DB resets. Capture the prod DB URL from back-end/.env before this
+# script overwrites DATABASE_URL with the local app database below.
+if [ -z "${FAST_MODE_CACHE_DATABASE_URL:-}" ] && [ -f "back-end/.env" ]; then
+    PROD_CACHE_DATABASE_URL=$(python3 - <<'PY'
+from pathlib import Path
+
+for raw in Path("back-end/.env").read_text().splitlines():
+    line = raw.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+    key, value = line.split("=", 1)
+    if key.strip() != "DATABASE_URL":
+        continue
+    value = value.strip()
+    if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+        value = value[1:-1]
+    print(value)
+    break
+PY
+)
+    if [ -n "$PROD_CACHE_DATABASE_URL" ]; then
+        export FAST_MODE_CACHE_DATABASE_URL="$PROD_CACHE_DATABASE_URL"
+    fi
+fi
+if [ -n "${FAST_MODE_CACHE_DATABASE_URL:-}" ]; then
+    echo "🧠 Ensuring Fast Mode cache schema..."
+    (cd back-end && npx tsx scripts/ensure-fast-mode-cache-schema.ts)
+fi
+
+# Larger Prisma pool: Fast Mode adds cache get/set on every LLM call, which under
+# sub-agent fan-out competes with the agent's own writes for the connection pool
+# (the known P2024 timeout signature). A bigger local pool absorbs the burst.
+export DATABASE_URL="${LOCAL_DB_URL}?connection_limit=50&pool_timeout=30"
 export DIRECT_URL="$LOCAL_DB_URL"
 
 # Sync Prisma schema to local DB (idempotent, dev-only)
@@ -377,7 +504,8 @@ if [ "$USER_EXISTS" = "0" ]; then
     echo "🌱 Syncing production data to local database (first run)..."
     (cd back-end && npx tsx scripts/seed-local.ts)
 else
-    echo "🌱 Local database already seeded (skipping sync)"
+    echo "🌱 Local database already seeded; syncing browser credentials..."
+    (cd back-end && npx tsx scripts/seed-local.ts --credentials-only)
 fi
 
 # ── Pre-flight: ensure node_modules exist for all JS services ──
@@ -413,56 +541,21 @@ fi
 # handles macOS multi-worktree scenarios where we must distinguish our
 # processes from another workspace's.
 if ! $IS_CLOUD; then
-    KILLED_ANY=false
-    has_live_runsh_ancestor() {
-        local pid=$1
-        while true; do
-            local ppid
-            ppid=$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d ' ') || return 1
-            [ -z "$ppid" ] || [ "$ppid" = "0" ] || [ "$ppid" = "1" ] && return 1
-            local pcmd
-            pcmd=$(ps -p "$ppid" -o command= 2>/dev/null) || return 1
-            echo "$pcmd" | grep -q "scripts/run.sh" && return 0
-            pid=$ppid
-        done
-    }
     SERVICE_PORTS=($BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $SDK_METRICS_PORT $NGROK_WEB_PORT)
     $IS_MAC && SERVICE_PORTS+=($MAC_APP_PORT)
     for port in "${SERVICE_PORTS[@]}"; do
         for pid in $(lsof -ti :"$port" 2>/dev/null); do
             cmd=$(ps -p "$pid" -o command= 2>/dev/null) || true
             echo "$cmd" | grep -qi docker && continue
-            if echo "$cmd" | grep -q "$PWD"; then
-                if has_live_runsh_ancestor "$pid"; then
-                    echo "✅ Services already running for this worktree (PID $pid on port $port). Exiting."
-                    exit 0
-                fi
-                echo "⚠️  Killing orphaned process on port $port (PID $pid)"
-                kill -9 "$pid" 2>/dev/null || true
-                KILLED_ANY=true
+            if process_belongs_to_this_worktree "$pid"; then
                 continue
             fi
             echo "❌ Port $port in use by unknown process (PID $pid). Kill it manually or choose a different port range."
             exit 1
         done
     done
-    for pattern in \
-        "$PWD/back-end/src/server.ts" \
-        "$PWD/front-end.*vite" \
-        "$PWD/mac-app/node_modules" \
-        "$PWD/agents/scripts/run_local_worker"; do
-        for pid in $(pgrep -f "$pattern" 2>/dev/null); do
-            has_live_runsh_ancestor "$pid" && continue
-            echo "⚠️  Killing orphaned process (PID $pid)"
-            kill -9 "$pid" 2>/dev/null || true
-            KILLED_ANY=true
-        done
-    done
-    if $KILLED_ANY; then
-        echo -n "   Waiting for ports to free..."
-        sleep 2
-        echo " done"
-    fi
+    echo "🧹 Cleaning stale services for this worktree before startup..."
+    bash "$SCRIPT_DIR/kill-services.sh" || exit 1
 fi
 
 PIDS=()
@@ -565,8 +658,7 @@ EOF
     NGROK_PID=$!
     PIDS+=($NGROK_PID); NAMES+=("ngrok")
 
-    local tunnel_ready=false
-    for attempt in $(seq 1 45); do
+    for attempt in $(seq 1 60); do
         if ! kill -0 "$NGROK_PID" 2>/dev/null; then
             echo "❌ ngrok exited before the public tunnel became ready."
             tail -60 .context/ngrok.log || true
@@ -575,44 +667,30 @@ EOF
             echo "Checkout: https://dashboard.ngrok.com/billing/choose-a-plan"
             exit 1
         fi
-        if python3 - "$NGROK_API_URL" "$FRONTEND_PORT" "$PUBLIC_BASE_URL" <<'PY'
+        if curl -fsS "$NGROK_API_URL" >/tmp/rose-ngrok-tunnels.json 2>/dev/null; then
+            if python3 - <<'PY'
 import json
-import sys
-import urllib.request
+from pathlib import Path
 
-api_url, frontend_port, public_url = sys.argv[1:4]
-try:
-    with urllib.request.urlopen(api_url, timeout=1) as response:
-        data = json.load(response)
-except Exception:
-    sys.exit(1)
-
-target = f":{frontend_port}"
+data = json.loads(Path("/tmp/rose-ngrok-tunnels.json").read_text())
 for tunnel in data.get("tunnels", []):
-    config = tunnel.get("config", {})
-    if tunnel.get("public_url") == public_url and str(config.get("addr", "")).endswith(target):
-        sys.exit(0)
-sys.exit(1)
+    if tunnel.get("proto") == "https" and tunnel.get("public_url"):
+        raise SystemExit(0)
+raise SystemExit(1)
 PY
-        then
-            tunnel_ready=true
-            break
+            then
+                rm -f /tmp/rose-ngrok-tunnels.json
+                echo "🌐 Public tunnel ready: $PUBLIC_BASE_URL"
+                return 0
+            fi
         fi
         sleep 1
     done
 
-    if ! $tunnel_ready; then
-        echo "❌ ngrok tunnel did not become ready for $PUBLIC_BASE_URL → :$FRONTEND_PORT"
-        echo "   API: $NGROK_API_URL"
-        tail -80 .context/ngrok.log || true
-        exit 1
-    fi
-
-    echo ""
-    echo "═══════════════════════════════════════════════════"
-    echo "  PUBLIC FRONTEND: $PUBLIC_BASE_URL"
-    echo "═══════════════════════════════════════════════════"
-    echo ""
+    echo "❌ ngrok tunnel did not become ready for $PUBLIC_BASE_URL → :$FRONTEND_PORT"
+    echo "   ngrok API: $NGROK_API_URL"
+    tail -80 .context/ngrok.log || true
+    exit 1
 }
 
 write_services_manifest() {
@@ -726,9 +804,9 @@ cleanup() {
     for pid in "${PIDS[@]}"; do
         kill_tree_hard "$pid"
     done
-    if [ -n "$NGROK_PID" ] && kill -0 "$NGROK_PID" 2>/dev/null; then
-        kill_tree_hard "$NGROK_PID"
-    fi
+    # Sweep by manifest, cwd, and service ports in case a wrapper exited before
+    # its child, or a descendant reparented during a cascade shutdown.
+    bash "$SCRIPT_DIR/kill-services.sh" || true
     if $DB_OWNED_BY_US && ! $USE_SYSTEM_PG; then
         docker stop "$DB_CONTAINER" 2>/dev/null || true
     fi
@@ -759,6 +837,8 @@ run_service() {
 #   ngrok reserved domain -> Vite dev server on FRONTEND_PORT
 #   backend exposes PUBLIC_BASE_URL for /api/test-payment/public-url
 start_public_tunnel
+export FAST_MODE_ANTHROPIC_PROXY_URL="$PUBLIC_BASE_URL/anthropic-proxy"
+export FAST_MODE_CODEX_PROXY_URL="$PUBLIC_BASE_URL/codex-proxy"
 
 # Launch each service
 if $BENCHMARK_MODE; then

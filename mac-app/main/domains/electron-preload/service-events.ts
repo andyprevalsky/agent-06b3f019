@@ -17,6 +17,7 @@ import type {
   QuickQueryToggleState,
   QuickQueryPayload,
   UpdateStatusPayload,
+  PasskeyImportResult,
 } from '../../../shared/types/ipc';
 
 export function buildEventBridge(
@@ -60,7 +61,7 @@ export function buildEventBridge(
 
 export function buildUnsubscribableEventBridge(
   ipcRenderer: IpcRenderer
-): Pick<IPC, 'onClaudeSetupStatus' | 'onWhatsAppQRCode'> {
+): Pick<IPC, 'onClaudeSetupStatus' | 'onWhatsAppQRCode' | 'onPasskeysImportComplete'> {
   return {
     onClaudeSetupStatus: (callback: (status: string) => void) => {
       const handler = (_event: IpcRendererEvent, status: unknown) => callback(status as string);
@@ -74,6 +75,14 @@ export function buildUnsubscribableEventBridge(
       ipcRenderer.on('whatsapp:qrCode', handler);
       return () => {
         ipcRenderer.removeListener('whatsapp:qrCode', handler);
+      };
+    },
+    onPasskeysImportComplete: (callback: (result: PasskeyImportResult) => void) => {
+      const handler = (_event: IpcRendererEvent, result: unknown) =>
+        callback(result as PasskeyImportResult);
+      ipcRenderer.on('passkeys:importComplete', handler);
+      return () => {
+        ipcRenderer.removeListener('passkeys:importComplete', handler);
       };
     },
   };

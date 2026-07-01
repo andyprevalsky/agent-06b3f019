@@ -42,6 +42,7 @@
 
 import { config } from 'dotenv';
 import { z } from 'zod';
+import { prisma } from '../../providers/database';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -55,32 +56,31 @@ const CASE_CONCURRENCY = Number(
 const GrepResponse = z.object({
   matches: z.array(
     z.object({
-      thread: z.string(),
-      person: z.object({
-        firstName: z.string().nullable(),
-        lastName: z.string().nullable(),
-        phoneNumber: z.string().nullable(),
-        email: z.string().nullable(),
+      source: z.enum(['messages', 'network', 'agent_network']),
+      path: z.string(),
+      pointer: z.string(),
+      timestamp: z.string(),
+      role: z.enum(['SYSTEM', 'ASSISTANT', 'USER', 'TOOL']).optional(),
+      location: z.object({
+        source: z.enum(['messages', 'network', 'agent_network']),
+        path: z.string(),
+        agent_id: z.string().optional(),
+        message_id: z.string().optional(),
+        role: z.enum(['SYSTEM', 'ASSISTANT', 'USER', 'TOOL']).optional(),
+        thread: z.string().optional(),
+        contact_id: z.string().optional(),
+        field: z.string().optional(),
       }),
-      messages: z.array(
-        z.object({
-          channel: z.string(),
-          from: z.string(),
-          to: z.string(),
-          timestamp: z.string(),
-          message: z.string(),
-          is_match: z.boolean(),
-        })
-      ),
+      content: z.string(),
     })
   ),
   total_matches: z.number(),
   truncated: z.boolean(),
-  pattern: z.string().optional(),
-  source: z.string().optional(),
-  since: z.string().optional(),
+  pattern: z.string(),
+  sources: z.array(z.enum(['messages', 'network', 'agent_network'])),
+  applied_limit: z.number(),
+  applied_offset: z.number(),
   message: z.string().optional(),
-  truncation_message: z.string().optional(),
 });
 
 const SummaryResponse = z.object({
@@ -314,7 +314,7 @@ async function testGrep_happy() {
   const res = await request(`${BASE_URL}/api/data/grep`, {
     method: 'POST',
     headers: authHeaders(ctx.accessToken!),
-    body: JSON.stringify({ pattern: 'test' }),
+    body: JSON.stringify({ pattern: 'test', source: 'messages' }),
   });
   assertStatus(res.status, 200, res.data);
   assertSchema(GrepResponse, res.data, 'POST /grep (happy)');
@@ -325,7 +325,7 @@ async function testGrep_emptyPattern() {
   const res = await request(`${BASE_URL}/api/data/grep`, {
     method: 'POST',
     headers: authHeaders(ctx.accessToken!),
-    body: JSON.stringify({ pattern: '' }),
+    body: JSON.stringify({ pattern: '', source: 'messages' }),
   });
   assertStatus(res.status, 200, res.data);
   assertSchema(GrepResponse, res.data, 'POST /grep (empty pattern)');
@@ -341,31 +341,34 @@ async function testGrep_withSource() {
   assertSchema(GrepResponse, res.data, 'POST /grep (with source)');
 }
 
-async function testGrep_withSince() {
+async function testGrep_acceptsSince() {
+  // `since` is a valid messages-only narrowing param (ISO or relative like 7d).
   const res = await request(`${BASE_URL}/api/data/grep`, {
     method: 'POST',
     headers: authHeaders(ctx.accessToken!),
-    body: JSON.stringify({ pattern: 'test', since: '2024-01-01T00:00:00Z' }),
+    body: JSON.stringify({ pattern: 'test', source: 'messages', since: '2024-01-01T00:00:00Z' }),
   });
   assertStatus(res.status, 200, res.data);
-  assertSchema(GrepResponse, res.data, 'POST /grep (with since)');
 }
 
-async function testGrep_withLimit() {
+async function testGrep_rejectsLimit() {
   const res = await request(`${BASE_URL}/api/data/grep`, {
     method: 'POST',
     headers: authHeaders(ctx.accessToken!),
-    body: JSON.stringify({ pattern: 'test', limit: 5 }),
+    body: JSON.stringify({ pattern: 'test', source: 'messages', limit: 5 }),
   });
-  assertStatus(res.status, 200, res.data);
-  assertSchema(GrepResponse, res.data, 'POST /grep (with limit)');
+  assertStatus(res.status, 400, res.data);
+  const body = res.data as { error?: string };
+  if (body.error !== 'INVALID_GREP_PARAM') {
+    throw new Error(`Expected INVALID_GREP_PARAM, got: ${JSON.stringify(body)}`);
+  }
 }
 
 async function testGrep_viaApiKey() {
   const res = await request(`${BASE_URL}/api/data/grep`, {
     method: 'POST',
     headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
-    body: JSON.stringify({ pattern: 'test' }),
+    body: JSON.stringify({ pattern: 'test', source: 'messages' }),
   });
   assertStatus(res.status, 200, res.data);
   assertSchema(GrepResponse, res.data, 'POST /grep (API key)');
@@ -376,7 +379,7 @@ async function testGrep_noMatchesShape() {
   const res = await request(`${BASE_URL}/api/data/grep`, {
     method: 'POST',
     headers: authHeaders(ctx.accessToken!),
-    body: JSON.stringify({ pattern: 'xyznonexistent' }),
+    body: JSON.stringify({ pattern: 'xyznonexistent', source: 'messages' }),
   });
   assertStatus(res.status, 200, res.data);
   const body = assertSchema(GrepResponse, res.data, 'POST /grep (no matches)');
@@ -441,29 +444,13 @@ async function testSummary_freshUserEmpty() {
   }
 }
 
-// ==================== POST /api/data/grep (agent_network sources) ====================
-
-const AgentNetworkGrepResponse = z.object({
-  matches: z.array(
-    z.object({
-      agent_id: z.string(),
-      message_id: z.string(),
-      role: z.string(),
-      text: z.string(),
-      timestamp: z.string(),
-      pointer: z.string(),
-    })
-  ),
-  total_matches: z.number(),
-  truncated: z.boolean(),
-  message: z.string().optional(),
-});
+// ==================== POST /api/data/grep (agent_network source) ====================
 
 async function testGrepAgentNetwork_missingAgentId() {
   const res = await request(`${BASE_URL}/api/data/grep`, {
     method: 'POST',
     headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
-    body: JSON.stringify({ pattern: 'test', source: 'agent_network_user_messages' }),
+    body: JSON.stringify({ pattern: 'test', source: 'agent_network' }),
   });
   assertStatus(res.status, 400, res.data);
   const body = res.data as { error: string };
@@ -472,7 +459,20 @@ async function testGrepAgentNetwork_missingAgentId() {
   }
 }
 
-async function testGrepAgentNetwork_missingAgentIdToolResults() {
+async function testGrepAgentNetwork_removedUserMessagesSource() {
+  const res = await request(`${BASE_URL}/api/data/grep`, {
+    method: 'POST',
+    headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+    body: JSON.stringify({ pattern: 'test', source: 'agent_network_user_messages' }),
+  });
+  assertStatus(res.status, 400, res.data);
+  const body = res.data as { error: string };
+  if (body.error !== 'SOURCE_NOT_FOUND') {
+    throw new Error(`Expected SOURCE_NOT_FOUND error, got: ${body.error}`);
+  }
+}
+
+async function testGrepAgentNetwork_removedToolResultsSource() {
   const res = await request(`${BASE_URL}/api/data/grep`, {
     method: 'POST',
     headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
@@ -480,8 +480,8 @@ async function testGrepAgentNetwork_missingAgentIdToolResults() {
   });
   assertStatus(res.status, 400, res.data);
   const body = res.data as { error: string };
-  if (body.error !== 'MISSING_AGENT_ID') {
-    throw new Error(`Expected MISSING_AGENT_ID error, got: ${body.error}`);
+  if (body.error !== 'SOURCE_NOT_FOUND') {
+    throw new Error(`Expected SOURCE_NOT_FOUND error, got: ${body.error}`);
   }
 }
 
@@ -491,15 +491,14 @@ async function testGrepAgentNetwork_nonexistentAgent() {
     headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
     body: JSON.stringify({
       pattern: 'test',
-      source: 'agent_network_user_messages',
+      source: 'agent_network',
       agent_id: '00000000-0000-0000-0000-000000000099',
     }),
   });
   assertStatus(res.status, 403, res.data);
 }
 
-async function testGrepAgentNetwork_happyUserMessages() {
-  // Create an agent, then search its network (will return empty matches for fresh user)
+async function testGrepAgentNetwork_happyAllRoles() {
   const createRes = await requestWithRetry(`${BASE_URL}/api/agents`, {
     method: 'POST',
     headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
@@ -509,17 +508,45 @@ async function testGrepAgentNetwork_happyUserMessages() {
   const agentId = (createRes.data as { agent_id: string }).agent_id;
 
   try {
+    await prisma.message.createMany({
+      data: [
+        {
+          agentId,
+          role: 'USER',
+          text: 'Unified data blackbox USER evidence',
+          metadata: { blackbox: 'data', role: 'USER' },
+        },
+        {
+          agentId,
+          role: 'ASSISTANT',
+          text: 'Unified data blackbox ASSISTANT evidence',
+          metadata: { blackbox: 'data', role: 'ASSISTANT' },
+        },
+        {
+          agentId,
+          role: 'TOOL',
+          text: 'Unified data blackbox TOOL evidence',
+          metadata: { blackbox: 'data', role: 'TOOL' },
+        },
+      ],
+    });
+
     const res = await request(`${BASE_URL}/api/data/grep`, {
       method: 'POST',
       headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
       body: JSON.stringify({
-        pattern: '',
-        source: 'agent_network_user_messages',
+        pattern: 'Unified data blackbox',
+        source: 'agent_network',
         agent_id: agentId,
       }),
     });
     assertStatus(res.status, 200, res.data);
-    assertSchema(AgentNetworkGrepResponse, res.data, 'agent_network_user_messages');
+    const body = assertSchema(GrepResponse, res.data, 'agent_network');
+    for (const role of ['USER', 'ASSISTANT', 'TOOL'] as const) {
+      if (!body.matches.some((match) => match.role === role && match.location.role === role)) {
+        throw new Error(`Expected ${role} match with role metadata`);
+      }
+    }
   } finally {
     await request(`${BASE_URL}/api/agents/${agentId}`, {
       method: 'DELETE',
@@ -528,51 +555,20 @@ async function testGrepAgentNetwork_happyUserMessages() {
   }
 }
 
-async function testGrepAgentNetwork_happyToolResults() {
-  const createRes = await requestWithRetry(`${BASE_URL}/api/agents`, {
-    method: 'POST',
-    headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
-    body: JSON.stringify({ goal: 'blackbox test agent for grep tool results' }),
-  });
-  assertStatus(createRes.status, 201, createRes.data);
-  const agentId = (createRes.data as { agent_id: string }).agent_id;
-
-  try {
-    const res = await request(`${BASE_URL}/api/data/grep`, {
-      method: 'POST',
-      headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
-      body: JSON.stringify({
-        pattern: '',
-        source: 'agent_network_tool_results',
-        agent_id: agentId,
-      }),
-    });
-    assertStatus(res.status, 200, res.data);
-    assertSchema(AgentNetworkGrepResponse, res.data, 'agent_network_tool_results');
-  } finally {
-    await request(`${BASE_URL}/api/agents/${agentId}`, {
-      method: 'DELETE',
-      headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
-    });
-  }
-}
-
-async function testGrepAgentNetwork_sourcesInValidList() {
-  // agent_network_* should NOT cause SOURCE_NOT_FOUND
+async function testGrepAgentNetwork_sourceInValidList() {
   const res = await request(`${BASE_URL}/api/data/grep`, {
     method: 'POST',
     headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
     body: JSON.stringify({
       pattern: 'test',
-      source: 'agent_network_user_messages',
+      source: 'agent_network',
       agent_id: '00000000-0000-0000-0000-000000000099',
     }),
   });
-  // Should get 403 (agent not found), not 400 (source not found)
   if (res.status === 400) {
     const body = res.data as { error: string };
     if (body.error === 'SOURCE_NOT_FOUND') {
-      throw new Error('agent_network_user_messages should be a valid source');
+      throw new Error('agent_network should be a valid source');
     }
   }
 }
@@ -580,7 +576,7 @@ async function testGrepAgentNetwork_sourcesInValidList() {
 // ==================== INVARIANTS ====================
 
 async function testIdempotency_grep() {
-  const body = JSON.stringify({ pattern: 'test' });
+  const body = JSON.stringify({ pattern: 'test', source: 'messages' });
   const r1 = await request(`${BASE_URL}/api/data/grep`, {
     method: 'POST',
     headers: authHeaders(ctx.accessToken!),
@@ -628,7 +624,7 @@ async function testReproducibility_threeSequentialGrep() {
     const res = await request(`${BASE_URL}/api/data/grep`, {
       method: 'POST',
       headers: authHeaders(ctx.accessToken!),
-      body: JSON.stringify({ pattern: 'repro-test' }),
+      body: JSON.stringify({ pattern: 'repro-test', source: 'messages' }),
     });
     statuses.push(res.status);
   }
@@ -664,37 +660,37 @@ async function runAll() {
     { name: 'POST /data/grep -- happy path', fn: testGrep_happy },
     { name: 'POST /data/grep -- empty pattern returns all', fn: testGrep_emptyPattern },
     { name: 'POST /data/grep -- with source=messages', fn: testGrep_withSource },
-    { name: 'POST /data/grep -- with since', fn: testGrep_withSince },
-    { name: 'POST /data/grep -- with limit', fn: testGrep_withLimit },
+    { name: 'POST /data/grep -- since param accepted', fn: testGrep_acceptsSince },
+    { name: 'POST /data/grep -- limit param rejected', fn: testGrep_rejectsLimit },
     { name: 'POST /data/grep -- via API key', fn: testGrep_viaApiKey },
     { name: 'POST /data/grep -- no matches shape', fn: testGrep_noMatchesShape },
     { name: 'GET /data/summary -- happy path (JWT)', fn: testSummary_happyJwt },
     { name: 'GET /data/summary -- happy path (API key)', fn: testSummary_happyApiKey },
     { name: 'GET /data/summary -- fresh user empty', fn: testSummary_freshUserEmpty },
-    // agent_network sources
+    // agent_network source
     {
-      name: 'POST /data/grep -- agent_network_user_messages missing agent_id -> 400',
+      name: 'POST /data/grep -- agent_network missing agent_id -> 400',
       fn: testGrepAgentNetwork_missingAgentId,
     },
     {
-      name: 'POST /data/grep -- agent_network_tool_results missing agent_id -> 400',
-      fn: testGrepAgentNetwork_missingAgentIdToolResults,
+      name: 'POST /data/grep -- removed agent_network_user_messages source -> 400',
+      fn: testGrepAgentNetwork_removedUserMessagesSource,
     },
     {
-      name: 'POST /data/grep -- agent_network_user_messages nonexistent agent -> 403',
+      name: 'POST /data/grep -- removed agent_network_tool_results source -> 400',
+      fn: testGrepAgentNetwork_removedToolResultsSource,
+    },
+    {
+      name: 'POST /data/grep -- agent_network nonexistent agent -> 403',
       fn: testGrepAgentNetwork_nonexistentAgent,
     },
     {
-      name: 'POST /data/grep -- agent_network_user_messages happy path',
-      fn: testGrepAgentNetwork_happyUserMessages,
+      name: 'POST /data/grep -- agent_network happy path includes all roles',
+      fn: testGrepAgentNetwork_happyAllRoles,
     },
     {
-      name: 'POST /data/grep -- agent_network_tool_results happy path',
-      fn: testGrepAgentNetwork_happyToolResults,
-    },
-    {
-      name: 'POST /data/grep -- agent_network_* sources are valid (not SOURCE_NOT_FOUND)',
-      fn: testGrepAgentNetwork_sourcesInValidList,
+      name: 'POST /data/grep -- agent_network source is valid',
+      fn: testGrepAgentNetwork_sourceInValidList,
     },
     // invariants
     { name: 'idempotency -- grep same on repeat', fn: testIdempotency_grep },

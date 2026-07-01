@@ -58,6 +58,7 @@ export {
   processPermissionsUpload,
   processCacheStorageUpload,
   processPasswordsUpload,
+  processPasskeysUpload,
   processApplePasswordsUpload,
   decryptPayload,
   decryptCompressedPayload,

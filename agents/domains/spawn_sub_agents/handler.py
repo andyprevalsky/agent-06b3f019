@@ -95,6 +95,7 @@ class SpawnSubAgentManager(ToolManager):
 
             parent_model = getattr(workflow_instance, "model", "rose-labs/rose-1-lite")
             parent_source = getattr(workflow_instance, "agent_source", "WEB")
+
             result = await workflow.execute_activity(
                 spawn_sub_agent_activity,
                 args=[
@@ -134,7 +135,13 @@ class SpawnSubAgentManager(ToolManager):
                 )
                 return
 
-            async for event in self.finalize_child(workflow_instance, child_info, sub_agent, tool_call_id, bus_id):
+            async for event in self.finalize_child(
+                workflow_instance,
+                child_info,
+                sub_agent,
+                tool_call_id,
+                bus_id,
+            ):
                 yield event
 
         except Exception as e:
@@ -218,6 +225,7 @@ class SpawnSubAgentManager(ToolManager):
 
         logger.info(f"🎉 Sub-agent {child_agent_id} completed!")
         structured_response = child_result.get("structured_response", {})
+        child_tool_counts = child_result.get("tool_counts") or {}
         output_schema = sub_agent.get("output_schema", {})
         file_pointers = extract_file_pointers_from_structured_response(structured_response, output_schema)
 
@@ -234,6 +242,7 @@ class SpawnSubAgentManager(ToolManager):
                 "subAgentIds": [child_agent_id],
                 "busId": bus_id,
                 "structured_response": structured_response,
+                "childToolCounts": child_tool_counts,
             },
         )
         if file_pointers:

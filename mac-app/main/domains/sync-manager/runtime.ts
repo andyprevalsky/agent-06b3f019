@@ -11,7 +11,7 @@
 
 import { logConsole, logConsoleError } from '../../base/logger';
 import { IMessageQueueService } from '../../services/IMessageQueueService';
-import { SYNC_INTERVAL_MS } from './config';
+import { PLATFORM_CONFIG } from './config';
 import {
   runStartupSyncs,
   startRealTimeWatchers,
@@ -36,7 +36,7 @@ import type { Platform } from './types';
  *   SyncManager.syncNow();   // Manual trigger
  */
 export class SyncManager {
-  private static intervalId: NodeJS.Timeout | null = null;
+  private static intervalIds: NodeJS.Timeout[] = [];
   private static isRunning = false;
 
   /** Start all syncs — single entry point for app startup. */
@@ -61,10 +61,10 @@ export class SyncManager {
   static async stopAll(): Promise<void> {
     logConsole('SyncManager', 'Stopping all syncs...');
 
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
+    for (const intervalId of this.intervalIds) {
+      clearInterval(intervalId);
     }
+    this.intervalIds = [];
 
     await stopRealTimeWatchers();
     IMessageQueueService.stop();
@@ -87,14 +87,25 @@ export class SyncManager {
     return this.isRunning;
   }
 
-  /** Start the single periodic interval that fans out to every platform. */
+  /** Start periodic intervals for each platform at its configured cadence. */
   private static startPeriodicDispatcher(): void {
-    if (this.intervalId) return;
+    if (this.intervalIds.length > 0) return;
 
-    logConsole('SyncManager', `Starting periodic sync (every ${SYNC_INTERVAL_MS / 1000 / 60} min)`);
-
-    this.intervalId = setInterval(() => {
-      syncAllPlatforms().catch((err) => logConsoleError('SyncManager', 'Periodic sync error', err));
-    }, SYNC_INTERVAL_MS);
+    for (const [platform, cfg] of Object.entries(PLATFORM_CONFIG) as [
+      Platform,
+      (typeof PLATFORM_CONFIG)[Platform],
+    ][]) {
+      if (cfg.interval <= 0) continue;
+      logConsole(
+        'SyncManager',
+        `Starting periodic ${platform} sync (every ${cfg.interval / 1000}s)`
+      );
+      const intervalId = setInterval(() => {
+        syncPlatform(platform).catch((err) =>
+          logConsoleError('SyncManager', `Periodic ${platform} sync error`, err)
+        );
+      }, cfg.interval);
+      this.intervalIds.push(intervalId);
+    }
   }
 }

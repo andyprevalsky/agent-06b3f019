@@ -1,0 +1,21 @@
+name: PasskeyProvider
+options:
+  bundleIdPrefix: com.rose.desktop
+  deploymentTarget:
+    macOS: '26.0'
+  createIntermediateGroups: true
+targets:
+  PasskeyProvider:
+    type: app-extension
+    platform: macOS
+    sources:
+      - CredentialProviderViewController.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.rose.desktop.PasskeyProvider
+        PRODUCT_NAME: PasskeyProvider
+        INFOPLIST_FILE: Info.plist
+        CODE_SIGN_ENTITLEMENTS: provider.entitlements
+        SWIFT_VERSION: '5.0'
+        MACOSX_DEPLOYMENT_TARGET: '26.0'
+        GENERATE_INFOPLIST_FILE: NO

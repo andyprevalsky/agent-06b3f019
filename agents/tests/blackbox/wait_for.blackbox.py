@@ -438,6 +438,89 @@ async def test_handler_condition_gates_off_skip_fetch():
     assert any(e.status == MessageStatus.ERROR for e in events)
 
 
+async def test_handler_condition_check_messages_carry_explore_task_id():
+    """Every per-check wait_for message — including the re-establish IN_PROGRESS
+    emitted between checks — must carry ``exploreTaskId``.
+
+    The FE groups explore agents into their wait_for check by matching
+    ``exploreTaskId`` on the *latest* message for each ``checkNum``
+    (``buildWaitForChecks`` in deduplicateToolMessages.ts). The re-establish
+    "Waiting for ..." message is emitted last for an unmet check, so if it lacks
+    ``exploreTaskId`` the explore agent loses its association, never gets hidden,
+    and renders as a separate top-level message. Regression guard for that bug.
+    """
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import EventType, MessageStatus, ToolEvent
+    from tools.spawn_agent import SpawnAgentManager
+
+    async def fake_spawn_explore(
+        self,
+        wf,
+        tool_call,
+        explore_tool_call_id,
+        *,
+        task_id=None,
+        display_goal=None,
+        capture_tool_results=None,
+    ):
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title="Explore done",
+            message="evidence",
+            status=MessageStatus.FINISHED,
+            metadata={"agentType": "explore", "taskId": task_id},
+            data={"usage": {"llm": [], "service": []}},
+        )
+
+    # Not satisfied on check 1 (forces a re-establish), satisfied on check 2.
+    calls = {"n": 0}
+
+    def eval_result():
+        calls["n"] += 1
+        return (
+            {"satisfied": False, "reasoning": "not yet"}
+            if calls["n"] == 1
+            else {"satisfied": True, "reasoning": "met"}
+        )
+
+    fake = _FakeWFModule(activity_results={"evaluate_condition_activity": eval_result})
+    restore = _patch_handler_workflow(fake)
+    orig_spawn = SpawnAgentManager._spawn_explore
+    SpawnAgentManager._spawn_explore = fake_spawn_explore
+    try:
+        events = await _collect(
+            WaitForManager().execute_tool(
+                workflow_instance=_WFInstance(),
+                tool_call={
+                    "condition": "deploy ready",
+                    "check_interval_seconds": 30,
+                    "max_checks": 3,
+                },
+                tool_call_id="tc",
+            )
+        )
+    finally:
+        SpawnAgentManager._spawn_explore = orig_spawn
+        restore()
+
+    check_msgs = [e for e in events if e.metadata.get("checkNum") is not None]
+    assert check_msgs, "expected per-check messages"
+    missing = [e.title for e in check_msgs if not e.metadata.get("exploreTaskId")]
+    assert not missing, f"per-check messages missing exploreTaskId: {missing}"
+
+    # The specific message that regressed: the re-establish IN_PROGRESS after an
+    # unmet check.
+    reestablish = [
+        e
+        for e in events
+        if e.status == MessageStatus.IN_PROGRESS
+        and (e.title or "").startswith("Waiting for")
+        and e.metadata.get("checkNum") is not None
+    ]
+    assert reestablish, "expected a re-establish IN_PROGRESS message after an unmet check"
+    assert all(e.metadata.get("exploreTaskId") for e in reestablish)
+
+
 async def run_all_tests():
     print("wait-for blackbox tests:")
     r = BlackboxResult()
@@ -463,6 +546,9 @@ async def run_all_tests():
     await r.record_async("handler_cond_paused", test_handler_condition_paused_yields_error)
     await r.record_async("handler_cond_fetch_fail", test_handler_condition_network_fetch_failure_tolerated)
     await r.record_async("handler_cond_gates_off", test_handler_condition_gates_off_skip_fetch)
+    await r.record_async(
+        "handler_cond_explore_task_id", test_handler_condition_check_messages_carry_explore_task_id
+    )
     teardown_mock()
     return r.all_passed
 

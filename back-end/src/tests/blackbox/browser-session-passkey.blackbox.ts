@@ -12,6 +12,7 @@ import { config } from 'dotenv';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
 import { reservePasskeysForRealm } from '../../domains/browser-session/repo';
+import { getTaskInfo } from '../../domains/browser-session/service.task-info';
 import { serializePasskeys } from '../../domains/browser-session/service.serializers';
 
 config();
@@ -88,6 +89,77 @@ test('serializePasskeys maps key material and preserves null userHandle', async 
     'mapping mismatch'
   );
   assert(out[1].userHandle === null, 'expected null userHandle preserved');
+});
+
+test('getTaskInfo includes reserved passkeys for resumed browser sessions', async () => {
+  const userId = `bs-passkey-task-${randomUUID()}`;
+  const contextId = `steel-profile-${randomUUID()}`;
+  await prisma.user.create({
+    data: {
+      userId,
+      isAnonymous: true,
+      name: 'Resume Shopper',
+      addressLine1: '1 Main St',
+      city: 'San Francisco',
+      state: 'CA',
+      postalCode: '94105',
+    },
+  });
+  const context = await prisma.browserContext.create({
+    data: { userId, contextId },
+  });
+  const session = await prisma.browserSession.create({
+    data: {
+      contextId: context.id,
+      agentId: randomUUID(),
+      sessionId: `steel-session-${randomUUID()}`,
+      debugUrl: 'https://debug.steel.dev/session/live',
+      wsUrl: 'ws://steel/live',
+      status: 'ACTIVE',
+      startUrl: 'https://www.google.com/',
+      currentUrl:
+        'https://www.amazon.com/ap/signin?openid.return_to=https%3A%2F%2Fwww.amazon.com%2Fcheckout',
+    },
+  });
+  const passkey = await prisma.passkeyCredential.create({
+    data: {
+      userId,
+      authRealm: 'amazon.com',
+      rpId: 'amazon.com',
+      credentialId: `cred-${randomUUID()}`,
+      encryptedPrivateKey: 'encrypted-private-key',
+      userHandle: 'user-handle',
+      signCount: 42,
+      browserSource: 'chrome',
+    },
+  });
+
+  try {
+    const info = await getTaskInfo(session.id);
+    assert(info !== null, 'expected task info response');
+    assert(
+      info.auth_realm === 'amazon.com',
+      `expected amazon.com auth realm, got ${info.auth_realm}`
+    );
+    assert(info.current_url === session.currentUrl, 'expected current_url to round trip');
+    assert(info.start_url === session.startUrl, 'expected start_url to round trip');
+    assert(info.user_settings?.addressLine1 === '1 Main St', 'expected user settings on resume');
+    assert(info.passkeys.length === 1, `expected one passkey, got ${info.passkeys.length}`);
+    assert(info.passkeys[0].id === passkey.id, 'expected passkey id to match');
+    assert(info.passkeys[0].rpId === 'amazon.com', 'expected amazon rpId');
+    assert(
+      info.passkeys[0].signCount === 42,
+      `expected reserved base 42, got ${info.passkeys[0].signCount}`
+    );
+
+    const row = await prisma.passkeyCredential.findUnique({ where: { id: passkey.id } });
+    assert(Number(row?.signCount) === 142, `expected db signCount 142, got ${row?.signCount}`);
+  } finally {
+    await prisma.browserSession.deleteMany({ where: { id: session.id } });
+    await prisma.browserContext.deleteMany({ where: { id: context.id } });
+    await prisma.passkeyCredential.deleteMany({ where: { userId } });
+    await prisma.user.deleteMany({ where: { userId } });
+  }
 });
 
 async function main() {

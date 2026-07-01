@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -533,6 +534,8 @@ def test_build_verifier_json_schema_object_type():
                 "properties": [
                     {"name": "title", "type": "str"},
                     {"name": "price_usd", "type": "float"},
+                    {"name": "preview", "type": "file_pointer"},
+                    {"name": "remote_preview", "type": "session_file_pointer"},
                 ],
             },
         ]
@@ -544,9 +547,12 @@ def test_build_verifier_json_schema_object_type():
     beanie = props["selected_beanie"]
     assert beanie["type"] == "object"
     assert beanie["additionalProperties"] is False
-    assert beanie["required"] == ["title", "price_usd"]
+    assert beanie["required"] == ["title", "price_usd", "preview", "remote_preview"]
     assert beanie["properties"]["title"]["type"] == "string"
     assert beanie["properties"]["price_usd"]["type"] == "number"
+    assert beanie["properties"]["preview"]["type"] == "object"
+    assert "storage_path" in beanie["properties"]["preview"]["properties"]
+    assert beanie["properties"]["remote_preview"]["required"] == ["path"]
     assert result["json_schema"]["strict"] is True
 
 
@@ -562,6 +568,8 @@ def test_build_verifier_json_schema_list_object_type():
                 "properties": [
                     {"name": "name", "type": "str"},
                     {"name": "rank", "type": "int"},
+                    {"name": "asset", "type": "file_pointer"},
+                    {"name": "remote_asset", "type": "session_file_pointer"},
                 ],
             },
         ]
@@ -573,7 +581,9 @@ def test_build_verifier_json_schema_list_object_type():
     assert props["items"]["type"] == "array"
     assert props["items"]["items"]["type"] == "object"
     assert props["items"]["items"]["additionalProperties"] is False
-    assert props["items"]["items"]["required"] == ["name", "rank"]
+    assert props["items"]["items"]["required"] == ["name", "rank", "asset", "remote_asset"]
+    assert props["items"]["items"]["properties"]["asset"]["type"] == "object"
+    assert props["items"]["items"]["properties"]["remote_asset"]["required"] == ["path"]
     assert result["json_schema"]["strict"] is True
 
 
@@ -1089,22 +1099,20 @@ async def test_set_response_schema_activity_http_error():
 
 
 async def test_call_llm_rose_path():
-    """call_llm routes Rose models through the in-process Rose client (waterfall via OpenRouter)."""
-    sse = _sse_body(
-        [
-            {
-                "choices": [{"delta": {"content": "hello from rose"}, "finish_reason": "stop"}],
-                "usage": {
-                    "prompt_tokens": 10,
-                    "completion_tokens": 20,
-                    "total_tokens": 30,
-                },
-            }
-        ]
+    """call_llm routes Rose models through the in-process Rose client."""
+    sse = _anthropic_sse_body(
+        text="hello from rose",
+        input_tokens=10,
+        output_tokens=20,
+        stop_reason="end_turn",
     )
     setup_mock(
         {
-            "openrouter.ai/api/v1/chat/completions": {
+            "/api/integrations/compute-code/anthropic-key/cooldown": {
+                "status": 200,
+                "json": {"onCooldown": False},
+            },
+            "api.anthropic.com/v1/messages": {
                 "status": 200,
                 "text": sse,
                 "headers": {"Content-Type": "text/event-stream"},
@@ -1112,20 +1120,29 @@ async def test_call_llm_rose_path():
         }
     )
 
-    with patch("temporalio.activity.heartbeat"):
-        from helpers.llm import call_llm
+    from providers.rose import client as rose_client
 
-        result = await call_llm(
-            messages=[{"role": "user", "content": "hi"}],
-            model="rose-labs/rose-1-lite",
-            call_site="test",
-        )
+    rose_client._reset_anthropic_api_key_cooldown_cache()
+    try:
+        with patch("temporalio.activity.heartbeat"), patch.dict(
+            os.environ, {"ANTHROPIC_API_KEY": "sk-ant-api03-test"}
+        ):
+            from helpers.llm import call_llm
+
+            result = await call_llm(
+                messages=[{"role": "user", "content": "hi"}],
+                model="rose-labs/rose-1-lite",
+                call_site="test",
+            )
+    finally:
+        rose_client._reset_anthropic_api_key_cooldown_cache()
 
     assert result["content"] == "hello from rose"
     assert result["finish_reason"] == "stop"
     assert result["usage"]["prompt_tokens"] == 10
     assert result["usage"]["completion_tokens"] == 20
     assert result["usage"]["total_tokens"] == 30
+    assert result["usage"]["actual_model"] == "claude-sonnet-4-6-anthropic"
 
 
 async def test_call_llm_rose_with_claude_token_and_skip_cache_write():
@@ -3431,6 +3448,82 @@ async def test_call_llm_structured_streaming_tool_detection_callback():
     assert any(t == "web_search" for t, _, _ in detected_ordered)
 
 
+async def _call_llm_structured_streaming_replayed_native_tool_call_without_json_case():
+    """Fast Mode replayed native tool calls parse even when stored model label is -anthropic."""
+    from helpers.llm import call_llm_structured_streaming
+    from providers.rose.types import StreamChunk
+    from utils.tool_schemas import create_agent_action_model
+
+    async def fake_cached_complete(*args, **kwargs):
+        yield StreamChunk(
+            kind="metadata",
+            data={
+                "actual_model": "claude-sonnet-4-6-anthropic",
+                "pool_name": "rose-1-lite",
+                "request_id": "cached-r1",
+                "from_fast_cache": True,
+            },
+        )
+        yield StreamChunk(
+            kind="tool_call",
+            data={
+                "id": "toolu_cached",
+                "name": "web_search",
+                "arguments": json.dumps({"query": "best cities to live in your 20s"}),
+            },
+        )
+        yield StreamChunk(
+            kind="usage",
+            data={
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "cache_read_input_tokens": 100,
+                "finish_reason": "tool_calls",
+            },
+        )
+        yield StreamChunk(kind="done", data={"from_fast_cache": True})
+
+    import helpers.llm as llm_module
+
+    original_cached_complete = llm_module.cached_complete
+    llm_module.cached_complete = fake_cached_complete
+    try:
+        AgentAction = create_agent_action_model(["web_search"])
+        detected = []
+
+        async def on_chunk(text: str, tokens: int):
+            pass
+
+        async def on_tool_detected(name, tool_call_id):
+            detected.append((name, tool_call_id))
+
+        response, usage, detected_ordered = await call_llm_structured_streaming(
+            messages=[{"role": "user", "content": "Do a web search"}],
+            model="rose",
+            temperature=1.0,
+            max_tokens=512,
+            response_model=AgentAction,
+            on_chunk=on_chunk,
+            on_tool_detected=on_tool_detected,
+            call_site="execute_loop",
+        )
+
+        assert response.response == ""
+        assert len(response.tool_calls) == 1
+        assert response.tool_calls[0].tool == "web_search"
+        assert response.tool_calls[0].query == "best cities to live in your 20s"
+        assert usage["cache_read_input_tokens"] == 100
+        assert detected == [("web_search", "toolu_cached")]
+        assert [(name, tid) for name, tid, _ in detected_ordered] == [("web_search", "toolu_cached")]
+    finally:
+        llm_module.cached_complete = original_cached_complete
+
+
+def test_call_llm_structured_streaming_replayed_native_tool_call_without_json():
+    asyncio.run(_call_llm_structured_streaming_replayed_native_tool_call_without_json_case())
+
+
+
 async def test_call_llm_structured_streaming_attention_streaming():
     """on_attention_stream fires for send_message_to_user tool message."""
     import httpx
@@ -3805,6 +3898,78 @@ async def test_call_llm_structured_streaming_openrouter_exception_raises():
         except RuntimeError as e:
             assert "openrouter boom" in str(e)
             raised = True
+    assert raised
+
+
+async def test_call_llm_structured_streaming_rose_cancelled_error_propagates():
+    """Rose stream cancellation must not become a successful empty AgentAction."""
+    from helpers.llm import call_llm_structured_streaming
+    from utils.tool_schemas import create_agent_action_model
+
+    AgentAction = create_agent_action_model([])
+
+    class FakeRoseClient:
+        async def complete(self, **kwargs):
+            raise asyncio.CancelledError()
+            yield  # pragma: no cover
+
+    async def on_chunk(text: str, tokens: int):
+        raise AssertionError("cancelled stream should not emit chunks")
+
+    raised = False
+    with patch("temporalio.activity.heartbeat"), patch("helpers.llm.RoseClient", FakeRoseClient):
+        try:
+            await call_llm_structured_streaming(
+                messages=[{"role": "user", "content": "q"}],
+                model="rose-labs/rose-1-lite",
+                temperature=0.5,
+                max_tokens=256,
+                response_model=AgentAction,
+                on_chunk=on_chunk,
+                call_site="rose-cancelled",
+            )
+        except asyncio.CancelledError:
+            raised = True
+
+    assert raised
+
+
+async def test_call_llm_structured_streaming_openrouter_cancelled_error_propagates():
+    """OpenRouter stream cancellation must not become a successful empty AgentAction."""
+    from unittest.mock import MagicMock, patch
+    from helpers.llm import call_llm_structured_streaming
+    from utils.tool_schemas import create_agent_action_model
+
+    AgentAction = create_agent_action_model([])
+
+    async def cancelled_iter(*args, **kwargs):
+        raise asyncio.CancelledError()
+        yield  # pragma: no cover
+
+    fake_completions = MagicMock()
+    fake_completions.create_partial = cancelled_iter
+
+    fake_client = MagicMock()
+    fake_client.chat.completions = fake_completions
+
+    async def on_chunk(text: str, tokens: int):
+        raise AssertionError("cancelled stream should not emit chunks")
+
+    raised = False
+    with patch("helpers.llm.AsyncOpenAI"), patch("helpers.llm.instructor.from_openai", return_value=fake_client):
+        try:
+            await call_llm_structured_streaming(
+                messages=[{"role": "user", "content": "q"}],
+                model="anthropic/claude-sonnet-4",
+                temperature=0.5,
+                max_tokens=256,
+                response_model=AgentAction,
+                on_chunk=on_chunk,
+                call_site="openrouter-cancelled",
+            )
+        except asyncio.CancelledError:
+            raised = True
+
     assert raised
 
 
@@ -4884,6 +5049,10 @@ async def run_all_tests():
         "convert_ctx_in_progress_tool", test_convert_context_to_messages_non_terminal_tool_becomes_user
     )
     await r.record_async("stream_tool_detection_cb", test_call_llm_structured_streaming_tool_detection_callback)
+    await r.record_async(
+        "stream_replayed_native_tool_call_without_json",
+        _call_llm_structured_streaming_replayed_native_tool_call_without_json_case,
+    )
     await r.record_async("stream_attention_streaming", test_call_llm_structured_streaming_attention_streaming)
     await r.record_async("call_llm_openrouter_path", test_call_llm_openrouter_path)
     await r.record_async("verifier_claude_token_error", test_call_llm_verifier_claude_token_error_surfaces)
@@ -4897,6 +5066,14 @@ async def run_all_tests():
     await r.record_async("call_llm_openrouter_exception", test_call_llm_openrouter_exception_path)
     await r.record_async("stream_openrouter_path", test_call_llm_structured_streaming_openrouter_path)
     await r.record_async("stream_openrouter_exception", test_call_llm_structured_streaming_openrouter_exception_raises)
+    await r.record_async(
+        "stream_rose_cancelled_propagates",
+        test_call_llm_structured_streaming_rose_cancelled_error_propagates,
+    )
+    await r.record_async(
+        "stream_openrouter_cancelled_propagates",
+        test_call_llm_structured_streaming_openrouter_cancelled_error_propagates,
+    )
     await r.record_async("stream_nested_tool_recovery", test_call_llm_structured_streaming_nested_tool_recovery)
     await r.record_async(
         "stream_thinking_model_reasoning_json", test_call_llm_structured_streaming_thinking_model_reasoning_json

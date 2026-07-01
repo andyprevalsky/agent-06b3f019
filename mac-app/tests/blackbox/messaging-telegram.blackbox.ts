@@ -41,6 +41,12 @@ import path from 'path';
 import { stubAllElectron } from './electron-stubs';
 import { installFetchCapture, clearFetchCaptures, fetchCaptures } from './fetch-capture';
 
+const { TEST_USER_DATA_DIR } = vi.hoisted(() => {
+  const testUserDataDir = `/tmp/mac-app-test-telegram-${process.pid}`;
+  process.env.MAC_APP_TEST_USER_DATA = testUserDataDir;
+  return { TEST_USER_DATA_DIR: testUserDataDir };
+});
+
 // Config reads env vars at module-load time — provide deterministic fakes BEFORE any
 // import that transitively pulls `main/base/config.ts`. The batch prompt pins backend to
 // http://localhost:3001 (the same URL vitest.config.ts injects into import.meta.env).
@@ -55,10 +61,10 @@ delete process.env.TELEGRAM_API_HASH;
 
 stubAllElectron();
 
-// The Electron stub pins `app.getPath('userData')` to `/tmp/mac-app-test` (see
-// electron-stubs.ts). TelegramAuth caches that as TELEGRAM_AUTH_DIR at module load.
-// We wipe it between tests so the disk-backed session state doesn't leak.
-const TELEGRAM_AUTH_DIR = path.join('/tmp/mac-app-test', 'telegram-auth');
+// TelegramAuth caches app.getPath('userData') at module load. This suite uses a
+// process-scoped test dir so parallel deploy verifiers cannot delete each
+// other's session file.
+const TELEGRAM_AUTH_DIR = path.join(TEST_USER_DATA_DIR, 'telegram-auth');
 const SESSION_PATH = path.join(TELEGRAM_AUTH_DIR, 'session.txt');
 
 // ---------------------------------------------------------------------------

@@ -1,14 +1,13 @@
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <linearGradient id="rose" x1="1" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#FF7A00" />
-      <stop offset="18%" stop-color="#FF6E1E" />
-      <stop offset="35%" stop-color="#FF4D6E" />
-      <stop offset="55%" stop-color="#FF4F8F" />
-      <stop offset="72%" stop-color="#E168E0" />
-      <stop offset="88%" stop-color="#B05BFF" />
-      <stop offset="100%" stop-color="#7A63FF" />
+    <linearGradient id="rose" x1="100%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FE7503" />
+      <stop offset="20%" stop-color="#FC585C" />
+      <stop offset="40%" stop-color="#FD5776" />
+      <stop offset="60%" stop-color="#E062CC" />
+      <stop offset="80%" stop-color="#A76CED" />
+      <stop offset="100%" stop-color="#7A6BEC" />
     </linearGradient>
   </defs>
-  <rect x="96" y="96" width="832" height="832" rx="300" fill="url(#rose)" />
+  <rect width="1024" height="1024" rx="300" fill="url(#rose)" />
 </svg>

@@ -27,6 +27,22 @@
     }
   }
 
+  @keyframes dropdownIconGlow {
+    0%,
+    100% {
+      box-shadow:
+        0 1px 2px rgba(0, 0, 0, 0.16),
+        0 0 9px rgba(29, 78, 216, 0.42),
+        0 0 0 1px rgba(29, 78, 216, 0.18);
+    }
+    50% {
+      box-shadow:
+        0 1px 2px rgba(0, 0, 0, 0.16),
+        0 0 14px rgba(59, 130, 246, 0.58),
+        0 0 0 1px rgba(59, 130, 246, 0.22);
+    }
+  }
+
   .voice-orb-canvas {
     display: block;
     background: transparent;

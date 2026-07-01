@@ -5,9 +5,12 @@ import type { BrowserType } from '@/features/integration-handlers-context';
 interface SyncHandlers {
   handleBrowserSync: (browserType: BrowserType) => Promise<void>;
   handleChromePasswordsSync: () => Promise<void>;
-  handleApplePasswordsSync: (file: File) => Promise<number | undefined>;
   handleAtlasPasswordsSync: (keychainPassword: string) => Promise<void>;
-  handlePasswordRequest: () => Promise<true | undefined>;
+  handlePasskeysConnect: () => Promise<{
+    enabled?: boolean;
+    openedSettings?: boolean;
+    openedPasswordsApp?: boolean;
+  } | void>;
   handleClaudeCodeSync: () => Promise<void>;
   handleGptCodeSync: () => Promise<void>;
   handleIMessageSync: () => Promise<void>;
@@ -53,23 +56,19 @@ export function useIntegrationActions(handlers: SyncHandlers) {
         setError,
         'Failed to sync Chrome passwords',
       ),
-      onApplePasswordsSync: async (file: File) => {
-        setError(null);
-        const count = await h.handleApplePasswordsSync(file);
-        if (count !== undefined) setSuccess(`Imported ${count} passwords from Apple Passwords`);
-      },
       onAtlasPasswordsSync: async (pw: string) => {
         setError(null);
         await h.handleAtlasPasswordsSync(pw);
         setSuccess('Synced passwords from ChatGPT Atlas');
       },
-      onPasswordRequest: async () => {
+      onPasskeysConnect: async () => {
         setError(null);
         try {
-          if (await h.handlePasswordRequest())
-            setSuccess("Request sent! We'll add the integration within 24 hours.");
+          return await h.handlePasskeysConnect();
         } catch (e) {
-          setError(formatError(e, 'Failed to send request'));
+          const message = formatError(e, 'Failed to sync passkeys');
+          setError(message);
+          throw new Error(message);
         }
       },
       onClaudeCodeSync: wrapAction(

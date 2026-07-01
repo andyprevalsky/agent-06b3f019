@@ -11,6 +11,7 @@ import * as service from './service';
 
 import uploadRoutes from './routes.upload';
 import browserRoutes from './routes.browser';
+import passkeyRoutes from './routes.passkeys';
 import emailRoutes from './routes.email';
 import claudeRoutes from './routes.claude';
 import computeRoutes from './routes.compute';
@@ -21,6 +22,7 @@ const router = Router();
 // Mount sub-routers
 router.use(uploadRoutes);
 router.use(browserRoutes);
+router.use(passkeyRoutes);
 router.use(emailRoutes);
 router.use(claudeRoutes);
 router.use(computeRoutes);

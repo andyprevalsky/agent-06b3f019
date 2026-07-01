@@ -61,6 +61,7 @@ from providers.rose.schema import (
     build_anthropic_tools_from_response_model,
     build_openai_response_format,
 )
+from providers.rose.transport import ANTHROPIC_FAST_MODE_BETA, _with_fast_mode_beta
 from providers.rose.transforms import (
     apply_anthropic_tool_config,
     get_messages_for_model,
@@ -938,6 +939,39 @@ def test_build_anthropic_body_identity_and_cache_block():
     cached_blocks = [b for b in sys if "cache_control" in b]
     assert len(cached_blocks) == 1
     assert cached_blocks[0]["cache_control"] == {"type": "ephemeral", "scope": "global"}
+
+
+def test_build_anthropic_body_provider_fast_mode_supported_opus_only():
+    ultra = get_pool("rose-1-ultra")
+    body = build_anthropic_body(
+        pool_spec=ultra,
+        messages=[{"role": "user", "content": "hi"}],
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        max_tokens=128,
+        provider_fast_mode=True,
+    )
+    assert body["speed"] == "fast"
+
+    lite = get_pool("rose-1-lite")
+    unsupported = build_anthropic_body(
+        pool_spec=lite,
+        messages=[{"role": "user", "content": "hi"}],
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        max_tokens=128,
+        provider_fast_mode=True,
+    )
+    assert "speed" not in unsupported
+
+
+def test_anthropic_fast_mode_transport_adds_beta_header():
+    headers = _with_fast_mode_beta({"anthropic-beta": "effort-2025-11-24"}, {"speed": "fast"})
+    assert ANTHROPIC_FAST_MODE_BETA in headers["anthropic-beta"].split(",")
+    unchanged = _with_fast_mode_beta({"anthropic-beta": "effort-2025-11-24"}, {})
+    assert unchanged["anthropic-beta"] == "effort-2025-11-24"
 
 
 def test_build_anthropic_body_static_dynamic_split():
@@ -2067,6 +2101,14 @@ def test_build_codex_responses_body_contract():
     assert body["reasoning"]["effort"] == "high"
     assert body["prompt_cache_key"].startswith("rose:")
     assert body["prompt_cache_key"] == same_prompt_different_request["prompt_cache_key"]
+    assert "service_tier" not in body
+    fast_body = build_codex_responses_body(
+        pool_spec=pool,
+        messages=[{"role": "user", "content": "hi"}],
+        provider_fast_mode=True,
+        request_id="fast-mode",
+    )
+    assert fast_body["service_tier"] == "priority"
     no_system_body = build_codex_responses_body(
         pool_spec=pool,
         messages=[{"role": "user", "content": "hi"}],
@@ -2274,6 +2316,21 @@ def test_build_openrouter_body_includes_optionals():
     assert body["temperature"] == 0.4
     assert body["max_tokens"] == 42
     assert body["seed"] == 7
+
+
+def test_build_openrouter_body_provider_fast_mode():
+    body = build_openrouter_body(
+        model="anthropic/claude-opus-4.8",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+        provider_fast_mode=True,
+    )
+    assert body["speed"] == "fast"
 
 
 def test_build_openrouter_body_minimal_omits_optionals():
@@ -2759,6 +2816,145 @@ async def test_client_direct_auth_stall_falls_through_immediately():
     metadata = next(c for c in chunks if c.kind == "metadata")
     assert metadata.data["claude_token_error"] == "stall"
     assert any(c.kind == "content" and c.data.get("text") == "fallback" for c in chunks)
+
+
+async def test_client_direct_auth_stall_marks_token_before_rotation():
+    """A TTFT stall backs the compute token off before fetching a replacement."""
+    events: list[str] = []
+    marked: list[tuple[str, int, str | None]] = []
+    fetches: list[str] = []
+
+    async def mark_rate_limited(ctx, cooldown_seconds, rate_limited_until=None, failure_reason=None):
+        events.append("mark")
+        marked.append((ctx.token, cooldown_seconds, failure_reason))
+        return True
+
+    async def fetch_fresh(user_id: str):
+        events.append("fetch")
+        fetches.append(user_id)
+        return GptAuthContext(
+            token="fresh-token",
+            source="user",
+            user_id=user_id,
+            account_id="acct_123",
+            mark_rate_limited=mark_rate_limited,
+            fetch_fresh=None,
+            max_rotations=1,
+        )
+
+    async def first_token_stalls_then_fresh_succeeds(**kwargs):
+        auth = kwargs["auth"]
+        if auth.token == "stale-token":
+            await asyncio.sleep(1.0)
+            yield StreamChunk(kind="metadata", data={"actual_model": "gpt-5.4-gpt"})
+            return
+        yield StreamChunk(kind="metadata", data={"actual_model": "gpt-5.4-gpt", "pool_name": "gpt-token"})
+        yield StreamChunk(kind="content", data={"text": "fresh ok"})
+        yield StreamChunk(
+            kind="usage",
+            data={
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "actual_model": "gpt-5.4-gpt",
+                "finish_reason": "stop",
+            },
+        )
+        yield StreamChunk(kind="done", data={})
+
+    auth = GptAuthContext(
+        token="stale-token",
+        source="user",
+        user_id="user-123",
+        account_id="acct_123",
+        mark_rate_limited=mark_rate_limited,
+        fetch_fresh=fetch_fresh,
+        max_rotations=1,
+    )
+    client = RoseClient(openrouter_key="ork-x")
+    with patch("providers.rose.client._try_gpt_auth", first_token_stalls_then_fresh_succeeds):
+        chunks = await _drain(
+            client.complete(
+                pool="rose-1-lite",
+                messages=[{"role": "user", "content": "hi"}],
+                gpt_auth=auth,
+                call_site="test-stall-cooldown",
+                deadline_s=2.0,
+                ttft_timeout_s=0.01,
+                idle_timeout_s=0.5,
+            )
+        )
+
+    assert events == ["mark", "fetch"]
+    assert marked == [("stale-token", 600, "stall")]
+    assert fetches == ["user-123"]
+    assert any(c.kind == "content" and c.data.get("text") == "fresh ok" for c in chunks)
+
+
+async def test_client_reproduces_rotated_gpt_direct_auth_deadline():
+    """Fast local repro for the prod explore stall pattern.
+
+    The prod run waited 90s for TTFT, fetched a fresh compute token, then
+    exhausted the 170s rose.complete deadline on the rotated direct GPT route.
+    This shrinks those timers to milliseconds while exercising the same client
+    branches: direct GPT stall -> fetch_fresh -> rotated direct GPT stall ->
+    RoseDeadlineError.
+    """
+
+    attempts: list[str] = []
+    fetches: list[str] = []
+
+    async def silent_gpt_auth(**kwargs):
+        attempts.append(kwargs["auth"].token)
+        await asyncio.sleep(1.0)
+        yield StreamChunk(kind="metadata", data={"actual_model": "gpt-5.4-gpt"})
+
+    async def fetch_fresh(user_id: str):
+        fetches.append(user_id)
+        return GptAuthContext(
+            token="fresh-token",
+            source="user",
+            user_id=user_id,
+            account_id="acct_123",
+            fetch_fresh=None,
+            max_rotations=1,
+        )
+
+    async def silent_waterfall(**kwargs):
+        await asyncio.sleep(1.0)
+        yield StreamChunk(kind="metadata", data={"actual_model": "fallback"})
+
+    auth = GptAuthContext(
+        token="stale-token",
+        source="user",
+        user_id="user-123",
+        account_id="acct_123",
+        fetch_fresh=fetch_fresh,
+        max_rotations=1,
+    )
+    client = RoseClient(openrouter_key="ork-x")
+
+    raised = False
+    with (
+        patch("providers.rose.client._try_gpt_auth", silent_gpt_auth),
+        patch("providers.rose.client.waterfall_complete", silent_waterfall),
+    ):
+        try:
+            async for _ in client.complete(
+                pool="rose-1-lite",
+                messages=[{"role": "user", "content": "repro final explore synthesis"}],
+                gpt_auth=auth,
+                call_site="explore_agent",
+                deadline_s=0.06,
+                ttft_timeout_s=0.05,
+                idle_timeout_s=0.5,
+            ):
+                pass
+        except RoseDeadlineError as exc:
+            raised = "deadline exceeded" in str(exc)
+
+    assert raised, "expected the shrunken prod stall to exhaust rose.complete deadline"
+    assert attempts == ["stale-token", "fresh-token"]
+    assert fetches == ["user-123"]
 
 
 async def test_client_does_not_use_supplied_gpt_auth_as_fallback():
@@ -3783,6 +3979,8 @@ async def run_all_tests():
     r.record("anthropic_body_cache_control_cap", test_build_anthropic_body_caps_anthropic_cache_control_blocks)
     r.record("anthropic_body_message_breakpoint", test_build_anthropic_body_message_cache_breakpoint)
     r.record("anthropic_body_skip_cache_write", test_build_anthropic_body_skip_cache_write_keeps_system_markers)
+    r.record("anthropic_body_provider_fast_mode", test_build_anthropic_body_provider_fast_mode_supported_opus_only)
+    r.record("anthropic_fast_mode_beta_header", test_anthropic_fast_mode_transport_adds_beta_header)
 
     await r.record_async("claude_auth_400_no_rotate", test_claude_auth_400_raises_invalid_request_no_rotation)
     await r.record_async("claude_auth_5xx_retries", test_claude_auth_5xx_retries_then_raises_server_error)
@@ -3843,6 +4041,7 @@ async def run_all_tests():
     )
 
     r.record("openrouter_body_optionals", test_build_openrouter_body_includes_optionals)
+    r.record("openrouter_body_provider_fast_mode", test_build_openrouter_body_provider_fast_mode)
     r.record("openrouter_body_minimal", test_build_openrouter_body_minimal_omits_optionals)
     await r.record_async("waterfall_falls_through_succeeds", test_waterfall_falls_through_then_succeeds)
     await r.record_async(
@@ -3874,6 +4073,14 @@ async def run_all_tests():
     await r.record_async(
         "client_direct_auth_stall_falls_through",
         test_client_direct_auth_stall_falls_through_immediately,
+    )
+    await r.record_async(
+        "client_direct_auth_stall_marks_token",
+        test_client_direct_auth_stall_marks_token_before_rotation,
+    )
+    await r.record_async(
+        "client_rotated_gpt_direct_auth_deadline_repro",
+        test_client_reproduces_rotated_gpt_direct_auth_deadline,
     )
     await r.record_async("client_no_supplied_gpt_fallback", test_client_does_not_use_supplied_gpt_auth_as_fallback)
     await r.record_async(
