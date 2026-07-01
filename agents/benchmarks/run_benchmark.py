@@ -2562,7 +2562,11 @@ def _evaluate_webdecoy_biometrics_result(data: dict) -> Tuple[bool, Optional[str
     # ~0.003 run-to-run variance in the behavioral-biometrics score (mouse timing,
     # Steel proxy, parallel-run CPU/PoW contention); resume ratcheting DOWN as the
     # anti-detection floor improves.
-    WEBDECOY_RISK_RATCHET = 0.160
+    # Raised to 0.163 on 2026-07-01 with explicit human approval: three consecutive
+    # runs (parallel + two solo) all scored a deterministic 0.163 with no related
+    # code change — the current external anti-bot floor (Steel proxy IP reputation)
+    # sits 0.003 above the prior ratchet. Resume ratcheting DOWN as the floor improves.
+    WEBDECOY_RISK_RATCHET = 0.163
     if final_score > WEBDECOY_RISK_RATCHET:
         return False, (
             f"FCaptcha {score_source} risk score {final_score:.3f} exceeds ratchet {WEBDECOY_RISK_RATCHET:.3f} "
