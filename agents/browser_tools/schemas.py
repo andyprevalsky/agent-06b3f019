@@ -253,6 +253,37 @@ class RequestUserAssistanceForAuthenticationBrowserTool(BaseModel):
     tool: Literal["request_user_assistance_for_authentication"]
 
 
+class PaymentLineItem(BaseModel):
+    """A checkout line item extracted from the merchant page."""
+
+    name: str = Field(description="Item name shown on the checkout page")
+    image_url: Optional[str] = Field(default=None, description="Product image URL if visible")
+    unit_price_cents: int = Field(description="Unit price in cents")
+    quantity: int = Field(description="Quantity")
+    line_total_cents: int = Field(description="Line total in cents")
+
+
+class PaymentFee(BaseModel):
+    """A tax, shipping, service, or other checkout fee."""
+
+    label: str = Field(description="Fee label shown on the checkout page")
+    amount_cents: int = Field(description="Fee amount in cents")
+
+
+class RequestPaymentCardBrowserTool(BaseModel):
+    """Request a one-time virtual payment card for the current checkout after extracting the full receipt."""
+
+    tool: Literal["request_payment_card"]
+    merchant: str = Field(description="Merchant or site name for the purchase")
+    currency: Literal["USD"] = Field(default="USD", description="Purchase currency; currently only USD")
+    line_items: List[PaymentLineItem] = Field(
+        description="Full itemized receipt: products/services, image URLs if visible, quantity, unit price, line total"
+    )
+    fees: List[PaymentFee] = Field(default_factory=list, description="Taxes, shipping, service fees, discounts, etc.")
+    subtotal_cents: int = Field(description="Subtotal before fees in cents")
+    total_cents: int = Field(description="Final checkout total in cents")
+
+
 # ============================================================================
 # INTERNAL WRITE-LOCK APPROVAL TOOL
 # ============================================================================
@@ -577,6 +608,7 @@ BROWSER_TOOL_MODELS = {
     "attempt_completion": AttemptCompletionBrowserTool,
     # "send_message_to_user": SendMessageToUserBrowserTool,
     "request_user_assistance_for_authentication": RequestUserAssistanceForAuthenticationBrowserTool,
+    "request_payment_card": RequestPaymentCardBrowserTool,
     # Internal write-lock approval metadata. Kept in the stable tool surface
     # so a forked request can append only a user message and preserve cache reads.
     "generate_write_lock_notification": GenerateWriteLockNotificationTool,
@@ -647,6 +679,7 @@ __all__ = [
     "AttemptCompletionBrowserTool",
     "SendMessageToUserBrowserTool",
     "RequestUserAssistanceForAuthenticationBrowserTool",
+    "RequestPaymentCardBrowserTool",
     "WriteLockService",
     "WriteLockMedia",
     "WriteLockPurchaseItem",

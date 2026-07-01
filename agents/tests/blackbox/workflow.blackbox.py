@@ -473,6 +473,8 @@ async def mock_call_llm_activity(
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
     user_id: Optional[str] = None,
+    *args: Any,
+    **kwargs: Any,
 ) -> Dict[str, Any]:
     """Mock LLM activity that returns an attempt_completion tool call to end the loop.
 
@@ -617,6 +619,8 @@ async def mock_set_response_schema_activity(
     agent_id: str,
     schema: Any,
     compute_auth: Any = None,
+    *args: Any,
+    **kwargs: Any,
 ) -> None:
     return None
 

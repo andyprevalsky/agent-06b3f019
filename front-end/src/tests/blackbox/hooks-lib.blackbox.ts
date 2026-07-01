@@ -9,7 +9,6 @@
  *   - src/features/agent-context/hooks/realtimeHandlers.ts
  *   - src/features/agent-context/hooks/useRealtimeSubscription.ts
  *   - src/features/terminal/hooks/useTerminalMessages.ts
- *   - src/features/settings/hooks/usePayment.ts   (payment form state)
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
@@ -66,9 +65,6 @@ import { useRealtimeSubscription } from '@/features/agent-context/hooks/useRealt
 import { useTerminalMessages } from '@/features/terminal/hooks/useTerminalMessages';
 import { useTickerCarousel } from '@/features/terminal/hooks/useTickerCarousel';
 import { useTileAnimation } from '@/features/terminal/hooks/useTileAnimation';
-
-// usePayment
-import { usePayment } from '@/features/settings/hooks/usePayment';
 
 // Supabase helpers
 import {
@@ -1389,187 +1385,6 @@ describe('useTerminalMessages', () => {
     expect(viewport.scrollTop).toBe(2000);
     rafSpy.mockRestore();
     document.body.removeChild(viewport);
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// usePayment.ts
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe('usePayment', () => {
-  const initialUserData = {
-    name: '',
-    addressLine1: '',
-    addressLine2: '',
-    city: '',
-    state: '',
-    postalCode: '',
-    country: '',
-    encryptedPaymentInformation: null as string | null,
-  };
-
-  beforeEach(() => {
-    mockSession();
-    server.use(
-      http.patch(`${API_BASE}/user-settings`, async ({ request }) => {
-        const body = (await request.json()) as any;
-        return HttpResponse.json({ encryptedPaymentInformation: body.encryptedPaymentInformation });
-      }),
-    );
-  });
-
-  afterEach(() => {
-    localStorage.clear();
-  });
-
-  it('formats card number in groups of 4, max 16 digits', () => {
-    const setUser = vi.fn();
-    const setErr = vi.fn();
-    const { result } = renderHook(() => usePayment(initialUserData, setUser, setErr));
-    act(() => result.current.handleCardNumber('4242abc4242-4242-4242-99'));
-    // only digits kept, grouped; 16 digits max
-    expect(result.current.paymentData.card_number).toBe('4242 4242 4242 4242');
-  });
-
-  it('formats expiry MM/YY', () => {
-    const { result } = renderHook(() => usePayment(initialUserData, vi.fn(), vi.fn()));
-    act(() => result.current.handleExpiry('1225abc'));
-    expect(result.current.paymentData.card_expiry).toBe('12/25');
-    act(() => result.current.handleExpiry('1'));
-    expect(result.current.paymentData.card_expiry).toBe('1');
-  });
-
-  it('limits CVV to 4 digits and strips non-digits', () => {
-    const { result } = renderHook(() => usePayment(initialUserData, vi.fn(), vi.fn()));
-    act(() => result.current.handleCVV('12abc34567'));
-    expect(result.current.paymentData.card_cvv).toBe('1234');
-  });
-
-  it('handleAutopayBlur converts dollars to cents', () => {
-    const { result } = renderHook(() => usePayment(initialUserData, vi.fn(), vi.fn()));
-    act(() => result.current.setAutopayLimitDisplay('12.34'));
-    act(() => result.current.handleAutopayBlur());
-    expect(result.current.paymentData.autoagentpaylimit_cents).toBe(1234);
-  });
-
-  it('derives envelope and autopay display from userData.encryptedPaymentInformation', async () => {
-    const envelope = {
-      version: 1,
-      encrypted_aes_key: 'k',
-      iv: 'i',
-      ciphertext: 'c',
-      card_last_four: '4242',
-      card_type: 'visa',
-      billing_city: 'SF',
-      billing_country: 'US',
-      autoagentpaylimit_cents: 4500,
-    };
-    const encrypted = btoa(JSON.stringify(envelope));
-    const userData = { ...initialUserData, encryptedPaymentInformation: encrypted };
-    const { result } = renderHook(() => usePayment(userData, vi.fn(), vi.fn()));
-    await waitFor(() => {
-      expect(result.current.savedPaymentEnvelope?.card_last_four).toBe('4242');
-    });
-    expect(result.current.autopayLimitDisplay).toBe('45.00');
-  });
-
-  it('clears saved envelope when encryptedPaymentInformation is null', () => {
-    const { result, rerender } = renderHook(
-      ({ ud }: { ud: any }) => usePayment(ud, vi.fn(), vi.fn()),
-      {
-        initialProps: {
-          ud: {
-            ...initialUserData,
-            encryptedPaymentInformation: btoa(
-              JSON.stringify({
-                version: 1,
-                encrypted_aes_key: 'k',
-                iv: 'i',
-                ciphertext: 'c',
-                card_last_four: '1',
-                card_type: 'visa',
-                billing_city: '',
-                billing_country: '',
-                autoagentpaylimit_cents: 100,
-              }),
-            ),
-          },
-        },
-      },
-    );
-    expect(result.current.savedPaymentEnvelope).not.toBeNull();
-    rerender({ ud: initialUserData });
-    expect(result.current.savedPaymentEnvelope).toBeNull();
-  });
-
-  it('savePaymentInfo surfaces validation errors without calling API', async () => {
-    const setUser = vi.fn();
-    const setErr = vi.fn();
-    const { result } = renderHook(() => usePayment(initialUserData, setUser, setErr));
-    await act(async () => {
-      await result.current.savePaymentInfo();
-    });
-    // no success, errors populated for required fields
-    expect(Object.keys(result.current.paymentErrors).length).toBeGreaterThan(0);
-    expect(result.current.savedPayment).toBe(false);
-  });
-
-  it('savePaymentInfo writes userData on success', async () => {
-    const setUser = vi.fn();
-    const { result } = renderHook(() => usePayment(initialUserData, setUser, vi.fn()));
-    act(() => {
-      // Populate a valid card (Luhn-valid Visa test number), far-future expiry
-      result.current.setPaymentData({
-        card_number: '4242 4242 4242 4242',
-        cardholder_name: 'A Holder',
-        card_expiry: '12/40',
-        card_cvv: '123',
-        billing_street_address: '1 Main',
-        billing_address_line2: '',
-        billing_city: 'SF',
-        billing_state: 'CA',
-        billing_zipcode: '94103',
-        billing_country: 'US',
-        billing_phone: '',
-        billing_email: 'x@y.com',
-        autoagentpaylimit_cents: 10000,
-      });
-      result.current.setAutopayLimitDisplay('50.00');
-    });
-    await act(async () => {
-      await result.current.savePaymentInfo();
-    });
-    expect(setUser).toHaveBeenCalled();
-    expect(result.current.savedPayment).toBe(true);
-  });
-
-  it('savePaymentInfo reports API errors via setError', async () => {
-    server.use(
-      http.patch(`${API_BASE}/user-settings`, () => new HttpResponse(null, { status: 500 })),
-    );
-    const setErr = vi.fn();
-    const { result } = renderHook(() => usePayment(initialUserData, vi.fn(), setErr));
-    act(() => {
-      result.current.setPaymentData({
-        card_number: '4242 4242 4242 4242',
-        cardholder_name: 'A',
-        card_expiry: '12/40',
-        card_cvv: '123',
-        billing_street_address: '1',
-        billing_address_line2: '',
-        billing_city: 'SF',
-        billing_state: 'CA',
-        billing_zipcode: '1',
-        billing_country: 'US',
-        billing_phone: '',
-        billing_email: '',
-        autoagentpaylimit_cents: 0,
-      });
-    });
-    await act(async () => {
-      await result.current.savePaymentInfo();
-    });
-    expect(setErr).toHaveBeenCalled();
   });
 });
 

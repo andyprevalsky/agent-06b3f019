@@ -11,14 +11,14 @@ export const VALID_SOURCES = {
     searchField: 'message',
     groupBy: 'personId',
   },
-  agent_network_user_messages: {
-    description: 'User messages across the agent network',
-    table: 'Message' as const,
-    searchField: 'text',
-    groupBy: 'agentId',
+  network: {
+    description: 'Contact network records',
+    table: 'Person' as const,
+    searchField: 'contact fields',
+    groupBy: 'personId',
   },
-  agent_network_tool_results: {
-    description: 'Tool call results across the agent network',
+  agent_network: {
+    description: 'Messages across the current agent tree',
     table: 'Message' as const,
     searchField: 'text',
     groupBy: 'agentId',
@@ -52,66 +52,72 @@ export interface FormattedResult {
 export interface GrepParams {
   pattern: string;
   source?: string;
+  '-A'?: string | number;
+  '-B'?: string | number;
+  '-C'?: string | number;
+  context?: string | number;
+  '-n'?: boolean | string;
+  '-i'?: boolean | string;
+  head_limit?: string | number;
+  offset?: string | number;
+  multiline?: boolean | string;
+  // messages-source-only narrowing
+  person?: string;
   since?: string;
-  limit?: string | number;
-  person_id?: string;
   agent_id?: string;
+  user_id?: string;
 }
 
-export interface AgentNetworkMatch {
-  agent_id: string;
-  message_id: string;
-  role: string;
-  text: string;
-  timestamp: string;
-  pointer: string;
-}
-
-export interface AgentNetworkGrepResult {
-  matches: AgentNetworkMatch[];
-  total_matches: number;
-  truncated: boolean;
-  message?: string;
-}
-
-export interface NetworkContactMatch {
-  person_id: string;
-  first_name: string | null;
-  last_name: string | null;
-  phone_number: string | null;
-  email: string | null;
-  company: string | null;
-  title: string | null;
-  relation: string | null;
-  communication_frequency: string | null;
-  messages_exchanged: number | null;
-}
-
-export interface NetworkGrepResult {
-  matches: NetworkContactMatch[];
-  total_matches: number;
-  truncated: boolean;
-  message?: string;
-}
-
-export interface GrepNoMatchResult {
-  matches: FormattedResult[];
-  total_matches: 0;
-  truncated: false;
-  message: string;
-}
-
-export interface GrepMatchResult {
-  matches: FormattedResult[];
-  total_matches: number;
-  truncated: boolean;
-  truncation_message?: string;
-  pattern: string;
+export interface GrepLocation {
   source: ValidSource;
-  since: string;
+  path: string;
+  agent_id?: string;
+  message_id?: string;
+  role?: 'SYSTEM' | 'ASSISTANT' | 'USER' | 'TOOL';
+  thread?: string;
+  contact_id?: string;
+  field?: string;
 }
 
-export type GrepResult = GrepNoMatchResult | GrepMatchResult;
+export interface GrepMatch {
+  source: ValidSource;
+  path: string;
+  pointer: string;
+  timestamp: string;
+  role?: 'SYSTEM' | 'ASSISTANT' | 'USER' | 'TOOL';
+  location: GrepLocation;
+  content: string;
+}
+
+export interface GrepResult {
+  matches: GrepMatch[];
+  total_matches: number;
+  truncated: boolean;
+  pattern: string;
+  sources: ValidSource[];
+  applied_limit: number;
+  applied_offset: number;
+  message?: string;
+}
+
+// Normalized, validated grep input shared by the service (validation) and the
+// formatter (snippet rendering).
+export interface ValidatedGrepInput {
+  pattern: string;
+  sources: ValidSource[];
+  regex: RegExp;
+  dbPattern: string;
+  caseInsensitive: boolean;
+  multiline: boolean;
+  showLineNumbers: boolean;
+  contextBefore: number;
+  contextAfter: number;
+  headLimit: number;
+  offset: number;
+  // messages-source-only narrowing (resolved/parsed)
+  person?: string;
+  since?: Date;
+}
 
 export interface SummaryThreadInfo {
   name: string;

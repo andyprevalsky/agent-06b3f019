@@ -63,7 +63,7 @@ export const DEFAULT_BORDER = 23;
 
 // ── Default model ─────────────────────────────────────────────────────────
 
-export const DEFAULT_MODEL = 'rose-labs/rose-1-lite';
+export const DEFAULT_MODEL = 'rose-labs/rose-1-ultra';
 
 // ── Browser review account ────────────────────────────────────────────────
 

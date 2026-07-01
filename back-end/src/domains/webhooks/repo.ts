@@ -57,9 +57,29 @@ export async function findPausedAgents(userId: string) {
   });
 }
 
+export async function findActiveAgents(userId: string) {
+  return prisma.agent.findMany({
+    where: {
+      userId,
+      status: 'ACTIVE',
+      deletedAt: null,
+    },
+  });
+}
+
 export async function updateAgentStatus(agentId: string, status: AgentStatus) {
   return prisma.agent.update({
     where: { id: agentId },
     data: { status },
   });
+}
+
+/** Resolve the local user behind a Stripe subscription (renewal/cancel events carry the sub id). */
+export async function findSubscriptionByStripeSubscriptionId(stripeSubscriptionId: string) {
+  return prisma.subscription.findUnique({ where: { stripeSubscriptionId } });
+}
+
+/** Remove a user's subscription record (revoke). Re-subscribe re-creates it via handlePaymentSuccess. */
+export async function deleteSubscriptionByUserId(userId: string) {
+  return prisma.subscription.deleteMany({ where: { userId } });
 }

@@ -4,6 +4,10 @@
  * REVEALING: Gradient sweep reveals text left-to-right.
  * PAUSED: Text fully visible.
  * FADING: Opacity drops to 0.
+ *
+ * LAYOUT:
+ * MOBILE: two-line-safe caption box so long opening messages do not clip.
+ * DESKTOP: single-line-preferred caption width.
  */
 
 import { OPENING_MESSAGES } from '../config';
@@ -25,9 +29,12 @@ export function OpeningMessageDisplay({
       : 'linear-gradient(90deg, rgba(0,0,0,1) 0%, rgba(0,0,0,1) 100%)';
 
   return (
-    <div className="relative w-full md:min-w-[600px] h-8 flex items-center justify-center">
+    <div
+      data-testid="opening-message-display"
+      className="relative mx-auto flex min-h-16 w-full max-w-[24rem] items-center justify-center px-8 md:min-h-8 md:min-w-[600px] md:max-w-none md:px-0"
+    >
       <p
-        className="text-muted-foreground absolute inset-0 flex items-center justify-center"
+        className="absolute inset-0 flex items-center justify-center text-balance text-center leading-snug text-muted-foreground md:whitespace-nowrap"
         style={{
           WebkitMaskImage: maskGradient,
           maskImage: maskGradient,

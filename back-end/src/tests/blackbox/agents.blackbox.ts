@@ -109,7 +109,7 @@ const CreateAgentResponse = z.object({
   progress: z.number(),
   goal: z.string(),
   model: z.string(),
-  source: z.enum(['WEB', 'MAC_APP']),
+  source: z.enum(['WEB', 'MAC_APP', 'SMS']),
   reasoning_max_tokens: z.number(),
   status: z.string(),
   status_message: z.string().nullable(),

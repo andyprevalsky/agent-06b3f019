@@ -87,6 +87,7 @@ agents/scripts/repro_*.py
 back-end/scripts/cleanup-trash-credentials.ts
 back-end/scripts/enable-specific-pool-tokens.ts
 back-end/scripts/probe-*.ts
+back-end/scripts/grep-eval-runs/
 back-end/jobs/
 moltbot/
 .test-logs/

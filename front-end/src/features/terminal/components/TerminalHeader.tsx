@@ -12,6 +12,10 @@
  * SYSTEM CONTEXT:
  * mobile user tap -> TerminalHeader.onLoginClick -> useTerminalAgents.handleLoginClick
  * -> TerminalModals.loginModalOpen -> PhoneAuthModal -> useAuth.refreshAuthState
+ *
+ * HEADER SPACING:
+ * The shell owns edge padding so the logo block and login action have matching
+ * top, left/right, and bottom inset on mobile.
  */
 
 import { useNavigate } from 'react-router-dom';
@@ -91,7 +95,7 @@ function BrandButton({ onCreateNewAgent }: Pick<TerminalHeaderProps, 'onCreateNe
       <button
         type="button"
         onClick={onCreateNewAgent}
-        className="flex items-center space-x-2.5 px-1 cursor-pointer hover:opacity-80 transition-opacity"
+        className="flex items-center space-x-2.5 cursor-pointer hover:opacity-80 transition-opacity"
       >
         <div
           className="w-8 h-8 rounded-lg"
@@ -159,7 +163,7 @@ export function TerminalHeader({
 }: TerminalHeaderProps) {
   return (
     <header
-      className="absolute top-4 left-1/2 -translate-x-1/2 z-50 flex items-center justify-between px-1 py-1 rounded-2xl border border-border/50 dark:border-navi-light-black/50 shadow-lg"
+      className="absolute top-4 left-1/2 -translate-x-1/2 z-50 flex items-center justify-between p-2 rounded-2xl border border-border/50 dark:border-navi-light-black/50 shadow-lg"
       style={buildHeaderStyle({ dripStyles, blur, backgroundColors, borderColor, shadowIntensity })}
     >
       <MarbleBackground backgroundColors={backgroundColors} dripStyles={dripStyles} />

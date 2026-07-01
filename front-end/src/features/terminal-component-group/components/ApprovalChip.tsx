@@ -36,6 +36,7 @@ import { useCallback, useState } from 'react';
 import { X, Check, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import type { RequestPaymentCardPayload } from '@/lib/realtime-types';
 import { respondToAttentionRequest, rejectAttentionRequest, useToast } from '../hooks';
 import { MarkdownText } from './MarkdownText';
 
@@ -43,6 +44,7 @@ interface PendingApproval {
   attentionRequestId: string;
   question: string;
   imageUrl?: string | null;
+  requestPaymentCard?: RequestPaymentCardPayload;
 }
 
 interface ApprovalChipProps {
@@ -152,6 +154,63 @@ function ApprovalActions({ actionState, onAccept, onReject }: ApprovalActionsPro
   );
 }
 
+function formatCents(cents = 0): string {
+  return `$${(cents / 100).toFixed(2)}`;
+}
+
+function PaymentReceipt({
+  receipt,
+}: {
+  receipt: NonNullable<PendingApproval['requestPaymentCard']>;
+}) {
+  return (
+    <div className="mb-3 rounded-lg border bg-muted/40 p-3 text-sm">
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <span className="font-medium">{receipt.merchant || 'Merchant'}</span>
+        <span className="font-semibold">{formatCents(receipt.totalCents)}</span>
+      </div>
+      <div className="space-y-2">
+        {(receipt.lineItems || []).map((item, index) => (
+          <div key={`${item.name || 'item'}-${index}`} className="flex items-center gap-3">
+            {item.imageUrl && (
+              <img src={item.imageUrl} alt="" className="h-10 w-10 rounded object-cover" />
+            )}
+            <div className="min-w-0 flex-1">
+              <div className="truncate">{item.name || 'Item'}</div>
+              <div className="text-xs text-muted-foreground">
+                Qty {item.quantity || 1} · {formatCents(item.unitPriceCents)}
+              </div>
+            </div>
+            <div className="font-medium">{formatCents(item.lineTotalCents)}</div>
+          </div>
+        ))}
+      </div>
+      <div className="mt-3 space-y-1 border-t pt-2">
+        <div className="flex justify-between text-muted-foreground">
+          <span>Subtotal</span>
+          <span>{formatCents(receipt.subtotalCents)}</span>
+        </div>
+        {(receipt.fees || []).map((fee, index) => (
+          <div
+            key={`${fee.label || 'fee'}-${index}`}
+            className="flex justify-between text-muted-foreground"
+          >
+            <span>{fee.label || 'Fee'}</span>
+            <span>{formatCents(fee.amountCents)}</span>
+          </div>
+        ))}
+        <div className="flex justify-between font-semibold">
+          <span>Total</span>
+          <span>{formatCents(receipt.totalCents)}</span>
+        </div>
+      </div>
+      <p className="mt-2 text-xs text-muted-foreground">
+        Rose will charge your saved Stripe billing method, then issue a one-time virtual card.
+      </p>
+    </div>
+  );
+}
+
 export default function ApprovalChip({ pendingApproval, onApprovalHandled }: ApprovalChipProps) {
   const [contextInput, setContextInput] = useState('');
   const [actionState, setActionState] = useState<ActionState>(null);
@@ -187,6 +246,9 @@ export default function ApprovalChip({ pendingApproval, onApprovalHandled }: App
           <div className="mb-3 text-sm text-foreground max-h-[300px] overflow-y-auto">
             <MarkdownText text={pendingApproval.question} breaks />
           </div>
+          {pendingApproval.requestPaymentCard && (
+            <PaymentReceipt receipt={pendingApproval.requestPaymentCard} />
+          )}
           <div className="mb-3">
             <Input
               placeholder="Add context (optional)..."

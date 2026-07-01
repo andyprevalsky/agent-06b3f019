@@ -647,6 +647,63 @@ def test_normalize_request_user_assistance():
     assert out["params"] == {}
 
 
+def test_normalize_request_payment_card_preserves_receipt():
+    out = normalize_browser_use_response({
+        "thinking": "checkout total is ready",
+        "action": [
+            {
+                "request_payment_card": {
+                    "merchant": "Rose Labs Test Payment",
+                    "currency": "USD",
+                    "line_items": [
+                        {
+                            "name": "Aurora Notebook",
+                            "image_url": "https://example.test/notebook.png",
+                            "unit_price_cents": 1200,
+                            "quantity": 1,
+                            "line_total_cents": 1200,
+                        }
+                    ],
+                    "fees": [{"label": "Tax", "amount_cents": 99}],
+                    "subtotal_cents": 1200,
+                    "total_cents": 1299,
+                }
+            }
+        ],
+    })
+
+    assert out["action"] == "request_payment_card"
+    assert out["thinking"] == "checkout total is ready"
+    assert out["params"]["merchant"] == "Rose Labs Test Payment"
+    assert out["params"]["line_items"][0]["image_url"] == "https://example.test/notebook.png"
+    assert out["params"]["fees"][0]["amount_cents"] == 99
+    assert out["params"]["subtotal_cents"] == 1200
+    assert out["params"]["total_cents"] == 1299
+
+
+def test_normalize_request_payment_card_parses_tool_string_arguments():
+    out = normalize_browser_use_response({
+        "action": [
+            {
+                "request_payment_card": {
+                    "merchant": "Rose Labs Test Payment",
+                    "currency": "USD",
+                    "line_items": '[{"name":"Aurora Notebook","image_url":"https://example.test/notebook.png","unit_price_cents":1200,"quantity":1,"line_total_cents":1200}]',
+                    "fees": '[{"name":"Tax","amount_cents":99}]',
+                    "subtotal_cents": "1200",
+                    "total_cents": "1299",
+                }
+            }
+        ],
+    })
+
+    assert out["action"] == "request_payment_card"
+    assert out["params"]["line_items"][0]["name"] == "Aurora Notebook"
+    assert out["params"]["fees"][0]["amount_cents"] == 99
+    assert out["params"]["subtotal_cents"] == 1200
+    assert out["params"]["total_cents"] == 1299
+
+
 def test_normalize_provider_tool_call():
     out = normalize_browser_use_tool_call(
         {"id": "call_1", "name": "click", "arguments": '{"index": 4}'},
@@ -906,7 +963,7 @@ async def test_complete_browser_use_waterfall_only_path():
     assert any("openrouter.ai" in u for u in captured)
     assert captured_bodies
     body = captured_bodies[0]
-    assert body["tool_choice"] == "required"
+    assert body["tool_choice"] == "auto"
     assert body["tools"][0]["function"]["name"] == "click"
     assert body["tools"][0]["function"]["description"] == BROWSER_USE_TOOLS["click"]["description"]
     assert "# Available Actions" not in body["messages"][0]["content"]
@@ -944,7 +1001,7 @@ async def test_complete_browser_use_claude_path_succeeds():
     assert result["claude_token_error"] is None
     assert captured_bodies
     body = captured_bodies[0]
-    assert body["tool_choice"]["type"] == "any"
+    assert body["tool_choice"]["type"] == "auto"
     assert body["tools"][0]["name"] == "click"
     assert body["tools"][0]["description"] == BROWSER_USE_TOOLS["click"]["description"]
 
@@ -1015,7 +1072,7 @@ async def test_complete_browser_use_gpt_path_succeeds():
     assert all("openrouter.ai" not in u for u in captured)
     assert captured_bodies
     body = captured_bodies[0]
-    assert body["tool_choice"] == "required"
+    assert body["tool_choice"] == "auto"
     assert body["tools"][0]["name"] == "click"
     assert body["tools"][0]["description"] == BROWSER_USE_TOOLS["click"]["description"]
     assert "# Available Actions" not in body["instructions"]
@@ -1035,7 +1092,7 @@ async def test_complete_browser_use_gpt_path_succeeds():
     assert payload["config"]["requested_params"]["temperature"] == 1.0
     assert payload["config"]["requested_params"]["max_tokens"] == 16000
     assert payload["tools"][0]["name"] == "click"
-    assert payload["config"]["tool_choice"] == "any"
+    assert payload["config"]["tool_choice"] == "auto"
     assert payload["extra"]["browser_recording_manifest_path"] == "/tmp/browser-recording/manifest.json"
     assert payload["extra"]["iteration"] == 7
 

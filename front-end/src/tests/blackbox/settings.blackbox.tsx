@@ -38,7 +38,6 @@ function installSettingsHandlers(overrides?: {
           state: 'NY',
           postalCode: '10001',
           country: 'United States',
-          encryptedPaymentInformation: null,
           systemName: 'Rose',
           profilePicture: null,
           customSystemPrompt: 'Be helpful',
@@ -60,7 +59,7 @@ function installSettingsHandlers(overrides?: {
     http.put(`${API_BASE}/user-settings`, () => {
       return HttpResponse.json({ success: true });
     }),
-    // PATCH for customization or payment
+    // PATCH for customization
     http.patch(`${API_BASE}/user-settings`, () => {
       return HttpResponse.json({ success: true });
     }),
@@ -118,14 +117,13 @@ describe('Settings page', () => {
       });
     });
 
-    it('renders all five tab triggers', async () => {
+    it('renders all four tab triggers', async () => {
       renderWithProviders(<Settings />);
       await waitFor(() => {
         expect(screen.getByText('Settings')).toBeInTheDocument();
       });
       expect(screen.getByRole('tab', { name: /customization/i })).toBeInTheDocument();
       expect(screen.getByRole('tab', { name: /personal info/i })).toBeInTheDocument();
-      expect(screen.getByRole('tab', { name: /agent payment/i })).toBeInTheDocument();
       expect(screen.getByRole('tab', { name: /billing/i })).toBeInTheDocument();
       expect(screen.getByRole('tab', { name: /api keys/i })).toBeInTheDocument();
     });
@@ -187,20 +185,6 @@ describe('Settings page', () => {
       expect(screen.getByLabelText('State')).toHaveValue('NY');
       expect(screen.getByLabelText('Postal Code')).toHaveValue('10001');
       expect(screen.getByLabelText('Country')).toHaveValue('United States');
-    });
-
-    it('switches to Agent Payment tab', async () => {
-      const user = userEvent.setup();
-      renderWithProviders(<Settings />);
-      await waitFor(() => {
-        expect(screen.getByText('Settings')).toBeInTheDocument();
-      });
-
-      await user.click(screen.getByRole('tab', { name: /agent payment/i }));
-
-      await waitFor(() => {
-        expect(screen.getByText('Agent Payment Method')).toBeInTheDocument();
-      });
     });
 
     it('switches to Billing tab and shows subscription info', async () => {

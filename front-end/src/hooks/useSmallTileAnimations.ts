@@ -8,7 +8,11 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { TilePosition, TileGridPosition, AnimatingTile } from '@/lib/smallTileAnimations';
+import { TilePosition, AnimatingTile } from '@/lib/smallTileAnimations';
+
+const AVAILABLE_ANIMATIONS = ['animation-1', 'animation-2', 'animation-3', 'animation-4'];
+const MAX_CONCURRENT_ANIMATIONS = 5;
+const START_DELAY_MS = 800;
 
 interface UseSmallTileAnimationsOptions {
   enabled: boolean; // Whether animations are enabled
@@ -35,18 +39,12 @@ export function useSmallTileAnimations({
 }: UseSmallTileAnimationsOptions) {
   const [animatingTiles, setAnimatingTiles] = useState<AnimatingTile[]>([]);
   const [delayPassed, setDelayPassed] = useState<boolean>(false);
-  const animationFrameRef = useRef<number | null>(null);
-  const lastTriggerTimeRef = useRef<number>(0);
+  const intervalRef = useRef<number | null>(null);
   const currentAnimationIndexRef = useRef<number>(0);
   const hasStartedRef = useRef<boolean>(false);
   const hasReachedMaxRef = useRef<boolean>(false);
   const isRefillingRef = useRef<boolean>(false);
   const enabledTimeRef = useRef<number | null>(null);
-
-  // Available animations to cycle through: animation-1, animation-2, animation-3, animation-4
-  const availableAnimations = ['animation-1', 'animation-2', 'animation-3', 'animation-4'];
-  const MAX_CONCURRENT_ANIMATIONS = 5; // Increased from 4 to 5 to accommodate new region
-  const START_DELAY_MS = 800; // 0.8 second delay after enabled
 
   // Helper function to assign tiles to groups based on proximity to large tile center
   const getGroupId = useCallback(
@@ -139,9 +137,9 @@ export function useSmallTileAnimations({
     const randomTile = availableTiles[Math.floor(Math.random() * availableTiles.length)];
 
     // Cycle through animations
-    const animationId = availableAnimations[currentAnimationIndexRef.current];
+    const animationId = AVAILABLE_ANIMATIONS[currentAnimationIndexRef.current];
     currentAnimationIndexRef.current =
-      (currentAnimationIndexRef.current + 1) % availableAnimations.length;
+      (currentAnimationIndexRef.current + 1) % AVAILABLE_ANIMATIONS.length;
 
     // Add to animating tiles - only store row/col, NOT x/y (those are calculated dynamically)
     const newAnimatingTile: AnimatingTile = {
@@ -158,7 +156,6 @@ export function useSmallTileAnimations({
   }, [
     everColoredTiles,
     animatingTiles,
-    availableAnimations,
     viewportWidth,
     viewportHeight,
     tileSize,
@@ -202,14 +199,14 @@ export function useSmallTileAnimations({
     return () => {
       clearTimeout(timeoutId);
     };
-  }, [enabled, START_DELAY_MS]);
+  }, [enabled]);
 
   // Animation loop with pool management
   useEffect(() => {
     if (!enabled || !delayPassed) {
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-        animationFrameRef.current = null;
+      if (intervalRef.current) {
+        window.clearInterval(intervalRef.current);
+        intervalRef.current = null;
       }
       hasStartedRef.current = false;
       hasReachedMaxRef.current = false;
@@ -223,7 +220,7 @@ export function useSmallTileAnimations({
       triggerRandomAnimation();
     }
 
-    const animate = (timestamp: number) => {
+    const maybeTriggerNextAnimation = () => {
       const poolSize = animatingTiles.length;
 
       // Track if we've reached max capacity
@@ -252,21 +249,17 @@ export function useSmallTileAnimations({
       const shouldAdd = (isInitialRampUp || isRefilling) && !selectedAgentId;
       const isBelowMax = poolSize < MAX_CONCURRENT_ANIMATIONS;
 
-      if (isBelowMax && shouldAdd && timestamp - lastTriggerTimeRef.current >= animationInterval) {
+      if (isBelowMax && shouldAdd) {
         triggerRandomAnimation();
-        lastTriggerTimeRef.current = timestamp;
       }
-
-      // Continue animation loop
-      animationFrameRef.current = requestAnimationFrame(animate);
     };
 
-    animationFrameRef.current = requestAnimationFrame(animate);
+    intervalRef.current = window.setInterval(maybeTriggerNextAnimation, animationInterval);
 
     return () => {
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-        animationFrameRef.current = null;
+      if (intervalRef.current) {
+        window.clearInterval(intervalRef.current);
+        intervalRef.current = null;
       }
     };
   }, [
@@ -275,7 +268,7 @@ export function useSmallTileAnimations({
     animationInterval,
     triggerRandomAnimation,
     animatingTiles.length,
-    MAX_CONCURRENT_ANIMATIONS,
+    selectedAgentId,
   ]);
 
   return {

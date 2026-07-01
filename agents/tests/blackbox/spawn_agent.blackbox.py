@@ -851,6 +851,7 @@ async def test_handler_for_each_happy_path_all_succeed():
     aggregate = [e for e in events if e.status == MessageStatus.FINISHED]
     assert aggregate, "for_each must yield a terminal parent tool result"
     assert aggregate[-1].metadata["toolName"] == "spawn_general_purpose_agent_for_each"
+    assert aggregate[-1].metadata["toolStatus"] == "FINISHED"
     items = aggregate[-1].metadata["structured_response"]["items"]
     assert len(items) == 2
     assert items[0]["status"] == "completed"
@@ -909,6 +910,7 @@ async def test_handler_for_each_failed_yields_error():
     assert errors
     aggregate = errors[-1]
     assert aggregate.metadata["toolName"] == "spawn_general_purpose_agent_for_each"
+    assert aggregate.metadata["toolStatus"] == "ERROR"
     items = aggregate.metadata["structured_response"]["items"]
     assert items == [
         {

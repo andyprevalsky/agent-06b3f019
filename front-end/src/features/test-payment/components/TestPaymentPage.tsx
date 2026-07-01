@@ -283,21 +283,76 @@ function CardForm({
   );
 }
 
-function Confirmation({ confirmation }: { confirmation: TestPaymentConfirmation }) {
+export function Confirmation({ confirmation }: { confirmation: TestPaymentConfirmation }) {
+  const { lineItems, totals } = confirmation.receipt;
   return (
     <main className="min-h-screen bg-background p-8 text-foreground">
       <section
         data-testid="payment-confirmation"
-        className="mx-auto max-w-2xl rounded-lg border bg-card p-8 text-card-foreground"
+        data-order-id={confirmation.orderId}
+        className="mx-auto max-w-2xl space-y-6 rounded-lg border bg-card p-8 text-card-foreground"
       >
-        <div className="mb-4 flex items-center gap-3">
-          <Check className="h-7 w-7 text-emerald-600" />
-          <h1 className="text-3xl font-semibold">Payment confirmed</h1>
+        <div>
+          <div className="mb-2 flex items-center gap-3">
+            <Check className="h-7 w-7 text-emerald-600" />
+            <h1 className="text-3xl font-semibold">Payment confirmed</h1>
+          </div>
+          <p className="text-muted-foreground">
+            Order {confirmation.orderId} was paid successfully.
+          </p>
         </div>
-        <p className="text-muted-foreground">Order {confirmation.orderId} was paid successfully.</p>
-        <p className="mt-4 text-sm">
-          Total charged: {formatCents(confirmation.receipt.totals.totalCents)}
-        </p>
+
+        <div data-testid="payment-confirmation-receipt" className="space-y-3 border-t pt-5">
+          <h2 className="text-lg font-semibold">Receipt</h2>
+          <ul className="space-y-3">
+            {lineItems.map((line) => (
+              <li
+                key={line.id}
+                data-line-item-id={line.id}
+                data-line-item-name={line.name}
+                data-quantity={line.quantity}
+                data-line-total-cents={line.lineTotalCents}
+                className="flex items-center gap-3 text-sm"
+              >
+                <img
+                  src={line.imageUrl}
+                  alt={`${line.name} purchased`}
+                  data-testid={`receipt-image-${line.id}`}
+                  className="h-12 w-12 rounded-md border object-cover"
+                />
+                <div className="flex-1">
+                  <p className="font-medium">{line.name}</p>
+                  <p className="text-xs text-muted-foreground">
+                    Qty {line.quantity} &middot; {formatCents(line.unitPriceCents)} each
+                  </p>
+                </div>
+                <span className="font-medium">{formatCents(line.lineTotalCents)}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        <div className="space-y-2 border-t pt-4 text-sm">
+          <div className="flex justify-between">
+            <span>Subtotal</span>
+            <span>{formatCents(totals.subtotalCents)}</span>
+          </div>
+          <div className="flex justify-between">
+            <span>Tax</span>
+            <span>{formatCents(totals.taxCents)}</span>
+          </div>
+          <div className="flex justify-between">
+            <span>Shipping</span>
+            <span>{formatCents(totals.shippingCents)}</span>
+          </div>
+          <div
+            data-testid="payment-confirmation-total"
+            className="flex justify-between border-t pt-2 text-base font-semibold"
+          >
+            <span>Total charged</span>
+            <span>{formatCents(totals.totalCents)}</span>
+          </div>
+        </div>
       </section>
     </main>
   );

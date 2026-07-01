@@ -1,5 +1,37 @@
 [
   {
+    "name": "test-mass-agent-run-0",
+    "title": "Test Mass Agent Run - 0",
+    "prompt": "I'm building a personal brand for health, longevity, technology, founder journey [I'll refine the angle]. Analyze the top 50 creators in this niche across YouTube, IG, TikTok, and Substack.\n\nUse a for_each agent run for the per-creator analysis: first identify the top 50 creators, then use spawn_general_purpose_agent_for_each / for_each so one agent analyzes each creator with the same template.\n\nFor each creator, pull their posting cadence, hook formulas, top 5 performing pieces of the last 90 days, and the gaps in what they cover. Then give me: (a) a positioning statement, (b) a 90-day content calendar across all 4 platforms, (c) 30 hook-tested video script openings, and (d) the 20 creators I should engage with weekly to get on their radar.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_general_purpose_agent_for_each"],
+    "tags": ["for-each", "mass-agent", "research", "scale"],
+    "price_limit_cents": 200,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "min_agent_count": 50
+  },
+  {
+    "name": "single-creator-arm",
+    "title": "Single-Creator Arm (baseline for mass-agent throttling)",
+    "prompt": "Analyze exactly one assigned creator using only public web/platform data and return a single structured summary. Focus only on Andrew Huberman (Huberman Lab) in the health/longevity/technology niche, across YouTube, Instagram, TikTok, and Substack. Pull their posting cadence, hook formulas, top 5 performing pieces of the last 90 days, and the gaps in what they cover.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": ["web_search"],
+    "tags": ["mass-agent", "baseline", "single-arm"],
+    "price_limit_cents": 100,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "min_agent_count": 1
+  },
+  {
     "name": "chat-mode",
     "title": "Basic Chat Response",
     "prompt": "whats the latest news?",
@@ -59,6 +91,33 @@
       "spawn_general_purpose_agent_for_each",
       "spawn_browser_agent",
       "spawn_claude_code_agent"
+    ]
+  },
+  {
+    "name": "grep-explore-stress",
+    "title": "Grep Explore Stress",
+    "prompt": "Run a comprehensive local-data Grep validation using only explore agents.\n\nCritical execution rules:\n- Do not call send_message_to_user_execute_phase or any progress-message tool. Your first actions must be spawn_agent calls.\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn the explore agents below, wait for them, then provide one final checklist report.\n\nA deterministic benchmark fixture has been seeded into local data with these named records:\n\nMessages:\n- \"Quarterly Lighthouse Brief\" contains a regex-searchable line about the Aurora budget.\n- \"Multiline Incident Note\" contains a multiline block where START and END are on different lines.\n- \"Pagination Ledger\" contains many numbered ledger entries.\n\nNetwork:\n- \"Mara Voss\" has contact details where the match appears in company, title, relation, and communication frequency fields.\n\nAgent network:\n- This agent tree already contains seeded USER, ASSISTANT, TOOL, and SYSTEM messages about the Atlas handoff.\n\nSpawn separate explore agents with these exact assignments. Each explore agent must use grep directly and return exact evidence from the Grep tool result:\n\n1. Omitted-source coverage: call grep without source and find evidence from messages, network, and agent_network.\n2. Messages regex: source=\"messages\", regex pattern for Aurora budget evidence in \"Quarterly Lighthouse Brief\".\n3. Network regex: source=\"network\", use pattern \"Northstar Calibration Group|Principal Signal Cartographer|benchmark verification contact\" and return exact matches for all three non-name fields.\n4. Agent-network roles: source=\"agent_network\", find USER, ASSISTANT, and TOOL Atlas handoff evidence, including location metadata and role.\n5. Case-insensitive: source=\"messages\", use \"-i\": true for mixed-case evidence.\n6. Multiline: source=\"messages\", use multiline: true for a match spanning START to END in \"Multiline Incident Note\".\n7. After context: source=\"messages\", use \"-A\" to return following logical lines.\n8. Before/context: source=\"messages\", use \"-B\" plus either \"-C\" or context to return surrounding logical lines.\n9. No line numbers: source=\"messages\", use \"-n\": false and prove line numbers are suppressed.\n10. Pagination: source=\"messages\", use pattern \"Ledger entry\", head_limit: 3, and offset: 20 so the result includes exact evidence \"Ledger entry 21: offset target confirmed\".\n\nAfter all explore agents complete, synthesize a final report with PASS or FAIL for each assignment. Include source searched, grep flags used, exact matched evidence, and for agent_network matches, the message role and location metadata returned by Grep. Only mark PASS when the explore agent found exact evidence from Grep.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "tags": ["grep", "local-only"],
+    "price_limit_cents": 250,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "min_tool_counts": {
+      "spawn_agent": 8,
+      "grep": 12
+    },
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_browser_agent",
+      "spawn_claude_code_agent",
+      "message_person",
+      "send_message_to_user_execute_phase"
     ]
   },
   {
@@ -131,7 +190,14 @@
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "needs-auth", "minted", "local-only", "auth", "auth-anon"],
+    "tags": [
+      "browser",
+      "needs-auth",
+      "minted",
+      "local-only",
+      "auth",
+      "auth-anon"
+    ],
     "price_limit_cents": 400,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -185,6 +251,55 @@
     "start_phase": "execute"
   },
   {
+    "name": "agent-payment-test-shop",
+    "title": "Agent Payment Test Shop",
+    "prompt": "Use a browser agent to go to {frontend_url}/test_payment. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "tags": ["browser", "payment", "local-only"],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_attention_kind": "payment_approval",
+    "start_phase": "execute",
+    "expected_payment_receipt": {
+      "merchant": "Rose Labs Test Payment",
+      "currency": "USD",
+      "subtotalCents": 3600,
+      "totalCents": 4396,
+      "lineItems": [
+        {
+          "name": "Aurora Notebook",
+          "imageUrl": "https://placehold.co/320x220/png?text=Aurora+Notebook",
+          "unitPriceCents": 1200,
+          "quantity": 1,
+          "lineTotalCents": 1200
+        },
+        {
+          "name": "Ceramic Mug",
+          "imageUrl": "https://placehold.co/320x220/png?text=Ceramic+Mug",
+          "unitPriceCents": 900,
+          "quantity": 1,
+          "lineTotalCents": 900
+        },
+        {
+          "name": "Canvas Tote",
+          "imageUrl": "https://placehold.co/320x220/png?text=Canvas+Tote",
+          "unitPriceCents": 1500,
+          "quantity": 1,
+          "lineTotalCents": 1500
+        }
+      ],
+      "fees": [
+        { "label": "Tax", "amountCents": 297 },
+        { "label": "Shipping", "amountCents": 499 }
+      ]
+    }
+  },
+  {
     "name": "browser-biometrics-webdecoy",
     "title": "Browser Biometrics WebDecoy",
     "prompt": "Use a browser agent to go to https://webdecoy.com/product/fcaptcha-demo/. This is a live third-party behavioral biometrics demo. Interact with it like a normal user: move to and click the checkbox mode verification control if present, then use the invisible mode form by entering benchmark-human@example.com as the email and a short message, and submit it. Do not use JavaScript evaluate to click or fill controls. Use visible browser actions only. Return the final visible FCaptcha risk score exactly as shown, whether the checkbox mode appeared to pass, whether the invisible form was submitted, and any visible bot/human verdict text.",
@@ -205,7 +320,11 @@
     "prompt": "Do these tasks in order:\n\n1. EXPLORE: Use an explore agent to find the current population of Japan (a single number).\n\n2. SIAS (Super-Intelligent Autonomous System): Spawn a general-purpose agent to do this multi-step task:\n   a. Use a browser agent to visit https://www.random.org/integers/?num=1&min=1&max=100&col=1&base=10&format=plain and return the number shown on the page.\n   b. Use Claude Code to run this Python script and return the output: import random; random.seed(42); print(random.randint(1, 100))\n   c. Multiply the two numbers (browser result × code result) and return the product.\n\n3. MULTIPLY: Take the population of Japan from step 1 and multiply it by the product from step 2.\n\n4. MESSAGE: Send an email to andy@roselabs.ai with the subject 'Cache Benchmark Result' containing the final number from step 3.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent", "spawn_general_purpose_agent", "message_person"],
+    "expected_tools": [
+      "spawn_agent",
+      "spawn_general_purpose_agent",
+      "message_person"
+    ],
     "tags": ["cache"],
     "price_limit_cents": 200,
     "requires_browser_agent": true,
@@ -287,7 +406,10 @@
     "prompt": "I've attached a CSV of angels. Reach out to every person in this CSV.\n\nUse spawn_general_purpose_agent_for_each to spawn one general-purpose agent per row.\n\nEach message should be personalized, sent from a@roselabs.ai and be centered around getting feedback about ML research I'm doing in mass agent networks. Here is the blog post I wrote: https://www.roselabs.ai/research/task-decomposer\n\nWe need to make sure we run this process with world class persistence, etiquette, and attention to detail. I want to have one general-purpose agent per row.\n\nPROCESS GUIDELINES\n===\n0. Use spawn_general_purpose_agent_for_each when spawning a general-purpose agent per row.\n1. At the start, do research for best practices on cold email outreach.\n2. When doing research on each person, try to find any unique commonalities between me and the person I'm reaching out to that help build trust in the email (school alma mater, fellow YC founder, any unique commonality).\n3. We are trying to eventually get this person to invest. Don't mention that, but just know that this is my goal. The first step is to build a relationship.\n4. Keep the email short and sweet, be personable, no dashes, or language that makes the email read like an AI wrote it. Do research on common phrases or patterns that AIs use when writing a message, and actively avoid them.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_general_purpose_agent_for_each", "message_person"],
+    "expected_tools": [
+      "spawn_general_purpose_agent_for_each",
+      "message_person"
+    ],
     "tags": ["attachment", "for-each", "approval", "outreach", "batch"],
     "price_limit_cents": 2000,
     "requires_browser_agent": false,
@@ -305,7 +427,11 @@
     "prompt": "My Dad, George Prevalsky, needs a new site that is exclusively used for signing new clients. His existing billing solution is archaic and is causing him to be unable to take a vacation.\nWe need to create and host a site that can be accessed via QR code or direct link.\n\nThe site should include:\n- I've attached 4 waivers as PDFs (Adult Waiver & Release of Liability, Minor Waiver & Release of Liability, Adult Sparring Consent, Minor Sparring Consent). Signing is required for the liability waivers (adult and minor). The sparring consent waivers are included for reference but don't need to be part of the payment flow.\n- I've also attached the billing & payment terms and the membership terms as PDFs. Before paying, users must check a required opt-in checkbox agreeing to these terms (you can include this as part of the waiver signing step). The full text of the terms should be viewable on the site.\n- The classes are:\n  Boxing $225/month\n  Muay Thai $225/month\n  MMA $245/month\n  Jiujitsu $185/month\n  Kids Program $185/month\n  Unlimited classes $285/month\n- We need to support discount codes for Boxing & Muay Thai\n\nThe flow will be:\n1. Pick your classes\n2. Sign your waivers and agree to the billing & membership terms (required checkboxes)\n3. Pay for the classes\n4. Get a confirmation email\n5. Send a confirmation email to georgeprevalsky@gmail.com that includes all relevant details of the payment & attachments of the signed waivers\n\nHere are the Stripe API keys:\\nSTRIPE_SECRET_KEY_TEST={{STRIPE_SECRET_KEY_TEST}}\\nSTRIPE_PUBLISHABLE_KEY_TEST={{STRIPE_PUBLISHABLE_KEY_TEST}}\\nSTRIPE_SECRET_KEY_PRODUCTION={{STRIPE_SECRET_KEY_PRODUCTION}}\\nSTRIPE_PUBLISHABLE_KEY_PRODUCTION={{STRIPE_PUBLISHABLE_KEY_PRODUCTION}}\n\nYou can test the flow on Stripe test mode, and send confirmation emails to andy@roselabs.ai (since you have access to that email via the browser agent).\n\nMake sure the payment site includes all necessary information, is styled exceptionally well, and architecturally, is as simple as possible - we do NOT want to have to worry about maintenance.\n\nReturn to me:\n- A link to the hosted site\n- A QR Code for the hosted site\n- A discount code that can be used exclusively for Boxing & Muay Thai purchases",
     "timeout_seconds": 7200,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_browser_agent", "spawn_claude_code_agent", "spawn_general_purpose_agent"],
+    "expected_tools": [
+      "spawn_browser_agent",
+      "spawn_claude_code_agent",
+      "spawn_general_purpose_agent"
+    ],
     "tags": ["browser", "claude-code", "attachment", "needs-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
@@ -334,7 +460,10 @@
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
-    "attachments": ["test-exec-assistant-resume.pdf", "test-childcare-resume.pdf"],
+    "attachments": [
+      "test-exec-assistant-resume.pdf",
+      "test-childcare-resume.pdf"
+    ],
     "approval_handling": "prompt_user",
     "start_phase": "plan"
   },
@@ -368,5 +497,49 @@
     "attachment": null,
     "approval_handling": "auto_approve",
     "start_phase": "plan"
+  },
+  {
+    "name": "people-search-criteria",
+    "title": "People Search — Criteria Discovery via Explore Agent",
+    "prompt": "Find five people who are partners at venture capital firms that invest in AI infrastructure startups and are based in the San Francisco Bay Area. For each person, report their name and a one-line description of their firm or focus. This is a single criteria-based discovery — do NOT drill into individual firms one at a time. Use explore-agent research to find real people on the public web; do NOT use a browser agent, Claude Code, or code sandbox.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "tags": ["basic"],
+    "price_limit_cents": 150,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "min_tool_counts": {
+      "people_search": 1
+    },
+    "expected_tool_counts": {
+      "spawn_browser_agent": 0,
+      "spawn_claude_code_agent": 0
+    }
+  },
+  {
+    "name": "people-search-targeted",
+    "title": "People Search — Targeted Lookup via Explore Agent",
+    "prompt": "Find the current professional profile of Andy Prevalsky, founder of Rose Labs, on the public web. Report his current title, company, location, and LinkedIn profile URL, with a source link. He is not a public figure, so you cannot rely on prior knowledge — you must look him up. Use explore-agent research; do NOT use a browser agent, Claude Code, or code sandbox.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "tags": ["basic"],
+    "price_limit_cents": 150,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "min_tool_counts": {
+      "people_search": 1
+    },
+    "expected_tool_counts": {
+      "spawn_browser_agent": 0,
+      "spawn_claude_code_agent": 0
+    }
   }
 ]

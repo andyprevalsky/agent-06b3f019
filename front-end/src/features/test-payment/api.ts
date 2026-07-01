@@ -12,21 +12,6 @@ export async function fetchTestPaymentItems(): Promise<TestPaymentItem[]> {
   return data.items;
 }
 
-/**
- * Returns this backend's live ngrok public URL (or null if no tunnel is up). Used by the
- * "Test Agent Debit Card" querybox prompt so the cloud browser agent gets a reachable URL.
- */
-export async function fetchTestPaymentPublicUrl(): Promise<string | null> {
-  try {
-    const response = await fetch(`${TEST_PAYMENT_API_BASE}/public-url`);
-    if (!response.ok) return null;
-    const data = (await response.json()) as { url: string | null };
-    return data.url ?? null;
-  } catch {
-    return null;
-  }
-}
-
 export async function confirmTestPayment(
   itemIds: string[],
   card: TestPaymentCardForm,

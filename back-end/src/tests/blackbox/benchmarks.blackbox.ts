@@ -163,6 +163,10 @@ const KNOWN_TAGS = [
   'job-applications',
   'cache',
   'load-test',
+  'mass-agent',
+  'research',
+  'baseline',
+  'single-arm',
   'scale',
   'batch',
   'needs-auth',
@@ -173,6 +177,8 @@ const KNOWN_TAGS = [
   'local-only',
   'minted',
   'social',
+  'grep',
+  'payment',
 ];
 
 // ==================== GET /api/benchmarks — CONTRACT TESTS ====================

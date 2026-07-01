@@ -292,7 +292,8 @@ function checkDomainCompleteness(domain: string): Violation[] {
 
 function getEffectiveLayer(fileBase: string): 'routes' | 'repo' | 'types' | 'config' | 'service' {
   if (fileBase.startsWith('routes')) return 'routes';
-  if (fileBase.startsWith('repo')) return 'repo';
+  // Repo layer: `repo.ts` and split files named `repo*` or `*Repo` (e.g. grepRepo).
+  if (fileBase.startsWith('repo') || fileBase.endsWith('Repo')) return 'repo';
   if (fileBase === 'types') return 'types';
   if (fileBase === 'config') return 'config';
   return 'service';

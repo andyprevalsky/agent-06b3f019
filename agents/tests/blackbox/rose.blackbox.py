@@ -704,6 +704,44 @@ def test_apply_tool_config_response_format_native_lift():
     assert body["tool_choice"] == {"type": "auto"}
 
 
+def test_browser_use_uses_auto_tool_choice_not_any():
+    """Browser-use MUST use tool_choice='auto', never 'any'/'required'.
+
+    Forcing tool use forbids the model from emitting a reasoning text block before its
+    tool call; without that step the model degenerates into reflexively re-picking the
+    safe no-op `screenshot` tool every turn (verified: the identical request returns a
+    17-token bare `screenshot` under 'any' vs. reasoned `input_text`/`click` under 'auto').
+    """
+    import inspect
+    from providers.rose.client import RoseClient
+
+    src = inspect.getsource(RoseClient.complete_browser_use)
+    assert 'tool_choice = "auto"' in src, "browser-use must set tool_choice='auto'"
+    assert 'tool_choice = "any"' not in src, "browser-use must NOT force tool_choice='any'"
+    assert 'tool_choice = "required"' not in src, "browser-use must NOT force tool_choice='required'"
+
+
+def test_browser_use_advertises_request_payment_card():
+    """request_payment_card must be ADVERTISED to the model, not just registered for parse/dispatch.
+
+    It drifted before: registered in AVAILABLE_ACTIONS + _VALID_ACTIONS + the action dispatcher
+    + the autopay prompt, but MISSING from the BROWSER_USE_TOOLS catalog that
+    build_browser_use_tools reads. build_browser_use_tools silently skips any action absent from
+    the catalog, so the model never saw the tool, couldn't call it, and typed the card refs the
+    prompt listed instead of minting a card.
+    """
+    from browser_tools.schemas import AVAILABLE_ACTIONS
+    from providers.rose.browser_use import BROWSER_USE_TOOLS, build_browser_use_tools
+
+    assert "request_payment_card" in BROWSER_USE_TOOLS, "missing from BROWSER_USE_TOOLS catalog"
+    tools = build_browser_use_tools(AVAILABLE_ACTIONS)
+    rpc = next((t for t in tools if t["name"] == "request_payment_card"), None)
+    assert rpc is not None, "request_payment_card not advertised to the model"
+    props = rpc["input_schema"]["properties"]
+    for p in ("merchant", "line_items", "subtotal_cents", "total_cents"):
+        assert p in props, f"request_payment_card schema missing required param {p}"
+
+
 def test_apply_tool_config_response_format_structured_output_path():
     body = {}
     rf = {"json_schema": {"schema": {"type": "object", "properties": {"x": {"type": "string"}}}}}
@@ -2653,6 +2691,56 @@ async def test_client_collect_waterfall_only_path():
     assert resp.usage.get("total_tokens") == 6
 
 
+async def test_client_collect_emits_common_rose_timing_logs():
+    sse_ok = "\n".join(
+        _openai_sse(
+            [
+                {"choices": [{"delta": {"content": "hello"}, "finish_reason": "stop"}]},
+                {"usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6}},
+            ]
+        )
+    )
+
+    def handler(req):
+        return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
+
+    logged: list[tuple[str, dict]] = []
+
+    def capture_info(event, *args, **kwargs):
+        logged.append((event, kwargs))
+
+    set_mock_handler(handler)
+    client = RoseClient(openrouter_key="ork-x")
+    with patch("providers.rose.client.logger.info", side_effect=capture_info):
+        resp = await client.collect(
+            pool="rose-1-lite",
+            messages=[{"role": "user", "content": "hi"}],
+            call_site="test-collect-logging",
+        )
+
+    assert resp.content == "hello"
+    event_names = [event for event, _ in logged]
+    assert "rose.complete.first_chunk" in event_names
+    assert "rose.complete.first_productive_chunk" in event_names
+    assert "rose.complete.waterfall.done" in event_names
+
+    first_productive = next(kwargs for event, kwargs in logged if event == "rose.complete.first_productive_chunk")
+    assert first_productive["kind"] == "content"
+    assert first_productive["active_route"] == "waterfall"
+    assert first_productive["elapsed_s"] is not None
+
+    done = next(kwargs for event, kwargs in logged if event == "rose.complete.waterfall.done")
+    assert done["active_route"] == "waterfall"
+    assert done["first_chunk_s"] is not None
+    assert done["first_contentful_token_s"] is not None
+    assert done["first_productive_kind"] == "content"
+    assert done["last_chunk_kind"] == "done"
+    assert done["chunk_counts"]["metadata"] >= 1
+    assert done["chunk_counts"]["content"] >= 1
+    assert done["chunk_counts"]["usage"] == 1
+    assert done["chunk_counts"]["done"] == 1
+
+
 async def test_client_falls_through_from_claude_auth_to_waterfall():
     """Anthropic 401 → fall-through; waterfall succeeds; metadata carries
     `claude_token_error` set to auth_error."""
@@ -2850,6 +2938,157 @@ async def test_client_direct_auth_stall_marks_token_before_rotation():
     assert marked == [("stale-token", 600, "stall")]
     assert fetches == ["user-123"]
     assert any(c.kind == "content" and c.data.get("text") == "fresh ok" for c in chunks)
+
+
+async def test_client_direct_auth_internal_idle_timeout_marks_and_rotates():
+    """A direct-auth idle timeout before visible output cools the token and rotates."""
+    events: list[str] = []
+    marked: list[tuple[str, int, str | None]] = []
+
+    async def mark_rate_limited(ctx, cooldown_seconds, rate_limited_until=None, failure_reason=None):
+        events.append("mark")
+        marked.append((ctx.token, cooldown_seconds, failure_reason))
+        return True
+
+    async def fetch_fresh(user_id: str):
+        events.append("fetch")
+        return GptAuthContext(
+            token="fresh-token",
+            source="user",
+            user_id=user_id,
+            account_id="acct_123",
+            mark_rate_limited=mark_rate_limited,
+            fetch_fresh=None,
+            max_rotations=1,
+        )
+
+    async def first_token_idles_then_fresh_succeeds(**kwargs):
+        auth = kwargs["auth"]
+        if auth.token == "stale-token":
+            yield StreamChunk(kind="metadata", data={"actual_model": "gpt-5.4-gpt"})
+            yield StreamChunk(
+                kind="codex_reasoning_item",
+                data={"id": "rs_1", "encrypted_content": "opaque", "summary": []},
+            )
+            await asyncio.sleep(1.0)
+            yield StreamChunk(kind="content", data={"text": "too late"})
+            return
+        yield StreamChunk(kind="metadata", data={"actual_model": "gpt-5.4-gpt", "pool_name": "gpt-token"})
+        yield StreamChunk(kind="content", data={"text": "fresh ok"})
+        yield StreamChunk(
+            kind="usage",
+            data={
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "actual_model": "gpt-5.4-gpt",
+                "finish_reason": "stop",
+            },
+        )
+        yield StreamChunk(kind="done", data={})
+
+    auth = GptAuthContext(
+        token="stale-token",
+        source="user",
+        user_id="user-123",
+        account_id="acct_123",
+        mark_rate_limited=mark_rate_limited,
+        fetch_fresh=fetch_fresh,
+        max_rotations=1,
+    )
+    client = RoseClient(openrouter_key="ork-x")
+    with patch("providers.rose.client._try_gpt_auth", first_token_idles_then_fresh_succeeds):
+        chunks = await _drain(
+            client.complete(
+                pool="rose-1-lite",
+                messages=[{"role": "user", "content": "hi"}],
+                gpt_auth=auth,
+                call_site="test-timeout-stall-cooldown",
+                deadline_s=2.0,
+                ttft_timeout_s=0.5,
+                idle_timeout_s=0.01,
+            )
+        )
+
+    assert events == ["mark", "fetch"]
+    assert marked == [("stale-token", 600, "timeout_stall")]
+    assert any(c.kind == "content" and c.data.get("text") == "fresh ok" for c in chunks)
+
+
+async def test_client_direct_auth_outer_deadline_marks_without_burning_next_token():
+    """An exhausted outer deadline cools the active token without consuming another."""
+    events: list[str] = []
+    marked: list[tuple[str, int, str | None]] = []
+
+    async def mark_rate_limited(ctx, cooldown_seconds, rate_limited_until=None, failure_reason=None):
+        events.append("mark")
+        marked.append((ctx.token, cooldown_seconds, failure_reason))
+        return True
+
+    async def fetch_fresh(user_id: str):
+        events.append("fetch")
+        return GptAuthContext(
+            token="fresh-token",
+            source="user",
+            user_id=user_id,
+            account_id="acct_123",
+            mark_rate_limited=mark_rate_limited,
+            fetch_fresh=None,
+            max_rotations=1,
+        )
+
+    async def first_token_hits_deadline_then_fresh_succeeds(**kwargs):
+        auth = kwargs["auth"]
+        if auth.token == "stale-token":
+            yield StreamChunk(kind="metadata", data={"actual_model": "gpt-5.4-gpt"})
+            while True:
+                await asyncio.sleep(0.005)
+                yield StreamChunk(
+                    kind="codex_reasoning_item",
+                    data={"id": "rs_loop", "encrypted_content": "opaque", "summary": []},
+                )
+        yield StreamChunk(kind="metadata", data={"actual_model": "gpt-5.4-gpt", "pool_name": "gpt-token"})
+        yield StreamChunk(kind="content", data={"text": "fresh ok"})
+        yield StreamChunk(
+            kind="usage",
+            data={
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "actual_model": "gpt-5.4-gpt",
+                "finish_reason": "stop",
+            },
+        )
+        yield StreamChunk(kind="done", data={})
+
+    auth = GptAuthContext(
+        token="stale-token",
+        source="user",
+        user_id="user-123",
+        account_id="acct_123",
+        mark_rate_limited=mark_rate_limited,
+        fetch_fresh=fetch_fresh,
+        max_rotations=1,
+    )
+    client = RoseClient(openrouter_key="ork-x")
+    with patch("providers.rose.client._try_gpt_auth", first_token_hits_deadline_then_fresh_succeeds):
+        raised = False
+        try:
+            await _drain(
+                client.complete(
+                    pool="rose-1-lite",
+                    messages=[{"role": "user", "content": "hi"}],
+                    gpt_auth=auth,
+                    call_site="test-deadline-stall-cooldown",
+                    deadline_s=0.03,
+                    ttft_timeout_s=0.5,
+                    idle_timeout_s=1.0,
+                )
+            )
+        except RoseDeadlineError as exc:
+            raised = "deadline" in str(exc)
+
+    assert raised, "expected exhausted outer deadline to remain terminal"
+    assert events == ["mark"]
+    assert marked == [("stale-token", 600, "timeout_stall")]
 
 
 async def test_client_reproduces_rotated_gpt_direct_auth_deadline():
@@ -3914,6 +4153,8 @@ async def run_all_tests():
     r.record("tool_config_explicit_tools", test_apply_tool_config_with_explicit_tools_and_choice)
     r.record("tool_config_choice_auto_specific", test_apply_tool_config_choice_auto_and_specific_tool)
     r.record("tool_config_native_lift", test_apply_tool_config_response_format_native_lift)
+    r.record("browser_use_auto_tool_choice", test_browser_use_uses_auto_tool_choice_not_any)
+    r.record("browser_use_advertises_request_payment_card", test_browser_use_advertises_request_payment_card)
     r.record("tool_config_structured_output_paths", test_apply_tool_config_response_format_structured_output_path)
 
     r.record("is_vision_capable", test_is_vision_capable_membership)
@@ -4025,6 +4266,7 @@ async def run_all_tests():
     )
 
     await r.record_async("client_collect_waterfall", test_client_collect_waterfall_only_path)
+    await r.record_async("client_collect_common_timing_logs", test_client_collect_emits_common_rose_timing_logs)
     await r.record_async("client_fallthrough_to_waterfall", test_client_falls_through_from_claude_auth_to_waterfall)
     await r.record_async(
         "client_direct_auth_ttft_fallthrough",
@@ -4037,6 +4279,14 @@ async def run_all_tests():
     await r.record_async(
         "client_direct_auth_stall_marks_token",
         test_client_direct_auth_stall_marks_token_before_rotation,
+    )
+    await r.record_async(
+        "client_direct_auth_idle_timeout_marks_token",
+        test_client_direct_auth_internal_idle_timeout_marks_and_rotates,
+    )
+    await r.record_async(
+        "client_direct_auth_deadline_marks_token",
+        test_client_direct_auth_outer_deadline_marks_without_burning_next_token,
     )
     await r.record_async(
         "client_rotated_gpt_direct_auth_deadline_repro",

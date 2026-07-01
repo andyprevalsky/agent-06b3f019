@@ -51,17 +51,6 @@ export async function saveCustomizationApi(data: {
   return response.json() as Promise<Record<string, unknown>>;
 }
 
-/** Saves encrypted payment information via PATCH. */
-export async function savePaymentApi(encryptedData: string): Promise<Record<string, unknown>> {
-  const response = await fetch(`${API_URL}/api/user-settings`, {
-    method: 'PATCH',
-    headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ encryptedPaymentInformation: encryptedData }),
-  });
-  if (!response.ok) throw new Error('Failed to save payment information');
-  return response.json() as Promise<Record<string, unknown>>;
-}
-
 /** Loads subscription info. */
 export async function loadSubscriptionApi(): Promise<Record<string, unknown>> {
   const response = await fetch(`${API_URL}/api/credits/subscription`, {

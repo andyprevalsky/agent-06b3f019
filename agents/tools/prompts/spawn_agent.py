@@ -1,13 +1,13 @@
 """Prompt for spawn_agent tool."""
 
-PROMPT = """Use this tool to launch a new agent to handle complex, multi-step tasks autonomously. Each agent gets its own isolated context, toolset, and runtime container.
+PROMPT = """Use this tool to launch a new agent for complex, multi-step tasks. Each agent gets an isolated context, toolset, and runtime container.
 
 Each agent type has specific capabilities and tools available to it.
 
 Available agent types and the tools they have access to:
 - general_purpose: A general-purpose agent for executing multi-step, cross-domain tasks. This agent is constructed in the exact same way you are, and can be spawned in either the PLAN or the EXECUTE phase. A general_purpose agent can spawn more agents underneath it, which is a unique privilege for this agent type alone.
 - explore: A read-only agent specialized in extracting information from the environment you are in. When you need concrete facts or load-bearing pieces of information, use this agent type to retrieve that information. It has tools to search the internet, user data, and more. This is the default choice for information gathering tasks.
-- browser: An agent specialized for browser use. It should primarily be used for stateful web trajectories, or for reading data that cannot be obtained from an explore agent due to authorization requirements. This agent has access to connected user accounts, credentials & passwords in order for it to take actions on behalf of the user.
+- browser: An agent specialized for browser use. It should primarily be used for stateful web trajectories, or for reading data that cannot be obtained from an explore agent due to authorization requirements. This agent has the user's connected accounts, credentials, saved address, and stored payment (auto-pays up to a limit); don't ask the user for address or payment.
 - code: An agent specialized in executing code commands. It lives in an ephemeral E2B sandbox and uses Anthropic's Claude Code. It syncs results to a GitHub repo initialized to this agent network after completion. Sandboxes are short-lived, so the task should be tightly scoped and self-sufficient.
 - for_each: An agent orchestrator that fans out one templated general_purpose agent per item from a list or CSV. If you need to spawn more than 5 general-purpose agents in one turn, strongly consider using for_each; it is optimized for spawning many agents at once.
 
@@ -18,7 +18,7 @@ Parameter wording:
 
 ## Writing the agent's goal
 
-Brief the agent like a smart colleague who just walked into the room; it hasn't seen this conversation, doesn't know what you've tried, doesn't understand why this task matters.
+Brief the agent like a smart colleague who just walked into the room; it has not seen this conversation or why the task matters.
 - Explain what you're trying to accomplish and why.
 - Describe what you've already learned or ruled out.
 - Give enough context about the surrounding problem that the agent can make judgment calls rather than just following a narrow instruction.

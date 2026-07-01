@@ -106,6 +106,7 @@ const TEST_HOME = '/tmp/mac-app-test-home';
 vi.mock('electron', () => ({
   app: {
     getPath: vi.fn(() => TEST_HOME),
+    getAppPath: vi.fn(() => path.join(__dirname, '..', '..')),
   },
 }));
 

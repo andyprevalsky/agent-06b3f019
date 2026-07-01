@@ -10,6 +10,49 @@
  */
 
 // ============================================
+// PHASE PROMPT MIRRORS
+// Verbatim copies of the agent's canonical PLAN/EXECUTE phase system prompts.
+// SOURCE OF TRUTH: agents/utils/prompts.py (PLAN_PHASE_PROMPT / EXECUTE_PHASE_PROMPT).
+// They are embedded into the router prompt below so the router fully understands
+// what each mode means before choosing plan vs execute. These are copies, kept in
+// sync by a drift-guard test (src/tests/blackbox/chat-router-phase-sync.blackbox.ts)
+// that fails if they diverge from the Python source — edit BOTH together.
+// ============================================
+export const PLAN_PHASE_PROMPT_MIRROR = `You are in the PLAN phase. The following finite state machine describes how you should call tools to progress to the EXECUTE phase and thus complete the user task. Do not attempt to complete the task in this phase. If the task is extremely clear then simply call set_plan then attempt_completion. If you are asked to complete a research task, only use spawn_agent to clarify the user's request, not to actually do the research. Stay within the Purpose of your current state. In your private thinking, name:
+- current_state before choosing a tool
+- next_state when a tool call transitions the FSM
+Do not use tools or do work that belongs to a different state, and do not attempt to complete the goal in this phase. Deliverable work must be done in EXECUTE. PLAN is strictly for clarifying the user's goal if needed and creating a plan of action.
+
+# State Machine
+
+PLAN FSM: PLAN -> SET_PLAN -> ASK_QUESTION -> EXIT(EXECUTE); ASK_QUESTION may loop -> PLAN after the user replies or after additional explore research. Transitions are tool-driven.
+
+## PLAN (entry)
+- Purpose: clarify the user's goal; if already clear, call set_plan.
+- Enabled tools: send_message_to_user, spawn_agent(type="explore"), set_plan
+- Transition: calling set_plan enters the SET_PLAN state
+
+## SET_PLAN
+- Purpose: Route between asking the user a question or starting execution
+- Enabled tools: send_message_to_user, attempt_completion
+- Disabled tools: spawn_agent
+- Transition: call send_message_to_user to enter ASK_QUESTION, or attempt_completion to EXIT
+
+## ASK_QUESTION
+- Purpose: Ask any questions needed before entering the EXECUTE phase
+- Enabled: send_message_to_user, attempt_completion, spawn_agent(type="explore")
+- Transition: call attempt_completion to EXIT, or spawn_agent to loop back to PLAN
+
+## EXIT (terminal)
+- The orchestrator handles the transition into EXECUTE`;
+
+export const EXECUTE_PHASE_PROMPT_MIRROR = `You are in the EXECUTE phase. You cannot request user input or wait for a reply here. When information is missing or ambiguous, make the best reasonable assumption and proceed anyway, even at the risk of a mistake. Never stop to ask. You will keep running until you are able to call attempt_completion and pass the grader that is invoked from that tool call. Treat attempt_completion as a finite resource, and only call it when you are confident that you have completed the task described by the user.
+
+In the words of Paul Graham, founder of Y Combinator, remember to "be relentlessly resourceful".
+
+The beginning of your context might have information generated from the PLAN phase, do not confuse those actions as being part of your current directive.`;
+
+// ============================================
 // ROUTER PROMPT (LLM Call 1)
 // Decides: direct_answer | web_search | agent_start_task
 // ============================================
@@ -47,13 +90,24 @@ Step 3: Does this need agent action?
 
 # Mode Selection (for start_superintelligence)
 
-Estimate the number of tool calls needed to accomplish the goal.
+Choose mode: "execute" ONLY if BOTH of these are true:
+(1) No user clarification is needed: every input the goal depends on — exactly what to get, delivery address, payment method/account, recipient, etc. — is already provided. If you would have to ask the user or guess any required input, condition (1) is FALSE.
+(2) A single agent can carry the goal to completion on its own — directly using its tools and a few focused helper sub-agents for research, browsing, or code — without first decomposing the work into a structured plan of multiple coordinated, parallel sub-tasks. (Research, browsing, and multi-step work are fine in execute and do NOT by themselves require plan; only needing to fan out into many coordinated sub-tasks — general-purpose sub-agents — does.)
+If EITHER condition is false, you MUST choose mode: "plan". Execute mode does not allow blocking on user input.
 
-- mode: "execute", task needs 1-2 tool calls
+To understand fully what each mode means, here are the agent's actual phase system prompts:
+
+## PLAN phase system prompt
+${PLAN_PHASE_PROMPT_MIRROR}
+
+## EXECUTE phase system prompt
+${EXECUTE_PHASE_PROMPT_MIRROR}
+
+- mode: "execute"
   - Clear target, direct action, no research phase needed
   - Examples: "Buy X from Amazon", "Send message to Z", "Book a table at W"
 
-- mode: "plan", task needs 3+ tool calls
+- mode: "plan"
   - Research, comparison, multi-step coordination
   - Examples: "Find the best deal on X", "Research Y and summarize", "Plan a trip to Z"
 

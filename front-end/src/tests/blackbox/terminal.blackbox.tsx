@@ -9,6 +9,11 @@ import Terminal from '@/pages/Terminal';
 
 const API_BASE = 'http://localhost:3001/api';
 
+function setViewport(width: number, height: number) {
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
+  Object.defineProperty(window, 'innerHeight', { configurable: true, value: height });
+}
+
 function mockSession() {
   const session = {
     access_token: 'test-token',
@@ -83,6 +88,7 @@ describe('Terminal page', () => {
   });
 
   afterEach(() => {
+    setViewport(1024, 768);
     localStorage.clear();
   });
 
@@ -178,6 +184,61 @@ describe('Terminal page', () => {
         expect(screen.getByText('Privacy')).toBeInTheDocument();
         expect(screen.getByText('Terms')).toBeInTheDocument();
       });
+    });
+
+    it('pushes legal links below the mobile URL bar area', async () => {
+      setViewport(390, 844);
+
+      renderWithProviders(<Terminal />);
+
+      const legalLinks = await screen.findByTestId('terminal-legal-links');
+      expect(legalLinks).toHaveClass('-bottom-8');
+      expect(legalLinks).toHaveClass('md:bottom-1');
+    });
+
+    it('reserves a two-line-safe opening caption box on mobile', async () => {
+      setViewport(390, 844);
+
+      renderWithProviders(<Terminal />);
+
+      const openingMessage = await screen.findByTestId('opening-message-display');
+      expect(openingMessage).toHaveClass('min-h-16');
+      expect(openingMessage).toHaveClass('max-w-[24rem]');
+      expect(openingMessage).toHaveClass('md:min-h-8');
+    });
+
+    it('keeps the mobile opening loader below the floating header', async () => {
+      setViewport(390, 844);
+
+      renderWithProviders(<Terminal />);
+
+      const openingLoader = await screen.findByTestId('terminal-opening-loader');
+      expect(openingLoader).toHaveClass('top-16');
+      expect(openingLoader).toHaveClass('bottom-0');
+      expect(openingLoader).toHaveClass('md:inset-0');
+      expect(openingLoader).toHaveClass('md:h-[100dvh]');
+    });
+
+    it('applies only a visual mobile transform to the opening ASCII art', async () => {
+      setViewport(390, 844);
+
+      renderWithProviders(<Terminal />);
+
+      const asciiTransform = await screen.findByTestId('terminal-opening-ascii-transform');
+      expect(asciiTransform).toHaveClass('scale-95');
+      expect(asciiTransform).toHaveClass('translate-y-[5%]');
+      expect(asciiTransform).toHaveClass('md:scale-100');
+      expect(asciiTransform).toHaveClass('md:translate-y-0');
+    });
+
+    it('keeps the mobile query box low near the visual viewport bottom', async () => {
+      setViewport(390, 844);
+
+      renderWithProviders(<Terminal />);
+
+      const inputArea = await screen.findByTestId('terminal-input-area');
+      expect(inputArea).toHaveClass('pb-1');
+      expect(inputArea).toHaveClass('md:pb-6');
     });
 
     it('lands the browser-review account on Browse by default', async () => {

@@ -52,6 +52,24 @@ router.post(
           break;
         }
 
+        case 'invoice.payment_failed': {
+          const invoice = event.data.object as Stripe.Invoice;
+          await service.handlePaymentFailed(invoice);
+          break;
+        }
+
+        case 'customer.subscription.deleted': {
+          const subscription = event.data.object as Stripe.Subscription;
+          await service.handleSubscriptionDeleted(subscription);
+          break;
+        }
+
+        case 'customer.subscription.updated': {
+          const subscription = event.data.object as Stripe.Subscription;
+          await service.handleSubscriptionUpdated(subscription);
+          break;
+        }
+
         default:
           log.info('Unhandled event type', { event_type: event.type });
       }

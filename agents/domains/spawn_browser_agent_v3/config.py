@@ -5,6 +5,8 @@ Constants, defaults, and environment reads.
 
 import os
 
+from helpers.llm_timeouts import VERIFIER_ACTIVITY_TIMEOUT_SECONDS
+
 # External service keys
 STEEL_API_KEY = os.environ.get("STEEL_API_KEY", "")
 
@@ -42,7 +44,7 @@ ROSE_BROWSER_USE_MODEL = "rose-labs/rose-1-browser-use"
 # preserved here so the call site stays explicit, but it's effectively
 # advisory.
 VERIFIER_ULTRA_MODEL = "rose-labs/rose-1-ultra"
-VERIFIER_ULTRA_TIMEOUT_SECONDS = 60
+VERIFIER_ULTRA_TIMEOUT_SECONDS = VERIFIER_ACTIVITY_TIMEOUT_SECONDS
 
 # Write lock approval timeout
 WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS = 120

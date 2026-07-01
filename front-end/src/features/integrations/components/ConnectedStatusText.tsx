@@ -6,6 +6,7 @@
  *
  * System context:
  *   Integration row label stack -> small status text, paired with the synced icon glow.
+ *   Connected state uses teal to match the shared connected glow.
  */
 
 interface ConnectedStatusTextProps {
@@ -18,7 +19,7 @@ export default function ConnectedStatusText({
   if (!isConnected) return null;
 
   return (
-    <span className="mt-0.5 block text-[10px] font-medium leading-3 text-blue-600/70 dark:text-blue-300/75">
+    <span className="mt-0.5 block text-[10px] font-medium leading-3 text-teal-600/80 dark:text-teal-300/80">
       Connected
     </span>
   );

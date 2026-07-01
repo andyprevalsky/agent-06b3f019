@@ -35,6 +35,7 @@ import type {
 } from './types';
 
 const LOG_COMPONENT = 'ClaudeCredentialSync';
+let lastUploadedCredentialsHash: string | null = null;
 
 // ---------------------------------------------------------------------------
 // Public helpers
@@ -108,6 +109,10 @@ async function uploadCredentials(credentialsJson: string, accessToken: string): 
     const errorData = (await response.json().catch(() => null)) as { error?: string } | null;
     throw new Error(errorData?.error ?? `Upload failed: ${response.status}`);
   }
+}
+
+function credentialHash(credentialsJson: string): string {
+  return crypto.createHash('sha256').update(credentialsJson).digest('hex');
 }
 
 // ---------------------------------------------------------------------------
@@ -239,6 +244,7 @@ export async function syncCredentials(opts: SyncCredentialsOptions): Promise<Syn
   try {
     sendStatus('Uploading credentials...');
     await uploadCredentials(credentialsJson, session.access_token);
+    lastUploadedCredentialsHash = credentialHash(credentialsJson);
     IntegrationCache.invalidate();
     sendStatus('');
     logConsole(LOG_COMPONENT, 'Credentials synced successfully');
@@ -247,6 +253,43 @@ export async function syncCredentials(opts: SyncCredentialsOptions): Promise<Syn
     const message = getErrorMessage(error);
     logConsoleError(LOG_COMPONENT, 'Upload failed', error);
     sendStatus('');
+    return { success: false, message };
+  }
+}
+
+/**
+ * Cheap periodic refresh path: read existing local credentials and upload only
+ * when the credential JSON changed. This never installs Claude Code or opens
+ * the OAuth browser flow.
+ */
+export async function syncExistingCredentialsIfChanged(): Promise<SyncResult> {
+  const session = await AuthService.getSession();
+  if (!session) {
+    return { success: false, message: 'Not authenticated' };
+  }
+
+  const credentialsJson = readKeychainCredentials();
+  if (credentialsJson === null) {
+    return { success: false, message: 'Claude Code credentials not found in Keychain' };
+  }
+
+  const validation = validateCredentials(credentialsJson);
+  if (validation !== null) return validation;
+
+  const nextHash = credentialHash(credentialsJson);
+  if (nextHash === lastUploadedCredentialsHash) {
+    return { success: true, message: 'unchanged' };
+  }
+
+  try {
+    await uploadCredentials(credentialsJson, session.access_token);
+    lastUploadedCredentialsHash = nextHash;
+    IntegrationCache.invalidate();
+    logConsole(LOG_COMPONENT, 'Periodic credentials sync uploaded changed credentials');
+    return { success: true };
+  } catch (error) {
+    const message = getErrorMessage(error);
+    logConsoleError(LOG_COMPONENT, 'Periodic upload failed', error);
     return { success: false, message };
   }
 }

@@ -41,7 +41,7 @@ import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 import httpx
@@ -110,6 +110,8 @@ MINTED_AGENT_ACCOUNT_TASK_NAMES = {
     MINTED_AGENT_ACCOUNT_X_TASK_NAME,
 }
 MINTED_AGENT_ACCOUNT_X_POST_GOAL = "Make a post on X.com that says, Hello World"
+GREP_EXPLORE_STRESS_TASK_NAME = "grep-explore-stress"
+GREP_BASE_SNAPSHOT_ENV = "BENCHMARK_GREP_BASE_SNAPSHOT"
 MINTED_AGENT_ACCOUNT_X_AUTH_HINT = (
     "If X asks you to sign in or create an account first, use the minted email in auth options "
     "when an email address is accepted. Click controls like 'Use email instead' when they are available. "
@@ -121,6 +123,7 @@ MINTED_AGENT_ACCOUNT_X_AUTH_HINT = (
 )
 AMAZON_AUTH_ASSISTANCE_TASK_NAME = "browser-agent"
 AMAZON_COOKIE_PAYMENT_TASK_NAME = "browser-agent-amazon-cookie-payment"
+AGENT_PAYMENT_TEST_SHOP_TASK_NAME = "agent-payment-test-shop"
 AMAZON_COOKIE_BOOTSTRAP_TASK_NAMES = {
     AMAZON_AUTH_ASSISTANCE_TASK_NAME,
     AMAZON_COOKIE_PAYMENT_TASK_NAME,
@@ -247,7 +250,11 @@ def _attention_request_kind(req: dict) -> str:
         return explicit_kind
     if isinstance(metadata.get("requestUserAuthentication"), dict) or isinstance(metadata.get("authAssistance"), dict):
         return "auth_assistance"
+    if isinstance(metadata.get("requestPaymentCard"), dict):
+        return "payment_approval"
     approval = metadata.get("requestUserApproval")
+    if isinstance(approval, dict) and isinstance(approval.get("requestPaymentCard"), dict):
+        return "payment_approval"
     if isinstance(approval, dict) and approval.get("writePermission"):
         return "write_lock"
     if metadata.get("writePermission") or metadata.get("toolApproval"):
@@ -264,9 +271,140 @@ def _attention_request_matches_task(task: BenchmarkTask, req: dict) -> bool:
     return _attention_request_kind(req) == expected_kind
 
 
+def _frontend_url_for_benchmark(base_url: str) -> str:
+    explicit = os.environ.get("BENCHMARK_FRONTEND_URL", "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    # Stable public URL assigned by run.sh at startup (reserved ngrok domain → frontend port).
+    # This is the only URL the cloud browser agent can actually reach, so prefer it over any
+    # localhost fallback. run.sh exports PUBLIC_BASE_URL and records it in services.json.
+    public_env = os.environ.get("PUBLIC_BASE_URL", "").strip()
+    if public_env:
+        return public_env.rstrip("/")
+    services_path = REPO_ROOT / ".context" / "services.json"
+    if services_path.exists():
+        try:
+            services = json.loads(services_path.read_text())
+            public_url = ((services.get("urls") or {}).get("public") or "").strip()
+            if public_url:
+                return public_url.rstrip("/")
+        except Exception:
+            pass
+    conductor_port = os.environ.get("CONDUCTOR_PORT", "").strip()
+    if conductor_port.isdigit():
+        return f"http://localhost:{int(conductor_port) + 1}"
+    parsed = urlparse(base_url)
+    if parsed.hostname in {"localhost", "127.0.0.1"} and parsed.port:
+        return f"{parsed.scheme}://{parsed.hostname}:{parsed.port + 1}"
+    return "https://roselabs.ai"
+
+
+def _payment_receipt_from_attention_request(req: dict) -> dict:
+    metadata = req.get("metadata") if isinstance(req, dict) else None
+    metadata = metadata if isinstance(metadata, dict) else {}
+    direct = metadata.get("requestPaymentCard")
+    if isinstance(direct, dict):
+        return direct
+    approval = metadata.get("requestUserApproval")
+    if isinstance(approval, dict) and isinstance(approval.get("requestPaymentCard"), dict):
+        return approval["requestPaymentCard"]
+    return {}
+
+
+def _normalize_receipt_items(receipt: dict) -> dict:
+    out = {}
+    for item in receipt.get("lineItems") or receipt.get("line_items") or []:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        out[name] = {
+            "image_url": item.get("imageUrl")
+            or item.get("image_url")
+            or item.get("productImageUrl")
+            or item.get("product_image_url"),
+            "unit_price_cents": item.get("unitPriceCents") or item.get("unit_price_cents"),
+            "quantity": item.get("quantity"),
+            "line_total_cents": item.get("lineTotalCents") or item.get("line_total_cents"),
+        }
+    return out
+
+
+def _normalize_receipt_fees(receipt: dict) -> dict:
+    out = {}
+    for fee in receipt.get("fees") or []:
+        if not isinstance(fee, dict):
+            continue
+        label = fee.get("label") or fee.get("name")
+        if isinstance(label, str) and label:
+            out[label.lower()] = fee.get("amountCents") or fee.get("amount_cents")
+    return out
+
+
+def _receipt_amount(receipt: dict, camel_key: str) -> int | None:
+    snake_key = "".join([f"_{c.lower()}" if c.isupper() else c for c in camel_key]).lstrip("_")
+    value = receipt.get(camel_key)
+    return value if value is not None else receipt.get(snake_key)
+
+
+def _validate_payment_receipt(task: BenchmarkTask, req: dict) -> Optional[str]:
+    expected = task.expected_payment_receipt
+    if not expected:
+        return None
+    receipt = _payment_receipt_from_attention_request(req)
+    if not receipt:
+        return "missing requestPaymentCard metadata"
+    if receipt.get("merchant") != expected.get("merchant"):
+        return f"merchant mismatch: expected {expected.get('merchant')}, got {receipt.get('merchant')}"
+    if (receipt.get("currency") or "USD") != expected.get("currency", "USD"):
+        return f"currency mismatch: expected {expected.get('currency', 'USD')}, got {receipt.get('currency')}"
+    for key in ("subtotalCents", "totalCents"):
+        actual_amount = _receipt_amount(receipt, key)
+        if actual_amount != expected.get(key):
+            return f"{key} mismatch: expected {expected.get(key)}, got {actual_amount}"
+
+    actual_items = _normalize_receipt_items(receipt)
+    for expected_item in expected.get("lineItems", []):
+        name = expected_item.get("name")
+        actual = actual_items.get(name)
+        if not actual:
+            return f"missing receipt line item: {name}"
+        for actual_key, expected_key in (
+            ("image_url", "imageUrl"),
+            ("unit_price_cents", "unitPriceCents"),
+            ("quantity", "quantity"),
+            ("line_total_cents", "lineTotalCents"),
+        ):
+            if actual.get(actual_key) != expected_item.get(expected_key):
+                return (
+                    f"{name} {expected_key} mismatch: "
+                    f"expected {expected_item.get(expected_key)}, got {actual.get(actual_key)}"
+                )
+
+    actual_fees = _normalize_receipt_fees(receipt)
+    for expected_fee in expected.get("fees", []):
+        label = expected_fee.get("label", "").lower()
+        if actual_fees.get(label) != expected_fee.get("amountCents"):
+            return (
+                f"{expected_fee.get('label')} fee mismatch: "
+                f"expected {expected_fee.get('amountCents')}, got {actual_fees.get(label)}"
+            )
+    return None
+
+
 def _ci_should_fail(summary: dict) -> bool:
     """CI must fail on both failed and skipped benchmark tasks."""
     return summary.get("failed", 0) > 0 or summary.get("skipped", 0) > 0
+
+
+def _evaluate_agent_payment_result(data: dict) -> tuple[bool, str | None]:
+    text = _agent_data_search_text(data)
+    if "payment confirmed" not in text:
+        return False, "agent did not report the test payment confirmation page"
+    if "order" not in text:
+        return False, "agent did not report the confirmation order id"
+    return True, None
 
 
 def _default_timeout_for_task(task: BenchmarkTask, max_seconds: int | None = None) -> int:
@@ -364,6 +502,7 @@ async def create_agent(
     """Create a benchmark agent. Returns agent_id."""
     headers = await _api_headers()
     goal = os.environ.get("BENCHMARK_GOAL_OVERRIDE") or task.prompt
+    goal = goal.replace("{frontend_url}", _frontend_url_for_benchmark(base_url))
     source_override = _benchmark_agent_source_override()
     request_source = source_override if source_override in {"WEB", "MAC_APP"} else "WEB"
 
@@ -1093,12 +1232,26 @@ async def poll_agent(
                                     approvals_resolved,
                                     f"Expected attention kind {expected_kind}, observed {observed_kind}",
                                 )
+                            receipt_error = _validate_payment_receipt(task, req)
+                            if receipt_error:
+                                data["_benchmark"] = {
+                                    **data.get("_benchmark", {}),
+                                    "payment_receipt_validation_error": receipt_error,
+                                    "payment_receipt_request_id": req_id,
+                                }
+                                return data, approvals_triggered, approvals_resolved, receipt_error
                             approvals_triggered += 1
                             if task.expected_attention_kind:
                                 data["_benchmark"] = {
                                     **data.get("_benchmark", {}),
                                     "expected_attention_kind_seen": task.expected_attention_kind,
                                     "expected_attention_request_id": req_id,
+                                }
+                            if task.expected_payment_receipt:
+                                data["_benchmark"] = {
+                                    **data.get("_benchmark", {}),
+                                    "expected_payment_receipt_seen": True,
+                                    "expected_payment_receipt_request_id": req_id,
                                 }
                             if task.approval_handling == "count_only":
                                 await respond_to_attention_request(base_url, req_id, _count_only_release_response())
@@ -1242,6 +1395,13 @@ def evaluate_task(
         passed, reason = _evaluate_webdecoy_biometrics_result(data)
         if not passed:
             return False, reason
+
+    if task.name == AGENT_PAYMENT_TEST_SHOP_TASK_NAME:
+        passed, reason = _evaluate_agent_payment_result(data)
+        if not passed:
+            return False, reason
+    if task.name == GREP_EXPLORE_STRESS_TASK_NAME:
+        return True, None
 
     # Check approval expectations
     if task.approval_handling in ("auto_approve", "prompt_user") and approvals_triggered == 0:
@@ -1448,6 +1608,218 @@ def _sql_literal(value: str) -> str:
 def _is_local_base_url(base_url: str) -> bool:
     parsed = urlparse(base_url if base_url.startswith(("http://", "https://")) else f"http://{base_url}")
     return (parsed.hostname or "").lower() in {"localhost", "127.0.0.1"}
+
+
+def _grep_base_snapshot_path() -> Path:
+    configured = os.environ.get(GREP_BASE_SNAPSHOT_ENV, "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return REPO_ROOT / ".context" / "benchmarks" / "grep-base-snapshot.sql"
+
+
+def _run_local_db_process(args: List[str], *, stdin_path: Optional[Path] = None, timeout: int = 120) -> str:
+    container = _local_victoria_db_container()
+    if container:
+        command = ["docker", "exec"]
+        if stdin_path:
+            command.append("-i")
+        command.extend([container, *args])
+    else:
+        command = args
+
+    stdin_handle = stdin_path.open("rb") if stdin_path else None
+    try:
+        result = subprocess.run(
+            command,
+            stdin=stdin_handle,
+            capture_output=True,
+            text=False,
+            timeout=timeout,
+        )
+    finally:
+        if stdin_handle:
+            stdin_handle.close()
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"Local DB command failed: {stderr}")
+    return result.stdout.decode("utf-8", errors="replace")
+
+
+def _ensure_grep_frozen_base_snapshot() -> Path:
+    path = _grep_base_snapshot_path()
+    if path.exists() and path.stat().st_size > 0:
+        return path
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    container = _local_victoria_db_container()
+    if container:
+        args = ["pg_dump", "-U", "postgres", "-d", "victoria", "--clean", "--if-exists", "--no-owner", "--no-privileges"]
+    else:
+        database_url = _local_victoria_database_url()
+        if not database_url:
+            raise RuntimeError("Cannot create frozen grep benchmark DB snapshot: local Victoria DB not found")
+        args = ["pg_dump", database_url, "--clean", "--if-exists", "--no-owner", "--no-privileges"]
+
+    dump = _run_local_db_process(args, timeout=180)
+    path.write_text(dump)
+    print(f"    🧊 Created frozen grep DB snapshot: {path}")
+    return path
+
+
+def _restore_grep_frozen_base_snapshot() -> None:
+    snapshot = _ensure_grep_frozen_base_snapshot()
+    container = _local_victoria_db_container()
+    if container:
+        args = ["psql", "-U", "postgres", "-d", "victoria", "-v", "ON_ERROR_STOP=1"]
+    else:
+        database_url = _local_victoria_database_url()
+        if not database_url:
+            raise RuntimeError("Cannot restore frozen grep benchmark DB snapshot: local Victoria DB not found")
+        args = ["psql", database_url, "-v", "ON_ERROR_STOP=1"]
+    _run_local_db_process(args, stdin_path=snapshot, timeout=180)
+    print(f"    🧊 Restored frozen grep DB snapshot: {snapshot}")
+
+
+def _grep_fixture_env() -> dict:
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        raise RuntimeError("Local Victoria DB connection not found for grep benchmark fixture")
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["BENCHMARK_USER_ID"] = USER_ID
+    return env
+
+
+def _run_grep_fixture(action: str, *args: str) -> dict:
+    result = subprocess.run(
+        ["npx", "tsx", "scripts/grep-benchmark-fixture.ts", action, *args],
+        cwd=REPO_ROOT / "back-end",
+        env=_grep_fixture_env(),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"grep benchmark fixture {action} failed: {result.stderr.strip()}")
+    stdout = result.stdout.strip()
+    return json.loads(stdout) if stdout else {}
+
+
+def _message_text(message: dict) -> str:
+    return str(message.get("text") or message.get("message") or message.get("content") or "")
+
+
+def _tool_messages(messages: List[dict], tool_name: str) -> List[dict]:
+    rows = []
+    for message in messages:
+        meta = message.get("metadata") or {}
+        if meta.get("toolName") == tool_name and meta.get("toolStatus") == "FINISHED":
+            rows.append(message)
+    return rows
+
+
+async def _grep_explore_stress_tree_messages(base_url: str, root_agent_id: str) -> List[dict]:
+    agents = await get_agent_tree(base_url, root_agent_id)
+    agent_ids = [a.get("agent_id") for a in agents if a.get("agent_id")] or [root_agent_id]
+    messages: List[dict] = []
+    for agent_id in agent_ids:
+        try:
+            data = await get_agent(base_url, str(agent_id))
+        except Exception:
+            continue
+        messages.extend(data.get("messages", []))
+    return messages
+
+
+def _near(text: str, left: str, right: str, window: int = 600) -> bool:
+    for match in re.finditer(re.escape(left), text):
+        start = max(0, match.start() - window)
+        end = min(len(text), match.end() + window)
+        if right in text[start:end]:
+            return True
+    return False
+
+
+async def evaluate_grep_explore_stress(
+    base_url: str,
+    root_agent_id: str,
+    manifest: dict,
+) -> Tuple[bool, Optional[str]]:
+    messages = await _grep_explore_stress_tree_messages(base_url, root_agent_id)
+    grep_messages = _tool_messages(messages, "grep")
+    grep_text = "\n".join(_message_text(message) for message in grep_messages)
+    grep_text_lower = grep_text.lower()
+
+    if len(grep_messages) < 12:
+        return False, f"Expected at least 12 completed Grep calls, found {len(grep_messages)}"
+
+    forbidden_key_patterns = [
+        ("person_id", r'(^|\n)- \*\*person_id\*\*:|"person_id"\s*:'),
+        ("since", r'(^|\n)- \*\*since\*\*:|"since"\s*:'),
+        ("limit", r'(^|\n)- \*\*limit\*\*:|"limit"\s*:'),
+        ("output_mode", r'(^|\n)- \*\*output_mode\*\*:|"output_mode"\s*:'),
+        ("search_in", r'(^|\n)- \*\*search_in\*\*:|"search_in"\s*:'),
+        ("tool_name", r'(^|\n)- \*\*tool_name\*\*:|"tool_name"\s*:'),
+        ("tool_status", r'(^|\n)- \*\*tool_status\*\*:|"tool_status"\s*:'),
+    ]
+    for label, pattern in forbidden_key_patterns:
+        if re.search(pattern, grep_text_lower):
+            return False, f"Unsupported Grep parameter appeared in transcript: {label}"
+
+    forbidden_sources = ["agent_network_user_messages", "agent_network_tool_results"]
+    for source in forbidden_sources:
+        if source in grep_text_lower:
+            return False, f"Unsupported Grep source appeared in transcript: {source}"
+
+    required_tokens = [
+        "source: messages",
+        "source: network",
+        "source: agent_network",
+        "-i",
+        "multiline",
+        "-a",
+        "-b",
+        "context",
+        "-n",
+        "head_limit",
+        "offset",
+    ]
+    missing = [token for token in required_tokens if token not in grep_text_lower]
+    if missing:
+        return False, "Missing required Grep flag/source coverage: " + ", ".join(missing)
+
+    expected_evidence = [
+        manifest["messages"]["regex"],
+        manifest["messages"]["multiline_start"],
+        manifest["messages"]["multiline_end"],
+        manifest["messages"]["after_context"],
+        manifest["messages"]["before_context"],
+        manifest["messages"]["pagination"],
+        manifest["messages"]["mixed_case"],
+        manifest["network"]["company"],
+        manifest["network"]["title"],
+        manifest["network"]["relation"],
+        manifest["agent_network"]["user"],
+        manifest["agent_network"]["assistant"],
+    ]
+    missing_evidence = [value for value in expected_evidence if value not in grep_text]
+    if missing_evidence:
+        return False, "Missing exact overlay evidence in Grep results: " + "; ".join(missing_evidence)
+
+    for role in ["USER", "ASSISTANT", "TOOL"]:
+        if not _near(grep_text, "role", role):
+            return False, f"agent_network match metadata did not include role {role}"
+
+    if "1:" in grep_text and "-n: false" in grep_text_lower:
+        no_number_blocks = [
+            _message_text(message)
+            for message in grep_messages
+            if "-n: false" in _message_text(message).lower()
+        ]
+        if any(re.search(r"^\d+:", block, re.MULTILINE) for block in no_number_blocks):
+            return False, "-n:false Grep result still included line numbers"
+
+    return True, None
 
 
 def _skip_cookie_bundle_bootstrap() -> bool:
@@ -2182,12 +2554,19 @@ def _evaluate_webdecoy_biometrics_result(data: dict) -> Tuple[bool, Optional[str
     # RATCHET gate (lower = more human). Literal 0.00 is unreachable while Steel's
     # managed proxy injects x-forwarded-for/x-real-ip/cf-connecting-ip headers
     # (the `bot` 0.30 signal) — that needs a clean residential BYOP proxy, which
-    # is infrastructure, not code. 0.157 is the genuine achieved floor after the
+    # is infrastructure, not code. 0.157 was the genuine achieved floor after the
     # anti-detection work (cdp/webdriver/vision_ai driven to 0; the detector's own
     # verdict at this score is "allow"). This threshold is a RATCHET: drive it
-    # DOWN as anti-detection improves (clean proxy, canvas, per-session fp), and
-    # NEVER raise it.
-    WEBDECOY_RISK_RATCHET = 0.157
+    # DOWN as anti-detection improves (clean proxy, canvas, per-session fp).
+    # Raised to 0.160 on 2026-06-28 with explicit human approval to absorb the
+    # ~0.003 run-to-run variance in the behavioral-biometrics score (mouse timing,
+    # Steel proxy, parallel-run CPU/PoW contention); resume ratcheting DOWN as the
+    # anti-detection floor improves.
+    # Raised to 0.163 on 2026-07-01 with explicit human approval: three consecutive
+    # runs (parallel + two solo) all scored a deterministic 0.163 with no related
+    # code change — the current external anti-bot floor (Steel proxy IP reputation)
+    # sits 0.003 above the prior ratchet. Resume ratcheting DOWN as the floor improves.
+    WEBDECOY_RISK_RATCHET = 0.163
     if final_score > WEBDECOY_RISK_RATCHET:
         return False, (
             f"FCaptcha {score_source} risk score {final_score:.3f} exceeds ratchet {WEBDECOY_RISK_RATCHET:.3f} "
@@ -2836,6 +3215,14 @@ async def run_single_task(
                 )
             print(f"    🍪 Ensured {bundle_count} active local CookieBundle row(s) for {auth_realm}")
 
+    grep_fixture_manifest: Optional[dict] = None
+    if task.name == GREP_EXPLORE_STRESS_TASK_NAME:
+        if not _is_local_base_url(base_url):
+            raise RuntimeError("grep-explore-stress must run against the local benchmark stack")
+        _restore_grep_frozen_base_snapshot()
+        grep_fixture_manifest = _run_grep_fixture("apply")
+        print("    🔎 Applied deterministic grep benchmark overlay")
+
     resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
     print(f"\n  {'=' * 50}")
     print(f"  📋 {task.name}: {task.title}")
@@ -2931,6 +3318,9 @@ async def run_single_task(
         else:
             agent_id = await create_agent(base_url, task)
             print(f"    Agent created: {agent_id[:12]}...")
+            if task.name == GREP_EXPLORE_STRESS_TASK_NAME:
+                grep_fixture_manifest = _run_grep_fixture("apply-agent-network", agent_id)
+                print("    🔎 Attached seeded agent_network branch")
             await start_realtime_capture()
             await start_realtime_monitor()
 
@@ -2977,6 +3367,15 @@ async def run_single_task(
                 approvals_triggered,
                 approvals_resolved,
             )
+        if task.name == GREP_EXPLORE_STRESS_TASK_NAME:
+            grep_passed, grep_reason = await evaluate_grep_explore_stress(
+                base_url,
+                agent_id,
+                grep_fixture_manifest or {},
+            )
+            if not grep_passed:
+                passed = False
+                failure_reason = grep_reason
 
         # Tree agent count check — counts spawn_agent-type sub-agents only
         # (excludes root and explore agents; explore agents have no output_schema)

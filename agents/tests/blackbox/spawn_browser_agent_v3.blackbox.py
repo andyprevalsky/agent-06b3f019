@@ -84,10 +84,11 @@ def _encrypt_envelope(plaintext: bytes, public_key, version: int = 1) -> str:
 
 
 def test_verifier_activity_timeout_allows_llm_call():
-    """Browser verifier wraps an LLM activity, so it must allow at least 60s."""
+    """Browser verifier uses the standard LLM activity budget."""
     from domains.spawn_browser_agent_v3.config import VERIFIER_ULTRA_TIMEOUT_SECONDS
+    from helpers.llm_timeouts import STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
 
-    assert VERIFIER_ULTRA_TIMEOUT_SECONDS >= 60
+    assert VERIFIER_ULTRA_TIMEOUT_SECONDS == STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
 
 
 def test_browser_task_prompt_does_not_duplicate_system_prompt():
@@ -1718,14 +1719,15 @@ def test_build_autopay_prompt_section():
     }
     out = build_autopay_prompt_section(payment_data, "envelope-b64")
     assert "$100.00" in out
-    assert "ending in 1111" in out
     assert "123 Main St" in out
     assert "555-1234" in out
     assert "test@example.com" in out
     assert "# User Context" not in out
     assert out.lstrip().startswith("## Billing Address")
     assert "## Payment Information" in out
-    assert "Always verify the total" not in out
+    assert "call request_payment_card" in out
+    # Card field names are emitted by the RESUME prompt (after mint), not the autopay prompt.
+    assert "4111111111111111" not in out
 
 
 def test_build_autopay_prompt_section_no_card():
@@ -1733,10 +1735,39 @@ def test_build_autopay_prompt_section_no_card():
         build_autopay_prompt_section,
     )
 
-    out = build_autopay_prompt_section(
-        {"autoagentpaylimit_cents": 0, "card_number": ""}, "env"
+    out = build_autopay_prompt_section({"autoagentpaylimit_cents": 0, "card_number": ""}, "env")
+    assert "call request_payment_card" in out
+
+
+def test_build_payment_card_resume_prompt_section():
+    from domains.spawn_browser_agent_v3.service_crypto import build_payment_card_resume_prompt_section
+
+    out = build_payment_card_resume_prompt_section(
+        {
+            "card_number": "4111111111111111",
+            "card_name": "Rose Labs",
+            "card_expiry": "12/30",
+            "card_cvv": "123",
+        }
     )
-    assert "****" in out  # masked last four
+
+    assert "Payment approval is complete" in out
+    assert "Do not call request_payment_card again" in out
+    assert "card_number" in out
+    assert "card_name" in out
+    assert "card_expiry" in out
+    assert "card_cvv" in out
+    assert "4111111111111111" not in out
+    assert "12/30" not in out
+    assert "123" not in out
+
+
+def test_build_payment_card_resume_prompt_section_requires_all_refs():
+    from domains.spawn_browser_agent_v3.service_crypto import build_payment_card_resume_prompt_section
+
+    out = build_payment_card_resume_prompt_section({"card_number": "4111111111111111"})
+
+    assert out == ""
 
 
 def test_build_passwords_prompt_section_empty():
@@ -4003,41 +4034,82 @@ async def test_execute_action_unknown_action():
     assert "Unknown action" in out["error"]
 
 
-async def test_execute_action_generate_write_lock_notification_is_internal_only():
+async def test_execute_action_request_payment_card_requests_workflow_approval():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
     dom.session = MagicMock()
     dom.selector_map = {}
     ah = MagicMock()
+    ah.record_action = AsyncMock()
+    payment_request = {
+        "merchant": "Rose Labs Test Payment",
+        "line_items": [{"name": "Aurora Notebook", "unit_price_cents": 1200, "quantity": 1, "line_total_cents": 1200}],
+        "subtotal_cents": 1200,
+        "total_cents": 4396,
+    }
 
     out = await execute_action(
         dom,
         ah,
-        {
-            "action": "generate_write_lock_notification",
-            "params": {
-                "trigger_type": "purchase",
-                "action": "buy item",
-                "service": {
-                    "name": "Amazon",
-                    "domain": "amazon.com",
-                    "url": "https://www.amazon.com/dp/example",
-                },
-                "media": [],
-                "purchase": {"items": [], "totals": None},
-                "payment": None,
-                "message": None,
-                "social_post": None,
-                "generic_write": None,
-            },
+        {"action": "request_payment_card", "params": payment_request},
+        current_url="https://example.test/checkout",
+    )
+
+    assert out["status"] == "awaiting_payment_card_approval"
+    assert out["payment_request"] == payment_request
+    assert out["current_url"] == "https://example.test/checkout"
+
+
+async def test_execute_action_request_payment_card_rejects_empty_receipt():
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom = MagicMock()
+    dom.session = MagicMock()
+    dom.selector_map = {}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+
+    out = await execute_action(
+        dom,
+        ah,
+        {"action": "request_payment_card", "params": {"merchant": "Rose Labs Test Payment"}},
+        current_url="https://example.test/checkout",
+    )
+
+    assert out["success"] is False
+    assert "line_items" in out["error"]
+    assert "subtotal_cents" in out["error"]
+    assert "total_cents" in out["error"]
+
+
+async def test_execute_action_request_payment_card_rejects_duplicate_after_card_ready():
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom = MagicMock()
+    dom.session = MagicMock()
+    dom.selector_map = {}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+
+    out = await execute_action(
+        dom,
+        ah,
+        {"action": "request_payment_card", "params": {}},
+        current_url="https://example.test/checkout",
+        secret_refs={
+            "card_number": "4111111111111111",
+            "card_name": "Rose Labs",
+            "card_expiry": "12/30",
+            "card_cvv": "123",
         },
     )
 
     assert out["success"] is False
-    assert "Tool call error" in out["error"]
-    assert "WRITE_LOCK_NOTIFICATION_FORK_REQUEST" in out["error"]
-    assert "Continue the browser task with a normal browser action." in out["error"]
+    assert "already complete" in out["error"]
+    assert "Do not call request_payment_card again" in out["error"]
+    assert "card_number" in out["error"]
+    assert "line_items" not in out["error"]
 
 
 async def test_execute_action_dropdown_options_missing_element():
@@ -5340,8 +5412,8 @@ async def test_execute_input_text_payment_triggers_approval():
             write_lock_approvals=None,
             system_name="Rose",
         )
-    assert out["status"] == "needs_write_approval"
-    assert out["approval_type"] == "payment"
+    assert out["success"] is False
+    assert "call request_payment_card" in out["error"]
 
 
 async def test_execute_input_text_coords_no_humanizer():
@@ -5906,6 +5978,165 @@ def test_normalize_write_lock_notification_media_promotes_item_image():
             "kind": "product",
         }
     ]
+
+
+async def test_generate_write_lock_notification_payment_forks_and_renders_question():
+    """The payment-approval path (#662) forks browser-use to mint a rich write-lock
+    notification. Validate the helper builds a validated notification, normalizes media,
+    renders a payment question, and threads usage/model/request metadata through."""
+    import domains.spawn_browser_agent_v3.handler as handler
+    from domains.spawn_browser_agent_v3.handler import _generate_write_lock_notification
+    from domains.spawn_browser_agent_v3.types import ClaudeTokenState
+
+    token_state = ClaudeTokenState()
+    token_state.access_token = "claude-token"
+    token_state.source = "user"
+
+    fork_action = {
+        "action": "generate_write_lock_notification",
+        "params": {
+            "trigger_type": "payment",
+            "action": "enter payment details",
+            "service": {
+                "name": "Delta",
+                "domain": "delta.com",
+                "url": "https://www.delta.com/checkout",
+            },
+            "media": [
+                {
+                    "url": "https://cdn.delta.com/receipt.png",
+                    "alt": "Booking summary",
+                    "kind": "page_preview",
+                }
+            ],
+            "payment": {
+                "merchant": "Delta Air Lines",
+                "amount": "$412.30",
+                "purpose": "Flight SFO -> JFK",
+                "fields": ["card number", "expiration date", "CVV"],
+            },
+        },
+    }
+
+    fork_mock = AsyncMock(
+        return_value={
+            "action": fork_action,
+            "usage": {"input_tokens": 1200, "output_tokens": 88},
+            "actual_model": "claude-sonnet-4-6-claude",
+            "request_id": "req-pay-1",
+            "mode": "claudeAuth",
+        }
+    )
+
+    with patch.object(
+        handler, "_call_browser_use_with_rotation", new=fork_mock
+    ):
+        result = await _generate_write_lock_notification(
+            rose_client=SimpleNamespace(),
+            task_prompt="Book the cheapest Delta flight",
+            dynamic_system_context="dynamic-ctx",
+            browser_turn_messages=[{"role": "user", "content": "checkout"}],
+            browser_state={"url": "https://www.delta.com/checkout", "screenshot": None},
+            action_entries=[{"type": "click"}],
+            config=_fake_config(),
+            user_id="user-pay",
+            agent_id="agent-pay",
+            iteration=7,
+            token_state=token_state,
+            gpt_token=None,
+            gpt_account_id=None,
+            gpt_token_source=None,
+            gpt_token_pool_id=None,
+            browser_use_mode="claude",
+            approval_type="payment",
+            current_url="https://www.delta.com/checkout",
+            pending_action={"action": "click", "params": {"index": 4}},
+            write_lock_result={"status": "awaiting_payment_card_approval"},
+            system_name="Rose",
+            fallback_question="Rose wants to make a purchase. Approve?",
+        )
+
+    # Fork was invoked with the write-lock notification call site + skip_cache_write.
+    fork_mock.assert_awaited_once()
+    fork_kwargs = fork_mock.await_args.kwargs
+    assert fork_kwargs["call_site"] == "write_lock_notification_fork_7"
+    assert fork_kwargs["skip_cache_write"] is True
+    assert fork_kwargs["dump_extra"]["approval_type"] == "payment"
+    # The fork prompt is appended as an extra user message.
+    extra = fork_kwargs["extra_user_messages"]
+    assert extra and extra[0]["role"] == "user"
+
+    # Notification is validated + tool key stripped.
+    notification = result["notification"]
+    assert "tool" not in notification
+    assert notification["trigger_type"] == "payment"
+    assert notification["payment"]["merchant"] == "Delta Air Lines"
+
+    # Question renders payment metadata (not the fallback) and hides secrets.
+    question = result["question"]
+    assert "Rose wants to enter payment details on **Delta**." in question
+    assert "Merchant: Delta Air Lines" in question
+    assert "Amount: $412.30" in question
+    assert "Fields: card number, expiration date, CVV" in question
+    assert "Payment secrets are not included in this message." in question
+    assert "Approve?" not in question  # fallback_question was not used
+
+    # Usage/model/request metadata threaded through for token accounting.
+    assert result["usage"] == {"input_tokens": 1200, "output_tokens": 88}
+    assert result["actual_model"] == "claude-sonnet-4-6-claude"
+    assert result["request_id"] == "req-pay-1"
+    assert result["mode"] == "claudeAuth"
+
+
+async def test_generate_write_lock_notification_raises_when_fork_calls_wrong_tool():
+    """If the forked model calls anything other than generate_write_lock_notification,
+    the helper raises so the caller falls back to build_payment_question rather than
+    surfacing a malformed notification."""
+    import domains.spawn_browser_agent_v3.handler as handler
+    from domains.spawn_browser_agent_v3.handler import _generate_write_lock_notification
+    from domains.spawn_browser_agent_v3.types import ClaudeTokenState
+
+    token_state = ClaudeTokenState()
+    token_state.access_token = "claude-token"
+    token_state.source = "user"
+
+    fork_mock = AsyncMock(
+        return_value={"action": {"action": "click", "params": {"index": 1}}}
+    )
+
+    with patch.object(handler, "_call_browser_use_with_rotation", new=fork_mock):
+        raised = None
+        try:
+            await _generate_write_lock_notification(
+                rose_client=SimpleNamespace(),
+                task_prompt="Buy socks",
+                dynamic_system_context="ctx",
+                browser_turn_messages=[],
+                browser_state={"url": "https://shop.example/checkout"},
+                action_entries=[],
+                config=_fake_config(),
+                user_id="u1",
+                agent_id="a1",
+                iteration=2,
+                token_state=token_state,
+                gpt_token=None,
+                gpt_account_id=None,
+                gpt_token_source=None,
+                gpt_token_pool_id=None,
+                browser_use_mode="claude",
+                approval_type="payment",
+                current_url="https://shop.example/checkout",
+                pending_action={"action": "click"},
+                write_lock_result={"status": "awaiting_payment_card_approval"},
+                system_name="Rose",
+                fallback_question="Approve purchase?",
+            )
+        except ValueError as exc:
+            raised = exc
+
+    assert raised is not None
+    assert "did not call generate_write_lock_notification" in str(raised)
+    assert "'click'" in str(raised)
 
 
 def test_extract_media_candidates_from_dom_state_keeps_image_urls_outside_llm_dom_text():
@@ -7067,7 +7298,7 @@ async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
     r = BlackboxResult()
 
-    r.record("verifier_timeout_minimum", test_verifier_activity_timeout_allows_llm_call)
+    r.record("verifier_timeout_standard_llm_budget", test_verifier_activity_timeout_allows_llm_call)
     r.record(
         "browser_task_prompt_no_system_duplication",
         test_browser_task_prompt_does_not_duplicate_system_prompt,
@@ -7207,26 +7438,16 @@ async def run_all_tests():
     r.record("format_otp_user_message_sms", test_format_otp_user_message_sms)
 
     r.record("build_autopay_prompt_section", test_build_autopay_prompt_section)
+    r.record("build_autopay_prompt_section_no_card", test_build_autopay_prompt_section_no_card)
+    r.record("build_payment_card_resume_prompt_section", test_build_payment_card_resume_prompt_section)
     r.record(
-        "build_autopay_prompt_section_no_card",
-        test_build_autopay_prompt_section_no_card,
+        "build_payment_card_resume_prompt_section_requires_all_refs",
+        test_build_payment_card_resume_prompt_section_requires_all_refs,
     )
-    r.record(
-        "build_passwords_prompt_section_empty",
-        test_build_passwords_prompt_section_empty,
-    )
-    r.record(
-        "build_passwords_prompt_section_unique",
-        test_build_passwords_prompt_section_unique_usernames,
-    )
-    r.record(
-        "build_passwords_prompt_section_duplicate",
-        test_build_passwords_prompt_section_duplicate_usernames,
-    )
-    r.record(
-        "build_auth_options_prompt_section",
-        test_build_auth_options_prompt_section_scoped_password_refs,
-    )
+    r.record("build_passwords_prompt_section_empty", test_build_passwords_prompt_section_empty)
+    r.record("build_passwords_prompt_section_unique", test_build_passwords_prompt_section_unique_usernames)
+    r.record("build_passwords_prompt_section_duplicate", test_build_passwords_prompt_section_duplicate_usernames)
+    r.record("build_auth_options_prompt_section", test_build_auth_options_prompt_section_scoped_password_refs)
     r.record(
         "build_auth_options_prompt_section_demo_site_ref",
         test_build_auth_options_prompt_section_demo_site_ref_does_not_expose_plaintext,
@@ -7578,23 +7799,21 @@ async def run_all_tests():
     )
     await r.record_async("execute_action_unknown", test_execute_action_unknown_action)
     await r.record_async(
-        "execute_action_write_lock_notification_internal",
-        test_execute_action_generate_write_lock_notification_is_internal_only,
+        "execute_action_request_payment_card",
+        test_execute_action_request_payment_card_requests_workflow_approval,
     )
     await r.record_async(
-        "execute_action_dropdown_options_no_el",
-        test_execute_action_dropdown_options_missing_element,
+        "execute_action_request_payment_card_rejects_empty_receipt",
+        test_execute_action_request_payment_card_rejects_empty_receipt,
     )
     await r.record_async(
-        "execute_action_select_dropdown_no_el",
-        test_execute_action_select_dropdown_missing_element,
+        "execute_action_request_payment_card_rejects_duplicate_after_card_ready",
+        test_execute_action_request_payment_card_rejects_duplicate_after_card_ready,
     )
-    await r.record_async(
-        "execute_action_attempt_completion", test_execute_action_attempt_completion
-    )
-    await r.record_async(
-        "execute_action_send_message", test_execute_action_send_message_to_user
-    )
+    await r.record_async("execute_action_dropdown_options_no_el", test_execute_action_dropdown_options_missing_element)
+    await r.record_async("execute_action_select_dropdown_no_el", test_execute_action_select_dropdown_missing_element)
+    await r.record_async("execute_action_attempt_completion", test_execute_action_attempt_completion)
+    await r.record_async("execute_action_send_message", test_execute_action_send_message_to_user)
     await r.record_async("execute_action_done", test_execute_action_done)
     await r.record_async(
         "execute_action_click_no_target", test_execute_action_click_no_element_no_coords
@@ -7884,6 +8103,14 @@ async def run_all_tests():
     r.record(
         "normalize_write_lock_notification_media_item_image",
         test_normalize_write_lock_notification_media_promotes_item_image,
+    )
+    await r.record_async(
+        "generate_write_lock_notification_payment_forks",
+        test_generate_write_lock_notification_payment_forks_and_renders_question,
+    )
+    await r.record_async(
+        "generate_write_lock_notification_wrong_tool_raises",
+        test_generate_write_lock_notification_raises_when_fork_calls_wrong_tool,
     )
     r.record(
         "extract_media_candidates_from_dom_state",

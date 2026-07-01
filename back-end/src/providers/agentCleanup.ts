@@ -1,6 +1,7 @@
 import { Sandbox } from 'e2b';
 import { prisma } from './database';
 import { createLogger } from './logger';
+import { cleanupAgentPurchaseCards } from './purchaseCleanup';
 import { closeSession } from './steel';
 
 const log = createLogger('Cleanup');
@@ -10,6 +11,14 @@ const log = createLogger('Cleanup');
  * Called during agent deletion. Best-effort: errors are logged but never thrown.
  */
 export async function cleanupAgentSessions(agentId: string): Promise<void> {
+  try {
+    await cleanupAgentPurchaseCards(agentId);
+  } catch (error) {
+    log.warn(`Failed to clean up purchase cards for agent ${agentId}`, {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
   // --- Steel browser sessions ---
   try {
     const activeBrowserSessions = await prisma.browserSession.findMany({

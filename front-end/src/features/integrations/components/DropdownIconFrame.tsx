@@ -6,7 +6,7 @@
  * System context:
  *   Integrations dropdown row -> DropdownIconFrame -> consistent 32px icon art
  *     inside a 1px diagonal border shared by row icons and parent dropdown icons.
- *     Synced rows keep their original icon and signal status with a green glow.
+ *     Synced rows keep their original icon and signal status with a static teal glow.
  */
 
 import type { CSSProperties, ReactNode } from 'react';
@@ -20,6 +20,9 @@ interface DropdownIconFrameProps {
 }
 
 export const dropdownIconImageClassName = 'h-8 w-8 object-cover';
+
+const connectedTealGlowGradient =
+  'linear-gradient(to bottom left, rgba(45, 212, 191, 0.5), rgba(20, 184, 166, 0.42), rgba(15, 118, 110, 0.46))';
 
 export const dropdownIconPreset = {
   browserMain: { iconScale: 62, iconFit: 'contain' },
@@ -87,19 +90,27 @@ export default function DropdownIconFrame({
   isSynced = false,
 }: DropdownIconFrameProps): JSX.Element {
   return (
-    <div
-      className={`flex h-[34px] w-[34px] shrink-0 items-center justify-center overflow-hidden rounded-lg border border-transparent shadow-[0_1px_2px_rgba(0,0,0,0.16)] [&>*]:h-full [&>*]:w-full [&>*]:scale-[var(--dropdown-icon-scale)] [&>*]:[object-fit:var(--dropdown-icon-fit)] ${className}`}
-      style={
-        {
-          '--dropdown-icon-fit': iconFit,
-          '--dropdown-icon-scale': String(iconScale / 100),
-          animation: isSynced ? 'dropdownIconGlow 1.8s ease-in-out infinite' : undefined,
-          background:
-            'linear-gradient(#f5f5f5, #f5f5f5) padding-box, conic-gradient(from 45deg, rgba(16,16,16,0.9) 0deg, rgba(255,255,255,0.96) 90deg, rgba(16,16,16,0.9) 180deg, rgba(255,255,255,0.96) 270deg, rgba(16,16,16,0.9) 360deg) border-box',
-        } as CSSProperties
-      }
-    >
-      {children}
+    <div className="relative h-[34px] w-[34px] shrink-0">
+      {isSynced && (
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute -inset-[3px] rounded-xl opacity-75 blur-sm"
+          style={{ backgroundImage: connectedTealGlowGradient }}
+        />
+      )}
+      <div
+        className={`relative z-10 flex h-[34px] w-[34px] items-center justify-center overflow-hidden rounded-lg border border-transparent shadow-[0_1px_2px_rgba(0,0,0,0.16)] [&>*]:h-full [&>*]:w-full [&>*]:scale-[var(--dropdown-icon-scale)] [&>*]:[object-fit:var(--dropdown-icon-fit)] ${className}`}
+        style={
+          {
+            '--dropdown-icon-fit': iconFit,
+            '--dropdown-icon-scale': String(iconScale / 100),
+            background:
+              'linear-gradient(#f5f5f5, #f5f5f5) padding-box, conic-gradient(from 45deg, rgba(16,16,16,0.9) 0deg, rgba(255,255,255,0.96) 90deg, rgba(16,16,16,0.9) 180deg, rgba(255,255,255,0.96) 270deg, rgba(16,16,16,0.9) 360deg) border-box',
+          } as CSSProperties
+        }
+      >
+        {children}
+      </div>
     </div>
   );
 }
