@@ -3,6 +3,7 @@
 
 import {
   callWithChatComputeRotation,
+  fetchChatComputeAuth,
   toChatComputeAuth,
   type ChatComputeAuth,
 } from '../../providers/chat/computeRotation';
@@ -176,6 +177,23 @@ async function testRateLimitMarksRateLimitThenRotates(): Promise<void> {
   assertEqual(attempt.usedWaterfall, false, 'waterfall not used for rate-limit rotation');
 }
 
+async function testForceWaterfallSkipsChatComputeLookup(): Promise<void> {
+  const previous = process.env.CHAT_FORCE_WATERFALL;
+  process.env.CHAT_FORCE_WATERFALL = 'true';
+  try {
+    const auth = await fetchChatComputeAuth('user-1');
+    assertEqual(auth.computeToken, null, 'no direct token selected');
+    assertEqual(auth.claudeToken, null, 'no Claude token selected');
+    assertEqual(auth.gptToken, null, 'no GPT token selected');
+  } finally {
+    if (previous === undefined) {
+      delete process.env.CHAT_FORCE_WATERFALL;
+    } else {
+      process.env.CHAT_FORCE_WATERFALL = previous;
+    }
+  }
+}
+
 async function main(): Promise<void> {
   const tests: Array<{ name: string; fn: () => Promise<void> }> = [
     {
@@ -189,6 +207,10 @@ async function main(): Promise<void> {
     {
       name: 'chat compute / rate-limit marks rate_limit then rotates',
       fn: testRateLimitMarksRateLimitThenRotates,
+    },
+    {
+      name: 'chat compute / force waterfall skips direct token lookup',
+      fn: testForceWaterfallSkipsChatComputeLookup,
     },
   ];
 

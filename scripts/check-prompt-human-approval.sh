@@ -96,8 +96,10 @@ DIFF_PROMPT_FILES="$(
       # Prompt-bearing fields usually assign string content to these names.
       if (code ~ /(^|[^A-Za-z0-9_])(prompt|instructions|rubric|persona)([^A-Za-z0-9_]|$)/ && code ~ /[:=][[:space:]]*[`"'"'"']/) return 1
 
-      # Direct prompt text edits embedded in code.
-      if (code ~ /(You are an AI|You are ChatGPT|You are Codex|You are a |System prompt|system prompt)/) return 1
+      # Direct prompt text edits embedded in code. Do not flag generic
+      # references to "system prompt"; normalization/cache code often talks
+      # about prompt hashes without changing LLM instructions.
+      if (code ~ /(You are an AI|You are ChatGPT|You are Codex|You are a )/) return 1
 
       return 0
     }

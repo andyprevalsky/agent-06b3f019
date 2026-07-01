@@ -48,6 +48,7 @@ export async function createAgentTransaction(params: {
   proxyCity?: string;
   priceLimitCents?: number;
   writeLockEnabled?: boolean;
+  fastModeCacheEnabled?: boolean;
   verifierType: string;
   attachments?: Array<Record<string, unknown>>;
   temporalWorkflowId?: string | null;
@@ -81,6 +82,9 @@ export async function createAgentTransaction(params: {
           : {}),
         ...(params.writeLockEnabled !== undefined
           ? { writeLockEnabled: params.writeLockEnabled }
+          : {}),
+        ...(params.fastModeCacheEnabled !== undefined
+          ? { fastModeCacheEnabled: params.fastModeCacheEnabled }
           : {}),
       },
     });
@@ -129,6 +133,7 @@ export interface BatchCreateAgentParams {
   proxyCity?: string;
   priceLimitCents?: number;
   writeLockEnabled?: boolean;
+  fastModeCacheEnabled?: boolean;
   verifierType: string;
   attachments?: Array<Record<string, unknown>>;
   temporalWorkflowId: string;
@@ -166,6 +171,9 @@ export async function createAgentBatchTransaction(items: BatchCreateAgentParams[
             : {}),
           ...(params.writeLockEnabled !== undefined
             ? { writeLockEnabled: params.writeLockEnabled }
+            : {}),
+          ...(params.fastModeCacheEnabled !== undefined
+            ? { fastModeCacheEnabled: params.fastModeCacheEnabled }
             : {}),
         },
       });

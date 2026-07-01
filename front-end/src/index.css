@@ -14,6 +14,14 @@
     text-align: left;
   }
 
+  @media (max-width: 767px) {
+    .mobile-disable-message-entry-spawn
+      > [data-message-id]
+      > .animate-in.fade-in.duration-300 {
+      animation: none !important;
+    }
+  }
+
   @keyframes dots {
     0%,
     100% {

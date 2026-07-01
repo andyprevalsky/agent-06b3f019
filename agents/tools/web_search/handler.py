@@ -12,6 +12,8 @@ from temporalio.common import RetryPolicy
 
 from helpers.handle_tool_event import handle_tool_event
 from helpers.tracing import traced
+from providers.fast_cache import client as fast_cache_client
+from providers.fast_cache import normalize as fast_cache_normalize
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager, format_error_message, format_tool_message
 from tools.web_search.config import (
     ACTIVITY_TIMEOUT_SECONDS,
@@ -52,6 +54,9 @@ class WebSearchManager(ToolManager):
         tool_call_id: str,
         agent_id: str,
         user_id: Optional[str] = None,
+        fast_mode_cache_enabled: bool = False,
+        fast_mode_goal: Optional[str] = None,
+        fast_mode_cache_write_enabled: bool = False,
     ) -> dict[str, Any]:
         """Execute web search and post events via handle_tool_event.
 
@@ -96,7 +101,7 @@ class WebSearchManager(ToolManager):
             logger.info("Calling web_search_activity", query_type=type(query).__name__, query_len=len(query))
             result = await execute_activity(
                 web_search_activity,
-                args=[query, max_tokens],
+                args=[query, max_tokens, fast_mode_cache_enabled, fast_mode_goal, fast_mode_cache_write_enabled],
                 start_to_close_timeout=timedelta(seconds=ACTIVITY_TIMEOUT_SECONDS),
                 retry_policy=RetryPolicy(
                     maximum_attempts=RETRY_MAX_ATTEMPTS,
@@ -184,6 +189,9 @@ async def web_search(
     tool_call_id: str,
     agent_id: str,
     user_id: Optional[str] = None,
+    fast_mode_cache_enabled: bool = False,
+    fast_mode_goal: Optional[str] = None,
+    fast_mode_cache_write_enabled: bool = False,
 ) -> dict[str, Any]:
     """Execute web search tool.
 
@@ -204,6 +212,9 @@ async def web_search(
         tool_call_id=tool_call_id,
         agent_id=agent_id,
         user_id=user_id,
+        fast_mode_cache_enabled=fast_mode_cache_enabled,
+        fast_mode_goal=fast_mode_goal,
+        fast_mode_cache_write_enabled=fast_mode_cache_write_enabled,
     )
 
 
@@ -214,7 +225,13 @@ async def web_search(
 
 @activity.defn
 @traced("web_search_activity")
-async def web_search_activity(query: str, max_tokens: int = DEFAULT_MAX_TOKENS) -> dict[str, Any]:
+async def web_search_activity(
+    query: str,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    fast_mode_cache_enabled: bool = False,
+    fast_mode_goal: Optional[str] = None,
+    fast_mode_cache_write_enabled: bool = False,
+) -> dict[str, Any]:
     """Activity: Perform a web search for quick facts and current information.
 
     Uses Parallel AI's search API for real-time web access.
@@ -225,12 +242,37 @@ async def web_search_activity(query: str, max_tokens: int = DEFAULT_MAX_TOKENS) 
         query: Search query or question.
         max_tokens: Maximum tokens for response. Defaults to DEFAULT_MAX_TOKENS
             (source-of-truth cap in tools/web_search/config.py).
+        fast_mode_cache_enabled / fast_mode_goal: Fast Mode read/replay switch.
+        fast_mode_cache_write_enabled: Write-through switch for allowlisted
+            accounts. When true and reads are off, the live provider result is
+            stored without first checking cache.
 
     Returns:
         Dict with answer, sources, query, and provider.
     """
+    read_cache = fast_mode_cache_enabled and bool(fast_mode_goal)
+    write_cache = (fast_mode_cache_enabled or fast_mode_cache_write_enabled) and bool(fast_mode_goal)
+    cache_key = (
+        fast_cache_normalize.web_search_key(fast_mode_goal, query, max_tokens) if write_cache else None
+    )
+    if cache_key is not None and read_cache:
+        stored = await fast_cache_client.cache_get(cache_key)
+        if stored is not None:
+            logger.info("fast_cache.web_search_hit", key=cache_key)
+            return stored
+        logger.info("fast_cache.web_search_miss", key=cache_key)
+    elif cache_key is not None:
+        logger.info("fast_cache.web_search_write_only", key=cache_key)
+
     try:
-        return await execute_search(query=query, max_tokens=max_tokens)
+        result = await execute_search(query=query, max_tokens=max_tokens)
     except Exception:
         logger.error("Web search failed", query=query)
         raise
+
+    if cache_key is not None and write_cache:
+        await fast_cache_client.cache_set(
+            cache_key, "web_search", fast_cache_normalize.goal_hash(fast_mode_goal), result
+        )
+        logger.info("fast_cache.web_search_stored", key=cache_key)
+    return result

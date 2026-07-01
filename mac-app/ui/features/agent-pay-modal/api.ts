@@ -12,10 +12,20 @@
 import { SAVE_FAILURE_MESSAGE } from './config';
 import type { UserSettingsPatchBody, UserSettingsResponse } from './types';
 
-const BACKEND_URL = (): string => {
-  const envUrl = import.meta.env.VITE_BACKEND_API_URL as string | undefined;
-  return envUrl !== undefined && envUrl !== '' ? envUrl : 'http://localhost:3001';
-};
+export function resolveBackendUrl(rawUrl: string | undefined, isProd: boolean): string {
+  const url = rawUrl?.trim();
+  if (url !== undefined && url !== '') return url;
+  if (isProd) {
+    throw new Error('Missing VITE_BACKEND_API_URL for packaged Mac app');
+  }
+  return 'http://localhost:3001';
+}
+
+const BACKEND_URL = (): string =>
+  resolveBackendUrl(
+    import.meta.env.VITE_BACKEND_API_URL as string | undefined,
+    import.meta.env.PROD
+  );
 
 /**
  * Fetches the current user-settings payload. Throws when the response is

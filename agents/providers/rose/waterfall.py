@@ -85,6 +85,7 @@ def build_openrouter_body(
     temperature: Optional[float],
     max_tokens: Optional[int],
     seed: Optional[int],
+    provider_fast_mode: bool = False,
 ) -> Dict[str, Any]:
     """Assemble the OpenRouter /chat/completions request body for one model.
 
@@ -110,6 +111,8 @@ def build_openrouter_body(
         body["max_tokens"] = max_tokens
     if seed is not None:
         body["seed"] = seed
+    if provider_fast_mode:
+        body["speed"] = "fast"
     return body
 
 
@@ -123,6 +126,7 @@ async def waterfall_complete(
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     seed: Optional[int] = None,
+    provider_fast_mode: bool = False,
     openrouter_key: str,
     request_id: str,
     agent_id: Optional[str] = None,
@@ -176,6 +180,7 @@ async def waterfall_complete(
             temperature=temperature,
             max_tokens=max_tokens,
             seed=seed,
+            provider_fast_mode=provider_fast_mode,
         )
         try:
             async for chunk in _stream_one_step(

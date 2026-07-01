@@ -61,6 +61,7 @@ from providers.rose.schema import (
     build_anthropic_tools_from_response_model,
     build_openai_response_format,
 )
+from providers.rose.transport import ANTHROPIC_FAST_MODE_BETA, _with_fast_mode_beta
 from providers.rose.transforms import (
     apply_anthropic_tool_config,
     get_messages_for_model,
@@ -900,6 +901,39 @@ def test_build_anthropic_body_identity_and_cache_block():
     cached_blocks = [b for b in sys if "cache_control" in b]
     assert len(cached_blocks) == 1
     assert cached_blocks[0]["cache_control"] == {"type": "ephemeral", "scope": "global"}
+
+
+def test_build_anthropic_body_provider_fast_mode_supported_opus_only():
+    ultra = get_pool("rose-1-ultra")
+    body = build_anthropic_body(
+        pool_spec=ultra,
+        messages=[{"role": "user", "content": "hi"}],
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        max_tokens=128,
+        provider_fast_mode=True,
+    )
+    assert body["speed"] == "fast"
+
+    lite = get_pool("rose-1-lite")
+    unsupported = build_anthropic_body(
+        pool_spec=lite,
+        messages=[{"role": "user", "content": "hi"}],
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        max_tokens=128,
+        provider_fast_mode=True,
+    )
+    assert "speed" not in unsupported
+
+
+def test_anthropic_fast_mode_transport_adds_beta_header():
+    headers = _with_fast_mode_beta({"anthropic-beta": "effort-2025-11-24"}, {"speed": "fast"})
+    assert ANTHROPIC_FAST_MODE_BETA in headers["anthropic-beta"].split(",")
+    unchanged = _with_fast_mode_beta({"anthropic-beta": "effort-2025-11-24"}, {})
+    assert unchanged["anthropic-beta"] == "effort-2025-11-24"
 
 
 def test_build_anthropic_body_static_dynamic_split():
@@ -2029,6 +2063,14 @@ def test_build_codex_responses_body_contract():
     assert body["reasoning"]["effort"] == "high"
     assert body["prompt_cache_key"].startswith("rose:")
     assert body["prompt_cache_key"] == same_prompt_different_request["prompt_cache_key"]
+    assert "service_tier" not in body
+    fast_body = build_codex_responses_body(
+        pool_spec=pool,
+        messages=[{"role": "user", "content": "hi"}],
+        provider_fast_mode=True,
+        request_id="fast-mode",
+    )
+    assert fast_body["service_tier"] == "priority"
     no_system_body = build_codex_responses_body(
         pool_spec=pool,
         messages=[{"role": "user", "content": "hi"}],
@@ -2236,6 +2278,21 @@ def test_build_openrouter_body_includes_optionals():
     assert body["temperature"] == 0.4
     assert body["max_tokens"] == 42
     assert body["seed"] == 7
+
+
+def test_build_openrouter_body_provider_fast_mode():
+    body = build_openrouter_body(
+        model="anthropic/claude-opus-4.8",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+        provider_fast_mode=True,
+    )
+    assert body["speed"] == "fast"
 
 
 def test_build_openrouter_body_minimal_omits_optionals():
@@ -4083,6 +4140,8 @@ async def run_all_tests():
     r.record("anthropic_body_cache_control_cap", test_build_anthropic_body_caps_anthropic_cache_control_blocks)
     r.record("anthropic_body_message_breakpoint", test_build_anthropic_body_message_cache_breakpoint)
     r.record("anthropic_body_skip_cache_write", test_build_anthropic_body_skip_cache_write_keeps_system_markers)
+    r.record("anthropic_body_provider_fast_mode", test_build_anthropic_body_provider_fast_mode_supported_opus_only)
+    r.record("anthropic_fast_mode_beta_header", test_anthropic_fast_mode_transport_adds_beta_header)
 
     await r.record_async("claude_auth_400_no_rotate", test_claude_auth_400_raises_invalid_request_no_rotation)
     await r.record_async("claude_auth_5xx_retries", test_claude_auth_5xx_retries_then_raises_server_error)
@@ -4143,6 +4202,7 @@ async def run_all_tests():
     )
 
     r.record("openrouter_body_optionals", test_build_openrouter_body_includes_optionals)
+    r.record("openrouter_body_provider_fast_mode", test_build_openrouter_body_provider_fast_mode)
     r.record("openrouter_body_minimal", test_build_openrouter_body_minimal_omits_optionals)
     await r.record_async("waterfall_falls_through_succeeds", test_waterfall_falls_through_then_succeeds)
     await r.record_async(

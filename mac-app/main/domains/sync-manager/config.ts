@@ -13,6 +13,9 @@ export const INTEGRATION_CACHE_TTL_MS = 30 * 1000;
 /** Periodic sync tick — how often SyncManager fans out to every platform. */
 export const SYNC_INTERVAL_MS = 5 * 60 * 1000;
 
+/** Compute subscription token refresh tick. Kept low because uploads are hash-gated. */
+export const COMPUTE_CREDENTIAL_SYNC_INTERVAL_MS = 10 * 1000;
+
 /** Per-platform sync configuration. */
 export const PLATFORM_CONFIG: Record<Platform, SyncConfig> = {
   imessage: {
@@ -56,5 +59,10 @@ export const PLATFORM_CONFIG: Record<Platform, SyncConfig> = {
       'firefox',
     ],
   },
-  // claudeCode sync disabled — token is managed manually via update-claude-token.ts
+  compute: {
+    interval: COMPUTE_CREDENTIAL_SYNC_INTERVAL_MS,
+    enableRealTime: true,
+    syncOnStartup: true,
+    integrationNames: ['claude_code', 'gpt_code'],
+  },
 };

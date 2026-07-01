@@ -229,6 +229,10 @@ def _normalize_reasoning_effort(effort: Optional[str]) -> str:
     return effort or "high"
 
 
+def _supports_anthropic_fast_mode(model: str) -> bool:
+    return model in {"claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8"}
+
+
 def build_anthropic_body(
     *,
     pool_spec: PoolSpec,
@@ -240,6 +244,7 @@ def build_anthropic_body(
     skip_cache_write: bool = False,
     thinking: Optional[Dict[str, Any]] = None,
     effort: Optional[str] = None,
+    provider_fast_mode: bool = False,
 ) -> Dict[str, Any]:
     """Assemble the Anthropic /v1/messages request body for a claudeAuth call.
 
@@ -265,6 +270,8 @@ def build_anthropic_body(
         "max_tokens": max_tokens or 8192,
         "stream": True,
     }
+    if provider_fast_mode and _supports_anthropic_fast_mode(pool_spec.claude_auth_model):
+        body["speed"] = "fast"
 
     system_blocks = _build_system_blocks(static_system, dynamic_system)
     body["system"] = [_IDENTITY_BLOCK, _DISCLAIMER_BLOCK, *system_blocks]
@@ -355,6 +362,7 @@ async def claude_auth_complete(
     effort: Optional[str] = None,
     auth: ClaudeAuthContext,
     request_id: str,
+    provider_fast_mode: bool = False,
     agent_id: Optional[str] = None,
     call_site: Optional[str] = None,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
@@ -377,6 +385,7 @@ async def claude_auth_complete(
         skip_cache_write=skip_cache_write,
         thinking=thinking,
         effort=effort,
+        provider_fast_mode=provider_fast_mode,
     )
     actual_model = f"{pool_spec.claude_auth_model}-claude"
     current_auth = auth
@@ -462,6 +471,7 @@ async def anthropic_api_key_complete(
     thinking: Optional[Dict[str, Any]] = None,
     effort: Optional[str] = None,
     request_id: str,
+    provider_fast_mode: bool = False,
     agent_id: Optional[str] = None,
     call_site: Optional[str] = None,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
@@ -482,6 +492,7 @@ async def anthropic_api_key_complete(
         skip_cache_write=skip_cache_write,
         thinking=thinking,
         effort=effort,
+        provider_fast_mode=provider_fast_mode,
     )
     actual_model = f"{pool_spec.claude_auth_model}-anthropic"
 

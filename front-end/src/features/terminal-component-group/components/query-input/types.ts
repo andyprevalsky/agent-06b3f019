@@ -42,6 +42,8 @@ export interface QueryInputProps {
   placeholder?: string;
   selectedModel?: string;
   onModelChange?: (model: string) => void;
+  fastMode?: boolean;
+  onFastModeChange?: (enabled: boolean) => void;
   availableModels?: Model[];
   modelsLoading?: boolean;
   contextPercentage?: number;

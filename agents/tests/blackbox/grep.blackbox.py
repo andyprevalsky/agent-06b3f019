@@ -58,10 +58,7 @@ async def test_grep_happy_path():
         from tools.grep import grep_activity
 
         result = await grep_activity(
-            pattern="project",
-            source="messages",
-            person_id=None,
-            since=None,
+            {"pattern": "project", "source": "messages"},
             user_id="user-42",
             agent_id="agent-1",
         )
@@ -79,10 +76,15 @@ async def test_grep_boundary():
         from tools.grep import grep_activity
 
         await grep_activity(
-            pattern="quarterly report",
-            source="messages",
-            person_id="person-abc",
-            since="2026-01-01T00:00:00Z",
+            {
+                "pattern": "quarterly report",
+                "source": "messages",
+                "-i": True,
+                "head_limit": 5,
+                "offset": 2,
+                "context": 1,
+                "multiline": True,
+            },
             user_id="user-99",
             agent_id="agent-2",
         )
@@ -95,13 +97,67 @@ async def test_grep_boundary():
     body = json.loads(call["requestBody"])
     assert body["pattern"] == "quarterly report"
     assert body["source"] == "messages"
-    assert body["person_id"] == "person-abc"
-    assert body["since"] == "2026-01-01T00:00:00Z"
+    assert body["-i"] is True
+    assert body["head_limit"] == 5
+    assert body["offset"] == 2
+    assert body["context"] == 1
+    assert body["multiline"] is True
     assert body["user_id"] == "user-99"
+    assert body["agent_id"] == "agent-2"
+    assert "tool" not in body
+    assert "person_id" not in body
+    assert "since" not in body
+    assert "limit" not in body
 
     # Verify X-User-Id header is set
     headers_lower = {k.lower(): v for k, v in call["requestHeaders"].items()}
     assert "x-user-id" in headers_lower
+
+
+async def test_grep_boundary_normalizes_model_dump_keys():
+    """Actual model dumps use Python field names; HTTP payload must use public Grep keys."""
+    _setup()
+    with patch("temporalio.activity.heartbeat"):
+        from tools.grep import grep_activity
+
+        await grep_activity(
+            {
+                "tool": "grep",
+                "pattern": "Lighthouse|Aurora",
+                "source": "messages",
+                "before": 1,
+                "after": 2,
+                "context_c": 3,
+                "line_numbers": False,
+                "case_insensitive": True,
+                "head_limit": 5,
+                "offset": 2,
+                "multiline": True,
+            },
+            user_id="user-99",
+            agent_id="agent-2",
+        )
+
+    call = assert_captured_call(
+        url_contains="/api/data/grep",
+        method="POST",
+        header_present="X-API-Key",
+    )
+    body = json.loads(call["requestBody"])
+    assert body == {
+        "pattern": "Lighthouse|Aurora",
+        "source": "messages",
+        "-B": 1,
+        "-A": 2,
+        "-C": 3,
+        "-n": False,
+        "-i": True,
+        "head_limit": 5,
+        "offset": 2,
+        "multiline": True,
+        "user_id": "user-99",
+        "agent_id": "agent-2",
+    }
 
 
 async def test_fetch_local_data_summary():
@@ -127,8 +183,7 @@ async def test_grep_empty_pattern():
         from tools.grep import grep_activity
 
         result = await grep_activity(
-            pattern="",
-            source="messages",
+            {"pattern": "", "source": "messages"},
             user_id="user-42",
         )
 
@@ -170,8 +225,7 @@ async def test_grep_network_source_forwarded():
         from tools.grep import grep_activity
 
         result = await grep_activity(
-            pattern="acme",
-            source="network",
+            {"pattern": "acme", "source": "network"},
             user_id="user-42",
         )
 
@@ -185,9 +239,10 @@ async def test_grep_network_source_forwarded():
     body = json.loads(call["requestBody"])
     assert body["source"] == "network"
     assert body["pattern"] == "acme"
-    # person_id / since must NOT be injected for network source
+    # Removed params must NOT be injected.
     assert "person_id" not in body
     assert "since" not in body
+    assert "limit" not in body
 
 
 # -------------------- service.py tests --------------------
@@ -272,7 +327,7 @@ async def test_execute_grep_error_reraises():
     try:
         await execute_grep(
             execute_activity=mock_execute_activity,
-            tool_call={"pattern": "x", "person_id": "p-abcdef"},
+            tool_call={"pattern": "x"},
             tool_call_id="tc-1",
             agent_id="a-1",
         )
@@ -284,7 +339,7 @@ async def test_execute_grep_error_reraises():
         for call in calls
         if call["activity"] == "post_agent_message" and call["args"][2] == "TOOL"
     ]
-    assert tool_titles[-1] == 'Grep failed searching messages for "x" (selected person)'
+    assert tool_titles[-1] == 'Grep failed searching all local data for "x"'
 
 
 async def test_manager_execute_tool():
@@ -313,6 +368,7 @@ async def run_all_tests():
     r = BlackboxResult()
     await r.record_async("happy_path", test_grep_happy_path)
     await r.record_async("boundary", test_grep_boundary)
+    await r.record_async("boundary_normalizes_model_dump_keys", test_grep_boundary_normalizes_model_dump_keys)
     await r.record_async("fetch_local_data_summary", test_fetch_local_data_summary)
     await r.record_async("empty_pattern", test_grep_empty_pattern)
     await r.record_async("network_source_forwarded", test_grep_network_source_forwarded)

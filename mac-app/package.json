@@ -114,9 +114,7 @@
     "protocols": {
       "name": "Rose",
       "schemes": [
-        "roselabs",
-        "http",
-        "https"
+        "roselabs"
       ]
     },
     "publish": {

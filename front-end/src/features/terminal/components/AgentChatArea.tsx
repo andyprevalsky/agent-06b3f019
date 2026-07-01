@@ -6,6 +6,12 @@
  *   NO_AGENT + LOADING       → show "Loading AI Network..." dots
  *   AGENT_SELECTED + LOADING → show "Loading AI Network..." dots
  *   AGENT_SELECTED + READY   → show message list, query input, browser status
+ *
+ * MOBILE CHROME:
+ *   Legal links sit below the mobile visual viewport so Safari's bottom URL bar
+ *   occludes them, while desktop keeps the links visible above the bottom edge.
+ *   The input stack hugs the mobile visual viewport bottom; desktop keeps the
+ *   roomier bottom padding.
  */
 
 import { useRef, Suspense, type ComponentType } from 'react';
@@ -105,7 +111,10 @@ export function AgentChatArea({
         tickerRef={tickerRef}
       />
 
-      <div className="absolute bottom-1 left-0 right-0 flex justify-center gap-2 text-[11px] text-muted-foreground/50 z-10">
+      <div
+        data-testid="terminal-legal-links"
+        className="absolute -bottom-8 left-0 right-0 z-10 flex justify-center gap-2 text-[11px] text-muted-foreground/50 md:bottom-1"
+      >
         <Link to="/privacy" className="hover:text-muted-foreground transition-colors">
           Privacy
         </Link>
@@ -141,7 +150,8 @@ function InputArea({
 }: InputAreaProps) {
   return (
     <div
-      className="pb-6 transition-opacity duration-300 ease-in-out relative"
+      data-testid="terminal-input-area"
+      className="pb-1 transition-opacity duration-300 ease-in-out relative md:pb-6"
       style={{ opacity: a.agentDetail?.status === 'FAILED' ? 0.8 : 1 }}
     >
       {!a.selectedAgentId && (
@@ -203,6 +213,8 @@ function ChatQueryInputBox({
         placeholder={a.selectedAgentId ? 'Type your message...' : 'Enter any goal'}
         selectedModel={a.selectedModel}
         onModelChange={a.setSelectedModel}
+        fastMode={a.fastMode}
+        onFastModeChange={a.setFastMode}
         availableModels={models.filter(
           (m) => m.id === 'rose-labs/rose-1-lite' || m.id === 'rose-labs/rose-1-ultra',
         )}

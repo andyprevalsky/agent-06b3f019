@@ -1358,6 +1358,10 @@ async def test_spawn_explore_agent_activity_execute_tool_dispatch():
     with (
         patch("temporalio.activity.heartbeat"),
         patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch(
+            "providers.fast_cache.client.resolve_agent_fast_mode",
+            new=AsyncMock(return_value=(False, "parent g", True)),
+        ),
         patch("tools.web_search.WebSearchManager", return_value=fake_ws),
         patch("tools.web_fetch.WebFetchManager", return_value=fake_wf),
         patch("tools.grep.GrepManager", return_value=fake_grep),
@@ -1381,6 +1385,12 @@ async def test_spawn_explore_agent_activity_execute_tool_dispatch():
     assert len(result["tool_call_results"]) >= 3
     # accumulated_usage captured the dict-with-usage results
     assert len(result["accumulated_usage"]) == 2  # web_search and grep had usage envelopes
+    assert fake_ws.execute_tool.call_args.kwargs["fast_mode_cache_enabled"] is False
+    assert fake_ws.execute_tool.call_args.kwargs["fast_mode_cache_write_enabled"] is True
+    assert fake_ws.execute_tool.call_args.kwargs["fast_mode_goal"] == "g"
+    assert fake_wf.execute_tool.call_args.kwargs["fast_mode_cache_enabled"] is False
+    assert fake_wf.execute_tool.call_args.kwargs["fast_mode_cache_write_enabled"] is True
+    assert fake_wf.execute_tool.call_args.kwargs["fast_mode_goal"] == "g"
 
 
 # ── handler.py: explore attachment resolution path ───────────────────

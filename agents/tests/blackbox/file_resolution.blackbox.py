@@ -28,6 +28,40 @@ def test_transform_schema_for_remote_session():
     assert result["fields"][2]["type"] == "list[session_file_pointer]"
 
 
+def test_transform_schema_for_remote_session_nested_file_pointers():
+    """transform_schema converts nested file_pointer fields recursively."""
+    from helpers.file_resolution import transform_schema_for_remote_session
+
+    schema = {
+        "fields": [
+            {
+                "name": "variant",
+                "type": "object",
+                "properties": [
+                    {"name": "color", "type": "str"},
+                    {"name": "file", "type": "file_pointer"},
+                    {"name": "frames", "type": "list[file_pointer]"},
+                ],
+            },
+            {
+                "name": "variants",
+                "type": "list[object]",
+                "properties": [
+                    {"name": "name", "type": "str"},
+                    {"name": "image", "type": "file_pointer"},
+                ],
+            },
+        ]
+    }
+
+    result = transform_schema_for_remote_session(schema)
+
+    props = result["fields"][0]["properties"]
+    assert props[1]["type"] == "session_file_pointer"
+    assert props[2]["type"] == "list[session_file_pointer]"
+    assert result["fields"][1]["properties"][1]["type"] == "session_file_pointer"
+
+
 def test_transform_schema_none():
     """transform_schema returns None for None input."""
     from helpers.file_resolution import transform_schema_for_remote_session
@@ -61,6 +95,31 @@ def test_restore_schema_from_remote_session():
     assert result["fields"][0]["type"] == "file_pointer"
     assert result["fields"][1]["type"] == "str"
     assert result["fields"][2]["type"] == "list[file_pointer]"
+
+
+def test_restore_schema_from_remote_session_nested_file_pointers():
+    """restore_schema converts nested session_file_pointer fields recursively."""
+    from helpers.file_resolution import restore_schema_from_remote_session
+
+    schema = {
+        "fields": [
+            {
+                "name": "variant",
+                "type": "object",
+                "properties": [
+                    {"name": "color", "type": "str"},
+                    {"name": "file", "type": "session_file_pointer"},
+                    {"name": "frames", "type": "list[session_file_pointer]"},
+                ],
+            }
+        ]
+    }
+
+    result = restore_schema_from_remote_session(schema)
+
+    props = result["fields"][0]["properties"]
+    assert props[1]["type"] == "file_pointer"
+    assert props[2]["type"] == "list[file_pointer]"
 
 
 def test_restore_schema_none():
@@ -224,6 +283,42 @@ def test_get_file_pointer_paths_malformed_schema_field():
     assert paths == ["/a/b.txt"]
 
 
+def test_get_file_pointer_paths_nested_object():
+    """get_file_pointer_paths follows object/list[object] properties."""
+    from helpers.file_resolution import get_file_pointer_paths_from_response
+
+    schema = {
+        "fields": [
+            {
+                "name": "variant",
+                "type": "object",
+                "properties": [
+                    {"name": "color", "type": "str"},
+                    {"name": "file", "type": "file_pointer"},
+                ],
+            },
+            {
+                "name": "frames",
+                "type": "list[object]",
+                "properties": [
+                    {"name": "index", "type": "int"},
+                    {"name": "image", "type": "file_pointer"},
+                ],
+            },
+        ]
+    }
+    response = {
+        "variant": {"color": "green", "file": {"path": "/home/user/green.png"}},
+        "frames": [
+            {"index": 1, "image": {"path": "/home/user/frame-1.png"}},
+            {"index": 2, "image": {"path": "/home/user/frame-2.png"}},
+        ],
+    }
+
+    paths = get_file_pointer_paths_from_response(response, schema)
+    assert paths == ["/home/user/green.png", "/home/user/frame-1.png", "/home/user/frame-2.png"]
+
+
 def test_resolve_file_pointers_from_extracted_happy():
     """resolve_file_pointers_from_extracted matches partial to full by filename."""
     from helpers.file_resolution import resolve_file_pointers_from_extracted
@@ -348,6 +443,44 @@ def test_resolve_file_pointers_from_extracted_non_partial_non_dict():
     assert resolved["report"] == "not-a-dict"
 
 
+def test_resolve_file_pointers_from_extracted_nested_object():
+    """resolve_file_pointers_from_extracted resolves nested object/list[object] pointers."""
+    from helpers.file_resolution import resolve_file_pointers_from_extracted
+
+    schema = {
+        "fields": [
+            {
+                "name": "variant",
+                "type": "object",
+                "properties": [
+                    {"name": "color", "type": "str"},
+                    {"name": "file", "type": "file_pointer"},
+                ],
+            },
+            {
+                "name": "frames",
+                "type": "list[object]",
+                "properties": [
+                    {"name": "index", "type": "int"},
+                    {"name": "image", "type": "file_pointer"},
+                ],
+            },
+        ]
+    }
+    response = {
+        "variant": {"color": "green", "file": {"path": "/home/user/green.png"}},
+        "frames": [{"index": 1, "image": {"path": "/home/user/frame.png"}}],
+    }
+    extracted = [
+        {"id": "fp-green", "storage_path": "u/green.png", "original_filename": "green.png", "mime_type": "image/png", "size_bytes": 1, "created_at": ""},
+        {"id": "fp-frame", "storage_path": "u/frame.png", "original_filename": "frame.png", "mime_type": "image/png", "size_bytes": 1, "created_at": ""},
+    ]
+
+    resolved = resolve_file_pointers_from_extracted(response, schema, extracted)
+    assert resolved["variant"]["file"]["id"] == "fp-green"
+    assert resolved["frames"][0]["image"]["id"] == "fp-frame"
+
+
 async def test_resolve_file_pointers_in_response_happy():
     """resolve_file_pointers_in_response extracts + uploads partial file pointers."""
     from helpers.file_resolution import resolve_file_pointers_in_response
@@ -370,6 +503,48 @@ async def test_resolve_file_pointers_in_response_happy():
     assert resolved["report"]["storage_path"] == "user-1/doc.pdf"
     assert len(fps) == 1
     assert fps[0].original_filename == "doc.pdf"
+
+
+async def test_resolve_file_pointers_in_response_nested_object():
+    """resolve_file_pointers_in_response uploads nested object/list[object] pointers."""
+    from helpers.file_resolution import resolve_file_pointers_in_response
+
+    async def extractor(path: str):
+        return b"bytes", path.split("/")[-1], "image/png"
+
+    async def uploader(user_id: str, content: bytes, filename: str, mime: str):
+        return {"storage_path": f"{user_id}/{filename}"}
+
+    schema = {
+        "fields": [
+            {
+                "name": "variant",
+                "type": "object",
+                "properties": [
+                    {"name": "color", "type": "str"},
+                    {"name": "file", "type": "file_pointer"},
+                ],
+            },
+            {
+                "name": "frames",
+                "type": "list[object]",
+                "properties": [
+                    {"name": "index", "type": "int"},
+                    {"name": "image", "type": "file_pointer"},
+                ],
+            },
+        ]
+    }
+    response = {
+        "variant": {"color": "green", "file": {"path": "/remote/green.png"}},
+        "frames": [{"index": 1, "image": {"path": "/remote/frame.png"}}],
+    }
+
+    resolved, fps = await resolve_file_pointers_in_response(response, schema, extractor, "u", uploader)
+
+    assert resolved["variant"]["file"]["storage_path"] == "u/green.png"
+    assert resolved["frames"][0]["image"]["storage_path"] == "u/frame.png"
+    assert [fp.original_filename for fp in fps] == ["green.png", "frame.png"]
 
 
 async def test_resolve_file_pointers_in_response_list():
@@ -547,9 +722,11 @@ async def run_all_tests():
     print("file-resolution blackbox tests:")
     r = BlackboxResult()
     r.record("transform_schema", test_transform_schema_for_remote_session)
+    r.record("transform_schema_nested", test_transform_schema_for_remote_session_nested_file_pointers)
     r.record("transform_schema_none", test_transform_schema_none)
     r.record("transform_schema_no_fields", test_transform_schema_no_fields)
     r.record("restore_schema", test_restore_schema_from_remote_session)
+    r.record("restore_schema_nested", test_restore_schema_from_remote_session_nested_file_pointers)
     r.record("restore_schema_none", test_restore_schema_none)
     r.record("restore_schema_no_fields", test_restore_schema_no_fields)
     r.record("transform_restore_roundtrip", test_transform_restore_roundtrip)
@@ -562,6 +739,7 @@ async def run_all_tests():
     r.record("get_file_pointer_paths_empty", test_get_file_pointer_paths_empty)
     r.record("get_file_pointer_paths_autodetect", test_get_file_pointer_paths_autodetect)
     r.record("get_file_pointer_paths_malformed", test_get_file_pointer_paths_malformed_schema_field)
+    r.record("get_file_pointer_paths_nested", test_get_file_pointer_paths_nested_object)
     r.record("resolve_from_extracted_happy", test_resolve_file_pointers_from_extracted_happy)
     r.record("resolve_from_extracted_list", test_resolve_file_pointers_from_extracted_list)
     r.record("resolve_from_extracted_no_match", test_resolve_file_pointers_from_extracted_no_match)
@@ -569,7 +747,9 @@ async def run_all_tests():
     r.record("resolve_from_extracted_empty", test_resolve_file_pointers_from_extracted_empty_response)
     r.record("resolve_from_extracted_none_value", test_resolve_file_pointers_from_extracted_none_value)
     r.record("resolve_from_extracted_non_partial", test_resolve_file_pointers_from_extracted_non_partial_non_dict)
+    r.record("resolve_from_extracted_nested", test_resolve_file_pointers_from_extracted_nested_object)
     await r.record_async("resolve_in_response_happy", test_resolve_file_pointers_in_response_happy)
+    await r.record_async("resolve_in_response_nested", test_resolve_file_pointers_in_response_nested_object)
     await r.record_async("resolve_in_response_list", test_resolve_file_pointers_in_response_list)
     await r.record_async("resolve_in_response_already_full", test_resolve_file_pointers_in_response_already_full)
     await r.record_async("resolve_in_response_none_value", test_resolve_file_pointers_in_response_none_value)

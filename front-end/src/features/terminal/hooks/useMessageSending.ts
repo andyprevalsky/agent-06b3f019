@@ -9,6 +9,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import * as amplitude from '@amplitude/analytics-browser';
 
 import { useToast } from '@/hooks/use-toast';
+import { DEFAULT_FAST_MODE_USER_IDS, FAST_MODE_USER_IDS } from '@/lib/fastModeAccounts';
 
 import { DEFAULT_MODEL, DEFAULT_PRICE_LIMIT_CENTS } from '../config';
 import { createAgent, postMessage, resumeAgent, checkAndRespondToAttention } from '../api';
@@ -19,6 +20,7 @@ interface UseMessageSendingArgs {
   agentDetail: AgentDetail | null;
   canSubmitGoals: boolean;
   isFullySignedIn: boolean;
+  userId?: string | null;
   clientSource: string;
   setSelectedAgentIdContext: (id: string | null) => void;
   setCurrentView: (v: TerminalView) => void;
@@ -32,6 +34,7 @@ export function useMessageSending({
   agentDetail,
   canSubmitGoals,
   isFullySignedIn,
+  userId,
   clientSource,
   setSelectedAgentIdContext,
   setCurrentView,
@@ -52,14 +55,50 @@ export function useMessageSending({
   const [isSendingMessage, setIsSendingMessage] = useState(false);
   const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
   const [pendingPriceLimitCents, setPendingPriceLimitCents] = useState(DEFAULT_PRICE_LIMIT_CENTS);
+  // Fast Mode aggressive cache — session-only, account-scoped default, never persisted client-side.
+  const [fastMode, setFastModeState] = useState(false);
 
   const messageInputRef = useRef<string>('');
   const pendingSubmitRef = useRef(false);
   const autoSubmitRef = useRef(false);
+  const fastModeUserOverrideRef = useRef(false);
+  const userCanUseFastMode = userId != null && FAST_MODE_USER_IDS.includes(userId);
 
   useEffect(() => {
     messageInputRef.current = messageInput;
   }, [messageInput]);
+
+  useEffect(() => {
+    if (!userCanUseFastMode) {
+      fastModeUserOverrideRef.current = false;
+      setFastModeState(false);
+      return;
+    }
+
+    if (
+      selectedAgentId !== null &&
+      agentDetail?.agent_id === selectedAgentId &&
+      typeof agentDetail.fast_mode_cache_enabled === 'boolean'
+    ) {
+      fastModeUserOverrideRef.current = false;
+      setFastModeState(agentDetail.fast_mode_cache_enabled);
+      return;
+    }
+
+    if (selectedAgentId !== null || fastModeUserOverrideRef.current) return;
+    setFastModeState(userId != null && DEFAULT_FAST_MODE_USER_IDS.includes(userId));
+  }, [
+    agentDetail?.agent_id,
+    agentDetail?.fast_mode_cache_enabled,
+    selectedAgentId,
+    userCanUseFastMode,
+    userId,
+  ]);
+
+  const setFastMode = useCallback((enabled: boolean) => {
+    fastModeUserOverrideRef.current = true;
+    setFastModeState(enabled);
+  }, []);
 
   // Sync model from agent detail
   useEffect(() => {
@@ -97,6 +136,7 @@ export function useMessageSending({
             source: clientSource,
             attachments: attachments && attachments.length > 0 ? attachments : undefined,
             price_limit_cents: pendingPriceLimitCents,
+            ...(userCanUseFastMode ? { fast_mode_cache_enabled: fastMode } : {}),
           });
           await loadAgents();
           setCurrentView('agents');
@@ -149,10 +189,12 @@ export function useMessageSending({
       messageInput,
       selectedAgentId,
       selectedModel,
+      fastMode,
       canSubmitGoals,
       clientSource,
       pendingPriceLimitCents,
       agentDetail,
+      userCanUseFastMode,
       loadAgents,
       setCurrentView,
       setSelectedAgentIdContext,
@@ -189,6 +231,8 @@ export function useMessageSending({
     setSelectedModel,
     pendingPriceLimitCents,
     setPendingPriceLimitCents,
+    fastMode,
+    setFastMode,
     handleSendMessage,
   };
 }

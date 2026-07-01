@@ -104,6 +104,42 @@ def test_extract_file_pointers_list():
     assert len(pointers) == 2
 
 
+def test_extract_file_pointers_nested_object():
+    """object/list[object] fields recursively extract nested file_pointer values."""
+    from domains.spawn_sub_agents.service import extract_file_pointers_from_structured_response
+
+    schema = {
+        "fields": [
+            {
+                "name": "variant",
+                "type": "object",
+                "properties": [
+                    {"name": "color", "type": "str"},
+                    {"name": "file", "type": "file_pointer"},
+                ],
+            },
+            {
+                "name": "frames",
+                "type": "list[object]",
+                "properties": [
+                    {"name": "index", "type": "int"},
+                    {"name": "image", "type": "file_pointer"},
+                ],
+            },
+        ]
+    }
+    resp = {
+        "variant": {"color": "green", "file": {"id": "fp-green", "storage_path": "u/green.png"}},
+        "frames": [
+            {"index": 1, "image": {"id": "fp-frame", "storage_path": "u/frame.png"}},
+            {"index": 2, "image": {"path": "/not/full.png"}},
+        ],
+    }
+
+    pointers = extract_file_pointers_from_structured_response(resp, schema)
+    assert [fp["id"] for fp in pointers] == ["fp-green", "fp-frame"]
+
+
 def test_extract_file_pointers_missing_field():
     """Missing or no-name fields are skipped."""
     from domains.spawn_sub_agents.service import extract_file_pointers_from_structured_response
@@ -971,6 +1007,7 @@ async def run_all_tests():
     # extract_file_pointers
     r.record("extract_fp_single", test_extract_file_pointers_single_pointer)
     r.record("extract_fp_list", test_extract_file_pointers_list)
+    r.record("extract_fp_nested_object", test_extract_file_pointers_nested_object)
     r.record("extract_fp_missing_field", test_extract_file_pointers_missing_field)
     r.record("extract_fp_empty", test_extract_file_pointers_empty_inputs)
     r.record("extract_fp_bad_type", test_extract_file_pointers_unrecognized_type)

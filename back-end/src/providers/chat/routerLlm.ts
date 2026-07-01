@@ -6,6 +6,9 @@
 
 import { z } from 'zod';
 import { createStreamingCompletion, markCacheable } from '../rose';
+import { agentFastMode, cacheGet, cacheSet } from '../fastCacheStore';
+import { goalHash } from '../fastCacheNormalizeCore';
+import { contentKey } from '../fastCacheNormalizeKeys';
 import { ROUTER_SYSTEM_PROMPT } from './chatPrompts';
 import {
   broadcastAssistantStream,
@@ -364,24 +367,70 @@ export async function callRouterLlm(params: {
 
   await broadcastAssistantStream(params.agentId, streamId, '', false, 0, false, false, startTime);
 
-  // Create streaming completion via Supabase completions endpoint
-  const stream = await createStreamingCompletion({
-    model: params.model,
-    messages: openaiMessages,
-    temperature: 0.3,
-    response_format: {
-      type: 'json_schema',
-      json_schema: {
+  const fastMode = await agentFastMode(params.agentId);
+  const fastModeRead = fastMode.enabled === true && fastMode.goal !== null;
+  const fastModeWrite = fastMode.writeEnabled === true && fastMode.goal !== null;
+  const providerFastMode = fastModeRead || fastModeWrite;
+  let fcKey: string | null = null;
+  let fcCachedJson: string | null = null;
+  if ((fastModeRead || fastModeWrite) && fastMode.goal) {
+    fcKey = contentKey(fastMode.goal, 'chat_router', {
+      model: params.model,
+      temperature: 0.3,
+      response_format: {
+        type: 'json_schema',
         name: 'router_decision',
         strict: true,
         schema: ROUTER_JSON_SCHEMA,
       },
-    },
-    claude_token: params.claudeToken ?? undefined,
-    gpt_token: params.gptToken ?? undefined,
-    gpt_account_id: params.gptAccountId,
-    disable_waterfall: params.disableWaterfall,
-  });
+      provider_fast_mode: providerFastMode,
+      messages: openaiMessages,
+    });
+  }
+  if (fcKey && fastModeRead) {
+    const hit = await cacheGet(fcKey);
+    if (hit.hit && hit.value) {
+      fcCachedJson = (hit.value as { json?: string }).json ?? null;
+      log.info('fast_cache.chat_router_hit', { agentId: params.agentId, key: fcKey });
+    } else {
+      log.info('fast_cache.chat_router_miss', { agentId: params.agentId, key: fcKey });
+    }
+  } else if (fcKey) {
+    log.info('fast_cache.chat_router_write_only', { agentId: params.agentId, key: fcKey });
+  }
+
+  async function* syntheticChatStream(json: string): AsyncGenerator<unknown> {
+    yield {
+      actual_model: 'fast-cache',
+      choices: [{ delta: { content: json }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+    };
+  }
+
+  // Create streaming completion via the Rose provider (or replay Fast Mode cache).
+  const stream =
+    fcCachedJson !== null
+      ? (syntheticChatStream(fcCachedJson) as unknown as Awaited<
+          ReturnType<typeof createStreamingCompletion>
+        >)
+      : await createStreamingCompletion({
+          model: params.model,
+          messages: openaiMessages,
+          temperature: 0.3,
+          response_format: {
+            type: 'json_schema',
+            json_schema: {
+              name: 'router_decision',
+              strict: true,
+              schema: ROUTER_JSON_SCHEMA,
+            },
+          },
+          claude_token: params.claudeToken ?? undefined,
+          gpt_token: params.gptToken ?? undefined,
+          gpt_account_id: params.gptAccountId,
+          provider_fast_mode: providerFastMode,
+          disable_waterfall: params.disableWaterfall,
+        });
 
   // isClaude = user's own Claude token was used ($0 cost, "-claude" suffix in actual_model)
   let isClaude = false;
@@ -519,6 +568,31 @@ export async function callRouterLlm(params: {
 
   // Combine for parsing - use accumulatedJson for JSON parsing
   const fullJson = accumulatedJson;
+
+  if (
+    fcKey &&
+    fcCachedJson === null &&
+    fullJson !== '' &&
+    fastMode.goal !== null &&
+    fastModeWrite
+  ) {
+    await cacheSet({
+      key: fcKey,
+      kind: 'llm',
+      goalHash: goalHash(fastMode.goal),
+      value: { json: fullJson },
+    })
+      .then(() =>
+        log.info('fast_cache.chat_router_stored', { agentId: params.agentId, key: fcKey })
+      )
+      .catch((error) =>
+        log.warn('fast_cache.chat_router_store_failed', {
+          agentId: params.agentId,
+          key: fcKey,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      );
+  }
 
   // Broadcast final "done" signal for reasoning stream
   await broadcastAssistantStream(

@@ -16,10 +16,14 @@
  * MODEL SELECTOR:      owned by `ModelSelector`
  * COST / PRICE LIMIT:  owned by `CostIndicator` + `usePriceLimit`
  * ATTACHMENTS:         owned by `useAttachments`
+ * FAST MODE:           shown for allow-listed users in both create + chat query boxes
+ * TEST PROMPTS:        shown only on desktop for dev/admin users; never mounted on mobile
  * SUBMISSION:          canSubmit prop decides send-vs-stop button
  */
 
 import { useRef } from 'react';
+import { useIsMobile } from '@/hooks/use-mobile';
+import { FAST_MODE_USER_IDS } from '@/lib/fastModeAccounts';
 import { cn } from '@/lib/utils';
 import { useAuth, useToast } from '../hooks';
 import { IS_DEV_MODE, ADMIN_USER_IDS, DEFAULT_RESTART_THRESHOLD } from '../config';
@@ -109,8 +113,10 @@ function QueryInputBody(props: QueryInputBodyProps) {
     onChange,
     disabled = false,
     placeholder = 'Type your message...',
-    selectedModel = 'rose-labs/rose-1-lite',
+    selectedModel = 'rose-labs/rose-1-ultra',
     onModelChange,
+    fastMode = false,
+    onFastModeChange,
     availableModels = [],
     contextPercentage = 0,
     contextSize = 0,
@@ -129,8 +135,11 @@ function QueryInputBody(props: QueryInputBodyProps) {
     handleSubmit,
   } = props;
   const { user: authUser } = useAuth();
+  const isMobile = useIsMobile();
   const showTestPrompts =
-    IS_DEV_MODE || (authUser?.id != null && ADMIN_USER_IDS.includes(authUser.id));
+    !isMobile && (IS_DEV_MODE || (authUser?.id != null && ADMIN_USER_IDS.includes(authUser.id)));
+  // Fast Mode toggle is query-box scoped and gated to allow-listed accounts.
+  const showFastMode = authUser?.id != null && FAST_MODE_USER_IDS.includes(authUser.id);
   const agentCompleted = agentDetail?.status === 'COMPLETED' || agentDetail?.status === 'FAILED';
 
   return (
@@ -140,6 +149,9 @@ function QueryInputBody(props: QueryInputBodyProps) {
         onAgentUpdate={onAgentUpdate}
         onAgentDelete={onAgentDelete}
         showTestPrompts={showTestPrompts}
+        showFastMode={showFastMode}
+        fastMode={fastMode}
+        onFastModeChange={onFastModeChange}
         onSelectPrompt={(prompt, files) => {
           onChange(prompt);
           if (files && files.length > 0) void attachments.processFiles(files);

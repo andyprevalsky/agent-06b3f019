@@ -75,6 +75,18 @@ vi.mock('../../main/services/browserStateSync', () => ({
   },
 }));
 
+vi.mock('../../main/services/claudeCredentialSync', () => ({
+  ClaudeCredentialSync: {
+    syncExistingCredentialsIfChanged: vi.fn(async () => ({ success: true })),
+  },
+}));
+
+vi.mock('../../main/services/gptCredentialSync', () => ({
+  GptCredentialSync: {
+    syncExistingCredentialsIfChanged: vi.fn(async () => ({ success: true })),
+  },
+}));
+
 vi.mock('../../main/services/messaging/platforms/telegram/TelegramSync', () => ({
   TelegramSync: {
     hasSession: vi.fn(() => false),
@@ -111,6 +123,8 @@ import { AuthService } from '../../main/services/auth';
 import { IMessageSync } from '../../main/services/iMessageSync';
 import { CookieSync } from '../../main/services/cookieSync';
 import { BrowserStateSync } from '../../main/services/browserStateSync';
+import { ClaudeCredentialSync } from '../../main/services/claudeCredentialSync';
+import { GptCredentialSync } from '../../main/services/gptCredentialSync';
 import { TelegramSync } from '../../main/services/messaging/platforms/telegram/TelegramSync';
 import { WhatsAppSync } from '../../main/services/messaging/platforms/whatsapp/WhatsAppSync';
 import { IMessageQueueService } from '../../main/services/IMessageQueueService';
@@ -229,6 +243,10 @@ describe('sync-manager blackbox', () => {
       expect(vi.mocked(IMessageSync.sync)).toHaveBeenCalledTimes(1);
       expect(vi.mocked(CookieSync.sync)).toHaveBeenCalledTimes(1);
       expect(vi.mocked(BrowserStateSync.sync)).toHaveBeenCalledTimes(1);
+      expect(
+        vi.mocked(ClaudeCredentialSync.syncExistingCredentialsIfChanged)
+      ).not.toHaveBeenCalled();
+      expect(vi.mocked(GptCredentialSync.syncExistingCredentialsIfChanged)).not.toHaveBeenCalled();
 
       // Realtime watchers + queue poller start unconditionally.
       expect(vi.mocked(IMessageSync.startRealTimeSync)).toHaveBeenCalledTimes(1);
@@ -290,6 +308,22 @@ describe('sync-manager blackbox', () => {
       const call = vi.mocked(WhatsAppSync.connect).mock.calls[0][0];
       expect(typeof call?.onQRCode).toBe('function');
     });
+
+    it('runs startup compute sync for connected Claude and GPT subscriptions', async () => {
+      vi.mocked(AuthService.getSession).mockResolvedValue(FAKE_SESSION);
+      restoreFetch = installFetchCapture({
+        '/api/integrations': integrationsResponder(['claude_code', 'gpt_code']),
+      });
+
+      await SyncManager.startAll();
+
+      expect(
+        vi.mocked(ClaudeCredentialSync.syncExistingCredentialsIfChanged)
+      ).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(GptCredentialSync.syncExistingCredentialsIfChanged)).toHaveBeenCalledTimes(
+        1
+      );
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -310,6 +344,10 @@ describe('sync-manager blackbox', () => {
       expect(vi.mocked(BrowserStateSync.sync)).not.toHaveBeenCalled();
       expect(vi.mocked(TelegramSync.connectWithExistingSession)).not.toHaveBeenCalled();
       expect(vi.mocked(WhatsAppSync.connect)).not.toHaveBeenCalled();
+      expect(
+        vi.mocked(ClaudeCredentialSync.syncExistingCredentialsIfChanged)
+      ).not.toHaveBeenCalled();
+      expect(vi.mocked(GptCredentialSync.syncExistingCredentialsIfChanged)).not.toHaveBeenCalled();
 
       // Queue polling + iMessage realtime watcher still start.
       expect(vi.mocked(IMessageQueueService.start)).toHaveBeenCalledTimes(1);
@@ -352,6 +390,20 @@ describe('sync-manager blackbox', () => {
       // Other connected platforms still ran.
       expect(vi.mocked(CookieSync.sync)).toHaveBeenCalledTimes(1);
       expect(vi.mocked(BrowserStateSync.sync)).toHaveBeenCalledTimes(1);
+    });
+
+    it('syncNow() includes compute when a compute integration is connected', async () => {
+      vi.mocked(AuthService.getSession).mockResolvedValue(FAKE_SESSION);
+      restoreFetch = installFetchCapture({
+        '/api/integrations': integrationsResponder(['claude_code']),
+      });
+
+      await SyncManager.syncNow();
+
+      expect(
+        vi.mocked(ClaudeCredentialSync.syncExistingCredentialsIfChanged)
+      ).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(GptCredentialSync.syncExistingCredentialsIfChanged)).not.toHaveBeenCalled();
     });
   });
 

@@ -240,10 +240,52 @@ def test_build_param_population_message_non_spawn_no_extra():
     assert "SPAWN TYPE" not in msg
 
 
+def test_select_param_tool_call_prefers_task_matching_duplicate():
+    """Duplicate matching tool calls are disambiguated by DAG task text."""
+    from loop.dag_executor import DAGTask, _select_param_tool_call
+
+    task = DAGTask(
+        index=1,
+        goal="Find the current population of New York City using explore-agent web research.",
+        tool_name="spawn_general_purpose_agent",
+    )
+    with patch("loop.dag_executor.workflow.logger", MagicMock()):
+        selected = _select_param_tool_call(
+            [
+                {"tool": "spawn_agent", "goal": "Find the current population of Tokyo."},
+                {"tool": "spawn_agent", "goal": "Find the current population of New York City."},
+            ],
+            "spawn_agent",
+            task,
+        )
+
+    assert selected["goal"] == "Find the current population of New York City."
+
+
+def test_select_param_tool_call_rejects_ambiguous_duplicate():
+    """Ambiguous duplicate tool calls fail before the wrong tool can execute."""
+    import pytest
+
+    from loop.dag_executor import DAGTask, _select_param_tool_call
+
+    task = DAGTask(index=0, goal="Find a population figure.", tool_name="spawn_general_purpose_agent")
+
+    with pytest.raises(ValueError, match="multiple ambiguous spawn_agent"):
+        _select_param_tool_call(
+            [
+                {"tool": "spawn_agent", "goal": "Find a population figure."},
+                {"tool": "spawn_agent", "goal": "Find a population figure."},
+            ],
+            "spawn_agent",
+            task,
+        )
+
+
 async def _run_execute_dag(
     plan_data,
     execute_tool_impl=None,
     reasoning_result=None,
+    param_tool_calls=None,
     execute_activity_calls=None,
     **execute_dag_kwargs,
 ):
@@ -286,9 +328,13 @@ async def _run_execute_dag(
             return reasoning_result or {"content": "reasoning output", "usage": {}}
         # call_llm_activity for param population — return tool_calls format
         tool_name = args[11] if args and len(args) > 11 else "unknown"
+        if param_tool_calls is not None and args and args[8] == "dag_param_populator":
+            tool_calls = param_tool_calls(args)
+        else:
+            tool_calls = [{"tool": tool_name, "query": "x"}]
         return {
             "response": "",
-            "tool_calls": [{"tool": tool_name, "query": "x"}],
+            "tool_calls": tool_calls,
             "usage": {},
             "detected_tools_ordered": [],
         }
@@ -530,6 +576,48 @@ async def test_execute_dag_general_purpose_spawn_emits_subagent_placeholder():
     assert dag.tasks[0].tool_call_id == recorded[0][2]
 
 
+async def test_execute_dag_uses_matching_param_tool_call_for_duplicate_spawn_calls():
+    """DAG execution does not run a wrong first spawn_agent call from param population."""
+    plan_data = {
+        "tasks": [
+            {
+                "goal": "Find the current population of New York City using explore-agent web research.",
+                "tool_name": "spawn_general_purpose_agent",
+            }
+        ],
+        "dependencies": {},
+    }
+
+    recorded = []
+
+    async def execute_tool(name, params, tool_call_id):
+        recorded.append((name, dict(params)))
+        return {"message": "spawned"}
+
+    def param_tool_calls(_args):
+        return [
+            {"tool": "spawn_agent", "goal": "Find the current population of Tokyo."},
+            {"tool": "spawn_agent", "goal": "Find the current population of New York City."},
+        ]
+
+    result, _events, _dag = await _run_execute_dag(
+        plan_data,
+        execute_tool_impl=execute_tool,
+        param_tool_calls=param_tool_calls,
+    )
+
+    assert result["status"] == "completed"
+    assert recorded == [
+        (
+            "spawn_agent",
+            {
+                "goal": "Find the current population of New York City.",
+                "type": "general_purpose",
+            },
+        )
+    ]
+
+
 async def test_execute_dag_tool_failure_returns_needs_llm():
     """execute_dag returns status=needs_llm when a tool reports error."""
     plan_data = {
@@ -604,6 +692,8 @@ async def run_all_tests():
     r.record("build_param_population_message_basic", test_build_param_population_message_basic)
     r.record("build_param_population_message_spawn", test_build_param_population_message_spawn_adds_context_warning)
     r.record("build_param_population_message_non_spawn", test_build_param_population_message_non_spawn_no_extra)
+    r.record("select_param_tool_call_prefers_task_matching_duplicate", test_select_param_tool_call_prefers_task_matching_duplicate)
+    r.record("select_param_tool_call_rejects_ambiguous_duplicate", test_select_param_tool_call_rejects_ambiguous_duplicate)
     await r.record_async("execute_dag_reasoning_task_succeeds", test_execute_dag_reasoning_task_succeeds)
     await r.record_async("execute_dag_reasoning_forwards_gpt_token", test_execute_dag_reasoning_forwards_gpt_token)
     await r.record_async("execute_dag_tool_task_succeeds", test_execute_dag_tool_task_succeeds)
@@ -616,6 +706,10 @@ async def run_all_tests():
     await r.record_async(
         "execute_dag_general_purpose_spawn_emits_subagent_placeholder",
         test_execute_dag_general_purpose_spawn_emits_subagent_placeholder,
+    )
+    await r.record_async(
+        "execute_dag_uses_matching_param_tool_call_for_duplicate_spawn_calls",
+        test_execute_dag_uses_matching_param_tool_call_for_duplicate_spawn_calls,
     )
     await r.record_async("execute_dag_tool_failure_returns_needs_llm", test_execute_dag_tool_failure_returns_needs_llm)
     await r.record_async("execute_dag_exception_in_tool_yields_error_event", test_execute_dag_exception_in_tool_yields_error_event)

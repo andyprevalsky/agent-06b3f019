@@ -43,6 +43,8 @@ import {
   RefreshCw,
   Cloud,
   LifeBuoy,
+  VenetianMask,
+  CreditCard,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -74,12 +76,14 @@ export function isClaudeCodeTool(toolName: string): boolean {
  */
 export const TOOL_ICONS: Record<string, LucideIcon> = {
   // Main agent tools
-  spawn_agent: Search, // Unified agent tool (explore/browser/code/general_purpose)
+  spawn_agent: Cloud, // Spawn cloud agent (persistent, fault-tolerant environment)
   grep: FileSearch, // Local data search (message threads)
-  spawn_browser_agent: Globe,
+  browser_agent: VenetianMask, // Stealth browser agent (humanized/undetectable)
+  spawn_browser_agent: VenetianMask,
   send_sms: MessageSquare,
   send_sms_as_user: MessageSquare,
   send_email: Mail,
+  make_payment: CreditCard,
   call_phone_number: Phone,
   send_message_to_user: AlertCircle,
   request_user_assistance_for_authentication: LifeBuoy,

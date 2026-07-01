@@ -14,6 +14,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, waitFor } from '@testing-library/react';
 import { MarkdownText } from '@/features/terminal-component-group/components/MarkdownText';
+import { renderWords } from '@/features/terminal-component-group/components/markdown-text/renderWords';
+import { type WordItem } from '@/features/terminal-component-group/components/markdown-text/types';
 
 describe('MarkdownText', () => {
   it('renders plain text', async () => {
@@ -133,6 +135,24 @@ describe('MarkdownText', () => {
       expect(container.querySelector('code')).not.toBeNull();
       expect(container.querySelector('a')).not.toBeNull();
     });
+  });
+
+  it('uses inline group keys that do not collide with interleaved whitespace children', () => {
+    const words: WordItem[] = [
+      { word: 'Best', isWord: true, isBold: true },
+      { word: ' ', isWord: false },
+      { word: 'cities', isWord: true, isItalic: true },
+      { word: ' ', isWord: false },
+      { word: 'cheap', isWord: true, isCode: true },
+    ];
+
+    const nodes = renderWords(words, false, 0, words[4], vi.fn());
+    const groupKeys = nodes
+      .map((node) => (typeof node === 'object' && node !== null && 'key' in node ? node.key : null))
+      .filter((key): key is string => typeof key === 'string' && key.startsWith('group-'))
+      .map((key) => key.match(/^group-\d+/)?.[0]);
+
+    expect(groupKeys).toEqual(['group-0', 'group-1', 'group-2']);
   });
 
   it('renders nested list items with multiple paragraphs correctly', async () => {

@@ -128,6 +128,7 @@ export async function startAgentMode(agentId: string, userId: string) {
       type: agent.verifier.type,
     },
     priceLimitCents: agent.priceLimitCents,
+    fastModeCacheEnabled: agent.fastModeCacheEnabled,
   });
 
   await repo.updateAgent(agentId, { temporalWorkflowId: workflowId });
@@ -204,6 +205,7 @@ export async function restartAgent(agentId: string, userId?: string) {
     ...(agent.parentWorkflowId !== null ? { parentWorkflowId: agent.parentWorkflowId } : {}),
     depth: agent.depth,
     priceLimitCents: agent.priceLimitCents,
+    fastModeCacheEnabled: agent.fastModeCacheEnabled,
   });
 
   await repo.updateAgent(agentId, { temporalWorkflowId: workflowId });

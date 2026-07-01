@@ -22,6 +22,12 @@ interface Args {
   removeAnimatingTile: (tile: AnimatingTile) => void;
 }
 
+function clearCanvases(...contexts: CanvasRenderingContext2D[]) {
+  contexts.forEach((ctx) => {
+    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+  });
+}
+
 export function useTileRenderLoop({
   enabled,
   dotsRef,
@@ -44,14 +50,8 @@ export function useTileRenderLoop({
     const bordersCtx = bordersRef.current?.getContext('2d');
     if (!dotsCtx || !animationsCtx || !bordersCtx) return;
 
-    const clearAll = () => {
-      dotsCtx.clearRect(0, 0, dotsCtx.canvas.width, dotsCtx.canvas.height);
-      animationsCtx.clearRect(0, 0, animationsCtx.canvas.width, animationsCtx.canvas.height);
-      bordersCtx.clearRect(0, 0, bordersCtx.canvas.width, bordersCtx.canvas.height);
-    };
-
     if (!enabled) {
-      clearAll();
+      clearCanvases(dotsCtx, animationsCtx, bordersCtx);
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
         animationFrameRef.current = null;
@@ -59,19 +59,26 @@ export function useTileRenderLoop({
       return;
     }
 
+    const animatingPositions = new Set(
+      animatingTiles.map((tile) => `${tile.position.row},${tile.position.col}`),
+    );
+    const origin = computeGridOrigin({
+      viewportWidth,
+      viewportHeight,
+      tileSize,
+      largeTileSize,
+      scrollOffset,
+    });
+
+    clearCanvases(dotsCtx, animationsCtx, bordersCtx);
+    drawDots(dotsCtx, origin, tileSize, everColoredTiles, animatingPositions);
+
+    if (animatingTiles.length === 0) {
+      return;
+    }
+
     const render = () => {
-      clearAll();
-      const animatingPositions = new Set(
-        animatingTiles.map((tile) => `${tile.position.row},${tile.position.col}`),
-      );
-      const origin = computeGridOrigin({
-        viewportWidth,
-        viewportHeight,
-        tileSize,
-        largeTileSize,
-        scrollOffset,
-      });
-      drawDots(dotsCtx, origin, tileSize, everColoredTiles, animatingPositions);
+      animationsCtx.clearRect(0, 0, animationsCtx.canvas.width, animationsCtx.canvas.height);
       const completed = drawAnimations(
         animationsCtx,
         origin,

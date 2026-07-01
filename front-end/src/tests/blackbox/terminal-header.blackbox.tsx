@@ -55,6 +55,14 @@ function renderHeader(overrides: Partial<ComponentProps<typeof TerminalHeader>> 
 }
 
 describe('TerminalHeader responsive auth action', () => {
+  it('keeps mobile header edge padding consistent between logo and login action', () => {
+    renderHeader({ isSignedIn: false });
+
+    expect(screen.getByRole('banner')).toHaveClass('p-2');
+    expect(screen.getByRole('button', { name: /Rose/ })).not.toHaveClass('px-1');
+    expect(screen.getByRole('button', { name: 'Login' })).toHaveClass('h-8');
+  });
+
   it('shows a mobile login action instead of the inbox when signed out', () => {
     const props = renderHeader({ isSignedIn: false });
 

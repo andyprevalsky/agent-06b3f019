@@ -433,6 +433,91 @@ async def test_download_and_attach_skips_failed_downloads():
     assert "bad.pdf" not in names
 
 
+async def test_download_and_attach_fast_cache_hit_skips_external_download():
+    """Fast Mode reuses cached file bytes instead of hitting the original file URL."""
+    uploaded: list[dict] = []
+
+    async def fake_upload(user_id, file_content, filename, mime_type):
+        pointer = {
+            "id": f"fp-{len(uploaded)}",
+            "original_filename": filename,
+            "mime_type": mime_type,
+            "size_bytes": len(file_content),
+        }
+        uploaded.append(pointer)
+        return pointer
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch(
+            "providers.fast_cache.client.cache_get_record",
+            new=AsyncMock(return_value={"hit": True, "value": {"size_bytes": 12}, "blobPath": "cache/file"}),
+        ) as get_record,
+        patch("providers.fast_cache.blob_store.download_blob", new=AsyncMock(return_value=b"CACHED-BYTES")),
+        patch(
+            "domains.web_fetch.service.download_files_batch",
+            new=AsyncMock(side_effect=AssertionError("external download should be skipped")),
+        ),
+        patch("domains.web_fetch.repo.upload_to_storage", side_effect=fake_upload),
+    ):
+        from domains.web_fetch.service import download_and_attach
+
+        pointers = await download_and_attach(
+            file_urls=["https://example.com/a.pdf"],
+            user_id="u-1",
+            fast_mode_cache_enabled=True,
+            fast_mode_goal="root goal",
+        )
+
+    assert len(pointers) == 1
+    assert pointers[0]["original_filename"] == "a.pdf"
+    assert uploaded[0]["size_bytes"] == len(b"CACHED-BYTES")
+    get_record.assert_awaited_once()
+
+
+async def test_download_and_attach_fast_cache_miss_stores_downloaded_bytes():
+    """Fast Mode stores downloaded file bytes in blob storage and writes a file cache row."""
+
+    async def fake_download(urls):
+        return {url: b"LIVE-BYTES" for url in urls}
+
+    async def fake_upload(user_id, file_content, filename, mime_type):
+        return {
+            "id": "fp-live",
+            "original_filename": filename,
+            "mime_type": mime_type,
+            "size_bytes": len(file_content),
+        }
+
+    cache_set = AsyncMock(return_value=True)
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch(
+            "providers.fast_cache.client.cache_get_record",
+            new=AsyncMock(return_value={"hit": False, "value": None, "blobPath": None}),
+        ),
+        patch("providers.fast_cache.client.cache_set", new=cache_set),
+        patch("providers.fast_cache.blob_store.upload_blob", new=AsyncMock(return_value=True)) as upload_blob,
+        patch("domains.web_fetch.service.download_files_batch", new=AsyncMock(side_effect=fake_download)),
+        patch("domains.web_fetch.repo.upload_to_storage", side_effect=fake_upload),
+    ):
+        from domains.web_fetch.service import download_and_attach
+
+        pointers = await download_and_attach(
+            file_urls=["https://example.com/a.pdf"],
+            user_id="u-1",
+            fast_mode_cache_enabled=True,
+            fast_mode_goal="root goal",
+        )
+
+    assert pointers[0]["size_bytes"] == len(b"LIVE-BYTES")
+    upload_blob.assert_awaited_once()
+    cache_set.assert_awaited_once()
+    assert cache_set.await_args.args[1] == "file"
+    assert cache_set.await_args.kwargs["blob_path"].startswith("fast-mode-cache/")
+
+
 # =========================================================================
 # Handler: full happy path through the 3 activities
 # =========================================================================
@@ -505,6 +590,8 @@ async def test_handler_execute_tool_happy_path():
         tool_call_id="tc-wf",
         agent_id="a-1",
         user_id="u-1",
+        fast_mode_cache_enabled=True,
+        fast_mode_goal="root goal",
     )
 
     # Activities fired in the right order
@@ -513,6 +600,8 @@ async def test_handler_execute_tool_happy_path():
     assert "web_fetch_download_activity" in captured
     scrape_call = next(call for call in calls if call["activity"] == "web_fetch_activity")
     assert scrape_call["kwargs"]["retry_policy"].maximum_attempts == 2
+    download_call = next(call for call in calls if call["activity"] == "web_fetch_download_activity")
+    assert download_call["args"] == [["https://example.com/file.pdf"], "u-1", True, "root goal", False]
 
     # Result wires the file_pointer through
     assert out["result"]["downloaded_files"][0]["original_filename"] == "file.pdf"
@@ -695,6 +784,8 @@ async def run_all_tests() -> bool:
     await r.record_async("download_no_user_returns_empty", test_download_and_attach_no_user_id_returns_empty)
     await r.record_async("download_happy_path", test_download_and_attach_happy_path)
     await r.record_async("download_skips_failed", test_download_and_attach_skips_failed_downloads)
+    await r.record_async("download_fast_cache_hit", test_download_and_attach_fast_cache_hit_skips_external_download)
+    await r.record_async("download_fast_cache_miss_stores", test_download_and_attach_fast_cache_miss_stores_downloaded_bytes)
 
     # Handler
     r.record("handler_safe_time_ok", test_handler_safe_time_happy_path)

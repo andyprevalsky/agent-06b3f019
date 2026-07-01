@@ -214,6 +214,11 @@ async def run_agent(  # noqa: C901
     # this loop (e.g. explore_agent) set this to surface as their own row in
     # cache reports instead of merging with the parent's execute_loop.
     call_site_override: Optional[str] = None,
+    # Fast Mode aggressive cache: when enabled, LLM calls record/replay through the
+    # backend store keyed by (goal, call_site, iteration). goal_text is the cache
+    # namespace (exact-match). Both flow from the workflow; default off = no-op.
+    fast_mode_cache_enabled: bool = False,
+    goal_text: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run the unified agent loop.
@@ -728,10 +733,36 @@ async def run_agent(  # noqa: C901
                         sequence[0] += 1  # noqa: B023
                         last_text[0] = text_so_far  # noqa: B023
 
+                # Fast Mode: the inline path (explore / browser sub-agents that run
+                # run_agent INSIDE an activity) bypasses call_llm_activity, so it must
+                # set the cache context itself. Keys are canonical request fingerprints;
+                # goal+enabled auto-resolve from the agent row when not threaded explicitly.
+                # Lazy import — this branch only runs inside an activity (explore/
+                # browser), never in the workflow sandbox, so keep fast_cache out of
+                # run_agent's module-level import graph.
+                from providers.fast_cache.client import ensure_position_context
+                from providers.fast_cache.context import (
+                    FastCacheContext,
+                    set_context,
+                    write_through_enabled_for_user,
+                )
+
+                write_through_enabled = write_through_enabled_for_user(user_id)
+                if goal_text and (fast_mode_cache_enabled or write_through_enabled):
+                    set_context(
+                        FastCacheContext(
+                            enabled=fast_mode_cache_enabled,
+                            goal=goal_text,
+                            base_step=iteration,
+                            write_enabled=fast_mode_cache_enabled or write_through_enabled,
+                        )
+                    )
+                else:
+                    await ensure_position_context(agent_id, iteration)
+
                 # Retry up to 3 times on parse failures (matches workflow path's RetryPolicy).
                 # The try/finally guarantees the broadcaster's background drainer is
-                # always disposed — including on pause (CancelledError) or a re-raised
-                # parse failure — so it can never zombie-loop after the stream ends.
+                # always disposed, including on pause or a re-raised parse failure.
                 max_llm_attempts = 3
                 try:
                     for llm_attempt in range(1, max_llm_attempts + 1):
@@ -838,10 +869,13 @@ async def run_agent(  # noqa: C901
                         current_gpt_token_pool_id,
                         user_id,
                         user_id,
+                        fast_mode_cache_enabled,
+                        goal_text,
+                        iteration,
                     ],
                     start_to_close_timeout=timedelta(seconds=STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS),
                     retry_policy=RetryPolicy(maximum_attempts=3),
-                    heartbeat_timeout=timedelta(seconds=60),
+                    heartbeat_timeout=timedelta(seconds=180),
                 )
 
                 # Reconstruct result object from activity response
@@ -1458,6 +1492,9 @@ async def run_agent(  # noqa: C901
                     gpt_token_user_id=user_id,
                     is_plan_loop=is_plan_loop,
                     tool_call_id=tool_call_id,
+                    fast_mode_cache_enabled=fast_mode_cache_enabled,
+                    fast_mode_goal=goal_text,
+                    fast_mode_step=iteration,
                 )
 
                 # Track verifier tokens
@@ -1672,6 +1709,11 @@ async def run_agent(  # noqa: C901
                 gpt_token_pool_id=final_verifier_gpt_token_pool_id,
                 gpt_token_user_id=user_id,
                 is_plan_loop=is_plan_loop,
+                fast_mode_cache_enabled=fast_mode_cache_enabled,
+                fast_mode_goal=goal_text,
+                # Distinct step so the final (max-iterations) verifier never collides
+                # with the per-iteration verifier cache entry.
+                fast_mode_step=999_999,
             )
 
             # Track final verifier tokens
@@ -1858,6 +1900,9 @@ async def _run_verifier(
     gpt_token_user_id: Optional[str] = None,
     is_plan_loop: bool = False,
     tool_call_id: Optional[str] = None,
+    fast_mode_cache_enabled: bool = False,
+    fast_mode_goal: Optional[str] = None,
+    fast_mode_step: int = 0,
 ) -> Dict:
     """Run verifier to check completion."""
     verifier_call_id = tool_call_id or str(uuid.uuid4())
@@ -1913,6 +1958,10 @@ async def _run_verifier(
             gpt_token_source,
             gpt_token_pool_id,
             gpt_token_user_id,
+            None,  # dump_extra
+            fast_mode_cache_enabled,
+            fast_mode_goal,
+            fast_mode_step,
         ],
         start_to_close_timeout=timedelta(seconds=VERIFIER_ACTIVITY_TIMEOUT_SECONDS),
         retry_policy=RetryPolicy(maximum_attempts=3),

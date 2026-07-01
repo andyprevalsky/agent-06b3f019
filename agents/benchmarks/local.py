@@ -323,9 +323,11 @@ def run_benchmark_invocation(
         output_lines.append(line)
     code = process.wait()
     output = "".join(output_lines)
-    result_path = extract_results_path(output) or latest_result_file(started)
+    result_path = extract_results_path(output)
     if result_path is None:
-        raise RuntimeError(f"Benchmark command produced no result file (exit {code})")
+        latest = latest_result_file(started)
+        latest_hint = f"; newest result after start was {latest}" if latest else ""
+        raise RuntimeError(f"Benchmark command did not print a result file marker (exit {code}){latest_hint}")
     if code != 0:
         print(f"Benchmark invocation failed with exit code {code}; result: {result_path}")
     return result_path

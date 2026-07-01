@@ -7,6 +7,7 @@ behaviour, and the attachment-resolution logic in the handler.
 
 import asyncio
 import json
+import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -1037,6 +1038,22 @@ def test_handler_select_code_provider_uses_codex_for_gpt_compute():
     assert _select_code_provider(wf, "gpt-token") == "codex"
 
 
+def test_handler_select_code_provider_env_override_forces_claude():
+    """Benchmark/local verification can force the real Claude Code path."""
+    from domains.spawn_claude_code_agent.handler import _select_code_provider
+
+    previous = os.environ.get("ROSE_CODE_AGENT_PROVIDER")
+    os.environ["ROSE_CODE_AGENT_PROVIDER"] = "claude"
+    try:
+        wf = SimpleNamespace(compute_token_provider="gpt")
+        assert _select_code_provider(wf, "gpt-token") == "claude"
+    finally:
+        if previous is None:
+            os.environ.pop("ROSE_CODE_AGENT_PROVIDER", None)
+        else:
+            os.environ["ROSE_CODE_AGENT_PROVIDER"] = previous
+
+
 def test_handler_select_code_provider_keeps_claude_without_gpt_token():
     """Missing GPT token keeps the existing Claude Code path."""
     from domains.spawn_claude_code_agent.handler import _select_code_provider
@@ -1122,8 +1139,10 @@ async def test_run_verifier_happy_path():
 
     terminal = TerminalFilter(cols=80, rows=50)
     terminal.feed("Done output /home/user/output file")
+    seen_args = {}
 
     async def fake_activity(fn, *, args, **_kwargs):
+        seen_args["args"] = args
         return {
             "score": 0.9,
             "reasoning": "looks good",
@@ -1145,11 +1164,15 @@ async def test_run_verifier_happy_path():
             action_summary=["a1"],
             output_schema={"fields": []},
             claude_token=None,
+            fast_mode_cache_enabled=True,
+            fast_mode_goal="fast goal",
+            fast_mode_step=3,
         )
     assert score == 0.9
     assert reasoning == "looks good"
     assert struct == {"ok": True}
     assert itok == 7 and otok == 3
+    assert seen_args["args"][-3:] == [True, "fast goal", 3]
 
 
 async def test_run_verifier_exception_fallback():
@@ -2072,6 +2095,7 @@ async def run_all_tests():
     r.record("handler_resolve_match_by_id", test_handler_resolve_attachments_match_by_id)
     r.record("handler_get_manager_singleton", test_handler_get_manager_singleton)
     r.record("handler_select_codex_for_gpt", test_handler_select_code_provider_uses_codex_for_gpt_compute)
+    r.record("handler_select_env_forces_claude", test_handler_select_code_provider_env_override_forces_claude)
     r.record("handler_select_claude_without_gpt", test_handler_select_code_provider_keeps_claude_without_gpt_token)
     # _handle_reconnect_exhausted
     await r.record_async("handle_reconnect_alive", test_handle_reconnect_exhausted_alive_sandbox)

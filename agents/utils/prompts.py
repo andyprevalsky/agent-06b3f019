@@ -164,7 +164,7 @@ PLAN FSM: PLAN -> SET_PLAN -> ASK_QUESTION -> EXIT(EXECUTE); ASK_QUESTION may lo
 """
 
 EXECUTE_PHASE_PROMPT = """
-You are in the EXECUTE phase. You cannot directly request user input in this phase. You will keep running until you are able to call attempt_completion and pass the grader that is invoked from that tool call. Treat attempt_completion as a finite resource, and only call it when you are confident that you have completed the task described by the user.
+You are in the EXECUTE phase. You cannot request user input or wait for a reply here. When information is missing or ambiguous, make the best reasonable assumption and proceed anyway, even at the risk of a mistake. Never stop to ask. You will keep running until you are able to call attempt_completion and pass the grader that is invoked from that tool call. Treat attempt_completion as a finite resource, and only call it when you are confident that you have completed the task described by the user.
 
 In the words of Paul Graham, founder of Y Combinator, remember to "be relentlessly resourceful".
 

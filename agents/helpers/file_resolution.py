@@ -61,11 +61,13 @@ def transform_schema_for_remote_session(output_schema: Optional[Dict[str, Any]])
 
     transformed = copy.deepcopy(output_schema)
 
-    for field in transformed.get("fields", []):
-        if field.get("type") == "file_pointer":
-            field["type"] = "session_file_pointer"
-        elif field.get("type") == "list[file_pointer]":
-            field["type"] = "list[session_file_pointer]"
+    _replace_schema_file_pointer_types(
+        transformed.get("fields", []),
+        single_from="file_pointer",
+        single_to="session_file_pointer",
+        list_from="list[file_pointer]",
+        list_to="list[session_file_pointer]",
+    )
 
     return transformed
 
@@ -88,13 +90,43 @@ def restore_schema_from_remote_session(output_schema: Optional[Dict[str, Any]]) 
 
     restored = copy.deepcopy(output_schema)
 
-    for field in restored.get("fields", []):
-        if field.get("type") == "session_file_pointer":
-            field["type"] = "file_pointer"
-        elif field.get("type") == "list[session_file_pointer]":
-            field["type"] = "list[file_pointer]"
+    _replace_schema_file_pointer_types(
+        restored.get("fields", []),
+        single_from="session_file_pointer",
+        single_to="file_pointer",
+        list_from="list[session_file_pointer]",
+        list_to="list[file_pointer]",
+    )
 
     return restored
+
+
+def _replace_schema_file_pointer_types(
+    fields: Any,
+    *,
+    single_from: str,
+    single_to: str,
+    list_from: str,
+    list_to: str,
+) -> None:
+    """Recursively replace file-pointer field types in response-schema fields."""
+    if not isinstance(fields, list):
+        return
+
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        if field.get("type") == single_from:
+            field["type"] = single_to
+        elif field.get("type") == list_from:
+            field["type"] = list_to
+        _replace_schema_file_pointer_types(
+            field.get("properties"),
+            single_from=single_from,
+            single_to=single_to,
+            list_from=list_from,
+            list_to=list_to,
+        )
 
 
 @dataclass
@@ -168,40 +200,20 @@ async def resolve_file_pointers_in_response(
     if not structured_response:
         return structured_response, []
 
-    # Build field type map from schema
-    field_types: Dict[str, str] = {}
-    if output_schema and "fields" in output_schema:
-        for field in output_schema["fields"]:
-            if isinstance(field, dict) and "name" in field and "type" in field:
-                field_types[field["name"]] = field["type"]
-
     resolved = {}
     all_file_pointers: List[FilePointer] = []
+    fields_by_name = _schema_fields_by_name(output_schema.get("fields") if isinstance(output_schema, dict) else None)
 
     for key, value in structured_response.items():
-        field_type = field_types.get(key)
-
-        # Handle file_pointer type
-        if field_type == "file_pointer":
-            resolved_value, fps = await _resolve_file_pointer_value(value, file_extractor, user_id, upload_fn)
-            resolved[key] = resolved_value
-            all_file_pointers.extend(fps)
-
-        # Handle list[file_pointer] type
-        elif field_type == "list[file_pointer]":
-            resolved_list, fps = await _resolve_file_pointer_list(value, file_extractor, user_id, upload_fn)
-            resolved[key] = resolved_list
-            all_file_pointers.extend(fps)
-
-        # Auto-detect partial file pointers even without schema type
-        elif PartialFilePointer.is_partial(value):
-            resolved_value, fps = await _resolve_file_pointer_value(value, file_extractor, user_id, upload_fn)
-            resolved[key] = resolved_value
-            all_file_pointers.extend(fps)
-
-        # Pass through other values unchanged
-        else:
-            resolved[key] = value
+        resolved_value, fps = await _resolve_value_by_schema(
+            value,
+            fields_by_name.get(key),
+            file_extractor,
+            user_id,
+            upload_fn,
+        )
+        resolved[key] = resolved_value
+        all_file_pointers.extend(fps)
 
     logger.info(
         "[FileResolution] Resolved file pointers in structured response",
@@ -210,6 +222,88 @@ async def resolve_file_pointers_in_response(
     )
 
     return resolved, all_file_pointers
+
+
+def _schema_fields_by_name(fields: Any) -> Dict[str, Dict[str, Any]]:
+    if not isinstance(fields, list):
+        return {}
+    by_name: Dict[str, Dict[str, Any]] = {}
+    for field in fields:
+        if isinstance(field, dict) and isinstance(field.get("name"), str):
+            by_name[field["name"]] = field
+    return by_name
+
+
+async def _resolve_value_by_schema(
+    value: Any,
+    field_schema: Optional[Dict[str, Any]],
+    file_extractor: FileExtractor,
+    user_id: str,
+    upload_fn: Callable[[str, bytes, str, str], Coroutine[Any, Any, Dict[str, Any]]],
+) -> tuple[Any, List[FilePointer]]:
+    field_type = field_schema.get("type") if isinstance(field_schema, dict) else None
+
+    if field_type in ("file_pointer", "session_file_pointer"):
+        return await _resolve_file_pointer_value(value, file_extractor, user_id, upload_fn)
+
+    if field_type in ("list[file_pointer]", "list[session_file_pointer]"):
+        return await _resolve_file_pointer_list(value, file_extractor, user_id, upload_fn)
+
+    if field_type == "object" and isinstance(value, dict):
+        return await _resolve_object_fields_by_schema(
+            value,
+            field_schema.get("properties") if isinstance(field_schema, dict) else None,
+            file_extractor,
+            user_id,
+            upload_fn,
+        )
+
+    if field_type == "list[object]" and isinstance(value, list):
+        resolved_list = []
+        all_fps: List[FilePointer] = []
+        properties = field_schema.get("properties") if isinstance(field_schema, dict) else None
+        for item in value:
+            if isinstance(item, dict):
+                resolved_item, fps = await _resolve_object_fields_by_schema(
+                    item,
+                    properties,
+                    file_extractor,
+                    user_id,
+                    upload_fn,
+                )
+                resolved_list.append(resolved_item)
+                all_fps.extend(fps)
+            else:
+                resolved_list.append(item)
+        return resolved_list, all_fps
+
+    if PartialFilePointer.is_partial(value):
+        return await _resolve_file_pointer_value(value, file_extractor, user_id, upload_fn)
+
+    return value, []
+
+
+async def _resolve_object_fields_by_schema(
+    value: Dict[str, Any],
+    fields: Any,
+    file_extractor: FileExtractor,
+    user_id: str,
+    upload_fn: Callable[[str, bytes, str, str], Coroutine[Any, Any, Dict[str, Any]]],
+) -> tuple[Dict[str, Any], List[FilePointer]]:
+    fields_by_name = _schema_fields_by_name(fields)
+    resolved: Dict[str, Any] = {}
+    all_fps: List[FilePointer] = []
+    for key, item in value.items():
+        resolved_item, fps = await _resolve_value_by_schema(
+            item,
+            fields_by_name.get(key),
+            file_extractor,
+            user_id,
+            upload_fn,
+        )
+        resolved[key] = resolved_item
+        all_fps.extend(fps)
+    return resolved, all_fps
 
 
 async def _resolve_file_pointer_value(
@@ -307,35 +401,49 @@ def get_file_pointer_paths_from_response(
     if not structured_response:
         return []
 
-    # Build field type map from schema
-    field_types: Dict[str, str] = {}
-    if output_schema and "fields" in output_schema:
-        for field in output_schema["fields"]:
-            if isinstance(field, dict) and "name" in field and "type" in field:
-                field_types[field["name"]] = field["type"]
-
     paths: List[str] = []
+    fields_by_name = _schema_fields_by_name(output_schema.get("fields") if isinstance(output_schema, dict) else None)
 
     for key, value in structured_response.items():
-        field_type = field_types.get(key)
+        paths.extend(_file_pointer_paths_by_schema(value, fields_by_name.get(key)))
 
-        if field_type == "file_pointer":
-            partial = PartialFilePointer.from_dict(value)
+    return paths
+
+
+def _file_pointer_paths_by_schema(value: Any, field_schema: Optional[Dict[str, Any]]) -> List[str]:
+    field_type = field_schema.get("type") if isinstance(field_schema, dict) else None
+
+    if field_type in ("file_pointer", "session_file_pointer") or PartialFilePointer.is_partial(value):
+        partial = PartialFilePointer.from_dict(value)
+        return [partial.path] if partial else []
+
+    if field_type in ("list[file_pointer]", "list[session_file_pointer]") and isinstance(value, list):
+        paths: List[str] = []
+        for item in value:
+            partial = PartialFilePointer.from_dict(item)
             if partial:
                 paths.append(partial.path)
+        return paths
 
-        elif field_type == "list[file_pointer]" and isinstance(value, list):
-            for item in value:
-                partial = PartialFilePointer.from_dict(item)
-                if partial:
-                    paths.append(partial.path)
+    if field_type == "object" and isinstance(value, dict):
+        return _file_pointer_paths_from_object(value, field_schema.get("properties"))
 
-        # Auto-detect partial file pointers
-        elif PartialFilePointer.is_partial(value):
-            partial = PartialFilePointer.from_dict(value)
-            if partial:
-                paths.append(partial.path)
+    if field_type == "list[object]" and isinstance(value, list):
+        paths: List[str] = []
+        properties = field_schema.get("properties") if isinstance(field_schema, dict) else None
+        for item in value:
+            if isinstance(item, dict):
+                paths.extend(_file_pointer_paths_from_object(item, properties))
+        return paths
 
+    return []
+
+
+def _file_pointer_paths_from_object(value: Dict[str, Any], fields: Any) -> List[str]:
+    fields_by_name = _schema_fields_by_name(fields)
+    paths: List[str] = []
+    for key, item in value.items():
+        paths.extend(_file_pointer_paths_by_schema(item, fields_by_name.get(key)))
     return paths
 
 
@@ -374,30 +482,52 @@ def resolve_file_pointers_from_extracted(
         available_files=list(file_lookup.keys()),
     )
 
-    # Build field type map from schema
-    field_types: Dict[str, str] = {}
-    if output_schema and "fields" in output_schema:
-        for field in output_schema["fields"]:
-            if isinstance(field, dict) and "name" in field and "type" in field:
-                field_types[field["name"]] = field["type"]
-
     resolved = {}
+    fields_by_name = _schema_fields_by_name(output_schema.get("fields") if isinstance(output_schema, dict) else None)
 
     for key, value in structured_response.items():
-        field_type = field_types.get(key)
+        resolved[key] = _resolve_extracted_value_by_schema(value, fields_by_name.get(key), file_lookup)
 
-        # Handle file_pointer type
-        if field_type == "file_pointer" or PartialFilePointer.is_partial(value):
-            resolved[key] = _match_partial_to_full(value, file_lookup)
+    return resolved
 
-        # Handle list[file_pointer] type
-        elif field_type == "list[file_pointer]" and isinstance(value, list):
-            resolved[key] = [_match_partial_to_full(item, file_lookup) for item in value]
 
-        # Pass through other values unchanged
-        else:
-            resolved[key] = value
+def _resolve_extracted_value_by_schema(
+    value: Any,
+    field_schema: Optional[Dict[str, Any]],
+    file_lookup: Dict[str, Dict[str, Any]],
+) -> Any:
+    field_type = field_schema.get("type") if isinstance(field_schema, dict) else None
 
+    if field_type in ("file_pointer", "session_file_pointer") or PartialFilePointer.is_partial(value):
+        return _match_partial_to_full(value, file_lookup)
+
+    if field_type in ("list[file_pointer]", "list[session_file_pointer]") and isinstance(value, list):
+        return [_match_partial_to_full(item, file_lookup) for item in value]
+
+    if field_type == "object" and isinstance(value, dict):
+        return _resolve_extracted_object_by_schema(value, field_schema.get("properties"), file_lookup)
+
+    if field_type == "list[object]" and isinstance(value, list):
+        properties = field_schema.get("properties") if isinstance(field_schema, dict) else None
+        return [
+            _resolve_extracted_object_by_schema(item, properties, file_lookup)
+            if isinstance(item, dict)
+            else item
+            for item in value
+        ]
+
+    return value
+
+
+def _resolve_extracted_object_by_schema(
+    value: Dict[str, Any],
+    fields: Any,
+    file_lookup: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    fields_by_name = _schema_fields_by_name(fields)
+    resolved: Dict[str, Any] = {}
+    for key, item in value.items():
+        resolved[key] = _resolve_extracted_value_by_schema(item, fields_by_name.get(key), file_lookup)
     return resolved
 
 

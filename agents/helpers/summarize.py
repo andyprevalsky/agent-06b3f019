@@ -54,6 +54,7 @@ TOOL_RESULT_HARD_CAP_CHARS = 50_000
 # Tool name → Human-readable label mapping for summary display
 TOOL_DISPLAY_NAMES = {
     "web_search": "Web Searches",
+    "people_search": "People Searches",
     "spawn_sub_agent": "Sub Agent Spawned",
     "spawn_browser_agent": "Browser Agents Spawned",
     "spawn_claude_code_agent": "Code Agents Spawned",
@@ -670,6 +671,8 @@ async def generate_completion_summary(
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
+    fast_mode_cache_enabled: bool = False,
+    fast_mode_step: int = 0,
 ) -> Dict[str, Any]:
     """
     Generate a summary of what the agent accomplished.
@@ -696,6 +699,11 @@ async def generate_completion_summary(
 
         # Import here to avoid circular dependency
         from helpers.llm import call_llm, convert_context_to_messages
+        from providers.fast_cache.context import (
+            FastCacheContext,
+            set_context as set_fast_cache_context,
+            write_through_enabled_for_user,
+        )
 
         # Build context about structured output (for LLM awareness, not for formatting)
         structured_output_context = ""
@@ -729,6 +737,18 @@ Just write plain text describing what was done."""
                 "content": "Provide a brief 1-2 sentence summary of what was accomplished. Plain text only, no markdown.",
             }
         )
+
+        cache_user_id = claude_token_user_id or gpt_token_user_id
+        write_through_enabled = write_through_enabled_for_user(cache_user_id)
+        if goal and (fast_mode_cache_enabled or write_through_enabled):
+            set_fast_cache_context(
+                FastCacheContext(
+                    enabled=fast_mode_cache_enabled,
+                    goal=goal,
+                    base_step=fast_mode_step,
+                    write_enabled=fast_mode_cache_enabled or write_through_enabled,
+                )
+            )
 
         # Use call_llm which handles Rose model routing automatically
         result = await call_llm(
@@ -769,11 +789,12 @@ Just write plain text describing what was done."""
             tool_count=sum(total_tool_counts.values()) if total_tool_counts else 0,
         )
 
-        return {
+        _summary_result = {
             "summary": summary,
             "usage": usage,
             "tool_counts": total_tool_counts,
         }
+        return _summary_result
 
     except Exception as e:
         logger.error("Failed to generate summary", error=str(e), goal=goal)

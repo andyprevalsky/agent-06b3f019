@@ -13,4 +13,8 @@ export class GptCredentialSync {
   static async syncCredentials(): Promise<SyncResult> {
     return service.syncCredentials();
   }
+
+  static async syncExistingCredentialsIfChanged(): Promise<SyncResult> {
+    return service.syncExistingCredentialsIfChanged();
+  }
 }

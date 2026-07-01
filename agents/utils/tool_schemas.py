@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Type, Union
 
 import structlog
-from pydantic import BaseModel, Field, create_model, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, create_model, field_validator, model_validator
 
 from utils.prompts import (
     PLANNER_RESPONSE_JOIN_DESCRIPTION,
@@ -260,6 +260,65 @@ class WebSearchTool(BaseModel):
     query: str = Field(description="Search query or question about current information.")
 
 
+class PeopleSearchTool(BaseModel):
+    """Find or enrich real people on the public web using dedicated people-search providers. Use when web_search is insufficient for a people goal: you need comprehensiveness (a broad list matching criteria) or depth (a field-level profile for a specific person). For a quick one-off people fact, web_search is fine."""
+
+    tool: Literal["people_search"]
+    query: str = Field(
+        description=(
+            "Natural-language people request. For mode='enrich', a specific "
+            "person plus disambiguating context (e.g. 'Patrick Collison, "
+            "co-founder of Stripe'). For mode='discover', the criteria (e.g. "
+            "'partners at AI-infra VC firms in the SF Bay Area')."
+        )
+    )
+    mode: Literal["enrich", "discover"] = Field(
+        description=(
+            "'enrich': resolve ONE specific person and return a field-level "
+            "profile. 'discover': return a LIST of people matching a role, "
+            "company, geography, or seniority."
+        )
+    )
+    provider: Literal["exa", "parallel"] = Field(
+        description=(
+            "Which backend. Exa is strongest for depth/enrichment (structured "
+            "work and education history); Parallel is strongest for broad "
+            "discovery (high recall). If the chosen provider returns "
+            "insufficient or low-quality data, re-call with the other provider. "
+            "On a provider rate-limit or error the tool auto-retries the other "
+            "provider."
+        )
+    )
+    limit: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=25,
+        description=(
+            "mode='discover' ONLY: max number of people to return (1-25, default "
+            "10). Not used for 'enrich', which resolves a single person."
+        ),
+    )
+    fields: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "mode='enrich' ONLY: the attributes to return for the resolved "
+            "person. These DEFINE the output params, e.g. ['current_title', "
+            "'current_company','location','linkedin_url','email','education']. "
+            "Maps to the provider's structured-output/enrichment schema. If "
+            "omitted, the provider returns its native default profile and no "
+            "field list is imposed."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_mode_params(self) -> "PeopleSearchTool":
+        if self.mode == "enrich" and self.limit is not None:
+            raise ValueError("limit is only valid for mode='discover'.")
+        if self.mode == "discover" and self.fields is not None:
+            raise ValueError("fields is only valid for mode='enrich'.")
+        return self
+
+
 class WebFetchTool(BaseModel):
     """Fetch a URL with JavaScript rendering; a small fast model filters the page to your objective."""
 
@@ -277,49 +336,79 @@ class WebFetchTool(BaseModel):
 
 
 class GrepTool(BaseModel):
-    """Search the user's local data (messages, contact network, agent network) by substring."""
+    """Search local data sources with regex grep semantics."""
 
     tool: Literal["grep"]
     pattern: str = Field(
         description=(
-            "Substring to match. Case-insensitive. Pass empty string to return all records up to limit. "
-            "Matches across any column in the database for the given data source."
+            "Regular expression pattern to search for. Plain text works as a literal regex. "
+            "Use -i for case-insensitive matching and multiline for cross-line patterns."
         ),
     )
-    source: str = Field(
-        default="messages",
-        description=(
-            "Data source to search. One of: "
-            "messages: iMessage/email records. Searches only message body text by case-insensitive substring. "
-            "Results are grouped by person/thread and include surrounding messages with channel, from, to, "
-            "timestamp, message, and is_match. Supports person_id and since. "
-            "Empty pattern returns the most recent messages within the `since` window (default 365 days). "
-            "network: Contact database. Searches firstName, lastName, email, phoneNumber, company, title, "
-            "relation, and communicationFrequency by case-insensitive substring. Results include person_id, "
-            "first_name, last_name, phone_number, email, company, title, relation, communication_frequency, "
-            "and messages_exchanged. Empty pattern returns top contacts by message volume. "
-            "agent_network_user_messages: User messages across all agents in this workflow tree. Searches "
-            "Message.text for messages with role='USER'. Results include agent_id, message_id, role, text, "
-            "timestamp, and pointer. "
-            "agent_network_tool_results: Finished tool-result messages across all agents in this workflow tree. "
-            "Searches Message.text for messages with role='TOOL' and metadata.toolStatus='FINISHED'. Results "
-            "include agent_id, message_id, role, text, timestamp, and pointer."
-        ),
-    )
-    person_id: Optional[str] = Field(
+    source: Optional[Literal["messages", "network", "agent_network"]] = Field(
         default=None,
         description=(
-            "Optional person identifier to scope search to one thread (messages source only). "
-            "Accepts email, phone, or full name."
+            "Optional source bucket. Omit to search messages, network, and the current agent_network. "
+            "messages searches user communication records. network searches contact records. "
+            "agent_network searches all message roles in the current agent tree and returns role/location metadata."
+        ),
+    )
+    before: Optional[int] = Field(
+        default=None,
+        alias="-B",
+        description="Number of logical lines to show before each match.",
+    )
+    after: Optional[int] = Field(
+        default=None,
+        alias="-A",
+        description="Number of logical lines to show after each match.",
+    )
+    context_c: Optional[int] = Field(
+        default=None,
+        alias="-C",
+        description="Number of logical lines to show before and after each match. Alias for context.",
+    )
+    context: Optional[int] = Field(
+        default=None,
+        description="Number of logical lines to show before and after each match.",
+    )
+    line_numbers: Optional[bool] = Field(
+        default=None,
+        alias="-n",
+        description="Show logical line numbers in content output. Defaults to true.",
+    )
+    case_insensitive: Optional[bool] = Field(
+        default=None,
+        alias="-i",
+        description="Enable case-insensitive regex matching.",
+    )
+    head_limit: Optional[int] = Field(
+        default=None,
+        description="Maximum number of returned result snippets. Defaults to 20.",
+    )
+    offset: Optional[int] = Field(
+        default=None,
+        description="Skip this many matched snippets before applying head_limit.",
+    )
+    multiline: Optional[bool] = Field(
+        default=None,
+        description="Allow regex patterns to match across newlines within a record.",
+    )
+    person: Optional[str] = Field(
+        default=None,
+        description=(
+            "messages source only: narrow to one contact by email, phone, or full name. "
+            "Ignored for network and agent_network."
         ),
     )
     since: Optional[str] = Field(
         default=None,
         description=(
-            "ISO 8601 timestamp cutoff; only return messages after this time (messages source only). "
-            "Defaults to 365 days ago."
+            "messages source only: only return messages at or after this time. "
+            "ISO 8601 timestamp or a relative form like 7d, 24h, 30m. Ignored for other sources."
         ),
     )
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class SendMessageToUserTool(BaseModel):
@@ -641,6 +730,7 @@ ToolRegistry = Dict[str, Type[BaseModel]]
 TOOL_MODELS: ToolRegistry = {
     "wait_for": WaitForTool,
     "web_search": WebSearchTool,
+    "people_search": PeopleSearchTool,
     "web_fetch": WebFetchTool,
     "send_message_to_user": SendMessageToUserTool,
     "send_message_to_user_execute_phase": SendMessageToUserExecutePhaseTool,
@@ -667,7 +757,7 @@ PLAN_TOOL_MODELS: ToolRegistry = {
 }
 
 # Tools available inside the explore agent (subset of read-only tools)
-EXPLORE_AGENT_TOOLS = ["web_search", "web_fetch", "grep", "attempt_completion_with_result"]
+EXPLORE_AGENT_TOOLS = ["web_search", "people_search", "web_fetch", "grep", "attempt_completion_with_result"]
 
 
 # ============================================================================
@@ -826,6 +916,7 @@ class ProgressScore(BaseModel):
 __all__ = [
     "WaitForTool",
     "WebSearchTool",
+    "PeopleSearchTool",
     "WebFetchTool",
     "SendMessageToUserTool",
     "SendMessageToUserExecutePhaseTool",

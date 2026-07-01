@@ -47,6 +47,7 @@ export async function findTopLevelAgents(userId: string) {
       tokensOut: true,
       contextSize: true,
       messageCount: true,
+      fastModeCacheEnabled: true,
       createdAt: true,
       updatedAt: true,
     },
@@ -207,6 +208,19 @@ export async function findExistingAgentsByIds(agentIds: string[], userId: string
       model: true,
       source: true,
       reasoningMaxTokens: true,
+      fastModeCacheEnabled: true,
+    },
+  });
+}
+
+/** Fetch parent Fast Mode flags in bulk for batch-created sub-agents. */
+export async function findFastModeFlagsByIds(agentIds: string[]) {
+  if (agentIds.length === 0) return [];
+  return prisma.agent.findMany({
+    where: { id: { in: agentIds }, deletedAt: null },
+    select: {
+      id: true,
+      fastModeCacheEnabled: true,
     },
   });
 }

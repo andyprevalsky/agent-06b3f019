@@ -564,6 +564,9 @@ async def run_planner_attempt(
         gpt_token_source,
         gpt_token_pool_id,
         getattr(workflow_instance, "user_id", None),
+        getattr(workflow_instance, "fast_mode_cache_enabled", False),
+        getattr(workflow_instance, "goal", None),
+        attempt,  # Fast Mode position step — planner attempt index (deterministic across runs)
     ]
 
     # Schema generation is now done synchronously at workflow startup so the

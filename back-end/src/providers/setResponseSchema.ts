@@ -81,7 +81,18 @@ const FieldTypeSchema = z.enum([
 const NestedSchemaFieldSchema = z.object({
   name: z.string().describe('Nested field name in snake_case'),
   type: z
-    .enum(['str', 'int', 'float', 'bool', 'list[str]', 'list[int]'])
+    .enum([
+      'str',
+      'int',
+      'float',
+      'bool',
+      'list[str]',
+      'list[int]',
+      'file_pointer',
+      'list[file_pointer]',
+      'session_file_pointer',
+      'list[session_file_pointer]',
+    ])
     .describe('Nested field type'),
 });
 
@@ -148,7 +159,17 @@ export type ResponseSchema = {
     required: boolean;
     properties?: Array<{
       name: string;
-      type: 'str' | 'int' | 'float' | 'bool' | 'list[str]' | 'list[int]';
+      type:
+        | 'str'
+        | 'int'
+        | 'float'
+        | 'bool'
+        | 'list[str]'
+        | 'list[int]'
+        | 'file_pointer'
+        | 'list[file_pointer]'
+        | 'session_file_pointer'
+        | 'list[session_file_pointer]';
     }>;
   }>;
 };
@@ -212,7 +233,18 @@ const RESPONSE_SCHEMA_JSON_SCHEMA = {
                 },
                 type: {
                   type: 'string',
-                  enum: ['str', 'int', 'float', 'bool', 'list[str]', 'list[int]'],
+                  enum: [
+                    'str',
+                    'int',
+                    'float',
+                    'bool',
+                    'list[str]',
+                    'list[int]',
+                    'file_pointer',
+                    'list[file_pointer]',
+                    'session_file_pointer',
+                    'list[session_file_pointer]',
+                  ],
                   description: 'Nested field type.',
                 },
               },

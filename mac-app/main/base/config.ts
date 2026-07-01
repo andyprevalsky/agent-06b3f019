@@ -16,14 +16,17 @@ if (fs.existsSync(envPath)) {
   console.warn(`[Config] Env file not found: ${envPath}`);
 }
 
-const apiUrl = process.env.VITE_BACKEND_API_URL ?? (app.isPackaged ? '' : 'http://localhost:3001');
-
-if (!apiUrl) {
-  throw new Error('Missing VITE_BACKEND_API_URL');
+export function resolveApiUrl(rawUrl: string | undefined, isPackaged: boolean): string {
+  const url = rawUrl?.trim();
+  if (url !== undefined && url !== '') return url;
+  if (isPackaged) {
+    throw new Error('Missing VITE_BACKEND_API_URL for packaged Mac app');
+  }
+  return 'http://localhost:3001';
 }
 
 export const config = {
-  apiUrl,
+  apiUrl: resolveApiUrl(process.env.VITE_BACKEND_API_URL, app.isPackaged),
   supabase: {
     url: process.env.VITE_SUPABASE_URL!,
     anonKey: process.env.VITE_SUPABASE_ANON_KEY!,

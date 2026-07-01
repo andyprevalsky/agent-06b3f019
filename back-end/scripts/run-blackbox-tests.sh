@@ -85,6 +85,8 @@ if $DB_FOUND; then
   LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria"
   export DATABASE_URL="$LOCAL_DB_URL"
   export DIRECT_URL="$LOCAL_DB_URL"
+  echo "Syncing Prisma schema to local test database..."
+  npx prisma db push --skip-generate --accept-data-loss >/dev/null
 else
   echo "❌ No local Postgres available. Blackbox tests require a local DB to"
   echo "   avoid writing test fixtures into prod Supabase."

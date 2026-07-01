@@ -121,7 +121,10 @@ class WaitForManager(ToolManager):
             },
         )
 
-        await workflow.sleep(delta_seconds)
+        # Fast Mode: a recorded run already waited out the real time, so on replay
+        # the wait is pure dead wall-clock — skip it and resolve instantly.
+        if not getattr(workflow_instance, "fast_mode_cache_enabled", False):
+            await workflow.sleep(delta_seconds)
 
         yield ToolEvent(
             type=EventType.POST_MESSAGE,
@@ -179,8 +182,10 @@ class WaitForManager(ToolManager):
         all_usage: dict[str, list[Any]] = {"llm": [], "service": []}
 
         for check_num in range(1, max_checks_param + 1):
-            # Sleep between checks (skip before the first check - check immediately)
-            if check_num > 1:
+            # Sleep between checks (skip before the first check - check immediately).
+            # Fast Mode skips the inter-check wait entirely on replay — the recorded
+            # condition evaluations already replay from cache, so polling is instant.
+            if check_num > 1 and not getattr(workflow_instance, "fast_mode_cache_enabled", False):
                 await workflow.sleep(check_interval_seconds)
 
             # Check pause / cost limit
@@ -340,6 +345,7 @@ class WaitForManager(ToolManager):
                     "checkIntervalSeconds": check_interval_seconds,
                     "maxChecks": max_checks_param,
                     "checkNum": check_num,
+                    "exploreTaskId": task_id,
                     "conditionMet": False,
                 },
             )

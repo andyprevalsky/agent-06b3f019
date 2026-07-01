@@ -14,8 +14,8 @@
  *
  * THINKING DISPLAY (see useThinkingVisibility):
  * ├─ 800ms debounce before showing
- * ├─ Persistence rule (stays visible until selectedAgent changes OR
- * │  ASSISTANT message INSERT arrives)
+ * ├─ Hide immediately when agent state becomes terminal, blocking, or tool-active
+ * ├─ Assistant INSERT hides the indicator and resets persistence for the next turn
  * └─ Orange gradient when any streaming LLM bubble/tool has direct Claude/GPT token metadata
  *
  * AUTO-SCROLL (see useStreamingAutoScroll):
