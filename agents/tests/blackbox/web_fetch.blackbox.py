@@ -100,7 +100,9 @@ async def test_firecrawl_boundary_request_shape():
 
 
 async def test_firecrawl_activity_raises_on_missing_key():
-    """If FIRECRAWL_API_KEY is unset the activity raises a clear RuntimeError."""
+    """If provider keys are unset the activity raises a clear non-retryable error."""
+    from temporalio.exceptions import ApplicationError
+
     os.environ.pop("FIRECRAWL_API_KEY", None)
     os.environ.pop("PARRALLEL_API_KEY", None)
     os.environ.pop("PARALLEL_API_KEY", None)
@@ -114,10 +116,12 @@ async def test_firecrawl_activity_raises_on_missing_key():
 
         try:
             await web_fetch_activity(url="https://example.com/a")
-            raised = False
-        except RuntimeError as e:
-            raised = "FIRECRAWL_API_KEY" in str(e)
-    assert raised, "expected RuntimeError mentioning FIRECRAWL_API_KEY"
+            error = None
+        except ApplicationError as e:
+            error = e
+    assert error is not None
+    assert error.non_retryable is True
+    assert "FIRECRAWL_API_KEY" in str(error)
 
 
 async def test_firecrawl_403_falls_back_to_parallel_extract():
@@ -264,15 +268,65 @@ async def test_both_fetch_providers_failing_raises_combined_error():
     })
 
     with patch("temporalio.activity.heartbeat"):
-        from domains.web_fetch.service import scrape_url
+        from domains.web_fetch.service import WebFetchProvidersFailed, scrape_url
 
         try:
             await scrape_url("https://example.com/bad")
-            raised = False
-        except RuntimeError as e:
-            raised = "Firecrawl" in str(e) and "Parallel Extract" in str(e)
+            error = None
+        except WebFetchProvidersFailed as e:
+            error = e
 
-    assert raised
+    assert error is not None
+    assert "Firecrawl" in str(error)
+    assert "Parallel Extract" in str(error)
+    assert error.retryable is False
+
+
+async def test_retryable_provider_failure_remains_retryable():
+    """If either provider failure is retryable by provider docs, Temporal may retry the activity."""
+    os.environ["FIRECRAWL_API_KEY"] = "test-firecrawl-key"
+    os.environ["PARRALLEL_API_KEY"] = "test-parallel-key"
+    setup_mock({
+        "api.firecrawl.dev/v2/scrape": {"status": 403, "json": {"error": "unsupported"}},
+        "api.parallel.ai/v1/extract": {"status": 500, "json": {"error": "temporary upstream failure"}},
+    })
+
+    with patch("temporalio.activity.heartbeat"):
+        from domains.web_fetch.service import WebFetchProvidersFailed, scrape_url
+
+        try:
+            await scrape_url("https://example.com/temporary")
+            error = None
+        except WebFetchProvidersFailed as e:
+            error = e
+
+    assert error is not None
+    assert error.retryable is True
+
+
+async def test_web_fetch_activity_marks_deterministic_provider_failures_non_retryable():
+    """The activity converts deterministic two-provider failures into a non-retryable Temporal error."""
+    from temporalio.exceptions import ApplicationError
+
+    os.environ["FIRECRAWL_API_KEY"] = "test-firecrawl-key"
+    os.environ["PARRALLEL_API_KEY"] = "test-parallel-key"
+    setup_mock({
+        "api.firecrawl.dev/v2/scrape": {"status": 403, "json": {"error": "unsupported"}},
+        "api.parallel.ai/v1/extract": {"status": 422, "json": {"errors": [{"content": "bad url"}]}},
+    })
+
+    with patch("temporalio.activity.heartbeat"):
+        from tools.web_fetch import web_fetch_activity
+
+        try:
+            await web_fetch_activity(url="https://example.com/bad")
+            error = None
+        except ApplicationError as e:
+            error = e
+
+    assert error is not None
+    assert error.non_retryable is True
+    assert error.type == "WebFetchProvidersFailed"
 
 
 # =========================================================================
@@ -458,7 +512,7 @@ async def test_handler_execute_tool_happy_path():
     assert "summarize_and_filter_links" in captured
     assert "web_fetch_download_activity" in captured
     scrape_call = next(call for call in calls if call["activity"] == "web_fetch_activity")
-    assert scrape_call["kwargs"]["retry_policy"].maximum_attempts == 1
+    assert scrape_call["kwargs"]["retry_policy"].maximum_attempts == 2
 
     # Result wires the file_pointer through
     assert out["result"]["downloaded_files"][0]["original_filename"] == "file.pdf"
@@ -626,6 +680,11 @@ async def run_all_tests() -> bool:
         test_parallel_extract_uses_joined_excerpts_when_full_content_missing,
     )
     await r.record_async("both_providers_failing_combined_error", test_both_fetch_providers_failing_raises_combined_error)
+    await r.record_async("retryable_provider_failure_remains_retryable", test_retryable_provider_failure_remains_retryable)
+    await r.record_async(
+        "activity_deterministic_provider_failures_non_retryable",
+        test_web_fetch_activity_marks_deterministic_provider_failures_non_retryable,
+    )
 
     # Pure helpers
     r.record("get_filename_simple", test_get_filename_from_url_simple)

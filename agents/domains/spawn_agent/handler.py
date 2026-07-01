@@ -573,6 +573,7 @@ class SpawnAgentManager(ToolManager):
                 status=MessageStatus.ERROR,
                 metadata={
                     "toolName": "spawn_general_purpose_agent_for_each",
+                    "toolStatus": MessageStatus.ERROR.value,
                     "structured_response": {"items": child_outputs},
                 },
             )
@@ -600,6 +601,7 @@ class SpawnAgentManager(ToolManager):
             status=MessageStatus.FINISHED,
             metadata={
                 "toolName": "spawn_general_purpose_agent_for_each",
+                "toolStatus": MessageStatus.FINISHED.value,
                 "structured_response": {"items": child_outputs},
             },
         )

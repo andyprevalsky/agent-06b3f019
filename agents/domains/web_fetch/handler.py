@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 import structlog
 from temporalio import activity
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ApplicationError
 
 from domains.web_fetch.config import FIRECRAWL_COST_CENTS, MAX_MARKDOWN_LENGTH, PARALLEL_EXTRACT_COST_CENTS
 from domains.web_fetch.service import download_and_attach, scrape_url
@@ -135,10 +136,12 @@ class WebFetchManager(ToolManager):
                 web_fetch_activity,
                 args=[url],
                 start_to_close_timeout=timedelta(seconds=180),
-                # scrape_url already tries Firecrawl and then Parallel Extract.
-                # Retrying this activity repeats the same provider pair for
-                # scrape-blocked URLs and creates long fan-out tail latency.
-                retry_policy=RetryPolicy(maximum_attempts=1),
+                retry_policy=RetryPolicy(
+                    maximum_attempts=2,
+                    backoff_coefficient=2.0,
+                    initial_interval=timedelta(seconds=1),
+                    maximum_interval=timedelta(seconds=10),
+                ),
             )
             markdown: str = scrape_result.get("markdown", "") if isinstance(scrape_result, dict) else ""
             links: List[str] = scrape_result.get("links", []) if isinstance(scrape_result, dict) else []
@@ -324,10 +327,15 @@ async def web_fetch_activity(url: str) -> Dict[str, Any]:
 
     Returns ``{markdown, links, metadata}``. Raises only if both providers fail.
     """
-    from domains.web_fetch.service import scrape_url
+    from domains.web_fetch.service import WebFetchProvidersFailed, scrape_url
 
     try:
         return await scrape_url(url)
+    except WebFetchProvidersFailed as e:
+        logger.error("Web fetch scrape failed", error=str(e), url=url, retryable=e.retryable)
+        if not e.retryable:
+            raise ApplicationError(str(e), type="WebFetchProvidersFailed", non_retryable=True) from e
+        raise
     except Exception as e:
         logger.error("Web fetch scrape failed", error=str(e), url=url)
         raise

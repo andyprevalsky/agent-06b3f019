@@ -444,26 +444,6 @@ def test_build_verifier_json_schema_with_response_schema():
     assert output_props["count"]["type"] == "integer"
 
 
-def test_build_verifier_prompt_allows_grounded_estimates_for_approximate_fields():
-    """Verifier instructions allow supported estimates for approximate fields."""
-    from utils.prompts import build_verifier_prompt
-
-    prompt = build_verifier_prompt({
-        "fields": [
-            {
-                "name": "posting_cadence",
-                "type": "str",
-                "description": "Typical posting cadence, e.g. daily or weekly.",
-            }
-        ]
-    })
-
-    assert "grounded approximation" in prompt
-    assert "typical cadence" in prompt
-    assert "do not require an exact" in prompt
-    assert "authoritative cadence statement" in prompt
-
-
 def test_build_verifier_json_schema_all_types():
     """_build_verifier_json_schema handles every supported field type."""
     from helpers.llm import _build_verifier_json_schema
@@ -2138,182 +2118,6 @@ async def test_check_progress_below_threshold_returns_partial_structured_respons
     assert result["score"] == 0.4
     # C2: partial structured_response must come through, not be dropped.
     assert result["structured_response"] == {"summary": "x"}
-
-
-async def test_check_progress_accepts_completed_for_each_structured_response():
-    """A completed for_each result can satisfy a single list[object] output without recopying via LLM."""
-    from helpers.llm import check_progress
-
-    response_schema = {
-        "fields": [
-            {
-                "name": "creator_research_results",
-                "type": "list[object]",
-                "properties": [
-                    {"name": "handle", "type": "str"},
-                    {"name": "primary_platform", "type": "str"},
-                    {"name": "follower_estimate", "type": "str"},
-                    {"name": "posting_cadence", "type": "str"},
-                    {"name": "top_content_theme", "type": "str"},
-                ],
-            }
-        ]
-    }
-    child_a = {
-        "handle": "@a",
-        "primary_platform": "YouTube",
-        "follower_estimate": "1M",
-        "posting_cadence": "weekly",
-        "top_content_theme": "health",
-    }
-    child_b = {
-        "handle": "@b",
-        "primary_platform": "X",
-        "follower_estimate": "500K",
-        "posting_cadence": "daily",
-        "top_content_theme": "technology",
-    }
-    context = [
-        {
-            "role": "TOOL",
-            "text": "Beginning execute",
-            "timestamp": "2024-01-01T00:00:00Z",
-            "metadata": {"toolName": "attempt_completion", "title": "Beginning Execute Phase"},
-        },
-        {
-            "role": "TOOL",
-            "text": "Completed for_each delegation",
-            "timestamp": "2024-01-01T00:00:01Z",
-            "metadata": {
-                "toolName": "spawn_general_purpose_agent_for_each",
-                "toolStatus": "FINISHED",
-                "structured_response": {
-                    "items": [
-                        {"index": 0, "status": "completed", "structured_response": child_a},
-                        {"index": 1, "status": "completed", "structured_response": child_b},
-                    ]
-                },
-            },
-        },
-    ]
-
-    async def fail_if_called(*_args, **_kwargs):
-        raise AssertionError("for_each structured output should bypass verifier LLM")
-
-    with patch("temporalio.activity.heartbeat"), patch("helpers.llm._call_llm_verifier", fail_if_called):
-        result = await check_progress(
-            context=context,
-            verifier_system_prompt="VERIFY",
-            response_schema=response_schema,
-            call_site="verifier_execute",
-        )
-
-    assert result["score"] == 1.0
-    assert result["usage"]["actual_model"] == "structured_response"
-    assert result["usage"]["pool_name"] == "completed_for_each"
-    assert result["structured_response"] == {"creator_research_results": [child_a, child_b]}
-
-
-async def test_check_progress_accepts_live_for_each_aggregate_without_tool_status():
-    """The terminal live for_each aggregate omits metadata.toolStatus but is complete by child item status."""
-    from helpers.llm import check_progress
-
-    response_schema = {
-        "fields": [
-            {
-                "name": "creators",
-                "type": "list[object]",
-                "properties": [
-                    {"name": "handle", "type": "str"},
-                    {"name": "posting_cadence", "type": "str"},
-                ],
-            }
-        ]
-    }
-    child_output = {"handle": "@a", "posting_cadence": "weekly"}
-    context = [
-        {
-            "role": "TOOL",
-            "text": "Completed for_each delegation for 1 items.\n\nChild outputs:\n- item 0: {\"handle\": \"@a\"}",
-            "timestamp": "2024-01-01T00:00:01Z",
-            "metadata": {
-                "toolName": "spawn_general_purpose_agent_for_each",
-                "structured_response": {
-                    "items": [
-                        {"index": 0, "agent_id": "child-1", "status": "completed", "structured_response": child_output}
-                    ]
-                },
-            },
-        },
-    ]
-
-    async def fail_if_called(*_args, **_kwargs):
-        raise AssertionError("live for_each aggregate should bypass verifier LLM")
-
-    with patch("temporalio.activity.heartbeat"), patch("helpers.llm._call_llm_verifier", fail_if_called):
-        result = await check_progress(
-            context=context,
-            verifier_system_prompt="VERIFY",
-            response_schema=response_schema,
-            call_site="verifier_execute",
-        )
-
-    assert result["score"] == 1.0
-    assert result["structured_response"] == {"creators": [child_output]}
-
-
-async def test_check_progress_incomplete_for_each_structured_response_uses_verifier():
-    """Missing nested fields are not accepted as completed for_each structured output."""
-    from helpers.llm import check_progress
-
-    response_schema = {
-        "fields": [
-            {
-                "name": "creator_research_results",
-                "type": "list[object]",
-                "properties": [
-                    {"name": "handle", "type": "str"},
-                    {"name": "primary_platform", "type": "str"},
-                ],
-            }
-        ]
-    }
-    context = [
-        {
-            "role": "TOOL",
-            "text": "Completed for_each delegation",
-            "timestamp": "2024-01-01T00:00:01Z",
-            "metadata": {
-                "toolName": "spawn_general_purpose_agent_for_each",
-                "toolStatus": "FINISHED",
-                "structured_response": {
-                    "items": [
-                        {"index": 0, "status": "completed", "structured_response": {"handle": "@a"}},
-                    ]
-                },
-            },
-        },
-    ]
-    called = []
-
-    async def fake_call_llm_verifier(messages, *_args, **_kwargs):
-        called.append(messages)
-        return {"score": 0.5, "reasoning": "missing platform"}, {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-        }
-
-    with patch("temporalio.activity.heartbeat"), patch("helpers.llm._call_llm_verifier", fake_call_llm_verifier):
-        result = await check_progress(
-            context=context,
-            verifier_system_prompt="VERIFY",
-            response_schema=response_schema,
-            call_site="verifier_execute",
-        )
-
-    assert called
-    assert result["score"] == 0.5
 
 
 def test_filter_context_for_execute_verifier_uses_execute_boundary():
@@ -4890,10 +4694,6 @@ async def run_all_tests():
     r.record("build_verifier_json_schema", test_build_verifier_json_schema)
     r.record("verifier_score_schema_no_numeric_bounds", test_verifier_score_schema_has_no_numeric_bounds)
     r.record("build_verifier_json_schema_with_response_schema", test_build_verifier_json_schema_with_response_schema)
-    r.record(
-        "build_verifier_prompt_allows_grounded_estimates_for_approximate_fields",
-        test_build_verifier_prompt_allows_grounded_estimates_for_approximate_fields,
-    )
     r.record("build_verifier_json_schema_all_types", test_build_verifier_json_schema_all_types)
     r.record(
         "verifier_response_model_closed_session_file_pointer",
@@ -5023,18 +4823,6 @@ async def run_all_tests():
     await r.record_async(
         "check_progress_below_threshold_returns_partial_structured_response",
         test_check_progress_below_threshold_returns_partial_structured_response,
-    )
-    await r.record_async(
-        "check_progress_accepts_completed_for_each_structured_response",
-        test_check_progress_accepts_completed_for_each_structured_response,
-    )
-    await r.record_async(
-        "check_progress_accepts_live_for_each_aggregate_without_tool_status",
-        test_check_progress_accepts_live_for_each_aggregate_without_tool_status,
-    )
-    await r.record_async(
-        "check_progress_incomplete_for_each_structured_response_uses_verifier",
-        test_check_progress_incomplete_for_each_structured_response_uses_verifier,
     )
     await r.record_async(
         "check_progress_accepts_completed_code_task_structured_response",

@@ -476,7 +476,7 @@ class SpawnAgentTool(BaseModel):
             "Optional when type='explore'; ignored for every other type. Controls research "
             "thoroughness as a TURN budget (one turn can batch multiple parallel searches): "
             "'quick' = a basic look (~5 turns), 'medium' = moderate exploration (~20 turns), "
-            "'deep' = comprehensive analysis across many sources (~50 turns). Default 'quick'; "
+            "'deep' = broad analysis across many sources (~50 turns). Default 'quick'; "
             "only use 'deep' when the task genuinely needs exhaustive research."
         ),
     )
@@ -549,7 +549,7 @@ class SpawnExploreAgentTool(BaseModel):
         description=(
             "Controls research thoroughness as a TURN budget (one turn can batch multiple "
             "parallel searches): 'quick' = a basic look (~5 turns), 'medium' = moderate (~20 turns), "
-            "'deep' = comprehensive across many sources (~50 turns). Default 'quick'; only use "
+            "'deep' = broad analysis across many sources (~50 turns). Default 'quick'; only use "
             "'deep' when the task genuinely needs exhaustive research."
         ),
     )

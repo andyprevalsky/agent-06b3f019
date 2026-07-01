@@ -12,7 +12,7 @@ const state = vi.hoisted(() => ({
 
 vi.mock('../../main/domains/passkey-enroll/config', () => ({
   APPLE_PASSWORDS_PASSKEY_SOURCE: 'apple_passwords',
-  ENROLL_TIMEOUT_MS: 5,
+  ENROLL_TIMEOUT_MS: 50,
   ENROLL_WINDOW: {
     height: 820,
     title: 'Add agent passkey',

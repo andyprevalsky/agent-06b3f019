@@ -38,6 +38,10 @@ from helpers.llm import (
     call_llm_structured_streaming,
     check_progress,
 )
+from helpers.llm_timeouts import (
+    STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS,
+    VERIFIER_ACTIVITY_TIMEOUT_SECONDS,
+)
 from helpers.messages import CoalescingStreamBroadcaster
 from helpers.summarize import compress_context
 from helpers.tracing import span, traced
@@ -835,7 +839,7 @@ async def run_agent(  # noqa: C901
                         user_id,
                         user_id,
                     ],
-                    start_to_close_timeout=timedelta(seconds=600),
+                    start_to_close_timeout=timedelta(seconds=STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS),
                     retry_policy=RetryPolicy(maximum_attempts=3),
                     heartbeat_timeout=timedelta(seconds=60),
                 )
@@ -1910,7 +1914,7 @@ async def _run_verifier(
             gpt_token_pool_id,
             gpt_token_user_id,
         ],
-        start_to_close_timeout=timedelta(seconds=60),
+        start_to_close_timeout=timedelta(seconds=VERIFIER_ACTIVITY_TIMEOUT_SECONDS),
         retry_policy=RetryPolicy(maximum_attempts=3),
     )
 
