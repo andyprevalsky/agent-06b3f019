@@ -18,6 +18,14 @@ FIRECRAWL_COST_CENTS = 0.083
 
 FIRECRAWL_SCRAPE_TIMEOUT_SECONDS = 120.0
 
+# ── Parallel Extract fallback ──
+
+PARALLEL_EXTRACT_API_URL = "https://api.parallel.ai/v1/extract"
+PARALLEL_EXTRACT_TIMEOUT_SECONDS = 120.0
+
+# Parallel Extract pricing is $1 / 1k URLs. Stored in cents.
+PARALLEL_EXTRACT_COST_CENTS = 0.1
+
 # ── MIME type mapping ──
 
 MIME_TYPES: dict[str, str] = {

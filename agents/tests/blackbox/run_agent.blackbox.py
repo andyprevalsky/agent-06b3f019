@@ -35,6 +35,7 @@ async def _run_single_iteration(
     execute_tool_override=None,
     verifier_score=1.0,
     verifier_reasoning="done",
+    winddown_window=0,
 ):
     from loop.run_agent import run_agent
 
@@ -116,6 +117,7 @@ async def _run_single_iteration(
             execute_tool=default_execute_tool,
             build_messages=lambda context, prompt: [{"role": "system", "content": prompt}],
             max_iterations=max_iterations,
+            winddown_window=winddown_window,
             skip_verification=skip_verification,
             skip_status_updates=True,
             is_plan_loop=is_plan_loop,
@@ -600,6 +602,96 @@ async def test_compress_context_forwards_compute_token_context():
     ]
 
 
+async def test_run_agent_reuses_rotated_compute_token_next_iteration():
+    """A successful in-call provider rotation should become the next iteration's direct token."""
+    from loop.run_agent import run_agent
+
+    llm_kwargs = []
+    posted_messages = []
+
+    async def system_prompt():
+        return "System prompt"
+
+    async def verifier_prompt():
+        return "Verifier prompt"
+
+    async def post_message(text, role, metadata=None):
+        posted_messages.append({"text": text, "role": role, "metadata": metadata})
+
+    async def execute_tool(tool_name, tool_args, tool_call_id):
+        posted_messages.append({
+            "text": f"{tool_name} complete",
+            "role": "TOOL",
+            "metadata": {
+                "toolCallId": tool_call_id,
+                "toolName": tool_name,
+                "toolStatus": "FINISHED",
+            },
+        })
+        return {"message": f"{tool_name} complete"}
+
+    async def mock_call_llm_structured_streaming(**kwargs):
+        llm_kwargs.append(kwargs)
+        if len(llm_kwargs) == 1:
+            return (
+                _DummyLLMResult("", [{"tool": "web_search", "query": "first"}]),
+                {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                    "actual_model": "claude-sonnet-4-6-claude",
+                    "gpt_token_error": "stall",
+                    "compute_token_used": {
+                        "type": "claude",
+                        "accessToken": "rotated-claude-token",
+                        "source": "pool",
+                        "poolTokenId": "pool-1",
+                    },
+                    "compute_token_rotated": True,
+                },
+                [("web_search", "tc-web-search-1", 1.0)],
+            )
+        return (
+            _DummyLLMResult("", []),
+            {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            [],
+        )
+
+    with patch(
+        "loop.run_agent.call_llm_structured_streaming",
+        new=AsyncMock(side_effect=mock_call_llm_structured_streaming),
+    ):
+        await run_agent(
+            agent_id="agent-test",
+            user_id="user-test",
+            system_prompt=system_prompt,
+            verifier_prompt_generator=verifier_prompt,
+            model="rose-labs/rose-1-lite",
+            tools=["web_search", "attempt_completion"],
+            initial_context=[
+                {"role": "USER", "text": "Find updates", "timestamp": "2024-01-01T00:00:00Z"}
+            ],
+            is_inside_temporal_activity=True,
+            post_message=post_message,
+            execute_tool=execute_tool,
+            build_messages=lambda context, prompt: [{"role": "system", "content": prompt}],
+            max_iterations=2,
+            skip_verification=True,
+            skip_status_updates=True,
+            gpt_token="stale-gpt-token",
+            gpt_account_id="acct-1",
+            get_gpt_token_source=lambda: "user",
+        )
+
+    assert len(llm_kwargs) == 2
+    assert llm_kwargs[0]["gpt_token"] == "stale-gpt-token"
+    assert llm_kwargs[0]["claude_token"] is None
+    assert llm_kwargs[1]["claude_token"] == "rotated-claude-token"
+    assert llm_kwargs[1]["claude_token_source"] == "pool"
+    assert llm_kwargs[1]["claude_token_pool_id"] == "pool-1"
+    assert llm_kwargs[1]["gpt_token"] is None
+
+
 async def test_compress_context_failure_preserves_original():
     """On activity failure (success=False), return (original_context, False) — no clobber."""
     from loop.run_agent import _compress_context
@@ -726,6 +818,51 @@ async def test_max_iterations_runs_final_verifier():
     assert "partial progress" in result["verifier_reasoning"]
 
 
+def _count_winddown_msgs(context):
+    return sum(
+        1
+        for m in context
+        if m.get("role") == "SYSTEM" and "final turn" in (m.get("text") or "")
+    )
+
+
+async def test_winddown_injects_one_message_near_cap():
+    """With winddown_window>0, exactly one 'final turn' SYSTEM message is appended
+    to the conversation tail (not the system prompt), and best-effort is returned."""
+    tool_calls = [{"tool": "web_search", "query": "x"}]  # never completes -> loops to cap
+    detected_tools = [("web_search", "tc-1", 1.0)]
+
+    result, _, _ = await _run_single_iteration(
+        tool_calls,
+        detected_tools,
+        skip_verification=True,  # explore-like
+        max_iterations=3,
+        winddown_window=1,
+    )
+
+    assert result["status"] == "max_iterations"
+    assert _count_winddown_msgs(result["context"]) == 1, "wind-down must inject exactly once"
+    assert "best_effort_response" in result
+    assert "final_response" in result
+
+
+async def test_winddown_disabled_by_default():
+    """winddown_window=0 (default) injects no wind-down message — keeps it explore-only."""
+    tool_calls = [{"tool": "web_search", "query": "x"}]
+    detected_tools = [("web_search", "tc-1", 1.0)]
+
+    result, _, _ = await _run_single_iteration(
+        tool_calls,
+        detected_tools,
+        skip_verification=True,
+        max_iterations=3,
+        winddown_window=0,
+    )
+
+    assert result["status"] == "max_iterations"
+    assert _count_winddown_msgs(result["context"]) == 0
+
+
 async def run_all_tests():
     print("run-agent blackbox tests:")
     r = BlackboxResult()
@@ -745,11 +882,14 @@ async def run_all_tests():
     await r.record_async("estimate_tokens", test_estimate_tokens)
     await r.record_async("compress_context_returns_new_context_on_success", test_compress_context_returns_new_context_on_success)
     await r.record_async("compress_context_forwards_compute_token_context", test_compress_context_forwards_compute_token_context)
+    await r.record_async("run_agent_reuses_rotated_compute_token_next_iteration", test_run_agent_reuses_rotated_compute_token_next_iteration)
     await r.record_async("compress_context_failure_preserves_original", test_compress_context_failure_preserves_original)
     await r.record_async("compress_context_activity_exception_preserves_original", test_compress_context_activity_exception_preserves_original)
     await r.record_async("run_verifier_posts_in_progress_and_finished", test_run_verifier_posts_in_progress_and_finished)
     await r.record_async("run_verifier_dynamic_schema_getter", test_run_verifier_dynamic_schema_getter)
     await r.record_async("max_iterations_runs_final_verifier", test_max_iterations_runs_final_verifier)
+    await r.record_async("winddown_injects_one_message_near_cap", test_winddown_injects_one_message_near_cap)
+    await r.record_async("winddown_disabled_by_default", test_winddown_disabled_by_default)
     teardown_mock()
     return r.summary()
 

@@ -1,6 +1,6 @@
 """Prompt for spawn_agent tool."""
 
-PROMPT = """Use this tool to launch a new agent to handle complex, multi-step tasks autonomously. Each agent gets its own isolated context, toolset, and runtime container.
+PROMPT = """Use this tool to launch a new agent for complex, multi-step tasks. Each agent gets an isolated context, toolset, and runtime container.
 
 Each agent type has specific capabilities and tools available to it.
 
@@ -18,7 +18,7 @@ Parameter wording:
 
 ## Writing the agent's goal
 
-Brief the agent like a smart colleague who just walked into the room; it hasn't seen this conversation, doesn't know what you've tried, doesn't understand why this task matters.
+Brief the agent like a smart colleague who just walked into the room; it has not seen this conversation or why the task matters.
 - Explain what you're trying to accomplish and why.
 - Describe what you've already learned or ruled out.
 - Give enough context about the surrounding problem that the agent can make judgment calls rather than just following a narrow instruction.

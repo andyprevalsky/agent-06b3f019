@@ -212,7 +212,9 @@ def test_agent_latency_inline_baseline_requires_20_samples():
             )
             span.end = span.start + timedelta(milliseconds=2000)
             rendered = _format_span_baseline(span, baselines, color=False)
-            assert "SLOW" in rendered
+            # 2000ms vs p95 1000ms → flagged out-of-band at 2.0× p95.
+            assert "OUT-OF-BAND" in rendered
+            assert "2.0× p95" in rendered
             assert "hist p50=1.00s p90=1.00s p95=1.00s max=1.00s n=20" in rendered
         finally:
             if old is None:

@@ -27,6 +27,7 @@ from temporalio.common import RetryPolicy
 
 from domains.reasoning.config import MAX_CONTEXT_MESSAGES as REASONING_MAX_CONTEXT_MESSAGES
 from helpers.llm import _pending_llm_context, call_llm_activity
+from helpers.llm_timeouts import STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
 from loop.context_utils import poll_and_update_context
 from loop.payload_guard import check_activity_payload
 from tools.base import EventType, MessageStatus, ToolEvent
@@ -479,9 +480,9 @@ async def execute_dag(
                     # enabled+goal auto-resolve from the agent row.
                     False, None, 0,
                 ],
-                start_to_close_timeout=timedelta(seconds=30),
+                start_to_close_timeout=timedelta(seconds=STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS),
                 retry_policy=RetryPolicy(maximum_attempts=1),
-                heartbeat_timeout=timedelta(seconds=20),
+                heartbeat_timeout=timedelta(seconds=60),
             )
             workflow.logger.info("[DAG] Cache warm complete")
         except Exception as e:
@@ -696,7 +697,7 @@ async def _execute_single_task(
                 # cost is consistently 80-110 s — start-to-close has to clear
                 # 90 s of streaming + post-processing, otherwise Temporal kills
                 # the activity mid-stream and the retry hits the same wall.
-                start_to_close_timeout=timedelta(seconds=600),
+                start_to_close_timeout=timedelta(seconds=STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS),
                 retry_policy=RetryPolicy(maximum_attempts=2),
                 # Heartbeat-timeout is the per-chunk safety net. The LLM stream
                 # heartbeats every chunk via _safe_heartbeat; a 90 s gap means
@@ -775,12 +776,18 @@ async def _execute_single_task(
             # second task falls back to backend API after the first cleans up.
             _pending_llm_context[agent_id] = (list(context), system_prompt_text, None)
 
+            # Constrain the param-population schema to ONLY the required tool.
+            # call_llm_activity uses structured output (create_agent_action_model),
+            # so passing the full tool-set lets a weak model (e.g. rose-1-lite)
+            # emit send_message instead of the planned tool — which fails the
+            # required_tool check and silently kills the DAG node (e.g. a for_each
+            # that never fans out). A single-tool union forces the right call.
             llm_result = await execute_activity(
                 call_llm_activity,
                 args=[
                     agent_id,
                     model,
-                    tool_names or [],
+                    [actual_tool],
                     256,
                     agent_id,
                     None,
@@ -847,6 +854,11 @@ async def _execute_single_task(
                     params.pop("output_schema", None)
                     params.pop("start_url", None)
                     params.pop("github_repo_link", None)
+                    # Clamp planner/DAG explores to a fast breadth-scan. The param-populator
+                    # LLM tends to pick depth="deep" for "comprehensive" goals, turning a
+                    # gating "identify the list" explore into a 50-turn crawl that blocks
+                    # fan-out. Force quick here; deliberate deep research should be its own task.
+                    params["depth"] = "quick"
 
             # Execute tool (uses existing flow - posts result to context)
             result = await execute_tool(actual_tool, params, tool_call_id)

@@ -235,6 +235,7 @@ async def _mark_direct_auth_stalled(
     request_id: str,
     agent_id: Optional[str],
     call_site: Optional[str],
+    failure_reason: str = "stall",
 ) -> None:
     """Temporarily back off a compute token that produced no first token."""
     if auth.mark_rate_limited is None:
@@ -246,6 +247,7 @@ async def _mark_direct_auth_stalled(
             token_type=auth.token_type,
             source=auth.source,
             pool_token_id=auth.pool_token_id,
+            failure_reason=failure_reason,
         )
         return
     try:
@@ -253,7 +255,7 @@ async def _mark_direct_auth_stalled(
             auth,
             _STALL_TOKEN_COOLDOWN_S,
             None,
-            "stall",
+            failure_reason,
         )
         if ok:
             logger.info(
@@ -264,6 +266,7 @@ async def _mark_direct_auth_stalled(
                 token_type=auth.token_type,
                 source=auth.source,
                 pool_token_id=auth.pool_token_id,
+                failure_reason=failure_reason,
                 cooldown_seconds=_STALL_TOKEN_COOLDOWN_S,
             )
         else:
@@ -275,6 +278,7 @@ async def _mark_direct_auth_stalled(
                 token_type=auth.token_type,
                 source=auth.source,
                 pool_token_id=auth.pool_token_id,
+                failure_reason=failure_reason,
                 cooldown_seconds=_STALL_TOKEN_COOLDOWN_S,
             )
     except Exception as exc:
@@ -286,6 +290,7 @@ async def _mark_direct_auth_stalled(
             token_type=auth.token_type,
             source=auth.source,
             pool_token_id=auth.pool_token_id,
+            failure_reason=failure_reason,
             cooldown_seconds=_STALL_TOKEN_COOLDOWN_S,
             error=str(exc),
         )
@@ -723,6 +728,26 @@ class RoseClient:
             return deadline_s - (time.monotonic() - started)
 
         last_heartbeat = started
+        first_chunk_at: Optional[float] = None
+        last_chunk_at: Optional[float] = None
+        first_productive_kind: Optional[str] = None
+        last_chunk_kind: Optional[str] = None
+        chunk_counts: Dict[str, int] = {}
+        active_route = "not_started"
+
+        def _elapsed_s(timestamp: Optional[float]) -> Optional[float]:
+            return round(timestamp - started, 3) if timestamp is not None else None
+
+        def _observability_fields() -> Dict[str, Any]:
+            return {
+                "active_route": active_route,
+                "first_chunk_s": _elapsed_s(first_chunk_at),
+                "first_contentful_token_s": _elapsed_s(first_contentful_at),
+                "first_productive_kind": first_productive_kind,
+                "last_chunk_s": _elapsed_s(last_chunk_at),
+                "last_chunk_kind": last_chunk_kind,
+                "chunk_counts": dict(chunk_counts),
+            }
 
         async def _guarded(
             source: AsyncIterator[StreamChunk],
@@ -741,7 +766,8 @@ class RoseClient:
               window raises `RoseDeadlineError`; the outer deadline still
               caps total time.
             """
-            nonlocal first_contentful_at, last_heartbeat
+            nonlocal first_chunk_at, first_contentful_at, first_productive_kind
+            nonlocal last_chunk_at, last_chunk_kind, last_heartbeat
             ttft_budget = ttft_override if ttft_override is not None else ttft_timeout_s
             it = source.__aiter__()
             saw_productive_chunk = False
@@ -767,11 +793,37 @@ class RoseClient:
                     raise RoseStallError(f"rose.complete TTFT exceeded {ttft_budget}s") from exc
                 except StopAsyncIteration:
                     return
+                now = time.monotonic()
+                chunk_kind = str(chunk.kind)
+                chunk_counts[chunk_kind] = chunk_counts.get(chunk_kind, 0) + 1
+                last_chunk_at = now
+                last_chunk_kind = chunk_kind
+                if first_chunk_at is None:
+                    first_chunk_at = now
+                    logger.info(
+                        "rose.complete.first_chunk",
+                        request_id=rid,
+                        agent_id=agent_id,
+                        call_site=call_site,
+                        active_route=active_route,
+                        kind=chunk_kind,
+                        elapsed_s=round(now - started, 3),
+                    )
                 if chunk.kind in productive_kinds:
                     if first_contentful_at is None:
-                        first_contentful_at = time.monotonic()
+                        first_contentful_at = now
+                        first_productive_kind = chunk_kind
+                        logger.info(
+                            "rose.complete.first_productive_chunk",
+                            request_id=rid,
+                            agent_id=agent_id,
+                            call_site=call_site,
+                            active_route=active_route,
+                            kind=chunk_kind,
+                            elapsed_s=round(now - started, 3),
+                            chunk_counts=dict(chunk_counts),
+                        )
                     saw_productive_chunk = True
-                now = time.monotonic()
                 if now - last_heartbeat >= _HEARTBEAT_INTERVAL_S:
                     _safe_heartbeat(f"rose.complete call_site={call_site} request_id={rid}")
                     last_heartbeat = now
@@ -841,6 +893,7 @@ class RoseClient:
             direct_rotations = 0
             direct_token_errors: Dict[str, str] = {}
             while direct_auth is not None:
+                active_route = f"direct_auth:{direct_auth.token_type}"
                 # Per-token stall-retry: bump TTFT and re-attempt with the
                 # same token before classifying as a fall-through. Cold pool
                 # slots often clear on attempt 2 with a wider window.
@@ -892,10 +945,13 @@ class RoseClient:
                             )
 
                         direct_yielded_any = False
+                        direct_yielded_user_visible = False
                         try:
                             async for chunk in _guarded(source, ttft_override=current_ttft_s):
                                 chunk = _with_timing_if_done(chunk)
                                 direct_yielded_any = True
+                                if chunk.kind in ("content", "reasoning", "tool_call"):
+                                    direct_yielded_user_visible = True
                                 if chunk.kind == "metadata" and chunk.data.get("actual_model"):
                                     _seen_actual_model = chunk.data["actual_model"]
                                 elif chunk.kind == "usage":
@@ -917,6 +973,20 @@ class RoseClient:
                             if not direct_yielded_any:
                                 raise _FallThrough() from exc
                             raise
+                        except RoseDeadlineError as exc:
+                            timeout_stall = RoseStallError(f"direct auth timeout_stall: {exc}")
+                            setattr(timeout_stall, "failure_reason", "timeout_stall")
+                            setattr(timeout_stall, "deadline_error", exc)
+                            if not direct_yielded_user_visible:
+                                raise _FallThrough() from timeout_stall
+                            await _mark_direct_auth_stalled(
+                                direct_auth,
+                                request_id=rid,
+                                agent_id=agent_id,
+                                call_site=call_site,
+                                failure_reason="timeout_stall",
+                            )
+                            raise
                         logger.info(
                             "rose.complete.direct_auth.done",
                             request_id=rid,
@@ -926,6 +996,7 @@ class RoseClient:
                             rotations=direct_rotations,
                             stall_retries=stall_retry_idx,
                             elapsed_s=round(time.monotonic() - started, 3),
+                            **_observability_fields(),
                         )
                         _finalize_dump()
                         return
@@ -976,16 +1047,25 @@ class RoseClient:
                     token_type=direct_auth.token_type,
                     reason=type(cause).__name__ if cause else "unknown",
                     token_error=token_error,
+                    failure_reason=getattr(cause, "failure_reason", token_error),
                     rotations=direct_rotations,
                     stall_retries=stall_retry_idx,
                 )
+                failure_reason = str(getattr(cause, "failure_reason", token_error))
                 if token_error == "stall":
                     await _mark_direct_auth_stalled(
                         direct_auth,
                         request_id=rid,
                         agent_id=agent_id,
                         call_site=call_site,
+                        failure_reason=failure_reason,
                     )
+
+                if token_error == "stall" and failure_reason == "timeout_stall" and remaining() <= 0:
+                    deadline_error = getattr(cause, "deadline_error", None)
+                    if isinstance(deadline_error, RoseDeadlineError):
+                        raise deadline_error
+                    raise RoseDeadlineError(f"rose.complete deadline exceeded after {deadline_s}s")
 
                 # Stalls are rotation-eligible immediately: cold-start jitter
                 # is absorbed by the 90s TTFT, and Anthropic's batched-response
@@ -1026,6 +1106,7 @@ class RoseClient:
             # first content, back it off (shared DB cooldown) and fall through.
             anthropic_api_key = (load_config().anthropic.api_key or "").strip()
             if anthropic_api_key and not await _anthropic_api_key_on_cooldown():
+                active_route = "anthropic_apikey"
                 api_yielded_any = False
                 try:
                     async for chunk in _guarded(
@@ -1062,6 +1143,7 @@ class RoseClient:
                         agent_id=agent_id,
                         call_site=call_site,
                         elapsed_s=round(time.monotonic() - started, 3),
+                        **_observability_fields(),
                     )
                     _finalize_dump()
                     return
@@ -1079,6 +1161,7 @@ class RoseClient:
                         reason=type(cause).__name__ if cause else "unknown",
                     )
 
+            active_route = "waterfall"
             async for chunk in _guarded(
                 waterfall_complete(
                     pool_spec=pool_spec,
@@ -1121,6 +1204,7 @@ class RoseClient:
                 agent_id=agent_id,
                 call_site=call_site,
                 elapsed_s=round(time.monotonic() - started, 3),
+                **_observability_fields(),
             )
             _finalize_dump()
         except RoseError as exc:
@@ -1133,6 +1217,7 @@ class RoseClient:
                 elapsed_s=round(time.monotonic() - started, 3),
                 error_type=type(exc).__name__,
                 error=str(exc),
+                **_observability_fields(),
             )
             raise
 

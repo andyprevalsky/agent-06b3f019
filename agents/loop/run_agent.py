@@ -38,6 +38,11 @@ from helpers.llm import (
     call_llm_structured_streaming,
     check_progress,
 )
+from helpers.llm_timeouts import (
+    STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS,
+    VERIFIER_ACTIVITY_TIMEOUT_SECONDS,
+)
+from helpers.messages import CoalescingStreamBroadcaster
 from helpers.summarize import compress_context
 from helpers.tracing import span, traced
 from helpers.update_status import update_agent_status
@@ -170,6 +175,10 @@ async def run_agent(  # noqa: C901
     build_messages: Optional[Callable[[List[Dict], str], List[Dict]]] = None,
     # Limits
     max_iterations: int = 200,
+    # Graceful wind-down: when > 0, inject ONE "synthesize & complete now" message
+    # into the conversation tail this many turns before the cap, giving the model a
+    # clean final turn instead of a hard cut. 0 = disabled (default). Explore opts in.
+    winddown_window: int = 0,
     max_context_tokens: int = 200_000,
     reasoning_max_tokens: int = 256,
     # State tracking (for continue_as_new)
@@ -235,6 +244,19 @@ async def run_agent(  # noqa: C901
     context_size = 0  # Current context window usage (uncached + cached tokens from last LLM call)
     cache_read_total = 0  # Cumulative cache read tokens (prompt caching hits)
     cache_write_total = 0  # Cumulative cache creation tokens (prompt caching misses)
+    # Local direct-token state for callers that run this loop inside a Temporal
+    # activity (explore/browser-style agents). Those callers pass token values
+    # as static activity args, so workflow-level token rotation cannot mutate
+    # them between loop iterations. When Rose rotates and succeeds, its usage
+    # payload includes the compute token that actually worked; remember it here
+    # so the next iteration starts from the successful provider/token.
+    remembered_claude_token = claude_token
+    remembered_claude_token_source: Optional[str] = None
+    remembered_claude_token_pool_id: Optional[str] = None
+    remembered_gpt_token = gpt_token
+    remembered_gpt_account_id = gpt_account_id
+    remembered_gpt_token_source: Optional[str] = None
+    remembered_gpt_token_pool_id: Optional[str] = None
     iteration = iteration_offset
     set_plan_called = False  # Track if set_plan was called (for is_plan_loop)
     set_plan_succeeded = False  # Track if set_plan completed successfully (not just called)
@@ -295,6 +317,41 @@ async def run_agent(  # noqa: C901
         if response_model
         else create_agent_action_model(tools, tool_registry=PLAN_TOOL_MODELS if is_plan_loop else None)
     )
+
+    def _remember_successful_compute_token(token: Optional[Dict[str, Any]]) -> None:
+        nonlocal remembered_claude_token
+        nonlocal remembered_claude_token_source
+        nonlocal remembered_claude_token_pool_id
+        nonlocal remembered_gpt_token
+        nonlocal remembered_gpt_account_id
+        nonlocal remembered_gpt_token_source
+        nonlocal remembered_gpt_token_pool_id
+
+        if not token or token.get("type") not in ("claude", "gpt") or not token.get("accessToken"):
+            return
+        if token.get("type") == "claude":
+            remembered_claude_token = token.get("accessToken")
+            remembered_claude_token_source = token.get("source")
+            remembered_claude_token_pool_id = token.get("poolTokenId")
+            remembered_gpt_token = None
+            remembered_gpt_account_id = None
+            remembered_gpt_token_source = None
+            remembered_gpt_token_pool_id = None
+        else:
+            remembered_gpt_token = token.get("accessToken")
+            remembered_gpt_account_id = token.get("accountId")
+            remembered_gpt_token_source = token.get("source")
+            remembered_gpt_token_pool_id = token.get("poolTokenId")
+            remembered_claude_token = None
+            remembered_claude_token_source = None
+            remembered_claude_token_pool_id = None
+        logger.info(
+            "run_agent remembered successful compute token",
+            agent_id=agent_id,
+            type=token.get("type"),
+            source=token.get("source"),
+            pool_token_id=token.get("poolTokenId"),
+        )
 
     def _log_cache_summary(status: str):
         """Log cache performance summary at end of run."""
@@ -392,6 +449,9 @@ async def run_agent(  # noqa: C901
         is_inside_temporal_activity=is_inside_temporal_activity,
     )
 
+    # Graceful wind-down state: ensures the "final turn" nudge is injected once.
+    winddown_injected = False
+
     # Main loop
     while iteration < max_iterations:
         # 1. Check if paused (BEFORE incrementing iteration - don't count paused loops as steps)
@@ -407,6 +467,30 @@ async def run_agent(  # noqa: C901
 
         # Only increment iteration when we're actually going to do work
         iteration += 1
+
+        # 1.4. Graceful wind-down (opt-in via winddown_window). On the final turn(s)
+        # before the cap, inject ONE message into the conversation tail (NOT the
+        # cached system prompt) telling the model to synthesize and complete now.
+        # Mirrors Hermes' single grace call — no earlier pressure warnings (they make
+        # models give up prematurely), injected exactly once.
+        if (
+            winddown_window > 0
+            and not winddown_injected
+            and iteration >= max_iterations - winddown_window
+        ):
+            context.append(
+                {
+                    "role": "SYSTEM",
+                    "text": (
+                        "You are on your final turn. Do not search further — synthesize the "
+                        "grounded evidence you already have and call attempt_completion_with_result "
+                        "now with your best answer, explicitly noting any gaps you could not fill."
+                    ),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            winddown_injected = True
+            logger.info("run_agent.winddown_injected", agent_id=agent_id, iteration=iteration, max_iterations=max_iterations)
 
         # 1.5. Check credits periodically (callback sets is_paused if depleted)
         if check_credits and (iteration % CREDIT_CHECK_INTERVAL == 0):
@@ -565,14 +649,33 @@ async def run_agent(  # noqa: C901
                 user_id=user_id,
             )
 
-        # Resolve Claude token dynamically (getter returns latest; may be None after fallback)
-        current_claude_token = get_claude_token() if get_claude_token else claude_token
-        current_claude_token_source = get_claude_token_source() if get_claude_token_source else None
-        current_claude_token_pool_id = get_claude_token_pool_id() if get_claude_token_pool_id else None
-        current_gpt_token = get_gpt_token() if get_gpt_token else gpt_token
-        current_gpt_account_id = get_gpt_account_id() if get_gpt_account_id else gpt_account_id
-        current_gpt_token_source = get_gpt_token_source() if get_gpt_token_source else None
-        current_gpt_token_pool_id = get_gpt_token_pool_id() if get_gpt_token_pool_id else None
+        # Resolve direct compute tokens dynamically when the workflow provides
+        # getters; otherwise use this loop's remembered successful token state.
+        current_claude_token = get_claude_token() if get_claude_token else remembered_claude_token
+        current_claude_token_source = (
+            get_claude_token_source()
+            if get_claude_token_source and current_claude_token
+            else remembered_claude_token_source
+        )
+        current_claude_token_pool_id = (
+            get_claude_token_pool_id()
+            if get_claude_token_pool_id and current_claude_token
+            else remembered_claude_token_pool_id
+        )
+        current_gpt_token = get_gpt_token() if get_gpt_token else remembered_gpt_token
+        current_gpt_account_id = (
+            get_gpt_account_id() if get_gpt_account_id and current_gpt_token else remembered_gpt_account_id
+        )
+        current_gpt_token_source = (
+            get_gpt_token_source()
+            if get_gpt_token_source and current_gpt_token
+            else remembered_gpt_token_source
+        )
+        current_gpt_token_pool_id = (
+            get_gpt_token_pool_id()
+            if get_gpt_token_pool_id and current_gpt_token
+            else remembered_gpt_token_pool_id
+        )
 
         # 7. Call LLM with structured streaming
         try:
@@ -601,35 +704,32 @@ async def run_agent(  # noqa: C901
                 )
                 sequence[0] += 1
 
+                # Decouple Supabase broadcasting from the token-read loop. Awaiting
+                # a broadcast per chunk inline collapsed per-stream throughput under
+                # high fan-out (root-caused on da938195); the broadcaster accepts
+                # deltas non-blocking and flushes them coalesced in the background.
+                broadcaster = CoalescingStreamBroadcaster(
+                    agent_id=agent_id,
+                    stream_id=stream_id,
+                    sub_agent_id=task_id,
+                    llm_started_at_ms=llm_started_at_ms,
+                )
+
                 async def on_chunk(text_so_far: str, token_count_chunk: int):  # noqa: B023
                     # Heartbeat so Temporal knows the activity is alive during long LLM calls
                     if is_inside_temporal_activity:
                         activity.heartbeat(f"LLM streaming: {token_count_chunk} tokens")
 
                     # Check if paused mid-stream
-                    if check_paused and await check_paused():
-                        raise asyncio.CancelledError("Paused")
+                    if check_paused:
+                        async with span("stream.check_paused", agent_id=agent_id, stream_id=stream_id):
+                            paused = await check_paused()
+                        if paused:
+                            raise asyncio.CancelledError("Paused")
 
                     delta = text_so_far[len(last_text[0]) :]  # noqa: B023
                     if delta:
-                        stream_event = ToolEvent(
-                            type=EventType.STREAM_MESSAGE,
-                            stream_id=stream_id,
-                            delta=delta,
-                            done=False,
-                            sequence=sequence[0],  # noqa: B023
-                            sub_agent_id=task_id,
-                            llm_started_at_ms=llm_started_at_ms,
-                        )
-                        await handle_tool_event(
-                            event=stream_event,
-                            agent_id=agent_id,
-                            tool_call_id=stream_id,
-                            tool_name="llm_call",
-                            execute_activity=execute_activity,
-                            user_id=user_id,
-                            sub_agent_id=task_id,
-                        )
+                        broadcaster.update(delta, sequence[0])  # noqa: B023 — non-blocking
                         sequence[0] += 1  # noqa: B023
                         last_text[0] = text_so_far  # noqa: B023
 
@@ -660,98 +760,87 @@ async def run_agent(  # noqa: C901
                 else:
                     await ensure_position_context(agent_id, iteration)
 
-                # Retry up to 3 times on parse failures (matches workflow path's RetryPolicy)
+                # Retry up to 3 times on parse failures (matches workflow path's RetryPolicy).
+                # The try/finally guarantees the broadcaster's background drainer is
+                # always disposed, including on pause or a re-raised parse failure.
                 max_llm_attempts = 3
-                for llm_attempt in range(1, max_llm_attempts + 1):
-                    try:
-                        async with span(
-                            "call_llm",
-                            agent_id=agent_id,
-                            model=model,
-                            call_site=cache_call_site,
-                            llm_attempt=llm_attempt,
-                            agent_type="explore" if cache_call_site == "explore_agent" else None,
-                            context_messages=len(llm_context),
-                            request_message_count=len(messages) if messages is not None else None,
-                            gpt_auth_present=bool(current_gpt_token),
-                            claude_auth_present=bool(current_claude_token),
-                        ):
-                            pydantic_result, usage, detected_tools_ordered = await call_llm_structured_streaming(
-                                messages=messages,
-                                model=model,
-                                temperature=1.0,
-                                max_tokens=8192,
-                                response_model=AgentAction,
-                                on_chunk=on_chunk,
-                                reasoning_max_tokens=reasoning_max_tokens,
-                                agent_id=agent_id,
-                                claude_token=current_claude_token,
-                                claude_token_source=current_claude_token_source,
-                                claude_token_pool_id=current_claude_token_pool_id,
-                                claude_token_user_id=user_id,
-                                gpt_token=current_gpt_token,
-                                gpt_account_id=current_gpt_account_id,
-                                gpt_token_source=current_gpt_token_source,
-                                gpt_token_pool_id=current_gpt_token_pool_id,
-                                gpt_token_user_id=user_id,
-                                call_site=cache_call_site,
-                            )
-                        break  # Success
-                    except (ValueError, Exception) as e:
-                        if llm_attempt < max_llm_attempts and "Failed to parse" in str(e):
-                            logger.warning(
-                                f"[run_agent] LLM parse failed (attempt {llm_attempt}/{max_llm_attempts}), retrying",
-                                error=str(e),
-                            )
-                            # Reset streaming state for retry
-                            sequence[0] = 0
-                            last_text[0] = ""
-                            continue
-                        raise
-
-                # Convert Pydantic tool_calls to dicts (same as call_llm_activity does)
-                tool_calls_as_dicts = []
-                if pydantic_result.tool_calls:
-                    for tc in pydantic_result.tool_calls:
-                        if tc is not None:
-                            tool_calls_as_dicts.append(tc.model_dump())
-
-                # Normalize to same structure as activity path
-                result = type(
-                    "LLMResult",
-                    (),
-                    {
-                        "response": pydantic_result.response or "",
-                        "tool_calls": tool_calls_as_dicts,  # List[dict]
-                        "codex_reasoning_items": getattr(pydantic_result, "codex_reasoning_items", []),
-                    },
-                )()
-
-                # Final stream chunk - done=True
                 try:
+                    for llm_attempt in range(1, max_llm_attempts + 1):
+                        try:
+                            async with span(
+                                "call_llm",
+                                agent_id=agent_id,
+                                model=model,
+                                call_site=cache_call_site,
+                                llm_attempt=llm_attempt,
+                                agent_type="explore" if cache_call_site == "explore_agent" else None,
+                                context_messages=len(llm_context),
+                                request_message_count=len(messages) if messages is not None else None,
+                                gpt_auth_present=bool(current_gpt_token),
+                                claude_auth_present=bool(current_claude_token),
+                            ):
+                                pydantic_result, usage, detected_tools_ordered = await call_llm_structured_streaming(
+                                    messages=messages,
+                                    model=model,
+                                    temperature=1.0,
+                                    max_tokens=8192,
+                                    response_model=AgentAction,
+                                    on_chunk=on_chunk,
+                                    reasoning_max_tokens=reasoning_max_tokens,
+                                    agent_id=agent_id,
+                                    claude_token=current_claude_token,
+                                    claude_token_source=current_claude_token_source,
+                                    claude_token_pool_id=current_claude_token_pool_id,
+                                    claude_token_user_id=user_id,
+                                    gpt_token=current_gpt_token,
+                                    gpt_account_id=current_gpt_account_id,
+                                    gpt_token_source=current_gpt_token_source,
+                                    gpt_token_pool_id=current_gpt_token_pool_id,
+                                    gpt_token_user_id=user_id,
+                                    call_site=cache_call_site,
+                                )
+                            break  # Success
+                        except (ValueError, Exception) as e:
+                            if llm_attempt < max_llm_attempts and "Failed to parse" in str(e):
+                                logger.warning(
+                                    f"[run_agent] LLM parse failed (attempt {llm_attempt}/{max_llm_attempts}), retrying",
+                                    error=str(e),
+                                )
+                                # Reset streaming state for retry
+                                sequence[0] = 0
+                                last_text[0] = ""
+                                broadcaster.reset()
+                                continue
+                            raise
+
+                    # Convert Pydantic tool_calls to dicts (same as call_llm_activity does)
+                    tool_calls_as_dicts = []
+                    if pydantic_result.tool_calls:
+                        for tc in pydantic_result.tool_calls:
+                            if tc is not None:
+                                tool_calls_as_dicts.append(tc.model_dump())
+
+                    # Normalize to same structure as activity path
+                    result = type(
+                        "LLMResult",
+                        (),
+                        {
+                            "response": pydantic_result.response or "",
+                            "tool_calls": tool_calls_as_dicts,  # List[dict]
+                            "codex_reasoning_items": getattr(pydantic_result, "codex_reasoning_items", []),
+                        },
+                    )()
+
+                    # Final stream chunk - done=True. aclose() stops the drainer,
+                    # flushes any buffered delta, then sends the done marker.
                     final_delta = ""
                     if pydantic_result.response:
                         final_delta = pydantic_result.response[len(last_text[0]) :]
-                    final_event = ToolEvent(
-                        type=EventType.STREAM_MESSAGE,
-                        stream_id=stream_id,
-                        delta=final_delta,
-                        done=True,
-                        sequence=sequence[0],
-                        sub_agent_id=task_id,
-                        llm_started_at_ms=llm_started_at_ms,
-                    )
-                    await handle_tool_event(
-                        event=final_event,
-                        agent_id=agent_id,
-                        tool_call_id=stream_id,
-                        tool_name="llm_call",
-                        execute_activity=execute_activity,
-                        user_id=user_id,
-                        sub_agent_id=task_id,
-                    )
-                except Exception:
-                    pass
+                    with contextlib.suppress(Exception):
+                        await broadcaster.aclose(final_delta=final_delta, final_sequence=sequence[0])
+                finally:
+                    # Guarantee the background drainer never leaks, even on error/pause.
+                    await broadcaster.adispose()
             else:
                 call_site_label = cache_call_site
                 llm_result = await workflow.execute_activity(
@@ -784,7 +873,7 @@ async def run_agent(  # noqa: C901
                         goal_text,
                         iteration,
                     ],
-                    start_to_close_timeout=timedelta(seconds=600),
+                    start_to_close_timeout=timedelta(seconds=STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS),
                     retry_policy=RetryPolicy(maximum_attempts=3),
                     heartbeat_timeout=timedelta(seconds=180),
                 )
@@ -821,6 +910,7 @@ async def run_agent(  # noqa: C901
             # Track cache metrics
             iter_cache_read = usage.get("cache_read_input_tokens", 0)
             iter_cache_write = usage.get("cache_creation_input_tokens", 0)
+            _remember_successful_compute_token(usage.get("compute_token_used"))
 
             # Context size = full prompt (uncached + cached) to reflect actual context window usage
             context_size = llm_tokens_in + iter_cache_read + iter_cache_write
@@ -1661,6 +1751,15 @@ async def run_agent(  # noqa: C901
         except Exception as e:
             logger.error(f"Final verifier call failed: {e}")
 
+    # Best-effort answer: the model's last synthesized assistant text, so a runaway
+    # that never called attempt_completion still returns usable output (the user's
+    # requirement). Callers (e.g. explore) use this when there's no clean result.
+    best_effort_response = ""
+    for _m in reversed(context):
+        if _m.get("role") == "ASSISTANT" and (_m.get("text") or "").strip():
+            best_effort_response = _m["text"]
+            break
+
     _log_cache_summary("max_iterations")
     return {
         "status": "max_iterations",
@@ -1672,6 +1771,9 @@ async def run_agent(  # noqa: C901
         "cache_read_input_tokens": cache_read_total,
         "cache_creation_input_tokens": cache_write_total,
         "message": f"Reached max iterations ({max_iterations})",
+        # Best-effort synthesis surfaced so callers never get an empty payload.
+        "final_response": best_effort_response,
+        "best_effort_response": best_effort_response,
         # Final verifier results for failure context
         "verifier_progress": final_verifier_progress,
         "verifier_reasoning": final_verifier_reasoning,
@@ -1861,7 +1963,7 @@ async def _run_verifier(
             fast_mode_goal,
             fast_mode_step,
         ],
-        start_to_close_timeout=timedelta(seconds=60),
+        start_to_close_timeout=timedelta(seconds=VERIFIER_ACTIVITY_TIMEOUT_SECONDS),
         retry_policy=RetryPolicy(maximum_attempts=3),
     )
 

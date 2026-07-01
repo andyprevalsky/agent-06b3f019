@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import re
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, AsyncIterator, Dict, List, Optional
@@ -18,6 +17,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 import httpx
 import structlog
 
+from helpers.tracing import span, stream_span
 from providers.rose.errors import (
     RoseAuthError,
     RoseError,
@@ -415,29 +415,49 @@ async def gpt_auth_complete(
 
     while True:
         try:
-            async for chunk in _attempt_with_token(
-                body=body,
-                auth=current_auth,
+            # One span per token attempt — see claude_auth for rationale. Without
+            # this the gpt path was opaque: a 348s round_trip showed no breakdown.
+            async with stream_span(
+                "llm.attempt",
+                provider="gptAuth",
                 actual_model=actual_model,
+                rotation=rotations,
+                call_site=call_site,
                 request_id=request_id,
                 agent_id=agent_id,
-                call_site=call_site,
-                ttft_timeout_s=ttft_timeout_s,
-                idle_timeout_s=idle_timeout_s,
             ):
-                yield chunk
+                async for chunk in _attempt_with_token(
+                    body=body,
+                    auth=current_auth,
+                    actual_model=actual_model,
+                    request_id=request_id,
+                    agent_id=agent_id,
+                    call_site=call_site,
+                    ttft_timeout_s=ttft_timeout_s,
+                    idle_timeout_s=idle_timeout_s,
+                ):
+                    yield chunk
             return
         except (RoseAuthError, RoseRateLimitError) as exc:
             reason = "auth_error" if isinstance(exc, RoseAuthError) else "rate_limit"
             rate_limited_until = getattr(exc, "rate_limited_until", None)
-            await _cool_down(
-                current_auth,
-                reason,
-                request_id,
-                agent_id,
-                call_site,
+            async with span(
+                "llm.cooldown",
+                reason=reason,
                 rate_limited_until=rate_limited_until,
-            )
+                rotation=rotations,
+                call_site=call_site,
+                request_id=request_id,
+                agent_id=agent_id,
+            ):
+                await _cool_down(
+                    current_auth,
+                    reason,
+                    request_id,
+                    agent_id,
+                    call_site,
+                    rate_limited_until=rate_limited_until,
+                )
             rotations += 1
             error_cls = RoseRateLimitError if reason == "rate_limit" else RoseAuthError
             if rotations > current_auth.max_rotations:
@@ -480,21 +500,37 @@ async def _attempt_with_token(
             ) as response:
                 status = response.status_code
                 if status == 200:
-                    async for chunk in parse_responses_sse(
-                        response,
+                    # Spans the SSE generation phase only — separates "the model
+                    # streamed slowly" (the 56→3 tok/s collapse) from connect/TTFT.
+                    async with stream_span(
+                        "llm.provider_read",
                         actual_model=actual_model,
-                        pool_name="gpt-token",
+                        attempt=attempt,
                         request_id=request_id,
-                        idle_timeout_s=idle_timeout_s,
+                        agent_id=agent_id,
                     ):
-                        yield chunk
+                        async for chunk in parse_responses_sse(
+                            response,
+                            actual_model=actual_model,
+                            pool_name="gpt-token",
+                            request_id=request_id,
+                            idle_timeout_s=idle_timeout_s,
+                        ):
+                            yield chunk
                     return
 
                 error_body = get_error_body(response)
 
                 if status == 429:
                     if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
-                        await asyncio.sleep(_backoff_for_429(response, attempt))
+                        async with span(
+                            "llm.backoff",
+                            reason="rate_limit_http",
+                            attempt=attempt,
+                            request_id=request_id,
+                            agent_id=agent_id,
+                        ):
+                            await asyncio.sleep(_backoff_for_429(response, attempt))
                         continue
                     rate_limited_until = _extract_rate_limited_until(
                         response, error_body
@@ -513,7 +549,8 @@ async def _attempt_with_token(
 
                 if status >= 500:
                     if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
-                        await asyncio.sleep(min(2 ** attempt, _BACKOFF_CAP_S))
+                        async with span("llm.backoff", reason="5xx", attempt=attempt, request_id=request_id, agent_id=agent_id):
+                            await asyncio.sleep(min(2 ** attempt, _BACKOFF_CAP_S))
                         continue
                     raise RoseServerError(f"Codex {status}: {error_body[:2000]}", status=status)
 
@@ -521,7 +558,8 @@ async def _attempt_with_token(
         except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
             last_error = exc
             if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
-                await asyncio.sleep(min(2 ** attempt, _BACKOFF_CAP_S))
+                async with span("llm.backoff", reason="connect_error", attempt=attempt, request_id=request_id, agent_id=agent_id):
+                    await asyncio.sleep(min(2 ** attempt, _BACKOFF_CAP_S))
                 continue
             raise RoseServerError(f"Codex connect/read error: {exc}") from exc
         except RoseStallError:

@@ -771,8 +771,80 @@ async def poll_queue_metrics(
             await asyncio.sleep(POLL_INTERVAL_SECS)
 
 
+async def monitor_event_loop_lag(
+    interval_s: float = 0.25,
+    warn_threshold_s: float = 0.25,
+) -> None:
+    """Measure asyncio event-loop scheduling lag.
+
+    Sleeps ``interval_s`` and measures how much LONGER than that the loop
+    actually took to resume this coroutine. The excess is the time the single
+    worker event loop was busy (CPU-bound work, blocking calls, or sheer
+    coroutine volume) and therefore could not service ready I/O — including the
+    LLM stream socket reads. A lag of ~1s here is the direct, no-guess proof of
+    the ~1s/chunk stream stalls seen under 50-wide fan-out.
+
+    Emits a sample every ~5s (so we always have a baseline) and a warning the
+    instant lag exceeds ``warn_threshold_s``, tagged with process CPU% and the
+    live asyncio task count so we can correlate the spike with load.
+    """
+    loop = asyncio.get_running_loop()
+    proc = psutil.Process()
+    proc.cpu_percent(None)  # prime the CPU% sampler
+    worker_index = int(os.getenv("WORKER_INDEX", "0"))
+    max_lag = 0.0
+    samples = 0
+    since_emit = 0.0
+    while True:
+        t0 = loop.time()
+        await asyncio.sleep(interval_s)
+        lag = loop.time() - t0 - interval_s
+        max_lag = max(max_lag, lag)
+        samples += 1
+        since_emit += interval_s + max(lag, 0.0)
+        if lag >= warn_threshold_s:
+            try:
+                task_count = len(asyncio.all_tasks(loop))
+            except Exception:
+                task_count = -1
+            logger.warning(
+                event="loop.lag",
+                msg="event loop stalled",
+                worker_index=worker_index,
+                lag_s=round(lag, 3),
+                cpu_pct=round(proc.cpu_percent(None), 1),
+                num_cpus=psutil.cpu_count(),
+                asyncio_tasks=task_count,
+            )
+        # Heartbeat baseline roughly every 5s regardless of threshold.
+        if since_emit >= 5.0:
+            logger.info(
+                event="loop.lag.baseline",
+                msg="loop lag baseline",
+                worker_index=worker_index,
+                max_lag_s=round(max_lag, 3),
+                samples=samples,
+                cpu_pct=round(proc.cpu_percent(None), 1),
+            )
+            max_lag = 0.0
+            samples = 0
+            since_emit = 0.0
+
+
 async def main():
     """Main worker entry point."""
+
+    # Opt-in cProfile of the worker event loop. The 50-wide fan-out saturates
+    # CPU via MANY small callbacks (no single slow callback >0.3s), so only an
+    # aggregate profiler reveals where cumulative loop CPU goes. Dumped in the
+    # finally block on graceful shutdown -> analyze with pstats.
+    _profiler = None
+    if os.getenv("PROFILE_WORKER"):
+        import cProfile
+
+        _profiler = cProfile.Profile()
+        _profiler.enable()
+        logger.warning("cProfile enabled for worker", worker_index=os.getenv("WORKER_INDEX", "0"))
 
     # Load configuration
     config = load_config()
@@ -869,6 +941,10 @@ async def main():
         ),
     )
 
+    # Start event-loop lag monitor (direct measurement of scheduling starvation
+    # under high concurrency — see monitor_event_loop_lag docstring).
+    asyncio.create_task(monitor_event_loop_lag())
+
     # Create worker with all workflows and activities
     worker = Worker(
         client,
@@ -963,6 +1039,20 @@ async def main():
 
     # Handle shutdown gracefully using asyncio signal handlers
     loop = asyncio.get_running_loop()
+
+    # Opt-in asyncio debug: logs any single callback/coroutine step that blocks
+    # the event loop longer than slow_callback_duration, naming the exact handle.
+    # This is the in-process replacement for py-spy when diagnosing which work
+    # hogs the single worker loop under high concurrency.
+    if os.getenv("ASYNCIO_DEBUG_SLOW_CALLBACKS"):
+        loop.set_debug(True)
+        loop.slow_callback_duration = float(os.getenv("ASYNCIO_SLOW_CALLBACK_S", "0.3"))
+        logging.getLogger("asyncio").setLevel(logging.WARNING)
+        logger.warning(
+            "asyncio debug enabled",
+            slow_callback_duration_s=loop.slow_callback_duration,
+        )
+
     shutdown_event = asyncio.Event()
     force_kill_event = asyncio.Event()
     shutdown_count = 0
@@ -1037,6 +1127,11 @@ async def main():
         raise
     finally:
         set_worker_status(False)
+        if _profiler is not None:
+            _profiler.disable()
+            out = f"worker-profile-{os.getenv('WORKER_INDEX', '0')}.prof"
+            _profiler.dump_stats(out)
+            logger.warning("cProfile stats dumped", path=out)
         logger.info("Worker stopped")
 
 

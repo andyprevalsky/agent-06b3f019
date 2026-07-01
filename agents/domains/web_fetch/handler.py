@@ -26,9 +26,10 @@ from typing import Any, Dict, List, Optional
 import structlog
 from temporalio import activity
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ApplicationError
 
-from domains.web_fetch.config import FIRECRAWL_COST_CENTS, MAX_MARKDOWN_LENGTH
-from domains.web_fetch.service import download_and_attach, scrape_url
+from domains.web_fetch.config import FIRECRAWL_COST_CENTS, MAX_MARKDOWN_LENGTH, PARALLEL_EXTRACT_COST_CENTS
+from domains.web_fetch.service import WebFetchProvidersFailed, download_and_attach, scrape_url
 from domains.web_fetch.types import ExecuteActivityCallable
 from helpers.handle_tool_event import handle_tool_event
 from helpers.summarize import summarize_and_filter_links
@@ -139,7 +140,7 @@ class WebFetchManager(ToolManager):
                 args=[url, fast_mode_cache_enabled, fast_mode_goal, fast_mode_cache_write_enabled],
                 start_to_close_timeout=timedelta(seconds=180),
                 retry_policy=RetryPolicy(
-                    maximum_attempts=3,
+                    maximum_attempts=2,
                     backoff_coefficient=2.0,
                     initial_interval=timedelta(seconds=1),
                     maximum_interval=timedelta(seconds=10),
@@ -147,6 +148,13 @@ class WebFetchManager(ToolManager):
             )
             markdown: str = scrape_result.get("markdown", "") if isinstance(scrape_result, dict) else ""
             links: List[str] = scrape_result.get("links", []) if isinstance(scrape_result, dict) else []
+            scrape_metadata: Dict[str, Any] = (
+                scrape_result.get("metadata", {}) if isinstance(scrape_result, dict) else {}
+            )
+            service_provider = scrape_metadata.get("provider") or "Firecrawl scrape"
+            service_cost_cents = (
+                PARALLEL_EXTRACT_COST_CENTS if service_provider == "Parallel Extract" else FIRECRAWL_COST_CENTS
+            )
 
             # 2) Haiku filter — structured output via WebFetchHaikuResponse
             haiku_result = await execute_activity(
@@ -227,7 +235,7 @@ class WebFetchManager(ToolManager):
                 params=tool_call,
                 result=result,
                 time_elapsed=elapsed_time,
-                cost_cents=FIRECRAWL_COST_CENTS,
+                cost_cents=service_cost_cents,
             )
 
             await handle_tool_event(
@@ -246,7 +254,7 @@ class WebFetchManager(ToolManager):
 
             usage_dict: Dict[str, Any] = {
                 "llm": [summarizer_llm_item] if summarizer_llm_item else [],
-                "service": [{"cost_cents": FIRECRAWL_COST_CENTS, "provider": "Firecrawl scrape"}],
+                "service": [{"cost_cents": service_cost_cents, "provider": service_provider}],
             }
             # Surface raw Haiku usage so the workflow can route claude_token_error /
             # claude_token_rotated / compute_token_used signals through _on_tokens
@@ -375,8 +383,13 @@ async def web_fetch_activity(
 
     try:
         result = await scrape_url(url)
+    except WebFetchProvidersFailed as e:
+        logger.error("Web fetch scrape failed", error=str(e), url=url, retryable=e.retryable)
+        if not e.retryable:
+            raise ApplicationError(str(e), type="WebFetchProvidersFailed", non_retryable=True) from e
+        raise
     except Exception as e:
-        logger.error("Web fetch (Firecrawl) failed", error=str(e), url=url)
+        logger.error("Web fetch scrape failed", error=str(e), url=url)
         raise
 
     if cache_key is not None and write_cache:
