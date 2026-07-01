@@ -222,8 +222,27 @@ def _temporal_activity_metadata() -> Dict[str, Any]:
     return _sanitize_metadata(metadata)
 
 
+# Process-wide TTL cache for the RSS snapshot. `proc.children(recursive=True)`
+# walks the ENTIRE system process table (builds a full ppid map) — ~1k syscalls
+# per call on a busy machine. It is called on every activity-span start/end AND
+# by a 0.5s-interval background sampler PER open activity span, so under a
+# 50-agent fan-out (~50+ concurrent activity spans) it ran ~100+ full
+# process-table walks/second and pinned a CPU core, starving the event loop and
+# stalling LLM stream reads (~1s/chunk). The snapshot is a coarse memory gauge,
+# so all concurrent callers share one computation per TTL window instead of each
+# walking the table. Single event loop per process → no await between the check
+# and the store, so a plain time guard is race-free.
+_RSS_CACHE_TTL_S = 1.0
+_rss_cache: Dict[str, int] = {}
+_rss_cache_at: float = -1e9
+
+
 def _rss_snapshot() -> Dict[str, int]:
-    """Return current worker process and child RSS, in bytes."""
+    """Return current worker process and child RSS, in bytes (TTL-cached)."""
+    global _rss_cache, _rss_cache_at
+    now = time.monotonic()
+    if _rss_cache and (now - _rss_cache_at) < _RSS_CACHE_TTL_S:
+        return _rss_cache
     try:
         import psutil
 
@@ -233,11 +252,13 @@ def _rss_snapshot() -> Dict[str, int]:
         for child in proc.children(recursive=True):
             with suppress(psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 child_rss += child.memory_info().rss
-        return {
+        _rss_cache = {
             "process_rss_bytes": process_rss,
             "child_rss_bytes": child_rss,
             "tree_rss_bytes": process_rss + child_rss,
         }
+        _rss_cache_at = now
+        return _rss_cache
     except Exception:
         return {}
 
@@ -320,6 +341,49 @@ async def span(name: str, **metadata: Any) -> AsyncIterator[str]:
             **end_metadata,
         )
         structlog.contextvars.reset_contextvars(**tokens)
+
+
+@asynccontextmanager
+async def stream_span(name: str, **metadata: Any) -> AsyncIterator[str]:
+    """Span safe to hold open across `async for ... yield` inside an async generator.
+
+    Unlike span(), it does NOT bind the span_id contextvar. Binding would fail
+    with "Token was created in a different Context": when a generator yields out
+    of the with-block and is resumed (or finalized) later, __aexit__ runs in a
+    different context than __aenter__, so reset_contextvars() raises. This variant
+    still emits span.start/span.end with parent linkage + duration; children nest
+    under it via the tracer's time-window containment rather than the contextvar.
+    Use it to wrap streaming regions (SSE reads, per-attempt token streams); use
+    span() everywhere an await does not cross a yield.
+    """
+    span_id = _new_span_id()
+    parent_span_id = current_span_id()
+    started = time.monotonic()
+    span_metadata = _span_metadata(name, metadata)
+    logger.info(
+        "span.start",
+        span_name=name,
+        span_id=span_id,
+        parent_span_id=parent_span_id,
+        **span_metadata,
+    )
+    status = "ok"
+    try:
+        yield span_id
+    except BaseException:
+        status = "error"
+        raise
+    finally:
+        duration_ms = int((time.monotonic() - started) * 1000)
+        logger.info(
+            "span.end",
+            span_name=name,
+            span_id=span_id,
+            parent_span_id=parent_span_id,
+            duration_ms=duration_ms,
+            status=status,
+            **span_metadata,
+        )
 
 
 @contextmanager

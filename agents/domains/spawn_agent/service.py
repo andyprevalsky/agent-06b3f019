@@ -13,8 +13,10 @@ import structlog.contextvars
 from temporalio import activity
 
 from domains.spawn_agent.config import (
-    EXPLORE_MAX_ITERATIONS,
+    EXPLORE_DEFAULT_DEPTH,
     EXPLORE_MESSAGE_TRUNCATE_LEN,
+    EXPLORE_WINDDOWN_WINDOW,
+    explore_limits_for_depth,
 )
 from domains.spawn_agent.repo import (
     _resolve_explore_attachments_activity as _resolve_explore_attachments_activity,
@@ -220,6 +222,8 @@ async def spawn_explore_agent_activity(  # noqa: C901
     gpt_token_pool_id: Optional[str] = None,
     attachment_texts: Optional[List[str]] = None,
     max_context_tokens: int = 200_000,
+    depth: Optional[str] = None,
+    max_iterations: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Run the explore agent loop inside a Temporal activity.
 
@@ -403,7 +407,11 @@ async def spawn_explore_agent_activity(  # noqa: C901
     # relative time ranges (e.g. for grep `since` filtering) without baking
     # the timestamp into the cacheable system prompt.
     current_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    state_line = f"[STATE: now={current_ts}]"
+    # Resolve the caller's thoroughness. The depth tag rides in the per-call goal
+    # (NOT the cacheable system prompt); the turn cap comes from the same depth.
+    effective_depth = depth or EXPLORE_DEFAULT_DEPTH
+    resolved_max_iterations = max_iterations or explore_limits_for_depth(effective_depth)[0]
+    state_line = f"[STATE: now={current_ts}] [Thoroughness: {effective_depth}]"
     initial_user_text = f"{state_line}\n\n{goal}"
     if attachment_texts:
         initial_user_text = initial_user_text + "\n\n" + "\n\n".join(attachment_texts)
@@ -421,7 +429,8 @@ async def spawn_explore_agent_activity(  # noqa: C901
         is_inside_temporal_activity=True,
         execute_tool=explore_execute_tool,
         post_message=explore_post_message,
-        max_iterations=EXPLORE_MAX_ITERATIONS,
+        max_iterations=resolved_max_iterations,
+        winddown_window=EXPLORE_WINDDOWN_WINDOW,
         max_context_tokens=max_context_tokens,
         skip_verification=True,
         skip_blueprint_query=True,

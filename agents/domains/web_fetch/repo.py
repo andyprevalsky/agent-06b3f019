@@ -1,5 +1,6 @@
-"""Web fetch domain repo — external data access (Firecrawl scrape, HTTP file downloads, storage uploads)."""
+"""Web fetch domain repo — external data access (Firecrawl/Parallel scrape, downloads, storage uploads)."""
 
+import re
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -7,10 +8,33 @@ import structlog
 from temporalio import activity
 
 from config import load_config
-from domains.web_fetch.config import FIRECRAWL_SCRAPE_TIMEOUT_SECONDS, MAX_DOWNLOAD_SIZE, MIME_TYPES
+from domains.web_fetch.config import (
+    FIRECRAWL_SCRAPE_TIMEOUT_SECONDS,
+    MAX_DOWNLOAD_SIZE,
+    MIME_TYPES,
+    PARALLEL_EXTRACT_API_URL,
+    PARALLEL_EXTRACT_TIMEOUT_SECONDS,
+)
 from helpers.attachments import upload_to_storage
 
 logger = structlog.get_logger()
+
+
+_MARKDOWN_LINK_RE = re.compile(r"\[[^\]]+\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
+_BARE_URL_RE = re.compile(r"https?://[^\s<>()\[\]{}\"']+")
+
+
+def extract_links_from_markdown(markdown: str) -> List[str]:
+    """Extract markdown-link targets and bare URLs from markdown text."""
+    links: List[str] = []
+
+    for match in _MARKDOWN_LINK_RE.finditer(markdown or ""):
+        links.append(match.group(1))
+
+    for match in _BARE_URL_RE.finditer(markdown or ""):
+        links.append(match.group(0).rstrip(".,;:!?"))
+
+    return list(dict.fromkeys(link for link in links if link.startswith(("http://", "https://"))))
 
 
 async def fetch_firecrawl_scrape(url: str) -> Dict[str, Any]:
@@ -54,10 +78,70 @@ async def fetch_firecrawl_scrape(url: str) -> Dict[str, Any]:
         body = response.json()
 
     data = body.get("data") or {}
+    markdown = data.get("markdown") or ""
+    if not markdown.strip():
+        raise RuntimeError("Firecrawl returned empty markdown")
+
+    metadata = data.get("metadata") or {}
+    metadata.setdefault("provider", "Firecrawl scrape")
     return {
-        "markdown": data.get("markdown") or "",
+        "markdown": markdown,
         "links": data.get("links") or [],
-        "metadata": data.get("metadata") or {},
+        "metadata": metadata,
+    }
+
+
+async def fetch_parallel_extract(url: str) -> Dict[str, Any]:
+    """Call Parallel Extract and normalize the first result to web_fetch shape."""
+    config = load_config()
+    api_key = config.parallel.api_key
+    if not api_key:
+        raise RuntimeError("PARRALLEL_API_KEY or PARALLEL_API_KEY is not configured (agents/.env)")
+
+    headers = {
+        "x-api-key": api_key,
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "urls": [url],
+        "objective": "Extract the full public page content as clean markdown for an autonomous agent web_fetch tool.",
+        "advanced_settings": {"full_content": True},
+    }
+
+    async with httpx.AsyncClient(timeout=PARALLEL_EXTRACT_TIMEOUT_SECONDS) as client:
+        response = await client.post(
+            PARALLEL_EXTRACT_API_URL,
+            headers=headers,
+            json=payload,
+        )
+        response.raise_for_status()
+        body = response.json()
+
+    results = body.get("results") or []
+    errors = body.get("errors") or []
+    if not results:
+        raise RuntimeError(f"Parallel Extract returned no results: {errors}")
+
+    result = results[0] or {}
+    excerpts = result.get("excerpts") or []
+    full_content = result.get("full_content") or ""
+    markdown = full_content.strip() or "\n\n".join(str(excerpt) for excerpt in excerpts if excerpt).strip()
+    if not markdown:
+        raise RuntimeError(f"Parallel Extract returned empty markdown: {errors}")
+
+    return {
+        "markdown": markdown,
+        "links": extract_links_from_markdown(markdown),
+        "metadata": {
+            "provider": "Parallel Extract",
+            "title": result.get("title"),
+            "publish_date": result.get("publish_date"),
+            "url": result.get("url") or url,
+            "extract_id": body.get("extract_id"),
+            "session_id": body.get("session_id"),
+            "warnings": body.get("warnings"),
+            "errors": errors,
+        },
     }
 
 

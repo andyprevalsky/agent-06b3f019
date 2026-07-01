@@ -24,12 +24,13 @@ export const ORIGIN_HASH_PREFIX_LENGTH = 16;
  * standard Node.js LevelDB libraries can't read. We use the
  * `ccl_chromium_reader` Python library which handles it correctly.
  *
- * In dev mode `__dirname` is `dist/main/main/domains/indexed-db-reader`; going
- * up five levels lands at `mac-app/`, where `scripts/read_indexeddb.py` lives.
+ * In dev mode the helper lives under the Electron app root. Use
+ * `app.getAppPath()` rather than `__dirname` depth math so source tests and
+ * compiled Electron output resolve the same repo-local script.
  * In prod the script is bundled outside `app.asar` at
  * `Contents/Resources/scripts/read_indexeddb.py` so Python can execute it.
  */
 export const SCRIPT_PATH =
   app.isPackaged === true
     ? path.join(process.resourcesPath, 'scripts', 'read_indexeddb.py')
-    : path.join(__dirname, '..', '..', '..', '..', '..', 'scripts', 'read_indexeddb.py');
+    : path.join(app.getAppPath(), 'scripts', 'read_indexeddb.py');

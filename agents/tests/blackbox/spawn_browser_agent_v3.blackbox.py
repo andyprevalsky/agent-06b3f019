@@ -84,10 +84,11 @@ def _encrypt_envelope(plaintext: bytes, public_key, version: int = 1) -> str:
 
 
 def test_verifier_activity_timeout_allows_llm_call():
-    """Browser verifier wraps an LLM activity, so it must allow at least 60s."""
+    """Browser verifier uses the standard LLM activity budget."""
     from domains.spawn_browser_agent_v3.config import VERIFIER_ULTRA_TIMEOUT_SECONDS
+    from helpers.llm_timeouts import STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
 
-    assert VERIFIER_ULTRA_TIMEOUT_SECONDS >= 60
+    assert VERIFIER_ULTRA_TIMEOUT_SECONDS == STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
 
 
 def test_browser_task_prompt_does_not_duplicate_system_prompt():
@@ -7067,7 +7068,7 @@ async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
     r = BlackboxResult()
 
-    r.record("verifier_timeout_minimum", test_verifier_activity_timeout_allows_llm_call)
+    r.record("verifier_timeout_standard_llm_budget", test_verifier_activity_timeout_allows_llm_call)
     r.record(
         "browser_task_prompt_no_system_duplication",
         test_browser_task_prompt_does_not_duplicate_system_prompt,

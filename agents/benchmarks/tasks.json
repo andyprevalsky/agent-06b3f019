@@ -1,5 +1,37 @@
 [
   {
+    "name": "test-mass-agent-run-0",
+    "title": "Test Mass Agent Run - 0",
+    "prompt": "I'm building a personal brand for health, longevity, technology, founder journey [I'll refine the angle]. Analyze the top 50 creators in this niche across YouTube, IG, TikTok, and Substack.\n\nUse a for_each agent run for the per-creator analysis: first identify the top 50 creators, then use spawn_general_purpose_agent_for_each / for_each so one agent analyzes each creator with the same template.\n\nFor each creator, pull their posting cadence, hook formulas, top 5 performing pieces of the last 90 days, and the gaps in what they cover. Then give me: (a) a positioning statement, (b) a 90-day content calendar across all 4 platforms, (c) 30 hook-tested video script openings, and (d) the 20 creators I should engage with weekly to get on their radar.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_general_purpose_agent_for_each"],
+    "tags": ["for-each", "mass-agent", "research", "scale"],
+    "price_limit_cents": 200,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "min_agent_count": 50
+  },
+  {
+    "name": "single-creator-arm",
+    "title": "Single-Creator Arm (baseline for mass-agent throttling)",
+    "prompt": "Analyze exactly one assigned creator using only public web/platform data and return a single structured summary. Focus only on Andrew Huberman (Huberman Lab) in the health/longevity/technology niche, across YouTube, Instagram, TikTok, and Substack. Pull their posting cadence, hook formulas, top 5 performing pieces of the last 90 days, and the gaps in what they cover.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": ["web_search"],
+    "tags": ["mass-agent", "baseline", "single-arm"],
+    "price_limit_cents": 100,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "min_agent_count": 1
+  },
+  {
     "name": "chat-mode",
     "title": "Basic Chat Response",
     "prompt": "whats the latest news?",

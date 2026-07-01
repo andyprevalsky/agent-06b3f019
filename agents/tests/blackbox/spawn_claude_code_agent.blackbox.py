@@ -161,10 +161,11 @@ def test_check_fatal_errors_rate_limit_options():
 
 
 def test_verifier_activity_timeout_allows_llm_call():
-    """Claude Code verifier wraps an LLM activity, so it must allow at least 60s."""
+    """Claude Code verifier uses the standard LLM activity budget."""
     from domains.spawn_claude_code_agent.service import VERIFIER_ACTIVITY_TIMEOUT_SECONDS
+    from helpers.llm_timeouts import STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
 
-    assert VERIFIER_ACTIVITY_TIMEOUT_SECONDS >= 60
+    assert VERIFIER_ACTIVITY_TIMEOUT_SECONDS == STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
 
 
 # ── safe_time ────────────────────────────────────────────────────────
@@ -2030,7 +2031,7 @@ async def run_all_tests():
     r.record("check_fatal_login", test_check_fatal_errors_login_request)
     r.record("check_fatal_credit_balance", test_check_fatal_errors_credit_balance)
     r.record("check_fatal_rate_limit_options", test_check_fatal_errors_rate_limit_options)
-    r.record("verifier_timeout_minimum", test_verifier_activity_timeout_allows_llm_call)
+    r.record("verifier_timeout_standard_llm_budget", test_verifier_activity_timeout_allows_llm_call)
     r.record("safe_time_ok", test_safe_time_returns_float)
     r.record("safe_time_fallback", test_safe_time_handles_exception)
     r.record("trunc_detect_marker", test_terminal_truncation_detects_collapse_marker)
