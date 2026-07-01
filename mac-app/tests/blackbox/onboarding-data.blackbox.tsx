@@ -217,9 +217,7 @@ function installBackendMocks(): void {
         ],
       })
     ),
-    http.get(`${API_BASE}/user-settings`, () =>
-      HttpResponse.json({ onboardingCompletedAt: null })
-    ),
+    http.get(`${API_BASE}/user-settings`, () => HttpResponse.json({ onboardingCompletedAt: null })),
     http.post(`${API_BASE}/integrations/passwords/request`, () =>
       HttpResponse.json({ success: true })
     ),
