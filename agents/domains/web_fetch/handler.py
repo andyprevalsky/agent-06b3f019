@@ -29,7 +29,7 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError
 
 from domains.web_fetch.config import FIRECRAWL_COST_CENTS, MAX_MARKDOWN_LENGTH, PARALLEL_EXTRACT_COST_CENTS
-from domains.web_fetch.service import download_and_attach, scrape_url
+from domains.web_fetch.service import WebFetchProvidersFailed, download_and_attach, scrape_url
 from domains.web_fetch.types import ExecuteActivityCallable
 from helpers.handle_tool_event import handle_tool_event
 from helpers.summarize import summarize_and_filter_links
@@ -366,7 +366,6 @@ async def web_fetch_activity(
     Allowlisted write-through mode stores live Firecrawl responses without first
     reading from cache.
     """
-    from domains.web_fetch.service import WebFetchProvidersFailed, scrape_url
     from providers.fast_cache import client as fast_cache_client
     from providers.fast_cache import normalize as fast_cache_normalize
 
