@@ -174,6 +174,7 @@ const KNOWN_TAGS = [
   'minted',
   'social',
   'grep',
+  'payment',
 ];
 
 // ==================== GET /api/benchmarks — CONTRACT TESTS ====================

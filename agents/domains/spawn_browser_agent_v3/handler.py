@@ -3268,6 +3268,50 @@ Based on this feedback, I need to continue working on the task and address the i
                     total_steps=MAX_ITERATIONS,
                 )
 
+                # Generate the same rich write-lock notification the write-approval path produces so
+                # the payment approval renders #662's itemized purchase notification instead of a
+                # plain question. Best-effort — the workflow falls back to build_payment_question.
+                payment_write_lock_notification = None
+                payment_write_lock_notification_usage = None
+                try:
+                    activity.heartbeat(f"Step {iteration} - generating payment approval notification")
+                    payment_notification_result = await _generate_write_lock_notification(
+                        rose_client=rose_client,
+                        task_prompt=task_prompt,
+                        dynamic_system_context=dynamic_system_context,
+                        browser_turn_messages=browser_turn_messages,
+                        browser_state=browser_state,
+                        action_entries=action_entries,
+                        config=config,
+                        user_id=user_id,
+                        agent_id=agent_id,
+                        iteration=iteration,
+                        token_state=token_state,
+                        gpt_token=gpt_token,
+                        gpt_account_id=gpt_account_id,
+                        gpt_token_source=gpt_token_source,
+                        gpt_token_pool_id=gpt_token_pool_id,
+                        browser_use_mode=browser_use_mode,
+                        approval_type="payment",
+                        current_url=current_url,
+                        pending_action=unified_action,
+                        write_lock_result=result,
+                        system_name=system_name,
+                        fallback_question=f"{system_name} wants to make a purchase. Approve?",
+                    )
+                    payment_write_lock_notification = payment_notification_result.get("notification")
+                    payment_write_lock_notification_usage = {
+                        "usage": payment_notification_result.get("usage", {}),
+                        "actual_model": payment_notification_result.get("actual_model"),
+                        "request_id": payment_notification_result.get("request_id"),
+                        "mode": payment_notification_result.get("mode"),
+                    }
+                except Exception as notification_error:
+                    logger.warning(
+                        "Failed to generate payment approval notification; using fallback question",
+                        error=str(notification_error),
+                    )
+
                 if dom_service:
                     try:
                         await dom_service.disconnect()
@@ -3278,6 +3322,8 @@ Based on this feedback, I need to continue working on the task and address the i
                     "status": "awaiting_payment_card_approval",
                     "payment_request": result.get("payment_request", {}),
                     "current_url": current_url,
+                    "write_lock_notification": payment_write_lock_notification,
+                    "write_lock_notification_usage": payment_write_lock_notification_usage,
                     "write_lock_approvals": write_lock_approvals,
                     "step_count": iteration,
                     "session_id": session_id,
@@ -3863,6 +3909,10 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 "writePermission": True,
                                 "url": result.get("current_url", ""),
                                 "requestPaymentCard": payment_payload,
+                                "writeLockNotification": result.get("write_lock_notification"),
+                                "writeLockNotificationUsage": result.get(
+                                    "write_lock_notification_usage"
+                                ),
                             },
                         )
 

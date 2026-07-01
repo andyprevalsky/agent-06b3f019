@@ -588,6 +588,19 @@ const tests: Array<[string, () => Promise<void>]> = [
       assertSchema(OkResponse, response.data, 'legacy webhook unknown card');
     },
   ],
+  [
+    'agentcard webhook without a card id is an idempotent no-op',
+    async () => {
+      const payload = { type: 'transaction.cleared' };
+      const response = await request('/api/webhooks/agentcard', {
+        method: 'POST',
+        headers: webhookHeaders(payload),
+        body: JSON.stringify(payload),
+      });
+      assertStatus(response.status, 200, response.data);
+      assertSchema(OkResponse, response.data, 'webhook no card id');
+    },
+  ],
 ];
 
 async function main(): Promise<void> {
