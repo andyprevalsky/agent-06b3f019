@@ -64,6 +64,13 @@ export class RoseStallError extends RoseError {
   }
 }
 
+export class RoseRefusalError extends RoseError {
+  constructor(message: string, status?: number) {
+    super(message, status);
+    this.name = 'RoseRefusalError';
+  }
+}
+
 export class RoseDeadlineError extends RoseError {
   constructor(message: string) {
     super(message);
@@ -96,6 +103,7 @@ export function isFallThroughError(err: unknown): boolean {
     err instanceof RoseServerError ||
     err instanceof RoseAuthError ||
     err instanceof RoseRateLimitError ||
-    err instanceof RosePaymentRequiredError
+    err instanceof RosePaymentRequiredError ||
+    err instanceof RoseRefusalError
   );
 }

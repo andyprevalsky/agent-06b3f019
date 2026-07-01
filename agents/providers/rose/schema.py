@@ -74,7 +74,9 @@ def model_supports_anthropic_strict_tools(model: Optional[str]) -> bool:
     canonical = model.lower().replace(".", "-")
     return (
         "claude-sonnet-4-6" in canonical
+        or "claude-sonnet-5" in canonical
         or "claude-sonnet-4-5" in canonical
+        or "claude-fable-5" in canonical
         or "claude-opus-4-1" in canonical
         or "claude-opus-4-5" in canonical
         or "claude-opus-4-6" in canonical

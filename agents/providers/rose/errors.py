@@ -11,6 +11,7 @@ plus the agreed P1 contract change for 400):
     HTTP 400                -> RoseInvalidRequest (does NOT rotate; falls through)
     HTTP 5xx                -> RoseServerError    (retried in-place, then falls through)
     Stream stall / TTFT TO  -> RoseStallError     (does NOT rotate; falls through)
+    Provider refusal        -> RoseRefusalError   (strict safety refusal; falls through)
     All pool models failed  -> RoseAllFailed      (terminal; carries per-step errors)
     Deadline exceeded       -> RoseDeadlineError  (terminal)
 """
@@ -60,6 +61,14 @@ class RoseStallError(RoseError):
 
     No partial-stream recovery: the reader is closed and the call falls through
     to the next layer (waterfall, or terminal if waterfall is exhausted).
+    """
+
+
+class RoseRefusalError(RoseError):
+    """Provider refused before producing content.
+
+    This is treated as a fall-through condition so stricter primary models
+    can defer to the pool waterfall instead of failing the user request.
     """
 
 

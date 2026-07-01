@@ -29,12 +29,14 @@ from providers.rose import (
     ClaudeAuthContext,
     GptAuthContext,
     POOL_REGISTRY,
+    PoolSpec,
     RoseAllFailed,
     RoseAuthError,
     RoseClient,
     RoseDeadlineError,
     RoseError,
     RoseInvalidRequest,
+    RoseRefusalError,
     RoseRateLimitError,
     RoseServerError,
     RoseStallError,
@@ -89,6 +91,7 @@ def test_is_rose_model_variants():
     assert is_rose_model("rose-ultra")
     assert is_rose_model("rose-labs/rose-1-lite")
     assert is_rose_model("rose-labs/rose-1-ultra")
+    assert is_rose_model("rose-labs/rose-1-browser-use")
     assert is_rose_model("ROSE-LABS/ROSE-1-LITE")  # case-insensitive
     assert not is_rose_model("anthropic/claude-sonnet-4.5")
     assert not is_rose_model(None)
@@ -99,12 +102,14 @@ def test_pool_for_model_fuzzy():
     assert pool_for_model("rose-labs/rose-1-mini") == "rose-1-mini"
     assert pool_for_model("rose-labs/rose-1-lite") == "rose-1-lite"
     assert pool_for_model("rose-labs/rose-1-ultra") == "rose-1-ultra"
+    assert pool_for_model("rose-labs/rose-1-browser-use") == "rose-1-browser-use"
     assert pool_for_model("rose") == "rose-1-lite"
     assert pool_for_model("rose-mini") == "rose-1-mini"
     assert pool_for_model("rose-ultra") == "rose-1-ultra"
     # Fuzzy fallback for unknown rose-labs/* strings
     assert pool_for_model("rose-labs/something-ultra-new") == "rose-1-ultra"
     assert pool_for_model("rose-labs/something-mini") == "rose-1-mini"
+    assert pool_for_model("rose-labs/new-browser-use") == "rose-1-browser-use"
     assert pool_for_model("rose-labs/something-else") == "rose-1-lite"
     assert pool_for_model("openai/gpt-4") is None
     assert pool_for_model("") is None
@@ -139,6 +144,7 @@ def test_classify_claude_token_error_each_branch():
     assert classify_claude_token_error(RoseRateLimitError("b")) == "rate_limit"
     assert classify_claude_token_error(RoseStallError("c")) == "stall"
     assert classify_claude_token_error(RoseInvalidRequest("d")) == "invalid_request"
+    assert classify_claude_token_error(RoseRefusalError("r")) == "refusal"
     assert classify_claude_token_error(RoseServerError("e")) == "server_error"
     # Unknown subclass falls back to server_error
     assert classify_claude_token_error(RoseError("z")) == "server_error"
@@ -942,9 +948,14 @@ def test_build_anthropic_body_identity_and_cache_block():
 
 
 def test_build_anthropic_body_provider_fast_mode_supported_opus_only():
-    ultra = get_pool("rose-1-ultra")
+    opus_pool = PoolSpec(
+        name="rose-1-ultra",
+        claude_auth_model="claude-opus-4-8",
+        gpt_auth_model="gpt-5.5",
+        waterfall=(),
+    )
     body = build_anthropic_body(
-        pool_spec=ultra,
+        pool_spec=opus_pool,
         messages=[{"role": "user", "content": "hi"}],
         tools=None,
         tool_choice=None,
@@ -954,9 +965,9 @@ def test_build_anthropic_body_provider_fast_mode_supported_opus_only():
     )
     assert body["speed"] == "fast"
 
-    lite = get_pool("rose-1-lite")
+    fable = get_pool("rose-1-ultra")
     unsupported = build_anthropic_body(
-        pool_spec=lite,
+        pool_spec=fable,
         messages=[{"role": "user", "content": "hi"}],
         tools=None,
         tool_choice=None,
@@ -1626,6 +1637,37 @@ async def test_parse_anthropic_sse_empty_stream_raises_stall():
     assert raised
 
 
+async def test_parse_anthropic_sse_refusal_raises_refusal():
+    lines = _ev(
+        "message_start",
+        {
+            "type": "message_start",
+            "message": {"usage": {"input_tokens": 1}},
+        },
+    )
+    lines += _ev(
+        "message_delta",
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": "refusal"},
+            "usage": {"output_tokens": 0},
+        },
+    )
+    raised = None
+    try:
+        await _drain(
+            parse_anthropic_sse(
+                _FakeStream(lines),
+                actual_model="claude-test",
+                pool_name="claude-token",
+                request_id="r-refusal",
+            )
+        )
+    except RoseRefusalError as exc:
+        raised = exc
+    assert isinstance(raised, RoseRefusalError)
+
+
 async def test_parse_anthropic_sse_thinking_delta_counts_as_emitted():
     lines = []
     lines += _ev(
@@ -1876,6 +1918,26 @@ async def test_parse_openai_sse_empty_stream_raises_stall():
     except RoseStallError:
         raised = True
     assert raised
+
+
+async def test_parse_openai_sse_refusal_raises_refusal():
+    payloads = [
+        {"choices": [{"delta": {}, "finish_reason": "refusal"}]},
+        {"usage": {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1}},
+    ]
+    raised = None
+    try:
+        await _drain(
+            parse_openai_sse(
+                _FakeStream(_openai_sse(payloads)),
+                actual_model="g",
+                pool_name="p",
+                request_id="r-empty-refusal",
+            )
+        )
+    except RoseRefusalError as exc:
+        raised = exc
+    assert isinstance(raised, RoseRefusalError)
 
 
 async def test_parse_responses_sse_content_and_usage():
@@ -2687,7 +2749,7 @@ async def test_client_collect_waterfall_only_path():
         call_site="test-collect",
     )
     assert resp.content == "hello"
-    assert resp.actual_model == "google/gemini-3-flash-preview"
+    assert resp.actual_model == "google/gemini-3.5-flash"
     assert resp.usage.get("total_tokens") == 6
 
 
@@ -4199,6 +4261,7 @@ async def run_all_tests():
     await r.record_async("anth_sse_text_usage", test_parse_anthropic_sse_text_and_usage)
     await r.record_async("anth_sse_tool_use", test_parse_anthropic_sse_tool_use_block)
     await r.record_async("anth_sse_empty_stalls", test_parse_anthropic_sse_empty_stream_raises_stall)
+    await r.record_async("anth_sse_refusal_raises", test_parse_anthropic_sse_refusal_raises_refusal)
     await r.record_async("anth_sse_thinking_emitted", test_parse_anthropic_sse_thinking_delta_counts_as_emitted)
     await r.record_async("anth_sse_skip_bad_json", test_parse_anthropic_sse_skips_event_lines_and_bad_json)
     await r.record_async("anth_sse_in_band_rate_limit_raises", test_parse_anthropic_sse_in_band_rate_limit_raises)
@@ -4208,6 +4271,7 @@ async def run_all_tests():
     await r.record_async("openai_sse_tool_call_assembly", test_parse_openai_sse_tool_call_assembly_across_deltas)
     await r.record_async("openai_sse_reasoning_alias", test_parse_openai_sse_reasoning_content_alias)
     await r.record_async("openai_sse_empty_stalls", test_parse_openai_sse_empty_stream_raises_stall)
+    await r.record_async("openai_sse_refusal_raises", test_parse_openai_sse_refusal_raises_refusal)
     await r.record_async("responses_sse_content_usage", test_parse_responses_sse_content_and_usage)
     await r.record_async(
         "responses_sse_ignores_idle_before_first_line",

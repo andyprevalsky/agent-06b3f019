@@ -1142,7 +1142,7 @@ async def test_call_llm_rose_path():
     assert result["usage"]["prompt_tokens"] == 10
     assert result["usage"]["completion_tokens"] == 20
     assert result["usage"]["total_tokens"] == 30
-    assert result["usage"]["actual_model"] == "claude-sonnet-4-6-anthropic"
+    assert result["usage"]["actual_model"] == "claude-sonnet-5-anthropic"
 
 
 async def test_call_llm_rose_with_claude_token_and_skip_cache_write():
@@ -1179,7 +1179,7 @@ async def test_call_llm_rose_with_claude_token_and_skip_cache_write():
     call = anthropic_calls[0]
     assert any(k.lower() == "authorization" for k in call["requestHeaders"])
     body = json.loads(call["requestBody"])
-    assert body["model"] == "claude-sonnet-4-6"
+    assert body["model"] == "claude-sonnet-5"
     assert body["stream"] is True
     assert isinstance(body["system"], list)
     # skip_cache_write=True keeps system cache_control for reads but strips message breakpoint
@@ -1834,7 +1834,7 @@ async def test_call_llm_structured_streaming_happy_path():
     assert usage["cache_read_input_tokens"] == 2
     assert usage["cache_creation_input_tokens"] == 3
     # Waterfall path uses the first model in rose-1-lite's fallback list.
-    assert usage["actual_model"] == "google/gemini-3-flash-preview"
+    assert usage["actual_model"] == "google/gemini-3.5-flash"
     assert usage["pool_name"] == "rose-1-lite"
     assert usage["cancelled"] is False
     assert detected == []
@@ -1884,7 +1884,7 @@ async def test_call_llm_structured_streaming_model_detected_callback():
     )
 
     # No claude_token → routes through waterfall → first model from rose-1-lite.
-    assert seen_models == ["google/gemini-3-flash-preview"]
+    assert seen_models == ["google/gemini-3.5-flash"]
 
 
 async def test_call_llm_verifier_streaming_parses_score():
@@ -1918,7 +1918,7 @@ async def test_call_llm_verifier_streaming_parses_score():
     assert result["reasoning"] == "looks good"
     assert usage["prompt_tokens"] == 100
     # Waterfall path → first model from rose-1-lite.
-    assert usage["actual_model"] == "google/gemini-3-flash-preview"
+    assert usage["actual_model"] == "google/gemini-3.5-flash"
     assert usage["pool_name"] == "rose-1-lite"
 
 
@@ -2007,7 +2007,7 @@ async def test_call_llm_verifier_claude_token_and_schema():
     # Bearer token forwarded to Anthropic as-is.
     assert captured["headers"].get("authorization") == "Bearer ct-99"
     # Anthropic body uses claudeAuth model from rose-1-lite pool.
-    assert captured["body"]["model"] == "claude-sonnet-4-6"
+    assert captured["body"]["model"] == "claude-sonnet-5"
     assert captured["body"]["stream"] is True
     assert result["score"] == 1.0
     assert result["output"]["summary"] == "ok"
@@ -2520,7 +2520,7 @@ async def test_call_planner_llm_activity_happy_path():
     assert captured["batch_user_id"] == "planner-user"
     assert "scoped referenced text" in json.dumps(planner_body)
     # Anthropic uses the claudeAuth model from the rose-1-lite pool.
-    assert planner_body["model"] == "claude-sonnet-4-6"
+    assert planner_body["model"] == "claude-sonnet-5"
     assert planner_body["stream"] is True
     # Anthropic's literal "max" stalls — we normalize to "xhigh" (the highest
     # reliably-streaming level, mirroring gpt_auth which maps "max" → "xhigh").
@@ -4616,7 +4616,7 @@ async def test_call_llm_verifier_stream_interrupted_still_parses_partial():
         )
     assert parsed["score"] == 0.9
     # Waterfall path → first model from rose-1-lite pool.
-    assert usage["actual_model"] == "google/gemini-3-flash-preview"
+    assert usage["actual_model"] == "google/gemini-3.5-flash"
     assert usage["cache_read_input_tokens"] == 2
     assert usage["cache_creation_input_tokens"] == 1
 

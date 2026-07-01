@@ -19,6 +19,7 @@ from providers.rose.errors import (
     RoseAuthError,
     RoseError,
     RoseInvalidRequest,
+    RoseRefusalError,
     RoseRateLimitError,
     RoseServerError,
     RoseStallError,
@@ -34,6 +35,7 @@ _MODEL_TO_POOL: dict[str, PoolName] = {
     "rose-labs/rose-1-mini": "rose-1-mini",
     "rose-labs/rose-1-lite": "rose-1-lite",
     "rose-labs/rose-1-ultra": "rose-1-ultra",
+    "rose-labs/rose-1-browser-use": "rose-1-browser-use",
     "rose": "rose-1-lite",
     "rose-mini": "rose-1-mini",
     "rose-ultra": "rose-1-ultra",
@@ -60,6 +62,8 @@ def pool_for_model(model: str) -> Optional[PoolName]:
         return _MODEL_TO_POOL[lowered]
     # Fuzzy fall-back: "rose-labs/..." with anything after mini/lite/ultra.
     if "rose-labs" in lowered:
+        if "browser-use" in lowered:
+            return "rose-1-browser-use"
         if "ultra" in lowered:
             return "rose-1-ultra"
         if "mini" in lowered:
@@ -122,6 +126,7 @@ def classify_claude_token_error(exc: RoseError) -> str:
       - "rate_limit"      -> 429 after retries
       - "stall"           -> TTFT miss (RoseStallError)
       - "invalid_request" -> 400 (does NOT trigger rotation upstream)
+      - "refusal"         -> provider safety refusal
       - "server_error"    -> 5xx after retries
     """
     if isinstance(exc, RoseAuthError):
@@ -132,6 +137,8 @@ def classify_claude_token_error(exc: RoseError) -> str:
         return "stall"
     if isinstance(exc, RoseInvalidRequest):
         return "invalid_request"
+    if isinstance(exc, RoseRefusalError):
+        return "refusal"
     if isinstance(exc, RoseServerError):
         return "server_error"
     return "server_error"

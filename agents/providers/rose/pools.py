@@ -11,23 +11,19 @@ Model contract (P1):
         waterfall  = anthropic/claude-haiku-4.5 -> google/gemini-3-flash-preview
 
     rose-1-lite:
-        claudeAuth = claude-sonnet-4-6
+        claudeAuth = claude-sonnet-5
         gptAuth    = gpt-5.4
-        waterfall  = google/gemini-3-flash-preview -> moonshotai/kimi-k2.5
+        waterfall  = google/gemini-3.5-flash -> moonshotai/kimi-k2.7-code
 
     rose-1-ultra:
-        claudeAuth = claude-opus-4-8
+        claudeAuth = claude-fable-5
         gptAuth    = gpt-5.5
         waterfall  = anthropic/claude-opus-4.8 -> google/gemini-3.1-pro-preview
 
     rose-1-browser-use:
-        claudeAuth = claude-opus-4-8
+        claudeAuth = claude-fable-5
         gptAuth    = gpt-5.5
-        waterfall  = anthropic/claude-opus-4.8 -> openai/gpt-5.4
-
-Note: today's research/.../claude-token.ts hardcodes claudeAuth to
-claude-sonnet-4-6 for *both* pools. The ultra->opus mapping below is a
-behavioral change introduced in P1 (per the user spec), not a port.
+        waterfall  = anthropic/claude-opus-4.8 -> openai/gpt-5.5
 """
 
 from __future__ import annotations
@@ -71,16 +67,16 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
     ),
     "rose-1-lite": PoolSpec(
         name="rose-1-lite",
-        claude_auth_model="claude-sonnet-4-6",
+        claude_auth_model="claude-sonnet-5",
         gpt_auth_model="gpt-5.4",
         waterfall=(
-            "google/gemini-3-flash-preview",
-            "moonshotai/kimi-k2.5",
+            "google/gemini-3.5-flash",
+            "moonshotai/kimi-k2.7-code",
         ),
     ),
     "rose-1-ultra": PoolSpec(
         name="rose-1-ultra",
-        claude_auth_model="claude-opus-4-8",
+        claude_auth_model="claude-fable-5",
         gpt_auth_model="gpt-5.5",
         waterfall=(
             "anthropic/claude-opus-4.8",
@@ -92,11 +88,11 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
     # for AVAILABLE_ACTIONS) and the response extractor (tool_use -> UnifiedAction).
     "rose-1-browser-use": PoolSpec(
         name="rose-1-browser-use",
-        claude_auth_model="claude-opus-4-8",
+        claude_auth_model="claude-fable-5",
         gpt_auth_model="gpt-5.5",
         waterfall=(
             "anthropic/claude-opus-4.8",
-            "openai/gpt-5.4",
+            "openai/gpt-5.5",
         ),
     ),
 }
