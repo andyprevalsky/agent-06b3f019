@@ -48,4 +48,9 @@ export class ClaudeCredentialSync {
       mockNoClaudeCode,
     });
   }
+
+  /** Non-interactive periodic refresh; uploads only when credentials changed. */
+  static async syncExistingCredentialsIfChanged(): Promise<SyncResult> {
+    return service.syncExistingCredentialsIfChanged();
+  }
 }
