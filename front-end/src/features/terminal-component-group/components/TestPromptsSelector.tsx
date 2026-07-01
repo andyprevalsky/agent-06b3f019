@@ -26,9 +26,20 @@ import { useAutoLoadDefaultPrompt } from './test-prompts-selector/useAutoLoadDef
 import { TEST_PROMPTS } from './test-prompts-selector/prompts';
 import type { TestPrompt, TestPromptsSelectorProps } from './test-prompts-selector/types';
 import { BACKEND_BASE_URL } from '@/lib/backendUrl';
-import { fetchTestPaymentPublicUrl } from '@/features/test-payment/api';
 
 const TEST_PAYMENT_BASE_URL_TOKEN = '{{TEST_PAYMENT_BASE_URL}}';
+
+/** Fetch this backend's live ngrok public URL (or null). Inlined to avoid a cross-feature import. */
+async function fetchTestPaymentPublicUrl(): Promise<string | null> {
+  try {
+    const response = await fetch(`${BACKEND_BASE_URL}/api/test-payment/public-url`);
+    if (!response.ok) return null;
+    const data = (await response.json()) as { url: string | null };
+    return data.url ?? null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Resolve the `{{TEST_PAYMENT_BASE_URL}}` token to this backend's live ngrok tunnel so the

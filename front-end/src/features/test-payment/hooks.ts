@@ -1,1 +1,1 @@
-export { confirmTestPayment, fetchTestPaymentItems, fetchTestPaymentPublicUrl } from './api';
+export { confirmTestPayment, fetchTestPaymentItems } from './api';
