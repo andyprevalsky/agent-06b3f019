@@ -187,6 +187,11 @@ test('#5 createAgentSchema accepts fast_mode_cache_enabled', () => {
   assert.strictEqual(absent.fast_mode_cache_enabled, undefined); // route/service applies defaults
 });
 
+test('createAgentSchema accepts SMS source for SMS-origin sub-agents', () => {
+  const body = createAgentSchema.parse({ goal: 'x', source: 'SMS' });
+  assert.strictEqual(body.source, 'SMS');
+});
+
 test('Andy root agents default Fast Mode on when flag is absent', () => {
   const body = createAgentSchema.parse({ goal: 'x' });
   applyFastModeDefault(body, '1f85ff25-6e29-4c1b-8739-f917bd101a30');

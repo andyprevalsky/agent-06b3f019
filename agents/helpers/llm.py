@@ -1780,7 +1780,6 @@ async def call_llm_structured_streaming(  # noqa: C901
         claude_token_error: Optional[str] = None  # Set when claudeAuth fell through to waterfall
         gpt_token_error: Optional[str] = None  # Set when gptAuth fell through to waterfall
         final_finish_reason = ""  # From usage chunk (parsers normalize to OpenAI vocabulary)
-        was_cancelled = False
         chunk_count = 0
         stream_usage: Optional[Dict[str, Any]] = None
 
@@ -2091,7 +2090,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                     await on_raw_progress(len(accumulated_reasoning) + len(accumulated_json) + len(text_buffer))
         except asyncio.CancelledError:
             logger.info("⏹️ Rose streaming cancelled (asyncio.CancelledError)")
-            was_cancelled = True
+            raise
         except RoseError as exc:
             logger.error(f"❌ [{request_id}] [{call_site}] Rose streaming failed: {type(exc).__name__}: {exc}")
             raise ValueError(f"Rose streaming failed: {exc}") from exc
@@ -2103,7 +2102,7 @@ async def call_llm_structured_streaming(  # noqa: C901
         #   - Any other schema (PlannerResponse, ReasoningResponse, etc.): serialize
         #     the first tool's `input` dict directly. The verifier path at
         #     `_call_llm_verifier` does the same.
-        if not was_cancelled and using_native_direct_tools:
+        if using_native_direct_tools:
             model_fields = set(response_model.model_fields.keys())
             is_agent_envelope = {"response", "tool_calls"}.issubset(model_fields)
             if tool_use_blocks:
@@ -2122,47 +2121,6 @@ async def call_llm_structured_streaming(  # noqa: C901
                 # Native text only (no tool_use) — treat as the JSON envelope
                 # body; existing markdown/balanced-brace extraction handles it.
                 accumulated_json = text_buffer
-
-        if was_cancelled:
-            logger.info(f"🛑 Rose streaming cancelled, returning partial usage: {token_count} tokens")
-            # Return empty response with partial usage - workflow will handle the pause
-            empty_response = response_model.model_validate(
-                {"reasoning": "Streaming cancelled by user", "response": "", "tool_calls": []}
-            )
-            # Use stream_usage if captured before cancellation, otherwise estimate
-            if stream_usage:
-                usage = {
-                    "prompt_tokens": stream_usage.get("prompt_tokens", 0),
-                    "completion_tokens": stream_usage.get("completion_tokens", 0),
-                    "total_tokens": stream_usage.get("total_tokens", 0),
-                    "actual_model": actual_model,
-                    "pool_name": pool_name,
-                    "pool_size": pool_size,
-                    "claude_token_error": claude_token_error,
-                    "gpt_token_error": gpt_token_error,
-                    "claude_token_rotated": stream_usage.get("claude_token_rotated", False),
-                    "gpt_token_rotated": stream_usage.get("gpt_token_rotated", False),
-                    "compute_token_rotated": stream_usage.get("compute_token_rotated", False),
-                    "compute_token_used": stream_usage.get("compute_token_used"),
-                    "cancelled": True,
-                }
-            else:
-                usage = {
-                    "prompt_tokens": 0,
-                    "completion_tokens": token_count,
-                    "total_tokens": token_count,
-                    "actual_model": actual_model,
-                    "pool_name": pool_name,
-                    "pool_size": pool_size,
-                    "claude_token_error": claude_token_error,
-                    "gpt_token_error": gpt_token_error,
-                    "claude_token_rotated": False,
-                    "gpt_token_rotated": False,
-                    "compute_token_rotated": False,
-                    "compute_token_used": None,
-                    "cancelled": True,
-                }
-            return empty_response, usage, detected_tools_ordered
 
         logger.info(
             f"🏁 [{call_site}] Rose streaming complete, received {chunk_count} chunks, "
@@ -2502,7 +2460,6 @@ async def call_llm_structured_streaming(  # noqa: C901
     last_emitted_for_chunk = ""  # Track what we've actually sent to on_chunk (for 18-char batching)
     accumulated_text = ""
     final_response = None
-    was_cancelled = False
     chunk_count = 0
 
     # Use create_partial for streaming
@@ -2538,30 +2495,15 @@ async def call_llm_structured_streaming(  # noqa: C901
             final_response = partial
 
         # Final emit - flush any remaining content that wasn't sent (under 18 chars)
-        if not was_cancelled and accumulated_text and accumulated_text != last_emitted_for_chunk:
+        if accumulated_text and accumulated_text != last_emitted_for_chunk:
             await on_chunk(accumulated_text, len(accumulated_text) // 4)
 
     except asyncio.CancelledError:
         logger.info("⏹️ OpenRouter streaming cancelled (asyncio.CancelledError)")
-        was_cancelled = True
+        raise
     except Exception as e:
         logger.error(f"Streaming LLM call failed: {str(e)}", model=model)
         raise
-
-    # Handle cancellation
-    if was_cancelled:
-        logger.info("🛑 OpenRouter streaming cancelled, returning partial usage")
-        empty_response = response_model.model_validate(
-            {"reasoning": "Streaming cancelled by user", "response": "", "tool_calls": []}
-        )
-        estimated_tokens = len(accumulated_text) // 4
-        usage = {
-            "prompt_tokens": 0,
-            "completion_tokens": estimated_tokens,
-            "total_tokens": estimated_tokens,
-            "cancelled": True,
-        }
-        return empty_response, usage, []  # No tool detection in OpenRouter path
 
     if final_response is None:
         raise ValueError(f"Streaming LLM returned no response (model={model})")
