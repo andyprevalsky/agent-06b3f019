@@ -786,7 +786,7 @@ async def run_agent(  # noqa: C901
                     ],
                     start_to_close_timeout=timedelta(seconds=600),
                     retry_policy=RetryPolicy(maximum_attempts=3),
-                    heartbeat_timeout=timedelta(seconds=60),
+                    heartbeat_timeout=timedelta(seconds=180),
                 )
 
                 # Reconstruct result object from activity response

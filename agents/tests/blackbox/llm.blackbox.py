@@ -3901,6 +3901,78 @@ async def test_call_llm_structured_streaming_openrouter_exception_raises():
     assert raised
 
 
+async def test_call_llm_structured_streaming_rose_cancelled_error_propagates():
+    """Rose stream cancellation must not become a successful empty AgentAction."""
+    from helpers.llm import call_llm_structured_streaming
+    from utils.tool_schemas import create_agent_action_model
+
+    AgentAction = create_agent_action_model([])
+
+    class FakeRoseClient:
+        async def complete(self, **kwargs):
+            raise asyncio.CancelledError()
+            yield  # pragma: no cover
+
+    async def on_chunk(text: str, tokens: int):
+        raise AssertionError("cancelled stream should not emit chunks")
+
+    raised = False
+    with patch("temporalio.activity.heartbeat"), patch("helpers.llm.RoseClient", FakeRoseClient):
+        try:
+            await call_llm_structured_streaming(
+                messages=[{"role": "user", "content": "q"}],
+                model="rose-labs/rose-1-lite",
+                temperature=0.5,
+                max_tokens=256,
+                response_model=AgentAction,
+                on_chunk=on_chunk,
+                call_site="rose-cancelled",
+            )
+        except asyncio.CancelledError:
+            raised = True
+
+    assert raised
+
+
+async def test_call_llm_structured_streaming_openrouter_cancelled_error_propagates():
+    """OpenRouter stream cancellation must not become a successful empty AgentAction."""
+    from unittest.mock import MagicMock, patch
+    from helpers.llm import call_llm_structured_streaming
+    from utils.tool_schemas import create_agent_action_model
+
+    AgentAction = create_agent_action_model([])
+
+    async def cancelled_iter(*args, **kwargs):
+        raise asyncio.CancelledError()
+        yield  # pragma: no cover
+
+    fake_completions = MagicMock()
+    fake_completions.create_partial = cancelled_iter
+
+    fake_client = MagicMock()
+    fake_client.chat.completions = fake_completions
+
+    async def on_chunk(text: str, tokens: int):
+        raise AssertionError("cancelled stream should not emit chunks")
+
+    raised = False
+    with patch("helpers.llm.AsyncOpenAI"), patch("helpers.llm.instructor.from_openai", return_value=fake_client):
+        try:
+            await call_llm_structured_streaming(
+                messages=[{"role": "user", "content": "q"}],
+                model="anthropic/claude-sonnet-4",
+                temperature=0.5,
+                max_tokens=256,
+                response_model=AgentAction,
+                on_chunk=on_chunk,
+                call_site="openrouter-cancelled",
+            )
+        except asyncio.CancelledError:
+            raised = True
+
+    assert raised
+
+
 async def test_call_llm_structured_streaming_nested_tool_recovery():
     """Structured streaming unwraps nested tool_calls from response text."""
     import httpx
@@ -4994,6 +5066,14 @@ async def run_all_tests():
     await r.record_async("call_llm_openrouter_exception", test_call_llm_openrouter_exception_path)
     await r.record_async("stream_openrouter_path", test_call_llm_structured_streaming_openrouter_path)
     await r.record_async("stream_openrouter_exception", test_call_llm_structured_streaming_openrouter_exception_raises)
+    await r.record_async(
+        "stream_rose_cancelled_propagates",
+        test_call_llm_structured_streaming_rose_cancelled_error_propagates,
+    )
+    await r.record_async(
+        "stream_openrouter_cancelled_propagates",
+        test_call_llm_structured_streaming_openrouter_cancelled_error_propagates,
+    )
     await r.record_async("stream_nested_tool_recovery", test_call_llm_structured_streaming_nested_tool_recovery)
     await r.record_async(
         "stream_thinking_model_reasoning_json", test_call_llm_structured_streaming_thinking_model_reasoning_json
