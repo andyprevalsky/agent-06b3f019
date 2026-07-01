@@ -5979,6 +5979,165 @@ def test_normalize_write_lock_notification_media_promotes_item_image():
     ]
 
 
+async def test_generate_write_lock_notification_payment_forks_and_renders_question():
+    """The payment-approval path (#662) forks browser-use to mint a rich write-lock
+    notification. Validate the helper builds a validated notification, normalizes media,
+    renders a payment question, and threads usage/model/request metadata through."""
+    import domains.spawn_browser_agent_v3.handler as handler
+    from domains.spawn_browser_agent_v3.handler import _generate_write_lock_notification
+    from domains.spawn_browser_agent_v3.types import ClaudeTokenState
+
+    token_state = ClaudeTokenState()
+    token_state.access_token = "claude-token"
+    token_state.source = "user"
+
+    fork_action = {
+        "action": "generate_write_lock_notification",
+        "params": {
+            "trigger_type": "payment",
+            "action": "enter payment details",
+            "service": {
+                "name": "Delta",
+                "domain": "delta.com",
+                "url": "https://www.delta.com/checkout",
+            },
+            "media": [
+                {
+                    "url": "https://cdn.delta.com/receipt.png",
+                    "alt": "Booking summary",
+                    "kind": "page_preview",
+                }
+            ],
+            "payment": {
+                "merchant": "Delta Air Lines",
+                "amount": "$412.30",
+                "purpose": "Flight SFO -> JFK",
+                "fields": ["card number", "expiration date", "CVV"],
+            },
+        },
+    }
+
+    fork_mock = AsyncMock(
+        return_value={
+            "action": fork_action,
+            "usage": {"input_tokens": 1200, "output_tokens": 88},
+            "actual_model": "claude-sonnet-4-6-claude",
+            "request_id": "req-pay-1",
+            "mode": "claudeAuth",
+        }
+    )
+
+    with patch.object(
+        handler, "_call_browser_use_with_rotation", new=fork_mock
+    ):
+        result = await _generate_write_lock_notification(
+            rose_client=SimpleNamespace(),
+            task_prompt="Book the cheapest Delta flight",
+            dynamic_system_context="dynamic-ctx",
+            browser_turn_messages=[{"role": "user", "content": "checkout"}],
+            browser_state={"url": "https://www.delta.com/checkout", "screenshot": None},
+            action_entries=[{"type": "click"}],
+            config=_fake_config(),
+            user_id="user-pay",
+            agent_id="agent-pay",
+            iteration=7,
+            token_state=token_state,
+            gpt_token=None,
+            gpt_account_id=None,
+            gpt_token_source=None,
+            gpt_token_pool_id=None,
+            browser_use_mode="claude",
+            approval_type="payment",
+            current_url="https://www.delta.com/checkout",
+            pending_action={"action": "click", "params": {"index": 4}},
+            write_lock_result={"status": "awaiting_payment_card_approval"},
+            system_name="Rose",
+            fallback_question="Rose wants to make a purchase. Approve?",
+        )
+
+    # Fork was invoked with the write-lock notification call site + skip_cache_write.
+    fork_mock.assert_awaited_once()
+    fork_kwargs = fork_mock.await_args.kwargs
+    assert fork_kwargs["call_site"] == "write_lock_notification_fork_7"
+    assert fork_kwargs["skip_cache_write"] is True
+    assert fork_kwargs["dump_extra"]["approval_type"] == "payment"
+    # The fork prompt is appended as an extra user message.
+    extra = fork_kwargs["extra_user_messages"]
+    assert extra and extra[0]["role"] == "user"
+
+    # Notification is validated + tool key stripped.
+    notification = result["notification"]
+    assert "tool" not in notification
+    assert notification["trigger_type"] == "payment"
+    assert notification["payment"]["merchant"] == "Delta Air Lines"
+
+    # Question renders payment metadata (not the fallback) and hides secrets.
+    question = result["question"]
+    assert "Rose wants to enter payment details on **Delta**." in question
+    assert "Merchant: Delta Air Lines" in question
+    assert "Amount: $412.30" in question
+    assert "Fields: card number, expiration date, CVV" in question
+    assert "Payment secrets are not included in this message." in question
+    assert "Approve?" not in question  # fallback_question was not used
+
+    # Usage/model/request metadata threaded through for token accounting.
+    assert result["usage"] == {"input_tokens": 1200, "output_tokens": 88}
+    assert result["actual_model"] == "claude-sonnet-4-6-claude"
+    assert result["request_id"] == "req-pay-1"
+    assert result["mode"] == "claudeAuth"
+
+
+async def test_generate_write_lock_notification_raises_when_fork_calls_wrong_tool():
+    """If the forked model calls anything other than generate_write_lock_notification,
+    the helper raises so the caller falls back to build_payment_question rather than
+    surfacing a malformed notification."""
+    import domains.spawn_browser_agent_v3.handler as handler
+    from domains.spawn_browser_agent_v3.handler import _generate_write_lock_notification
+    from domains.spawn_browser_agent_v3.types import ClaudeTokenState
+
+    token_state = ClaudeTokenState()
+    token_state.access_token = "claude-token"
+    token_state.source = "user"
+
+    fork_mock = AsyncMock(
+        return_value={"action": {"action": "click", "params": {"index": 1}}}
+    )
+
+    with patch.object(handler, "_call_browser_use_with_rotation", new=fork_mock):
+        raised = None
+        try:
+            await _generate_write_lock_notification(
+                rose_client=SimpleNamespace(),
+                task_prompt="Buy socks",
+                dynamic_system_context="ctx",
+                browser_turn_messages=[],
+                browser_state={"url": "https://shop.example/checkout"},
+                action_entries=[],
+                config=_fake_config(),
+                user_id="u1",
+                agent_id="a1",
+                iteration=2,
+                token_state=token_state,
+                gpt_token=None,
+                gpt_account_id=None,
+                gpt_token_source=None,
+                gpt_token_pool_id=None,
+                browser_use_mode="claude",
+                approval_type="payment",
+                current_url="https://shop.example/checkout",
+                pending_action={"action": "click"},
+                write_lock_result={"status": "awaiting_payment_card_approval"},
+                system_name="Rose",
+                fallback_question="Approve purchase?",
+            )
+        except ValueError as exc:
+            raised = exc
+
+    assert raised is not None
+    assert "did not call generate_write_lock_notification" in str(raised)
+    assert "'click'" in str(raised)
+
+
 def test_extract_media_candidates_from_dom_state_keeps_image_urls_outside_llm_dom_text():
     from browser_tools.dom_service import _extract_media_candidates_from_dom_state
 
@@ -7943,6 +8102,14 @@ async def run_all_tests():
     r.record(
         "normalize_write_lock_notification_media_item_image",
         test_normalize_write_lock_notification_media_promotes_item_image,
+    )
+    await r.record_async(
+        "generate_write_lock_notification_payment_forks",
+        test_generate_write_lock_notification_payment_forks_and_renders_question,
+    )
+    await r.record_async(
+        "generate_write_lock_notification_wrong_tool_raises",
+        test_generate_write_lock_notification_raises_when_fork_calls_wrong_tool,
     )
     r.record(
         "extract_media_candidates_from_dom_state",
