@@ -182,6 +182,7 @@ async def waterfall_complete(
             seed=seed,
             provider_fast_mode=provider_fast_mode,
         )
+        emitted_user_visible = False
         try:
             async for chunk in _stream_one_step(
                 body=body,
@@ -194,9 +195,13 @@ async def waterfall_complete(
                 per_step_timeout_s=per_step_timeout_s,
                 idle_timeout_s=idle_timeout_s,
             ):
+                if chunk.kind in {"content", "reasoning", "tool_call", "codex_reasoning_item"}:
+                    emitted_user_visible = True
                 yield chunk
             return
         except RoseError as exc:
+            if emitted_user_visible:
+                raise
             logger.warning(
                 "rose.waterfall.step_failed",
                 request_id=request_id,

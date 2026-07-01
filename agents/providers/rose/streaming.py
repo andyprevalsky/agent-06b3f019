@@ -39,6 +39,7 @@ from providers.rose.errors import (
     RoseAuthError,
     RoseInvalidRequest,
     RoseRateLimitError,
+    RoseRefusalError,
     RoseServerError,
     RoseStallError,
 )
@@ -58,6 +59,8 @@ def _responses_error_to_exception(error_payload: Any, request_id: str):
     details = f"Responses stream failed (request_id={request_id}, code={code or 'unknown'}): {message[:1000]}"
     if code in {"invalid_request_error", "context_length_exceeded", "bad_request"}:
         return RoseInvalidRequest(details)
+    if code in {"refusal", "safety_refusal", "content_policy_violation", "policy_violation"}:
+        return RoseRefusalError(details)
     if code in {"rate_limit_exceeded", "rate_limit_error", "too_many_requests"}:
         return RoseRateLimitError(details)
     if code in {"authentication_error", "permission_error", "unauthorized", "forbidden"}:
@@ -284,6 +287,9 @@ async def parse_anthropic_sse(
     finally:
         await _close_quietly(response)
 
+    if finish_reason == "refusal":
+        raise RoseRefusalError(f"Anthropic stream ended with refusal (request_id={request_id})")
+
     if not emitted_content_or_tool:
         raise RoseStallError(f"Anthropic stream closed without content or tool_call (request_id={request_id})")
 
@@ -439,6 +445,9 @@ async def parse_openai_sse(
     for chunk in _flush_tool_calls():
         emitted_content_or_tool = True
         yield chunk
+
+    if finish_reason == "refusal":
+        raise RoseRefusalError(f"OpenAI/OpenRouter stream ended with refusal (request_id={request_id})")
 
     if not emitted_content_or_tool:
         # An empty stream is a stall in the TS waterfall sense: the

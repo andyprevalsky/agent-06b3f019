@@ -51,9 +51,9 @@ def test_browser_use_pool_registered():
     assert "rose-1-browser-use" in POOL_REGISTRY
     spec = get_pool("rose-1-browser-use")
     assert spec.name == "rose-1-browser-use"
-    assert spec.claude_auth_model == "claude-opus-4-8"
+    assert spec.claude_auth_model == "claude-fable-5"
     assert "anthropic/claude-opus-4.8" in spec.waterfall
-    # Legacy bu/yutori models removed; waterfall is opus → gpt-5.4
+    # Legacy bu/yutori models removed; waterfall is opus → gpt-5.5
     assert all("yutori" not in m and "browser-use" not in m for m in spec.waterfall)
 
 

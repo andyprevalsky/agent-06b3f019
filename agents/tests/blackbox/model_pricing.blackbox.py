@@ -36,7 +36,7 @@ def test_get_anthropic_pricing_claude_auth_zero():
     """claudeAuth-suffixed models bill $0 to Rose."""
     from helpers.model_pricing import get_anthropic_pricing
 
-    result = get_anthropic_pricing("claude-opus-4-7-claude")
+    result = get_anthropic_pricing("claude-fable-5-claude")
 
     assert result is not None
     assert result["input_cents_per_1k"] == 0.0

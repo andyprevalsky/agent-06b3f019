@@ -30,8 +30,8 @@ test('Claude Code sandbox enables Fast Mode through a live Claude Code model ali
     'utf8'
   );
   assert.ok(
-    e2bProvider.includes("const model = process.env.CLAUDE_CODE_MODEL || 'sonnet'"),
-    'backend must use a broadly available Claude Code model alias by default'
+    e2bProvider.includes("const model = process.env.CLAUDE_CODE_MODEL || 'claude-sonnet-5'"),
+    'backend must use the upgraded Claude Code model by default'
   );
   assert.ok(
     e2bProvider.includes(
@@ -77,7 +77,7 @@ test('Claude Code sandbox enables Fast Mode through a live Claude Code model ali
       "join(process.cwd(), '..', 'e2b-templates', 'claude-code', 'ws-server.mjs')"
     )
   );
-  assert.match(wsServer, /process\.env\.CLAUDE_CODE_MODEL\s*\|\|\s*["']sonnet["']/);
+  assert.match(wsServer, /process\.env\.CLAUDE_CODE_MODEL\s*\|\|\s*["']claude-sonnet-5["']/);
   assert.ok(
     !wsServer.includes('ANTHROPIC_DEFAULT_OPUS_MODEL'),
     'wrapper must not pin a model alias to a stale concrete model'
@@ -139,7 +139,8 @@ test('Codex Code sandbox uses Fast Mode localhost proxy plumbing', () => {
     'wrapper model provider must use Responses API wire format'
   );
   assert.ok(
-    viteConfig.includes('"/codex-proxy"'),
+    viteConfig.includes("'/codex-proxy'") &&
+      viteConfig.includes("target: `http://localhost:${process.env.BACKEND_PORT || '3000'}`"),
     'public dev tunnel must proxy Codex cache traffic to backend'
   );
   assert.ok(
@@ -171,22 +172,33 @@ test('local runner preserves prod DB URL for shared cache before local override'
 test('Rose provider Fast Mode maps to supported downstream request shapes', () => {
   const ultra = getPool('rose-1-ultra');
   const lite = getPool('rose-1-lite');
+  const opusAuth = { ...ultra, claudeAuthModel: 'claude-opus-4-8' };
   const messages = [{ role: 'user' as const, content: 'hi' }];
 
   const anthropicFast = buildAnthropicBody({
-    poolSpec: ultra,
+    poolSpec: opusAuth,
     messages,
     providerFastMode: true,
   });
   assert.strictEqual(anthropicFast.speed, 'fast');
 
-  const anthropicUnsupported = buildAnthropicBody({
+  const fableAnthropic = buildAnthropicBody({
+    poolSpec: ultra,
+    messages,
+    providerFastMode: true,
+  });
+  assert.ok(
+    !('speed' in fableAnthropic),
+    'direct Anthropic only gets speed for supported Opus models, not Fable'
+  );
+
+  const liteAnthropic = buildAnthropicBody({
     poolSpec: lite,
     messages,
     providerFastMode: true,
   });
   assert.ok(
-    !('speed' in anthropicUnsupported),
+    !('speed' in liteAnthropic),
     'direct Anthropic only gets speed for supported Opus models'
   );
 
@@ -240,6 +252,10 @@ test('backend chat passes provider Fast Mode to Rose live calls and cache keys',
     generator.includes('provider_fast_mode: providerFastMode'),
     'generator live call and cache key must request provider fast mode when cache-active'
   );
+});
+
+test('Rose pool registry rejects unknown pool names', () => {
+  assert.throws(() => getPool('rose-2-unknown' as never), /Unknown Rose pool rose-2-unknown/);
 });
 
 // #17/#18/#19 — the cache only keys LLM/network responses, never live infra.
