@@ -8,7 +8,6 @@ import {
   fetchCustomization,
   fetchIntegrations,
   fetchPlaidItems,
-  fetchUserSettings,
   resolvePresetSamplePath,
   saveCustomization,
   sendPasswordIntegrationRequest,
@@ -26,7 +25,6 @@ const ONBOARDING_CUSTOMIZATION_API: {
 
 const ONBOARDING_DATA_API: {
   fetchIntegrations: typeof fetchIntegrations;
-  fetchUserSettings: typeof fetchUserSettings;
   startGmailOAuth: typeof startGmailOAuth;
   uploadApplePasswords: typeof uploadApplePasswords;
   sendPasswordIntegrationRequest: typeof sendPasswordIntegrationRequest;
@@ -36,7 +34,6 @@ const ONBOARDING_DATA_API: {
   fetchPlaidItems: typeof fetchPlaidItems;
 } = {
   fetchIntegrations,
-  fetchUserSettings,
   startGmailOAuth,
   uploadApplePasswords,
   sendPasswordIntegrationRequest,

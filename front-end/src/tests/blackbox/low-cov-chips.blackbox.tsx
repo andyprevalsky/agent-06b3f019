@@ -276,6 +276,46 @@ describe('ApprovalChip', () => {
     expect(img.src).toBe('https://example.com/img.png');
   });
 
+  it('renders payment-card receipt metadata', () => {
+    renderWithProviders(
+      <ApprovalChip
+        pendingApproval={{
+          attentionRequestId: 'req-pay',
+          question: 'Approve purchase?',
+          requestPaymentCard: {
+            merchant: 'Example Shop',
+            currency: 'USD',
+            lineItems: [
+              {
+                name: 'Desk Lamp',
+                imageUrl: 'https://example.com/lamp.png',
+                unitPriceCents: 1299,
+                quantity: 2,
+                lineTotalCents: 2598,
+              },
+            ],
+            fees: [{ label: 'Tax', amountCents: 210 }],
+            subtotalCents: 2598,
+            totalCents: 2808,
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getByText('Example Shop')).toBeInTheDocument();
+    expect(screen.getByText('Desk Lamp')).toBeInTheDocument();
+    expect(screen.getByText('Qty 2 · $12.99')).toBeInTheDocument();
+    expect(screen.getAllByText('$25.98').length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText('Tax')).toBeInTheDocument();
+    expect(screen.getByText('$2.10')).toBeInTheDocument();
+    expect(screen.getAllByText('$28.08').length).toBeGreaterThanOrEqual(2);
+    expect(
+      screen.getByText(
+        'Rose will charge your saved Stripe billing method, then issue a one-time virtual card.',
+      ),
+    ).toBeInTheDocument();
+  });
+
   it('Accept: sends "Approved" by default and calls onApprovalHandled', async () => {
     const user = userEvent.setup();
     const onHandled = vi.fn();

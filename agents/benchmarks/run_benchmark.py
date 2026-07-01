@@ -123,6 +123,7 @@ MINTED_AGENT_ACCOUNT_X_AUTH_HINT = (
 )
 AMAZON_AUTH_ASSISTANCE_TASK_NAME = "browser-agent"
 AMAZON_COOKIE_PAYMENT_TASK_NAME = "browser-agent-amazon-cookie-payment"
+AGENT_PAYMENT_TEST_SHOP_TASK_NAME = "agent-payment-test-shop"
 AMAZON_COOKIE_BOOTSTRAP_TASK_NAMES = {
     AMAZON_AUTH_ASSISTANCE_TASK_NAME,
     AMAZON_COOKIE_PAYMENT_TASK_NAME,
@@ -249,7 +250,11 @@ def _attention_request_kind(req: dict) -> str:
         return explicit_kind
     if isinstance(metadata.get("requestUserAuthentication"), dict) or isinstance(metadata.get("authAssistance"), dict):
         return "auth_assistance"
+    if isinstance(metadata.get("requestPaymentCard"), dict):
+        return "payment_approval"
     approval = metadata.get("requestUserApproval")
+    if isinstance(approval, dict) and isinstance(approval.get("requestPaymentCard"), dict):
+        return "payment_approval"
     if isinstance(approval, dict) and approval.get("writePermission"):
         return "write_lock"
     if metadata.get("writePermission") or metadata.get("toolApproval"):
@@ -266,9 +271,140 @@ def _attention_request_matches_task(task: BenchmarkTask, req: dict) -> bool:
     return _attention_request_kind(req) == expected_kind
 
 
+def _frontend_url_for_benchmark(base_url: str) -> str:
+    explicit = os.environ.get("BENCHMARK_FRONTEND_URL", "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    # Stable public URL assigned by run.sh at startup (reserved ngrok domain → frontend port).
+    # This is the only URL the cloud browser agent can actually reach, so prefer it over any
+    # localhost fallback. run.sh exports PUBLIC_BASE_URL and records it in services.json.
+    public_env = os.environ.get("PUBLIC_BASE_URL", "").strip()
+    if public_env:
+        return public_env.rstrip("/")
+    services_path = REPO_ROOT / ".context" / "services.json"
+    if services_path.exists():
+        try:
+            services = json.loads(services_path.read_text())
+            public_url = ((services.get("urls") or {}).get("public") or "").strip()
+            if public_url:
+                return public_url.rstrip("/")
+        except Exception:
+            pass
+    conductor_port = os.environ.get("CONDUCTOR_PORT", "").strip()
+    if conductor_port.isdigit():
+        return f"http://localhost:{int(conductor_port) + 1}"
+    parsed = urlparse(base_url)
+    if parsed.hostname in {"localhost", "127.0.0.1"} and parsed.port:
+        return f"{parsed.scheme}://{parsed.hostname}:{parsed.port + 1}"
+    return "https://roselabs.ai"
+
+
+def _payment_receipt_from_attention_request(req: dict) -> dict:
+    metadata = req.get("metadata") if isinstance(req, dict) else None
+    metadata = metadata if isinstance(metadata, dict) else {}
+    direct = metadata.get("requestPaymentCard")
+    if isinstance(direct, dict):
+        return direct
+    approval = metadata.get("requestUserApproval")
+    if isinstance(approval, dict) and isinstance(approval.get("requestPaymentCard"), dict):
+        return approval["requestPaymentCard"]
+    return {}
+
+
+def _normalize_receipt_items(receipt: dict) -> dict:
+    out = {}
+    for item in receipt.get("lineItems") or receipt.get("line_items") or []:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        out[name] = {
+            "image_url": item.get("imageUrl")
+            or item.get("image_url")
+            or item.get("productImageUrl")
+            or item.get("product_image_url"),
+            "unit_price_cents": item.get("unitPriceCents") or item.get("unit_price_cents"),
+            "quantity": item.get("quantity"),
+            "line_total_cents": item.get("lineTotalCents") or item.get("line_total_cents"),
+        }
+    return out
+
+
+def _normalize_receipt_fees(receipt: dict) -> dict:
+    out = {}
+    for fee in receipt.get("fees") or []:
+        if not isinstance(fee, dict):
+            continue
+        label = fee.get("label") or fee.get("name")
+        if isinstance(label, str) and label:
+            out[label.lower()] = fee.get("amountCents") or fee.get("amount_cents")
+    return out
+
+
+def _receipt_amount(receipt: dict, camel_key: str) -> int | None:
+    snake_key = "".join([f"_{c.lower()}" if c.isupper() else c for c in camel_key]).lstrip("_")
+    value = receipt.get(camel_key)
+    return value if value is not None else receipt.get(snake_key)
+
+
+def _validate_payment_receipt(task: BenchmarkTask, req: dict) -> Optional[str]:
+    expected = task.expected_payment_receipt
+    if not expected:
+        return None
+    receipt = _payment_receipt_from_attention_request(req)
+    if not receipt:
+        return "missing requestPaymentCard metadata"
+    if receipt.get("merchant") != expected.get("merchant"):
+        return f"merchant mismatch: expected {expected.get('merchant')}, got {receipt.get('merchant')}"
+    if (receipt.get("currency") or "USD") != expected.get("currency", "USD"):
+        return f"currency mismatch: expected {expected.get('currency', 'USD')}, got {receipt.get('currency')}"
+    for key in ("subtotalCents", "totalCents"):
+        actual_amount = _receipt_amount(receipt, key)
+        if actual_amount != expected.get(key):
+            return f"{key} mismatch: expected {expected.get(key)}, got {actual_amount}"
+
+    actual_items = _normalize_receipt_items(receipt)
+    for expected_item in expected.get("lineItems", []):
+        name = expected_item.get("name")
+        actual = actual_items.get(name)
+        if not actual:
+            return f"missing receipt line item: {name}"
+        for actual_key, expected_key in (
+            ("image_url", "imageUrl"),
+            ("unit_price_cents", "unitPriceCents"),
+            ("quantity", "quantity"),
+            ("line_total_cents", "lineTotalCents"),
+        ):
+            if actual.get(actual_key) != expected_item.get(expected_key):
+                return (
+                    f"{name} {expected_key} mismatch: "
+                    f"expected {expected_item.get(expected_key)}, got {actual.get(actual_key)}"
+                )
+
+    actual_fees = _normalize_receipt_fees(receipt)
+    for expected_fee in expected.get("fees", []):
+        label = expected_fee.get("label", "").lower()
+        if actual_fees.get(label) != expected_fee.get("amountCents"):
+            return (
+                f"{expected_fee.get('label')} fee mismatch: "
+                f"expected {expected_fee.get('amountCents')}, got {actual_fees.get(label)}"
+            )
+    return None
+
+
 def _ci_should_fail(summary: dict) -> bool:
     """CI must fail on both failed and skipped benchmark tasks."""
     return summary.get("failed", 0) > 0 or summary.get("skipped", 0) > 0
+
+
+def _evaluate_agent_payment_result(data: dict) -> tuple[bool, str | None]:
+    text = _agent_data_search_text(data)
+    if "payment confirmed" not in text:
+        return False, "agent did not report the test payment confirmation page"
+    if "order" not in text:
+        return False, "agent did not report the confirmation order id"
+    return True, None
 
 
 def _default_timeout_for_task(task: BenchmarkTask, max_seconds: int | None = None) -> int:
@@ -366,6 +502,7 @@ async def create_agent(
     """Create a benchmark agent. Returns agent_id."""
     headers = await _api_headers()
     goal = os.environ.get("BENCHMARK_GOAL_OVERRIDE") or task.prompt
+    goal = goal.replace("{frontend_url}", _frontend_url_for_benchmark(base_url))
     source_override = _benchmark_agent_source_override()
     request_source = source_override if source_override in {"WEB", "MAC_APP"} else "WEB"
 
@@ -1095,12 +1232,26 @@ async def poll_agent(
                                     approvals_resolved,
                                     f"Expected attention kind {expected_kind}, observed {observed_kind}",
                                 )
+                            receipt_error = _validate_payment_receipt(task, req)
+                            if receipt_error:
+                                data["_benchmark"] = {
+                                    **data.get("_benchmark", {}),
+                                    "payment_receipt_validation_error": receipt_error,
+                                    "payment_receipt_request_id": req_id,
+                                }
+                                return data, approvals_triggered, approvals_resolved, receipt_error
                             approvals_triggered += 1
                             if task.expected_attention_kind:
                                 data["_benchmark"] = {
                                     **data.get("_benchmark", {}),
                                     "expected_attention_kind_seen": task.expected_attention_kind,
                                     "expected_attention_request_id": req_id,
+                                }
+                            if task.expected_payment_receipt:
+                                data["_benchmark"] = {
+                                    **data.get("_benchmark", {}),
+                                    "expected_payment_receipt_seen": True,
+                                    "expected_payment_receipt_request_id": req_id,
                                 }
                             if task.approval_handling == "count_only":
                                 await respond_to_attention_request(base_url, req_id, _count_only_release_response())
@@ -1245,6 +1396,10 @@ def evaluate_task(
         if not passed:
             return False, reason
 
+    if task.name == AGENT_PAYMENT_TEST_SHOP_TASK_NAME:
+        passed, reason = _evaluate_agent_payment_result(data)
+        if not passed:
+            return False, reason
     if task.name == GREP_EXPLORE_STRESS_TASK_NAME:
         return True, None
 
@@ -2407,7 +2562,11 @@ def _evaluate_webdecoy_biometrics_result(data: dict) -> Tuple[bool, Optional[str
     # ~0.003 run-to-run variance in the behavioral-biometrics score (mouse timing,
     # Steel proxy, parallel-run CPU/PoW contention); resume ratcheting DOWN as the
     # anti-detection floor improves.
-    WEBDECOY_RISK_RATCHET = 0.160
+    # Raised to 0.163 on 2026-07-01 with explicit human approval: three consecutive
+    # runs (parallel + two solo) all scored a deterministic 0.163 with no related
+    # code change — the current external anti-bot floor (Steel proxy IP reputation)
+    # sits 0.003 above the prior ratchet. Resume ratcheting DOWN as the floor improves.
+    WEBDECOY_RISK_RATCHET = 0.163
     if final_score > WEBDECOY_RISK_RATCHET:
         return False, (
             f"FCaptcha {score_source} risk score {final_score:.3f} exceeds ratchet {WEBDECOY_RISK_RATCHET:.3f} "

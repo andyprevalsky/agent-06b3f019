@@ -11,7 +11,6 @@ import { usePlaidLink, type PlaidLinkOnSuccessMetadata } from 'react-plaid-link'
 import AtlasPasswordModal from '../../../components/AtlasPasswordModal';
 import WhatsAppQRModal from '../../../components/WhatsAppQRModal';
 import TelegramAuthModal from '../../../components/TelegramAuthModal';
-import AgentPayModal from '../../../components/AgentPayModal';
 import PasskeysModal from '@/components/PasskeysModal';
 import ConnectedStatusText from '@/features/integrations/components/ConnectedStatusText';
 import DropdownIconFrame, {
@@ -214,10 +213,6 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
   const [socialsExpanded, setSocialsExpanded] = useState(false);
   const [linkedinSyncLoading, setLinkedinSyncLoading] = useState(false);
 
-  // Agent Pay state
-  const [agentPayModalOpen, setAgentPayModalOpen] = useState(false);
-  const [agentPayConfigured, setAgentPayConfigured] = useState(false);
-
   // Accordion behavior - expand one section, collapse others
   const handleBrowsersExpand = () => {
     setBrowsersExpanded(!browsersExpanded);
@@ -349,12 +344,6 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
           (i: Integration) => i.name === 'telegram' && i.status === 'CONNECTED'
         );
         setTelegramConnected(!!telegramIntegration);
-
-        // Check if agent pay is already configured
-        const settings = await onboardingDataApi.fetchUserSettings();
-        if (settings !== null && settings.encryptedPaymentInformation) {
-          setAgentPayConfigured(true);
-        }
 
         // Hydrate connected banks (Plaid items)
         try {
@@ -1422,38 +1411,6 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
             )}
           </div>
 
-          {/* Agent Pay - Opens modal */}
-          <div className="rounded-xl border transition-all duration-200 bg-card border-border overflow-hidden">
-            <div className="p-4 flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <DropdownIconFrame {...dropdownIconPreset.agentPay} isSynced={agentPayConfigured}>
-                  <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none">
-                    <rect x="1" y="4" width="22" height="16" rx="2.5" fill="#1a1a1a" />
-                    <rect x="1" y="8.5" width="22" height="3" fill="#333" />
-                    <rect x="3.5" y="14" width="6" height="2" rx="0.5" fill="#555" />
-                    <rect x="11" y="14" width="3" height="2" rx="0.5" fill="#555" />
-                    <circle cx="18.5" cy="15" r="2" fill="#444" />
-                    <circle cx="20" cy="15" r="2" fill="#555" />
-                  </svg>
-                </DropdownIconFrame>
-                <div>
-                  <div className="font-medium text-sm text-foreground">Agent Pay</div>
-                  <ConnectedStatusText isConnected={agentPayConfigured} />
-                  <div className="text-xs text-muted-foreground">
-                    Payment method for agent purchases
-                  </div>
-                </div>
-              </div>
-
-              <button
-                onClick={() => setAgentPayModalOpen(true)}
-                className="h-10 w-10 rounded-lg flex items-center justify-center transition-all duration-200 bg-foreground text-background hover:bg-foreground/90"
-              >
-                <RefreshCw className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-
           {/* Banking (Plaid) */}
           <div className="rounded-xl border transition-all duration-200 bg-card border-border overflow-hidden">
             <div className="p-4 flex items-center justify-between">
@@ -1561,16 +1518,6 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
         onSuccess={() => {
           setTelegramConnected(true);
           setTelegramAuthModalOpen(false);
-        }}
-      />
-
-      {/* Agent Pay Modal */}
-      <AgentPayModal
-        isOpen={agentPayModalOpen}
-        onClose={() => setAgentPayModalOpen(false)}
-        onSuccess={() => {
-          setAgentPayConfigured(true);
-          setAgentPayModalOpen(false);
         }}
       />
     </div>

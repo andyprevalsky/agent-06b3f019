@@ -35,7 +35,6 @@ export function useSettingsData(): SettingsDataResult {
     state: '',
     postalCode: '',
     country: 'United States',
-    encryptedPaymentInformation: null,
   });
   const [customization, setCustomization] = useState<CustomizationData>({
     systemName: 'Rose',
@@ -85,7 +84,6 @@ export function useSettingsData(): SettingsDataResult {
           state: (data.state as string) || '',
           postalCode: (data.postalCode as string) || '',
           country: (data.country as string) || 'United States',
-          encryptedPaymentInformation: (data.encryptedPaymentInformation as string) || null,
         });
         setCustomization({
           systemName: (data.systemName as string) || 'Rose',

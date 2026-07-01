@@ -14,6 +14,7 @@ import type {
   FilePointer,
   CreateAgentPayload,
 } from '@/lib/api';
+import type { RequestPaymentCardPayload } from '@/lib/realtime-types';
 
 // ── View state ────────────────────────────────────────────────────────────
 
@@ -57,6 +58,7 @@ export interface PendingApproval {
   attentionRequestId: string;
   question: string;
   imageUrl: string | null;
+  requestPaymentCard?: RequestPaymentCardPayload;
 }
 
 // ── Opening message tuple: [text, pauseDurationMs] ────────────────────────

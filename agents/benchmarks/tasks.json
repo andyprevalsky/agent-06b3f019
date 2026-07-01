@@ -174,7 +174,14 @@
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "needs-auth", "minted", "local-only", "auth", "auth-anon"],
+    "tags": [
+      "browser",
+      "needs-auth",
+      "minted",
+      "local-only",
+      "auth",
+      "auth-anon"
+    ],
     "price_limit_cents": 400,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -228,6 +235,55 @@
     "start_phase": "execute"
   },
   {
+    "name": "agent-payment-test-shop",
+    "title": "Agent Payment Test Shop",
+    "prompt": "Use a browser agent to go to {frontend_url}/test_payment. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "tags": ["browser", "payment", "local-only"],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_attention_kind": "payment_approval",
+    "start_phase": "execute",
+    "expected_payment_receipt": {
+      "merchant": "Rose Labs Test Payment",
+      "currency": "USD",
+      "subtotalCents": 3600,
+      "totalCents": 4396,
+      "lineItems": [
+        {
+          "name": "Aurora Notebook",
+          "imageUrl": "https://placehold.co/320x220/png?text=Aurora+Notebook",
+          "unitPriceCents": 1200,
+          "quantity": 1,
+          "lineTotalCents": 1200
+        },
+        {
+          "name": "Ceramic Mug",
+          "imageUrl": "https://placehold.co/320x220/png?text=Ceramic+Mug",
+          "unitPriceCents": 900,
+          "quantity": 1,
+          "lineTotalCents": 900
+        },
+        {
+          "name": "Canvas Tote",
+          "imageUrl": "https://placehold.co/320x220/png?text=Canvas+Tote",
+          "unitPriceCents": 1500,
+          "quantity": 1,
+          "lineTotalCents": 1500
+        }
+      ],
+      "fees": [
+        { "label": "Tax", "amountCents": 297 },
+        { "label": "Shipping", "amountCents": 499 }
+      ]
+    }
+  },
+  {
     "name": "browser-biometrics-webdecoy",
     "title": "Browser Biometrics WebDecoy",
     "prompt": "Use a browser agent to go to https://webdecoy.com/product/fcaptcha-demo/. This is a live third-party behavioral biometrics demo. Interact with it like a normal user: move to and click the checkbox mode verification control if present, then use the invisible mode form by entering benchmark-human@example.com as the email and a short message, and submit it. Do not use JavaScript evaluate to click or fill controls. Use visible browser actions only. Return the final visible FCaptcha risk score exactly as shown, whether the checkbox mode appeared to pass, whether the invisible form was submitted, and any visible bot/human verdict text.",
@@ -248,7 +304,11 @@
     "prompt": "Do these tasks in order:\n\n1. EXPLORE: Use an explore agent to find the current population of Japan (a single number).\n\n2. SIAS (Super-Intelligent Autonomous System): Spawn a general-purpose agent to do this multi-step task:\n   a. Use a browser agent to visit https://www.random.org/integers/?num=1&min=1&max=100&col=1&base=10&format=plain and return the number shown on the page.\n   b. Use Claude Code to run this Python script and return the output: import random; random.seed(42); print(random.randint(1, 100))\n   c. Multiply the two numbers (browser result × code result) and return the product.\n\n3. MULTIPLY: Take the population of Japan from step 1 and multiply it by the product from step 2.\n\n4. MESSAGE: Send an email to andy@roselabs.ai with the subject 'Cache Benchmark Result' containing the final number from step 3.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent", "spawn_general_purpose_agent", "message_person"],
+    "expected_tools": [
+      "spawn_agent",
+      "spawn_general_purpose_agent",
+      "message_person"
+    ],
     "tags": ["cache"],
     "price_limit_cents": 200,
     "requires_browser_agent": true,
@@ -330,7 +390,10 @@
     "prompt": "I've attached a CSV of angels. Reach out to every person in this CSV.\n\nUse spawn_general_purpose_agent_for_each to spawn one general-purpose agent per row.\n\nEach message should be personalized, sent from a@roselabs.ai and be centered around getting feedback about ML research I'm doing in mass agent networks. Here is the blog post I wrote: https://www.roselabs.ai/research/task-decomposer\n\nWe need to make sure we run this process with world class persistence, etiquette, and attention to detail. I want to have one general-purpose agent per row.\n\nPROCESS GUIDELINES\n===\n0. Use spawn_general_purpose_agent_for_each when spawning a general-purpose agent per row.\n1. At the start, do research for best practices on cold email outreach.\n2. When doing research on each person, try to find any unique commonalities between me and the person I'm reaching out to that help build trust in the email (school alma mater, fellow YC founder, any unique commonality).\n3. We are trying to eventually get this person to invest. Don't mention that, but just know that this is my goal. The first step is to build a relationship.\n4. Keep the email short and sweet, be personable, no dashes, or language that makes the email read like an AI wrote it. Do research on common phrases or patterns that AIs use when writing a message, and actively avoid them.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_general_purpose_agent_for_each", "message_person"],
+    "expected_tools": [
+      "spawn_general_purpose_agent_for_each",
+      "message_person"
+    ],
     "tags": ["attachment", "for-each", "approval", "outreach", "batch"],
     "price_limit_cents": 2000,
     "requires_browser_agent": false,
@@ -348,7 +411,11 @@
     "prompt": "My Dad, George Prevalsky, needs a new site that is exclusively used for signing new clients. His existing billing solution is archaic and is causing him to be unable to take a vacation.\nWe need to create and host a site that can be accessed via QR code or direct link.\n\nThe site should include:\n- I've attached 4 waivers as PDFs (Adult Waiver & Release of Liability, Minor Waiver & Release of Liability, Adult Sparring Consent, Minor Sparring Consent). Signing is required for the liability waivers (adult and minor). The sparring consent waivers are included for reference but don't need to be part of the payment flow.\n- I've also attached the billing & payment terms and the membership terms as PDFs. Before paying, users must check a required opt-in checkbox agreeing to these terms (you can include this as part of the waiver signing step). The full text of the terms should be viewable on the site.\n- The classes are:\n  Boxing $225/month\n  Muay Thai $225/month\n  MMA $245/month\n  Jiujitsu $185/month\n  Kids Program $185/month\n  Unlimited classes $285/month\n- We need to support discount codes for Boxing & Muay Thai\n\nThe flow will be:\n1. Pick your classes\n2. Sign your waivers and agree to the billing & membership terms (required checkboxes)\n3. Pay for the classes\n4. Get a confirmation email\n5. Send a confirmation email to georgeprevalsky@gmail.com that includes all relevant details of the payment & attachments of the signed waivers\n\nHere are the Stripe API keys:\\nSTRIPE_SECRET_KEY_TEST={{STRIPE_SECRET_KEY_TEST}}\\nSTRIPE_PUBLISHABLE_KEY_TEST={{STRIPE_PUBLISHABLE_KEY_TEST}}\\nSTRIPE_SECRET_KEY_PRODUCTION={{STRIPE_SECRET_KEY_PRODUCTION}}\\nSTRIPE_PUBLISHABLE_KEY_PRODUCTION={{STRIPE_PUBLISHABLE_KEY_PRODUCTION}}\n\nYou can test the flow on Stripe test mode, and send confirmation emails to andy@roselabs.ai (since you have access to that email via the browser agent).\n\nMake sure the payment site includes all necessary information, is styled exceptionally well, and architecturally, is as simple as possible - we do NOT want to have to worry about maintenance.\n\nReturn to me:\n- A link to the hosted site\n- A QR Code for the hosted site\n- A discount code that can be used exclusively for Boxing & Muay Thai purchases",
     "timeout_seconds": 7200,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_browser_agent", "spawn_claude_code_agent", "spawn_general_purpose_agent"],
+    "expected_tools": [
+      "spawn_browser_agent",
+      "spawn_claude_code_agent",
+      "spawn_general_purpose_agent"
+    ],
     "tags": ["browser", "claude-code", "attachment", "needs-auth"],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
@@ -377,7 +444,10 @@
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
-    "attachments": ["test-exec-assistant-resume.pdf", "test-childcare-resume.pdf"],
+    "attachments": [
+      "test-exec-assistant-resume.pdf",
+      "test-childcare-resume.pdf"
+    ],
     "approval_handling": "prompt_user",
     "start_phase": "plan"
   },

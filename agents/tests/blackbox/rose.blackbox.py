@@ -704,6 +704,44 @@ def test_apply_tool_config_response_format_native_lift():
     assert body["tool_choice"] == {"type": "auto"}
 
 
+def test_browser_use_uses_auto_tool_choice_not_any():
+    """Browser-use MUST use tool_choice='auto', never 'any'/'required'.
+
+    Forcing tool use forbids the model from emitting a reasoning text block before its
+    tool call; without that step the model degenerates into reflexively re-picking the
+    safe no-op `screenshot` tool every turn (verified: the identical request returns a
+    17-token bare `screenshot` under 'any' vs. reasoned `input_text`/`click` under 'auto').
+    """
+    import inspect
+    from providers.rose.client import RoseClient
+
+    src = inspect.getsource(RoseClient.complete_browser_use)
+    assert 'tool_choice = "auto"' in src, "browser-use must set tool_choice='auto'"
+    assert 'tool_choice = "any"' not in src, "browser-use must NOT force tool_choice='any'"
+    assert 'tool_choice = "required"' not in src, "browser-use must NOT force tool_choice='required'"
+
+
+def test_browser_use_advertises_request_payment_card():
+    """request_payment_card must be ADVERTISED to the model, not just registered for parse/dispatch.
+
+    It drifted before: registered in AVAILABLE_ACTIONS + _VALID_ACTIONS + the action dispatcher
+    + the autopay prompt, but MISSING from the BROWSER_USE_TOOLS catalog that
+    build_browser_use_tools reads. build_browser_use_tools silently skips any action absent from
+    the catalog, so the model never saw the tool, couldn't call it, and typed the card refs the
+    prompt listed instead of minting a card.
+    """
+    from browser_tools.schemas import AVAILABLE_ACTIONS
+    from providers.rose.browser_use import BROWSER_USE_TOOLS, build_browser_use_tools
+
+    assert "request_payment_card" in BROWSER_USE_TOOLS, "missing from BROWSER_USE_TOOLS catalog"
+    tools = build_browser_use_tools(AVAILABLE_ACTIONS)
+    rpc = next((t for t in tools if t["name"] == "request_payment_card"), None)
+    assert rpc is not None, "request_payment_card not advertised to the model"
+    props = rpc["input_schema"]["properties"]
+    for p in ("merchant", "line_items", "subtotal_cents", "total_cents"):
+        assert p in props, f"request_payment_card schema missing required param {p}"
+
+
 def test_apply_tool_config_response_format_structured_output_path():
     body = {}
     rf = {"json_schema": {"schema": {"type": "object", "properties": {"x": {"type": "string"}}}}}
@@ -4115,6 +4153,8 @@ async def run_all_tests():
     r.record("tool_config_explicit_tools", test_apply_tool_config_with_explicit_tools_and_choice)
     r.record("tool_config_choice_auto_specific", test_apply_tool_config_choice_auto_and_specific_tool)
     r.record("tool_config_native_lift", test_apply_tool_config_response_format_native_lift)
+    r.record("browser_use_auto_tool_choice", test_browser_use_uses_auto_tool_choice_not_any)
+    r.record("browser_use_advertises_request_payment_card", test_browser_use_advertises_request_payment_card)
     r.record("tool_config_structured_output_paths", test_apply_tool_config_response_format_structured_output_path)
 
     r.record("is_vision_capable", test_is_vision_capable_membership)

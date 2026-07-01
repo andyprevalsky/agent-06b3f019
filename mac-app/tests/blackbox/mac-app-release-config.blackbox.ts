@@ -13,7 +13,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { resolveBackendUrl as resolveElectronAppBackendUrl } from '../../ui/features/electron-app/config';
-import { resolveBackendUrl as resolveAgentPayBackendUrl } from '../../ui/features/agent-pay-modal/api';
 import { resolveBackendUrl as resolveOnboardingBackendUrl } from '../../ui/features/onboarding/config';
 
 const ROOT = path.resolve(__dirname, '../..');
@@ -58,11 +57,7 @@ describe('mac app release config', () => {
   });
 
   it('renderer backend URL resolvers fail production builds without a backend URL', () => {
-    const resolvers = [
-      resolveElectronAppBackendUrl,
-      resolveAgentPayBackendUrl,
-      resolveOnboardingBackendUrl,
-    ];
+    const resolvers = [resolveElectronAppBackendUrl, resolveOnboardingBackendUrl];
 
     for (const resolve of resolvers) {
       expect(resolve(undefined, false)).toBe('http://localhost:3001');

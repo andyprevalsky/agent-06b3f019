@@ -4,32 +4,30 @@
  *                    [LOADING]
  *                        |
  *                        v (loadSettings + loadSubscription + loadApiKeys)
- *         +---------[READY]----------------------------------------------+
- *         |              |               |               |               |
- *    [TAB:CUSTOM]  [TAB:INFO]    [TAB:PAYMENT]   [TAB:BILLING]    [TAB:KEYS]
- *         |              |               |               |               |
- *    (save custom) (save info)   (save payment)  (redirect to     (gen/del keys)
- *         |              |               |        Stripe portal)        |
- *         v              v               v               |               v
- *    [SAVING_CUST]  [SAVING]      [SAVING_PAY]          |        [SUBSCRIPTION_MODAL]
- *         |              |               |               |         (if no subscription)
- *         v              v               v               |               |
- *    [SAVED_CUST]   [SAVED]       [SAVED_PAY]           |         [Subscribe] -> Stripe
- *         |              |               |               |               |
- *         +──────────────+───────────────+───────────────+───────────────+
+ *         +---------[READY]------------------------------+
+ *         |              |               |               |
+ *    [TAB:CUSTOM]  [TAB:INFO]    [TAB:BILLING]    [TAB:KEYS]
+ *         |              |               |               |
+ *    (save custom) (save info)   (redirect to     (gen/del keys)
+ *         |              |        Stripe portal)        |
+ *         v              v               |               v
+ *    [SAVING_CUST]  [SAVING]            |        [SUBSCRIPTION_MODAL]
+ *         |              |               |         (if no subscription)
+ *         v              v               |               |
+ *    [SAVED_CUST]   [SAVED]             |         [Subscribe] -> Stripe
+ *         |              |               |               |
+ *         +──────────────+───────────────+───────────────+
  *                        |
  *                        v
  *                    [READY]
  *
  * States:
  * - loading: true -> LOADING
- * - activeTab: 'customization' | 'info' | 'payment' | 'billing' | 'keys'
+ * - activeTab: 'customization' | 'info' | 'billing' | 'keys'
  * - saving: true -> SAVING (personal info)
  * - saved: true -> SAVED (success indicator)
  * - savingCustomization: true -> SAVING_CUSTOMIZATION
  * - savedCustomization: true -> customization saved success
- * - savingPayment: true -> SAVING_PAYMENT
- * - savedPayment: true -> payment saved success
  * - showSubscriptionModal: true -> subscription required modal
  * - subscriptionTier: number | null
  * - apiKeys: array of user's API keys
@@ -45,7 +43,6 @@ import {
   useSettingsData,
   useSavePersonalInfo,
   useSaveCustomization,
-  usePayment,
   useBilling,
   useApiKeys,
 } from '../hooks';
@@ -58,7 +55,6 @@ export default function Settings() {
   const data = useSettingsData();
   const personalInfo = useSavePersonalInfo(data.userData, data.setError);
   const customizationSave = useSaveCustomization(data.customization, data.setError);
-  const payment = usePayment(data.userData, data.setUserData, data.setError);
   const billing = useBilling(data.userId, data.upgradeOptions, data.setError);
   const apiKeysHook = useApiKeys(data.subscriptionTier, data.reloadApiKeys, data.setError);
 
@@ -100,9 +96,6 @@ export default function Settings() {
             <TabsTrigger value="info" className="flex-shrink-0 text-xs sm:text-sm">
               Personal Info
             </TabsTrigger>
-            <TabsTrigger value="payment" className="flex-shrink-0 text-xs sm:text-sm">
-              Agent Payment
-            </TabsTrigger>
             <TabsTrigger value="billing" className="flex-shrink-0 text-xs sm:text-sm">
               Billing
             </TabsTrigger>
@@ -115,7 +108,6 @@ export default function Settings() {
             data={data}
             personalInfo={personalInfo}
             customizationSave={customizationSave}
-            payment={payment}
             billing={billing}
             apiKeysHook={apiKeysHook}
             handleFieldChange={handleFieldChange}

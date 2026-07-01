@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -29,7 +30,10 @@ from benchmarks.benchmark_tasks import all_tasks
 LOAD_TEST_TASKS = {"load-test-sias"}
 SERVICES_MANIFEST = REPO_ROOT / ".context" / "services.json"
 SERVICE_LOG = REPO_ROOT / ".context" / "local-benchmark-services.log"
+TUNNEL_LOG = REPO_ROOT / ".context" / "local-benchmark-ngrok.log"
 RUNS_DIR = AGENTS_DIR / "benchmarks" / "runs"
+AGENT_PAYMENT_TEST_SHOP_TASK_NAME = "agent-payment-test-shop"
+BENCHMARK_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 
 
 @dataclass(frozen=True)
@@ -44,6 +48,12 @@ class FailedTask:
     name: str
     agent_id: str
     failure_reason: str
+
+
+@dataclass(frozen=True)
+class FrontendTunnel:
+    process: subprocess.Popen
+    public_url: str
 
 
 def known_task_names() -> list[str]:
@@ -137,6 +147,98 @@ def http_ok(url: str, timeout: float = 1.0) -> bool:
             return 200 <= response.status < 500
     except Exception:
         return False
+
+
+def _ngrok_public_url_for_port(port: int) -> str | None:
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:4040/api/tunnels", timeout=1.0) as response:
+            data = json.load(response)
+    except Exception:
+        return None
+    for tunnel in data.get("tunnels", []) or []:
+        if not isinstance(tunnel, dict):
+            continue
+        public_url = tunnel.get("public_url")
+        config = tunnel.get("config") if isinstance(tunnel.get("config"), dict) else {}
+        addr = str(config.get("addr") or "")
+        if isinstance(public_url, str) and public_url.startswith("https://") and addr.endswith(f":{port}"):
+            return public_url.rstrip("/")
+    return None
+
+
+def start_frontend_tunnel(port: int, timeout_seconds: int = 45) -> FrontendTunnel:
+    if not shutil.which("ngrok"):
+        raise RuntimeError("agent-payment-test-shop requires ngrok so the cloud browser can reach the local test site")
+    existing = _ngrok_public_url_for_port(port)
+    if existing:
+        return FrontendTunnel(process=subprocess.Popen(["true"]), public_url=existing)
+
+    (REPO_ROOT / ".context").mkdir(exist_ok=True)
+    tunnel_log = open(TUNNEL_LOG, "w")
+    process = subprocess.Popen(
+        ["ngrok", "http", str(port), "--log=stdout", "--log-format=json"],
+        cwd=REPO_ROOT,
+        stdout=tunnel_log,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    tunnel_log.close()
+
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"ngrok exited early with code {process.returncode}; see {TUNNEL_LOG}")
+        public_url = _ngrok_public_url_for_port(port)
+        if public_url:
+            return FrontendTunnel(process=process, public_url=public_url)
+        time.sleep(1)
+
+    process.terminate()
+    raise TimeoutError(f"Timed out waiting for ngrok test-site tunnel; see {TUNNEL_LOG}")
+
+
+def stop_frontend_tunnel(tunnel: FrontendTunnel | None) -> None:
+    if tunnel is None or tunnel.process.poll() is not None:
+        return
+    tunnel.process.terminate()
+    try:
+        tunnel.process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        tunnel.process.kill()
+        tunnel.process.wait()
+
+
+def needs_frontend_tunnel(tasks: Sequence[str]) -> bool:
+    return AGENT_PAYMENT_TEST_SHOP_TASK_NAME in set(tasks) and not os.environ.get("BENCHMARK_FRONTEND_URL")
+
+
+def needs_payment_fixture(tasks: Sequence[str]) -> bool:
+    return AGENT_PAYMENT_TEST_SHOP_TASK_NAME in set(tasks)
+
+
+def seed_payment_fixture(manifest: dict) -> None:
+    db_port = manifest.get("ports", {}).get("local_db")
+    if not db_port:
+        raise ValueError("Invalid services manifest: missing local_db port")
+    database_url = f"postgresql://postgres:postgres@localhost:{db_port}/victoria"
+    env = {
+        **os.environ,
+        "DATABASE_URL": database_url,
+        "DIRECT_URL": database_url,
+    }
+    print("Seeding Stripe test billing fixture for agent-payment-test-shop")
+    subprocess.run(
+        [
+            "npx",
+            "tsx",
+            "scripts/setup-benchmark-payment.ts",
+            "--user-id",
+            os.environ.get("BENCHMARK_USER_ID", BENCHMARK_USER_ID),
+        ],
+        cwd=REPO_ROOT / "back-end",
+        env=env,
+        check=True,
+    )
 
 
 def wait_for_services(
@@ -376,6 +478,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     selected_tasks = tasks_from_args(args)
     process: subprocess.Popen | None = None
+    frontend_tunnel: FrontendTunnel | None = None
     result_paths: list[Path] = []
     try:
         if args.use_existing:
@@ -390,6 +493,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 clean_first=not args.no_clean,
                 anon_steel_profile=args.anon,
             )
+        if needs_payment_fixture(selected_tasks):
+            seed_payment_fixture(manifest)
+        if needs_frontend_tunnel(selected_tasks):
+            # Prefer the stable public URL run.sh assigned at startup (reserved ngrok domain →
+            # frontend port, where /test_payment is now served). Only spin an ad-hoc tunnel if
+            # run.sh did not publish one.
+            stable_public = ((manifest.get("urls") or {}).get("public") or "").strip()
+            if stable_public:
+                os.environ["BENCHMARK_FRONTEND_URL"] = stable_public.rstrip("/")
+                print(f"Test payment public URL (run.sh): {stable_public}")
+            else:
+                frontend_tunnel = start_frontend_tunnel(int(manifest["ports"]["frontend"]))
+                os.environ["BENCHMARK_FRONTEND_URL"] = frontend_tunnel.public_url.rstrip("/")
+                print(f"Test payment tunnel (fallback): {frontend_tunnel.public_url}")
         port = int(manifest["ports"]["backend"])
         for invocation in plan_invocations(selected_tasks):
             result_path = run_benchmark_invocation(
@@ -414,6 +531,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("\nAll requested benchmarks passed.")
         return 0
     finally:
+        stop_frontend_tunnel(frontend_tunnel)
         if not args.keep_services and not args.use_existing:
             stop_services(process)
 

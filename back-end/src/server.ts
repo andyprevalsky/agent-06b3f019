@@ -36,6 +36,7 @@ import billingRouter from './domains/billing/routes';
 import apiKeysRouter from './domains/api-keys/routes';
 import smsWebhookRouter from './domains/sms-webhook/routes';
 import credentialPropagationRouter from './domains/credential-propagation/routes';
+import purchasesRouter, { agentCardWebhookHandler } from './domains/purchases/routes';
 import testPaymentRouter from './domains/test-payment/routes';
 import {
   setSupervisorFixtureOverride,
@@ -130,6 +131,17 @@ app.use(
   express.raw({ type: 'application/json', limit: '1mb' }),
   agentPhoneRouter
 );
+
+// AgentCard webhooks: JSON body, but HMAC is over the raw bytes, so preserve them on req.rawBody.
+// Scoped to these paths (not the global parser) to keep the raw-string copy off heavy routes.
+const agentCardRawJson = express.json({
+  type: 'application/json',
+  verify: (req, _res, buf) => {
+    (req as unknown as { rawBody: string }).rawBody = buf.toString('utf-8');
+  },
+});
+app.post('/api/webhooks/agentcard', agentCardRawJson, agentCardWebhookHandler);
+app.post('/api/purchases/webhooks/agentcard', agentCardRawJson, agentCardWebhookHandler);
 
 // Middleware
 app.use(express.json({ limit: '100mb' })); // Increased to handle large encrypted payloads
@@ -478,6 +490,7 @@ app.use('/api/api-keys', apiKeysRouter);
 app.use('/api/upload', uploadRouter);
 app.use('/api/feedback', feedbackRouter);
 app.use('/api/data', dataRouter);
+app.use('/api/purchases', purchasesRouter);
 app.use('/api/test-payment', testPaymentRouter);
 app.use('/api/fast-cache', fastCacheRouter); // Fast Mode aggressive cache get/set/purge
 // Anthropic tee-proxy for the code agent. Mounted OUTSIDE /api so the injected

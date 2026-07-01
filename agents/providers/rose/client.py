@@ -1269,7 +1269,13 @@ class RoseClient:
         max_tokens = 16000
         temperature = 1.0
         tools = build_browser_use_tools(available_actions)
-        tool_choice = "any"
+        # IMPORTANT: "auto", not "any". Forcing tool use ("any") forbids the model from
+        # emitting a reasoning text block before its tool call; without that reasoning step
+        # the model degenerates into reflexively re-picking the safe no-op `screenshot` tool
+        # every turn (verified: identical request returns a 17-token bare `screenshot` under
+        # "any" vs. reasoned `input_text`/`click` actions under "auto"). The browser loop is
+        # agentic — it needs the model to think, then act.
+        tool_choice = "auto"
         messages = build_browser_use_messages(
             task=task,
             browser_state=browser_state,

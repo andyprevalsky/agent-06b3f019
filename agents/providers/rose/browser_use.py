@@ -153,6 +153,34 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
         ),
         "params": {},
     },
+    "request_payment_card": {
+        "description": (
+            "Request a one-time virtual payment card for the current checkout. Call this when you reach a "
+            "checkout/payment page and BEFORE typing any card details. First read the full itemized receipt off "
+            "the page (each product's name, image URL if visible, unit price in cents, quantity, line total in "
+            "cents; plus every fee, the subtotal, and the final total). After the user approves, the card is "
+            "minted on demand and the one-time card refs are returned for you to type into the payment fields. "
+            "Never ask the user to enter a card and never type stored card details."
+        ),
+        "params": {
+            "merchant": {"type": "string", "description": "Merchant or site name for the purchase", "required": True},
+            "currency": {"type": "string", "description": "Purchase currency (currently only USD)"},
+            "line_items": {
+                "type": "array",
+                "description": (
+                    "Full itemized receipt. One object per product/service: "
+                    "{name, image_url (if visible), unit_price_cents, quantity, line_total_cents}."
+                ),
+                "required": True,
+            },
+            "fees": {
+                "type": "array",
+                "description": "Taxes, shipping, service fees, discounts, etc. One object each: {label, amount_cents}.",
+            },
+            "subtotal_cents": {"type": "integer", "description": "Subtotal before fees, in cents", "required": True},
+            "total_cents": {"type": "integer", "description": "Final checkout total, in cents", "required": True},
+        },
+    },
     "generate_write_lock_notification": {
         "description": (
             "Internal approval-metadata tool. Never call this tool during normal task execution. "
@@ -640,6 +668,7 @@ _VALID_ACTIONS = frozenset({
     # the user for help mid-task. Keep the allowlist in sync with the tool
     # schema or normalize_browser_use_response() will reject it.
     "send_message_to_user", "request_user_assistance_for_authentication",
+    "request_payment_card",
     "generate_write_lock_notification",
 })
 
@@ -790,6 +819,40 @@ def _normalize_action_params(
         out["value"] = params["text"]
     elif params.get("value"):
         out["value"] = params["value"]
+
+    if normalized_action == "request_payment_card":
+        def _maybe_json_list(value: Any) -> Any:
+            if isinstance(value, str):
+                try:
+                    parsed = json.loads(value)
+                except json.JSONDecodeError:
+                    return value
+                return parsed if isinstance(parsed, list) else value
+            return value
+
+        def _maybe_int(value: Any) -> Any:
+            if isinstance(value, str) and value.strip().isdigit():
+                return int(value.strip())
+            return value
+
+        for key in (
+            "merchant",
+            "currency",
+            "line_items",
+            "lineItems",
+            "fees",
+            "subtotal_cents",
+            "subtotalCents",
+            "total_cents",
+            "totalCents",
+        ):
+            if params.get(key) is not None:
+                value = params[key]
+                if key in {"line_items", "lineItems", "fees"}:
+                    value = _maybe_json_list(value)
+                if key in {"subtotal_cents", "subtotalCents", "total_cents", "totalCents"}:
+                    value = _maybe_int(value)
+                out[key] = value
 
     if params.get("tab_id"):
         out["tab_id"] = params["tab_id"]

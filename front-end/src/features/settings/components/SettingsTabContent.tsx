@@ -1,12 +1,10 @@
 import { TabsContent } from '@/components/ui/tabs';
 import type { CustomizationData } from '@/features/customization';
-import type { PaymentData, EncryptedPaymentEnvelope } from '@/lib/encryption';
 
 import type { UserData, ApiKey, UpgradeOption } from '../types';
 
 import CustomizationTab from './CustomizationTab';
 import PersonalInfoTab from './PersonalInfoTab';
-import PaymentTab from './PaymentTab';
 import BillingTab from './BillingTab';
 import ApiKeysTab from './ApiKeysTab';
 
@@ -30,25 +28,6 @@ interface SettingsTabContentProps {
     savingCustomization: boolean;
     savedCustomization: boolean;
     saveCustomization: () => Promise<void>;
-  };
-  payment: {
-    showPaymentForm: boolean;
-    setShowPaymentForm: (v: boolean) => void;
-    paymentData: PaymentData;
-    setPaymentData: React.Dispatch<React.SetStateAction<PaymentData>>;
-    paymentErrors: Record<string, string>;
-    setPaymentErrors: React.Dispatch<React.SetStateAction<Record<string, string>>>;
-    savingPayment: boolean;
-    savedPayment: boolean;
-    autopayLimitDisplay: string;
-    setAutopayLimitDisplay: (v: string) => void;
-    savedPaymentEnvelope: EncryptedPaymentEnvelope | null;
-    currentCardType: string;
-    savePaymentInfo: () => Promise<void>;
-    handleCardNumber: (value: string) => void;
-    handleExpiry: (value: string) => void;
-    handleCVV: (value: string) => void;
-    handleAutopayBlur: () => void;
   };
   billing: {
     loadingBillingPortal: boolean;
@@ -76,7 +55,6 @@ export default function SettingsTabContent({
   data,
   personalInfo,
   customizationSave,
-  payment,
   billing,
   apiKeysHook,
   handleFieldChange,
@@ -101,28 +79,6 @@ export default function SettingsTabContent({
           saving={personalInfo.saving}
           saved={personalInfo.saved}
           onSave={() => void personalInfo.saveSettings()}
-        />
-      </TabsContent>
-
-      <TabsContent value="payment">
-        <PaymentTab
-          showPaymentForm={payment.showPaymentForm}
-          setShowPaymentForm={payment.setShowPaymentForm}
-          paymentData={payment.paymentData}
-          setPaymentData={payment.setPaymentData}
-          paymentErrors={payment.paymentErrors}
-          setPaymentErrors={payment.setPaymentErrors}
-          savingPayment={payment.savingPayment}
-          savedPayment={payment.savedPayment}
-          autopayLimitDisplay={payment.autopayLimitDisplay}
-          setAutopayLimitDisplay={payment.setAutopayLimitDisplay}
-          savedPaymentEnvelope={payment.savedPaymentEnvelope}
-          currentCardType={payment.currentCardType}
-          onSave={() => void payment.savePaymentInfo()}
-          onCardNumber={payment.handleCardNumber}
-          onExpiry={payment.handleExpiry}
-          onCVV={payment.handleCVV}
-          onAutopayBlur={payment.handleAutopayBlur}
         />
       </TabsContent>
 

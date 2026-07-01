@@ -36,8 +36,8 @@ export const handlers: RequestHandler[] = [
     })
   ),
 
-  // --- agent-pay-modal domain (owner: andyprevalsky/blackbox-agent-pay-modal) ---
-  // Default happy-path PATCH for saving payment/shipping settings. Tests
+  // --- onboarding-customization domain (owner: andyprevalsky/blackbox-onboarding) ---
+  // Default happy-path PATCH for saving customization settings. Tests
   // override per-case for failure modes.
   http.patch(`${BACKEND_URL}/api/user-settings`, () => HttpResponse.json({ success: true })),
 ];
