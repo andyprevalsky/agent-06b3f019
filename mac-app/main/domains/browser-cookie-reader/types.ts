@@ -7,15 +7,7 @@ import type { CookieData } from '../../../shared/types/ipc';
  * name only — the union must stay in lockstep with that shared alias.
  */
 export type BrowserType =
-  | 'chrome'
-  | 'edge'
-  | 'brave'
-  | 'arc'
-  | 'opera'
-  | 'vivaldi'
-  | 'chromium'
-  | 'atlas'
-  | 'safari';
+  'chrome' | 'edge' | 'brave' | 'arc' | 'opera' | 'vivaldi' | 'chromium' | 'atlas' | 'safari';
 
 /**
  * Static, per-browser wiring: where cookies live on disk, how the store is

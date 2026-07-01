@@ -10,16 +10,24 @@
  * injected boundaries the blackbox test mocks).
  */
 
+import { basename, dirname } from 'path';
+import { existsSync, watch, type FSWatcher } from 'fs';
 import { logConsole, logConsoleError } from '../../base/logger';
 import { AuthService } from '../../services/auth';
 import { IMessageSync } from '../../services/iMessageSync';
 import { CookieSync } from '../../services/cookieSync';
 import { BrowserStateSync } from '../../services/browserStateSync';
+import { ClaudeCredentialSync } from '../../services/claudeCredentialSync';
+import { GptCredentialSync } from '../../services/gptCredentialSync';
 import { TelegramSync } from '../../services/messaging/platforms/telegram/TelegramSync';
 import { WhatsAppSync } from '../../services/messaging/platforms/whatsapp/WhatsAppSync';
+import { CODEX_AUTH_PATH } from '../gpt-credential-sync/config';
 import { PLATFORM_CONFIG, INTEGRATION_CACHE_TTL_MS } from './config';
 import { fetchIntegrations } from './repo';
 import type { CachedIntegrations, Integration, Platform, SyncConfig } from './types';
+
+let codexAuthWatcher: FSWatcher | null = null;
+let codexAuthDebounce: NodeJS.Timeout | null = null;
 
 // ---------------------------------------------------------------------------
 // IntegrationCache
@@ -130,7 +138,19 @@ export class IntegrationCache {
  * Core sync logic for each platform. No integration check — caller has
  * already verified the platform is connected.
  */
-export async function syncPlatformCore(platform: Platform): Promise<void> {
+async function syncComputeCredentials(connected?: Set<string>): Promise<void> {
+  const synced: Promise<unknown>[] = [];
+  if (connected === undefined || connected.has('claude_code')) {
+    synced.push(ClaudeCredentialSync.syncExistingCredentialsIfChanged());
+  }
+  if (connected === undefined || connected.has('gpt_code')) {
+    synced.push(GptCredentialSync.syncExistingCredentialsIfChanged());
+  }
+  if (synced.length === 0) return;
+  await Promise.allSettled(synced);
+}
+
+export async function syncPlatformCore(platform: Platform, connected?: Set<string>): Promise<void> {
   switch (platform) {
     case 'imessage':
       await IMessageSync.sync();
@@ -153,6 +173,10 @@ export async function syncPlatformCore(platform: Platform): Promise<void> {
     case 'browserState':
       await BrowserStateSync.sync();
       break;
+
+    case 'compute':
+      await syncComputeCredentials(connected);
+      break;
   }
 }
 
@@ -169,7 +193,7 @@ export async function syncPlatform(platform: Platform): Promise<void> {
     return;
   }
 
-  await syncPlatformCore(platform);
+  await syncPlatformCore(platform, connected);
 }
 
 /**
@@ -192,7 +216,7 @@ export async function syncAllPlatforms(): Promise<void> {
     if (!isConnected) continue;
 
     tasks.push(
-      syncPlatformCore(platform).catch((err) =>
+      syncPlatformCore(platform, connected).catch((err) =>
         logConsoleError('SyncManager', `Sync error for ${platform}`, err)
       )
     );
@@ -233,7 +257,7 @@ export async function runStartupSyncs(): Promise<void> {
 
     logConsole('SyncManager', `Running startup sync for ${platform}`);
     tasks.push(
-      syncPlatformCore(platform).catch((err) =>
+      syncPlatformCore(platform, connected).catch((err) =>
         logConsoleError('SyncManager', `Startup sync error for ${platform}`, err)
       )
     );
@@ -286,6 +310,42 @@ async function startWhatsAppRealTime(): Promise<void> {
   }
 }
 
+function scheduleCodexAuthFileSync(filename: string | Buffer | null): void {
+  if (filename !== null && filename.toString() !== basename(CODEX_AUTH_PATH)) return;
+  if (codexAuthDebounce) clearTimeout(codexAuthDebounce);
+  codexAuthDebounce = setTimeout(() => {
+    void IntegrationCache.isConnected('gpt_code')
+      .then((connected) => {
+        if (!connected) return undefined;
+        return GptCredentialSync.syncExistingCredentialsIfChanged();
+      })
+      .catch((err) => logConsoleError('SyncManager', 'Codex credential watcher sync error', err));
+  }, 250);
+}
+
+function startComputeRealTime(): void {
+  if (!PLATFORM_CONFIG.compute.enableRealTime || codexAuthWatcher !== null) return;
+
+  const authDir = dirname(CODEX_AUTH_PATH);
+  if (!existsSync(authDir)) {
+    logConsole('SyncManager', `Codex auth watcher skipped - missing directory: ${authDir}`);
+    return;
+  }
+
+  try {
+    codexAuthWatcher = watch(authDir, (_eventType, filename) => {
+      scheduleCodexAuthFileSync(filename);
+    });
+    codexAuthWatcher.on('error', (err) =>
+      logConsoleError('SyncManager', 'Codex auth watcher error', err)
+    );
+    logConsole('SyncManager', `Started Codex auth watcher for ${CODEX_AUTH_PATH}`);
+  } catch (err) {
+    codexAuthWatcher = null;
+    logConsoleError('SyncManager', 'Failed to start Codex auth watcher', err);
+  }
+}
+
 /**
  * Start real-time watchers for every platform that supports them.
  */
@@ -294,6 +354,7 @@ export async function startRealTimeWatchers(): Promise<void> {
     IMessageSync.startRealTimeSync();
     logConsole('SyncManager', 'Started iMessage real-time watcher');
   }
+  startComputeRealTime();
   await startTelegramRealTime();
   await startWhatsAppRealTime();
 }
@@ -304,6 +365,14 @@ export async function startRealTimeWatchers(): Promise<void> {
  */
 export async function stopRealTimeWatchers(): Promise<void> {
   IMessageSync.stopRealTimeSync();
+  if (codexAuthDebounce) {
+    clearTimeout(codexAuthDebounce);
+    codexAuthDebounce = null;
+  }
+  if (codexAuthWatcher) {
+    codexAuthWatcher.close();
+    codexAuthWatcher = null;
+  }
   await TelegramSync.disconnect().catch((err) =>
     logConsoleError('SyncManager', 'Error disconnecting Telegram', err)
   );
