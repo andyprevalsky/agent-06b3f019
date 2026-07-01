@@ -47,6 +47,7 @@ from utils.prompts import build_verifier_prompt
 from .config import (
     ACTION_LOOP_DELAY_SECONDS,
     ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES,
+    HEARTBEAT_KEEPALIVE_SECONDS,
     HEARTBEAT_TIMEOUT_SECONDS,
     MAX_ACTIVITY_RETRIES,
     MAX_CLAUDE_TOKEN_ROTATIONS,
@@ -1442,6 +1443,27 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
     session_auth_options: Optional[Dict[str, Any]] = None
     session_credential_ref: Optional[Dict[str, Any]] = None
     browser_session_metadata: Dict[str, Any] = {}
+
+    # Decouple the Temporal heartbeat from the main loop. A bot-challenge (e.g.
+    # Cloudflare Turnstile proof-of-work) can CPU-freeze the page renderer — and
+    # therefore every CDP call (get_browser_state, screenshots) — for 90-260s.
+    # While the main loop is blocked on a hung CDP await it cannot reach
+    # activity.heartbeat(), so without this the activity would hit
+    # HEARTBEAT_TIMEOUT_SECONDS and Temporal would kill it mid-challenge — exactly
+    # the prod failure on agent 9ec05898. This background task keeps heartbeating
+    # at a fixed cadence regardless of what the main loop is blocked on.
+    _hb_stop = asyncio.Event()
+
+    async def _background_heartbeat() -> None:
+        while not _hb_stop.is_set():
+            with contextlib.suppress(Exception):
+                activity.heartbeat("browser keepalive (renderer/CDP may be blocked by a bot-challenge)")
+            try:
+                await asyncio.wait_for(_hb_stop.wait(), timeout=HEARTBEAT_KEEPALIVE_SECONDS)
+            except asyncio.TimeoutError:
+                pass
+
+    _heartbeat_task = asyncio.create_task(_background_heartbeat())
 
     try:
         # ===== SETUP TIMING TRACKER =====
@@ -3458,6 +3480,10 @@ Based on this feedback, I need to continue working on the task and address the i
 
         raise
     finally:
+        _hb_stop.set()
+        _heartbeat_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await _heartbeat_task
         if cursor_streamer:
             with contextlib.suppress(Exception):
                 await cursor_streamer.close()
@@ -3507,6 +3533,29 @@ Based on this feedback, I need to continue working on the task and address the i
             with contextlib.suppress(Exception):
                 recording_path = await browser_recorder.close()
                 if recording_path and task_id:
+                    # Upload a single self-contained replay HTML to Supabase Storage
+                    # so the front-end can render the recording post-completion (the
+                    # live debugUrl iframe is only valid during the run). The signed
+                    # URL is resolved by the FE from this FilePointer, same as attachments.
+                    recording_file_pointer = None
+                    try:
+                        from helpers.attachments import upload_to_storage
+
+                        html_bytes = browser_recorder.export_inline_html_bytes()
+                        if html_bytes:
+                            recording_file_pointer = await upload_to_storage(
+                                user_id=user_id,
+                                file_content=html_bytes,
+                                filename=f"browser-recording-{task_id}.html",
+                                mime_type="text/html",
+                            )
+                    except Exception as exc:  # noqa: BLE001 — recording upload is best-effort
+                        logger.warning(
+                            "Browser recording upload failed",
+                            agent_id=agent_id,
+                            task_id=task_id,
+                            error=str(exc),
+                        )
                     await save_browser_action_message(
                         agent_id=agent_id,
                         title="Browser recording saved",
@@ -3518,6 +3567,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         tool_call_id=str(uuid_module.uuid4()),
                         extra_metadata={
                             "recording_path": str(recording_path),
+                            "recording_file_pointer": recording_file_pointer,
                             "browser_session_metadata": browser_session_metadata,
                         },
                     )

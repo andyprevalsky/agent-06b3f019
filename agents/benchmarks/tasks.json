@@ -109,6 +109,22 @@
     "start_phase": "execute"
   },
   {
+    "name": "browser-toast-nopa-write-lock",
+    "title": "Toast Nopa Fish Order — Cloudflare Challenge + Write Lock",
+    "prompt": "Order me the 2 fish sandwhiches from Nopa Fish ferry building",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "tags": ["browser", "needs-auth", "bot-challenge", "local-only"],
+    "price_limit_cents": 200,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "ignore",
+    "expected_attention_kind": "write_lock",
+    "start_phase": "execute"
+  },
+  {
     "name": "minted-agent-accounts-uber",
     "title": "Minted Agent Accounts Uber",
     "prompt": "Stateful benchmark implemented by run_benchmark.py: delete local minted accounts for the benchmark user, create an Uber-style rider account with a real AgentMail minted inbox, verify the MintedAccount row, then start a fresh booking task in the same Steel browser profile and stop on write-lock approval before payment/request submission.",

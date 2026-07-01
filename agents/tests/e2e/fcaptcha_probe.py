@@ -39,9 +39,34 @@ def steel_key() -> str:
     return k
 
 
-def create_session(skip_fp: bool, use_proxy: bool) -> dict:
+def _proxy_value(proxy_spec: str | None, use_proxy: bool):
+    """Resolve --proxy into a useProxy value. None -> bool use_proxy."""
+    if not proxy_spec:
+        return use_proxy
+    if proxy_spec in ("none", "false"):
+        return False
+    if proxy_spec == "true":
+        return True
+    if proxy_spec == "fixed":
+        return {"type": "fixed"}
+    if proxy_spec.startswith("fixed:"):
+        return {"type": "fixed", "id": proxy_spec}
+    if proxy_spec.startswith("geo:"):
+        parts = proxy_spec[4:].split("/")
+        g = {"country": parts[0]}
+        if len(parts) > 1 and parts[1]:
+            g["state"] = parts[1]
+        if len(parts) > 2 and parts[2]:
+            g["city"] = parts[2]
+        return {"geolocation": g}
+    return use_proxy
+
+
+def create_session(skip_fp: bool, use_proxy: bool, proxy_spec: str | None = None,
+                   experimental: str | None = None, persist_profile: bool = False,
+                   profile_id: str | None = None) -> dict:
     body = {
-        "useProxy": use_proxy,
+        "useProxy": _proxy_value(proxy_spec, use_proxy),
         "solveCaptcha": True,
         "stealthConfig": {
             "humanizeInteractions": False,
@@ -50,6 +75,12 @@ def create_session(skip_fp: bool, use_proxy: bool) -> dict:
         "timeout": 180000,
         "dimensions": {"width": 1288, "height": 891},
     }
+    if experimental:
+        body["experimentalFeatures"] = [x for x in experimental.split(",") if x]
+    if persist_profile or profile_id:
+        body["persistProfile"] = True
+    if profile_id:
+        body["profileId"] = profile_id
     r = requests.post(
         "https://api.steel.dev/v1/sessions",
         headers={"steel-api-key": steel_key(), "content-type": "application/json"},
@@ -190,10 +221,13 @@ async def humanized_submit(page, args) -> None:
 async def run(args) -> None:
     from playwright.async_api import async_playwright
 
-    session = create_session(skip_fp=args.skip_fp, use_proxy=not args.no_proxy)
+    session = create_session(skip_fp=args.skip_fp, use_proxy=not args.no_proxy,
+                             proxy_spec=args.proxy, experimental=args.experimental,
+                             persist_profile=args.persist_profile, profile_id=args.profile_id)
     sid = session["id"]
     ws = f"wss://connect.steel.dev?apiKey={steel_key()}&sessionId={sid}"
-    print(f"[{args.label}] session={sid} skip_fp={args.skip_fp} proxy={not args.no_proxy} "
+    print(f"[{args.label}] session={sid} skip_fp={args.skip_fp} proxy={args.proxy or (not args.no_proxy)} "
+          f"experimental={args.experimental} profileId={session.get('profileId')} "
           f"auto_override={args.auto_override} js_webdriver={args.js_webdriver}")
     cap = {"resp": None, "req_signals": None}
     try:
@@ -318,6 +352,10 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--skip-fp", action="store_true", help="skipFingerprintInjection=true (Steel does NOT inject its stealth fingerprint)")
     ap.add_argument("--no-proxy", action="store_true", help="useProxy=false")
+    ap.add_argument("--proxy", default=None, help="proxy spec: none|true|fixed|fixed:<id>|geo:US (overrides --no-proxy)")
+    ap.add_argument("--experimental", default=None, help="comma-separated experimentalFeatures, e.g. useStealthBrowser")
+    ap.add_argument("--persist-profile", dest="persist_profile", action="store_true")
+    ap.add_argument("--profile-id", dest="profile_id", default=None)
     ap.add_argument("--auto-override", action="store_true", help="apply Emulation.setAutomationOverride{enabled:false}")
     ap.add_argument("--js-webdriver", choices=list(WEBDRIVER_SPOOFS), default="none")
     ap.add_argument("--full-spoof", action="store_true", help="inject the full anti-detection script (console/webdriver/canvas/notifications/chrome)")

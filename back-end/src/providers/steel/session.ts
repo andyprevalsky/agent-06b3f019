@@ -100,6 +100,10 @@ interface SteelSessionCookieSummary {
 type SteelProxyConfig =
   | false
   | { server: string }
+  // Steel Dedicated IPs: { type: 'fixed' } lets Steel pick one of our leased
+  // IPs and — with persistProfile — pin it to the profile, so each user keeps a
+  // stable egress IP across sessions. An explicit id pins a specific IP.
+  | { type: 'fixed'; id?: string }
   | {
       geolocation: {
         country: string;
@@ -110,7 +114,7 @@ type SteelProxyConfig =
 
 type SteelProxySettings = {
   config: SteelProxyConfig;
-  source: 'none' | 'steel' | 'byop';
+  source: 'none' | 'steel' | 'byop' | 'dedicated';
 };
 
 function redactProxyServerForLog(server: string): string {
@@ -134,6 +138,16 @@ export function buildSteelProxySettings(
   if (byopProxyServer) {
     log.info(`  Using BYOP proxy server: ${redactProxyServerForLog(byopProxyServer)}`);
     return { config: { server: byopProxyServer }, source: 'byop' };
+  }
+
+  // Dedicated IPs: route through our leased Steel IP pool. With persistProfile +
+  // a per-user profileId, Steel pins one IP to each user's profile on first use,
+  // giving every user a stable egress identity (and making cf_clearance reuse
+  // work). An explicit STEEL_DEDICATED_IP_ID pins one shared IP instead.
+  if (envEnabled('BROWSER_AGENT_STEEL_DEDICATED_IP_ENABLED', false)) {
+    const pinnedId = process.env.STEEL_DEDICATED_IP_ID?.trim();
+    log.info(`  Using Steel dedicated IP${pinnedId ? ` (pinned ${pinnedId})` : ' (auto-pin to profile)'}`);
+    return { config: { type: 'fixed', ...(pinnedId ? { id: pinnedId } : {}) }, source: 'dedicated' };
   }
 
   const useSteelProxy = envEnabled('BROWSER_AGENT_STEEL_PROXY_ENABLED', true);
