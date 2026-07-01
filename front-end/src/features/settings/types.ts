@@ -1,5 +1,3 @@
-import type { PaymentData, EncryptedPaymentEnvelope } from '@/lib/encryption';
-
 export interface UserData {
   name: string;
   addressLine1: string;
@@ -8,7 +6,6 @@ export interface UserData {
   state: string;
   postalCode: string;
   country: string;
-  encryptedPaymentInformation: string | null;
 }
 
 export interface ApiKey {
@@ -24,7 +21,7 @@ export interface UpgradeOption {
   url: string;
 }
 
-export type SettingsTab = 'customization' | 'info' | 'payment' | 'billing' | 'keys';
+export type SettingsTab = 'customization' | 'info' | 'billing' | 'keys';
 
 export interface CustomizationState {
   systemName: string;
@@ -43,13 +40,6 @@ export interface SettingsState {
   saved: boolean;
   savingCustomization: boolean;
   savedCustomization: boolean;
-  showPaymentForm: boolean;
-  paymentData: PaymentData;
-  paymentErrors: Record<string, string>;
-  savingPayment: boolean;
-  savedPayment: boolean;
-  autopayLimitDisplay: string;
-  savedPaymentEnvelope: EncryptedPaymentEnvelope | null;
   subscriptionTier: number | null;
   upgradeOptions: UpgradeOption[];
   loadingBillingPortal: boolean;

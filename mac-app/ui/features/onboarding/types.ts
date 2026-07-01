@@ -25,7 +25,6 @@ export interface UserSettingsResponse {
   customSystemPrompt?: string | null;
   voicePreferenceId?: string | null;
   onboardingCompletedAt?: string | null;
-  encryptedPaymentInformation?: unknown;
 }
 
 export interface ShortcutConfig {

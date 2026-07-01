@@ -218,7 +218,7 @@ function installBackendMocks(): void {
       })
     ),
     http.get(`${API_BASE}/user-settings`, () =>
-      HttpResponse.json({ onboardingCompletedAt: null, encryptedPaymentInformation: null })
+      HttpResponse.json({ onboardingCompletedAt: null })
     ),
     http.post(`${API_BASE}/integrations/passwords/request`, () =>
       HttpResponse.json({ success: true })
@@ -261,7 +261,6 @@ describe('OnboardingData', () => {
     expect(screen.getByText('Passwords')).toBeInTheDocument();
     expect(screen.getByText('Messages')).toBeInTheDocument();
     expect(screen.getByText('Socials')).toBeInTheDocument();
-    expect(screen.getByText('Agent Pay')).toBeInTheDocument();
     expect(screen.queryByText('andy@example.com')).not.toBeInTheDocument();
 
     await user.click(sectionToggle('Messages'));
