@@ -30,8 +30,8 @@ test('Claude Code sandbox enables Fast Mode through a live Claude Code model ali
     'utf8'
   );
   assert.ok(
-    e2bProvider.includes("const model = process.env.CLAUDE_CODE_MODEL || 'sonnet'"),
-    'backend must use a broadly available Claude Code model alias by default'
+    e2bProvider.includes("const model = process.env.CLAUDE_CODE_MODEL || 'claude-sonnet-5'"),
+    'backend must use the upgraded Claude Code model by default'
   );
   assert.ok(
     e2bProvider.includes(
@@ -77,7 +77,7 @@ test('Claude Code sandbox enables Fast Mode through a live Claude Code model ali
       "join(process.cwd(), '..', 'e2b-templates', 'claude-code', 'ws-server.mjs')"
     )
   );
-  assert.match(wsServer, /process\.env\.CLAUDE_CODE_MODEL\s*\|\|\s*["']sonnet["']/);
+  assert.match(wsServer, /process\.env\.CLAUDE_CODE_MODEL\s*\|\|\s*["']claude-sonnet-5["']/);
   assert.ok(
     !wsServer.includes('ANTHROPIC_DEFAULT_OPUS_MODEL'),
     'wrapper must not pin a model alias to a stale concrete model'
@@ -139,7 +139,8 @@ test('Codex Code sandbox uses Fast Mode localhost proxy plumbing', () => {
     'wrapper model provider must use Responses API wire format'
   );
   assert.ok(
-    viteConfig.includes('"/codex-proxy"'),
+    viteConfig.includes("'/codex-proxy'") &&
+      viteConfig.includes("target: `http://localhost:${process.env.BACKEND_PORT || '3000'}`"),
     'public dev tunnel must proxy Codex cache traffic to backend'
   );
   assert.ok(
