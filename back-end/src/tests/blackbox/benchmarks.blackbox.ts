@@ -181,6 +181,7 @@ const KNOWN_TAGS = [
   'payment',
   'plaid',
   'transactions',
+  'bot-challenge',
 ];
 
 // ==================== GET /api/benchmarks — CONTRACT TESTS ====================

@@ -137,6 +137,7 @@ class BrowserAgentRecorder:
         self._started_at = time.monotonic()
         self._frame_index = 0
         self._closed = False
+        self._consecutive_failures = 0
         self._capture_lock = asyncio.Lock()
         self._loop_task: Optional[asyncio.Task] = None
         self._cursor: Optional[Dict[str, int]] = None
@@ -197,7 +198,12 @@ class BrowserAgentRecorder:
 
     async def _capture_loop(self) -> None:
         while not self._closed:
-            await asyncio.sleep(self.interval_seconds)
+            # Back off when the renderer is frozen by a bot-challenge: each failed
+            # screenshot already blocks ~5s (Playwright timeout), so hammering every
+            # interval just spams failures and contends on the frozen CDP channel.
+            # Grow the gap exponentially while failing (cap ~16x), snap back on success.
+            backoff = min(2 ** self._consecutive_failures, 16)
+            await asyncio.sleep(self.interval_seconds * backoff)
             await self.capture(self._last_label, action="idle")
 
     async def mark(
@@ -233,7 +239,9 @@ class BrowserAgentRecorder:
                 return
             try:
                 image_bytes = await self.page.screenshot(type="jpeg", quality=55, full_page=False, timeout=5000)
+                self._consecutive_failures = 0
             except Exception as exc:
+                self._consecutive_failures += 1
                 if force:
                     logger.warning(
                         "Browser agent recording frame capture failed",
@@ -299,8 +307,12 @@ class BrowserAgentRecorder:
             ),
             encoding="utf-8",
         )
+        # Use the real captured frames (self.frames) for the screenshot replay —
+        # _build_playback_frames currently collapses every entry to frame_00001,
+        # which made recordings show only the pre-nav splash. The player plays
+        # frames uniformly (skip-idle), so real per-frame timing isn't required.
         html_path.write_text(
-            self._build_steel_video_html(steel_media) if steel_media else self._build_html(playback_frames),
+            self._build_steel_video_html(steel_media) if steel_media else self._build_html(self.frames),
             encoding="utf-8",
         )
         logger.info(
@@ -313,6 +325,26 @@ class BrowserAgentRecorder:
             recording_source=recording_source,
         )
         return html_path
+
+    def export_inline_html_bytes(self) -> Optional[bytes]:
+        """Build a SINGLE self-contained replay HTML with every frame inlined as a
+        base64 data URI, so it can be uploaded to Supabase Storage and iframed by
+        the front-end without any sibling assets. Works for both recording modes
+        (we always have screenshot frames). Returns None when there are no frames."""
+        if not self.frames:
+            return None
+        inlined: List[Dict[str, Any]] = []
+        for frame in self._build_playback_frames():
+            src = frame.get("src", "")
+            frame_copy = dict(frame)
+            if isinstance(src, str) and src.startswith("frames/"):
+                try:
+                    raw = (self.output_dir / src).read_bytes()
+                    frame_copy["src"] = "data:image/jpeg;base64," + base64.b64encode(raw).decode("ascii")
+                except Exception:  # noqa: BLE001 — keep relative src if a frame file is missing
+                    pass
+            inlined.append(frame_copy)
+        return self._build_html(inlined).encode("utf-8")
 
     async def _download_steel_hls_recording(self) -> Optional[Dict[str, Any]]:
         if self.session_metadata.get("provider") != "steel":
@@ -453,64 +485,35 @@ class BrowserAgentRecorder:
         frames_json = json.dumps(playback_frames)
         cursor_events_json = json.dumps(self.cursor_events)
         title = html.escape(f"Browser recording {self.task_id}")
-        proxy_location = self.session_metadata.get("proxy_location") or {}
-        if not isinstance(proxy_location, dict):
-            proxy_location = {}
-        provider = self.session_metadata.get("provider")
-        proxy_source = self.session_metadata.get("proxy_source")
-        proxy_parts = [
-            str(proxy_location.get("city") or "").strip(),
-            str(proxy_location.get("state") or "").strip(),
-            str(proxy_location.get("country") or "").strip(),
-        ]
-        proxy_label = ", ".join(part for part in proxy_parts if part)
-        session_meta_lines = "\n".join(
-            f'<div class="meta">{html.escape(label)}: {html.escape(value)}</div>'
-            for label, value in (
-                ("Provider", provider),
-                ("Proxy source", proxy_source),
-                ("Proxy location", proxy_label),
-            )
-            if value
-        )
         return f"""<!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
   <title>{title}</title>
   <style>
-    body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #111; color: #f5f5f5; }}
-    header {{ display: flex; gap: 12px; align-items: center; padding: 10px 12px; background: #1e1e1e; position: sticky; top: 0; z-index: 2; }}
-    button, select, label {{ font: inherit; }}
-    button, select {{ background: #2b2b2b; color: #fff; border: 1px solid #555; border-radius: 6px; padding: 5px 8px; }}
-    #wrap {{ display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 0; height: calc(100vh - 48px); overflow: hidden; }}
-    #stage {{ display: flex; align-items: flex-start; justify-content: center; min-height: 0; overflow: hidden; background: #050505; }}
-    canvas {{ max-width: 100%; max-height: calc(100vh - 54px); box-shadow: 0 0 0 1px #333; }}
-    aside {{ min-height: 0; border-left: 1px solid #333; background: #181818; padding: 12px; overflow: auto; }}
-    .meta {{ color: #bdbdbd; font-size: 12px; margin-top: 4px; }}
-    #timeline {{ width: 260px; }}
-    #events {{ list-style: none; padding: 0; margin: 12px 0 0; font-size: 12px; }}
-    #events li {{ padding: 6px 0; border-bottom: 1px solid #2a2a2a; cursor: pointer; }}
-    #events li.active {{ color: #9fd3ff; }}
+    html, body {{ margin: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0b0b0c; color: #e8e8ea; }}
+    #app {{ display: flex; flex-direction: column; height: 100vh; }}
+    header {{ display: flex; gap: 14px; align-items: center; padding: 10px 14px; background: #161618; border-bottom: 1px solid #232327; }}
+    button, select {{ font: inherit; background: #232327; color: #fff; border: 1px solid #34343a; border-radius: 8px; padding: 6px 12px; cursor: pointer; }}
+    button:hover, select:hover {{ background: #2c2c31; }}
+    label {{ font-size: 13px; color: #b5b5bd; display: flex; align-items: center; gap: 6px; }}
+    #play {{ min-width: 76px; font-weight: 600; }}
+    #timeline {{ flex: 1; accent-color: #6aa7ff; }}
+    #time {{ font-variant-numeric: tabular-nums; font-size: 12px; color: #9a9aa3; min-width: 58px; text-align: right; }}
+    #stage {{ flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; padding: 4px; background: #050506; }}
+    canvas {{ max-width: 100%; max-height: 100%; }}
   </style>
 </head>
 <body>
-  <header>
-    <button id="play">Play</button>
-    <label>Speed <select id="speed"><option>1</option><option>2</option><option selected>4</option><option>8</option></select>x</label>
-    <label><input id="skipIdle" type="checkbox" checked> skip idle</label>
-    <input id="timeline" type="range" min="0" max="0" value="0">
-    <span id="time"></span>
-  </header>
-  <div id="wrap">
+  <div id="app">
+    <header>
+      <button id="play">Play</button>
+      <label>Speed <select id="speed"><option>1</option><option>2</option><option selected>4</option><option>8</option></select>x</label>
+      <label><input id="skipIdle" type="checkbox" checked> skip idle</label>
+      <input id="timeline" type="range" min="0" max="0" value="0">
+      <span id="time"></span>
+    </header>
     <div id="stage"><canvas id="canvas"></canvas></div>
-    <aside>
-      <div><strong>{html.escape(self.task_id)}</strong></div>
-      <div class="meta">Agent: {html.escape(self.agent_id)}</div>
-      <div class="meta">Session: {html.escape(self.session_id)}</div>
-      {session_meta_lines}
-      <ol id="events"></ol>
-    </aside>
   </div>
 <script>
 const frames = {frames_json};
@@ -522,8 +525,13 @@ const speed = document.getElementById('speed');
 const skipIdle = document.getElementById('skipIdle');
 const timeline = document.getElementById('timeline');
 const time = document.getElementById('time');
-const events = document.getElementById('events');
-const totalMs = Math.max(0, frames[frames.length - 1]?.ts_ms || 0);
+// skip-idle: play one frame at a time (uniform), dropping the dead gaps — e.g.
+// the ~90s bot-challenge freeze where the renderer holds a single frame. Off =
+// real capture timestamps.
+const FRAME_MS = 500;
+function buildEff(skip) {{ return skip ? frames.map((_, i) => i * FRAME_MS) : frames.map((f) => f.ts_ms || 0); }}
+let eff = buildEff(skipIdle.checked);
+let totalMs = eff.length ? eff[eff.length - 1] : 0;
 timeline.max = totalMs;
 timeline.step = 1;
 let playheadMs = 0;
@@ -566,11 +574,11 @@ function cursorAtTime(tsMs) {{
   return {{ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }};
 }}
 function frameIndexAtTime(tsMs) {{
-  if (!frames.length) return 0;
-  let lo = 0, hi = frames.length - 1;
+  if (!eff.length) return 0;
+  let lo = 0, hi = eff.length - 1;
   while (lo <= hi) {{
     const mid = Math.floor((lo + hi) / 2);
-    if (frames[mid].ts_ms <= tsMs) lo = mid + 1;
+    if (eff[mid] <= tsMs) lo = mid + 1;
     else hi = mid - 1;
   }}
   return Math.max(0, Math.min(frames.length - 1, hi));
@@ -595,15 +603,9 @@ function renderAt(tsMs) {{
     canvas.width = img.naturalWidth || 1280;
     canvas.height = img.naturalHeight || 800;
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    drawCursor(cursorAtTime(playheadMs) || cursorByFrame[idx]);
-    ctx.fillStyle = 'rgba(0,0,0,.72)';
-    ctx.fillRect(0, canvas.height - 54, canvas.width, 54);
-    ctx.fillStyle = '#fff';
-    ctx.font = '18px system-ui, sans-serif';
-    ctx.fillText(`${{f.action}}: ${{f.label}}`, 14, canvas.height - 22);
+    drawCursor(cursorByFrame[idx]);
     timeline.value = Math.round(playheadMs);
-    time.textContent = `${{(playheadMs / 1000).toFixed(2)}}s / frame ${{idx + 1}} of ${{frames.length}}`;
-    [...events.children].forEach((li, n) => li.classList.toggle('active', n === idx));
+    time.textContent = `${{(playheadMs / 1000).toFixed(2)}}s`;
   }};
   if (img.complete) paint(); else img.onload = paint;
 }}
@@ -635,18 +637,13 @@ timeline.oninput = e => {{
   lastRafMs = null;
   renderAt(Number(e.target.value));
 }};
-frames.forEach((f, i) => {{
-  const li = document.createElement('li');
-  li.textContent = `${{(f.ts_ms / 1000).toFixed(1)}}s  ${{f.action}}  ${{f.label}}`;
-  li.onclick = () => {{
-    playing = false;
-    playBtn.textContent = 'Play';
-    if (rafId) cancelAnimationFrame(rafId);
-    lastRafMs = null;
-    renderAt(f.ts_ms);
-  }};
-  events.appendChild(li);
-}});
+skipIdle.onchange = () => {{
+  const cur = frameIndexAtTime(playheadMs);
+  eff = buildEff(skipIdle.checked);
+  totalMs = eff.length ? eff[eff.length - 1] : 0;
+  timeline.max = totalMs;
+  renderAt(eff[cur] || 0);
+}};
 renderAt(0);
 </script>
 </body>

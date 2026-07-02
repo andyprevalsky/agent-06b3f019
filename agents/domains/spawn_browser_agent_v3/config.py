@@ -15,6 +15,11 @@ MAX_ITERATIONS = 30
 MAX_CONSECUTIVE_API_FAILURES = 5
 ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES = 15
 HEARTBEAT_TIMEOUT_SECONDS = 120
+# A background task heartbeats at this cadence independent of the main loop, so a
+# CPU-bound bot-challenge that freezes the page renderer (and every CDP call) for
+# 90-260s can't starve the Temporal heartbeat and get the activity killed.
+# Must stay comfortably below HEARTBEAT_TIMEOUT_SECONDS.
+HEARTBEAT_KEEPALIVE_SECONDS = 15
 MAX_ACTIVITY_RETRIES = 2
 
 # Session init retry settings
