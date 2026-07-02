@@ -5,6 +5,13 @@
  * - Which tiles are currently animating
  * - Random selection of tiles (from tileColors) to animate every second
  * - Animation state and timing
+ *
+ * STATE MACHINE:
+ * [IDLE] --enabled + delayPassed + no agent selected--> [SPAWNING]
+ * [SPAWNING] --pool reaches MAX--> [DRAINING] (no new spawns)
+ * [DRAINING] --pool drops to <=1--> [SPAWNING] (refill)
+ * [any state] --agent selected--> [SUSPENDED] (pool cleared, no spawns)
+ * [SUSPENDED] --agent deselected--> [SPAWNING]
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -178,6 +185,13 @@ export function useSmallTileAnimations({
     });
   }, []);
 
+  // When an agent is selected, stop in-flight square animations immediately
+  useEffect(() => {
+    if (selectedAgentId) {
+      setAnimatingTiles([]);
+    }
+  }, [selectedAgentId]);
+
   // Handle delay after enabled becomes true
   useEffect(() => {
     if (!enabled) {
@@ -214,8 +228,9 @@ export function useSmallTileAnimations({
       return;
     }
 
-    // Start with 1 animation immediately
-    if (!hasStartedRef.current) {
+    // Start with 1 animation immediately (unless an agent is selected —
+    // leave hasStartedRef false so spawning kicks in on deselect)
+    if (!hasStartedRef.current && !selectedAgentId) {
       hasStartedRef.current = true;
       triggerRandomAnimation();
     }
