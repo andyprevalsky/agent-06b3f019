@@ -12,6 +12,7 @@ import {
   RoseAuthError,
   RoseInvalidRequest,
   RoseRateLimitError,
+  RoseRefusalError,
   RoseServerError,
   RoseStallError,
 } from './errors';
@@ -40,6 +41,11 @@ function responsesErrorToException(errorPayload: unknown, requestId: string): Er
   const details = `Responses stream failed (request_id=${requestId}, code=${code || 'unknown'}): ${message.substring(0, 1000)}`;
   if (['invalid_request_error', 'context_length_exceeded', 'bad_request'].includes(code)) {
     return new RoseInvalidRequest(details);
+  }
+  if (
+    ['refusal', 'safety_refusal', 'content_policy_violation', 'policy_violation'].includes(code)
+  ) {
+    return new RoseRefusalError(details);
   }
   if (['rate_limit_exceeded', 'rate_limit_error', 'too_many_requests'].includes(code)) {
     return new RoseRateLimitError(details);
@@ -192,8 +198,14 @@ export async function* parseAnthropicSSE(
         message: event.error?.message,
         error_type: event.error?.type,
       });
-      continue;
+      throw responsesErrorToException(event.error, options.requestId);
     }
+  }
+
+  if (finishReason === 'refusal') {
+    throw new RoseRefusalError(
+      `Anthropic stream ended with refusal (request_id=${options.requestId})`
+    );
   }
 
   if (!emittedContentOrTool) {
@@ -279,6 +291,12 @@ export async function* parseOpenAISSE(
     }
 
     if (choice.finish_reason) finishReason = choice.finish_reason;
+  }
+
+  if (finishReason === 'refusal') {
+    throw new RoseRefusalError(
+      `OpenAI/OpenRouter stream ended with refusal (request_id=${options.requestId})`
+    );
   }
 
   if (!emittedContentOrTool) {

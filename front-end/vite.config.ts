@@ -5,16 +5,20 @@ import path from 'path';
 // https://vitejs.dev/config/
 export default defineConfig(() => ({
   server: {
-    host: "::",
-    port: parseInt(process.env.VITE_DEV_PORT || "8080"),
-    allowedHosts: process.env.VITE_ALLOWED_HOSTS?.split(",").filter(Boolean),
+    host: '::',
+    port: parseInt(process.env.VITE_DEV_PORT || '8080'),
+    allowedHosts: process.env.VITE_ALLOWED_HOSTS?.split(',').filter(Boolean),
     proxy: {
-      "/anthropic-proxy": {
-        target: `http://localhost:${process.env.BACKEND_PORT || "3000"}`,
+      '/anthropic-proxy': {
+        target: `http://localhost:${process.env.BACKEND_PORT || '3000'}`,
         changeOrigin: true,
       },
-      "/codex-proxy": {
-        target: `http://localhost:${process.env.BACKEND_PORT || "3000"}`,
+      '/codex-proxy': {
+        target: `http://localhost:${process.env.BACKEND_PORT || '3000'}`,
+        changeOrigin: true,
+      },
+      '/api': {
+        target: process.env.VITE_BACKEND_API_URL || 'http://localhost:3001',
         changeOrigin: true,
       },
     },
@@ -23,12 +27,6 @@ export default defineConfig(() => ({
           clientPort: 443,
         }
       : undefined,
-    proxy: {
-      '/api': {
-        target: process.env.VITE_BACKEND_API_URL || 'http://localhost:3001',
-        changeOrigin: true,
-      },
-    },
   },
   plugins: [react()],
   resolve: {

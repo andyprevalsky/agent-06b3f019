@@ -193,7 +193,7 @@ export async function createClaudeCodeSession(
   const fastModeWriteEnabled =
     fastModeCacheEnabled === true || shouldWriteFastModeCacheForUser(userId);
   const codeAgentFastModeActive = fastModeCacheEnabled === true || fastModeWriteEnabled;
-  const model = process.env.CLAUDE_CODE_MODEL || 'sonnet';
+  const model = process.env.CLAUDE_CODE_MODEL || 'claude-sonnet-5';
   const workDir = workDirForGithubRepo(githubRepoUrl);
   const templateId = process.env.E2B_CLAUDE_CODE_TEMPLATE_ID;
   const runtimeFingerprint = [

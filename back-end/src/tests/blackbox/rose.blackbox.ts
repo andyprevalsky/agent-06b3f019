@@ -45,6 +45,7 @@ import {
   poolForModel,
   RoseAllFailed,
   RoseInvalidRequest,
+  RoseRefusalError,
   RoseStallError,
   SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
   responseModel,
@@ -1090,11 +1091,7 @@ async function testClient_dumpContextWritesRequestAndOutput() {
       'browser_run_credential_outcomes',
       'caller config dumped'
     );
-    assertEqual(
-      payload.config.actual_model,
-      'google/gemini-3-flash-preview',
-      'actual model dumped'
-    );
+    assertEqual(payload.config.actual_model, 'google/gemini-3.5-flash', 'actual model dumped');
     assertEqual(
       JSON.stringify(payload.response_format),
       JSON.stringify(responseFormat),
@@ -1508,9 +1505,9 @@ async function testStreaming_anthropic_thinkingDeltaEmitsReasoning() {
   }
 }
 
-async function testStreaming_anthropic_errorEventLoggedNotThrown() {
-  // `event: error` mid-stream is a soft signal — log + continue. Stream still
-  // yields content normally; only a missing-content close raises RoseStallError.
+async function testStreaming_anthropic_errorEventRaisesTypedError() {
+  // Anthropic can emit provider errors in-band after opening a 200/SSE stream.
+  // These must raise typed errors so direct auth can fall through cleanly.
   const lines = [
     'event: message_start',
     'data: {"type":"message_start","message":{"usage":{"input_tokens":3}}}',
@@ -1518,28 +1515,21 @@ async function testStreaming_anthropic_errorEventLoggedNotThrown() {
     'event: error',
     'data: {"type":"error","error":{"type":"overloaded_error","message":"server busy"}}',
     '',
-    'event: content_block_delta',
-    'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}',
-    '',
-    'data: [DONE]',
-    '',
   ];
   const body = rawStream([lines.join('\n') + '\n']);
-  const chunks = await collectRose(
-    parseAnthropicSSE(body, {
-      actualModel: 'claude-test',
-      poolName: 'claude-token',
-      requestId: 'r-anth-err-evt',
-    })
-  );
-  assert(
-    chunks.some((c) => c.kind === 'content'),
-    'error event did not abort stream — content still flowed'
-  );
-  assert(
-    chunks.some((c) => c.kind === 'done'),
-    'stream completed cleanly past error event'
-  );
+  let raised: unknown = null;
+  try {
+    await collectRose(
+      parseAnthropicSSE(body, {
+        actualModel: 'claude-test',
+        poolName: 'claude-token',
+        requestId: 'r-anth-err-evt',
+      })
+    );
+  } catch (err) {
+    raised = err;
+  }
+  assert(raised instanceof Error, `expected typed error, got ${raised}`);
 }
 
 async function testStreaming_anthropic_emptyStreamRaisesStallError() {
@@ -1569,6 +1559,33 @@ async function testStreaming_anthropic_emptyStreamRaisesStallError() {
     raised = err;
   }
   assert(raised instanceof RoseStallError, `expected RoseStallError, got ${raised}`);
+}
+
+async function testStreaming_anthropic_refusalRaisesRefusalError() {
+  const lines = [
+    'event: message_start',
+    'data: {"type":"message_start","message":{"usage":{"input_tokens":3}}}',
+    '',
+    'event: message_delta',
+    'data: {"type":"message_delta","delta":{"stop_reason":"refusal"},"usage":{"output_tokens":0}}',
+    '',
+    'data: [DONE]',
+    '',
+  ];
+  const body = rawStream([lines.join('\n') + '\n']);
+  let raised: unknown = null;
+  try {
+    await collectRose(
+      parseAnthropicSSE(body, {
+        actualModel: 'claude-test',
+        poolName: 'claude-token',
+        requestId: 'r-anth-refusal',
+      })
+    );
+  } catch (err) {
+    raised = err;
+  }
+  assert(raised instanceof RoseRefusalError, `expected RoseRefusalError, got ${raised}`);
 }
 
 async function testStreaming_anthropic_unmappedStopReasonPassthrough() {
@@ -1792,6 +1809,29 @@ async function testStreaming_openai_emptyStreamRaisesStallError() {
     (raised as Error).message.includes('saw_done=true'),
     'message should annotate saw_done flag for diagnosability'
   );
+}
+
+async function testStreaming_openai_refusalRaisesRefusalError() {
+  const lines = [
+    'data: {"choices":[{"index":0,"delta":{},"finish_reason":"refusal"}]}',
+    '',
+    'data: [DONE]',
+    '',
+  ];
+  const body = rawStream([lines.join('\n') + '\n']);
+  let raised: unknown = null;
+  try {
+    await collectRose(
+      parseOpenAISSE(body, {
+        actualModel: 'or-test',
+        poolName: 'rose-1-lite',
+        requestId: 'r-or-refusal',
+      })
+    );
+  } catch (err) {
+    raised = err;
+  }
+  assert(raised instanceof RoseRefusalError, `expected RoseRefusalError, got ${raised}`);
 }
 
 async function testStreaming_openai_emptyStreamWithoutDoneRaisesStallError() {
@@ -2643,12 +2683,16 @@ async function main(): Promise<void> {
       fn: testStreaming_anthropic_thinkingDeltaEmitsReasoning,
     },
     {
-      name: 'streaming / anthropic error event logged not thrown',
-      fn: testStreaming_anthropic_errorEventLoggedNotThrown,
+      name: 'streaming / anthropic error event raises typed error',
+      fn: testStreaming_anthropic_errorEventRaisesTypedError,
     },
     {
       name: 'streaming / anthropic empty stream → RoseStallError',
       fn: testStreaming_anthropic_emptyStreamRaisesStallError,
+    },
+    {
+      name: 'streaming / anthropic refusal → RoseRefusalError',
+      fn: testStreaming_anthropic_refusalRaisesRefusalError,
     },
     {
       name: 'streaming / anthropic unmapped stop_reason passthrough',
@@ -2685,6 +2729,10 @@ async function main(): Promise<void> {
     {
       name: 'streaming / openai empty stream → RoseStallError (saw_done=true)',
       fn: testStreaming_openai_emptyStreamRaisesStallError,
+    },
+    {
+      name: 'streaming / openai refusal → RoseRefusalError',
+      fn: testStreaming_openai_refusalRaisesRefusalError,
     },
     {
       name: 'streaming / openai disconnect (saw_done=false) → RoseStallError',

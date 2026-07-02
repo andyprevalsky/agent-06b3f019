@@ -23,6 +23,7 @@ export {
   RoseDeadlineError,
   RoseError,
   RoseInvalidRequest,
+  RoseRefusalError,
   RoseRateLimitError,
   RoseServerError,
   RoseStallError,

@@ -45,6 +45,7 @@ from providers.rose.errors import (
     RoseError,
     RoseInvalidRequest,
     RosePaymentRequiredError,
+    RoseRefusalError,
     RoseRateLimitError,
     RoseServerError,
     RoseStallError,
@@ -99,6 +100,7 @@ _FALL_THROUGH_ERRORS = (
     RoseAuthError,
     RoseRateLimitError,
     RosePaymentRequiredError,
+    RoseRefusalError,
 )
 
 # Stall-retry budget for direct-auth attempts. Empty: the new 45s TTFT
