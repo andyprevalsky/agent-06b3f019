@@ -26,6 +26,7 @@ export interface MessageRouting {
   isPhoneCallTool: boolean;
   isClaudeCodeToolMessage: boolean;
   isClaudeCodeChipMessage: boolean;
+  isBrowserAgentChipMessage: boolean;
   isCompletionSummary: boolean;
 }
 
@@ -61,6 +62,20 @@ export function useMessageRouting(message: Message): MessageRouting {
     isClaudeCodeInProgress || isClaudeCodeStarted || isClaudeCodeComplete,
   );
 
+  // Browser-agent terminal results shown in the main chat (no subAgentId — the
+  // per-step messages carry one and stay in the browser panel). This covers both
+  // the inner completion (action_type 'task_complete', with task_id) and the
+  // outer tool result / session-init failure (no task_id, e.g. "Browser
+  // automation failed"). All become a single chip; the chip derives recording +
+  // trajectory from task_id-scoped messages when available, else shows the
+  // result with Recording/Trajectory unavailable.
+  const isBrowserAgentChipMessage = Boolean(
+    isTool &&
+      metadata?.toolName === 'spawn_browser_agent' &&
+      !metadata?.subAgentId &&
+      (metadata?.toolStatus === 'FINISHED' || metadata?.toolStatus === 'ERROR'),
+  );
+
   return {
     isUser,
     isTool,
@@ -76,6 +91,7 @@ export function useMessageRouting(message: Message): MessageRouting {
     isPhoneCallTool,
     isClaudeCodeToolMessage,
     isClaudeCodeChipMessage,
+    isBrowserAgentChipMessage,
     isCompletionSummary,
   };
 }

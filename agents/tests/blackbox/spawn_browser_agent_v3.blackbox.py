@@ -185,12 +185,15 @@ async def test_browser_agent_recording_writes_local_html_replay():
             assert "cursorByFrame" in html_text
             assert "cursorAtTime" in html_text
             assert "Clicked submit" in html_text
+            # Single-column player (the metadata sidebar was intentionally removed).
             assert (
-                "#wrap { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 0; height: calc(100vh - 48px); overflow: hidden; }"
+                "#app { display: flex; flex-direction: column; height: 100vh; }" in html_text
+            )
+            assert (
+                "#stage { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; padding: 4px; background: #050506; }"
                 in html_text
             )
-            assert "#stage { display: flex; align-items: flex-start;" in html_text
-            assert "aside { min-height: 0;" in html_text
+            assert "<aside" not in html_text
     finally:
         if previous_enabled is None:
             os.environ.pop("BROWSER_AGENT_RECORDINGS", None)
@@ -276,7 +279,8 @@ def test_browser_agent_recording_supports_video_rate_replay():
         assert "requestAnimationFrame(tick)" in html_text
         assert "frameIndexAtTime" in html_text
         assert "timeline.max = totalMs" in html_text
-        assert "cursorAtTime(playheadMs)" in html_text
+        # Cursor is drawn per-frame in the redesigned single-column player.
+        assert "drawCursor(cursorByFrame[idx])" in html_text
     finally:
         if previous_interval is None:
             os.environ.pop("BROWSER_AGENT_RECORDING_INTERVAL_SECONDS", None)

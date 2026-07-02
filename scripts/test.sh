@@ -333,6 +333,11 @@ if $SMOKE; then
     SMOKE_TASK_QUEUE="navi-agent-tasks-${CONDUCTOR_WORKSPACE_NAME}"
     bg_suite "Smoke Benchmarks" bash -c "cd agents && source venv/bin/activate && TEMPORAL_TASK_QUEUE=$SMOKE_TASK_QUEUE ALLOW_TEMPORAL_CLEANUP=true python benchmarks/run_benchmark.py --suite smoke --port $PORT --ci --parallel"
     bg_suite "Frontend Semantic (Playwright)" bash -c "cd front-end && BACKEND_PORT=$SEMANTIC_BACKEND_PORT FRONTEND_PORT=$SEMANTIC_FRONTEND_PORT bash scripts/run-semantic-tests.sh"
+    # Steel cloud-browser load-time gate through a real bot wall (Cloudflare
+    # Turnstile + reCAPTCHA on order.toasttab.com). Ratchets median time-to-
+    # usable; the constant lives in the benchmark (TIME_TO_USABLE_RATCHET_SECONDS,
+    # ratchets DOWN only). 1 run keeps smoke fast (~2min); observed spread <1s.
+    bg_suite "Steel Bot-Challenge Load" bash -c "cd agents && source venv/bin/activate && python tests/e2e/steel_bot_challenge_benchmark.py --runs 1"
 
     collect_bg_suites
   fi
