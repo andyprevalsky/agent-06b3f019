@@ -6,9 +6,11 @@ Usage:
 - Do not use this for the public web, use web_search instead.
 - `pattern` is a regular expression. Plain text works for literal searches.
 - `source` is optional. Omit it to search messages, network, and agent_network.
-- Supported sources: messages, network, agent_network.
+- Supported sources: messages, network, agent_network, transactions.
 - Grep-style flags: -A lines after, -B lines before, -C/context both sides, -n line numbers, -i case-insensitive, head_limit, offset, multiline.
-- messages-only narrowing: `person` (email, phone, or full name) scopes to one contact; `since` (ISO 8601, or relative like 7d/24h/30m) limits to recent messages. Both are ignored for network and agent_network.
+- Use nested `filters` for source-specific narrowing. For messages: `person` and `since`. Legacy top-level `person` and `since` still work for messages.
+- For transactions: `filters.since`, `filters.until`, `filters.account`, `filters.min_amount`, `filters.max_amount`, `filters.status` (`posted`, `pending`, or `all`), and `filters.include_pending_in_totals`.
+- Transaction results include row snippets plus full-result aggregate totals by currency. Pending rows are visible, but excluded from totals unless `include_pending_in_totals` is true.
 
 Returns:
 - matching records with surrounding context and location metadata. agent_network matches include the message role."""

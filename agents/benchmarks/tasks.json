@@ -121,6 +121,87 @@
     ]
   },
   {
+    "name": "plaid-transactions-monthly-spend",
+    "title": "Plaid Transactions — Monthly Spend",
+    "prompt": "Answer this using only local transaction data through an explore agent: What is my monthly spend for September 2023?\n\nRules:\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn one explore agent and have it call grep with source=\"transactions\".\n- Use nested filters with since=\"2023-09-01\", until=\"2023-09-30\", status=\"posted\", include_pending_in_totals=false.\n- Use the transaction aggregate totals by currency from grep; monthly spend means posted USD outflow, excluding pending and excluding income/refunds.\n- Final answer must include the exact USD spend number and cite the transaction grep evidence.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "tags": ["plaid", "transactions", "grep", "local-only"],
+    "price_limit_cents": 100,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "min_tool_counts": {
+      "spawn_agent": 1,
+      "grep": 1
+    },
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_browser_agent",
+      "spawn_claude_code_agent",
+      "message_person",
+      "send_message_to_user_execute_phase"
+    ]
+  },
+  {
+    "name": "plaid-transactions-doordash-count",
+    "title": "Plaid Transactions — DoorDash Count",
+    "prompt": "Answer this using only local transaction data through an explore agent: How many posted DoorDash orders did I have in 2025?\n\nRules:\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn one explore agent and have it call grep with source=\"transactions\".\n- Use pattern=\"doordash\" with -i=true.\n- Use nested filters with since=\"2025-01-01\", until=\"2025-12-31\", status=\"posted\".\n- Count matched transaction rows, not just returned snippets. Use head_limit and offset if pagination is needed.\n- Final answer must include the exact count and cite the transaction grep evidence.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "tags": ["plaid", "transactions", "grep", "local-only"],
+    "price_limit_cents": 100,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "min_tool_counts": {
+      "spawn_agent": 1,
+      "grep": 1
+    },
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_browser_agent",
+      "spawn_claude_code_agent",
+      "message_person",
+      "send_message_to_user_execute_phase"
+    ]
+  },
+  {
+    "name": "plaid-transactions-dead-subscriptions",
+    "title": "Plaid Transactions — Dead Subscriptions",
+    "prompt": "Using only local transaction data through explore agents, identify subscriptions that look unused or dead and propose refund targets.\n\nRules:\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn explore agents that call grep with source=\"transactions\".\n- Search for subscription-like transactions using patterns such as subscription|premium|annual|membership and use nested filters with status=\"posted\".\n- Do not actually contact merchants or request refunds. Return a refund prep list only.\n- Final answer must include merchant name, charge evidence, why it looks like a refund candidate from transaction data, and exclude active developer-tool subscriptions.",
+    "timeout_seconds": 420,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "tags": ["plaid", "transactions", "grep", "local-only"],
+    "price_limit_cents": 150,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "min_tool_counts": {
+      "spawn_agent": 1,
+      "grep": 1
+    },
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_browser_agent",
+      "spawn_claude_code_agent",
+      "message_person",
+      "send_message_to_user_execute_phase"
+    ]
+  },
+  {
     "name": "message-person",
     "title": "Send Email + iMessage",
     "prompt": "Send a friendly hello message to the phone number 972-977-7432 via both email and iMessage. The email should go to test@example.com. Keep both messages short and friendly.",

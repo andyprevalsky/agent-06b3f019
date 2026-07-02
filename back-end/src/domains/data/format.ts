@@ -199,3 +199,59 @@ export function buildAgentNetworkMatch(
     input,
   });
 }
+
+function decimalToString(value: { toString(): string } | number | string): string {
+  return typeof value === 'number' || typeof value === 'string' ? String(value) : value.toString();
+}
+
+export function buildTransactionMatch(
+  row: grepRepo.TransactionGrepRow,
+  input: ValidatedGrepInput
+): GrepMatch {
+  const merchant = firstNonEmpty(row.merchantName, row.name);
+  const accountSuffix =
+    row.accountMask !== null && row.accountMask !== '' ? ` ****${row.accountMask}` : '';
+  const path = `transactions/${row.institutionName ?? 'unknown-institution'}/${row.accountName}${accountSuffix}/${row.plaidTransactionId}`;
+  const currency = row.isoCurrencyCode ?? row.unofficialCurrencyCode ?? 'UNKNOWN';
+  const content = [
+    valueToLine('source', 'transactions'),
+    valueToLine('transaction_id', row.plaidTransactionId),
+    valueToLine('institution', row.institutionName),
+    valueToLine('account', `${row.accountName}${accountSuffix}`),
+    valueToLine('date', row.date.toISOString().slice(0, 10)),
+    valueToLine(
+      'authorized_date',
+      row.authorizedDate ? row.authorizedDate.toISOString().slice(0, 10) : null
+    ),
+    valueToLine('status', row.pending ? 'pending' : 'posted'),
+    valueToLine('direction', row.direction.toLowerCase()),
+    valueToLine('amount', `${decimalToString(row.amount)} ${currency}`),
+    valueToLine('absolute_amount', `${decimalToString(row.absoluteAmount)} ${currency}`),
+    valueToLine('merchant', merchant),
+    valueToLine('name', row.name),
+    valueToLine('original_description', row.originalDescription),
+    valueToLine('category', row.category.join(' > ')),
+    valueToLine('personal_finance_category', row.personalFinanceCategory),
+    valueToLine('personal_finance_detailed', row.personalFinanceDetailed),
+    valueToLine('payment_channel', row.paymentChannel),
+    valueToLine('location', row.locationSummary),
+  ]
+    .filter((line): line is string => line !== null)
+    .join('\n');
+
+  return buildMatch({
+    source: 'transactions',
+    path,
+    pointer: `transactions:${row.plaidTransactionId}`,
+    timestamp: row.date,
+    location: {
+      source: 'transactions',
+      path,
+      transaction_id: row.plaidTransactionId,
+      account_id: row.plaidAccountExternalId,
+      field: 'transaction',
+    },
+    content,
+    input,
+  });
+}

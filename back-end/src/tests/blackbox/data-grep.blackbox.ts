@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
+/* eslint-disable max-lines, no-console */
 /**
  * Black-box tests for the DB-backed Grep contract.
  */
@@ -14,16 +14,18 @@ const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
 const API_KEY = process.env.BACKEND_API_KEY || '';
 
 const GrepMatch = z.object({
-  source: z.enum(['messages', 'network', 'agent_network']),
+  source: z.enum(['messages', 'network', 'agent_network', 'transactions']),
   path: z.string(),
   pointer: z.string(),
   timestamp: z.string(),
   role: z.enum(['SYSTEM', 'ASSISTANT', 'USER', 'TOOL']).optional(),
   location: z.object({
-    source: z.enum(['messages', 'network', 'agent_network']),
+    source: z.enum(['messages', 'network', 'agent_network', 'transactions']),
     path: z.string(),
     agent_id: z.string().optional(),
     message_id: z.string().optional(),
+    transaction_id: z.string().optional(),
+    account_id: z.string().optional(),
     role: z.enum(['SYSTEM', 'ASSISTANT', 'USER', 'TOOL']).optional(),
     thread: z.string().optional(),
     contact_id: z.string().optional(),
@@ -37,10 +39,41 @@ const GrepResponse = z.object({
   total_matches: z.number(),
   truncated: z.boolean(),
   pattern: z.string(),
-  sources: z.array(z.enum(['messages', 'network', 'agent_network'])),
+  sources: z.array(z.enum(['messages', 'network', 'agent_network', 'transactions'])),
   applied_limit: z.number(),
   applied_offset: z.number(),
+  summaries: z
+    .object({
+      transactions: z
+        .object({
+          totals_include_pending: z.boolean(),
+          currencies: z.array(
+            z.object({
+              currency: z.string(),
+              outflow: z.string(),
+              inflow: z.string(),
+              net: z.string(),
+              count: z.number(),
+            })
+          ),
+        })
+        .optional(),
+    })
+    .optional(),
   message: z.string().optional(),
+});
+
+const SummaryResponse = z.object({
+  sources: z.object({
+    transactions: z
+      .object({
+        total_transactions: z.number(),
+        account_count: z.number(),
+        institutions: z.array(z.string()),
+        date_range: z.object({ from: z.string().nullable(), to: z.string().nullable() }),
+      })
+      .optional(),
+  }),
 });
 
 type GrepBody = z.infer<typeof GrepResponse>;
@@ -63,6 +96,14 @@ async function requestGrep(userId: string, body: Record<string, unknown>) {
   return { status: response.status, data };
 }
 
+async function requestSummary(userId: string) {
+  const response = await fetch(`${BASE_URL}/api/data/summary`, {
+    headers: apiHeaders(userId),
+  });
+  const data = await response.json();
+  return { status: response.status, data };
+}
+
 function assertStatus(actual: number, expected: number, data: unknown): void {
   if (actual !== expected) {
     throw new Error(`Expected HTTP ${expected}, got ${actual}: ${JSON.stringify(data)}`);
@@ -79,6 +120,12 @@ function requireContent(body: GrepBody, expected: string): void {
   }
 }
 
+function requireInvalidGrepParam(data: unknown, label: string): void {
+  if ((data as { error?: string }).error !== 'INVALID_GREP_PARAM') {
+    throw new Error(`Expected INVALID_GREP_PARAM for ${label}, got ${JSON.stringify(data)}`);
+  }
+}
+
 function forbidLineNumbers(body: GrepBody): void {
   for (const match of body.matches) {
     if (/^\d+:/m.test(match.content)) {
@@ -88,6 +135,10 @@ function forbidLineNumbers(body: GrepBody): void {
 }
 
 async function cleanup(userId: string): Promise<void> {
+  await prisma.plaidTransaction.deleteMany({ where: { userId } });
+  await prisma.plaidAccount.deleteMany({ where: { userId } });
+  await prisma.plaidItem.deleteMany({ where: { userId } });
+  await prisma.integration.deleteMany({ where: { userId, name: 'plaid' } });
   await prisma.agent.deleteMany({ where: { userId } });
   await prisma.person.deleteMany({ where: { userId } });
   await prisma.user.deleteMany({ where: { userId } });
@@ -212,7 +263,132 @@ async function seedFixture() {
     ],
   });
 
+  await seedPlaidFixture(userId);
+
   return { userId, agentId: child.id };
+}
+
+async function seedPlaidFixture(userId: string): Promise<void> {
+  const integration = await prisma.integration.create({
+    data: {
+      userId,
+      type: 'DATA_SOURCE',
+      name: 'plaid',
+      status: 'CONNECTED',
+      isActive: true,
+    },
+  });
+  const item = await prisma.plaidItem.create({
+    data: {
+      userId,
+      integrationId: integration.id,
+      plaidItemId: `item-${randomUUID()}`,
+      plaidInstitutionId: 'ins_109508',
+      institutionName: 'First Platypus Bank',
+      encryptedAccessToken: 'encrypted-test-token',
+      status: 'ACTIVE',
+      products: ['transactions'],
+      cursor: 'cursor-test',
+      lastSyncAt: new Date('2026-01-05T00:00:00Z'),
+    },
+  });
+  const checking = await prisma.plaidAccount.create({
+    data: {
+      userId,
+      plaidItemId: item.id,
+      plaidAccountId: `account-checking-${randomUUID()}`,
+      name: 'Main Checking',
+      officialName: 'Plaid Gold Standard Checking',
+      mask: '0000',
+      type: 'depository',
+      subtype: 'checking',
+    },
+  });
+  const credit = await prisma.plaidAccount.create({
+    data: {
+      userId,
+      plaidItemId: item.id,
+      plaidAccountId: `account-credit-${randomUUID()}`,
+      name: 'Rewards Card',
+      officialName: 'Plaid Rewards Credit Card',
+      mask: '1111',
+      type: 'credit',
+      subtype: 'credit card',
+    },
+  });
+  await prisma.plaidTransaction.createMany({
+    data: [
+      {
+        userId,
+        plaidItemId: item.id,
+        plaidAccountId: checking.id,
+        plaidTransactionId: `tx-posted-${randomUUID()}`,
+        plaidAccountExternalId: checking.plaidAccountId,
+        date: new Date('2025-01-10T00:00:00Z'),
+        name: 'Starbucks Coffee',
+        merchantName: 'Starbucks',
+        amount: '5.25',
+        absoluteAmount: '5.25',
+        direction: 'OUTFLOW',
+        isoCurrencyCode: 'USD',
+        category: ['Food and Drink', 'Coffee Shop'],
+        paymentChannel: 'in store',
+        locationSummary: 'Seattle, WA',
+        pending: false,
+      },
+      {
+        userId,
+        plaidItemId: item.id,
+        plaidAccountId: checking.id,
+        plaidTransactionId: `tx-pending-${randomUUID()}`,
+        plaidAccountExternalId: checking.plaidAccountId,
+        date: new Date('2025-01-11T00:00:00Z'),
+        name: 'Starbucks Pending Latte',
+        merchantName: 'Starbucks',
+        amount: '7.00',
+        absoluteAmount: '7.00',
+        direction: 'OUTFLOW',
+        isoCurrencyCode: 'USD',
+        category: ['Food and Drink', 'Coffee Shop'],
+        paymentChannel: 'in store',
+        pending: true,
+      },
+      {
+        userId,
+        plaidItemId: item.id,
+        plaidAccountId: checking.id,
+        plaidTransactionId: `tx-payroll-${randomUUID()}`,
+        plaidAccountExternalId: checking.plaidAccountId,
+        date: new Date('2025-01-15T00:00:00Z'),
+        name: 'Payroll Deposit',
+        merchantName: 'Acme Payroll',
+        amount: '-1000.00',
+        absoluteAmount: '1000.00',
+        direction: 'INFLOW',
+        isoCurrencyCode: 'USD',
+        category: ['Payroll'],
+        paymentChannel: 'other',
+        pending: false,
+      },
+      {
+        userId,
+        plaidItemId: item.id,
+        plaidAccountId: credit.id,
+        plaidTransactionId: `tx-card-${randomUUID()}`,
+        plaidAccountExternalId: credit.plaidAccountId,
+        date: new Date('2025-01-20T00:00:00Z'),
+        name: 'Coffee Supplies Warehouse',
+        merchantName: 'Coffee Supplies',
+        amount: '125.00',
+        absoluteAmount: '125.00',
+        direction: 'OUTFLOW',
+        isoCurrencyCode: 'USD',
+        category: ['Shops'],
+        paymentChannel: 'online',
+        pending: false,
+      },
+    ],
+  });
 }
 
 async function testSchemaAndRemovedParams(userId: string): Promise<void> {
@@ -445,6 +621,171 @@ async function testPersonAndSinceFilters(userId: string): Promise<void> {
   }
 }
 
+async function testSourceSpecificFilterValidation(userId: string): Promise<void> {
+  let res = await requestGrep(userId, {
+    pattern: 'Starbucks',
+    source: 'transactions',
+    filters: { person: 'Lighthouse Archive' },
+  });
+  assertStatus(res.status, 400, res.data);
+  requireInvalidGrepParam(res.data, 'unsupported transaction filter');
+
+  res = await requestGrep(userId, {
+    pattern: 'Ledger entry',
+    source: 'messages',
+    filters: { person: 'Lighthouse Archive', min_amount: 1 },
+  });
+  assertStatus(res.status, 400, res.data);
+  requireInvalidGrepParam(res.data, 'unsupported message filter');
+
+  res = await requestGrep(userId, {
+    pattern: 'Starbucks',
+    source: 'transactions',
+    filters: ['status'],
+  });
+  assertStatus(res.status, 400, res.data);
+  requireInvalidGrepParam(res.data, 'non-object filters');
+
+  for (const [label, filters] of [
+    ['invalid transaction min_amount', { min_amount: '1' }],
+    ['invalid transaction status', { status: 'settled' }],
+    ['invalid transaction since', { since: 'not-a-date' }],
+    ['invalid transaction include_pending_in_totals', { include_pending_in_totals: 'true' }],
+    ['invalid message person', { person: ['Lighthouse Archive'] }],
+    ['invalid message since', { since: 'not-a-date' }],
+  ] as const) {
+    res = await requestGrep(userId, {
+      pattern: label.includes('message') ? 'Ledger entry' : 'Starbucks',
+      source: label.includes('message') ? 'messages' : 'transactions',
+      filters,
+    });
+    assertStatus(res.status, 400, res.data);
+    requireInvalidGrepParam(res.data, label);
+  }
+}
+
+async function testTransactionFiltersAndAggregates(userId: string): Promise<void> {
+  let res = await requestGrep(userId, {
+    pattern: 'starbucks|coffee',
+    source: 'transactions',
+    '-i': true,
+    filters: {
+      since: '2025-01-01',
+      until: '2025-12-31',
+      account: 'checking',
+      min_amount: 0,
+      max_amount: 10,
+      status: 'all',
+      include_pending_in_totals: false,
+    },
+    head_limit: 1,
+  });
+  assertStatus(res.status, 200, res.data);
+  const defaultTotals = assertBody(res.data);
+  if (defaultTotals.total_matches !== 2 || defaultTotals.matches.length !== 1) {
+    throw new Error(
+      `Expected full transaction total with one returned row, got ${JSON.stringify(defaultTotals)}`
+    );
+  }
+  const currency = defaultTotals.summaries?.transactions?.currencies.find(
+    (row) => row.currency === 'USD'
+  );
+  if (
+    defaultTotals.summaries?.transactions?.totals_include_pending !== false ||
+    currency?.count !== 1 ||
+    currency.outflow !== '5.25'
+  ) {
+    throw new Error(
+      `Expected posted-only aggregate over full filtered set, got ${JSON.stringify(defaultTotals)}`
+    );
+  }
+  requireContent(defaultTotals, 'Starbucks');
+
+  res = await requestGrep(userId, {
+    pattern: 'starbucks|coffee',
+    source: 'transactions',
+    '-i': true,
+    filters: {
+      since: '2025-01-01',
+      until: '2025-12-31',
+      account: 'checking',
+      min_amount: 0,
+      max_amount: 10,
+      status: 'all',
+      include_pending_in_totals: true,
+    },
+    head_limit: 1,
+  });
+  assertStatus(res.status, 200, res.data);
+  const withPendingTotals = assertBody(res.data);
+  const withPendingCurrency = withPendingTotals.summaries?.transactions?.currencies.find(
+    (row) => row.currency === 'USD'
+  );
+  if (
+    withPendingTotals.summaries?.transactions?.totals_include_pending !== true ||
+    withPendingCurrency?.count !== 2 ||
+    withPendingCurrency.outflow !== '12.25'
+  ) {
+    throw new Error(
+      `Expected pending-inclusive aggregate, got ${JSON.stringify(withPendingTotals)}`
+    );
+  }
+
+  res = await requestGrep(userId, {
+    pattern: 'starbucks|coffee',
+    source: 'transactions',
+    '-i': true,
+    filters: { status: 'posted' },
+  });
+  assertStatus(res.status, 200, res.data);
+  const postedOnly = assertBody(res.data);
+  if (postedOnly.matches.some((match) => match.content.includes('status: pending'))) {
+    throw new Error(
+      `Expected posted filter to hide pending rows, got ${JSON.stringify(postedOnly)}`
+    );
+  }
+}
+
+async function testTransactionTenantIsolation(userId: string): Promise<void> {
+  const otherUserId = `grep-other-${randomUUID()}`;
+  await cleanup(otherUserId);
+  await prisma.user.create({ data: { userId: otherUserId, isAnonymous: true } });
+  await seedPlaidFixture(otherUserId);
+  try {
+    const res = await requestGrep(userId, {
+      pattern: 'Payroll|Coffee Supplies',
+      source: 'transactions',
+      '-i': true,
+    });
+    assertStatus(res.status, 200, res.data);
+    const body = assertBody(res.data);
+    if (body.total_matches !== 2) {
+      throw new Error(
+        `Expected only current user's transaction matches, got ${JSON.stringify(body)}`
+      );
+    }
+  } finally {
+    await cleanup(otherUserId);
+  }
+}
+
+async function testTransactionSummary(userId: string): Promise<void> {
+  const res = await requestSummary(userId);
+  assertStatus(res.status, 200, res.data);
+  const body = SummaryResponse.parse(res.data);
+  const transactions = body.sources.transactions;
+  if (
+    transactions === undefined ||
+    transactions.total_transactions !== 4 ||
+    transactions.account_count !== 2 ||
+    !transactions.institutions.includes('First Platypus Bank') ||
+    transactions.date_range.from?.slice(0, 10) !== '2025-01-10' ||
+    transactions.date_range.to?.slice(0, 10) !== '2025-01-20'
+  ) {
+    throw new Error(`Expected transaction summary, got ${JSON.stringify(body)}`);
+  }
+}
+
 async function runAll(): Promise<void> {
   const { userId, agentId } = await seedFixture();
   const tests = [
@@ -457,6 +798,10 @@ async function runAll(): Promise<void> {
     ['dialect patterns normalized and succeed', () => testDialectNormalization(userId)],
     ['realistic safe patterns are allowed', () => testRealisticPatternsAllowed(userId)],
     ['person and since narrow messages', () => testPersonAndSinceFilters(userId)],
+    ['source-specific filters are validated', () => testSourceSpecificFilterValidation(userId)],
+    ['transactions filters and aggregates work', () => testTransactionFiltersAndAggregates(userId)],
+    ['transaction grep is tenant isolated', () => testTransactionTenantIsolation(userId)],
+    ['summary includes transactions', () => testTransactionSummary(userId)],
   ] as const;
 
   try {
