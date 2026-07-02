@@ -21,8 +21,8 @@
  */
 import { useMemo, useState } from 'react';
 import { ChevronDown, Clapperboard, ListOrdered, FileText, Globe } from 'lucide-react';
-import { useAgentContext } from '@/features/agent-context';
 import { getAttachmentUrl } from '@/lib/api/messages';
+import { useAgentContext } from '../hooks';
 import type { FilePointer, Message, OutputSchema } from '@/lib/api';
 import { SchemaChip } from './SchemaChip';
 

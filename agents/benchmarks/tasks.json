@@ -170,7 +170,7 @@
   {
     "name": "browser-toast-nopa-write-lock",
     "title": "Toast Nopa Fish Order — Cloudflare Challenge + Write Lock",
-    "prompt": "Order me the 2 fish sandwhiches from Nopa Fish ferry building",
+    "prompt": "Order me 1 rocky fish sandwich from Nopa Fish ferry building",
     "timeout_seconds": 600,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],

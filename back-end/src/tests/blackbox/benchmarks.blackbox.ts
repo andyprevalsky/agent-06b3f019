@@ -179,6 +179,7 @@ const KNOWN_TAGS = [
   'social',
   'grep',
   'payment',
+  'bot-challenge',
 ];
 
 // ==================== GET /api/benchmarks — CONTRACT TESTS ====================

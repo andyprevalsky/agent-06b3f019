@@ -146,8 +146,13 @@ export function buildSteelProxySettings(
   // work). An explicit STEEL_DEDICATED_IP_ID pins one shared IP instead.
   if (envEnabled('BROWSER_AGENT_STEEL_DEDICATED_IP_ENABLED', false)) {
     const pinnedId = process.env.STEEL_DEDICATED_IP_ID?.trim();
-    log.info(`  Using Steel dedicated IP${pinnedId ? ` (pinned ${pinnedId})` : ' (auto-pin to profile)'}`);
-    return { config: { type: 'fixed', ...(pinnedId ? { id: pinnedId } : {}) }, source: 'dedicated' };
+    log.info(
+      `  Using Steel dedicated IP${pinnedId ? ` (pinned ${pinnedId})` : ' (auto-pin to profile)'}`
+    );
+    return {
+      config: { type: 'fixed', ...(pinnedId ? { id: pinnedId } : {}) },
+      source: 'dedicated',
+    };
   }
 
   const useSteelProxy = envEnabled('BROWSER_AGENT_STEEL_PROXY_ENABLED', true);
