@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { createCardProvider, type CardProvider } from '../../providers/card-provider';
 import { createLogger } from '../../providers/logger';
-import { stripe } from '../../providers/stripe';
+import { cancelAuthorizedHold, captureAuthorizedHold, stripe } from '../../providers/stripe';
 import { AGENTCARD_WEBHOOK_SECRET } from './config';
 import { PurchaseError } from './errors';
 import * as repo from './repo';
@@ -24,8 +24,10 @@ function hasValue(value: string | null | undefined): value is string {
 }
 
 /**
- * Close a minted card and reconcile the ledger. Refunds the user's PaymentIntent unless the
- * purchase already CLEARED (a settled charge is not refunded). Idempotent on already-closed rows.
+ * Close a minted card and reconcile the ledger. The purchase's Stripe charge is an authorized HOLD,
+ * so an un-captured (HELD) purchase is CANCELED, not refunded — no money moved, no fee, no
+ * charge/refund churn. A settled (CLEARED) purchase just has its card closed; the captured charge
+ * stands. Idempotent on already-reconciled (VOIDED/REFUNDED) rows.
  */
 export async function closePurchaseCard(
   cardId: string,
@@ -47,20 +49,19 @@ export async function closePurchaseCard(
     return { ok: true, status: purchase.status };
   }
 
-  if (purchase.status !== PurchaseSpendStatus.CLEARED) {
+  // Settled: the card was used and the hold captured — reclaim the card, but the charge stands.
+  if (purchase.status === PurchaseSpendStatus.CLEARED) {
     await cardProvider.closeCard(cardId);
-    if (hasValue(purchase.stripePaymentIntentId)) {
-      await stripe.refunds.create({
-        payment_intent: purchase.stripePaymentIntentId,
-        metadata: { purchaseSpendId: purchase.id },
-      });
-    }
-    await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.REFUNDED);
-    return { ok: true, status: PurchaseSpendStatus.REFUNDED };
+    return { ok: true, status: PurchaseSpendStatus.CLEARED };
   }
 
+  // Un-captured hold (agent abandoned the purchase): release the hold. No charge, no refund.
   await cardProvider.closeCard(cardId);
-  return { ok: true, status: PurchaseSpendStatus.CLEARED };
+  if (hasValue(purchase.stripePaymentIntentId)) {
+    await cancelAuthorizedHold(purchase.stripePaymentIntentId);
+  }
+  await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.VOIDED);
+  return { ok: true, status: PurchaseSpendStatus.VOIDED };
 }
 
 const WEBHOOK_TOLERANCE_SECONDS = 5 * 60;
@@ -110,8 +111,13 @@ export function verifyAgentCardWebhookSignature(rawBody: string, signatureHeader
 }
 
 /**
- * Reconcile a purchase from an AgentCard transaction webhook: `transaction.cleared` settles the
- * hold (→ CLEARED, consuming the auto-approve cache); `transaction.voided` refunds the user (→ VOIDED).
+ * Reconcile a purchase from an AgentCard transaction webhook:
+ *  - `transaction.cleared` → the card settled, so CAPTURE the user's hold (→ CLEARED). Capture is
+ *    always attempted (even if a prior liveness check already flipped the row to CLEARED without
+ *    capturing) and is idempotent, so a lost `cleared` webhook can't leave money uncollected.
+ *  - `transaction.voided` → if the hold was already captured (CLEARED), REFUND it (→ REFUNDED);
+ *    otherwise CANCEL the un-captured hold (→ VOIDED) — no charge, no refund churn.
+ * Already-terminal (VOIDED/REFUNDED) rows are never resurrected by a late/duplicate event.
  */
 export async function handleAgentCardWebhook(event: AgentCardWebhookEvent): Promise<{ ok: true }> {
   const cardId = extractWebhookCardId(event);
@@ -126,16 +132,35 @@ export async function handleAgentCardWebhook(event: AgentCardWebhookEvent): Prom
     return { ok: true };
   }
 
+  if (
+    purchase.status === PurchaseSpendStatus.VOIDED ||
+    purchase.status === PurchaseSpendStatus.REFUNDED
+  ) {
+    return { ok: true };
+  }
+
   if (event.type === 'transaction.cleared') {
+    if (hasValue(purchase.stripePaymentIntentId)) {
+      await captureAuthorizedHold(purchase.stripePaymentIntentId);
+    }
     await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CLEARED);
   } else if (event.type === 'transaction.voided') {
-    if (hasValue(purchase.stripePaymentIntentId)) {
-      await stripe.refunds.create({
-        payment_intent: purchase.stripePaymentIntentId,
-        metadata: { purchaseSpendId: purchase.id, agentcardEventType: event.type },
-      });
+    if (purchase.status === PurchaseSpendStatus.CLEARED) {
+      // The hold was already captured, then the card transaction reversed → refund the charge.
+      if (hasValue(purchase.stripePaymentIntentId)) {
+        await stripe.refunds.create({
+          payment_intent: purchase.stripePaymentIntentId,
+          metadata: { purchaseSpendId: purchase.id, agentcardEventType: event.type },
+        });
+      }
+      await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.REFUNDED);
+    } else {
+      // Hold never captured → release it. No money taken.
+      if (hasValue(purchase.stripePaymentIntentId)) {
+        await cancelAuthorizedHold(purchase.stripePaymentIntentId);
+      }
+      await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.VOIDED);
     }
-    await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.VOIDED);
   }
 
   return { ok: true };

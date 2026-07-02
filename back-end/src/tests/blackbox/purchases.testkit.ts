@@ -130,12 +130,26 @@ export async function seedHeldPurchase(userId: string, fingerprint: string, card
   });
 }
 
-/** Run `fn` with stripe.paymentIntents/refunds/customers stubbed; records charge/refund params. */
-export async function withFakeStripe<T>(
-  fn: (calls: { charges: string[]; refunds: string[] }) => Promise<T>
-) {
+/** Recorded Stripe side effects. `charges` holds serialized create params; the hold-lifecycle
+ * arrays hold the PaymentIntent id passed to capture/cancel; `refunds` holds serialized refund
+ * params. */
+export interface FakeStripeCalls {
+  charges: string[];
+  refunds: string[];
+  captures: string[];
+  cancels: string[];
+}
+
+/**
+ * Run `fn` with stripe.paymentIntents (create/capture/cancel) + refunds + customers stubbed;
+ * records charge params and the hold capture/cancel/refund calls. `create` returns a stable
+ * PaymentIntent id so a later capture/cancel can be tied back to the row.
+ */
+export async function withFakeStripe<T>(fn: (calls: FakeStripeCalls) => Promise<T>) {
   const paymentIntents = stripe.paymentIntents as unknown as {
     create: (params: unknown) => Promise<{ id: string }>;
+    capture: (id: string, params?: unknown) => Promise<{ id: string; status: string }>;
+    cancel: (id: string, params?: unknown) => Promise<{ id: string; status: string }>;
   };
   const refunds = stripe.refunds as unknown as {
     create: (params: unknown) => Promise<{ id: string }>;
@@ -148,9 +162,11 @@ export async function withFakeStripe<T>(
     }>;
   };
   const originalPaymentIntentCreate = paymentIntents.create;
+  const originalPaymentIntentCapture = paymentIntents.capture;
+  const originalPaymentIntentCancel = paymentIntents.cancel;
   const originalRefundCreate = refunds.create;
   const originalCustomerRetrieve = customers.retrieve;
-  const calls = { charges: [] as string[], refunds: [] as string[] };
+  const calls: FakeStripeCalls = { charges: [], refunds: [], captures: [], cancels: [] };
 
   customers.retrieve = async (customerId: string) => ({
     id: customerId,
@@ -160,6 +176,14 @@ export async function withFakeStripe<T>(
     const id = `pi_${randomUUID()}`;
     calls.charges.push(JSON.stringify(params));
     return { id };
+  };
+  paymentIntents.capture = async (id: string) => {
+    calls.captures.push(id);
+    return { id, status: 'succeeded' };
+  };
+  paymentIntents.cancel = async (id: string) => {
+    calls.cancels.push(id);
+    return { id, status: 'canceled' };
   };
   refunds.create = async (params: unknown) => {
     const id = `re_${randomUUID()}`;
@@ -171,6 +195,8 @@ export async function withFakeStripe<T>(
     return await fn(calls);
   } finally {
     paymentIntents.create = originalPaymentIntentCreate;
+    paymentIntents.capture = originalPaymentIntentCapture;
+    paymentIntents.cancel = originalPaymentIntentCancel;
     refunds.create = originalRefundCreate;
     customers.retrieve = originalCustomerRetrieve;
   }
