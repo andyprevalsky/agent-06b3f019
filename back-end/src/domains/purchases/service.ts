@@ -1,5 +1,6 @@
 import {
   createCardProvider,
+  isCardLive,
   type CardProvider,
   type CardProviderDetailsResult,
 } from '../../providers/card-provider';
@@ -78,19 +79,6 @@ async function getCustomerDefaultPaymentMethodId(customerId: string): Promise<st
 
 function isReusableStatus(status: PurchaseSpendStatus): boolean {
   return status === PurchaseSpendStatus.HELD;
-}
-
-/** Card statuses (from the provider) where the card is still live and can be reused. */
-const LIVE_CARD_STATUSES = new Set(['OPEN', 'ACTIVE']);
-
-/**
- * Whether a minted card is still live and unspent — the source of truth for whether a purchase
- * has actually been consumed. A single-use AgentCard card flips to `CLOSED` / `balanceCents 0`
- * the moment a merchant settles a charge (verified against `sk_test_`). We ask the card itself
- * rather than trusting that the `transaction.cleared` webhook was delivered.
- */
-function isCardLive(details: CardProviderDetailsResult): boolean {
-  return details.balanceCents > 0 && LIVE_CARD_STATUSES.has(details.status.trim().toUpperCase());
 }
 
 /**
@@ -234,7 +222,12 @@ async function openPendingPurchase(
   });
 }
 
-/** Charge the user's saved card off-session, then mint the order-sized single-use card (→ HELD). */
+/**
+ * Authorize a manual-capture HOLD on the user's saved card off-session (money is NOT taken yet),
+ * then mint the order-sized single-use card (→ HELD). The hold is captured only when the card
+ * settles (`transaction.cleared` / liveness check), and released (canceled, no refund) if the
+ * purchase is abandoned (`transaction.voided`, explicit close, or agent-session cleanup).
+ */
 async function chargeAndIssueCard(
   purchaseId: string,
   input: MintPurchaseInput,
@@ -252,6 +245,9 @@ async function chargeAndIssueCard(
         payment_method: paymentMethodId,
         confirm: true,
         off_session: true,
+        // Authorize a hold; the money is only taken on capture (card settles). Abandoned purchases
+        // cancel the hold instead of charge-then-refund — no fee, no user-visible charge churn.
+        capture_method: 'manual',
         statement_descriptor_suffix: sanitizeDescriptorSuffix(input.merchant),
         metadata: {
           userId: input.userId,

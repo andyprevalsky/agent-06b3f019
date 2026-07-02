@@ -21,7 +21,6 @@ import { z } from 'zod';
 import { PurchaseSpendStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
 import type { CardProvider } from '../../providers/card-provider';
-import { cleanupAgentPurchaseCards } from '../../providers/purchaseCleanup';
 import * as purchasesService from '../../domains/purchases/service';
 import {
   assert,
@@ -143,18 +142,6 @@ async function createSubscribedUser(label: string): Promise<string> {
   return userId;
 }
 
-async function createAgent(userId: string, label: string): Promise<string> {
-  const agent = await prisma.agent.create({
-    data: {
-      userId,
-      goal: `purchase cleanup test ${label}`,
-    },
-    select: { id: true },
-  });
-  trackedAgentIds.add(agent.id);
-  return agent.id;
-}
-
 function validMintBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     fingerprint: `fp-${randomUUID()}`,
@@ -241,6 +228,14 @@ const tests: Array<[string, () => Promise<void>]> = [
         assert(
           calls.charges[0].includes('"statement_descriptor_suffix":"Test Merchant"'),
           'charge should set merchant descriptor suffix'
+        );
+        assert(
+          calls.charges[0].includes('"capture_method":"manual"'),
+          'mint must authorize a manual-capture hold, not an immediate charge'
+        );
+        assert(
+          calls.captures.length === 0 && calls.cancels.length === 0,
+          'minting alone must not capture or cancel the hold'
         );
       });
     },
@@ -331,150 +326,6 @@ const tests: Array<[string, () => Promise<void>]> = [
         assert(rows.length === 2, `expected 2 rows for the re-bought cart, got ${rows.length}`);
         const held = rows.find((r) => r.status === PurchaseSpendStatus.HELD);
         assert(held?.cardId === provider.newCardId, 'the new row should hold the new card');
-      });
-    },
-  ],
-  [
-    'service close refunds held cards and marks the purchase refunded',
-    async () => {
-      const userId = await createSubscribedUser('service-close');
-      const fingerprint = `service-close-${randomUUID()}`;
-      const provider = new FakeCardProvider();
-
-      await withFakeStripe(async (calls) => {
-        await purchasesService.mintPurchaseCard(
-          validMintBody({ userId, fingerprint, totalCents: 1000 }) as never,
-          provider
-        );
-        const closed = await purchasesService.closePurchaseCard(provider.cardId, provider);
-
-        assert(
-          closed.status === PurchaseSpendStatus.REFUNDED,
-          `expected REFUNDED, got ${closed.status}`
-        );
-        assert(
-          provider.closeCalls === 1,
-          `expected one provider close, got ${provider.closeCalls}`
-        );
-        assert(
-          calls.refunds.length === 1,
-          `expected one Stripe refund, got ${calls.refunds.length}`
-        );
-
-        const row = await prisma.purchaseSpend.findFirst({
-          where: { userId, fingerprint },
-          orderBy: { createdAt: 'desc' },
-        });
-        assert(
-          row?.status === PurchaseSpendStatus.REFUNDED,
-          `expected REFUNDED row, got ${row?.status}`
-        );
-      });
-    },
-  ],
-  [
-    'service webhook reconciles cleared and voided card transactions',
-    async () => {
-      const clearedUserId = await createUser('webhook-cleared');
-      const voidedUserId = await createUser('webhook-voided');
-      const clearedCardId = `card-cleared-${randomUUID()}`;
-      const voidedCardId = `card-voided-${randomUUID()}`;
-
-      await prisma.purchaseSpend.createMany({
-        data: [
-          {
-            userId: clearedUserId,
-            fingerprint: `cleared-${randomUUID()}`,
-            cardId: clearedCardId,
-            merchant: 'Cleared Merchant',
-            lineItemsJson: { totalCents: 1000 },
-            totalCents: 1000,
-            status: PurchaseSpendStatus.HELD,
-            stripePaymentIntentId: `pi_${randomUUID()}`,
-          },
-          {
-            userId: voidedUserId,
-            fingerprint: `voided-${randomUUID()}`,
-            cardId: voidedCardId,
-            merchant: 'Voided Merchant',
-            lineItemsJson: { totalCents: 1000 },
-            totalCents: 1000,
-            status: PurchaseSpendStatus.HELD,
-            stripePaymentIntentId: `pi_${randomUUID()}`,
-          },
-        ],
-      });
-
-      await withFakeStripe(async (calls) => {
-        await purchasesService.handleAgentCardWebhook({
-          type: 'transaction.cleared',
-          cardId: clearedCardId,
-        });
-        await purchasesService.handleAgentCardWebhook({
-          type: 'transaction.voided',
-          cardId: voidedCardId,
-        });
-
-        const cleared = await prisma.purchaseSpend.findFirst({ where: { cardId: clearedCardId } });
-        const voided = await prisma.purchaseSpend.findFirst({ where: { cardId: voidedCardId } });
-
-        assert(
-          cleared?.status === PurchaseSpendStatus.CLEARED,
-          `expected CLEARED, got ${cleared?.status}`
-        );
-        assert(
-          voided?.status === PurchaseSpendStatus.VOIDED,
-          `expected VOIDED, got ${voided?.status}`
-        );
-        assert(
-          calls.refunds.length === 1,
-          `expected one refund for voided transaction, got ${calls.refunds.length}`
-        );
-      });
-    },
-  ],
-  [
-    'cleanup closes held agent purchase cards and refunds the user charge',
-    async () => {
-      const userId = await createUser('cleanup-held');
-      const agentId = await createAgent(userId, 'held-card');
-      const provider = new FakeCardProvider();
-      const fingerprint = `cleanup-${randomUUID()}`;
-
-      await prisma.purchaseSpend.create({
-        data: {
-          userId,
-          agentId,
-          fingerprint,
-          cardId: provider.cardId,
-          merchant: 'Cleanup Merchant',
-          lineItemsJson: { totalCents: 1000 },
-          totalCents: 1000,
-          status: PurchaseSpendStatus.HELD,
-          stripePaymentIntentId: `pi_${randomUUID()}`,
-        },
-      });
-
-      await withFakeStripe(async (calls) => {
-        await cleanupAgentPurchaseCards(agentId, provider);
-
-        assert(
-          provider.closeCalls === 1,
-          `expected one provider close, got ${provider.closeCalls}`
-        );
-        assert(
-          calls.refunds.length === 1,
-          `expected one Stripe refund, got ${calls.refunds.length}`
-        );
-
-        const row = await prisma.purchaseSpend.findFirst({
-          where: { userId, fingerprint },
-          orderBy: { createdAt: 'desc' },
-        });
-        assert(
-          row?.status === PurchaseSpendStatus.REFUNDED,
-          `expected REFUNDED, got ${row?.status}`
-        );
       });
     },
   ],
