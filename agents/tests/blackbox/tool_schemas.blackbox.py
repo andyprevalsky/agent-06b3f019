@@ -159,6 +159,7 @@ def test_grep_tool_schema_exact_contract():
         "head_limit",
         "offset",
         "multiline",
+        "filters",
         "person",
         "since",
     }
@@ -167,7 +168,7 @@ def test_grep_tool_schema_exact_contract():
     enum_values = set()
     for option in source_schema.get("anyOf", []):
         enum_values.update(option.get("enum", []))
-    assert enum_values == {"messages", "network", "agent_network"}
+    assert enum_values == {"messages", "network", "agent_network", "transactions"}
 
     removed = {
         "path", "glob", "type", "output_mode", "person_id", "limit",

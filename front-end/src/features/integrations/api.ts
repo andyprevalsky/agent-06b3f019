@@ -165,10 +165,14 @@ async function plaidJsonOrThrow<T>(response: Response, label: string): Promise<T
   return payload as T;
 }
 
-export async function createPlaidLinkTokenApi(): Promise<PlaidLinkTokenResponse> {
+export async function createPlaidLinkTokenApi(input?: {
+  mode?: 'create' | 'update';
+  itemId?: string;
+}): Promise<PlaidLinkTokenResponse> {
   const response = await fetch(`${API_BASE_WITH_PATH}/integrations/plaid/link-token`, {
     method: 'POST',
     headers: getAuthHeaders(),
+    body: input === undefined ? undefined : JSON.stringify(input),
   });
   return plaidJsonOrThrow<PlaidLinkTokenResponse>(response, 'Create Plaid link token');
 }
@@ -181,6 +185,9 @@ export async function exchangePlaidPublicTokenApi(input: {
   if (input.metadata?.institution) {
     body.institution_id = input.metadata.institution.institution_id;
     body.institution_name = input.metadata.institution.name;
+  }
+  if (input.metadata) {
+    body.metadata = input.metadata;
   }
   const response = await fetch(`${API_BASE_WITH_PATH}/integrations/plaid/exchange-public-token`, {
     method: 'POST',
@@ -205,4 +212,12 @@ export async function disconnectPlaidItemApi(itemId: string): Promise<{ ok: true
     headers: getAuthHeaders(),
   });
   return plaidJsonOrThrow<{ ok: true }>(response, 'Disconnect Plaid item');
+}
+
+export async function completePlaidUpdateModeApi(itemId: string): Promise<{ item: PlaidItem }> {
+  const response = await fetch(`${API_BASE_WITH_PATH}/integrations/plaid/items/${itemId}/update-complete`, {
+    method: 'POST',
+    headers: getAuthHeaders(),
+  });
+  return plaidJsonOrThrow<{ item: PlaidItem }>(response, 'Complete Plaid update mode');
 }

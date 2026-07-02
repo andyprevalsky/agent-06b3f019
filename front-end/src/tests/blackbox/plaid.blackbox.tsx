@@ -166,8 +166,11 @@ function PlaidIntegrationHarness() {
       items={plaid.items}
       itemsLoading={plaid.itemsLoading}
       connectLoading={plaid.connectLoading}
+      disconnectingItemId={plaid.disconnectingItemId}
       error={plaid.error}
       onConnect={plaid.onConnect}
+      onUpdate={plaid.onUpdate}
+      onDisconnect={plaid.onDisconnect}
     />
   );
 }
@@ -240,12 +243,12 @@ describe('PlaidSection (rendering)', () => {
     );
     renderWithProviders(<PlaidIntegrationHarness />);
     await waitFor(() => {
-      expect(screen.getByText('First Platypus Bank')).toBeInTheDocument();
+      expect(screen.getAllByText('First Platypus Bank').length).toBeGreaterThan(0);
     });
     expect(screen.getByText('Connected')).toBeInTheDocument();
   });
 
-  it('does not render account-row details for a connected item', async () => {
+  it('renders item status but not account masks for a connected item', async () => {
     server.use(
       http.get(`${API_BASE}/integrations/plaid/items`, () =>
         HttpResponse.json({ items: [makeItem()] }),
@@ -253,9 +256,9 @@ describe('PlaidSection (rendering)', () => {
     );
     renderWithProviders(<PlaidIntegrationHarness />);
     await waitFor(() => {
-      expect(screen.getByText('First Platypus Bank')).toBeInTheDocument();
+      expect(screen.getAllByText('First Platypus Bank').length).toBeGreaterThan(0);
     });
-    expect(screen.queryByText(/1 account/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/1 account \/ ACTIVE/i)).toBeInTheDocument();
     expect(screen.queryByText(/••0000/)).not.toBeInTheDocument();
   });
 
@@ -360,7 +363,7 @@ describe('PlaidSection (connect flow)', () => {
     await waitFor(() => expect(linkController.opened).toBe(true));
     linkController.fireSuccess('public-sandbox-token');
     await waitFor(() => expect(exchanged).toBe(true));
-    await waitFor(() => expect(screen.getByText('First Platypus Bank')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText('First Platypus Bank').length).toBeGreaterThan(0));
   });
 
   it('persists the link_token to localStorage for OAuth-bank resume', async () => {
@@ -510,15 +513,15 @@ describe('PlaidSection (non-expandable card)', () => {
     server.resetHandlers();
   });
 
-  it('does not render item-row disconnect controls', async () => {
+  it('renders item-row disconnect controls', async () => {
     server.use(
       http.get(`${API_BASE}/integrations/plaid/items`, () =>
         HttpResponse.json({ items: [makeItem()] }),
       ),
     );
     renderWithProviders(<PlaidIntegrationHarness />);
-    await waitFor(() => expect(screen.getByText('First Platypus Bank')).toBeInTheDocument());
-    expect(screen.queryByRole('button', { name: /disconnect/i })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByText('First Platypus Bank').length).toBeGreaterThan(0));
+    expect(screen.getByRole('button', { name: /disconnect first platypus bank/i })).toBeInTheDocument();
   });
 });
 

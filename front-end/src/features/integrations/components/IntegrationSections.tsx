@@ -45,8 +45,11 @@ function PlaidIntegrationSection({ plaid }: Pick<IntegrationSectionsProps, 'plai
       items={plaid.items}
       itemsLoading={plaid.itemsLoading}
       connectLoading={plaid.connectLoading}
+      disconnectingItemId={plaid.disconnectingItemId}
       error={plaid.error}
       onConnect={plaid.onConnect}
+      onUpdate={plaid.onUpdate}
+      onDisconnect={plaid.onDisconnect}
     />
   );
 }

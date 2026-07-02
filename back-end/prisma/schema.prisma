@@ -510,6 +510,7 @@ model PlaidItem {
   disconnectedAt       DateTime?
   integration          Integration     @relation(fields: [integrationId], references: [id], onDelete: Cascade)
   accounts             PlaidAccount[]
+  transactions         PlaidTransaction[]
 
   @@index([userId])
   @@index([userId, status])
@@ -534,9 +535,55 @@ model PlaidAccount {
   updatedAt          DateTime  @updatedAt
   disconnectedAt     DateTime?
   plaidItem          PlaidItem @relation(fields: [plaidItemId], references: [id], onDelete: Cascade)
+  transactions       PlaidTransaction[]
 
   @@index([userId])
   @@index([plaidItemId])
+}
+
+/// Plaid Transaction: normalized, searchable transaction data from Plaid
+/// Transactions Sync. Stores no raw Plaid payload.
+model PlaidTransaction {
+  id                         String       @id @default(uuid())
+  userId                     String
+  plaidItemId                String
+  plaidAccountId             String
+  plaidTransactionId         String       @unique
+  plaidAccountExternalId     String
+  date                       DateTime
+  authorizedDate             DateTime?
+  datetime                   DateTime?
+  authorizedDatetime         DateTime?
+  name                       String
+  merchantName               String?
+  originalDescription        String?
+  amount                     Decimal      @db.Decimal(18, 4)
+  absoluteAmount             Decimal      @db.Decimal(18, 4)
+  direction                  TransactionDirection
+  isoCurrencyCode            String?
+  unofficialCurrencyCode     String?
+  category                   String[]     @default([])
+  categoryId                 String?
+  personalFinanceCategory    String?
+  personalFinanceDetailed    String?
+  paymentChannel             String?
+  locationSummary            String?
+  pending                    Boolean      @default(false)
+  pendingTransactionId       String?
+  accountOwner               String?
+  checkNumber                String?
+  removedAt                  DateTime?
+  createdAt                  DateTime     @default(now())
+  updatedAt                  DateTime     @updatedAt
+  plaidItem                  PlaidItem    @relation(fields: [plaidItemId], references: [id], onDelete: Cascade)
+  plaidAccount               PlaidAccount @relation(fields: [plaidAccountId], references: [id], onDelete: Cascade)
+
+  @@index([userId, date])
+  @@index([userId, pending])
+  @@index([userId, removedAt])
+  @@index([plaidItemId])
+  @@index([plaidAccountId])
+  @@index([plaidAccountExternalId])
 }
 
 model RoseApiKey {
@@ -974,6 +1021,11 @@ enum PlaidItemStatus {
   DISCONNECTED
   REQUIRES_REAUTH
   ERROR
+}
+
+enum TransactionDirection {
+  OUTFLOW
+  INFLOW
 }
 
 model SmsSession {

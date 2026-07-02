@@ -15,6 +15,12 @@ import { type Response, Router } from 'express';
 import { type AuthRequest, authenticate } from '../../providers/auth';
 import { asyncHandler } from '../../utils/asyncHandler';
 import * as plaidService from './service.plaid';
+import {
+  handlePlaidWebhook,
+  PlaidWebhookVerificationError,
+  verifyPlaidWebhook,
+  type PlaidWebhookPayload,
+} from './service.plaidWebhooks';
 
 const router = Router({ mergeParams: true });
 
@@ -36,7 +42,13 @@ router.post(
     }
 
     try {
-      const result = await plaidService.createPlaidLinkToken(userId);
+      const body = (req.body as Record<string, unknown> | undefined) ?? {};
+      const mode = body.mode === 'update' ? 'update' : 'create';
+      const itemId = typeof body.itemId === 'string' ? body.itemId : undefined;
+      const result =
+        mode === 'update' && itemId !== undefined && itemId !== ''
+          ? await plaidService.createPlaidUpdateLinkToken(userId, itemId)
+          : await plaidService.createPlaidLinkToken(userId);
       return res.json(result);
     } catch (err) {
       if (err instanceof plaidService.PlaidApiError) {
@@ -46,6 +58,9 @@ router.post(
           type: err.errorType,
           message: err.message,
         });
+      }
+      if (err instanceof plaidService.PlaidItemNotFoundError) {
+        return res.status(404).json({ error: err.message });
       }
       throw err;
     }
@@ -80,15 +95,36 @@ router.post(
         : typeof institutionRaw?.name === 'string'
           ? institutionRaw.name
           : undefined;
+    const metadataRaw = body.metadata as Record<string, unknown> | undefined;
+    const accountsRaw = Array.isArray(body.accounts)
+      ? body.accounts
+      : Array.isArray(metadataRaw?.accounts)
+        ? metadataRaw.accounts
+        : [];
+    const accounts = accountsRaw
+      .filter(
+        (account): account is Record<string, unknown> =>
+          typeof account === 'object' && account !== null
+      )
+      .map((account) => ({
+        name: typeof account.name === 'string' ? account.name : null,
+        mask: typeof account.mask === 'string' ? account.mask : null,
+        type: typeof account.type === 'string' ? account.type : null,
+        subtype: typeof account.subtype === 'string' ? account.subtype : null,
+      }));
 
     try {
       const result = await plaidService.exchangePlaidPublicToken(userId, {
         publicToken,
         institutionId,
         institutionName,
+        accounts,
       });
       return res.json(result);
     } catch (err) {
+      if (err instanceof plaidService.PlaidDuplicateItemError) {
+        return res.status(409).json({ error: 'DUPLICATE_PLAID_ITEM', message: err.message });
+      }
       if (err instanceof plaidService.PlaidApiError) {
         return res.status(502).json({
           error: 'Plaid API error',
@@ -96,6 +132,26 @@ router.post(
           type: err.errorType,
           message: err.message,
         });
+      }
+      throw err;
+    }
+  })
+);
+
+router.post(
+  '/plaid/items/:id/update-complete',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const userId = resolveUserId(req);
+    if (userId === undefined || userId === '') {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
+    try {
+      const result = await plaidService.completePlaidUpdateMode(userId, req.params.id);
+      return res.json(result);
+    } catch (err) {
+      if (err instanceof plaidService.PlaidItemNotFoundError) {
+        return res.status(404).json({ error: err.message });
       }
       throw err;
     }
@@ -136,6 +192,37 @@ router.delete(
     } catch (err) {
       if (err instanceof plaidService.PlaidItemNotFoundError) {
         return res.status(404).json({ error: err.message });
+      }
+      throw err;
+    }
+  })
+);
+
+router.delete(
+  '/plaid',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const userId = resolveUserId(req);
+    if (userId === undefined || userId === '') {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
+    const result = await plaidService.disconnectAllPlaidItems(userId);
+    return res.json(result);
+  })
+);
+
+router.post(
+  '/plaid/webhook',
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const rawBody =
+      (req as AuthRequest & { rawBody?: string }).rawBody ?? JSON.stringify(req.body ?? {});
+    try {
+      await verifyPlaidWebhook(rawBody, req.headers['plaid-verification']);
+      const result = await handlePlaidWebhook(req.body as PlaidWebhookPayload);
+      return res.json(result);
+    } catch (err) {
+      if (err instanceof PlaidWebhookVerificationError) {
+        return res.status(401).json({ error: 'INVALID_PLAID_WEBHOOK', message: err.message });
       }
       throw err;
     }

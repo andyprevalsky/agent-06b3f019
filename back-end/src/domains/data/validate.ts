@@ -6,11 +6,21 @@
 import { MAX_RESULTS } from './config';
 import { InvalidGrepParamError, InvalidPatternError, SourceNotFoundError } from './errors';
 import { checkPatternSafety, extractInlineFlags, stripNamedGroups } from './regexSafety';
-import { VALID_SOURCES, type GrepParams, type ValidSource, type ValidatedGrepInput } from './types';
+import {
+  DATA_SOURCE_CONFIGS,
+  DEFAULT_GREP_SOURCES,
+  VALID_SOURCES,
+  type GrepParams,
+  type MessageGrepFilters,
+  type TransactionGrepFilters,
+  type ValidSource,
+  type ValidatedGrepInput,
+} from './types';
 
 const ALLOWED_GREP_KEYS = new Set([
   'pattern',
   'source',
+  'filters',
   '-A',
   '-B',
   '-C',
@@ -37,6 +47,18 @@ function parseBoolean(value: unknown, defaultValue: boolean): boolean {
     if (['false', '0', 'no', 'off'].includes(normalized)) return false;
   }
   return defaultValue;
+}
+
+function parseFilterBoolean(
+  filters: Record<string, unknown>,
+  key: string,
+  defaultValue: boolean
+): boolean {
+  if (!(key in filters)) return defaultValue;
+  if (typeof filters[key] !== 'boolean') {
+    throw new InvalidGrepParamError(`filters.${key}`);
+  }
+  return filters[key];
 }
 
 function parseBoundedNumber(
@@ -72,6 +94,109 @@ function parseSince(value: unknown): Date | undefined {
   return Number.isNaN(parsed.getTime()) ? undefined : parsed;
 }
 
+function parseFilterDate(filters: Record<string, unknown>, key: string): Date | undefined {
+  if (!(key in filters)) return undefined;
+  const value = filters[key];
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new InvalidGrepParamError(`filters.${key}`);
+  }
+  const parsed = new Date(value.length === 10 ? `${value}T00:00:00.000Z` : value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new InvalidGrepParamError(`filters.${key}`);
+  }
+  return parsed;
+}
+
+function parseFilterSince(filters: Record<string, unknown>, key: string): Date | undefined {
+  if (!(key in filters)) return undefined;
+  const value = filters[key];
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new InvalidGrepParamError(`filters.${key}`);
+  }
+  const parsed = parseSince(value);
+  if (parsed === undefined) {
+    throw new InvalidGrepParamError(`filters.${key}`);
+  }
+  return parsed;
+}
+
+function parseFilterString(filters: Record<string, unknown>, key: string): string | undefined {
+  if (!(key in filters)) return undefined;
+  const value = filters[key];
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new InvalidGrepParamError(`filters.${key}`);
+  }
+  return value.trim();
+}
+
+function parseFilterNumber(filters: Record<string, unknown>, key: string): number | undefined {
+  if (!(key in filters)) return undefined;
+  const value = filters[key];
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new InvalidGrepParamError(`filters.${key}`);
+  }
+  return value;
+}
+
+function requireFilterObject(params: GrepParams): Record<string, unknown> {
+  if (params.filters === undefined || params.filters === null) return {};
+  if (typeof params.filters !== 'object' || Array.isArray(params.filters)) {
+    throw new InvalidGrepParamError('filters');
+  }
+  return params.filters;
+}
+
+function rejectUnsupportedFilters(source: ValidSource, filters: Record<string, unknown>): void {
+  const allowed = new Set<string>(DATA_SOURCE_CONFIGS[source].filters);
+  for (const key of Object.keys(filters)) {
+    if (!allowed.has(key)) {
+      throw new InvalidGrepParamError(`filters.${key}`);
+    }
+  }
+}
+
+function parseMessageFilters(
+  params: GrepParams,
+  selectedSource?: ValidSource
+): MessageGrepFilters | undefined {
+  const raw = requireFilterObject(params);
+  const merged =
+    selectedSource === 'messages'
+      ? {
+          ...raw,
+          ...(params.person !== undefined ? { person: params.person } : {}),
+          ...(params.since !== undefined ? { since: params.since } : {}),
+        }
+      : raw;
+  if (Object.keys(merged).length === 0) return undefined;
+  rejectUnsupportedFilters('messages', merged);
+  return {
+    person: parseFilterString(merged, 'person'),
+    since: parseFilterSince(merged, 'since'),
+  };
+}
+
+function parseTransactionFilters(params: GrepParams): TransactionGrepFilters | undefined {
+  const raw = requireFilterObject(params);
+  if (Object.keys(raw).length === 0) {
+    return { includePendingInTotals: false, status: 'all' };
+  }
+  rejectUnsupportedFilters('transactions', raw);
+  const status = 'status' in raw ? parseFilterString(raw, 'status') : 'all';
+  if (status !== 'pending' && status !== 'posted' && status !== 'all') {
+    throw new InvalidGrepParamError('filters.status');
+  }
+  return {
+    since: parseFilterDate(raw, 'since'),
+    until: parseFilterDate(raw, 'until'),
+    account: parseFilterString(raw, 'account'),
+    minAmount: parseFilterNumber(raw, 'min_amount'),
+    maxAmount: parseFilterNumber(raw, 'max_amount'),
+    status,
+    includePendingInTotals: parseFilterBoolean(raw, 'include_pending_in_totals', false),
+  };
+}
+
 export function validateGrepInput(params: GrepParams): ValidatedGrepInput {
   for (const key of Object.keys(params)) {
     if (!ALLOWED_GREP_KEYS.has(key)) {
@@ -86,6 +211,10 @@ export function validateGrepInput(params: GrepParams): ValidatedGrepInput {
   if (source !== undefined && !(source in VALID_SOURCES)) {
     throw new SourceNotFoundError(source);
   }
+  if (params.filters !== undefined && source === undefined) {
+    throw new InvalidGrepParamError('filters');
+  }
+  const selectedSource = source as ValidSource | undefined;
 
   const multiline = parseBoolean(params.multiline, false);
   // Fix 1: fold inline (?i) into case-insensitivity (JS RegExp + Postgres ARE reject it).
@@ -119,10 +248,7 @@ export function validateGrepInput(params: GrepParams): ValidatedGrepInput {
     pattern,
     // Strip named-capture syntax for Postgres ARE (we only boolean-match).
     dbPattern: databaseRegexPattern(stripNamedGroups(normalizedPattern), multiline),
-    sources:
-      source !== undefined
-        ? [source as ValidSource]
-        : (Object.keys(VALID_SOURCES) as ValidSource[]),
+    sources: source !== undefined ? [source as ValidSource] : DEFAULT_GREP_SOURCES,
     regex,
     caseInsensitive,
     multiline,
@@ -131,11 +257,12 @@ export function validateGrepInput(params: GrepParams): ValidatedGrepInput {
     contextAfter,
     headLimit: parseBoundedNumber(params.head_limit, 20, 1, MAX_RESULTS),
     offset: parseBoundedNumber(params.offset, 0, 0, 10_000),
-    // messages-source-only narrowing (resolved to a personId in searchSource).
-    person:
-      typeof params.person === 'string' && params.person.trim() !== ''
-        ? params.person.trim()
-        : undefined,
-    since: parseSince(params.since),
+    filters: {
+      messages:
+        selectedSource === undefined || selectedSource === 'messages'
+          ? parseMessageFilters(params, selectedSource)
+          : undefined,
+      transactions: selectedSource === 'transactions' ? parseTransactionFilters(params) : undefined,
+    },
   };
 }

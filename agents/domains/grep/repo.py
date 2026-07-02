@@ -148,12 +148,14 @@ async def fetch_local_data_summary(user_id: str) -> str:
 
         sources = data.get("sources", {})
         messages = sources.get("messages", {})
+        transactions = sources.get("transactions", {})
 
         total_threads = messages.get("total_threads", 0)
         total_messages = messages.get("total_messages", 0)
+        total_transactions = transactions.get("total_transactions", 0)
 
-        if total_messages == 0:
-            summary = "No local message data available."
+        if total_messages == 0 and total_transactions == 0:
+            summary = "No local data available."
             _data_summary_cache[user_id] = {"summary": summary, "fetched_at": now}
             return summary
 
@@ -175,13 +177,31 @@ async def fetch_local_data_summary(user_id: str) -> str:
         if remaining > 0:
             thread_lines.append(f"    ... {remaining} more threads")
 
+        transaction_lines = []
+        if total_transactions > 0:
+            transaction_date_range = transactions.get("date_range", {})
+            transaction_from_date = (
+                transaction_date_range.get("from", "")[:10] if transaction_date_range.get("from") else "?"
+            )
+            transaction_to_date = (
+                transaction_date_range.get("to", "")[:10] if transaction_date_range.get("to") else "?"
+            )
+            institutions = transactions.get("institutions", [])
+            institution_str = ", ".join(institutions) if institutions else "unknown"
+            transaction_lines = [
+                "",
+                f"transactions/                          {transactions.get('account_count', 0)} accounts, {total_transactions:,} transactions",
+                f"  Institutions: {institution_str}",
+                f"  Date range: {transaction_from_date} → {transaction_to_date}",
+            ]
+
         summary = f"""LOCAL DATA SOURCES:
 
 messages/                              {total_threads} threads, {total_messages:,} messages
   Channels: {channel_str}
   Date range: {from_date} → {to_date}
   Threads by volume:
-{chr(10).join(thread_lines)}"""
+{chr(10).join(thread_lines)}{chr(10).join(transaction_lines)}"""
 
         _data_summary_cache[user_id] = {"summary": summary, "fetched_at": now}
         return summary
