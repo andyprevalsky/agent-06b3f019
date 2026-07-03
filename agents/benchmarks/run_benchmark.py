@@ -769,9 +769,16 @@ def _validate_user_data_prod_grep_messages(messages: List[dict]) -> Optional[str
     """Require prod user-data benchmark grep calls to cover every provider explicitly."""
     seen_providers: set[str] = set()
     matching_grep_calls = 0
+    completed_provider_agent_spawns = 0
 
     for msg in messages:
         meta = msg.get("metadata") or {}
+        if (
+            meta.get("toolName") in {"spawn_agent", "spawn_general_purpose_agent"}
+            and meta.get("toolStatus") == "FINISHED"
+            and not meta.get("subAgentId")
+        ):
+            completed_provider_agent_spawns += 1
         if meta.get("toolName") != "grep" or meta.get("toolStatus") != "FINISHED":
             continue
         text = str(msg.get("text") or "")
@@ -789,6 +796,12 @@ def _validate_user_data_prod_grep_messages(messages: List[dict]) -> Optional[str
             "and filters.document_source for every V1 provider. "
             f"Missing: {sorted(missing)}. Seen: {sorted(seen_providers)}. "
             f"Matching grep calls: {matching_grep_calls}"
+        )
+    if completed_provider_agent_spawns < 1:
+        return (
+            "User-data prod grep must complete at least one provider-agent spawn "
+            "before finalizing. Completed provider-agent spawns: "
+            f"{completed_provider_agent_spawns}"
         )
     return None
 
