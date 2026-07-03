@@ -282,15 +282,16 @@ jobs:
       # UPLOAD DMG TO SUPABASE STORAGE (public downloads)
       # ============================================
 
-      - name: Rewrite latest-mac.yml URLs to Supabase
+      - name: Prepare latest-mac.yml for Supabase
         working-directory: mac-app
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
         run: |
-          # Rewrite download URLs in latest-mac.yml to point at Supabase public bucket
+          # Recompute hashes/sizes after stapling mutates the DMG, and rewrite
+          # download URLs to point at the Supabase public bucket.
           PUBLIC_BASE="${SUPABASE_URL}/storage/v1/object/public/Releases/mac/latest"
-          sed -i '' "s|url:.*Rose-mac.dmg|url: ${PUBLIC_BASE}/Rose-mac.dmg|" dist/latest-mac.yml
-          sed -i '' "s|url:.*Rose-mac.zip|url: ${PUBLIC_BASE}/Rose-mac.zip|" dist/latest-mac.yml
+          node scripts/prepare-updater-feed.mjs --dist dist --base-url "$PUBLIC_BASE"
+          node scripts/prepare-updater-feed.mjs --dist dist --base-url "$PUBLIC_BASE" --check
           echo "Rewritten latest-mac.yml:"
           cat dist/latest-mac.yml
 

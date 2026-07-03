@@ -10,7 +10,10 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { execFileSync, spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { resolveBackendUrl as resolveElectronAppBackendUrl } from '../../ui/features/electron-app/config';
 import { resolveBackendUrl as resolveOnboardingBackendUrl } from '../../ui/features/onboarding/config';
@@ -23,6 +26,10 @@ function readPackageJson(): {
   build: { protocols?: { schemes?: string[] } };
 } {
   return JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+}
+
+function sha512Base64(filePath: string): string {
+  return crypto.createHash('sha512').update(fs.readFileSync(filePath)).digest('base64');
 }
 
 describe('mac app release config', () => {
@@ -64,5 +71,68 @@ describe('mac app release config', () => {
       expect(() => resolve('', true)).toThrow(/Missing VITE_BACKEND_API_URL/);
       expect(resolve('https://api.example.com', true)).toBe('https://api.example.com');
     }
+  });
+
+  it('release feed prep refreshes updater hashes after post-build artifact mutation', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rose-updater-feed-'));
+    const dist = path.join(tmp, 'dist');
+    fs.mkdirSync(dist);
+
+    const zipPath = path.join(dist, 'Rose-mac.zip');
+    const dmgPath = path.join(dist, 'Rose-mac.dmg');
+    fs.writeFileSync(zipPath, 'zip-before');
+    fs.writeFileSync(dmgPath, 'dmg-before');
+
+    fs.writeFileSync(
+      path.join(dist, 'latest-mac.yml'),
+      [
+        'version: 9.9.9',
+        'files:',
+        '  - url: Rose-mac.zip',
+        `    sha512: ${sha512Base64(zipPath)}`,
+        `    size: ${fs.statSync(zipPath).size}`,
+        '  - url: Rose-mac.dmg',
+        `    sha512: ${sha512Base64(dmgPath)}`,
+        `    size: ${fs.statSync(dmgPath).size}`,
+        'path: Rose-mac.zip',
+        `sha512: ${sha512Base64(zipPath)}`,
+        "releaseDate: '2026-07-02T20:45:29.797Z'",
+        '',
+      ].join('\n')
+    );
+
+    fs.appendFileSync(dmgPath, '-stapled');
+
+    const script = path.join(ROOT, 'scripts/prepare-updater-feed.mjs');
+    const staleCheck = spawnSync(
+      'node',
+      [script, '--dist', dist, '--base-url', 'https://cdn.example.com/mac/latest', '--check'],
+      { encoding: 'utf8' }
+    );
+    expect(staleCheck.status).toBe(1);
+    expect(staleCheck.stderr).toMatch(/latest-mac\.yml does not match/);
+
+    execFileSync('node', [
+      script,
+      '--dist',
+      dist,
+      '--base-url',
+      'https://cdn.example.com/mac/latest',
+    ]);
+    execFileSync('node', [
+      script,
+      '--dist',
+      dist,
+      '--base-url',
+      'https://cdn.example.com/mac/latest',
+      '--check',
+    ]);
+
+    const latest = fs.readFileSync(path.join(dist, 'latest-mac.yml'), 'utf8');
+    expect(latest).toContain('url: https://cdn.example.com/mac/latest/Rose-mac.zip');
+    expect(latest).toContain('url: https://cdn.example.com/mac/latest/Rose-mac.dmg');
+    expect(latest).toContain(`sha512: ${sha512Base64(dmgPath)}`);
+    expect(latest).toContain(`size: ${fs.statSync(dmgPath).size}`);
+    expect(latest).toContain(`sha512: ${sha512Base64(zipPath)}`);
   });
 });
