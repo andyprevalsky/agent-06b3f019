@@ -101,6 +101,33 @@ export function sortAgents(agents: Agent[]): Agent[] {
 
 // ── Browser panels ────────────────────────────────────────────────────────
 
+const TERMINAL_BROWSER_ACTION_TYPES = new Set(['task_complete', 'session_paused']);
+const TERMINAL_BROWSER_TOOL_STATUSES = new Set(['FINISHED', 'ERROR']);
+
+function isBrowserTaskTerminalMessage(message: Message): boolean {
+  const actionType = message.metadata?.action_type;
+  if (typeof actionType === 'string' && TERMINAL_BROWSER_ACTION_TYPES.has(actionType)) {
+    return true;
+  }
+
+  return (
+    message.metadata?.toolName === 'spawn_browser_agent' &&
+    typeof message.metadata?.toolStatus === 'string' &&
+    TERMINAL_BROWSER_TOOL_STATUSES.has(message.metadata.toolStatus)
+  );
+}
+
+/**
+ * Browser status chip lifecycle:
+ *
+ * spawn_browser_agent init/browser/system
+ *   -> [VISIBLE_STATUS_CHIP]
+ *   -> task-scoped browser progress messages
+ *   -> terminal message:
+ *        - action_type task_complete/session_paused, or
+ *        - spawn_browser_agent toolStatus FINISHED/ERROR
+ *   -> [HIDDEN_STATUS_CHIP]
+ */
 export function computeActiveBrowserPanels(messages: Message[]): BrowserPanelData[] {
   const panels: BrowserPanelData[] = [];
   const browserTaskIds = new Set<string>();
@@ -126,18 +153,12 @@ export function computeActiveBrowserPanels(messages: Message[]): BrowserPanelDat
     const initMessage = taskMessages.find(
       (m) => m.metadata?.action_type === 'browser' || m.metadata?.action_type === 'system',
     );
-    const lastMessage = taskMessages[taskMessages.length - 1];
     const initToolCallId = initMessage?.metadata?.toolCallId;
 
-    const hasTerminalTaskMessage = taskMessages.some(
-      (m) =>
-        m.metadata?.action_type === 'task_complete' || m.metadata?.action_type === 'session_paused',
-    );
+    const hasTerminalTaskMessage = taskMessages.some(isBrowserTaskTerminalMessage);
 
     const isComplete =
       hasTerminalTaskMessage ||
-      lastMessage?.metadata?.action_type === 'task_complete' ||
-      lastMessage?.metadata?.action_type === 'session_paused' ||
       (typeof initToolCallId === 'string' && pausedBrowserToolCallIds.has(initToolCallId));
 
     if (!isComplete && initMessage) {

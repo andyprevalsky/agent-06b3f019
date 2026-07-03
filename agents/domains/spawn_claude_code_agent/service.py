@@ -965,6 +965,8 @@ async def _run_verifier(
                 gpt_token_pool_id,
                 gpt_token_user_id,
                 None,
+                None,
+                None,
                 fast_mode_cache_enabled,
                 fast_mode_goal or goal,
                 fast_mode_step,

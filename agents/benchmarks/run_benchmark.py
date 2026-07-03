@@ -541,7 +541,6 @@ async def create_agent(
 
     body: dict = {
         "goal": goal,
-        "model": "rose-labs/rose-1-lite",
         "source": request_source,
         "price_limit_cents": task.price_limit_cents,
         "verifier": {

@@ -1203,6 +1203,7 @@ async def test_create_agent_uses_goal_override_when_env_set():
             os.environ["BENCHMARK_GOAL_OVERRIDE"] = original_env
 
     assert bodies[0]["goal"] == "Override benchmark goal"
+    assert "model" not in bodies[0]
 
 
 def test_keep_failed_agents_only_preserves_failures():

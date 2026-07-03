@@ -205,8 +205,10 @@ def _single_attempt_auth(auth: ComputeAuthContext) -> ComputeAuthContext:
             source=auth.source,
             user_id=auth.user_id,
             pool_token_id=auth.pool_token_id,
+            lineage_key=auth.lineage_key,
             mark_rate_limited=auth.mark_rate_limited,
             fetch_fresh=None,
+            heartbeat_lease=auth.heartbeat_lease,
             max_rotations=0,
         )
     return GptAuthContext(
@@ -215,10 +217,24 @@ def _single_attempt_auth(auth: ComputeAuthContext) -> ComputeAuthContext:
         user_id=auth.user_id,
         account_id=auth.account_id,
         pool_token_id=auth.pool_token_id,
+        lineage_key=auth.lineage_key,
         mark_rate_limited=auth.mark_rate_limited,
         fetch_fresh=None,
+        heartbeat_lease=auth.heartbeat_lease,
         max_rotations=0,
     )
+
+
+def _fire_and_forget_lease_heartbeat(auth: ComputeAuthContext) -> None:
+    if auth.heartbeat_lease is None or not auth.lineage_key:
+        return
+
+    async def _heartbeat() -> None:
+        with contextlib.suppress(Exception):
+            await auth.heartbeat_lease(auth)
+
+    with contextlib.suppress(Exception):
+        asyncio.create_task(_heartbeat())
 
 
 def _compute_token_payload(auth: ComputeAuthContext) -> Dict[str, Any]:
@@ -903,6 +919,7 @@ class RoseClient:
                 ft_to_handle: Optional[_FallThrough] = None
                 while True:
                     attempt_auth = _single_attempt_auth(direct_auth)
+                    _fire_and_forget_lease_heartbeat(direct_auth)
                     current_ttft_s = (
                         ttft_timeout_s * _STALL_TTFT_MULTIPLIERS[stall_retry_idx - 1]
                         if stall_retry_idx > 0

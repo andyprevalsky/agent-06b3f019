@@ -379,6 +379,40 @@ def test_spawn_agent_for_each_no_items_raises():
     )
 
 
+def test_spawn_agent_for_each_accepts_recursive_json_items():
+    """SpawnAgentTool for_each accepts nested JSON values as items."""
+    from utils.tool_schemas import (
+        ResponseSchemaConfig,
+        ResponseSchemaFieldConfig,
+        SpawnAgentTool,
+    )
+
+    schema = ResponseSchemaConfig(
+        fields=[ResponseSchemaFieldConfig(name="x", type="str", required=True, description="d")]
+    )
+    nested_item = {
+        "canonical_name": "Bryan Johnson",
+        "approximate_audience_metrics_by_platform": {
+            "youtube": {"subscribers": "1M+", "recent_views": [120000, 250000, None]},
+            "newsletter": None,
+        },
+        "platforms": ["YouTube", "Instagram"],
+        "active": True,
+        "rank": 1,
+    }
+
+    tool = SpawnAgentTool(
+        tool="spawn_agent",
+        type="for_each",
+        goal=LONG_GOAL,
+        output_schema=schema,
+        start_phase="PLAN",
+        items=[nested_item, ["nested", {"ok": True}], None, 42, False, "plain string"],
+    )
+
+    assert tool.items == [nested_item, ["nested", {"ok": True}], None, 42, False, "plain string"]
+
+
 def test_spawn_agent_browser_no_schema_raises():
     """SpawnAgentTool browser/code/general_purpose/for_each requires output_schema."""
     from utils.tool_schemas import SpawnAgentTool
@@ -724,6 +758,7 @@ async def run_all_tests():
     r.record("spawn_agent_general_purpose_no_phase", test_spawn_agent_general_purpose_missing_phase_raises)
     r.record("spawn_agent_for_each_both", test_spawn_agent_for_each_items_and_csv_raises)
     r.record("spawn_agent_for_each_neither", test_spawn_agent_for_each_no_items_raises)
+    r.record("spawn_agent_for_each_recursive_json_items", test_spawn_agent_for_each_accepts_recursive_json_items)
     r.record("spawn_agent_browser_no_schema", test_spawn_agent_browser_no_schema_raises)
     r.record("spawn_agent_explore_with_schema", test_spawn_agent_explore_with_schema_dropped)
     r.record("spawn_agent_short_goal", test_spawn_agent_short_goal_allowed)

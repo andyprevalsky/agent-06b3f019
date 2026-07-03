@@ -2,10 +2,19 @@
 
 import json
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional, Type, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Type, Union
 
 import structlog
-from pydantic import BaseModel, ConfigDict, Field, create_model, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    WithJsonSchema,
+    create_model,
+    field_validator,
+    model_validator,
+)
 
 from utils.prompts import (
     PLANNER_RESPONSE_JOIN_DESCRIPTION,
@@ -475,7 +484,21 @@ class MessagePersonTool(BaseModel):
     )
 
 
-ForEachItem = Union[str, Dict[str, Union[str, List[str]]]]
+ForEachItem = Annotated[
+    JsonValue,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {"type": "string"},
+                {"type": "number"},
+                {"type": "boolean"},
+                {"type": "null"},
+                {"type": "object", "additionalProperties": {}},
+                {"type": "array", "items": {}},
+            ]
+        }
+    ),
+]
 
 
 class SpawnAgentTool(BaseModel):
@@ -546,7 +569,9 @@ class SpawnAgentTool(BaseModel):
         description=(
             "Optional alternative when type='for_each': provide either items or items_csv. "
             "Ignored for every other type. For each item in the array, "
-            "a general-purpose agent will be spawned with the given goal and the item attached to its context."
+            "a general-purpose agent will be spawned with the given goal and the item attached to its context. "
+            "Each array element spawns exactly one sub-agent. Items may be any JSON value: "
+            "string, number, boolean, null, object, or array."
         ),
     )
     items_csv: Optional[str] = Field(

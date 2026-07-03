@@ -145,6 +145,7 @@ export interface AgentTreeNode {
   message_count: number;
   output_schema?: OutputSchema;
   structured_output?: Record<string, unknown>;
+  failure_context?: import('@/lib/realtime-types').FailureContext;
   tree_cost_cents: number;
 }
 

@@ -2,6 +2,8 @@
  * General-purpose agent spawn routing logic.
  *
  * Branches:
+ *   (0) for_each terminal aggregate with inferred child ids
+ *       → SubAgentTree headed by user-facing sub-agent status
  *   (a) pre-spawn error (status ERROR, no subAgentIds, no subAgentId)
  *       → simple red "└─ ✗ title: error" line
  *   (b) summary with subAgentIds + busId
@@ -57,14 +59,11 @@ export function SubAgentBubble({
     | 'ERROR';
 
   if (subAgentIds && subAgentIds.length > 0 && busId) {
-    let title = (metadata.title as string) || 'Spawning agent cluster';
-    title = title.replace(/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]\s*/u, '');
     return (
       <div className="flex gap-3 animate-in fade-in duration-300">
         <SubAgentTree
           busId={busId}
           subAgentIds={subAgentIds}
-          title={title}
           onNavigate={(agentId) => onNavigateToAgent?.(agentId)}
           hideHeader={hideSubAgentTreeHeader}
         />

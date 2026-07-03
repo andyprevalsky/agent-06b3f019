@@ -50,6 +50,7 @@ from loop.activity_helper import call_temporal_activity_from_activity
 from loop.context_utils import poll_and_update_context
 from tools.base import EventType, MessageStatus, ToolEvent
 from tools.knowledge_base import query_blueprints
+from utils.error_utils import extract_error_message
 from utils.tool_schemas import PLAN_TOOL_MODELS, create_agent_action_model
 
 logger = structlog.get_logger()
@@ -72,66 +73,9 @@ ESTIMATE_SAFETY_MULTIPLIER = 1.4
 # consecutive failures so a broken compactor doesn't loop forever.
 MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3
 
-
-def _assistant_declared_explore_spawn(msg: Dict[str, Any]) -> bool:
-    metadata = msg.get("metadata") or {}
-    tool_calls = metadata.get("tool_calls")
-    if not isinstance(tool_calls, list):
-        return False
-    return any(
-        isinstance(call, dict)
-        and call.get("tool") == "spawn_agent"
-        and call.get("type") == "explore"
-        and isinstance(call.get("tool_call_id"), str)
-        for call in tool_calls
-    )
-
-
-def _finished_tool_call_ids(context: List[Dict[str, Any]]) -> set[str]:
-    finished: set[str] = set()
-    for msg in context:
-        if msg.get("role") != "TOOL":
-            continue
-        metadata = msg.get("metadata") or {}
-        if metadata.get("toolStatus") != "FINISHED":
-            continue
-        tool_call_id = metadata.get("toolCallId")
-        if isinstance(tool_call_id, str):
-            finished.add(tool_call_id)
-    return finished
-
-
-def _completed_explore_spawn_count(context: List[Dict[str, Any]]) -> int:
-    finished = _finished_tool_call_ids(context)
-    count = 0
-    for msg in context:
-        if msg.get("role") != "ASSISTANT" or not _assistant_declared_explore_spawn(msg):
-            continue
-        metadata = msg.get("metadata") or {}
-        for call in metadata.get("tool_calls") or []:
-            if (
-                isinstance(call, dict)
-                and call.get("tool") == "spawn_agent"
-                and call.get("type") == "explore"
-                and call.get("tool_call_id") in finished
-            ):
-                count += 1
-    return count
-
-
-def _is_redundant_synthesis_delegate(
-    tool_name: str,
-    tool_args: Dict[str, Any],
-    context: List[Dict[str, Any]],
-) -> bool:
-    """Detect attempts to outsource final synthesis after explore results exist."""
-    if tool_name != "spawn_agent" or tool_args.get("type") != "general_purpose":
-        return False
-    if _completed_explore_spawn_count(context) < 2:
-        return False
-
-    goal = str(tool_args.get("goal") or "").lower()
-    return any(term in goal for term in ("synthes", "summar", "compare", "comparison", "table"))
+# If compaction succeeds but saves almost nothing, surface an explicit error
+# instead of continuing into the same overflow loop.
+MIN_AUTOCOMPACT_SAVINGS_RATIO = 0.10
 
 
 @traced("run_agent")
@@ -209,6 +153,8 @@ async def run_agent(  # noqa: C901
     get_gpt_account_id: Optional[Callable[[], Optional[str]]] = None,
     get_gpt_token_source: Optional[Callable[[], Optional[str]]] = None,
     get_gpt_token_pool_id: Optional[Callable[[], Optional[str]]] = None,
+    compute_token_lineage_key: Optional[str] = None,
+    compute_token_fast_cache_affinity_key: Optional[str] = None,
     # Override the call_site label used when emitting llm.cache. Defaults to
     # "plan_loop"/"execute_loop" based on is_plan_loop. Sub-agents that share
     # this loop (e.g. explore_agent) set this to surface as their own row in
@@ -258,12 +204,16 @@ async def run_agent(  # noqa: C901
     remembered_gpt_token_source: Optional[str] = None
     remembered_gpt_token_pool_id: Optional[str] = None
     iteration = iteration_offset
+    # Fast-cache position tracks committed LLM turns, not attempted loop
+    # iterations. A transient transport failure must retry the same cache key.
+    fast_cache_llm_position = iteration_offset
     set_plan_called = False  # Track if set_plan was called (for is_plan_loop)
     set_plan_succeeded = False  # Track if set_plan completed successfully (not just called)
     no_tool_count = 0  # Track consecutive iterations with no tool calls
     consecutive_llm_failures = 0  # Track consecutive LLM call failures for early exit
     consecutive_verifier_errors = 0  # Track consecutive verifier failures for early exit
     compactor_failures = 0  # Circuit-breaker: skip compaction after 3 consecutive failures
+    ineffective_compactions = 0  # Circuit-breaker for repeated low-value compactions
     recent_verifier_scores: List[float] = []  # Track last N scores for trend feedback
     recent_call_hashes: Deque[str] = deque(maxlen=6)  # Track last N tool-call signatures for repetition detection
     same_call_streak = 0  # Consecutive iterations where all tool calls were identical
@@ -467,6 +417,7 @@ async def run_agent(  # noqa: C901
 
         # Only increment iteration when we're actually going to do work
         iteration += 1
+        fast_cache_step = fast_cache_llm_position + 1
 
         # 1.4. Graceful wind-down (opt-in via winddown_window). On the final turn(s)
         # before the cap, inject ONE message into the conversation tail (NOT the
@@ -590,9 +541,71 @@ async def run_agent(  # noqa: C901
                 gpt_account_id=compression_gpt_account_id,
                 gpt_token_source=compression_gpt_token_source,
                 gpt_token_pool_id=compression_gpt_token_pool_id,
+                compute_token_lineage_key=compute_token_lineage_key,
+                compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
             )
 
             if success:
+                compressed_tokens = _estimate_tokens(compressed)
+                saved_ratio = 0.0
+                if context_tokens > 0:
+                    saved_ratio = max(0.0, (context_tokens - compressed_tokens) / context_tokens)
+
+                if compressed_tokens >= compaction_trigger:
+                    message = (
+                        "Context compression ineffective: compressed context estimate "
+                        f"{compressed_tokens} tokens still exceeds trigger {compaction_trigger} "
+                        f"(original estimate {context_tokens})."
+                    )
+                    logger.error(
+                        "Compaction did not get below overflow trigger",
+                        context_tokens=context_tokens,
+                        compressed_tokens=compressed_tokens,
+                        trigger=compaction_trigger,
+                        saved_ratio=saved_ratio,
+                    )
+                    return {
+                        "status": "error",
+                        "context": context,
+                        "tokens_in": tokens_in,
+                        "tokens_out": tokens_out,
+                        "token_count": token_count,
+                        "context_size": context_size,
+                        "cache_read_input_tokens": cache_read_total,
+                        "cache_creation_input_tokens": cache_write_total,
+                        "message": message,
+                    }
+
+                if saved_ratio < MIN_AUTOCOMPACT_SAVINGS_RATIO:
+                    ineffective_compactions += 1
+                    message = (
+                        "Context compression ineffective: compressed context saved only "
+                        f"{saved_ratio:.1%} of estimated tokens "
+                        f"(original {context_tokens}, compressed {compressed_tokens})."
+                    )
+                    logger.warning(
+                        "Compaction saved too little",
+                        context_tokens=context_tokens,
+                        compressed_tokens=compressed_tokens,
+                        saved_ratio=saved_ratio,
+                        minimum=MIN_AUTOCOMPACT_SAVINGS_RATIO,
+                        ineffective_compactions=ineffective_compactions,
+                    )
+                    if ineffective_compactions >= 2:
+                        return {
+                            "status": "error",
+                            "context": context,
+                            "tokens_in": tokens_in,
+                            "tokens_out": tokens_out,
+                            "token_count": token_count,
+                            "context_size": context_size,
+                            "cache_read_input_tokens": cache_read_total,
+                            "cache_creation_input_tokens": cache_write_total,
+                            "message": message,
+                        }
+                else:
+                    ineffective_compactions = 0
+
                 compactor_failures = 0
                 if on_context_overflow:
                     # Workflow: will call continue_as_new (never returns)
@@ -753,12 +766,12 @@ async def run_agent(  # noqa: C901
                         FastCacheContext(
                             enabled=fast_mode_cache_enabled,
                             goal=goal_text,
-                            base_step=iteration,
+                            base_step=fast_cache_step,
                             write_enabled=fast_mode_cache_enabled or write_through_enabled,
                         )
                     )
                 else:
-                    await ensure_position_context(agent_id, iteration)
+                    await ensure_position_context(agent_id, fast_cache_step)
 
                 # Retry up to 3 times on parse failures (matches workflow path's RetryPolicy).
                 # The try/finally guarantees the broadcaster's background drainer is
@@ -797,14 +810,17 @@ async def run_agent(  # noqa: C901
                                     gpt_token_source=current_gpt_token_source,
                                     gpt_token_pool_id=current_gpt_token_pool_id,
                                     gpt_token_user_id=user_id,
+                                    compute_token_lineage_key=compute_token_lineage_key,
+                                    compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
                                     call_site=cache_call_site,
                                 )
                             break  # Success
-                        except (ValueError, Exception) as e:
-                            if llm_attempt < max_llm_attempts and "Failed to parse" in str(e):
+                        except Exception as e:
+                            error_message = extract_error_message(e)
+                            if llm_attempt < max_llm_attempts and "Failed to parse" in error_message:
                                 logger.warning(
                                     f"[run_agent] LLM parse failed (attempt {llm_attempt}/{max_llm_attempts}), retrying",
-                                    error=str(e),
+                                    error=error_message,
                                 )
                                 # Reset streaming state for retry
                                 sequence[0] = 0
@@ -868,10 +884,12 @@ async def run_agent(  # noqa: C901
                         current_gpt_token_source,
                         current_gpt_token_pool_id,
                         user_id,
+                        compute_token_lineage_key,
+                        compute_token_fast_cache_affinity_key,
                         user_id,
                         fast_mode_cache_enabled,
                         goal_text,
-                        iteration,
+                        fast_cache_step,
                     ],
                     start_to_close_timeout=timedelta(seconds=STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS),
                     retry_policy=RetryPolicy(maximum_attempts=3),
@@ -922,6 +940,8 @@ async def run_agent(  # noqa: C901
                 logger.info(
                     f"💾 Cache i{iteration}: read={iter_cache_read} write={iter_cache_write} uncached={llm_tokens_in} hit={cache_pct}% | cumulative: read={cache_read_total} write={cache_write_total}"
                 )
+
+            fast_cache_llm_position = fast_cache_step
 
             # Notify workflow of token usage for cost tracking and limit checking
             # This happens BEFORE tree token broadcast so cost limit can pause before more work
@@ -1140,37 +1160,6 @@ async def run_agent(  # noqa: C901
 
             async def execute_single_tool(tool_name: str, tool_args: dict, tool_call_id: str):
                 """Execute a single tool and return result with metadata."""
-                if (
-                    not is_plan_loop
-                    and _is_redundant_synthesis_delegate(tool_name, tool_args, context)
-                ):
-                    result_message = (
-                        "Rejected redundant general-purpose synthesis delegation after completed "
-                        "explore-agent results. Complete the synthesis in this agent."
-                    )
-                    logger.warning(
-                        "Rejected redundant synthesis delegation",
-                        agent_id=agent_id,
-                        tool_call_id=tool_call_id,
-                    )
-                    if post_message:
-                        await post_message(
-                            f"Error: {result_message}",
-                            "TOOL",
-                            {
-                                "toolCallId": tool_call_id,
-                                "toolName": tool_name,
-                                "toolStatus": "ERROR",
-                                "error": True,
-                            },
-                        )
-                    return {
-                        "tool_name": tool_name,
-                        "tool_call_id": tool_call_id,
-                        "result": {"error": True, "message": result_message},
-                        "error": None,
-                    }
-
                 try:
                     async with span(
                         "tool_dispatch",
@@ -1490,11 +1479,13 @@ async def run_agent(  # noqa: C901
                     gpt_token_source=verifier_gpt_token_source,
                     gpt_token_pool_id=verifier_gpt_token_pool_id,
                     gpt_token_user_id=user_id,
+                    compute_token_lineage_key=compute_token_lineage_key,
+                    compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
                     is_plan_loop=is_plan_loop,
                     tool_call_id=tool_call_id,
                     fast_mode_cache_enabled=fast_mode_cache_enabled,
                     fast_mode_goal=goal_text,
-                    fast_mode_step=iteration,
+                    fast_mode_step=fast_cache_step,
                 )
 
                 # Track verifier tokens
@@ -1708,6 +1699,8 @@ async def run_agent(  # noqa: C901
                 gpt_token_source=final_verifier_gpt_token_source,
                 gpt_token_pool_id=final_verifier_gpt_token_pool_id,
                 gpt_token_user_id=user_id,
+                compute_token_lineage_key=compute_token_lineage_key,
+                compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
                 is_plan_loop=is_plan_loop,
                 fast_mode_cache_enabled=fast_mode_cache_enabled,
                 fast_mode_goal=goal_text,
@@ -1812,6 +1805,8 @@ async def _compress_context(
     gpt_account_id: Optional[str] = None,
     gpt_token_source: Optional[str] = None,
     gpt_token_pool_id: Optional[str] = None,
+    compute_token_lineage_key: Optional[str] = None,
+    compute_token_fast_cache_affinity_key: Optional[str] = None,
 ) -> Tuple[List[Dict], bool]:
     """Compress context using the head/tail-protected compactor.
 
@@ -1836,6 +1831,8 @@ async def _compress_context(
                 gpt_token_pool_id,
                 user_id,
                 agent_id,
+                compute_token_lineage_key,
+                compute_token_fast_cache_affinity_key,
             ],
             start_to_close_timeout=timedelta(seconds=180),
             retry_policy=RetryPolicy(maximum_attempts=3),
@@ -1898,6 +1895,8 @@ async def _run_verifier(
     gpt_token_source: Optional[str] = None,
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
+    compute_token_lineage_key: Optional[str] = None,
+    compute_token_fast_cache_affinity_key: Optional[str] = None,
     is_plan_loop: bool = False,
     tool_call_id: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
@@ -1908,9 +1907,9 @@ async def _run_verifier(
     verifier_call_id = tool_call_id or str(uuid.uuid4())
 
     # Post IN_PROGRESS
-    # C5: Tag the verifier message as the TOOL result of `attempt_completion`
-    # so the agent reads the verifier feedback as the natural result of its
-    # own tool call. The `verifierMessage` flag is the canonical filter.
+    # Post the in-progress verifier row as the active attempt_completion tool
+    # result. The finished feedback row below is tagged as verifierMessage so
+    # the next LLM turn receives it as ordinary assistant feedback.
     if post_message:
         await post_message(
             "",
@@ -1958,6 +1957,8 @@ async def _run_verifier(
             gpt_token_source,
             gpt_token_pool_id,
             gpt_token_user_id,
+            compute_token_lineage_key,
+            compute_token_fast_cache_affinity_key,
             None,  # dump_extra
             fast_mode_cache_enabled,
             fast_mode_goal,
@@ -1971,7 +1972,7 @@ async def _run_verifier(
     reasoning = result.get("reasoning", "")
     structured_response = result.get("structured_response")
 
-    # Format message with structured output if present
+    # Format message with structured output if present.
     message_text = reasoning
     if structured_response and isinstance(structured_response, dict) and len(structured_response) > 0:
         output_lines = ["\n\n**Extracted Output:**"]
@@ -1986,8 +1987,18 @@ async def _run_verifier(
             output_lines.append(f"- **{formatted_key}:** {formatted_value}")
         message_text = reasoning + "\n".join(output_lines)
 
-    # Post FINISHED — same C5 reasoning: surface as the TOOL result of
-    # attempt_completion, identified by the verifierMessage flag.
+    if score < 1.0:
+        message_text = (
+            f"Verifier score: {score:.0%}\n\n"
+            f"Reasoning: {message_text}\n\n"
+            "Take a NEW action that produces fresh tool evidence matching the goal, "
+            "then call attempt_completion again."
+        )
+
+    # Post FINISHED. Surface verifier feedback as the completed
+    # attempt_completion result for UI continuity, and mark it with
+    # verifierMessage so the next LLM turn receives the feedback as assistant
+    # conversation instead of as an opaque tool output.
     if post_message:
         await post_message(
             message_text,
@@ -1996,8 +2007,13 @@ async def _run_verifier(
                 "toolCallId": verifier_call_id,
                 "toolName": "attempt_completion",
                 "toolStatus": "FINISHED",
-                "title": f"⚖️ Progress: {score * 100:.0f}%",
+                "title": (
+                    f"⚖️ Verifier rejected ({score:.0%}) — continue task"
+                    if score < 1.0
+                    else f"⚖️ Progress: {score * 100:.0f}%"
+                ),
                 "subAgentId": task_id,
+                "verifierMessage": True,
             },
         )
 

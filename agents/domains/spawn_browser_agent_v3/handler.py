@@ -1535,6 +1535,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
     action_history = ActionHistory()
     browser_url = None
     current_url = ""
+    latest_structured_response: Optional[Dict[str, Any]] = None
     config = load_config()
     start_time = safe_time()
 
@@ -3040,6 +3041,8 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                             gpt_token_source,
                             gpt_token_pool_id,
                             user_id,
+                            None,
+                            None,
                             (
                                 {
                                     "browser_recording_manifest_path": str(
@@ -3066,6 +3069,8 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
 
                     score = progress_result.get("score", 0.0)
                     v_reasoning = progress_result.get("reasoning", "")
+                    if progress_result.get("structured_response") is not None:
+                        latest_structured_response = progress_result["structured_response"]
 
                     await save_browser_action_message(
                         agent_id=agent_id,
@@ -3663,6 +3668,7 @@ Based on this feedback, I need to continue working on the task and address the i
             "browser_url": browser_url,
             "usage_items": usage_items,
             "execution_time_ms": execution_time_ms,
+            "structured_response": latest_structured_response,
         }
 
     except asyncio.CancelledError:

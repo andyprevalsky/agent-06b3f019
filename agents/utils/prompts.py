@@ -58,12 +58,15 @@ between separate calls. Do NOT split a stateful flow across multiple calls.
 """
 
 CONTEXT_POINTERS_RULE = """
-Messages and tool results in your context include "Reference: @ref:message:<id>" pointers.
-Use them instead of rewriting:
-- Prefer @ref:message: pointers in tool arguments and goal strings over rewriting content.
-- Do NOT paraphrase referenced content; the pointer preserves the original exactly.
-- Use @ref:message:<id>[start="prefix"|end="suffix"] to reference a substring.
-- Pointers are resolved automatically before each LLM call.
+Messages and tool results may include `Reference: @ref:message:<id>` pointers.
+
+`@ref:message` pointers are text-only context references:
+- They resolve to the referenced message text as a string before an LLM call.
+- Use them only inside string fields, especially spawned-agent `goal` text.
+- They do not resolve to JSON arrays, objects, numbers, booleans, file_pointers, or list items.
+- For list/object fields, provide the concrete JSON shape. String values inside that shape may contain pointers.
+- One pointer is one string value. It is not automatically expanded into multiple list elements.
+- Use `@ref:message:<id>[start="prefix"|end="suffix"]` to reference a substring.
 """
 
 FILE_HANDLING_RULE = """
@@ -197,10 +200,7 @@ Irreversible, external, destructive, and privacy-sensitive actions 100% ARE allo
 
 Context is available to you primarily through spawn_agent(type="explore"), this explore agent's purpose is to acquire factual information. It has grep tools that can search over the web & user messages, web searches, and much much more. MANDATORY: All load-bearing information must be grounded by being retrieved from an explore agent or because it came from a user.
 
-User messages and tool results have this suffix attached - "Reference: @ref:message:<id>".
-They should be treated as information pointers so that you don't have to rewrite any information you are referencing (to avoid hallucinations).
-
-Use them in 'goal' strings you pass when creating spawned agents instead of rewriting or summarizing information. Use @ref:message:<id>[start="prefix"|end="suffix"] to reference a substring. These pointers will be automatically resolved to the information they point to before each LLM call.
+{CONTEXT_POINTERS_RULE.strip()}
 
 Your harness splits up your work into 3 phases, a PLAN phase, a DECOMPOSITION phase, and an EXECUTE phase. You will spawn in at either PLAN or EXECUTE and aren't guaranteed to have been through a PLAN phase before you spawn into the EXECUTE phase. The PLAN phase is the only place you can directly request user guidance, and you have access to extra compute in order to create an extra precise task decomposition plan via the DECOMPOSITION. Once you are in the EXECUTE phase you will continue running until completing the task at hand by passing the grader. You may not reward hack, fabricate output, or stop running until the task is verifiably completed.
 """
@@ -543,8 +543,6 @@ The plan you emit is executed by a DAG runner. You do not call these tools direc
 
 # Context Pointers
 
-When decomposing tasks, embed @ref:message: pointers in sub-task goals rather than
-summarizing the referenced data. This prevents information degradation across the agent network.
 {CONTEXT_POINTERS_RULE.strip()}
 
 ## Output Field Descriptions

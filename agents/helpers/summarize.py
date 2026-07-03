@@ -1,5 +1,7 @@
 """Tool for compressing agent context and generating completion summaries."""
 
+import json
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -36,14 +38,81 @@ class WebFetchHaikuResponse(BaseModel):
         ),
     )
 
-# Number of trailing TOOL/ASSISTANT messages kept verbatim in head/tail-protected
-# compaction. Matches Hermes `trajectory_compressor.py:482-528`.
+# Minimum number of recent TOOL/ASSISTANT/USER messages kept verbatim in
+# head/tail-protected compaction. The primary boundary is token-budget based,
+# following OpenClaw's `keepRecentTokens` and Hermes' `_find_tail_cut_by_tokens`.
 HEAD_TAIL_PROTECTED_TURNS = 4
+KEEP_RECENT_TOKENS = 20_000
 
 # Threshold below which we skip compaction entirely — context is already small.
 MIN_CONTEXT_LEN_FOR_COMPACTION = HEAD_TAIL_PROTECTED_TURNS + 2
 
 COMPACTION_SUMMARY_PREFIX = "[CONTEXT SUMMARY]:"
+
+# Serializer limits are intentionally per-field so one giant tool payload cannot
+# erase other facts the compactor needs to see.
+SUMMARY_MESSAGE_CHAR_BUDGET = 7_500
+SUMMARY_FIELD_CHAR_BUDGET = 5_000
+SUMMARY_TOOL_ARGS_CHAR_BUDGET = 2_000
+
+_SECRET_PATTERNS = [
+    re.compile(r"(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|password|secret)\s*[:=]\s*([^\s,;]+)"),
+    re.compile(r"(?i)(bearer\s+)[a-z0-9._~+/=-]{12,}"),
+]
+
+
+NO_TOOLS_PREAMBLE = """CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
+
+- Do NOT use Read, Bash, Grep, Glob, Edit, Write, or ANY other tool.
+- You already have all the context you need in the conversation below.
+- Tool calls will be REJECTED and will waste your only turn — you will fail the task.
+- Your entire response must be plain text: an <analysis> block followed by a <summary> block.
+
+"""
+
+DETAILED_ANALYSIS_INSTRUCTION_PARTIAL = """Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts and ensure you've covered all necessary points. In your analysis process:
+
+1. Analyze the recent messages chronologically. For each section thoroughly identify:
+   - The user's explicit requests and intents
+   - Your approach to addressing the user's requests
+   - Key decisions, technical concepts and code patterns
+   - Specific details like:
+     - file names
+     - full code snippets
+     - function signatures
+     - file edits
+   - Errors that you ran into and how you fixed them
+   - Pay special attention to specific user feedback that you received, especially if the user told you to do something differently.
+2. Double-check for technical accuracy and completeness, addressing each required element thoroughly."""
+
+PARTIAL_COMPACT_PROMPT = f"""Your task is to create a detailed summary of the RECENT portion of the conversation — the messages that follow earlier retained context. The earlier messages are being kept intact and do NOT need to be summarized. Focus your summary on what was discussed, learned, and accomplished in the recent messages only.
+
+{DETAILED_ANALYSIS_INSTRUCTION_PARTIAL}
+
+Your summary should include the following sections:
+
+1. Primary Request and Intent: Capture the user's explicit requests and intents from the recent messages
+2. Key Technical Concepts: List important technical concepts, technologies, and frameworks discussed recently.
+3. Files and Code Sections: Enumerate specific files and code sections examined, modified, or created. Include full code snippets where applicable and include a summary of why this file read or edit is important.
+4. Errors and fixes: List errors encountered and how they were fixed.
+5. Problem Solving: Document problems solved and any ongoing troubleshooting efforts.
+6. All user messages: List ALL user messages from the recent portion that are not tool results.
+7. Pending Tasks: Outline any pending tasks from the recent messages.
+8. Current Work: Describe precisely what was being worked on immediately before this summary request.
+9. Optional Next Step: List the next step related to the most recent work. Include direct quotes from the most recent conversation.
+
+Also include these continuity sections from the compaction safeguard contract:
+
+## Pending user asks
+List active user asks that still matter after the retained recent messages.
+
+## Exact identifiers
+Preserve literal values exactly as seen when needed for continuity: IDs, URLs, file paths, ports, hashes, dates, and times.
+
+Please provide your summary based on the RECENT messages only (after the retained earlier context), following this structure and ensuring precision and thoroughness in your response.
+"""
+
+NO_TOOLS_TRAILER = "\nRemember: respond with TEXT ONLY. Do NOT call tools.\n"
 
 # Per-tool summarizer threshold (chars). Hermes parity at web_tools.py:613-682.
 TOOL_SUMMARIZER_CHAR_THRESHOLD = 5_000
@@ -172,52 +241,69 @@ def _build_tool_pair_maps(
     return asst_by_id, tools_by_id
 
 
-def split_head_middle_tail(
+def _redact_sensitive_text(text: str) -> str:
+    redacted = text
+    for pattern in _SECRET_PATTERNS:
+        if pattern.groups >= 2:
+            redacted = pattern.sub(lambda m: f"{m.group(1)}=[REDACTED]", redacted)
+        else:
+            redacted = pattern.sub(lambda m: f"{m.group(1)}[REDACTED]", redacted)
+    return redacted
+
+
+def _truncate_middle(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    head = max(1, int(limit * 0.7))
+    tail = max(1, limit - head)
+    omitted = len(value) - head - tail
+    return f"{value[:head]}\n...[truncated {omitted} chars]...\n{value[-tail:]}"
+
+
+def _json_dumps_safe(value: Any, *, limit: int = SUMMARY_FIELD_CHAR_BUDGET) -> str:
+    try:
+        rendered = json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2, default=str)
+    except Exception:
+        rendered = str(value)
+    return _truncate_middle(_redact_sensitive_text(rendered), limit)
+
+
+def _message_text(msg: Dict[str, Any]) -> str:
+    text = msg.get("text")
+    if text is None:
+        text = msg.get("content", "")
+    if isinstance(text, str):
+        return text
+    return _json_dumps_safe(text)
+
+
+def _estimate_tokens_for_compaction(value: str) -> int:
+    return max(1, int(len(value) / 4 * 1.4))
+
+
+def _message_summary_weight(msg: Dict[str, Any]) -> int:
+    meta = msg.get("metadata") or {}
+    rendered_parts = [_message_text(msg)]
+    if meta.get("structured_response") is not None:
+        rendered_parts.append(_json_dumps_safe(meta.get("structured_response")))
+    if meta.get("tool_calls"):
+        rendered_parts.append(_json_dumps_safe(meta.get("tool_calls")))
+    if meta.get("attachments"):
+        rendered_parts.append(_json_dumps_safe(meta.get("attachments")))
+    if meta.get("file_pointer") or msg.get("file_pointer"):
+        rendered_parts.append(_json_dumps_safe(meta.get("file_pointer") or msg.get("file_pointer")))
+    return _estimate_tokens_for_compaction("\n".join(rendered_parts))
+
+
+def _expand_tool_pairs(
     context: List[Dict[str, Any]],
-    n_tail: int = HEAD_TAIL_PROTECTED_TURNS,
-) -> Optional[Tuple[List[int], List[int], List[int]]]:
-    """Pick (head, middle, tail) message indices for head/tail-protected compaction.
-
-    Head: first SYSTEM message (if any) + first USER message (the goal).
-    Tail: last `n_tail` messages of role TOOL/ASSISTANT/USER, expanded to
-          preserve every ASSISTANT tool_use ↔ TOOL tool_result pair.
-    Middle: everything else.
-
-    Returns None when the context is already small enough that compaction
-    would be pointless.
-    """
-    if len(context) < MIN_CONTEXT_LEN_FOR_COMPACTION:
-        return None
-
-    head_indices: List[int] = []
-    seen_first_user = False
-    for i, msg in enumerate(context):
-        role = msg.get("role")
-        if role == "SYSTEM" and not head_indices:
-            head_indices.append(i)
-        elif role == "USER" and not seen_first_user:
-            head_indices.append(i)
-            seen_first_user = True
-            break
-
-    head_set = set(head_indices)
-
-    tail_indices: set[int] = set()
-    count = 0
-    for i in range(len(context) - 1, -1, -1):
-        if i in head_set:
-            break
-        role = context[i].get("role")
-        if role in ("USER", "ASSISTANT", "TOOL"):
-            tail_indices.add(i)
-            count += 1
-            if count >= n_tail:
-                break
-
+    tail_indices: set[int],
+    head_set: set[int],
+) -> set[int]:
     asst_by_id, tools_by_id = _build_tool_pair_maps(context)
 
-    # Expand tail until every tool_use ↔ tool_result pair is fully inside
-    # head ∪ tail (no orphans crossing the summary boundary).
+    # Expand tail until every tool_use <-> tool_result pair is fully inside
+    # head union tail (no orphans crossing the summary boundary).
     changed = True
     while changed:
         changed = False
@@ -241,6 +327,68 @@ def split_head_middle_tail(
                         if t_idx not in tail_indices and t_idx not in head_set:
                             tail_indices.add(t_idx)
                             changed = True
+    return tail_indices
+
+
+def split_head_middle_tail(
+    context: List[Dict[str, Any]],
+    n_tail: int = HEAD_TAIL_PROTECTED_TURNS,
+    keep_recent_tokens: Optional[int] = None,
+) -> Optional[Tuple[List[int], List[int], List[int]]]:
+    """Pick (head, middle, tail) message indices for head/tail-protected compaction.
+
+    Head: first SYSTEM message (if any) + first USER message (the goal).
+    Tail: recent TOOL/ASSISTANT/USER messages within a token budget, expanded
+          to preserve every ASSISTANT tool_use <-> TOOL tool_result pair.
+    Middle: everything else.
+
+    Returns None when the context is already small enough that compaction
+    would be pointless.
+    """
+    if len(context) < MIN_CONTEXT_LEN_FOR_COMPACTION:
+        return None
+
+    head_indices: List[int] = []
+    seen_first_user = False
+    for i, msg in enumerate(context):
+        role = msg.get("role")
+        if role == "SYSTEM" and not head_indices:
+            head_indices.append(i)
+        elif role == "USER" and not seen_first_user:
+            head_indices.append(i)
+            seen_first_user = True
+            break
+
+    head_set = set(head_indices)
+
+    if keep_recent_tokens is None:
+        keep_recent_tokens = KEEP_RECENT_TOKENS
+
+    tail_indices: set[int] = set()
+    count = 0
+    token_count = 0
+    for i in range(len(context) - 1, -1, -1):
+        if i in head_set:
+            break
+        role = context[i].get("role")
+        if role in ("USER", "ASSISTANT", "TOOL"):
+            token_count += _message_summary_weight(context[i])
+            tail_indices.add(i)
+            count += 1
+            if count >= n_tail and token_count >= keep_recent_tokens:
+                break
+
+    # Keep the latest user/assistant turns verbatim when possible. That mirrors
+    # Hermes' guard against losing the active ask at the compaction boundary.
+    for target_role in ("USER", "ASSISTANT"):
+        for i in range(len(context) - 1, -1, -1):
+            if i in head_set:
+                break
+            if context[i].get("role") == target_role:
+                tail_indices.add(i)
+                break
+
+    tail_indices = _expand_tool_pairs(context, tail_indices, head_set)
 
     middle_indices = [i for i in range(len(context)) if i not in head_set and i not in tail_indices]
     if not middle_indices:
@@ -249,20 +397,79 @@ def split_head_middle_tail(
     return head_indices, middle_indices, sorted(tail_indices)
 
 
+def _format_tool_call_for_prompt(tool_call: Dict[str, Any]) -> str:
+    call_copy = dict(tool_call)
+    args = call_copy.get("arguments")
+    if args is None:
+        args = {k: v for k, v in call_copy.items() if k not in {"tool", "tool_call_id", "id", "name"}}
+    return _json_dumps_safe(
+        {
+            "tool": call_copy.get("tool") or call_copy.get("name"),
+            "tool_call_id": call_copy.get("tool_call_id") or call_copy.get("id"),
+            "arguments": args,
+        },
+        limit=SUMMARY_TOOL_ARGS_CHAR_BUDGET,
+    )
+
+
+def _format_file_metadata_for_prompt(msg: Dict[str, Any], meta: Dict[str, Any]) -> List[str]:
+    lines: List[str] = []
+    file_pointer = meta.get("file_pointer") or msg.get("file_pointer")
+    if file_pointer:
+        lines.append(f"file_pointer: {_json_dumps_safe(file_pointer, limit=SUMMARY_TOOL_ARGS_CHAR_BUDGET)}")
+    attachments = meta.get("attachments") or msg.get("attachments")
+    if attachments:
+        lines.append(f"attachments: {_json_dumps_safe(attachments, limit=SUMMARY_TOOL_ARGS_CHAR_BUDGET)}")
+    return lines
+
+
 def _format_middle_for_prompt(context: List[Dict[str, Any]], middle_indices: List[int]) -> str:
-    """Render middle messages as plain text for the summarizer LLM."""
+    """Render middle messages with model-relevant text and metadata.
+
+    The compactor is the only reader of this representation. Human UI can show
+    formatted chips, but the next LLM turn depends on structured_response and
+    tool-call arguments being preserved in this summary input.
+    """
     parts: List[str] = []
     for i in middle_indices:
         msg = context[i]
         role = msg.get("role", "unknown")
-        text = msg.get("text", "")
         meta = msg.get("metadata") or {}
         tool_name = meta.get("toolName")
-        prefix = f"[{role}]"
+        prefix = f"message_index={i} role={role}"
         if tool_name:
-            prefix += f"[{tool_name}]"
-        parts.append(f"{prefix} {text}")
-    return "\n".join(parts)
+            prefix += f" tool={tool_name}"
+        if meta.get("toolStatus"):
+            prefix += f" status={meta.get('toolStatus')}"
+        if meta.get("toolCallId"):
+            prefix += f" tool_call_id={meta.get('toolCallId')}"
+        if meta.get("title"):
+            prefix += f" title={meta.get('title')}"
+
+        lines = [f"--- {prefix} ---"]
+        text = _truncate_middle(_redact_sensitive_text(_message_text(msg)), SUMMARY_FIELD_CHAR_BUDGET)
+        if text:
+            lines.append(f"text:\n{text}")
+
+        if role == "ASSISTANT" and meta.get("tool_calls"):
+            lines.append("assistant_tool_calls:")
+            for tool_call in meta.get("tool_calls") or []:
+                lines.append(_format_tool_call_for_prompt(tool_call))
+
+        if meta.get("structured_response") is not None:
+            lines.append("structured_response:")
+            lines.append(_json_dumps_safe(meta.get("structured_response"), limit=SUMMARY_FIELD_CHAR_BUDGET))
+
+        lines.extend(_format_file_metadata_for_prompt(msg, meta))
+        parts.append(_truncate_middle("\n".join(lines), SUMMARY_MESSAGE_CHAR_BUDGET))
+    return "\n\n".join(parts)
+
+
+def _strip_compact_analysis(summary: str) -> str:
+    match = re.search(r"<summary>(.*?)</summary>", summary, flags=re.IGNORECASE | re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return re.sub(r"<analysis>.*?</analysis>", "", summary, flags=re.IGNORECASE | re.DOTALL).strip()
 
 
 @activity.defn
@@ -280,14 +487,16 @@ async def compress_context(
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
+    compute_token_lineage_key: Optional[str] = None,
+    compute_token_fast_cache_affinity_key: Optional[str] = None,
 ) -> Dict:
     """Head/tail-protected context compaction.
 
-    Keeps first SYSTEM + first USER + last 4 turns verbatim. Replaces the
-    middle range with one synthetic USER turn containing an LLM-generated
-    summary. ASSISTANT.tool_calls and TOOL.toolCallId pairs that straddle
-    the boundary are pulled into the tail so the Anthropic API never sees
-    an orphan tool_use.
+    Keeps first SYSTEM + first USER + recent tail turns verbatim, selected by
+    token budget. Replaces the middle range with one synthetic USER turn
+    containing an LLM-generated summary. ASSISTANT.tool_calls and TOOL.toolCallId
+    pairs that straddle the boundary are pulled into the tail so the Anthropic
+    API never sees an orphan tool_use.
 
     Returns:
         Dict with:
@@ -310,27 +519,13 @@ async def compress_context(
 
         middle_text = _format_middle_for_prompt(context, middle_indices)
 
-        prompt = f"""You are summarizing a portion of an autonomous agent's execution history.
-Write the summary from a neutral perspective describing what the agent did.
-
-MUST PRESERVE:
-1. Per-source evidence: every URL fetched, every claim cited with its source,
-   key quoted snippets, file names, identifiers.
-2. Active tasks and their current status (in-progress, blocked, pending).
-3. The last user/parent request and what the agent was doing about it.
-4. Decisions made and their rationale.
-5. Open questions and constraints.
-
-PRIORITIZE recent context over older history. The agent needs to know what
-it was doing, not just what was discussed.
-
-Preserve all opaque identifiers exactly as written (no shortening or
-reconstruction), including UUIDs, hashes, IDs, URLs, and file names.
+        prompt = f"""{NO_TOOLS_PREAMBLE}{PARTIAL_COMPACT_PROMPT}
 
 TURNS TO SUMMARIZE:
 {middle_text}
 
-Write only the summary, starting with "{COMPACTION_SUMMARY_PREFIX}" prefix."""
+Write only the summary, starting with "{COMPACTION_SUMMARY_PREFIX}" prefix.
+{NO_TOOLS_TRAILER}"""
 
         result = await call_llm(
             messages=[{"role": "user", "content": prompt}],
@@ -346,13 +541,15 @@ Write only the summary, starting with "{COMPACTION_SUMMARY_PREFIX}" prefix."""
             gpt_token_source=gpt_token_source,
             gpt_token_pool_id=gpt_token_pool_id,
             gpt_token_user_id=gpt_token_user_id,
+            compute_token_lineage_key=compute_token_lineage_key,
+            compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
             skip_cache_write=True,
             call_site="context_compression",
             agent_id=agent_id,
             user_id=claude_token_user_id or gpt_token_user_id,
         )
 
-        summary = (result.get("content") or "").strip()
+        summary = _strip_compact_analysis((result.get("content") or "").strip())
         usage = result.get("usage", {})
 
         if not summary:
@@ -671,6 +868,8 @@ async def generate_completion_summary(
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
+    compute_token_lineage_key: Optional[str] = None,
+    compute_token_fast_cache_affinity_key: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
     fast_mode_step: int = 0,
 ) -> Dict[str, Any]:
@@ -765,6 +964,8 @@ Just write plain text describing what was done."""
             gpt_token_source=gpt_token_source,
             gpt_token_pool_id=gpt_token_pool_id,
             gpt_token_user_id=gpt_token_user_id,
+            compute_token_lineage_key=compute_token_lineage_key,
+            compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
             skip_cache_write=True,  # One-shot call — no cache reuse
             call_site="completion_summary",
             agent_id=agent_id,

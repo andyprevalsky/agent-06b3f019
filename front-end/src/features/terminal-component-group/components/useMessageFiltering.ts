@@ -3,6 +3,11 @@
  * and sub-agent-tree merge. Split out so behavioral hooks (animation buffer,
  * thinking visibility, auto-scroll) can live in useMessageList.ts while the
  * data pipeline lives here.
+ *
+ * SUB-AGENT MERGE STATES:
+ * [RAW SPAWN ROWS] -> group by for_each/base tool call -> [ONE TREE PER CALL]
+ * [FOR_EACH TERMINAL] -> infer child ids from child rows -> [AGGREGATE TREE]
+ * [NO TERMINAL YET] -> keep live child tree rows visible
  */
 import { useMemo, useRef } from 'react';
 import {
@@ -123,7 +128,13 @@ export function useFilteredStreaming({
   }, [target, streamingBubbles, streamingPlan, streamingAttention, streamingTools]);
 }
 
-// ─── Merge sub-agent tree messages by busId ──────────────────────────────
+// ─── Merge sub-agent tree messages by for_each/base tool call ────────────
+
+function baseToolCallId(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  const colonIndex = value.indexOf(':');
+  return colonIndex === -1 ? value : value.slice(0, colonIndex);
+}
 
 function isSpawnTree(m: Message): boolean {
   return (
@@ -135,67 +146,146 @@ function isSpawnTree(m: Message): boolean {
   );
 }
 
+function isForEachTerminal(m: Message): boolean {
+  return (
+    m.metadata?.toolName === 'spawn_general_purpose_agent_for_each' &&
+    (m.metadata?.toolStatus === 'FINISHED' || m.metadata?.toolStatus === 'ERROR') &&
+    !Array.isArray(m.metadata?.subAgentIds)
+  );
+}
+
 interface SpawnGroup {
   firstIndex: number;
   ids: string[];
   firstMsg: Message;
 }
 
+interface ForEachTerminalGroup {
+  messageIndex: number;
+  message: Message;
+  ids: string[];
+  busId?: string;
+}
+
+function collectForEachTerminalGroups(messages: Message[]): Map<string, ForEachTerminalGroup> {
+  const groups = new Map<string, ForEachTerminalGroup>();
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (!isForEachTerminal(msg)) continue;
+    const callId = baseToolCallId(msg.metadata?.toolCallId);
+    if (!callId) continue;
+    groups.set(callId, { messageIndex: i, message: msg, ids: [] });
+  }
+
+  for (const msg of messages) {
+    if (!isSpawnTree(msg)) continue;
+    const childBaseCallId = baseToolCallId(msg.metadata?.toolCallId);
+    if (!childBaseCallId) continue;
+    const terminal = groups.get(childBaseCallId);
+    if (!terminal) continue;
+    terminal.busId = (msg.metadata?.busId as string | undefined) ?? terminal.busId;
+    for (const id of msg.metadata!.subAgentIds as string[]) {
+      if (!terminal.ids.includes(id)) terminal.ids.push(id);
+    }
+  }
+
+  return groups;
+}
+
+function spawnGroupKey(msg: Message): string {
+  return msg.metadata!.busId as string;
+}
+
 function groupSpawnTrees(messages: Message[]): {
-  groupsByBus: Map<string, SpawnGroup>;
+  groupsByKey: Map<string, SpawnGroup>;
   skipIndices: Set<number>;
 } {
-  const groupsByBus = new Map<string, SpawnGroup>();
+  const terminalGroups = collectForEachTerminalGroups(messages);
+  const groupsByKey = new Map<string, SpawnGroup>();
   const skipIndices = new Set<number>();
+
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
     if (!isSpawnTree(msg)) continue;
-    const busId = msg.metadata!.busId as string;
-    const group = groupsByBus.get(busId);
+    const childBaseCallId = baseToolCallId(msg.metadata?.toolCallId);
+    const key = spawnGroupKey(msg);
+    if (childBaseCallId !== null && terminalGroups.has(childBaseCallId)) {
+      skipIndices.add(i);
+      continue;
+    }
+
+    const group = groupsByKey.get(key);
     if (group) {
       group.ids.push(...(msg.metadata!.subAgentIds as string[]));
       skipIndices.add(i);
     } else {
-      groupsByBus.set(busId, {
+      groupsByKey.set(key, {
         firstIndex: i,
         ids: [...(msg.metadata!.subAgentIds as string[])],
         firstMsg: msg,
       });
     }
   }
-  return { groupsByBus, skipIndices };
+  return { groupsByKey, skipIndices };
+}
+
+function mergeForEachTerminalMessage(
+  msg: Message,
+  terminalGroups: Map<string, ForEachTerminalGroup>,
+): Message {
+  const callId = baseToolCallId(msg.metadata?.toolCallId);
+  const terminal = callId ? terminalGroups.get(callId) : undefined;
+  if (!terminal?.busId || terminal.ids.length === 0) return msg;
+  return {
+    ...msg,
+    metadata: {
+      ...msg.metadata,
+      busId: terminal.busId,
+      subAgentIds: terminal.ids,
+      forEachAggregate: true,
+    },
+  };
 }
 
 function buildMergedMessages(
   messages: Message[],
-  groupsByBus: Map<string, SpawnGroup>,
+  groupsByKey: Map<string, SpawnGroup>,
   skipIndices: Set<number>,
   prevCache: Map<string, Message>,
 ): { result: Message[]; newCache: Map<string, Message> } {
   const newCache = new Map<string, Message>();
   const result: Message[] = [];
+  const terminalGroups = collectForEachTerminalGroups(messages);
 
   for (let i = 0; i < messages.length; i++) {
     if (skipIndices.has(i)) continue;
-    const msg = messages[i];
+    let msg = messages[i];
+
+    if (isForEachTerminal(msg)) {
+      msg = mergeForEachTerminalMessage(msg, terminalGroups);
+    }
 
     if (!isSpawnTree(msg)) {
       result.push(msg);
       continue;
     }
 
-    const busId = msg.metadata!.busId as string;
-    const group = groupsByBus.get(busId)!;
+    const key = spawnGroupKey(msg);
+    const group = groupsByKey.get(key) ?? {
+      firstIndex: i,
+      ids: msg.metadata!.subAgentIds as string[],
+      firstMsg: msg,
+    };
     const idsKey = group.ids.join(',');
 
-    const cached = prevCache.get(busId);
+    const cached = prevCache.get(key);
     if (cached && (cached.metadata?.subAgentIds as string[])?.join(',') === idsKey) {
       result.push(cached);
-      newCache.set(busId, cached);
+      newCache.set(key, cached);
     } else {
       const merged = { ...msg, metadata: { ...msg.metadata, subAgentIds: group.ids } };
       result.push(merged);
-      newCache.set(busId, merged);
+      newCache.set(key, merged);
     }
   }
 
@@ -206,14 +296,16 @@ export function useSubAgentTreeMerge(messages: Message[]): Message[] {
   const prevMergedRef = useRef<Map<string, Message>>(new Map());
 
   return useMemo(() => {
-    const { groupsByBus, skipIndices } = groupSpawnTrees(messages);
-    const { result, newCache } = buildMergedMessages(
-      messages,
-      groupsByBus,
-      skipIndices,
-      prevMergedRef.current,
-    );
+    const { result, newCache } = mergeSubAgentTreeMessages(messages, prevMergedRef.current);
     prevMergedRef.current = newCache;
     return result;
   }, [messages]);
+}
+
+export function mergeSubAgentTreeMessages(
+  messages: Message[],
+  prevCache: Map<string, Message> = new Map(),
+): { result: Message[]; newCache: Map<string, Message> } {
+  const { groupsByKey, skipIndices } = groupSpawnTrees(messages);
+  return buildMergedMessages(messages, groupsByKey, skipIndices, prevCache);
 }

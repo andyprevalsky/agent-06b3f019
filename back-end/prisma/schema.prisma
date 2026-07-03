@@ -466,6 +466,34 @@ model Integration {
   @@index([poolingEnabled, rateLimitedUntil])
 }
 
+model ComputeTokenLineageLease {
+  lineageKey    String    @id
+  tokenType     String
+  tokenSource   String
+  tokenIdentity String
+  userId        String?
+  agentId       String?
+  rootAgentId   String?
+  assignedAt    DateTime  @default(now())
+  lastUsedAt    DateTime  @default(now())
+  releasedAt    DateTime?
+
+  @@index([tokenType, tokenSource, tokenIdentity, releasedAt, lastUsedAt])
+  @@index([agentId])
+  @@index([rootAgentId])
+}
+
+model ComputeTokenFastCacheAffinity {
+  affinityKey String   @id
+  tokenType   String
+  userId      String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([tokenType])
+  @@index([userId])
+}
+
 model UserDataDocument {
   id              String                 @id @default(uuid())
   userId          String

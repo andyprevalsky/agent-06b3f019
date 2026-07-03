@@ -129,7 +129,7 @@ def _build_test_context(n_pairs: int = 6):
 
 
 async def test_compress_context_happy_head_tail_protected():
-    """compress_context preserves first SYSTEM + first USER + last 4 turns."""
+    """compress_context preserves first SYSTEM + first USER + recent paired tail."""
     from helpers import summarize
     import helpers.llm as llm_mod
 
@@ -139,9 +139,10 @@ async def test_compress_context_happy_head_tail_protected():
     ctx = _build_test_context(n_pairs=6)
     with patch("temporalio.activity.heartbeat"):
         with patch.object(llm_mod, "call_llm", fake_llm):
-            out = await summarize.compress_context(
-                context=ctx, iteration_count=12, model="test-model",
-            )
+            with patch.object(summarize, "KEEP_RECENT_TOKENS", 1):
+                out = await summarize.compress_context(
+                    context=ctx, iteration_count=12, model="test-model",
+                )
 
     assert out["success"] is True
     new_ctx = out["context"]
@@ -171,9 +172,10 @@ async def test_compress_context_no_orphan_tool_use():
 
     with patch("temporalio.activity.heartbeat"):
         with patch.object(llm_mod, "call_llm", fake_llm):
-            out = await summarize.compress_context(
-                context=ctx, iteration_count=10, model="m",
-            )
+            with patch.object(summarize, "KEEP_RECENT_TOKENS", 1):
+                out = await summarize.compress_context(
+                    context=ctx, iteration_count=10, model="m",
+                )
 
     new_ctx = out["context"]
     # Every TOOL.toolCallId in the new context must have a matching
@@ -227,17 +229,18 @@ async def test_compress_context_forwards_compute_auth():
 
     with patch("temporalio.activity.heartbeat"):
         with patch.object(llm_mod, "call_llm", fake_llm):
-            await summarize.compress_context(
-                context=_build_test_context(n_pairs=4),
-                iteration_count=5,
-                model="test-model",
-                gpt_token="gpt-token",
-                gpt_account_id="acct-1",
-                gpt_token_source="user",
-                gpt_token_pool_id="pool-1",
-                gpt_token_user_id="user-1",
-                agent_id="agent-1",
-            )
+            with patch.object(summarize, "KEEP_RECENT_TOKENS", 1):
+                await summarize.compress_context(
+                    context=_build_test_context(n_pairs=4),
+                    iteration_count=5,
+                    model="test-model",
+                    gpt_token="gpt-token",
+                    gpt_account_id="acct-1",
+                    gpt_token_source="user",
+                    gpt_token_pool_id="pool-1",
+                    gpt_token_user_id="user-1",
+                    agent_id="agent-1",
+                )
 
     assert observed_kwargs[0]["gpt_token"] == "gpt-token"
     assert observed_kwargs[0]["gpt_account_id"] == "acct-1"
@@ -258,11 +261,12 @@ async def test_compress_context_on_llm_error_returns_failure():
 
     with patch("temporalio.activity.heartbeat"):
         with patch.object(llm_mod, "call_llm", boom):
-            out = await summarize.compress_context(
-                context=_build_test_context(n_pairs=5),
-                iteration_count=10,
-                model="m",
-            )
+            with patch.object(summarize, "KEEP_RECENT_TOKENS", 1):
+                out = await summarize.compress_context(
+                    context=_build_test_context(n_pairs=5),
+                    iteration_count=10,
+                    model="m",
+                )
     assert out["success"] is False
     assert out["context"] is None
     assert "LLM down" in out.get("error", "")
@@ -278,13 +282,125 @@ async def test_compress_context_empty_summary_is_failure():
 
     with patch("temporalio.activity.heartbeat"):
         with patch.object(llm_mod, "call_llm", fake_llm):
-            out = await summarize.compress_context(
-                context=_build_test_context(n_pairs=5),
-                iteration_count=10,
-                model="m",
-            )
+            with patch.object(summarize, "KEEP_RECENT_TOKENS", 1):
+                out = await summarize.compress_context(
+                    context=_build_test_context(n_pairs=5),
+                    iteration_count=10,
+                    model="m",
+                )
     assert out["success"] is False
     assert out["context"] is None
+
+
+async def test_compress_context_prompt_includes_structured_tool_metadata():
+    """Middle serialization includes structured_response, not just tool text."""
+    from helpers import summarize
+    import helpers.llm as llm_mod
+
+    prompts = []
+
+    async def fake_llm(messages, **kwargs):
+        prompts.append(messages[0]["content"])
+        return {"content": "Structured data preserved.", "usage": {"total_tokens": 10}}
+
+    ctx = [
+        {"role": "SYSTEM", "text": "system prompt", "metadata": {}},
+        {"role": "USER", "text": "original goal", "metadata": {}},
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "tool": "spawn_general_purpose_agent_for_each",
+                        "tool_call_id": "tc-1",
+                        "items": ["Alice", "Bob"],
+                    }
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "Sub Agents completed successfully.",
+            "metadata": {
+                "toolCallId": "tc-1",
+                "toolName": "spawn_general_purpose_agent_for_each",
+                "toolStatus": "FINISHED",
+                "title": "Sub Agents completed successfully",
+                "structured_response": {
+                    "items": [
+                        {"name": "Alice", "answer": "alpha"},
+                        {"name": "Bob", "answer": "beta"},
+                    ]
+                },
+            },
+        },
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "metadata": {"tool_calls": [{"tool": "web_search", "tool_call_id": "tc-2", "query": "recent filler"}]},
+        },
+        {
+            "role": "TOOL",
+            "text": "recent filler result",
+            "metadata": {"toolCallId": "tc-2", "toolName": "web_search", "toolStatus": "FINISHED"},
+        },
+        {"role": "USER", "text": "latest ask", "metadata": {}},
+        {"role": "ASSISTANT", "text": "working on it", "metadata": {}},
+        {"role": "TOOL", "text": "recent", "metadata": {"toolName": "wait_for", "toolStatus": "FINISHED"}},
+    ]
+
+    with patch("temporalio.activity.heartbeat"):
+        with patch.object(llm_mod, "call_llm", fake_llm):
+            with patch.object(summarize, "KEEP_RECENT_TOKENS", 1):
+                out = await summarize.compress_context(context=ctx, iteration_count=7, model="m")
+
+    assert out["success"] is True
+    assert prompts
+    assert "structured_response" in prompts[0]
+    assert "Alice" in prompts[0]
+    assert "spawn_general_purpose_agent_for_each" in prompts[0]
+
+
+async def test_split_head_middle_tail_uses_recent_token_budget():
+    """Recent tail grows until the token budget is reached, then preserves pairs."""
+    from helpers import summarize
+
+    ctx = _build_test_context(n_pairs=8)
+    split = summarize.split_head_middle_tail(ctx, keep_recent_tokens=20)
+
+    assert split is not None
+    head, middle, tail = split
+    assert head == [0, 1]
+    assert middle
+    assert len(tail) >= summarize.HEAD_TAIL_PROTECTED_TURNS
+    assert tail[-1] == len(ctx) - 1
+
+
+async def test_compress_context_strips_analysis_block():
+    """Claude-style scratch analysis should not be stored in agent context."""
+    from helpers import summarize
+    import helpers.llm as llm_mod
+
+    async def fake_llm(messages, **kwargs):
+        return {
+            "content": "<analysis>scratch</analysis><summary>Final compact summary.</summary>",
+            "usage": {"total_tokens": 10},
+        }
+
+    with patch("temporalio.activity.heartbeat"):
+        with patch.object(llm_mod, "call_llm", fake_llm):
+            with patch.object(summarize, "KEEP_RECENT_TOKENS", 1):
+                out = await summarize.compress_context(
+                    context=_build_test_context(n_pairs=5),
+                    iteration_count=10,
+                    model="m",
+                )
+
+    assert out["success"] is True
+    summary = out["context"][2]["text"]
+    assert "scratch" not in summary
+    assert "Final compact summary." in summary
 
 
 async def test_summarize_tool_result_below_threshold_unused():
@@ -540,6 +656,12 @@ async def run_all_tests():
     await r.record_async("compress_context_forwards_compute_auth", test_compress_context_forwards_compute_auth)
     await r.record_async("compress_context_on_llm_error_returns_failure", test_compress_context_on_llm_error_returns_failure)
     await r.record_async("compress_context_empty_summary_is_failure", test_compress_context_empty_summary_is_failure)
+    await r.record_async(
+        "compress_context_prompt_includes_structured_tool_metadata",
+        test_compress_context_prompt_includes_structured_tool_metadata,
+    )
+    await r.record_async("split_head_middle_tail_uses_recent_token_budget", test_split_head_middle_tail_uses_recent_token_budget)
+    await r.record_async("compress_context_strips_analysis_block", test_compress_context_strips_analysis_block)
     await r.record_async("summarize_tool_result_below_threshold_unused", test_summarize_tool_result_below_threshold_unused)
     await r.record_async("summarize_tool_result_happy", test_summarize_tool_result_happy)
     await r.record_async("summarize_tool_result_llm_failure_truncates", test_summarize_tool_result_llm_failure_truncates)

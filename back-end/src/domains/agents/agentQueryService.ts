@@ -54,6 +54,10 @@ export async function getAgentTree(busId: string) {
       message_count: agent.messageCount,
       output_schema: agent.responseSchema,
       structured_output: agent.structuredResponse,
+      failure_context:
+        agent.status === 'FAILED' && agent.structuredResponse !== null
+          ? { partial_structured_response: agent.structuredResponse }
+          : undefined,
       tree_cost_cents: agent.treeCostCents,
     })),
   };
@@ -143,6 +147,11 @@ export async function getAgentDetail(agentId: string, userId?: string, since?: D
       created_at: agent.createdAt,
       updated_at: agent.updatedAt,
       write_lock_enabled: agent.writeLockEnabled,
+      structured_output: agent.structuredResponse,
+      failure_context:
+        agent.status === 'FAILED' && agent.structuredResponse !== null
+          ? { partial_structured_response: agent.structuredResponse }
+          : null,
       verifier: agent.verifier
         ? {
             type: agent.verifier.type,

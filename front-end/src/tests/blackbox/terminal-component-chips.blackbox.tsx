@@ -276,7 +276,7 @@ describe('SubAgentTree', () => {
     );
     expect(screen.getByText('Find sock stores')).toBeInTheDocument();
     expect(screen.getByText('$2.50')).toBeInTheDocument();
-    expect(screen.getByText('Delegating tasks')).toBeInTheDocument();
+    expect(screen.getByText('Delegating Sub Agents')).toBeInTheDocument();
   });
 
   it('fires onNavigate when a leaf row is clicked', async () => {
@@ -295,7 +295,7 @@ describe('SubAgentTree', () => {
     renderWithProviders(
       <SubAgentTree busId="bus-1" subAgentIds={['a1']} title="t" onNavigate={vi.fn()} />,
     );
-    expect(screen.getByText('All tasks completed')).toBeInTheDocument();
+    expect(screen.getByText('Sub Agents completed successfully')).toBeInTheDocument();
   });
 
   it('renders failed cluster header when any leaf FAILED', () => {
@@ -318,8 +318,7 @@ describe('SubAgentTree', () => {
     renderWithProviders(
       <SubAgentTree busId="bus-1" subAgentIds={['a1']} title="t" onNavigate={vi.fn()} />,
     );
-    expect(screen.getByText('Some tasks failed')).toBeInTheDocument();
-    expect(screen.getByText('failed')).toBeInTheDocument();
+    expect(screen.getByText('All Sub Agents failed')).toBeInTheDocument();
   });
 
   it('shows output chip + status line with tool icon for agent using a tool', () => {
@@ -449,6 +448,6 @@ describe('SubAgentTree', () => {
       <SubAgentTree busId="bus-1" subAgentIds={['a1']} title="t" onNavigate={vi.fn()} />,
     );
     expect(screen.getByText('Did part')).toBeInTheDocument();
-    expect(screen.getByText('Some tasks failed')).toBeInTheDocument();
+    expect(screen.getByText('All Sub Agents failed')).toBeInTheDocument();
   });
 });

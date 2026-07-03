@@ -327,6 +327,66 @@ describe('derivations.ts', () => {
       ] as any;
       expect(computeActiveBrowserPanels(msgs)).toEqual([{ taskId: 'active', browserUrl: 'y' }]);
     });
+    it('excludes finished browser tasks even when no task_complete action arrives', () => {
+      const msgs: Parameters<typeof computeActiveBrowserPanels>[0] = [
+        {
+          message_id: 'init',
+          timestamp: '2026-01-01T00:00:01.000Z',
+          text: '',
+          role: 'TOOL',
+          metadata: {
+            task_id: 't1',
+            toolName: 'spawn_browser_agent',
+            action_type: 'browser',
+            browser_url: 'x',
+            toolStatus: 'IN_PROGRESS',
+          },
+        },
+        {
+          message_id: 'finished',
+          timestamp: '2026-01-01T00:00:02.000Z',
+          text: '',
+          role: 'TOOL',
+          metadata: {
+            task_id: 't1',
+            toolName: 'spawn_browser_agent',
+            action_type: 'system',
+            toolStatus: 'FINISHED',
+          },
+        },
+      ];
+      expect(computeActiveBrowserPanels(msgs)).toEqual([]);
+    });
+    it('excludes failed browser tasks even when no task_complete action arrives', () => {
+      const msgs: Parameters<typeof computeActiveBrowserPanels>[0] = [
+        {
+          message_id: 'init',
+          timestamp: '2026-01-01T00:00:01.000Z',
+          text: '',
+          role: 'TOOL',
+          metadata: {
+            task_id: 't1',
+            toolName: 'spawn_browser_agent',
+            action_type: 'browser',
+            browser_url: 'x',
+            toolStatus: 'IN_PROGRESS',
+          },
+        },
+        {
+          message_id: 'failed',
+          timestamp: '2026-01-01T00:00:02.000Z',
+          text: '',
+          role: 'TOOL',
+          metadata: {
+            task_id: 't1',
+            toolName: 'spawn_browser_agent',
+            action_type: 'system',
+            toolStatus: 'ERROR',
+          },
+        },
+      ];
+      expect(computeActiveBrowserPanels(msgs)).toEqual([]);
+    });
     it('excludes tasks when parent browser tool pauses before task-scoped cleanup arrives', () => {
       const msgs = [
         {

@@ -7037,6 +7037,75 @@ async def test_manager_finished_tool_event_includes_structured_response_values()
     }
 
 
+async def test_manager_failed_tool_event_includes_structured_response_values():
+    from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
+    from tools.base import MessageStatus
+
+    class _FakeActivityHandle:
+        def done(self):
+            return True
+
+        def cancel(self):
+            raise AssertionError("done activity should not be cancelled")
+
+        def __await__(self):
+            async def _result():
+                return {
+                    "success": False,
+                    "status": "max_iterations",
+                    "message": "best effort only",
+                    "structured_response": {
+                        "selected_black_beanie_url": "https://amazon.com/item",
+                        "added_to_cart": False,
+                    },
+                }
+
+            return _result().__await__()
+
+    workflow_instance = SimpleNamespace(
+        user_id="user-1",
+        agent_id="agent-1",
+        is_paused=False,
+        write_lock_enabled=True,
+        system_name="Rose",
+    )
+    manager = SpawnBrowserAgentManagerV3()
+
+    output_schema = {
+        "fields": [
+            {"name": "selected_black_beanie_url", "type": "str"},
+            {"name": "added_to_cart", "type": "bool"},
+        ]
+    }
+
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.handler.workflow.start_activity",
+            return_value=_FakeActivityHandle(),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.workflow.wait_condition",
+            AsyncMock(return_value=None),
+        ),
+    ):
+        events = []
+        async for event in manager.execute_tool(
+            workflow_instance,
+            {"goal": "Buy socks", "output_schema": output_schema},
+            "tool-1",
+        ):
+            events.append(event)
+
+    failed_event = next(
+        e for e in events if getattr(e, "status", None) == MessageStatus.ERROR
+    )
+    assert failed_event.message == "best effort only"
+    assert failed_event.metadata["structured_response"] == {
+        "selected_black_beanie_url": "https://amazon.com/item",
+        "added_to_cart": False,
+    }
+
+
 async def test_manager_auth_assistance_pauses_and_resumes():
     from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
     from tools.base import MessageStatus
@@ -7897,6 +7966,10 @@ async def run_all_tests():
     await r.record_async(
         "manager_finished_structured_response_values",
         test_manager_finished_tool_event_includes_structured_response_values,
+    )
+    await r.record_async(
+        "manager_failed_structured_response_values",
+        test_manager_failed_tool_event_includes_structured_response_values,
     )
     await r.record_async(
         "manager_auth_assistance_resume",
