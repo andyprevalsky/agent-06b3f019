@@ -146,8 +146,6 @@ class BrowserAgentRecorder:
         self.interval_seconds = max(1 / 30, float(os.getenv("BROWSER_AGENT_RECORDING_INTERVAL_SECONDS", "2")))
         self.render_fps = max(1, int(os.getenv("BROWSER_AGENT_RECORDING_RENDER_FPS", "30")))
         self.max_frames = max(1, int(os.getenv("BROWSER_AGENT_RECORDING_MAX_FRAMES", "900")))
-        self._cdp_session: Any = None
-        self._cdp_capture_failures = 0
 
     def set_cursor(self, x: int, y: int) -> None:
         """Update replay cursor position without forcing a screenshot capture."""
@@ -189,7 +187,6 @@ class BrowserAgentRecorder:
 
     async def start(self) -> None:
         self.frames_dir.mkdir(parents=True, exist_ok=True)
-        await self._init_cdp_capture()
         await self.capture("recording started", action="start", force=True)
         self._loop_task = asyncio.create_task(self._capture_loop())
         logger.info(
@@ -227,43 +224,12 @@ class BrowserAgentRecorder:
         self._last_metadata = next_metadata
         await self.capture(label, action=action, metadata=next_metadata, force=force)
 
-    async def _init_cdp_capture(self) -> None:
-        """Attach a raw CDP session for screenshots.
-
-        Page.captureScreenshot returns immediately from the compositor, while
-        Playwright's page.screenshot waits for fonts/stability and can stall
-        for its full 5s timeout on a freshly attached remote (Steel) page.
-        """
-        try:
-            context = getattr(self.page, "context", None)
-            if context is not None and hasattr(context, "new_cdp_session"):
-                self._cdp_session = await context.new_cdp_session(self.page)
-        except Exception as exc:
-            logger.debug("Recorder CDP capture unavailable; using page.screenshot", error=str(exc))
-            self._cdp_session = None
-
     async def _screenshot_bytes(self, *, allow_slow_fallback: bool) -> bytes:
-        if self._cdp_session is not None:
-            try:
-                result = await asyncio.wait_for(
-                    self._cdp_session.send("Page.captureScreenshot", {"format": "jpeg", "quality": 55}),
-                    timeout=3.0,
-                )
-                self._cdp_capture_failures = 0
-                return base64.b64decode(result["data"])
-            except Exception as exc:
-                self._cdp_capture_failures += 1
-                if self._cdp_capture_failures >= 2:
-                    logger.debug("Recorder CDP capture failing; falling back to page.screenshot", error=str(exc))
-                    self._cdp_session = None
-                if not allow_slow_fallback:
-                    raise
-        elif not allow_slow_fallback:
-            # Idle-loop frames are best-effort: a Playwright screenshot can stall
-            # for seconds waiting on fonts/stability while holding the capture
-            # lock, which then blocks forced (action) captures behind it.
-            raise RuntimeError("Recorder CDP capture unavailable; skipping best-effort frame")
-        return await self.page.screenshot(type="jpeg", quality=55, full_page=False, timeout=2500)
+        # Forced (action) frames get the full budget; best-effort idle frames use
+        # a short timeout so a slow page.screenshot (fonts/stability wait) can't
+        # stall the capture loop and block a later forced frame behind the lock.
+        timeout_ms = 2500 if allow_slow_fallback else 1200
+        return await self.page.screenshot(type="jpeg", quality=55, full_page=False, timeout=timeout_ms)
 
     async def capture(
         self,
@@ -320,14 +286,6 @@ class BrowserAgentRecorder:
                 pass
         await self.capture("recording stopped", action="stop", force=True)
         self._closed = True
-        # Detach the raw CDP session used for screenshots so it doesn't linger
-        # past the recording's lifetime.
-        if self._cdp_session is not None:
-            try:
-                await self._cdp_session.detach()
-            except Exception:
-                pass
-            self._cdp_session = None
         steel_media = await self._download_steel_hls_recording()
         if not self.frames and not steel_media:
             return None
