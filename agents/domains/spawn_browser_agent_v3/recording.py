@@ -224,6 +224,13 @@ class BrowserAgentRecorder:
         self._last_metadata = next_metadata
         await self.capture(label, action=action, metadata=next_metadata, force=force)
 
+    async def _screenshot_bytes(self, *, allow_slow_fallback: bool) -> bytes:
+        # Forced (action) frames get the full budget; best-effort idle frames use
+        # a short timeout so a slow page.screenshot (fonts/stability wait) can't
+        # stall the capture loop and block a later forced frame behind the lock.
+        timeout_ms = 2500 if allow_slow_fallback else 1200
+        return await self.page.screenshot(type="jpeg", quality=55, full_page=False, timeout=timeout_ms)
+
     async def capture(
         self,
         label: str,
@@ -238,7 +245,7 @@ class BrowserAgentRecorder:
             if self._closed or len(self.frames) >= self.max_frames:
                 return
             try:
-                image_bytes = await self.page.screenshot(type="jpeg", quality=55, full_page=False, timeout=5000)
+                image_bytes = await self._screenshot_bytes(allow_slow_fallback=force)
                 self._consecutive_failures = 0
             except Exception as exc:
                 self._consecutive_failures += 1

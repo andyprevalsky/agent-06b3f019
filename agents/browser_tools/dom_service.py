@@ -473,38 +473,26 @@ class DOMService:
             await self._session.start()
             logger.info(f"🌐 Connected to browser via CDP: {self.cdp_url[:50]}...")
 
-            # Hide scrollbars to ensure viewport matches screenshot dimensions (1280x800)
-            # This prevents coordinate mismatch between reported viewport and captured screenshot
-            # which causes Yutori to misclick (viewport reports 1265 with scrollbar, screenshot is 1280)
-            try:
-                page = await self._session.get_current_page()
-                await page.add_style_tag(content="""
-                    ::-webkit-scrollbar { display: none !important; }
-                    html, body {
-                        -ms-overflow-style: none !important;
-                        scrollbar-width: none !important;
-                    }
-                """)
-                logger.info("📏 Injected scrollbar-hiding CSS for consistent 1280x800 viewport")
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to inject scrollbar CSS: {e}")
-
             # Note: Download behavior is configured automatically by browser-use DownloadsWatchdog
             # using the downloads_path="/files" setting in BrowserProfile
 
-            # Suppress native browser overlays that CDP can't capture in screenshots.
-            # CDP's Page.captureScreenshot only captures page content, not browser-chrome-level UI
-            # (passkey popups, permission prompts, etc.). These invisible overlays block interaction
-            # and confuse the agent. Instead of trying to capture them, we suppress them.
-            await self._suppress_browser_overlays()
-
-            # Inject browser-side anti-detection spoofs on THIS connection. The
-            # backend's fingerprint injection (injection.ts addInitScript) is
-            # registered on a Playwright connection that closes before the agent
-            # connects, so its webdriver/canvas/console spoofs never reach the
-            # pages the agent drives. Re-register them here via CDP so they apply
-            # on every new document of the agent's own session.
-            await self._inject_anti_detection()
+            # Post-start CDP setup, all against the same pooled CDP session:
+            #   - scrollbar-hiding CSS (viewport must match the 1280x800 screenshot;
+            #     injected on every new document — browser-use pages have no
+            #     Playwright add_style_tag, and a one-shot style tag would be lost
+            #     on the first navigation anyway)
+            #   - native-overlay suppression (passkey popups / file chooser dialogs
+            #     are browser-chrome UI that CDP screenshots can't capture)
+            #   - anti-detection spoofs (the backend's init-script injection is
+            #     registered on a connection that closes before the agent attaches,
+            #     so webdriver/canvas/console spoofs must be re-registered here)
+            # The groups are independent, and each ~130ms round trip to Steel adds
+            # up — run them concurrently. Each swallows its own failures.
+            await asyncio.gather(
+                self._inject_scrollbar_css(),
+                self._suppress_browser_overlays(),
+                self._inject_anti_detection(),
+            )
 
         except ImportError as e:
             logger.error(f"browser-use not installed or import error: {e}")
@@ -513,9 +501,44 @@ class DOMService:
             logger.error(f"Failed to connect to browser: {e}")
             raise
 
+    async def _inject_scrollbar_css(self) -> None:
+        """Register scrollbar-hiding CSS on every new document.
+
+        Prevents coordinate mismatch between the reported viewport and captured
+        screenshot (viewport reports 1265 with scrollbar, screenshot is 1280),
+        which causes misclicks.
+        """
+        try:
+            target_id = self._session.agent_focus_target_id
+            if not target_id:
+                return
+            scrollbar_script = """
+                (() => {
+                    const style = document.createElement('style');
+                    style.textContent = `
+                        ::-webkit-scrollbar { display: none !important; }
+                        html, body {
+                            -ms-overflow-style: none !important;
+                            scrollbar-width: none !important;
+                        }
+                    `;
+                    const attach = () => (document.head || document.documentElement).appendChild(style);
+                    if (document.head || document.documentElement) attach();
+                    else document.addEventListener('DOMContentLoaded', attach, { once: true });
+                })();
+            """
+            cdp_session = await self._session.get_or_create_cdp_session(target_id, focus=False)
+            await cdp_session.cdp_client.send.Page.addScriptToEvaluateOnNewDocument(
+                params={"source": scrollbar_script, "runImmediately": True},
+                session_id=cdp_session.session_id,
+            )
+            logger.info("📏 Injected scrollbar-hiding CSS for consistent 1280x800 viewport")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to inject scrollbar CSS: {e}")
+
     async def disconnect(self) -> None:
         """Disconnect from the browser.
-        
+
         Note: For remote browsers (Steel), this just releases our connection.
         The actual browser session may still be alive on the server.
         """

@@ -487,6 +487,121 @@ async def _propagate_browser_credentials_with_progress(
     return result
 
 
+_ROSE_LOGO_DATA_URL = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjIxIDYyIDIyMCAyMjIiIHdpZHRoPSIyMjAiIGhlaWdodD0iMjIyIj4KICA8ZyB0cmFuc2Zvcm09InRyYW5zbGF0ZSgwLDMwMykgc2NhbGUoMC4xLC0wLjEpIiBmaWxsPSIjZmZmZmZmIj4KICAgIDxwYXRoIGQ9Ik0xMjc2IDIzNzggYy0xNDUgLTE5MiAtMjMxIC00NDIgLTIxMSAtNjE2IDggLTY4IDQxIC0yMDIgNjEgLTI1MSA4IC0xOSAxMyAtMzUgMTEgLTM3IC0yIC0yIC0zMCA3IC02MiAyMSAtMjQ5IDEwMCAtNTM3IDU0IC03ODQgLTEyNCAtMzYgLTI1IC02OSAtNDkgLTc1IC01MyAtMTcgLTExIDIyIC00NiAxMTkgLTEwNSAxNjMgLTEwMSAzMDAgLTE0NCA0NjAgLTE0NCA5MiAtMSAyMjYgMjQgMzAxIDU2IDIwIDggMzggMTUgMzkgMTUgMiAwIC0xMCAtMzkgLTI1IC04NyAtNjkgLTIxMyAtNTggLTM5NSAzNiAtNjAwIDMxIC02OSAxMzYgLTIzNyAxNTQgLTI0OCAxMCAtNiAxMTQgMTQ0IDE1MiAyMjAgMzcgNzMgNzUgMTk5IDg4IDI5MyAxNCAxMDEgMSAyMDYgLTQwIDMzMCAtMTUgNDggLTI3IDg4IC0yNiA4OSAxIDIgMjYgLTcgNTUgLTE4IDE5NSAtNzQgNDIzIC02NiA2MTEgMjIgOTggNDYgMjE3IDExOCAyNDUgMTQ5IDE4IDIwIDE4IDIxIC0xIDM1IC0xNzcgMTM5IC0zOTYgMjI1IC01NzAgMjI1IC03OSAwIC0xOTUgLTIzIC0yODIgLTU2IC00NCAtMTYgLTYzIC0yMCAtNTkgLTExIDI3IDcyIDYwIDE5NiA2OCAyNjAgMTcgMTMyIC0xNyAzMDAgLTg5IDQ0MiAtMzYgNzIgLTEyNCAyMDkgLTE0MSAyMTkgLTUgNCAtMjEgLTggLTM1IC0yNnogbTQwIC05MzUgYzcgLTQ2IDUwIC05MiAxMDkgLTExOSAyNyAtMTMgNDEgLTIzIDMxIC0yMyAtMTEgLTEgLTM4IC0xMiAtNjIgLTI2IC00OSAtMjkgLTgzIC05MCAtODUgLTE1MSAtMSAtMzcgLTIgLTM2IC05IDEzIC00IDI5IC0xNyA2NyAtMjggODUgLTIyIDM1IC04NiA3NyAtMTE4IDc5IC0xMSAwIDEgOSAyNiAyMCA3OSAzNSAxMTggOTAgMTIxIDE2OCAxIDI1IDMgMjggNiAxMSAyIC0xNCA2IC0zOSA5IC01N3oiLz4KICA8L2c+Cjwvc3ZnPg=="
+
+
+async def _apply_logo_hijack(dom_service: Any) -> None:
+    """Replace browser-use logos with the Rose logo on new documents + existing pages."""
+    try:
+        logo_hijack_script = f"""
+            (() => {{
+                const ROSE_LOGO_URL = '{_ROSE_LOGO_DATA_URL}';
+
+                if (window.__roseSrcHijacked) return;
+                window.__roseSrcHijacked = true;
+
+                const originalDescriptor = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
+
+                Object.defineProperty(HTMLImageElement.prototype, 'src', {{
+                    get: function() {{
+                        return originalDescriptor.get.call(this);
+                    }},
+                    set: function(value) {{
+                        if (value && typeof value === 'string' && value.includes('browser-use.com')) {{
+                            value = ROSE_LOGO_URL;
+                            this.alt = 'Rose';
+                        }}
+                        return originalDescriptor.set.call(this, value);
+                    }},
+                    enumerable: originalDescriptor.enumerable,
+                    configurable: originalDescriptor.configurable
+                }});
+
+                const originalSetAttribute = Element.prototype.setAttribute;
+                Element.prototype.setAttribute = function(name, value) {{
+                    if (this instanceof HTMLImageElement && name === 'src' &&
+                        value && typeof value === 'string' && value.includes('browser-use.com')) {{
+                        value = ROSE_LOGO_URL;
+                        this.alt = 'Rose';
+                    }}
+                    return originalSetAttribute.call(this, name, value);
+                }};
+            }})();
+        """
+        logo_cdp_session = await dom_service._session.get_or_create_cdp_session(focus=True)
+        await logo_cdp_session.cdp_client.send.Page.addScriptToEvaluateOnNewDocument(
+            params={"source": logo_hijack_script, "runImmediately": True},
+            session_id=logo_cdp_session.session_id,
+        )
+
+        immediate_replace_script = f"""
+            (() => {{
+                const ROSE_LOGO_URL = '{_ROSE_LOGO_DATA_URL}';
+
+                document.querySelectorAll('img').forEach(img => {{
+                    if (img.src && img.src.includes('browser-use.com')) {{
+                        img.src = ROSE_LOGO_URL;
+                        img.alt = 'Rose';
+                    }}
+                }});
+            }})();
+        """
+        try:
+            page_targets = await dom_service._session._cdp_get_all_pages()
+            for target in page_targets:
+                try:
+                    target_id = target.get("targetId")
+                    if target_id:
+                        temp_session = await dom_service._session.get_or_create_cdp_session(target_id, focus=False)
+                        await temp_session.cdp_client.send.Runtime.evaluate(
+                            params={"expression": immediate_replace_script},
+                            session_id=temp_session.session_id,
+                        )
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug(f"Could not replace logos on existing pages: {e}")
+
+        logger.info("\U0001f3a8 Hijacked img.src to replace browser-use logo with Rose logo")
+    except Exception as e:
+        logger.warning(f"Failed to replace logo: {e}")
+
+
+async def _wait_for_document_ready(dom_service: Any, *, timeout_s: float = 8.0, interactive_grace_s: float = 2.0) -> str:
+    """Poll document.readyState via CDP until the page is usable.
+
+    browser-use's NavigateToUrlEvent readiness wait matches lifecycle events by
+    loaderId, which frequently misses the real load event and burns its full
+    timeout before proceeding anyway. Navigating with wait_until="commit" and
+    polling readyState directly detects readiness reliably and returns as soon
+    as the document is complete (or interactive after a short grace period).
+    Returns the final readyState observed ("unknown" if polling itself failed).
+    """
+    start = time.monotonic()
+    last_state = "unknown"
+    while (time.monotonic() - start) < timeout_s:
+        try:
+            cdp_session = await dom_service._session.get_or_create_cdp_session(focus=True)
+            result = await cdp_session.cdp_client.send.Runtime.evaluate(
+                params={"expression": "document.readyState", "returnByValue": True},
+                session_id=cdp_session.session_id,
+            )
+            last_state = (result.get("result") or {}).get("value") or last_state
+        except Exception as poll_err:
+            logger.debug(f"readyState poll failed: {poll_err}")
+        if last_state == "complete":
+            return last_state
+        if last_state == "interactive" and (time.monotonic() - start) >= interactive_grace_s:
+            return last_state
+        await asyncio.sleep(0.2)
+    logger.warning(
+        "Document readiness poll timed out",
+        timeout_s=timeout_s,
+        last_state=last_state,
+    )
+    return last_state
+
+
 async def _stop_playwright_resources(
     playwright_browser: Optional[Any],
     playwright_instance: Optional[Any],
@@ -901,7 +1016,7 @@ def _render_write_lock_notification_question(
     action = _sentence_case_action(str(notification.get("action") or "perform a write action").strip())
     trigger_type = notification.get("trigger_type")
 
-    lines = [f"**Approval Needed**\n", f"{system_name} wants to {action} on **{service_name}**."]
+    lines = ["**Approval Needed**\n", f"{system_name} wants to {action} on **{service_name}**."]
 
     if trigger_type == "purchase" and isinstance(notification.get("purchase"), dict):
         purchase = notification["purchase"]
@@ -1371,6 +1486,8 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
     humanizer = None
     browser_recorder: Optional[BrowserAgentRecorder] = None
     browser_network_recorder: Optional[BrowserNetworkRecorder] = None
+    network_recorder_task: Optional[asyncio.Task] = None
+    interaction_layer_task: Optional[asyncio.Task] = None
     cursor_streamer: Optional[BrowserCursorRealtimeStreamer] = None
     action_history = ActionHistory()
     browser_url = None
@@ -1480,6 +1597,12 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
         t_session = time.monotonic()
         fingerprint_injection = None
         user_profile = {}
+        # Fresh sessions never carry auth_options in the init response, so the
+        # realm lookup can run concurrently with the (much slower) Steel session
+        # creation instead of serially after it.
+        auth_options_prefetch: Optional[asyncio.Task] = None
+        if not (is_resume and task_id) and auth_realm:
+            auth_options_prefetch = asyncio.create_task(fetch_auth_options(config, user_id, auth_realm))
         logger.info(
             "Session init check",
             is_resume=is_resume,
@@ -1612,11 +1735,24 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
         auth_options = session_auth_options or {}
         if auth_options.get("realm"):
             auth_realm = auth_options["realm"]
-        if not auth_options and auth_realm:
+        if not auth_options and auth_options_prefetch is not None:
+            auth_options = await auth_options_prefetch
+            auth_realm = auth_options.get("realm") or auth_realm
+        elif not auth_options and auth_realm:
             auth_options = await fetch_auth_options(config, user_id, auth_realm)
             auth_realm = auth_options.get("realm") or auth_realm
         elif not auth_options:
             auth_options = {"realm": "this site"}
+        if auth_options_prefetch is not None:
+            if not auth_options_prefetch.done():
+                auth_options_prefetch.cancel()
+            elif not auth_options_prefetch.cancelled() and auth_options_prefetch.exception() is not None:
+                # Retrieve the unused prefetch failure so asyncio doesn't log
+                # "exception was never retrieved" (session already had auth_options).
+                logger.debug(
+                    "Unused auth_options prefetch failed",
+                    error=extract_error_message(auth_options_prefetch.exception()),
+                )
         auth_runtime_state = AuthRuntimeState.from_auth_options(auth_options)
         minted_option = auth_options.get("minted") or {}
         minted_account_label = (
@@ -1650,72 +1786,83 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
 
         async def _setup_browser():
             """Connect DOMService + Playwright, apply fingerprint, init humanizer."""
-            t = time.monotonic()
             _dom_service = DOMService(cdp_url=cdp_url)
-            await _dom_service.connect()
-            _record_timing("parallel.browser.dom_connect", t)
-            logger.info("\U0001f310 Connected to browser via CDP")
 
-            _dom_page = await _dom_service.session.get_current_page()
+            async def _connect_dom():
+                t = time.monotonic()
+                await _dom_service.connect()
+                _record_timing("parallel.browser.dom_connect", t)
+                logger.info("\U0001f310 Connected to browser via CDP")
+                return await _dom_service.session.get_current_page()
 
-            t = time.monotonic()
-            from playwright.async_api import async_playwright
+            async def _connect_playwright():
+                """Connect Playwright, then apply everything that only needs the
+                Playwright side (fast-mode route, botsigged diagnostics,
+                fingerprint injection) while DOMService is still attaching."""
+                t = time.monotonic()
+                from playwright.async_api import async_playwright
 
-            _playwright_instance = await async_playwright().start()
-            _playwright_browser = await _playwright_instance.chromium.connect_over_cdp(cdp_url)
-            _playwright_context = _playwright_browser.contexts[0]
-            _input_page = _playwright_context.pages[0]
-            _record_timing("parallel.browser.playwright_connect", t)
+                _pw_instance = await async_playwright().start()
+                try:
+                    _pw_browser = await _pw_instance.chromium.connect_over_cdp(cdp_url)
+                except BaseException:
+                    await _pw_instance.stop()
+                    raise
+                _record_timing("parallel.browser.playwright_connect", t)
+                _pw_context = _pw_browser.contexts[0]
+                _pw_page = _pw_context.pages[0]
 
-            # Fast Mode: record/replay the page's HTTPS responses via a CDP Fetch route.
-            # On a hit we fulfill from cache (no internet); on a miss we let the request
-            # go live and capture the response body. Write-through mode records without
-            # fulfilling from cache. The browser session + actions stay live.
-            fast_mode_write_through = write_through_enabled_for_user(user_id)
-            if goal and (fast_mode_cache_enabled or fast_mode_write_through):
-                await _install_fast_mode_network_cache(
-                    _playwright_context,
-                    goal,
-                    read_enabled=fast_mode_cache_enabled,
-                    write_enabled=fast_mode_cache_enabled or fast_mode_write_through,
-                )
-
-            if _botsigged_diagnostics_enabled(start_url):
-                await _install_botsigged_diagnostics(_input_page, agent_id=agent_id, task_id=task_id)
-
-            t = time.monotonic()
-            fingerprint_injection_enabled = _env_enabled("BROWSER_AGENT_FINGERPRINT_INJECTION_ENABLED", True)
-            if fingerprint_injection and fingerprint_injection_enabled:
-                from helpers.fingerprint_injection import apply_fingerprint_injection
-
-                injection_success = await apply_fingerprint_injection(_input_page, fingerprint_injection)
-                if injection_success:
-                    logger.info("\U0001f510 Applied fingerprint injection via CDP (Sec-CH-UA-Platform, init scripts)")
-                else:
-                    logger.warning(
-                        "\u26a0\ufe0f Failed to apply fingerprint injection - browser may leak real fingerprint"
+                # Fast Mode: record/replay the page's HTTPS responses via a CDP Fetch route.
+                # On a hit we fulfill from cache (no internet); on a miss we let the request
+                # go live and capture the response body. Write-through mode records without
+                # fulfilling from cache. The browser session + actions stay live.
+                fast_mode_write_through = write_through_enabled_for_user(user_id)
+                if goal and (fast_mode_cache_enabled or fast_mode_write_through):
+                    await _install_fast_mode_network_cache(
+                        _pw_context,
+                        goal,
+                        read_enabled=fast_mode_cache_enabled,
+                        write_enabled=fast_mode_cache_enabled or fast_mode_write_through,
                     )
-            elif fingerprint_injection and not fingerprint_injection_enabled:
-                logger.info("\U0001f510 Browser-agent fingerprint injection disabled by env")
-            else:
-                logger.info("\U0001f510 No fingerprint injection data provided - using Steel defaults")
-            _record_timing("parallel.browser.fingerprint", t)
 
-            t = time.monotonic()
-            _humanizer = None
-            if _env_enabled("BROWSER_AGENT_HUMANIZER_ENABLED", True):
-                _humanizer = BrowserHumanizer(dom_page=_dom_page, input_page=_input_page, fast=False)
-                await _humanizer.initialize_cursor(start_pos=(640, 400))
-                logger.info("\U0001f916 BrowserHumanizer initialized (browser-use for DOM, Playwright for input)")
-            else:
-                logger.info("\U0001f916 BrowserHumanizer disabled by env; using browser-use input events")
-            _record_timing("parallel.browser.humanizer", t)
+                if _botsigged_diagnostics_enabled(start_url):
+                    await _install_botsigged_diagnostics(_pw_page, agent_id=agent_id, task_id=task_id)
+
+                t = time.monotonic()
+                fingerprint_injection_enabled = _env_enabled("BROWSER_AGENT_FINGERPRINT_INJECTION_ENABLED", True)
+                if fingerprint_injection and fingerprint_injection_enabled:
+                    from helpers.fingerprint_injection import apply_fingerprint_injection
+
+                    injection_success = await apply_fingerprint_injection(_pw_page, fingerprint_injection)
+                    if injection_success:
+                        logger.info(
+                            "\U0001f510 Applied fingerprint injection via CDP (Sec-CH-UA-Platform, init scripts)"
+                        )
+                    else:
+                        logger.warning(
+                            "\u26a0\ufe0f Failed to apply fingerprint injection - browser may leak real fingerprint"
+                        )
+                elif fingerprint_injection and not fingerprint_injection_enabled:
+                    logger.info("\U0001f510 Browser-agent fingerprint injection disabled by env")
+                else:
+                    logger.info("\U0001f510 No fingerprint injection data provided - using Steel defaults")
+                _record_timing("parallel.browser.fingerprint", t)
+
+                return _pw_instance, _pw_browser, _pw_context, _pw_page
+
+            # The DOMService (browser-use) and Playwright connections are two
+            # independent CDP websockets to the same Steel session; each takes
+            # 3-5s to attach, so open them concurrently. The Playwright branch
+            # also applies fingerprint/fast-mode/diagnostics so those don't wait
+            # on the (slower) DOMService attach.
+            _dom_page, (_playwright_instance, _playwright_browser, _playwright_context, _input_page) = (
+                await asyncio.gather(_connect_dom(), _connect_playwright())
+            )
 
             return (
                 _dom_service,
                 _dom_page,
                 _input_page,
-                _humanizer,
                 _playwright_browser,
                 _playwright_instance,
             )
@@ -1885,20 +2032,48 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             dom_service,
             dom_page,
             input_page,
-            humanizer,
             playwright_browser,
             playwright_instance,
         ) = browser_result
         recording_output_dir = browser_recording_output_dir(agent_id, task_id) if task_id else None
-        browser_recorder = await BrowserAgentRecorder.create(
-            page=input_page,
-            agent_id=agent_id,
-            task_id=task_id,
-            session_id=session_id,
-            browser_url=browser_url,
-            session_metadata=browser_session_metadata,
-        )
-        cursor_streamer = BrowserCursorRealtimeStreamer(agent_id=agent_id, task_id=task_id)
+
+        async def _create_network_recorder():
+            if not recording_output_dir:
+                return None
+            recorder = await BrowserNetworkRecorder.create(
+                browser_session=dom_service.session,
+                agent_id=agent_id,
+                task_id=task_id,
+                session_id=session_id,
+                output_dir=recording_output_dir,
+            )
+            if recorder and task_id:
+                await save_browser_action_message(
+                    agent_id=agent_id,
+                    title="Browser network recording started",
+                    task_id=task_id,
+                    message=f"Local browser network log will be saved: {recorder.network_dir / 'index.json'}",
+                    status=MessageStatus.IN_PROGRESS,
+                    browser_url=browser_url,
+                    action_type="network_recording",
+                    tool_call_id=str(uuid_module.uuid4()),
+                    extra_metadata={"network_recording_path": str(recorder.network_dir / "index.json")},
+                )
+            return recorder
+
+        # Dev-only network recorder: its CDP session + Network.enable round trips
+        # can take seconds and nothing downstream needs it synchronously, so it
+        # attaches in the background (resolved before session close).
+        network_recorder_task = asyncio.create_task(_create_network_recorder())
+
+        async def _init_humanizer():
+            if not _env_enabled("BROWSER_AGENT_HUMANIZER_ENABLED", True):
+                logger.info("\U0001f916 BrowserHumanizer disabled by env; using browser-use input events")
+                return None
+            _humanizer = BrowserHumanizer(dom_page=dom_page, input_page=input_page, fast=False)
+            await _humanizer.initialize_cursor(start_pos=(640, 400))
+            logger.info("\U0001f916 BrowserHumanizer initialized (browser-use for DOM, Playwright for input)")
+            return _humanizer
 
         def observe_cursor(x: int, y: int) -> None:
             if browser_recorder:
@@ -1906,44 +2081,51 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             if cursor_streamer:
                 cursor_streamer.set_cursor(x, y)
 
-        if humanizer:
-            humanizer.set_cursor_observer(observe_cursor)
-            humanizer.start_idle_movement()
-        if recording_output_dir:
-            browser_network_recorder = await BrowserNetworkRecorder.create(
-                browser_session=dom_service.session,
-                agent_id=agent_id,
-                task_id=task_id,
-                session_id=session_id,
-                output_dir=recording_output_dir,
+        async def _setup_interaction_layer():
+            """Humanizer + screenshot recorder (dev-only) + logo hijack.
+
+            Independent of each other AND of the start-URL navigation (which
+            only requires fingerprint/cookies/passkeys to be in place), so this
+            runs concurrently with the navigation and both are awaited before
+            the warm-up scroll / agent loop.
+            """
+            nonlocal humanizer, browser_recorder, cursor_streamer
+            t = time.monotonic()
+            humanizer, browser_recorder, _ = await asyncio.gather(
+                _init_humanizer(),
+                BrowserAgentRecorder.create(
+                    page=input_page,
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    session_id=session_id,
+                    browser_url=browser_url,
+                    session_metadata=browser_session_metadata,
+                ),
+                _apply_logo_hijack(dom_service),
             )
-        if browser_recorder and task_id:
-            await save_browser_action_message(
-                agent_id=agent_id,
-                title="Browser recording started",
-                task_id=task_id,
-                message=f"Local browser recording will be saved: {browser_recorder.output_dir / 'index.html'}",
-                status=MessageStatus.IN_PROGRESS,
-                browser_url=browser_url,
-                action_type="recording",
-                tool_call_id=str(uuid_module.uuid4()),
-                extra_metadata={
-                    "recording_path": str(browser_recorder.output_dir / "index.html"),
-                    "browser_session_metadata": browser_session_metadata,
-                },
-            )
-        if browser_network_recorder and task_id:
-            await save_browser_action_message(
-                agent_id=agent_id,
-                title="Browser network recording started",
-                task_id=task_id,
-                message=f"Local browser network log will be saved: {browser_network_recorder.network_dir / 'index.json'}",
-                status=MessageStatus.IN_PROGRESS,
-                browser_url=browser_url,
-                action_type="network_recording",
-                tool_call_id=str(uuid_module.uuid4()),
-                extra_metadata={"network_recording_path": str(browser_network_recorder.network_dir / "index.json")},
-            )
+            _record_timing("humanizer_recorders_logo", t)
+            cursor_streamer = BrowserCursorRealtimeStreamer(agent_id=agent_id, task_id=task_id)
+
+            if humanizer:
+                humanizer.set_cursor_observer(observe_cursor)
+                humanizer.start_idle_movement()
+            if browser_recorder and task_id:
+                await save_browser_action_message(
+                    agent_id=agent_id,
+                    title="Browser recording started",
+                    task_id=task_id,
+                    message=f"Local browser recording will be saved: {browser_recorder.output_dir / 'index.html'}",
+                    status=MessageStatus.IN_PROGRESS,
+                    browser_url=browser_url,
+                    action_type="recording",
+                    tool_call_id=str(uuid_module.uuid4()),
+                    extra_metadata={
+                        "recording_path": str(browser_recorder.output_dir / "index.html"),
+                        "browser_session_metadata": browser_session_metadata,
+                    },
+                )
+
+        interaction_layer_task = asyncio.create_task(_setup_interaction_layer())
 
         (
             shipping_section,
@@ -2072,82 +2254,6 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                 logger.info(f"\U0001f4ce Available files for browser: {list(available_file_paths.keys())}")
             _record_timing("post_setup.attachments", t)
 
-        # Logo hijack
-        t = time.monotonic()
-        try:
-            logo_hijack_script = """
-                (() => {
-                    const ROSE_LOGO_URL = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjIxIDYyIDIyMCAyMjIiIHdpZHRoPSIyMjAiIGhlaWdodD0iMjIyIj4KICA8ZyB0cmFuc2Zvcm09InRyYW5zbGF0ZSgwLDMwMykgc2NhbGUoMC4xLC0wLjEpIiBmaWxsPSIjZmZmZmZmIj4KICAgIDxwYXRoIGQ9Ik0xMjc2IDIzNzggYy0xNDUgLTE5MiAtMjMxIC00NDIgLTIxMSAtNjE2IDggLTY4IDQxIC0yMDIgNjEgLTI1MSA4IC0xOSAxMyAtMzUgMTEgLTM3IC0yIC0yIC0zMCA3IC02MiAyMSAtMjQ5IDEwMCAtNTM3IDU0IC03ODQgLTEyNCAtMzYgLTI1IC02OSAtNDkgLTc1IC01MyAtMTcgLTExIDIyIC00NiAxMTkgLTEwNSAxNjMgLTEwMSAzMDAgLTE0NCA0NjAgLTE0NCA5MiAtMSAyMjYgMjQgMzAxIDU2IDIwIDggMzggMTUgMzkgMTUgMiAwIC0xMCAtMzkgLTI1IC04NyAtNjkgLTIxMyAtNTggLTM5NSAzNiAtNjAwIDMxIC02OSAxMzYgLTIzNyAxNTQgLTI0OCAxMCAtNiAxMTQgMTQ0IDE1MiAyMjAgMzcgNzMgNzUgMTk5IDg4IDI5MyAxNCAxMDEgMSAyMDYgLTQwIDMzMCAtMTUgNDggLTI3IDg4IC0yNiA4OSAxIDIgMjYgLTcgNTUgLTE4IDE5NSAtNzQgNDIzIC02NiA2MTEgMjIgOTggNDYgMjE3IDExOCAyNDUgMTQ5IDE4IDIwIDE4IDIxIC0xIDM1IC0xNzcgMTM5IC0zOTYgMjI1IC01NzAgMjI1IC03OSAwIC0xOTUgLTIzIC0yODIgLTU2IC00NCAtMTYgLTYzIC0yMCAtNTkgLTExIDI3IDcyIDYwIDE5NiA2OCAyNjAgMTcgMTMyIC0xNyAzMDAgLTg5IDQ0MiAtMzYgNzIgLTEyNCAyMDkgLTE0MSAyMTkgLTUgNCAtMjEgLTggLTM1IC0yNnogbTQwIC05MzUgYzcgLTQ2IDUwIC05MiAxMDkgLTExOSAyNyAtMTMgNDEgLTIzIDMxIC0yMyAtMTEgLTEgLTM4IC0xMiAtNjIgLTI2IC00OSAtMjkgLTgzIC05MCAtODUgLTE1MSAtMSAtMzcgLTIgLTM2IC05IDEzIC00IDI5IC0xNyA2NyAtMjggODUgLTIyIDM1IC04NiA3NyAtMTE4IDc5IC0xMSAwIDEgOSAyNiAyMCA3OSAzNSAxMTggOTAgMTIxIDE2OCAxIDI1IDMgMjggNiAxMSAyIC0xNCA2IC0zOSA5IC01N3oiLz4KICA8L2c+Cjwvc3ZnPg==';
-
-                    if (window.__roseSrcHijacked) return;
-                    window.__roseSrcHijacked = true;
-
-                    const originalDescriptor = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
-
-                    Object.defineProperty(HTMLImageElement.prototype, 'src', {
-                        get: function() {
-                            return originalDescriptor.get.call(this);
-                        },
-                        set: function(value) {
-                            if (value && typeof value === 'string' && value.includes('browser-use.com')) {
-                                value = ROSE_LOGO_URL;
-                                this.alt = 'Rose';
-                            }
-                            return originalDescriptor.set.call(this, value);
-                        },
-                        enumerable: originalDescriptor.enumerable,
-                        configurable: originalDescriptor.configurable
-                    });
-
-                    const originalSetAttribute = Element.prototype.setAttribute;
-                    Element.prototype.setAttribute = function(name, value) {
-                        if (this instanceof HTMLImageElement && name === 'src' &&
-                            value && typeof value === 'string' && value.includes('browser-use.com')) {
-                            value = ROSE_LOGO_URL;
-                            this.alt = 'Rose';
-                        }
-                        return originalSetAttribute.call(this, name, value);
-                    };
-                })();
-            """
-            logo_cdp_session = await dom_service._session.get_or_create_cdp_session(focus=True)
-            await logo_cdp_session.cdp_client.send.Page.addScriptToEvaluateOnNewDocument(
-                params={"source": logo_hijack_script, "runImmediately": True},
-                session_id=logo_cdp_session.session_id,
-            )
-
-            immediate_replace_script = """
-                (() => {
-                    const ROSE_LOGO_URL = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjIxIDYyIDIyMCAyMjIiIHdpZHRoPSIyMjAiIGhlaWdodD0iMjIyIj4KICA8ZyB0cmFuc2Zvcm09InRyYW5zbGF0ZSgwLDMwMykgc2NhbGUoMC4xLC0wLjEpIiBmaWxsPSIjZmZmZmZmIj4KICAgIDxwYXRoIGQ9Ik0xMjc2IDIzNzggYy0xNDUgLTE5MiAtMjMxIC00NDIgLTIxMSAtNjE2IDggLTY4IDQxIC0yMDIgNjEgLTI1MSA4IC0xOSAxMyAtMzUgMTEgLTM3IC0yIC0yIC0zMCA3IC02MiAyMSAtMjQ5IDEwMCAtNTM3IDU0IC03ODQgLTEyNCAtMzYgLTI1IC02OSAtNDkgLTc1IC01MyAtMTcgLTExIDIyIC00NiAxMTkgLTEwNSAxNjMgLTEwMSAzMDAgLTE0NCA0NjAgLTE0NCA5MiAtMSAyMjYgMjQgMzAxIDU2IDIwIDggMzggMTUgMzkgMTUgMiAwIC0xMCAtMzkgLTI1IC04NyAtNjkgLTIxMyAtNTggLTM5NSAzNiAtNjAwIDMxIC02OSAxMzYgLTIzNyAxNTQgLTI0OCAxMCAtNiAxMTQgMTQ0IDE1MiAyMjAgMzcgNzMgNzUgMTk5IDg4IDI5MyAxNCAxMDEgMSAyMDYgLTQwIDMzMCAtMTUgNDggLTI3IDg4IC0yNiA4OSAxIDIgMjYgLTcgNTUgLTE4IDE5NSAtNzQgNDIzIC02NiA2MTEgMjIgOTggNDYgMjE3IDExOCAyNDUgMTQ5IDE4IDIwIDE4IDIxIC0xIDM1IC0xNzcgMTM5IC0zOTYgMjI1IC01NzAgMjI1IC03OSAwIC0xOTUgLTIzIC0yODIgLTU2IC00NCAtMTYgLTYzIC0yMCAtNTkgLTExIDI3IDcyIDYwIDE5NiA2OCAyNjAgMTcgMTMyIC0xNyAzMDAgLTg5IDQ0MiAtMzYgNzIgLTEyNCAyMDkgLTE0MSAyMTkgLTUgNCAtMjEgLTggLTM1IC0yNnogbTQwIC05MzUgYzcgLTQ2IDUwIC05MiAxMDkgLTExOSAyNyAtMTMgNDEgLTIzIDMxIC0yMyAtMTEgLTEgLTM4IC0xMiAtNjIgLTI2IC00OSAtMjkgLTgzIC05MCAtODUgLTE1MSAtMSAtMzcgLTIgLTM2IC05IDEzIC00IDI5IC0xNyA2NyAtMjggODUgLTIyIDM1IC04NiA3NyAtMTE4IDc5IC0xMSAwIDEgOSAyNiAyMCA3OSAzNSAxMTggOTAgMTIxIDE2OCAxIDI1IDMgMjggNiAxMSAyIC0xNCA2IC0zOSA5IC01N3oiLz4KICA8L2c+Cjwvc3ZnPg==';
-
-                    document.querySelectorAll('img').forEach(img => {
-                        if (img.src && img.src.includes('browser-use.com')) {
-                            img.src = ROSE_LOGO_URL;
-                            img.alt = 'Rose';
-                        }
-                    });
-                })();
-            """
-            try:
-                page_targets = await dom_service._session._cdp_get_all_pages()
-                for target in page_targets:
-                    try:
-                        target_id = target.get("targetId")
-                        if target_id:
-                            temp_session = await dom_service._session.get_or_create_cdp_session(target_id, focus=False)
-                            await temp_session.cdp_client.send.Runtime.evaluate(
-                                params={"expression": immediate_replace_script},
-                                session_id=temp_session.session_id,
-                            )
-                    except Exception:
-                        pass
-            except Exception as e:
-                logger.debug(f"Could not replace logos on existing pages: {e}")
-
-            logger.info("\U0001f3a8 Hijacked img.src to replace browser-use logo with Rose logo")
-        except Exception as e:
-            logger.warning(f"Failed to replace logo: {e}")
-        _record_timing("post_setup.logo_hijack", t)
         _record_timing("post_setup_total", t_post)
 
         # ===== PHASE 4: NAVIGATION =====
@@ -2160,54 +2266,74 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                 nav_url = f"https://{nav_url}"
                 logger.info(f"\U0001f517 Auto-added https:// to start URL: {nav_url}")
 
-            await save_browser_action_message(
-                agent_id=agent_id,
-                title=f"Navigating \u2192 {nav_url[:50]}",
-                task_id=task_id,
-                message="",
-                status=MessageStatus.IN_PROGRESS,
-                browser_url=browser_url,
-                action_type="goto",
-                tool_call_id=tool_call_id,
-                steps_taken=0,
-                total_steps=MAX_ITERATIONS,
+            async def _navigate_to_start_url():
+                t = time.monotonic()
+                event = dom_service.session.event_bus.dispatch(NavigateToUrlEvent(url=nav_url, wait_until="commit"))
+                await event
+                await event.event_result(raise_if_any=True, raise_if_none=False)
+                ready_state = await _wait_for_document_ready(dom_service)
+                logger.info(f"\U0001f310 Start URL readiness: {ready_state}")
+                _record_timing("navigation.navigate", t)
+
+            # The "Navigating" progress message is pure bookkeeping \u2014 write it
+            # while the navigation is already underway.
+            await asyncio.gather(
+                _navigate_to_start_url(),
+                save_browser_action_message(
+                    agent_id=agent_id,
+                    title=f"Navigating \u2192 {nav_url[:50]}",
+                    task_id=task_id,
+                    message="",
+                    status=MessageStatus.IN_PROGRESS,
+                    browser_url=browser_url,
+                    action_type="goto",
+                    tool_call_id=tool_call_id,
+                    steps_taken=0,
+                    total_steps=MAX_ITERATIONS,
+                ),
             )
 
-            t = time.monotonic()
-            event = dom_service.session.event_bus.dispatch(NavigateToUrlEvent(url=nav_url))
-            await event
-            await event.event_result(raise_if_any=True, raise_if_none=False)
-            _record_timing("navigation.navigate", t)
+            async def _inject_start_url_local_storage():
+                t = time.monotonic()
+                try:
+                    from urllib.parse import urlparse
 
-            t = time.monotonic()
-            try:
-                from urllib.parse import urlparse
+                    parsed = urlparse(nav_url)
+                    origin = f"{parsed.scheme}://{parsed.netloc}"
+                    result_data = await inject_local_storage(config, session_id, origin)
+                    if result_data and result_data.get("injected"):
+                        logger.info(f"\U0001f4be Injected {result_data.get('count', 0)} localStorage entries for {origin}")
+                except Exception as e:
+                    logger.warning(f"Failed to inject localStorage for {nav_url}: {e}")
+                _record_timing("navigation.inject_localStorage", t)
 
-                parsed = urlparse(nav_url)
-                origin = f"{parsed.scheme}://{parsed.netloc}"
-                result_data = await inject_local_storage(config, session_id, origin)
-                if result_data and result_data.get("injected"):
-                    logger.info(f"\U0001f4be Injected {result_data.get('count', 0)} localStorage entries for {origin}")
-            except Exception as e:
-                logger.warning(f"Failed to inject localStorage for {nav_url}: {e}")
-            _record_timing("navigation.inject_localStorage", t)
+            async def _mark_navigated():
+                if browser_recorder:
+                    await browser_recorder.mark(f"Navigated -> {nav_url[:80]}", action="goto")
 
-            await save_browser_action_message(
-                agent_id=agent_id,
-                title=f"Navigated \u2192 {nav_url[:50]}",
-                task_id=task_id,
-                message="",
-                status=MessageStatus.FINISHED,
-                browser_url=browser_url,
-                action_type="goto",
-                tool_call_id=tool_call_id,
-                steps_taken=0,
-                total_steps=MAX_ITERATIONS,
+            await asyncio.gather(
+                _inject_start_url_local_storage(),
+                save_browser_action_message(
+                    agent_id=agent_id,
+                    title=f"Navigated \u2192 {nav_url[:50]}",
+                    task_id=task_id,
+                    message="",
+                    status=MessageStatus.FINISHED,
+                    browser_url=browser_url,
+                    action_type="goto",
+                    tool_call_id=tool_call_id,
+                    steps_taken=0,
+                    total_steps=MAX_ITERATIONS,
+                ),
+                _mark_navigated(),
             )
-            if browser_recorder:
-                await browser_recorder.mark(f"Navigated -> {nav_url[:80]}", action="goto")
 
             logger.info(f"\U0001f310 Auto-navigated to start URL: {nav_url}")
+
+            # The interaction layer (humanizer/recorder/logo) ran concurrently
+            # with the navigation; both must be complete before the warm-up
+            # scroll and the agent loop.
+            await interaction_layer_task
 
             # Warm-up human activity after the page loads, before the agent's
             # first deliberate action. Clears two behavioral-biometrics tells:
@@ -2223,6 +2349,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                 logger.warning(f"⚠️ Warm-up scroll failed: {warmup_err}")
         else:
             logger.info("\U0001f504 Resuming from write lock approval - skipping start URL navigation")
+            await interaction_layer_task
         _record_timing("navigation_total", t_nav)
 
         # ===== LOG SETUP TIMING SUMMARY =====
@@ -3600,9 +3727,17 @@ Based on this feedback, I need to continue working on the task and address the i
                             "botsigged_signal_counts": capture["diagnostics"].get("signalCounts"),
                         },
                     )
+        if interaction_layer_task is not None and not interaction_layer_task.done():
+            # Settle the concurrent interaction-layer setup (it may still be
+            # assigning `humanizer`/`browser_recorder`) before tearing down.
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(asyncio.shield(interaction_layer_task), timeout=10)
         if humanizer:
             with contextlib.suppress(Exception):
                 await humanizer.close()
+        if network_recorder_task is not None:
+            with contextlib.suppress(Exception):
+                browser_network_recorder = await asyncio.wait_for(network_recorder_task, timeout=10)
         if browser_network_recorder:
             with contextlib.suppress(Exception):
                 network_index_path = await browser_network_recorder.close()
@@ -3628,8 +3763,6 @@ Based on this feedback, I need to continue working on the task and address the i
                     # URL is resolved by the FE from this FilePointer, same as attachments.
                     recording_file_pointer = None
                     try:
-                        from helpers.attachments import upload_to_storage
-
                         html_bytes = browser_recorder.export_inline_html_bytes()
                         if html_bytes:
                             recording_file_pointer = await upload_to_storage(
