@@ -174,6 +174,22 @@ Returns:
           type: 'object' as const,
           description:
             "Source-specific nested filters. For transactions: since, until, account, min_amount, max_amount, status ('posted', 'pending', or 'all'), include_pending_in_totals. For messages: person and since. For documents: document_source, since, until, path, and tag. Unsupported filters are rejected by the backend for the selected source.",
+          properties: {
+            since: { type: 'string' as const },
+            until: { type: 'string' as const },
+            account: { type: 'string' as const },
+            min_amount: { type: 'number' as const },
+            max_amount: { type: 'number' as const },
+            status: { type: 'string' as const, enum: ['posted', 'pending', 'all'] },
+            include_pending_in_totals: { type: 'boolean' as const },
+            person: { type: 'string' as const },
+            document_source: {
+              type: 'string' as const,
+              enum: ['chatgpt', 'claude', 'apple_notes', 'obsidian'],
+            },
+            path: { type: 'string' as const },
+            tag: { type: 'string' as const },
+          },
         },
         person: {
           type: 'string' as const,

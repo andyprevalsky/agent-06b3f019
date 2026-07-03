@@ -36,10 +36,27 @@ export interface GrepArgs {
 const OMITTED_SOURCE_FAN_OUT = ['messages', 'network'] as const;
 
 /** Drop null/undefined keys so the domain's strict validation sees only real args. */
+function stripNullish(obj: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (value !== null && value !== undefined) out[key] = value;
+  }
+  return out;
+}
+
 function toGrepParams(args: GrepArgs): UserDataGrepParams {
-  const params: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(args)) {
-    if (value !== null && value !== undefined) params[key] = value;
+  const params = stripNullish(args as unknown as Record<string, unknown>);
+  // The strict LLM schema makes every filter key required-but-nullable, so a
+  // filters object arrives fully populated with nulls; the domain rejects
+  // null-valued keys as unsupported for the source. Strip them, and drop the
+  // object entirely when nothing real remains.
+  if (params.filters !== undefined) {
+    const filters = stripNullish(params.filters as Record<string, unknown>);
+    if (Object.keys(filters).length === 0) {
+      delete params.filters;
+    } else {
+      params.filters = filters;
+    }
   }
   return params as unknown as UserDataGrepParams;
 }

@@ -94,7 +94,19 @@ const grepCallSchema = z
         .nullable()
         .describe('Allow regex patterns to match across newlines within a record.'),
       filters: z
-        .record(z.unknown())
+        .object({
+          since: z.string().nullable(),
+          until: z.string().nullable(),
+          account: z.string().nullable(),
+          min_amount: z.number().nullable(),
+          max_amount: z.number().nullable(),
+          status: z.enum(['posted', 'pending', 'all']).nullable(),
+          include_pending_in_totals: z.boolean().nullable(),
+          person: z.string().nullable(),
+          document_source: z.enum(['chatgpt', 'claude', 'apple_notes', 'obsidian']).nullable(),
+          path: z.string().nullable(),
+          tag: z.string().nullable(),
+        })
         .nullable()
         .describe(
           'Source-specific nested filters. For transactions: since, until, account, min_amount, ' +
