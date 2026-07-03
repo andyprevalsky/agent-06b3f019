@@ -32,6 +32,7 @@ class BenchmarkTask:
     forbidden_tools: List[str] = field(default_factory=list)  # Tool names that must not be called
     sub_agent_count: Optional[int] = None  # Default fan-out for load-test style tasks; substitutes {n} in prompt
     expected_payment_receipt: Optional[dict] = None  # Expected request_payment_card approval receipt metadata
+    success_on_payment_card_request: bool = False  # Treat a validated payment-card request as terminal success
 
 
 _TASKS_FILE = os.path.join(os.path.dirname(__file__), "tasks.json")

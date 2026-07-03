@@ -37,7 +37,6 @@ from helpers.model_pricing import get_model_pricing_with_fallback
 from helpers.tracing import span, traced
 from loop.activity_helper import call_temporal_activity_from_activity
 from providers.fast_cache.browser_use_cache import cached_browser_decision
-from providers.fast_cache.context import write_through_enabled_for_user
 from providers.rose import ClaudeAuthContext, GptAuthContext, RoseClient
 from providers.rose.browser_use import build_browser_state_message_content
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
@@ -47,6 +46,11 @@ from utils.prompts import build_verifier_prompt
 from .config import (
     ACTION_LOOP_DELAY_SECONDS,
     ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES,
+    BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS,
+    BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
+    BROWSER_SUPERVISOR_MAX_RECOVERIES,
+    BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
+    BROWSER_WARMUP_ACTION_TIMEOUT_SECONDS,
     HEARTBEAT_KEEPALIVE_SECONDS,
     HEARTBEAT_TIMEOUT_SECONDS,
     MAX_ACTIVITY_RETRIES,
@@ -125,6 +129,13 @@ _BROWSER_REPLAY_TARGET_ATTRS = (
     "title",
     "href",
     "value",
+)
+
+_GENERIC_DISMISS_BUTTON_RE = re.compile(
+    r"^\s*(accept only essential|allow essential|reject all|reject|decline|deny|"
+    r"opt out( of all)?|close( banner)?|dismiss|got it|ok|okay|continue|"
+    r"no thanks|not now|skip|x|×)\s*$",
+    re.IGNORECASE,
 )
 
 
@@ -832,6 +843,252 @@ def json_dumps_compact(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
+async def _browser_supervisor_snapshot(
+    *,
+    input_page: Optional[Any],
+    dom_service: Optional[Any],
+    timeout_s: float = 5.0,
+) -> Dict[str, Any]:
+    """Best-effort lightweight page snapshot for browser stalls.
+
+    This intentionally avoids the expensive browser-use DOM extraction path; the
+    supervisor is called when that path may already be wedged.
+    """
+
+    snapshot: Dict[str, Any] = {
+        "url": "",
+        "title": "",
+        "body_text": "",
+        "buttons": [],
+        "inputs": [],
+        "tabs": [],
+    }
+
+    page = input_page
+    if page is None and dom_service is not None:
+        with contextlib.suppress(Exception):
+            page = await asyncio.wait_for(dom_service.session.get_current_page(), timeout=timeout_s)
+
+    if page is None:
+        return snapshot
+
+    async def _read_page() -> Dict[str, Any]:
+        return await page.evaluate(
+            """() => {
+                const text = (document.body?.innerText || '').replace(/\\s+/g, ' ').trim();
+                const buttons = Array.from(document.querySelectorAll(
+                    'button, [role="button"], a, input[type="button"], input[type="submit"]'
+                )).slice(0, 80).map((el) => ({
+                    tag: el.tagName,
+                    text: (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim().slice(0, 120),
+                    aria: (el.getAttribute('aria-label') || '').slice(0, 120),
+                    visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length),
+                })).filter((el) => el.text || el.aria);
+                const inputs = Array.from(document.querySelectorAll('input, textarea, select')).slice(0, 50).map((el) => ({
+                    tag: el.tagName,
+                    type: el.getAttribute('type') || '',
+                    name: el.getAttribute('name') || '',
+                    placeholder: el.getAttribute('placeholder') || '',
+                    aria: el.getAttribute('aria-label') || '',
+                }));
+                return {
+                    url: location.href,
+                    title: document.title || '',
+                    body_text: text.slice(0, 3000),
+                    buttons,
+                    inputs,
+                };
+            }"""
+        )
+
+    with contextlib.suppress(Exception):
+        page_data = await asyncio.wait_for(_read_page(), timeout=timeout_s)
+        if isinstance(page_data, dict):
+            snapshot.update(page_data)
+
+    with contextlib.suppress(Exception):
+        context = getattr(page, "context", None)
+        pages = getattr(context, "pages", []) if context is not None else []
+        tabs = []
+        for idx, tab in enumerate(pages[:10]):
+            tabs.append(
+                {
+                    "index": idx,
+                    "url": getattr(tab, "url", "") or "",
+                    "title": await asyncio.wait_for(tab.title(), timeout=1.5),
+                }
+            )
+        snapshot["tabs"] = tabs
+
+    return snapshot
+
+
+def _format_browser_supervisor_message(recovery: Dict[str, Any]) -> str:
+    snapshot = recovery.get("snapshot") or {}
+    actions = recovery.get("actions") or []
+    body_text = str(snapshot.get("body_text") or "")
+    buttons = snapshot.get("buttons") or []
+    button_text = ", ".join(
+        str((b or {}).get("text") or (b or {}).get("aria") or "").strip()
+        for b in buttons[:12]
+        if str((b or {}).get("text") or (b or {}).get("aria") or "").strip()
+    )
+    parts = [
+        "Browser supervisor detected a stalled browser step and performed generic recovery.",
+        f"Reason: {recovery.get('reason', 'unknown')}",
+        f"URL: {snapshot.get('url') or 'unknown'}",
+    ]
+    if actions:
+        parts.append("Recovery actions: " + ", ".join(str(a) for a in actions))
+    if button_text:
+        parts.append("Visible controls before recovery: " + button_text[:600])
+    if body_text:
+        parts.append("Visible page text before recovery: " + body_text[:1000])
+    parts.append("Continue from the current page state. Do not restart from search unless the page is unusable.")
+    return "\n".join(parts)
+
+
+async def _perform_generic_browser_recovery(
+    *,
+    input_page: Optional[Any],
+    reason: str,
+    reload_page: bool,
+    fallback_url: str = "",
+    timeout_s: float = 8.0,
+) -> List[str]:
+    """Try safe, site-agnostic unstick actions on the active page."""
+
+    actions: List[str] = []
+    if input_page is None:
+        return actions
+
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(input_page.bring_to_front(), timeout=timeout_s)
+        actions.append("bring_to_front")
+
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(input_page.keyboard.press("Escape"), timeout=timeout_s)
+        actions.append("press_escape")
+
+    async def _click_dismiss_button() -> Optional[str]:
+        candidates = await input_page.locator(
+            'button, [role="button"], a, input[type="button"], input[type="submit"]'
+        ).all()
+        for locator in candidates[:80]:
+            try:
+                text = (
+                    await locator.evaluate(
+                        """el => (
+                            el.innerText || el.value || el.getAttribute('aria-label') ||
+                            el.getAttribute('title') || ''
+                        ).trim()"""
+                    )
+                )
+                if not _GENERIC_DISMISS_BUTTON_RE.match(str(text or "")):
+                    continue
+                if not await locator.is_visible():
+                    continue
+                await locator.click(timeout=int(timeout_s * 1000), force=False)
+                return f"click_dismiss:{str(text)[:60]}"
+            except Exception:
+                continue
+        return None
+
+    with contextlib.suppress(Exception):
+        clicked = await asyncio.wait_for(_click_dismiss_button(), timeout=timeout_s)
+        if clicked:
+            actions.append(clicked)
+
+    if reload_page:
+        with contextlib.suppress(Exception):
+            current_url = getattr(input_page, "url", "") or ""
+            if current_url.startswith(("http://", "https://")):
+                await asyncio.wait_for(
+                    input_page.reload(wait_until="domcontentloaded", timeout=int(timeout_s * 1000)),
+                    timeout=timeout_s + 2,
+                )
+                actions.append("reload")
+            elif fallback_url.startswith(("http://", "https://")):
+                await asyncio.wait_for(
+                    input_page.goto(fallback_url, wait_until="domcontentloaded", timeout=int(timeout_s * 1000)),
+                    timeout=timeout_s + 2,
+                )
+                actions.append("goto_fallback_url")
+
+    return actions
+
+
+async def _run_browser_supervisor_recovery(
+    *,
+    agent_id: str,
+    task_id: Optional[str],
+    browser_url: Optional[str],
+    tool_call_id: str,
+    iteration: int,
+    reason: str,
+    input_page: Optional[Any],
+    dom_service: Optional[Any],
+    browser_turn_messages: List[Dict[str, Any]],
+    reload_page: bool,
+    fallback_url: str = "",
+) -> Dict[str, Any]:
+    snapshot = await _browser_supervisor_snapshot(input_page=input_page, dom_service=dom_service)
+    if fallback_url and not snapshot.get("url"):
+        snapshot["url"] = fallback_url
+    actions = await _perform_generic_browser_recovery(
+        input_page=input_page,
+        reason=reason,
+        reload_page=reload_page,
+        fallback_url=fallback_url,
+    )
+    recovery = {
+        "reason": reason,
+        "actions": actions,
+        "snapshot": snapshot,
+    }
+    browser_turn_messages.append(
+        {
+            "role": "user",
+            "content": _format_browser_supervisor_message(recovery),
+        }
+    )
+    if task_id:
+        with contextlib.suppress(Exception):
+            await save_browser_action_message(
+                agent_id=agent_id,
+                title="Browser supervisor recovery",
+                task_id=task_id,
+                message=_format_browser_supervisor_message(recovery),
+                status=MessageStatus.FINISHED,
+                browser_url=browser_url or snapshot.get("url") or "",
+                action_type="supervisor_recovery",
+                tool_call_id=str(uuid_module.uuid4()),
+                steps_taken=iteration,
+                total_steps=MAX_ITERATIONS,
+                extra_metadata={
+                    "supervisor_reason": reason,
+                    "supervisor_actions": actions,
+                    "supervisor_snapshot": {
+                        "url": snapshot.get("url"),
+                        "title": snapshot.get("title"),
+                        "buttons": snapshot.get("buttons", [])[:20],
+                        "inputs": snapshot.get("inputs", [])[:20],
+                        "tabs": snapshot.get("tabs", [])[:10],
+                    },
+                    "parent_tool_call_id": tool_call_id,
+                },
+            )
+    logger.warning(
+        "Browser supervisor recovery ran",
+        agent_id=agent_id,
+        task_id=task_id,
+        reason=reason,
+        actions=actions,
+        url=snapshot.get("url"),
+    )
+    return recovery
+
+
 def _write_lock_notification_prompt(
     *,
     approval_type: str,
@@ -1333,6 +1590,151 @@ async def _install_fast_mode_network_cache(
     context.on("response", lambda r: asyncio.ensure_future(_record(r)))
 
 
+async def _finalize_browser_recording_for_fe(
+    *,
+    browser_recorder: BrowserAgentRecorder,
+    agent_id: str,
+    task_id: Optional[str],
+    user_id: str,
+    browser_url: Optional[str],
+    browser_session_metadata: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Persist the frame replay and write the FE-visible recording message.
+
+    System context:
+    browser frames/cursor/tab URL -> inline HTML upload -> DB tool message ->
+    BrowserAgentChip Recording tab. This intentionally skips the optional Steel
+    HLS download because failed/timed-out runs need the already-captured frame
+    replay uploaded before activity cleanup can be interrupted.
+    """
+    if not task_id:
+        return None
+
+    recording_path = await browser_recorder.close(include_steel_media=False)
+    if not recording_path:
+        return None
+
+    recording_file_pointer = None
+    html_bytes: Optional[bytes] = None
+    try:
+        html_bytes = browser_recorder.export_inline_html_bytes()
+        if html_bytes:
+            recording_file_pointer = await upload_to_storage(
+                user_id=user_id,
+                file_content=html_bytes,
+                filename=f"browser-recording-{task_id}.html",
+                mime_type="text/html",
+            )
+            logger.info(
+                "Browser recording uploaded",
+                agent_id=agent_id,
+                task_id=task_id,
+                bytes=len(html_bytes),
+                has_pointer=bool(recording_file_pointer),
+            )
+    except Exception as exc:  # noqa: BLE001 — recording upload is best-effort
+        logger.warning(
+            "Browser recording upload failed",
+            agent_id=agent_id,
+            task_id=task_id,
+            error=repr(exc),
+            html_bytes=len(html_bytes) if isinstance(html_bytes, (bytes, bytearray)) else None,
+        )
+
+    await save_browser_action_message(
+        agent_id=agent_id,
+        title="Browser recording saved",
+        task_id=task_id,
+        message=f"Local browser recording: {recording_path}",
+        status=MessageStatus.FINISHED,
+        browser_url=browser_url or "",
+        action_type="recording",
+        tool_call_id=str(uuid_module.uuid4()),
+        extra_metadata={
+            "recording_path": str(recording_path),
+            "recording_file_pointer": recording_file_pointer,
+            "browser_session_metadata": browser_session_metadata,
+        },
+    )
+    return {
+        "recording_path": str(recording_path),
+        "recording_file_pointer": recording_file_pointer,
+        "html_bytes": len(html_bytes) if isinstance(html_bytes, (bytes, bytearray)) else None,
+    }
+
+
+async def _finalize_browser_recording_for_fe_resilient(
+    *,
+    browser_recorder: BrowserAgentRecorder,
+    agent_id: str,
+    task_id: Optional[str],
+    user_id: str,
+    browser_url: Optional[str],
+    browser_session_metadata: Dict[str, Any],
+    timeout_seconds: int = BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS,
+) -> Optional[Dict[str, Any]]:
+    """Run recording finalization even when activity cleanup is being cancelled."""
+
+    task = asyncio.create_task(
+        _finalize_browser_recording_for_fe(
+            browser_recorder=browser_recorder,
+            agent_id=agent_id,
+            task_id=task_id,
+            user_id=user_id,
+            browser_url=browser_url,
+            browser_session_metadata=browser_session_metadata,
+        )
+    )
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
+    except asyncio.CancelledError:
+        logger.warning(
+            "Browser recording finalization received cancellation; draining before activity exit",
+            agent_id=agent_id,
+            task_id=task_id,
+        )
+        current_task = asyncio.current_task()
+        if current_task is not None and hasattr(current_task, "uncancel"):
+            while current_task.cancelling():
+                current_task.uncancel()
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            task.cancel()
+            logger.warning(
+                "Browser recording finalization timed out after cancellation",
+                agent_id=agent_id,
+                task_id=task_id,
+                timeout_seconds=timeout_seconds,
+            )
+            return None
+        except Exception as exc:  # noqa: BLE001 — final cleanup should not mask the activity result
+            logger.warning(
+                "Browser recording finalization failed after cancellation",
+                agent_id=agent_id,
+                task_id=task_id,
+                error=repr(exc),
+            )
+            return None
+    except asyncio.TimeoutError:
+        task.cancel()
+        logger.warning(
+            "Browser recording finalization timed out",
+            agent_id=agent_id,
+            task_id=task_id,
+            timeout_seconds=timeout_seconds,
+        )
+        return None
+    except Exception as exc:  # noqa: BLE001 — final cleanup should not mask the activity result
+        logger.warning(
+            "Browser recording finalization failed",
+            agent_id=agent_id,
+            task_id=task_id,
+            error=repr(exc),
+        )
+        return None
+
+
 @activity.defn
 @traced("spawn_browser_agent_activity_v3")
 async def spawn_browser_agent_activity_v3(  # noqa: C901
@@ -1359,6 +1761,13 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
 ) -> Dict[str, Any]:
     """Browser agent activity using browser-use BrowserSession + Rose API."""
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
+    if fast_mode_cache_enabled:
+        logger.info(
+            "Browser Fast Mode cache disabled; ignoring requested browser fast_mode_cache_enabled",
+            agent_id=agent_id,
+            task_id=task_id,
+        )
+    fast_mode_cache_enabled = False
 
     from browser_tools.dom_service import ActionHistory, DOMService
     from browser_tools.humanizer import BrowserHumanizer
@@ -1666,19 +2075,6 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             _playwright_context = _playwright_browser.contexts[0]
             _input_page = _playwright_context.pages[0]
             _record_timing("parallel.browser.playwright_connect", t)
-
-            # Fast Mode: record/replay the page's HTTPS responses via a CDP Fetch route.
-            # On a hit we fulfill from cache (no internet); on a miss we let the request
-            # go live and capture the response body. Write-through mode records without
-            # fulfilling from cache. The browser session + actions stay live.
-            fast_mode_write_through = write_through_enabled_for_user(user_id)
-            if goal and (fast_mode_cache_enabled or fast_mode_write_through):
-                await _install_fast_mode_network_cache(
-                    _playwright_context,
-                    goal,
-                    read_enabled=fast_mode_cache_enabled,
-                    write_enabled=fast_mode_cache_enabled or fast_mode_write_through,
-                )
 
             if _botsigged_diagnostics_enabled(start_url):
                 await _install_botsigged_diagnostics(_input_page, agent_id=agent_id, task_id=task_id)
@@ -2216,9 +2612,20 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             try:
                 if humanizer is not None:
                     await asyncio.sleep(random.uniform(1.0, 2.0))
-                    await humanizer.scroll(random.randint(120, 320))
+                    await asyncio.wait_for(
+                        humanizer.scroll(random.randint(120, 320)),
+                        timeout=BROWSER_WARMUP_ACTION_TIMEOUT_SECONDS,
+                    )
                     await asyncio.sleep(random.uniform(0.4, 0.9))
-                    await humanizer.scroll(-random.randint(60, 160))
+                    await asyncio.wait_for(
+                        humanizer.scroll(-random.randint(60, 160)),
+                        timeout=BROWSER_WARMUP_ACTION_TIMEOUT_SECONDS,
+                    )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "⚠️ Warm-up scroll timed out; continuing to browser loop",
+                    timeout_seconds=BROWSER_WARMUP_ACTION_TIMEOUT_SECONDS,
+                )
             except Exception as warmup_err:
                 logger.warning(f"⚠️ Warm-up scroll failed: {warmup_err}")
         else:
@@ -2250,12 +2657,40 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
         browser_turn_messages: List[Dict[str, Any]] = []
         browser_turn_messages.extend(resume_user_messages)
         otp_history_count = 0
+        supervisor_recovery_count = 0
         task_prompt = build_browser_task_prompt(goal)
         dynamic_system_context = build_browser_dynamic_system_context(
             base_custom_instructions,
             available_files=(list(available_file_paths.keys()) if available_file_paths else None),
             response_schema=response_schema,
         )
+
+        async def _recover_browser_step(reason: str, *, reload_page: bool) -> bool:
+            nonlocal supervisor_recovery_count
+            if supervisor_recovery_count >= BROWSER_SUPERVISOR_MAX_RECOVERIES:
+                logger.error(
+                    "Browser supervisor recovery budget exhausted",
+                    reason=reason,
+                    recoveries=supervisor_recovery_count,
+                    max_recoveries=BROWSER_SUPERVISOR_MAX_RECOVERIES,
+                )
+                return False
+            supervisor_recovery_count += 1
+            activity.heartbeat(f"Step {iteration} - browser supervisor recovery: {reason}")
+            await _run_browser_supervisor_recovery(
+                agent_id=agent_id,
+                task_id=task_id,
+                browser_url=browser_url,
+                tool_call_id=tool_call_id,
+                iteration=iteration,
+                reason=reason,
+                input_page=input_page,
+                dom_service=dom_service,
+                browser_turn_messages=browser_turn_messages,
+                reload_page=reload_page,
+                fallback_url=current_url,
+            )
+            return True
 
         while iteration < MAX_ITERATIONS:
             iteration += 1
@@ -2327,7 +2762,27 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
 
             # 1. Get current browser state
             activity.heartbeat(f"Step {iteration} - fetching browser state")
-            browser_state = await dom_service.get_browser_state(include_screenshot=False)
+            try:
+                browser_state = await asyncio.wait_for(
+                    dom_service.get_browser_state(include_screenshot=False),
+                    timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                recovered = await _recover_browser_step(
+                    f"browser_state_timeout_{BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS}s",
+                    reload_page=True,
+                )
+                if recovered:
+                    continue
+                raise
+            except Exception as state_error:
+                recovered = await _recover_browser_step(
+                    f"browser_state_error:{type(state_error).__name__}:{extract_error_message(state_error)[:160]}",
+                    reload_page=True,
+                )
+                if recovered:
+                    continue
+                raise
             current_url = browser_state.get("url", "")
 
             if current_url and (not visited_urls or current_url != visited_urls[-1]):
@@ -2384,21 +2839,24 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                     )
                     return _attach_browser_replay_target(live_result, dom_service)
 
-                llm_result = await cached_browser_decision(
-                    enabled=fast_mode_cache_enabled,
-                    goal=goal,
-                    request={
-                        "task": task_prompt,
-                        "dynamic_system_context": dynamic_system_context,
-                        "turn_messages": browser_turn_messages,
-                        "browser_state": browser_state,
-                        "action_entries": action_entries,
-                        "config": {
-                            "browser_use_mode": browser_use_mode,
+                llm_result = await asyncio.wait_for(
+                    cached_browser_decision(
+                        enabled=False,
+                        goal=goal,
+                        request={
+                            "task": task_prompt,
+                            "dynamic_system_context": dynamic_system_context,
+                            "turn_messages": browser_turn_messages,
+                            "browser_state": browser_state,
+                            "action_entries": action_entries,
+                            "config": {
+                                "browser_use_mode": browser_use_mode,
+                            },
                         },
-                    },
-                    call_llm=_live_browser_decision,
-                    write_enabled=(fast_mode_cache_enabled or write_through_enabled_for_user(user_id)),
+                        call_llm=_live_browser_decision,
+                        write_enabled=False,
+                    ),
+                    timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
                 )
                 # Track waterfall fall-through so subsequent iterations skip claudeAuth.
                 if llm_result.get("mode") != "claude" and browser_use_mode == "claude":
@@ -2413,6 +2871,21 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                     total_input_tokens += usage.get("prompt_tokens", 0)
                     total_output_tokens += usage.get("completion_tokens", 0)
 
+            except asyncio.TimeoutError:
+                consecutive_api_failures += 1
+                recovered = await _recover_browser_step(
+                    f"browser_decision_timeout_{BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS}s",
+                    reload_page=False,
+                )
+                if recovered and consecutive_api_failures < MAX_CONSECUTIVE_API_FAILURES:
+                    await asyncio.sleep(1)
+                    continue
+                if consecutive_api_failures >= MAX_CONSECUTIVE_API_FAILURES:
+                    logger.error(
+                        f"Aborting: {MAX_CONSECUTIVE_API_FAILURES} consecutive browser decision timeouts"
+                    )
+                    break
+                raise
             except Exception as e:
                 consecutive_api_failures += 1
                 logger.error(
@@ -3135,26 +3608,62 @@ Based on this feedback, I need to continue working on the task and address the i
                         "action": action_name,
                         "target_coordinates": coords_for_cursor,
                     },
-                )
+            )
 
             activity.heartbeat(f"Step {iteration} - executing {action_name}")
-            result = await execute_action(
-                dom_service,
-                action_history,
-                unified_action,
-                available_file_paths,
-                session_id=session_id,
-                config=config,
-                humanizer=humanizer,
-                secret_refs=secret_refs,
-                password_origins=password_origins,
-                credential_refs_by_secret_ref=credential_refs_by_secret_ref,
-                user_id=user_id,
-                current_url=current_url,
-                write_lock_enabled=write_lock_enabled,
-                write_lock_approvals=write_lock_approvals,
-                system_name=system_name,
-            )
+            try:
+                result = await asyncio.wait_for(
+                    execute_action(
+                        dom_service,
+                        action_history,
+                        unified_action,
+                        available_file_paths,
+                        session_id=session_id,
+                        config=config,
+                        humanizer=humanizer,
+                        secret_refs=secret_refs,
+                        password_origins=password_origins,
+                        credential_refs_by_secret_ref=credential_refs_by_secret_ref,
+                        user_id=user_id,
+                        current_url=current_url,
+                        write_lock_enabled=write_lock_enabled,
+                        write_lock_approvals=write_lock_approvals,
+                        system_name=system_name,
+                    ),
+                    timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                await _recover_browser_step(
+                    f"action_timeout_{action_name}_{BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS}s",
+                    reload_page=False,
+                )
+                result = {
+                    "success": False,
+                    "error": (
+                        f"Browser action '{action_name}' timed out after "
+                        f"{BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS}s; generic browser supervisor recovery ran."
+                    ),
+                    "supervisor_recovered": True,
+                }
+            except Exception as action_error:
+                await _recover_browser_step(
+                    f"action_error_{action_name}:{type(action_error).__name__}:"
+                    f"{extract_error_message(action_error)[:160]}",
+                    reload_page=False,
+                )
+                result = {
+                    "success": False,
+                    "error": (
+                        f"Browser action '{action_name}' failed with {type(action_error).__name__}: "
+                        f"{extract_error_message(action_error)[:300]}. "
+                        "Generic browser supervisor recovery ran; continue from current page state."
+                    ),
+                    "supervisor_recovered": True,
+                }
+            if isinstance(result, dict) and result.get("current_url"):
+                current_url = str(result.get("current_url") or "")
+                if current_url and (not visited_urls or current_url != visited_urls[-1]):
+                    visited_urls.append(current_url)
             if (
                 not result.get("credential_ref")
                 and action_name == "input_text"
@@ -3619,47 +4128,14 @@ Based on this feedback, I need to continue working on the task and address the i
                         extra_metadata={"network_recording_path": str(network_index_path)},
                     )
         if browser_recorder:
-            with contextlib.suppress(Exception):
-                recording_path = await browser_recorder.close()
-                if recording_path and task_id:
-                    # Upload a single self-contained replay HTML to Supabase Storage
-                    # so the front-end can render the recording post-completion (the
-                    # live debugUrl iframe is only valid during the run). The signed
-                    # URL is resolved by the FE from this FilePointer, same as attachments.
-                    recording_file_pointer = None
-                    try:
-                        from helpers.attachments import upload_to_storage
-
-                        html_bytes = browser_recorder.export_inline_html_bytes()
-                        if html_bytes:
-                            recording_file_pointer = await upload_to_storage(
-                                user_id=user_id,
-                                file_content=html_bytes,
-                                filename=f"browser-recording-{task_id}.html",
-                                mime_type="text/html",
-                            )
-                    except Exception as exc:  # noqa: BLE001 — recording upload is best-effort
-                        logger.warning(
-                            "Browser recording upload failed",
-                            agent_id=agent_id,
-                            task_id=task_id,
-                            error=str(exc),
-                        )
-                    await save_browser_action_message(
-                        agent_id=agent_id,
-                        title="Browser recording saved",
-                        task_id=task_id,
-                        message=f"Local browser recording: {recording_path}",
-                        status=MessageStatus.FINISHED,
-                        browser_url=browser_url or "",
-                        action_type="recording",
-                        tool_call_id=str(uuid_module.uuid4()),
-                        extra_metadata={
-                            "recording_path": str(recording_path),
-                            "recording_file_pointer": recording_file_pointer,
-                            "browser_session_metadata": browser_session_metadata,
-                        },
-                    )
+            await _finalize_browser_recording_for_fe_resilient(
+                browser_recorder=browser_recorder,
+                agent_id=agent_id,
+                task_id=task_id,
+                user_id=user_id,
+                browser_url=browser_url,
+                browser_session_metadata=browser_session_metadata,
+            )
         await _stop_playwright_resources(playwright_browser, playwright_instance, agent_id)
 
 
@@ -3790,7 +4266,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             active_gpt_account_id,
                             active_gpt_source,
                             active_gpt_pool_id,
-                            getattr(workflow_instance, "fast_mode_cache_enabled", False),
+                            False,
                         ],
                         start_to_close_timeout=timedelta(minutes=ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES),
                         heartbeat_timeout=timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS),

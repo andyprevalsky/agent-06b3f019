@@ -14,6 +14,11 @@ export function resolveBackendBaseUrl(
     const explicit = explicitUrl ? explicitUrl.replace(/\/$/, '') : '';
     const explicitIsDefaultLocal =
       explicit === 'http://localhost:3001' || explicit === 'http://127.0.0.1:3001';
+    const explicitIsLocal =
+      explicit.startsWith('http://localhost:') || explicit.startsWith('http://127.0.0.1:');
+    if (!isLocalHost && explicitIsLocal) {
+      return '';
+    }
     if (isLocalHost && Number.isInteger(frontendPort) && frontendPort > 1) {
       if (!explicit || (explicitIsDefaultLocal && frontendPort !== 3002)) {
         return `${locationLike.protocol}//${locationLike.hostname}:${frontendPort - 1}`;

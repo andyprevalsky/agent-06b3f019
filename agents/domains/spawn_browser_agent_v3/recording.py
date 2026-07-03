@@ -196,6 +196,31 @@ class BrowserAgentRecorder:
             output_dir=str(self.output_dir),
         )
 
+    async def _active_page(self):
+        """Return the foreground/active tab so the recording FOLLOWS tab switches
+        (e.g. an "order ahead" link that opens the merchant in a NEW tab). The
+        fixed self.page reference would otherwise pin the recording to tab 1 and
+        every multi-tab flow would look stuck on the first page."""
+        try:
+            pages = list(self.page.context.pages)
+        except Exception:
+            return self.page
+        if not pages:
+            return self.page
+        if len(pages) == 1:
+            return pages[0]
+        # Prefer the visible (non-hidden) tab; check newest-first since a freshly
+        # opened tab (the usual active one) is appended at the end. Bounded evals
+        # so a frozen renderer can't stall the capture loop.
+        for candidate in reversed(pages):
+            try:
+                hidden = await asyncio.wait_for(candidate.evaluate("document.hidden"), timeout=1.0)
+                if not hidden:
+                    return candidate
+            except Exception:
+                continue
+        return pages[-1]
+
     async def _capture_loop(self) -> None:
         while not self._closed:
             # Back off when the renderer is frozen by a bot-challenge: each failed
@@ -237,8 +262,17 @@ class BrowserAgentRecorder:
         async with self._capture_lock:
             if self._closed or len(self.frames) >= self.max_frames:
                 return
+            active_url = ""
             try:
-                image_bytes = await self.page.screenshot(type="jpeg", quality=55, full_page=False, timeout=5000)
+                active_page = await self._active_page()
+                image_bytes = await asyncio.wait_for(
+                    active_page.screenshot(type="jpeg", quality=55, full_page=False, timeout=5000),
+                    timeout=6,
+                )
+                try:
+                    active_url = active_page.url or ""
+                except Exception:
+                    active_url = ""
                 self._consecutive_failures = 0
             except Exception as exc:
                 self._consecutive_failures += 1
@@ -262,24 +296,33 @@ class BrowserAgentRecorder:
                     "label": label,
                     "action": action,
                     "cursor": self._cursor,
+                    "tab_url": active_url,
                     "metadata": dict(metadata if metadata is not None else self._last_metadata),
                     "size": len(image_bytes),
                 }
             )
 
-    async def close(self) -> Optional[Path]:
+    async def close(self, *, include_steel_media: bool = True) -> Optional[Path]:
         if self._closed:
             existing_path = self.output_dir / "index.html"
             return existing_path if existing_path.exists() else None
         if self._loop_task:
             self._loop_task.cancel()
             try:
-                await self._loop_task
-            except asyncio.CancelledError:
+                await asyncio.wait_for(self._loop_task, timeout=3)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
-        await self.capture("recording stopped", action="stop", force=True)
+        try:
+            await asyncio.wait_for(self.capture("recording stopped", action="stop", force=True), timeout=7)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Browser agent recording final frame capture timed out",
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                existing_frames=len(self.frames),
+            )
         self._closed = True
-        steel_media = await self._download_steel_hls_recording()
+        steel_media = await self._download_steel_hls_recording() if include_steel_media else None
         if not self.frames and not steel_media:
             return None
         source_frame_count = len(self.frames)
@@ -333,16 +376,27 @@ class BrowserAgentRecorder:
         (we always have screenshot frames). Returns None when there are no frames."""
         if not self.frames:
             return None
+        # Inline the REAL captured frames (self.frames), NOT _build_playback_frames()
+        # — the latter collapses every entry to frame_00001, so inlining it produced
+        # ~frame_count base64 copies of ONE image (e.g. 900 dupes → ~90MB HTML) which
+        # blew past the storage upload and failed silently. Dedupe by src so each
+        # distinct jpg is base64'd once; the frame-based player stays compact + plays
+        # frame-by-frame in the FE (no 132MB Steel-MP4 decode dependency).
+        cache: Dict[str, str] = {}
         inlined: List[Dict[str, Any]] = []
-        for frame in self._build_playback_frames():
+        for frame in self.frames:
             src = frame.get("src", "")
             frame_copy = dict(frame)
             if isinstance(src, str) and src.startswith("frames/"):
-                try:
-                    raw = (self.output_dir / src).read_bytes()
-                    frame_copy["src"] = "data:image/jpeg;base64," + base64.b64encode(raw).decode("ascii")
-                except Exception:  # noqa: BLE001 — keep relative src if a frame file is missing
-                    pass
+                data_uri = cache.get(src)
+                if data_uri is None:
+                    try:
+                        raw = (self.output_dir / src).read_bytes()
+                        data_uri = "data:image/jpeg;base64," + base64.b64encode(raw).decode("ascii")
+                    except Exception:  # noqa: BLE001 — keep relative src if a frame file is missing
+                        data_uri = src
+                    cache[src] = data_uri
+                frame_copy["src"] = data_uri
             inlined.append(frame_copy)
         return self._build_html(inlined).encode("utf-8")
 
@@ -599,11 +653,35 @@ function renderAt(tsMs) {{
   playheadMs = Math.max(0, Math.min(totalMs, tsMs));
   const idx = frameIndexAtTime(playheadMs);
   const img = images[idx], f = frames[idx];
+  const frameEffTs = eff[idx] || 0;
+  const nextEffTs = eff[Math.min(frames.length - 1, idx + 1)] || frameEffTs;
+  const frameRealTs = f && f.ts_ms != null ? f.ts_ms : playheadMs;
+  const nextFrame = frames[Math.min(frames.length - 1, idx + 1)];
+  const nextRealTs = nextFrame && nextFrame.ts_ms != null ? nextFrame.ts_ms : frameRealTs;
+  const frameSpan = Math.max(1, nextEffTs - frameEffTs);
+  const frameT = Math.max(0, Math.min(1, (playheadMs - frameEffTs) / frameSpan));
+  const cursorTs = frameRealTs + (nextRealTs - frameRealTs) * frameT;
   const paint = () => {{
     canvas.width = img.naturalWidth || 1280;
     canvas.height = img.naturalHeight || 800;
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    drawCursor(cursorByFrame[idx]);
+    // Animate the cursor from the captured humanized path (cursorEvents, keyed on
+    // each frame's REAL timestamp) rather than the static per-frame snapshot — the
+    // per-frame cursor is a single capture-time position and never moves.
+    drawCursor(cursorAtTime(cursorTs) || cursorByFrame[idx]);
+    // Active-tab indicator: show which tab this frame was captured from, so
+    // multi-tab flows are legible (the recording now follows the active tab).
+    if (f && f.tab_url) {{
+      ctx.save();
+      ctx.font = '13px ui-monospace, Menlo, monospace';
+      const label = ('◯ ' + f.tab_url).slice(0, 96);
+      const w = ctx.measureText(label).width + 14;
+      ctx.fillStyle = 'rgba(10,10,12,.72)';
+      ctx.fillRect(8, 8, w, 24);
+      ctx.fillStyle = 'rgba(255,255,255,.92)';
+      ctx.fillText(label, 15, 25);
+      ctx.restore();
+    }}
     timeline.value = Math.round(playheadMs);
     time.textContent = `${{(playheadMs / 1000).toFixed(2)}}s`;
   }};
