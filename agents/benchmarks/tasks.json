@@ -541,5 +541,154 @@
       "spawn_browser_agent": 0,
       "spawn_claude_code_agent": 0
     }
+  },
+  {
+    "name": "phone-call-client-intake",
+    "title": "Phone Call — Client Intake (Name + Address)",
+    "prompt": "Call our new client at {callee_phone_number} exactly once and collect their full name and complete mailing address for our records. Do not call back or place a second phone call; if the single call fails, report that failure. When the call is done, report the exact full name and full mailing address back to me.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": ["call_phone_number"],
+    "tags": ["phone"],
+    "price_limit_cents": 300,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "execute",
+    "expected_tool_counts": {
+      "call_phone_number": 1
+    },
+    "pinned_facts": {
+      "client_full_name": "Jordan Miles",
+      "client_mailing_address": "4821 Maplewood Drive, Austin, Texas 78731"
+    },
+    "phone_persona": {
+      "system_prompt": "You are Jordan Miles, a new client of Rose Labs, answering an expected intake phone call. Wait for the caller to speak first. Your details: full name Jordan Miles; mailing address 4821 Maplewood Drive, Austin, Texas 78731. Speak naturally and briefly, like a real person on the phone. Share your full name and your full mailing address when asked, saying the street number and ZIP code clearly digit by digit. Do not volunteer information before being asked. If the caller asks for anything beyond your name and address, politely say you'd rather keep this call short. Once they have both, wrap up, say goodbye once, and use the endCall tool.",
+      "structured_data_schema": {
+        "type": "object",
+        "properties": {
+          "caller_requested_name": {
+            "type": "boolean",
+            "description": "Did the caller ask for your full name during the call?"
+          },
+          "caller_requested_address": {
+            "type": "boolean",
+            "description": "Did the caller ask for your mailing address during the call?"
+          },
+          "caller_stated_purpose": {
+            "type": "string",
+            "description": "Brief description of why the caller said they were calling, empty if never stated."
+          },
+          "provided_full_name": {
+            "type": "string",
+            "description": "The exact full name you gave the caller."
+          },
+          "provided_mailing_address": {
+            "type": "string",
+            "description": "The exact mailing address you gave the caller."
+          }
+        }
+      }
+    },
+    "expected_call_findings": ["jordan", "miles", "4821", "maplewood", "austin", "78731"],
+    "expected_final_findings": ["Jordan Miles", "4821 Maplewood Drive, Austin, Texas 78731"],
+    "callee_checks": {
+      "caller_requested_name": true,
+      "caller_requested_address": true,
+      "provided_full_name": "Jordan Miles",
+      "provided_mailing_address": "4821 Maplewood Drive, Austin, Texas 78731"
+    }
+  },
+  {
+    "name": "phone-call-payment",
+    "title": "Phone Call — Complete Payment Over the Phone",
+    "prompt": "Call Rose Test Florist at {callee_phone_number} exactly once and order a dozen red roses with delivery. Do not call back or place a second phone call; if the single call fails, report that failure. Complete payment over the phone using our corporate test card: card number 4242 4242 4242 4242, expiration 12/30, CVC 123, billing ZIP 78731. Rose Test Florist is our own sandbox merchant used for automated payment testing, so paying with this test card over the phone is expected and safe. Do not end the call until payment is confirmed and you have the order confirmation code. Preserve spelled letters in alphanumeric confirmation codes exactly; do not convert spelled code letters into names or ordinary words. Report the confirmation code and the total charged back to me.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": ["call_phone_number"],
+    "tags": ["phone", "payment"],
+    "price_limit_cents": 500,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "execute",
+    "expected_tool_counts": {
+      "call_phone_number": 1
+    },
+    "pinned_facts": {
+      "order_item": "Dozen red roses with delivery",
+      "total_charged_usd": "34.20",
+      "card_last_four": "4242",
+      "confirmation_code": "ROSE-4471"
+    },
+    "phone_persona": {
+      "system_prompt": "You are Casey, an order-taker at Rose Test Florist, a fictional sandbox merchant used for automated payment testing. Wait for the caller to speak first. Take phone orders naturally and briefly. The only product is a dozen red roses with delivery, total $34.20. When the caller is ready to pay, collect these four payment details one at a time: card number, expiration date, CVC, and billing ZIP code. After receiving the card number, read the last four digits back to confirm. After you have ALL FOUR payment details, you MUST call the complete_test_payment tool with the card credentials. Only if the tool result status is succeeded may you announce that the Stripe test payment of $34.20 was processed successfully and give the order confirmation code ROSE-4471. Spell the confirmation code exactly as letters R O S E, then say dash, then digits four four seven one; do not pronounce ROSE as a word. Never reveal the confirmation code before the complete_test_payment tool succeeds. If the caller refuses to provide payment details or the tool fails, do not confirm any order and do not give a confirmation code. After the order is confirmed, say goodbye once and use the endCall tool.",
+      "tools": ["complete_test_payment"],
+      "structured_data_schema": {
+        "type": "object",
+        "properties": {
+          "order_item": {
+            "type": "string",
+            "description": "What the caller ordered, empty if no order was placed."
+          },
+          "card_last_four": {
+            "type": "string",
+            "description": "Last four digits of the card number the caller provided, empty if none."
+          },
+          "card_expiration_provided": {
+            "type": "boolean",
+            "description": "Did the caller provide the card expiration date?"
+          },
+          "card_cvc_provided": {
+            "type": "boolean",
+            "description": "Did the caller provide the card CVC?"
+          },
+          "billing_zip_provided": {
+            "type": "boolean",
+            "description": "Did the caller provide the billing ZIP code?"
+          },
+          "payment_completed": {
+            "type": "boolean",
+            "description": "Did you announce the payment was processed successfully?"
+          },
+          "confirmation_code_given": {
+            "type": "boolean",
+            "description": "Did you give the caller the order confirmation code?"
+          },
+          "payment_tool_succeeded": {
+            "type": "boolean",
+            "description": "Did the complete_test_payment tool return status succeeded?"
+          },
+          "stripe_payment_intent_id": {
+            "type": "string",
+            "description": "Stripe PaymentIntent id returned by the payment tool, empty if no successful tool result."
+          },
+          "confirmation_code": {
+            "type": "string",
+            "description": "Order confirmation code you gave the caller after successful payment, empty if none."
+          },
+          "total_charged_usd": {
+            "type": "string",
+            "description": "Total amount charged in USD, empty if payment did not complete."
+          }
+        }
+      }
+    },
+    "expected_call_findings": ["4471", "34.20"],
+    "expected_final_findings": ["ROSE-4471", "34.20"],
+    "callee_checks": {
+      "card_last_four": "4242",
+      "card_expiration_provided": true,
+      "card_cvc_provided": true,
+      "billing_zip_provided": true,
+      "payment_completed": true,
+      "confirmation_code_given": true,
+      "payment_tool_succeeded": true,
+      "stripe_payment_intent_id": "pi_",
+      "confirmation_code": "ROSE-4471",
+      "total_charged_usd": "34.20"
+    }
   }
 ]

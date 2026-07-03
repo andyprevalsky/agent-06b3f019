@@ -1214,6 +1214,22 @@ def test_keep_failed_agents_only_preserves_failures():
     assert _should_delete_agent_after_run(passed=False, keep_failed_agents=False) is True
 
 
+def test_keep_agents_env_preserves_successes_and_failures():
+    """BENCHMARK_KEEP_AGENTS keeps passed agents loadable for UI audit."""
+    from benchmarks.run_benchmark import _should_delete_agent_after_run
+
+    original_env = os.environ.get("BENCHMARK_KEEP_AGENTS")
+    os.environ["BENCHMARK_KEEP_AGENTS"] = "true"
+    try:
+        assert _should_delete_agent_after_run(passed=True, keep_failed_agents=False) is False
+        assert _should_delete_agent_after_run(passed=False, keep_failed_agents=False) is False
+    finally:
+        if original_env is None:
+            os.environ.pop("BENCHMARK_KEEP_AGENTS", None)
+        else:
+            os.environ["BENCHMARK_KEEP_AGENTS"] = original_env
+
+
 def test_local_plan_runs_load_tests_separately():
     """Local orchestrator separates load-test-sias from normal parallel batches."""
     from benchmarks.local import plan_invocations
@@ -1721,9 +1737,275 @@ def test_spawn_sub_agents_smoke_forbids_browser_and_code_detours():
     assert "explore-agent web research" in task.prompt
 
 
+def test_phone_call_tasks_define_two_sided_verification():
+    """Both phone benchmarks pair a callee persona with agent- and callee-side checks."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    intake = get_task_by_name("phone-call-client-intake")
+    assert intake.expected_tools == ["call_phone_number"]
+    assert intake.expected_tool_counts == {"call_phone_number": 1}
+    assert intake.approval_handling == "auto_approve"
+    assert "{callee_phone_number}" in intake.prompt
+    assert "exactly once" in intake.prompt
+    assert intake.pinned_facts == {
+        "client_full_name": "Jordan Miles",
+        "client_mailing_address": "4821 Maplewood Drive, Austin, Texas 78731",
+    }
+    assert intake.phone_persona["system_prompt"]
+    assert "first_message" not in intake.phone_persona
+    assert "Wait for the caller to speak first" in intake.phone_persona["system_prompt"]
+    assert "endCall tool" in intake.phone_persona["system_prompt"]
+    assert intake.phone_persona["structured_data_schema"]["type"] == "object"
+    assert "jordan" in intake.expected_call_findings
+    assert intake.expected_final_findings == [
+        "Jordan Miles",
+        "4821 Maplewood Drive, Austin, Texas 78731",
+    ]
+    assert intake.callee_checks["caller_requested_name"] is True
+    assert intake.callee_checks["provided_full_name"] == "Jordan Miles"
+    assert intake.callee_checks["provided_mailing_address"] == "4821 Maplewood Drive, Austin, Texas 78731"
+
+    payment = get_task_by_name("phone-call-payment")
+    assert payment.expected_tools == ["call_phone_number"]
+    assert payment.expected_tool_counts == {"call_phone_number": 1}
+    assert "{callee_phone_number}" in payment.prompt
+    assert "exactly once" in payment.prompt
+    assert "4242 4242 4242 4242" in payment.prompt
+    assert payment.pinned_facts == {
+        "order_item": "Dozen red roses with delivery",
+        "total_charged_usd": "34.20",
+        "card_last_four": "4242",
+        "confirmation_code": "ROSE-4471",
+    }
+    assert "first_message" not in payment.phone_persona
+    assert "Wait for the caller to speak first" in payment.phone_persona["system_prompt"]
+    assert payment.callee_checks["card_last_four"] == "4242"
+    assert payment.callee_checks["payment_completed"] is True
+    assert payment.callee_checks["payment_tool_succeeded"] is True
+    assert payment.callee_checks["stripe_payment_intent_id"] == "pi_"
+    assert payment.callee_checks["confirmation_code"] == "ROSE-4471"
+    assert payment.callee_checks["total_charged_usd"] == "34.20"
+    assert "4471" in payment.expected_call_findings
+    assert payment.expected_final_findings == ["ROSE-4471", "34.20"]
+    assert "Preserve spelled letters in alphanumeric confirmation codes exactly" in payment.prompt
+    # The persona must gate the confirmation code behind full payment details.
+    assert "ROSE-4471" in payment.phone_persona["system_prompt"]
+    assert "Spell the confirmation code exactly as letters R O S E" in payment.phone_persona["system_prompt"]
+    assert "do not pronounce ROSE as a word" in payment.phone_persona["system_prompt"]
+    assert "complete_test_payment" in payment.phone_persona["tools"]
+    assert "tool result status is succeeded" in payment.phone_persona["system_prompt"]
+    assert "use the endCall tool" in payment.phone_persona["system_prompt"]
+
+
+def test_phone_callee_assistant_base_has_end_call_tool_and_duration_cap():
+    """Benchmark callees can end completed calls instead of waiting for max duration."""
+    from benchmarks.phone_callee import _CALLEE_ASSISTANT_BASE
+
+    assert _CALLEE_ASSISTANT_BASE["maxDurationSeconds"] == 150
+
+
+def test_missing_call_findings_tolerates_spacing_and_punctuation():
+    """Finding matcher survives transcript formatting like '48 21' or 'rose 4471'."""
+    from benchmarks.phone_callee import missing_call_findings
+
+    haystack = "Client is Jordan Miles, at 48 21 Maplewood Drive. Confirmation: rose 4471."
+    assert missing_call_findings(["jordan", "miles", "4821", "rose-4471"], haystack) == []
+    assert missing_call_findings(["78731"], haystack) == ["78731"]
+
+    spelled_code = "The confirmation code is R O S E dash four four seven one."
+    assert missing_call_findings(["ROSE-4471"], spelled_code) == []
+    assert missing_call_findings(["ROSE-4471"], "The confirmation code is Rosa-4471.") == ["ROSE-4471"]
+
+
+def test_phone_search_text_includes_phone_call_metadata():
+    """Agent-side haystack covers message text AND phoneCall metadata (transcript, structuredData)."""
+    from benchmarks.phone_callee import phone_search_text
+
+    data = {
+        "messages": [
+            {"message": "Call completed", "metadata": {"phoneCall": {"structuredData": {"zip": "78731"}}}},
+            {"text": "The client is Jordan Miles."},
+        ]
+    }
+    text = phone_search_text(data)
+    assert "78731" in text
+
+
+def test_phone_final_result_text_excludes_raw_transcript_evidence():
+    """Returned-data checks cannot pass just because the raw call transcript had the right fact."""
+    from benchmarks.phone_callee import missing_call_findings
+    from benchmarks.run_benchmark import phone_final_result_text
+
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": "Call completed",
+                "metadata": {
+                    "toolName": "call_phone_number",
+                    "phoneCall": {"transcript": "User: code is R O S E dash four four seven one"},
+                },
+            },
+            {
+                "role": "TOOL",
+                "text": "Extracted Output:\n- Order Confirmation Code: Rosa-4471\n- Total: 34.20",
+                "metadata": {"toolName": "attempt_completion", "toolStatus": "FINISHED"},
+            },
+        ]
+    }
+
+    final_text = phone_final_result_text(data)
+    assert "Rosa-4471" in final_text
+    assert "R O S E" not in final_text
+    assert missing_call_findings(["ROSE-4471"], final_text) == ["ROSE-4471"]
+
+
+def test_flatten_pinned_call_findings_extracts_string_leaves():
+    """Pinned facts become agent-side evidence requirements."""
+    from benchmarks.run_benchmark import _flatten_pinned_call_findings
+
+    findings = _flatten_pinned_call_findings(
+        {
+            "client": {"name": "Jordan Miles", "address": "4821 Maplewood Drive"},
+            "payment": {"total": 34.20, "confirmation": "ROSE-4471"},
+        }
+    )
+
+    assert "Jordan Miles" in findings
+    assert "4821 Maplewood Drive" in findings
+    assert "34.2" in findings
+    assert "ROSE-4471" in findings
+
+
+def test_callee_check_failures_coerce_bools_and_match_strings_loosely():
+    """Callee-side checks: lenient bool coercion, squashed string containment, exact otherwise."""
+    from benchmarks.phone_callee import callee_check_failures
+
+    expected = {
+        "payment_completed": True,
+        "card_last_four": "4242",
+        "caller_requested_name": True,
+        "provided_mailing_address": "4821 Maplewood Drive, Austin, Texas 78731",
+    }
+    actual = {
+        "payment_completed": "true",
+        "card_last_four": "ending in 42 42",
+        "caller_requested_name": False,
+        "provided_mailing_address": "four eight two one Maplewood Drive, Austin, Texas seven eight seven three one",
+    }
+    failures = callee_check_failures(expected, actual)
+    assert len(failures) == 1
+    assert failures[0].startswith("caller_requested_name")
+
+    assert callee_check_failures({"payment_completed": True}, {}) == [
+        "payment_completed: expected True, got None"
+    ]
+
+
+def test_payment_audit_structured_data_since_returns_latest_successful_payment():
+    """Callee-side payment checks use backend tool results newer than the active session."""
+    import os
+    import tempfile
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from benchmarks.phone_callee import payment_audit_structured_data_since
+
+    previous = os.environ.get("PHONE_BENCHMARK_PAYMENT_AUDIT_PATH")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "payments.jsonl"
+        path.write_text(
+            "\n".join(
+                [
+                    '{"createdAt":"2026-07-02T21:59:00Z","status":"succeeded","paymentIntentId":"pi_old"}',
+                    '{"createdAt":"2026-07-02T22:01:00Z","status":"failed","error":"cvc is required"}',
+                    (
+                        '{"createdAt":"2026-07-02T22:02:00Z","status":"succeeded",'
+                        '"paymentIntentId":"pi_new","amountCents":3420,"confirmationCode":"ROSE-4471"}'
+                    ),
+                ]
+            )
+            + "\n"
+        )
+        os.environ["PHONE_BENCHMARK_PAYMENT_AUDIT_PATH"] = str(path)
+        try:
+            data = payment_audit_structured_data_since(
+                datetime(2026, 7, 2, 22, 0, 0, tzinfo=timezone.utc)
+            )
+        finally:
+            if previous is None:
+                os.environ.pop("PHONE_BENCHMARK_PAYMENT_AUDIT_PATH", None)
+            else:
+                os.environ["PHONE_BENCHMARK_PAYMENT_AUDIT_PATH"] = previous
+
+    assert data == {
+        "payment_completed": True,
+        "confirmation_code_given": True,
+        "payment_tool_succeeded": True,
+        "stripe_payment_intent_id": "pi_new",
+        "confirmation_code": "ROSE-4471",
+        "total_charged_usd": "34.20",
+    }
+
+
+def test_resolve_callee_prompt_requires_active_session():
+    """{callee_phone_number} without a live callee session must fail loudly, not call a stale number."""
+    from benchmarks.phone_callee import resolve_callee_prompt
+
+    resolved = resolve_callee_prompt("Call the client at {callee_phone_number} now.", "+15551234567", "t")
+    assert resolved == "Call the client at +15551234567 now."
+    assert resolve_callee_prompt("No placeholder here.", "", "t") == "No placeholder here."
+
+    try:
+        resolve_callee_prompt("Call {callee_phone_number}.", "", "phone-call-client-intake")
+        raise AssertionError("expected RuntimeError for missing callee session")
+    except RuntimeError as exc:
+        assert "phone-call-client-intake" in str(exc)
+
+
+def test_benchmark_public_base_url_uses_env_override():
+    """Phone payment tool webhooks can use an explicit public benchmark URL."""
+    import os
+
+    from benchmarks.phone_callee import benchmark_public_base_url
+
+    previous = os.environ.get("BENCHMARK_PHONE_TOOL_BASE_URL")
+    os.environ["BENCHMARK_PHONE_TOOL_BASE_URL"] = "https://benchmark.example"
+    try:
+        assert benchmark_public_base_url() == "https://benchmark.example"
+    finally:
+        if previous is None:
+            os.environ.pop("BENCHMARK_PHONE_TOOL_BASE_URL", None)
+        else:
+            os.environ["BENCHMARK_PHONE_TOOL_BASE_URL"] = previous
+
+
+def test_phone_auto_approval_requires_active_callee_number():
+    """Phone tasks auto-approve only approval requests for the controlled callee number."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _phone_approval_matches_callee
+
+    task = get_task_by_name("phone-call-client-intake")
+    task._callee_phone_number = "+14155550123"
+
+    assert _phone_approval_matches_callee(task, {"question": "Make a phone call to +1 (415) 555-0123?"})
+    assert not _phone_approval_matches_callee(task, {"question": "Make a phone call to +1 (650) 555-0123?"})
+
+
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
+    r.record("phone_call_tasks_two_sided_verification", test_phone_call_tasks_define_two_sided_verification)
+    r.record("phone_callee_end_call_config", test_phone_callee_assistant_base_has_end_call_tool_and_duration_cap)
+    r.record("phone_findings_matcher_squashes_separators", test_missing_call_findings_tolerates_spacing_and_punctuation)
+    r.record("phone_search_text_includes_metadata", test_phone_search_text_includes_phone_call_metadata)
+    r.record("phone_final_result_text_excludes_raw_transcript", test_phone_final_result_text_excludes_raw_transcript_evidence)
+    r.record("phone_pinned_facts_flatten", test_flatten_pinned_call_findings_extracts_string_leaves)
+    r.record("phone_callee_checks_coercion", test_callee_check_failures_coerce_bools_and_match_strings_loosely)
+    r.record("phone_payment_audit_structured_data", test_payment_audit_structured_data_since_returns_latest_successful_payment)
+    r.record("phone_callee_prompt_resolution", test_resolve_callee_prompt_requires_active_session)
+    r.record("phone_public_base_url", test_benchmark_public_base_url_uses_env_override)
+    r.record("phone_auto_approval_requires_callee", test_phone_auto_approval_requires_active_callee_number)
     r.record("extract_worker_pids_macos_python", test_extract_worker_pids_from_ps_matches_macos_python_executable)
     r.record("extract_worker_pids_lowercase_python", test_extract_worker_pids_from_ps_matches_lowercase_python)
     r.record("extract_worker_pids_workspace_filter", test_extract_worker_pids_from_ps_filters_to_workspace_root)

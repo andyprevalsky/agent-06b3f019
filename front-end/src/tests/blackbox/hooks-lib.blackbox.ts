@@ -26,6 +26,7 @@ import {
   derivePendingApproval,
   deriveHasActiveAttentionRequest,
 } from '@/features/terminal/hooks/derivations';
+import { deduplicateToolMessages as deduplicateComponentToolMessages } from '@/features/terminal-component-group/hooks/deduplicateToolMessages';
 
 // useAgentTree (mock realtime)
 // NOTE: vi.mock calls are hoisted — imports below are real. Tests that rely
@@ -240,6 +241,62 @@ describe('derivations.ts', () => {
       ] as any;
       const out = deduplicateToolMessages(msgs);
       expect(out.map((m) => m.message_id)).toEqual(['user']);
+    });
+
+    it('component-group helper collapses phone call lifecycle to the finished card', () => {
+      const msgs = [
+        {
+          message_id: 'init',
+          role: 'TOOL',
+          timestamp: ts(1),
+          text: '**Calling:** +1 (619) 915-3156',
+          metadata: {
+            toolCallId: 'call-1',
+            toolName: 'call_phone_number',
+            title: '📞 Initiating call',
+            toolStatus: 'IN_PROGRESS',
+            phoneCall: { status: 'initiating', to: '+1 (619) 915-3156' },
+          },
+        },
+        {
+          message_id: 'progress',
+          role: 'TOOL',
+          timestamp: ts(2),
+          text: '**Calling:** +1 (619) 915-3156',
+          metadata: {
+            toolCallId: 'call-1',
+            toolName: 'call_phone_number',
+            title: '📞 Call in progress',
+            toolStatus: 'IN_PROGRESS',
+            phoneCall: { status: 'in-progress', to: '+1 (619) 915-3156' },
+          },
+        },
+        {
+          message_id: 'done',
+          role: 'TOOL',
+          timestamp: ts(3),
+          text: 'Call completed with transcript',
+          metadata: {
+            toolCallId: 'call-1',
+            toolName: 'call_phone_number',
+            title: '✅ Call completed',
+            toolStatus: 'FINISHED',
+            phoneCall: {
+              status: 'ended',
+              to: '+1 (619) 915-3156',
+              transcript: 'Jordan Miles confirmed the address.',
+            },
+          },
+        },
+      ] as any;
+
+      const [out] = deduplicateComponentToolMessages(msgs);
+
+      expect(out).toHaveLength(1);
+      expect(out[0].message_id).toBe('done');
+      expect(out[0].metadata?.toolStatus).toBe('FINISHED');
+      expect((out[0].metadata?.phoneCall as any).status).toBe('ended');
+      expect(out[0].text).toContain('transcript');
     });
   });
 
