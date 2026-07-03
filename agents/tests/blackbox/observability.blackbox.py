@@ -79,32 +79,45 @@ def test_prod_llm_context_dump_emits_clickhouse_payload_and_update():
 
 def test_prod_llm_context_dump_kill_switch():
     import helpers.observability as observability
+    import helpers.trace_archive as trace_archive
 
     old_logger = observability.logger
     old_is_prod = observability._IS_PRODUCTION
-    old_dump_enabled = os.environ.get("LLM_CONTEXT_DUMP_PROD")
+    old_archive_root = trace_archive._LOCAL_ROOT
+    old_env = {
+        "LLM_CONTEXT_DUMP_PROD": os.environ.get("LLM_CONTEXT_DUMP_PROD"),
+        "TRACE_ARCHIVE_ENABLED": os.environ.get("TRACE_ARCHIVE_ENABLED"),
+        "TRACE_ARCHIVE_BACKEND": os.environ.get("TRACE_ARCHIVE_BACKEND"),
+    }
     capture = _CaptureLogger()
-    try:
-        observability.logger = capture
-        observability._IS_PRODUCTION = True
-        os.environ["LLM_CONTEXT_DUMP_PROD"] = "0"
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            observability.logger = capture
+            observability._IS_PRODUCTION = True
+            trace_archive._LOCAL_ROOT = Path(tmp)
+            os.environ["LLM_CONTEXT_DUMP_PROD"] = "0"
+            os.environ["TRACE_ARCHIVE_ENABLED"] = "1"
+            os.environ["TRACE_ARCHIVE_BACKEND"] = "local"
 
-        path = observability.dump_llm_context(
-            "explore_agent",
-            [{"role": "user", "content": "sensitive prompt"}],
-            agent_id="agent-1",
-            model="rose-labs/rose-1-lite",
-        )
+            path = observability.dump_llm_context(
+                "explore_agent",
+                [{"role": "user", "content": "sensitive prompt"}],
+                agent_id="agent-1",
+                model="rose-labs/rose-1-lite",
+            )
 
-        assert path is None
-        assert capture.events == []
-    finally:
-        observability.logger = old_logger
-        observability._IS_PRODUCTION = old_is_prod
-        if old_dump_enabled is None:
-            os.environ.pop("LLM_CONTEXT_DUMP_PROD", None)
-        else:
-            os.environ["LLM_CONTEXT_DUMP_PROD"] = old_dump_enabled
+            assert path is not None
+            assert Path(path).exists()
+            assert capture.events == []
+        finally:
+            observability.logger = old_logger
+            observability._IS_PRODUCTION = old_is_prod
+            trace_archive._LOCAL_ROOT = old_archive_root
+            for key, value in old_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
 
 def test_agent_context_materializes_clickhouse_dump_events():

@@ -27,9 +27,11 @@ import {
 import { getValidAccessToken } from '../../services/integrations/gmailSync';
 import { fetchGmailMessagesSince } from '../../services/integrations/gmailParser';
 import { fetchPrimitiveMessagesSince } from '../../providers/primitive';
+import { archiveJson } from '../../providers/traceArchive';
 import * as repo from './repo';
 
 const log = createLogger('Integrations');
+type GmailSendCredential = NonNullable<Awaited<ReturnType<typeof repo.findGmailCredentialForSend>>>;
 
 // Re-export sub-services for routes to consume from a single import
 export {
@@ -236,48 +238,19 @@ export async function fetchEmailsSince(userId: string, since: Date, limit: numbe
 
 export async function sendEmail(
   userId: string,
-  params: { to: string; subject: string; body: string; cc?: string; fromEmail: string }
+  params: {
+    to: string;
+    subject: string;
+    body: string;
+    cc?: string;
+    fromEmail: string;
+    agentId?: string;
+  }
 ) {
   const { refreshGmailToken, buildRawEmail } = await import('./oauthService');
-  const credential = await repo.findGmailCredentialForSend(userId, params.fromEmail);
-
-  if (
-    credential === null ||
-    credential === undefined ||
-    credential.accessToken === null ||
-    credential.accessToken === undefined
-  ) {
-    const creds = await repo.findAvailableGmailEmails(userId);
-    const available = creds
-      .map((c) => c.email)
-      .filter((e): e is string => e !== null && e !== undefined && e !== '');
-    throw new GmailAccountNotFoundError(params.fromEmail, available);
-  }
-
-  let accessToken = credential.accessToken;
-  const isExpired =
-    credential.expiresAt !== null &&
-    credential.expiresAt !== undefined &&
-    new Date(credential.expiresAt) <= new Date();
-
-  if (isExpired) {
-    log.info('Access token expired, refreshing', { userId });
-    const newToken = await refreshGmailToken({
-      id: credential.id,
-      refreshToken: credential.refreshToken,
-    });
-    if (newToken === null || newToken === undefined || newToken === '')
-      throw new GmailTokenExpiredError();
-    accessToken = newToken;
-  }
-
-  const integrationConfig =
-    (credential.integration?.config as Record<string, unknown> | null) ?? {};
-  const senderEmail = credential.email ?? (integrationConfig.connectedEmail as string | undefined);
-  if (senderEmail === undefined || senderEmail === null || senderEmail === '') {
-    throw new Error('Unable to determine sender email address');
-  }
-
+  const credential = await requireGmailCredentialForSend(userId, params.fromEmail);
+  const accessToken = await usableGmailAccessToken(userId, credential, refreshGmailToken);
+  const senderEmail = senderEmailForCredential(credential);
   const rawMessage = buildRawEmail({
     from: senderEmail,
     to: params.to,
@@ -285,28 +258,137 @@ export async function sendEmail(
     subject: params.subject,
     body: params.body,
   });
-  const gmailResponse = await fetch(
-    'https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
-    {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ raw: rawMessage }),
-    }
-  );
+  const requestBody = { raw: rawMessage };
+  const archiveRootId = params.agentId ?? userId;
+  const archiveContext = {
+    user_id: userId,
+    agent_id: params.agentId ?? null,
+    from_email: senderEmail,
+    to: params.to,
+    cc: params.cc ?? null,
+    subject: params.subject,
+  };
+  const gmailResult = await postGmailMessage(accessToken, requestBody);
 
-  if (!gmailResponse.ok) {
-    const errorData = (await gmailResponse.json()) as Record<string, unknown>;
-    log.error('Send email failed', { error: JSON.stringify(errorData) });
-    if (gmailResponse.status === 401) throw new GmailAuthFailedError();
-    const errMsg = (errorData.error as Record<string, unknown> | undefined)?.message;
+  if (!gmailResult.ok) {
+    await archiveEmailBoundary(archiveRootId, {
+      provider: 'gmail',
+      request: {
+        method: 'POST',
+        url: 'https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
+        body: requestBody,
+      },
+      response: gmailResult.data,
+      status_code: gmailResult.status,
+      success: false,
+      context: archiveContext,
+    });
+    log.error('Send email failed', { error: JSON.stringify(gmailResult.data) });
+    if (gmailResult.status === 401) throw new GmailAuthFailedError();
+    const errMsg = (gmailResult.data.error as Record<string, unknown> | undefined)?.message;
     throw new Error(typeof errMsg === 'string' ? errMsg : 'Unknown Gmail API error');
   }
 
-  const result = (await gmailResponse.json()) as { id: string; threadId: string };
+  const result = gmailResult.data as { id: string; threadId: string };
+  await archiveEmailBoundary(archiveRootId, {
+    provider: 'gmail',
+    request: {
+      method: 'POST',
+      url: 'https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
+      body: requestBody,
+    },
+    response: result,
+    status_code: gmailResult.status,
+    success: true,
+    context: {
+      ...archiveContext,
+      message_id: result.id,
+      thread_id: result.threadId,
+    },
+  });
   log.info('Email sent', { userId, messageId: result.id });
   return result;
 }
 /* c8 ignore stop */
+
+async function requireGmailCredentialForSend(
+  userId: string,
+  fromEmail: string
+): Promise<GmailSendCredential> {
+  const credential = await repo.findGmailCredentialForSend(userId, fromEmail);
+  if (credential?.accessToken !== null && credential?.accessToken !== undefined) return credential;
+  const creds = await repo.findAvailableGmailEmails(userId);
+  const available = creds
+    .map((c) => c.email)
+    .filter((email): email is string => email !== null && email !== undefined && email !== '');
+  throw new GmailAccountNotFoundError(fromEmail, available);
+}
+
+async function usableGmailAccessToken(
+  userId: string,
+  credential: GmailSendCredential,
+  refreshGmailToken: (params: { id: string; refreshToken: string | null }) => Promise<string | null>
+): Promise<string> {
+  if (
+    credential.expiresAt === null ||
+    credential.expiresAt === undefined ||
+    new Date(credential.expiresAt) > new Date()
+  ) {
+    return credential.accessToken!;
+  }
+
+  log.info('Access token expired, refreshing', { userId });
+  const newToken = await refreshGmailToken({
+    id: credential.id,
+    refreshToken: credential.refreshToken,
+  });
+  if (newToken === null || newToken === undefined || newToken === '') {
+    throw new GmailTokenExpiredError();
+  }
+  return newToken;
+}
+
+function senderEmailForCredential(credential: GmailSendCredential): string {
+  const integrationConfig =
+    (credential.integration?.config as Record<string, unknown> | null) ?? {};
+  const senderEmail = credential.email ?? (integrationConfig.connectedEmail as string | undefined);
+  if (senderEmail === undefined || senderEmail === null || senderEmail === '') {
+    throw new Error('Unable to determine sender email address');
+  }
+  return senderEmail;
+}
+
+async function postGmailMessage(
+  accessToken: string,
+  requestBody: { raw: string }
+): Promise<{ ok: boolean; status: number; data: Record<string, unknown> }> {
+  const response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(requestBody),
+  });
+  return {
+    ok: response.ok,
+    status: response.status,
+    data: (await response.json()) as Record<string, unknown>,
+  };
+}
+
+async function archiveEmailBoundary(rootAgentId: string, value: unknown): Promise<void> {
+  try {
+    const suffix = `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+    await archiveJson({
+      rootAgentId,
+      objectPath: `provider/email/gmail/${suffix}.json.gz.enc`,
+      value,
+    });
+  } catch (error) {
+    log.warn('Email provider archive failed', {
+      rootAgentId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
 
 export async function disconnectGmailAccount(userId: string, email: string) {
   const credential = await repo.findGmailCredentialForDisconnect(userId, email);

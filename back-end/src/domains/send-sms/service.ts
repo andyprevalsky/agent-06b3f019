@@ -104,7 +104,10 @@ export async function sendDirect(userId: string, message: string) {
     throw new UserHasNoPhoneError();
   }
 
-  const result = await sendSms(userPhone, message);
+  const result = await sendSms(userPhone, message, {
+    archiveRootAgentId: userId,
+    archiveContext: { source: 'send-sms-direct', user_id: userId },
+  });
 
   log.info('Direct send result', {
     userId,

@@ -140,6 +140,9 @@ async def test_browser_agent_recording_writes_local_html_replay():
         async def screenshot(self, **kwargs):
             return b"fake-jpeg-bytes"
 
+        async def content(self):
+            return "<html><body><main>Final browser DOM</main></body></html>"
+
     previous_enabled = os.environ.get("BROWSER_AGENT_RECORDINGS")
     previous_dir = os.environ.get("BROWSER_AGENT_RECORDINGS_DIR")
     previous_interval = os.environ.get("BROWSER_AGENT_RECORDING_INTERVAL_SECONDS")
@@ -156,6 +159,24 @@ async def test_browser_agent_recording_writes_local_html_replay():
                 browser_url="https://api.steel.dev/v1/sessions/session-1/player",
             )
             assert recorder is not None
+            await recorder.record_observation(
+                iteration=1,
+                browser_state={
+                    "url": "https://example.com/checkout",
+                    "title": "Checkout",
+                    "dom_tree": "<main>Checkout</main>",
+                    "screenshot": base64.b64encode(b"state-png").decode("ascii"),
+                },
+                action_entries=[
+                    {
+                        "step": 1,
+                        "action": "click",
+                        "params": {"index": 2},
+                        "result": {"success": True, "screenshot": base64.b64encode(b"action-png").decode("ascii")},
+                    }
+                ],
+            )
+            await recorder.write_final_screenshot(base64.b64encode(b"final-png").decode("ascii"))
             await recorder.mark(
                 "Clicked submit",
                 action="click",
@@ -169,6 +190,17 @@ async def test_browser_agent_recording_writes_local_html_replay():
             manifest = json.loads((html_path.parent / "manifest.json").read_text())
             assert manifest["agent_id"] == "agent-1"
             assert manifest["task_id"] == "task-1"
+            assert manifest["final_dom_path"] == "final-dom.html"
+            assert manifest["final_screenshot_path"] == "final-screenshot.png"
+            assert manifest["observation_count"] == 1
+            assert manifest["observations"] == [{"iteration": 1, "path": "observations/iteration_0001.json"}]
+            assert "Final browser DOM" in (html_path.parent / "final-dom.html").read_text()
+            assert (html_path.parent / "final-screenshot.png").read_bytes() == b"final-png"
+            observation = json.loads((html_path.parent / "observations" / "iteration_0001.json").read_text())
+            assert observation["browser_state"]["url"] == "https://example.com/checkout"
+            assert observation["browser_state"]["dom_tree"] == "<main>Checkout</main>"
+            assert observation["browser_state"]["screenshot"]["redacted"] == "base64-media"
+            assert observation["action_entries"][0]["result"]["screenshot"]["redacted"] == "base64-media"
             assert manifest["frame_count"] >= 2
             assert manifest["cursor_events"][-1] == {
                 "ts_ms": manifest["cursor_events"][-1]["ts_ms"],
@@ -224,6 +256,74 @@ async def test_browser_agent_recording_respects_disabled_env():
             os.environ.pop("BROWSER_AGENT_RECORDINGS", None)
         else:
             os.environ["BROWSER_AGENT_RECORDINGS"] = previous_enabled
+
+
+async def test_browser_agent_recording_enabled_by_trace_archive_in_prod():
+    import tempfile
+    from pathlib import Path
+
+    import helpers.trace_archive as trace_archive
+    from domains.spawn_browser_agent_v3.recording import BrowserAgentRecorder
+
+    class FakePage:
+        async def screenshot(self, **kwargs):
+            return b"fake-jpeg-bytes"
+
+        async def content(self):
+            return "<html><body>prod archive dom</body></html>"
+
+    saved_env = {
+        "ENVIRONMENT": os.environ.get("ENVIRONMENT"),
+        "TRACE_ARCHIVE_ENABLED": os.environ.get("TRACE_ARCHIVE_ENABLED"),
+        "TRACE_ARCHIVE_BACKEND": os.environ.get("TRACE_ARCHIVE_BACKEND"),
+        "TRACE_ARCHIVE_ENCRYPTION_KEY_B64": os.environ.get("TRACE_ARCHIVE_ENCRYPTION_KEY_B64"),
+        "BROWSER_AGENT_RECORDINGS": os.environ.get("BROWSER_AGENT_RECORDINGS"),
+        "BROWSER_AGENT_RECORDINGS_DIR": os.environ.get("BROWSER_AGENT_RECORDINGS_DIR"),
+        "BROWSER_AGENT_RECORDING_INTERVAL_SECONDS": os.environ.get("BROWSER_AGENT_RECORDING_INTERVAL_SECONDS"),
+    }
+    old_archive_root = trace_archive._LOCAL_ROOT
+    old_store = trace_archive.store_encrypted_artifact
+    try:
+        uploaded_paths = []
+
+        def fake_store_encrypted_artifact(*, root_agent_id, path, ciphertext, metadata):
+            uploaded_paths.append((root_agent_id, path, len(ciphertext), metadata))
+            return f"r2://fake/{root_agent_id}/{path}"
+
+        trace_archive.store_encrypted_artifact = fake_store_encrypted_artifact
+        with tempfile.TemporaryDirectory() as recordings, tempfile.TemporaryDirectory() as archive:
+            os.environ["ENVIRONMENT"] = "production"
+            os.environ["TRACE_ARCHIVE_ENABLED"] = "1"
+            os.environ["TRACE_ARCHIVE_BACKEND"] = "r2"
+            os.environ["TRACE_ARCHIVE_ENCRYPTION_KEY_B64"] = base64.b64encode(b"b" * 32).decode("ascii")
+            os.environ.pop("BROWSER_AGENT_RECORDINGS", None)
+            os.environ["BROWSER_AGENT_RECORDINGS_DIR"] = recordings
+            os.environ["BROWSER_AGENT_RECORDING_INTERVAL_SECONDS"] = "60"
+            trace_archive._LOCAL_ROOT = Path(archive)
+            recorder = await BrowserAgentRecorder.create(
+                page=FakePage(),
+                agent_id="agent-prod",
+                task_id="task-prod",
+                session_id="session-prod",
+                browser_url="",
+            )
+            assert recorder is not None
+            await recorder.close()
+            paths = [path for _root, path, _size, _metadata in uploaded_paths]
+            assert "media/browser/task-prod/manifest.json" in paths
+            assert "media/browser/task-prod/final-dom.html" in paths
+            assert "media/browser/task-prod/index.html" in paths
+            assert any(path.startswith("media/browser/task-prod/frames/") for path in paths)
+            assert all(root == "agent-prod" for root, _path, _size, _metadata in uploaded_paths)
+            assert all(size > 0 for _root, _path, size, _metadata in uploaded_paths)
+    finally:
+        trace_archive._LOCAL_ROOT = old_archive_root
+        trace_archive.store_encrypted_artifact = old_store
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def test_browser_agent_recording_supports_video_rate_replay():
@@ -7728,6 +7828,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_agent_recording_disabled_env",
         test_browser_agent_recording_respects_disabled_env,
+    )
+    await r.record_async(
+        "browser_agent_recording_prod_trace_archive",
+        test_browser_agent_recording_enabled_by_trace_archive_in_prod,
     )
     r.record(
         "browser_agent_recording_video_rate_replay",

@@ -2522,6 +2522,12 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                     )
 
                 activity.heartbeat(f"Step {iteration} - calling Rose API")
+                if browser_recorder:
+                    await browser_recorder.record_observation(
+                        iteration=iteration,
+                        browser_state=browser_state,
+                        action_entries=action_entries,
+                    )
 
                 # Fast Mode: replay the recorded decision when the browser request
                 # fingerprint matches. The live browser session still executes the
@@ -3094,6 +3100,8 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
 
                         last_screenshot_b64 = browser_state.get("screenshot")
                         if last_screenshot_b64:
+                            if browser_recorder:
+                                await browser_recorder.write_final_screenshot(last_screenshot_b64)
                             try:
                                 screenshot_bytes = base64.b64decode(last_screenshot_b64)
                                 screenshot_fp = await upload_to_storage(

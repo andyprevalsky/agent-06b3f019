@@ -9,6 +9,7 @@ import { stripe } from '../../providers/stripe';
 import { MAX_PURCHASE_CENTS, PURCHASE_APPROVAL_CACHE_HOURS } from './config';
 import { PurchaseError } from './errors';
 import * as repo from './repo';
+import { archivePurchaseBoundary } from './archive';
 import {
   PurchaseSpendStatus,
   type MintPurchaseInput,
@@ -237,36 +238,45 @@ async function chargeAndIssueCard(
   let paymentIntentId: string | undefined;
   try {
     const paymentMethodId = await getCustomerDefaultPaymentMethodId(stripeCustomerId);
-    const paymentIntent = await stripe.paymentIntents.create(
-      {
-        amount: input.totalCents,
-        currency: 'usd',
-        customer: stripeCustomerId,
-        payment_method: paymentMethodId,
-        confirm: true,
-        off_session: true,
-        // Authorize a hold; the money is only taken on capture (card settles). Abandoned purchases
-        // cancel the hold instead of charge-then-refund — no fee, no user-visible charge churn.
-        capture_method: 'manual',
-        statement_descriptor_suffix: sanitizeDescriptorSuffix(input.merchant),
-        metadata: {
-          userId: input.userId,
-          agentId: input.agentId ?? '',
-          fingerprint: input.fingerprint,
-          purchaseSpendId: purchaseId,
-        },
+    const stripeRequest = {
+      amount: input.totalCents,
+      currency: 'usd',
+      customer: stripeCustomerId,
+      payment_method: paymentMethodId,
+      confirm: true,
+      off_session: true,
+      capture_method: 'manual' as const,
+      statement_descriptor_suffix: sanitizeDescriptorSuffix(input.merchant),
+      metadata: {
+        userId: input.userId,
+        agentId: input.agentId ?? '',
+        fingerprint: input.fingerprint,
+        purchaseSpendId: purchaseId,
       },
+    };
+    const paymentIntent = await stripe.paymentIntents.create(
+      stripeRequest,
       // Per-row idempotency: a retried mint of the SAME purchase never double-charges Stripe.
       { idempotencyKey: `purchase-charge:${purchaseId}` }
     );
     paymentIntentId = paymentIntent.id;
+    await archivePurchaseBoundary(input.agentId, purchaseId, 'stripe-payment-intent', {
+      request: stripeRequest,
+      response: paymentIntent,
+    });
 
     const activeCardProvider = cardProvider ?? createCardProvider();
-    const minted = await activeCardProvider.mintCard({
+    const cardRequest = {
       amountCents: input.totalCents,
       idempotencyKey: `purchase:${purchaseId}`,
-    });
+    };
+    const minted = await activeCardProvider.mintCard(cardRequest);
     const details = await activeCardProvider.getDetails(minted.cardId);
+    await archivePurchaseBoundary(input.agentId, purchaseId, 'agentcard-mint-and-details', {
+      mint_request: cardRequest,
+      mint_response: minted,
+      details_response: details,
+    });
 
     await repo.updatePurchaseStatus(purchaseId, PurchaseSpendStatus.HELD, {
       cardId: minted.cardId,

@@ -592,7 +592,43 @@ async def create_agent(
                     "write_lock_enabled override did not persist: "
                     f"expected {write_lock_enabled}, got {patched.get('write_lock_enabled')}"
                 )
-        return agent_id
+    return agent_id
+
+
+async def archive_agent_start(base_url: str, agent_id: str) -> Optional[str]:
+    try:
+        headers = await _api_headers()
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(f"{base_url}/api/archive/agent-start", headers=headers, json={"agentId": agent_id})
+        if resp.status_code != 200:
+            print(f"    ⚠ Trace archive start failed: {resp.status_code} {resp.text[:160]}")
+            return None
+        fixture = resp.json().get("fixture")
+        return fixture.get("ref") if isinstance(fixture, dict) else None
+    except Exception as exc:
+        print(f"    ⚠ Trace archive start failed: {exc}")
+        return None
+
+
+async def archive_agent_finalize(base_url: str, agent_id: str, task_name: str, *, force: bool = False) -> Optional[str]:
+    if not agent_id:
+        return None
+    try:
+        headers = await _api_headers()
+        async with httpx.AsyncClient(timeout=90) as client:
+            resp = await client.post(
+                f"{base_url}/api/archive/agent-finalize",
+                headers=headers,
+                json={"rootAgentId": agent_id, "benchmarkTaskName": task_name, "force": force},
+            )
+        if resp.status_code != 200:
+            print(f"    ⚠ Trace archive finalize failed: {resp.status_code} {resp.text[:160]}")
+            return None
+        manifest = resp.json().get("manifest")
+        return manifest.get("ref") if isinstance(manifest, dict) else None
+    except Exception as exc:
+        print(f"    ⚠ Trace archive finalize failed: {exc}")
+        return None
 
 
 async def get_agent(base_url: str, agent_id: str) -> dict:
@@ -3572,6 +3608,7 @@ async def run_single_task(
     start = time.time()
     start_time = datetime.now(timezone.utc)
     agent_id = ""
+    archive_manifest_ref: Optional[str] = None
     realtime_monitor: Optional[SupabaseRealtimeSmokeMonitor] = None
     realtime_tree_task: Optional[asyncio.Task] = None
 
@@ -3650,6 +3687,9 @@ async def run_single_task(
             if file_pointers:
                 await post_attachment_message(base_url, agent_id, file_pointers)
                 print(f"    📎 Posted {len(file_pointers)} file(s) as agent message")
+            start_fixture_ref = await archive_agent_start(base_url, agent_id)
+            if start_fixture_ref:
+                print(f"    🧊 Trace archive start fixture: {start_fixture_ref}")
         else:
             agent_id = await create_agent(base_url, task)
             print(f"    Agent created: {agent_id[:12]}...")
@@ -3658,6 +3698,9 @@ async def run_single_task(
                 print("    🔎 Attached seeded agent_network branch")
             await start_realtime_capture()
             await start_realtime_monitor()
+            start_fixture_ref = await archive_agent_start(base_url, agent_id)
+            if start_fixture_ref:
+                print(f"    🧊 Trace archive start fixture: {start_fixture_ref}")
 
         # Poll until done (or early-fail)
         data, approvals_triggered, approvals_resolved, early_fail_reason = await poll_agent(
@@ -3812,6 +3855,9 @@ async def run_single_task(
             log_summary.append(f"{label}={len(entries)}")
         log_summary.append(f"messages={len(logs.get('messages', []))}")
         print(f"    Logs collected: {', '.join(log_summary)}")
+        archive_manifest_ref = await archive_agent_finalize(base_url, agent_id, task.name)
+        if archive_manifest_ref:
+            print(f"    🧊 Trace archive manifest: {archive_manifest_ref}")
 
         # Compute cache hit rate
         total_input = cache_read_input_tokens + cache_creation_input_tokens
@@ -3835,6 +3881,7 @@ async def run_single_task(
             fast_mode_cache_enabled=agent.get("fast_mode_cache_enabled") is True,
             context_violations=context_violation_dicts,
             logs=logs,
+            archive_manifest_ref=archive_manifest_ref,
         )
 
         icon = "✅" if passed else "❌"
@@ -3895,6 +3942,9 @@ async def run_single_task(
                 print(f"    Logs collected: {', '.join(log_summary)}")
             except Exception as log_exc:
                 print(f"    ⚠ Failed to collect cancellation logs: {log_exc}")
+            archive_manifest_ref = await archive_agent_finalize(base_url, agent_id, task.name, force=True)
+            if archive_manifest_ref:
+                print(f"    🧊 Trace archive manifest: {archive_manifest_ref}")
             try:
                 if not keep_failed_agents:
                     await delete_agent(base_url, agent_id)
@@ -3917,6 +3967,7 @@ async def run_single_task(
                 + (f" | Investigate: python agents/benchmarks/agent_latency.py {agent_id}" if agent_id else "")
             ),
             logs=logs,
+            archive_manifest_ref=archive_manifest_ref,
         )
 
     except Exception as e:
@@ -3932,6 +3983,9 @@ async def run_single_task(
                 logs = await collect_logs(agent_id, {}, start_time)
             except Exception:
                 pass
+            archive_manifest_ref = await archive_agent_finalize(base_url, agent_id, task.name, force=True)
+            if archive_manifest_ref:
+                print(f"    🧊 Trace archive manifest: {archive_manifest_ref}")
             try:
                 if not keep_failed_agents:
                     await delete_agent(base_url, agent_id)
@@ -3955,6 +4009,7 @@ async def run_single_task(
                 + " | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>"
             ),
             logs=logs,
+            archive_manifest_ref=archive_manifest_ref,
         )
     finally:
         if realtime_tree_task:
@@ -3986,15 +4041,30 @@ def resolve_tasks(args) -> List[BenchmarkTask]:
     """Resolve which tasks to run from CLI args."""
     if args.task:
         tasks = [get_task_by_name(args.task)]
+        if tasks[0].runner != "agent":
+            raise ValueError(
+                f"Task '{args.task}' is a {tasks[0].runner} eval — run it via "
+                f"benchmarks/run_eval_suite.py or its own test runner, not run_benchmark.py."
+            )
     elif args.suite:
         if args.suite == "all":
             tasks = all_tasks()
         elif args.suite == "auth":
             tasks = get_tasks_by_tag("auth-anon" if getattr(args, "anon", False) else "auth-cookie")
+        elif args.suite in ("rose-bench", "pipeline-e2e"):
+            # Bench axis: rose-bench = harness-independent capability evals,
+            # pipeline-e2e = harness plumbing tests. Orthogonal to tag slices.
+            tasks = [t for t in all_tasks() if t.bench == args.suite]
         else:
             tasks = get_tasks_by_tag(args.suite)
     else:
         tasks = all_tasks()
+
+    if not args.task:
+        # Suite selection only runs complete agent evals. `status == "incomplete"` entries
+        # (missing fixtures/judges) and external vitest smokes stay catalogued but are
+        # skipped; explicit --task still targets incomplete agent evals for dev iteration.
+        tasks = [t for t in tasks if t.runner == "agent" and t.status == "ready"]
 
     excluded_names: set[str] = set()
     for value in getattr(args, "exclude_task", []) or []:

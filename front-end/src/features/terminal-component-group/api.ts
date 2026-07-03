@@ -101,6 +101,45 @@ export async function downloadAttachmentAsBlob(url: string): Promise<Blob> {
   return response.blob();
 }
 
+export interface CatalogTestPrompt {
+  title: string;
+  description: string;
+  prompt: string;
+  attachmentUrls: string[];
+}
+
+/**
+ * Fetch the test-prompt catalog from the backend.
+ *
+ * The backend adapts `agents/benchmarks/tasks.json` (the single canonical eval
+ * catalog) via GET /api/benchmarks/test-prompts, so the dev query box and the
+ * benchmark suite can never drift apart. Throws on non-OK responses.
+ */
+export async function fetchTestPromptCatalog(): Promise<CatalogTestPrompt[]> {
+  const response = await fetch(`${API_BASE_WITH_PATH}/benchmarks/test-prompts`);
+  if (!response.ok) {
+    throw new Error(`test-prompts fetch failed: ${response.status}`);
+  }
+  const data = (await response.json()) as { prompts: CatalogTestPrompt[] };
+  return data.prompts;
+}
+
+/**
+ * Fetch this backend's live ngrok public URL for the test-payment page,
+ * or null when no tunnel is up. Used to resolve the {{TEST_PAYMENT_BASE_URL}}
+ * token in catalog prompts so the cloud browser agent gets a reachable URL.
+ */
+export async function fetchTestPaymentPublicUrl(): Promise<string | null> {
+  try {
+    const response = await fetch(`${API_URL}/api/test-payment/public-url`);
+    if (!response.ok) return null;
+    const data = (await response.json()) as { url: string | null };
+    return data.url ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** Submit free-form feedback text for the authenticated user. Throws when unauthenticated or on non-OK. */
 export async function submitFeedback(feedback: string): Promise<void> {
   const session = getStoredSession();

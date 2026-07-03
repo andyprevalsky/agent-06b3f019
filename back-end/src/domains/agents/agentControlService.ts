@@ -7,6 +7,7 @@ import { broadcastAgentUpdate, broadcastAgentModeStarted } from '../../providers
 import { createLogger } from '../../providers/logger';
 import { resumeAgentWorkflow } from '../../providers/agentResume';
 import { classifyAgentFailureForSurface } from '../../providers/credentialPropagation';
+import { finalizeAgent } from '../../providers/traceArchiveLifecycle';
 import type { Prisma, UpdateStatusBody } from './types';
 import * as repo from './repo';
 
@@ -293,6 +294,17 @@ export async function updateAgentStatus(agentId: string, body: UpdateStatusBody)
   };
 
   await broadcastAgentUpdate(agentId, broadcastPayload);
+  if (TERMINAL_STATUSES.has(fields.status) && agent.parentAgentId === null) {
+    try {
+      await finalizeAgent({ rootAgentId: agentId });
+    } catch (error) {
+      log.warn('Trace archive finalization unavailable', {
+        agent_id: agentId,
+        status: fields.status,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
 
   return updated;
 }

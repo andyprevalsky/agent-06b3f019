@@ -170,8 +170,12 @@ router.post(
   '/email/send',
   authenticate,
   asyncHandler(async (req: AuthRequest, res: Response) => {
-    const { to, subject, body, cc, user_id, from_email } = req.body;
+    const { to, subject, body, cc, user_id, from_email, agent_id } = req.body;
     const userId = req.isInternal === true ? user_id : req.user!.id;
+    const agentId =
+      req.isInternal === true && typeof agent_id === 'string' && agent_id !== ''
+        ? agent_id
+        : undefined;
 
     if (userId === undefined || userId === null || userId === '') {
       return res.status(401).json({ error: 'Unauthorized: user_id required for internal auth' });
@@ -210,6 +214,7 @@ router.post(
         body,
         cc,
         fromEmail: from_email,
+        agentId,
       });
 
       return res.json({

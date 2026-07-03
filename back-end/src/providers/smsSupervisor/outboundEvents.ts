@@ -282,7 +282,10 @@ export async function notifyAgentStarted(
   const url = getAgentUrl(agent.id);
   const message = SMS_TEMPLATES.agentStarted(prefix, agent.goal, url);
 
-  const result = await sendSms(phone, message);
+  const result = await sendSms(phone, message, {
+    archiveRootAgentId: agent.id,
+    archiveContext: { event_type: 'agent_started', user_id: userId },
+  });
 
   log.info('agentStarted SMS sent', {
     userId,
@@ -323,7 +326,10 @@ export async function notifyPlannerMessage(
     ? SMS_TEMPLATES.plannerQuestion(prefix, messageText)
     : SMS_TEMPLATES.plannerFyi(prefix, messageText);
 
-  const result = await sendSms(phone, message);
+  const result = await sendSms(phone, message, {
+    archiveRootAgentId: agent.id,
+    archiveContext: { event_type: 'planner_message', user_id: userId, is_question: isQuestion },
+  });
 
   log.info('plannerMessage SMS sent', {
     userId,
@@ -374,8 +380,22 @@ export async function notifyWriteLock(
   const rehostedMediaUrl = mediaUrl ? await rehostMmsAttachmentUrl(userId, mediaUrl) : null;
 
   const result = rehostedMediaUrl
-    ? await sendMms(phone, message, rehostedMediaUrl)
-    : await sendSms(phone, message);
+    ? await sendMms(phone, message, rehostedMediaUrl, {
+        archiveRootAgentId: agent.id,
+        archiveContext: {
+          event_type: 'write_lock',
+          user_id: userId,
+          attention_request_id: attentionRequestId,
+        },
+      })
+    : await sendSms(phone, message, {
+        archiveRootAgentId: agent.id,
+        archiveContext: {
+          event_type: 'write_lock',
+          user_id: userId,
+          attention_request_id: attentionRequestId,
+        },
+      });
 
   log.info('writeLock notification sent', {
     userId,
@@ -420,7 +440,14 @@ export async function notifyAuthAssistance(
   const url = getAgentUrl(agent.id, browserSessionId);
   const message = SMS_TEMPLATES.authAssistance(prefix, authRealm, url);
 
-  const result = await sendSms(phone, message);
+  const result = await sendSms(phone, message, {
+    archiveRootAgentId: agent.id,
+    archiveContext: {
+      event_type: 'auth_assistance',
+      user_id: userId,
+      browser_session_id: browserSessionId ?? null,
+    },
+  });
 
   log.info('authAssistance SMS sent', {
     userId,
@@ -458,7 +485,10 @@ export async function notifyCompletion(
   const url = getAgentUrl(agent.id);
   const message = SMS_TEMPLATES.agentCompleted(prefix, summary, url);
 
-  const result = await sendSms(phone, message);
+  const result = await sendSms(phone, message, {
+    archiveRootAgentId: agent.id,
+    archiveContext: { event_type: 'completion', user_id: userId },
+  });
 
   log.info('completion SMS sent', {
     userId,
@@ -500,7 +530,10 @@ export async function notifyCostLimit(
     agent.priceLimitCents
   );
 
-  const result = await sendSms(phone, message);
+  const result = await sendSms(phone, message, {
+    archiveRootAgentId: agent.id,
+    archiveContext: { event_type: 'cost_limit', user_id: userId },
+  });
 
   log.info('costLimit SMS sent', {
     userId,

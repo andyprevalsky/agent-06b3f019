@@ -5,15 +5,23 @@
     "prompt": "I'm building a personal brand for health, longevity, technology, founder journey [I'll refine the angle]. Analyze the top 50 creators in this niche across YouTube, IG, TikTok, and Substack.\n\nUse a for_each agent run for the per-creator analysis: first identify the top 50 creators, then use spawn_general_purpose_agent_for_each / for_each so one agent analyzes each creator with the same template.\n\nFor each creator, pull their posting cadence, hook formulas, top 5 performing pieces of the last 90 days, and the gaps in what they cover. Then give me: (a) a positioning statement, (b) a 90-day content calendar across all 4 platforms, (c) 30 hook-tested video script openings, and (d) the 20 creators I should engage with weekly to get on their radar.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_general_purpose_agent_for_each"],
-    "tags": ["for-each", "mass-agent", "research", "scale"],
+    "expected_tools": [
+      "spawn_general_purpose_agent_for_each"
+    ],
+    "tags": [
+      "for-each",
+      "mass-agent",
+      "research",
+      "scale"
+    ],
     "price_limit_cents": 200,
     "requires_browser_agent": false,
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": null,
     "start_phase": "plan",
-    "min_agent_count": 50
+    "min_agent_count": 50,
+    "bench": "rose-bench"
   },
   {
     "name": "single-creator-arm",
@@ -21,15 +29,22 @@
     "prompt": "Analyze exactly one assigned creator using only public web/platform data and return a single structured summary. Focus only on Andrew Huberman (Huberman Lab) in the health/longevity/technology niche, across YouTube, Instagram, TikTok, and Substack. Pull their posting cadence, hook formulas, top 5 performing pieces of the last 90 days, and the gaps in what they cover.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": ["web_search"],
-    "tags": ["mass-agent", "baseline", "single-arm"],
+    "expected_tools": [
+      "web_search"
+    ],
+    "tags": [
+      "mass-agent",
+      "baseline",
+      "single-arm"
+    ],
     "price_limit_cents": 100,
     "requires_browser_agent": false,
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": null,
     "start_phase": "execute",
-    "min_agent_count": 1
+    "min_agent_count": 1,
+    "bench": "pipeline-e2e"
   },
   {
     "name": "chat-mode",
@@ -38,13 +53,18 @@
     "timeout_seconds": 120,
     "is_chat_mode": true,
     "expected_tools": [],
-    "tags": ["basic", "chat", "smoke"],
+    "tags": [
+      "basic",
+      "chat",
+      "smoke"
+    ],
     "price_limit_cents": 25,
     "requires_browser_agent": false,
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": null,
-    "start_phase": null
+    "start_phase": null,
+    "bench": "pipeline-e2e"
   },
   {
     "name": "spawn-sub-agents",
@@ -52,8 +72,13 @@
     "prompt": "Find the current population of Tokyo and the current population of New York City. You MUST use spawn_general_purpose_agent exactly twice - once per city. Each general-purpose agent should use explore-agent web research, MUST NOT use a browser agent, Claude Code, or code sandbox, and should return only the numeric population value. After both agents complete, multiply the two populations together and report the final product.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_general_purpose_agent"],
-    "tags": ["basic", "smoke"],
+    "expected_tools": [
+      "spawn_general_purpose_agent"
+    ],
+    "tags": [
+      "basic",
+      "smoke"
+    ],
     "price_limit_cents": 100,
     "requires_browser_agent": false,
     "requires_claude_code": false,
@@ -67,7 +92,8 @@
       "spawn_general_purpose_agent": 2,
       "spawn_browser_agent": 0,
       "spawn_claude_code_agent": 0
-    }
+    },
+    "bench": "pipeline-e2e"
   },
   {
     "name": "parallel-tool-calls",
@@ -75,8 +101,13 @@
     "prompt": "I'm comparing three cities to live in: Austin TX, Denver CO, and Lisbon Portugal. For each city, search the web for: cost of living, best neighborhoods, and weather. Synthesize your findings into a comparison table.\n\nStart in execute phase. Use explore sub-agents: spawn one explore sub-agent per city, preferably in parallel. Do NOT use Claude Code, a browser agent, or any code sandbox.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["basic", "smoke"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "basic",
+      "smoke"
+    ],
     "price_limit_cents": 100,
     "requires_browser_agent": false,
     "requires_claude_code": false,
@@ -91,7 +122,8 @@
       "spawn_general_purpose_agent_for_each",
       "spawn_browser_agent",
       "spawn_claude_code_agent"
-    ]
+    ],
+    "bench": "pipeline-e2e"
   },
   {
     "name": "grep-explore-stress",
@@ -99,8 +131,13 @@
     "prompt": "Run a comprehensive local-data Grep validation using only explore agents.\n\nCritical execution rules:\n- Do not call send_message_to_user_execute_phase or any progress-message tool. Your first actions must be spawn_agent calls.\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn the explore agents below, wait for them, then provide one final checklist report.\n\nA deterministic benchmark fixture has been seeded into local data with these named records:\n\nMessages:\n- \"Quarterly Lighthouse Brief\" contains a regex-searchable line about the Aurora budget.\n- \"Multiline Incident Note\" contains a multiline block where START and END are on different lines.\n- \"Pagination Ledger\" contains many numbered ledger entries.\n\nNetwork:\n- \"Mara Voss\" has contact details where the match appears in company, title, relation, and communication frequency fields.\n\nAgent network:\n- This agent tree already contains seeded USER, ASSISTANT, TOOL, and SYSTEM messages about the Atlas handoff.\n\nSpawn separate explore agents with these exact assignments. Each explore agent must use grep directly and return exact evidence from the Grep tool result:\n\n1. Omitted-source coverage: call grep without source and find evidence from messages, network, and agent_network.\n2. Messages regex: source=\"messages\", regex pattern for Aurora budget evidence in \"Quarterly Lighthouse Brief\".\n3. Network regex: source=\"network\", use pattern \"Northstar Calibration Group|Principal Signal Cartographer|benchmark verification contact\" and return exact matches for all three non-name fields.\n4. Agent-network roles: source=\"agent_network\", find USER, ASSISTANT, and TOOL Atlas handoff evidence, including location metadata and role.\n5. Case-insensitive: source=\"messages\", use \"-i\": true for mixed-case evidence.\n6. Multiline: source=\"messages\", use multiline: true for a match spanning START to END in \"Multiline Incident Note\".\n7. After context: source=\"messages\", use \"-A\" to return following logical lines.\n8. Before/context: source=\"messages\", use \"-B\" plus either \"-C\" or context to return surrounding logical lines.\n9. No line numbers: source=\"messages\", use \"-n\": false and prove line numbers are suppressed.\n10. Pagination: source=\"messages\", use pattern \"Ledger entry\", head_limit: 3, and offset: 20 so the result includes exact evidence \"Ledger entry 21: offset target confirmed\".\n\nAfter all explore agents complete, synthesize a final report with PASS or FAIL for each assignment. Include source searched, grep flags used, exact matched evidence, and for agent_network matches, the message role and location metadata returned by Grep. Only mark PASS when the explore agent found exact evidence from Grep.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["grep", "local-only"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "grep",
+      "local-only"
+    ],
     "price_limit_cents": 250,
     "requires_browser_agent": false,
     "requires_claude_code": false,
@@ -118,7 +155,8 @@
       "spawn_claude_code_agent",
       "message_person",
       "send_message_to_user_execute_phase"
-    ]
+    ],
+    "bench": "pipeline-e2e"
   },
   {
     "name": "user-data-prod-grep",
@@ -144,7 +182,8 @@
       "spawn_claude_code_agent",
       "message_person",
       "send_message_to_user_execute_phase"
-    ]
+    ],
+    "bench": "pipeline-e2e"
   },
   {
     "name": "plaid-transactions-monthly-spend",
@@ -171,7 +210,38 @@
       "spawn_claude_code_agent",
       "message_person",
       "send_message_to_user_execute_phase"
-    ]
+    ],
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": ["plaid_transactions_benchmark_v1"],
+      "base_images": [],
+      "services": ["plaid_transactions", "grep"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Local Plaid transaction fixture seeded by back-end/scripts/plaid-transactions-benchmark-fixture.ts; grep source=transactions is the required data path."
+    },
+    "evaluators": [
+      {
+        "id": "primary",
+        "method": "static_check",
+        "criteria": [
+          "Final answer reports September 2025 posted USD outflow spend",
+          "Income/refunds and pending transactions are excluded",
+          "Transaction grep evidence is cited"
+        ],
+        "checks": [
+          {
+            "type": "string_match",
+            "expected_strings": ["2184.42"]
+          }
+        ]
+      }
+    ],
+    "source": [
+      "main-sync:plaid-transactions-monthly-spend",
+      "fixture:back-end/scripts/plaid-transactions-benchmark-fixture.ts"
+    ],
+    "bench": "pipeline-e2e"
   },
   {
     "name": "plaid-transactions-doordash-count",
@@ -198,7 +268,38 @@
       "spawn_claude_code_agent",
       "message_person",
       "send_message_to_user_execute_phase"
-    ]
+    ],
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": ["plaid_transactions_benchmark_v1"],
+      "base_images": [],
+      "services": ["plaid_transactions", "grep"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Local Plaid transaction fixture seeded by back-end/scripts/plaid-transactions-benchmark-fixture.ts; grep source=transactions is the required data path."
+    },
+    "evaluators": [
+      {
+        "id": "primary",
+        "method": "static_check",
+        "criteria": [
+          "Final answer reports the exact count of posted DoorDash transactions in 2025",
+          "The count is based on transaction rows, not snippets only",
+          "Transaction grep evidence is cited"
+        ],
+        "checks": [
+          {
+            "type": "string_match",
+            "expected_strings": ["7"]
+          }
+        ]
+      }
+    ],
+    "source": [
+      "main-sync:plaid-transactions-doordash-count",
+      "fixture:back-end/scripts/plaid-transactions-benchmark-fixture.ts"
+    ],
+    "bench": "pipeline-e2e"
   },
   {
     "name": "plaid-transactions-dead-subscriptions",
@@ -225,7 +326,43 @@
       "spawn_claude_code_agent",
       "message_person",
       "send_message_to_user_execute_phase"
-    ]
+    ],
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": ["plaid_transactions_benchmark_v1"],
+      "base_images": [],
+      "services": ["plaid_transactions", "grep"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Local Plaid transaction fixture seeded by back-end/scripts/plaid-transactions-benchmark-fixture.ts; grep source=transactions is the required data path."
+    },
+    "evaluators": [
+      {
+        "id": "primary",
+        "method": "static_check",
+        "criteria": [
+          "Final answer identifies synthetic dead subscription candidates from transaction data",
+          "GitHub/developer-tool subscriptions are excluded from refund prep candidates",
+          "Transaction grep evidence is cited for included and excluded candidates"
+        ],
+        "checks": [
+          {
+            "type": "string_match",
+            "expected_strings": [
+              "StreamNest Premium",
+              "MeditatePro Annual",
+              "CloudBox Storage",
+              "GitHub"
+            ]
+          }
+        ]
+      }
+    ],
+    "source": [
+      "main-sync:plaid-transactions-dead-subscriptions",
+      "fixture:back-end/scripts/plaid-transactions-benchmark-fixture.ts"
+    ],
+    "bench": "pipeline-e2e"
   },
   {
     "name": "message-person",
@@ -233,30 +370,77 @@
     "prompt": "Send a friendly hello message to the phone number 972-977-7432 via both email and iMessage. The email should go to test@example.com. Keep both messages short and friendly.",
     "timeout_seconds": 180,
     "is_chat_mode": false,
-    "expected_tools": ["message_person"],
-    "tags": ["basic", "approval"],
+    "expected_tools": [
+      "message_person"
+    ],
+    "tags": [
+      "basic",
+      "approval"
+    ],
     "price_limit_cents": 50,
     "requires_browser_agent": false,
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": "auto_approve",
-    "start_phase": "execute"
+    "start_phase": "execute",
+    "bench": "pipeline-e2e"
   },
   {
     "name": "browser-agent",
     "title": "Browser Agent Shopping",
+    "description": "Live Amazon shopping: buy a black beanie under $35 through the cart path (no Buy Now)",
     "prompt": "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. Avoid using the Buy Now button as the purchase path, but make sure purchase is completed.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "needs-auth", "auth", "auth-anon"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "needs-auth",
+      "auth",
+      "auth-anon"
+    ],
     "price_limit_cents": 200,
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": "ignore",
     "expected_attention_kind": "auth_assistance",
-    "start_phase": "execute"
+    "start_phase": "execute",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "amazon.com",
+        "write_lock"
+      ],
+      "secrets": [
+        "amazon_auth_bundle"
+      ],
+      "live_targets": [
+        "https://www.amazon.com"
+      ],
+      "context_notes": "Live Amazon with real account/auth state and payment/write-lock controls. A synthetic digital-twin variant of this scenario lives in the idea bank (black-beanie)."
+    },
+    "evaluators": [
+      {
+        "id": "primary",
+        "method": "agentic_llm_judge",
+        "criteria": [
+          "The agent reached a payment/write-lock or completed purchase state",
+          "The selected product is a black beanie under $35",
+          "The transcript shows no forbidden Buy Now path"
+        ],
+        "judge_prompt": "Review the browser transcript and attention requests. Pass only if the task reaches the expected live commerce state with a qualifying product and obeys the path constraint."
+      }
+    ],
+    "source": [
+      "long-horizon:shopping-black-beanie-live-amazon",
+      "test-prompts:Test Browser Agent"
+    ],
+    "bench": "rose-bench"
   },
   {
     "name": "browser-agent-amazon-cookie-payment",
@@ -264,15 +448,24 @@
     "prompt": "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. Avoid using the Buy Now button as the purchase path, but make sure purchase is completed.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "needs-auth", "auth", "auth-cookie", "local-only"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "needs-auth",
+      "auth",
+      "auth-cookie",
+      "local-only"
+    ],
     "price_limit_cents": 200,
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": "ignore",
     "expected_attention_kind": "write_lock",
-    "start_phase": "execute"
+    "start_phase": "execute",
+    "bench": "pipeline-e2e"
   },
   {
     "name": "browser-toast-nopa-write-lock",
@@ -280,15 +473,23 @@
     "prompt": "Order me 1 rocky fish sandwich from Nopa Fish ferry building",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "needs-auth", "bot-challenge", "local-only"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "needs-auth",
+      "bot-challenge",
+      "local-only"
+    ],
     "price_limit_cents": 200,
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": "ignore",
     "expected_attention_kind": "write_lock",
-    "start_phase": "execute"
+    "start_phase": "execute",
+    "bench": "pipeline-e2e"
   },
   {
     "name": "minted-agent-accounts-uber",
@@ -296,7 +497,9 @@
     "prompt": "Stateful benchmark implemented by run_benchmark.py: delete local minted accounts for the benchmark user, create an Uber-style rider account with a real AgentMail minted inbox, verify the MintedAccount row, then start a fresh booking task in the same Steel browser profile and stop on write-lock approval before payment/request submission.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
     "tags": [
       "browser",
       "needs-auth",
@@ -310,7 +513,8 @@
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": null,
-    "start_phase": "execute"
+    "start_phase": "execute",
+    "bench": "pipeline-e2e"
   },
   {
     "name": "minted-agent-accounts-x",
@@ -318,14 +522,23 @@
     "prompt": "Make a post on X.com that says, Hello World",
     "timeout_seconds": 1200,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "needs-auth", "minted", "local-only", "social"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "needs-auth",
+      "minted",
+      "local-only",
+      "social"
+    ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": null,
-    "start_phase": "execute"
+    "start_phase": "execute",
+    "bench": "pipeline-e2e"
   },
   {
     "name": "claude-code-agent",
@@ -333,14 +546,20 @@
     "prompt": "Using Claude Code, write and run a Python program that computes the Collatz sequence starting from 27. Print every number in the sequence until it reaches 1, and print the total count of steps.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_claude_code_agent"],
-    "tags": ["claude-code", "smoke"],
+    "expected_tools": [
+      "spawn_claude_code_agent"
+    ],
+    "tags": [
+      "claude-code",
+      "smoke"
+    ],
     "price_limit_cents": 100,
     "requires_browser_agent": false,
     "requires_claude_code": true,
     "attachment": null,
     "approval_handling": null,
-    "start_phase": "execute"
+    "start_phase": "execute",
+    "bench": "pipeline-e2e"
   },
   {
     "name": "browser-smoke",
@@ -348,14 +567,21 @@
     "prompt": "Use a browser agent to go to https://example.com and tell me what the main heading says on the page.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["basic", "browser", "smoke"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "basic",
+      "browser",
+      "smoke"
+    ],
     "price_limit_cents": 50,
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": null,
-    "start_phase": "execute"
+    "start_phase": "execute",
+    "bench": "pipeline-e2e"
   },
   {
     "name": "agent-payment-test-shop",
@@ -363,8 +589,14 @@
     "prompt": "Use a browser agent to go to {frontend_url}/test_payment. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "payment", "local-only"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "payment",
+      "local-only"
+    ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -401,10 +633,17 @@
         }
       ],
       "fees": [
-        { "label": "Tax", "amountCents": 297 },
-        { "label": "Shipping", "amountCents": 499 }
+        {
+          "label": "Tax",
+          "amountCents": 297
+        },
+        {
+          "label": "Shipping",
+          "amountCents": 499
+        }
       ]
-    }
+    },
+    "bench": "pipeline-e2e"
   },
   {
     "name": "browser-biometrics-webdecoy",
@@ -412,14 +651,21 @@
     "prompt": "Use a browser agent to go to https://webdecoy.com/product/fcaptcha-demo/. This is a live third-party behavioral biometrics demo. Interact with it like a normal user: move to and click the checkbox mode verification control if present, then use the invisible mode form by entering benchmark-human@example.com as the email and a short message, and submit it. Do not use JavaScript evaluate to click or fill controls. Use visible browser actions only. Return the final visible FCaptcha risk score exactly as shown, whether the checkbox mode appeared to pass, whether the invisible form was submitted, and any visible bot/human verdict text.",
     "timeout_seconds": 420,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "biometrics", "smoke"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "biometrics",
+      "smoke"
+    ],
     "price_limit_cents": 120,
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": null,
-    "start_phase": "execute"
+    "start_phase": "execute",
+    "bench": "pipeline-e2e"
   },
   {
     "name": "cache-coverage",
@@ -432,7 +678,9 @@
       "spawn_general_purpose_agent",
       "message_person"
     ],
-    "tags": ["cache"],
+    "tags": [
+      "cache"
+    ],
     "price_limit_cents": 200,
     "requires_browser_agent": true,
     "requires_claude_code": true,
@@ -445,7 +693,8 @@
       "spawn_browser_agent": 1,
       "spawn_claude_code_agent": 1,
       "message_person": 1
-    }
+    },
+    "bench": "pipeline-e2e"
   },
   {
     "name": "image-handling",
@@ -453,14 +702,19 @@
     "prompt": "Make this image completely red-tinted (apply a red color overlay to the entire image).",
     "timeout_seconds": 300,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_claude_code_agent"],
-    "tags": ["attachment"],
+    "expected_tools": [
+      "spawn_claude_code_agent"
+    ],
+    "tags": [
+      "attachment"
+    ],
     "price_limit_cents": 100,
     "requires_browser_agent": false,
     "requires_claude_code": true,
     "attachment": "rs.jpeg",
     "approval_handling": null,
-    "start_phase": "execute"
+    "start_phase": "execute",
+    "bench": "pipeline-e2e"
   },
   {
     "name": "files-in-sub-agents",
@@ -468,14 +722,20 @@
     "prompt": "Create 4 color variants of the attached image: red, blue, green, and yellow tinted versions. Spawn 4 general-purpose agents, one for each color variant. Each general-purpose agent must run a code agent to create its assigned image. Return all 4 images.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_general_purpose_agent"],
-    "tags": ["attachment", "claude-code"],
+    "expected_tools": [
+      "spawn_general_purpose_agent"
+    ],
+    "tags": [
+      "attachment",
+      "claude-code"
+    ],
     "price_limit_cents": 300,
     "requires_browser_agent": false,
     "requires_claude_code": true,
     "attachment": "rs.jpeg",
     "approval_handling": null,
-    "start_phase": "plan"
+    "start_phase": "plan",
+    "bench": "pipeline-e2e"
   },
   {
     "name": "agent-for-each",
@@ -483,14 +743,20 @@
     "prompt": "Read the attached CSV file. For each entity (person/company) in the file, spawn a general-purpose agent to find one interesting fact about them from the web. Collect all facts and present them in a summary.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_general_purpose_agent_for_each"],
-    "tags": ["attachment", "for-each"],
+    "expected_tools": [
+      "spawn_general_purpose_agent_for_each"
+    ],
+    "tags": [
+      "attachment",
+      "for-each"
+    ],
     "price_limit_cents": 500,
     "requires_browser_agent": false,
     "requires_claude_code": false,
     "attachment": "entities-12.csv",
     "approval_handling": null,
-    "start_phase": "plan"
+    "start_phase": "plan",
+    "bench": "pipeline-e2e"
   },
   {
     "name": "family-office-angel-outreach",
@@ -498,14 +764,24 @@
     "prompt": "I've attached a CSV of ~700 angels. Get me on a call to chat with as many of the people on this list as possible.\n\nEach message should be personalized, sent from andy@roselabs.ai and be centered around getting feedback about ML research I'm doing in mass agent networks. Here is the blog post I wrote: https://www.roselabs.ai/research/task-decomposer\n\nWe need to make sure we run this process with world class persistence, etiquette, and attention to detail. I want to have one general-purpose agent manage each individual relationship, and be responsible for follow-ups, responses, getting them on a call via generating a calendly link on a browser agent etc.\n\nSince you are limited on the general-purpose agents you can create, you may need to split the file up into chunks which are handed off to each agent which recursively reduce the list down to one agent per person. Chunk it as you see fit.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent", "explore", "message_person"],
-    "tags": ["attachment", "for-each", "approval", "outreach"],
+    "expected_tools": [
+      "spawn_agent",
+      "explore",
+      "message_person"
+    ],
+    "tags": [
+      "attachment",
+      "for-each",
+      "approval",
+      "outreach"
+    ],
     "price_limit_cents": 1000,
     "requires_browser_agent": false,
     "requires_claude_code": false,
     "attachment": "vcs-and-angels.csv",
     "approval_handling": "prompt_user",
-    "start_phase": "plan"
+    "start_phase": "plan",
+    "bench": "rose-bench"
   },
   {
     "name": "outreach-batch",
@@ -517,7 +793,13 @@
       "spawn_general_purpose_agent_for_each",
       "message_person"
     ],
-    "tags": ["attachment", "for-each", "approval", "outreach", "batch"],
+    "tags": [
+      "attachment",
+      "for-each",
+      "approval",
+      "outreach",
+      "batch"
+    ],
     "price_limit_cents": 2000,
     "requires_browser_agent": false,
     "requires_claude_code": false,
@@ -526,7 +808,37 @@
     "start_phase": "plan",
     "row_start": 71,
     "row_end": 110,
-    "expected_approval_count": 40
+    "expected_approval_count": 40,
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "web_search",
+        "email"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Live outreach drafting gated by count_only approvals so nothing sends without sign-off. Mock message sink for a fully synthetic variant is TODO (idea bank: raise-money)."
+    },
+    "evaluators": [
+      {
+        "id": "primary",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "One draft is produced per assigned CSV row",
+          "Each draft contains recipient-specific research",
+          "Messages ask for feedback without claiming an investment ask",
+          "No messages are actually sent before approval"
+        ],
+        "judge_prompt": "Grade the final answer, drafts, and tool log. Pass only if outreach drafts are personalized, concise, approval-gated, and aligned with the research-feedback ask."
+      }
+    ],
+    "source": [
+      "long-horizon:outreach-angel-feedback-batch",
+      "test-prompts:Outreach In Batch"
+    ],
+    "bench": "rose-bench"
   },
   {
     "name": "build-boxing-payment",
@@ -539,7 +851,12 @@
       "spawn_claude_code_agent",
       "spawn_general_purpose_agent"
     ],
-    "tags": ["browser", "claude-code", "attachment", "needs-auth"],
+    "tags": [
+      "browser",
+      "claude-code",
+      "attachment",
+      "needs-auth"
+    ],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": true,
@@ -553,7 +870,44 @@
       "dallasmmaboxing-waivers/billing_payment_terms_final.pdf"
     ],
     "approval_handling": "prompt_user",
-    "start_phase": "plan"
+    "start_phase": "plan",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "stripe_test_mode",
+        "email",
+        "preview_hosting"
+      ],
+      "secrets": [
+        "STRIPE_SECRET_KEY_TEST",
+        "STRIPE_PUBLISHABLE_KEY_TEST",
+        "STRIPE_SECRET_KEY_PRODUCTION",
+        "STRIPE_PUBLISHABLE_KEY_PRODUCTION"
+      ],
+      "live_targets": [],
+      "context_notes": "Runs live today: Stripe test-mode keys injected via prompt secrets, real confirmation emails, real hosted preview. Agentic-judge runner + mock email-capture fixture are still TODO for the synthetic variant (idea bank: launch-business)."
+    },
+    "evaluators": [
+      {
+        "id": "primary",
+        "method": "agentic_llm_judge",
+        "criteria": [
+          "Hosted site URL is reachable",
+          "Class selection includes the required class names and prices",
+          "Required waiver and terms acknowledgements are represented",
+          "Stripe test payment path is usable",
+          "Confirmation email and QR/discount outputs are present"
+        ],
+        "judge_prompt": "Use browser, code, email, and artifact inspection tools to verify the hosted payment flow end to end against the task requirements."
+      }
+    ],
+    "source": [
+      "long-horizon:site-build-boxing-payment-flow",
+      "test-prompts:Build New Boxing Payment Flow"
+    ],
+    "bench": "rose-bench"
   },
   {
     "name": "job-applications",
@@ -561,8 +915,15 @@
     "prompt": "Get my friend a job as an executive assistant or in childcare.\nShe is currently in Harlem, NYC.\nHer email is testapplicant+bench@example.com\n\n- Shooting for $30/hr, but will take $20/hr minimum.\n- She needs to get a job ASAP.\n- Remote is ideal but not mandatory.\n- Since she needs a job really badly, we can sacrifice specificity for throughput.\n- We don't have access to her email, so I just want you to handle doing whatever is necessary to get her foot in the door, apply to as many relevant jobs as possible and do anything else you think would be conducive to getting her a job quickly.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent", "web_search"],
-    "tags": ["browser", "job-applications", "needs-auth"],
+    "expected_tools": [
+      "spawn_agent",
+      "web_search"
+    ],
+    "tags": [
+      "browser",
+      "job-applications",
+      "needs-auth"
+    ],
     "price_limit_cents": 1000,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -572,7 +933,36 @@
       "test-childcare-resume.pdf"
     ],
     "approval_handling": "prompt_user",
-    "start_phase": "plan"
+    "start_phase": "plan",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "job_boards"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Runs against live job boards with a test-applicant identity. Synthetic job-board fixture + mock application sink are TODO for a controlled variant (idea bank: get-a-job)."
+    },
+    "evaluators": [
+      {
+        "id": "primary",
+        "method": "agentic_llm_judge",
+        "criteria": [
+          "Job targets match the candidate profile",
+          "Application materials are tailored per role",
+          "No real submission happens without approval",
+          "The final report includes evidence and next steps"
+        ],
+        "judge_prompt": "Inspect browsing, generated materials, and submission records. Pass only if applications are relevant, tailored, and approval-gated."
+      }
+    ],
+    "source": [
+      "long-horizon:job-application-blitz-synthetic",
+      "test-prompts:Get Jessie a Job"
+    ],
+    "bench": "rose-bench"
   },
   {
     "name": "load-test-sias",
@@ -580,15 +970,52 @@
     "prompt": "LOAD TEST — your only goal is to spawn exactly {n} general-purpose agents in parallel and aggregate their results. Do this:\n\n1. Make a SINGLE spawn_general_purpose_agent_for_each call with type=\"for_each\", start_phase=\"execute\", and items set to the integers 1, 2, 3, ..., {n} (every integer from 1 through {n}, inclusive — no skips).\n2. Set output_schema to {\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"integer\"}},\"required\":[\"value\"]}.\n3. Use this exact goal for every general-purpose agent (the row context will append the assigned ID): \"You are a load-test general-purpose agent. Your assigned integer ID is in the row context above. Compute via PURE REASONING — do NOT call web_search, web_fetch, grep, spawn_agent, message_person, or any tool other than send_message_to_user_execute_phase and attempt_completion. Compute: value = (ID * ID) + (ID * 3) + 7. (a) Call send_message_to_user_execute_phase with the arithmetic shown (e.g. 'ID=7: 7*7 + 7*3 + 7 = 49 + 21 + 7 = 77'). (b) Then call attempt_completion with {\\\"value\\\": <integer>}.\"\n4. Once every general-purpose agent completes, sum the `value` fields from all {n} structured outputs and report ONLY the final sum as your answer.\n\nDo NOT use spawn_explore_agent, browser, code, or any other tool path — only spawn_general_purpose_agent_for_each + send_message_to_user_execute_phase + attempt_completion.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_general_purpose_agent_for_each"],
-    "tags": ["load-test", "scale"],
+    "expected_tools": [
+      "spawn_general_purpose_agent_for_each"
+    ],
+    "tags": [
+      "load-test",
+      "scale"
+    ],
     "price_limit_cents": 300,
     "requires_browser_agent": false,
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": null,
     "start_phase": "plan",
-    "sub_agent_count": 30
+    "sub_agent_count": 30,
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "No external fixture required; the harness substitutes {n} and {expected_sum} and evaluates deterministic orchestration behavior."
+    },
+    "evaluators": [
+      {
+        "id": "primary",
+        "method": "static_check",
+        "criteria": [
+          "Final answer contains the expected deterministic sum",
+          "At least n sub-agents are created",
+          "No browser or code sandbox detour is used"
+        ],
+        "checks": [
+          {
+            "type": "string_match",
+            "expected_strings": [
+              "{expected_sum}"
+            ]
+          }
+        ]
+      }
+    ],
+    "source": [
+      "long-horizon:load-test-mass-agent-arithmetic"
+    ],
+    "bench": "pipeline-e2e"
   },
   {
     "name": "calendly-schedule-meeting",
@@ -596,14 +1023,23 @@
     "prompt": "Schedule a meeting with Andy Prevalsky (andyprevalsky@yahoo.com). Go to Calendly (log in with a@roselabs.ai, which is aliased to andy@roselabs.ai), create a new 30-minute one-on-one event type, and send the scheduling link to Andy via email at andyprevalsky@yahoo.com. The email should be short and friendly, just letting him know you'd like to set up a quick 30-min chat and including the Calendly link so he can pick a time that works. IMPORTANT: Don't waste time trying to rename the event — the default name is fine. Focus on setting it to 30 minutes, saving it, copying the link, and sending the email.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent", "message_person"],
-    "tags": ["browser", "approval", "outreach", "needs-auth"],
+    "expected_tools": [
+      "spawn_agent",
+      "message_person"
+    ],
+    "tags": [
+      "browser",
+      "approval",
+      "outreach",
+      "needs-auth"
+    ],
     "price_limit_cents": 200,
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": "auto_approve",
-    "start_phase": "plan"
+    "start_phase": "plan",
+    "bench": "rose-bench"
   },
   {
     "name": "people-search-criteria",
@@ -611,8 +1047,12 @@
     "prompt": "Find five people who are partners at venture capital firms that invest in AI infrastructure startups and are based in the San Francisco Bay Area. For each person, report their name and a one-line description of their firm or focus. This is a single criteria-based discovery — do NOT drill into individual firms one at a time. Use explore-agent research to find real people on the public web; do NOT use a browser agent, Claude Code, or code sandbox.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["basic"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "basic"
+    ],
     "price_limit_cents": 150,
     "requires_browser_agent": false,
     "requires_claude_code": false,
@@ -625,7 +1065,8 @@
     "expected_tool_counts": {
       "spawn_browser_agent": 0,
       "spawn_claude_code_agent": 0
-    }
+    },
+    "bench": "pipeline-e2e"
   },
   {
     "name": "people-search-targeted",
@@ -633,8 +1074,12 @@
     "prompt": "Find the current professional profile of Andy Prevalsky, founder of Rose Labs, on the public web. Report his current title, company, location, and LinkedIn profile URL, with a source link. He is not a public figure, so you cannot rely on prior knowledge — you must look him up. Use explore-agent research; do NOT use a browser agent, Claude Code, or code sandbox.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["basic"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "basic"
+    ],
     "price_limit_cents": 150,
     "requires_browser_agent": false,
     "requires_claude_code": false,
@@ -647,6 +1092,262 @@
     "expected_tool_counts": {
       "spawn_browser_agent": 0,
       "spawn_claude_code_agent": 0
-    }
+    },
+    "bench": "pipeline-e2e"
+  },
+  {
+    "name": "linkedin-data-download",
+    "title": "LinkedIn Data Download",
+    "description": "Tests browser agent with LinkedIn data download",
+    "prompt": "go to linkedin.com and trigger a download for my data",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "needs-auth"
+    ],
+    "price_limit_cents": 100,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "status": "incomplete",
+    "source": [
+      "test-prompts:Test Automatic LinkedIn Connection"
+    ],
+    "bench": "pipeline-e2e"
+  },
+  {
+    "name": "spawn-depth-debug",
+    "title": "Recursive Spawn Depth Debug",
+    "description": "Tests recursive general-purpose agent spawning with depth parameter",
+    "prompt": "Spawn 2 general-purpose agents with the same goal as yourself, this is for debugging of the systems max depth parameter. Current Depth Left == 2, when spawning a general-purpose agent decrease this count by 1. If Depth Left == 0, then output a random integer between 0 - 10. If Depth > 0 then output the multiplication of each general-purpose agent you spawned.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_general_purpose_agent"
+    ],
+    "tags": [
+      "basic"
+    ],
+    "price_limit_cents": 100,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "status": "incomplete",
+    "source": [
+      "test-prompts:Test Spawn General-Purpose Agents"
+    ],
+    "bench": "pipeline-e2e"
+  },
+  {
+    "name": "dag-executor-plan-mode",
+    "title": "DAG Executor Plan Mode",
+    "description": "Tests DAG executor with plan mode (no web searches during planning)",
+    "prompt": "Do 3 parallel web_searches to get data for the best of each of these items\n1. Cities to live in in your 20s\n2. place to vacation\n3. cheapest cost of living in NA\n\nno questions ask\nstart in plan mode\ndont use any websearches in plan mode\nno general-purpose agents",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "basic"
+    ],
+    "price_limit_cents": 100,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "status": "incomplete",
+    "source": [
+      "test-prompts:Test DAG Executor"
+    ],
+    "bench": "pipeline-e2e"
+  },
+  {
+    "name": "browser-file-upload-tinypng",
+    "title": "Browser File Upload TinyPNG",
+    "description": "Tests browser agent file upload with TinyPNG",
+    "prompt": "upload this image to tinypng.com and compress it\n\nno general-purpose agents\nno questions asked",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "attachment"
+    ],
+    "price_limit_cents": 100,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": "rs.jpeg",
+    "approval_handling": null,
+    "start_phase": "execute",
+    "status": "incomplete",
+    "source": [
+      "test-prompts:Test Files in Browser Agent"
+    ],
+    "bench": "pipeline-e2e"
+  },
+  {
+    "name": "wait-for-trigger",
+    "title": "Wait For Price Trigger",
+    "description": "Tests wait_for with price trigger and phone call action",
+    "prompt": "Once bitcoin reaches 72K, call my phone number and tell me.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "wait_for"
+    ],
+    "tags": [
+      "wait-for",
+      "voice"
+    ],
+    "price_limit_cents": 50,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "status": "incomplete",
+    "source": [
+      "test-prompts:Test Wait For"
+    ],
+    "bench": "pipeline-e2e"
+  },
+  {
+    "name": "smoke-backend-claude-code",
+    "title": "Backend Smoke: Claude Code E2B Session",
+    "description": "Backend blackbox smoke: real Claude Code session in an E2B sandbox writes a sentinel file",
+    "prompt": "External vitest smoke — not an agent goal. Runs back-end/src/tests/blackbox/claude-code.blackbox.ts (testSmoke_claudeCodeAnswersQuestion): creates a real Claude Code E2B session, asks it to write /home/user/output/claude-smoke.txt with CLAUDE_E2B_OK, asserts the websocket stream and sandbox file contents.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": [
+      "smoke",
+      "external",
+      "claude-code"
+    ],
+    "price_limit_cents": 100,
+    "requires_browser_agent": false,
+    "requires_claude_code": true,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": null,
+    "runner": "vitest",
+    "evaluators": [
+      {
+        "id": "primary",
+        "method": "static_check",
+        "criteria": [
+          "Session creation returns ws_url, task_id, sandbox_id",
+          "Stream contains CLAUDE_E2B_DONE within 240s",
+          "Sandbox file /home/user/output/claude-smoke.txt contains exactly CLAUDE_E2B_OK"
+        ],
+        "checks": [
+          {
+            "type": "vitest",
+            "file": "back-end/src/tests/blackbox/claude-code.blackbox.ts",
+            "test": "testSmoke_claudeCodeAnswersQuestion"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "smoke:back-end/src/tests/blackbox/claude-code.blackbox.ts:testSmoke_claudeCodeAnswersQuestion"
+    ],
+    "bench": "pipeline-e2e"
+  },
+  {
+    "name": "smoke-backend-codex-code",
+    "title": "Backend Smoke: Codex E2B Session",
+    "description": "Backend blackbox smoke: real Codex session in an E2B sandbox writes a sentinel file",
+    "prompt": "External vitest smoke — not an agent goal. Runs back-end/src/tests/blackbox/codex-code.blackbox.ts (testSmoke_codexCompletesE2bTask): creates a real Codex E2B session, asks it to write /home/user/output/codex-smoke.txt with CODEX_E2B_OK, asserts the websocket stream and sandbox file contents.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": [
+      "smoke",
+      "external"
+    ],
+    "price_limit_cents": 100,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": null,
+    "runner": "vitest",
+    "evaluators": [
+      {
+        "id": "primary",
+        "method": "static_check",
+        "criteria": [
+          "Session creation returns ws_url, task_id, sandbox_id",
+          "Stream contains CODEX_E2B_DONE within 240s",
+          "Sandbox file /home/user/output/codex-smoke.txt contains exactly CODEX_E2B_OK"
+        ],
+        "checks": [
+          {
+            "type": "vitest",
+            "file": "back-end/src/tests/blackbox/codex-code.blackbox.ts",
+            "test": "testSmoke_codexCompletesE2bTask"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "smoke:back-end/src/tests/blackbox/codex-code.blackbox.ts:testSmoke_codexCompletesE2bTask"
+    ],
+    "bench": "pipeline-e2e"
+  },
+  {
+    "name": "smoke-backend-sms-supervisor",
+    "title": "Backend Smoke: SMS Supervisor Loop",
+    "description": "Backend blackbox smoke: inbound SMS drives the supervisor loop to send the fixture response",
+    "prompt": "External vitest smoke — not an agent goal. Runs back-end/src/tests/blackbox/sms-supervisor.blackbox.ts (testSmoke_knownPhoneSupervisorSendsSmsResponse): posts an inbound SMS for a provisioned user, asserts the supervisor loop sends the configured outbound reply and session state advances.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": [
+      "smoke",
+      "external"
+    ],
+    "price_limit_cents": 100,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": null,
+    "runner": "vitest",
+    "evaluators": [
+      {
+        "id": "primary",
+        "method": "static_check",
+        "criteria": [
+          "POST /api/sms/inbound returns 200",
+          "Outbound Surge SMS call captured with the fixture reply",
+          "SmsSession records both inbound and assistant messages"
+        ],
+        "checks": [
+          {
+            "type": "vitest",
+            "file": "back-end/src/tests/blackbox/sms-supervisor.blackbox.ts",
+            "test": "testSmoke_knownPhoneSupervisorSendsSmsResponse"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "smoke:back-end/src/tests/blackbox/sms-supervisor.blackbox.ts:testSmoke_knownPhoneSupervisorSendsSmsResponse"
+    ],
+    "bench": "pipeline-e2e"
   }
 ]

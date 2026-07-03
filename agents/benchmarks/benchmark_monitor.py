@@ -20,8 +20,8 @@ import asyncio
 import os
 import sys
 import time
-from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -250,7 +250,7 @@ async def monitor(agent_id: str, base_url: str, interval: int = 60, count_only_a
     print(f"  Monitoring agent {BOLD}{agent_id[:12]}{RESET}")
     print(f"  Polling every {interval}s. Will exit on: COMPLETED, error, or stall.")
     if fly_active:
-        print(f"  Fly.io log streaming: active (worker spans will be saved on exit)")
+        print("  Fly.io log streaming: active (worker spans will be saved on exit)")
     else:
         print(f"  Fly.io log streaming: {fly_status}")
     print()
@@ -268,7 +268,6 @@ async def monitor(agent_id: str, base_url: str, interval: int = 60, count_only_a
 
 async def _save_fly_logs(collector: FlyLogCollector, agent_id: str, base_url: str, start: float):
     """Save captured Fly.io worker logs to disk for post-hoc latency analysis."""
-    import json
     logs_dir = os.path.join(os.path.dirname(__file__), "runs")
     os.makedirs(logs_dir, exist_ok=True)
     out_path = os.path.join(logs_dir, f"{agent_id[:12]}-worker.jsonl")

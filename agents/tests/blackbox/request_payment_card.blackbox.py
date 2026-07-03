@@ -2,6 +2,9 @@
 
 import asyncio
 import json
+import os
+import tempfile
+from pathlib import Path
 
 from _test_utils import (
     BlackboxResult,
@@ -145,12 +148,33 @@ async def test_mint_purchase_card_activity_boundary():
         }
     )
 
+    import helpers.trace_archive as trace_archive
     from domains.request_payment_card.service import normalize_payment_payload
     from tools.request_payment_card import mint_purchase_card_activity
 
-    payload = normalize_payment_payload(_sample_tool_call(), "user-123")
-    payload["agentId"] = "agent-1"
-    result = await mint_purchase_card_activity("user-123", payload)
+    old_root = trace_archive._LOCAL_ROOT
+    old_enabled = os.environ.get("TRACE_ARCHIVE_ENABLED")
+    old_backend = os.environ.get("TRACE_ARCHIVE_BACKEND")
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            trace_archive._LOCAL_ROOT = Path(tmp)
+            os.environ["TRACE_ARCHIVE_ENABLED"] = "1"
+            os.environ["TRACE_ARCHIVE_BACKEND"] = "local"
+            payload = normalize_payment_payload(_sample_tool_call(), "user-123")
+            payload["agentId"] = "agent-1"
+            result = await mint_purchase_card_activity("user-123", payload)
+            archived = Path(tmp) / "agent-1" / "provider" / "payment" / "mint" / f"{payload['fingerprint']}.json.gz.enc"
+            assert archived.exists()
+        finally:
+            trace_archive._LOCAL_ROOT = old_root
+            if old_enabled is None:
+                os.environ.pop("TRACE_ARCHIVE_ENABLED", None)
+            else:
+                os.environ["TRACE_ARCHIVE_ENABLED"] = old_enabled
+            if old_backend is None:
+                os.environ.pop("TRACE_ARCHIVE_BACKEND", None)
+            else:
+                os.environ["TRACE_ARCHIVE_BACKEND"] = old_backend
 
     assert result["cardId"] == "card-1"
     assert result["last4"] == "4242"

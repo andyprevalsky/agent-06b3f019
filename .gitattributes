@@ -1,2 +1,3 @@
 agents/benchmarks/history/task_durations.jsonl merge=union
 agents/benchmarks/history/span_durations.jsonl merge=union
+agents/benchmarks/history/task_attempts.jsonl merge=union

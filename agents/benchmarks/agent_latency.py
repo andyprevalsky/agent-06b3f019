@@ -73,8 +73,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from benchmarks.logs import (
     FlyLogCollector,
     fetch_clickhouse_worker_logs,
-    fetch_flyio_logs_snapshot,
-    fetch_render_logs,
     load_env_var,
 )
 from benchmarks.span_history import make_observation, record_span_observations
@@ -1706,7 +1704,8 @@ async def _fetch_render_logs_bulk(
 ) -> List[_RawEvent]:
     """Fetch ALL backend logs from Render in the time window, filter locally by agent IDs."""
     import httpx
-    from benchmarks.logs import RENDER_API_KEY, RENDER_SERVICE_ID, RENDER_OWNER_ID
+
+    from benchmarks.logs import RENDER_API_KEY, RENDER_OWNER_ID, RENDER_SERVICE_ID
 
     if not RENDER_API_KEY:
         print("  [render] RENDER_API_KEY not set in back-end/.env")
