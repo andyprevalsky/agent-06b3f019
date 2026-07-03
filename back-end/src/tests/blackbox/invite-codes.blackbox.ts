@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console, max-lines */
+/* eslint-disable max-lines */
 /**
  * Black-box tests for the invite-codes domain
  *

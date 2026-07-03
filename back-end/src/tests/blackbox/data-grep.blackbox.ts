@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-/* eslint-disable max-lines, no-console */
+/* eslint-disable max-lines */
 /**
  * Black-box tests for the DB-backed Grep contract.
  */

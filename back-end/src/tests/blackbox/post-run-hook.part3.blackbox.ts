@@ -1,5 +1,4 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
 
 import { randomUUID } from 'node:crypto';
 import { config } from 'dotenv';

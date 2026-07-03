@@ -1,5 +1,4 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
 import { config } from 'dotenv';
 import { z } from 'zod';
 config();

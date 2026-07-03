@@ -107,13 +107,7 @@ export interface CompletionChunk {
  * them into the OpenAI-shaped CompletionChunk for chat callers.
  */
 export type ChunkKind =
-  | 'metadata'
-  | 'content'
-  | 'tool_call'
-  | 'reasoning'
-  | 'codex_reasoning_item'
-  | 'usage'
-  | 'done';
+  'metadata' | 'content' | 'tool_call' | 'reasoning' | 'codex_reasoning_item' | 'usage' | 'done';
 
 export type RoseStreamChunk =
   | {

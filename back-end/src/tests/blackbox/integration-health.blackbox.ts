@@ -1,5 +1,4 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
 /**
  * Black-box credential health checks for every external service that smoke
  * benchmarks depend on. Always runs — no skip-guards, no env-gated branches.

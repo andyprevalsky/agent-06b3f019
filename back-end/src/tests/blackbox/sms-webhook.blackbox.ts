@@ -1,5 +1,4 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
 /**
  * Black-box tests for /api/sms/inbound (Surge webhook)
  *
@@ -203,6 +202,44 @@ async function testInbound_whitespaceOnlyBody() {
     }),
   });
   // Whitespace-only body is trimmed to empty → 400
+  assertStatus(res.status, 400, res.data);
+}
+
+async function testInbound_attachmentOnlyPayload() {
+  // Media-only MMS (photo/voice note, no text) must be accepted, not dropped.
+  const res = await request(`${BASE_URL}/api/sms/inbound`, {
+    method: 'POST',
+    body: JSON.stringify({
+      data: {
+        body: '',
+        attachments: [{ url: 'https://example.com/photo.jpg', type: 'image/jpeg' }],
+        conversation: {
+          contact: { phone_number: '+10000000004' },
+          phone_number: { number: '+14154498072' },
+        },
+      },
+    }),
+  });
+  // Unknown phone → 200 with async "unknown phone" SMS; the point is the
+  // payload parses instead of 400ing on the empty body.
+  assertStatus(res.status, 200, res.data);
+}
+
+async function testInbound_invalidAttachmentsStillRejected() {
+  // Attachment entries without a usable url don't rescue an empty body.
+  const res = await request(`${BASE_URL}/api/sms/inbound`, {
+    method: 'POST',
+    body: JSON.stringify({
+      data: {
+        body: '',
+        attachments: [null, 42, { type: 'image/jpeg' }, { url: '' }],
+        conversation: {
+          contact: { phone_number: '+10000000000' },
+          phone_number: { number: '+14154498072' },
+        },
+      },
+    }),
+  });
   assertStatus(res.status, 400, res.data);
 }
 
@@ -563,6 +600,14 @@ async function runAll() {
     {
       name: 'POST /sms/inbound -- whitespace only body -> 400',
       fn: testInbound_whitespaceOnlyBody,
+    },
+    {
+      name: 'POST /sms/inbound -- attachment-only payload -> 200',
+      fn: testInbound_attachmentOnlyPayload,
+    },
+    {
+      name: 'POST /sms/inbound -- invalid attachments with empty body -> 400',
+      fn: testInbound_invalidAttachmentsStillRejected,
     },
     { name: 'POST /sms/inbound -- error response shape', fn: testInbound_errorShape },
     // unknown phone

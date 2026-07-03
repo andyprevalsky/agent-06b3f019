@@ -219,6 +219,33 @@ async function recordSnapshotRevision(params: {
   });
 }
 
+function buildDryRunResult(
+  source: string,
+  documents: Array<{ externalId: string }>,
+  sync: ReturnType<typeof syncDefaults>
+) {
+  return {
+    integration: {
+      id: 'dry-run',
+      name: source,
+      status: IntegrationStatus.CONNECTED,
+    },
+    documents: documents.map((doc) => ({
+      id: `dry-run:${doc.externalId}`,
+      externalId: doc.externalId,
+    })),
+    documentCount: documents.length,
+    snapshotRevision: null,
+    syncState: {
+      id: 'dry-run',
+      source,
+      status: IntegrationStatus.CONNECTED,
+      nextSyncAt: sync.nextSyncAt,
+    },
+    dryRun: true,
+  };
+}
+
 export async function processDocumentsUpload(userId: string, input: DocumentsUploadInput) {
   const source = parseSource(input.source);
   const dryRun = parseDryRun(input.dryRun);
@@ -232,26 +259,7 @@ export async function processDocumentsUpload(userId: string, input: DocumentsUpl
   const documents = input.documents.map((doc) => normalizeDocument(source, doc));
   const sync = syncDefaults(source);
   if (dryRun) {
-    return {
-      integration: {
-        id: 'dry-run',
-        name: source,
-        status: IntegrationStatus.CONNECTED,
-      },
-      documents: documents.map((doc) => ({
-        id: `dry-run:${doc.externalId}`,
-        externalId: doc.externalId,
-      })),
-      documentCount: documents.length,
-      snapshotRevision: null,
-      syncState: {
-        id: 'dry-run',
-        source,
-        status: IntegrationStatus.CONNECTED,
-        nextSyncAt: sync.nextSyncAt,
-      },
-      dryRun: true,
-    };
+    return buildDryRunResult(source, documents, sync);
   }
 
   await documentRepo.ensureUser(userId);

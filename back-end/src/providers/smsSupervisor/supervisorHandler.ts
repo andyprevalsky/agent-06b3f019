@@ -17,9 +17,11 @@
  */
 
 import { prisma } from '../database';
-import { createStreamingCompletion, CompletionMessage, markCacheable } from '../rose';
+import { createStreamingCompletion, CompletionMessage, ContentBlock, markCacheable } from '../rose';
 import { sendSms } from '../smsQueue';
 import { buildSmsContext } from './contextBuilder';
+import { processInboundAttachments } from './inboundMedia';
+import type { SurgeAttachment } from '../../domains/sms-webhook/types';
 import {
   commitPendingWrites,
   dispatchToolCall,
@@ -115,9 +117,11 @@ export async function handleSmsSupervisorMessage(config: {
   phoneNumber: string;
   inboundMessage: string;
   mySeq: number;
+  attachments?: SurgeAttachment[];
   abortSignal?: AbortSignal;
 }): Promise<SmsSupervisorResult> {
   const { userId, phoneNumber, inboundMessage, mySeq, abortSignal } = config;
+  const attachments = config.attachments ?? [];
   const overallStart = Date.now();
 
   log.info('[SmsSupervisor] === START ===', {
@@ -125,7 +129,28 @@ export async function handleSmsSupervisorMessage(config: {
     phone: phoneNumber.substring(0, 7) + '****',
     messageLength: inboundMessage.length,
     messagePreview: inboundMessage.substring(0, 100),
+    attachmentCount: attachments.length,
   });
+
+  // 0. Resolve MMS media: images become multimodal content blocks on the
+  // inbound user message; voice notes are transcribed into text lines.
+  const media = attachments.length
+    ? await processInboundAttachments(attachments)
+    : { imageBlocks: [], noteLines: [] };
+  const inboundText = [inboundMessage, ...media.noteLines].filter((s) => s !== '').join('\n\n');
+  const inboundContent: string | ContentBlock[] =
+    media.imageBlocks.length > 0
+      ? [
+          {
+            type: 'text',
+            text:
+              inboundText !== ''
+                ? inboundText
+                : 'The user sent the attached photo(s) with no text.',
+          },
+          ...media.imageBlocks,
+        ]
+      : inboundText;
 
   // 1. Load or create SMS session
   const session = await loadOrCreateSession(userId);
@@ -163,7 +188,7 @@ export async function handleSmsSupervisorMessage(config: {
     markCacheable(systemPrompt),
     ...sessionHistory,
     { role: 'user', content: contextUserMessage },
-    { role: 'user', content: inboundMessage },
+    { role: 'user', content: inboundContent },
   ];
 
   // 5. LLM call loop — loop until attempt_completion or safety cap.
@@ -377,10 +402,18 @@ export async function handleSmsSupervisorMessage(config: {
       durationMs: Date.now() - smsStart,
     });
 
-    // Persist the user→assistant turn pair (no tool transcript).
+    // Persist the user→assistant turn pair (no tool transcript). Session
+    // content is text-only: voice notes persist as their transcript lines,
+    // photos as a marker so later turns know an image was shared.
+    const persistedUserContent =
+      media.imageBlocks.length > 0
+        ? [inboundText, `[${media.imageBlocks.length} photo(s) attached]`]
+            .filter((s) => s !== '')
+            .join('\n\n')
+        : inboundText;
     session.messages.push({
       role: 'user',
-      content: inboundMessage,
+      content: persistedUserContent,
       timestamp: new Date().toISOString(),
     });
     session.messages.push({

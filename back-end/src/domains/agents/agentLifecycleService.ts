@@ -10,6 +10,7 @@ import { cleanupAgentSessions } from '../../providers/agentCleanup';
 import { createGithubRepo } from '../../providers/github';
 import { createLogger } from '../../providers/logger';
 import type { CreateAgentBody } from './types';
+import { getPromptSecret } from './config';
 import * as repo from './repo';
 import { resolveCreateMetadata } from './agentCreateMetadata';
 import { captureAgentStart } from '../../providers/traceArchiveLifecycle';
@@ -24,14 +25,12 @@ const DEFAULT_FAST_MODE_USER_IDS = new Set(['1f85ff25-6e29-4c1b-8739-f917bd101a3
 /** Resolve {{VAR_NAME}} placeholders from PROMPT_SECRET_* env vars. */
 export function resolvePromptSecrets(text: string): string {
   return text.replace(/\{\{([A-Z_][A-Z0-9_]*)\}\}/g, (_match, varName: string) => {
-    const envKey = `PROMPT_SECRET_${varName}`;
-    // eslint-disable-next-line no-restricted-syntax -- dynamic env key computed at runtime; can't enumerate in config.ts
-    const value = process.env[envKey];
+    const value = getPromptSecret(varName);
     if (value !== undefined && value !== '') {
       log.info(`Resolved prompt secret: {{${varName}}}`);
       return value;
     }
-    log.warn(`Unresolved prompt secret: {{${varName}}} (env var ${envKey} not set)`);
+    log.warn(`Unresolved prompt secret: {{${varName}}} (env var PROMPT_SECRET_${varName} not set)`);
     return `{{${varName}}}`;
   });
 }
@@ -97,7 +96,6 @@ async function startDirectWorkflow(
   verifier: { type: string },
   priceLimitCents: number
 ): Promise<string> {
-  const startPhase = body.start_phase!;
   const workflowId = await startAgentWorkflow({
     agentId: agentDbId,
     userId,
@@ -106,7 +104,7 @@ async function startDirectWorkflow(
     reasoningMaxTokens: body.reasoning_max_tokens,
     verifier: { type: verifier.type },
     ...(body.task_queue !== undefined ? { taskQueue: body.task_queue } : {}),
-    startPhase,
+    startPhase: body.start_phase!,
     priceLimitCents,
     ...(body.fast_mode_cache_enabled !== undefined
       ? { fastModeCacheEnabled: body.fast_mode_cache_enabled }

@@ -1,5 +1,4 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
 /**
  * Black-box tests for the SMS supervisor's tool-loop + deferred-commit gate.
  *
@@ -41,7 +40,9 @@ import {
   testNaturalApproval_ambiguousApprovalAsksClarification,
   testNaturalApproval_resolvesPendingAttentionRequest,
   testPrompt_neverExposeRoutingIds,
+  testRealLlm_photoAttachmentRoundTrip,
   testRealLlm_supervisorRoundTrip,
+  testRealLlm_voiceNoteRoundTrip,
 } from './sms-supervisor.behavior';
 import { buildToolFailureMessage } from '../../providers/smsSupervisor/supervisorHandler';
 import { commitPendingWrites, PendingOp } from '../../providers/smsSupervisor/supervisorTools';
@@ -611,6 +612,14 @@ async function runAll() {
     {
       name: 'real-llm -- full stack roundtrip (opt-in via BLACKBOX_SMS_SUPERVISOR_REAL_LLM=1)',
       fn: () => testRealLlm_supervisorRoundTrip(prisma),
+    },
+    {
+      name: 'real-llm -- photo attachment round-trip (opt-in via BLACKBOX_SMS_SUPERVISOR_REAL_LLM=1)',
+      fn: () => testRealLlm_photoAttachmentRoundTrip(prisma),
+    },
+    {
+      name: 'real-llm -- voice note round-trip (opt-in via BLACKBOX_SMS_SUPERVISOR_REAL_LLM=1)',
+      fn: () => testRealLlm_voiceNoteRoundTrip(prisma),
     },
   ];
 

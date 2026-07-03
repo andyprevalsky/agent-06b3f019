@@ -11,8 +11,7 @@ export class ToolSideEffectAlreadyStartedError extends Error {
 }
 
 export type ToolSideEffectClaim =
-  | { status: 'claimed'; record: ToolSideEffect }
-  | { status: 'existing'; record: ToolSideEffect };
+  { status: 'claimed'; record: ToolSideEffect } | { status: 'existing'; record: ToolSideEffect };
 export type ToolSideEffectJson = Prisma.InputJsonValue;
 
 export async function claimToolSideEffect(params: {

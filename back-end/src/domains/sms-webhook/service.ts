@@ -12,6 +12,7 @@
 import * as repo from './repo';
 import { SURGE_SIGNING_SECRET, IS_PRODUCTION } from './config';
 import { validateSurgeSignature, parseSurgePayload } from './service.validation';
+import type { SurgeAttachment } from './types';
 import { getTemporalClient } from '../../providers/temporal';
 import { sendSms } from '../../providers/smsQueue';
 import { SMS_TEMPLATES } from '../../providers/smsTemplates';
@@ -129,6 +130,7 @@ export async function routeToSupervisor(
   userId: string,
   fromPhone: string,
   messageBody: string,
+  attachments: SurgeAttachment[],
   requestStart: number
 ): Promise<void> {
   // Atomically bump the per-user inbound counter and capture the new value as
@@ -140,6 +142,7 @@ export async function routeToSupervisor(
   log.info('Routing to SMS Supervisor', {
     userId,
     messageLength: messageBody.length,
+    attachmentCount: attachments.length,
     mySeq,
   });
 
@@ -152,6 +155,7 @@ export async function routeToSupervisor(
     phoneNumber: fromPhone,
     inboundMessage: messageBody,
     mySeq,
+    attachments,
     abortSignal: abortController.signal,
   })
     .then((result) => {
@@ -276,7 +280,7 @@ export async function handleInboundSms(input: InboundSmsInput): Promise<InboundS
     throw new InvalidPayloadError();
   }
 
-  const { fromPhone, messageBody } = parsed;
+  const { fromPhone, messageBody, attachments } = parsed;
 
   // Look up user by phone number
   const user = await repo.findUserByPhone(fromPhone);
@@ -304,7 +308,7 @@ export async function handleInboundSms(input: InboundSmsInput): Promise<InboundS
   // Await long enough to atomically bump `lastInboundSeq` so the run captures
   // the right `mySeq` before the next inbound SMS can race. The supervisor
   // itself continues async — the webhook still returns 200 promptly.
-  await routeToSupervisor(user.userId, fromPhone, messageBody, requestStart);
+  await routeToSupervisor(user.userId, fromPhone, messageBody, attachments, requestStart);
 
   return { ok: true };
 }

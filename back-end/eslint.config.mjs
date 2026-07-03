@@ -63,6 +63,14 @@ export default tseslint.config(
     },
   },
 
+  // ── Blackbox test scripts: console output IS the test-runner reporting surface ──
+  {
+    files: ['src/tests/blackbox/**/*.ts'],
+    rules: {
+      'no-console': 'off',
+    },
+  },
+
   // ── Strict overlay: cleaned domains only (type-aware) ──
   ...(STRICT_DOMAIN_FILES.length > 0
     ? [

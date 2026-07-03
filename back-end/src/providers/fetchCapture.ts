@@ -200,6 +200,7 @@ export function installFetchCapture(): Router {
 
     // Serialize request body
     let requestBody: string | null = null;
+    let bodySerializable = true;
     if (init?.body !== undefined && init?.body !== null) {
       if (typeof init.body === 'string') {
         requestBody = init.body;
@@ -207,6 +208,41 @@ export function installFetchCapture(): Router {
         requestBody = init.body.toString();
       } else {
         requestBody = '[non-string body]';
+        bodySerializable = false;
+      }
+    }
+
+    // Non-serializable bodies (FormData, Blob, ArrayBuffer — e.g. multipart
+    // STT uploads) cannot round-trip through the string-based cache layer.
+    // Replaying them would send the literal string "[non-string body]" to the
+    // real API. Pass the original request through untouched and record a
+    // capture entry so boundary assertions still see the outbound call.
+    if (!bodySerializable) {
+      const passthroughEntry: CapturedCall = {
+        id,
+        timestamp: new Date().toISOString(),
+        url,
+        method,
+        requestHeaders: {},
+        requestBody,
+        responseStatus: null,
+        responseBody: null,
+        durationMs: 0,
+        error: null,
+        cached: false,
+        captureToken: captureTokenStore.getStore() ?? null,
+      };
+      try {
+        const response = await originalFetch(input, init);
+        passthroughEntry.durationMs = Date.now() - start;
+        passthroughEntry.responseStatus = response.status;
+        captures.push(passthroughEntry);
+        return response;
+      } catch (err) {
+        passthroughEntry.durationMs = Date.now() - start;
+        passthroughEntry.error = err instanceof Error ? err.message : String(err);
+        captures.push(passthroughEntry);
+        throw err;
       }
     }
 
