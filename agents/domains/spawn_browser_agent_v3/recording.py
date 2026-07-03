@@ -320,6 +320,14 @@ class BrowserAgentRecorder:
                 pass
         await self.capture("recording stopped", action="stop", force=True)
         self._closed = True
+        # Detach the raw CDP session used for screenshots so it doesn't linger
+        # past the recording's lifetime.
+        if self._cdp_session is not None:
+            try:
+                await self._cdp_session.detach()
+            except Exception:
+                pass
+            self._cdp_session = None
         steel_media = await self._download_steel_hls_recording()
         if not self.frames and not steel_media:
             return None
