@@ -744,6 +744,16 @@ async function testTransactionFiltersAndAggregates(userId: string): Promise<void
       `Expected posted filter to hide pending rows, got ${JSON.stringify(postedOnly)}`
     );
   }
+  const postedStarbucks = postedOnly.matches.find((match) => match.content.includes('Starbucks'));
+  if (
+    postedStarbucks === undefined ||
+    !postedStarbucks.content.includes('date: 2025-01-10') ||
+    !postedStarbucks.content.includes('amount: 5.25 USD')
+  ) {
+    throw new Error(
+      `Expected default transaction row snippet to include core date/amount fields, got ${JSON.stringify(postedOnly)}`
+    );
+  }
 }
 
 async function testTransactionTenantIsolation(userId: string): Promise<void> {

@@ -78,6 +78,22 @@ export async function startGmailOAuthApi(returnUrl?: string): Promise<{ authUrl:
   return payload;
 }
 
+export async function disconnectGmailAccountApi(email: string): Promise<void> {
+  const headers = getAuthHeaders();
+  const response = await fetch(
+    `${API_BASE_WITH_PATH}/integrations/email/gmail/accounts/${encodeURIComponent(email)}`,
+    {
+      method: 'DELETE',
+      headers,
+    },
+  );
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.error || 'Failed to disconnect Gmail account');
+  }
+}
+
 export async function sendPasswordRequestApi(request: string): Promise<void> {
   const headers = getAuthHeaders();
   const response = await fetch(`${API_BASE_WITH_PATH}/integrations/passwords/request`, {

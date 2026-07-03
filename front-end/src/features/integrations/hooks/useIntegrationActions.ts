@@ -16,6 +16,7 @@ interface SyncHandlers {
   handleIMessageSync: () => Promise<void>;
   handleLinkedInSync: () => Promise<void>;
   handleEmailConnect: (provider: 'gmail') => Promise<void>;
+  handleEmailDisconnect: (email: string) => Promise<void>;
   handleFileUpload: (type: 'vcf' | 'email-zip', file: File) => Promise<string | undefined>;
 }
 
@@ -80,6 +81,14 @@ export function useIntegrationActions(handlers: SyncHandlers) {
       onIMessageSync: wrapAction(h.handleIMessageSync, setError, 'Failed to sync iMessage'),
       onLinkedInSync: wrapAction(h.handleLinkedInSync, setError, 'Failed to start LinkedIn sync'),
       onGmailConnect: wrapAction(() => h.handleEmailConnect('gmail'), setError, 'Unknown error'),
+      onGmailDisconnect: async (email: string) => {
+        setError(null);
+        try {
+          await h.handleEmailDisconnect(email);
+        } catch (e) {
+          setError(formatError(e, 'Failed to disconnect Gmail account'));
+        }
+      },
       onFileChange: async (type: 'vcf' | 'email-zip', file: File) => {
         setError(null);
         setSuccess(null);

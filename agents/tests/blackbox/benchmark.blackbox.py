@@ -1540,7 +1540,7 @@ def test_build_smoke_memory_summary_flags_growth_and_playwright_driver():
         "playwright_driver_rss_mb": 120.0,
     }
 
-    summary = _build_smoke_memory_summary(before, after)
+    summary = _build_smoke_memory_summary(before, after, platform_name="linux")
 
     assert summary["growth_mb"] == 400.0
     assert any("RSS grew" in f for f in summary["failures"])
@@ -1568,6 +1568,121 @@ def test_build_smoke_memory_summary_passes_stable_worker():
 
     assert summary["growth_mb"] == 50.0
     assert summary["failures"] == []
+
+
+def test_build_smoke_memory_summary_skips_darwin_growth_without_allocator_trim():
+    """macOS RSS growth is a warning when allocator pressure relief cannot trim arenas."""
+    from benchmarks.run_benchmark import _build_smoke_memory_summary
+
+    before = {
+        "available": True,
+        "total_rss_mb": 300.0,
+        "playwright_driver_count": 0,
+        "playwright_driver_rss_mb": 0.0,
+    }
+    after = {
+        "available": True,
+        "total_rss_mb": 700.0,
+        "playwright_driver_count": 0,
+        "playwright_driver_rss_mb": 0.0,
+    }
+
+    summary = _build_smoke_memory_summary(
+        before,
+        after,
+        baseline={"after": {"allocator_trimmed": False}},
+        platform_name="darwin",
+    )
+
+    assert summary["thresholds"]["growth_enforced"] is False
+    assert summary["failures"] == []
+    assert "RSS grew" in summary["growth_warning"]
+
+
+def test_build_smoke_memory_summary_enforces_linux_growth():
+    """Linux/glibc smoke keeps the RSS growth ratchet enforced."""
+    from benchmarks.run_benchmark import _build_smoke_memory_summary
+
+    before = {
+        "available": True,
+        "total_rss_mb": 300.0,
+        "playwright_driver_count": 0,
+        "playwright_driver_rss_mb": 0.0,
+    }
+    after = {
+        "available": True,
+        "total_rss_mb": 700.0,
+        "playwright_driver_count": 0,
+        "playwright_driver_rss_mb": 0.0,
+    }
+
+    summary = _build_smoke_memory_summary(
+        before,
+        after,
+        baseline={"after": {"allocator_trimmed": False}},
+        platform_name="linux",
+    )
+
+    assert summary["thresholds"]["growth_enforced"] is True
+    assert any("RSS grew" in failure for failure in summary["failures"])
+
+
+def test_local_worker_health_url_prefers_explicit_smoke_url():
+    """Smoke memory warmup uses the explicit health URL when the harness provides it."""
+    import os
+
+    from benchmarks.run_benchmark import _local_worker_health_url
+
+    original = os.environ.get("SMOKE_HEALTH_URL")
+    try:
+        os.environ["SMOKE_HEALTH_URL"] = "http://localhost:55132/"
+        assert _local_worker_health_url("http://localhost:55130") == "http://localhost:55132"
+    finally:
+        if original is None:
+            os.environ.pop("SMOKE_HEALTH_URL", None)
+        else:
+            os.environ["SMOKE_HEALTH_URL"] = original
+
+
+def test_local_worker_health_url_derives_from_backend_port():
+    """Local smoke memory warmup pairs the worker health port with the backend port."""
+    import os
+
+    from benchmarks.run_benchmark import _local_worker_health_url
+
+    original = os.environ.pop("SMOKE_HEALTH_URL", None)
+    try:
+        assert _local_worker_health_url("http://localhost:55130") == "http://localhost:55132"
+        assert _local_worker_health_url("https://navi-j9a9.onrender.com") is None
+    finally:
+        if original is not None:
+            os.environ["SMOKE_HEALTH_URL"] = original
+
+
+def test_benchmark_memory_baseline_endpoint_is_guarded():
+    """Worker memory warmup endpoint is unavailable unless benchmark mode enables it."""
+    import os
+
+    import health_server
+
+    original_env = os.environ.pop("ENABLE_BENCHMARK_MEMORY_BASELINE", None)
+    original_baseline = health_server._benchmark_memory_baseline
+    health_server._benchmark_memory_baseline = lambda: {"ok": True}
+    try:
+        with health_server.app.test_client() as client:
+            disabled = client.post("/benchmark/memory-baseline")
+            assert disabled.status_code == 404
+
+            os.environ["ENABLE_BENCHMARK_MEMORY_BASELINE"] = "1"
+            enabled = client.post("/benchmark/memory-baseline")
+            assert enabled.status_code == 200
+            assert enabled.get_json() == {"ok": True}
+    finally:
+        health_server._benchmark_memory_baseline = original_baseline
+        if original_env is None:
+            os.environ.pop("ENABLE_BENCHMARK_MEMORY_BASELINE", None)
+        else:
+            os.environ["ENABLE_BENCHMARK_MEMORY_BASELINE"] = original_env
 
 
 def test_logical_tool_counts_ignore_progress_messages():
@@ -1829,6 +1944,14 @@ async def run_all_tests():
     r.record("local_diagnostics_timeout_recorded", test_local_diagnostics_timeout_is_recorded)
     r.record("smoke_memory_summary_flags_leak", test_build_smoke_memory_summary_flags_growth_and_playwright_driver)
     r.record("smoke_memory_summary_passes", test_build_smoke_memory_summary_passes_stable_worker)
+    r.record(
+        "smoke_memory_summary_darwin_growth_warning",
+        test_build_smoke_memory_summary_skips_darwin_growth_without_allocator_trim,
+    )
+    r.record("smoke_memory_summary_linux_growth", test_build_smoke_memory_summary_enforces_linux_growth)
+    r.record("local_worker_health_url_explicit", test_local_worker_health_url_prefers_explicit_smoke_url)
+    r.record("local_worker_health_url_derived", test_local_worker_health_url_derives_from_backend_port)
+    r.record("benchmark_memory_baseline_guarded", test_benchmark_memory_baseline_endpoint_is_guarded)
     r.record("logical_tool_counts_ignore_progress", test_logical_tool_counts_ignore_progress_messages)
     r.record("tool_count_expectations", test_tool_count_expectations_support_minimums_and_forbidden_tools)
     r.record(

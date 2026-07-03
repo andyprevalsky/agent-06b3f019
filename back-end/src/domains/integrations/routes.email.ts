@@ -140,6 +140,31 @@ router.get(
   })
 );
 
+/** DELETE /api/integrations/email/gmail/accounts/:email */
+router.delete(
+  '/email/gmail/accounts/:email',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const email = req.params.email;
+    if (typeof email !== 'string' || email.trim() === '') {
+      return res.status(400).json({ error: 'Missing Gmail account email' });
+    }
+
+    try {
+      const result = await service.disconnectGmailAccount(req.user!.id, email);
+      return res.json({
+        message: 'Gmail account disconnected successfully',
+        ...result,
+      });
+    } catch (error: unknown) {
+      if (error instanceof service.GmailAccountNotFoundError) {
+        return res.status(404).json({ error: error.message });
+      }
+      throw error;
+    }
+  })
+);
+
 /** POST /api/integrations/email/send */
 router.post(
   '/email/send',

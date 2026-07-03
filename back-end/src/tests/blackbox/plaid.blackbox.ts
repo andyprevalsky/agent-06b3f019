@@ -75,6 +75,17 @@ const LinkTokenResponse = z.object({
   request_id: z.string().min(1),
 });
 
+const SyncSummarySchema = z.object({
+  transactionCount: z.number().int().nonnegative(),
+  postedTransactionCount: z.number().int().nonnegative(),
+  pendingTransactionCount: z.number().int().nonnegative(),
+  removedTransactionCount: z.number().int().nonnegative(),
+  dateRange: z.object({
+    from: z.string().nullable(),
+    to: z.string().nullable(),
+  }),
+});
+
 const AccountSchema = z.object({
   id: z.string().min(1),
   plaidAccountId: z.string().min(1),
@@ -83,6 +94,7 @@ const AccountSchema = z.object({
   mask: z.string().nullable(),
   type: z.string(),
   subtype: z.string().nullable(),
+  sync: SyncSummarySchema,
 });
 
 const ItemSchema = z.object({
@@ -95,6 +107,9 @@ const ItemSchema = z.object({
   createdAt: z.string(),
   lastSyncAt: z.string().nullable(),
   disconnectedAt: z.string().nullable(),
+  sync: SyncSummarySchema.extend({
+    state: z.enum(['syncing', 'synced', 'needs_repair', 'error']),
+  }),
   accounts: z.array(AccountSchema),
 });
 
@@ -377,6 +392,11 @@ async function testListItems_returnsOwnOnly(): Promise<void> {
   assertStatus(resA.status, 200, resA.data);
   const bodyA = assertSchema(ListItemsResponse, resA.data, 'list A');
   assert(bodyA.items.length === 1, 'user A has 1 item');
+  assert(
+    bodyA.items[0].accounts.every((account) => account.sync.transactionCount >= 0),
+    'list includes account-level sync summaries'
+  );
+  assert(bodyA.items[0].sync.transactionCount >= 0, 'list includes item-level sync summary');
 
   const resB = await request(`${BASE_URL}/api/integrations/plaid/items`, {
     headers: authHeaders(b.accessToken),

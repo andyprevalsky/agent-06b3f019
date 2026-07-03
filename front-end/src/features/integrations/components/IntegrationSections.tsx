@@ -135,7 +135,9 @@ export default function IntegrationSections({
         onIMessageSync={() => void actions.onIMessageSync()}
         connectedIntegrations={data.connectedIntegrations}
         connectingProvider={gmail.connectingProvider}
+        disconnectingEmail={gmail.disconnectingEmail}
         onGmailConnect={() => void actions.onGmailConnect()}
+        onGmailDisconnect={(email) => void actions.onGmailDisconnect(email)}
       />
 
       {isFullySignedIn && (

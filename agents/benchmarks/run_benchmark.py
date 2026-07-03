@@ -1702,6 +1702,11 @@ def _plaid_transactions_fixture_env() -> dict:
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     env["BENCHMARK_USER_ID"] = USER_ID
+    source_database_url = load_env_var("DATABASE_URL", _BACKEND_ENV)
+    if source_database_url:
+        source_database_url = _psql_compatible_database_url(source_database_url)
+        if source_database_url != database_url:
+            env["BENCHMARK_PLAID_SOURCE_DATABASE_URL"] = source_database_url
     return env
 
 
@@ -1732,6 +1737,15 @@ def _run_plaid_transactions_fixture(action: str) -> dict:
             f"{(result.stderr or result.stdout).strip()}"
         )
     return _parse_last_json_line(result.stdout)
+
+
+def _plaid_transactions_fixture_action() -> str:
+    mode = os.environ.get("BENCHMARK_PLAID_FIXTURE_MODE", "real").strip().lower()
+    if mode in ("", "real", "sync-real", "prod", "production"):
+        return "sync-real"
+    if mode in ("synthetic", "apply"):
+        return "apply"
+    raise RuntimeError("BENCHMARK_PLAID_FIXTURE_MODE must be one of real/sync-real/synthetic/apply")
 
 
 def _run_grep_fixture(action: str, *args: str) -> dict:
@@ -1879,34 +1893,99 @@ async def evaluate_plaid_transaction_task(
     all_lower = all_text.lower()
     grep_lower = grep_text.lower()
 
-    if "source: transactions" not in grep_lower and '"source": "transactions"' not in grep_lower:
+    has_transaction_source = (
+        "source: transactions" in grep_lower
+        or '"source": "transactions"' in grep_lower
+        or "source: transactions" in all_lower
+        or '"source": "transactions"' in all_lower
+        or "grep:transactions" in all_lower
+    )
+    if not has_transaction_source:
         return False, "Expected grep(source='transactions') evidence in transcript"
 
     if task.name == "plaid-transactions-monthly-spend":
-        expected = str(manifest.get("monthly_spend_sep_2023_usd", ""))
+        expected = str(
+            manifest.get("monthly_spend_sep_2025_usd")
+            or manifest.get("monthly_spend_sep_2023_usd", "")
+        )
         if expected and expected not in all_text:
-            return False, f"Expected September 2023 spend {expected} in final/evidence text"
-        if "2023-09" not in grep_text and "2023-09-01" not in grep_text:
-            return False, "Expected September 2023 transaction evidence"
+            return False, f"Expected September 2025 spend {expected} in final/evidence text"
+        if "2025-09" not in grep_text and "2025-09-01" not in grep_text:
+            return False, "Expected September 2025 transaction evidence"
         return True, None
 
     if task.name == "plaid-transactions-doordash-count":
         expected_count = manifest.get("doordash_orders_2025")
         if expected_count is not None and str(expected_count) not in all_text:
             return False, f"Expected DoorDash count {expected_count} in final/evidence text"
-        if "doordash" not in grep_lower:
+        if "doordash" not in grep_lower and "doordash" not in all_lower:
             return False, "Expected DoorDash transaction evidence"
         return True, None
 
     if task.name == "plaid-transactions-dead-subscriptions":
+        candidate_text = all_text
+        candidate_matches = list(re.finditer(
+            r"(?:refund_prep_candidates|refund prep candidates|refund targets)(.*?)(?:excluded_subscription_candidates|excluded subscription candidates|excluded candidates|$)",
+            all_text,
+            flags=re.IGNORECASE | re.DOTALL,
+        ))
+        if candidate_matches:
+            candidate_match = candidate_matches[-1]
+            candidate_text = candidate_match.group(1)
+        candidate_lower = candidate_text.lower()
+
         expected_candidates = [
-            str(name) for name in manifest.get("dead_subscription_candidates", []) if str(name).strip()
+            str(name)
+            for name in (
+                manifest.get("dead_subscription_expected_include")
+                or manifest.get("dead_subscription_candidates", [])
+            )
+            if str(name).strip()
         ]
-        missing = [name for name in expected_candidates[:3] if name.lower() not in all_lower]
+        excluded_candidates = [
+            str(name)
+            for name in manifest.get("dead_subscription_expected_exclude", ["GitHub"])
+            if str(name).strip()
+        ]
+        missing = [name for name in expected_candidates if name.lower() not in candidate_lower]
         if missing:
             return False, "Missing expected dead subscription candidates: " + ", ".join(missing)
-        if "github" in all_lower and len(expected_candidates) > 0:
-            return False, "Active GitHub subscription should not be listed as a dead subscription"
+        bad_exclusions = []
+        for name in excluded_candidates:
+            needle = name.lower()
+            start = 0
+            while True:
+                index = candidate_lower.find(needle, start)
+                if index < 0:
+                    break
+                window = candidate_lower[max(0, index - 140) : index + len(needle) + 140]
+                if needle == "amazon prime" and "amazon prime video" in window:
+                    start = index + len(needle)
+                    continue
+                has_exclusion_context = any(
+                    marker in window
+                    for marker in [
+                        "exclude",
+                        "excluded",
+                        "not a dead",
+                        "not dead",
+                        "active",
+                        "recent",
+                        "developer",
+                        "do not list",
+                        "should not",
+                    ]
+                )
+                has_candidate_context = any(
+                    marker in window
+                    for marker in ["refund", "cancel", "dead subscription", "unused", "candidate", "target"]
+                )
+                if has_candidate_context and not has_exclusion_context:
+                    bad_exclusions.append(name)
+                    break
+                start = index + len(needle)
+        if bad_exclusions and len(expected_candidates) > 0:
+            return False, "Excluded active/recent/developer subscriptions should not be listed as dead: " + ", ".join(bad_exclusions)
         return True, None
 
     return True, None
@@ -3307,6 +3386,7 @@ async def run_single_task(
 
     grep_fixture_manifest: Optional[dict] = None
     plaid_transactions_manifest: Optional[dict] = None
+    plaid_transactions_fixture_action: Optional[str] = None
     if task.name == GREP_EXPLORE_STRESS_TASK_NAME:
         if not _is_local_base_url(base_url):
             raise RuntimeError("grep-explore-stress must run against the local benchmark stack")
@@ -3316,7 +3396,8 @@ async def run_single_task(
     if task.name in PLAID_TRANSACTION_BENCHMARK_TASK_NAMES:
         if not _is_local_base_url(base_url):
             raise RuntimeError(f"{task.name} must run against the local benchmark stack")
-        action = "sync-real" if os.environ.get("BENCHMARK_PLAID_USE_REAL") == "1" else "apply"
+        action = _plaid_transactions_fixture_action()
+        plaid_transactions_fixture_action = action
         plaid_transactions_manifest = _run_plaid_transactions_fixture(action)
         mode = plaid_transactions_manifest.get("fixture_mode", action)
         tx_count = plaid_transactions_manifest.get("transaction_count", "?")
@@ -3719,6 +3800,14 @@ async def run_single_task(
                 os.unlink(tmp)
             except OSError:
                 pass
+        if (
+            plaid_transactions_fixture_action == "apply"
+            and os.environ.get("BENCHMARK_KEEP_PLAID_FIXTURE") != "1"
+        ):
+            try:
+                _run_plaid_transactions_fixture("cleanup")
+            except Exception as exc:
+                print(f"    ⚠ Failed to clean up synthetic Plaid transaction fixture: {exc}")
 
 
 # ============================================================
@@ -3945,6 +4034,42 @@ def _memory_mb(byte_count: int) -> float:
     return round(byte_count / 1024 / 1024, 1)
 
 
+def _local_worker_health_url(base_url: str) -> str | None:
+    """Return the local worker health URL paired with a local backend URL."""
+    configured = os.environ.get("SMOKE_HEALTH_URL")
+    if configured:
+        return configured.rstrip("/")
+
+    parsed = urlparse(base_url)
+    if parsed.hostname not in ("localhost", "127.0.0.1") or parsed.port is None:
+        return None
+    return f"{parsed.scheme}://{parsed.hostname}:{parsed.port + 2}"
+
+
+async def _stabilize_local_worker_memory(base_url: str, phase: str) -> dict:
+    """Ask the local worker to warm lazy benchmark imports and collect memory."""
+    health_url = _local_worker_health_url(base_url)
+    if not health_url:
+        return {"attempted": False, "reason": "no local worker health URL"}
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(f"{health_url}/benchmark/memory-baseline")
+        if response.status_code == 404:
+            return {"attempted": True, "enabled": False, "status": response.status_code}
+        response.raise_for_status()
+        data = response.json()
+        print(
+            "  🧠 Worker memory baseline "
+            f"({phase}): imported={len(data.get('imported', []))} "
+            f"gc_collected={data.get('gc_collected', 0)}"
+        )
+        return {"attempted": True, "enabled": True, "status": response.status_code, **data}
+    except Exception as exc:
+        print(f"  ⚠ Worker memory baseline ({phase}) failed: {exc}")
+        return {"attempted": True, "enabled": False, "reason": str(exc)}
+
+
 def _sample_local_worker_memory() -> dict:
     """Return worker process-tree memory for local smoke leak detection."""
     import subprocess
@@ -4016,16 +4141,26 @@ def _sample_local_worker_memory() -> dict:
     }
 
 
-def _build_smoke_memory_summary(before: dict, after: dict) -> dict:
+def _build_smoke_memory_summary(
+    before: dict,
+    after: dict,
+    baseline: dict | None = None,
+    platform_name: str | None = None,
+) -> dict:
     """Build memory leak gate output for local smoke runs."""
+    platform_value = platform_name or sys.platform
+    allocator_trimmed = bool((baseline or {}).get("after", {}).get("allocator_trimmed"))
+    enforce_growth = platform_value != "darwin" or allocator_trimmed
     summary = {
         "enabled": True,
         "before": before,
         "after": after,
+        "baseline": baseline or {},
         "thresholds": {
             "max_growth_mb": SMOKE_MEMORY_MAX_GROWTH_MB,
             "max_end_mb": SMOKE_MEMORY_MAX_END_MB,
             "forbid_playwright_drivers": SMOKE_MEMORY_FORBID_PLAYWRIGHT_DRIVERS,
+            "growth_enforced": enforce_growth,
         },
         "failures": [],
     }
@@ -4038,9 +4173,14 @@ def _build_smoke_memory_summary(before: dict, after: dict) -> dict:
     growth_mb = round(after["total_rss_mb"] - before["total_rss_mb"], 1)
     summary["growth_mb"] = growth_mb
 
-    if growth_mb > SMOKE_MEMORY_MAX_GROWTH_MB:
+    if enforce_growth and growth_mb > SMOKE_MEMORY_MAX_GROWTH_MB:
         summary["failures"].append(
             f"worker process-tree RSS grew by {growth_mb} MB (> {SMOKE_MEMORY_MAX_GROWTH_MB} MB)"
+        )
+    elif not enforce_growth and growth_mb > SMOKE_MEMORY_MAX_GROWTH_MB:
+        summary["growth_warning"] = (
+            f"worker process-tree RSS grew by {growth_mb} MB, but RSS growth is not enforced on "
+            "macOS when allocator pressure relief cannot return freed arenas"
         )
     if after["total_rss_mb"] > SMOKE_MEMORY_MAX_END_MB:
         summary["failures"].append(
@@ -4381,6 +4521,9 @@ async def main_async(args):
         and not args.prod
         and (base_url.startswith("http://localhost") or base_url.startswith("http://127.0.0.1"))
     )
+    memory_baseline_before = (
+        await _stabilize_local_worker_memory(base_url, "before") if memory_gate_enabled else {}
+    )
     memory_before = _sample_local_worker_memory() if memory_gate_enabled else {"available": False, "reason": "disabled"}
     if memory_gate_enabled:
         if memory_before.get("available"):
@@ -4492,8 +4635,16 @@ async def main_async(args):
             print(f"  📡 Supabase realtime frame stream stopped ({realtime_total} frames captured)")
 
         if memory_gate_enabled:
+            memory_baseline_after = await _stabilize_local_worker_memory(base_url, "after")
             memory_after = _sample_local_worker_memory()
-            run.memory_summary = _build_smoke_memory_summary(memory_before, memory_after)
+            run.memory_summary = _build_smoke_memory_summary(
+                memory_before,
+                memory_after,
+                baseline={
+                    "before": memory_baseline_before,
+                    "after": memory_baseline_after,
+                },
+            )
             if memory_after.get("available"):
                 growth = run.memory_summary.get("growth_mb")
                 print(

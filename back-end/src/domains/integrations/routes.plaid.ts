@@ -82,7 +82,10 @@ router.post(
       return res.status(400).json({ error: 'public_token is required' });
     }
 
-    const institutionRaw = body.institution as Record<string, unknown> | undefined;
+    const metadataRaw = body.metadata as Record<string, unknown> | undefined;
+    const metadataInstitutionRaw = metadataRaw?.institution as Record<string, unknown> | undefined;
+    const institutionRaw =
+      (body.institution as Record<string, unknown> | undefined) ?? metadataInstitutionRaw;
     const institutionId =
       typeof body.institution_id === 'string'
         ? body.institution_id
@@ -95,7 +98,6 @@ router.post(
         : typeof institutionRaw?.name === 'string'
           ? institutionRaw.name
           : undefined;
-    const metadataRaw = body.metadata as Record<string, unknown> | undefined;
     const accountsRaw = Array.isArray(body.accounts)
       ? body.accounts
       : Array.isArray(metadataRaw?.accounts)

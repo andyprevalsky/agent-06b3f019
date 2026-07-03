@@ -528,6 +528,14 @@ async function testEmailMessages_noAuth() {
   assertStatus(res.status, 401, res.data);
 }
 
+async function testEmailGmailAccountDelete_noAuth() {
+  const res = await request(
+    `${BASE_URL}/api/integrations/email/gmail/accounts/${encodeURIComponent('noauth@gmail.com')}`,
+    { method: 'DELETE' }
+  );
+  assertStatus(res.status, 401, res.data);
+}
+
 async function testEmailSend_noAuth() {
   const res = await request(`${BASE_URL}/api/integrations/email/send`, {
     method: 'POST',
@@ -2079,6 +2087,78 @@ async function testEmailMessages_gmailNotConnected() {
   );
   assertStatus(res.status, 404, res.data);
   assertSchema(ErrorResponse, res.data, 'email messages not connected');
+}
+
+async function testEmailGmailAccountDelete_removesOneCredential() {
+  const { accessToken, userId } = await createAnonSession();
+  const integration = await prisma.integration.create({
+    data: {
+      userId,
+      name: 'gmail',
+      type: 'DATA_SOURCE',
+      status: 'CONNECTED',
+      isActive: true,
+      config: {
+        provider: 'gmail',
+        connectedEmail: 'primary@gmail.com',
+        connectedEmails: ['primary@gmail.com', 'secondary@gmail.com'],
+      },
+    },
+  });
+  await prisma.emailIntegrationCredential.createMany({
+    data: [
+      {
+        userId,
+        integrationId: integration.id,
+        provider: 'GMAIL',
+        email: 'primary@gmail.com',
+        accessToken: 'access-primary',
+        refreshToken: 'refresh-primary',
+      },
+      {
+        userId,
+        integrationId: integration.id,
+        provider: 'GMAIL',
+        email: 'secondary@gmail.com',
+        accessToken: 'access-secondary',
+        refreshToken: 'refresh-secondary',
+      },
+    ],
+  });
+
+  const res = await request(
+    `${BASE_URL}/api/integrations/email/gmail/accounts/${encodeURIComponent('primary@gmail.com')}`,
+    { method: 'DELETE', headers: authHeaders(accessToken) }
+  );
+  assertStatus(res.status, 200, res.data);
+  const body = res.data as { disconnectedEmail?: string; connectedEmails?: string[] };
+  assert(body.disconnectedEmail === 'primary@gmail.com', 'deleted email should be echoed');
+  assert(
+    Array.isArray(body.connectedEmails) &&
+      body.connectedEmails.length === 1 &&
+      body.connectedEmails[0] === 'secondary@gmail.com',
+    'remaining email should be returned'
+  );
+
+  const deleted = await prisma.emailIntegrationCredential.findFirst({
+    where: { userId, email: 'primary@gmail.com' },
+  });
+  assert(deleted === null, 'deleted Gmail credential should be removed');
+
+  const updated = await prisma.integration.findUnique({ where: { id: integration.id } });
+  const config = updated?.config as { connectedEmail?: unknown; connectedEmails?: unknown };
+  assert(updated?.status === 'CONNECTED', 'integration should stay connected');
+  assert(updated?.isActive === true, 'integration should stay active');
+  assert(
+    config.connectedEmail === 'secondary@gmail.com',
+    'primary config should move to remaining email'
+  );
+  assert(
+    Array.isArray(config.connectedEmails) &&
+      config.connectedEmails.length === 1 &&
+      config.connectedEmails[0] === 'secondary@gmail.com',
+    'connectedEmails config should be recomputed'
+  );
 }
 
 async function testPasswordsRequest_missingRequest() {
@@ -4709,6 +4789,10 @@ async function runAll() {
     { name: 'POST /passwords/request no auth -> 401', fn: testPasswordsRequest_noAuth },
     { name: 'POST /email/start no auth -> 401', fn: testEmailStart_noAuth },
     { name: 'GET /email/messages no auth -> 401', fn: testEmailMessages_noAuth },
+    {
+      name: 'DELETE /email/gmail/accounts/:email no auth -> 401',
+      fn: testEmailGmailAccountDelete_noAuth,
+    },
     { name: 'POST /email/send no auth -> 401', fn: testEmailSend_noAuth },
     { name: 'POST /upload no auth -> 401', fn: testUpload_noAuth },
     { name: 'POST /linkedin/upload no auth -> 401', fn: testLinkedinUpload_noAuth },
@@ -4975,6 +5059,10 @@ async function runAll() {
     {
       name: 'GET /email/messages valid since empty account',
       fn: testEmailMessages_validSinceEmptyAccount,
+    },
+    {
+      name: 'DELETE /email/gmail/accounts/:email removes one credential',
+      fn: testEmailGmailAccountDelete_removesOneCredential,
     },
 
     // File upload validation

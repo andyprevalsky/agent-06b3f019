@@ -22,6 +22,17 @@ export type PlaidItemWithAccounts = PlaidItem & { accounts: PlaidAccount[] };
 export { PlaidItemStatus };
 export const REDACTED_PLAID_ACCESS_TOKEN = 'REDACTED_AFTER_DISCONNECT';
 
+export interface PlaidAccountTransactionStats {
+  plaidItemId: string;
+  plaidAccountId: string;
+  transactionCount: number;
+  postedTransactionCount: number;
+  pendingTransactionCount: number;
+  removedTransactionCount: number;
+  minDate: Date | null;
+  maxDate: Date | null;
+}
+
 type AccountUpsertInput = {
   account_id: string;
   name: string;
@@ -204,6 +215,84 @@ export async function findActivePlaidItemsWithAccountsForUser(
     include: { accounts: { where: { disconnectedAt: null } } },
     orderBy: { createdAt: 'asc' },
   });
+}
+
+function statsKey(plaidItemId: string, plaidAccountId: string): string {
+  return `${plaidItemId}:${plaidAccountId}`;
+}
+
+function ensureStats(
+  stats: Map<string, PlaidAccountTransactionStats>,
+  plaidItemId: string,
+  plaidAccountId: string
+): PlaidAccountTransactionStats {
+  const key = statsKey(plaidItemId, plaidAccountId);
+  const existing = stats.get(key);
+  if (existing !== undefined) return existing;
+  const created: PlaidAccountTransactionStats = {
+    plaidItemId,
+    plaidAccountId,
+    transactionCount: 0,
+    postedTransactionCount: 0,
+    pendingTransactionCount: 0,
+    removedTransactionCount: 0,
+    minDate: null,
+    maxDate: null,
+  };
+  stats.set(key, created);
+  return created;
+}
+
+export async function getPlaidAccountTransactionStatsForItems(
+  userId: string,
+  plaidItemIds: string[]
+): Promise<PlaidAccountTransactionStats[]> {
+  if (plaidItemIds.length === 0) return [];
+
+  const [activeRows, pendingRows, removedRows] = await Promise.all([
+    prisma.plaidTransaction.groupBy({
+      by: ['plaidItemId', 'plaidAccountId'],
+      where: { userId, plaidItemId: { in: plaidItemIds }, removedAt: null },
+      _count: { id: true },
+      _min: { date: true },
+      _max: { date: true },
+    }),
+    prisma.plaidTransaction.groupBy({
+      by: ['plaidItemId', 'plaidAccountId', 'pending'],
+      where: { userId, plaidItemId: { in: plaidItemIds }, removedAt: null },
+      _count: { id: true },
+    }),
+    prisma.plaidTransaction.groupBy({
+      by: ['plaidItemId', 'plaidAccountId'],
+      where: { userId, plaidItemId: { in: plaidItemIds }, removedAt: { not: null } },
+      _count: { id: true },
+    }),
+  ]);
+
+  const stats = new Map<string, PlaidAccountTransactionStats>();
+
+  for (const row of activeRows) {
+    const stat = ensureStats(stats, row.plaidItemId, row.plaidAccountId);
+    stat.transactionCount = row._count.id;
+    stat.minDate = row._min.date;
+    stat.maxDate = row._max.date;
+  }
+
+  for (const row of pendingRows) {
+    const stat = ensureStats(stats, row.plaidItemId, row.plaidAccountId);
+    if (row.pending) {
+      stat.pendingTransactionCount = row._count.id;
+    } else {
+      stat.postedTransactionCount = row._count.id;
+    }
+  }
+
+  for (const row of removedRows) {
+    const stat = ensureStats(stats, row.plaidItemId, row.plaidAccountId);
+    stat.removedTransactionCount = row._count.id;
+  }
+
+  return Array.from(stats.values());
 }
 
 export async function findPlaidItemForUser(

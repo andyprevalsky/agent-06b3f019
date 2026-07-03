@@ -34,10 +34,12 @@ import {
   findActivePlaidItemsWithAccountsForUser,
   findPlaidItemForUser,
   findPlaidItemWithAccountsForUser,
+  getPlaidAccountTransactionStatsForItems,
   markIntegrationDisconnected,
   markPlaidItemDisconnected,
   persistPlaidItem,
   PlaidItemStatus,
+  type PlaidAccountTransactionStats,
   type PlaidItemWithAccounts,
 } from './repo.plaid';
 import { syncPlaidItemTransactions } from './service.plaidTransactions';
@@ -94,6 +96,20 @@ export interface SerializedPlaidAccount {
   mask: string | null;
   type: string;
   subtype: string | null;
+  sync: SerializedPlaidSyncSummary;
+}
+
+export interface SerializedPlaidDateRange {
+  from: string | null;
+  to: string | null;
+}
+
+export interface SerializedPlaidSyncSummary {
+  transactionCount: number;
+  postedTransactionCount: number;
+  pendingTransactionCount: number;
+  removedTransactionCount: number;
+  dateRange: SerializedPlaidDateRange;
 }
 
 export interface SerializedPlaidItem {
@@ -106,6 +122,9 @@ export interface SerializedPlaidItem {
   createdAt: string;
   lastSyncAt: string | null;
   disconnectedAt: string | null;
+  sync: SerializedPlaidSyncSummary & {
+    state: 'syncing' | 'synced' | 'needs_repair' | 'error';
+  };
   accounts: SerializedPlaidAccount[];
 }
 
@@ -293,7 +312,11 @@ export async function completePlaidUpdateMode(
 
 export async function listPlaidItems(userId: string): Promise<SerializedPlaidItem[]> {
   const items = await findActivePlaidItemsForUser(userId);
-  return items.map(serializeItem);
+  const accountStats = await getPlaidAccountTransactionStatsForItems(
+    userId,
+    items.map((item) => item.id)
+  );
+  return items.map((item) => serializeItem(item, accountStats));
 }
 
 async function revokePlaidItemAtProvider(
@@ -357,7 +380,89 @@ export async function disconnectAllPlaidItems(
   return { ok: true, disconnected };
 }
 
-function serializeItem(item: PlaidItemWithAccounts): SerializedPlaidItem {
+function formatDate(value: Date | null): string | null {
+  return value === null ? null : value.toISOString();
+}
+
+function emptySyncSummary(): SerializedPlaidSyncSummary {
+  return {
+    transactionCount: 0,
+    postedTransactionCount: 0,
+    pendingTransactionCount: 0,
+    removedTransactionCount: 0,
+    dateRange: { from: null, to: null },
+  };
+}
+
+function statsForAccount(
+  accountStats: PlaidAccountTransactionStats[],
+  accountId: string
+): SerializedPlaidSyncSummary {
+  const stats = accountStats.find((row) => row.plaidAccountId === accountId);
+  if (stats === undefined) return emptySyncSummary();
+  return {
+    transactionCount: stats.transactionCount,
+    postedTransactionCount: stats.postedTransactionCount,
+    pendingTransactionCount: stats.pendingTransactionCount,
+    removedTransactionCount: stats.removedTransactionCount,
+    dateRange: {
+      from: formatDate(stats.minDate),
+      to: formatDate(stats.maxDate),
+    },
+  };
+}
+
+function summarizeAccounts(accounts: SerializedPlaidAccount[]): SerializedPlaidSyncSummary {
+  const summary = emptySyncSummary();
+  for (const account of accounts) {
+    summary.transactionCount += account.sync.transactionCount;
+    summary.postedTransactionCount += account.sync.postedTransactionCount;
+    summary.pendingTransactionCount += account.sync.pendingTransactionCount;
+    summary.removedTransactionCount += account.sync.removedTransactionCount;
+
+    const from =
+      account.sync.dateRange.from === null ? null : new Date(account.sync.dateRange.from);
+    const to = account.sync.dateRange.to === null ? null : new Date(account.sync.dateRange.to);
+    const currentFrom = summary.dateRange.from === null ? null : new Date(summary.dateRange.from);
+    const currentTo = summary.dateRange.to === null ? null : new Date(summary.dateRange.to);
+
+    if (from !== null && (currentFrom === null || from < currentFrom)) {
+      summary.dateRange.from = from.toISOString();
+    }
+    if (to !== null && (currentTo === null || to > currentTo)) {
+      summary.dateRange.to = to.toISOString();
+    }
+  }
+  return summary;
+}
+
+function syncStateForItem(
+  item: PlaidItemWithAccounts,
+  summary: SerializedPlaidSyncSummary
+): SerializedPlaidItem['sync']['state'] {
+  if (item.status === PlaidItemStatus.REQUIRES_REAUTH) return 'needs_repair';
+  if (item.status === PlaidItemStatus.ERROR) return 'error';
+  if (item.cursor === null && summary.transactionCount === 0) return 'syncing';
+  return 'synced';
+}
+
+function serializeItem(
+  item: PlaidItemWithAccounts,
+  accountStats: PlaidAccountTransactionStats[] = []
+): SerializedPlaidItem {
+  const itemAccountStats = accountStats.filter((row) => row.plaidItemId === item.id);
+  const accounts = item.accounts.map((a) => ({
+    id: a.id,
+    plaidAccountId: a.plaidAccountId,
+    name: a.name,
+    officialName: a.officialName,
+    mask: a.mask,
+    type: a.type,
+    subtype: a.subtype,
+    sync: statsForAccount(itemAccountStats, a.id),
+  }));
+  const syncSummary = summarizeAccounts(accounts);
+
   return {
     id: item.id,
     plaidItemId: item.plaidItemId,
@@ -368,14 +473,10 @@ function serializeItem(item: PlaidItemWithAccounts): SerializedPlaidItem {
     createdAt: item.createdAt.toISOString(),
     lastSyncAt: item.lastSyncAt ? item.lastSyncAt.toISOString() : null,
     disconnectedAt: item.disconnectedAt ? item.disconnectedAt.toISOString() : null,
-    accounts: item.accounts.map((a) => ({
-      id: a.id,
-      plaidAccountId: a.plaidAccountId,
-      name: a.name,
-      officialName: a.officialName,
-      mask: a.mask,
-      type: a.type,
-      subtype: a.subtype,
-    })),
+    sync: {
+      ...syncSummary,
+      state: syncStateForItem(item, syncSummary),
+    },
+    accounts,
   };
 }

@@ -25,6 +25,19 @@ export type MessageSyncType = 'imessage' | 'whatsapp' | 'telegram';
 
 export type PlaidItemStatus = 'ACTIVE' | 'DISCONNECTED' | 'REQUIRES_REAUTH' | 'ERROR';
 
+export interface PlaidSyncSummary {
+  transactionCount: number;
+  postedTransactionCount: number;
+  pendingTransactionCount: number;
+  removedTransactionCount: number;
+  dateRange: {
+    from: string | null;
+    to: string | null;
+  };
+}
+
+export type PlaidSyncState = 'syncing' | 'synced' | 'needs_repair' | 'error';
+
 export interface PlaidAccount {
   id: string;
   plaidAccountId: string;
@@ -33,6 +46,7 @@ export interface PlaidAccount {
   mask: string | null;
   type: string;
   subtype: string | null;
+  sync: PlaidSyncSummary;
 }
 
 export interface PlaidItem {
@@ -45,6 +59,7 @@ export interface PlaidItem {
   createdAt: string;
   lastSyncAt: string | null;
   disconnectedAt: string | null;
+  sync: PlaidSyncSummary & { state: PlaidSyncState };
   accounts: PlaidAccount[];
 }
 
