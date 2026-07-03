@@ -1698,9 +1698,9 @@ def test_user_data_prod_grep_requires_all_provider_filters():
     """Prod user-data benchmark cannot pass with generic document grep calls."""
     from benchmarks.run_benchmark import _validate_user_data_prod_grep_messages
 
-    def grep_msg(provider: str) -> dict:
+    def grep_msg(provider: str, *, body_field: str = "text") -> dict:
         return {
-            "text": (
+            body_field: (
                 "**Params Passed:**\n\n"
                 "- **pattern**: project\n"
                 "- **source**: documents\n"
@@ -1716,20 +1716,91 @@ def test_user_data_prod_grep_requires_all_provider_filters():
             },
         }
 
+    def final_summary_msg(
+        *,
+        checklist_key: str = "provider_validation_checklist",
+        verified_key: str = "appears_verified_from_prod_data",
+    ) -> dict:
+        return {
+            "metadata": {
+                "completionSummary": {
+                    "outputs": [
+                        {
+                            "key": checklist_key,
+                            "value": [
+                                {
+                                    "provider": "chatgpt",
+                                    "grep_filters_used": 'source="documents", filters.document_source="chatgpt"',
+                                    "exact_evidence_snippet": "no synced document evidence",
+                                    "document_path": "none",
+                                    verified_key: False,
+                                },
+                                {
+                                    "provider": "claude",
+                                    "grep_filters_used": 'source="documents", filters.document_source="claude"',
+                                    "exact_evidence_snippet": "goal",
+                                    "document_path": "documents/claude/session.json",
+                                    verified_key: True,
+                                },
+                                {
+                                    "provider": "apple_notes",
+                                    "grep_filters_used": 'source="documents", filters.document_source="apple_notes"',
+                                    "exact_evidence_snippet": "project",
+                                    "document_path": "documents/apple_notes/Apple Note/apple-notes:1",
+                                    verified_key: True,
+                                },
+                                {
+                                    "provider": "obsidian",
+                                    "grep_filters_used": 'source="documents", filters.document_source="obsidian"',
+                                    "exact_evidence_snippet": "tool",
+                                    "document_path": "documents/obsidian/vault/note.md",
+                                    verified_key: True,
+                                },
+                            ],
+                        }
+                    ]
+                }
+            }
+        }
+
     assert (
         _validate_user_data_prod_grep_messages(
             [
                 {
                     "metadata": {
-                        "toolName": "spawn_general_purpose_agent",
+                        "toolName": "spawn_agent",
                         "toolStatus": "FINISHED",
-                        "toolCallId": "spawn-providers",
+                        "toolCallId": "spawn-explore",
                     },
                 },
                 grep_msg("chatgpt"),
                 grep_msg("claude"),
                 grep_msg("apple_notes"),
                 grep_msg("obsidian"),
+                final_summary_msg(),
+            ]
+        )
+        is None
+    )
+
+    assert (
+        _validate_user_data_prod_grep_messages(
+            [
+                {
+                    "metadata": {
+                        "toolName": "spawn_agent",
+                        "toolStatus": "FINISHED",
+                        "toolCallId": "spawn-explore",
+                    },
+                },
+                grep_msg("chatgpt", body_field="message"),
+                grep_msg("claude", body_field="message"),
+                grep_msg("apple_notes", body_field="message"),
+                grep_msg("obsidian", body_field="message"),
+                final_summary_msg(
+                    checklist_key="provider_verification_checklist",
+                    verified_key="verified_from_prod_data",
+                ),
             ]
         )
         is None
@@ -1763,10 +1834,48 @@ def test_user_data_prod_grep_requires_all_provider_filters():
             grep_msg("claude"),
             grep_msg("apple_notes"),
             grep_msg("obsidian"),
+            final_summary_msg(),
         ]
     )
     assert no_spawn_failure is not None
-    assert "provider-agent spawn" in no_spawn_failure
+    assert "explore spawn_agent" in no_spawn_failure
+
+    wrong_spawn_failure = _validate_user_data_prod_grep_messages(
+        [
+            {
+                "metadata": {
+                    "toolName": "spawn_general_purpose_agent",
+                    "toolStatus": "FINISHED",
+                    "toolCallId": "spawn-general",
+                },
+            },
+            grep_msg("chatgpt"),
+            grep_msg("claude"),
+            grep_msg("apple_notes"),
+            grep_msg("obsidian"),
+            final_summary_msg(),
+        ]
+    )
+    assert wrong_spawn_failure is not None
+    assert "spawn_general_purpose_agent" in wrong_spawn_failure
+
+    no_final_failure = _validate_user_data_prod_grep_messages(
+        [
+            {
+                "metadata": {
+                    "toolName": "spawn_agent",
+                    "toolStatus": "FINISHED",
+                    "toolCallId": "spawn-explore",
+                },
+            },
+            grep_msg("chatgpt"),
+            grep_msg("claude"),
+            grep_msg("apple_notes"),
+            grep_msg("obsidian"),
+        ]
+    )
+    assert no_final_failure is not None
+    assert "provider_validation_checklist" in no_final_failure
 
 
 def test_parallel_tool_calls_smoke_requires_explore_sub_agents():
@@ -1790,9 +1899,11 @@ def test_user_data_prod_grep_prompt_avoids_nested_agent_instruction():
     task = get_task_by_name("user-data-prod-grep")
 
     assert task.min_tool_counts == {"grep": 4}
-    assert "Spawn exactly one provider-audit agent" in task.prompt
-    assert "do not tell it to spawn another agent" in task.prompt
+    assert 'spawn_agent with type="explore"' in task.prompt
+    assert 'Do not use type="general_purpose"' in task.prompt
+    assert "output_schema" in task.prompt
     assert "must call grep directly four times" in task.prompt
+    assert "exactly one" not in task.prompt.lower()
 
 
 def test_spawn_sub_agents_smoke_forbids_browser_and_code_detours():
