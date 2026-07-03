@@ -3763,8 +3763,6 @@ Based on this feedback, I need to continue working on the task and address the i
                     # URL is resolved by the FE from this FilePointer, same as attachments.
                     recording_file_pointer = None
                     try:
-                        from helpers.attachments import upload_to_storage
-
                         html_bytes = browser_recorder.export_inline_html_bytes()
                         if html_bytes:
                             recording_file_pointer = await upload_to_storage(
