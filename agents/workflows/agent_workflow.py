@@ -1090,6 +1090,7 @@ class AgentWorkflow:
                         claude_token_rotated=v_usage.get("claude_token_rotated", False),
                         gpt_token_rotated=v_usage.get("gpt_token_rotated", False),
                         compute_token_used=v_usage.get("compute_token_used"),
+                        from_fast_cache=v_usage.get("from_fast_cache", False),
                     )
                 except Exception as e:
                     workflow.logger.warning(f"[DAG] _on_tokens failed for post-DAG verifier: {e}")
@@ -1642,6 +1643,7 @@ class AgentWorkflow:
                             gpt_token_error=rotation_signal.get("gpt_token_error"),
                             gpt_token_rotated=rotation_signal.get("gpt_token_rotated", False),
                             compute_token_used=rotation_signal.get("compute_token_used"),
+                            from_fast_cache=rotation_signal.get("from_fast_cache", False),
                         )
                     except Exception as e:
                         workflow.logger.warning(f"_on_tokens failed for {tool_name} summarizer: {e}")
@@ -1779,7 +1781,16 @@ class AgentWorkflow:
         # NOTE: tokens_in/out and cost tracking moved to _on_tokens callback
         # which is called after each LLM call in run_agent for real-time limit checking
 
-    async def _track_llm_cost(self, tokens_in: int, tokens_out: int, call_site: str = "unknown") -> None:
+    async def _track_llm_cost(
+        self,
+        tokens_in: int,
+        tokens_out: int,
+        call_site: str = "unknown",
+        actual_model: Optional[str] = None,
+        cache_read_input_tokens: int = 0,
+        cache_creation_input_tokens: int = 0,
+        from_fast_cache: bool = False,
+    ) -> None:
         """Track cost for LLM calls outside run_agent (e.g., completion summary).
 
         Use this for LLM calls that don't go through run_agent and thus don't trigger _on_tokens.
@@ -1788,12 +1799,51 @@ class AgentWorkflow:
             tokens_in: Input/prompt tokens
             tokens_out: Output/completion tokens
             call_site: Label identifying the LLM call source (e.g., completion_summary, context_compression)
+            actual_model: Model that served the request when available.
+            cache_read_input_tokens: Cached input tokens read.
+            cache_creation_input_tokens: Tokens written to cache.
+            from_fast_cache: True when Fast Mode replayed this usage without a provider call.
         """
         # Update workflow token state
         self.tokens_in += tokens_in
         self.tokens_out += tokens_out
 
         # Calculate cost from tokens using stored pricing (fractional cents)
+        cost_cents = 0.0
+        model_for_usage = actual_model or self.model
+        if from_fast_cache:
+            workflow.logger.info(
+                f"💰 $0 cost (fast cache replay): actual_model={model_for_usage}, "
+                f"in={tokens_in}, out={tokens_out}, cache_read={cache_read_input_tokens}, call_site={call_site}"
+            )
+            try:
+                await workflow.execute_activity(
+                    save_tool_usage,
+                    args=[
+                        self.agent_id,
+                        self.user_id,
+                        call_site,
+                        [
+                            {
+                                "type": "llm",
+                                "cost_cents": 0,
+                                "call_site": call_site,
+                                "tokens_in": tokens_in,
+                                "tokens_out": tokens_out,
+                                "model": model_for_usage,
+                                "cache_read_input_tokens": cache_read_input_tokens,
+                                "cache_creation_input_tokens": cache_creation_input_tokens,
+                                "from_fast_cache": True,
+                            }
+                        ],
+                    ],
+                    start_to_close_timeout=timedelta(seconds=15),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+            except Exception as e:
+                workflow.logger.warning(f"Failed to save tool usage for {call_site}: {e}")
+            return
+
         if self.input_cents_per_1k > 0 or self.output_cents_per_1k > 0:
             cost_cents = (tokens_in * self.input_cents_per_1k / 1000) + (tokens_out * self.output_cents_per_1k / 1000)
             if cost_cents > 0:
@@ -1818,7 +1868,9 @@ class AgentWorkflow:
                                     "call_site": call_site,
                                     "tokens_in": tokens_in,
                                     "tokens_out": tokens_out,
-                                    "model": self.model,
+                                    "model": model_for_usage,
+                                    "cache_read_input_tokens": cache_read_input_tokens,
+                                    "cache_creation_input_tokens": cache_creation_input_tokens,
                                 }
                             ],
                         ],
@@ -1864,6 +1916,28 @@ class AgentWorkflow:
             effective_call_site = call_site or tool_name or "unknown"
             cache_read = llm.get("cache_read_input_tokens", 0)
             cache_write = llm.get("cache_creation_input_tokens", 0)
+            from_fast_cache = bool(llm.get("from_fast_cache"))
+
+            if from_fast_cache:
+                workflow.logger.info(
+                    f"💰 $0 cost (fast cache replay): actual_model={model}, "
+                    f"in={tokens_in}, out={tokens_out}, cache_read={cache_read}, call_site={effective_call_site}"
+                )
+                usage_items_for_db.append(
+                    {
+                        "type": "llm",
+                        "cost_cents": 0,
+                        "call_site": effective_call_site,
+                        "provider": provider,
+                        "tokens_in": tokens_in,
+                        "tokens_out": tokens_out,
+                        "model": model,
+                        "cache_read_input_tokens": cache_read,
+                        "cache_creation_input_tokens": cache_write,
+                        "from_fast_cache": True,
+                    }
+                )
+                continue
 
             if isinstance(model, str) and (model.endswith("-claude") or model.endswith("-gpt")):
                 workflow.logger.info(
@@ -2077,6 +2151,7 @@ class AgentWorkflow:
         claude_token_rotated: bool = False,
         gpt_token_rotated: bool = False,
         compute_token_used: Optional[Dict[str, Any]] = None,
+        from_fast_cache: bool = False,
     ) -> None:
         """Callback for run_agent to report token usage after each LLM call.
 
@@ -2092,6 +2167,7 @@ class AgentWorkflow:
             claude_token_error: Why the claude token call failed (auth_error, rate_limit, stall, server_error)
             claude_token_rotated: True when RoseClient swapped tokens inside a successful claudeAuth call.
             gpt_token_rotated: True when RoseClient swapped tokens inside a successful gptAuth call.
+            from_fast_cache: True when Fast Mode replayed this usage without a provider call.
         """
         # Update workflow token state (keep in sync with run_agent local vars)
         self.tokens_in += tokens_in_delta
@@ -2279,7 +2355,12 @@ class AgentWorkflow:
         cache_write_mult = 1.25 if is_anthropic else 1.0
 
         cost_cents = 0.0
-        if input_rate > 0 or output_rate > 0:
+        if from_fast_cache:
+            workflow.logger.info(
+                f"💰 $0 cost (fast cache replay): actual_model={actual_model or self.model}, "
+                f"in={tokens_in_delta}, out={tokens_out_delta}, cache_read={cache_read_input_tokens}, call_site={call_site}"
+            )
+        elif input_rate > 0 or output_rate > 0:
             input_cost = tokens_in_delta * input_rate / 1000
             cache_read_cost = cache_read_input_tokens * input_rate * cache_read_mult / 1000
             cache_write_cost = cache_creation_input_tokens * input_rate * cache_write_mult / 1000
@@ -2318,6 +2399,7 @@ class AgentWorkflow:
                             "model": model_for_usage,
                             "cache_read_input_tokens": cache_read_input_tokens,
                             "cache_creation_input_tokens": cache_creation_input_tokens,
+                            "from_fast_cache": from_fast_cache,
                         }
                     ],
                 ],
@@ -2903,6 +2985,10 @@ class AgentWorkflow:
                 summary_result.get("usage", {}).get("prompt_tokens", 0),
                 summary_result.get("usage", {}).get("completion_tokens", 0),
                 call_site="completion_summary",
+                actual_model=summary_result.get("usage", {}).get("actual_model"),
+                cache_read_input_tokens=summary_result.get("usage", {}).get("cache_read_input_tokens", 0),
+                cache_creation_input_tokens=summary_result.get("usage", {}).get("cache_creation_input_tokens", 0),
+                from_fast_cache=summary_result.get("usage", {}).get("from_fast_cache", False),
             )
             self.token_count += summary_result.get("usage", {}).get("total_tokens", 0)
 
