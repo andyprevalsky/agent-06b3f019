@@ -15,7 +15,6 @@ import { Button } from '@/components/ui/button';
 import claudeIcon from '@/assets/claude-color.svg';
 import geminiIcon from '@/assets/gemini-icon.png';
 
-import ConnectedStatusText from './ConnectedStatusText';
 import DropdownIconFrame, {
   dropdownIconImageClassName,
   dropdownIconPreset,
@@ -84,9 +83,8 @@ function ClaudeRow({
           <DropdownIconFrame {...dropdownIconPreset.claude} isSynced={synced}>
             <img src={claudeIcon} alt="Claude" className={dropdownIconImageClassName} />
           </DropdownIconFrame>
-          <div className="flex flex-col items-start">
-            <span className="text-sm">Claude Subscription</span>
-            <ConnectedStatusText isConnected={synced} />
+          <div className="flex min-w-0 items-center">
+            <span className="truncate text-sm">Claude Subscription</span>
           </div>
         </div>
         <SyncItemButton isLoading={loading} isSynced={synced} onClick={onSync} />
@@ -133,9 +131,8 @@ function GptRow({
           <DropdownIconFrame {...dropdownIconPreset.chatgpt} isSynced={synced}>
             <ChatGPTIcon />
           </DropdownIconFrame>
-          <div className="flex flex-col items-start">
-            <span className="text-sm">ChatGPT Subscription</span>
-            <ConnectedStatusText isConnected={synced} />
+          <div className="flex min-w-0 items-center">
+            <span className="truncate text-sm">ChatGPT Subscription</span>
           </div>
         </div>
         <SyncItemButton isLoading={loading} isSynced={synced} onClick={onSync} />

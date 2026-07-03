@@ -250,6 +250,7 @@ export {
   findConnectedEmailCredentials,
   findGmailIntegrationsWithCredentials,
   findGmailCredentialForSend,
+  findGmailCredentialForDisconnect,
   findAvailableGmailEmails,
   findMintedAccountEmails,
   updateEmailCredentialToken,

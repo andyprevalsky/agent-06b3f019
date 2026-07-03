@@ -53,6 +53,42 @@ function formatSnippet(
     .join('\n');
 }
 
+function formatTransactionRowSnippet(
+  content: string,
+  regex: RegExp,
+  showLineNumbers: boolean
+): string {
+  const probe = new RegExp(regex.source, regex.flags.replace('g', ''));
+  const coreFields = new Set([
+    'transaction_id',
+    'institution',
+    'account',
+    'date',
+    'status',
+    'direction',
+    'amount',
+    'absolute_amount',
+    'merchant',
+    'name',
+    'original_description',
+    'category',
+  ]);
+  const lines = content.split('\n');
+  const selectedIndexes = new Set<number>();
+
+  lines.forEach((line, idx) => {
+    const field = line.slice(0, line.indexOf(':'));
+    if (coreFields.has(field) || probe.test(line)) {
+      selectedIndexes.add(idx);
+    }
+  });
+
+  return [...selectedIndexes]
+    .sort((a, b) => a - b)
+    .map((idx) => (showLineNumbers ? `${idx + 1}: ${lines[idx]}` : lines[idx]))
+    .join('\n');
+}
+
 function firstNonEmpty(...values: Array<string | null | undefined>): string {
   for (const value of values) {
     if (value !== null && value !== undefined && value !== '') return value;
@@ -238,12 +274,21 @@ export function buildTransactionMatch(
   ]
     .filter((line): line is string => line !== null)
     .join('\n');
+  const renderedContent =
+    input.contextBefore === 0 && input.contextAfter === 0
+      ? formatTransactionRowSnippet(content, input.regex, input.showLineNumbers)
+      : formatSnippet(
+          content,
+          input.regex,
+          input.contextBefore,
+          input.contextAfter,
+          input.showLineNumbers
+        );
 
-  return buildMatch({
+  return {
     source: 'transactions',
     path,
     pointer: `transactions:${row.plaidTransactionId}`,
-    timestamp: row.date,
     location: {
       source: 'transactions',
       path,
@@ -251,7 +296,7 @@ export function buildTransactionMatch(
       account_id: row.plaidAccountExternalId,
       field: 'transaction',
     },
-    content,
-    input,
-  });
+    timestamp: row.date.toISOString(),
+    content: renderedContent,
+  };
 }

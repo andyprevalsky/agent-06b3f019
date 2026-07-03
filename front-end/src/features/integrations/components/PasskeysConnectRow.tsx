@@ -18,7 +18,6 @@
 import { Button } from '@/components/ui/button';
 import applePasswordsIcon from '@/assets/apple-passwords-icon.png';
 
-import ConnectedStatusText from './ConnectedStatusText';
 import DropdownIconFrame, {
   dropdownIconImageClassName,
   dropdownIconPreset,
@@ -52,8 +51,8 @@ export default function PasskeysConnectRow({
             className={dropdownIconImageClassName}
           />
         </DropdownIconFrame>
-        <div className="flex flex-col items-start">
-          <div className="flex items-center gap-2">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <div className="flex min-w-0 items-center gap-2">
             <span className="text-sm">Apple Passwords &amp; Passkeys</span>
             {!isAvailable && (
               <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
@@ -61,7 +60,6 @@ export default function PasskeysConnectRow({
               </span>
             )}
           </div>
-          <ConnectedStatusText isConnected={isSynced} />
         </div>
       </div>
       {isAvailable ? (

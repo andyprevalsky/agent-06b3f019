@@ -443,6 +443,54 @@ describe('Integrations page', () => {
         expect(screen.getByText('user@gmail.com')).toBeInTheDocument();
       });
     });
+
+    it('disconnects a connected Gmail email from its chip', async () => {
+      const user = userEvent.setup();
+      let integrations = [
+        {
+          id: 'int-gmail',
+          name: 'gmail',
+          status: 'CONNECTED',
+          isActive: true,
+          config: { connectedEmail: 'user@gmail.com', connectedEmails: ['user@gmail.com'] },
+        },
+      ];
+      let deletedEmail: string | null = null;
+
+      server.use(
+        http.get(`${API_BASE}/integrations`, () => HttpResponse.json({ integrations })),
+        http.delete(`${API_BASE}/integrations/email/gmail/accounts/:email`, ({ params }) => {
+          deletedEmail = decodeURIComponent(String(params.email));
+          integrations = [];
+          return HttpResponse.json({
+            message: 'Gmail account disconnected successfully',
+            disconnectedEmail: deletedEmail,
+            connectedEmails: [],
+          });
+        }),
+      );
+
+      renderWithProviders(<Integrations />);
+
+      await waitFor(() => {
+        expect(screen.getByText('Messages')).toBeInTheDocument();
+      });
+
+      const messagesSection = screen.getByText('Messages').closest('.rounded-lg')!;
+      const toggleButton = within(messagesSection).getAllByRole('button')[0];
+      await user.click(toggleButton);
+
+      const chip = await screen.findByRole('button', { name: /disconnect user@gmail.com/i });
+      expect(within(chip).getByText('user@gmail.com')).toBeInTheDocument();
+      await user.click(chip);
+
+      await waitFor(() => {
+        expect(deletedEmail).toBe('user@gmail.com');
+      });
+      await waitFor(() => {
+        expect(screen.queryByText('user@gmail.com')).not.toBeInTheDocument();
+      });
+    });
   });
 
   // ---------------------------------------------------------------------------

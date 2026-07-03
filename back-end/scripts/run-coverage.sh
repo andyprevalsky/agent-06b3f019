@@ -100,6 +100,22 @@ if $DB_FOUND; then
   LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria"
   export DATABASE_URL="$LOCAL_DB_URL"
   export DIRECT_URL="$LOCAL_DB_URL"
+  if command -v psql >/dev/null 2>&1; then
+    psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
+DO $$
+BEGIN
+  IF to_regclass('"UserAuthAssistanceRequest"') IS NOT NULL
+     AND to_regclass('"AgentAttentionRequest"') IS NOT NULL THEN
+    DELETE FROM "UserAuthAssistanceRequest" request
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM "AgentAttentionRequest" attention
+      WHERE attention.id = request.id
+    );
+  END IF;
+END $$;
+SQL
+  fi
   echo "Syncing Prisma schema to local test database..."
   npx prisma db push --skip-generate --accept-data-loss >/dev/null
   if [[ "${BACKEND_CODEX_SMOKE_SKIP:-0}" != "1" ]]; then
@@ -153,7 +169,30 @@ echo "Running blackbox tests..."
 TEST_EXIT=0
 NODE_V8_COVERAGE="$COV_TMP" \
 BLACKBOX_TEST_USE_EXISTING_BACKEND=1 CONTRACT_TEST_USE_EXISTING_BACKEND=1 \
+BLACKBOX_TEST_CONCURRENCY="${BLACKBOX_TEST_CONCURRENCY:-1}" CONTRACT_TEST_CONCURRENCY="${CONTRACT_TEST_CONCURRENCY:-1}" \
+BLACKBOX_TEST_CASE_CONCURRENCY="${BLACKBOX_TEST_CASE_CONCURRENCY:-1}" CONTRACT_TEST_CASE_CONCURRENCY="${CONTRACT_TEST_CASE_CONCURRENCY:-1}" \
   bash scripts/run-blackbox-tests.sh || TEST_EXIT=$?
+
+if $DB_FOUND; then
+  echo "Re-syncing Prisma schema before unit tests..."
+  if command -v psql >/dev/null 2>&1; then
+    psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
+DO $$
+BEGIN
+  IF to_regclass('"UserAuthAssistanceRequest"') IS NOT NULL
+     AND to_regclass('"AgentAttentionRequest"') IS NOT NULL THEN
+    DELETE FROM "UserAuthAssistanceRequest" request
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM "AgentAttentionRequest" attention
+      WHERE attention.id = request.id
+    );
+  END IF;
+END $$;
+SQL
+  fi
+  npx prisma db push --skip-generate --accept-data-loss >/dev/null
+fi
 
 echo "Running unit tests..."
 UNIT_EXIT=0
