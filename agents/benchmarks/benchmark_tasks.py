@@ -34,6 +34,11 @@ class BenchmarkTask:
     forbidden_tools: List[str] = field(default_factory=list)  # Tool names that must not be called
     sub_agent_count: Optional[int] = None  # Default fan-out for load-test style tasks; substitutes {n} in prompt
     expected_payment_receipt: Optional[dict] = None  # Expected request_payment_card approval receipt metadata
+    phone_persona: Optional[dict] = None  # Vapi callee persona (system_prompt, first_message, structured_data_schema)
+    pinned_facts: Optional[dict] = None  # Ground-truth facts fixed before the run and cross-validated afterward
+    expected_call_findings: List[str] = field(default_factory=list)  # Substrings the agent must report after the call
+    expected_final_findings: List[str] = field(default_factory=list)  # Substrings that must appear in returned final data
+    callee_checks: Optional[dict] = None  # Expected callee-side analysis.structuredData values (persona's view)
     # --- Unified eval-catalog contract (additive; validated by benchmarks/long_horizon.py) ---
     status: str = "ready"  # "ready" = runnable end-to-end today; "incomplete" = missing fixtures/judge runner, excluded from suite runs
     runner: str = "agent"  # "agent" = run_benchmark.py creates a real agent; "vitest" = external back-end blackbox smoke

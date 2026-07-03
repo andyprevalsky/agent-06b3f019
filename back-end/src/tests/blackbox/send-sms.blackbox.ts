@@ -996,7 +996,8 @@ async function testBoundary_notifyWriteLockNaturalLanguageOnly() {
 async function testBoundary_notifyWriteLockStructuredMms() {
   const token = captureToken('notify-write-lock-mms');
   const agent = await createNotifyAgent('boundary write lock mms agent');
-  const imageUrl = 'https://httpbin.org/image/jpeg';
+  const imageUrl =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=';
   const itemTitle = "Carhartt Men's Knit Cuffed Beanie, Black";
   const itemDescription = 'Soft rib-knit acrylic, fold-up cuff, Carhartt patch label.';
   try {

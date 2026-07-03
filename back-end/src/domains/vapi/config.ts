@@ -19,6 +19,7 @@ export const DEFAULT_OUTBOUND_VOICE_ID = '6fZce9LFNG3iEITDfqZZ';
 export const BASE_SYSTEM_PROMPT = `You are making an outbound phone call. Be polite, professional, and conversational.
 If the person is busy or uninterested, thank them for their time and end the call.
 Extract the information defined in your output schema through natural conversation.
+When the conversation goal is complete, say a brief goodbye and use the endCall tool.
 
 `;
 
@@ -27,6 +28,7 @@ export const DEFAULT_CALL_ASSISTANT_CONFIG: JsonObject = {
   model: {
     provider: 'openai',
     model: 'gpt-4o',
+    tools: [{ type: 'endCall' }],
   },
   voice: {
     provider: '11labs',

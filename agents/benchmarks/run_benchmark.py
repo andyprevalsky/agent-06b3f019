@@ -68,6 +68,13 @@ from benchmarks.logs import (
     stop_supabase_realtime_collector,
     subscribe_supabase_realtime_agent,
 )
+from benchmarks.phone_callee import (
+    PhoneCalleeSession,
+    callee_check_failures,
+    missing_call_findings,
+    phone_search_text,
+    resolve_callee_prompt,
+)
 from benchmarks.realtime_monitor import SupabaseRealtimeSmokeMonitor
 from benchmarks.results import BenchmarkRun, TaskResult, compare_runs
 from benchmarks.timeout_history import (
@@ -279,6 +286,23 @@ def _attention_request_matches_task(task: BenchmarkTask, req: dict) -> bool:
     return _attention_request_kind(req) == expected_kind
 
 
+def _digits_only(value: object) -> str:
+    return "".join(ch for ch in str(value or "") if ch.isdigit())
+
+
+def _phone_approval_matches_callee(task: BenchmarkTask, req: dict) -> bool:
+    """Phone benchmarks may auto-approve only the active controlled callee number."""
+    callee_number = getattr(task, "_callee_phone_number", "")
+    if not task.phone_persona or not callee_number:
+        return True
+    expected_digits = _digits_only(callee_number)
+    if expected_digits.startswith("1") and len(expected_digits) == 11:
+        expected_digits = expected_digits[1:]
+    haystack = json.dumps(req, default=str)
+    haystack_digits = _digits_only(haystack)
+    return bool(expected_digits and expected_digits in haystack_digits)
+
+
 def _frontend_url_for_benchmark(base_url: str) -> str:
     explicit = os.environ.get("BENCHMARK_FRONTEND_URL", "").strip()
     if explicit:
@@ -415,6 +439,67 @@ def _evaluate_agent_payment_result(data: dict) -> tuple[bool, str | None]:
     return True, None
 
 
+async def _evaluate_phone_call_task(
+    task: BenchmarkTask,
+    data: dict,
+    callee: PhoneCalleeSession,
+) -> tuple[bool, str | None]:
+    """Two-sided phone verification: agent-side findings + callee-side analysis."""
+    pinned_findings = _flatten_pinned_call_findings(task.pinned_facts)
+    expected_findings = [*(task.expected_call_findings or []), *pinned_findings]
+    missing = missing_call_findings(expected_findings, phone_search_text(data))
+    if missing:
+        return False, f"agent output missing pinned/expected call findings: {missing}"
+    final_missing = missing_call_findings(task.expected_final_findings or [], phone_final_result_text(data))
+    if final_missing:
+        return False, f"final output missing expected returned findings: {final_missing}"
+    if task.callee_checks:
+        try:
+            structured = await callee.fetch_callee_structured_data()
+        except Exception as exc:
+            return False, f"failed to fetch callee-side call analysis: {exc}"
+        failures = callee_check_failures(task.callee_checks, structured)
+        if failures:
+            return False, "callee-side checks failed: " + "; ".join(failures)
+    return True, None
+
+
+def phone_final_result_text(data: dict) -> str:
+    """Final returned data only; excludes prompts and raw phone transcript metadata."""
+    chunks: list[str] = []
+    for message in data.get("messages", []) or []:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata")
+        tool_name = metadata.get("toolName") if isinstance(metadata, dict) else None
+        if tool_name in {"attempt_completion", "completion_summary"}:
+            chunks.append(str(message.get("text") or message.get("message") or ""))
+            completion_summary = metadata.get("completionSummary") if isinstance(metadata, dict) else None
+            if isinstance(completion_summary, dict):
+                chunks.append(json.dumps(completion_summary))
+        elif message.get("role") == "ASSISTANT":
+            chunks.append(str(message.get("text") or message.get("message") or ""))
+    return "\n".join(chunks)
+
+
+def _flatten_pinned_call_findings(pinned_facts: Optional[dict]) -> list[str]:
+    """Return string leaves from pinned phone facts for agent-side evidence checks."""
+    findings: list[str] = []
+
+    def visit(value: object) -> None:
+        if isinstance(value, dict):
+            for nested in value.values():
+                visit(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                visit(nested)
+        elif isinstance(value, (str, int, float)) and str(value).strip():
+            findings.append(str(value))
+
+    visit(pinned_facts or {})
+    return findings
+
+
 def _default_timeout_for_task(task: BenchmarkTask, max_seconds: int | None = None) -> int:
     """Return the configured timeout used when dynamic history is unavailable."""
     timeout = task.timeout_seconds
@@ -536,6 +621,7 @@ async def create_agent(
         or task.prompt
     )
     goal = goal.replace("{frontend_url}", _frontend_url_for_benchmark(base_url))
+    goal = resolve_callee_prompt(goal, getattr(task, "_callee_phone_number", ""), task.name)
     source_override = _benchmark_agent_source_override()
     request_source = source_override if source_override in {"WEB", "MAC_APP"} else "WEB"
 
@@ -1477,6 +1563,14 @@ async def poll_agent(
                             return data, approvals_triggered, approvals_resolved, None
                         if task.approval_handling == "auto_approve":
                             if req_id:
+                                if not _phone_approval_matches_callee(task, req):
+                                    await respond_to_attention_request(base_url, req_id, "denied")
+                                    return (
+                                        data,
+                                        approvals_triggered,
+                                        approvals_resolved,
+                                        "Refused to auto-approve phone call to non-benchmark number",
+                                    )
                                 await respond_to_attention_request(base_url, req_id, "approved")
                                 approvals_resolved += 1
                                 print(f"    ✅ Auto-approved attention request {req_id[:8]}")
@@ -3593,6 +3687,16 @@ async def run_single_task(
         tx_count = plaid_transactions_manifest.get("transaction_count", "?")
         print(f"    💳 Prepared Plaid transaction fixture mode={mode} transactions={tx_count}")
 
+    phone_callee: Optional[PhoneCalleeSession] = None
+    if task.phone_persona:
+        phone_callee = PhoneCalleeSession(task.name, task.phone_persona)
+        await phone_callee.setup()
+        task._callee_phone_number = phone_callee.phone_number
+        print(
+            f"    📞 Benchmark callee ready: {phone_callee.phone_number} "
+            f"(persona assistant {phone_callee.assistant_id[:8]})"
+        )
+
     resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
     print(f"\n  {'=' * 50}")
     print(f"  📋 {task.name}: {task.title}")
@@ -3753,6 +3857,11 @@ async def run_single_task(
             if not grep_passed:
                 passed = False
                 failure_reason = grep_reason
+        if phone_callee is not None and passed:
+            phone_passed, phone_reason = await _evaluate_phone_call_task(task, data, phone_callee)
+            if not phone_passed:
+                passed = False
+                failure_reason = phone_reason
         if task.name in PLAID_TRANSACTION_BENCHMARK_TASK_NAMES:
             plaid_passed, plaid_reason = await evaluate_plaid_transaction_task(
                 task,
@@ -3901,6 +4010,8 @@ async def run_single_task(
                 print(f"    🗑  Deleted agent {agent_id[:12]}")
             except Exception:
                 print(f"    ⚠ Failed to delete agent {agent_id[:12]}")
+        elif os.environ.get("BENCHMARK_KEEP_AGENTS") == "true":
+            print(f"    🧪 Keeping agent {agent_id[:12]} for UI audit")
         else:
             print(f"    🧪 Keeping failed agent {agent_id[:12]} for diagnostics")
 
@@ -4016,6 +4127,8 @@ async def run_single_task(
             await asyncio.gather(realtime_tree_task, return_exceptions=True)
         if realtime_monitor:
             await realtime_monitor.stop()
+        if phone_callee is not None:
+            await phone_callee.cleanup()
         for tmp in temp_csv_paths:
             try:
                 os.unlink(tmp)

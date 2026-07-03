@@ -8,8 +8,15 @@
  */
 
 import 'dotenv/config';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { z } from 'zod';
-import { confirmTestPayment } from '../../domains/test-payment/service';
+import {
+  confirmPhoneBenchmarkPayment,
+  confirmTestPayment,
+  recordPhoneBenchmarkPaymentAudit,
+} from '../../domains/test-payment/service';
 import { stripe } from '../../providers/stripe';
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -21,6 +28,14 @@ const writeErrorLine = (message: string): void => {
 };
 
 const ErrorResponse = z.object({ error: z.string() });
+const VapiToolResponse = z.object({
+  results: z.array(
+    z.object({
+      toolCallId: z.string(),
+      result: z.string(),
+    })
+  ),
+});
 const ItemsResponse = z.object({
   items: z
     .array(
@@ -217,6 +232,178 @@ const tests: Array<[string, () => Promise<void>]> = [
           `expected card-only payment method types, got ${paymentIntent.payment_method_types}`
         );
       });
+    },
+  ],
+  [
+    'phone benchmark payment creates a Stripe test PaymentIntent',
+    async () => {
+      await withFakeStripe(async (calls) => {
+        const result = await confirmPhoneBenchmarkPayment({
+          cardNumber: '4242 4242 4242 4242',
+          expiration: '12/30',
+          cvc: '123',
+          billingZip: '78731',
+          cardholderName: 'Rose Labs',
+        });
+
+        assert(result.status === 'succeeded', 'expected phone payment to succeed');
+        assert(result.confirmationCode === 'ROSE-4471', 'expected phone confirmation code');
+        assert(result.amountCents === 3420, 'expected $34.20 benchmark amount');
+        assert(calls.paymentMethods.length === 0, 'sandbox PAN should use Stripe test PM token');
+        assert(calls.paymentIntents.length === 1, 'expected one Stripe payment intent');
+        const paymentIntent = JSON.parse(calls.paymentIntents[0]) as {
+          amount?: number;
+          payment_method?: string;
+          metadata?: Record<string, string>;
+        };
+        assert(paymentIntent.amount === 3420, `expected amount 3420, got ${paymentIntent.amount}`);
+        assert(
+          paymentIntent.payment_method === 'pm_card_visa',
+          `expected pm_card_visa, got ${paymentIntent.payment_method}`
+        );
+        assert(
+          paymentIntent.metadata?.benchmark === 'phone-call-payment',
+          'expected phone benchmark metadata'
+        );
+      });
+    },
+  ],
+  [
+    'phone benchmark payment audit records tool-call PaymentIntent results',
+    async () => {
+      const previous = process.env.PHONE_BENCHMARK_PAYMENT_AUDIT_PATH;
+      const tmp = await mkdtemp(path.join(os.tmpdir(), 'phone-payment-audit-'));
+      const auditPath = path.join(tmp, 'payments.jsonl');
+      process.env.PHONE_BENCHMARK_PAYMENT_AUDIT_PATH = auditPath;
+      try {
+        const entry = await recordPhoneBenchmarkPaymentAudit({
+          toolCallId: 'call_payment_blackbox',
+          status: 'succeeded',
+          paymentIntentId: 'pi_payment_blackbox',
+          amountCents: 3420,
+          confirmationCode: 'ROSE-4471',
+        });
+        const lines = (await readFile(auditPath, 'utf8')).trim().split('\n');
+        const persisted = JSON.parse(lines[0]) as {
+          createdAt?: string;
+          toolCallId?: string;
+          status?: string;
+          paymentIntentId?: string;
+        };
+        assert(
+          entry.createdAt === persisted.createdAt,
+          'expected returned audit entry to match file'
+        );
+        assert(persisted.toolCallId === 'call_payment_blackbox', 'wrong persisted tool call id');
+        assert(persisted.status === 'succeeded', 'wrong persisted status');
+        assert(
+          persisted.paymentIntentId === 'pi_payment_blackbox',
+          'wrong persisted PaymentIntent id'
+        );
+      } finally {
+        if (previous === undefined) delete process.env.PHONE_BENCHMARK_PAYMENT_AUDIT_PATH;
+        else process.env.PHONE_BENCHMARK_PAYMENT_AUDIT_PATH = previous;
+        await rm(tmp, { recursive: true, force: true });
+      }
+    },
+  ],
+  [
+    'Vapi phone payment tool returns tool-call result envelope on validation failure',
+    async () => {
+      const response = await request('/api/test-payment/vapi-phone-payment-tool', {
+        method: 'POST',
+        body: JSON.stringify({
+          message: {
+            type: 'tool-calls',
+            toolCallList: [
+              {
+                id: 'toolu_phone_payment_missing_cvc',
+                name: 'complete_test_payment',
+                arguments: {
+                  card_number: '4242 4242 4242 4242',
+                  expiration: '12/30',
+                  billing_zip: '78731',
+                },
+              },
+            ],
+          },
+        }),
+      });
+      assertStatus(response.status, 200, response.data);
+      const body = assertSchema(VapiToolResponse, response.data, 'vapi payment tool');
+      assert(
+        body.results[0].toolCallId === 'toolu_phone_payment_missing_cvc',
+        'wrong tool call id'
+      );
+      const result = JSON.parse(body.results[0].result) as { status?: string; error?: string };
+      assert(result.status === 'failed', 'expected failed result');
+      assert(String(result.error || '').includes('cvc'), `expected cvc error, got ${result.error}`);
+    },
+  ],
+  [
+    'Vapi phone payment tool accepts JSON-string tool arguments',
+    async () => {
+      const response = await request('/api/test-payment/vapi-phone-payment-tool', {
+        method: 'POST',
+        body: JSON.stringify({
+          message: {
+            type: 'tool-calls',
+            toolCallList: [
+              {
+                id: 'toolu_phone_payment_string_args',
+                name: 'complete_test_payment',
+                arguments: JSON.stringify({
+                  card_number: '4242 4242 4242 4242',
+                  expiration: '12/30',
+                  billing_zip: '78731',
+                }),
+              },
+            ],
+          },
+        }),
+      });
+      assertStatus(response.status, 200, response.data);
+      const body = assertSchema(VapiToolResponse, response.data, 'vapi payment tool');
+      assert(
+        body.results[0].toolCallId === 'toolu_phone_payment_string_args',
+        'wrong tool call id'
+      );
+      const result = JSON.parse(body.results[0].result) as { status?: string; error?: string };
+      assert(result.status === 'failed', 'expected failed result');
+      assert(String(result.error || '').includes('cvc'), `expected cvc error, got ${result.error}`);
+    },
+  ],
+  [
+    'Vapi phone payment tool accepts nested function toolCalls payload',
+    async () => {
+      const response = await request('/api/test-payment/vapi-phone-payment-tool', {
+        method: 'POST',
+        body: JSON.stringify({
+          message: {
+            type: 'tool-calls',
+            toolCalls: [
+              {
+                id: 'call_nested_missing_cvc',
+                type: 'function',
+                function: {
+                  name: 'complete_test_payment',
+                  arguments: {
+                    card_number: '4242 4242 4242 4242',
+                    expiration: '12/30',
+                    billing_zip: '78731',
+                  },
+                },
+              },
+            ],
+          },
+        }),
+      });
+      assertStatus(response.status, 200, response.data);
+      const body = assertSchema(VapiToolResponse, response.data, 'vapi payment tool');
+      assert(body.results[0].toolCallId === 'call_nested_missing_cvc', 'wrong tool call id');
+      const result = JSON.parse(body.results[0].result) as { status?: string; error?: string };
+      assert(result.status === 'failed', 'expected failed result');
+      assert(String(result.error || '').includes('cvc'), `expected cvc error, got ${result.error}`);
     },
   ],
 ];

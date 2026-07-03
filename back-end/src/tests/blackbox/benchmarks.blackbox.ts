@@ -207,6 +207,7 @@ const KNOWN_TAGS = [
   'social',
   'grep',
   'payment',
+  'phone',
   'plaid',
   'transactions',
   'bot-challenge',
