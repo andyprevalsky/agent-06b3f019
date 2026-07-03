@@ -3,11 +3,12 @@
  */
 
 import Steel from 'steel-sdk';
+import type { Browser } from 'playwright';
 import { prisma } from '../database';
 import { logJson } from '../../utils/log';
 import { type ProxyGeoLocation, DEFAULT_GEOLOCATION } from '../geoip';
 import { SteelRateLimitError, type FingerprintData, log } from './types';
-import { createLocalBrowserSession, validateSessionConnection } from './sessionConnection';
+import { createLocalBrowserSession, connectValidatedBrowser } from './sessionConnection';
 export { resumeSession } from './sessionResume';
 
 // Validate required environment variables
@@ -126,6 +127,34 @@ function redactProxyServerForLog(server: string): string {
   }
 }
 
+// Cities Steel has already rejected with "400 Invalid proxy configuration".
+// Steel only has residential proxies in a subset of cities; without this cache
+// every session for an affected user burns ~0.5-4s on a guaranteed-failing
+// create attempt before the dropCity retry succeeds. The cache is per-process
+// (re-learned after each deploy), so known-bad cities can be seeded via
+// STEEL_REJECTED_PROXY_CITIES="US|CA|SAN FRANCISCO,US|NY|NEW YORK" to skip
+// even the first-request penalty. Advisory only — it never drops country/state.
+const rejectedProxyCities = new Set<string>(
+  (process.env.STEEL_REJECTED_PROXY_CITIES ?? '')
+    .split(',')
+    .map((entry) => entry.trim().toLowerCase())
+    .filter((entry) => entry.split('|').length === 3 && entry.split('|')[2] !== '')
+);
+
+export function proxyCityKey(geolocation: ProxyGeoLocation): string {
+  return `${geolocation.country}|${geolocation.state ?? ''}|${geolocation.city ?? ''}`.toLowerCase();
+}
+
+export function isKnownRejectedProxyCity(geolocation: ProxyGeoLocation): boolean {
+  return geolocation.city !== undefined && rejectedProxyCities.has(proxyCityKey(geolocation));
+}
+
+export function rememberRejectedProxyCity(geolocation: ProxyGeoLocation): void {
+  if (geolocation.city === undefined || geolocation.city === '') return;
+  rejectedProxyCities.add(proxyCityKey(geolocation));
+  log.info(`  🌎 Remembering unsupported proxy city: ${proxyCityKey(geolocation)}`);
+}
+
 export function buildSteelProxySettings(
   geolocation: ProxyGeoLocation,
   dropCity = false
@@ -210,7 +239,8 @@ export async function createSessionWithContext(
   dbContextId: string,
   agentId: string,
   geolocation: ProxyGeoLocation = DEFAULT_GEOLOCATION,
-  startUrl?: string
+  startUrl?: string,
+  options?: { keepValidationConnection?: boolean }
 ): Promise<{
   sessionId: string;
   debugUrl: string;
@@ -220,6 +250,7 @@ export async function createSessionWithContext(
   proxyLocation: ProxyGeoLocation;
   steelProfileId: string | null;
   profileSource: string;
+  validationBrowser: Browser | null;
 }> {
   log.info(`Creating Steel browser session for context ${dbContextId}...`);
   log.info(
@@ -246,16 +277,19 @@ export async function createSessionWithContext(
   }
 
   const localSession = await createLocalBrowserSession(dbContextId, agentId, startUrl);
-  if (localSession) return localSession;
+  if (localSession) return { ...localSession, validationBrowser: null };
 
   let lastError: Error | null = null;
   // Set after Steel rejects a city-level proxy ("400 Invalid proxy
   // configuration") so the next attempt retries with country+state only.
-  let dropProxyCity = false;
+  // Seeded from the process-wide rejection cache so repeat sessions for the
+  // same location skip the guaranteed-failing city attempt entirely.
+  let dropProxyCity = isKnownRejectedProxyCity(geolocation);
 
   for (let attempt = 1; attempt <= MAX_SESSION_RETRIES; attempt++) {
     log.info(`  📡 Session creation attempt ${attempt}/${MAX_SESSION_RETRIES}...`);
 
+    let validationBrowser: Browser | null = null;
     try {
       // Create session in Steel with viewport adjusted for browser chrome
       // Steel's headful mode has ~91px chrome (toolbar). To get 1280x800 content area:
@@ -299,10 +333,12 @@ export async function createSessionWithContext(
       // Format: wss://connect.steel.dev?apiKey=${STEEL_API_KEY}&sessionId=${session.id}
       const wsUrl = `wss://connect.steel.dev?apiKey=${process.env.STEEL_API_KEY}&sessionId=${session.id}`;
 
-      // VALIDATE: Test that the WebSocket connection actually works before proceeding
-      const isValid = await validateSessionConnection(wsUrl);
+      // VALIDATE: Test that the WebSocket connection actually works before
+      // proceeding. The connection is kept open so injectUserData can reuse it
+      // instead of paying a second 3-5s CDP handshake.
+      validationBrowser = await connectValidatedBrowser(wsUrl);
 
-      if (!isValid) {
+      if (validationBrowser === null) {
         log.info(`  ⚠️ Session ${session.id} failed validation, releasing...`);
         try {
           await steel.sessions.release(session.id);
@@ -334,6 +370,8 @@ export async function createSessionWithContext(
             log.info(
               `  ⚠️ Concurrent profile init detected; releasing ${session.id} and retrying with ${winningContext.contextId}`
             );
+            await validationBrowser.close().catch(() => {});
+            validationBrowser = null;
             try {
               await steel.sessions.release(session.id);
             } catch (releaseErr) {
@@ -376,6 +414,11 @@ export async function createSessionWithContext(
       log.info(`  Live View URL: ${debugUrl}`);
       log.info(`  CDP WebSocket URL: ${wsUrl}`);
 
+      if (!options?.keepValidationConnection) {
+        await validationBrowser.close().catch(() => {});
+        validationBrowser = null;
+      }
+
       return {
         sessionId: session.id,
         debugUrl,
@@ -385,8 +428,12 @@ export async function createSessionWithContext(
         proxyLocation: geolocation,
         steelProfileId: session.profileId ?? null,
         profileSource: profile.profileSource,
+        validationBrowser,
       };
     } catch (error) {
+      if (validationBrowser !== null) {
+        await validationBrowser.close().catch(() => {});
+      }
       // Steel 429 = concurrent session limit. Don't retry locally — bubble up so agent can backoff.
       const status =
         (error as Record<string, unknown>)?.status ??
@@ -407,6 +454,7 @@ export async function createSessionWithContext(
       const msg = (lastError.message || '').toLowerCase();
       if (!dropProxyCity && (status === 400 || msg.includes('invalid proxy'))) {
         dropProxyCity = true;
+        rememberRejectedProxyCity(geolocation);
         log.info('  🌎 Dropping unsupported proxy city; retrying with country+state only');
       }
     }

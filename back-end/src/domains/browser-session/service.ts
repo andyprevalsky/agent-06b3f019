@@ -73,11 +73,16 @@ export async function initSession(userId: string, agentId: string, startUrl: str
     country: proxyGeo.country,
   });
 
-  // Phase 2: Create session (needs agent proxy + context)
-  const session = await createSessionWithContext(contextId, agentId, proxyGeo, startUrl);
+  // Phase 2: Create session (needs agent proxy + context). Keep the validation
+  // CDP connection open so injection can reuse it (a fresh handshake is 3-5s).
+  const session = await createSessionWithContext(contextId, agentId, proxyGeo, startUrl, {
+    keepValidationConnection: true,
+  });
 
   // Phase 3: Inject user's cookies and fingerprint via CDP
-  const injectionResult = await injectUserData(session.sessionId, userId, startUrl);
+  const injectionResult = await injectUserData(session.sessionId, userId, startUrl, {
+    browser: session.validationBrowser ?? undefined,
+  });
 
   const serializedPasswords = serializePasswords(passwords);
   const serializedPasskeys = serializePasskeys(passkeys);
