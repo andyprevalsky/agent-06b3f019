@@ -27,6 +27,7 @@ from helpers.attachments import (
     get_file_from_pointer,
 )
 from helpers.context_pointers import resolve_pointers_in_messages
+from helpers.context_compaction import is_excluded_from_model
 from helpers.context_scope import is_internal_subagent_message
 from helpers.messages import (
     CoalescingStreamBroadcaster,
@@ -315,6 +316,10 @@ def _build_claude_auth_context(
     source: Optional[str] = None,
     user_id: Optional[str] = None,
     pool_token_id: Optional[str] = None,
+    lineage_key: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    root_agent_id: Optional[str] = None,
+    fast_cache_affinity_key: Optional[str] = None,
     max_rotations: int = 2,
 ) -> Optional[ClaudeAuthContext]:
     """Build the rotation-capable claudeAuth context RoseClient.complete needs."""
@@ -341,18 +346,36 @@ def _build_claude_auth_context(
         )
 
     async def _fetch_fresh(fetch_user_id: str) -> Optional[ComputeAuthContext]:
-        result = await fetch_compute_token_activity(fetch_user_id)
+        result = await fetch_compute_token_activity(
+            fetch_user_id,
+            lineage_key=lineage_key,
+            agent_id=agent_id,
+            root_agent_id=root_agent_id,
+            fast_cache_affinity_key=fast_cache_affinity_key,
+        )
         if not result or not result.get("accessToken"):
             return None
-        return _build_compute_auth_context(result, fetch_user_id, max_rotations=max_rotations)
+        return _build_compute_auth_context(
+            result,
+            fetch_user_id,
+            agent_id=agent_id,
+            root_agent_id=root_agent_id,
+            fast_cache_affinity_key=fast_cache_affinity_key,
+            max_rotations=max_rotations,
+        )
+
+    async def _heartbeat_lease(ctx: ComputeAuthContext) -> None:
+        await heartbeat_compute_token_lineage_activity(ctx.lineage_key or "")
 
     return ClaudeAuthContext(
         token=claude_token,
         source=source,
         user_id=user_id,
         pool_token_id=pool_token_id if source == "pool" else None,
+        lineage_key=lineage_key,
         mark_rate_limited=_mark_rate_limited,
         fetch_fresh=_fetch_fresh if max_rotations > 0 else None,
+        heartbeat_lease=_heartbeat_lease if lineage_key else None,
         max_rotations=max_rotations,
     )
 
@@ -364,6 +387,10 @@ def _build_gpt_auth_context(
     source: Optional[str] = None,
     user_id: Optional[str] = None,
     pool_token_id: Optional[str] = None,
+    lineage_key: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    root_agent_id: Optional[str] = None,
+    fast_cache_affinity_key: Optional[str] = None,
     max_rotations: int = 2,
 ) -> Optional[GptAuthContext]:
     """Build the gptAuth context RoseClient.complete needs."""
@@ -390,10 +417,26 @@ def _build_gpt_auth_context(
         )
 
     async def _fetch_fresh(fetch_user_id: str) -> Optional[ComputeAuthContext]:
-        result = await fetch_compute_token_activity(fetch_user_id)
+        result = await fetch_compute_token_activity(
+            fetch_user_id,
+            lineage_key=lineage_key,
+            agent_id=agent_id,
+            root_agent_id=root_agent_id,
+            fast_cache_affinity_key=fast_cache_affinity_key,
+        )
         if not result or not result.get("accessToken"):
             return None
-        return _build_compute_auth_context(result, fetch_user_id, max_rotations=max_rotations)
+        return _build_compute_auth_context(
+            result,
+            fetch_user_id,
+            agent_id=agent_id,
+            root_agent_id=root_agent_id,
+            fast_cache_affinity_key=fast_cache_affinity_key,
+            max_rotations=max_rotations,
+        )
+
+    async def _heartbeat_lease(ctx: ComputeAuthContext) -> None:
+        await heartbeat_compute_token_lineage_activity(ctx.lineage_key or "")
 
     return GptAuthContext(
         token=gpt_token,
@@ -401,8 +444,10 @@ def _build_gpt_auth_context(
         user_id=user_id,
         account_id=account_id,
         pool_token_id=pool_token_id if source == "pool" else None,
+        lineage_key=lineage_key,
         mark_rate_limited=_mark_rate_limited,
         fetch_fresh=_fetch_fresh,
+        heartbeat_lease=_heartbeat_lease if lineage_key else None,
         max_rotations=max_rotations,
     )
 
@@ -411,6 +456,9 @@ def _build_compute_auth_context(
     result: Dict[str, Any],
     user_id: str,
     *,
+    agent_id: Optional[str] = None,
+    root_agent_id: Optional[str] = None,
+    fast_cache_affinity_key: Optional[str] = None,
     max_rotations: int = 2,
 ) -> Optional[ComputeAuthContext]:
     """Build a direct auth context from the unified compute-token endpoint."""
@@ -424,6 +472,10 @@ def _build_compute_auth_context(
             source=result.get("source"),
             user_id=user_id,
             pool_token_id=result.get("poolTokenId"),
+            lineage_key=result.get("lineageKey"),
+            agent_id=agent_id,
+            root_agent_id=root_agent_id,
+            fast_cache_affinity_key=fast_cache_affinity_key or result.get("fastCacheAffinityKey"),
             max_rotations=max_rotations,
         )
     return _build_gpt_auth_context(
@@ -432,6 +484,10 @@ def _build_compute_auth_context(
         source=result.get("source"),
         user_id=user_id,
         pool_token_id=result.get("poolTokenId"),
+        lineage_key=result.get("lineageKey"),
+        agent_id=agent_id,
+        root_agent_id=root_agent_id,
+        fast_cache_affinity_key=fast_cache_affinity_key or result.get("fastCacheAffinityKey"),
         max_rotations=max_rotations,
     )
 
@@ -449,7 +505,13 @@ def _build_compute_auth_context_from_payload(
 
     user_id = compute_auth.get("userId")
     if isinstance(user_id, str) and user_id:
-        ctx = _build_compute_auth_context(compute_auth, user_id)
+        ctx = _build_compute_auth_context(
+            compute_auth,
+            user_id,
+            agent_id=compute_auth.get("agentId"),
+            root_agent_id=compute_auth.get("rootAgentId"),
+            fast_cache_affinity_key=compute_auth.get("fastCacheAffinityKey"),
+        )
         if isinstance(ctx, ClaudeAuthContext):
             return ctx, None
         if isinstance(ctx, GptAuthContext):
@@ -988,6 +1050,9 @@ def convert_context_to_messages(  # noqa: C901
         content = msg.get("text", "")
         metadata = msg.get("metadata", {}) or {}  # Handle explicit None values
 
+        if is_excluded_from_model(msg):
+            continue
+
         # Skip ALL sub-agent internal messages regardless of role
         if is_internal_subagent_message(msg):
             continue
@@ -1171,6 +1236,9 @@ async def build_llm_messages(  # noqa: C901
     for msg in context:
         role = msg.get("role", "").upper()
         metadata = msg.get("metadata", {}) or {}
+
+        if is_excluded_from_model(msg):
+            continue
 
         # Skip ALL sub-agent internal messages regardless of role
         if is_internal_subagent_message(msg):
@@ -1724,6 +1792,8 @@ async def call_llm_structured_streaming(  # noqa: C901
     gpt_token_source: Optional[str] = None,
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
+    compute_token_lineage_key: Optional[str] = None,
+    compute_token_fast_cache_affinity_key: Optional[str] = None,
     on_model_detected: Optional[Callable[[str], None]] = None,  # Called with actual_model when first chunk reveals it
     skip_cache_write: bool = False,  # Skip prompt caching (for single-use calls like planner)
     call_site: str = "unknown",  # Label identifying the caller (e.g., plan_loop, execute_loop, planner)
@@ -1823,6 +1893,10 @@ async def call_llm_structured_streaming(  # noqa: C901
             source=claude_token_source,
             user_id=claude_token_user_id,
             pool_token_id=claude_token_pool_id,
+            lineage_key=compute_token_lineage_key,
+            agent_id=agent_id,
+            root_agent_id=agent_id,
+            fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
         )
         gpt_auth_context = _build_gpt_auth_context(
             gpt_token,
@@ -1830,6 +1904,10 @@ async def call_llm_structured_streaming(  # noqa: C901
             source=gpt_token_source,
             user_id=gpt_token_user_id,
             pool_token_id=gpt_token_pool_id,
+            lineage_key=compute_token_lineage_key,
+            agent_id=agent_id,
+            root_agent_id=agent_id,
+            fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
         )
 
         def _native_visible_text() -> str:
@@ -2238,6 +2316,8 @@ async def call_llm_structured_streaming(  # noqa: C901
                 gpt_token_source=gpt_token_source,
                 gpt_token_pool_id=gpt_token_pool_id,
                 gpt_token_user_id=gpt_token_user_id,
+                compute_token_lineage_key=compute_token_lineage_key,
+                compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
                 on_model_detected=on_model_detected,
                 skip_cache_write=skip_cache_write,
                 call_site=call_site,
@@ -2433,11 +2513,12 @@ async def call_llm_structured_streaming(  # noqa: C901
 
             response = response_model.model_validate(parsed_content)
         except (json.JSONDecodeError, Exception) as e:
+            error_message = extract_error_message(e)
             logger.error(
                 f"Failed to parse streaming Rose response: json={accumulated_json[:500]}",
-                error=extract_error_message(e),
+                error=error_message,
             )
-            raise ValueError(f"Failed to parse streaming Rose response as {response_model.__name__}: {str(e)}") from e
+            raise ValueError(f"Failed to parse streaming Rose response as {response_model.__name__}: {error_message}") from e
 
         # Use captured stream usage if available, otherwise fall back to estimates
         if stream_usage:
@@ -2774,6 +2855,8 @@ async def call_llm(
     gpt_token_source: Optional[str] = None,
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
+    compute_token_lineage_key: Optional[str] = None,
+    compute_token_fast_cache_affinity_key: Optional[str] = None,
     skip_cache_write: bool = False,
     call_site: str = "unknown",
     agent_id: Optional[str] = None,
@@ -2830,6 +2913,10 @@ async def call_llm(
                 source=claude_token_source,
                 user_id=claude_token_user_id,
                 pool_token_id=claude_token_pool_id,
+                lineage_key=compute_token_lineage_key,
+                agent_id=agent_id,
+                root_agent_id=agent_id,
+                fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
             )
             gpt_auth_context = _build_gpt_auth_context(
                 gpt_token,
@@ -2837,6 +2924,10 @@ async def call_llm(
                 source=gpt_token_source,
                 user_id=gpt_token_user_id,
                 pool_token_id=gpt_token_pool_id,
+                lineage_key=compute_token_lineage_key,
+                agent_id=agent_id,
+                root_agent_id=agent_id,
+                fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
             )
             try:
                 rose_response = await rose_client.collect(
@@ -2999,6 +3090,8 @@ async def _call_llm_verifier(  # noqa: C901
     gpt_token_source: Optional[str] = None,
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
+    compute_token_lineage_key: Optional[str] = None,
+    compute_token_fast_cache_affinity_key: Optional[str] = None,
     call_site: str = "verifier",
     agent_id: Optional[str] = None,
     dump_extra: Optional[Dict[str, Any]] = None,
@@ -3051,6 +3144,10 @@ async def _call_llm_verifier(  # noqa: C901
         source=claude_token_source,
         user_id=claude_token_user_id,
         pool_token_id=claude_token_pool_id,
+        lineage_key=compute_token_lineage_key,
+        agent_id=agent_id,
+        root_agent_id=agent_id,
+        fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
     )
     gpt_auth_context = _build_gpt_auth_context(
         gpt_token,
@@ -3058,6 +3155,10 @@ async def _call_llm_verifier(  # noqa: C901
         source=gpt_token_source,
         user_id=gpt_token_user_id,
         pool_token_id=gpt_token_pool_id,
+        lineage_key=compute_token_lineage_key,
+        agent_id=agent_id,
+        root_agent_id=agent_id,
+        fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
     )
     try:
         # Fast Mode record/replay (verifier path).
@@ -3068,7 +3169,7 @@ async def _call_llm_verifier(  # noqa: C901
             messages=messages,
             response_model=response_model,
             temperature=0.3,
-            max_tokens=4096,
+            max_tokens=VERIFIER_MAX_TOKENS,
             claude_auth=claude_auth_context,
             gpt_auth=gpt_auth_context,
             agent_id=agent_id,
@@ -3685,6 +3786,7 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
 # browser, claude_code — routes through the check_progress activity below, so
 # this constant is the single source of truth for the verifier model.
 VERIFIER_MODEL = "rose-labs/rose-1-ultra"
+VERIFIER_MAX_TOKENS = 16000
 
 
 @activity.defn
@@ -3705,6 +3807,8 @@ async def check_progress(  # noqa: C901
     gpt_token_source: Optional[str] = None,
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
+    compute_token_lineage_key: Optional[str] = None,
+    compute_token_fast_cache_affinity_key: Optional[str] = None,
     dump_extra: Optional[Dict[str, Any]] = None,
     fast_mode_cache_enabled: bool = False,
     fast_mode_goal: Optional[str] = None,
@@ -3777,13 +3881,14 @@ async def check_progress(  # noqa: C901
     # _call_llm_verifier → cached_complete) records/replays by canonical request
     # fingerprint. Prompt/schema/message changes intentionally miss.
     write_through_enabled = write_through_enabled_for_user(claude_token_user_id or gpt_token_user_id)
-    if fast_mode_goal and (fast_mode_cache_enabled or write_through_enabled):
+    fast_cache_should_write = fast_mode_cache_enabled or write_through_enabled
+    if fast_mode_goal and fast_cache_should_write:
         set_fast_cache_context(
             FastCacheContext(
                 enabled=fast_mode_cache_enabled,
                 goal=fast_mode_goal,
                 base_step=fast_mode_step,
-                write_enabled=fast_mode_cache_enabled or write_through_enabled,
+                write_enabled=fast_cache_should_write,
             )
         )
 
@@ -3910,6 +4015,8 @@ async def check_progress(  # noqa: C901
                     gpt_token_source=gpt_token_source,
                     gpt_token_pool_id=gpt_token_pool_id,
                     gpt_token_user_id=gpt_token_user_id,
+                    compute_token_lineage_key=compute_token_lineage_key,
+                    compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
                     call_site=call_site,
                     agent_id=agent_id,
                     dump_extra=verifier_dump_extra or None,
@@ -3918,6 +4025,15 @@ async def check_progress(  # noqa: C901
             except Exception as e:
                 last_error = e
                 if attempt < max_retries:
+                    if fast_mode_goal and fast_cache_should_write:
+                        set_fast_cache_context(
+                            FastCacheContext(
+                                enabled=False,
+                                goal=fast_mode_goal,
+                                base_step=fast_mode_step,
+                                write_enabled=True,
+                            )
+                        )
                     delay = base_delay * (2**attempt)
                     jitter = random.uniform(0, delay * 0.5)
                     logger.warning(
@@ -3925,11 +4041,12 @@ async def check_progress(  # noqa: C901
                         attempt=attempt + 1,
                         max_retries=max_retries,
                         delay=round(delay + jitter, 3),
-                        error=str(e)[:200],
+                        fast_cache_read_enabled=False if fast_mode_goal and fast_cache_should_write else None,
+                        error=extract_error_message(e),
                     )
                     await asyncio.sleep(delay + jitter)
                 else:
-                    raise last_error from last_error
+                    raise last_error
 
         score = result["score"]
         # C3: score_reasoning is gone. Read only `reasoning` now.
@@ -3959,9 +4076,10 @@ async def check_progress(  # noqa: C901
             "structured_response": structured_response,
         }
     except Exception as e:
-        logger.error("Failed to check progress", error=extract_error_message(e))
+        error_message = extract_error_message(e)
+        logger.error("Failed to check progress", error=error_message)
         # Return 0.5 on error to keep agent running, with empty usage
-        error_message = f"Progress check failed: {str(e)}"
+        error_message = f"Progress check failed: {error_message}"
         return {
             "score": 0.5,
             "reasoning": error_message,
@@ -4006,6 +4124,8 @@ async def call_llm_activity(  # noqa: C901
     gpt_token_source: Optional[str] = None,
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
+    compute_token_lineage_key: Optional[str] = None,
+    compute_token_fast_cache_affinity_key: Optional[str] = None,
     user_id: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
     fast_mode_goal: Optional[str] = None,
@@ -4246,6 +4366,8 @@ async def call_llm_activity(  # noqa: C901
                 gpt_token_source=gpt_token_source,
                 gpt_token_pool_id=gpt_token_pool_id,
                 gpt_token_user_id=gpt_token_user_id,
+                compute_token_lineage_key=compute_token_lineage_key,
+                compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
                 on_model_detected=on_model_detected,
                 call_site=call_site,
                 skip_cache_write=skip_cache_write,
@@ -4554,19 +4676,35 @@ async def fetch_gpt_code_token_activity(user_id: str) -> Optional[Dict[str, Any]
 
 
 @activity.defn
-async def fetch_compute_token_activity(user_id: str) -> Optional[Dict[str, Any]]:
+async def fetch_compute_token_activity(
+    user_id: str,
+    lineage_key: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    root_agent_id: Optional[str] = None,
+    fast_cache_affinity_key: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
     """Fetch one provider-typed compute token across Claude/GPT from the backend."""
     config = load_config()
     _safe_heartbeat("Fetching compute token")
 
     try:
         async with httpx.AsyncClient() as client:
+            params: Dict[str, str] = {}
+            if lineage_key:
+                params["lineageKey"] = lineage_key
+            if agent_id:
+                params["agentId"] = agent_id
+            if root_agent_id:
+                params["rootAgentId"] = root_agent_id
+            if fast_cache_affinity_key:
+                params["fastCacheAffinityKey"] = fast_cache_affinity_key
             response = await client.get(
                 f"{config.backend.api_url}/api/integrations/compute-code/credentials/token",
                 headers={
                     "X-API-Key": config.backend.api_key or "",
                     "X-User-Id": user_id,
                 },
+                params=params,
                 timeout=15.0,
             )
             if response.status_code == 200:
@@ -4586,6 +4724,8 @@ async def fetch_compute_token_activity(user_id: str) -> Optional[Dict[str, Any]]
                         "accountId": data.get("accountId"),
                         "source": data.get("source", "user"),
                         "poolTokenId": data.get("poolTokenId"),
+                        "lineageKey": data.get("lineageKey"),
+                        "fastCacheAffinityKey": data.get("fastCacheAffinityKey") or fast_cache_affinity_key,
                     }
             elif response.status_code == 404:
                 logger.info(f"Compute credentials not found for user {user_id}")
@@ -4595,6 +4735,29 @@ async def fetch_compute_token_activity(user_id: str) -> Optional[Dict[str, Any]]
         logger.warning(f"Failed to fetch compute token: {e}")
 
     return None
+
+
+@activity.defn
+async def heartbeat_compute_token_lineage_activity(lineage_key: str) -> bool:
+    """Refresh a compute-token lineage lease. Best-effort; callers should not block on it."""
+    if not lineage_key:
+        return False
+    config = load_config()
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{config.backend.api_url}/api/integrations/compute-code/token/lineage-heartbeat",
+                headers={
+                    "X-API-Key": config.backend.api_key or "",
+                    "Content-Type": "application/json",
+                },
+                json={"lineageKey": lineage_key},
+                timeout=5.0,
+            )
+            return response.status_code == 200
+    except Exception as e:
+        logger.warning(f"Compute token lineage heartbeat failed: {e}")
+        return False
 
 
 @activity.defn
@@ -4778,6 +4941,8 @@ async def call_planner_llm_activity(
     gpt_token_source: Optional[str] = None,
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
+    compute_token_lineage_key: Optional[str] = None,
+    compute_token_fast_cache_affinity_key: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
     fast_mode_goal: Optional[str] = None,
     fast_mode_step: int = 0,
@@ -4898,6 +5063,8 @@ async def call_planner_llm_activity(
             gpt_token_source=gpt_token_source,
             gpt_token_pool_id=gpt_token_pool_id,
             gpt_token_user_id=gpt_token_user_id,
+            compute_token_lineage_key=compute_token_lineage_key,
+            compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
             skip_cache_write=False,
             call_site="planner",
             effort="max",

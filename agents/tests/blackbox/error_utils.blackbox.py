@@ -55,6 +55,40 @@ def test_activity_task_failed_wrapper():
     assert result == "actual failure reason"
 
 
+def test_self_referential_cause_does_not_loop():
+    """extract_error_message handles accidental self-causation from `raise e from e`."""
+    from utils.error_utils import extract_error_message
+
+    error = RuntimeError("final verifier failure")
+    error.__cause__ = error
+
+    result = extract_error_message(error)
+
+    assert result == "final verifier failure"
+
+
+def test_pydantic_validation_error_omits_large_input():
+    """extract_error_message summarizes validation errors without rendering huge inputs."""
+    from pydantic import BaseModel, ValidationError
+    from utils.error_utils import extract_error_message
+
+    class Payload(BaseModel):
+        count: int
+
+    huge = "x" * 100_000
+    try:
+        Payload.model_validate({"count": huge})
+    except ValidationError as exc:
+        result = extract_error_message(exc)
+    else:
+        raise AssertionError("expected validation error")
+
+    assert "validation error(s)" in result
+    assert "count" in result
+    assert len(result) < 1000
+    assert huge[:1000] not in result
+
+
 async def run_all_tests():
     print("error-utils blackbox tests:")
     r = BlackboxResult()
@@ -62,6 +96,8 @@ async def run_all_tests():
     r.record("chained_error", test_chained_error)
     r.record("empty_error", test_empty_error)
     r.record("activity_task_failed_wrapper", test_activity_task_failed_wrapper)
+    r.record("self_referential_cause_does_not_loop", test_self_referential_cause_does_not_loop)
+    r.record("pydantic_validation_error_omits_large_input", test_pydantic_validation_error_omits_large_input)
     teardown_mock()
     return r.all_passed
 

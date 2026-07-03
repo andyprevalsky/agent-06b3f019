@@ -15,8 +15,10 @@ import {
 } from '../../providers/claudeCredentials';
 import {
   fetchComputeTokenForUser,
+  heartbeatComputeTokenLineage,
   isAnthropicApiKeyOnCooldown,
   markAnthropicApiKeyOnCooldown,
+  releaseComputeTokenLineage,
 } from '../../providers/computeCredentials';
 import {
   fetchGptCodeAccessToken,
@@ -421,9 +423,22 @@ export async function getGptCodeToken(
 export async function getComputeCodeToken(
   userId: string,
   forcePool: boolean,
-  excludePoolTokenIds?: string[]
+  excludePoolTokenIds?: string[],
+  lineage?: {
+    lineageKey?: string;
+    agentId?: string;
+    rootAgentId?: string;
+    fastCacheAffinityKey?: string;
+  }
 ) {
-  const result = await fetchComputeTokenForUser(userId, { forcePool, excludePoolTokenIds });
+  const result = await fetchComputeTokenForUser(userId, {
+    forcePool,
+    excludePoolTokenIds,
+    lineageKey: lineage?.lineageKey,
+    agentId: lineage?.agentId,
+    rootAgentId: lineage?.rootAgentId,
+    fastCacheAffinityKey: lineage?.fastCacheAffinityKey,
+  });
   if (result === null || result === undefined) throw new NoTokensAvailableError();
   return {
     type: result.type,
@@ -431,8 +446,12 @@ export async function getComputeCodeToken(
     accountId: result.accountId,
     source: result.source,
     poolTokenId: result.poolTokenId,
+    lineageKey: result.lineageKey,
+    fastCacheAffinityKey: lineage?.fastCacheAffinityKey,
   };
 }
+
+export { heartbeatComputeTokenLineage, releaseComputeTokenLineage };
 
 export async function markTokenRateLimited(
   source: string,

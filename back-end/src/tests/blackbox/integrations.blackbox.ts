@@ -3863,6 +3863,178 @@ async function testComputeRotation_poolRotatesAcrossProviders() {
   }
 }
 
+async function testComputeTokenLineageSemaphore_capsLiveGptLeases() {
+  const existing = await existingComputePoolIds();
+  const caller = await createAnonSession();
+  const poolOwner = await createAnonSession();
+  await completeOnboarding(caller.userId);
+  await completeOnboarding(poolOwner.userId);
+  const gptPool = await seedGptIntegration(poolOwner.userId, {
+    poolingEnabled: true,
+    lastUsedAt: new Date(Date.now() - 120_000),
+  });
+  const lineageKeys = Array.from(
+    { length: 17 },
+    (_, idx) => `test-lineage-gpt-${crypto.randomUUID()}-${idx}`
+  );
+
+  const fetchPool = async (lineageKey: string) => {
+    const headers: Record<string, string> = {
+      ...apiKeyHeaders(caller.userId),
+      'X-Force-Pool': 'true',
+    };
+    const exclude = existing.filter((id) => id !== gptPool.id);
+    if (exclude.length > 0) headers['X-Exclude-Pool-Tokens'] = exclude.join(',');
+    const params = new URLSearchParams({
+      lineageKey,
+      agentId: lineageKey,
+      rootAgentId: lineageKey,
+    });
+    return request(`${BASE_URL}/api/integrations/compute-code/credentials/token?${params}`, {
+      headers,
+    });
+  };
+
+  try {
+    for (const lineageKey of lineageKeys.slice(0, 16)) {
+      const res = await fetchPool(lineageKey);
+      assertStatus(res.status, 200, res.data);
+      const body = res.data as {
+        type: string;
+        source: string;
+        poolTokenId?: string;
+        lineageKey?: string;
+      };
+      assert(body.type === 'gpt', `Expected GPT token, got ${JSON.stringify(body)}`);
+      assert(body.source === 'pool', `Expected pool token, got ${JSON.stringify(body)}`);
+      assert(
+        body.poolTokenId === gptPool.id,
+        `Expected pool ${gptPool.id}, got ${body.poolTokenId}`
+      );
+      assert(
+        body.lineageKey === lineageKey,
+        `Expected lineage echo ${lineageKey}, got ${body.lineageKey}`
+      );
+    }
+
+    const reused = await fetchPool(lineageKeys[0]);
+    assertStatus(reused.status, 200, reused.data);
+
+    const exhausted = await fetchPool(lineageKeys[16]);
+    assertStatus(exhausted.status, 404, exhausted.data);
+
+    await prisma.computeTokenLineageLease.updateMany({
+      where: { lineageKey: { in: lineageKeys.slice(0, 16) } },
+      data: { lastUsedAt: new Date(Date.now() - 6 * 60 * 1000) },
+    });
+
+    const afterStale = await fetchPool(lineageKeys[16]);
+    assertStatus(afterStale.status, 200, afterStale.data);
+  } finally {
+    await prisma.computeTokenLineageLease.deleteMany({
+      where: { lineageKey: { in: lineageKeys } },
+    });
+    await cleanupIntegrations([gptPool.id]);
+  }
+}
+
+async function testComputeTokenFastCacheAffinity_pinsProviderFamily() {
+  const existing = await existingComputePoolIds();
+  const caller = await createAnonSession();
+  const gptOwner = await createAnonSession();
+  const claudeOwner = await createAnonSession();
+  await completeOnboarding(caller.userId);
+  await completeOnboarding(gptOwner.userId);
+  await completeOnboarding(claudeOwner.userId);
+
+  const affinityKey = `test-affinity-${crypto.randomUUID()}`;
+  const lineages = [
+    `test-affinity-lineage-${crypto.randomUUID()}-1`,
+    `test-affinity-lineage-${crypto.randomUUID()}-2`,
+  ];
+  const gptPool = await seedGptIntegration(gptOwner.userId, {
+    poolingEnabled: true,
+    lastUsedAt: new Date(Date.now() - 120_000),
+  });
+  const claudePool = await seedClaudeIntegration(claudeOwner.userId, {
+    poolingEnabled: true,
+    lastUsedAt: new Date(Date.now() - 60_000),
+  });
+
+  const fetchPool = async (lineageKey: string) => {
+    const headers: Record<string, string> = {
+      ...apiKeyHeaders(caller.userId),
+      'X-Force-Pool': 'true',
+    };
+    const exclude = existing.filter((id) => id !== gptPool.id && id !== claudePool.id);
+    if (exclude.length > 0) headers['X-Exclude-Pool-Tokens'] = exclude.join(',');
+    const params = new URLSearchParams({
+      lineageKey,
+      agentId: lineageKey,
+      rootAgentId: lineageKey,
+      fastCacheAffinityKey: affinityKey,
+    });
+    return request(`${BASE_URL}/api/integrations/compute-code/credentials/token?${params}`, {
+      headers,
+    });
+  };
+
+  try {
+    const first = await fetchPool(lineages[0]);
+    assertStatus(first.status, 200, first.data);
+    const firstBody = first.data as {
+      type: string;
+      poolTokenId?: string;
+      fastCacheAffinityKey?: string;
+    };
+    assert(
+      firstBody.type === 'gpt',
+      `Expected initial affinity to pick GPT, got ${JSON.stringify(firstBody)}`
+    );
+    assert(
+      firstBody.poolTokenId === gptPool.id,
+      `Expected GPT pool ${gptPool.id}, got ${firstBody.poolTokenId}`
+    );
+    assert(
+      firstBody.fastCacheAffinityKey === affinityKey,
+      'Expected affinity key echoed in token response'
+    );
+
+    await prisma.integration.update({
+      where: { id: gptPool.id },
+      data: { lastUsedAt: new Date() },
+    });
+    await prisma.integration.update({
+      where: { id: claudePool.id },
+      data: { lastUsedAt: new Date(Date.now() - 180_000) },
+    });
+
+    const second = await fetchPool(lineages[1]);
+    assertStatus(second.status, 200, second.data);
+    const secondBody = second.data as {
+      type: string;
+      poolTokenId?: string;
+      fastCacheAffinityKey?: string;
+    };
+    assert(
+      secondBody.type === 'gpt',
+      `Expected pinned affinity to keep GPT despite Claude being LRU, got ${JSON.stringify(secondBody)}`
+    );
+    assert(
+      secondBody.poolTokenId === gptPool.id,
+      `Expected GPT pool ${gptPool.id}, got ${secondBody.poolTokenId}`
+    );
+    assert(
+      secondBody.fastCacheAffinityKey === affinityKey,
+      'Expected affinity key echoed on pinned response'
+    );
+  } finally {
+    await prisma.computeTokenLineageLease.deleteMany({ where: { lineageKey: { in: lineages } } });
+    await prisma.computeTokenFastCacheAffinity.deleteMany({ where: { affinityKey } });
+    await cleanupIntegrations([gptPool.id, claudePool.id]);
+  }
+}
+
 async function testRotation_poolAuthErrorDisablesToken() {
   const caller = await createAnonSession();
   const poolOwnerA = await createAnonSession();
@@ -5187,6 +5359,14 @@ async function runAll() {
     {
       name: 'rotation -- compute pool rotates across providers',
       fn: testComputeRotation_poolRotatesAcrossProviders,
+    },
+    {
+      name: 'compute token lineage semaphore -- caps live GPT leases',
+      fn: testComputeTokenLineageSemaphore_capsLiveGptLeases,
+    },
+    {
+      name: 'compute token fast-cache affinity -- pins provider family',
+      fn: testComputeTokenFastCacheAffinity_pinsProviderFamily,
     },
     {
       name: 'rotation -- auto-expires after cooldown (time-windowed)',

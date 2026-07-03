@@ -294,6 +294,7 @@ async def mock_update_agent_status(
     message_count: int,
     tokens_in: int = 0,
     tokens_out: int = 0,
+    structured_response: Optional[Dict] = None,
 ) -> None:
     return None
 
@@ -329,7 +330,13 @@ async def mock_fetch_claude_max_token_activity(user_id: str) -> Optional[str]:
 
 
 @activity.defn(name="fetch_compute_token_activity")
-async def mock_fetch_compute_token_activity(user_id: str) -> Optional[Dict[str, Any]]:
+async def mock_fetch_compute_token_activity(
+    user_id: str,
+    lineage_key: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    root_agent_id: Optional[str] = None,
+    fast_cache_affinity_key: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
     return None
 
 
@@ -473,6 +480,9 @@ async def mock_call_llm_activity(
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
     user_id: Optional[str] = None,
+    fast_mode_cache_enabled: bool = False,
+    fast_mode_goal: Optional[str] = None,
+    fast_mode_step: Optional[int] = None,
     *args: Any,
     **kwargs: Any,
 ) -> Dict[str, Any]:
@@ -617,11 +627,12 @@ async def mock_save_blueprint_activity(user_id: str, data: dict) -> dict:
 @activity.defn(name="set_response_schema_activity")
 async def mock_set_response_schema_activity(
     agent_id: str,
-    schema: Any,
+    user_messages: List[str],
     compute_auth: Any = None,
+    fast_mode_cache_enabled: bool = False,
     *args: Any,
     **kwargs: Any,
-) -> None:
+) -> Optional[Dict[str, Any]]:
     return None
 
 
@@ -1563,6 +1574,44 @@ async def test_workflow_signal_child_completed_failure():
         _restore_workflow(original)
 
 
+async def test_workflow_signal_child_max_iterations_posts_error_with_partial_payload():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-1"
+    wf.message_count = 0
+    wf.pending_children = {"child-1"}
+    wf.child_tool_ids = {"child-1": "tool-call-1"}
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf.child_completed(
+            {
+                "child_agent_id": "child-1",
+                "result": {
+                    "status": "max_iterations",
+                    "goal": "subtask",
+                    "message": "Reached max iterations (5)",
+                    "best_effort_response": "partial useful result",
+                    "partial_structured_response": {"answer": "partial"},
+                },
+            }
+        )
+        assert "child-1" not in wf.pending_children
+        assert wf.child_tool_counts == {}
+        assert wf.child_results["child-1"]["status"] == "max_iterations"
+
+        post_calls = [call for call in fake.activity_calls if call[0] == "post_agent_message"]
+        assert len(post_calls) == 1
+        args = post_calls[0][1]
+        assert args[1] == "partial useful result"
+        assert args[2] == "TOOL"
+        metadata = args[3]
+        assert metadata["toolStatus"] == "ERROR"
+        assert metadata["structuredResponse"] == {"answer": "partial"}
+        assert metadata["structured_response"] == {"answer": "partial"}
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_signal_cost_limit_reached_sets_flags():
     wf = _bare_workflow_instance()
     wf.agent_id = "agent-1"
@@ -2041,6 +2090,7 @@ async def test_workflow_mark_failed_signals_parent_with_context():
             message="Max Steps Reached",
             verifier_progress=0.5,
             verifier_reasoning="halfway",
+            partial_structured_response={"answer": "best effort"},
         )
         # Should call update_agent_status and tree state
         activity_names = [c[0] for c in fake.activity_calls]
@@ -2049,6 +2099,9 @@ async def test_workflow_mark_failed_signals_parent_with_context():
         # Signal to parent
         signal_names = [s[1] for s in fake.signal_calls]
         assert "child_completed" in signal_names
+        child_completed = next(s[2] for s in fake.signal_calls if s[1] == "child_completed")
+        assert child_completed["result"]["status"] == "failed"
+        assert child_completed["result"]["structured_response"] == {"answer": "best effort"}
     finally:
         _restore_workflow(original)
 
@@ -2421,6 +2474,10 @@ async def test_workflow_run_covers_chat_agent_startup_and_completion():
             "accountId": "acct-1",
             "source": "pool",
             "poolTokenId": "pool-1",
+            "lineageKey": "agent:agent-run-1",
+            "agentId": "agent-run-1",
+            "rootAgentId": "agent-run-1",
+            "fastCacheAffinityKey": None,
         }
         assert "mark_finished" in activity_names
         init_posts = [
@@ -3317,6 +3374,10 @@ async def run_all_tests():
     await r.record_async("wf_signal_child_progress", test_workflow_signal_child_progress_tracks_deltas)
     await r.record_async("wf_signal_child_completed_success", test_workflow_signal_child_completed_success)
     await r.record_async("wf_signal_child_completed_failure", test_workflow_signal_child_completed_failure)
+    await r.record_async(
+        "wf_signal_child_max_iterations_error_partial_payload",
+        test_workflow_signal_child_max_iterations_posts_error_with_partial_payload,
+    )
     await r.record_async("wf_signal_cost_limit_reached", test_workflow_signal_cost_limit_reached_sets_flags)
     await r.record_async("wf_signal_price_limit_inc", test_workflow_signal_price_limit_increased_clears_limit)
     await r.record_async("wf_track_tokens_and_cost", test_workflow_track_tokens_and_cost_updates_counters)

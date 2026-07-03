@@ -31,6 +31,7 @@ from helpers.llm_timeouts import STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
 from loop.context_utils import poll_and_update_context
 from loop.payload_guard import check_activity_payload
 from tools.base import EventType, MessageStatus, ToolEvent
+from utils.prompts import CONTEXT_POINTERS_RULE
 
 logger = structlog.get_logger()
 
@@ -171,7 +172,8 @@ def _build_param_population_message(goal: str, tool_name: str, alias_hint: str =
         msg += (
             "\n\nThe spawned agent has NO access to your conversation or prior context. "
             "The goal string is its ONLY source of information — embed ALL relevant details. "
-            "Prefer @ref:message: pointers over rewriting content. "
+            "\n\n"
+            f"{CONTEXT_POINTERS_RULE.strip()} "
             "Pass files via `attachments` using exact `original_filename` values. "
             "For file outputs in output_schema, use type='file_pointer'."
         )
@@ -475,7 +477,7 @@ async def execute_dag(
                     "",
                     claude_token_source, claude_token_pool_id, user_id,
                     gpt_token, gpt_account_id, gpt_token_source, gpt_token_pool_id, user_id,
-                    user_id,
+                    None, None, user_id,
                     # Fast Mode: cache-warm keys by canonical request fingerprint;
                     # enabled+goal auto-resolve from the agent row.
                     False, None, 0,
@@ -807,6 +809,8 @@ async def _execute_single_task(
                     gpt_token_source,
                     gpt_token_pool_id,
                     user_id,
+                    None,
+                    None,
                     user_id,
                     # Fast Mode: DAG node keys by canonical request fingerprint.
                     False, None, task.index,

@@ -8,6 +8,7 @@ Uses run_agent for the core loop. Workflow handles:
 
 import asyncio
 import contextlib
+import hashlib
 import json as _json
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -38,6 +39,7 @@ with workflow.unsafe.imports_passed_through():
         update_agent_status,
     )
     from helpers.context_scope import filter_internal_subagent_messages
+    from helpers.context_compaction import build_context_compaction_metadata
     from helpers.handle_tool_event import handle_tool_event
     from helpers.llm import (
         check_progress,
@@ -88,6 +90,15 @@ CLOUD_AGENT_IN_PROGRESS_TITLES = {
     STARTING_REASONING_TITLE,
 }
 FAST_MODE_WRITE_THROUGH_USER_IDS = {"1f85ff25-6e29-4c1b-8739-f917bd101a30"}
+
+
+def _fast_cache_compute_affinity_key(user_id: str, goal: str) -> str:
+    material = _json.dumps(
+        {"version": 1, "user_id": user_id, "goal": goal},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "fast-cache-agent-provider:" + hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 # =============================================================================
 # TOOL CONFIGURATION
@@ -208,6 +219,8 @@ class AgentWorkflow:
         self.gpt_code_account_id: Optional[str] = None
         self.gpt_code_token_source: Optional[str] = None
         self.gpt_code_token_pool_id: Optional[str] = None
+        self.compute_token_lineage_key: Optional[str] = None
+        self.compute_token_fast_cache_affinity_key: Optional[str] = None
         self.compute_token_fetched_at: Optional[datetime] = None  # For 5-min TTL refresh
 
         # Model pricing (fetched at workflow start for cost calculation)
@@ -329,22 +342,42 @@ class AgentWorkflow:
         child_tool_id = self.child_tool_ids.get(child_agent_id)
         goal_text = result.get("goal", "")
 
-        if child_status == "failed":
+        child_status_normalized = str(child_status or "").strip().lower()
+        child_failed = child_status_normalized in {"failed", "error", "max_iterations"} or result.get("success") is False
+
+        if child_failed:
             # Child agent failed
             workflow.logger.warning(f"❌ Child {child_agent_id[:8]} failed: {result.get('error_reason', 'unknown')}")
 
             if child_tool_id:
+                best_effort = (
+                    result.get("best_effort_response")
+                    or result.get("final_response")
+                    or result.get("summary")
+                    or result.get("message")
+                    or "Sub-agent failed"
+                )
+                structured_response = (
+                    result.get("structured_response")
+                    or result.get("partial_structured_response")
+                    or (result.get("failure_context") or {}).get("partial_structured_response")
+                )
+                metadata = {
+                    "toolCallId": child_tool_id,
+                    "toolName": "spawn_general_purpose_agent",
+                    "toolStatus": "ERROR",
+                    "title": f"❌ Sub-agent failed: {goal_text[:30]}",
+                    "subAgentId": child_agent_id,
+                    "error": True,
+                    "error_reason": result.get("error_reason") or result.get("message") or child_status_normalized,
+                }
+                if structured_response is not None:
+                    metadata["structuredResponse"] = structured_response
+                    metadata["structured_response"] = structured_response
                 await self._post_message(
-                    result.get("summary", "Sub-agent failed"),
+                    best_effort,
                     "TOOL",
-                    metadata={
-                        "toolCallId": child_tool_id,
-                        "toolName": "spawn_general_purpose_agent",
-                        "toolStatus": "ERROR",
-                        "title": f"❌ Sub-agent failed: {goal_text[:30]}",
-                        "subAgentId": child_agent_id,
-                        "error": True,
-                    },
+                    metadata=metadata,
                 )
         else:
             # Child agent succeeded
@@ -494,6 +527,10 @@ class AgentWorkflow:
         self.max_iterations = max_iterations
         self.price_limit_cents = price_limit_cents  # Use passed value instead of hardcoded default
         self.start_time = workflow.now()  # Track start time for duration calculation
+        self.compute_token_lineage_key = f"agent:{agent_id}"
+        self.compute_token_fast_cache_affinity_key = (
+            _fast_cache_compute_affinity_key(user_id, goal) if fast_mode_cache_enabled else None
+        )
 
         workflow.logger.info(f"Agent starting: agent={agent_id}, goal='{goal[:50]}', depth={depth}")
 
@@ -797,6 +834,8 @@ class AgentWorkflow:
                 get_gpt_account_id=self._active_gpt_account_id,
                 get_gpt_token_source=self._active_gpt_source,
                 get_gpt_token_pool_id=self._active_gpt_pool_id,
+                compute_token_lineage_key=self.compute_token_lineage_key,
+                compute_token_fast_cache_affinity_key=self.compute_token_fast_cache_affinity_key,
                 fast_mode_cache_enabled=self.fast_mode_cache_enabled,
                 goal_text=self.goal,
             )
@@ -940,6 +979,8 @@ class AgentWorkflow:
             get_gpt_account_id=self._active_gpt_account_id,
             get_gpt_token_source=self._active_gpt_source,
             get_gpt_token_pool_id=self._active_gpt_pool_id,
+            compute_token_lineage_key=self.compute_token_lineage_key,
+            compute_token_fast_cache_affinity_key=self.compute_token_fast_cache_affinity_key,
             fast_mode_cache_enabled=self.fast_mode_cache_enabled,
             goal_text=self.goal,
             **({"max_iterations": self.max_iterations} if self.max_iterations else {}),
@@ -1016,6 +1057,8 @@ class AgentWorkflow:
                     self._active_gpt_source(),
                     self._active_gpt_pool_id(),
                     user_id,
+                    self.compute_token_lineage_key,
+                    self.compute_token_fast_cache_affinity_key,
                     None,  # dump_extra
                     # Fast Mode: verifier keys by canonical request fingerprint;
                     # fast_mode_step is retained only for activity signature compatibility.
@@ -1126,6 +1169,7 @@ class AgentWorkflow:
                         "toolName": "context_reset",
                         "toolStatus": "FINISHED",
                         "title": "Context Reset",
+                        "contextCompaction": build_context_compaction_metadata(compressed_context),
                     },
                 ],
                 start_to_close_timeout=timedelta(seconds=10),
@@ -1201,6 +1245,8 @@ class AgentWorkflow:
         now = workflow.now()
         self._clear_compute_token()
         self.compute_token_provider = token.get("type")
+        if token.get("lineageKey"):
+            self.compute_token_lineage_key = token.get("lineageKey")
         if self.compute_token_provider == "claude":
             self.claude_max_token = token.get("accessToken")
             self.claude_max_token_source = token.get("source")
@@ -1229,7 +1275,13 @@ class AgentWorkflow:
         try:
             result = await workflow.execute_activity(
                 fetch_compute_token_activity,
-                args=[user_id],
+                args=[
+                    user_id,
+                    self.compute_token_lineage_key,
+                    self.agent_id,
+                    self.agent_id,
+                    self.compute_token_fast_cache_affinity_key,
+                ],
                 start_to_close_timeout=timedelta(seconds=20),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
@@ -1273,6 +1325,10 @@ class AgentWorkflow:
                 "userId": self.user_id,
                 "source": self.claude_max_token_source,
                 "poolTokenId": self.claude_max_token_pool_id,
+                "lineageKey": self.compute_token_lineage_key,
+                "agentId": self.agent_id,
+                "rootAgentId": self.agent_id,
+                "fastCacheAffinityKey": self.compute_token_fast_cache_affinity_key,
             }
         if self.compute_token_provider == "gpt" and self.gpt_code_token:
             return {
@@ -1282,6 +1338,10 @@ class AgentWorkflow:
                 "accountId": self.gpt_code_account_id,
                 "source": self.gpt_code_token_source,
                 "poolTokenId": self.gpt_code_token_pool_id,
+                "lineageKey": self.compute_token_lineage_key,
+                "agentId": self.agent_id,
+                "rootAgentId": self.agent_id,
+                "fastCacheAffinityKey": self.compute_token_fast_cache_affinity_key,
             }
         return None
 
@@ -1399,9 +1459,40 @@ class AgentWorkflow:
             # poll result so run_agent can still advance last_checked past
             # filtered sub-agent rows and avoid re-polling them forever.
             if messages:
+                def _message_dedupe_key(msg: Dict) -> str:
+                    metadata = msg.get("metadata") or {}
+                    return "|".join(
+                        [
+                            str(msg.get("role") or ""),
+                            str(msg.get("timestamp") or ""),
+                            str(metadata.get("toolCallId") or ""),
+                            str(metadata.get("toolName") or ""),
+                            str(msg.get("text") or "")[:256],
+                        ]
+                    )
+
+                seen_message_ids = {
+                    msg.get("message_id") or msg.get("id")
+                    for msg in self.context
+                    if msg.get("message_id") or msg.get("id")
+                }
+                seen_message_keys = {
+                    _message_dedupe_key(msg)
+                    for msg in self.context
+                    if not (msg.get("message_id") or msg.get("id"))
+                }
                 for msg in filter_internal_subagent_messages(messages):
-                    if msg not in self.context:
-                        self.context.append(msg)
+                    message_id = msg.get("message_id") or msg.get("id")
+                    if message_id:
+                        if message_id in seen_message_ids:
+                            continue
+                        seen_message_ids.add(message_id)
+                    else:
+                        message_key = _message_dedupe_key(msg)
+                        if message_key in seen_message_keys:
+                            continue
+                        seen_message_keys.add(message_key)
+                    self.context.append(msg)
                 self.context.sort(key=lambda x: x.get("timestamp", ""))
 
             return messages
@@ -2665,6 +2756,7 @@ class AgentWorkflow:
                     len(context),
                     self.tokens_in,
                     self.tokens_out,
+                    partial_structured_response,
                 ],
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=3),
@@ -2687,7 +2779,7 @@ class AgentWorkflow:
                             "summary": f"Failed: {message}",
                             "error_reason": reason,
                             "failure_context": failure_context,  # Full context for parent learning
-                            "structured_response": None,
+                            "structured_response": partial_structured_response,
                             "tool_counts": {},
                         },
                     },
@@ -2796,6 +2888,8 @@ class AgentWorkflow:
                     self._active_gpt_pool_id(),
                     self.user_id,
                     self.agent_id,
+                    self.compute_token_lineage_key,
+                    self.compute_token_fast_cache_affinity_key,
                     self.fast_mode_cache_enabled,
                     0,  # Fast Mode step — one completion summary per agent
                 ],

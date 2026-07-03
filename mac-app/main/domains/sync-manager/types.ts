@@ -9,7 +9,12 @@
  * Platforms coordinated by {@link SyncManager}.
  */
 export type Platform =
-  'imessage' | 'telegram' | 'whatsapp' | 'cookies' | 'browserState' | 'compute';
+  | 'imessage'
+  | 'telegram'
+  | 'whatsapp'
+  | 'cookies'
+  | 'browserState'
+  | 'compute';
 
 /**
  * Configuration for a single sync platform.

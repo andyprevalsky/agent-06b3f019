@@ -471,6 +471,12 @@ async def spawn_explore_agent_activity(  # noqa: C901
     result_payload = {
         "status": "completed" if result.get("status") == "completed" else "error",
         "result": final_response,
+        "summary": final_response,
+        "final_response": final_response,
+        "best_effort_response": result.get("best_effort_response") or final_response,
+        "error_reason": None if result.get("status") == "completed" else (result.get("message") or result.get("status")),
+        "partial_structured_response": result.get("partial_structured_response"),
+        "structured_response": result.get("structured_response") or result.get("partial_structured_response"),
         "tokens_in": result.get("tokens_in", 0),
         "tokens_out": result.get("tokens_out", 0),
         "accumulated_usage": accumulated_usage,

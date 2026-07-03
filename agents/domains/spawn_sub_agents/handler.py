@@ -25,6 +25,35 @@ from utils.error_utils import extract_error_message
 logger = structlog.get_logger()
 
 USER_FACING_TOOL_NAME = "spawn_general_purpose_agent"
+CHILD_FAILURE_STATUSES = {"failed", "error", "max_iterations"}
+
+
+def _child_result_is_failure(child_result: Dict[str, Any]) -> bool:
+    status = str(child_result.get("status") or "").strip().lower()
+    if status in CHILD_FAILURE_STATUSES:
+        return True
+    return child_result.get("success") is False
+
+
+def _child_best_effort_text(child_result: Dict[str, Any]) -> str:
+    for key in ("best_effort_response", "final_response", "summary", "message", "result"):
+        value = child_result.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _child_partial_structured_response(child_result: Dict[str, Any]) -> Any:
+    failure_context = child_result.get("failure_context") or {}
+    for value in (
+        child_result.get("structured_response"),
+        child_result.get("partial_structured_response"),
+        failure_context.get("partial_structured_response"),
+        failure_context.get("structured_response"),
+    ):
+        if value is not None:
+            return value
+    return None
 
 
 class SpawnSubAgentManager(ToolManager):
@@ -218,7 +247,7 @@ class SpawnSubAgentManager(ToolManager):
         await workflow.wait_condition(lambda cid=child_agent_id: cid in workflow_instance.child_results)
 
         child_result = workflow_instance.child_results.get(child_agent_id, {})
-        if child_result.get("status", "completed") == "failed":
+        if _child_result_is_failure(child_result):
             for event in self._build_failure_events(child_agent_id, child_result, bus_id):
                 yield event
             return
@@ -256,19 +285,24 @@ class SpawnSubAgentManager(ToolManager):
         bus_id: str,
     ) -> list[ToolEvent]:
         """Build ToolEvent list for a failed child agent."""
-        error_reason = child_result.get("error_reason", "unknown")
+        status = str(child_result.get("status") or "").strip()
+        error_reason = child_result.get("error_reason") or child_result.get("message") or status or "unknown"
         failure_context = child_result.get("failure_context", {})
         trajectory = failure_context.get("trajectory", [])
         last_reasoning = failure_context.get("last_reasoning")
         last_plan = failure_context.get("last_plan")
         progress_estimate = failure_context.get("progress_estimate", "Unknown")
         verifier_reasoning = failure_context.get("verifier_reasoning")
-        partial_structured_response = failure_context.get("partial_structured_response")
+        best_effort_response = _child_best_effort_text(child_result)
+        partial_structured_response = _child_partial_structured_response(child_result)
 
         logger.warning(f"❌ Sub-agent {child_agent_id} failed: {error_reason}")
 
         error_parts = [f"Sub-agent failed: {error_reason}"]
         error_parts.append(f"Progress: {progress_estimate}")
+
+        if best_effort_response:
+            error_parts.append(f"\nBest-effort result:\n{best_effort_response[:1200]}")
 
         if verifier_reasoning:
             error_parts.append(f"\nWhy not complete:\n{verifier_reasoning[:400]}")
@@ -301,19 +335,26 @@ class SpawnSubAgentManager(ToolManager):
 
         error_message = "\n".join(error_parts)
 
+        metadata = {
+            "toolName": USER_FACING_TOOL_NAME,
+            "subAgentIds": [child_agent_id],
+            "busId": bus_id,
+            "error_reason": error_reason,
+            "failure_context": failure_context,
+        }
+        if best_effort_response:
+            metadata["best_effort_response"] = best_effort_response
+        if partial_structured_response is not None:
+            metadata["structured_response"] = partial_structured_response
+            metadata["partial_structured_response"] = partial_structured_response
+
         return [
             ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="❌ Sub-agent failed",
                 message=error_message,
                 status=MessageStatus.ERROR,
-                metadata={
-                    "toolName": USER_FACING_TOOL_NAME,
-                    "subAgentIds": [child_agent_id],
-                    "busId": bus_id,
-                    "error_reason": error_reason,
-                    "failure_context": failure_context,
-                },
+                metadata=metadata,
             )
         ]
 
