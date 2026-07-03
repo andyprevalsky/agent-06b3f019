@@ -1299,6 +1299,7 @@ async def test_spawn_explore_agent_activity_inner_callbacks_work():
             3,
             "explore_agent",
             claude_token_rotated=True,
+            from_fast_cache=True,
         )
         on_tokens_holder["called"] = True
 
@@ -1326,6 +1327,7 @@ async def test_spawn_explore_agent_activity_inner_callbacks_work():
     assert entry["model"] == "claude-x"
     assert entry["cache_read_input_tokens"] == 7
     assert entry["cache_creation_input_tokens"] == 3
+    assert entry["from_fast_cache"] is True
 
     # post_message dispatched to save_explore_message
     assert len(save_calls) == 1
