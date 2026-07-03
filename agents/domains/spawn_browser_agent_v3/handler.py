@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import gc
 import json
 import os
 import random
@@ -567,7 +568,9 @@ async def _apply_logo_hijack(dom_service: Any) -> None:
         logger.warning(f"Failed to replace logo: {e}")
 
 
-async def _wait_for_document_ready(dom_service: Any, *, timeout_s: float = 8.0, interactive_grace_s: float = 2.0) -> str:
+async def _wait_for_document_ready(
+    dom_service: Any, *, timeout_s: float = 8.0, interactive_grace_s: float = 2.0
+) -> str:
     """Poll document.readyState via CDP until the page is usable.
 
     browser-use's NavigateToUrlEvent readiness wait matches lifecycle events by
@@ -626,6 +629,46 @@ async def _stop_playwright_resources(
             logger.info("Playwright instance stopped", agent_id=agent_id)
         except Exception as e:
             logger.warning("Failed to stop Playwright instance", agent_id=agent_id, error=str(e))
+
+
+def _clear_browser_activity_memory_buffers(
+    *,
+    action_history: Optional[Any] = None,
+    browser_recorder: Optional[Any] = None,
+    browser_network_recorder: Optional[Any] = None,
+    mutable_buffers: tuple[Any, ...] = (),
+) -> None:
+    """Release large per-run browser buffers before smoke memory ratchet samples RSS."""
+    if action_history is not None and hasattr(action_history, "clear"):
+        with contextlib.suppress(Exception):
+            action_history.clear()
+
+    if browser_recorder is not None:
+        for attr in ("frames", "cursor_events", "_last_metadata"):
+            value = getattr(browser_recorder, attr, None)
+            if hasattr(value, "clear"):
+                with contextlib.suppress(Exception):
+                    value.clear()
+        for attr in ("page", "_cursor"):
+            with contextlib.suppress(Exception):
+                setattr(browser_recorder, attr, None)
+
+    if browser_network_recorder is not None:
+        for attr in ("entries", "_tasks"):
+            value = getattr(browser_network_recorder, attr, None)
+            if hasattr(value, "clear"):
+                with contextlib.suppress(Exception):
+                    value.clear()
+        for attr in ("browser_session", "_cdp_client"):
+            with contextlib.suppress(Exception):
+                setattr(browser_network_recorder, attr, None)
+
+    for value in mutable_buffers:
+        if hasattr(value, "clear"):
+            with contextlib.suppress(Exception):
+                value.clear()
+
+    gc.collect()
 
 
 async def _append_new_otp_user_messages(
@@ -1582,6 +1625,13 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                 pass
 
     _heartbeat_task = asyncio.create_task(_background_heartbeat())
+    action_entries: List[Dict[str, Any]] = []
+    browser_state: Dict[str, Any] = {}
+    browser_turn_messages: List[Dict[str, Any]] = []
+    otp_user_messages: List[Dict[str, str]] = []
+    seen_otp_codes: set[str] = set()
+    available_file_paths: Dict[str, str] = {}
+    passkey_ref_by_credential_id: Dict[str, Dict[str, str]] = {}
 
     try:
         # ===== SETUP TIMING TRACKER =====
@@ -1855,9 +1905,10 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             # 3-5s to attach, so open them concurrently. The Playwright branch
             # also applies fingerprint/fast-mode/diagnostics so those don't wait
             # on the (slower) DOMService attach.
-            _dom_page, (_playwright_instance, _playwright_browser, _playwright_context, _input_page) = (
-                await asyncio.gather(_connect_dom(), _connect_playwright())
-            )
+            (
+                _dom_page,
+                (_playwright_instance, _playwright_browser, _playwright_context, _input_page),
+            ) = await asyncio.gather(_connect_dom(), _connect_playwright())
 
             return (
                 _dom_service,
@@ -2144,7 +2195,6 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
         # the LLM) and seed a CDP virtual authenticator on the Steel session.
         # passkey_ref_by_credential_id lets us record a passkey credential_ref at
         # session end if the relying party actually exercised the credential.
-        passkey_ref_by_credential_id: Dict[str, Dict[str, str]] = {}
         if session_passkeys and config.payment.decryption_key:
             from cryptography.hazmat.backends import default_backend
             from cryptography.hazmat.primitives import serialization
@@ -2218,7 +2268,6 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
         t_post = time.monotonic()
 
         # Upload attachments
-        available_file_paths: Dict[str, str] = {}
         if attachments:
             t = time.monotonic()
             logger.info(f"\U0001f4ce Uploading {len(attachments)} attachments to Steel session")
@@ -2302,7 +2351,9 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                     origin = f"{parsed.scheme}://{parsed.netloc}"
                     result_data = await inject_local_storage(config, session_id, origin)
                     if result_data and result_data.get("injected"):
-                        logger.info(f"\U0001f4be Injected {result_data.get('count', 0)} localStorage entries for {origin}")
+                        logger.info(
+                            f"\U0001f4be Injected {result_data.get('count', 0)} localStorage entries for {origin}"
+                        )
                 except Exception as e:
                     logger.warning(f"Failed to inject localStorage for {nav_url}: {e}")
                 _record_timing("navigation.inject_localStorage", t)
@@ -2372,9 +2423,6 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
         rose_client = RoseClient()
         iteration = resume_step_count
         consecutive_api_failures = 0
-        seen_otp_codes: set[str] = set()
-        otp_user_messages: List[Dict[str, str]] = []
-        browser_turn_messages: List[Dict[str, Any]] = []
         browser_turn_messages.extend(resume_user_messages)
         otp_history_count = 0
         task_prompt = build_browser_task_prompt(goal)
@@ -2743,6 +2791,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                 )
 
                 await dom_service.disconnect()
+                dom_service = None
                 await _stop_playwright_resources(
                     playwright_browser,
                     playwright_instance,
@@ -2791,6 +2840,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
 
                 logger.info("Browser agent requested user attention", reason=reason)
                 await dom_service.disconnect()
+                dom_service = None
 
                 await close_browser_session(config, session_id, pause=True, current_url=current_url)
 
@@ -3079,6 +3129,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
 
                         await record_passkey_usage_once()
                         await dom_service.disconnect()
+                        dom_service = None
                         await close_browser_session(config, session_id, pause=False)
 
                         context_message = build_context_summary(
@@ -3371,6 +3422,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 if dom_service:
                     try:
                         await dom_service.disconnect()
+                        dom_service = None
                     except Exception as e:
                         logger.warning(f"Failed to disconnect browser before write lock return: {e}")
 
@@ -3464,6 +3516,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 if dom_service:
                     try:
                         await dom_service.disconnect()
+                        dom_service = None
                     except Exception as e:
                         logger.warning(f"Failed to disconnect browser before payment card return: {e}")
 
@@ -3567,6 +3620,7 @@ Based on this feedback, I need to continue working on the task and address the i
         logger.warning(f"Max iterations reached: {MAX_ITERATIONS}")
 
         await dom_service.disconnect()
+        dom_service = None
         await close_browser_session(config, session_id, pause=False)
 
         context_message = build_context_summary(
@@ -3617,6 +3671,7 @@ Based on this feedback, I need to continue working on the task and address the i
         if dom_service:
             with contextlib.suppress(Exception):
                 await dom_service.disconnect()
+                dom_service = None
 
         if session_id:
             await close_browser_session(config, session_id, pause=True, current_url=current_url)
@@ -3650,6 +3705,7 @@ Based on this feedback, I need to continue working on the task and address the i
         if dom_service:
             with contextlib.suppress(Exception):
                 await dom_service.disconnect()
+                dom_service = None
 
         if session_id:
             await close_browser_session(config, session_id, pause=False)
@@ -3793,7 +3849,36 @@ Based on this feedback, I need to continue working on the task and address the i
                             "browser_session_metadata": browser_session_metadata,
                         },
                     )
+                    html_bytes = None
+        if dom_service:
+            with contextlib.suppress(Exception):
+                await dom_service.disconnect()
         await _stop_playwright_resources(playwright_browser, playwright_instance, agent_id)
+        playwright_browser = None
+        playwright_instance = None
+        input_page = None
+        dom_service = None
+        _clear_browser_activity_memory_buffers(
+            action_history=action_history,
+            browser_recorder=browser_recorder,
+            browser_network_recorder=browser_network_recorder,
+            mutable_buffers=(
+                action_entries,
+                browser_state,
+                browser_turn_messages,
+                otp_user_messages,
+                seen_otp_codes,
+                visited_urls,
+                reasoning_messages,
+                action_summary,
+                resume_user_messages,
+                session_passwords,
+                session_passkeys,
+                available_file_paths,
+                passkey_ref_by_credential_id,
+                browser_session_metadata,
+            ),
+        )
 
 
 # ========================================
@@ -4093,9 +4178,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 "url": result.get("current_url", ""),
                                 "requestPaymentCard": payment_payload,
                                 "writeLockNotification": result.get("write_lock_notification"),
-                                "writeLockNotificationUsage": result.get(
-                                    "write_lock_notification_usage"
-                                ),
+                                "writeLockNotificationUsage": result.get("write_lock_notification_usage"),
                             },
                         )
 
