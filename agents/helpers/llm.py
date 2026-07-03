@@ -2536,6 +2536,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                 "compute_token_rotated": stream_usage.get("compute_token_rotated", False),
                 "compute_token_used": stream_usage.get("compute_token_used"),
                 "cancelled": False,
+                "from_fast_cache": stream_usage.get("from_fast_cache", False),
                 # Cache metrics from Anthropic prompt caching
                 "cache_creation_input_tokens": stream_usage.get("cache_creation_input_tokens", 0),
                 "cache_read_input_tokens": stream_usage.get("cache_read_input_tokens", 0),
@@ -2555,6 +2556,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                 "compute_token_rotated": False,
                 "compute_token_used": None,
                 "cancelled": False,
+                "from_fast_cache": False,
                 "cache_creation_input_tokens": 0,
                 "cache_read_input_tokens": 0,
             }
@@ -2982,6 +2984,7 @@ async def call_llm(
                     "gpt_token_rotated": usage.get("gpt_token_rotated", False),
                     "compute_token_rotated": usage.get("compute_token_rotated", False),
                     "compute_token_used": usage.get("compute_token_used"),
+                    "from_fast_cache": usage.get("from_fast_cache", False),
                 },
             }
 
@@ -3271,6 +3274,7 @@ async def _call_llm_verifier(  # noqa: C901
         "gpt_token_rotated": stream_usage.get("gpt_token_rotated", False) if stream_usage else False,
         "compute_token_rotated": stream_usage.get("compute_token_rotated", False) if stream_usage else False,
         "compute_token_used": stream_usage.get("compute_token_used") if stream_usage else None,
+        "from_fast_cache": stream_usage.get("from_fast_cache", False) if stream_usage else False,
         "cache_creation_input_tokens": cache_write,
         "cache_read_input_tokens": cache_read,
     }

@@ -1710,6 +1710,37 @@ async def test_workflow_track_llm_cost_zero_when_no_pricing():
         _restore_workflow(original)
 
 
+async def test_workflow_track_llm_cost_fast_cache_replay_is_zero_cost():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    wf.user_id = "u"
+    wf.model = "claude-sonnet-4"
+    wf.input_cents_per_1k = 0.3
+    wf.output_cents_per_1k = 1.5
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._track_llm_cost(
+            tokens_in=0,
+            tokens_out=500,
+            call_site="completion_summary",
+            actual_model="claude-fable-5-anthropic",
+            cache_read_input_tokens=10000,
+            from_fast_cache=True,
+        )
+        assert wf.own_cost_cents == 0.0
+        activity_names = [c[0] for c in fake.activity_calls]
+        assert "save_tool_usage" in activity_names
+        save_call = next(c for c in fake.activity_calls if c[0] == "save_tool_usage")
+        saved_item = save_call[1][3][0]
+        assert saved_item["cost_cents"] == 0
+        assert saved_item["model"] == "claude-fable-5-anthropic"
+        assert saved_item["cache_read_input_tokens"] == 10000
+        assert saved_item["from_fast_cache"] is True
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_track_usage_empty_is_no_op():
     wf = _bare_workflow_instance()
     fake = _FakeWorkflowModule()
@@ -1768,6 +1799,44 @@ async def test_workflow_track_usage_direct_compute_token_is_zero_cost():
         assert saved_item["model"] == "gpt-5.4-gpt"
         assert saved_item["cache_read_input_tokens"] == 8576
         assert saved_item["cache_creation_input_tokens"] == 7984
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_track_usage_fast_cache_replay_is_zero_cost():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    wf.user_id = "u"
+    wf.model = "claude-sonnet-4"
+    wf.input_cents_per_1k = 0.3
+    wf.output_cents_per_1k = 1.5
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        usage = {
+            "llm": [
+                {
+                    "tokens_in": 0,
+                    "tokens_out": 4646,
+                    "model": "google/gemini-3.1-pro-preview",
+                    "provider": "Explore Agent",
+                    "cache_read_input_tokens": 7600,
+                    "cache_creation_input_tokens": 0,
+                    "from_fast_cache": True,
+                }
+            ]
+        }
+        await wf._track_usage(usage, tool_name="spawn_sub_agent", call_site="explore_agent")
+        assert wf.own_cost_cents == 0.0
+        activity_names = [c[0] for c in fake.activity_calls]
+        assert "save_tool_usage" in activity_names
+        save_call = next(c for c in fake.activity_calls if c[0] == "save_tool_usage")
+        saved_item = save_call[1][3][0]
+        assert saved_item["cost_cents"] == 0
+        assert saved_item["model"] == "google/gemini-3.1-pro-preview"
+        assert saved_item["tokens_out"] == 4646
+        assert saved_item["cache_read_input_tokens"] == 7600
+        assert saved_item["from_fast_cache"] is True
     finally:
         _restore_workflow(original)
 
@@ -2014,6 +2083,40 @@ async def test_workflow_on_tokens_no_pricing_still_logs():
         assert wf.tokens_in == 100
         assert wf.tokens_out == 50
         assert wf.own_cost_cents == 0.0
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_on_tokens_fast_cache_replay_is_zero_cost():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    wf.user_id = "u"
+    wf.model = "claude-sonnet-4"
+    wf.input_cents_per_1k = 0.3
+    wf.output_cents_per_1k = 1.5
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._on_tokens(
+            tokens_in_delta=0,
+            tokens_out_delta=1136,
+            actual_model="claude-fable-5-anthropic",
+            cache_read_input_tokens=9405,
+            cache_creation_input_tokens=0,
+            call_site="execute_loop",
+            from_fast_cache=True,
+        )
+        assert wf.tokens_in == 0
+        assert wf.tokens_out == 1136
+        assert wf.own_cost_cents == 0.0
+        activity_names = [c[0] for c in fake.activity_calls]
+        assert "save_tool_usage" in activity_names
+        save_call = next(c for c in fake.activity_calls if c[0] == "save_tool_usage")
+        saved_item = save_call[1][3][0]
+        assert saved_item["cost_cents"] == 0.0
+        assert saved_item["model"] == "claude-fable-5-anthropic"
+        assert saved_item["cache_read_input_tokens"] == 9405
+        assert saved_item["from_fast_cache"] is True
     finally:
         _restore_workflow(original)
 
@@ -3383,11 +3486,19 @@ async def run_all_tests():
     await r.record_async("wf_track_tokens_and_cost", test_workflow_track_tokens_and_cost_updates_counters)
     await r.record_async("wf_track_llm_cost", test_workflow_track_llm_cost_calculates_and_persists)
     await r.record_async("wf_track_llm_cost_no_pricing", test_workflow_track_llm_cost_zero_when_no_pricing)
+    await r.record_async(
+        "wf_track_llm_cost_fast_cache_replay",
+        test_workflow_track_llm_cost_fast_cache_replay_is_zero_cost,
+    )
     await r.record_async("wf_track_usage_empty", test_workflow_track_usage_empty_is_no_op)
     await r.record_async("wf_track_usage_service", test_workflow_track_usage_service_cost)
     await r.record_async(
         "wf_track_usage_direct_compute_token",
         test_workflow_track_usage_direct_compute_token_is_zero_cost,
+    )
+    await r.record_async(
+        "wf_track_usage_fast_cache_replay",
+        test_workflow_track_usage_fast_cache_replay_is_zero_cost,
     )
     await r.record_async("wf_update_cost_root_limit", test_workflow_update_cost_and_signal_parent_root_checks_limit)
     await r.record_async("wf_update_cost_non_root_signal", test_workflow_update_cost_and_signal_parent_non_root_signals)
@@ -3405,6 +3516,7 @@ async def run_all_tests():
     await r.record_async("wf_refresh_claude_token_fresh", test_workflow_refresh_claude_token_still_fresh_returns_early)
     await r.record_async("wf_on_tokens_with_pricing", test_workflow_on_tokens_calculates_cost_with_pricing)
     await r.record_async("wf_on_tokens_no_pricing", test_workflow_on_tokens_no_pricing_still_logs)
+    await r.record_async("wf_on_tokens_fast_cache_replay", test_workflow_on_tokens_fast_cache_replay_is_zero_cost)
     await r.record_async("wf_wait_for_messages_timeout", test_workflow_wait_for_messages_timeout_returns_false)
     await r.record_async("wf_get_model_pricing_primary", test_workflow_get_model_pricing_returns_primary_when_matches)
     await r.record_async("wf_get_model_pricing_cache", test_workflow_get_model_pricing_uses_cache)
