@@ -1905,8 +1905,9 @@ def test_user_data_prod_grep_prompt_avoids_nested_agent_instruction():
     task = get_task_by_name("user-data-prod-grep")
 
     assert task.min_tool_counts == {"grep": 4}
+    assert "Spawn exactly one provider-audit agent" in task.prompt
     assert "do not tell it to spawn another agent" in task.prompt
-    assert "must call grep directly" in task.prompt
+    assert "must call grep directly four times" in task.prompt
 
 
 def test_spawn_sub_agents_smoke_forbids_browser_and_code_detours():
