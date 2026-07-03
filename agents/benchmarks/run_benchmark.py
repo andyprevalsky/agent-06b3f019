@@ -112,6 +112,11 @@ MINTED_AGENT_ACCOUNT_TASK_NAMES = {
 MINTED_AGENT_ACCOUNT_X_POST_GOAL = "Make a post on X.com that says, Hello World"
 GREP_EXPLORE_STRESS_TASK_NAME = "grep-explore-stress"
 GREP_BASE_SNAPSHOT_ENV = "BENCHMARK_GREP_BASE_SNAPSHOT"
+PLAID_TRANSACTION_BENCHMARK_TASK_NAMES = {
+    "plaid-transactions-monthly-spend",
+    "plaid-transactions-doordash-count",
+    "plaid-transactions-dead-subscriptions",
+}
 MINTED_AGENT_ACCOUNT_X_AUTH_HINT = (
     "If X asks you to sign in or create an account first, use the minted email in auth options "
     "when an email address is accepted. Click controls like 'Use email instead' when they are available. "
@@ -1690,6 +1695,45 @@ def _grep_fixture_env() -> dict:
     return env
 
 
+def _plaid_transactions_fixture_env() -> dict:
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        raise RuntimeError("Local Victoria DB connection not found for Plaid transaction benchmark fixture")
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["BENCHMARK_USER_ID"] = USER_ID
+    return env
+
+
+def _parse_last_json_line(stdout: str) -> dict:
+    for line in reversed(stdout.splitlines()):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+    return {}
+
+
+def _run_plaid_transactions_fixture(action: str) -> dict:
+    result = subprocess.run(
+        ["npx", "tsx", "scripts/plaid-transactions-benchmark-fixture.ts", action],
+        cwd=REPO_ROOT / "back-end",
+        env=_plaid_transactions_fixture_env(),
+        capture_output=True,
+        text=True,
+        timeout=240 if action == "sync-real" else 60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Plaid transaction benchmark fixture {action} failed: "
+            f"{(result.stderr or result.stdout).strip()}"
+        )
+    return _parse_last_json_line(result.stdout)
+
+
 def _run_grep_fixture(action: str, *args: str) -> dict:
     result = subprocess.run(
         ["npx", "tsx", "scripts/grep-benchmark-fixture.ts", action, *args],
@@ -1818,6 +1862,52 @@ async def evaluate_grep_explore_stress(
         ]
         if any(re.search(r"^\d+:", block, re.MULTILINE) for block in no_number_blocks):
             return False, "-n:false Grep result still included line numbers"
+
+    return True, None
+
+
+async def evaluate_plaid_transaction_task(
+    task: BenchmarkTask,
+    base_url: str,
+    root_agent_id: str,
+    manifest: dict,
+) -> Tuple[bool, Optional[str]]:
+    messages = await _grep_explore_stress_tree_messages(base_url, root_agent_id)
+    grep_messages = _tool_messages(messages, "grep")
+    all_text = "\n".join(_message_text(message) for message in messages)
+    grep_text = "\n".join(_message_text(message) for message in grep_messages)
+    all_lower = all_text.lower()
+    grep_lower = grep_text.lower()
+
+    if "source: transactions" not in grep_lower and '"source": "transactions"' not in grep_lower:
+        return False, "Expected grep(source='transactions') evidence in transcript"
+
+    if task.name == "plaid-transactions-monthly-spend":
+        expected = str(manifest.get("monthly_spend_sep_2023_usd", ""))
+        if expected and expected not in all_text:
+            return False, f"Expected September 2023 spend {expected} in final/evidence text"
+        if "2023-09" not in grep_text and "2023-09-01" not in grep_text:
+            return False, "Expected September 2023 transaction evidence"
+        return True, None
+
+    if task.name == "plaid-transactions-doordash-count":
+        expected_count = manifest.get("doordash_orders_2025")
+        if expected_count is not None and str(expected_count) not in all_text:
+            return False, f"Expected DoorDash count {expected_count} in final/evidence text"
+        if "doordash" not in grep_lower:
+            return False, "Expected DoorDash transaction evidence"
+        return True, None
+
+    if task.name == "plaid-transactions-dead-subscriptions":
+        expected_candidates = [
+            str(name) for name in manifest.get("dead_subscription_candidates", []) if str(name).strip()
+        ]
+        missing = [name for name in expected_candidates[:3] if name.lower() not in all_lower]
+        if missing:
+            return False, "Missing expected dead subscription candidates: " + ", ".join(missing)
+        if "github" in all_lower and len(expected_candidates) > 0:
+            return False, "Active GitHub subscription should not be listed as a dead subscription"
+        return True, None
 
     return True, None
 
@@ -3216,12 +3306,21 @@ async def run_single_task(
             print(f"    🍪 Ensured {bundle_count} active local CookieBundle row(s) for {auth_realm}")
 
     grep_fixture_manifest: Optional[dict] = None
+    plaid_transactions_manifest: Optional[dict] = None
     if task.name == GREP_EXPLORE_STRESS_TASK_NAME:
         if not _is_local_base_url(base_url):
             raise RuntimeError("grep-explore-stress must run against the local benchmark stack")
         _restore_grep_frozen_base_snapshot()
         grep_fixture_manifest = _run_grep_fixture("apply")
         print("    🔎 Applied deterministic grep benchmark overlay")
+    if task.name in PLAID_TRANSACTION_BENCHMARK_TASK_NAMES:
+        if not _is_local_base_url(base_url):
+            raise RuntimeError(f"{task.name} must run against the local benchmark stack")
+        action = "sync-real" if os.environ.get("BENCHMARK_PLAID_USE_REAL") == "1" else "apply"
+        plaid_transactions_manifest = _run_plaid_transactions_fixture(action)
+        mode = plaid_transactions_manifest.get("fixture_mode", action)
+        tx_count = plaid_transactions_manifest.get("transaction_count", "?")
+        print(f"    💳 Prepared Plaid transaction fixture mode={mode} transactions={tx_count}")
 
     resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
     print(f"\n  {'=' * 50}")
@@ -3376,6 +3475,16 @@ async def run_single_task(
             if not grep_passed:
                 passed = False
                 failure_reason = grep_reason
+        if task.name in PLAID_TRANSACTION_BENCHMARK_TASK_NAMES:
+            plaid_passed, plaid_reason = await evaluate_plaid_transaction_task(
+                task,
+                base_url,
+                agent_id,
+                plaid_transactions_manifest or {},
+            )
+            if not plaid_passed:
+                passed = False
+                failure_reason = plaid_reason
 
         # Tree agent count check — counts spawn_agent-type sub-agents only
         # (excludes root and explore agents; explore agents have no output_schema)

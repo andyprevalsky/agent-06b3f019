@@ -345,12 +345,13 @@ class GrepTool(BaseModel):
             "Use -i for case-insensitive matching and multiline for cross-line patterns."
         ),
     )
-    source: Optional[Literal["messages", "network", "agent_network"]] = Field(
+    source: Optional[Literal["messages", "network", "agent_network", "transactions"]] = Field(
         default=None,
         description=(
             "Optional source bucket. Omit to search messages, network, and the current agent_network. "
             "messages searches user communication records. network searches contact records. "
-            "agent_network searches all message roles in the current agent tree and returns role/location metadata."
+            "agent_network searches all message roles in the current agent tree and returns role/location metadata. "
+            "transactions searches synced Plaid transaction rows."
         ),
     )
     before: Optional[int] = Field(
@@ -393,6 +394,14 @@ class GrepTool(BaseModel):
     multiline: Optional[bool] = Field(
         default=None,
         description="Allow regex patterns to match across newlines within a record.",
+    )
+    filters: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Source-specific nested filters. For transactions: since, until, account, min_amount, "
+            "max_amount, status ('posted', 'pending', or 'all'), include_pending_in_totals. "
+            "For messages: person and since. Unsupported filters are rejected by the backend for the selected source."
+        ),
     )
     person: Optional[str] = Field(
         default=None,

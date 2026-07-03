@@ -9,6 +9,7 @@ import type { MessageRouting } from './useMessageRouting';
 import { PlanBubble } from './PlanBubble';
 import { PhoneCallBubble } from './PhoneCallBubble';
 import { ClaudeCodeBubble } from './ClaudeCodeBubble';
+import BrowserAgentChip from '../BrowserAgentChip';
 import { CompletionBubble } from './CompletionBubble';
 import { AttentionMessageWrapper } from './AttentionMessageWrapper';
 
@@ -61,6 +62,13 @@ export function renderChipRoutes({ props, routing }: Args): ReactElement | null 
         onTypingComplete={onTypingComplete}
       />
     );
+  }
+
+  if (routing.isBrowserAgentChipMessage) {
+    if (shouldType && onTypingComplete) {
+      requestAnimationFrame(() => onTypingComplete());
+    }
+    return <BrowserAgentChip message={message} />;
   }
 
   if (routing.isCompletionSummary && message.metadata?.completionSummary) {

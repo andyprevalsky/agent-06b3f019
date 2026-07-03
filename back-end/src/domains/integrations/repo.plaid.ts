@@ -1,3 +1,4 @@
+/* eslint-disable max-lines */
 /**
  * Repository for Plaid-related rows.
  *
@@ -9,6 +10,8 @@ import {
   IntegrationStatus,
   IntegrationType,
   PlaidItemStatus,
+  Prisma,
+  TransactionDirection,
   type PlaidAccount,
   type PlaidItem,
 } from '@prisma/client';
@@ -17,6 +20,7 @@ import { PLAID_DEFAULT_PRODUCTS } from '../../providers/plaid';
 
 export type PlaidItemWithAccounts = PlaidItem & { accounts: PlaidAccount[] };
 export { PlaidItemStatus };
+export const REDACTED_PLAID_ACCESS_TOKEN = 'REDACTED_AFTER_DISCONNECT';
 
 type AccountUpsertInput = {
   account_id: string;
@@ -26,6 +30,31 @@ type AccountUpsertInput = {
   type: string;
   subtype?: string | null;
   verification_status?: string | null;
+};
+
+export type PlaidTransactionUpsertInput = {
+  plaidTransactionId: string;
+  plaidAccountExternalId: string;
+  date: Date;
+  authorizedDate?: Date | null;
+  datetime?: Date | null;
+  authorizedDatetime?: Date | null;
+  name: string;
+  merchantName?: string | null;
+  originalDescription?: string | null;
+  amount: number;
+  isoCurrencyCode?: string | null;
+  unofficialCurrencyCode?: string | null;
+  category?: string[];
+  categoryId?: string | null;
+  personalFinanceCategory?: string | null;
+  personalFinanceDetailed?: string | null;
+  paymentChannel?: string | null;
+  locationSummary?: string | null;
+  pending: boolean;
+  pendingTransactionId?: string | null;
+  accountOwner?: string | null;
+  checkNumber?: string | null;
 };
 
 type PlaidTx = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
@@ -145,7 +174,29 @@ export async function persistPlaidItem(
   });
 }
 
+export async function findActivePlaidItemsWithTokens(): Promise<PlaidItem[]> {
+  return prisma.plaidItem.findMany({
+    where: {
+      status: {
+        in: [PlaidItemStatus.ACTIVE, PlaidItemStatus.ERROR, PlaidItemStatus.REQUIRES_REAUTH],
+      },
+      encryptedAccessToken: { not: REDACTED_PLAID_ACCESS_TOKEN },
+    },
+    orderBy: { lastSyncAt: 'asc' },
+  });
+}
+
 export async function findActivePlaidItemsForUser(
+  userId: string
+): Promise<PlaidItemWithAccounts[]> {
+  return prisma.plaidItem.findMany({
+    where: { userId, status: { not: PlaidItemStatus.DISCONNECTED } },
+    include: { accounts: { where: { disconnectedAt: null } } },
+    orderBy: { createdAt: 'asc' },
+  });
+}
+
+export async function findActivePlaidItemsWithAccountsForUser(
   userId: string
 ): Promise<PlaidItemWithAccounts[]> {
   return prisma.plaidItem.findMany({
@@ -164,18 +215,178 @@ export async function findPlaidItemForUser(
   });
 }
 
+export async function findPlaidItemWithAccountsForUser(
+  userId: string,
+  itemRowId: string
+): Promise<PlaidItemWithAccounts | null> {
+  return prisma.plaidItem.findFirst({
+    where: { id: itemRowId, userId },
+    include: { accounts: true },
+  });
+}
+
+export async function findPlaidItemByPlaidItemId(plaidItemId: string): Promise<PlaidItem | null> {
+  return prisma.plaidItem.findUnique({ where: { plaidItemId } });
+}
+
+export async function getPlaidItemAccountByExternalId(
+  plaidItemRowId: string,
+  plaidAccountExternalId: string
+): Promise<PlaidAccount | null> {
+  return prisma.plaidAccount.findFirst({
+    where: { plaidItemId: plaidItemRowId, plaidAccountId: plaidAccountExternalId },
+  });
+}
+
 export async function markPlaidItemDisconnected(itemRowId: string): Promise<void> {
   const now = new Date();
   await prisma.$transaction([
+    prisma.plaidTransaction.deleteMany({
+      where: { plaidItemId: itemRowId },
+    }),
     prisma.plaidAccount.updateMany({
       where: { plaidItemId: itemRowId, disconnectedAt: null },
       data: { disconnectedAt: now },
     }),
     prisma.plaidItem.update({
       where: { id: itemRowId },
-      data: { status: PlaidItemStatus.DISCONNECTED, disconnectedAt: now },
+      data: {
+        status: PlaidItemStatus.DISCONNECTED,
+        disconnectedAt: now,
+        encryptedAccessToken: REDACTED_PLAID_ACCESS_TOKEN,
+      },
     }),
   ]);
+}
+
+export async function deletePlaidTransactionsForUser(userId: string): Promise<void> {
+  await prisma.plaidTransaction.deleteMany({ where: { userId } });
+}
+
+export async function markPlaidItemSyncing(itemRowId: string): Promise<void> {
+  await prisma.plaidItem.update({
+    where: { id: itemRowId },
+    data: { lastSyncAt: new Date(), errorCode: null, errorMessage: null },
+  });
+}
+
+export async function markPlaidItemSyncSucceeded(
+  itemRowId: string,
+  cursor: string | null,
+  lastWebhookAt?: Date
+): Promise<void> {
+  await prisma.plaidItem.update({
+    where: { id: itemRowId },
+    data: {
+      cursor,
+      status: PlaidItemStatus.ACTIVE,
+      lastSyncAt: new Date(),
+      ...(lastWebhookAt ? { lastWebhookAt } : {}),
+      errorCode: null,
+      errorMessage: null,
+    },
+  });
+}
+
+export async function markPlaidItemSyncFailed(
+  itemRowId: string,
+  errorCode: string,
+  errorMessage: string
+): Promise<void> {
+  await prisma.plaidItem.update({
+    where: { id: itemRowId },
+    data: {
+      status:
+        errorCode === 'ITEM_LOGIN_REQUIRED'
+          ? PlaidItemStatus.REQUIRES_REAUTH
+          : PlaidItemStatus.ERROR,
+      lastSyncAt: new Date(),
+      errorCode,
+      errorMessage,
+    },
+  });
+}
+
+export async function upsertPlaidTransaction(
+  userId: string,
+  plaidItemRowId: string,
+  plaidAccountRowId: string,
+  input: PlaidTransactionUpsertInput
+): Promise<void> {
+  const amount = new Prisma.Decimal(input.amount);
+  const absoluteAmount = new Prisma.Decimal(Math.abs(input.amount));
+  const direction = input.amount >= 0 ? TransactionDirection.OUTFLOW : TransactionDirection.INFLOW;
+
+  await prisma.plaidTransaction.upsert({
+    where: { plaidTransactionId: input.plaidTransactionId },
+    create: {
+      userId,
+      plaidItemId: plaidItemRowId,
+      plaidAccountId: plaidAccountRowId,
+      plaidTransactionId: input.plaidTransactionId,
+      plaidAccountExternalId: input.plaidAccountExternalId,
+      date: input.date,
+      authorizedDate: input.authorizedDate ?? null,
+      datetime: input.datetime ?? null,
+      authorizedDatetime: input.authorizedDatetime ?? null,
+      name: input.name,
+      merchantName: input.merchantName ?? null,
+      originalDescription: input.originalDescription ?? null,
+      amount,
+      absoluteAmount,
+      direction,
+      isoCurrencyCode: input.isoCurrencyCode ?? null,
+      unofficialCurrencyCode: input.unofficialCurrencyCode ?? null,
+      category: input.category ?? [],
+      categoryId: input.categoryId ?? null,
+      personalFinanceCategory: input.personalFinanceCategory ?? null,
+      personalFinanceDetailed: input.personalFinanceDetailed ?? null,
+      paymentChannel: input.paymentChannel ?? null,
+      locationSummary: input.locationSummary ?? null,
+      pending: input.pending,
+      pendingTransactionId: input.pendingTransactionId ?? null,
+      accountOwner: input.accountOwner ?? null,
+      checkNumber: input.checkNumber ?? null,
+      removedAt: null,
+    },
+    update: {
+      plaidAccountId: plaidAccountRowId,
+      plaidAccountExternalId: input.plaidAccountExternalId,
+      date: input.date,
+      authorizedDate: input.authorizedDate ?? null,
+      datetime: input.datetime ?? null,
+      authorizedDatetime: input.authorizedDatetime ?? null,
+      name: input.name,
+      merchantName: input.merchantName ?? null,
+      originalDescription: input.originalDescription ?? null,
+      amount,
+      absoluteAmount,
+      direction,
+      isoCurrencyCode: input.isoCurrencyCode ?? null,
+      unofficialCurrencyCode: input.unofficialCurrencyCode ?? null,
+      category: input.category ?? [],
+      categoryId: input.categoryId ?? null,
+      personalFinanceCategory: input.personalFinanceCategory ?? null,
+      personalFinanceDetailed: input.personalFinanceDetailed ?? null,
+      paymentChannel: input.paymentChannel ?? null,
+      locationSummary: input.locationSummary ?? null,
+      pending: input.pending,
+      pendingTransactionId: input.pendingTransactionId ?? null,
+      accountOwner: input.accountOwner ?? null,
+      checkNumber: input.checkNumber ?? null,
+      removedAt: null,
+    },
+  });
+}
+
+export async function markPlaidTransactionRemoved(
+  plaidTransactionId: string,
+  removedAt = new Date()
+): Promise<void> {
+  await prisma.plaidTransaction.updateMany({
+    where: { plaidTransactionId, removedAt: null },
+    data: { removedAt },
+  });
 }
 
 export async function countActivePlaidItems(

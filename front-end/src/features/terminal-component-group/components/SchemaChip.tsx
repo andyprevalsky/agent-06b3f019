@@ -25,6 +25,8 @@ const TOOLTIP_GAP = 8;
 
 interface SchemaChipProps {
   outputSchema: { fields: ResponseSchemaField[] } | undefined;
+  /** Populated values keyed by field name (shown next to each field on success). */
+  values?: Record<string, unknown> | null;
   size?: 'sm' | 'md';
   tooltipPosition?: 'top' | 'bottom';
 }
@@ -48,11 +50,14 @@ function computeTooltipStyle(rect: DOMRect, tooltipPosition: 'top' | 'bottom'): 
 function SchemaTooltip({
   style,
   fields,
+  values,
 }: {
   style: CSSProperties;
   fields: ResponseSchemaField[] | undefined;
+  values?: Record<string, unknown> | null;
 }) {
   const hasSchema = fields && fields.length > 0;
+  const hasValues = !!values && Object.keys(values).length > 0;
   return createPortal(
     <div style={style} className="pointer-events-none">
       <div
@@ -60,25 +65,39 @@ function SchemaTooltip({
         style={{ backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)' }}
       >
         <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">
-          Output Schema
+          {hasValues ? 'Output Schema · Result' : 'Output Schema'}
         </div>
         {hasSchema ? (
-          <div className="space-y-1.5 max-h-[300px] overflow-y-auto">
-            {fields.map((field, idx) => (
-              <div key={idx} className="text-xs">
-                <div className="flex items-center gap-1.5">
-                  <code className="font-mono bg-muted px-1 py-0.5 rounded text-[10px]">
-                    {field.name}
-                  </code>
-                  <span className="text-muted-foreground text-[10px]">
-                    {formatFieldType(field.type)}
-                  </span>
+          <div className="space-y-1.5 max-h-[340px] overflow-y-auto">
+            {fields.map((field, idx) => {
+              const hasValue = hasValues && values != null && field.name in values;
+              const value = hasValue ? values![field.name] : undefined;
+              return (
+                <div key={idx} className="text-xs">
+                  <div className="flex items-center gap-1.5">
+                    <code className="font-mono bg-muted px-1 py-0.5 rounded text-[10px]">
+                      {field.name}
+                    </code>
+                    <span className="text-muted-foreground text-[10px]">
+                      {formatFieldType(field.type)}
+                    </span>
+                  </div>
+                  {field.description && (
+                    <p className="text-[10px] text-muted-foreground mt-0.5 pl-0.5">
+                      {field.description}
+                    </p>
+                  )}
+                  {hasValue && (
+                    <p className="mt-0.5 pl-0.5 text-[10px] break-words">
+                      <span className="text-emerald-500">→ </span>
+                      <span className="font-mono text-foreground">
+                        {typeof value === 'object' ? JSON.stringify(value) : String(value)}
+                      </span>
+                    </p>
+                  )}
                 </div>
-                <p className="text-[10px] text-muted-foreground mt-0.5 pl-0.5">
-                  {field.description}
-                </p>
-              </div>
-            ))}
+              );
+            })}
           </div>
         ) : (
           <p className="text-xs text-muted-foreground italic">No schema defined</p>
@@ -91,6 +110,7 @@ function SchemaTooltip({
 
 export function SchemaChip({
   outputSchema,
+  values,
   size = 'sm',
   tooltipPosition = 'bottom',
 }: SchemaChipProps) {
@@ -117,6 +137,7 @@ export function SchemaChip({
     <>
       <div
         ref={triggerRef}
+        data-testid="schema-chip"
         className="relative flex-shrink-0"
         onMouseEnter={handleMouseEnter}
         onMouseLeave={handleMouseLeave}
@@ -133,7 +154,9 @@ export function SchemaChip({
           />
         </div>
       </div>
-      {isHovered && <SchemaTooltip style={tooltipStyle} fields={outputSchema?.fields} />}
+      {isHovered && (
+        <SchemaTooltip style={tooltipStyle} fields={outputSchema?.fields} values={values} />
+      )}
     </>
   );
 }

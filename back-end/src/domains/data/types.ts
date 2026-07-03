@@ -2,30 +2,49 @@
  * Data domain types — Zod schemas, interfaces, type aliases.
  */
 
-// Valid data sources with their configuration
-// TODO: Add more sources as we expand (contacts, emails, calendar, etc.)
-export const VALID_SOURCES = {
+export const DATA_SOURCE_CONFIGS = {
   messages: {
     description: 'iMessage and email conversation threads',
     table: 'MessageRecord' as const,
     searchField: 'message',
     groupBy: 'personId',
+    filters: ['person', 'since'] as const,
   },
   network: {
     description: 'Contact network records',
     table: 'Person' as const,
     searchField: 'contact fields',
     groupBy: 'personId',
+    filters: [] as const,
   },
   agent_network: {
     description: 'Messages across the current agent tree',
     table: 'Message' as const,
     searchField: 'text',
     groupBy: 'agentId',
+    filters: [] as const,
+  },
+  transactions: {
+    description: 'Plaid financial transactions',
+    table: 'PlaidTransaction' as const,
+    searchField: 'transaction fields',
+    groupBy: 'plaidAccountId',
+    filters: [
+      'since',
+      'until',
+      'account',
+      'min_amount',
+      'max_amount',
+      'status',
+      'include_pending_in_totals',
+    ] as const,
   },
 } as const;
 
-export type ValidSource = keyof typeof VALID_SOURCES;
+export const VALID_SOURCES = DATA_SOURCE_CONFIGS;
+
+export type ValidSource = keyof typeof DATA_SOURCE_CONFIGS;
+export const DEFAULT_GREP_SOURCES: ValidSource[] = ['messages', 'network', 'agent_network'];
 
 export interface PersonInfo {
   firstName: string | null;
@@ -52,6 +71,7 @@ export interface FormattedResult {
 export interface GrepParams {
   pattern: string;
   source?: string;
+  filters?: Record<string, unknown>;
   '-A'?: string | number;
   '-B'?: string | number;
   '-C'?: string | number;
@@ -77,6 +97,8 @@ export interface GrepLocation {
   thread?: string;
   contact_id?: string;
   field?: string;
+  transaction_id?: string;
+  account_id?: string;
 }
 
 export interface GrepMatch {
@@ -97,7 +119,23 @@ export interface GrepResult {
   sources: ValidSource[];
   applied_limit: number;
   applied_offset: number;
+  summaries?: Partial<Record<ValidSource, unknown>>;
   message?: string;
+}
+
+export interface TransactionGrepFilters {
+  since?: Date;
+  until?: Date;
+  account?: string;
+  minAmount?: number;
+  maxAmount?: number;
+  status?: 'pending' | 'posted' | 'all';
+  includePendingInTotals: boolean;
+}
+
+export interface MessageGrepFilters {
+  person?: string;
+  since?: Date;
 }
 
 // Normalized, validated grep input shared by the service (validation) and the
@@ -114,9 +152,10 @@ export interface ValidatedGrepInput {
   contextAfter: number;
   headLimit: number;
   offset: number;
-  // messages-source-only narrowing (resolved/parsed)
-  person?: string;
-  since?: Date;
+  filters: {
+    messages?: MessageGrepFilters;
+    transactions?: TransactionGrepFilters;
+  };
 }
 
 export interface SummaryThreadInfo {
@@ -136,6 +175,15 @@ export interface SummaryResult {
         to: string | null;
       };
       threads: SummaryThreadInfo[];
+    };
+    transactions?: {
+      total_transactions: number;
+      account_count: number;
+      institutions: string[];
+      date_range: {
+        from: string | null;
+        to: string | null;
+      };
     };
   };
 }

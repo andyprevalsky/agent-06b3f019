@@ -1,3 +1,4 @@
+/* eslint-disable max-lines */
 /**
  * Plaid integration service.
  *
@@ -30,13 +31,16 @@ import {
 import {
   countActivePlaidItems,
   findActivePlaidItemsForUser,
+  findActivePlaidItemsWithAccountsForUser,
   findPlaidItemForUser,
+  findPlaidItemWithAccountsForUser,
   markIntegrationDisconnected,
   markPlaidItemDisconnected,
   persistPlaidItem,
   PlaidItemStatus,
   type PlaidItemWithAccounts,
 } from './repo.plaid';
+import { syncPlaidItemTransactions } from './service.plaidTransactions';
 
 const log = createLogger('PlaidService');
 
@@ -58,6 +62,13 @@ export class PlaidApiError extends Error {
   }
 }
 
+export class PlaidDuplicateItemError extends Error {
+  constructor(message = 'This financial institution account is already connected') {
+    super(message);
+    this.name = 'PlaidDuplicateItemError';
+  }
+}
+
 export interface CreatedLinkToken {
   link_token: string;
   expiration: string;
@@ -66,6 +77,13 @@ export interface CreatedLinkToken {
 
 export interface PublicTokenExchangeResult {
   item: SerializedPlaidItem;
+}
+
+export interface PlaidLinkMetadataAccount {
+  name?: string | null;
+  mask?: string | null;
+  type?: string | null;
+  subtype?: string | null;
 }
 
 export interface SerializedPlaidAccount {
@@ -121,14 +139,87 @@ export async function createPlaidLinkToken(userId: string): Promise<CreatedLinkT
   }
 }
 
+export async function createPlaidUpdateLinkToken(
+  userId: string,
+  itemRowId: string
+): Promise<CreatedLinkToken> {
+  const item = await findPlaidItemForUser(userId, itemRowId);
+  if (!item) throw new PlaidItemNotFoundError(itemRowId);
+
+  try {
+    const accessToken = decryptPlaidAccessTokenOrThrow(item.encryptedAccessToken);
+    const data = await createLinkToken({ clientUserId: userId, accessToken });
+    log.info('Created Plaid update-mode link token', { userId, itemRowId });
+    return {
+      link_token: data.link_token,
+      expiration: data.expiration,
+      request_id: data.request_id,
+    };
+  } catch (err) {
+    toApiError(err, 'createUpdateLinkToken');
+  }
+}
+
+function accountLooksDuplicate(
+  candidate: PlaidLinkMetadataAccount,
+  existing: { name: string; mask: string | null; type: string; subtype: string | null }
+): boolean {
+  const nameMatches =
+    typeof candidate.name === 'string' &&
+    candidate.name.trim().toLowerCase() === existing.name.trim().toLowerCase();
+  const maskMatches =
+    candidate.mask !== undefined &&
+    candidate.mask !== null &&
+    existing.mask !== null &&
+    candidate.mask === existing.mask;
+  const typeMatches =
+    candidate.type !== undefined && candidate.type !== null && candidate.type === existing.type;
+  const subtypeMatches =
+    (candidate.subtype ?? null) === existing.subtype || candidate.subtype === undefined;
+  return nameMatches && maskMatches && typeMatches && subtypeMatches;
+}
+
+async function assertNotDuplicatePlaidItem(
+  userId: string,
+  input: {
+    institutionId?: string;
+    accounts?: PlaidLinkMetadataAccount[];
+  }
+): Promise<void> {
+  if (
+    input.institutionId === undefined ||
+    input.institutionId === '' ||
+    input.accounts === undefined ||
+    input.accounts.length === 0
+  ) {
+    return;
+  }
+  const existingItems = await findActivePlaidItemsWithAccountsForUser(userId);
+  const institutionMatches = existingItems.filter(
+    (item) => item.plaidInstitutionId === input.institutionId
+  );
+  for (const item of institutionMatches) {
+    for (const candidate of input.accounts) {
+      if (item.accounts.some((existing) => accountLooksDuplicate(candidate, existing))) {
+        throw new PlaidDuplicateItemError(
+          `${item.institutionName ?? 'This institution'} account is already connected`
+        );
+      }
+    }
+  }
+}
+
 export async function exchangePlaidPublicToken(
   userId: string,
   input: {
     publicToken: string;
     institutionId?: string;
     institutionName?: string;
+    accounts?: PlaidLinkMetadataAccount[];
   }
 ): Promise<PublicTokenExchangeResult> {
+  await assertNotDuplicatePlaidItem(userId, input);
+
   let accessToken: string;
   let plaidItemId: string;
   try {
@@ -165,7 +256,39 @@ export async function exchangePlaidPublicToken(
     accounts: item.accounts.length,
   });
 
+  try {
+    await syncPlaidItemTransactions(item.id);
+  } catch (err) {
+    log.warn('Initial Plaid transaction sync did not complete after token exchange', {
+      userId,
+      plaidItemId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
   return { item: serializeItem(item) };
+}
+
+export async function completePlaidUpdateMode(
+  userId: string,
+  itemRowId: string
+): Promise<PublicTokenExchangeResult> {
+  const item = await findPlaidItemWithAccountsForUser(userId, itemRowId);
+  if (!item) throw new PlaidItemNotFoundError(itemRowId);
+
+  try {
+    await syncPlaidItemTransactions(item.id);
+  } catch (err) {
+    log.warn('Plaid update-mode completion sync did not complete', {
+      userId,
+      itemRowId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  const updated = await findPlaidItemWithAccountsForUser(userId, itemRowId);
+  if (!updated) throw new PlaidItemNotFoundError(itemRowId);
+  return { item: serializeItem(updated) };
 }
 
 export async function listPlaidItems(userId: string): Promise<SerializedPlaidItem[]> {
@@ -220,6 +343,18 @@ export async function disconnectPlaidItem(
 
   log.info('Disconnected Plaid item', { userId, plaidItemId });
   return { ok: true };
+}
+
+export async function disconnectAllPlaidItems(
+  userId: string
+): Promise<{ ok: true; disconnected: number }> {
+  const items = await findActivePlaidItemsForUser(userId);
+  let disconnected = 0;
+  for (const item of items) {
+    await disconnectPlaidItem(userId, item.id);
+    disconnected += 1;
+  }
+  return { ok: true, disconnected };
 }
 
 function serializeItem(item: PlaidItemWithAccounts): SerializedPlaidItem {

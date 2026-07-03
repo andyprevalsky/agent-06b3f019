@@ -6,6 +6,7 @@
  *
  *   [LOADING] --first fetch--> [LOADED]
  *     --connect()--> [CONNECTING] --success--> [LOADED + new item]
+ *     --update(id)--> [CONNECTING] --success--> [LOADED + repaired item]
  *     --disconnect(id)--> [DISCONNECTING(id)] --success--> [LOADED - item]
  */
 
@@ -22,6 +23,7 @@ export function usePlaidIntegration(): {
   disconnectingItemId: string | null;
   error: string | null;
   onConnect: () => void;
+  onUpdate: (itemId: string) => void;
   onDisconnect: (itemId: string) => void;
 } {
   const items = usePlaidItems();
@@ -40,6 +42,13 @@ export function usePlaidIntegration(): {
   const onConnect = useCallback(() => {
     void connect.connect();
   }, [connect]);
+
+  const onUpdate = useCallback(
+    (itemId: string) => {
+      void connect.update(itemId);
+    },
+    [connect],
+  );
 
   const onDisconnect = useCallback(
     (itemId: string) => {
@@ -61,6 +70,7 @@ export function usePlaidIntegration(): {
     disconnectingItemId,
     error: items.error ?? connect.error,
     onConnect,
+    onUpdate,
     onDisconnect,
   };
 }

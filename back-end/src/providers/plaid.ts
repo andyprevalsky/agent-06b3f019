@@ -9,6 +9,8 @@ import {
   type ItemRemoveResponse,
   type AccountsGetResponse,
   type LinkTokenCreateResponse,
+  type TransactionsSyncResponse,
+  type WebhookVerificationKeyGetResponse,
 } from 'plaid';
 import { createLogger } from './logger';
 
@@ -32,6 +34,14 @@ function getBasePath(): string {
     throw new Error(`Unknown PLAID_ENV='${PLAID_ENV}'; expected 'sandbox' or 'production'`);
   }
   return path;
+}
+
+function resolveBackendBaseUrl(): string {
+  const configuredUrl = process.env.BACKEND_URL ?? process.env.RENDER_EXTERNAL_URL;
+  if (configuredUrl !== undefined && configuredUrl.trim() !== '') {
+    return configuredUrl.trim().replace(/\/$/, '');
+  }
+  return 'http://localhost:3001';
 }
 
 let cachedClient: PlaidApi | null = null;
@@ -109,10 +119,18 @@ export const PLAID_DEFAULT_PRODUCTS: Products[] =
 export const PLAID_OPTIONAL_PRODUCTS: Products[] = [];
 
 export const PLAID_DEFAULT_COUNTRY_CODES: CountryCode[] = [CountryCode.Us];
+export const PLAID_TRANSACTIONS_DAYS_REQUESTED = 730;
+export const PLAID_TRANSACTIONS_SYNC_PAGE_SIZE = 500;
 
 /** Plaid OAuth redirect URI used for OAuth-enabled US banks. */
 export function getPlaidRedirectUri(): string | undefined {
   return process.env.PLAID_REDIRECT_URI;
+}
+
+export function getPlaidWebhookUrl(): string | undefined {
+  const configured = process.env.PLAID_WEBHOOK_URL;
+  if (configured !== undefined && configured.trim() !== '') return configured.trim();
+  return `${resolveBackendBaseUrl()}/api/integrations/plaid/webhook`;
 }
 
 export type CreateLinkTokenInput = {
@@ -120,6 +138,8 @@ export type CreateLinkTokenInput = {
   clientUserId: string;
   /** Optional product overrides. Defaults to PLAID_DEFAULT_PRODUCTS. */
   products?: Products[];
+  /** Access token for Plaid Link update mode. */
+  accessToken?: string;
   /** Optional OAuth redirect URI override. */
   redirectUri?: string;
   /** Webhook URL Plaid will call for ITEM/TRANSACTIONS events. */
@@ -132,15 +152,20 @@ export async function createLinkToken(
   const client = getPlaidClient();
   const products = input.products ?? PLAID_DEFAULT_PRODUCTS;
   const redirectUri = input.redirectUri ?? getPlaidRedirectUri();
+  const webhook = input.webhook ?? getPlaidWebhookUrl();
+  const isUpdateMode = input.accessToken !== undefined && input.accessToken !== '';
 
   const request: LinkTokenCreateRequest = {
     user: { client_user_id: input.clientUserId },
     client_name: 'Rose Labs',
-    products,
     language: 'en',
     country_codes: PLAID_DEFAULT_COUNTRY_CODES,
+    ...(isUpdateMode ? { access_token: input.accessToken } : { products }),
     ...(redirectUri ? { redirect_uri: redirectUri } : {}),
-    ...(input.webhook ? { webhook: input.webhook } : {}),
+    ...(webhook && !isUpdateMode ? { webhook } : {}),
+    ...(!isUpdateMode && products.includes(Products.Transactions)
+      ? { transactions: { days_requested: PLAID_TRANSACTIONS_DAYS_REQUESTED } }
+      : {}),
   };
 
   const response = await client.linkTokenCreate(request);
@@ -164,6 +189,31 @@ export async function getAccounts(accessToken: string): Promise<AccountsGetRespo
 export async function removeItem(accessToken: string): Promise<ItemRemoveResponse> {
   const client = getPlaidClient();
   const response = await client.itemRemove({ access_token: accessToken });
+  return response.data;
+}
+
+export async function syncTransactions(
+  accessToken: string,
+  cursor?: string | null
+): Promise<TransactionsSyncResponse> {
+  const client = getPlaidClient();
+  const response = await client.transactionsSync({
+    access_token: accessToken,
+    ...(cursor ? { cursor } : {}),
+    count: PLAID_TRANSACTIONS_SYNC_PAGE_SIZE,
+    options: {
+      days_requested: PLAID_TRANSACTIONS_DAYS_REQUESTED,
+      include_original_description: true,
+    },
+  });
+  return response.data;
+}
+
+export async function getWebhookVerificationKey(
+  keyId: string
+): Promise<WebhookVerificationKeyGetResponse> {
+  const client = getPlaidClient();
+  const response = await client.webhookVerificationKeyGet({ key_id: keyId });
   return response.data;
 }
 
