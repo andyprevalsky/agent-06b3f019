@@ -202,7 +202,7 @@ class BrowserAgentRecorder:
             # screenshot already blocks ~5s (Playwright timeout), so hammering every
             # interval just spams failures and contends on the frozen CDP channel.
             # Grow the gap exponentially while failing (cap ~16x), snap back on success.
-            backoff = min(2 ** self._consecutive_failures, 16)
+            backoff = min(2**self._consecutive_failures, 16)
             await asyncio.sleep(self.interval_seconds * backoff)
             await self.capture(self._last_label, action="idle")
 
@@ -341,7 +341,10 @@ class BrowserAgentRecorder:
         if not self.frames:
             return None
         inlined: List[Dict[str, Any]] = []
-        for frame in self._build_playback_frames():
+        # Upload the real captured frames once each. _build_playback_frames()
+        # expands sparse screenshots to video-rate playback, which can duplicate
+        # a handful of frames hundreds of times and allocate huge base64 HTML.
+        for frame in self.frames:
             src = frame.get("src", "")
             frame_copy = dict(frame)
             if isinstance(src, str) and src.startswith("frames/"):
@@ -905,8 +908,7 @@ class BrowserNetworkRecorder:
             return False
         lower_mime = (mime_type or "").lower()
         return not lower_mime or any(
-            marker in lower_mime
-            for marker in ("json", "text/", "html", "xml", "x-www-form-urlencoded", "javascript")
+            marker in lower_mime for marker in ("json", "text/", "html", "xml", "x-www-form-urlencoded", "javascript")
         )
 
     def _on_request_will_be_sent(self, event: Dict[str, Any], session_id: str | None) -> None:
