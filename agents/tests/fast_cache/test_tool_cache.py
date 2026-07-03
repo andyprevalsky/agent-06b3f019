@@ -19,6 +19,10 @@ import tools.web_search.handler as ws
 import domains.web_fetch.handler as wf
 
 
+def _without_fast_cache_hit(value: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: v for k, v in value.items() if k != "_fast_cache_hit"}
+
+
 class MemStore:
     def __init__(self):
         self.data: Dict[str, Any] = {}
@@ -120,7 +124,8 @@ def test_web_search_record_then_replay(mem, monkeypatch):
         r1 = await ws.web_search_activity("weather", 100, fast_mode_cache_enabled=True, fast_mode_goal="g")
         r2 = await ws.web_search_activity("weather", 100, fast_mode_cache_enabled=True, fast_mode_goal="g")
         assert calls["n"] == 1  # provider hit once; #11 replay served from cache
-        assert r1 == r2
+        assert r2["_fast_cache_hit"] is True
+        assert r1 == _without_fast_cache_hit(r2)
 
     asyncio.run(body())
 
@@ -137,7 +142,8 @@ def test_web_search_replays_across_goals(mem, monkeypatch):
         r1 = await ws.web_search_activity("Best cities to live in your 20s", 100, True, "goal-a")
         r2 = await ws.web_search_activity(" best   cities to LIVE in your 20s ", 100, True, "goal-b")
         assert calls["n"] == 1
-        assert r1 == r2
+        assert r2["_fast_cache_hit"] is True
+        assert r1 == _without_fast_cache_hit(r2)
 
     asyncio.run(body())
 
@@ -168,7 +174,8 @@ def test_web_fetch_record_then_replay(memwf, monkeypatch):
         r1 = await wf.web_fetch_activity("https://x.com/a?t=1", True, "g")
         r2 = await wf.web_fetch_activity("https://x.com/a?t=99999", True, "g")
         assert calls["n"] == 1
-        assert r1 == r2
+        assert r2["_fast_cache_hit"] is True
+        assert r1 == _without_fast_cache_hit(r2)
 
     asyncio.run(body())
 
@@ -186,7 +193,8 @@ def test_web_fetch_replays_across_goals(memwf, monkeypatch):
         r1 = await wf.web_fetch_activity("https://x.com/a?t=1", True, "goal-a")
         r2 = await wf.web_fetch_activity("https://x.com/a?t=99999", True, "goal-b")
         assert calls["n"] == 1
-        assert r1 == r2
+        assert r2["_fast_cache_hit"] is True
+        assert r1 == _without_fast_cache_hit(r2)
 
     asyncio.run(body())
 

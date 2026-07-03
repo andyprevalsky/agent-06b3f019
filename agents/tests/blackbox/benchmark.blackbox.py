@@ -141,6 +141,105 @@ def test_parallel_tool_calls_smoke_cap_allows_recent_fanout_tail():
     assert get_smoke_cap("parallel-tool-calls") == 600
 
 
+def test_toast_nopa_benchmark_routes_browser_to_toast_not_generic_search():
+    """Toast checkout benchmark should not rely on model-discovered DoorDash/Google routing."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("browser-toast-nopa-write-lock")
+
+    assert "https://order.toasttab.com/online/nopafish" in task.prompt
+    assert "Do not use Google, DoorDash, Uber Eats" in task.prompt
+    assert task.expected_attention_kind == "payment_approval"
+    assert task.expected_payment_receipt["merchant"] == "Nopa Fish (Toast - order.toasttab.com)"
+    assert task.success_on_payment_card_request is True
+    assert task.expected_payment_receipt["lineItems"] == [
+        {"name": "The Rocky Sandwich", "quantity": 1}
+    ]
+
+
+def test_payment_receipt_validation_allows_partial_live_receipts():
+    """Live merchant receipts should validate stable fields without pinning tax/price drift."""
+    from benchmarks.benchmark_tasks import BenchmarkTask
+    from benchmarks.run_benchmark import _validate_payment_receipt
+
+    task = BenchmarkTask(
+        name="partial-receipt",
+        title="Partial Receipt",
+        prompt="",
+        timeout_seconds=1,
+        is_chat_mode=False,
+        expected_tools=[],
+        tags=[],
+        price_limit_cents=100,
+        requires_browser_agent=False,
+        requires_claude_code=False,
+        attachment=None,
+        approval_handling="ignore",
+        start_phase="execute",
+        expected_payment_receipt={
+            "merchant": "Nopa Fish (Toast - order.toasttab.com)",
+            "currency": "USD",
+            "lineItems": [{"name": "The Rocky Sandwich", "quantity": 1}],
+        },
+    )
+    req = {
+        "metadata": {
+            "requestUserApproval": {
+                "requestPaymentCard": {
+                    "merchant": "Nopa Fish (Toast - order.toasttab.com)",
+                    "currency": "USD",
+                    "subtotalCents": 2100,
+                    "totalCents": 2394,
+                    "lineItems": [
+                        {
+                            "name": "The Rocky Sandwich",
+                            "imageUrl": None,
+                            "unitPriceCents": 2100,
+                            "quantity": 1,
+                            "lineTotalCents": 2100,
+                        }
+                    ],
+                    "fees": [{"label": "Taxes & Fees", "amountCents": 294}],
+                }
+            }
+        }
+    }
+
+    assert _validate_payment_receipt(task, req) is None
+
+
+def test_success_on_payment_card_request_passes_before_agent_completion():
+    """Checkout benchmarks can stop once a validated payment-card request is observed."""
+    from benchmarks.benchmark_tasks import BenchmarkTask
+    from benchmarks.run_benchmark import evaluate_task
+
+    task = BenchmarkTask(
+        name="payment-card-terminal",
+        title="Payment Card Terminal",
+        prompt="",
+        timeout_seconds=1,
+        is_chat_mode=False,
+        expected_tools=[],
+        tags=[],
+        price_limit_cents=100,
+        requires_browser_agent=False,
+        requires_claude_code=False,
+        attachment=None,
+        approval_handling="prompt_user",
+        start_phase="execute",
+        expected_attention_kind="payment_approval",
+        expected_payment_receipt={"lineItems": [{"name": "The Rocky Sandwich", "quantity": 1}]},
+        success_on_payment_card_request=True,
+    )
+    data = {
+        "agent": {"status": "ACTIVE", "progress": 0.01},
+        "messages": [],
+        "_benchmark": {"expected_payment_receipt_seen": True},
+    }
+
+    assert evaluate_task(task, data, approvals_triggered=1) == (True, None)
+
+
 def test_cached_sub_agent_child_tool_counts_are_counted_once():
     """Fast Mode sub-agent result replay preserves logical child tool counts."""
     from benchmarks.run_benchmark import _count_logical_tool_calls_from_messages
@@ -471,6 +570,26 @@ def test_benchmark_agent_source_override_validates_known_sources():
             os.environ.pop("BENCHMARK_AGENT_SOURCE", None)
         else:
             os.environ["BENCHMARK_AGENT_SOURCE"] = original_env
+
+
+def test_local_benchmark_task_queue_uses_conductor_workspace_only_for_local_urls():
+    """Local benchmark agents are scheduled onto the queue the harness preflights."""
+    import os
+
+    import benchmarks.run_benchmark as bench
+
+    previous_workspace = os.environ.get("CONDUCTOR_WORKSPACE_NAME")
+    try:
+        os.environ["CONDUCTOR_WORKSPACE_NAME"] = "washington"
+
+        assert bench._local_benchmark_task_queue("http://localhost:55020") == "navi-agent-tasks-washington"
+        assert bench._local_benchmark_task_queue("http://127.0.0.1:55020") == "navi-agent-tasks-washington"
+        assert bench._local_benchmark_task_queue("https://navi-j9a9.onrender.com") is None
+    finally:
+        if previous_workspace is None:
+            os.environ.pop("CONDUCTOR_WORKSPACE_NAME", None)
+        else:
+            os.environ["CONDUCTOR_WORKSPACE_NAME"] = previous_workspace
 
 
 def test_benchmark_sms_source_override_updates_local_agent_source():
@@ -1220,7 +1339,14 @@ def test_count_only_releases_observed_approvals_by_denial():
     """count_only should unblock observed approvals without approving side effects."""
     from benchmarks.run_benchmark import _count_only_release_response
 
-    assert _count_only_release_response() == "denied"
+    assert _count_only_release_response() == "__REJECTED__"
+
+
+def test_prompt_user_denial_uses_rejection_sentinel():
+    """prompt_user denial must use the app's rejection sentinel, not free text."""
+    from benchmarks.run_benchmark import _approval_rejection_response
+
+    assert _approval_rejection_response() == "__REJECTED__"
 
 
 def test_benchmark_env_bool_parses_optional_write_lock_override():
@@ -1392,11 +1518,36 @@ async def test_create_agent_uses_goal_override_when_env_set():
 
 def test_keep_failed_agents_only_preserves_failures():
     """The diagnostic flag preserves failed agents but still cleans up passes."""
+    import os
+
     from benchmarks.run_benchmark import _should_delete_agent_after_run
 
-    assert _should_delete_agent_after_run(passed=True, keep_failed_agents=True) is True
-    assert _should_delete_agent_after_run(passed=False, keep_failed_agents=True) is False
-    assert _should_delete_agent_after_run(passed=False, keep_failed_agents=False) is True
+    original = os.environ.pop("BENCHMARK_KEEP_AGENTS", None)
+    try:
+        assert _should_delete_agent_after_run(passed=True, keep_failed_agents=True) is True
+        assert _should_delete_agent_after_run(passed=False, keep_failed_agents=True) is False
+        assert _should_delete_agent_after_run(passed=False, keep_failed_agents=False) is True
+    finally:
+        if original is not None:
+            os.environ["BENCHMARK_KEEP_AGENTS"] = original
+
+
+def test_keep_agents_preserves_passed_and_failed_runs():
+    """The keep-agents cleanup override keeps frontend links viewable after a run."""
+    import os
+
+    from benchmarks.run_benchmark import _should_delete_agent_after_run
+
+    original = os.environ.get("BENCHMARK_KEEP_AGENTS")
+    os.environ["BENCHMARK_KEEP_AGENTS"] = "true"
+    try:
+        assert _should_delete_agent_after_run(passed=True, keep_failed_agents=False) is False
+        assert _should_delete_agent_after_run(passed=False, keep_failed_agents=False) is False
+    finally:
+        if original is None:
+            os.environ.pop("BENCHMARK_KEEP_AGENTS", None)
+        else:
+            os.environ["BENCHMARK_KEEP_AGENTS"] = original
 
 
 def test_keep_agents_env_preserves_successes_and_failures():
@@ -2736,6 +2887,10 @@ async def run_all_tests():
         test_anon_benchmark_mode_disables_saved_auth_material,
     )
     r.record(
+        "local_benchmark_task_queue_uses_workspace",
+        test_local_benchmark_task_queue_uses_conductor_workspace_only_for_local_urls,
+    )
+    r.record(
         "browser_agent_cookie_bundle_bootstrap_local_only",
         test_browser_agent_cookie_bundle_bootstrap_is_local_only,
     )
@@ -2782,6 +2937,7 @@ async def run_all_tests():
     await r.record_async("create_agent_write_lock_override", test_create_agent_sends_write_lock_override_when_env_set)
     await r.record_async("create_agent_goal_override", test_create_agent_uses_goal_override_when_env_set)
     r.record("keep_failed_agents_cleanup_policy", test_keep_failed_agents_only_preserves_failures)
+    r.record("keep_agents_cleanup_policy", test_keep_agents_preserves_passed_and_failed_runs)
     r.record("local_plan_load_separate", test_local_plan_runs_load_tests_separately)
     await r.record_async("tree_log_supabase_once", test_tree_log_collection_fetches_supabase_once)
     r.record("local_args_multi_exclude", test_local_benchmark_args_for_multi_task_exclude_complement)
@@ -2817,6 +2973,14 @@ async def run_all_tests():
     r.record(
         "parallel_tool_calls_smoke_cap",
         test_parallel_tool_calls_smoke_cap_allows_recent_fanout_tail,
+    )
+    r.record(
+        "toast_nopa_routes_to_toast",
+        test_toast_nopa_benchmark_routes_browser_to_toast_not_generic_search,
+    )
+    r.record(
+        "success_on_payment_card_request",
+        test_success_on_payment_card_request_passes_before_agent_completion,
     )
     r.record(
         "cached_sub_agent_child_tool_counts",

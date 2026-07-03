@@ -21,6 +21,23 @@ HEARTBEAT_TIMEOUT_SECONDS = 120
 # Must stay comfortably below HEARTBEAT_TIMEOUT_SECONDS.
 HEARTBEAT_KEEPALIVE_SECONDS = 15
 MAX_ACTIVITY_RETRIES = 2
+BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS = int(os.getenv("BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS", "45"))
+
+# browser-use per-event timeouts. browser-use fetches DOM+screenshot before every
+# LLM step via BrowserStateRequestEvent (library default TIMEOUT_BrowserStateRequestEvent
+# = 30s; TIMEOUT_NavigateToUrlEvent = 30s; TIMEOUT_ScreenshotEvent = 15s). On a
+# Cloudflare/bot-challenge that CPU-freezes the renderer for ~90-260s, that CDP
+# fetch hangs, hits the 30s cap, raises TimeoutError, fails the activity, and
+# Temporal retries from scratch into an infinite freeze loop (the survival
+# heartbeat only keeps the Temporal layer alive — this is browser-use's earlier,
+# internal cap). Raise these above the max observed freeze so browser-use WAITS
+# the challenge out instead of bailing. setdefault so Fly/local env can override.
+BROWSER_STATE_REQUEST_TIMEOUT_SECONDS = 300
+NAVIGATE_TO_URL_TIMEOUT_SECONDS = 300
+SCREENSHOT_EVENT_TIMEOUT_SECONDS = 120
+os.environ.setdefault("TIMEOUT_BrowserStateRequestEvent", str(BROWSER_STATE_REQUEST_TIMEOUT_SECONDS))
+os.environ.setdefault("TIMEOUT_NavigateToUrlEvent", str(NAVIGATE_TO_URL_TIMEOUT_SECONDS))
+os.environ.setdefault("TIMEOUT_ScreenshotEvent", str(SCREENSHOT_EVENT_TIMEOUT_SECONDS))
 
 # Session init retry settings
 SESSION_MAX_WAIT_SECONDS = 900  # 15 minutes max
@@ -54,6 +71,21 @@ STEEL_COST_CENTS_PER_MS = 100 / 3_600_000  # ~0.00002778
 
 # Action loop delay between iterations (seconds)
 ACTION_LOOP_DELAY_SECONDS = 0.5
+
+# Browser supervisor watchdogs. These must be longer than browser-use's own
+# per-event caps because those EventBus requests are not reliably cancellable
+# from an outer asyncio.wait_for. If the supervisor preempts BrowserStateRequest
+# at 90s while browser-use is still allowed to run for 300s, the underlying
+# DOMWatchdog keeps running and later state requests queue behind it. Fire the
+# supervisor only after browser-use has had time to complete or fail its event.
+BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS = int(
+    os.getenv("BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS", str(BROWSER_STATE_REQUEST_TIMEOUT_SECONDS + 30))
+)
+BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS = int(
+    os.getenv("BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS", str(NAVIGATE_TO_URL_TIMEOUT_SECONDS + 30))
+)
+BROWSER_SUPERVISOR_MAX_RECOVERIES = int(os.getenv("BROWSER_SUPERVISOR_MAX_RECOVERIES", "8"))
+BROWSER_WARMUP_ACTION_TIMEOUT_SECONDS = float(os.getenv("BROWSER_WARMUP_ACTION_TIMEOUT_SECONDS", "5"))
 
 # MIME type mappings for file downloads
 MIME_TYPE_MAP = {

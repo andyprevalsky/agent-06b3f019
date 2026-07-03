@@ -515,8 +515,8 @@
   },
   {
     "name": "browser-toast-nopa-write-lock",
-    "title": "Toast Nopa Fish Order \u2014 Cloudflare Challenge + Write Lock",
-    "prompt": "Order me 1 rocky fish sandwich from Nopa Fish ferry building",
+    "title": "Toast Nopa Fish Order - Cloudflare Challenge + Payment Card",
+    "prompt": "Order me 1 rocky fish sandwich from Nopa Fish Ferry Building using the official Toast pickup flow. Start the browser order at https://order.toasttab.com/online/nopafish for Nopa Fish, 1 Ferry Building Suite 31, San Francisco, CA. Inspect the live Toast menu, choose the closest matching single rocky fish sandwich item (currently often named The Rocky Sandwich), add quantity 1, proceed through checkout, and stop at/handle the write-lock approval before placing the order as the harness expects. Do not use Google, DoorDash, Uber Eats, or other delivery-platform search as the primary path; only fall back away from Toast if the Toast ordering page itself is technically blocked, and report the exact blocker.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
     "expected_tools": [
@@ -533,7 +533,18 @@
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": "ignore",
-    "expected_attention_kind": "write_lock",
+    "expected_attention_kind": "payment_approval",
+    "expected_payment_receipt": {
+      "merchant": "Nopa Fish (Toast - order.toasttab.com)",
+      "currency": "USD",
+      "lineItems": [
+        {
+          "name": "The Rocky Sandwich",
+          "quantity": 1
+        }
+      ]
+    },
+    "success_on_payment_card_request": true,
     "start_phase": "execute",
     "bench": "pipeline-e2e"
   },

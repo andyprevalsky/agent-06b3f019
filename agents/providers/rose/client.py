@@ -35,6 +35,7 @@ from config import load_config
 from providers.rose.browser_use import (
     build_browser_use_messages,
     build_browser_use_tools,
+    filter_browser_use_actions_for_state,
     normalize_browser_use_response,
     normalize_browser_use_tool_call,
 )
@@ -529,6 +530,12 @@ class RoseClient:
         call_site = kwargs.get("call_site", "unspecified")
         agent_id = kwargs.get("agent_id")
         messages = kwargs.get("messages")
+        pool = kwargs.get("pool")
+
+        if pool == "rose-1-browser-use" or str(call_site).startswith("browser_use"):
+            async for chunk in self._complete_impl(**kwargs):
+                yield chunk
+            return
 
         ctx = current_context()
         if ctx is None or not ctx.active:
@@ -691,6 +698,8 @@ class RoseClient:
         claude_auth_tool_choice = None
         gpt_auth_tools = None
         gpt_auth_tool_choice = None
+        anthropic_api_key_tools = None
+        anthropic_api_key_tool_choice = None
         direct_auth_tools = tools
         effective_tool_choice = tool_choice
         if (
@@ -724,6 +733,13 @@ class RoseClient:
                 gpt_auth_tools = direct_auth_tools
             if gpt_auth_tools:
                 gpt_auth_tool_choice = effective_tool_choice or "any"
+        # The funded Anthropic API-key route is the same native Anthropic
+        # protocol as claudeAuth, so it must preserve real tool schemas even
+        # when the direct route was GPT-only and then fell through.
+        if not _is_synthetic_output_toolset(direct_auth_tools):
+            anthropic_api_key_tools = direct_auth_tools
+        if anthropic_api_key_tools:
+            anthropic_api_key_tool_choice = effective_tool_choice or "any"
 
         direct_auth: Optional[ComputeAuthContext] = claude_auth or gpt_auth
 
@@ -1133,9 +1149,9 @@ class RoseClient:
                             pool_spec=pool_spec,
                             messages=messages,
                             api_key=anthropic_api_key,
-                            tools=claude_auth_tools,
-                            tool_choice=claude_auth_tool_choice,
-                            response_format=None if claude_auth_tools else openrouter_response_format,
+                            tools=anthropic_api_key_tools,
+                            tool_choice=anthropic_api_key_tool_choice,
+                            response_format=None if anthropic_api_key_tools else openrouter_response_format,
                             max_tokens=max_tokens,
                             skip_cache_write=skip_cache_write,
                             thinking=thinking,
@@ -1150,8 +1166,15 @@ class RoseClient:
                     ):
                         chunk = _with_timing_if_done(chunk)
                         api_yielded_any = True
-                        if chunk.kind == "metadata" and chunk.data.get("actual_model"):
-                            _seen_actual_model = chunk.data["actual_model"]
+                        if chunk.kind == "metadata":
+                            metadata = dict(chunk.data)
+                            if claude_token_error is not None:
+                                metadata["claude_token_error"] = claude_token_error
+                            if gpt_token_error is not None:
+                                metadata["gpt_token_error"] = gpt_token_error
+                            chunk = StreamChunk(kind="metadata", data=metadata)
+                            if chunk.data.get("actual_model"):
+                                _seen_actual_model = chunk.data["actual_model"]
                         elif chunk.kind == "usage":
                             _emit_llm_cache(chunk.data)
                         _record_dump_chunk(chunk)
@@ -1287,7 +1310,8 @@ class RoseClient:
         pool_spec = get_pool("rose-1-browser-use")
         max_tokens = 16000
         temperature = 1.0
-        tools = build_browser_use_tools(available_actions)
+        state_actions = filter_browser_use_actions_for_state(available_actions, browser_state)
+        tools = build_browser_use_tools(state_actions)
         # IMPORTANT: "auto", not "any". Forcing tool use ("any") forbids the model from
         # emitting a reasoning text block before its tool call; without that reasoning step
         # the model degenerates into reflexively re-picking the safe no-op `screenshot` tool
@@ -1299,7 +1323,7 @@ class RoseClient:
             task=task,
             browser_state=browser_state,
             action_history=action_history,
-            available_actions=available_actions,
+            available_actions=state_actions,
             include_screenshot=include_screenshot,
             dynamic_system_context=dynamic_system_context,
             turn_messages=turn_messages,

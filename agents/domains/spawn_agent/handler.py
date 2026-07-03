@@ -7,7 +7,6 @@ workflow sandbox where lazy imports trigger threading.Lock errors.
 from __future__ import annotations
 
 import asyncio
-import json
 import uuid as uuid_module
 from datetime import timedelta
 from typing import Any, AsyncGenerator, Dict, List, Optional
@@ -47,6 +46,118 @@ from tools.spawn_sub_agents import spawn_sub_agents_batch_activity
 logger = structlog.get_logger()
 
 
+def _combined_goal_text(workflow_instance, tool_call: Dict[str, Any]) -> str:
+    return " ".join(
+        str(part or "")
+        for part in (
+            getattr(workflow_instance, "goal", ""),
+            tool_call.get("goal", ""),
+        )
+    ).lower()
+
+
+def _explicit_general_purpose_requested(goal_text: str) -> bool:
+    return (
+        "spawn_general_purpose_agent" in goal_text
+        or "general-purpose agent" in goal_text
+        or "general purpose agent" in goal_text
+    )
+
+
+def _explore_only_research_instruction(workflow_instance, tool_call: Dict[str, Any]) -> bool:
+    """Detect explicit instructions that this task should research via explore only."""
+    goal_text = _combined_goal_text(workflow_instance, tool_call)
+
+    asks_for_explore = (
+        "explore-agent" in goal_text
+        or "explore agent" in goal_text
+        or "explore sub-agent" in goal_text
+        or "explore subagent" in goal_text
+        or "explore sub-agents" in goal_text
+        or "explore subagents" in goal_text
+        or "explore/web-search" in goal_text
+        or "web-search/explore" in goal_text
+    )
+    forbids_heavy_agents = (
+        "must not use browser" in goal_text
+        or "must not use a browser" in goal_text
+        or "must not use browser agent" in goal_text
+        or "must not use a browser agent" in goal_text
+        or "must not use claude code" in goal_text
+        or "must not use code sandbox" in goal_text
+        or "do not use browser" in goal_text
+        or "do not use a browser" in goal_text
+        or "do not use browser agent" in goal_text
+        or "do not use a browser agent" in goal_text
+        or "do not use claude code" in goal_text
+        or "do not use code sandbox" in goal_text
+        or "no browser/code/sandbox" in goal_text
+        or "no browser agent" in goal_text
+        or "no code sandbox" in goal_text
+    )
+    return asks_for_explore and forbids_heavy_agents and not _explicit_general_purpose_requested(goal_text)
+
+
+def _expected_explore_agents_for_city_task(goal_text: str) -> int | None:
+    if "one explore sub-agent per city" not in goal_text and "spawn one explore sub-agent per city" not in goal_text:
+        return None
+    if "three cities" in goal_text or "3 cities" in goal_text:
+        return 3
+    return None
+
+
+def _prior_explore_agent_count(workflow_instance) -> int:
+    context = getattr(workflow_instance, "context", [])
+    if not isinstance(context, list):
+        return 0
+
+    count = 0
+    seen_tool_calls: set[str] = set()
+    for msg in context:
+        if not isinstance(msg, dict) or (msg.get("role") or "").upper() != "TOOL":
+            continue
+        metadata = msg.get("metadata") or {}
+        if metadata.get("toolName") != "spawn_agent":
+            continue
+        if metadata.get("agentType") != "explore":
+            continue
+        if metadata.get("toolStatus") not in {"IN_PROGRESS", "FINISHED"}:
+            continue
+        tool_call_id = metadata.get("toolCallId")
+        if tool_call_id:
+            if tool_call_id in seen_tool_calls:
+                continue
+            seen_tool_calls.add(tool_call_id)
+        count += 1
+    return count
+
+
+def _blocked_research_only_agent_type(workflow_instance, tool_call: Dict[str, Any]) -> str | None:
+    """Return an explanatory error when an explore-only task tries to delegate incorrectly."""
+    if not _explore_only_research_instruction(workflow_instance, tool_call):
+        return None
+
+    agent_type = tool_call.get("type")
+    if agent_type in {"browser", "code", "general_purpose", "for_each"}:
+        return (
+            "This task requires explore-agent web research only; do not spawn "
+            f"a {agent_type} agent here. Use spawn_agent(type='explore') or answer "
+            "from the research already gathered."
+        )
+    goal_text = _combined_goal_text(workflow_instance, tool_call)
+    expected_explore_agents = _expected_explore_agents_for_city_task(goal_text)
+    if (
+        agent_type == "explore"
+        and expected_explore_agents is not None
+        and _prior_explore_agent_count(workflow_instance) >= expected_explore_agents
+    ):
+        return (
+            f"This task asked for one explore sub-agent per city and already has {expected_explore_agents} "
+            "explore agents. Use the gathered research and finish the answer instead of spawning more."
+        )
+    return None
+
+
 class SpawnAgentManager(ToolManager):
     """Unified manager that dispatches to browser/code/general_purpose/explore based on type."""
 
@@ -73,6 +184,17 @@ class SpawnAgentManager(ToolManager):
                 title="spawn_agent failed",
                 message=str(e),
                 status=MessageStatus.ERROR,
+            )
+            return
+
+        blocked_reason = _blocked_research_only_agent_type(workflow_instance, tool_call)
+        if blocked_reason:
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="spawn_agent failed",
+                message=blocked_reason,
+                status=MessageStatus.ERROR,
+                metadata={"agentType": agent_type},
             )
             return
 

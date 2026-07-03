@@ -35,6 +35,20 @@ describe('backend URL resolution', () => {
     ).toBe('http://localhost:55120');
   });
 
+  it('uses the same-origin Vite proxy when a public dev host has a local backend URL', () => {
+    expect(
+      resolveBackendBaseUrl(
+        'http://localhost:55020',
+        {
+          protocol: 'https:',
+          hostname: 'rose-washington.ngrok.app',
+          port: '',
+        },
+        true,
+      ),
+    ).toBe('');
+  });
+
   it('infers the paired backend port for local Vite dev servers', () => {
     expect(
       resolveBackendBaseUrl(

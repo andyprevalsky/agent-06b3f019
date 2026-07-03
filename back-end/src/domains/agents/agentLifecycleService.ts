@@ -105,6 +105,7 @@ async function startDirectWorkflow(
     model: body.model,
     reasoningMaxTokens: body.reasoning_max_tokens,
     verifier: { type: verifier.type },
+    ...(body.task_queue !== undefined ? { taskQueue: body.task_queue } : {}),
     startPhase,
     priceLimitCents,
     ...(body.fast_mode_cache_enabled !== undefined

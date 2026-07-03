@@ -1184,9 +1184,13 @@ async def _execute_goto(
             logger.warning(f"Failed to inject localStorage for {url}: {e}")
 
     await action_history.record_action(
-        dom_service=dom_service, action="goto", thinking=thinking, params={"url": url}, result={"success": True}
+        dom_service=dom_service,
+        action="goto",
+        thinking=thinking,
+        params={"url": url},
+        result={"success": True, "current_url": url},
     )
-    return {"success": True, "message": ""}
+    return {"success": True, "message": "", "current_url": url}
 
 
 async def _execute_extract(

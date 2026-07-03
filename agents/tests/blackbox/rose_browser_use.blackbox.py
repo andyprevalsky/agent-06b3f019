@@ -26,6 +26,7 @@ from _test_utils import BlackboxResult, set_mock_handler, teardown_mock
 import httpx
 
 from providers.rose import POOL_REGISTRY, RoseClient, claude_auth_from_token, get_pool, gpt_auth_from_token
+from providers.fast_cache.context import FastCacheContext, reset_context, set_context
 from providers.rose.browser_use import (
     BROWSER_USE_TOOLS,
     _normalize_action_params,
@@ -33,10 +34,12 @@ from providers.rose.browser_use import (
     build_browser_use_system_prompt,
     build_browser_use_tools,
     extract_json,
+    filter_browser_use_actions_for_state,
     filter_browser_turn_messages,
     generate_tool_descriptions,
     normalize_browser_use_response,
     normalize_browser_use_tool_call,
+    state_has_indexed_dom_targets,
 )
 from tools.prompts import attempt_completion_prompt
 from utils.prompts import VERIFICATION_RULES
@@ -121,6 +124,30 @@ def test_build_browser_use_system_prompt_does_not_advertise_extract():
     assert "use `extract`" not in prompt
     assert "restart_auth_with_cookie_bundle" not in prompt
     assert "tool call" in prompt
+
+
+def test_state_has_indexed_dom_targets_detects_interactive_indices():
+    browser_state = {"dom_tree": "[81]<button />\n\tSchedule your order for later"}
+
+    assert state_has_indexed_dom_targets(browser_state)
+
+
+def test_filter_browser_use_actions_removes_coordinates_when_dom_has_indices():
+    actions = ["click", "click_coordinates", "wait"]
+    browser_state = {"dom_tree": "[92]<button aria-label=Add item to Cart />"}
+
+    out = filter_browser_use_actions_for_state(actions, browser_state)
+
+    assert out == ["click", "wait"]
+
+
+def test_filter_browser_use_actions_keeps_coordinates_for_unindexed_state():
+    actions = ["click", "click_coordinates", "wait"]
+    browser_state = {"dom_tree": "<canvas id=game />"}
+
+    out = filter_browser_use_actions_for_state(actions, browser_state)
+
+    assert out == actions
 
 
 def test_build_browser_use_system_prompt_auth_priority_is_numbered():
@@ -1053,7 +1080,7 @@ async def test_complete_browser_use_gpt_path_succeeds():
         task="click submit",
         browser_state=_browser_state(),
         action_history=[],
-        available_actions=["click"],
+        available_actions=["click", "click_coordinates"],
         include_screenshot=False,
         gpt_auth=gpt_auth_from_token("good-gpt-token", "acct_123"),
         call_site="test-bu-gpt",
@@ -1074,6 +1101,7 @@ async def test_complete_browser_use_gpt_path_succeeds():
     body = captured_bodies[0]
     assert body["tool_choice"] == "auto"
     assert body["tools"][0]["name"] == "click"
+    assert [tool["name"] for tool in body["tools"]] == ["click"]
     assert body["tools"][0]["description"] == BROWSER_USE_TOOLS["click"]["description"]
     assert "# Available Actions" not in body["instructions"]
 
@@ -1092,9 +1120,124 @@ async def test_complete_browser_use_gpt_path_succeeds():
     assert payload["config"]["requested_params"]["temperature"] == 1.0
     assert payload["config"]["requested_params"]["max_tokens"] == 16000
     assert payload["tools"][0]["name"] == "click"
+    assert [tool["name"] for tool in payload["tools"]] == ["click"]
     assert payload["config"]["tool_choice"] == "auto"
     assert payload["extra"]["browser_recording_manifest_path"] == "/tmp/browser-recording/manifest.json"
     assert payload["extra"]["iteration"] == 7
+
+
+async def test_complete_browser_use_bypasses_fast_cache_context():
+    """Browser-use LLM calls must not read or write provider fast-cache."""
+    sse_lines = []
+    sse_lines += _ev("response.output_item.done", {
+        "type": "response.output_item.done",
+        "item": {
+            "type": "function_call",
+            "call_id": "call_click",
+            "name": "click",
+            "arguments": '{"index": 3}',
+        },
+    })
+    sse_lines += _ev("response.completed", {
+        "type": "response.completed",
+        "response": {"usage": {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20}},
+    })
+    sse_body = "\n".join(sse_lines)
+    captured: list[str] = []
+
+    def handler(req):
+        url = str(req.url)
+        captured.append(url)
+        if "fast-cache" in url:
+            return httpx.Response(500, text="browser-use should bypass fast-cache")
+        if "chatgpt.com/backend-api/codex/responses" in url:
+            return httpx.Response(200, text=sse_body, headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(500, text="unexpected endpoint")
+
+    set_mock_handler(handler)
+    token = set_context(FastCacheContext(enabled=True, goal="click submit", write_enabled=True))
+    try:
+        client = RoseClient(openrouter_key="ork-x")
+        result = await client.complete_browser_use(
+            task="click submit",
+            browser_state=_browser_state(),
+            action_history=[],
+            available_actions=["click", "click_coordinates"],
+            include_screenshot=False,
+            gpt_auth=gpt_auth_from_token("good-gpt-token", "acct_123"),
+            agent_id="agent-fast-cache-bypass",
+            call_site="browser_use_step_1",
+        )
+    finally:
+        reset_context(token)
+
+    assert result["action"]["action"] == "click"
+    assert not any("fast-cache" in url for url in captured)
+    assert any("chatgpt.com/backend-api/codex/responses" in url for url in captured)
+
+
+async def test_complete_browser_use_gpt_rate_limit_preserves_tools_for_anthropic_api_key():
+    """GPT rate-limit -> Anthropic API-key fallback still receives browser action tools."""
+    import providers.rose.client as rc
+
+    rc._reset_anthropic_api_key_cooldown_cache()
+    captured: list[str] = []
+    anthropic_bodies: list[dict] = []
+
+    def handler(req):
+        url = str(req.url)
+        if req.url.path.endswith("/anthropic-key/cooldown"):
+            return httpx.Response(200, json={"onCooldown": False})
+        captured.append(url)
+        if "chatgpt.com/backend-api/codex/responses" in url:
+            return httpx.Response(
+                429,
+                json={
+                    "error": {
+                        "type": "usage_limit_reached",
+                        "message": "The usage limit has been reached",
+                    }
+                },
+            )
+        if "api.anthropic.com" in url:
+            anthropic_bodies.append(json.loads(req.content.decode()))
+            return httpx.Response(
+                200,
+                text=_anthropic_tool_sse("click", '{"index": 3}'),
+                headers={"Content-Type": "text/event-stream"},
+            )
+        return httpx.Response(500, text="should not hit openrouter")
+
+    set_mock_handler(handler)
+    client = RoseClient(openrouter_key="ork-x")
+
+    try:
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test"}):
+            result = await client.complete_browser_use(
+                task="click submit",
+                browser_state=_browser_state(),
+                action_history=[],
+                available_actions=["click", "goto"],
+                include_screenshot=False,
+                gpt_auth=gpt_auth_from_token("rate-limited-gpt-token", "acct_123"),
+                call_site="test-bu-gpt-rate-limit-api-key-tools",
+            )
+    finally:
+        rc._reset_anthropic_api_key_cooldown_cache()
+
+    assert result["mode"] == "waterfall"
+    assert result["actual_model"] == "claude-fable-5-anthropic"
+    assert result["gpt_token_error"] == "rate_limit"
+    assert result["action"]["action"] == "click"
+    assert result["action"]["index"] == 3
+    assert any("chatgpt.com/backend-api/codex/responses" in u for u in captured)
+    assert any("api.anthropic.com" in u for u in captured)
+    assert all("openrouter.ai" not in u for u in captured)
+    assert anthropic_bodies
+    body = anthropic_bodies[0]
+    assert body["tool_choice"]["type"] == "auto"
+    assert [tool["name"] for tool in body["tools"]] == ["click", "goto"]
+    assert body["tools"][0]["description"] == BROWSER_USE_TOOLS["click"]["description"]
 
 
 async def test_complete_browser_use_claude_401_falls_through_to_waterfall():
@@ -1144,6 +1287,15 @@ async def run_all_tests():
     r.record("tool_catalog_completeness", test_browser_use_tool_catalog_completeness)
     r.record("system_prompt_uses_native_tools", test_build_browser_use_system_prompt_uses_native_tools_not_action_list)
     r.record("system_prompt_hides_extract", test_build_browser_use_system_prompt_does_not_advertise_extract)
+    r.record("state_has_indexed_dom_targets", test_state_has_indexed_dom_targets_detects_interactive_indices)
+    r.record(
+        "filter_actions_removes_coordinates_when_indexed",
+        test_filter_browser_use_actions_removes_coordinates_when_dom_has_indices,
+    )
+    r.record(
+        "filter_actions_keeps_coordinates_when_unindexed",
+        test_filter_browser_use_actions_keeps_coordinates_for_unindexed_state,
+    )
     r.record("native_tool_schemas_preserve_catalog", test_build_browser_use_tools_preserves_catalog_descriptions)
     r.record("write_lock_notification_schema", test_write_lock_notification_tool_is_stable_internal_action_schema)
     r.record(
@@ -1204,6 +1356,11 @@ async def run_all_tests():
     await r.record_async("complete_browser_use_waterfall_only", test_complete_browser_use_waterfall_only_path)
     await r.record_async("complete_browser_use_claude_path", test_complete_browser_use_claude_path_succeeds)
     await r.record_async("complete_browser_use_gpt_path", test_complete_browser_use_gpt_path_succeeds)
+    await r.record_async("complete_browser_use_bypasses_fast_cache", test_complete_browser_use_bypasses_fast_cache_context)
+    await r.record_async(
+        "complete_browser_use_gpt_rate_limit_api_key_tools",
+        test_complete_browser_use_gpt_rate_limit_preserves_tools_for_anthropic_api_key,
+    )
     await r.record_async("complete_browser_use_claude_401_fallthrough", test_complete_browser_use_claude_401_falls_through_to_waterfall)
 
     teardown_mock()
