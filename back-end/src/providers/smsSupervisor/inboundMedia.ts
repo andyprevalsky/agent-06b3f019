@@ -12,9 +12,15 @@
 
 import { createLogger } from '../logger';
 import type { ContentBlock } from '../rose';
-import type { SurgeAttachment } from '../../domains/sms-webhook/types';
 
 const log = createLogger('SmsInboundMedia');
+
+/** Media attachment on an inbound Surge message (MMS photo, voice note, etc.). */
+export interface SurgeAttachment {
+  url: string;
+  /** Content-type hint from the webhook payload (e.g. "image/jpeg"), if present. */
+  type: string | null;
+}
 
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024; // MMS media is small; 20MB is a generous cap
 // scribe_v2 is the current batch STT model ($0.22/hr); scribe_v1 is removed

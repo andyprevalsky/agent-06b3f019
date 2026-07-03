@@ -20,8 +20,7 @@ import { prisma } from '../database';
 import { createStreamingCompletion, CompletionMessage, ContentBlock, markCacheable } from '../rose';
 import { sendSms } from '../smsQueue';
 import { buildSmsContext } from './contextBuilder';
-import { processInboundAttachments } from './inboundMedia';
-import type { SurgeAttachment } from '../../domains/sms-webhook/types';
+import { processInboundAttachments, type SurgeAttachment } from './inboundMedia';
 import {
   commitPendingWrites,
   dispatchToolCall,
