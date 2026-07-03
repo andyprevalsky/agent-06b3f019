@@ -1834,6 +1834,13 @@ def test_user_data_prod_grep_requires_all_provider_filters():
     assert (
         _validate_user_data_prod_grep_messages(
             [
+                {
+                    "metadata": {
+                        "toolName": "spawn_general_purpose_agent",
+                        "toolStatus": "FINISHED",
+                        "toolCallId": "spawn-providers",
+                    },
+                },
                 grep_msg("chatgpt"),
                 grep_msg("claude"),
                 grep_msg("apple_notes"),
@@ -1865,6 +1872,17 @@ def test_user_data_prod_grep_requires_all_provider_filters():
     assert "chatgpt" in failure
     assert "obsidian" in failure
 
+    no_spawn_failure = _validate_user_data_prod_grep_messages(
+        [
+            grep_msg("chatgpt"),
+            grep_msg("claude"),
+            grep_msg("apple_notes"),
+            grep_msg("obsidian"),
+        ]
+    )
+    assert no_spawn_failure is not None
+    assert "provider-agent spawn" in no_spawn_failure
+
 
 def test_parallel_tool_calls_smoke_requires_explore_sub_agents():
     """The parallel search smoke should exercise execute-phase explore fanout."""
@@ -1878,6 +1896,17 @@ def test_parallel_tool_calls_smoke_requires_explore_sub_agents():
     assert "explore sub-agents" in task.prompt
     assert "spawn_agent" not in task.forbidden_tools
     assert "spawn_general_purpose_agent" in task.forbidden_tools
+
+
+def test_user_data_prod_grep_prompt_avoids_nested_agent_instruction():
+    """Prod user-data task should not tell provider agents to spawn more agents."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("user-data-prod-grep")
+
+    assert task.min_tool_counts == {"grep": 4}
+    assert "do not tell it to spawn another agent" in task.prompt
+    assert "must call grep directly" in task.prompt
 
 
 def test_spawn_sub_agents_smoke_forbids_browser_and_code_detours():
@@ -2014,6 +2043,10 @@ async def run_all_tests():
     r.record(
         "user_data_prod_grep_provider_filters",
         test_user_data_prod_grep_requires_all_provider_filters,
+    )
+    r.record(
+        "user_data_prod_grep_no_nested_agent_instruction",
+        test_user_data_prod_grep_prompt_avoids_nested_agent_instruction,
     )
     r.record(
         "parallel_tool_calls_smoke_cap",

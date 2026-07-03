@@ -123,7 +123,7 @@
   {
     "name": "user-data-prod-grep",
     "title": "User Data Prod Grep",
-    "prompt": "Run a real prod-data validation of my synced user documents using only local-data Grep through explore agents.\n\nCritical execution rules:\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn one or more explore agents; each explore agent must call grep with source=\"documents\".\n- Check each V1 provider separately with filters.document_source: chatgpt, claude, apple_notes, and obsidian.\n- For each provider, find one concrete, human-verifiable fact or state clearly that no document evidence is currently synced for that provider.\n- Prefer high-signal recent project, preference, tool, or goal evidence. Use grep flags and filters as needed, but cite exact grep evidence and the returned document path/source.\n- Final answer must include a PASS/VERIFY checklist with one row per provider: provider, grep filters used, exact evidence snippet, document path, and whether it appears verified from prod data.\n\nThis benchmark intentionally runs against my prod account/data. Do not fabricate expected answers; the user will manually verify the cited facts.",
+    "prompt": "Run a real prod-data validation of my synced user documents using only local-data Grep through provider-specific spawned agents.\n\nCritical execution rules:\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn provider-specific agents for chatgpt, claude, apple_notes, and obsidian. The spawned provider agent is the research agent; do not tell it to spawn another agent.\n- Each spawned provider agent must call grep directly with source=\"documents\" and filters.document_source set to its assigned provider.\n- For each provider, find one concrete, human-verifiable fact or state clearly that no document evidence is currently synced for that provider.\n- Prefer high-signal recent project, preference, tool, or goal evidence. Use grep flags and filters as needed, but cite exact grep evidence and the returned document path/source.\n- Final answer must include a PASS/VERIFY checklist with one row per provider: provider, grep filters used, exact evidence snippet, document path, and whether it appears verified from prod data.\n\nThis benchmark intentionally runs against my prod account/data. Do not fabricate expected answers; the user will manually verify the cited facts.",
     "timeout_seconds": 420,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
@@ -135,7 +135,6 @@
     "approval_handling": null,
     "start_phase": "execute",
     "min_tool_counts": {
-      "spawn_agent": 1,
       "grep": 4
     },
     "forbidden_tools": [
