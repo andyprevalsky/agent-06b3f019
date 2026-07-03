@@ -652,6 +652,41 @@ async def test_handler_reports_parallel_provider_when_fallback_succeeds():
     assert out["usage"]["service"][0]["provider"] == "Parallel Extract"
 
 
+async def test_handler_fast_cache_scrape_hit_has_no_service_cost():
+    """Fast Mode scrape cache hits should not be billed as live scrape/extract calls."""
+    from domains.web_fetch.handler import FAST_CACHE_HIT_FIELD, WebFetchManager
+
+    calls = []
+
+    async def fake_execute_activity(fn, args=None, **kwargs):
+        name = getattr(fn, "__name__", "")
+        calls.append({"activity": name, "args": args, "kwargs": kwargs})
+        if name == "web_fetch_activity":
+            return {
+                "markdown": "cached page text",
+                "links": [],
+                "metadata": {"provider": "Firecrawl scrape"},
+                FAST_CACHE_HIT_FIELD: True,
+            }
+        if name == "summarize_and_filter_links":
+            return {"summary": "Cached summary.", "files_to_download": [], "usage": {}, "summarized": True}
+        return None
+
+    manager = WebFetchManager()
+    out = await manager.execute_tool(
+        execute_activity=fake_execute_activity,
+        tool_call={"url": "https://example.com/a", "objective": "summarize"},
+        tool_call_id="tc-wf",
+        agent_id="a-1",
+        user_id="u-1",
+    )
+
+    assert out["usage"]["service"] == []
+    finished = [call for call in calls if call["activity"] == "post_agent_message"][-1]
+    assert "**Cost:** $0.0000" in finished["args"][1]
+    assert FAST_CACHE_HIT_FIELD not in finished["args"][1]
+
+
 async def test_handler_skips_download_when_haiku_returns_no_files():
     """When the Haiku filter returns an empty files_to_download list, the download activity is not invoked."""
     from domains.web_fetch.handler import WebFetchManager
@@ -793,6 +828,7 @@ async def run_all_tests() -> bool:
     r.record("handler_get_manager_singleton", test_handler_get_manager_singleton)
     await r.record_async("handler_exec_happy", test_handler_execute_tool_happy_path)
     await r.record_async("handler_reports_parallel_provider", test_handler_reports_parallel_provider_when_fallback_succeeds)
+    await r.record_async("handler_fast_cache_scrape_no_cost", test_handler_fast_cache_scrape_hit_has_no_service_cost)
     await r.record_async("handler_skips_download_when_no_files", test_handler_skips_download_when_haiku_returns_no_files)
     await r.record_async("handler_activity_error_reraises", test_handler_execute_tool_activity_error_reraises)
 

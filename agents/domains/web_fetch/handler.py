@@ -46,6 +46,7 @@ def _safe_time() -> float:
 
 
 logger = structlog.get_logger()
+FAST_CACHE_HIT_FIELD = "_fast_cache_hit"
 
 
 def _truncate_display(value: str, max_len: int = 100) -> str:
@@ -151,8 +152,9 @@ class WebFetchManager(ToolManager):
             scrape_metadata: Dict[str, Any] = (
                 scrape_result.get("metadata", {}) if isinstance(scrape_result, dict) else {}
             )
+            scrape_cache_hit = isinstance(scrape_result, dict) and bool(scrape_result.get(FAST_CACHE_HIT_FIELD))
             service_provider = scrape_metadata.get("provider") or "Firecrawl scrape"
-            service_cost_cents = (
+            service_cost_cents = 0 if scrape_cache_hit else (
                 PARALLEL_EXTRACT_COST_CENTS if service_provider == "Parallel Extract" else FIRECRAWL_COST_CENTS
             )
 
@@ -254,7 +256,7 @@ class WebFetchManager(ToolManager):
 
             usage_dict: Dict[str, Any] = {
                 "llm": [summarizer_llm_item] if summarizer_llm_item else [],
-                "service": [{"cost_cents": service_cost_cents, "provider": service_provider}],
+                "service": [] if scrape_cache_hit else [{"cost_cents": service_cost_cents, "provider": service_provider}],
             }
             # Surface raw Haiku usage so the workflow can route claude_token_error /
             # claude_token_rotated / compute_token_used signals through _on_tokens
@@ -376,6 +378,8 @@ async def web_fetch_activity(
         stored = await fast_cache_client.cache_get(cache_key)
         if stored is not None:
             logger.info("fast_cache.web_fetch_hit", key=cache_key, url=url)
+            if isinstance(stored, dict):
+                return {**stored, FAST_CACHE_HIT_FIELD: True}
             return stored
         logger.info("fast_cache.web_fetch_miss", key=cache_key, url=url)
     elif cache_key is not None:

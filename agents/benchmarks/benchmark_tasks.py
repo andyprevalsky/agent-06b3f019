@@ -68,6 +68,9 @@ TASK_TIMEOUT_FLOORS: dict[str, int] = {
     # 40 row agents. Historical local passes are from older, narrower task
     # shapes, so do not let the dynamic cap collapse below this floor.
     "outreach-batch": 600,
+    # Mass-agent fanout is intentionally wide and prod can legitimately need
+    # more than the older dynamic history cap while children finish.
+    "test-mass-agent-run-0": 900,
 }
 
 

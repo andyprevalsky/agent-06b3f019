@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from _test_utils import (
     BlackboxResult,
@@ -156,6 +156,55 @@ async def test_manager_execute_tool_happy():
     assert first_metadata["title"] == "Searching the web for AI trends"
 
 
+async def test_manager_execute_tool_fast_cache_hit_has_no_service_cost():
+    """Fast Mode cache hits should not be billed as live Parallel searches."""
+    from tools.web_search.handler import FAST_CACHE_HIT_FIELD, WebSearchManager
+
+    calls = []
+    manager = WebSearchManager()
+    out = await manager.execute_tool(
+        execute_activity=_mock_execute(
+            calls,
+            result={
+                "results": [{"title": "cached"}],
+                "answer": "cached answer",
+                "query": "q",
+                FAST_CACHE_HIT_FIELD: True,
+            },
+        ),
+        tool_call={"query": "AI trends", "max_tokens": 1000},
+        tool_call_id="tc-1",
+        agent_id="agent-1",
+        user_id="user-1",
+    )
+
+    assert out["result"]["answer"] == "cached answer"
+    assert FAST_CACHE_HIT_FIELD not in out["result"]
+    assert out["usage"]["service"] == []
+
+    finished = [c for c in calls if c["activity"] == "post_agent_message"][-1]
+    assert "**Cost:** $0.0000" in finished["kwargs"]["args"][1]
+    assert FAST_CACHE_HIT_FIELD not in finished["kwargs"]["args"][1]
+
+
+async def test_web_search_activity_fast_cache_hit_marks_cached_result():
+    """Activity returns a cache-hit marker so the manager can skip service billing."""
+    from tools.web_search.handler import FAST_CACHE_HIT_FIELD, web_search_activity
+
+    cached = {"results": [{"title": "cached"}], "answer": "cached answer", "query": "q"}
+    with patch("tools.web_search.handler.fast_cache_client.cache_get", new=AsyncMock(return_value=cached)):
+        with patch("tools.web_search.handler.execute_search", new=AsyncMock(side_effect=AssertionError("live call"))):
+            result = await web_search_activity(
+                query="AI trends",
+                max_tokens=1000,
+                fast_mode_cache_enabled=True,
+                fast_mode_goal="goal",
+            )
+
+    assert result["answer"] == "cached answer"
+    assert result[FAST_CACHE_HIT_FIELD] is True
+
+
 async def test_manager_execute_tool_raises_on_error():
     """WebSearchManager re-raises on activity exception."""
     from tools.web_search.handler import WebSearchManager
@@ -215,6 +264,8 @@ async def run_all_tests():
     await r.record_async("ddgs_fallback", test_web_search_ddgs_fallback)
     await r.record_async("ddgs_no_api_key", test_web_search_ddgs_no_api_key)
     await r.record_async("manager_execute_tool_happy", test_manager_execute_tool_happy)
+    await r.record_async("manager_fast_cache_no_cost", test_manager_execute_tool_fast_cache_hit_has_no_service_cost)
+    await r.record_async("activity_fast_cache_marks_result", test_web_search_activity_fast_cache_hit_marks_cached_result)
     await r.record_async("manager_execute_tool_raises", test_manager_execute_tool_raises_on_error)
     await r.record_async("manager_long_query_truncates", test_manager_execute_tool_long_query_truncates)
     await r.record_async("web_search_entry_point", test_web_search_entry_point)
