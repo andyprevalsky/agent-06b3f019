@@ -120,6 +120,30 @@ def test_create_agent_action_model_injects_completion_result_only_when_requested
     assert "result" in unverified_defs["AttemptCompletionWithResultTool"]["properties"]
 
 
+def test_explore_agent_action_model_accepts_documents_grep():
+    """Explore agents must be able to search synced user documents via grep."""
+    from utils.tool_schemas import EXPLORE_AGENT_TOOLS, create_agent_action_model
+
+    assert "grep" in EXPLORE_AGENT_TOOLS
+
+    Model = create_agent_action_model(EXPLORE_AGENT_TOOLS)
+    instance = Model(
+        response="Searching synced documents",
+        tool_calls=[
+            {
+                "tool": "grep",
+                "pattern": "project",
+                "source": "documents",
+                "filters": {"document_source": "obsidian"},
+            }
+        ],
+    )
+
+    assert instance.tool_calls[0].tool == "grep"
+    assert instance.tool_calls[0].source == "documents"
+    assert instance.tool_calls[0].filters == {"document_source": "obsidian"}
+
+
 def test_planner_assignable_tools():
     """PLANNER_ASSIGNABLE_TOOLS contains expected planner-specific tool names."""
     from utils.tool_schemas import PLANNER_ASSIGNABLE_TOOLS
@@ -168,7 +192,7 @@ def test_grep_tool_schema_exact_contract():
     enum_values = set()
     for option in source_schema.get("anyOf", []):
         enum_values.update(option.get("enum", []))
-    assert enum_values == {"messages", "network", "agent_network", "transactions"}
+    assert enum_values == {"messages", "network", "agent_network", "transactions", "documents"}
 
     removed = {
         "path", "glob", "type", "output_mode", "person_id", "limit",
@@ -683,6 +707,7 @@ async def run_all_tests():
         "create_agent_action_model_injects_completion_result_only_when_requested",
         test_create_agent_action_model_injects_completion_result_only_when_requested,
     )
+    r.record("explore_agent_action_model_accepts_documents_grep", test_explore_agent_action_model_accepts_documents_grep)
     r.record("planner_assignable_tools", test_planner_assignable_tools)
     r.record("planner_response_schema_compact", test_planner_response_schema_is_compact)
     r.record("grep_tool_schema_exact_contract", test_grep_tool_schema_exact_contract)

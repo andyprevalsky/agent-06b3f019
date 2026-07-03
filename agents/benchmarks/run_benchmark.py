@@ -113,6 +113,7 @@ MINTED_AGENT_ACCOUNT_X_POST_GOAL = "Make a post on X.com that says, Hello World"
 GREP_EXPLORE_STRESS_TASK_NAME = "grep-explore-stress"
 USER_DATA_PROD_GREP_TASK_NAME = "user-data-prod-grep"
 USER_DATA_PROD_DOCUMENT_SOURCES = {"chatgpt", "claude", "apple_notes", "obsidian"}
+USER_DATA_PROD_CHECKLIST_KEYS = {"provider_validation_checklist", "provider_verification_checklist"}
 GREP_BASE_SNAPSHOT_ENV = "BENCHMARK_GREP_BASE_SNAPSHOT"
 PLAID_TRANSACTION_BENCHMARK_TASK_NAMES = {
     "plaid-transactions-monthly-spend",
@@ -765,29 +766,76 @@ def _extract_grep_document_source_filters(text: str) -> set[str]:
     return providers
 
 
+def _benchmark_message_text(msg: dict) -> str:
+    """Return message body across live API and saved-run log shapes."""
+    return str(msg.get("text") or msg.get("message") or "")
+
+
 def _validate_user_data_prod_grep_messages(messages: List[dict]) -> Optional[str]:
     """Require prod user-data benchmark grep calls to cover every provider explicitly."""
     seen_providers: set[str] = set()
+    final_providers: set[str] = set()
     matching_grep_calls = 0
-    completed_provider_agent_spawns = 0
+    completed_explore_spawns = 0
+    invalid_spawns: List[str] = []
 
     for msg in messages:
         meta = msg.get("metadata") or {}
+        for tool_call in meta.get("tool_calls") or []:
+            if tool_call.get("tool") != "spawn_agent":
+                continue
+            agent_type = tool_call.get("type")
+            if agent_type != "explore":
+                invalid_spawns.append(f"spawn_agent type={agent_type!r}")
+            if tool_call.get("output_schema"):
+                invalid_spawns.append("spawn_agent(type='explore') with output_schema")
+
+        if meta.get("toolName") == "spawn_general_purpose_agent" and meta.get("toolStatus") == "FINISHED":
+            invalid_spawns.append("spawn_general_purpose_agent")
+
         if (
-            meta.get("toolName") in {"spawn_agent", "spawn_general_purpose_agent"}
+            meta.get("toolName") == "spawn_agent"
             and meta.get("toolStatus") == "FINISHED"
             and not meta.get("subAgentId")
         ):
-            completed_provider_agent_spawns += 1
+            completed_explore_spawns += 1
+
+        completion_summary = meta.get("completionSummary") or {}
+        for output in completion_summary.get("outputs") or []:
+            if output.get("key") not in USER_DATA_PROD_CHECKLIST_KEYS:
+                continue
+            for item in output.get("value") or []:
+                if not isinstance(item, dict):
+                    continue
+                provider = str(item.get("provider") or "").strip().lower()
+                if provider not in USER_DATA_PROD_DOCUMENT_SOURCES:
+                    continue
+                filters = str(item.get("grep_filters_used") or "").lower()
+                document_path = str(item.get("document_path") or "")
+                has_prod_evidence = bool(
+                    item.get("appears_verified_from_prod_data", item.get("verified_from_prod_data"))
+                )
+                if "documents" not in filters or provider not in filters:
+                    continue
+                if has_prod_evidence and not document_path.startswith("documents/"):
+                    continue
+                final_providers.add(provider)
+
         if meta.get("toolName") != "grep" or meta.get("toolStatus") != "FINISHED":
             continue
-        text = str(msg.get("text") or "")
+        text = _benchmark_message_text(msg)
         if not _grep_message_uses_documents_source(text):
             continue
         matched = _extract_grep_document_source_filters(text) & USER_DATA_PROD_DOCUMENT_SOURCES
         if matched:
             matching_grep_calls += 1
             seen_providers.update(matched)
+
+    if invalid_spawns:
+        return (
+            "User-data prod grep must use only spawn_agent(type='explore') without output_schema. "
+            f"Invalid spawn calls: {invalid_spawns[:5]}"
+        )
 
     missing = USER_DATA_PROD_DOCUMENT_SOURCES - seen_providers
     if missing:
@@ -797,11 +845,18 @@ def _validate_user_data_prod_grep_messages(messages: List[dict]) -> Optional[str
             f"Missing: {sorted(missing)}. Seen: {sorted(seen_providers)}. "
             f"Matching grep calls: {matching_grep_calls}"
         )
-    if completed_provider_agent_spawns < 1:
+    if completed_explore_spawns < 1:
         return (
-            "User-data prod grep must complete at least one provider-agent spawn "
-            "before finalizing. Completed provider-agent spawns: "
-            f"{completed_provider_agent_spawns}"
+            "User-data prod grep must complete at least one explore spawn_agent call "
+            "before finalizing. Completed explore spawn_agent calls: "
+            f"{completed_explore_spawns}"
+        )
+    missing_final = USER_DATA_PROD_DOCUMENT_SOURCES - final_providers
+    if missing_final:
+        return (
+            "User-data prod grep final provider_validation_checklist must cite every V1 provider "
+            "with source='documents' grep filters and a prod evidence boolean. "
+            f"Missing final providers: {sorted(missing_final)}. Seen: {sorted(final_providers)}"
         )
     return None
 
