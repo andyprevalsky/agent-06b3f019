@@ -5,7 +5,7 @@ OUT_DIR="${1:-../../dist/native}"
 cd "$(dirname "$0")"
 
 ELECTRON_VERSION="$(node -p "require('../../node_modules/electron/package.json').version")"
-npx node-gyp rebuild \
+npx --yes node-gyp@10.2.0 rebuild \
   --target="$ELECTRON_VERSION" \
   --arch="$(uname -m)" \
   --dist-url=https://electronjs.org/headers \
