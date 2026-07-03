@@ -13,6 +13,8 @@
  *     |                       +--error------> [ERROR]
  *     |
  *     +--disconnect(itemId)--> [DISCONNECTING] --done--> [IDLE]
+ *     +--update(itemId)-----> [FETCHING_LINK_TOKEN]
+ *                              --Plaid Link success--> [EXCHANGING] --done--> [CONNECTED]
  *
  * OAuth-bank flow (Chase, Wells, Cap One, US Bank, Citi):
  *
@@ -25,11 +27,12 @@ import { useCallback, useEffect, useState } from 'react';
 import { usePlaidLink, type PlaidLinkOnSuccessMetadata } from 'react-plaid-link';
 
 import {
+  completePlaidUpdateModeApi,
   createPlaidLinkTokenApi,
   disconnectPlaidItemApi,
   exchangePlaidPublicTokenApi,
 } from '../api';
-import { PLAID_OAUTH_LINK_TOKEN_STORAGE_KEY } from '../config';
+import { PLAID_OAUTH_CONTEXT_STORAGE_KEY, PLAID_OAUTH_LINK_TOKEN_STORAGE_KEY } from '../config';
 import type { PlaidItem } from '../types';
 
 type ConnectState =
@@ -45,22 +48,54 @@ interface UsePlaidConnectOptions {
   onDisconnected?: (itemId: string) => void;
 }
 
+function persistPlaidOAuthContext(linkToken: string, itemId: string | null): void {
+  try {
+    window.localStorage.setItem(PLAID_OAUTH_LINK_TOKEN_STORAGE_KEY, linkToken);
+    window.localStorage.setItem(
+      PLAID_OAUTH_CONTEXT_STORAGE_KEY,
+      JSON.stringify(itemId === null ? { mode: 'create' } : { mode: 'update', itemId }),
+    );
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function clearPlaidOAuthContext(): void {
+  try {
+    window.localStorage.removeItem(PLAID_OAUTH_LINK_TOKEN_STORAGE_KEY);
+    window.localStorage.removeItem(PLAID_OAUTH_CONTEXT_STORAGE_KEY);
+  } catch {
+    // ignore storage errors
+  }
+}
+
 export function usePlaidConnect(options: UsePlaidConnectOptions = {}): {
   state: ConnectState;
   error: string | null;
   linkToken: string | null;
   connect: () => Promise<void>;
+  update: (itemId: string) => Promise<void>;
   disconnect: (itemId: string) => Promise<void>;
   ready: boolean;
 } {
   const [state, setState] = useState<ConnectState>('idle');
   const [error, setError] = useState<string | null>(null);
   const [linkToken, setLinkToken] = useState<string | null>(null);
+  const [updatingItemId, setUpdatingItemId] = useState<string | null>(null);
 
   const handleSuccess = useCallback(
     async (publicToken: string, metadata: PlaidLinkOnSuccessMetadata): Promise<void> => {
       setState('exchanging');
       try {
+        if (updatingItemId !== null) {
+          const { item } = await completePlaidUpdateModeApi(updatingItemId);
+          clearPlaidOAuthContext();
+          setUpdatingItemId(null);
+          setState('idle');
+          setLinkToken(null);
+          options.onConnected?.(item);
+          return;
+        }
         const { item } = await exchangePlaidPublicTokenApi({
           publicToken,
           metadata: {
@@ -80,11 +115,7 @@ export function usePlaidConnect(options: UsePlaidConnectOptions = {}): {
             link_session_id: metadata.link_session_id,
           },
         });
-        try {
-          window.localStorage.removeItem(PLAID_OAUTH_LINK_TOKEN_STORAGE_KEY);
-        } catch {
-          // ignore storage errors
-        }
+        clearPlaidOAuthContext();
         setState('idle');
         setLinkToken(null);
         options.onConnected?.(item);
@@ -93,7 +124,7 @@ export function usePlaidConnect(options: UsePlaidConnectOptions = {}): {
         setState('error');
       }
     },
-    [options],
+    [options, updatingItemId],
   );
 
   const { open, ready } = usePlaidLink({
@@ -108,11 +139,8 @@ export function usePlaidConnect(options: UsePlaidConnectOptions = {}): {
       } else {
         setState('idle');
       }
-      try {
-        window.localStorage.removeItem(PLAID_OAUTH_LINK_TOKEN_STORAGE_KEY);
-      } catch {
-        // ignore storage errors
-      }
+      setUpdatingItemId(null);
+      clearPlaidOAuthContext();
     },
   });
 
@@ -125,17 +153,29 @@ export function usePlaidConnect(options: UsePlaidConnectOptions = {}): {
 
   const connect = useCallback(async (): Promise<void> => {
     setError(null);
+    setUpdatingItemId(null);
     setState('fetching_link_token');
     try {
       const tokenResp = await createPlaidLinkTokenApi();
       setLinkToken(tokenResp.link_token);
-      try {
-        window.localStorage.setItem(PLAID_OAUTH_LINK_TOKEN_STORAGE_KEY, tokenResp.link_token);
-      } catch {
-        // ignore storage errors
-      }
+      persistPlaidOAuthContext(tokenResp.link_token, null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create Plaid link token');
+      setState('error');
+    }
+  }, []);
+
+  const update = useCallback(async (itemId: string): Promise<void> => {
+    setError(null);
+    setUpdatingItemId(itemId);
+    setState('fetching_link_token');
+    try {
+      const tokenResp = await createPlaidLinkTokenApi({ mode: 'update', itemId });
+      setLinkToken(tokenResp.link_token);
+      persistPlaidOAuthContext(tokenResp.link_token, itemId);
+    } catch (err) {
+      setUpdatingItemId(null);
+      setError(err instanceof Error ? err.message : 'Failed to create Plaid update token');
       setState('error');
     }
   }, []);
@@ -156,5 +196,5 @@ export function usePlaidConnect(options: UsePlaidConnectOptions = {}): {
     [options],
   );
 
-  return { state, error, linkToken, connect, disconnect, ready };
+  return { state, error, linkToken, connect, update, disconnect, ready };
 }

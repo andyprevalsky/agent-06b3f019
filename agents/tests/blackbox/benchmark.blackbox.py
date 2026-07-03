@@ -198,9 +198,12 @@ def test_fast_mode_pass_does_not_seed_timeout_history():
     from benchmarks.results import BenchmarkRun, TaskResult
 
     recorded = []
+    attempts = []
     original_record_pass = timeout_history.record_pass
+    original_record_attempt = timeout_history.record_attempt
     try:
         timeout_history.record_pass = lambda **kwargs: recorded.append(kwargs)
+        timeout_history.record_attempt = lambda **kwargs: attempts.append(kwargs)
 
         run = BenchmarkRun(suite="smoke", base_url="https://navi-j9a9.onrender.com")
         run.task_results.append(
@@ -220,8 +223,11 @@ def test_fast_mode_pass_does_not_seed_timeout_history():
         run._record_history()
     finally:
         timeout_history.record_pass = original_record_pass
+        timeout_history.record_attempt = original_record_attempt
 
     assert recorded == []
+    # ...but the attempt is still recorded in the run-stats ledger
+    assert len(attempts) == 1 and attempts[0]["fast_mode_cache_enabled"] is True
 
 
 def test_non_fast_mode_pass_still_seeds_timeout_history():
@@ -230,9 +236,12 @@ def test_non_fast_mode_pass_still_seeds_timeout_history():
     from benchmarks.results import BenchmarkRun, TaskResult
 
     recorded = []
+    attempts = []
     original_record_pass = timeout_history.record_pass
+    original_record_attempt = timeout_history.record_attempt
     try:
         timeout_history.record_pass = lambda **kwargs: recorded.append(kwargs)
+        timeout_history.record_attempt = lambda **kwargs: attempts.append(kwargs)
 
         run = BenchmarkRun(suite="smoke", base_url="https://navi-j9a9.onrender.com")
         run.task_results.append(
@@ -252,6 +261,7 @@ def test_non_fast_mode_pass_still_seeds_timeout_history():
         run._record_history()
     finally:
         timeout_history.record_pass = original_record_pass
+        timeout_history.record_attempt = original_record_attempt
 
     assert recorded == [
         {
@@ -262,6 +272,7 @@ def test_non_fast_mode_pass_still_seeds_timeout_history():
             "timestamp": run.timestamp,
         }
     ]
+    assert len(attempts) == 1 and attempts[0]["passed"] is True
 
 
 def test_minted_benchmark_cleanup_preserves_cached_agent_identity_by_default():
@@ -731,6 +742,176 @@ async def test_api_headers_honors_internal_api_key_auth():
         bench.USER_ID = original_user_id
 
 
+async def test_archive_agent_start_posts_agent_and_returns_fixture_ref():
+    """Benchmark runs capture the start fixture immediately after agent setup."""
+    import benchmarks.run_benchmark as bench
+
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"fixture": {"ref": "trace-archive/root-1/db/start.fixture.json.gz.enc"}}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, *, headers, json):
+            calls.append((self.timeout, url, headers, json))
+            return FakeResponse()
+
+    original_headers = bench._api_headers
+    original_client = bench.httpx.AsyncClient
+    try:
+        async def fake_headers():
+            return {"X-API-Key": "test-key"}
+
+        bench._api_headers = fake_headers
+        bench.httpx.AsyncClient = FakeClient
+
+        fixture_ref = await bench.archive_agent_start("http://localhost:55120", "agent-root")
+    finally:
+        bench._api_headers = original_headers
+        bench.httpx.AsyncClient = original_client
+
+    assert fixture_ref == "trace-archive/root-1/db/start.fixture.json.gz.enc"
+    assert calls == [
+        (
+            60,
+            "http://localhost:55120/api/archive/agent-start",
+            {"X-API-Key": "test-key"},
+            {"agentId": "agent-root"},
+        )
+    ]
+
+
+async def test_archive_agent_finalize_posts_task_and_returns_manifest_ref():
+    """Benchmark task completion records the durable trace bundle manifest."""
+    import benchmarks.run_benchmark as bench
+
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"manifest": {"ref": "trace-archive/root-1/manifest.json.gz.enc"}}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, *, headers, json):
+            calls.append((self.timeout, url, headers, json))
+            return FakeResponse()
+
+    original_headers = bench._api_headers
+    original_client = bench.httpx.AsyncClient
+    try:
+        async def fake_headers():
+            return {"X-API-Key": "test-key"}
+
+        bench._api_headers = fake_headers
+        bench.httpx.AsyncClient = FakeClient
+
+        manifest_ref = await bench.archive_agent_finalize(
+            "http://localhost:55120",
+            "agent-root",
+            "chat-mode",
+            force=True,
+        )
+    finally:
+        bench._api_headers = original_headers
+        bench.httpx.AsyncClient = original_client
+
+    assert manifest_ref == "trace-archive/root-1/manifest.json.gz.enc"
+    assert calls == [
+        (
+            90,
+            "http://localhost:55120/api/archive/agent-finalize",
+            {"X-API-Key": "test-key"},
+            {"rootAgentId": "agent-root", "benchmarkTaskName": "chat-mode", "force": True},
+        )
+    ]
+
+
+async def test_archive_agent_finalize_failure_is_best_effort():
+    """Archive failures should not fail the benchmark result path."""
+    import benchmarks.run_benchmark as bench
+
+    class FakeResponse:
+        status_code = 503
+        text = "archive unavailable"
+
+        def json(self):
+            raise AssertionError("json should not be called on failed archive response")
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _url, *, headers, json):
+            return FakeResponse()
+
+    original_headers = bench._api_headers
+    original_client = bench.httpx.AsyncClient
+    try:
+        async def fake_headers():
+            return {"X-API-Key": "test-key"}
+
+        bench._api_headers = fake_headers
+        bench.httpx.AsyncClient = FakeClient
+
+        assert await bench.archive_agent_finalize("http://localhost:55120", "agent-root", "chat-mode") is None
+    finally:
+        bench._api_headers = original_headers
+        bench.httpx.AsyncClient = original_client
+
+
+def test_benchmark_run_json_preserves_archive_manifest_ref():
+    """Run JSON keeps each task's archive manifest pointer for replay lookup."""
+    from benchmarks.results import BenchmarkRun, TaskResult
+
+    run = BenchmarkRun(suite="smoke", base_url="http://localhost:55120")
+    run.task_results.append(
+        TaskResult(
+            name="chat-mode",
+            passed=True,
+            agent_id="agent-root",
+            status="COMPLETED",
+            progress_score=1.0,
+            duration_seconds=4.0,
+            cost_cents=2.0,
+            message_count=3,
+            archive_manifest_ref="trace-archive/root-1/manifest.json.gz.enc",
+        )
+    )
+
+    assert run.to_dict()["tasks"][0]["archive_manifest_ref"] == "trace-archive/root-1/manifest.json.gz.enc"
+
+
 async def test_code_agent_preflight_accepts_gpt_compute_token():
     """Code-agent benchmarks preflight against the workflow compute-token route."""
     import benchmarks.run_benchmark as bench
@@ -897,56 +1078,59 @@ def test_webdecoy_biometrics_evaluator_requires_interaction_and_low_score():
     assert "ratchet" in reason.lower()
 
 
-def test_webdecoy_biometrics_evaluator_uses_exact_network_score_when_visible_is_rounded(tmp_path):
+def test_webdecoy_biometrics_evaluator_uses_exact_network_score_when_visible_is_rounded():
     """The ratchet should compare exact FCaptcha JSON, not the page's rounded display text."""
     import json
+    import tempfile
+    from pathlib import Path
 
     from benchmarks.run_benchmark import _evaluate_webdecoy_biometrics_result
 
-    network_dir = tmp_path / "recording" / "network"
-    network_dir.mkdir(parents=True)
-    body_file = network_dir / "0001_score.json"
-    body_file.write_text(
-        json.dumps(
-            {
-                "action": "form_submit",
-                "recommendation": "allow",
-                "score": 0.1559512195121951,
-                "success": True,
-            }
+    with tempfile.TemporaryDirectory() as tmp:
+        network_dir = Path(tmp) / "recording" / "network"
+        network_dir.mkdir(parents=True)
+        body_file = network_dir / "0001_score.json"
+        body_file.write_text(
+            json.dumps(
+                {
+                    "action": "form_submit",
+                    "recommendation": "allow",
+                    "score": 0.1559512195121951,
+                    "success": True,
+                }
+            )
         )
-    )
-    (network_dir / "index.json").write_text(
-        json.dumps(
-            {
-                "entries": [
-                    {
-                        "method": "POST",
-                        "url": "https://fcaptcha.webdecoy.com/api/score",
-                        "response_ts_ms": 123,
-                        "body_file": body_file.name,
-                    }
-                ]
-            }
+        (network_dir / "index.json").write_text(
+            json.dumps(
+                {
+                    "entries": [
+                        {
+                            "method": "POST",
+                            "url": "https://fcaptcha.webdecoy.com/api/score",
+                            "response_ts_ms": 123,
+                            "body_file": body_file.name,
+                        }
+                    ]
+                }
+            )
         )
-    )
 
-    data = {
-        "messages": [
-            {
-                "role": "TOOL",
-                "text": (
-                    "Visited https://webdecoy.com/product/fcaptcha-demo/. "
-                    "Clicked the checkbox mode verification control. "
-                    "Entered benchmark-human@example.com in invisible mode and clicked Submit. "
-                    "Final visible FCaptcha Risk Score: 0.16."
-                ),
-                "metadata": {"network_recording_path": str(network_dir / "index.json")},
-            }
-        ]
-    }
+        data = {
+            "messages": [
+                {
+                    "role": "TOOL",
+                    "text": (
+                        "Visited https://webdecoy.com/product/fcaptcha-demo/. "
+                        "Clicked the checkbox mode verification control. "
+                        "Entered benchmark-human@example.com in invisible mode and clicked Submit. "
+                        "Final visible FCaptcha Risk Score: 0.16."
+                    ),
+                    "metadata": {"network_recording_path": str(network_dir / "index.json")},
+                }
+            ]
+        }
 
-    assert _evaluate_webdecoy_biometrics_result(data) == (True, None)
+        assert _evaluate_webdecoy_biometrics_result(data) == (True, None)
 
 
 def test_auth_bundle_biometrics_gate_defaults_on_and_can_be_disabled():
@@ -1203,6 +1387,7 @@ async def test_create_agent_uses_goal_override_when_env_set():
             os.environ["BENCHMARK_GOAL_OVERRIDE"] = original_env
 
     assert bodies[0]["goal"] == "Override benchmark goal"
+    assert "model" not in bodies[0]
 
 
 def test_keep_failed_agents_only_preserves_failures():
@@ -1556,7 +1741,7 @@ def test_build_smoke_memory_summary_flags_growth_and_playwright_driver():
         "playwright_driver_rss_mb": 120.0,
     }
 
-    summary = _build_smoke_memory_summary(before, after)
+    summary = _build_smoke_memory_summary(before, after, platform_name="linux")
 
     assert summary["growth_mb"] == 400.0
     assert any("RSS grew" in f for f in summary["failures"])
@@ -1584,6 +1769,121 @@ def test_build_smoke_memory_summary_passes_stable_worker():
 
     assert summary["growth_mb"] == 50.0
     assert summary["failures"] == []
+
+
+def test_build_smoke_memory_summary_skips_darwin_growth_without_allocator_trim():
+    """macOS RSS growth is a warning when allocator pressure relief cannot trim arenas."""
+    from benchmarks.run_benchmark import _build_smoke_memory_summary
+
+    before = {
+        "available": True,
+        "total_rss_mb": 300.0,
+        "playwright_driver_count": 0,
+        "playwright_driver_rss_mb": 0.0,
+    }
+    after = {
+        "available": True,
+        "total_rss_mb": 700.0,
+        "playwright_driver_count": 0,
+        "playwright_driver_rss_mb": 0.0,
+    }
+
+    summary = _build_smoke_memory_summary(
+        before,
+        after,
+        baseline={"after": {"allocator_trimmed": False}},
+        platform_name="darwin",
+    )
+
+    assert summary["thresholds"]["growth_enforced"] is False
+    assert summary["failures"] == []
+    assert "RSS grew" in summary["growth_warning"]
+
+
+def test_build_smoke_memory_summary_enforces_linux_growth():
+    """Linux/glibc smoke keeps the RSS growth ratchet enforced."""
+    from benchmarks.run_benchmark import _build_smoke_memory_summary
+
+    before = {
+        "available": True,
+        "total_rss_mb": 300.0,
+        "playwright_driver_count": 0,
+        "playwright_driver_rss_mb": 0.0,
+    }
+    after = {
+        "available": True,
+        "total_rss_mb": 700.0,
+        "playwright_driver_count": 0,
+        "playwright_driver_rss_mb": 0.0,
+    }
+
+    summary = _build_smoke_memory_summary(
+        before,
+        after,
+        baseline={"after": {"allocator_trimmed": False}},
+        platform_name="linux",
+    )
+
+    assert summary["thresholds"]["growth_enforced"] is True
+    assert any("RSS grew" in failure for failure in summary["failures"])
+
+
+def test_local_worker_health_url_prefers_explicit_smoke_url():
+    """Smoke memory warmup uses the explicit health URL when the harness provides it."""
+    import os
+
+    from benchmarks.run_benchmark import _local_worker_health_url
+
+    original = os.environ.get("SMOKE_HEALTH_URL")
+    try:
+        os.environ["SMOKE_HEALTH_URL"] = "http://localhost:55132/"
+        assert _local_worker_health_url("http://localhost:55130") == "http://localhost:55132"
+    finally:
+        if original is None:
+            os.environ.pop("SMOKE_HEALTH_URL", None)
+        else:
+            os.environ["SMOKE_HEALTH_URL"] = original
+
+
+def test_local_worker_health_url_derives_from_backend_port():
+    """Local smoke memory warmup pairs the worker health port with the backend port."""
+    import os
+
+    from benchmarks.run_benchmark import _local_worker_health_url
+
+    original = os.environ.pop("SMOKE_HEALTH_URL", None)
+    try:
+        assert _local_worker_health_url("http://localhost:55130") == "http://localhost:55132"
+        assert _local_worker_health_url("https://navi-j9a9.onrender.com") is None
+    finally:
+        if original is not None:
+            os.environ["SMOKE_HEALTH_URL"] = original
+
+
+def test_benchmark_memory_baseline_endpoint_is_guarded():
+    """Worker memory warmup endpoint is unavailable unless benchmark mode enables it."""
+    import os
+
+    import health_server
+
+    original_env = os.environ.pop("ENABLE_BENCHMARK_MEMORY_BASELINE", None)
+    original_baseline = health_server._benchmark_memory_baseline
+    health_server._benchmark_memory_baseline = lambda: {"ok": True}
+    try:
+        with health_server.app.test_client() as client:
+            disabled = client.post("/benchmark/memory-baseline")
+            assert disabled.status_code == 404
+
+            os.environ["ENABLE_BENCHMARK_MEMORY_BASELINE"] = "1"
+            enabled = client.post("/benchmark/memory-baseline")
+            assert enabled.status_code == 200
+            assert enabled.get_json() == {"ok": True}
+    finally:
+        health_server._benchmark_memory_baseline = original_baseline
+        if original_env is None:
+            os.environ.pop("ENABLE_BENCHMARK_MEMORY_BASELINE", None)
+        else:
+            os.environ["ENABLE_BENCHMARK_MEMORY_BASELINE"] = original_env
 
 
 def test_logical_tool_counts_ignore_progress_messages():
@@ -1710,6 +2010,190 @@ def test_tool_count_expectations_support_minimums_and_forbidden_tools():
     )
 
 
+def test_user_data_prod_grep_requires_all_provider_filters():
+    """Prod user-data benchmark cannot pass with generic document grep calls."""
+    from benchmarks.run_benchmark import _validate_user_data_prod_grep_messages
+
+    def grep_msg(provider: str, *, body_field: str = "text") -> dict:
+        return {
+            body_field: (
+                "**Params Passed:**\n\n"
+                "- **pattern**: project\n"
+                "- **source**: documents\n"
+                "- **filters**: {\n"
+                f'  "document_source": "{provider}"\n'
+                "}\n\n"
+                "**Result:**\n\n**Grep Matches:** 1 shown / 1 total"
+            ),
+            "metadata": {
+                "toolName": "grep",
+                "toolStatus": "FINISHED",
+                "toolCallId": f"grep-{provider}",
+            },
+        }
+
+    def final_summary_msg(
+        *,
+        checklist_key: str = "provider_validation_checklist",
+        verified_key: str = "appears_verified_from_prod_data",
+    ) -> dict:
+        return {
+            "metadata": {
+                "completionSummary": {
+                    "outputs": [
+                        {
+                            "key": checklist_key,
+                            "value": [
+                                {
+                                    "provider": "chatgpt",
+                                    "grep_filters_used": 'source="documents", filters.document_source="chatgpt"',
+                                    "exact_evidence_snippet": "no synced document evidence",
+                                    "document_path": "none",
+                                    verified_key: False,
+                                },
+                                {
+                                    "provider": "claude",
+                                    "grep_filters_used": 'source="documents", filters.document_source="claude"',
+                                    "exact_evidence_snippet": "goal",
+                                    "document_path": "documents/claude/session.json",
+                                    verified_key: True,
+                                },
+                                {
+                                    "provider": "apple_notes",
+                                    "grep_filters_used": 'source="documents", filters.document_source="apple_notes"',
+                                    "exact_evidence_snippet": "project",
+                                    "document_path": "documents/apple_notes/Apple Note/apple-notes:1",
+                                    verified_key: True,
+                                },
+                                {
+                                    "provider": "obsidian",
+                                    "grep_filters_used": 'source="documents", filters.document_source="obsidian"',
+                                    "exact_evidence_snippet": "tool",
+                                    "document_path": "documents/obsidian/vault/note.md",
+                                    verified_key: True,
+                                },
+                            ],
+                        }
+                    ]
+                }
+            }
+        }
+
+    assert (
+        _validate_user_data_prod_grep_messages(
+            [
+                {
+                    "metadata": {
+                        "toolName": "spawn_agent",
+                        "toolStatus": "FINISHED",
+                        "toolCallId": "spawn-explore",
+                    },
+                },
+                grep_msg("chatgpt"),
+                grep_msg("claude"),
+                grep_msg("apple_notes"),
+                grep_msg("obsidian"),
+                final_summary_msg(),
+            ]
+        )
+        is None
+    )
+
+    assert (
+        _validate_user_data_prod_grep_messages(
+            [
+                {
+                    "metadata": {
+                        "toolName": "spawn_agent",
+                        "toolStatus": "FINISHED",
+                        "toolCallId": "spawn-explore",
+                    },
+                },
+                grep_msg("chatgpt", body_field="message"),
+                grep_msg("claude", body_field="message"),
+                grep_msg("apple_notes", body_field="message"),
+                grep_msg("obsidian", body_field="message"),
+                final_summary_msg(
+                    checklist_key="provider_verification_checklist",
+                    verified_key="verified_from_prod_data",
+                ),
+            ]
+        )
+        is None
+    )
+
+    failure = _validate_user_data_prod_grep_messages(
+        [
+            {
+                "text": (
+                    "**Params Passed:**\n\n"
+                    "- **pattern**: project\n"
+                    "- **source**: documents\n\n"
+                    "**Result:**\n\n**Grep Matches:** 4 shown / 4 total"
+                ),
+                "metadata": {
+                    "toolName": "grep",
+                    "toolStatus": "FINISHED",
+                    "toolCallId": "grep-generic",
+                },
+            }
+        ]
+    )
+    assert failure is not None
+    assert "filters.document_source" in failure
+    assert "chatgpt" in failure
+    assert "obsidian" in failure
+
+    no_spawn_failure = _validate_user_data_prod_grep_messages(
+        [
+            grep_msg("chatgpt"),
+            grep_msg("claude"),
+            grep_msg("apple_notes"),
+            grep_msg("obsidian"),
+            final_summary_msg(),
+        ]
+    )
+    assert no_spawn_failure is not None
+    assert "explore spawn_agent" in no_spawn_failure
+
+    wrong_spawn_failure = _validate_user_data_prod_grep_messages(
+        [
+            {
+                "metadata": {
+                    "toolName": "spawn_general_purpose_agent",
+                    "toolStatus": "FINISHED",
+                    "toolCallId": "spawn-general",
+                },
+            },
+            grep_msg("chatgpt"),
+            grep_msg("claude"),
+            grep_msg("apple_notes"),
+            grep_msg("obsidian"),
+            final_summary_msg(),
+        ]
+    )
+    assert wrong_spawn_failure is not None
+    assert "spawn_general_purpose_agent" in wrong_spawn_failure
+
+    no_final_failure = _validate_user_data_prod_grep_messages(
+        [
+            {
+                "metadata": {
+                    "toolName": "spawn_agent",
+                    "toolStatus": "FINISHED",
+                    "toolCallId": "spawn-explore",
+                },
+            },
+            grep_msg("chatgpt"),
+            grep_msg("claude"),
+            grep_msg("apple_notes"),
+            grep_msg("obsidian"),
+        ]
+    )
+    assert no_final_failure is not None
+    assert "provider_validation_checklist" in no_final_failure
+
+
 def test_parallel_tool_calls_smoke_requires_explore_sub_agents():
     """The parallel search smoke should exercise execute-phase explore fanout."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -1722,6 +2206,20 @@ def test_parallel_tool_calls_smoke_requires_explore_sub_agents():
     assert "explore sub-agents" in task.prompt
     assert "spawn_agent" not in task.forbidden_tools
     assert "spawn_general_purpose_agent" in task.forbidden_tools
+
+
+def test_user_data_prod_grep_prompt_avoids_nested_agent_instruction():
+    """Prod user-data task should not tell provider agents to spawn more agents."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("user-data-prod-grep")
+
+    assert task.min_tool_counts == {"grep": 4}
+    assert 'spawn_agent with type="explore"' in task.prompt
+    assert 'Do not use type="general_purpose"' in task.prompt
+    assert "output_schema" in task.prompt
+    assert "must call grep directly four times" in task.prompt
+    assert "exactly one" not in task.prompt.lower()
 
 
 def test_spawn_sub_agents_smoke_forbids_browser_and_code_detours():
@@ -1990,6 +2488,185 @@ def test_phone_auto_approval_requires_active_callee_number():
 
     assert _phone_approval_matches_callee(task, {"question": "Make a phone call to +1 (415) 555-0123?"})
     assert not _phone_approval_matches_callee(task, {"question": "Make a phone call to +1 (650) 555-0123?"})
+def test_unified_catalog_validates_and_covers_all_runner_kinds():
+    """tasks.json is the ONE catalog: valid contract, agent + vitest entries, holding set split."""
+    from benchmarks.long_horizon import EVALUATION_METHODS, validate_catalog
+
+    tasks = validate_catalog()
+
+    assert len(tasks) >= 36
+    statuses = {(t.get("runner", "agent"), t.get("status", "ready")) for t in tasks}
+    assert ("agent", "ready") in statuses
+    assert ("agent", "incomplete") in statuses
+    assert ("vitest", "ready") in statuses
+    methods = {e["method"] for t in tasks for e in t.get("evaluators", [])}
+    assert methods == EVALUATION_METHODS
+    # Enriched long-horizon migrations carry the full environment contract
+    with_env = [t for t in tasks if t.get("environment")]
+    assert len(with_env) >= 5
+    for t in with_env:
+        assert t["environment"]["mode"] in {"synthetic", "live", "hybrid"}
+        assert "db_fixtures" in t["environment"]
+        assert "base_images" in t["environment"]
+
+
+def test_unified_catalog_delineates_bench_axes():
+    """Every task declares its bench: pipeline-e2e (plumbing) vs rose-bench (capability).
+
+    Rose Bench entries are harness-INDEPENDENT: fixture + prompt + evaluators
+    must be portable to any harness (e.g. swap in Claude Code and measure).
+    """
+    from benchmarks.long_horizon import TASK_BENCHES, validate_catalog
+
+    tasks = validate_catalog()
+    by_name = {t["name"]: t for t in tasks}
+
+    assert all(t.get("bench") in TASK_BENCHES for t in tasks)
+    rose = {t["name"] for t in tasks if t["bench"] == "rose-bench"}
+    # Founder-labeled anchors of each axis (2026-07-02)
+    assert {"test-mass-agent-run-0", "browser-agent", "job-applications"} <= rose
+    for name in ("chat-mode", "browser-smoke", "spawn-sub-agents", "single-creator-arm", "cache-coverage"):
+        assert by_name[name]["bench"] == "pipeline-e2e"
+    # Live capability eval keeps its live environment contract
+    live = by_name["browser-agent"]
+    assert live["environment"]["mode"] == "live"
+    assert live["environment"]["db_fixtures"] == []
+    assert live["environment"]["live_targets"] == ["https://www.amazon.com"]
+
+
+def test_unified_catalog_supports_multiple_evaluators_per_eval():
+    """The contract allows combining deterministic checks with an agentic judge."""
+    from benchmarks.long_horizon import validate_task_contract
+
+    validate_task_contract(
+        {
+            "name": "contract-fixture",
+            "bench": "rose-bench",
+            "environment": {
+                "mode": "synthetic",
+                "db_fixtures": ["digital_twin_store_v1"],
+                "base_images": [],
+                "services": ["synthetic_store"],
+                "secrets": [],
+                "live_targets": [],
+                "context_notes": "contract fixture",
+            },
+            "evaluators": [
+                {
+                    "id": "db",
+                    "method": "static_check",
+                    "criteria": ["one confirmed order"],
+                    "checks": [{"type": "db_row_count", "table": "orders", "expected": 1}],
+                },
+                {
+                    "id": "judge",
+                    "method": "agentic_llm_judge",
+                    "criteria": ["qualifying purchase completed"],
+                    "judge_prompt": "Inspect the transcript and order DB.",
+                },
+            ],
+        }
+    )
+
+
+def test_suite_selection_excludes_incomplete_and_external_entries():
+    """Suite runs execute only ready agent evals; incomplete + vitest entries are catalogued but skipped."""
+    from benchmarks.benchmark_tasks import all_tasks, suite_tasks
+
+    suite_names = {t.name for t in suite_tasks()}
+    all_names = {t.name for t in all_tasks()}
+
+    assert "wait-for-trigger" in all_names and "wait-for-trigger" not in suite_names
+    assert "raise-my-round" not in all_names
+    assert "smoke-backend-claude-code" in all_names and "smoke-backend-claude-code" not in suite_names
+    # Main added three ready Plaid transaction benchmarks during this branch.
+    assert "load-test-sias" in suite_names
+    assert "browser-agent" in suite_names
+    assert {
+        "user-data-prod-grep",
+        "plaid-transactions-monthly-spend",
+        "plaid-transactions-doordash-count",
+        "plaid-transactions-dead-subscriptions",
+        "phone-call-client-intake",
+        "phone-call-payment",
+    } <= suite_names
+    assert len(suite_names) == 34
+
+
+def test_every_task_has_base_image_fixture_by_default():
+    """Every eval runs on a reproducible base image; undeclared environments inherit the default."""
+    from benchmarks.benchmark_tasks import all_tasks
+    from benchmarks.fixtures import BASE_IMAGES, DEFAULT_BASE_IMAGE
+
+    assert DEFAULT_BASE_IMAGE in BASE_IMAGES
+    for t in all_tasks():
+        assert t.environment is not None, f"{t.name}: no effective environment"
+        assert t.environment.get("base_images"), f"{t.name}: no base image fixture"
+    # Tasks that don't declare an environment inherit the default base image verbatim
+    by_name = {t.name: t for t in all_tasks()}
+    assert by_name["chat-mode"].environment["base_images"] == [DEFAULT_BASE_IMAGE]
+    # Declared environments with empty base_images also inherit it
+    assert by_name["load-test-sias"].environment["base_images"] == [DEFAULT_BASE_IMAGE]
+
+
+def test_tag_slices_still_resolve():
+    """Semantic tag slices (e.g. browser auth suite) survive catalog changes."""
+    from benchmarks.benchmark_tasks import get_tasks_by_tag
+
+    for tag, minimum in {
+        "browser": 8,
+        "auth": 2,
+        "auth-anon": 2,
+        "auth-cookie": 1,
+        "smoke": 5,
+        "outreach": 3,
+        "attachment": 5,
+        "for-each": 4,
+        "claude-code": 3,
+        "payment": 1,
+        "load-test": 1,
+    }.items():
+        assert len(get_tasks_by_tag(tag)) >= minimum, f"tag slice '{tag}' collapsed"
+
+
+def test_history_ledger_task_names_still_exist_in_catalog():
+    """History-orphan guard: renaming a catalog task orphans its pass ledger + p99 baselines.
+
+    Every task name ever recorded in the success ledger must still exist in
+    tasks.json. If this fails, a task was renamed or deleted — restore the name
+    (CLAUDE.md "Eval Suite": task name is the cross-store primary key).
+    """
+    import json as _json
+    from pathlib import Path
+
+    from benchmarks.benchmark_tasks import all_tasks
+
+    ledger = Path(__file__).resolve().parents[2] / "benchmarks" / "history" / "task_durations.jsonl"
+    if not ledger.exists() or ledger.stat().st_size == 0:
+        return  # fresh checkout — nothing recorded yet
+    recorded = set()
+    with ledger.open() as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                recorded.add(_json.loads(line)["task"])
+    catalog_names = {t.name for t in all_tasks()}
+    orphaned = sorted(recorded - catalog_names)
+    assert not orphaned, f"History-orphaning rename/delete detected for: {orphaned}"
+
+
+def test_long_horizon_idea_bank_preserves_seed_ideas_with_safety_notes():
+    """Raw idea kernels have a home before they become runnable evals."""
+    from benchmarks.long_horizon import load_idea_bank
+
+    ideas = load_idea_bank()
+    by_id = {idea.id: idea for idea in ideas}
+
+    assert len(ideas) >= 25
+    assert by_id["black-beanie"].status == "promoted"
+    assert "Do not locate or deliver pirated" in by_id["lawful-book-access"].safety_notes
+    assert "Do not collect private personal contact info" in by_id["world-power-ranking-public"].safety_notes
+    assert "explicit approval" in by_id["create-100-person-event"].safety_notes
 
 
 async def run_all_tests():
@@ -2071,6 +2748,10 @@ async def run_all_tests():
         test_primitive_uber_welcome_evidence_uses_exact_recipient,
     )
     await r.record_async("api_headers_internal_api_key", test_api_headers_honors_internal_api_key_auth)
+    await r.record_async("archive_agent_start", test_archive_agent_start_posts_agent_and_returns_fixture_ref)
+    await r.record_async("archive_agent_finalize", test_archive_agent_finalize_posts_task_and_returns_manifest_ref)
+    await r.record_async("archive_agent_finalize_best_effort", test_archive_agent_finalize_failure_is_best_effort)
+    r.record("benchmark_run_archive_manifest_ref", test_benchmark_run_json_preserves_archive_manifest_ref)
     await r.record_async("code_agent_preflight_accepts_gpt_compute", test_code_agent_preflight_accepts_gpt_compute_token)
     await r.record_async("code_agent_preflight_rejects_missing_compute", test_code_agent_preflight_rejects_missing_compute_token)
     r.record("normalize_attention_requests", test_normalize_attention_requests_accepts_backend_contract)
@@ -2079,6 +2760,10 @@ async def run_all_tests():
     r.record(
         "webdecoy_biometrics_evaluator",
         test_webdecoy_biometrics_evaluator_requires_interaction_and_low_score,
+    )
+    r.record(
+        "webdecoy_biometrics_exact_network_score",
+        test_webdecoy_biometrics_evaluator_uses_exact_network_score_when_visible_is_rounded,
     )
     r.record(
         "auth_bundle_biometrics_gate_env",
@@ -2111,8 +2796,24 @@ async def run_all_tests():
     r.record("local_diagnostics_timeout_recorded", test_local_diagnostics_timeout_is_recorded)
     r.record("smoke_memory_summary_flags_leak", test_build_smoke_memory_summary_flags_growth_and_playwright_driver)
     r.record("smoke_memory_summary_passes", test_build_smoke_memory_summary_passes_stable_worker)
+    r.record(
+        "smoke_memory_summary_darwin_growth_warning",
+        test_build_smoke_memory_summary_skips_darwin_growth_without_allocator_trim,
+    )
+    r.record("smoke_memory_summary_linux_growth", test_build_smoke_memory_summary_enforces_linux_growth)
+    r.record("local_worker_health_url_explicit", test_local_worker_health_url_prefers_explicit_smoke_url)
+    r.record("local_worker_health_url_derived", test_local_worker_health_url_derives_from_backend_port)
+    r.record("benchmark_memory_baseline_guarded", test_benchmark_memory_baseline_endpoint_is_guarded)
     r.record("logical_tool_counts_ignore_progress", test_logical_tool_counts_ignore_progress_messages)
     r.record("tool_count_expectations", test_tool_count_expectations_support_minimums_and_forbidden_tools)
+    r.record(
+        "user_data_prod_grep_provider_filters",
+        test_user_data_prod_grep_requires_all_provider_filters,
+    )
+    r.record(
+        "user_data_prod_grep_no_nested_agent_instruction",
+        test_user_data_prod_grep_prompt_avoids_nested_agent_instruction,
+    )
     r.record(
         "parallel_tool_calls_smoke_cap",
         test_parallel_tool_calls_smoke_cap_allows_recent_fanout_tail,
@@ -2123,4 +2824,21 @@ async def run_all_tests():
     )
     r.record("parallel_tool_calls_explore_sub_agents", test_parallel_tool_calls_smoke_requires_explore_sub_agents)
     r.record("spawn_sub_agents_no_browser_code_detours", test_spawn_sub_agents_smoke_forbids_browser_and_code_detours)
+    r.record("unified_catalog_core_contract", test_unified_catalog_validates_and_covers_all_runner_kinds)
+    r.record(
+        "unified_catalog_bench_axes",
+        test_unified_catalog_delineates_bench_axes,
+    )
+    r.record(
+        "unified_catalog_multiple_evaluators",
+        test_unified_catalog_supports_multiple_evaluators_per_eval,
+    )
+    r.record(
+        "suite_selection_excludes_incomplete_external",
+        test_suite_selection_excludes_incomplete_and_external_entries,
+    )
+    r.record("every_task_has_base_image_fixture", test_every_task_has_base_image_fixture_by_default)
+    r.record("tag_slices_still_resolve", test_tag_slices_still_resolve)
+    r.record("history_ledger_no_orphaned_task_names", test_history_ledger_task_names_still_exist_in_catalog)
+    r.record("long_horizon_idea_bank", test_long_horizon_idea_bank_preserves_seed_ideas_with_safety_notes)
     return r.all_passed

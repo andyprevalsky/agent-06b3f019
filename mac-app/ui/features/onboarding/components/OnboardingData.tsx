@@ -12,7 +12,7 @@ import AtlasPasswordModal from '../../../components/AtlasPasswordModal';
 import WhatsAppQRModal from '../../../components/WhatsAppQRModal';
 import TelegramAuthModal from '../../../components/TelegramAuthModal';
 import PasskeysModal from '@/components/PasskeysModal';
-import ConnectedStatusText from '@/features/integrations/components/ConnectedStatusText';
+import ConnectedAccountChip from '@/features/integrations/components/ConnectedAccountChip';
 import DropdownIconFrame, {
   browserDropdownIconPreset,
   dropdownIconImageClassName,
@@ -917,9 +917,8 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                               className={dropdownIconImageClassName}
                             />
                           </DropdownIconFrame>
-                          <div className="flex flex-col items-start">
-                            <span className="text-sm text-foreground">{browser.name}</span>
-                            <ConnectedStatusText isConnected={isConnected} />
+                          <div className="flex min-w-0 items-center">
+                            <span className="truncate text-sm text-foreground">{browser.name}</span>
                           </div>
                         </div>
 
@@ -1006,9 +1005,8 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                     >
                       <img src={chromeIcon} alt="Chrome" className={dropdownIconImageClassName} />
                     </DropdownIconFrame>
-                    <div className="flex flex-col items-start">
-                      <span className="text-sm text-foreground">Chrome</span>
-                      <ConnectedStatusText isConnected={chromePasswordsSynced} />
+                    <div className="flex min-w-0 items-center">
+                      <span className="truncate text-sm text-foreground">Chrome</span>
                     </div>
                   </div>
 
@@ -1045,9 +1043,8 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                         className={dropdownIconImageClassName}
                       />
                     </DropdownIconFrame>
-                    <div className="flex flex-col items-start">
-                      <span className="text-sm text-foreground">ChatGPT Atlas</span>
-                      <ConnectedStatusText isConnected={atlasPasswordsSynced} />
+                    <div className="flex min-w-0 items-center">
+                      <span className="truncate text-sm text-foreground">ChatGPT Atlas</span>
                     </div>
                   </div>
 
@@ -1131,9 +1128,8 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                         />
                       </svg>
                     </DropdownIconFrame>
-                    <div className="flex flex-col items-start">
-                      <span className="text-sm text-foreground">iMessage</span>
-                      <ConnectedStatusText isConnected={iMessageSynced} />
+                    <div className="flex min-w-0 items-center">
+                      <span className="truncate text-sm text-foreground">iMessage</span>
                     </div>
                   </div>
 
@@ -1165,9 +1161,8 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                         />
                       </svg>
                     </DropdownIconFrame>
-                    <div className="flex flex-col items-start">
-                      <span className="text-sm text-foreground">WhatsApp</span>
-                      <ConnectedStatusText isConnected={whatsAppConnected} />
+                    <div className="flex min-w-0 items-center">
+                      <span className="truncate text-sm text-foreground">WhatsApp</span>
                     </div>
                   </div>
 
@@ -1200,9 +1195,8 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                         />
                       </svg>
                     </DropdownIconFrame>
-                    <div className="flex flex-col items-start">
-                      <span className="text-sm text-foreground">Telegram</span>
-                      <ConnectedStatusText isConnected={telegramConnected} />
+                    <div className="flex min-w-0 items-center">
+                      <span className="truncate text-sm text-foreground">Telegram</span>
                     </div>
                   </div>
 
@@ -1235,13 +1229,10 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                     </DropdownIconFrame>
                     <div className="flex min-w-0 flex-col">
                       <span className="text-sm text-foreground">Gmail</span>
-                      <ConnectedStatusText isConnected={connectedEmails.length > 0} />
                       {connectedEmails.length > 0 && (
-                        <div className="mt-0.5 flex min-w-0 flex-col">
+                        <div className="mt-1 flex min-w-0 flex-wrap gap-1.5">
                           {connectedEmails.map((email) => (
-                            <span key={email} className="truncate text-xs text-muted-foreground">
-                              {email}
-                            </span>
+                            <ConnectedAccountChip key={email} label={email} tone="synced" />
                           ))}
                         </div>
                       )}
@@ -1421,14 +1412,19 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                 >
                   <PlaidLogoIcon />
                 </DropdownIconFrame>
-                <div>
+                <div className="min-w-0">
                   <div className="font-medium text-sm text-foreground">Banking</div>
-                  <ConnectedStatusText isConnected={connectedBanks.length > 0} />
-                  <div className="truncate text-xs text-muted-foreground">
-                    {connectedBanks.length > 0
-                      ? connectedBanks.join(', ')
-                      : 'Connect a bank account via Plaid'}
-                  </div>
+                  {connectedBanks.length > 0 ? (
+                    <div className="mt-1 flex min-w-0 flex-wrap gap-1.5">
+                      {connectedBanks.map((bank) => (
+                        <ConnectedAccountChip key={bank} label={bank} tone="synced" />
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="truncate text-xs text-muted-foreground">
+                      Connect a bank account via Plaid
+                    </div>
+                  )}
                 </div>
               </div>
 

@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional
 
 import structlog
 
+from helpers.trace_archive import archive_json
 from helpers.tracing import current_agent_id, current_span_id
 
 logger = structlog.get_logger()
@@ -161,9 +162,18 @@ def dump_llm_context(
         if extra:
             payload["extra"] = extra
 
+        archive_ref = archive_json(
+            root_agent_id=aid,
+            path=f"llm/{dump_id}.json.gz.enc",
+            payload=payload,
+        )
+        if archive_ref:
+            payload.setdefault("archive", {})["ref"] = archive_ref["ref"]
+            payload["archive"]["metadata"] = archive_ref["metadata"]
+
         if _IS_PRODUCTION:
             if not _prod_clickhouse_dumps_enabled(aid):
-                return None
+                return str(archive_ref["ref"]) if archive_ref else None
             return _emit_clickhouse_dump_event(
                 event_name="llm.context.dumped",
                 payload=payload,
@@ -242,6 +252,14 @@ def update_llm_dump(
                 patch_payload["output"] = output
             if extra:
                 patch_payload["extra"] = extra
+            archive_ref = archive_json(
+                root_agent_id=agent_id,
+                path=f"llm-updates/{dump_id}-{int(time.time() * 1000)}-{_safe_filename_segment(str((extra or {}).get('call_site') or 'update'))}.json.gz.enc",
+                payload=patch_payload,
+            )
+            if archive_ref:
+                patch_payload.setdefault("archive", {})["ref"] = archive_ref["ref"]
+                patch_payload["archive"]["metadata"] = archive_ref["metadata"]
             _emit_clickhouse_dump_event(
                 event_name="llm.context.dump_updated",
                 payload=patch_payload,
@@ -278,6 +296,18 @@ def update_llm_dump(
             merged_extra = dict(payload.get("extra") or {})
             merged_extra.update(extra)
             payload["extra"] = merged_extra
+            call_site = str(extra.get("call_site") or payload.get("call_site") or "update")
+        else:
+            call_site = str(payload.get("call_site") or "update")
+        archive_ref = archive_json(
+            root_agent_id=str(payload.get("agent_id") or "unbound"),
+            path=f"llm-updates/{payload.get('dump_id') or dump_path.stem}-{int(time.time() * 1000)}-{_safe_filename_segment(call_site)}.json.gz.enc",
+            payload=payload,
+        )
+        if archive_ref:
+            payload.setdefault("archive_updates", []).append(
+                {"ref": archive_ref["ref"], "metadata": archive_ref["metadata"]}
+            )
         dump_path.write_text(json.dumps(payload, ensure_ascii=False, default=str, indent=2))
     except Exception as e:
         logger.warning("llm.context.dump_update_failed", path=path, error=str(e)[:200])

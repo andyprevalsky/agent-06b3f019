@@ -25,6 +25,13 @@ function excludedPoolIds(req: AuthRequest): string[] | undefined {
     : undefined;
 }
 
+function queryValue(req: AuthRequest, name: string): string | undefined {
+  const value = req.query[name];
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed === '' ? undefined : trimmed;
+}
+
 /** GET /api/integrations/compute-code/credentials/token */
 router.get(
   '/compute-code/credentials/token',
@@ -39,7 +46,13 @@ router.get(
       const result = await service.getComputeCodeToken(
         userId,
         req.headers['x-force-pool'] === 'true',
-        excludedPoolIds(req)
+        excludedPoolIds(req),
+        {
+          lineageKey: queryValue(req, 'lineageKey'),
+          agentId: queryValue(req, 'agentId'),
+          rootAgentId: queryValue(req, 'rootAgentId'),
+          fastCacheAffinityKey: queryValue(req, 'fastCacheAffinityKey'),
+        }
       );
       return res.json(result);
     } catch (error: unknown) {
@@ -48,6 +61,34 @@ router.get(
       }
       throw error;
     }
+  })
+);
+
+/** POST /api/integrations/compute-code/token/lineage-heartbeat */
+router.post(
+  '/compute-code/token/lineage-heartbeat',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    if (req.isInternal !== true) {
+      return res.status(403).json({ error: 'Internal only' });
+    }
+    const body = (req.body as Record<string, unknown> | undefined) ?? {};
+    const lineageKey = typeof body.lineageKey === 'string' ? body.lineageKey : '';
+    return res.json(await service.heartbeatComputeTokenLineage(lineageKey));
+  })
+);
+
+/** POST /api/integrations/compute-code/token/lineage-release */
+router.post(
+  '/compute-code/token/lineage-release',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    if (req.isInternal !== true) {
+      return res.status(403).json({ error: 'Internal only' });
+    }
+    const body = (req.body as Record<string, unknown> | undefined) ?? {};
+    const lineageKey = typeof body.lineageKey === 'string' ? body.lineageKey : '';
+    return res.json(await service.releaseComputeTokenLineage(lineageKey));
   })
 );
 

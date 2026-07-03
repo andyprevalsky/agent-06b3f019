@@ -17,7 +17,6 @@ import chromeIcon from '@/assets/chrome-icon.png';
 import chatgptIcon from '@/assets/chatgpt-icon.webp';
 
 import type { PasswordSyncType } from '../types';
-import ConnectedStatusText from './ConnectedStatusText';
 import DropdownIconFrame, {
   dropdownIconImageClassName,
   dropdownIconPreset,
@@ -108,9 +107,8 @@ function PasswordItemRow({
         >
           <img src={icon} alt={label} className={dropdownIconImageClassName} />
         </DropdownIconFrame>
-        <div className="flex flex-col items-start">
-          <span className="text-sm">{label}</span>
-          <ConnectedStatusText isConnected={isSynced} />
+        <div className="flex min-w-0 items-center">
+          <span className="truncate text-sm">{label}</span>
         </div>
       </div>
       <SyncItemButton isLoading={isLoading} isSynced={isSynced} onClick={onClick} />

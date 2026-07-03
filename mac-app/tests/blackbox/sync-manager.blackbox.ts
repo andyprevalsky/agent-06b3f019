@@ -82,8 +82,17 @@ vi.mock('../../main/services/claudeCredentialSync', () => ({
 }));
 
 vi.mock('../../main/services/gptCredentialSync', () => ({
+  CODEX_AUTH_PATH: '/tmp/rose-test-codex-auth.json',
   GptCredentialSync: {
     syncExistingCredentialsIfChanged: vi.fn(async () => ({ success: true })),
+  },
+}));
+
+vi.mock('../../main/services/userDataSync', () => ({
+  UserDataSync: {
+    sync: vi.fn(async () => []),
+    startRealTimeSync: vi.fn(async () => {}),
+    stopRealTimeSync: vi.fn(),
   },
 }));
 
@@ -125,6 +134,7 @@ import { CookieSync } from '../../main/services/cookieSync';
 import { BrowserStateSync } from '../../main/services/browserStateSync';
 import { ClaudeCredentialSync } from '../../main/services/claudeCredentialSync';
 import { GptCredentialSync } from '../../main/services/gptCredentialSync';
+import { UserDataSync } from '../../main/services/userDataSync';
 import { TelegramSync } from '../../main/services/messaging/platforms/telegram/TelegramSync';
 import { WhatsAppSync } from '../../main/services/messaging/platforms/whatsapp/WhatsAppSync';
 import { IMessageQueueService } from '../../main/services/IMessageQueueService';
@@ -324,6 +334,24 @@ describe('sync-manager blackbox', () => {
         1
       );
     });
+
+    it('runs startup user-data sync and realtime watchers for connected document providers', async () => {
+      vi.mocked(AuthService.getSession).mockResolvedValue(FAKE_SESSION);
+      restoreFetch = installFetchCapture({
+        '/api/integrations': integrationsResponder(['apple_notes', 'obsidian']),
+      });
+
+      await SyncManager.startAll();
+
+      expect(vi.mocked(UserDataSync.sync)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(UserDataSync.sync).mock.calls[0][0]).toEqual(
+        new Set(['apple_notes', 'obsidian'])
+      );
+      expect(vi.mocked(UserDataSync.startRealTimeSync)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(UserDataSync.startRealTimeSync).mock.calls[0][0]).toEqual(
+        new Set(['apple_notes', 'obsidian'])
+      );
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -348,6 +376,7 @@ describe('sync-manager blackbox', () => {
         vi.mocked(ClaudeCredentialSync.syncExistingCredentialsIfChanged)
       ).not.toHaveBeenCalled();
       expect(vi.mocked(GptCredentialSync.syncExistingCredentialsIfChanged)).not.toHaveBeenCalled();
+      expect(vi.mocked(UserDataSync.sync)).not.toHaveBeenCalled();
 
       // Queue polling + iMessage realtime watcher still start.
       expect(vi.mocked(IMessageQueueService.start)).toHaveBeenCalledTimes(1);
@@ -491,6 +520,7 @@ describe('sync-manager blackbox', () => {
       await SyncManager.stopAll();
 
       expect(vi.mocked(IMessageSync.stopRealTimeSync)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(UserDataSync.stopRealTimeSync)).toHaveBeenCalledTimes(1);
       expect(vi.mocked(TelegramSync.disconnect)).toHaveBeenCalledTimes(1);
       expect(vi.mocked(WhatsAppSync.disconnect)).toHaveBeenCalledTimes(1);
       expect(vi.mocked(IMessageQueueService.stop)).toHaveBeenCalledTimes(1);

@@ -15,6 +15,7 @@ from temporalio import activity
 
 from config import load_config
 from helpers.context_scope import filter_internal_subagent_messages
+from helpers.context_compaction import project_model_context_after_compaction
 from helpers.fetch_config import _fetch_agent_data_impl
 from helpers.tracing import span
 
@@ -736,6 +737,7 @@ async def poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict[
         # Use the single fetch_agent_data implementation with server-side filtering
         data = await _fetch_agent_data_impl(agent_id, since=last_checked.isoformat())
         new_messages = data.get('messages', [])
+        new_messages = project_model_context_after_compaction(new_messages)
 
         # Drop sub-agent internal work-stream rows before crossing the activity
         # boundary. Every downstream caller filters them anyway (see

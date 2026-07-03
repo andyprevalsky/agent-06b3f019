@@ -20,7 +20,7 @@
     "getmessages:all": "tsx scripts/get-messages-all.ts",
     "backfill:pricing": "tsx scripts/backfill-agent-pricing.ts",
     "test:blackbox": "bash scripts/run-blackbox-tests.sh",
-    "test:api": "bash scripts/run-blackbox-tests.sh benchmarks,data,data-coverage,data-grep",
+    "test:api": "bash scripts/run-blackbox-tests.sh benchmarks,benchmarks-test-prompts,data,data-coverage,data-grep",
     "test:blackbox:runner": "tsx src/tests/blackbox/run.ts",
     "test:blackbox:existing": "BLACKBOX_TEST_USE_EXISTING_BACKEND=1 bash scripts/run-blackbox-tests.sh",
     "test:structural": "tsx src/tests/structural/layer-deps.test.ts && tsx src/tests/structural/migration-drift.test.ts && tsx src/tests/structural/integrations-config.test.ts && tsx src/tests/structural/browser-context-nullability.test.ts",
@@ -42,6 +42,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1079.0",
     "@browserbasehq/sdk": "^2.6.0",
     "@coinbase/cdp-sdk": "^1.40.0",
     "@coinbase/x402": "^0.7.3",

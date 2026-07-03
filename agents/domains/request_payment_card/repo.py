@@ -8,6 +8,7 @@ import httpx
 from temporalio import activity
 
 from config import load_config
+from helpers.trace_archive import archive_json
 
 
 @activity.defn
@@ -24,7 +25,13 @@ async def lookup_purchase_activity(user_id: str, fingerprint: str) -> Dict[str, 
             },
         )
         response.raise_for_status()
-        return response.json()
+        result = response.json()
+        archive_json(
+            root_agent_id=user_id,
+            path=f"provider/payment/lookup/{fingerprint}.json.gz.enc",
+            payload={"request": {"user_id": user_id, "fingerprint": fingerprint}, "response": result},
+        )
+        return result
 
 
 @activity.defn
@@ -51,4 +58,10 @@ async def mint_purchase_card_activity(user_id: str, payload: Dict[str, Any]) -> 
             },
         )
         response.raise_for_status()
-        return response.json()
+        result = response.json()
+        archive_json(
+            root_agent_id=str(payload.get("agentId") or user_id),
+            path=f"provider/payment/mint/{body['fingerprint']}.json.gz.enc",
+            payload={"request": body, "response": result},
+        )
+        return result

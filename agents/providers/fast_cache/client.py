@@ -9,10 +9,14 @@ break a live run (#16).
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Optional, TypedDict
 
 import httpx
 import structlog
+
+from helpers.trace_archive import archive_json
+from helpers.tracing import current_agent_id, current_span_id
 
 from . import normalize
 
@@ -178,6 +182,8 @@ async def cache_set(
     blob_path: Optional[str] = None,
 ) -> bool:
     """Write `value` under `key`. Last write wins. Never raises."""
+    sanitized_value = normalize.strip_secrets(value)
+    _archive_cache_write(key, kind, goal_hash, sanitized_value, blob_path)
     try:
         api_url, api_key = _backend()
         resp = await _shared_client().post(
@@ -187,7 +193,7 @@ async def cache_set(
                 "key": key,
                 "kind": kind,
                 "goalHash": goal_hash,
-                "value": normalize.strip_secrets(value),
+                "value": sanitized_value,
                 "blobPath": blob_path,
             },
             timeout=_SET_TIMEOUT_S,
@@ -199,3 +205,27 @@ async def cache_set(
     except Exception as exc:
         logger.warning("fast_cache.set_error", key=key, error=str(exc))
         return False
+
+
+def _archive_cache_write(
+    key: str,
+    kind: str,
+    goal_hash: str,
+    value: Any,
+    blob_path: Optional[str],
+) -> None:
+    try:
+        archive_json(
+            root_agent_id=current_agent_id() or "unbound",
+            path=f"provider/fast-cache/{kind}/{hashlib.sha256(key.encode('utf-8')).hexdigest()}.json.gz.enc",
+            payload={
+                "key": key,
+                "kind": kind,
+                "goal_hash": goal_hash,
+                "span_id": current_span_id(),
+                "blob_path": blob_path,
+                "value": value,
+            },
+        )
+    except Exception as exc:  # cache/archive must never break provider calls
+        logger.warning("fast_cache.archive_error", key=key, kind=kind, error=str(exc)[:200])

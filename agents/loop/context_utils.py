@@ -40,10 +40,41 @@ async def poll_and_update_context(
                     pass
 
         new_msgs = filter_internal_subagent_messages(new_msgs)
+        def _message_dedupe_key(msg: Dict) -> str:
+            metadata = msg.get("metadata") or {}
+            return "|".join(
+                [
+                    str(msg.get("role") or ""),
+                    str(msg.get("timestamp") or ""),
+                    str(metadata.get("toolCallId") or ""),
+                    str(metadata.get("toolName") or ""),
+                    str(msg.get("text") or "")[:256],
+                ]
+            )
+
+        seen_message_ids = {
+            msg.get("message_id") or msg.get("id")
+            for msg in context
+            if msg.get("message_id") or msg.get("id")
+        }
+        seen_message_keys = {
+            _message_dedupe_key(msg)
+            for msg in context
+            if not (msg.get("message_id") or msg.get("id"))
+        }
         for msg in new_msgs:
-            if msg not in context:
-                annotate_with_pointer(msg)
-                context.append(msg)
+            message_id = msg.get("message_id") or msg.get("id")
+            if message_id:
+                if message_id in seen_message_ids:
+                    continue
+                seen_message_ids.add(message_id)
+            else:
+                message_key = _message_dedupe_key(msg)
+                if message_key in seen_message_keys:
+                    continue
+                seen_message_keys.add(message_key)
+            annotate_with_pointer(msg)
+            context.append(msg)
         context.sort(key=lambda x: x.get("timestamp", ""))
 
     return last_checked

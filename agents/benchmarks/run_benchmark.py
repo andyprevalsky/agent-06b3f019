@@ -41,7 +41,7 @@ import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 import httpx
@@ -86,12 +86,12 @@ from benchmarks.timeout_history import (
 from benchmarks.timeout_history import (
     summary as _history_summary,
 )
-from tests.e2e.test_helpers import (
-    authenticate,
-)
 from domains.set_plan.config import (
     PLANNER_ACTIVITY_MAX_ATTEMPTS,
     PLANNER_ACTIVITY_TIMEOUT_SECONDS,
+)
+from tests.e2e.test_helpers import (
+    authenticate,
 )
 
 # Defaults — benchmarks run against PROD by default (no local services needed)
@@ -118,7 +118,15 @@ MINTED_AGENT_ACCOUNT_TASK_NAMES = {
 }
 MINTED_AGENT_ACCOUNT_X_POST_GOAL = "Make a post on X.com that says, Hello World"
 GREP_EXPLORE_STRESS_TASK_NAME = "grep-explore-stress"
+USER_DATA_PROD_GREP_TASK_NAME = "user-data-prod-grep"
+USER_DATA_PROD_DOCUMENT_SOURCES = {"chatgpt", "claude", "apple_notes", "obsidian"}
+USER_DATA_PROD_CHECKLIST_KEYS = {"provider_validation_checklist", "provider_verification_checklist"}
 GREP_BASE_SNAPSHOT_ENV = "BENCHMARK_GREP_BASE_SNAPSHOT"
+PLAID_TRANSACTION_BENCHMARK_TASK_NAMES = {
+    "plaid-transactions-monthly-spend",
+    "plaid-transactions-doordash-count",
+    "plaid-transactions-dead-subscriptions",
+}
 MINTED_AGENT_ACCOUNT_X_AUTH_HINT = (
     "If X asks you to sign in or create an account first, use the minted email in auth options "
     "when an email address is accepted. Click controls like 'Use email instead' when they are available. "
@@ -580,13 +588,38 @@ def _apply_local_agent_source_override(agent_id: str, source: str) -> None:
     )
 
 
+def _prod_user_data_prompt_override(task: BenchmarkTask) -> str | None:
+    if task.name != USER_DATA_PROD_GREP_TASK_NAME:
+        return None
+    explicit = os.environ.get("BENCHMARK_USER_DATA_PROD_PROMPT", "").strip()
+    if explicit:
+        return explicit
+    prompt_path = REPO_ROOT / ".context" / "benchmarks" / "user-data-prod-prompts.json"
+    if not prompt_path.exists():
+        return None
+    data = json.loads(prompt_path.read_text())
+    questions = data.get("questions") if isinstance(data, dict) else None
+    if not isinstance(questions, list) or not questions:
+        raise ValueError(f"{prompt_path} must contain a non-empty questions array")
+    rendered = "\n".join(f"{idx + 1}. {str(question)}" for idx, question in enumerate(questions))
+    return (
+        task.prompt
+        + "\n\nPrivate prod verification questions from .context/benchmarks/user-data-prod-prompts.json:\n"
+        + rendered
+    )
+
+
 async def create_agent(
     base_url: str,
     task: BenchmarkTask,
 ) -> str:
     """Create a benchmark agent. Returns agent_id."""
     headers = await _api_headers()
-    goal = os.environ.get("BENCHMARK_GOAL_OVERRIDE") or task.prompt
+    goal = (
+        os.environ.get("BENCHMARK_GOAL_OVERRIDE")
+        or _prod_user_data_prompt_override(task)
+        or task.prompt
+    )
     goal = goal.replace("{frontend_url}", _frontend_url_for_benchmark(base_url))
     goal = resolve_callee_prompt(goal, getattr(task, "_callee_phone_number", ""), task.name)
     source_override = _benchmark_agent_source_override()
@@ -594,7 +627,6 @@ async def create_agent(
 
     body: dict = {
         "goal": goal,
-        "model": "rose-labs/rose-1-lite",
         "source": request_source,
         "price_limit_cents": task.price_limit_cents,
         "verifier": {
@@ -645,7 +677,43 @@ async def create_agent(
                     "write_lock_enabled override did not persist: "
                     f"expected {write_lock_enabled}, got {patched.get('write_lock_enabled')}"
                 )
-        return agent_id
+    return agent_id
+
+
+async def archive_agent_start(base_url: str, agent_id: str) -> Optional[str]:
+    try:
+        headers = await _api_headers()
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(f"{base_url}/api/archive/agent-start", headers=headers, json={"agentId": agent_id})
+        if resp.status_code != 200:
+            print(f"    ⚠ Trace archive start failed: {resp.status_code} {resp.text[:160]}")
+            return None
+        fixture = resp.json().get("fixture")
+        return fixture.get("ref") if isinstance(fixture, dict) else None
+    except Exception as exc:
+        print(f"    ⚠ Trace archive start failed: {exc}")
+        return None
+
+
+async def archive_agent_finalize(base_url: str, agent_id: str, task_name: str, *, force: bool = False) -> Optional[str]:
+    if not agent_id:
+        return None
+    try:
+        headers = await _api_headers()
+        async with httpx.AsyncClient(timeout=90) as client:
+            resp = await client.post(
+                f"{base_url}/api/archive/agent-finalize",
+                headers=headers,
+                json={"rootAgentId": agent_id, "benchmarkTaskName": task_name, "force": force},
+            )
+        if resp.status_code != 200:
+            print(f"    ⚠ Trace archive finalize failed: {resp.status_code} {resp.text[:160]}")
+            return None
+        manifest = resp.json().get("manifest")
+        return manifest.get("ref") if isinstance(manifest, dict) else None
+    except Exception as exc:
+        print(f"    ⚠ Trace archive finalize failed: {exc}")
+        return None
 
 
 async def get_agent(base_url: str, agent_id: str) -> dict:
@@ -799,6 +867,133 @@ async def count_tree_tool_calls(base_url: str, root_agent_id: str) -> Dict[str, 
         for tool_name, count in _count_logical_tool_calls_from_messages(data.get("messages", [])).items():
             counts[tool_name] = counts.get(tool_name, 0) + count
     return counts
+
+
+def _grep_message_uses_documents_source(text: str) -> bool:
+    normalized = text.lower()
+    return (
+        "- **source**: documents" in normalized
+        or '"source": "documents"' in normalized
+        or "'source': 'documents'" in normalized
+    )
+
+
+def _extract_grep_document_source_filters(text: str) -> set[str]:
+    providers: set[str] = set()
+    for match in re.finditer(r"[\"']document_source[\"']\s*:\s*[\"']([^\"']+)[\"']", text):
+        providers.add(match.group(1).strip().lower())
+    for match in re.finditer(r"document_source\s*[:=]\s*([a-z0-9_ -]+)", text, re.IGNORECASE):
+        providers.add(match.group(1).strip().lower())
+    return providers
+
+
+def _benchmark_message_text(msg: dict) -> str:
+    """Return message body across live API and saved-run log shapes."""
+    return str(msg.get("text") or msg.get("message") or "")
+
+
+def _validate_user_data_prod_grep_messages(messages: List[dict]) -> Optional[str]:
+    """Require prod user-data benchmark grep calls to cover every provider explicitly."""
+    seen_providers: set[str] = set()
+    final_providers: set[str] = set()
+    matching_grep_calls = 0
+    completed_explore_spawns = 0
+    invalid_spawns: List[str] = []
+
+    for msg in messages:
+        meta = msg.get("metadata") or {}
+        for tool_call in meta.get("tool_calls") or []:
+            if tool_call.get("tool") != "spawn_agent":
+                continue
+            agent_type = tool_call.get("type")
+            if agent_type != "explore":
+                invalid_spawns.append(f"spawn_agent type={agent_type!r}")
+            if tool_call.get("output_schema"):
+                invalid_spawns.append("spawn_agent(type='explore') with output_schema")
+
+        if meta.get("toolName") == "spawn_general_purpose_agent" and meta.get("toolStatus") == "FINISHED":
+            invalid_spawns.append("spawn_general_purpose_agent")
+
+        if (
+            meta.get("toolName") == "spawn_agent"
+            and meta.get("toolStatus") == "FINISHED"
+            and not meta.get("subAgentId")
+        ):
+            completed_explore_spawns += 1
+
+        completion_summary = meta.get("completionSummary") or {}
+        for output in completion_summary.get("outputs") or []:
+            if output.get("key") not in USER_DATA_PROD_CHECKLIST_KEYS:
+                continue
+            for item in output.get("value") or []:
+                if not isinstance(item, dict):
+                    continue
+                provider = str(item.get("provider") or "").strip().lower()
+                if provider not in USER_DATA_PROD_DOCUMENT_SOURCES:
+                    continue
+                filters = str(item.get("grep_filters_used") or "").lower()
+                document_path = str(item.get("document_path") or "")
+                has_prod_evidence = bool(
+                    item.get("appears_verified_from_prod_data", item.get("verified_from_prod_data"))
+                )
+                if "documents" not in filters or provider not in filters:
+                    continue
+                if has_prod_evidence and not document_path.startswith("documents/"):
+                    continue
+                final_providers.add(provider)
+
+        if meta.get("toolName") != "grep" or meta.get("toolStatus") != "FINISHED":
+            continue
+        text = _benchmark_message_text(msg)
+        if not _grep_message_uses_documents_source(text):
+            continue
+        matched = _extract_grep_document_source_filters(text) & USER_DATA_PROD_DOCUMENT_SOURCES
+        if matched:
+            matching_grep_calls += 1
+            seen_providers.update(matched)
+
+    if invalid_spawns:
+        return (
+            "User-data prod grep must use only spawn_agent(type='explore') without output_schema. "
+            f"Invalid spawn calls: {invalid_spawns[:5]}"
+        )
+
+    missing = USER_DATA_PROD_DOCUMENT_SOURCES - seen_providers
+    if missing:
+        return (
+            "User-data prod grep must include completed grep calls with source='documents' "
+            "and filters.document_source for every V1 provider. "
+            f"Missing: {sorted(missing)}. Seen: {sorted(seen_providers)}. "
+            f"Matching grep calls: {matching_grep_calls}"
+        )
+    if completed_explore_spawns < 1:
+        return (
+            "User-data prod grep must complete at least one explore spawn_agent call "
+            "before finalizing. Completed explore spawn_agent calls: "
+            f"{completed_explore_spawns}"
+        )
+    missing_final = USER_DATA_PROD_DOCUMENT_SOURCES - final_providers
+    if missing_final:
+        return (
+            "User-data prod grep final provider_validation_checklist must cite every V1 provider "
+            "with source='documents' grep filters and a prod evidence boolean. "
+            f"Missing final providers: {sorted(missing_final)}. Seen: {sorted(final_providers)}"
+        )
+    return None
+
+
+async def validate_user_data_prod_grep_contract(base_url: str, root_agent_id: str) -> Optional[str]:
+    agents = await get_agent_tree(base_url, root_agent_id)
+    agent_ids = [a["agent_id"] for a in agents] if agents else [root_agent_id]
+
+    messages: List[dict] = []
+    for aid in agent_ids:
+        try:
+            data = await get_agent(base_url, aid)
+        except Exception:
+            continue
+        messages.extend(data.get("messages", []))
+    return _validate_user_data_prod_grep_messages(messages)
 
 
 def _validate_tool_count_expectations(
@@ -1784,6 +1979,59 @@ def _grep_fixture_env() -> dict:
     return env
 
 
+def _plaid_transactions_fixture_env() -> dict:
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        raise RuntimeError("Local Victoria DB connection not found for Plaid transaction benchmark fixture")
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["BENCHMARK_USER_ID"] = USER_ID
+    source_database_url = load_env_var("DATABASE_URL", _BACKEND_ENV)
+    if source_database_url:
+        source_database_url = _psql_compatible_database_url(source_database_url)
+        if source_database_url != database_url:
+            env["BENCHMARK_PLAID_SOURCE_DATABASE_URL"] = source_database_url
+    return env
+
+
+def _parse_last_json_line(stdout: str) -> dict:
+    for line in reversed(stdout.splitlines()):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+    return {}
+
+
+def _run_plaid_transactions_fixture(action: str) -> dict:
+    result = subprocess.run(
+        ["npx", "tsx", "scripts/plaid-transactions-benchmark-fixture.ts", action],
+        cwd=REPO_ROOT / "back-end",
+        env=_plaid_transactions_fixture_env(),
+        capture_output=True,
+        text=True,
+        timeout=240 if action == "sync-real" else 60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Plaid transaction benchmark fixture {action} failed: "
+            f"{(result.stderr or result.stdout).strip()}"
+        )
+    return _parse_last_json_line(result.stdout)
+
+
+def _plaid_transactions_fixture_action() -> str:
+    mode = os.environ.get("BENCHMARK_PLAID_FIXTURE_MODE", "real").strip().lower()
+    if mode in ("", "real", "sync-real", "prod", "production"):
+        return "sync-real"
+    if mode in ("synthetic", "apply"):
+        return "apply"
+    raise RuntimeError("BENCHMARK_PLAID_FIXTURE_MODE must be one of real/sync-real/synthetic/apply")
+
+
 def _run_grep_fixture(action: str, *args: str) -> dict:
     result = subprocess.run(
         ["npx", "tsx", "scripts/grep-benchmark-fixture.ts", action, *args],
@@ -1912,6 +2160,117 @@ async def evaluate_grep_explore_stress(
         ]
         if any(re.search(r"^\d+:", block, re.MULTILINE) for block in no_number_blocks):
             return False, "-n:false Grep result still included line numbers"
+
+    return True, None
+
+
+async def evaluate_plaid_transaction_task(
+    task: BenchmarkTask,
+    base_url: str,
+    root_agent_id: str,
+    manifest: dict,
+) -> Tuple[bool, Optional[str]]:
+    messages = await _grep_explore_stress_tree_messages(base_url, root_agent_id)
+    grep_messages = _tool_messages(messages, "grep")
+    all_text = "\n".join(_message_text(message) for message in messages)
+    grep_text = "\n".join(_message_text(message) for message in grep_messages)
+    all_lower = all_text.lower()
+    grep_lower = grep_text.lower()
+
+    has_transaction_source = (
+        "source: transactions" in grep_lower
+        or '"source": "transactions"' in grep_lower
+        or "source: transactions" in all_lower
+        or '"source": "transactions"' in all_lower
+        or "grep:transactions" in all_lower
+    )
+    if not has_transaction_source:
+        return False, "Expected grep(source='transactions') evidence in transcript"
+
+    if task.name == "plaid-transactions-monthly-spend":
+        expected = str(
+            manifest.get("monthly_spend_sep_2025_usd")
+            or manifest.get("monthly_spend_sep_2023_usd", "")
+        )
+        if expected and expected not in all_text:
+            return False, f"Expected September 2025 spend {expected} in final/evidence text"
+        if "2025-09" not in grep_text and "2025-09-01" not in grep_text:
+            return False, "Expected September 2025 transaction evidence"
+        return True, None
+
+    if task.name == "plaid-transactions-doordash-count":
+        expected_count = manifest.get("doordash_orders_2025")
+        if expected_count is not None and str(expected_count) not in all_text:
+            return False, f"Expected DoorDash count {expected_count} in final/evidence text"
+        if "doordash" not in grep_lower and "doordash" not in all_lower:
+            return False, "Expected DoorDash transaction evidence"
+        return True, None
+
+    if task.name == "plaid-transactions-dead-subscriptions":
+        candidate_text = all_text
+        candidate_matches = list(re.finditer(
+            r"(?:refund_prep_candidates|refund prep candidates|refund targets)(.*?)(?:excluded_subscription_candidates|excluded subscription candidates|excluded candidates|$)",
+            all_text,
+            flags=re.IGNORECASE | re.DOTALL,
+        ))
+        if candidate_matches:
+            candidate_match = candidate_matches[-1]
+            candidate_text = candidate_match.group(1)
+        candidate_lower = candidate_text.lower()
+
+        expected_candidates = [
+            str(name)
+            for name in (
+                manifest.get("dead_subscription_expected_include")
+                or manifest.get("dead_subscription_candidates", [])
+            )
+            if str(name).strip()
+        ]
+        excluded_candidates = [
+            str(name)
+            for name in manifest.get("dead_subscription_expected_exclude", ["GitHub"])
+            if str(name).strip()
+        ]
+        missing = [name for name in expected_candidates if name.lower() not in candidate_lower]
+        if missing:
+            return False, "Missing expected dead subscription candidates: " + ", ".join(missing)
+        bad_exclusions = []
+        for name in excluded_candidates:
+            needle = name.lower()
+            start = 0
+            while True:
+                index = candidate_lower.find(needle, start)
+                if index < 0:
+                    break
+                window = candidate_lower[max(0, index - 140) : index + len(needle) + 140]
+                if needle == "amazon prime" and "amazon prime video" in window:
+                    start = index + len(needle)
+                    continue
+                has_exclusion_context = any(
+                    marker in window
+                    for marker in [
+                        "exclude",
+                        "excluded",
+                        "not a dead",
+                        "not dead",
+                        "active",
+                        "recent",
+                        "developer",
+                        "do not list",
+                        "should not",
+                    ]
+                )
+                has_candidate_context = any(
+                    marker in window
+                    for marker in ["refund", "cancel", "dead subscription", "unused", "candidate", "target"]
+                )
+                if has_candidate_context and not has_exclusion_context:
+                    bad_exclusions.append(name)
+                    break
+                start = index + len(needle)
+        if bad_exclusions and len(expected_candidates) > 0:
+            return False, "Excluded active/recent/developer subscriptions should not be listed as dead: " + ", ".join(bad_exclusions)
+        return True, None
 
     return True, None
 
@@ -3310,12 +3669,23 @@ async def run_single_task(
             print(f"    🍪 Ensured {bundle_count} active local CookieBundle row(s) for {auth_realm}")
 
     grep_fixture_manifest: Optional[dict] = None
+    plaid_transactions_manifest: Optional[dict] = None
+    plaid_transactions_fixture_action: Optional[str] = None
     if task.name == GREP_EXPLORE_STRESS_TASK_NAME:
         if not _is_local_base_url(base_url):
             raise RuntimeError("grep-explore-stress must run against the local benchmark stack")
         _restore_grep_frozen_base_snapshot()
         grep_fixture_manifest = _run_grep_fixture("apply")
         print("    🔎 Applied deterministic grep benchmark overlay")
+    if task.name in PLAID_TRANSACTION_BENCHMARK_TASK_NAMES:
+        if not _is_local_base_url(base_url):
+            raise RuntimeError(f"{task.name} must run against the local benchmark stack")
+        action = _plaid_transactions_fixture_action()
+        plaid_transactions_fixture_action = action
+        plaid_transactions_manifest = _run_plaid_transactions_fixture(action)
+        mode = plaid_transactions_manifest.get("fixture_mode", action)
+        tx_count = plaid_transactions_manifest.get("transaction_count", "?")
+        print(f"    💳 Prepared Plaid transaction fixture mode={mode} transactions={tx_count}")
 
     phone_callee: Optional[PhoneCalleeSession] = None
     if task.phone_persona:
@@ -3341,6 +3711,7 @@ async def run_single_task(
     start = time.time()
     start_time = datetime.now(timezone.utc)
     agent_id = ""
+    archive_manifest_ref: Optional[str] = None
     realtime_monitor: Optional[SupabaseRealtimeSmokeMonitor] = None
     realtime_tree_task: Optional[asyncio.Task] = None
 
@@ -3419,6 +3790,9 @@ async def run_single_task(
             if file_pointers:
                 await post_attachment_message(base_url, agent_id, file_pointers)
                 print(f"    📎 Posted {len(file_pointers)} file(s) as agent message")
+            start_fixture_ref = await archive_agent_start(base_url, agent_id)
+            if start_fixture_ref:
+                print(f"    🧊 Trace archive start fixture: {start_fixture_ref}")
         else:
             agent_id = await create_agent(base_url, task)
             print(f"    Agent created: {agent_id[:12]}...")
@@ -3427,6 +3801,9 @@ async def run_single_task(
                 print("    🔎 Attached seeded agent_network branch")
             await start_realtime_capture()
             await start_realtime_monitor()
+            start_fixture_ref = await archive_agent_start(base_url, agent_id)
+            if start_fixture_ref:
+                print(f"    🧊 Trace archive start fixture: {start_fixture_ref}")
 
         # Poll until done (or early-fail)
         data, approvals_triggered, approvals_resolved, early_fail_reason = await poll_agent(
@@ -3485,6 +3862,16 @@ async def run_single_task(
             if not phone_passed:
                 passed = False
                 failure_reason = phone_reason
+        if task.name in PLAID_TRANSACTION_BENCHMARK_TASK_NAMES:
+            plaid_passed, plaid_reason = await evaluate_plaid_transaction_task(
+                task,
+                base_url,
+                agent_id,
+                plaid_transactions_manifest or {},
+            )
+            if not plaid_passed:
+                passed = False
+                failure_reason = plaid_reason
 
         # Tree agent count check — counts spawn_agent-type sub-agents only
         # (excludes root and explore agents; explore agents have no output_schema)
@@ -3527,6 +3914,18 @@ async def run_single_task(
             except Exception as e:
                 print(f"    ⚠ Tool count check failed: {e}")
 
+        if task.name == USER_DATA_PROD_GREP_TASK_NAME and passed:
+            try:
+                prod_grep_contract_error = await validate_user_data_prod_grep_contract(
+                    base_url, agent_id
+                )
+                if prod_grep_contract_error:
+                    passed = False
+                    failure_reason = prod_grep_contract_error
+            except Exception as e:
+                passed = False
+                failure_reason = f"User-data prod grep contract check failed: {e}"
+
         # Final context well-formedness check
         approval_mode_blocked_on_approval = _approval_mode_allows_open_tool_context(
             task,
@@ -3564,6 +3963,9 @@ async def run_single_task(
             log_summary.append(f"{label}={len(entries)}")
         log_summary.append(f"messages={len(logs.get('messages', []))}")
         print(f"    Logs collected: {', '.join(log_summary)}")
+        archive_manifest_ref = await archive_agent_finalize(base_url, agent_id, task.name)
+        if archive_manifest_ref:
+            print(f"    🧊 Trace archive manifest: {archive_manifest_ref}")
 
         # Compute cache hit rate
         total_input = cache_read_input_tokens + cache_creation_input_tokens
@@ -3587,6 +3989,7 @@ async def run_single_task(
             fast_mode_cache_enabled=agent.get("fast_mode_cache_enabled") is True,
             context_violations=context_violation_dicts,
             logs=logs,
+            archive_manifest_ref=archive_manifest_ref,
         )
 
         icon = "✅" if passed else "❌"
@@ -3649,6 +4052,9 @@ async def run_single_task(
                 print(f"    Logs collected: {', '.join(log_summary)}")
             except Exception as log_exc:
                 print(f"    ⚠ Failed to collect cancellation logs: {log_exc}")
+            archive_manifest_ref = await archive_agent_finalize(base_url, agent_id, task.name, force=True)
+            if archive_manifest_ref:
+                print(f"    🧊 Trace archive manifest: {archive_manifest_ref}")
             try:
                 if not keep_failed_agents:
                     await delete_agent(base_url, agent_id)
@@ -3671,6 +4077,7 @@ async def run_single_task(
                 + (f" | Investigate: python agents/benchmarks/agent_latency.py {agent_id}" if agent_id else "")
             ),
             logs=logs,
+            archive_manifest_ref=archive_manifest_ref,
         )
 
     except Exception as e:
@@ -3686,6 +4093,9 @@ async def run_single_task(
                 logs = await collect_logs(agent_id, {}, start_time)
             except Exception:
                 pass
+            archive_manifest_ref = await archive_agent_finalize(base_url, agent_id, task.name, force=True)
+            if archive_manifest_ref:
+                print(f"    🧊 Trace archive manifest: {archive_manifest_ref}")
             try:
                 if not keep_failed_agents:
                     await delete_agent(base_url, agent_id)
@@ -3709,6 +4119,7 @@ async def run_single_task(
                 + " | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>"
             ),
             logs=logs,
+            archive_manifest_ref=archive_manifest_ref,
         )
     finally:
         if realtime_tree_task:
@@ -3723,6 +4134,14 @@ async def run_single_task(
                 os.unlink(tmp)
             except OSError:
                 pass
+        if (
+            plaid_transactions_fixture_action == "apply"
+            and os.environ.get("BENCHMARK_KEEP_PLAID_FIXTURE") != "1"
+        ):
+            try:
+                _run_plaid_transactions_fixture("cleanup")
+            except Exception as exc:
+                print(f"    ⚠ Failed to clean up synthetic Plaid transaction fixture: {exc}")
 
 
 # ============================================================
@@ -3734,15 +4153,30 @@ def resolve_tasks(args) -> List[BenchmarkTask]:
     """Resolve which tasks to run from CLI args."""
     if args.task:
         tasks = [get_task_by_name(args.task)]
+        if tasks[0].runner != "agent":
+            raise ValueError(
+                f"Task '{args.task}' is a {tasks[0].runner} eval — run it via "
+                f"benchmarks/run_eval_suite.py or its own test runner, not run_benchmark.py."
+            )
     elif args.suite:
         if args.suite == "all":
             tasks = all_tasks()
         elif args.suite == "auth":
             tasks = get_tasks_by_tag("auth-anon" if getattr(args, "anon", False) else "auth-cookie")
+        elif args.suite in ("rose-bench", "pipeline-e2e"):
+            # Bench axis: rose-bench = harness-independent capability evals,
+            # pipeline-e2e = harness plumbing tests. Orthogonal to tag slices.
+            tasks = [t for t in all_tasks() if t.bench == args.suite]
         else:
             tasks = get_tasks_by_tag(args.suite)
     else:
         tasks = all_tasks()
+
+    if not args.task:
+        # Suite selection only runs complete agent evals. `status == "incomplete"` entries
+        # (missing fixtures/judges) and external vitest smokes stay catalogued but are
+        # skipped; explicit --task still targets incomplete agent evals for dev iteration.
+        tasks = [t for t in tasks if t.runner == "agent" and t.status == "ready"]
 
     excluded_names: set[str] = set()
     for value in getattr(args, "exclude_task", []) or []:
@@ -3949,6 +4383,42 @@ def _memory_mb(byte_count: int) -> float:
     return round(byte_count / 1024 / 1024, 1)
 
 
+def _local_worker_health_url(base_url: str) -> str | None:
+    """Return the local worker health URL paired with a local backend URL."""
+    configured = os.environ.get("SMOKE_HEALTH_URL")
+    if configured:
+        return configured.rstrip("/")
+
+    parsed = urlparse(base_url)
+    if parsed.hostname not in ("localhost", "127.0.0.1") or parsed.port is None:
+        return None
+    return f"{parsed.scheme}://{parsed.hostname}:{parsed.port + 2}"
+
+
+async def _stabilize_local_worker_memory(base_url: str, phase: str) -> dict:
+    """Ask the local worker to warm lazy benchmark imports and collect memory."""
+    health_url = _local_worker_health_url(base_url)
+    if not health_url:
+        return {"attempted": False, "reason": "no local worker health URL"}
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(f"{health_url}/benchmark/memory-baseline")
+        if response.status_code == 404:
+            return {"attempted": True, "enabled": False, "status": response.status_code}
+        response.raise_for_status()
+        data = response.json()
+        print(
+            "  🧠 Worker memory baseline "
+            f"({phase}): imported={len(data.get('imported', []))} "
+            f"gc_collected={data.get('gc_collected', 0)}"
+        )
+        return {"attempted": True, "enabled": True, "status": response.status_code, **data}
+    except Exception as exc:
+        print(f"  ⚠ Worker memory baseline ({phase}) failed: {exc}")
+        return {"attempted": True, "enabled": False, "reason": str(exc)}
+
+
 def _sample_local_worker_memory() -> dict:
     """Return worker process-tree memory for local smoke leak detection."""
     import subprocess
@@ -4020,16 +4490,26 @@ def _sample_local_worker_memory() -> dict:
     }
 
 
-def _build_smoke_memory_summary(before: dict, after: dict) -> dict:
+def _build_smoke_memory_summary(
+    before: dict,
+    after: dict,
+    baseline: dict | None = None,
+    platform_name: str | None = None,
+) -> dict:
     """Build memory leak gate output for local smoke runs."""
+    platform_value = platform_name or sys.platform
+    allocator_trimmed = bool((baseline or {}).get("after", {}).get("allocator_trimmed"))
+    enforce_growth = platform_value != "darwin" or allocator_trimmed
     summary = {
         "enabled": True,
         "before": before,
         "after": after,
+        "baseline": baseline or {},
         "thresholds": {
             "max_growth_mb": SMOKE_MEMORY_MAX_GROWTH_MB,
             "max_end_mb": SMOKE_MEMORY_MAX_END_MB,
             "forbid_playwright_drivers": SMOKE_MEMORY_FORBID_PLAYWRIGHT_DRIVERS,
+            "growth_enforced": enforce_growth,
         },
         "failures": [],
     }
@@ -4042,9 +4522,14 @@ def _build_smoke_memory_summary(before: dict, after: dict) -> dict:
     growth_mb = round(after["total_rss_mb"] - before["total_rss_mb"], 1)
     summary["growth_mb"] = growth_mb
 
-    if growth_mb > SMOKE_MEMORY_MAX_GROWTH_MB:
+    if enforce_growth and growth_mb > SMOKE_MEMORY_MAX_GROWTH_MB:
         summary["failures"].append(
             f"worker process-tree RSS grew by {growth_mb} MB (> {SMOKE_MEMORY_MAX_GROWTH_MB} MB)"
+        )
+    elif not enforce_growth and growth_mb > SMOKE_MEMORY_MAX_GROWTH_MB:
+        summary["growth_warning"] = (
+            f"worker process-tree RSS grew by {growth_mb} MB, but RSS growth is not enforced on "
+            "macOS when allocator pressure relief cannot return freed arenas"
         )
     if after["total_rss_mb"] > SMOKE_MEMORY_MAX_END_MB:
         summary["failures"].append(
@@ -4385,6 +4870,9 @@ async def main_async(args):
         and not args.prod
         and (base_url.startswith("http://localhost") or base_url.startswith("http://127.0.0.1"))
     )
+    memory_baseline_before = (
+        await _stabilize_local_worker_memory(base_url, "before") if memory_gate_enabled else {}
+    )
     memory_before = _sample_local_worker_memory() if memory_gate_enabled else {"available": False, "reason": "disabled"}
     if memory_gate_enabled:
         if memory_before.get("available"):
@@ -4496,8 +4984,16 @@ async def main_async(args):
             print(f"  📡 Supabase realtime frame stream stopped ({realtime_total} frames captured)")
 
         if memory_gate_enabled:
+            memory_baseline_after = await _stabilize_local_worker_memory(base_url, "after")
             memory_after = _sample_local_worker_memory()
-            run.memory_summary = _build_smoke_memory_summary(memory_before, memory_after)
+            run.memory_summary = _build_smoke_memory_summary(
+                memory_before,
+                memory_after,
+                baseline={
+                    "before": memory_baseline_before,
+                    "after": memory_baseline_after,
+                },
+            )
             if memory_after.get("available"):
                 growth = run.memory_summary.get("growth_mb")
                 print(

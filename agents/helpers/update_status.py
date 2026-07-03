@@ -93,6 +93,7 @@ async def update_agent_status(
     message_count: int,
     tokens_in: int = 0,
     tokens_out: int = 0,
+    structured_response: Optional[Dict] = None,
 ) -> None:
     """
     Activity wrapper for updating agent status and metrics in the database.
@@ -109,6 +110,7 @@ async def update_agent_status(
             message_count=message_count,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
+            structured_response=structured_response,
         )
     except Exception as e:
         logger.error("Failed to update agent status", agent_id=agent_id, error=str(e))

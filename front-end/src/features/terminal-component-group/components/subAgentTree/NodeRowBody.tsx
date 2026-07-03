@@ -20,8 +20,13 @@ interface NodeRowBodyProps {
 }
 
 /**
- * Shared inner row rendering: prefix, circle, cost, output/failure chips, goal, chevron.
+ * Shared inner row rendering: prefix, circle, cost, output/failure chips, label, chevron.
  * Used by both TreeNodeRow (full tree) and LeafNodeRow (collapsed view).
+ *
+ * LABEL STATE:
+ * [STRUCTURED CANONICAL NAME] -> show creator/item name
+ * [ROW ITEM PRESENT]          -> show concise assigned item
+ * [NO ROW ITEM]               -> show original agent goal text
  */
 export function NodeRowBody({
   node,
@@ -36,7 +41,7 @@ export function NodeRowBody({
   const hasSchema = !!node.outputSchema?.fields?.length;
   const outputForChip =
     node.status === 'FAILED'
-      ? node.failureContext?.partial_structured_response || undefined
+      ? node.failureContext?.partial_structured_response || node.structuredOutput || undefined
       : node.structuredOutput;
 
   return (
@@ -105,7 +110,7 @@ function GoalText({
   goalMaxChars?: number;
   goalFlex?: boolean;
 }) {
-  const { emoji, text: rawGoalText } = extractEmoji(node.goal);
+  const { emoji, text: rawGoalText } = extractEmoji(displayGoal(node));
   const goalText =
     goalMaxChars && rawGoalText.length > goalMaxChars
       ? rawGoalText.slice(0, goalMaxChars - 3) + '...'
@@ -129,4 +134,28 @@ function GoalText({
       </span>
     </span>
   );
+}
+
+function displayGoal(node: TreeNode): string {
+  const canonicalName = node.structuredOutput?.canonical_name;
+  if (typeof canonicalName === 'string' && canonicalName.trim()) return canonicalName.trim();
+
+  const partialCanonicalName = node.failureContext?.partial_structured_response?.canonical_name;
+  if (typeof partialCanonicalName === 'string' && partialCanonicalName.trim()) {
+    return partialCanonicalName.trim();
+  }
+
+  const failedStructuredCanonicalName =
+    node.status === 'FAILED' ? node.structuredOutput?.canonical_name : undefined;
+  if (
+    typeof failedStructuredCanonicalName === 'string' &&
+    failedStructuredCanonicalName.trim()
+  ) {
+    return failedStructuredCanonicalName.trim();
+  }
+
+  const { goal } = node;
+  const rowItem = goal.match(/(?:^|\n)Row item:\s*\n([^\n]+)/);
+  if (rowItem?.[1]?.trim()) return rowItem[1].trim();
+  return goal;
 }

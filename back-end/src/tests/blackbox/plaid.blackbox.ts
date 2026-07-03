@@ -75,6 +75,17 @@ const LinkTokenResponse = z.object({
   request_id: z.string().min(1),
 });
 
+const SyncSummarySchema = z.object({
+  transactionCount: z.number().int().nonnegative(),
+  postedTransactionCount: z.number().int().nonnegative(),
+  pendingTransactionCount: z.number().int().nonnegative(),
+  removedTransactionCount: z.number().int().nonnegative(),
+  dateRange: z.object({
+    from: z.string().nullable(),
+    to: z.string().nullable(),
+  }),
+});
+
 const AccountSchema = z.object({
   id: z.string().min(1),
   plaidAccountId: z.string().min(1),
@@ -83,6 +94,7 @@ const AccountSchema = z.object({
   mask: z.string().nullable(),
   type: z.string(),
   subtype: z.string().nullable(),
+  sync: SyncSummarySchema,
 });
 
 const ItemSchema = z.object({
@@ -95,6 +107,9 @@ const ItemSchema = z.object({
   createdAt: z.string(),
   lastSyncAt: z.string().nullable(),
   disconnectedAt: z.string().nullable(),
+  sync: SyncSummarySchema.extend({
+    state: z.enum(['syncing', 'synced', 'needs_repair', 'error']),
+  }),
   accounts: z.array(AccountSchema),
 });
 
@@ -195,6 +210,12 @@ async function mintSandboxPublicToken(): Promise<string> {
   const resp = await sandboxClient.sandboxPublicTokenCreate({
     institution_id: 'ins_109508', // First Platypus Bank (Plaid sandbox)
     initial_products: [Products.Transactions],
+    options: {
+      transactions: {
+        start_date: '2024-01-01',
+        end_date: '2024-12-31',
+      },
+    },
   });
   return resp.data.public_token;
 }
@@ -202,13 +223,16 @@ async function mintSandboxPublicToken(): Promise<string> {
 async function teardown(): Promise<void> {
   if (createdAnonUserIds.size === 0) return;
   const userIds = Array.from(createdAnonUserIds);
+  const transactions = await prisma.plaidTransaction.deleteMany({
+    where: { userId: { in: userIds } },
+  });
   const accounts = await prisma.plaidAccount.deleteMany({ where: { userId: { in: userIds } } });
   const items = await prisma.plaidItem.deleteMany({ where: { userId: { in: userIds } } });
   const integrations = await prisma.integration.deleteMany({
     where: { userId: { in: userIds }, name: 'plaid' },
   });
   console.log(
-    `\nTeardown: deleted ${accounts.count} accounts, ${items.count} items, ${integrations.count} integrations`
+    `\nTeardown: deleted ${transactions.count} transactions, ${accounts.count} accounts, ${items.count} items, ${integrations.count} integrations`
   );
   createdAnonUserIds.clear();
 }
@@ -297,21 +321,30 @@ async function testExchange_happyPath_persistsItemEncrypted(): Promise<void> {
   // Token is encrypted at rest, not stored plaintext.
   const row = await prisma.plaidItem.findUnique({ where: { id: body.item.id } });
   assert(row !== null, 'PlaidItem persisted');
-  if (row !== null) {
-    assert(row.userId === userId, 'PlaidItem owned by correct user');
-    assert(row.encryptedAccessToken.length > 0, 'encryptedAccessToken not empty');
-    assert(
-      !row.encryptedAccessToken.startsWith('access-'),
-      'encryptedAccessToken is not plaintext Plaid token'
-    );
-    // Envelope structure check: base64-encoded JSON
-    const envelopeJson = Buffer.from(row.encryptedAccessToken, 'base64').toString('utf8');
-    const envelope = JSON.parse(envelopeJson) as Record<string, unknown>;
-    assert(envelope.version === 1, 'envelope version=1');
-    assert(typeof envelope.encrypted_aes_key === 'string', 'envelope has encrypted_aes_key');
-    assert(typeof envelope.iv === 'string', 'envelope has iv');
-    assert(typeof envelope.ciphertext === 'string', 'envelope has ciphertext');
-  }
+  if (row === null) return;
+  assert(row.userId === userId, 'PlaidItem owned by correct user');
+  assert(row.encryptedAccessToken.length > 0, 'encryptedAccessToken not empty');
+  assert(
+    !row.encryptedAccessToken.startsWith('access-'),
+    'encryptedAccessToken is not plaintext Plaid token'
+  );
+  // Envelope structure check: base64-encoded JSON
+  const envelopeJson = Buffer.from(row.encryptedAccessToken, 'base64').toString('utf8');
+  const envelope = JSON.parse(envelopeJson) as Record<string, unknown>;
+  assert(envelope.version === 1, 'envelope version=1');
+  assert(typeof envelope.encrypted_aes_key === 'string', 'envelope has encrypted_aes_key');
+  assert(typeof envelope.iv === 'string', 'envelope has iv');
+  assert(typeof envelope.ciphertext === 'string', 'envelope has ciphertext');
+
+  const syncedRow = await prisma.plaidItem.findUnique({ where: { id: body.item.id } });
+  assert(
+    syncedRow !== null && syncedRow.lastSyncAt !== null,
+    'exchange schedules Plaid transaction sync'
+  );
+  assert(
+    syncedRow !== null && syncedRow.errorCode === null,
+    'transaction sync completes without item error'
+  );
 }
 
 async function testExchange_idempotent(): Promise<void> {
@@ -359,6 +392,11 @@ async function testListItems_returnsOwnOnly(): Promise<void> {
   assertStatus(resA.status, 200, resA.data);
   const bodyA = assertSchema(ListItemsResponse, resA.data, 'list A');
   assert(bodyA.items.length === 1, 'user A has 1 item');
+  assert(
+    bodyA.items[0].accounts.every((account) => account.sync.transactionCount >= 0),
+    'list includes account-level sync summaries'
+  );
+  assert(bodyA.items[0].sync.transactionCount >= 0, 'list includes item-level sync summary');
 
   const resB = await request(`${BASE_URL}/api/integrations/plaid/items`, {
     headers: authHeaders(b.accessToken),
@@ -378,6 +416,24 @@ async function testDisconnect_happyPath(): Promise<void> {
   });
   assertStatus(exch.status, 200, exch.data);
   const { item } = assertSchema(ExchangeResponse, exch.data, 'exchange for disconnect');
+  assert(item.accounts.length > 0, 'item has an account for disconnect transaction purge coverage');
+  await prisma.plaidTransaction.create({
+    data: {
+      userId,
+      plaidItemId: item.id,
+      plaidAccountId: item.accounts[0].id,
+      plaidTransactionId: `disconnect-purge-${item.id}`,
+      plaidAccountExternalId: item.accounts[0].plaidAccountId,
+      date: new Date('2024-01-15T00:00:00Z'),
+      name: 'Disconnect Purge Coverage Transaction',
+      amount: '12.34',
+      absoluteAmount: '12.34',
+      direction: 'OUTFLOW',
+      isoCurrencyCode: 'USD',
+      category: ['Test'],
+      pending: false,
+    },
+  });
 
   const del = await request(`${BASE_URL}/api/integrations/plaid/items/${item.id}`, {
     method: 'DELETE',
@@ -390,6 +446,14 @@ async function testDisconnect_happyPath(): Promise<void> {
   const row = await prisma.plaidItem.findUnique({ where: { id: item.id } });
   assert(row !== null && row.status === 'DISCONNECTED', 'item status is DISCONNECTED');
   assert(row !== null && row.disconnectedAt !== null, 'item disconnectedAt is set');
+  assert(
+    row !== null && row.encryptedAccessToken === 'REDACTED_AFTER_DISCONNECT',
+    'encrypted token redacted on disconnect'
+  );
+  const remainingTransactions = await prisma.plaidTransaction.count({
+    where: { userId, plaidItemId: item.id },
+  });
+  assert(remainingTransactions === 0, 'disconnect deletes synced transactions');
 
   const integ = await prisma.integration.findFirst({
     where: { userId, name: 'plaid' },

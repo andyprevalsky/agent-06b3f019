@@ -9,6 +9,8 @@ lerna-debug.log*
 **/video-to-process/*
 navi-features-master.mov
 archive
+!back-end/src/domains/archive/
+!back-end/src/domains/archive/**
 
 node_modules
 package-lock.json

@@ -24,10 +24,9 @@ Usage:
 
 import argparse
 import asyncio
-import json
 import os
 import sys
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 

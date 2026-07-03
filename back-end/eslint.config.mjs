@@ -83,10 +83,7 @@ export default tseslint.config(
             '@typescript-eslint/no-floating-promises': 'error',
             '@typescript-eslint/no-misused-promises': 'error',
             '@typescript-eslint/strict-boolean-expressions': 'error',
-            '@typescript-eslint/consistent-type-imports': [
-              'error',
-              { prefer: 'type-imports' },
-            ],
+            '@typescript-eslint/consistent-type-imports': ['error', { prefer: 'type-imports' }],
           },
         },
       ]
@@ -112,8 +109,7 @@ export default tseslint.config(
             'Hand-rolled retry loop detected. Use retryWithBackoff() or retryOnCollision() from providers/retry.ts instead.',
         },
         {
-          selector:
-            'MemberExpression[object.object.name="process"][object.property.name="env"]',
+          selector: 'MemberExpression[object.object.name="process"][object.property.name="env"]',
           message:
             'Read process.env in your domain config.ts, not here. Import the value from config.ts instead.',
         },
@@ -133,24 +129,20 @@ export default tseslint.config(
           paths: [
             {
               name: 'crypto',
-              message:
-                'Import from providers/crypto.ts instead of Node crypto directly.',
+              message: 'Import from providers/crypto.ts instead of Node crypto directly.',
             },
             {
               name: 'stripe',
-              message:
-                'Import from providers/stripe.ts instead of using Stripe directly.',
+              message: 'Import from providers/stripe.ts instead of using Stripe directly.',
               allowTypeImports: true,
             },
             {
               name: 'node-fetch',
-              message:
-                'Use global fetch() instead of node-fetch. It is available in Node 18+.',
+              message: 'Use global fetch() instead of node-fetch. It is available in Node 18+.',
             },
             {
               name: 'uuid',
-              message:
-                'Use randomUUID() from providers/crypto.ts instead of the uuid package.',
+              message: 'Use randomUUID() from providers/crypto.ts instead of the uuid package.',
             },
             {
               name: 'fs',
@@ -159,38 +151,88 @@ export default tseslint.config(
             },
             {
               name: 'openai',
-              message:
-                'Import from a provider instead of using the OpenAI SDK directly.',
+              message: 'Import from a provider instead of using the OpenAI SDK directly.',
             },
             {
               name: 'jsonwebtoken',
-              message:
-                'Import from a provider instead of using jsonwebtoken directly.',
+              message: 'Import from a provider instead of using jsonwebtoken directly.',
             },
             {
               name: '@supabase/supabase-js',
-              message:
-                'Import from a provider instead of using the Supabase client directly.',
+              message: 'Import from a provider instead of using the Supabase client directly.',
             },
             {
               name: 'node-cache',
-              message:
-                'Import from a provider instead of using node-cache directly.',
+              message: 'Import from a provider instead of using node-cache directly.',
             },
             {
               name: 'lru-cache',
-              message:
-                'Import from a provider instead of using lru-cache directly.',
+              message: 'Import from a provider instead of using lru-cache directly.',
             },
             {
               name: 'multer',
-              message:
-                'Import from a provider or configure multer in your domain config.ts.',
+              message: 'Import from a provider or configure multer in your domain config.ts.',
             },
             {
               name: 'vcards-js',
-              message:
-                'Import from a provider instead of using vcards-js directly.',
+              message: 'Import from a provider instead of using vcards-js directly.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+
+  // ── Domain config.ts files: fs allowed here — this IS the sanctioned home ──
+  // The fs restriction above says "restricted to config.ts"; this override makes
+  // that policy real instead of forcing per-line disables in every config.ts.
+  {
+    files: ['src/domains/**/config.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            {
+              name: 'crypto',
+              message: 'Import from providers/crypto.ts instead of Node crypto directly.',
+            },
+            {
+              name: 'stripe',
+              message: 'Import from providers/stripe.ts instead of using Stripe directly.',
+              allowTypeImports: true,
+            },
+            {
+              name: 'node-fetch',
+              message: 'Use global fetch() instead of node-fetch. It is available in Node 18+.',
+            },
+            {
+              name: 'uuid',
+              message: 'Use randomUUID() from providers/crypto.ts instead of the uuid package.',
+            },
+            {
+              name: 'openai',
+              message: 'Import from a provider instead of using the OpenAI SDK directly.',
+            },
+            {
+              name: 'jsonwebtoken',
+              message: 'Import from a provider instead of using jsonwebtoken directly.',
+            },
+            {
+              name: '@supabase/supabase-js',
+              message: 'Import from a provider instead of using the Supabase client directly.',
+            },
+            {
+              name: 'node-cache',
+              message: 'Import from a provider instead of using node-cache directly.',
+            },
+            {
+              name: 'lru-cache',
+              message: 'Import from a provider instead of using lru-cache directly.',
+            },
+            {
+              name: 'vcards-js',
+              message: 'Import from a provider instead of using vcards-js directly.',
             },
           ],
         },

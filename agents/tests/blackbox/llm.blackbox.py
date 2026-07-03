@@ -764,6 +764,78 @@ async def test_fetch_claude_max_token_activity_missing_token_field():
     assert result is None
 
 
+async def test_fetch_compute_token_activity_passes_lineage_params():
+    """Unified compute token fetch sends lineage metadata to backend."""
+    setup_mock(
+        {
+            "/api/integrations/compute-code/credentials/token": {
+                "status": 200,
+                "json": {
+                    "type": "gpt",
+                    "accessToken": "gpt-token",
+                    "accountId": "acct-1",
+                    "source": "pool",
+                    "poolTokenId": "pool-1",
+                    "lineageKey": "agent:a-1",
+                    "fastCacheAffinityKey": "affinity-1",
+                },
+            },
+        }
+    )
+
+    with patch("temporalio.activity.heartbeat"):
+        from helpers.llm import fetch_compute_token_activity
+
+        result = await fetch_compute_token_activity(
+            "user-1",
+            lineage_key="agent:a-1",
+            agent_id="a-1",
+            root_agent_id="root-1",
+            fast_cache_affinity_key="affinity-1",
+        )
+
+    assert result == {
+        "type": "gpt",
+        "accessToken": "gpt-token",
+        "accountId": "acct-1",
+        "source": "pool",
+        "poolTokenId": "pool-1",
+        "lineageKey": "agent:a-1",
+        "fastCacheAffinityKey": "affinity-1",
+    }
+    call = assert_captured_call(
+        url_contains="/api/integrations/compute-code/credentials/token",
+        method="GET",
+    )
+    assert "lineageKey=agent%3Aa-1" in call["url"]
+    assert "agentId=a-1" in call["url"]
+    assert "rootAgentId=root-1" in call["url"]
+    assert "fastCacheAffinityKey=affinity-1" in call["url"]
+
+
+async def test_heartbeat_compute_token_lineage_activity_posts_lineage_key():
+    """Lineage heartbeat posts the lease key without requiring a token fetch."""
+    setup_mock(
+        {
+            "/api/integrations/compute-code/token/lineage-heartbeat": {
+                "status": 200,
+                "json": {"ok": True, "updated": 1},
+            },
+        }
+    )
+
+    from helpers.llm import heartbeat_compute_token_lineage_activity
+
+    result = await heartbeat_compute_token_lineage_activity("agent:a-1")
+
+    assert result is True
+    call = assert_captured_call(
+        url_contains="/api/integrations/compute-code/token/lineage-heartbeat",
+        method="POST",
+    )
+    assert json.loads(call["requestBody"]) == {"lineageKey": "agent:a-1"}
+
+
 async def test_mark_claude_token_rate_limited_user_success():
     """mark_claude_token_rate_limited_activity POSTs with user source."""
     setup_mock(
@@ -1466,6 +1538,31 @@ async def test_build_llm_messages_skip_subagent():
     assert not any("hidden" in t for t in texts)
 
 
+async def test_build_llm_messages_skips_exclude_from_model_boundary():
+    """Cursor-only compaction boundary rows must not enter LLM prompts."""
+    from helpers.llm import build_llm_messages
+
+    context = [
+        {"role": "USER", "text": "Visible goal", "timestamp": "2026-04-05T12:00:00Z", "metadata": {}},
+        {
+            "role": "SYSTEM",
+            "text": "hidden boundary text",
+            "timestamp": "2026-04-05T12:01:00Z",
+            "metadata": {"contextCompactionBoundary": True, "excludeFromModel": True},
+        },
+        {"role": "ASSISTANT", "text": "Visible answer", "timestamp": "2026-04-05T12:02:00Z", "metadata": {}},
+    ]
+
+    with patch("helpers.llm.activity.in_activity", return_value=False):
+        msgs = await build_llm_messages(context, "sys")
+
+    rendered = "\n".join(str(m.get("content")) for m in msgs)
+    assert "Visible goal" in rendered
+    assert "Visible answer" in rendered
+    assert "hidden boundary text" not in rendered
+    assert "contextCompactionBoundary" not in rendered
+
+
 async def test_build_llm_messages_attachment_large_falls_back_to_metadata():
     """Large attachment is represented as metadata text, not multimodal content."""
     from helpers.llm import build_llm_messages
@@ -1922,6 +2019,41 @@ async def test_call_llm_verifier_streaming_parses_score():
     assert usage["pool_name"] == "rose-1-lite"
 
 
+async def test_call_llm_verifier_uses_large_output_cap():
+    """Verifier requests enough output tokens for large structured extraction."""
+    import httpx
+    from config import load_config
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import VERIFIER_MAX_TOKENS, _call_llm_verifier
+
+    seen_max_tokens = []
+    body = _sse_body(
+        [
+            {
+                "choices": [{"delta": {"content": '{"reasoning": "ok", "score": 1.0}'}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+        ]
+    )
+
+    def handler(req):
+        seen_max_tokens.append(json.loads(req.content.decode()).get("max_tokens"))
+        return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+
+    with patch("temporalio.activity.heartbeat"):
+        await _call_llm_verifier(
+            messages=[{"role": "user", "content": "x"}],
+            model="rose",
+            config=load_config(),
+        )
+
+    provider_max_tokens = [value for value in seen_max_tokens if value is not None]
+    assert provider_max_tokens
+    assert all(value == VERIFIER_MAX_TOKENS for value in provider_max_tokens)
+
+
 async def test_call_llm_verifier_dump_extra_includes_browser_recording_metadata():
     """Verifier dumps preserve browser recording metadata for the HTML renderer."""
     import httpx
@@ -2236,6 +2368,43 @@ async def test_check_progress_execute_filters_plan_context_before_llm():
     assert "original goal" not in rendered
     assert "plan explore result" not in rendered
     assert "set_plan" not in rendered
+
+
+async def test_check_progress_disables_fast_cache_read_after_verifier_parse_failure():
+    """Verifier retries should not replay the same invalid cached response repeatedly."""
+    from helpers.llm import check_progress
+    from providers.fast_cache.context import current_context, set_context
+
+    seen_contexts = []
+
+    async def fake_call_llm_verifier(messages, *_args, **_kwargs):
+        ctx = current_context()
+        seen_contexts.append((ctx.read_enabled if ctx else None, ctx.should_write if ctx else None))
+        if len(seen_contexts) == 1:
+            raise json.JSONDecodeError("bad cached verifier payload", "", 0)
+        return (
+            {"score": 1.0, "reasoning": "valid on live retry"},
+            {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        )
+
+    try:
+        with patch("temporalio.activity.heartbeat"), patch(
+            "helpers.llm._call_llm_verifier", fake_call_llm_verifier
+        ), patch("helpers.llm.asyncio.sleep", AsyncMock()), patch("helpers.llm.random.uniform", return_value=0):
+            result = await check_progress(
+                context=[{"role": "USER", "text": "finish the task", "timestamp": "2024-01-01T00:00:00Z"}],
+                verifier_system_prompt="VERIFY",
+                model="rose",
+                call_site="verifier_execute",
+                fast_mode_cache_enabled=True,
+                fast_mode_goal="finish the task",
+                fast_mode_step=2,
+            )
+    finally:
+        set_context(None)
+
+    assert result["score"] == 1.0
+    assert seen_contexts == [(True, True), (False, True)]
 
 
 async def test_check_progress_extracts_browser_recording_metadata_from_context():
@@ -4951,6 +5120,10 @@ async def run_all_tests():
     await r.record_async("build_llm_messages_assistant_merging", test_build_llm_messages_assistant_merging)
     await r.record_async("build_llm_messages_skip_subagent", test_build_llm_messages_skip_subagent)
     await r.record_async(
+        "build_llm_messages_skips_exclude_from_model_boundary",
+        test_build_llm_messages_skips_exclude_from_model_boundary,
+    )
+    await r.record_async(
         "build_llm_messages_attachment_large_falls_back_to_metadata",
         test_build_llm_messages_attachment_large_falls_back_to_metadata,
     )
@@ -4980,6 +5153,7 @@ async def run_all_tests():
         test_call_llm_structured_streaming_model_detected_callback,
     )
     await r.record_async("call_llm_verifier_streaming_parses_score", test_call_llm_verifier_streaming_parses_score)
+    await r.record_async("call_llm_verifier_uses_large_output_cap", test_call_llm_verifier_uses_large_output_cap)
     await r.record_async(
         "call_llm_verifier_dump_extra_includes_browser_recording_metadata",
         test_call_llm_verifier_dump_extra_includes_browser_recording_metadata,
@@ -4997,6 +5171,10 @@ async def run_all_tests():
     await r.record_async(
         "check_progress_accepts_completed_code_task_structured_response",
         test_check_progress_accepts_completed_code_task_structured_response,
+    )
+    await r.record_async(
+        "check_progress_disables_fast_cache_read_after_verifier_parse_failure",
+        test_check_progress_disables_fast_cache_read_after_verifier_parse_failure,
     )
     await r.record_async("call_planner_llm_activity_happy_path", test_call_planner_llm_activity_happy_path)
     # Additional llm coverage

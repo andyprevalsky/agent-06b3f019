@@ -8,6 +8,8 @@ export {
   randomBytes,
   createHash,
   createHmac,
+  createPrivateKey,
+  createPublicKey,
   timingSafeEqual,
   createCipheriv,
   createDecipheriv,

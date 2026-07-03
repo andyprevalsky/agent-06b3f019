@@ -45,6 +45,8 @@ export {
 
 export { processPasskeysUpload } from './uploadService.passkeys';
 
+export { processDocumentsUpload } from './uploadService.documents';
+
 // ---------------------------------------------------------------------------
 // Shared crypto helpers
 // ---------------------------------------------------------------------------

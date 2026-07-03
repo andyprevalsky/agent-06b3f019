@@ -49,6 +49,7 @@ import imessageRouter from './domains/imessage/routes';
 import dataRouter from './domains/data/routes';
 import benchmarksRouter from './domains/benchmarks/routes';
 import fastCacheRouter from './domains/fast-cache/routes';
+import archiveRouter from './domains/archive/routes';
 import { anthropicProxyRouter, codexProxyRouter } from './domains/fast-cache/routes.proxy';
 import { prisma } from './providers/database';
 import { createLogger } from './providers/logger';
@@ -93,6 +94,7 @@ ${SYSTEM_TOOLS.map((t) => `• ${t.name}: ${t.description}`).join('\n')}
 Pay with USDC on Base network. Credits are consumed as the agent works. Top up anytime to continue.`;
 import cron from 'node-cron';
 import { runGmailSyncJob } from './services/integrations/gmailSync';
+import { runPlaidTransactionSyncJob } from './domains/integrations/service.plaidTransactions';
 // x402 payment middleware
 import { paymentMiddleware } from 'x402-express';
 import { facilitator } from '@coinbase/x402';
@@ -144,7 +146,14 @@ app.post('/api/webhooks/agentcard', agentCardRawJson, agentCardWebhookHandler);
 app.post('/api/purchases/webhooks/agentcard', agentCardRawJson, agentCardWebhookHandler);
 
 // Middleware
-app.use(express.json({ limit: '100mb' })); // Increased to handle large encrypted payloads
+app.use(
+  express.json({
+    limit: '100mb',
+    verify: (req, _res, buf) => {
+      (req as unknown as { rawBody: string }).rawBody = buf.toString('utf-8');
+    },
+  })
+); // Increased to handle large encrypted payloads
 
 // CORS configuration - allow all localhost origins for development
 const defaultOrigins = [
@@ -493,6 +502,7 @@ app.use('/api/data', dataRouter);
 app.use('/api/purchases', purchasesRouter);
 app.use('/api/test-payment', testPaymentRouter);
 app.use('/api/fast-cache', fastCacheRouter); // Fast Mode aggressive cache get/set/purge
+app.use('/api/archive', archiveRouter); // Encrypted trace archive + scoped DB fixtures
 // Anthropic tee-proxy for the code agent. Mounted OUTSIDE /api so the injected
 // ANTHROPIC_BASE_URL = <backend>/anthropic-proxy/<goalHash> resolves to /v1/messages.
 app.use('/anthropic-proxy', anthropicProxyRouter);
@@ -555,6 +565,22 @@ app.listen(PORT, () => {
     runSync();
     cron.schedule('*/5 * * * *', runSync);
     cronLog.info('Gmail sync scheduled (every 5 minutes)');
+  }
+
+  if (process.env.DISABLE_PLAID_SYNC === '1') {
+    createLogger('Cron').info('Plaid sync disabled by DISABLE_PLAID_SYNC');
+  } else {
+    const cronLog = createLogger('Cron');
+    const runPlaidSync = () => {
+      cronLog.info('Running Plaid transaction sync job...');
+      runPlaidTransactionSyncJob().catch((err) => {
+        cronLog.error('Plaid transaction sync job error', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    };
+    cron.schedule('*/5 * * * *', runPlaidSync);
+    cronLog.info('Plaid transaction sync scheduled (every 5 minutes)');
   }
 });
 

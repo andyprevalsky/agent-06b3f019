@@ -480,7 +480,9 @@ async def test_execute_dag_tool_llm_activity_args_match_signature():
     assert cache_args[19] == "compute"
     assert cache_args[20] == "gpt-pool-1"
     assert cache_args[21] == "user-1"
-    assert cache_args[22] == "user-1"
+    assert cache_args[22] is None
+    assert cache_args[23] is None
+    assert cache_args[24] == "user-1"
 
     param_args = llm_calls[1]["args"]
     assert param_args[8] == "dag_param_populator"
@@ -495,7 +497,9 @@ async def test_execute_dag_tool_llm_activity_args_match_signature():
     assert param_args[19] == "compute"
     assert param_args[20] == "gpt-pool-1"
     assert param_args[21] == "user-1"
-    assert param_args[22] == "user-1"
+    assert param_args[22] is None
+    assert param_args[23] is None
+    assert param_args[24] == "user-1"
 
 
 async def test_execute_dag_alias_resolution_spawn_explore():

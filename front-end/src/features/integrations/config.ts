@@ -32,6 +32,7 @@ export const GMAIL_POLL_INTERVAL_MS = 2_000;
  * credentials.
  */
 export const PLAID_OAUTH_LINK_TOKEN_STORAGE_KEY = 'rose:plaid:oauth:link_token';
+export const PLAID_OAUTH_CONTEXT_STORAGE_KEY = 'rose:plaid:oauth:context';
 
 /**
  * In-app route that Plaid redirects OAuth banks back to. Must be registered in

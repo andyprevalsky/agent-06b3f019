@@ -511,8 +511,10 @@ class SpawnAgentManager(ToolManager):
                             "summary": event.message or "",
                             "error_reason": event_metadata.get("error_reason") or event.message or "unknown",
                         }
-                        partial = failure_context.get("partial_structured_response") or event_metadata.get(
-                            "partial_structured_response"
+                        partial = (
+                            event_metadata.get("structured_response")
+                            or failure_context.get("partial_structured_response")
+                            or event_metadata.get("partial_structured_response")
                         )
                         if partial is not None:
                             failed_item["partial_structured_response"] = partial
@@ -552,20 +554,10 @@ class SpawnAgentManager(ToolManager):
         child_outputs.sort(key=lambda item: item.get("index", 0))
 
         if failed_count > 0:
-            child_summary_lines = []
-            for item in child_outputs:
-                idx = item.get("index")
-                if item.get("status") == "failed":
-                    child_summary_lines.append(f"- item {idx}: failed: {item.get('error_reason', 'unknown')}")
-                elif item.get("structured_response"):
-                    child_summary_lines.append(
-                        f"- item {idx}: {json.dumps(item['structured_response'], sort_keys=True)}"
-                    )
-                elif item.get("summary"):
-                    child_summary_lines.append(f"- item {idx}: {item['summary']}")
-            message = f"{failed_count}/{len(children)} children failed"
-            if child_summary_lines:
-                message = f"{message}\n\nChild outputs:\n" + "\n".join(child_summary_lines)
+            message = (
+                f"{failed_count}/{len(children)} children failed. "
+                "See structured_response.items for per-child results."
+            )
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="for_each failed",
@@ -582,18 +574,10 @@ class SpawnAgentManager(ToolManager):
         # The per-child events use suffixed IDs (`parent:idx`) for UI routing.
         # Also yield one terminal event for the declared parent tool_call_id so
         # the next LLM context has a valid assistant tool_use -> tool_result pair.
-        child_summary_lines = []
-        for item in child_outputs:
-            idx = item.get("index")
-            structured = item.get("structured_response")
-            if structured:
-                child_summary_lines.append(f"- item {idx}: {json.dumps(structured, sort_keys=True)}")
-            elif item.get("summary"):
-                child_summary_lines.append(f"- item {idx}: {item['summary']}")
-        child_summary_text = "\n".join(child_summary_lines)
-        message = f"Completed for_each delegation for {len(child_outputs)} items."
-        if child_summary_text:
-            message = f"{message}\n\nChild outputs:\n{child_summary_text}"
+        message = (
+            f"Completed for_each delegation for {len(child_outputs)} items. "
+            "See structured_response.items for per-child results."
+        )
         yield ToolEvent(
             type=EventType.POST_MESSAGE,
             title="for_each complete",

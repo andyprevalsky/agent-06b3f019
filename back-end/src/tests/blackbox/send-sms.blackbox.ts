@@ -47,6 +47,8 @@
 import { config } from 'dotenv';
 import { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
+import fs from 'node:fs';
+import path from 'node:path';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -196,6 +198,31 @@ async function readCapturesForToken(token: string): Promise<CapturedCall[]> {
 
 function captureToken(prefix: string): string {
   return `send-sms-${prefix}-${crypto.randomUUID()}`;
+}
+
+function safeArchiveSegment(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 96) || 'unbound';
+}
+
+function traceArchiveRoot(): string {
+  return process.env.TRACE_ARCHIVE_LOCAL_DIR || path.resolve(process.cwd(), '..', '.context');
+}
+
+function listSmsArchiveFiles(rootAgentId: string): string[] {
+  const dir = path.join(
+    traceArchiveRoot(),
+    'trace-archive',
+    safeArchiveSegment(rootAgentId),
+    'provider',
+    'sms',
+    'surge'
+  );
+  if (!fs.existsSync(dir)) return [];
+  return fs
+    .readdirSync(dir)
+    .map((entry) => path.join(dir, entry))
+    .filter((entry) => fs.statSync(entry).isFile())
+    .sort();
 }
 
 /** Filter Surge calls and match on a specific body substring to isolate from concurrent tests. */
@@ -786,6 +813,7 @@ async function testBoundary_directCallsSurgeApi() {
 async function testBoundary_notifyCompletionCallsSurgeApi() {
   const token = captureToken('notify-completion');
   const agent = await createNotifyAgent('boundary completion agent');
+  const archiveBefore = new Set(listSmsArchiveFiles(agent.id));
   try {
     const res = await request(`${BASE_URL}/api/send-sms/notify`, {
       method: 'POST',
@@ -824,6 +852,19 @@ async function testBoundary_notifyCompletionCallsSurgeApi() {
       `Expected completion summary in SMS, got: ${body.body.substring(0, 100)}`
     );
     assertNoInternalRoutingTokens(body.body, agent.id);
+    const archiveAfter = listSmsArchiveFiles(agent.id);
+    const newEncryptedArtifacts = archiveAfter.filter(
+      (entry) => !archiveBefore.has(entry) && entry.endsWith('.json.gz.enc')
+    );
+    assert(
+      newEncryptedArtifacts.length >= 1,
+      `Expected encrypted SMS provider archive for agent ${agent.id}`
+    );
+    const metadataPath = `${newEncryptedArtifacts[0]}.meta.json`;
+    assert(fs.existsSync(metadataPath), `Expected archive metadata at ${metadataPath}`);
+    const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8')) as Record<string, unknown>;
+    assert(metadata.content_type === 'application/json', 'Expected JSON archive content type');
+    assert(metadata.compression === 'gzip', 'Expected SMS provider archive to be gzipped');
   } finally {
     await prisma.agent.deleteMany({ where: { id: agent.id } });
   }

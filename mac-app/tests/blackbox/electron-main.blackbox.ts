@@ -87,7 +87,7 @@ vi.mock('../../main/domains/auto-updater/runtime', () => ({
   registerUpdateIpc: registerUpdateIpcMock,
 }));
 
-vi.mock('../../main/services/auth', () => ({
+vi.mock('../../main/domains/auth/runtime', () => ({
   AuthService: { getSession: getSessionMock },
 }));
 

@@ -16,7 +16,7 @@
     "build": "vite build && tsc -p tsconfig.main.json && npm run build:native && electron-builder",
     "build:native": "bash native/passkey-import/build.sh && bash native/user-activity-bridge/build.sh",
     "build:vite": "vite build && tsc -p tsconfig.main.json",
-    "postinstall": "node -e \"const v=require('electron/package.json').version;require('child_process').execSync('npx --yes node-gyp rebuild --target='+v+' --arch='+process.arch+' --dist-url=https://electronjs.org/headers',{cwd:'node_modules/better-sqlite3',stdio:'inherit'})\"",
+    "postinstall": "node -e \"const v=require('electron/package.json').version;require('child_process').execSync('npx --yes node-gyp@10.2.0 rebuild --target='+v+' --arch='+process.arch+' --dist-url=https://electronjs.org/headers',{cwd:'node_modules/better-sqlite3',stdio:'inherit'})\"",
     "type-check": "tsc --noEmit && tsc -p tsconfig.main.json --noEmit",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

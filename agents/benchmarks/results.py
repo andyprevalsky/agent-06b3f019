@@ -3,8 +3,8 @@
 import json
 import os
 import uuid
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from dataclasses import dataclass, field, asdict
 from typing import List, Optional
 
 
@@ -27,6 +27,7 @@ class TaskResult:
     fast_mode_cache_enabled: bool = False
     context_violations: List[dict] = field(default_factory=list)  # [{rule, severity, message}]
     logs: Optional[dict] = None  # {messages, backend_logs, worker_logs, research_logs}
+    archive_manifest_ref: Optional[str] = None
 
 
 @dataclass
@@ -94,14 +95,17 @@ class BenchmarkRun:
         return path
 
     def _record_history(self) -> None:
-        """Append every passed task's duration to the timeout-history corpus.
+        """Record run stats for every completed task, plus pass-only corpora.
 
-        Best-effort, per-task: history recording must never fail save() after
-        the results JSON has already been written, and one task's failure
-        must not prevent subsequent tasks from being recorded.
+        Every attempt (pass or fail, local or prod) lands in the attempts
+        ledger; passes additionally feed the timeout-derivation corpus and
+        span-latency baselines. Best-effort, per-task: history recording must
+        never fail save() after the results JSON has already been written, and
+        one task's failure must not prevent subsequent tasks from being
+        recorded.
         """
         try:
-            from benchmarks.timeout_history import record_pass
+            from benchmarks.timeout_history import record_attempt, record_pass
         except Exception as e:
             print(f"⚠️  _record_history import failed (non-fatal): {e}")
             return
@@ -113,7 +117,25 @@ class BenchmarkRun:
 
         environment = "local" if "localhost" in self.base_url or "127.0.0.1" in self.base_url else "prod"
         for r in self.task_results:
-            if not r.passed or r.status == "SKIPPED":
+            if r.status == "SKIPPED":
+                continue
+            # Full trajectories for each attempt are already persisted in this
+            # run's JSON (messages + logs) and .llm-dumps/<agent_id>/ locally.
+            try:
+                record_attempt(
+                    task_name=r.name,
+                    passed=r.passed,
+                    status=r.status,
+                    duration_seconds=r.duration_seconds,
+                    cost_cents=r.cost_cents,
+                    agent_id=r.agent_id,
+                    failure_reason=r.failure_reason,
+                    fast_mode_cache_enabled=r.fast_mode_cache_enabled,
+                    timestamp=self.timestamp,
+                )
+            except Exception as e:
+                print(f"⚠️  record_attempt failed for {r.name} (non-fatal): {e}")
+            if not r.passed:
                 continue
             if r.fast_mode_cache_enabled:
                 print(f"    Timeout history skipped for {r.name}: fast mode cache was enabled")
@@ -164,7 +186,7 @@ def compare_runs(path_a: str, path_b: str) -> None:
     b = BenchmarkRun.load(path_b)
 
     print(f"\n{'='*70}")
-    print(f"Benchmark Comparison")
+    print("Benchmark Comparison")
     print(f"  A: {os.path.basename(path_a)} ({a.timestamp[:19]})")
     print(f"  B: {os.path.basename(path_b)} ({b.timestamp[:19]})")
     print(f"{'='*70}")
