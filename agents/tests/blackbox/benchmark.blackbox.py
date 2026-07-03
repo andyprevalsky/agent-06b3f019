@@ -1809,6 +1809,63 @@ def test_tool_count_expectations_support_minimums_and_forbidden_tools():
     )
 
 
+def test_user_data_prod_grep_requires_all_provider_filters():
+    """Prod user-data benchmark cannot pass with generic document grep calls."""
+    from benchmarks.run_benchmark import _validate_user_data_prod_grep_messages
+
+    def grep_msg(provider: str) -> dict:
+        return {
+            "text": (
+                "**Params Passed:**\n\n"
+                "- **pattern**: project\n"
+                "- **source**: documents\n"
+                "- **filters**: {\n"
+                f'  "document_source": "{provider}"\n'
+                "}\n\n"
+                "**Result:**\n\n**Grep Matches:** 1 shown / 1 total"
+            ),
+            "metadata": {
+                "toolName": "grep",
+                "toolStatus": "FINISHED",
+                "toolCallId": f"grep-{provider}",
+            },
+        }
+
+    assert (
+        _validate_user_data_prod_grep_messages(
+            [
+                grep_msg("chatgpt"),
+                grep_msg("claude"),
+                grep_msg("apple_notes"),
+                grep_msg("obsidian"),
+            ]
+        )
+        is None
+    )
+
+    failure = _validate_user_data_prod_grep_messages(
+        [
+            {
+                "text": (
+                    "**Params Passed:**\n\n"
+                    "- **pattern**: project\n"
+                    "- **source**: documents\n\n"
+                    "**Result:**\n\n**Grep Matches:** 4 shown / 4 total"
+                ),
+                "metadata": {
+                    "toolName": "grep",
+                    "toolStatus": "FINISHED",
+                    "toolCallId": "grep-generic",
+                },
+            }
+        ]
+    )
+    assert failure is not None
+    assert "filters.document_source" in failure
+    assert "chatgpt" in failure
+    assert "obsidian" in failure
+
+
 def test_parallel_tool_calls_smoke_requires_explore_sub_agents():
     """The parallel search smoke should exercise execute-phase explore fanout."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -1954,6 +2011,10 @@ async def run_all_tests():
     r.record("benchmark_memory_baseline_guarded", test_benchmark_memory_baseline_endpoint_is_guarded)
     r.record("logical_tool_counts_ignore_progress", test_logical_tool_counts_ignore_progress_messages)
     r.record("tool_count_expectations", test_tool_count_expectations_support_minimums_and_forbidden_tools)
+    r.record(
+        "user_data_prod_grep_provider_filters",
+        test_user_data_prod_grep_requires_all_provider_filters,
+    )
     r.record(
         "parallel_tool_calls_smoke_cap",
         test_parallel_tool_calls_smoke_cap_allows_recent_fanout_tail,

@@ -1,6 +1,7 @@
 """Blackbox tests for get-user-context domain."""
 
 import asyncio
+import importlib
 import json
 from unittest.mock import patch
 
@@ -40,6 +41,22 @@ def _mock_handler(request: httpx.Request) -> httpx.Response:
             "authenticatedDomains": ["github.com", "notion.so"],
         })
 
+    if "/api/data/snapshot" in url:
+        return httpx.Response(200, json={
+            "snapshot": {
+                "content": {"preferences": {"writing_style": "concise"}, "work": {"focus": "agents"}},
+                "version": 3,
+                "updatedAt": "2026-07-03T12:00:00Z",
+                "revisions": [
+                    {
+                        "source": "chatgpt",
+                        "createdAt": "2026-07-03T12:00:00Z",
+                        "changes": {"preferences": ["writing_style"]},
+                    },
+                ],
+            },
+        })
+
     if "/api/people/messages/recent" in url:
         return httpx.Response(200, json={
             "messages": [
@@ -74,6 +91,11 @@ def _clear_user_context_cache():
         mod._simulation_messages_cache.clear()
 
 
+def _get_user_context_module():
+    """Return helpers.get_user_context module despite helpers.__init__ re-export shadowing."""
+    return importlib.import_module("helpers.get_user_context")
+
+
 async def test_get_user_context_happy_path():
     """get_user_context activity returns formatted user context string."""
     _setup()
@@ -88,6 +110,8 @@ async def test_get_user_context_happy_path():
     assert "Alice Test" in result
     # Verify sections present
     assert "## User Profile" in result
+    assert "## Distilled User Snapshot" in result
+    assert "writing_style" in result
     assert "## Connected Integrations" in result
 
 
@@ -139,7 +163,7 @@ async def test_get_system_name_outer_except():
     _clear_user_context_cache()
 
     with patch("temporalio.activity.heartbeat"), \
-         patch("helpers.get_user_context.load_config", side_effect=RuntimeError("cfg fail")):
+         patch.object(_get_user_context_module(), "load_config", side_effect=RuntimeError("cfg fail")):
         from helpers.get_user_context import get_user_system_name
         result = await get_user_system_name(user_id="user-outer-1")
     assert result == "Rose"
@@ -149,7 +173,7 @@ async def test_get_custom_prompt_outer_except():
     """get_user_custom_system_prompt outer except triggered when load_config raises."""
     _clear_user_context_cache()
     with patch("temporalio.activity.heartbeat"), \
-         patch("helpers.get_user_context.load_config", side_effect=RuntimeError("cfg fail")):
+         patch.object(_get_user_context_module(), "load_config", side_effect=RuntimeError("cfg fail")):
         from helpers.get_user_context import get_user_custom_system_prompt
         result = await get_user_custom_system_prompt(user_id="user-outer-2")
     assert result is None
@@ -159,7 +183,7 @@ async def test_get_user_context_outer_except():
     """get_user_context's outer except returns empty string when load_config raises."""
     _clear_user_context_cache()
     with patch("temporalio.activity.heartbeat"), \
-         patch("helpers.get_user_context.load_config", side_effect=RuntimeError("cfg fail")):
+         patch.object(_get_user_context_module(), "load_config", side_effect=RuntimeError("cfg fail")):
         from helpers.get_user_context import get_user_context
         result = await get_user_context(user_id="user-outer-3")
     assert result == ""
@@ -168,7 +192,7 @@ async def test_get_user_context_outer_except():
 async def test_fetch_frequent_contact_messages_outer_except():
     """fetch_frequent_contact_messages outer except when load_config raises."""
     _clear_user_context_cache()
-    with patch("helpers.get_user_context.load_config", side_effect=RuntimeError("cfg fail")):
+    with patch.object(_get_user_context_module(), "load_config", side_effect=RuntimeError("cfg fail")):
         from helpers.get_user_context import fetch_frequent_contact_messages
         result = await fetch_frequent_contact_messages("user-outer-4")
     assert result == []
@@ -243,9 +267,10 @@ async def test_get_user_context_boundary():
     captures = get_captured_requests()
     urls = [c["url"] for c in captures]
 
-    # All four backend endpoints should have been called
+    # All backend endpoints for dynamic user context should have been called.
     assert any("/api/user-settings" in u for u in urls), f"Expected /api/user-settings call, got {urls}"
     assert any("/api/integrations" in u for u in urls), f"Expected /api/integrations call, got {urls}"
+    assert any("/api/data/snapshot" in u for u in urls), f"Expected /api/data/snapshot call, got {urls}"
     assert any("/api/people/messages/recent" in u for u in urls), f"Expected /api/people/messages/recent call, got {urls}"
     assert any("/api/people" in u for u in urls), f"Expected /api/people call, got {urls}"
 
@@ -271,6 +296,7 @@ async def test_get_user_context_gates_closed():
                 "integrations": False,
                 "recent_communications": False,
                 "network": False,
+                "user_snapshot": False,
             },
         )
 
@@ -423,6 +449,28 @@ def test_format_user_context_integration_no_creds():
     )
     assert "Calendar" in result
     assert "## Connected Integrations" in result
+
+
+def test_format_user_context_snapshot():
+    """_format_user_context includes distilled snapshot content and latest update."""
+    from helpers.get_user_context import _format_user_context
+
+    result = _format_user_context(
+        authenticated_sites=[],
+        user_settings={},
+        recent_messages=[],
+        frequent_contacts=[],
+        integrations=None,
+        user_snapshot={
+            "content": {"preferences": {"tone": "direct"}},
+            "version": 2,
+            "updatedAt": "2026-07-03T12:00:00Z",
+            "revisions": [{"source": "obsidian", "createdAt": "2026-07-03T12:01:00Z"}],
+        },
+    )
+    assert "## Distilled User Snapshot" in result
+    assert '"tone": "direct"' in result
+    assert "Latest update" in result
 
 
 def test_format_user_context_skips_disconnected_no_creds():
@@ -681,6 +729,7 @@ async def run_all_tests():
     r.record("format_sim_happy", test_format_messages_for_simulation_happy)
     r.record("fmt_ctx_empty", test_format_user_context_empty_returns_empty)
     r.record("fmt_ctx_integ_no_creds", test_format_user_context_integration_no_creds)
+    r.record("fmt_ctx_snapshot", test_format_user_context_snapshot)
     r.record("fmt_ctx_skips_disconnected", test_format_user_context_skips_disconnected_no_creds)
     r.record("fmt_ctx_bad_ts", test_format_user_context_bad_timestamp)
     r.record("fmt_ctx_msg_truncate", test_format_user_context_recent_message_truncation)

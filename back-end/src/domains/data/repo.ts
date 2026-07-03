@@ -199,3 +199,26 @@ export async function findAgentTreeIds(rootId: string, userId: string): Promise<
   }
   return treeIds;
 }
+
+export async function getUserSnapshot(userId: string) {
+  return prisma.userSnapshot.findUnique({
+    where: { userId },
+    select: {
+      content: true,
+      version: true,
+      updatedAt: true,
+      revisions: {
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+        select: {
+          id: true,
+          source: true,
+          changes: true,
+          createdAt: true,
+          model: true,
+          promptKey: true,
+        },
+      },
+    },
+  });
+}

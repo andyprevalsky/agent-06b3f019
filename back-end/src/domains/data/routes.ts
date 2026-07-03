@@ -10,6 +10,7 @@ import { authenticate, type AuthRequest } from '../../providers/auth';
 import { asyncHandler } from '../../utils/asyncHandler';
 import {
   grep,
+  getSnapshot,
   getSummary,
   InvalidPatternError,
   SourceNotFoundError,
@@ -131,6 +132,29 @@ router.get(
         details: error instanceof Error ? error.message : 'Unknown error',
       });
     }
+  })
+);
+
+/**
+ * GET /api/data/snapshot
+ *
+ * Returns the current distilled user snapshot plus a small update ledger.
+ * Used by agents to inject high-signal persistent context.
+ */
+router.get(
+  '/snapshot',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const userId =
+      req.isInternal === true ? (req.headers['x-user-id'] as string | undefined) : req.user?.id;
+
+    if (userId === undefined || userId === null) {
+      res.status(401).json({ error: 'User not authenticated' });
+      return;
+    }
+
+    const result = await getSnapshot(userId);
+    res.json(result);
   })
 );
 

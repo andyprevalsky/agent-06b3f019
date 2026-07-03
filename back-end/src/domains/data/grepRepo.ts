@@ -91,6 +91,29 @@ export interface TransactionSummaryResult {
   };
 }
 
+export interface DocumentGrepRow {
+  id: string;
+  source: string;
+  externalId: string;
+  title: string;
+  content: string;
+  url: string | null;
+  metadata: Prisma.JsonValue | null;
+  sourceUpdatedAt: Date | null;
+  lastSeenAt: Date;
+  deletedAt: Date | null;
+  updatedAt: Date;
+}
+
+export interface DocumentSummaryResult {
+  total_documents: number;
+  sources: Record<string, number>;
+  date_range: {
+    from: string | null;
+    to: string | null;
+  };
+}
+
 function regexPredicate(
   expression: Prisma.Sql,
   pattern: string,
@@ -183,6 +206,39 @@ function transactionFilters(params: {
       OR COALESCE(i."institutionName", '') ILIKE ${account}
       OR t."plaidAccountExternalId" ILIKE ${account}
     )`);
+  }
+  return Prisma.sql`AND ${Prisma.join(parts, ' AND ')}`;
+}
+
+function documentFilters(params: {
+  documentSource?: string;
+  since?: Date;
+  until?: Date;
+  path?: string;
+  tag?: string;
+}): Prisma.Sql {
+  const parts: Prisma.Sql[] = [Prisma.sql`d."deletedAt" IS NULL`];
+  if (params.documentSource !== undefined) {
+    parts.push(Prisma.sql`d.source = ${params.documentSource}`);
+  }
+  if (params.since !== undefined) {
+    parts.push(Prisma.sql`COALESCE(d."sourceUpdatedAt", d."updatedAt") >= ${params.since}`);
+  }
+  if (params.until !== undefined) {
+    parts.push(Prisma.sql`COALESCE(d."sourceUpdatedAt", d."updatedAt") <= ${params.until}`);
+  }
+  if (params.path !== undefined) {
+    const path = `%${params.path}%`;
+    parts.push(Prisma.sql`(
+      d."externalId" ILIKE ${path}
+      OR d.title ILIKE ${path}
+      OR COALESCE(d.url, '') ILIKE ${path}
+      OR COALESCE(d.metadata::text, '') ILIKE ${path}
+    )`);
+  }
+  if (params.tag !== undefined) {
+    const tag = `%${params.tag}%`;
+    parts.push(Prisma.sql`COALESCE(d.metadata::text, '') ILIKE ${tag}`);
   }
   return Prisma.sql`AND ${Prisma.join(parts, ' AND ')}`;
 }
@@ -398,6 +454,76 @@ export async function countTransactionGrepRows(params: {
   return Number(rows[0]?.count ?? 0);
 }
 
+export async function countDocumentGrepRows(params: {
+  userId: string;
+  pattern: string;
+  caseInsensitive: boolean;
+  documentSource?: string;
+  since?: Date;
+  until?: Date;
+  path?: string;
+  tag?: string;
+}): Promise<number> {
+  const expression = Prisma.sql`concat_ws(E'\n',
+    d.title,
+    d.content,
+    COALESCE(d.url, ''),
+    COALESCE(d.metadata::text, '')
+  )`;
+  const predicate = regexPredicate(expression, params.pattern, params.caseInsensitive);
+  const filters = documentFilters(params);
+  const rows = await prisma.$queryRaw<Array<{ count: bigint }>>`
+    SELECT COUNT(*)::bigint AS count
+    FROM "UserDataDocument" d
+    WHERE d."userId" = ${params.userId}
+      AND ${predicate}
+      ${filters}
+  `;
+  return Number(rows[0]?.count ?? 0);
+}
+
+export async function searchDocumentGrepRows(params: {
+  userId: string;
+  pattern: string;
+  caseInsensitive: boolean;
+  limit: number;
+  offset: number;
+  documentSource?: string;
+  since?: Date;
+  until?: Date;
+  path?: string;
+  tag?: string;
+}): Promise<DocumentGrepRow[]> {
+  const expression = Prisma.sql`concat_ws(E'\n',
+    d.title,
+    d.content,
+    COALESCE(d.url, ''),
+    COALESCE(d.metadata::text, '')
+  )`;
+  const predicate = regexPredicate(expression, params.pattern, params.caseInsensitive);
+  const filters = documentFilters(params);
+  return prisma.$queryRaw<DocumentGrepRow[]>`
+    SELECT
+      d.id,
+      d.source,
+      d."externalId",
+      d.title,
+      d.content,
+      d.url,
+      d.metadata,
+      d."sourceUpdatedAt",
+      d."lastSeenAt",
+      d."deletedAt",
+      d."updatedAt"
+    FROM "UserDataDocument" d
+    WHERE d."userId" = ${params.userId}
+      AND ${predicate}
+      ${filters}
+    ORDER BY COALESCE(d."sourceUpdatedAt", d."updatedAt") DESC, d.id DESC
+    LIMIT ${pageSize(params.limit, params.offset)}
+  `;
+}
+
 export async function searchTransactionGrepRows(params: {
   userId: string;
   pattern: string;
@@ -533,6 +659,40 @@ export async function getTransactionSummary(userId: string): Promise<Transaction
     total_transactions: Number(row?.total_transactions ?? 0),
     account_count: Number(row?.account_count ?? 0),
     institutions: row?.institutions ?? [],
+    date_range: {
+      from: row?.from_date?.toISOString() ?? null,
+      to: row?.to_date?.toISOString() ?? null,
+    },
+  };
+}
+
+export async function getDocumentSummary(userId: string): Promise<DocumentSummaryResult> {
+  const rows = await prisma.$queryRaw<
+    Array<{
+      total_documents: bigint;
+      from_date: Date | null;
+      to_date: Date | null;
+    }>
+  >`
+    SELECT
+      COUNT(id)::bigint AS total_documents,
+      MIN(COALESCE("sourceUpdatedAt", "updatedAt")) AS from_date,
+      MAX(COALESCE("sourceUpdatedAt", "updatedAt")) AS to_date
+    FROM "UserDataDocument"
+    WHERE "userId" = ${userId}
+      AND "deletedAt" IS NULL
+  `;
+  const sourceRows = await prisma.userDataDocument.groupBy({
+    by: ['source'],
+    where: { userId, deletedAt: null },
+    _count: true,
+  });
+  const row = rows[0];
+  return {
+    total_documents: Number(row?.total_documents ?? 0),
+    sources: Object.fromEntries(
+      sourceRows.map((sourceRow) => [sourceRow.source, sourceRow._count])
+    ),
     date_range: {
       from: row?.from_date?.toISOString() ?? null,
       to: row?.to_date?.toISOString() ?? null,

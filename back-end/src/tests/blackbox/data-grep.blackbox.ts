@@ -14,18 +14,20 @@ const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
 const API_KEY = process.env.BACKEND_API_KEY || '';
 
 const GrepMatch = z.object({
-  source: z.enum(['messages', 'network', 'agent_network', 'transactions']),
+  source: z.enum(['messages', 'network', 'agent_network', 'transactions', 'documents']),
   path: z.string(),
   pointer: z.string(),
   timestamp: z.string(),
   role: z.enum(['SYSTEM', 'ASSISTANT', 'USER', 'TOOL']).optional(),
   location: z.object({
-    source: z.enum(['messages', 'network', 'agent_network', 'transactions']),
+    source: z.enum(['messages', 'network', 'agent_network', 'transactions', 'documents']),
     path: z.string(),
     agent_id: z.string().optional(),
     message_id: z.string().optional(),
     transaction_id: z.string().optional(),
     account_id: z.string().optional(),
+    document_id: z.string().optional(),
+    source_name: z.string().optional(),
     role: z.enum(['SYSTEM', 'ASSISTANT', 'USER', 'TOOL']).optional(),
     thread: z.string().optional(),
     contact_id: z.string().optional(),
@@ -39,7 +41,7 @@ const GrepResponse = z.object({
   total_matches: z.number(),
   truncated: z.boolean(),
   pattern: z.string(),
-  sources: z.array(z.enum(['messages', 'network', 'agent_network', 'transactions'])),
+  sources: z.array(z.enum(['messages', 'network', 'agent_network', 'transactions', 'documents'])),
   applied_limit: z.number(),
   applied_offset: z.number(),
   summaries: z
@@ -70,6 +72,13 @@ const SummaryResponse = z.object({
         total_transactions: z.number(),
         account_count: z.number(),
         institutions: z.array(z.string()),
+        date_range: z.object({ from: z.string().nullable(), to: z.string().nullable() }),
+      })
+      .optional(),
+    documents: z
+      .object({
+        total_documents: z.number(),
+        sources: z.record(z.number()),
         date_range: z.object({ from: z.string().nullable(), to: z.string().nullable() }),
       })
       .optional(),
@@ -264,8 +273,66 @@ async function seedFixture() {
   });
 
   await seedPlaidFixture(userId);
+  await seedDocumentFixture(userId);
 
   return { userId, agentId: child.id };
+}
+
+async function seedDocumentFixture(userId: string): Promise<void> {
+  await prisma.integration.create({
+    data: {
+      userId,
+      type: 'DATA_SOURCE',
+      name: 'chatgpt',
+      status: 'CONNECTED',
+      isActive: true,
+      config: { documentCount: 2 },
+    },
+  });
+  await prisma.userDataDocument.createMany({
+    data: [
+      {
+        userId,
+        source: 'chatgpt',
+        externalId: `chatgpt-${randomUUID()}`,
+        title: 'Launch planning conversation',
+        content: 'The user prefers concise launch memos with Nimbus milestone details.',
+        contentHash: `hash-${randomUUID()}`,
+        sourceUpdatedAt: new Date('2026-01-06T10:00:00Z'),
+        metadata: { provider: 'chatgpt', conversationId: 'conv-launch', tags: ['llm-export'] },
+      },
+      {
+        userId,
+        source: 'claude',
+        externalId: `claude-${randomUUID()}`,
+        title: 'Research memory conversation',
+        content: 'Claude export: Meridian research preference should stay searchable.',
+        contentHash: `hash-${randomUUID()}`,
+        sourceUpdatedAt: new Date('2026-01-06T11:00:00Z'),
+        metadata: { provider: 'claude', chatId: 'claude-meridian', tags: ['llm-export'] },
+      },
+      {
+        userId,
+        source: 'apple_notes',
+        externalId: `apple-notes-${randomUUID()}`,
+        title: 'Connector checklist',
+        content: 'Apple Notes entry: Solstice notebook keeps provider sync reminders.',
+        contentHash: `hash-${randomUUID()}`,
+        sourceUpdatedAt: new Date('2026-01-07T09:00:00Z'),
+        metadata: { folder: 'Product', tags: ['connector'] },
+      },
+      {
+        userId,
+        source: 'obsidian',
+        externalId: `obsidian-${randomUUID()}`,
+        title: 'Project notes',
+        content: 'Obsidian note: Calypso archive includes vendor follow-ups.',
+        contentHash: `hash-${randomUUID()}`,
+        sourceUpdatedAt: new Date('2026-01-08T10:00:00Z'),
+        metadata: { vault: 'main', path: 'Projects/Calypso.md', tags: ['vendor'] },
+      },
+    ],
+  });
 }
 
 async function seedPlaidFixture(userId: string): Promise<void> {
@@ -460,6 +527,60 @@ async function testRegexAndSources(userId: string, agentId: string): Promise<voi
         `Expected agent_network result with role ${role}, got ${JSON.stringify(body)}`
       );
     }
+  }
+
+  res = await requestGrep(userId, {
+    pattern: 'Nimbus milestone|Calypso archive',
+    source: 'documents',
+    '-i': true,
+  });
+  assertStatus(res.status, 200, res.data);
+  const documents = assertBody(res.data);
+  if (
+    documents.total_matches !== 2 ||
+    !documents.matches.every((match) => match.source === 'documents') ||
+    !documents.matches.some((match) => match.location.source_name === 'chatgpt') ||
+    !documents.matches.some((match) => match.location.source_name === 'obsidian')
+  ) {
+    throw new Error(`Expected document grep matches, got ${JSON.stringify(documents)}`);
+  }
+}
+
+async function testDocumentFilters(userId: string): Promise<void> {
+  let res = await requestGrep(userId, {
+    pattern: 'Meridian research preference',
+    source: 'documents',
+    filters: { document_source: 'claude' },
+  });
+  assertStatus(res.status, 200, res.data);
+  const claudeOnly = assertBody(res.data);
+  if (claudeOnly.total_matches !== 1 || claudeOnly.matches[0]?.location.source_name !== 'claude') {
+    throw new Error(`Expected only Claude document match, got ${JSON.stringify(claudeOnly)}`);
+  }
+
+  res = await requestGrep(userId, {
+    pattern: 'Calypso archive',
+    source: 'documents',
+    filters: { path: 'Projects/Calypso.md', tag: 'vendor' },
+  });
+  assertStatus(res.status, 200, res.data);
+  const byPathAndTag = assertBody(res.data);
+  if (
+    byPathAndTag.total_matches !== 1 ||
+    byPathAndTag.matches[0]?.path !== 'documents/obsidian/main/Projects/Calypso.md'
+  ) {
+    throw new Error(`Expected Obsidian path/tag match, got ${JSON.stringify(byPathAndTag)}`);
+  }
+
+  res = await requestGrep(userId, {
+    pattern: 'provider sync reminders',
+    source: 'documents',
+    filters: { since: '2026-01-07', until: '2026-01-07T23:59:59.000Z' },
+  });
+  assertStatus(res.status, 200, res.data);
+  const byDate = assertBody(res.data);
+  if (byDate.total_matches !== 1 || byDate.matches[0]?.location.source_name !== 'apple_notes') {
+    throw new Error(`Expected Apple Notes date-filtered match, got ${JSON.stringify(byDate)}`);
   }
 }
 
@@ -662,6 +783,14 @@ async function testSourceSpecificFilterValidation(userId: string): Promise<void>
     assertStatus(res.status, 400, res.data);
     requireInvalidGrepParam(res.data, label);
   }
+
+  res = await requestGrep(userId, {
+    pattern: 'Nimbus',
+    source: 'documents',
+    filters: { tag: 123 },
+  });
+  assertStatus(res.status, 400, res.data);
+  requireInvalidGrepParam(res.data, 'invalid document tag');
 }
 
 async function testTransactionFiltersAndAggregates(userId: string): Promise<void> {
@@ -796,6 +925,25 @@ async function testTransactionSummary(userId: string): Promise<void> {
   }
 }
 
+async function testDocumentSummary(userId: string): Promise<void> {
+  const res = await requestSummary(userId);
+  assertStatus(res.status, 200, res.data);
+  const body = SummaryResponse.parse(res.data);
+  const documents = body.sources.documents;
+  if (
+    documents === undefined ||
+    documents.total_documents !== 4 ||
+    documents.sources.chatgpt !== 1 ||
+    documents.sources.claude !== 1 ||
+    documents.sources.apple_notes !== 1 ||
+    documents.sources.obsidian !== 1 ||
+    documents.date_range.from?.slice(0, 10) !== '2026-01-06' ||
+    documents.date_range.to?.slice(0, 10) !== '2026-01-08'
+  ) {
+    throw new Error(`Expected document summary, got ${JSON.stringify(body)}`);
+  }
+}
+
 async function runAll(): Promise<void> {
   const { userId, agentId } = await seedFixture();
   const tests = [
@@ -809,9 +957,11 @@ async function runAll(): Promise<void> {
     ['realistic safe patterns are allowed', () => testRealisticPatternsAllowed(userId)],
     ['person and since narrow messages', () => testPersonAndSinceFilters(userId)],
     ['source-specific filters are validated', () => testSourceSpecificFilterValidation(userId)],
+    ['documents filters work', () => testDocumentFilters(userId)],
     ['transactions filters and aggregates work', () => testTransactionFiltersAndAggregates(userId)],
     ['transaction grep is tenant isolated', () => testTransactionTenantIsolation(userId)],
     ['summary includes transactions', () => testTransactionSummary(userId)],
+    ['summary includes documents', () => testDocumentSummary(userId)],
   ] as const;
 
   try {

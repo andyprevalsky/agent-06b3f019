@@ -60,6 +60,7 @@ export {
   processPasswordsUpload,
   processPasskeysUpload,
   processApplePasswordsUpload,
+  processDocumentsUpload,
   decryptPayload,
   decryptCompressedPayload,
 } from './uploadService';

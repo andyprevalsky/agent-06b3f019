@@ -121,6 +121,33 @@
     ]
   },
   {
+    "name": "user-data-prod-grep",
+    "title": "User Data Prod Grep",
+    "prompt": "Run a real prod-data validation of my synced user documents using only local-data Grep through explore agents.\n\nCritical execution rules:\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn one or more explore agents; each explore agent must call grep with source=\"documents\".\n- Check each V1 provider separately with filters.document_source: chatgpt, claude, apple_notes, and obsidian.\n- For each provider, find one concrete, human-verifiable fact or state clearly that no document evidence is currently synced for that provider.\n- Prefer high-signal recent project, preference, tool, or goal evidence. Use grep flags and filters as needed, but cite exact grep evidence and the returned document path/source.\n- Final answer must include a PASS/VERIFY checklist with one row per provider: provider, grep filters used, exact evidence snippet, document path, and whether it appears verified from prod data.\n\nThis benchmark intentionally runs against my prod account/data. Do not fabricate expected answers; the user will manually verify the cited facts.",
+    "timeout_seconds": 420,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "tags": ["grep", "documents", "prod-data"],
+    "price_limit_cents": 150,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "min_tool_counts": {
+      "spawn_agent": 1,
+      "grep": 4
+    },
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_browser_agent",
+      "spawn_claude_code_agent",
+      "message_person",
+      "send_message_to_user_execute_phase"
+    ]
+  },
+  {
     "name": "plaid-transactions-monthly-spend",
     "title": "Plaid Transactions — Monthly Spend",
     "prompt": "Answer this using only local transaction data through an explore agent: What is my monthly spend for September 2025?\n\nRules:\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn one explore agent and have it call grep with source=\"transactions\".\n- Use nested filters with since=\"2025-09-01\", until=\"2025-09-30\", status=\"posted\", include_pending_in_totals=false.\n- Use the transaction aggregate totals by currency from grep; monthly spend means posted USD outflow, excluding pending and excluding income/refunds.\n- Final answer must include the exact USD spend number and cite the transaction grep evidence.",

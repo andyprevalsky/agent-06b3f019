@@ -41,7 +41,7 @@ import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 import httpx
@@ -79,12 +79,12 @@ from benchmarks.timeout_history import (
 from benchmarks.timeout_history import (
     summary as _history_summary,
 )
-from tests.e2e.test_helpers import (
-    authenticate,
-)
 from domains.set_plan.config import (
     PLANNER_ACTIVITY_MAX_ATTEMPTS,
     PLANNER_ACTIVITY_TIMEOUT_SECONDS,
+)
+from tests.e2e.test_helpers import (
+    authenticate,
 )
 
 # Defaults — benchmarks run against PROD by default (no local services needed)
@@ -111,6 +111,8 @@ MINTED_AGENT_ACCOUNT_TASK_NAMES = {
 }
 MINTED_AGENT_ACCOUNT_X_POST_GOAL = "Make a post on X.com that says, Hello World"
 GREP_EXPLORE_STRESS_TASK_NAME = "grep-explore-stress"
+USER_DATA_PROD_GREP_TASK_NAME = "user-data-prod-grep"
+USER_DATA_PROD_DOCUMENT_SOURCES = {"chatgpt", "claude", "apple_notes", "obsidian"}
 GREP_BASE_SNAPSHOT_ENV = "BENCHMARK_GREP_BASE_SNAPSHOT"
 PLAID_TRANSACTION_BENCHMARK_TASK_NAMES = {
     "plaid-transactions-monthly-spend",
@@ -500,13 +502,38 @@ def _apply_local_agent_source_override(agent_id: str, source: str) -> None:
     )
 
 
+def _prod_user_data_prompt_override(task: BenchmarkTask) -> str | None:
+    if task.name != USER_DATA_PROD_GREP_TASK_NAME:
+        return None
+    explicit = os.environ.get("BENCHMARK_USER_DATA_PROD_PROMPT", "").strip()
+    if explicit:
+        return explicit
+    prompt_path = REPO_ROOT / ".context" / "benchmarks" / "user-data-prod-prompts.json"
+    if not prompt_path.exists():
+        return None
+    data = json.loads(prompt_path.read_text())
+    questions = data.get("questions") if isinstance(data, dict) else None
+    if not isinstance(questions, list) or not questions:
+        raise ValueError(f"{prompt_path} must contain a non-empty questions array")
+    rendered = "\n".join(f"{idx + 1}. {str(question)}" for idx, question in enumerate(questions))
+    return (
+        task.prompt
+        + "\n\nPrivate prod verification questions from .context/benchmarks/user-data-prod-prompts.json:\n"
+        + rendered
+    )
+
+
 async def create_agent(
     base_url: str,
     task: BenchmarkTask,
 ) -> str:
     """Create a benchmark agent. Returns agent_id."""
     headers = await _api_headers()
-    goal = os.environ.get("BENCHMARK_GOAL_OVERRIDE") or task.prompt
+    goal = (
+        os.environ.get("BENCHMARK_GOAL_OVERRIDE")
+        or _prod_user_data_prompt_override(task)
+        or task.prompt
+    )
     goal = goal.replace("{frontend_url}", _frontend_url_for_benchmark(base_url))
     source_override = _benchmark_agent_source_override()
     request_source = source_override if source_override in {"WEB", "MAC_APP"} else "WEB"
@@ -718,6 +745,66 @@ async def count_tree_tool_calls(base_url: str, root_agent_id: str) -> Dict[str, 
         for tool_name, count in _count_logical_tool_calls_from_messages(data.get("messages", [])).items():
             counts[tool_name] = counts.get(tool_name, 0) + count
     return counts
+
+
+def _grep_message_uses_documents_source(text: str) -> bool:
+    normalized = text.lower()
+    return (
+        "- **source**: documents" in normalized
+        or '"source": "documents"' in normalized
+        or "'source': 'documents'" in normalized
+    )
+
+
+def _extract_grep_document_source_filters(text: str) -> set[str]:
+    providers: set[str] = set()
+    for match in re.finditer(r"[\"']document_source[\"']\s*:\s*[\"']([^\"']+)[\"']", text):
+        providers.add(match.group(1).strip().lower())
+    for match in re.finditer(r"document_source\s*[:=]\s*([a-z0-9_ -]+)", text, re.IGNORECASE):
+        providers.add(match.group(1).strip().lower())
+    return providers
+
+
+def _validate_user_data_prod_grep_messages(messages: List[dict]) -> Optional[str]:
+    """Require prod user-data benchmark grep calls to cover every provider explicitly."""
+    seen_providers: set[str] = set()
+    matching_grep_calls = 0
+
+    for msg in messages:
+        meta = msg.get("metadata") or {}
+        if meta.get("toolName") != "grep" or meta.get("toolStatus") != "FINISHED":
+            continue
+        text = str(msg.get("text") or "")
+        if not _grep_message_uses_documents_source(text):
+            continue
+        matched = _extract_grep_document_source_filters(text) & USER_DATA_PROD_DOCUMENT_SOURCES
+        if matched:
+            matching_grep_calls += 1
+            seen_providers.update(matched)
+
+    missing = USER_DATA_PROD_DOCUMENT_SOURCES - seen_providers
+    if missing:
+        return (
+            "User-data prod grep must include completed grep calls with source='documents' "
+            "and filters.document_source for every V1 provider. "
+            f"Missing: {sorted(missing)}. Seen: {sorted(seen_providers)}. "
+            f"Matching grep calls: {matching_grep_calls}"
+        )
+    return None
+
+
+async def validate_user_data_prod_grep_contract(base_url: str, root_agent_id: str) -> Optional[str]:
+    agents = await get_agent_tree(base_url, root_agent_id)
+    agent_ids = [a["agent_id"] for a in agents] if agents else [root_agent_id]
+
+    messages: List[dict] = []
+    for aid in agent_ids:
+        try:
+            data = await get_agent(base_url, aid)
+        except Exception:
+            continue
+        messages.extend(data.get("messages", []))
+    return _validate_user_data_prod_grep_messages(messages)
 
 
 def _validate_tool_count_expectations(
@@ -3607,6 +3694,18 @@ async def run_single_task(
                         failure_reason = tool_count_error
             except Exception as e:
                 print(f"    ⚠ Tool count check failed: {e}")
+
+        if task.name == USER_DATA_PROD_GREP_TASK_NAME and passed:
+            try:
+                prod_grep_contract_error = await validate_user_data_prod_grep_contract(
+                    base_url, agent_id
+                )
+                if prod_grep_contract_error:
+                    passed = False
+                    failure_reason = prod_grep_contract_error
+            except Exception as e:
+                passed = False
+                failure_reason = f"User-data prod grep contract check failed: {e}"
 
         # Final context well-formedness check
         approval_mode_blocked_on_approval = _approval_mode_allows_open_tool_context(

@@ -6,7 +6,7 @@ import {
   refreshCredentialExchangeActivityBridge,
 } from './domains/passkey-import/activity-bridge';
 import { importPasskeysFromToken } from './domains/passkey-import/service';
-import { AuthService } from './services/auth';
+import { AuthService } from './domains/auth/runtime';
 import { initLogger, logConsole, logConsoleError } from './base/logger';
 import { getOnboardingComplete } from './handlers/registry';
 import {

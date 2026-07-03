@@ -6,6 +6,7 @@
 import { isPostgresRegexError } from './regexSafety';
 import {
   buildAgentNetworkMatch,
+  buildDocumentMatch,
   buildMessageMatch,
   buildNetworkMatch,
   buildTransactionMatch,
@@ -130,6 +131,35 @@ async function searchSource(
     return { total, matches: rows.map((row) => buildTransactionMatch(row, input)) };
   }
 
+  if (source === 'documents') {
+    const filters = input.filters.documents;
+    const [total, rows] = await Promise.all([
+      grepRepo.countDocumentGrepRows({
+        userId,
+        pattern: input.dbPattern,
+        caseInsensitive: input.caseInsensitive,
+        documentSource: filters?.documentSource,
+        since: filters?.since,
+        until: filters?.until,
+        path: filters?.path,
+        tag: filters?.tag,
+      }),
+      grepRepo.searchDocumentGrepRows({
+        userId,
+        pattern: input.dbPattern,
+        caseInsensitive: input.caseInsensitive,
+        limit: input.headLimit,
+        offset: input.offset,
+        documentSource: filters?.documentSource,
+        since: filters?.since,
+        until: filters?.until,
+        path: filters?.path,
+        tag: filters?.tag,
+      }),
+    ]);
+    return { total, matches: rows.map((row) => buildDocumentMatch(row, input)) };
+  }
+
   const agentIds = await agentTreeIdsForGrep(userId, agentId);
   const [total, rows] = await Promise.all([
     grepRepo.countAgentNetworkGrepRows({
@@ -242,6 +272,7 @@ export async function getSummary(userId: string): Promise<SummaryResult> {
   const oldestMessage = await repo.getOldestMessage(userId);
   const newestMessage = await repo.getNewestMessage(userId);
   const transactionSummary = await grepRepo.getTransactionSummary(userId);
+  const documentSummary = await grepRepo.getDocumentSummary(userId);
 
   const channels = channelCounts.reduce(
     (acc, c) => {
@@ -282,5 +313,13 @@ export async function getSummary(userId: string): Promise<SummaryResult> {
   if (transactionSummary.total_transactions > 0) {
     result.sources.transactions = transactionSummary;
   }
+  if (documentSummary.total_documents > 0) {
+    result.sources.documents = documentSummary;
+  }
   return result;
+}
+
+export async function getSnapshot(userId: string) {
+  const snapshot = await repo.getUserSnapshot(userId);
+  return { snapshot };
 }

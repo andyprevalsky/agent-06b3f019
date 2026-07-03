@@ -18,10 +18,10 @@ import { IMessageSync } from '../../services/iMessageSync';
 import { CookieSync } from '../../services/cookieSync';
 import { BrowserStateSync } from '../../services/browserStateSync';
 import { ClaudeCredentialSync } from '../../services/claudeCredentialSync';
-import { GptCredentialSync } from '../../services/gptCredentialSync';
+import { CODEX_AUTH_PATH, GptCredentialSync } from '../../services/gptCredentialSync';
+import { UserDataSync } from '../../services/userDataSync';
 import { TelegramSync } from '../../services/messaging/platforms/telegram/TelegramSync';
 import { WhatsAppSync } from '../../services/messaging/platforms/whatsapp/WhatsAppSync';
-import { CODEX_AUTH_PATH } from '../gpt-credential-sync/config';
 import { PLATFORM_CONFIG, INTEGRATION_CACHE_TTL_MS } from './config';
 import { fetchIntegrations } from './repo';
 import type { CachedIntegrations, Integration, Platform, SyncConfig } from './types';
@@ -176,6 +176,10 @@ export async function syncPlatformCore(platform: Platform, connected?: Set<strin
 
     case 'compute':
       await syncComputeCredentials(connected);
+      break;
+
+    case 'userData':
+      await UserDataSync.sync(connected);
       break;
   }
 }
@@ -354,6 +358,14 @@ export async function startRealTimeWatchers(): Promise<void> {
     IMessageSync.startRealTimeSync();
     logConsole('SyncManager', 'Started iMessage real-time watcher');
   }
+  const connected = await IntegrationCache.getConnected();
+  if (
+    PLATFORM_CONFIG.userData.enableRealTime &&
+    PLATFORM_CONFIG.userData.integrationNames.some((name) => connected.has(name))
+  ) {
+    await UserDataSync.startRealTimeSync(connected);
+    logConsole('SyncManager', 'Started user-data real-time watchers');
+  }
   startComputeRealTime();
   await startTelegramRealTime();
   await startWhatsAppRealTime();
@@ -373,6 +385,7 @@ export async function stopRealTimeWatchers(): Promise<void> {
     codexAuthWatcher.close();
     codexAuthWatcher = null;
   }
+  UserDataSync.stopRealTimeSync();
   await TelegramSync.disconnect().catch((err) =>
     logConsoleError('SyncManager', 'Error disconnecting Telegram', err)
   );

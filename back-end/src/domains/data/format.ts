@@ -96,6 +96,17 @@ function firstNonEmpty(...values: Array<string | null | undefined>): string {
   return '';
 }
 
+function metadataString(metadata: unknown, key: string): string | undefined {
+  if (metadata === null || typeof metadata !== 'object' || Array.isArray(metadata))
+    return undefined;
+  const value = (metadata as Record<string, unknown>)[key];
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined;
+}
+
+function pathSegment(value: string): string {
+  return value.replace(/^\/+|\/+$/g, '').replace(/[?#]/g, '_');
+}
+
 function threadName(row: grepRepo.MessageGrepRow): string {
   const fullName = [row.firstName, row.lastName].filter(Boolean).join(' ');
   return firstNonEmpty(fullName, row.phoneNumber, row.email, row.personId);
@@ -299,4 +310,48 @@ export function buildTransactionMatch(
     timestamp: row.date.toISOString(),
     content: renderedContent,
   };
+}
+
+export function buildDocumentMatch(
+  row: grepRepo.DocumentGrepRow,
+  input: ValidatedGrepInput
+): GrepMatch {
+  const vault = metadataString(row.metadata, 'vault');
+  const relativePath =
+    metadataString(row.metadata, 'path') ?? metadataString(row.metadata, 'relativePath');
+  const path =
+    row.source === 'obsidian' && vault !== undefined && relativePath !== undefined
+      ? `documents/obsidian/${pathSegment(vault)}/${pathSegment(relativePath)}`
+      : `documents/${row.source}/${pathSegment(row.title)}/${pathSegment(row.externalId)}`;
+  const timestamp = row.sourceUpdatedAt ?? row.updatedAt;
+  const content = [
+    valueToLine('source', 'documents'),
+    valueToLine('document_source', row.source),
+    valueToLine('document_id', row.id),
+    valueToLine('external_id', row.externalId),
+    valueToLine('title', row.title),
+    valueToLine('url', row.url),
+    valueToLine('timestamp', timestamp.toISOString()),
+    valueToLine('metadata', row.metadata),
+    'content:',
+    row.content,
+  ]
+    .filter((line): line is string => line !== null)
+    .join('\n');
+
+  return buildMatch({
+    source: 'documents',
+    path,
+    pointer: `documents:${row.id}`,
+    timestamp,
+    location: {
+      source: 'documents',
+      path,
+      document_id: row.id,
+      source_name: row.source,
+      field: 'content',
+    },
+    content,
+    input,
+  });
 }
