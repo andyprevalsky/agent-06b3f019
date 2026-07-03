@@ -120,7 +120,10 @@ export async function fetchTestPromptCatalog(): Promise<CatalogTestPrompt[]> {
   if (!response.ok) {
     throw new Error(`test-prompts fetch failed: ${response.status}`);
   }
-  const data = (await response.json()) as { prompts: CatalogTestPrompt[] };
+  const data = (await response.json()) as { prompts?: CatalogTestPrompt[] };
+  if (!Array.isArray(data.prompts)) {
+    throw new Error('test-prompts fetch failed: malformed catalog response');
+  }
   return data.prompts;
 }
 

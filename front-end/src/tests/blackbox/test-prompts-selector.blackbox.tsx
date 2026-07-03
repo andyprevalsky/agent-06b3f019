@@ -198,4 +198,28 @@ describe('TestPromptsSelector', () => {
     expect(screen.getByText(/Loading catalog/i)).toBeInTheDocument();
     warnSpy.mockRestore();
   });
+
+  it('keeps the picker stable when the catalog response is malformed', async () => {
+    fetchSpy.mockImplementation(async (input: FetchInput) => {
+      const url = inputUrl(input);
+      if (isCatalogUrl(url)) {
+        return new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(null, { status: 404 });
+    });
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    renderWithProviders(<TestPromptsSelector onSelectPrompt={vi.fn()} />);
+    fireEvent.mouseEnter(screen.getByTitle('Select a test prompt'));
+    await waitFor(() => {
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Failed to load catalog'),
+        expect.objectContaining({ message: expect.stringContaining('malformed catalog') }),
+      );
+    });
+    expect(screen.getByText(/Loading catalog/i)).toBeInTheDocument();
+    warnSpy.mockRestore();
+  });
 });
