@@ -1,7 +1,13 @@
-import { randomBytes, createCipheriv, publicEncrypt, constants } from './crypto';
+import {
+  randomBytes,
+  createCipheriv,
+  createPrivateKey,
+  createPublicKey,
+  publicEncrypt,
+  constants,
+} from './crypto';
 import { createLogger } from './logger';
 import { decryptCredentialEnvelope } from './claudeCredentials';
-import { RSA_PUBLIC_KEY_PEM } from './encryptionKeys';
 
 const log = createLogger('PlaidCredentials');
 
@@ -15,9 +21,28 @@ const log = createLogger('PlaidCredentials');
  * encrypted at the application layer prior to storage in our database, in
  * addition to the at-rest encryption provided by Supabase Postgres.
  *
- * Encryption key: `RSA_PUBLIC_KEY_PEM` from `domains/integrations/config.ts`
- * Decryption key: same RSA private key as `CLAUDE_CREDENTIAL_DECRYPTION_KEY`
+ * Encryption key: public key derived from `CLAUDE_CREDENTIAL_DECRYPTION_KEY`.
+ * This guarantees server-created Plaid token envelopes can be decrypted by the
+ * same backend/worker configuration that will later call Plaid sync/remove.
  */
+function getPlaidAccessTokenPublicKeyPem(): string {
+  const decryptionKeyB64 = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
+  if (!decryptionKeyB64) {
+    throw new Error('CLAUDE_CREDENTIAL_DECRYPTION_KEY is required to encrypt Plaid access tokens');
+  }
+  try {
+    const privateKeyPem = Buffer.from(decryptionKeyB64, 'base64').toString('utf8');
+    return createPublicKey(createPrivateKey(privateKeyPem))
+      .export({ type: 'spki', format: 'pem' })
+      .toString();
+  } catch (error) {
+    log.error('Failed to derive Plaid encryption public key from configured private key', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw new Error('Invalid CLAUDE_CREDENTIAL_DECRYPTION_KEY; cannot encrypt Plaid access tokens');
+  }
+}
+
 export function encryptPlaidAccessToken(accessToken: string): string {
   if (!accessToken) {
     throw new Error('encryptPlaidAccessToken: accessToken must be non-empty');
@@ -33,7 +58,7 @@ export function encryptPlaidAccessToken(accessToken: string): string {
 
   const encryptedAesKey = publicEncrypt(
     {
-      key: RSA_PUBLIC_KEY_PEM,
+      key: getPlaidAccessTokenPublicKeyPem(),
       padding: constants.RSA_PKCS1_OAEP_PADDING,
       oaepHash: 'sha256',
     },

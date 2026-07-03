@@ -3,7 +3,7 @@
  * Integrations domain service — business logic, no req/res.
  */
 
-import { type Prisma, IntegrationType, IntegrationStatus } from './types';
+import { type Prisma, IntegrationType, IntegrationStatus, mergeJson } from './types';
 import { createLogger } from '../../providers/logger';
 import { sendSms } from '../../providers/smsQueue';
 import { getAdminPhone } from './config';
@@ -62,6 +62,7 @@ export {
   processPasswordsUpload,
   processPasskeysUpload,
   processApplePasswordsUpload,
+  processDocumentsUpload,
   decryptPayload,
   decryptCompressedPayload,
 } from './uploadService';
@@ -308,6 +309,35 @@ export async function sendEmail(
   return result;
 }
 /* c8 ignore stop */
+
+export async function disconnectGmailAccount(userId: string, email: string) {
+  const credential = await repo.findGmailCredentialForDisconnect(userId, email);
+  if (credential === null || credential === undefined) {
+    const availableRows = await repo.findAvailableGmailEmails(userId);
+    const available = availableRows
+      .map((row) => row.email)
+      .filter((value): value is string => value !== null && value !== undefined && value !== '');
+    throw new GmailAccountNotFoundError(email, available);
+  }
+
+  await repo.deleteEmailCredential(credential.id);
+  const remainingRows = await repo.findConnectedEmailCredentials(userId, credential.provider);
+  const connectedEmails = remainingRows
+    .map((row) => row.email)
+    .filter((value): value is string => value !== null && value !== undefined && value !== '');
+
+  await repo.updateIntegration(credential.integrationId, {
+    status:
+      connectedEmails.length > 0 ? IntegrationStatus.CONNECTED : IntegrationStatus.NOT_CONNECTED,
+    isActive: connectedEmails.length > 0,
+    config: mergeJson(credential.integration.config ?? null, {
+      connectedEmail: connectedEmails[0] ?? null,
+      connectedEmails,
+    }),
+  });
+
+  return { disconnectedEmail: email, connectedEmails };
+}
 
 export async function getAvailableGmailEmails(userId: string) {
   const creds = await repo.findAvailableGmailEmails(userId);

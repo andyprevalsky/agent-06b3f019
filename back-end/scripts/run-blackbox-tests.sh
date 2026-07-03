@@ -85,6 +85,22 @@ if $DB_FOUND; then
   LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria"
   export DATABASE_URL="$LOCAL_DB_URL"
   export DIRECT_URL="$LOCAL_DB_URL"
+  if command -v psql >/dev/null 2>&1; then
+    psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
+DO $$
+BEGIN
+  IF to_regclass('"UserAuthAssistanceRequest"') IS NOT NULL
+     AND to_regclass('"AgentAttentionRequest"') IS NOT NULL THEN
+    DELETE FROM "UserAuthAssistanceRequest" request
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM "AgentAttentionRequest" attention
+      WHERE attention.id = request.id
+    );
+  END IF;
+END $$;
+SQL
+  fi
   echo "Syncing Prisma schema to local test database..."
   npx prisma db push --skip-generate --accept-data-loss >/dev/null
 else

@@ -1,10 +1,11 @@
 import { useState, useCallback } from 'react';
 
-import { fetchIntegrationsApi, startGmailOAuthApi } from '../api';
+import { disconnectGmailAccountApi, fetchIntegrationsApi, startGmailOAuthApi } from '../api';
 import { GMAIL_POLL_TIMEOUT_MS, GMAIL_POLL_INTERVAL_MS } from '../config';
 
 export function useGmailConnect(fetchIntegrations: () => Promise<void>) {
   const [connectingProvider, setConnectingProvider] = useState<'gmail' | null>(null);
+  const [disconnectingEmail, setDisconnectingEmail] = useState<string | null>(null);
 
   const handleEmailConnect = useCallback(
     async (provider: 'gmail') => {
@@ -54,5 +55,18 @@ export function useGmailConnect(fetchIntegrations: () => Promise<void>) {
     [fetchIntegrations],
   );
 
-  return { connectingProvider, handleEmailConnect } as const;
+  const handleEmailDisconnect = useCallback(
+    async (email: string) => {
+      setDisconnectingEmail(email);
+      try {
+        await disconnectGmailAccountApi(email);
+        await fetchIntegrations();
+      } finally {
+        setDisconnectingEmail(null);
+      }
+    },
+    [fetchIntegrations],
+  );
+
+  return { connectingProvider, disconnectingEmail, handleEmailConnect, handleEmailDisconnect } as const;
 }

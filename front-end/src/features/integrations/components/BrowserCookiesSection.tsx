@@ -13,7 +13,6 @@ import type { BrowserType, BrowserInfo } from '@/features/integration-handlers-c
 import { Button } from '@/components/ui/button';
 
 import BrowserIcon from './BrowserIcon';
-import ConnectedStatusText from './ConnectedStatusText';
 import DropdownIconFrame, {
   browserDropdownIconPreset,
   dropdownIconImageClassName,
@@ -130,9 +129,8 @@ export default function BrowserCookiesSection({
                   >
                     <BrowserIcon type={browser.type} className={dropdownIconImageClassName} />
                   </DropdownIconFrame>
-                  <div className="flex flex-col items-start">
-                    <span className="text-sm">{browser.name}</span>
-                    <ConnectedStatusText isConnected={connectedBrowsers.has(browser.type)} />
+                  <div className="flex min-w-0 items-center">
+                    <span className="truncate text-sm">{browser.name}</span>
                   </div>
                 </div>
 

@@ -1,5 +1,10 @@
 """Health check HTTP server for fly.io monitoring."""
 
+import ctypes
+import gc
+import importlib
+import os
+import sys
 import threading
 from datetime import datetime
 from typing import Optional
@@ -23,6 +28,12 @@ worker_status = {
 # Reuse process handle so CPU deltas are computed between scrapes.
 _process = psutil.Process()
 _process.cpu_percent(interval=None)
+
+_BENCHMARK_MEMORY_MODULES = (
+    "domains.spawn_browser_agent_v3.handler",
+    "domains.spawn_claude_code_agent.service",
+    "providers.rose.browser_use",
+)
 
 # Queue metrics (updated by background poller in worker.py)
 _task_queue_backlog = 0
@@ -59,6 +70,56 @@ def _process_tree_rss_bytes() -> tuple[int, int]:
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
     return process_rss, child_rss
+
+
+def _trim_process_memory() -> bool:
+    """Ask the platform allocator to release free arenas when supported."""
+    if sys.platform == "darwin":
+        try:
+            libc = ctypes.CDLL(None)
+            libc.malloc_default_zone.restype = ctypes.c_void_p
+            zone = libc.malloc_default_zone()
+            libc.malloc_zone_pressure_relief.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+            libc.malloc_zone_pressure_relief.restype = ctypes.c_size_t
+            return libc.malloc_zone_pressure_relief(zone, 0) > 0
+        except Exception:
+            return False
+
+    try:
+        libc = ctypes.CDLL("libc.so.6")
+        return bool(libc.malloc_trim(0))
+    except Exception:
+        return False
+
+
+def _benchmark_memory_baseline() -> dict:
+    """Warm smoke-only lazy imports, then collect memory before RSS sampling."""
+    imported: list[str] = []
+    import_errors: dict[str, str] = {}
+    before_process_rss, before_child_rss = _process_tree_rss_bytes()
+
+    for module_name in _BENCHMARK_MEMORY_MODULES:
+        try:
+            importlib.import_module(module_name)
+            imported.append(module_name)
+        except Exception as exc:
+            import_errors[module_name] = str(exc)
+
+    collected = gc.collect()
+    collected += gc.collect()
+    allocator_trimmed = _trim_process_memory()
+    after_process_rss, after_child_rss = _process_tree_rss_bytes()
+
+    return {
+        "imported": imported,
+        "import_errors": import_errors,
+        "gc_collected": collected,
+        "allocator_trimmed": allocator_trimmed,
+        "before_process_rss_bytes": before_process_rss,
+        "before_child_rss_bytes": before_child_rss,
+        "after_process_rss_bytes": after_process_rss,
+        "after_child_rss_bytes": after_child_rss,
+    }
 
 
 def set_queue_metrics(
@@ -320,6 +381,14 @@ autoscaler_memory_signal_percent {_autoscaler_memory_signal_percent or _machine_
 """
 
     return metrics_text, 200, {"Content-Type": "text/plain; charset=utf-8"}
+
+
+@app.route("/benchmark/memory-baseline", methods=["POST"])
+def benchmark_memory_baseline():
+    """Benchmark-only endpoint that stabilizes worker RSS before smoke sampling."""
+    if os.environ.get("ENABLE_BENCHMARK_MEMORY_BASELINE") != "1":
+        return jsonify({"error": "benchmark memory baseline disabled"}), 404
+    return jsonify(_benchmark_memory_baseline()), 200
 
 
 def set_worker_status(healthy: bool):

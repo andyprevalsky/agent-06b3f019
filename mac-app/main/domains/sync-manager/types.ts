@@ -14,7 +14,8 @@ export type Platform =
   | 'whatsapp'
   | 'cookies'
   | 'browserState'
-  | 'compute';
+  | 'compute'
+  | 'userData';
 
 /**
  * Configuration for a single sync platform.

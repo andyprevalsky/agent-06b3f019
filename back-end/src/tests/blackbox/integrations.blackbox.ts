@@ -175,6 +175,29 @@ const ClaudeCodeUploadResponse = z.object({
   message: z.string(),
 });
 
+const DocumentsUploadResponse = z.object({
+  integration: z.object({
+    id: z.string(),
+    name: z.string(),
+    status: z.string(),
+  }),
+  documents: z.array(z.object({ id: z.string(), externalId: z.string() })),
+  documentCount: z.number(),
+  snapshotRevision: z
+    .object({
+      snapshotVersion: z.number(),
+      revisionId: z.string(),
+    })
+    .nullable(),
+  syncState: z.object({
+    id: z.string(),
+    source: z.string(),
+    status: z.string(),
+    nextSyncAt: z.string().nullable(),
+  }),
+  dryRun: z.boolean(),
+});
+
 // ==================== CAPTURE TYPES ====================
 
 interface CapturedCall {
@@ -382,6 +405,9 @@ async function createAnonSession(): Promise<{ accessToken: string; userId: strin
 async function teardown(): Promise<void> {
   if (createdAnonUserIds.size === 0) return;
   const userIds = Array.from(createdAnonUserIds);
+  await prisma.userSnapshotRevision.deleteMany({ where: { userId: { in: userIds } } });
+  await prisma.userSnapshot.deleteMany({ where: { userId: { in: userIds } } });
+  await prisma.userDataDocument.deleteMany({ where: { userId: { in: userIds } } });
   const { count } = await prisma.integration.deleteMany({ where: { userId: { in: userIds } } });
   console.log(`\nTeardown: deleted ${count} Integration rows across ${userIds.length} anon users`);
   createdAnonUserIds.clear();
@@ -525,6 +551,14 @@ async function testEmailStart_noAuth() {
 
 async function testEmailMessages_noAuth() {
   const res = await request(`${BASE_URL}/api/integrations/email/messages`);
+  assertStatus(res.status, 401, res.data);
+}
+
+async function testEmailGmailAccountDelete_noAuth() {
+  const res = await request(
+    `${BASE_URL}/api/integrations/email/gmail/accounts/${encodeURIComponent('noauth@gmail.com')}`,
+    { method: 'DELETE' }
+  );
   assertStatus(res.status, 401, res.data);
 }
 
@@ -2079,6 +2113,78 @@ async function testEmailMessages_gmailNotConnected() {
   );
   assertStatus(res.status, 404, res.data);
   assertSchema(ErrorResponse, res.data, 'email messages not connected');
+}
+
+async function testEmailGmailAccountDelete_removesOneCredential() {
+  const { accessToken, userId } = await createAnonSession();
+  const integration = await prisma.integration.create({
+    data: {
+      userId,
+      name: 'gmail',
+      type: 'DATA_SOURCE',
+      status: 'CONNECTED',
+      isActive: true,
+      config: {
+        provider: 'gmail',
+        connectedEmail: 'primary@gmail.com',
+        connectedEmails: ['primary@gmail.com', 'secondary@gmail.com'],
+      },
+    },
+  });
+  await prisma.emailIntegrationCredential.createMany({
+    data: [
+      {
+        userId,
+        integrationId: integration.id,
+        provider: 'GMAIL',
+        email: 'primary@gmail.com',
+        accessToken: 'access-primary',
+        refreshToken: 'refresh-primary',
+      },
+      {
+        userId,
+        integrationId: integration.id,
+        provider: 'GMAIL',
+        email: 'secondary@gmail.com',
+        accessToken: 'access-secondary',
+        refreshToken: 'refresh-secondary',
+      },
+    ],
+  });
+
+  const res = await request(
+    `${BASE_URL}/api/integrations/email/gmail/accounts/${encodeURIComponent('primary@gmail.com')}`,
+    { method: 'DELETE', headers: authHeaders(accessToken) }
+  );
+  assertStatus(res.status, 200, res.data);
+  const body = res.data as { disconnectedEmail?: string; connectedEmails?: string[] };
+  assert(body.disconnectedEmail === 'primary@gmail.com', 'deleted email should be echoed');
+  assert(
+    Array.isArray(body.connectedEmails) &&
+      body.connectedEmails.length === 1 &&
+      body.connectedEmails[0] === 'secondary@gmail.com',
+    'remaining email should be returned'
+  );
+
+  const deleted = await prisma.emailIntegrationCredential.findFirst({
+    where: { userId, email: 'primary@gmail.com' },
+  });
+  assert(deleted === null, 'deleted Gmail credential should be removed');
+
+  const updated = await prisma.integration.findUnique({ where: { id: integration.id } });
+  const config = updated?.config as { connectedEmail?: unknown; connectedEmails?: unknown };
+  assert(updated?.status === 'CONNECTED', 'integration should stay connected');
+  assert(updated?.isActive === true, 'integration should stay active');
+  assert(
+    config.connectedEmail === 'secondary@gmail.com',
+    'primary config should move to remaining email'
+  );
+  assert(
+    Array.isArray(config.connectedEmails) &&
+      config.connectedEmails.length === 1 &&
+      config.connectedEmails[0] === 'secondary@gmail.com',
+    'connectedEmails config should be recomputed'
+  );
 }
 
 async function testPasswordsRequest_missingRequest() {
@@ -4845,6 +4951,161 @@ async function testClaudeCodeToken_noOnboarding() {
   assertSchema(ErrorResponse, res.data, 'claude-code token no onboarding missing');
 }
 
+async function testDocumentsUpload_happyPath() {
+  const res = await request(`${BASE_URL}/api/integrations/documents/upload`, {
+    method: 'POST',
+    headers: apiKeyHeaders(ctx.userId1),
+    body: JSON.stringify({
+      source: 'apple_notes',
+      documents: [
+        {
+          externalId: 'note-connectors-1',
+          title: 'Connector planning',
+          content: 'Apple Notes connector should preserve user preference details.',
+          sourceUpdatedAt: '2026-07-03T12:00:00Z',
+          metadata: { folder: 'Product' },
+        },
+      ],
+      snapshotRevision: {
+        documentExternalId: 'note-connectors-1',
+        before: {},
+        after: {
+          preferences: {
+            agent_data_sources: ['apple_notes'],
+          },
+        },
+        changes: { preferences: ['agent_data_sources'] },
+        model: 'test-distiller',
+        promptKey: 'user-snapshot-v1',
+      },
+    }),
+  });
+  assertStatus(res.status, 200, res.data);
+  const body = assertSchema(DocumentsUploadResponse, res.data, 'documents upload');
+  if (
+    body.integration.name !== 'apple_notes' ||
+    body.integration.status !== 'CONNECTED' ||
+    body.documentCount !== 1 ||
+    body.snapshotRevision?.snapshotVersion !== 1 ||
+    body.syncState.source !== 'apple_notes' ||
+    body.syncState.status !== 'CONNECTED' ||
+    body.dryRun
+  ) {
+    throw new Error(`Unexpected documents upload response: ${JSON.stringify(body)}`);
+  }
+
+  const snapshot = await prisma.userSnapshot.findUnique({ where: { userId: ctx.userId1! } });
+  if (
+    snapshot === null ||
+    snapshot.version !== 1 ||
+    JSON.stringify(snapshot.content).indexOf('apple_notes') === -1
+  ) {
+    throw new Error(`Expected persisted snapshot, got ${JSON.stringify(snapshot)}`);
+  }
+
+  const syncState = await prisma.userDataProviderSyncState.findUnique({
+    where: { userId_source: { userId: ctx.userId1!, source: 'apple_notes' } },
+  });
+  if (
+    syncState === null ||
+    syncState.status !== 'CONNECTED' ||
+    syncState.lastSuccessfulSyncAt === null ||
+    syncState.nextSyncAt === null ||
+    !syncState.realtimeEnabled
+  ) {
+    throw new Error(`Expected persisted Apple Notes sync state, got ${JSON.stringify(syncState)}`);
+  }
+}
+
+async function testDocumentsUpload_idempotentUpsert() {
+  const externalId = `obsidian-idempotent-${crypto.randomUUID()}`;
+  const first = await request(`${BASE_URL}/api/integrations/documents/upload`, {
+    method: 'POST',
+    headers: apiKeyHeaders(ctx.userId1),
+    body: JSON.stringify({
+      source: 'obsidian',
+      documents: [
+        {
+          externalId,
+          title: 'Idempotent note',
+          content: 'Obsidian first version contains Helios marker.',
+          sourceUpdatedAt: '2026-07-03T12:00:00Z',
+          metadata: { vault: 'main', path: 'Idempotent.md' },
+        },
+      ],
+    }),
+  });
+  assertStatus(first.status, 200, first.data);
+  const firstBody = assertSchema(DocumentsUploadResponse, first.data, 'documents first upload');
+
+  const second = await request(`${BASE_URL}/api/integrations/documents/upload`, {
+    method: 'POST',
+    headers: apiKeyHeaders(ctx.userId1),
+    body: JSON.stringify({
+      source: 'obsidian',
+      documents: [
+        {
+          externalId,
+          title: 'Idempotent note updated',
+          content: 'Obsidian second version contains Helios marker and update marker.',
+          sourceUpdatedAt: '2026-07-03T12:10:00Z',
+          metadata: { vault: 'main', path: 'Idempotent.md', tags: ['updated'] },
+        },
+      ],
+    }),
+  });
+  assertStatus(second.status, 200, second.data);
+  const secondBody = assertSchema(DocumentsUploadResponse, second.data, 'documents second upload');
+  if (firstBody.documents[0]?.id !== secondBody.documents[0]?.id) {
+    throw new Error(
+      `Expected idempotent document id, got ${JSON.stringify({ firstBody, secondBody })}`
+    );
+  }
+
+  const rows = await prisma.userDataDocument.findMany({
+    where: { userId: ctx.userId1!, source: 'obsidian', externalId },
+  });
+  if (
+    rows.length !== 1 ||
+    rows[0]?.title !== 'Idempotent note updated' ||
+    rows[0]?.deletedAt !== null
+  ) {
+    throw new Error(`Expected one updated document row, got ${JSON.stringify(rows)}`);
+  }
+}
+
+async function testDocumentsUpload_dryRunDoesNotPersist() {
+  const externalId = `dry-run-${crypto.randomUUID()}`;
+  const res = await request(`${BASE_URL}/api/integrations/documents/upload`, {
+    method: 'POST',
+    headers: apiKeyHeaders(ctx.userId1),
+    body: JSON.stringify({
+      source: 'chatgpt',
+      dryRun: true,
+      documents: [
+        {
+          externalId,
+          title: 'Dry run prod smoke',
+          content: 'Dry run validates prod path without persistence.',
+          metadata: { provider: 'chatgpt' },
+        },
+      ],
+    }),
+  });
+  assertStatus(res.status, 200, res.data);
+  const body = assertSchema(DocumentsUploadResponse, res.data, 'documents dry run');
+  if (!body.dryRun || body.integration.id !== 'dry-run' || body.syncState.id !== 'dry-run') {
+    throw new Error(`Unexpected dry-run response: ${JSON.stringify(body)}`);
+  }
+
+  const persisted = await prisma.userDataDocument.findFirst({
+    where: { userId: ctx.userId1!, source: 'chatgpt', externalId },
+  });
+  if (persisted !== null) {
+    throw new Error(`Dry-run upload persisted a document: ${JSON.stringify(persisted)}`);
+  }
+}
+
 // ==================== RUNNER ====================
 
 async function runAll() {
@@ -4881,6 +5142,10 @@ async function runAll() {
     { name: 'POST /passwords/request no auth -> 401', fn: testPasswordsRequest_noAuth },
     { name: 'POST /email/start no auth -> 401', fn: testEmailStart_noAuth },
     { name: 'GET /email/messages no auth -> 401', fn: testEmailMessages_noAuth },
+    {
+      name: 'DELETE /email/gmail/accounts/:email no auth -> 401',
+      fn: testEmailGmailAccountDelete_noAuth,
+    },
     { name: 'POST /email/send no auth -> 401', fn: testEmailSend_noAuth },
     { name: 'POST /upload no auth -> 401', fn: testUpload_noAuth },
     { name: 'POST /linkedin/upload no auth -> 401', fn: testLinkedinUpload_noAuth },
@@ -4983,6 +5248,9 @@ async function runAll() {
       name: 'POST /passwords/upload apple source marks Apple Passwords connected',
       fn: testPasswordsUpload_appleSourceMarksApplePasswordsIntegration,
     },
+    { name: 'POST /documents/upload happy path', fn: testDocumentsUpload_happyPath },
+    { name: 'POST /documents/upload idempotent upsert', fn: testDocumentsUpload_idempotentUpsert },
+    { name: 'POST /documents/upload dry run', fn: testDocumentsUpload_dryRunDoesNotPersist },
 
     // Encrypted upload error-path coverage (decryption-failure + shape-validation branches)
     {
@@ -5147,6 +5415,10 @@ async function runAll() {
     {
       name: 'GET /email/messages valid since empty account',
       fn: testEmailMessages_validSinceEmptyAccount,
+    },
+    {
+      name: 'DELETE /email/gmail/accounts/:email removes one credential',
+      fn: testEmailGmailAccountDelete_removesOneCredential,
     },
 
     // File upload validation

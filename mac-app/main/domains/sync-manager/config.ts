@@ -65,4 +65,10 @@ export const PLATFORM_CONFIG: Record<Platform, SyncConfig> = {
     syncOnStartup: true,
     integrationNames: ['claude_code', 'gpt_code'],
   },
+  userData: {
+    interval: 5 * 60 * 1000,
+    enableRealTime: true,
+    syncOnStartup: true,
+    integrationNames: ['chatgpt', 'claude', 'apple_notes', 'obsidian'],
+  },
 };

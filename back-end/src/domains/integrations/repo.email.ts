@@ -113,6 +113,19 @@ export async function findGmailCredentialForSend(userId: string, fromEmail: stri
   });
 }
 
+export async function findGmailCredentialForDisconnect(userId: string, email: string) {
+  return prisma.emailIntegrationCredential.findFirst({
+    where: {
+      userId,
+      provider: EmailProvider.GMAIL,
+      email,
+    },
+    include: {
+      integration: true,
+    },
+  });
+}
+
 export async function findAvailableGmailEmails(userId: string) {
   return prisma.emailIntegrationCredential.findMany({
     where: { userId, provider: EmailProvider.GMAIL, accessToken: { not: null } },

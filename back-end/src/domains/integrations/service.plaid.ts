@@ -1,3 +1,4 @@
+/* eslint-disable max-lines */
 /**
  * Plaid integration service.
  *
@@ -30,13 +31,18 @@ import {
 import {
   countActivePlaidItems,
   findActivePlaidItemsForUser,
+  findActivePlaidItemsWithAccountsForUser,
   findPlaidItemForUser,
+  findPlaidItemWithAccountsForUser,
+  getPlaidAccountTransactionStatsForItems,
   markIntegrationDisconnected,
   markPlaidItemDisconnected,
   persistPlaidItem,
   PlaidItemStatus,
+  type PlaidAccountTransactionStats,
   type PlaidItemWithAccounts,
 } from './repo.plaid';
+import { syncPlaidItemTransactions } from './service.plaidTransactions';
 
 const log = createLogger('PlaidService');
 
@@ -58,6 +64,13 @@ export class PlaidApiError extends Error {
   }
 }
 
+export class PlaidDuplicateItemError extends Error {
+  constructor(message = 'This financial institution account is already connected') {
+    super(message);
+    this.name = 'PlaidDuplicateItemError';
+  }
+}
+
 export interface CreatedLinkToken {
   link_token: string;
   expiration: string;
@@ -68,6 +81,13 @@ export interface PublicTokenExchangeResult {
   item: SerializedPlaidItem;
 }
 
+export interface PlaidLinkMetadataAccount {
+  name?: string | null;
+  mask?: string | null;
+  type?: string | null;
+  subtype?: string | null;
+}
+
 export interface SerializedPlaidAccount {
   id: string;
   plaidAccountId: string;
@@ -76,6 +96,20 @@ export interface SerializedPlaidAccount {
   mask: string | null;
   type: string;
   subtype: string | null;
+  sync: SerializedPlaidSyncSummary;
+}
+
+export interface SerializedPlaidDateRange {
+  from: string | null;
+  to: string | null;
+}
+
+export interface SerializedPlaidSyncSummary {
+  transactionCount: number;
+  postedTransactionCount: number;
+  pendingTransactionCount: number;
+  removedTransactionCount: number;
+  dateRange: SerializedPlaidDateRange;
 }
 
 export interface SerializedPlaidItem {
@@ -88,6 +122,9 @@ export interface SerializedPlaidItem {
   createdAt: string;
   lastSyncAt: string | null;
   disconnectedAt: string | null;
+  sync: SerializedPlaidSyncSummary & {
+    state: 'syncing' | 'synced' | 'needs_repair' | 'error';
+  };
   accounts: SerializedPlaidAccount[];
 }
 
@@ -121,14 +158,87 @@ export async function createPlaidLinkToken(userId: string): Promise<CreatedLinkT
   }
 }
 
+export async function createPlaidUpdateLinkToken(
+  userId: string,
+  itemRowId: string
+): Promise<CreatedLinkToken> {
+  const item = await findPlaidItemForUser(userId, itemRowId);
+  if (!item) throw new PlaidItemNotFoundError(itemRowId);
+
+  try {
+    const accessToken = decryptPlaidAccessTokenOrThrow(item.encryptedAccessToken);
+    const data = await createLinkToken({ clientUserId: userId, accessToken });
+    log.info('Created Plaid update-mode link token', { userId, itemRowId });
+    return {
+      link_token: data.link_token,
+      expiration: data.expiration,
+      request_id: data.request_id,
+    };
+  } catch (err) {
+    toApiError(err, 'createUpdateLinkToken');
+  }
+}
+
+function accountLooksDuplicate(
+  candidate: PlaidLinkMetadataAccount,
+  existing: { name: string; mask: string | null; type: string; subtype: string | null }
+): boolean {
+  const nameMatches =
+    typeof candidate.name === 'string' &&
+    candidate.name.trim().toLowerCase() === existing.name.trim().toLowerCase();
+  const maskMatches =
+    candidate.mask !== undefined &&
+    candidate.mask !== null &&
+    existing.mask !== null &&
+    candidate.mask === existing.mask;
+  const typeMatches =
+    candidate.type !== undefined && candidate.type !== null && candidate.type === existing.type;
+  const subtypeMatches =
+    (candidate.subtype ?? null) === existing.subtype || candidate.subtype === undefined;
+  return nameMatches && maskMatches && typeMatches && subtypeMatches;
+}
+
+async function assertNotDuplicatePlaidItem(
+  userId: string,
+  input: {
+    institutionId?: string;
+    accounts?: PlaidLinkMetadataAccount[];
+  }
+): Promise<void> {
+  if (
+    input.institutionId === undefined ||
+    input.institutionId === '' ||
+    input.accounts === undefined ||
+    input.accounts.length === 0
+  ) {
+    return;
+  }
+  const existingItems = await findActivePlaidItemsWithAccountsForUser(userId);
+  const institutionMatches = existingItems.filter(
+    (item) => item.plaidInstitutionId === input.institutionId
+  );
+  for (const item of institutionMatches) {
+    for (const candidate of input.accounts) {
+      if (item.accounts.some((existing) => accountLooksDuplicate(candidate, existing))) {
+        throw new PlaidDuplicateItemError(
+          `${item.institutionName ?? 'This institution'} account is already connected`
+        );
+      }
+    }
+  }
+}
+
 export async function exchangePlaidPublicToken(
   userId: string,
   input: {
     publicToken: string;
     institutionId?: string;
     institutionName?: string;
+    accounts?: PlaidLinkMetadataAccount[];
   }
 ): Promise<PublicTokenExchangeResult> {
+  await assertNotDuplicatePlaidItem(userId, input);
+
   let accessToken: string;
   let plaidItemId: string;
   try {
@@ -165,12 +275,48 @@ export async function exchangePlaidPublicToken(
     accounts: item.accounts.length,
   });
 
+  try {
+    await syncPlaidItemTransactions(item.id);
+  } catch (err) {
+    log.warn('Initial Plaid transaction sync did not complete after token exchange', {
+      userId,
+      plaidItemId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
   return { item: serializeItem(item) };
+}
+
+export async function completePlaidUpdateMode(
+  userId: string,
+  itemRowId: string
+): Promise<PublicTokenExchangeResult> {
+  const item = await findPlaidItemWithAccountsForUser(userId, itemRowId);
+  if (!item) throw new PlaidItemNotFoundError(itemRowId);
+
+  try {
+    await syncPlaidItemTransactions(item.id);
+  } catch (err) {
+    log.warn('Plaid update-mode completion sync did not complete', {
+      userId,
+      itemRowId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  const updated = await findPlaidItemWithAccountsForUser(userId, itemRowId);
+  if (!updated) throw new PlaidItemNotFoundError(itemRowId);
+  return { item: serializeItem(updated) };
 }
 
 export async function listPlaidItems(userId: string): Promise<SerializedPlaidItem[]> {
   const items = await findActivePlaidItemsForUser(userId);
-  return items.map(serializeItem);
+  const accountStats = await getPlaidAccountTransactionStatsForItems(
+    userId,
+    items.map((item) => item.id)
+  );
+  return items.map((item) => serializeItem(item, accountStats));
 }
 
 async function revokePlaidItemAtProvider(
@@ -222,7 +368,101 @@ export async function disconnectPlaidItem(
   return { ok: true };
 }
 
-function serializeItem(item: PlaidItemWithAccounts): SerializedPlaidItem {
+export async function disconnectAllPlaidItems(
+  userId: string
+): Promise<{ ok: true; disconnected: number }> {
+  const items = await findActivePlaidItemsForUser(userId);
+  let disconnected = 0;
+  for (const item of items) {
+    await disconnectPlaidItem(userId, item.id);
+    disconnected += 1;
+  }
+  return { ok: true, disconnected };
+}
+
+function formatDate(value: Date | null): string | null {
+  return value === null ? null : value.toISOString();
+}
+
+function emptySyncSummary(): SerializedPlaidSyncSummary {
+  return {
+    transactionCount: 0,
+    postedTransactionCount: 0,
+    pendingTransactionCount: 0,
+    removedTransactionCount: 0,
+    dateRange: { from: null, to: null },
+  };
+}
+
+function statsForAccount(
+  accountStats: PlaidAccountTransactionStats[],
+  accountId: string
+): SerializedPlaidSyncSummary {
+  const stats = accountStats.find((row) => row.plaidAccountId === accountId);
+  if (stats === undefined) return emptySyncSummary();
+  return {
+    transactionCount: stats.transactionCount,
+    postedTransactionCount: stats.postedTransactionCount,
+    pendingTransactionCount: stats.pendingTransactionCount,
+    removedTransactionCount: stats.removedTransactionCount,
+    dateRange: {
+      from: formatDate(stats.minDate),
+      to: formatDate(stats.maxDate),
+    },
+  };
+}
+
+function summarizeAccounts(accounts: SerializedPlaidAccount[]): SerializedPlaidSyncSummary {
+  const summary = emptySyncSummary();
+  for (const account of accounts) {
+    summary.transactionCount += account.sync.transactionCount;
+    summary.postedTransactionCount += account.sync.postedTransactionCount;
+    summary.pendingTransactionCount += account.sync.pendingTransactionCount;
+    summary.removedTransactionCount += account.sync.removedTransactionCount;
+
+    const from =
+      account.sync.dateRange.from === null ? null : new Date(account.sync.dateRange.from);
+    const to = account.sync.dateRange.to === null ? null : new Date(account.sync.dateRange.to);
+    const currentFrom = summary.dateRange.from === null ? null : new Date(summary.dateRange.from);
+    const currentTo = summary.dateRange.to === null ? null : new Date(summary.dateRange.to);
+
+    if (from !== null && (currentFrom === null || from < currentFrom)) {
+      summary.dateRange.from = from.toISOString();
+    }
+    if (to !== null && (currentTo === null || to > currentTo)) {
+      summary.dateRange.to = to.toISOString();
+    }
+  }
+  return summary;
+}
+
+function syncStateForItem(
+  item: PlaidItemWithAccounts,
+  summary: SerializedPlaidSyncSummary
+): SerializedPlaidItem['sync']['state'] {
+  if (item.status === PlaidItemStatus.REQUIRES_REAUTH) return 'needs_repair';
+  if (item.status === PlaidItemStatus.ERROR) return 'error';
+  if (item.cursor === null && summary.transactionCount === 0) return 'syncing';
+  return 'synced';
+}
+
+function serializeItem(
+  item: PlaidItemWithAccounts,
+  accountStats: PlaidAccountTransactionStats[] = []
+): SerializedPlaidItem {
+  const itemAccountStats = accountStats.filter((row) => row.plaidItemId === item.id);
+  const accounts = item.accounts.map((a) => ({
+    id: a.id,
+    plaidAccountId: a.plaidAccountId,
+    name: a.name,
+    officialName: a.officialName,
+    mask: a.mask,
+    type: a.type,
+    subtype: a.subtype,
+    sync: statsForAccount(itemAccountStats, a.id),
+  }));
+  const syncSummary = summarizeAccounts(accounts);
+
   return {
     id: item.id,
     plaidItemId: item.plaidItemId,
@@ -233,14 +473,10 @@ function serializeItem(item: PlaidItemWithAccounts): SerializedPlaidItem {
     createdAt: item.createdAt.toISOString(),
     lastSyncAt: item.lastSyncAt ? item.lastSyncAt.toISOString() : null,
     disconnectedAt: item.disconnectedAt ? item.disconnectedAt.toISOString() : null,
-    accounts: item.accounts.map((a) => ({
-      id: a.id,
-      plaidAccountId: a.plaidAccountId,
-      name: a.name,
-      officialName: a.officialName,
-      mask: a.mask,
-      type: a.type,
-      subtype: a.subtype,
-    })),
+    sync: {
+      ...syncSummary,
+      state: syncStateForItem(item, syncSummary),
+    },
+    accounts,
   };
 }

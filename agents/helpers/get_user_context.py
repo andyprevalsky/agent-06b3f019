@@ -1,6 +1,7 @@
 """Helper for fetching and formatting user context for agent system prompts."""
 
 import asyncio
+import json
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -405,6 +406,24 @@ async def _fetch_top_contacts(
         return []
 
 
+async def _fetch_user_snapshot(client: httpx.AsyncClient, config, user_id: str) -> dict:
+    """Fetch the current distilled user snapshot from backend."""
+    try:
+        response = await client.get(
+            f"{config.backend.api_url}/api/data/snapshot",
+            headers={
+                "X-API-Key": config.backend.api_key or "",
+                "X-User-Id": user_id,
+            },
+            timeout=30.0,
+        )
+        response.raise_for_status()
+        return response.json().get("snapshot") or {}
+    except Exception as e:
+        logger.warning("Failed to fetch user snapshot", user_id=user_id, error=str(e))
+        return {}
+
+
 async def _fetch_messages_for_simulation(client: httpx.AsyncClient, config, user_id: str, days: int = 7) -> List[dict]:
     """
     Fetch user's messages from the past N days for user simulation.
@@ -451,6 +470,7 @@ def _format_user_context(  # noqa: C901
     recent_messages: List[dict],
     frequent_contacts: List[dict],
     integrations: Optional[List[dict]] = None,
+    user_snapshot: Optional[dict] = None,
 ) -> str:
     """Format the user context string for the system prompt."""
     sections = []
@@ -514,6 +534,31 @@ def _format_user_context(  # noqa: C901
 
     if profile_parts:
         sections.append("## User Profile\n" + "\n".join(profile_parts))
+
+    # Section: Distilled User Snapshot
+    snapshot_content = user_snapshot.get("content") if user_snapshot else None
+    if isinstance(snapshot_content, dict) and snapshot_content:
+        snapshot_lines = [
+            f"Version: {user_snapshot.get('version')}",
+            f"Updated: {user_snapshot.get('updatedAt')}",
+            json.dumps(snapshot_content, ensure_ascii=False, indent=2, sort_keys=True),
+        ]
+        revisions = user_snapshot.get("revisions")
+        if isinstance(revisions, list) and revisions:
+            latest = revisions[0]
+            snapshot_lines.append(
+                "Latest update: "
+                + json.dumps(
+                    {
+                        "source": latest.get("source"),
+                        "createdAt": latest.get("createdAt"),
+                        "changes": latest.get("changes"),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+        sections.append("## Distilled User Snapshot\n" + "\n".join(snapshot_lines))
 
     # Section: Recent Communications
     if recent_messages:
@@ -608,6 +653,7 @@ def _format_user_context(  # noqa: C901
 
     section_order = [
         "## User Profile",
+        "## Distilled User Snapshot",
         "## Connected Integrations",
         "## Authenticated Browser Sessions",
         "## Recent Communications",
@@ -632,7 +678,7 @@ async def fetch_user_context(user_id: str, context_gates: Optional[Dict[str, boo
     Args:
         user_id: The user's ID
         context_gates: Optional dict controlling which sections to include.
-            Keys: user_profile, authenticated_sessions, integrations,
+            Keys: user_profile, user_snapshot, authenticated_sessions, integrations,
                   recent_communications, network, custom_system_prompt.
             Default (None or missing key) = True (include section).
 
@@ -646,7 +692,14 @@ async def fetch_user_context(user_id: str, context_gates: Optional[Dict[str, boo
         return gates.get(name, True)
 
     # If ALL relevant gates are closed, skip everything
-    relevant_gates = ["user_profile", "authenticated_sessions", "integrations", "recent_communications", "network"]
+    relevant_gates = [
+        "user_profile",
+        "user_snapshot",
+        "authenticated_sessions",
+        "integrations",
+        "recent_communications",
+        "network",
+    ]
     if all(not _gate_open(g) for g in relevant_gates):
         logger.info("All user context gates closed, skipping fetch", user_id=user_id[:8])
         return ""
@@ -699,13 +752,23 @@ async def fetch_user_context(user_id: str, context_gates: Optional[Dict[str, boo
                 else _noop_list()
             )
             contacts_future = _fetch_top_contacts(client, config, user_id) if _gate_open("network") else _noop_list()
+            snapshot_future = (
+                _fetch_user_snapshot(client, config, user_id) if _gate_open("user_snapshot") else _noop_dict()
+            )
 
             (
                 (integrations, authenticated_sites),
                 user_settings,
                 recent_messages,
                 frequent_contacts,
-            ) = await asyncio.gather(integrations_future, user_settings_future, messages_future, contacts_future)
+                user_snapshot,
+            ) = await asyncio.gather(
+                integrations_future,
+                user_settings_future,
+                messages_future,
+                contacts_future,
+                snapshot_future,
+            )
 
         # Apply gate filtering at format level too (belt + suspenders)
         context = _format_user_context(
@@ -714,6 +777,7 @@ async def fetch_user_context(user_id: str, context_gates: Optional[Dict[str, boo
             recent_messages=recent_messages if _gate_open("recent_communications") else [],
             frequent_contacts=frequent_contacts if _gate_open("network") else [],
             integrations=integrations if _gate_open("integrations") else None,
+            user_snapshot=user_snapshot if _gate_open("user_snapshot") else None,
         )
 
         # Only cache full (ungated) context

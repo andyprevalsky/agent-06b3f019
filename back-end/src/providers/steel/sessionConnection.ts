@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { Browser } from 'playwright';
 import { prisma } from '../database';
 import { type ProxyGeoLocation, DEFAULT_GEOLOCATION } from '../geoip';
 import { retryWithBackoff } from '../retry';
@@ -7,12 +8,19 @@ import { log } from './types';
 const SESSION_VALIDATION_TIMEOUT = 10000;
 const WS_BACKOFF_DELAYS = [100, 400, 800];
 
-export async function validateSessionConnection(wsUrl: string): Promise<boolean> {
+/**
+ * Connect to the session via CDP and validate it, returning the OPEN browser
+ * connection on success (null on failure). Callers that keep the connection
+ * (e.g. to reuse it for user-data injection, saving a second 3-5s CDP
+ * handshake) are responsible for closing it.
+ */
+export async function connectValidatedBrowser(wsUrl: string): Promise<Browser | null> {
   try {
+    let connected: Browser | undefined;
     await retryWithBackoff(
       async () => {
         const { chromium } = await import('playwright');
-        let browser;
+        let browser: Browser | undefined;
         try {
           browser = await Promise.race([
             chromium.connectOverCDP(wsUrl),
@@ -26,10 +34,12 @@ export async function validateSessionConnection(wsUrl: string): Promise<boolean>
           }
           const pages = contexts[0].pages();
           log.info(`    [WS] Connected (${contexts.length} context(s), ${pages.length} page(s))`);
-        } finally {
+          connected = browser;
+        } catch (error) {
           if (browser !== undefined) {
             await browser.close().catch(() => {});
           }
+          throw error;
         }
       },
       {
@@ -39,13 +49,20 @@ export async function validateSessionConnection(wsUrl: string): Promise<boolean>
         isRetryable: () => true,
       }
     );
-    return true;
+    return connected ?? null;
   } catch (error) {
     log.info('  Session validation failed', {
       error: error instanceof Error ? error.message : String(error),
     });
-    return false;
+    return null;
   }
+}
+
+export async function validateSessionConnection(wsUrl: string): Promise<boolean> {
+  const browser = await connectValidatedBrowser(wsUrl);
+  if (browser === null) return false;
+  await browser.close().catch(() => {});
+  return true;
 }
 
 export async function createLocalBrowserSession(

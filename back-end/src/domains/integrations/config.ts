@@ -195,3 +195,5 @@ export const UPLOAD_LIMITS = {
   fileSize: 500 * 1024 * 1024, // 500MB max file size
   fieldSize: 200 * 1024 * 1024, // 200MB max field size (for localStorage uploads which can be large)
 };
+
+export const PLAID_SKIP_WEBHOOK_VERIFICATION = process.env.PLAID_SKIP_WEBHOOK_VERIFICATION === '1';
