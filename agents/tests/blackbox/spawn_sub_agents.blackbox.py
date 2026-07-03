@@ -378,6 +378,11 @@ def test_build_failure_events_rich_context():
     assert "y" * 200 not in msg
     # List summarized
     assert "[3 items]" in msg or "[5 items]" in msg
+    assert events[0].metadata["structured_response"] == {
+        "short_value": "abc",
+        "long_value": "y" * 300,
+        "items": [1, 2, 3, 4, 5],
+    }
 
 
 # ── SpawnSubAgentManager.execute_tool — validation/early-exit branches ──
@@ -696,6 +701,51 @@ async def test_execute_tool_failed_child_yields_failure_events():
     error_events = [e for e in events if getattr(e, "status", None) == MessageStatus.ERROR]
     assert len(error_events) == 1
     assert "timeout" in error_events[0].message
+
+
+async def test_execute_tool_max_iterations_child_is_error_with_best_effort_payload():
+    """max_iterations children are failed for UI/DAG but keep partial output."""
+    from domains.spawn_sub_agents.handler import SpawnSubAgentManager
+    from tools.base import MessageStatus
+
+    fake = _FakeWorkflowModule(
+        activity_result={
+            "agents": [
+                {"agent_id": "child-max", "goal": "x", "temporal_workflow_id": "wf-max"}
+            ]
+        }
+    )
+    restore = _patch_spawn_sub_agents_workflow(fake)
+    try:
+        parent = _FakeParentWorkflow(bus_id="bus-ext")
+        parent.child_results["child-max"] = {
+            "status": "max_iterations",
+            "message": "Reached max iterations (5)",
+            "best_effort_response": "I found partial answer A.",
+            "partial_structured_response": {"answer": "partial A"},
+            "verifier_reasoning": "not enough sources",
+        }
+
+        manager = SpawnSubAgentManager()
+        events = await _collect_events(
+            manager.execute_tool(
+                parent,
+                {"sub_agent": {"goal": "x"}},
+                "tc-max",
+            )
+        )
+    finally:
+        restore()
+
+    error_events = [e for e in events if getattr(e, "status", None) == MessageStatus.ERROR]
+    assert len(error_events) == 1
+    ev = error_events[0]
+    assert "Reached max iterations" in ev.message
+    assert "Best-effort result:" in ev.message
+    assert "I found partial answer A." in ev.message
+    assert ev.metadata["structured_response"] == {"answer": "partial A"}
+    assert ev.metadata["partial_structured_response"] == {"answer": "partial A"}
+    assert ev.metadata["best_effort_response"] == "I found partial answer A."
 
 
 async def test_execute_tool_posts_assistant_events_for_file_pointers():
@@ -1034,6 +1084,10 @@ async def run_all_tests():
     await r.record_async("exec_happy_path", test_execute_tool_happy_path_completes_and_tracks_child)
     await r.record_async("exec_no_bus_id", test_execute_tool_happy_path_no_parent_bus_id_sets_it)
     await r.record_async("exec_failed_child", test_execute_tool_failed_child_yields_failure_events)
+    await r.record_async(
+        "exec_max_iterations_child_error_best_effort",
+        test_execute_tool_max_iterations_child_is_error_with_best_effort_payload,
+    )
     await r.record_async("exec_file_pointers", test_execute_tool_posts_assistant_events_for_file_pointers)
     # pre-fetched attachments
     await r.record_async("prefetched_attachments", test_spawn_with_prefetched_attachments)

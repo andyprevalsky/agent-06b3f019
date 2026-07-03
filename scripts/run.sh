@@ -860,7 +860,11 @@ if ! $BENCHMARK_MODE && $IS_MAC; then
     PIDS+=($!); NAMES+=("mac-app")
 fi
 
-run_service "agents" bash -c 'set -eo pipefail; cd agents && source venv/bin/activate && HEALTH_CHECK_PORT=$HEALTH_PORT SDK_METRICS_PORT=$SDK_METRICS_PORT ./scripts/run_local_worker.sh' &
+if $BENCHMARK_MODE; then
+    run_service "agents" bash -c 'set -eo pipefail; cd agents && source venv/bin/activate && ENABLE_BENCHMARK_MEMORY_BASELINE=1 HEALTH_CHECK_PORT=$HEALTH_PORT SDK_METRICS_PORT=$SDK_METRICS_PORT ./scripts/run_local_worker.sh' &
+else
+    run_service "agents" bash -c 'set -eo pipefail; cd agents && source venv/bin/activate && HEALTH_CHECK_PORT=$HEALTH_PORT SDK_METRICS_PORT=$SDK_METRICS_PORT ./scripts/run_local_worker.sh' &
+fi
 PIDS+=($!); NAMES+=("agents")
 
 SERVICE_STATUS=running

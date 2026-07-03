@@ -242,6 +242,44 @@ def test_for_each_aggregate_parent_result_pairs_declared_tool_use():
     assert not pairing_errors, f"for_each aggregate result should pair parent id: {pairing_errors}"
 
 
+def test_final_orphan_tool_use_matches_llm_repair_path():
+    """Smoke validator should mirror build_llm_messages synthetic tool-result repair.
+
+    Completed agents can end with an assistant attempt_completion/verifier tool call
+    whose DB TOOL row is absent because the workflow completes immediately after
+    handling it. The provider-facing LLM context repairs that orphan before sending
+    another request; the smoke validator must judge the same repaired context.
+    """
+    from context_validator import validate_context
+
+    first_id = "call_spawn_browser"
+    final_id = "call_attempt_completion"
+    messages = [
+        _make_msg("USER", "Use a browser agent.", ts="2024-01-01T00:00:00.000Z"),
+        _make_msg(
+            "ASSISTANT",
+            "",
+            tool_calls=[_tc("spawn_agent", first_id)],
+            ts="2024-01-01T00:00:01.000Z",
+        ),
+        _tool_result(first_id, "Browser result", ts="2024-01-01T00:00:02.000Z"),
+        _make_msg(
+            "ASSISTANT",
+            "",
+            tool_calls=[_tc("attempt_completion", final_id)],
+            ts="2024-01-01T00:00:03.000Z",
+        ),
+        _make_msg("USER", "completion summary", ts="2024-01-01T00:00:04.000Z"),
+    ]
+
+    violations = validate_context(messages)
+    pairing_errors = [
+        v for v in violations
+        if v.rule == "tool_result_pairing" and v.severity == "error"
+    ]
+    assert not pairing_errors, f"synthetic repair path should satisfy pairing: {pairing_errors}"
+
+
 def test_duplicate_system_messages_are_scoped_to_sub_agent():
     """Repeated auth-selection notices for different browser task scopes are not duplicates."""
     from context_validator import validate_context
@@ -299,6 +337,7 @@ async def run_all_tests():
     r.record("two_consecutive_text_only_assistants_exempt", test_two_consecutive_text_only_assistants_exempt)
     r.record("file_output_assistant_does_not_break_tool_result_pairing", test_file_output_assistant_does_not_break_tool_result_pairing)
     r.record("for_each_aggregate_parent_result_pairs_declared_tool_use", test_for_each_aggregate_parent_result_pairs_declared_tool_use)
+    r.record("final_orphan_tool_use_matches_llm_repair_path", test_final_orphan_tool_use_matches_llm_repair_path)
     r.record("duplicate_system_messages_are_scoped_to_sub_agent", test_duplicate_system_messages_are_scoped_to_sub_agent)
     return r.all_passed
 

@@ -1,3 +1,4 @@
+/* eslint-disable max-lines-per-function */
 /**
  * Data domain service — business logic for grep and summary operations.
  */
@@ -5,8 +6,10 @@
 import { isPostgresRegexError } from './regexSafety';
 import {
   buildAgentNetworkMatch,
+  buildDocumentMatch,
   buildMessageMatch,
   buildNetworkMatch,
+  buildTransactionMatch,
   formatTimeAgo,
 } from './format';
 import {
@@ -52,8 +55,9 @@ async function searchSource(
   if (source === 'messages') {
     // person/since narrow the messages source only.
     let personId: string | undefined;
-    if (input.person !== undefined) {
-      const resolved = await grepRepo.resolvePersonId(userId, input.person);
+    const messageFilters = input.filters.messages;
+    if (messageFilters?.person !== undefined) {
+      const resolved = await grepRepo.resolvePersonId(userId, messageFilters.person);
       if (resolved === null) return { total: 0, matches: [] }; // requested person not found
       personId = resolved;
     }
@@ -63,7 +67,7 @@ async function searchSource(
         pattern: input.dbPattern,
         caseInsensitive: input.caseInsensitive,
         personId,
-        since: input.since,
+        since: messageFilters?.since,
       }),
       grepRepo.searchMessageGrepRows({
         userId,
@@ -72,7 +76,7 @@ async function searchSource(
         limit: input.headLimit,
         offset: input.offset,
         personId,
-        since: input.since,
+        since: messageFilters?.since,
       }),
     ]);
     return { total, matches: rows.map((row) => buildMessageMatch(row, input)) };
@@ -94,6 +98,66 @@ async function searchSource(
       }),
     ]);
     return { total, matches: rows.map((row) => buildNetworkMatch(row, input)) };
+  }
+
+  if (source === 'transactions') {
+    const filters = input.filters.transactions;
+    const [total, rows] = await Promise.all([
+      grepRepo.countTransactionGrepRows({
+        userId,
+        pattern: input.dbPattern,
+        caseInsensitive: input.caseInsensitive,
+        since: filters?.since,
+        until: filters?.until,
+        account: filters?.account,
+        minAmount: filters?.minAmount,
+        maxAmount: filters?.maxAmount,
+        status: filters?.status,
+      }),
+      grepRepo.searchTransactionGrepRows({
+        userId,
+        pattern: input.dbPattern,
+        caseInsensitive: input.caseInsensitive,
+        limit: input.headLimit,
+        offset: input.offset,
+        since: filters?.since,
+        until: filters?.until,
+        account: filters?.account,
+        minAmount: filters?.minAmount,
+        maxAmount: filters?.maxAmount,
+        status: filters?.status,
+      }),
+    ]);
+    return { total, matches: rows.map((row) => buildTransactionMatch(row, input)) };
+  }
+
+  if (source === 'documents') {
+    const filters = input.filters.documents;
+    const [total, rows] = await Promise.all([
+      grepRepo.countDocumentGrepRows({
+        userId,
+        pattern: input.dbPattern,
+        caseInsensitive: input.caseInsensitive,
+        documentSource: filters?.documentSource,
+        since: filters?.since,
+        until: filters?.until,
+        path: filters?.path,
+        tag: filters?.tag,
+      }),
+      grepRepo.searchDocumentGrepRows({
+        userId,
+        pattern: input.dbPattern,
+        caseInsensitive: input.caseInsensitive,
+        limit: input.headLimit,
+        offset: input.offset,
+        documentSource: filters?.documentSource,
+        since: filters?.since,
+        until: filters?.until,
+        path: filters?.path,
+        tag: filters?.tag,
+      }),
+    ]);
+    return { total, matches: rows.map((row) => buildDocumentMatch(row, input)) };
   }
 
   const agentIds = await agentTreeIdsForGrep(userId, agentId);
@@ -148,6 +212,33 @@ export async function grep(userId: string, params: GrepParams): Promise<GrepResu
   const merged = sortMatches(sourceResults.flatMap((result) => result.matches));
   const matches = merged.slice(input.offset, input.offset + input.headLimit);
   const truncated = totalMatches > input.offset + matches.length;
+  const summaries: GrepResult['summaries'] = {};
+
+  if (input.sources.includes('transactions')) {
+    const filters = input.filters.transactions;
+    const aggregateRows = await grepRepo.aggregateTransactionGrepRows({
+      userId,
+      pattern: input.dbPattern,
+      caseInsensitive: input.caseInsensitive,
+      since: filters?.since,
+      until: filters?.until,
+      account: filters?.account,
+      minAmount: filters?.minAmount,
+      maxAmount: filters?.maxAmount,
+      status: filters?.status,
+      includePendingInTotals: filters?.includePendingInTotals,
+    });
+    summaries.transactions = {
+      totals_include_pending: filters?.includePendingInTotals === true,
+      currencies: aggregateRows.map((row) => ({
+        currency: row.currency,
+        outflow: row.outflow?.toString() ?? '0',
+        inflow: row.inflow?.toString() ?? '0',
+        net: row.net?.toString() ?? '0',
+        count: Number(row.count),
+      })),
+    };
+  }
 
   log.info(
     `grep: '${params.pattern}' -> ${matches.length}/${totalMatches} matches in ${input.sources.join(',')}`
@@ -161,6 +252,7 @@ export async function grep(userId: string, params: GrepParams): Promise<GrepResu
     sources: input.sources,
     applied_limit: input.headLimit,
     applied_offset: input.offset,
+    ...(Object.keys(summaries).length > 0 ? { summaries } : {}),
     ...(matches.length === 0
       ? {
           message: `No matches for '${params.pattern}' in ${input.sources.join(', ')}.`,
@@ -179,6 +271,8 @@ export async function getSummary(userId: string): Promise<SummaryResult> {
   const channelCounts = await repo.getChannelCounts(userId);
   const oldestMessage = await repo.getOldestMessage(userId);
   const newestMessage = await repo.getNewestMessage(userId);
+  const transactionSummary = await grepRepo.getTransactionSummary(userId);
+  const documentSummary = await grepRepo.getDocumentSummary(userId);
 
   const channels = channelCounts.reduce(
     (acc, c) => {
@@ -202,7 +296,7 @@ export async function getSummary(userId: string): Promise<SummaryResult> {
 
   log.info(`summary: ${threads.length} threads, ${totalMessages} messages`);
 
-  return {
+  const result: SummaryResult = {
     sources: {
       messages: {
         total_threads: threads.length,
@@ -216,4 +310,16 @@ export async function getSummary(userId: string): Promise<SummaryResult> {
       },
     },
   };
+  if (transactionSummary.total_transactions > 0) {
+    result.sources.transactions = transactionSummary;
+  }
+  if (documentSummary.total_documents > 0) {
+    result.sources.documents = documentSummary;
+  }
+  return result;
+}
+
+export async function getSnapshot(userId: string) {
+  const snapshot = await repo.getUserSnapshot(userId);
+  return { snapshot };
 }

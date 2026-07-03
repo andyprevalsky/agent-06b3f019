@@ -275,6 +275,7 @@ async def spawn_explore_agent_activity(  # noqa: C901
         claude_token_rotated: bool = False,
         gpt_token_rotated: bool = False,
         compute_token_used: Optional[Dict[str, Any]] = None,
+        from_fast_cache: bool = False,
     ):
         """Track each LLM call's tokens with the actual model used."""
         llm_iteration_usage.append(
@@ -286,6 +287,7 @@ async def spawn_explore_agent_activity(  # noqa: C901
                 "call_site": call_site,
                 "cache_read_input_tokens": cache_read_input_tokens,
                 "cache_creation_input_tokens": cache_creation_input_tokens,
+                "from_fast_cache": from_fast_cache,
             }
         )
 
@@ -471,6 +473,12 @@ async def spawn_explore_agent_activity(  # noqa: C901
     result_payload = {
         "status": "completed" if result.get("status") == "completed" else "error",
         "result": final_response,
+        "summary": final_response,
+        "final_response": final_response,
+        "best_effort_response": result.get("best_effort_response") or final_response,
+        "error_reason": None if result.get("status") == "completed" else (result.get("message") or result.get("status")),
+        "partial_structured_response": result.get("partial_structured_response"),
+        "structured_response": result.get("structured_response") or result.get("partial_structured_response"),
         "tokens_in": result.get("tokens_in", 0),
         "tokens_out": result.get("tokens_out", 0),
         "accumulated_usage": accumulated_usage,

@@ -1,13 +1,13 @@
 /**
  * STATE MACHINE: SyncItemButton
  *
- * [IDLE|SYNCED] --click--> [LOADING] --done--> [SYNCED] or [IDLE]
+ * [IDLE|SYNCED] --plus click--> [LOADING] --done--> [SYNCED] or [IDLE]
  *
  * Pure presentation: loading state is passed in from hooks. Synced state is
  * represented by the row icon glow, so the action icon remains stable.
  */
 
-import { Loader2, RefreshCw } from 'lucide-react';
+import { Loader2, Plus } from 'lucide-react';
 
 interface SyncItemButtonProps {
   isLoading: boolean;
@@ -33,7 +33,7 @@ export default function SyncItemButton({
       {isLoading ? (
         <Loader2 className="w-3.5 h-3.5 animate-spin" />
       ) : (
-        <RefreshCw className="w-3.5 h-3.5" />
+        <Plus className="w-3.5 h-3.5" />
       )}
     </button>
   );

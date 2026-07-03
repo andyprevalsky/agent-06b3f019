@@ -1,28 +1,33 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console, @typescript-eslint/no-explicit-any */
 
 /**
  * Cleanup Script: Delete All Agents, Terminate Workflows, Clear Blueprints, and Attention Requests
  *
- * Cleans BOTH databases that can hold agents for this checkout:
- *   1. This worktree's LOCAL docker DB (discovered from .context/services.json) — where
- *      `scripts/run.sh` points the running stack (it exports DATABASE_URL to a per-worktree
- *      `victoria-db-<workspace>` container). This is the DB the local app/benchmarks write to.
- *   2. PROD (the DATABASE_URL in back-end/.env — shared Supabase).
+ * Scoped to THE CURRENT WORKTREE, but covers every stack it has:
+ *   - The stack recorded in .context/services.json (docker container or system Postgres)
+ *   - The victoria-db-<worktree-basename> container. Stopped containers are
+ *     started, cleaned, and stopped again. (CONDUCTOR_WORKSPACE_NAME is
+ *     deliberately ignored — it leaks across worktrees.)
+ *   - env DATABASE_URL, only when it points at localhost. Remote/shared DBs
+ *     (e.g. Supabase) are skipped unless CLEANUP_REMOTE_DB=1.
  *
- * For each target it will:
- *   - Find all active (non-deleted) agents and archive other users' goals to GoalHistory
- *   - Terminate their Temporal workflows (cloud namespace, shared across targets)
- *   - Soft-delete them, then hard-delete previously soft-deleted agents
- *   - Clear blueprints without feedback and all attention requests
+ * Per database, this script will:
+ * 1. Find all active (non-deleted) agents
+ * 2. Archive goals from other users to GoalHistory table
+ * 3. Terminate their Temporal workflows
+ * 4. Soft-delete them from the database
+ * 5. Find all soft-deleted agents and hard-delete them
+ * 6. Clear all blueprints from the knowledge base
+ * 7. Clear all attention requests
  *
- * Worker processes are killed SCOPED TO THIS WORKTREE ONLY (by matching the process cwd),
- * so parallel Conductor worktrees running their own stacks are never disrupted.
+ * Before touching any database it kills Python workers whose cwd is inside
+ * this worktree (other worktrees' workers are left alone).
  *
  * Set MY_USER_ID environment variable to skip archiving your own agents' goals.
  */
 
 import { PrismaClient, Prisma } from '@prisma/client';
+import type { Client as TemporalClient } from '@temporalio/client';
 import { getTemporalClient } from '../src/providers/temporal';
 import * as dotenv from 'dotenv';
 import { execSync } from 'child_process';
@@ -33,215 +38,312 @@ import pLimit from 'p-limit';
 dotenv.config();
 
 const MY_USER_ID = process.env.MY_USER_ID || '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+const WORKTREE_ROOT = path.resolve(__dirname, '..', '..');
 
-// Worktree root = two levels up from back-end/scripts.
-const WORKTREE_ROOT = path.resolve(__dirname, '../../');
-
-interface CleanupTarget {
+interface DbTarget {
   label: string;
   url: string;
+  /** Container we started just for this cleanup — stop it again when done */
+  stopContainerAfter?: string;
 }
 
-/** PROD target: the DATABASE_URL baked into back-end/.env (shared Supabase). */
-function getProdTarget(): CleanupTarget | null {
-  const url = process.env.DATABASE_URL;
-  if (!url) {
-    console.log('⚠️  No DATABASE_URL in env — skipping prod cleanup');
-    return null;
-  }
-  return { label: 'prod (DATABASE_URL from .env)', url };
+interface CleanupStats {
+  archivedCount: number;
+  failedArchiveCount: number;
+  activeCount: number;
+  softDeletedCount: number;
+  softDeleteFailCount: number;
+  hardDeletedCount: number;
+  hardDeleteFailCount: number;
+  skippedHardDeleteCount: number;
+  blueprintsClearedCount: number;
+  attentionClearedCount: number;
+  cleanupFailures: number;
 }
 
-/**
- * LOCAL target: this worktree's docker DB. Resolved by CONTAINER NAME
- * (`victoria-db-<CONDUCTOR_WORKSPACE_NAME>`) via `docker port`, NOT by the port recorded in
- * services.json — that port can be stale and since reused by a SIBLING worktree's container,
- * which would make us clean the wrong database. Starts the container if it is stopped so its
- * data can be purged. Falls back to services.json only when the workspace name is unavailable
- * (e.g. system-postgres setups). Returns null when the worktree has no local DB.
- */
-function getLocalWorktreeTarget(): CleanupTarget | null {
-  const workspace = process.env.CONDUCTOR_WORKSPACE_NAME;
-  if (workspace) {
-    const container = `victoria-db-${workspace}`;
-    try {
-      const running = execSync(
-        `docker ps --filter "name=^${container}$" --format '{{.Names}}'`,
-        { encoding: 'utf-8' }
-      ).trim();
-      if (!running) {
-        const exists = execSync(
-          `docker ps -a --filter "name=^${container}$" --format '{{.Names}}'`,
-          { encoding: 'utf-8' }
-        ).trim();
-        if (exists) {
-          console.log(
-            `⚠️  ${container} is stopped — not cleaning in place (its stored port may be reused\n` +
-              `    by a sibling worktree). Purge it with: docker rm -f ${container}`
-          );
-        }
-        return null;
-      }
-      const portLine = execSync(`docker port ${container} 5432 2>/dev/null || true`, {
-        encoding: 'utf-8',
-      }).trim();
-      const port = portLine.split('\n')[0]?.match(/:(\d+)\s*$/)?.[1];
-      if (!port) return null;
-      // Collision guard: confirm the RUNNING container publishing this port is actually ours —
-      // never a sibling worktree's container that grabbed the same port number.
-      const owner = execSync(`docker ps --filter "publish=${port}" --format '{{.Names}}'`, {
-        encoding: 'utf-8',
-      }).trim();
-      if (owner !== container) {
-        console.log(
-          `⚠️  Port :${port} is published by '${owner || 'unknown'}', not '${container}' — ` +
-            `skipping local cleanup so a sibling worktree's DB is never touched.`
-        );
-        return null;
-      }
-      const url = `postgresql://postgres:postgres@localhost:${port}/victoria`;
-      if (url !== process.env.DATABASE_URL) {
-        return { label: `local worktree (${container} on :${port})`, url };
-      }
-    } catch (error: any) {
-      console.log(`⚠️  Could not resolve ${container} via docker:`, error.message);
-    }
-  }
+function emptyStats(): CleanupStats {
+  return {
+    archivedCount: 0,
+    failedArchiveCount: 0,
+    activeCount: 0,
+    softDeletedCount: 0,
+    softDeleteFailCount: 0,
+    hardDeletedCount: 0,
+    hardDeleteFailCount: 0,
+    skippedHardDeleteCount: 0,
+    blueprintsClearedCount: 0,
+    attentionClearedCount: 0,
+    cleanupFailures: 0,
+  };
+}
 
-  // Fallback: services.json (system-postgres / no workspace name).
+function totalFailures(stats: CleanupStats): number {
+  return (
+    stats.softDeleteFailCount +
+    stats.hardDeleteFailCount +
+    stats.failedArchiveCount +
+    stats.cleanupFailures
+  );
+}
+
+function sh(cmd: string): string {
+  return execSync(cmd, { encoding: 'utf-8' }).trim();
+}
+
+/** Kill Python workers whose cwd is inside this worktree (leave other worktrees alone) */
+async function killThisWorktreeWorkers() {
+  console.log(`🔪 Killing Python workers running from ${WORKTREE_ROOT}...\n`);
+
   try {
-    const servicesPath = path.join(WORKTREE_ROOT, '.context', 'services.json');
-    if (!fs.existsSync(servicesPath)) return null;
-    const svc = JSON.parse(fs.readFileSync(servicesPath, 'utf-8'));
-    const port = svc?.ports?.local_db;
-    const container = svc?.database?.container;
-    if (!port) return null;
-    const url = `postgresql://postgres:postgres@localhost:${port}/victoria`;
-    if (url === process.env.DATABASE_URL) return null;
-    return { label: `local worktree (${container ?? 'victoria'} on :${port})`, url };
-  } catch (error: any) {
-    console.log('⚠️  Could not read local worktree DB from services.json:', error.message);
-    return null;
-  }
-}
+    const pids = sh('pgrep -f "python worker.py" || true')
+      .split('\n')
+      .map((p) => p.trim())
+      .filter(Boolean);
 
-/**
- * Kill Python workers belonging to THIS worktree only, matched by process cwd.
- * Never does a global `pkill` (that would break sibling Conductor worktrees mid-run).
- */
-function killThisWorktreeWorkers() {
-  console.log(`🔪 Killing this worktree's Python workers (scoped to ${WORKTREE_ROOT})...\n`);
-  try {
-    const out = execSync('pgrep -f "python worker.py" || true', { encoding: 'utf-8' }).trim();
-    const pids = out ? out.split('\n').filter(Boolean) : [];
-    if (pids.length === 0) {
-      console.log('✅ No workers running\n');
-      return;
-    }
     let killed = 0;
     for (const pid of pids) {
+      let cwd = '';
       try {
-        const cwd = execSync(
-          `lsof -a -d cwd -p ${pid} -Fn 2>/dev/null | grep '^n' | head -1 | cut -c2- || true`,
-          { encoding: 'utf-8' }
-        ).trim();
-        if (cwd && cwd.startsWith(WORKTREE_ROOT)) {
-          execSync(`kill -9 ${pid} 2>/dev/null || true`);
-          console.log(`   ✅ Killed worker pid ${pid} (cwd ${cwd})`);
-          killed++;
-        } else {
-          console.log(`   ⏭️  Skipped worker pid ${pid} (other worktree: ${cwd || 'unknown'})`);
-        }
+        cwd = sh(`lsof -a -p ${pid} -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1`);
       } catch {
-        // best-effort
+        continue; // process already gone or unreadable
+      }
+      if (cwd === WORKTREE_ROOT || cwd.startsWith(WORKTREE_ROOT + path.sep)) {
+        console.log(`📍 Killing worker PID ${pid} (cwd: ${cwd})`);
+        try {
+          execSync(`kill -9 ${pid}`);
+          killed++;
+        } catch {
+          // already exited between pgrep and kill
+        }
       }
     }
-    console.log(`✅ Killed ${killed} worker(s) for this worktree\n`);
+    console.log(killed > 0 ? `✅ Killed ${killed} worker(s)\n` : '✅ No workers running\n');
   } catch (error: any) {
-    console.log('⚠️  Error scoping/killing workers:', error.message);
+    console.log('⚠️  Error checking/killing workers:', error.message);
     console.log('⚠️  Continuing with cleanup...\n');
   }
 }
 
-/** Clean a single database (terminate workflows + delete agents + clear blueprints/attention). */
-async function cleanupOneDatabase(
-  prisma: PrismaClient,
-  temporalClient: any,
-  label: string
-): Promise<number> {
-  console.log(`🧹 Cleaning agents in: ${label}\n`);
+function isLocalUrl(url: string): boolean {
+  return url.includes('localhost') || url.includes('127.0.0.1');
+}
 
-  // Get all non-deleted agents
-  let agents;
-  let softDeletedAgents;
+function containerState(name: string): 'running' | 'stopped' | 'absent' {
   try {
-    agents = await prisma.agent.findMany({
-      where: { deletedAt: null },
-      select: {
-        id: true,
-        userId: true,
-        goal: true,
-        status: true,
-        statusMessage: true,
-        model: true,
-        contextSize: true,
-        messageCount: true,
-        tokenCount: true,
-        tokensIn: true,
-        tokensOut: true,
-        source: true,
-        depth: true,
-        createdAt: true,
-        updatedAt: true,
-        deletedAt: true,
-        temporalWorkflowId: true,
-      },
-    });
+    const state = sh(`docker inspect --format '{{.State.Running}}' ${JSON.stringify(name)}`);
+    return state === 'true' ? 'running' : 'stopped';
+  } catch {
+    return 'absent';
+  }
+}
 
-    softDeletedAgents = await prisma.agent.findMany({
-      where: { deletedAt: { not: null } },
-      select: {
-        id: true,
-        userId: true,
-        goal: true,
-        status: true,
-        statusMessage: true,
-        model: true,
-        contextSize: true,
-        messageCount: true,
-        tokenCount: true,
-        tokensIn: true,
-        tokensOut: true,
-        source: true,
-        depth: true,
-        createdAt: true,
-        updatedAt: true,
-        deletedAt: true,
-      },
-    });
-  } catch (dbError: any) {
-    console.log(`⚠️  Cannot connect to database (${label}):`, dbError.message);
-    console.log('⚠️  Skipping this target');
-    return 1;
+function containerHostPort(name: string): string | null {
+  try {
+    const portLine = sh(`docker port ${JSON.stringify(name)} 5432/tcp`)
+      .split('\n')[0]
+      .trim();
+    const port = portLine.split(':').pop();
+    return port && /^\d+$/.test(port) ? port : null;
+  } catch {
+    return null;
+  }
+}
+
+function waitForContainerPg(name: string): boolean {
+  for (let i = 0; i < 30; i++) {
+    try {
+      execSync(`docker exec ${JSON.stringify(name)} pg_isready -U postgres -q`, {
+        stdio: 'ignore',
+      });
+      return true;
+    } catch {
+      execSync('sleep 1');
+    }
+  }
+  return false;
+}
+
+interface ServicesManifest {
+  database?: { container?: string; use_system_postgres?: boolean };
+  ports?: { local_db?: number };
+}
+
+function readServicesManifest(): ServicesManifest | null {
+  const manifestPath = path.join(WORKTREE_ROOT, '.context', 'services.json');
+  try {
+    return JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Every database belonging to THIS worktree. Local stacks all use the same
+ * credentials (postgres:postgres, db "victoria") — see scripts/setup-db.sh
+ * and scripts/run.sh at the repo root.
+ */
+function discoverDbTargets(): DbTarget[] {
+  const targets: DbTarget[] = [];
+  const seenUrls = new Set<string>();
+
+  const addTarget = (target: DbTarget) => {
+    const key = target.url.replace(/^postgresql:/, 'postgres:').replace(/\/+$/, '');
+    if (seenUrls.has(key)) return;
+    seenUrls.add(key);
+    targets.push(target);
+  };
+
+  const manifest = readServicesManifest();
+
+  // Workspace names this worktree may have used for its DB container.
+  // CONDUCTOR_WORKSPACE_NAME is intentionally NOT trusted here — it leaks
+  // across worktrees (see normalize_conductor_workspace_env in
+  // scripts/lib/workspace-env.sh, which overrides it with the directory
+  // basename for the same reason). The services.json manifest is written
+  // after that normalization, so it is authoritative.
+  const workspaceNames = new Set<string>();
+  if (manifest?.database?.container?.startsWith('victoria-db-')) {
+    workspaceNames.add(manifest.database.container.slice('victoria-db-'.length));
+  }
+  workspaceNames.add(path.basename(WORKTREE_ROOT));
+
+  let dockerOk = true;
+  try {
+    execSync('docker ps', { stdio: 'ignore' });
+  } catch {
+    dockerOk = false;
+    console.log('⚠️  Docker unavailable — skipping container databases');
   }
 
-  console.log(`📊 Found ${agents.length} active agents`);
-  console.log(`📊 Found ${softDeletedAgents.length} soft-deleted agents\n`);
+  if (dockerOk) {
+    for (const workspace of Array.from(workspaceNames)) {
+      const container = `victoria-db-${workspace}`;
+      const state = containerState(container);
+      if (state === 'absent') continue;
 
-  const limit = pLimit(10);
-  const failedArchiveIds = new Set<string>();
+      if (state === 'stopped') {
+        console.log(`🐘 Starting stopped container ${container} to clean it...`);
+        try {
+          execSync(`docker start ${JSON.stringify(container)}`, { stdio: 'ignore' });
+        } catch (error: any) {
+          console.log(`⚠️  Failed to start ${container}: ${error.message} — skipping`);
+          continue;
+        }
+        if (!waitForContainerPg(container)) {
+          console.log(`⚠️  ${container} did not become ready — skipping`);
+          execSync(`docker stop ${JSON.stringify(container)} || true`, { stdio: 'ignore' });
+          continue;
+        }
+      }
 
-  // Archive goals from other users to GoalHistory
-  let archivedCount = 0;
-  {
+      const port = containerHostPort(container);
+      if (!port) {
+        console.log(`⚠️  Could not determine host port for ${container} — skipping`);
+        continue;
+      }
+      addTarget({
+        label: container,
+        url: `postgresql://postgres:postgres@localhost:${port}/victoria`,
+        stopContainerAfter: state === 'stopped' ? container : undefined,
+      });
+    }
+  }
+
+  // System-Postgres fallback stack (run.sh without Docker)
+  if (manifest?.database?.use_system_postgres && manifest.ports?.local_db) {
+    addTarget({
+      label: `system postgres :${manifest.ports.local_db}`,
+      url: `postgresql://postgres:postgres@localhost:${manifest.ports.local_db}/victoria`,
+    });
+  }
+
+  // env DATABASE_URL: local URLs are part of this worktree's stack; remote/shared
+  // DBs are out of scope unless explicitly requested
+  const envUrl = process.env.DATABASE_URL;
+  if (envUrl) {
+    if (isLocalUrl(envUrl)) {
+      addTarget({ label: 'env DATABASE_URL', url: envUrl });
+    } else if (process.env.CLEANUP_REMOTE_DB === '1') {
+      addTarget({ label: 'env DATABASE_URL (remote)', url: envUrl });
+    } else {
+      console.log(
+        'ℹ️  env DATABASE_URL is remote — skipping (set CLEANUP_REMOTE_DB=1 to clean it too)'
+      );
+    }
+  }
+
+  return targets;
+}
+
+async function cleanupDatabase(
+  target: DbTarget,
+  temporalClient: TemporalClient | null
+): Promise<CleanupStats> {
+  const stats = emptyStats();
+  const prisma = new PrismaClient({
+    log: ['error', 'warn'],
+    datasources: { db: { url: target.url } },
+  });
+
+  try {
+    // Get all non-deleted agents
+    let agents;
+    let softDeletedAgents;
+    const agentSelect = {
+      id: true,
+      userId: true,
+      goal: true,
+      status: true,
+      statusMessage: true,
+      model: true,
+      contextSize: true,
+      messageCount: true,
+      tokenCount: true,
+      tokensIn: true,
+      tokensOut: true,
+      source: true,
+      depth: true,
+      createdAt: true,
+      updatedAt: true,
+      deletedAt: true,
+      temporalWorkflowId: true,
+    } as const;
+    try {
+      agents = await prisma.agent.findMany({
+        where: { deletedAt: null },
+        select: agentSelect,
+      });
+
+      // Get already soft-deleted agents for hard deletion (also need full data for archiving)
+      softDeletedAgents = await prisma.agent.findMany({
+        where: { deletedAt: { not: null } },
+        select: agentSelect,
+      });
+    } catch (dbError: any) {
+      console.log(`⚠️  Cannot query ${target.label}:`, dbError.message);
+      console.log('⚠️  Skipping this database\n');
+      stats.cleanupFailures++;
+      return stats;
+    }
+
+    stats.activeCount = agents.length;
+    console.log(`📊 Found ${agents.length} active agents`);
+    console.log(`📊 Found ${softDeletedAgents.length} soft-deleted agents\n`);
+
+    const limit = pLimit(10);
+
+    // Track agent IDs that failed to archive — skip hard-deleting these
+    const failedArchiveIds = new Set<string>();
+
+    // Archive goals from other users to GoalHistory
     const allAgentsToArchive = [...agents, ...softDeletedAgents].filter(
       (agent) => MY_USER_ID && agent.userId !== MY_USER_ID
     );
 
     if (!MY_USER_ID) {
       console.log('ℹ️  MY_USER_ID not set - skipping goal archiving (all goals will be deleted)\n');
-    } else {
-      console.log(`🔒 MY_USER_ID is set: ${MY_USER_ID}`);
+    } else if (allAgentsToArchive.length > 0) {
       console.log(
         `📦 Archiving ${allAgentsToArchive.length} goals from other users to GoalHistory...\n`
       );
@@ -254,7 +356,9 @@ async function cleanupOneDatabase(
                 where: { originalAgentId: agent.id },
                 select: { id: true },
               });
-              if (existing) return;
+              if (existing) {
+                return;
+              }
               await prisma.goalHistory.create({
                 data: {
                   originalAgentId: agent.id,
@@ -275,7 +379,10 @@ async function cleanupOneDatabase(
                   agentDeletedAt: agent.deletedAt,
                 },
               });
-              archivedCount++;
+              console.log(
+                `   📦 Archived goal from user ${agent.userId}: ${agent.goal.substring(0, 50)}...`
+              );
+              stats.archivedCount++;
             } catch (archiveError: any) {
               console.log(`   ⚠️  Failed to archive agent ${agent.id}: ${archiveError.message}`);
               failedArchiveIds.add(agent.id);
@@ -283,182 +390,215 @@ async function cleanupOneDatabase(
           })
         )
       );
-      console.log(`✅ Archived ${archivedCount} goals to GoalHistory\n`);
+      console.log(`✅ Archived ${stats.archivedCount} goals to GoalHistory\n`);
       if (failedArchiveIds.size > 0) {
         console.log(
           `⚠️  ${failedArchiveIds.size} agent(s) failed to archive — will skip hard-deleting them\n`
         );
       }
     }
-  }
+    stats.failedArchiveCount = failedArchiveIds.size;
 
-  // Process active agents in parallel (terminate workflow + soft delete)
-  let successCount = 0;
-  let failCount = 0;
-
-  await Promise.all(
-    agents.map((agent) =>
-      limit(async () => {
-        try {
-          if (agent.temporalWorkflowId && temporalClient) {
-            try {
-              const handle = temporalClient.workflow.getHandle(agent.temporalWorkflowId);
-              await handle.terminate('Cleanup: All agents deleted');
-            } catch (workflowError: any) {
-              if (
-                workflowError.message?.includes('not found') ||
-                workflowError.message?.includes('already completed')
-              ) {
-                // safe to delete
-              } else {
-                console.log(`   ⚠️  Failed to terminate workflow: ${workflowError.message}`);
-                failCount++;
-                return;
-              }
-            }
-          } else if (agent.temporalWorkflowId && !temporalClient) {
-            console.log(`   ⚠️  Skipping workflow termination (no Temporal connection)`);
-            failCount++;
-            return;
-          }
-
-          await prisma.agent.update({
-            where: { id: agent.id },
-            data: { deletedAt: new Date() },
-          });
-          successCount++;
-        } catch (error: any) {
-          console.error(`   ❌ Failed to delete agent ${agent.id}: ${error.message}`);
-          failCount++;
-        }
-      })
-    )
-  );
-
-  // Hard-delete soft-deleted agents (skip agents that failed to archive)
-  let hardDeletedCount = 0;
-  let hardDeleteFailCount = 0;
-  const safeToDelete = softDeletedAgents.filter((a) => !failedArchiveIds.has(a.id));
-  const skippedCount = softDeletedAgents.length - safeToDelete.length;
-  if (skippedCount > 0) {
-    console.log(`\n⚠️  Skipping ${skippedCount} agent(s) whose goals failed to archive`);
-  }
-  if (safeToDelete.length > 0) {
-    console.log(`\n🗑️  Hard-deleting ${safeToDelete.length} soft-deleted agents...`);
+    // Process active agents in parallel (terminate workflow + soft delete)
     await Promise.all(
-      safeToDelete.map((agent) =>
+      agents.map((agent) =>
         limit(async () => {
+          console.log(`\n🔄 Processing agent ${agent.id}`);
+          console.log(`   Goal: ${agent.goal.substring(0, 60)}...`);
+          console.log(`   Status: ${agent.status}`);
+          console.log(`   Workflow ID: ${agent.temporalWorkflowId || 'None'}`);
+
           try {
-            await prisma.agent.delete({ where: { id: agent.id } });
-            hardDeletedCount++;
+            if (agent.temporalWorkflowId && temporalClient) {
+              try {
+                const handle = temporalClient.workflow.getHandle(agent.temporalWorkflowId);
+                await handle.terminate('Cleanup: All agents deleted');
+                console.log(`   ✅ Terminated workflow`);
+              } catch (workflowError: any) {
+                if (
+                  workflowError.message?.includes('not found') ||
+                  workflowError.message?.includes('already completed')
+                ) {
+                  console.log(`   ℹ️  Workflow already finished (safe to delete)`);
+                } else {
+                  console.log(`   ⚠️  Failed to terminate workflow: ${workflowError.message}`);
+                  stats.softDeleteFailCount++;
+                  return;
+                }
+              }
+            } else if (agent.temporalWorkflowId && !temporalClient) {
+              console.log(`   ⚠️  Skipping workflow termination (no Temporal connection)`);
+              stats.softDeleteFailCount++;
+              return;
+            } else {
+              console.log(`   ℹ️  No workflow to terminate`);
+            }
+
+            await prisma.agent.update({
+              where: { id: agent.id },
+              data: { deletedAt: new Date() },
+            });
+            console.log(`   ✅ Deleted agent from database`);
+            stats.softDeletedCount++;
           } catch (error: any) {
-            console.log(`   ❌ Failed to hard-delete agent ${agent.id}: ${error.message}`);
-            hardDeleteFailCount++;
+            console.error(`   ❌ Failed to delete agent: ${error.message}`);
+            stats.softDeleteFailCount++;
           }
         })
       )
     );
-    console.log(`✅ Hard-deleted ${hardDeletedCount} soft-deleted agent(s)`);
+
+    // Hard-delete soft-deleted agents in parallel (skip agents that failed to archive)
+    const safeToDelete = softDeletedAgents.filter((a) => !failedArchiveIds.has(a.id));
+    stats.skippedHardDeleteCount = softDeletedAgents.length - safeToDelete.length;
+    if (stats.skippedHardDeleteCount > 0) {
+      console.log(
+        `\n⚠️  Skipping ${stats.skippedHardDeleteCount} agent(s) whose goals failed to archive`
+      );
+    }
+    if (safeToDelete.length > 0) {
+      console.log(`\n🗑️  Hard-deleting ${safeToDelete.length} soft-deleted agents...`);
+      await Promise.all(
+        safeToDelete.map((agent) =>
+          limit(async () => {
+            try {
+              await prisma.agent.delete({
+                where: { id: agent.id },
+              });
+              console.log(
+                `   ✅ Hard-deleted agent ${agent.id} (deleted on ${agent.deletedAt?.toISOString()})`
+              );
+              stats.hardDeletedCount++;
+            } catch (error: any) {
+              console.log(`   ❌ Failed to hard-delete agent ${agent.id}: ${error.message}`);
+              stats.hardDeleteFailCount++;
+            }
+          })
+        )
+      );
+      console.log(`✅ Hard-deleted ${stats.hardDeletedCount} soft-deleted agent(s)`);
+    }
+
+    // Clear blueprints + attention requests in parallel (allSettled to always report both)
+    const [blueprintResult, attentionResult] = await Promise.allSettled([
+      (async () => {
+        console.log('\n🗑️  Clearing blueprints without feedback...');
+        const result = await prisma.goalBlueprint.deleteMany({
+          where: {
+            metadata: { equals: Prisma.DbNull },
+          },
+        });
+        console.log(`✅ Deleted ${result.count} blueprint(s) (preserved blueprints with feedback)`);
+        return result;
+      })(),
+      (async () => {
+        console.log('\n🗑️  Clearing all attention requests...');
+        const result = await prisma.agentAttentionRequest.deleteMany({});
+        console.log(`✅ Deleted ${result.count} attention request(s)`);
+        return result;
+      })(),
+    ]);
+    stats.blueprintsClearedCount =
+      blueprintResult.status === 'fulfilled' ? blueprintResult.value.count : 0;
+    stats.attentionClearedCount =
+      attentionResult.status === 'fulfilled' ? attentionResult.value.count : 0;
+    if (blueprintResult.status === 'rejected') {
+      console.log(`❌ Failed to clear blueprints: ${blueprintResult.reason}`);
+      stats.cleanupFailures++;
+    }
+    if (attentionResult.status === 'rejected') {
+      console.log(`❌ Failed to clear attention requests: ${attentionResult.reason}`);
+      stats.cleanupFailures++;
+    }
+
+    return stats;
+  } finally {
+    await prisma.$disconnect();
+    if (target.stopContainerAfter) {
+      console.log(`🐘 Stopping ${target.stopContainerAfter} (was stopped before cleanup)`);
+      try {
+        execSync(`docker stop ${JSON.stringify(target.stopContainerAfter)}`, { stdio: 'ignore' });
+      } catch (error: any) {
+        console.log(`⚠️  Failed to stop ${target.stopContainerAfter}: ${error.message}`);
+      }
+    }
   }
-
-  // Clear blueprints + attention requests
-  const [blueprintResult, attentionResult] = await Promise.allSettled([
-    (async () => {
-      const result = await prisma.goalBlueprint.deleteMany({
-        where: { metadata: { equals: Prisma.DbNull } },
-      });
-      console.log(`✅ Deleted ${result.count} blueprint(s) (preserved blueprints with feedback)`);
-      return result;
-    })(),
-    (async () => {
-      const result = await prisma.agentAttentionRequest.deleteMany({});
-      console.log(`✅ Deleted ${result.count} attention request(s)`);
-      return result;
-    })(),
-  ]);
-  if (blueprintResult.status === 'rejected') {
-    console.log(`❌ Failed to clear blueprints: ${blueprintResult.reason}`);
-  }
-  if (attentionResult.status === 'rejected') {
-    console.log(`❌ Failed to clear attention requests: ${attentionResult.reason}`);
-  }
-
-  const cleanupFailures =
-    (blueprintResult.status === 'rejected' ? 1 : 0) +
-    (attentionResult.status === 'rejected' ? 1 : 0);
-  const totalFailures = failCount + hardDeleteFailCount + failedArchiveIds.size + cleanupFailures;
-
-  console.log('\n' + '-'.repeat(60));
-  console.log(`📈 Summary for ${label}:`);
-  console.log(`   Goals archived: ${archivedCount}`);
-  console.log(`   Active agents: ${agents.length}  (soft-deleted ${successCount}, failed ${failCount})`);
-  console.log(`   Hard-deleted: ${hardDeletedCount}  (failed ${hardDeleteFailCount})`);
-  console.log(`   Skipped hard-delete (archive failed): ${skippedCount}`);
-  console.log('-'.repeat(60));
-
-  return totalFailures;
 }
 
-async function main() {
-  console.log('🧹 Starting cleanup (this worktree + prod)...\n');
+async function cleanupAllAgents() {
+  console.log(`🧹 Starting cleanup of all agents (worktree: ${WORKTREE_ROOT})...\n`);
 
-  // Local first so any token-burning local workflows die before we touch prod.
-  const targets = [getLocalWorktreeTarget(), getProdTarget()].filter(Boolean) as CleanupTarget[];
+  // First kill this worktree's workers
+  await killThisWorktreeWorkers();
+
+  const targets = discoverDbTargets();
   if (targets.length === 0) {
-    console.log('⚠️  No cleanup targets resolved — nothing to do.');
+    console.log('⚠️  No databases found for this worktree');
+    process.exitCode = 1;
     return;
   }
-  console.log('🎯 Cleanup targets:');
-  targets.forEach((t) => console.log(`   - ${t.label}`));
+
+  console.log(`\n🎯 Cleaning ${targets.length} database(s):`);
+  for (const target of targets) {
+    console.log(`   - ${target.label}`);
+  }
   console.log('');
 
-  // One Temporal client (cloud namespace) shared across targets.
-  const temporalClient = await (async () => {
-    try {
-      const client = await getTemporalClient();
-      console.log('✅ Connected to Temporal Cloud\n');
-      return client;
-    } catch (error) {
-      console.error('⚠️  Failed to connect to Temporal:', error);
-      console.log('⚠️  Will proceed with database cleanup only\n');
-      return null;
-    }
-  })();
-
-  let totalFailures = 0;
-  for (const target of targets) {
-    console.log('\n' + '#'.repeat(60));
-    console.log(`# Cleaning: ${target.label}`);
-    console.log('#'.repeat(60) + '\n');
-    const prisma = new PrismaClient({ datasourceUrl: target.url });
-    try {
-      totalFailures += await cleanupOneDatabase(prisma, temporalClient, target.label);
-    } catch (error: any) {
-      console.error(`❌ Fatal error cleaning ${target.label}:`, error.message);
-      totalFailures++;
-    } finally {
-      await prisma.$disconnect();
-    }
+  // One Temporal client shared across databases — all stacks use the same namespace
+  let temporalClient: TemporalClient | null = null;
+  try {
+    temporalClient = await getTemporalClient();
+    console.log('✅ Connected to Temporal Cloud\n');
+  } catch (error) {
+    console.error('⚠️  Failed to connect to Temporal:', error);
+    console.log('⚠️  Will proceed with database cleanup only\n');
   }
 
-  // Kill workers LAST: killing this worktree's worker can trip run.sh's EXIT trap, which
-  // tears down the local docker DB. Doing it after cleanup avoids making the DB unreachable
-  // mid-run. NOTE: this stops this worktree's running stack — restart run.sh afterwards.
-  console.log('');
-  killThisWorktreeWorkers();
+  const perDbStats: Array<{ target: DbTarget; stats: CleanupStats }> = [];
+  for (const target of targets) {
+    console.log('\n' + '─'.repeat(60));
+    console.log(`🗄️  Database: ${target.label}`);
+    console.log('─'.repeat(60) + '\n');
+    try {
+      const stats = await cleanupDatabase(target, temporalClient);
+      perDbStats.push({ target, stats });
+    } catch (error: any) {
+      console.error(`❌ Fatal error cleaning ${target.label}: ${error.message}`);
+      const stats = emptyStats();
+      stats.cleanupFailures++;
+      perDbStats.push({ target, stats });
+    }
+  }
 
   console.log('\n' + '='.repeat(60));
-  if (totalFailures === 0) {
-    console.log('✅ All targets cleaned up successfully!');
+  console.log('📈 Cleanup Summary:');
+  let grandFailures = 0;
+  for (const { target, stats } of perDbStats) {
+    grandFailures += totalFailures(stats);
+    console.log(`\n   ${target.label}:`);
+    console.log(`      Goals archived to GoalHistory: ${stats.archivedCount}`);
+    console.log(`      Goals failed to archive: ${stats.failedArchiveCount}`);
+    console.log(`      Active agents processed: ${stats.activeCount}`);
+    console.log(`      Successfully soft-deleted: ${stats.softDeletedCount}`);
+    console.log(`      Failed to soft-delete: ${stats.softDeleteFailCount}`);
+    console.log(`      Hard-deleted (previously soft-deleted): ${stats.hardDeletedCount}`);
+    console.log(`      Failed to hard-delete: ${stats.hardDeleteFailCount}`);
+    console.log(`      Skipped hard-delete (archive failed): ${stats.skippedHardDeleteCount}`);
+    console.log(`      Blueprints cleared: ${stats.blueprintsClearedCount}`);
+    console.log(`      Attention requests cleared: ${stats.attentionClearedCount}`);
+  }
+  console.log('\n' + '='.repeat(60));
+
+  if (grandFailures === 0) {
+    console.log('\n✅ All agents, blueprints, and attention requests cleaned up successfully!');
   } else {
-    console.log(`⚠️  ${totalFailures} failure(s) during cleanup`);
+    console.log(`\n⚠️  ${grandFailures} failure(s) during cleanup`);
     process.exitCode = 1;
   }
-  console.log('='.repeat(60));
 }
 
 // Run cleanup
-main()
+cleanupAllAgents()
   .then(() => {
     console.log('\n👋 Cleanup complete');
     process.exit(process.exitCode ?? 0);

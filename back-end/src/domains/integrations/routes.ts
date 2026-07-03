@@ -16,6 +16,7 @@ import emailRoutes from './routes.email';
 import claudeRoutes from './routes.claude';
 import computeRoutes from './routes.compute';
 import plaidRoutes from './routes.plaid';
+import documentRoutes from './routes.documents';
 
 const router = Router();
 
@@ -27,6 +28,7 @@ router.use(emailRoutes);
 router.use(claudeRoutes);
 router.use(computeRoutes);
 router.use(plaidRoutes);
+router.use(documentRoutes);
 
 // ---------------------------------------------------------------------------
 // CRUD routes

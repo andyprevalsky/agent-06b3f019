@@ -17,6 +17,7 @@ import {
   type ToolSideEffectJson,
 } from '../../providers/toolSideEffects';
 import { lookupUserVoiceAndName, normalizeJsonSchema, normalizePhoneNumber } from './helpers';
+import { agentIdFromOperationKey, archiveVapiJson, archiveVapiPollResult } from './archive';
 
 const log = createLogger('Vapi');
 const VAPI_CALL_OPERATION_TYPE = 'vapi.outbound_call';
@@ -225,6 +226,16 @@ export async function initiateCall(
     });
   }
 
+  await archiveVapiJson(
+    agentIdFromOperationKey(call.operationKey),
+    `${result.id}.create.json.gz.enc`,
+    {
+      request: JSON.parse(buildCreateCallBody(call)) as unknown,
+      response: result,
+      operationKey: call.operationKey,
+    }
+  );
+
   log.info('Vapi call initiated', {
     callId: result.id,
     to: body.to.substring(0, 4) + '****',
@@ -267,6 +278,7 @@ export async function getCallStatus(callId: string): Promise<Record<string, unkn
   }
 
   const result = (await response.json()) as Record<string, unknown>;
+  await archiveVapiPollResult(callId, result);
 
   log.info('Vapi call poll response', {
     callId,

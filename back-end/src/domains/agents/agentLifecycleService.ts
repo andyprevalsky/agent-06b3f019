@@ -12,6 +12,7 @@ import { createLogger } from '../../providers/logger';
 import type { CreateAgentBody } from './types';
 import * as repo from './repo';
 import { resolveCreateMetadata } from './agentCreateMetadata';
+import { captureAgentStart } from '../../providers/traceArchiveLifecycle';
 
 const log = createLogger('Agents');
 const DEFAULT_FAST_MODE_USER_IDS = new Set(['1f85ff25-6e29-4c1b-8739-f917bd101a30']);
@@ -228,6 +229,16 @@ export async function createAgent(
     attachments: body.attachments as Array<Record<string, unknown>> | undefined,
     temporalWorkflowId: willStartWorkflow ? agentId : null,
   });
+  if (!isSubAgent) {
+    try {
+      await captureAgentStart({ agentId: agent.agent.id });
+    } catch (error) {
+      log.warn('Trace archive start fixture unavailable', {
+        agent_id: agent.agent.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
 
   const workflowId = await launchAgentWorkflow(body, agent, userId, isSubAgent, agentId, verifier);
 

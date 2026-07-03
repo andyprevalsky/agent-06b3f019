@@ -2,6 +2,28 @@
 
 Spawns real agents against prod or localhost, polls for completion, evaluates pass/fail, handles approvals, retries transient failures, and stores results.
 
+## Eval Suite (the ONE catalog)
+
+`tasks.json` is the single canonical eval catalog (see CLAUDE.md "Eval Suite"). Each entry carries the additive eval contract — `status` (`ready` | `incomplete`), `runner` (`agent` | `vitest`), `bench` (`pipeline-e2e` harness plumbing | `rose-bench` harness-independent capability), `description`, `environment`, `evaluators[]`, `source` — validated by `long_horizon.py:validate_catalog()`. Idea kernels live in `long_horizon_ideas.json`.
+
+```bash
+# THE full-suite entrypoint: every ready eval (agent + external vitest smokes)
+python benchmarks/run_eval_suite.py --port 3001
+
+# Print the holding set (ready vs incomplete)
+python benchmarks/run_eval_suite.py --list
+
+# Run a named subset across runners
+python benchmarks/run_eval_suite.py --only load-test-sias,smoke-backend-sms-supervisor
+
+# Run one bench axis
+python benchmarks/run_eval_suite.py --bench rose-bench --port 3001
+```
+
+Every task runs on a **base-image fixture**: undeclared environments inherit `base:victoria-prod-sync-v1` (workspace prod-sync DB, `scripts/setup-db.sh`) at load time — registry + pg_dump freezer in `fixtures.py`. Every completed run — pass or fail — is recorded: full record in `runs/*.json`, one line per attempt in `history/task_attempts.jsonl` (`record_attempt`), full LLM trajectories in `.llm-dumps/<agent_id>/` (always-on locally).
+
+Suite selection (`run_benchmark.py --suite ...`) runs only `runner: "agent"` + `status: "ready"` entries; explicit `--task <name>` still targets incomplete agent evals for dev iteration. **Never rename an existing task `name`** — it is the primary key into `history/task_durations.jsonl` (success ledger), `history/span_durations.jsonl` (p99 baselines), and `runs/*.json`; a rename orphans that history (guarded by `test_history_ledger_task_names_still_exist_in_catalog`). The FE dev query box reads this same catalog via `GET /api/benchmarks/test-prompts`.
+
 ## Quick Start
 
 ```bash
@@ -39,7 +61,9 @@ python benchmarks/run_benchmark.py --compare runs/A.json runs/B.json
 | `for-each` | agent-for-each, outreach-batch | Multi-agent for-each tasks |
 | `outreach` | outreach-batch | Personalized outreach at scale |
 | `job-applications` | job-applications | Job application blitz with resumes |
-| `all` | Everything | All tasks |
+| `rose-bench` | Harness-independent capability evals | Portable fixture + prompt + evaluator tasks |
+| `pipeline-e2e` | Harness plumbing evals | Rose-specific pipes, write locks, auth, smoke coverage |
+| `all` | Everything | All ready agent tasks |
 
 ## Tasks
 

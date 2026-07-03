@@ -19,6 +19,7 @@ export function TreeNodeRow({ node, isLast, prefix, getChildren, onNavigate }: T
   const [isHovered, setIsHovered] = useState(false);
   const children = getChildren(node.agentId);
   const statusText = getStatusText(node);
+  const showStatusText = statusText !== '' && statusText !== 'failed';
 
   const branch = isLast ? TREE_LAST : TREE_BRANCH;
   const childPrefix = prefix + (isLast ? '   ' : `${TREE_VERT}  `);
@@ -39,7 +40,7 @@ export function TreeNodeRow({ node, isLast, prefix, getChildren, onNavigate }: T
         onMouseLeave={() => setIsHovered(false)}
       />
 
-      {statusText && (
+      {showStatusText && (
         <div className="flex items-center gap-1 py-0.5">
           <span className="text-gray-400 dark:text-gray-600 whitespace-pre select-none">
             {childPrefix}

@@ -4,7 +4,6 @@
 
 import { prisma } from '../database';
 import { canonicalAuthRealm } from '../authRealm';
-import { buildFingerprintScript } from './injectionScripts';
 import { type FingerprintData, log } from './types';
 import {
   injectCacheStorageState,
@@ -170,6 +169,9 @@ export async function resolveBrowserAuthCredentialSource(params: {
   authRealm: string;
   steelContextId: string | null;
   steelSessionHasRealmCookies?: boolean;
+  // Pass the already-fetched SteelSessionAuth row (or explicit null) to skip
+  // re-querying it — injectUserData looks it up moments earlier.
+  preloadedSteelAuth?: Awaited<ReturnType<typeof prisma.steelSessionAuth.findUnique>>;
 }): Promise<BrowserAuthCredentialSource> {
   if (benchmarkSavedBrowserAuthDisabled()) {
     log.info('  [cookies] Benchmark anon mode active; skipping saved browser auth selection', {
@@ -181,17 +183,19 @@ export async function resolveBrowserAuthCredentialSource(params: {
   }
 
   const steelAuth =
-    params.steelContextId !== null && params.authRealm !== ''
-      ? await prisma.steelSessionAuth.findUnique({
-          where: {
-            userId_contextId_authRealm: {
-              userId: params.userId,
-              contextId: params.steelContextId,
-              authRealm: params.authRealm,
+    params.preloadedSteelAuth !== undefined
+      ? params.preloadedSteelAuth
+      : params.steelContextId !== null && params.authRealm !== ''
+        ? await prisma.steelSessionAuth.findUnique({
+            where: {
+              userId_contextId_authRealm: {
+                userId: params.userId,
+                contextId: params.steelContextId,
+                authRealm: params.authRealm,
+              },
             },
-          },
-        })
-      : null;
+          })
+        : null;
 
   if (
     steelAuth !== null &&
@@ -230,7 +234,8 @@ export async function resolveBrowserAuthCredentialSource(params: {
 export async function injectUserData(
   sessionId: string,
   userId: string,
-  startUrl: string
+  startUrl: string,
+  options?: { browser?: import('playwright').Browser }
 ): Promise<{
   cookies: {
     injected: boolean;
@@ -310,6 +315,9 @@ export async function injectUserData(
   log.info(`  [1/9] DB fetch complete (${Date.now() - startTime}ms)`);
 
   if (!dbSession?.wsUrl) {
+    if (options?.browser) {
+      await options.browser.close().catch(() => {});
+    }
     throw new Error('No WebSocket URL found for session');
   }
 
@@ -336,6 +344,7 @@ export async function injectUserData(
     authRealm,
     steelContextId,
     steelSessionHasRealmCookies: steelCookieSummary?.hasRealmCookies,
+    preloadedSteelAuth: steelAuthForVerification,
   });
 
   if (authSource.kind === 'steel_session') {
@@ -390,15 +399,22 @@ export async function injectUserData(
   // Note: We always need CDP connection now to inject scrollbar CSS
   // (previously returned early when no cookies/fingerprint)
 
-  // Connect via Playwright (single connection for both operations)
-  const { chromium } = await import('playwright');
+  // Connect via Playwright (single connection for both operations). Reuse the
+  // caller's already-validated connection when provided — a fresh CDP
+  // handshake to Steel costs 3-5s.
   let browser;
 
   try {
-    log.info(`  [3/9] Connecting to CDP...`);
-    browser = await chromium.connectOverCDP(dbSession.wsUrl);
+    if (options?.browser) {
+      browser = options.browser;
+      log.info(`  [3/9] Reusing validated CDP connection (${Date.now() - startTime}ms)`);
+    } else {
+      const { chromium } = await import('playwright');
+      log.info(`  [3/9] Connecting to CDP...`);
+      browser = await chromium.connectOverCDP(dbSession.wsUrl);
+      log.info(`  [3/9] CDP connected (${Date.now() - startTime}ms)`);
+    }
     const context = browser.contexts()[0];
-    log.info(`  [3/9] CDP connected (${Date.now() - startTime}ms)`);
 
     let cookieResult = {
       injected: false,
@@ -406,7 +422,7 @@ export async function injectUserData(
       authSource: authSource.kind,
       credentialRef: authSource.credentialRef,
     };
-    let fingerprintResult = { injected: false };
+    const fingerprintResult = { injected: false };
     let localStorageResult = { injected: false, originCount: 0 };
     let indexedDBResult = { injected: false, originCount: 0 };
     let permissionsResult = { injected: false, grantCount: 0 };
@@ -469,79 +485,17 @@ export async function injectUserData(
       );
     }
 
-    // 2. Inject fingerprint via CDP + JS script if available
-    if (hasFingerprint && fp) {
-      injectionPromises.push(
-        (async () => {
-          try {
-            log.info(`  [fingerprint] Injecting via CDP and script...`);
-
-            // Get the page for init script injection
-            const page = context.pages()[0];
-            if (!page) {
-              log.error(`  [fingerprint] ❌ No page available for CDP session`);
-              return;
-            }
-
-            // Create page-level CDP session for Client Hints override
-            // (User-Agent is already set at Steel session creation level)
-            const cdpSession = await context.newCDPSession(page);
-
-            // IMPORTANT: Network.enable MUST be called before setUserAgentOverride
-            // Without this, the userAgentMetadata won't affect HTTP headers
-            await cdpSession.send('Network.enable');
-
-            // 2a. Set Client Hints at HTTP header level via CDP
-            // User-Agent is already set by Steel, we just need the metadata for Sec-CH-UA-* headers
-            if (fp.userAgentData) {
-              log.info(`  [fingerprint] Setting Client Hints via CDP...`);
-              const userAgentOverrideParams = {
-                userAgent: fp.navigator.userAgent, // Must match what Steel set
-                acceptLanguage: fp.navigator.languages.join(','),
-                platform: fp.navigator.platform,
-                userAgentMetadata: {
-                  brands: fp.userAgentData.brands,
-                  fullVersionList: fp.userAgentData.fullVersionList,
-                  platform: fp.userAgentData.platform,
-                  platformVersion: fp.userAgentData.platformVersion,
-                  architecture: fp.userAgentData.architecture,
-                  model: fp.userAgentData.model,
-                  mobile: fp.userAgentData.mobile,
-                  bitness: fp.userAgentData.bitness,
-                },
-              };
-              await cdpSession.send('Network.setUserAgentOverride', userAgentOverrideParams);
-              log.info(
-                `  [fingerprint] ✅ Client Hints: platform=${fp.userAgentData.platform}, arch=${fp.userAgentData.architecture}`
-              );
-            }
-
-            // 2b. Disable WebRTC IP leak (prevent real IP from being exposed)
-            log.info(`  [fingerprint] Disabling WebRTC IP leak via CDP...`);
-            try {
-              // Use WebRTC IP handling policy to prevent leaks
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any -- CDP method not in Playwright's type defs
-              await cdpSession.send('Emulation.setAutomationOverride' as any, {
-                enabled: false,
-              });
-            } catch {
-              // This CDP method may not be available in all Chrome versions
-              log.info(`  [fingerprint] WebRTC leak prevention not available via CDP`);
-            }
-
-            // 2d. Inject comprehensive JS fingerprint spoofing script
-            const fingerprintScript = buildFingerprintScript(fp);
-
-            await context.addInitScript(fingerprintScript);
-            log.info(`  [fingerprint] ✅ Injected (${Date.now() - startTime}ms)`);
-            fingerprintResult = { injected: true };
-          } catch (error) {
-            log.error('Failed to inject fingerprint', {
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
-        })()
-      );
+    // 2. Fingerprint: NOT injected here on purpose. CDP-level settings
+    // (Network.setUserAgentOverride, addInitScript, Emulation overrides) are
+    // scoped to the CDP connection that created them and vanish when this
+    // connection closes — see agents/helpers/fingerprint_injection.py (header)
+    // and agents/browser_tools/dom_service.py connect() for the same finding.
+    // The worker applies the identical override + init script on its own
+    // persistent connection (from the fingerprint_injection payload this init
+    // response returns) before any navigation, so the 5 serial CDP round trips
+    // this used to spend here were dead work on the critical path.
+    if (hasFingerprint) {
+      log.info(`  [fingerprint] Deferred to worker connection (payload in init response)`);
     }
 
     // 3. Inject localStorage if available
@@ -640,10 +594,12 @@ export async function injectUserData(
       cacheStorage: cacheStorageResult,
     };
   } finally {
-    // Always disconnect from the browser (doesn't close the Steel session)
+    // Always disconnect from the browser (doesn't close the Steel session).
+    // Fire-and-forget: the connection is being discarded, and awaiting the
+    // websocket teardown put ~350-400ms on the init critical path.
     if (browser) {
-      log.info(`  [5/5] Closing CDP connection...`);
-      await browser.close();
+      log.info(`  [5/5] Closing CDP connection (async)...`);
+      void browser.close().catch(() => {});
       log.info(`🔐 [injectUserData] COMPLETE (${Date.now() - startTime}ms total)`);
     }
   }

@@ -19,12 +19,12 @@ model Agent {
   createdAt                 DateTime        @default(now())
   updatedAt                 DateTime        @updatedAt
   temporalWorkflowId        String?
-  model                     String      @default("rose-labs/rose-1-ultra")
-  contextSize               Int         @default(0)
-  messageCount              Int         @default(0)
-  tokenCount                Int         @default(0)
-  tokensIn                  Int         @default(0)
-  tokensOut                 Int         @default(0)
+  model                     String          @default("rose-labs/rose-1-ultra")
+  contextSize               Int             @default(0)
+  messageCount              Int             @default(0)
+  tokenCount                Int             @default(0)
+  tokensIn                  Int             @default(0)
+  tokensOut                 Int             @default(0)
   parentAgentId             String?
   tokenInPriceMicrodollars  Int?
   tokenOutPriceMicrodollars Int?
@@ -39,11 +39,11 @@ model Agent {
   proxyCity                 String?
   proxyCountry              String?
   proxyState                String?
-  priceLimitCents           Int         @default(100)
-  treeCostCents             Int         @default(0)
-  ownCostCents              Float       @default(0)
-  writeLockEnabled          Boolean     @default(true)
-  fastModeCacheEnabled      Boolean     @default(false)
+  priceLimitCents           Int             @default(100)
+  treeCostCents             Int             @default(0)
+  ownCostCents              Float           @default(0)
+  writeLockEnabled          Boolean         @default(true)
+  fastModeCacheEnabled      Boolean         @default(false)
   githubRepoUrl             String?
   parent                    Agent?          @relation("AgentHierarchy", fields: [parentAgentId], references: [id])
   children                  Agent[]         @relation("AgentHierarchy")
@@ -241,6 +241,10 @@ model User {
   agentPhoneMessages          AgentPhoneMessage[]
   authAssistanceRequests      UserAuthAssistanceRequest[]
   purchaseSpends              PurchaseSpend[]
+  dataDocuments               UserDataDocument[]
+  dataProviderSyncStates      UserDataProviderSyncState[]
+  userSnapshot                UserSnapshot?
+  userSnapshotRevisions       UserSnapshotRevision[]
 
   @@index([userId])
   @@index([inviteCode])
@@ -462,6 +466,114 @@ model Integration {
   @@index([poolingEnabled, rateLimitedUntil])
 }
 
+model ComputeTokenLineageLease {
+  lineageKey    String    @id
+  tokenType     String
+  tokenSource   String
+  tokenIdentity String
+  userId        String?
+  agentId       String?
+  rootAgentId   String?
+  assignedAt    DateTime  @default(now())
+  lastUsedAt    DateTime  @default(now())
+  releasedAt    DateTime?
+
+  @@index([tokenType, tokenSource, tokenIdentity, releasedAt, lastUsedAt])
+  @@index([agentId])
+  @@index([rootAgentId])
+}
+
+model ComputeTokenFastCacheAffinity {
+  affinityKey String   @id
+  tokenType   String
+  userId      String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([tokenType])
+  @@index([userId])
+}
+
+model UserDataDocument {
+  id              String                 @id @default(uuid())
+  userId          String
+  source          String
+  externalId      String
+  title           String
+  content         String
+  url             String?
+  metadata        Json?                  @default("{}")
+  contentHash     String
+  sourceUpdatedAt DateTime?
+  lastSeenAt      DateTime               @default(now())
+  deletedAt       DateTime?
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
+  user            User                   @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  snapshotUpdates UserSnapshotRevision[]
+
+  @@unique([userId, source, externalId])
+  @@index([userId, source])
+  @@index([userId, updatedAt])
+  @@index([userId, source, deletedAt])
+}
+
+model UserDataProviderSyncState {
+  id                   String    @id @default(uuid())
+  userId               String
+  source               String
+  status               String    @default("NOT_CONNECTED")
+  config               Json?     @default("{}")
+  cursor               Json?     @default("{}")
+  lastStartedAt        DateTime?
+  lastSuccessfulSyncAt DateTime?
+  lastError            String?
+  nextSyncAt           DateTime?
+  realtimeEnabled      Boolean   @default(false)
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+  user                 User      @relation(fields: [userId], references: [userId], onDelete: Cascade)
+
+  @@unique([userId, source])
+  @@index([userId, status])
+  @@index([nextSyncAt])
+}
+
+model UserSnapshot {
+  id        String                 @id @default(uuid())
+  userId    String                 @unique
+  content   Json                   @default("{}")
+  version   Int                    @default(1)
+  createdAt DateTime               @default(now())
+  updatedAt DateTime               @updatedAt
+  user      User                   @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  revisions UserSnapshotRevision[]
+
+  @@index([userId])
+}
+
+model UserSnapshotRevision {
+  id         String            @id @default(uuid())
+  userId     String
+  snapshotId String
+  documentId String?
+  source     String
+  before     Json              @default("{}")
+  after      Json              @default("{}")
+  changes    Json?             @default("{}")
+  model      String?
+  promptKey  String?
+  createdAt  DateTime          @default(now())
+  user       User              @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  snapshot   UserSnapshot      @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+  document   UserDataDocument? @relation(fields: [documentId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([snapshotId])
+  @@index([documentId])
+  @@index([source])
+}
+
 model EmailIntegrationCredential {
   id            String        @id @default(uuid())
   userId        String
@@ -488,28 +600,29 @@ model EmailIntegrationCredential {
 /// Holds the encrypted long-lived access token issued by Plaid after
 /// successful Link exchange.
 model PlaidItem {
-  id                   String          @id @default(uuid())
+  id                   String             @id @default(uuid())
   userId               String
   integrationId        String
-  plaidItemId          String          @unique
+  plaidItemId          String             @unique
   plaidInstitutionId   String?
   institutionName      String?
   /// Base64-encoded RSA-2048 + AES-256-GCM envelope wrapping the Plaid
   /// access_token. Encrypted on the backend at write time; decrypted only
   /// at the moment of a Plaid API call. See providers/plaidCredentials.ts.
   encryptedAccessToken String
-  status               PlaidItemStatus @default(ACTIVE)
-  products             String[]        @default([])
+  status               PlaidItemStatus    @default(ACTIVE)
+  products             String[]           @default([])
   cursor               String?
   lastSyncAt           DateTime?
   lastWebhookAt        DateTime?
   errorCode            String?
   errorMessage         String?
-  createdAt            DateTime        @default(now())
-  updatedAt            DateTime        @updatedAt
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
   disconnectedAt       DateTime?
-  integration          Integration     @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  integration          Integration        @relation(fields: [integrationId], references: [id], onDelete: Cascade)
   accounts             PlaidAccount[]
+  transactions         PlaidTransaction[]
 
   @@index([userId])
   @@index([userId, status])
@@ -520,23 +633,69 @@ model PlaidItem {
 /// Holds no balances or transactions; those are fetched on demand and not
 /// persisted by this table.
 model PlaidAccount {
-  id                 String    @id @default(uuid())
+  id                 String             @id @default(uuid())
   userId             String
   plaidItemId        String
-  plaidAccountId     String    @unique
+  plaidAccountId     String             @unique
   name               String
   officialName       String?
   mask               String?
   type               String
   subtype            String?
   verificationStatus String?
-  createdAt          DateTime  @default(now())
-  updatedAt          DateTime  @updatedAt
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
   disconnectedAt     DateTime?
-  plaidItem          PlaidItem @relation(fields: [plaidItemId], references: [id], onDelete: Cascade)
+  plaidItem          PlaidItem          @relation(fields: [plaidItemId], references: [id], onDelete: Cascade)
+  transactions       PlaidTransaction[]
 
   @@index([userId])
   @@index([plaidItemId])
+}
+
+/// Plaid Transaction: normalized, searchable transaction data from Plaid
+/// Transactions Sync. Stores no raw Plaid payload.
+model PlaidTransaction {
+  id                      String               @id @default(uuid())
+  userId                  String
+  plaidItemId             String
+  plaidAccountId          String
+  plaidTransactionId      String               @unique
+  plaidAccountExternalId  String
+  date                    DateTime
+  authorizedDate          DateTime?
+  datetime                DateTime?
+  authorizedDatetime      DateTime?
+  name                    String
+  merchantName            String?
+  originalDescription     String?
+  amount                  Decimal              @db.Decimal(18, 4)
+  absoluteAmount          Decimal              @db.Decimal(18, 4)
+  direction               TransactionDirection
+  isoCurrencyCode         String?
+  unofficialCurrencyCode  String?
+  category                String[]             @default([])
+  categoryId              String?
+  personalFinanceCategory String?
+  personalFinanceDetailed String?
+  paymentChannel          String?
+  locationSummary         String?
+  pending                 Boolean              @default(false)
+  pendingTransactionId    String?
+  accountOwner            String?
+  checkNumber             String?
+  removedAt               DateTime?
+  createdAt               DateTime             @default(now())
+  updatedAt               DateTime             @updatedAt
+  plaidItem               PlaidItem            @relation(fields: [plaidItemId], references: [id], onDelete: Cascade)
+  plaidAccount            PlaidAccount         @relation(fields: [plaidAccountId], references: [id], onDelete: Cascade)
+
+  @@index([userId, date])
+  @@index([userId, pending])
+  @@index([userId, removedAt])
+  @@index([plaidItemId])
+  @@index([plaidAccountId])
+  @@index([plaidAccountExternalId])
 }
 
 model RoseApiKey {
@@ -974,6 +1133,11 @@ enum PlaidItemStatus {
   DISCONNECTED
   REQUIRES_REAUTH
   ERROR
+}
+
+enum TransactionDirection {
+  OUTFLOW
+  INFLOW
 }
 
 model SmsSession {

@@ -25,6 +25,7 @@ import { config } from 'dotenv';
 config();
 
 const CHECK_TIMEOUT_MS = 5000;
+const STEEL_CHECK_TIMEOUT_MS = 15000;
 
 interface CheckResult {
   name: string;
@@ -33,9 +34,13 @@ interface CheckResult {
   error?: string;
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs = CHECK_TIMEOUT_MS
+): Promise<Response> {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), CHECK_TIMEOUT_MS);
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     return await fetch(url, { ...init, signal: ctrl.signal });
   } finally {
@@ -100,10 +105,14 @@ async function checkE2B(): Promise<void> {
 
 async function checkSteel(): Promise<void> {
   const key = requireEnv('STEEL_API_KEY');
-  const res = await fetchWithTimeout('https://api.steel.dev/v1/sessions?limit=1', {
-    method: 'GET',
-    headers: { 'Steel-Api-Key': key },
-  });
+  const res = await fetchWithTimeout(
+    'https://api.steel.dev/v1/sessions?limit=1',
+    {
+      method: 'GET',
+      headers: { 'Steel-Api-Key': key },
+    },
+    STEEL_CHECK_TIMEOUT_MS
+  );
   if (authFailed(res.status)) {
     const body = await res.text().catch(() => '');
     throw new Error(

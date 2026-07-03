@@ -49,3 +49,33 @@ export interface TestPaymentConfirmation {
     totals: TestPaymentTotals;
   };
 }
+
+export interface PhoneBenchmarkPaymentInput {
+  cardNumber: string;
+  expiration: string;
+  cvc: string;
+  billingZip: string;
+  cardholderName?: string;
+  amountCents?: number;
+  orderItem?: string;
+}
+
+export interface PhoneBenchmarkPaymentResult {
+  status: string;
+  paymentIntentId: string;
+  amountCents: number;
+  total: string;
+  orderItem: string;
+  confirmationCode: string;
+  cardLastFour: string;
+}
+
+export interface PhoneBenchmarkPaymentAuditEntry {
+  createdAt: string;
+  toolCallId: string;
+  status: string;
+  paymentIntentId?: string;
+  amountCents?: number;
+  confirmationCode?: string;
+  error?: string;
+}

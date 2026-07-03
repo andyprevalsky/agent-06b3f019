@@ -7,7 +7,6 @@ from .fetch_tools import fetch_agent_tools
 # query_blueprints and save_blueprint imported directly by worker from knowledge_base_v2
 from .finished import mark_finished
 from .get_user_context import get_user_context, get_user_custom_system_prompt, get_user_system_name
-from .llm import call_llm, call_llm_activity, check_progress
 from .messages import poll_new_messages, post_agent_message, stream_assistant_chunk
 from .model_info import get_model_context_window
 from .model_pricing import fetch_model_pricing
@@ -35,3 +34,11 @@ __all__ = [
     "get_user_custom_system_prompt",
     "fetch_model_pricing",
 ]
+
+
+def __getattr__(name: str):
+    if name in {"call_llm", "call_llm_activity", "check_progress"}:
+        from . import llm
+
+        return getattr(llm, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

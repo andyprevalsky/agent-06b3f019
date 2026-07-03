@@ -93,6 +93,11 @@ RENDER_OWNER_ID = load_env_var("RENDER_OWNER_ID", _BACKEND_ENV) or "tea-csppgi56
 # Fly.io (agent worker on Fly.io)
 FLY_API_TOKEN = load_env_var("FLY_API_TOKEN", _AGENTS_ENV)
 FLY_APP_NAME = "navi-whisper-lux"
+DISABLE_FLY_LOG_STREAM = os.environ.get("BENCHMARK_DISABLE_FLY_LOG_STREAM", "").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
 # ClickHouse (retained Fly.io worker logs)
 CLICKHOUSE_ENDPOINT = load_env_var("CLICKHOUSE_ENDPOINT", _AGENTS_ENV, _BACKEND_ENV)
@@ -385,6 +390,9 @@ _fly_collector: Optional[FlyLogCollector] = None
 async def start_fly_log_collector() -> str:
     """Start the global Fly.io log collector. Call once before running tasks."""
     global _fly_collector
+    if DISABLE_FLY_LOG_STREAM:
+        _fly_collector = None
+        return "[fly.io] disabled by BENCHMARK_DISABLE_FLY_LOG_STREAM"
     _fly_collector = FlyLogCollector()
     return await _fly_collector.start()
 
@@ -397,7 +405,7 @@ async def fetch_flyio_logs_snapshot(agent_id: str) -> List[str]:
     the Fly buffer after a task completes. The streaming collector can miss
     logs if the connection goes idle or drops during long runs.
     """
-    if not FLY_API_TOKEN:
+    if DISABLE_FLY_LOG_STREAM or not FLY_API_TOKEN:
         return []
     try:
         env = {**os.environ, "FLY_API_TOKEN": FLY_API_TOKEN}
@@ -434,6 +442,8 @@ async def fetch_flyio_logs_snapshot(agent_id: str) -> List[str]:
 def get_flyio_logs_for_agent(agent_id: str) -> List[str]:
     """Get Fly.io logs for an agent from the streaming collector."""
     if _fly_collector is None:
+        if DISABLE_FLY_LOG_STREAM:
+            return ["[fly.io] disabled by BENCHMARK_DISABLE_FLY_LOG_STREAM"]
         return ["[fly.io] Log collector not started — call start_fly_log_collector() first"]
     return _fly_collector.get_logs_for_agent(agent_id)
 
@@ -924,7 +934,7 @@ def _detect_anomalies(msgs: List[dict]) -> List[str]:
         ts = m.get("created_at", "")
         if ts:
             try:
-                from datetime import datetime, timezone
+                from datetime import datetime
 
                 # Handle both "2026-03-20T20:28:51.907Z" and other ISO formats
                 dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))

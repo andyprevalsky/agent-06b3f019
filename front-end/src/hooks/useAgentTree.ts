@@ -36,6 +36,7 @@ function apiToTreeNode(node: AgentTreeNode): TreeNode {
     costCents: node.tree_cost_cents,
     outputSchema: node.output_schema,
     structuredOutput: node.structured_output,
+    failureContext: node.failure_context,
   };
 }
 

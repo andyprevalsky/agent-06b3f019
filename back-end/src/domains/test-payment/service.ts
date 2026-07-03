@@ -1,7 +1,12 @@
 import { randomUUID } from 'node:crypto';
+import { appendFile, mkdir } from 'node:fs/promises';
+import path from 'node:path';
 import { stripe } from '../../providers/stripe';
-import { TEST_PAYMENT_PUBLIC_BASE_URL } from './config';
+import { getPhoneBenchmarkPaymentAuditPathOverride, TEST_PAYMENT_PUBLIC_BASE_URL } from './config';
 import type {
+  PhoneBenchmarkPaymentAuditEntry,
+  PhoneBenchmarkPaymentInput,
+  PhoneBenchmarkPaymentResult,
   TestPaymentCardInput,
   TestPaymentConfirmInput,
   TestPaymentConfirmation,
@@ -14,6 +19,8 @@ import type {
 const TAX_BPS = 825;
 const SHIPPING_CENTS = 499;
 const STRIPE_VISA_TEST_PAYMENT_METHOD = 'pm_card_visa';
+const PHONE_BENCHMARK_DEFAULT_AMOUNT_CENTS = 3420;
+const PHONE_BENCHMARK_DEFAULT_ITEM = 'Dozen red roses with delivery';
 
 export class TestPaymentError extends Error {
   constructor(
@@ -96,6 +103,10 @@ function isAgentCardSandboxPan(cardNumber: string): boolean {
   return /^424242424242\d{4}$/.test(cardNumber.replace(/\s+/g, ''));
 }
 
+function paymentMethodIdForBenchmarkCard(cardNumber: string): string | null {
+  return isAgentCardSandboxPan(cardNumber) ? STRIPE_VISA_TEST_PAYMENT_METHOD : null;
+}
+
 function normalizeLineItems(items: TestPaymentLineItem[]): TestPaymentReceiptLine[] {
   if (!Array.isArray(items)) throw new TestPaymentError('items are required');
   if (items.length !== 3) throw new TestPaymentError('exactly 3 distinct test items are required');
@@ -154,7 +165,7 @@ export async function confirmTestPayment(
   const postalCode = input.card.postalCode?.trim();
 
   const paymentMethodId = isAgentCardSandboxPan(normalizedCardNumber)
-    ? STRIPE_VISA_TEST_PAYMENT_METHOD
+    ? (paymentMethodIdForBenchmarkCard(normalizedCardNumber) ?? STRIPE_VISA_TEST_PAYMENT_METHOD)
     : (
         await stripe.paymentMethods.create({
           type: 'card',
@@ -196,4 +207,103 @@ export async function confirmTestPayment(
     paymentIntentId: paymentIntent.id,
     receipt: { lineItems, totals },
   };
+}
+
+function normalizePhoneBenchmarkPaymentInput(
+  input: PhoneBenchmarkPaymentInput
+): Required<PhoneBenchmarkPaymentInput> {
+  const cardNumber = String(input.cardNumber ?? '').replace(/\s+/g, '');
+  const expiration = String(input.expiration ?? '').trim();
+  const cvc = String(input.cvc ?? '').trim();
+  const billingZip = String(input.billingZip ?? '').trim();
+  const trimmedCardholderName = String(input.cardholderName ?? 'Rose Labs').trim();
+  const cardholderName = trimmedCardholderName === '' ? 'Rose Labs' : trimmedCardholderName;
+  const amountCents = Number(input.amountCents ?? PHONE_BENCHMARK_DEFAULT_AMOUNT_CENTS);
+  const trimmedOrderItem = String(input.orderItem ?? PHONE_BENCHMARK_DEFAULT_ITEM).trim();
+  const orderItem = trimmedOrderItem === '' ? PHONE_BENCHMARK_DEFAULT_ITEM : trimmedOrderItem;
+
+  if (cardNumber.length < 12) throw new TestPaymentError('cardNumber is required');
+  normalizeExpiry(expiration);
+  if (cvc.length < 3) throw new TestPaymentError('cvc is required');
+  if (billingZip.length < 5) throw new TestPaymentError('billingZip is required');
+  if (!Number.isInteger(amountCents) || amountCents !== PHONE_BENCHMARK_DEFAULT_AMOUNT_CENTS) {
+    throw new TestPaymentError('amountCents must be 3420 for the phone payment benchmark');
+  }
+
+  return { cardNumber, expiration, cvc, billingZip, cardholderName, amountCents, orderItem };
+}
+
+export async function confirmPhoneBenchmarkPayment(
+  input: PhoneBenchmarkPaymentInput
+): Promise<PhoneBenchmarkPaymentResult> {
+  const normalized = normalizePhoneBenchmarkPaymentInput(input);
+  const { expMonth, expYear } = normalizeExpiry(normalized.expiration);
+  const knownTestPaymentMethod = paymentMethodIdForBenchmarkCard(normalized.cardNumber);
+  const paymentMethodId =
+    knownTestPaymentMethod ??
+    (
+      await stripe.paymentMethods.create({
+        type: 'card',
+        card: {
+          number: normalized.cardNumber,
+          exp_month: expMonth,
+          exp_year: expYear,
+          cvc: normalized.cvc,
+        },
+        billing_details: {
+          name: normalized.cardholderName,
+          address: { postal_code: normalized.billingZip },
+        },
+      })
+    ).id;
+
+  const paymentIntent = await stripe.paymentIntents.create({
+    amount: normalized.amountCents,
+    currency: 'usd',
+    payment_method: paymentMethodId,
+    payment_method_types: ['card'],
+    confirm: true,
+    metadata: {
+      benchmark: 'phone-call-payment',
+      orderItem: normalized.orderItem,
+      billingZip: normalized.billingZip,
+    },
+  });
+
+  if (paymentIntent.status !== 'succeeded') {
+    throw new TestPaymentError(
+      `Stripe phone benchmark payment did not succeed: ${paymentIntent.status}`,
+      402
+    );
+  }
+
+  return {
+    status: paymentIntent.status,
+    paymentIntentId: paymentIntent.id,
+    amountCents: normalized.amountCents,
+    total: '$34.20',
+    orderItem: normalized.orderItem,
+    confirmationCode: 'ROSE-4471',
+    cardLastFour: normalized.cardNumber.slice(-4),
+  };
+}
+
+export function phoneBenchmarkPaymentAuditPath(): string {
+  const auditPathOverride = getPhoneBenchmarkPaymentAuditPathOverride();
+  return auditPathOverride !== ''
+    ? path.resolve(auditPathOverride)
+    : path.resolve(process.cwd(), '..', '.context', 'phone-benchmark-payments.jsonl');
+}
+
+export async function recordPhoneBenchmarkPaymentAudit(
+  entry: Omit<PhoneBenchmarkPaymentAuditEntry, 'createdAt'>
+): Promise<PhoneBenchmarkPaymentAuditEntry> {
+  const fullEntry: PhoneBenchmarkPaymentAuditEntry = {
+    createdAt: new Date().toISOString(),
+    ...entry,
+  };
+  const auditPath = phoneBenchmarkPaymentAuditPath();
+  await mkdir(path.dirname(auditPath), { recursive: true });
+  await appendFile(auditPath, `${JSON.stringify(fullEntry)}\n`, 'utf8');
+  return fullEntry;
 }

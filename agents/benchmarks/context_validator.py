@@ -44,12 +44,13 @@ def validate_context(messages: List[Dict[str, Any]]) -> List[ContextViolation]:
 
     # Merged OpenAI view drives the tool-use checks (matches real LLM pipeline).
     openai_msgs = _convert_to_openai_format(messages)
+    openai_msgs_paired = _ensure_tool_result_pairing(openai_msgs)
 
     # Convert OpenAI format to Anthropic format (same as Rose completions endpoint)
-    anthropic_msgs = _convert_to_anthropic_format(openai_msgs)
+    anthropic_msgs = _convert_to_anthropic_format(openai_msgs_paired)
 
     # Run validators on different representations
-    violations.extend(_check_unique_tool_use_ids(openai_msgs))
+    violations.extend(_check_unique_tool_use_ids(openai_msgs_paired))
     violations.extend(_check_role_alternation(openai_msgs_unmerged))
     violations.extend(_check_tool_result_pairing(anthropic_msgs))
     violations.extend(_check_no_duplicate_tool_results(anthropic_msgs))
@@ -253,6 +254,104 @@ def _convert_to_openai_format(messages: List[Dict], merge_assistants: bool = Tru
             result.pop(i)
         else:
             i += 1
+
+    return result
+
+
+SYNTHETIC_TOOL_RESULT_PLACEHOLDER = "[Tool result missing due to internal error]"
+
+
+def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Mirror helpers.llm._ensure_tool_result_pairing without importing the LLM stack.
+
+    build_llm_messages repairs orphan assistant tool calls before any provider call.
+    The benchmark validator must evaluate the same repaired OpenAI view or it will
+    fail completed agents whose final attempt_completion/verifier tool result was
+    not persisted as a DB TOOL row.
+    """
+    seen_ids: Set[str] = set()
+
+    normalized: List[Dict[str, Any]] = []
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            normalized.append(msg)
+            continue
+
+        copied = dict(msg)
+        tcs = copied.get("tool_calls") or []
+        deduped: List[Dict[str, Any]] = []
+        for tc in tcs:
+            tc_id = tc.get("id")
+            if tc_id and tc_id in seen_ids:
+                continue
+            if tc_id:
+                seen_ids.add(tc_id)
+            deduped.append(tc)
+        if deduped:
+            copied["tool_calls"] = deduped
+        else:
+            copied.pop("tool_calls", None)
+        normalized.append(copied)
+
+    result: List[Dict[str, Any]] = []
+    declared_at_or_before: Set[str] = set()
+    i = 0
+    while i < len(normalized):
+        msg = normalized[i]
+        role = msg.get("role")
+
+        if role == "assistant":
+            tcs = msg.get("tool_calls") or []
+            for tc in tcs:
+                tc_id = tc.get("id")
+                if tc_id:
+                    declared_at_or_before.add(tc_id)
+            result.append(msg)
+
+            covered: Set[str] = set()
+            tool_run: List[Dict[str, Any]] = []
+            non_tool_run: List[Dict[str, Any]] = []
+            j = i + 1
+            while j < len(normalized) and normalized[j].get("role") != "assistant":
+                m2 = normalized[j]
+                if m2.get("role") == "tool":
+                    tcid = m2.get("tool_call_id")
+                    if tcid and tcid in declared_at_or_before and tcid not in covered:
+                        covered.add(tcid)
+                        tool_run.append(m2)
+                else:
+                    non_tool_run.append(m2)
+                j += 1
+
+            tc_names = {tc.get("id"): tc.get("function", {}).get("name") for tc in tcs}
+            for tc in tcs:
+                tc_id = tc.get("id")
+                if not tc_id or tc_id in covered:
+                    continue
+                synthetic: Dict[str, Any] = {
+                    "role": "tool",
+                    "tool_call_id": tc_id,
+                    "content": SYNTHETIC_TOOL_RESULT_PLACEHOLDER,
+                }
+                name = tc_names.get(tc_id)
+                if name:
+                    synthetic["name"] = name
+                tool_run.append(synthetic)
+
+            result.extend(tool_run)
+            result.extend(non_tool_run)
+            i = j
+            continue
+
+        if role == "tool":
+            tcid = msg.get("tool_call_id")
+            if tcid and tcid in declared_at_or_before:
+                result.append(msg)
+            i += 1
+            continue
+
+        result.append(msg)
+        i += 1
 
     return result
 

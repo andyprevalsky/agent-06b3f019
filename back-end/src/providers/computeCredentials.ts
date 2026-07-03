@@ -18,6 +18,7 @@ export interface ComputeCodeCredentialResult {
   source: 'user' | 'pool';
   userId: string;
   poolTokenId?: string;
+  lineageKey?: string;
 }
 
 type IntegrationRow = {
@@ -26,6 +27,47 @@ type IntegrationRow = {
   name: string;
   config: unknown;
 };
+
+type ComputeLeaseOptions = {
+  lineageKey?: string;
+  agentId?: string;
+  rootAgentId?: string;
+  fastCacheAffinityKey?: string;
+};
+type RequiredLineageLease = Required<
+  Pick<ComputeLeaseOptions, 'lineageKey' | 'agentId' | 'rootAgentId'>
+>;
+
+const LINEAGE_LEASE_TTL_MS = 5 * 60 * 1000;
+const GPT_LINEAGE_CAPACITY = 16;
+const CLAUDE_LINEAGE_CAPACITY = 12;
+
+function capacityForType(type: ComputeCodeCredentialType): number {
+  return type === 'gpt' ? GPT_LINEAGE_CAPACITY : CLAUDE_LINEAGE_CAPACITY;
+}
+
+function tokenIdentity(
+  token: Pick<ComputeCodeCredentialResult, 'source' | 'userId' | 'poolTokenId'>
+): string {
+  return token.source === 'pool' ? (token.poolTokenId ?? '') : token.userId;
+}
+
+function liveLeaseCutoff(now: Date): Date {
+  return new Date(now.getTime() - LINEAGE_LEASE_TTL_MS);
+}
+
+function normalizeFastCacheAffinityKey(key: string | undefined): string | null {
+  const trimmed = key?.trim() ?? '';
+  return trimmed === '' ? null : trimmed;
+}
+
+function integrationNamesForAffinity(
+  tokenType: ComputeCodeCredentialType | null
+): Array<'claude_code' | 'gpt_code'> {
+  if (tokenType === 'claude') return ['claude_code'];
+  if (tokenType === 'gpt') return ['gpt_code'];
+  return ['claude_code', 'gpt_code'];
+}
 
 function decryptIntegrationCredentials(integration: IntegrationRow, decryptionKey: string) {
   const config = integration.config as Record<string, unknown> | null;
@@ -134,6 +176,190 @@ async function selectFirstUsable(
   return null;
 }
 
+async function fetchCredentialForLease(
+  lineageKey: string,
+  decryptionKey: string,
+  now: Date,
+  requiredTokenType: ComputeCodeCredentialType | null = null
+): Promise<ComputeCodeCredentialResult | null> {
+  const lease = await prisma.computeTokenLineageLease.findUnique({ where: { lineageKey } });
+  if (!lease || lease.releasedAt || lease.lastUsedAt <= liveLeaseCutoff(now)) return null;
+  if (lease.tokenType !== 'claude' && lease.tokenType !== 'gpt') return null;
+  if (requiredTokenType !== null && lease.tokenType !== requiredTokenType) {
+    await prisma.computeTokenLineageLease.update({
+      where: { lineageKey },
+      data: { releasedAt: now },
+    });
+    return null;
+  }
+  if (lease.tokenSource !== 'user' && lease.tokenSource !== 'pool') return null;
+
+  const name = lease.tokenType === 'claude' ? 'claude_code' : 'gpt_code';
+  const integration = await prisma.integration.findFirst({
+    where: {
+      name,
+      status: 'CONNECTED',
+      OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: now } }],
+      ...(lease.tokenSource === 'pool'
+        ? { id: lease.tokenIdentity, poolingEnabled: true }
+        : { userId: lease.tokenIdentity }),
+    },
+  });
+  if (!integration) {
+    await prisma.computeTokenLineageLease.update({
+      where: { lineageKey },
+      data: { releasedAt: now },
+    });
+    return null;
+  }
+
+  const result = await rowToCredential(integration, decryptionKey, lease.tokenSource);
+  if (!result) {
+    await prisma.computeTokenLineageLease.update({
+      where: { lineageKey },
+      data: { releasedAt: now },
+    });
+    return null;
+  }
+
+  await prisma.$transaction([
+    prisma.computeTokenLineageLease.update({
+      where: { lineageKey },
+      data: { lastUsedAt: now },
+    }),
+    prisma.integration.update({ where: { id: integration.id }, data: { lastUsedAt: now } }),
+  ]);
+
+  return { ...result, lineageKey };
+}
+
+async function tryAcquireLineageLease(
+  lineage: RequiredLineageLease,
+  token: ComputeCodeCredentialResult,
+  integrationId: string,
+  now: Date
+): Promise<ComputeCodeCredentialResult | null> {
+  const identity = tokenIdentity(token);
+  if (!identity) return null;
+
+  const capacity = capacityForType(token.type);
+  const cutoff = liveLeaseCutoff(now);
+  const lockKey = `compute-token-lineage:${token.type}:${token.source}:${identity}`;
+
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`;
+
+    const existingLease = await tx.computeTokenLineageLease.findUnique({
+      where: { lineageKey: lineage.lineageKey },
+    });
+    if (
+      existingLease &&
+      !existingLease.releasedAt &&
+      existingLease.lastUsedAt > cutoff &&
+      existingLease.tokenType === token.type &&
+      existingLease.tokenSource === token.source &&
+      existingLease.tokenIdentity === identity
+    ) {
+      await tx.computeTokenLineageLease.update({
+        where: { lineageKey: lineage.lineageKey },
+        data: { lastUsedAt: now, agentId: lineage.agentId, rootAgentId: lineage.rootAgentId },
+      });
+      await tx.integration.update({ where: { id: integrationId }, data: { lastUsedAt: now } });
+      return { ...token, lineageKey: lineage.lineageKey };
+    }
+
+    const liveLeaseCount = await tx.computeTokenLineageLease.count({
+      where: {
+        tokenType: token.type,
+        tokenSource: token.source,
+        tokenIdentity: identity,
+        releasedAt: null,
+        lastUsedAt: { gt: cutoff },
+      },
+    });
+    if (liveLeaseCount >= capacity) return null;
+
+    await tx.computeTokenLineageLease.upsert({
+      where: { lineageKey: lineage.lineageKey },
+      create: {
+        lineageKey: lineage.lineageKey,
+        tokenType: token.type,
+        tokenSource: token.source,
+        tokenIdentity: identity,
+        userId: token.source === 'user' ? token.userId : undefined,
+        agentId: lineage.agentId,
+        rootAgentId: lineage.rootAgentId,
+        assignedAt: now,
+        lastUsedAt: now,
+      },
+      update: {
+        tokenType: token.type,
+        tokenSource: token.source,
+        tokenIdentity: identity,
+        userId: token.source === 'user' ? token.userId : null,
+        agentId: lineage.agentId,
+        rootAgentId: lineage.rootAgentId,
+        lastUsedAt: now,
+        releasedAt: null,
+      },
+    });
+    await tx.integration.update({ where: { id: integrationId }, data: { lastUsedAt: now } });
+
+    log.info('Serving compute token lease', {
+      type: token.type,
+      source: token.source,
+      tokenIdentity: identity,
+      lineageKey: lineage.lineageKey,
+      liveLeaseCount: liveLeaseCount + 1,
+      capacity,
+    });
+
+    return { ...token, lineageKey: lineage.lineageKey };
+  });
+}
+
+async function selectFirstUsableWithLineage(
+  integrations: IntegrationRow[],
+  decryptionKey: string,
+  source: 'user' | 'pool',
+  now: Date,
+  lineage: RequiredLineageLease
+): Promise<ComputeCodeCredentialResult | null> {
+  for (const integration of integrations) {
+    const result = await rowToCredential(integration, decryptionKey, source);
+    if (!result) continue;
+    const leased = await tryAcquireLineageLease(lineage, result, integration.id, now);
+    if (leased) return leased;
+  }
+  return null;
+}
+
+async function readFastCacheAffinity(
+  affinityKey: string | null
+): Promise<ComputeCodeCredentialType | null> {
+  if (affinityKey === null) return null;
+  const row = await prisma.computeTokenFastCacheAffinity.findUnique({ where: { affinityKey } });
+  if (row?.tokenType === 'claude' || row?.tokenType === 'gpt') return row.tokenType;
+  return null;
+}
+
+async function persistOrReadFastCacheAffinity(
+  affinityKey: string | null,
+  userId: string,
+  tokenType: ComputeCodeCredentialType
+): Promise<ComputeCodeCredentialType> {
+  if (affinityKey === null) return tokenType;
+  try {
+    await prisma.computeTokenFastCacheAffinity.create({
+      data: { affinityKey, userId, tokenType },
+    });
+    return tokenType;
+  } catch {
+    const existing = await readFastCacheAffinity(affinityKey);
+    return existing ?? tokenType;
+  }
+}
+
 export async function fetchComputeUserToken(
   userId: string
 ): Promise<ComputeCodeCredentialResult | null> {
@@ -175,13 +401,120 @@ export async function fetchComputePoolToken(
 
 export async function fetchComputeTokenForUser(
   userId: string,
-  options?: { forcePool?: boolean; excludePoolTokenIds?: string[] }
+  options?: { forcePool?: boolean; excludePoolTokenIds?: string[] } & ComputeLeaseOptions
 ): Promise<ComputeCodeCredentialResult | null> {
+  const fastCacheAffinityKey = normalizeFastCacheAffinityKey(options?.fastCacheAffinityKey);
+  const pinnedTokenType = await readFastCacheAffinity(fastCacheAffinityKey);
+  const lineage =
+    options?.lineageKey && options.lineageKey.trim() !== ''
+      ? {
+          lineageKey: options.lineageKey.trim(),
+          agentId: options.agentId ?? '',
+          rootAgentId: options.rootAgentId ?? options.agentId ?? '',
+        }
+      : null;
+  if (lineage) {
+    const decryptionKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
+    if (!decryptionKey) return null;
+    const now = new Date();
+    const existing = await fetchCredentialForLease(
+      lineage.lineageKey,
+      decryptionKey,
+      now,
+      pinnedTokenType
+    );
+    if (existing) return existing;
+
+    if (options?.forcePool !== true) {
+      const userIntegrations = await prisma.integration.findMany({
+        where: {
+          userId,
+          name: { in: integrationNamesForAffinity(pinnedTokenType) },
+          status: 'CONNECTED',
+          OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: now } }],
+        },
+        orderBy: [{ lastUsedAt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'asc' }],
+      });
+      const userToken = await selectFirstUsableWithLineage(
+        userIntegrations,
+        decryptionKey,
+        'user',
+        now,
+        lineage
+      );
+      if (userToken) {
+        const affinityType = await persistOrReadFastCacheAffinity(
+          fastCacheAffinityKey,
+          userId,
+          userToken.type
+        );
+        if (affinityType === userToken.type) return userToken;
+        await releaseComputeTokenLineage(lineage.lineageKey);
+        return fetchComputeTokenForUser(userId, {
+          ...options,
+          fastCacheAffinityKey: fastCacheAffinityKey ?? undefined,
+        });
+      }
+    }
+
+    const poolIntegrations = await prisma.integration.findMany({
+      where: {
+        name: { in: integrationNamesForAffinity(pinnedTokenType) },
+        status: 'CONNECTED',
+        poolingEnabled: true,
+        OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: now } }],
+        ...(options?.excludePoolTokenIds?.length
+          ? { id: { notIn: options.excludePoolTokenIds } }
+          : {}),
+      },
+      orderBy: [{ lastUsedAt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'asc' }],
+    });
+    const poolToken = await selectFirstUsableWithLineage(
+      poolIntegrations,
+      decryptionKey,
+      'pool',
+      now,
+      lineage
+    );
+    if (!poolToken) return null;
+    const affinityType = await persistOrReadFastCacheAffinity(
+      fastCacheAffinityKey,
+      userId,
+      poolToken.type
+    );
+    if (affinityType === poolToken.type) return poolToken;
+    await releaseComputeTokenLineage(lineage.lineageKey);
+    return fetchComputeTokenForUser(userId, {
+      ...options,
+      fastCacheAffinityKey: fastCacheAffinityKey ?? undefined,
+    });
+  }
+
   if (options?.forcePool !== true) {
     const userToken = await fetchComputeUserToken(userId);
     if (userToken) return userToken;
   }
   return fetchComputePoolToken(options?.excludePoolTokenIds);
+}
+
+export async function heartbeatComputeTokenLineage(lineageKey: string) {
+  const trimmed = lineageKey.trim();
+  if (trimmed === '') return { ok: false, updated: 0 };
+  const result = await prisma.computeTokenLineageLease.updateMany({
+    where: { lineageKey: trimmed, releasedAt: null },
+    data: { lastUsedAt: new Date() },
+  });
+  return { ok: result.count > 0, updated: result.count };
+}
+
+export async function releaseComputeTokenLineage(lineageKey: string) {
+  const trimmed = lineageKey.trim();
+  if (trimmed === '') return { ok: false, updated: 0 };
+  const result = await prisma.computeTokenLineageLease.updateMany({
+    where: { lineageKey: trimmed, releasedAt: null },
+    data: { releasedAt: new Date() },
+  });
+  return { ok: result.count > 0, updated: result.count };
 }
 
 export async function markComputeTokenUnavailable(

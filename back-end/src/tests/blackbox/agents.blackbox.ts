@@ -167,6 +167,12 @@ const AgentDetail = z.object({
   created_at: DATE_LIKE,
   updated_at: DATE_LIKE,
   write_lock_enabled: z.boolean(),
+  structured_output: z.unknown().nullable(),
+  failure_context: z
+    .object({
+      partial_structured_response: z.unknown(),
+    })
+    .nullable(),
   verifier: VerifierSchema,
   tools: z.array(ToolItem),
   response_schema: z.unknown().nullable(),
@@ -2379,6 +2385,58 @@ test('PATCH /:id/status — with structuredResponse and all fields', async () =>
     headers: apiKeyHeaders(session.user.id),
   });
   assertStatus(detail.status, 200, detail.data);
+  const detailBody = assertSchema(GetAgentResponse, detail.data, 'GET detail structured');
+  assert(
+    z
+      .object({ result: z.literal('success'), data: z.array(z.number()) })
+      .safeParse(detailBody.agent.structured_output).success,
+    `GET detail should expose structured output, got ${JSON.stringify(detailBody.agent.structured_output)}`
+  );
+  assert(
+    detailBody.agent.failure_context === null,
+    'Completed agent should not expose failure_context'
+  );
+
+  await deleteTestAgent(agentId, session.user.id);
+});
+
+test('GET /:id — failed agent exposes partial structured failure context', async () => {
+  const session = await createAnonymousSession('failed-structured-detail');
+
+  const agentId = randomUUID();
+  trackedAgentIds.add(agentId);
+  const structuredResponse = { easy_fact: 'Paris', impossible_receipt_url: '' };
+  await withTransientDbRetry('create-failed-structured-detail', async () => {
+    await prisma.agent.create({
+      data: {
+        id: agentId,
+        userId: session.user.id,
+        goal: 'Failed structured detail test',
+        status: 'FAILED',
+        statusMessage: 'Max Steps Reached',
+        busId: agentId,
+        structuredResponse,
+      },
+    });
+    await prisma.verifier.create({
+      data: { agentId, type: 'FLOAT_LLM_JUDGE' },
+    });
+  });
+
+  const detail = await request(`${BASE_URL}/api/agents/${agentId}`, {
+    headers: apiKeyHeaders(session.user.id),
+  });
+  assertStatus(detail.status, 200, detail.data);
+  const detailBody = assertSchema(GetAgentResponse, detail.data, 'GET failed structured detail');
+  assert(
+    JSON.stringify(detailBody.agent.structured_output) === JSON.stringify(structuredResponse),
+    'GET detail should expose failed structured output'
+  );
+  assert(
+    JSON.stringify(detailBody.agent.failure_context) ===
+      JSON.stringify({ partial_structured_response: structuredResponse }),
+    'GET detail should expose partial structured failure context'
+  );
 
   await deleteTestAgent(agentId, session.user.id);
 });

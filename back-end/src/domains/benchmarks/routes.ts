@@ -22,4 +22,22 @@ router.get('/', (req, res) => {
   }
 });
 
+/**
+ * GET /api/benchmarks/test-prompts
+ * Catalog entries adapted for the front-end test-prompts picker (dev query box).
+ * No auth required — same public data as GET /api/benchmarks, reshaped.
+ */
+router.get('/test-prompts', (req, res) => {
+  try {
+    const prompts = service.getTestPrompts();
+    res.json({ prompts });
+  } catch (error) {
+    if (error instanceof TasksUnavailableError) {
+      res.status(500).json({ error: 'Benchmark tasks unavailable' });
+      return;
+    }
+    throw error;
+  }
+});
+
 export default router;

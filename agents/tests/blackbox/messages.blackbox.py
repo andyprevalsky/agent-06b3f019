@@ -186,6 +186,121 @@ async def test_poll_messages_happy_path():
     assert result[0]["role"] == "USER"
 
 
+async def test_context_compaction_projection_keeps_checkpoint_tail():
+    """Compaction checkpoints replace raw pre-checkpoint history for model context."""
+    from helpers.context_compaction import (
+        build_context_compaction_metadata,
+        project_model_context_after_compaction,
+    )
+
+    compressed_context = [
+        {"role": "USER", "text": "Original goal", "timestamp": "2026-04-05T12:00:00Z", "metadata": {}},
+        {
+            "role": "USER",
+            "text": "Compaction summary: earlier work was summarized.",
+            "timestamp": "2026-04-05T12:03:00Z",
+            "metadata": {"compactionSummary": True},
+        },
+    ]
+    raw_messages = [
+        {"role": "USER", "text": "Original goal", "timestamp": "2026-04-05T12:00:00Z", "metadata": {}},
+        {"role": "TOOL", "text": "Very large raw tool output", "timestamp": "2026-04-05T12:01:00Z", "metadata": {}},
+        {
+            "role": "TOOL",
+            "text": "Context compressed — continuing with summarized history.",
+            "timestamp": "2026-04-05T12:04:00Z",
+            "metadata": {
+                "toolName": "context_reset",
+                "toolStatus": "FINISHED",
+                "contextCompaction": build_context_compaction_metadata(compressed_context),
+            },
+        },
+        {"role": "ASSISTANT", "text": "Continuing after reset", "timestamp": "2026-04-05T12:05:00Z", "metadata": {}},
+    ]
+
+    projected = project_model_context_after_compaction(raw_messages)
+
+    assert [m["text"] for m in projected if m.get("text")] == [
+        "Original goal",
+        "Compaction summary: earlier work was summarized.",
+        "Continuing after reset",
+    ]
+    assert any((m.get("metadata") or {}).get("excludeFromModel") for m in projected)
+    assert all(m.get("text") != "Very large raw tool output" for m in projected)
+
+
+async def test_poll_messages_projects_context_compaction_checkpoint():
+    """poll_new_messages returns compacted model context when a checkpoint exists."""
+    compressed_context = [
+        {"role": "USER", "text": "Original goal", "timestamp": "2026-04-05T12:00:00Z", "metadata": {}},
+        {
+            "role": "USER",
+            "text": "Compaction summary: old rows summarized.",
+            "timestamp": "2026-04-05T12:03:00Z",
+            "metadata": {"compactionSummary": True},
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/api/agents/" in str(request.url) and request.method == "GET":
+            return httpx.Response(200, json={
+                "agent": {"id": "agent-compact-1", "status": "ACTIVE"},
+                "messages": [
+                    {
+                        "role": "USER",
+                        "text": "Original goal",
+                        "timestamp": "2026-04-05T12:00:00Z",
+                        "metadata": {},
+                    },
+                    {
+                        "role": "TOOL",
+                        "text": "Very large raw tool output",
+                        "timestamp": "2026-04-05T12:01:00Z",
+                        "metadata": {},
+                    },
+                    {
+                        "message_id": "msg-reset-1",
+                        "role": "TOOL",
+                        "text": "Context compressed — continuing with summarized history.",
+                        "timestamp": "2026-04-05T12:04:00Z",
+                        "metadata": {
+                            "toolName": "context_reset",
+                            "toolStatus": "FINISHED",
+                            "contextCompaction": {
+                                "version": 1,
+                                "compressedContext": compressed_context,
+                                "compressedMessageCount": len(compressed_context),
+                            },
+                        },
+                    },
+                    {
+                        "role": "ASSISTANT",
+                        "text": "Continuing after reset",
+                        "timestamp": "2026-04-05T12:05:00Z",
+                        "metadata": {},
+                    },
+                ],
+            })
+        return httpx.Response(404, json={"error": "no mock"})
+
+    setup_mock_fn(handler)
+    with patch("temporalio.activity.heartbeat"):
+        from helpers.messages import poll_new_messages
+
+        result = await poll_new_messages(
+            agent_id="agent-compact-1",
+            last_checked=datetime(2020, 1, 1, tzinfo=timezone.utc),
+        )
+
+    assert [m["text"] for m in result if m.get("text")] == [
+        "Original goal",
+        "Compaction summary: old rows summarized.",
+        "Continuing after reset",
+    ]
+    assert any((m.get("metadata") or {}).get("contextCompactionBoundary") for m in result)
+    assert all(m.get("text") != "Very large raw tool output" for m in result)
+
+
 async def test_poll_messages_raises_on_error():
     """poll_new_messages raises when the underlying fetch fails."""
     def handler(request: httpx.Request) -> httpx.Response:
@@ -587,6 +702,8 @@ async def run_all_tests():
     await r.record_async("post_message_no_metadata", test_post_message_no_metadata)
     await r.record_async("post_message_raises_on_http_error", test_post_message_raises_on_http_error)
     await r.record_async("poll_messages_happy_path", test_poll_messages_happy_path)
+    await r.record_async("context_compaction_projection_keeps_checkpoint_tail", test_context_compaction_projection_keeps_checkpoint_tail)
+    await r.record_async("poll_messages_projects_context_compaction_checkpoint", test_poll_messages_projects_context_compaction_checkpoint)
     await r.record_async("poll_messages_raises_on_error", test_poll_messages_raises_on_error)
     await r.record_async("update_tree_state_happy_path", test_update_agent_tree_state_happy_path)
     await r.record_async("update_tree_state_no_broadcast", test_update_agent_tree_state_no_broadcast)

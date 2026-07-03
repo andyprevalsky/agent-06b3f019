@@ -80,11 +80,39 @@ async def test_boundary():
     assert body["tokensOut"] == 800
 
 
+async def test_structured_response_passthrough():
+    """update_agent_status persists structuredResponse when supplied."""
+    _setup()
+    with patch("temporalio.activity.heartbeat"):
+        from helpers.update_status import update_agent_status
+
+        await update_agent_status(
+            agent_id="agent-structured",
+            status="FAILED",
+            progress=1.0,
+            status_message="Max Steps Reached",
+            token_count=2000,
+            context_size=8000,
+            message_count=20,
+            tokens_in=1200,
+            tokens_out=800,
+            structured_response={"canonical_name": "Peter Attia"},
+        )
+
+    call = assert_captured_call(
+        url_contains="/api/agents/agent-structured/status",
+        method="PATCH",
+    )
+    body = json.loads(call["requestBody"])
+    assert body["structuredResponse"] == {"canonical_name": "Peter Attia"}
+
+
 async def run_all_tests():
     print("update-status blackbox tests:")
     r = BlackboxResult()
     await r.record_async("happy_path", test_happy_path)
     await r.record_async("boundary", test_boundary)
+    await r.record_async("structured_response_passthrough", test_structured_response_passthrough)
     teardown_mock()
     return r.all_passed
 

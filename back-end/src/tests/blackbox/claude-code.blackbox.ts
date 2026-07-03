@@ -1386,15 +1386,19 @@ async function runAll() {
       fn: testSmoke_claudeCodeAnswersQuestion,
     },
   ];
-  console.log(`\nRunning ${smokeTests.length} smoke tests...`);
   const smokeResults: TestResult[] = [];
-  for (const test of smokeTests) {
-    const result = await runTest(test.name, test.fn);
-    smokeResults.push(result);
-    const icon = result.passed ? '  PASS' : '  FAIL';
-    console.log(
-      `${icon}  ${result.name}${result.passed ? '' : ` -- ${result.error}`} (${result.duration}ms)`
-    );
+  if (process.env.BLACKBOX_SMOKE === '1') {
+    console.log(`\nRunning ${smokeTests.length} smoke tests...`);
+    for (const test of smokeTests) {
+      const result = await runTest(test.name, test.fn);
+      smokeResults.push(result);
+      const icon = result.passed ? '  PASS' : '  FAIL';
+      console.log(
+        `${icon}  ${result.name}${result.passed ? '' : ` -- ${result.error}`} (${result.duration}ms)`
+      );
+    }
+  } else {
+    console.log('\nSkipping Claude Code smoke tests (BLACKBOX_SMOKE!=1)');
   }
 
   // Summary

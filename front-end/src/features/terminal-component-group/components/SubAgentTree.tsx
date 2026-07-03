@@ -20,6 +20,7 @@
  *
  * Tree data comes from useAgentTree hook via AgentContext.
  * Visual state (circle color, status text) derived from agent status.
+ * Aggregate copy is user-facing and intentionally avoids tool names.
  */
 
 import { memo, useState } from 'react';
@@ -31,7 +32,6 @@ import { FullTreeView } from './subAgentTree/FullTreeView';
 interface SubAgentTreeProps {
   busId: string;
   subAgentIds: string[];
-  title: string;
   onNavigate: (agentId: string) => void;
   /** Hide the header line (used when consecutive trees are grouped) */
   hideHeader?: boolean;
@@ -61,11 +61,14 @@ const SubAgentTree = memo(function SubAgentTree({
   const allTerminal = leafNodes.length > 0 && leafNodes.every(isTerminalNode);
   const anyFailed = leafNodes.some((node) => node.status === 'FAILED');
   const clusterCircle = allTerminal ? (anyFailed ? '✗' : '●') : '◑';
+  const failedCount = leafNodes.filter((node) => node.status === 'FAILED').length;
   const clusterTitle = allTerminal
-    ? anyFailed
-      ? 'Some tasks failed'
-      : 'All tasks completed'
-    : 'Delegating tasks';
+    ? failedCount === 0
+      ? 'Sub Agents completed successfully'
+      : failedCount === leafNodes.length
+        ? 'All Sub Agents failed'
+        : 'Some Sub Agents failed'
+    : 'Delegating Sub Agents';
 
   const shouldCollapse = maxDepth >= 2 && !showAllIntermediaries;
 

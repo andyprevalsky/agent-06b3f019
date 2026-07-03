@@ -45,8 +45,11 @@ function PlaidIntegrationSection({ plaid }: Pick<IntegrationSectionsProps, 'plai
       items={plaid.items}
       itemsLoading={plaid.itemsLoading}
       connectLoading={plaid.connectLoading}
+      disconnectingItemId={plaid.disconnectingItemId}
       error={plaid.error}
       onConnect={plaid.onConnect}
+      onUpdate={plaid.onUpdate}
+      onDisconnect={plaid.onDisconnect}
     />
   );
 }
@@ -132,7 +135,9 @@ export default function IntegrationSections({
         onIMessageSync={() => void actions.onIMessageSync()}
         connectedIntegrations={data.connectedIntegrations}
         connectingProvider={gmail.connectingProvider}
+        disconnectingEmail={gmail.disconnectingEmail}
         onGmailConnect={() => void actions.onGmailConnect()}
+        onGmailDisconnect={(email) => void actions.onGmailDisconnect(email)}
       />
 
       {isFullySignedIn && (

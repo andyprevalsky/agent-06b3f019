@@ -2,10 +2,19 @@
 
 import json
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional, Type, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Type, Union
 
 import structlog
-from pydantic import BaseModel, ConfigDict, Field, create_model, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    WithJsonSchema,
+    create_model,
+    field_validator,
+    model_validator,
+)
 
 from utils.prompts import (
     PLANNER_RESPONSE_JOIN_DESCRIPTION,
@@ -345,12 +354,14 @@ class GrepTool(BaseModel):
             "Use -i for case-insensitive matching and multiline for cross-line patterns."
         ),
     )
-    source: Optional[Literal["messages", "network", "agent_network"]] = Field(
+    source: Optional[Literal["messages", "network", "agent_network", "transactions", "documents"]] = Field(
         default=None,
         description=(
             "Optional source bucket. Omit to search messages, network, and the current agent_network. "
             "messages searches user communication records. network searches contact records. "
-            "agent_network searches all message roles in the current agent tree and returns role/location metadata."
+            "agent_network searches all message roles in the current agent tree and returns role/location metadata. "
+            "transactions searches synced Plaid transaction rows. documents searches synced ChatGPT/Claude "
+            "exports, Apple Notes, Obsidian vault notes, and generic user documents."
         ),
     )
     before: Optional[int] = Field(
@@ -393,6 +404,15 @@ class GrepTool(BaseModel):
     multiline: Optional[bool] = Field(
         default=None,
         description="Allow regex patterns to match across newlines within a record.",
+    )
+    filters: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Source-specific nested filters. For transactions: since, until, account, min_amount, "
+            "max_amount, status ('posted', 'pending', or 'all'), include_pending_in_totals. "
+            "For messages: person and since. For documents: document_source, since, until, path, and tag. "
+            "Unsupported filters are rejected by the backend for the selected source."
+        ),
     )
     person: Optional[str] = Field(
         default=None,
@@ -464,7 +484,21 @@ class MessagePersonTool(BaseModel):
     )
 
 
-ForEachItem = Union[str, Dict[str, Union[str, List[str]]]]
+ForEachItem = Annotated[
+    JsonValue,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {"type": "string"},
+                {"type": "number"},
+                {"type": "boolean"},
+                {"type": "null"},
+                {"type": "object", "additionalProperties": {}},
+                {"type": "array", "items": {}},
+            ]
+        }
+    ),
+]
 
 
 class SpawnAgentTool(BaseModel):
@@ -535,7 +569,9 @@ class SpawnAgentTool(BaseModel):
         description=(
             "Optional alternative when type='for_each': provide either items or items_csv. "
             "Ignored for every other type. For each item in the array, "
-            "a general-purpose agent will be spawned with the given goal and the item attached to its context."
+            "a general-purpose agent will be spawned with the given goal and the item attached to its context. "
+            "Each array element spawns exactly one sub-agent. Items may be any JSON value: "
+            "string, number, boolean, null, object, or array."
         ),
     )
     items_csv: Optional[str] = Field(

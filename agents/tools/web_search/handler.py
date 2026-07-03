@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from tools.web_search.types import ExecuteActivityCallable
 
 logger = structlog.get_logger()
+FAST_CACHE_HIT_FIELD = "_fast_cache_hit"
 
 
 def _safe_time() -> float:
@@ -113,7 +114,10 @@ class WebSearchManager(ToolManager):
 
             # 3. Calculate elapsed time and cost
             elapsed_time = _safe_time() - start_time
-            total_cost_cents = COST_CENTS_PER_QUERY
+            cache_hit = isinstance(result, dict) and bool(result.get(FAST_CACHE_HIT_FIELD))
+            if cache_hit:
+                result = {k: v for k, v in result.items() if k != FAST_CACHE_HIT_FIELD}
+            total_cost_cents = 0 if cache_hit else COST_CENTS_PER_QUERY
 
             message = format_tool_message(
                 params=tool_call, result=result, time_elapsed=elapsed_time, cost_cents=total_cost_cents
@@ -137,7 +141,9 @@ class WebSearchManager(ToolManager):
                 "result": result,
                 "usage": {
                     "llm": [],
-                    "service": [{"cost_cents": total_cost_cents, "provider": "Parallel AI Search"}],
+                    "service": (
+                        [] if cache_hit else [{"cost_cents": total_cost_cents, "provider": "Parallel AI Search"}]
+                    ),
                 },
             }
 
@@ -259,6 +265,8 @@ async def web_search_activity(
         stored = await fast_cache_client.cache_get(cache_key)
         if stored is not None:
             logger.info("fast_cache.web_search_hit", key=cache_key)
+            if isinstance(stored, dict):
+                return {**stored, FAST_CACHE_HIT_FIELD: True}
             return stored
         logger.info("fast_cache.web_search_miss", key=cache_key)
     elif cache_key is not None:

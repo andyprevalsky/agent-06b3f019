@@ -5,6 +5,8 @@ import os
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+from benchmarks.fixtures import DEFAULT_BASE_IMAGE
+
 
 @dataclass
 class BenchmarkTask:
@@ -33,6 +35,19 @@ class BenchmarkTask:
     sub_agent_count: Optional[int] = None  # Default fan-out for load-test style tasks; substitutes {n} in prompt
     expected_payment_receipt: Optional[dict] = None  # Expected request_payment_card approval receipt metadata
     success_on_payment_card_request: bool = False  # Treat a validated payment-card request as terminal success
+    phone_persona: Optional[dict] = None  # Vapi callee persona (system_prompt, first_message, structured_data_schema)
+    pinned_facts: Optional[dict] = None  # Ground-truth facts fixed before the run and cross-validated afterward
+    expected_call_findings: List[str] = field(default_factory=list)  # Substrings the agent must report after the call
+    expected_final_findings: List[str] = field(default_factory=list)  # Substrings that must appear in returned final data
+    callee_checks: Optional[dict] = None  # Expected callee-side analysis.structuredData values (persona's view)
+    # --- Unified eval-catalog contract (additive; validated by benchmarks/long_horizon.py) ---
+    status: str = "ready"  # "ready" = runnable end-to-end today; "incomplete" = missing fixtures/judge runner, excluded from suite runs
+    runner: str = "agent"  # "agent" = run_benchmark.py creates a real agent; "vitest" = external back-end blackbox smoke
+    bench: str = "pipeline-e2e"  # "pipeline-e2e" = harness plumbing works (write locks, cookie inject, tool pipes); "rose-bench" = harness-independent capability (fixture + prompt + eval portable to any harness)
+    description: Optional[str] = None  # One-line summary served to the FE test-prompts picker (falls back to title)
+    environment: Optional[dict] = None  # {mode, db_fixtures, base_images, services, secrets, live_targets, context_notes}
+    evaluators: List[dict] = field(default_factory=list)  # Declared evaluator contract (static_check | single_turn_llm_judge | agentic_llm_judge)
+    source: List[str] = field(default_factory=list)  # Provenance pointers (origin task/test-prompt/smoke/agent_id)
 
 
 _TASKS_FILE = os.path.join(os.path.dirname(__file__), "tasks.json")
@@ -59,6 +74,9 @@ TASK_TIMEOUT_FLOORS: dict[str, int] = {
     # 40 row agents. Historical local passes are from older, narrower task
     # shapes, so do not let the dynamic cap collapse below this floor.
     "outreach-batch": 600,
+    # Mass-agent fanout is intentionally wide and prod can legitimately need
+    # more than the older dynamic history cap while children finish.
+    "test-mass-agent-run-0": 900,
 }
 
 
@@ -72,11 +90,38 @@ def get_timeout_floor(name: str) -> int | None:
     return TASK_TIMEOUT_FLOORS.get(name)
 
 
+def _default_environment() -> dict:
+    """Effective environment for tasks that don't declare one.
+
+    Every eval runs on top of a base image — the workspace Victoria DB synced
+    from prod (scripts/setup-db.sh) — so all tasks have a reproducible starting
+    state by default. Tasks override this by declaring `environment` in
+    tasks.json; declared environments with empty base_images also inherit the
+    default base image.
+    """
+    return {
+        "mode": "live",
+        "db_fixtures": [],
+        "base_images": [DEFAULT_BASE_IMAGE],
+        "services": [],
+        "secrets": [],
+        "live_targets": [],
+        "context_notes": (
+            "Default environment: workspace base-image DB (prod sync via "
+            "scripts/setup-db.sh) + live third-party services."
+        ),
+    }
+
+
 def _load_tasks() -> List[BenchmarkTask]:
     with open(_TASKS_FILE) as f:
         raw = json.load(f)
     tasks = [BenchmarkTask(**t) for t in raw]
     for t in tasks:
+        if t.environment is None:
+            t.environment = _default_environment()
+        elif not t.environment.get("base_images"):
+            t.environment["base_images"] = [DEFAULT_BASE_IMAGE]
         if t.sub_agent_count is not None:
             apply_sub_agent_count(t, t.sub_agent_count)
         if t.name in SMOKE_TIMEOUT_CAPS:
@@ -113,6 +158,16 @@ def all_tasks() -> List[BenchmarkTask]:
     return _cached_tasks
 
 
+def suite_tasks() -> List[BenchmarkTask]:
+    """Tasks eligible for suite runs: agent-runner entries whose eval contract is complete.
+
+    `status == "incomplete"` entries (missing fixtures/judge runner) and external-runner
+    entries (back-end vitest smokes) are catalogued but excluded from agent suite runs.
+    Explicit `--task <name>` selection bypasses this filter for dev iteration.
+    """
+    return [t for t in all_tasks() if t.runner == "agent" and t.status == "ready"]
+
+
 def get_task_by_name(name: str) -> BenchmarkTask:
     for t in all_tasks():
         if t.name == name:
@@ -131,4 +186,5 @@ def list_all_tasks() -> None:
         attach = f" [attachments: {', '.join(all_attach)}]" if all_attach else ""
         approval = f" [approval: {t.approval_handling}]" if t.approval_handling else ""
         rows = f" [rows: {t.row_start}-{t.row_end}]" if t.row_start is not None else ""
-        print(f"  {t.name:<25} {t.title:<35} tags=[{tags}]{attach}{approval}{rows}")
+        lifecycle = "" if t.status == "ready" and t.runner == "agent" else f" [{t.runner}:{t.status}]"
+        print(f"  {t.name:<25} {t.title:<35} tags=[{tags}]{attach}{approval}{rows}{lifecycle}")

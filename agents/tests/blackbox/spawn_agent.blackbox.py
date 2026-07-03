@@ -855,8 +855,8 @@ async def test_handler_for_each_happy_path_all_succeed():
     items = aggregate[-1].metadata["structured_response"]["items"]
     assert len(items) == 2
     assert items[0]["status"] == "completed"
-    assert "Child outputs:" in aggregate[-1].message
-    assert "- item 0:" in aggregate[-1].message
+    assert "See structured_response.items" in aggregate[-1].message
+    assert "Child outputs:" not in aggregate[-1].message
     # But child events were handled through workflow_instance._handle_tool_event
     assert len(wf.handled_events) >= 2  # at least 2 per-child
 
@@ -924,7 +924,8 @@ async def test_handler_for_each_failed_yields_error():
             "progress_estimate": "partial",
         }
     ]
-    assert "item 0: failed: verifier_rejected" in aggregate.message
+    assert "See structured_response.items" in aggregate.message
+    assert "item 0: failed: verifier_rejected" not in aggregate.message
 
 
 async def test_spawn_agent_helper_tracks_usage_and_returns():
@@ -1241,13 +1242,21 @@ async def test_spawn_explore_agent_activity_runs_run_agent_and_returns_result():
 
 
 async def test_spawn_explore_agent_activity_error_status_returned():
-    """run_agent reporting non-completed status -> error status returned."""
+    """run_agent non-completed status returns error while preserving best effort."""
     from unittest.mock import AsyncMock, patch
 
     from domains.spawn_agent.service import spawn_explore_agent_activity
 
     async def fake_run_agent(**kwargs):
-        return {"status": "max_iterations", "final_response": "", "tokens_in": 1, "tokens_out": 1}
+        return {
+            "status": "max_iterations",
+            "message": "Reached max iterations (2)",
+            "final_response": "partial research summary",
+            "best_effort_response": "partial research summary",
+            "partial_structured_response": {"topic": "partial"},
+            "tokens_in": 1,
+            "tokens_out": 1,
+        }
 
     with (
         patch("temporalio.activity.heartbeat"),
@@ -1257,6 +1266,12 @@ async def test_spawn_explore_agent_activity_error_status_returned():
             agent_id="a", user_id="u", goal="g", model="m"
         )
     assert result["status"] == "error"
+    assert result["result"] == "partial research summary"
+    assert result["summary"] == "partial research summary"
+    assert result["best_effort_response"] == "partial research summary"
+    assert result["error_reason"] == "Reached max iterations (2)"
+    assert result["partial_structured_response"] == {"topic": "partial"}
+    assert result["structured_response"] == {"topic": "partial"}
 
 
 async def test_spawn_explore_agent_activity_inner_callbacks_work():
@@ -1284,6 +1299,7 @@ async def test_spawn_explore_agent_activity_inner_callbacks_work():
             3,
             "explore_agent",
             claude_token_rotated=True,
+            from_fast_cache=True,
         )
         on_tokens_holder["called"] = True
 
@@ -1311,6 +1327,7 @@ async def test_spawn_explore_agent_activity_inner_callbacks_work():
     assert entry["model"] == "claude-x"
     assert entry["cache_read_input_tokens"] == 7
     assert entry["cache_creation_input_tokens"] == 3
+    assert entry["from_fast_cache"] is True
 
     # post_message dispatched to save_explore_message
     assert len(save_calls) == 1

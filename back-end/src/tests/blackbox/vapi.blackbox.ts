@@ -339,6 +339,7 @@ async function testBoundary_vapiCallCreation() {
         provider?: string;
         model?: string;
         messages?: { role?: string; content?: string }[];
+        tools?: { type?: string }[];
       };
       voice?: {
         provider?: string;
@@ -387,8 +388,16 @@ async function testBoundary_vapiCallCreation() {
   if (!systemMessage.includes('You are making an outbound phone call.')) {
     throw new Error('Expected base system prompt in outbound assistant config');
   }
+  if (!systemMessage.includes('use the endCall tool')) {
+    throw new Error('Expected outbound assistant prompt to instruct explicit call termination');
+  }
   if (!systemMessage.includes('Boundary test')) {
     throw new Error('Expected per-call system prompt in outbound assistant config');
+  }
+  if (!assistant.model.tools?.some((tool) => tool.type === 'endCall')) {
+    throw new Error(
+      `Expected outbound assistant to include endCall tool, got ${JSON.stringify(assistant.model.tools)}`
+    );
   }
   // "Rose" preset from mac-app onboarding VoiceSelector (PRESET_VOICES[0]).
   if (

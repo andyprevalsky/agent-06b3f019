@@ -120,6 +120,30 @@ def test_create_agent_action_model_injects_completion_result_only_when_requested
     assert "result" in unverified_defs["AttemptCompletionWithResultTool"]["properties"]
 
 
+def test_explore_agent_action_model_accepts_documents_grep():
+    """Explore agents must be able to search synced user documents via grep."""
+    from utils.tool_schemas import EXPLORE_AGENT_TOOLS, create_agent_action_model
+
+    assert "grep" in EXPLORE_AGENT_TOOLS
+
+    Model = create_agent_action_model(EXPLORE_AGENT_TOOLS)
+    instance = Model(
+        response="Searching synced documents",
+        tool_calls=[
+            {
+                "tool": "grep",
+                "pattern": "project",
+                "source": "documents",
+                "filters": {"document_source": "obsidian"},
+            }
+        ],
+    )
+
+    assert instance.tool_calls[0].tool == "grep"
+    assert instance.tool_calls[0].source == "documents"
+    assert instance.tool_calls[0].filters == {"document_source": "obsidian"}
+
+
 def test_planner_assignable_tools():
     """PLANNER_ASSIGNABLE_TOOLS contains expected planner-specific tool names."""
     from utils.tool_schemas import PLANNER_ASSIGNABLE_TOOLS
@@ -159,6 +183,7 @@ def test_grep_tool_schema_exact_contract():
         "head_limit",
         "offset",
         "multiline",
+        "filters",
         "person",
         "since",
     }
@@ -167,7 +192,7 @@ def test_grep_tool_schema_exact_contract():
     enum_values = set()
     for option in source_schema.get("anyOf", []):
         enum_values.update(option.get("enum", []))
-    assert enum_values == {"messages", "network", "agent_network"}
+    assert enum_values == {"messages", "network", "agent_network", "transactions", "documents"}
 
     removed = {
         "path", "glob", "type", "output_mode", "person_id", "limit",
@@ -352,6 +377,40 @@ def test_spawn_agent_for_each_no_items_raises():
         ),
         "items",
     )
+
+
+def test_spawn_agent_for_each_accepts_recursive_json_items():
+    """SpawnAgentTool for_each accepts nested JSON values as items."""
+    from utils.tool_schemas import (
+        ResponseSchemaConfig,
+        ResponseSchemaFieldConfig,
+        SpawnAgentTool,
+    )
+
+    schema = ResponseSchemaConfig(
+        fields=[ResponseSchemaFieldConfig(name="x", type="str", required=True, description="d")]
+    )
+    nested_item = {
+        "canonical_name": "Bryan Johnson",
+        "approximate_audience_metrics_by_platform": {
+            "youtube": {"subscribers": "1M+", "recent_views": [120000, 250000, None]},
+            "newsletter": None,
+        },
+        "platforms": ["YouTube", "Instagram"],
+        "active": True,
+        "rank": 1,
+    }
+
+    tool = SpawnAgentTool(
+        tool="spawn_agent",
+        type="for_each",
+        goal=LONG_GOAL,
+        output_schema=schema,
+        start_phase="PLAN",
+        items=[nested_item, ["nested", {"ok": True}], None, 42, False, "plain string"],
+    )
+
+    assert tool.items == [nested_item, ["nested", {"ok": True}], None, 42, False, "plain string"]
 
 
 def test_spawn_agent_browser_no_schema_raises():
@@ -682,6 +741,7 @@ async def run_all_tests():
         "create_agent_action_model_injects_completion_result_only_when_requested",
         test_create_agent_action_model_injects_completion_result_only_when_requested,
     )
+    r.record("explore_agent_action_model_accepts_documents_grep", test_explore_agent_action_model_accepts_documents_grep)
     r.record("planner_assignable_tools", test_planner_assignable_tools)
     r.record("planner_response_schema_compact", test_planner_response_schema_is_compact)
     r.record("grep_tool_schema_exact_contract", test_grep_tool_schema_exact_contract)
@@ -698,6 +758,7 @@ async def run_all_tests():
     r.record("spawn_agent_general_purpose_no_phase", test_spawn_agent_general_purpose_missing_phase_raises)
     r.record("spawn_agent_for_each_both", test_spawn_agent_for_each_items_and_csv_raises)
     r.record("spawn_agent_for_each_neither", test_spawn_agent_for_each_no_items_raises)
+    r.record("spawn_agent_for_each_recursive_json_items", test_spawn_agent_for_each_accepts_recursive_json_items)
     r.record("spawn_agent_browser_no_schema", test_spawn_agent_browser_no_schema_raises)
     r.record("spawn_agent_explore_with_schema", test_spawn_agent_explore_with_schema_dropped)
     r.record("spawn_agent_short_goal", test_spawn_agent_short_goal_allowed)

@@ -80,6 +80,12 @@ FetchFreshTokenFn = Callable[
 ]
 
 
+HeartbeatTokenLeaseFn = Callable[
+    ["ComputeAuthContext"],
+    Awaitable[None],
+]
+
+
 @dataclass
 class ComputeAuthContext:
     """Everything the Rose client needs to make a direct compute-token call
@@ -97,11 +103,13 @@ class ComputeAuthContext:
     user_id: str
     account_id: Optional[str] = None  # GPT/Codex account id when token_type == "gpt"
     pool_token_id: Optional[str] = None  # set when source == "pool"
+    lineage_key: Optional[str] = None
 
     # Callbacks (injected by the caller in helpers/llm.py — kept out of the
     # client so we don't take a Temporal dependency in this module).
     mark_rate_limited: Optional[MarkRateLimitedFn] = None
     fetch_fresh: Optional[FetchFreshTokenFn] = None
+    heartbeat_lease: Optional[HeartbeatTokenLeaseFn] = None
 
     # Per-request rotation budget — caps how many tokens we burn before giving
     # up on direct compute-token routing and falling through to waterfall.
@@ -121,8 +129,10 @@ class ClaudeAuthContext(ComputeAuthContext):
         source: ClaudeTokenSource,
         user_id: str,
         pool_token_id: Optional[str] = None,
+        lineage_key: Optional[str] = None,
         mark_rate_limited: Optional[MarkRateLimitedFn] = None,
         fetch_fresh: Optional[FetchFreshTokenFn] = None,
+        heartbeat_lease: Optional[HeartbeatTokenLeaseFn] = None,
         max_rotations: int = 2,
     ) -> None:
         super().__init__(
@@ -132,8 +142,10 @@ class ClaudeAuthContext(ComputeAuthContext):
             user_id=user_id,
             account_id=None,
             pool_token_id=pool_token_id,
+            lineage_key=lineage_key,
             mark_rate_limited=mark_rate_limited,
             fetch_fresh=fetch_fresh,
+            heartbeat_lease=heartbeat_lease,
             max_rotations=max_rotations,
         )
 
@@ -148,8 +160,10 @@ class GptAuthContext(ComputeAuthContext):
         user_id: str,
         account_id: Optional[str] = None,
         pool_token_id: Optional[str] = None,
+        lineage_key: Optional[str] = None,
         mark_rate_limited: Optional[MarkRateLimitedFn] = None,
         fetch_fresh: Optional[FetchFreshTokenFn] = None,
+        heartbeat_lease: Optional[HeartbeatTokenLeaseFn] = None,
         max_rotations: int = 2,
     ) -> None:
         super().__init__(
@@ -159,8 +173,10 @@ class GptAuthContext(ComputeAuthContext):
             user_id=user_id,
             account_id=account_id,
             pool_token_id=pool_token_id,
+            lineage_key=lineage_key,
             mark_rate_limited=mark_rate_limited,
             fetch_fresh=fetch_fresh,
+            heartbeat_lease=heartbeat_lease,
             max_rotations=max_rotations,
         )
 

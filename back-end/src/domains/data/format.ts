@@ -53,11 +53,58 @@ function formatSnippet(
     .join('\n');
 }
 
+function formatTransactionRowSnippet(
+  content: string,
+  regex: RegExp,
+  showLineNumbers: boolean
+): string {
+  const probe = new RegExp(regex.source, regex.flags.replace('g', ''));
+  const coreFields = new Set([
+    'transaction_id',
+    'institution',
+    'account',
+    'date',
+    'status',
+    'direction',
+    'amount',
+    'absolute_amount',
+    'merchant',
+    'name',
+    'original_description',
+    'category',
+  ]);
+  const lines = content.split('\n');
+  const selectedIndexes = new Set<number>();
+
+  lines.forEach((line, idx) => {
+    const field = line.slice(0, line.indexOf(':'));
+    if (coreFields.has(field) || probe.test(line)) {
+      selectedIndexes.add(idx);
+    }
+  });
+
+  return [...selectedIndexes]
+    .sort((a, b) => a - b)
+    .map((idx) => (showLineNumbers ? `${idx + 1}: ${lines[idx]}` : lines[idx]))
+    .join('\n');
+}
+
 function firstNonEmpty(...values: Array<string | null | undefined>): string {
   for (const value of values) {
     if (value !== null && value !== undefined && value !== '') return value;
   }
   return '';
+}
+
+function metadataString(metadata: unknown, key: string): string | undefined {
+  if (metadata === null || typeof metadata !== 'object' || Array.isArray(metadata))
+    return undefined;
+  const value = (metadata as Record<string, unknown>)[key];
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined;
+}
+
+function pathSegment(value: string): string {
+  return value.replace(/^\/+|\/+$/g, '').replace(/[?#]/g, '_');
 }
 
 function threadName(row: grepRepo.MessageGrepRow): string {
@@ -194,6 +241,115 @@ export function buildAgentNetworkMatch(
       message_id: row.id,
       role: row.role,
       field: 'message',
+    },
+    content,
+    input,
+  });
+}
+
+function decimalToString(value: { toString(): string } | number | string): string {
+  return typeof value === 'number' || typeof value === 'string' ? String(value) : value.toString();
+}
+
+export function buildTransactionMatch(
+  row: grepRepo.TransactionGrepRow,
+  input: ValidatedGrepInput
+): GrepMatch {
+  const merchant = firstNonEmpty(row.merchantName, row.name);
+  const accountSuffix =
+    row.accountMask !== null && row.accountMask !== '' ? ` ****${row.accountMask}` : '';
+  const path = `transactions/${row.institutionName ?? 'unknown-institution'}/${row.accountName}${accountSuffix}/${row.plaidTransactionId}`;
+  const currency = row.isoCurrencyCode ?? row.unofficialCurrencyCode ?? 'UNKNOWN';
+  const content = [
+    valueToLine('source', 'transactions'),
+    valueToLine('transaction_id', row.plaidTransactionId),
+    valueToLine('institution', row.institutionName),
+    valueToLine('account', `${row.accountName}${accountSuffix}`),
+    valueToLine('date', row.date.toISOString().slice(0, 10)),
+    valueToLine(
+      'authorized_date',
+      row.authorizedDate ? row.authorizedDate.toISOString().slice(0, 10) : null
+    ),
+    valueToLine('status', row.pending ? 'pending' : 'posted'),
+    valueToLine('direction', row.direction.toLowerCase()),
+    valueToLine('amount', `${decimalToString(row.amount)} ${currency}`),
+    valueToLine('absolute_amount', `${decimalToString(row.absoluteAmount)} ${currency}`),
+    valueToLine('merchant', merchant),
+    valueToLine('name', row.name),
+    valueToLine('original_description', row.originalDescription),
+    valueToLine('category', row.category.join(' > ')),
+    valueToLine('personal_finance_category', row.personalFinanceCategory),
+    valueToLine('personal_finance_detailed', row.personalFinanceDetailed),
+    valueToLine('payment_channel', row.paymentChannel),
+    valueToLine('location', row.locationSummary),
+  ]
+    .filter((line): line is string => line !== null)
+    .join('\n');
+  const renderedContent =
+    input.contextBefore === 0 && input.contextAfter === 0
+      ? formatTransactionRowSnippet(content, input.regex, input.showLineNumbers)
+      : formatSnippet(
+          content,
+          input.regex,
+          input.contextBefore,
+          input.contextAfter,
+          input.showLineNumbers
+        );
+
+  return {
+    source: 'transactions',
+    path,
+    pointer: `transactions:${row.plaidTransactionId}`,
+    location: {
+      source: 'transactions',
+      path,
+      transaction_id: row.plaidTransactionId,
+      account_id: row.plaidAccountExternalId,
+      field: 'transaction',
+    },
+    timestamp: row.date.toISOString(),
+    content: renderedContent,
+  };
+}
+
+export function buildDocumentMatch(
+  row: grepRepo.DocumentGrepRow,
+  input: ValidatedGrepInput
+): GrepMatch {
+  const vault = metadataString(row.metadata, 'vault');
+  const relativePath =
+    metadataString(row.metadata, 'path') ?? metadataString(row.metadata, 'relativePath');
+  const path =
+    row.source === 'obsidian' && vault !== undefined && relativePath !== undefined
+      ? `documents/obsidian/${pathSegment(vault)}/${pathSegment(relativePath)}`
+      : `documents/${row.source}/${pathSegment(row.title)}/${pathSegment(row.externalId)}`;
+  const timestamp = row.sourceUpdatedAt ?? row.updatedAt;
+  const content = [
+    valueToLine('source', 'documents'),
+    valueToLine('document_source', row.source),
+    valueToLine('document_id', row.id),
+    valueToLine('external_id', row.externalId),
+    valueToLine('title', row.title),
+    valueToLine('url', row.url),
+    valueToLine('timestamp', timestamp.toISOString()),
+    valueToLine('metadata', row.metadata),
+    'content:',
+    row.content,
+  ]
+    .filter((line): line is string => line !== null)
+    .join('\n');
+
+  return buildMatch({
+    source: 'documents',
+    path,
+    pointer: `documents:${row.id}`,
+    timestamp,
+    location: {
+      source: 'documents',
+      path,
+      document_id: row.id,
+      source_name: row.source,
+      field: 'content',
     },
     content,
     input,

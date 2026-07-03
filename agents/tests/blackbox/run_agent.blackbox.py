@@ -180,8 +180,8 @@ async def test_assistant_tool_call_ids_match_execution_and_context_results():
     assert set(tool_post_ids) == set(executed_ids) == set(persisted_ids)
 
 
-async def test_redundant_synthesis_delegate_is_rejected_after_explore_results():
-    """Final synthesis should happen in the current agent after explore children finish."""
+async def test_general_purpose_agent_executes_after_explore_results():
+    """Completed explore children should not block later general-purpose work."""
     initial_context = [
         {"role": "USER", "text": "Compare three cities", "timestamp": "2024-01-01T00:00:00Z"},
     ]
@@ -217,7 +217,7 @@ async def test_redundant_synthesis_delegate_is_rejected_after_explore_results():
         {
             "tool": "spawn_agent",
             "type": "general_purpose",
-            "goal": "Synthesize the city findings into a comparison table",
+            "goal": "Analyze Dave Asprey using the newly discovered creator list",
             "start_phase": "execute",
             "output_schema": {"fields": [{"name": "summary", "type": "str", "required": True}]},
         }
@@ -232,14 +232,14 @@ async def test_redundant_synthesis_delegate_is_rejected_after_explore_results():
     )
 
     assert result["status"] == "max_iterations"
-    assert executed == []
+    assert len(executed) == 1
+    assert executed[0]["tool_name"] == "spawn_agent"
+    assert executed[0]["tool_call_id"] == "tc-general-synthesis"
     tool_errors = [
         m for m in posted
         if m["role"] == "TOOL" and (m["metadata"] or {}).get("toolStatus") == "ERROR"
     ]
-    assert len(tool_errors) == 1
-    assert tool_errors[0]["metadata"]["toolCallId"] == "tc-general-synthesis"
-    assert "redundant general-purpose synthesis" in tool_errors[0]["text"]
+    assert tool_errors == []
 
 
 async def test_attempt_completion_skip_verification_returns_completed():
@@ -557,6 +557,8 @@ async def test_compress_context_returns_new_context_on_success():
         None,
         None,
         None,
+        None,
+        None,
     ]
     assert len(tokens_recorded) == 1
     assert tokens_recorded[0][0] == 3
@@ -599,6 +601,8 @@ async def test_compress_context_forwards_compute_token_context():
         "pool-1",
         "user-1",
         "agent-1",
+        None,
+        None,
     ]
 
 
@@ -692,6 +696,72 @@ async def test_run_agent_reuses_rotated_compute_token_next_iteration():
     assert llm_kwargs[1]["gpt_token"] is None
 
 
+async def test_fast_cache_position_retries_same_step_after_llm_failure():
+    """A failed LLM attempt must not consume the next fast-cache position."""
+    from loop.run_agent import run_agent
+    import providers.fast_cache.context as fast_cache_context
+
+    cache_steps = []
+    llm_calls = []
+    posted_messages = []
+
+    async def system_prompt():
+        return "System prompt"
+
+    async def verifier_prompt():
+        return "Verifier prompt"
+
+    async def post_message(text, role, metadata=None):
+        posted_messages.append({"text": text, "role": role, "metadata": metadata})
+
+    async def mock_call_llm_structured_streaming(**kwargs):
+        llm_calls.append(kwargs)
+        if len(llm_calls) == 1:
+            raise RuntimeError("[SSL: SSLV3_ALERT_BAD_RECORD_MAC] bad record mac")
+        return (
+            _DummyLLMResult("", []),
+            {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            [],
+        )
+
+    def mock_set_context(ctx):
+        cache_steps.append(ctx.base_step)
+
+    with (
+        patch(
+            "loop.run_agent.call_llm_structured_streaming",
+            new=AsyncMock(side_effect=mock_call_llm_structured_streaming),
+        ),
+        patch("loop.run_agent.asyncio.sleep", new=AsyncMock()),
+        patch.object(fast_cache_context, "set_context", side_effect=mock_set_context),
+        patch.object(fast_cache_context, "write_through_enabled_for_user", return_value=False),
+    ):
+        result = await run_agent(
+            agent_id="agent-test",
+            user_id="user-test",
+            system_prompt=system_prompt,
+            verifier_prompt_generator=verifier_prompt,
+            model="rose-labs/rose-1-lite",
+            tools=["attempt_completion"],
+            initial_context=[
+                {"role": "USER", "text": "Find updates", "timestamp": "2024-01-01T00:00:00Z"}
+            ],
+            is_inside_temporal_activity=True,
+            post_message=post_message,
+            execute_tool=AsyncMock(),
+            build_messages=lambda context, prompt: [{"role": "system", "content": prompt}],
+            max_iterations=2,
+            skip_verification=True,
+            skip_status_updates=True,
+            fast_mode_cache_enabled=True,
+            goal_text="stable fast cache goal",
+        )
+
+    assert len(llm_calls) == 2
+    assert cache_steps == [1, 1]
+    assert result["status"] in {"max_iterations", "error"}
+
+
 async def test_compress_context_failure_preserves_original():
     """On activity failure (success=False), return (original_context, False) — no clobber."""
     from loop.run_agent import _compress_context
@@ -718,8 +788,56 @@ async def test_compress_context_activity_exception_preserves_original():
     assert result_ctx is original
 
 
+async def test_run_agent_errors_when_compaction_still_over_trigger():
+    """Successful but ineffective compaction should not continue_as_new or call the LLM."""
+    import loop.run_agent as run_mod
+
+    async def system_prompt():
+        return "System prompt"
+
+    async def verifier_prompt():
+        return "Verifier prompt"
+
+    async def fake_compress_context(**kwargs):
+        compressed = [{"role": "USER", "text": "y" * 400, "timestamp": "2024-01-01T00:00:00Z"}]
+        return compressed, True
+
+    async def fail_llm(**kwargs):
+        raise AssertionError("LLM should not be called after ineffective compaction")
+
+    initial_context = [
+        {"role": "USER", "text": "x" * 400, "timestamp": "2024-01-01T00:00:00Z"}
+    ]
+
+    with (
+        patch.object(run_mod, "EFFECTIVE_OUTPUT_RESERVATION", 0),
+        patch.object(run_mod, "AUTOCOMPACT_BUFFER_TOKENS", 10),
+        patch.object(run_mod, "_compress_context", new=AsyncMock(side_effect=fake_compress_context)),
+        patch.object(run_mod, "call_llm_structured_streaming", new=AsyncMock(side_effect=fail_llm)),
+    ):
+        result = await run_mod.run_agent(
+            agent_id="agent-test",
+            user_id="user-test",
+            system_prompt=system_prompt,
+            verifier_prompt_generator=verifier_prompt,
+            model="rose-labs/rose-1-lite",
+            tools=["attempt_completion"],
+            initial_context=initial_context,
+            is_inside_temporal_activity=True,
+            build_messages=lambda context, prompt: [{"role": "system", "content": prompt}],
+            max_iterations=1,
+            max_context_tokens=100,
+            skip_verification=True,
+            skip_status_updates=True,
+        )
+
+    assert result["status"] == "error"
+    assert "Context compression ineffective" in result["message"]
+    assert result["context"] == initial_context
+
+
 async def test_run_verifier_posts_in_progress_and_finished():
-    """_run_verifier can post progress as the original attempt_completion tool result."""
+    """_run_verifier posts actionable feedback as the attempt_completion result."""
     from loop.run_agent import _run_verifier
 
     captured = []
@@ -758,7 +876,10 @@ async def test_run_verifier_posts_in_progress_and_finished():
     assert in_progress["metadata"]["toolCallId"] == "tc-attempt"
     assert finished["metadata"]["toolCallId"] == "tc-attempt"
     assert "verifierMessage" not in in_progress["metadata"]
-    assert "verifierMessage" not in finished["metadata"]
+    assert finished["metadata"]["verifierMessage"] is True
+    assert finished["metadata"]["title"] == "⚖️ Verifier rejected (75%) — continue task"
+    assert "Verifier score: 75%" in finished["text"]
+    assert "Take a NEW action" in finished["text"]
     # Structured output rendered as Extracted Output
     assert "Extracted Output" in finished["text"]
     assert "42" in finished["text"]
@@ -868,7 +989,7 @@ async def run_all_tests():
     r = BlackboxResult()
     await r.record_async("tool_only_assistant_turn_persists_tool_calls", test_tool_only_assistant_turn_persists_tool_calls)
     await r.record_async("assistant_tool_call_ids_match_execution_and_context_results", test_assistant_tool_call_ids_match_execution_and_context_results)
-    await r.record_async("redundant_synthesis_delegate_rejected", test_redundant_synthesis_delegate_is_rejected_after_explore_results)
+    await r.record_async("general_purpose_agent_executes_after_explore_results", test_general_purpose_agent_executes_after_explore_results)
     await r.record_async("attempt_completion_skip_verification_returns_completed", test_attempt_completion_skip_verification_returns_completed)
     await r.record_async("attempt_completion_result_used_when_skip_verification", test_attempt_completion_result_used_when_skip_verification)
     await r.record_async("attempt_completion_plan_loop_requires_set_plan", test_attempt_completion_plan_loop_requires_set_plan)
@@ -883,8 +1004,16 @@ async def run_all_tests():
     await r.record_async("compress_context_returns_new_context_on_success", test_compress_context_returns_new_context_on_success)
     await r.record_async("compress_context_forwards_compute_token_context", test_compress_context_forwards_compute_token_context)
     await r.record_async("run_agent_reuses_rotated_compute_token_next_iteration", test_run_agent_reuses_rotated_compute_token_next_iteration)
+    await r.record_async(
+        "fast_cache_position_retries_same_step_after_llm_failure",
+        test_fast_cache_position_retries_same_step_after_llm_failure,
+    )
     await r.record_async("compress_context_failure_preserves_original", test_compress_context_failure_preserves_original)
     await r.record_async("compress_context_activity_exception_preserves_original", test_compress_context_activity_exception_preserves_original)
+    await r.record_async(
+        "run_agent_errors_when_compaction_still_over_trigger",
+        test_run_agent_errors_when_compaction_still_over_trigger,
+    )
     await r.record_async("run_verifier_posts_in_progress_and_finished", test_run_verifier_posts_in_progress_and_finished)
     await r.record_async("run_verifier_dynamic_schema_getter", test_run_verifier_dynamic_schema_getter)
     await r.record_async("max_iterations_runs_final_verifier", test_max_iterations_runs_final_verifier)

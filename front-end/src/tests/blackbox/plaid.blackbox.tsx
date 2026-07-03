@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 
@@ -18,7 +18,7 @@ import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
 
 import PlaidSection from '@/features/integrations/components/PlaidSection';
-import type { PlaidItem } from '@/features/integrations/types';
+import type { PlaidItem, PlaidSyncSummary } from '@/features/integrations/types';
 import { usePlaidIntegration } from '@/features/integrations/hooks/usePlaidIntegration';
 
 function clickPlaidActionButton(): Promise<void> {
@@ -133,6 +133,20 @@ function mockSession() {
   localStorage.setItem('app-user', JSON.stringify({ id: 'test-user', is_anonymous: false }));
 }
 
+function makeSync(overrides: Partial<PlaidSyncSummary> = {}): PlaidSyncSummary {
+  return {
+    transactionCount: 42,
+    postedTransactionCount: 40,
+    pendingTransactionCount: 2,
+    removedTransactionCount: 0,
+    dateRange: {
+      from: '2025-01-01T00:00:00.000Z',
+      to: '2025-03-31T00:00:00.000Z',
+    },
+    ...overrides,
+  };
+}
+
 function makeItem(overrides: Partial<PlaidItem> = {}): PlaidItem {
   return {
     id: 'item-uuid-1',
@@ -144,6 +158,10 @@ function makeItem(overrides: Partial<PlaidItem> = {}): PlaidItem {
     createdAt: '2026-05-12T17:00:00Z',
     lastSyncAt: '2026-05-12T17:00:00Z',
     disconnectedAt: null,
+    sync: {
+      ...makeSync(),
+      state: 'synced',
+    },
     accounts: [
       {
         id: 'acct-uuid-1',
@@ -153,6 +171,7 @@ function makeItem(overrides: Partial<PlaidItem> = {}): PlaidItem {
         mask: '0000',
         type: 'depository',
         subtype: 'checking',
+        sync: makeSync(),
       },
     ],
     ...overrides,
@@ -166,8 +185,11 @@ function PlaidIntegrationHarness() {
       items={plaid.items}
       itemsLoading={plaid.itemsLoading}
       connectLoading={plaid.connectLoading}
+      disconnectingItemId={plaid.disconnectingItemId}
       error={plaid.error}
       onConnect={plaid.onConnect}
+      onUpdate={plaid.onUpdate}
+      onDisconnect={plaid.onDisconnect}
     />
   );
 }
@@ -232,7 +254,7 @@ describe('PlaidSection (rendering)', () => {
     expect(screen.queryByRole('link', { name: /plaid/i })).not.toBeInTheDocument();
   });
 
-  it('renders connected institution names on the card when items exist', async () => {
+  it('renders connected institution chips on the card when items exist', async () => {
     server.use(
       http.get(`${API_BASE}/integrations/plaid/items`, () =>
         HttpResponse.json({ items: [makeItem()] }),
@@ -240,12 +262,17 @@ describe('PlaidSection (rendering)', () => {
     );
     renderWithProviders(<PlaidIntegrationHarness />);
     await waitFor(() => {
-      expect(screen.getByText('First Platypus Bank')).toBeInTheDocument();
+      const titleColumn = screen.getByText('Banks & Financial Accounts').closest('.flex-col');
+      expect(titleColumn).not.toBeNull();
+      const institutionChip = within(titleColumn as HTMLElement).getByRole('button', {
+        name: /disconnect first platypus bank and its connected accounts/i,
+      });
+      expect(within(institutionChip).getByText(/First Platypus Bank/i)).toBeInTheDocument();
     });
-    expect(screen.getByText('Connected')).toBeInTheDocument();
+    expect(screen.queryByText('Connected')).not.toBeInTheDocument();
   });
 
-  it('does not render account-row details for a connected item', async () => {
+  it('renders institution chips without transaction metadata or account masks', async () => {
     server.use(
       http.get(`${API_BASE}/integrations/plaid/items`, () =>
         HttpResponse.json({ items: [makeItem()] }),
@@ -253,10 +280,46 @@ describe('PlaidSection (rendering)', () => {
     );
     renderWithProviders(<PlaidIntegrationHarness />);
     await waitFor(() => {
-      expect(screen.getByText('First Platypus Bank')).toBeInTheDocument();
+      expect(screen.getByText(/First Platypus Bank/i)).toBeInTheDocument();
     });
-    expect(screen.queryByText(/1 account/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/42 tx/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/2 pending/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\b\d+ accounts\b/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Jan 2025|Mar 2025/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/••0000/)).not.toBeInTheDocument();
+  });
+
+  it('deduplicates duplicate institution items and hides repair action for hidden stale items', async () => {
+    const activeChase = makeItem({
+      id: 'item-active-chase',
+      institutionId: 'ins_56',
+      institutionName: 'Chase',
+      status: 'ACTIVE',
+      sync: { ...makeSync(), state: 'synced' },
+    });
+    const staleErrorChase = makeItem({
+      id: 'item-error-chase',
+      plaidItemId: 'plaid_item_error_chase',
+      institutionId: 'ins_56',
+      institutionName: 'Chase',
+      status: 'ERROR',
+      sync: { ...makeSync(), state: 'error' },
+    });
+    server.use(
+      http.get(`${API_BASE}/integrations/plaid/items`, () =>
+        HttpResponse.json({ items: [staleErrorChase, activeChase] }),
+      ),
+    );
+
+    renderWithProviders(<PlaidIntegrationHarness />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /disconnect chase/i })).toBeInTheDocument();
+    });
+    expect(screen.getAllByRole('button', { name: /disconnect chase/i })).toHaveLength(1);
+    expect(screen.queryByText(/sync error/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\b\d+ accounts\b/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /repair chase/i })).not.toBeInTheDocument();
   });
 
   it('uses the action button to connect another account when already connected', async () => {
@@ -360,7 +423,9 @@ describe('PlaidSection (connect flow)', () => {
     await waitFor(() => expect(linkController.opened).toBe(true));
     linkController.fireSuccess('public-sandbox-token');
     await waitFor(() => expect(exchanged).toBe(true));
-    await waitFor(() => expect(screen.getByText('First Platypus Bank')).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByText(/First Platypus Bank/i)).toBeInTheDocument(),
+    );
   });
 
   it('persists the link_token to localStorage for OAuth-bank resume', async () => {
@@ -510,15 +575,19 @@ describe('PlaidSection (non-expandable card)', () => {
     server.resetHandlers();
   });
 
-  it('does not render item-row disconnect controls', async () => {
+  it('renders item-row disconnect controls', async () => {
     server.use(
       http.get(`${API_BASE}/integrations/plaid/items`, () =>
         HttpResponse.json({ items: [makeItem()] }),
       ),
     );
     renderWithProviders(<PlaidIntegrationHarness />);
-    await waitFor(() => expect(screen.getByText('First Platypus Bank')).toBeInTheDocument());
-    expect(screen.queryByRole('button', { name: /disconnect/i })).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByText(/First Platypus Bank/i)).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByRole('button', { name: /disconnect first platypus bank/i }),
+    ).toBeInTheDocument();
   });
 });
 
@@ -544,19 +613,22 @@ describe('PlaidSection (items list)', () => {
     );
   });
 
-  it('renders multiple institution names in the card summary', async () => {
+  it('renders multiple connected institution chips in the card summary', async () => {
     server.use(
       http.get(`${API_BASE}/integrations/plaid/items`, () =>
         HttpResponse.json({
           items: [
-            makeItem({ id: 'i1', institutionName: 'Bank A' }),
-            makeItem({ id: 'i2', institutionName: 'Bank B' }),
+            makeItem({ id: 'i1', institutionId: 'ins_bank_a', institutionName: 'Bank A' }),
+            makeItem({ id: 'i2', institutionId: 'ins_bank_b', institutionName: 'Bank B' }),
           ],
         }),
       ),
     );
     renderWithProviders(<PlaidIntegrationHarness />);
-    await waitFor(() => expect(screen.getByText('Bank A, Bank B')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/Bank A/i)).toBeInTheDocument());
+    expect(screen.queryByText(/2 accounts \/ 84 transactions/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/42 tx/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/Bank B/i)).toBeInTheDocument();
   });
 
   it('surfaces an items-list error message', async () => {
