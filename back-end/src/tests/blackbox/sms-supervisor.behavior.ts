@@ -511,7 +511,6 @@ export async function testGrep_failureBlocksCompletionAndFallsBackGracefully(pri
   }
 }
 
-
 /**
  * Real-LLM acceptance for bias-to-action: a clear purchase request should
  * spawn a superintelligence agent (start_new_agent) with a purchase goal —
@@ -566,7 +565,9 @@ export async function testRealLlm_purchaseRequestSpawnsAgent(prisma: PrismaClien
       throw new Error(`Expected agent goal to mention lip balm, got: "${agent.goal}"`);
     }
     if (!/amazon|purchas|buy|order/.test(goal)) {
-      throw new Error(`Expected a clear purchase goal (amazon/purchase/buy/order), got: "${agent.goal}"`);
+      throw new Error(
+        `Expected a clear purchase goal (amazon/purchase/buy/order), got: "${agent.goal}"`
+      );
     }
   } finally {
     await cleanupAgentScopedUser(prisma, userId);

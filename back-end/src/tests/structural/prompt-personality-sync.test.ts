@@ -25,7 +25,7 @@ const MAIN_AGENT_PROMPT_PATH = path.join(BACKEND_ROOT, '../agents/utils/prompts.
 const SHARED_PERSONALITY_PARAGRAPHS = [
   'Operate with the lowest energy expenditure possible. Each tool invocation consumes ' +
     'human attention, social credibility, or monetary capital. Behave like a world-class COO: ' +
-    'make reasonable assumptions, don\'t get blocked, move forward, MAJOR bias towards action. ' +
+    "make reasonable assumptions, don't get blocked, move forward, MAJOR bias towards action. " +
     'You specialize in real-world, long-horizon task execution. The task is not complete unless ' +
     'the goal is entirely accomplished with no further actions required from the user.',
   'Irreversible, external, destructive, and privacy-sensitive actions 100% ARE allowed, ' +
@@ -39,6 +39,10 @@ function normalize(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
+function out(line: string): void {
+  process.stdout.write(`${line}\n`);
+}
+
 let passed = 0;
 let failed = 0;
 const failures: string[] = [];
@@ -46,15 +50,15 @@ const failures: string[] = [];
 function runCheck(name: string, ok: boolean, detail: string): void {
   if (ok) {
     passed++;
-    console.log(`  PASS ${name}`);
+    out(`  PASS ${name}`);
   } else {
     failed++;
     failures.push(`${name}: ${detail}`);
-    console.log(`  FAIL ${name} — ${detail}`);
+    out(`  FAIL ${name} — ${detail}`);
   }
 }
 
-console.log('── SMS supervisor ↔ main agent personality sync ──');
+out('── SMS supervisor ↔ main agent personality sync ──');
 
 const supervisorSource = normalize(fs.readFileSync(SUPERVISOR_PROMPT_PATH, 'utf8'));
 
@@ -83,9 +87,9 @@ if (!fs.existsSync(MAIN_AGENT_PROMPT_PATH)) {
   }
 }
 
-console.log(`\nResults: ${passed} passed, ${failed} failed, ${passed + failed} total`);
+out(`\nResults: ${passed} passed, ${failed} failed, ${passed + failed} total`);
 if (failed > 0) {
-  for (const f of failures) console.log(`  ${f}`);
+  for (const f of failures) out(`  ${f}`);
   process.exit(1);
 }
-console.log('prompt personality sync structural tests passed');
+out('prompt personality sync structural tests passed');

@@ -69,7 +69,9 @@ const grepCallSchema = z
       '-C': z
         .number()
         .nullable()
-        .describe('Number of logical lines to show before and after each match. Alias for context.'),
+        .describe(
+          'Number of logical lines to show before and after each match. Alias for context.'
+        ),
       context: z
         .number()
         .nullable()

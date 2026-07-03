@@ -59,7 +59,9 @@ export async function executeUserDataGrep(
   params: UserDataGrepParams
 ): Promise<UserDataGrepResult> {
   if (grepExecutor === null) {
-    throw new Error('[UserDataSearch] user data grep not initialized — registerUserDataGrep was never called');
+    throw new Error(
+      '[UserDataSearch] user data grep not initialized — registerUserDataGrep was never called'
+    );
   }
   return grepExecutor(userId, params);
 }

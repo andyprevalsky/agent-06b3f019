@@ -11,11 +11,7 @@
  */
 
 import { createLogger } from '../logger';
-import {
-  executeUserDataGrep,
-  UserDataGrepParams,
-  UserDataGrepResult,
-} from '../userDataSearch';
+import { executeUserDataGrep, UserDataGrepParams, UserDataGrepResult } from '../userDataSearch';
 import type { ToolResult } from './supervisorTools';
 
 const log = createLogger('SmsSupervisorGrep');
@@ -92,7 +88,8 @@ export async function executeGrepTool(args: GrepArgs, userId: string): Promise<T
         tool: 'grep',
         success: false,
         result: '',
-        error: 'filters require an explicit source. Pick one of: messages, network, transactions, documents.',
+        error:
+          'filters require an explicit source. Pick one of: messages, network, transactions, documents.',
       };
     }
     const perSource = await Promise.all(
