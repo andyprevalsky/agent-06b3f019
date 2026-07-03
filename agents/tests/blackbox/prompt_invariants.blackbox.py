@@ -1712,7 +1712,12 @@ def test_tool_prompts_open_with_declarative_sentence():
 # session-isolation contract on every call without a cross-reference. The
 # prompt also defines the canonical Required/Optional/Ignored subtype-field
 # wording, so the local cap is intentionally higher than ordinary tool prompts.
+#
+# grep carries load-bearing source/filter guidance for documents and
+# transactions so local-data benchmarks use the scoped DB search path instead
+# of public web tools or generic unfiltered searches.
 _TOOL_PROMPT_CHAR_CAP_OVERRIDES = {
+    "grep": 1600,
     "spawn_agent": 3100,
 }
 _TOOL_PROMPT_CHAR_CAP_DEFAULT = 1500

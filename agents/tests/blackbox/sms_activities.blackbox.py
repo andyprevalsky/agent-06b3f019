@@ -2,6 +2,9 @@
 
 import asyncio
 import json
+import os
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 from _test_utils import (
@@ -74,15 +77,37 @@ async def test_send_direct_sms():
 async def test_notify_event():
     """notify_sms_event_activity sends POST to /api/send-sms/notify."""
     _setup()
+    import helpers.trace_archive as trace_archive
+
+    old_root = trace_archive._LOCAL_ROOT
+    old_enabled = os.environ.get("TRACE_ARCHIVE_ENABLED")
+    old_backend = os.environ.get("TRACE_ARCHIVE_BACKEND")
     with patch("temporalio.activity.heartbeat"):
         from helpers.sms_activities import notify_sms_event_activity
 
-        result = await notify_sms_event_activity(
-            user_id="user-99",
-            event_type="agent_started",
-            agent_id="agent-5",
-            payload={"goal": "Research AI trends"},
-        )
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                trace_archive._LOCAL_ROOT = Path(tmp)
+                os.environ["TRACE_ARCHIVE_ENABLED"] = "1"
+                os.environ["TRACE_ARCHIVE_BACKEND"] = "local"
+                result = await notify_sms_event_activity(
+                    user_id="user-99",
+                    event_type="agent_started",
+                    agent_id="agent-5",
+                    payload={"goal": "Research AI trends"},
+                )
+                archived = Path(tmp) / "agent-5" / "provider" / "sms" / "notify" / "agent_started-agent-5.json.gz.enc"
+                assert archived.exists()
+            finally:
+                trace_archive._LOCAL_ROOT = old_root
+                if old_enabled is None:
+                    os.environ.pop("TRACE_ARCHIVE_ENABLED", None)
+                else:
+                    os.environ["TRACE_ARCHIVE_ENABLED"] = old_enabled
+                if old_backend is None:
+                    os.environ.pop("TRACE_ARCHIVE_BACKEND", None)
+                else:
+                    os.environ["TRACE_ARCHIVE_BACKEND"] = old_backend
 
     assert result["success"] is True
     call = assert_captured_call(

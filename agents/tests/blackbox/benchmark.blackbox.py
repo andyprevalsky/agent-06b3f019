@@ -198,9 +198,12 @@ def test_fast_mode_pass_does_not_seed_timeout_history():
     from benchmarks.results import BenchmarkRun, TaskResult
 
     recorded = []
+    attempts = []
     original_record_pass = timeout_history.record_pass
+    original_record_attempt = timeout_history.record_attempt
     try:
         timeout_history.record_pass = lambda **kwargs: recorded.append(kwargs)
+        timeout_history.record_attempt = lambda **kwargs: attempts.append(kwargs)
 
         run = BenchmarkRun(suite="smoke", base_url="https://navi-j9a9.onrender.com")
         run.task_results.append(
@@ -220,8 +223,11 @@ def test_fast_mode_pass_does_not_seed_timeout_history():
         run._record_history()
     finally:
         timeout_history.record_pass = original_record_pass
+        timeout_history.record_attempt = original_record_attempt
 
     assert recorded == []
+    # ...but the attempt is still recorded in the run-stats ledger
+    assert len(attempts) == 1 and attempts[0]["fast_mode_cache_enabled"] is True
 
 
 def test_non_fast_mode_pass_still_seeds_timeout_history():
@@ -230,9 +236,12 @@ def test_non_fast_mode_pass_still_seeds_timeout_history():
     from benchmarks.results import BenchmarkRun, TaskResult
 
     recorded = []
+    attempts = []
     original_record_pass = timeout_history.record_pass
+    original_record_attempt = timeout_history.record_attempt
     try:
         timeout_history.record_pass = lambda **kwargs: recorded.append(kwargs)
+        timeout_history.record_attempt = lambda **kwargs: attempts.append(kwargs)
 
         run = BenchmarkRun(suite="smoke", base_url="https://navi-j9a9.onrender.com")
         run.task_results.append(
@@ -252,6 +261,7 @@ def test_non_fast_mode_pass_still_seeds_timeout_history():
         run._record_history()
     finally:
         timeout_history.record_pass = original_record_pass
+        timeout_history.record_attempt = original_record_attempt
 
     assert recorded == [
         {
@@ -262,6 +272,7 @@ def test_non_fast_mode_pass_still_seeds_timeout_history():
             "timestamp": run.timestamp,
         }
     ]
+    assert len(attempts) == 1 and attempts[0]["passed"] is True
 
 
 def test_minted_benchmark_cleanup_preserves_cached_agent_identity_by_default():
@@ -731,6 +742,176 @@ async def test_api_headers_honors_internal_api_key_auth():
         bench.USER_ID = original_user_id
 
 
+async def test_archive_agent_start_posts_agent_and_returns_fixture_ref():
+    """Benchmark runs capture the start fixture immediately after agent setup."""
+    import benchmarks.run_benchmark as bench
+
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"fixture": {"ref": "trace-archive/root-1/db/start.fixture.json.gz.enc"}}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, *, headers, json):
+            calls.append((self.timeout, url, headers, json))
+            return FakeResponse()
+
+    original_headers = bench._api_headers
+    original_client = bench.httpx.AsyncClient
+    try:
+        async def fake_headers():
+            return {"X-API-Key": "test-key"}
+
+        bench._api_headers = fake_headers
+        bench.httpx.AsyncClient = FakeClient
+
+        fixture_ref = await bench.archive_agent_start("http://localhost:55120", "agent-root")
+    finally:
+        bench._api_headers = original_headers
+        bench.httpx.AsyncClient = original_client
+
+    assert fixture_ref == "trace-archive/root-1/db/start.fixture.json.gz.enc"
+    assert calls == [
+        (
+            60,
+            "http://localhost:55120/api/archive/agent-start",
+            {"X-API-Key": "test-key"},
+            {"agentId": "agent-root"},
+        )
+    ]
+
+
+async def test_archive_agent_finalize_posts_task_and_returns_manifest_ref():
+    """Benchmark task completion records the durable trace bundle manifest."""
+    import benchmarks.run_benchmark as bench
+
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"manifest": {"ref": "trace-archive/root-1/manifest.json.gz.enc"}}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, *, headers, json):
+            calls.append((self.timeout, url, headers, json))
+            return FakeResponse()
+
+    original_headers = bench._api_headers
+    original_client = bench.httpx.AsyncClient
+    try:
+        async def fake_headers():
+            return {"X-API-Key": "test-key"}
+
+        bench._api_headers = fake_headers
+        bench.httpx.AsyncClient = FakeClient
+
+        manifest_ref = await bench.archive_agent_finalize(
+            "http://localhost:55120",
+            "agent-root",
+            "chat-mode",
+            force=True,
+        )
+    finally:
+        bench._api_headers = original_headers
+        bench.httpx.AsyncClient = original_client
+
+    assert manifest_ref == "trace-archive/root-1/manifest.json.gz.enc"
+    assert calls == [
+        (
+            90,
+            "http://localhost:55120/api/archive/agent-finalize",
+            {"X-API-Key": "test-key"},
+            {"rootAgentId": "agent-root", "benchmarkTaskName": "chat-mode", "force": True},
+        )
+    ]
+
+
+async def test_archive_agent_finalize_failure_is_best_effort():
+    """Archive failures should not fail the benchmark result path."""
+    import benchmarks.run_benchmark as bench
+
+    class FakeResponse:
+        status_code = 503
+        text = "archive unavailable"
+
+        def json(self):
+            raise AssertionError("json should not be called on failed archive response")
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _url, *, headers, json):
+            return FakeResponse()
+
+    original_headers = bench._api_headers
+    original_client = bench.httpx.AsyncClient
+    try:
+        async def fake_headers():
+            return {"X-API-Key": "test-key"}
+
+        bench._api_headers = fake_headers
+        bench.httpx.AsyncClient = FakeClient
+
+        assert await bench.archive_agent_finalize("http://localhost:55120", "agent-root", "chat-mode") is None
+    finally:
+        bench._api_headers = original_headers
+        bench.httpx.AsyncClient = original_client
+
+
+def test_benchmark_run_json_preserves_archive_manifest_ref():
+    """Run JSON keeps each task's archive manifest pointer for replay lookup."""
+    from benchmarks.results import BenchmarkRun, TaskResult
+
+    run = BenchmarkRun(suite="smoke", base_url="http://localhost:55120")
+    run.task_results.append(
+        TaskResult(
+            name="chat-mode",
+            passed=True,
+            agent_id="agent-root",
+            status="COMPLETED",
+            progress_score=1.0,
+            duration_seconds=4.0,
+            cost_cents=2.0,
+            message_count=3,
+            archive_manifest_ref="trace-archive/root-1/manifest.json.gz.enc",
+        )
+    )
+
+    assert run.to_dict()["tasks"][0]["archive_manifest_ref"] == "trace-archive/root-1/manifest.json.gz.enc"
+
+
 async def test_code_agent_preflight_accepts_gpt_compute_token():
     """Code-agent benchmarks preflight against the workflow compute-token route."""
     import benchmarks.run_benchmark as bench
@@ -897,56 +1078,59 @@ def test_webdecoy_biometrics_evaluator_requires_interaction_and_low_score():
     assert "ratchet" in reason.lower()
 
 
-def test_webdecoy_biometrics_evaluator_uses_exact_network_score_when_visible_is_rounded(tmp_path):
+def test_webdecoy_biometrics_evaluator_uses_exact_network_score_when_visible_is_rounded():
     """The ratchet should compare exact FCaptcha JSON, not the page's rounded display text."""
     import json
+    import tempfile
+    from pathlib import Path
 
     from benchmarks.run_benchmark import _evaluate_webdecoy_biometrics_result
 
-    network_dir = tmp_path / "recording" / "network"
-    network_dir.mkdir(parents=True)
-    body_file = network_dir / "0001_score.json"
-    body_file.write_text(
-        json.dumps(
-            {
-                "action": "form_submit",
-                "recommendation": "allow",
-                "score": 0.1559512195121951,
-                "success": True,
-            }
+    with tempfile.TemporaryDirectory() as tmp:
+        network_dir = Path(tmp) / "recording" / "network"
+        network_dir.mkdir(parents=True)
+        body_file = network_dir / "0001_score.json"
+        body_file.write_text(
+            json.dumps(
+                {
+                    "action": "form_submit",
+                    "recommendation": "allow",
+                    "score": 0.1559512195121951,
+                    "success": True,
+                }
+            )
         )
-    )
-    (network_dir / "index.json").write_text(
-        json.dumps(
-            {
-                "entries": [
-                    {
-                        "method": "POST",
-                        "url": "https://fcaptcha.webdecoy.com/api/score",
-                        "response_ts_ms": 123,
-                        "body_file": body_file.name,
-                    }
-                ]
-            }
+        (network_dir / "index.json").write_text(
+            json.dumps(
+                {
+                    "entries": [
+                        {
+                            "method": "POST",
+                            "url": "https://fcaptcha.webdecoy.com/api/score",
+                            "response_ts_ms": 123,
+                            "body_file": body_file.name,
+                        }
+                    ]
+                }
+            )
         )
-    )
 
-    data = {
-        "messages": [
-            {
-                "role": "TOOL",
-                "text": (
-                    "Visited https://webdecoy.com/product/fcaptcha-demo/. "
-                    "Clicked the checkbox mode verification control. "
-                    "Entered benchmark-human@example.com in invisible mode and clicked Submit. "
-                    "Final visible FCaptcha Risk Score: 0.16."
-                ),
-                "metadata": {"network_recording_path": str(network_dir / "index.json")},
-            }
-        ]
-    }
+        data = {
+            "messages": [
+                {
+                    "role": "TOOL",
+                    "text": (
+                        "Visited https://webdecoy.com/product/fcaptcha-demo/. "
+                        "Clicked the checkbox mode verification control. "
+                        "Entered benchmark-human@example.com in invisible mode and clicked Submit. "
+                        "Final visible FCaptcha Risk Score: 0.16."
+                    ),
+                    "metadata": {"network_recording_path": str(network_dir / "index.json")},
+                }
+            ]
+        }
 
-    assert _evaluate_webdecoy_biometrics_result(data) == (True, None)
+        assert _evaluate_webdecoy_biometrics_result(data) == (True, None)
 
 
 def test_auth_bundle_biometrics_gate_defaults_on_and_can_be_disabled():
@@ -2035,6 +2219,185 @@ def test_spawn_sub_agents_smoke_forbids_browser_and_code_detours():
     assert "explore-agent web research" in task.prompt
 
 
+def test_unified_catalog_validates_and_covers_all_runner_kinds():
+    """tasks.json is the ONE catalog: valid contract, agent + vitest entries, holding set split."""
+    from benchmarks.long_horizon import EVALUATION_METHODS, validate_catalog
+
+    tasks = validate_catalog()
+
+    assert len(tasks) >= 36
+    statuses = {(t.get("runner", "agent"), t.get("status", "ready")) for t in tasks}
+    assert ("agent", "ready") in statuses
+    assert ("agent", "incomplete") in statuses
+    assert ("vitest", "ready") in statuses
+    methods = {e["method"] for t in tasks for e in t.get("evaluators", [])}
+    assert methods == EVALUATION_METHODS
+    # Enriched long-horizon migrations carry the full environment contract
+    with_env = [t for t in tasks if t.get("environment")]
+    assert len(with_env) >= 5
+    for t in with_env:
+        assert t["environment"]["mode"] in {"synthetic", "live", "hybrid"}
+        assert "db_fixtures" in t["environment"]
+        assert "base_images" in t["environment"]
+
+
+def test_unified_catalog_delineates_bench_axes():
+    """Every task declares its bench: pipeline-e2e (plumbing) vs rose-bench (capability).
+
+    Rose Bench entries are harness-INDEPENDENT: fixture + prompt + evaluators
+    must be portable to any harness (e.g. swap in Claude Code and measure).
+    """
+    from benchmarks.long_horizon import TASK_BENCHES, validate_catalog
+
+    tasks = validate_catalog()
+    by_name = {t["name"]: t for t in tasks}
+
+    assert all(t.get("bench") in TASK_BENCHES for t in tasks)
+    rose = {t["name"] for t in tasks if t["bench"] == "rose-bench"}
+    # Founder-labeled anchors of each axis (2026-07-02)
+    assert {"test-mass-agent-run-0", "browser-agent", "job-applications"} <= rose
+    for name in ("chat-mode", "browser-smoke", "spawn-sub-agents", "single-creator-arm", "cache-coverage"):
+        assert by_name[name]["bench"] == "pipeline-e2e"
+    # Live capability eval keeps its live environment contract
+    live = by_name["browser-agent"]
+    assert live["environment"]["mode"] == "live"
+    assert live["environment"]["db_fixtures"] == []
+    assert live["environment"]["live_targets"] == ["https://www.amazon.com"]
+
+
+def test_unified_catalog_supports_multiple_evaluators_per_eval():
+    """The contract allows combining deterministic checks with an agentic judge."""
+    from benchmarks.long_horizon import validate_task_contract
+
+    validate_task_contract(
+        {
+            "name": "contract-fixture",
+            "bench": "rose-bench",
+            "environment": {
+                "mode": "synthetic",
+                "db_fixtures": ["digital_twin_store_v1"],
+                "base_images": [],
+                "services": ["synthetic_store"],
+                "secrets": [],
+                "live_targets": [],
+                "context_notes": "contract fixture",
+            },
+            "evaluators": [
+                {
+                    "id": "db",
+                    "method": "static_check",
+                    "criteria": ["one confirmed order"],
+                    "checks": [{"type": "db_row_count", "table": "orders", "expected": 1}],
+                },
+                {
+                    "id": "judge",
+                    "method": "agentic_llm_judge",
+                    "criteria": ["qualifying purchase completed"],
+                    "judge_prompt": "Inspect the transcript and order DB.",
+                },
+            ],
+        }
+    )
+
+
+def test_suite_selection_excludes_incomplete_and_external_entries():
+    """Suite runs execute only ready agent evals; incomplete + vitest entries are catalogued but skipped."""
+    from benchmarks.benchmark_tasks import all_tasks, suite_tasks
+
+    suite_names = {t.name for t in suite_tasks()}
+    all_names = {t.name for t in all_tasks()}
+
+    assert "wait-for-trigger" in all_names and "wait-for-trigger" not in suite_names
+    assert "raise-my-round" not in all_names
+    assert "smoke-backend-claude-code" in all_names and "smoke-backend-claude-code" not in suite_names
+    # Main added three ready Plaid transaction benchmarks during this branch.
+    assert "load-test-sias" in suite_names
+    assert "browser-agent" in suite_names
+    assert {
+        "user-data-prod-grep",
+        "plaid-transactions-monthly-spend",
+        "plaid-transactions-doordash-count",
+        "plaid-transactions-dead-subscriptions",
+    } <= suite_names
+    assert len(suite_names) == 32
+
+
+def test_every_task_has_base_image_fixture_by_default():
+    """Every eval runs on a reproducible base image; undeclared environments inherit the default."""
+    from benchmarks.benchmark_tasks import all_tasks
+    from benchmarks.fixtures import BASE_IMAGES, DEFAULT_BASE_IMAGE
+
+    assert DEFAULT_BASE_IMAGE in BASE_IMAGES
+    for t in all_tasks():
+        assert t.environment is not None, f"{t.name}: no effective environment"
+        assert t.environment.get("base_images"), f"{t.name}: no base image fixture"
+    # Tasks that don't declare an environment inherit the default base image verbatim
+    by_name = {t.name: t for t in all_tasks()}
+    assert by_name["chat-mode"].environment["base_images"] == [DEFAULT_BASE_IMAGE]
+    # Declared environments with empty base_images also inherit it
+    assert by_name["load-test-sias"].environment["base_images"] == [DEFAULT_BASE_IMAGE]
+
+
+def test_tag_slices_still_resolve():
+    """Semantic tag slices (e.g. browser auth suite) survive catalog changes."""
+    from benchmarks.benchmark_tasks import get_tasks_by_tag
+
+    for tag, minimum in {
+        "browser": 8,
+        "auth": 2,
+        "auth-anon": 2,
+        "auth-cookie": 1,
+        "smoke": 5,
+        "outreach": 3,
+        "attachment": 5,
+        "for-each": 4,
+        "claude-code": 3,
+        "payment": 1,
+        "load-test": 1,
+    }.items():
+        assert len(get_tasks_by_tag(tag)) >= minimum, f"tag slice '{tag}' collapsed"
+
+
+def test_history_ledger_task_names_still_exist_in_catalog():
+    """History-orphan guard: renaming a catalog task orphans its pass ledger + p99 baselines.
+
+    Every task name ever recorded in the success ledger must still exist in
+    tasks.json. If this fails, a task was renamed or deleted — restore the name
+    (CLAUDE.md "Eval Suite": task name is the cross-store primary key).
+    """
+    import json as _json
+    from pathlib import Path
+
+    from benchmarks.benchmark_tasks import all_tasks
+
+    ledger = Path(__file__).resolve().parents[2] / "benchmarks" / "history" / "task_durations.jsonl"
+    if not ledger.exists() or ledger.stat().st_size == 0:
+        return  # fresh checkout — nothing recorded yet
+    recorded = set()
+    with ledger.open() as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                recorded.add(_json.loads(line)["task"])
+    catalog_names = {t.name for t in all_tasks()}
+    orphaned = sorted(recorded - catalog_names)
+    assert not orphaned, f"History-orphaning rename/delete detected for: {orphaned}"
+
+
+def test_long_horizon_idea_bank_preserves_seed_ideas_with_safety_notes():
+    """Raw idea kernels have a home before they become runnable evals."""
+    from benchmarks.long_horizon import load_idea_bank
+
+    ideas = load_idea_bank()
+    by_id = {idea.id: idea for idea in ideas}
+
+    assert len(ideas) >= 25
+    assert by_id["black-beanie"].status == "promoted"
+    assert "Do not locate or deliver pirated" in by_id["lawful-book-access"].safety_notes
+    assert "Do not collect private personal contact info" in by_id["world-power-ranking-public"].safety_notes
+    assert "explicit approval" in by_id["create-100-person-event"].safety_notes
+
+
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
@@ -2103,6 +2466,10 @@ async def run_all_tests():
         test_primitive_uber_welcome_evidence_uses_exact_recipient,
     )
     await r.record_async("api_headers_internal_api_key", test_api_headers_honors_internal_api_key_auth)
+    await r.record_async("archive_agent_start", test_archive_agent_start_posts_agent_and_returns_fixture_ref)
+    await r.record_async("archive_agent_finalize", test_archive_agent_finalize_posts_task_and_returns_manifest_ref)
+    await r.record_async("archive_agent_finalize_best_effort", test_archive_agent_finalize_failure_is_best_effort)
+    r.record("benchmark_run_archive_manifest_ref", test_benchmark_run_json_preserves_archive_manifest_ref)
     await r.record_async("code_agent_preflight_accepts_gpt_compute", test_code_agent_preflight_accepts_gpt_compute_token)
     await r.record_async("code_agent_preflight_rejects_missing_compute", test_code_agent_preflight_rejects_missing_compute_token)
     r.record("normalize_attention_requests", test_normalize_attention_requests_accepts_backend_contract)
@@ -2111,6 +2478,10 @@ async def run_all_tests():
     r.record(
         "webdecoy_biometrics_evaluator",
         test_webdecoy_biometrics_evaluator_requires_interaction_and_low_score,
+    )
+    r.record(
+        "webdecoy_biometrics_exact_network_score",
+        test_webdecoy_biometrics_evaluator_uses_exact_network_score_when_visible_is_rounded,
     )
     r.record(
         "auth_bundle_biometrics_gate_env",
@@ -2171,4 +2542,21 @@ async def run_all_tests():
     )
     r.record("parallel_tool_calls_explore_sub_agents", test_parallel_tool_calls_smoke_requires_explore_sub_agents)
     r.record("spawn_sub_agents_no_browser_code_detours", test_spawn_sub_agents_smoke_forbids_browser_and_code_detours)
+    r.record("unified_catalog_core_contract", test_unified_catalog_validates_and_covers_all_runner_kinds)
+    r.record(
+        "unified_catalog_bench_axes",
+        test_unified_catalog_delineates_bench_axes,
+    )
+    r.record(
+        "unified_catalog_multiple_evaluators",
+        test_unified_catalog_supports_multiple_evaluators_per_eval,
+    )
+    r.record(
+        "suite_selection_excludes_incomplete_external",
+        test_suite_selection_excludes_incomplete_and_external_entries,
+    )
+    r.record("every_task_has_base_image_fixture", test_every_task_has_base_image_fixture_by_default)
+    r.record("tag_slices_still_resolve", test_tag_slices_still_resolve)
+    r.record("history_ledger_no_orphaned_task_names", test_history_ledger_task_names_still_exist_in_catalog)
+    r.record("long_horizon_idea_bank", test_long_horizon_idea_bank_preserves_seed_ideas_with_safety_notes)
     return r.all_passed

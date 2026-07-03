@@ -6,6 +6,7 @@ Activities for:
 - Sending lifecycle SMS notifications (agent started, write lock, cost limit)
 """
 
+import time
 from typing import Dict
 
 import httpx
@@ -13,6 +14,7 @@ import structlog
 from temporalio import activity
 
 from config import load_config
+from helpers.trace_archive import archive_json
 
 logger = structlog.get_logger()
 
@@ -79,6 +81,11 @@ async def send_direct_sms_activity(user_id: str, message: str) -> Dict:
             )
             response.raise_for_status()
             result = response.json()
+            archive_json(
+                root_agent_id=user_id,
+                path=f"provider/sms/direct/{int(time.time() * 1000)}.json.gz.enc",
+                payload={"request": {"user_id": user_id, "message": message}, "response": result},
+            )
 
             logger.info(
                 "Direct SMS result",
@@ -153,6 +160,15 @@ async def notify_sms_event_activity(user_id: str, event_type: str, agent_id: str
 
             response.raise_for_status()
             result = response.json()
+            archive_json(
+                root_agent_id=agent_id,
+                path=f"provider/sms/notify/{event_type}-{agent_id}.json.gz.enc",
+                payload={
+                    "request": request_body,
+                    "response": result,
+                    "status_code": response.status_code,
+                },
+            )
 
             logger.info(
                 "SMS notify result",

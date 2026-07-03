@@ -1,0 +1,425 @@
+{
+  "version": "0.1",
+  "description": "Idea bank for long-horizon benchmark kernels before they become fully specified evals.",
+  "ideas": [
+    {
+      "id": "get-a-job",
+      "title": "Get a Job",
+      "raw_user_idea": "Getting a job",
+      "normalized_goal": "Find matching roles, tailor materials, coordinate outreach, and stop before real submissions unless explicitly approved.",
+      "status": "idea",
+      "likely_environment_modes": [
+        "synthetic",
+        "live"
+      ],
+      "likely_evaluation_methods": [
+        "agentic_llm_judge"
+      ],
+      "safety_notes": "Use synthetic employers for routine regression runs; real applications require explicit user approval."
+    },
+    {
+      "id": "create-100-person-event",
+      "title": "Create an In-Person Event with 100 Attendees",
+      "raw_user_idea": "Creating an in-person event with 100 people attending",
+      "normalized_goal": "Plan, invite, track RSVPs, and produce an attendance-ready event plan with approval-gated messaging.",
+      "status": "idea",
+      "likely_environment_modes": [
+        "synthetic",
+        "hybrid"
+      ],
+      "likely_evaluation_methods": [
+        "agentic_llm_judge"
+      ],
+      "safety_notes": "Synthetic contact and venue fixtures should be the default; real outreach must be opt-in and require explicit approval."
+    },
+    {
+      "id": "family-christmas-gifts",
+      "title": "Get Family Christmas Gifts",
+      "raw_user_idea": "Get my family Christmas gifts",
+      "normalized_goal": "Infer recipients and preferences, choose gifts within budget, and stop at checkout approval.",
+      "status": "idea",
+      "likely_environment_modes": [
+        "synthetic",
+        "live"
+      ],
+      "likely_evaluation_methods": [
+        "agentic_llm_judge"
+      ],
+      "safety_notes": "Do not purchase live goods without explicit payment approval."
+    },
+    {
+      "id": "raise-money",
+      "title": "Raise Money",
+      "raw_user_idea": "Raise me money",
+      "normalized_goal": "Build a fundraising target list, personalize outreach, manage follow-ups, and produce approval-gated sends.",
+      "status": "idea",
+      "likely_environment_modes": [
+        "synthetic",
+        "hybrid"
+      ],
+      "likely_evaluation_methods": [
+        "single_turn_llm_judge",
+        "agentic_llm_judge"
+      ],
+      "safety_notes": "Avoid deceptive claims; real outreach needs approval and compliance review."
+    },
+    {
+      "id": "launch-business",
+      "title": "Launch My Business",
+      "raw_user_idea": "Launch my business",
+      "normalized_goal": "Create launch plan, assets, customer list, website, and approval-gated outreach or transactions.",
+      "status": "idea",
+      "likely_environment_modes": [
+        "synthetic",
+        "hybrid"
+      ],
+      "likely_evaluation_methods": [
+        "agentic_llm_judge"
+      ],
+      "safety_notes": "Constrain legal, financial, and public launch actions behind explicit approval."
+    },
+    {
+      "id": "visa-help",
+      "title": "Figure Out Visa Options",
+      "raw_user_idea": "Figure out my Visa shit / Get me my visa for France",
+      "normalized_goal": "Collect requirements, identify visa paths, prepare checklist and draft materials, and flag when professional/legal review is required.",
+      "status": "idea",
+      "likely_environment_modes": [
+        "synthetic",
+        "live"
+      ],
+      "likely_evaluation_methods": [
+        "agentic_llm_judge"
+      ],
+      "safety_notes": "Legal/immigration output must be framed as information, not legal advice; live filing requires approval."
+    },
+    {
+      "id": "black-beanie",
+      "title": "Get a Black Beanie",
+      "raw_user_idea": "Get me a black beanie",
+      "normalized_goal": "Find and purchase a qualifying black beanie under user constraints, with synthetic and live variants separated.",
+      "status": "promoted",
+      "likely_environment_modes": [
+        "synthetic",
+        "live"
+      ],
+      "likely_evaluation_methods": [
+        "agentic_llm_judge"
+      ],
+      "safety_notes": "Live purchase requires explicit payment/write-lock approval."
+    },
+    {
+      "id": "convex-optimization-tutor",
+      "title": "Understand Convex Optimization",
+      "raw_user_idea": "Help me understand convex optimization",
+      "normalized_goal": "Teach concepts, diagnose misconceptions, and verify learning through worked problems.",
+      "status": "idea",
+      "likely_environment_modes": [
+        "synthetic"
+      ],
+      "likely_evaluation_methods": [
+        "single_turn_llm_judge",
+        "agentic_llm_judge"
+      ],
+      "safety_notes": "Low risk; judge should verify mathematical correctness rather than style alone."
+    },
+    {
+      "id": "lawful-book-access",
+      "title": "Find Lawful Book Access",
+      "raw_user_idea": "Gimme Tales of Power carlos castaneda pdf (internet use through scrape tool)",
+      "normalized_goal": "Find lawful ways to access or buy the requested book and summarize availability.",
+      "status": "idea",
+      "likely_environment_modes": [
+        "live"
+      ],
+      "likely_evaluation_methods": [
+        "single_turn_llm_judge"
+      ],
+      "safety_notes": "Do not locate or deliver pirated copyrighted PDFs."
+    },
+    {
+      "id": "file-delivery",
+      "title": "File Delivery",
+      "raw_user_idea": "File delivery",
+      "normalized_goal": "Deliver requested generated or transformed files with correct format, metadata, and accessibility.",
+      "status": "idea",
+      "likely_environment_modes": [
+        "synthetic"
+      ],
+      "likely_evaluation_methods": [
+        "static_check",
+        "agentic_llm_judge"
+      ],
+      "safety_notes": "Validate files and avoid exfiltrating private data."
+    },
+    {
+      "id": "virtual-assistant-job",
+      "title": "Get a Virtual Assistant Job",
+      "raw_user_idea": "Get me a job as a Virtual Assistant",
+      "normalized_goal": "Find appropriate VA roles, tailor applications, and approval-gate submissions.",
+      "status": "idea",
+      "likely_environment_modes": [
+        "synthetic",
+        "live"
+      ],
+      "likely_evaluation_methods": [
+        "agentic_llm_judge"
+      ],
+      "safety_notes": "Real applications require approval and truthful candidate representation."
+    },
+    {
+      "id": "gaia-benchmark",
+      "title": "GAIA Benchmark",
+      "raw_user_idea": "Gaia benchmark",
+      "normalized_goal": "Represent GAIA-like research and tool-use tasks as controlled long-horizon evals.",
+      "status": "promoted",
+      "likely_environment_modes": [
+        "synthetic"
+      ],
+      "likely_evaluation_methods": [
+        "single_turn_llm_judge",
+        "agentic_llm_judge"
+      ],
+      "safety_notes": "Keep benchmark data licensing and leakage controls explicit."
+    },
+    {
+      "id": "eligible-refunds",
+      "title": "Get Eligible Refunds",
+      "raw_user_idea": "Get me refunds on everything (donotpay)",
+      "normalized_goal": "Identify purchases eligible for refunds, draft claims, and stop before submitting claims.",
+      "status": "idea",
+      "likely_environment_modes": [
+        "synthetic",
+        "live"
+      ],
+      "likely_evaluation_methods": [
+        "agentic_llm_judge"
+      ],
+      "safety_notes": "Only truthful, eligible refund claims; no fraud or deceptive claims."
+    },
+    {
+      "id": "anthropic-outreach",
+      "title": "Anthropic Outreach",
+      "raw_user_idea": "Email everyone in anthropic about how I built a system that coordinates thousands of Claudes together",
+      "normalized_goal": "Identify appropriate public or opted-in contacts and draft a concise outreach campaign for approval.",
+      "status": "idea",
+      "likely_environment_modes": [
+        "synthetic",
+        "hybrid"
+      ],
+      "likely_evaluation_methods": [
+        "agentic_llm_judge"
+      ],
+      "safety_notes": "Do not mass email or scrape private contact info; require consent/approval and rate limits."
+    },
+    {
+      "id": "unemployment-benefits",
+      "title": "Unemployment Benefits",
+      "raw_user_idea": "Get my on unemployment benefits",
+      "normalized_goal": "Determine eligibility, prepare documents, and guide filing with approval before submission.",
+      "status": "idea",
+      "likely_environment_modes": [
+        "synthetic",
+        "live"
+      ],
+      "likely_evaluation_methods": [
+        "agentic_llm_judge"
+      ],
+      "safety_notes": "Benefits guidance must be accurate and non-deceptive; live filing requires user review."
+    },
+    {
+      "id": "lean-proof-mathematician",
+      "title": "Find a Lean Proof Mathematician",
+      "raw_user_idea": "Finding the right mathematician for finishing a lean proof",
+      "normalized_goal": "Identify qualified experts, assess fit, draft outreach, and stop before contacting them.",
+      "status": "idea",
+      "likely_environment_modes": [
+        "synthetic",
+        "live"
+      ],
+      "likely_evaluation_methods": [
+        "agentic_llm_judge"
+      ],
+      "safety_notes": "Use public professional info only; real outreach is approval-gated."
+    },
+    {
+      "id": "fortune-500-head-marketing",
+      "title": "Find a Head of Marketing",
+      "raw_user_idea": "Finding the best head of marketing for your Fortune 500",
+      "normalized_goal": "Map candidate profiles, source public candidates, rank fit, and draft outreach for approval.",
+      "status": "idea",
+      "likely_environment_modes": [
+        "synthetic",
+        "hybrid"
+      ],
+      "likely_evaluation_methods": [
+        "agentic_llm_judge"
+      ],
+      "safety_notes": "Respect privacy and employment-law constraints; no private contact harvesting."
+    },
+    {
+      "id": "wet-lab-experiment-team",
+      "title": "Find Wet Lab Experiment Operators",
+      "raw_user_idea": "Finding the right people to run an experiment wet lab -> e2e automation for drug discovery, automating northern blots -> e2e clinical trials, 100k per clinical. Agent negotiate on the wet labs",
+      "normalized_goal": "Identify qualified lab providers, compare capabilities/pricing, and prepare negotiation plans with approval gates.",
+      "status": "idea",
+      "likely_environment_modes": [
+        "synthetic",
+        "hybrid"
+      ],
+      "likely_evaluation_methods": [
+        "agentic_llm_judge"
+      ],
+      "safety_notes": "No real clinical or lab commitments without expert review, compliance checks, and explicit approval."
+    },
+    {
+      "id": "genai-market-map",
+      "title": "Map Generative AI Market",
+      "raw_user_idea": "Map out the entire generative ai market and identify underserved opportunities",
+      "normalized_goal": "Build a sourced market taxonomy, identify whitespace, and rank opportunities.",
+      "status": "idea",
+      "likely_environment_modes": [
+        "live",
+        "synthetic"
+      ],
+      "likely_evaluation_methods": [
+        "single_turn_llm_judge",
+        "agentic_llm_judge"
+      ],
+      "safety_notes": "Market data should be cited and time-stamped."
+    },
+    {
+      "id": "developer-relations-lead",
+      "title": "Find a Developer Relations Lead",
+      "raw_user_idea": "I need a developer relations lead. Someone technical enough to earn respect from senior engineers, but who actually enjoys being on Twitter. We sell to platform teams. Go.",
+      "normalized_goal": "Define scorecard, source candidates, rank fit, and draft approval-gated outreach.",
+      "status": "idea",
+      "likely_environment_modes": [
+        "synthetic",
+        "hybrid"
+      ],
+      "likely_evaluation_methods": [
+        "agentic_llm_judge"
+      ],
+      "safety_notes": "Use public professional signals only and avoid sensitive personal inferences."
+    },
+    {
+      "id": "reply-to-relevant-x-posts",
+      "title": "Reply to Relevant X Posts",
+      "raw_user_idea": "Replying to all relevant x posts",
+      "normalized_goal": "Find relevant public posts, draft replies in brand voice, and stop before posting.",
+      "status": "idea",
+      "likely_environment_modes": [
+        "synthetic",
+        "live"
+      ],
+      "likely_evaluation_methods": [
+        "agentic_llm_judge"
+      ],
+      "safety_notes": "No live posting without approval; avoid spammy or deceptive replies."
+    },
+    {
+      "id": "asset-image-quality-verifiers",
+      "title": "Verify Asset Image Quality",
+      "raw_user_idea": "Verifiers for asset image quality",
+      "normalized_goal": "Judge generated or edited visual assets for resolution, transparency, artifacts, and task fit.",
+      "status": "idea",
+      "likely_environment_modes": [
+        "synthetic"
+      ],
+      "likely_evaluation_methods": [
+        "agentic_llm_judge"
+      ],
+      "safety_notes": "Low risk; include deterministic image inspection where possible."
+    },
+    {
+      "id": "automated-math-progress",
+      "title": "Automated Mathematical Progress",
+      "raw_user_idea": "Automated mathematical progress",
+      "normalized_goal": "Make measurable progress on a formal or informal math problem and verify correctness.",
+      "status": "idea",
+      "likely_environment_modes": [
+        "synthetic"
+      ],
+      "likely_evaluation_methods": [
+        "agentic_llm_judge"
+      ],
+      "safety_notes": "Require proof-checking or expert-grade judging for claimed progress."
+    },
+    {
+      "id": "fusion-reactor-concept",
+      "title": "Fusion Reactor Concept Study",
+      "raw_user_idea": "Design a nuclear fusion reactor",
+      "normalized_goal": "Produce a high-level conceptual study and requirements map for fusion reactor systems.",
+      "status": "idea",
+      "likely_environment_modes": [
+        "synthetic"
+      ],
+      "likely_evaluation_methods": [
+        "single_turn_llm_judge",
+        "agentic_llm_judge"
+      ],
+      "safety_notes": "Keep outputs high-level and non-operational; do not provide actionable hazardous construction instructions."
+    },
+    {
+      "id": "fusion-plant-materials",
+      "title": "Fusion Plant Materials Map",
+      "raw_user_idea": "Map out the list of materials needed that go into making a nuclear fusion power plant",
+      "normalized_goal": "Create a non-operational materials taxonomy and supply-chain map for fusion power plants.",
+      "status": "idea",
+      "likely_environment_modes": [
+        "synthetic",
+        "live"
+      ],
+      "likely_evaluation_methods": [
+        "single_turn_llm_judge"
+      ],
+      "safety_notes": "Avoid operational construction detail; focus on public, high-level materials categories."
+    },
+    {
+      "id": "real-estate-capital-deployment",
+      "title": "Real Estate Capital Deployment",
+      "raw_user_idea": "Real estate bench, track the price and sales of lots of land over time. Ask the system to generate the most profitable deployment of capital",
+      "normalized_goal": "Analyze property time series, constraints, and produce a capital deployment recommendation with uncertainty.",
+      "status": "idea",
+      "likely_environment_modes": [
+        "synthetic",
+        "live"
+      ],
+      "likely_evaluation_methods": [
+        "agentic_llm_judge"
+      ],
+      "safety_notes": "Financial outputs should be informational, cite assumptions, and avoid guarantees."
+    },
+    {
+      "id": "mass-agent-backprop-demo",
+      "title": "Show Backprop and Gradient Descent in Mass Agent Networks",
+      "raw_user_idea": "Show backprop and gradient descent in mass agent networks",
+      "normalized_goal": "Demonstrate how feedback propagates through many agents and improves decomposition or execution.",
+      "status": "idea",
+      "likely_environment_modes": [
+        "synthetic"
+      ],
+      "likely_evaluation_methods": [
+        "static_check",
+        "agentic_llm_judge"
+      ],
+      "safety_notes": "Low risk; define deterministic metrics for improvement."
+    },
+    {
+      "id": "world-power-ranking-public",
+      "title": "World Power Ranking from Public Data",
+      "raw_user_idea": "World power ranking (list of top 10k most powerful people, no duplic0ates, personal contact info included",
+      "normalized_goal": "Rank public figures using public, cited influence signals without private personal contact information.",
+      "status": "idea",
+      "likely_environment_modes": [
+        "synthetic",
+        "live"
+      ],
+      "likely_evaluation_methods": [
+        "agentic_llm_judge"
+      ],
+      "safety_notes": "Do not collect private personal contact info or doxxing data; public professional links only if needed."
+    }
+  ]
+}

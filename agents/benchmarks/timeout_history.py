@@ -81,6 +81,48 @@ def record_pass(
         pass
 
 
+ATTEMPTS_FILE = os.path.join(HISTORY_DIR, "task_attempts.jsonl")
+
+
+def record_attempt(
+    task_name: str,
+    passed: bool,
+    status: str,
+    duration_seconds: float,
+    cost_cents: float,
+    agent_id: str = "",
+    failure_reason: Optional[str] = None,
+    fast_mode_cache_enabled: bool = False,
+    timestamp: Optional[str] = None,
+) -> None:
+    """Append EVERY completed run (pass or fail, local or prod) to the attempts ledger.
+
+    Unlike `record_pass` (pass-only corpus that feeds timeout derivation — a
+    failure duration would poison p95), this ledger is the complete run-stats
+    record: attempt counts, failure rates, and failure reasons per task. Full
+    trajectories for each attempt live in `runs/*.json` (message transcripts +
+    logs) and `.llm-dumps/<agent_id>/` (full LLM calls, always-on locally).
+    Best-effort, O_APPEND, never raises.
+    """
+    os.makedirs(HISTORY_DIR, exist_ok=True)
+    entry = {
+        "task": task_name,
+        "passed": bool(passed),
+        "status": status,
+        "duration_seconds": round(float(duration_seconds), 1),
+        "cost_cents": round(float(cost_cents), 2),
+        "timestamp": timestamp or datetime.now(timezone.utc).isoformat(),
+        "agent_id": agent_id,
+        "failure_reason": (failure_reason or "")[:200] or None,
+        "fast_mode_cache": bool(fast_mode_cache_enabled),
+    }
+    try:
+        with open(ATTEMPTS_FILE, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except OSError:
+        pass
+
+
 def _load_durations(task_name: str) -> List[float]:
     """Read all duration_seconds values for this task from history."""
     if not os.path.exists(HISTORY_FILE):

@@ -61,6 +61,8 @@ export {
   fetchClaudeCodeSession,
   fetchCreditsUsage,
   fetchPublicAsset,
+  fetchTestPromptCatalog,
+  fetchTestPaymentPublicUrl,
   submitFeedback,
   downloadAttachmentAsBlob,
 } from './api';

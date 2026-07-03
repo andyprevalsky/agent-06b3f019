@@ -1,17 +1,22 @@
 /**
  * STATE MACHINE: TestPromptsSelector
  *
+ * [FETCHING] <-- prompts: [] (catalog request in flight on mount)
+ *     |
+ *     | (GET /api/benchmarks/test-prompts resolves; failure leaves [] + warn)
+ *     v
  * [CLOSED] <-- isOpen: false
  *     |
  *     | (click trigger / mouse enter)
  *     v
- * [OPEN] <-- isOpen: true (shows test prompts popover)
+ * [OPEN] <-- isOpen: true (shows catalog prompts popover)
  *     |
  *     | (select prompt or mouse leave)
  *     v
  * [CLOSED]
  *
  * State:
+ * - prompts: TestPrompt[] (fetched from the unified eval catalog via the backend)
  * - isOpen: boolean (popover open state)
  * - isLoading: boolean (while resolving attachment URLs into File objects)
  *
@@ -19,27 +24,16 @@
  */
 
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import PromptList from './test-prompts-selector/PromptList';
 import { fetchTestPromptFiles } from './test-prompts-selector/fetchTestPromptFiles';
 import { useAutoLoadDefaultPrompt } from './test-prompts-selector/useAutoLoadDefaultPrompt';
-import { TEST_PROMPTS } from './test-prompts-selector/prompts';
+import { fetchTestPrompts } from './test-prompts-selector/fetchTestPrompts';
 import type { TestPrompt, TestPromptsSelectorProps } from './test-prompts-selector/types';
+import { fetchTestPaymentPublicUrl } from '../hooks';
 import { BACKEND_BASE_URL } from '@/lib/backendUrl';
 
 const TEST_PAYMENT_BASE_URL_TOKEN = '{{TEST_PAYMENT_BASE_URL}}';
-
-/** Fetch this backend's live ngrok public URL (or null). Inlined to avoid a cross-feature import. */
-async function fetchTestPaymentPublicUrl(): Promise<string | null> {
-  try {
-    const response = await fetch(`${BACKEND_BASE_URL}/api/test-payment/public-url`);
-    if (!response.ok) return null;
-    const data = (await response.json()) as { url: string | null };
-    return data.url ?? null;
-  } catch {
-    return null;
-  }
-}
 
 /**
  * Resolve the `{{TEST_PAYMENT_BASE_URL}}` token to this backend's live ngrok tunnel so the
@@ -61,6 +55,21 @@ async function resolvePromptText(prompt: string): Promise<string> {
 export default function TestPromptsSelector({ onSelectPrompt }: TestPromptsSelectorProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [prompts, setPrompts] = useState<TestPrompt[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchTestPrompts()
+      .then((fetched) => {
+        if (!cancelled) setPrompts(fetched);
+      })
+      .catch((error: unknown) => {
+        console.warn('[TestPrompts] Failed to load catalog from backend:', error);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useAutoLoadDefaultPrompt(onSelectPrompt);
 
@@ -105,12 +114,18 @@ export default function TestPromptsSelector({ onSelectPrompt }: TestPromptsSelec
         onMouseLeave={() => setIsOpen(false)}
       >
         <div className="space-y-3">
-          <p className="text-xs text-muted-foreground">Dev test prompts for tool testing</p>
-          <PromptList
-            prompts={TEST_PROMPTS}
-            disabled={isLoading}
-            onSelect={(p) => void handleSelectPrompt(p)}
-          />
+          <p className="text-xs text-muted-foreground">
+            Eval-catalog prompts (agents/benchmarks/tasks.json)
+          </p>
+          {prompts.length === 0 ? (
+            <p className="text-xs text-muted-foreground">Loading catalog…</p>
+          ) : (
+            <PromptList
+              prompts={prompts}
+              disabled={isLoading}
+              onSelect={(p) => void handleSelectPrompt(p)}
+            />
+          )}
         </div>
       </PopoverContent>
     </Popover>

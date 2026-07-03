@@ -11,6 +11,7 @@ import asyncio
 import base64
 import html
 import json
+import mimetypes
 import os
 import re
 import shutil
@@ -21,6 +22,8 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 import structlog
+
+from helpers.trace_archive import archive_bytes, archive_enabled
 
 logger = structlog.get_logger()
 
@@ -35,6 +38,8 @@ def browser_recordings_enabled() -> bool:
         return True
     if value in FALSE_VALUES:
         return False
+    if archive_enabled():
+        return True
 
     if os.getenv("ENVIRONMENT") != "production":
         return True
@@ -112,6 +117,24 @@ def _cursor_svg_for_html() -> str:
     return svg.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
 
 
+def _sanitize_observation_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        sanitized: Dict[str, Any] = {}
+        for key, nested in value.items():
+            if key in {"screenshot", "screenshot_b64", "base64", "image_url"} and isinstance(nested, str):
+                sanitized[key] = {
+                    "redacted": "base64-media",
+                    "bytes_estimate": int(len(nested) * 3 / 4),
+                    "present": bool(nested),
+                }
+            else:
+                sanitized[key] = _sanitize_observation_value(nested)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_observation_value(item) for item in value]
+    return value
+
+
 class BrowserAgentRecorder:
     def __init__(
         self,
@@ -132,7 +155,9 @@ class BrowserAgentRecorder:
         self.output_dir = browser_recording_output_dir(agent_id, task_id)
         self.frames_dir = self.output_dir / "frames"
         self.media_dir = self.output_dir / "media"
+        self.observations_dir = self.output_dir / "observations"
         self.frames: List[Dict[str, Any]] = []
+        self.observations: List[Dict[str, Any]] = []
         self.cursor_events: List[Dict[str, int]] = []
         self._started_at = time.monotonic()
         self._frame_index = 0
@@ -143,6 +168,7 @@ class BrowserAgentRecorder:
         self._cursor: Optional[Dict[str, int]] = None
         self._last_label = "idle"
         self._last_metadata: Dict[str, Any] = {}
+        self._final_screenshot_path: Optional[Path] = None
         self.interval_seconds = max(1 / 30, float(os.getenv("BROWSER_AGENT_RECORDING_INTERVAL_SECONDS", "2")))
         self.render_fps = max(1, int(os.getenv("BROWSER_AGENT_RECORDING_RENDER_FPS", "30")))
         self.max_frames = max(1, int(os.getenv("BROWSER_AGENT_RECORDING_MAX_FRAMES", "900")))
@@ -274,6 +300,47 @@ class BrowserAgentRecorder:
                 }
             )
 
+    async def record_observation(
+        self,
+        *,
+        iteration: int,
+        browser_state: Dict[str, Any],
+        action_entries: List[Dict[str, Any]],
+    ) -> Optional[Path]:
+        if self._closed:
+            return None
+        self.observations_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"iteration_{int(iteration):04d}.json"
+        path = self.observations_dir / filename
+        payload = {
+            "iteration": int(iteration),
+            "ts_ms": int((time.monotonic() - self._started_at) * 1000),
+            "browser_state": _sanitize_observation_value(browser_state),
+            "action_entries": _sanitize_observation_value(action_entries),
+        }
+        path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        self.observations.append({"iteration": int(iteration), "path": f"observations/{filename}"})
+        return path
+
+    async def write_final_screenshot(self, screenshot_b64: str) -> Optional[Path]:
+        if self._closed or not screenshot_b64:
+            return None
+        try:
+            data = screenshot_b64.split(",", 1)[1] if "," in screenshot_b64[:80] else screenshot_b64
+            image_bytes = base64.b64decode(data)
+            path = self.output_dir / "final-screenshot.png"
+            path.write_bytes(image_bytes)
+            self._final_screenshot_path = path
+            return path
+        except Exception as exc:  # noqa: BLE001 - screenshot archive is best-effort
+            logger.debug(
+                "Browser agent final screenshot artifact failed",
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                error=str(exc)[:300],
+            )
+            return None
+
     async def close(self) -> Optional[Path]:
         if self._closed:
             existing_path = self.output_dir / "index.html"
@@ -293,6 +360,7 @@ class BrowserAgentRecorder:
         playback_frames = self._build_playback_frames() if self.frames else []
         manifest_path = self.output_dir / "manifest.json"
         html_path = self.output_dir / "index.html"
+        final_dom_path = await self._write_final_dom_artifact()
         recording_source = "steel_hls" if steel_media else "screenshot_replay"
         manifest_path.write_text(
             json.dumps(
@@ -304,6 +372,10 @@ class BrowserAgentRecorder:
                     "browser_session_metadata": self.session_metadata,
                     "recording_source": recording_source,
                     "steel_recording": steel_media,
+                    "final_dom_path": "final-dom.html" if final_dom_path else None,
+                    "final_screenshot_path": "final-screenshot.png" if self._final_screenshot_path else None,
+                    "observation_count": len(self.observations),
+                    "observations": self.observations,
                     "frame_count": len(playback_frames),
                     "source_frame_count": source_frame_count,
                     "render_fps": self.render_fps,
@@ -331,7 +403,50 @@ class BrowserAgentRecorder:
             source_frame_count=source_frame_count,
             recording_source=recording_source,
         )
+        await self._archive_recording_artifacts()
         return html_path
+
+    async def _write_final_dom_artifact(self) -> Optional[Path]:
+        if not hasattr(self.page, "content"):
+            return None
+        try:
+            dom = await asyncio.wait_for(self.page.content(), timeout=5)
+            path = self.output_dir / "final-dom.html"
+            path.write_text(dom, encoding="utf-8")
+            return path
+        except Exception as exc:  # noqa: BLE001 - recording must not fail browser runs
+            logger.debug(
+                "Browser agent final DOM capture failed",
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                error=str(exc)[:300],
+            )
+            return None
+
+    async def _archive_recording_artifacts(self) -> None:
+        if not archive_enabled():
+            return
+        try:
+            for file_path in self.output_dir.rglob("*"):
+                if not file_path.is_file():
+                    continue
+                relative = file_path.relative_to(self.output_dir).as_posix()
+                content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+                is_media = content_type.startswith(("image/", "video/", "audio/"))
+                archive_bytes(
+                    root_agent_id=self.agent_id,
+                    path=f"media/browser/{self.task_id}/{relative}",
+                    body=file_path.read_bytes(),
+                    content_type=content_type,
+                    compress=False if is_media else None,
+                )
+        except Exception as exc:  # noqa: BLE001 - archive is best-effort
+            logger.warning(
+                "Browser agent recording archive failed",
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                error=str(exc)[:300],
+            )
 
     def export_inline_html_bytes(self) -> Optional[bytes]:
         """Build a SINGLE self-contained replay HTML with every frame inlined as a

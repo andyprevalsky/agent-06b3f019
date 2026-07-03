@@ -64,6 +64,33 @@ const BenchmarkTaskSchema = z.object({
   attachment: z.string().nullable(),
   approval_handling: z.string().nullable(),
   start_phase: z.string().nullable(),
+  // Unified eval-catalog contract (additive, optional — validated by agents/benchmarks/long_horizon.py)
+  status: z.enum(['ready', 'incomplete']).optional(),
+  runner: z.enum(['agent', 'vitest']).optional(),
+  description: z.string().min(1).optional(),
+  environment: z
+    .object({
+      mode: z.enum(['synthetic', 'live', 'hybrid']),
+      db_fixtures: z.array(z.string()),
+      base_images: z.array(z.string()),
+      services: z.array(z.string()),
+      secrets: z.array(z.string()),
+      live_targets: z.array(z.string()),
+      context_notes: z.string().min(1),
+    })
+    .optional(),
+  evaluators: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        method: z.enum(['static_check', 'single_turn_llm_judge', 'agentic_llm_judge']),
+        criteria: z.array(z.string().min(1)).min(1),
+        checks: z.array(z.object({ type: z.string().min(1) }).passthrough()).optional(),
+        judge_prompt: z.string().min(1).optional(),
+      })
+    )
+    .optional(),
+  source: z.array(z.string().min(1)).optional(),
 });
 
 const TasksResponseSchema = z.object({
@@ -185,6 +212,9 @@ const KNOWN_TAGS = [
   'bot-challenge',
   'documents',
   'prod-data',
+  'external',
+  'voice',
+  'wait-for',
 ];
 
 // ==================== GET /api/benchmarks — CONTRACT TESTS ====================

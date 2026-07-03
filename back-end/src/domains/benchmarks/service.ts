@@ -1,6 +1,4 @@
-// eslint-disable-next-line no-restricted-imports -- reads static benchmark JSON at startup
-import fs from 'fs';
-import { TASKS_PATH } from './config';
+import { readTasksFile } from './config';
 import { createLogger } from '../../providers/logger';
 
 const log = createLogger('Benchmarks');
@@ -8,7 +6,7 @@ const log = createLogger('Benchmarks');
 // Read once at startup — task definitions are static
 let cachedTasks: unknown[] | null = null;
 try {
-  const parsed: unknown = JSON.parse(fs.readFileSync(TASKS_PATH, 'utf-8'));
+  const parsed = readTasksFile();
   if (!Array.isArray(parsed)) {
     log.error('Benchmark tasks file is not an array');
   } else {
@@ -52,4 +50,51 @@ export function getTasks(): unknown[] {
     throw new TasksUnavailableError();
   }
   return cachedTasks;
+}
+
+export interface TestPrompt {
+  title: string;
+  description: string;
+  prompt: string;
+  attachmentUrls: string[];
+}
+
+interface CatalogTaskShape {
+  title?: unknown;
+  description?: unknown;
+  prompt: string;
+  attachment?: unknown;
+  attachments?: unknown;
+  runner?: unknown;
+}
+
+/**
+ * Adapts the benchmark catalog into the shape the front-end test-prompts
+ * picker consumes. This is the single source the query box reads from, so the
+ * picker can never drift from the eval catalog.
+ *
+ * - Only agent-runner entries are included (external vitest smokes are not
+ *   agent goals).
+ * - `{frontend_url}` (run_benchmark's token) is rewritten to the front-end's
+ *   `{{TEST_PAYMENT_BASE_URL}}` token, which TestPromptsSelector resolves to
+ *   the live tunnel URL.
+ * - Bare attachment names become `/test-assets/*` public paths.
+ */
+export function getTestPrompts(): TestPrompt[] {
+  return (getTasks() as CatalogTaskShape[])
+    .filter((task) => (task.runner ?? 'agent') === 'agent')
+    .map((task) => {
+      const attachments = Array.isArray(task.attachments)
+        ? (task.attachments as string[])
+        : typeof task.attachment === 'string'
+          ? [task.attachment]
+          : [];
+      const title = typeof task.title === 'string' ? task.title : '';
+      return {
+        title,
+        description: typeof task.description === 'string' ? task.description : title,
+        prompt: task.prompt.replaceAll('{frontend_url}', '{{TEST_PAYMENT_BASE_URL}}'),
+        attachmentUrls: attachments.map((name) => `/test-assets/${name}`),
+      };
+    });
 }

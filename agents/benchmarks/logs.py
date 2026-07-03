@@ -934,7 +934,7 @@ def _detect_anomalies(msgs: List[dict]) -> List[str]:
         ts = m.get("created_at", "")
         if ts:
             try:
-                from datetime import datetime, timezone
+                from datetime import datetime
 
                 # Handle both "2026-03-20T20:28:51.907Z" and other ISO formats
                 dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
