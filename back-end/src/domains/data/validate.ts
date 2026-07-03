@@ -10,6 +10,7 @@ import {
   DATA_SOURCE_CONFIGS,
   DEFAULT_GREP_SOURCES,
   VALID_SOURCES,
+  type DocumentGrepFilters,
   type GrepParams,
   type MessageGrepFilters,
   type TransactionGrepFilters,
@@ -197,6 +198,21 @@ function parseTransactionFilters(params: GrepParams): TransactionGrepFilters | u
   };
 }
 
+function parseDocumentFilters(params: GrepParams): DocumentGrepFilters | undefined {
+  const raw = requireFilterObject(params);
+  if (Object.keys(raw).length === 0) return undefined;
+  rejectUnsupportedFilters('documents', raw);
+  return {
+    documentSource: parseFilterString(raw, 'document_source')
+      ?.toLowerCase()
+      .replace(/[\s-]+/g, '_'),
+    since: parseFilterSince(raw, 'since'),
+    until: parseFilterDate(raw, 'until'),
+    path: parseFilterString(raw, 'path'),
+    tag: parseFilterString(raw, 'tag'),
+  };
+}
+
 export function validateGrepInput(params: GrepParams): ValidatedGrepInput {
   for (const key of Object.keys(params)) {
     if (!ALLOWED_GREP_KEYS.has(key)) {
@@ -215,6 +231,14 @@ export function validateGrepInput(params: GrepParams): ValidatedGrepInput {
     throw new InvalidGrepParamError('filters');
   }
   const selectedSource = source as ValidSource | undefined;
+  if (
+    selectedSource !== undefined &&
+    selectedSource !== 'messages' &&
+    selectedSource !== 'transactions' &&
+    selectedSource !== 'documents'
+  ) {
+    rejectUnsupportedFilters(selectedSource, requireFilterObject(params));
+  }
 
   const multiline = parseBoolean(params.multiline, false);
   // Fix 1: fold inline (?i) into case-insensitivity (JS RegExp + Postgres ARE reject it).
@@ -263,6 +287,7 @@ export function validateGrepInput(params: GrepParams): ValidatedGrepInput {
           ? parseMessageFilters(params, selectedSource)
           : undefined,
       transactions: selectedSource === 'transactions' ? parseTransactionFilters(params) : undefined,
+      documents: selectedSource === 'documents' ? parseDocumentFilters(params) : undefined,
     },
   };
 }

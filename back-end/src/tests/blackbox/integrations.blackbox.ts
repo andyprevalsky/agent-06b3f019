@@ -175,6 +175,29 @@ const ClaudeCodeUploadResponse = z.object({
   message: z.string(),
 });
 
+const DocumentsUploadResponse = z.object({
+  integration: z.object({
+    id: z.string(),
+    name: z.string(),
+    status: z.string(),
+  }),
+  documents: z.array(z.object({ id: z.string(), externalId: z.string() })),
+  documentCount: z.number(),
+  snapshotRevision: z
+    .object({
+      snapshotVersion: z.number(),
+      revisionId: z.string(),
+    })
+    .nullable(),
+  syncState: z.object({
+    id: z.string(),
+    source: z.string(),
+    status: z.string(),
+    nextSyncAt: z.string().nullable(),
+  }),
+  dryRun: z.boolean(),
+});
+
 // ==================== CAPTURE TYPES ====================
 
 interface CapturedCall {
@@ -382,6 +405,9 @@ async function createAnonSession(): Promise<{ accessToken: string; userId: strin
 async function teardown(): Promise<void> {
   if (createdAnonUserIds.size === 0) return;
   const userIds = Array.from(createdAnonUserIds);
+  await prisma.userSnapshotRevision.deleteMany({ where: { userId: { in: userIds } } });
+  await prisma.userSnapshot.deleteMany({ where: { userId: { in: userIds } } });
+  await prisma.userDataDocument.deleteMany({ where: { userId: { in: userIds } } });
   const { count } = await prisma.integration.deleteMany({ where: { userId: { in: userIds } } });
   console.log(`\nTeardown: deleted ${count} Integration rows across ${userIds.length} anon users`);
   createdAnonUserIds.clear();
@@ -4673,6 +4699,161 @@ async function testClaudeCodeToken_noOnboarding() {
   assertSchema(ErrorResponse, res.data, 'claude-code token no onboarding missing');
 }
 
+async function testDocumentsUpload_happyPath() {
+  const res = await request(`${BASE_URL}/api/integrations/documents/upload`, {
+    method: 'POST',
+    headers: apiKeyHeaders(ctx.userId1),
+    body: JSON.stringify({
+      source: 'apple_notes',
+      documents: [
+        {
+          externalId: 'note-connectors-1',
+          title: 'Connector planning',
+          content: 'Apple Notes connector should preserve user preference details.',
+          sourceUpdatedAt: '2026-07-03T12:00:00Z',
+          metadata: { folder: 'Product' },
+        },
+      ],
+      snapshotRevision: {
+        documentExternalId: 'note-connectors-1',
+        before: {},
+        after: {
+          preferences: {
+            agent_data_sources: ['apple_notes'],
+          },
+        },
+        changes: { preferences: ['agent_data_sources'] },
+        model: 'test-distiller',
+        promptKey: 'user-snapshot-v1',
+      },
+    }),
+  });
+  assertStatus(res.status, 200, res.data);
+  const body = assertSchema(DocumentsUploadResponse, res.data, 'documents upload');
+  if (
+    body.integration.name !== 'apple_notes' ||
+    body.integration.status !== 'CONNECTED' ||
+    body.documentCount !== 1 ||
+    body.snapshotRevision?.snapshotVersion !== 1 ||
+    body.syncState.source !== 'apple_notes' ||
+    body.syncState.status !== 'CONNECTED' ||
+    body.dryRun
+  ) {
+    throw new Error(`Unexpected documents upload response: ${JSON.stringify(body)}`);
+  }
+
+  const snapshot = await prisma.userSnapshot.findUnique({ where: { userId: ctx.userId1! } });
+  if (
+    snapshot === null ||
+    snapshot.version !== 1 ||
+    JSON.stringify(snapshot.content).indexOf('apple_notes') === -1
+  ) {
+    throw new Error(`Expected persisted snapshot, got ${JSON.stringify(snapshot)}`);
+  }
+
+  const syncState = await prisma.userDataProviderSyncState.findUnique({
+    where: { userId_source: { userId: ctx.userId1!, source: 'apple_notes' } },
+  });
+  if (
+    syncState === null ||
+    syncState.status !== 'CONNECTED' ||
+    syncState.lastSuccessfulSyncAt === null ||
+    syncState.nextSyncAt === null ||
+    !syncState.realtimeEnabled
+  ) {
+    throw new Error(`Expected persisted Apple Notes sync state, got ${JSON.stringify(syncState)}`);
+  }
+}
+
+async function testDocumentsUpload_idempotentUpsert() {
+  const externalId = `obsidian-idempotent-${crypto.randomUUID()}`;
+  const first = await request(`${BASE_URL}/api/integrations/documents/upload`, {
+    method: 'POST',
+    headers: apiKeyHeaders(ctx.userId1),
+    body: JSON.stringify({
+      source: 'obsidian',
+      documents: [
+        {
+          externalId,
+          title: 'Idempotent note',
+          content: 'Obsidian first version contains Helios marker.',
+          sourceUpdatedAt: '2026-07-03T12:00:00Z',
+          metadata: { vault: 'main', path: 'Idempotent.md' },
+        },
+      ],
+    }),
+  });
+  assertStatus(first.status, 200, first.data);
+  const firstBody = assertSchema(DocumentsUploadResponse, first.data, 'documents first upload');
+
+  const second = await request(`${BASE_URL}/api/integrations/documents/upload`, {
+    method: 'POST',
+    headers: apiKeyHeaders(ctx.userId1),
+    body: JSON.stringify({
+      source: 'obsidian',
+      documents: [
+        {
+          externalId,
+          title: 'Idempotent note updated',
+          content: 'Obsidian second version contains Helios marker and update marker.',
+          sourceUpdatedAt: '2026-07-03T12:10:00Z',
+          metadata: { vault: 'main', path: 'Idempotent.md', tags: ['updated'] },
+        },
+      ],
+    }),
+  });
+  assertStatus(second.status, 200, second.data);
+  const secondBody = assertSchema(DocumentsUploadResponse, second.data, 'documents second upload');
+  if (firstBody.documents[0]?.id !== secondBody.documents[0]?.id) {
+    throw new Error(
+      `Expected idempotent document id, got ${JSON.stringify({ firstBody, secondBody })}`
+    );
+  }
+
+  const rows = await prisma.userDataDocument.findMany({
+    where: { userId: ctx.userId1!, source: 'obsidian', externalId },
+  });
+  if (
+    rows.length !== 1 ||
+    rows[0]?.title !== 'Idempotent note updated' ||
+    rows[0]?.deletedAt !== null
+  ) {
+    throw new Error(`Expected one updated document row, got ${JSON.stringify(rows)}`);
+  }
+}
+
+async function testDocumentsUpload_dryRunDoesNotPersist() {
+  const externalId = `dry-run-${crypto.randomUUID()}`;
+  const res = await request(`${BASE_URL}/api/integrations/documents/upload`, {
+    method: 'POST',
+    headers: apiKeyHeaders(ctx.userId1),
+    body: JSON.stringify({
+      source: 'chatgpt',
+      dryRun: true,
+      documents: [
+        {
+          externalId,
+          title: 'Dry run prod smoke',
+          content: 'Dry run validates prod path without persistence.',
+          metadata: { provider: 'chatgpt' },
+        },
+      ],
+    }),
+  });
+  assertStatus(res.status, 200, res.data);
+  const body = assertSchema(DocumentsUploadResponse, res.data, 'documents dry run');
+  if (!body.dryRun || body.integration.id !== 'dry-run' || body.syncState.id !== 'dry-run') {
+    throw new Error(`Unexpected dry-run response: ${JSON.stringify(body)}`);
+  }
+
+  const persisted = await prisma.userDataDocument.findFirst({
+    where: { userId: ctx.userId1!, source: 'chatgpt', externalId },
+  });
+  if (persisted !== null) {
+    throw new Error(`Dry-run upload persisted a document: ${JSON.stringify(persisted)}`);
+  }
+}
+
 // ==================== RUNNER ====================
 
 async function runAll() {
@@ -4811,6 +4992,9 @@ async function runAll() {
       name: 'POST /passwords/upload apple source marks Apple Passwords connected',
       fn: testPasswordsUpload_appleSourceMarksApplePasswordsIntegration,
     },
+    { name: 'POST /documents/upload happy path', fn: testDocumentsUpload_happyPath },
+    { name: 'POST /documents/upload idempotent upsert', fn: testDocumentsUpload_idempotentUpsert },
+    { name: 'POST /documents/upload dry run', fn: testDocumentsUpload_dryRunDoesNotPersist },
 
     // Encrypted upload error-path coverage (decryption-failure + shape-validation branches)
     {

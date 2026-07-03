@@ -39,6 +39,13 @@ export const DATA_SOURCE_CONFIGS = {
       'include_pending_in_totals',
     ] as const,
   },
+  documents: {
+    description: 'Synced text documents from LLM exports, Apple Notes, Obsidian, and generic files',
+    table: 'UserDataDocument' as const,
+    searchField: 'title/content/metadata',
+    groupBy: 'source',
+    filters: ['document_source', 'since', 'until', 'path', 'tag'] as const,
+  },
 } as const;
 
 export const VALID_SOURCES = DATA_SOURCE_CONFIGS;
@@ -99,6 +106,8 @@ export interface GrepLocation {
   field?: string;
   transaction_id?: string;
   account_id?: string;
+  document_id?: string;
+  source_name?: string;
 }
 
 export interface GrepMatch {
@@ -133,6 +142,14 @@ export interface TransactionGrepFilters {
   includePendingInTotals: boolean;
 }
 
+export interface DocumentGrepFilters {
+  documentSource?: string;
+  since?: Date;
+  until?: Date;
+  path?: string;
+  tag?: string;
+}
+
 export interface MessageGrepFilters {
   person?: string;
   since?: Date;
@@ -155,6 +172,7 @@ export interface ValidatedGrepInput {
   filters: {
     messages?: MessageGrepFilters;
     transactions?: TransactionGrepFilters;
+    documents?: DocumentGrepFilters;
   };
 }
 
@@ -180,6 +198,14 @@ export interface SummaryResult {
       total_transactions: number;
       account_count: number;
       institutions: string[];
+      date_range: {
+        from: string | null;
+        to: string | null;
+      };
+    };
+    documents?: {
+      total_documents: number;
+      sources: Record<string, number>;
       date_range: {
         from: string | null;
         to: string | null;

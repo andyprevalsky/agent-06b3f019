@@ -20,11 +20,13 @@
 import { join } from 'path';
 import { app } from 'electron';
 import { createRequire } from 'module';
-import { uploadPasskeys, type PasskeyUploadEntry } from '../passkey-enroll/repo';
-import { APPLE_PASSWORDS_PASSKEY_SOURCE } from '../passkey-enroll/config';
-import { encryptPasswordToEnvelope } from '../browser-password-reader/service';
-import { uploadPasswords } from '../browser-state-sync/service-simple-uploads';
-import type { PasswordRecord } from '../browser-state-sync/types';
+import {
+  APPLE_PASSWORDS_PASSKEY_SOURCE,
+  uploadPasskeys,
+  type PasskeyUploadEntry,
+} from '../../services/passkeyEnroll';
+import { encryptPasswordToEnvelope } from '../../services/browserPasswordEncryption';
+import { uploadPasswords, type PasswordRecord } from '../../services/browserPasswordUpload';
 import { getErrorMessage } from '../../../shared/utils/error';
 
 interface HelperPasskey {

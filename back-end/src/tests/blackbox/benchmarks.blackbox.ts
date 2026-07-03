@@ -148,6 +148,7 @@ const KNOWN_TASK_NAMES = [
   'build-boxing-payment',
   'job-applications',
   'cache-coverage',
+  'user-data-prod-grep',
 ];
 
 const KNOWN_TAGS = [
@@ -182,6 +183,8 @@ const KNOWN_TAGS = [
   'plaid',
   'transactions',
   'bot-challenge',
+  'documents',
+  'prod-data',
 ];
 
 // ==================== GET /api/benchmarks — CONTRACT TESTS ====================
