@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
     curl \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
@@ -31,4 +32,3 @@ ENV PYTHONUNBUFFERED=1
 
 # Run the worker
 CMD ["python", "worker.py"]
-
