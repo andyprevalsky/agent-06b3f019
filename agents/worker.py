@@ -104,6 +104,7 @@ from helpers.sms_activities import (
 )
 from helpers.summarize import summarize_and_filter_links
 from helpers.update_tokens import update_agent_tokens_activity, update_agent_tree_cost_activity
+from helpers.world_model_runtime import world_model_step_activity
 from tools.people_search import people_search_activity  # not yet refactored into domains/
 from tools.web_search import web_search_activity  # not yet refactored into domains/
 from workflows import AgentWorkflow
@@ -835,6 +836,11 @@ async def monitor_event_loop_lag(
 async def main():
     """Main worker entry point."""
 
+    # Trace-archive writes (gzip + AES-GCM + backend POST) must never run inline
+    # on the worker event loop — they stall stream reads for every concurrent
+    # agent. This opts archive_bytes/archive_json into deferred executor writes.
+    os.environ.setdefault("TRACE_ARCHIVE_ASYNC_WRITES", "1")
+
     # Opt-in cProfile of the worker event loop. The 50-wide fan-out saturates
     # CPU via MANY small callbacks (no single slow callback >0.3s), so only an
     # aggregate profiler reveals where cumulative loop CPU goes. Dumped in the
@@ -1024,6 +1030,8 @@ async def main():
             execute_reasoning_activity,
             # Parent state query (for sub-agent → parent communication)
             query_parent_state_activity,
+            # World-model runtime shim
+            world_model_step_activity,
         ],
         tuner=tuner,
         max_cached_workflows=config.temporal.max_cached_workflows,

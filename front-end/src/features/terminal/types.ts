@@ -128,6 +128,8 @@ export interface AgentSlice {
   setPendingPriceLimitCents: (c: number) => void;
   fastMode: boolean;
   setFastMode: (enabled: boolean) => void;
+  simulatorMode: boolean;
+  setSimulatorMode: (enabled: boolean) => void;
   isChatMode: boolean;
   isPausing: boolean;
   ancestors: AncestorNode[];

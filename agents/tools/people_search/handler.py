@@ -12,6 +12,7 @@ from temporalio.common import RetryPolicy
 
 from helpers.handle_tool_event import handle_tool_event
 from helpers.tracing import traced
+from helpers.world_model_runtime import WorldModelToolExecutionAdapter
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager, format_error_message, format_tool_message
 from tools.people_search.config import (
     ACTIVITY_TIMEOUT_SECONDS,
@@ -258,9 +259,21 @@ async def people_search_activity(
     Returns:
         Dict with query, mode_used, provider_used, providers_attempted, results, warnings.
     """
-    try:
+    async def real_executor(_tool_name: str, _tool_args: dict[str, Any], _tool_call_id: str) -> dict[str, Any]:
         return await execute_people_search(
-            query=query, mode=mode, provider=provider, limit=limit, fields=fields
+            query=query,
+            mode=mode,
+            provider=provider,
+            limit=limit,
+            fields=fields,
+        )
+
+    try:
+        return await WorldModelToolExecutionAdapter.from_env().execute(
+            "people_search",
+            {"query": query, "mode": mode, "provider": provider, "limit": limit, "fields": fields},
+            "people_search_activity",
+            real_executor,
         )
     except Exception:
         logger.error("People search failed", query=query, mode=mode, provider=provider)

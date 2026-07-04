@@ -12,6 +12,7 @@ from temporalio.common import RetryPolicy
 
 from helpers.handle_tool_event import handle_tool_event
 from helpers.tracing import traced
+from helpers.world_model_runtime import WorldModelToolExecutionAdapter
 from providers.fast_cache import client as fast_cache_client
 from providers.fast_cache import normalize as fast_cache_normalize
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager, format_error_message, format_tool_message
@@ -272,8 +273,16 @@ async def web_search_activity(
     elif cache_key is not None:
         logger.info("fast_cache.web_search_write_only", key=cache_key)
 
+    async def real_executor(_tool_name: str, _tool_args: dict[str, Any], _tool_call_id: str) -> dict[str, Any]:
+        return await execute_search(query=query, max_tokens=max_tokens)
+
     try:
-        result = await execute_search(query=query, max_tokens=max_tokens)
+        result = await WorldModelToolExecutionAdapter.from_env().execute(
+            "web_search",
+            {"query": query, "max_tokens": max_tokens},
+            "web_search_activity",
+            real_executor,
+        )
     except Exception:
         logger.error("Web search failed", query=query)
         raise

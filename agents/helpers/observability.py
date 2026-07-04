@@ -29,7 +29,7 @@ from typing import Any, Dict, List, Optional
 import structlog
 
 from helpers.trace_archive import archive_json
-from helpers.tracing import current_agent_id, current_span_id
+from helpers.tracing import current_agent_id, current_root_agent_id, current_span_id
 
 logger = structlog.get_logger()
 
@@ -120,6 +120,10 @@ def _safe_filename_segment(value: str) -> str:
     return "".join(c if c.isalnum() or c in "-_." else "_" for c in value)[:64] or "unbound"
 
 
+def _archive_root_for(agent_id: str) -> str:
+    return current_root_agent_id() or agent_id or "unbound"
+
+
 def dump_llm_context(
     call_site: str,
     messages: List[Dict[str, Any]],
@@ -140,11 +144,13 @@ def dump_llm_context(
     try:
         span_id = current_span_id() or uuid.uuid4().hex[:12]
         aid = agent_id or current_agent_id() or "unbound"
+        archive_root_agent_id = _archive_root_for(aid)
         dump_id = uuid.uuid4().hex[:12]
 
         payload: Dict[str, Any] = {
             "call_site": call_site,
             "agent_id": aid,
+            "root_agent_id": archive_root_agent_id,
             "span_id": span_id,
             "dump_id": dump_id,
             "model": model,
@@ -163,7 +169,7 @@ def dump_llm_context(
             payload["extra"] = extra
 
         archive_ref = archive_json(
-            root_agent_id=aid,
+            root_agent_id=archive_root_agent_id,
             path=f"llm/{dump_id}.json.gz.enc",
             payload=payload,
         )
@@ -233,10 +239,12 @@ def update_llm_dump(
         try:
             parts = path.removeprefix(_CLICKHOUSE_DUMP_SCHEME).split("/", 1)
             agent_id = parts[0] if parts else "unbound"
+            archive_root_agent_id = _archive_root_for(agent_id)
             dump_id = parts[1] if len(parts) > 1 else uuid.uuid4().hex[:12]
             span_id = current_span_id() or "unbound"
             patch_payload: Dict[str, Any] = {
                 "agent_id": agent_id,
+                "root_agent_id": archive_root_agent_id,
                 "span_id": span_id,
                 "dump_id": dump_id,
             }
@@ -253,7 +261,7 @@ def update_llm_dump(
             if extra:
                 patch_payload["extra"] = extra
             archive_ref = archive_json(
-                root_agent_id=agent_id,
+                root_agent_id=archive_root_agent_id,
                 path=f"llm-updates/{dump_id}-{int(time.time() * 1000)}-{_safe_filename_segment(str((extra or {}).get('call_site') or 'update'))}.json.gz.enc",
                 payload=patch_payload,
             )
@@ -299,8 +307,10 @@ def update_llm_dump(
             call_site = str(extra.get("call_site") or payload.get("call_site") or "update")
         else:
             call_site = str(payload.get("call_site") or "update")
+        archive_root_agent_id = str(payload.get("root_agent_id") or _archive_root_for(str(payload.get("agent_id") or "unbound")))
+        payload["root_agent_id"] = archive_root_agent_id
         archive_ref = archive_json(
-            root_agent_id=str(payload.get("agent_id") or "unbound"),
+            root_agent_id=archive_root_agent_id,
             path=f"llm-updates/{payload.get('dump_id') or dump_path.stem}-{int(time.time() * 1000)}-{_safe_filename_segment(call_site)}.json.gz.enc",
             payload=payload,
         )

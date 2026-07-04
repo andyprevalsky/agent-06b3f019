@@ -514,7 +514,8 @@ class AgentWorkflow:
         # Bind agent_id to structlog context so ALL downstream structlog calls
         # (tools, helpers, activities) automatically include agent_id in JSON output
         structlog.contextvars.clear_contextvars()
-        structlog.contextvars.bind_contextvars(agent_id=agent_id)
+        root_agent_id = agent_id if depth == 0 else (bus_id or parent_agent_id or agent_id)
+        structlog.contextvars.bind_contextvars(agent_id=agent_id, root_agent_id=root_agent_id)
 
         self.agent_id = agent_id
         self.user_id = user_id

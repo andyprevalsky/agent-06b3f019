@@ -89,6 +89,48 @@ def test_get_captures_after_filter():
     clear_captures()
 
 
+async def test_mock_handler_wraps_proxy_mount_transports():
+    """Mocked captures must intercept proxy/env mount transports, not only _transport."""
+    import httpx
+
+    old_env = {
+        "HTTPS_PROXY": os.environ.get("HTTPS_PROXY"),
+        "HTTP_PROXY": os.environ.get("HTTP_PROXY"),
+        "ALL_PROXY": os.environ.get("ALL_PROXY"),
+        "NO_PROXY": os.environ.get("NO_PROXY"),
+    }
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(200, json={"ok": True})
+
+    try:
+        os.environ["HTTPS_PROXY"] = "http://127.0.0.1:9"
+        os.environ["HTTP_PROXY"] = "http://127.0.0.1:9"
+        os.environ["ALL_PROXY"] = "http://127.0.0.1:9"
+        os.environ["NO_PROXY"] = ""
+        setup_mock_fn(handler)
+
+        async with httpx.AsyncClient(timeout=1.0) as client:
+            response = await client.get("https://wmh.example.test/world_models")
+
+        assert response.status_code == 200
+        assert response.json() == {"ok": True}
+        assert calls == ["https://wmh.example.test/world_models"]
+        captured = get_captured_requests()
+        assert len(captured) == 1
+        assert captured[0]["url"] == "https://wmh.example.test/world_models"
+        assert captured[0]["responseStatus"] == 200
+    finally:
+        teardown_mock()
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 async def run_all_tests():
     print("httpx-capture blackbox tests:")
     r = BlackboxResult()
@@ -96,6 +138,7 @@ async def run_all_tests():
     r.record("get_captures_empty", test_get_captures_empty)
     r.record("set_and_clear_mock_handler", test_set_and_clear_mock_handler)
     r.record("get_captures_after_filter", test_get_captures_after_filter)
+    await r.record_async("mock_handler_wraps_proxy_mount_transports", test_mock_handler_wraps_proxy_mount_transports)
     teardown_mock()
     return r.all_passed
 

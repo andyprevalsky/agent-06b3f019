@@ -10,13 +10,14 @@ break a live run (#16).
 from __future__ import annotations
 
 import hashlib
+import time
 from typing import Any, Optional, TypedDict
 
 import httpx
 import structlog
 
 from helpers.trace_archive import archive_json
-from helpers.tracing import current_agent_id, current_span_id
+from helpers.tracing import current_root_agent_id, current_span_id
 
 from . import normalize
 
@@ -70,8 +71,16 @@ async def cache_get_record(key: str) -> CacheRecord:
         )
         if resp.status_code != 200:
             logger.warning("fast_cache.get_failed", key=key, status=resp.status_code)
+            await _archive_cache_read(key, hit=False, value=None, blob_path=None, status=resp.status_code)
             return {"hit": False, "value": None, "blobPath": None}
         data = resp.json()
+        await _archive_cache_read(
+            key,
+            hit=bool(data.get("hit")),
+            value=data.get("value"),
+            blob_path=data.get("blobPath"),
+            status=resp.status_code,
+        )
         return {
             "hit": bool(data.get("hit")),
             "value": data.get("value"),
@@ -79,6 +88,7 @@ async def cache_get_record(key: str) -> CacheRecord:
         }
     except Exception as exc:  # cache must never break a run
         logger.warning("fast_cache.get_error", key=key, error=str(exc))
+        await _archive_cache_read(key, hit=False, value=None, blob_path=None, error=str(exc)[:300])
         return {"hit": False, "value": None, "blobPath": None}
 
 
@@ -88,13 +98,13 @@ async def cache_get(key: str) -> Optional[Any]:
     return record.get("value") if record.get("hit") else None
 
 
-# Per-process memo of (read_enabled, goal, write_enabled) keyed by agent_id, so
+# Per-process memo of (read_enabled, goal, write_enabled, root_agent_id) keyed by agent_id, so
 # auto-resolution costs at most one backend lookup per agent per worker process.
-_AGENT_FASTMODE: dict[str, tuple[bool, Optional[str], bool]] = {}
+_AGENT_FASTMODE: dict[str, tuple[bool, Optional[str], bool, Optional[str]]] = {}
 
 
-async def resolve_agent_fast_mode(agent_id: str) -> tuple[bool, Optional[str], bool]:
-    """Look up (read_enabled, goal, write_enabled) for an agent.
+async def resolve_agent_fast_mode(agent_id: str) -> tuple[bool, Optional[str], bool, Optional[str]]:
+    """Look up (read_enabled, goal, write_enabled, root_agent_id) for an agent.
 
     `read_enabled` is the persisted Fast Mode flag. `write_enabled` may be true
     for allowlisted accounts even when reads are off. Returns all-false on any
@@ -102,7 +112,7 @@ async def resolve_agent_fast_mode(agent_id: str) -> tuple[bool, Optional[str], b
     """
     if agent_id in _AGENT_FASTMODE:
         return _AGENT_FASTMODE[agent_id]
-    enabled, goal, write_enabled = False, None, False
+    enabled, goal, write_enabled, root_agent_id = False, None, False, None
     try:
         api_url, api_key = _backend()
         # Dedicated internal endpoint (API-key auth, no RLS) — the agent serializer
@@ -118,6 +128,7 @@ async def resolve_agent_fast_mode(agent_id: str) -> tuple[bool, Optional[str], b
             enabled = bool(data.get("enabled"))
             goal = data.get("goal")
             write_enabled = bool(data.get("writeEnabled", enabled))
+            root_agent_id = data.get("rootAgentId") if isinstance(data.get("rootAgentId"), str) else agent_id
         else:
             logger.warning("fast_cache.resolve_agent_failed", agent_id=agent_id, status=resp.status_code)
     except Exception as exc:  # noqa: BLE001
@@ -125,8 +136,21 @@ async def resolve_agent_fast_mode(agent_id: str) -> tuple[bool, Optional[str], b
     # Only memoize a positive resolution — a transient failure shouldn't disable
     # the cache for the rest of the run.
     if goal and (enabled or write_enabled):
-        _AGENT_FASTMODE[agent_id] = (enabled, goal, write_enabled)
-    return enabled, goal, write_enabled
+        _AGENT_FASTMODE[agent_id] = (enabled, goal, write_enabled, root_agent_id)
+    return enabled, goal, write_enabled, root_agent_id
+
+
+async def resolve_archive_root_agent_id() -> Optional[str]:
+    root_agent_id = current_root_agent_id()
+    agent_id = structlog.contextvars.get_contextvars().get("agent_id")
+    if isinstance(agent_id, str):
+        try:
+            _enabled, _goal, _write_enabled, resolved_root = await resolve_agent_fast_mode(agent_id)
+            if resolved_root:
+                return resolved_root
+        except Exception as exc:  # archive best-effort path
+            logger.warning("fast_cache.resolve_archive_root_error", agent_id=agent_id, error=str(exc)[:200])
+    return root_agent_id
 
 
 async def ensure_context(agent_id: Optional[str], goal: Optional[str] = None):
@@ -141,7 +165,7 @@ async def ensure_context(agent_id: Optional[str], goal: Optional[str] = None):
         return existing
     if not agent_id:
         return existing
-    enabled, resolved_goal, write_enabled = await resolve_agent_fast_mode(agent_id)
+    enabled, resolved_goal, write_enabled, _root_agent_id = await resolve_agent_fast_mode(agent_id)
     g = goal or resolved_goal
     if g and (enabled or write_enabled):
         ctx = FastCacheContext(enabled=enabled, goal=g, write_enabled=write_enabled)
@@ -161,7 +185,7 @@ async def ensure_position_context(agent_id: Optional[str], step: int):
 
     if not agent_id:
         return None
-    enabled, goal, write_enabled = await resolve_agent_fast_mode(agent_id)
+    enabled, goal, write_enabled, _root_agent_id = await resolve_agent_fast_mode(agent_id)
     if goal and (enabled or write_enabled):
         ctx = FastCacheContext(
             enabled=enabled,
@@ -183,7 +207,7 @@ async def cache_set(
 ) -> bool:
     """Write `value` under `key`. Last write wins. Never raises."""
     sanitized_value = normalize.strip_secrets(value)
-    _archive_cache_write(key, kind, goal_hash, sanitized_value, blob_path)
+    await _archive_cache_write(key, kind, goal_hash, sanitized_value, blob_path)
     try:
         api_url, api_key = _backend()
         resp = await _shared_client().post(
@@ -207,7 +231,22 @@ async def cache_set(
         return False
 
 
-def _archive_cache_write(
+# browser_http cache ops fire once per page SUBRESOURCE (images, scripts, css) —
+# thousands per browser session. Archiving each one floods the backend archive
+# endpoint (observed: 5.5k queued artifacts saturating the Node event loop).
+# Browser-level state is already archived via recordings + transitions, and
+# cache-replayed observations are deduped out of the WMH corpus anyway, so these
+# artifacts carry no corpus signal worth that cost.
+_ARCHIVE_SKIPPED_KINDS = ("browser_http",)
+
+
+def _archive_skipped(key: str, kind: Optional[str] = None) -> bool:
+    if kind in _ARCHIVE_SKIPPED_KINDS:
+        return True
+    return any(f":{skipped}:" in key for skipped in _ARCHIVE_SKIPPED_KINDS)
+
+
+async def _archive_cache_write(
     key: str,
     kind: str,
     goal_hash: str,
@@ -215,8 +254,13 @@ def _archive_cache_write(
     blob_path: Optional[str],
 ) -> None:
     try:
+        if _archive_skipped(key, kind):
+            return
+        root_agent_id = await resolve_archive_root_agent_id()
+        if not root_agent_id:
+            return
         archive_json(
-            root_agent_id=current_agent_id() or "unbound",
+            root_agent_id=root_agent_id,
             path=f"provider/fast-cache/{kind}/{hashlib.sha256(key.encode('utf-8')).hexdigest()}.json.gz.enc",
             payload={
                 "key": key,
@@ -229,3 +273,39 @@ def _archive_cache_write(
         )
     except Exception as exc:  # cache/archive must never break provider calls
         logger.warning("fast_cache.archive_error", key=key, kind=kind, error=str(exc)[:200])
+
+
+async def _archive_cache_read(
+    key: str,
+    *,
+    hit: bool,
+    value: Any,
+    blob_path: Optional[str],
+    status: Optional[int] = None,
+    error: Optional[str] = None,
+) -> None:
+    try:
+        if _archive_skipped(key):
+            return
+        root_agent_id = await resolve_archive_root_agent_id()
+        if not root_agent_id:
+            return
+        sanitized_value = normalize.strip_secrets(value)
+        key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        archive_json(
+            root_agent_id=root_agent_id,
+            path=f"provider/fast-cache/read/{key_hash}.{int(time.time() * 1000)}.json.gz.enc",
+            payload={
+                "key": key,
+                "key_hash": key_hash,
+                "operation": "read",
+                "hit": hit,
+                "status": status,
+                "error": error,
+                "span_id": current_span_id(),
+                "blob_path": blob_path,
+                "value": sanitized_value,
+            },
+        )
+    except Exception as exc:  # cache/archive must never break provider calls
+        logger.warning("fast_cache.archive_read_error", key=key, error=str(exc)[:200])

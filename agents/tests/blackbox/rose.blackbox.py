@@ -3266,8 +3266,11 @@ async def test_client_reproduces_rotated_gpt_direct_auth_deadline():
         )
 
     async def silent_waterfall(**kwargs):
-        await asyncio.sleep(1.0)
+        raise RoseDeadlineError("rose.complete deadline exceeded after 0.2s")
         yield StreamChunk(kind="metadata", data={"actual_model": "fallback"})
+
+    async def api_key_on_cooldown():
+        return True
 
     auth = GptAuthContext(
         token="stale-token",
@@ -3283,6 +3286,7 @@ async def test_client_reproduces_rotated_gpt_direct_auth_deadline():
     with (
         patch("providers.rose.client._try_gpt_auth", silent_gpt_auth),
         patch("providers.rose.client.waterfall_complete", silent_waterfall),
+        patch("providers.rose.client._anthropic_api_key_on_cooldown", api_key_on_cooldown),
     ):
         try:
             async for _ in client.complete(

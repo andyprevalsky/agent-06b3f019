@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console, max-lines */
+/* eslint-disable max-lines */
 /**
  * Black-box tests for /api/agents
  *
@@ -968,6 +968,61 @@ test('POST /:id/messages — internal TOOL message', async () => {
   assertStatus(res.status, 201, res.data);
   const body = assertSchema(PostMessageResponse, res.data, 'POST /:id/messages TOOL');
   assert(body.role === 'TOOL', `Expected TOOL role, got ${body.role}`);
+
+  await deleteTestAgent(agentId, session.user.id);
+});
+
+test('POST /:id/messages — duplicate internal TOOL retry is idempotent', async () => {
+  const session = await createAnonymousSession('msg-tool-dedupe');
+  const agentId = await createTestAgent(session.user.id, 'Tool message dedupe test');
+  const payload = {
+    message: 'RemoteProtocolError: Server disconnected without sending a response.',
+    role: 'TOOL',
+    metadata: {
+      toolCallId: 'attempt-completion-dedupe',
+      toolName: 'attempt_completion',
+      toolStatus: 'ERROR',
+      title: 'attempt_completion',
+    },
+  };
+
+  const first = await request(`${BASE_URL}/api/agents/${agentId}/messages`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify(payload),
+  });
+  const second = await request(`${BASE_URL}/api/agents/${agentId}/messages`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify(payload),
+  });
+
+  assertStatus(first.status, 201, first.data);
+  assertStatus(second.status, 201, second.data);
+  const firstBody = assertSchema(PostMessageResponse, first.data, 'POST duplicate TOOL first');
+  const secondBody = assertSchema(PostMessageResponse, second.data, 'POST duplicate TOOL second');
+  assert(
+    firstBody.message_id === secondBody.message_id,
+    'duplicate TOOL retry should return existing message id'
+  );
+
+  const detail = await request(`${BASE_URL}/api/agents/${agentId}`, {
+    headers: apiKeyHeaders(session.user.id),
+  });
+  assertStatus(detail.status, 200, detail.data);
+  const detailBody = assertSchema(GetAgentResponse, detail.data, 'duplicate TOOL detail');
+  const matches = detailBody.messages.filter(
+    (m) =>
+      m.role === 'TOOL' &&
+      m.text === payload.message &&
+      typeof m.metadata === 'object' &&
+      m.metadata !== null &&
+      (m.metadata as Record<string, unknown>).toolCallId === payload.metadata.toolCallId
+  );
+  assert(
+    matches.length === 1,
+    `Expected one persisted duplicate TOOL message, got ${matches.length}`
+  );
 
   await deleteTestAgent(agentId, session.user.id);
 });

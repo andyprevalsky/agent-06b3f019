@@ -76,30 +76,27 @@ def install_capture() -> None:
 
     _original_init = httpx.AsyncClient.__init__
 
+    def _capture_transport(wrapped: httpx.AsyncBaseTransport) -> httpx.AsyncBaseTransport:
+        # httpx builds proxy/env transports as URL-pattern mounts. Those mounts
+        # bypass _transport, so tests with proxy env vars active must wrap both.
+        if _mock_handler is not None:
+            return _CapturingTransport(httpx.MockTransport(_mock_handler))
+        return _CapturingTransport(wrapped)
+
     def patched_init(self: httpx.AsyncClient, *args: Any, **kwargs: Any) -> None:
         assert _original_init is not None
         _original_init(self, *args, **kwargs)
-        wrapped_any = False
         if hasattr(self, "_transport") and self._transport is not None:
-            # If a mock handler is set, capture wraps the mock transport
-            # instead of the real transport. Requests still get recorded
-            # in captures but responses come from the mock.
-            if _mock_handler is not None:
-                mock_transport = httpx.MockTransport(_mock_handler)
-                self._transport = _CapturingTransport(mock_transport)
-            else:
-                self._transport = _CapturingTransport(self._transport)
-            wrapped_any = True
-        if hasattr(self, "_mounts") and isinstance(self._mounts, dict):
-            for pattern, transport in list(self._mounts.items()):
-                if transport is None or isinstance(transport, _CapturingTransport):
-                    continue
-                if _mock_handler is not None:
-                    self._mounts[pattern] = _CapturingTransport(httpx.MockTransport(_mock_handler))
-                else:
-                    self._mounts[pattern] = _CapturingTransport(transport)
-                wrapped_any = True
-        if not wrapped_any:
+            # If a mock handler is set, capture wraps a mock transport instead
+            # of the real transport. Requests still get recorded in captures
+            # but responses come from the mock.
+            self._transport = _capture_transport(self._transport)
+            mounts = getattr(self, "_mounts", None)
+            if isinstance(mounts, dict):
+                for pattern, transport in list(mounts.items()):
+                    if isinstance(transport, httpx.AsyncBaseTransport):
+                        mounts[pattern] = _capture_transport(transport)
+        else:
             warnings.warn(
                 "httpx_capture: AsyncClient transports not found — capture disabled. "
                 "This may indicate an incompatible httpx version.",

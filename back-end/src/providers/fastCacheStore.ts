@@ -106,17 +106,21 @@ export async function cachePurge(goalHash: string): Promise<number> {
   return res.count;
 }
 
-export async function agentFastMode(
-  agentId: string
-): Promise<{ enabled: boolean; goal: string | null; writeEnabled: boolean }> {
+export async function agentFastMode(agentId: string): Promise<{
+  enabled: boolean;
+  goal: string | null;
+  writeEnabled: boolean;
+  rootAgentId: string | null;
+}> {
   const agent = await prisma.agent.findUnique({
     where: { id: agentId },
-    select: { fastModeCacheEnabled: true, goal: true, userId: true },
+    select: { fastModeCacheEnabled: true, goal: true, userId: true, busId: true },
   });
   const enabled = agent?.fastModeCacheEnabled ?? false;
   return {
     enabled,
     goal: agent?.goal ?? null,
     writeEnabled: enabled || shouldWriteFastModeCacheForUser(agent?.userId),
+    rootAgentId: agent?.busId ?? agentId,
   };
 }

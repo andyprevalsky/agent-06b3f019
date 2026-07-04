@@ -41,6 +41,7 @@ from domains.call_phone_number.service import (
 )
 from domains.call_phone_number.types import ExecuteActivityCallable
 from helpers.handle_tool_event import handle_tool_event
+from helpers.world_model_runtime import WorldModelToolExecutionAdapter
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager, UsageItem, UsageType, extract_root_error
 
 __all__ = [
@@ -228,6 +229,38 @@ async def call_phone_number(
 
 @activity.defn
 async def call_phone_number_activity(
+    to: str,
+    system_prompt: str,
+    output_schema: dict[str, Any],
+    agent_id: str,
+    tool_call_id: str,
+    user_id: str | None = None,
+) -> dict[str, Any]:
+    async def real_executor(_tool_name: str, _tool_args: dict[str, Any], _tool_call_id: str) -> dict[str, Any]:
+        return await _call_phone_number_activity_real(
+            to=to,
+            system_prompt=system_prompt,
+            output_schema=output_schema,
+            agent_id=agent_id,
+            tool_call_id=tool_call_id,
+            user_id=user_id,
+        )
+
+    return await WorldModelToolExecutionAdapter.from_env(agent_id=agent_id).execute(
+        "call_phone_number",
+        {
+            "to": to,
+            "system_prompt": system_prompt,
+            "output_schema": output_schema,
+            "agent_id": agent_id,
+            "user_id": user_id,
+        },
+        tool_call_id,
+        real_executor,
+    )
+
+
+async def _call_phone_number_activity_real(
     to: str,
     system_prompt: str,
     output_schema: dict[str, Any],

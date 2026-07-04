@@ -48,18 +48,16 @@ def _with_archive_env(tmp: str):
     return restore
 
 
-def _with_dev_encryption_key():
-    """Pin the dev-derived key so _decrypt's hardcoded key always matches.
-
-    A developer .env (loaded by the coverage/test harness) may set
-    TRACE_ARCHIVE_ENCRYPTION_KEY_B64; encrypt_artifact would then use that key
-    while _decrypt derives the dev key, failing with InvalidTag.
-    """
-    old = os.environ.pop("TRACE_ARCHIVE_ENCRYPTION_KEY_B64", None)
+def _without_archive_key():
+    """Pin the dev-derived key so _decrypt's hardcoded key always matches."""
+    old_key = os.environ.get("TRACE_ARCHIVE_ENCRYPTION_KEY_B64")
+    os.environ.pop("TRACE_ARCHIVE_ENCRYPTION_KEY_B64", None)
 
     def restore():
-        if old is not None:
-            os.environ["TRACE_ARCHIVE_ENCRYPTION_KEY_B64"] = old
+        if old_key is None:
+            os.environ.pop("TRACE_ARCHIVE_ENCRYPTION_KEY_B64", None)
+        else:
+            os.environ["TRACE_ARCHIVE_ENCRYPTION_KEY_B64"] = old_key
 
     return restore
 
@@ -67,7 +65,7 @@ def _with_dev_encryption_key():
 def test_encrypt_json_gzip_roundtrip():
     from helpers.trace_archive import encrypt_artifact
 
-    restore = _with_dev_encryption_key()
+    restore = _without_archive_key()
     try:
         body = json.dumps({"hello": "world", "n": 3}).encode("utf-8")
         encrypted = encrypt_artifact(body, path="llm/demo.json.gz.enc", content_type="application/json")
@@ -86,7 +84,7 @@ def test_encrypt_json_gzip_roundtrip():
 def test_encrypt_media_skips_gzip():
     from helpers.trace_archive import encrypt_artifact
 
-    restore = _with_dev_encryption_key()
+    restore = _without_archive_key()
     try:
         body = b"\x00\x00\x00\x18ftypmp42already-compressed"
         encrypted = encrypt_artifact(body, path="media/browser/run.mp4", content_type="video/mp4")
@@ -176,6 +174,42 @@ def test_observability_writes_dev_dump_and_archive_updates():
             updated = json.loads(Path(path).read_text())
             assert updated["output"]["text"] == "done"
         finally:
+            observability._DUMP_ROOT = old_dump_root
+            observability._IS_PRODUCTION = old_is_prod
+            restore_archive()
+
+
+def test_observability_archives_subagent_dumps_under_root_bundle():
+    import helpers.observability as observability
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore_archive = _with_archive_env(str(Path(tmp) / "archive"))
+        old_dump_root = observability._DUMP_ROOT
+        old_is_prod = observability._IS_PRODUCTION
+        structlog.contextvars.clear_contextvars()
+        structlog.contextvars.bind_contextvars(agent_id="child-agent", root_agent_id="root-agent")
+        try:
+            observability._DUMP_ROOT = Path(tmp) / "llm-dumps"
+            observability._IS_PRODUCTION = False
+            path = observability.dump_llm_context(
+                "subagent_call",
+                [{"role": "user", "content": "persist me under root"}],
+                agent_id="child-agent",
+                model="rose-labs/rose-1-lite",
+            )
+            assert path is not None
+            observability.update_llm_dump(path, output={"text": "done"})
+
+            archive_root = Path(tmp) / "archive"
+            assert len(list((archive_root / "root-agent" / "llm").glob("*.enc"))) == 1
+            assert len(list((archive_root / "root-agent" / "llm-updates").glob("*.enc"))) == 1
+            assert not (archive_root / "child-agent").exists()
+
+            updated = json.loads(Path(path).read_text())
+            assert updated["agent_id"] == "child-agent"
+            assert updated["root_agent_id"] == "root-agent"
+        finally:
+            structlog.contextvars.clear_contextvars()
             observability._DUMP_ROOT = old_dump_root
             observability._IS_PRODUCTION = old_is_prod
             restore_archive()
@@ -271,7 +305,7 @@ async def test_fast_cache_write_archives_without_replay_reads_or_backend_success
             fast_cache_client._client = _Client()
             ok = await fast_cache_client.cache_set(
                 "provider-request-key",
-                "browser_http",
+                "web_fetch",
                 "goal-hash",
                 {"request": {"url": "https://example.com"}, "response": {"status": 200}},
             )
@@ -279,13 +313,13 @@ async def test_fast_cache_write_archives_without_replay_reads_or_backend_success
             expected_hash = hashlib.sha256(b"provider-request-key").hexdigest()
             stored = read_local_artifact(
                 root_agent_id="agent-fast-cache",
-                path=f"provider/fast-cache/browser_http/{expected_hash}.json.gz.enc",
+                path=f"provider/fast-cache/web_fetch/{expected_hash}.json.gz.enc",
             )
             assert stored is not None
             ciphertext, metadata = stored
             payload = json.loads(decrypt_and_validate_artifact(ciphertext, metadata).decode("utf-8"))
             assert payload["key"] == "provider-request-key"
-            assert payload["kind"] == "browser_http"
+            assert payload["kind"] == "web_fetch"
             assert payload["goal_hash"] == "goal-hash"
             assert payload["span_id"] == "span-fast-cache"
             assert payload["value"]["request"]["url"] == "https://example.com"
@@ -293,6 +327,245 @@ async def test_fast_cache_write_archives_without_replay_reads_or_backend_success
         finally:
             structlog.contextvars.reset_contextvars(**token)
             fast_cache_client._client = old_client
+            restore()
+
+
+async def test_fast_cache_read_archives_hit_response_for_replay():
+    import providers.fast_cache.client as fast_cache_client
+    from helpers.trace_archive import (
+        decrypt_and_validate_artifact,
+        list_local_artifact_paths,
+        read_local_artifact,
+    )
+
+    class _Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "hit": True,
+                "value": {"request": {"q": "smoke"}, "response": {"answer": "cached"}},
+                "blobPath": None,
+            }
+
+    class _Client:
+        is_closed = False
+
+        async def post(self, *args, **kwargs):
+            return _Response()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(tmp)
+        old_client = fast_cache_client._client
+        token = structlog.contextvars.bind_contextvars(agent_id="agent-fast-cache", span_id="span-read")
+        try:
+            fast_cache_client._client = _Client()
+            record = await fast_cache_client.cache_get_record("provider-read-key")
+            assert record["hit"] is True
+            expected_hash = hashlib.sha256(b"provider-read-key").hexdigest()
+            paths = [
+                path
+                for path in list_local_artifact_paths("agent-fast-cache")
+                if path.startswith(f"provider/fast-cache/read/{expected_hash}.")
+            ]
+            assert len(paths) == 1
+            stored = read_local_artifact(root_agent_id="agent-fast-cache", path=paths[0])
+            assert stored is not None
+            ciphertext, metadata = stored
+            payload = json.loads(decrypt_and_validate_artifact(ciphertext, metadata).decode("utf-8"))
+            assert payload["key"] == "provider-read-key"
+            assert payload["key_hash"] == expected_hash
+            assert payload["operation"] == "read"
+            assert payload["hit"] is True
+            assert payload["span_id"] == "span-read"
+            assert payload["value"]["response"]["answer"] == "cached"
+        finally:
+            structlog.contextvars.reset_contextvars(**token)
+            fast_cache_client._client = old_client
+            restore()
+
+
+async def test_fast_cache_archive_uses_resolved_root_agent_id():
+    import providers.fast_cache.client as fast_cache_client
+    from helpers.trace_archive import list_local_artifact_paths
+
+    class _Response:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class _Client:
+        is_closed = False
+
+        async def post(self, url, *args, **kwargs):
+            if url.endswith("/api/fast-cache/agent-flag"):
+                return _Response(
+                    200,
+                    {
+                        "enabled": True,
+                        "goal": "child task",
+                        "writeEnabled": True,
+                        "rootAgentId": "root-agent-for-cache",
+                    },
+                )
+            return _Response(200, {"ok": True})
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(tmp)
+        old_client = fast_cache_client._client
+        old_memo = dict(fast_cache_client._AGENT_FASTMODE)
+        token = structlog.contextvars.bind_contextvars(agent_id="child-agent-for-cache", span_id="span-root")
+        try:
+            fast_cache_client._client = _Client()
+            fast_cache_client._AGENT_FASTMODE.clear()
+            ok = await fast_cache_client.cache_set(
+                "root-resolved-key",
+                "llm",
+                "goal-hash",
+                {"response": "stored under root"},
+            )
+            assert ok is True
+            assert list_local_artifact_paths("child-agent-for-cache") == []
+            root_paths = list_local_artifact_paths("root-agent-for-cache")
+            assert any(path.startswith("provider/fast-cache/llm/") for path in root_paths)
+        finally:
+            structlog.contextvars.reset_contextvars(**token)
+            fast_cache_client._client = old_client
+            fast_cache_client._AGENT_FASTMODE.clear()
+            fast_cache_client._AGENT_FASTMODE.update(old_memo)
+            restore()
+
+
+async def test_worker_async_writes_defer_off_event_loop_and_complete():
+    """Worker opt-in (TRACE_ARCHIVE_ASYNC_WRITES) defers the gzip/encrypt/store work
+    off the event-loop thread — the loop-stall root cause — while still landing the
+    artifact; without the opt-in, in-loop callers keep read-after-write semantics."""
+    import asyncio
+    import time as time_mod
+
+    import helpers.trace_archive as trace_archive
+    from helpers.trace_archive import archive_json, decrypt_and_validate_artifact
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(tmp)
+        old_flag = os.environ.get("TRACE_ARCHIVE_ASYNC_WRITES")
+        try:
+            # Default (no opt-in): synchronous even inside a running loop.
+            result = archive_json(root_agent_id="agent-sync", path="llm/sync.json.gz.enc", payload={"mode": "sync"})
+            assert result is not None and result["metadata"] is not None
+            assert Path(result["ref"]).exists()
+
+            # Worker opt-in: returns immediately with the expected ref, no metadata,
+            # and the write lands via the executor shortly after.
+            os.environ["TRACE_ARCHIVE_ASYNC_WRITES"] = "1"
+            slow_calls: list[float] = []
+            original_store = trace_archive.store_encrypted_artifact
+
+            def _slow_store(**kwargs):
+                slow_calls.append(time_mod.monotonic())
+                time_mod.sleep(0.3)
+                return original_store(**kwargs)
+
+            trace_archive.store_encrypted_artifact = _slow_store
+            try:
+                started = time_mod.monotonic()
+                deferred = archive_json(
+                    root_agent_id="agent-async", path="llm/deferred.json.gz.enc", payload={"mode": "async"}
+                )
+                elapsed = time_mod.monotonic() - started
+            finally:
+                trace_archive.store_encrypted_artifact = original_store
+            assert deferred is not None
+            assert deferred["metadata"] is None
+            assert elapsed < 0.25, f"archive_json blocked the loop for {elapsed:.3f}s"
+            expected = Path(tmp) / "agent-async" / "llm" / "deferred.json.gz.enc"
+            assert deferred["ref"] == str(expected)
+            for _ in range(100):
+                if expected.exists():
+                    break
+                await asyncio.sleep(0.05)
+            assert expected.exists(), "deferred archive write never landed"
+            metadata = json.loads(Path(str(expected) + ".meta.json").read_text())
+            assert json.loads(decrypt_and_validate_artifact(expected.read_bytes(), metadata).decode("utf-8")) == {
+                "mode": "async"
+            }
+        finally:
+            if old_flag is None:
+                os.environ.pop("TRACE_ARCHIVE_ASYNC_WRITES", None)
+            else:
+                os.environ["TRACE_ARCHIVE_ASYNC_WRITES"] = old_flag
+            restore()
+
+
+async def test_browser_http_cache_ops_do_not_archive():
+    """browser_http cache ops fire per page subresource (thousands/session) and
+    must never hit the archive endpoint; llm-kind ops keep archiving."""
+    from providers.fast_cache import client as fast_cache_client
+
+    calls: list[str] = []
+
+    def fake_archive_json(**kwargs):
+        calls.append(kwargs["path"])
+        return {"ref": kwargs["path"], "metadata": None}
+
+    old_archive = fast_cache_client.archive_json
+    old_resolver = fast_cache_client.resolve_archive_root_agent_id
+
+    async def fake_resolver():
+        return "root-agent"
+
+    fast_cache_client.archive_json = fake_archive_json
+    fast_cache_client.resolve_archive_root_agent_id = fake_resolver
+    try:
+        await fast_cache_client._archive_cache_write(
+            "fastmode:v42:browser_http:global:GET:abc:public:no-body", "browser_http", "gh", {"v": 1}, None
+        )
+        await fast_cache_client._archive_cache_read(
+            "fastmode:v42:browser_http:global:GET:abc:public:no-body", hit=True, value={"v": 1}, blob_path=None
+        )
+        assert calls == []
+        await fast_cache_client._archive_cache_write("fastmode:v42:llm:gh:site:c:abc", "llm", "gh", {"v": 1}, None)
+        await fast_cache_client._archive_cache_read("fastmode:v42:llm:gh:site:c:abc", hit=True, value={"v": 1}, blob_path=None)
+        assert len(calls) == 2
+    finally:
+        fast_cache_client.archive_json = old_archive
+        fast_cache_client.resolve_archive_root_agent_id = old_resolver
+
+
+def test_oversized_artifact_is_dropped_with_warning():
+    """A single oversized body (e.g. browser session video) must never reach the
+    backend — giant base64-in-JSON uploads freeze the Node event loop on parse/GC."""
+    from helpers.trace_archive import archive_bytes
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(tmp)
+        old_limit = os.environ.get("TRACE_ARCHIVE_MAX_ARTIFACT_BYTES")
+        os.environ["TRACE_ARCHIVE_MAX_ARTIFACT_BYTES"] = "1024"
+        try:
+            result = archive_bytes(
+                root_agent_id="agent-big",
+                path="media/browser/huge.bin",
+                body=b"x" * 2048,
+                content_type="application/octet-stream",
+            )
+            assert result is None
+            assert not (Path(tmp) / "agent-big").exists()
+            ok = archive_bytes(
+                root_agent_id="agent-big",
+                path="media/browser/small.bin",
+                body=b"x" * 512,
+                content_type="application/octet-stream",
+            )
+            assert ok is not None
+        finally:
+            if old_limit is None:
+                os.environ.pop("TRACE_ARCHIVE_MAX_ARTIFACT_BYTES", None)
+            else:
+                os.environ["TRACE_ARCHIVE_MAX_ARTIFACT_BYTES"] = old_limit
             restore()
 
 
@@ -304,8 +577,17 @@ async def run_all_tests():
     r.record("local_store_writes_ciphertext_and_metadata", test_local_store_writes_ciphertext_and_metadata)
     r.record("local_store_gold_io_validates_integrity", test_local_store_gold_io_validates_integrity)
     r.record("observability_writes_dev_dump_and_archive_updates", test_observability_writes_dev_dump_and_archive_updates)
+    r.record("observability_archives_subagent_dumps_under_root_bundle", test_observability_archives_subagent_dumps_under_root_bundle)
     r.record("prod_worker_posts_encrypted_artifact_to_backend", test_prod_worker_posts_encrypted_artifact_to_backend)
     await r.record_async("fast_cache_write_archives_without_replay_reads_or_backend_success", test_fast_cache_write_archives_without_replay_reads_or_backend_success)
+    await r.record_async("fast_cache_read_archives_hit_response_for_replay", test_fast_cache_read_archives_hit_response_for_replay)
+    await r.record_async("fast_cache_archive_uses_resolved_root_agent_id", test_fast_cache_archive_uses_resolved_root_agent_id)
+    await r.record_async(
+        "worker_async_writes_defer_off_event_loop_and_complete",
+        test_worker_async_writes_defer_off_event_loop_and_complete,
+    )
+    r.record("oversized_artifact_is_dropped_with_warning", test_oversized_artifact_is_dropped_with_warning)
+    await r.record_async("browser_http_cache_ops_do_not_archive", test_browser_http_cache_ops_do_not_archive)
     teardown_mock()
     return r.all_passed
 
