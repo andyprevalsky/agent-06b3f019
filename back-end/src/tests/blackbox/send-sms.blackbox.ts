@@ -1288,14 +1288,18 @@ async function runAll() {
           name: 'happy path (200 or Surge error)',
           fn: testSend_happyPath,
         },
-        {
-          name: 'Surge API error -> provider status',
-          fn: testSend_surgeApiError,
-        },
-        {
-          name: 'Surge network failure -> 500',
-          fn: testSend_surgeNetworkFailure,
-        },
+        ...(captureAvailable
+          ? [
+              {
+                name: 'Surge API error -> provider status',
+                fn: testSend_surgeApiError,
+              },
+              {
+                name: 'Surge network failure -> 500',
+                fn: testSend_surgeNetworkFailure,
+              },
+            ]
+          : []),
         {
           name: 'response Content-Type: application/json',
           fn: testSend_responseContentType,
