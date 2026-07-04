@@ -1,5 +1,7 @@
 """Blackbox tests for benchmark helpers."""
 
+from pathlib import Path
+
 from _test_utils import BlackboxResult
 
 
@@ -372,6 +374,49 @@ def test_non_fast_mode_pass_still_seeds_timeout_history():
         }
     ]
     assert len(attempts) == 1 and attempts[0]["passed"] is True
+
+
+def test_benchmark_run_serializes_world_model_fidelity_and_ignores_unknown_task_fields():
+    """Run JSON keeps WMH fidelity reports and remains forward-compatible."""
+    import json
+    import tempfile
+    from pathlib import Path
+
+    from benchmarks.results import BenchmarkRun, TaskResult
+
+    run = BenchmarkRun(suite="wmh", base_url="http://localhost:3001")
+    run.task_results.append(
+        TaskResult(
+            name="chat-mode",
+            passed=True,
+            agent_id="agent-wmh",
+            status="COMPLETED",
+            progress_score=1.0,
+            duration_seconds=1.0,
+            cost_cents=0.0,
+            message_count=1,
+            archive_manifest_ref="trace-archive/agent-wmh/manifest.json.gz.enc",
+            world_model_fidelity={
+                "status": "scored",
+                "mean_score": 0.9,
+                "n_steps": 2,
+                "dimensions": {"schema_validity": 1.0},
+            },
+            world_model_mode="simulate",
+        )
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "run.json"
+        path.write_text(json.dumps(run.to_dict()))
+        data = json.loads(path.read_text())
+        data["tasks"][0]["future_field"] = "ignored"
+        path.write_text(json.dumps(data))
+        loaded = BenchmarkRun.load(str(path))
+
+    assert loaded.task_results[0].world_model_fidelity["status"] == "scored"
+    assert loaded.task_results[0].world_model_fidelity["mean_score"] == 0.9
+    assert loaded.task_results[0].world_model_mode == "simulate"
+    assert loaded.task_results[0].archive_manifest_ref.endswith("manifest.json.gz.enc")
 
 
 def test_minted_benchmark_cleanup_preserves_cached_agent_identity_by_default():
@@ -954,6 +999,8 @@ async def test_archive_agent_finalize_posts_task_and_returns_manifest_ref():
             "agent-root",
             "chat-mode",
             force=True,
+            benchmark_passed=True,
+            benchmark_status="PASSED",
         )
     finally:
         bench._api_headers = original_headers
@@ -965,7 +1012,14 @@ async def test_archive_agent_finalize_posts_task_and_returns_manifest_ref():
             90,
             "http://localhost:55120/api/archive/agent-finalize",
             {"X-API-Key": "test-key"},
-            {"rootAgentId": "agent-root", "benchmarkTaskName": "chat-mode", "force": True},
+            {
+                "rootAgentId": "agent-root",
+                "benchmarkTaskName": "chat-mode",
+                "force": True,
+                "worldModelMode": "real",
+                "benchmarkPassed": True,
+                "benchmarkStatus": "PASSED",
+            },
         )
     ]
 
@@ -1029,6 +1083,247 @@ def test_benchmark_run_json_preserves_archive_manifest_ref():
     )
 
     assert run.to_dict()["tasks"][0]["archive_manifest_ref"] == "trace-archive/root-1/manifest.json.gz.enc"
+
+
+def test_benchmark_run_summary_reports_wmh_prediction_accuracy():
+    """Run summary exposes aggregate WMH prediction accuracy for scored tasks."""
+    from benchmarks.results import BenchmarkRun, TaskResult
+
+    run = BenchmarkRun(suite="wmh", base_url="http://localhost:55120")
+    run.task_results.extend(
+        [
+            TaskResult(
+                name="task-a",
+                passed=True,
+                agent_id="agent-a",
+                status="COMPLETED",
+                progress_score=1.0,
+                duration_seconds=4.0,
+                cost_cents=2.0,
+                message_count=3,
+                world_model_fidelity={"status": "scored", "mean_score": 0.8},
+            ),
+            TaskResult(
+                name="task-b",
+                passed=True,
+                agent_id="agent-b",
+                status="COMPLETED",
+                progress_score=1.0,
+                duration_seconds=5.0,
+                cost_cents=3.0,
+                message_count=4,
+                world_model_fidelity={"status": "scored", "mean_score": 0.9},
+            ),
+            TaskResult(
+                name="task-c",
+                passed=True,
+                agent_id="agent-c",
+                status="COMPLETED",
+                progress_score=1.0,
+                duration_seconds=5.0,
+                cost_cents=3.0,
+                message_count=4,
+                world_model_fidelity={"status": "not_configured"},
+            ),
+        ]
+    )
+
+    summary = run.to_dict()["summary"]
+    assert summary["wmh_scored_tasks"] == 2
+    assert summary["wmh_prediction_accuracy"] == 0.85
+
+
+async def test_finalize_archive_and_score_world_model_lifecycle():
+    """A benchmark completion finalizes storage, scores WMH, and returns both refs."""
+    import benchmarks.run_benchmark as bench
+
+    calls = []
+
+    async def fake_finalize(base_url, agent_id, task_name, *, force=False, **kwargs):
+        calls.append(("archive", base_url, agent_id, task_name, force, kwargs))
+        return "trace-archive/root-1/manifest.json.gz.enc"
+
+    async def fake_score(agent_id):
+        calls.append(("wmh", agent_id))
+        return {"status": "scored", "mean_score": 0.87, "n_steps": 3}
+
+    original_finalize = bench.archive_agent_finalize
+    original_score = bench.evaluate_world_model_fidelity
+    try:
+        bench.archive_agent_finalize = fake_finalize
+        bench.evaluate_world_model_fidelity = fake_score
+
+        manifest_ref, fidelity = await bench.finalize_archive_and_score_world_model(
+            "http://localhost:55120",
+            "root-1",
+            "phone-call-client-intake",
+            force=True,
+        )
+    finally:
+        bench.archive_agent_finalize = original_finalize
+        bench.evaluate_world_model_fidelity = original_score
+
+    assert manifest_ref == "trace-archive/root-1/manifest.json.gz.enc"
+    assert fidelity["status"] == "scored"
+    assert fidelity["mean_score"] == 0.87
+    assert calls == [
+        (
+            "archive",
+            "http://localhost:55120",
+            "root-1",
+            "phone-call-client-intake",
+            True,
+            {"benchmark_passed": None, "benchmark_status": None, "failure_reason": None},
+        ),
+        ("wmh", "root-1"),
+    ]
+
+
+def test_world_model_cli_env_simulate_alias_does_not_enable_self_eval():
+    """--simulate is the supported short flag for provider-boundary WMH simulation."""
+    import os
+    from types import SimpleNamespace
+
+    import benchmarks.run_benchmark as bench
+
+    class Parser:
+        def error(self, message):
+            raise AssertionError(message)
+
+    old_env = {
+        "BENCHMARK_WORLD_MODEL_MODE": os.environ.get("BENCHMARK_WORLD_MODEL_MODE"),
+        "BENCHMARK_WMH_EVAL": os.environ.get("BENCHMARK_WMH_EVAL"),
+        "WMH_BASE_URL": os.environ.get("WMH_BASE_URL"),
+        "WMH_MODEL_NAME": os.environ.get("WMH_MODEL_NAME"),
+        "WMH_SESSION_ID": os.environ.get("WMH_SESSION_ID"),
+    }
+    try:
+        for key in old_env:
+            os.environ.pop(key, None)
+        bench._apply_world_model_cli_env(
+            SimpleNamespace(
+                simulate=True,
+                world_model_mode=None,
+                wmh_eval=False,
+                world_model_url="http://wmh.local",
+                world_model_name="rose-golden",
+                world_model_session_id="session-1",
+            ),
+            Parser(),
+        )
+        assert os.environ["BENCHMARK_WORLD_MODEL_MODE"] == "simulate"
+        assert os.environ.get("BENCHMARK_WMH_EVAL") is None
+        assert os.environ["WMH_BASE_URL"] == "http://wmh.local"
+        assert os.environ["WMH_MODEL_NAME"] == "rose-golden"
+        assert os.environ["WMH_SESSION_ID"] == "session-1"
+    finally:
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def test_world_model_cli_env_wmh_eval_scores_real_runs():
+    """--wmh-eval lets real benchmark runs produce prediction-accuracy reports."""
+    import os
+    from types import SimpleNamespace
+
+    import benchmarks.run_benchmark as bench
+
+    class Parser:
+        def error(self, message):
+            raise AssertionError(message)
+
+    old_eval = os.environ.get("BENCHMARK_WMH_EVAL")
+    old_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
+    try:
+        os.environ.pop("BENCHMARK_WMH_EVAL", None)
+        os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
+        bench._apply_world_model_cli_env(
+            SimpleNamespace(
+                simulate=False,
+                world_model_mode="real",
+                wmh_eval=True,
+                world_model_url=None,
+                world_model_name=None,
+                world_model_session_id=None,
+            ),
+            Parser(),
+        )
+        assert os.environ["BENCHMARK_WORLD_MODEL_MODE"] == "real"
+        assert os.environ["BENCHMARK_WMH_EVAL"] == "1"
+    finally:
+        if old_eval is None:
+            os.environ.pop("BENCHMARK_WMH_EVAL", None)
+        else:
+            os.environ["BENCHMARK_WMH_EVAL"] = old_eval
+        if old_mode is None:
+            os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
+        else:
+            os.environ["BENCHMARK_WORLD_MODEL_MODE"] = old_mode
+
+
+async def test_simulate_preflight_updates_world_model_and_records_progress():
+    """--simulate runs the delta builder before any benchmark agent starts."""
+    import os
+    from types import SimpleNamespace
+
+    import benchmarks.run_benchmark as bench
+
+    calls = []
+
+    def fake_update(**kwargs):
+        calls.append(kwargs)
+        kwargs["progress"](
+            {
+                "title": "World Model Updating",
+                "status": "IN_PROGRESS",
+                "metadata": {"total_traces": 2, "traces_to_update": 1},
+            }
+        )
+        kwargs["progress"](
+            {
+                "title": "World Model Ready",
+                "status": "FINISHED",
+                "metadata": {"total_traces": 2, "updated_traces": 1, "aggregate_trace_bytes": 123},
+            }
+        )
+        return {
+            "status": "ready",
+            "model_name": "rose-delta",
+            "total_traces": 2,
+            "updated_traces": 1,
+            "unchanged_traces": 1,
+            "build_ran": True,
+        }
+
+    original_update = bench.update_world_model_for_simulation
+    old_model_name = os.environ.get("WMH_MODEL_NAME")
+    try:
+        bench.update_world_model_for_simulation = fake_update
+        os.environ.pop("WMH_MODEL_NAME", None)
+        bench._WORLD_MODEL_UPDATE_EVENTS.clear()
+        bench._WORLD_MODEL_UPDATE_RESULT = None
+        await bench._update_world_model_before_simulation(
+            SimpleNamespace(simulate=True, world_model_mode=None, world_model_name="rose-delta")
+        )
+        assert os.environ["WMH_MODEL_NAME"] == "rose-delta"
+    finally:
+        bench.update_world_model_for_simulation = original_update
+        if old_model_name is None:
+            os.environ.pop("WMH_MODEL_NAME", None)
+        else:
+            os.environ["WMH_MODEL_NAME"] = old_model_name
+
+    assert len(calls) == 1
+    assert calls[0]["name"] == "rose-delta"
+    assert bench._WORLD_MODEL_UPDATE_RESULT["status"] == "ready"
+    assert [event["title"] for event in bench._WORLD_MODEL_UPDATE_EVENTS] == [
+        "World Model Updating",
+        "World Model Ready",
+    ]
+    assert "text" not in bench._WORLD_MODEL_UPDATE_EVENTS[0]
 
 
 async def test_code_agent_preflight_accepts_gpt_compute_token():
@@ -1723,7 +2018,8 @@ def test_local_benchmark_args_for_multi_task_exclude_complement():
         max_concurrency=5,
     )
 
-    assert args[:2][-1] == "benchmarks/run_benchmark.py"
+    assert args[0].endswith("python") or Path(args[0]).name.startswith("python")
+    assert args[1:3] == ["-u", "benchmarks/run_benchmark.py"]
     assert "--suite" in args and "all" in args
     assert "--exclude-task" in args
     excluded = args[args.index("--exclude-task") + 1].split(",")
@@ -2122,6 +2418,15 @@ def test_logical_tool_counts_ignore_progress_messages():
         },
         {
             "metadata": {
+                "toolName": "spawn_agent",
+                "toolStatus": "FINISHED",
+                "toolCallId": "browser-via-spawn-agent",
+                "agentType": "browser",
+                "subAgentId": "browser-1",
+            }
+        },
+        {
+            "metadata": {
                 "toolName": "spawn_general_purpose_agent",
                 "toolStatus": "FINISHED",
                 "toolCallId": "sub-1",
@@ -2149,6 +2454,24 @@ def test_logical_tool_counts_ignore_progress_messages():
                 "toolStatus": "FINISHED",
                 "toolCallId": "browser-1",
                 "action_type": "task_complete",
+            }
+        },
+        {
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "toolCallId": "browser-current-complete",
+                "title": "Browser automation complete",
+            }
+        },
+        {
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "toolCallId": "browser-progress",
+                "title": "Navigated -> https://example.com",
+                "action_type": "goto",
+                "subAgentId": "browser-1",
             }
         },
         {
@@ -2194,9 +2517,44 @@ def test_logical_tool_counts_ignore_progress_messages():
     assert _count_logical_tool_calls_from_messages(messages) == {
         "spawn_agent": 1,
         "spawn_general_purpose_agent": 1,
+        "spawn_browser_agent": 3,
+        "spawn_claude_code_agent": 1,
+        "message_person": 1,
+    }
+
+
+def test_cache_coverage_uses_root_scoped_tool_counts():
+    """Cache coverage validates top-level path coverage, not child verifier internals."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _count_logical_tool_calls_from_messages
+
+    task = get_task_by_name("cache-coverage")
+
+    assert task.tool_count_scope == "root"
+    assert task.expected_tool_counts == {
+        "spawn_agent": 1,
+        "spawn_general_purpose_agent": 1,
         "spawn_browser_agent": 1,
         "spawn_claude_code_agent": 1,
         "message_person": 1,
+    }
+
+    messages = [
+        {
+            "metadata": {
+                "toolName": "spawn_general_purpose_agent",
+                "toolStatus": "FINISHED",
+                "toolCallId": "sias-1",
+                "childToolCounts": {
+                    "spawn_agent": 1,
+                    "spawn_claude_code_agent": 1,
+                },
+            }
+        },
+    ]
+
+    assert _count_logical_tool_calls_from_messages(messages) == {
+        "spawn_general_purpose_agent": 1,
     }
 
 
@@ -2829,16 +3187,17 @@ def test_tag_slices_still_resolve():
 
     for tag, minimum in {
         "browser": 8,
-        "auth": 2,
-        "auth-anon": 2,
-        "auth-cookie": 1,
+        "auth": 5,
+        "antibot": 1,
         "smoke": 5,
         "outreach": 3,
-        "attachment": 5,
-        "for-each": 4,
-        "claude-code": 3,
+        "attachments": 5,
+        "sub-agent-fan-out": 4,
+        "code-agent": 3,
         "payment": 1,
-        "load-test": 1,
+        "load-test": 2,
+        "grep": 3,
+        "plaid": 2,
     }.items():
         assert len(get_tasks_by_tag(tag)) >= minimum, f"tag slice '{tag}' collapsed"
 
@@ -2914,6 +3273,10 @@ async def run_all_tests():
     r.record("fast_mode_pass_skips_timeout_history", test_fast_mode_pass_does_not_seed_timeout_history)
     r.record("non_fast_mode_pass_records_timeout_history", test_non_fast_mode_pass_still_seeds_timeout_history)
     r.record(
+        "benchmark_run_serializes_world_model_fidelity",
+        test_benchmark_run_serializes_world_model_fidelity_and_ignores_unknown_task_fields,
+    )
+    r.record(
         "minted_cleanup_preserves_identity",
         test_minted_benchmark_cleanup_preserves_cached_agent_identity_by_default,
     )
@@ -2970,6 +3333,11 @@ async def run_all_tests():
     await r.record_async("archive_agent_finalize", test_archive_agent_finalize_posts_task_and_returns_manifest_ref)
     await r.record_async("archive_agent_finalize_best_effort", test_archive_agent_finalize_failure_is_best_effort)
     r.record("benchmark_run_archive_manifest_ref", test_benchmark_run_json_preserves_archive_manifest_ref)
+    r.record("benchmark_run_wmh_prediction_accuracy", test_benchmark_run_summary_reports_wmh_prediction_accuracy)
+    await r.record_async("archive_to_wmh_lifecycle", test_finalize_archive_and_score_world_model_lifecycle)
+    r.record("world_model_cli_simulate_alias", test_world_model_cli_env_simulate_alias_does_not_enable_self_eval)
+    r.record("world_model_cli_wmh_eval_real", test_world_model_cli_env_wmh_eval_scores_real_runs)
+    await r.record_async("simulate_preflight_world_model_update", test_simulate_preflight_updates_world_model_and_records_progress)
     await r.record_async("code_agent_preflight_accepts_gpt_compute", test_code_agent_preflight_accepts_gpt_compute_token)
     await r.record_async("code_agent_preflight_rejects_missing_compute", test_code_agent_preflight_rejects_missing_compute_token)
     await r.record_async(

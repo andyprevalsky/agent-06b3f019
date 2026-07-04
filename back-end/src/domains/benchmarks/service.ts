@@ -57,6 +57,7 @@ export interface TestPrompt {
   description: string;
   prompt: string;
   attachmentUrls: string[];
+  tags: string[];
 }
 
 interface CatalogTaskShape {
@@ -66,6 +67,7 @@ interface CatalogTaskShape {
   attachment?: unknown;
   attachments?: unknown;
   runner?: unknown;
+  tags?: unknown;
 }
 
 /**
@@ -79,6 +81,7 @@ interface CatalogTaskShape {
  *   `{{TEST_PAYMENT_BASE_URL}}` token, which TestPromptsSelector resolves to
  *   the live tunnel URL.
  * - Bare attachment names become `/test-assets/*` public paths.
+ * - Catalog `tags` pass through so the picker can filter prompts by tag.
  */
 export function getTestPrompts(): TestPrompt[] {
   return (getTasks() as CatalogTaskShape[])
@@ -95,6 +98,9 @@ export function getTestPrompts(): TestPrompt[] {
         description: typeof task.description === 'string' ? task.description : title,
         prompt: task.prompt.replaceAll('{frontend_url}', '{{TEST_PAYMENT_BASE_URL}}'),
         attachmentUrls: attachments.map((name) => `/test-assets/${name}`),
+        tags: Array.isArray(task.tags)
+          ? (task.tags as unknown[]).filter((tag): tag is string => typeof tag === 'string')
+          : [],
       };
     });
 }

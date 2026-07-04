@@ -17,6 +17,7 @@
  * COST / PRICE LIMIT:  owned by `CostIndicator` + `usePriceLimit`
  * ATTACHMENTS:         owned by `useAttachments`
  * FAST MODE:           shown for allow-listed users in both create + chat query boxes
+ * SIMULATOR:           shown for simulator-allow-listed users; session-only and default off
  * TEST PROMPTS:        shown only on desktop for dev/admin users; never mounted on mobile
  * SUBMISSION:          canSubmit prop decides send-vs-stop button
  */
@@ -24,6 +25,7 @@
 import { useRef } from 'react';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { FAST_MODE_USER_IDS } from '@/lib/fastModeAccounts';
+import { SIMULATOR_USER_IDS } from '@/lib/simulatorAccounts';
 import { cn } from '@/lib/utils';
 import { useAuth, useToast } from '../hooks';
 import { IS_DEV_MODE, ADMIN_USER_IDS, DEFAULT_RESTART_THRESHOLD } from '../config';
@@ -100,6 +102,15 @@ function useSubmitHandler(
   };
 }
 
+function getQueryInputVisibility(isMobile: boolean, userId: string | null | undefined) {
+  return {
+    showTestPrompts:
+      !isMobile && (IS_DEV_MODE || (userId != null && ADMIN_USER_IDS.includes(userId))),
+    showFastMode: userId != null && FAST_MODE_USER_IDS.includes(userId),
+    showSimulator: userId != null && SIMULATOR_USER_IDS.includes(userId),
+  };
+}
+
 interface QueryInputBodyProps extends QueryInputProps {
   attachments: ReturnType<typeof useAttachments>;
   priceLimit: UsePriceLimitResult;
@@ -117,6 +128,8 @@ function QueryInputBody(props: QueryInputBodyProps) {
     onModelChange,
     fastMode = false,
     onFastModeChange,
+    simulatorMode = false,
+    onSimulatorModeChange,
     availableModels = [],
     contextPercentage = 0,
     contextSize = 0,
@@ -136,10 +149,7 @@ function QueryInputBody(props: QueryInputBodyProps) {
   } = props;
   const { user: authUser } = useAuth();
   const isMobile = useIsMobile();
-  const showTestPrompts =
-    !isMobile && (IS_DEV_MODE || (authUser?.id != null && ADMIN_USER_IDS.includes(authUser.id)));
-  // Fast Mode toggle is query-box scoped and gated to allow-listed accounts.
-  const showFastMode = authUser?.id != null && FAST_MODE_USER_IDS.includes(authUser.id);
+  const visibility = getQueryInputVisibility(isMobile, authUser?.id);
   const agentCompleted = agentDetail?.status === 'COMPLETED' || agentDetail?.status === 'FAILED';
 
   return (
@@ -148,10 +158,13 @@ function QueryInputBody(props: QueryInputBodyProps) {
         agentDetail={agentDetail}
         onAgentUpdate={onAgentUpdate}
         onAgentDelete={onAgentDelete}
-        showTestPrompts={showTestPrompts}
-        showFastMode={showFastMode}
+        showTestPrompts={visibility.showTestPrompts}
+        showFastMode={visibility.showFastMode}
         fastMode={fastMode}
         onFastModeChange={onFastModeChange}
+        showSimulator={visibility.showSimulator}
+        simulatorMode={simulatorMode}
+        onSimulatorModeChange={onSimulatorModeChange}
         onSelectPrompt={(prompt, files) => {
           onChange(prompt);
           if (files && files.length > 0) void attachments.processFiles(files);
@@ -163,11 +176,7 @@ function QueryInputBody(props: QueryInputBodyProps) {
         restartThreshold={restartThreshold}
       />
       <AttachmentList attachments={attachments.attachments} onRemove={attachments.remove} />
-      {attachments.isDragOver && (
-        <div className="absolute inset-0 bg-primary/10 flex items-center justify-center z-20 pointer-events-none rounded-xl">
-          <div className="text-primary font-medium">Drop files here</div>
-        </div>
-      )}
+      <DragOverlay visible={attachments.isDragOver} />
       <InputContainer
         value={value}
         onChange={onChange}
@@ -187,6 +196,15 @@ function QueryInputBody(props: QueryInputBodyProps) {
         textareaRef={textareaRef}
       />
     </>
+  );
+}
+
+function DragOverlay({ visible }: { visible: boolean }) {
+  if (!visible) return null;
+  return (
+    <div className="absolute inset-0 bg-primary/10 flex items-center justify-center z-20 pointer-events-none rounded-xl">
+      <div className="text-primary font-medium">Drop files here</div>
+    </div>
   );
 }
 

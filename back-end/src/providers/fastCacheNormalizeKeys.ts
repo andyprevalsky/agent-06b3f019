@@ -1,9 +1,19 @@
+import {
+  BROWSER_SELECTOR_PREFIX_RE,
+  BROWSER_STEP_CALLSITE_RE,
+  CACHE_KEY_VERSION,
+  REQUEST_PARTITION_HEADERS,
+  worldModelCacheScope,
+  type CacheKind,
+} from './fastCacheNormalizeConstants';
+import { canonicalMessages, goalHash, normalizeUrl, sha256 } from './fastCacheNormalizeCore';
+
 export function buildKey(kind: CacheKind, goal: string, detail: string): string {
-  return `fastmode:${CACHE_KEY_VERSION}:${kind}:${goalHash(goal)}:${detail}`;
+  return `fastmode:${CACHE_KEY_VERSION}:${worldModelCacheScope()}${kind}:${goalHash(goal)}:${detail}`;
 }
 
 export function buildGlobalKey(kind: CacheKind, detail: string): string {
-  return `fastmode:${CACHE_KEY_VERSION}:${kind}:global:${detail}`;
+  return `fastmode:${CACHE_KEY_VERSION}:${worldModelCacheScope()}${kind}:global:${detail}`;
 }
 
 export function normalizeCallSite(callSite: string): string {
@@ -159,17 +169,9 @@ export function anthropicKey(goal: string, request: unknown): string {
  * ANTHROPIC_BASE_URL path) and hashes the canonical Anthropic request body.
  */
 export function anthropicKeyFromHash(goalHashValue: string, request: unknown): string {
-  return `fastmode:${CACHE_KEY_VERSION}:anthropic:${goalHashValue}:c:${sha256(canonicalMessages(request)).slice(0, 32)}`;
+  return `fastmode:${CACHE_KEY_VERSION}:${worldModelCacheScope()}anthropic:${goalHashValue}:c:${sha256(canonicalMessages(request)).slice(0, 32)}`;
 }
 
 export function codexKeyFromHash(goalHashValue: string, request: unknown): string {
-  return `fastmode:${CACHE_KEY_VERSION}:codex:${goalHashValue}:c:${sha256(canonicalMessages(request)).slice(0, 32)}`;
+  return `fastmode:${CACHE_KEY_VERSION}:${worldModelCacheScope()}codex:${goalHashValue}:c:${sha256(canonicalMessages(request)).slice(0, 32)}`;
 }
-import {
-  BROWSER_SELECTOR_PREFIX_RE,
-  BROWSER_STEP_CALLSITE_RE,
-  CACHE_KEY_VERSION,
-  REQUEST_PARTITION_HEADERS,
-  type CacheKind,
-} from './fastCacheNormalizeConstants';
-import { canonicalMessages, goalHash, normalizeUrl, sha256 } from './fastCacheNormalizeCore';

@@ -13,7 +13,6 @@ interface UseToolDataArgs {
   isStreaming: boolean;
   isAssistant: boolean;
   isTool: boolean;
-  shouldType: boolean;
 }
 
 export function useToolData({
@@ -21,22 +20,23 @@ export function useToolData({
   isStreaming,
   isAssistant,
   isTool,
-  shouldType,
 }: UseToolDataArgs): ToolMessageData | null {
   return useMemo(() => {
     // Streaming messages render as text, not as a "Thought" tool card.
     if (isStreaming) return null;
 
     // ASSISTANT messages without an attachment render as synthetic "Thought" cards.
+    // Status is always FINISHED: the card has no typing animation, so a
+    // transient IN_PROGRESS keyed off the animation queue would only flash the
+    // card open for one frame before the instant onComplete collapses it.
     if (isAssistant && !message.file_pointer) {
       if (message.text.trim().length === 0) return null;
 
-      const assistantStatus: ToolMessageData['status'] = shouldType ? 'IN_PROGRESS' : 'FINISHED';
       return {
         toolCallId: message.message_id,
         toolName: 'thought',
-        title: assistantStatus === 'IN_PROGRESS' ? 'Thinking' : 'Thought',
-        status: assistantStatus,
+        title: 'Thought',
+        status: 'FINISHED',
         message: message.text,
       };
     }
@@ -84,5 +84,5 @@ export function useToolData({
       actionType: metadata.action_type as string | undefined,
       codeProvider: metadata.code_provider === 'codex' ? 'codex' : 'claude',
     };
-  }, [isAssistant, shouldType, isTool, message, isStreaming]);
+  }, [isAssistant, isTool, message, isStreaming]);
 }

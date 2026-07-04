@@ -1,4 +1,4 @@
-import { CACHE_KEY_VERSION } from './fastCacheNormalizeConstants';
+import { CACHE_KEY_VERSION, worldModelCacheScope } from './fastCacheNormalizeConstants';
 import { stripSecrets } from './fastCacheNormalizeCore';
 
 /** Headers we forward upstream (auth + anthropic protocol headers). */
@@ -59,7 +59,7 @@ export interface TraceReplayContext {
 const traceOrdinalCounters = new Map<string, number>();
 
 export function anthropicSlotKey(traceHash: string, ordinal: number): string {
-  return `fastmode:${CACHE_KEY_VERSION}:anthropic:${traceHash}:slot:${ordinal}`;
+  return `fastmode:${CACHE_KEY_VERSION}:${worldModelCacheScope()}anthropic:${traceHash}:slot:${ordinal}`;
 }
 
 interface TraceOrdinalReservation {

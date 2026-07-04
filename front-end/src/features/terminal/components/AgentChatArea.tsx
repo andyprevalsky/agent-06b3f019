@@ -215,6 +215,8 @@ function ChatQueryInputBox({
         onModelChange={a.setSelectedModel}
         fastMode={a.fastMode}
         onFastModeChange={a.setFastMode}
+        simulatorMode={a.simulatorMode}
+        onSimulatorModeChange={a.setSimulatorMode}
         availableModels={models.filter(
           (m) => m.id === 'rose-labs/rose-1-lite' || m.id === 'rose-labs/rose-1-ultra',
         )}

@@ -62,6 +62,7 @@ export function MessageListItems({
             key={message.message_id}
             data-message-id={message.message_id}
             data-message-role={message.role}
+            className="min-w-0 max-w-full"
           >
             <MessageBubble
               message={message}

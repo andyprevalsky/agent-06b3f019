@@ -50,6 +50,7 @@ import dataRouter from './domains/data/routes';
 import benchmarksRouter from './domains/benchmarks/routes';
 import fastCacheRouter from './domains/fast-cache/routes';
 import archiveRouter from './domains/archive/routes';
+import worldModelsRouter from './domains/world-models/routes';
 import { anthropicProxyRouter, codexProxyRouter } from './domains/fast-cache/routes.proxy';
 import { prisma } from './providers/database';
 import { createLogger } from './providers/logger';
@@ -509,6 +510,7 @@ app.use('/api/purchases', purchasesRouter);
 app.use('/api/test-payment', testPaymentRouter);
 app.use('/api/fast-cache', fastCacheRouter); // Fast Mode aggressive cache get/set/purge
 app.use('/api/archive', archiveRouter); // Encrypted trace archive + scoped DB fixtures
+app.use('/api/world-models', worldModelsRouter); // WMH-compatible simulation runtime shim
 // Anthropic tee-proxy for the code agent. Mounted OUTSIDE /api so the injected
 // ANTHROPIC_BASE_URL = <backend>/anthropic-proxy/<goalHash> resolves to /v1/messages.
 app.use('/anthropic-proxy', anthropicProxyRouter);

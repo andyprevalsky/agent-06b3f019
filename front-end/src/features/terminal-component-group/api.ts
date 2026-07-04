@@ -106,6 +106,8 @@ export interface CatalogTestPrompt {
   description: string;
   prompt: string;
   attachmentUrls: string[];
+  /** Catalog tags — optional so an older backend payload without tags still parses. */
+  tags?: string[];
 }
 
 /**

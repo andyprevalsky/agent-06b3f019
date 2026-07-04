@@ -211,6 +211,7 @@ const KNOWN_TAGS = [
   'plaid',
   'transactions',
   'bot-challenge',
+  'antibot',
   'documents',
   'prod-data',
   'external',

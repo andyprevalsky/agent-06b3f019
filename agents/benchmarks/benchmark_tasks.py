@@ -29,8 +29,9 @@ class BenchmarkTask:
     expected_approval_count: Optional[int] = None  # Exact number of approvals expected (used with count_only)
     expected_attention_kind: Optional[str] = None  # metadata.attentionKind expected for approval-style tasks
     min_agent_count: Optional[int] = None  # Minimum total agents in tree (root + sub-agents)
-    expected_tool_counts: Optional[dict] = None  # Exact tool call counts across entire agent tree (toolName → count)
-    min_tool_counts: Optional[dict] = None  # Minimum tool call counts across entire agent tree (toolName → min count)
+    expected_tool_counts: Optional[dict] = None  # Exact tool call counts (toolName → count)
+    min_tool_counts: Optional[dict] = None  # Minimum tool call counts (toolName → min count)
+    tool_count_scope: str = "tree"  # "tree" counts all descendants; "root" counts root-visible tool calls only
     forbidden_tools: List[str] = field(default_factory=list)  # Tool names that must not be called
     sub_agent_count: Optional[int] = None  # Default fan-out for load-test style tasks; substitutes {n} in prompt
     expected_payment_receipt: Optional[dict] = None  # Expected request_payment_card approval receipt metadata
@@ -64,8 +65,10 @@ SMOKE_TIMEOUT_CAPS: dict[str, int] = {
     # runs can extend the dynamic history instead of timing out at the ceiling.
     "spawn-sub-agents": 480,
     "parallel-tool-calls": 600,
+    "message-person": 180,
     "claude-code-agent": 300,
     "browser-smoke": 300,
+    "browser-biometrics-webdecoy": 420,
 }
 
 
@@ -176,7 +179,13 @@ def get_task_by_name(name: str) -> BenchmarkTask:
 
 
 def get_tasks_by_tag(tag: str) -> List[BenchmarkTask]:
-    return [t for t in all_tasks() if tag in t.tags]
+    aliases = {
+        "attachments": "attachment",
+        "code-agent": "claude-code",
+        "sub-agent-fan-out": "mass-agent",
+    }
+    normalized = aliases.get(tag, tag)
+    return [t for t in all_tasks() if normalized in t.tags]
 
 
 def list_all_tasks() -> None:

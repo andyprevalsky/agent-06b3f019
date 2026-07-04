@@ -1,13 +1,19 @@
-import {
-  GetObjectCommand,
-  ListObjectsV2Command,
-  PutObjectCommand,
-  S3Client,
-} from '@aws-sdk/client-s3';
+import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
+import {
+  deleteLocalArchivedBundle,
+  deleteR2ArchivedBundle,
+  listLocalArchivedObjects,
+  listR2ArchivedObjects,
+} from './traceArchiveBundleStorage';
+import {
+  decryptAndValidateArtifact as decryptAndValidateArtifactEnvelope,
+  metadataFromUnknown,
+  validateEncryptedArtifactEnvelope as validateEncryptedEnvelope,
+} from './traceArchiveEnvelope';
 import { createLogger } from './logger';
 
 const log = createLogger('TraceArchive');
@@ -26,6 +32,7 @@ const MEDIA_EXTENSIONS = new Set([
   '.wav',
   '.m3u8',
 ]);
+const STORE_MAX_ATTEMPTS = 5;
 
 export interface EncryptedArtifactMetadata {
   path: string;
@@ -58,6 +65,12 @@ export interface ArchivedObjectSummary {
   ref: string;
   path: string;
   metadata?: unknown;
+}
+
+export interface ArchiveBundleDeleteResult {
+  rootAgentId: string;
+  backend: string;
+  deletedObjectCount: number;
 }
 
 function isProduction(): boolean {
@@ -96,6 +109,10 @@ function encryptionKey(): Buffer | null {
 
 function safeSegment(value: string): string {
   return value.replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 96) || 'unbound';
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export function safeArchivePath(input: string): string {
@@ -204,6 +221,29 @@ function getS3Client(): S3Client {
   return s3Client;
 }
 
+function resetS3Client(): void {
+  s3Client?.destroy();
+  s3Client = null;
+}
+
+function shouldResetS3ClientAfterError(errorMessage: string): boolean {
+  const normalized = errorMessage.toLowerCase();
+  return (
+    normalized.includes('bad record mac') ||
+    normalized.includes('socket') ||
+    normalized.includes('tls') ||
+    normalized.includes('econnreset') ||
+    normalized.includes('etimedout') ||
+    normalized.includes('timeout') ||
+    normalized.includes('network') ||
+    normalized.includes('connection')
+  );
+}
+
+function retryDelayMs(attempt: number): number {
+  return 250 * attempt * attempt;
+}
+
 async function putR2(
   rootAgentId: string,
   objectPath: string,
@@ -245,41 +285,15 @@ async function putR2(
   return `r2://${bucket}/${key}`;
 }
 
-function metadataFromUnknown(value: unknown): EncryptedArtifactMetadata {
-  if (value === null || typeof value !== 'object') {
-    throw new Error('Archive metadata is missing');
-  }
-  const metadata = value as EncryptedArtifactMetadata;
-  const requiredStringFields: (keyof EncryptedArtifactMetadata)[] = [
-    'path',
-    'content_type',
-    'compression',
-    'encryption',
-    'encryption_key_id',
-    'nonce_b64',
-    'auth_tag_b64',
-    'aad',
-    'plaintext_sha256',
-    'ciphertext_sha256',
-  ];
-  for (const field of requiredStringFields) {
-    if (typeof metadata[field] !== 'string') throw new Error(`Archive metadata missing ${field}`);
-  }
-  const requiredNumberFields: (keyof EncryptedArtifactMetadata)[] = [
-    'plaintext_bytes',
-    'stored_plaintext_bytes',
-    'ciphertext_bytes',
-    'created_at_ms',
-  ];
-  for (const field of requiredNumberFields) {
-    if (typeof metadata[field] !== 'number') throw new Error(`Archive metadata missing ${field}`);
-  }
-  if (metadata.encryption !== 'aes-256-gcm')
-    throw new Error(`Unsupported archive encryption ${metadata.encryption}`);
-  if (metadata.compression !== 'gzip' && metadata.compression !== 'none') {
-    throw new Error(`Unsupported archive compression ${metadata.compression}`);
-  }
-  return metadata;
+export function validateEncryptedArtifactEnvelope(params: {
+  objectPath: string;
+  ciphertext: Buffer;
+  metadata: unknown;
+}): EncryptedArtifactMetadata {
+  return validateEncryptedEnvelope({
+    ...params,
+    objectPath: safeArchivePath(params.objectPath),
+  });
 }
 
 function readLocalObject(rootAgentId: string, objectPath: string): StoredEncryptedArtifact | null {
@@ -357,38 +371,49 @@ export async function storeEncryptedArtifact(params: {
   if (!archiveEnabled()) return null;
   const backend = (process.env.TRACE_ARCHIVE_BACKEND || '').trim().toLowerCase();
   const contentType = params.contentType || 'application/octet-stream';
-  try {
-    if (backend === 'fake-r2') {
-      return await putFakeR2(
+  for (let attempt = 1; attempt <= STORE_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      if (backend === 'fake-r2') {
+        return await putFakeR2(
+          params.rootAgentId,
+          params.objectPath,
+          params.ciphertext,
+          params.metadata
+        );
+      }
+      if (backend === 'r2' || (isProduction() && backend !== 'local')) {
+        return await putR2(
+          params.rootAgentId,
+          params.objectPath,
+          params.ciphertext,
+          contentType,
+          params.metadata
+        );
+      }
+      return await putLocal(
         params.rootAgentId,
         params.objectPath,
         params.ciphertext,
         params.metadata
       );
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log.warn('Trace archive store failed', {
+        root_agent_id: params.rootAgentId,
+        object_path: params.objectPath,
+        attempt,
+        attempts: STORE_MAX_ATTEMPTS,
+        error: errorMessage,
+      });
+      if (attempt < STORE_MAX_ATTEMPTS) {
+        if (backend === 'r2' || (isProduction() && backend !== 'local')) {
+          if (shouldResetS3ClientAfterError(errorMessage)) resetS3Client();
+        }
+        await sleep(retryDelayMs(attempt));
+      }
     }
-    if (backend === 'r2' || (isProduction() && backend !== 'local')) {
-      return await putR2(
-        params.rootAgentId,
-        params.objectPath,
-        params.ciphertext,
-        contentType,
-        params.metadata
-      );
-    }
-    return await putLocal(
-      params.rootAgentId,
-      params.objectPath,
-      params.ciphertext,
-      params.metadata
-    );
-  } catch (error) {
-    log.warn('Trace archive store failed', {
-      root_agent_id: params.rootAgentId,
-      object_path: params.objectPath,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return null;
   }
+  return null;
 }
 
 export async function storePlainArtifact(params: {
@@ -400,22 +425,33 @@ export async function storePlainArtifact(params: {
   if (!archiveEnabled()) return null;
   const backend = (process.env.TRACE_ARCHIVE_BACKEND || '').trim().toLowerCase();
   const objectPath = safeArchivePath(params.objectPath);
-  try {
-    if (backend === 'fake-r2') {
-      return await putFakeR2(params.rootAgentId, objectPath, params.body);
+  for (let attempt = 1; attempt <= STORE_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      if (backend === 'fake-r2') {
+        return await putFakeR2(params.rootAgentId, objectPath, params.body);
+      }
+      if (backend === 'r2' || (isProduction() && backend !== 'local')) {
+        return await putR2(params.rootAgentId, objectPath, params.body, params.contentType);
+      }
+      return await putLocal(params.rootAgentId, objectPath, params.body);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log.warn('Trace public archive store failed', {
+        root_agent_id: params.rootAgentId,
+        object_path: objectPath,
+        attempt,
+        attempts: STORE_MAX_ATTEMPTS,
+        error: errorMessage,
+      });
+      if (attempt < STORE_MAX_ATTEMPTS) {
+        if (backend === 'r2' || (isProduction() && backend !== 'local')) {
+          if (shouldResetS3ClientAfterError(errorMessage)) resetS3Client();
+        }
+        await sleep(retryDelayMs(attempt));
+      }
     }
-    if (backend === 'r2' || (isProduction() && backend !== 'local')) {
-      return await putR2(params.rootAgentId, objectPath, params.body, params.contentType);
-    }
-    return await putLocal(params.rootAgentId, objectPath, params.body);
-  } catch (error) {
-    log.warn('Trace public archive store failed', {
-      root_agent_id: params.rootAgentId,
-      object_path: objectPath,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return null;
   }
+  return null;
 }
 
 export async function readArchivedArtifact(params: {
@@ -435,39 +471,10 @@ export function decryptAndValidateArtifact(params: {
   ciphertext: Buffer;
   metadata: EncryptedArtifactMetadata;
 }): Buffer {
-  const { ciphertext, metadata } = params;
-  const ciphertextSha = crypto.createHash('sha256').update(ciphertext).digest('hex');
-  if (ciphertextSha !== metadata.ciphertext_sha256) {
-    throw new Error('Archive ciphertext SHA-256 mismatch');
-  }
-  if (ciphertext.length !== metadata.ciphertext_bytes) {
-    throw new Error('Archive ciphertext byte count mismatch');
-  }
-  const key = encryptionKey();
-  if (key === null) throw new Error('Archive encryption key is unavailable');
-  const tag = Buffer.from(metadata.auth_tag_b64, 'base64');
-  const encrypted = ciphertext.subarray(0, ciphertext.length - tag.length);
-  const decipher = crypto.createDecipheriv(
-    'aes-256-gcm',
-    key,
-    Buffer.from(metadata.nonce_b64, 'base64')
-  );
-  decipher.setAAD(Buffer.from(metadata.aad, 'utf8'));
-  decipher.setAuthTag(tag);
-  const storedPlaintext = Buffer.concat([decipher.update(encrypted), decipher.final()]);
-  if (storedPlaintext.length !== metadata.stored_plaintext_bytes) {
-    throw new Error('Archive stored plaintext byte count mismatch');
-  }
-  const plaintext =
-    metadata.compression === 'gzip' ? zlib.gunzipSync(storedPlaintext) : storedPlaintext;
-  if (plaintext.length !== metadata.plaintext_bytes) {
-    throw new Error('Archive plaintext byte count mismatch');
-  }
-  const plaintextSha = crypto.createHash('sha256').update(plaintext).digest('hex');
-  if (plaintextSha !== metadata.plaintext_sha256) {
-    throw new Error('Archive plaintext SHA-256 mismatch');
-  }
-  return plaintext;
+  return decryptAndValidateArtifactEnvelope({
+    ...params,
+    encryptionKey: encryptionKey(),
+  });
 }
 
 export async function archiveBytes(params: {
@@ -535,34 +542,28 @@ export async function listArchivedObjects(rootAgentId: string): Promise<Archived
   }
 }
 
+export async function deleteArchivedBundle(
+  rootAgentId: string
+): Promise<ArchiveBundleDeleteResult> {
+  if (!archiveEnabled()) {
+    return { rootAgentId, backend: storageBackend(), deletedObjectCount: 0 };
+  }
+  const backend = storageBackend();
+  if (backend === 'r2' || (isProduction() && backend !== 'local')) {
+    return deleteR2Bundle(rootAgentId);
+  }
+  return deleteLocalBundle(rootAgentId);
+}
+
+function storageBackend(): string {
+  return (process.env.TRACE_ARCHIVE_BACKEND || '').trim().toLowerCase() || 'local';
+}
+
 function listLocalObjects(rootAgentId: string): ArchivedObjectSummary[] {
-  const prefix = objectPrefix(rootAgentId);
-  const dir = path.join(localArchiveRoot(), prefix);
-  if (!fs.existsSync(dir)) return [];
-  const results: ArchivedObjectSummary[] = [];
-  const walk = (current: string): void => {
-    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
-      const full = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        walk(full);
-        continue;
-      }
-      if (entry.name.endsWith('.meta.json')) continue;
-      const relative = path.relative(dir, full).split(path.sep).join('/');
-      let metadata: unknown;
-      const metaPath = `${full}.meta.json`;
-      if (fs.existsSync(metaPath)) {
-        try {
-          metadata = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
-        } catch {
-          metadata = undefined;
-        }
-      }
-      results.push({ ref: full, path: relative, metadata });
-    }
-  };
-  walk(dir);
-  return results.sort((a, b) => a.path.localeCompare(b.path));
+  return listLocalArchivedObjects({
+    localArchiveRoot: localArchiveRoot(),
+    objectPrefix: objectPrefix(rootAgentId),
+  });
 }
 
 async function putFakeR2(
@@ -582,26 +583,28 @@ function fakeR2Ref(rootAgentId: string, objectPath: string): string {
 async function listR2Objects(rootAgentId: string): Promise<ArchivedObjectSummary[]> {
   const bucket = process.env.R2_BUCKET_TRACE_ARCHIVE || '';
   if (bucket === '') return [];
-  const prefix = objectPrefix(rootAgentId);
-  const client = getS3Client();
-  const results: ArchivedObjectSummary[] = [];
-  let continuationToken: string | undefined;
-  do {
-    const response = await client.send(
-      new ListObjectsV2Command({
-        Bucket: bucket,
-        Prefix: prefix,
-        ContinuationToken: continuationToken,
-      })
-    );
-    for (const item of response.Contents ?? []) {
-      if (item.Key === undefined || item.Key.endsWith('.meta.json')) continue;
-      results.push({
-        ref: `r2://${bucket}/${item.Key}`,
-        path: item.Key.slice(prefix.length),
-      });
-    }
-    continuationToken = response.NextContinuationToken;
-  } while (continuationToken !== undefined);
-  return results.sort((a, b) => a.path.localeCompare(b.path));
+  return listR2ArchivedObjects({
+    bucket,
+    objectPrefix: objectPrefix(rootAgentId),
+    client: getS3Client(),
+  });
+}
+
+async function deleteR2Bundle(rootAgentId: string): Promise<ArchiveBundleDeleteResult> {
+  const bucket = process.env.R2_BUCKET_TRACE_ARCHIVE || '';
+  return deleteR2ArchivedBundle({
+    rootAgentId,
+    bucket,
+    objectPrefix: objectPrefix(rootAgentId),
+    client: getS3Client(),
+  });
+}
+
+function deleteLocalBundle(rootAgentId: string): ArchiveBundleDeleteResult {
+  return deleteLocalArchivedBundle({
+    rootAgentId,
+    backend: storageBackend(),
+    localArchiveRoot: localArchiveRoot(),
+    objectPrefix: objectPrefix(rootAgentId),
+  });
 }

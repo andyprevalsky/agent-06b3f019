@@ -26,6 +26,9 @@ fi
 normalize_conductor_workspace_env
 . "$SCRIPT_DIR/lib/run-process-cleanup.sh"
 
+RUN_CONTEXT_DIR="${BENCHMARK_CONTEXT_DIR:-.context}"
+BENCHMARK_ISOLATED_RUN="${BENCHMARK_ISOLATED_RUN:-false}"
+
 # mac-app is Electron + requires nvm/Node 20.10.0; only runs on macOS.
 IS_MAC=false
 [ "$(uname)" = "Darwin" ] && IS_MAC=true
@@ -256,7 +259,9 @@ kill_stale_same_worktree_benchmark_stack() {
     fi
 }
 
-kill_stale_same_worktree_benchmark_stack
+if [ "$BENCHMARK_ISOLATED_RUN" != "true" ]; then
+    kill_stale_same_worktree_benchmark_stack
+fi
 
 # ── Cloud instance: aggressive port cleanup ──
 # On cloud there's exactly one worktree — no multi-workspace concern.
@@ -557,8 +562,12 @@ if ! $IS_CLOUD; then
             exit 1
         done
     done
-    echo "🧹 Cleaning stale services for this worktree before startup..."
-    bash "$SCRIPT_DIR/kill-services.sh" || exit 1
+    if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
+        echo "🧹 Isolated benchmark run: skipping same-worktree service sweep"
+    else
+        echo "🧹 Cleaning stale services for this worktree before startup..."
+        bash "$SCRIPT_DIR/kill-services.sh" || exit 1
+    fi
 fi
 
 PIDS=()
@@ -633,7 +642,7 @@ start_public_tunnel() {
 
     ensure_ngrok_domain_reserved
 
-    mkdir -p .context
+    mkdir -p "$RUN_CONTEXT_DIR"
     local ngrok_base_config="$HOME/Library/Application Support/ngrok/ngrok.yml"
     if [ ! -f "$ngrok_base_config" ]; then
         ngrok_base_config="$HOME/.config/ngrok/ngrok.yml"
@@ -643,7 +652,7 @@ start_public_tunnel() {
         exit 1
     fi
 
-    NGROK_CONFIG_FILE=".context/ngrok-${WORKSPACE_DNS_LABEL}.yml"
+    NGROK_CONFIG_FILE="$RUN_CONTEXT_DIR/ngrok-${WORKSPACE_DNS_LABEL}.yml"
     cat > "$NGROK_CONFIG_FILE" <<EOF
 version: "3"
 agent:
@@ -657,14 +666,14 @@ EOF
         --domain "$WORKTREE_DOMAIN" \
         --log stdout \
         --log-format logfmt \
-        --log-level info > .context/ngrok.log 2>&1 &
+        --log-level info > "$RUN_CONTEXT_DIR/ngrok.log" 2>&1 &
     NGROK_PID=$!
     PIDS+=($NGROK_PID); NAMES+=("ngrok")
 
     for attempt in $(seq 1 60); do
         if ! kill -0 "$NGROK_PID" 2>/dev/null; then
             echo "❌ ngrok exited before the public tunnel became ready."
-            tail -60 .context/ngrok.log || true
+            tail -60 "$RUN_CONTEXT_DIR/ngrok.log" || true
             echo ""
             echo "Required ngrok billing state: Pay-as-you-go plan (\$20/month + usage) with reserved domain $WORKTREE_DOMAIN."
             echo "Checkout: https://dashboard.ngrok.com/billing/choose-a-plan"
@@ -692,19 +701,19 @@ PY
 
     echo "❌ ngrok tunnel did not become ready for $PUBLIC_BASE_URL → :$FRONTEND_PORT"
     echo "   ngrok API: $NGROK_API_URL"
-    tail -80 .context/ngrok.log || true
+    tail -80 "$RUN_CONTEXT_DIR/ngrok.log" || true
     exit 1
 }
 
 write_services_manifest() {
-    mkdir -p .context
+    mkdir -p "$RUN_CONTEXT_DIR"
     local names_csv pids_csv
     names_csv="$(IFS=,; echo "${NAMES[*]:-}")"
     pids_csv="$(IFS=,; echo "${PIDS[*]:-}")"
     SERVICE_NAMES="$names_csv" SERVICE_PIDS="$pids_csv" SERVICE_STATUS="$SERVICE_STATUS" \
         BENCHMARK_MODE="$BENCHMARK_MODE" DB_CONTAINER="$DB_CONTAINER" \
-        DB_OWNED_BY_US="$DB_OWNED_BY_US" USE_SYSTEM_PG="$USE_SYSTEM_PG" \
-        RUN_SH_PID="$$" python3 - <<'PY'
+        DB_VOLUME="$DB_VOLUME" DB_OWNED_BY_US="$DB_OWNED_BY_US" USE_SYSTEM_PG="$USE_SYSTEM_PG" \
+        RUN_SH_PID="$$" RUN_CONTEXT_DIR="$RUN_CONTEXT_DIR" python3 - <<'PY'
 import json
 import os
 from datetime import datetime, timezone
@@ -730,6 +739,7 @@ for index, name in enumerate(names):
     services.append({"name": name, "pid": pid})
 
 root = os.getcwd()
+context_dir = os.environ.get("RUN_CONTEXT_DIR") or ".context"
 data = {
     "schema_version": 1,
     "status": os.environ.get("SERVICE_STATUS", "unknown"),
@@ -755,11 +765,12 @@ data = {
         "sdk_metrics": f"http://localhost:{os.environ.get('SDK_METRICS_PORT', '')}",
     },
     "temporal_task_queue": os.environ.get("TEMPORAL_TASK_QUEUE", ""),
-    "database": {
-        "container": os.environ.get("DB_CONTAINER", ""),
-        "owned_by_run_sh": os.environ.get("DB_OWNED_BY_US", "false").lower() == "true",
-        "use_system_postgres": os.environ.get("USE_SYSTEM_PG", "false").lower() == "true",
-    },
+        "database": {
+            "container": os.environ.get("DB_CONTAINER", ""),
+            "volume": os.environ.get("DB_VOLUME", ""),
+            "owned_by_run_sh": os.environ.get("DB_OWNED_BY_US", "false").lower() == "true",
+            "use_system_postgres": os.environ.get("USE_SYSTEM_PG", "false").lower() == "true",
+        },
     "env": {
         "benchmark_anon_steel_profile": os.environ.get("BENCHMARK_ANON_STEEL_PROFILE", "").lower() in ("1", "true", "yes", "on"),
         "benchmark_disable_saved_browser_auth": os.environ.get("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH", "").lower() in ("1", "true", "yes", "on"),
@@ -770,8 +781,8 @@ data = {
     },
     "services": services,
 }
-tmp_path = os.path.join(root, ".context", "services.json.tmp")
-path = os.path.join(root, ".context", "services.json")
+tmp_path = os.path.join(root, context_dir, "services.json.tmp")
+path = os.path.join(root, context_dir, "services.json")
 with open(tmp_path, "w") as f:
     json.dump(data, f, indent=2, sort_keys=True)
     f.write("\n")
@@ -808,10 +819,19 @@ cleanup() {
         kill_tree_hard "$pid"
     done
     # Sweep by manifest, cwd, and service ports in case a wrapper exited before
-    # its child, or a descendant reparented during a cascade shutdown.
-    bash "$SCRIPT_DIR/kill-services.sh" || true
+    # its child, or a descendant reparented during a cascade shutdown. Isolated
+    # benchmark runs skip the broad same-worktree sweep because their process
+    # group and explicit PIDS list are the isolation boundary.
+    if [ "$BENCHMARK_ISOLATED_RUN" != "true" ]; then
+        bash "$SCRIPT_DIR/kill-services.sh" || true
+    fi
     if $DB_OWNED_BY_US && ! $USE_SYSTEM_PG; then
-        docker stop "$DB_CONTAINER" 2>/dev/null || true
+        if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
+            docker rm -f "$DB_CONTAINER" 2>/dev/null || true
+            docker volume rm "$DB_VOLUME" 2>/dev/null || true
+        else
+            docker stop "$DB_CONTAINER" 2>/dev/null || true
+        fi
     fi
     SERVICE_STATUS=stopped
     write_services_manifest || true
@@ -872,7 +892,7 @@ PIDS+=($!); NAMES+=("agents")
 
 SERVICE_STATUS=running
 write_services_manifest
-echo "🧭 Service manifest: .context/services.json"
+echo "🧭 Service manifest: $RUN_CONTEXT_DIR/services.json"
 echo "🌐 Public frontend: $PUBLIC_BASE_URL"
 
 echo "⏳ Verifying public tunnel smoke..."

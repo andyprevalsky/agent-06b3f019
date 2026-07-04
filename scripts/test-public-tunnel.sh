@@ -1,22 +1,26 @@
 #!/bin/bash
 set -eo pipefail
 
-if [ -f .context/services.json ]; then
+SERVICES_MANIFEST="${BENCHMARK_CONTEXT_DIR:-.context}/services.json"
+
+if [ -f "$SERVICES_MANIFEST" ]; then
     BACKEND_PORT_FROM_MANIFEST="$(
-        python3 -c '
+        SERVICES_MANIFEST="$SERVICES_MANIFEST" python3 -c '
 import json
+import os
 from pathlib import Path
 
-data = json.loads(Path(".context/services.json").read_text())
+data = json.loads(Path(os.environ["SERVICES_MANIFEST"]).read_text())
 print(data.get("ports", {}).get("backend", ""))
 '
     )"
     PUBLIC_BASE_URL_FROM_MANIFEST="$(
-        python3 -c '
+        SERVICES_MANIFEST="$SERVICES_MANIFEST" python3 -c '
 import json
+import os
 from pathlib import Path
 
-data = json.loads(Path(".context/services.json").read_text())
+data = json.loads(Path(os.environ["SERVICES_MANIFEST"]).read_text())
 print(data.get("urls", {}).get("public", ""))
 '
     )"

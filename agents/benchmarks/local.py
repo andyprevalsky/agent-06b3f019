@@ -8,10 +8,15 @@ and post-failure diagnostics. Benchmark definitions remain in tasks.json.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import hashlib
 import json
 import os
+import random
+import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -31,6 +36,7 @@ LOAD_TEST_TASKS = {"load-test-sias"}
 SERVICES_MANIFEST = REPO_ROOT / ".context" / "services.json"
 SERVICE_LOG = REPO_ROOT / ".context" / "local-benchmark-services.log"
 TUNNEL_LOG = REPO_ROOT / ".context" / "local-benchmark-ngrok.log"
+BENCHMARK_CONTEXT_ROOT = REPO_ROOT / ".context" / "benchmarks"
 RUNS_DIR = AGENTS_DIR / "benchmarks" / "runs"
 AGENT_PAYMENT_TEST_SHOP_TASK_NAME = "agent-payment-test-shop"
 BENCHMARK_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
@@ -54,6 +60,106 @@ class FailedTask:
 class FrontendTunnel:
     process: subprocess.Popen
     public_url: str
+
+
+@dataclass(frozen=True)
+class ServiceStack:
+    run_id: str
+    context_dir: Path
+    manifest_path: Path
+    service_log: Path
+    isolated: bool
+    workspace_name: str | None = None
+    base_port: int | None = None
+
+
+def slugify(value: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", value.strip()).strip("-")
+    return slug or "bench"
+
+
+def make_run_id(explicit: str | None = None) -> str:
+    if explicit:
+        return slugify(explicit)
+    return f"{int(time.time())}-{os.getpid()}-{random.randrange(10000, 99999)}"
+
+
+def _port_is_available(port: int, docker_ports: str) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.1)
+        if sock.connect_ex(("127.0.0.1", port)) == 0:
+            return False
+    return f":{port}->" not in docker_ports
+
+
+def _docker_ports_snapshot() -> str:
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "--format", "{{.Ports}}"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except Exception:
+        return ""
+    return result.stdout if result.returncode == 0 else ""
+
+
+def allocate_port_range(preferred_base: int | None = None) -> int:
+    offsets = (0, 1, 2, 3, 4, 5, 9)
+    docker_ports = _docker_ports_snapshot()
+    candidates: list[int] = []
+    if preferred_base:
+        candidates.append(preferred_base)
+    seed = int(hashlib.sha1(f"{time.time()}:{os.getpid()}".encode()).hexdigest()[:8], 16)
+    start = 55000 + (seed % 400) * 20
+    candidates.extend(range(start, 65500, 20))
+    candidates.extend(range(55000, start, 20))
+    for base in candidates:
+        if base < 1024 or base + max(offsets) >= 65535:
+            continue
+        if all(_port_is_available(base + offset, docker_ports) for offset in offsets):
+            return base
+    raise RuntimeError("Could not find a free benchmark port range")
+
+
+def build_service_stack(args: argparse.Namespace) -> ServiceStack:
+    if args.use_existing:
+        return ServiceStack(
+            run_id="existing",
+            context_dir=SERVICES_MANIFEST.parent,
+            manifest_path=SERVICES_MANIFEST,
+            service_log=SERVICE_LOG,
+            isolated=False,
+        )
+    isolated = not args.shared_stack
+    run_id = make_run_id(args.run_id)
+    if not isolated:
+        return ServiceStack(
+            run_id=run_id,
+            context_dir=SERVICES_MANIFEST.parent,
+            manifest_path=SERVICES_MANIFEST,
+            service_log=SERVICE_LOG,
+            isolated=False,
+        )
+    context_dir = BENCHMARK_CONTEXT_ROOT / run_id
+    base_name = os.environ.get("CONDUCTOR_WORKSPACE_NAME") or REPO_ROOT.name
+    workspace_name = slugify(f"{base_name}-bench-{run_id}")[:60].strip("-")
+    preferred_base = args.base_port
+    if preferred_base is None:
+        env_base = os.environ.get("CONDUCTOR_PORT")
+        if env_base and env_base.isdigit():
+            preferred_base = int(env_base) + 200
+    return ServiceStack(
+        run_id=run_id,
+        context_dir=context_dir,
+        manifest_path=context_dir / "services.json",
+        service_log=context_dir / "services.log",
+        isolated=True,
+        workspace_name=workspace_name,
+        base_port=allocate_port_range(preferred_base),
+    )
 
 
 def known_task_names() -> list[str]:
@@ -108,7 +214,7 @@ def build_benchmark_args(
     max_concurrency: int = 5,
     keep_failed_agents: bool = True,
 ) -> list[str]:
-    args = [sys.executable, "benchmarks/run_benchmark.py"]
+    args = [sys.executable, "-u", "benchmarks/run_benchmark.py"]
     args.extend(build_task_selector_args(selected_tasks, known_task_names()))
     args.extend(["--port", str(port), "--ci"])
     if bootstrap:
@@ -208,6 +314,103 @@ def stop_frontend_tunnel(tunnel: FrontendTunnel | None) -> None:
         tunnel.process.wait()
 
 
+def _manifest_run_sh_pid(stack: ServiceStack) -> int | None:
+    try:
+        manifest = load_services_manifest(stack.manifest_path)
+    except Exception:
+        return None
+    pid = manifest.get("run_sh_pid")
+    return pid if isinstance(pid, int) and pid > 1 else None
+
+
+def _wait_for_pid_exit(pid: int, timeout_seconds: float) -> bool:
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        time.sleep(0.2)
+    return False
+
+
+def _manifest_status(stack: ServiceStack) -> str | None:
+    try:
+        with open(stack.manifest_path) as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    status = data.get("status")
+    return status if isinstance(status, str) else None
+
+
+def _stop_owned_db_from_manifest(stack: ServiceStack) -> None:
+    try:
+        with open(stack.manifest_path) as f:
+            manifest = json.load(f)
+    except Exception:
+        return
+    database = manifest.get("database") if isinstance(manifest, dict) else None
+    if not isinstance(database, dict):
+        return
+    if database.get("use_system_postgres") or not database.get("owned_by_run_sh"):
+        return
+    container = database.get("container")
+    if isinstance(container, str) and container:
+        subprocess.run(["docker", "rm", "-f", container], cwd=REPO_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    volume = database.get("volume")
+    if not isinstance(volume, str) or not volume:
+        if isinstance(container, str) and container.startswith("victoria-db-"):
+            volume = f"victoria-pgdata-{container[len('victoria-db-'):]}"
+    if isinstance(volume, str) and volume:
+        subprocess.run(["docker", "volume", "rm", volume], cwd=REPO_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _kill_scoped_processes_by_run_id(stack: ServiceStack) -> None:
+    if not stack.isolated or not stack.run_id or stack.run_id == "existing":
+        return
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,command="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except Exception:
+        return
+    current_pid = os.getpid()
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        pid_text, _, command = stripped.partition(" ")
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        if pid == current_pid or stack.run_id not in command:
+            continue
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(pid, signal.SIGTERM)
+    time.sleep(1)
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        pid_text, _, command = stripped.partition(" ")
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        if pid == current_pid or stack.run_id not in command:
+            continue
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(pid, signal.SIGKILL)
+
+
 def needs_frontend_tunnel(tasks: Sequence[str]) -> bool:
     return AGENT_PAYMENT_TEST_SHOP_TASK_NAME in set(tasks) and not os.environ.get("BENCHMARK_FRONTEND_URL")
 
@@ -245,13 +448,14 @@ def wait_for_services(
     manifest_path: Path = SERVICES_MANIFEST,
     *,
     process: subprocess.Popen | None = None,
+    service_log: Path = SERVICE_LOG,
     timeout_seconds: int = 180,
 ) -> dict:
     deadline = time.time() + timeout_seconds
     last_error = ""
     while time.time() < deadline:
         if process is not None and process.poll() is not None:
-            raise RuntimeError(f"run.sh exited early with code {process.returncode}; see {SERVICE_LOG}")
+            raise RuntimeError(f"run.sh exited early with code {process.returncode}; see {service_log}")
         try:
             manifest = load_services_manifest(manifest_path)
             ports = manifest["ports"]
@@ -263,18 +467,39 @@ def wait_for_services(
         except Exception as exc:
             last_error = str(exc)
         time.sleep(2)
-    raise TimeoutError(f"Timed out waiting for benchmark services ({last_error}); see {SERVICE_LOG}")
+    raise TimeoutError(f"Timed out waiting for benchmark services ({last_error}); see {service_log}")
 
 
-def start_services(clean_first: bool = True, *, anon_steel_profile: bool = False) -> tuple[subprocess.Popen, dict]:
-    (REPO_ROOT / ".context").mkdir(exist_ok=True)
-    if clean_first:
+def _context_dir_env_value(context_dir: Path) -> str:
+    try:
+        return str(context_dir.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(context_dir)
+
+
+def start_services(
+    stack: ServiceStack,
+    clean_first: bool = True,
+    *,
+    anon_steel_profile: bool = False,
+) -> tuple[subprocess.Popen, dict]:
+    stack.context_dir.mkdir(parents=True, exist_ok=True)
+    if clean_first and not stack.isolated:
         subprocess.run(["bash", "scripts/kill-services.sh"], cwd=REPO_ROOT, check=True)
-    service_log = open(SERVICE_LOG, "w")
+    service_log = open(stack.service_log, "w")
     env = {**os.environ, "DISABLE_GMAIL_SYNC": "1"}
     if anon_steel_profile:
         env["BENCHMARK_ANON_STEEL_PROFILE"] = "true"
         env["BENCHMARK_DISABLE_SAVED_BROWSER_AUTH"] = "true"
+    if stack.isolated:
+        assert stack.workspace_name
+        assert stack.base_port
+        env["BENCHMARK_ISOLATED_RUN"] = "true"
+        env["BENCHMARK_CONTEXT_DIR"] = _context_dir_env_value(stack.context_dir)
+        env["BENCHMARK_RUN_ID"] = stack.run_id
+        env["CONDUCTOR_WORKSPACE_NAME"] = stack.workspace_name
+        env["CONDUCTOR_PORT"] = str(stack.base_port)
+        env["ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME"] = "1"
     process = subprocess.Popen(
         ["bash", "scripts/run.sh", "--benchmark"],
         cwd=REPO_ROOT,
@@ -284,17 +509,72 @@ def start_services(clean_first: bool = True, *, anon_steel_profile: bool = False
         start_new_session=True,
     )
     service_log.close()
-    manifest = wait_for_services(process=process)
+    manifest = wait_for_services(stack.manifest_path, process=process, service_log=stack.service_log)
     return process, manifest
 
 
-def stop_services(process: subprocess.Popen | None = None) -> None:
-    subprocess.run(["bash", "scripts/kill-services.sh"], cwd=REPO_ROOT, check=False)
+def stop_services(process: subprocess.Popen | None = None, *, stack: ServiceStack | None = None) -> None:
+    if stack is None or not stack.isolated:
+        subprocess.run(["bash", "scripts/kill-services.sh"], cwd=REPO_ROOT, check=False)
+    elif _manifest_status(stack) == "stopped":
+        _stop_owned_db_from_manifest(stack)
+        _kill_scoped_processes_by_run_id(stack)
+        return
+    target_pid: int | None = None
     if process is not None and process.poll() is None:
+        target_pid = process.pid
+    elif stack is not None and stack.isolated:
+        target_pid = _manifest_run_sh_pid(stack)
+
+    if target_pid is not None:
         try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            return
+            os.killpg(target_pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+        if process is not None and process.pid == target_pid:
+            try:
+                process.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(target_pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+        elif not _wait_for_pid_exit(target_pid, 20):
+            try:
+                os.killpg(target_pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            _wait_for_pid_exit(target_pid, 5)
+
+    if stack is not None and stack.isolated:
+        if _manifest_status(stack) != "stopped":
+            _stop_owned_db_from_manifest(stack)
+        _kill_scoped_processes_by_run_id(stack)
+
+
+def apply_manifest_environment(manifest: dict) -> None:
+    ports = manifest.get("ports") if isinstance(manifest, dict) else {}
+    urls = manifest.get("urls") if isinstance(manifest, dict) else {}
+    db_port = ports.get("local_db") if isinstance(ports, dict) else None
+    if db_port:
+        database_url = f"postgresql://postgres:postgres@localhost:{db_port}/victoria"
+        os.environ["DATABASE_URL"] = f"{database_url}?connection_limit=50&pool_timeout=30"
+        os.environ["DIRECT_URL"] = database_url
+    task_queue = manifest.get("temporal_task_queue")
+    if task_queue:
+        os.environ["TEMPORAL_TASK_QUEUE"] = str(task_queue)
+        prefix = "navi-agent-tasks-"
+        if str(task_queue).startswith(prefix):
+            os.environ["CONDUCTOR_WORKSPACE_NAME"] = str(task_queue)[len(prefix) :]
+            os.environ["ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME"] = "1"
+    public_url = (urls.get("public") if isinstance(urls, dict) else "") or ""
+    if public_url:
+        os.environ["PUBLIC_BASE_URL"] = str(public_url).rstrip("/")
+        os.environ.setdefault("BENCHMARK_FRONTEND_URL", str(public_url).rstrip("/"))
 
 
 def extract_results_path(output: str) -> Path | None:
@@ -417,7 +697,15 @@ def run_benchmark_invocation(
     )
     print(f"\n== Running {invocation.label}: {', '.join(invocation.tasks)}")
     print("$ " + " ".join(command))
-    process = subprocess.Popen(command, cwd=AGENTS_DIR, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    process = subprocess.Popen(
+        command,
+        cwd=AGENTS_DIR,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
     output_lines: list[str] = []
     assert process.stdout is not None
     for line in process.stdout:
@@ -436,6 +724,15 @@ def run_benchmark_invocation(
 
 
 def tasks_from_args(args: argparse.Namespace) -> list[str]:
+    if args.eval_suite:
+        if args.only:
+            return validate_task_names([name.strip() for name in args.only.split(",") if name.strip()])
+        selected = [task for task in all_tasks() if task.status == "ready"]
+        if args.bench:
+            selected = [task for task in selected if task.bench == args.bench]
+        if args.agent_only:
+            selected = [task for task in selected if task.runner == "agent"]
+        return validate_task_names([task.name for task in selected if task.runner == "agent"])
     if args.rerun_failed:
         run_path = resolve_run_path(args.rerun_failed)
         failures = failed_tasks_from_run(run_path)
@@ -445,16 +742,43 @@ def tasks_from_args(args: argparse.Namespace) -> list[str]:
         return validate_task_names(names)
     if args.full:
         return known_task_names()
+    if args.suite:
+        if args.suite == "all":
+            selected = [task for task in all_tasks() if task.runner == "agent" and task.status == "ready"]
+        elif args.suite in ("rose-bench", "pipeline-e2e"):
+            selected = [
+                task
+                for task in all_tasks()
+                if task.runner == "agent" and task.status == "ready" and task.bench == args.suite
+            ]
+        else:
+            selected = [
+                task
+                for task in all_tasks()
+                if task.runner == "agent" and task.status == "ready" and args.suite in task.tags
+            ]
+        if not selected:
+            raise ValueError(f"No ready agent benchmark tasks matched suite/tag: {args.suite}")
+        return validate_task_names([task.name for task in selected])
     if args.tasks:
         return validate_task_names(args.tasks)
-    raise ValueError("Specify benchmark task names, --full, or --rerun-failed latest")
+    raise ValueError("Specify benchmark task names, --suite, --full, or --rerun-failed latest")
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run local benchmarks with managed services and diagnostics")
     parser.add_argument("tasks", nargs="*", help="Benchmark task names, e.g. browser-agent cache-coverage")
+    parser.add_argument("--suite", help="Benchmark suite/tag to run, e.g. smoke, rose-bench, pipeline-e2e, all")
     parser.add_argument("--full", action="store_true", help="Run every benchmark; load-test-sias runs by itself")
+    parser.add_argument("--eval-suite", action="store_true", help="Run benchmarks/run_eval_suite.py against isolated services")
     parser.add_argument("--rerun-failed", metavar="RUN", help="Rerun failed tasks from a result JSON or 'latest'")
+    parser.add_argument("--only", help="Comma-separated eval task names for --eval-suite")
+    parser.add_argument("--agent-only", action="store_true", help="Pass --agent-only through to run_eval_suite.py")
+    parser.add_argument(
+        "--bench",
+        choices=["rose-bench", "pipeline-e2e"],
+        help="Pass --bench through to run_eval_suite.py",
+    )
     parser.add_argument("--bootstrap", action="store_true", help="Pass --bootstrap through to run_benchmark.py")
     parser.add_argument(
         "--anon",
@@ -464,25 +788,88 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--max-concurrency", type=int, default=5, help="Max concurrent non-load benchmark tasks")
     parser.add_argument("--keep-services", action="store_true", help="Leave local services running after benchmarks")
     parser.add_argument("--use-existing", action="store_true", help="Use services from .context/services.json")
+    parser.add_argument(
+        "--shared-stack",
+        action="store_true",
+        help="Use the default .context/services.json stack instead of a per-run isolated stack",
+    )
+    parser.add_argument("--run-id", help="Stable id for the isolated benchmark stack")
+    parser.add_argument("--base-port", type=int, help="Preferred base port for an isolated benchmark stack")
     parser.add_argument("--no-clean", action="store_true", help="Do not call scripts/kill-services.sh before startup")
     args = parser.parse_args(argv)
-    selected_modes = sum(1 for enabled in (bool(args.tasks), args.full, bool(args.rerun_failed)) if enabled)
+    selected_modes = sum(
+        1
+        for enabled in (bool(args.tasks), bool(args.suite), args.full, bool(args.rerun_failed), args.eval_suite)
+        if enabled
+    )
     if selected_modes != 1:
-        parser.error("specify exactly one benchmark selection: tasks, --full, or --rerun-failed")
+        parser.error("specify exactly one benchmark selection: tasks, --suite, --full, --rerun-failed, or --eval-suite")
+    if not args.eval_suite and (args.only or args.agent_only or args.bench):
+        parser.error("--only, --agent-only, and --bench require --eval-suite")
+    if args.eval_suite and (args.bootstrap or args.anon):
+        parser.error("--bootstrap and --anon are task-runner options, not --eval-suite options")
     if args.max_concurrency < 1:
         parser.error("--max-concurrency must be >= 1")
+    if args.use_existing and (args.shared_stack or args.run_id or args.base_port or args.no_clean):
+        parser.error("--use-existing cannot be combined with --shared-stack, --run-id, --base-port, or --no-clean")
+    if args.base_port is not None and args.base_port < 1024:
+        parser.error("--base-port must be >= 1024")
     return args
+
+
+def run_eval_suite_invocation(*, port: int, args: argparse.Namespace) -> int:
+    command = [sys.executable, "-u", "benchmarks/run_eval_suite.py", "--port", str(port)]
+    if args.only:
+        command.extend(["--only", args.only])
+    if args.agent_only:
+        command.append("--agent-only")
+    if args.bench:
+        command.extend(["--bench", args.bench])
+    print("\n== Running eval suite")
+    print("$ " + " ".join(command))
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    return subprocess.run(command, cwd=AGENTS_DIR, env=env).returncode
+
+
+def promote_direct_external_runner_tasks(args: argparse.Namespace) -> None:
+    if args.eval_suite or not args.tasks:
+        return
+    by_name = {task.name: task for task in all_tasks()}
+    selected = [by_name[name] for name in validate_task_names(args.tasks)]
+    external = [task.name for task in selected if task.runner != "agent"]
+    if not external:
+        return
+    args.eval_suite = True
+    args.only = ",".join(task.name for task in selected)
+    print(
+        "Routing through eval suite because the selection includes external runner task(s): "
+        + ", ".join(external)
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
+    promote_direct_external_runner_tasks(args)
     selected_tasks = tasks_from_args(args)
     process: subprocess.Popen | None = None
     frontend_tunnel: FrontendTunnel | None = None
     result_paths: list[Path] = []
+    stack = build_service_stack(args)
+
+    def handle_shutdown(signum: int, _frame: object) -> None:
+        print(f"\nReceived signal {signum}; tearing down benchmark services...", file=sys.stderr)
+        stop_frontend_tunnel(frontend_tunnel)
+        if not args.keep_services and not args.use_existing:
+            stop_services(process, stack=stack)
+        raise SystemExit(128 + signum)
+
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGTERM, handle_shutdown)
+    signal.signal(signal.SIGINT, handle_shutdown)
     try:
         if args.use_existing:
-            manifest = wait_for_services()
+            manifest = wait_for_services(stack.manifest_path, service_log=stack.service_log)
             if args.anon and not services_manifest_anon_enabled(manifest):
                 raise RuntimeError(
                     "Existing local stack was not started with anon browser auth disabled. "
@@ -490,8 +877,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
         else:
             process, manifest = start_services(
+                stack,
                 clean_first=not args.no_clean,
                 anon_steel_profile=args.anon,
+            )
+        apply_manifest_environment(manifest)
+        if stack.isolated:
+            ports = manifest.get("ports", {})
+            print(
+                "Isolated benchmark stack: "
+                f"run_id={stack.run_id} "
+                f"context={stack.context_dir.relative_to(REPO_ROOT)} "
+                f"backend={ports.get('backend')} "
+                f"frontend={ports.get('frontend')} "
+                f"db={ports.get('local_db')} "
+                f"queue={manifest.get('temporal_task_queue')}"
             )
         if needs_payment_fixture(selected_tasks):
             seed_payment_fixture(manifest)
@@ -508,6 +908,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 os.environ["BENCHMARK_FRONTEND_URL"] = frontend_tunnel.public_url.rstrip("/")
                 print(f"Test payment tunnel (fallback): {frontend_tunnel.public_url}")
         port = int(manifest["ports"]["backend"])
+        if args.eval_suite:
+            return run_eval_suite_invocation(port=port, args=args)
         for invocation in plan_invocations(selected_tasks):
             result_path = run_benchmark_invocation(
                 invocation,
@@ -531,9 +933,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("\nAll requested benchmarks passed.")
         return 0
     finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        signal.signal(signal.SIGINT, previous_sigint)
         stop_frontend_tunnel(frontend_tunnel)
         if not args.keep_services and not args.use_existing:
-            stop_services(process)
+            stop_services(process, stack=stack)
 
 
 if __name__ == "__main__":

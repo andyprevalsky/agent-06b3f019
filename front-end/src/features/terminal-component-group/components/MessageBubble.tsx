@@ -27,14 +27,13 @@ import { renderSpecialisedBubble } from './message-bubble/renderSpecialisedBubbl
 import { renderFallbackBubble } from './message-bubble/renderFallbackBubble';
 
 export default function MessageBubble(props: MessageBubbleProps) {
-  const { message, isStreaming = false, shouldType = false } = props;
+  const { message, isStreaming = false } = props;
   const routing = useMessageRouting(message);
   const toolData = useToolData({
     message,
     isStreaming,
     isAssistant: routing.isAssistant,
     isTool: routing.isTool,
-    shouldType,
   });
 
   const specialised = renderSpecialisedBubble({ props, routing });

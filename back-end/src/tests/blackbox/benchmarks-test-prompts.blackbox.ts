@@ -1,5 +1,4 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
 /**
  * Black-box tests for /api/benchmarks/test-prompts
  *
@@ -39,6 +38,7 @@ const TestPromptSchema = z.object({
   description: z.string().min(1),
   prompt: z.string().min(1),
   attachmentUrls: z.array(z.string().min(1)),
+  tags: z.array(z.string().min(1)),
 });
 
 const TestPromptsResponseSchema = z.object({
@@ -138,6 +138,30 @@ async function testPrompts_matchAgentCatalogEntries() {
   }
 }
 
+async function testPrompts_tagsMatchCatalog() {
+  // Tags drive the picker's tag filter — they must pass through from the
+  // catalog verbatim, entry by entry.
+  const tasksRes = await request(`${BASE_URL}/api/benchmarks`);
+  const promptsRes = await request(`${BASE_URL}/api/benchmarks/test-prompts`);
+  if (tasksRes.status !== 200 || promptsRes.status !== 200) return;
+  const tasks = (tasksRes.data as { tasks: { title: string; runner?: string; tags?: string[] }[] })
+    .tasks;
+  const prompts = (promptsRes.data as { prompts: TestPrompt[] }).prompts;
+  const agentTasks = tasks.filter((t) => (t.runner ?? 'agent') === 'agent');
+  if (prompts.length !== agentTasks.length) return; // drift guard covers count mismatch
+  for (let i = 0; i < agentTasks.length; i++) {
+    const expected = agentTasks[i].tags ?? [];
+    if (JSON.stringify(prompts[i].tags) !== JSON.stringify(expected)) {
+      throw new Error(
+        `test-prompts[${i}] "${prompts[i].title}" tags ${JSON.stringify(prompts[i].tags)} != catalog tags ${JSON.stringify(expected)}`
+      );
+    }
+  }
+  if (!prompts.some((p) => p.tags.length > 0)) {
+    throw new Error('No prompt carries any tags — tag pass-through appears broken');
+  }
+}
+
 async function testPrompts_excludeExternalRunners() {
   const res = await request(`${BASE_URL}/api/benchmarks/test-prompts`);
   if (res.status !== 200) return;
@@ -205,6 +229,7 @@ async function runAll() {
   const tests: { name: string; fn: () => Promise<void> }[] = [
     { name: 'happy path (200 or 500)', fn: testPrompts_happy },
     { name: 'matches agent-runner catalog entries', fn: testPrompts_matchAgentCatalogEntries },
+    { name: 'tags match catalog entries', fn: testPrompts_tagsMatchCatalog },
     { name: 'excludes external vitest smokes', fn: testPrompts_excludeExternalRunners },
     { name: 'attachment urls under /test-assets/', fn: testPrompts_attachmentUrlsUseTestAssets },
     { name: '{frontend_url} token rewritten', fn: testPrompts_frontendUrlTokenRewritten },

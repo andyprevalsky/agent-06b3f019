@@ -227,7 +227,7 @@ function ThinkingStepRow({ step, index }: { step: ExploreStep; index: number }) 
       className="flex items-start gap-1.5 text-[10px] text-muted-foreground/60 py-0.5"
     >
       <Lightbulb className="h-2.5 w-2.5 flex-shrink-0 text-amber-400/70 mt-0.5" />
-      <span className="italic flex-1">{thinkingText || 'Thinking...'}</span>
+      <span className="italic flex-1 min-w-0 break-words">{thinkingText || 'Thinking...'}</span>
     </div>
   );
 }
@@ -264,11 +264,11 @@ function ToolStepRow({
             )}
           />
         )}
-        <span className="flex-1">{step.title?.replace(/\n/g, ' ')}</span>
+        <span className="flex-1 min-w-0 break-words">{step.title?.replace(/\n/g, ' ')}</span>
       </div>
 
       {isExpanded && hasContent && (
-        <div className="ml-4 mt-0.5 mb-1 text-[10px] text-muted-foreground/50 whitespace-pre-wrap max-h-[120px] overflow-y-auto border-l border-border/30 pl-2">
+        <div className="ml-4 mt-0.5 mb-1 text-[10px] text-muted-foreground/50 whitespace-pre-wrap break-words max-h-[120px] overflow-y-auto overflow-x-hidden border-l border-border/30 pl-2">
           {step.message}
         </div>
       )}
@@ -286,7 +286,7 @@ function ExploreStepsList({
   toggleStep: (i: number, e: React.MouseEvent) => void;
 }) {
   return (
-    <div className="px-3 pb-2 space-y-0.5 max-h-[250px] overflow-y-auto">
+    <div className="px-3 pb-2 min-w-0 max-w-full space-y-0.5 overflow-y-auto overflow-x-hidden max-h-[250px]">
       {steps.map((step, i) =>
         isThinkingStep(step) ? (
           <ThinkingStepRow key={`${step.timestamp}-${i}`} step={step} index={i} />
@@ -309,8 +309,8 @@ function TerminalResult({ message }: { message: string }) {
 
   return (
     <div className="border-t border-border/30 px-3 py-2">
-      <div className="text-[10px] text-foreground/60 whitespace-pre-wrap max-h-[120px] overflow-y-auto">
-        <MarkdownText text={message} className="text-[10px]" />
+      <div className="text-[10px] text-foreground/60 whitespace-pre-wrap break-words max-h-[120px] overflow-y-auto overflow-x-hidden">
+        <MarkdownText text={message} className="tool-message-markdown text-[10px]" />
       </div>
     </div>
   );
@@ -347,7 +347,7 @@ export function InlineExploreChip({
   const isTerminal = explore.status === 'FINISHED' || explore.status === 'ERROR';
 
   return (
-    <div className="border-t border-border/40">
+    <div className="min-w-0 max-w-full overflow-hidden border-t border-border/40">
       <ExploreChipHeader
         explore={explore}
         isLive={isLive}
@@ -359,7 +359,9 @@ export function InlineExploreChip({
 
       {isExpanded && goalText && (
         <div className="px-3 pt-1.5 pb-1 border-t border-border/30">
-          <div className="text-[10px] text-foreground/60 whitespace-pre-wrap">{goalText}</div>
+          <div className="text-[10px] text-foreground/60 whitespace-pre-wrap break-words">
+            {goalText}
+          </div>
         </div>
       )}
 

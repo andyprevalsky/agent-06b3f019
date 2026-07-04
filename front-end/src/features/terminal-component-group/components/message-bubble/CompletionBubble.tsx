@@ -32,7 +32,7 @@ export function CompletionBubble({
 
   return (
     <div className={cn('flex', !compact && 'gap-3', 'animate-in fade-in duration-300')}>
-      <div className="flex-1 space-y-3">
+      <div className="flex-1 min-w-0 space-y-3">
         <CompletionSummaryCard data={completionData} />
         {onSubmitFeedback && <FeedbackBanner onSubmit={onSubmitFeedback} />}
       </div>
