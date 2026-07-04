@@ -294,6 +294,32 @@ async function main(): Promise<void> {
   );
 
   await test(
+    'local listing tolerates corrupt metadata sidecars',
+    withEnv(
+      {
+        TRACE_ARCHIVE_ENABLED: '1',
+        TRACE_ARCHIVE_BACKEND: 'local',
+        TRACE_ARCHIVE_LOCAL_DIR: undefined,
+        TRACE_ARCHIVE_ENCRYPTION_KEY_B64: undefined,
+      },
+      async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-archive-corrupt-meta-'));
+        process.env.TRACE_ARCHIVE_LOCAL_DIR = dir;
+        const objectDir = path.join(dir, 'trace-archive', 'agent-corrupt-meta', 'provider', 'sms');
+        fs.mkdirSync(objectDir, { recursive: true });
+        const objectPath = path.join(objectDir, 'bad.json.gz.enc');
+        fs.writeFileSync(objectPath, Buffer.from('not-real-ciphertext'));
+        fs.writeFileSync(`${objectPath}.meta.json`, '{not valid json');
+
+        const listed = await listArchivedObjects('agent-corrupt-meta');
+        assert.strictEqual(listed.length, 1);
+        assert.strictEqual(listed[0].path, 'provider/sms/bad.json.gz.enc');
+        assert.strictEqual(listed[0].metadata, undefined);
+      }
+    )
+  );
+
+  await test(
     'R2 backend uses S3 put/get/list and validates byte-perfect roundtrip',
     withEnv(
       {
