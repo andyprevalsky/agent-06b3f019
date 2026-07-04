@@ -15,13 +15,25 @@ import { createLogger } from '../logger';
 
 const log = createLogger('SmsContext');
 
-// Cache boundary handling: the call site (supervisorHandler.ts) wraps the
-// returned `systemPrompt` in `markCacheable()` (see providers/rose/cache.ts),
-// which makes the entire prompt the cache-stable static prefix on the
-// Anthropic claudeAuth path. We do NOT embed the boundary sentinel here —
-// keeping the cache boundary explicit at the call site makes the contract
-// visible. Per-SMS dynamic state lives in `contextUserMessage` (a separate
-// trailing user-role message) so it never invalidates the cached prefix.
+// Cache boundary handling: the SMS supervisor system prompt reuses the main
+// agent's three-block skeleton (agents/utils/prompts.py:build_system_prompt):
+//
+//   Block 1  ROSE_CORE            — universal, user-agnostic core prose, shared
+//                                   byte-for-byte with the main agent. One
+//                                   fleet-wide ephemeral.global cache block.
+//   Block 2  # User Context       — per-user profile (name / phone / address).
+//                                   Per-user ephemeral.global cache block.
+//   Block 3  SMS_SURFACE_OVERLAY  — everything SMS-specific (surface framing,
+//                                   grep grounding, input format, response
+//                                   rules). User-agnostic; global cache block.
+//
+// Blocks are separated by SYSTEM_PROMPT_DYNAMIC_BOUNDARY sentinels; the call
+// site (supervisorHandler.ts) wraps the result in `markCacheable()`, which
+// appends one trailing boundary. claudeAuth.ts (buildAnthropicBody) then marks
+// each non-empty section a globally-cached system block. Per-SMS dynamic state
+// (datetime, hierarchy, attention requests, recent activity) lives in
+// `contextUserMessage` — a separate trailing user-role message — so it never
+// invalidates any cached block.
 
 // Tool names whose messages are visible to users in the frontend
 const VISIBLE_TOOL_NAMES = [
@@ -87,7 +99,7 @@ interface VisibleMessage {
   timestamp: Date;
 }
 
-interface UserProfileContext {
+export interface UserProfileContext {
   userId: string;
   name: string | null;
   phone: string | null;
@@ -165,14 +177,13 @@ export async function buildSmsContext(userId: string): Promise<SmsContext> {
     durationMs: Date.now() - startTime,
   });
 
-  // STATIC: identity, user profile (rarely changes), tool guidance, response
-  // format, and custom system prompt — cacheable up to the boundary marker.
+  // STATIC three-block system prompt (see module header):
+  //   Block 1 ROSE_CORE — universal, user-agnostic (shared with the main agent)
+  //   Block 2 # User Context — per-user profile (name / phone / address)
+  //   Block 3 SMS_SURFACE_OVERLAY — SMS-specific surface + response rules
+  // Per-SMS dynamic state stays out of all three (see contextUserMessage).
   const userContextSection = formatUserContext(user);
-  const systemPrompt = assembleSystemPrompt({
-    userContextSection,
-    userName: user?.name || 'User',
-    assistantName: user?.systemName || 'Rose',
-  });
+  const systemPrompt = assembleSystemPrompt({ userContextSection });
 
   // DYNAMIC: hierarchy, attention requests, recent activity, current datetime —
   // these change on every SMS and live in a trailing user message so they
@@ -492,10 +503,16 @@ function formatVisibleMessages(messages: VisibleMessage[], rootAgents: RootAgent
   return lines.join('\n');
 }
 
-function formatUserContext(user: UserProfileContext | null): string {
+export function formatUserContext(user: UserProfileContext | null): string {
   if (!user) return '';
 
   const parts = ['# User Context\n'];
+
+  // Assistant name is per-user (the user's chosen `systemName`, default "Rose").
+  // It lives here in the per-user Block 2 rather than the shared, user-agnostic
+  // ROSE_CORE so Block 1 stays byte-identical across the whole fleet.
+  const assistantName = user.systemName || 'Rose';
+  parts.push(`You are the user's personal assistant; they have named you "${assistantName}".`);
 
   if (user.name) parts.push(`Name: ${user.name}`);
   if (user.phone) parts.push(`Phone: ${user.phone}`);
@@ -513,10 +530,6 @@ function formatUserContext(user: UserProfileContext | null): string {
     }
   }
 
-  // Note: user.systemName is interpolated into the universal-static prompt as
-  // `{USER_ASSIGNED_ASSISTANT_NAME}` at render time on the per-user-stable
-  // template path; re-stating it here would duplicate the value and drift.
-
   return parts.join('\n');
 }
 
@@ -533,32 +546,35 @@ function formatTimeAgo(date: Date): string {
 // ============================================
 
 /**
- * STATIC system prompt — identity, user profile, tool guidance, response
- * format. Anything that would change per-SMS (datetime, hierarchy, attention
- * requests, recent activity) lives in `assembleContextUserMessage` instead.
+ * Block 1 — Rose core. The universal, surface-agnostic prose shared byte-for-
+ * byte with the main agent (agents/utils/prompts.py:MAIN_SYSTEM_PROMPT): the
+ * seed/identity metaphor, the low-energy-COO / bias-to-action paragraph, and
+ * the harness auto-escalation approval paragraph.
  *
- * The call site wraps this prompt in `markCacheable()` so the entire prefix
- * is tagged with cache_control: ephemeral on the Anthropic claudeAuth path,
- * letting prompt caching reuse it across SMSes within the 5-min window.
- * See providers/rose/cache.ts.
+ * MUST contain no per-user interpolation and no surface-specific text, so it is
+ * byte-identical across every user AND matches the main agent's wording. That
+ * makes it one fleet-wide `ephemeral.global` cache block on the claudeAuth path.
+ * It is pinned to the Python source by
+ * tests/structural/prompt-personality-sync.test.ts — edit both together.
  */
+export const ROSE_CORE = `You are a Rose Labs Agent. A single agent in a massive network of agents that together form a super-intelligent system. Each agent, including you, is a nurturer of metaphysical seeds - the user plants a goal and your job
+is to grow it to full fruition using the tools available to you.
+
+Operate with the lowest energy expenditure possible. Each tool invocation consumes
+human attention, social credibility, or monetary capital. Behave like a world-class COO: make reasonable assumptions, don't get blocked, move forward, MAJOR bias towards action. You specialize in real-world, long-horizon task execution. The task is not complete unless the goal is entirely accomplished with no further actions required from the user.
+
+Irreversible, external, destructive, and privacy-sensitive actions 100% ARE allowed, that is because you are in a harness that automatically detects those behaviors and escalates them for human approval. This is to allow you to bias completely towards action with the confidence that an external entity will ensure any attempted actions are safe, asking for permission in this case is much worse than asking for forgiveness.`;
+
 /**
- * Block 1 template — assistant identity, input format docs, response rules.
- * Per-user-stable: interpolates `{USER_ASSIGNED_ASSISTANT_NAME}` (the user's
- * preferred system name, defaults to "Rose") and `{USER_NAME}`. Cached as a
- * single `ephemeral.global` block on the claudeAuth path; across messages from
- * the same user this is byte-identical, so the Anthropic prefix cache reuses it.
- *
- * No per-SMS data (datetime, hierarchy, recent activity) goes here — that lives
- * in the trailing user-role context message so it never invalidates the prefix.
+ * Block 3 — SMS surface overlay. Everything specific to running over SMS: the
+ * surface framing, the `grep` grounding contract (the main agent's equivalent
+ * names `spawn_agent(type="explore")`), the input/state-block format docs, and
+ * the response rules. User-agnostic (no names, no per-SMS state), so it is a
+ * globally-cacheable block just like Block 1.
  */
-const STATIC_SUPERVISOR_PROMPT_TEMPLATE = `You are {USER_ASSIGNED_ASSISTANT_NAME}, a nurturer of metaphysical seeds. The user plants a goal and your job is to grow it to full fruition using the tools available to you.
+export const SMS_SURFACE_OVERLAY = `# Your Surface
 
-In this surface, you receive SMS messages from {USER_NAME} and orchestrate massive agent networks to accomplish user goals.
-
-Operate with the lowest energy expenditure possible. Each tool invocation consumes human attention, social credibility, or monetary capital. Behave like a world-class COO: make reasonable assumptions, don't get blocked, move forward, MAJOR bias towards action. You specialize in real-world, long-horizon task execution. The task is not complete unless the goal is entirely accomplished with no further actions required from the user.
-
-Irreversible, external, destructive, and privacy-sensitive actions 100% ARE allowed, that is because you are in a harness that automatically detects those behaviors and escalates them for human approval. This is to allow you to bias completely towards action with the confidence that an external entity will ensure any attempted actions are safe, asking for permission in this case is much worse than asking for forgiveness.
+You are responding over SMS. You receive SMS messages from the user and orchestrate massive agent networks to accomplish user goals. Be conversational but concise — this is texting, not email.
 
 Context is available to you primarily through grep, this tool's purpose is to acquire factual information from the user's own data (contacts/network, message history, transactions, documents). MANDATORY: All load-bearing information must be grounded by being retrieved from grep, web_search, the current state block, or because it came from a user.
 
@@ -603,35 +619,24 @@ Parallelize as many tool calls per turn as reasonable so you respond quickly wit
 - Calling attempt_completion both sends your SMS and commits every write-tool call you made this turn. There is no separate commit step and no retraction after you call it.`;
 
 /**
- * Cache layout produced here, on the Anthropic claudeAuth path:
+ * Compose the three-block SMS supervisor system prompt:
  *
- *   Block 1 — STATIC_SUPERVISOR_PROMPT_TEMPLATE rendered with the user's name
- *             and preferred assistant name. Per-user-stable, cached `ephemeral.global`.
- *   Block 2 — formatUserContext() output (name / phone / address). Per-user-stable,
- *             cached `ephemeral.global`.
- *   Then the supervisor handler appends a user-role message with per-SMS env state.
+ *   ROSE_CORE  {BOUNDARY}  # User Context  {BOUNDARY}  SMS_SURFACE_OVERLAY
  *
- * Mechanism: we emit `BLOCK1{BOUNDARY}BLOCK2` here; `markCacheable()` in the
- * caller appends ONE trailing boundary. The resulting two boundaries are
- * recognized by `transforms.ts` → `claudeAuth.ts` → multi-block cache logic
- * which marks each non-empty section globally cacheable. See
- * agents/providers/rose/claude_auth.py:_build_system_blocks for the source pattern.
+ * `markCacheable()` at the call site appends ONE trailing boundary; claudeAuth's
+ * `buildAnthropicBody` then splits on the boundaries and marks each non-empty
+ * section a globally-cached system block (see the module header). When there is
+ * no user profile, Block 2 is omitted and the layout collapses to two blocks.
  */
-function assembleSystemPrompt(params: {
-  userContextSection: string;
-  userName: string;
-  assistantName: string;
-}): string {
-  const { userContextSection, userName, assistantName } = params;
-
-  const block1 = STATIC_SUPERVISOR_PROMPT_TEMPLATE.replace(
-    /\{USER_ASSIGNED_ASSISTANT_NAME\}/g,
-    assistantName
-  ).replace(/\{USER_NAME\}/g, userName);
+export function assembleSystemPrompt(params: { userContextSection: string }): string {
+  const { userContextSection } = params;
 
   const block2 = userContextSection.trim();
+  const blocks = block2
+    ? [ROSE_CORE, block2, SMS_SURFACE_OVERLAY]
+    : [ROSE_CORE, SMS_SURFACE_OVERLAY];
 
-  return block2 ? `${block1}${SYSTEM_PROMPT_DYNAMIC_BOUNDARY}${block2}` : block1;
+  return blocks.join(SYSTEM_PROMPT_DYNAMIC_BOUNDARY);
 }
 
 /**
