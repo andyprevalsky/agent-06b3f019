@@ -43,11 +43,13 @@ import {
   testNaturalApproval_resolvesPendingAttentionRequest,
   testPrompt_neverExposeRoutingIds,
   testRealLlm_answersContactFactViaGrep,
-  testRealLlm_photoAttachmentRoundTrip,
   testRealLlm_purchaseRequestSpawnsAgent,
   testRealLlm_supervisorRoundTrip,
-  testRealLlm_voiceNoteRoundTrip,
 } from './sms-supervisor.behavior';
+import {
+  testRealLlm_photoAttachmentRoundTrip,
+  testRealLlm_voiceNoteRoundTrip,
+} from './sms-supervisor.media.behavior';
 import { buildToolFailureMessage } from '../../providers/smsSupervisor/supervisorHandler';
 import { commitPendingWrites, PendingOp } from '../../providers/smsSupervisor/supervisorTools';
 config();
