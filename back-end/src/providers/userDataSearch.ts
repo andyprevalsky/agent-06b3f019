@@ -1,0 +1,67 @@
+/**
+ * Bridge exposing the data domain's grep to providers (SMS supervisor).
+ *
+ * Providers must not import domains (structural invariant 3, layer-deps),
+ * so server.ts registers `grep` from domains/data/service here at boot and
+ * provider code calls through this slot. Types below are structural mirrors
+ * of the domain's GrepParams/GrepResult — kept import-free on purpose.
+ */
+
+export interface UserDataGrepParams {
+  pattern: string;
+  source?: string;
+  filters?: Record<string, unknown>;
+  '-A'?: string | number;
+  '-B'?: string | number;
+  '-C'?: string | number;
+  context?: string | number;
+  '-n'?: boolean | string;
+  '-i'?: boolean | string;
+  head_limit?: string | number;
+  offset?: string | number;
+  multiline?: boolean | string;
+  person?: string;
+  since?: string;
+}
+
+export interface UserDataGrepMatch {
+  source: string;
+  path: string;
+  pointer: string;
+  timestamp: string;
+  role?: string;
+  line_numbers?: boolean;
+  content: string;
+}
+
+export interface UserDataGrepResult {
+  matches: UserDataGrepMatch[];
+  total_matches: number;
+  truncated: boolean;
+  pattern: string;
+  sources: string[];
+  applied_limit: number;
+  applied_offset: number;
+  summaries?: Partial<Record<string, unknown>>;
+  message?: string;
+}
+
+type UserDataGrepFn = (userId: string, params: UserDataGrepParams) => Promise<UserDataGrepResult>;
+
+let grepExecutor: UserDataGrepFn | null = null;
+
+export function registerUserDataGrep(fn: UserDataGrepFn): void {
+  grepExecutor = fn;
+}
+
+export async function executeUserDataGrep(
+  userId: string,
+  params: UserDataGrepParams
+): Promise<UserDataGrepResult> {
+  if (grepExecutor === null) {
+    throw new Error(
+      '[UserDataSearch] user data grep not initialized — registerUserDataGrep was never called'
+    );
+  }
+  return grepExecutor(userId, params);
+}

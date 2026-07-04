@@ -387,11 +387,13 @@ def _validate_payment_receipt(task: BenchmarkTask, req: dict) -> Optional[str]:
     receipt = _payment_receipt_from_attention_request(req)
     if not receipt:
         return "missing requestPaymentCard metadata"
-    if receipt.get("merchant") != expected.get("merchant"):
+    if "merchant" in expected and receipt.get("merchant") != expected.get("merchant"):
         return f"merchant mismatch: expected {expected.get('merchant')}, got {receipt.get('merchant')}"
-    if (receipt.get("currency") or "USD") != expected.get("currency", "USD"):
+    if "currency" in expected and (receipt.get("currency") or "USD") != expected.get("currency", "USD"):
         return f"currency mismatch: expected {expected.get('currency', 'USD')}, got {receipt.get('currency')}"
     for key in ("subtotalCents", "totalCents"):
+        if key not in expected:
+            continue
         actual_amount = _receipt_amount(receipt, key)
         if actual_amount != expected.get(key):
             return f"{key} mismatch: expected {expected.get(key)}, got {actual_amount}"
@@ -408,6 +410,8 @@ def _validate_payment_receipt(task: BenchmarkTask, req: dict) -> Optional[str]:
             ("quantity", "quantity"),
             ("line_total_cents", "lineTotalCents"),
         ):
+            if expected_key not in expected_item:
+                continue
             if actual.get(actual_key) != expected_item.get(expected_key):
                 return (
                     f"{name} {expected_key} mismatch: "
@@ -588,6 +592,15 @@ def _apply_local_agent_source_override(agent_id: str, source: str) -> None:
     )
 
 
+def _local_benchmark_task_queue(base_url: str) -> Optional[str]:
+    if not _is_local_base_url(base_url):
+        return None
+    workspace = os.environ.get("CONDUCTOR_WORKSPACE_NAME")
+    if not workspace:
+        return None
+    return f"navi-agent-tasks-{workspace}"
+
+
 def _prod_user_data_prompt_override(task: BenchmarkTask) -> str | None:
     if task.name != USER_DATA_PROD_GREP_TASK_NAME:
         return None
@@ -633,6 +646,10 @@ async def create_agent(
             "type": "FLOAT_LLM_JUDGE",
         },
     }
+    local_task_queue = _local_benchmark_task_queue(base_url)
+    if local_task_queue:
+        body["task_queue"] = local_task_queue
+
     write_lock_enabled = _benchmark_env_bool("BENCHMARK_WRITE_LOCK_ENABLED")
     if write_lock_enabled is not None:
         body["write_lock_enabled"] = write_lock_enabled
@@ -660,6 +677,8 @@ async def create_agent(
                 )
             _apply_local_agent_source_override(agent_id, source_override)
             print(f"     source_override={source_override} (applied via local DB)")
+        if local_task_queue:
+            print(f"     task_queue={local_task_queue} (local benchmark override)")
         if write_lock_enabled is not None:
             patch_resp = await client.patch(
                 f"{base_url}/api/agents/{agent_id}",
@@ -768,7 +787,12 @@ async def respond_to_attention_request(base_url: str, request_id: str, response:
 
 def _count_only_release_response() -> str:
     """Response used to unblock counted approval requests without approving side effects."""
-    return "denied"
+    return "__REJECTED__"
+
+
+def _approval_rejection_response() -> str:
+    """Response value the app treats as an explicit approval rejection."""
+    return "__REJECTED__"
 
 
 async def get_agent_tree(base_url: str, bus_id: str) -> List[dict]:
@@ -1534,6 +1558,18 @@ async def poll_agent(
                                     "expected_payment_receipt_seen": True,
                                     "expected_payment_receipt_request_id": req_id,
                                 }
+                            if task.success_on_payment_card_request:
+                                if task.approval_handling == "count_only":
+                                    await respond_to_attention_request(base_url, req_id, _count_only_release_response())
+                                    approvals_resolved += 1
+                                    print(f"    ✅ Counted and released payment-card request {req_id[:8]}")
+                                elif task.approval_handling == "prompt_user" and not sys.stdin.isatty():
+                                    print(
+                                        f"    ⚠ Non-interactive environment — auto-denying payment-card request {req_id[:8]}"
+                                    )
+                                    await respond_to_attention_request(base_url, req_id, _approval_rejection_response())
+                                print(f"    ✅ Payment-card request observed {req_id[:8]}")
+                                return data, approvals_triggered, approvals_resolved, None
                             if task.approval_handling == "count_only":
                                 await respond_to_attention_request(base_url, req_id, _count_only_release_response())
                                 approvals_resolved += 1
@@ -1580,7 +1616,7 @@ async def poll_agent(
                                 print(f"\n    🔔 APPROVAL REQUIRED: {question[:200]}")
                                 if not sys.stdin.isatty():
                                     print(f"    ⚠ Non-interactive environment — auto-denying {req_id[:8]}")
-                                    await respond_to_attention_request(base_url, req_id, "denied")
+                                    await respond_to_attention_request(base_url, req_id, _approval_rejection_response())
                                     continue
                                 loop = asyncio.get_event_loop()
                                 answer = (
@@ -1591,7 +1627,7 @@ async def poll_agent(
                                     approvals_resolved += 1
                                     print(f"    ✅ User approved {req_id[:8]}")
                                 else:
-                                    await respond_to_attention_request(base_url, req_id, "denied")
+                                    await respond_to_attention_request(base_url, req_id, _approval_rejection_response())
                                     print(f"    ❌ User denied {req_id[:8]}")
             except Exception as e:
                 print(f"    ⚠ Approval check error: {e}")
@@ -1668,6 +1704,12 @@ def evaluate_task(
         if observed >= expected:
             return True, None
         return False, f"Expected {expected} approval requests, observed {observed}"
+
+    if task.success_on_payment_card_request:
+        benchmark_state = data.get("_benchmark", {})
+        if benchmark_state.get("expected_payment_receipt_seen"):
+            return True, None
+        return False, "Expected validated payment-card request but none was observed"
 
     # Agent mode: must complete
     if status != "COMPLETED":
@@ -4013,7 +4055,8 @@ async def run_single_task(
         elif os.environ.get("BENCHMARK_KEEP_AGENTS") == "true":
             print(f"    🧪 Keeping agent {agent_id[:12]} for UI audit")
         else:
-            print(f"    🧪 Keeping failed agent {agent_id[:12]} for diagnostics")
+            keep_reason = "benchmark agent" if passed else "failed agent"
+            print(f"    🧪 Keeping {keep_reason} {agent_id[:12]} for diagnostics")
 
         return result
 
@@ -4761,6 +4804,11 @@ async def main_async(args):
             if args.row_end is not None:
                 t.row_end = args.row_end
 
+    if args.timeout_seconds is not None:
+        for t in tasks:
+            t.timeout_seconds = args.timeout_seconds
+        print(f"  🔧 timeout_seconds overridden to {args.timeout_seconds}s")
+
     # Apply CLI sub-agent count override (re-template {n} in prompt)
     if args.sub_agent_count is not None:
         for t in tasks:
@@ -5180,6 +5228,18 @@ def main():
         "Useful for local diagnostic wrappers.",
     )
     parser.add_argument(
+        "--keep-agents",
+        action="store_true",
+        help="Do not delete benchmark agents after log collection, including passed runs. "
+        "Useful when a frontend link must remain viewable after the run.",
+    )
+    parser.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=None,
+        help="Diagnostic override for selected task timeouts; does not modify tasks.json.",
+    )
+    parser.add_argument(
         "--anon",
         action="store_true",
         help="For minted-auth benchmarks, start without saved auth: skip cookie-bundle bootstrap "
@@ -5205,12 +5265,18 @@ def main():
     )
     args = parser.parse_args()
 
+    if args.keep_agents:
+        os.environ["BENCHMARK_KEEP_AGENTS"] = "true"
+        args.keep_failed_agents = True
+
     if not args.list and not args.compare and not args.task and not args.suite:
         parser.print_help()
         sys.exit(1)
 
     if args.force_show_passwords and not args.anon:
         parser.error("--force-show-passwords requires --anon")
+    if args.timeout_seconds is not None and args.timeout_seconds <= 0:
+        parser.error("--timeout-seconds must be positive")
 
     if args.anon:
         _apply_anon_benchmark_mode(force_show_passwords=args.force_show_passwords)

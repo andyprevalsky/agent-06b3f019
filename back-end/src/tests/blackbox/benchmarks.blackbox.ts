@@ -216,6 +216,8 @@ const KNOWN_TAGS = [
   'external',
   'voice',
   'wait-for',
+  'eval',
+  'real-llm',
 ];
 
 // ==================== GET /api/benchmarks — CONTRACT TESTS ====================

@@ -14,6 +14,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+ROOT_DIR="$(cd "$BACKEND_DIR/.." && pwd)"
 cd "$BACKEND_DIR"
 
 REPORT_ONLY=0
@@ -38,6 +39,14 @@ fi
 
 export TEST_BASE_URL="http://localhost:$COV_PORT"
 COV_LOG="$BACKEND_DIR/coverage/server.log"
+
+# Keep local blackbox coverage deterministic. back-end/.env points trace
+# archives at R2 for development/prod, but blackbox tests assert local archive
+# artifacts and fake provider boundaries.
+export TRACE_ARCHIVE_ENABLED="${TRACE_ARCHIVE_ENABLED:-1}"
+export TRACE_ARCHIVE_BACKEND="${TRACE_ARCHIVE_BACKEND:-local}"
+export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$ROOT_DIR/.context}"
+export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
 
 # Coverage starts only a local backend. E2B smoke sandboxes cannot reach stale
 # developer ngrok URLs from .env, so keep those smoke sessions on direct provider

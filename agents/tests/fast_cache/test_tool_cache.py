@@ -19,6 +19,10 @@ import tools.web_search.handler as ws
 import domains.web_fetch.handler as wf
 
 
+def _without_fast_cache_hit(value: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: v for k, v in value.items() if k != "_fast_cache_hit"}
+
+
 class MemStore:
     def __init__(self):
         self.data: Dict[str, Any] = {}

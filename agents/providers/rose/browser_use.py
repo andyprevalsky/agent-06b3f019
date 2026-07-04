@@ -50,7 +50,10 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
         "params": {"index": {"type": "integer", "description": "Element index from browser_state", "required": True}},
     },
     "click_coordinates": {
-        "description": "Click at specific coordinates (for vision models when index unavailable)",
+        "description": (
+            "Fallback only: click at specific coordinates when the target has no numeric DOM index. "
+            "Do not use when the current browser state lists a relevant [index]."
+        ),
         "params": {
             "x": {"type": "integer", "description": "X coordinate", "required": True},
             "y": {"type": "integer", "description": "Y coordinate", "required": True},
@@ -240,6 +243,32 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
 }
 
 
+_INDEXED_DOM_TARGET_RE = re.compile(r"(?m)\[\d+\]<")
+
+
+def state_has_indexed_dom_targets(browser_state: Dict[str, Any]) -> bool:
+    """Return True when the browser snapshot exposes numeric DOM targets."""
+    dom_tree = browser_state.get("dom_tree")
+    if not isinstance(dom_tree, str) or not dom_tree:
+        return False
+    return bool(_INDEXED_DOM_TARGET_RE.search(dom_tree))
+
+
+def filter_browser_use_actions_for_state(
+    available_actions: List[str],
+    browser_state: Dict[str, Any],
+) -> List[str]:
+    """Keep coordinate clicking as a fallback for unindexed/screenshot-only targets.
+
+    Normal web pages expose indexed DOM targets. If `click_coordinates` remains
+    available there, the model can choose raw pixels for indexed controls and
+    loop on visually plausible no-op clicks while the DOM state stays unchanged.
+    """
+    if not state_has_indexed_dom_targets(browser_state):
+        return list(available_actions)
+    return [action for action in available_actions if action != "click_coordinates"]
+
+
 def generate_tool_descriptions(available_actions: List[str]) -> str:
     """Produce the system-prompt action list filtered by `available_actions`."""
     descriptions: List[str] = []
@@ -328,6 +357,8 @@ Each turn you will receive a snapshot of the current browser environment which i
 - Avoid login flows unless the site forces you to login to complete your directed goal.
 - Only interact with elements that have a numeric [index] assigned
 - Only use indexes that are explicitly provided in the current state
+- Use `click_coordinates` only when the target has no numeric [index] in the current state.
+  If a relevant [index] exists, call `click` or `input_text` with that index.
 - If expected elements are missing, try scrolling or waiting
 - By default, only elements in the visible viewport are listed; use scroll if content is offscreen
 - You can scroll by pages using the pages parameter (0.5 for half page, 2.0 for two pages)

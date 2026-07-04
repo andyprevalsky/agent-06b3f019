@@ -118,6 +118,7 @@ cd mac-app && bash scripts/run-blackbox-tests.sh <domain>  # Mac-app blackbox: s
 - Thresholds ratchet — only increase, never decrease. Bump after adding tests.
 
 **Benchmarks:** See `agents/benchmarks/README.md` for the full CLI reference. Quick: `cd agents && python benchmarks/run_benchmark.py --list`. For local iteration, prefer `cd agents && python benchmarks/local.py <task...>` or `cd agents && python benchmarks/local.py --rerun-failed latest`; the local wrapper starts `scripts/run.sh --benchmark`, reads `.context/services.json`, runs non-load tasks with max concurrency 5, runs `load-test-sias` by itself, keeps failed agents long enough to run `agent_latency.py`, `agent_logs.py`, and `agent_cache.py`, then tears services down. Use `python benchmarks/local.py --full` only when you intentionally want the whole local suite. Direct `run_benchmark.py --port N` remains the lower-level path for already-running services or special cases. The `/benchmark` skill is a Claude-driven loop — Claude executes each step (create agent, monitor via `agent_logs.py`, diagnose, fix) directly, not by delegating to `run_benchmark.py`.
+- Every time a benchmark task is run, include the valid FE link to view the run (for example, `http://localhost:5050/?agent-id=ac267c32-470f-41da-8343-091b8965c410`) and verify it actually displays the agent.
 
 ## Eval Suite
 

@@ -89,6 +89,19 @@ def test_verifier_activity_timeout_allows_llm_call():
     assert VERIFIER_ULTRA_TIMEOUT_SECONDS == STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
 
 
+def test_browser_supervisor_does_not_preempt_browser_use_event_timeouts():
+    """Outer watchdogs must not cancel queued browser-use EventBus requests."""
+    from domains.spawn_browser_agent_v3.config import (
+        BROWSER_STATE_REQUEST_TIMEOUT_SECONDS,
+        BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
+        BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
+        NAVIGATE_TO_URL_TIMEOUT_SECONDS,
+    )
+
+    assert BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS > BROWSER_STATE_REQUEST_TIMEOUT_SECONDS
+    assert BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS > NAVIGATE_TO_URL_TIMEOUT_SECONDS
+
+
 def test_browser_task_prompt_does_not_duplicate_system_prompt():
     from domains.spawn_browser_agent_v3.service import (
         build_browser_dynamic_system_context,
@@ -208,12 +221,14 @@ async def test_browser_agent_recording_writes_local_html_replay():
                 "y": 20,
             }
             assert manifest["frames"][-1]["cursor"] == {"x": 10, "y": 20}
+            assert "tab_url" in manifest["frames"][-1]
             assert manifest["frames"][-1]["metadata"]["step"] == 3
             assert manifest["frames"][-1]["metadata"]["cursor"] == {"x": 10, "y": 20}
             html_text = html_path.read_text()
             assert "skip idle" in html_text
             assert "cursorByFrame" in html_text
             assert "cursorAtTime" in html_text
+            assert "cursorTs = frameRealTs + (nextRealTs - frameRealTs) * frameT" in html_text
             assert "Clicked submit" in html_text
             # Single-column player (the metadata sidebar was intentionally removed).
             assert "#app { display: flex; flex-direction: column; height: 100vh; }" in html_text
@@ -222,6 +237,69 @@ async def test_browser_agent_recording_writes_local_html_replay():
                 in html_text
             )
             assert "<aside" not in html_text
+    finally:
+        if previous_enabled is None:
+            os.environ.pop("BROWSER_AGENT_RECORDINGS", None)
+        else:
+            os.environ["BROWSER_AGENT_RECORDINGS"] = previous_enabled
+        if previous_dir is None:
+            os.environ.pop("BROWSER_AGENT_RECORDINGS_DIR", None)
+        else:
+            os.environ["BROWSER_AGENT_RECORDINGS_DIR"] = previous_dir
+        if previous_interval is None:
+            os.environ.pop("BROWSER_AGENT_RECORDING_INTERVAL_SECONDS", None)
+        else:
+            os.environ["BROWSER_AGENT_RECORDING_INTERVAL_SECONDS"] = previous_interval
+
+
+async def test_browser_agent_recording_captures_visible_active_tab_url():
+    import tempfile
+
+    from domains.spawn_browser_agent_v3.recording import BrowserAgentRecorder
+
+    class FakePage:
+        def __init__(self, url, hidden, image_bytes):
+            self.url = url
+            self.hidden = hidden
+            self.image_bytes = image_bytes
+            self.context = None
+
+        async def evaluate(self, script):
+            assert script == "document.hidden"
+            return self.hidden
+
+        async def screenshot(self, **kwargs):
+            return self.image_bytes
+
+    previous_enabled = os.environ.get("BROWSER_AGENT_RECORDINGS")
+    previous_dir = os.environ.get("BROWSER_AGENT_RECORDINGS_DIR")
+    previous_interval = os.environ.get("BROWSER_AGENT_RECORDING_INTERVAL_SECONDS")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["BROWSER_AGENT_RECORDINGS"] = "1"
+            os.environ["BROWSER_AGENT_RECORDINGS_DIR"] = tmp
+            os.environ["BROWSER_AGENT_RECORDING_INTERVAL_SECONDS"] = "60"
+            hidden_tab = FakePage("https://nopafish.com/", True, b"hidden-tab")
+            visible_tab = FakePage("https://order.toasttab.com/online/nopafish", False, b"visible-tab")
+            context = SimpleNamespace(pages=[hidden_tab, visible_tab])
+            hidden_tab.context = context
+            visible_tab.context = context
+
+            recorder = await BrowserAgentRecorder.create(
+                page=hidden_tab,
+                agent_id="agent-1",
+                task_id="task-1",
+                session_id="session-1",
+                browser_url="",
+            )
+            assert recorder is not None
+            await recorder.close(include_steel_media=False)
+
+            assert recorder.frames
+            assert recorder.frames[0]["tab_url"] == "https://order.toasttab.com/online/nopafish"
+            frame_bytes = (recorder.output_dir / recorder.frames[0]["src"]).read_bytes()
+            assert frame_bytes == b"visible-tab"
+            assert "order.toasttab.com/online/nopafish" in recorder.export_inline_html_bytes().decode("utf-8")
     finally:
         if previous_enabled is None:
             os.environ.pop("BROWSER_AGENT_RECORDINGS", None)
@@ -376,12 +454,76 @@ def test_browser_agent_recording_supports_video_rate_replay():
         assert "frameIndexAtTime" in html_text
         assert "timeline.max = totalMs" in html_text
         # Cursor is drawn per-frame in the redesigned single-column player.
-        assert "drawCursor(cursorByFrame[idx])" in html_text
+        assert "drawCursor(cursorAtTime(cursorTs) || cursorByFrame[idx])" in html_text
+        assert "cursorTs = frameRealTs + (nextRealTs - frameRealTs) * frameT" in html_text
     finally:
         if previous_interval is None:
             os.environ.pop("BROWSER_AGENT_RECORDING_INTERVAL_SECONDS", None)
         else:
             os.environ["BROWSER_AGENT_RECORDING_INTERVAL_SECONDS"] = previous_interval
+
+
+async def test_browser_recording_finalizer_uploads_frame_replay_after_cancellation():
+    import tempfile
+
+    from domains.spawn_browser_agent_v3.handler import _finalize_browser_recording_for_fe_resilient
+
+    class SlowCloseRecorder:
+        def __init__(self, output_dir):
+            self.output_dir = Path(output_dir)
+            self.release = asyncio.Event()
+            self.include_steel_media = None
+
+        async def close(self, *, include_steel_media=True):
+            self.include_steel_media = include_steel_media
+            await self.release.wait()
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            path = self.output_dir / "index.html"
+            path.write_text("<html>recording</html>", encoding="utf-8")
+            return path
+
+        def export_inline_html_bytes(self):
+            return b"<html>inline frame replay with cursorEvents and tab_url</html>"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        recorder = SlowCloseRecorder(tmp)
+        with (
+            patch(
+                "domains.spawn_browser_agent_v3.handler.upload_to_storage",
+                new_callable=AsyncMock,
+                return_value={"id": "file-pointer-1"},
+            ) as upload_mock,
+            patch(
+                "domains.spawn_browser_agent_v3.handler.save_browser_action_message",
+                new_callable=AsyncMock,
+            ) as save_mock,
+        ):
+            finalize_task = asyncio.create_task(
+                _finalize_browser_recording_for_fe_resilient(
+                    browser_recorder=recorder,
+                    agent_id="agent-1",
+                    task_id="task-1",
+                    user_id="user-1",
+                    browser_url="https://debug",
+                    browser_session_metadata={"provider": "steel"},
+                    timeout_seconds=2,
+                )
+            )
+            await asyncio.sleep(0)
+            finalize_task.cancel()
+            await asyncio.sleep(0)
+            recorder.release.set()
+
+            result = await finalize_task
+
+        assert result is not None
+        assert result["recording_file_pointer"] == {"id": "file-pointer-1"}
+        assert recorder.include_steel_media is False
+        upload_mock.assert_awaited_once()
+        save_mock.assert_awaited_once()
+        metadata = save_mock.await_args.kwargs["extra_metadata"]
+        assert metadata["recording_file_pointer"] == {"id": "file-pointer-1"}
+        assert metadata["browser_session_metadata"] == {"provider": "steel"}
 
 
 def test_browser_agent_recording_inline_export_uses_source_frames_once():
@@ -6795,6 +6937,151 @@ async def test_spawn_browser_activity_auth_assistance_resume_falls_back_when_liv
     assert resume_mock.await_args.args[1] == "task-1"
 
 
+async def test_browser_supervisor_recovery_clicks_generic_dismiss_button():
+    from domains.spawn_browser_agent_v3.handler import _perform_generic_browser_recovery
+
+    class _FakeButton:
+        def __init__(self, text):
+            self.text = text
+            self.clicked = False
+
+        async def evaluate(self, _script):
+            return self.text
+
+        async def is_visible(self):
+            return True
+
+        async def click(self, **_kwargs):
+            self.clicked = True
+
+    class _FakeLocator:
+        def __init__(self, buttons):
+            self.buttons = buttons
+
+        async def all(self):
+            return self.buttons
+
+    buttons = [_FakeButton("Keep browsing"), _FakeButton("Close banner")]
+    page = SimpleNamespace(
+        url="https://example.com/menu",
+        bring_to_front=AsyncMock(),
+        keyboard=SimpleNamespace(press=AsyncMock()),
+        locator=lambda _selector: _FakeLocator(buttons),
+        reload=AsyncMock(),
+    )
+
+    actions = await _perform_generic_browser_recovery(
+        input_page=page,
+        reason="test",
+        reload_page=False,
+    )
+
+    assert "bring_to_front" in actions
+    assert "press_escape" in actions
+    assert "click_dismiss:Close banner" in actions
+    assert buttons[0].clicked is False
+    assert buttons[1].clicked is True
+    page.reload.assert_not_awaited()
+
+
+async def test_browser_supervisor_recovery_uses_fallback_url_when_page_url_missing():
+    from domains.spawn_browser_agent_v3.handler import _perform_generic_browser_recovery
+
+    class _FakeLocator:
+        async def all(self):
+            return []
+
+    page = SimpleNamespace(
+        url="",
+        bring_to_front=AsyncMock(),
+        keyboard=SimpleNamespace(press=AsyncMock()),
+        locator=lambda _selector: _FakeLocator(),
+        reload=AsyncMock(),
+        goto=AsyncMock(),
+    )
+
+    actions = await _perform_generic_browser_recovery(
+        input_page=page,
+        reason="browser_state_timeout_330s",
+        reload_page=True,
+        fallback_url="https://order.example.com/menu",
+    )
+
+    assert "goto_fallback_url" in actions
+    page.reload.assert_not_awaited()
+    page.goto.assert_awaited_once()
+    assert page.goto.await_args.args == ("https://order.example.com/menu",)
+
+
+async def test_goto_action_returns_current_url_for_recovery_fallback():
+    from domains.spawn_browser_agent_v3.service_actions import _execute_goto
+
+    class _FakeEvent:
+        def __await__(self):
+            async def _done():
+                return None
+
+            return _done().__await__()
+
+        async def event_result(self, **_kwargs):
+            return None
+
+    session = SimpleNamespace(
+        event_bus=SimpleNamespace(dispatch=MagicMock(return_value=_FakeEvent())),
+    )
+    action_history = SimpleNamespace(record_action=AsyncMock())
+
+    result = await _execute_goto(
+        session=session,
+        dom_service=SimpleNamespace(),
+        action_history=action_history,
+        params={"url": "order.example.com/menu"},
+        thinking="go to menu",
+        session_id=None,
+        config=None,
+    )
+
+    assert result["success"] is True
+    assert result["current_url"] == "https://order.example.com/menu"
+    action_history.record_action.assert_awaited_once()
+    recorded_result = action_history.record_action.await_args.kwargs["result"]
+    assert recorded_result["current_url"] == "https://order.example.com/menu"
+
+
+async def test_browser_supervisor_snapshot_reads_lightweight_page_state():
+    from domains.spawn_browser_agent_v3.handler import (
+        _browser_supervisor_snapshot,
+        _format_browser_supervisor_message,
+    )
+
+    tab = SimpleNamespace(url="https://example.com/other", title=AsyncMock(return_value="Other"))
+    page = SimpleNamespace(
+        context=SimpleNamespace(pages=[tab]),
+        evaluate=AsyncMock(
+            return_value={
+                "url": "https://example.com/menu",
+                "title": "Menu",
+                "body_text": "Only accepting scheduled orders",
+                "buttons": [{"text": "Opt out of all", "visible": True}],
+                "inputs": [{"type": "email", "placeholder": "Email"}],
+            }
+        ),
+    )
+
+    snapshot = await _browser_supervisor_snapshot(input_page=page, dom_service=None)
+    assert snapshot["url"] == "https://example.com/menu"
+    assert snapshot["title"] == "Menu"
+    assert snapshot["buttons"][0]["text"] == "Opt out of all"
+    assert snapshot["tabs"][0]["title"] == "Other"
+
+    message = _format_browser_supervisor_message(
+        {"reason": "browser_state_timeout_90s", "actions": ["press_escape"], "snapshot": snapshot}
+    )
+    assert "browser_state_timeout_90s" in message
+    assert "Opt out of all" in message
+    assert "Only accepting scheduled orders" in message
+
+
 async def test_spawn_browser_activity_auth_assistance_keeps_live_steel_session_open():
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
 
@@ -7014,6 +7301,58 @@ async def test_manager_cancelled_browser_pause_event_includes_task_metadata():
         "browser_url": "https://steel.example/debug",
         "session_id": "session-1",
     }
+
+
+async def test_manager_disables_fast_mode_cache_for_browser_activity():
+    from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
+
+    class _FakeActivityHandle:
+        def done(self):
+            return True
+
+        def cancel(self):
+            raise AssertionError("done activity should not be cancelled")
+
+        def __await__(self):
+            async def _result():
+                return {"success": True, "message": "done"}
+
+            return _result().__await__()
+
+    workflow_instance = SimpleNamespace(
+        user_id="user-1",
+        agent_id="agent-1",
+        is_paused=False,
+        write_lock_enabled=True,
+        system_name="Rose",
+        fast_mode_cache_enabled=True,
+    )
+    manager = SpawnBrowserAgentManagerV3()
+    start_calls = []
+
+    def fake_start_activity(*args, **kwargs):
+        start_calls.append((args, kwargs))
+        return _FakeActivityHandle()
+
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.handler.workflow.start_activity",
+            side_effect=fake_start_activity,
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.workflow.wait_condition",
+            AsyncMock(return_value=None),
+        ),
+    ):
+        events = []
+        async for event in manager.execute_tool(
+            workflow_instance, {"goal": "Buy socks"}, "tool-1"
+        ):
+            events.append(event)
+
+    assert events[-1].status.name == "FINISHED"
+    activity_args = start_calls[0][1]["args"]
+    assert activity_args[-1] is False
 
 
 async def test_manager_posts_output_files_after_finished_tool_event():
@@ -7306,6 +7645,10 @@ async def run_all_tests():
     r = BlackboxResult()
 
     r.record("verifier_timeout_standard_llm_budget", test_verifier_activity_timeout_allows_llm_call)
+    r.record(
+        "browser_supervisor_timeout_ordering",
+        test_browser_supervisor_does_not_preempt_browser_use_event_timeouts,
+    )
     r.record(
         "browser_task_prompt_no_system_duplication",
         test_browser_task_prompt_does_not_duplicate_system_prompt,
@@ -7895,6 +8238,10 @@ async def run_all_tests():
         test_browser_agent_recording_inline_export_uses_source_frames_once,
     )
     await r.record_async(
+        "browser_agent_recording_active_tab_url",
+        test_browser_agent_recording_captures_visible_active_tab_url,
+    )
+    await r.record_async(
         "browser_agent_recording_disabled_env",
         test_browser_agent_recording_respects_disabled_env,
     )
@@ -7909,6 +8256,10 @@ async def run_all_tests():
     r.record(
         "browser_agent_recording_steel_video_player",
         test_browser_agent_recording_steel_video_player_uses_debug_recording_and_window_offsets,
+    )
+    await r.record_async(
+        "browser_recording_finalizer_cancel_resilient",
+        test_browser_recording_finalizer_uploads_frame_replay_after_cancellation,
     )
     r.record(
         "browser_humanizer_visual_cursor_default_off",
@@ -8056,12 +8407,24 @@ async def run_all_tests():
         test_spawn_browser_activity_auth_assistance_resume_falls_back_when_live_session_expired,
     )
     await r.record_async(
+        "browser_supervisor_recovery_clicks_dismiss",
+        test_browser_supervisor_recovery_clicks_generic_dismiss_button,
+    )
+    await r.record_async(
+        "browser_supervisor_snapshot",
+        test_browser_supervisor_snapshot_reads_lightweight_page_state,
+    )
+    await r.record_async(
         "activity_auth_assistance_keeps_live_session_open",
         test_spawn_browser_activity_auth_assistance_keeps_live_steel_session_open,
     )
     await r.record_async(
         "manager_cancelled_pause_metadata",
         test_manager_cancelled_browser_pause_event_includes_task_metadata,
+    )
+    await r.record_async(
+        "manager_disables_fast_mode_cache",
+        test_manager_disables_fast_mode_cache_for_browser_activity,
     )
     await r.record_async(
         "manager_output_files_after_finished",

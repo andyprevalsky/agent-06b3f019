@@ -298,6 +298,34 @@ async function testSend_happyPath() {
   }
 }
 
+async function testSend_surgeApiError() {
+  const res = await request(`${BASE_URL}/api/send-sms`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({
+      phone_number: TEST_PHONE,
+      message: '__BLACKBOX_SURGE_502__',
+    }),
+  });
+  assertStatus(res.status, 502, res.data);
+  const data = assertSchema(ErrorSchema, res.data, 'send Surge API error');
+  assert(data.error.includes('Surge API error (502)'), `Unexpected error: ${data.error}`);
+}
+
+async function testSend_surgeNetworkFailure() {
+  const res = await request(`${BASE_URL}/api/send-sms`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({
+      phone_number: TEST_PHONE,
+      message: '__BLACKBOX_SURGE_THROW__',
+    }),
+  });
+  assertStatus(res.status, 500, res.data);
+  const data = assertSchema(ErrorSchema, res.data, 'send Surge network failure');
+  assert(data.error === 'Failed to send SMS', `Unexpected error: ${data.error}`);
+}
+
 async function testSend_responseContentType() {
   const res = await request(`${BASE_URL}/api/send-sms`, {
     method: 'POST',
@@ -523,6 +551,61 @@ async function testNotify_completionHappyPath() {
   assert(res.status === 200 || res.status === 500, `Expected 200 or 500, got ${res.status}`);
   if (res.status === 200) {
     assertSchema(NotifySuccessSchema, res.data, 'notify completion happy');
+  }
+}
+
+async function testNotify_unknownAgentSkipped() {
+  const res = await request(`${BASE_URL}/api/send-sms/notify`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({
+      user_id: TEST_USER_ID,
+      event_type: 'completion',
+      agent_id: crypto.randomUUID(),
+      payload: { summary: 'unknown agent skip' },
+    }),
+  });
+  assertStatus(res.status, 200, res.data);
+  const data = assertSchema(
+    NotifySuccessSchema.extend({
+      skipped: z.literal(true),
+      reason: z.literal('agent_not_found'),
+    }),
+    res.data,
+    'notify unknown agent skipped'
+  );
+  assert(data.reason === 'agent_not_found', `Unexpected reason: ${data.reason}`);
+}
+
+async function testNotify_deletedAgentSkipped() {
+  const agent = await createNotifyAgent('deleted agent skip');
+  try {
+    await prisma.agent.update({
+      where: { id: agent.id },
+      data: { deletedAt: new Date() },
+    });
+    const res = await request(`${BASE_URL}/api/send-sms/notify`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({
+        user_id: TEST_USER_ID,
+        event_type: 'completion',
+        agent_id: agent.id,
+        payload: { summary: 'deleted agent skip' },
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+    const data = assertSchema(
+      NotifySuccessSchema.extend({
+        skipped: z.literal(true),
+        reason: z.literal('agent_deleted'),
+      }),
+      res.data,
+      'notify deleted agent skipped'
+    );
+    assert(data.reason === 'agent_deleted', `Unexpected reason: ${data.reason}`);
+  } finally {
+    await prisma.agent.deleteMany({ where: { id: agent.id } });
   }
 }
 
@@ -1193,6 +1276,18 @@ async function runAll() {
           name: 'happy path (200 or Surge error)',
           fn: testSend_happyPath,
         },
+        ...(captureAvailable
+          ? [
+              {
+                name: 'Surge API error -> provider status',
+                fn: testSend_surgeApiError,
+              },
+              {
+                name: 'Surge network failure -> 500',
+                fn: testSend_surgeNetworkFailure,
+              },
+            ]
+          : []),
         {
           name: 'response Content-Type: application/json',
           fn: testSend_responseContentType,
@@ -1242,6 +1337,14 @@ async function runAll() {
         {
           name: 'completion happy path',
           fn: testNotify_completionHappyPath,
+        },
+        {
+          name: 'unknown agent -> skipped',
+          fn: testNotify_unknownAgentSkipped,
+        },
+        {
+          name: 'deleted agent -> skipped',
+          fn: testNotify_deletedAgentSkipped,
         },
         {
           name: 'response Content-Type: application/json',

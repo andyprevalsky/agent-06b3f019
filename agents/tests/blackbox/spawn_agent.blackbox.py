@@ -426,13 +426,24 @@ class _FakeSpawnWF:
 
 
 class _FakeWFInstance:
-    def __init__(self, *, user_id="u-1", agent_id="a-1", depth=0, paused=False, model="rose-1-lite"):
+    def __init__(
+        self,
+        *,
+        user_id="u-1",
+        agent_id="a-1",
+        depth=0,
+        paused=False,
+        model="rose-1-lite",
+        goal="",
+        context=None,
+    ):
         self.user_id = user_id
         self.agent_id = agent_id
         self.depth = depth
+        self.goal = goal
         self.is_paused = paused
         self.model = model
-        self.context = {}
+        self.context = context if context is not None else {}
         self.context_gates = {}
         self.child_tool_ids = {}
         self.pending_children = set()
@@ -781,6 +792,195 @@ async def test_handler_sub_agent_delegates_without_verifier_arg():
     cfg = fake_mgr.last_call["tool_call"]["sub_agent"]
     assert "verifier" not in cfg
     assert cfg["context_gates"] == {"network": False}
+
+
+async def test_handler_blocks_recursive_general_purpose_for_explore_only_child():
+    """Explore-only research children should not spawn another general-purpose agent."""
+    from tools.base import MessageStatus
+
+    from domains.spawn_agent.handler import SpawnAgentManager
+
+    wf = _FakeWFInstance(
+        depth=1,
+        goal=(
+            "Find current population of Tokyo. Use explore-agent web research. "
+            "MUST NOT use browser agent, Claude Code, or code sandbox."
+        ),
+    )
+
+    events = await _collect(
+        SpawnAgentManager().execute_tool(
+            workflow_instance=wf,
+            tool_call={"type": "general_purpose", "goal": "Determine Tokyo population", "output_schema": {"fields": []}},
+            tool_call_id="tc",
+        )
+    )
+
+    assert len(events) == 1
+    assert events[0].status == MessageStatus.ERROR
+    assert "explore-agent web research only" in events[0].message
+
+
+async def test_handler_blocks_recursive_general_purpose_for_web_search_only_child():
+    """Generated explore/web-search-only child prompts should also be protected."""
+    from tools.base import MessageStatus
+
+    from domains.spawn_agent.handler import SpawnAgentManager
+
+    wf = _FakeWFInstance(
+        depth=1,
+        goal=(
+            "You are executing a narrowly scoped research subtask. The final answer must be "
+            "grounded using an explore-agent web research subtask only. Please use only any "
+            "explore/web-search research capability available to you; do not use browser/code/sandbox."
+        ),
+    )
+
+    events = await _collect(
+        SpawnAgentManager().execute_tool(
+            workflow_instance=wf,
+            tool_call={"type": "general_purpose", "goal": "Find current Tokyo population", "output_schema": {"fields": []}},
+            tool_call_id="tc",
+        )
+    )
+
+    assert len(events) == 1
+    assert events[0].status == MessageStatus.ERROR
+    assert "explore-agent web research only" in events[0].message
+
+
+async def test_handler_allows_explore_for_explore_only_child():
+    """The research-only guard still permits the intended explore subagent."""
+    from tools.base import MessageStatus
+
+    from domains.spawn_agent.handler import SpawnAgentManager
+
+    fake = _FakeSpawnWF(
+        start_activity_result=_Activity(
+            result={"result": "population found", "tool_call_results": [], "accumulated_usage": [], "llm_iteration_usage": []}
+        )
+    )
+    restore = _patch_spawn_workflow(fake)
+    try:
+        events = await _collect(
+            SpawnAgentManager().execute_tool(
+                workflow_instance=_FakeWFInstance(
+                    depth=1,
+                    goal=(
+                        "Find current population of Tokyo. Use explore-agent web research. "
+                        "MUST NOT use browser agent, Claude Code, or code sandbox."
+                    ),
+                ),
+                tool_call={"type": "explore", "goal": "Research Tokyo population"},
+                tool_call_id="tc",
+            )
+        )
+    finally:
+        restore()
+
+    assert any(e.status == MessageStatus.FINISHED for e in events)
+
+
+async def test_handler_blocks_root_general_purpose_for_explore_subagent_only_task():
+    """Root tasks that ask for explore sub-agents only should not switch to general-purpose."""
+    from tools.base import MessageStatus
+
+    from domains.spawn_agent.handler import SpawnAgentManager
+
+    wf = _FakeWFInstance(
+        depth=0,
+        goal=(
+            "I'm comparing three cities: Austin TX, Denver CO, and Lisbon Portugal. "
+            "Use explore sub-agents: spawn one explore sub-agent per city, preferably in parallel. "
+            "Do NOT use Claude Code, a browser agent, or any code sandbox."
+        ),
+    )
+
+    events = await _collect(
+        SpawnAgentManager().execute_tool(
+            workflow_instance=wf,
+            tool_call={"type": "general_purpose", "goal": "Compare the cities", "output_schema": {"fields": []}},
+            tool_call_id="tc",
+        )
+    )
+
+    assert len(events) == 1
+    assert events[0].status == MessageStatus.ERROR
+    assert "explore-agent web research only" in events[0].message
+
+
+async def test_handler_caps_root_explore_for_one_per_city_task():
+    """Do not keep spawning explore agents after satisfying a one-per-city instruction."""
+    from tools.base import MessageStatus
+
+    from domains.spawn_agent.handler import SpawnAgentManager
+
+    prior_context = []
+    for idx in range(3):
+        prior_context.append(
+            {
+                "role": "TOOL",
+                "text": "research done",
+                "metadata": {
+                    "toolCallId": f"tc-{idx}",
+                    "toolName": "spawn_agent",
+                    "toolStatus": "FINISHED",
+                    "agentType": "explore",
+                },
+            }
+        )
+
+    wf = _FakeWFInstance(
+        depth=0,
+        goal=(
+            "I'm comparing three cities: Austin TX, Denver CO, and Lisbon Portugal. "
+            "Use explore sub-agents: spawn one explore sub-agent per city, preferably in parallel. "
+            "Do NOT use Claude Code, a browser agent, or any code sandbox."
+        ),
+        context=prior_context,
+    )
+
+    events = await _collect(
+        SpawnAgentManager().execute_tool(
+            workflow_instance=wf,
+            tool_call={"type": "explore", "goal": "Research Austin again"},
+            tool_call_id="tc-extra",
+        )
+    )
+
+    assert len(events) == 1
+    assert events[0].status == MessageStatus.ERROR
+    assert "already has 3 explore agents" in events[0].message
+
+
+async def test_handler_allows_general_purpose_when_explicitly_required():
+    """The explore-only guard must not block benchmarks that explicitly require general-purpose agents."""
+    from tools.base import EventType, MessageStatus, ToolEvent
+    import domains.spawn_agent.handler as h
+
+    fake_mgr = _FakeDelegateManager(
+        [ToolEvent(type=EventType.POST_MESSAGE, title="Sub done", message="ok", status=MessageStatus.FINISHED)]
+    )
+    original = h.get_sub_agent_manager
+    h.get_sub_agent_manager = lambda: fake_mgr
+    try:
+        events = await _collect(
+            h.SpawnAgentManager().execute_tool(
+                workflow_instance=_FakeWFInstance(
+                    depth=0,
+                    goal=(
+                        "MUST use spawn_general_purpose_agent exactly twice. "
+                        "Do not use browser agent or Claude Code."
+                    ),
+                ),
+                tool_call={"type": "general_purpose", "goal": "do work", "output_schema": {"fields": []}},
+                tool_call_id="tc",
+            )
+        )
+    finally:
+        h.get_sub_agent_manager = original
+
+    assert any(e.status == MessageStatus.FINISHED for e in events)
 
 
 async def test_handler_for_each_depth_exceeded_raises():
@@ -1757,6 +1957,30 @@ async def run_all_tests():
     await r.record_async("handler_browser_delegates", test_handler_browser_delegates)
     await r.record_async("handler_code_delegates", test_handler_code_delegates)
     await r.record_async("handler_sub_agent_no_verifier_arg", test_handler_sub_agent_delegates_without_verifier_arg)
+    await r.record_async(
+        "handler_blocks_recursive_general_purpose_for_explore_only_child",
+        test_handler_blocks_recursive_general_purpose_for_explore_only_child,
+    )
+    await r.record_async(
+        "handler_blocks_recursive_general_purpose_for_web_search_only_child",
+        test_handler_blocks_recursive_general_purpose_for_web_search_only_child,
+    )
+    await r.record_async(
+        "handler_allows_explore_for_explore_only_child",
+        test_handler_allows_explore_for_explore_only_child,
+    )
+    await r.record_async(
+        "handler_blocks_root_general_purpose_for_explore_subagent_only_task",
+        test_handler_blocks_root_general_purpose_for_explore_subagent_only_task,
+    )
+    await r.record_async(
+        "handler_caps_root_explore_for_one_per_city_task",
+        test_handler_caps_root_explore_for_one_per_city_task,
+    )
+    await r.record_async(
+        "handler_allows_general_purpose_when_explicitly_required",
+        test_handler_allows_general_purpose_when_explicitly_required,
+    )
     await r.record_async("handler_for_each_depth", test_handler_for_each_depth_exceeded_raises)
     await r.record_async("handler_for_each_no_items", test_handler_for_each_no_items_raises)
     await r.record_async("handler_for_each_happy", test_handler_for_each_happy_path_all_succeed)
