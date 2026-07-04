@@ -1,3 +1,5 @@
+/* c8 ignore start -- Type-only declarations; no runtime code to cover. */
+
 export interface TestPaymentItem {
   id: string;
   name: string;

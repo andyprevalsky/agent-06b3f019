@@ -23,7 +23,7 @@
     "test:api": "bash scripts/run-blackbox-tests.sh benchmarks,benchmarks-test-prompts,data,data-coverage,data-grep",
     "test:blackbox:runner": "tsx src/tests/blackbox/run.ts",
     "test:blackbox:existing": "BLACKBOX_TEST_USE_EXISTING_BACKEND=1 bash scripts/run-blackbox-tests.sh",
-    "test:structural": "tsx src/tests/structural/layer-deps.test.ts && tsx src/tests/structural/migration-drift.test.ts && tsx src/tests/structural/integrations-config.test.ts && tsx src/tests/structural/browser-context-nullability.test.ts",
+    "test:structural": "tsx src/tests/structural/layer-deps.test.ts && tsx src/tests/structural/migration-drift.test.ts && tsx src/tests/structural/integrations-config.test.ts && tsx src/tests/structural/browser-context-nullability.test.ts && tsx src/tests/structural/prompt-personality-sync.test.ts",
     "test:coverage": "bash scripts/run-coverage.sh",
     "test:coverage:report": "bash scripts/run-coverage.sh --report-only",
     "test:all": "npm run test:structural && npm run test:api && npm run test:x402 && npm run test:blackbox",

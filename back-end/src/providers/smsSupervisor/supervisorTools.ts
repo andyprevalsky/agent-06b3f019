@@ -1,13 +1,14 @@
 /**
  * SMS Supervisor Tools
  *
- * 6 tools available to the SMS supervisor LLM:
+ * 7 tools available to the SMS supervisor LLM:
  * 1. reply_to_agent — Send a reply to an agent (answers questions, approves/rejects write-locks)
  * 2. kill_agent — Terminate an agent and all sub-agents
  * 3. increase_budget — Increase an agent's cost limit
  * 4. start_new_agent — Create and start a new agent
  * 5. web_search — Search the web for information
- * 6. attempt_completion — Send final SMS to user (loop terminator)
+ * 6. grep — Search the user's local data (messages, network, transactions, documents)
+ * 7. attempt_completion — Send final SMS to user (loop terminator)
  *
  * Each tool has a JSON schema for the LLM and an executor function.
  * All executors log extensively at boundaries.
@@ -22,6 +23,7 @@ import { getAgentUrl } from '../smsTemplates';
 import { createMessage } from '../messages';
 import { createLogger } from '../logger';
 import { deleteAgentRecursive, resolveAgentPrefix } from './supervisorTools.helpers';
+import { executeGrepTool, GrepArgs } from './supervisorTools.grep';
 
 const log = createLogger('SmsSupervisorTools');
 
@@ -151,6 +153,9 @@ export async function dispatchToolCall(
         break;
       case 'web_search':
         result = await executeWebSearchTool(args as unknown as WebSearchArgs);
+        break;
+      case 'grep':
+        result = await executeGrepTool(args as unknown as GrepArgs, userId);
         break;
       case 'attempt_completion':
         // Loop terminator — the handler intercepts before reaching this point.

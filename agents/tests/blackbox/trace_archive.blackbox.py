@@ -43,30 +43,54 @@ def _with_archive_env(tmp: str):
     return restore
 
 
+def _with_dev_encryption_key():
+    """Pin the dev-derived key so _decrypt's hardcoded key always matches.
+
+    A developer .env (loaded by the coverage/test harness) may set
+    TRACE_ARCHIVE_ENCRYPTION_KEY_B64; encrypt_artifact would then use that key
+    while _decrypt derives the dev key, failing with InvalidTag.
+    """
+    old = os.environ.pop("TRACE_ARCHIVE_ENCRYPTION_KEY_B64", None)
+
+    def restore():
+        if old is not None:
+            os.environ["TRACE_ARCHIVE_ENCRYPTION_KEY_B64"] = old
+
+    return restore
+
+
 def test_encrypt_json_gzip_roundtrip():
     from helpers.trace_archive import encrypt_artifact
 
-    body = json.dumps({"hello": "world", "n": 3}).encode("utf-8")
-    encrypted = encrypt_artifact(body, path="llm/demo.json.gz.enc", content_type="application/json")
-    assert encrypted is not None
-    ciphertext, metadata = encrypted
-    assert metadata["compression"] == "gzip"
-    assert metadata["encryption"] == "aes-256-gcm"
-    assert metadata["plaintext_sha256"] == hashlib.sha256(body).hexdigest()
-    assert metadata["ciphertext_sha256"] == hashlib.sha256(ciphertext).hexdigest()
-    assert metadata["auth_tag_b64"]
-    assert _decrypt(ciphertext, metadata) == body
+    restore = _with_dev_encryption_key()
+    try:
+        body = json.dumps({"hello": "world", "n": 3}).encode("utf-8")
+        encrypted = encrypt_artifact(body, path="llm/demo.json.gz.enc", content_type="application/json")
+        assert encrypted is not None
+        ciphertext, metadata = encrypted
+        assert metadata["compression"] == "gzip"
+        assert metadata["encryption"] == "aes-256-gcm"
+        assert metadata["plaintext_sha256"] == hashlib.sha256(body).hexdigest()
+        assert metadata["ciphertext_sha256"] == hashlib.sha256(ciphertext).hexdigest()
+        assert metadata["auth_tag_b64"]
+        assert _decrypt(ciphertext, metadata) == body
+    finally:
+        restore()
 
 
 def test_encrypt_media_skips_gzip():
     from helpers.trace_archive import encrypt_artifact
 
-    body = b"\x00\x00\x00\x18ftypmp42already-compressed"
-    encrypted = encrypt_artifact(body, path="media/browser/run.mp4", content_type="video/mp4")
-    assert encrypted is not None
-    ciphertext, metadata = encrypted
-    assert metadata["compression"] == "none"
-    assert _decrypt(ciphertext, metadata) == body
+    restore = _with_dev_encryption_key()
+    try:
+        body = b"\x00\x00\x00\x18ftypmp42already-compressed"
+        encrypted = encrypt_artifact(body, path="media/browser/run.mp4", content_type="video/mp4")
+        assert encrypted is not None
+        ciphertext, metadata = encrypted
+        assert metadata["compression"] == "none"
+        assert _decrypt(ciphertext, metadata) == body
+    finally:
+        restore()
 
 
 def test_local_store_writes_ciphertext_and_metadata():
