@@ -48,7 +48,7 @@ export const AttentionMessage = memo(function AttentionMessage({
 
   return (
     <div className="flex gap-3 animate-in fade-in duration-300">
-      <div className="flex-1 space-y-3">
+      <div className="flex-1 min-w-0 space-y-3">
         <div className="text-sm">
           {isStreaming ? (
             <StreamingText text={attentionMessage} />

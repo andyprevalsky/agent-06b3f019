@@ -12,7 +12,12 @@ const ScrollArea = React.forwardRef<
     className={cn('relative overflow-hidden', className)}
     {...props}
   >
-    <ScrollAreaPrimitive.Viewport className="h-full w-full rounded-[inherit]">
+    {/* Radix wraps viewport children in an inline-styled `display: table` div
+        that sizes to content min-width and never shrinks, so wide content
+        (code blocks, long URLs) blows the layout out sideways instead of
+        wrapping/scrolling internally. No ScrollArea in this app scrolls
+        horizontally, so force the wrapper back to block flow. */}
+    <ScrollAreaPrimitive.Viewport className="h-full w-full overflow-x-hidden rounded-[inherit] [&>div]:!block [&>div]:!max-w-full">
       {children}
     </ScrollAreaPrimitive.Viewport>
     <ScrollBar />

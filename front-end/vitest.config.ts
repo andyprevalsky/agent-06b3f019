@@ -25,7 +25,7 @@ export default defineConfig({
     ],
     globals: true,
     css: false,
-    maxWorkers: 30,
+    maxWorkers: 8,
     minWorkers: 1,
     coverage: {
       provider: 'v8',

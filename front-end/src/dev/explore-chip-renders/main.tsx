@@ -60,6 +60,7 @@ interface FixtureData {
   failedResult: string;
   finishedStepResult: string;
   failedStepResult: string;
+  widthStressResult: string;
   condition: string;
 }
 
@@ -124,16 +125,14 @@ function buildLiveSteps(toolsFinished: boolean, finishedAtMs: number): ExploreSt
       message: 'Planning which evidence source to inspect next.',
       toolName: 'spawn_agent',
     },
-    ...liveToolCalls.map(
-      (tool, index): ExploreStep => ({
-        title: tool.title,
-        status: toolsFinished ? 'FINISHED' : 'IN_PROGRESS',
-        timestamp: new Date(toolsFinished ? finishedAtMs + index : now + index).toISOString(),
-        message: toolsFinished ? tool.finishedMessage : '',
-        toolName: tool.toolName,
-        toolCallId: `demo-tool-${index + 1}`,
-      }),
-    ),
+    ...liveToolCalls.map((tool, index): ExploreStep => ({
+      title: tool.title,
+      status: toolsFinished ? 'FINISHED' : 'IN_PROGRESS',
+      timestamp: new Date(toolsFinished ? finishedAtMs + index : now + index).toISOString(),
+      message: toolsFinished ? tool.finishedMessage : '',
+      toolName: tool.toolName,
+      toolCallId: `demo-tool-${index + 1}`,
+    })),
   ];
 }
 
@@ -151,8 +150,10 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 function Example({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="grid min-w-0 gap-1.5">
-      <div className="text-[11px] text-muted-foreground">{label}</div>
-      {children}
+      <div className="min-w-0 text-[11px] text-muted-foreground">{label}</div>
+      {/* min-w-0 mirrors the real message list, where bubbles sit in width-
+          constrained block wrappers instead of intrinsically-sized grid tracks. */}
+      <div className="min-w-0">{children}</div>
     </div>
   );
 }
@@ -320,6 +321,24 @@ function App() {
     failedStepResult:
       '**Params Passed:**\n\n- **query**: Vercel production deployment status roselabs.ai\n- **max_tokens**: 1500\n\n**Error:**\n\nParallel AI search returned HTTP 429 Too Many Requests\n\n**Time Elapsed:** 4s\n\n**Cost:** $0.0000',
     condition: 'the production deploy to finish',
+    widthStressResult: [
+      'Identify exactly 50 top creators in the health, longevity, biohacking, health-tech, and founder journey niche across four platforms: YouTube, Instagram, TikTok, and Substack.',
+      '',
+      '    17. Arnold Schwarzenegger (Arnold’s Pump Club) | Substack-style newsletter | arnoldspumpclub.com | ~700K+ subscribers (est.) [33] | daily fitness/longevity positivity',
+      '    18. Nikhil Krishnan | Substack | outofpocket.health | ~50K subscribers (est.) [34] | healthcare-business/health-tech founder analysis',
+      '    19. Greg Katz, MD | Substack | gregorykatz.substack.com | ~20K subscribers (est.) [35] | cardiology & practical longevity for patients',
+      '',
+      '```',
+      'curl -sS https://api.roselabs.ai/v1/agents/ac267c32-470f-41da-8343-091b8965c410/messages?include=metadata,tool_calls,step_history&format=jsonl&page_size=200 -H "Authorization: Bearer AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag="',
+      '```',
+      '',
+      '| Creator | Platform | Handle | Followers | Niche focus and detailed positioning notes for the longevity and health-tech founder audience |',
+      '| --- | --- | --- | --- | --- |',
+      '| Bryan Johnson | YouTube | @bryanjohnson | 1.2M | longevity protocol content with heavy data instrumentation and founder-journey framing |',
+      '| Andrew Huberman | YouTube | @hubermanlab | 5.8M | neuroscience-grounded health optimization protocols |',
+      '',
+      'Unbreakable-token check: https://vercel.com/rose-labs/rose-labs-web/deployments/dpl_4Gt8Yq2kJ9XwLmN3pRsTuVzAbCdEfGhIjKlMnOpQrStUvWxYzVeryLongDeploymentIdentifierThatNeverWraps',
+    ].join('\n'),
   };
 
   const steps = useMemo(
@@ -404,6 +423,20 @@ function App() {
                     data.latestToolName,
                     'ERROR',
                     data.failedStepResult,
+                  )}
+                />
+              </Example>
+              <Example label="FINISHED width stress (long lines, code block, table, URL)">
+                <ExploreAgentBubble
+                  title="Identify 50 top creators"
+                  fullGoal={data.goal}
+                  message={data.widthStressResult}
+                  status="FINISHED"
+                  stepHistory={baseSteps(
+                    'Fetching https://vercel.com/rose-labs/rose-labs-web/deployments/dpl_4Gt8Yq2kJ9XwLmN3pRsTuVzAbCdEfGhIjKlMnOpQrStUvWxYz for deployment event details',
+                    'web_fetch',
+                    'FINISHED',
+                    data.widthStressResult,
                   )}
                 />
               </Example>

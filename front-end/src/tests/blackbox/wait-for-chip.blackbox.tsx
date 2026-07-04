@@ -92,13 +92,27 @@ describe('WaitForChip — condition mode', () => {
     expect(screen.getByText(/1 check/)).toBeInTheDocument();
   });
 
-  it('renders "Waited for {condition}" with green icon on completion', () => {
-    render(
+  it('renders "Waited for {condition}" with green icon on completion', async () => {
+    const u = userEvent.setup();
+    const { container } = render(
       <WaitForChip
         title=""
         message=""
         status="FINISHED"
-        checks={[makeCheck({ checkNum: 1, conditionMet: true, status: 'FINISHED' })]}
+        checks={[
+          makeCheck({
+            checkNum: 1,
+            conditionMet: true,
+            status: 'FINISHED',
+            explore: {
+              title: 'Done',
+              fullGoal: 'Check file uploaded',
+              message: '```\nhttps://example.com/a/really/long/token\n```',
+              status: 'FINISHED',
+              steps: [],
+            },
+          }),
+        ]}
         metadata={{
           waitForMode: 'condition',
           condition: 'file uploaded',
@@ -110,6 +124,9 @@ describe('WaitForChip — condition mode', () => {
     expect(screen.getByText('Waited for file uploaded')).toBeInTheDocument();
     expect(document.querySelector('.text-emerald-400')).not.toBeNull();
     expect(screen.getByText(/3 checks/)).toBeInTheDocument();
+    await u.click(screen.getByText('Waited for file uploaded'));
+    expect(screen.getByText('Explored')).toBeInTheDocument();
+    expect(container.querySelector('.tool-message-markdown')).not.toBeNull();
   });
 
   it('expands to show check history when clicked', async () => {
