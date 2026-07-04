@@ -368,45 +368,126 @@ def _stop_owned_db_from_manifest(stack: ServiceStack) -> None:
         subprocess.run(["docker", "volume", "rm", volume], cwd=REPO_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def _kill_scoped_processes_by_run_id(stack: ServiceStack) -> None:
-    if not stack.isolated or not stack.run_id or stack.run_id == "existing":
-        return
+def _descendant_pids(root: int) -> set[int]:
+    """Every descendant of root (inclusive), captured now via pgrep -P."""
+    seen: set[int] = set()
+    frontier = [root]
+    while frontier:
+        pid = frontier.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        try:
+            out = subprocess.run(
+                ["pgrep", "-P", str(pid)], capture_output=True, text=True, timeout=2, check=False
+            ).stdout
+        except Exception:
+            continue
+        for line in out.split():
+            with contextlib.suppress(ValueError):
+                frontier.append(int(line))
+    return seen
+
+
+def _port_listener_pids(port: int) -> set[int]:
     try:
-        result = subprocess.run(
-            ["ps", "-axo", "pid=,command="],
+        out = subprocess.run(
+            ["lsof", "-ti", f"tcp:{port}"], capture_output=True, text=True, timeout=3, check=False
+        ).stdout
+    except Exception:
+        return set()
+    pids: set[int] = set()
+    for line in out.split():
+        with contextlib.suppress(ValueError):
+            pids.add(int(line))
+    return pids
+
+
+def _pid_cwd_under_worktree(pid: int) -> bool:
+    """True iff pid's cwd is inside this worktree. Safety gate: guarantees the
+    isolated teardown can never reach a process owned by a sibling worktree,
+    even if a PID/port were somehow reused."""
+    try:
+        out = subprocess.run(
+            ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
             capture_output=True,
             text=True,
-            timeout=2,
+            timeout=3,
             check=False,
-        )
+        ).stdout
     except Exception:
+        return False
+    root = str(REPO_ROOT)
+    for line in out.splitlines():
+        if line.startswith("n"):
+            cwd = line[1:]
+            return cwd == root or cwd.startswith(root + os.sep)
+    return False
+
+
+def _kill_scoped_processes_by_run_id(stack: ServiceStack) -> None:
+    """Reap an isolated stack's processes scoped strictly to THIS run.
+
+    The run_id only appears in run.sh's (and ngrok's) command line — the backend
+    (`tsx src/server.ts`) and worker (`python worker.py`) carry it only in their
+    environment, and they routinely reparent to launchd, so a command-line match
+    alone leaks them. We instead union three run-specific signals — command-line
+    run_id match, the manifest's recorded PIDs + their process trees, and the
+    listeners on this run's unique service ports — then gate every candidate on
+    cwd-under-this-worktree so a sibling worktree's stack is never touched.
+    """
+    if not stack.isolated or not stack.run_id or stack.run_id == "existing":
         return
+
+    targets: set[int] = set()
+
+    # 1) command-line run_id match (run.sh, ngrok)
+    with contextlib.suppress(Exception):
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,command="], capture_output=True, text=True, timeout=3, check=False
+        )
+        for line in result.stdout.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            pid_text, _, command = stripped.partition(" ")
+            with contextlib.suppress(ValueError):
+                if stack.run_id in command:
+                    targets.add(int(pid_text))
+
+    # 2) manifest PIDs (run_sh + recorded services) and their process trees, plus
+    #    3) listeners on this run's unique ports (catches reparented backend/vite).
+    with contextlib.suppress(Exception):
+        with open(stack.manifest_path) as f:
+            manifest = json.load(f)
+        if isinstance(manifest, dict):
+            manifest_pids: list[int] = []
+            run_sh_pid = manifest.get("run_sh_pid")
+            if isinstance(run_sh_pid, int) and run_sh_pid > 0:
+                manifest_pids.append(run_sh_pid)
+            for service in manifest.get("services") or []:
+                pid = service.get("pid") if isinstance(service, dict) else None
+                if isinstance(pid, int) and pid > 0:
+                    manifest_pids.append(pid)
+            for pid in manifest_pids:
+                targets |= _descendant_pids(pid)
+            ports = manifest.get("ports") or {}
+            for key in ("backend", "frontend", "health", "sdk_metrics", "mac_app", "ngrok_api"):
+                port = ports.get(key) if isinstance(ports, dict) else None
+                if isinstance(port, int) and port > 0:
+                    targets |= _port_listener_pids(port)
+
     current_pid = os.getpid()
-    for line in result.stdout.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        pid_text, _, command = stripped.partition(" ")
-        try:
-            pid = int(pid_text)
-        except ValueError:
-            continue
-        if pid == current_pid or stack.run_id not in command:
-            continue
+    targets.discard(current_pid)
+    # Safety gate: only reap processes whose cwd is inside THIS worktree.
+    scoped = {pid for pid in targets if _pid_cwd_under_worktree(pid)}
+    if not scoped:
+        return
+    for pid in scoped:
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.kill(pid, signal.SIGTERM)
     time.sleep(1)
-    for line in result.stdout.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        pid_text, _, command = stripped.partition(" ")
-        try:
-            pid = int(pid_text)
-        except ValueError:
-            continue
-        if pid == current_pid or stack.run_id not in command:
-            continue
+    for pid in scoped:
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.kill(pid, signal.SIGKILL)
 
@@ -883,6 +964,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         apply_manifest_environment(manifest)
         if stack.isolated:
+            # Child processes (run_benchmark.py, diagnostics, eval suite) inherit this
+            # process's os.environ. They resolve the isolated stack's services.json via
+            # BENCHMARK_CONTEXT_DIR; without it they default to the top-level ".context"
+            # (a stale manifest from a prior run) and route DB fixtures to the wrong
+            # database — e.g. the grep fixture's direct agent lookup hits system Postgres
+            # instead of the isolated container and fails with "root agent not found".
+            os.environ["BENCHMARK_CONTEXT_DIR"] = _context_dir_env_value(stack.context_dir)
             ports = manifest.get("ports", {})
             print(
                 "Isolated benchmark stack: "

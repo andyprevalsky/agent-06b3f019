@@ -2321,6 +2321,40 @@ def _plaid_transactions_fixture_action() -> str:
     raise RuntimeError("BENCHMARK_PLAID_FIXTURE_MODE must be one of real/sync-real/synthetic/apply")
 
 
+def _user_data_fixture_env() -> dict:
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        raise RuntimeError("Local Victoria DB connection not found for user-data benchmark fixture")
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["BENCHMARK_USER_ID"] = USER_ID
+    # Source (prod) URL lets the fixture freeze real documents once if the frozen
+    # file is missing. When the frozen file already exists, apply is fully offline.
+    source_database_url = load_env_var("DATABASE_URL", _BACKEND_ENV)
+    if source_database_url:
+        source_database_url = _psql_compatible_database_url(source_database_url)
+        if source_database_url != database_url:
+            env["BENCHMARK_USER_DATA_SOURCE_DATABASE_URL"] = source_database_url
+    return env
+
+
+def _run_user_data_fixture(action: str) -> dict:
+    result = subprocess.run(
+        ["npx", "tsx", "scripts/user-data-benchmark-fixture.ts", action],
+        cwd=REPO_ROOT / "back-end",
+        env=_user_data_fixture_env(),
+        capture_output=True,
+        text=True,
+        timeout=240 if action in ("apply", "freeze") else 60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"user-data benchmark fixture {action} failed: "
+            f"{(result.stderr or result.stdout).strip()}"
+        )
+    return _parse_last_json_line(result.stdout)
+
+
 def _run_grep_fixture(action: str, *args: str) -> dict:
     result = subprocess.run(
         ["npx", "tsx", "scripts/grep-benchmark-fixture.ts", action, *args],
@@ -3975,6 +4009,16 @@ async def run_single_task(
         mode = plaid_transactions_manifest.get("fixture_mode", action)
         tx_count = plaid_transactions_manifest.get("transaction_count", "?")
         print(f"    💳 Prepared Plaid transaction fixture mode={mode} transactions={tx_count}")
+    if task.name == USER_DATA_PROD_GREP_TASK_NAME:
+        if not _is_local_base_url(base_url):
+            raise RuntimeError(f"{task.name} must run against the local benchmark stack")
+        user_data_manifest = _run_user_data_fixture("apply")
+        doc_count = user_data_manifest.get("document_count", "?")
+        provider_count = user_data_manifest.get("provider_count", "?")
+        print(
+            f"    📄 Seeded frozen user-data fixture: {doc_count} documents "
+            f"across {provider_count} providers"
+        )
 
     phone_callee: Optional[PhoneCalleeSession] = None
     if task.phone_persona:

@@ -181,7 +181,20 @@
       "message_person",
       "send_message_to_user_execute_phase"
     ],
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "environment": {
+      "mode": "hybrid",
+      "db_fixtures": [
+        "user_data_prod_grep_v1"
+      ],
+      "base_images": [],
+      "services": [
+        "grep"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Frozen user-data documents (apple_notes, chatgpt, claude, obsidian) seeded by back-end/scripts/user-data-benchmark-fixture.ts from .context/benchmarks/user-data-grep-fixture.json — real prod docs frozen once (gitignored, re-derivable via BENCHMARK_USER_DATA_SOURCE_DATABASE_URL). grep source=documents is the required data path."
+    }
   },
   {
     "name": "plaid-transactions-monthly-spend",
