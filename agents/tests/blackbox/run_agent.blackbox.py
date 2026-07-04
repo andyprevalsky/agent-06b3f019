@@ -821,6 +821,29 @@ async def test_run_agent_refusal_retry_excludes_anthropic_without_backoff():
     assert result["status"] in {"max_iterations", "error"}
 
 
+def test_is_refusal_error_detects_type_message_and_cause_chain():
+    """_is_refusal_error matches by type, by message, and through the cause chain."""
+    from loop.run_agent import _is_refusal_error
+    from providers.rose.errors import RoseRefusalError
+
+    # Direct type match.
+    assert _is_refusal_error(RoseRefusalError("refused")) is True
+
+    # String-based match on a non-RoseRefusalError exception.
+    assert _is_refusal_error(RuntimeError("Anthropic stream ended with refusal")) is True
+
+    # Match reached by walking the __cause__ chain.
+    inner = RuntimeError("stream ended with refusal")
+    outer = ValueError("wrapper")
+    outer.__cause__ = inner
+    assert _is_refusal_error(outer) is True
+
+    # Non-refusal errors are not misclassified; a self-cycle must not loop forever.
+    benign = ValueError("deadline exceeded")
+    benign.__context__ = benign
+    assert _is_refusal_error(benign) is False
+
+
 async def test_compress_context_failure_preserves_original():
     """On activity failure (success=False), return (original_context, False) — no clobber."""
     from loop.run_agent import _compress_context
@@ -1071,6 +1094,7 @@ async def run_all_tests():
         "run_agent_refusal_retry_excludes_anthropic_without_backoff",
         test_run_agent_refusal_retry_excludes_anthropic_without_backoff,
     )
+    r.record("is_refusal_error_type_message_cause_chain", test_is_refusal_error_detects_type_message_and_cause_chain)
     await r.record_async("compress_context_failure_preserves_original", test_compress_context_failure_preserves_original)
     await r.record_async("compress_context_activity_exception_preserves_original", test_compress_context_activity_exception_preserves_original)
     await r.record_async(
