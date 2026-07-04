@@ -133,6 +133,7 @@ async def waterfall_complete(
     call_site: Optional[str] = None,
     per_step_timeout_s: float = _PER_STEP_TIMEOUT_S,
     idle_timeout_s: Optional[float] = None,
+    exclude_anthropic_family: bool = False,
 ) -> AsyncIterator[StreamChunk]:
     """Walk the pool's waterfall until one model streams a clean response.
 
@@ -142,6 +143,20 @@ async def waterfall_complete(
     step_errors: List[RoseStepError] = []
 
     for idx, model in enumerate(pool_spec.waterfall):
+        if exclude_anthropic_family and is_anthropic_model(model):
+            logger.warning(
+                "rose.waterfall.step_skipped",
+                request_id=request_id,
+                agent_id=agent_id,
+                call_site=call_site,
+                pool=pool_spec.name,
+                step=idx + 1,
+                total=len(pool_spec.waterfall),
+                model=model,
+                reason="anthropic_family_excluded",
+            )
+            continue
+
         if response_format is not None and is_anthropic_model(model):
             error = RoseInvalidRequest(
                 "Skipping OpenRouter Anthropic structured-output request: "

@@ -762,6 +762,65 @@ async def test_fast_cache_position_retries_same_step_after_llm_failure():
     assert result["status"] in {"max_iterations", "error"}
 
 
+async def test_run_agent_refusal_retry_excludes_anthropic_without_backoff():
+    from loop.run_agent import run_agent
+    from providers.rose.errors import RoseRefusalError
+
+    llm_calls = []
+
+    async def system_prompt():
+        return "System prompt"
+
+    async def verifier_prompt():
+        return "Verifier prompt"
+
+    async def post_message(text, role, metadata=None):
+        return None
+
+    async def mock_call_llm_structured_streaming(**kwargs):
+        llm_calls.append(kwargs)
+        if len(llm_calls) == 1:
+            raise RoseRefusalError("Anthropic stream ended with refusal (request_id=r-test)")
+        return (
+            _DummyLLMResult("", []),
+            {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            [],
+        )
+
+    sleep_mock = AsyncMock()
+    with (
+        patch(
+            "loop.run_agent.call_llm_structured_streaming",
+            new=AsyncMock(side_effect=mock_call_llm_structured_streaming),
+        ),
+        patch("loop.run_agent.asyncio.sleep", new=sleep_mock),
+    ):
+        result = await run_agent(
+            agent_id="agent-test",
+            user_id="user-test",
+            system_prompt=system_prompt,
+            verifier_prompt_generator=verifier_prompt,
+            model="rose-labs/rose-1-lite",
+            tools=["attempt_completion"],
+            initial_context=[
+                {"role": "USER", "text": "Find updates", "timestamp": "2024-01-01T00:00:00Z"}
+            ],
+            is_inside_temporal_activity=True,
+            post_message=post_message,
+            execute_tool=AsyncMock(),
+            build_messages=lambda context, prompt: [{"role": "system", "content": prompt}],
+            max_iterations=2,
+            skip_verification=True,
+            skip_status_updates=True,
+        )
+
+    assert len(llm_calls) == 2
+    assert llm_calls[0]["_exclude_anthropic_family"] is False
+    assert llm_calls[1]["_exclude_anthropic_family"] is True
+    assert not any(call.args == (2,) for call in sleep_mock.await_args_list)
+    assert result["status"] in {"max_iterations", "error"}
+
+
 async def test_compress_context_failure_preserves_original():
     """On activity failure (success=False), return (original_context, False) — no clobber."""
     from loop.run_agent import _compress_context
@@ -1007,6 +1066,10 @@ async def run_all_tests():
     await r.record_async(
         "fast_cache_position_retries_same_step_after_llm_failure",
         test_fast_cache_position_retries_same_step_after_llm_failure,
+    )
+    await r.record_async(
+        "run_agent_refusal_retry_excludes_anthropic_without_backoff",
+        test_run_agent_refusal_retry_excludes_anthropic_without_backoff,
     )
     await r.record_async("compress_context_failure_preserves_original", test_compress_context_failure_preserves_original)
     await r.record_async("compress_context_activity_exception_preserves_original", test_compress_context_activity_exception_preserves_original)

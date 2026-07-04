@@ -1805,6 +1805,7 @@ async def call_llm_structured_streaming(  # noqa: C901
     deadline_s: Optional[float] = None,  # Override Rose top-level deadline; None uses Rose default
     ttft_timeout_s: Optional[float] = None,  # Override Rose TTFT timeout
     idle_timeout_s: Optional[float] = None,  # Override Rose idle/inter-chunk timeout (-1 disables)
+    _exclude_anthropic_family: bool = False,  # Internal: refusal retry skips Anthropic direct/waterfall routes
     _is_escalation: bool = False,  # Internal: prevents infinite recursion on max_tokens escalation
 ) -> Tuple[T, Dict, List[tuple]]:
     """
@@ -2000,6 +2001,7 @@ async def call_llm_structured_streaming(  # noqa: C901
             request_id=request_id,
             thinking=thinking,
             effort=effort,
+            _exclude_anthropic_family=_exclude_anthropic_family,
             **rose_kwargs,
         ).__aiter__()
         try:

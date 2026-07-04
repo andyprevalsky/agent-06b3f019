@@ -79,6 +79,7 @@ def install_capture() -> None:
     def patched_init(self: httpx.AsyncClient, *args: Any, **kwargs: Any) -> None:
         assert _original_init is not None
         _original_init(self, *args, **kwargs)
+        wrapped_any = False
         if hasattr(self, "_transport") and self._transport is not None:
             # If a mock handler is set, capture wraps the mock transport
             # instead of the real transport. Requests still get recorded
@@ -88,9 +89,19 @@ def install_capture() -> None:
                 self._transport = _CapturingTransport(mock_transport)
             else:
                 self._transport = _CapturingTransport(self._transport)
-        else:
+            wrapped_any = True
+        if hasattr(self, "_mounts") and isinstance(self._mounts, dict):
+            for pattern, transport in list(self._mounts.items()):
+                if transport is None or isinstance(transport, _CapturingTransport):
+                    continue
+                if _mock_handler is not None:
+                    self._mounts[pattern] = _CapturingTransport(httpx.MockTransport(_mock_handler))
+                else:
+                    self._mounts[pattern] = _CapturingTransport(transport)
+                wrapped_any = True
+        if not wrapped_any:
             warnings.warn(
-                "httpx_capture: AsyncClient._transport not found — capture disabled. "
+                "httpx_capture: AsyncClient transports not found — capture disabled. "
                 "This may indicate an incompatible httpx version.",
                 stacklevel=2,
             )

@@ -595,6 +595,7 @@ class RoseClient:
         provider_fast_mode: bool = False,
         dump_context: bool = True,
         dump_extra: Optional[Dict[str, Any]] = None,
+        _exclude_anthropic_family: bool = False,
     ) -> AsyncIterator[StreamChunk]:
         """Run a full Rose completion, yielding normalized StreamChunks.
 
@@ -643,10 +644,17 @@ class RoseClient:
                             "gpt": gpt_auth is not None,
                         },
                         "candidate_models": {
-                            "claude_auth": pool_spec.claude_auth_model,
+                            "claude_auth": (
+                                None if _exclude_anthropic_family else pool_spec.claude_auth_model
+                            ),
                             "gpt_auth": pool_spec.gpt_auth_model,
-                            "waterfall": list(pool_spec.waterfall),
+                            "waterfall": [
+                                model
+                                for model in pool_spec.waterfall
+                                if not (_exclude_anthropic_family and "anthropic/" in model)
+                            ],
                         },
+                        "exclude_anthropic_family": _exclude_anthropic_family,
                     },
                     response_format=None if tools else openrouter_response_format,
                     tools=tools,
@@ -742,7 +750,12 @@ class RoseClient:
         if anthropic_api_key_tools:
             anthropic_api_key_tool_choice = effective_tool_choice or "any"
 
-        direct_auth: Optional[ComputeAuthContext] = claude_auth or gpt_auth
+        if _exclude_anthropic_family and gpt_auth is not None:
+            direct_auth = gpt_auth
+        elif _exclude_anthropic_family:
+            direct_auth = None
+        else:
+            direct_auth = claude_auth or gpt_auth
 
         logger.info(
             "rose.complete.start",
@@ -757,6 +770,7 @@ class RoseClient:
             deadline_s=deadline_s,
             ttft_timeout_s=ttft_timeout_s,
             idle_timeout_s=idle_timeout_s,
+            exclude_anthropic_family=_exclude_anthropic_family,
         )
 
         def remaining() -> float:
@@ -928,6 +942,16 @@ class RoseClient:
             direct_rotations = 0
             direct_token_errors: Dict[str, str] = {}
             while direct_auth is not None:
+                if _exclude_anthropic_family and direct_auth.token_type == "claude":
+                    logger.info(
+                        "rose.complete.direct_auth.skipped",
+                        request_id=rid,
+                        agent_id=agent_id,
+                        call_site=call_site,
+                        token_type=direct_auth.token_type,
+                        reason="anthropic_family_excluded",
+                    )
+                    break
                 active_route = f"direct_auth:{direct_auth.token_type}"
                 # Per-token stall-retry: bump TTFT and re-attempt with the
                 # same token before classifying as a fall-through. Cold pool
@@ -1141,7 +1165,11 @@ class RoseClient:
             # suffix so cost is recorded). On out-of-credits/bad-key before
             # first content, back it off (shared DB cooldown) and fall through.
             anthropic_api_key = (load_config().anthropic.api_key or "").strip()
-            if anthropic_api_key and not await _anthropic_api_key_on_cooldown():
+            if (
+                not _exclude_anthropic_family
+                and anthropic_api_key
+                and not await _anthropic_api_key_on_cooldown()
+            ):
                 active_route = "anthropic_apikey"
                 api_yielded_any = False
                 try:
@@ -1222,6 +1250,7 @@ class RoseClient:
                     call_site=call_site,
                     per_step_timeout_s=ttft_timeout_s,
                     idle_timeout_s=idle_timeout_s,
+                    exclude_anthropic_family=_exclude_anthropic_family,
                 )
             ):
                 chunk = _with_timing_if_done(chunk)
