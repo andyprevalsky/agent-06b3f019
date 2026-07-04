@@ -87,6 +87,7 @@ vi.mock('electron-updater', () => ({
   autoUpdater: {
     autoDownload: true, // real default — initAutoUpdater flips this to false
     autoInstallOnAppQuit: false,
+    disableDifferentialDownload: false, // real default — configureFeed flips to true
     setFeedURL: setFeedURLFn,
     checkForUpdates: checkForUpdatesFn,
     downloadUpdate: downloadUpdateFn,
@@ -232,6 +233,11 @@ describe('blackbox: auto-updater (main-service)', () => {
       });
       expect(electronUpdater.autoUpdater.autoDownload).toBe(false);
       expect(electronUpdater.autoUpdater.autoInstallOnAppQuit).toBe(true);
+      // Differential download must be disabled: block-level reconstruction from
+      // a stale cached Rose-mac.zip produces a sha512 mismatch and a bare
+      // "Update failed" with no renderer-visible diagnostics. Full downloads
+      // re-verify end-to-end and cannot be poisoned by a stale cache.
+      expect(electronUpdater.autoUpdater.disableDifferentialDownload).toBe(true);
     });
 
     it('registers listeners for every event the service translates', async () => {
