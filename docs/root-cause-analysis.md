@@ -22,6 +22,7 @@ Every bug lives on a path through this graph. Your first job is to identify WHIC
 ## Step 0: Gather evidence before theorizing
 
 Before forming ANY hypothesis, collect runtime evidence:
+
 - Read the relevant log file (`agents/navi-worker-log.txt`, `back-end/backend-logs.log`, etc.)
 - Read the actual error message, stack trace, or HTTP response body
 - If the error is in agent execution, query the DB for raw message/event data
@@ -54,6 +55,7 @@ The symptom is where you NOTICE the bug. The root cause could be upstream, downs
 Once you have found the most upstream suspicious point, reproduce the failure in the smallest environment that still exercises the same mechanism. This is required before writing the fix whenever the bug can be isolated without losing the behavior under investigation.
 
 The isolated reproduction should:
+
 - Use the same critical code path or boundary where the data first goes wrong
 - Remove unrelated services, network calls, benchmarks, retries, and UI layers
 - Run quickly enough to iterate repeatedly while fixing
@@ -67,6 +69,7 @@ If an isolated reproduction is not feasible, state why explicitly and use the na
 If the suspected root cause is an LLM call, provider call, model gateway call, compute-token acquisition, tool-call parser response, or any other model-facing boundary, the isolated reproduction must start by reconstructing the exact failing LLM request locally from captured evidence.
 
 Required reconstruction evidence:
+
 - The full message list/context sent to the model
 - The system prompt and tool/schema set
 - The model name and provider/auth path used
@@ -74,6 +77,7 @@ Required reconstruction evidence:
 - The captured failure span/log line, including provider, request/span id, duration, timeout type, and any token/auth rotation metadata
 
 The RCA is incomplete until you either:
+
 1. Re-run the reconstructed call through the same local client path and reproduce the failure, then iteratively reduce or vary the request to identify which input/config/provider condition makes it fail; or
 2. Prove the failure cannot be reproduced locally because it depends on an unavailable external state, such as an expired provider token, provider incident, or production-only compute-token lease, and document the narrowest replay that was attempted plus the exact missing state.
 
@@ -83,13 +87,13 @@ Do not classify an LLM issue as "model/provider timeout" and stop there. Treat t
 
 Not all errors are bugs in our code. Before writing a fix, classify:
 
-| Classification | Example | Correct response |
-|---|---|---|
-| **Our bug** — our code produces wrong output given valid input | JSON parse error on well-formed LLM response | Fix our code |
-| **Third-party failure** — external service returns an error | 402 out of credits, 429 rate limited, provider outage | Surface the error clearly to the user; do NOT add fallbacks that mask it |
-| **Input error** — bad data entered the system | Malformed user goal, missing required field | Validate at the system boundary where the input enters; do NOT patch downstream handlers |
-| **Configuration error** — missing env var, expired token, wrong URL | TEMPORAL_ADDRESS not set, expired Claude OAuth token | Report the specific missing config; do NOT add "works without it" fallbacks |
-| **Test bug** — the test itself asserts the wrong thing | Test expects old API shape after a schema change | Fix the test, not the production code |
+| Classification                                                      | Example                                               | Correct response                                                                         |
+| ------------------------------------------------------------------- | ----------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| **Our bug** — our code produces wrong output given valid input      | JSON parse error on well-formed LLM response          | Fix our code                                                                             |
+| **Third-party failure** — external service returns an error         | 402 out of credits, 429 rate limited, provider outage | Surface the error clearly to the user; do NOT add fallbacks that mask it                 |
+| **Input error** — bad data entered the system                       | Malformed user goal, missing required field           | Validate at the system boundary where the input enters; do NOT patch downstream handlers |
+| **Configuration error** — missing env var, expired token, wrong URL | TEMPORAL_ADDRESS not set, expired Claude OAuth token  | Report the specific missing config; do NOT add "works without it" fallbacks              |
+| **Test bug** — the test itself asserts the wrong thing              | Test expects old API shape after a schema change      | Fix the test, not the production code                                                    |
 
 **The critical rule:** Third-party failures and configuration errors are NOT bugs in our code. Never write code to "handle" a 402 by falling back to a different provider silently. Never write code to "handle" a missing env var by using a default. These mask real problems. Surface them to the user.
 
@@ -101,14 +105,52 @@ Before writing any fix, state ALL of these:
 2. **Where** — the root cause location (file, function, line)
 3. **Why** — the causal chain from root cause to symptom
 4. **Proof** — the specific log line, DB query result, or isolated reproduction step that confirms causation
+5. **Problem** — the generalizable problem class, not just the local failure instance
 
-If you cannot fill in all four, you have not found the root cause yet. Keep investigating.
+If you cannot fill in all five, you have not found the root cause yet. Keep investigating.
+
+### Step 5a: Escalate to the deepest owning cause
+
+Steps 1–2 walk _upstream on the data path_ to the first place data goes wrong. That is where the bug is, but it is not always the deepest cause you own. Once you have a proven root cause, interrogate the cause itself: ask "why was this failure even _possible_?" up to three times, treating each answer as a new candidate root cause.
+
+Rules for the ladder:
+
+- **Every rung needs evidence.** Each "why" must be answered with a real, checkable gap — a missing invariant or contract, an absent validation/type, an untested code path, a shared-state assumption — not a speculative story. If you cannot prove the next rung, stop; you have reached the deepest _proven_ cause.
+- **Stop when the next "why" leaves what you own.** Halt the moment the next answer would (a) cross into third-party or configuration state you do not control (hand it to the Step 4 classification instead), or (b) name a deliberate, documented design decision. Do not escalate into "the whole architecture is wrong" hand-waving.
+- **Fix at the deepest cause you still own.** The repair belongs at the lowest rung that is both in-scope and evidence-backed.
+- **Prefer the cause that also kills the siblings.** When two rungs are both in-scope, choose the one whose fix prevents the _other failures you can concretely enumerate_ from the same gap. If you cannot name at least one sibling failure the deeper fix also prevents, you have probably escalated past the real root cause — drop back down a rung.
+
+The deepest owned cause you land on _is_ the **Problem** class from Step 5, and it is what Step 6's generalizable fix should target.
+
+Example:
+
+- **Symptom:** user sees a malformed message.
+- **Why 1:** `message_person.py` sent a string the front-end can't render. (upstream on the path — Step 2 stops here)
+- **Why 2:** the string was malformed because the LLM response parser accepted a shape it can't safely serialize. _Evidence: parser has no schema check; the log shows the raw shape._
+- **Why 3:** the parser accepted it because no boundary validates tool-call output against a contract before it enters the message pipeline. _Evidence: grep shows three other tools feed the same unvalidated path._
+- **Why 4** would be "the message pipeline was designed without a validation boundary" — a design decision, and the fix (add the boundary) already lives at Why 3. **Stop.** Fix at Why 3; it also prevents the three sibling tools from producing the same class of malformed message.
+
+For benchmark failures, attach the diagnosis to one of the problem buckets below. If more than one independent issue occurred in the same benchmark run, write one problem entry per issue.
+
+| Problem bucket                                         | Use this when                                                                                                                                                                                                                                                                              | Do NOT use this when                                                                                                                                                                                | Generalizable fix shape                                                                                                                                                                                             |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Timeout too aggressive**                             | The code path is making valid progress, but a benchmark deadline, idle watchdog, provider idle timer, or derived timeout expires before the path can reasonably finish. Evidence must include spans/logs showing continuing useful work or passing runs just beyond the current budget.    | The agent is looping, blocked on missing state, waiting on a never-fired event, stuck behind a resource bottleneck, or failing because data is malformed. "The runner timed out" is only a symptom. | Fix the timeout policy at the owner layer: derive from pass history/span baselines, split idle vs wall-clock budgets, emit better progress heartbeats, or tune the watchdog condition for the whole class of tasks. |
+| **Logical inconsistency in harness prompts/contracts** | The harness gives contradictory instructions, a prompt disagrees with the evaluator, a tool schema conflicts with tool-result formatting, or the runner expects state that another layer intentionally hides. Evidence must cite the conflicting prompt/schema/evaluator/runtime contract. | The prompt is clear but the agent chose poorly, the data fixture is wrong, or the desired behavior requires a capability that does not exist.                                                       | Move the contract to one source of truth and update every consumer: task prompt, tool schema, verifier prompt, context builder, evaluator, and UI/runtime metadata.                                                 |
+| **Uncaptured user preference/spec**                    | The user expected a stable product preference or benchmark convention that was not encoded in the task, fixture, evaluator, default prompt, or harness config, so multiple valid behaviors existed and the agent chose the wrong one.                                                      | The requirement was already explicit and the system ignored it, or the user preference requires a new tool/capability before it can be followed.                                                    | Encode the preference at the narrowest stable boundary that all future runs share: task definition, evaluator, harness default, reusable prompt fragment, or product config.                                        |
+| **New tool/capability required**                       | The task requires observing or changing state that current tools cannot access reliably or safely, such as a missing domain API, browser/phone/payment primitive, trace query, or data-source-specific operation.                                                                          | An existing tool can do the work but the prompt failed to select it, the tool result was formatted badly, or the fixture omitted required data.                                                     | Add the missing capability at the abstraction that owns it, with a typed schema, clear permissions, evaluator coverage, and representative benchmark coverage.                                                      |
+| **Concurrency inefficiency**                           | Correct work becomes slow or flaky because parallel execution amplifies CPU, memory, connection-pool, event-loop, worker-slot, provider-rate-limit, or shared-service contention. Evidence must compare per-unit work with concurrent-run behavior.                                        | A single agent/task is slow for reasons unrelated to load, a provider is down, or the benchmark prompt asks for unnecessary work.                                                                   | Fix scheduling/resource ownership: bounded concurrency, batching, coalescing, per-run isolation, shared expensive sampling, task partitioning, or explicit load-test isolation.                                     |
+| **Fixture/environment/data mismatch**                  | The benchmark run used the wrong seed data, stale local/prod DB state, missing env var, wrong public URL, wrong task queue, wrong user/account identity, or a fixture that does not match the task's assertions.                                                                           | The data is correct but the agent lacks instructions/capability, or an external service returned a legitimate error.                                                                                | Make the fixture declarative and validated before launch: base image, deltas, env checks, URL/task-queue injection, identity mapping, and preflight assertions.                                                     |
+| **Observability/trace capture gap**                    | The failure cannot be diagnosed or replayed because the benchmark did not preserve the raw request, spans, tool inputs/outputs, screenshots, active tab state, logs, or evaluator artifacts needed to compare source to sink.                                                              | Evidence exists but was not read, or the fix is only to make logs prettier after the root cause is already proven.                                                                                  | Capture the missing evidence at the source boundary and persist it with the run record so future RCAs can replay the same class of failure.                                                                         |
+| **Other**                                              | Only after proving none of the buckets above fits.                                                                                                                                                                                                                                         | Any case that can reasonably fit a specific bucket.                                                                                                                                                 | Name the missing bucket candidate in the RCA so this taxonomy can be tightened later.                                                                                                                               |
+
+The bucket is the **problem**, not the solution. Do not classify "add popup auto-dismiss" as the problem when the general failure is that screenshot/observation support omits active popups. The general fix is to improve the observation channel so every caller sees the popup state; auto-dismiss is a point workaround unless the product requirement is specifically to dismiss that class of popup.
 
 ## Step 6: Design a generalizable fix
 
 Before writing code, ask: "Am I fixing the instance or the class of bug?"
 
 **Point fix (avoid):**
+
 ```python
 # Bad: special-case for one tool's timeout
 if tool_name == "web_search" and "timeout" in error:
@@ -116,6 +158,7 @@ if tool_name == "web_search" and "timeout" in error:
 ```
 
 **General fix (prefer):**
+
 ```python
 # Good: retry-with-backoff for ALL HTTP tool calls
 class HttpToolClient:
@@ -124,6 +167,7 @@ class HttpToolClient:
 ```
 
 Prefer fixes that:
+
 - Eliminate the **class** of bug, not just the **instance**
 - Respect encapsulation — fix it in the layer that owns the responsibility
 - Don't duplicate logic that already exists elsewhere (search the codebase first)
