@@ -50,6 +50,7 @@ import dataRouter from './domains/data/routes';
 import benchmarksRouter from './domains/benchmarks/routes';
 import fastCacheRouter from './domains/fast-cache/routes';
 import archiveRouter from './domains/archive/routes';
+import worldModelsRouter from './domains/world-models/routes';
 import { anthropicProxyRouter, codexProxyRouter } from './domains/fast-cache/routes.proxy';
 import { prisma } from './providers/database';
 import { createLogger } from './providers/logger';
@@ -95,6 +96,8 @@ Pay with USDC on Base network. Credits are consumed as the agent works. Top up a
 import cron from 'node-cron';
 import { runGmailSyncJob } from './services/integrations/gmailSync';
 import { runPlaidTransactionSyncJob } from './domains/integrations/service.plaidTransactions';
+import { grep as userDataGrep } from './domains/data/service';
+import { registerUserDataGrep } from './providers/userDataSearch';
 // x402 payment middleware
 import { paymentMiddleware } from 'x402-express';
 import { facilitator } from '@coinbase/x402';
@@ -110,6 +113,10 @@ if (!process.env.BACKEND_API_KEY) {
     key_prefix: process.env.BACKEND_API_KEY.substring(0, 20) + '...',
   });
 }
+
+// Wire the data domain's grep into the provider-side bridge so the SMS
+// supervisor can search user data without a provider→domain import.
+registerUserDataGrep(userDataGrep);
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -503,6 +510,7 @@ app.use('/api/purchases', purchasesRouter);
 app.use('/api/test-payment', testPaymentRouter);
 app.use('/api/fast-cache', fastCacheRouter); // Fast Mode aggressive cache get/set/purge
 app.use('/api/archive', archiveRouter); // Encrypted trace archive + scoped DB fixtures
+app.use('/api/world-models', worldModelsRouter); // WMH-compatible simulation runtime shim
 // Anthropic tee-proxy for the code agent. Mounted OUTSIDE /api so the injected
 // ANTHROPIC_BASE_URL = <backend>/anthropic-proxy/<goalHash> resolves to /v1/messages.
 app.use('/anthropic-proxy', anthropicProxyRouter);

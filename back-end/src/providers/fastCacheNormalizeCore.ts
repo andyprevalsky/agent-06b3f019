@@ -51,9 +51,21 @@ export function sha256(input: string): string {
   return createHash('sha256').update(input, 'utf8').digest('hex');
 }
 
-/** Short, stable hash of a goal string. Exact-match (no goal normalization). */
+/**
+ * Short, stable hash of a goal string.
+ *
+ * Exact-match on user prose, with one canonicalization: run-local
+ * `@ref:message:<uuid>` pointers collapse before hashing. Spawn paths append a
+ * fresh message reference to sub-agent goals on every run, and namespacing on
+ * those would give each rerun of the same goal an empty cache namespace.
+ * Keep in sync with `goal_hash` in agents providers/fast_cache/normalize.py.
+ */
 export function goalHash(goal: string): string {
-  return sha256(goal).slice(0, 16);
+  const canonical = goal.replace(
+    /@ref:message:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g,
+    '@ref:message:<uuid>'
+  );
+  return sha256(canonical).slice(0, 16);
 }
 
 /** Recursively drop secret-bearing fields from an object before it is cached. */

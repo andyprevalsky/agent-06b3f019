@@ -10,6 +10,8 @@ import asyncio
 import base64
 import contextlib
 import gc
+import importlib
+import inspect
 import json
 import os
 import random
@@ -36,6 +38,7 @@ from helpers.file_resolution import (
 from helpers.messages import stream_browser_cursor
 from helpers.model_pricing import get_model_pricing_with_fallback
 from helpers.tracing import span, traced
+from helpers.world_model_runtime import WorldModelToolExecutionAdapter
 from loop.activity_helper import call_temporal_activity_from_activity
 from providers.fast_cache.browser_use_cache import cached_browser_decision
 from providers.fast_cache.context import write_through_enabled_for_user
@@ -118,6 +121,43 @@ from .service_crypto import (
 from .types import ClaudeTokenState
 
 logger = structlog.get_logger()
+
+
+def _patch_cdp_use_websocket_proxy_default() -> None:
+    """Force cdp-use CDP sockets to connect directly under websockets>=15.
+
+    websockets 15 defaults client proxy discovery to proxy=True. cdp-use 1.4.5
+    does not pass a proxy argument, so Steel CDP sockets can be misrouted
+    through system proxy discovery and fail before browser-use can attach.
+    Playwright validation uses a separate client and is unaffected.
+    """
+    try:
+        import cdp_use.client as cdp_client
+    except Exception as exc:
+        logger.warning("Unable to patch cdp-use websocket proxy default", error=extract_error_message(exc))
+        return
+
+    connect = cdp_client.websockets.connect
+    if getattr(connect, "_rose_direct_cdp_patch", False):
+        return
+
+    try:
+        parameters = inspect.signature(connect).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+
+    supports_proxy = "proxy" in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+    if not supports_proxy:
+        return
+
+    def connect_direct(*args: Any, **kwargs: Any) -> Any:
+        kwargs.setdefault("proxy", None)
+        return connect(*args, **kwargs)
+
+    setattr(connect_direct, "_rose_direct_cdp_patch", True)
+    cdp_client.websockets.connect = connect_direct
 
 
 _FALSE_ENV_VALUES = {"0", "false", "no", "off", "disabled"}
@@ -628,7 +668,7 @@ async def _stop_playwright_resources(
 
     if playwright_browser and close_browser:
         try:
-            await playwright_browser.close()
+            await asyncio.wait_for(playwright_browser.close(), timeout=5.0)
             logger.info("Playwright browser CDP connection closed", agent_id=agent_id)
         except Exception as e:
             logger.warning(
@@ -639,7 +679,7 @@ async def _stop_playwright_resources(
 
     if playwright_instance:
         try:
-            await playwright_instance.stop()
+            await asyncio.wait_for(playwright_instance.stop(), timeout=5.0)
             logger.info("Playwright instance stopped", agent_id=agent_id)
         except Exception as e:
             logger.warning("Failed to stop Playwright instance", agent_id=agent_id, error=str(e))
@@ -695,6 +735,35 @@ async def _reap_playwright_driver_process(process: Optional[Any], agent_id: str)
         return
     except Exception as e:
         logger.warning("Failed to kill Playwright driver process", agent_id=agent_id, error=str(e))
+
+
+def _disable_cdp_websocket_proxy() -> bool:
+    """Force cdp-use websocket handshakes to bypass ambient proxy config."""
+    try:
+        cdp_client_module = importlib.import_module("cdp_use.client")
+    except Exception as exc:  # noqa: BLE001 - dependency availability is environment-specific
+        logger.debug("Could not patch cdp-use websocket proxy handling", error=str(exc))
+        return False
+
+    connect = getattr(cdp_client_module.websockets, "connect", None)
+    if connect is None or getattr(connect, "_rose_proxy_disabled", False):
+        return False
+
+    try:
+        supports_proxy_arg = "proxy" in inspect.signature(connect).parameters
+    except (TypeError, ValueError):
+        supports_proxy_arg = False
+    if not supports_proxy_arg:
+        return False
+
+    def connect_without_proxy(*args: Any, **kwargs: Any) -> Any:
+        kwargs.setdefault("proxy", None)
+        return connect(*args, **kwargs)
+
+    setattr(connect_without_proxy, "_rose_proxy_disabled", True)
+    cdp_client_module.websockets.connect = connect_without_proxy
+    logger.info("Disabled ambient proxy use for cdp-use websocket connections")
+    return True
 
 
 def _clear_browser_activity_memory_buffers(
@@ -1972,6 +2041,73 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
     gpt_token_pool_id: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
 ) -> Dict[str, Any]:
+    async def real_executor(_tool_name: str, _tool_args: Dict[str, Any], _tool_call_id: str) -> Dict[str, Any]:
+        return await _spawn_browser_agent_activity_v3_real(
+            user_id=user_id,
+            agent_id=agent_id,
+            goal=goal,
+            tool_call_id=tool_call_id,
+            task_id=task_id,
+            session_id=session_id,
+            cdp_url=cdp_url,
+            is_resume=is_resume,
+            output_schema=output_schema,
+            attachments=attachments,
+            write_lock_enabled=write_lock_enabled,
+            start_url=start_url,
+            write_lock_resume_state=write_lock_resume_state,
+            system_name=system_name,
+            use_claude_mode=use_claude_mode,
+            gpt_token=gpt_token,
+            gpt_account_id=gpt_account_id,
+            gpt_token_source=gpt_token_source,
+            gpt_token_pool_id=gpt_token_pool_id,
+            fast_mode_cache_enabled=fast_mode_cache_enabled,
+        )
+
+    return await WorldModelToolExecutionAdapter.from_env(agent_id=agent_id).execute(
+        "spawn_browser_agent",
+        {
+            "user_id": user_id,
+            "agent_id": agent_id,
+            "goal": goal,
+            "task_id": task_id,
+            "session_id": session_id,
+            "is_resume": is_resume,
+            "output_schema": output_schema,
+            "attachments": attachments,
+            "write_lock_enabled": write_lock_enabled,
+            "start_url": start_url,
+            "system_name": system_name,
+            "use_claude_mode": use_claude_mode,
+        },
+        tool_call_id,
+        real_executor,
+    )
+
+
+async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
+    user_id: str,
+    agent_id: str,
+    goal: str,
+    tool_call_id: str,
+    task_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    cdp_url: Optional[str] = None,
+    is_resume: bool = False,
+    output_schema: Optional[Dict[str, Any]] = None,
+    attachments: Optional[List[Dict[str, Any]]] = None,
+    write_lock_enabled: bool = True,
+    start_url: str = "",
+    write_lock_resume_state: Optional[Dict[str, Any]] = None,
+    system_name: str = "Rose",
+    use_claude_mode: bool = True,
+    gpt_token: Optional[str] = None,
+    gpt_account_id: Optional[str] = None,
+    gpt_token_source: Optional[str] = None,
+    gpt_token_pool_id: Optional[str] = None,
+    fast_mode_cache_enabled: bool = False,
+) -> Dict[str, Any]:
     """Browser agent activity using browser-use BrowserSession + Rose API."""
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
     if fast_mode_cache_enabled:
@@ -2301,9 +2437,10 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
 
         async def _setup_browser():
             """Connect DOMService + Playwright, apply fingerprint, init humanizer."""
+            _disable_cdp_websocket_proxy()
             _dom_service = DOMService(cdp_url=cdp_url)
-            _local_playwright_browser = None
-            _local_playwright_instance = None
+            _playwright_instance = None
+            _playwright_browser = None
 
             async def _connect_dom():
                 t = time.monotonic()
@@ -2316,12 +2453,12 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                 """Connect Playwright, then apply everything that only needs the
                 Playwright side (fast-mode route, botsigged diagnostics,
                 fingerprint injection) while DOMService is still attaching."""
-                nonlocal _local_playwright_browser, _local_playwright_instance
+                nonlocal _playwright_browser, _playwright_instance
                 t = time.monotonic()
                 from playwright.async_api import async_playwright
 
                 _pw_instance = await async_playwright().start()
-                _local_playwright_instance = _pw_instance
+                _playwright_instance = _pw_instance
                 try:
                     _pw_browser = await _pw_instance.chromium.connect_over_cdp(cdp_url)
                 except BaseException:
@@ -2329,9 +2466,9 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                     with contextlib.suppress(Exception):
                         await _pw_instance.stop()
                     await _reap_playwright_driver_process(_driver_process, agent_id)
-                    _local_playwright_instance = None
+                    _playwright_instance = None
                     raise
-                _local_playwright_browser = _pw_browser
+                _playwright_browser = _pw_browser
                 _record_timing("parallel.browser.playwright_connect", t)
                 _pw_context = _pw_browser.contexts[0]
                 _pw_page = _pw_context.pages[0]
@@ -2374,20 +2511,28 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
 
                 return _pw_instance, _pw_browser, _pw_context, _pw_page
 
-            # The DOMService (browser-use) and Playwright connections are two
-            # independent CDP websockets to the same Steel session; each takes
-            # 3-5s to attach, so open them concurrently. The Playwright branch
-            # also applies fingerprint/fast-mode/diagnostics so those don't wait
-            # on the (slower) DOMService attach.
             try:
-                (
-                    _dom_page,
-                    (_playwright_instance, _playwright_browser, _playwright_context, _input_page),
-                ) = await asyncio.gather(_connect_dom(), _connect_playwright())
+                if _env_enabled("BROWSER_AGENT_PARALLEL_CDP_CONNECT", False):
+                    # The DOMService (browser-use) and Playwright connections
+                    # are independent CDP websockets. Keep this as an opt-in
+                    # fast path; default to sequential attach because Steel can
+                    # reject concurrent initial CDP handshakes under load.
+                    (
+                        _dom_page,
+                        (_playwright_instance, _playwright_browser, _playwright_context, _input_page),
+                    ) = await asyncio.gather(_connect_dom(), _connect_playwright())
+                else:
+                    _dom_page = await _connect_dom()
+                    (
+                        _playwright_instance,
+                        _playwright_browser,
+                        _playwright_context,
+                        _input_page,
+                    ) = await _connect_playwright()
             except BaseException:
                 with contextlib.suppress(Exception):
                     await _dom_service.disconnect()
-                await _stop_playwright_resources(_local_playwright_browser, _local_playwright_instance, agent_id)
+                await _stop_playwright_resources(_playwright_browser, _playwright_instance, agent_id)
                 raise
 
             return (

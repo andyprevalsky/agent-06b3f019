@@ -22,10 +22,13 @@ import time
 import uuid
 from contextlib import asynccontextmanager, contextmanager, suppress
 from contextvars import ContextVar, Token
-from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Iterator, Optional, Tuple, TypeVar
+from typing import TYPE_CHECKING, Any, AsyncIterator, Awaitable, Callable, Dict, Iterator, Optional, Tuple, TypeVar
 
 import structlog
 import structlog.contextvars
+
+if TYPE_CHECKING:
+    import asyncio
 
 T = TypeVar("T")
 
@@ -91,6 +94,10 @@ def current_request_id() -> Optional[str]:
 
 def current_agent_id() -> Optional[str]:
     return _current().get("agent_id")
+
+
+def current_root_agent_id() -> Optional[str]:
+    return _current().get("root_agent_id") or current_agent_id()
 
 
 def _sanitize_runtime_value(value: Any, depth: int = 0) -> Any:

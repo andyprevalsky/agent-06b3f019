@@ -79,6 +79,18 @@ test('goalHash is exact-match', () => {
   assert.notStrictEqual(goalHash('buy milk'), goalHash('buy MILK'));
 });
 
+// Parity with Python: run-local @ref:message pointers collapse before hashing,
+// so sub-agent goals (which get a fresh message reference per run) share one
+// namespace across reruns.
+test('goalHash collapses run-local message refs', () => {
+  const base = 'Analyze ONE creator.\nRow item:\nThomas DeLauer | YouTube';
+  const runA = `${base}\n\nReference: @ref:message:3018fec0-93f2-4907-bba9-098cef49ab74`;
+  const runB = `${base}\n\nReference: @ref:message:aaaabbbb-cccc-4ddd-8eee-ffff00001111`;
+  assert.strictEqual(goalHash(runA), goalHash(runB));
+  assert.strictEqual(goalHash(runA), goalHash(`${base}\n\nReference: @ref:message:<uuid>`));
+  assert.notStrictEqual(goalHash(runA), goalHash(`Different goal${runA}`));
+});
+
 test('llmKey uses canonical request fingerprints', () => {
   assert.strictEqual(
     llmKey('g', 'execute_loop', { messages: [{ role: 'user', content: 'hello' }] }),
@@ -539,6 +551,25 @@ test('canonicalMessages normalizes web_fetch downloaded-file metadata', () => {
   };
   assert.strictEqual(canonicalMessages(base), canonicalMessages(noisy));
   assert.notStrictEqual(canonicalMessages(base), canonicalMessages(changed));
+});
+
+test('worldModelCacheScope partitions simulated runs, real/shadow keys unchanged', () => {
+  delete process.env.BENCHMARK_WORLD_MODEL_MODE;
+  delete process.env.WMH_MODEL_NAME;
+  const realKey = llmKey('goal', 'site', { messages: [] });
+  assert.ok(realKey.startsWith('fastmode:v42:llm:'));
+
+  process.env.BENCHMARK_WORLD_MODEL_MODE = 'simulate';
+  process.env.WMH_MODEL_NAME = 'rose archive/v2';
+  const simKey = llmKey('goal', 'site', { messages: [] });
+  assert.notStrictEqual(simKey, realKey);
+  assert.ok(simKey.includes(':sim.rose-archive-v2:'));
+
+  // Shadow mode executes real calls — those cache entries are real signal.
+  process.env.BENCHMARK_WORLD_MODEL_MODE = 'shadow';
+  assert.strictEqual(llmKey('goal', 'site', { messages: [] }), realKey);
+  delete process.env.BENCHMARK_WORLD_MODEL_MODE;
+  delete process.env.WMH_MODEL_NAME;
 });
 
 if (failures.length > 0) {

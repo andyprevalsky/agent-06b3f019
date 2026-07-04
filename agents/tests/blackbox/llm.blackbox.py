@@ -2407,6 +2407,59 @@ async def test_check_progress_disables_fast_cache_read_after_verifier_parse_fail
     assert seen_contexts == [(True, True), (False, True)]
 
 
+async def test_check_progress_browser_success_uses_fast_cache_write_only():
+    """Live browser evidence must not be overwritten by a stale verifier cache replay."""
+    from helpers.llm import check_progress
+    from providers.fast_cache.context import current_context, set_context
+
+    seen_contexts = []
+
+    async def fake_call_llm_verifier(messages, *_args, **_kwargs):
+        ctx = current_context()
+        seen_contexts.append((ctx.read_enabled if ctx else None, ctx.should_write if ctx else None))
+        return (
+            {"score": 1.0, "reasoning": "browser evidence accepted"},
+            {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        )
+
+    context = [
+        {"role": "USER", "text": "complete the FCaptcha demo", "timestamp": "2026-07-04T03:20:45Z"},
+        {
+            "role": "TOOL",
+            "text": "**Status**: ✅ SUCCESS",
+            "timestamp": "2026-07-04T03:24:06Z",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "title": "Browser automation complete",
+                "structured_response": {
+                    "fcaptcha_risk_score_display": "0.16",
+                    "checkbox_mode_passed": True,
+                    "invisible_form_submitted": True,
+                    "visible_verdict_text": "Verified! / Form submission allowed!",
+                },
+            },
+        },
+    ]
+
+    try:
+        with patch("temporalio.activity.heartbeat"), patch("helpers.llm._call_llm_verifier", fake_call_llm_verifier):
+            result = await check_progress(
+                context=context,
+                verifier_system_prompt="VERIFY",
+                model="rose",
+                call_site="verifier_execute",
+                fast_mode_cache_enabled=True,
+                fast_mode_goal="complete the FCaptcha demo",
+                fast_mode_step=2,
+            )
+    finally:
+        set_context(None)
+
+    assert result["score"] == 1.0
+    assert seen_contexts == [(False, True)]
+
+
 async def test_check_progress_extracts_browser_recording_metadata_from_context():
     """Execute verifier dumps inherit recording metadata from browser tool messages."""
     from helpers.llm import check_progress
@@ -2613,6 +2666,53 @@ async def test_check_progress_accepts_completed_code_task_structured_response():
                     {"name": "collatz_sequence", "type": "list[int]"},
                     {"name": "total_steps", "type": "int"},
                     {"name": "python_script", "type": "file_pointer"},
+                ]
+            },
+            call_site="verifier_execute",
+        )
+
+    assert result["score"] == 1.0
+    assert result["structured_response"] == structured_response
+    assert result["usage"]["actual_model"] == "structured_response"
+
+
+async def test_check_progress_accepts_completed_browser_task_structured_response():
+    """Parent execute verifier accepts a finished browser child structured response without an LLM call."""
+    from helpers.llm import check_progress
+
+    async def verifier_should_not_run(*_args, **_kwargs):
+        raise AssertionError("verifier should not run for completed browser task output")
+
+    structured_response = {
+        "fcaptcha_risk_score_display": "0.16",
+        "checkbox_mode_passed": True,
+        "invisible_form_submitted": True,
+        "visible_verdict_text": "Verified!; Form submission allowed!",
+    }
+    context = [
+        {"role": "USER", "text": "check the FCaptcha demo"},
+        {
+            "role": "TOOL",
+            "text": "",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "title": "Browser automation complete",
+                "structured_response": structured_response,
+            },
+        },
+    ]
+
+    with patch("helpers.llm._call_llm_verifier", verifier_should_not_run), patch("temporalio.activity.heartbeat"):
+        result = await check_progress(
+            context=context,
+            verifier_system_prompt="VERIFY",
+            response_schema={
+                "fields": [
+                    {"name": "fcaptcha_risk_score_display", "type": "str"},
+                    {"name": "checkbox_mode_passed", "type": "bool"},
+                    {"name": "invisible_form_submitted", "type": "bool"},
+                    {"name": "visible_verdict_text", "type": "str"},
                 ]
             },
             call_site="verifier_execute",
@@ -3266,6 +3366,103 @@ def test_build_verifier_context_messages_filters_subagent_tree_rows():
     assert '"items": [{"index": 0, "agent_id": "child-1", "status": "completed"' in content
 
 
+def test_build_verifier_context_messages_prunes_superseded_browser_protocol_failure():
+    """A later successful browser result should supersede stale protocol-init verifier feedback."""
+    from helpers.llm import build_verifier_context_messages
+
+    ctx = [
+        {"role": "USER", "text": "Use a browser agent to complete FCaptcha.", "timestamp": "2026-07-04T02:53:30Z"},
+        {
+            "role": "TOOL",
+            "text": (
+                "Verifier score: 0%\n\nReasoning: The browser agent failed to initialize "
+                "with an 'unsupported protocol' error."
+            ),
+            "timestamp": "2026-07-04T02:56:48Z",
+            "metadata": {
+                "toolName": "attempt_completion",
+                "toolCallId": "tc-attempt-1",
+                "toolStatus": "FINISHED",
+                "title": "⚖️ Verifier rejected (0%) — continue task",
+                "verifierMessage": True,
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "**Status**: ✅ SUCCESS",
+            "timestamp": "2026-07-04T02:59:57Z",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "tc-browser-1",
+                "toolStatus": "FINISHED",
+                "title": "Browser automation complete",
+                "structured_response": {
+                    "fcaptcha_risk_score_display": "0.16",
+                    "checkbox_mode_passed": True,
+                    "invisible_form_submitted": True,
+                    "visible_verdict_text": "Verified! / Form submission allowed!",
+                },
+            },
+        },
+    ]
+
+    messages = build_verifier_context_messages(ctx, "system")
+    content = "\n".join(str(m["content"]) for m in messages)
+
+    assert "unsupported protocol" not in content
+    assert '"fcaptcha_risk_score_display": "0.16"' in content
+    assert '"checkbox_mode_passed": true' in content
+
+
+async def test_build_llm_messages_prunes_superseded_browser_protocol_failure():
+    """The next root-agent turn should not be told to redo browser work after browser success."""
+    from helpers.llm import build_llm_messages
+
+    ctx = [
+        {"role": "USER", "text": "Use a browser agent to complete FCaptcha.", "timestamp": "2026-07-04T02:53:30Z"},
+        {
+            "role": "TOOL",
+            "text": (
+                "Verifier score: 0%\n\nReasoning: The browser agent failed to initialize "
+                "with an 'unsupported protocol' error. Take a NEW action."
+            ),
+            "timestamp": "2026-07-04T02:56:48Z",
+            "metadata": {
+                "toolName": "attempt_completion",
+                "toolCallId": "tc-attempt-1",
+                "toolStatus": "FINISHED",
+                "title": "⚖️ Verifier rejected (0%) — continue task",
+                "verifierMessage": True,
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "**Status**: ✅ SUCCESS",
+            "timestamp": "2026-07-04T02:59:57Z",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "tc-browser-1",
+                "toolStatus": "FINISHED",
+                "title": "Browser automation complete",
+                "structured_response": {
+                    "fcaptcha_risk_score_display": "0.16",
+                    "checkbox_mode_passed": True,
+                    "invisible_form_submitted": True,
+                    "visible_verdict_text": "Verified! / Form submission allowed!",
+                },
+            },
+        },
+    ]
+
+    messages = await build_llm_messages(ctx, "system")
+    content = "\n".join(str(m["content"]) for m in messages)
+
+    assert "unsupported protocol" not in content
+    assert "Take a NEW action" not in content
+    assert "Structured Response" in content
+    assert '"fcaptcha_risk_score_display": "0.16"' in content
+
+
 async def test_extract_response_from_partial_json_raw_json_object():
     """_extract_response_from_partial_json parses a non-fenced JSON object from content."""
     from helpers.llm import _extract_response_from_partial_json
@@ -3652,10 +3849,12 @@ async def _call_llm_structured_streaming_replayed_native_tool_call_without_json_
         )
         yield StreamChunk(kind="done", data={"from_fast_cache": True})
 
-    import helpers.llm as llm_module
+    # helpers.llm imports cached_complete lazily inside the function, so patch
+    # the source module — the lazy import resolves this attribute at call time.
+    import providers.fast_cache.rose_cache as rose_cache_module
 
-    original_cached_complete = llm_module.cached_complete
-    llm_module.cached_complete = fake_cached_complete
+    original_cached_complete = rose_cache_module.cached_complete
+    rose_cache_module.cached_complete = fake_cached_complete
     try:
         AgentAction = create_agent_action_model(["web_search"])
         detected = []
@@ -3685,7 +3884,7 @@ async def _call_llm_structured_streaming_replayed_native_tool_call_without_json_
         assert detected == [("web_search", "toolu_cached")]
         assert [(name, tid) for name, tid, _ in detected_ordered] == [("web_search", "toolu_cached")]
     finally:
-        llm_module.cached_complete = original_cached_complete
+        rose_cache_module.cached_complete = original_cached_complete
 
 
 def test_call_llm_structured_streaming_replayed_native_tool_call_without_json():
@@ -4412,6 +4611,99 @@ async def test_call_llm_structured_streaming_json_parse_failure_raises():
     except ValueError:
         raised = True
     assert raised
+
+
+async def test_call_llm_structured_streaming_fast_cache_writes_only_after_validation():
+    """Structured LLM responses are cached only after AgentAction validation succeeds."""
+    import httpx
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import call_llm_structured_streaming
+    from providers.fast_cache import client as fast_cache_client
+    from providers.fast_cache.context import FastCacheContext, reset_context, set_context
+    from providers.fast_cache import rose_cache
+    from utils.tool_schemas import create_agent_action_model
+
+    store = {}
+    set_calls = 0
+
+    async def cache_get(key):
+        return None
+
+    async def cache_set(key, kind, goal_hash, value):
+        nonlocal set_calls
+        set_calls += 1
+        store[key] = value
+        return True
+
+    original_client_get = fast_cache_client.cache_get
+    original_client_set = fast_cache_client.cache_set
+    original_rose_get = rose_cache.cache_client.cache_get
+    original_rose_set = rose_cache.cache_client.cache_set
+    token = set_context(FastCacheContext(enabled=True, goal="structured cache validation"))
+    try:
+        fast_cache_client.cache_get = cache_get
+        fast_cache_client.cache_set = cache_set
+        rose_cache.cache_client.cache_get = cache_get
+        rose_cache.cache_client.cache_set = cache_set
+
+        AgentAction = create_agent_action_model([])
+
+        async def on_chunk(text, tokens):
+            pass
+
+        invalid_payload = {
+            "choices": [{"delta": {"content": '{"response":"","tool_calls":[{"tool":"spawn_agent"}]}'}}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 3, "total_tokens": 6},
+        }
+
+        def invalid_handler(req):
+            return httpx.Response(200, text=_sse_body([invalid_payload]))
+
+        set_mock_handler(invalid_handler)
+        raised = False
+        try:
+            await call_llm_structured_streaming(
+                messages=[{"role": "user", "content": "q"}],
+                model="rose",
+                temperature=0.7,
+                max_tokens=512,
+                response_model=AgentAction,
+                on_chunk=on_chunk,
+                call_site="validation-cache",
+            )
+        except ValueError:
+            raised = True
+        assert raised
+        assert set_calls == 0
+        assert store == {}
+
+        valid_payload = {
+            "choices": [{"delta": {"content": '{"response":"ok","tool_calls":[]}'}}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 3, "total_tokens": 6},
+        }
+
+        def valid_handler(req):
+            return httpx.Response(200, text=_sse_body([valid_payload]))
+
+        set_mock_handler(valid_handler)
+        response, _, _ = await call_llm_structured_streaming(
+            messages=[{"role": "user", "content": "q"}],
+            model="rose",
+            temperature=0.7,
+            max_tokens=512,
+            response_model=AgentAction,
+            on_chunk=on_chunk,
+            call_site="validation-cache",
+        )
+        assert response.response == "ok"
+        assert set_calls == 1
+        assert len(store) == 1
+    finally:
+        reset_context(token)
+        fast_cache_client.cache_get = original_client_get
+        fast_cache_client.cache_set = original_client_set
+        rose_cache.cache_client.cache_get = original_rose_get
+        rose_cache.cache_client.cache_set = original_rose_set
 
 
 async def test_call_llm_structured_streaming_no_json_content_raises():
@@ -5173,8 +5465,16 @@ async def run_all_tests():
         test_check_progress_accepts_completed_code_task_structured_response,
     )
     await r.record_async(
+        "check_progress_accepts_completed_browser_task_structured_response",
+        test_check_progress_accepts_completed_browser_task_structured_response,
+    )
+    await r.record_async(
         "check_progress_disables_fast_cache_read_after_verifier_parse_failure",
         test_check_progress_disables_fast_cache_read_after_verifier_parse_failure,
+    )
+    await r.record_async(
+        "check_progress_browser_success_uses_fast_cache_write_only",
+        test_check_progress_browser_success_uses_fast_cache_write_only,
     )
     await r.record_async("call_planner_llm_activity_happy_path", test_call_planner_llm_activity_happy_path)
     # Additional llm coverage
@@ -5214,6 +5514,14 @@ async def run_all_tests():
         test_build_verifier_context_messages_self_closes_trailing_refs,
     )
     r.record("verifier_ctx_filters_subagent_tree_rows", test_build_verifier_context_messages_filters_subagent_tree_rows)
+    r.record(
+        "verifier_ctx_prunes_superseded_browser_protocol_failure",
+        test_build_verifier_context_messages_prunes_superseded_browser_protocol_failure,
+    )
+    await r.record_async(
+        "build_llm_messages_prunes_superseded_browser_protocol_failure",
+        test_build_llm_messages_prunes_superseded_browser_protocol_failure,
+    )
     await r.record_async("extract_response_raw_json", test_extract_response_from_partial_json_raw_json_object)
     await r.record_async("extract_response_tool_calls_only", test_extract_response_from_partial_json_tool_calls_only)
     await r.record_async("extract_completed_tool_calls_multiple", test_extract_completed_tool_calls_multiple)
@@ -5263,6 +5571,10 @@ async def run_all_tests():
     await r.record_async("stream_single_call_dedup", test_call_llm_structured_streaming_single_call_dedup)
     await r.record_async(
         "stream_json_parse_failure_raises", test_call_llm_structured_streaming_json_parse_failure_raises
+    )
+    await r.record_async(
+        "stream_fast_cache_writes_only_after_validation",
+        test_call_llm_structured_streaming_fast_cache_writes_only_after_validation,
     )
     r.record(
         "normalize_response_schema_purchase_confirmation_identifier",

@@ -1053,7 +1053,8 @@ async def run_agent(  # noqa: C901
             }
         except Exception as e:
             consecutive_llm_failures += 1
-            logger.error(f"LLM call failed (consecutive={consecutive_llm_failures}): {e}")
+            error_message = extract_error_message(e)
+            logger.error(f"LLM call failed (consecutive={consecutive_llm_failures}): {error_message}")
             if consecutive_llm_failures >= 3:
                 _pending_llm_context.pop(agent_id, None)
                 return {
@@ -1065,7 +1066,7 @@ async def run_agent(  # noqa: C901
                     "context_size": context_size,
                     "cache_read_input_tokens": cache_read_total,
                     "cache_creation_input_tokens": cache_write_total,
-                    "message": f"LLM call failed {consecutive_llm_failures} consecutive times: {e}",
+                    "message": f"LLM call failed {consecutive_llm_failures} consecutive times: {error_message}",
                 }
             backoff = min(2 * (2 ** (consecutive_llm_failures - 1)), 30)
             await asyncio.sleep(backoff)

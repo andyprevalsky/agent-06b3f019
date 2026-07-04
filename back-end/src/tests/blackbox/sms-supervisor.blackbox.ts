@@ -37,10 +37,14 @@ import {
   waitFor,
 } from './sms-supervisor.helpers';
 import {
+  testGrep_failureBlocksCompletionAndFallsBackGracefully,
+  testGrep_searchUserDataInlineSuccessCompletes,
   testNaturalApproval_ambiguousApprovalAsksClarification,
   testNaturalApproval_resolvesPendingAttentionRequest,
   testPrompt_neverExposeRoutingIds,
+  testRealLlm_answersContactFactViaGrep,
   testRealLlm_photoAttachmentRoundTrip,
+  testRealLlm_purchaseRequestSpawnsAgent,
   testRealLlm_supervisorRoundTrip,
   testRealLlm_voiceNoteRoundTrip,
 } from './sms-supervisor.behavior';
@@ -608,6 +612,22 @@ async function runAll() {
     {
       name: 'ws2 -- suppressed run discards queued start_new_agent',
       fn: testWs2_suppressedRunDiscardsStartNewAgent,
+    },
+    {
+      name: 'grep -- inline dispatch succeeds and completion SMS goes out',
+      fn: () => testGrep_searchUserDataInlineSuccessCompletes(prisma),
+    },
+    {
+      name: 'grep -- failed dispatch blocks completion and falls back gracefully',
+      fn: () => testGrep_failureBlocksCompletionAndFallsBackGracefully(prisma),
+    },
+    {
+      name: 'real-llm -- answers contact fact via grep without asking user (opt-in)',
+      fn: () => testRealLlm_answersContactFactViaGrep(prisma),
+    },
+    {
+      name: 'real-llm -- clear purchase request spawns agent, no clarifying question (opt-in)',
+      fn: () => testRealLlm_purchaseRequestSpawnsAgent(prisma),
     },
     {
       name: 'real-llm -- full stack roundtrip (opt-in via BLACKBOX_SMS_SUPERVISOR_REAL_LLM=1)',

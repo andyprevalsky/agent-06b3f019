@@ -34,6 +34,7 @@ from domains.web_fetch.types import ExecuteActivityCallable
 from helpers.handle_tool_event import handle_tool_event
 from helpers.summarize import summarize_and_filter_links
 from helpers.tracing import traced
+from helpers.world_model_runtime import WorldModelToolExecutionAdapter
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager, format_error_message, format_tool_message
 
 
@@ -385,8 +386,16 @@ async def web_fetch_activity(
     elif cache_key is not None:
         logger.info("fast_cache.web_fetch_write_only", key=cache_key, url=url)
 
+    async def real_executor(_tool_name: str, _tool_args: Dict[str, Any], _tool_call_id: str) -> Dict[str, Any]:
+        return await scrape_url(url)
+
     try:
-        result = await scrape_url(url)
+        result = await WorldModelToolExecutionAdapter.from_env().execute(
+            "web_fetch",
+            {"url": url},
+            "web_fetch_activity",
+            real_executor,
+        )
     except WebFetchProvidersFailed as e:
         logger.error("Web fetch scrape failed", error=str(e), url=url, retryable=e.retryable)
         if not e.retryable:

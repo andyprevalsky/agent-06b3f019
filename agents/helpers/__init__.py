@@ -1,6 +1,8 @@
 """Helper activities for workflow orchestration (not exposed to LLM)."""
 
 from .check_usage import check_user_usage
+from .child_results import fetch_child_terminal_result_activity
+from .fast_cache_goal import resolve_fast_cache_goal_activity
 from .fetch_config import fetch_agent_config
 from .fetch_tools import fetch_agent_tools
 
@@ -28,6 +30,8 @@ __all__ = [
     "get_model_context_window",
     "mark_finished",
     "fetch_agent_config",
+    "fetch_child_terminal_result_activity",
+    "resolve_fast_cache_goal_activity",
     "check_user_usage",
     "get_user_context",
     "get_user_system_name",

@@ -14,6 +14,7 @@ import {
 } from '../../domains/archive/fixture';
 import {
   decryptAndValidateArtifact,
+  encryptArtifact,
   listArchivedObjects,
   readArchivedArtifact,
 } from '../../providers/traceArchive';
@@ -248,24 +249,40 @@ async function testArchiveEndpointsWriteFixtureAndManifest(): Promise<void> {
     });
     assert.strictEqual(start.status, 200, JSON.stringify(start.data).slice(0, 300));
     assert((start.data as { fixture?: { ref?: string } }).fixture?.ref);
+    const invalidArtifact = await request(`${BASE_URL}/api/archive/artifact`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        rootAgentId: seed.rootAgentId,
+        path: 'provider/test-provider/bad.json.gz.enc',
+        ciphertextB64: Buffer.from('not-a-valid-envelope').toString('base64'),
+        metadata: {
+          path: 'provider/test-provider/bad.json.gz.enc',
+          content_type: 'application/json',
+        },
+      }),
+    });
+    assert.strictEqual(invalidArtifact.status, 400, JSON.stringify(invalidArtifact.data));
+
     for (const artifactPath of [
       'provider/test-provider/request-response.json.gz.enc',
-      'media/browser/session/final-screenshot.png',
+      'media/browser/session/final-screenshot.png.enc',
       'llm/test-dump.json.gz.enc',
     ]) {
+      const encrypted = encryptArtifact(
+        artifactPath,
+        Buffer.from(`ciphertext:${artifactPath}`),
+        artifactPath.endsWith('.png.enc') ? 'image/png' : 'application/json'
+      );
+      assert(encrypted, 'expected test artifact encryption to be available');
       const artifact = await request(`${BASE_URL}/api/archive/artifact`, {
         method: 'POST',
         headers,
         body: JSON.stringify({
           rootAgentId: seed.rootAgentId,
           path: artifactPath,
-          ciphertextB64: Buffer.from(`ciphertext:${artifactPath}`).toString('base64'),
-          metadata: {
-            path: artifactPath,
-            content_type: artifactPath.endsWith('.png') ? 'image/png' : 'application/json',
-            plaintext_bytes: 10,
-            ciphertext_bytes: Buffer.byteLength(`ciphertext:${artifactPath}`),
-          },
+          ciphertextB64: encrypted.ciphertext.toString('base64'),
+          metadata: encrypted.metadata,
         }),
       });
       assert.strictEqual(artifact.status, 200, JSON.stringify(artifact.data).slice(0, 300));
@@ -294,6 +311,7 @@ async function testArchiveEndpointsWriteFixtureAndManifest(): Promise<void> {
       provider_count: number;
       media_count: number;
       llm_trace_count: number;
+      world_model_mode: string;
       correlations: { root_agent_id: string; user_id: string; agent_ids: string[] };
       sensitive: {
         fixture_refs: { path: string }[];
@@ -303,6 +321,11 @@ async function testArchiveEndpointsWriteFixtureAndManifest(): Promise<void> {
         artifact_refs: { path: string }[];
       };
     };
+    assert.strictEqual(
+      manifest.world_model_mode,
+      'real',
+      'finalize without worldModelMode must record a real run'
+    );
     assert.strictEqual(manifest.correlations.root_agent_id, seed.rootAgentId);
     assert.strictEqual(manifest.correlations.user_id, seed.userId);
     assert(manifest.correlations.agent_ids.includes(seed.childAgentId));
@@ -321,7 +344,7 @@ async function testArchiveEndpointsWriteFixtureAndManifest(): Promise<void> {
     );
     assert(
       manifest.sensitive.media_refs.some(
-        (ref) => ref.path === 'media/browser/session/final-screenshot.png'
+        (ref) => ref.path === 'media/browser/session/final-screenshot.png.enc'
       )
     );
     assert(

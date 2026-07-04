@@ -54,7 +54,24 @@ async function cleanupSynthetic(): Promise<void> {
 function sourcePrismaClient(): PrismaClient | null {
   if (SOURCE_DATABASE_URL === undefined || SOURCE_DATABASE_URL.trim() === '') return null;
   if (SOURCE_DATABASE_URL === process.env.DATABASE_URL) return null;
-  return new PrismaClient({ datasources: { db: { url: SOURCE_DATABASE_URL } } });
+  return new PrismaClient({ datasources: { db: { url: prismaPooledPostgresUrl(SOURCE_DATABASE_URL) } } });
+}
+
+function prismaPooledPostgresUrl(rawUrl: string): string {
+  const trimmed = rawUrl.trim();
+  try {
+    const url = new URL(trimmed);
+    if (url.protocol !== 'postgresql:' && url.protocol !== 'postgres:') return trimmed;
+    if (!url.searchParams.has('pgbouncer')) {
+      url.searchParams.set('pgbouncer', 'true');
+    }
+    if (!url.searchParams.has('connection_limit')) {
+      url.searchParams.set('connection_limit', '1');
+    }
+    return url.toString();
+  } catch {
+    return trimmed;
+  }
 }
 
 async function integrationId(): Promise<string> {
@@ -472,6 +489,8 @@ async function importRealDataFromSource(): Promise<boolean> {
 
 async function syncReal(): Promise<Manifest> {
   await cleanupSynthetic();
+  const imported = await importRealDataFromSource();
+  if (imported) return summarize('real');
   const items = await findActivePlaidItemsWithAccountsForUser(USER_ID);
   const syncable = items.filter((item) => item.encryptedAccessToken !== 'REDACTED_AFTER_DISCONNECT');
   if (syncable.length === 0) {
@@ -483,8 +502,6 @@ async function syncReal(): Promise<Manifest> {
       },
     });
     if (existingRealRows > 0) return summarize('real');
-    const imported = await importRealDataFromSource();
-    if (imported) return summarize('real');
   }
   if (syncable.length === 0) {
     throw new Error(`No active Plaid Items found for user ${USER_ID}; connect Plaid before running sync-real.`);

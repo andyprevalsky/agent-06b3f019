@@ -14,6 +14,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+ROOT_DIR="$(cd "$BACKEND_DIR/.." && pwd)"
 cd "$BACKEND_DIR"
 
 REPORT_ONLY=0
@@ -38,6 +39,14 @@ fi
 
 export TEST_BASE_URL="http://localhost:$COV_PORT"
 COV_LOG="$BACKEND_DIR/coverage/server.log"
+
+# Keep local blackbox coverage deterministic. back-end/.env points trace
+# archives at R2 for development/prod, but blackbox tests assert local archive
+# artifacts and fake provider boundaries.
+export TRACE_ARCHIVE_ENABLED="${TRACE_ARCHIVE_ENABLED:-1}"
+export TRACE_ARCHIVE_BACKEND="${TRACE_ARCHIVE_BACKEND:-local}"
+export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$ROOT_DIR/.context}"
+export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
 
 # Coverage starts only a local backend. E2B smoke sandboxes cannot reach stale
 # developer ngrok URLs from .env, so keep those smoke sessions on direct provider
@@ -122,6 +131,22 @@ SQL
     echo "Syncing local Codex credentials to local test database..."
     npx tsx scripts/sync-codex-token.ts >/dev/null
   fi
+fi
+
+# Fast Mode cache requires an explicit URL outside production (no fallback to the
+# local app database). Mirror scripts/run.sh: derive it from back-end/.env's
+# DATABASE_URL (the shared cache DB) before DATABASE_URL is overridden to the
+# local test database above. Without this, every /api/fast-cache route 500s and
+# the fast-cache blackbox domain fails under coverage.
+if [[ -z "${FAST_MODE_CACHE_DATABASE_URL:-}" && -f .env ]]; then
+  ENV_DATABASE_URL=$(grep -E '^DATABASE_URL=' .env | head -1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+  if [[ -n "$ENV_DATABASE_URL" ]]; then
+    export FAST_MODE_CACHE_DATABASE_URL="$ENV_DATABASE_URL"
+  fi
+fi
+if [[ -z "${FAST_MODE_CACHE_DATABASE_URL:-}" ]]; then
+  echo "❌ FAST_MODE_CACHE_DATABASE_URL is required (or keep DATABASE_URL in back-end/.env so it can be derived)." >&2
+  exit 1
 fi
 
 echo "Starting backend with coverage collection on port $COV_PORT..."

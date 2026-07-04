@@ -14,6 +14,11 @@ export interface AgentStartRequest {
 export interface AgentFinalizeRequest {
   rootAgentId: string;
   benchmarkTaskName?: string;
+  benchmarkPassed?: boolean;
+  benchmarkStatus?: string;
+  failureReason?: string | null;
+  /** World-model execution mode of the run (real | shadow | simulate). Defaults to real. */
+  worldModelMode?: string;
   force?: boolean;
 }
 

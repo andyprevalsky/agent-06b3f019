@@ -291,6 +291,22 @@ export function installFetchCapture(): Router {
       url.includes('api.surge.app') &&
       url.includes('/messages')
     ) {
+      if (requestBody?.includes('__BLACKBOX_SURGE_THROW__')) {
+        throw new Error('blackbox fake Surge network failure');
+      }
+      if (requestBody?.includes('__BLACKBOX_SURGE_502__')) {
+        const body = 'blackbox fake Surge upstream unavailable';
+        entry.durationMs = Date.now() - start;
+        entry.responseStatus = 502;
+        entry.responseBody = body;
+        captures.push(entry);
+
+        return new globalThis.Response(body, {
+          status: 502,
+          statusText: 'Bad Gateway',
+          headers: { 'content-type': 'text/plain' },
+        });
+      }
       const body = JSON.stringify({ id: `blackbox-surge-message-${id}` });
       entry.durationMs = Date.now() - start;
       entry.responseStatus = 200;

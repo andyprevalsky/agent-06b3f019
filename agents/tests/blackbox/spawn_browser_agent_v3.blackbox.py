@@ -9,11 +9,12 @@ import asyncio
 import base64
 import json
 import os
+import sys
 import time as time_module
 from io import BytesIO
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from _test_utils import (
@@ -79,6 +80,46 @@ def _encrypt_envelope(plaintext: bytes, public_key, version: int = 1) -> str:
         "encrypted_aes_key": base64.b64encode(encrypted_aes_key).decode("utf-8"),
     }
     return base64.b64encode(json.dumps(envelope).encode("utf-8")).decode("utf-8")
+
+
+async def test_cdp_use_websocket_patch_disables_proxy_discovery():
+    """browser-use CDP sockets must not inherit websockets>=15 proxy discovery."""
+    import cdp_use.client as cdp_client
+
+    from domains.spawn_browser_agent_v3.handler import _patch_cdp_use_websocket_proxy_default
+
+    calls = []
+    original_connect = cdp_client.websockets.connect
+
+    def fake_connect(*args, **kwargs):
+        calls.append({"args": args, "kwargs": dict(kwargs)})
+
+        class AwaitableResult:
+            def __await__(self):
+                async def _return():
+                    return "connected"
+
+                return _return().__await__()
+
+        return AwaitableResult()
+
+    try:
+        cdp_client.websockets.connect = fake_connect
+        _patch_cdp_use_websocket_proxy_default()
+
+        assert await cdp_client.websockets.connect("wss://connect.steel.dev") == "connected"
+        assert calls[-1]["kwargs"]["proxy"] is None
+
+        assert (
+            await cdp_client.websockets.connect(
+                "wss://connect.steel.dev",
+                proxy="http://explicit-proxy.local:8080",
+            )
+            == "connected"
+        )
+        assert calls[-1]["kwargs"]["proxy"] == "http://explicit-proxy.local:8080"
+    finally:
+        cdp_client.websockets.connect = original_connect
 
 
 def test_verifier_activity_timeout_allows_llm_call():
@@ -6564,6 +6605,31 @@ async def test_stop_playwright_resources_reaps_lingering_driver_process():
     assert process.returncode == -15
 
 
+def test_disable_cdp_websocket_proxy_sets_default_proxy_none():
+    from domains.spawn_browser_agent_v3.handler import _disable_cdp_websocket_proxy
+
+    calls = []
+
+    def fake_connect(uri, *, proxy=True, **kwargs):
+        calls.append({"uri": uri, "proxy": proxy, **kwargs})
+        return "connected"
+
+    fake_cdp_client = ModuleType("cdp_use.client")
+    fake_cdp_client.websockets = SimpleNamespace(connect=fake_connect)
+
+    with patch.dict(sys.modules, {"cdp_use.client": fake_cdp_client}):
+        assert _disable_cdp_websocket_proxy() is True
+        assert fake_cdp_client.websockets.connect("ws://example.test/devtools") == "connected"
+        assert calls[-1]["proxy"] is None
+
+        assert (
+            fake_cdp_client.websockets.connect("ws://example.test/devtools", proxy="http://proxy.local")
+            == "connected"
+        )
+        assert calls[-1]["proxy"] == "http://proxy.local"
+        assert _disable_cdp_websocket_proxy() is False
+
+
 def test_browser_activity_memory_cleanup_clears_retained_buffers():
     from domains.spawn_browser_agent_v3.handler import _clear_browser_activity_memory_buffers
 
@@ -7683,6 +7749,7 @@ async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
     r = BlackboxResult()
 
+    await r.record_async("cdp_use_websocket_direct", test_cdp_use_websocket_patch_disables_proxy_discovery)
     r.record("verifier_timeout_standard_llm_budget", test_verifier_activity_timeout_allows_llm_call)
     r.record(
         "browser_supervisor_timeout_ordering",
@@ -8397,6 +8464,10 @@ async def run_all_tests():
     await r.record_async(
         "stop_playwright_resources",
         test_stop_playwright_resources_closes_browser_and_stops_instance,
+    )
+    r.record(
+        "disable_cdp_websocket_proxy",
+        test_disable_cdp_websocket_proxy_sets_default_proxy_none,
     )
     await r.record_async(
         "stop_playwright_resources_reaps_driver_process",

@@ -9,7 +9,12 @@
  *     |
  *     | (click trigger / mouse enter)
  *     v
- * [OPEN] <-- isOpen: true (shows catalog prompts popover)
+ * [OPEN] <-- isOpen: true (shows tag filter chips + catalog prompts popover)
+ *     |    |
+ *     |    | (click tag chip: toggle in/out of selectedTags — list shows prompts
+ *     |    |  carrying ANY selected tag; empty selection shows all prompts)
+ *     |    v
+ *     |  [OPEN] (filtered)
  *     |
  *     | (select prompt or mouse leave)
  *     v
@@ -17,14 +22,20 @@
  *
  * State:
  * - prompts: TestPrompt[] (fetched from the unified eval catalog via the backend)
+ * - selectedTags: string[] (tag filter; OR semantics across selected tags)
  * - isOpen: boolean (popover open state)
  * - isLoading: boolean (while resolving attachment URLs into File objects)
+ *
+ * UI: icon-only trigger (document icon) styled to match the other query-box icon buttons.
  *
  * Only visible in development mode (gated by the parent `TopBar`).
  */
 
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { FileText } from 'lucide-react';
 import { useEffect, useState } from 'react';
+import TagFilter from './test-prompts-selector/TagFilter';
+import { useTagFilter } from './test-prompts-selector/useTagFilter';
 import PromptList from './test-prompts-selector/PromptList';
 import { fetchTestPromptFiles } from './test-prompts-selector/fetchTestPromptFiles';
 import { useAutoLoadDefaultPrompt } from './test-prompts-selector/useAutoLoadDefaultPrompt';
@@ -56,6 +67,7 @@ export default function TestPromptsSelector({ onSelectPrompt }: TestPromptsSelec
   const [isOpen, setIsOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [prompts, setPrompts] = useState<TestPrompt[]>([]);
+  const { allTags, selectedTags, toggleTag, visiblePrompts } = useTagFilter(prompts);
 
   useEffect(() => {
     let cancelled = false;
@@ -97,14 +109,13 @@ export default function TestPromptsSelector({ onSelectPrompt }: TestPromptsSelec
     <Popover open={isOpen} onOpenChange={setIsOpen}>
       <PopoverTrigger asChild>
         <button
-          className="flex items-center gap-2 px-2 py-1 rounded-md border border-border bg-gradient-to-br from-[#FE7503]/5 via-[#E062CC]/5 to-[#7A6BEC]/5 text-muted-foreground text-xs hover:from-[#FE7503]/10 hover:via-[#E062CC]/10 hover:to-[#7A6BEC]/10 transition-colors"
+          className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-muted/50 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           title="Select a test prompt"
+          aria-label="Select a test prompt"
           onMouseEnter={() => setIsOpen(true)}
           onMouseLeave={() => setIsOpen(false)}
         >
-          <span className="font-semibold bg-gradient-to-br from-[#FE7503] via-[#E062CC] to-[#7A6BEC] bg-clip-text text-transparent">
-            Test-Prompts
-          </span>
+          <FileText className="h-3.5 w-3.5" />
         </button>
       </PopoverTrigger>
       <PopoverContent
@@ -117,11 +128,12 @@ export default function TestPromptsSelector({ onSelectPrompt }: TestPromptsSelec
           <p className="text-xs text-muted-foreground">
             Eval-catalog prompts (agents/benchmarks/tasks.json)
           </p>
+          <TagFilter tags={allTags} selectedTags={selectedTags} onToggle={toggleTag} />
           {prompts.length === 0 ? (
             <p className="text-xs text-muted-foreground">Loading catalog…</p>
           ) : (
             <PromptList
-              prompts={prompts}
+              prompts={visiblePrompts}
               disabled={isLoading}
               onSelect={(p) => void handleSelectPrompt(p)}
             />

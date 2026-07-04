@@ -36,10 +36,11 @@ with workflow.unsafe.imports_passed_through():
         mark_finished,
         poll_new_messages,
         post_agent_message,
+        resolve_fast_cache_goal_activity,
         update_agent_status,
     )
-    from helpers.context_scope import filter_internal_subagent_messages
     from helpers.context_compaction import build_context_compaction_metadata
+    from helpers.context_scope import filter_internal_subagent_messages
     from helpers.handle_tool_event import handle_tool_event
     from helpers.llm import (
         check_progress,
@@ -141,6 +142,10 @@ class AgentWorkflow:
         self.agent_id: Optional[str] = None
         self.user_id: Optional[str] = None
         self.goal: Optional[str] = None
+        # Fast Mode cache namespace goal — the persisted Agent-row goal, which may
+        # differ from the workflow-input goal (chat escalation passes an LLM-refined
+        # goal that varies run to run). All cache keying threads this, never self.goal.
+        self.fast_cache_goal: Optional[str] = None
         self.fast_mode_cache_enabled: bool = False
         self.model: str = "anthropic/claude-sonnet-4.6"
         self.reasoning_max_tokens: int = 256
@@ -509,11 +514,13 @@ class AgentWorkflow:
         # Bind agent_id to structlog context so ALL downstream structlog calls
         # (tools, helpers, activities) automatically include agent_id in JSON output
         structlog.contextvars.clear_contextvars()
-        structlog.contextvars.bind_contextvars(agent_id=agent_id)
+        root_agent_id = agent_id if depth == 0 else (bus_id or parent_agent_id or agent_id)
+        structlog.contextvars.bind_contextvars(agent_id=agent_id, root_agent_id=root_agent_id)
 
         self.agent_id = agent_id
         self.user_id = user_id
         self.goal = goal
+        self.fast_cache_goal = goal  # Overridden by the persisted row goal below
         self.model = model
         self.current_phase = "PLAN"
         self.reasoning_max_tokens = reasoning_max_tokens
@@ -598,6 +605,36 @@ class AgentWorkflow:
             workflow.logger.info(f"Agent source: {self.agent_source}")
         except Exception as e:
             workflow.logger.warning(f"Failed to fetch agent source, defaulting to WEB: {e}")
+
+        # Fast Mode: cache keys namespace by exact goal hash. Chat escalation may
+        # start this workflow with an LLM-refined goal that differs from the
+        # persisted Agent row and varies run to run — keying on it would give every
+        # chat-originated run a fresh, empty cache namespace. Resolve the durable
+        # DB-row goal once and thread it into all cache keying (the DAG path
+        # already resolves it via ensure_position_context; this aligns the
+        # explicitly-threaded plan/execute/verifier/summary paths with it).
+        if self.fast_mode_cache_enabled or user_id in FAST_MODE_WRITE_THROUGH_USER_IDS:
+            try:
+                persisted_goal = await workflow.execute_activity(
+                    resolve_fast_cache_goal_activity,
+                    args=[agent_id],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+                if persisted_goal and persisted_goal != self.fast_cache_goal:
+                    workflow.logger.info(
+                        "Fast Mode cache goal resolved from agent row (differs from workflow input goal)"
+                    )
+                    self.fast_cache_goal = persisted_goal
+                    # Compute-token cache affinity pins by goal too — keep it on
+                    # the same stable namespace.
+                    self.compute_token_fast_cache_affinity_key = (
+                        _fast_cache_compute_affinity_key(user_id, persisted_goal)
+                        if fast_mode_cache_enabled
+                        else None
+                    )
+            except Exception as e:
+                workflow.logger.warning(f"Failed to resolve Fast Mode cache goal, using workflow input goal: {e}")
 
         # Send SMS notification for agent_started (root + SMS-source only)
         if not parent_workflow_id and self.agent_source == "SMS":
@@ -716,7 +753,11 @@ class AgentWorkflow:
                     set_response_schema_activity,
                     args=[
                         agent_id,
-                        [self.goal],
+                        # Persisted-row goal: schema generation is content-keyed on
+                        # this text, so the stable goal keeps it cacheable (and
+                        # matches the TS-side setResponseSchema, which reads the
+                        # Agent row).
+                        [self.fast_cache_goal],
                         self._active_compute_token_payload(),
                         self.fast_mode_cache_enabled,
                     ],
@@ -837,7 +878,7 @@ class AgentWorkflow:
                 compute_token_lineage_key=self.compute_token_lineage_key,
                 compute_token_fast_cache_affinity_key=self.compute_token_fast_cache_affinity_key,
                 fast_mode_cache_enabled=self.fast_mode_cache_enabled,
-                goal_text=self.goal,
+                goal_text=self.fast_cache_goal,
             )
 
             await self._track_tokens_and_cost(plan_result)
@@ -982,7 +1023,7 @@ class AgentWorkflow:
             compute_token_lineage_key=self.compute_token_lineage_key,
             compute_token_fast_cache_affinity_key=self.compute_token_fast_cache_affinity_key,
             fast_mode_cache_enabled=self.fast_mode_cache_enabled,
-            goal_text=self.goal,
+            goal_text=self.fast_cache_goal,
             **({"max_iterations": self.max_iterations} if self.max_iterations else {}),
         )
 
@@ -1063,7 +1104,7 @@ class AgentWorkflow:
                     # Fast Mode: verifier keys by canonical request fingerprint;
                     # fast_mode_step is retained only for activity signature compatibility.
                     self.fast_mode_cache_enabled,
-                    self.goal,
+                    self.fast_cache_goal,
                     0,
                 ],
                 start_to_close_timeout=timedelta(seconds=60),
@@ -1591,7 +1632,7 @@ class AgentWorkflow:
                     self.fast_mode_cache_enabled or fast_mode_write_through
                 ):
                     extra_executor_kwargs["fast_mode_cache_enabled"] = self.fast_mode_cache_enabled
-                    extra_executor_kwargs["fast_mode_goal"] = self.goal
+                    extra_executor_kwargs["fast_mode_goal"] = self.fast_cache_goal
                     extra_executor_kwargs["fast_mode_cache_write_enabled"] = (
                         self.fast_mode_cache_enabled or fast_mode_write_through
                     )
@@ -2955,7 +2996,9 @@ class AgentWorkflow:
                 generate_completion_summary,
                 args=[
                     context,
-                    self.goal,
+                    # Persisted-row goal: the summary prompt labels this "ORIGINAL
+                    # GOAL" and it doubles as the Fast Mode cache namespace.
+                    self.fast_cache_goal,
                     self.model,
                     structured_response,
                     self.output_schema,

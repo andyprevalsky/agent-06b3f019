@@ -6,6 +6,7 @@ import type { PrismaClient } from '@prisma/client';
 import {
   BASE_URL,
   BYPASS_FIXTURE_REAL_LLM,
+  buildGrepFixture,
   assertStatus,
   captureToken,
   capturedSmsBody,
@@ -334,6 +335,7 @@ export async function testRealLlm_supervisorRoundTrip(prisma: PrismaClient) {
   }
 }
 
+
 // ==================== REAL-LLM MEDIA ROUND-TRIPS ====================
 // Fire an MMS-shaped Surge payload (photo / voice note attachment) at
 // /api/sms/inbound and assert the real supervisor LLM's outbound SMS reflects
@@ -485,4 +487,247 @@ export async function testRealLlm_voiceNoteRoundTrip(prisma: PrismaClient) {
     expectInReply: 'paris',
     expectInPersistedUserTurn: 'capital of France',
   });
+}
+
+/**
+ * Real-LLM acceptance for the grep tool: a factual question about a contact
+ * should be answered from the user's own data (grep source=network), not
+ * bounced back to the user as a clarifying question.
+ */
+export async function testRealLlm_answersContactFactViaGrep(prisma: PrismaClient) {
+  if (process.env.BLACKBOX_SMS_SUPERVISOR_REAL_LLM !== '1') {
+    console.warn('  ⚠ BLACKBOX_SMS_SUPERVISOR_REAL_LLM != 1 — skipping real-LLM grep test');
+    return;
+  }
+  const probeRes = await request(`${BASE_URL}/api/test/captures`);
+  if (probeRes.status !== 200) {
+    console.warn('  ⚠ capture harness not active — skipping real-LLM grep test');
+    return;
+  }
+  const cursor = (probeRes.data as { nextId: number }).nextId - 1;
+
+  const phone = uniqueSmsPhone();
+  const userId = await provisionUserWithPhone(prisma, phone);
+  const token = captureToken('sms-supervisor-real-llm-grep');
+  const lastName = `Grepwell${Math.random().toString(36).slice(2, 8)}`;
+  const email = `jane.${lastName.toLowerCase()}@example.com`;
+
+  await prisma.person.create({
+    data: { userId, firstName: 'Jane', lastName, email },
+  });
+
+  try {
+    await setFixtureOverride(userId, BYPASS_FIXTURE_REAL_LLM);
+
+    const res = await request(`${BASE_URL}/api/sms/inbound`, {
+      method: 'POST',
+      headers: { 'X-Capture-Token': token },
+      body: JSON.stringify({
+        data: {
+          body: `What is Jane ${lastName}'s email address?`,
+          conversation: {
+            contact: { phone_number: phone },
+            phone_number: { number: '+14154498072' },
+          },
+        },
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+
+    const surgeCall = await waitFor(
+      async () => {
+        const tokenCalls = await readCapturesForToken(token);
+        const cursorCalls = await readCapturesAfter(cursor);
+        const calls = [...tokenCalls, ...cursorCalls];
+        return (
+          calls.find((call) => {
+            if (!call.url.includes('surge.app') || !call.url.endsWith('/messages')) {
+              return false;
+            }
+            const body = capturedSmsBody(call);
+            return body?.to === phone && typeof body?.body === 'string';
+          }) ?? null
+        );
+      },
+      90000,
+      2000
+    );
+    if (!surgeCall) {
+      throw new Error('Expected an outbound Surge SMS from the real-LLM grep run');
+    }
+    const smsBody = capturedSmsBody(surgeCall)?.body as string;
+    if (!smsBody.toLowerCase().includes(email)) {
+      throw new Error(
+        `Expected the SMS to contain the seeded email ${email} (answered from grep, not asked back). Got: "${smsBody.substring(0, 160)}"`
+      );
+    }
+  } finally {
+    await prisma.person.deleteMany({ where: { userId } });
+    await cleanupAgentScopedUser(prisma, userId);
+  }
+}
+
+// ==================== GREP — read-tool inline dispatch ====================
+
+export async function testGrep_searchUserDataInlineSuccessCompletes(prisma: PrismaClient) {
+  const probeRes = await request(`${BASE_URL}/api/test/captures`);
+  if (probeRes.status !== 200) {
+    console.warn('  ⚠ capture harness not active — skipping grep success test');
+    return;
+  }
+  const cursor = (probeRes.data as { nextId: number }).nextId - 1;
+
+  const phone = uniqueSmsPhone();
+  const userId = await provisionUserWithPhone(prisma, phone);
+  const token = captureToken('sms-supervisor-grep-success');
+  const lastName = `Grepson${Math.random().toString(36).slice(2, 8)}`;
+  const email = `john.${lastName.toLowerCase()}@example.com`;
+  const replyText = `John ${lastName}'s email is ${email}`;
+
+  await prisma.person.create({
+    data: { userId, firstName: 'John', lastName, email },
+  });
+
+  try {
+    // grep succeeds inline, so the fixture's attempt_completion in the same
+    // round is honored and its SMS goes out — a failed dispatch would have
+    // blocked completion (see supervisorHandler failed-tool gate).
+    await setFixtureOverride(
+      userId,
+      buildGrepFixture({ pattern: lastName, source: 'network', replyText })
+    );
+
+    const res = await request(`${BASE_URL}/api/sms/inbound`, {
+      method: 'POST',
+      headers: { 'X-Capture-Token': token },
+      body: JSON.stringify({
+        data: {
+          body: "What's John's email?",
+          conversation: {
+            contact: { phone_number: phone },
+            phone_number: { number: '+14154498072' },
+          },
+        },
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+
+    await waitFor(() => findSurgeCallForReply(token, cursor, phone, replyText));
+  } finally {
+    await prisma.person.deleteMany({ where: { userId } });
+    await cleanupAgentScopedUser(prisma, userId);
+  }
+}
+
+export async function testGrep_failureBlocksCompletionAndFallsBackGracefully(prisma: PrismaClient) {
+  const probeRes = await request(`${BASE_URL}/api/test/captures`);
+  if (probeRes.status !== 200) {
+    console.warn('  ⚠ capture harness not active — skipping grep failure test');
+    return;
+  }
+  const cursor = (probeRes.data as { nextId: number }).nextId - 1;
+
+  const phone = uniqueSmsPhone();
+  const userId = await provisionUserWithPhone(prisma, phone);
+  const token = captureToken('sms-supervisor-grep-failure');
+  const blockedReply = 'This reply must never be sent';
+  // The blocked-completion path exits the loop with no finalResponse, so the
+  // post-loop gate substitutes this fallback (supervisorHandler step 6).
+  const fallbackReply = "Sorry, I couldn't process that. Try again or text a task to get started.";
+
+  try {
+    // Invalid regex → dispatch fails every round → attempt_completion in the
+    // same fixture response stays blocked until the round cap.
+    await setFixtureOverride(
+      userId,
+      buildGrepFixture({ pattern: '(unclosed', source: 'messages', replyText: blockedReply })
+    );
+
+    const res = await request(`${BASE_URL}/api/sms/inbound`, {
+      method: 'POST',
+      headers: { 'X-Capture-Token': token },
+      body: JSON.stringify({
+        data: {
+          body: 'Search my messages',
+          conversation: {
+            contact: { phone_number: phone },
+            phone_number: { number: '+14154498072' },
+          },
+        },
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+
+    await waitFor(() => findSurgeCallForReply(token, cursor, phone, fallbackReply));
+
+    const blocked = await findSurgeCallForReply(token, cursor, phone, blockedReply);
+    if (blocked) {
+      throw new Error('Fixture reply was sent despite the grep dispatch failing every round');
+    }
+  } finally {
+    await cleanupAgentScopedUser(prisma, userId);
+  }
+}
+
+/**
+ * Real-LLM acceptance for bias-to-action: a clear purchase request should
+ * spawn a superintelligence agent (start_new_agent) with a purchase goal —
+ * not bounce a clarifying question back to the user.
+ */
+export async function testRealLlm_purchaseRequestSpawnsAgent(prisma: PrismaClient) {
+  if (process.env.BLACKBOX_SMS_SUPERVISOR_REAL_LLM !== '1') {
+    console.warn('  ⚠ BLACKBOX_SMS_SUPERVISOR_REAL_LLM != 1 — skipping real-LLM purchase test');
+    return;
+  }
+  const probeRes = await request(`${BASE_URL}/api/test/captures`);
+  if (probeRes.status !== 200) {
+    console.warn('  ⚠ capture harness not active — skipping real-LLM purchase test');
+    return;
+  }
+
+  const phone = uniqueSmsPhone();
+  const userId = await provisionUserWithPhone(prisma, phone);
+  const token = captureToken('sms-supervisor-real-llm-purchase');
+
+  try {
+    await setFixtureOverride(userId, BYPASS_FIXTURE_REAL_LLM);
+
+    const res = await request(`${BASE_URL}/api/sms/inbound`, {
+      method: 'POST',
+      headers: { 'X-Capture-Token': token },
+      body: JSON.stringify({
+        data: {
+          body: 'get me the best lip balm from amazon',
+          conversation: {
+            contact: { phone_number: phone },
+            phone_number: { number: '+14154498072' },
+          },
+        },
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+
+    const agent = await waitFor(
+      async () => prisma.agent.findFirst({ where: { userId } }),
+      90000,
+      2000
+    );
+    if (!agent) {
+      throw new Error(
+        'Expected start_new_agent to spawn an agent for a clear purchase request — ' +
+          'the supervisor asked back or replied inline instead'
+      );
+    }
+    const goal = agent.goal.toLowerCase();
+    if (!goal.includes('lip balm')) {
+      throw new Error(`Expected agent goal to mention lip balm, got: "${agent.goal}"`);
+    }
+    if (!/amazon|purchas|buy|order/.test(goal)) {
+      throw new Error(
+        `Expected a clear purchase goal (amazon/purchase/buy/order), got: "${agent.goal}"`
+      );
+    }
+  } finally {
+    await cleanupAgentScopedUser(prisma, userId);
+  }
 }

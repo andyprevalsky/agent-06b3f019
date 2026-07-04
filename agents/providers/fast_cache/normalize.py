@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -657,8 +658,16 @@ def normalize_url(raw_url: str) -> str:
 
 
 def goal_hash(goal: str) -> str:
-    """Short, stable hash of a goal string. Exact-match (no goal normalization)."""
-    return sha256(goal)[:16]
+    """Short, stable hash of a goal string.
+
+    Exact-match on user prose, with one canonicalization: run-local
+    `@ref:message:<uuid>` pointers collapse before hashing. Spawn paths append
+    a fresh message reference to sub-agent goals on every run, and namespacing
+    on those would give each rerun of the same goal an empty cache namespace.
+    Keep in sync with `goalHash` in back-end fastCacheNormalizeCore.ts.
+    """
+    canonical = re.sub(r"@ref:message:" + _UUID_RE.pattern, "@ref:message:<uuid>", goal)
+    return sha256(canonical)[:16]
 
 
 def strip_secrets(value: Any) -> Any:
@@ -689,12 +698,28 @@ def _canonical_request_body(body: Any) -> str:
     return canonical_messages(body)
 
 
+def world_model_cache_scope() -> str:
+    """Cache-key namespace segment for world-model-simulated runs.
+
+    Simulated runs observe WMH-emulated environment responses, so their cache
+    entries must never be replayed by (or overwrite) real-run entries. Scoping
+    the key keeps the fast cache fully active during simulation — WMH steps are
+    expensive, so sim-space replays still pay off — while real-run keys stay
+    byte-identical (empty scope).
+    """
+    mode = (os.environ.get("BENCHMARK_WORLD_MODEL_MODE") or "real").strip().lower() or "real"
+    if mode != "simulate":
+        return ""
+    model = os.environ.get("WMH_MODEL_NAME") or os.environ.get("WORLD_MODEL_NAME") or "rose-archive"
+    return f"sim.{re.sub(r'[^A-Za-z0-9._-]', '-', model)}:"
+
+
 def build_key(kind: str, goal: str, detail: str) -> str:
-    return f"fastmode:{CACHE_KEY_VERSION}:{kind}:{goal_hash(goal)}:{detail}"
+    return f"fastmode:{CACHE_KEY_VERSION}:{world_model_cache_scope()}{kind}:{goal_hash(goal)}:{detail}"
 
 
 def build_global_key(kind: str, detail: str) -> str:
-    return f"fastmode:{CACHE_KEY_VERSION}:{kind}:global:{detail}"
+    return f"fastmode:{CACHE_KEY_VERSION}:{world_model_cache_scope()}{kind}:global:{detail}"
 
 
 def normalize_call_site(call_site: str) -> str:
@@ -942,4 +967,7 @@ def file_key(goal: str, url: str) -> str:
 
 
 def codex_key_from_hash(goal_hash_value: str, request: Any) -> str:
-    return f"fastmode:{CACHE_KEY_VERSION}:codex:{goal_hash_value}:c:{sha256(canonical_messages(request))[:32]}"
+    return (
+        f"fastmode:{CACHE_KEY_VERSION}:{world_model_cache_scope()}codex:"
+        f"{goal_hash_value}:c:{sha256(canonical_messages(request))[:32]}"
+    )

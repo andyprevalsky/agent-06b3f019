@@ -19,6 +19,7 @@ const CATALOG_PROMPTS = [
     description: 'Tests chat mode web search flow',
     prompt: 'whats the latest news?',
     attachmentUrls: [],
+    tags: ['chat', 'smoke'],
   },
   {
     title: 'Image Attachment Processing',
@@ -26,6 +27,7 @@ const CATALOG_PROMPTS = [
     prompt:
       'Make this image completely red-tinted (apply a red color overlay to the entire image).',
     attachmentUrls: ['/test-assets/rs.jpeg'],
+    tags: ['attachment', 'smoke'],
   },
 ];
 
@@ -72,9 +74,12 @@ describe('TestPromptsSelector', () => {
     vi.clearAllMocks();
   });
 
-  it('renders the trigger button', () => {
+  it('renders the icon-only trigger button', () => {
     renderWithProviders(<TestPromptsSelector onSelectPrompt={vi.fn()} />);
-    expect(screen.getByText('Test-Prompts')).toBeInTheDocument();
+    const trigger = screen.getByTitle('Select a test prompt');
+    expect(trigger).toBeInTheDocument();
+    expect(trigger).toHaveAccessibleName('Select a test prompt');
+    expect(trigger).toHaveTextContent('');
   });
 
   it('opens the popover on mouse-enter and shows catalog prompt titles', async () => {
@@ -84,6 +89,56 @@ describe('TestPromptsSelector', () => {
     await waitFor(() => {
       expect(screen.getByText(/Basic Chat Response/i)).toBeInTheDocument();
     });
+  });
+
+  it('shows one chip per catalog tag, sorted', async () => {
+    renderWithProviders(<TestPromptsSelector onSelectPrompt={vi.fn()} />);
+    fireEvent.mouseEnter(screen.getByTitle('Select a test prompt'));
+    await waitFor(() => expect(screen.getByText(/Basic Chat Response/i)).toBeInTheDocument());
+
+    const chips = screen.getAllByRole('button', { pressed: false });
+    const chipLabels = chips.map((c) => c.textContent);
+    expect(chipLabels).toEqual(expect.arrayContaining(['attachment', 'chat', 'smoke']));
+    // 'smoke' appears on both prompts but must render exactly one chip
+    expect(chipLabels.filter((label) => label === 'smoke')).toHaveLength(1);
+  });
+
+  it('selecting a tag filters the list to prompts carrying it', async () => {
+    renderWithProviders(<TestPromptsSelector onSelectPrompt={vi.fn()} />);
+    fireEvent.mouseEnter(screen.getByTitle('Select a test prompt'));
+    await waitFor(() => expect(screen.getByText(/Basic Chat Response/i)).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole('button', { name: 'chat' }));
+    expect(screen.getByRole('button', { name: 'chat' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByText(/Basic Chat Response/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Image Attachment Processing/i)).toBeNull();
+  });
+
+  it('selecting multiple tags includes prompts matching ANY of them (OR)', async () => {
+    renderWithProviders(<TestPromptsSelector onSelectPrompt={vi.fn()} />);
+    fireEvent.mouseEnter(screen.getByTitle('Select a test prompt'));
+    await waitFor(() => expect(screen.getByText(/Basic Chat Response/i)).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole('button', { name: 'chat' }));
+    fireEvent.click(screen.getByRole('button', { name: 'attachment' }));
+    expect(screen.getByText(/Basic Chat Response/i)).toBeInTheDocument();
+    expect(screen.getByText(/Image Attachment Processing/i)).toBeInTheDocument();
+  });
+
+  it('deselecting the last tag restores the full list', async () => {
+    renderWithProviders(<TestPromptsSelector onSelectPrompt={vi.fn()} />);
+    fireEvent.mouseEnter(screen.getByTitle('Select a test prompt'));
+    await waitFor(() => expect(screen.getByText(/Basic Chat Response/i)).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole('button', { name: 'attachment' }));
+    expect(screen.queryByText(/Basic Chat Response/i)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'attachment' }));
+    expect(screen.getByRole('button', { name: 'attachment' })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
+    expect(screen.getByText(/Basic Chat Response/i)).toBeInTheDocument();
+    expect(screen.getByText(/Image Attachment Processing/i)).toBeInTheDocument();
   });
 
   it('selecting a prompt WITHOUT attachments calls onSelectPrompt with the prompt text', async () => {

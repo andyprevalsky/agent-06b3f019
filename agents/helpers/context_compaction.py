@@ -5,7 +5,6 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Dict, List, Optional
 
-
 CONTEXT_COMPACTION_KEY = "contextCompaction"
 
 

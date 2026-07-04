@@ -15,6 +15,8 @@ from temporalio import activity
 
 from config import load_config
 from helpers.trace_archive import archive_json
+from helpers.tracing import current_root_agent_id
+from helpers.world_model_runtime import WorldModelToolExecutionAdapter
 
 logger = structlog.get_logger()
 
@@ -51,6 +53,18 @@ async def get_agent_source(agent_id: str) -> str:
 
 @activity.defn
 async def send_direct_sms_activity(user_id: str, message: str) -> Dict:
+    async def real_executor(_tool_name: str, _tool_args: Dict, _tool_call_id: str) -> Dict:
+        return await _send_direct_sms_real(user_id, message)
+
+    return await WorldModelToolExecutionAdapter.from_env(agent_id=user_id).execute(
+        "send_direct_sms",
+        {"user_id": user_id, "message": message},
+        f"send_direct_sms:{user_id}",
+        real_executor,
+    )
+
+
+async def _send_direct_sms_real(user_id: str, message: str) -> Dict:
     """
     Send SMS directly (for completion, welcome - no queue).
 
@@ -81,8 +95,9 @@ async def send_direct_sms_activity(user_id: str, message: str) -> Dict:
             )
             response.raise_for_status()
             result = response.json()
+            archive_root_agent_id = current_root_agent_id() or user_id
             archive_json(
-                root_agent_id=user_id,
+                root_agent_id=archive_root_agent_id,
                 path=f"provider/sms/direct/{int(time.time() * 1000)}.json.gz.enc",
                 payload={"request": {"user_id": user_id, "message": message}, "response": result},
             )
@@ -104,6 +119,18 @@ async def send_direct_sms_activity(user_id: str, message: str) -> Dict:
 
 @activity.defn
 async def notify_sms_event_activity(user_id: str, event_type: str, agent_id: str, payload: Dict) -> Dict:
+    async def real_executor(_tool_name: str, _tool_args: Dict, _tool_call_id: str) -> Dict:
+        return await _notify_sms_event_real(user_id, event_type, agent_id, payload)
+
+    return await WorldModelToolExecutionAdapter.from_env(agent_id=agent_id).execute(
+        "notify_sms_event",
+        {"user_id": user_id, "event_type": event_type, "agent_id": agent_id, "payload": payload},
+        f"notify_sms_event:{agent_id}:{event_type}",
+        real_executor,
+    )
+
+
+async def _notify_sms_event_real(user_id: str, event_type: str, agent_id: str, payload: Dict) -> Dict:
     """
     Send a lifecycle SMS notification via the backend /api/send-sms/notify endpoint.
 
@@ -160,8 +187,9 @@ async def notify_sms_event_activity(user_id: str, event_type: str, agent_id: str
 
             response.raise_for_status()
             result = response.json()
+            archive_root_agent_id = current_root_agent_id() or agent_id
             archive_json(
-                root_agent_id=agent_id,
+                root_agent_id=archive_root_agent_id,
                 path=f"provider/sms/notify/{event_type}-{agent_id}.json.gz.enc",
                 payload={
                     "request": request_body,

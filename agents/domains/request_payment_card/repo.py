@@ -9,10 +9,24 @@ from temporalio import activity
 
 from config import load_config
 from helpers.trace_archive import archive_json
+from helpers.tracing import current_root_agent_id
+from helpers.world_model_runtime import WorldModelToolExecutionAdapter
 
 
 @activity.defn
 async def lookup_purchase_activity(user_id: str, fingerprint: str) -> Dict[str, Any]:
+    async def real_executor(_tool_name: str, _tool_args: Dict[str, Any], _tool_call_id: str) -> Dict[str, Any]:
+        return await _lookup_purchase_real(user_id, fingerprint)
+
+    return await WorldModelToolExecutionAdapter.from_env(agent_id=user_id).execute(
+        "payment_lookup",
+        {"user_id": user_id, "fingerprint": fingerprint},
+        f"payment_lookup:{fingerprint}",
+        real_executor,
+    )
+
+
+async def _lookup_purchase_real(user_id: str, fingerprint: str) -> Dict[str, Any]:
     config = load_config()
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.get(
@@ -26,8 +40,9 @@ async def lookup_purchase_activity(user_id: str, fingerprint: str) -> Dict[str, 
         )
         response.raise_for_status()
         result = response.json()
+        archive_root_agent_id = current_root_agent_id() or user_id
         archive_json(
-            root_agent_id=user_id,
+            root_agent_id=archive_root_agent_id,
             path=f"provider/payment/lookup/{fingerprint}.json.gz.enc",
             payload={"request": {"user_id": user_id, "fingerprint": fingerprint}, "response": result},
         )
@@ -36,6 +51,20 @@ async def lookup_purchase_activity(user_id: str, fingerprint: str) -> Dict[str, 
 
 @activity.defn
 async def mint_purchase_card_activity(user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    fingerprint = str(payload.get("fingerprint") or "")
+
+    async def real_executor(_tool_name: str, _tool_args: Dict[str, Any], _tool_call_id: str) -> Dict[str, Any]:
+        return await _mint_purchase_card_real(user_id, payload)
+
+    return await WorldModelToolExecutionAdapter.from_env(agent_id=str(payload.get("agentId") or user_id)).execute(
+        "payment_mint",
+        {"user_id": user_id, "payload": payload},
+        f"payment_mint:{fingerprint}",
+        real_executor,
+    )
+
+
+async def _mint_purchase_card_real(user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     config = load_config()
     body = {
         "fingerprint": payload["fingerprint"],
@@ -59,8 +88,9 @@ async def mint_purchase_card_activity(user_id: str, payload: Dict[str, Any]) -> 
         )
         response.raise_for_status()
         result = response.json()
+        archive_root_agent_id = current_root_agent_id() or str(payload.get("agentId") or user_id)
         archive_json(
-            root_agent_id=str(payload.get("agentId") or user_id),
+            root_agent_id=archive_root_agent_id,
             path=f"provider/payment/mint/{body['fingerprint']}.json.gz.enc",
             payload={"request": body, "response": result},
         )

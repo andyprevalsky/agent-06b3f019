@@ -21,7 +21,7 @@ from utils.tool_schemas import SpawnAgentTool  # noqa: E402
 
 
 def test_depth_limits_mapping():
-    assert explore_limits_for_depth("quick") == (5, timedelta(seconds=300))
+    assert explore_limits_for_depth("quick") == (5, timedelta(seconds=600))
     assert explore_limits_for_depth("medium") == (20, timedelta(seconds=600))
     assert explore_limits_for_depth("deep") == (50, timedelta(seconds=1800))
 

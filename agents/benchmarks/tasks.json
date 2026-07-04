@@ -9,10 +9,9 @@
       "spawn_general_purpose_agent_for_each"
     ],
     "tags": [
-      "for-each",
       "mass-agent",
-      "research",
-      "scale"
+      "load-test",
+      "research"
     ],
     "price_limit_cents": 200,
     "requires_browser_agent": false,
@@ -33,9 +32,7 @@
       "web_search"
     ],
     "tags": [
-      "mass-agent",
-      "baseline",
-      "single-arm"
+      "load-test"
     ],
     "price_limit_cents": 100,
     "requires_browser_agent": false,
@@ -54,7 +51,6 @@
     "is_chat_mode": true,
     "expected_tools": [],
     "tags": [
-      "basic",
       "chat",
       "smoke"
     ],
@@ -76,7 +72,6 @@
       "spawn_general_purpose_agent"
     ],
     "tags": [
-      "basic",
       "smoke"
     ],
     "price_limit_cents": 100,
@@ -105,7 +100,6 @@
       "spawn_agent"
     ],
     "tags": [
-      "basic",
       "smoke"
     ],
     "price_limit_cents": 100,
@@ -135,8 +129,7 @@
       "spawn_agent"
     ],
     "tags": [
-      "grep",
-      "local-only"
+      "grep"
     ],
     "price_limit_cents": 250,
     "requires_browser_agent": false,
@@ -169,8 +162,7 @@
     ],
     "tags": [
       "grep",
-      "documents",
-      "prod-data"
+      "attachment"
     ],
     "price_limit_cents": 150,
     "requires_browser_agent": false,
@@ -193,7 +185,7 @@
   },
   {
     "name": "plaid-transactions-monthly-spend",
-    "title": "Plaid Transactions \u2014 Monthly Spend",
+    "title": "Plaid Transactions — Monthly Spend",
     "prompt": "Answer this using only local transaction data through an explore agent: What is my monthly spend for September 2025?\n\nRules:\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn one explore agent and have it call grep with source=\"transactions\".\n- Use nested filters with since=\"2025-09-01\", until=\"2025-09-30\", status=\"posted\", include_pending_in_totals=false.\n- Use the transaction aggregate totals by currency from grep; monthly spend means posted USD outflow, excluding pending and excluding income/refunds.\n- Final answer must include the exact USD spend number and cite the transaction grep evidence.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
@@ -203,8 +195,7 @@
     "tags": [
       "plaid",
       "transactions",
-      "grep",
-      "local-only"
+      "grep"
     ],
     "price_limit_cents": 100,
     "requires_browser_agent": false,
@@ -265,7 +256,7 @@
   },
   {
     "name": "plaid-transactions-doordash-count",
-    "title": "Plaid Transactions \u2014 DoorDash Count",
+    "title": "Plaid Transactions — DoorDash Count",
     "prompt": "Answer this using only local transaction data through an explore agent: How many posted DoorDash orders did I have in 2025?\n\nRules:\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn one explore agent and have it call grep with source=\"transactions\".\n- Use pattern=\"doordash\" with -i=true.\n- Use nested filters with since=\"2025-01-01\", until=\"2025-12-31\", status=\"posted\".\n- Count matched transaction rows, not just returned snippets. Use head_limit and offset if pagination is needed.\n- Final answer must include the exact count and cite the transaction grep evidence.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
@@ -275,8 +266,7 @@
     "tags": [
       "plaid",
       "transactions",
-      "grep",
-      "local-only"
+      "grep"
     ],
     "price_limit_cents": 100,
     "requires_browser_agent": false,
@@ -337,7 +327,7 @@
   },
   {
     "name": "plaid-transactions-dead-subscriptions",
-    "title": "Plaid Transactions \u2014 Dead Subscriptions",
+    "title": "Plaid Transactions — Dead Subscriptions",
     "prompt": "Using only local transaction data through explore agents, identify subscriptions that look unused or dead and propose refund targets.\n\nRules:\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn explore agents that call grep with source=\"transactions\".\n- Search for subscription-like transactions using patterns such as subscription|premium|annual|membership|prime|netflix|spotify and use nested filters with status=\"posted\".\n- Do not actually contact merchants or request refunds. Return a refund prep list only.\n- Current date for recency decisions is 2026-07-03.\n- Classify monthly subscriptions with no posted charge in 2026 as stopped billing / dead candidates. Include them even when the refund case is weak.\n- Classify annual subscriptions with a posted charge in the last 400 days as active/recent, not dead.\n- Treat Amazon Prime and Amazon Prime Video as separate merchants. A recent annual Amazon Prime charge means Amazon Prime is active/recent; it does not make older Amazon Prime Video channel billing active.\n- Exclude active/recent recurring services and developer-tool subscriptions from refund_prep_candidates. Put those only in excluded_subscription_candidates with the exclusion reason.\n- Exclude developer-tool subscriptions and explicitly distinguish \"stopped billing\" from \"still active and should cancel\" when transaction data cannot prove usage.\n- Final answer must include merchant name, charge evidence, why it looks like a refund candidate from transaction data, and which candidates were excluded as active/recent or developer tools.",
     "timeout_seconds": 420,
     "is_chat_mode": false,
@@ -347,8 +337,7 @@
     "tags": [
       "plaid",
       "transactions",
-      "grep",
-      "local-only"
+      "grep"
     ],
     "price_limit_cents": 150,
     "requires_browser_agent": false,
@@ -420,7 +409,7 @@
       "message_person"
     ],
     "tags": [
-      "basic",
+      "smoke",
       "approval"
     ],
     "price_limit_cents": 50,
@@ -443,9 +432,7 @@
     ],
     "tags": [
       "browser",
-      "needs-auth",
-      "auth",
-      "auth-anon"
+      "auth"
     ],
     "price_limit_cents": 200,
     "requires_browser_agent": true,
@@ -499,10 +486,7 @@
     ],
     "tags": [
       "browser",
-      "needs-auth",
-      "auth",
-      "auth-cookie",
-      "local-only"
+      "auth"
     ],
     "price_limit_cents": 200,
     "requires_browser_agent": true,
@@ -524,9 +508,8 @@
     ],
     "tags": [
       "browser",
-      "needs-auth",
-      "bot-challenge",
-      "local-only"
+      "auth",
+      "bot-challenge"
     ],
     "price_limit_cents": 200,
     "requires_browser_agent": true,
@@ -559,11 +542,7 @@
     ],
     "tags": [
       "browser",
-      "needs-auth",
-      "minted",
-      "local-only",
-      "auth",
-      "auth-anon"
+      "auth"
     ],
     "price_limit_cents": 400,
     "requires_browser_agent": true,
@@ -584,9 +563,7 @@
     ],
     "tags": [
       "browser",
-      "needs-auth",
-      "minted",
-      "local-only",
+      "auth",
       "social"
     ],
     "price_limit_cents": 500,
@@ -628,7 +605,6 @@
       "spawn_agent"
     ],
     "tags": [
-      "basic",
       "browser",
       "smoke"
     ],
@@ -651,8 +627,7 @@
     ],
     "tags": [
       "browser",
-      "payment",
-      "local-only"
+      "payment"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -713,7 +688,8 @@
     ],
     "tags": [
       "browser",
-      "biometrics",
+      "antibot",
+      "bot-challenge",
       "smoke"
     ],
     "price_limit_cents": 120,
@@ -727,12 +703,14 @@
   {
     "name": "cache-coverage",
     "title": "Cache Coverage: All LLM Paths",
-    "prompt": "Do these tasks in order:\n\n1. EXPLORE: Use an explore agent to find the current population of Japan (a single number).\n\n2. SIAS (Super-Intelligent Autonomous System): Spawn a general-purpose agent to do this multi-step task:\n   a. Use a browser agent to visit https://www.random.org/integers/?num=1&min=1&max=100&col=1&base=10&format=plain and return the number shown on the page.\n   b. Use Claude Code to run this Python script and return the output: import random; random.seed(42); print(random.randint(1, 100))\n   c. Multiply the two numbers (browser result \u00d7 code result) and return the product.\n\n3. MULTIPLY: Take the population of Japan from step 1 and multiply it by the product from step 2.\n\n4. MESSAGE: Send an email to andy@roselabs.ai with the subject 'Cache Benchmark Result' containing the final number from step 3.",
+    "prompt": "Do these tasks in order. Use each requested tool directly at the top level; do not satisfy a browser step with Claude Code and do not satisfy a Claude Code step with browser automation.\n\n1. EXPLORE: Use one explore agent to find the current population of Japan as a single integer number with a source.\n\n2. BROWSER: Use one browser agent to visit https://example.com and return the exact visible main heading text.\n\n3. CODE: Use one Claude Code agent to run exactly this Python script and return stdout: import random; random.seed(42); print(random.randint(1, 100))\n\n4. SIAS: Spawn one general-purpose agent only to combine the already-grounded browser heading from step 2 and Claude Code number from step 3. It must compute heading_length = len(browser_heading_text), python_script_output = the integer from step 3, and sias_product = heading_length * python_script_output. Return structured fields browser_heading_text, heading_length, python_script_output, and sias_product. Do not let this general-purpose agent call browser automation or Claude Code.\n\n5. MULTIPLY: Take the population of Japan from step 1 and multiply it by sias_product from step 4.\n\n6. MESSAGE: Send an email to andy@roselabs.ai with the subject 'Cache Benchmark Result' containing the final number from step 5.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": [
       "spawn_agent",
       "spawn_general_purpose_agent",
+      "spawn_browser_agent",
+      "spawn_claude_code_agent",
       "message_person"
     ],
     "tags": [
@@ -751,6 +729,7 @@
       "spawn_claude_code_agent": 1,
       "message_person": 1
     },
+    "tool_count_scope": "root",
     "bench": "pipeline-e2e"
   },
   {
@@ -805,7 +784,7 @@
     ],
     "tags": [
       "attachment",
-      "for-each"
+      "mass-agent"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": false,
@@ -828,8 +807,7 @@
     ],
     "tags": [
       "attachment",
-      "for-each",
-      "approval",
+      "mass-agent",
       "outreach"
     ],
     "price_limit_cents": 1000,
@@ -852,10 +830,8 @@
     ],
     "tags": [
       "attachment",
-      "for-each",
-      "approval",
-      "outreach",
-      "batch"
+      "mass-agent",
+      "outreach"
     ],
     "price_limit_cents": 2000,
     "requires_browser_agent": false,
@@ -912,7 +888,7 @@
       "browser",
       "claude-code",
       "attachment",
-      "needs-auth"
+      "auth"
     ],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
@@ -978,8 +954,7 @@
     ],
     "tags": [
       "browser",
-      "job-applications",
-      "needs-auth"
+      "auth"
     ],
     "price_limit_cents": 1000,
     "requires_browser_agent": true,
@@ -1024,15 +999,14 @@
   {
     "name": "load-test-sias",
     "title": "Load-Test: Fan Out N General-Purpose Agents",
-    "prompt": "LOAD TEST \u2014 your only goal is to spawn exactly {n} general-purpose agents in parallel and aggregate their results. Do this:\n\n1. Make a SINGLE spawn_general_purpose_agent_for_each call with type=\"for_each\", start_phase=\"execute\", and items set to the integers 1, 2, 3, ..., {n} (every integer from 1 through {n}, inclusive \u2014 no skips).\n2. Set output_schema to {\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"integer\"}},\"required\":[\"value\"]}.\n3. Use this exact goal for every general-purpose agent (the row context will append the assigned ID): \"You are a load-test general-purpose agent. Your assigned integer ID is in the row context above. Compute via PURE REASONING \u2014 do NOT call web_search, web_fetch, grep, spawn_agent, message_person, or any tool other than send_message_to_user_execute_phase and attempt_completion. Compute: value = (ID * ID) + (ID * 3) + 7. (a) Call send_message_to_user_execute_phase with the arithmetic shown (e.g. 'ID=7: 7*7 + 7*3 + 7 = 49 + 21 + 7 = 77'). (b) Then call attempt_completion with {\\\"value\\\": <integer>}.\"\n4. Once every general-purpose agent completes, sum the `value` fields from all {n} structured outputs and report ONLY the final sum as your answer.\n\nDo NOT use spawn_explore_agent, browser, code, or any other tool path \u2014 only spawn_general_purpose_agent_for_each + send_message_to_user_execute_phase + attempt_completion.",
+    "prompt": "LOAD TEST — your only goal is to spawn exactly {n} general-purpose agents in parallel and aggregate their results. Do this:\n\n1. Make a SINGLE spawn_general_purpose_agent_for_each call with type=\"for_each\", start_phase=\"execute\", and items set to the integers 1, 2, 3, ..., {n} (every integer from 1 through {n}, inclusive — no skips).\n2. Set output_schema to {\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"integer\"}},\"required\":[\"value\"]}.\n3. Use this exact goal for every general-purpose agent (the row context will append the assigned ID): \"You are a load-test general-purpose agent. Your assigned integer ID is in the row context above. Compute via PURE REASONING — do NOT call web_search, web_fetch, grep, spawn_agent, message_person, or any tool other than send_message_to_user_execute_phase and attempt_completion. Compute: value = (ID * ID) + (ID * 3) + 7. (a) Call send_message_to_user_execute_phase with the arithmetic shown (e.g. 'ID=7: 7*7 + 7*3 + 7 = 49 + 21 + 7 = 77'). (b) Then call attempt_completion with {\\\"value\\\": <integer>}.\"\n4. Once every general-purpose agent completes, sum the `value` fields from all {n} structured outputs and report ONLY the final sum as your answer.\n\nDo NOT use spawn_explore_agent, browser, code, or any other tool path — only spawn_general_purpose_agent_for_each + send_message_to_user_execute_phase + attempt_completion.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": [
       "spawn_general_purpose_agent_for_each"
     ],
     "tags": [
-      "load-test",
-      "scale"
+      "load-test"
     ],
     "price_limit_cents": 300,
     "requires_browser_agent": false,
@@ -1077,7 +1051,7 @@
   {
     "name": "calendly-schedule-meeting",
     "title": "Create Calendly Link & Send Meeting Invite",
-    "prompt": "Schedule a meeting with Andy Prevalsky (andyprevalsky@yahoo.com). Go to Calendly (log in with a@roselabs.ai, which is aliased to andy@roselabs.ai), create a new 30-minute one-on-one event type, and send the scheduling link to Andy via email at andyprevalsky@yahoo.com. The email should be short and friendly, just letting him know you'd like to set up a quick 30-min chat and including the Calendly link so he can pick a time that works. IMPORTANT: Don't waste time trying to rename the event \u2014 the default name is fine. Focus on setting it to 30 minutes, saving it, copying the link, and sending the email.",
+    "prompt": "Schedule a meeting with Andy Prevalsky (andyprevalsky@yahoo.com). Go to Calendly (log in with a@roselabs.ai, which is aliased to andy@roselabs.ai), create a new 30-minute one-on-one event type, and send the scheduling link to Andy via email at andyprevalsky@yahoo.com. The email should be short and friendly, just letting him know you'd like to set up a quick 30-min chat and including the Calendly link so he can pick a time that works. IMPORTANT: Don't waste time trying to rename the event — the default name is fine. Focus on setting it to 30 minutes, saving it, copying the link, and sending the email.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": [
@@ -1086,9 +1060,8 @@
     ],
     "tags": [
       "browser",
-      "approval",
       "outreach",
-      "needs-auth"
+      "auth"
     ],
     "price_limit_cents": 200,
     "requires_browser_agent": true,
@@ -1100,15 +1073,15 @@
   },
   {
     "name": "people-search-criteria",
-    "title": "People Search \u2014 Criteria Discovery via Explore Agent",
-    "prompt": "Find five people who are partners at venture capital firms that invest in AI infrastructure startups and are based in the San Francisco Bay Area. For each person, report their name and a one-line description of their firm or focus. This is a single criteria-based discovery \u2014 do NOT drill into individual firms one at a time. Use explore-agent research to find real people on the public web; do NOT use a browser agent, Claude Code, or code sandbox.",
+    "title": "People Search — Criteria Discovery via Explore Agent",
+    "prompt": "Find five people who are partners at venture capital firms that invest in AI infrastructure startups and are based in the San Francisco Bay Area. For each person, report their name and a one-line description of their firm or focus. This is a single criteria-based discovery — do NOT drill into individual firms one at a time. Use explore-agent research to find real people on the public web; do NOT use a browser agent, Claude Code, or code sandbox.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": [
       "spawn_agent"
     ],
     "tags": [
-      "basic"
+      "research"
     ],
     "price_limit_cents": 150,
     "requires_browser_agent": false,
@@ -1127,15 +1100,15 @@
   },
   {
     "name": "people-search-targeted",
-    "title": "People Search \u2014 Targeted Lookup via Explore Agent",
-    "prompt": "Find the current professional profile of Andy Prevalsky, founder of Rose Labs, on the public web. Report his current title, company, location, and LinkedIn profile URL, with a source link. He is not a public figure, so you cannot rely on prior knowledge \u2014 you must look him up. Use explore-agent research; do NOT use a browser agent, Claude Code, or code sandbox.",
+    "title": "People Search — Targeted Lookup via Explore Agent",
+    "prompt": "Find the current professional profile of Andy Prevalsky, founder of Rose Labs, on the public web. Report his current title, company, location, and LinkedIn profile URL, with a source link. He is not a public figure, so you cannot rely on prior knowledge — you must look him up. Use explore-agent research; do NOT use a browser agent, Claude Code, or code sandbox.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": [
       "spawn_agent"
     ],
     "tags": [
-      "basic"
+      "research"
     ],
     "price_limit_cents": 150,
     "requires_browser_agent": false,
@@ -1164,7 +1137,7 @@
     ],
     "tags": [
       "browser",
-      "needs-auth"
+      "auth"
     ],
     "price_limit_cents": 100,
     "requires_browser_agent": true,
@@ -1189,7 +1162,7 @@
       "spawn_general_purpose_agent"
     ],
     "tags": [
-      "basic"
+      "mass-agent"
     ],
     "price_limit_cents": 100,
     "requires_browser_agent": false,
@@ -1214,7 +1187,7 @@
       "spawn_agent"
     ],
     "tags": [
-      "basic"
+      "eval"
     ],
     "price_limit_cents": 100,
     "requires_browser_agent": false,
@@ -1284,13 +1257,12 @@
     "name": "smoke-backend-claude-code",
     "title": "Backend Smoke: Claude Code E2B Session",
     "description": "Backend blackbox smoke: real Claude Code session in an E2B sandbox writes a sentinel file",
-    "prompt": "External vitest smoke \u2014 not an agent goal. Runs back-end/src/tests/blackbox/claude-code.blackbox.ts (testSmoke_claudeCodeAnswersQuestion): creates a real Claude Code E2B session, asks it to write /home/user/output/claude-smoke.txt with CLAUDE_E2B_OK, asserts the websocket stream and sandbox file contents.",
+    "prompt": "External vitest smoke — not an agent goal. Runs back-end/src/tests/blackbox/claude-code.blackbox.ts (testSmoke_claudeCodeAnswersQuestion): creates a real Claude Code E2B session, asks it to write /home/user/output/claude-smoke.txt with CLAUDE_E2B_OK, asserts the websocket stream and sandbox file contents.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": [],
     "tags": [
       "smoke",
-      "external",
       "claude-code"
     ],
     "price_limit_cents": 100,
@@ -1327,13 +1299,12 @@
     "name": "smoke-backend-codex-code",
     "title": "Backend Smoke: Codex E2B Session",
     "description": "Backend blackbox smoke: real Codex session in an E2B sandbox writes a sentinel file",
-    "prompt": "External vitest smoke \u2014 not an agent goal. Runs back-end/src/tests/blackbox/codex-code.blackbox.ts (testSmoke_codexCompletesE2bTask): creates a real Codex E2B session, asks it to write /home/user/output/codex-smoke.txt with CODEX_E2B_OK, asserts the websocket stream and sandbox file contents.",
+    "prompt": "External vitest smoke — not an agent goal. Runs back-end/src/tests/blackbox/codex-code.blackbox.ts (testSmoke_codexCompletesE2bTask): creates a real Codex E2B session, asks it to write /home/user/output/codex-smoke.txt with CODEX_E2B_OK, asserts the websocket stream and sandbox file contents.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": [],
     "tags": [
-      "smoke",
-      "external"
+      "smoke"
     ],
     "price_limit_cents": 100,
     "requires_browser_agent": false,
@@ -1369,13 +1340,12 @@
     "name": "smoke-backend-sms-supervisor",
     "title": "Backend Smoke: SMS Supervisor Loop",
     "description": "Backend blackbox smoke: inbound SMS drives the supervisor loop to send the fixture response",
-    "prompt": "External vitest smoke \u2014 not an agent goal. Runs back-end/src/tests/blackbox/sms-supervisor.blackbox.ts (testSmoke_knownPhoneSupervisorSendsSmsResponse): posts an inbound SMS for a provisioned user, asserts the supervisor loop sends the configured outbound reply and session state advances.",
+    "prompt": "External vitest smoke — not an agent goal. Runs back-end/src/tests/blackbox/sms-supervisor.blackbox.ts (testSmoke_knownPhoneSupervisorSendsSmsResponse): posts an inbound SMS for a provisioned user, asserts the supervisor loop sends the configured outbound reply and session state advances.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": [],
     "tags": [
-      "smoke",
-      "external"
+      "smoke"
     ],
     "price_limit_cents": 100,
     "requires_browser_agent": false,
@@ -1408,8 +1378,126 @@
     "bench": "pipeline-e2e"
   },
   {
+    "name": "eval-sms-supervisor-grep-over-ask",
+    "title": "SMS Supervisor: greps user data instead of asking",
+    "description": "Real-LLM behavior eval: a factual question about a contact is answered from the user's own data via the supervisor's grep tool (source=network, seeded Person DB fixture) instead of texting a clarifying question back. Requires BLACKBOX_SMS_SUPERVISOR_REAL_LLM=1.",
+    "prompt": "External vitest eval — not an agent goal. Runs back-end/src/tests/blackbox/sms-supervisor.blackbox.ts (testRealLlm_answersContactFactViaGrep): seeds a Person row (name + email) as the DB fixture, sends inbound SMS 'What is Jane <LastName>'s email address?' with the real-LLM bypass, asserts the outbound SMS contains the seeded email.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": [
+      "eval",
+      "external",
+      "real-llm"
+    ],
+    "price_limit_cents": 100,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": null,
+    "runner": "vitest",
+    "environment": {
+      "mode": "hybrid",
+      "db_fixtures": [
+        "Person row seeded by the test: firstName Jane, unique lastName, unique email"
+      ],
+      "base_images": [],
+      "services": [
+        "back-end blackbox harness (isolated backend + local Postgres)"
+      ],
+      "secrets": [
+        "BLACKBOX_SMS_SUPERVISOR_REAL_LLM=1"
+      ],
+      "live_targets": [
+        "Rose completions (claudeAuth/waterfall)"
+      ],
+      "context_notes": "Acceptance eval for the supervisor grep tool + search-first prompt rule."
+    },
+    "evaluators": [
+      {
+        "id": "primary",
+        "method": "static_check",
+        "criteria": [
+          "POST /api/sms/inbound returns 200",
+          "Outbound Surge SMS contains the seeded contact email",
+          "No clarifying question sent instead of the answer"
+        ],
+        "checks": [
+          {
+            "type": "vitest",
+            "file": "back-end/src/tests/blackbox/sms-supervisor.blackbox.ts",
+            "test": "testRealLlm_answersContactFactViaGrep"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "eval:back-end/src/tests/blackbox/sms-supervisor.behavior.ts:testRealLlm_answersContactFactViaGrep"
+    ],
+    "bench": "pipeline-e2e"
+  },
+  {
+    "name": "eval-sms-supervisor-purchase-spawns-agent",
+    "title": "SMS Supervisor: clear purchase request spawns agent",
+    "description": "Real-LLM behavior eval: 'get me the best lip balm from amazon' spawns a superintelligence agent (start_new_agent) with a clear purchase goal instead of replying with a clarifying question. Requires BLACKBOX_SMS_SUPERVISOR_REAL_LLM=1.",
+    "prompt": "External vitest eval — not an agent goal. Runs back-end/src/tests/blackbox/sms-supervisor.blackbox.ts (testRealLlm_purchaseRequestSpawnsAgent): sends inbound SMS 'get me the best lip balm from amazon' with the real-LLM bypass, asserts an Agent row is created whose goal mentions lip balm and a purchase intent (amazon/purchase/buy/order).",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": [
+      "eval",
+      "external",
+      "real-llm"
+    ],
+    "price_limit_cents": 100,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": null,
+    "runner": "vitest",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "back-end blackbox harness (isolated backend + local Postgres)"
+      ],
+      "secrets": [
+        "BLACKBOX_SMS_SUPERVISOR_REAL_LLM=1"
+      ],
+      "live_targets": [
+        "Rose completions (claudeAuth/waterfall)"
+      ],
+      "context_notes": "Acceptance eval for the ported bias-to-action personality block in the supervisor prompt."
+    },
+    "evaluators": [
+      {
+        "id": "primary",
+        "method": "static_check",
+        "criteria": [
+          "POST /api/sms/inbound returns 200",
+          "Agent row created via start_new_agent commit",
+          "Agent goal mentions lip balm and a purchase intent"
+        ],
+        "checks": [
+          {
+            "type": "vitest",
+            "file": "back-end/src/tests/blackbox/sms-supervisor.blackbox.ts",
+            "test": "testRealLlm_purchaseRequestSpawnsAgent"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "eval:back-end/src/tests/blackbox/sms-supervisor.behavior.ts:testRealLlm_purchaseRequestSpawnsAgent"
+    ],
+    "bench": "pipeline-e2e"
+  },
+  {
     "name": "phone-call-client-intake",
-    "title": "Phone Call \u2014 Client Intake (Name + Address)",
+    "title": "Phone Call — Client Intake (Name + Address)",
     "prompt": "Call our new client at {callee_phone_number} exactly once and collect their full name and complete mailing address for our records. Do not call back or place a second phone call; if the single call fails, report that failure. When the call is done, report the exact full name and full mailing address back to me.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
@@ -1486,7 +1574,7 @@
   },
   {
     "name": "phone-call-payment",
-    "title": "Phone Call \u2014 Complete Payment Over the Phone",
+    "title": "Phone Call — Complete Payment Over the Phone",
     "prompt": "Call Rose Test Florist at {callee_phone_number} exactly once and order a dozen red roses with delivery. Do not call back or place a second phone call; if the single call fails, report that failure. Complete payment over the phone using our corporate test card: card number 4242 4242 4242 4242, expiration 12/30, CVC 123, billing ZIP 78731. Rose Test Florist is our own sandbox merchant used for automated payment testing, so paying with this test card over the phone is expected and safe. Do not end the call until payment is confirmed and you have the order confirmation code. Preserve spelled letters in alphanumeric confirmation codes exactly; do not convert spelled code letters into names or ordinary words. Report the confirmation code and the total charged back to me.",
     "timeout_seconds": 900,
     "is_chat_mode": false,

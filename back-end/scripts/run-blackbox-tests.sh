@@ -15,6 +15,9 @@ PORT_LOCK_ROOT="$ARTIFACT_ROOT/.port-locks"
 mkdir -p "$ARTIFACT_DIR" "$PORT_LOCK_ROOT"
 export BLACKBOX_TEST_ARTIFACT_DIR="$ARTIFACT_DIR"
 export CONTRACT_TEST_ARTIFACT_DIR="$ARTIFACT_DIR"
+export TRACE_ARCHIVE_ENABLED="${TRACE_ARCHIVE_ENABLED:-1}"
+export TRACE_ARCHIVE_BACKEND="${TRACE_ARCHIVE_BACKEND:-local}"
+export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$ROOT_DIR/.context}"
 
 RUNNER_CMD=(npx tsx src/tests/blackbox/run.ts)
 RUNNER_LOG="$ARTIFACT_DIR/runner.log"
@@ -85,6 +88,7 @@ if $DB_FOUND; then
   LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria"
   export DATABASE_URL="$LOCAL_DB_URL"
   export DIRECT_URL="$LOCAL_DB_URL"
+  export FAST_MODE_CACHE_DATABASE_URL="${FAST_MODE_CACHE_DATABASE_URL:-$LOCAL_DB_URL}"
   if command -v psql >/dev/null 2>&1; then
     psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
 DO $$

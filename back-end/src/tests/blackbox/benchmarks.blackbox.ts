@@ -210,11 +210,14 @@ const KNOWN_TAGS = [
   'plaid',
   'transactions',
   'bot-challenge',
+  'antibot',
   'documents',
   'prod-data',
   'external',
   'voice',
   'wait-for',
+  'eval',
+  'real-llm',
 ];
 
 // ==================== GET /api/benchmarks — CONTRACT TESTS ====================

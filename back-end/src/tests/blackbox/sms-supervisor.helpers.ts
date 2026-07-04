@@ -199,6 +199,43 @@ export function buildStartNewAgentFixture(
   });
 }
 
+/**
+ * Fixture with a grep call followed by attempt_completion. All grep argument
+ * keys are present (null when unused) because the fixture is validated with
+ * SmsSupervisorResponseSchema, whose nullable fields are still required keys.
+ */
+export function buildGrepFixture(params: {
+  pattern: string;
+  source: string | null;
+  replyText: string;
+}): string {
+  return JSON.stringify({
+    reasoning: 'search user data then send sms',
+    tool_calls: [
+      {
+        tool: 'grep',
+        arguments: {
+          pattern: params.pattern,
+          source: params.source,
+          '-B': null,
+          '-A': null,
+          '-C': null,
+          context: null,
+          '-n': null,
+          '-i': null,
+          head_limit: null,
+          offset: null,
+          multiline: null,
+          filters: null,
+          person: null,
+          since: null,
+        },
+      },
+      { tool: 'attempt_completion', arguments: { message: params.replyText } },
+    ],
+  });
+}
+
 export function fixtureSmsReply(): string | null {
   const raw = process.env.BLACKBOX_SMS_SUPERVISOR_RESPONSE_JSON;
   if (!raw) {

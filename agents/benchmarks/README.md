@@ -35,14 +35,14 @@ python benchmarks/run_benchmark.py --list
 # Run a single task against prod
 python benchmarks/run_benchmark.py --task chat-mode
 
-# Run all basic tasks against prod
-python benchmarks/run_benchmark.py --suite basic
+# Run all smoke tasks against prod
+python benchmarks/run_benchmark.py --suite smoke
 
 # Run all tasks against localhost
 python benchmarks/run_benchmark.py --suite all --url http://localhost:3001
 
 # Run without retry on failure
-python benchmarks/run_benchmark.py --suite basic --no-retry
+python benchmarks/run_benchmark.py --suite smoke --no-retry
 
 # Compare two runs
 python benchmarks/run_benchmark.py --compare runs/A.json runs/B.json
@@ -50,20 +50,34 @@ python benchmarks/run_benchmark.py --compare runs/A.json runs/B.json
 
 ## Suites (tags)
 
-| Tag | Tasks | Description |
-|-----|-------|-------------|
-| `basic` | chat-mode, spawn-sub-agents, parallel-tool-calls, message-person | Core agent capabilities |
-| `chat` | chat-mode | Chat mode only |
-| `approval` | message-person, outreach-batch | Tasks requiring approval handling |
-| `browser` | browser-agent | Browser agent tasks |
-| `claude-code` | claude-code-agent, files-in-sub-agents | Claude Code sandbox tasks |
-| `attachment` | image-handling, files-in-sub-agents, agent-for-each | Tasks with file attachments |
-| `for-each` | agent-for-each, outreach-batch | Multi-agent for-each tasks |
-| `outreach` | outreach-batch | Personalized outreach at scale |
-| `job-applications` | job-applications | Job application blitz with resumes |
-| `rose-bench` | Harness-independent capability evals | Portable fixture + prompt + evaluator tasks |
-| `pipeline-e2e` | Harness plumbing evals | Rose-specific pipes, write locks, auth, smoke coverage |
-| `all` | Everything | All ready agent tasks |
+The curated tag vocabulary (each task carries zero or more):
+
+| Tag | Description |
+|-----|-------------|
+| `antibot` | Bot-challenge / biometric-defeat browser tasks |
+| `attachments` | Tasks with file attachments or document handling |
+| `auth` | Tasks needing authenticated sessions (cookie, minted, or anon accounts) |
+| `browser` | Browser agent tasks |
+| `cache` | Fast-mode cache record/replay tasks |
+| `chat` | Chat mode only |
+| `code-agent` | Claude Code sandbox tasks |
+| `grep` | User-data grep/search tasks |
+| `load-test` | Mass-agent / scale load tests |
+| `outreach` | Personalized outreach at scale |
+| `payment` | Payment and checkout flows |
+| `phone` | Phone-call tasks |
+| `plaid` | Plaid-connected finance tasks |
+| `research` | Deep-research tasks |
+| `smoke` | Deploy-gate smoke suite |
+| `social` | Social-account tasks |
+| `sub-agent-fan-out` | Multi-agent for-each fan-out tasks |
+| `transactions` | Transaction analysis tasks |
+| `voice` | Voice tasks |
+| `wait-for` | wait_for scheduling tasks |
+
+Special suite selectors (not tags): `all` (every ready agent task), `auth`
+(cookie-auth task by default, anon tasks with `--anon` — split by task name),
+`rose-bench` / `pipeline-e2e` (bench axis).
 
 ## Tasks
 

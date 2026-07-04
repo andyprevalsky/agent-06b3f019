@@ -303,6 +303,14 @@ test('cache entry storage uses the shared Fast Mode database URL', () => {
   const repo = readFileSync(join(process.cwd(), 'src', 'providers', 'fastCacheStore.ts'), 'utf8');
   assert.ok(repo.includes('FAST_MODE_CACHE_DATABASE_URL'), 'cache DB override env is wired');
   assert.ok(
+    !/FAST_MODE_CACHE_DATABASE_URL\s*\?\?\s*process\.env\.DATABASE_URL/.test(repo),
+    'cache DB must not silently fall back to the active app DB'
+  );
+  assert.ok(
+    repo.includes("NODE_ENV === 'production'") && repo.includes('throw new Error'),
+    'only production may fall back to DATABASE_URL because production DATABASE_URL is the prod table'
+  );
+  assert.ok(
     /fastCachePrisma\.fastModeCacheEntry\.findUnique/.test(repo),
     'cache reads use shared cache DB'
   );
