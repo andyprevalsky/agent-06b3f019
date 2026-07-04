@@ -9,11 +9,12 @@ import asyncio
 import base64
 import json
 import os
+import sys
 import time as time_module
 from io import BytesIO
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from _test_utils import (
@@ -6525,6 +6526,31 @@ async def test_stop_playwright_resources_closes_browser_and_stops_instance():
     playwright.stop.assert_awaited_once()
 
 
+def test_disable_cdp_websocket_proxy_sets_default_proxy_none():
+    from domains.spawn_browser_agent_v3.handler import _disable_cdp_websocket_proxy
+
+    calls = []
+
+    def fake_connect(uri, *, proxy=True, **kwargs):
+        calls.append({"uri": uri, "proxy": proxy, **kwargs})
+        return "connected"
+
+    fake_cdp_client = ModuleType("cdp_use.client")
+    fake_cdp_client.websockets = SimpleNamespace(connect=fake_connect)
+
+    with patch.dict(sys.modules, {"cdp_use.client": fake_cdp_client}):
+        assert _disable_cdp_websocket_proxy() is True
+        assert fake_cdp_client.websockets.connect("ws://example.test/devtools") == "connected"
+        assert calls[-1]["proxy"] is None
+
+        assert (
+            fake_cdp_client.websockets.connect("ws://example.test/devtools", proxy="http://proxy.local")
+            == "connected"
+        )
+        assert calls[-1]["proxy"] == "http://proxy.local"
+        assert _disable_cdp_websocket_proxy() is False
+
+
 def test_browser_activity_memory_cleanup_clears_retained_buffers():
     from domains.spawn_browser_agent_v3.handler import _clear_browser_activity_memory_buffers
 
@@ -8358,6 +8384,10 @@ async def run_all_tests():
     await r.record_async(
         "stop_playwright_resources",
         test_stop_playwright_resources_closes_browser_and_stops_instance,
+    )
+    r.record(
+        "disable_cdp_websocket_proxy",
+        test_disable_cdp_websocket_proxy_sets_default_proxy_none,
     )
     await r.record_async(
         "stop_playwright_resources_close_fails",

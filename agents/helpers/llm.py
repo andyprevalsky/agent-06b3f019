@@ -3618,17 +3618,16 @@ def _structured_response_satisfies_schema(
     return True
 
 
-def _completed_code_task_structured_response(
+def _completed_child_task_structured_response(
     context: List[Dict[str, Any]],
     response_schema: Optional[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
-    """Return a completed code subtask's structured output when it covers the schema.
+    """Return a completed child task's structured output when it covers the schema.
 
-    This is deliberately narrow: only finished spawn_claude_code_agent task
-    completion messages qualify. The child code tool already ran its own
-    verifier or evidence-based fallback, so the parent verifier can accept the
-    grounded structured response instead of retrying on verifier transport
-    timeouts.
+    This is deliberately narrow: only finished child task completion messages
+    from tools that already ran their own verifier qualify. The parent verifier
+    can then accept grounded structured output instead of retrying work it
+    already delegated successfully.
     """
     if not context or not response_schema:
         return None
@@ -3639,9 +3638,12 @@ def _completed_code_task_structured_response(
         metadata = message.get("metadata")
         if not isinstance(metadata, dict):
             continue
-        if metadata.get("toolName") != "spawn_claude_code_agent":
+        tool_name = metadata.get("toolName")
+        if tool_name not in {"spawn_claude_code_agent", "spawn_browser_agent"}:
             continue
-        if metadata.get("toolStatus") != "FINISHED" or metadata.get("action_type") != "task_complete":
+        if metadata.get("toolStatus") != "FINISHED":
+            continue
+        if tool_name == "spawn_claude_code_agent" and metadata.get("action_type") != "task_complete":
             continue
         structured_response = metadata.get("structured_response")
         if isinstance(structured_response, dict) and isinstance(structured_response.get("output"), dict):
@@ -4101,15 +4103,15 @@ async def check_progress(  # noqa: C901
         _safe_heartbeat("Checking progress with LLM judge")
 
         if call_site == "verifier_execute" and schema_for_call:
-            completed_code_output = _completed_code_task_structured_response(context, schema_for_call)
-            if completed_code_output is not None:
+            completed_child_output = _completed_child_task_structured_response(context, schema_for_call)
+            if completed_child_output is not None:
                 field_names = _schema_field_names(schema_for_call)
                 reasoning = (
-                    "A completed code sandbox task returned a grounded structured response "
+                    "A completed child task returned a grounded structured response "
                     f"covering the required fields: {', '.join(field_names)}."
                 )
                 logger.info(
-                    "Progress satisfied by completed code task structured response",
+                    "Progress satisfied by completed child task structured response",
                     fields=field_names,
                     call_site=call_site,
                 )
@@ -4122,13 +4124,13 @@ async def check_progress(  # noqa: C901
                         "completion_tokens": 0,
                         "total_tokens": 0,
                         "actual_model": "structured_response",
-                        "pool_name": "completed_code_task",
+                        "pool_name": "completed_child_task",
                         "cache_creation_input_tokens": 0,
                         "cache_read_input_tokens": 0,
                         "claude_token_error": None,
                         "gpt_token_error": None,
                     },
-                    "structured_response": completed_code_output,
+                    "structured_response": completed_child_output,
                 }
 
         config = load_config()

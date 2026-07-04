@@ -2623,6 +2623,53 @@ async def test_check_progress_accepts_completed_code_task_structured_response():
     assert result["usage"]["actual_model"] == "structured_response"
 
 
+async def test_check_progress_accepts_completed_browser_task_structured_response():
+    """Parent execute verifier accepts a finished browser child structured response without an LLM call."""
+    from helpers.llm import check_progress
+
+    async def verifier_should_not_run(*_args, **_kwargs):
+        raise AssertionError("verifier should not run for completed browser task output")
+
+    structured_response = {
+        "fcaptcha_risk_score_display": "0.16",
+        "checkbox_mode_passed": True,
+        "invisible_form_submitted": True,
+        "visible_verdict_text": "Verified!; Form submission allowed!",
+    }
+    context = [
+        {"role": "USER", "text": "check the FCaptcha demo"},
+        {
+            "role": "TOOL",
+            "text": "",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "title": "Browser automation complete",
+                "structured_response": structured_response,
+            },
+        },
+    ]
+
+    with patch("helpers.llm._call_llm_verifier", verifier_should_not_run), patch("temporalio.activity.heartbeat"):
+        result = await check_progress(
+            context=context,
+            verifier_system_prompt="VERIFY",
+            response_schema={
+                "fields": [
+                    {"name": "fcaptcha_risk_score_display", "type": "str"},
+                    {"name": "checkbox_mode_passed", "type": "bool"},
+                    {"name": "invisible_form_submitted", "type": "bool"},
+                    {"name": "visible_verdict_text", "type": "str"},
+                ]
+            },
+            call_site="verifier_execute",
+        )
+
+    assert result["score"] == 1.0
+    assert result["structured_response"] == structured_response
+    assert result["usage"]["actual_model"] == "structured_response"
+
+
 async def test_call_planner_llm_activity_happy_path():
     """call_planner_llm_activity builds system prompt, streams a plan, returns result+usage."""
     import httpx
@@ -5266,6 +5313,10 @@ async def run_all_tests():
     await r.record_async(
         "check_progress_accepts_completed_code_task_structured_response",
         test_check_progress_accepts_completed_code_task_structured_response,
+    )
+    await r.record_async(
+        "check_progress_accepts_completed_browser_task_structured_response",
+        test_check_progress_accepts_completed_browser_task_structured_response,
     )
     await r.record_async(
         "check_progress_disables_fast_cache_read_after_verifier_parse_failure",
