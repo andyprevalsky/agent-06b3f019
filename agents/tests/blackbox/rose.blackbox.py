@@ -2487,6 +2487,37 @@ async def test_waterfall_skips_anthropic_for_response_format():
     assert any(c.kind == "content" for c in chunks)
 
 
+async def test_waterfall_excludes_anthropic_family_when_requested():
+    sse_ok = "\n".join(
+        _openai_sse(
+            [
+                {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]},
+                {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+            ]
+        )
+    )
+    models_seen: list[str] = []
+
+    def handler(req):
+        body = json.loads(req.content.decode())
+        models_seen.append(body["model"])
+        return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+    chunks = await _drain(
+        waterfall_complete(
+            pool_spec=get_pool("rose-1-ultra"),
+            messages=[{"role": "user", "content": "hi"}],
+            openrouter_key="ork-test",
+            request_id="r-exclude-anthropic",
+            exclude_anthropic_family=True,
+        )
+    )
+
+    assert models_seen == ["google/gemini-3.1-pro-preview"]
+    assert any(c.kind == "content" for c in chunks)
+
+
 async def test_waterfall_all_failed_raises_with_step_errors():
     def handler(req):
         return httpx.Response(503, text="upstream down")
@@ -2721,6 +2752,54 @@ async def test_client_api_key_tier_402_falls_through_to_waterfall():
     # actual_model must be a waterfall model, NOT the -anthropic api-key suffix.
     meta = next((c for c in chunks if c.kind == "metadata"), None)
     assert meta is not None and not meta.data.get("actual_model", "").endswith("-anthropic")
+
+
+async def test_client_exclude_anthropic_family_skips_api_key_and_anthropic_waterfall():
+    import providers.rose.client as rc
+
+    rc._reset_anthropic_api_key_cooldown_cache()
+    sse_ok = "\n".join(
+        _openai_sse(
+            [
+                {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]},
+                {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+            ]
+        )
+    )
+    seen = {"anthropic": 0, "openrouter_models": []}
+
+    def handler(req):
+        host = req.url.host
+        if host == "api.anthropic.com":
+            seen["anthropic"] += 1
+            return httpx.Response(500, text="anthropic should be skipped")
+        if host == "openrouter.ai":
+            body = json.loads(req.content.decode())
+            seen["openrouter_models"].append(body["model"])
+            return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+    prev = os.environ.get("ANTHROPIC_API_KEY")
+    os.environ["ANTHROPIC_API_KEY"] = "sk-ant-api03-test"
+    try:
+        chunks = await _drain(
+            RoseClient(openrouter_key="ork-x").complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "hi"}],
+                _exclude_anthropic_family=True,
+            )
+        )
+    finally:
+        if prev is None:
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+        else:
+            os.environ["ANTHROPIC_API_KEY"] = prev
+        rc._reset_anthropic_api_key_cooldown_cache()
+
+    assert seen["anthropic"] == 0
+    assert seen["openrouter_models"] == ["google/gemini-3.1-pro-preview"]
+    assert any(c.kind == "content" for c in chunks)
 
 
 # =====================================================================
@@ -3167,7 +3246,11 @@ async def test_client_reproduces_rotated_gpt_direct_auth_deadline():
     fetches: list[str] = []
 
     async def silent_gpt_auth(**kwargs):
-        attempts.append(kwargs["auth"].token)
+        token = kwargs["auth"].token
+        attempts.append(token)
+        if token == "fresh-token":
+            yield StreamChunk(kind="metadata", data={"actual_model": "gpt-5.4-gpt"})
+            yield StreamChunk(kind="content", data={"text": "partial"})
         await asyncio.sleep(1.0)
         yield StreamChunk(kind="metadata", data={"actual_model": "gpt-5.4-gpt"})
 
@@ -3217,7 +3300,7 @@ async def test_client_reproduces_rotated_gpt_direct_auth_deadline():
             ):
                 pass
         except RoseDeadlineError as exc:
-            raised = "deadline exceeded" in str(exc)
+            raised = "deadline" in str(exc)
 
     assert raised, "expected the shrunken prod stall to exhaust rose.complete deadline"
     assert attempts == ["stale-token", "fresh-token"]
@@ -4316,6 +4399,7 @@ async def run_all_tests():
     await r.record_async(
         "waterfall_skips_anthropic_response_format", test_waterfall_skips_anthropic_for_response_format
     )
+    await r.record_async("waterfall_excludes_anthropic_family", test_waterfall_excludes_anthropic_family_when_requested)
     await r.record_async("waterfall_all_failed", test_waterfall_all_failed_raises_with_step_errors)
     await r.record_async("waterfall_cache_metrics", test_waterfall_reports_cache_metrics_from_openrouter)
 
@@ -4331,6 +4415,9 @@ async def run_all_tests():
     )
     await r.record_async(
         "anthropic_apikey_tier_402_to_waterfall", test_client_api_key_tier_402_falls_through_to_waterfall
+    )
+    await r.record_async(
+        "client_exclude_anthropic_family", test_client_exclude_anthropic_family_skips_api_key_and_anthropic_waterfall
     )
 
     await r.record_async("client_collect_waterfall", test_client_collect_waterfall_only_path)

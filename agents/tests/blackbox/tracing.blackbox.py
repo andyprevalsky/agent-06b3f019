@@ -157,6 +157,178 @@ async def test_activity_span_records_memory_snapshots():
         structlog.contextvars.clear_contextvars()
 
 
+def test_sanitize_runtime_value_truncates_and_caps_depth():
+    from helpers import tracing
+
+    # Long strings are truncated with a suffix noting the dropped count.
+    long_str = "x" * (tracing._MAX_RUNTIME_STRING + 25)
+    sanitized = tracing._sanitize_runtime_value(long_str)
+    assert sanitized.startswith("x" * tracing._MAX_RUNTIME_STRING)
+    assert sanitized.endswith("...[truncated 25 chars]")
+
+    # Scalars pass through untouched.
+    assert tracing._sanitize_runtime_value(None) is None
+    assert tracing._sanitize_runtime_value(True) is True
+    assert tracing._sanitize_runtime_value(3.5) == 3.5
+
+    # Lists/tuples are truncated to _MAX_RUNTIME_ITEMS with a marker item.
+    big_list = list(range(tracing._MAX_RUNTIME_ITEMS + 5))
+    out_list = tracing._sanitize_runtime_value(big_list)
+    assert len(out_list) == tracing._MAX_RUNTIME_ITEMS + 1
+    assert out_list[-1] == "...[truncated 5 items]"
+
+    # Dicts are truncated to _MAX_RUNTIME_ITEMS keys with a marker key.
+    big_dict = {str(i): i for i in range(tracing._MAX_RUNTIME_ITEMS + 3)}
+    out_dict = tracing._sanitize_runtime_value(big_dict)
+    assert out_dict["..."] == "truncated 3 keys"
+
+    # Depth cap collapses deeply nested structures to a type marker.
+    nested = {"a": {"b": {"c": "deep"}}}
+    out_nested = tracing._sanitize_runtime_value(nested)
+    assert out_nested["a"]["b"] == "<dict>"
+
+    # Arbitrary objects fall back to a truncated repr.
+    class Weird:
+        def __repr__(self) -> str:
+            return "W" * (tracing._MAX_RUNTIME_STRING + 50)
+
+    weird_out = tracing._sanitize_runtime_value(Weird())
+    assert len(weird_out) == tracing._MAX_RUNTIME_STRING
+
+
+def test_sync_span_logs_start_end_and_marks_error_status():
+    tracing, fake, original = _patch_logger()
+    structlog.contextvars.clear_contextvars()
+    try:
+        with tracing.sync_span("sync_work", tool_name="demo") as span_id:
+            assert isinstance(span_id, str) and span_id
+
+        # Error path sets status=error and re-raises.
+        raised = False
+        try:
+            with tracing.sync_span("sync_boom"):
+                raise ValueError("boom")
+        except ValueError:
+            raised = True
+        assert raised
+
+        ends = [e for e in fake.events if e["event"] == "span.end"]
+        ok_end = next(e for e in ends if e["span_name"] == "sync_work")
+        err_end = next(e for e in ends if e["span_name"] == "sync_boom")
+        assert ok_end["status"] == "ok"
+        assert ok_end["tool_name"] == "demo"
+        assert err_end["status"] == "error"
+    finally:
+        tracing.logger = original
+        structlog.contextvars.clear_contextvars()
+
+
+def test_trace_and_rose_headers_use_context_then_fallbacks():
+    from helpers import tracing
+
+    structlog.contextvars.clear_contextvars()
+    try:
+        # No bound context: fallbacks are used for request/agent ids.
+        headers = tracing.rose_api_headers(
+            api_key="key-1",
+            anon_key="anon-1",
+            call_site="verifier",
+            fallback_request_id="req-fallback",
+            fallback_agent_id="agent-fallback",
+        )
+        assert headers["Authorization"] == "Bearer anon-1"
+        assert headers["x-api-key"] == "key-1"
+        assert headers["x-call-site"] == "verifier"
+        assert headers["X-Request-Id"] == "req-fallback"
+        assert headers["X-Agent-Id"] == "agent-fallback"
+
+        assert tracing.tracing_headers() == {}
+        backend = tracing.backend_api_headers("bk-key")
+        assert backend["X-API-Key"] == "bk-key"
+        assert backend["Content-Type"] == "application/json"
+
+        # Bound context takes precedence over the fallbacks.
+        token = tracing.bind_request_id("req-bound")
+        try:
+            ctx_headers = tracing.rose_api_headers(
+                api_key="key-2",
+                anon_key="anon-2",
+                call_site="planner",
+                fallback_request_id="req-fallback",
+            )
+            assert ctx_headers["X-Request-Id"] == "req-bound"
+            assert tracing.tracing_headers()["X-Request-Id"] == "req-bound"
+        finally:
+            structlog.contextvars.reset_contextvars(**token)
+    finally:
+        structlog.contextvars.clear_contextvars()
+
+
+def test_rss_snapshot_reads_process_memory_and_caches():
+    from helpers import tracing
+
+    # Reset the TTL cache so the psutil branch executes.
+    tracing._rss_cache = {}
+    tracing._rss_cache_at = -1e9
+    snapshot = tracing._rss_snapshot()
+    assert snapshot["process_rss_bytes"] > 0
+    assert snapshot["tree_rss_bytes"] >= snapshot["process_rss_bytes"]
+
+    # Second call within the TTL returns the cached object identity.
+    assert tracing._rss_snapshot() is snapshot
+
+    metadata = tracing._memory_metadata("start", snapshot)
+    assert metadata["memory_process_rss_start_bytes"] == snapshot["process_rss_bytes"]
+
+
+def test_temporal_activity_metadata_empty_outside_activity():
+    from helpers import tracing
+
+    # No active Temporal activity → activity.info() raises → returns {}.
+    assert tracing._temporal_activity_metadata() == {}
+
+
+def test_temporal_activity_metadata_collects_queue_dimensions():
+    import types
+    from datetime import datetime, timedelta, timezone
+
+    import health_server
+    from temporalio import activity
+
+    from helpers import tracing
+
+    scheduled = datetime(2026, 7, 4, 12, 0, 0, tzinfo=timezone.utc)
+    started = scheduled + timedelta(milliseconds=150)
+    fake_info = types.SimpleNamespace(
+        current_attempt_scheduled_time=scheduled,
+        scheduled_time=scheduled,
+        started_time=started,
+        activity_id="act-1",
+        activity_type="call_llm_activity",
+        attempt=2,
+        task_queue="navi-agent-tasks-x",
+        workflow_id="wf-1",
+        workflow_run_id="run-1",
+    )
+    old_info = activity.info
+    old_snapshot = health_server.get_queue_metrics_snapshot
+    try:
+        activity.info = lambda: fake_info
+        health_server.get_queue_metrics_snapshot = lambda: {"active_slots": 3}
+        md = tracing._temporal_activity_metadata()
+        assert md["temporal_activity_id"] == "act-1"
+        assert md["temporal_activity_type"] == "call_llm_activity"
+        assert md["temporal_activity_attempt"] == 2
+        assert md["temporal_task_queue"] == "navi-agent-tasks-x"
+        assert md["temporal_workflow_run_id"] == "run-1"
+        assert md["temporal_schedule_to_start_ms"] == 150
+        # Queue metrics snapshot is folded in with a worker_ prefix.
+        assert md["worker_active_slots_at_activity_start"] == 3
+    finally:
+        activity.info = old_info
+        health_server.get_queue_metrics_snapshot = old_snapshot
+
+
 async def run_all_tests():
     print("tracing blackbox tests:")
     r = BlackboxResult()
@@ -164,6 +336,12 @@ async def run_all_tests():
     await r.record_async("span_context_scope", test_span_context_is_scoped_and_dumped_on_start_and_end)
     await r.record_async("traced_loop_args", test_traced_derives_phase_and_agent_type_from_loop_args)
     await r.record_async("activity_span_memory_snapshots", test_activity_span_records_memory_snapshots)
+    r.record("sanitize_runtime_value_truncation", test_sanitize_runtime_value_truncates_and_caps_depth)
+    r.record("sync_span_start_end_error", test_sync_span_logs_start_end_and_marks_error_status)
+    r.record("trace_and_rose_headers", test_trace_and_rose_headers_use_context_then_fallbacks)
+    r.record("rss_snapshot_reads_and_caches", test_rss_snapshot_reads_process_memory_and_caches)
+    r.record("temporal_activity_metadata_empty", test_temporal_activity_metadata_empty_outside_activity)
+    r.record("temporal_activity_metadata_queue_dims", test_temporal_activity_metadata_collects_queue_dimensions)
     teardown_mock()
     return r.all_passed
 

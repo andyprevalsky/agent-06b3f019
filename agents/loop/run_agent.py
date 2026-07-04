@@ -48,6 +48,7 @@ from helpers.tracing import span, traced
 from helpers.update_status import update_agent_status
 from loop.activity_helper import call_temporal_activity_from_activity
 from loop.context_utils import poll_and_update_context
+from providers.rose.errors import RoseRefusalError
 from tools.base import EventType, MessageStatus, ToolEvent
 from tools.knowledge_base import query_blueprints
 from utils.error_utils import extract_error_message
@@ -76,6 +77,21 @@ MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3
 # If compaction succeeds but saves almost nothing, surface an explicit error
 # instead of continuing into the same overflow loop.
 MIN_AUTOCOMPACT_SAVINGS_RATIO = 0.10
+
+
+def _is_refusal_error(exc: BaseException) -> bool:
+    current: Optional[BaseException] = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        if isinstance(current, RoseRefusalError):
+            return True
+        name = type(current).__name__
+        message = str(current)
+        if name == "RoseRefusalError" or "RoseRefusalError" in message or "stream ended with refusal" in message:
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
 
 
 @traced("run_agent")
@@ -211,6 +227,7 @@ async def run_agent(  # noqa: C901
     set_plan_succeeded = False  # Track if set_plan completed successfully (not just called)
     no_tool_count = 0  # Track consecutive iterations with no tool calls
     consecutive_llm_failures = 0  # Track consecutive LLM call failures for early exit
+    exclude_anthropic_family_on_llm_retry = False  # Set after refusal to reroute the immediate retry
     consecutive_verifier_errors = 0  # Track consecutive verifier failures for early exit
     compactor_failures = 0  # Circuit-breaker: skip compaction after 3 consecutive failures
     ineffective_compactions = 0  # Circuit-breaker for repeated low-value compactions
@@ -813,6 +830,7 @@ async def run_agent(  # noqa: C901
                                     compute_token_lineage_key=compute_token_lineage_key,
                                     compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
                                     call_site=cache_call_site,
+                                    _exclude_anthropic_family=exclude_anthropic_family_on_llm_retry,
                                 )
                             break  # Success
                         except Exception as e:
@@ -917,6 +935,7 @@ async def run_agent(  # noqa: C901
                 detected_tools_ordered = llm_result.get("detected_tools_ordered", [])
 
             # Track tokens locally
+            exclude_anthropic_family_on_llm_retry = False
             llm_tokens_in = usage.get("prompt_tokens", 0)
             llm_tokens_out = usage.get("completion_tokens", 0)
             llm_total = usage.get("total_tokens", 0)
@@ -1068,6 +1087,15 @@ async def run_agent(  # noqa: C901
                     "cache_creation_input_tokens": cache_write_total,
                     "message": f"LLM call failed {consecutive_llm_failures} consecutive times: {error_message}",
                 }
+            if _is_refusal_error(e):
+                exclude_anthropic_family_on_llm_retry = True
+                logger.info(
+                    "run_agent.llm_retry_excluding_anthropic",
+                    agent_id=agent_id,
+                    iteration=iteration,
+                    consecutive_failures=consecutive_llm_failures,
+                )
+                continue
             backoff = min(2 * (2 ** (consecutive_llm_failures - 1)), 30)
             await asyncio.sleep(backoff)
             continue

@@ -98,7 +98,7 @@ def install_capture() -> None:
                         mounts[pattern] = _capture_transport(transport)
         else:
             warnings.warn(
-                "httpx_capture: AsyncClient._transport not found — capture disabled. "
+                "httpx_capture: AsyncClient transports not found — capture disabled. "
                 "This may indicate an incompatible httpx version.",
                 stacklevel=2,
             )
