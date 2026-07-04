@@ -160,6 +160,14 @@ jobs:
           cp "$APP_PROFILE" "$APP/Contents/embedded.provisionprofile"
           cp "$EXT_PROFILE" "$APP/Contents/PlugIns/PasskeyProvider.appex/Contents/embedded.provisionprofile"
 
+          # electron-updater needs Contents/Resources/app-update.yml to resolve
+          # the download feed. Our `--mac dir` + `--prepackaged` two-step build
+          # never emits it (see scripts/write-app-update-yml.mjs), so downloads
+          # failed with ENOENT. Write it BEFORE signing so it is sealed inside
+          # the app's code signature.
+          node scripts/write-app-update-yml.mjs --app "$APP"
+          test -f "$APP/Contents/Resources/app-update.yml"
+
           codesign --force --options runtime --timestamp --sign "$IDENTITY" \
             --identifier com.rose.desktop \
             "$APP/Contents/Resources/native/rose-passkey-import"

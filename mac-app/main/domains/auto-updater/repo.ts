@@ -23,6 +23,18 @@ export function configureFeed(): void {
   });
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
+  // Force full-zip downloads instead of block-level differential updates.
+  // Differential download reconstructs the new artifact by reusing blocks from
+  // whatever `Rose-mac.zip` is already in the updater cache. If that cached
+  // artifact is stale (e.g. left over from a prior release whose blockmap no
+  // longer matches the current feed), the reconstructed file fails its sha512
+  // check and the whole update dies with a checksum-mismatch `error` event —
+  // surfaced to the user as a bare "Update failed" with nothing in the renderer
+  // console/network tab (the failure lives entirely in the main process).
+  // Full downloads always re-fetch the complete zip and verify it end-to-end,
+  // so they cannot be poisoned by a stale cache. On a generic HTTP feed the
+  // bandwidth saving from differential updates is marginal; correctness wins.
+  autoUpdater.disableDifferentialDownload = true;
 }
 
 /** Proxy for `autoUpdater.checkForUpdates()` — typed result passthrough. */
