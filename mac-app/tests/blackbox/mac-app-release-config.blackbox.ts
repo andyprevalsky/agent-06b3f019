@@ -135,4 +135,46 @@ describe('mac app release config', () => {
     expect(latest).toContain(`size: ${fs.statSync(dmgPath).size}`);
     expect(latest).toContain(`sha512: ${sha512Base64(zipPath)}`);
   });
+
+  it('release build writes app-update.yml into the bundle so electron-updater can download', () => {
+    // Regression guard: every shipped build was missing
+    // Contents/Resources/app-update.yml, so update *checks* worked (setFeedURL
+    // in memory) but every *download* died with ENOENT on app-update.yml. The
+    // release workflow now runs write-app-update-yml.mjs against the built .app
+    // before signing; this exercises that script end-to-end.
+    const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')) as {
+      name: string;
+      build: { publish?: { provider?: string; url?: string } };
+    };
+    const publish = pkg.build.publish;
+    expect(publish?.provider, 'package.json build.publish.provider must be set').toBeTruthy();
+    expect(publish?.url, 'package.json build.publish.url must be set').toBeTruthy();
+
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rose-app-update-'));
+    const appDir = path.join(tmp, 'Rose.app');
+    const resources = path.join(appDir, 'Contents', 'Resources');
+    fs.mkdirSync(resources, { recursive: true });
+
+    execFileSync('node', [path.join(ROOT, 'scripts/write-app-update-yml.mjs'), '--app', appDir]);
+
+    const ymlPath = path.join(resources, 'app-update.yml');
+    expect(fs.existsSync(ymlPath), 'app-update.yml must be written into the bundle').toBe(true);
+    const yml = fs.readFileSync(ymlPath, 'utf8');
+    expect(yml).toContain(`provider: ${publish!.provider}`);
+    expect(yml).toContain(`url: ${publish!.url}`);
+    // Cache dir name must match electron-builder's derived <name>-updater so
+    // existing users' ~/Library/Caches/<name>-updater keeps being reused.
+    expect(yml).toContain(`updaterCacheDirName: ${pkg.name}-updater`);
+  });
+
+  it('write-app-update-yml.mjs fails a bundle that is not a mac .app', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rose-app-update-bad-'));
+    const result = spawnSync(
+      'node',
+      [path.join(ROOT, 'scripts/write-app-update-yml.mjs'), '--app', path.join(tmp, 'Nope.app')],
+      { encoding: 'utf8' }
+    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/Contents\/Resources/);
+  });
 });

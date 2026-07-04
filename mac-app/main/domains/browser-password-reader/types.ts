@@ -12,14 +12,7 @@
  * entry (it uses the "ChatGPT Safe Storage" Data Protection keychain).
  */
 export type BrowserType =
-  | 'chrome'
-  | 'edge'
-  | 'brave'
-  | 'arc'
-  | 'opera'
-  | 'vivaldi'
-  | 'chromium'
-  | 'atlas';
+  'chrome' | 'edge' | 'brave' | 'arc' | 'opera' | 'vivaldi' | 'chromium' | 'atlas';
 
 /**
  * Static per-browser wiring: where `Login Data` lives on disk, the macOS

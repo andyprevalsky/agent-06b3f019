@@ -160,6 +160,14 @@ jobs:
           cp "$APP_PROFILE" "$APP/Contents/embedded.provisionprofile"
           cp "$EXT_PROFILE" "$APP/Contents/PlugIns/PasskeyProvider.appex/Contents/embedded.provisionprofile"
 
+          # electron-updater needs Contents/Resources/app-update.yml to resolve
+          # the download feed. Our `--mac dir` + `--prepackaged` two-step build
+          # never emits it (see scripts/write-app-update-yml.mjs), so downloads
+          # failed with ENOENT. Write it BEFORE signing so it is sealed inside
+          # the app's code signature.
+          node scripts/write-app-update-yml.mjs --app "$APP"
+          test -f "$APP/Contents/Resources/app-update.yml"
+
           codesign --force --options runtime --timestamp --sign "$IDENTITY" \
             --identifier com.rose.desktop \
             "$APP/Contents/Resources/native/rose-passkey-import"
@@ -212,6 +220,17 @@ jobs:
             echo "Provider provisioning profile is missing AutoFill credential provider entitlement"
             exit 1
           fi
+          # Guard the shipped artifacts, not just the pre-signing bundle: the
+          # `--prepackaged ... --mac dmg zip` step above is what actually
+          # produces the zip electron-updater downloads. Assert app-update.yml
+          # survived into both the final .app and the shipped zip so a future
+          # electron-builder/--prepackaged regression can't silently reintroduce
+          # the ENOENT-on-download bug this PR fixes.
+          echo "Verifying app-update.yml is present for the auto-updater..."
+          test -f dist/mac-arm64/Rose.app/Contents/Resources/app-update.yml \
+            || { echo "app-update.yml missing from built app — auto-update downloads would fail"; exit 1; }
+          unzip -l dist/Rose-mac.zip | grep -q 'Contents/Resources/app-update.yml' \
+            || { echo "app-update.yml missing from shipped Rose-mac.zip — auto-update downloads would fail"; exit 1; }
           echo "Verifying DMG signature..."
           codesign --verify --verbose=2 dist/Rose-mac.dmg || true
 
