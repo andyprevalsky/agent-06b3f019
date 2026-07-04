@@ -2355,6 +2355,37 @@ def _run_user_data_fixture(action: str) -> dict:
     return _parse_last_json_line(result.stdout)
 
 
+def _sync_compute_tokens() -> None:
+    """Refresh the compute-token integrations (claude_code / gpt_code + pool)
+    from prod into the isolated benchmark DB. Best-effort but loud: a frozen DB
+    fixture or whole-DB snapshot restore can leave stale/expired compute tokens,
+    which forces the agent's claudeAuth fetch to fail into the paid waterfall.
+    Reads the prod source from back-end/.env; writes to the isolated DB."""
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        print("    ⚠ Compute-token sync skipped: local Victoria DB not found")
+        return
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["DIRECT_URL"] = database_url
+    try:
+        result = subprocess.run(
+            ["npx", "tsx", "scripts/seed-local.ts", "--compute-tokens-only"],
+            cwd=REPO_ROOT / "back-end",
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except Exception as exc:
+        print(f"    ⚠ Compute-token sync error: {exc}")
+        return
+    if result.returncode != 0:
+        print(f"    ⚠ Compute-token sync failed: {(result.stderr or result.stdout).strip()[:200]}")
+    else:
+        print("    🔑 Refreshed compute tokens from prod")
+
+
 def _run_grep_fixture(action: str, *args: str) -> dict:
     result = subprocess.run(
         ["npx", "tsx", "scripts/grep-benchmark-fixture.ts", action, *args],
@@ -4019,6 +4050,14 @@ async def run_single_task(
             f"    📄 Seeded frozen user-data fixture: {doc_count} documents "
             f"across {provider_count} providers"
         )
+
+    # Compute tokens (claude_code / gpt_code) must always be current from prod at
+    # runtime — a frozen DB fixture or whole-DB snapshot restore above can leave
+    # stale/expired tokens, which would force claudeAuth into the paid waterfall
+    # and make every run miss the $0 compute-token path. Refresh right before the
+    # agent starts, on every local run, after any fixture has touched the DB.
+    if _is_local_base_url(base_url):
+        _sync_compute_tokens()
 
     phone_callee: Optional[PhoneCalleeSession] = None
     if task.phone_persona:

@@ -27,6 +27,13 @@ if (!REMOTE_URL) {
 
 const DEV_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 const CREDENTIALS_ONLY = process.argv.includes('--credentials-only');
+// Refresh ONLY the compute-token integrations (claude_code / gpt_code, the
+// dev user's own + the shared pool) from prod. Benchmark runs invoke this at
+// task setup so a frozen DB fixture or whole-DB snapshot restore can never
+// leave the isolated DB with a stale/expired compute token — otherwise the
+// agent's claudeAuth fetch fails and every LLM call falls through to the paid
+// waterfall.
+const COMPUTE_TOKENS_ONLY = process.argv.includes('--compute-tokens-only');
 
 const remote = new PrismaClient({ datasources: { db: { url: REMOTE_URL } } });
 const local = new PrismaClient(); // uses process.env.DATABASE_URL (local)
@@ -46,6 +53,40 @@ async function upsertById(model: any, records: any[]): Promise<number> {
     await model.upsert({ where: { id }, create: r, update: rest });
   }
   return records.length;
+}
+
+async function syncIntegrations(): Promise<number> {
+  // Sync dev user's integrations + all pool tokens (needed for Claude Code benchmarks)
+  const userIntegrations = await remote.integration.findMany({ where: { userId: DEV_USER_ID } });
+  const poolIntegrations = await remote.integration.findMany({
+    where: { poolingEnabled: true, userId: { not: DEV_USER_ID } },
+  });
+  const all = [...userIntegrations, ...poolIntegrations];
+  // Pool tokens reference foreign users — ensure those User records exist locally
+  const poolUserIds = [...new Set(poolIntegrations.map((i) => i.userId))];
+  for (const uid of poolUserIds) {
+    const user = await remote.user.findUnique({ where: { userId: uid } });
+    if (user) {
+      const { id, ...rest } = user;
+      await local.user.upsert({
+        where: { userId: uid },
+        create: user as any,
+        update: rest as any,
+      });
+    }
+  }
+  const synced = await upsertById(local.integration, all);
+  const syncedIds = all.map((integration) => integration.id);
+  const deleted = await local.integration.deleteMany({
+    where: {
+      name: { in: ['claude_code', 'gpt_code'] },
+      id: { notIn: syncedIds.length > 0 ? syncedIds : ['__none__'] },
+    },
+  });
+  if (deleted.count > 0) {
+    console.log(`  🧹 Integrations: ${deleted.count} stale local compute tokens deleted`);
+  }
+  return synced;
 }
 
 async function syncBrowserCredentials(): Promise<void> {
@@ -69,6 +110,12 @@ async function sync() {
 
   // Verify remote connectivity
   await remote.$queryRaw`SELECT 1`;
+
+  if (COMPUTE_TOKENS_ONLY) {
+    await syncTable('Compute Tokens (integrations)', syncIntegrations);
+    console.log('\n🔄 Compute token sync complete.');
+    return;
+  }
 
   if (CREDENTIALS_ONLY) {
     await syncBrowserCredentials();
@@ -122,39 +169,7 @@ async function sync() {
   });
 
   // ── Integrations ──
-  await syncTable('Integrations', async () => {
-    // Sync dev user's integrations + all pool tokens (needed for Claude Code benchmarks)
-    const userIntegrations = await remote.integration.findMany({ where: { userId: DEV_USER_ID } });
-    const poolIntegrations = await remote.integration.findMany({
-      where: { poolingEnabled: true, userId: { not: DEV_USER_ID } },
-    });
-    const all = [...userIntegrations, ...poolIntegrations];
-    // Pool tokens reference foreign users — ensure those User records exist locally
-    const poolUserIds = [...new Set(poolIntegrations.map((i) => i.userId))];
-    for (const uid of poolUserIds) {
-      const user = await remote.user.findUnique({ where: { userId: uid } });
-      if (user) {
-        const { id, ...rest } = user;
-        await local.user.upsert({
-          where: { userId: uid },
-          create: user as any,
-          update: rest as any,
-        });
-      }
-    }
-    const synced = await upsertById(local.integration, all);
-    const syncedIds = all.map((integration) => integration.id);
-    const deleted = await local.integration.deleteMany({
-      where: {
-        name: { in: ['claude_code', 'gpt_code'] },
-        id: { notIn: syncedIds.length > 0 ? syncedIds : ['__none__'] },
-      },
-    });
-    if (deleted.count > 0) {
-      console.log(`  🧹 Integrations: ${deleted.count} stale local compute tokens deleted`);
-    }
-    return synced;
-  });
+  await syncTable('Integrations', syncIntegrations);
 
   // ── Email Integration Credentials ──
   await syncTable('Email Credentials', async () => {

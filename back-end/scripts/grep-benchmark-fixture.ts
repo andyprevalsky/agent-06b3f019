@@ -151,7 +151,13 @@ async function apply() {
         channel: 'EMAIL' as const,
         from: 'ledger@benchmark.local',
         to: 'andy@benchmark.local',
-        timestamp: new Date(`2026-01-03T10:${String(idx).padStart(2, '0')}:00Z`),
+        // Grep returns matches newest-first (timestamp DESC). Entry 1 is the
+        // newest and entry 30 the oldest, so the descending result order is
+        // entry 1, 2, ..., 30. This makes offset:20 land exactly on entry 21
+        // (the seeded "offset target confirmed" marker). If timestamps instead
+        // increased with entry number, offset:20 would land on entry 10 and the
+        // pagination sub-task would be unsatisfiable.
+        timestamp: new Date(`2026-01-03T10:${String(29 - idx).padStart(2, '0')}:00Z`),
         externalId: `grep-pagination-ledger-${idx + 1}`,
         message: `Pagination Ledger\nLedger entry ${idx + 1}: ${
           idx + 1 === 21 ? 'offset target confirmed' : 'ordinary ledger row'
