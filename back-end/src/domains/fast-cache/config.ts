@@ -9,7 +9,8 @@ export const FAST_MODE_CODEX_REPLAY_WRITE_STDIN_YIELD_MS = Number(
 );
 
 export const FAST_MODE_CACHE_DATABASE_URL =
-  process.env.FAST_MODE_CACHE_DATABASE_URL ?? process.env.DATABASE_URL ?? '';
+  process.env.FAST_MODE_CACHE_DATABASE_URL ??
+  (process.env.NODE_ENV === 'production' ? (process.env.DATABASE_URL ?? '') : '');
 
 export const FAST_MODE_ANTHROPIC_PROXY_URL = process.env.FAST_MODE_ANTHROPIC_PROXY_URL;
 export const FAST_MODE_CODEX_PROXY_URL = process.env.FAST_MODE_CODEX_PROXY_URL;

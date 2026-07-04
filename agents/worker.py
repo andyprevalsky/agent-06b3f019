@@ -68,6 +68,7 @@ from helpers import (
     compress_context,
     fetch_agent_config,
     fetch_agent_tools,
+    fetch_child_terminal_result_activity,
     fetch_model_pricing,
     generate_completion_summary,
     get_model_context_window,
@@ -77,6 +78,7 @@ from helpers import (
     mark_finished,
     poll_new_messages,
     post_agent_message,
+    resolve_fast_cache_goal_activity,
     summarize_tool_result,
     update_agent_status,
 )
@@ -205,7 +207,6 @@ SDK_METRICS_PORT = int(os.getenv("SDK_METRICS_PORT", "9090"))
 HEALTH_CHECK_PORT = int(os.getenv("HEALTH_CHECK_PORT", "8080"))
 DEFAULT_CAPACITY = 100  # Fallback when SDK metrics are unavailable (matches default max activity slots)
 MEMORY_SCALE_UP_THRESHOLD_PERCENT = float(os.getenv("MEMORY_SCALE_UP_THRESHOLD_PERCENT", "75"))
-MEMORY_CRITICAL_SCALE_UP_THRESHOLD_PERCENT = float(os.getenv("MEMORY_CRITICAL_SCALE_UP_THRESHOLD_PERCENT", "90"))
 
 FLY_MACHINES_API = "https://api.machines.dev/v1"
 
@@ -565,11 +566,11 @@ async def poll_queue_metrics(
       When backlog >= 20% of observed capacity, add ceil(backlog / capacity) machines.
       The 20% threshold absorbs transient blips; ceil() ensures we add enough
       machines once the threshold is crossed (0.2→+1, 1.2→+2).
-      Memory pressure is an independent signal: when any peer machine is above
-      MEMORY_SCALE_UP_THRESHOLD_PERCENT and workflows are running, add 1 machine
-      (2 if above MEMORY_CRITICAL_SCALE_UP_THRESHOLD_PERCENT). Backlog can be 0
-      while activities are already in-flight and consuming memory, so backlog
-      alone is not a sufficient saturation signal.
+      Memory pressure is an independent signal: when the fleet is above
+      MEMORY_SCALE_UP_THRESHOLD_PERCENT and workflows are running, hold the
+      current machine count (block scale-down). Backlog can be 0 while
+      activities are already in-flight and consuming memory, so backlog alone
+      is not a sufficient saturation signal.
 
     Scale-down (adaptive):
       When backlog stays at 0 for 60 consecutive seconds:
@@ -635,7 +636,6 @@ async def poll_queue_metrics(
                 memory_used_percent = _get_machine_memory_used_percent()
                 fleet_memory_used_percent = await _get_fleet_memory_used_percent(http, memory_used_percent)
                 memory_pressure = fleet_memory_used_percent >= MEMORY_SCALE_UP_THRESHOLD_PERCENT
-                critical_memory_pressure = fleet_memory_used_percent >= MEMORY_CRITICAL_SCALE_UP_THRESHOLD_PERCENT
                 current_machines = _count_fly_peers()
                 is_leader = _am_i_leader()
                 admission_snapshot = activity_admission_snapshot.snapshot()
@@ -1004,6 +1004,7 @@ async def main():
             resolve_attachments_activity,
             mark_finished,
             fetch_agent_config,
+            fetch_child_terminal_result_activity,
             fetch_model_pricing,
             check_user_usage,
             get_user_context,
@@ -1012,6 +1013,8 @@ async def main():
             update_agent_tokens_activity,
             update_agent_tree_cost_activity,
             update_agent_tree_state,
+            # Fast Mode cache goal resolution (persisted Agent-row goal)
+            resolve_fast_cache_goal_activity,
             # SMS activities
             get_agent_source,
             send_direct_sms_activity,

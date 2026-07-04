@@ -79,6 +79,18 @@ test('goalHash is exact-match', () => {
   assert.notStrictEqual(goalHash('buy milk'), goalHash('buy MILK'));
 });
 
+// Parity with Python: run-local @ref:message pointers collapse before hashing,
+// so sub-agent goals (which get a fresh message reference per run) share one
+// namespace across reruns.
+test('goalHash collapses run-local message refs', () => {
+  const base = 'Analyze ONE creator.\nRow item:\nThomas DeLauer | YouTube';
+  const runA = `${base}\n\nReference: @ref:message:3018fec0-93f2-4907-bba9-098cef49ab74`;
+  const runB = `${base}\n\nReference: @ref:message:aaaabbbb-cccc-4ddd-8eee-ffff00001111`;
+  assert.strictEqual(goalHash(runA), goalHash(runB));
+  assert.strictEqual(goalHash(runA), goalHash(`${base}\n\nReference: @ref:message:<uuid>`));
+  assert.notStrictEqual(goalHash(runA), goalHash(`Different goal${runA}`));
+});
+
 test('llmKey uses canonical request fingerprints', () => {
   assert.strictEqual(
     llmKey('g', 'execute_loop', { messages: [{ role: 'user', content: 'hello' }] }),

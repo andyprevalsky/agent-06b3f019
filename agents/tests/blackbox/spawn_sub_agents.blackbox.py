@@ -395,19 +395,26 @@ class _FakeWorkflowInfo:
 class _FakeWorkflowModule:
     """Stand-in for temporalio.workflow with enough surface for execute_tool."""
 
-    def __init__(self, activity_result=None, child_results=None):
+    def __init__(self, activity_result=None, child_results=None, activity_results=None):
         self._activity_result = activity_result
         self._child_results = child_results or {}
+        self._activity_results = activity_results or {}
 
     def info(self):
         return _FakeWorkflowInfo()
 
     async def execute_activity(self, fn, args=None, **kwargs):
+        name = getattr(fn, "__name__", "?")
+        if name in self._activity_results:
+            value = self._activity_results[name]
+            if isinstance(value, Exception):
+                raise value
+            return value
         if isinstance(self._activity_result, Exception):
             raise self._activity_result
         return self._activity_result
 
-    async def wait_condition(self, predicate):
+    async def wait_condition(self, predicate, timeout=None):
         # Predicate should return True immediately after setup
         # (test pre-populates child_results)
         return None
@@ -628,6 +635,52 @@ async def test_execute_tool_happy_path_completes_and_tracks_child():
     # FINISHED event has summary
     finished = [e for e in events if getattr(e, "status", None) == MessageStatus.FINISHED][0]
     assert finished.message == "all done"
+
+
+async def test_execute_tool_recovers_terminal_child_from_persisted_state():
+    """A missed child_completed signal is recovered from the child agent row."""
+    from domains.spawn_sub_agents.handler import SpawnSubAgentManager
+    from tools.base import MessageStatus
+
+    fake = _FakeWorkflowModule(
+        activity_results={
+            "spawn_sub_agent_activity": {
+                "agents": [
+                    {
+                        "agent_id": "child-recovered",
+                        "goal": "Do durable thing",
+                        "temporal_workflow_id": "wf-child-recovered",
+                    }
+                ]
+            },
+            "fetch_child_terminal_result_activity": {
+                "status": "completed",
+                "summary": "recovered summary",
+                "structured_response": {"answer": "42"},
+                "tool_counts": {"web_search": 2},
+            },
+        }
+    )
+    restore = _patch_spawn_sub_agents_workflow(fake)
+    try:
+        parent = _FakeParentWorkflow()
+        manager = SpawnSubAgentManager()
+        events = await _collect_events(
+            manager.execute_tool(
+                parent,
+                {"sub_agent": {"goal": "Do durable thing"}},
+                "tc-recovered",
+            )
+        )
+    finally:
+        restore()
+
+    finished = [event for event in events if getattr(event, "status", None) == MessageStatus.FINISHED]
+    assert len(finished) == 1
+    assert finished[0].message == "recovered summary"
+    assert finished[0].metadata["structured_response"] == {"answer": "42"}
+    assert finished[0].metadata["childToolCounts"] == {"web_search": 2}
+    assert "child-recovered" not in parent.pending_children
 
 
 async def test_execute_tool_happy_path_no_parent_bus_id_sets_it():
@@ -1082,6 +1135,7 @@ async def run_all_tests():
     await r.record_async("exec_child_error_key", test_execute_tool_child_info_has_error_key)
     await r.record_async("exec_exception_path", test_execute_tool_exception_path_yields_error)
     await r.record_async("exec_happy_path", test_execute_tool_happy_path_completes_and_tracks_child)
+    await r.record_async("exec_recovers_terminal_child", test_execute_tool_recovers_terminal_child_from_persisted_state)
     await r.record_async("exec_no_bus_id", test_execute_tool_happy_path_no_parent_bus_id_sets_it)
     await r.record_async("exec_failed_child", test_execute_tool_failed_child_yields_failure_events)
     await r.record_async(

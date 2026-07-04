@@ -7,6 +7,7 @@ signal-based completion wait, and result/error reporting.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from typing import Any, AsyncGenerator, Dict
 
@@ -19,6 +20,7 @@ from domains.spawn_sub_agents.service import (
     extract_file_pointers_from_structured_response,
     spawn_sub_agent_activity,
 )
+from helpers.child_results import fetch_child_terminal_result_activity
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.error_utils import extract_error_message
 
@@ -62,6 +64,30 @@ class SpawnSubAgentManager(ToolManager):
     @property
     def tool_name(self) -> str:
         return "spawn_sub_agent"
+
+    async def _reconcile_terminal_child_result(self, workflow_instance: Any, child_agent_id: str) -> bool:
+        """Recover a terminal child result that was persisted but not signaled."""
+        if child_agent_id in workflow_instance.child_results:
+            workflow_instance.pending_children.discard(child_agent_id)
+            return True
+
+        try:
+            recovered = await workflow.execute_activity(
+                fetch_child_terminal_result_activity,
+                args=[child_agent_id],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+        except Exception as exc:
+            logger.warning("Child terminal reconciliation failed", child_agent_id=child_agent_id, error=str(exc))
+            return False
+        if recovered is None:
+            return False
+
+        workflow_instance.child_results[child_agent_id] = recovered
+        workflow_instance.pending_children.discard(child_agent_id)
+        logger.info("Recovered terminal child result from durable state", child_agent_id=child_agent_id)
+        return True
 
     async def execute_tool(  # noqa: C901
         self,
@@ -205,7 +231,10 @@ class SpawnSubAgentManager(ToolManager):
         """
         if str(child_info.get("status", "")).upper() == "FAILED":
             err = child_info.get("error", "spawn failed")
-            for event in self._build_failure_events(child_info.get("agent_id", ""), {"error_reason": err}, bus_id):
+            child_agent_id = child_info.get("agent_id", "")
+            if child_agent_id:
+                workflow_instance.pending_children.discard(child_agent_id)
+            for event in self._build_failure_events(child_agent_id, {"error_reason": err}, bus_id):
                 yield event
             return
 
@@ -213,6 +242,8 @@ class SpawnSubAgentManager(ToolManager):
         child_agent_id = child_info["agent_id"]
         workflow_instance.child_tool_ids[child_agent_id] = child_tool_id
         workflow_instance.pending_children.add(child_agent_id)
+        if child_agent_id in workflow_instance.child_results:
+            workflow_instance.pending_children.discard(child_agent_id)
 
         child_temporal_workflow_id = child_info.get("temporal_workflow_id")
         if child_temporal_workflow_id:
@@ -244,7 +275,16 @@ class SpawnSubAgentManager(ToolManager):
         )
 
         logger.info(f"⏳ Waiting for sub-agent {child_agent_id} to complete...")
-        await workflow.wait_condition(lambda cid=child_agent_id: cid in workflow_instance.child_results)
+        while child_agent_id not in workflow_instance.child_results:
+            if await self._reconcile_terminal_child_result(workflow_instance, child_agent_id):
+                break
+            try:
+                await workflow.wait_condition(
+                    lambda cid=child_agent_id: cid in workflow_instance.child_results,
+                    timeout=timedelta(seconds=30),
+                )
+            except (asyncio.TimeoutError, TimeoutError):
+                continue
 
         child_result = workflow_instance.child_results.get(child_agent_id, {})
         if _child_result_is_failure(child_result):

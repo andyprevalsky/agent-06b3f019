@@ -14,14 +14,16 @@ are written for future Fast Mode runs.
 from __future__ import annotations
 
 import os
-from typing import Any, AsyncIterator, Dict
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, AsyncIterator, Dict
 
 import structlog
 
 from providers.fast_cache import client as cache_client
 from providers.fast_cache.context import current_context
-from providers.fast_cache import normalize
-from providers.rose.types import StreamChunk
+
+if TYPE_CHECKING:
+    from providers.rose.types import StreamChunk
 
 logger = structlog.get_logger(__name__)
 
@@ -59,9 +61,9 @@ def _cache_replay_usage(original: Dict[str, Any]) -> Dict[str, Any]:
     return usage
 
 
-async def _replay(stored: Dict[str, Any]) -> AsyncIterator[StreamChunk]:
+async def _replay(stored: Dict[str, Any]) -> AsyncIterator["StreamChunk"]:
     """Reconstruct the StreamChunk sequence from a stored response."""
-    yield StreamChunk(
+    yield SimpleNamespace(
         kind="metadata",
         data={
             "actual_model": stored.get("actual_model", "unknown"),
@@ -72,20 +74,20 @@ async def _replay(stored: Dict[str, Any]) -> AsyncIterator[StreamChunk]:
     )
     reasoning = stored.get("reasoning") or ""
     if reasoning:
-        yield StreamChunk(kind="reasoning", data={"text": reasoning})
+        yield SimpleNamespace(kind="reasoning", data={"text": reasoning})
     content = stored.get("content") or ""
     if content:
-        yield StreamChunk(kind="content", data={"text": content})
+        yield SimpleNamespace(kind="content", data={"text": content})
     for tc in stored.get("tool_calls") or []:
-        yield StreamChunk(kind="tool_call", data=tc)
+        yield SimpleNamespace(kind="tool_call", data=tc)
     for item in stored.get("codex_reasoning_items") or []:
-        yield StreamChunk(kind="codex_reasoning_item", data=item)
+        yield SimpleNamespace(kind="codex_reasoning_item", data=item)
     usage = _cache_replay_usage(stored.get("usage") or {})
-    yield StreamChunk(kind="usage", data=usage)
-    yield StreamChunk(kind="done", data={"timing": {"round_trip_s": 0.0}, "from_fast_cache": True})
+    yield SimpleNamespace(kind="usage", data=usage)
+    yield SimpleNamespace(kind="done", data={"timing": {"round_trip_s": 0.0}, "from_fast_cache": True})
 
 
-def _accumulate(acc: Dict[str, Any], chunk: StreamChunk) -> None:
+def _accumulate(acc: Dict[str, Any], chunk: "StreamChunk") -> None:
     if chunk.kind == "metadata":
         acc["actual_model"] = chunk.data.get("actual_model", acc["actual_model"])
         acc["pool_name"] = chunk.data.get("pool_name", acc["pool_name"])
@@ -172,10 +174,11 @@ async def cached_complete(
     else:
         logger.info("llm.cache.write_only", call_site=call_site, key=key)
 
+    structured_response_model = complete_kwargs.get("response_model") is not None
     acc = _empty_response()
     async for chunk in rose_client.complete(call_site=call_site, **complete_kwargs):
         _accumulate(acc, chunk)
-        if chunk.kind == "done" and ctx.should_write:
+        if chunk.kind == "done" and ctx.should_write and not structured_response_model:
             try:
                 await cache_client.cache_set(key, "llm", ctx.goal_hash, acc)
                 logger.info("llm.cache.stored", call_site=call_site, key=key)

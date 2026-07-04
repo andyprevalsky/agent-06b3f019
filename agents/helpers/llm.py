@@ -26,8 +26,8 @@ from helpers.attachments import (
     get_cached_file,
     get_file_from_pointer,
 )
-from helpers.context_pointers import resolve_pointers_in_messages
 from helpers.context_compaction import is_excluded_from_model
+from helpers.context_pointers import resolve_pointers_in_messages
 from helpers.context_scope import is_internal_subagent_message
 from helpers.messages import (
     CoalescingStreamBroadcaster,
@@ -36,17 +36,20 @@ from helpers.messages import (
     stream_tool_event,
 )
 from helpers.tracing import backend_api_headers, current_request_id, traced
+from providers.fast_cache import client as fast_cache_client
 from providers.fast_cache.client import (
     ensure_position_context as ensure_fast_cache_position_context,
 )
 from providers.fast_cache.context import (
     FastCacheContext,
+    write_through_enabled_for_user,
+)
+from providers.fast_cache.context import (
+    current_context as current_fast_cache_context,
 )
 from providers.fast_cache.context import (
     set_context as set_fast_cache_context,
 )
-from providers.fast_cache.context import write_through_enabled_for_user
-from providers.fast_cache.rose_cache import cached_complete
 from providers.rose import (
     ClaudeAuthContext,
     ComputeAuthContext,
@@ -1924,6 +1927,49 @@ async def call_llm_structured_streaming(  # noqa: C901
         if idle_timeout_s is not None:
             rose_kwargs["idle_timeout_s"] = None if idle_timeout_s < 0 else idle_timeout_s
 
+        deferred_fast_cache_key: Optional[str] = None
+        deferred_fast_cache_goal_hash: Optional[str] = None
+        deferred_fast_cache_acc: Optional[Dict[str, Any]] = None
+        fast_cache_accumulate = None
+        try:
+            from providers.fast_cache.rose_cache import (
+                accumulate_chunk as fast_cache_accumulate,
+            )
+            from providers.fast_cache.rose_cache import (
+                empty_response as fast_cache_empty_response,
+            )
+            from providers.fast_cache.rose_cache import (
+                request_key_material as fast_cache_request_key_material,
+            )
+
+            fast_cache_context = current_fast_cache_context()
+            if fast_cache_context is not None and fast_cache_context.active and fast_cache_context.should_write:
+                fast_cache_complete_kwargs: Dict[str, Any] = {
+                    "pool": pool,
+                    "messages": messages,
+                    "response_model": response_model,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "seed": model_seed,
+                    "skip_cache_write": skip_cache_write,
+                    "claude_auth": claude_auth_context,
+                    "gpt_auth": gpt_auth_context,
+                    "agent_id": agent_id,
+                    "request_id": request_id,
+                    "thinking": thinking,
+                    "effort": effort,
+                    "provider_fast_mode": bool(fast_cache_context.provider_fast_mode),
+                    **rose_kwargs,
+                }
+                deferred_fast_cache_key = fast_cache_context.llm_key(
+                    call_site,
+                    fast_cache_request_key_material(fast_cache_complete_kwargs),
+                )
+                deferred_fast_cache_goal_hash = fast_cache_context.goal_hash
+                deferred_fast_cache_acc = fast_cache_empty_response()
+        except Exception as exc:
+            logger.warning("fast_cache.defer_setup_error", call_site=call_site, error=str(exc))
+
         # Per-stream wall-time profiler: splits stream duration into time spent in
         # inline per-chunk callbacks (broadcasts / tool-progress events, which do
         # network round-trips) vs everything else (socket wait + parse). Attributes
@@ -1936,6 +1982,8 @@ async def call_llm_structured_streaming(  # noqa: C901
         # from per-chunk processing, regardless of the `continue`s in the body.
         # Fast Mode record/replay: transparent passthrough when off; on a cache
         # hit this re-streams the stored response without touching Rose/Anthropic.
+        from providers.fast_cache.rose_cache import cached_complete
+
         _stream_iter = cached_complete(
             rose_client,
             call_site=call_site,
@@ -1963,6 +2011,8 @@ async def call_llm_structured_streaming(  # noqa: C901
                     break
                 _await_s += _safe_time() - _t_await
                 chunk_count += 1
+                if deferred_fast_cache_acc is not None and fast_cache_accumulate is not None:
+                    fast_cache_accumulate(deferred_fast_cache_acc, chunk)
 
                 if not ttft_logged:
                     ttft_ms = int((_safe_time() - request_start_time) * 1000)
@@ -2561,6 +2611,23 @@ async def call_llm_structured_streaming(  # noqa: C901
                 "cache_read_input_tokens": 0,
             }
 
+        if (
+            deferred_fast_cache_key
+            and deferred_fast_cache_goal_hash
+            and deferred_fast_cache_acc is not None
+            and not usage.get("from_fast_cache")
+        ):
+            try:
+                await fast_cache_client.cache_set(
+                    deferred_fast_cache_key,
+                    "llm",
+                    deferred_fast_cache_goal_hash,
+                    deferred_fast_cache_acc,
+                )
+                logger.info("llm.cache.stored", call_site=call_site, key=deferred_fast_cache_key)
+            except Exception as exc:
+                logger.warning("fast_cache.set_error", key=deferred_fast_cache_key, error=str(exc))
+
         # Deduplicate single-call-per-step tools (keep only first occurrence)
         # These tools should never be called more than once in the same response
         SINGLE_CALL_TOOLS = {"send_message_to_user", "send_message_to_user_execute_phase"}
@@ -2962,6 +3029,7 @@ async def call_llm(
                     )
                     or content
                 )
+                content = response_model.model_validate_json(content).model_dump_json()
             usage = rose_response.usage or {}
 
             result = {
@@ -2997,6 +3065,37 @@ async def call_llm(
                 content_length=len(content),
                 content_preview=content[:100] if content else "EMPTY",
             )
+
+            if response_model is not None and not skip_cache_write and not usage.get("from_fast_cache"):
+                ctx = current_fast_cache_context()
+                if ctx is not None and ctx.active and ctx.should_write:
+                    from providers.fast_cache.rose_cache import request_key_material as fast_cache_request_key_material
+
+                    fast_cache_kwargs = {
+                        "pool": pool,
+                        "messages": messages,
+                        "response_model": response_model,
+                        "temperature": temperature,
+                        "max_tokens": max_tokens,
+                        "provider_fast_mode": bool(ctx.provider_fast_mode),
+                    }
+                    key = ctx.llm_key(call_site, fast_cache_request_key_material(fast_cache_kwargs))
+                    await fast_cache_client.cache_set(
+                        key,
+                        "llm",
+                        ctx.goal_hash,
+                        {
+                            "actual_model": rose_response.actual_model or model,
+                            "pool_name": rose_response.pool_name or pool,
+                            "request_id": rose_response.request_id or request_id,
+                            "content": content,
+                            "reasoning": rose_response.reasoning,
+                            "tool_calls": rose_response.tool_calls,
+                            "codex_reasoning_items": rose_response.codex_reasoning_items,
+                            "usage": usage,
+                        },
+                    )
+                    logger.info("llm.cache.stored", call_site=call_site, key=key, structured=True)
 
             return result
 
@@ -3163,6 +3262,49 @@ async def _call_llm_verifier(  # noqa: C901
         root_agent_id=agent_id,
         fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
     )
+    deferred_fast_cache_key: Optional[str] = None
+    deferred_fast_cache_goal_hash: Optional[str] = None
+    deferred_fast_cache_acc: Optional[Dict[str, Any]] = None
+    fast_cache_accumulate = None
+    try:
+        from providers.fast_cache.rose_cache import (
+            accumulate_chunk as fast_cache_accumulate,
+        )
+        from providers.fast_cache.rose_cache import (
+            cached_complete,
+        )
+        from providers.fast_cache.rose_cache import (
+            empty_response as fast_cache_empty_response,
+        )
+        from providers.fast_cache.rose_cache import (
+            request_key_material as fast_cache_request_key_material,
+        )
+
+        fast_cache_context = current_fast_cache_context()
+        if fast_cache_context is not None and fast_cache_context.active and fast_cache_context.should_write:
+            fast_cache_complete_kwargs: Dict[str, Any] = {
+                "pool": pool,
+                "messages": messages,
+                "response_model": response_model,
+                "temperature": 0.3,
+                "max_tokens": VERIFIER_MAX_TOKENS,
+                "claude_auth": claude_auth_context,
+                "gpt_auth": gpt_auth_context,
+                "agent_id": agent_id,
+                "request_id": verifier_request_id,
+                "dump_extra": dump_extra,
+                "provider_fast_mode": bool(fast_cache_context.provider_fast_mode),
+            }
+            deferred_fast_cache_key = fast_cache_context.llm_key(
+                call_site,
+                fast_cache_request_key_material(fast_cache_complete_kwargs),
+            )
+            deferred_fast_cache_goal_hash = fast_cache_context.goal_hash
+            deferred_fast_cache_acc = fast_cache_empty_response()
+    except Exception as exc:
+        logger.warning("fast_cache.defer_setup_error", call_site=call_site, error=str(exc))
+        from providers.fast_cache.rose_cache import cached_complete
+
     try:
         # Fast Mode record/replay (verifier path).
         async for chunk in cached_complete(
@@ -3180,6 +3322,8 @@ async def _call_llm_verifier(  # noqa: C901
             dump_extra=dump_extra,
         ):
             chunk_count += 1
+            if deferred_fast_cache_acc is not None and fast_cache_accumulate is not None:
+                fast_cache_accumulate(deferred_fast_cache_acc, chunk)
             if chunk_count % 10 == 0:
                 _safe_heartbeat(f"Verifier streaming... {chunk_count} chunks")
 
@@ -3278,6 +3422,23 @@ async def _call_llm_verifier(  # noqa: C901
         "cache_creation_input_tokens": cache_write,
         "cache_read_input_tokens": cache_read,
     }
+
+    if (
+        deferred_fast_cache_key
+        and deferred_fast_cache_goal_hash
+        and deferred_fast_cache_acc is not None
+        and not usage.get("from_fast_cache")
+    ):
+        try:
+            await fast_cache_client.cache_set(
+                deferred_fast_cache_key,
+                "llm",
+                deferred_fast_cache_goal_hash,
+                deferred_fast_cache_acc,
+            )
+            logger.info("llm.cache.stored", call_site=call_site, key=deferred_fast_cache_key)
+        except Exception as exc:
+            logger.warning("fast_cache.set_error", key=deferred_fast_cache_key, error=str(exc))
 
     return parsed, usage
 

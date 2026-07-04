@@ -3652,10 +3652,12 @@ async def _call_llm_structured_streaming_replayed_native_tool_call_without_json_
         )
         yield StreamChunk(kind="done", data={"from_fast_cache": True})
 
-    import helpers.llm as llm_module
+    # helpers.llm imports cached_complete lazily inside the function, so patch
+    # the source module — the lazy import resolves this attribute at call time.
+    import providers.fast_cache.rose_cache as rose_cache_module
 
-    original_cached_complete = llm_module.cached_complete
-    llm_module.cached_complete = fake_cached_complete
+    original_cached_complete = rose_cache_module.cached_complete
+    rose_cache_module.cached_complete = fake_cached_complete
     try:
         AgentAction = create_agent_action_model(["web_search"])
         detected = []
@@ -3685,7 +3687,7 @@ async def _call_llm_structured_streaming_replayed_native_tool_call_without_json_
         assert detected == [("web_search", "toolu_cached")]
         assert [(name, tid) for name, tid, _ in detected_ordered] == [("web_search", "toolu_cached")]
     finally:
-        llm_module.cached_complete = original_cached_complete
+        rose_cache_module.cached_complete = original_cached_complete
 
 
 def test_call_llm_structured_streaming_replayed_native_tool_call_without_json():
@@ -4412,6 +4414,99 @@ async def test_call_llm_structured_streaming_json_parse_failure_raises():
     except ValueError:
         raised = True
     assert raised
+
+
+async def test_call_llm_structured_streaming_fast_cache_writes_only_after_validation():
+    """Structured LLM responses are cached only after AgentAction validation succeeds."""
+    import httpx
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import call_llm_structured_streaming
+    from providers.fast_cache import client as fast_cache_client
+    from providers.fast_cache.context import FastCacheContext, reset_context, set_context
+    from providers.fast_cache import rose_cache
+    from utils.tool_schemas import create_agent_action_model
+
+    store = {}
+    set_calls = 0
+
+    async def cache_get(key):
+        return None
+
+    async def cache_set(key, kind, goal_hash, value):
+        nonlocal set_calls
+        set_calls += 1
+        store[key] = value
+        return True
+
+    original_client_get = fast_cache_client.cache_get
+    original_client_set = fast_cache_client.cache_set
+    original_rose_get = rose_cache.cache_client.cache_get
+    original_rose_set = rose_cache.cache_client.cache_set
+    token = set_context(FastCacheContext(enabled=True, goal="structured cache validation"))
+    try:
+        fast_cache_client.cache_get = cache_get
+        fast_cache_client.cache_set = cache_set
+        rose_cache.cache_client.cache_get = cache_get
+        rose_cache.cache_client.cache_set = cache_set
+
+        AgentAction = create_agent_action_model([])
+
+        async def on_chunk(text, tokens):
+            pass
+
+        invalid_payload = {
+            "choices": [{"delta": {"content": '{"response":"","tool_calls":[{"tool":"spawn_agent"}]}'}}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 3, "total_tokens": 6},
+        }
+
+        def invalid_handler(req):
+            return httpx.Response(200, text=_sse_body([invalid_payload]))
+
+        set_mock_handler(invalid_handler)
+        raised = False
+        try:
+            await call_llm_structured_streaming(
+                messages=[{"role": "user", "content": "q"}],
+                model="rose",
+                temperature=0.7,
+                max_tokens=512,
+                response_model=AgentAction,
+                on_chunk=on_chunk,
+                call_site="validation-cache",
+            )
+        except ValueError:
+            raised = True
+        assert raised
+        assert set_calls == 0
+        assert store == {}
+
+        valid_payload = {
+            "choices": [{"delta": {"content": '{"response":"ok","tool_calls":[]}'}}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 3, "total_tokens": 6},
+        }
+
+        def valid_handler(req):
+            return httpx.Response(200, text=_sse_body([valid_payload]))
+
+        set_mock_handler(valid_handler)
+        response, _, _ = await call_llm_structured_streaming(
+            messages=[{"role": "user", "content": "q"}],
+            model="rose",
+            temperature=0.7,
+            max_tokens=512,
+            response_model=AgentAction,
+            on_chunk=on_chunk,
+            call_site="validation-cache",
+        )
+        assert response.response == "ok"
+        assert set_calls == 1
+        assert len(store) == 1
+    finally:
+        reset_context(token)
+        fast_cache_client.cache_get = original_client_get
+        fast_cache_client.cache_set = original_client_set
+        rose_cache.cache_client.cache_get = original_rose_get
+        rose_cache.cache_client.cache_set = original_rose_set
 
 
 async def test_call_llm_structured_streaming_no_json_content_raises():
@@ -5263,6 +5358,10 @@ async def run_all_tests():
     await r.record_async("stream_single_call_dedup", test_call_llm_structured_streaming_single_call_dedup)
     await r.record_async(
         "stream_json_parse_failure_raises", test_call_llm_structured_streaming_json_parse_failure_raises
+    )
+    await r.record_async(
+        "stream_fast_cache_writes_only_after_validation",
+        test_call_llm_structured_streaming_fast_cache_writes_only_after_validation,
     )
     r.record(
         "normalize_response_schema_purchase_confirmation_identifier",

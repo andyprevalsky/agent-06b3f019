@@ -120,6 +120,9 @@ def test_web_search_record_then_replay(mem, monkeypatch):
         r1 = await ws.web_search_activity("weather", 100, fast_mode_cache_enabled=True, fast_mode_goal="g")
         r2 = await ws.web_search_activity("weather", 100, fast_mode_cache_enabled=True, fast_mode_goal="g")
         assert calls["n"] == 1  # provider hit once; #11 replay served from cache
+        # Replays are the recorded payload plus the hit marker (consumed and
+        # stripped by the tool handler for cost accounting).
+        assert r2.pop(ws.FAST_CACHE_HIT_FIELD) is True
         assert r1 == r2
 
     asyncio.run(body())
@@ -137,6 +140,7 @@ def test_web_search_replays_across_goals(mem, monkeypatch):
         r1 = await ws.web_search_activity("Best cities to live in your 20s", 100, True, "goal-a")
         r2 = await ws.web_search_activity(" best   cities to LIVE in your 20s ", 100, True, "goal-b")
         assert calls["n"] == 1
+        assert r2.pop(ws.FAST_CACHE_HIT_FIELD) is True
         assert r1 == r2
 
     asyncio.run(body())
@@ -168,6 +172,7 @@ def test_web_fetch_record_then_replay(memwf, monkeypatch):
         r1 = await wf.web_fetch_activity("https://x.com/a?t=1", True, "g")
         r2 = await wf.web_fetch_activity("https://x.com/a?t=99999", True, "g")
         assert calls["n"] == 1
+        assert r2.pop(wf.FAST_CACHE_HIT_FIELD) is True
         assert r1 == r2
 
     asyncio.run(body())
@@ -186,6 +191,7 @@ def test_web_fetch_replays_across_goals(memwf, monkeypatch):
         r1 = await wf.web_fetch_activity("https://x.com/a?t=1", True, "goal-a")
         r2 = await wf.web_fetch_activity("https://x.com/a?t=99999", True, "goal-b")
         assert calls["n"] == 1
+        assert r2.pop(wf.FAST_CACHE_HIT_FIELD) is True
         assert r1 == r2
 
     asyncio.run(body())

@@ -7,23 +7,40 @@ import { stripSecrets } from './fastCacheNormalizeCore';
 const globalForFastCachePrisma = global as unknown as { fastCachePrisma?: PrismaClient };
 
 function getFastCacheDatabaseUrl(): string {
-  return process.env.FAST_MODE_CACHE_DATABASE_URL ?? process.env.DATABASE_URL ?? '';
+  const explicitUrl = process.env.FAST_MODE_CACHE_DATABASE_URL;
+  if (explicitUrl) return explicitUrl;
+  if (process.env.NODE_ENV === 'production' && process.env.DATABASE_URL) {
+    return process.env.DATABASE_URL;
+  }
+  throw new Error(
+    'FAST_MODE_CACHE_DATABASE_URL is required outside production; Fast Mode cache must not fall back to the local app database.'
+  );
 }
 
-const fastCachePrisma =
-  globalForFastCachePrisma.fastCachePrisma ??
-  new PrismaClient({
-    log: ['error', 'warn'],
-    datasources: {
-      db: {
-        url: getFastCacheDatabaseUrl(),
+function getFastCachePrisma(): PrismaClient {
+  const fastCachePrisma =
+    globalForFastCachePrisma.fastCachePrisma ??
+    new PrismaClient({
+      log: ['error', 'warn'],
+      datasources: {
+        db: {
+          url: getFastCacheDatabaseUrl(),
+        },
       },
-    },
-  });
+    });
 
-if (process.env.NODE_ENV !== 'production') {
-  globalForFastCachePrisma.fastCachePrisma = fastCachePrisma;
+  if (process.env.NODE_ENV !== 'production') {
+    globalForFastCachePrisma.fastCachePrisma = fastCachePrisma;
+  }
+
+  return fastCachePrisma;
 }
+
+const fastCachePrisma = {
+  get fastModeCacheEntry() {
+    return getFastCachePrisma().fastModeCacheEntry;
+  },
+};
 
 export interface CacheGetResult {
   hit: boolean;

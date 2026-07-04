@@ -22,10 +22,13 @@ import time
 import uuid
 from contextlib import asynccontextmanager, contextmanager, suppress
 from contextvars import ContextVar, Token
-from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Iterator, Optional, Tuple, TypeVar
+from typing import TYPE_CHECKING, Any, AsyncIterator, Awaitable, Callable, Dict, Iterator, Optional, Tuple, TypeVar
 
 import structlog
 import structlog.contextvars
+
+if TYPE_CHECKING:
+    import asyncio
 
 T = TypeVar("T")
 

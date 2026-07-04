@@ -554,10 +554,11 @@ class RoseClient:
         else:
             logger.info("llm.cache.write_only", call_site=call_site, key=key)
 
+        structured_response_model = kwargs.get("response_model") is not None
         acc = _fc_empty()
         async for chunk in self._complete_impl(**kwargs):
             _fc_accumulate(acc, chunk)
-            if chunk.kind == "done" and ctx.should_write:
+            if chunk.kind == "done" and ctx.should_write and not structured_response_model:
                 await _fc.cache_set(key, "llm", ctx.goal_hash, acc)
                 logger.info("llm.cache.stored", call_site=call_site, key=key)
             yield chunk
