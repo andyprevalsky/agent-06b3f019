@@ -624,6 +624,8 @@ async def _stop_playwright_resources(
     close_browser: bool = True,
 ) -> None:
     """Disconnect Playwright's CDP client and stop its local driver process."""
+    driver_process = _playwright_driver_process(playwright_instance)
+
     if playwright_browser and close_browser:
         try:
             await playwright_browser.close()
@@ -641,6 +643,58 @@ async def _stop_playwright_resources(
             logger.info("Playwright instance stopped", agent_id=agent_id)
         except Exception as e:
             logger.warning("Failed to stop Playwright instance", agent_id=agent_id, error=str(e))
+        await _reap_playwright_driver_process(driver_process, agent_id)
+
+
+def _playwright_driver_process(playwright_instance: Optional[Any]) -> Optional[Any]:
+    if not playwright_instance:
+        return None
+    impl_obj = getattr(playwright_instance, "_impl_obj", None)
+    connection = getattr(impl_obj, "_connection", None)
+    transport = getattr(connection, "_transport", None)
+    process = getattr(transport, "_proc", None)
+    pid = getattr(process, "pid", None)
+    return process if isinstance(pid, int) else None
+
+
+async def _reap_playwright_driver_process(process: Optional[Any], agent_id: str) -> None:
+    if not process or getattr(process, "returncode", None) is not None:
+        return
+
+    try:
+        await asyncio.wait_for(process.wait(), timeout=2)
+        return
+    except asyncio.TimeoutError:
+        pass
+    except Exception as e:
+        logger.debug("Failed while waiting for Playwright driver exit", agent_id=agent_id, error=str(e))
+
+    if getattr(process, "returncode", None) is not None:
+        return
+
+    try:
+        process.terminate()
+        await asyncio.wait_for(process.wait(), timeout=2)
+        logger.warning("Terminated lingering Playwright driver process", agent_id=agent_id, pid=process.pid)
+        return
+    except asyncio.TimeoutError:
+        pass
+    except ProcessLookupError:
+        return
+    except Exception as e:
+        logger.warning("Failed to terminate Playwright driver process", agent_id=agent_id, error=str(e))
+
+    if getattr(process, "returncode", None) is not None:
+        return
+
+    try:
+        process.kill()
+        await asyncio.wait_for(process.wait(), timeout=2)
+        logger.warning("Killed lingering Playwright driver process", agent_id=agent_id, pid=process.pid)
+    except ProcessLookupError:
+        return
+    except Exception as e:
+        logger.warning("Failed to kill Playwright driver process", agent_id=agent_id, error=str(e))
 
 
 def _clear_browser_activity_memory_buffers(
@@ -2248,6 +2302,8 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
         async def _setup_browser():
             """Connect DOMService + Playwright, apply fingerprint, init humanizer."""
             _dom_service = DOMService(cdp_url=cdp_url)
+            _local_playwright_browser = None
+            _local_playwright_instance = None
 
             async def _connect_dom():
                 t = time.monotonic()
@@ -2260,15 +2316,22 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
                 """Connect Playwright, then apply everything that only needs the
                 Playwright side (fast-mode route, botsigged diagnostics,
                 fingerprint injection) while DOMService is still attaching."""
+                nonlocal _local_playwright_browser, _local_playwright_instance
                 t = time.monotonic()
                 from playwright.async_api import async_playwright
 
                 _pw_instance = await async_playwright().start()
+                _local_playwright_instance = _pw_instance
                 try:
                     _pw_browser = await _pw_instance.chromium.connect_over_cdp(cdp_url)
                 except BaseException:
-                    await _pw_instance.stop()
+                    _driver_process = _playwright_driver_process(_pw_instance)
+                    with contextlib.suppress(Exception):
+                        await _pw_instance.stop()
+                    await _reap_playwright_driver_process(_driver_process, agent_id)
+                    _local_playwright_instance = None
                     raise
+                _local_playwright_browser = _pw_browser
                 _record_timing("parallel.browser.playwright_connect", t)
                 _pw_context = _pw_browser.contexts[0]
                 _pw_page = _pw_context.pages[0]
@@ -2316,10 +2379,16 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             # 3-5s to attach, so open them concurrently. The Playwright branch
             # also applies fingerprint/fast-mode/diagnostics so those don't wait
             # on the (slower) DOMService attach.
-            (
-                _dom_page,
-                (_playwright_instance, _playwright_browser, _playwright_context, _input_page),
-            ) = await asyncio.gather(_connect_dom(), _connect_playwright())
+            try:
+                (
+                    _dom_page,
+                    (_playwright_instance, _playwright_browser, _playwright_context, _input_page),
+                ) = await asyncio.gather(_connect_dom(), _connect_playwright())
+            except BaseException:
+                with contextlib.suppress(Exception):
+                    await _dom_service.disconnect()
+                await _stop_playwright_resources(_local_playwright_browser, _local_playwright_instance, agent_id)
+                raise
 
             return (
                 _dom_service,
