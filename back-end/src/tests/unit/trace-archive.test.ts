@@ -294,6 +294,19 @@ async function main(): Promise<void> {
   );
 
   await test(
+    'archive listing returns empty when disabled',
+    withEnv(
+      {
+        TRACE_ARCHIVE_ENABLED: '0',
+        TRACE_ARCHIVE_BACKEND: 'local',
+      },
+      async () => {
+        assert.deepStrictEqual(await listArchivedObjects('disabled-agent'), []);
+      }
+    )
+  );
+
+  await test(
     'local listing tolerates corrupt metadata sidecars',
     withEnv(
       {
@@ -315,6 +328,26 @@ async function main(): Promise<void> {
         assert.strictEqual(listed.length, 1);
         assert.strictEqual(listed[0].path, 'provider/sms/bad.json.gz.enc');
         assert.strictEqual(listed[0].metadata, undefined);
+      }
+    )
+  );
+
+  await test(
+    'local read returns null for absent artifact',
+    withEnv(
+      {
+        TRACE_ARCHIVE_ENABLED: '1',
+        TRACE_ARCHIVE_BACKEND: 'local',
+        TRACE_ARCHIVE_LOCAL_DIR: undefined,
+      },
+      async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-archive-missing-'));
+        process.env.TRACE_ARCHIVE_LOCAL_DIR = dir;
+        const stored = await readArchivedArtifact({
+          rootAgentId: 'missing-agent',
+          objectPath: 'provider/sms/missing.json.gz.enc',
+        });
+        assert.strictEqual(stored, null);
       }
     )
   );

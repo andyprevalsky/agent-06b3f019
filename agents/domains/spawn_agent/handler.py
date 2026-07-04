@@ -576,27 +576,46 @@ class SpawnAgentManager(ToolManager):
         parent_model = getattr(workflow_instance, "model", "rose-labs/rose-1-lite")
         parent_source = getattr(workflow_instance, "agent_source", "WEB")
 
+        child_agent_ids = [str(workflow.uuid4()) for _ in agent_cfgs]
+        for idx, child_agent_id in enumerate(child_agent_ids):
+            workflow_instance.child_tool_ids[child_agent_id] = f"{tool_call_id}:{idx}"
+            workflow_instance.pending_children.add(child_agent_id)
+            workflow_instance.child_workflow_ids[child_agent_id] = child_agent_id
+
         # Phase 1: one batch activity = one backend HTTP call.
-        batch_result = await workflow.execute_activity(
-            spawn_sub_agents_batch_activity,
-            args=[
-                workflow_instance.user_id,
-                agent_cfgs,
-                workflow_instance.agent_id,
-                workflow.info().workflow_id,
-                workflow_instance.depth + 1,
-                getattr(workflow_instance, "is_paused", False),
-                parent_model,
-                parent_bus_id,
-                parent_source,
-                parent_attachments,
-                None,  # child_agent_ids — let activity mint them
-            ],
-            start_to_close_timeout=timedelta(seconds=120),
-            retry_policy=RetryPolicy(maximum_attempts=3),
-        )
+        try:
+            batch_result = await workflow.execute_activity(
+                spawn_sub_agents_batch_activity,
+                args=[
+                    workflow_instance.user_id,
+                    agent_cfgs,
+                    workflow_instance.agent_id,
+                    workflow.info().workflow_id,
+                    workflow_instance.depth + 1,
+                    getattr(workflow_instance, "is_paused", False),
+                    parent_model,
+                    parent_bus_id,
+                    parent_source,
+                    parent_attachments,
+                    child_agent_ids,
+                ],
+                start_to_close_timeout=timedelta(seconds=120),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except Exception:
+            for child_agent_id in child_agent_ids:
+                workflow_instance.child_tool_ids.pop(child_agent_id, None)
+                workflow_instance.pending_children.discard(child_agent_id)
+                workflow_instance.child_workflow_ids.pop(child_agent_id, None)
+            raise
 
         children = batch_result.get("agents", [])
+        returned_child_ids = {child.get("agent_id") for child in children if child.get("agent_id")}
+        for child_agent_id in child_agent_ids:
+            if child_agent_id not in returned_child_ids:
+                workflow_instance.child_tool_ids.pop(child_agent_id, None)
+                workflow_instance.pending_children.discard(child_agent_id)
+                workflow_instance.child_workflow_ids.pop(child_agent_id, None)
         if len(children) != len(agent_cfgs):
             logger.warning(
                 "Batch result length mismatch",

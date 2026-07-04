@@ -4730,13 +4730,17 @@ async def _fail_stale_active_agents():
         print(f"  ⚠ Could not run stale-agent cleanup: {e}")
 
 
+def _has_anthropic_api_key_fallback_configured() -> bool:
+    return bool(load_env_var("ANTHROPIC_API_KEY", _BACKEND_ENV, _AGENTS_ENV))
+
+
 async def _check_compute_code_credentials(base_url: str) -> bool:
     """Check if a provider-typed compute token is available for code-agent benchmarks.
 
     The runtime code-agent path uses the workflow's current compute token and
-    routes to Claude Code or Codex based on the token provider. A local smoke
-    preflight must check that same provider-typed endpoint; checking only the
-    legacy Claude Code OAuth endpoint incorrectly skips valid GPT/Codex runs.
+    routes to Claude Code or Codex based on the token provider. If no user/pool
+    token is available, Claude Code can still use the shared ANTHROPIC_API_KEY
+    fallback as long as the backend has not put it on cooldown.
     """
     try:
         headers = await _api_headers()
@@ -4749,7 +4753,19 @@ async def _check_compute_code_credentials(base_url: str) -> bool:
             if resp.status_code == 200:
                 data = resp.json()
                 return data.get("type") in ("claude", "gpt") and bool(data.get("accessToken"))
-            return False
+
+            if not _has_anthropic_api_key_fallback_configured():
+                return False
+
+            cooldown_resp = await client.get(
+                f"{base_url}/api/integrations/compute-code/anthropic-key/cooldown",
+                headers=headers,
+                timeout=10.0,
+            )
+            if cooldown_resp.status_code != 200:
+                return False
+            cooldown_data = cooldown_resp.json()
+            return cooldown_data.get("onCooldown") is not True
     except Exception:
         return False
 

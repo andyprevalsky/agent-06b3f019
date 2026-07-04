@@ -1099,17 +1099,80 @@ async def test_code_agent_preflight_rejects_missing_compute_token():
 
     original_headers = bench._api_headers
     original_client = bench.httpx.AsyncClient
+    original_has_fallback = bench._has_anthropic_api_key_fallback_configured
     try:
         async def fake_headers():
             return {"X-API-Key": "test-key"}
 
         bench._api_headers = fake_headers
         bench.httpx.AsyncClient = FakeClient
+        bench._has_anthropic_api_key_fallback_configured = lambda: False
 
         assert await bench._check_compute_code_credentials("http://localhost:55120") is False
     finally:
         bench._api_headers = original_headers
         bench.httpx.AsyncClient = original_client
+        bench._has_anthropic_api_key_fallback_configured = original_has_fallback
+
+
+async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
+    """Code-agent benchmarks run when the Claude Code API-key fallback is configured and clear."""
+    import benchmarks.run_benchmark as bench
+
+    calls = []
+
+    class FakeResponse:
+        def __init__(self, status_code, body):
+            self.status_code = status_code
+            self._body = body
+
+        def json(self):
+            return self._body
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url, *, headers, timeout):
+            calls.append((url, headers, timeout))
+            if url.endswith("/api/integrations/compute-code/credentials/token"):
+                return FakeResponse(404, {"error": "NO_TOKENS_AVAILABLE"})
+            if url.endswith("/api/integrations/compute-code/anthropic-key/cooldown"):
+                return FakeResponse(200, {"onCooldown": False})
+            raise AssertionError(f"unexpected URL {url}")
+
+    original_headers = bench._api_headers
+    original_client = bench.httpx.AsyncClient
+    original_has_fallback = bench._has_anthropic_api_key_fallback_configured
+    try:
+        async def fake_headers():
+            return {"X-API-Key": "test-key"}
+
+        bench._api_headers = fake_headers
+        bench.httpx.AsyncClient = FakeClient
+        bench._has_anthropic_api_key_fallback_configured = lambda: True
+
+        assert await bench._check_compute_code_credentials("http://localhost:55120") is True
+    finally:
+        bench._api_headers = original_headers
+        bench.httpx.AsyncClient = original_client
+        bench._has_anthropic_api_key_fallback_configured = original_has_fallback
+
+    assert calls == [
+        (
+            "http://localhost:55120/api/integrations/compute-code/credentials/token",
+            {"X-API-Key": "test-key"},
+            10.0,
+        ),
+        (
+            "http://localhost:55120/api/integrations/compute-code/anthropic-key/cooldown",
+            {"X-API-Key": "test-key"},
+            10.0,
+        ),
+    ]
 
 
 def test_normalize_attention_requests_accepts_backend_contract():
@@ -2909,6 +2972,10 @@ async def run_all_tests():
     r.record("benchmark_run_archive_manifest_ref", test_benchmark_run_json_preserves_archive_manifest_ref)
     await r.record_async("code_agent_preflight_accepts_gpt_compute", test_code_agent_preflight_accepts_gpt_compute_token)
     await r.record_async("code_agent_preflight_rejects_missing_compute", test_code_agent_preflight_rejects_missing_compute_token)
+    await r.record_async(
+        "code_agent_preflight_accepts_anthropic_api_key_fallback",
+        test_code_agent_preflight_accepts_anthropic_api_key_fallback,
+    )
     r.record("normalize_attention_requests", test_normalize_attention_requests_accepts_backend_contract)
     r.record("attention_kind_auth_vs_write_lock", test_attention_request_kind_distinguishes_auth_from_write_lock)
     r.record("attention_open_backend_fields", test_attention_request_open_check_honors_backend_answered_fields)

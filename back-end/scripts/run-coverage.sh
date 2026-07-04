@@ -133,6 +133,22 @@ SQL
   fi
 fi
 
+# Fast Mode cache requires an explicit URL outside production (no fallback to the
+# local app database). Mirror scripts/run.sh: derive it from back-end/.env's
+# DATABASE_URL (the shared cache DB) before DATABASE_URL is overridden to the
+# local test database above. Without this, every /api/fast-cache route 500s and
+# the fast-cache blackbox domain fails under coverage.
+if [[ -z "${FAST_MODE_CACHE_DATABASE_URL:-}" && -f .env ]]; then
+  ENV_DATABASE_URL=$(grep -E '^DATABASE_URL=' .env | head -1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+  if [[ -n "$ENV_DATABASE_URL" ]]; then
+    export FAST_MODE_CACHE_DATABASE_URL="$ENV_DATABASE_URL"
+  fi
+fi
+if [[ -z "${FAST_MODE_CACHE_DATABASE_URL:-}" ]]; then
+  echo "❌ FAST_MODE_CACHE_DATABASE_URL is required (or keep DATABASE_URL in back-end/.env so it can be derived)." >&2
+  exit 1
+fi
+
 echo "Starting backend with coverage collection on port $COV_PORT..."
 NODE_V8_COVERAGE="$COV_TMP" PORT="$COV_PORT" DISABLE_GMAIL_SYNC=1 BLACKBOX_TEST_CAPTURE_OUTBOUND=1 \
   npx tsx src/server.ts >"$COV_LOG" 2>&1 &

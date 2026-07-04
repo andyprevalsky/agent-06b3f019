@@ -52,8 +52,8 @@ export async function pauseAgent(agentId: string): Promise<void> {
 }
 
 /** Resume a single agent. Children discover parent's resumed state via pull-based queries. */
-export async function resumeAgent(agentId: string): Promise<void> {
-  await resumeAgentWorkflow(agentId);
+export async function resumeAgent(agentId: string) {
+  return resumeAgentWorkflow(agentId);
 }
 
 /** Pause an agent for a user (verifies ownership first). */
@@ -89,8 +89,7 @@ export async function resumeAgentForUser(agentId: string, userId: string) {
     }
   }
 
-  await resumeAgent(agentId);
-  return { success: true };
+  return resumeAgent(agentId);
 }
 
 // ---------------------------------------------------------------------------

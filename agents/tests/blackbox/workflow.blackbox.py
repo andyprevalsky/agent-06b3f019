@@ -455,6 +455,16 @@ async def mock_update_agent_tokens_activity(agent_id: str, tokens_in: int, token
     return None
 
 
+# Captures the Fast Mode cache args the workflow threads into LLM activities,
+# keyed by agent_id. Tests clear their agent's entry before starting.
+FAST_MODE_GOAL_CAPTURE: Dict[str, List[Optional[str]]] = {}
+
+
+@activity.defn(name="resolve_fast_cache_goal_activity")
+async def mock_resolve_fast_cache_goal_activity(agent_id: str) -> Optional[str]:
+    return "Persisted DB goal"
+
+
 @activity.defn(name="call_llm_activity")
 async def mock_call_llm_activity(
     messages_or_agent_id: Any,
@@ -479,6 +489,8 @@ async def mock_call_llm_activity(
     gpt_token_source: Optional[str] = None,
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
+    compute_token_lineage_key: Optional[str] = None,
+    compute_token_fast_cache_affinity_key: Optional[str] = None,
     user_id: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
     fast_mode_goal: Optional[str] = None,
@@ -491,6 +503,8 @@ async def mock_call_llm_activity(
     When called for DAG param population (extra_user_message set), returns
     the required_tool so the DAG executor can extract params.
     """
+    if agent_id:
+        FAST_MODE_GOAL_CAPTURE.setdefault(agent_id, []).append(fast_mode_goal)
     if extra_user_message and required_tool:
         return {
             "response": "",
@@ -675,6 +689,7 @@ MOCK_ACTIVITIES = [
     mock_save_blueprint_activity,
     mock_set_response_schema_activity,
     mock_send_direct_sms_activity,
+    mock_resolve_fast_cache_goal_activity,
 ]
 
 
@@ -924,6 +939,57 @@ async def _run_all_workflow_tests() -> List[tuple]:
 
                 status = await handle.query(AgentWorkflow.get_status)
                 assert status["agent_id"] == "agent-test-1", "Workflow should still be running"
+
+                await _cancel_workflow(handle)
+                results.append((name, None))
+            except Exception as e:
+                results.append((name, e))
+
+            # --- test: fast cache goal comes from the persisted agent row ---
+            # Chat escalation starts the workflow with an LLM-refined goal that
+            # differs from the persisted Agent row and varies run to run. Cache
+            # keys namespace by exact goal hash, so keying on the workflow-input
+            # goal gives every chat-originated run a fresh, empty namespace.
+            # The workflow must thread the DB-row goal into LLM activities.
+            name = "wf_fast_cache_goal_uses_persisted_row"
+            try:
+                fc_agent_id = "agent-test-fastcache"
+                FAST_MODE_GOAL_CAPTURE.pop(fc_agent_id, None)
+                handle = await env.client.start_workflow(
+                    AgentWorkflow.run,
+                    args=[
+                        fc_agent_id,
+                        "user-test-1",
+                        "Refined chat goal (volatile, differs per run)",
+                        "rose-labs/rose-1-lite",
+                        256,
+                        {"type": "FLOAT_LLM_JUDGE"},
+                        None,  # context
+                        None,  # parent_workflow_id
+                        None,  # parent_agent_id
+                        0,  # depth
+                        None,  # bus_id
+                        "plan",  # start_phase
+                        None,  # max_iterations
+                        100,  # price_limit_cents
+                        None,  # context_gates
+                        True,  # fast_mode_cache_enabled
+                    ],
+                    id=_next_wf_id("fast-cache-goal"),
+                    task_queue=TASK_QUEUE,
+                )
+                # Wait until the workflow reaches its first LLM call.
+                for _ in range(60):
+                    if FAST_MODE_GOAL_CAPTURE.get(fc_agent_id):
+                        break
+                    await asyncio.sleep(0.5)
+
+                captured_goals = FAST_MODE_GOAL_CAPTURE.get(fc_agent_id)
+                assert captured_goals, "Workflow never reached an LLM call"
+                assert captured_goals[0] == "Persisted DB goal", (
+                    f"Fast Mode cache goal must be the persisted agent-row goal, "
+                    f"got {captured_goals[0]!r}"
+                )
 
                 await _cancel_workflow(handle)
                 results.append((name, None))
@@ -3075,7 +3141,10 @@ async def test_workflow_execute_tool_web_fetch_preserves_fast_mode_kwargs():
     wf = _bare_workflow_instance()
     wf.agent_id = "agent-1"
     wf.user_id = "user-1"
-    wf.goal = "root goal"
+    # Cache kwargs must thread the persisted-row goal, not the (possibly
+    # chat-refined) workflow input goal.
+    wf.goal = "refined workflow input goal"
+    wf.fast_cache_goal = "root goal"
     wf.fast_mode_cache_enabled = True
     captured_kwargs: Dict[str, Any] = {}
 

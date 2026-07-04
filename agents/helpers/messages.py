@@ -14,8 +14,8 @@ import structlog
 from temporalio import activity
 
 from config import load_config
-from helpers.context_scope import filter_internal_subagent_messages
 from helpers.context_compaction import project_model_context_after_compaction
+from helpers.context_scope import filter_internal_subagent_messages
 from helpers.fetch_config import _fetch_agent_data_impl
 from helpers.tracing import span
 

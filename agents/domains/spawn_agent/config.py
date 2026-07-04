@@ -15,7 +15,7 @@ EXPLORE_GOAL_DISPLAY_LEN = 200
 # Mirrors Claude Code's exploreAgent thoroughness levels. Default is "quick".
 # depth -> (max_iterations turns, activity_timeout)
 EXPLORE_DEPTH_LIMITS = {
-    "quick": (5, timedelta(seconds=300)),
+    "quick": (5, timedelta(seconds=600)),
     "medium": (20, timedelta(seconds=600)),
     "deep": (50, timedelta(seconds=1800)),
 }

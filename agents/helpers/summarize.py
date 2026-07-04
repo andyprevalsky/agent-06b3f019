@@ -791,7 +791,7 @@ Rules for files_to_download:
             gpt_token_source=gpt_token_source,
             gpt_token_pool_id=gpt_token_pool_id,
             gpt_token_user_id=gpt_token_user_id,
-            skip_cache_write=True,
+            skip_cache_write=False,
             call_site="summarize_web_fetch",
             agent_id=agent_id,
             user_id=claude_token_user_id or gpt_token_user_id,
@@ -900,8 +900,10 @@ async def generate_completion_summary(
         from helpers.llm import call_llm, convert_context_to_messages
         from providers.fast_cache.context import (
             FastCacheContext,
-            set_context as set_fast_cache_context,
             write_through_enabled_for_user,
+        )
+        from providers.fast_cache.context import (
+            set_context as set_fast_cache_context,
         )
 
         # Build context about structured output (for LLM awareness, not for formatting)

@@ -477,10 +477,13 @@ PY
         export FAST_MODE_CACHE_DATABASE_URL="$PROD_CACHE_DATABASE_URL"
     fi
 fi
-if [ -n "${FAST_MODE_CACHE_DATABASE_URL:-}" ]; then
-    echo "🧠 Ensuring Fast Mode cache schema..."
-    (cd back-end && npx tsx scripts/ensure-fast-mode-cache-schema.ts)
+if [ -z "${FAST_MODE_CACHE_DATABASE_URL:-}" ]; then
+    echo "❌ FAST_MODE_CACHE_DATABASE_URL is required; Fast Mode cache must route to the prod cache table."
+    echo "   Set it explicitly or keep the prod DATABASE_URL in back-end/.env so scripts/run.sh can derive it before local DB override."
+    exit 1
 fi
+echo "🧠 Ensuring Fast Mode cache schema..."
+(cd back-end && npx tsx scripts/ensure-fast-mode-cache-schema.ts)
 
 # Larger Prisma pool: Fast Mode adds cache get/set on every LLM call, which under
 # sub-agent fan-out competes with the agent's own writes for the connection pool

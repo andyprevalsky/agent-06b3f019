@@ -15,7 +15,12 @@ from _test_utils import BlackboxResult, teardown_mock
 
 
 def _decrypt(ciphertext: bytes, metadata: dict) -> bytes:
-    key = hashlib.sha256(b"rose-trace-archive-dev-key").digest()
+    # Resolve the key the same way the module does: agents/.env (loaded by
+    # _test_utils) may set a real TRACE_ARCHIVE_ENCRYPTION_KEY_B64, in which
+    # case encrypt_artifact uses it instead of the hard-coded dev key.
+    from helpers.trace_archive import _encryption_key
+
+    key = _encryption_key() or hashlib.sha256(b"rose-trace-archive-dev-key").digest()
     nonce = base64.b64decode(metadata["nonce_b64"])
     plaintext = AESGCM(key).decrypt(nonce, ciphertext, metadata["aad"].encode("utf-8"))
     if metadata["compression"] == "gzip":

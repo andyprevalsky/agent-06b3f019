@@ -364,6 +364,8 @@ class _FakeSpawnWF:
 
     def __init__(self, activity_results=None, start_activity_result=None):
         self._activity_results = activity_results or {}
+        self.activity_calls = []
+        self._uuid_counter = 0
         self._start_activity_result = start_activity_result or _Activity(
             result={
                 "result": "Found 3 results",
@@ -380,11 +382,17 @@ class _FakeSpawnWF:
 
     async def execute_activity(self, fn, args=None, **kwargs):
         name = getattr(fn, "__name__", "?")
+        self.activity_calls.append({"name": name, "args": args or [], "kwargs": kwargs})
         if name in self._activity_results:
             val = self._activity_results[name]
             if isinstance(val, Exception):
                 raise val
-            return val() if callable(val) else val
+            if callable(val):
+                try:
+                    return val(args=args or [], kwargs=kwargs)
+                except TypeError:
+                    return val()
+            return val
         # Default mock for the for_each batch path: synthesize one child per cfg.
         if name == "spawn_sub_agents_batch_activity":
             cfgs = (args or [None, []])[1] or []
@@ -400,6 +408,10 @@ class _FakeSpawnWF:
                 ]
             }
         return ""
+
+    def uuid4(self):
+        self._uuid_counter += 1
+        return f"00000000-0000-4000-8000-{self._uuid_counter:012d}"
 
     def start_activity(self, fn, args=None, **kwargs):
         return self._start_activity_result
@@ -433,6 +445,10 @@ class _FakeWFInstance:
         self.model = model
         self.context = context if context is not None else {}
         self.context_gates = {}
+        self.child_tool_ids = {}
+        self.pending_children = set()
+        self.child_workflow_ids = {}
+        self.child_results = {}
         self.handled_events = []
         self._tracked_usage = []
         self.tree_state_updates = 0
@@ -1059,6 +1075,63 @@ async def test_handler_for_each_happy_path_all_succeed():
     assert "Child outputs:" not in aggregate[-1].message
     # But child events were handled through workflow_instance._handle_tool_event
     assert len(wf.handled_events) >= 2  # at least 2 per-child
+
+
+async def test_handler_for_each_pre_registers_child_ids_for_batch():
+    """for_each owns child IDs before batch spawn so early completions are trackable."""
+    from tools.base import EventType, MessageStatus, ToolEvent
+    import domains.spawn_agent.handler as h
+
+    fake_mgr = _FakeDelegateManager(
+        [ToolEvent(type=EventType.POST_MESSAGE, title="sub ok", message="ok", status=MessageStatus.FINISHED)]
+    )
+
+    def _batch(args, kwargs):
+        ids = args[10]
+        return {
+            "agents": [
+                {
+                    "agent_id": child_id,
+                    "status": "ACTIVE",
+                    "goal": f"G{i}",
+                    "temporal_workflow_id": child_id,
+                }
+                for i, child_id in enumerate(ids)
+            ]
+        }
+
+    fake = _FakeSpawnWF(activity_results={"spawn_sub_agents_batch_activity": _batch})
+    restore_wf = _patch_spawn_workflow(fake)
+    original_sub = h.get_sub_agent_manager
+    h.get_sub_agent_manager = lambda: fake_mgr
+    try:
+        wf = _FakeWFInstance()
+        await _collect(
+            h.SpawnAgentManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={
+                    "type": "for_each",
+                    "goal": "process row",
+                    "output_schema": {"fields": []},
+                    "items": ["a", "b"],
+                },
+                tool_call_id="tc",
+            )
+        )
+    finally:
+        h.get_sub_agent_manager = original_sub
+        restore_wf()
+
+    batch_call = next(call for call in fake.activity_calls if call["name"] == "spawn_sub_agents_batch_activity")
+    child_ids = batch_call["args"][10]
+    assert child_ids == [
+        "00000000-0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-000000000002",
+    ]
+    assert wf.child_tool_ids[child_ids[0]] == "tc:0"
+    assert wf.child_tool_ids[child_ids[1]] == "tc:1"
+    assert child_ids[0] in wf.child_workflow_ids
+    assert child_ids[1] in wf.child_workflow_ids
 
 
 async def test_handler_for_each_failed_yields_error():
@@ -1911,6 +1984,7 @@ async def run_all_tests():
     await r.record_async("handler_for_each_depth", test_handler_for_each_depth_exceeded_raises)
     await r.record_async("handler_for_each_no_items", test_handler_for_each_no_items_raises)
     await r.record_async("handler_for_each_happy", test_handler_for_each_happy_path_all_succeed)
+    await r.record_async("handler_for_each_pre_registers_ids", test_handler_for_each_pre_registers_child_ids_for_batch)
     await r.record_async("handler_for_each_failed", test_handler_for_each_failed_yields_error)
     await r.record_async("spawn_agent_helper", test_spawn_agent_helper_tracks_usage_and_returns)
     # repo.py

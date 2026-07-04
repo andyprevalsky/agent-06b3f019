@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from typing import Any, AsyncIterator, Dict, List
 
 import pytest
+from pydantic import BaseModel
 
 from providers.fast_cache import normalize
 from providers.fast_cache.context import (
@@ -24,7 +26,6 @@ from providers.fast_cache.context import (
     set_context,
 )
 from providers.fast_cache import rose_cache
-from providers.rose.types import StreamChunk
 
 
 # ---------------------------------------------------------------------------
@@ -32,27 +33,31 @@ from providers.rose.types import StreamChunk
 # ---------------------------------------------------------------------------
 
 
+def _chunk(kind: str, data: Dict[str, Any]):
+    return SimpleNamespace(kind=kind, data=data)
+
+
 class FakeRose:
     """Stand-in for RoseClient.complete — records calls and yields a fixed stream."""
 
-    def __init__(self, chunks: List[StreamChunk]):
+    def __init__(self, chunks: List[Any]):
         self._chunks = chunks
         self.calls = 0
 
-    async def complete(self, **kwargs: Any) -> AsyncIterator[StreamChunk]:
+    async def complete(self, **kwargs: Any) -> AsyncIterator[Any]:
         self.calls += 1
         for c in self._chunks:
             yield c
 
 
-def _full_stream() -> List[StreamChunk]:
+def _full_stream() -> List[Any]:
     return [
-        StreamChunk(kind="metadata", data={"actual_model": "claude-opus-4-7-claude", "pool_name": "rose-1-ultra", "request_id": "r1"}),
-        StreamChunk(kind="content", data={"text": "Hello "}),
-        StreamChunk(kind="content", data={"text": "world"}),
-        StreamChunk(kind="tool_call", data={"id": "t1", "name": "set_plan", "arguments": '{"x":1}'}),
-        StreamChunk(kind="usage", data={"prompt_tokens": 10, "completion_tokens": 5, "finish_reason": "tool_calls"}),
-        StreamChunk(kind="done", data={"timing": {"round_trip_s": 1.2}}),
+        _chunk("metadata", {"actual_model": "claude-opus-4-7-claude", "pool_name": "rose-1-ultra", "request_id": "r1"}),
+        _chunk("content", {"text": "Hello "}),
+        _chunk("content", {"text": "world"}),
+        _chunk("tool_call", {"id": "t1", "name": "set_plan", "arguments": '{"x":1}'}),
+        _chunk("usage", {"prompt_tokens": 10, "completion_tokens": 5, "finish_reason": "tool_calls"}),
+        _chunk("done", {"timing": {"round_trip_s": 1.2}}),
     ]
 
 
@@ -92,7 +97,7 @@ def mem(monkeypatch):
     return store
 
 
-async def _drain(agen) -> List[StreamChunk]:
+async def _drain(agen) -> List[Any]:
     return [c async for c in agen]
 
 
@@ -1168,7 +1173,9 @@ def test_canonical_messages_canonicalizes_code_agent_sdk_event_telemetry():
             {**hot_payload["code_agent_events"][4], "output": "Total steps: 112\n"},
         ],
     }
-    request = lambda payload: {"messages": [{"role": "tool", "content": tool_result(payload)}]}
+    def request(payload):
+        return {"messages": [{"role": "tool", "content": tool_result(payload)}]}
+
     assert normalize.canonical_messages(request(cold_payload)) == normalize.canonical_messages(request(hot_payload))
     assert normalize.canonical_messages(request(cold_payload)) != normalize.canonical_messages(request(changed_payload))
 
@@ -1218,7 +1225,9 @@ def test_canonical_messages_repairs_capped_raw_code_agent_sdk_event_text():
     )
     changed_text = hot_text.replace("/home/user\\n", "/tmp\\n")
 
-    request = lambda text: {"messages": [{"role": "TOOL", "text": text}]}
+    def request(text):
+        return {"messages": [{"role": "TOOL", "text": text}]}
+
     assert normalize.canonical_messages(request(cold_text)) == normalize.canonical_messages(request(hot_text))
     assert normalize.canonical_messages(request(cold_text)) != normalize.canonical_messages(request(changed_text))
 
@@ -1727,6 +1736,31 @@ def test_miss_writes_assembled_response(mem):
     asyncio.run(body())
 
 
+def test_structured_response_model_does_not_write_during_stream(mem):
+    async def body():
+        class StructuredAction(BaseModel):
+            response: str
+            tool_calls: list = []
+
+        set_context(FastCacheContext(enabled=True, goal="g"))
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(
+                rose,
+                call_site="execute_loop",
+                pool="rose-1-ultra",
+                response_model=StructuredAction,
+            )
+        )
+
+        assert rose.calls == 1
+        assert chunks[-1].kind == "done"
+        assert mem.set_calls == 0
+        assert mem.data == {}
+
+    asyncio.run(body())
+
+
 def test_partial_stream_not_written(mem):
     # #8 aborted/partial (no done chunk) is never cached.
     async def body():
@@ -1842,3 +1876,50 @@ def test_get_error_falls_through_to_live(monkeypatch):
         assert chunks[-1].kind == "done"
 
     asyncio.run(body())
+
+
+def test_resolve_fast_cache_goal_activity_returns_persisted_row_goal(monkeypatch):
+    # The workflow keys the cache namespace by the persisted Agent-row goal, not
+    # its (possibly chat-refined) input goal. This activity is that resolution.
+    import providers.fast_cache.client as cache_client_module
+    from helpers.fast_cache_goal import resolve_fast_cache_goal_activity
+
+    async def fake_resolve(agent_id: str):
+        assert agent_id == "agent-1"
+        return True, "persisted row goal", True
+
+    monkeypatch.setattr(cache_client_module, "resolve_agent_fast_mode", fake_resolve)
+
+    async def body():
+        assert await resolve_fast_cache_goal_activity("agent-1") == "persisted row goal"
+
+    asyncio.run(body())
+
+
+def test_resolve_fast_cache_goal_activity_none_on_unresolved(monkeypatch):
+    import providers.fast_cache.client as cache_client_module
+    from helpers.fast_cache_goal import resolve_fast_cache_goal_activity
+
+    async def fake_resolve(agent_id: str):
+        return False, None, False
+
+    monkeypatch.setattr(cache_client_module, "resolve_agent_fast_mode", fake_resolve)
+
+    async def body():
+        assert await resolve_fast_cache_goal_activity("agent-x") is None
+
+    asyncio.run(body())
+
+
+def test_goal_hash_collapses_run_local_message_refs():
+    # Spawn paths append "Reference: @ref:message:<uuid>" to sub-agent goals with
+    # a fresh message id per run. The namespace must survive reruns.
+    base = "Analyze ONE creator as part of a 50-creator analysis.\nRow item:\nThomas DeLauer | YouTube"
+    run_a = base + "\n\nReference: @ref:message:3018fec0-93f2-4907-bba9-098cef49ab74"
+    run_b = base + "\n\nReference: @ref:message:aaaabbbb-cccc-4ddd-8eee-ffff00001111"
+    assert normalize.goal_hash(run_a) == normalize.goal_hash(run_b)
+    assert normalize.goal_hash(run_a) == normalize.goal_hash(base + "\n\nReference: @ref:message:<uuid>")
+    # Different goal prose must still get its own namespace.
+    assert normalize.goal_hash(run_a) != normalize.goal_hash("Different goal" + run_a)
+    # Goals without refs hash exactly as before (raw sha256 prefix).
+    assert normalize.goal_hash(base) == normalize.sha256(base)[:16]

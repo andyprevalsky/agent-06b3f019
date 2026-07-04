@@ -657,8 +657,16 @@ def normalize_url(raw_url: str) -> str:
 
 
 def goal_hash(goal: str) -> str:
-    """Short, stable hash of a goal string. Exact-match (no goal normalization)."""
-    return sha256(goal)[:16]
+    """Short, stable hash of a goal string.
+
+    Exact-match on user prose, with one canonicalization: run-local
+    `@ref:message:<uuid>` pointers collapse before hashing. Spawn paths append
+    a fresh message reference to sub-agent goals on every run, and namespacing
+    on those would give each rerun of the same goal an empty cache namespace.
+    Keep in sync with `goalHash` in back-end fastCacheNormalizeCore.ts.
+    """
+    canonical = re.sub(r"@ref:message:" + _UUID_RE.pattern, "@ref:message:<uuid>", goal)
+    return sha256(canonical)[:16]
 
 
 def strip_secrets(value: Any) -> Any:
