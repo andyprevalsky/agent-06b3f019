@@ -41,7 +41,7 @@ import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 import httpx
@@ -86,6 +86,7 @@ from benchmarks.timeout_history import (
 from benchmarks.timeout_history import (
     summary as _history_summary,
 )
+from benchmarks.world_model_harness import evaluate_archive_with_world_model, update_world_model_for_simulation
 from domains.set_plan.config import (
     PLANNER_ACTIVITY_MAX_ATTEMPTS,
     PLANNER_ACTIVITY_TIMEOUT_SECONDS,
@@ -107,6 +108,9 @@ STALL_THRESHOLD = 120  # seconds without new messages/agents across ENTIRE tree 
 # planner retry is still inside its workflow budget.
 AGENT_STALL_SECONDS = max(240, PLANNER_ACTIVITY_TIMEOUT_SECONDS * PLANNER_ACTIVITY_MAX_ATTEMPTS + 30)
 TREE_POLL_INTERVAL = 15  # seconds between tree-level polls (more expensive than root-only)
+
+_WORLD_MODEL_UPDATE_EVENTS: list[dict[str, Any]] = []
+_WORLD_MODEL_UPDATE_RESULT: Optional[dict[str, Any]] = None
 CALENDLY_TASK_NAME = "calendly-schedule-meeting"
 BIOMETRICS_WEBDECOY_TASK_NAME = "browser-biometrics-webdecoy"
 AUTH_BUNDLE_BIOMETRICS_GATE_ENV = "BENCHMARK_AUTH_BUNDLE_BIOMETRICS_GATE"
@@ -118,6 +122,10 @@ MINTED_AGENT_ACCOUNT_TASK_NAMES = {
 }
 MINTED_AGENT_ACCOUNT_X_POST_GOAL = "Make a post on X.com that says, Hello World"
 GREP_EXPLORE_STRESS_TASK_NAME = "grep-explore-stress"
+# Tasks whose setup restores a whole-DB snapshot (drops + recreates tables).
+# The parallel scheduler runs these serially after the batch drains — a
+# mid-batch restore destroys every concurrent task's rows (poll 404 cascade).
+EXCLUSIVE_DB_RESTORE_TASK_NAMES = {GREP_EXPLORE_STRESS_TASK_NAME}
 USER_DATA_PROD_GREP_TASK_NAME = "user-data-prod-grep"
 USER_DATA_PROD_DOCUMENT_SOURCES = {"chatgpt", "claude", "apple_notes", "obsidian"}
 USER_DATA_PROD_CHECKLIST_KEYS = {"provider_validation_checklist", "provider_verification_checklist"}
@@ -313,7 +321,8 @@ def _frontend_url_for_benchmark(base_url: str) -> str:
     public_env = os.environ.get("PUBLIC_BASE_URL", "").strip()
     if public_env:
         return public_env.rstrip("/")
-    services_path = REPO_ROOT / ".context" / "services.json"
+    context_dir = os.environ.get("BENCHMARK_CONTEXT_DIR", ".context")
+    services_path = REPO_ROOT / context_dir / "services.json"
     if services_path.exists():
         try:
             services = json.loads(services_path.read_text())
@@ -432,6 +441,99 @@ def _validate_payment_receipt(task: BenchmarkTask, req: dict) -> Optional[str]:
 def _ci_should_fail(summary: dict) -> bool:
     """CI must fail on both failed and skipped benchmark tasks."""
     return summary.get("failed", 0) > 0 or summary.get("skipped", 0) > 0
+
+
+def _apply_world_model_cli_env(args, parser: argparse.ArgumentParser) -> None:
+    """Apply WMH benchmark flags to env vars consumed by workers and eval."""
+
+    if args.simulate and args.world_model_mode and args.world_model_mode != "simulate":
+        parser.error("--simulate conflicts with --world-model-mode values other than simulate")
+    world_model_mode = "simulate" if args.simulate else args.world_model_mode
+    if world_model_mode:
+        os.environ["BENCHMARK_WORLD_MODEL_MODE"] = world_model_mode
+    if world_model_mode == "simulate":
+        if not os.environ.get("WMH_MODEL_NAME") and not args.world_model_name:
+            os.environ["WMH_MODEL_NAME"] = "rose-archive"
+        if not os.environ.get("TRACE_ARCHIVE_BACKEND") and all(
+            os.environ.get(name)
+            for name in (
+                "R2_ACCOUNT_ID",
+                "R2_ACCESS_KEY_ID",
+                "R2_SECRET_ACCESS_KEY",
+                "R2_BUCKET_TRACE_ARCHIVE",
+            )
+        ):
+            os.environ["TRACE_ARCHIVE_BACKEND"] = "r2"
+            os.environ.setdefault("TRACE_ARCHIVE_ENABLED", "1")
+    if args.wmh_eval or world_model_mode == "shadow":
+        os.environ["BENCHMARK_WMH_EVAL"] = "1"
+    if args.world_model_url:
+        os.environ["WMH_BASE_URL"] = args.world_model_url
+    if args.world_model_name:
+        os.environ["WMH_MODEL_NAME"] = args.world_model_name
+    if args.world_model_session_id:
+        os.environ["WMH_SESSION_ID"] = args.world_model_session_id
+
+
+def _world_model_mode_from_args(args) -> str | None:
+    return "simulate" if args.simulate else args.world_model_mode
+
+
+def _format_world_model_progress(event: dict[str, Any]) -> str:
+    metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+    counts = []
+    for key in (
+        "total_traces",
+        "traces_to_update",
+        "updated_traces",
+        "traces_unchanged",
+        "unchanged_traces",
+        "artifact_count",
+        "exported_spans",
+        "index_refresh_required",
+        "indexed_traces",
+        "indexed_steps",
+        "aggregate_trace_bytes",
+        "replay_corpus_bytes",
+        "elapsed_ms",
+    ):
+        if key in metadata:
+            counts.append(f"{key}={metadata[key]}")
+    suffix = f" ({', '.join(counts)})" if counts else ""
+    return f"  🌌 {event.get('title')}: {event.get('status')}{suffix}"
+
+
+def _record_world_model_progress(event: dict[str, Any]) -> None:
+    _WORLD_MODEL_UPDATE_EVENTS.append(event)
+    print(_format_world_model_progress(event), flush=True)
+
+
+async def _update_world_model_before_simulation(args) -> None:
+    global _WORLD_MODEL_UPDATE_RESULT
+    if _world_model_mode_from_args(args) != "simulate":
+        return
+    _WORLD_MODEL_UPDATE_EVENTS.clear()
+    print("\n  Updating world model before simulated benchmark run...")
+    try:
+        _WORLD_MODEL_UPDATE_RESULT = await asyncio.to_thread(
+            update_world_model_for_simulation,
+            name=os.environ.get("WMH_MODEL_NAME") or args.world_model_name or "rose-archive",
+            provider=os.environ.get("WMH_BUILD_PROVIDER") or "anthropic",
+            model=os.environ.get("WMH_BUILD_MODEL") or os.environ.get("WMH_SERVE_MODEL") or "claude-opus-4-8",
+            progress=_record_world_model_progress,
+        )
+    except Exception as exc:
+        print(f"  ❌ World model update failed before simulate run: {exc}")
+        raise
+    if _WORLD_MODEL_UPDATE_RESULT:
+        os.environ["WMH_MODEL_NAME"] = str(_WORLD_MODEL_UPDATE_RESULT.get("model_name") or os.environ.get("WMH_MODEL_NAME") or "rose-archive")
+        print(
+            "  ✅ World model ready: "
+            f"total={_WORLD_MODEL_UPDATE_RESULT.get('total_traces')} "
+            f"updated={_WORLD_MODEL_UPDATE_RESULT.get('updated_traces')} "
+            f"unchanged={_WORLD_MODEL_UPDATE_RESULT.get('unchanged_traces')} "
+            f"build_ran={_WORLD_MODEL_UPDATE_RESULT.get('build_ran')}"
+        )
 
 
 def _evaluate_agent_payment_result(data: dict) -> tuple[bool, str | None]:
@@ -714,16 +816,37 @@ async def archive_agent_start(base_url: str, agent_id: str) -> Optional[str]:
         return None
 
 
-async def archive_agent_finalize(base_url: str, agent_id: str, task_name: str, *, force: bool = False) -> Optional[str]:
+async def archive_agent_finalize(
+    base_url: str,
+    agent_id: str,
+    task_name: str,
+    *,
+    force: bool = False,
+    benchmark_passed: Optional[bool] = None,
+    benchmark_status: Optional[str] = None,
+    failure_reason: Optional[str] = None,
+) -> Optional[str]:
     if not agent_id:
         return None
     try:
         headers = await _api_headers()
         async with httpx.AsyncClient(timeout=90) as client:
+            body = {
+                "rootAgentId": agent_id,
+                "benchmarkTaskName": task_name,
+                "force": force,
+                "worldModelMode": os.environ.get("BENCHMARK_WORLD_MODEL_MODE", "real"),
+            }
+            if benchmark_passed is not None:
+                body["benchmarkPassed"] = benchmark_passed
+            if benchmark_status is not None:
+                body["benchmarkStatus"] = benchmark_status
+            if failure_reason:
+                body["failureReason"] = failure_reason[:1000]
             resp = await client.post(
                 f"{base_url}/api/archive/agent-finalize",
                 headers=headers,
-                json={"rootAgentId": agent_id, "benchmarkTaskName": task_name, "force": force},
+                json=body,
             )
         if resp.status_code != 200:
             print(f"    ⚠ Trace archive finalize failed: {resp.status_code} {resp.text[:160]}")
@@ -733,6 +856,49 @@ async def archive_agent_finalize(base_url: str, agent_id: str, task_name: str, *
     except Exception as exc:
         print(f"    ⚠ Trace archive finalize failed: {exc}")
         return None
+
+
+async def evaluate_world_model_fidelity(agent_id: str) -> dict:
+    """Best-effort WMH replay scoring for a finalized trace archive."""
+    if not agent_id:
+        return {"status": "disabled", "reason": "agent_id is missing"}
+    try:
+        return await evaluate_archive_with_world_model(agent_id)
+    except Exception as exc:
+        return {"status": "error", "reason": str(exc)[:300]}
+
+
+async def finalize_archive_and_score_world_model(
+    base_url: str,
+    agent_id: str,
+    task_name: str,
+    *,
+    force: bool = False,
+    benchmark_passed: Optional[bool] = None,
+    benchmark_status: Optional[str] = None,
+    failure_reason: Optional[str] = None,
+) -> tuple[Optional[str], dict]:
+    """Finalize durable trace storage and score WMH prediction fidelity for the run."""
+
+    archive_manifest_ref = await archive_agent_finalize(
+        base_url,
+        agent_id,
+        task_name,
+        force=force,
+        benchmark_passed=benchmark_passed,
+        benchmark_status=benchmark_status,
+        failure_reason=failure_reason,
+    )
+    if archive_manifest_ref:
+        print(f"    🧊 Trace archive manifest: {archive_manifest_ref}")
+    world_model_fidelity = await evaluate_world_model_fidelity(agent_id)
+    if world_model_fidelity.get("status") == "scored":
+        print(
+            "    🧠 WMH prediction accuracy: "
+            f"{world_model_fidelity.get('mean_score', 0):.3f} "
+            f"n={world_model_fidelity.get('n_steps', 0)}"
+        )
+    return archive_manifest_ref, world_model_fidelity
 
 
 async def get_agent(base_url: str, agent_id: str) -> dict:
@@ -829,6 +995,8 @@ def _logical_tool_count_key(meta: dict) -> Optional[Tuple[str, str]]:
         return None
 
     if tool_name == "spawn_agent":
+        if meta.get("agentType") == "browser" and tool_call_id:
+            return "spawn_browser_agent", str(tool_call_id)
         if meta.get("subAgentId"):
             return None
         if not tool_call_id:
@@ -840,7 +1008,18 @@ def _logical_tool_count_key(meta: dict) -> Optional[Tuple[str, str]]:
             return None
         return tool_name, str(tool_call_id)
 
-    if tool_name in {"spawn_browser_agent", "spawn_claude_code_agent"}:
+    if tool_name == "spawn_browser_agent":
+        is_completion = (
+            action_type == "task_complete"
+            or (action_type is None and meta.get("title") == "Browser automation complete")
+        )
+        if not is_completion or meta.get("subAgentId"):
+            return None
+        if not tool_call_id:
+            return None
+        return tool_name, str(tool_call_id)
+
+    if tool_name == "spawn_claude_code_agent":
         if action_type != "task_complete" or meta.get("subAgentId"):
             return None
         if not tool_call_id:
@@ -1054,6 +1233,54 @@ async def post_message(base_url: str, agent_id: str, message: str) -> bool:
         return resp.status_code in (200, 201)
 
 
+async def post_tool_status_message(
+    base_url: str,
+    agent_id: str,
+    *,
+    title: str,
+    status: str,
+    metadata: Optional[dict[str, Any]] = None,
+) -> bool:
+    """Post a metadata-only tool row without adding visible text content."""
+
+    headers = await _api_headers()
+    body = {
+        "message": "",
+        "role": "TOOL",
+        "metadata": {
+            "toolName": "world_model_update",
+            "toolStatus": status,
+            "title": title,
+            "simulated": True,
+            "source": "benchmark_simulate_preflight",
+            **(metadata or {}),
+        },
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(f"{base_url}/api/agents/{agent_id}/messages", headers=headers, json=body)
+        return resp.status_code in (200, 201)
+
+
+async def post_world_model_update_events(base_url: str, agent_id: str) -> None:
+    if not _WORLD_MODEL_UPDATE_EVENTS:
+        return
+    for event in _WORLD_MODEL_UPDATE_EVENTS:
+        metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+        ok = await post_tool_status_message(
+            base_url,
+            agent_id,
+            title=str(event.get("title") or "World Model Updating"),
+            status=str(event.get("status") or "IN_PROGRESS"),
+            metadata={
+                "worldModelStage": event.get("title"),
+                "worldModelUpdate": metadata,
+            },
+        )
+        if not ok:
+            print(f"    ⚠ Failed to post world model status row for agent:{agent_id[:12]}")
+            return
+
+
 async def pause_agent(base_url: str, agent_id: str) -> bool:
     """POST /api/agents/:id/pause — pause root agent (children discover via polling)."""
     headers = await _api_headers()
@@ -1242,6 +1469,7 @@ async def poll_agent(
     # Includes the root plus every descendant appearing in the tree endpoint.
     per_agent_state: Dict[str, dict] = {}
     seen_attention_ids: set[str] = set()
+    chat_assistant_seen_at: Optional[float] = None
 
     resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
 
@@ -1318,7 +1546,12 @@ async def poll_agent(
         if task.is_chat_mode:
             assistant_msgs = [m for m in messages if m.get("role") == "ASSISTANT"]
             if len(assistant_msgs) >= 1:
-                return data, approvals_triggered, approvals_resolved, None
+                if status in TERMINAL_STATUSES:
+                    return data, approvals_triggered, approvals_resolved, None
+                if chat_assistant_seen_at is None:
+                    chat_assistant_seen_at = time.time()
+                if time.time() - chat_assistant_seen_at >= 10:
+                    return data, approvals_triggered, approvals_resolved, None
 
         # Agent mode: done on terminal status
         if status in TERMINAL_STATUSES:
@@ -1861,7 +2094,8 @@ def _local_victoria_db_container() -> Optional[str]:
 
 def _local_victoria_database_url() -> Optional[str]:
     candidates: list[str] = []
-    services_path = REPO_ROOT / ".context" / "services.json"
+    context_dir = os.environ.get("BENCHMARK_CONTEXT_DIR", ".context")
+    services_path = REPO_ROOT / context_dir / "services.json"
     if services_path.exists():
         try:
             services = json.loads(services_path.read_text())
@@ -1872,6 +2106,9 @@ def _local_victoria_database_url() -> Optional[str]:
                 candidates.append(f"postgresql://postgres:postgres@localhost:{port}/victoria")
         except Exception:
             pass
+    env_database_url = os.environ.get("DIRECT_URL") or os.environ.get("DATABASE_URL")
+    if env_database_url:
+        candidates.append(_psql_compatible_database_url(env_database_url))
     candidates.append("postgresql://postgres:postgres@localhost:5432/victoria")
     configured_url = load_env_var("DATABASE_URL", _BACKEND_ENV)
     if configured_url:
@@ -2048,7 +2285,12 @@ def _parse_last_json_line(stdout: str) -> dict:
     return {}
 
 
+_PLAID_TRANSACTIONS_FIXTURE_CACHE: dict[str, dict] = {}
+
+
 def _run_plaid_transactions_fixture(action: str) -> dict:
+    if action == "apply" and action in _PLAID_TRANSACTIONS_FIXTURE_CACHE:
+        return dict(_PLAID_TRANSACTIONS_FIXTURE_CACHE[action])
     result = subprocess.run(
         ["npx", "tsx", "scripts/plaid-transactions-benchmark-fixture.ts", action],
         cwd=REPO_ROOT / "back-end",
@@ -2062,11 +2304,16 @@ def _run_plaid_transactions_fixture(action: str) -> dict:
             f"Plaid transaction benchmark fixture {action} failed: "
             f"{(result.stderr or result.stdout).strip()}"
         )
-    return _parse_last_json_line(result.stdout)
+    manifest = _parse_last_json_line(result.stdout)
+    if action == "apply":
+        _PLAID_TRANSACTIONS_FIXTURE_CACHE[action] = dict(manifest)
+    elif action == "cleanup":
+        _PLAID_TRANSACTIONS_FIXTURE_CACHE.clear()
+    return manifest
 
 
 def _plaid_transactions_fixture_action() -> str:
-    mode = os.environ.get("BENCHMARK_PLAID_FIXTURE_MODE", "real").strip().lower()
+    mode = os.environ.get("BENCHMARK_PLAID_FIXTURE_MODE", "synthetic").strip().lower()
     if mode in ("", "real", "sync-real", "prod", "production"):
         return "sync-real"
     if mode in ("synthetic", "apply"):
@@ -3754,6 +4001,7 @@ async def run_single_task(
     start_time = datetime.now(timezone.utc)
     agent_id = ""
     archive_manifest_ref: Optional[str] = None
+    world_model_fidelity: Optional[dict] = None
     realtime_monitor: Optional[SupabaseRealtimeSmokeMonitor] = None
     realtime_tree_task: Optional[asyncio.Task] = None
 
@@ -3832,6 +4080,7 @@ async def run_single_task(
             if file_pointers:
                 await post_attachment_message(base_url, agent_id, file_pointers)
                 print(f"    📎 Posted {len(file_pointers)} file(s) as agent message")
+            await post_world_model_update_events(base_url, agent_id)
             start_fixture_ref = await archive_agent_start(base_url, agent_id)
             if start_fixture_ref:
                 print(f"    🧊 Trace archive start fixture: {start_fixture_ref}")
@@ -3843,6 +4092,7 @@ async def run_single_task(
                 print("    🔎 Attached seeded agent_network branch")
             await start_realtime_capture()
             await start_realtime_monitor()
+            await post_world_model_update_events(base_url, agent_id)
             start_fixture_ref = await archive_agent_start(base_url, agent_id)
             if start_fixture_ref:
                 print(f"    🧊 Trace archive start fixture: {start_fixture_ref}")
@@ -3931,10 +4181,14 @@ async def run_single_task(
             except Exception as e:
                 print(f"    ⚠ Tree count check failed: {e}")
 
-        # Tree-wide tool count checks — verifies exact, minimum, and forbidden tool calls.
+        # Tool count checks — tree-wide by default, with root scope available
+        # for benchmarks that validate top-level orchestration paths only.
         if (task.expected_tool_counts or task.min_tool_counts or task.forbidden_tools) and passed:
             try:
-                actual_counts = await count_tree_tool_calls(base_url, agent_id)
+                if task.tool_count_scope == "root":
+                    actual_counts = _count_logical_tool_calls_from_messages(data.get("messages", []))
+                else:
+                    actual_counts = await count_tree_tool_calls(base_url, agent_id)
                 for tool_name, expected_count in (task.expected_tool_counts or {}).items():
                     actual = actual_counts.get(tool_name, 0)
                     if actual != expected_count:
@@ -4005,9 +4259,14 @@ async def run_single_task(
             log_summary.append(f"{label}={len(entries)}")
         log_summary.append(f"messages={len(logs.get('messages', []))}")
         print(f"    Logs collected: {', '.join(log_summary)}")
-        archive_manifest_ref = await archive_agent_finalize(base_url, agent_id, task.name)
-        if archive_manifest_ref:
-            print(f"    🧊 Trace archive manifest: {archive_manifest_ref}")
+        archive_manifest_ref, world_model_fidelity = await finalize_archive_and_score_world_model(
+            base_url,
+            agent_id,
+            task.name,
+            benchmark_passed=passed,
+            benchmark_status="PASSED" if passed else "FAILED",
+            failure_reason=failure_reason,
+        )
 
         # Compute cache hit rate
         total_input = cache_read_input_tokens + cache_creation_input_tokens
@@ -4032,6 +4291,8 @@ async def run_single_task(
             context_violations=context_violation_dicts,
             logs=logs,
             archive_manifest_ref=archive_manifest_ref,
+            world_model_fidelity=world_model_fidelity,
+            world_model_mode=os.environ.get("BENCHMARK_WORLD_MODEL_MODE", "real"),
         )
 
         icon = "✅" if passed else "❌"
@@ -4095,9 +4356,15 @@ async def run_single_task(
                 print(f"    Logs collected: {', '.join(log_summary)}")
             except Exception as log_exc:
                 print(f"    ⚠ Failed to collect cancellation logs: {log_exc}")
-            archive_manifest_ref = await archive_agent_finalize(base_url, agent_id, task.name, force=True)
-            if archive_manifest_ref:
-                print(f"    🧊 Trace archive manifest: {archive_manifest_ref}")
+            archive_manifest_ref, world_model_fidelity = await finalize_archive_and_score_world_model(
+                base_url,
+                agent_id,
+                task.name,
+                force=True,
+                benchmark_passed=False,
+                benchmark_status="CANCELLED",
+                failure_reason="Benchmark interrupted; prod logs were collected before shutdown",
+            )
             try:
                 if not keep_failed_agents:
                     await delete_agent(base_url, agent_id)
@@ -4121,6 +4388,8 @@ async def run_single_task(
             ),
             logs=logs,
             archive_manifest_ref=archive_manifest_ref,
+            world_model_fidelity=world_model_fidelity,
+            world_model_mode=os.environ.get("BENCHMARK_WORLD_MODEL_MODE", "real"),
         )
 
     except Exception as e:
@@ -4136,9 +4405,15 @@ async def run_single_task(
                 logs = await collect_logs(agent_id, {}, start_time)
             except Exception:
                 pass
-            archive_manifest_ref = await archive_agent_finalize(base_url, agent_id, task.name, force=True)
-            if archive_manifest_ref:
-                print(f"    🧊 Trace archive manifest: {archive_manifest_ref}")
+            archive_manifest_ref, world_model_fidelity = await finalize_archive_and_score_world_model(
+                base_url,
+                agent_id,
+                task.name,
+                force=True,
+                benchmark_passed=False,
+                benchmark_status="ERROR",
+                failure_reason=str(e),
+            )
             try:
                 if not keep_failed_agents:
                     await delete_agent(base_url, agent_id)
@@ -4163,6 +4438,8 @@ async def run_single_task(
             ),
             logs=logs,
             archive_manifest_ref=archive_manifest_ref,
+            world_model_fidelity=world_model_fidelity,
+            world_model_mode=os.environ.get("BENCHMARK_WORLD_MODEL_MODE", "real"),
         )
     finally:
         if realtime_tree_task:
@@ -4179,7 +4456,7 @@ async def run_single_task(
                 pass
         if (
             plaid_transactions_fixture_action == "apply"
-            and os.environ.get("BENCHMARK_KEEP_PLAID_FIXTURE") != "1"
+            and os.environ.get("BENCHMARK_CLEANUP_PLAID_FIXTURE") == "1"
         ):
             try:
                 _run_plaid_transactions_fixture("cleanup")
@@ -4205,7 +4482,14 @@ def resolve_tasks(args) -> List[BenchmarkTask]:
         if args.suite == "all":
             tasks = all_tasks()
         elif args.suite == "auth":
-            tasks = get_tasks_by_tag("auth-anon" if getattr(args, "anon", False) else "auth-cookie")
+            # The anon/cookie split used to live on dedicated tags; the curated
+            # tag vocabulary merged them into `auth`, so the split is by name.
+            auth_names = (
+                ("browser-agent", "minted-agent-accounts-uber")
+                if getattr(args, "anon", False)
+                else ("browser-agent-amazon-cookie-payment",)
+            )
+            tasks = [get_task_by_name(name) for name in auth_names]
         elif args.suite in ("rose-bench", "pipeline-e2e"):
             # Bench axis: rose-bench = harness-independent capability evals,
             # pipeline-e2e = harness plumbing tests. Orthogonal to tag slices.
@@ -4871,6 +5155,8 @@ async def main_async(args):
             skipped_claude_tasks = claude_code_tasks
             tasks = [t for t in tasks if not t.requires_claude_code]
 
+    await _update_world_model_before_simulation(args)
+
     # Pre-flight: resolve per-task timeout from history corpus.
     # In bootstrap mode, always use tasks.json timeout_seconds as the ceiling — passes
     # recorded this run seed/extend the corpus for future dynamic caps. This lets
@@ -4972,22 +5258,33 @@ async def main_async(args):
             if max_concurrency is not None and max_concurrency < 1:
                 raise ValueError("--max-concurrency must be >= 1")
 
-            if max_concurrency is None or max_concurrency >= len(tasks):
-                print(f"\n  Running {len(tasks)} tasks in parallel...")
-                task_runners = [run_single_task(base_url, task, args.keep_failed_agents) for task in tasks]
+            # Tasks whose setup replays a whole-DB snapshot (psql < dump with
+            # --clean --if-exists) drop and recreate tables, destroying every
+            # concurrent task's Agent rows mid-flight (poll 404 cascade). They
+            # must never share the DB with in-flight tasks — run them serially
+            # after the parallel batch drains.
+            exclusive_db_tasks = [t for t in tasks if t.name in EXCLUSIVE_DB_RESTORE_TASK_NAMES]
+            parallel_batch = [t for t in tasks if t.name not in EXCLUSIVE_DB_RESTORE_TASK_NAMES]
+            if exclusive_db_tasks:
+                names = ", ".join(t.name for t in exclusive_db_tasks)
+                print(f"\n  Deferring {len(exclusive_db_tasks)} DB-restore task(s) to a serial phase: {names}")
+
+            if max_concurrency is None or max_concurrency >= len(parallel_batch):
+                print(f"\n  Running {len(parallel_batch)} tasks in parallel...")
+                task_runners = [run_single_task(base_url, task, args.keep_failed_agents) for task in parallel_batch]
             else:
-                print(f"\n  Running {len(tasks)} tasks in parallel (max_concurrency={max_concurrency})...")
+                print(f"\n  Running {len(parallel_batch)} tasks in parallel (max_concurrency={max_concurrency})...")
                 semaphore = asyncio.Semaphore(max_concurrency)
 
                 async def run_limited(task: BenchmarkTask) -> TaskResult:
                     async with semaphore:
                         return await run_single_task(base_url, task, args.keep_failed_agents)
 
-                task_runners = [run_limited(task) for task in tasks]
+                task_runners = [run_limited(task) for task in parallel_batch]
 
             pending_results: dict[asyncio.Task, BenchmarkTask] = {
                 asyncio.create_task(runner, name=f"benchmark-{task.name}"): task
-                for task, runner in zip(tasks, task_runners)
+                for task, runner in zip(parallel_batch, task_runners)
             }
             pending = set(pending_results)
             try:
@@ -5013,6 +5310,10 @@ async def main_async(args):
                             )
                         else:
                             run.task_results.append(result)
+                for task in exclusive_db_tasks:
+                    print(f"\n  Running DB-restore task serially: {task.name}")
+                    result = await run_single_task(base_url, task, args.keep_failed_agents)
+                    run.task_results.append(result)
             except asyncio.CancelledError:
                 for task_future in pending:
                     task_future.cancel()
@@ -5256,6 +5557,44 @@ def main():
         help="Diagnostic override for selected task timeouts; does not modify tasks.json.",
     )
     parser.add_argument(
+        "--world-model-mode",
+        choices=["real", "shadow", "simulate"],
+        default=None,
+        help="Set BENCHMARK_WORLD_MODEL_MODE for tool execution adapters. "
+        "real runs live provider boundaries, shadow compares live provider boundaries with WMH predictions, "
+        "simulate routes eligible provider/environment boundaries to WMH while agent loops and orchestration still run.",
+    )
+    parser.add_argument(
+        "--simulate",
+        action="store_true",
+        help="Alias for --world-model-mode simulate. Agent loops and orchestration still run; "
+        "only eligible provider/environment boundaries are simulated by WMH.",
+    )
+    parser.add_argument(
+        "--wmh-eval",
+        action="store_true",
+        help="After each task finalizes its trace archive, run WMH open-loop fidelity scoring "
+        "and store prediction accuracy in the run JSON.",
+    )
+    parser.add_argument(
+        "--world-model-url",
+        type=str,
+        default=None,
+        help="WMH server base URL for benchmark simulation/evaluation.",
+    )
+    parser.add_argument(
+        "--world-model-name",
+        type=str,
+        default=None,
+        help="WMH model name for benchmark simulation/evaluation.",
+    )
+    parser.add_argument(
+        "--world-model-session-id",
+        type=str,
+        default=None,
+        help="Existing WMH session id for simulate/shadow tool execution.",
+    )
+    parser.add_argument(
         "--anon",
         action="store_true",
         help="For minted-auth benchmarks, start without saved auth: skip cookie-bundle bootstrap "
@@ -5296,6 +5635,7 @@ def main():
 
     if args.anon:
         _apply_anon_benchmark_mode(force_show_passwords=args.force_show_passwords)
+    _apply_world_model_cli_env(args, parser)
 
     asyncio.run(main_async(args))
 

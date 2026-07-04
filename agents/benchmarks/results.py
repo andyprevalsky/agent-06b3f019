@@ -28,6 +28,8 @@ class TaskResult:
     context_violations: List[dict] = field(default_factory=list)  # [{rule, severity, message}]
     logs: Optional[dict] = None  # {messages, backend_logs, worker_logs, research_logs}
     archive_manifest_ref: Optional[str] = None
+    world_model_fidelity: Optional[dict] = None
+    world_model_mode: Optional[str] = None
 
 
 @dataclass
@@ -52,6 +54,13 @@ class BenchmarkRun:
         agg_cache_write = sum(r.cache_creation_input_tokens for r in self.task_results)
         agg_cache_total = agg_cache_read + agg_cache_write
         agg_cache_hit_pct = round(agg_cache_read / agg_cache_total * 100, 1) if agg_cache_total > 0 else 0.0
+        scored_world_model = [
+            r.world_model_fidelity
+            for r in self.task_results
+            if isinstance(r.world_model_fidelity, dict)
+            and r.world_model_fidelity.get("status") == "scored"
+            and isinstance(r.world_model_fidelity.get("mean_score"), (int, float))
+        ]
         result = {
             "total": total,
             "passed": passed,
@@ -63,6 +72,12 @@ class BenchmarkRun:
             "cache_creation_input_tokens": agg_cache_write,
             "cache_hit_pct": agg_cache_hit_pct,
         }
+        if scored_world_model:
+            result["wmh_scored_tasks"] = len(scored_world_model)
+            result["wmh_prediction_accuracy"] = round(
+                sum(float(report["mean_score"]) for report in scored_world_model) / len(scored_world_model),
+                3,
+            )
         if skipped > 0:
             result["skipped"] = skipped
         return result
@@ -176,8 +191,10 @@ class BenchmarkRun:
             base_url=data["base_url"],
             memory_summary=data.get("memory_summary"),
         )
+        task_result_fields = set(TaskResult.__dataclass_fields__)
         for t in data["tasks"]:
-            run.task_results.append(TaskResult(**t))
+            filtered = {key: value for key, value in t.items() if key in task_result_fields}
+            run.task_results.append(TaskResult(**filtered))
         return run
 
 

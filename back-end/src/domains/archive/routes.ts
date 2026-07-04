@@ -27,8 +27,17 @@ router.post(
       res.status(400).json({ error: 'ciphertextB64 and metadata are required' });
       return;
     }
-    const result = await service.storeWorkerArtifact(body);
-    res.json(result);
+    try {
+      const result = await service.storeWorkerArtifact(body);
+      res.json(result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'invalid archive artifact';
+      if (message.startsWith('Archive ')) {
+        res.status(400).json({ error: message });
+        return;
+      }
+      throw error;
+    }
   })
 );
 

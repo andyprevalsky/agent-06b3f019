@@ -6,8 +6,9 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import zlib from 'node:zlib';
 import { S3Client } from '@aws-sdk/client-s3';
+import { auditArchiveBundle, listArchiveBundleIds } from '../../providers/traceArchiveAudit';
+import { assertArchiveFinalizable } from '../../providers/traceArchiveLifecycle';
 import {
   archiveBytes,
   archiveJson,
@@ -15,64 +16,13 @@ import {
   encryptArtifact,
   listArchivedObjects,
   readArchivedArtifact,
+  storePlainArtifact,
   type EncryptedArtifactMetadata,
+  validateEncryptedArtifactEnvelope,
 } from '../../providers/traceArchive';
+import { bodyToBuffer, createTestHarness, decrypt, withEnv } from './trace-archive-test-utils';
 
-let passed = 0;
-const failures: string[] = [];
-
-async function test(name: string, fn: () => void | Promise<void>): Promise<void> {
-  try {
-    await fn();
-    passed += 1;
-    console.log(`  ✅ ${name}`);
-  } catch (err) {
-    failures.push(`${name}: ${err instanceof Error ? err.message : String(err)}`);
-    console.log(`  ❌ ${name}`);
-  }
-}
-
-function withEnv(values: Record<string, string | undefined>, fn: () => void | Promise<void>) {
-  return async () => {
-    const old: Record<string, string | undefined> = {};
-    for (const key of Object.keys(values)) old[key] = process.env[key];
-    try {
-      for (const [key, value] of Object.entries(values)) {
-        if (value === undefined) delete process.env[key];
-        else process.env[key] = value;
-      }
-      await fn();
-    } finally {
-      for (const [key, value] of Object.entries(old)) {
-        if (value === undefined) delete process.env[key];
-        else process.env[key] = value;
-      }
-    }
-  };
-}
-
-function decrypt(ciphertext: Buffer, metadata: EncryptedArtifactMetadata, key?: Buffer): Buffer {
-  const archiveKey =
-    key ?? crypto.createHash('sha256').update('rose-trace-archive-dev-key').digest();
-  const tag = Buffer.from(metadata.auth_tag_b64, 'base64');
-  const encrypted = ciphertext.subarray(0, ciphertext.length - tag.length);
-  const decipher = crypto.createDecipheriv(
-    'aes-256-gcm',
-    archiveKey,
-    Buffer.from(metadata.nonce_b64, 'base64')
-  );
-  decipher.setAAD(Buffer.from(metadata.aad, 'utf8'));
-  decipher.setAuthTag(tag);
-  const stored = Buffer.concat([decipher.update(encrypted), decipher.final()]);
-  return metadata.compression === 'gzip' ? zlib.gunzipSync(stored) : stored;
-}
-
-function bodyToBuffer(body: unknown): Buffer {
-  if (Buffer.isBuffer(body)) return body;
-  if (body instanceof Uint8Array) return Buffer.from(body);
-  if (typeof body === 'string') return Buffer.from(body);
-  throw new Error(`Unsupported test S3 body type: ${typeof body}`);
-}
+const { test, finish } = createTestHarness('trace-archive unit tests');
 
 async function main(): Promise<void> {
   await test(
@@ -221,6 +171,109 @@ async function main(): Promise<void> {
       }
     )
   );
+
+  await test(
+    'worker artifact envelope validation rejects incomplete or mismatched metadata',
+    withEnv(
+      { NODE_ENV: 'test', ENVIRONMENT: undefined, TRACE_ARCHIVE_ENCRYPTION_KEY_B64: undefined },
+      () => {
+        const encrypted = encryptArtifact(
+          'llm/validated.json.gz.enc',
+          Buffer.from('{"ok":true}'),
+          'application/json'
+        );
+        assert.ok(encrypted);
+        assert.deepStrictEqual(
+          validateEncryptedArtifactEnvelope({
+            objectPath: 'llm/validated.json.gz.enc',
+            ciphertext: encrypted.ciphertext,
+            metadata: encrypted.metadata,
+          }),
+          encrypted.metadata
+        );
+        assert.throws(
+          () =>
+            validateEncryptedArtifactEnvelope({
+              objectPath: 'llm/validated.json.gz.enc',
+              ciphertext: encrypted.ciphertext,
+              metadata: { path: 'llm/validated.json.gz.enc' },
+            }),
+          /Archive metadata missing/
+        );
+        assert.throws(
+          () =>
+            validateEncryptedArtifactEnvelope({
+              objectPath: 'llm/other.json.gz.enc',
+              ciphertext: encrypted.ciphertext,
+              metadata: encrypted.metadata,
+            }),
+          /path mismatch/
+        );
+      }
+    )
+  );
+
+  await test(
+    'archive audit validates required fixtures manifest and encrypted object integrity',
+    withEnv(
+      {
+        TRACE_ARCHIVE_ENABLED: '1',
+        TRACE_ARCHIVE_BACKEND: 'local',
+        TRACE_ARCHIVE_LOCAL_DIR: undefined,
+        TRACE_ARCHIVE_ENCRYPTION_KEY_B64: undefined,
+      },
+      async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-archive-audit-'));
+        process.env.TRACE_ARCHIVE_LOCAL_DIR = dir;
+        for (const objectPath of [
+          'db/start.fixture.json.gz.enc',
+          'db/end.fixture.json.gz.enc',
+          'manifest.json.gz.enc',
+        ]) {
+          const result = await archiveJson({
+            rootAgentId: 'audit-agent',
+            objectPath,
+            value: { objectPath, ok: true },
+          });
+          assert.ok(result);
+        }
+        const publicRef = await storePlainArtifact({
+          rootAgentId: 'audit-agent',
+          objectPath: 'manifest.public.json',
+          body: Buffer.from('{"ok":true}\n'),
+          contentType: 'application/json',
+        });
+        assert.ok(publicRef);
+        assert.deepStrictEqual(await listArchiveBundleIds(), ['audit-agent']);
+        const audit = await auditArchiveBundle('audit-agent');
+        assert.strictEqual(audit.ok, true);
+        assert.strictEqual(audit.objectCount, 4);
+        assert.strictEqual(audit.encryptedObjectCount, 3);
+        assert.strictEqual(audit.decryptedObjectCount, 3);
+        assert.deepStrictEqual(audit.missing, []);
+        assert.deepStrictEqual(audit.invalid, []);
+      }
+    )
+  );
+
+  await test('archive finalization refuses unforced active root manifests', () => {
+    const fixture = {
+      rows: {
+        Agent: [{ id: 'active-root', status: 'ACTIVE' }],
+      },
+      agent_ids: ['active-root'],
+    };
+    assert.throws(
+      () => assertArchiveFinalizable({ rootAgentId: 'active-root' }, fixture),
+      /requires a terminal status.*ACTIVE/
+    );
+    assert.doesNotThrow(() =>
+      assertArchiveFinalizable({ rootAgentId: 'active-root', benchmarkStatus: 'PASSED' }, fixture)
+    );
+    assert.doesNotThrow(() =>
+      assertArchiveFinalizable({ rootAgentId: 'active-root', force: true }, fixture)
+    );
+  });
 
   await test(
     'simulated prod local backend requires configured key and roundtrips',
@@ -399,6 +452,16 @@ async function main(): Promise<void> {
             if (commandName === 'ListObjectsV2Command') {
               assert.strictEqual(input.Bucket, 'unit-trace-bucket');
               const prefix = String(input.Prefix ?? '');
+              if (input.Delimiter === '/') {
+                return {
+                  CommonPrefixes: [...objects.keys()]
+                    .filter((key) => key.startsWith(prefix))
+                    .map((key) => key.slice(prefix.length).split('/')[0])
+                    .filter((id, index, ids) => id !== '' && ids.indexOf(id) === index)
+                    .sort()
+                    .map((id) => ({ Prefix: `${prefix}${id}/` })),
+                };
+              }
               return {
                 Contents: [...objects.keys()]
                   .filter((key) => key.startsWith(prefix))
@@ -441,13 +504,75 @@ async function main(): Promise<void> {
             listed.map((item) => item.path),
             ['llm/prod-r2.json.gz.enc']
           );
+          assert.deepStrictEqual(await listArchiveBundleIds(), ['prod-r2-agent']);
           assert.deepStrictEqual(sentCommands.sort(), [
             'GetObjectCommand',
             'GetObjectCommand',
             'ListObjectsV2Command',
+            'ListObjectsV2Command',
             'PutObjectCommand',
             'PutObjectCommand',
           ]);
+        } finally {
+          (S3Client.prototype as unknown as { send: (command: unknown) => Promise<unknown> }).send =
+            originalSend;
+        }
+      }
+    )
+  );
+
+  await test(
+    'R2 backend retries transient TLS write failures with a fresh S3 client',
+    withEnv(
+      {
+        NODE_ENV: 'production',
+        ENVIRONMENT: 'production',
+        TRACE_ARCHIVE_ENABLED: '1',
+        TRACE_ARCHIVE_BACKEND: 'r2',
+        TRACE_ARCHIVE_ENCRYPTION_KEY_B64: Buffer.alloc(32, 11).toString('base64'),
+        R2_ACCOUNT_ID: 'retry-account',
+        R2_ACCESS_KEY_ID: 'retry-access',
+        R2_SECRET_ACCESS_KEY: 'retry-secret',
+        R2_BUCKET_TRACE_ARCHIVE: 'retry-trace-bucket',
+      },
+      async () => {
+        const originalSend = (
+          S3Client.prototype as unknown as { send: (command: unknown) => Promise<unknown> }
+        ).send;
+        const clients = new Set<unknown>();
+        let putAttempts = 0;
+        const objects = new Map<string, Buffer>();
+        (S3Client.prototype as unknown as { send: (command: unknown) => Promise<unknown> }).send =
+          async function send(command: unknown) {
+            clients.add(this);
+            const commandName = command?.constructor?.name;
+            const input = (command as { input?: Record<string, unknown> }).input ?? {};
+            if (commandName !== 'PutObjectCommand') {
+              throw new Error(`unexpected S3 command ${String(commandName)}`);
+            }
+            putAttempts += 1;
+            if (putAttempts === 1) {
+              throw new Error('ssl3_read_bytes:sslv3 alert bad record mac');
+            }
+            assert.strictEqual(input.Bucket, 'retry-trace-bucket');
+            objects.set(String(input.Key), bodyToBuffer(input.Body));
+            return {};
+          };
+        try {
+          const result = await archiveBytes({
+            rootAgentId: 'retry-r2-agent',
+            objectPath: 'db/end.fixture.json.gz.enc',
+            body: Buffer.from('{"retry":true}\n', 'utf8'),
+            contentType: 'application/json',
+          });
+          assert.ok(result);
+          assert.strictEqual(putAttempts, 3);
+          assert(
+            clients.size >= 2,
+            'retry after a TLS transport failure must recreate the cached S3 client'
+          );
+          assert(objects.has('trace-archive/retry-r2-agent/db/end.fixture.json.gz.enc'));
+          assert(objects.has('trace-archive/retry-r2-agent/db/end.fixture.json.gz.enc.meta.json'));
         } finally {
           (S3Client.prototype as unknown as { send: (command: unknown) => Promise<unknown> }).send =
             originalSend;
@@ -475,13 +600,7 @@ async function main(): Promise<void> {
     )
   );
 
-  if (failures.length > 0) {
-    console.error('\nFailures:');
-    for (const failure of failures) console.error(`  - ${failure}`);
-    process.exit(1);
-  }
-
-  console.log(`\ntrace-archive unit tests: ${passed} passed`);
+  finish();
 }
 
 main().catch((error: unknown) => {

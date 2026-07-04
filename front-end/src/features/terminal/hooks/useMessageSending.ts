@@ -10,6 +10,7 @@ import * as amplitude from '@amplitude/analytics-browser';
 
 import { useToast } from '@/hooks/use-toast';
 import { DEFAULT_FAST_MODE_USER_IDS, FAST_MODE_USER_IDS } from '@/lib/fastModeAccounts';
+import { SIMULATOR_USER_IDS } from '@/lib/simulatorAccounts';
 
 import { DEFAULT_MODEL, DEFAULT_PRICE_LIMIT_CENTS } from '../config';
 import { createAgent, postMessage, resumeAgent, checkAndRespondToAttention } from '../api';
@@ -57,12 +58,15 @@ export function useMessageSending({
   const [pendingPriceLimitCents, setPendingPriceLimitCents] = useState(DEFAULT_PRICE_LIMIT_CENTS);
   // Fast Mode aggressive cache — session-only, account-scoped default, never persisted client-side.
   const [fastMode, setFastModeState] = useState(false);
+  // World Model simulator — session-only, account-scoped, default off, never persisted client-side.
+  const [simulatorMode, setSimulatorModeState] = useState(false);
 
   const messageInputRef = useRef<string>('');
   const pendingSubmitRef = useRef(false);
   const autoSubmitRef = useRef(false);
   const fastModeUserOverrideRef = useRef(false);
   const userCanUseFastMode = userId != null && FAST_MODE_USER_IDS.includes(userId);
+  const userCanUseSimulator = userId != null && SIMULATOR_USER_IDS.includes(userId);
 
   useEffect(() => {
     messageInputRef.current = messageInput;
@@ -98,6 +102,14 @@ export function useMessageSending({
   const setFastMode = useCallback((enabled: boolean) => {
     fastModeUserOverrideRef.current = true;
     setFastModeState(enabled);
+  }, []);
+
+  useEffect(() => {
+    if (!userCanUseSimulator) setSimulatorModeState(false);
+  }, [userCanUseSimulator]);
+
+  const setSimulatorMode = useCallback((enabled: boolean) => {
+    setSimulatorModeState(enabled);
   }, []);
 
   // Sync model from agent detail
@@ -233,6 +245,8 @@ export function useMessageSending({
     setPendingPriceLimitCents,
     fastMode,
     setFastMode,
+    simulatorMode,
+    setSimulatorMode,
     handleSendMessage,
   };
 }

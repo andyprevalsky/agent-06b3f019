@@ -160,6 +160,37 @@ def test_codex_key_from_hash_uses_canonical_request_fingerprint():
     assert normalize.codex_key_from_hash("abc", {"input": []}).startswith("fastmode:v42:codex:abc:c:")
 
 
+def test_world_model_scope_empty_for_real_and_shadow_runs(monkeypatch):
+    monkeypatch.delenv("BENCHMARK_WORLD_MODEL_MODE", raising=False)
+    real_key = normalize.build_key("llm", "goal", "detail")
+    assert real_key == f"fastmode:{normalize.CACHE_KEY_VERSION}:llm:{normalize.goal_hash('goal')}:detail"
+    assert normalize.world_model_cache_scope() == ""
+    # Shadow mode executes real calls — those cache entries are real signal.
+    monkeypatch.setenv("BENCHMARK_WORLD_MODEL_MODE", "shadow")
+    assert normalize.build_key("llm", "goal", "detail") == real_key
+
+
+def test_world_model_scope_partitions_simulated_runs(monkeypatch):
+    monkeypatch.delenv("BENCHMARK_WORLD_MODEL_MODE", raising=False)
+    real_key = normalize.build_key("llm", "goal", "detail")
+    real_global = normalize.build_global_key("web_fetch", "abc")
+    real_codex = normalize.codex_key_from_hash("gh", {"input": []})
+
+    monkeypatch.setenv("BENCHMARK_WORLD_MODEL_MODE", "simulate")
+    monkeypatch.setenv("WMH_MODEL_NAME", "rose archive/v2")
+    sim_key = normalize.build_key("llm", "goal", "detail")
+    sim_global = normalize.build_global_key("web_fetch", "abc")
+    sim_codex = normalize.codex_key_from_hash("gh", {"input": []})
+
+    assert sim_key != real_key and sim_global != real_global and sim_codex != real_codex
+    for key in (sim_key, sim_global, sim_codex):
+        assert f":sim.rose-archive-v2:" in key
+
+    # Different world models get different namespaces.
+    monkeypatch.setenv("WMH_MODEL_NAME", "rose-archive-v3")
+    assert normalize.build_key("llm", "goal", "detail") != sim_key
+
+
 def test_canonical_messages_ignore_separate_dynamic_user_context_system_message_churn():
     def request(recent_message: str, integrations: list[str], user_text: str = "same goal"):
         return {

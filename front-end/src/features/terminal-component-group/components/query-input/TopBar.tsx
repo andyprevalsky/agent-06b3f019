@@ -2,17 +2,21 @@
  * STATE MACHINE: TopBar
  *
  * VISIBILITY STATE:
- * [BASE_CONTROLS] --> always renders write-lock, toolset, cost, context, settings
+ * [BASE_CONTROLS] --> always renders write-lock (far left), toolset (wrench, left of fast mode), cost, context, settings
+ *     |
+ *     +--> [TEST_PROMPTS_VISIBLE] when parent says viewport is desktop and account is dev/admin
+ *     |      (doc icon, right after write-lock)
  *     |
  *     +--> [FAST_MODE_VISIBLE] when parent says the account is allow-listed
  *     |
- *     +--> [TEST_PROMPTS_VISIBLE] when parent says viewport is desktop and account is dev/admin
+ *     +--> [SIMULATOR_VISIBLE] when parent says the account is simulator-allow-listed
  *
  * TopBar owns layout only; account and viewport gating stay in QueryInputBody.
  */
 
 import WriteLockToggle from '../WriteLockToggle';
 import FastModeToggle from '../FastModeToggle';
+import SimulatorToggle from '../SimulatorToggle';
 import RoseToolSetChip from '../RoseToolSetChip';
 import TestPromptsSelector from '../TestPromptsSelector';
 import AgentSettingsDialog from '../AgentSettingsDialog';
@@ -29,6 +33,9 @@ interface TopBarProps {
   showFastMode?: boolean;
   fastMode?: boolean;
   onFastModeChange?: (enabled: boolean) => void;
+  showSimulator?: boolean;
+  simulatorMode?: boolean;
+  onSimulatorModeChange?: (enabled: boolean) => void;
   onSelectPrompt: (prompt: string, files?: File[]) => void;
   pendingPriceLimitCents: number;
   priceLimit: UsePriceLimitResult;
@@ -45,6 +52,9 @@ export function TopBar({
   showFastMode = false,
   fastMode = false,
   onFastModeChange,
+  showSimulator = false,
+  simulatorMode = false,
+  onSimulatorModeChange,
   onSelectPrompt,
   pendingPriceLimitCents,
   priceLimit,
@@ -62,11 +72,14 @@ export function TopBar({
             onUpdate={onAgentUpdate}
           />
         </div>
+        {showTestPrompts && <TestPromptsSelector onSelectPrompt={onSelectPrompt} />}
+        <RoseToolSetChip />
         {showFastMode && (
           <FastModeToggle enabled={fastMode} onChange={onFastModeChange ?? (() => {})} />
         )}
-        <RoseToolSetChip />
-        {showTestPrompts && <TestPromptsSelector onSelectPrompt={onSelectPrompt} />}
+        {showSimulator && (
+          <SimulatorToggle enabled={simulatorMode} onChange={onSimulatorModeChange ?? (() => {})} />
+        )}
       </div>
       <div className="flex items-center gap-2">
         <CostIndicator

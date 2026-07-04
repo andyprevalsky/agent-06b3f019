@@ -1,5 +1,5 @@
 /**
- * Blackbox tests for the Fast Mode toggle + its account gating.
+ * Blackbox tests for the Fast Mode + Simulator toggles and their account gating.
  *
  * Proves checklist items:
  *  - #2  the toggle is hidden unless the user is in FAST_MODE_USER_IDS
@@ -13,8 +13,10 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import FastModeToggle from '@/features/terminal-component-group/components/FastModeToggle';
 import QueryInput from '@/features/terminal-component-group/components/QueryInput';
 import RoseToolSetChip from '@/features/terminal-component-group/components/RoseToolSetChip';
+import SimulatorToggle from '@/features/terminal-component-group/components/SimulatorToggle';
 import { TopBar } from '@/features/terminal-component-group/components/query-input/TopBar';
 import { FAST_MODE_USER_IDS } from '@/lib/fastModeAccounts';
+import { SIMULATOR_USER_IDS } from '@/lib/simulatorAccounts';
 import { TOOL_ICONS } from '@/lib/toolIcons';
 
 const hookMocks = vi.hoisted(() => ({
@@ -46,7 +48,21 @@ vi.mock('@/features/terminal-component-group/hooks', async (importOriginal) => {
   };
 });
 
-function renderTopBar(showFastMode: boolean, fastMode = false, onFastModeChange = vi.fn()) {
+function renderTopBar({
+  showFastMode,
+  fastMode = false,
+  onFastModeChange = vi.fn(),
+  showSimulator = false,
+  simulatorMode = false,
+  onSimulatorModeChange = vi.fn(),
+}: {
+  showFastMode: boolean;
+  fastMode?: boolean;
+  onFastModeChange?: (enabled: boolean) => void;
+  showSimulator?: boolean;
+  simulatorMode?: boolean;
+  onSimulatorModeChange?: (enabled: boolean) => void;
+}) {
   const noop = vi.fn();
   return render(
     <TooltipProvider>
@@ -55,6 +71,9 @@ function renderTopBar(showFastMode: boolean, fastMode = false, onFastModeChange 
         showFastMode={showFastMode}
         fastMode={fastMode}
         onFastModeChange={onFastModeChange}
+        showSimulator={showSimulator}
+        simulatorMode={simulatorMode}
+        onSimulatorModeChange={onSimulatorModeChange}
         onSelectPrompt={noop}
         pendingPriceLimitCents={100}
         priceLimit={
@@ -113,29 +132,34 @@ describe('Fast Mode account gating', () => {
   });
 
   it('#2 hides the toggle when not allow-listed', () => {
-    renderTopBar(false);
+    renderTopBar({ showFastMode: false });
     expect(screen.queryByTestId('fast-mode-toggle')).toBeNull();
   });
 
   it('#2 shows the toggle when allow-listed', () => {
-    renderTopBar(true);
+    renderTopBar({ showFastMode: true });
     expect(screen.getByTestId('fast-mode-toggle')).not.toBeNull();
   });
 
-  it('places Fast Mode between Safe Writes and Rose-ToolSet', () => {
-    const { container } = renderTopBar(true);
+  it('places Rose-ToolSet before Fast Mode and Simulator', () => {
+    const { container } = renderTopBar({ showFastMode: true, showSimulator: true });
     const safeWrites = screen.getByText('Safe Writes');
     const fastMode = screen.getByTestId('fast-mode-toggle');
+    const simulator = screen.getByTestId('simulator-toggle');
     const toolSet = screen.getByTitle('View Rose system tools');
 
-    expect(
-      safeWrites.compareDocumentPosition(fastMode) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).not.toBe(0);
-    expect(fastMode.compareDocumentPosition(toolSet) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(
+    expect(safeWrites.compareDocumentPosition(toolSet) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(
+      0,
+    );
+    expect(toolSet.compareDocumentPosition(fastMode) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(
+      0,
+    );
+    expect(fastMode.compareDocumentPosition(simulator) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(
       0,
     );
     expect(container.textContent).toContain('Safe Writes');
     expect(screen.getByTestId('fast-mode-toggle')).toHaveTextContent('');
+    expect(screen.getByTestId('simulator-toggle')).toHaveTextContent('');
     expect(screen.getByTitle('View Rose system tools')).toHaveTextContent('');
   });
 
@@ -157,13 +181,58 @@ describe('Fast Mode account gating', () => {
     );
 
     expect(screen.queryByTitle('Select a test prompt')).toBeNull();
-    expect(screen.queryByText('Test-Prompts')).toBeNull();
+    expect(screen.queryByLabelText('Select a test prompt')).toBeNull();
   });
 
   it('config allow-list contains exactly the two intended accounts', () => {
     expect(FAST_MODE_USER_IDS).toContain('1f85ff25-6e29-4c1b-8739-f917bd101a30'); // Andy
     expect(FAST_MODE_USER_IDS).toContain('43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9'); // Tamy
     expect(FAST_MODE_USER_IDS.length).toBe(2);
+  });
+});
+
+describe('Simulator account gating', () => {
+  it('shows the simulator toggle in a query box only for Andy', () => {
+    hookMocks.authUserId = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+
+    render(
+      <TooltipProvider>
+        <QueryInput
+          value=""
+          onChange={vi.fn()}
+          onSubmit={vi.fn()}
+          simulatorMode={false}
+          onSimulatorModeChange={vi.fn()}
+          showModelSelector={false}
+        />
+      </TooltipProvider>,
+    );
+
+    expect(screen.getByTestId('simulator-toggle')).toBeInTheDocument();
+    expect(screen.getByTestId('simulator-toggle')).toHaveAccessibleName('Simulator Off');
+  });
+
+  it('hides the simulator toggle for Fast Mode users who are not Andy', () => {
+    hookMocks.authUserId = '43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9';
+
+    render(
+      <TooltipProvider>
+        <QueryInput
+          value=""
+          onChange={vi.fn()}
+          onSubmit={vi.fn()}
+          simulatorMode={false}
+          onSimulatorModeChange={vi.fn()}
+          showModelSelector={false}
+        />
+      </TooltipProvider>,
+    );
+
+    expect(screen.queryByTestId('simulator-toggle')).toBeNull();
+  });
+
+  it('config allow-list contains exactly Andy', () => {
+    expect(SIMULATOR_USER_IDS).toEqual(['1f85ff25-6e29-4c1b-8739-f917bd101a30']);
   });
 });
 
@@ -244,6 +313,43 @@ describe('FastModeToggle behavior', () => {
     expect(btn).toHaveAttribute('aria-pressed', 'true');
     expect(btn).toHaveAccessibleName('Fast Mode On');
     expect(btn).toHaveTextContent('');
+  });
+});
+
+describe('SimulatorToggle behavior', () => {
+  it('is default-off when controlled value starts false', () => {
+    render(
+      <TooltipProvider>
+        <SimulatorToggle enabled={false} onChange={vi.fn()} />
+      </TooltipProvider>,
+    );
+    const btn = screen.getByTestId('simulator-toggle');
+    expect(btn).toHaveAttribute('aria-pressed', 'false');
+    expect(btn).toHaveAccessibleName('Simulator Off');
+    expect(btn).toHaveTextContent('');
+  });
+
+  it('toggles to true and renders the starry on state', () => {
+    const onChange = vi.fn();
+    render(
+      <TooltipProvider>
+        <SimulatorToggle enabled={false} onChange={onChange} />
+      </TooltipProvider>,
+    );
+    act(() => {
+      screen.getByTestId('simulator-toggle').click();
+    });
+    expect(onChange).toHaveBeenCalledWith(true);
+
+    render(
+      <TooltipProvider>
+        <SimulatorToggle enabled={true} onChange={vi.fn()} />
+      </TooltipProvider>,
+    );
+    const enabledButtons = screen.getAllByTestId('simulator-toggle');
+    expect(enabledButtons[1]).toHaveAttribute('aria-pressed', 'true');
+    expect(enabledButtons[1]).toHaveAttribute('data-state', 'on');
+    expect(enabledButtons[1]).toHaveAccessibleName('Simulator On');
   });
 });
 

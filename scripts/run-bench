@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR/agents"
+
+if [[ "${1:-}" == "list" || "${1:-}" == "--list" ]]; then
+    exec python -u benchmarks/run_benchmark.py --list
+fi
+
+if [[ "${1:-}" == "eval" || "${1:-}" == "eval-suite" ]]; then
+    shift
+    exec python -u benchmarks/local.py --eval-suite "$@"
+fi
+
+exec python -u benchmarks/local.py "$@"

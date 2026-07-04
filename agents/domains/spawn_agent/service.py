@@ -247,7 +247,7 @@ async def spawn_explore_agent_activity(  # noqa: C901
     # agent_id, which carries the persisted flag). Resolve it once for inner
     # request caches only. Do not cache the terminal explore result: replaying the
     # whole tool hides the inner LLM/web_search/web_fetch waterfall from the UI.
-    _explore_fast_mode_enabled, _explore_fast_mode_goal, _explore_fast_mode_write_enabled = (
+    _explore_fast_mode_enabled, _explore_fast_mode_goal, _explore_fast_mode_write_enabled, _ = (
         await resolve_agent_fast_mode(agent_id)
     )
     _explore_fast_mode_goal = goal or _explore_fast_mode_goal

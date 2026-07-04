@@ -50,6 +50,7 @@ from providers.fast_cache.context import (
 from providers.fast_cache.context import (
     set_context as set_fast_cache_context,
 )
+from providers.fast_cache.rose_cache import cached_complete
 from providers.rose import (
     ClaudeAuthContext,
     ComputeAuthContext,
@@ -809,6 +810,7 @@ def build_verifier_context_messages(  # noqa: C901
     content block. Anthropic + OpenAI both accept content arrays mixed with
     plain-string messages, so the rest of the conversation remains text-only.
     """
+    context = _filter_superseded_browser_protocol_failures(context)
     sorted_context = sorted(
         context,
         key=lambda m: m.get("timestamp", "1970-01-01"),
@@ -962,6 +964,77 @@ def _filter_context_for_execute_verifier(context: List[Dict[str, Any]]) -> List[
             continue
         execute_context.append(msg)
     return execute_context
+
+
+def _context_timestamp(msg: Dict[str, Any]) -> datetime:
+    ts = msg.get("timestamp") or msg.get("created_at") or msg.get("createdAt")
+    if isinstance(ts, datetime):
+        return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+    if isinstance(ts, str) and ts:
+        try:
+            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+    return datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _is_successful_browser_tool_result(msg: Dict[str, Any]) -> bool:
+    metadata = msg.get("metadata", {}) or {}
+    if msg.get("role") != "TOOL":
+        return False
+    if metadata.get("toolName") != "spawn_browser_agent":
+        return False
+    if metadata.get("toolStatus") != "FINISHED":
+        return False
+    title = str(metadata.get("title") or "")
+    text = str(msg.get("text") or "")
+    if "SUCCESS" in text and title in {"Browser automation complete", "✓ Task Completed"}:
+        return True
+    return isinstance(metadata.get("structured_response"), dict) or isinstance(metadata.get("structuredResponse"), dict)
+
+
+def _is_superseded_browser_protocol_failure(msg: Dict[str, Any]) -> bool:
+    metadata = msg.get("metadata", {}) or {}
+    text = str(msg.get("text") or "")
+    title = str(metadata.get("title") or "")
+    if "unsupported protocol" not in text:
+        return False
+    if metadata.get("toolName") == "spawn_browser_agent":
+        return True
+    if metadata.get("toolName") == "attempt_completion" and metadata.get("verifierMessage"):
+        return "browser agent failed to initialize" in text.lower() or "spawn_browser_agent" in text
+    return "browser agent failed to initialize" in text.lower() and "Verifier rejected" in title
+
+
+def _filter_superseded_browser_protocol_failures(context: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drop stale browser-init protocol failures after later browser success.
+
+    Local browser/proxy initialization can intermittently emit
+    "unsupported protocol" failures. Once a later browser-agent result has
+    completed successfully, that stale failure is no longer useful evidence and
+    can cause both the verifier and the next agent turn to rerun completed work.
+    """
+    successful_browser_times = [
+        _context_timestamp(msg)
+        for msg in context
+        if _is_successful_browser_tool_result(msg)
+    ]
+    if not successful_browser_times:
+        return context
+
+    latest_success = max(successful_browser_times)
+    return [
+        msg
+        for msg in context
+        if not (
+            _is_superseded_browser_protocol_failure(msg)
+            and _context_timestamp(msg) < latest_success
+        )
+    ]
+
+
+def _verifier_context_has_successful_browser_result(context: List[Dict[str, Any]]) -> bool:
+    return any(_is_successful_browser_tool_result(msg) for msg in context)
 
 
 def convert_context_to_messages(  # noqa: C901
@@ -1215,6 +1288,7 @@ async def build_llm_messages(  # noqa: C901
     """
     # Filter TOOL messages: skip IN_PROGRESS, keep only latest terminal message
     # (FINISHED/ERROR) per toolCallId.
+    context = _filter_superseded_browser_protocol_failures(context)
 
     def parse_timestamp(ts) -> datetime:
         """Parse timestamp to datetime, return epoch for invalid/missing."""
@@ -4100,6 +4174,25 @@ async def check_progress(  # noqa: C901
                     after=len(context),
                 )
 
+        browser_success_context = (
+            call_site in ("verifier_execute", "verifier_post_dag")
+            and _verifier_context_has_successful_browser_result(context)
+        )
+        if browser_success_context and fast_mode_goal and fast_cache_should_write:
+            set_fast_cache_context(
+                FastCacheContext(
+                    enabled=False,
+                    goal=fast_mode_goal,
+                    base_step=fast_mode_step,
+                    write_enabled=True,
+                )
+            )
+            logger.info(
+                "Verifier fast-cache read disabled for browser-success context",
+                call_site=call_site,
+                fast_mode_step=fast_mode_step,
+            )
+
         _safe_heartbeat("Checking progress with LLM judge")
 
         if call_site == "verifier_execute" and schema_for_call:
@@ -4659,7 +4752,7 @@ async def set_response_schema_activity(
     if not write_through_enabled and agent_id:
         from providers.fast_cache import client as _fc_client
 
-        _, _, write_through_enabled = await _fc_client.resolve_agent_fast_mode(agent_id)
+        _, _, write_through_enabled, _ = await _fc_client.resolve_agent_fast_mode(agent_id)
     if goal and (fast_mode_cache_enabled or write_through_enabled):
         from providers.fast_cache import client as _fc_client
         from providers.fast_cache import normalize as _fc_norm

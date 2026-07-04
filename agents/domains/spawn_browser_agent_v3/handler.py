@@ -38,6 +38,7 @@ from helpers.file_resolution import (
 from helpers.messages import stream_browser_cursor
 from helpers.model_pricing import get_model_pricing_with_fallback
 from helpers.tracing import span, traced
+from helpers.world_model_runtime import WorldModelToolExecutionAdapter
 from loop.activity_helper import call_temporal_activity_from_activity
 from providers.fast_cache.browser_use_cache import cached_browser_decision
 from providers.fast_cache.context import write_through_enabled_for_user
@@ -120,6 +121,43 @@ from .service_crypto import (
 from .types import ClaudeTokenState
 
 logger = structlog.get_logger()
+
+
+def _patch_cdp_use_websocket_proxy_default() -> None:
+    """Force cdp-use CDP sockets to connect directly under websockets>=15.
+
+    websockets 15 defaults client proxy discovery to proxy=True. cdp-use 1.4.5
+    does not pass a proxy argument, so Steel CDP sockets can be misrouted
+    through system proxy discovery and fail before browser-use can attach.
+    Playwright validation uses a separate client and is unaffected.
+    """
+    try:
+        import cdp_use.client as cdp_client
+    except Exception as exc:
+        logger.warning("Unable to patch cdp-use websocket proxy default", error=extract_error_message(exc))
+        return
+
+    connect = cdp_client.websockets.connect
+    if getattr(connect, "_rose_direct_cdp_patch", False):
+        return
+
+    try:
+        parameters = inspect.signature(connect).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+
+    supports_proxy = "proxy" in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+    if not supports_proxy:
+        return
+
+    def connect_direct(*args: Any, **kwargs: Any) -> Any:
+        kwargs.setdefault("proxy", None)
+        return connect(*args, **kwargs)
+
+    setattr(connect_direct, "_rose_direct_cdp_patch", True)
+    cdp_client.websockets.connect = connect_direct
 
 
 _FALSE_ENV_VALUES = {"0", "false", "no", "off", "disabled"}
@@ -1928,6 +1966,73 @@ async def _finalize_browser_recording_for_fe_resilient(
 @activity.defn
 @traced("spawn_browser_agent_activity_v3")
 async def spawn_browser_agent_activity_v3(  # noqa: C901
+    user_id: str,
+    agent_id: str,
+    goal: str,
+    tool_call_id: str,
+    task_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    cdp_url: Optional[str] = None,
+    is_resume: bool = False,
+    output_schema: Optional[Dict[str, Any]] = None,
+    attachments: Optional[List[Dict[str, Any]]] = None,
+    write_lock_enabled: bool = True,
+    start_url: str = "",
+    write_lock_resume_state: Optional[Dict[str, Any]] = None,
+    system_name: str = "Rose",
+    use_claude_mode: bool = True,
+    gpt_token: Optional[str] = None,
+    gpt_account_id: Optional[str] = None,
+    gpt_token_source: Optional[str] = None,
+    gpt_token_pool_id: Optional[str] = None,
+    fast_mode_cache_enabled: bool = False,
+) -> Dict[str, Any]:
+    async def real_executor(_tool_name: str, _tool_args: Dict[str, Any], _tool_call_id: str) -> Dict[str, Any]:
+        return await _spawn_browser_agent_activity_v3_real(
+            user_id=user_id,
+            agent_id=agent_id,
+            goal=goal,
+            tool_call_id=tool_call_id,
+            task_id=task_id,
+            session_id=session_id,
+            cdp_url=cdp_url,
+            is_resume=is_resume,
+            output_schema=output_schema,
+            attachments=attachments,
+            write_lock_enabled=write_lock_enabled,
+            start_url=start_url,
+            write_lock_resume_state=write_lock_resume_state,
+            system_name=system_name,
+            use_claude_mode=use_claude_mode,
+            gpt_token=gpt_token,
+            gpt_account_id=gpt_account_id,
+            gpt_token_source=gpt_token_source,
+            gpt_token_pool_id=gpt_token_pool_id,
+            fast_mode_cache_enabled=fast_mode_cache_enabled,
+        )
+
+    return await WorldModelToolExecutionAdapter.from_env(agent_id=agent_id).execute(
+        "spawn_browser_agent",
+        {
+            "user_id": user_id,
+            "agent_id": agent_id,
+            "goal": goal,
+            "task_id": task_id,
+            "session_id": session_id,
+            "is_resume": is_resume,
+            "output_schema": output_schema,
+            "attachments": attachments,
+            "write_lock_enabled": write_lock_enabled,
+            "start_url": start_url,
+            "system_name": system_name,
+            "use_claude_mode": use_claude_mode,
+        },
+        tool_call_id,
+        real_executor,
+    )
+
+
+async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     user_id: str,
     agent_id: str,
     goal: str,

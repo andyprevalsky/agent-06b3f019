@@ -88,6 +88,7 @@ if $DB_FOUND; then
   LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria"
   export DATABASE_URL="$LOCAL_DB_URL"
   export DIRECT_URL="$LOCAL_DB_URL"
+  export FAST_MODE_CACHE_DATABASE_URL="${FAST_MODE_CACHE_DATABASE_URL:-$LOCAL_DB_URL}"
   if command -v psql >/dev/null 2>&1; then
     psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
 DO $$

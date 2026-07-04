@@ -44,6 +44,8 @@ export interface QueryInputProps {
   onModelChange?: (model: string) => void;
   fastMode?: boolean;
   onFastModeChange?: (enabled: boolean) => void;
+  simulatorMode?: boolean;
+  onSimulatorModeChange?: (enabled: boolean) => void;
   availableModels?: Model[];
   modelsLoading?: boolean;
   contextPercentage?: number;

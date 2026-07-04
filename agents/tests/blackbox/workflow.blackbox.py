@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -3096,6 +3097,53 @@ async def test_workflow_execute_tool_invalid_params_returns_error_and_posts_tool
         _restore_workflow(original)
 
 
+async def test_workflow_execute_tool_world_model_simulate_runs_agent_facing_executor():
+    """World-model simulate mode must not short-circuit agent-facing tools."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-1"
+    wf.user_id = "user-1"
+    wf.current_phase = "EXECUTE"
+    wf.goal = "root goal"
+    captured_kwargs: Dict[str, Any] = {}
+
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    import workflows.agent_workflow as workflow_module
+
+    async def fake_web_search_executor(**kwargs):
+        captured_kwargs.update(kwargs)
+        return {"content": "real executor result"}
+
+    original_executor = workflow_module.TOOL_EXECUTORS["web_search"]
+    workflow_module.TOOL_EXECUTORS["web_search"] = fake_web_search_executor
+    old_env = {
+        "BENCHMARK_WORLD_MODEL_MODE": os.environ.get("BENCHMARK_WORLD_MODEL_MODE"),
+        "WMH_BASE_URL": os.environ.get("WMH_BASE_URL"),
+        "WMH_MODEL_NAME": os.environ.get("WMH_MODEL_NAME"),
+        "WMH_SESSION_ID": os.environ.get("WMH_SESSION_ID"),
+    }
+    try:
+        os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "simulate"
+        os.environ["WMH_BASE_URL"] = "http://wmh.test"
+        os.environ["WMH_MODEL_NAME"] = "rose-model"
+        os.environ["WMH_SESSION_ID"] = "session-1"
+        result = await wf._execute_tool("web_search", {"query": "rose labs"}, "tc-wmh")
+        assert result["success"] is True
+        assert result["result"] == {"content": "real executor result"}
+        assert captured_kwargs["tool_call"]["tool"] == "web_search"
+        assert captured_kwargs["tool_call_id"] == "tc-wmh"
+        assert captured_kwargs["agent_id"] == "agent-1"
+        assert "world_model_step_activity" not in [call[0] for call in fake.activity_calls]
+    finally:
+        workflow_module.TOOL_EXECUTORS["web_search"] = original_executor
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        _restore_workflow(original)
+
+
 async def test_workflow_execute_tool_legacy_spawn_agent_receives_phase():
     """Legacy spawn_agent dispatch must pass current_phase to runtime validators."""
     wf = _bare_workflow_instance()
@@ -3628,6 +3676,10 @@ async def run_all_tests():
     await r.record_async(
         "wf_execute_tool_invalid_params_posts_event",
         test_workflow_execute_tool_invalid_params_returns_error_and_posts_tool_event,
+    )
+    await r.record_async(
+        "wf_execute_tool_world_model_simulate_runs_agent_facing_executor",
+        test_workflow_execute_tool_world_model_simulate_runs_agent_facing_executor,
     )
     await r.record_async(
         "wf_execute_tool_legacy_spawn_agent_phase",

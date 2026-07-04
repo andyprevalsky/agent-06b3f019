@@ -1,5 +1,5 @@
 import { maybeDumpFastCacheRequest } from './fastCacheRequestDump';
-import { CACHE_KEY_VERSION } from './fastCacheNormalizeConstants';
+import { CACHE_KEY_VERSION, worldModelCacheScope } from './fastCacheNormalizeConstants';
 import { stripSecrets } from './fastCacheNormalizeCore';
 
 const CACHEABLE_CODEX_RESPONSE_PATH = '/backend-api/codex/responses';
@@ -45,7 +45,7 @@ export function codeAgentSlotKey(
   traceHash: string,
   ordinal: number
 ): string {
-  return `fastmode:${CACHE_KEY_VERSION}:${kind}:${traceHash}:slot:${ordinal}`;
+  return `fastmode:${CACHE_KEY_VERSION}:${worldModelCacheScope()}${kind}:${traceHash}:slot:${ordinal}`;
 }
 
 interface TraceOrdinalReservation {

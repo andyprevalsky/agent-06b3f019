@@ -2407,6 +2407,59 @@ async def test_check_progress_disables_fast_cache_read_after_verifier_parse_fail
     assert seen_contexts == [(True, True), (False, True)]
 
 
+async def test_check_progress_browser_success_uses_fast_cache_write_only():
+    """Live browser evidence must not be overwritten by a stale verifier cache replay."""
+    from helpers.llm import check_progress
+    from providers.fast_cache.context import current_context, set_context
+
+    seen_contexts = []
+
+    async def fake_call_llm_verifier(messages, *_args, **_kwargs):
+        ctx = current_context()
+        seen_contexts.append((ctx.read_enabled if ctx else None, ctx.should_write if ctx else None))
+        return (
+            {"score": 1.0, "reasoning": "browser evidence accepted"},
+            {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        )
+
+    context = [
+        {"role": "USER", "text": "complete the FCaptcha demo", "timestamp": "2026-07-04T03:20:45Z"},
+        {
+            "role": "TOOL",
+            "text": "**Status**: ✅ SUCCESS",
+            "timestamp": "2026-07-04T03:24:06Z",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "title": "Browser automation complete",
+                "structured_response": {
+                    "fcaptcha_risk_score_display": "0.16",
+                    "checkbox_mode_passed": True,
+                    "invisible_form_submitted": True,
+                    "visible_verdict_text": "Verified! / Form submission allowed!",
+                },
+            },
+        },
+    ]
+
+    try:
+        with patch("temporalio.activity.heartbeat"), patch("helpers.llm._call_llm_verifier", fake_call_llm_verifier):
+            result = await check_progress(
+                context=context,
+                verifier_system_prompt="VERIFY",
+                model="rose",
+                call_site="verifier_execute",
+                fast_mode_cache_enabled=True,
+                fast_mode_goal="complete the FCaptcha demo",
+                fast_mode_step=2,
+            )
+    finally:
+        set_context(None)
+
+    assert result["score"] == 1.0
+    assert seen_contexts == [(False, True)]
+
+
 async def test_check_progress_extracts_browser_recording_metadata_from_context():
     """Execute verifier dumps inherit recording metadata from browser tool messages."""
     from helpers.llm import check_progress
@@ -3311,6 +3364,103 @@ def test_build_verifier_context_messages_filters_subagent_tree_rows():
     assert "child UI summary should be hidden" not in content
     assert '"tool_name": "spawn_general_purpose_agent_for_each"' in content
     assert '"items": [{"index": 0, "agent_id": "child-1", "status": "completed"' in content
+
+
+def test_build_verifier_context_messages_prunes_superseded_browser_protocol_failure():
+    """A later successful browser result should supersede stale protocol-init verifier feedback."""
+    from helpers.llm import build_verifier_context_messages
+
+    ctx = [
+        {"role": "USER", "text": "Use a browser agent to complete FCaptcha.", "timestamp": "2026-07-04T02:53:30Z"},
+        {
+            "role": "TOOL",
+            "text": (
+                "Verifier score: 0%\n\nReasoning: The browser agent failed to initialize "
+                "with an 'unsupported protocol' error."
+            ),
+            "timestamp": "2026-07-04T02:56:48Z",
+            "metadata": {
+                "toolName": "attempt_completion",
+                "toolCallId": "tc-attempt-1",
+                "toolStatus": "FINISHED",
+                "title": "⚖️ Verifier rejected (0%) — continue task",
+                "verifierMessage": True,
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "**Status**: ✅ SUCCESS",
+            "timestamp": "2026-07-04T02:59:57Z",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "tc-browser-1",
+                "toolStatus": "FINISHED",
+                "title": "Browser automation complete",
+                "structured_response": {
+                    "fcaptcha_risk_score_display": "0.16",
+                    "checkbox_mode_passed": True,
+                    "invisible_form_submitted": True,
+                    "visible_verdict_text": "Verified! / Form submission allowed!",
+                },
+            },
+        },
+    ]
+
+    messages = build_verifier_context_messages(ctx, "system")
+    content = "\n".join(str(m["content"]) for m in messages)
+
+    assert "unsupported protocol" not in content
+    assert '"fcaptcha_risk_score_display": "0.16"' in content
+    assert '"checkbox_mode_passed": true' in content
+
+
+async def test_build_llm_messages_prunes_superseded_browser_protocol_failure():
+    """The next root-agent turn should not be told to redo browser work after browser success."""
+    from helpers.llm import build_llm_messages
+
+    ctx = [
+        {"role": "USER", "text": "Use a browser agent to complete FCaptcha.", "timestamp": "2026-07-04T02:53:30Z"},
+        {
+            "role": "TOOL",
+            "text": (
+                "Verifier score: 0%\n\nReasoning: The browser agent failed to initialize "
+                "with an 'unsupported protocol' error. Take a NEW action."
+            ),
+            "timestamp": "2026-07-04T02:56:48Z",
+            "metadata": {
+                "toolName": "attempt_completion",
+                "toolCallId": "tc-attempt-1",
+                "toolStatus": "FINISHED",
+                "title": "⚖️ Verifier rejected (0%) — continue task",
+                "verifierMessage": True,
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "**Status**: ✅ SUCCESS",
+            "timestamp": "2026-07-04T02:59:57Z",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "tc-browser-1",
+                "toolStatus": "FINISHED",
+                "title": "Browser automation complete",
+                "structured_response": {
+                    "fcaptcha_risk_score_display": "0.16",
+                    "checkbox_mode_passed": True,
+                    "invisible_form_submitted": True,
+                    "visible_verdict_text": "Verified! / Form submission allowed!",
+                },
+            },
+        },
+    ]
+
+    messages = await build_llm_messages(ctx, "system")
+    content = "\n".join(str(m["content"]) for m in messages)
+
+    assert "unsupported protocol" not in content
+    assert "Take a NEW action" not in content
+    assert "Structured Response" in content
+    assert '"fcaptcha_risk_score_display": "0.16"' in content
 
 
 async def test_extract_response_from_partial_json_raw_json_object():
@@ -5322,6 +5472,10 @@ async def run_all_tests():
         "check_progress_disables_fast_cache_read_after_verifier_parse_failure",
         test_check_progress_disables_fast_cache_read_after_verifier_parse_failure,
     )
+    await r.record_async(
+        "check_progress_browser_success_uses_fast_cache_write_only",
+        test_check_progress_browser_success_uses_fast_cache_write_only,
+    )
     await r.record_async("call_planner_llm_activity_happy_path", test_call_planner_llm_activity_happy_path)
     # Additional llm coverage
     await r.record_async("call_llm_activity_happy_path", test_call_llm_activity_happy_path_with_messages_list)
@@ -5360,6 +5514,14 @@ async def run_all_tests():
         test_build_verifier_context_messages_self_closes_trailing_refs,
     )
     r.record("verifier_ctx_filters_subagent_tree_rows", test_build_verifier_context_messages_filters_subagent_tree_rows)
+    r.record(
+        "verifier_ctx_prunes_superseded_browser_protocol_failure",
+        test_build_verifier_context_messages_prunes_superseded_browser_protocol_failure,
+    )
+    await r.record_async(
+        "build_llm_messages_prunes_superseded_browser_protocol_failure",
+        test_build_llm_messages_prunes_superseded_browser_protocol_failure,
+    )
     await r.record_async("extract_response_raw_json", test_extract_response_from_partial_json_raw_json_object)
     await r.record_async("extract_response_tool_calls_only", test_extract_response_from_partial_json_tool_calls_only)
     await r.record_async("extract_completed_tool_calls_multiple", test_extract_completed_tool_calls_multiple)

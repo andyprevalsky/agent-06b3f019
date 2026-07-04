@@ -24,6 +24,7 @@ import httpx
 import structlog
 
 from helpers.trace_archive import archive_bytes, archive_enabled
+from helpers.tracing import current_root_agent_id
 
 logger = structlog.get_logger()
 
@@ -473,6 +474,7 @@ class BrowserAgentRecorder:
         if not archive_enabled():
             return
         try:
+            archive_root_agent_id = current_root_agent_id() or self.agent_id
             for file_path in self.output_dir.rglob("*"):
                 if not file_path.is_file():
                     continue
@@ -480,7 +482,7 @@ class BrowserAgentRecorder:
                 content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
                 is_media = content_type.startswith(("image/", "video/", "audio/"))
                 archive_bytes(
-                    root_agent_id=self.agent_id,
+                    root_agent_id=archive_root_agent_id,
                     path=f"media/browser/{self.task_id}/{relative}",
                     body=file_path.read_bytes(),
                     content_type=content_type,

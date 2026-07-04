@@ -8,6 +8,8 @@ export interface TestPrompt {
   prompt: string;
   /** Paths (starting with `/`) to files in the Vite public folder to attach. */
   attachmentUrls?: string[];
+  /** Catalog tags (from agents/benchmarks/tasks.json) driving the popover tag filter. */
+  tags?: string[];
 }
 
 export interface TestPromptsSelectorProps {

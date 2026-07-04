@@ -96,6 +96,10 @@ def current_agent_id() -> Optional[str]:
     return _current().get("agent_id")
 
 
+def current_root_agent_id() -> Optional[str]:
+    return _current().get("root_agent_id") or current_agent_id()
+
+
 def _sanitize_runtime_value(value: Any, depth: int = 0) -> Any:
     """Return a log-safe runtime value without dumping bulky objects."""
     if value is None or isinstance(value, (bool, int, float)):

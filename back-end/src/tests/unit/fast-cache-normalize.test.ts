@@ -553,6 +553,25 @@ test('canonicalMessages normalizes web_fetch downloaded-file metadata', () => {
   assert.notStrictEqual(canonicalMessages(base), canonicalMessages(changed));
 });
 
+test('worldModelCacheScope partitions simulated runs, real/shadow keys unchanged', () => {
+  delete process.env.BENCHMARK_WORLD_MODEL_MODE;
+  delete process.env.WMH_MODEL_NAME;
+  const realKey = llmKey('goal', 'site', { messages: [] });
+  assert.ok(realKey.startsWith('fastmode:v42:llm:'));
+
+  process.env.BENCHMARK_WORLD_MODEL_MODE = 'simulate';
+  process.env.WMH_MODEL_NAME = 'rose archive/v2';
+  const simKey = llmKey('goal', 'site', { messages: [] });
+  assert.notStrictEqual(simKey, realKey);
+  assert.ok(simKey.includes(':sim.rose-archive-v2:'));
+
+  // Shadow mode executes real calls — those cache entries are real signal.
+  process.env.BENCHMARK_WORLD_MODEL_MODE = 'shadow';
+  assert.strictEqual(llmKey('goal', 'site', { messages: [] }), realKey);
+  delete process.env.BENCHMARK_WORLD_MODEL_MODE;
+  delete process.env.WMH_MODEL_NAME;
+});
+
 if (failures.length > 0) {
   console.error(`\n❌ ${failures.length} failed:\n${failures.map((f) => `  - ${f}`).join('\n')}`);
   process.exit(1);

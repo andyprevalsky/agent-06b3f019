@@ -6,6 +6,22 @@ run_process_env_value() {
   ps eww -p "$pid" 2>/dev/null | tr ' ' '\n' | sed -n "s/^${key}=//p" | tail -1
 }
 
+run_process_env_value_wait() {
+  local pid="$1"
+  local key="$2"
+  local value attempt
+
+  for attempt in $(seq 1 10); do
+    value="$(run_process_env_value "$pid" "$key")"
+    if [ -n "$value" ]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+    sleep 0.05
+  done
+  return 1
+}
+
 run_process_cwd_in_tree() {
   local pid="$1"
   local root="$2"
@@ -60,12 +76,12 @@ run_kill_stale_same_task_queue_workers() {
     fi
     run_process_cwd_in_tree "$pid" "$worktree" || continue
 
-    worker_queue="$(run_process_env_value "$pid" "TEMPORAL_TASK_QUEUE")"
+    worker_queue="$(run_process_env_value_wait "$pid" "TEMPORAL_TASK_QUEUE" || true)"
     [ "$worker_queue" = "$task_queue" ] || continue
 
-    worker_backend="$(run_process_env_value "$pid" "BACKEND_API_URL")"
+    worker_backend="$(run_process_env_value_wait "$pid" "BACKEND_API_URL" || true)"
     if [ -z "$worker_backend" ]; then
-      worker_backend="$(run_process_env_value "$pid" "BACKEND_URL")"
+      worker_backend="$(run_process_env_value_wait "$pid" "BACKEND_URL" || true)"
     fi
     [ "$worker_backend" != "$expected_backend_url" ] || continue
 
@@ -84,11 +100,11 @@ run_kill_stale_same_task_queue_workers() {
         continue
       fi
       run_process_cwd_in_tree "$pid" "$worktree" || continue
-      worker_queue="$(run_process_env_value "$pid" "TEMPORAL_TASK_QUEUE")"
+      worker_queue="$(run_process_env_value_wait "$pid" "TEMPORAL_TASK_QUEUE" || true)"
       [ "$worker_queue" = "$task_queue" ] || continue
-      worker_backend="$(run_process_env_value "$pid" "BACKEND_API_URL")"
+      worker_backend="$(run_process_env_value_wait "$pid" "BACKEND_API_URL" || true)"
       if [ -z "$worker_backend" ]; then
-        worker_backend="$(run_process_env_value "$pid" "BACKEND_URL")"
+        worker_backend="$(run_process_env_value_wait "$pid" "BACKEND_URL" || true)"
       fi
       [ "$worker_backend" != "$expected_backend_url" ] || continue
       kill -9 "$pid" 2>/dev/null || true
