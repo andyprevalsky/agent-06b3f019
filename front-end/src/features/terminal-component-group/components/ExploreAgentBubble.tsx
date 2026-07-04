@@ -242,7 +242,7 @@ function StepRow({ step, index, isStepExpanded, onToggleStep }: StepRowProps) {
     return (
       <div className="flex items-start gap-1.5 text-[11px] text-muted-foreground/60 py-0.5 px-1 -mx-1">
         <Lightbulb className="h-3 w-3 flex-shrink-0 text-amber-400/70 mt-0.5" />
-        <span className="italic">{thinkingText || 'Thinking...'}</span>
+        <span className="italic min-w-0 flex-1 break-words">{thinkingText || 'Thinking...'}</span>
       </div>
     );
   }
@@ -265,10 +265,10 @@ function StepRow({ step, index, isStepExpanded, onToggleStep }: StepRowProps) {
             )}
           />
         )}
-        <span className="truncate">{step.title}</span>
+        <span className="min-w-0 flex-1 truncate">{step.title}</span>
       </div>
       {isStepExpanded && hasContent && (
-        <div className="ml-4 mt-0.5 mb-1 text-[11px] text-muted-foreground/50 whitespace-pre-wrap max-h-[150px] overflow-y-auto border-l border-border/30 pl-2">
+        <div className="ml-4 mt-0.5 mb-1 text-[11px] text-muted-foreground/50 whitespace-pre-wrap break-words max-h-[150px] overflow-y-auto border-l border-border/30 pl-2">
           {step.message}
         </div>
       )}
@@ -284,7 +284,7 @@ interface StepsListProps {
 
 function StepsList({ steps, expandedSteps, onToggleStep }: StepsListProps) {
   return (
-    <div className="mt-1 space-y-0.5 max-h-[300px] overflow-y-auto">
+    <div className="mt-1 min-w-0 max-w-full space-y-0.5 overflow-y-auto overflow-x-hidden max-h-[300px]">
       {steps.map((step, i) => (
         <StepRow
           key={`${step.timestamp}-${i}`}
@@ -370,8 +370,8 @@ const ExploreAgentBubble = memo(function ExploreAgentBubble({
 
   return (
     <div className="flex gap-3 animate-in fade-in duration-300">
-      <div className="flex-1">
-        <div className="rounded-xl border border-border bg-card/50 backdrop-blur-sm shadow-sm px-3 py-2">
+      <div className="flex-1 min-w-0">
+        <div className="min-w-0 max-w-full overflow-hidden rounded-xl border border-border bg-card/50 backdrop-blur-sm shadow-sm px-3 py-2">
           <Header
             status={status}
             titleText={titleText}
@@ -382,14 +382,14 @@ const ExploreAgentBubble = memo(function ExploreAgentBubble({
           />
           {(isComplete || isError) && message && (
             <div className="mt-2 border-t border-border/40 pt-2">
-              <div className="text-xs text-foreground/70 max-h-[200px] overflow-y-auto">
-                <MarkdownText text={message} className="text-xs" />
+              <div className="min-w-0 max-w-full overflow-y-auto overflow-x-hidden text-xs text-foreground/70 max-h-[200px]">
+                <MarkdownText text={message} className="tool-message-markdown text-xs" />
               </div>
             </div>
           )}
           {isExpanded && (fullGoal || title) && (
             <div className="mt-2 border-t border-border/40 pt-2 pb-1.5">
-              <div className="text-xs text-foreground/70 whitespace-pre-wrap max-h-[200px] overflow-y-auto">
+              <div className="text-xs text-foreground/70 whitespace-pre-wrap break-words max-h-[200px] overflow-y-auto">
                 {fullGoal || title}
               </div>
             </div>

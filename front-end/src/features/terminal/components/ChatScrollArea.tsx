@@ -85,7 +85,7 @@ export function ChatScrollArea({ agents: a, drip, opening, messagesEndRef }: Cha
       </div>
 
       <div
-        className="transition-opacity duration-700 ease-in-out relative"
+        className="relative min-w-0 max-w-full transition-opacity duration-700 ease-in-out"
         style={{ opacity: a.messages.length > 0 ? 1 : 0, zIndex: 20 }}
       >
         <MessageList

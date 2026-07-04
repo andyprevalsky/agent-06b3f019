@@ -4,7 +4,7 @@
  *
  * Covers all routing branches:
  *  - USER role: bubble with text, with file_pointer
- *  - ASSISTANT role: Thinking → Thought tool card, streaming, file_pointer
+ *  - ASSISTANT role: Thought tool card, streaming, file_pointer
  *  - SYSTEM role: plain bubble
  *  - TOOL role: ToolMessage card (IN_PROGRESS / FINISHED / ERROR with chevron)
  *  - isUserAttentionMessage → AttentionMessage with waiting indicator
@@ -112,11 +112,16 @@ describe('MessageBubble', () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it('renders ASSISTANT with shouldType=true as Thinking (IN_PROGRESS)', async () => {
+  it('renders ASSISTANT with shouldType=true as collapsed Thought and releases the animation queue', async () => {
+    // Regression: the card has no typing animation, so deriving IN_PROGRESS
+    // from shouldType flashed it open for one frame before the instant
+    // onComplete collapsed it (open→closed flicker on the first thought).
     const msg = baseMessage({ role: 'ASSISTANT', text: 'working' });
     const onComplete = vi.fn();
     renderBubble(<MessageBubble message={msg} shouldType={true} onTypingComplete={onComplete} />);
-    await waitFor(() => expect(screen.getByText('Thinking')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Thought')).toBeInTheDocument());
+    expect(screen.queryByText('Thinking')).not.toBeInTheDocument();
+    expect(screen.queryByText('working')).not.toBeInTheDocument();
     await waitFor(() => expect(onComplete).toHaveBeenCalled());
   });
 
@@ -451,11 +456,12 @@ describe('MessageBubble', () => {
         taskId: 'task-1-finished',
       },
     });
-    renderBubble(<MessageBubble message={msg} />);
+    const { container } = renderBubble(<MessageBubble message={msg} />);
 
     await waitFor(() => expect(screen.getByText('Explored')).toBeInTheDocument());
     expect(screen.queryByText(/Explored -/)).not.toBeInTheDocument();
     expect(document.body.textContent).toContain('The production deployment is ready');
+    expect(container.querySelector('.tool-message-markdown')).not.toBeNull();
   });
 
   it('renders failed explore agent with state-only header and error result body', async () => {

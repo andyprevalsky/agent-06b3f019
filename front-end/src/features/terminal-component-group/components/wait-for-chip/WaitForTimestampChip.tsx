@@ -53,7 +53,7 @@ export function WaitForTimestampChip({
               <XCircle className="h-4 w-4 flex-shrink-0 text-red-400" />
             )}
 
-            <span className="text-xs font-medium text-foreground/80 flex-1">
+            <span className="text-xs font-medium text-foreground/80 flex-1 min-w-0 break-words">
               {isComplete
                 ? `Waited until ${formattedTarget || 'target time'}`
                 : `Waiting for ${formattedTarget || 'target time'}`}

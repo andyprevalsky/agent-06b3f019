@@ -120,7 +120,7 @@ function CheckHistoryRow({
     <div>
       <div className="flex items-center gap-1.5 px-3 py-1.5">
         <CheckStatusIcon isError={isError} checkPassed={checkPassed} checkFailed={checkFailed} />
-        <span className="text-[11px] text-muted-foreground/70 flex-1">
+        <span className="text-[11px] text-muted-foreground/70 flex-1 min-w-0 break-words">
           {checkLabel}
           {ago && <span className="text-muted-foreground/40"> · {ago}</span>}
         </span>
@@ -325,8 +325,8 @@ export function WaitForConditionChip({
   const showCheckHistory = isExpanded && pastChecks.length > 0;
 
   return (
-    <div className="animate-in fade-in duration-300">
-      <div className="flex-1">
+    <div className="min-w-0 max-w-full animate-in fade-in duration-300">
+      <div className="min-w-0 max-w-full flex-1">
         <div className="rounded-xl border border-border bg-card/50 backdrop-blur-sm shadow-sm overflow-hidden">
           <ConditionHeader
             isInProgress={isInProgress}

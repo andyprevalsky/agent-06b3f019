@@ -54,9 +54,7 @@ export function SubAgentBubble({
   }
 
   const toolStatus = (rawToolStatus === 'ERROR' ? 'FINISHED' : rawToolStatus) as
-    | 'IN_PROGRESS'
-    | 'FINISHED'
-    | 'ERROR';
+    'IN_PROGRESS' | 'FINISHED' | 'ERROR';
 
   if (subAgentIds && subAgentIds.length > 0 && busId) {
     return (
@@ -88,7 +86,7 @@ export function SubAgentBubble({
 
   return (
     <div className="flex gap-3 animate-in fade-in duration-300">
-      <div className="flex-1">
+      <div className="flex-1 min-w-0">
         <SubAgentToolBubble
           toolCallId={(metadata.toolCallId as string | undefined) || ''}
           title={(metadata.title as string | undefined) || 'General-purpose agent'}

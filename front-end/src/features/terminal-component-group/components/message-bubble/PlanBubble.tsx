@@ -104,10 +104,7 @@ export function PlanBubble({
   planStreamStartedAtMs,
 }: PlanBubbleProps) {
   const toolStatus = message.metadata?.toolStatus as
-    | 'IN_PROGRESS'
-    | 'FINISHED'
-    | 'ERROR'
-    | undefined;
+    'IN_PROGRESS' | 'FINISHED' | 'ERROR' | undefined;
   const planData = message.metadata?.data as PlanDataShape | undefined;
 
   // Unblock the animation queue for all terminal statuses.
@@ -122,7 +119,7 @@ export function PlanBubble({
   if (toolStatus === 'ERROR') {
     return (
       <div className="flex gap-3 animate-in fade-in duration-300">
-        <div className="flex-1">
+        <div className="flex-1 min-w-0">
           <PlanChip
             plan={{
               title: (message.metadata?.title as string) || 'Plan Failed',
@@ -144,7 +141,7 @@ export function PlanBubble({
 
   return (
     <div className="flex gap-3 animate-in fade-in duration-300">
-      <div className="flex-1">
+      <div className="flex-1 min-w-0">
         <PlanChip
           plan={{
             title,

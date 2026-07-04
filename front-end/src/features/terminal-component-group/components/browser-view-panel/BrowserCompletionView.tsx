@@ -16,7 +16,7 @@ export function BrowserCompletionView({ taskId, isSuccess, message }: BrowserCom
         ) : (
           <XCircle className="h-8 w-8 text-red-500 flex-shrink-0" />
         )}
-        <div className="flex-1">
+        <div className="flex-1 min-w-0">
           <h3 className="text-lg font-semibold">{isSuccess ? 'Task Completed' : 'Task Failed'}</h3>
           {message && <p className="text-sm text-muted-foreground mt-1">{message}</p>}
         </div>
