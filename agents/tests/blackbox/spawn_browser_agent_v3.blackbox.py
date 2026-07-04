@@ -6566,6 +6566,45 @@ async def test_stop_playwright_resources_closes_browser_and_stops_instance():
     playwright.stop.assert_awaited_once()
 
 
+async def test_stop_playwright_resources_reaps_lingering_driver_process():
+    from domains.spawn_browser_agent_v3.handler import _stop_playwright_resources
+
+    class FakeDriverProcess:
+        pid = 12345
+        returncode = None
+
+        def __init__(self):
+            self.terminated = False
+            self.waits = 0
+
+        async def wait(self):
+            self.waits += 1
+            if self.terminated:
+                self.returncode = -15
+                return self.returncode
+            await asyncio.sleep(10)
+
+        def terminate(self):
+            self.terminated = True
+
+        def kill(self):
+            raise AssertionError("terminate should reap this fake process")
+
+    process = FakeDriverProcess()
+    playwright = SimpleNamespace(
+        stop=AsyncMock(),
+        _impl_obj=SimpleNamespace(
+            _connection=SimpleNamespace(_transport=SimpleNamespace(_proc=process)),
+        ),
+    )
+
+    await _stop_playwright_resources(None, playwright, "agent-1")
+
+    playwright.stop.assert_awaited_once()
+    assert process.terminated is True
+    assert process.returncode == -15
+
+
 def test_disable_cdp_websocket_proxy_sets_default_proxy_none():
     from domains.spawn_browser_agent_v3.handler import _disable_cdp_websocket_proxy
 
@@ -8429,6 +8468,10 @@ async def run_all_tests():
     r.record(
         "disable_cdp_websocket_proxy",
         test_disable_cdp_websocket_proxy_sets_default_proxy_none,
+    )
+    await r.record_async(
+        "stop_playwright_resources_reaps_driver_process",
+        test_stop_playwright_resources_reaps_lingering_driver_process,
     )
     await r.record_async(
         "stop_playwright_resources_close_fails",

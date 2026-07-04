@@ -1,5 +1,4 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
 /**
  * Black-box tests for POST /api/integrations/passkeys/upload — passkey ingestion
  * from the mac-app. Mirrors the encrypted-upload contract used by passwords:

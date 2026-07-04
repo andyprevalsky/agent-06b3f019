@@ -29,6 +29,31 @@ def _setup():
     })
 
 
+def test_types_contracts_are_importable():
+    """Public TypedDict contracts stay importable for tool callers."""
+    from domains.knowledge_base.types import (
+        BlueprintSearchResult,
+        ContextMessage,
+        SaveBlueprintResult,
+        SavedBlueprintResponse,
+        ToolCallMetadata,
+    )
+
+    assert BlueprintSearchResult.__annotations__ == {
+        "id": str,
+        "title": str,
+        "blueprint": str,
+    }
+    assert SavedBlueprintResponse.__annotations__ == {
+        "id": str,
+        "title": str,
+        "created": bool,
+    }
+    assert "saved_blueprint" in SaveBlueprintResult.__annotations__
+    assert "toolName" in ToolCallMetadata.__annotations__
+    assert "metadata" in ContextMessage.__annotations__
+
+
 async def test_query_blueprints_happy_path():
     """query_blueprints_activity returns matching blueprints."""
     _setup()
@@ -663,6 +688,7 @@ def test_trajectory_result_summary_fallbacks():
 async def run_all_tests():
     print("knowledge-base blackbox tests:")
     r = BlackboxResult()
+    r.record("types_contracts", test_types_contracts_are_importable)
     await r.record_async("query_happy_path", test_query_blueprints_happy_path)
     await r.record_async("query_boundary", test_query_blueprints_boundary)
     await r.record_async("save_happy_path", test_save_blueprint_happy_path)

@@ -10,8 +10,8 @@ import {
   buildMessageMatch,
   buildNetworkMatch,
   buildTransactionMatch,
-  formatTimeAgo,
 } from './format';
+import { formatTimeAgo } from './format.snippets';
 import {
   type GrepMatch,
   type GrepParams,

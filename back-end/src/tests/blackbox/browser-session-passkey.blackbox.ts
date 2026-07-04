@@ -1,5 +1,4 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
 /**
  * Black-box tests for passkey runtime plumbing in the browser-session domain.
  *

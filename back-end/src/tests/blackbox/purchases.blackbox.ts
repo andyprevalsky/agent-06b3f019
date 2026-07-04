@@ -1,5 +1,4 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console -- CLI test runner prints results to stdout */
 /**
  * Black-box tests for /api/purchases and /api/webhooks/agentcard.
  *

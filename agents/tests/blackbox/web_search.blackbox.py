@@ -36,6 +36,19 @@ def _setup():
     })
 
 
+def test_types_contracts_are_importable():
+    """Public web-search result contracts stay importable for tool callers."""
+    from tools.web_search.types import ExecuteActivityCallable, SearchResult
+
+    assert ExecuteActivityCallable is not None
+    assert SearchResult.__annotations__ == {
+        "answer": str,
+        "sources": list[str],
+        "query": str,
+        "provider": str,
+    }
+
+
 async def test_web_search_happy_path():
     """web_search_activity returns search results from Parallel AI."""
     _setup()
@@ -259,6 +272,7 @@ async def test_web_search_entry_point():
 async def run_all_tests():
     print("web-search blackbox tests:")
     r = BlackboxResult()
+    r.record("types_contracts", test_types_contracts_are_importable)
     await r.record_async("happy_path", test_web_search_happy_path)
     await r.record_async("boundary", test_web_search_boundary)
     await r.record_async("ddgs_fallback", test_web_search_ddgs_fallback)

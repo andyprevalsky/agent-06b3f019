@@ -1,4 +1,3 @@
-/* eslint-disable no-console */
 import type { PrismaClient } from '@prisma/client';
 import {
   BASE_URL,
@@ -409,6 +408,7 @@ export async function testRealLlm_answersContactFactViaGrep(prisma: PrismaClient
     await cleanupAgentScopedUser(prisma, userId);
   }
 }
+
 // ==================== GREP — read-tool inline dispatch ====================
 
 export async function testGrep_searchUserDataInlineSuccessCompletes(prisma: PrismaClient) {

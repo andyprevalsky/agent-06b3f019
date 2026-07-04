@@ -4,20 +4,20 @@
 
 /**
  * Standardized message structure for all messaging platforms
- * 
+ *
  * Each message history field (iMessageHistory, whatsappHistory, etc.)
  * is a JSON array of MessageRecord objects.
  */
 export interface MessageRecord {
-  from: string;      // Sender identifier (email, phone, username, etc.)
-  to: string;        // Recipient identifier (email, phone, username, etc.)
+  from: string; // Sender identifier (email, phone, username, etc.)
+  to: string; // Recipient identifier (email, phone, username, etc.)
   timestamp: string; // ISO 8601 timestamp (e.g., "2025-01-15T14:30:00Z")
-  message: string;   // Message content/body
+  message: string; // Message content/body
 }
 
 /**
  * Example usage:
- * 
+ *
  * const iMessageHistory: MessageRecord[] = [
  *   {
  *     from: "+19729777432",
@@ -33,4 +33,3 @@ export interface MessageRecord {
  *   }
  * ];
  */
-

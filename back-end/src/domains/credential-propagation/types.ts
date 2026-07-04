@@ -1,12 +1,7 @@
 import type { AgentStatus } from '@prisma/client';
 
 export type CredentialKind =
-  | 'cookie_bundle'
-  | 'password'
-  | 'steel_session'
-  | 'email_otp'
-  | 'minted'
-  | 'passkey';
+  'cookie_bundle' | 'password' | 'steel_session' | 'email_otp' | 'minted' | 'passkey';
 
 export interface CredentialRef {
   kind: CredentialKind;

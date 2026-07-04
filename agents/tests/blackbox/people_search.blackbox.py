@@ -61,6 +61,21 @@ def _setup_parallel(n: int = 5):
     setup_mock({PARALLEL_URL: {"status": 200, "json": {"entity_set_id": "s1", "entities": _parallel_entities(n)}}})
 
 
+def test_types_contracts_are_importable():
+    """Public people-search result contracts stay importable for tool callers."""
+    from tools.people_search.types import (
+        ExecuteActivityCallable,
+        PeopleSearchResult,
+        PersonResult,
+        PersonSource,
+    )
+
+    assert ExecuteActivityCallable is not None
+    assert "provider" in PersonSource.__annotations__
+    assert "source" in PersonResult.__annotations__
+    assert "providers_attempted" in PeopleSearchResult.__annotations__
+
+
 # -------------------- schema validation --------------------
 
 
@@ -373,6 +388,7 @@ async def test_people_search_entry_point():
 async def run_all_tests():
     print("people-search blackbox tests:")
     r = BlackboxResult()
+    r.record("types_contracts", test_types_contracts_are_importable)
     await r.record_async("schema_strict_pairing", test_schema_strict_pairing)
     await r.record_async("limit_clamp_discover", test_limit_clamp_discover)
     await r.record_async("exa_discover_request_shape", test_exa_discover_request_shape)

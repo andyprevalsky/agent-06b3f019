@@ -1,5 +1,4 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
 /**
  * Black-box tests for the Fast Mode cache routes + flag persistence (live server).
  *

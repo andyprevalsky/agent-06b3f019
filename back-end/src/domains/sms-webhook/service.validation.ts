@@ -10,7 +10,7 @@
  */
 
 import { createHmac, timingSafeEqual } from '../../providers/crypto';
-import type { ParsedSurgeMessage } from './types';
+import type { ParsedSurgeMessage, SurgeAttachment } from './types';
 import { createLogger } from '../../providers/logger';
 
 const log = createLogger('SMS Webhook');
@@ -73,12 +73,13 @@ export function validateSurgeSignature(
 /* c8 ignore stop */
 
 /**
- * Extract phone number and body from Surge webhook payload.
+ * Extract phone number, body, and media attachments from Surge webhook payload.
  *
  * Surge message.received payload:
  * {
  *   id: "msg_...",
  *   body: "Hello",
+ *   attachments: [{ id: "att_...", type: "image/jpeg", url: "https://..." }],
  *   conversation: {
  *     contact: { phone_number: "+19729777432", ... },
  *     phone_number: { number: "+18001234567", ... }
@@ -92,10 +93,37 @@ export function parseSurgePayload(body: Record<string, unknown>): ParsedSurgeMes
   const conversation = data?.conversation as Record<string, unknown> | undefined;
   const contact = conversation?.contact as Record<string, unknown> | undefined;
   const fromPhone = contact?.phone_number as string | undefined;
+  const attachments = parseSurgeAttachments(data);
 
-  if (fromPhone === null || fromPhone === undefined || fromPhone === '' || messageBody === '') {
+  // A message must carry text or at least one attachment (media-only MMS has
+  // an empty body — dropping those silently loses photos and voice notes).
+  if (
+    fromPhone === null ||
+    fromPhone === undefined ||
+    fromPhone === '' ||
+    (messageBody === '' && attachments.length === 0)
+  ) {
     return null;
   }
 
-  return { fromPhone, messageBody };
+  return { fromPhone, messageBody, attachments };
+}
+
+function parseSurgeAttachments(data: Record<string, unknown> | undefined): SurgeAttachment[] {
+  const raw = data?.attachments;
+  if (!Array.isArray(raw)) return [];
+
+  const attachments: SurgeAttachment[] = [];
+  for (const item of raw) {
+    if (typeof item !== 'object' || item === null) continue;
+    const entry = item as Record<string, unknown>;
+    if (typeof entry.url !== 'string' || entry.url === '') continue;
+    // Surge uses `type`; tolerate `content_type` in case of payload drift.
+    const hint = entry.type ?? entry.content_type;
+    attachments.push({
+      url: entry.url,
+      type: typeof hint === 'string' && hint !== '' ? hint : null,
+    });
+  }
+  return attachments;
 }

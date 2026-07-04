@@ -1,5 +1,4 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
 /**
  * Deterministic coverage for the provider credential-failure heuristic path.
  *

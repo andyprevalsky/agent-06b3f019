@@ -1,13 +1,13 @@
 #!/usr/bin/env tsx
 /*
- * eslint-disable no-console, max-lines
+ * eslint-disable max-lines
  *
  * Matches the convention across the 13 other blackbox test files in
  * src/tests/blackbox/. Test runner output goes through console; coverage-driven
  * test growth pushes file lines past the 600 default. See e.g.
  * agents.blackbox.ts, integrations.blackbox.ts which use the same disable.
  */
-/* eslint-disable no-console, max-lines */
+/* eslint-disable max-lines */
 /**
  * Module-level black-box tests for back-end/src/providers/rose/.
  *

@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console, max-lines */
+/* eslint-disable max-lines */
 /**
  * Black-box tests for /api/send-sms
  *
@@ -47,7 +47,11 @@
 import { config } from 'dotenv';
 import { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
-import { listArchivedObjects, readArchivedArtifact } from '../../providers/traceArchive';
+import {
+  listArchivedObjects,
+  readArchivedArtifact,
+  decryptAndValidateArtifact,
+} from '../../providers/traceArchive';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -919,7 +923,10 @@ async function testBoundary_notifyCompletionCallsSurgeApi() {
     assertNoInternalRoutingTokens(body.body, agent.id);
     const archiveAfter = await listSmsArchivePaths(agent.id);
     const newEncryptedArtifacts = archiveAfter.filter(
-      (entry) => !archiveBefore.has(entry) && entry.endsWith('.json.gz.enc')
+      (entry) =>
+        !archiveBefore.has(entry) &&
+        entry.startsWith('provider/sms/surge/') &&
+        entry.endsWith('.json.gz.enc')
     );
     assert(
       newEncryptedArtifacts.length >= 1,
@@ -936,6 +943,19 @@ async function testBoundary_notifyCompletionCallsSurgeApi() {
     const metadata = archivedArtifact.metadata as Record<string, unknown>;
     assert(metadata.content_type === 'application/json', 'Expected JSON archive content type');
     assert(metadata.compression === 'gzip', 'Expected SMS provider archive to be gzipped');
+    const payload = JSON.parse(decryptAndValidateArtifact(archivedArtifact).toString('utf8')) as {
+      provider?: unknown;
+      success?: unknown;
+      request?: { body?: { body?: unknown } };
+      context?: { event_type?: unknown; user_id?: unknown };
+    };
+    assert(payload.provider === 'surge', 'Expected Surge provider archive payload');
+    assert(payload.success === true, 'Expected successful SMS provider archive payload');
+    assert(
+      payload.request?.body?.body?.toString().includes('boundary test completed') === true,
+      'Expected archived SMS body to include completion summary'
+    );
+    assert(payload.context?.event_type === 'completion', 'Expected completion archive context');
   } finally {
     await prisma.agent.deleteMany({ where: { id: agent.id } });
   }

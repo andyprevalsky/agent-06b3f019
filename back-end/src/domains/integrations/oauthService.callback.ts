@@ -3,7 +3,14 @@
  * Split from oauthService.ts for max-lines compliance.
  */
 
-import { IntegrationStatus, mergeJson, type EmailProvider, type OAuthResponse, type EmailProviderSlug, type TokenExchangeResult } from './types';
+import {
+  IntegrationStatus,
+  mergeJson,
+  type EmailProvider,
+  type OAuthResponse,
+  type EmailProviderSlug,
+  type TokenExchangeResult,
+} from './types';
 import { createLogger } from '../../providers/logger';
 import { fetchGmailEmails, parseGmailOAuthEmails } from '../../services/integrations/gmailParser';
 import { EMAIL_PROVIDER_CONFIG } from './config';
@@ -190,7 +197,10 @@ async function validateOAuthCredential(
 
   const credential = await repo.findCredentialByState(config.provider, state);
   if (credential === null || credential === undefined) {
-    sendOAuthResult(res, { success: false, message: 'No pending OAuth request found or state mismatch' });
+    sendOAuthResult(res, {
+      success: false,
+      message: 'No pending OAuth request found or state mismatch',
+    });
     return null;
   }
 
@@ -198,8 +208,17 @@ async function validateOAuthCredential(
   const returnUrl = typeof metadata?.returnUrl === 'string' ? metadata.returnUrl : null;
   const errorUrl = typeof metadata?.errorUrl === 'string' ? metadata.errorUrl : null;
 
-  if (credential.pkceVerifier === null || credential.pkceVerifier === undefined || credential.pkceVerifier === '') {
-    sendOAuthResult(res, { success: false, message: 'Missing PKCE verifier for this request', returnUrl, errorUrl });
+  if (
+    credential.pkceVerifier === null ||
+    credential.pkceVerifier === undefined ||
+    credential.pkceVerifier === ''
+  ) {
+    sendOAuthResult(res, {
+      success: false,
+      message: 'Missing PKCE verifier for this request',
+      returnUrl,
+      errorUrl,
+    });
     return null;
   }
 
@@ -232,24 +251,44 @@ export async function handleOAuthCallback(
       : null;
 
   // Check if this email is already connected
-  if (tokenResult.userEmail !== undefined && tokenResult.userEmail !== null && tokenResult.userEmail !== '') {
+  if (
+    tokenResult.userEmail !== undefined &&
+    tokenResult.userEmail !== null &&
+    tokenResult.userEmail !== ''
+  ) {
     const existingCredential = await repo.findExistingCredential({
-      userId: credential.userId, provider: config.provider,
-      email: tokenResult.userEmail, excludeId: credential.id,
+      userId: credential.userId,
+      provider: config.provider,
+      email: tokenResult.userEmail,
+      excludeId: credential.id,
     });
 
     if (existingCredential !== null && existingCredential !== undefined) {
       return handleExistingEmail(
-        tokenResult, existingCredential.id, credential.id,
-        existingCredential.integrationId, existingCredential.refreshToken,
-        existingCredential.metadata, providerKey, tokenResult.userEmail,
-        expiresAt, res, returnUrl, errorUrl
+        tokenResult,
+        existingCredential.id,
+        credential.id,
+        existingCredential.integrationId,
+        existingCredential.refreshToken,
+        existingCredential.metadata,
+        providerKey,
+        tokenResult.userEmail,
+        expiresAt,
+        res,
+        returnUrl,
+        errorUrl
       );
     }
   }
 
   await finalizeNewCredential(
-    credential, tokenResult, expiresAt, config.provider,
-    providerKey, res, returnUrl, errorUrl
+    credential,
+    tokenResult,
+    expiresAt,
+    config.provider,
+    providerKey,
+    res,
+    returnUrl,
+    errorUrl
   );
 }

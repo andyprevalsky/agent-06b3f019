@@ -664,6 +664,8 @@ async def _stop_playwright_resources(
     close_browser: bool = True,
 ) -> None:
     """Disconnect Playwright's CDP client and stop its local driver process."""
+    driver_process = _playwright_driver_process(playwright_instance)
+
     if playwright_browser and close_browser:
         try:
             await asyncio.wait_for(playwright_browser.close(), timeout=5.0)
@@ -681,6 +683,58 @@ async def _stop_playwright_resources(
             logger.info("Playwright instance stopped", agent_id=agent_id)
         except Exception as e:
             logger.warning("Failed to stop Playwright instance", agent_id=agent_id, error=str(e))
+        await _reap_playwright_driver_process(driver_process, agent_id)
+
+
+def _playwright_driver_process(playwright_instance: Optional[Any]) -> Optional[Any]:
+    if not playwright_instance:
+        return None
+    impl_obj = getattr(playwright_instance, "_impl_obj", None)
+    connection = getattr(impl_obj, "_connection", None)
+    transport = getattr(connection, "_transport", None)
+    process = getattr(transport, "_proc", None)
+    pid = getattr(process, "pid", None)
+    return process if isinstance(pid, int) else None
+
+
+async def _reap_playwright_driver_process(process: Optional[Any], agent_id: str) -> None:
+    if not process or getattr(process, "returncode", None) is not None:
+        return
+
+    try:
+        await asyncio.wait_for(process.wait(), timeout=2)
+        return
+    except asyncio.TimeoutError:
+        pass
+    except Exception as e:
+        logger.debug("Failed while waiting for Playwright driver exit", agent_id=agent_id, error=str(e))
+
+    if getattr(process, "returncode", None) is not None:
+        return
+
+    try:
+        process.terminate()
+        await asyncio.wait_for(process.wait(), timeout=2)
+        logger.warning("Terminated lingering Playwright driver process", agent_id=agent_id, pid=process.pid)
+        return
+    except asyncio.TimeoutError:
+        pass
+    except ProcessLookupError:
+        return
+    except Exception as e:
+        logger.warning("Failed to terminate Playwright driver process", agent_id=agent_id, error=str(e))
+
+    if getattr(process, "returncode", None) is not None:
+        return
+
+    try:
+        process.kill()
+        await asyncio.wait_for(process.wait(), timeout=2)
+        logger.warning("Killed lingering Playwright driver process", agent_id=agent_id, pid=process.pid)
+    except ProcessLookupError:
+        return
+    except Exception as e:
+        logger.warning("Failed to kill Playwright driver process", agent_id=agent_id, error=str(e))
 
 
 def _disable_cdp_websocket_proxy() -> bool:
@@ -2408,7 +2462,10 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 try:
                     _pw_browser = await _pw_instance.chromium.connect_over_cdp(cdp_url)
                 except BaseException:
-                    await _pw_instance.stop()
+                    _driver_process = _playwright_driver_process(_pw_instance)
+                    with contextlib.suppress(Exception):
+                        await _pw_instance.stop()
+                    await _reap_playwright_driver_process(_driver_process, agent_id)
                     _playwright_instance = None
                     raise
                 _playwright_browser = _pw_browser
