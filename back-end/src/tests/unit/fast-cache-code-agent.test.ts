@@ -148,7 +148,7 @@ test('Codex Code sandbox uses Fast Mode localhost proxy plumbing', () => {
     'wrapper must not cache provider paths itself'
   );
   assert.ok(
-    wsServer.includes("const REPO_WORKDIR = '/home/user/workspace'"),
+    /const REPO_WORKDIR = ["']\/home\/user\/workspace["']/.test(wsServer),
     'Codex wrapper must clone generated repos into the stable cache replay workdir'
   );
   assert.ok(

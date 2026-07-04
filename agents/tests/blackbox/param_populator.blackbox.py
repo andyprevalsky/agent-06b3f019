@@ -12,6 +12,14 @@ from _test_utils import (
 )
 
 
+def test_types_contracts_are_importable():
+    """Public param-populator result contract remains importable."""
+    from domains.param_populator.types import PopulatedParams
+
+    assert "params" in PopulatedParams.__annotations__
+    assert "usage" in PopulatedParams.__annotations__
+
+
 def test_build_prompt_basic():
     """_build_agent_system_prompt returns non-empty string containing the goal."""
     from activities.param_populator import _build_agent_system_prompt
@@ -383,6 +391,7 @@ async def test_handler_returns_service_result():
 async def run_all_tests():
     print("param-populator blackbox tests:")
     r = BlackboxResult()
+    r.record("types_contracts", test_types_contracts_are_importable)
     r.record("build_prompt_basic", test_build_prompt_basic)
     r.record("build_prompt_spawn_agent_alias_no_redefine", test_build_prompt_spawn_agent_alias_does_not_redefine_type_schema)
     r.record("build_prompt_spawn_general_no_duplicate", test_build_prompt_spawn_general_purpose_agent_no_duplicate_requirements)
