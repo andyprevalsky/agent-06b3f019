@@ -1140,15 +1140,20 @@ def _validate_user_data_prod_grep_messages(messages: List[dict]) -> Optional[str
                 if provider not in USER_DATA_PROD_DOCUMENT_SOURCES:
                     continue
                 document_path = str(item.get("document_path") or "")
+                appears_verified = bool(
+                    item.get("appears_verified_from_prod_data", item.get("verified_from_prod_data"))
+                )
                 # Gate A already verified each provider was grepped from
-                # source='documents'. The checklist row's real prod-evidence
-                # signal is a concrete document path under documents/ for this
-                # provider. Key on that rather than parsing the agent's free-form
-                # `grep_filters_used`/evidence-boolean fields, whose exact wording
-                # and key names vary run to run (source="documents" vs
-                # filters={"document_source":...}, verified_status vs
-                # verification_status, ...) and produced false negatives.
-                if not document_path.startswith("documents/"):
+                # source='documents', so we no longer parse the agent's free-form
+                # `grep_filters_used` string (its wording/key names vary run to
+                # run and produced false negatives). A checklist row counts as
+                # covering its provider when it either cites a concrete
+                # documents/<provider> evidence path OR honestly reports that the
+                # provider had no synced prod data (verified flag False) — a
+                # legitimately-empty provider is a correct outcome and must not
+                # fail the checklist. Only a row that CLAIMS verification without
+                # a documents/ path (fabricated evidence) is rejected.
+                if appears_verified and not document_path.startswith("documents/"):
                     continue
                 final_providers.add(provider)
 

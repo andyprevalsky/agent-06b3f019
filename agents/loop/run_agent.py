@@ -78,6 +78,20 @@ MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3
 # instead of continuing into the same overflow loop.
 MIN_AUTOCOMPACT_SAVINGS_RATIO = 0.10
 
+# Paused-wait loop guards. The top-of-loop pause branch waits for the agent to
+# be unpaused. If wait_for_messages() ever returns immediately instead of
+# blocking — e.g. an orphaned sub-agent whose parent workflow was terminated,
+# so the parent-state query resolves instantly — the loop would busy-spin and
+# saturate the Temporal worker, starving every other agent (prod incident
+# 2026-07-05). PAUSED_WAIT_FLOOR_SECONDS enforces a hard minimum idle interval
+# between paused iterations so the loop can never spin. After
+# MAX_CONSECUTIVE_PAUSED_ITERATIONS consecutive paused iterations we stop
+# hot-looping entirely and return "paused", handing control to the workflow's
+# cold pause handler (wait_condition(not is_paused) + continue_as_new on
+# resume) — an efficient zero-CPU wait for both user-paused roots and orphans.
+PAUSED_WAIT_FLOOR_SECONDS = 1.0
+MAX_CONSECUTIVE_PAUSED_ITERATIONS = 20
+
 
 def _is_refusal_error(exc: BaseException) -> bool:
     current: Optional[BaseException] = exc
@@ -419,18 +433,61 @@ async def run_agent(  # noqa: C901
     # Graceful wind-down state: ensures the "final turn" nudge is injected once.
     winddown_injected = False
 
+    # Count of consecutive iterations spent paused. Reset the moment we run real
+    # work. Bounds the paused-wait loop (see PAUSED_WAIT_FLOOR_SECONDS /
+    # MAX_CONSECUTIVE_PAUSED_ITERATIONS).
+    consecutive_paused = 0
+
     # Main loop
     while iteration < max_iterations:
         # 1. Check if paused (BEFORE incrementing iteration - don't count paused loops as steps)
         if check_paused and await check_paused():
-            logger.info("Agent paused, waiting...")
+            consecutive_paused += 1
+            # Log on the first pause and then only periodically — never every
+            # iteration. If the wait below ever fails to block, an unthrottled
+            # log would flood the worker (prod incident 2026-07-05: ~30–100
+            # "Agent paused, waiting..." lines/sec across orphaned sub-agents).
+            if consecutive_paused == 1 or consecutive_paused % 30 == 0:
+                logger.info("Agent paused, waiting...", consecutive_paused=consecutive_paused)
             if wait_for_messages:
                 # Wait for unpause (workflow) or poll (activity)
                 with contextlib.suppress(asyncio.TimeoutError):
                     await wait_for_messages()
             else:
                 await asyncio.sleep(1)
+            # Hard floor: guarantee a minimum idle interval between paused
+            # iterations. Without this an orphaned sub-agent whose parent
+            # workflow was terminated (parent-state query returns instantly
+            # instead of blocking) busy-spins this loop and starves the worker.
+            # Safe in both contexts: a durable timer in the workflow, a normal
+            # sleep in the activity path.
+            await asyncio.sleep(PAUSED_WAIT_FLOOR_SECONDS)
+            # Escape hatch: after too many consecutive paused iterations, stop
+            # hot-looping and return "paused". The workflow's cold pause handler
+            # (wait_condition(not is_paused) + continue_as_new on resume) then
+            # takes over — a zero-CPU idle wait for user-paused roots and a
+            # harmless idle state for orphans, instead of an unbounded hot loop.
+            if consecutive_paused >= MAX_CONSECUTIVE_PAUSED_ITERATIONS:
+                logger.warning(
+                    "Agent paused for too many consecutive iterations — yielding to cold pause handler",
+                    agent_id=agent_id,
+                    consecutive_paused=consecutive_paused,
+                )
+                _pending_llm_context.pop(agent_id, None)
+                return {
+                    "status": "paused",
+                    "context": context,
+                    "tokens_in": tokens_in,
+                    "tokens_out": tokens_out,
+                    "token_count": token_count,
+                    "context_size": context_size,
+                    "cache_read_input_tokens": cache_read_total,
+                    "cache_creation_input_tokens": cache_write_total,
+                }
             continue
+
+        # Reached only when not paused — reset the paused-iteration counter.
+        consecutive_paused = 0
 
         # Only increment iteration when we're actually going to do work
         iteration += 1
