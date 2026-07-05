@@ -1066,6 +1066,88 @@ async def test_winddown_disabled_by_default():
     assert _count_winddown_msgs(result["context"]) == 0
 
 
+async def test_paused_agent_does_not_busy_spin_and_yields_to_cold_handler():
+    """Regression for the 2026-07-05 prod worker-starvation incident.
+
+    An orphaned sub-agent (parent workflow terminated) stays paused while its
+    wait_for_messages() resolves *instantly* instead of blocking. The old
+    top-of-loop pause branch had no floor and no escape, so it `continue`d
+    forever without incrementing `iteration` — an infinite busy-loop that
+    saturated the Temporal worker. The fix must:
+      1. never busy-spin (hard floor between paused iterations), and
+      2. yield to the cold pause handler by returning "paused" after a bounded
+         number of consecutive paused iterations — never calling the LLM.
+    """
+    from loop import run_agent as ra
+
+    wait_calls = 0
+    llm_called = False
+
+    async def always_paused():
+        return True
+
+    async def instant_wait():
+        # Orphaned sub-agent: parent gone → the wait returns immediately.
+        nonlocal wait_calls
+        wait_calls += 1
+        return False
+
+    async def mock_system_prompt():
+        return "System prompt"
+
+    async def mock_post_message(text, role, metadata=None):
+        return None
+
+    async def mock_execute_tool(tool_name, tool_args, tool_call_id):
+        return {"message": "ok"}
+
+    async def mock_call_llm(**kwargs):
+        nonlocal llm_called
+        llm_called = True
+        return (_DummyLLMResult("", []), {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}, [])
+
+    with (
+        # Zero the floor so the test runs instantly; a small escape threshold
+        # keeps the assertion tight. max_iterations is huge so the escape
+        # hatch — not max_iterations — is what stops the loop.
+        patch.object(ra, "PAUSED_WAIT_FLOOR_SECONDS", 0.0),
+        patch.object(ra, "MAX_CONSECUTIVE_PAUSED_ITERATIONS", 5),
+        patch(
+            "loop.run_agent.call_llm_structured_streaming",
+            new=AsyncMock(side_effect=mock_call_llm),
+        ),
+    ):
+        # wait_for guards against a genuine infinite loop (the pre-fix bug):
+        # the old code never returns here, so this would raise TimeoutError.
+        result = await asyncio.wait_for(
+            ra.run_agent(
+                agent_id="agent-orphan",
+                user_id="user-test",
+                system_prompt=mock_system_prompt,
+                verifier_prompt_generator=mock_system_prompt,
+                model="rose-labs/rose-1-lite",
+                tools=["attempt_completion"],
+                initial_context=[{"role": "USER", "text": "hi", "timestamp": "2024-01-01T00:00:00Z"}],
+                is_inside_temporal_activity=True,
+                check_paused=always_paused,
+                wait_for_messages=instant_wait,
+                post_message=mock_post_message,
+                execute_tool=mock_execute_tool,
+                build_messages=lambda context, prompt: [{"role": "system", "content": prompt}],
+                max_iterations=10_000,
+                skip_verification=True,
+                skip_status_updates=True,
+            ),
+            timeout=10,
+        )
+
+    assert result["status"] == "paused", f"expected paused, got {result['status']}"
+    # Escape hatch fires at MAX_CONSECUTIVE_PAUSED_ITERATIONS (5), not at
+    # max_iterations (10000). A couple extra calls of slack for the +1 counting.
+    assert wait_calls <= 6, f"busy-spin not bounded: wait_for_messages called {wait_calls} times"
+    assert not llm_called, "LLM must never run while the agent is paused"
+
+
 async def run_all_tests():
     print("run-agent blackbox tests:")
     r = BlackboxResult()
@@ -1106,6 +1188,10 @@ async def run_all_tests():
     await r.record_async("max_iterations_runs_final_verifier", test_max_iterations_runs_final_verifier)
     await r.record_async("winddown_injects_one_message_near_cap", test_winddown_injects_one_message_near_cap)
     await r.record_async("winddown_disabled_by_default", test_winddown_disabled_by_default)
+    await r.record_async(
+        "paused_agent_does_not_busy_spin_and_yields_to_cold_handler",
+        test_paused_agent_does_not_busy_spin_and_yields_to_cold_handler,
+    )
     teardown_mock()
     return r.summary()
 
