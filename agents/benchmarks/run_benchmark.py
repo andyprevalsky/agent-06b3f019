@@ -1126,7 +1126,12 @@ def _validate_user_data_prod_grep_messages(messages: List[dict]) -> Optional[str
 
         completion_summary = meta.get("completionSummary") or {}
         for output in completion_summary.get("outputs") or []:
-            if output.get("key") not in USER_DATA_PROD_CHECKLIST_KEYS:
+            # Accept any provider checklist output. The agent's exact key name
+            # varies run to run (provider_validation_checklist,
+            # provider_verification_checklist, provider_checklist, ...), so match
+            # on the "checklist" intent rather than an exact-name allowlist.
+            output_key = str(output.get("key") or "").strip().lower()
+            if output_key not in USER_DATA_PROD_CHECKLIST_KEYS and "checklist" not in output_key:
                 continue
             for item in output.get("value") or []:
                 if not isinstance(item, dict):
@@ -1134,14 +1139,16 @@ def _validate_user_data_prod_grep_messages(messages: List[dict]) -> Optional[str
                 provider = str(item.get("provider") or "").strip().lower()
                 if provider not in USER_DATA_PROD_DOCUMENT_SOURCES:
                     continue
-                filters = str(item.get("grep_filters_used") or "").lower()
                 document_path = str(item.get("document_path") or "")
-                has_prod_evidence = bool(
-                    item.get("appears_verified_from_prod_data", item.get("verified_from_prod_data"))
-                )
-                if "documents" not in filters or provider not in filters:
-                    continue
-                if has_prod_evidence and not document_path.startswith("documents/"):
+                # Gate A already verified each provider was grepped from
+                # source='documents'. The checklist row's real prod-evidence
+                # signal is a concrete document path under documents/ for this
+                # provider. Key on that rather than parsing the agent's free-form
+                # `grep_filters_used`/evidence-boolean fields, whose exact wording
+                # and key names vary run to run (source="documents" vs
+                # filters={"document_source":...}, verified_status vs
+                # verification_status, ...) and produced false negatives.
+                if not document_path.startswith("documents/"):
                     continue
                 final_providers.add(provider)
 

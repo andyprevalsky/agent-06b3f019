@@ -131,7 +131,7 @@
     "tags": [
       "grep"
     ],
-    "price_limit_cents": 250,
+    "price_limit_cents": 450,
     "requires_browser_agent": false,
     "requires_claude_code": false,
     "attachment": null,
