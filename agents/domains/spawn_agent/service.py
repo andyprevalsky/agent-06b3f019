@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
@@ -291,16 +292,41 @@ async def spawn_explore_agent_activity(  # noqa: C901
             }
         )
 
-    # Wrap execute_activity to inject taskId into all internal tool messages
+    # FE tool-message posts (post_agent_message) are fire-and-forget so they never
+    # block the explore leaf's loop. Each post is a ~500ms createMessage round-trip
+    # (Fly→Render + awaited Supabase broadcast); awaiting one per tool call is what
+    # made leaf cached iterations ~1.1s apart instead of ms (root streams at 0.11s,
+    # leaves at 1.34s — a 12x load lag). The explore runs with no poll_messages, so
+    # the result is already in-process; the post is FE/persistence-only. Backgrounded
+    # tasks are drained after run_agent so no message is lost.
+    _pending_fe_posts: "list[asyncio.Task]" = []
+
     async def tagged_execute_activity(activity_fn, args=None, **kwargs):
-        """Wraps call_temporal_activity_from_activity to tag internal messages with explore taskId."""
+        """Wraps call_temporal_activity_from_activity to tag internal messages with explore taskId.
+
+        post_agent_message is dispatched in the background (create_task) so the tool
+        call returns immediately; every other activity is awaited as before.
+        """
         if activity_fn.__name__ == "post_agent_message" and args and len(args) >= 4:
             metadata = args[3]
             if isinstance(metadata, dict):
                 metadata["taskId"] = task_id
                 metadata["agentType"] = "explore"
                 metadata["subAgentId"] = task_id
+            _pending_fe_posts.append(
+                asyncio.create_task(
+                    call_temporal_activity_from_activity(activity_fn, args=args, **kwargs)
+                )
+            )
+            return None
         return await call_temporal_activity_from_activity(activity_fn, args=args, **kwargs)
+
+    async def _drain_pending_fe_posts() -> None:
+        """Await all backgrounded FE posts so none is lost when the activity returns."""
+        pending = [t for t in _pending_fe_posts if not t.done()]
+        _pending_fe_posts.clear()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     # Send the system prompt verbatim. Contact + message-thread context is
     # fetched on-demand via the grep tool (network / agent_network_* / messages
@@ -450,6 +476,10 @@ async def spawn_explore_agent_activity(  # noqa: C901
         fast_mode_cache_enabled=_explore_fast_mode_enabled,
         goal_text=_explore_fast_mode_goal,
     )
+
+    # Flush any backgrounded FE posts before returning so the FE receives every
+    # tool message even though they no longer blocked the leaf loop.
+    await _drain_pending_fe_posts()
 
     # Defensive fallback: when the explore agent terminates with attempt_completion
     # but leaves result empty, the parent receives no evidence. Synthesize a
