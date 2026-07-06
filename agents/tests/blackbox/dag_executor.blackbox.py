@@ -230,7 +230,7 @@ def test_dag_foreach_alias_override_passes_spawn_agent_validation():
     'start_phase is required when type=...for_each'. The override must include
     start_phase so the DAG task fans out instead of failing.
     """
-    from loop.dag_executor import ALIAS_TYPE_OVERRIDES
+    from loop.dag_executor import ALIAS_TYPE_OVERRIDES, _apply_alias_override
     from utils.tool_schemas import SpawnAgentTool
 
     for alias, agent_type in (
@@ -259,11 +259,18 @@ def test_dag_foreach_alias_override_passes_spawn_agent_validation():
             assert "start_phase is required" in str(exc), str(exc)
         assert raised, "expected start_phase validation error with the old type-only override"
 
-        # With the fixed override (type + start_phase), the resolved call validates.
-        params.update(ALIAS_TYPE_OVERRIDES[alias])
-        tool = SpawnAgentTool(**params)
+        # Fill-when-missing: no populator start_phase → alias default EXECUTE,
+        # and the resolved call validates.
+        filled = _apply_alias_override(dict(params), alias)
+        tool = SpawnAgentTool(**filled)
         assert tool.type == agent_type
         assert tool.start_phase == "EXECUTE"
+
+        # Preserve: a populator-chosen start_phase must NOT be overwritten (keeps
+        # already-cached fan-out children on their existing keys).
+        preserved = _apply_alias_override({**params, "start_phase": "PLAN"}, alias)
+        assert preserved["start_phase"] == "PLAN"
+        assert SpawnAgentTool(**preserved).start_phase == "PLAN"
 
 
 def test_build_param_population_message_basic():

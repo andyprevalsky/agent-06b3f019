@@ -65,6 +65,26 @@ ALIAS_TYPE_OVERRIDES = {
     "spawn_general_purpose_agent_for_each": {"type": "for_each", "start_phase": "EXECUTE"},
 }
 
+def _apply_alias_override(params: Dict[str, Any], tool_name: str) -> Dict[str, Any]:
+    """Merge an alias's type/start_phase override into a populated param dict.
+
+    ``type`` is forced (the param-populator can't be trusted to pick it), but
+    ``start_phase`` is a FALLBACK: a populator-chosen start_phase is preserved so
+    an already-cached fan-out keeps its children on their existing cache keys;
+    the alias default only fills a missing/None start_phase (the intermittent
+    prod failure where the DAG for_each spawned without start_phase and was
+    rejected by SpawnAgentTool). Mutates and returns ``params``.
+    """
+    type_override = ALIAS_TYPE_OVERRIDES.get(tool_name)
+    if not type_override:
+        return params
+    override = dict(type_override)
+    if override.get("start_phase") and params.get("start_phase"):
+        override.pop("start_phase")
+    params.update(override)
+    return params
+
+
 _PARAM_SELECTION_STOPWORDS = {
     "a",
     "an",
@@ -858,8 +878,8 @@ async def _execute_single_task(
             # Force correct type for spawn_agent aliases (LLM can't be trusted to pick the right type)
             type_override = ALIAS_TYPE_OVERRIDES.get(task.tool_name)
             if type_override:
-                workflow.logger.info(f"[DAG] Applying type override for {task.tool_name}: {type_override}")
-                params.update(type_override)
+                _apply_alias_override(params, task.tool_name)
+                workflow.logger.info(f"[DAG] Applying type override for {task.tool_name}: {params.get('type')} start_phase={params.get('start_phase')}")
                 # Explore agents don't use these type-specific params — strip them if LLM added them
                 if type_override.get("type") == "explore":
                     params.pop("output_schema", None)
