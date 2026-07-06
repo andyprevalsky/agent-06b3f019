@@ -204,6 +204,12 @@ class AgentWorkflow:
         self.price_limit_cents: int = 100  # Default price limit (100 cents = $1.00)
         self._cost_limit_reached: bool = False  # Flag for cost limit status
         self._is_finished: bool = False  # Latched True after _mark_complete/_mark_failed runs
+        # Debounce the tree-cost persist + Processing status broadcast. These two
+        # activities fire from 4 call sites; unthrottled they flood the backend
+        # (→ activity timeouts that stall the loop) and race (→ FE cost flicker).
+        # Coalesce bursts to at most one emit per _TREE_COST_EMIT_MIN_INTERVAL;
+        # terminal/cost-limit transitions force-flush so the final value lands.
+        self._last_tree_cost_emit_at: Optional[datetime] = None
         self.child_workflow_ids: Dict[str, str] = {}  # child_agent_id -> child_temporal_workflow_id
 
         # Tree token tracking (hierarchical relay: child → parent → root)
@@ -2450,17 +2456,22 @@ class AgentWorkflow:
         except Exception as e:
             workflow.logger.warning(f"Failed to save LLM usage to DB: {e}")
 
-    async def _update_cost_and_signal_parent(self) -> None:
-        """Recalculate subtree cost/tokens and signal parent (or check limit if root)."""
+    async def _update_cost_and_signal_parent(self, force: bool = False) -> None:
+        """Recalculate subtree cost/tokens and signal parent (or check limit if root).
+
+        The DB persist + Processing status broadcast are debounced (coalesced to at
+        most one emit per 3s) so the fan-out does not flood the backend — the flood
+        causes the activity timeouts that stall the loop and the out-of-order
+        broadcasts that flicker the FE cost. Pass force=True on terminal/cost-limit
+        transitions to flush the final value immediately. Parent cost signal and the
+        root cost-limit check always run so aggregation/enforcement stay real-time.
+        """
         # Recalculate subtree cost
         self.subtree_cost_cents = self.own_cost_cents + sum(self.children_cost_cents.values())
 
         # Recalculate tree tokens (own + all children's subtrees)
         self.tree_tokens_in = self.tokens_in + sum(self.children_tokens_in.values())
         self.tree_tokens_out = self.tokens_out + sum(self.children_tokens_out.values())
-
-        # Persist subtree cost to DB (for all agents, so frontend can display it)
-        await self._persist_tree_cost()
 
         # Signal parent (if we have one)
         if self.parent_workflow_id:
@@ -2480,6 +2491,21 @@ class AgentWorkflow:
         else:
             # We are root - check cost limit
             await self._check_cost_limit()
+
+        # Debounce the DB persist + Processing status broadcast — the flooding pair.
+        # (Parent signal + cost-limit check above always run; only the FE-display
+        # writes below are coalesced.) workflow.now() keeps this deterministic.
+        now = workflow.now()
+        if (
+            not force
+            and self._last_tree_cost_emit_at is not None
+            and (now - self._last_tree_cost_emit_at) < timedelta(seconds=3)
+        ):
+            return
+        self._last_tree_cost_emit_at = now
+
+        # Persist subtree cost to DB (for all agents, so frontend can display it)
+        await self._persist_tree_cost()
 
         # Broadcast updated tree tokens to this agent's channel (for frontend display)
         # This applies to all agents (root and non-root) when receiving child updates
@@ -2824,6 +2850,13 @@ class AgentWorkflow:
         # this prevents (status=ACTIVE clobbering FAILED on late child cost signals).
         self._is_finished = True
 
+        # Force a final tree-cost persist so the debounced emitter's last (≤3s
+        # stale) value is corrected to the exact terminal cost. Recalc first; do
+        # NOT route through _update_cost_and_signal_parent (its cost-limit check
+        # could clobber the terminal status).
+        self.subtree_cost_cents = self.own_cost_cents + sum(self.children_cost_cents.values())
+        await self._persist_tree_cost()
+
         tool_call_id = str(workflow.uuid4())
 
         # Extract comprehensive failure context for parent learning
@@ -2948,6 +2981,13 @@ class AgentWorkflow:
         # (which calls _update_cost_and_signal_parent → broadcast) cannot
         # overwrite the COMPLETED status with ACTIVE/Processing.
         self._is_finished = True
+
+        # Force a final tree-cost persist so the debounced emitter's last (≤3s
+        # stale) value is corrected to the exact terminal cost. Recalc first; do
+        # NOT route through _update_cost_and_signal_parent here (its cost-limit
+        # check could flip a just-completed root to COST_LIMIT_REACHED).
+        self.subtree_cost_cents = self.own_cost_cents + sum(self.children_cost_cents.values())
+        await self._persist_tree_cost()
 
         # Poll for output_schema if missing (handles race condition with async schema generation)
         max_schema_attempts = 5
