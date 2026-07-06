@@ -2004,6 +2004,7 @@ async def call_llm_structured_streaming(  # noqa: C901
 
         deferred_fast_cache_key: Optional[str] = None
         deferred_fast_cache_goal_hash: Optional[str] = None
+        deferred_fast_cache_goal_str: Optional[str] = None
         deferred_fast_cache_acc: Optional[Dict[str, Any]] = None
         fast_cache_accumulate = None
         try:
@@ -2041,6 +2042,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                     fast_cache_request_key_material(fast_cache_complete_kwargs),
                 )
                 deferred_fast_cache_goal_hash = fast_cache_context.goal_hash
+                deferred_fast_cache_goal_str = fast_cache_context.goal
                 deferred_fast_cache_acc = fast_cache_empty_response()
         except Exception as exc:
             logger.warning("fast_cache.defer_setup_error", call_site=call_site, error=str(exc))
@@ -2694,13 +2696,34 @@ async def call_llm_structured_streaming(  # noqa: C901
             and not usage.get("from_fast_cache")
         ):
             try:
-                await fast_cache_client.cache_set(
+                stored_ok = await fast_cache_client.cache_set(
                     deferred_fast_cache_key,
                     "llm",
                     deferred_fast_cache_goal_hash,
                     deferred_fast_cache_acc,
                 )
-                logger.info("llm.cache.stored", call_site=call_site, key=deferred_fast_cache_key)
+                # Diagnostic: the goal STRING behind the goal_hash. A trajectory whose
+                # terminal call caches under a run-unique goal (timestamp/uuid leaking
+                # into the goal) never replays — see explore-final-call-cache-miss.
+                goal_preview = (deferred_fast_cache_goal_str or "")[:160]
+                if stored_ok:
+                    logger.info(
+                        "llm.cache.stored",
+                        call_site=call_site,
+                        key=deferred_fast_cache_key,
+                        goal_hash=deferred_fast_cache_goal_hash,
+                        goal_preview=goal_preview,
+                    )
+                else:
+                    # cache_set returns False (never raises) on a non-200/timeout write.
+                    # Previously we logged "stored" unconditionally, masking dropped writes.
+                    logger.warning(
+                        "fast_cache.write_dropped",
+                        call_site=call_site,
+                        key=deferred_fast_cache_key,
+                        goal_hash=deferred_fast_cache_goal_hash,
+                        goal_preview=goal_preview,
+                    )
             except Exception as exc:
                 logger.warning("fast_cache.set_error", key=deferred_fast_cache_key, error=str(exc))
 
@@ -3156,7 +3179,7 @@ async def call_llm(
                         "provider_fast_mode": bool(ctx.provider_fast_mode),
                     }
                     key = ctx.llm_key(call_site, fast_cache_request_key_material(fast_cache_kwargs))
-                    await fast_cache_client.cache_set(
+                    stored_ok = await fast_cache_client.cache_set(
                         key,
                         "llm",
                         ctx.goal_hash,
@@ -3171,7 +3194,24 @@ async def call_llm(
                             "usage": usage,
                         },
                     )
-                    logger.info("llm.cache.stored", call_site=call_site, key=key, structured=True)
+                    if stored_ok:
+                        logger.info(
+                            "llm.cache.stored",
+                            call_site=call_site,
+                            key=key,
+                            structured=True,
+                            goal_hash=ctx.goal_hash,
+                            goal_preview=(ctx.goal or "")[:160],
+                        )
+                    else:
+                        logger.warning(
+                            "fast_cache.write_dropped",
+                            call_site=call_site,
+                            key=key,
+                            structured=True,
+                            goal_hash=ctx.goal_hash,
+                            goal_preview=(ctx.goal or "")[:160],
+                        )
 
             return result
 
@@ -3340,6 +3380,7 @@ async def _call_llm_verifier(  # noqa: C901
     )
     deferred_fast_cache_key: Optional[str] = None
     deferred_fast_cache_goal_hash: Optional[str] = None
+    deferred_fast_cache_goal_str: Optional[str] = None
     deferred_fast_cache_acc: Optional[Dict[str, Any]] = None
     fast_cache_accumulate = None
     try:
@@ -3376,6 +3417,7 @@ async def _call_llm_verifier(  # noqa: C901
                 fast_cache_request_key_material(fast_cache_complete_kwargs),
             )
             deferred_fast_cache_goal_hash = fast_cache_context.goal_hash
+            deferred_fast_cache_goal_str = fast_cache_context.goal
             deferred_fast_cache_acc = fast_cache_empty_response()
     except Exception as exc:
         logger.warning("fast_cache.defer_setup_error", call_site=call_site, error=str(exc))
@@ -3506,13 +3548,29 @@ async def _call_llm_verifier(  # noqa: C901
         and not usage.get("from_fast_cache")
     ):
         try:
-            await fast_cache_client.cache_set(
+            stored_ok = await fast_cache_client.cache_set(
                 deferred_fast_cache_key,
                 "llm",
                 deferred_fast_cache_goal_hash,
                 deferred_fast_cache_acc,
             )
-            logger.info("llm.cache.stored", call_site=call_site, key=deferred_fast_cache_key)
+            goal_preview = (deferred_fast_cache_goal_str or "")[:160]
+            if stored_ok:
+                logger.info(
+                    "llm.cache.stored",
+                    call_site=call_site,
+                    key=deferred_fast_cache_key,
+                    goal_hash=deferred_fast_cache_goal_hash,
+                    goal_preview=goal_preview,
+                )
+            else:
+                logger.warning(
+                    "fast_cache.write_dropped",
+                    call_site=call_site,
+                    key=deferred_fast_cache_key,
+                    goal_hash=deferred_fast_cache_goal_hash,
+                    goal_preview=goal_preview,
+                )
         except Exception as exc:
             logger.warning("fast_cache.set_error", key=deferred_fast_cache_key, error=str(exc))
 
@@ -5362,6 +5420,12 @@ async def call_planner_llm_activity(
                         "tokens_out": tokens_out,
                         "model": actual_model,
                         "provider": "Rose Planner",
+                        # Propagate fast-cache replay + cache-token fields so the
+                        # workflow cost aggregator zeroes a replayed planner call
+                        # instead of billing the replayed output tokens.
+                        "from_fast_cache": usage.get("from_fast_cache", False),
+                        "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0),
+                        "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0),
                     }
                 ],
                 "service": [],

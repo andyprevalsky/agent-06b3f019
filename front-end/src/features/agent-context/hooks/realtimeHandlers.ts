@@ -115,7 +115,16 @@ export function handleUpdateAgent(
       tokens_out: updated.tokensOut ?? prev.tokens_out,
       context_size: updated.contextSize ?? prev.context_size,
       message_count: updated.messageCount ?? prev.message_count,
-      tree_cost_cents: updated.treeCostCents ?? prev.tree_cost_cents,
+      // Tree cost is monotonic within a run, but the workflow fans out cost
+      // updates from several concurrent, retryable broadcast activities with no
+      // ordering guarantee — so a stale (smaller) payload can arrive after a
+      // newer (larger) one. Clamp to the max seen to stop the value flickering
+      // down. (Backend single-emitter coalescing is the primary fix; this is
+      // the belt-and-suspenders guard at the sink.)
+      tree_cost_cents:
+        updated.treeCostCents !== undefined && updated.treeCostCents !== null
+          ? Math.max(prev.tree_cost_cents ?? 0, updated.treeCostCents)
+          : prev.tree_cost_cents,
       updated_at: updated.updatedAt ?? prev.updated_at,
       temporal_workflow_id:
         updated.temporalWorkflowId !== undefined
