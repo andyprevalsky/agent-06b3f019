@@ -51,13 +51,18 @@ TOOL_ALIASES = {
 }
 
 # When aliases resolve to spawn_agent, force the correct type param
-# so the param-populator LLM can't pick the wrong agent type
+# so the param-populator LLM can't pick the wrong agent type.
+# general_purpose/for_each also REQUIRE start_phase (SpawnAgentTool validation);
+# the param-populator doesn't supply it, so the alias must — otherwise the DAG
+# task fails with "start_phase is required when type='general_purpose'|'for_each'".
+# EXECUTE is correct here: these run pre-planned DAG sub-tasks, so the child
+# doesn't need its own PLAN phase (also cheaper across a large for_each fan-out).
 ALIAS_TYPE_OVERRIDES = {
     "spawn_explore_agent": {"type": "explore"},
     "spawn_browser_agent": {"type": "browser"},
     "spawn_code_agent": {"type": "code"},
-    "spawn_general_purpose_agent": {"type": "general_purpose"},
-    "spawn_general_purpose_agent_for_each": {"type": "for_each"},
+    "spawn_general_purpose_agent": {"type": "general_purpose", "start_phase": "EXECUTE"},
+    "spawn_general_purpose_agent_for_each": {"type": "for_each", "start_phase": "EXECUTE"},
 }
 
 _PARAM_SELECTION_STOPWORDS = {
