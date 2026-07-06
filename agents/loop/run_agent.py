@@ -419,18 +419,34 @@ async def run_agent(  # noqa: C901
     # Graceful wind-down state: ensures the "final turn" nudge is injected once.
     winddown_injected = False
 
+    # Consecutive paused iterations — used to throttle logging and guarantee a
+    # non-zero floor sleep so a paused agent can never busy-spin the worker.
+    paused_spins = 0
+
     # Main loop
     while iteration < max_iterations:
         # 1. Check if paused (BEFORE incrementing iteration - don't count paused loops as steps)
         if check_paused and await check_paused():
-            logger.info("Agent paused, waiting...")
+            # Throttle the log to ~once per 30s. An orphaned sub-agent (dead
+            # parent, wait_for_messages returns immediately) could otherwise emit
+            # tens of thousands of identical lines per run.
+            if paused_spins % 30 == 0:
+                logger.info("Agent paused, waiting...", agent_id=agent_id, paused_spins=paused_spins)
+            paused_spins += 1
             if wait_for_messages:
-                # Wait for unpause (workflow) or poll (activity)
+                # Wait for unpause (workflow) or poll (activity).
                 with contextlib.suppress(asyncio.TimeoutError):
                     await wait_for_messages()
-            else:
-                await asyncio.sleep(1)
+            # Floor sleep on EVERY paused iteration — including when
+            # wait_for_messages is set. If wait_for_messages() returns immediately
+            # (orphaned sub-agent whose parent is dead, or a poll with no backoff),
+            # the loop would busy-spin and peg the worker event loop, starving every
+            # other agent on the same worker (livelock → cascade of ACTIVE
+            # timeouts). The 1s floor bounds it to ~1 iteration/sec with negligible
+            # impact on waits that legitimately block.
+            await asyncio.sleep(1)
             continue
+        paused_spins = 0
 
         # Only increment iteration when we're actually going to do work
         iteration += 1
