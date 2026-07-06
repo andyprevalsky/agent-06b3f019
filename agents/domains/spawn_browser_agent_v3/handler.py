@@ -5064,6 +5064,11 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 "tokens_out": item.get("output_tokens", 0),
                                 "model": item.get("model"),
                                 "provider": item.get("provider", ""),
+                                "cache_read_input_tokens": item.get("cache_read_input_tokens", 0),
+                                "cache_creation_input_tokens": item.get("cache_creation_input_tokens", 0),
+                                # Propagate fast-cache replay so replayed browser
+                                # steps bill $0 instead of their replayed tokens.
+                                "from_fast_cache": item.get("from_fast_cache", False),
                             }
                         )
                     else:

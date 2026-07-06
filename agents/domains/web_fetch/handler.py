@@ -230,6 +230,10 @@ class WebFetchManager(ToolManager):
                     "provider": "Rose (summarize_web_fetch)",
                     "cache_read_input_tokens": haiku_usage.get("cache_read_input_tokens", 0),
                     "cache_creation_input_tokens": haiku_usage.get("cache_creation_input_tokens", 0),
+                    # Propagate fast-cache replay so the workflow cost aggregator
+                    # zeroes a replayed summarize call instead of billing the
+                    # replayed output tokens (mirrors the planner fix).
+                    "from_fast_cache": haiku_usage.get("from_fast_cache", False),
                 }
 
             elapsed_time = _safe_time() - start_time

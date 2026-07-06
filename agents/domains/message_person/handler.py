@@ -529,6 +529,11 @@ class MessagePersonManager(ToolManager):
                             "tokens_out": gen_usage.get("completion_tokens", 0),
                             "model": gen_usage.get("actual_model", model),
                             "provider": "message_person",
+                            "cache_read_input_tokens": gen_usage.get("cache_read_input_tokens", 0),
+                            "cache_creation_input_tokens": gen_usage.get("cache_creation_input_tokens", 0),
+                            # Propagate fast-cache replay so a replayed message_person
+                            # call bills $0 instead of its replayed output tokens.
+                            "from_fast_cache": gen_usage.get("from_fast_cache", False),
                         }
                     ]
                 }
