@@ -1141,6 +1141,70 @@ async def test_paused_agent_floor_sleeps_and_does_not_busy_spin():
     assert wait_calls["n"] >= 3, f"wait_for_messages should be attempted per pause, got {wait_calls['n']}"
 
 
+async def test_orphaned_agent_aborts_instead_of_pausing_forever():
+    """A child orphaned by a terminated parent raises check_abort. The loop must
+    return a terminal 'aborted' status (so the workflow finalizes) rather than
+    staying in the paused-wait loop forever. This is the real cure for the orphan
+    livelock; the floor sleep above is only defense-in-depth."""
+    from loop.run_agent import run_agent
+
+    # check_paused True (inherited pause), wait returns immediately (dead parent),
+    # then abort flips true — mirroring _check_parent_state detecting parent-gone.
+    state = {"waited": 0, "abort": False}
+
+    async def check_paused():
+        return True
+
+    async def check_abort():
+        return state["abort"]
+
+    async def wait_for_messages():
+        state["waited"] += 1
+        state["abort"] = True  # parent confirmed gone on the first wait
+        return False
+
+    async def mock_system_prompt():
+        return "sys"
+
+    def mock_verifier_prompt(*args, **kwargs):
+        return "verify"
+
+    async def mock_post_message(text, role, metadata=None):
+        return None
+
+    async def instant_sleep(secs, *args, **kwargs):
+        return None
+
+    with (
+        patch("loop.run_agent.call_llm_structured_streaming", new=AsyncMock()),
+        patch("loop.run_agent.asyncio.sleep", new=instant_sleep),
+    ):
+        result = await asyncio.wait_for(
+            run_agent(
+                agent_id="agent-orphan",
+                user_id="user-test",
+                system_prompt=mock_system_prompt,
+                verifier_prompt_generator=mock_verifier_prompt,
+                model="rose-labs/rose-1-lite",
+                tools=["attempt_completion"],
+                initial_context=[{"role": "USER", "text": "go", "timestamp": "2024-01-01T00:00:00Z"}],
+                is_inside_temporal_activity=False,
+                check_paused=check_paused,
+                check_abort=check_abort,
+                wait_for_messages=wait_for_messages,
+                post_message=mock_post_message,
+                build_messages=lambda context, prompt: [{"role": "system", "content": prompt}],
+                max_iterations=100000,
+                skip_verification=True,
+                skip_status_updates=True,
+            ),
+            timeout=5,
+        )
+
+    assert result["status"] == "aborted", f"expected aborted, got {result.get('status')}"
+    assert state["waited"] >= 1, "should have entered the paused-wait before aborting"
+
+
 async def run_all_tests():
     print("run-agent blackbox tests:")
     r = BlackboxResult()
@@ -1184,6 +1248,10 @@ async def run_all_tests():
     await r.record_async(
         "paused_agent_floor_sleeps_and_does_not_busy_spin",
         test_paused_agent_floor_sleeps_and_does_not_busy_spin,
+    )
+    await r.record_async(
+        "orphaned_agent_aborts_instead_of_pausing_forever",
+        test_orphaned_agent_aborts_instead_of_pausing_forever,
     )
     teardown_mock()
     return r.summary()

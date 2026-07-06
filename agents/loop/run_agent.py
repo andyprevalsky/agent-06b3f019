@@ -113,6 +113,10 @@ async def run_agent(  # noqa: C901
     is_inside_temporal_activity: bool = False,
     # Callbacks - abstract workflow vs activity differences
     check_paused: Optional[Callable[[], bool]] = None,
+    # Returns True when the agent should abort and finalize (e.g. it has been
+    # orphaned — its parent terminated — so waiting/working is pointless). Distinct
+    # from pause: pause is recoverable, abort is terminal.
+    check_abort: Optional[Callable[[], Awaitable[bool]]] = None,
     wait_for_messages: Optional[Callable[[], Awaitable[bool]]] = None,
     on_context_overflow: Optional[Callable[[List[Dict]], Awaitable[None]]] = None,
     check_credits: Optional[Callable[[], Awaitable[None]]] = None,  # Checks credits, sets pause if depleted
@@ -425,6 +429,23 @@ async def run_agent(  # noqa: C901
 
     # Main loop
     while iteration < max_iterations:
+        # 0. Abort check (BEFORE pause) — a terminal signal such as being orphaned
+        # (parent workflow gone). Return immediately with a terminal status so the
+        # caller finalizes instead of pausing/looping forever.
+        if check_abort and await check_abort():
+            logger.info("run_agent aborting — terminal signal (orphaned)", agent_id=agent_id, iteration=iteration)
+            _pending_llm_context.pop(agent_id, None)
+            return {
+                "status": "aborted",
+                "context": context,
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "token_count": token_count,
+                "context_size": context_size,
+                "cache_read_input_tokens": cache_read_total,
+                "cache_creation_input_tokens": cache_write_total,
+            }
+
         # 1. Check if paused (BEFORE incrementing iteration - don't count paused loops as steps)
         if check_paused and await check_paused():
             # Throttle the log to ~once per 30s. An orphaned sub-agent (dead
@@ -437,12 +458,12 @@ async def run_agent(  # noqa: C901
                 # Wait for unpause (workflow) or poll (activity).
                 with contextlib.suppress(asyncio.TimeoutError):
                     await wait_for_messages()
-            # Floor sleep on EVERY paused iteration — including when
-            # wait_for_messages is set. If wait_for_messages() returns immediately
-            # (orphaned sub-agent whose parent is dead, or a poll with no backoff),
-            # the loop would busy-spin and peg the worker event loop, starving every
-            # other agent on the same worker (livelock → cascade of ACTIVE
-            # timeouts). The 1s floor bounds it to ~1 iteration/sec with negligible
+            # Defense-in-depth floor sleep on EVERY paused iteration — including
+            # when wait_for_messages is set. The real orphan livelock (a child
+            # paused by a since-terminated parent) is now cured upstream via the
+            # check_abort path above; this floor just guarantees that no future
+            # pause path can ever busy-spin and peg the worker event loop if
+            # wait_for_messages() returns immediately. ~1 iteration/sec, negligible
             # impact on waits that legitimately block.
             await asyncio.sleep(1)
             continue
