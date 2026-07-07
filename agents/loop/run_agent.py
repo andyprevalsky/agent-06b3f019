@@ -16,7 +16,6 @@ import asyncio
 import contextlib
 import hashlib
 import json
-import uuid
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional, Tuple, Type
@@ -270,8 +269,10 @@ async def run_agent(  # noqa: C901
         last_checked=last_checked.isoformat(),
     )
 
-    # Generate stream_id for this session
-    stream_id = str(uuid.uuid4())
+    # Generate stream_id for this session. workflow.uuid4() (not uuid.uuid4()):
+    # run_agent is workflow-scope, so raw uuid4 is regenerated on replay and
+    # breaks event/id correlation across a worker migration.
+    stream_id = str(workflow.uuid4())
 
     # Set up execute_activity based on context (workflow vs activity)
     execute_activity = (
@@ -511,7 +512,7 @@ async def run_agent(  # noqa: C901
                         "grounded evidence you already have and call attempt_completion_with_result "
                         "now with your best answer, explicitly noting any gaps you could not fill."
                     ),
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "timestamp": workflow.now().isoformat(),
                 }
             )
             winddown_injected = True
@@ -567,7 +568,7 @@ async def run_agent(  # noqa: C901
                                 {
                                     "role": "SYSTEM",
                                     "text": formatted,
-                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                    "timestamp": workflow.now().isoformat(),
                                 }
                             )
                         logger.info(f"Added {len(blueprints)} blueprints to context")
@@ -770,7 +771,7 @@ async def run_agent(  # noqa: C901
                 # Inside activity (browser agent) - call LLM directly with streaming callback
                 sequence = [0]
                 last_text = [""]
-                llm_started_at_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+                llm_started_at_ms = int(workflow.now().timestamp() * 1000)
                 start_event = ToolEvent(
                     type=EventType.STREAM_MESSAGE,
                     stream_id=stream_id,
@@ -1189,9 +1190,10 @@ async def run_agent(  # noqa: C901
                     tool_call_id = matches[current_usage][1]  # Get the tool_call_id
                     detected_tool_usage_count[tool_name] = current_usage + 1
 
-            # Fallback to new UUID if no pre-assigned ID found
+            # Fallback to new UUID if no pre-assigned ID found. workflow.uuid4()
+            # for replay-stability (raw uuid4 re-mints on replay → split bubbles).
             if not tool_call_id:
-                tool_call_id = str(uuid.uuid4())
+                tool_call_id = str(workflow.uuid4())
 
             # Persist assistant declarations with explicit tool_call_id mapping
             assistant_tool_calls.append(
@@ -1236,7 +1238,7 @@ async def run_agent(  # noqa: C901
                     {
                         "role": "ASSISTANT",
                         "text": response_text or "",
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "timestamp": workflow.now().isoformat(),
                         "metadata": assistant_metadata or {},
                     }
                 )
@@ -1298,7 +1300,7 @@ async def run_agent(  # noqa: C901
                             {
                                 "role": "TOOL",
                                 "text": f"Error: {error}",
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "timestamp": workflow.now().isoformat(),
                                 "metadata": {
                                     "toolCallId": tool_call_id,
                                     "toolName": tool_name,
@@ -1352,7 +1354,7 @@ async def run_agent(  # noqa: C901
                     new_msg = {
                         "role": "TOOL",
                         "text": f"Error: {result_message}",
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "timestamp": workflow.now().isoformat(),
                         "metadata": {
                             "toolCallId": tool_call_id,
                             "toolName": tool_name,
@@ -1364,7 +1366,7 @@ async def run_agent(  # noqa: C901
                     new_msg = {
                         "role": "TOOL",
                         "text": result_message,
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "timestamp": workflow.now().isoformat(),
                         "metadata": {
                             "toolCallId": tool_call_id,
                             "toolName": tool_name,
@@ -1411,7 +1413,7 @@ async def run_agent(  # noqa: C901
                             "use different arguments, a different tool, or decompose the problem differently. "
                             "Do not repeat the same call again."
                         ),
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "timestamp": workflow.now().isoformat(),
                     }
                 )
             else:
@@ -1476,7 +1478,7 @@ async def run_agent(  # noqa: C901
                         {
                             "role": "TOOL",
                             "text": response_text or "",
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "timestamp": workflow.now().isoformat(),
                             "metadata": {
                                 "toolCallId": tool_call_id,
                                 "toolName": tool_name,
@@ -1654,7 +1656,7 @@ async def run_agent(  # noqa: C901
                         {
                             "role": "TOOL",
                             "text": v_reasoning or "",
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "timestamp": workflow.now().isoformat(),
                             "metadata": {
                                 "toolCallId": tool_call_id,
                                 "toolName": "attempt_completion",
@@ -1693,7 +1695,7 @@ async def run_agent(  # noqa: C901
                         {
                             "role": "TOOL",
                             "text": feedback_text,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "timestamp": workflow.now().isoformat(),
                             "metadata": {
                                 "toolCallId": tool_call_id,
                                 "toolName": "attempt_completion",
@@ -1737,7 +1739,7 @@ async def run_agent(  # noqa: C901
                 {
                     "role": "SYSTEM",
                     "text": nudge,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "timestamp": workflow.now().isoformat(),
                 }
             )
         else:
@@ -1994,7 +1996,7 @@ async def _run_verifier(
     fast_mode_step: int = 0,
 ) -> Dict:
     """Run verifier to check completion."""
-    verifier_call_id = tool_call_id or str(uuid.uuid4())
+    verifier_call_id = tool_call_id or str(workflow.uuid4())
 
     # Post IN_PROGRESS
     # Post the in-progress verifier row as the active attempt_completion tool

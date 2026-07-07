@@ -15,7 +15,6 @@ USAGE:
 import asyncio
 import json
 import re
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -656,13 +655,20 @@ async def _execute_single_task(
     """
     from activities.reasoning import execute_reasoning_activity
 
-    tool_call_id = str(uuid.uuid4())
+    # MUST be workflow.uuid4() (not uuid.uuid4()): this id runs in workflow
+    # scope and is recorded in Temporal history. Raw uuid.uuid4() is recomputed
+    # on every replay, so a worker migration/restart mid-fan-out regenerates the
+    # id — IN_PROGRESS child events land under the pre-replay id and FINISHED
+    # events under the post-replay id, splitting one for_each into two bubbles
+    # (the pre-replay one spins forever, never receiving a matching FINISHED).
+    tool_call_id = str(workflow.uuid4())
     dag.mark_in_progress(task.index, tool_call_id)
 
     try:
         if task.tool_name == "reasoning":
             # Reasoning task - execute via activity (streams to frontend via Supabase Realtime)
-            stream_id = f"dag-reasoning-{task.index}-{uuid.uuid4()}"
+            # workflow.uuid4() for replay-stability (see tool_call_id note above).
+            stream_id = f"dag-reasoning-{task.index}-{workflow.uuid4()}"
 
             # Emit an IN_PROGRESS DB row so external monitors (and the FE) can see
             # the reasoning task started. Without this, the parent agent appears
