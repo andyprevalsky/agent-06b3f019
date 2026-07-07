@@ -108,9 +108,7 @@ async def cache_get_record(key: str) -> CacheRecord:
         logger.warning("fast_cache.get_failed", key=key, status=last_status, attempts=_GET_MAX_ATTEMPTS)
     else:
         logger.warning("fast_cache.get_error", key=key, error=(last_error or "")[:300], attempts=_GET_MAX_ATTEMPTS)
-    await _archive_cache_read(
-        key, hit=False, value=None, blob_path=None, status=last_status, error=last_error
-    )
+    await _archive_cache_read(key, hit=False, value=None, blob_path=None, status=last_status, error=last_error)
     return {"hit": False, "value": None, "blobPath": None}
 
 

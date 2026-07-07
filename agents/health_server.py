@@ -11,7 +11,6 @@ from typing import Optional
 
 import psutil
 import structlog
-
 from flask import Flask, jsonify
 
 logger = structlog.get_logger()

@@ -109,35 +109,27 @@ def assert_captured_call(
 ) -> dict[str, Any]:
     """Assert properties of a captured HTTP call."""
     captures = get_captures()
-    assert len(captures) > index, (
-        f"Expected at least {index + 1} captures, got {len(captures)}"
-    )
+    assert len(captures) > index, f"Expected at least {index + 1} captures, got {len(captures)}"
 
     call = captures[index]
 
     if url_contains is not None:
-        assert url_contains in call["url"], (
-            f"Expected URL to contain '{url_contains}', got '{call['url']}'"
-        )
+        assert url_contains in call["url"], f"Expected URL to contain '{url_contains}', got '{call['url']}'"
 
     if method is not None:
-        assert call["method"] == method, (
-            f"Expected method '{method}', got '{call['method']}'"
-        )
+        assert call["method"] == method, f"Expected method '{method}', got '{call['method']}'"
 
     if body_contains is not None and call["requestBody"]:
         body = json.loads(call["requestBody"])
         for key, value in body_contains.items():
             assert key in body, f"Expected key '{key}' in request body, got {list(body.keys())}"
             if value is not None:
-                assert body[key] == value, (
-                    f"Expected body['{key}'] = {value}, got {body[key]}"
-                )
+                assert body[key] == value, f"Expected body['{key}'] = {value}, got {body[key]}"
 
     if header_present is not None:
-        assert header_present.lower() in {
-            k.lower() for k in call["requestHeaders"]
-        }, f"Expected header '{header_present}' in request"
+        assert header_present.lower() in {k.lower() for k in call["requestHeaders"]}, (
+            f"Expected header '{header_present}' in request"
+        )
 
     return call
 

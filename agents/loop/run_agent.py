@@ -45,6 +45,8 @@ from helpers.messages import CoalescingStreamBroadcaster
 from helpers.summarize import compress_context
 from helpers.tracing import span, traced
 from helpers.update_status import update_agent_status
+from helpers.workflow_safe import safe_now as _safe_now
+from helpers.workflow_safe import safe_uuid4 as _safe_uuid4
 from loop.activity_helper import call_temporal_activity_from_activity
 from loop.context_utils import poll_and_update_context
 from providers.rose.errors import RoseRefusalError
@@ -54,6 +56,7 @@ from utils.error_utils import extract_error_message
 from utils.tool_schemas import PLAN_TOOL_MODELS, create_agent_action_model
 
 logger = structlog.get_logger()
+
 
 # Check credits every N iterations
 CREDIT_CHECK_INTERVAL = 5
@@ -269,10 +272,10 @@ async def run_agent(  # noqa: C901
         last_checked=last_checked.isoformat(),
     )
 
-    # Generate stream_id for this session. workflow.uuid4() (not uuid.uuid4()):
+    # Generate stream_id for this session. _safe_uuid4() (not uuid.uuid4()):
     # run_agent is workflow-scope, so raw uuid4 is regenerated on replay and
     # breaks event/id correlation across a worker migration.
-    stream_id = str(workflow.uuid4())
+    stream_id = str(_safe_uuid4())
 
     # Set up execute_activity based on context (workflow vs activity)
     execute_activity = (
@@ -349,18 +352,18 @@ async def run_agent(  # noqa: C901
         """One-line PLAN FSM state label injected into tool results."""
         if state == "PLAN":
             return (
-                "FSM_STATE: current=PLAN; purpose=\"clarify the user's goal; if already clear, call set_plan\"; "
+                'FSM_STATE: current=PLAN; purpose="clarify the user\'s goal; if already clear, call set_plan"; '
                 "enabled_tools=send_message_to_user,spawn_agent,set_plan; transitions=set_plan->SET_PLAN."
             )
         if state == "SET_PLAN":
             return (
-                "FSM_STATE: current=SET_PLAN; purpose=\"Route between asking the user a question or starting execution\"; "
+                'FSM_STATE: current=SET_PLAN; purpose="Route between asking the user a question or starting execution"; '
                 "enabled_tools=send_message_to_user,attempt_completion; disabled_tools=spawn_agent; "
                 "transitions=send_message_to_user->ASK_QUESTION,attempt_completion->EXIT(EXECUTE)."
             )
         if state == "ASK_QUESTION":
             return (
-                "FSM_STATE: current=ASK_QUESTION; purpose=\"Ask any questions needed before entering the EXECUTE phase\"; "
+                'FSM_STATE: current=ASK_QUESTION; purpose="Ask any questions needed before entering the EXECUTE phase"; '
                 "enabled_tools=send_message_to_user,attempt_completion,spawn_agent; "
                 "transitions=attempt_completion->EXIT(EXECUTE),spawn_agent->PLAN."
             )
@@ -499,11 +502,7 @@ async def run_agent(  # noqa: C901
         # cached system prompt) telling the model to synthesize and complete now.
         # Mirrors Hermes' single grace call — no earlier pressure warnings (they make
         # models give up prematurely), injected exactly once.
-        if (
-            winddown_window > 0
-            and not winddown_injected
-            and iteration >= max_iterations - winddown_window
-        ):
+        if winddown_window > 0 and not winddown_injected and iteration >= max_iterations - winddown_window:
             context.append(
                 {
                     "role": "SYSTEM",
@@ -512,11 +511,13 @@ async def run_agent(  # noqa: C901
                         "grounded evidence you already have and call attempt_completion_with_result "
                         "now with your best answer, explicitly noting any gaps you could not fill."
                     ),
-                    "timestamp": workflow.now().isoformat(),
+                    "timestamp": _safe_now().isoformat(),
                 }
             )
             winddown_injected = True
-            logger.info("run_agent.winddown_injected", agent_id=agent_id, iteration=iteration, max_iterations=max_iterations)
+            logger.info(
+                "run_agent.winddown_injected", agent_id=agent_id, iteration=iteration, max_iterations=max_iterations
+            )
 
         # 1.5. Check credits periodically (callback sets is_paused if depleted)
         if check_credits and (iteration % CREDIT_CHECK_INTERVAL == 0):
@@ -568,7 +569,7 @@ async def run_agent(  # noqa: C901
                                 {
                                     "role": "SYSTEM",
                                     "text": formatted,
-                                    "timestamp": workflow.now().isoformat(),
+                                    "timestamp": _safe_now().isoformat(),
                                 }
                             )
                         logger.info(f"Added {len(blueprints)} blueprints to context")
@@ -585,10 +586,7 @@ async def run_agent(  # noqa: C901
         compaction_trigger = effective_window - AUTOCOMPACT_BUFFER_TOKENS
         context_tokens = _estimate_tokens(context)
 
-        if (
-            context_tokens >= compaction_trigger
-            and compactor_failures < MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES
-        ):
+        if context_tokens >= compaction_trigger and compactor_failures < MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
             logger.info(
                 "Context overflow",
                 context_tokens=context_tokens,
@@ -755,14 +753,10 @@ async def run_agent(  # noqa: C901
             get_gpt_account_id() if get_gpt_account_id and current_gpt_token else remembered_gpt_account_id
         )
         current_gpt_token_source = (
-            get_gpt_token_source()
-            if get_gpt_token_source and current_gpt_token
-            else remembered_gpt_token_source
+            get_gpt_token_source() if get_gpt_token_source and current_gpt_token else remembered_gpt_token_source
         )
         current_gpt_token_pool_id = (
-            get_gpt_token_pool_id()
-            if get_gpt_token_pool_id and current_gpt_token
-            else remembered_gpt_token_pool_id
+            get_gpt_token_pool_id() if get_gpt_token_pool_id and current_gpt_token else remembered_gpt_token_pool_id
         )
 
         # 7. Call LLM with structured streaming
@@ -771,7 +765,7 @@ async def run_agent(  # noqa: C901
                 # Inside activity (browser agent) - call LLM directly with streaming callback
                 sequence = [0]
                 last_text = [""]
-                llm_started_at_ms = int(workflow.now().timestamp() * 1000)
+                llm_started_at_ms = int(_safe_now().timestamp() * 1000)
                 start_event = ToolEvent(
                     type=EventType.STREAM_MESSAGE,
                     stream_id=stream_id,
@@ -1190,10 +1184,10 @@ async def run_agent(  # noqa: C901
                     tool_call_id = matches[current_usage][1]  # Get the tool_call_id
                     detected_tool_usage_count[tool_name] = current_usage + 1
 
-            # Fallback to new UUID if no pre-assigned ID found. workflow.uuid4()
+            # Fallback to new UUID if no pre-assigned ID found. _safe_uuid4()
             # for replay-stability (raw uuid4 re-mints on replay → split bubbles).
             if not tool_call_id:
-                tool_call_id = str(workflow.uuid4())
+                tool_call_id = str(_safe_uuid4())
 
             # Persist assistant declarations with explicit tool_call_id mapping
             assistant_tool_calls.append(
@@ -1238,7 +1232,7 @@ async def run_agent(  # noqa: C901
                     {
                         "role": "ASSISTANT",
                         "text": response_text or "",
-                        "timestamp": workflow.now().isoformat(),
+                        "timestamp": _safe_now().isoformat(),
                         "metadata": assistant_metadata or {},
                     }
                 )
@@ -1300,7 +1294,7 @@ async def run_agent(  # noqa: C901
                             {
                                 "role": "TOOL",
                                 "text": f"Error: {error}",
-                                "timestamp": workflow.now().isoformat(),
+                                "timestamp": _safe_now().isoformat(),
                                 "metadata": {
                                     "toolCallId": tool_call_id,
                                     "toolName": tool_name,
@@ -1354,7 +1348,7 @@ async def run_agent(  # noqa: C901
                     new_msg = {
                         "role": "TOOL",
                         "text": f"Error: {result_message}",
-                        "timestamp": workflow.now().isoformat(),
+                        "timestamp": _safe_now().isoformat(),
                         "metadata": {
                             "toolCallId": tool_call_id,
                             "toolName": tool_name,
@@ -1366,7 +1360,7 @@ async def run_agent(  # noqa: C901
                     new_msg = {
                         "role": "TOOL",
                         "text": result_message,
-                        "timestamp": workflow.now().isoformat(),
+                        "timestamp": _safe_now().isoformat(),
                         "metadata": {
                             "toolCallId": tool_call_id,
                             "toolName": tool_name,
@@ -1399,10 +1393,7 @@ async def run_agent(  # noqa: C901
             if len(recent_call_hashes) >= 3 and len(set(list(recent_call_hashes)[-3:])) == 1:
                 same_call_streak += 1
                 tool_names = [t for t, _, _ in processed_tools]
-                logger.warning(
-                    f"[run_agent] Repetitive tool calls detected (streak={same_call_streak}): "
-                    f"{tool_names}"
-                )
+                logger.warning(f"[run_agent] Repetitive tool calls detected (streak={same_call_streak}): {tool_names}")
                 context.append(
                     {
                         "role": "SYSTEM",
@@ -1413,7 +1404,7 @@ async def run_agent(  # noqa: C901
                             "use different arguments, a different tool, or decompose the problem differently. "
                             "Do not repeat the same call again."
                         ),
-                        "timestamp": workflow.now().isoformat(),
+                        "timestamp": _safe_now().isoformat(),
                     }
                 )
             else:
@@ -1478,7 +1469,7 @@ async def run_agent(  # noqa: C901
                         {
                             "role": "TOOL",
                             "text": response_text or "",
-                            "timestamp": workflow.now().isoformat(),
+                            "timestamp": _safe_now().isoformat(),
                             "metadata": {
                                 "toolCallId": tool_call_id,
                                 "toolName": tool_name,
@@ -1656,7 +1647,7 @@ async def run_agent(  # noqa: C901
                         {
                             "role": "TOOL",
                             "text": v_reasoning or "",
-                            "timestamp": workflow.now().isoformat(),
+                            "timestamp": _safe_now().isoformat(),
                             "metadata": {
                                 "toolCallId": tool_call_id,
                                 "toolName": "attempt_completion",
@@ -1695,7 +1686,7 @@ async def run_agent(  # noqa: C901
                         {
                             "role": "TOOL",
                             "text": feedback_text,
-                            "timestamp": workflow.now().isoformat(),
+                            "timestamp": _safe_now().isoformat(),
                             "metadata": {
                                 "toolCallId": tool_call_id,
                                 "toolName": "attempt_completion",
@@ -1739,7 +1730,7 @@ async def run_agent(  # noqa: C901
                 {
                     "role": "SYSTEM",
                     "text": nudge,
-                    "timestamp": workflow.now().isoformat(),
+                    "timestamp": _safe_now().isoformat(),
                 }
             )
         else:
@@ -1996,7 +1987,7 @@ async def _run_verifier(
     fast_mode_step: int = 0,
 ) -> Dict:
     """Run verifier to check completion."""
-    verifier_call_id = tool_call_id or str(workflow.uuid4())
+    verifier_call_id = tool_call_id or str(_safe_uuid4())
 
     # Post IN_PROGRESS
     # Post the in-progress verifier row as the active attempt_completion tool

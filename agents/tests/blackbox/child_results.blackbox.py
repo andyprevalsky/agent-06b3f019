@@ -76,16 +76,18 @@ def _agent_data(status, **agent_extra):
 
 
 async def test_activity_returns_none_for_non_terminal():
-    with patch("temporalio.activity.heartbeat"), patch(
-        "helpers.child_results._fetch_agent_data_impl", return_value=_agent_data("ACTIVE")
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("helpers.child_results._fetch_agent_data_impl", return_value=_agent_data("ACTIVE")),
     ):
         assert await fetch_child_terminal_result_activity("child-1") is None
 
 
 async def test_activity_completed_child():
     data = _agent_data("COMPLETED", structured_output={"k": "v"})
-    with patch("temporalio.activity.heartbeat"), patch(
-        "helpers.child_results._fetch_agent_data_impl", return_value=data
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("helpers.child_results._fetch_agent_data_impl", return_value=data),
     ):
         result = await fetch_child_terminal_result_activity("child-2")
     assert result == {
@@ -104,8 +106,9 @@ async def test_activity_failed_child_merges_partial_structured():
         structured_output={"partial": True},
         failure_context={"reason": "crash"},
     )
-    with patch("temporalio.activity.heartbeat"), patch(
-        "helpers.child_results._fetch_agent_data_impl", return_value=data
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("helpers.child_results._fetch_agent_data_impl", return_value=data),
     ):
         result = await fetch_child_terminal_result_activity("child-3")
     assert result["status"] == "failed"
@@ -128,8 +131,9 @@ async def test_activity_returns_none_for_paused_resumable():
             status_message="paused: limit reached",
             structured_output={"partial": True},
         )
-        with patch("temporalio.activity.heartbeat"), patch(
-            "helpers.child_results._fetch_agent_data_impl", return_value=data
+        with (
+            patch("temporalio.activity.heartbeat"),
+            patch("helpers.child_results._fetch_agent_data_impl", return_value=data),
         ):
             result = await fetch_child_terminal_result_activity("child-paused")
         assert result is None, f"{paused_status} must reconcile to None (paused, not terminal), got {result}"
@@ -137,8 +141,9 @@ async def test_activity_returns_none_for_paused_resumable():
 
 async def test_activity_failed_child_defaults():
     data = {"agent": {"status": "FAILED", "goal": "g", "failure_context": "bad-type"}, "messages": None}
-    with patch("temporalio.activity.heartbeat"), patch(
-        "helpers.child_results._fetch_agent_data_impl", return_value=data
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("helpers.child_results._fetch_agent_data_impl", return_value=data),
     ):
         result = await fetch_child_terminal_result_activity("child-4")
     assert result["status"] == "failed"
