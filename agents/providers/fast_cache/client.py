@@ -9,6 +9,7 @@ break a live run (#16).
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import time
 from typing import Any, Optional, TypedDict
@@ -24,6 +25,12 @@ from . import normalize
 logger = structlog.get_logger(__name__)
 
 _GET_TIMEOUT_S = 15.0
+# A failed GET is conceded as a cache MISS, which sends the caller to an EXPENSIVE
+# live LLM call. Under a fan-out the backend fast-cache endpoint 500s from DB-pool
+# pressure, so retry the cheap GET a few times before conceding — a retry costs
+# milliseconds; a false miss costs a full live model call.
+_GET_MAX_ATTEMPTS = 3
+_GET_RETRY_BACKOFF_S = 0.15
 _SET_TIMEOUT_S = 30.0
 
 # A single pooled client per worker process. Creating a fresh httpx.AsyncClient per
@@ -61,35 +68,50 @@ async def cache_get_record(key: str) -> CacheRecord:
     This exposes `blobPath` for binary cache entries while keeping `cache_get`
     as the simple value-only API used by LLM/search/fetch JSON callers.
     """
-    try:
-        api_url, api_key = _backend()
-        resp = await _shared_client().post(
-            f"{api_url}/api/fast-cache/get",
-            headers={"X-API-Key": api_key, "Content-Type": "application/json"},
-            json={"key": key},
-            timeout=_GET_TIMEOUT_S,
-        )
-        if resp.status_code != 200:
-            logger.warning("fast_cache.get_failed", key=key, status=resp.status_code)
-            await _archive_cache_read(key, hit=False, value=None, blob_path=None, status=resp.status_code)
-            return {"hit": False, "value": None, "blobPath": None}
-        data = resp.json()
-        await _archive_cache_read(
-            key,
-            hit=bool(data.get("hit")),
-            value=data.get("value"),
-            blob_path=data.get("blobPath"),
-            status=resp.status_code,
-        )
-        return {
-            "hit": bool(data.get("hit")),
-            "value": data.get("value"),
-            "blobPath": data.get("blobPath"),
-        }
-    except Exception as exc:  # cache must never break a run
-        logger.warning("fast_cache.get_error", key=key, error=str(exc))
-        await _archive_cache_read(key, hit=False, value=None, blob_path=None, error=str(exc)[:300])
-        return {"hit": False, "value": None, "blobPath": None}
+    last_status: Optional[int] = None
+    last_error: Optional[str] = None
+    for attempt in range(_GET_MAX_ATTEMPTS):
+        try:
+            api_url, api_key = _backend()
+            resp = await _shared_client().post(
+                f"{api_url}/api/fast-cache/get",
+                headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+                json={"key": key},
+                timeout=_GET_TIMEOUT_S,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                await _archive_cache_read(
+                    key,
+                    hit=bool(data.get("hit")),
+                    value=data.get("value"),
+                    blob_path=data.get("blobPath"),
+                    status=resp.status_code,
+                )
+                return {
+                    "hit": bool(data.get("hit")),
+                    "value": data.get("value"),
+                    "blobPath": data.get("blobPath"),
+                }
+            # Non-200: retry 5xx (transient backend/DB-pool pressure); a 4xx is a
+            # client contract error and won't change on retry, so stop early.
+            last_status = resp.status_code
+            if resp.status_code < 500:
+                break
+        except Exception as exc:  # timeout / connection reset — transient, retry
+            last_error = str(exc)
+        if attempt < _GET_MAX_ATTEMPTS - 1:
+            await asyncio.sleep(_GET_RETRY_BACKOFF_S * (attempt + 1))
+
+    # Retries exhausted — concede a miss so the cache never hard-breaks a run.
+    if last_status is not None:
+        logger.warning("fast_cache.get_failed", key=key, status=last_status, attempts=_GET_MAX_ATTEMPTS)
+    else:
+        logger.warning("fast_cache.get_error", key=key, error=(last_error or "")[:300], attempts=_GET_MAX_ATTEMPTS)
+    await _archive_cache_read(
+        key, hit=False, value=None, blob_path=None, status=last_status, error=last_error
+    )
+    return {"hit": False, "value": None, "blobPath": None}
 
 
 async def cache_get(key: str) -> Optional[Any]:
