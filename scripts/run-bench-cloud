@@ -741,26 +741,34 @@ exec bash /data/cloudbench-run.sh"
 REMOTE_WRAPPER_B64="$(printf '%s' "$REMOTE_WRAPPER" | base64 | tr -d '\n')"
 
 # Write the wrapper to $REMOTE_TMP_SCRIPT, truncate the log, launch detached.
-# `setsid ... < /dev/null &` fully detaches: the ssh session returns immediately.
-LAUNCH_CMD="set -e
-echo '$REMOTE_WRAPPER_B64' | base64 -d > '$REMOTE_TMP_SCRIPT'
-chmod +x '$REMOTE_TMP_SCRIPT'
-: > '$REMOTE_LOG'
-setsid bash '$REMOTE_TMP_SCRIPT' > '$REMOTE_LOG' 2>&1 < /dev/null &
-echo LAUNCHED"
-
 echo ""
 echo "📡 Launching the on-box driver DETACHED (logs → $REMOTE_LOG) ..."
 echo "   tasks=[$TASKS_DISPLAY] ref=${BENCH_REF:-<HEAD>} simulate=$BENCH_SIMULATE"
-# ssh -C returns 4294967295 because the command backgrounds a process — that is
-# EXPECTED here, so we do not treat a non-zero exit as failure; we verify launch
-# via the LAUNCHED echo instead (best-effort) and then poll the log.
-launch_out="$(ssh_read "$mid" "$LAUNCH_CMD" 2>/dev/null || true)"
-if printf '%s' "$launch_out" | grep -q 'LAUNCHED'; then
-    echo "✅ On-box driver launched."
-else
-    echo "   (launch ack not captured — expected when ssh -C backgrounds; polling the log)"
-fi
+# The launch ssh drops (4294967295) once it backgrounds, and can drop BEFORE it
+# even truncates the log — leaving the PREVIOUS run's ::CLOUDBENCH-DONE:: in place
+# so the poll below would exit instantly on a stale marker. So do it in VERIFIED
+# steps: (a) reset+stamp the log, (b) stage the wrapper, (c) launch appending
+# after the stamp — each retried until confirmed.
+_ok=0
+for _ in 1 2 3 4 5; do
+    o="$(ssh_read "$mid" "printf '%s\n' 'RUNSTAMP-$$' > '$REMOTE_LOG'; grep -q 'RUNSTAMP-$$' '$REMOTE_LOG' && echo STAMPED")"
+    printf '%s' "$o" | grep -q STAMPED && { _ok=1; break; }; sleep 3
+done
+[ "$_ok" = 1 ] || { echo "❌ could not reset the on-box log after retries"; exit 1; }
+_ok=0
+for _ in 1 2 3 4 5; do
+    o="$(ssh_read "$mid" "echo '$REMOTE_WRAPPER_B64' | base64 -d > '$REMOTE_TMP_SCRIPT'; chmod +x '$REMOTE_TMP_SCRIPT'; grep -q cloudbench-run '$REMOTE_TMP_SCRIPT' && echo WROTE")"
+    printf '%s' "$o" | grep -q WROTE && { _ok=1; break; }; sleep 3
+done
+[ "$_ok" = 1 ] || { echo "❌ could not stage the on-box driver after retries"; exit 1; }
+_ok=0
+for _ in 1 2 3 4 5; do
+    FLY ssh console -a "$APP" --machine "$mid" -C "bash -c \"setsid bash '$REMOTE_TMP_SCRIPT' >> '$REMOTE_LOG' 2>&1 < /dev/null &\"" >/dev/null 2>&1 || true
+    sleep 5
+    o="$(ssh_read "$mid" "pgrep -f cloudbench-run.sh >/dev/null 2>&1 && echo RUNNING")"
+    printf '%s' "$o" | grep -q RUNNING && { _ok=1; break; }
+done
+if [ "$_ok" = 1 ]; then echo "✅ On-box driver launched + confirmed running."; else echo "   ⚠️ driver-running check inconclusive; polling anyway."; fi
 
 # ── 3. Proxy the live dashboard to the Mac + open it in Chrome ──────────────
 # The on-box driver serves $CONTEXT_DIR (dashboard.html + report-card.json) on
