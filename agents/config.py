@@ -36,6 +36,13 @@ class TemporalConfig:
     max_concurrent_activities: int = 100
     activity_admission_close_memory_percent: float = 80.0
     activity_admission_open_memory_percent: float = 75.0
+    # CPU-pressure admission (mirrors the memory gate). The per-turn agent work
+    # runs inside activities on a single GIL-bound vCPU, so a worker can peg its
+    # core (event-loop starvation) long before memory fills. Closing admission on
+    # high CPU makes the fleet autoscaler (which counts admission-unavailable
+    # workers) scale out on CPU pressure, not just memory.
+    activity_admission_close_cpu_percent: float = 85.0
+    activity_admission_open_cpu_percent: float = 70.0
     max_concurrent_workflows: int = 50  # Max concurrent agents (aligned with activities)
     max_cached_workflows: int = 100  # Reduced to match workflow count
     # Polling concurrency. Was 2/2 — too low when several workflows hit init in
@@ -227,6 +234,8 @@ def load_config() -> AppConfig:
         max_concurrent_activities=int(os.getenv("MAX_CONCURRENT_ACTIVITIES", "100")),
         activity_admission_close_memory_percent=float(os.getenv("ACTIVITY_ADMISSION_CLOSE_MEMORY_PERCENT", "80")),
         activity_admission_open_memory_percent=float(os.getenv("ACTIVITY_ADMISSION_OPEN_MEMORY_PERCENT", "75")),
+        activity_admission_close_cpu_percent=float(os.getenv("ACTIVITY_ADMISSION_CLOSE_CPU_PERCENT", "85")),
+        activity_admission_open_cpu_percent=float(os.getenv("ACTIVITY_ADMISSION_OPEN_CPU_PERCENT", "70")),
         max_concurrent_workflows=int(os.getenv("MAX_CONCURRENT_WORKFLOWS", "50")),
         max_cached_workflows=int(os.getenv("MAX_CACHED_WORKFLOWS", "100")),
         max_concurrent_activity_task_polls=int(os.getenv("MAX_CONCURRENT_ACTIVITY_TASK_POLLERS", "8")),
