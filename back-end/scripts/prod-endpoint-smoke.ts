@@ -23,10 +23,13 @@
  *   npx tsx scripts/prod-endpoint-smoke.ts
  *   SMOKE_BASE_URL=http://localhost:3001 npx tsx scripts/prod-endpoint-smoke.ts
  *
- * Env (all optional, with prod defaults):
- *   SMOKE_BASE_URL   backend base URL          (default https://navi-j9a9.onrender.com)
- *   SMOKE_API_KEY    internal X-API-Key        (default dev backend key)
- *   SMOKE_USER_ID    X-User-Id for the probe   (default Andy Prevalsky prod user)
+ * Env — override any of these; they default to the repo's shared dev
+ * credentials (the same X-API-Key / test-user id documented in CLAUDE.md and
+ * used by every blackbox test + the /deploy Step 13a probe), so the script runs
+ * with no setup. Set SMOKE_API_KEY / SMOKE_USER_ID to point at another env.
+ *   SMOKE_BASE_URL   backend base URL     (default https://navi-j9a9.onrender.com)
+ *   SMOKE_API_KEY    internal X-API-Key   (default: shared dev key, see CLAUDE.md)
+ *   SMOKE_USER_ID    X-User-Id            (default: shared dev test user, see CLAUDE.md)
  */
 import { config } from 'dotenv';
 config();
@@ -35,6 +38,8 @@ const BASE_URL = (process.env.SMOKE_BASE_URL ?? 'https://navi-j9a9.onrender.com'
   /\/$/,
   ''
 );
+// Shared dev credentials (also in CLAUDE.md + every *.blackbox.ts). Not a real
+// secret; override via env to probe a different environment.
 const API_KEY = process.env.SMOKE_API_KEY ?? 'AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=';
 const USER_ID = process.env.SMOKE_USER_ID ?? '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 
