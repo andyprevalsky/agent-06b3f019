@@ -227,6 +227,9 @@ def test_prod_worker_posts_encrypted_artifact_to_backend():
         "BACKEND_API_KEY": os.environ.get("BACKEND_API_KEY"),
     }
     old_client = trace_archive.httpx.Client
+    old_cached_client = getattr(trace_archive._BACKEND_CLIENTS, "client", None)
+    old_cached_factory = getattr(trace_archive._BACKEND_CLIENTS, "client_factory", None)
+    old_local_root = trace_archive._LOCAL_ROOT
     captured_posts = []
 
     class _Response:
@@ -252,26 +255,35 @@ def test_prod_worker_posts_encrypted_artifact_to_backend():
             return _Response()
 
     try:
-        os.environ["FLY_APP_NAME"] = "rose-agent-prod"
-        os.environ["TRACE_ARCHIVE_ENABLED"] = "1"
-        os.environ["TRACE_ARCHIVE_BACKEND"] = "r2"
-        os.environ["TRACE_ARCHIVE_ENCRYPTION_KEY_B64"] = base64.b64encode(b"1" * 32).decode("ascii")
-        os.environ["BACKEND_API_URL"] = "https://backend.example.test"
-        os.environ["BACKEND_API_KEY"] = "test-api-key"
-        trace_archive.httpx.Client = _Client
+        with tempfile.TemporaryDirectory() as tmp:
+            trace_archive._LOCAL_ROOT = Path(tmp) / "archive"
+            os.environ["FLY_APP_NAME"] = "rose-agent-prod"
+            os.environ["TRACE_ARCHIVE_ENABLED"] = "1"
+            os.environ["TRACE_ARCHIVE_BACKEND"] = "r2"
+            os.environ["TRACE_ARCHIVE_ENCRYPTION_KEY_B64"] = base64.b64encode(b"1" * 32).decode("ascii")
+            os.environ["BACKEND_API_URL"] = "https://backend.example.test"
+            os.environ["BACKEND_API_KEY"] = "test-api-key"
+            trace_archive.httpx.Client = _Client
+            trace_archive._BACKEND_CLIENTS.client = None
+            trace_archive._BACKEND_CLIENTS.client_factory = None
 
-        result = trace_archive.archive_json(root_agent_id="prod-agent", path="llm/prod.json.gz.enc", payload={"prod": True})
-        assert result is not None
-        assert result["ref"].startswith("r2://bucket/")
-        assert len(captured_posts) == 1
-        body = captured_posts[0]["json"]
-        assert body["rootAgentId"] == "prod-agent"
-        assert body["path"] == "llm/prod.json.gz.enc"
-        assert body["metadata"]["compression"] == "gzip"
-        assert body["metadata"]["auth_tag_b64"]
-        assert captured_posts[0]["headers"]["X-API-Key"] == "test-api-key"
+            result = trace_archive.archive_json(
+                root_agent_id="prod-agent", path="llm/prod.json.gz.enc", payload={"prod": True}
+            )
+            assert result is not None
+            assert result["ref"].startswith("r2://bucket/")
+            assert len(captured_posts) == 1
+            body = captured_posts[0]["json"]
+            assert body["rootAgentId"] == "prod-agent"
+            assert body["path"] == "llm/prod.json.gz.enc"
+            assert body["metadata"]["compression"] == "gzip"
+            assert body["metadata"]["auth_tag_b64"]
+            assert captured_posts[0]["headers"]["X-API-Key"] == "test-api-key"
     finally:
         trace_archive.httpx.Client = old_client
+        trace_archive._BACKEND_CLIENTS.client = old_cached_client
+        trace_archive._BACKEND_CLIENTS.client_factory = old_cached_factory
+        trace_archive._LOCAL_ROOT = old_local_root
         for key, value in old_env.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -591,6 +603,83 @@ async def test_async_archive_burst_preserves_all_artifacts():
             restore()
 
 
+async def test_backend_failure_spools_encrypted_outbox_and_async_drain():
+    import asyncio
+
+    import helpers.trace_archive as trace_archive
+    from helpers.trace_archive import archive_json
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(tmp)
+        old_env = {
+            "FLY_APP_NAME": os.environ.get("FLY_APP_NAME"),
+            "TRACE_ARCHIVE_BACKEND": os.environ.get("TRACE_ARCHIVE_BACKEND"),
+            "TRACE_ARCHIVE_ASYNC_WRITES": os.environ.get("TRACE_ARCHIVE_ASYNC_WRITES"),
+            "TRACE_ARCHIVE_ENCRYPTION_KEY_B64": os.environ.get("TRACE_ARCHIVE_ENCRYPTION_KEY_B64"),
+            "BACKEND_API_URL": os.environ.get("BACKEND_API_URL"),
+            "BACKEND_API_KEY": os.environ.get("BACKEND_API_KEY"),
+        }
+        old_client = trace_archive.httpx.Client
+        posts: list[str] = []
+
+        class _Response:
+            text = ""
+
+            def __init__(self, status_code: int, path: str):
+                self.status_code = status_code
+                self._path = path
+
+            def json(self):
+                return {"ref": f"r2://bucket/trace-archive/agent-outbox/{self._path}"}
+
+        class _Client:
+            is_closed = False
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def post(self, url, headers, json):
+                posts.append(json["path"])
+                status = 500 if len(posts) == 1 else 200
+                return _Response(status, json["path"])
+
+        try:
+            os.environ["FLY_APP_NAME"] = "rose-agent-prod"
+            os.environ["TRACE_ARCHIVE_BACKEND"] = "r2"
+            os.environ["TRACE_ARCHIVE_ENCRYPTION_KEY_B64"] = base64.b64encode(b"2" * 32).decode("ascii")
+            os.environ["BACKEND_API_URL"] = "https://backend.example.test"
+            os.environ["BACKEND_API_KEY"] = "test-api-key"
+            trace_archive.httpx.Client = _Client
+            trace_archive._BACKEND_CLIENTS.client = None
+            trace_archive._BACKEND_CLIENTS.client_factory = None
+
+            failed = archive_json(root_agent_id="agent-outbox", path="llm/failed.json.gz.enc", payload={"n": 1})
+            assert failed is None
+            pending = Path(tmp).parent / "trace-archive-outbox" / "agent-outbox" / "llm" / "failed.json.gz.enc"
+            assert pending.exists()
+            assert pending.with_suffix(pending.suffix + ".meta.json").exists()
+
+            os.environ["TRACE_ARCHIVE_ASYNC_WRITES"] = "1"
+            current = archive_json(root_agent_id="agent-outbox", path="llm/current.json.gz.enc", payload={"n": 2})
+            assert current is not None
+            for _ in range(100):
+                if not pending.exists():
+                    break
+                await asyncio.sleep(0.05)
+            assert not pending.exists(), "successful async archive job did not drain pending outbox artifact"
+            assert posts == ["llm/failed.json.gz.enc", "llm/current.json.gz.enc", "llm/failed.json.gz.enc"]
+        finally:
+            trace_archive.httpx.Client = old_client
+            trace_archive._BACKEND_CLIENTS.client = None
+            trace_archive._BACKEND_CLIENTS.client_factory = None
+            for key, value in old_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            restore()
+
+
 async def test_browser_http_cache_ops_do_not_archive():
     """browser_http cache ops fire per page subresource (thousands/session) and
     must never hit the archive endpoint; llm-kind ops keep archiving."""
@@ -598,22 +687,16 @@ async def test_browser_http_cache_ops_do_not_archive():
 
     calls: list[str] = []
 
-    def fake_archive_json(**kwargs):
-        calls.append(kwargs["path"])
-        return {"ref": kwargs["path"], "metadata": None}
-
     def fake_archive_json_deferred(**kwargs):
         calls.append(kwargs["path"])
         return {"ref": kwargs["path"], "metadata": None}
 
-    old_archive = fast_cache_client.archive_json
     old_deferred_archive = fast_cache_client.archive_json_deferred
     old_resolver = fast_cache_client.resolve_archive_root_agent_id
 
     async def fake_resolver():
         return "root-agent"
 
-    fast_cache_client.archive_json = fake_archive_json
     fast_cache_client.archive_json_deferred = fake_archive_json_deferred
     fast_cache_client.resolve_archive_root_agent_id = fake_resolver
     try:
@@ -628,7 +711,6 @@ async def test_browser_http_cache_ops_do_not_archive():
         await fast_cache_client._archive_cache_read("fastmode:v42:llm:gh:site:c:abc", hit=True, value={"v": 1}, blob_path=None)
         assert len(calls) == 2
     finally:
-        fast_cache_client.archive_json = old_archive
         fast_cache_client.archive_json_deferred = old_deferred_archive
         fast_cache_client.resolve_archive_root_agent_id = old_resolver
 
@@ -688,6 +770,10 @@ async def run_all_tests():
         test_deferred_json_payload_factory_runs_off_event_loop,
     )
     await r.record_async("async_archive_burst_preserves_all_artifacts", test_async_archive_burst_preserves_all_artifacts)
+    await r.record_async(
+        "backend_failure_spools_encrypted_outbox_and_async_drain",
+        test_backend_failure_spools_encrypted_outbox_and_async_drain,
+    )
     r.record("oversized_artifact_is_dropped_with_warning", test_oversized_artifact_is_dropped_with_warning)
     await r.record_async("browser_http_cache_ops_do_not_archive", test_browser_http_cache_ops_do_not_archive)
     teardown_mock()
