@@ -1,60 +1,100 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# run-bench-cloud — CLOUD-EXCLUSIVE benchmark runner.
+# run-bench-cloud — WARM, PERSISTENT cloud-exclusive benchmark runner.
 #
-# Provisions a one-shot Fly.io machine (app: navi-whisper-lux-bench) that runs
-# the ENTIRE isolated Rose stack — backend + agents worker + World Model Harness
-# + system Postgres — plus a single benchmark task in --simulate, ENTIRELY on the
-# box. Retrieves the report card from the machine logs, then ALWAYS destroys the
-# machine (mandatory: no leaked billed resources).
+# A single deterministically-named Fly machine (app: navi-whisper-lux-bench) with
+# a Fly VOLUME mounted at /data holds the deps (baked into the keep-alive image),
+# the branch checkout (/data/repo), and a cached World Model Harness artifact
+# (/data/world-model). The machine is START/STOPPED per run — NEVER destroyed —
+# so a warm run only git-syncs the branch and boots the stack against the CACHED
+# WMH model (served, not rebuilt). A STOPPED Fly machine bills only for the small
+# volume, so idle cost is ~0.
+#
+# This replaces the old build+push+pull+destroy-per-run lifecycle (~45 min cold
+# start every run) with:
+#     one-time  : --setup  → volume + machine + git clone
+#     rare      : --refresh-wmh → (re)build the cached WMH model on the volume
+#     per run   : <task> [--simulate] → start → git-sync → serve-cached-WMH →
+#                  run_benchmark → retrieve report card → STOP the machine
+#     cleanup   : --destroy → destroy machine + volume
 #
 # Usage:
-#   bash scripts/run-bench-cloud <task> [--simulate] [--no-simulate]
-#                                [--flags "<extra run_benchmark flags>"]
-#                                [--model <wmh-model-name>]
-#                                [--vm-size <size>] [--vm-memory <mb>]
-#                                [--timeout <seconds>] [--keep] [--reuse-image]
+#   # ── one-time bootstrap (run these two, in order, once) ──
+#   bash scripts/run-bench-cloud --setup
+#   bash scripts/run-bench-cloud --refresh-wmh
 #
+#   # ── fast per-run path (repeat as often as you like) ──
+#   bash scripts/run-bench-cloud <task> [--simulate]
 #   bash scripts/run-bench-cloud spawn-sub-agents --simulate
-#   bash scripts/run-bench-cloud chat-mode --simulate
+#   bash scripts/run-bench-cloud chat-mode --simulate --ref my-branch
 #
-# Teardown is NON-NEGOTIABLE: every exit path (success, failure, error, timeout,
-# Ctrl-C) destroys the machine via a bash trap. After a run,
-# `flyctl machines list -a navi-whisper-lux-bench` shows 0 machines.
+#   # ── explicit cleanup (removes the machine + volume; ends billing entirely) ──
+#   bash scripts/run-bench-cloud --destroy
+#
+# Flags:
+#   --setup            one-time: create volume + persistent machine + git clone
+#   --refresh-wmh      explicit-only: (re)build the cached WMH model on /data/world-model
+#   --destroy          explicit-only: destroy the machine + volume
+#   --simulate         pass --simulate to run_benchmark (default for a task run)
+#   --no-simulate      real mode (no WMH); serves nothing, runs the live stack
+#   --ref <branch|sha> branch/sha to git-sync + run (default: current HEAD sha)
+#   --flags "<...>"    extra run_benchmark.py flags (optional)
+#   --model <name>     WMH model artifact name (default rose-archive)
+#   --vm-size <size>   machine size at --setup (default shared-cpu-4x)
+#   --vm-memory <mb>   machine memory at --setup (default 8192)
+#   --volume-size <gb> volume size at --setup (default 20)
+#   --timeout <secs>   per-run hard ceiling for the SSH-driven benchmark (default 2400)
+#
+# SAFETY: the default per-run path ALWAYS STOPS the machine on every exit
+# (success, failure, error, timeout, Ctrl-C) so nothing is left running/billing.
+# Only --destroy removes the machine + volume.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
 APP="navi-whisper-lux-bench"
 PROD_APP="navi-whisper-lux"   # NEVER touch this.
-REGION="iad"
+REGION="${CLOUDBENCH_REGION:-iad}"
+MACHINE_NAME="cloudbench-warm"
+VOLUME_NAME="cloudbench_data"     # Fly volume names must be [a-z0-9_].
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR" || exit 1
 
+STATE_FILE="$ROOT_DIR/.context/cloudbench-machine.json"
+
+# On-box paths (mirror scripts/cloudbench-run.sh).
+REMOTE_REPO="/data/repo"
+REMOTE_WMH="/data/world-model"
+REMOTE_RUN_SCRIPT="scripts/cloudbench-run.sh"
+
 # ── Defaults ───────────────────────────────────────────────────────────────
+MODE="run"              # run | setup | refresh-wmh | destroy
 BENCH_TASK=""
 BENCH_SIMULATE="1"
 BENCH_FLAGS=""
+BENCH_REF=""
 WMH_MODEL_NAME="rose-archive"
 VM_SIZE="shared-cpu-4x"
 VM_MEMORY="8192"
-RUN_TIMEOUT="3600"      # 60 min hard ceiling: cold WMH build (~15-25 min) + stack + benchmark.
-KEEP_MACHINE="0"        # debug-only; still warns loudly.
-REUSE_IMAGE=""          # skip build, run this pre-built image ref.
+VOLUME_SIZE="20"
+RUN_TIMEOUT="2400"      # 40 min per-run ceiling (warm: no WMH build; serve-only).
 
 # ── Arg parsing ──────────────────────────────────────────────────────────────
 while [ $# -gt 0 ]; do
     case "$1" in
+        --setup)        MODE="setup"; shift ;;
+        --refresh-wmh)  MODE="refresh-wmh"; shift ;;
+        --destroy)      MODE="destroy"; shift ;;
         --simulate)     BENCH_SIMULATE="1"; shift ;;
         --no-simulate)  BENCH_SIMULATE="0"; shift ;;
+        --ref)          BENCH_REF="${2:-}"; shift 2 ;;
         --flags)        BENCH_FLAGS="${2:-}"; shift 2 ;;
         --model)        WMH_MODEL_NAME="${2:-}"; shift 2 ;;
         --vm-size)      VM_SIZE="${2:-}"; shift 2 ;;
         --vm-memory)    VM_MEMORY="${2:-}"; shift 2 ;;
+        --volume-size)  VOLUME_SIZE="${2:-}"; shift 2 ;;
         --timeout)      RUN_TIMEOUT="${2:-}"; shift 2 ;;
-        --keep)         KEEP_MACHINE="1"; shift ;;
-        --reuse-image)  REUSE_IMAGE="${2:-}"; shift 2 ;;
         -h|--help)
-            sed -n '2,32p' "$0"; exit 0 ;;
+            sed -n '2,60p' "$0"; exit 0 ;;
         --*)            echo "❌ Unknown flag: $1" >&2; exit 2 ;;
         *)
             if [ -z "$BENCH_TASK" ]; then BENCH_TASK="$1"; else
@@ -64,16 +104,15 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-if [ -z "$BENCH_TASK" ]; then
-    echo "❌ A benchmark task name is required. e.g. bash scripts/run-bench-cloud spawn-sub-agents --simulate" >&2
-    exit 2
+# Default ref = current branch's HEAD sha (deterministic; matches the code the
+# caller is looking at). A caller can override with --ref <branch|sha>.
+if [ -z "$BENCH_REF" ]; then
+    BENCH_REF="$(git rev-parse HEAD 2>/dev/null || echo '')"
 fi
 
 # ── Fly auth token ───────────────────────────────────────────────────────────
-# App creation + operating a NEW app requires a USER/org-scoped token. The
-# FLY_API_TOKEN in agents/.env is deploy-scoped to the PROD app (navi-whisper-lux)
-# only and cannot create or operate the bench app. So prefer, in order:
-#   1) FLY_BENCH_API_TOKEN (explicit override, if the caller provides an org token)
+# Operating the bench app requires a USER/org-scoped token. Prefer, in order:
+#   1) FLY_BENCH_API_TOKEN (explicit override)
 #   2) the user login token in ~/.fly/config.yml (`flyctl auth login`) — org-wide
 #   3) FLY_API_TOKEN env / agents/.env (last resort; may be app-scoped to prod)
 resolve_fly_token() {
@@ -110,319 +149,520 @@ if ! command -v flyctl >/dev/null 2>&1; then
     fi
 fi
 
-# ─────────────────────────────────────────────────────────────────────────────
-# MANDATORY TEARDOWN TRAP — destroys every machine in the bench app on ANY exit.
-# ─────────────────────────────────────────────────────────────────────────────
-MACHINE_ID=""
-TEARDOWN_DONE="0"
-
-teardown() {
-    local exit_code=$?
-    [ "$TEARDOWN_DONE" = "1" ] && return
-    TEARDOWN_DONE="1"
-
-    if [ "$KEEP_MACHINE" = "1" ]; then
-        echo ""
-        echo "⚠️  --keep set: NOT destroying machine ${MACHINE_ID:-<none>}. THIS LEAKS BILLING."
-        echo "   Destroy manually: flyctl machine destroy --force ${MACHINE_ID:-<id>} -a $APP"
-        return
-    fi
-
-    echo ""
-    echo "🧹 Teardown: destroying all machines in $APP ..."
-
-    # Destroy the specific machine we started first (fast path).
-    if [ -n "$MACHINE_ID" ]; then
-        FLY machine destroy --force "$MACHINE_ID" -a "$APP" 2>&1 | sed 's/^/   /' || true
-    fi
-
-    # Belt-and-suspenders: destroy ANY machine still present in the app, so a
-    # partial failure (e.g. machine created but id capture failed) can't leak.
-    local ids
-    ids="$(FLY machines list -a "$APP" --json 2>/dev/null \
-        | python3 -c 'import json,sys
-try:
-    data=json.load(sys.stdin)
-except Exception:
-    data=[]
-for m in (data or []):
-    mid=m.get("id")
-    if mid: print(mid)' 2>/dev/null || true)"
-    for id in $ids; do
-        echo "   destroying leftover machine $id"
-        FLY machine destroy --force "$id" -a "$APP" 2>&1 | sed 's/^/   /' || true
-    done
-
-    # Proof of teardown: list must show 0 machines.
-    echo ""
-    echo "🔎 Proof of teardown — flyctl machines list -a $APP:"
-    FLY machines list -a "$APP" 2>&1 | sed 's/^/   /' || true
-    local remaining
-    remaining="$(FLY machines list -a "$APP" --json 2>/dev/null \
-        | python3 -c 'import json,sys
-try: print(len(json.load(sys.stdin) or []))
-except Exception: print("?")' 2>/dev/null || echo '?')"
-    echo "   machines remaining: $remaining"
-    if [ "$remaining" != "0" ]; then
-        echo "   ❌ WARNING: machines still present — retrying destroy once more..."
-        for id in $(FLY machines list -a "$APP" --json 2>/dev/null | python3 -c 'import json,sys
-try:
-    for m in (json.load(sys.stdin) or []):
-        if m.get("id"): print(m["id"])
-except Exception: pass' 2>/dev/null); do
-            FLY machine destroy --force "$id" -a "$APP" 2>&1 | sed 's/^/   /' || true
-        done
-        FLY machines list -a "$APP" 2>&1 | sed 's/^/   /' || true
-    fi
-
-    echo ""
-    echo "Original exit code: $exit_code"
-}
-trap teardown EXIT INT TERM
-
-# ── 1. Ensure the bench app exists (NEVER the prod app) ──────────────────────
 if [ "$APP" = "$PROD_APP" ]; then
     echo "❌ Refusing to run: bench app equals prod app ($PROD_APP)." >&2
     exit 1
 fi
-echo "═══ run-bench-cloud ═══"
-echo "task=$BENCH_TASK simulate=$BENCH_SIMULATE model=$WMH_MODEL_NAME vm=$VM_SIZE/${VM_MEMORY}MB app=$APP region=$REGION"
-echo ""
 
-if FLY apps list --json 2>/dev/null | python3 -c 'import json,sys
-apps=json.load(sys.stdin)
-names={a.get("Name") or a.get("name") for a in (apps or [])}
-sys.exit(0 if "'"$APP"'" in names else 1)' 2>/dev/null; then
-    echo "✅ App $APP already exists"
-else
-    echo "📦 Creating app $APP ..."
-    FLY apps create "$APP" --org personal 2>&1 | sed 's/^/   /' || {
-        # "already exists" races are fine.
-        FLY apps list 2>/dev/null | grep -q "$APP" || { echo "❌ Failed to create app $APP"; exit 1; }
-    }
-fi
-
-# ── 2. Inject secrets (only keys that are present) ───────────────────────────
-# The stack reads agents/.env + back-end/.env directly, so the simplest correct
-# transport is to base64 the entire files and let the entrypoint decode them —
-# every key captured exactly, no per-key drift. We also set the R2 keys as plain
-# secrets (redundant, but harmless) so any direct-env consumer sees them too.
-echo ""
-echo "🔐 Injecting secrets into $APP ..."
-
-if [ ! -f agents/.env ] || [ ! -f back-end/.env ]; then
-    echo "❌ agents/.env and back-end/.env are required to inject secrets." >&2
-    exit 1
-fi
-
-AGENTS_ENV_B64="$(base64 < agents/.env | tr -d '\n')"
-BACKEND_ENV_B64="$(base64 < back-end/.env | tr -d '\n')"
-
-# Pull a few individual keys through as well (present-only) for visibility/logging.
-get_env() {  # get_env FILE KEY
-    grep -E "^$2=" "$1" 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//'
-}
-
-declare -a SECRET_ARGS=()
-SECRET_ARGS+=("AGENTS_ENV_B64=$AGENTS_ENV_B64")
-SECRET_ARGS+=("BACKEND_ENV_B64=$BACKEND_ENV_B64")
-
-# Log which high-value keys are present (do NOT print values).
-echo "   secret files: AGENTS_ENV_B64 ($(wc -l < agents/.env | tr -d ' ') lines), BACKEND_ENV_B64 ($(wc -l < back-end/.env | tr -d ' ') lines)"
-PRESENT_KEYS=()
-for k in TEMPORAL_API_KEY TEMPORAL_ADDRESS TEMPORAL_NAMESPACE OPENROUTER_API_KEY ROSE_API_KEY \
-         ANTHROPIC_API_KEY BACKEND_API_KEY SUPABASE_SERVICE_ROLE_KEY SUPABASE_ANON_KEY \
-         R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET_TRACE_ARCHIVE \
-         CLICKHOUSE_ENDPOINT FLY_API_TOKEN; do
-    v="$(get_env agents/.env "$k")"
-    [ -z "$v" ] && v="$(get_env back-end/.env "$k")"
-    [ -n "$v" ] && PRESENT_KEYS+=("$k")
-done
-echo "   present high-value keys: ${PRESENT_KEYS[*]:-<none>}"
-
-# Set as a batch. --stage stores them WITHOUT triggering a deploy; because a new
-# `machine run` reads the app's current secrets at launch time, we then flush the
-# staged secrets to "active" so the fresh machine actually receives them. With 0
-# running machines, `secrets deploy` has nothing to restart — it just activates.
-FLY secrets set --stage -a "$APP" "${SECRET_ARGS[@]}" 2>&1 | sed 's/^/   /' || {
-    echo "❌ Failed to set secrets"; exit 1
-}
-FLY secrets deploy -a "$APP" 2>&1 | sed 's/^/   /' || true
-echo "✅ Secrets set (active)"
-
-# ── 3. Build + push the image with Fly's CLASSIC builder (plain manifest) ────
-# Depot (the default builder) pushes an OCI image INDEX with provenance/
-# attestation manifests. `flyctl machine run` then can't resolve that index tag
-# by manifest → "MANIFEST_UNKNOWN [http 404]" — both in the standalone and the
-# atomic (`machine run . --build-depot`) forms. The classic remote builder
-# (`--depot=false`) pushes a single plain manifest that `machine run <tag>`
-# resolves cleanly. The classic builder occasionally throws a transient
-# "unable to upgrade to h2c, received 500" while its builder VM warms up, so we
-# retry the build a few times.
-IMAGE_REF="$REUSE_IMAGE"
-if [ -z "$IMAGE_REF" ]; then
-    echo ""
-    echo "🏗️  Building + pushing image (Fly classic remote builder, plain manifest)..."
-    IMAGE_LABEL="cloudbench-$(date +%Y%m%d-%H%M%S)"
-    BUILD_OK=0
-    for attempt in 1 2 3; do
-        echo "   build attempt $attempt/3 (label $IMAGE_LABEL)"
-        if FLY deploy \
-            -c fly.cloudbench.toml \
-            --dockerfile Dockerfile.cloudbench \
-            --depot=false \
-            --remote-only \
-            --build-only \
-            --push \
-            --image-label "$IMAGE_LABEL" \
-            -a "$APP" 2>&1; then
-            BUILD_OK=1
-            break
-        fi
-        echo "   ⚠️  build attempt $attempt failed — retrying in 15s (transient builder errors are common)"
-        sleep 15
-    done
-    if [ "$BUILD_OK" != "1" ]; then
-        echo "❌ Image build failed after 3 attempts (see output above)"; exit 1
-    fi
-    # Deterministic tag ref — the label we just pushed. Pass by TAG (never a
-    # @sha256 digest) so machine run resolves the plain manifest.
-    IMAGE_REF="registry.fly.io/$APP:$IMAGE_LABEL"
-    echo "✅ Image: $IMAGE_REF"
-fi
-
-# ── 4. Provision a one-shot machine with the benchmark env ───────────────────
-echo ""
-echo "🚀 Provisioning one-shot machine ($VM_SIZE / ${VM_MEMORY}MB) ..."
-RUN_LOG="$(mktemp)"
-# --restart no: one-shot; do NOT auto-remove (--rm) — we destroy explicitly in
-# teardown AFTER retrieving logs, so the machine must survive until then.
-FLY machine run "$IMAGE_REF" \
-    -a "$APP" \
-    --region "$REGION" \
-    --vm-size "$VM_SIZE" \
-    --vm-memory "$VM_MEMORY" \
-    --restart no \
-    --env "BENCH_TASK=$BENCH_TASK" \
-    --env "BENCH_SIMULATE=$BENCH_SIMULATE" \
-    --env "BENCH_FLAGS=$BENCH_FLAGS" \
-    --env "WMH_MODEL_NAME=$WMH_MODEL_NAME" \
-    --detach 2>&1 | tee "$RUN_LOG"
-MACHINE_RUN_STATUS="${PIPESTATUS[0]}"
-
-# Capture the machine id from the run output REGARDLESS of exit status. Even when
-# `machine run --detach` returns non-zero (e.g. "failed to reach desired start
-# state" because a cold image pull in iad exceeded its internal start deadline),
-# the machine IS created and WILL start — the health-wait loop below tolerates a
-# slow start. We only hard-fail when NO machine exists.
-MACHINE_ID="$(grep -oiE 'Machine ID: [0-9a-f]+' "$RUN_LOG" | tail -1 | awk '{print $3}')"
-rm -f "$RUN_LOG"
-if [ -z "$MACHINE_ID" ]; then
-    # No id in output — ask the API (there should be exactly one machine).
-    MACHINE_ID="$(FLY machines list -a "$APP" --json 2>/dev/null | python3 -c 'import json,sys
-try:
-    d=json.load(sys.stdin) or []
-    print(d[0]["id"] if d else "")
-except Exception:
-    print("")' 2>/dev/null)"
-fi
-if [ -z "$MACHINE_ID" ]; then
-    if [ "$MACHINE_RUN_STATUS" -ne 0 ]; then
-        echo "❌ Failed to provision machine and no machine was created (see output above)."
-        exit 1
-    fi
-    echo "⚠️  Could not determine machine id (teardown will still sweep the whole app)."
-    MACHINE_ID=""
-else
-    if [ "$MACHINE_RUN_STATUS" -ne 0 ]; then
-        echo "⚠️  machine run returned non-zero (likely a slow cold image pull) — machine $MACHINE_ID was created; continuing to monitor its start."
-    fi
-    echo "✅ Machine: $MACHINE_ID"
-fi
-
-# ── 5. Stream logs; wait for the DONE marker; capture the report card ─────────
-echo ""
-echo "📡 Streaming machine logs (waiting for benchmark to complete)..."
-echo "   (hard timeout ${RUN_TIMEOUT}s — teardown fires on timeout too)"
-
+# Markers the on-box per-run script prints (parsed from the SSH transcript).
 DONE_MARKER="::CLOUDBENCH-DONE::"
 REPORT_BEGIN="::CLOUDBENCH-REPORT-CARD-BEGIN::"
 REPORT_END="::CLOUDBENCH-REPORT-CARD-END::"
+RESULT_BEGIN="::CLOUDBENCH-RESULT-BEGIN::"
+RESULT_END="::CLOUDBENCH-RESULT-END::"
 
-ALL_LOGS="$(mktemp)"
-DEADLINE=$(( $(date +%s) + RUN_TIMEOUT ))
-FINISHED="0"
-BENCH_EXIT=""
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
-# Poll buffered logs on an interval (streaming `flyctl logs` blocks indefinitely;
-# polling with --no-tail lets us watch for the DONE marker and enforce a timeout).
-while [ "$(date +%s)" -lt "$DEADLINE" ]; do
-    if [ -n "$MACHINE_ID" ]; then
-        FLY logs -a "$APP" --machine "$MACHINE_ID" --no-tail 2>/dev/null > "$ALL_LOGS" || true
+# Print the JSON list of machines in the app (empty array on any error).
+_machines_json() {
+    FLY machines list -a "$APP" --json 2>/dev/null || echo '[]'
+}
+
+# Resolve the persistent machine id: prefer the stored id, else match by name.
+resolve_machine_id() {
+    local stored=""
+    if [ -f "$STATE_FILE" ]; then
+        stored="$(python3 -c 'import json,sys
+try: print(json.load(open(sys.argv[1])).get("machine_id",""))
+except Exception: print("")' "$STATE_FILE" 2>/dev/null || echo '')"
+    fi
+    _machines_json | MACHINE_NAME="$MACHINE_NAME" STORED="$stored" python3 -c '
+import json,os,sys
+try:
+    data=json.load(sys.stdin) or []
+except Exception:
+    data=[]
+name=os.environ.get("MACHINE_NAME")
+stored=os.environ.get("STORED") or ""
+ids={m.get("id") for m in data if m.get("id")}
+# stored id still present?
+if stored and stored in ids:
+    print(stored); sys.exit(0)
+# else match by name
+for m in data:
+    if m.get("name")==name and m.get("id"):
+        print(m["id"]); sys.exit(0)
+print("")
+' 2>/dev/null || echo ""
+}
+
+machine_state() {  # machine_state <id>
+    local id="$1"
+    _machines_json | ID="$id" python3 -c '
+import json,os,sys
+try: data=json.load(sys.stdin) or []
+except Exception: data=[]
+mid=os.environ.get("ID")
+for m in data:
+    if m.get("id")==mid:
+        print(m.get("state","")); sys.exit(0)
+print("gone")
+' 2>/dev/null || echo "gone"
+}
+
+write_state() {  # write_state <machine_id>
+    mkdir -p "$ROOT_DIR/.context"
+    printf '{"app":"%s","machine_id":"%s","machine_name":"%s","volume_name":"%s","region":"%s"}\n' \
+        "$APP" "$1" "$MACHINE_NAME" "$VOLUME_NAME" "$REGION" > "$STATE_FILE"
+}
+
+ensure_app() {
+    if _machines_json >/dev/null 2>&1 && FLY apps list --json 2>/dev/null | python3 -c 'import json,sys
+apps=json.load(sys.stdin)
+names={a.get("Name") or a.get("name") for a in (apps or [])}
+sys.exit(0 if "'"$APP"'" in names else 1)' 2>/dev/null; then
+        echo "✅ App $APP already exists"
     else
-        FLY logs -a "$APP" --no-tail 2>/dev/null > "$ALL_LOGS" || true
+        echo "📦 Creating app $APP ..."
+        FLY apps create "$APP" --org personal 2>&1 | sed 's/^/   /' || {
+            FLY apps list 2>/dev/null | grep -q "$APP" || { echo "❌ Failed to create app $APP"; exit 1; }
+        }
     fi
+}
 
-    # Show new [cloudbench] progress lines (dedupe against last render).
-    grep -aE '\[cloudbench\]|🌌|🌍|report-card|❌|FATAL|Results saved' "$ALL_LOGS" 2>/dev/null \
-        | tail -8 | sed 's/^/   /' || true
+# Read GITHUB_TOKEN from back-end/.env (fallback agents/.env) for the git clone +
+# per-run fetches (private repo).
+resolve_github_token() {
+    local t
+    t="$(grep -E '^GITHUB_TOKEN=' back-end/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
+    [ -z "$t" ] && t="$(grep -E '^GITHUB_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
+    echo "$t"
+}
 
-    if grep -aq "$DONE_MARKER" "$ALL_LOGS" 2>/dev/null; then
-        FINISHED="1"
-        BENCH_EXIT="$(grep -aoE "${DONE_MARKER} exit=[0-9]+" "$ALL_LOGS" | tail -1 | grep -oE '[0-9]+$' || echo '')"
-        break
+# Inject the two base64 .env blobs + GITHUB_TOKEN as Fly secrets (present on the
+# machine env + in ssh sessions). Idempotent: only re-stages when the files exist.
+# GITHUB_TOKEN is injected as a secret so the on-box per-run git-sync (private
+# repo) can authenticate via git http.extraheader without the token ever being
+# stored in .git/config on the volume.
+inject_secrets() {
+    echo "🔐 Injecting secrets into $APP ..."
+    if [ ! -f agents/.env ] || [ ! -f back-end/.env ]; then
+        echo "❌ agents/.env and back-end/.env are required to inject secrets." >&2
+        exit 1
     fi
+    local agents_b64 backend_b64 gh_token
+    agents_b64="$(base64 < agents/.env | tr -d '\n')"
+    backend_b64="$(base64 < back-end/.env | tr -d '\n')"
+    gh_token="$(resolve_github_token)"
+    echo "   secret files: AGENTS_ENV_B64 ($(wc -l < agents/.env | tr -d ' ') lines), BACKEND_ENV_B64 ($(wc -l < back-end/.env | tr -d ' ') lines)"
+    local -a set_args=(
+        "AGENTS_ENV_B64=$agents_b64"
+        "BACKEND_ENV_B64=$backend_b64"
+    )
+    if [ -n "$gh_token" ]; then
+        set_args+=("GITHUB_TOKEN=$gh_token")
+        echo "   GITHUB_TOKEN present (for private-repo git-sync)"
+    else
+        echo "   ⚠️  GITHUB_TOKEN not found — private-repo fetches will fail"
+    fi
+    FLY secrets set --stage -a "$APP" "${set_args[@]}" 2>&1 | sed 's/^/   /' || {
+        echo "❌ Failed to set secrets"; exit 1
+    }
+    FLY secrets deploy -a "$APP" 2>&1 | sed 's/^/   /' || true
+    echo "✅ Secrets set (active)"
+}
 
-    # If the machine has stopped/destroyed without a DONE marker, bail.
-    STATE="$(FLY machines list -a "$APP" --json 2>/dev/null | python3 -c 'import json,sys
-d=json.load(sys.stdin) or []
-print(d[0].get("state","") if d else "gone")' 2>/dev/null || echo '')"
-    if [ "$STATE" = "stopped" ] || [ "$STATE" = "destroyed" ] || [ "$STATE" = "gone" ]; then
-        echo "   ⚠️  machine state=$STATE without DONE marker — collecting final logs"
-        sleep 3
-        if [ -n "$MACHINE_ID" ]; then
-            FLY logs -a "$APP" --machine "$MACHINE_ID" --no-tail 2>/dev/null > "$ALL_LOGS" || true
+# SSH-exec a shell snippet on the machine, streaming output. $1 = machine id.
+ssh_exec() {  # ssh_exec <machine_id> <remote-shell-command>
+    FLY ssh console -a "$APP" --machine "$1" -C "bash -lc $(printf '%q' "$2")"
+}
+
+# Start the machine and wait until Fly reports it "started".
+start_machine() {  # start_machine <id>
+    local id="$1" st
+    st="$(machine_state "$id")"
+    if [ "$st" = "started" ]; then
+        echo "✅ Machine $id already started"
+        return 0
+    fi
+    echo "▶️  Starting machine $id ..."
+    FLY machine start "$id" -a "$APP" 2>&1 | sed 's/^/   /' || true
+    for _ in $(seq 1 60); do
+        st="$(machine_state "$id")"
+        [ "$st" = "started" ] && { echo "✅ Machine started"; return 0; }
+        [ "$st" = "gone" ] && { echo "❌ Machine $id disappeared while starting"; return 1; }
+        sleep 2
+    done
+    echo "⚠️  Machine $id did not report 'started' in time (state=$st) — continuing; SSH will retry."
+    return 0
+}
+
+# Stop the machine (keep it + volume). Safe default on every per-run exit path.
+stop_machine() {  # stop_machine <id>
+    local id="$1"
+    [ -z "$id" ] && return 0
+    echo "⏹️  Stopping machine $id (kept; volume retained; idle cost ~0) ..."
+    FLY machine stop "$id" -a "$APP" 2>&1 | sed 's/^/   /' || true
+}
+
+# Wait for SSH to answer on the machine (post-start it can take a few seconds).
+wait_for_ssh() {  # wait_for_ssh <id>
+    local id="$1"
+    for _ in $(seq 1 30); do
+        if FLY ssh console -a "$APP" --machine "$id" -C "true" >/dev/null 2>&1; then
+            return 0
         fi
-        grep -aq "$DONE_MARKER" "$ALL_LOGS" 2>/dev/null && FINISHED="1"
-        break
+        sleep 3
+    done
+    echo "⚠️  SSH did not become reachable on $id — proceeding (the exec below may still succeed)."
+    return 0
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+# MODE: --destroy — remove the machine + volume entirely (ends all billing).
+# ═════════════════════════════════════════════════════════════════════════════
+if [ "$MODE" = "destroy" ]; then
+    echo "═══ run-bench-cloud --destroy ═══"
+    ensure_app
+    mid="$(resolve_machine_id)"
+    if [ -n "$mid" ]; then
+        echo "🧹 Destroying machine $mid ..."
+        FLY machine destroy --force "$mid" -a "$APP" 2>&1 | sed 's/^/   /' || true
     fi
-
-    sleep 10
-done
-
-echo ""
-if [ "$FINISHED" != "1" ]; then
-    echo "⏰ Timed out or machine ended before completion. Final logs tail:"
-    tail -60 "$ALL_LOGS" 2>/dev/null | sed 's/^/   /' || true
+    # Belt-and-suspenders: sweep any leftover machines in the app.
+    for id in $(_machines_json | python3 -c 'import json,sys
+try:
+    for m in (json.load(sys.stdin) or []):
+        if m.get("id"): print(m["id"])
+except Exception: pass' 2>/dev/null); do
+        echo "   destroying leftover machine $id"
+        FLY machine destroy --force "$id" -a "$APP" 2>&1 | sed 's/^/   /' || true
+    done
+    # Destroy the volume(s).
+    for vid in $(FLY volumes list -a "$APP" --json 2>/dev/null | python3 -c 'import json,sys
+try:
+    for v in (json.load(sys.stdin) or []):
+        if v.get("id"): print(v["id"])
+except Exception: pass' 2>/dev/null); do
+        echo "   destroying volume $vid"
+        FLY volumes destroy "$vid" -a "$APP" --yes 2>&1 | sed 's/^/   /' || true
+    done
+    rm -f "$STATE_FILE"
+    echo ""
+    echo "🔎 Proof — remaining machines / volumes:"
+    FLY machines list -a "$APP" 2>&1 | sed 's/^/   /' || true
+    FLY volumes list -a "$APP" 2>&1 | sed 's/^/   /' || true
+    echo "✅ Destroyed. Idle cost is now zero (no machine, no volume)."
+    exit 0
 fi
 
-# ── 6. Retrieve the report card + run JSON directly from the machine ─────────
-# `flyctl logs --no-tail` only returns the last ~100 buffered lines, so the
-# report card (printed between delimiters) can scroll out of the buffer. Fetch
-# the files directly over SSH instead — reliable and complete. This runs while
-# the machine is still alive (before teardown).
+# ═════════════════════════════════════════════════════════════════════════════
+# MODE: --setup — one-time: app + secrets + image + volume + machine + git clone.
+# ═════════════════════════════════════════════════════════════════════════════
+if [ "$MODE" = "setup" ]; then
+    echo "═══ run-bench-cloud --setup ═══"
+    echo "app=$APP region=$REGION machine=$MACHINE_NAME volume=$VOLUME_NAME vm=$VM_SIZE/${VM_MEMORY}MB volume_size=${VOLUME_SIZE}GB"
+    echo ""
+
+    ensure_app
+    inject_secrets
+
+    # ── Build + push the KEEP-ALIVE image (deps baked; CMD = sleep infinity) ──
+    # Uses the Fly classic remote builder (plain manifest) so `machine run <tag>`
+    # resolves cleanly (Depot pushes an OCI index that machine-run can't resolve).
+    echo ""
+    if [ -n "${WARM_IMAGE_REF:-}" ]; then
+        # Fly's remote builder is currently unhealthy (wireguardless h2c 500), so
+        # allow a locally-built + pushed plain-manifest image to be supplied.
+        IMAGE_REF="$WARM_IMAGE_REF"
+        echo "✅ Using pre-built image (WARM_IMAGE_REF): $IMAGE_REF"
+    else
+        echo "🏗️  Building + pushing keep-alive image (Fly classic remote builder)..."
+        IMAGE_LABEL="cloudbench-warm-$(date +%Y%m%d-%H%M%S)"
+        BUILD_OK=0
+        for attempt in 1 2 3; do
+            echo "   build attempt $attempt/3 (label $IMAGE_LABEL)"
+            if FLY deploy \
+                -c fly.cloudbench-warm.toml \
+                --dockerfile Dockerfile.cloudbench-warm \
+                --depot=false \
+                --remote-only \
+                --build-only \
+                --push \
+                --image-label "$IMAGE_LABEL" \
+                -a "$APP" 2>&1; then
+                BUILD_OK=1
+                break
+            fi
+            echo "   ⚠️  build attempt $attempt failed — retrying in 15s"
+            sleep 15
+        done
+        [ "$BUILD_OK" != "1" ] && { echo "❌ Image build failed after 3 attempts"; exit 1; }
+        IMAGE_REF="registry.fly.io/$APP:$IMAGE_LABEL"
+        echo "✅ Image: $IMAGE_REF"
+    fi
+
+    # ── Create the volume (if absent) ────────────────────────────────────────
+    echo ""
+    HAVE_VOL="$(FLY volumes list -a "$APP" --json 2>/dev/null | VN="$VOLUME_NAME" python3 -c 'import json,os,sys
+try: data=json.load(sys.stdin) or []
+except Exception: data=[]
+print("1" if any(v.get("name")==os.environ["VN"] for v in data) else "0")' 2>/dev/null || echo 0)"
+    if [ "$HAVE_VOL" = "1" ]; then
+        echo "✅ Volume $VOLUME_NAME already exists"
+    else
+        echo "💽 Creating volume $VOLUME_NAME (${VOLUME_SIZE}GB, region $REGION) ..."
+        FLY volumes create "$VOLUME_NAME" -a "$APP" --region "$REGION" --size "$VOLUME_SIZE" --yes 2>&1 | sed 's/^/   /' || {
+            echo "❌ Failed to create volume"; exit 1
+        }
+    fi
+
+    # ── Create the persistent machine (keep-alive image + volume at /data) ───
+    echo ""
+    mid="$(resolve_machine_id)"
+    if [ -n "$mid" ]; then
+        echo "✅ Persistent machine already exists: $mid (skipping create)"
+    else
+        echo "🖥️  Creating persistent machine $MACHINE_NAME ($VM_SIZE / ${VM_MEMORY}MB, volume→/data) ..."
+        RUN_LOG="$(mktemp)"
+        FLY machine run "$IMAGE_REF" \
+            -a "$APP" \
+            --name "$MACHINE_NAME" \
+            --region "$REGION" \
+            --vm-size "$VM_SIZE" \
+            --vm-memory "$VM_MEMORY" \
+            --volume "$VOLUME_NAME:/data" \
+            --restart no \
+            --detach 2>&1 | tee "$RUN_LOG"
+        mid="$(grep -oiE 'Machine ID: [0-9a-f]+' "$RUN_LOG" | tail -1 | awk '{print $3}')"
+        rm -f "$RUN_LOG"
+        [ -z "$mid" ] && mid="$(resolve_machine_id)"
+        [ -z "$mid" ] && { echo "❌ Failed to create the persistent machine"; exit 1; }
+        echo "✅ Machine: $mid"
+    fi
+    write_state "$mid"
+
+    start_machine "$mid"
+    wait_for_ssh "$mid"
+
+    # ── git clone the repo into /data/repo (auth via GITHUB_TOKEN) ────────────
+    gh_token="$(resolve_github_token)"
+    if [ -z "$gh_token" ]; then
+        echo "❌ GITHUB_TOKEN not found in back-end/.env or agents/.env — cannot clone the repo." >&2
+        echo "   Stopping machine; add GITHUB_TOKEN and re-run --setup." >&2
+        stop_machine "$mid"
+        exit 1
+    fi
+    echo ""
+    echo "📥 Cloning repo into $REMOTE_REPO on the box (branch $BENCH_REF) ..."
+    # The token is passed as a transient env var to the remote shell and used via
+    # git's http.extraheader (Basic auth header) rather than embedded in the clone
+    # URL — so it never lands in git's process argv OR in the stored remote URL.
+    # The remote stays clean (https://github.com/...) for all future fetches, which
+    # then reuse the same header only when the run/refresh paths re-supply it.
+    CLONE_CMD="set -e
+mkdir -p /data
+AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GH_TOKEN\" | base64 | tr -d '\n')\"
+if [ -d '$REMOTE_REPO/.git' ]; then
+  echo 'repo already present — fetching latest'
+  git -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin
+else
+  git -c http.extraheader=\"\$AUTH_HDR\" clone --quiet 'https://github.com/Rose-Ai-Labs/rose.git' '$REMOTE_REPO'
+fi
+git -C '$REMOTE_REPO' remote set-url origin 'https://github.com/Rose-Ai-Labs/rose.git'
+chown -R rose:rose '$REMOTE_REPO' 2>/dev/null || true
+echo 'clone/fetch complete'"
+    FLY ssh console -a "$APP" --machine "$mid" \
+        -C "bash -lc $(printf 'GH_TOKEN=%q; %s' "$gh_token" "$CLONE_CMD")" 2>&1 \
+        | grep -av '^Connecting to' | sed 's/^/   /' || {
+        echo "❌ git clone failed"; stop_machine "$mid"; exit 1
+    }
+
+    stop_machine "$mid"
+    echo ""
+    echo "✅ Setup complete."
+    echo "   Next (one-time, builds the cached WMH model):  bash scripts/run-bench-cloud --refresh-wmh"
+    echo "   Then per run:                                  bash scripts/run-bench-cloud <task> --simulate"
+    exit 0
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+# MODE: --refresh-wmh — (re)build the cached WMH model on /data/world-model.
+# This is the ONLY place the model is (re)built. NOT per run.
+# ═════════════════════════════════════════════════════════════════════════════
+if [ "$MODE" = "refresh-wmh" ]; then
+    echo "═══ run-bench-cloud --refresh-wmh ═══"
+    echo "model=$WMH_MODEL_NAME target=$REMOTE_WMH"
+    echo ""
+    ensure_app
+    inject_secrets      # refresh secrets so R2 creds for the corpus read are current.
+
+    mid="$(resolve_machine_id)"
+    [ -z "$mid" ] && { echo "❌ No persistent machine — run 'run-bench-cloud --setup' first."; exit 1; }
+    write_state "$mid"
+
+    # STOP the machine on ANY exit — the refresh must never leak a running box.
+    trap 'stop_machine "$mid"' EXIT INT TERM
+
+    start_machine "$mid"
+    wait_for_ssh "$mid"
+
+    # Sync the repo first so the WMH build uses the current branch's builder code.
+    # Auth the private-repo fetch with the box-side GITHUB_TOKEN secret via git
+    # http.extraheader (kept out of .git/config + git argv).
+    echo "🔄 git-syncing $REMOTE_REPO → $BENCH_REF (so the WMH build uses current builder code) ..."
+    SYNC_CMD="set -e
+AUTH_HDR=''
+[ -n \"\${GITHUB_TOKEN:-}\" ] && AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GITHUB_TOKEN\" | base64 | tr -d '\n')\"
+git -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin '$BENCH_REF' || git -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin
+git -C '$REMOTE_REPO' checkout -f '$BENCH_REF' 2>/dev/null || git -C '$REMOTE_REPO' checkout -f FETCH_HEAD
+git -C '$REMOTE_REPO' reset --hard
+chown -R rose:rose '$REMOTE_REPO' 2>/dev/null || true
+echo checkout \$(git -C '$REMOTE_REPO' rev-parse --short HEAD)"
+    ssh_exec "$mid" "$SYNC_CMD" 2>&1 | grep -av '^Connecting to' | sed 's/^/   /' || true
+
+    echo ""
+    echo "🌍 Building the WMH model on the box → $REMOTE_WMH (WMH_GEPA_BUDGET=0 index-only) ..."
+    # Decode secrets into the checkout .env, mirror deps if needed, then run the
+    # WMH build. This is the ONLY place update_world_model_for_simulation() runs
+    # cloud-side. Runs as rose from the agents dir with the cached-model build root.
+    BUILD_CMD="set -e
+# decode env for R2 creds the corpus read needs
+[ -n \"\${AGENTS_ENV_B64:-}\" ] && echo \"\$AGENTS_ENV_B64\" | base64 -d > '$REMOTE_REPO/agents/.env'
+[ -n \"\${BACKEND_ENV_B64:-}\" ] && echo \"\$BACKEND_ENV_B64\" | base64 -d > '$REMOTE_REPO/back-end/.env'
+chown rose:rose '$REMOTE_REPO/agents/.env' '$REMOTE_REPO/back-end/.env' 2>/dev/null || true
+# mirror baked venv if the checkout lacks it
+[ -x '$REMOTE_REPO/agents/venv/bin/python' ] || rsync -a /app/agents/venv/ '$REMOTE_REPO/agents/venv/'
+mkdir -p '$REMOTE_WMH'
+chown -R rose:rose '$REMOTE_WMH' '$REMOTE_REPO/agents/venv' 2>/dev/null || true
+cd '$REMOTE_REPO/agents'
+gosu rose env HOME=/home/rose WMH_BUILD_DIR='$REMOTE_WMH' WMH_MODEL_NAME='$WMH_MODEL_NAME' WMH_GEPA_BUDGET=0 \\
+  venv/bin/python -u -c \"from benchmarks.world_model_harness import update_world_model_for_simulation as u; import json; print(json.dumps(u(progress=lambda e: print('[WMH]', e.get('title'), e.get('status'), flush=True))))\"
+echo '::WMH-REFRESH-DONE::'
+ls -la '$REMOTE_WMH/models' 2>/dev/null || true"
+    REFRESH_LOG="$(mktemp)"
+    ssh_exec "$mid" "$BUILD_CMD" 2>&1 | grep -av '^Connecting to' | tee "$REFRESH_LOG" | sed 's/^/   /'
+    if grep -q '::WMH-REFRESH-DONE::' "$REFRESH_LOG" 2>/dev/null; then
+        echo ""
+        echo "✅ WMH model refreshed + cached at $REMOTE_WMH (served-not-rebuilt on every future run)."
+        rm -f "$REFRESH_LOG"
+    else
+        echo ""
+        echo "❌ WMH refresh did not report completion (see output above)."
+        rm -f "$REFRESH_LOG"
+        exit 1
+    fi
+    # EXIT trap stops the machine.
+    exit 0
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+# MODE: run (default) — the fast per-run path.
+#   start → git-sync → serve CACHED WMH → run_benchmark → retrieve → STOP.
+# ═════════════════════════════════════════════════════════════════════════════
+if [ -z "$BENCH_TASK" ]; then
+    echo "❌ A benchmark task name is required. e.g. bash scripts/run-bench-cloud spawn-sub-agents --simulate" >&2
+    echo "   (Or use --setup / --refresh-wmh / --destroy.)" >&2
+    exit 2
+fi
+
+echo "═══ run-bench-cloud (warm run) ═══"
+echo "task=$BENCH_TASK simulate=$BENCH_SIMULATE ref=${BENCH_REF:-<checkout>} model=$WMH_MODEL_NAME app=$APP"
+echo ""
+
+ensure_app
+inject_secrets
+
+mid="$(resolve_machine_id)"
+if [ -z "$mid" ]; then
+    echo "❌ No persistent machine found. Run one-time setup first:" >&2
+    echo "     bash scripts/run-bench-cloud --setup" >&2
+    echo "     bash scripts/run-bench-cloud --refresh-wmh" >&2
+    exit 1
+fi
+write_state "$mid"
+
+# SAFETY: STOP the machine on EVERY exit (success, failure, error, timeout,
+# Ctrl-C). Never destroy on the per-run path — only --destroy removes it. This is
+# the "never leak billing" guarantee: a stopped machine bills only for the volume.
+STOP_DONE="0"
+stop_on_exit() {
+    local ec=$?
+    [ "$STOP_DONE" = "1" ] && return
+    STOP_DONE="1"
+    stop_machine "$mid"
+    echo "Original exit code: $ec"
+}
+trap stop_on_exit EXIT INT TERM
+
+start_machine "$mid"
+wait_for_ssh "$mid"
+
+# Deliver the per-run script to the box independently of the git checkout (so it
+# works even before the checkout is synced): base64 the LOCAL copy, decode + exec
+# on the box with the run params passed as env. The on-box script does the
+# git-sync of the branch under test, serves the CACHED WMH (no rebuild), runs the
+# benchmark, and prints the DONE marker + report card.
+if [ ! -f "$ROOT_DIR/$REMOTE_RUN_SCRIPT" ]; then
+    echo "❌ Missing $REMOTE_RUN_SCRIPT locally." >&2
+    exit 1
+fi
+RUN_SCRIPT_B64="$(base64 < "$ROOT_DIR/$REMOTE_RUN_SCRIPT" | tr -d '\n')"
+
+# Compose the remote invocation: write the script to /tmp, chmod, exec it with the
+# per-run env. Env carries the task, ref, simulate flag, model, and extra flags.
+REMOTE_INVOKE="set -e
+echo '$RUN_SCRIPT_B64' | base64 -d > /tmp/cloudbench-run.sh
+chmod +x /tmp/cloudbench-run.sh
+export BENCH_TASK=$(printf '%q' "$BENCH_TASK")
+export BENCH_SIMULATE=$(printf '%q' "$BENCH_SIMULATE")
+export BENCH_REF=$(printf '%q' "$BENCH_REF")
+export BENCH_FLAGS=$(printf '%q' "$BENCH_FLAGS")
+export WMH_MODEL_NAME=$(printf '%q' "$WMH_MODEL_NAME")
+exec bash /tmp/cloudbench-run.sh"
+
+echo ""
+echo "📡 Running benchmark on the warm box over SSH (hard timeout ${RUN_TIMEOUT}s)..."
+echo "   task=$BENCH_TASK ref=$BENCH_REF simulate=$BENCH_SIMULATE"
+echo ""
+
+SSH_LOG="$(mktemp)"
+# Enforce the per-run ceiling around the single SSH exec. `timeout` kills the
+# local flyctl process on overrun; the trap then STOPS the machine.
+TIMEOUT_BIN="timeout"
+command -v timeout >/dev/null 2>&1 || TIMEOUT_BIN="gtimeout"
+if ! command -v "$TIMEOUT_BIN" >/dev/null 2>&1; then
+    TIMEOUT_BIN=""   # no coreutils timeout available; rely on the on-box waits.
+fi
+
+set +e
+if [ -n "$TIMEOUT_BIN" ]; then
+    "$TIMEOUT_BIN" "$RUN_TIMEOUT" \
+        flyctl ssh console -a "$APP" --machine "$mid" \
+        -C "bash -lc $(printf '%q' "$REMOTE_INVOKE")" 2>&1 \
+        | grep -av '^Connecting to' | tee "$SSH_LOG"
+else
+    flyctl ssh console -a "$APP" --machine "$mid" \
+        -C "bash -lc $(printf '%q' "$REMOTE_INVOKE")" 2>&1 \
+        | grep -av '^Connecting to' | tee "$SSH_LOG"
+fi
+SSH_STATUS="${PIPESTATUS[0]}"
+set -e 2>/dev/null || true
+
+# ── Parse the DONE marker + report card + run record from the SSH transcript ──
+FINISHED="0"; BENCH_EXIT=""
+if grep -aq "$DONE_MARKER" "$SSH_LOG" 2>/dev/null; then
+    FINISHED="1"
+    BENCH_EXIT="$(grep -aoE "${DONE_MARKER} exit=[0-9]+" "$SSH_LOG" | tail -1 | grep -oE '[0-9]+$' || echo '')"
+fi
+
 mkdir -p "$ROOT_DIR/.context"
 CARD_OUT="$ROOT_DIR/.context/cloudbench-report-card.json"
 RUN_OUT="$ROOT_DIR/.context/cloudbench-run.json"
-REMOTE_CTX="/app/.context/cloudbench"
-CARD_JSON=""
-RUN_JSON=""
-
-if [ -n "$MACHINE_ID" ] && [ "$FINISHED" = "1" ]; then
-    echo ""
-    echo "📥 Fetching report card + run record from the machine over SSH..."
-    CARD_JSON="$(FLY ssh console -a "$APP" --machine "$MACHINE_ID" \
-        -C "cat $REMOTE_CTX/report-card.json" 2>/dev/null \
-        | grep -av '^Connecting to' || true)"
-    RUN_JSON="$(FLY ssh console -a "$APP" --machine "$MACHINE_ID" \
-        -C "bash -lc 'ls -t /app/agents/benchmarks/runs/*.json 2>/dev/null | head -1 | xargs cat 2>/dev/null'" 2>/dev/null \
-        | grep -av '^Connecting to' || true)"
-fi
-
-# Fallback: recover the report card from the log buffer if SSH missed it.
-if [ -z "$CARD_JSON" ]; then
-    CARD_JSON="$(awk "/$REPORT_BEGIN/{f=1;next} /$REPORT_END/{f=0} f" "$ALL_LOGS" 2>/dev/null)"
-fi
+CARD_JSON="$(awk "/$REPORT_BEGIN/{f=1;next} /$REPORT_END/{f=0} f" "$SSH_LOG" 2>/dev/null)"
+RUN_JSON="$(awk "/$RESULT_BEGIN/{f=1;next} /$RESULT_END/{f=0} f" "$SSH_LOG" 2>/dev/null | grep -av '^run_file:')"
 
 echo ""
 echo "════════════════════ REPORT CARD ════════════════════"
@@ -434,7 +674,6 @@ else
 fi
 echo "══════════════════════════════════════════════════════"
 
-# Persist + summarize the run record (the authoritative pass/fail).
 PASS_RATE=""
 if [ -n "$RUN_JSON" ]; then
     echo "$RUN_JSON" > "$RUN_OUT" 2>/dev/null && echo "💾 Saved run record: $RUN_OUT"
@@ -455,11 +694,8 @@ except Exception as e:
 fi
 
 echo ""
-echo "🏁 benchmark exit code (run_benchmark.py --ci): ${BENCH_EXIT:-unknown}   (finished=$FINISHED)"
+echo "🏁 benchmark exit code (run_benchmark.py --ci): ${BENCH_EXIT:-unknown}   (finished=$FINISHED, ssh_status=$SSH_STATUS)"
 
-# Derive the authoritative outcome from the run record's pass_rate when we have
-# it (the --ci exit also fails on skipped tasks, which is stricter than "did the
-# task pass"). Prefer the run JSON; fall back to the entrypoint's exit code.
 OUTCOME_OK="0"
 RUN_PASS_RATE="$(printf '%s' "$PASS_RATE" | grep -oE 'PASS_RATE_VALUE= [0-9.]+' | awk '{print $2}' || true)"
 if [ -n "$RUN_PASS_RATE" ]; then
@@ -471,8 +707,8 @@ elif [ "$FINISHED" = "1" ] && [ "${BENCH_EXIT:-1}" = "0" ]; then
     OUTCOME_OK="1"
 fi
 
-rm -f "$ALL_LOGS"
+rm -f "$SSH_LOG"
 
-# teardown() (EXIT trap) destroys the machine + proves 0 remain.
+# stop_on_exit (EXIT trap) STOPS the machine (kept + volume retained).
 [ "$OUTCOME_OK" = "1" ] && exit 0
 exit 1

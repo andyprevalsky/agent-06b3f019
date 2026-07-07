@@ -1449,6 +1449,13 @@ def update_world_model_for_simulation(
 
     all_bundle_ids = sorted(list(root_agent_ids) if root_agent_ids is not None else list_archive_bundle_ids())
     bundle_ids, excluded_bundles = partition_real_world_bundles(all_bundle_ids)
+    # Corpus cap for fast benchmark/cloud builds. The full R2 archive is large and
+    # downloads slowly from some hosts (~KB/s); WMH_MAX_BUNDLES bounds the first
+    # build to N bundles so a serving model is ready in minutes, not hours. A later
+    # explicit --refresh-wmh (higher/unset cap) can grow it. 0/unset = no cap.
+    _wmh_max_bundles = int(os.environ.get("WMH_MAX_BUNDLES", "0") or "0")
+    if _wmh_max_bundles > 0 and len(bundle_ids) > _wmh_max_bundles:
+        bundle_ids = bundle_ids[:_wmh_max_bundles]
     split = deterministic_split(bundle_ids, heldout_fraction=heldout_fraction) if bundle_ids else {}
     index = _read_delta_index(index_path)
     old_bundles = index.get("bundles") if isinstance(index.get("bundles"), dict) else {}
