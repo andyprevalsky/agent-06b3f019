@@ -401,11 +401,17 @@ def run_health_server(port: int = 8080):
     """Run the health check server in a separate thread."""
     logger.info(f"Starting health check server on port {port}")
 
-    # Run in a separate thread so it doesn't block the worker
-    server_thread = threading.Thread(target=lambda: app.run(host="0.0.0.0", port=port, debug=False), daemon=True)
+    # Bind dual-stack (::) not 0.0.0.0. Fly's private 6PN network is IPv6-only,
+    # and the autoscaler leader scrapes each peer's /metrics over IPv6
+    # (http://[fdaa:...]:PORT/metrics, peer IPs resolved via AF_INET6 AAAA DNS).
+    # An IPv4-only 0.0.0.0 bind is unreachable on the 6PN, so peer admission/CPU
+    # scrapes fail ("All connection attempts failed") and the leader can only see
+    # its own pressure → it under-scales the fleet. `::` accepts both IPv6 (peers)
+    # and IPv4-mapped (local health checks) on Linux (bindv6only=0).
+    server_thread = threading.Thread(target=lambda: app.run(host="::", port=port, debug=False), daemon=True)
     server_thread.start()
 
-    logger.info(f"Health check server running at http://0.0.0.0:{port}/health")
+    logger.info(f"Health check server running at http://[::]:{port}/health")
 
     return server_thread
 
