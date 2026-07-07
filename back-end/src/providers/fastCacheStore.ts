@@ -10,7 +10,9 @@ function getFastCacheDatabaseUrl(): string {
   const explicitUrl = process.env.FAST_MODE_CACHE_DATABASE_URL;
   const base =
     explicitUrl ??
-    (process.env.NODE_ENV === 'production' && process.env.DATABASE_URL ? process.env.DATABASE_URL : null);
+    (process.env.NODE_ENV === 'production' && process.env.DATABASE_URL
+      ? process.env.DATABASE_URL
+      : null);
   if (base === null) {
     throw new Error(
       'FAST_MODE_CACHE_DATABASE_URL is required outside production; Fast Mode cache must not fall back to the local app database.'
