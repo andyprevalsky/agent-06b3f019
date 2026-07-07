@@ -52,13 +52,61 @@ describe('useMessageFiltering mergeSubAgentTreeMessages', () => {
     const { result } = mergeSubAgentTreeMessages(messages);
     const aggregate = result.find((message) => message.message_id === 'for-each-failed');
 
-    expect(result.map((message) => message.message_id)).toEqual([
-      'for-each-start',
-      'for-each-failed',
-    ]);
+    // The IN_PROGRESS "Spawning..." placeholder folds away once children exist;
+    // only the merged aggregate tree remains.
+    expect(result.map((message) => message.message_id)).toEqual(['for-each-failed']);
     expect(aggregate?.metadata?.forEachAggregate).toBe(true);
     expect(aggregate?.metadata?.busId).toBe('root-bus');
     expect(aggregate?.metadata?.subAgentIds).toEqual(['agent-a', 'agent-b']);
+  });
+
+  it('folds the for_each placeholder into the child tree mid-run (no terminal yet)', () => {
+    const messages = [
+      msg('for-each-start', {
+        toolCallId: 'call-1',
+        toolName: 'spawn_general_purpose_agent_for_each',
+        toolStatus: 'IN_PROGRESS',
+        title: 'Spawning agent cluster',
+      }),
+      msg('child-a', {
+        toolCallId: 'call-1:0',
+        toolName: 'spawn_general_purpose_agent',
+        toolStatus: 'IN_PROGRESS',
+        title: 'Sub-agent starting',
+        busId: 'root-bus',
+        subAgentIds: ['agent-a'],
+      }),
+      msg('child-b', {
+        toolCallId: 'call-1:1',
+        toolName: 'spawn_general_purpose_agent',
+        toolStatus: 'IN_PROGRESS',
+        title: 'Sub-agent starting',
+        busId: 'root-bus',
+        subAgentIds: ['agent-b'],
+      }),
+    ];
+
+    const { result } = mergeSubAgentTreeMessages(messages);
+
+    // No stray "Spawning..." placeholder — just the single grouped child tree.
+    expect(result).toHaveLength(1);
+    expect(result[0].metadata?.toolName).toBe('spawn_general_purpose_agent');
+    expect(result[0].metadata?.subAgentIds).toEqual(['agent-a', 'agent-b']);
+  });
+
+  it('keeps the for_each placeholder visible before any child has spawned', () => {
+    const messages = [
+      msg('for-each-start', {
+        toolCallId: 'call-1',
+        toolName: 'spawn_general_purpose_agent_for_each',
+        toolStatus: 'IN_PROGRESS',
+        title: 'Spawning agent cluster',
+      }),
+    ];
+
+    const { result } = mergeSubAgentTreeMessages(messages);
+
+    expect(result.map((message) => message.message_id)).toEqual(['for-each-start']);
   });
 
   it('merges separate spawn summaries under the same bus into one tree', () => {

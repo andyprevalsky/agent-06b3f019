@@ -33,7 +33,10 @@ async def resolve_fast_cache_goal_activity(agent_id: str) -> Optional[str]:
     # so a module-level import here would cycle through helpers/__init__.
     from providers.fast_cache.client import resolve_agent_fast_mode
 
-    _enabled, goal, _write_enabled = await resolve_agent_fast_mode(agent_id)
+    # resolve_agent_fast_mode returns a 4-tuple (enabled, goal, write_enabled,
+    # root_agent_id). Unpacking only 3 here raised ValueError("too many values to
+    # unpack (expected 3)"), failing resolve_fast_cache_goal_activity on every run.
+    _enabled, goal, _write_enabled, _root_agent_id = await resolve_agent_fast_mode(agent_id)
     logger.info(
         "fast_cache.goal_resolved",
         agent_id=agent_id,

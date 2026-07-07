@@ -107,6 +107,7 @@ def _fast_cache_compute_affinity_key(user_id: str, goal: str) -> str:
     )
     return "fast-cache-agent-provider:" + hashlib.sha256(material.encode("utf-8")).hexdigest()
 
+
 # =============================================================================
 # TOOL CONFIGURATION
 # =============================================================================
@@ -366,7 +367,9 @@ class AgentWorkflow:
         goal_text = result.get("goal", "")
 
         child_status_normalized = str(child_status or "").strip().lower()
-        child_failed = child_status_normalized in {"failed", "error", "max_iterations"} or result.get("success") is False
+        child_failed = (
+            child_status_normalized in {"failed", "error", "max_iterations"} or result.get("success") is False
+        )
 
         if child_failed:
             # Child agent failed
@@ -647,9 +650,7 @@ class AgentWorkflow:
                     # Compute-token cache affinity pins by goal too — keep it on
                     # the same stable namespace.
                     self.compute_token_fast_cache_affinity_key = (
-                        _fast_cache_compute_affinity_key(user_id, persisted_goal)
-                        if fast_mode_cache_enabled
-                        else None
+                        _fast_cache_compute_affinity_key(user_id, persisted_goal) if fast_mode_cache_enabled else None
                     )
             except Exception as e:
                 workflow.logger.warning(f"Failed to resolve Fast Mode cache goal, using workflow input goal: {e}")
@@ -1335,9 +1336,7 @@ class AgentWorkflow:
             age = now - fetched_at
             if age < self.COMPUTE_TOKEN_TTL:
                 return  # Still fresh
-            workflow.logger.info(
-                f"🔑 Compute token expired ({age.total_seconds():.0f}s old), refreshing"
-            )
+            workflow.logger.info(f"🔑 Compute token expired ({age.total_seconds():.0f}s old), refreshing")
 
         try:
             result = await workflow.execute_activity(
@@ -1526,6 +1525,7 @@ class AgentWorkflow:
             # poll result so run_agent can still advance last_checked past
             # filtered sub-agent rows and avoid re-polling them forever.
             if messages:
+
                 def _message_dedupe_key(msg: Dict) -> str:
                     metadata = msg.get("metadata") or {}
                     return "|".join(
@@ -1544,9 +1544,7 @@ class AgentWorkflow:
                     if msg.get("message_id") or msg.get("id")
                 }
                 seen_message_keys = {
-                    _message_dedupe_key(msg)
-                    for msg in self.context
-                    if not (msg.get("message_id") or msg.get("id"))
+                    _message_dedupe_key(msg) for msg in self.context if not (msg.get("message_id") or msg.get("id"))
                 }
                 for msg in filter_internal_subagent_messages(messages):
                     message_id = msg.get("message_id") or msg.get("id")
@@ -2296,9 +2294,7 @@ class AgentWorkflow:
                 and claude_token_rotated
                 and not compute_token_used
             ):
-                workflow.logger.info(
-                    "🔁 Claude token rotated inside RoseClient; refreshing workflow cached token"
-                )
+                workflow.logger.info("🔁 Claude token rotated inside RoseClient; refreshing workflow cached token")
                 self._clear_compute_token()
                 if self.user_id:
                     try:
@@ -2345,9 +2341,7 @@ class AgentWorkflow:
                                 retry_policy=RetryPolicy(maximum_attempts=2),
                             )
                         except Exception as mark_error:
-                            workflow.logger.warning(
-                                f"Failed to mark Claude token rate-limited: {mark_error}"
-                            )
+                            workflow.logger.warning(f"Failed to mark Claude token rate-limited: {mark_error}")
                     # Clear cache to force refetch on next call → rotation kicks in
                     self._clear_compute_token()
                     # Proactively refetch so subsequent LLM calls in this phase use the
@@ -2357,9 +2351,7 @@ class AgentWorkflow:
                         try:
                             await self._refresh_compute_token(self.user_id)
                         except Exception as refresh_error:
-                            workflow.logger.warning(
-                                f"Rotation refetch failed: {refresh_error}"
-                            )
+                            workflow.logger.warning(f"Rotation refetch failed: {refresh_error}")
                 else:
                     workflow.logger.info(
                         f"ℹ️ Claude token fallback (transient: {claude_token_error}): "
@@ -2372,9 +2364,7 @@ class AgentWorkflow:
                 and gpt_token_rotated
                 and not compute_token_used
             ):
-                workflow.logger.info(
-                    "🔁 GPT token rotated inside RoseClient; refreshing workflow cached token"
-                )
+                workflow.logger.info("🔁 GPT token rotated inside RoseClient; refreshing workflow cached token")
                 self._clear_compute_token()
                 if self.user_id:
                     try:
@@ -2412,17 +2402,13 @@ class AgentWorkflow:
                                 retry_policy=RetryPolicy(maximum_attempts=2),
                             )
                         except Exception as mark_error:
-                            workflow.logger.warning(
-                                f"Failed to mark GPT token rate-limited: {mark_error}"
-                            )
+                            workflow.logger.warning(f"Failed to mark GPT token rate-limited: {mark_error}")
                     self._clear_compute_token()
                     if self.user_id:
                         try:
                             await self._refresh_compute_token(self.user_id)
                         except Exception as refresh_error:
-                            workflow.logger.warning(
-                                f"GPT rotation refetch failed: {refresh_error}"
-                            )
+                            workflow.logger.warning(f"GPT rotation refetch failed: {refresh_error}")
                 else:
                     workflow.logger.info(
                         f"ℹ️ GPT token fallback (transient: {gpt_token_error}): "
@@ -2745,7 +2731,13 @@ class AgentWorkflow:
                     self.parent_agent_id,
                     self.depth,
                     self.bus_id,
-                    "execute",  # start_phase: skip PLAN since we already have context
+                    # skip PLAN *and* DAG: on pause/resume the DAG (e.g. a for_each
+                    # fan-out) has already run and spawned its children. Using plain
+                    # "execute" set skip_dag=False, so resume re-ran the DAG and
+                    # re-spawned a fresh fan-out, orphaning the paused children. Match
+                    # the context-overflow continue_as_new, which correctly resumes
+                    # into the LLM loop (it polls the DB for the resumed children).
+                    "execute_continued",
                     self.max_iterations,
                     self.price_limit_cents,
                     self.context_gates or None,  # Preserve context gates across pause/resume

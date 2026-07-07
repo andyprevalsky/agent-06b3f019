@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-import httpx
-
+from helpers.http_client import get_http_client
 from tools.people_search.config import (
     EXA_CATEGORY,
     EXA_SEARCH_URL,
@@ -66,10 +65,9 @@ async def fetch_exa_people(
     if output_schema is not None:
         payload["outputSchema"] = output_schema
 
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        response = await client.post(EXA_SEARCH_URL, headers=headers, json=payload)
-        response.raise_for_status()
-        data = response.json()
+    response = await get_http_client().post(EXA_SEARCH_URL, headers=headers, json=payload, timeout=HTTP_TIMEOUT)
+    response.raise_for_status()
+    data = response.json()
 
     return data.get("results", [])
 
@@ -107,9 +105,10 @@ async def fetch_parallel_people(
         "match_limit": match_limit,
     }
 
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        response = await client.post(PARALLEL_ENTITY_SEARCH_URL, headers=headers, json=payload)
-        response.raise_for_status()
-        data = response.json()
+    response = await get_http_client().post(
+        PARALLEL_ENTITY_SEARCH_URL, headers=headers, json=payload, timeout=HTTP_TIMEOUT
+    )
+    response.raise_for_status()
+    data = response.json()
 
     return data.get("entities", [])

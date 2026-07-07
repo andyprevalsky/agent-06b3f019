@@ -15,7 +15,6 @@ USAGE:
 import asyncio
 import json
 import re
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -64,6 +63,7 @@ ALIAS_TYPE_OVERRIDES = {
     "spawn_general_purpose_agent": {"type": "general_purpose", "start_phase": "EXECUTE"},
     "spawn_general_purpose_agent_for_each": {"type": "for_each", "start_phase": "EXECUTE"},
 }
+
 
 def _apply_alias_override(params: Dict[str, Any], tool_name: str) -> Dict[str, Any]:
     """Merge an alias's type/start_phase override into a populated param dict.
@@ -147,13 +147,9 @@ def _select_param_tool_call(tool_calls: List[Dict[str, Any]], actual_tool: str, 
     matching = [tc for tc in tool_calls if tc.get("tool") == actual_tool]
     if not matching:
         if len(tool_calls) == 1:
-            workflow.logger.warning(
-                f"[DAG] Expected tool {actual_tool}, got {tool_calls[0].get('tool')}"
-            )
+            workflow.logger.warning(f"[DAG] Expected tool {actual_tool}, got {tool_calls[0].get('tool')}")
             return tool_calls[0]
-        raise ValueError(
-            f"LLM returned {len(tool_calls)} tool calls for task {task.index}, none for {actual_tool}"
-        )
+        raise ValueError(f"LLM returned {len(tool_calls)} tool calls for task {task.index}, none for {actual_tool}")
 
     if len(matching) == 1:
         return matching[0]
@@ -175,9 +171,7 @@ def _select_param_tool_call(tool_calls: List[Dict[str, Any]], actual_tool: str, 
         )
         return ranked[0][2]
 
-    raise ValueError(
-        f"LLM returned multiple ambiguous {actual_tool} tool calls for task {task.index}"
-    )
+    raise ValueError(f"LLM returned multiple ambiguous {actual_tool} tool calls for task {task.index}")
 
 
 def _build_param_population_message(goal: str, tool_name: str, alias_hint: str = "") -> str:
@@ -486,26 +480,43 @@ async def execute_dag(
     # A throwaway LLM call with the execute-phase system+tools+context
     # writes the cache prefix once; subsequent parallel param-populator
     # calls all read from it without needing serialization.
-    has_llm_tasks = any(
-        t.tool_name != "reasoning" for t in dag.tasks
-    )
+    has_llm_tasks = any(t.tool_name != "reasoning" for t in dag.tasks)
     if has_llm_tasks and system_prompt_text and (claude_token or gpt_token):
         try:
             _pending_llm_context[agent_id] = (list(context), system_prompt_text, None)
             await execute_activity(
                 call_llm_activity,
                 args=[
-                    agent_id, model, tool_names or [], 1,
-                    agent_id, None, None, claude_token,
-                    "dag_cache_warm", system_prompt_text,
-                    None, None, False,
+                    agent_id,
+                    model,
+                    tool_names or [],
+                    1,
+                    agent_id,
+                    None,
+                    None,
+                    claude_token,
+                    "dag_cache_warm",
+                    system_prompt_text,
+                    None,
+                    None,
+                    False,
                     "",
-                    claude_token_source, claude_token_pool_id, user_id,
-                    gpt_token, gpt_account_id, gpt_token_source, gpt_token_pool_id, user_id,
-                    None, None, user_id,
+                    claude_token_source,
+                    claude_token_pool_id,
+                    user_id,
+                    gpt_token,
+                    gpt_account_id,
+                    gpt_token_source,
+                    gpt_token_pool_id,
+                    user_id,
+                    None,
+                    None,
+                    user_id,
                     # Fast Mode: cache-warm keys by canonical request fingerprint;
                     # enabled+goal auto-resolve from the agent row.
-                    False, None, 0,
+                    False,
+                    None,
+                    0,
                 ],
                 start_to_close_timeout=timedelta(seconds=STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS),
                 retry_policy=RetryPolicy(maximum_attempts=1),
@@ -656,13 +667,20 @@ async def _execute_single_task(
     """
     from activities.reasoning import execute_reasoning_activity
 
-    tool_call_id = str(uuid.uuid4())
+    # MUST be workflow.uuid4() (not uuid.uuid4()): this id runs in workflow
+    # scope and is recorded in Temporal history. Raw uuid.uuid4() is recomputed
+    # on every replay, so a worker migration/restart mid-fan-out regenerates the
+    # id — IN_PROGRESS child events land under the pre-replay id and FINISHED
+    # events under the post-replay id, splitting one for_each into two bubbles
+    # (the pre-replay one spins forever, never receiving a matching FINISHED).
+    tool_call_id = str(workflow.uuid4())
     dag.mark_in_progress(task.index, tool_call_id)
 
     try:
         if task.tool_name == "reasoning":
             # Reasoning task - execute via activity (streams to frontend via Supabase Realtime)
-            stream_id = f"dag-reasoning-{task.index}-{uuid.uuid4()}"
+            # workflow.uuid4() for replay-stability (see tool_call_id note above).
+            stream_id = f"dag-reasoning-{task.index}-{workflow.uuid4()}"
 
             # Emit an IN_PROGRESS DB row so external monitors (and the FE) can see
             # the reasoning task started. Without this, the parent agent appears
@@ -689,9 +707,7 @@ async def _execute_single_task(
             # would just truncate this anyway, so trimming at the call site
             # both keeps the payload under cap AND saves serialization work.
             trimmed_context = (
-                context[-REASONING_MAX_CONTEXT_MESSAGES:]
-                if len(context) > REASONING_MAX_CONTEXT_MESSAGES
-                else context
+                context[-REASONING_MAX_CONTEXT_MESSAGES:] if len(context) > REASONING_MAX_CONTEXT_MESSAGES else context
             )
             reasoning_args = [
                 task.goal,
@@ -839,7 +855,9 @@ async def _execute_single_task(
                     None,
                     user_id,
                     # Fast Mode: DAG node keys by canonical request fingerprint.
-                    False, None, task.index,
+                    False,
+                    None,
+                    task.index,
                 ],
                 start_to_close_timeout=timedelta(seconds=600),
                 retry_policy=RetryPolicy(maximum_attempts=2),
@@ -879,7 +897,9 @@ async def _execute_single_task(
             type_override = ALIAS_TYPE_OVERRIDES.get(task.tool_name)
             if type_override:
                 _apply_alias_override(params, task.tool_name)
-                workflow.logger.info(f"[DAG] Applying type override for {task.tool_name}: {params.get('type')} start_phase={params.get('start_phase')}")
+                workflow.logger.info(
+                    f"[DAG] Applying type override for {task.tool_name}: {params.get('type')} start_phase={params.get('start_phase')}"
+                )
                 # Explore agents don't use these type-specific params — strip them if LLM added them
                 if type_override.get("type") == "explore":
                     params.pop("output_schema", None)

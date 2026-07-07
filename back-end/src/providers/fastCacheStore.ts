@@ -8,19 +8,44 @@ const globalForFastCachePrisma = global as unknown as { fastCachePrisma?: Prisma
 
 function getFastCacheDatabaseUrl(): string {
   const explicitUrl = process.env.FAST_MODE_CACHE_DATABASE_URL;
-  if (explicitUrl) return explicitUrl;
-  if (process.env.NODE_ENV === 'production' && process.env.DATABASE_URL) {
-    return process.env.DATABASE_URL;
+  const base =
+    explicitUrl ??
+    (process.env.NODE_ENV === 'production' && process.env.DATABASE_URL
+      ? process.env.DATABASE_URL
+      : null);
+  if (base === null) {
+    throw new Error(
+      'FAST_MODE_CACHE_DATABASE_URL is required outside production; Fast Mode cache must not fall back to the local app database.'
+    );
   }
-  throw new Error(
-    'FAST_MODE_CACHE_DATABASE_URL is required outside production; Fast Mode cache must not fall back to the local app database.'
-  );
+  // Bound the connection pool explicitly. Without connection_limit Prisma defaults
+  // to num_cpus*2+1 (~3-5 on a small instance); 50 concurrent worker cache reads
+  // during a fan-out exhaust it → P2024 pool timeout → cacheGet throws → the route
+  // 500s → the worker treats the 500 as a cache MISS → it falls through to an
+  // expensive live LLM call even though the entry exists (observed: 760 get_failed
+  // /500 in one run). A bounded, queued pool absorbs the concurrent reads instead.
+  try {
+    const url = new URL(base);
+    if (!url.searchParams.has('connection_limit')) {
+      url.searchParams.set('connection_limit', process.env.FAST_CACHE_DB_POOL ?? '25');
+    }
+    if (!url.searchParams.has('pool_timeout')) {
+      url.searchParams.set('pool_timeout', '20');
+    }
+    return url.toString();
+  } catch {
+    return base;
+  }
 }
 
 function getFastCachePrisma(): PrismaClient {
-  const fastCachePrisma =
-    globalForFastCachePrisma.fastCachePrisma ??
-    new PrismaClient({
+  // Cache the client as a process-wide singleton in ALL environments. The previous
+  // code only memoized it outside production, so in prod every `.fastModeCacheEntry`
+  // access constructed a fresh PrismaClient with its own connection pool — under a
+  // 50-way fan-out that spawns hundreds of pools and blows past Postgres
+  // max_connections, which is a second source of the 500s above.
+  if (!globalForFastCachePrisma.fastCachePrisma) {
+    globalForFastCachePrisma.fastCachePrisma = new PrismaClient({
       log: ['error', 'warn'],
       datasources: {
         db: {
@@ -28,12 +53,8 @@ function getFastCachePrisma(): PrismaClient {
         },
       },
     });
-
-  if (process.env.NODE_ENV !== 'production') {
-    globalForFastCachePrisma.fastCachePrisma = fastCachePrisma;
   }
-
-  return fastCachePrisma;
+  return globalForFastCachePrisma.fastCachePrisma;
 }
 
 const fastCachePrisma = {

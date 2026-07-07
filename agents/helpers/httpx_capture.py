@@ -79,8 +79,11 @@ def install_capture() -> None:
     def _capture_transport(wrapped: httpx.AsyncBaseTransport) -> httpx.AsyncBaseTransport:
         # httpx builds proxy/env transports as URL-pattern mounts. Those mounts
         # bypass _transport, so tests with proxy env vars active must wrap both.
-        if _mock_handler is not None:
-            return _CapturingTransport(httpx.MockTransport(_mock_handler))
+        # Always wrap the REAL transport; the mock is chosen per-request inside
+        # _CapturingTransport.handle_async_request. Binding mock-vs-real here (at
+        # client __init__) breaks a process-wide shared client (helpers.http_client)
+        # that is constructed ONCE, outside any test's mock context — every later
+        # setup_mock() would be ignored and calls would hit the real network.
         return _CapturingTransport(wrapped)
 
     def patched_init(self: httpx.AsyncClient, *args: Any, **kwargs: Any) -> None:
@@ -214,7 +217,12 @@ class _CapturingTransport(httpx.AsyncBaseTransport):
         }
 
         try:
-            response = await self._wrapped.handle_async_request(request)
+            # Choose the transport per-request so the CURRENT mock handler wins,
+            # even on a shared client that was constructed outside this test's
+            # mock context. (Pre-refactor per-call clients baked this at __init__;
+            # a process-wide singleton requires the dynamic check.)
+            active = httpx.MockTransport(_mock_handler) if _mock_handler is not None else self._wrapped
+            response = await active.handle_async_request(request)
 
             # Buffer the response stream so we can capture the body
             body_bytes = b""
