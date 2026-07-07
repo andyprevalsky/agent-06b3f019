@@ -866,9 +866,15 @@ start_world_model_harness() {
         else
             echo "ℹ️  No prebuilt World Model at $build_dir — skipping WMH serve. Build it via a benchmark run or SERVE_WORLD_MODEL=1."
         fi
-    elif $BENCHMARK_MODE; then
+    elif $BENCHMARK_MODE && [ "${BENCHMARK_SKIP_WMH_DELTA:-}" != "1" ]; then
         # Cheap delta refresh so benchmark runs pick up new traces; never fatal.
+        # BENCHMARK_SKIP_WMH_DELTA=1 serves the pre-built model verbatim with NO
+        # archive read/refresh — the fast per-run path for the persistent cloud-bench
+        # box, where the model is (re)built ONLY via an explicit --refresh-wmh step
+        # and every per-run start must SERVE the cached artifact, never touch R2.
         _wmh_build || echo "⚠️  WMH delta refresh failed — serving existing model (see $wmh_log)."
+    elif $BENCHMARK_MODE; then
+        echo "🌍 BENCHMARK_SKIP_WMH_DELTA=1 — serving pre-built World Model verbatim (no delta refresh)"
     fi
 
     $model_ready || return 0

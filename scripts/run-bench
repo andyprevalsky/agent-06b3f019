@@ -21,4 +21,13 @@ if [[ "${1:-}" == "eval" || "${1:-}" == "eval-suite" ]]; then
     exec "$PY" -u benchmarks/local.py --eval-suite "$@"
 fi
 
-exec "$PY" -u benchmarks/local.py "$@"
+# --local opts out to the local isolated stack (backend + worker + WMH + Postgres
+# on THIS machine). Without it, a benchmark run defaults to CLOUD — the warm Fly
+# box (run-bench-cloud), serving the cached WMH, nothing on the laptop.
+if [[ "${1:-}" == "--local" ]]; then
+    shift
+    exec "$PY" -u benchmarks/local.py "$@"
+fi
+
+# DEFAULT: cloud-exclusive run on the warm Fly box.
+exec bash "$ROOT_DIR/scripts/run-bench-cloud" "$@"

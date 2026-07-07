@@ -10,22 +10,38 @@
 # WMH model (served, not rebuilt). A STOPPED Fly machine bills only for the small
 # volume, so idle cost is ~0.
 #
-# This replaces the old build+push+pull+destroy-per-run lifecycle (~45 min cold
-# start every run) with:
+# The per-run path is HANDS-OFF + WARM:
 #     one-time  : --setup  → volume + machine + git clone
 #     rare      : --refresh-wmh → (re)build the cached WMH model on the volume
-#     per run   : <task> [--simulate] → start → git-sync → serve-cached-WMH →
-#                  run_benchmark → retrieve report card → STOP the machine
+#     per run   : <task...> [--simulate] → start warm machine → detach the on-box
+#                  driver (cloudbench-run.sh) → serve-cached-WMH → run_benchmark →
+#                  proxy the live dashboard to the Mac → retrieve report card +
+#                  newest run record → STOP the machine
 #     cleanup   : --destroy → destroy machine + volume
+#
+# The warm machine (cloudbench-warm) + Fly volume (cloudbench_data → /data) already
+# exist. /data persists across stop/start (the container's baked /app does NOT):
+#   /data/repo         a PRE-AUTHENTICATED git checkout (remote URL embeds a repo
+#                      token — no token handling needed on the box)
+#   /data/world-model  a PRE-BUILT WMH model (served, NEVER rebuilt from R2, which
+#                      is throttled to ~14 KB/s = hours)
+#
+# WHY the detach + poll design: `flyctl ssh console -C` BUFFERS stdout until the
+# session ends AND returns exit 4294967295 whenever the remote command backgrounds
+# a process. So the on-box driver is launched DETACHED
+#     setsid bash /tmp/rb.sh > /data/bench.log 2>&1 < /dev/null &
+# and this controller polls /data/bench.log for the DONE marker over SEPARATE short
+# ssh -C reads (each retry-wrapped to tolerate transient ssh failures).
 #
 # Usage:
 #   # ── one-time bootstrap (run these two, in order, once) ──
 #   bash scripts/run-bench-cloud --setup
 #   bash scripts/run-bench-cloud --refresh-wmh
 #
-#   # ── fast per-run path (repeat as often as you like) ──
-#   bash scripts/run-bench-cloud <task> [--simulate]
+#   # ── HANDS-OFF per-run path (repeat as often as you like) ──
+#   bash scripts/run-bench-cloud <task...> --simulate
 #   bash scripts/run-bench-cloud spawn-sub-agents --simulate
+#   bash scripts/run-bench-cloud chat-mode spawn-sub-agents --simulate --parallel
 #   bash scripts/run-bench-cloud chat-mode --simulate --ref my-branch
 #
 #   # ── explicit cleanup (removes the machine + volume; ends billing entirely) ──
@@ -37,13 +53,16 @@
 #   --destroy          explicit-only: destroy the machine + volume
 #   --simulate         pass --simulate to run_benchmark (default for a task run)
 #   --no-simulate      real mode (no WMH); serves nothing, runs the live stack
+#   --parallel         run multiple tasks concurrently (implied when >1 task)
+#   --max-concurrency <n>  cap concurrent tasks when running multiple (default 5)
 #   --ref <branch|sha> branch/sha to git-sync + run (default: current HEAD sha)
-#   --flags "<...>"    extra run_benchmark.py flags (optional)
-#   --model <name>     WMH model artifact name (default rose-archive)
+#   --no-dashboard     do NOT proxy/open the live dashboard (implied under CI)
+#   --dash-port <n>    local port for the proxied dashboard (default 8765)
+#   --model <name>     WMH model artifact name (default rose-r2-archive-anthropic)
 #   --vm-size <size>   machine size at --setup (default shared-cpu-4x)
 #   --vm-memory <mb>   machine memory at --setup (default 8192)
 #   --volume-size <gb> volume size at --setup (default 20)
-#   --timeout <secs>   per-run hard ceiling for the SSH-driven benchmark (default 2400)
+#   --timeout <secs>   per-run hard ceiling for the polled benchmark (default 3600)
 #
 # SAFETY: the default per-run path ALWAYS STOPS the machine on every exit
 # (success, failure, error, timeout, Ctrl-C) so nothing is left running/billing.
@@ -65,44 +84,59 @@ STATE_FILE="$ROOT_DIR/.context/cloudbench-machine.json"
 REMOTE_REPO="/data/repo"
 REMOTE_WMH="/data/world-model"
 REMOTE_RUN_SCRIPT="scripts/cloudbench-run.sh"
+REMOTE_LOG="/data/bench.log"      # detached on-box driver logs here; we poll it.
+REMOTE_TMP_SCRIPT="/tmp/rb.sh"    # the base64'd on-box invocation lands here.
+REMOTE_DASH_PORT="8009"           # on-box static dashboard http.server port.
 
 # ── Defaults ───────────────────────────────────────────────────────────────
 MODE="run"              # run | setup | refresh-wmh | destroy
-BENCH_TASK=""
+BENCH_TASKS=()          # one or more task names (positional).
 BENCH_SIMULATE="1"
-BENCH_FLAGS=""
+BENCH_PARALLEL="0"
+BENCH_MAX_CONCURRENCY="5"
 BENCH_REF=""
-WMH_MODEL_NAME="rose-archive"
+WMH_MODEL_NAME="rose-r2-archive-anthropic"
 VM_SIZE="shared-cpu-4x"
 VM_MEMORY="8192"
 VOLUME_SIZE="20"
-RUN_TIMEOUT="2400"      # 40 min per-run ceiling (warm: no WMH build; serve-only).
+RUN_TIMEOUT="3600"      # 60 min per-run ceiling (warm: no WMH build; serve-only).
+DASHBOARD="1"           # proxy + open the live dashboard (auto-off under CI).
+LOCAL_DASH_PORT="8765"
 
 # ── Arg parsing ──────────────────────────────────────────────────────────────
 while [ $# -gt 0 ]; do
     case "$1" in
-        --setup)        MODE="setup"; shift ;;
-        --refresh-wmh)  MODE="refresh-wmh"; shift ;;
-        --destroy)      MODE="destroy"; shift ;;
-        --simulate)     BENCH_SIMULATE="1"; shift ;;
-        --no-simulate)  BENCH_SIMULATE="0"; shift ;;
-        --ref)          BENCH_REF="${2:-}"; shift 2 ;;
-        --flags)        BENCH_FLAGS="${2:-}"; shift 2 ;;
-        --model)        WMH_MODEL_NAME="${2:-}"; shift 2 ;;
-        --vm-size)      VM_SIZE="${2:-}"; shift 2 ;;
-        --vm-memory)    VM_MEMORY="${2:-}"; shift 2 ;;
-        --volume-size)  VOLUME_SIZE="${2:-}"; shift 2 ;;
-        --timeout)      RUN_TIMEOUT="${2:-}"; shift 2 ;;
+        --setup)          MODE="setup"; shift ;;
+        --refresh-wmh)    MODE="refresh-wmh"; shift ;;
+        --destroy)        MODE="destroy"; shift ;;
+        --simulate)       BENCH_SIMULATE="1"; shift ;;
+        --no-simulate)    BENCH_SIMULATE="0"; shift ;;
+        --parallel)       BENCH_PARALLEL="1"; shift ;;
+        --max-concurrency) BENCH_MAX_CONCURRENCY="${2:-}"; shift 2 ;;
+        --ref)            BENCH_REF="${2:-}"; shift 2 ;;
+        --no-dashboard)   DASHBOARD="0"; shift ;;
+        --dash-port)      LOCAL_DASH_PORT="${2:-}"; shift 2 ;;
+        --model)          WMH_MODEL_NAME="${2:-}"; shift 2 ;;
+        --vm-size)        VM_SIZE="${2:-}"; shift 2 ;;
+        --vm-memory)      VM_MEMORY="${2:-}"; shift 2 ;;
+        --volume-size)    VOLUME_SIZE="${2:-}"; shift 2 ;;
+        --timeout)        RUN_TIMEOUT="${2:-}"; shift 2 ;;
         -h|--help)
-            sed -n '2,60p' "$0"; exit 0 ;;
-        --*)            echo "❌ Unknown flag: $1" >&2; exit 2 ;;
-        *)
-            if [ -z "$BENCH_TASK" ]; then BENCH_TASK="$1"; else
-                echo "❌ Unexpected extra argument: $1" >&2; exit 2
-            fi
-            shift ;;
+            sed -n '2,72p' "$0"; exit 0 ;;
+        --*)              echo "❌ Unknown flag: $1" >&2; exit 2 ;;
+        *)                BENCH_TASKS+=("$1"); shift ;;
     esac
 done
+
+# CI never pops a browser / proxy.
+if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ] || [ -n "${CONTINUOUS_INTEGRATION:-}" ]; then
+    DASHBOARD="0"
+fi
+
+# --parallel is implied when more than one task is given.
+if [ "${#BENCH_TASKS[@]}" -gt 1 ]; then
+    BENCH_PARALLEL="1"
+fi
 
 # Default ref = current branch's HEAD sha (deterministic; matches the code the
 # caller is looking at). A caller can override with --ref <branch|sha>.
@@ -277,6 +311,36 @@ inject_secrets() {
 # SSH-exec a shell snippet on the machine, streaming output. $1 = machine id.
 ssh_exec() {  # ssh_exec <machine_id> <remote-shell-command>
     FLY ssh console -a "$APP" --machine "$1" -C "bash -lc $(printf '%q' "$2")"
+}
+
+# Retry-wrapped, QUIET ssh -C read. `flyctl ssh console -C` buffers stdout until
+# the session ends and can transiently fail (network blip, machine mid-start), so
+# every poll read is retried a few times. Returns the remote stdout on stdout;
+# returns non-zero only if every attempt failed. $1=machine id, $2=remote command.
+ssh_read() {  # ssh_read <machine_id> <remote-shell-command>
+    local id="$1" cmd="$2" out="" tries="${SSH_READ_TRIES:-3}"
+    local n=0
+    while [ "$n" -lt "$tries" ]; do
+        if out="$(FLY ssh console -a "$APP" --machine "$id" \
+                    -C "bash -lc $(printf '%q' "$cmd")" 2>/dev/null \
+                  | grep -av '^Connecting to')"; then
+            printf '%s' "$out"
+            return 0
+        fi
+        n=$((n + 1))
+        sleep 2
+    done
+    return 1
+}
+
+# True (0) iff Fly reports the machine started AND a trivial ssh command returns R.
+# Used to gate the run start: warm ~10s, cold pull can take minutes.
+ssh_ready() {  # ssh_ready <machine_id>
+    local id="$1"
+    [ "$(machine_state "$id")" = "started" ] || return 1
+    local r
+    r="$(ssh_read "$id" 'echo R' 2>/dev/null || true)"
+    [ "$(printf '%s' "$r" | tr -d '[:space:]')" = "R" ]
 }
 
 # Start the machine and wait until Fly reports it "started".
@@ -559,21 +623,38 @@ ls -la '$REMOTE_WMH/models' 2>/dev/null || true"
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
-# MODE: run (default) — the fast per-run path.
-#   start → git-sync → serve CACHED WMH → run_benchmark → retrieve → STOP.
+# MODE: run (default) — the HANDS-OFF, WARM per-run path.
+#   start warm machine → detach on-box driver → serve CACHED WMH → run_benchmark →
+#   proxy the live dashboard to the Mac → poll /data/bench.log for DONE → retrieve
+#   report-card.json + newest runs/*.json → STOP the machine.
 # ═════════════════════════════════════════════════════════════════════════════
-if [ -z "$BENCH_TASK" ]; then
-    echo "❌ A benchmark task name is required. e.g. bash scripts/run-bench-cloud spawn-sub-agents --simulate" >&2
+if [ "${#BENCH_TASKS[@]}" -eq 0 ]; then
+    echo "❌ At least one benchmark task name is required." >&2
+    echo "   e.g. bash scripts/run-bench-cloud spawn-sub-agents --simulate" >&2
+    echo "        bash scripts/run-bench-cloud chat-mode spawn-sub-agents --simulate" >&2
     echo "   (Or use --setup / --refresh-wmh / --destroy.)" >&2
     exit 2
 fi
 
+# Comma-joined task list for the on-box driver + human-readable display.
+TASKS_CSV="$(IFS=,; echo "${BENCH_TASKS[*]}")"
+TASKS_DISPLAY="${BENCH_TASKS[*]}"
+
 echo "═══ run-bench-cloud (warm run) ═══"
-echo "task=$BENCH_TASK simulate=$BENCH_SIMULATE ref=${BENCH_REF:-<checkout>} model=$WMH_MODEL_NAME app=$APP"
+echo "tasks=[$TASKS_DISPLAY] simulate=$BENCH_SIMULATE parallel=$BENCH_PARALLEL max_concurrency=$BENCH_MAX_CONCURRENCY"
+echo "ref=${BENCH_REF:-<HEAD>} model=$WMH_MODEL_NAME app=$APP dashboard=$DASHBOARD"
 echo ""
 
 ensure_app
-inject_secrets
+# Secrets (AGENTS_ENV_B64 / BACKEND_ENV_B64) are already present on the warm box
+# and visible to ssh sessions, so the per-run path does NOT re-inject by default:
+# a `secrets deploy` can bounce the machine, defeating the warm-reuse goal. Set
+# CLOUDBENCH_REFRESH_SECRETS=1 to force a refresh (e.g. after rotating a token).
+if [ "${CLOUDBENCH_REFRESH_SECRETS:-0}" = "1" ]; then
+    inject_secrets
+else
+    echo "🔐 Reusing existing box secrets (set CLOUDBENCH_REFRESH_SECRETS=1 to re-inject)."
+fi
 
 mid="$(resolve_machine_id)"
 if [ -z "$mid" ]; then
@@ -584,85 +665,171 @@ if [ -z "$mid" ]; then
 fi
 write_state "$mid"
 
+# ── Local dashboard proxy handle (started once the run is in flight) ─────────
+PROXY_PID=""
+stop_proxy() {
+    [ -n "$PROXY_PID" ] || return 0
+    kill "$PROXY_PID" 2>/dev/null || true
+    PROXY_PID=""
+}
+
 # SAFETY: STOP the machine on EVERY exit (success, failure, error, timeout,
-# Ctrl-C). Never destroy on the per-run path — only --destroy removes it. This is
-# the "never leak billing" guarantee: a stopped machine bills only for the volume.
+# Ctrl-C) and always kill the local dashboard proxy. Never destroy on the per-run
+# path — only --destroy removes it. A stopped machine bills only for the volume.
 STOP_DONE="0"
 stop_on_exit() {
     local ec=$?
-    [ "$STOP_DONE" = "1" ] && return
-    STOP_DONE="1"
-    stop_machine "$mid"
+    stop_proxy
+    if [ "$STOP_DONE" != "1" ]; then
+        STOP_DONE="1"
+        stop_machine "$mid"
+    fi
     echo "Original exit code: $ec"
 }
 trap stop_on_exit EXIT INT TERM
 
-start_machine "$mid"
-wait_for_ssh "$mid"
+# ── 1. Start the warm machine + wait until it is start+ssh-ready ────────────
+# Generous timeout: ~10s warm, minutes on a cold image pull. Gate on BOTH the Fly
+# machine state AND a trivial ssh echo (start != ssh-reachable).
+echo "▶️  Starting warm machine $mid ..."
+FLY machine start "$mid" -a "$APP" 2>&1 | sed 's/^/   /' || true
+READY_TIMEOUT="${CLOUDBENCH_READY_TIMEOUT:-600}"   # 10 min ceiling for a cold pull.
+start_ts="$(date +%s)"
+while :; do
+    if ssh_ready "$mid"; then break; fi
+    st="$(machine_state "$mid")"
+    if [ "$st" = "gone" ]; then
+        echo "❌ Machine $mid disappeared while starting." >&2
+        exit 1
+    fi
+    now="$(date +%s)"
+    if [ $((now - start_ts)) -ge "$READY_TIMEOUT" ]; then
+        echo "❌ Machine $mid did not become start+ssh-ready within ${READY_TIMEOUT}s (state=$st)." >&2
+        exit 1
+    fi
+    sleep 5
+done
+echo "✅ Machine started + ssh-ready ($mid)"
 
-# Deliver the per-run script to the box independently of the git checkout (so it
-# works even before the checkout is synced): base64 the LOCAL copy, decode + exec
-# on the box with the run params passed as env. The on-box script does the
-# git-sync of the branch under test, serves the CACHED WMH (no rebuild), runs the
-# benchmark, and prints the DONE marker + report card.
+# ── 2. Deliver + launch the on-box driver DETACHED ──────────────────────────
+# base64 the LOCAL cloudbench-run.sh + a small invocation wrapper, write both to
+# the box, then launch DETACHED with setsid so the driver survives the ssh session
+# closing. (ssh -C returns 4294967295 when the remote backgrounds a process — so
+# we never hold the session open; we poll /data/bench.log below.)
 if [ ! -f "$ROOT_DIR/$REMOTE_RUN_SCRIPT" ]; then
     echo "❌ Missing $REMOTE_RUN_SCRIPT locally." >&2
     exit 1
 fi
 RUN_SCRIPT_B64="$(base64 < "$ROOT_DIR/$REMOTE_RUN_SCRIPT" | tr -d '\n')"
 
-# Compose the remote invocation: write the script to /tmp, chmod, exec it with the
-# per-run env. Env carries the task, ref, simulate flag, model, and extra flags.
-REMOTE_INVOKE="set -e
-echo '$RUN_SCRIPT_B64' | base64 -d > /tmp/cloudbench-run.sh
-chmod +x /tmp/cloudbench-run.sh
-export BENCH_TASK=$(printf '%q' "$BENCH_TASK")
-export BENCH_SIMULATE=$(printf '%q' "$BENCH_SIMULATE")
-export BENCH_REF=$(printf '%q' "$BENCH_REF")
-export BENCH_FLAGS=$(printf '%q' "$BENCH_FLAGS")
+# The wrapper (written to $REMOTE_TMP_SCRIPT) decodes the driver, exports the
+# per-run env, and execs it. run-bench-cloud then launches THIS wrapper detached.
+REMOTE_WRAPPER="set -e
+echo '$RUN_SCRIPT_B64' | base64 -d > /data/cloudbench-run.sh
+chmod +x /data/cloudbench-run.sh
+export REF=$(printf '%q' "$BENCH_REF")
 export WMH_MODEL_NAME=$(printf '%q' "$WMH_MODEL_NAME")
-exec bash /tmp/cloudbench-run.sh"
+export BENCH_TASKS=$(printf '%q' "$TASKS_CSV")
+export BENCH_MAX_CONCURRENCY=$(printf '%q' "$BENCH_MAX_CONCURRENCY")
+export BENCH_SIMULATE=$(printf '%q' "$BENCH_SIMULATE")
+export BENCH_DASHPORT=$(printf '%q' "$REMOTE_DASH_PORT")
+exec bash /data/cloudbench-run.sh"
+REMOTE_WRAPPER_B64="$(printf '%s' "$REMOTE_WRAPPER" | base64 | tr -d '\n')"
+
+# Write the wrapper to $REMOTE_TMP_SCRIPT, truncate the log, launch detached.
+# `setsid ... < /dev/null &` fully detaches: the ssh session returns immediately.
+LAUNCH_CMD="set -e
+echo '$REMOTE_WRAPPER_B64' | base64 -d > '$REMOTE_TMP_SCRIPT'
+chmod +x '$REMOTE_TMP_SCRIPT'
+: > '$REMOTE_LOG'
+setsid bash '$REMOTE_TMP_SCRIPT' > '$REMOTE_LOG' 2>&1 < /dev/null &
+echo LAUNCHED"
 
 echo ""
-echo "📡 Running benchmark on the warm box over SSH (hard timeout ${RUN_TIMEOUT}s)..."
-echo "   task=$BENCH_TASK ref=$BENCH_REF simulate=$BENCH_SIMULATE"
-echo ""
-
-SSH_LOG="$(mktemp)"
-# Enforce the per-run ceiling around the single SSH exec. `timeout` kills the
-# local flyctl process on overrun; the trap then STOPS the machine.
-TIMEOUT_BIN="timeout"
-command -v timeout >/dev/null 2>&1 || TIMEOUT_BIN="gtimeout"
-if ! command -v "$TIMEOUT_BIN" >/dev/null 2>&1; then
-    TIMEOUT_BIN=""   # no coreutils timeout available; rely on the on-box waits.
-fi
-
-set +e
-if [ -n "$TIMEOUT_BIN" ]; then
-    "$TIMEOUT_BIN" "$RUN_TIMEOUT" \
-        flyctl ssh console -a "$APP" --machine "$mid" \
-        -C "bash -lc $(printf '%q' "$REMOTE_INVOKE")" 2>&1 \
-        | grep -av '^Connecting to' | tee "$SSH_LOG"
+echo "📡 Launching the on-box driver DETACHED (logs → $REMOTE_LOG) ..."
+echo "   tasks=[$TASKS_DISPLAY] ref=${BENCH_REF:-<HEAD>} simulate=$BENCH_SIMULATE"
+# ssh -C returns 4294967295 because the command backgrounds a process — that is
+# EXPECTED here, so we do not treat a non-zero exit as failure; we verify launch
+# via the LAUNCHED echo instead (best-effort) and then poll the log.
+launch_out="$(ssh_read "$mid" "$LAUNCH_CMD" 2>/dev/null || true)"
+if printf '%s' "$launch_out" | grep -q 'LAUNCHED'; then
+    echo "✅ On-box driver launched."
 else
-    flyctl ssh console -a "$APP" --machine "$mid" \
-        -C "bash -lc $(printf '%q' "$REMOTE_INVOKE")" 2>&1 \
-        | grep -av '^Connecting to' | tee "$SSH_LOG"
-fi
-SSH_STATUS="${PIPESTATUS[0]}"
-set -e 2>/dev/null || true
-
-# ── Parse the DONE marker + report card + run record from the SSH transcript ──
-FINISHED="0"; BENCH_EXIT=""
-if grep -aq "$DONE_MARKER" "$SSH_LOG" 2>/dev/null; then
-    FINISHED="1"
-    BENCH_EXIT="$(grep -aoE "${DONE_MARKER} exit=[0-9]+" "$SSH_LOG" | tail -1 | grep -oE '[0-9]+$' || echo '')"
+    echo "   (launch ack not captured — expected when ssh -C backgrounds; polling the log)"
 fi
 
+# ── 3. Proxy the live dashboard to the Mac + open it in Chrome ──────────────
+# The on-box driver serves $CONTEXT_DIR (dashboard.html + report-card.json) on
+# $REMOTE_DASH_PORT. `flyctl proxy` forwards a local port to it; then open Chrome.
+if [ "$DASHBOARD" = "1" ]; then
+    echo ""
+    echo "🖥️  Proxying live dashboard localhost:$LOCAL_DASH_PORT → machine :$REMOTE_DASH_PORT ..."
+    FLY proxy "$LOCAL_DASH_PORT:$REMOTE_DASH_PORT" -a "$APP" >/dev/null 2>&1 &
+    PROXY_PID=$!
+    DASH_URL="http://localhost:$LOCAL_DASH_PORT/dashboard.html"
+    # Give the proxy + on-box server a moment, then open Chrome (macOS/best-effort).
+    for _ in $(seq 1 20); do
+        curl -fsS "http://localhost:$LOCAL_DASH_PORT/" >/dev/null 2>&1 && break
+        sleep 1
+    done
+    if command -v open >/dev/null 2>&1; then
+        open -na "Google Chrome" --args --new-window "$DASH_URL" >/dev/null 2>&1 \
+            && echo "   opened $DASH_URL in a new Chrome window" \
+            || echo "   could not auto-open Chrome; open manually: $DASH_URL"
+    else
+        echo "   dashboard live (open manually): $DASH_URL"
+    fi
+fi
+
+# ── 4. Poll /data/bench.log for the DONE marker (retry-wrapped ssh reads) ───
+echo ""
+echo "⏳ Polling $REMOTE_LOG for $DONE_MARKER (hard timeout ${RUN_TIMEOUT}s)..."
+SSH_LOG="$(mktemp)"
+FINISHED="0"; BENCH_EXIT=""; TIMED_OUT="0"
+poll_start="$(date +%s)"
+last_size="0"
+while :; do
+    now="$(date +%s)"
+    if [ $((now - poll_start)) -ge "$RUN_TIMEOUT" ]; then
+        echo "⏱️  Hard timeout (${RUN_TIMEOUT}s) reached — capturing partial log + stopping."
+        TIMED_OUT="1"
+        break
+    fi
+    # Pull the full log each poll (it stays small: driver + stack progress lines).
+    if remote_log="$(ssh_read "$mid" "cat '$REMOTE_LOG' 2>/dev/null" 2>/dev/null)"; then
+        printf '%s' "$remote_log" > "$SSH_LOG"
+        cur_size="$(wc -c < "$SSH_LOG" | tr -d ' ')"
+        if [ "$cur_size" != "$last_size" ]; then
+            # Show only the newest progress lines to keep the console readable.
+            tail -3 "$SSH_LOG" 2>/dev/null | sed 's/^/   │ /' || true
+            last_size="$cur_size"
+        fi
+        if grep -aq "$DONE_MARKER" "$SSH_LOG" 2>/dev/null; then
+            FINISHED="1"
+            BENCH_EXIT="$(grep -aoE "${DONE_MARKER} exit=[0-9]+" "$SSH_LOG" | tail -1 | grep -oE '[0-9]+$' || echo '')"
+            break
+        fi
+    fi
+    sleep 10
+done
+
+# ── 5. Retrieve report-card.json + newest runs/*.json directly from the box ──
+# The bench.log already contains the report card / run record between markers as
+# a fallback, but fetch the on-disk files directly for fidelity while the machine
+# is still up (it is stopped by the EXIT trap AFTER this).
 mkdir -p "$ROOT_DIR/.context"
 CARD_OUT="$ROOT_DIR/.context/cloudbench-report-card.json"
 RUN_OUT="$ROOT_DIR/.context/cloudbench-run.json"
-CARD_JSON="$(awk "/$REPORT_BEGIN/{f=1;next} /$REPORT_END/{f=0} f" "$SSH_LOG" 2>/dev/null)"
-RUN_JSON="$(awk "/$RESULT_BEGIN/{f=1;next} /$RESULT_END/{f=0} f" "$SSH_LOG" 2>/dev/null | grep -av '^run_file:')"
+
+CARD_JSON="$(ssh_read "$mid" "cat '$REMOTE_REPO/.context/cloudbench/report-card.json' 2>/dev/null" 2>/dev/null || true)"
+if [ -z "$CARD_JSON" ]; then
+    # Fallback: extract from the polled log between markers.
+    CARD_JSON="$(awk "/$REPORT_BEGIN/{f=1;next} /$REPORT_END/{f=0} f" "$SSH_LOG" 2>/dev/null)"
+fi
+RUN_JSON="$(ssh_read "$mid" "f=\$(ls -t '$REMOTE_REPO/agents/benchmarks/runs/'*.json 2>/dev/null | head -1); [ -n \"\$f\" ] && cat \"\$f\"" 2>/dev/null || true)"
+if [ -z "$RUN_JSON" ]; then
+    RUN_JSON="$(awk "/$RESULT_BEGIN/{f=1;next} /$RESULT_END/{f=0} f" "$SSH_LOG" 2>/dev/null | grep -av '^run_file:')"
+fi
 
 echo ""
 echo "════════════════════ REPORT CARD ════════════════════"
@@ -694,7 +861,7 @@ except Exception as e:
 fi
 
 echo ""
-echo "🏁 benchmark exit code (run_benchmark.py --ci): ${BENCH_EXIT:-unknown}   (finished=$FINISHED, ssh_status=$SSH_STATUS)"
+echo "🏁 benchmark exit code (run_benchmark.py --ci): ${BENCH_EXIT:-unknown}   (finished=$FINISHED, timed_out=$TIMED_OUT)"
 
 OUTCOME_OK="0"
 RUN_PASS_RATE="$(printf '%s' "$PASS_RATE" | grep -oE 'PASS_RATE_VALUE= [0-9.]+' | awk '{print $2}' || true)"
@@ -709,6 +876,8 @@ fi
 
 rm -f "$SSH_LOG"
 
-# stop_on_exit (EXIT trap) STOPS the machine (kept + volume retained).
+# stop_on_exit (EXIT trap) STOPS the machine (kept + volume retained) + kills the
+# local dashboard proxy.
 [ "$OUTCOME_OK" = "1" ] && exit 0
 exit 1
+
