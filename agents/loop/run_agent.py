@@ -16,7 +16,6 @@ import asyncio
 import contextlib
 import hashlib
 import json
-import uuid
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional, Tuple, Type
@@ -46,6 +45,8 @@ from helpers.messages import CoalescingStreamBroadcaster
 from helpers.summarize import compress_context
 from helpers.tracing import span, traced
 from helpers.update_status import update_agent_status
+from helpers.workflow_safe import safe_now as _safe_now
+from helpers.workflow_safe import safe_uuid4 as _safe_uuid4
 from loop.activity_helper import call_temporal_activity_from_activity
 from loop.context_utils import poll_and_update_context
 from providers.rose.errors import RoseRefusalError
@@ -55,21 +56,6 @@ from utils.error_utils import extract_error_message
 from utils.tool_schemas import PLAN_TOOL_MODELS, create_agent_action_model
 
 logger = structlog.get_logger()
-
-
-# run_agent runs in TWO contexts: the main agent loop (inside the Temporal workflow
-# event loop) AND the explore agent (inside spawn_explore_agent_activity, an
-# activity). workflow.uuid4()/workflow.now() give replay-deterministic values but
-# ONLY work in the workflow event loop — calling them inside the explore activity
-# raises _NotInWorkflowEventLoopError ("Not in workflow event loop"), which failed
-# every explore agent. Branch on workflow.in_workflow(): deterministic in the
-# workflow, real uuid/clock in the activity (activities aren't replay-constrained).
-def _safe_uuid4():
-    return workflow.uuid4() if workflow.in_workflow() else uuid.uuid4()
-
-
-def _safe_now() -> datetime:
-    return workflow.now() if workflow.in_workflow() else datetime.now(timezone.utc)
 
 
 # Check credits every N iterations
