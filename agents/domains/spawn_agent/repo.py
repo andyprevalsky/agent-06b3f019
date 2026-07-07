@@ -6,7 +6,6 @@ import uuid as uuid_module
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-import httpx
 import structlog
 from temporalio import activity
 
@@ -19,6 +18,7 @@ from domains.spawn_agent.config import (
     SAVE_MESSAGE_TIMEOUT,
 )
 from helpers.attachments import FilePointer, resolve_attachments_for_llm
+from helpers.http_client import get_http_client
 from tools.base import MessageStatus
 
 logger = structlog.get_logger()
@@ -58,12 +58,12 @@ async def save_explore_message(
         if status == MessageStatus.ERROR:
             metadata["error"] = True
 
-        async with httpx.AsyncClient(timeout=SAVE_MESSAGE_TIMEOUT) as client:
-            await client.post(
-                f"{config.backend.api_url}/api/agents/{agent_id}/messages",
-                headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
-                json={"message": message, "role": "TOOL", "metadata": metadata},
-            )
+        await get_http_client().post(
+            f"{config.backend.api_url}/api/agents/{agent_id}/messages",
+            headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
+            json={"message": message, "role": "TOOL", "metadata": metadata},
+            timeout=SAVE_MESSAGE_TIMEOUT,
+        )
     except Exception as e:
         logger.error("Failed to save explore message", error=str(e))
 
@@ -100,18 +100,18 @@ async def fetch_full_network_metadata(user_id: str) -> str:
 
     config = load_config()
     try:
-        async with httpx.AsyncClient(timeout=NETWORK_FETCH_TIMEOUT) as client:
-            response = await client.get(
-                f"{config.backend.api_url}/api/people",
-                params={"limit": NETWORK_PEOPLE_LIMIT},
-                headers={
-                    "X-API-Key": config.backend.api_key or "",
-                    "X-User-Id": user_id,
-                },
-            )
-            response.raise_for_status()
-            data = response.json()
-            people = data.get("people", [])
+        response = await get_http_client().get(
+            f"{config.backend.api_url}/api/people",
+            params={"limit": NETWORK_PEOPLE_LIMIT},
+            headers={
+                "X-API-Key": config.backend.api_key or "",
+                "X-User-Id": user_id,
+            },
+            timeout=NETWORK_FETCH_TIMEOUT,
+        )
+        response.raise_for_status()
+        data = response.json()
+        people = data.get("people", [])
 
         # Format all non-null fields per person
         lines: List[str] = []

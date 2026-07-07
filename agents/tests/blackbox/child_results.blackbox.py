@@ -99,22 +99,40 @@ async def test_activity_completed_child():
 
 async def test_activity_failed_child_merges_partial_structured():
     data = _agent_data(
-        "COST_LIMIT_REACHED",
-        status_message="Cost limit reached",
+        "FAILED",
+        status_message="Sandbox crashed",
         structured_output={"partial": True},
-        failure_context={"reason": "cost"},
+        failure_context={"reason": "crash"},
     )
     with patch("temporalio.activity.heartbeat"), patch(
         "helpers.child_results._fetch_agent_data_impl", return_value=data
     ):
         result = await fetch_child_terminal_result_activity("child-3")
     assert result["status"] == "failed"
-    assert result["error_reason"] == "Cost limit reached"
+    assert result["error_reason"] == "Sandbox crashed"
     assert result["failure_context"] == {
-        "reason": "cost",
+        "reason": "crash",
         "partial_structured_response": {"partial": True},
     }
     assert result["structured_response"] == {"partial": True}
+
+
+async def test_activity_returns_none_for_paused_resumable():
+    """COST_LIMIT_REACHED / OUT_OF_CREDITS are paused-and-resumable, NOT terminal
+    failures. Reporting them as terminal made the parent's for_each fail and
+    re-spawn a fresh fan-out on resume, orphaning the paused children. They must
+    reconcile to None so the parent keeps waiting until the resumed child finishes."""
+    for paused_status in ("COST_LIMIT_REACHED", "OUT_OF_CREDITS"):
+        data = _agent_data(
+            paused_status,
+            status_message="paused: limit reached",
+            structured_output={"partial": True},
+        )
+        with patch("temporalio.activity.heartbeat"), patch(
+            "helpers.child_results._fetch_agent_data_impl", return_value=data
+        ):
+            result = await fetch_child_terminal_result_activity("child-paused")
+        assert result is None, f"{paused_status} must reconcile to None (paused, not terminal), got {result}"
 
 
 async def test_activity_failed_child_defaults():
@@ -139,6 +157,7 @@ async def run_all_tests():
     await r.record_async("activity_non_terminal_none", test_activity_returns_none_for_non_terminal)
     await r.record_async("activity_completed_child", test_activity_completed_child)
     await r.record_async("activity_failed_merges_partial", test_activity_failed_child_merges_partial_structured)
+    await r.record_async("activity_paused_resumable_none", test_activity_returns_none_for_paused_resumable)
     await r.record_async("activity_failed_defaults", test_activity_failed_child_defaults)
     teardown_mock()
     return r.all_passed

@@ -154,6 +154,38 @@ function isForEachTerminal(m: Message): boolean {
   );
 }
 
+/**
+ * The DAG emits an IN_PROGRESS `spawn_general_purpose_agent_for_each` row under
+ * the parent toolCallId BEFORE any child is spawned — the "Spawning agent
+ * cluster" placeholder (rendered as "Spawning general-purpose agents..."). Its
+ * children fan out under SUFFIXED toolCallIds (`parent:idx`), so unlike the
+ * single-spawn path they never dedup-collapse with this parent row, and the
+ * terminal aggregate row only arrives once every child finishes. Left alone the
+ * placeholder lingers as a stray line above the live child tree for the whole
+ * run. Once children exist, fold it away — the grouped child tree (or, at the
+ * end, the merged terminal aggregate) is the single source of truth.
+ */
+function isForEachPlaceholder(m: Message): boolean {
+  return (
+    m.metadata?.toolName === 'spawn_general_purpose_agent_for_each' &&
+    m.metadata?.toolStatus === 'IN_PROGRESS' &&
+    !Array.isArray(m.metadata?.subAgentIds)
+  );
+}
+
+/** Base toolCallIds that already have live for_each child spawn-tree rows. */
+function collectForEachChildBaseCallIds(messages: Message[]): Set<string> {
+  const ids = new Set<string>();
+  for (const m of messages) {
+    if (!isSpawnTree(m)) continue;
+    const toolCallId = m.metadata?.toolCallId;
+    if (typeof toolCallId !== 'string' || !toolCallId.includes(':')) continue;
+    const base = baseToolCallId(toolCallId);
+    if (base) ids.add(base);
+  }
+  return ids;
+}
+
 interface SpawnGroup {
   firstIndex: number;
   ids: string[];
@@ -256,10 +288,18 @@ function buildMergedMessages(
   const newCache = new Map<string, Message>();
   const result: Message[] = [];
   const terminalGroups = collectForEachTerminalGroups(messages);
+  const forEachChildBaseCallIds = collectForEachChildBaseCallIds(messages);
 
   for (let i = 0; i < messages.length; i++) {
     if (skipIndices.has(i)) continue;
     let msg = messages[i];
+
+    // Drop the for_each "Spawning..." placeholder once its children exist —
+    // the child tree (grouped below) becomes the single visible row.
+    if (isForEachPlaceholder(msg)) {
+      const base = baseToolCallId(msg.metadata?.toolCallId);
+      if (base && forEachChildBaseCallIds.has(base)) continue;
+    }
 
     if (isForEachTerminal(msg)) {
       msg = mergeForEachTerminalMessage(msg, terminalGroups);

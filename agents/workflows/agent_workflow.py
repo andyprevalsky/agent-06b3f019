@@ -2694,7 +2694,13 @@ class AgentWorkflow:
                     self.parent_agent_id,
                     self.depth,
                     self.bus_id,
-                    "execute",  # start_phase: skip PLAN since we already have context
+                    # skip PLAN *and* DAG: on pause/resume the DAG (e.g. a for_each
+                    # fan-out) has already run and spawned its children. Using plain
+                    # "execute" set skip_dag=False, so resume re-ran the DAG and
+                    # re-spawned a fresh fan-out, orphaning the paused children. Match
+                    # the context-overflow continue_as_new, which correctly resumes
+                    # into the LLM loop (it polls the DB for the resumed children).
+                    "execute_continued",
                     self.max_iterations,
                     self.price_limit_cents,
                     self.context_gates or None,  # Preserve context gates across pause/resume

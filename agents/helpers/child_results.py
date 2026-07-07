@@ -11,7 +11,15 @@ from helpers.fetch_config import _fetch_agent_data_impl
 
 logger = structlog.get_logger()
 
-TERMINAL_STATUSES = {"COMPLETED", "FAILED", "OUT_OF_CREDITS", "COST_LIMIT_REACHED"}
+# Only genuinely terminal child outcomes belong here. COST_LIMIT_REACHED and
+# OUT_OF_CREDITS are PAUSED-and-RESUMABLE states: when the price limit / credits
+# are raised, the paused child resumes and finishes. Classifying them as terminal
+# made `fetch_child_terminal_result_activity` report a paused child as a hard
+# "failed" result, which failed the parent's for_each, dropped it to the LLM loop,
+# and (on pause-resume continue_as_new) re-spawned a fresh fan-out — orphaning the
+# paused children and their completed work. Treating them as non-terminal keeps the
+# parent's finalize_child waiter blocked until the resumed child truly completes.
+TERMINAL_STATUSES = {"COMPLETED", "FAILED"}
 
 
 def _latest_completion_summary(messages: list[Dict[str, Any]]) -> Dict[str, Any]:

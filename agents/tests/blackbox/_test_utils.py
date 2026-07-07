@@ -34,6 +34,22 @@ from helpers.httpx_capture import (
 # Install capture harness once at import time
 install_capture()
 
+# Stub Temporal's replay-stable workflow clock (workflow.uuid4/workflow.now) so
+# workflow-scope code — loop.run_agent, loop.dag_executor, workflows.agent_workflow —
+# can be unit-tested outside a real workflow event loop. Those APIs raise
+# "Not in workflow event loop" when called directly; production keeps the real
+# deterministic implementations. Blackbox tests never execute inside a workflow,
+# so a process-wide stub is correct. Started (not stopped) for the test process.
+import uuid as _uuid
+from datetime import datetime as _dt
+from datetime import timezone as _tz
+from unittest.mock import patch as _patch
+
+import temporalio.workflow as _temporal_workflow
+
+_patch.object(_temporal_workflow, "uuid4", side_effect=_uuid.uuid4).start()
+_patch.object(_temporal_workflow, "now", return_value=_dt(2026, 1, 1, tzinfo=_tz.utc)).start()
+
 
 def setup_mock(routes: dict[str, dict[str, Any]]) -> None:
     """

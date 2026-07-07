@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-import httpx
-
+from helpers.http_client import get_http_client
 from tools.web_search.config import (
     DEFAULT_MAX_RESULTS,
     HTTP_TIMEOUT,
@@ -46,10 +45,9 @@ async def fetch_search_results(
         "excerpts": {"max_chars_per_result": max_chars_per_result},
     }
 
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        response = await client.post(PARALLEL_API_URL, headers=headers, json=payload)
-        response.raise_for_status()
-        data = response.json()
+    response = await get_http_client().post(PARALLEL_API_URL, headers=headers, json=payload, timeout=HTTP_TIMEOUT)
+    response.raise_for_status()
+    data = response.json()
 
     return data.get("results", [])
 

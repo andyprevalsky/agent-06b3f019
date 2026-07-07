@@ -3,7 +3,6 @@
 import re
 from typing import Any, Dict, List, Optional
 
-import httpx
 import structlog
 from temporalio import activity
 
@@ -16,6 +15,7 @@ from domains.web_fetch.config import (
     PARALLEL_EXTRACT_TIMEOUT_SECONDS,
 )
 from helpers.attachments import upload_to_storage
+from helpers.http_client import get_http_client
 
 logger = structlog.get_logger()
 
@@ -68,14 +68,14 @@ async def fetch_firecrawl_scrape(url: str) -> Dict[str, Any]:
         "onlyMainContent": True,
     }
 
-    async with httpx.AsyncClient(timeout=FIRECRAWL_SCRAPE_TIMEOUT_SECONDS) as client:
-        response = await client.post(
-            "https://api.firecrawl.dev/v2/scrape",
-            headers=headers,
-            json=payload,
-        )
-        response.raise_for_status()
-        body = response.json()
+    response = await get_http_client().post(
+        "https://api.firecrawl.dev/v2/scrape",
+        headers=headers,
+        json=payload,
+        timeout=FIRECRAWL_SCRAPE_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    body = response.json()
 
     data = body.get("data") or {}
     markdown = data.get("markdown") or ""
@@ -108,14 +108,14 @@ async def fetch_parallel_extract(url: str) -> Dict[str, Any]:
         "advanced_settings": {"full_content": True},
     }
 
-    async with httpx.AsyncClient(timeout=PARALLEL_EXTRACT_TIMEOUT_SECONDS) as client:
-        response = await client.post(
-            PARALLEL_EXTRACT_API_URL,
-            headers=headers,
-            json=payload,
-        )
-        response.raise_for_status()
-        body = response.json()
+    response = await get_http_client().post(
+        PARALLEL_EXTRACT_API_URL,
+        headers=headers,
+        json=payload,
+        timeout=PARALLEL_EXTRACT_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    body = response.json()
 
     results = body.get("results") or []
     errors = body.get("errors") or []
@@ -155,23 +155,23 @@ async def download_files_batch(urls: List[str]) -> Dict[str, Optional[bytes]]:
         Dict mapping each URL to its content bytes, or None if download failed/too large.
     """
     results: Dict[str, Optional[bytes]] = {}
-    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-        for url in urls:
-            try:
-                activity.heartbeat(f"Downloading {url.rsplit('/', 1)[-1][:50]}...")
-                response = await client.get(url)
-                response.raise_for_status()
+    client = get_http_client()
+    for url in urls:
+        try:
+            activity.heartbeat(f"Downloading {url.rsplit('/', 1)[-1][:50]}...")
+            response = await client.get(url, timeout=30.0, follow_redirects=True)
+            response.raise_for_status()
 
-                content = response.content
-                if len(content) > MAX_DOWNLOAD_SIZE:
-                    logger.warning("File too large, skipping", url=url, size=len(content))
-                    results[url] = None
-                    continue
-
-                results[url] = content
-            except Exception as e:
-                logger.warning("[web_fetch] Failed to download file", url=url, error=str(e))
+            content = response.content
+            if len(content) > MAX_DOWNLOAD_SIZE:
+                logger.warning("File too large, skipping", url=url, size=len(content))
                 results[url] = None
+                continue
+
+            results[url] = content
+        except Exception as e:
+            logger.warning("[web_fetch] Failed to download file", url=url, error=str(e))
+            results[url] = None
 
     return results
 
