@@ -513,6 +513,13 @@ fi
 if [ "$USER_EXISTS" = "0" ]; then
     echo "🌱 Syncing production data to local database (first run)..."
     (cd back-end && npx tsx scripts/seed-local.ts)
+elif [ "${BENCHMARK_WORLD_MODEL_MODE:-}" = "simulate" ]; then
+    # Simulate mode: the World Model Harness intercepts every environment-boundary
+    # tool, so real browser cookies/passwords are never exercised. Re-syncing all
+    # 21k+ cookie rows on every stack start is pure overhead (and stalls on a
+    # throttled cloud uplink). Compute tokens stay fresh via run_benchmark's
+    # per-task base fixture (_sync_compute_tokens), so skip the cred sync here.
+    echo "🌍 simulate mode — skipping startup browser credential sync (WMH mocks env tools)"
 else
     echo "🌱 Local database already seeded; syncing browser credentials..."
     (cd back-end && npx tsx scripts/seed-local.ts --credentials-only)
