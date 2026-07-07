@@ -428,6 +428,9 @@ gosu "$APP_USER" env \
     "BENCHMARK_CONTEXT_DIR=$CONTEXT_DIR" \
     "BENCHMARK_ISOLATED_RUN=true" \
     "ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1" \
+    "CONDUCTOR_WORKSPACE_NAME=cloudbench" \
+    "CONDUCTOR_PORT=3001" \
+    "TEMPORAL_TASK_QUEUE=navi-agent-tasks-cloudbench" \
     bash -c "cd '$REPO_DIR/agents' && exec venv/bin/python -u benchmarks/run_benchmark.py \"\$@\"" _ "${BENCH_ARGS[@]}"
 BENCH_RC=$?
 set -e 2>/dev/null || true
