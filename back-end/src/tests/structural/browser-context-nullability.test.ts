@@ -20,22 +20,27 @@ function testBrowserContextContextIdIsNullable() {
   );
 }
 
-function testMigrationBackfillsEmptySentinel() {
-  const migration = read(
-    'prisma/migrations/20260508010000_nullable_browser_context_context_id/migration.sql'
+function testBaselineCreatesNullableContextId() {
+  // The migration history was squashed to a single pg_dump baseline on
+  // 2026-07-06 (prisma/migrations/00000000000000_init). The historical
+  // empty-string -> NULL backfill is baked into prod data and irrelevant to a
+  // fresh deploy (no rows to backfill); the durable invariant is that the
+  // baseline creates BrowserContext.contextId as NULLABLE and UNIQUE.
+  const baseline = read('prisma/migrations/00000000000000_init/migration.sql');
+  const table = baseline.match(/CREATE TABLE (?:public\.)?"BrowserContext"\s*\(([\s\S]+?)\n\)\s*;/);
+  assert(table, 'Baseline must create the BrowserContext table');
+  const contextIdCol = table[1]
+    .split('\n')
+    .map((l) => l.trim())
+    .find((l) => /^"contextId"\s/.test(l));
+  assert(contextIdCol, 'Baseline BrowserContext must define a contextId column');
+  assert(
+    !/\bNOT NULL\b/i.test(contextIdCol),
+    'BrowserContext.contextId must be nullable in the baseline (Steel profile IDs are created lazily)'
   );
   assert(
-    migration.includes('WHERE "contextId" = \'\';'),
-    'Migration must backfill existing empty-string contextId sentinels'
-  );
-  assert(
-    migration.includes('ALTER TABLE "BrowserContext" ALTER COLUMN "contextId" DROP NOT NULL;'),
-    'Migration must drop the BrowserContext.contextId NOT NULL constraint'
-  );
-  assert(
-    migration.indexOf('ALTER TABLE "BrowserContext" ALTER COLUMN "contextId" DROP NOT NULL;') <
-      migration.indexOf('SET "contextId" = NULL'),
-    'Migration must drop NOT NULL before replacing empty-string sentinels with NULL'
+    /CREATE UNIQUE INDEX "BrowserContext_contextId_key"/.test(baseline),
+    'Baseline must keep the unique index on BrowserContext.contextId'
   );
 }
 
@@ -89,7 +94,7 @@ function testSteelDoesNotCreateEmptyContextId() {
 
 function main() {
   testBrowserContextContextIdIsNullable();
-  testMigrationBackfillsEmptySentinel();
+  testBaselineCreatesNullableContextId();
   testSteelDoesNotCreateEmptyContextId();
   console.log('browser context nullability structural tests passed');
 }

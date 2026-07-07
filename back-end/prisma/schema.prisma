@@ -293,8 +293,9 @@ model PurchaseSpend {
   provider              String              @default("agentcard")
   createdAt             DateTime            @default(now())
   updatedAt             DateTime            @updatedAt
-  user                  User                @relation(fields: [userId], references: [userId], onDelete: Cascade)
-  agent                 Agent?              @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  user                  User                   @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  agent                 Agent?                 @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  walletFunding         PurchaseWalletFunding?
 
   // NOT unique: a user may legitimately re-buy the same cart. Idempotency for in-flight retries
   // is enforced in application logic (status checks + a Stripe idempotency key per purchase row)
@@ -304,6 +305,38 @@ model PurchaseSpend {
   @@index([cardId])
   @@index([status])
   @@index([createdAt])
+}
+
+// Wallet-funding ledger for AgentCard purchases: tracks moving funds into the
+// virtual card wallet and reclaiming them, with idempotency keys so Temporal
+// retries don't double-fund/double-reclaim. One row per PurchaseSpend.
+// (Baselined from prod on 2026-07-06 — the table pre-existed in prod with no
+// committed schema/migration.)
+model PurchaseWalletFunding {
+  id                        String                      @id @default(uuid())
+  purchaseId                String                      @unique
+  userId                    String
+  agentId                   String?
+  provider                  String                      @default("agentcard")
+  amountCents               Int
+  currency                  String                      @default("usd")
+  status                    PurchaseWalletFundingStatus @default(PENDING)
+  providerTransferId        String?
+  reclaimProviderTransferId String?
+  idempotencyKey            String                      @unique
+  reclaimIdempotencyKey     String?
+  metadata                  Json?
+  errorMessage              String?
+  fundedAt                  DateTime?
+  consumedAt                DateTime?
+  reclaimedAt               DateTime?
+  createdAt                 DateTime                    @default(now())
+  updatedAt                 DateTime                    @updatedAt
+  purchase                  PurchaseSpend               @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+
+  @@index([agentId])
+  @@index([status, createdAt])
+  @@index([userId, status])
 }
 
 model BrowserContext {
@@ -1097,6 +1130,18 @@ enum PurchaseSpendStatus {
   VOIDED
   REFUNDED
   FAILED
+  CAPTURE_FAILED
+  FUNDING_RECLAIM_FAILED
+}
+
+enum PurchaseWalletFundingStatus {
+  PENDING
+  FUNDED
+  CONSUMED
+  RECLAIMING
+  RECLAIMED
+  FAILED
+  RECLAIM_FAILED
 }
 
 enum MessageChannel {
@@ -1171,3 +1216,4 @@ model SmsShortcode {
   @@index([userId])
   @@index([expiresAt])
 }
+

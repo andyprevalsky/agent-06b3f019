@@ -1104,9 +1104,17 @@ for i in $(seq 1 12); do  # ~1 min
 done
 [ "$HEALTHY" = "1" ] || { echo "❌ FUNCTIONAL CHECK FAILED: /api/agents -> $CODE"; head -c 500 /tmp/prod-agents.json; exit 1; }
 echo "✅ /api/agents -> 200 (DB/Prisma path healthy)"
+
+# (c) Multi-domain endpoint smoke — one representative DB-backed GET per domain,
+#     fails on any 5xx. /api/agents proves ONLY the Agent domain; a single probe
+#     missed the 2026-07-06 compute-token outage (ComputeTokenLineageLease /
+#     ComputeTokenFastCacheAffinity tables never migrated -> every compute-token
+#     fetch 500'd -> every agent fell to the paid waterfall, while /api/agents
+#     stayed 200). This probe hits the compute-token route plus other domains.
+cd "$(git rev-parse --show-toplevel)/back-end" && npx tsx scripts/prod-endpoint-smoke.ts
 ```
 
-`GET /api/agents` is the canonical probe because it runs an authenticated `prisma.agent.findMany()` — the same query class that broke on 2026-06-27. If you added a new domain whose runtime path is independent of `Agent`, add a second probe for it here.
+`GET /api/agents` is the canonical warmup probe because it runs an authenticated `prisma.agent.findMany()` — the same query class that broke on 2026-06-27. Step (c) then runs `back-end/scripts/prod-endpoint-smoke.ts`, which probes one DB-backed endpoint per domain (agents, models, benchmarks, user-settings, people, tool-usage, **integrations/compute-code token**, …) and fails on any 5xx. **When you add a new domain whose runtime path is independent of the ones already probed, add a line to the `PROBES` array in that script** — that is how we keep the post-deploy check from going stale.
 
 ### Step 3 — Scan post-deploy prod logs for runtime errors
 
