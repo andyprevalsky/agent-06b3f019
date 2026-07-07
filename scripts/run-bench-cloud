@@ -639,6 +639,10 @@ fi
 # Comma-joined task list for the on-box driver + human-readable display.
 TASKS_CSV="$(IFS=,; echo "${BENCH_TASKS[*]}")"
 TASKS_DISPLAY="${BENCH_TASKS[*]}"
+# base64 the task list so it survives the base64/exec layers verbatim (printf %q
+# escapes the comma to '\,', which the double-decode + `bash` re-parse mangled,
+# dropping every task after the first).
+TASKS_CSV_B64="$(printf '%s' "$TASKS_CSV" | base64 | tr -d '\n')"
 
 echo "═══ run-bench-cloud (warm run) ═══"
 echo "tasks=[$TASKS_DISPLAY] simulate=$BENCH_SIMULATE parallel=$BENCH_PARALLEL max_concurrency=$BENCH_MAX_CONCURRENCY"
@@ -729,7 +733,7 @@ echo '$RUN_SCRIPT_B64' | base64 -d > /data/cloudbench-run.sh
 chmod +x /data/cloudbench-run.sh
 export REF=$(printf '%q' "$BENCH_REF")
 export WMH_MODEL_NAME=$(printf '%q' "$WMH_MODEL_NAME")
-export BENCH_TASKS=$(printf '%q' "$TASKS_CSV")
+export BENCH_TASKS_B64=$(printf '%q' "$TASKS_CSV_B64")
 export BENCH_MAX_CONCURRENCY=$(printf '%q' "$BENCH_MAX_CONCURRENCY")
 export BENCH_SIMULATE=$(printf '%q' "$BENCH_SIMULATE")
 export BENCH_DASHPORT=$(printf '%q' "$REMOTE_DASH_PORT")

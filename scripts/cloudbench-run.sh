@@ -60,6 +60,11 @@ CONTEXT_DIR="$REPO_DIR/.context/cloudbench"
 REF="${REF:-}"
 WMH_MODEL_NAME="${WMH_MODEL_NAME:-rose-r2-archive-anthropic}"
 BENCH_TASKS="${BENCH_TASKS:-}"
+# The controller passes the task list base64-encoded (BENCH_TASKS_B64) so commas
+# survive the base64/exec layers verbatim; fall back to a raw BENCH_TASKS.
+if [ -n "${BENCH_TASKS_B64:-}" ]; then
+    BENCH_TASKS="$(printf '%s' "$BENCH_TASKS_B64" | base64 -d 2>/dev/null || printf '%s' "$BENCH_TASKS")"
+fi
 BENCH_MAX_CONCURRENCY="${BENCH_MAX_CONCURRENCY:-5}"
 BENCH_SIMULATE="${BENCH_SIMULATE:-1}"
 BENCH_DASHPORT="${BENCH_DASHPORT:-8009}"
