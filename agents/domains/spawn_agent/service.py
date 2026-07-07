@@ -324,10 +324,17 @@ async def spawn_explore_agent_activity(  # noqa: C901
 
     async def _drain_pending_fe_posts() -> None:
         """Await all backgrounded FE posts so none is lost when the activity returns."""
-        pending = [t for t in _pending_fe_posts if not t.done()]
+        # Include already-done tasks: one that failed before the drain still holds
+        # an unretrieved exception, which asyncio would log as "Task exception was
+        # never retrieved" (and the FE post is silently dropped). gather() retrieves
+        # every result so we can surface failures instead.
+        pending = list(_pending_fe_posts)
         _pending_fe_posts.clear()
         if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+            results = await asyncio.gather(*pending, return_exceptions=True)
+            for result in results:
+                if isinstance(result, BaseException):
+                    logger.warning("Explore FE post failed during drain", error=str(result))
 
     # Send the system prompt verbatim. Contact + message-thread context is
     # fetched on-demand via the grep tool (network / agent_network_* / messages
