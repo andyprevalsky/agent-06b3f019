@@ -36,7 +36,7 @@ def build_app(name: str, root: str, pool: str):
     from wmh.config import WorldModelStore
     from wmh.engine.world_model import WorldModel
 
-    from benchmarks.wmh_rose_provider import RoseWMHProvider
+    from benchmarks.wmh_rose_provider import GLOBAL_ROSE_USAGE, RoseWMHProvider
 
     store = WorldModelStore(root)
     model_dir = store.resolve(name)  # raises FileNotFoundError/ValueError on bad --name/--root
@@ -50,7 +50,22 @@ def build_app(name: str, root: str, pool: str):
 
     from wmh.serving.server import create_app
 
-    return create_app(world_models={name: world_model})
+    app = create_app(world_models={name: world_model})
+    _add_rose_usage_route(app, GLOBAL_ROSE_USAGE)
+    return app
+
+
+def _add_rose_usage_route(app, usage) -> None:
+    """Expose cumulative Rose inference cost/tokens for this served WMH.
+
+    The vendored `create_app` has no cost endpoint; we extend the returned FastAPI app
+    with `GET /rose_usage` so the benchmark controller can attribute WMH grounding cost
+    to a run. Reads the process-level accumulator the provider records into on each step.
+    """
+
+    @app.get("/rose_usage")
+    def rose_usage() -> dict:  # pragma: no cover - exercised via TestClient in tests
+        return usage.snapshot().as_dict()
 
 
 def main(argv: list[str] | None = None) -> int:

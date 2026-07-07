@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional
 
 import structlog
@@ -36,6 +38,7 @@ from providers.rose import (
     GptAuthContext,
     RoseClient,
 )
+from providers.rose.pricing import get_model_pricing
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from wmh.providers.base import Completion, Message
@@ -56,6 +59,84 @@ _WMH_MAX_TOKENS = 8192
 def _resolve_user_id(explicit: Optional[str]) -> str:
     """User id for the compute-token lease: explicit arg > env > benchmark default."""
     return explicit or os.environ.get("WMH_ROSE_USER_ID") or _DEFAULT_WMH_USER_ID
+
+
+@dataclass(frozen=True)
+class RoseUsageSnapshot:
+    """An immutable view of the cumulative Rose inference usage for a served WMH."""
+
+    total_cost_usd: float
+    calls: int
+    input_tokens: int
+    output_tokens: int
+
+    def as_dict(self) -> dict:
+        return {
+            "total_cost_usd": round(self.total_cost_usd, 6),
+            "calls": self.calls,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+        }
+
+
+class RoseUsageAccumulator:
+    """Process-level, thread-safe tally of Rose inference cost + tokens.
+
+    WMH steps run in a FastAPI threadpool (one thread per concurrent step), so the
+    accumulator must be safe under concurrent `record()` calls. A single lock guards
+    the counters — the critical section is a handful of additions, so contention is
+    negligible relative to the LLM call it follows.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._total_cost_usd = 0.0
+        self._calls = 0
+        self._input_tokens = 0
+        self._output_tokens = 0
+
+    def record(self, *, cost_usd: float, input_tokens: int, output_tokens: int) -> None:
+        with self._lock:
+            self._total_cost_usd += cost_usd
+            self._calls += 1
+            self._input_tokens += input_tokens
+            self._output_tokens += output_tokens
+
+    def snapshot(self) -> RoseUsageSnapshot:
+        with self._lock:
+            return RoseUsageSnapshot(
+                total_cost_usd=self._total_cost_usd,
+                calls=self._calls,
+                input_tokens=self._input_tokens,
+                output_tokens=self._output_tokens,
+            )
+
+
+def _cost_usd_for_call(actual_model: str, input_tokens: int, output_tokens: int) -> float:
+    """USD cost of one Rose call from token counts × the model's pricing.
+
+    Rose's `usage` dict carries no cost field, so we derive it exactly the way the
+    rest of the agents stack does: look up cents-per-1k for `actual_model` via the
+    shared `providers.rose.pricing` table and multiply by the tokens.
+
+    claudeAuth/gptAuth direct paths (`actual_model` ends `-claude`/`-gpt`) are priced
+    at $0 in that table — the user's own subscription pays — so this correctly returns
+    0.0 for the common WMH path. Waterfall models return their real averaged pool price.
+    Unknown models return 0.0 (no invented numbers); the token counts are still tracked.
+    """
+    pricing = get_model_pricing(actual_model or "")
+    if not pricing:
+        return 0.0
+    input_cost = (input_tokens / 1000.0) * pricing["input_cents_per_1k"]
+    output_cost = (output_tokens / 1000.0) * pricing["output_cents_per_1k"]
+    return (input_cost + output_cost) / 100.0  # cents → USD
+
+
+# Process-level usage tally shared by every provider instance in the served app. The
+# served WMH constructs one provider, but keeping the accumulator at module scope means
+# the `/rose_usage` route can read it without threading the provider handle through the
+# FastAPI app. Reset per process (a served WMH is one benchmark run).
+GLOBAL_ROSE_USAGE = RoseUsageAccumulator()
 
 
 class _RoseProviderConfig:
@@ -87,6 +168,7 @@ class RoseWMHProvider:
         user_id: Optional[str] = None,
         model_label: Optional[str] = None,
         client: Optional[RoseClient] = None,
+        usage: Optional[RoseUsageAccumulator] = None,
     ) -> None:
         self._pool: "PoolName" = pool
         self._user_id = _resolve_user_id(user_id)
@@ -95,6 +177,10 @@ class RoseWMHProvider:
         # rows read e.g. "rose-1-lite".
         self.config = _RoseProviderConfig(model_label or pool)
         self._client = client or RoseClient()
+        # Cumulative Rose inference cost/tokens across every step this served WMH runs.
+        # Defaults to the process-level accumulator the `/rose_usage` route reads; tests
+        # inject their own to assert accumulation in isolation.
+        self._usage = usage if usage is not None else GLOBAL_ROSE_USAGE
 
     # -- WMH Provider protocol -------------------------------------------------
 
@@ -154,6 +240,13 @@ class RoseWMHProvider:
 
         usage = response.usage or {}
         token_used = usage.get("compute_token_used")
+        input_tokens = int(usage.get("prompt_tokens", 0) or 0)
+        output_tokens = int(usage.get("completion_tokens", 0) or 0)
+        # Rose returns no cost field, so derive it from tokens × the actual model's
+        # pricing (claudeAuth/gptAuth direct = $0; waterfall = real pool price). This is
+        # the only place WMH grounding cost is measured — surfaced via /rose_usage.
+        cost_usd = _cost_usd_for_call(response.actual_model or "", input_tokens, output_tokens)
+        self._usage.record(cost_usd=cost_usd, input_tokens=input_tokens, output_tokens=output_tokens)
         logger.info(
             "wmh.rose.complete",
             pool=self._pool,
@@ -161,15 +254,16 @@ class RoseWMHProvider:
             compute_token_used=bool(token_used),
             compute_token_type=(token_used or {}).get("type") if isinstance(token_used, dict) else None,
             compute_token_rotated=bool(usage.get("compute_token_rotated")),
-            input_tokens=usage.get("prompt_tokens", 0),
-            output_tokens=usage.get("completion_tokens", 0),
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=round(cost_usd, 6),
         )
 
         return Completion(
             text=response.content,
             usage=TokenUsage(
-                input_tokens=int(usage.get("prompt_tokens", 0) or 0),
-                output_tokens=int(usage.get("completion_tokens", 0) or 0),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
             ),
         )
 

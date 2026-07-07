@@ -1,0 +1,60 @@
+# Cloud-exclusive benchmark box.
+#
+# One-shot Fly machine that runs the ENTIRE isolated Rose stack (backend +
+# agents worker + World Model Harness + system Postgres) plus a single
+# benchmark task in --simulate, entirely on the box. Driven by
+# scripts/run-bench-cloud, which builds this image, provisions a machine,
+# streams logs, retrieves the report card, and ALWAYS destroys the machine.
+#
+# NOT the prod worker (that is app "navi-whisper-lux" — do not touch it).
+
+app = "navi-whisper-lux-bench"
+primary_region = "iad"  # Ashburn, Virginia — same region as prod deps.
+
+[build]
+  dockerfile = "Dockerfile.cloudbench"
+
+[env]
+  PYTHONUNBUFFERED = "1"
+  PYTHON_VERSION = "3.11"
+  NODE_ENV = "development"
+
+  # NOTE ON ENVIRONMENT: run.sh's World Model Harness serve-guard
+  # (should_serve_world_model) refuses to serve the WMH when
+  # ENVIRONMENT=production. --simulate REQUIRES a served WMH, so this box runs
+  # with the non-production ENVIRONMENT that agents/.env already carries
+  # ("development"). This mirrors the local isolated benchmark stack exactly —
+  # the box is a benchmark harness, not a prod worker. Do NOT set
+  # ENVIRONMENT=production here or the WMH will not serve and simulate breaks.
+  #
+  # SUPABASE_URL / Temporal / R2 / Rose all resolve from the injected .env
+  # secrets regardless of ENVIRONMENT, so pointing at prod data still works.
+
+  # Worker concurrency — a single machine, sized for one benchmark task + its
+  # sub-agent fan-out. Kept modest to fit shared-cpu-4x / 8GB alongside the
+  # backend, WMH, and Postgres.
+  MAX_CONCURRENT_ACTIVITIES = "100"
+  MAX_CONCURRENT_WORKFLOWS = "50"
+  MAX_CACHED_WORKFLOWS = "50"
+  MAX_CONCURRENT_ACTIVITY_TASK_POLLERS = "5"
+  MAX_CONCURRENT_WORKFLOW_TASK_POLLERS = "5"
+
+  # Benchmark run parameters (defaults; overridden per-machine by run-bench-cloud
+  # via `flyctl machine run --env`).
+  BENCH_SIMULATE = "1"
+  WMH_MODEL_NAME = "rose-archive"
+
+# One-shot box: never auto-restart. The restart policy is applied per-machine by
+# the controller (`flyctl machine run --restart no`), which is the authoritative
+# lifecycle path here — a [[restart]] block in this file is intentionally omitted
+# because this config is only consumed for `--build-only` image builds, and the
+# fly.toml restart-block validator rejects the machine-level "no" value.
+#
+# No [http_service] block: this is not a long-lived service. There is nothing
+# to auto-start/stop and no public port to expose — the stack is entirely
+# internal to the machine and the controller drives it over `flyctl` + logs.
+
+# Single machine, sized for the full stack + WMH + Postgres + sub-agent fan-out.
+[[vm]]
+  size = "shared-cpu-4x"
+  memory = "8192"

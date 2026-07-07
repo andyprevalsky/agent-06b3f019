@@ -1,0 +1,48 @@
+# Build context trimming for Dockerfile.cloudbench.
+# Deps are installed fresh inside the image; heavy/generated/secret dirs are
+# excluded so the remote build context upload stays small and no secrets leak
+# into image layers.
+
+# Dependencies (reinstalled in-image)
+node_modules
+**/node_modules
+agents/venv
+**/venv
+**/__pycache__
+**/*.pyc
+
+# Generated / per-run state
+.context
+.llm-dumps
+**/dist
+**/dist-ssr
+**/.next
+**/build
+
+# Git history (not needed at runtime; the git+https pip dep clones separately)
+.git
+
+# Logs
+*.log
+**/*.log
+agents/navi-worker-log.txt
+
+# Local env / secrets — injected as Fly secrets, never baked into the image
+.env
+**/.env
+.cloud-env
+
+# Editor / OS
+.DS_Store
+.vscode
+.idea
+
+# Reference repos (read-only research material, large)
+claude-code-src
+openclaw
+hermes-agent
+
+# Media / decks
+pitch-deck
+*.mov
+*.mp4

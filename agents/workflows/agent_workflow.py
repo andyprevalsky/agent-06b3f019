@@ -869,7 +869,6 @@ class AgentWorkflow:
                 tools=plan_tools,
                 is_inside_temporal_activity=False,
                 check_paused=self._check_paused,
-                check_abort=self._check_orphaned,
                 wait_for_messages=self._wait_for_messages,
                 on_context_overflow=self._handle_context_overflow,
                 check_credits=self._check_credits,
@@ -1015,7 +1014,6 @@ class AgentWorkflow:
             initial_context=None,  # Don't pass - run_agent polls from DB
             is_inside_temporal_activity=False,
             check_paused=self._check_paused,
-            check_abort=self._check_orphaned,
             wait_for_messages=self._wait_for_messages,
             on_context_overflow=self._handle_context_overflow,
             check_credits=self._check_credits,

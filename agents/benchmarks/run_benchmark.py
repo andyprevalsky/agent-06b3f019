@@ -309,6 +309,33 @@ def _phone_approval_matches_callee(task: BenchmarkTask, req: dict) -> bool:
     return bool(expected_digits and expected_digits in haystack_digits)
 
 
+def _fetch_wmh_grounding_usd() -> Optional[float]:
+    """Best-effort cumulative WMH grounding cost (USD) from the served WMH.
+
+    The served WMH (`benchmarks.serve_world_model`) exposes `GET /rose_usage`, backed
+    by the per-process accumulator every `RoseWMHProvider` step records into. We query
+    it at report-emit time and surface `total_cost_usd` as the report card's
+    `cost.wmh_grounding_usd`. Returns None when the WMH isn't served or is unreachable —
+    the report card renders "—" rather than an invented number.
+    """
+    base = os.environ.get("WMH_BASE_URL", "").strip().rstrip("/")
+    if not base:
+        return None
+    try:
+        resp = httpx.get(f"{base}/rose_usage", timeout=5.0)
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception:
+        return None
+    cost = payload.get("total_cost_usd") if isinstance(payload, dict) else None
+    if cost is None:
+        return None
+    try:
+        return float(cost)
+    except (TypeError, ValueError):
+        return None
+
+
 def _frontend_url_for_benchmark(base_url: str) -> str:
     explicit = os.environ.get("BENCHMARK_FRONTEND_URL", "").strip()
     if explicit:
@@ -5470,6 +5497,9 @@ async def main_async(args):
             world_model_mode=os.environ.get("BENCHMARK_WORLD_MODEL_MODE", "real"),
             total_tasks=len(tasks) + len(skipped_claude_tasks),
             per_task=per_task,
+            # WMH grounding cost is only known when a WMH is served (simulate/shadow);
+            # None for plain real runs so the card renders "—" rather than a fake $0.
+            wmh_grounding_usd=_fetch_wmh_grounding_usd(),
         )
 
     def _emit_report(running_names: set[str], *, force: bool = False) -> None:

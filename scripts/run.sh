@@ -818,6 +818,10 @@ WMH_MODEL_NAME="${WMH_MODEL_NAME:-rose-archive}"
 should_serve_world_model() {
     # Serve on every non-prod run; only prod is excluded.
     [ "${ENVIRONMENT:-}" = "production" ] && return 1
+    # Explicit opt-out: the cloud-bench box uses this for real-mode (non-simulate)
+    # runs where no WMH is needed, so the (slow, R2-corpus + GEPA) cold build never
+    # blocks status=running. Simulate runs leave this unset and still build/serve.
+    [ "${BENCHMARK_SKIP_WMH_BUILD:-}" = "1" ] && return 1
     return 0
 }
 
@@ -976,7 +980,22 @@ run_service() {
 #   CONDUCTOR_WORKSPACE_NAME -> rose-<workspace>.<suffix>
 #   ngrok reserved domain -> Vite dev server on FRONTEND_PORT
 #   backend exposes PUBLIC_BASE_URL for /api/test-payment/public-url
-start_public_tunnel
+#
+# BENCHMARK_SKIP_PUBLIC_TUNNEL=1 opt-out: a self-contained cloud-bench box
+# (scripts/run-bench-cloud) runs simulate-only, where the WMH intercepts every
+# provider/environment boundary and no external browser ever needs to reach the
+# frontend over the internet. Standing up an ngrok reserved domain per one-shot
+# Fly machine is fragile and unnecessary there, so we point PUBLIC_BASE_URL at the
+# local frontend and skip the tunnel + tunnel smoke. Never set this for the normal
+# dev/benchmark stack — real browser agents need the public URL.
+if [ "${BENCHMARK_SKIP_PUBLIC_TUNNEL:-}" = "1" ]; then
+    export PUBLIC_BASE_URL="http://localhost:$FRONTEND_PORT"
+    export VITE_ALLOWED_HOSTS="localhost"
+    export ALLOWED_ORIGINS="$ALLOWED_ORIGINS,$PUBLIC_BASE_URL"
+    echo "🌐 BENCHMARK_SKIP_PUBLIC_TUNNEL=1 — skipping ngrok public tunnel; PUBLIC_BASE_URL=$PUBLIC_BASE_URL (simulate-only cloud bench)"
+else
+    start_public_tunnel
+fi
 export FAST_MODE_ANTHROPIC_PROXY_URL="$PUBLIC_BASE_URL/anthropic-proxy"
 export FAST_MODE_CODEX_PROXY_URL="$PUBLIC_BASE_URL/codex-proxy"
 
@@ -1017,8 +1036,12 @@ write_services_manifest
 echo "🧭 Service manifest: $RUN_CONTEXT_DIR/services.json"
 echo "🌐 Public frontend: $PUBLIC_BASE_URL"
 
-echo "⏳ Verifying public tunnel smoke..."
-bash scripts/test-public-tunnel.sh
+if [ "${BENCHMARK_SKIP_PUBLIC_TUNNEL:-}" = "1" ]; then
+    echo "⏭️  BENCHMARK_SKIP_PUBLIC_TUNNEL=1 — skipping public tunnel smoke (no ngrok on this cloud bench box)"
+else
+    echo "⏳ Verifying public tunnel smoke..."
+    bash scripts/test-public-tunnel.sh
+fi
 
 # ── Post-launch: verify exactly one listener per service port ──
 # Wait for services to bind, then confirm no duplicate listeners.

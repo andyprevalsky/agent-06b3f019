@@ -26,7 +26,12 @@ import pytest
 from wmh.providers.base import Message
 
 from benchmarks import wmh_rose_provider
-from benchmarks.wmh_rose_provider import RoseWMHProvider, _to_rose_messages
+from benchmarks.wmh_rose_provider import (
+    RoseUsageAccumulator,
+    RoseWMHProvider,
+    _cost_usd_for_call,
+    _to_rose_messages,
+)
 from providers.rose import ClaudeAuthContext, RoseResponse
 
 
@@ -295,3 +300,138 @@ def test_provider_satisfies_wmh_provider_protocol():
     assert isinstance(provider, Provider)
     # And it exposes the metering surface WorldModel.step reads.
     assert hasattr(provider.config, "model")
+
+
+# --- cost accumulation ------------------------------------------------------
+
+
+def _waterfall_response(*, content: str, prompt: int, completion: int) -> RoseResponse:
+    """A response that won the race on a paid waterfall model (non-$0 pricing)."""
+    r = RoseResponse()
+    r.content = content
+    # A concrete waterfall model in providers.rose.pricing (not a -claude direct model).
+    r.actual_model = "google/gemini-3.5-flash"
+    r.usage = {"prompt_tokens": prompt, "completion_tokens": completion}
+    return r
+
+
+def test_accumulator_is_thread_safe_and_sums():
+    """Concurrent record() calls tally without lost updates (lock-guarded)."""
+    import threading
+
+    acc = RoseUsageAccumulator()
+
+    def worker():
+        for _ in range(1000):
+            acc.record(cost_usd=0.001, input_tokens=2, output_tokens=1)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    snap = acc.snapshot()
+    assert snap.calls == 8000
+    assert snap.input_tokens == 8 * 1000 * 2
+    assert snap.output_tokens == 8 * 1000 * 1
+    assert snap.total_cost_usd == pytest.approx(8000 * 0.001)
+
+
+def test_snapshot_as_dict_shape():
+    acc = RoseUsageAccumulator()
+    acc.record(cost_usd=0.12345678, input_tokens=10, output_tokens=5)
+    d = acc.snapshot().as_dict()
+    assert set(d) == {"total_cost_usd", "calls", "input_tokens", "output_tokens"}
+    assert d["calls"] == 1
+    assert d["input_tokens"] == 10
+    assert d["output_tokens"] == 5
+    # total_cost_usd rounded to 6 places.
+    assert d["total_cost_usd"] == 0.123457
+
+
+def test_cost_zero_for_direct_claude_and_unknown():
+    # Any -claude/-gpt direct path is priced at $0 (user's own subscription pays) —
+    # including models absent from the explicit direct-pricing list (e.g. haiku-claude).
+    assert _cost_usd_for_call("claude-opus-4-8-claude", 10_000, 10_000) == 0.0
+    assert _cost_usd_for_call("claude-haiku-4-5-claude", 10_000, 10_000) == 0.0
+    assert _cost_usd_for_call("gpt-5.4-gpt", 10_000, 10_000) == 0.0
+    # Unknown / empty model → 0.0 (no invented numbers, no fuzzy substring match).
+    assert _cost_usd_for_call("some/unknown-model", 10_000, 10_000) == 0.0
+    assert _cost_usd_for_call("", 10_000, 10_000) == 0.0
+
+
+def test_cost_nonzero_for_waterfall_model():
+    from providers.rose.pricing import get_model_pricing
+
+    pricing = get_model_pricing("google/gemini-3.5-flash")
+    assert pricing is not None
+    cost = _cost_usd_for_call("google/gemini-3.5-flash", 1000, 1000)
+    expected = (
+        (1000 / 1000.0) * pricing["input_cents_per_1k"]
+        + (1000 / 1000.0) * pricing["output_cents_per_1k"]
+    ) / 100.0
+    assert cost == pytest.approx(expected)
+    assert cost > 0.0
+
+
+def test_complete_records_cost_into_injected_accumulator(monkeypatch):
+    """Each WMH step folds its Rose cost + tokens into the provider's accumulator."""
+    acc = RoseUsageAccumulator()
+    fake_client = _FakeRoseClient(
+        _waterfall_response(content="obs", prompt=1000, completion=1000)
+    )
+
+    async def fake_lease(self):
+        return _leased_claude_auth(fetch_fresh=None), None
+
+    monkeypatch.setattr(RoseWMHProvider, "_lease_auth", fake_lease)
+    provider = RoseWMHProvider(client=fake_client, usage=acc)
+
+    async def run():
+        return await provider._complete_async(
+            "SYS", [Message(role="user", content="go")], max_tokens=8192
+        )
+
+    completion = asyncio.run(run())
+    assert completion.usage.input_tokens == 1000
+    assert completion.usage.output_tokens == 1000
+
+    snap = acc.snapshot()
+    assert snap.calls == 1
+    assert snap.input_tokens == 1000
+    assert snap.output_tokens == 1000
+    assert snap.total_cost_usd == pytest.approx(
+        _cost_usd_for_call("google/gemini-3.5-flash", 1000, 1000)
+    )
+
+
+def test_complete_records_zero_cost_for_direct_claude(monkeypatch):
+    """The common claudeAuth path adds tokens but $0 cost."""
+    acc = RoseUsageAccumulator()
+    fake_client = _FakeRoseClient(
+        _canned_response(content="obs", prompt=500, completion=200, token_used=None)
+    )
+
+    async def fake_lease(self):
+        return _leased_claude_auth(fetch_fresh=None), None
+
+    monkeypatch.setattr(RoseWMHProvider, "_lease_auth", fake_lease)
+    provider = RoseWMHProvider(client=fake_client, usage=acc)
+
+    async def run():
+        return await provider._complete_async(
+            "SYS", [Message(role="user", content="go")], max_tokens=8192
+        )
+
+    asyncio.run(run())
+    snap = acc.snapshot()
+    assert snap.calls == 1
+    assert snap.input_tokens == 500
+    assert snap.output_tokens == 200
+    assert snap.total_cost_usd == 0.0
+
+
+def test_provider_defaults_to_global_accumulator():
+    provider = RoseWMHProvider(client=_FakeRoseClient(RoseResponse()))
+    assert provider._usage is wmh_rose_provider.GLOBAL_ROSE_USAGE
