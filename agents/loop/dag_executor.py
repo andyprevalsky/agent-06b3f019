@@ -31,6 +31,7 @@ from loop.context_utils import poll_and_update_context
 from loop.payload_guard import check_activity_payload
 from tools.base import EventType, MessageStatus, ToolEvent
 from utils.prompts import CONTEXT_POINTERS_RULE
+from utils.tool_call_ids import spawn_group_id
 
 logger = structlog.get_logger()
 
@@ -234,10 +235,12 @@ def _build_early_tool_event(
             event_tool_name = "spawn_general_purpose_agent"
             title = "Spawning sub-agent"
             message = ""
+            metadata = {"spawnGroupId": spawn_group_id(tool_call_id)}
         elif agent_type == "for_each":
             event_tool_name = "spawn_general_purpose_agent_for_each"
             title = "Spawning agent cluster"
             message = ""
+            metadata = {"spawnGroupId": spawn_group_id(tool_call_id)}
 
     return event_tool_name, ToolEvent(
         type=EventType.POST_MESSAGE,
@@ -910,6 +913,9 @@ async def _execute_single_task(
                     # gating "identify the list" explore into a 50-turn crawl that blocks
                     # fan-out. Force quick here; deliberate deep research should be its own task.
                     params["depth"] = "quick"
+
+                if type_override.get("type") in {"general_purpose", "for_each"}:
+                    params["_spawn_group_id"] = spawn_group_id(tool_call_id)
 
             # Execute tool (uses existing flow - posts result to context)
             result = await execute_tool(actual_tool, params, tool_call_id)

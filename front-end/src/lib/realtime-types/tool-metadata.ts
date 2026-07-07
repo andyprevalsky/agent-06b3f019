@@ -125,9 +125,7 @@ export interface SpawnClaudeCodeAgentMetadata extends BaseToolMetadata {
 }
 
 export type GeneralPurposeAgentToolName =
-  | 'spawn_general_purpose_agent'
-  | 'spawn_general_purpose_agent_for_each'
-  | 'spawn_sub_agent';
+  'spawn_general_purpose_agent' | 'spawn_general_purpose_agent_for_each' | 'spawn_sub_agent';
 
 /**
  * Metadata for general-purpose agent spawn tool messages.
@@ -138,6 +136,7 @@ export interface SpawnSubAgentMetadata extends BaseToolMetadata {
   subAgentIds?: string[];
   subAgentId?: string;
   busId?: string;
+  spawnGroupId?: string;
 }
 
 /**

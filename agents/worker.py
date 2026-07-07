@@ -6,6 +6,7 @@ import os
 import re
 import signal
 import sys
+from datetime import timedelta
 
 import psutil
 import structlog
@@ -1083,6 +1084,9 @@ async def main():
         ],
         tuner=tuner,
         max_cached_workflows=config.temporal.max_cached_workflows,
+        sticky_queue_schedule_to_start_timeout=timedelta(
+            seconds=config.temporal.sticky_queue_schedule_to_start_timeout_seconds
+        ),
         max_concurrent_activity_task_polls=config.temporal.max_concurrent_activity_task_polls,
         max_concurrent_workflow_task_polls=config.temporal.max_concurrent_workflow_task_polls,
         workflow_runner=SandboxedWorkflowRunner(restrictions=sandbox_restrictions),
@@ -1094,6 +1098,9 @@ async def main():
         activity_admission_open_memory_percent=config.temporal.activity_admission_open_memory_percent,
         max_activity_slots=config.temporal.max_concurrent_activities,
         max_workflow_slots=config.temporal.max_concurrent_workflows,
+        sticky_queue_schedule_to_start_timeout_seconds=(
+            config.temporal.sticky_queue_schedule_to_start_timeout_seconds
+        ),
         target_cpu=0.8,
         workflow_target_memory=0.8,
     )

@@ -501,6 +501,96 @@ async def test_worker_async_writes_defer_off_event_loop_and_complete():
             restore()
 
 
+async def test_deferred_json_payload_factory_runs_off_event_loop():
+    import asyncio
+    import time as time_mod
+
+    from helpers.trace_archive import archive_json_deferred, decrypt_and_validate_artifact
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(tmp)
+        old_flag = os.environ.get("TRACE_ARCHIVE_ASYNC_WRITES")
+        os.environ["TRACE_ARCHIVE_ASYNC_WRITES"] = "1"
+        try:
+            calls = []
+
+            def payload():
+                calls.append(time_mod.monotonic())
+                time_mod.sleep(0.3)
+                return {"mode": "deferred"}
+
+            started = time_mod.monotonic()
+            result = archive_json_deferred(
+                root_agent_id="agent-deferred",
+                path="provider/fast-cache/read/deferred.json.gz.enc",
+                payload_factory=payload,
+            )
+            elapsed = time_mod.monotonic() - started
+            assert result is not None
+            assert result["metadata"] is None
+            assert elapsed < 0.25, f"payload factory ran on the event loop for {elapsed:.3f}s"
+            expected = Path(tmp) / "agent-deferred" / "provider" / "fast-cache" / "read" / "deferred.json.gz.enc"
+            for _ in range(100):
+                if expected.exists():
+                    break
+                await asyncio.sleep(0.05)
+            assert expected.exists(), "deferred JSON archive never landed"
+            metadata = json.loads(Path(str(expected) + ".meta.json").read_text())
+            assert json.loads(decrypt_and_validate_artifact(expected.read_bytes(), metadata).decode("utf-8")) == {
+                "mode": "deferred"
+            }
+            assert len(calls) == 1
+        finally:
+            if old_flag is None:
+                os.environ.pop("TRACE_ARCHIVE_ASYNC_WRITES", None)
+            else:
+                os.environ["TRACE_ARCHIVE_ASYNC_WRITES"] = old_flag
+            restore()
+
+
+async def test_async_archive_burst_preserves_all_artifacts():
+    import asyncio
+    import time as time_mod
+
+    import helpers.trace_archive as trace_archive
+    from helpers.trace_archive import archive_json
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(tmp)
+        old_flag = os.environ.get("TRACE_ARCHIVE_ASYNC_WRITES")
+        os.environ["TRACE_ARCHIVE_ASYNC_WRITES"] = "1"
+        original_store = trace_archive.store_encrypted_artifact
+        try:
+            def _slow_store(**kwargs):
+                time_mod.sleep(0.02)
+                return original_store(**kwargs)
+
+            trace_archive.store_encrypted_artifact = _slow_store
+            count = 96
+            for idx in range(count):
+                result = archive_json(
+                    root_agent_id="agent-burst",
+                    path=f"llm/burst-{idx}.json.gz.enc",
+                    payload={"idx": idx},
+                )
+                assert result is not None
+
+            bundle = Path(tmp) / "agent-burst" / "llm"
+            for _ in range(200):
+                if bundle.exists() and len(list(bundle.glob("burst-*.json.gz.enc"))) == count:
+                    break
+                await asyncio.sleep(0.05)
+            assert bundle.exists()
+            assert len(list(bundle.glob("burst-*.json.gz.enc"))) == count
+        finally:
+            trace_archive.store_encrypted_artifact = original_store
+            if old_flag is None:
+                os.environ.pop("TRACE_ARCHIVE_ASYNC_WRITES", None)
+            else:
+                os.environ["TRACE_ARCHIVE_ASYNC_WRITES"] = old_flag
+            restore()
+
+
 async def test_browser_http_cache_ops_do_not_archive():
     """browser_http cache ops fire per page subresource (thousands/session) and
     must never hit the archive endpoint; llm-kind ops keep archiving."""
@@ -512,13 +602,19 @@ async def test_browser_http_cache_ops_do_not_archive():
         calls.append(kwargs["path"])
         return {"ref": kwargs["path"], "metadata": None}
 
+    def fake_archive_json_deferred(**kwargs):
+        calls.append(kwargs["path"])
+        return {"ref": kwargs["path"], "metadata": None}
+
     old_archive = fast_cache_client.archive_json
+    old_deferred_archive = fast_cache_client.archive_json_deferred
     old_resolver = fast_cache_client.resolve_archive_root_agent_id
 
     async def fake_resolver():
         return "root-agent"
 
     fast_cache_client.archive_json = fake_archive_json
+    fast_cache_client.archive_json_deferred = fake_archive_json_deferred
     fast_cache_client.resolve_archive_root_agent_id = fake_resolver
     try:
         await fast_cache_client._archive_cache_write(
@@ -533,6 +629,7 @@ async def test_browser_http_cache_ops_do_not_archive():
         assert len(calls) == 2
     finally:
         fast_cache_client.archive_json = old_archive
+        fast_cache_client.archive_json_deferred = old_deferred_archive
         fast_cache_client.resolve_archive_root_agent_id = old_resolver
 
 
@@ -586,6 +683,11 @@ async def run_all_tests():
         "worker_async_writes_defer_off_event_loop_and_complete",
         test_worker_async_writes_defer_off_event_loop_and_complete,
     )
+    await r.record_async(
+        "deferred_json_payload_factory_runs_off_event_loop",
+        test_deferred_json_payload_factory_runs_off_event_loop,
+    )
+    await r.record_async("async_archive_burst_preserves_all_artifacts", test_async_archive_burst_preserves_all_artifacts)
     r.record("oversized_artifact_is_dropped_with_warning", test_oversized_artifact_is_dropped_with_warning)
     await r.record_async("browser_http_cache_ops_do_not_archive", test_browser_http_cache_ops_do_not_archive)
     teardown_mock()

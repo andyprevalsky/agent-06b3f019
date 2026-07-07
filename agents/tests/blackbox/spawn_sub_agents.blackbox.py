@@ -330,6 +330,7 @@ def test_build_failure_events_basic():
         child_agent_id="c-1",
         child_result={"error_reason": "timeout", "failure_context": {}},
         bus_id="bus-1",
+        child_tool_id="tc-1",
     )
     assert len(events) == 1
     ev = events[0]
@@ -337,6 +338,7 @@ def test_build_failure_events_basic():
     assert "timeout" in ev.message
     assert ev.metadata["subAgentIds"] == ["c-1"]
     assert ev.metadata["busId"] == "bus-1"
+    assert ev.metadata["spawnGroupId"] == "tc-1"
 
 
 def test_build_failure_events_rich_context():
@@ -364,6 +366,7 @@ def test_build_failure_events_rich_context():
             },
         },
         bus_id="bus-2",
+        child_tool_id="tc-2",
     )
     msg = events[0].message
     assert "verifier_failed" in msg

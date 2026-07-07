@@ -1082,6 +1082,39 @@ def test_canonical_messages_ignore_run_local_ids_and_timestamps():
     assert normalize.canonical_messages(a) == normalize.canonical_messages(b)
 
 
+def test_canonical_messages_ignore_spawn_group_ids():
+    a = {
+        "messages": [
+            {
+                "role": "tool",
+                "tool_call_id": "toolu_01AAAAAAAAAAAAAAAAAAAAAA",
+                "content": "spawn complete",
+                "metadata": {
+                    "toolCallId": "toolu_01AAAAAAAAAAAAAAAAAAAAAA",
+                    "spawnGroupId": "llm-turn:execute:1",
+                    "subAgentIds": ["same-agent"],
+                },
+            }
+        ]
+    }
+    b = {
+        "messages": [
+            {
+                "role": "tool",
+                "tool_call_id": "toolu_01BBBBBBBBBBBBBBBBBBBBBB",
+                "content": "spawn complete",
+                "metadata": {
+                    "toolCallId": "toolu_01BBBBBBBBBBBBBBBBBBBBBB",
+                    "spawnGroupId": "dag-task:2",
+                    "subAgentIds": ["same-agent"],
+                },
+            }
+        ]
+    }
+
+    assert normalize.canonical_messages(a) == normalize.canonical_messages(b)
+
+
 def test_canonical_messages_normalizes_code_agent_runtime_noise():
     a = {
         "messages": [
@@ -1917,7 +1950,7 @@ def test_resolve_fast_cache_goal_activity_returns_persisted_row_goal(monkeypatch
 
     async def fake_resolve(agent_id: str):
         assert agent_id == "agent-1"
-        return True, "persisted row goal", True
+        return True, "persisted row goal", True, "agent-1"
 
     monkeypatch.setattr(cache_client_module, "resolve_agent_fast_mode", fake_resolve)
 
@@ -1932,7 +1965,7 @@ def test_resolve_fast_cache_goal_activity_none_on_unresolved(monkeypatch):
     from helpers.fast_cache_goal import resolve_fast_cache_goal_activity
 
     async def fake_resolve(agent_id: str):
-        return False, None, False
+        return False, None, False, None
 
     monkeypatch.setattr(cache_client_module, "resolve_agent_fast_mode", fake_resolve)
 

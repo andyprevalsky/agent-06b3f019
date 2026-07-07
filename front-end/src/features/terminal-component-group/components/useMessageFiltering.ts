@@ -5,11 +5,12 @@
  * data pipeline lives here.
  *
  * SUB-AGENT MERGE STATES:
- * [RAW SPAWN ROWS] -> group by for_each/base tool call -> [ONE TREE PER CALL]
- * [FOR_EACH TERMINAL] -> infer child ids from child rows -> [AGGREGATE TREE]
+ * [RAW SPAWN ROWS] -> group by spawnGroupId (busId for legacy rows) -> [ONE TREE PER TURN/TASK]
+ * [LEGACY CHILD ROW] -> synthesize busId/subAgentIds from root id + subAgentId -> [LIVE TREE]
+ * [FOR_EACH TERMINAL] -> use emitted child ids or infer legacy rows -> [AGGREGATE TREE]
  * [NO TERMINAL YET] -> keep live child tree rows visible
  */
-import { useMemo, useRef } from 'react';
+import { useMemo } from 'react';
 import {
   deduplicateToolMessages,
   type Message,
@@ -20,11 +21,7 @@ import {
 } from '../hooks';
 import type { ExploreStep, WaitForCheck } from '../types';
 
-const GENERAL_PURPOSE_AGENT_TOOLS = new Set([
-  'spawn_general_purpose_agent',
-  'spawn_general_purpose_agent_for_each',
-  'spawn_sub_agent',
-]);
+import { isDirectSpawnChildProgress } from './useSubAgentTreeMerge';
 
 // ─── Filter messages by subAgentId ───────────────────────────────────────
 
@@ -34,6 +31,7 @@ function filterMessagesForSubAgent(messages: Message[], subAgentId: string | und
     const msgSub = m.metadata?.subAgentId ?? null;
     if (target === null) {
       if (msgSub === null) return true;
+      if (isDirectSpawnChildProgress(m)) return true;
       if (m.metadata?.agentType === 'explore') return true;
       return false;
     }
@@ -128,224 +126,4 @@ export function useFilteredStreaming({
   }, [target, streamingBubbles, streamingPlan, streamingAttention, streamingTools]);
 }
 
-// ─── Merge sub-agent tree messages by for_each/base tool call ────────────
-
-function baseToolCallId(value: unknown): string | null {
-  if (typeof value !== 'string' || value.length === 0) return null;
-  const colonIndex = value.indexOf(':');
-  return colonIndex === -1 ? value : value.slice(0, colonIndex);
-}
-
-function isSpawnTree(m: Message): boolean {
-  return (
-    !!m.metadata?.toolName &&
-    GENERAL_PURPOSE_AGENT_TOOLS.has(m.metadata.toolName) &&
-    Array.isArray(m.metadata?.subAgentIds) &&
-    (m.metadata.subAgentIds as string[]).length > 0 &&
-    !!m.metadata?.busId
-  );
-}
-
-function isForEachTerminal(m: Message): boolean {
-  return (
-    m.metadata?.toolName === 'spawn_general_purpose_agent_for_each' &&
-    (m.metadata?.toolStatus === 'FINISHED' || m.metadata?.toolStatus === 'ERROR') &&
-    !Array.isArray(m.metadata?.subAgentIds)
-  );
-}
-
-/**
- * The DAG emits an IN_PROGRESS `spawn_general_purpose_agent_for_each` row under
- * the parent toolCallId BEFORE any child is spawned — the "Spawning agent
- * cluster" placeholder (rendered as "Spawning general-purpose agents..."). Its
- * children fan out under SUFFIXED toolCallIds (`parent:idx`), so unlike the
- * single-spawn path they never dedup-collapse with this parent row, and the
- * terminal aggregate row only arrives once every child finishes. Left alone the
- * placeholder lingers as a stray line above the live child tree for the whole
- * run. Once children exist, fold it away — the grouped child tree (or, at the
- * end, the merged terminal aggregate) is the single source of truth.
- */
-function isForEachPlaceholder(m: Message): boolean {
-  return (
-    m.metadata?.toolName === 'spawn_general_purpose_agent_for_each' &&
-    m.metadata?.toolStatus === 'IN_PROGRESS' &&
-    !Array.isArray(m.metadata?.subAgentIds)
-  );
-}
-
-/** Base toolCallIds that already have live for_each child spawn-tree rows. */
-function collectForEachChildBaseCallIds(messages: Message[]): Set<string> {
-  const ids = new Set<string>();
-  for (const m of messages) {
-    if (!isSpawnTree(m)) continue;
-    const toolCallId = m.metadata?.toolCallId;
-    if (typeof toolCallId !== 'string' || !toolCallId.includes(':')) continue;
-    const base = baseToolCallId(toolCallId);
-    if (base) ids.add(base);
-  }
-  return ids;
-}
-
-interface SpawnGroup {
-  firstIndex: number;
-  ids: string[];
-  firstMsg: Message;
-}
-
-interface ForEachTerminalGroup {
-  messageIndex: number;
-  message: Message;
-  ids: string[];
-  busId?: string;
-}
-
-function collectForEachTerminalGroups(messages: Message[]): Map<string, ForEachTerminalGroup> {
-  const groups = new Map<string, ForEachTerminalGroup>();
-  for (let i = 0; i < messages.length; i++) {
-    const msg = messages[i];
-    if (!isForEachTerminal(msg)) continue;
-    const callId = baseToolCallId(msg.metadata?.toolCallId);
-    if (!callId) continue;
-    groups.set(callId, { messageIndex: i, message: msg, ids: [] });
-  }
-
-  for (const msg of messages) {
-    if (!isSpawnTree(msg)) continue;
-    const childBaseCallId = baseToolCallId(msg.metadata?.toolCallId);
-    if (!childBaseCallId) continue;
-    const terminal = groups.get(childBaseCallId);
-    if (!terminal) continue;
-    terminal.busId = (msg.metadata?.busId as string | undefined) ?? terminal.busId;
-    for (const id of msg.metadata!.subAgentIds as string[]) {
-      if (!terminal.ids.includes(id)) terminal.ids.push(id);
-    }
-  }
-
-  return groups;
-}
-
-function spawnGroupKey(msg: Message): string {
-  return msg.metadata!.busId as string;
-}
-
-function groupSpawnTrees(messages: Message[]): {
-  groupsByKey: Map<string, SpawnGroup>;
-  skipIndices: Set<number>;
-} {
-  const terminalGroups = collectForEachTerminalGroups(messages);
-  const groupsByKey = new Map<string, SpawnGroup>();
-  const skipIndices = new Set<number>();
-
-  for (let i = 0; i < messages.length; i++) {
-    const msg = messages[i];
-    if (!isSpawnTree(msg)) continue;
-    const childBaseCallId = baseToolCallId(msg.metadata?.toolCallId);
-    const key = spawnGroupKey(msg);
-    if (childBaseCallId !== null && terminalGroups.has(childBaseCallId)) {
-      skipIndices.add(i);
-      continue;
-    }
-
-    const group = groupsByKey.get(key);
-    if (group) {
-      group.ids.push(...(msg.metadata!.subAgentIds as string[]));
-      skipIndices.add(i);
-    } else {
-      groupsByKey.set(key, {
-        firstIndex: i,
-        ids: [...(msg.metadata!.subAgentIds as string[])],
-        firstMsg: msg,
-      });
-    }
-  }
-  return { groupsByKey, skipIndices };
-}
-
-function mergeForEachTerminalMessage(
-  msg: Message,
-  terminalGroups: Map<string, ForEachTerminalGroup>,
-): Message {
-  const callId = baseToolCallId(msg.metadata?.toolCallId);
-  const terminal = callId ? terminalGroups.get(callId) : undefined;
-  if (!terminal?.busId || terminal.ids.length === 0) return msg;
-  return {
-    ...msg,
-    metadata: {
-      ...msg.metadata,
-      busId: terminal.busId,
-      subAgentIds: terminal.ids,
-      forEachAggregate: true,
-    },
-  };
-}
-
-function buildMergedMessages(
-  messages: Message[],
-  groupsByKey: Map<string, SpawnGroup>,
-  skipIndices: Set<number>,
-  prevCache: Map<string, Message>,
-): { result: Message[]; newCache: Map<string, Message> } {
-  const newCache = new Map<string, Message>();
-  const result: Message[] = [];
-  const terminalGroups = collectForEachTerminalGroups(messages);
-  const forEachChildBaseCallIds = collectForEachChildBaseCallIds(messages);
-
-  for (let i = 0; i < messages.length; i++) {
-    if (skipIndices.has(i)) continue;
-    let msg = messages[i];
-
-    // Drop the for_each "Spawning..." placeholder once its children exist —
-    // the child tree (grouped below) becomes the single visible row.
-    if (isForEachPlaceholder(msg)) {
-      const base = baseToolCallId(msg.metadata?.toolCallId);
-      if (base && forEachChildBaseCallIds.has(base)) continue;
-    }
-
-    if (isForEachTerminal(msg)) {
-      msg = mergeForEachTerminalMessage(msg, terminalGroups);
-    }
-
-    if (!isSpawnTree(msg)) {
-      result.push(msg);
-      continue;
-    }
-
-    const key = spawnGroupKey(msg);
-    const group = groupsByKey.get(key) ?? {
-      firstIndex: i,
-      ids: msg.metadata!.subAgentIds as string[],
-      firstMsg: msg,
-    };
-    const idsKey = group.ids.join(',');
-
-    const cached = prevCache.get(key);
-    if (cached && (cached.metadata?.subAgentIds as string[])?.join(',') === idsKey) {
-      result.push(cached);
-      newCache.set(key, cached);
-    } else {
-      const merged = { ...msg, metadata: { ...msg.metadata, subAgentIds: group.ids } };
-      result.push(merged);
-      newCache.set(key, merged);
-    }
-  }
-
-  return { result, newCache };
-}
-
-export function useSubAgentTreeMerge(messages: Message[]): Message[] {
-  const prevMergedRef = useRef<Map<string, Message>>(new Map());
-
-  return useMemo(() => {
-    const { result, newCache } = mergeSubAgentTreeMessages(messages, prevMergedRef.current);
-    prevMergedRef.current = newCache;
-    return result;
-  }, [messages]);
-}
-
-export function mergeSubAgentTreeMessages(
-  messages: Message[],
-  prevCache: Map<string, Message> = new Map(),
-): { result: Message[]; newCache: Map<string, Message> } {
-  const { groupsByKey, skipIndices } = groupSpawnTrees(messages);
-  return buildMergedMessages(messages, groupsByKey, skipIndices, prevCache);
-}
+export { mergeSubAgentTreeMessages, useSubAgentTreeMerge } from './useSubAgentTreeMerge';

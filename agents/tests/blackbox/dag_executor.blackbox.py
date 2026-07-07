@@ -639,6 +639,8 @@ async def test_execute_dag_general_purpose_spawn_emits_subagent_placeholder():
     assert early["title"] == "Spawning sub-agent"
     assert early["message"] == ""
     assert early["tool_call_id"] == recorded[0][2]
+    assert early["metadata"]["spawnGroupId"] == recorded[0][2]
+    assert recorded[0][1]["_spawn_group_id"] == recorded[0][2]
     assert dag.tasks[0].tool_call_id == recorded[0][2]
 
 
@@ -666,13 +668,14 @@ async def test_execute_dag_uses_matching_param_tool_call_for_duplicate_spawn_cal
             {"tool": "spawn_agent", "goal": "Find the current population of New York City."},
         ]
 
-    result, _events, _dag = await _run_execute_dag(
+    result, _events, dag = await _run_execute_dag(
         plan_data,
         execute_tool_impl=execute_tool,
         param_tool_calls=param_tool_calls,
     )
 
     assert result["status"] == "completed"
+    assert recorded[0][1].pop("_spawn_group_id") == dag.tasks[0].tool_call_id
     assert recorded == [
         (
             "spawn_agent",
