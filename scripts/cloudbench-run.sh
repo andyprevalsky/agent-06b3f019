@@ -423,15 +423,19 @@ fi
 
 log "running benchmark: run_benchmark.py ${BENCH_ARGS[*]}"
 set +e
-gosu "$APP_USER" env \
-    "HOME=/home/$APP_USER" \
-    "BENCHMARK_CONTEXT_DIR=$CONTEXT_DIR" \
-    "BENCHMARK_ISOLATED_RUN=true" \
-    "ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1" \
-    "CONDUCTOR_WORKSPACE_NAME=cloudbench" \
-    "CONDUCTOR_PORT=3001" \
-    "TEMPORAL_TASK_QUEUE=navi-agent-tasks-cloudbench" \
-    bash -c "cd '$REPO_DIR/agents' && exec venv/bin/python -u benchmarks/run_benchmark.py \"\$@\"" _ "${BENCH_ARGS[@]}"
+# Export the workspace/queue env explicitly INSIDE the shell (not just an `env`
+# prefix) so run_benchmark's _verify_worker_queue_alignment() reliably sees
+# CONDUCTOR_WORKSPACE_NAME, and echo it so the log proves what the process got.
+gosu "$APP_USER" bash -c "
+export HOME='/home/$APP_USER'
+export BENCHMARK_CONTEXT_DIR='$CONTEXT_DIR'
+export BENCHMARK_ISOLATED_RUN=true
+export ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1
+export CONDUCTOR_WORKSPACE_NAME=cloudbench
+export CONDUCTOR_PORT=3001
+export TEMPORAL_TASK_QUEUE=navi-agent-tasks-cloudbench
+echo \"[cloudbench] run_benchmark env: CONDUCTOR_WORKSPACE_NAME=\$CONDUCTOR_WORKSPACE_NAME TEMPORAL_TASK_QUEUE=\$TEMPORAL_TASK_QUEUE\"
+cd '$REPO_DIR/agents' && exec venv/bin/python -u benchmarks/run_benchmark.py \"\$@\"" _ "${BENCH_ARGS[@]}"
 BENCH_RC=$?
 set -e 2>/dev/null || true
 
