@@ -2470,12 +2470,28 @@ class LiveFixtureContext:
     auth_realm: str
 
 
+def _is_simulate_mode() -> bool:
+    """True when this run's tool execution is served by the World Model Harness.
+    Set once at startup (BENCHMARK_WORLD_MODEL_MODE, run_benchmark.py:478)."""
+    return os.environ.get("BENCHMARK_WORLD_MODEL_MODE") == "simulate"
+
+
 def _apply_base_live_fixture(ctx: LiveFixtureContext) -> dict:
     """The default live fixture every live task inherits: current compute tokens
-    + browser cookies/passwords, pulled fresh from prod into the isolated DB."""
+    + browser cookies/passwords, pulled fresh from prod into the isolated DB.
+
+    In simulate mode the World Model Harness intercepts every environment-boundary
+    tool (browser, purchases, messaging), so real browser cookies/passwords are
+    never exercised. Re-syncing all 21k+ cookie/password rows per task is then pure
+    overhead — and on a throttled cloud uplink it blows the 180s sync budget,
+    stalling agent creation. Compute tokens are still refreshed because WMH
+    inference (RoseWMHProvider) and the agent's own LLM waterfall lease them."""
     _sync_compute_tokens()
+    if _is_simulate_mode():
+        print("    🌍 simulate mode — skipping browser cookie/password sync (WMH mocks env tools)")
+        return {"fixture": "base", "browser_credentials": False}
     _sync_browser_credentials()
-    return {"fixture": "base"}
+    return {"fixture": "base", "browser_credentials": True}
 
 
 def _apply_amazon_auth(ctx: LiveFixtureContext) -> dict:

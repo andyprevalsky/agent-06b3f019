@@ -81,6 +81,52 @@ def test_returns_none_when_cost_missing_or_unparseable(monkeypatch):
     assert rb._fetch_wmh_grounding_usd() is None
 
 
+def _fixture_ctx():
+    return rb.LiveFixtureContext(
+        base_url="http://localhost:3001",
+        user_id="u1",
+        auth_realm="amazon.com",
+    )
+
+
+def test_base_live_fixture_skips_browser_creds_in_simulate(monkeypatch):
+    """Simulate mode: the WMH mocks env tools, so the heavy 21k-cookie browser
+    credential sync is skipped (it otherwise blows the 180s budget on a throttled
+    uplink and stalls agent creation). Compute tokens are still refreshed."""
+    monkeypatch.setenv("BENCHMARK_WORLD_MODEL_MODE", "simulate")
+    calls = []
+    monkeypatch.setattr(rb, "_sync_compute_tokens", lambda: calls.append("compute"))
+    monkeypatch.setattr(rb, "_sync_browser_credentials", lambda: calls.append("browser"))
+
+    manifest = rb._apply_base_live_fixture(_fixture_ctx())
+
+    assert calls == ["compute"]  # browser cred sync NOT called
+    assert manifest == {"fixture": "base", "browser_credentials": False}
+
+
+def test_base_live_fixture_syncs_browser_creds_when_live(monkeypatch):
+    """Real (non-simulate) mode still refreshes cookies/passwords — live tasks
+    exercise real browser auth."""
+    monkeypatch.setenv("BENCHMARK_WORLD_MODEL_MODE", "real")
+    calls = []
+    monkeypatch.setattr(rb, "_sync_compute_tokens", lambda: calls.append("compute"))
+    monkeypatch.setattr(rb, "_sync_browser_credentials", lambda: calls.append("browser"))
+
+    manifest = rb._apply_base_live_fixture(_fixture_ctx())
+
+    assert calls == ["compute", "browser"]
+    assert manifest == {"fixture": "base", "browser_credentials": True}
+
+
+def test_is_simulate_mode_reads_env(monkeypatch):
+    monkeypatch.setenv("BENCHMARK_WORLD_MODEL_MODE", "simulate")
+    assert rb._is_simulate_mode() is True
+    monkeypatch.setenv("BENCHMARK_WORLD_MODEL_MODE", "shadow")
+    assert rb._is_simulate_mode() is False
+    monkeypatch.delenv("BENCHMARK_WORLD_MODEL_MODE", raising=False)
+    assert rb._is_simulate_mode() is False
+
+
 def test_report_card_folds_wmh_cost_into_total():
     """End-to-end: a fetched WMH cost lands in cost.wmh_grounding_usd + total_usd."""
     from benchmarks.report_card import RunState, TaskCard, build_report_card
