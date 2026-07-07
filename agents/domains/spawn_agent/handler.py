@@ -42,6 +42,7 @@ from tools.spawn_browser_agent_v3 import get_manager as get_browser_manager
 from tools.spawn_claude_code_agent import get_manager as get_code_manager
 from tools.spawn_sub_agents import get_manager as get_sub_agent_manager
 from tools.spawn_sub_agents import spawn_sub_agents_batch_activity
+from utils.tool_call_ids import spawn_group_id
 
 logger = structlog.get_logger()
 
@@ -491,6 +492,9 @@ class SpawnAgentManager(ToolManager):
             "start_phase": resolve_start_phase(tool_call),
             "attachments": tool_call.get("attachments"),
         }
+        group_id = spawn_group_id(tool_call_id, tool_call.get("_spawn_group_id"))
+        if group_id:
+            sub_agent_config["_spawn_group_id"] = group_id
         if tool_call.get("context_gates"):
             sub_agent_config["context_gates"] = tool_call["context_gates"]
 
@@ -575,6 +579,7 @@ class SpawnAgentManager(ToolManager):
 
         parent_model = getattr(workflow_instance, "model", "rose-labs/rose-1-lite")
         parent_source = getattr(workflow_instance, "agent_source", "WEB")
+        group_id = spawn_group_id(tool_call_id, tool_call.get("_spawn_group_id"))
 
         child_agent_ids = [str(workflow.uuid4()) for _ in agent_cfgs]
         for idx, child_agent_id in enumerate(child_agent_ids):
@@ -634,6 +639,7 @@ class SpawnAgentManager(ToolManager):
             sub_agent_for_finalize = {
                 "goal": cfg.get("goal", ""),
                 "output_schema": cfg.get("output_schema"),
+                "_spawn_group_id": group_id,
             }
             saw_error = False
             try:
@@ -693,6 +699,11 @@ class SpawnAgentManager(ToolManager):
         await asyncio.gather(*(asyncio.create_task(_drain_child(i, child)) for i, child in enumerate(children)))
 
         child_outputs.sort(key=lambda item: item.get("index", 0))
+        sub_agent_ids = [
+            item["agent_id"]
+            for item in child_outputs
+            if isinstance(item.get("agent_id"), str) and item.get("agent_id")
+        ]
 
         if failed_count > 0:
             message = (
@@ -707,6 +718,10 @@ class SpawnAgentManager(ToolManager):
                 metadata={
                     "toolName": "spawn_general_purpose_agent_for_each",
                     "toolStatus": MessageStatus.ERROR.value,
+                    "busId": parent_bus_id,
+                    "subAgentIds": sub_agent_ids,
+                    "spawnGroupId": group_id,
+                    "forEachAggregate": True,
                     "structured_response": {"items": child_outputs},
                 },
             )
@@ -727,6 +742,10 @@ class SpawnAgentManager(ToolManager):
             metadata={
                 "toolName": "spawn_general_purpose_agent_for_each",
                 "toolStatus": MessageStatus.FINISHED.value,
+                "busId": parent_bus_id,
+                "subAgentIds": sub_agent_ids,
+                "spawnGroupId": group_id,
+                "forEachAggregate": True,
                 "structured_response": {"items": child_outputs},
             },
         )

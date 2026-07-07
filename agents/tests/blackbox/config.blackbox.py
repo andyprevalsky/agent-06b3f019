@@ -95,6 +95,7 @@ def test_load_config_temporal_defaults():
     assert result.temporal.activity_admission_open_memory_percent == 75.0
     assert isinstance(result.temporal.activity_max_attempts, int)
     assert result.temporal.activity_max_attempts >= 1
+    assert result.temporal.sticky_queue_schedule_to_start_timeout_seconds == 10
 
 
 def test_load_config_temporal_activity_slot_overrides():
@@ -115,6 +116,19 @@ def test_load_config_temporal_activity_slot_overrides():
     assert result.temporal.max_concurrent_activities == 800
     assert result.temporal.activity_admission_close_memory_percent == 82.5
     assert result.temporal.activity_admission_open_memory_percent == 74.5
+
+
+def test_load_config_temporal_sticky_timeout_override():
+    """Temporal sticky queue schedule-to-start timeout is env-configurable."""
+    _reset_config_cache()
+
+    env = {**_MINIMAL_ENV, "STICKY_QUEUE_SCHEDULE_TO_START_TIMEOUT_SECONDS": "2"}
+    with patch.dict(os.environ, env, clear=True):
+        from config import load_config
+
+        result = load_config()
+
+    assert result.temporal.sticky_queue_schedule_to_start_timeout_seconds == 2
 
 
 def test_load_config_parallel_accepts_correct_spelling():
@@ -155,6 +169,7 @@ async def run_all_tests():
     r.record("load_config_backend_defaults", test_load_config_backend_defaults)
     r.record("load_config_temporal_defaults", test_load_config_temporal_defaults)
     r.record("load_config_temporal_activity_slot_overrides", test_load_config_temporal_activity_slot_overrides)
+    r.record("load_config_temporal_sticky_timeout_override", test_load_config_temporal_sticky_timeout_override)
     r.record("parallel_correct_spelling", test_load_config_parallel_accepts_correct_spelling)
     r.record("parallel_legacy_spelling_precedence", test_load_config_parallel_keeps_legacy_spelling_precedence)
     teardown_mock()
