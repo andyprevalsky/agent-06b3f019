@@ -38,7 +38,7 @@ import sys
 import tempfile
 import time
 import uuid
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -59,6 +59,7 @@ from benchmarks.benchmark_tasks import (
     list_all_tasks,
 )
 from benchmarks.context_validator import validate_context
+from benchmarks.live_fixtures import LIVE_FIXTURE_NAMES, resolve_live_fixtures
 from benchmarks.logs import (
     collect_logs,
     load_env_var,
@@ -145,12 +146,9 @@ MINTED_AGENT_ACCOUNT_X_AUTH_HINT = (
     "stop and report that as a terminal phone-auth blocker instead of retrying alternate phone formats."
 )
 AMAZON_AUTH_ASSISTANCE_TASK_NAME = "browser-agent"
-AMAZON_COOKIE_PAYMENT_TASK_NAME = "browser-agent-amazon-cookie-payment"
 AGENT_PAYMENT_TEST_SHOP_TASK_NAME = "agent-payment-test-shop"
-AMAZON_COOKIE_BOOTSTRAP_TASK_NAMES = {
-    AMAZON_AUTH_ASSISTANCE_TASK_NAME,
-    AMAZON_COOKIE_PAYMENT_TASK_NAME,
-}
+# Cookie-bundle bootstrap for these tasks is now declared as the `amazon_auth`
+# live fixture in tasks.json (see live_fixtures.py), not a task-name branch.
 BENCHMARK_FORCE_SHOW_PASSWORDS_ENV = "BENCHMARK_FORCE_SHOW_PASSWORDS"
 BAD_AMAZON_PASSWORD_USERNAME = "andyprevalsky@yahoo.com"
 BAD_AMAZON_COOKIE_SOURCE = "benchmark_bad_auth"
@@ -511,6 +509,13 @@ def _record_world_model_progress(event: dict[str, Any]) -> None:
 async def _update_world_model_before_simulation(args) -> None:
     global _WORLD_MODEL_UPDATE_RESULT
     if _world_model_mode_from_args(args) != "simulate":
+        return
+    # When the WMH is already served (run.sh builds + serves the model and exports
+    # WMH_BASE_URL, which local.py injects here), that served model is authoritative.
+    # Rebuilding/refreshing the corpus from R2 in-process would be redundant work and
+    # could target a different build dir — defer to the served model instead.
+    if os.environ.get("WMH_BASE_URL"):
+        print("\n  World model already served (WMH_BASE_URL set) — skipping pre-run corpus update.")
         return
     _WORLD_MODEL_UPDATE_EVENTS.clear()
     print("\n  Updating world model before simulated benchmark run...")
@@ -1141,14 +1146,21 @@ def _validate_user_data_prod_grep_messages(messages: List[dict]) -> Optional[str
                     continue
                 document_path = str(item.get("document_path") or "")
                 # Gate A already verified each provider was grepped from
-                # source='documents'. The checklist row's real prod-evidence
+                # source='documents'. The checklist row's strongest prod-evidence
                 # signal is a concrete document path under documents/ for this
                 # provider. Key on that rather than parsing the agent's free-form
                 # `grep_filters_used`/evidence-boolean fields, whose exact wording
                 # and key names vary run to run (source="documents" vs
                 # filters={"document_source":...}, verified_status vs
                 # verification_status, ...) and produced false negatives.
-                if not document_path.startswith("documents/"):
+                #
+                # But a provider that genuinely has no synced docs (e.g. a stalled
+                # export) honestly reports document_path "none"/absent with
+                # verified=False. Gate A already confirmed it was grepped, so credit
+                # a provider seen there rather than false-negativing an honest
+                # "no evidence" checklist row (the terminal summary is processed
+                # last, so seen_providers is fully populated by this point).
+                if not document_path.startswith("documents/") and provider not in seen_providers:
                     continue
                 final_providers.add(provider)
 
@@ -2391,6 +2403,107 @@ def _sync_compute_tokens() -> None:
         print(f"    ⚠ Compute-token sync failed: {(result.stderr or result.stdout).strip()[:200]}")
     else:
         print("    🔑 Refreshed compute tokens from prod")
+
+
+def _sync_browser_credentials() -> None:
+    """Refresh live browser auth state (cookies + browser context/storage +
+    passwords/passkeys) from prod into the isolated benchmark DB. Same pattern as
+    _sync_compute_tokens: a one-time setup-db sync goes stale as cookies expire,
+    so the `base` live fixture re-pulls them right before the agent starts.
+    Best-effort but loud. Reads the prod source from back-end/.env."""
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        print("    ⚠ Credential sync skipped: local Victoria DB not found")
+        return
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["DIRECT_URL"] = database_url
+    try:
+        result = subprocess.run(
+            ["npx", "tsx", "scripts/seed-local.ts", "--credentials-only"],
+            cwd=REPO_ROOT / "back-end",
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    except Exception as exc:
+        print(f"    ⚠ Credential sync error: {exc}")
+        return
+    if result.returncode != 0:
+        print(f"    ⚠ Credential sync failed: {(result.stderr or result.stdout).strip()[:200]}")
+    else:
+        print("    🍪 Refreshed browser cookies + passwords from prod")
+
+
+@dataclass
+class LiveFixtureContext:
+    """Runtime inputs handed to a live-fixture applier."""
+
+    base_url: str
+    user_id: str
+    auth_realm: str
+
+
+def _apply_base_live_fixture(ctx: LiveFixtureContext) -> dict:
+    """The default live fixture every live task inherits: current compute tokens
+    + browser cookies/passwords, pulled fresh from prod into the isolated DB."""
+    _sync_compute_tokens()
+    _sync_browser_credentials()
+    return {"fixture": "base"}
+
+
+def _apply_amazon_auth(ctx: LiveFixtureContext) -> dict:
+    """Build active CookieBundle rows for the amazon auth realm from synced
+    prod cookies so the browser agent starts logged in."""
+    if _skip_cookie_bundle_bootstrap():
+        print(f"    🍪 Skipping local CookieBundle bootstrap for {ctx.auth_realm}")
+        return {"fixture": "amazon_auth", "bundle_count": 0, "skipped": True}
+    bundle_count = _ensure_local_cookie_bundle_for_realm(ctx.user_id, ctx.auth_realm)
+    if bundle_count <= 0:
+        raise RuntimeError(
+            f"No usable local cookies found for {ctx.auth_realm}; cannot bootstrap an "
+            f"active CookieBundle. Refresh prod cookies (the `base` live fixture) first."
+        )
+    print(f"    🍪 Ensured {bundle_count} active local CookieBundle row(s) for {ctx.auth_realm}")
+    return {"fixture": "amazon_auth", "bundle_count": bundle_count}
+
+
+# Runtime bindings for the metadata registry in live_fixtures.py. Kept in sync by
+# the assertion below so a fixture can never be declared without an applier.
+LIVE_FIXTURE_APPLIERS = {
+    "base": _apply_base_live_fixture,
+    "amazon_auth": _apply_amazon_auth,
+}
+assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES), (
+    f"live-fixture appliers {sorted(LIVE_FIXTURE_APPLIERS)} must match "
+    f"registry {sorted(LIVE_FIXTURE_NAMES)}"
+)
+
+
+def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dict]:
+    """Apply every live fixture the task's environment resolves to, in order.
+
+    Replaces the old per-task-name credential/cookie branches: compute-token sync
+    and amazon cookie bootstrap are now declared as live_fixtures in tasks.json
+    (the `base` fixture is inherited by every live task). Live fixtures only apply
+    against the local benchmark stack.
+    """
+    fixtures = resolve_live_fixtures(task.environment)
+    if not fixtures:
+        return []
+    if not _is_local_base_url(base_url):
+        # Live fixtures mutate the local isolated DB; never touch a prod base_url.
+        return []
+    auth_realm = os.environ.get("BENCHMARK_BROWSER_AUTH_REALM") or "amazon.com"
+    ctx = LiveFixtureContext(base_url=base_url, user_id=USER_ID, auth_realm=auth_realm)
+    manifests: list[dict] = []
+    for name in fixtures:
+        applier = LIVE_FIXTURE_APPLIERS.get(name)
+        if applier is None:
+            raise RuntimeError(f"{task.name}: unknown live_fixture '{name}'")
+        manifests.append(applier(ctx))
+    return manifests
 
 
 def _run_grep_fixture(action: str, *args: str) -> dict:
@@ -4016,19 +4129,6 @@ async def run_single_task(
             f"{len(fixture['password_ids'])} bad password row(s)"
         )
 
-    if task.name in AMAZON_COOKIE_BOOTSTRAP_TASK_NAMES and _is_local_base_url(base_url):
-        auth_realm = os.environ.get("BENCHMARK_BROWSER_AUTH_REALM") or "amazon.com"
-        if _skip_cookie_bundle_bootstrap():
-            print(f"    🍪 Skipping local CookieBundle bootstrap for {auth_realm}")
-        else:
-            bundle_count = _ensure_local_cookie_bundle_for_realm(USER_ID, auth_realm)
-            if bundle_count <= 0:
-                raise RuntimeError(
-                    f"No usable local cookies found for {auth_realm}; cannot bootstrap an active CookieBundle "
-                    f"for {task.name}."
-                )
-            print(f"    🍪 Ensured {bundle_count} active local CookieBundle row(s) for {auth_realm}")
-
     grep_fixture_manifest: Optional[dict] = None
     plaid_transactions_manifest: Optional[dict] = None
     plaid_transactions_fixture_action: Optional[str] = None
@@ -4058,13 +4158,13 @@ async def run_single_task(
             f"across {provider_count} providers"
         )
 
-    # Compute tokens (claude_code / gpt_code) must always be current from prod at
-    # runtime — a frozen DB fixture or whole-DB snapshot restore above can leave
-    # stale/expired tokens, which would force claudeAuth into the paid waterfall
-    # and make every run miss the $0 compute-token path. Refresh right before the
-    # agent starts, on every local run, after any fixture has touched the DB.
-    if _is_local_base_url(base_url):
-        _sync_compute_tokens()
+    # Live fixtures (compute tokens, browser cookies/passwords, amazon auth) must
+    # always be current from prod at runtime — a frozen DB fixture or whole-DB
+    # snapshot restore above can leave stale/expired tokens/cookies, which would
+    # force claudeAuth into the paid waterfall or log the browser out. Applied
+    # right before the agent starts, after any frozen fixture has touched the DB.
+    # Every live task inherits the `base` fixture; extras compose on top.
+    _apply_live_fixtures(task, base_url)
 
     phone_callee: Optional[PhoneCalleeSession] = None
     if task.phone_persona:
@@ -5340,6 +5440,61 @@ async def main_async(args):
             )
         )
 
+    # Live report card: a standardized progress snapshot emitted to stdout + the run's
+    # context dir at most every 60s (and once, forced, at the end). Purely observational —
+    # every emit is wrapped so it can never break a benchmark run.
+    from benchmarks.report_card import ReportCardEmitter, RunState, TaskCard
+
+    _report_emitter = ReportCardEmitter(os.environ.get("BENCHMARK_CONTEXT_DIR", ".context"))
+    _report_start = time.monotonic()
+
+    def _report_snapshot(running_names: set[str]) -> RunState:
+        finished = {r.name for r in run.task_results}
+        fe = _frontend_url_for_benchmark(base_url)
+        per_task: list[TaskCard] = []
+        for r in run.task_results:
+            status = "skipped" if r.status == "SKIPPED" else ("passed" if r.passed else "failed")
+            per_task.append(
+                TaskCard(
+                    name=r.name,
+                    status=status,
+                    duration_s=r.duration_seconds,
+                    cost_usd=(r.cost_cents / 100.0) if r.cost_cents is not None else None,
+                    agent_url=f"{fe}/?agent-id={r.agent_id}" if r.agent_id else None,
+                )
+            )
+        for name in running_names:
+            if name not in finished:
+                per_task.append(TaskCard(name=name, status="running"))
+        return RunState(
+            run_id=run.run_id,
+            elapsed_s=time.monotonic() - _report_start,
+            world_model_mode=os.environ.get("BENCHMARK_WORLD_MODEL_MODE", "real"),
+            total_tasks=len(tasks) + len(skipped_claude_tasks),
+            per_task=per_task,
+        )
+
+    def _emit_report(running_names: set[str], *, force: bool = False) -> None:
+        try:
+            _report_emitter.maybe_emit(_report_snapshot(running_names), force=force)
+        except Exception as exc:  # observability must never fail the run
+            print(f"  ⚠ report card emit failed: {exc}")
+
+    # Live report card: a background ticker emits on a timer so the dashboard updates
+    # DURING the run. The drain loop only emits on task-completion events, so a single
+    # blocking task (or any long task) would otherwise leave the report screen blank
+    # until the very end. `_report_running` is kept in sync by the branches below.
+    _report_running: set[str] = set()
+
+    async def _report_ticker() -> None:
+        try:
+            while True:
+                await asyncio.sleep(15)
+                _emit_report(set(_report_running))
+        except asyncio.CancelledError:
+            pass
+
+    _report_ticker_task = asyncio.create_task(_report_ticker())
     try:
         if args.parallel:
             max_concurrency = args.max_concurrency
@@ -5379,6 +5534,8 @@ async def main_async(args):
             pending = set(pending_results)
             try:
                 while pending:
+                    _report_running.clear()
+                    _report_running.update(pending_results[future].name for future in pending)
                     done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
                     for task_future in done:
                         task = pending_results[task_future]
@@ -5400,10 +5557,15 @@ async def main_async(args):
                             )
                         else:
                             run.task_results.append(result)
+                    _emit_report({pending_results[future].name for future in pending})
                 for task in exclusive_db_tasks:
                     print(f"\n  Running DB-restore task serially: {task.name}")
+                    _report_running.clear()
+                    _report_running.add(task.name)
                     result = await run_single_task(base_url, task, args.keep_failed_agents)
                     run.task_results.append(result)
+                    _report_running.discard(task.name)
+                    _emit_report(set())
             except asyncio.CancelledError:
                 for task_future in pending:
                     task_future.cancel()
@@ -5429,9 +5591,15 @@ async def main_async(args):
                 raise
         else:
             for task in tasks:
+                _report_running.clear()
+                _report_running.add(task.name)
                 result = await run_single_task(base_url, task, args.keep_failed_agents)
                 run.task_results.append(result)
+                _report_running.discard(task.name)
+                _emit_report(set())
     finally:
+        _report_ticker_task.cancel()
+        _emit_report(set(), force=True)
         fly_total = await stop_fly_log_collector()
         print(f"\n  📡 Fly.io log stream stopped ({fly_total} lines captured)")
         if realtime_started:

@@ -458,6 +458,10 @@
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
+      "live_fixtures": [
+        "base",
+        "amazon_auth"
+      ],
       "services": [
         "amazon.com",
         "write_lock"
@@ -468,7 +472,7 @@
       "live_targets": [
         "https://www.amazon.com"
       ],
-      "context_notes": "Live Amazon with real account/auth state and payment/write-lock controls. A synthetic digital-twin variant of this scenario lives in the idea bank (black-beanie)."
+      "context_notes": "Live Amazon with real account/auth state and payment/write-lock controls. The base live fixture refreshes compute tokens + cookies + passwords from prod; amazon_auth builds the active CookieBundle. A synthetic digital-twin variant of this scenario lives in the idea bank (black-beanie)."
     },
     "evaluators": [
       {
@@ -508,6 +512,26 @@
     "approval_handling": "ignore",
     "expected_attention_kind": "write_lock",
     "start_phase": "execute",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "base",
+        "amazon_auth"
+      ],
+      "services": [
+        "amazon.com",
+        "write_lock"
+      ],
+      "secrets": [
+        "amazon_auth_bundle"
+      ],
+      "live_targets": [
+        "https://www.amazon.com"
+      ],
+      "context_notes": "Live Amazon via synced-prod cookie auth. The base live fixture refreshes compute tokens + cookies + passwords from prod; amazon_auth builds the active CookieBundle used to reach the payment write-lock."
+    },
     "bench": "pipeline-e2e"
   },
   {

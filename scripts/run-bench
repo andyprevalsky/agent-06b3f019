@@ -4,13 +4,21 @@ set -eo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR/agents"
 
+# Use the agents venv interpreter so subprocesses (run_benchmark.py) inherit the full
+# dependency set — notably boto3 for R2 world-model/trace-archive reads under --simulate.
+# The system/asdf python may lack these. Fall back to PATH python if the venv is absent.
+PY="python"
+if [ -x "venv/bin/python" ]; then
+    PY="venv/bin/python"
+fi
+
 if [[ "${1:-}" == "list" || "${1:-}" == "--list" ]]; then
-    exec python -u benchmarks/run_benchmark.py --list
+    exec "$PY" -u benchmarks/run_benchmark.py --list
 fi
 
 if [[ "${1:-}" == "eval" || "${1:-}" == "eval-suite" ]]; then
     shift
-    exec python -u benchmarks/local.py --eval-suite "$@"
+    exec "$PY" -u benchmarks/local.py --eval-suite "$@"
 fi
 
-exec python -u benchmarks/local.py "$@"
+exec "$PY" -u benchmarks/local.py "$@"

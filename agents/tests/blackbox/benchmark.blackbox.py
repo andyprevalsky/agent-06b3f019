@@ -1,5 +1,6 @@
 """Blackbox tests for benchmark helpers."""
 
+import os
 from pathlib import Path
 
 from _test_utils import BlackboxResult
@@ -2088,6 +2089,106 @@ def test_local_failed_tasks_from_run_reads_result_json():
     ]
 
 
+def test_run_sh_manifest_writer_publishes_wmh_when_served():
+    """run.sh's manifest writer carries ports.wmh + urls.wmh + a wmh service entry.
+
+    Drives the exact embedded manifest-writer python from scripts/run.sh with WMH
+    env set (as start_world_model_harness exports once the server is confirmed up),
+    and asserts the additive WMH fields land in services.json. When WMH is NOT
+    served, ports.wmh is 0 and urls.wmh is empty (gated off).
+    """
+    import json
+    import re
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[3]
+    run_sh = (repo_root / "scripts" / "run.sh").read_text(encoding="utf-8")
+    # Extract the embedded manifest-writer python heredoc (the one that emits
+    # services.json — identified by its schema_version key, not the ngrok probe).
+    candidates = re.findall(r"python3 - <<'PY'\n(.*?)\nPY\n", run_sh, re.DOTALL)
+    manifest_pys = [c for c in candidates if "schema_version" in c and '"wmh"' in c]
+    assert len(manifest_pys) == 1, "could not uniquely locate manifest-writer heredoc in scripts/run.sh"
+    manifest_py = manifest_pys[0]
+
+    def _write_manifest(env_extra: dict) -> dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / ".context").mkdir()
+            env = {
+                "SERVICE_NAMES": "back-end,agents,wmh",
+                "SERVICE_PIDS": "111,222,333",
+                "SERVICE_STATUS": "running",
+                "BENCHMARK_MODE": "true",
+                "BACKEND_PORT": "55020",
+                "HEALTH_PORT": "55022",
+                "LOCAL_DB_PORT": "55025",
+                "NGROK_WEB_PORT": "55029",
+                "RUN_SH_PID": "999",
+                "RUN_CONTEXT_DIR": ".context",
+                "PATH": os.environ.get("PATH", ""),
+                **env_extra,
+            }
+            subprocess.run(
+                ["python3", "-c", manifest_py],
+                cwd=tmp,
+                env=env,
+                check=True,
+            )
+            return json.loads((Path(tmp) / ".context" / "services.json").read_text())
+
+    # Served: WMH manifest env is exported by run.sh once /healthz answers.
+    served = _write_manifest(
+        {
+            "WMH_MANIFEST_PORT": "55026",
+            "WMH_MANIFEST_URL": "http://localhost:55026",
+            "WMH_MANIFEST_MODEL_NAME": "rose-archive",
+        }
+    )
+    assert served["ports"]["wmh"] == 55026
+    assert served["urls"]["wmh"] == "http://localhost:55026"
+    assert served["wmh_model_name"] == "rose-archive"
+    assert any(s["name"] == "wmh" and s["pid"] == 333 for s in served["services"])
+
+    # Not served (plain run.sh): gated off — wmh port 0, url empty.
+    gated = _write_manifest({})
+    assert gated["ports"]["wmh"] == 0
+    assert gated["urls"]["wmh"] == ""
+
+
+def test_apply_manifest_environment_injects_wmh_base_url_and_model():
+    """local.py injects WMH_BASE_URL + WMH_MODEL_NAME from the served manifest."""
+    import os
+
+    from benchmarks.local import apply_manifest_environment
+
+    saved = {k: os.environ.get(k) for k in ("WMH_BASE_URL", "WMH_MODEL_NAME")}
+    for key in saved:
+        os.environ.pop(key, None)
+    try:
+        apply_manifest_environment(
+            {
+                "ports": {"backend": 55020, "health": 55022, "local_db": 55025, "wmh": 55026},
+                "urls": {"wmh": "http://localhost:55026/"},
+                "wmh_model_name": "rose-archive",
+            }
+        )
+        assert os.environ["WMH_BASE_URL"] == "http://localhost:55026"
+        assert os.environ["WMH_MODEL_NAME"] == "rose-archive"
+
+        # No wmh url in the manifest (gated off) → WMH env is left unset.
+        os.environ.pop("WMH_BASE_URL", None)
+        os.environ.pop("WMH_MODEL_NAME", None)
+        apply_manifest_environment({"ports": {"backend": 55020, "health": 55022}, "urls": {}})
+        assert "WMH_BASE_URL" not in os.environ
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def test_local_services_manifest_validation_requires_ports():
     """Service manifest parsing fails fast when run.sh has not published required ports."""
     import json
@@ -3181,6 +3282,93 @@ def test_every_task_has_base_image_fixture_by_default():
     assert by_name["load-test-sias"].environment["base_images"] == [DEFAULT_BASE_IMAGE]
 
 
+def test_live_fixture_registry_appliers_stay_in_sync():
+    """Every declared live fixture must have a runtime applier, and vice-versa.
+
+    The metadata registry (live_fixtures.py) and the runtime dispatch table
+    (run_benchmark.py) are asserted equal at import; this pins that contract so a
+    fixture can never be declared without a way to apply it.
+    """
+    from benchmarks.live_fixtures import LIVE_FIXTURE_NAMES
+    from benchmarks.run_benchmark import LIVE_FIXTURE_APPLIERS
+
+    assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES)
+    assert "base" in LIVE_FIXTURE_NAMES  # the default every live task inherits
+
+
+def test_live_fixtures_default_to_base_and_synthetic_to_none():
+    """Live/hybrid tasks inherit ["base"]; synthetic tasks resolve to []."""
+    from benchmarks.benchmark_tasks import all_tasks
+    from benchmarks.live_fixtures import resolve_live_fixtures
+
+    # Pure resolver contract
+    assert resolve_live_fixtures(None) == ["base"]
+    assert resolve_live_fixtures({"mode": "live"}) == ["base"]
+    assert resolve_live_fixtures({"mode": "hybrid"}) == ["base"]
+    assert resolve_live_fixtures({"mode": "synthetic"}) == []
+    assert resolve_live_fixtures({"mode": "live", "live_fixtures": []}) == []  # explicit wins
+    assert resolve_live_fixtures({"mode": "live", "live_fixtures": ["base", "amazon_auth"]}) == [
+        "base",
+        "amazon_auth",
+    ]
+
+    # Loaded catalog: every task has effective live_fixtures matching its mode
+    for t in all_tasks():
+        env = t.environment
+        assert env is not None and "live_fixtures" in env, f"{t.name}: no effective live_fixtures"
+        if env.get("mode") == "synthetic":
+            assert env["live_fixtures"] == [], f"{t.name}: synthetic must not carry live fixtures"
+        else:
+            assert env["live_fixtures"], f"{t.name}: live/hybrid must inherit a live fixture"
+
+    by_name = {t.name: t for t in all_tasks()}
+    # Amazon tasks compose amazon_auth onto the base fixture
+    assert by_name["browser-agent"].environment["live_fixtures"] == ["base", "amazon_auth"]
+    assert by_name["browser-agent-amazon-cookie-payment"].environment["live_fixtures"] == [
+        "base",
+        "amazon_auth",
+    ]
+    # An undeclared-environment task inherits ["base"]
+    assert by_name["chat-mode"].environment["live_fixtures"] == ["base"]
+
+
+def test_live_fixture_validation_rejects_unknown_and_synthetic_declarations():
+    """Catalog validation refuses live fixtures the harness can't satisfy."""
+    from benchmarks.long_horizon import _validate_environment
+
+    base_env = {
+        "mode": "live",
+        "db_fixtures": [],
+        "base_images": [],
+        "services": [],
+        "secrets": [],
+        "live_targets": [],
+        "context_notes": "x",
+    }
+
+    # Unknown fixture name fails
+    bad = {**base_env, "live_fixtures": ["does_not_exist"]}
+    raised = False
+    try:
+        _validate_environment(bad, "t-unknown")
+    except ValueError as e:
+        raised = "unknown live_fixtures" in str(e)
+    assert raised, "unknown live_fixture must fail validation"
+
+    # Synthetic task declaring live fixtures fails
+    syn = {**base_env, "mode": "synthetic", "live_fixtures": ["base"]}
+    raised = False
+    try:
+        _validate_environment(syn, "t-synthetic")
+    except ValueError as e:
+        raised = "synthetic evals must not declare live_fixtures" in str(e)
+    assert raised, "synthetic + live_fixtures must fail validation"
+
+    # A valid declaration passes
+    ok = {**base_env, "live_fixtures": ["base", "amazon_auth"]}
+    assert _validate_environment(ok, "t-ok")["live_fixtures"] == ["base", "amazon_auth"]
+
+
 def test_tag_slices_still_resolve():
     """Semantic tag slices (e.g. browser auth suite) survive catalog changes."""
     from benchmarks.benchmark_tasks import get_tasks_by_tag
@@ -3380,6 +3568,8 @@ async def run_all_tests():
     r.record("local_args_single_load", test_local_benchmark_args_for_single_load_task_not_parallel)
     r.record("local_failed_tasks_from_run", test_local_failed_tasks_from_run_reads_result_json)
     r.record("local_services_manifest_validation", test_local_services_manifest_validation_requires_ports)
+    r.record("run_sh_manifest_publishes_wmh", test_run_sh_manifest_writer_publishes_wmh_when_served)
+    r.record("apply_manifest_env_injects_wmh", test_apply_manifest_environment_injects_wmh_base_url_and_model)
     r.record("local_results_and_diagnostics", test_local_extract_results_path_and_diagnostic_commands)
     r.record("agent_cache_provider_accounting", test_agent_cache_stats_respects_provider_accounting)
     r.record("local_parse_args_rejects_ambiguous_selection", test_local_parse_args_rejects_ambiguous_selection)
@@ -3437,6 +3627,9 @@ async def run_all_tests():
         test_suite_selection_excludes_incomplete_and_external_entries,
     )
     r.record("every_task_has_base_image_fixture", test_every_task_has_base_image_fixture_by_default)
+    r.record("live_fixture_registry_appliers_in_sync", test_live_fixture_registry_appliers_stay_in_sync)
+    r.record("live_fixtures_default_to_base", test_live_fixtures_default_to_base_and_synthetic_to_none)
+    r.record("live_fixture_validation_guards", test_live_fixture_validation_rejects_unknown_and_synthetic_declarations)
     r.record("tag_slices_still_resolve", test_tag_slices_still_resolve)
     r.record("history_ledger_no_orphaned_task_names", test_history_ledger_task_names_still_exist_in_catalog)
     r.record("long_horizon_idea_bank", test_long_horizon_idea_bank_preserves_seed_ideas_with_safety_notes)

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from benchmarks.fixtures import DEFAULT_BASE_IMAGE
+from benchmarks.live_fixtures import DEFAULT_LIVE_FIXTURE, resolve_live_fixtures
 
 
 @dataclass
@@ -106,12 +107,14 @@ def _default_environment() -> dict:
         "mode": "live",
         "db_fixtures": [],
         "base_images": [DEFAULT_BASE_IMAGE],
+        "live_fixtures": [DEFAULT_LIVE_FIXTURE],
         "services": [],
         "secrets": [],
         "live_targets": [],
         "context_notes": (
             "Default environment: workspace base-image DB (prod sync via "
-            "scripts/setup-db.sh) + live third-party services."
+            "scripts/setup-db.sh) + live third-party services + base live "
+            "fixture (fresh compute tokens, cookies, passwords)."
         ),
     }
 
@@ -123,8 +126,13 @@ def _load_tasks() -> List[BenchmarkTask]:
     for t in tasks:
         if t.environment is None:
             t.environment = _default_environment()
-        elif not t.environment.get("base_images"):
-            t.environment["base_images"] = [DEFAULT_BASE_IMAGE]
+        else:
+            if not t.environment.get("base_images"):
+                t.environment["base_images"] = [DEFAULT_BASE_IMAGE]
+            # Inherit the base live fixture when unspecified (live/hybrid tasks
+            # get ["base"]; synthetic tasks get []). Explicit lists win verbatim.
+            if t.environment.get("live_fixtures") is None:
+                t.environment["live_fixtures"] = resolve_live_fixtures(t.environment)
         if t.sub_agent_count is not None:
             apply_sub_agent_count(t, t.sub_agent_count)
         if t.name in SMOKE_TIMEOUT_CAPS:

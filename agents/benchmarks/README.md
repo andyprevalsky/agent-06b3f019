@@ -22,6 +22,24 @@ python benchmarks/run_eval_suite.py --bench rose-bench --port 3001
 
 Every task runs on a **base-image fixture**: undeclared environments inherit `base:victoria-prod-sync-v1` (workspace prod-sync DB, `scripts/setup-db.sh`) at load time — registry + pg_dump freezer in `fixtures.py`. Every completed run — pass or fail — is recorded: full record in `runs/*.json`, one line per attempt in `history/task_attempts.jsonl` (`record_attempt`), full LLM trajectories in `.llm-dumps/<agent_id>/` (always-on locally).
 
+### Live data fixtures (`environment.live_fixtures`)
+
+`db_fixtures` are *frozen* deltas on a base image (reproducible). **Live fixtures** are the opposite: prod-synced credentials that must be **current at runtime** — compute tokens (the $0 claudeAuth path), browser cookies (authenticated site access), passwords. A frozen expired token is worthless, so live fixtures re-sync from prod into the isolated benchmark DB right before the agent starts, every run, and are never snapshotted. Registry: `live_fixtures.py` (metadata) + `run_benchmark.py:_apply_live_fixtures` (runtime appliers, kept in sync by an import-time assertion).
+
+Declare them per task, composable and ordered:
+
+```jsonc
+"environment": {
+  "mode": "live",
+  "live_fixtures": ["base", "amazon_auth"]   // base first (syncs cookies), then amazon builds the CookieBundle
+}
+```
+
+- **`base`** — the default every `live`/`hybrid` task inherits when it omits `live_fixtures` (like `base_images` inheriting the default). Syncs fresh compute tokens + browser cookies/context/storage + passwords/passkeys from prod (`seed-local.ts --compute-tokens-only` then `--credentials-only`). `synthetic` tasks inherit `[]`.
+- **`amazon_auth`** — builds active `CookieBundle` rows for amazon.com from the synced prod cookies so the browser agent starts logged in.
+
+Validated by `long_horizon.py:_validate_environment`: unknown fixture names and `synthetic` + live fixtures both fail catalog validation. Add a new live fixture by registering a `LiveFixtureSpec` in `live_fixtures.py` and its applier in `run_benchmark.py` — no per-task-name branching.
+
 Suite selection (`run_benchmark.py --suite ...`) runs only `runner: "agent"` + `status: "ready"` entries; explicit `--task <name>` still targets incomplete agent evals for dev iteration. **Never rename an existing task `name`** — it is the primary key into `history/task_durations.jsonl` (success ledger), `history/span_durations.jsonl` (p99 baselines), and `runs/*.json`; a rename orphans that history (guarded by `test_history_ledger_task_names_still_exist_in_catalog`). The FE dev query box reads this same catalog via `GET /api/benchmarks/test-prompts`.
 
 ## Quick Start

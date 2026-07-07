@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<!--
+  Live benchmark dashboard (self-contained, zero external deps).
+
+  Frontend state machine (per repo convention — keep this diagram in sync with
+  the polling/render logic below):
+
+      ┌──────────┐  first successful fetch,     ┌─────────┐
+      │ loading  │  card has run_id             │  live   │
+      │(initial) │ ───────────────────────────► │(polling)│◄─┐
+      └────┬─────┘                              └────┬────┘  │ every ~3s, still
+           │                                         │       │ non-terminal
+           │ fetch 404 / not-yet-written             │       │
+           ▼                                         │       │
+      ┌──────────┐  first successful fetch           │───────┘
+      │ waiting  │ ─────────────────────────────────►│
+      │(no file) │                                   │
+      └──────────┘                                   │ all tasks terminal
+                                                     ▼
+                                                ┌─────────┐
+                                                │  final  │  (stops polling;
+                                                │(frozen) │   window stays open)
+                                                └─────────┘
+
+  Transitions:
+    loading  → waiting : first fetch fails (report-card.json not yet on disk).
+    loading  → live    : first fetch succeeds and card has a run_id.
+    waiting  → live    : a later fetch succeeds.
+    live     → live    : poll tick while the run is still in flight.
+    live     → final   : a fetched card shows every task in a terminal status
+                         AND tasks.running == 0 AND tasks.queued == 0.
+    (any)    → waiting : transient fetch error after we had data is tolerated —
+                         we keep the last-good card rendered and retry.
+
+  The page fetches report-card.json from its OWN directory every ~3s. Because
+  file:// cannot fetch JSON, this page is ALWAYS served over HTTP by
+  DashboardServer (see dashboard.py). A cache-busting query param defeats any
+  HTTP caching so we always see the freshest atomic write.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rose Benchmark Dashboard</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --panel: #161b22;
+      --panel-2: #1c2330;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #58a6ff;
+      --green: #3fb950;
+      --red: #f85149;
+      --amber: #d29922;
+      --purple: #bc8cff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    header {
+      padding: 18px 24px;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 8px 20px;
+    }
+    header h1 {
+      font-size: 16px;
+      margin: 0;
+      color: var(--accent);
+      letter-spacing: 0.5px;
+    }
+    .meta { color: var(--muted); }
+    .meta strong { color: var(--text); font-weight: 600; }
+    .mode-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      color: var(--purple);
+    }
+    #status-line {
+      margin-left: auto;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    #status-line .dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 6px;
+      vertical-align: middle;
+      background: var(--muted);
+    }
+    #status-line.live .dot { background: var(--green); animation: pulse 1.6s infinite; }
+    #status-line.final .dot { background: var(--accent); }
+    #status-line.waiting .dot { background: var(--amber); }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+    main { padding: 24px; max-width: 1100px; margin: 0 auto; }
+    .waiting-panel {
+      padding: 48px 24px;
+      text-align: center;
+      color: var(--muted);
+    }
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 14px;
+      margin-bottom: 24px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 16px;
+    }
+    .card h2 {
+      margin: 0 0 8px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .card .metrics { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+    .metric { white-space: nowrap; }
+    .metric .k { color: var(--muted); }
+    .metric .v { color: var(--text); font-weight: 600; }
+    .v.green { color: var(--green); }
+    .v.red { color: var(--red); }
+    .v.amber { color: var(--amber); }
+    .bar-wrap {
+      margin-top: 10px;
+      height: 10px;
+      border-radius: 5px;
+      background: var(--panel-2);
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }
+    .bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--green), #56d364);
+      width: 0%;
+      transition: width 0.4s ease;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    th, td {
+      text-align: left;
+      padding: 9px 14px;
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+    }
+    th {
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      font-size: 11px;
+      background: var(--panel-2);
+    }
+    tr:last-child td { border-bottom: none; }
+    td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+    .badge.passed { background: rgba(63,185,80,0.15); color: var(--green); }
+    .badge.failed, .badge.error { background: rgba(248,81,73,0.15); color: var(--red); }
+    .badge.transient { background: rgba(210,153,34,0.15); color: var(--amber); }
+    .badge.running { background: rgba(88,166,255,0.15); color: var(--accent); }
+    .badge.queued { background: rgba(139,148,158,0.15); color: var(--muted); }
+    .badge.skipped { background: rgba(188,140,255,0.12); color: var(--purple); }
+    .empty { color: var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>ROSE BENCHMARK</h1>
+    <span class="meta">run <strong id="run-id">…</strong></span>
+    <span class="meta">elapsed <strong id="elapsed">…</strong></span>
+    <span class="mode-badge" id="mode">—</span>
+    <span id="status-line" class="loading"><span class="dot"></span><span id="status-text">loading…</span></span>
+  </header>
+
+  <main>
+    <div id="waiting" class="waiting-panel">Waiting for first report…</div>
+
+    <div id="content" style="display:none;">
+      <div class="cards">
+        <div class="card">
+          <h2>Tasks</h2>
+          <div class="metrics">
+            <span class="metric"><span class="k">total</span> <span class="v" id="t-total">0</span></span>
+            <span class="metric"><span class="k">running</span> <span class="v amber" id="t-running">0</span></span>
+            <span class="metric"><span class="k">done</span> <span class="v" id="t-completed">0</span></span>
+            <span class="metric"><span class="k">queued</span> <span class="v" id="t-queued">0</span></span>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Results</h2>
+          <div class="metrics">
+            <span class="metric"><span class="k">passed</span> <span class="v green" id="r-passed">0</span></span>
+            <span class="metric"><span class="k">failed</span> <span class="v red" id="r-failed">0</span></span>
+            <span class="metric"><span class="k">transient</span> <span class="v amber" id="r-transient">0</span></span>
+          </div>
+          <div class="bar-wrap"><div class="bar-fill" id="rate-bar"></div></div>
+          <div class="metric" style="margin-top:6px;"><span class="k">success rate</span> <span class="v" id="r-rate">—</span></div>
+        </div>
+        <div class="card">
+          <h2>Cost</h2>
+          <div class="metrics">
+            <span class="metric"><span class="k">agents</span> <span class="v" id="c-agents">—</span></span>
+            <span class="metric"><span class="k">wmh</span> <span class="v" id="c-wmh">—</span></span>
+            <span class="metric"><span class="k">total</span> <span class="v" id="c-total">—</span></span>
+            <span class="metric"><span class="k">cache hit</span> <span class="v" id="c-cache">—</span></span>
+          </div>
+        </div>
+        <div class="card" id="infra-card" style="display:none;">
+          <h2>Infra</h2>
+          <div class="metrics">
+            <span class="metric"><span class="k">fleet</span> <span class="v" id="i-fleet">—</span></span>
+            <span class="metric"><span class="k">peak</span> <span class="v" id="i-peak">—</span></span>
+            <span class="metric"><span class="k">wmh served</span> <span class="v" id="i-served">—</span></span>
+            <span class="metric"><span class="k">queue</span> <span class="v" id="i-queue">—</span></span>
+          </div>
+        </div>
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Task</th>
+            <th>Status</th>
+            <th class="num">Duration</th>
+            <th class="num">Cost</th>
+            <th>Agent</th>
+          </tr>
+        </thead>
+        <tbody id="task-rows"></tbody>
+      </table>
+    </div>
+  </main>
+
+  <script>
+    "use strict";
+
+    // Poll cadence (ms). ~3s per the dashboard spec.
+    var POLL_MS = 3000;
+    // Terminal per-task statuses (mirror report_card.py display statuses).
+    var TERMINAL = { passed: 1, failed: 1, error: 1, transient: 1, skipped: 1 };
+
+    var state = "loading"; // loading | waiting | live | final
+    var lastCard = null;
+    var timer = null;
+
+    function $(id) { return document.getElementById(id); }
+
+    function esc(s) {
+      var d = document.createElement("div");
+      d.textContent = s == null ? "" : String(s);
+      return d.innerHTML;
+    }
+
+    function fmtElapsed(sec) {
+      if (sec == null) return "—";
+      sec = Math.round(sec);
+      var m = Math.floor(sec / 60);
+      var s = sec % 60;
+      if (m <= 0) return s + "s";
+      return m + "m " + (s < 10 ? "0" : "") + s + "s";
+    }
+
+    function fmtUsd(v) { return v == null ? "—" : "$" + Number(v).toFixed(4); }
+    function fmtDur(v) { return v == null ? "—" : Math.round(v) + "s"; }
+    function fmtPct(v) { return v == null ? "—" : Math.round(Number(v) * 100) + "%"; }
+
+    function setStatus(next) {
+      state = next;
+      var el = $("status-line");
+      el.className = next;
+      var text = {
+        loading: "loading…",
+        waiting: "waiting for run…",
+        live: "live",
+        final: "final",
+      }[next] || next;
+      $("status-text").textContent = text;
+    }
+
+    function isRunFinal(card) {
+      var tasks = card.tasks || {};
+      var perTask = card.per_task || [];
+      if (!perTask.length) return false;
+      if ((tasks.running || 0) > 0 || (tasks.queued || 0) > 0) return false;
+      return perTask.every(function (t) { return TERMINAL[t.status]; });
+    }
+
+    function render(card) {
+      lastCard = card;
+      $("waiting").style.display = "none";
+      $("content").style.display = "";
+
+      $("run-id").textContent = card.run_id || "—";
+      $("elapsed").textContent = fmtElapsed(card.elapsed_s);
+      $("mode").textContent = card.world_model_mode || "—";
+
+      var tasks = card.tasks || {};
+      $("t-total").textContent = tasks.total || 0;
+      $("t-running").textContent = tasks.running || 0;
+      $("t-completed").textContent = tasks.completed || 0;
+      $("t-queued").textContent = tasks.queued || 0;
+
+      var results = card.results || {};
+      $("r-passed").textContent = results.passed || 0;
+      $("r-failed").textContent = results.failed || 0;
+      $("r-transient").textContent = results.transient || 0;
+      $("r-rate").textContent = fmtPct(results.success_rate);
+      var pct = Math.max(0, Math.min(100, Math.round((results.success_rate || 0) * 100)));
+      $("rate-bar").style.width = pct + "%";
+
+      var cost = card.cost || {};
+      $("c-agents").textContent = fmtUsd(cost.agents_llm_usd);
+      $("c-wmh").textContent = fmtUsd(cost.wmh_grounding_usd);
+      $("c-total").textContent = fmtUsd(cost.total_usd);
+      $("c-cache").textContent = fmtPct(cost.fast_cache_hit_rate);
+
+      var infra = card.infra;
+      if (infra) {
+        $("infra-card").style.display = "";
+        $("i-fleet").textContent = infra.fleet_machines == null ? "—" : infra.fleet_machines;
+        $("i-peak").textContent = infra.peak_machines == null ? "—" : infra.peak_machines;
+        $("i-served").textContent = infra.wmh_served == null ? "—" : (infra.wmh_served ? "yes" : "no");
+        $("i-queue").textContent = infra.queue_depth == null ? "—" : infra.queue_depth;
+      } else {
+        $("infra-card").style.display = "none";
+      }
+
+      var rows = card.per_task || [];
+      var html = "";
+      if (!rows.length) {
+        html = '<tr><td colspan="5" class="empty">No tasks yet…</td></tr>';
+      } else {
+        for (var i = 0; i < rows.length; i++) {
+          var t = rows[i];
+          var status = String(t.status || "");
+          var badgeClass = status.replace(/[^a-z]/gi, "").toLowerCase() || "queued";
+          var agent = "";
+          if (t.agent_url) {
+            agent = '<a href="' + esc(t.agent_url) + '" target="_blank" rel="noopener">open ↗</a>';
+          } else {
+            agent = '<span class="empty">—</span>';
+          }
+          html +=
+            "<tr>" +
+            "<td>" + esc(t.name) + "</td>" +
+            '<td><span class="badge ' + esc(badgeClass) + '">' + esc(status) + "</span></td>" +
+            '<td class="num">' + esc(fmtDur(t.duration_s)) + "</td>" +
+            '<td class="num">' + esc(fmtUsd(t.cost_usd)) + "</td>" +
+            "<td>" + agent + "</td>" +
+            "</tr>";
+        }
+      }
+      $("task-rows").innerHTML = html;
+    }
+
+    function poll() {
+      // Cache-bust so we always read the freshest atomic write.
+      fetch("report-card.json?_=" + Date.now(), { cache: "no-store" })
+        .then(function (resp) {
+          if (!resp.ok) throw new Error("http " + resp.status);
+          return resp.json();
+        })
+        .then(function (card) {
+          if (!card || !card.run_id) throw new Error("empty card");
+          render(card);
+          if (isRunFinal(card)) {
+            setStatus("final");
+            stop(); // freeze; leave the window open for review.
+          } else {
+            setStatus("live");
+          }
+        })
+        .catch(function () {
+          // File not yet written, or a transient read mid-atomic-rename.
+          // If we already have data, keep it rendered; otherwise show waiting.
+          if (lastCard) {
+            if (state !== "final") setStatus("live");
+          } else {
+            setStatus("waiting");
+          }
+        });
+    }
+
+    function stop() {
+      if (timer) { clearInterval(timer); timer = null; }
+    }
+
+    function start() {
+      setStatus("loading");
+      poll();
+      timer = setInterval(poll, POLL_MS);
+    }
+
+    start();
+  </script>
+</body>
+</html>

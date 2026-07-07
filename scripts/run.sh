@@ -33,8 +33,9 @@ BENCHMARK_ISOLATED_RUN="${BENCHMARK_ISOLATED_RUN:-false}"
 IS_MAC=false
 [ "$(uname)" = "Darwin" ] && IS_MAC=true
 
-# Assign ports from a base port. Uses offsets 0-5 (5 services + 1 DB).
+# Assign ports from a base port. Uses offsets 0-6 (5 services + 1 DB + WMH).
 # Research was retired post-rose-migration so no research ports are reserved.
+# +6 is the World Model Harness serving port (benchmark/simulate only).
 assign_ports() {
     local base=$1
     export BACKEND_PORT=$base
@@ -43,6 +44,7 @@ assign_ports() {
     export MAC_APP_PORT=$((base + 3))
     export SDK_METRICS_PORT=$((base + 4))
     export LOCAL_DB_PORT=$((base + 5))
+    export WMH_PORT=$((base + 6))
     export NGROK_WEB_PORT=$((base + 9))
     export BACKEND_API_URL=http://localhost:$BACKEND_PORT
     export VITE_BACKEND_API_URL=http://localhost:$BACKEND_PORT
@@ -152,7 +154,7 @@ assign_ports "$CONDUCTOR_PORT"
 
 # If any port in our range is held by another process, find a safe range
 COLLISION=false
-for port in $BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $MAC_APP_PORT $SDK_METRICS_PORT $LOCAL_DB_PORT $NGROK_WEB_PORT; do
+for port in $BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $MAC_APP_PORT $SDK_METRICS_PORT $LOCAL_DB_PORT $WMH_PORT $NGROK_WEB_PORT; do
     if port_requires_reassign "$port"; then
         COLLISION=true
         break
@@ -166,7 +168,7 @@ if $COLLISION; then
     FOUND=false
     while [ $CANDIDATE -lt 65500 ]; do
         RANGE_FREE=true
-        for offset in 0 1 2 3 4 5 9; do
+        for offset in 0 1 2 3 4 5 6 9; do
             p=$((CANDIDATE + offset))
             if ! port_is_free_for_candidate_range "$p"; then
                 RANGE_FREE=false
@@ -197,7 +199,7 @@ fi
 
 export NODE_ENV="${NODE_ENV:-development}"
 export TEMPORAL_TASK_QUEUE=navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME
-echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT mac-app=$MAC_APP_PORT metrics=$SDK_METRICS_PORT db=$LOCAL_DB_PORT ngrok_api=$NGROK_WEB_PORT queue=$TEMPORAL_TASK_QUEUE benchmark_mode=$BENCHMARK_MODE activity_max_slots=${MAX_CONCURRENT_ACTIVITIES:-100} activity_pollers=${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-8}"
+echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT mac-app=$MAC_APP_PORT metrics=$SDK_METRICS_PORT db=$LOCAL_DB_PORT wmh=$WMH_PORT ngrok_api=$NGROK_WEB_PORT queue=$TEMPORAL_TASK_QUEUE benchmark_mode=$BENCHMARK_MODE activity_max_slots=${MAX_CONCURRENT_ACTIVITIES:-100} activity_pollers=${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-8}"
 
 run_kill_stale_same_task_queue_workers "$PWD" "$TEMPORAL_TASK_QUEUE" "$BACKEND_API_URL" "$$"
 
@@ -713,6 +715,8 @@ write_services_manifest() {
     SERVICE_NAMES="$names_csv" SERVICE_PIDS="$pids_csv" SERVICE_STATUS="$SERVICE_STATUS" \
         BENCHMARK_MODE="$BENCHMARK_MODE" DB_CONTAINER="$DB_CONTAINER" \
         DB_VOLUME="$DB_VOLUME" DB_OWNED_BY_US="$DB_OWNED_BY_US" USE_SYSTEM_PG="$USE_SYSTEM_PG" \
+        WMH_MANIFEST_PORT="${WMH_MANIFEST_PORT:-0}" WMH_MANIFEST_URL="${WMH_MANIFEST_URL:-}" \
+        WMH_MANIFEST_MODEL_NAME="${WMH_MANIFEST_MODEL_NAME:-}" \
         RUN_SH_PID="$$" RUN_CONTEXT_DIR="$RUN_CONTEXT_DIR" python3 - <<'PY'
 import json
 import os
@@ -754,6 +758,8 @@ data = {
         "mac_app": env_int("MAC_APP_PORT"),
         "sdk_metrics": env_int("SDK_METRICS_PORT"),
         "local_db": env_int("LOCAL_DB_PORT"),
+        # WMH port is only serving in benchmark/simulate context; 0 otherwise.
+        "wmh": env_int("WMH_MANIFEST_PORT"),
         "ngrok_api": env_int("NGROK_WEB_PORT"),
     },
     "urls": {
@@ -763,8 +769,11 @@ data = {
         "public": os.environ.get("PUBLIC_BASE_URL", ""),
         "health": f"http://localhost:{os.environ.get('HEALTH_PORT', '')}",
         "sdk_metrics": f"http://localhost:{os.environ.get('SDK_METRICS_PORT', '')}",
+        # Empty until the WMH server is confirmed serving (benchmark/simulate only).
+        "wmh": os.environ.get("WMH_MANIFEST_URL", ""),
     },
     "temporal_task_queue": os.environ.get("TEMPORAL_TASK_QUEUE", ""),
+    "wmh_model_name": os.environ.get("WMH_MANIFEST_MODEL_NAME", ""),
         "database": {
             "container": os.environ.get("DB_CONTAINER", ""),
             "volume": os.environ.get("DB_VOLUME", ""),
@@ -788,6 +797,114 @@ with open(tmp_path, "w") as f:
     f.write("\n")
 os.replace(tmp_path, path)
 PY
+}
+
+# ── World Model Harness (WMH) ──
+# The WMH is a trace-grounded environment emulator used by simulate/shadow
+# benchmarks. It runs as a standard run.sh-managed service on ALL non-prod runs
+# (local + cloud). Two costs, gated differently:
+#   - Serving (`wmh serve`, a loaded model idling on WMH_PORT): CHEAP → we serve
+#     on every non-prod run whenever a built model artifact already exists.
+#   - The first GEPA build from the R2 trace corpus: EXPENSIVE + needs R2 creds →
+#     only attempted when this is a benchmark run (BENCHMARK_MODE) or an explicit
+#     opt-in (SERVE_WORLD_MODEL=1). Building is NEVER fatal: a failed/absent build
+#     just means no WMH this run (simulate benchmarks will error clearly; smoke
+#     and plain dev runs are unaffected).
+# Hard guard: NEVER in prod (ENVIRONMENT=production; prod agents run on Fly via
+# worker.py and never invoke run.sh, but the guard makes the invariant explicit).
+WMH_PID=""
+WMH_MODEL_NAME="${WMH_MODEL_NAME:-rose-archive}"
+
+should_serve_world_model() {
+    # Serve on every non-prod run; only prod is excluded.
+    [ "${ENVIRONMENT:-}" = "production" ] && return 1
+    return 0
+}
+
+start_world_model_harness() {
+    should_serve_world_model || return 0
+
+    mkdir -p "$RUN_CONTEXT_DIR"
+    local wmh_log="$RUN_CONTEXT_DIR/wmh-serve-log.txt"
+
+    # Shared, persistent build root so the model is built ONCE and reused across
+    # every run — NOT the per-run context dir (that would rebuild each time).
+    # Mirrors _DEFAULT_WMH_BUILD_ROOT in agents/benchmarks/world_model_harness.py.
+    local build_dir="${WMH_BUILD_DIR:-$PWD/.context/world-model}"
+    case "$build_dir" in
+        /*) : ;;                       # already absolute
+        *)  build_dir="$PWD/$build_dir" ;;
+    esac
+
+    local model_ready=false
+    if [ -f "$build_dir/build.manifest.json" ] && [ -d "$build_dir/models/$WMH_MODEL_NAME" ]; then
+        model_ready=true
+    fi
+
+    _wmh_build() {
+        (cd agents && source venv/bin/activate && \
+            WMH_BUILD_DIR="$build_dir" WMH_MODEL_NAME="$WMH_MODEL_NAME" \
+            python -c "from benchmarks.world_model_harness import update_world_model_for_simulation as u; u(progress=lambda e: print('[WMH]', e.get('title'), e.get('status'), flush=True))" \
+            >>"$wmh_log" 2>&1)
+    }
+
+    if ! $model_ready; then
+        # First build (GEPA) is expensive + needs the R2 corpus — only when this
+        # run is allowed to build. Non-fatal: on failure we warn and skip serving.
+        if $BENCHMARK_MODE || [ "${SERVE_WORLD_MODEL:-}" = "1" ]; then
+            echo "🌍 Building World Model Harness corpus ($WMH_MODEL_NAME) from trace archive → $build_dir (first build)"
+            if _wmh_build; then
+                model_ready=true
+            else
+                echo "⚠️  World Model Harness build failed — WMH not served this run (see $wmh_log). Simulate benchmarks will error until it builds; smoke/dev runs are unaffected."
+                tail -20 "$wmh_log" || true
+            fi
+        else
+            echo "ℹ️  No prebuilt World Model at $build_dir — skipping WMH serve. Build it via a benchmark run or SERVE_WORLD_MODEL=1."
+        fi
+    elif $BENCHMARK_MODE; then
+        # Cheap delta refresh so benchmark runs pick up new traces; never fatal.
+        _wmh_build || echo "⚠️  WMH delta refresh failed — serving existing model (see $wmh_log)."
+    fi
+
+    $model_ready || return 0
+
+    echo "🌍 Starting World Model Harness: serve $WMH_MODEL_NAME on port $WMH_PORT (root $build_dir)"
+    # Serve via serve_world_model.py (Rose inference provider: compute tokens +
+    # claudeAuth + rotation) instead of `wmh serve` (raw direct-Anthropic key).
+    (cd agents && source venv/bin/activate && \
+        exec python -m benchmarks.serve_world_model --name "$WMH_MODEL_NAME" --port "$WMH_PORT" --root "$build_dir") \
+        >>"$wmh_log" 2>&1 &
+    WMH_PID=$!
+    PIDS+=($WMH_PID); NAMES+=("wmh")
+
+    # Health-wait on GET /healthz (short timeout — check the log if it never comes up).
+    local ready=false
+    for _ in $(seq 1 30); do
+        if ! kill -0 "$WMH_PID" 2>/dev/null; then
+            echo "⚠️  WMH server exited before becoming ready — not served this run (see $wmh_log)."
+            tail -20 "$wmh_log" || true
+            return 0
+        fi
+        if curl -fsS "http://localhost:$WMH_PORT/healthz" >/dev/null 2>&1; then
+            ready=true
+            break
+        fi
+        sleep 1
+    done
+    if ! $ready; then
+        echo "⚠️  WMH server did not answer /healthz on port $WMH_PORT within 30s — not served this run (see $wmh_log)."
+        tail -20 "$wmh_log" || true
+        return 0
+    fi
+
+    # Only now publish WMH to the manifest and benchmark env — the server is confirmed up.
+    export WMH_MANIFEST_PORT="$WMH_PORT"
+    export WMH_MANIFEST_URL="http://localhost:$WMH_PORT"
+    export WMH_MANIFEST_MODEL_NAME="$WMH_MODEL_NAME"
+    export WMH_BASE_URL="http://localhost:$WMH_PORT"
+    export WMH_MODEL_NAME
+    echo "🌍 World Model Harness ready: $WMH_BASE_URL (model $WMH_MODEL_NAME)"
 }
 
 kill_tree() {
@@ -889,6 +1006,11 @@ else
     run_service "agents" bash -c 'set -eo pipefail; cd agents && source venv/bin/activate && HEALTH_CHECK_PORT=$HEALTH_PORT SDK_METRICS_PORT=$SDK_METRICS_PORT ./scripts/run_local_worker.sh' &
 fi
 PIDS+=($!); NAMES+=("agents")
+
+# World Model Harness (benchmark/simulate only — never prod). Builds from the
+# trace corpus and serves on WMH_PORT; sets WMH_BASE_URL/WMH_MODEL_NAME + manifest
+# fields when it comes up. A no-op on plain (non-benchmark) run.sh.
+start_world_model_harness
 
 SERVICE_STATUS=running
 write_services_manifest

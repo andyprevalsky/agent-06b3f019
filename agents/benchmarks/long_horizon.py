@@ -30,6 +30,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from benchmarks.live_fixtures import LIVE_FIXTURE_NAMES
+
 CATALOG_VERSION = "0.1"
 EVALUATION_METHODS = {"static_check", "single_turn_llm_judge", "agentic_llm_judge"}
 ENVIRONMENT_MODES = {"synthetic", "live", "hybrid"}
@@ -87,6 +89,22 @@ def _validate_environment(env: dict[str, Any], item_id: str) -> dict[str, Any]:
         raise ValueError(f"{item_id}: environment.context_notes must be a non-empty string")
     if mode == "live" and env.get("db_fixtures"):
         raise ValueError(f"{item_id}: live evals must not declare db_fixtures")
+    # live_fixtures is optional in the raw catalog (tasks omitting it inherit
+    # ["base"] at load time); validate only when explicitly declared.
+    live_fixtures = env.get("live_fixtures")
+    if live_fixtures is not None:
+        _require_string_list(env, "live_fixtures", item_id, allow_empty=True)
+        unknown = [f for f in live_fixtures if f not in LIVE_FIXTURE_NAMES]
+        if unknown:
+            raise ValueError(
+                f"{item_id}: unknown live_fixtures {unknown}; "
+                f"known: {sorted(LIVE_FIXTURE_NAMES)}"
+            )
+        if mode == "synthetic" and live_fixtures:
+            raise ValueError(
+                f"{item_id}: synthetic evals must not declare live_fixtures "
+                f"(live credentials have no meaning for a fully synthetic task)"
+            )
     return env
 
 
