@@ -643,10 +643,11 @@ TASKS_DISPLAY="${BENCH_TASKS[*]}"
 # escapes the comma to '\,', which the double-decode + `bash` re-parse mangled,
 # dropping every task after the first).
 TASKS_CSV_B64="$(printf '%s' "$TASKS_CSV" | base64 | tr -d '\n')"
+RUN_WORKSPACE_NAME="${CLOUDBENCH_WORKSPACE_NAME:-cloudbench-$(date -u +%Y%m%d%H%M%S)-$$}"
 
 echo "═══ run-bench-cloud (warm run) ═══"
 echo "tasks=[$TASKS_DISPLAY] simulate=$BENCH_SIMULATE parallel=$BENCH_PARALLEL max_concurrency=$BENCH_MAX_CONCURRENCY"
-echo "ref=${BENCH_REF:-<HEAD>} model=$WMH_MODEL_NAME app=$APP dashboard=$DASHBOARD"
+echo "ref=${BENCH_REF:-<HEAD>} model=$WMH_MODEL_NAME app=$APP dashboard=$DASHBOARD workspace=$RUN_WORKSPACE_NAME"
 echo ""
 
 ensure_app
@@ -737,13 +738,14 @@ export BENCH_TASKS_B64=$(printf '%q' "$TASKS_CSV_B64")
 export BENCH_MAX_CONCURRENCY=$(printf '%q' "$BENCH_MAX_CONCURRENCY")
 export BENCH_SIMULATE=$(printf '%q' "$BENCH_SIMULATE")
 export BENCH_DASHPORT=$(printf '%q' "$REMOTE_DASH_PORT")
+export CONDUCTOR_WORKSPACE_NAME=$(printf '%q' "$RUN_WORKSPACE_NAME")
 exec bash /data/cloudbench-run.sh"
 REMOTE_WRAPPER_B64="$(printf '%s' "$REMOTE_WRAPPER" | base64 | tr -d '\n')"
 
 # Write the wrapper to $REMOTE_TMP_SCRIPT, truncate the log, launch detached.
 echo ""
 echo "📡 Launching the on-box driver DETACHED (logs → $REMOTE_LOG) ..."
-echo "   tasks=[$TASKS_DISPLAY] ref=${BENCH_REF:-<HEAD>} simulate=$BENCH_SIMULATE"
+echo "   tasks=[$TASKS_DISPLAY] ref=${BENCH_REF:-<HEAD>} simulate=$BENCH_SIMULATE workspace=$RUN_WORKSPACE_NAME"
 # The launch ssh drops (4294967295) once it backgrounds, and can drop BEFORE it
 # even truncates the log — leaving the PREVIOUS run's ::CLOUDBENCH-DONE:: in place
 # so the poll below would exit instantly on a stale marker. So do it in VERIFIED
@@ -892,4 +894,3 @@ rm -f "$SSH_LOG"
 # local dashboard proxy.
 [ "$OUTCOME_OK" = "1" ] && exit 0
 exit 1
-

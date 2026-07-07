@@ -409,9 +409,9 @@ export HOME='/home/$APP_USER'
 export BENCHMARK_CONTEXT_DIR='$CONTEXT_DIR'
 export BENCHMARK_ISOLATED_RUN=true
 export ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1
-export CONDUCTOR_WORKSPACE_NAME=cloudbench
-export CONDUCTOR_PORT=3001
-export TEMPORAL_TASK_QUEUE=navi-agent-tasks-cloudbench
+export CONDUCTOR_WORKSPACE_NAME='$WORKSPACE_NAME'
+export CONDUCTOR_PORT='$BASE_PORT'
+export TEMPORAL_TASK_QUEUE='navi-agent-tasks-$WORKSPACE_NAME'
 echo \"[cloudbench] run_benchmark env: CONDUCTOR_WORKSPACE_NAME=\$CONDUCTOR_WORKSPACE_NAME TEMPORAL_TASK_QUEUE=\$TEMPORAL_TASK_QUEUE\"
 cd '$REPO_DIR/agents' && exec venv/bin/python -u benchmarks/run_benchmark.py \"\$@\"" _ "${BENCH_ARGS[@]}"
 BENCH_RC=$?
