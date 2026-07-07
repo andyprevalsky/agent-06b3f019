@@ -383,35 +383,13 @@ if [ "${#BENCH_TASK_LIST[@]}" -eq 0 ]; then
     finish 1
 fi
 
-# Task selector, matching benchmarks/local.py:build_task_selector_args:
-#   1 task  → --task <name>
-#   >1 task → --suite all --exclude-task <every-other-ready-task>
-# (run_benchmark.py takes a single --task; multi-task selection is expressed as
-# "run all, minus the ones you didn't ask for". --parallel is added for >1.)
+# Task selector: pass the exact requested task names. `run_benchmark.py`
+# accepts repeated `--task` values, so the cloud runner does not need to encode
+# multi-task selection as "suite all minus exclusions".
 BENCH_ARGS=()
-if [ "${#BENCH_TASK_LIST[@]}" -eq 1 ]; then
-    BENCH_ARGS=(--task "${BENCH_TASK_LIST[0]}")
-else
-    ALL_NAMES="$(gosu "$APP_USER" env HOME=/home/$APP_USER bash -c \
-        "cd '$REPO_DIR/agents' && venv/bin/python -c 'from benchmarks.benchmark_tasks import all_tasks; print(\" \".join(t.name for t in all_tasks()))'" 2>/dev/null || true)"
-    EXCLUDE=()
-    if [ -n "$ALL_NAMES" ]; then
-        # Space-padded membership string (bash 3.2-safe; no associative arrays).
-        SELECTED_STR=" ${BENCH_TASK_LIST[*]} "
-        for name in $ALL_NAMES; do
-            case "$SELECTED_STR" in
-                *" $name "*) ;;            # requested → keep (don't exclude)
-                *) EXCLUDE+=("$name") ;;   # not requested → exclude
-            esac
-        done
-    fi
-    BENCH_ARGS=(--suite all)
-    if [ "${#EXCLUDE[@]}" -gt 0 ]; then
-        # Join with commas.
-        EXCLUDE_CSV="$(IFS=,; echo "${EXCLUDE[*]}")"
-        BENCH_ARGS+=(--exclude-task "$EXCLUDE_CSV")
-    fi
-fi
+for task_name in "${BENCH_TASK_LIST[@]}"; do
+    BENCH_ARGS+=(--task "$task_name")
+done
 
 BENCH_ARGS+=(--port "$BACKEND_PORT" --ci --keep-failed-agents)
 if [ "${#BENCH_TASK_LIST[@]}" -gt 1 ]; then

@@ -1444,8 +1444,9 @@ def suite_name_for_error(args) -> str:
     """Best-effort suite label for error messages — mirrors what the user ran."""
     if args.suite:
         return args.suite
-    if args.task:
-        return f"--task {args.task}"
+    task_names = task_names_from_args(args)
+    if task_names:
+        return "--task " + ",".join(task_names)
     return "smoke"
 
 
@@ -4700,14 +4701,35 @@ async def run_single_task(
 # ============================================================
 
 
+def task_names_from_args(args) -> list[str]:
+    """Return explicit task names from argparse output.
+
+    `--task` accepts repeated values and comma-separated values so wrappers can
+    pass an exact task set without encoding it as "suite all minus exclusions".
+    """
+    values = getattr(args, "task", None)
+    if not values:
+        return []
+    if isinstance(values, str):
+        values = [values]
+
+    names: list[str] = []
+    for value in values:
+        names.extend(name.strip() for name in str(value).split(",") if name.strip())
+    return names
+
+
 def resolve_tasks(args) -> List[BenchmarkTask]:
     """Resolve which tasks to run from CLI args."""
-    if args.task:
-        tasks = [get_task_by_name(args.task)]
-        if tasks[0].runner != "agent":
+    explicit_task_names = task_names_from_args(args)
+    if explicit_task_names:
+        tasks = [get_task_by_name(name) for name in explicit_task_names]
+        non_agent_tasks = [task for task in tasks if task.runner != "agent"]
+        if non_agent_tasks:
+            names = ", ".join(f"{task.name} ({task.runner})" for task in non_agent_tasks)
             raise ValueError(
-                f"Task '{args.task}' is a {tasks[0].runner} eval — run it via "
-                f"benchmarks/run_eval_suite.py or its own test runner, not run_benchmark.py."
+                f"Task(s) {names} are not agent evals — run them via "
+                f"benchmarks/run_eval_suite.py or their own test runner, not run_benchmark.py."
             )
     elif args.suite:
         if args.suite == "all":
@@ -4730,7 +4752,7 @@ def resolve_tasks(args) -> List[BenchmarkTask]:
     else:
         tasks = all_tasks()
 
-    if not args.task:
+    if not explicit_task_names:
         # Suite selection only runs complete agent evals. `status == "incomplete"` entries
         # (missing fixtures/judges) and external vitest smokes stay catalogued but are
         # skipped; explicit --task still targets incomplete agent evals for dev iteration.
@@ -5436,7 +5458,8 @@ async def main_async(args):
         realtime_started = True
     print(f"  📡 {realtime_status}")
 
-    suite_name = args.suite or args.task or "all"
+    task_names = task_names_from_args(args)
+    suite_name = args.suite or (",".join(task_names) if task_names else "all")
     print(f"\n{'=' * 60}")
     print("  Agent Benchmark Harness")
     print(f"  URL:   {base_url}")
@@ -5774,7 +5797,12 @@ async def main_async(args):
 def main():
     parser = argparse.ArgumentParser(description="Agent Benchmark Harness")
     parser.add_argument("--list", action="store_true", help="List all benchmark tasks")
-    parser.add_argument("--task", type=str, help="Run a single task by name")
+    parser.add_argument(
+        "--task",
+        action="append",
+        default=[],
+        help="Run one or more explicit task names. Repeatable; comma-separated names are also accepted.",
+    )
     parser.add_argument(
         "--suite",
         type=str,
@@ -5926,7 +5954,7 @@ def main():
         os.environ["BENCHMARK_KEEP_AGENTS"] = "true"
         args.keep_failed_agents = True
 
-    if not args.list and not args.compare and not args.task and not args.suite:
+    if not args.list and not args.compare and not task_names_from_args(args) and not args.suite:
         parser.print_help()
         sys.exit(1)
 
