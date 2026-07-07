@@ -1978,6 +1978,125 @@ def _build_trace_from_events(
     return roots, t0, t1, stats
 
 
+# ── FE message cadence ────────────────────────────────────────────────────────
+# Message.createdAt is stamped when the backend inserts a message, which is also
+# when it auto-broadcasts the INSERT to Supabase Realtime — i.e. ≈ the moment the
+# FE receives it. Per-agent gaps between consecutive createdAt values therefore
+# approximate what a user sees on the FE: how long an agent "sits thinking" with
+# no new messages. Comparing the root (usually low concurrency) against the leaf
+# sub-agents (which run under fan-out concurrency) surfaces load-based streaming
+# lag that the worker-side span waterfall alone doesn't show.
+
+
+def _fetch_agent_message_cadence(base_url: str, agent_id: str) -> Optional[dict]:
+    """Fetch one agent's message createdAt gaps. Returns {n, gaps[], parent} or None."""
+    import urllib.request
+
+    headers = {"X-API-Key": API_KEY, "X-User-Id": USER_ID}
+    req = urllib.request.Request(f"{base_url}/api/agents/{agent_id}", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.load(resp)
+    except Exception:
+        return None
+    agent = data.get("agent") or data
+    msgs = data.get("messages") or agent.get("messages") or []
+    times: List[float] = []
+    for m in msgs:
+        # The API serializes Message.createdAt as `timestamp` (the broadcast time).
+        ca = m.get("timestamp") or m.get("created_at") or m.get("createdAt")
+        if not ca:
+            continue
+        try:
+            times.append(parse_ts(ca).timestamp())
+        except Exception:
+            continue
+    times.sort()
+    gaps = sorted(times[i] - times[i - 1] for i in range(1, len(times)))
+    return {"n": len(times), "gaps": gaps, "parent": agent.get("parent_agent_id")}
+
+
+def _fetch_message_cadence(base_url: str, seed_agent_id: str) -> Tuple[str, Dict[str, dict]]:
+    """Return (root_id, {agent_id: {n, gaps, parent, is_root}}) for the whole tree.
+
+    Fetches the tree via /api/agents/tree?busId=, then each agent's messages in
+    parallel. Silently returns ({}, {}) if the backend is unreachable.
+    """
+    import urllib.request
+    from concurrent.futures import ThreadPoolExecutor
+
+    headers = {"X-API-Key": API_KEY, "X-User-Id": USER_ID}
+    ids: List[str] = [seed_agent_id]
+    try:
+        treq = urllib.request.Request(
+            f"{base_url}/api/agents/tree?busId={seed_agent_id}", headers=headers
+        )
+        with urllib.request.urlopen(treq, timeout=30) as resp:
+            for a in json.load(resp).get("agents", []):
+                aid = a.get("agent_id")
+                if aid and aid not in ids:
+                    ids.append(aid)
+    except Exception:
+        pass
+
+    result: Dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=12) as ex:
+        for aid, cad in zip(ids, ex.map(lambda a: _fetch_agent_message_cadence(base_url, a), ids)):
+            if cad and cad["n"] >= 2:
+                result[aid] = cad
+    root_id = next((a for a, c in result.items() if not c.get("parent")), seed_agent_id)
+    for aid, c in result.items():
+        c["is_root"] = aid == root_id
+    return root_id, result
+
+
+def _render_message_cadence(root_id: str, cadence: Dict[str, dict], color: bool) -> str:
+    if not cadence:
+        return ""
+
+    def stat(c: dict) -> Tuple[float, float, float]:
+        g = c["gaps"]
+        if not g:
+            return (0.0, 0.0, 0.0)
+        return (g[len(g) // 2], g[min(len(g) - 1, int(len(g) * 0.9))], g[-1])
+
+    lines = [
+        _c("FE MESSAGE CADENCE  (Message.createdAt = broadcast ≈ FE receive time)", BOLD, color),
+        _c("═" * 100, BOLD, color),
+    ]
+    root = cadence.get(root_id)
+    root_p50 = 0.0
+    if root:
+        p50, p90, mx = stat(root)
+        root_p50 = p50
+        lines.append(
+            f"  ROOT   {root_id[:8]}: {root['n']:4d} msgs | inter-msg gap "
+            f"p50={p50:.2f}s p90={p90:.2f}s max={mx:.2f}s"
+        )
+    leaves = [(a, c) for a, c in cadence.items() if a != root_id]
+    if leaves:
+        lp50 = sorted(stat(c)[0] for _, c in leaves)
+        lmax = sorted(stat(c)[2] for _, c in leaves)
+        med_p50 = lp50[len(lp50) // 2]
+        med_max = lmax[len(lmax) // 2]
+        lines.append(
+            f"  LEAVES ({len(leaves):2d}): inter-msg gap median-p50={med_p50:.2f}s "
+            f"worst-p50={lp50[-1]:.2f}s | dead-gap median-max={med_max:.1f}s worst-max={lmax[-1]:.1f}s"
+        )
+        if root and med_p50 > 3 * root_p50 + 0.3:
+            ratio = med_p50 / max(root_p50, 0.01)
+            lines.append(_c(
+                f"  ⚠ LOAD LAG: leaves stream {ratio:.0f}× slower than root "
+                f"({med_p50:.2f}s vs {root_p50:.2f}s per msg) — concurrency contention, not compute.",
+                YELLOW, color,
+            ))
+        lines.append("  Slowest leaves (id: msgs, p50 gap, worst dead-gap):")
+        for aid, c in sorted(leaves, key=lambda x: stat(x[1])[0], reverse=True)[:6]:
+            p50, _p90, mx = stat(c)
+            lines.append(f"    {aid[:8]}: {c['n']:4d} msgs  p50={p50:.2f}s  max={mx:.1f}s")
+    return "\n".join(lines)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1991,6 +2110,11 @@ def main() -> int:
     ap.add_argument("--slow-threshold", type=int, default=300,
                     help="Milliseconds above which a span is counted as 'bad' (default 300).")
     ap.add_argument("--no-color", action="store_true")
+    ap.add_argument("--no-fe-cadence", action="store_true",
+                    help="Skip the FE message-cadence analysis (per-agent Message.createdAt gaps).")
+    ap.add_argument("--fe-base-url", default=None,
+                    help="Backend base URL for the FE-cadence fetch "
+                         "(defaults to --url, else http://localhost:3001).")
     ap.add_argument("--url", default=None,
                     help="Base URL for prod mode (e.g. https://navi-j9a9.onrender.com). "
                          "Fetches logs from Render, ClickHouse, and Fly.io instead of local files.")
@@ -2055,6 +2179,17 @@ def main() -> int:
         args.slow_threshold, color, span_baselines,
     )
     print(summary)
+
+    if not args.no_fe_cadence:
+        fe_base = args.fe_base_url or args.url or "http://localhost:3001"
+        try:
+            fe_root_id, fe_cadence = _fetch_message_cadence(fe_base, args.agent_id)
+            fe_section = _render_message_cadence(fe_root_id, fe_cadence, color)
+            if fe_section:
+                print(fe_section)
+                print("")
+        except Exception as exc:
+            print(_c(f"  [fe-cadence] skipped ({fe_base}): {exc}", YELLOW, color))
 
     if not stats.get("has_span_events"):
         print(_c(

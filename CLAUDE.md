@@ -340,7 +340,13 @@ curl -s "http://localhost:3001/api/agents/{agent_id}" -H "X-API-Key: AEzycCpQcJ1
 - **ORM:** Prisma
 - **RLS:** Enabled on all tables - users only see their own data
 - **Realtime:** All realtime events use explicit HTTP broadcasts to Supabase Realtime (`POST /realtime/v1/api/broadcast`). `createMessage()` auto-broadcasts INSERT events; `updateAgentStatus()` auto-broadcasts UPDATE events. No DB triggers are involved.
-- Schema changes: Edit `back-end/prisma/schema.prisma`, then migrate
+- **Schema changes MUST ship a migration** — do NOT rely on `db push`. Local dev/setup (`scripts/run.sh`, `scripts/setup-db.sh`) run `prisma db push --accept-data-loss`, which silently conjures the DB from `schema.prisma`, so blackbox/local tests pass even with NO migration. Prod (`render.yaml`) runs `prisma migrate deploy`, which ONLY applies committed migration directories. A schema edit without a migration therefore works locally and **500s in prod** ("table/column does not exist" → e.g. every compute-token fetch fell to the paid waterfall on 2026-07-06). Correct path:
+  1. Edit `back-end/prisma/schema.prisma`.
+  2. Author the migration WITHOUT `prisma migrate dev` — its shadow DB replays the whole history including the squashed baseline (`00000000000000_init`), which contains Supabase RLS policies (`auth.uid()`) + `realtime.*` triggers that don't exist on a plain local Postgres shadow, so `migrate dev` fails. Instead diff your edited schema against the current local DB (no shadow):
+     `mkdir -p prisma/migrations/$(date +%Y%m%d%H%M%S)_<desc> && npx prisma migrate diff --from-url "$DATABASE_URL" --to-schema-datamodel prisma/schema.prisma --script > prisma/migrations/<that-dir>/migration.sql`
+     (run BEFORE `db push`, while the local DB still reflects the old schema). Review the SQL, then `npx prisma db push` to apply locally. A loose `.sql` in the migrations root is IGNORED by `migrate deploy` — it MUST be `<timestamp>_<name>/migration.sql`.
+  3. Commit the migration directory with the schema change. `src/tests/structural/migration-drift.test.ts` fails the build if `schema.prisma` has a model/column with no migration (both directions).
+- **Migration history is a single squashed baseline** (`00000000000000_init`, from a `pg_dump` of prod on 2026-07-06 via `back-end/scripts/clean-baseline-dump.py`). It reproduces prod exactly — tables, enums, indexes (incl. the `pg_trgm` expression index), functions, triggers, and RLS policies — and existing DBs have it `migrate resolve --applied`. To re-baseline after major drift, re-run that script on a fresh `pg_dump` and re-resolve.
 - **Query DB:** `npx tsx back-end/scripts/query-db.ts` (modify script as needed)
 
 ## Supabase Realtime Messages

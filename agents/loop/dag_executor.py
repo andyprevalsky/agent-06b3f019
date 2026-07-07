@@ -896,7 +896,18 @@ async def _execute_single_task(
 
             # Check for error status
             # _execute_tool returns {"error": True} on exception, {"success": False} on tool failure
-            return not (result.get("error") or result.get("success") is False or result.get("status") == "error")
+            failed = bool(result.get("error") or result.get("success") is False or result.get("status") == "error")
+            if failed:
+                # Surface the swallowed tool-result error — without this, a DAG task
+                # failure shows only "[DAG] Task N failed" with no reason, making
+                # e.g. a for_each spawn validation failure invisible.
+                workflow.logger.warning(
+                    f"[DAG] Task {task.index} tool '{actual_tool}' returned failure: "
+                    f"{str(result.get('message') or result.get('error') or result)[:300]} "
+                    f"| type={params.get('type')} start_phase={params.get('start_phase')} "
+                    f"items={len(params.get('items')) if isinstance(params.get('items'), list) else params.get('items')}"
+                )
+            return not failed
 
     except Exception as e:
         # Extract actual error message (unwrap Temporal's ActivityError wrapper)
