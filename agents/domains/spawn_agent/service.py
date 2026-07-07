@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
@@ -247,9 +248,12 @@ async def spawn_explore_agent_activity(  # noqa: C901
     # agent_id, which carries the persisted flag). Resolve it once for inner
     # request caches only. Do not cache the terminal explore result: replaying the
     # whole tool hides the inner LLM/web_search/web_fetch waterfall from the UI.
-    _explore_fast_mode_enabled, _explore_fast_mode_goal, _explore_fast_mode_write_enabled, _ = (
-        await resolve_agent_fast_mode(agent_id)
-    )
+    (
+        _explore_fast_mode_enabled,
+        _explore_fast_mode_goal,
+        _explore_fast_mode_write_enabled,
+        _,
+    ) = await resolve_agent_fast_mode(agent_id)
     _explore_fast_mode_goal = goal or _explore_fast_mode_goal
 
     activity.heartbeat(f"Starting explore agent: {goal[:100]}...")
@@ -291,16 +295,46 @@ async def spawn_explore_agent_activity(  # noqa: C901
             }
         )
 
-    # Wrap execute_activity to inject taskId into all internal tool messages
+    # FE tool-message posts (post_agent_message) are fire-and-forget so they never
+    # block the explore leaf's loop. Each post is a ~500ms createMessage round-trip
+    # (Fly→Render + awaited Supabase broadcast); awaiting one per tool call is what
+    # made leaf cached iterations ~1.1s apart instead of ms (root streams at 0.11s,
+    # leaves at 1.34s — a 12x load lag). The explore runs with no poll_messages, so
+    # the result is already in-process; the post is FE/persistence-only. Backgrounded
+    # tasks are drained after run_agent so no message is lost.
+    _pending_fe_posts: "list[asyncio.Task]" = []
+
     async def tagged_execute_activity(activity_fn, args=None, **kwargs):
-        """Wraps call_temporal_activity_from_activity to tag internal messages with explore taskId."""
+        """Wraps call_temporal_activity_from_activity to tag internal messages with explore taskId.
+
+        post_agent_message is dispatched in the background (create_task) so the tool
+        call returns immediately; every other activity is awaited as before.
+        """
         if activity_fn.__name__ == "post_agent_message" and args and len(args) >= 4:
             metadata = args[3]
             if isinstance(metadata, dict):
                 metadata["taskId"] = task_id
                 metadata["agentType"] = "explore"
                 metadata["subAgentId"] = task_id
+            _pending_fe_posts.append(
+                asyncio.create_task(call_temporal_activity_from_activity(activity_fn, args=args, **kwargs))
+            )
+            return None
         return await call_temporal_activity_from_activity(activity_fn, args=args, **kwargs)
+
+    async def _drain_pending_fe_posts() -> None:
+        """Await all backgrounded FE posts so none is lost when the activity returns."""
+        # Include already-done tasks: one that failed before the drain still holds
+        # an unretrieved exception, which asyncio would log as "Task exception was
+        # never retrieved" (and the FE post is silently dropped). gather() retrieves
+        # every result so we can surface failures instead.
+        pending = list(_pending_fe_posts)
+        _pending_fe_posts.clear()
+        if pending:
+            results = await asyncio.gather(*pending, return_exceptions=True)
+            for result in results:
+                if isinstance(result, BaseException):
+                    logger.warning("Explore FE post failed during drain", error=str(result))
 
     # Send the system prompt verbatim. Contact + message-thread context is
     # fetched on-demand via the grep tool (network / agent_network_* / messages
@@ -418,38 +452,47 @@ async def spawn_explore_agent_activity(  # noqa: C901
     if attachment_texts:
         initial_user_text = initial_user_text + "\n\n" + "\n\n".join(attachment_texts)
 
-    # Run the agent loop
-    result = await run_agent(
-        agent_id=agent_id,
-        user_id=user_id,
-        system_prompt=explore_system_prompt,
-        verifier_prompt_generator=explore_verifier_prompt,
-        model=model,
-        tools=EXPLORE_AGENT_TOOLS,
-        initial_context=[{"role": "USER", "text": initial_user_text}],
-        task_id=task_id,
-        is_inside_temporal_activity=True,
-        execute_tool=explore_execute_tool,
-        post_message=explore_post_message,
-        max_iterations=resolved_max_iterations,
-        winddown_window=EXPLORE_WINDDOWN_WINDOW,
-        max_context_tokens=max_context_tokens,
-        skip_verification=True,
-        skip_blueprint_query=True,
-        skip_status_updates=True,
-        claude_token=claude_token,
-        gpt_token=gpt_token,
-        gpt_account_id=gpt_account_id,
-        get_gpt_token_source=(lambda: gpt_token_source),
-        get_gpt_token_pool_id=(lambda: gpt_token_pool_id),
-        on_tokens=on_tokens,
-        call_site_override="explore_agent",
-        # Fast Mode: key this explore agent by ITS OWN goal (not the shared parent
-        # agent_id), so the N parallel explore agents under one sub-agent don't all
-        # collide on (parent_goal, explore_agent, iteration) and bust each other.
-        fast_mode_cache_enabled=_explore_fast_mode_enabled,
-        goal_text=_explore_fast_mode_goal,
-    )
+    # Run the agent loop. Wrap in try/finally so backgrounded FE posts are always
+    # drained — if run_agent raises, the already-scheduled _pending_fe_posts tasks
+    # would otherwise dangle on the shared worker loop (asyncio "Task exception was
+    # never retrieved") and the final iteration's FE messages would be dropped on
+    # exactly the error path where visibility matters most.
+    try:
+        result = await run_agent(
+            agent_id=agent_id,
+            user_id=user_id,
+            system_prompt=explore_system_prompt,
+            verifier_prompt_generator=explore_verifier_prompt,
+            model=model,
+            tools=EXPLORE_AGENT_TOOLS,
+            initial_context=[{"role": "USER", "text": initial_user_text}],
+            task_id=task_id,
+            is_inside_temporal_activity=True,
+            execute_tool=explore_execute_tool,
+            post_message=explore_post_message,
+            max_iterations=resolved_max_iterations,
+            winddown_window=EXPLORE_WINDDOWN_WINDOW,
+            max_context_tokens=max_context_tokens,
+            skip_verification=True,
+            skip_blueprint_query=True,
+            skip_status_updates=True,
+            claude_token=claude_token,
+            gpt_token=gpt_token,
+            gpt_account_id=gpt_account_id,
+            get_gpt_token_source=(lambda: gpt_token_source),
+            get_gpt_token_pool_id=(lambda: gpt_token_pool_id),
+            on_tokens=on_tokens,
+            call_site_override="explore_agent",
+            # Fast Mode: key this explore agent by ITS OWN goal (not the shared parent
+            # agent_id), so the N parallel explore agents under one sub-agent don't all
+            # collide on (parent_goal, explore_agent, iteration) and bust each other.
+            fast_mode_cache_enabled=_explore_fast_mode_enabled,
+            goal_text=_explore_fast_mode_goal,
+        )
+    finally:
+        # Flush any backgrounded FE posts before returning/propagating so the FE
+        # receives every tool message even though they no longer blocked the leaf loop.
+        await _drain_pending_fe_posts()
 
     # Defensive fallback: when the explore agent terminates with attempt_completion
     # but leaves result empty, the parent receives no evidence. Synthesize a
@@ -476,7 +519,9 @@ async def spawn_explore_agent_activity(  # noqa: C901
         "summary": final_response,
         "final_response": final_response,
         "best_effort_response": result.get("best_effort_response") or final_response,
-        "error_reason": None if result.get("status") == "completed" else (result.get("message") or result.get("status")),
+        "error_reason": None
+        if result.get("status") == "completed"
+        else (result.get("message") or result.get("status")),
         "partial_structured_response": result.get("partial_structured_response"),
         "structured_response": result.get("structured_response") or result.get("partial_structured_response"),
         "tokens_in": result.get("tokens_in", 0),

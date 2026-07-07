@@ -209,6 +209,68 @@ def test_tool_aliases_constants():
     assert ALIAS_TYPE_OVERRIDES["spawn_explore_agent"] == {"type": "explore"}
     assert ALIAS_TYPE_OVERRIDES["spawn_browser_agent"] == {"type": "browser"}
     assert ALIAS_TYPE_OVERRIDES["spawn_code_agent"] == {"type": "code"}
+    # general_purpose/for_each REQUIRE start_phase — the alias must supply it or
+    # SpawnAgentTool validation rejects the DAG-resolved call.
+    assert ALIAS_TYPE_OVERRIDES["spawn_general_purpose_agent"] == {
+        "type": "general_purpose",
+        "start_phase": "EXECUTE",
+    }
+    assert ALIAS_TYPE_OVERRIDES["spawn_general_purpose_agent_for_each"] == {
+        "type": "for_each",
+        "start_phase": "EXECUTE",
+    }
+
+
+def test_dag_foreach_alias_override_passes_spawn_agent_validation():
+    """Regression: a DAG for_each/general_purpose task, after alias type-override,
+    must produce a spawn_agent call that passes SpawnAgentTool validation.
+
+    Repro of the prod failure: `spawn_general_purpose_agent_for_each` resolved to
+    spawn_agent with only {'type': 'for_each'} → start_phase=None →
+    'start_phase is required when type=...for_each'. The override must include
+    start_phase so the DAG task fans out instead of failing.
+    """
+    from loop.dag_executor import ALIAS_TYPE_OVERRIDES, _apply_alias_override
+    from utils.tool_schemas import SpawnAgentTool
+
+    for alias, agent_type in (
+        ("spawn_general_purpose_agent_for_each", "for_each"),
+        ("spawn_general_purpose_agent", "general_purpose"),
+    ):
+        # Simulate the param-populator output + the alias override, exactly as
+        # execute_dag does via params.update(type_override). The populator omits
+        # start_phase (that was the prod bug); the override must supply it.
+        params = {
+            "tool": "spawn_agent",
+            "goal": "Analyze one creator",
+            "start_phase": None,
+            "output_schema": {"fields": [{"name": "summary", "type": "str", "required": True}]},
+        }
+        if agent_type == "for_each":
+            params["items"] = ["creator-a", "creator-b"]
+
+        # Old override ({"type": ...} only) reproduces the prod failure:
+        # type is set but start_phase is not → SpawnAgentTool rejects it.
+        raised = False
+        try:
+            SpawnAgentTool(**{**params, "type": agent_type})
+        except Exception as exc:  # pydantic ValidationError (not a ValueError subclass)
+            raised = True
+            assert "start_phase is required" in str(exc), str(exc)
+        assert raised, "expected start_phase validation error with the old type-only override"
+
+        # Fill-when-missing: no populator start_phase → alias default EXECUTE,
+        # and the resolved call validates.
+        filled = _apply_alias_override(dict(params), alias)
+        tool = SpawnAgentTool(**filled)
+        assert tool.type == agent_type
+        assert tool.start_phase == "EXECUTE"
+
+        # Preserve: a populator-chosen start_phase must NOT be overwritten (keeps
+        # already-cached fan-out children on their existing keys).
+        preserved = _apply_alias_override({**params, "start_phase": "PLAN"}, alias)
+        assert preserved["start_phase"] == "PLAN"
+        assert SpawnAgentTool(**preserved).start_phase == "PLAN"
 
 
 def test_build_param_population_message_basic():
@@ -617,6 +679,9 @@ async def test_execute_dag_uses_matching_param_tool_call_for_duplicate_spawn_cal
             {
                 "goal": "Find the current population of New York City.",
                 "type": "general_purpose",
+                # start_phase is now supplied by the alias override so the
+                # resolved spawn_agent call passes SpawnAgentTool validation.
+                "start_phase": "EXECUTE",
             },
         )
     ]
@@ -693,6 +758,10 @@ async def run_all_tests():
     r.record("extract_plan_from_context_empty", test_extract_plan_from_context_empty)
     r.record("extract_plan_from_context_ignores_in_progress", test_extract_plan_from_context_ignores_in_progress)
     r.record("tool_aliases_constants", test_tool_aliases_constants)
+    r.record(
+        "dag_foreach_alias_override_passes_spawn_agent_validation",
+        test_dag_foreach_alias_override_passes_spawn_agent_validation,
+    )
     r.record("build_param_population_message_basic", test_build_param_population_message_basic)
     r.record("build_param_population_message_spawn", test_build_param_population_message_spawn_adds_context_warning)
     r.record("build_param_population_message_non_spawn", test_build_param_population_message_non_spawn_no_extra)

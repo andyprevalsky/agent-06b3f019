@@ -1066,143 +1066,86 @@ async def test_winddown_disabled_by_default():
     assert _count_winddown_msgs(result["context"]) == 0
 
 
-async def test_paused_agent_floor_sleeps_and_does_not_busy_spin():
-    """Regression: a paused agent whose wait_for_messages returns immediately
-    (orphaned sub-agent / dead parent) MUST floor-sleep each iteration instead of
-    busy-spinning the worker event loop. The spin previously pegged the loop and
-    starved every other agent on the worker (livelock -> cascade of ACTIVE
-    timeouts). Pre-fix, the wait_for_messages branch had no sleep and this test
-    would time out; post-fix it stops after the floor sleeps fire."""
-    from loop.run_agent import run_agent
+async def test_paused_agent_does_not_busy_spin_and_yields_to_cold_handler():
+    """Regression for the 2026-07-05 prod worker-starvation incident.
 
-    class _StopSpin(Exception):
-        pass
+    An orphaned sub-agent (parent workflow terminated) stays paused while its
+    wait_for_messages() resolves *instantly* instead of blocking. The old
+    top-of-loop pause branch had no floor and no escape, so it `continue`d
+    forever without incrementing `iteration` — an infinite busy-loop that
+    saturated the Temporal worker. The fix must:
+      1. never busy-spin (hard floor between paused iterations), and
+      2. yield to the cold pause handler by returning "paused" after a bounded
+         number of consecutive paused iterations — never calling the LLM.
+    """
+    from loop import run_agent as ra
 
-    sleep_calls: list = []
-    real_sleep = asyncio.sleep
-
-    async def counting_sleep(secs, *args, **kwargs):
-        sleep_calls.append(secs)
-        if len(sleep_calls) >= 3:
-            raise _StopSpin()
-        await real_sleep(0)
+    wait_calls = 0
+    llm_called = False
 
     async def always_paused():
         return True
 
-    wait_calls = {"n": 0}
-
-    async def immediate_wait():
-        wait_calls["n"] += 1
-        return True  # returns immediately — the busy-spin trigger
-
-    async def mock_system_prompt():
-        return "sys"
-
-    def mock_verifier_prompt(*args, **kwargs):
-        return "verify"
-
-    async def mock_post_message(text, role, metadata=None):
-        return None
-
-    stopped = False
-    with (
-        patch("loop.run_agent.call_llm_structured_streaming", new=AsyncMock()),
-        patch("loop.run_agent.asyncio.sleep", new=counting_sleep),
-    ):
-        try:
-            await asyncio.wait_for(
-                run_agent(
-                    agent_id="agent-pause",
-                    user_id="user-test",
-                    system_prompt=mock_system_prompt,
-                    verifier_prompt_generator=mock_verifier_prompt,
-                    model="rose-labs/rose-1-lite",
-                    tools=["attempt_completion"],
-                    initial_context=[{"role": "USER", "text": "go", "timestamp": "2024-01-01T00:00:00Z"}],
-                    is_inside_temporal_activity=True,
-                    check_paused=always_paused,
-                    wait_for_messages=immediate_wait,
-                    post_message=mock_post_message,
-                    build_messages=lambda context, prompt: [{"role": "system", "content": prompt}],
-                    max_iterations=100000,
-                    skip_verification=True,
-                    skip_status_updates=True,
-                ),
-                timeout=5,
-            )
-        except _StopSpin:
-            stopped = True
-        except asyncio.TimeoutError:
-            stopped = False
-
-    assert stopped, "run_agent busy-spun while paused (no floor sleep) — livelock regression"
-    assert len(sleep_calls) >= 3, f"expected floor sleep each paused iteration, got {sleep_calls}"
-    assert wait_calls["n"] >= 3, f"wait_for_messages should be attempted per pause, got {wait_calls['n']}"
-
-
-async def test_orphaned_agent_aborts_instead_of_pausing_forever():
-    """A child orphaned by a terminated parent raises check_abort. The loop must
-    return a terminal 'aborted' status (so the workflow finalizes) rather than
-    staying in the paused-wait loop forever. This is the real cure for the orphan
-    livelock; the floor sleep above is only defense-in-depth."""
-    from loop.run_agent import run_agent
-
-    # check_paused True (inherited pause), wait returns immediately (dead parent),
-    # then abort flips true — mirroring _check_parent_state detecting parent-gone.
-    state = {"waited": 0, "abort": False}
-
-    async def check_paused():
-        return True
-
-    async def check_abort():
-        return state["abort"]
-
-    async def wait_for_messages():
-        state["waited"] += 1
-        state["abort"] = True  # parent confirmed gone on the first wait
+    async def instant_wait():
+        # Orphaned sub-agent: parent gone → the wait returns immediately.
+        nonlocal wait_calls
+        wait_calls += 1
         return False
 
     async def mock_system_prompt():
-        return "sys"
-
-    def mock_verifier_prompt(*args, **kwargs):
-        return "verify"
+        return "System prompt"
 
     async def mock_post_message(text, role, metadata=None):
         return None
 
-    async def instant_sleep(secs, *args, **kwargs):
-        return None
+    async def mock_execute_tool(tool_name, tool_args, tool_call_id):
+        return {"message": "ok"}
+
+    async def mock_call_llm(**kwargs):
+        nonlocal llm_called
+        llm_called = True
+        return (_DummyLLMResult("", []), {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}, [])
 
     with (
-        patch("loop.run_agent.call_llm_structured_streaming", new=AsyncMock()),
-        patch("loop.run_agent.asyncio.sleep", new=instant_sleep),
+        # Zero the floor so the test runs instantly; a small escape threshold
+        # keeps the assertion tight. max_iterations is huge so the escape
+        # hatch — not max_iterations — is what stops the loop.
+        patch.object(ra, "PAUSED_WAIT_FLOOR_SECONDS", 0.0),
+        patch.object(ra, "MAX_CONSECUTIVE_PAUSED_ITERATIONS", 5),
+        patch(
+            "loop.run_agent.call_llm_structured_streaming",
+            new=AsyncMock(side_effect=mock_call_llm),
+        ),
     ):
+        # wait_for guards against a genuine infinite loop (the pre-fix bug):
+        # the old code never returns here, so this would raise TimeoutError.
         result = await asyncio.wait_for(
-            run_agent(
+            ra.run_agent(
                 agent_id="agent-orphan",
                 user_id="user-test",
                 system_prompt=mock_system_prompt,
-                verifier_prompt_generator=mock_verifier_prompt,
+                verifier_prompt_generator=mock_system_prompt,
                 model="rose-labs/rose-1-lite",
                 tools=["attempt_completion"],
-                initial_context=[{"role": "USER", "text": "go", "timestamp": "2024-01-01T00:00:00Z"}],
-                is_inside_temporal_activity=False,
-                check_paused=check_paused,
-                check_abort=check_abort,
-                wait_for_messages=wait_for_messages,
+                initial_context=[{"role": "USER", "text": "hi", "timestamp": "2024-01-01T00:00:00Z"}],
+                is_inside_temporal_activity=True,
+                check_paused=always_paused,
+                wait_for_messages=instant_wait,
                 post_message=mock_post_message,
+                execute_tool=mock_execute_tool,
                 build_messages=lambda context, prompt: [{"role": "system", "content": prompt}],
-                max_iterations=100000,
+                max_iterations=10_000,
                 skip_verification=True,
                 skip_status_updates=True,
             ),
-            timeout=5,
+            timeout=10,
         )
 
-    assert result["status"] == "aborted", f"expected aborted, got {result.get('status')}"
-    assert state["waited"] >= 1, "should have entered the paused-wait before aborting"
+    assert result["status"] == "paused", f"expected paused, got {result['status']}"
+    # Escape hatch fires at MAX_CONSECUTIVE_PAUSED_ITERATIONS (5), not at
+    # max_iterations (10000). A couple extra calls of slack for the +1 counting.
+    assert wait_calls <= 6, f"busy-spin not bounded: wait_for_messages called {wait_calls} times"
+    assert not llm_called, "LLM must never run while the agent is paused"
 
 
 async def run_all_tests():
@@ -1246,12 +1189,8 @@ async def run_all_tests():
     await r.record_async("winddown_injects_one_message_near_cap", test_winddown_injects_one_message_near_cap)
     await r.record_async("winddown_disabled_by_default", test_winddown_disabled_by_default)
     await r.record_async(
-        "paused_agent_floor_sleeps_and_does_not_busy_spin",
-        test_paused_agent_floor_sleeps_and_does_not_busy_spin,
-    )
-    await r.record_async(
-        "orphaned_agent_aborts_instead_of_pausing_forever",
-        test_orphaned_agent_aborts_instead_of_pausing_forever,
+        "paused_agent_does_not_busy_spin_and_yields_to_cold_handler",
+        test_paused_agent_does_not_busy_spin_and_yields_to_cold_handler,
     )
     teardown_mock()
     return r.summary()

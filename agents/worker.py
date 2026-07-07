@@ -235,21 +235,45 @@ class ActivityAdmissionSnapshot:
         maximum_slots: int,
         close_memory_percent: float,
         open_memory_percent: float,
+        close_cpu_percent: float = 85.0,
+        open_cpu_percent: float = 70.0,
         poll_interval_s: float = 0.1,
     ) -> None:
         if open_memory_percent >= close_memory_percent:
             raise ValueError("ACTIVITY_ADMISSION_OPEN_MEMORY_PERCENT must be below close threshold")
+        if open_cpu_percent >= close_cpu_percent:
+            raise ValueError("ACTIVITY_ADMISSION_OPEN_CPU_PERCENT must be below close threshold")
         self.maximum_slots = maximum_slots
         self.close_memory_percent = close_memory_percent
         self.open_memory_percent = open_memory_percent
+        self.close_cpu_percent = close_cpu_percent
+        self.open_cpu_percent = open_cpu_percent
         self._admission_open = True
         self._memory_percent = 0.0
+        self._cpu_percent = 0.0
+        # Prime psutil's system-wide CPU sampler so the first real read measures
+        # the interval since construction rather than returning 0.0.
+        psutil.cpu_percent(None)
 
     def _refresh_admission(self) -> None:
         self._memory_percent = float(psutil.virtual_memory().percent)
-        if self._admission_open and self._memory_percent >= self.close_memory_percent:
+        # System-wide CPU over the interval since the last poll (non-blocking).
+        # On a 1-vCPU Fly VM this is the guest core's utilization — the direct
+        # signal for GIL/event-loop saturation from concurrent agent activities.
+        self._cpu_percent = float(psutil.cpu_percent(None))
+        # Close on EITHER pressure; only reopen when BOTH have recovered, so a
+        # still-pegged core can't flap admission back open on a memory dip.
+        under_close = (
+            self._memory_percent >= self.close_memory_percent
+            or self._cpu_percent >= self.close_cpu_percent
+        )
+        under_open = (
+            self._memory_percent <= self.open_memory_percent
+            and self._cpu_percent <= self.open_cpu_percent
+        )
+        if self._admission_open and under_close:
             self._admission_open = False
-        elif not self._admission_open and self._memory_percent <= self.open_memory_percent:
+        elif not self._admission_open and under_open:
             self._admission_open = True
 
     def snapshot(self) -> dict[str, int | float | bool]:
@@ -259,6 +283,9 @@ class ActivityAdmissionSnapshot:
             "activity_admission_memory_percent": self._memory_percent,
             "activity_admission_close_memory_percent": self.close_memory_percent,
             "activity_admission_open_memory_percent": self.open_memory_percent,
+            "activity_admission_cpu_percent": self._cpu_percent,
+            "activity_admission_close_cpu_percent": self.close_cpu_percent,
+            "activity_admission_open_cpu_percent": self.open_cpu_percent,
             "activity_admission_max_slots": self.maximum_slots,
         }
 
@@ -919,6 +946,8 @@ async def main():
         maximum_slots=config.temporal.max_concurrent_activities,
         close_memory_percent=config.temporal.activity_admission_close_memory_percent,
         open_memory_percent=config.temporal.activity_admission_open_memory_percent,
+        close_cpu_percent=config.temporal.activity_admission_close_cpu_percent,
+        open_cpu_percent=config.temporal.activity_admission_open_cpu_percent,
     )
 
     # Workflow slots still use Temporal's resource tuner. Activity slots use
