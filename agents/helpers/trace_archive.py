@@ -468,12 +468,11 @@ def store_encrypted_artifact(
 
     backend = os.environ.get("TRACE_ARCHIVE_BACKEND", "").strip().lower()
     if _is_production() or backend == "r2":
-        _drain_backend_outbox()
         ref = _post_backend_artifact(root_agent_id=root_agent_id, path=path, ciphertext=ciphertext, metadata=metadata)
         if ref:
             return ref
         _write_outbox(root_agent_id, path, ciphertext, metadata)
-        return f"trace-archive/{root_agent_id}/{path}"
+        return None
 
     try:
         return _write_local(root_agent_id, path, ciphertext, metadata)
@@ -565,13 +564,15 @@ def _submit_archive_job(
                     limit=_max_artifact_bytes(),
                 )
                 return
-            _archive_bytes_now(
+            result = _archive_bytes_now(
                 root_agent_id=root_agent_id,
                 path=path,
                 body=body,
                 content_type=content_type,
                 compress=compress,
             )
+            if result is not None and _use_r2_archive():
+                _drain_backend_outbox()
         except Exception as exc:
             logger.warning("trace_archive.async_write_error", root_agent_id=safe_root, path=safe_path, error=str(exc)[:200])
 
