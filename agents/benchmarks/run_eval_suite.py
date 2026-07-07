@@ -65,11 +65,16 @@ def _vitest_script_path(task: BenchmarkTask) -> Path:
     raise ValueError(f"vitest task '{task.name}' declares no checks[].file")
 
 
-def _run_vitest_task(task: BenchmarkTask) -> bool:
+def _run_vitest_task(task: BenchmarkTask, args: argparse.Namespace) -> bool:
     script = _vitest_script_path(task)
     rel = script.relative_to(_BACKEND_DIR)
     print(f"\n=== {task.name}: npx tsx {rel} ===")
-    result = subprocess.run(["npx", "tsx", str(rel)], cwd=_BACKEND_DIR, timeout=task.timeout_seconds + 60)
+    env = os.environ.copy()
+    if args.url:
+        env["TEST_BASE_URL"] = args.url.rstrip("/")
+    elif args.port:
+        env["TEST_BASE_URL"] = f"http://localhost:{args.port}"
+    result = subprocess.run(["npx", "tsx", str(rel)], cwd=_BACKEND_DIR, timeout=task.timeout_seconds + 60, env=env)
     passed = result.returncode == 0
     print(f"=== {task.name}: {'PASS' if passed else 'FAIL'} (exit {result.returncode}) ===")
     return passed
@@ -142,7 +147,7 @@ def main() -> int:
     if agent_names:
         results["agent-suite"] = _run_agent_tasks(agent_names, args)
     for task in vitest_tasks:
-        results[task.name] = _run_vitest_task(task)
+        results[task.name] = _run_vitest_task(task, args)
 
     print("\n" + "=" * 60)
     print("  EVAL SUITE SUMMARY")
