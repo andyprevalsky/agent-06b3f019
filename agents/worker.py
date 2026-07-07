@@ -271,14 +271,8 @@ class ActivityAdmissionSnapshot:
         self._cpu_percent = float(psutil.cpu_percent(None))
         # Close on EITHER pressure; only reopen when BOTH have recovered, so a
         # still-pegged core can't flap admission back open on a memory dip.
-        under_close = (
-            self._memory_percent >= self.close_memory_percent
-            or self._cpu_percent >= self.close_cpu_percent
-        )
-        under_open = (
-            self._memory_percent <= self.open_memory_percent
-            and self._cpu_percent <= self.open_cpu_percent
-        )
+        under_close = self._memory_percent >= self.close_memory_percent or self._cpu_percent >= self.close_cpu_percent
+        under_open = self._memory_percent <= self.open_memory_percent and self._cpu_percent <= self.open_cpu_percent
         if self._admission_open and under_close:
             self._admission_open = False
         elif not self._admission_open and under_open:
@@ -688,8 +682,7 @@ async def poll_queue_metrics(
                 now = time.monotonic()
                 in_cooldown = (now - _last_scale_up_time) < SCALE_UP_COOLDOWN_SECS
                 admission_pressure = (
-                    workflow_count > 0
-                    and activity_admission_unavailable_count >= activity_admission_scale_threshold
+                    workflow_count > 0 and activity_admission_unavailable_count >= activity_admission_scale_threshold
                 )
                 if admission_pressure:
                     if _admission_pressure_since is None:
@@ -771,9 +764,7 @@ async def poll_queue_metrics(
                     workflow_task_pollers=sdk_metrics.get("workflow_task_pollers"),
                     sticky_workflow_task_pollers=sdk_metrics.get("sticky_workflow_task_pollers"),
                     activity_admission_open=activity_admission_open,
-                    activity_admission_memory_percent=float(
-                        admission_snapshot["activity_admission_memory_percent"]
-                    ),
+                    activity_admission_memory_percent=float(admission_snapshot["activity_admission_memory_percent"]),
                     activity_admission_close_memory_percent=float(
                         admission_snapshot["activity_admission_close_memory_percent"]
                     ),

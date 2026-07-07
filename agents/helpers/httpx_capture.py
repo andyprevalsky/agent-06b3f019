@@ -221,11 +221,7 @@ class _CapturingTransport(httpx.AsyncBaseTransport):
             # even on a shared client that was constructed outside this test's
             # mock context. (Pre-refactor per-call clients baked this at __init__;
             # a process-wide singleton requires the dynamic check.)
-            active = (
-                httpx.MockTransport(_mock_handler)
-                if _mock_handler is not None
-                else self._wrapped
-            )
+            active = httpx.MockTransport(_mock_handler) if _mock_handler is not None else self._wrapped
             response = await active.handle_async_request(request)
 
             # Buffer the response stream so we can capture the body

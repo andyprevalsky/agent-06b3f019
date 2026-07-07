@@ -366,18 +366,18 @@ async def run_agent(  # noqa: C901
         """One-line PLAN FSM state label injected into tool results."""
         if state == "PLAN":
             return (
-                "FSM_STATE: current=PLAN; purpose=\"clarify the user's goal; if already clear, call set_plan\"; "
+                'FSM_STATE: current=PLAN; purpose="clarify the user\'s goal; if already clear, call set_plan"; '
                 "enabled_tools=send_message_to_user,spawn_agent,set_plan; transitions=set_plan->SET_PLAN."
             )
         if state == "SET_PLAN":
             return (
-                "FSM_STATE: current=SET_PLAN; purpose=\"Route between asking the user a question or starting execution\"; "
+                'FSM_STATE: current=SET_PLAN; purpose="Route between asking the user a question or starting execution"; '
                 "enabled_tools=send_message_to_user,attempt_completion; disabled_tools=spawn_agent; "
                 "transitions=send_message_to_user->ASK_QUESTION,attempt_completion->EXIT(EXECUTE)."
             )
         if state == "ASK_QUESTION":
             return (
-                "FSM_STATE: current=ASK_QUESTION; purpose=\"Ask any questions needed before entering the EXECUTE phase\"; "
+                'FSM_STATE: current=ASK_QUESTION; purpose="Ask any questions needed before entering the EXECUTE phase"; '
                 "enabled_tools=send_message_to_user,attempt_completion,spawn_agent; "
                 "transitions=attempt_completion->EXIT(EXECUTE),spawn_agent->PLAN."
             )
@@ -516,11 +516,7 @@ async def run_agent(  # noqa: C901
         # cached system prompt) telling the model to synthesize and complete now.
         # Mirrors Hermes' single grace call — no earlier pressure warnings (they make
         # models give up prematurely), injected exactly once.
-        if (
-            winddown_window > 0
-            and not winddown_injected
-            and iteration >= max_iterations - winddown_window
-        ):
+        if winddown_window > 0 and not winddown_injected and iteration >= max_iterations - winddown_window:
             context.append(
                 {
                     "role": "SYSTEM",
@@ -533,7 +529,9 @@ async def run_agent(  # noqa: C901
                 }
             )
             winddown_injected = True
-            logger.info("run_agent.winddown_injected", agent_id=agent_id, iteration=iteration, max_iterations=max_iterations)
+            logger.info(
+                "run_agent.winddown_injected", agent_id=agent_id, iteration=iteration, max_iterations=max_iterations
+            )
 
         # 1.5. Check credits periodically (callback sets is_paused if depleted)
         if check_credits and (iteration % CREDIT_CHECK_INTERVAL == 0):
@@ -602,10 +600,7 @@ async def run_agent(  # noqa: C901
         compaction_trigger = effective_window - AUTOCOMPACT_BUFFER_TOKENS
         context_tokens = _estimate_tokens(context)
 
-        if (
-            context_tokens >= compaction_trigger
-            and compactor_failures < MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES
-        ):
+        if context_tokens >= compaction_trigger and compactor_failures < MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
             logger.info(
                 "Context overflow",
                 context_tokens=context_tokens,
@@ -772,14 +767,10 @@ async def run_agent(  # noqa: C901
             get_gpt_account_id() if get_gpt_account_id and current_gpt_token else remembered_gpt_account_id
         )
         current_gpt_token_source = (
-            get_gpt_token_source()
-            if get_gpt_token_source and current_gpt_token
-            else remembered_gpt_token_source
+            get_gpt_token_source() if get_gpt_token_source and current_gpt_token else remembered_gpt_token_source
         )
         current_gpt_token_pool_id = (
-            get_gpt_token_pool_id()
-            if get_gpt_token_pool_id and current_gpt_token
-            else remembered_gpt_token_pool_id
+            get_gpt_token_pool_id() if get_gpt_token_pool_id and current_gpt_token else remembered_gpt_token_pool_id
         )
 
         # 7. Call LLM with structured streaming
@@ -1416,10 +1407,7 @@ async def run_agent(  # noqa: C901
             if len(recent_call_hashes) >= 3 and len(set(list(recent_call_hashes)[-3:])) == 1:
                 same_call_streak += 1
                 tool_names = [t for t, _, _ in processed_tools]
-                logger.warning(
-                    f"[run_agent] Repetitive tool calls detected (streak={same_call_streak}): "
-                    f"{tool_names}"
-                )
+                logger.warning(f"[run_agent] Repetitive tool calls detected (streak={same_call_streak}): {tool_names}")
                 context.append(
                     {
                         "role": "SYSTEM",

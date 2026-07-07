@@ -7,6 +7,7 @@ position, and whether the terminal call HIT or STALLED (miss -> live).
 
 Usage: python benchmarks/explore_trajectory.py <agent_id> [--since-min N]
 """
+
 import json
 import os
 import subprocess
@@ -30,8 +31,14 @@ def main() -> None:
     )
     out = subprocess.run(
         [
-            "curl", "-sS", "-u", f"{user}:{pw}", "--get", endpoint,
-            "--data-urlencode", f"query={query}",
+            "curl",
+            "-sS",
+            "-u",
+            f"{user}:{pw}",
+            "--get",
+            endpoint,
+            "--data-urlencode",
+            f"query={query}",
         ],
         capture_output=True,
         text=True,
@@ -59,10 +66,14 @@ def main() -> None:
         except Exception:
             continue
         kind = (
-            "replay" if "replay" in ev
-            else "miss" if "miss" in ev
-            else "stored" if "stored" in ev
-            else "dropped" if "dropped" in ev
+            "replay"
+            if "replay" in ev
+            else "miss"
+            if "miss" in ev
+            else "stored"
+            if "stored" in ev
+            else "dropped"
+            if "dropped" in ev
             else ev
         )
         ns[gh][pos].add(kind)
