@@ -834,6 +834,17 @@ while :; do
 done
 echo "✅ Machine started + ssh-ready ($mid)"
 
+# Warm machines can retain a detached driver from an interrupted local
+# controller. Clear it before touching the shared /data/repo checkout.
+echo "🧹 Clearing stale on-box benchmark driver..."
+ssh_read "$mid" "
+    pkill -TERM -f '/data/[c]loudbench-run.sh|[g]it -C $REMOTE_REPO fetch|[i]ndex-pack.*fetch-pack' 2>/dev/null || true
+    sleep 2
+    pkill -KILL -f '/data/[c]loudbench-run.sh|[g]it -C $REMOTE_REPO fetch|[i]ndex-pack.*fetch-pack' 2>/dev/null || true
+    rm -f '$REMOTE_REPO/.context/cloudbench/report-card.json' '$REMOTE_REPO/.context/cloudbench/run.json' 2>/dev/null || true
+    git config --global --add safe.directory '$REMOTE_REPO' 2>/dev/null || true
+" >/dev/null 2>&1 || true
+
 # ── 2. Deliver + launch the on-box driver DETACHED ──────────────────────────
 # base64 the LOCAL cloudbench-run.sh + a small invocation wrapper, write both to
 # the box, then launch DETACHED with setsid so the driver survives the ssh session
@@ -883,13 +894,11 @@ for _ in 1 2 3 4 5; do
     printf '%s' "$o" | grep -q WROTE && { _ok=1; break; }; sleep 3
 done
 [ "$_ok" = 1 ] || { echo "❌ could not stage the on-box driver after retries"; exit 1; }
+FLY ssh console -a "$APP" --machine "$mid" -C "bash -c \"setsid bash '$REMOTE_TMP_SCRIPT' >> '$REMOTE_LOG' 2>&1 < /dev/null &\"" >/dev/null 2>&1 || true
+sleep 5
+o="$(ssh_read "$mid" "pgrep -f cloudbench-run.sh >/dev/null 2>&1 && echo RUNNING")"
 _ok=0
-for _ in 1 2 3 4 5; do
-    FLY ssh console -a "$APP" --machine "$mid" -C "bash -c \"setsid bash '$REMOTE_TMP_SCRIPT' >> '$REMOTE_LOG' 2>&1 < /dev/null &\"" >/dev/null 2>&1 || true
-    sleep 5
-    o="$(ssh_read "$mid" "pgrep -f cloudbench-run.sh >/dev/null 2>&1 && echo RUNNING")"
-    printf '%s' "$o" | grep -q RUNNING && { _ok=1; break; }
-done
+printf '%s' "$o" | grep -q RUNNING && _ok=1
 if [ "$_ok" = 1 ]; then echo "✅ On-box driver launched + confirmed running."; else echo "   ⚠️ driver-running check inconclusive; polling anyway."; fi
 
 # ── 3. Mirror the live dashboard to the Mac + open it in Chrome ─────────────
