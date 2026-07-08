@@ -343,11 +343,18 @@ class WorldModelToolExecutionAdapter:
             started = time.monotonic()
             observation = await self.client.step(self.world_model_name, session_id, action)
             wall_elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
-            return world_model_observation_to_tool_result(
+            result = world_model_observation_to_tool_result(
                 observation,
                 simulated=True,
                 wall_elapsed_ms=wall_elapsed_ms,
             )
+            if _wmh_fallback_on_unavailable_enabled() and _wmh_result_unavailable(result):
+                real_result = await real_executor(tool_name, tool_args, tool_call_id)
+                if isinstance(real_result, dict):
+                    real_result.setdefault("world_model_unavailable_fallback", True)
+                    real_result.setdefault("world_model_unavailable_observation", observation)
+                return real_result
+            return result
         real_result = await real_executor(tool_name, tool_args, tool_call_id)
         started = time.monotonic()
         try:
@@ -440,6 +447,37 @@ def _observation_tool_result_payload(observation: JsonObject) -> Any:
         if candidate is not None:
             return candidate
     return None
+
+
+def _wmh_fallback_on_unavailable_enabled() -> bool:
+    return os.environ.get("BENCHMARK_WMH_FALLBACK_ON_UNAVAILABLE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _wmh_result_unavailable(value: Any) -> bool:
+    if isinstance(value, dict):
+        metadata = value.get("metadata")
+        if isinstance(metadata, dict) and metadata.get("result_unavailable") is True:
+            return True
+        if value.get("result_unavailable") is True:
+            return True
+        for key in ("content", "message"):
+            content = value.get(key)
+            if isinstance(content, str) and content.strip():
+                try:
+                    parsed = json.loads(content)
+                except json.JSONDecodeError:
+                    continue
+                if _wmh_result_unavailable(parsed):
+                    return True
+        for key in ("result", "tool_result", "world_model_observation"):
+            if _wmh_result_unavailable(value.get(key)):
+                return True
+    return False
 
 
 @activity.defn

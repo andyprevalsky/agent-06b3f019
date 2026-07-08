@@ -1563,7 +1563,7 @@ async def poll_agent(
 
         if realtime_monitor and realtime_monitor.failure_reason:
             realtime_failure = realtime_monitor.reconcile_snapshot(messages)
-            if realtime_failure:
+            if realtime_failure and status in TERMINAL_STATUSES:
                 return data, approvals_triggered, approvals_resolved, realtime_failure
 
         # Validate context well-formedness. Any error-severity violation is an

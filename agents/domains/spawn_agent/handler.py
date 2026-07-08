@@ -57,6 +57,10 @@ def _combined_goal_text(workflow_instance, tool_call: Dict[str, Any]) -> str:
     ).lower()
 
 
+def _current_tool_goal_text(tool_call: Dict[str, Any]) -> str:
+    return str(tool_call.get("goal") or "").lower()
+
+
 def _explicit_general_purpose_requested(goal_text: str) -> bool:
     return (
         "spawn_general_purpose_agent" in goal_text
@@ -68,6 +72,7 @@ def _explicit_general_purpose_requested(goal_text: str) -> bool:
 def _explore_only_research_instruction(workflow_instance, tool_call: Dict[str, Any]) -> bool:
     """Detect explicit instructions that this task should research via explore only."""
     goal_text = _combined_goal_text(workflow_instance, tool_call)
+    current_goal_text = _current_tool_goal_text(tool_call)
 
     asks_for_explore = (
         "explore-agent" in goal_text
@@ -96,7 +101,7 @@ def _explore_only_research_instruction(workflow_instance, tool_call: Dict[str, A
         or "no browser agent" in goal_text
         or "no code sandbox" in goal_text
     )
-    return asks_for_explore and forbids_heavy_agents and not _explicit_general_purpose_requested(goal_text)
+    return asks_for_explore and forbids_heavy_agents and not _explicit_general_purpose_requested(current_goal_text)
 
 
 def _expected_explore_agents_for_city_task(goal_text: str) -> int | None:

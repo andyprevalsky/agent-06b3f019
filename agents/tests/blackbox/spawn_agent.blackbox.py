@@ -983,6 +983,38 @@ async def test_handler_allows_general_purpose_when_explicitly_required():
     assert any(e.status == MessageStatus.FINISHED for e in events)
 
 
+async def test_handler_blocks_child_general_purpose_even_when_parent_required_general_purpose():
+    """Parent benchmark wording must not disable explore-only guard inside children."""
+    from tools.base import MessageStatus
+
+    from domains.spawn_agent.handler import SpawnAgentManager
+
+    wf = _FakeWFInstance(
+        depth=1,
+        goal=(
+            "Root task: MUST use spawn_general_purpose_agent exactly twice. "
+            "Child task: use explore-agent web research and MUST NOT use a browser agent, "
+            "Claude Code, or code sandbox."
+        ),
+    )
+
+    events = await _collect(
+        SpawnAgentManager().execute_tool(
+            workflow_instance=wf,
+            tool_call={
+                "type": "general_purpose",
+                "goal": "Find current Tokyo population using only explore-agent web research.",
+                "output_schema": {"fields": []},
+            },
+            tool_call_id="tc",
+        )
+    )
+
+    assert len(events) == 1
+    assert events[0].status == MessageStatus.ERROR
+    assert "explore-agent web research only" in events[0].message
+
+
 async def test_handler_for_each_depth_exceeded_raises():
     """for_each at depth >= FOR_EACH_MAX_DEPTH raises ValueError."""
     from domains.spawn_agent.handler import SpawnAgentManager
@@ -1988,6 +2020,10 @@ async def run_all_tests():
     await r.record_async(
         "handler_allows_general_purpose_when_explicitly_required",
         test_handler_allows_general_purpose_when_explicitly_required,
+    )
+    await r.record_async(
+        "handler_blocks_child_general_purpose_even_when_parent_required_general_purpose",
+        test_handler_blocks_child_general_purpose_even_when_parent_required_general_purpose,
     )
     await r.record_async("handler_for_each_depth", test_handler_for_each_depth_exceeded_raises)
     await r.record_async("handler_for_each_no_items", test_handler_for_each_no_items_raises)

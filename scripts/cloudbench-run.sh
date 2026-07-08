@@ -307,6 +307,7 @@ if [ "$BENCH_SIMULATE" = "1" ]; then
     STACK_ENV+=(
         "BENCHMARK_WORLD_MODEL_MODE=simulate"
         "BENCHMARK_SKIP_BROWSER_AUTH_SYNC=1"
+        "BENCHMARK_WMH_FALLBACK_ON_UNAVAILABLE=1"
         "WMH_BASE_URL=http://localhost:$WMH_PORT"
     )
 else
