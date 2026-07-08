@@ -152,6 +152,16 @@ if [ -n "$REF" ]; then
     gosu "$APP_USER" git -C "$REPO_DIR" reset --hard 2>&1 | sed 's/^/   /' || true
 fi
 log "checkout at $(gosu "$APP_USER" git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+if [ -n "${LOCAL_PATCH_B64:-}" ]; then
+    PATCH_FILE="/tmp/cloudbench-local.patch"
+    if printf '%s' "$LOCAL_PATCH_B64" | base64 -d > "$PATCH_FILE" 2>/dev/null && [ -s "$PATCH_FILE" ]; then
+        log "applying local workspace patch on top of checkout"
+        if ! gosu "$APP_USER" git -C "$REPO_DIR" apply --whitespace=nowarn "$PATCH_FILE" 2>&1 | sed 's/^/   /'; then
+            log "FATAL: could not apply local workspace patch"
+            finish 1
+        fi
+    fi
+fi
 
 # ── 2. Decode injected secrets into the repo .env files the stack reads ─────
 # Fly secrets are exposed as env vars in the machine init AND in ssh sessions.
