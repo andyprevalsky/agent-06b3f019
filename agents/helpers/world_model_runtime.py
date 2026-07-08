@@ -458,6 +458,10 @@ def _wmh_fallback_on_unavailable_enabled() -> bool:
     }
 
 
+def wmh_fallback_on_unavailable_enabled() -> bool:
+    return _wmh_fallback_on_unavailable_enabled()
+
+
 def _wmh_result_unavailable(value: Any) -> bool:
     if isinstance(value, dict):
         metadata = value.get("metadata")
@@ -478,6 +482,10 @@ def _wmh_result_unavailable(value: Any) -> bool:
             if _wmh_result_unavailable(value.get(key)):
                 return True
     return False
+
+
+def wmh_result_unavailable(value: Any) -> bool:
+    return _wmh_result_unavailable(value)
 
 
 @activity.defn

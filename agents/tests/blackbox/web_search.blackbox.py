@@ -218,6 +218,40 @@ async def test_web_search_activity_fast_cache_hit_marks_cached_result():
     assert result[FAST_CACHE_HIT_FIELD] is True
 
 
+async def test_web_search_activity_ignores_unavailable_fast_cache_when_fallback_enabled():
+    """Benchmark fallback mode treats unavailable WMH observations as cache misses."""
+    from tools.web_search.handler import FAST_CACHE_HIT_FIELD, web_search_activity
+
+    cached = {
+        "answer": '{"result_unavailable": true}',
+        "metadata": {"result_unavailable": True},
+    }
+    live = {"results": [{"title": "live"}], "answer": "live answer", "query": "q"}
+
+    with patch.dict(
+        "os.environ",
+        {
+            "BENCHMARK_WMH_FALLBACK_ON_UNAVAILABLE": "1",
+            "BENCHMARK_WORLD_MODEL_MODE": "",
+        },
+        clear=False,
+    ):
+        with patch("tools.web_search.handler.fast_cache_client.cache_get", new=AsyncMock(return_value=cached)):
+            with patch("tools.web_search.handler.fast_cache_client.cache_set", new=AsyncMock(return_value=True)) as set_cache:
+                with patch("tools.web_search.handler.execute_search", new=AsyncMock(return_value=live)) as execute_search:
+                    result = await web_search_activity(
+                        query="AI trends",
+                        max_tokens=1000,
+                        fast_mode_cache_enabled=True,
+                        fast_mode_goal="goal",
+                    )
+
+    execute_search.assert_awaited_once_with(query="AI trends", max_tokens=1000)
+    assert result == live
+    assert FAST_CACHE_HIT_FIELD not in result
+    assert set_cache.await_count == 1
+
+
 async def test_manager_execute_tool_raises_on_error():
     """WebSearchManager re-raises on activity exception."""
     from tools.web_search.handler import WebSearchManager
@@ -280,6 +314,10 @@ async def run_all_tests():
     await r.record_async("manager_execute_tool_happy", test_manager_execute_tool_happy)
     await r.record_async("manager_fast_cache_no_cost", test_manager_execute_tool_fast_cache_hit_has_no_service_cost)
     await r.record_async("activity_fast_cache_marks_result", test_web_search_activity_fast_cache_hit_marks_cached_result)
+    await r.record_async(
+        "activity_fast_cache_ignores_unavailable",
+        test_web_search_activity_ignores_unavailable_fast_cache_when_fallback_enabled,
+    )
     await r.record_async("manager_execute_tool_raises", test_manager_execute_tool_raises_on_error)
     await r.record_async("manager_long_query_truncates", test_manager_execute_tool_long_query_truncates)
     await r.record_async("web_search_entry_point", test_web_search_entry_point)
