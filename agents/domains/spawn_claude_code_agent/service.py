@@ -1345,6 +1345,7 @@ async def spawn_claude_code_activity(  # noqa: C901
             attachments=attachments,
             github_repo_url=github_repo_url,
             code_provider=code_provider,
+            fast_mode_cache_enabled=fast_mode_cache_enabled,
         )
         task_id = session_data["task_id"]
         sandbox_id = session_data["sandbox_id"]
