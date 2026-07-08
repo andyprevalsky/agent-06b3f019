@@ -5,6 +5,16 @@ import asyncio
 from providers.fast_cache import client
 
 
+def reset_client_state() -> None:
+    client._pending_gets.clear()
+    client._pending_gets_lock = None
+    client._pending_gets_flush_task = None
+    client._pending_gets_batch_tasks.clear()
+    client._archive_read_tasks.clear()
+    client._archive_read_semaphore = None
+    client._archive_read_semaphore_loop = None
+
+
 def test_concurrent_cache_gets_are_batched(monkeypatch):
     calls: list[list[str]] = []
 
@@ -23,12 +33,7 @@ def test_concurrent_cache_gets_are_batched(monkeypatch):
         return None
 
     async def run():
-        client._pending_gets.clear()
-        client._pending_gets_lock = None
-        client._pending_gets_flush_task = None
-        client._archive_read_tasks.clear()
-        client._archive_read_semaphore = None
-        client._archive_read_semaphore_loop = None
+        reset_client_state()
         monkeypatch.setattr(client, "_GET_BATCH_DELAY_S", 0.001)
         monkeypatch.setattr(client, "_fetch_cache_records_many", fake_fetch)
         monkeypatch.setattr(client, "_queue_archive_cache_read", noop_archive)
@@ -41,6 +46,53 @@ def test_concurrent_cache_gets_are_batched(monkeypatch):
 
         assert [result["value"]["key"] for result in results] == ["k1", "k2", "k1"]
         assert calls == [["k1", "k2"]]
+
+    asyncio.run(run())
+
+
+def test_cache_get_batches_can_overlap_when_one_batch_is_in_flight(monkeypatch):
+    calls: list[list[str]] = []
+    first_fetch_started = asyncio.Event()
+    second_fetch_started = asyncio.Event()
+    release_first_fetch = asyncio.Event()
+
+    async def fake_fetch(keys: list[str]):
+        calls.append(keys)
+        if keys == ["k1"]:
+            first_fetch_started.set()
+            await release_first_fetch.wait()
+        else:
+            second_fetch_started.set()
+        return {
+            key: {
+                "hit": True,
+                "value": {"key": key},
+                "blobPath": None,
+            }
+            for key in keys
+        }
+
+    def noop_archive(*args, **kwargs):
+        return None
+
+    async def run():
+        reset_client_state()
+        monkeypatch.setattr(client, "_GET_BATCH_DELAY_S", 0.001)
+        monkeypatch.setattr(client, "_GET_BATCH_MAX_IN_FLIGHT", 2)
+        monkeypatch.setattr(client, "_fetch_cache_records_many", fake_fetch)
+        monkeypatch.setattr(client, "_queue_archive_cache_read", noop_archive)
+
+        first = asyncio.create_task(client.cache_get_record("k1"))
+        await asyncio.wait_for(first_fetch_started.wait(), timeout=0.1)
+
+        second = asyncio.create_task(client.cache_get_record("k2"))
+        await asyncio.wait_for(second_fetch_started.wait(), timeout=0.1)
+
+        release_first_fetch.set()
+        results = await asyncio.gather(first, second)
+
+        assert [result["value"]["key"] for result in results] == ["k1", "k2"]
+        assert calls == [["k1"], ["k2"]]
 
     asyncio.run(run())
 
@@ -63,12 +115,7 @@ def test_cache_get_record_does_not_wait_for_read_archive(monkeypatch):
         await asyncio.sleep(0.05)
 
     async def run():
-        client._pending_gets.clear()
-        client._pending_gets_lock = None
-        client._pending_gets_flush_task = None
-        client._archive_read_tasks.clear()
-        client._archive_read_semaphore = None
-        client._archive_read_semaphore_loop = None
+        reset_client_state()
         monkeypatch.setattr(client, "_GET_BATCH_DELAY_S", 0.001)
         monkeypatch.setattr(client, "_fetch_cache_records_many", fake_fetch)
         monkeypatch.setattr(client, "_archive_cache_read", slow_archive)
@@ -97,9 +144,7 @@ def test_archive_read_side_work_is_bounded(monkeypatch):
         active -= 1
 
     async def run():
-        client._archive_read_tasks.clear()
-        client._archive_read_semaphore = None
-        client._archive_read_semaphore_loop = None
+        reset_client_state()
         monkeypatch.setattr(client, "_ARCHIVE_READ_MAX_CONCURRENCY", 2)
         monkeypatch.setattr(client, "_archive_cache_read", slow_archive)
 

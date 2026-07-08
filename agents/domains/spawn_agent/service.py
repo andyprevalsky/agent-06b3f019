@@ -295,14 +295,14 @@ async def spawn_explore_agent_activity(  # noqa: C901
             }
         )
 
-    # FE tool-message posts (post_agent_message) are fire-and-forget so they never
-    # block the explore leaf's loop. Each post is a ~500ms createMessage round-trip
-    # (Fly→Render + awaited Supabase broadcast); awaiting one per tool call is what
-    # made leaf cached iterations ~1.1s apart instead of ms (root streams at 0.11s,
-    # leaves at 1.34s — a 12x load lag). The explore runs with no poll_messages, so
-    # the result is already in-process; the post is FE/persistence-only. Backgrounded
-    # tasks are drained after run_agent so no message is lost.
+    # FE message posts are fire-and-forget so they never block the explore leaf's
+    # loop. Each post is a ~500ms createMessage round-trip (Fly->Render + awaited
+    # Supabase broadcast); awaiting one per cached turn serializes fanout leaves on
+    # UI/debug persistence. The explore runs with no poll_messages, so context is
+    # already in-process; the post is FE/persistence-only. Backgrounded tasks are
+    # drained after run_agent so no message is lost.
     _pending_fe_posts: "list[asyncio.Task]" = []
+    _FE_POST_DRAIN_THRESHOLD = 64
 
     async def tagged_execute_activity(activity_fn, args=None, **kwargs):
         """Wraps call_temporal_activity_from_activity to tag internal messages with explore taskId.
@@ -335,6 +335,10 @@ async def spawn_explore_agent_activity(  # noqa: C901
             for result in results:
                 if isinstance(result, BaseException):
                     logger.warning("Explore FE post failed during drain", error=str(result))
+
+    async def _maybe_drain_pending_fe_posts() -> None:
+        if len(_pending_fe_posts) >= _FE_POST_DRAIN_THRESHOLD:
+            await _drain_pending_fe_posts()
 
     # Send the system prompt verbatim. Contact + message-thread context is
     # fetched on-demand via the grep tool (network / agent_network_* / messages
@@ -430,13 +434,18 @@ async def spawn_explore_agent_activity(  # noqa: C901
 
     async def explore_post_message(message: str, role: str, metadata: Optional[Dict] = None):
         """Post messages from the explore agent to DB."""
-        await save_explore_message(
-            agent_id=agent_id,
-            title="Explore agent thinking",
-            message=message[:EXPLORE_MESSAGE_TRUNCATE_LEN],
-            status=MessageStatus.FINISHED,
-            task_id=task_id,
+        _pending_fe_posts.append(
+            asyncio.create_task(
+                save_explore_message(
+                    agent_id=agent_id,
+                    title="Explore agent thinking",
+                    message=message[:EXPLORE_MESSAGE_TRUNCATE_LEN],
+                    status=MessageStatus.FINISHED,
+                    task_id=task_id,
+                )
+            )
         )
+        await _maybe_drain_pending_fe_posts()
 
     # Build initial context with goal + any resolved attachment content.
     # Prepend a [STATE: time=...] line so the explore agent can compute
