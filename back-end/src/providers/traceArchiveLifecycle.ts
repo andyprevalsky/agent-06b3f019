@@ -220,13 +220,56 @@ export async function storeWorkerArtifact(
 export async function captureAgentStart(
   input: AgentStartRequest
 ): Promise<{ fixture: ArchiveArtifactRef | null }> {
-  const fixture = await collectFixture(input.agentId, 'start');
+  const fixture = await collectAgentStartFixture(input);
+  return archiveAgentStartFixture(input.agentId, fixture);
+}
+
+export async function collectAgentStartFixture(
+  input: AgentStartRequest
+): Promise<Awaited<ReturnType<typeof collectFixture>>> {
+  return collectFixture(input.agentId, 'start');
+}
+
+export async function archiveAgentStartFixture(
+  agentId: string,
+  fixture: Awaited<ReturnType<typeof collectFixture>>
+): Promise<{ fixture: ArchiveArtifactRef | null }> {
   const result = await archiveJson({
-    rootAgentId: input.agentId,
+    rootAgentId: agentId,
     objectPath: 'db/start.fixture.json.gz.enc',
     value: fixture,
   });
   return { fixture: result };
+}
+
+export async function prepareAgentStartArchive(
+  agentId: string
+): Promise<(() => Promise<void>) | null> {
+  try {
+    const fixture = await collectAgentStartFixture({ agentId });
+    return async () => {
+      try {
+        const result = await archiveAgentStartFixture(agentId, fixture);
+        if (result.fixture !== null) {
+          log.info('Trace archive start fixture captured', {
+            agent_id: agentId,
+            ref: result.fixture.ref,
+          });
+        }
+      } catch (error) {
+        log.warn('Trace archive start fixture unavailable', {
+          agent_id: agentId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    };
+  } catch (error) {
+    log.warn('Trace archive start fixture unavailable', {
+      agent_id: agentId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
 }
 
 async function waitForActiveFinalize(rootAgentId: string): Promise<void> {

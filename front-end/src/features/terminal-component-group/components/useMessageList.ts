@@ -17,12 +17,7 @@ import {
   type MutableRefObject,
   type RefObject,
 } from 'react';
-import {
-  useAnimatedCounter,
-  type AgentContextValue,
-  type AgentDetail,
-  type Message,
-} from '../hooks';
+import { useAnimatedCounter, type AgentContextValue, type Message } from '../hooks';
 import {
   useFilteredMessages,
   useFilteredStreaming,
@@ -30,6 +25,7 @@ import {
   type FilteredMessages,
   type FilteredStreamingState,
 } from './useMessageFiltering';
+import { useThinkingVisibility } from './useThinkingVisibility';
 
 // ─── Animation buffer ────────────────────────────────────────────────────
 
@@ -125,135 +121,6 @@ export function useMessageAnimationBuffer({
   };
 }
 
-// ─── Thinking visibility ─────────────────────────────────────────────────
-
-interface UseThinkingVisibilityOptions {
-  showThinkingIndicator: boolean;
-  agent: AgentDetail | null;
-  filteredMessages: Message[];
-  isChatMode: boolean;
-  hasStreamingBubbles: boolean;
-  hasStreamingPlan: boolean;
-  selectedAgentId: string | null;
-  assistantInsertedRef: MutableRefObject<boolean>;
-}
-
-function isLastAttentionBlocking(last: Message | undefined, isChatMode: boolean): boolean {
-  if (!last?.metadata?.isUserAttentionMessage) return false;
-  if (isChatMode) return true;
-  const isQuestion = (last.metadata?.sendMessageToUser as { isQuestion?: boolean } | undefined)
-    ?.isQuestion;
-  const toolApproval = (
-    last.metadata?.requestUserApproval as { toolApproval?: boolean } | undefined
-  )?.toolApproval;
-  return isQuestion === true || toolApproval === true;
-}
-
-function isLastToolInProgress(last: Message | undefined): boolean {
-  return (
-    last?.role === 'TOOL' &&
-    last.metadata?.toolStatus === 'IN_PROGRESS' &&
-    !last.metadata?.isUserAttentionMessage
-  );
-}
-
-function computeShouldShow(opts: UseThinkingVisibilityOptions): boolean {
-  const {
-    showThinkingIndicator,
-    agent,
-    filteredMessages,
-    isChatMode,
-    hasStreamingBubbles,
-    hasStreamingPlan,
-  } = opts;
-  if (!showThinkingIndicator) return false;
-
-  const isAgentActive =
-    agent &&
-    agent.status !== 'PAUSED' &&
-    agent.status !== 'COMPLETED' &&
-    agent.status !== 'FAILED' &&
-    agent.status !== 'OUT_OF_CREDITS' &&
-    agent.status !== 'COST_LIMIT_REACHED';
-  if (!isAgentActive) return false;
-
-  const last = filteredMessages[filteredMessages.length - 1];
-  if (isLastToolInProgress(last)) return false;
-  if (isLastAttentionBlocking(last, isChatMode)) return false;
-
-  const hasInProgressTool = filteredMessages.some(
-    (m) =>
-      m.role === 'TOOL' &&
-      m.metadata?.toolStatus === 'IN_PROGRESS' &&
-      !m.metadata?.isUserAttentionMessage,
-  );
-  if (hasInProgressTool || hasStreamingPlan) return false;
-
-  if (hasStreamingBubbles) return true;
-
-  return true;
-}
-
-export function useThinkingVisibility(opts: UseThinkingVisibilityOptions): boolean {
-  const { selectedAgentId, assistantInsertedRef } = opts;
-  const [thinkingVisible, setThinkingVisible] = useState(false);
-  const prevAgentIdRef = useRef<string | null>(selectedAgentId);
-  const showDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const shouldShow = computeShouldShow(opts);
-  const shouldDismissPersistedThinking =
-    opts.hasStreamingPlan || opts.agent?.status === 'COMPLETED';
-
-  useEffect(() => {
-    if (showDebounceRef.current) {
-      clearTimeout(showDebounceRef.current);
-      showDebounceRef.current = null;
-    }
-
-    if (prevAgentIdRef.current !== selectedAgentId) {
-      prevAgentIdRef.current = selectedAgentId;
-      setThinkingVisible(shouldShow);
-      assistantInsertedRef.current = false;
-      return;
-    }
-
-    if (shouldDismissPersistedThinking) {
-      setThinkingVisible(false);
-      return;
-    }
-
-    if (assistantInsertedRef.current) {
-      setThinkingVisible(false);
-      assistantInsertedRef.current = false;
-      return;
-    }
-
-    if (!shouldShow && thinkingVisible) {
-      setThinkingVisible(false);
-      return;
-    }
-
-    if (shouldShow && !thinkingVisible) {
-      showDebounceRef.current = setTimeout(() => setThinkingVisible(true), 800);
-    }
-
-    return () => {
-      if (showDebounceRef.current) {
-        clearTimeout(showDebounceRef.current);
-        showDebounceRef.current = null;
-      }
-    };
-  }, [
-    shouldShow,
-    shouldDismissPersistedThinking,
-    selectedAgentId,
-    assistantInsertedRef,
-    thinkingVisible,
-  ]);
-
-  return thinkingVisible;
-}
-
 // ─── Streaming auto-scroll (sub-agent panels only) ───────────────────────
 
 export function useStreamingAutoScroll(
@@ -304,7 +171,10 @@ export function useMessageListState({
 }: UseMessageListStateOptions): MessageListState {
   const assistantInsertedRef = useRef(false);
   const filtered = useFilteredMessages(ctx.messages, subAgentId);
-  const filteredMessages = useSubAgentTreeMerge(filtered.filteredMessagesRaw);
+  const filteredMessages = useSubAgentTreeMerge(
+    filtered.filteredMessagesRaw,
+    subAgentId === undefined ? ctx.selectedAgentId : undefined,
+  );
 
   const streaming = useFilteredStreaming({
     subAgentId,

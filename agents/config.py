@@ -36,6 +36,13 @@ class TemporalConfig:
     max_concurrent_activities: int = 100
     activity_admission_close_memory_percent: float = 80.0
     activity_admission_open_memory_percent: float = 75.0
+    # CPU-pressure admission (mirrors the memory gate). The per-turn agent work
+    # runs inside activities on a single GIL-bound vCPU, so a worker can peg its
+    # core (event-loop starvation) long before memory fills. Closing admission on
+    # high CPU makes the fleet autoscaler (which counts admission-unavailable
+    # workers) scale out on CPU pressure, not just memory.
+    activity_admission_close_cpu_percent: float = 85.0
+    activity_admission_open_cpu_percent: float = 70.0
     max_concurrent_workflows: int = 50  # Max concurrent agents (aligned with activities)
     max_cached_workflows: int = 100  # Reduced to match workflow count
     # Polling concurrency. Was 2/2 — too low when several workflows hit init in
@@ -45,6 +52,12 @@ class TemporalConfig:
     # the 120 s benchmark window even under load.
     max_concurrent_activity_task_polls: int = 8
     max_concurrent_workflow_task_polls: int = 8
+    # Temporal's SDK default is 0.2, which turns 8 workflow pollers into
+    # roughly 1 normal poller + 7 sticky pollers. Fanout creates many fresh
+    # child workflows that can only start on the normal task queue, so keep
+    # the split balanced unless an environment explicitly chooses otherwise.
+    nonsticky_to_sticky_poll_ratio: float = 1.0
+    sticky_queue_schedule_to_start_timeout_seconds: int = 10
 
     # Timeout settings (in seconds)
     activity_start_to_close_timeout: int = 300
@@ -227,10 +240,16 @@ def load_config() -> AppConfig:
         max_concurrent_activities=int(os.getenv("MAX_CONCURRENT_ACTIVITIES", "100")),
         activity_admission_close_memory_percent=float(os.getenv("ACTIVITY_ADMISSION_CLOSE_MEMORY_PERCENT", "80")),
         activity_admission_open_memory_percent=float(os.getenv("ACTIVITY_ADMISSION_OPEN_MEMORY_PERCENT", "75")),
+        activity_admission_close_cpu_percent=float(os.getenv("ACTIVITY_ADMISSION_CLOSE_CPU_PERCENT", "85")),
+        activity_admission_open_cpu_percent=float(os.getenv("ACTIVITY_ADMISSION_OPEN_CPU_PERCENT", "70")),
         max_concurrent_workflows=int(os.getenv("MAX_CONCURRENT_WORKFLOWS", "50")),
         max_cached_workflows=int(os.getenv("MAX_CACHED_WORKFLOWS", "100")),
         max_concurrent_activity_task_polls=int(os.getenv("MAX_CONCURRENT_ACTIVITY_TASK_POLLERS", "8")),
         max_concurrent_workflow_task_polls=int(os.getenv("MAX_CONCURRENT_WORKFLOW_TASK_POLLERS", "8")),
+        nonsticky_to_sticky_poll_ratio=float(os.getenv("NONSTICKY_TO_STICKY_POLL_RATIO", "1.0")),
+        sticky_queue_schedule_to_start_timeout_seconds=int(
+            os.getenv("STICKY_QUEUE_SCHEDULE_TO_START_TIMEOUT_SECONDS", "10")
+        ),
         activity_start_to_close_timeout=int(os.getenv("ACTIVITY_START_TO_CLOSE_TIMEOUT", "300")),
         activity_schedule_to_close_timeout=int(os.getenv("ACTIVITY_SCHEDULE_TO_CLOSE_TIMEOUT", "600")),
         activity_heartbeat_timeout=int(os.getenv("ACTIVITY_HEARTBEAT_TIMEOUT", "30")),

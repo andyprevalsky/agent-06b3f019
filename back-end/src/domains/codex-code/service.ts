@@ -33,6 +33,7 @@ export interface CreateSessionParams {
   attachments?: FilePointer[];
   github_repo_url?: string;
   user_id: string;
+  fast_mode_cache_enabled?: boolean;
 }
 
 export interface CloseSessionParams {
@@ -96,7 +97,19 @@ export async function createSession(params: CreateSessionParams) {
     normalizedRepoUrl = accessCheck.normalizedUrl!;
   }
 
-  const fastModeCacheEnabled = await repo.findAgentFastModeCache(agent_id);
+  const persistedFastModeCacheEnabled = await repo.findAgentFastModeCache(agent_id);
+  const fastModeCacheEnabled = params.fast_mode_cache_enabled ?? persistedFastModeCacheEnabled;
+  if (
+    params.fast_mode_cache_enabled !== undefined &&
+    params.fast_mode_cache_enabled !== persistedFastModeCacheEnabled
+  ) {
+    log.warn('Codex Code session Fast Mode flag mismatch', {
+      agentId: agent_id,
+      requestFastModeCacheEnabled: params.fast_mode_cache_enabled,
+      persistedFastModeCacheEnabled,
+      effectiveFastModeCacheEnabled: fastModeCacheEnabled,
+    });
+  }
   const session = await createCodexCodeSession(
     agent_id,
     goal,

@@ -16,7 +16,6 @@ import asyncio
 import contextlib
 import hashlib
 import json
-import uuid
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional, Tuple, Type
@@ -42,10 +41,12 @@ from helpers.llm_timeouts import (
     STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS,
     VERIFIER_ACTIVITY_TIMEOUT_SECONDS,
 )
-from helpers.messages import CoalescingStreamBroadcaster
+from helpers.messages import CoalescingStreamBroadcaster, schedule_background_broadcast
 from helpers.summarize import compress_context
 from helpers.tracing import span, traced
 from helpers.update_status import update_agent_status
+from helpers.workflow_safe import safe_now as _safe_now
+from helpers.workflow_safe import safe_uuid4 as _safe_uuid4
 from loop.activity_helper import call_temporal_activity_from_activity
 from loop.context_utils import poll_and_update_context
 from providers.rose.errors import RoseRefusalError
@@ -55,6 +56,7 @@ from utils.error_utils import extract_error_message
 from utils.tool_schemas import PLAN_TOOL_MODELS, create_agent_action_model
 
 logger = structlog.get_logger()
+
 
 # Check credits every N iterations
 CREDIT_CHECK_INTERVAL = 5
@@ -91,6 +93,11 @@ MIN_AUTOCOMPACT_SAVINGS_RATIO = 0.10
 # resume) — an efficient zero-CPU wait for both user-paused roots and orphans.
 PAUSED_WAIT_FLOOR_SECONDS = 1.0
 MAX_CONSECUTIVE_PAUSED_ITERATIONS = 20
+
+
+def _is_grouped_spawn_tool(tool_name: str, tool_args: Dict[str, Any]) -> bool:
+    """Return True for spawn calls that should render in a sub-agent tree."""
+    return tool_name == "spawn_agent" and tool_args.get("type") in {"general_purpose", "for_each"}
 
 
 def _is_refusal_error(exc: BaseException) -> bool:
@@ -270,8 +277,10 @@ async def run_agent(  # noqa: C901
         last_checked=last_checked.isoformat(),
     )
 
-    # Generate stream_id for this session
-    stream_id = str(uuid.uuid4())
+    # Generate stream_id for this session. _safe_uuid4() (not uuid.uuid4()):
+    # run_agent is workflow-scope, so raw uuid4 is regenerated on replay and
+    # breaks event/id correlation across a worker migration.
+    stream_id = str(_safe_uuid4())
 
     # Set up execute_activity based on context (workflow vs activity)
     execute_activity = (
@@ -348,18 +357,18 @@ async def run_agent(  # noqa: C901
         """One-line PLAN FSM state label injected into tool results."""
         if state == "PLAN":
             return (
-                "FSM_STATE: current=PLAN; purpose=\"clarify the user's goal; if already clear, call set_plan\"; "
+                'FSM_STATE: current=PLAN; purpose="clarify the user\'s goal; if already clear, call set_plan"; '
                 "enabled_tools=send_message_to_user,spawn_agent,set_plan; transitions=set_plan->SET_PLAN."
             )
         if state == "SET_PLAN":
             return (
-                "FSM_STATE: current=SET_PLAN; purpose=\"Route between asking the user a question or starting execution\"; "
+                'FSM_STATE: current=SET_PLAN; purpose="Route between asking the user a question or starting execution"; '
                 "enabled_tools=send_message_to_user,attempt_completion; disabled_tools=spawn_agent; "
                 "transitions=send_message_to_user->ASK_QUESTION,attempt_completion->EXIT(EXECUTE)."
             )
         if state == "ASK_QUESTION":
             return (
-                "FSM_STATE: current=ASK_QUESTION; purpose=\"Ask any questions needed before entering the EXECUTE phase\"; "
+                'FSM_STATE: current=ASK_QUESTION; purpose="Ask any questions needed before entering the EXECUTE phase"; '
                 "enabled_tools=send_message_to_user,attempt_completion,spawn_agent; "
                 "transitions=attempt_completion->EXIT(EXECUTE),spawn_agent->PLAN."
             )
@@ -498,11 +507,7 @@ async def run_agent(  # noqa: C901
         # cached system prompt) telling the model to synthesize and complete now.
         # Mirrors Hermes' single grace call — no earlier pressure warnings (they make
         # models give up prematurely), injected exactly once.
-        if (
-            winddown_window > 0
-            and not winddown_injected
-            and iteration >= max_iterations - winddown_window
-        ):
+        if winddown_window > 0 and not winddown_injected and iteration >= max_iterations - winddown_window:
             context.append(
                 {
                     "role": "SYSTEM",
@@ -511,11 +516,13 @@ async def run_agent(  # noqa: C901
                         "grounded evidence you already have and call attempt_completion_with_result "
                         "now with your best answer, explicitly noting any gaps you could not fill."
                     ),
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "timestamp": _safe_now().isoformat(),
                 }
             )
             winddown_injected = True
-            logger.info("run_agent.winddown_injected", agent_id=agent_id, iteration=iteration, max_iterations=max_iterations)
+            logger.info(
+                "run_agent.winddown_injected", agent_id=agent_id, iteration=iteration, max_iterations=max_iterations
+            )
 
         # 1.5. Check credits periodically (callback sets is_paused if depleted)
         if check_credits and (iteration % CREDIT_CHECK_INTERVAL == 0):
@@ -567,7 +574,7 @@ async def run_agent(  # noqa: C901
                                 {
                                     "role": "SYSTEM",
                                     "text": formatted,
-                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                    "timestamp": _safe_now().isoformat(),
                                 }
                             )
                         logger.info(f"Added {len(blueprints)} blueprints to context")
@@ -582,12 +589,16 @@ async def run_agent(  # noqa: C901
         # For Sonnet 200k → effective=180k → trigger=167k.
         effective_window = max_context_tokens - EFFECTIVE_OUTPUT_RESERVATION
         compaction_trigger = effective_window - AUTOCOMPACT_BUFFER_TOKENS
-        context_tokens = _estimate_tokens(context)
-
-        if (
-            context_tokens >= compaction_trigger
-            and compactor_failures < MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES
+        async with span(
+            "run_loop.context_token_estimate",
+            agent_id=agent_id,
+            iteration=iteration,
+            context_messages=len(context),
+            agent_type="explore" if cache_call_site == "explore_agent" else None,
         ):
+            context_tokens = _estimate_tokens(context)
+
+        if context_tokens >= compaction_trigger and compactor_failures < MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
             logger.info(
                 "Context overflow",
                 context_tokens=context_tokens,
@@ -695,14 +706,34 @@ async def run_agent(  # noqa: C901
                 )
 
         # 6. Build system prompt (calls API for fresh shared memory each iteration)
-        current_system_prompt = await system_prompt()
+        async with span(
+            "run_loop.system_prompt",
+            agent_id=agent_id,
+            iteration=iteration,
+            agent_type="explore" if cache_call_site == "explore_agent" else None,
+        ):
+            current_system_prompt = await system_prompt()
 
         # 7. Build messages for LLM
         # Use custom builder if provided (e.g., browser uses compress_messages for multimodal)
-        llm_context = _context_with_plan_fsm_labels(context)
+        async with span(
+            "run_loop.prepare_llm_context",
+            agent_id=agent_id,
+            iteration=iteration,
+            context_messages=len(context),
+            agent_type="explore" if cache_call_site == "explore_agent" else None,
+        ):
+            llm_context = _context_with_plan_fsm_labels(context)
 
         if build_messages:
-            messages = build_messages(llm_context, current_system_prompt)
+            async with span(
+                "run_loop.build_messages_custom",
+                agent_id=agent_id,
+                iteration=iteration,
+                context_messages=len(llm_context),
+                agent_type="explore" if cache_call_site == "explore_agent" else None,
+            ):
+                messages = build_messages(llm_context, current_system_prompt)
         elif not is_inside_temporal_activity:
             # Workflow context: pre-download files, then defer message building to call_llm_activity
             # so that base64 content never crosses Temporal's 2MB payload boundary.
@@ -730,11 +761,18 @@ async def run_agent(  # noqa: C901
             )
             messages = None  # Signals to use shared state path below
         else:
-            messages = await build_llm_messages(
-                llm_context,
-                current_system_prompt,
-                user_id=user_id,
-            )
+            async with span(
+                "run_loop.build_llm_messages",
+                agent_id=agent_id,
+                iteration=iteration,
+                context_messages=len(llm_context),
+                agent_type="explore" if cache_call_site == "explore_agent" else None,
+            ):
+                messages = await build_llm_messages(
+                    llm_context,
+                    current_system_prompt,
+                    user_id=user_id,
+                )
 
         # Resolve direct compute tokens dynamically when the workflow provides
         # getters; otherwise use this loop's remembered successful token state.
@@ -754,14 +792,10 @@ async def run_agent(  # noqa: C901
             get_gpt_account_id() if get_gpt_account_id and current_gpt_token else remembered_gpt_account_id
         )
         current_gpt_token_source = (
-            get_gpt_token_source()
-            if get_gpt_token_source and current_gpt_token
-            else remembered_gpt_token_source
+            get_gpt_token_source() if get_gpt_token_source and current_gpt_token else remembered_gpt_token_source
         )
         current_gpt_token_pool_id = (
-            get_gpt_token_pool_id()
-            if get_gpt_token_pool_id and current_gpt_token
-            else remembered_gpt_token_pool_id
+            get_gpt_token_pool_id() if get_gpt_token_pool_id and current_gpt_token else remembered_gpt_token_pool_id
         )
 
         # 7. Call LLM with structured streaming
@@ -770,7 +804,7 @@ async def run_agent(  # noqa: C901
                 # Inside activity (browser agent) - call LLM directly with streaming callback
                 sequence = [0]
                 last_text = [""]
-                llm_started_at_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+                llm_started_at_ms = int(_safe_now().timestamp() * 1000)
                 start_event = ToolEvent(
                     type=EventType.STREAM_MESSAGE,
                     stream_id=stream_id,
@@ -780,15 +814,28 @@ async def run_agent(  # noqa: C901
                     sub_agent_id=task_id,
                     llm_started_at_ms=llm_started_at_ms,
                 )
-                await handle_tool_event(
-                    event=start_event,
-                    agent_id=agent_id,
-                    tool_call_id=stream_id,
-                    tool_name="llm_call",
-                    execute_activity=execute_activity,
-                    user_id=user_id,
-                    sub_agent_id=task_id,
-                )
+                async def _send_stream_start() -> None:
+                    async with span(
+                        "stream.start_event",
+                        agent_id=agent_id,
+                        stream_id=stream_id,
+                        agent_type="explore" if cache_call_site == "explore_agent" else None,
+                    ):
+                        await handle_tool_event(
+                            event=start_event,
+                            agent_id=agent_id,
+                            tool_call_id=stream_id,
+                            tool_name="llm_call",
+                            execute_activity=execute_activity,
+                            user_id=user_id,
+                            sub_agent_id=task_id,
+                        )
+
+                background_stream_start = cache_call_site == "explore_agent" and fast_mode_cache_enabled
+                if background_stream_start:
+                    schedule_background_broadcast(_send_stream_start(), label="stream.start")
+                else:
+                    await _send_stream_start()
                 sequence[0] += 1
 
                 # Decouple Supabase broadcasting from the token-read loop. Awaiting
@@ -927,8 +974,15 @@ async def run_agent(  # noqa: C901
                     final_delta = ""
                     if pydantic_result.response:
                         final_delta = pydantic_result.response[len(last_text[0]) :]
+                    await_done_broadcast = not (
+                        cache_call_site == "explore_agent" and fast_mode_cache_enabled
+                    )
                     with contextlib.suppress(Exception):
-                        await broadcaster.aclose(final_delta=final_delta, final_sequence=sequence[0])
+                        await broadcaster.aclose(
+                            final_delta=final_delta,
+                            final_sequence=sequence[0],
+                            await_done_broadcast=await_done_broadcast,
+                        )
                 finally:
                     # Guarantee the background drainer never leaks, even on error/pause.
                     await broadcaster.adispose()
@@ -1169,6 +1223,7 @@ async def run_agent(  # noqa: C901
         processed_tools = []
         attempt_completion_tool = None
         assistant_tool_calls = []
+        turn_spawn_group_id = None
 
         for tc_dict in tool_calls:
             tc_dict = tc_dict.copy()  # Don't mutate original
@@ -1189,9 +1244,10 @@ async def run_agent(  # noqa: C901
                     tool_call_id = matches[current_usage][1]  # Get the tool_call_id
                     detected_tool_usage_count[tool_name] = current_usage + 1
 
-            # Fallback to new UUID if no pre-assigned ID found
+            # Fallback to new UUID if no pre-assigned ID found. _safe_uuid4()
+            # for replay-stability (raw uuid4 re-mints on replay → split bubbles).
             if not tool_call_id:
-                tool_call_id = str(uuid.uuid4())
+                tool_call_id = str(_safe_uuid4())
 
             # Persist assistant declarations with explicit tool_call_id mapping
             assistant_tool_calls.append(
@@ -1201,6 +1257,12 @@ async def run_agent(  # noqa: C901
                     **tool_args,
                 }
             )
+
+            if _is_grouped_spawn_tool(tool_name, tool_args):
+                if turn_spawn_group_id is None:
+                    phase_label = "plan" if is_plan_loop else "execute"
+                    turn_spawn_group_id = f"llm-turn:{phase_label}:{iteration}:{tool_call_id}"
+                tool_args["_spawn_group_id"] = turn_spawn_group_id
 
             # Special: set_plan - track that it was called (for is_plan_loop)
             if tool_name == "set_plan":
@@ -1226,7 +1288,17 @@ async def run_agent(  # noqa: C901
             assistant_metadata = None
         if response_text or assistant_tool_calls:
             if post_message:
-                await post_message(response_text, "ASSISTANT", assistant_metadata)
+                async with span(
+                    "run_loop.post_assistant_message",
+                    agent_id=agent_id,
+                    iteration=iteration,
+                    role="ASSISTANT",
+                    has_tool_calls=bool(assistant_tool_calls),
+                    text_len=len(response_text or ""),
+                    context_messages=len(context),
+                    agent_type="explore" if cache_call_site == "explore_agent" else None,
+                ):
+                    await post_message(response_text, "ASSISTANT", assistant_metadata)
             # When no poll_messages (explore/browser agents in activities, or
             # fully in-memory callers with no post_message), locally append so
             # subsequent TOOL results have their declaring assistant row and
@@ -1236,7 +1308,7 @@ async def run_agent(  # noqa: C901
                     {
                         "role": "ASSISTANT",
                         "text": response_text or "",
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "timestamp": _safe_now().isoformat(),
                         "metadata": assistant_metadata or {},
                     }
                 )
@@ -1244,6 +1316,42 @@ async def run_agent(  # noqa: C901
         # 11. Execute tool calls (tool_calls is always List[dict] at this point)
         # Execute regular tools in parallel
         if processed_tools and execute_tool:
+            if is_inside_temporal_activity and fast_mode_cache_enabled:
+                try:
+                    from providers.fast_cache import client as fast_cache_client
+                    from providers.fast_cache import normalize as fast_cache_normalize
+                    from providers.fast_cache.context import current_context
+                    from tools.web_search.config import DEFAULT_MAX_TOKENS as WEB_SEARCH_DEFAULT_MAX_TOKENS
+
+                    ctx = current_context()
+                    prewarm_goal = goal_text or (ctx.goal if ctx is not None else None)
+                    prewarm_keys = []
+                    if prewarm_goal:
+                        for tool_name, tool_args, _tool_call_id in processed_tools:
+                            if tool_name == "web_search":
+                                prewarm_keys.append(
+                                    fast_cache_normalize.web_search_key(
+                                        prewarm_goal,
+                                        str(tool_args.get("query", "")),
+                                        tool_args.get("max_tokens", WEB_SEARCH_DEFAULT_MAX_TOKENS),
+                                    )
+                                )
+                            elif tool_name == "web_fetch":
+                                prewarm_keys.append(
+                                    fast_cache_normalize.web_fetch_key(
+                                        prewarm_goal,
+                                        str(tool_args.get("url", "")),
+                                    )
+                                )
+                    if prewarm_keys:
+                        await fast_cache_client.prefetch_cache_records(prewarm_keys, reason="tool_dispatch")
+                except Exception as exc:
+                    logger.warning(
+                        "fast_cache.tool_prewarm_failed",
+                        agent_id=agent_id,
+                        iteration=iteration,
+                        error=str(exc)[:200],
+                    )
 
             async def execute_single_tool(tool_name: str, tool_args: dict, tool_call_id: str):
                 """Execute a single tool and return result with metadata."""
@@ -1270,152 +1378,171 @@ async def run_agent(  # noqa: C901
             tool_results = await asyncio.gather(*tasks)
 
             # Process results in order (for determinism)
-            for tool_result in tool_results:
-                tool_name = tool_result["tool_name"]
-                tool_call_id = tool_result["tool_call_id"]
-                result = tool_result["result"]
-                error = tool_result["error"]
+            async with span(
+                "run_loop.process_tool_results",
+                agent_id=agent_id,
+                iteration=iteration,
+                tool_result_count=len(tool_results),
+                context_messages=len(context),
+                agent_type="explore" if cache_call_site == "explore_agent" else None,
+            ):
+                for tool_result in tool_results:
+                    tool_name = tool_result["tool_name"]
+                    tool_call_id = tool_result["tool_call_id"]
+                    result = tool_result["result"]
+                    error = tool_result["error"]
 
-                if error:
-                    # Tool failed - add error to context
-                    if is_inside_temporal_activity and post_message:
-                        await post_message(
-                            str(error),
-                            "TOOL",
-                            {
+                    if error:
+                        # Tool failed - add error to context
+                        if is_inside_temporal_activity and post_message:
+                            async with span(
+                                "run_loop.post_tool_error_message",
+                                agent_id=agent_id,
+                                iteration=iteration,
+                                tool_name=tool_name,
+                                agent_type="explore" if cache_call_site == "explore_agent" else None,
+                            ):
+                                await post_message(
+                                    str(error),
+                                    "TOOL",
+                                    {
+                                        "toolCallId": tool_call_id,
+                                        "toolName": tool_name,
+                                        "toolStatus": "ERROR",
+                                        "title": f"{tool_name} failed",
+                                        "error": True,
+                                        "subAgentId": task_id,
+                                    },
+                                )
+                        # When no poll_messages, locally append error so agent sees it
+                        # (omit subAgentId so convert_context_to_messages doesn't filter it)
+                        if not poll_messages:
+                            context.append(
+                                {
+                                    "role": "TOOL",
+                                    "text": f"Error: {error}",
+                                    "timestamp": _safe_now().isoformat(),
+                                    "metadata": {
+                                        "toolCallId": tool_call_id,
+                                        "toolName": tool_name,
+                                        "toolStatus": "ERROR",
+                                        "error": True,
+                                    },
+                                }
+                            )
+                        continue
+
+                    # Check for special status returns (used by browser agent)
+                    if isinstance(result, dict):
+                        result_status = result.get("status", "").lower()
+
+                        if result_status == "needs_user_help":
+                            return {
+                                "status": "needs_user_help",
+                                "context": context,
+                                "tokens_in": tokens_in,
+                                "tokens_out": tokens_out,
+                                "token_count": token_count,
+                                "context_size": context_size,
+                                "cache_read_input_tokens": cache_read_total,
+                                "cache_creation_input_tokens": cache_write_total,
+                                **result,
+                            }
+
+                        if result_status == "completed":
+                            return {
+                                "status": "completed",
+                                "context": context,
+                                "tokens_in": tokens_in,
+                                "tokens_out": tokens_out,
+                                "token_count": token_count,
+                                "context_size": context_size,
+                                "cache_read_input_tokens": cache_read_total,
+                                "cache_creation_input_tokens": cache_write_total,
+                                **result,
+                            }
+
+                    # Add successful result to context
+                    is_error = isinstance(result, dict) and result.get("error", False)
+                    # Check for nested result with its own message (from NEW_SIGNATURE_TOOLS)
+                    if isinstance(result, dict) and isinstance(result.get("result"), dict):
+                        nested_result = result["result"]
+                        result_message = nested_result.get("message", result.get("message", ""))
+                    else:
+                        result_message = result.get("message", "") if isinstance(result, dict) else str(result)
+
+                    if is_error:
+                        new_msg = {
+                            "role": "TOOL",
+                            "text": f"Error: {result_message}",
+                            "timestamp": _safe_now().isoformat(),
+                            "metadata": {
                                 "toolCallId": tool_call_id,
                                 "toolName": tool_name,
                                 "toolStatus": "ERROR",
-                                "title": f"{tool_name} failed",
                                 "error": True,
-                                "subAgentId": task_id,
                             },
-                        )
-                    # When no poll_messages, locally append error so agent sees it
-                    # (omit subAgentId so convert_context_to_messages doesn't filter it)
+                        }
+                    else:
+                        new_msg = {
+                            "role": "TOOL",
+                            "text": result_message,
+                            "timestamp": _safe_now().isoformat(),
+                            "metadata": {
+                                "toolCallId": tool_call_id,
+                                "toolName": tool_name,
+                                "toolStatus": "FINISHED",
+                            },
+                        }
+                    logger.debug(
+                        "Tool result posted to DB (will be picked up by poll)",
+                        tool_name=tool_name,
+                        context_len=len(context),
+                    )
+                    # When no poll_messages, locally append so agent sees tool results
                     if not poll_messages:
-                        context.append(
-                            {
-                                "role": "TOOL",
-                                "text": f"Error: {error}",
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
-                                "metadata": {
-                                    "toolCallId": tool_call_id,
-                                    "toolName": tool_name,
-                                    "toolStatus": "ERROR",
-                                    "error": True,
-                                },
-                            }
-                        )
-                    continue
+                        context.append(new_msg)
 
-                # Check for special status returns (used by browser agent)
-                if isinstance(result, dict):
-                    result_status = result.get("status", "").lower()
-
-                    if result_status == "needs_user_help":
-                        return {
-                            "status": "needs_user_help",
-                            "context": context,
-                            "tokens_in": tokens_in,
-                            "tokens_out": tokens_out,
-                            "token_count": token_count,
-                            "context_size": context_size,
-                            "cache_read_input_tokens": cache_read_total,
-                            "cache_creation_input_tokens": cache_write_total,
-                            **result,
-                        }
-
-                    if result_status == "completed":
-                        return {
-                            "status": "completed",
-                            "context": context,
-                            "tokens_in": tokens_in,
-                            "tokens_out": tokens_out,
-                            "token_count": token_count,
-                            "context_size": context_size,
-                            "cache_read_input_tokens": cache_read_total,
-                            "cache_creation_input_tokens": cache_write_total,
-                            **result,
-                        }
-
-                # Add successful result to context
-                is_error = isinstance(result, dict) and result.get("error", False)
-                # Check for nested result with its own message (from NEW_SIGNATURE_TOOLS)
-                if isinstance(result, dict) and isinstance(result.get("result"), dict):
-                    nested_result = result["result"]
-                    result_message = nested_result.get("message", result.get("message", ""))
-                else:
-                    result_message = result.get("message", "") if isinstance(result, dict) else str(result)
-
-                if is_error:
-                    new_msg = {
-                        "role": "TOOL",
-                        "text": f"Error: {result_message}",
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "metadata": {
-                            "toolCallId": tool_call_id,
-                            "toolName": tool_name,
-                            "toolStatus": "ERROR",
-                            "error": True,
-                        },
-                    }
-                else:
-                    new_msg = {
-                        "role": "TOOL",
-                        "text": result_message,
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "metadata": {
-                            "toolCallId": tool_call_id,
-                            "toolName": tool_name,
-                            "toolStatus": "FINISHED",
-                        },
-                    }
-                logger.debug(
-                    "Tool result posted to DB (will be picked up by poll)",
-                    tool_name=tool_name,
-                    context_len=len(context),
-                )
-                # When no poll_messages, locally append so agent sees tool results
-                if not poll_messages:
-                    context.append(new_msg)
-
-                # Track set_plan success (only if no error)
-                if tool_name == "set_plan" and not is_error:
-                    set_plan_succeeded = True
+                    # Track set_plan success (only if no error)
+                    if tool_name == "set_plan" and not is_error:
+                        set_plan_succeeded = True
 
         # Repetition detection: if the agent keeps calling the same tools with identical
         # args, it's stuck. Inject a strong nudge after 3 consecutive identical iterations.
         if processed_tools:
-            call_sig = hashlib.md5(
-                json.dumps(
-                    sorted([(t, json.dumps(a, sort_keys=True, default=str)) for t, a, _ in processed_tools]),
-                    sort_keys=True,
-                ).encode()
-            ).hexdigest()
-            recent_call_hashes.append(call_sig)
-            if len(recent_call_hashes) >= 3 and len(set(list(recent_call_hashes)[-3:])) == 1:
-                same_call_streak += 1
-                tool_names = [t for t, _, _ in processed_tools]
-                logger.warning(
-                    f"[run_agent] Repetitive tool calls detected (streak={same_call_streak}): "
-                    f"{tool_names}"
-                )
-                context.append(
-                    {
-                        "role": "SYSTEM",
-                        "text": (
-                            f"WARNING: You have called the same tool(s) with identical arguments "
-                            f"{same_call_streak + 2} times in a row without making progress. "
-                            "The previous approach is not working. You MUST try a fundamentally different strategy: "
-                            "use different arguments, a different tool, or decompose the problem differently. "
-                            "Do not repeat the same call again."
-                        ),
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                    }
-                )
-            else:
-                same_call_streak = 0
+            async with span(
+                "run_loop.repetition_detection",
+                agent_id=agent_id,
+                iteration=iteration,
+                processed_tool_count=len(processed_tools),
+                agent_type="explore" if cache_call_site == "explore_agent" else None,
+            ):
+                call_sig = hashlib.md5(
+                    json.dumps(
+                        sorted([(t, json.dumps(a, sort_keys=True, default=str)) for t, a, _ in processed_tools]),
+                        sort_keys=True,
+                    ).encode()
+                ).hexdigest()
+                recent_call_hashes.append(call_sig)
+                if len(recent_call_hashes) >= 3 and len(set(list(recent_call_hashes)[-3:])) == 1:
+                    same_call_streak += 1
+                    tool_names = [t for t, _, _ in processed_tools]
+                    logger.warning(f"[run_agent] Repetitive tool calls detected (streak={same_call_streak}): {tool_names}")
+                    context.append(
+                        {
+                            "role": "SYSTEM",
+                            "text": (
+                                f"WARNING: You have called the same tool(s) with identical arguments "
+                                f"{same_call_streak + 2} times in a row without making progress. "
+                                "The previous approach is not working. You MUST try a fundamentally different strategy: "
+                                "use different arguments, a different tool, or decompose the problem differently. "
+                                "Do not repeat the same call again."
+                            ),
+                            "timestamp": _safe_now().isoformat(),
+                        }
+                    )
+                else:
+                    same_call_streak = 0
 
         # Handle attempt_completion separately (should be alone due to llm.py filtering)
         if attempt_completion_tool:
@@ -1476,7 +1603,7 @@ async def run_agent(  # noqa: C901
                         {
                             "role": "TOOL",
                             "text": response_text or "",
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "timestamp": _safe_now().isoformat(),
                             "metadata": {
                                 "toolCallId": tool_call_id,
                                 "toolName": tool_name,
@@ -1654,7 +1781,7 @@ async def run_agent(  # noqa: C901
                         {
                             "role": "TOOL",
                             "text": v_reasoning or "",
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "timestamp": _safe_now().isoformat(),
                             "metadata": {
                                 "toolCallId": tool_call_id,
                                 "toolName": "attempt_completion",
@@ -1693,7 +1820,7 @@ async def run_agent(  # noqa: C901
                         {
                             "role": "TOOL",
                             "text": feedback_text,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "timestamp": _safe_now().isoformat(),
                             "metadata": {
                                 "toolCallId": tool_call_id,
                                 "toolName": "attempt_completion",
@@ -1737,7 +1864,7 @@ async def run_agent(  # noqa: C901
                 {
                     "role": "SYSTEM",
                     "text": nudge,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "timestamp": _safe_now().isoformat(),
                 }
             )
         else:
@@ -1994,7 +2121,7 @@ async def _run_verifier(
     fast_mode_step: int = 0,
 ) -> Dict:
     """Run verifier to check completion."""
-    verifier_call_id = tool_call_id or str(uuid.uuid4())
+    verifier_call_id = tool_call_id or str(_safe_uuid4())
 
     # Post IN_PROGRESS
     # Post the in-progress verifier row as the active attempt_completion tool

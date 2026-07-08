@@ -27,6 +27,9 @@ normalize_conductor_workspace_env
 . "$SCRIPT_DIR/lib/run-process-cleanup.sh"
 
 RUN_CONTEXT_DIR="${BENCHMARK_CONTEXT_DIR:-.context}"
+case "$RUN_CONTEXT_DIR" in
+    /.context|/.context/*) RUN_CONTEXT_DIR="${RUN_CONTEXT_DIR#/}" ;;
+esac
 BENCHMARK_ISOLATED_RUN="${BENCHMARK_ISOLATED_RUN:-false}"
 
 # mac-app is Electron + requires nvm/Node 20.10.0; only runs on macOS.
@@ -190,14 +193,44 @@ fi
 IS_CLOUD=false
 [ -f "$SCRIPT_DIR/../.cloud-env" ] && IS_CLOUD=true
 
+default_benchmark_worker_processes() {
+    local cpus
+    cpus=1
+    if command -v sysctl >/dev/null 2>&1; then
+        cpus=$(sysctl -n hw.logicalcpu 2>/dev/null || echo 1)
+    elif command -v nproc >/dev/null 2>&1; then
+        cpus=$(nproc 2>/dev/null || echo 1)
+    fi
+    case "$cpus" in
+        ''|*[!0-9]*) cpus=1 ;;
+    esac
+    if [ "$cpus" -le 2 ]; then
+        echo 1
+    elif [ "$cpus" -gt 14 ]; then
+        echo 12
+    else
+        echo $((cpus - 2))
+    fi
+}
+
 if ! $IS_CLOUD; then
-    export MAX_CONCURRENT_ACTIVITIES="${MAX_CONCURRENT_ACTIVITIES:-500}"
-    export MAX_CONCURRENT_ACTIVITY_TASK_POLLERS="${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-80}"
+    if $BENCHMARK_MODE; then
+        export WORKER_PROCESSES="${WORKER_PROCESSES:-${BENCHMARK_AGENT_WORKERS:-$(default_benchmark_worker_processes)}}"
+        export MAX_CONCURRENT_ACTIVITIES="${MAX_CONCURRENT_ACTIVITIES:-16}"
+        export MAX_CONCURRENT_ACTIVITY_TASK_POLLERS="${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-16}"
+        export MAX_CONCURRENT_WORKFLOWS="${MAX_CONCURRENT_WORKFLOWS:-32}"
+        export MAX_CACHED_WORKFLOWS="${MAX_CACHED_WORKFLOWS:-64}"
+        export MAX_CONCURRENT_WORKFLOW_TASK_POLLERS="${MAX_CONCURRENT_WORKFLOW_TASK_POLLERS:-8}"
+        export NONSTICKY_TO_STICKY_POLL_RATIO="${NONSTICKY_TO_STICKY_POLL_RATIO:-1.0}"
+    else
+        export MAX_CONCURRENT_ACTIVITIES="${MAX_CONCURRENT_ACTIVITIES:-500}"
+        export MAX_CONCURRENT_ACTIVITY_TASK_POLLERS="${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-80}"
+    fi
 fi
 
 export NODE_ENV="${NODE_ENV:-development}"
 export TEMPORAL_TASK_QUEUE=navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME
-echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT mac-app=$MAC_APP_PORT metrics=$SDK_METRICS_PORT db=$LOCAL_DB_PORT ngrok_api=$NGROK_WEB_PORT queue=$TEMPORAL_TASK_QUEUE benchmark_mode=$BENCHMARK_MODE activity_max_slots=${MAX_CONCURRENT_ACTIVITIES:-100} activity_pollers=${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-8}"
+echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT mac-app=$MAC_APP_PORT metrics=$SDK_METRICS_PORT db=$LOCAL_DB_PORT ngrok_api=$NGROK_WEB_PORT queue=$TEMPORAL_TASK_QUEUE benchmark_mode=$BENCHMARK_MODE worker_processes=${WORKER_PROCESSES:-1} workflow_max_slots=${MAX_CONCURRENT_WORKFLOWS:-50} workflow_pollers=${MAX_CONCURRENT_WORKFLOW_TASK_POLLERS:-8} nonsticky_to_sticky=${NONSTICKY_TO_STICKY_POLL_RATIO:-1.0} activity_max_slots=${MAX_CONCURRENT_ACTIVITIES:-100} activity_pollers=${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-8}"
 
 run_kill_stale_same_task_queue_workers "$PWD" "$TEMPORAL_TASK_QUEUE" "$BACKEND_API_URL" "$$"
 
@@ -499,6 +532,8 @@ export DIRECT_URL="$LOCAL_DB_URL"
 # Sync Prisma schema to local DB (idempotent, dev-only)
 echo "🐘 Syncing Prisma schema..."
 (cd back-end && npx prisma db push --skip-generate --accept-data-loss 2>&1 | tail -3)
+echo "🔎 Ensuring agent-network grep indexes..."
+(cd back-end && npx tsx scripts/ensure-agent-network-grep-indexes.ts)
 
 # Seed local DB if dev user doesn't exist yet (full prod sync in scripts/setup-db.sh)
 if $DOCKER_OK && ! $USE_SYSTEM_PG; then
@@ -774,10 +809,18 @@ data = {
     "env": {
         "benchmark_anon_steel_profile": os.environ.get("BENCHMARK_ANON_STEEL_PROFILE", "").lower() in ("1", "true", "yes", "on"),
         "benchmark_disable_saved_browser_auth": os.environ.get("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH", "").lower() in ("1", "true", "yes", "on"),
+        "worker_processes": env_int("WORKER_PROCESSES", 1),
+        "max_concurrent_workflows": env_int("MAX_CONCURRENT_WORKFLOWS", 50),
+        "max_cached_workflows": env_int("MAX_CACHED_WORKFLOWS", 100),
+        "max_concurrent_workflow_task_pollers": env_int("MAX_CONCURRENT_WORKFLOW_TASK_POLLERS", 8),
+        "nonsticky_to_sticky_poll_ratio": float(os.environ.get("NONSTICKY_TO_STICKY_POLL_RATIO", "1.0")),
+        "max_concurrent_activities": env_int("MAX_CONCURRENT_ACTIVITIES", 100),
+        "max_concurrent_activity_task_pollers": env_int("MAX_CONCURRENT_ACTIVITY_TASK_POLLERS", 8),
     },
     "logs": {
-        "backend": os.path.join(root, "back-end", "backend-logs.log"),
-        "worker": os.path.join(root, "agents", "navi-worker-log.txt"),
+        "backend": os.environ.get("BACKEND_LOG_FILE") or os.path.join(root, "back-end", "backend-logs.log"),
+        "frontend": os.environ.get("FRONTEND_LOG_FILE") or os.path.join(root, "front-end", "frontend-logs.log"),
+        "worker": os.environ.get("NAVI_WORKER_LOG_FILE") or os.path.join(root, "agents", "navi-worker-log.txt"),
     },
     "services": services,
 }
@@ -863,18 +906,45 @@ start_public_tunnel
 export FAST_MODE_ANTHROPIC_PROXY_URL="$PUBLIC_BASE_URL/anthropic-proxy"
 export FAST_MODE_CODEX_PROXY_URL="$PUBLIC_BASE_URL/codex-proxy"
 
+if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
+    BENCHMARK_LOG_DIR="$PWD/$RUN_CONTEXT_DIR/logs"
+    mkdir -p "$BENCHMARK_LOG_DIR"
+    export BACKEND_LOG_FILE="$BENCHMARK_LOG_DIR/backend.log"
+    export FRONTEND_LOG_FILE="$BENCHMARK_LOG_DIR/frontend.log"
+    export NAVI_WORKER_LOG_FILE="$BENCHMARK_LOG_DIR/worker.log"
+    export NAVI_WORKER_LOG_STREAM=false
+fi
+
 # Launch each service
 if $BENCHMARK_MODE; then
+    export TRACE_ARCHIVE_ENABLED="${TRACE_ARCHIVE_ENABLED:-1}"
+    export TRACE_ARCHIVE_BACKEND="${TRACE_ARCHIVE_BACKEND:-local}"
+    export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$PWD/.context}"
+    export BLACKBOX_TEST_CAPTURE_OUTBOUND="${BLACKBOX_TEST_CAPTURE_OUTBOUND:-1}"
+    export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
+    export SURGE_API_KEY="${SURGE_API_KEY:-blackbox-surge-key}"
+    export SURGE_ACCOUNT_ID="${SURGE_ACCOUNT_ID:-blackbox-surge-account}"
+    export VITE_DEV_AUTO_LOGIN_PHONE="${VITE_DEV_AUTO_LOGIN_PHONE:-+15555550123}"
+    export VITE_DEV_AUTO_LOGIN_OTP="${VITE_DEV_AUTO_LOGIN_OTP:-191919}"
+
     # In benchmark mode, use plain tsx (no watch) to prevent file-change restarts from killing the backend mid-run
-    run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f backend-logs.log && PORT=$BACKEND_PORT npx tsx src/server.ts 2>&1 | tee backend-logs.log' &
+    if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
+        run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f "$BACKEND_LOG_FILE" && PORT=$BACKEND_PORT npx tsx src/server.ts > "$BACKEND_LOG_FILE" 2>&1' &
+    else
+        run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f "$BACKEND_LOG_FILE" && PORT=$BACKEND_PORT npx tsx src/server.ts 2>&1 | tee "$BACKEND_LOG_FILE"' &
+    fi
 else
-    run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f backend-logs.log && PORT=$BACKEND_PORT npx tsx watch src/server.ts 2>&1 | tee backend-logs.log' &
+    run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f "$BACKEND_LOG_FILE" && PORT=$BACKEND_PORT npx tsx watch src/server.ts 2>&1 | tee "$BACKEND_LOG_FILE"' &
 fi
 PIDS+=($!); NAMES+=("back-end")
 
 # Front-end is always launched — benchmark mode needs it for semantic tests
 # (Chrome CDP drives a real browser against the dev server in parallel with smoke).
-run_service "front-end" bash -c 'set -eo pipefail; cd front-end && rm -f frontend-logs.log && VITE_DEV_PORT=$FRONTEND_PORT npx vite 2>&1 | tee frontend-logs.log' &
+if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
+    run_service "front-end" bash -c 'set -eo pipefail; cd front-end && rm -f "$FRONTEND_LOG_FILE" && VITE_DEV_PORT=$FRONTEND_PORT npx vite > "$FRONTEND_LOG_FILE" 2>&1' &
+else
+    run_service "front-end" bash -c 'set -eo pipefail; cd front-end && rm -f "$FRONTEND_LOG_FILE" && VITE_DEV_PORT=$FRONTEND_PORT npx vite 2>&1 | tee "$FRONTEND_LOG_FILE"' &
+fi
 PIDS+=($!); NAMES+=("front-end")
 
 # mac-app is skipped in benchmark mode (Electron is heavy and smoke doesn't touch it).
@@ -940,6 +1010,13 @@ while true; do
             wait "$pid" 2>/dev/null
             code=$?
             name="${NAMES[$i]}"
+            if [ "$name" = "ngrok" ]; then
+                echo "⚠️  ngrok (PID $pid) exited with code $code; keeping local services running."
+                unset "PIDS[$i]"
+                unset "NAMES[$i]"
+                write_services_manifest || true
+                continue
+            fi
             if [ $code -ne 0 ]; then
                 echo ""
                 echo "❌ $name (PID $pid) exited with code $code — shutting down all services."

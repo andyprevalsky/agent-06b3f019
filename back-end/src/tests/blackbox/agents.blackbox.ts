@@ -98,6 +98,8 @@ const TreeAgentItem = z.object({
   output_schema: z.unknown().nullable(),
   structured_output: z.unknown().nullable(),
   tree_cost_cents: z.number(),
+  created_at: DATE_LIKE,
+  updated_at: DATE_LIKE,
 });
 
 const TreeResponse = z.object({
@@ -1027,6 +1029,90 @@ test('POST /:id/messages — duplicate internal TOOL retry is idempotent', async
   await deleteTestAgent(agentId, session.user.id);
 });
 
+test('POST /:id/messages — changed TOOL metadata is a new event, exact retry is idempotent', async () => {
+  const session = await createAnonymousSession('msg-spawn-tree-upgrade');
+  const agentId = await createTestAgent(session.user.id, 'Spawn-tree upgrade test');
+  const toolCallId = `spawn-tree-upgrade-${randomUUID().slice(0, 8)}`;
+  const childAgentId = randomUUID();
+  const base = {
+    message: '',
+    role: 'TOOL' as const,
+    metadata: {
+      toolCallId,
+      toolName: 'spawn_general_purpose_agent',
+      toolStatus: 'IN_PROGRESS',
+      title: 'Spawning sub-agent',
+    },
+  };
+  const upgradePayload = {
+    ...base,
+    metadata: { ...base.metadata, busId: agentId, subAgentIds: [childAgentId] },
+  };
+
+  const placeholder = await request(`${BASE_URL}/api/agents/${agentId}/messages`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify(base),
+  });
+  const upgrade = await request(`${BASE_URL}/api/agents/${agentId}/messages`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify(upgradePayload),
+  });
+  const retry = await request(`${BASE_URL}/api/agents/${agentId}/messages`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify(upgradePayload),
+  });
+
+  assertStatus(placeholder.status, 201, placeholder.data);
+  assertStatus(upgrade.status, 201, upgrade.data);
+  assertStatus(retry.status, 201, retry.data);
+  const placeholderBody = assertSchema(PostMessageResponse, placeholder.data, 'spawn placeholder');
+  const upgradeBody = assertSchema(PostMessageResponse, upgrade.data, 'spawn upgrade');
+  const retryBody = assertSchema(PostMessageResponse, retry.data, 'spawn upgrade retry');
+  assert(
+    upgradeBody.message_id !== placeholderBody.message_id,
+    'same tool status/text/title with changed metadata must persist as a new event'
+  );
+  assert(
+    retryBody.message_id === upgradeBody.message_id,
+    'exact retry of the changed-metadata event must be idempotent'
+  );
+
+  const detail = await request(`${BASE_URL}/api/agents/${agentId}`, {
+    headers: apiKeyHeaders(session.user.id),
+  });
+  assertStatus(detail.status, 200, detail.data);
+  const detailBody = assertSchema(GetAgentResponse, detail.data, 'spawn-tree upgrade detail');
+  const withBusId = detailBody.messages.filter(
+    (m) =>
+      m.role === 'TOOL' &&
+      typeof m.metadata === 'object' &&
+      m.metadata !== null &&
+      (m.metadata as Record<string, unknown>).toolCallId === toolCallId &&
+      (m.metadata as Record<string, unknown>).busId !== undefined &&
+      (m.metadata as Record<string, unknown>).busId !== null
+  );
+  const matchingToolCall = detailBody.messages.filter(
+    (m) =>
+      m.role === 'TOOL' &&
+      typeof m.metadata === 'object' &&
+      m.metadata !== null &&
+      (m.metadata as Record<string, unknown>).toolCallId === toolCallId
+  );
+  assert(
+    matchingToolCall.length === 2,
+    `Expected placeholder plus changed-metadata TOOL event, got ${matchingToolCall.length}`
+  );
+  assert(
+    withBusId.length === 1,
+    `Expected exactly one persisted spawn-tree row with busId, got ${withBusId.length}`
+  );
+
+  await deleteTestAgent(agentId, session.user.id);
+});
+
 test('POST /:id/messages — read-after-write: message visible in detail', async () => {
   const session = await createAnonymousSession('msg-raw');
   const agentId = await createTestAgent(session.user.id, 'RAW message test');
@@ -1152,6 +1238,63 @@ test('PATCH /:id/status — happy path — schema validated', async () => {
   assert(body.progress === 1.0, `Expected progress 1.0, got ${body.progress}`);
   assert(body.token_count === 5000, `Expected token_count 5000, got ${body.token_count}`);
   assert(body.status_message === 'All done', `Expected "All done", got "${body.status_message}"`);
+
+  await deleteTestAgent(agentId, session.user.id);
+});
+
+test('PATCH /:id/status — stale ACTIVE cannot overwrite terminal status', async () => {
+  const session = await createAnonymousSession('upd-status-terminal-guard');
+  const agentId = await createTestAgent(session.user.id, 'Terminal guard test');
+
+  const completeRes = await request(`${BASE_URL}/api/agents/${agentId}/status`, {
+    method: 'PATCH',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({
+      status: 'COMPLETED',
+      statusMessage: 'Done',
+      progress: 1.0,
+      tokenCount: 5000,
+      tokensIn: 3000,
+      tokensOut: 2000,
+      contextSize: 10000,
+      messageCount: 20,
+    }),
+  });
+  assertStatus(completeRes.status, 200, completeRes.data);
+
+  const staleRes = await request(`${BASE_URL}/api/agents/${agentId}/status`, {
+    method: 'PATCH',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({
+      status: 'ACTIVE',
+      statusMessage: 'Processing',
+      progress: 0.16,
+      tokenCount: 13089,
+      tokensIn: 0,
+      tokensOut: 2361,
+      contextSize: 5942,
+      messageCount: 12,
+    }),
+  });
+  assertStatus(staleRes.status, 200, staleRes.data);
+  const staleBody = assertSchema(UpdateStatusResponse, staleRes.data, 'stale status guard');
+  assert(staleBody.status === 'COMPLETED', `Expected COMPLETED, got ${staleBody.status}`);
+  assert(staleBody.progress === 1.0, `Expected progress 1.0, got ${staleBody.progress}`);
+  assert(staleBody.status_message === 'Done', 'Expected terminal status message to persist');
+
+  const detailRes = await request(`${BASE_URL}/api/agents/${agentId}`, {
+    headers: apiKeyHeaders(session.user.id),
+  });
+  assertStatus(detailRes.status, 200, detailRes.data);
+  const detailBody = assertSchema(GetAgentResponse, detailRes.data, 'stale status detail');
+  assert(
+    detailBody.agent.status === 'COMPLETED',
+    `Expected COMPLETED, got ${detailBody.agent.status}`
+  );
+  assert(
+    detailBody.agent.progress === 1.0,
+    `Expected progress 1.0, got ${detailBody.agent.progress}`
+  );
 
   await deleteTestAgent(agentId, session.user.id);
 });

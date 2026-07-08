@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Code Agent Terminal Preview</title>
+    <link rel="stylesheet" href="/src/index.css" />
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: #f6f6f4;
+        color: #18181b;
+        font-family:
+          Inter,
+          ui-sans-serif,
+          system-ui,
+          -apple-system,
+          BlinkMacSystemFont,
+          'Segoe UI',
+          sans-serif;
+      }
+
+      .preview-page {
+        box-sizing: border-box;
+        min-height: 100vh;
+        padding: 32px;
+      }
+
+      .preview-card {
+        margin: 0 auto;
+        max-width: 1120px;
+        overflow: hidden;
+        border: 1px solid rgb(0 0 0 / 0.1);
+        border-radius: 12px;
+        background: rgb(255 255 255 / 0.82);
+        box-shadow: 0 18px 55px rgb(0 0 0 / 0.12);
+      }
+
+      .preview-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        min-width: 0;
+        border-bottom: 1px solid rgb(0 0 0 / 0.1);
+        background: rgb(255 255 255 / 0.72);
+        padding: 10px 12px;
+        backdrop-filter: blur(12px);
+      }
+
+      .preview-status {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-width: 0;
+      }
+
+      .preview-logo {
+        display: grid;
+        width: 20px;
+        height: 20px;
+        place-items: center;
+        border-radius: 6px;
+        background: #111827;
+        color: white;
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .preview-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: #22c55e;
+        box-shadow: 0 0 0 4px rgb(34 197 94 / 0.16);
+      }
+
+      .preview-title {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 13px;
+        font-weight: 600;
+      }
+
+      .preview-turns {
+        display: inline-flex;
+        height: 24px;
+        align-items: center;
+        border: 1px solid rgb(52 211 153 / 0.3);
+        border-radius: 6px;
+        background: rgb(52 211 153 / 0.12);
+        padding: 0 8px;
+        color: #047857;
+        font-family:
+          'SF Mono',
+          Menlo,
+          monospace;
+        font-size: 11px;
+        font-weight: 600;
+      }
+
+      .preview-expand {
+        border: 0;
+        border-radius: 6px;
+        background: transparent;
+        color: #6b7280;
+        font-size: 18px;
+      }
+
+      .terminal-frame {
+        position: relative;
+        height: 520px;
+        overflow: hidden;
+      }
+
+      .terminal-pad {
+        position: absolute;
+        inset: 0;
+        padding: 12px 12px 20px;
+      }
+
+      .terminal-host {
+        position: relative;
+        height: 100%;
+        width: 100%;
+      }
+
+      #terminal {
+        position: absolute;
+        inset: 10px 12px 16px;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="preview-page">
+      <section class="preview-card">
+        <header class="preview-header">
+          <div class="preview-status">
+            <div class="preview-logo">C</div>
+            <div class="preview-dot"></div>
+            <div class="preview-title">Codex Active</div>
+            <div class="preview-turns">6 turns completed<span class="animate-dots" aria-hidden="true"></span></div>
+          </div>
+          <button class="preview-expand" type="button" aria-label="Maximize">↗</button>
+        </header>
+        <div class="code-agent-terminal-shell terminal-frame">
+          <div class="terminal-pad">
+            <div class="code-agent-terminal-host terminal-host">
+              <div id="terminal"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script type="module">
+      import { Terminal } from '@xterm/xterm';
+      import { FitAddon } from '@xterm/addon-fit';
+      import '@xterm/xterm/css/xterm.css';
+      import { formatTerminalOutputForDisplay } from '/src/features/terminal-component-group/components/claudeCodeChip.terminal.ts';
+
+      const sampleOutput = String.raw`python - <<'PY'
+import csv
+import shutil
+from pathlib import Path
+
+path = Path('/home/user/content_calendar_90_days.csv')
+out_path = Path('/home/user/output/content_calendar_90_days.csv')
+rows = [
+    {'week': 1, 'channel': 'LinkedIn', 'topic': 'Founder story', 'status': 'ready'},
+    {'week': 2, 'channel': 'Email', 'topic': 'Customer proof', 'status': 'ready'},
+    {'week': 3, 'channel': 'Blog', 'topic': 'Automation teardown', 'status': 'ready'},
+]
+with path.open('w', newline='') as f:
+    writer = csv.DictWriter(f, fieldnames=rows[0].keys())
+    writer.writeheader()
+    writer.writerows(rows)
+shutil.copy2(path, out_path)
+print(path)
+print(out_path)
+PY
+[Codex command output]
+/home/user/content_calendar_90_days.csv
+/home/user/output/content_calendar_90_days.csv
+
+Verification: output file exists and contains 90 planned publishing slots.
+SUCCESS Generated CSV and copied it to /home/user/output.
+
+[Codex exit code] 0`;
+
+      const terminal = new Terminal({
+        theme: {
+          background: '#101211',
+          foreground: '#ecf0e8',
+          cursor: '#f7d774',
+          cursorAccent: '#101211',
+          selectionBackground: '#375f62',
+          black: '#101211',
+          red: '#ff6b6b',
+          green: '#7ee787',
+          yellow: '#f7d774',
+          blue: '#7dcfff',
+          magenta: '#d2a8ff',
+          cyan: '#79d4d7',
+          white: '#ecf0e8',
+          brightBlack: '#758078',
+          brightRed: '#ff8f8f',
+          brightGreen: '#a6f3a6',
+          brightYellow: '#ffe58f',
+          brightBlue: '#9bdcff',
+          brightMagenta: '#e2c4ff',
+          brightCyan: '#a2f0f2',
+          brightWhite: '#ffffff',
+        },
+        fontFamily: '"SF Mono", "Cascadia Code", "JetBrains Mono", Monaco, Menlo, monospace',
+        fontSize: 13,
+        lineHeight: 1.35,
+        cursorBlink: false,
+        scrollback: 10000,
+        convertEol: true,
+        disableStdin: true,
+        allowTransparency: true,
+      });
+      const fit = new FitAddon();
+      terminal.loadAddon(fit);
+      terminal.open(document.getElementById('terminal'));
+      fit.fit();
+      terminal.write(formatTerminalOutputForDisplay(sampleOutput, 'buffer'));
+      addEventListener('resize', () => fit.fit());
+    </script>
+  </body>
+</html>

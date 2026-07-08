@@ -3,7 +3,6 @@
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
-import httpx
 import structlog
 from temporalio import activity
 
@@ -16,6 +15,7 @@ from domains.grep.config import (
     SUMMARY_MAX_THREADS,
 )
 from domains.grep.types import GrepResult
+from helpers.http_client import get_http_client
 
 logger = structlog.get_logger()
 
@@ -72,24 +72,24 @@ async def grep_activity(
         if agent_id:
             payload["agent_id"] = agent_id
 
-        async with httpx.AsyncClient(timeout=GREP_HTTP_TIMEOUT) as client:
-            response = await client.post(
-                f"{config.backend.api_url}/api/data/grep",
-                headers={
-                    "X-API-Key": config.backend.api_key or "",
-                    "X-User-Id": user_id or "",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-            )
+        response = await get_http_client().post(
+            f"{config.backend.api_url}/api/data/grep",
+            headers={
+                "X-API-Key": config.backend.api_key or "",
+                "X-User-Id": user_id or "",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=GREP_HTTP_TIMEOUT,
+        )
 
-            # Propagate backend errors with descriptive messages
-            if response.status_code != 200:
-                error_data = response.json()
-                error_msg = error_data.get("message", error_data.get("error", f"HTTP {response.status_code}"))
-                raise ValueError(error_msg)
+        # Propagate backend errors with descriptive messages
+        if response.status_code != 200:
+            error_data = response.json()
+            error_msg = error_data.get("message", error_data.get("error", f"HTTP {response.status_code}"))
+            raise ValueError(error_msg)
 
-            data = response.json()
+        data = response.json()
 
         total_matches = data.get("total_matches", 0)
         truncated = data.get("truncated", False)
@@ -135,16 +135,16 @@ async def fetch_local_data_summary(user_id: str) -> str:
 
     config = load_config()
     try:
-        async with httpx.AsyncClient(timeout=SUMMARY_HTTP_TIMEOUT) as client:
-            response = await client.get(
-                f"{config.backend.api_url}/api/data/summary",
-                headers={
-                    "X-API-Key": config.backend.api_key or "",
-                    "X-User-Id": user_id,
-                },
-            )
-            response.raise_for_status()
-            data = response.json()
+        response = await get_http_client().get(
+            f"{config.backend.api_url}/api/data/summary",
+            headers={
+                "X-API-Key": config.backend.api_key or "",
+                "X-User-Id": user_id,
+            },
+            timeout=SUMMARY_HTTP_TIMEOUT,
+        )
+        response.raise_for_status()
+        data = response.json()
 
         sources = data.get("sources", {})
         messages = sources.get("messages", {})
@@ -185,9 +185,7 @@ async def fetch_local_data_summary(user_id: str) -> str:
             transaction_from_date = (
                 transaction_date_range.get("from", "")[:10] if transaction_date_range.get("from") else "?"
             )
-            transaction_to_date = (
-                transaction_date_range.get("to", "")[:10] if transaction_date_range.get("to") else "?"
-            )
+            transaction_to_date = transaction_date_range.get("to", "")[:10] if transaction_date_range.get("to") else "?"
             institutions = transactions.get("institutions", [])
             institution_str = ", ".join(institutions) if institutions else "unknown"
             transaction_lines = [

@@ -78,6 +78,8 @@ _VOLATILE_OBJECT_FIELDS = {
     "toolcallid",
     "tool_use_id",
     "tooluseid",
+    "spawn_group_id",
+    "spawngroupid",
     "created_at",
     "createdat",
     "updated_at",

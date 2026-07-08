@@ -16,7 +16,7 @@ import {
 import { checkNeedsInviteCode } from '@/lib/api';
 
 import { sendOTP, verifyOTP } from './api';
-import { IS_DEV_AUTO_LOGIN } from './config';
+import { DEV_AUTO_LOGIN_OTP, DEV_AUTO_LOGIN_PHONE, IS_DEV_AUTO_LOGIN } from './config';
 import type { AuthStep } from './types';
 
 /** Strips a formatted phone number to E.164: +19729777432. */
@@ -46,8 +46,8 @@ async function initAuthSession(
   if (IS_DEV_AUTO_LOGIN) {
     logAuth('Dev mode: auto-logging in with test credentials...');
     try {
-      await sendOTP('+19729777432');
-      const { session: devSession } = await verifyOTP('+19729777432', '181818');
+      await sendOTP(DEV_AUTO_LOGIN_PHONE);
+      const { session: devSession } = await verifyOTP(DEV_AUTO_LOGIN_PHONE, DEV_AUTO_LOGIN_OTP);
       await applySession('dev-auto-login', devSession);
       logAuth('Dev auto-login complete', { userId: devSession.user.id });
       return;

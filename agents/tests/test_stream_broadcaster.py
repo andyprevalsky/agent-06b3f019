@@ -9,6 +9,7 @@ broadcasts, losing no text, and (3) flush a final done marker on close.
 import asyncio
 import sys
 import time
+from types import SimpleNamespace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -42,6 +43,14 @@ def _patch(monkeypatch_target: _Recorder):
     messages.stream_assistant_chunk = monkeypatch_target  # type: ignore[assignment]
 
 
+def _reset_realtime_queue():
+    messages._broadcast_queue.clear()
+    messages._broadcast_coalesce_items.clear()
+    messages._broadcast_idle_waiters.clear()
+    messages._broadcast_draining = False
+    messages._broadcast_flush_task = None
+
+
 def test_update_is_non_blocking():
     """200 updates against a 50ms-per-broadcast sink must return near-instantly."""
     rec = _Recorder(latency_s=0.05)
@@ -61,6 +70,54 @@ def test_update_is_non_blocking():
         asyncio.run(run())
     finally:
         messages.stream_assistant_chunk = orig
+
+
+def test_stream_assistant_chunk_enqueues_without_waiting_for_supabase():
+    class _SlowClient:
+        def __init__(self):
+            self.posts = []
+
+        async def post(self, *args, **kwargs):
+            await asyncio.sleep(0.1)
+            self.posts.append((args, kwargs))
+            return SimpleNamespace(status_code=200, text="")
+
+    orig_client = messages._get_broadcast_client
+    orig_config = messages.load_config
+    slow_client = _SlowClient()
+    _reset_realtime_queue()
+    messages._get_broadcast_client = lambda: slow_client  # type: ignore[assignment]
+    messages.load_config = lambda: SimpleNamespace(  # type: ignore[assignment]
+        supabase=SimpleNamespace(url="https://supabase.test", service_role_key="service", anon_key="anon")
+    )
+    try:
+        async def run():
+            start = time.monotonic()
+            await messages.stream_assistant_chunk(
+                agent_id="a",
+                stream_id="s",
+                delta="hello ",
+                sequence=1,
+            )
+            elapsed = time.monotonic() - start
+            assert elapsed < 0.05, f"stream_assistant_chunk waited for Supabase: {elapsed:.3f}s"
+            assert slow_client.posts == []
+
+            await messages.stream_assistant_chunk(
+                agent_id="a",
+                stream_id="s",
+                delta="world",
+                sequence=2,
+            )
+            await messages.flush_realtime_broadcasts_for_tests()
+            assert len(slow_client.posts) == 1
+            body = slow_client.posts[0][1]["json"]
+            assert body["messages"][0]["payload"]["record"]["delta"] == "hello world"
+        asyncio.run(run())
+    finally:
+        messages._get_broadcast_client = orig_client  # type: ignore[assignment]
+        messages.load_config = orig_config  # type: ignore[assignment]
+        _reset_realtime_queue()
 
 
 def test_coalesces_without_losing_text():
@@ -105,6 +162,32 @@ def test_aclose_sends_done_marker():
         messages.stream_assistant_chunk = orig
 
 
+def test_aclose_can_background_done_marker():
+    rec = _Recorder(latency_s=0.1)
+    orig = messages.stream_assistant_chunk
+    _patch(rec)
+    try:
+        async def run():
+            b = CoalescingStreamBroadcaster(agent_id="a", stream_id="s", interval_s=0.05)
+            b.update("hello ", sequence=6)
+            start = time.monotonic()
+            await b.aclose(final_delta="done", final_sequence=7, await_done_broadcast=False)
+            elapsed = time.monotonic() - start
+            assert elapsed < 0.05, f"aclose awaited done broadcast: {elapsed:.3f}s"
+            assert rec.done_calls == []
+            for _ in range(20):
+                if rec.done_calls:
+                    break
+                await asyncio.sleep(0.01)
+            assert len(rec.done_calls) == 1, "background done marker was not sent"
+            assert rec.text == "hello done"
+            assert rec.done_calls[0]["delta"] == "done"
+            assert rec.done_calls[0]["sequence"] == 7
+        asyncio.run(run())
+    finally:
+        messages.stream_assistant_chunk = orig
+
+
 def test_reset_drops_buffered_deltas():
     rec = _Recorder(latency_s=0.001)
     orig = messages.stream_assistant_chunk
@@ -125,7 +208,9 @@ def test_reset_drops_buffered_deltas():
 
 if __name__ == "__main__":
     test_update_is_non_blocking()
+    test_stream_assistant_chunk_enqueues_without_waiting_for_supabase()
     test_coalesces_without_losing_text()
     test_aclose_sends_done_marker()
+    test_aclose_can_background_done_marker()
     test_reset_drops_buffered_deltas()
     print("all stream-broadcaster tests passed")

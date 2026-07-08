@@ -3,7 +3,7 @@
  * Both worker (via API) and chat handler use the same path for message creation.
  */
 
-import type { Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { prisma } from './database';
 import { broadcastMessageInsert } from './chat/supabaseBroadcast';
 import { createLogger } from './logger';
@@ -26,6 +26,31 @@ function stringMetadataValue(
   return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
+function normalizeJsonForCompare(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(normalizeJsonForCompare);
+  }
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .filter(([, entryValue]) => entryValue !== undefined)
+        .sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey))
+        .map(([key, entryValue]) => [key, normalizeJsonForCompare(entryValue)])
+    );
+  }
+  return value;
+}
+
+function metadataEquals(
+  incoming: Record<string, unknown> | null | undefined,
+  existing: Prisma.JsonValue | null | undefined
+): boolean {
+  return (
+    JSON.stringify(normalizeJsonForCompare(incoming ?? null)) ===
+    JSON.stringify(normalizeJsonForCompare(existing ?? null))
+  );
+}
+
 async function findDuplicateToolMessage(params: CreateMessageParams) {
   if (params.role !== 'TOOL' || (params.filePointer !== undefined && params.filePointer !== null)) {
     return null;
@@ -43,15 +68,20 @@ async function findDuplicateToolMessage(params: CreateMessageParams) {
     jsonPredicates.push({ metadata: { path: ['title'], equals: title } });
   }
 
-  return prisma.message.findFirst({
+  const candidates = await prisma.message.findMany({
     where: {
       agentId: params.agentId,
       role: 'TOOL',
       text: params.text,
+      filePointer: { equals: Prisma.AnyNull },
       AND: jsonPredicates,
     },
     orderBy: { timestamp: 'desc' },
   });
+
+  return (
+    candidates.find((candidate) => metadataEquals(params.metadata, candidate.metadata)) ?? null
+  );
 }
 
 /**

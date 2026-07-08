@@ -42,6 +42,7 @@ export interface SyncEvent {
 export interface Integration {
   name: string;
   status: string;
+  isActive?: boolean;
   lastSyncAt?: string | null;
   config?: Record<string, unknown>;
 }

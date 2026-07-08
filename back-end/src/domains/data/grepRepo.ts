@@ -367,10 +367,8 @@ export async function countAgentNetworkGrepRows(params: {
   caseInsensitive: boolean;
 }): Promise<number> {
   if (params.agentIds.length === 0) return 0;
-  const expression = Prisma.sql`concat_ws(E'\n',
-    m.text,
-    COALESCE(m.metadata::text, ''),
-    COALESCE(m."filePointer"::text, '')
+  const expression = Prisma.sql`(
+    m.text || E'\n' || COALESCE(m.metadata::text, '') || E'\n' || COALESCE(m."filePointer"::text, '')
   )`;
   const predicate = regexPredicate(expression, params.pattern, params.caseInsensitive);
   const rows = await prisma.$queryRaw<Array<{ count: bigint }>>`
@@ -390,10 +388,8 @@ export async function searchAgentNetworkGrepRows(params: {
   offset: number;
 }): Promise<AgentMessageGrepRow[]> {
   if (params.agentIds.length === 0) return [];
-  const expression = Prisma.sql`concat_ws(E'\n',
-    m.text,
-    COALESCE(m.metadata::text, ''),
-    COALESCE(m."filePointer"::text, '')
+  const expression = Prisma.sql`(
+    m.text || E'\n' || COALESCE(m.metadata::text, '') || E'\n' || COALESCE(m."filePointer"::text, '')
   )`;
   const predicate = regexPredicate(expression, params.pattern, params.caseInsensitive);
   return prisma.$queryRaw<AgentMessageGrepRow[]>`

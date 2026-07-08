@@ -6,7 +6,7 @@
  * the components through their state branches deterministically.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { screen, fireEvent } from '@testing-library/react';
+import { act, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from './test-wrapper';
 
@@ -59,6 +59,11 @@ vi.mock('@/hooks/useAgentTree', async () => {
 });
 
 import ClaudeCodeChip from '@/features/terminal-component-group/components/ClaudeCodeChip';
+import {
+  formatTerminalOutputForDisplay,
+  normalizeTerminalWhitespace,
+} from '@/features/terminal-component-group/components/claudeCodeChip.terminal';
+import { parseCodeAgentTranscript } from '@/features/terminal-component-group/components/claudeCodeChip.renderers';
 import SubAgentTree from '@/features/terminal-component-group/components/SubAgentTree';
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -76,12 +81,16 @@ function makeMsg(overrides: any = {}) {
 }
 
 describe('ClaudeCodeChip', () => {
+  const originalWebSocket = globalThis.WebSocket;
+
   beforeEach(() => {
     messagesRef.current = [];
+    globalThis.WebSocket = originalWebSocket;
   });
 
   afterEach(() => {
     messagesRef.current = [];
+    globalThis.WebSocket = originalWebSocket;
   });
 
   it('renders the spinning up state by default', () => {
@@ -98,9 +107,79 @@ describe('ClaudeCodeChip', () => {
   it('renders spinning_up with forceShow terminal surface', () => {
     renderWithProviders(<ClaudeCodeChip taskId="task-1" forceShow />);
     expect(screen.getByText('Claude Code Spinning up...')).toBeInTheDocument();
+    expect(screen.getByText('0 turns completed')).toBeInTheDocument();
     // The compact header shows Maximize2 button
     const buttons = screen.getAllByRole('button');
     expect(buttons.length).toBeGreaterThan(0);
+  });
+
+  it('does not count heartbeat progress messages as completed turns', () => {
+    messagesRef.current = [
+      makeMsg({
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'task_started',
+          title: 'Task Started',
+          toolStatus: 'FINISHED',
+        },
+      }),
+      makeMsg({
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'agent_observation',
+          title: 'Claude Code working (30s)',
+          toolStatus: 'FINISHED',
+        },
+      }),
+      makeMsg({
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'agent_observation',
+          title: 'Claude Code working (60s)',
+          toolStatus: 'FINISHED',
+        },
+      }),
+    ];
+
+    renderWithProviders(<ClaudeCodeChip taskId="task-1" forceShow />);
+    expect(screen.getByText('0 turns completed')).toBeInTheDocument();
+    expect(screen.queryByText('2 turns completed')).not.toBeInTheDocument();
+  });
+
+  it('shows explicit Codex completed turn count in code-agent headers', () => {
+    messagesRef.current = [
+      makeMsg({
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'claude_code_started',
+          title: 'Codex Code Started',
+          code_provider: 'codex',
+        },
+      }),
+      makeMsg({
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'agent_observation',
+          title: 'Codex working (30s)',
+          toolStatus: 'FINISHED',
+          code_provider: 'codex',
+          completed_turns: 1,
+        },
+      }),
+      makeMsg({
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'agent_observation',
+          title: 'Codex working (60s)',
+          toolStatus: 'FINISHED',
+          code_provider: 'codex',
+          completed_turns: 1,
+        },
+      }),
+    ];
+
+    renderWithProviders(<ClaudeCodeChip taskId="task-1" forceShow codeProvider="codex" />);
+    expect(screen.getByText('1 turn completed')).toBeInTheDocument();
   });
 
   it('shows completed state and structured response when expanded', async () => {
@@ -138,6 +217,108 @@ describe('ClaudeCodeChip', () => {
     expect(screen.getByText('Extracted Output')).toBeInTheDocument();
     expect(screen.getByText('Summary')).toBeInTheDocument();
     expect(screen.getByText('Count')).toBeInTheDocument();
+  });
+
+  it('treats Codex Task Complete messages with success status as completed', () => {
+    messagesRef.current = [
+      makeMsg({
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'claude_code_started',
+          title: 'Codex Code Started',
+          code_provider: 'codex',
+        },
+      }),
+      makeMsg({
+        text: '**Status**: ✅ SUCCESS\n\nVerification passed.',
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'task_complete',
+          title: 'Task Complete',
+          toolStatus: 'FINISHED',
+          code_provider: 'codex',
+        },
+      }),
+    ];
+
+    renderWithProviders(<ClaudeCodeChip taskId="task-1" />);
+    expect(screen.getByText('Codex Completed Successfully')).toBeInTheDocument();
+    expect(screen.queryByText('Codex Failed')).not.toBeInTheDocument();
+  });
+
+  it('does not flash failed from a raw non-zero WebSocket exit before Codex verifier success', async () => {
+    let socket: {
+      onopen: (() => void) | null;
+      onmessage: ((event: { data: string }) => void) | null;
+      onclose: (() => void) | null;
+      readyState: number;
+      close: () => void;
+    };
+
+    class MockWebSocket {
+      static OPEN = 1;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+      readyState = MockWebSocket.OPEN;
+
+      constructor() {
+        socket = this;
+      }
+
+      close() {
+        this.readyState = 3;
+        this.onclose?.();
+      }
+    }
+
+    globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+
+    const { rerender } = renderWithProviders(
+      <ClaudeCodeChip taskId="task-1" wsUrl="ws://example.test" codeProvider="codex" forceShow />,
+    );
+
+    act(() => {
+      socket.onopen?.();
+    });
+    expect(screen.getByText('Codex Active')).toBeInTheDocument();
+
+    act(() => {
+      socket.onmessage?.({ data: JSON.stringify({ type: 'exit', code: 1 }) });
+    });
+
+    await waitFor(() => expect(screen.getByText('Verifying Result...')).toBeInTheDocument());
+    expect(screen.queryByText('Codex Failed')).not.toBeInTheDocument();
+
+    messagesRef.current = [
+      makeMsg({
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'claude_code_started',
+          title: 'Codex Code Started',
+          code_provider: 'codex',
+        },
+      }),
+      makeMsg({
+        text: '**Status**: ✅ SUCCESS\n\nVerification passed.',
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'task_complete',
+          title: 'Task Complete',
+          toolStatus: 'FINISHED',
+          code_provider: 'codex',
+        },
+      }),
+    ];
+
+    rerender(
+      <ClaudeCodeChip taskId="task-1" wsUrl="ws://example.test" codeProvider="codex" forceShow />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText('Codex Completed Successfully')).toBeInTheDocument(),
+    );
+    expect(screen.queryByText('Codex Failed')).not.toBeInTheDocument();
   });
 
   it('shows failed state with failure message when expanded', async () => {
@@ -227,6 +408,65 @@ describe('ClaudeCodeChip', () => {
     expect(screen.getByText('Output Schema')).toBeInTheDocument();
     expect(screen.getByText('city')).toBeInTheDocument();
     fireEvent.mouseLeave(triggers[0].parentElement!.parentElement!);
+  });
+});
+
+describe('code-agent terminal formatting', () => {
+  it('adds readable ANSI section labels for terminal action markers', () => {
+    const formatted = formatTerminalOutputForDisplay(
+      '[Codex command output]\nhello\n[Codex exit code] 0',
+    );
+
+    expect(formatted).toContain('▶ Codex output');
+    expect(formatted).toContain('✓ Codex exit');
+    expect(formatted).toContain('\x1b[');
+  });
+
+  it('collapses runaway terminal indentation while preserving real code indentation', () => {
+    const normalized = normalizeTerminalWhitespace(
+      [
+        'current = start',
+        '                                                                                                while current <= end:',
+        '    if weekday == 0:',
+        '                                                                                                                         day_number = (current - start).days + 1',
+      ].join('\n'),
+    );
+
+    expect(normalized).toContain('\n  while current <= end:');
+    expect(normalized).toContain('\n    if weekday == 0:');
+    expect(normalized).toContain('\n  day_number = (current - start).days + 1');
+    expect(normalized).not.toMatch(/\n {24,}\S/);
+  });
+
+  it('parses completed code-agent output into color-coded transcript sections', () => {
+    const blocks = parseCodeAgentTranscript(
+      [
+        `[Codex command started] /bin/bash -lc "python3 - <<'PY'"`,
+        'from datetime import date, datetime',
+        '[Codex command output]',
+        'csv module parse: OK',
+        'row_count=156',
+        '[Codex exit_code] 0',
+        '[Codex] Created and committed the calendar CSV.',
+        'Artifacts:',
+        '- `/home/user/content_calendar_90_days.csv`',
+        'Verification:',
+        '- `csv.DictReader`: OK',
+      ].join('\n'),
+    );
+
+    expect(blocks.map((block) => block.kind)).toEqual([
+      'command',
+      'output',
+      'exit',
+      'agent',
+      'status',
+      'status',
+    ]);
+    expect(blocks.find((block) => block.kind === 'output')?.lines.join('\n')).toContain(
+      'row_count=156',
+    );
+    expect(blocks.find((block) => block.title === 'Exited cleanly')?.tone).toBe('green');
   });
 });
 
@@ -384,6 +624,34 @@ describe('SubAgentTree', () => {
     await user.click(collapseBtn);
     // After collapse: intermediary count line appears with '2 intermediary agents'
     expect(screen.getByText(/intermediary agent/)).toBeInTheDocument();
+  });
+
+  it('caps active leaf previews in collapsed depth>=2 trees', async () => {
+    const user = userEvent.setup();
+    treeRef.current.set('root', makeNode({ agentId: 'root', goal: 'root goal' }));
+    for (let i = 0; i < 4; i++) {
+      treeRef.current.set(
+        `leaf-${i}`,
+        makeNode({
+          agentId: `leaf-${i}`,
+          parentAgentId: 'root',
+          goal: `active repeated prompt ${i}`,
+          messageCount: 1,
+        }),
+      );
+    }
+
+    renderWithProviders(
+      <SubAgentTree busId="bus-1" subAgentIds={['root']} title="t" onNavigate={vi.fn()} />,
+    );
+
+    await user.click(screen.getByText(/Collapse intermediary agents/));
+
+    expect(screen.getByText('active repeated prompt 0')).toBeInTheDocument();
+    expect(screen.getByText('thinking...')).toBeInTheDocument();
+    expect(screen.queryByText('active repeated prompt 1')).toBeNull();
+    expect(screen.queryByText('active repeated prompt 2')).toBeNull();
+    expect(screen.queryByText('active repeated prompt 3')).toBeNull();
   });
 
   it('shows finished-summary line when multiple terminal leaves present in collapsed view', async () => {

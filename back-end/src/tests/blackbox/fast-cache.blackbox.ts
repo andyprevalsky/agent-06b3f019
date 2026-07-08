@@ -85,6 +85,26 @@ async function main(): Promise<void> {
     assert(get.json.value.content === 'CHANGED', 'last write must win');
   });
 
+  await test('#10 get-many returns hits and misses in one request', async () => {
+    const secondKey = `${key}:second`;
+    await post('/api/fast-cache/set', {
+      key: secondKey,
+      kind: 'llm',
+      goalHash,
+      value: { content: 'SECOND' },
+    });
+    const get = await post('/api/fast-cache/get-many', {
+      keys: [key, secondKey, `${key}:missing`, key],
+    });
+    const results = get.json.results as Record<string, JsonObject>;
+    assert(get.status === 200, `get-many status ${get.status}`);
+    assert(results[key].hit === true, 'first key should hit');
+    assert((results[key].value as JsonObject).content === 'CHANGED', 'first value roundtrip');
+    assert(results[secondKey].hit === true, 'second key should hit');
+    assert((results[secondKey].value as JsonObject).content === 'SECOND', 'second value roundtrip');
+    assert(results[`${key}:missing`].hit === false, 'missing key should miss');
+  });
+
   await test('#26 secrets stripped at the route', async () => {
     const skey = `${key}:secret`;
     await post('/api/fast-cache/set', {

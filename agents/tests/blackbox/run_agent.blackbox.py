@@ -153,6 +153,39 @@ async def test_tool_only_assistant_turn_persists_tool_calls():
     assert executed[0]["tool_call_id"] == "tc-web-search-1"
 
 
+async def test_same_llm_turn_spawn_agents_share_spawn_group_id_without_persisting_arg():
+    """Multiple general-purpose spawns from one LLM turn render as one tree."""
+    tool_calls = [
+        {
+            "tool": "spawn_agent",
+            "type": "general_purpose",
+            "goal": "Research alpha",
+            "output_schema": {"fields": []},
+        },
+        {
+            "tool": "spawn_agent",
+            "type": "general_purpose",
+            "goal": "Research beta",
+            "output_schema": {"fields": []},
+        },
+    ]
+    detected_tools = [
+        ("spawn_agent", "tc-spawn-a", 1.0),
+        ("spawn_agent", "tc-spawn-b", 2.0),
+    ]
+
+    _result, posted, executed = await _run_single_iteration(tool_calls, detected_tools)
+
+    assert len(executed) == 2
+    group_ids = [call["tool_args"].get("_spawn_group_id") for call in executed]
+    assert group_ids == ["llm-turn:execute:1:tc-spawn-a", "llm-turn:execute:1:tc-spawn-a"]
+
+    assistant_posts = [m for m in posted if m["role"] == "ASSISTANT"]
+    assert len(assistant_posts) == 1
+    persisted_calls = assistant_posts[0]["metadata"]["tool_calls"]
+    assert all("_spawn_group_id" not in call for call in persisted_calls)
+
+
 async def test_assistant_tool_call_ids_match_execution_and_context_results():
     """Persisted assistant tool_call_id values should match execution and TOOL context metadata."""
     tool_calls = [
@@ -1152,6 +1185,10 @@ async def run_all_tests():
     print("run-agent blackbox tests:")
     r = BlackboxResult()
     await r.record_async("tool_only_assistant_turn_persists_tool_calls", test_tool_only_assistant_turn_persists_tool_calls)
+    await r.record_async(
+        "same_llm_turn_spawn_agents_share_spawn_group_id",
+        test_same_llm_turn_spawn_agents_share_spawn_group_id_without_persisting_arg,
+    )
     await r.record_async("assistant_tool_call_ids_match_execution_and_context_results", test_assistant_tool_call_ids_match_execution_and_context_results)
     await r.record_async("general_purpose_agent_executes_after_explore_results", test_general_purpose_agent_executes_after_explore_results)
     await r.record_async("attempt_completion_skip_verification_returns_completed", test_attempt_completion_skip_verification_returns_completed)

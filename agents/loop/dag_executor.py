@@ -15,7 +15,6 @@ USAGE:
 import asyncio
 import json
 import re
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -32,6 +31,7 @@ from loop.context_utils import poll_and_update_context
 from loop.payload_guard import check_activity_payload
 from tools.base import EventType, MessageStatus, ToolEvent
 from utils.prompts import CONTEXT_POINTERS_RULE
+from utils.tool_call_ids import spawn_group_id
 
 logger = structlog.get_logger()
 
@@ -64,6 +64,7 @@ ALIAS_TYPE_OVERRIDES = {
     "spawn_general_purpose_agent": {"type": "general_purpose", "start_phase": "EXECUTE"},
     "spawn_general_purpose_agent_for_each": {"type": "for_each", "start_phase": "EXECUTE"},
 }
+
 
 def _apply_alias_override(params: Dict[str, Any], tool_name: str) -> Dict[str, Any]:
     """Merge an alias's type/start_phase override into a populated param dict.
@@ -147,13 +148,9 @@ def _select_param_tool_call(tool_calls: List[Dict[str, Any]], actual_tool: str, 
     matching = [tc for tc in tool_calls if tc.get("tool") == actual_tool]
     if not matching:
         if len(tool_calls) == 1:
-            workflow.logger.warning(
-                f"[DAG] Expected tool {actual_tool}, got {tool_calls[0].get('tool')}"
-            )
+            workflow.logger.warning(f"[DAG] Expected tool {actual_tool}, got {tool_calls[0].get('tool')}")
             return tool_calls[0]
-        raise ValueError(
-            f"LLM returned {len(tool_calls)} tool calls for task {task.index}, none for {actual_tool}"
-        )
+        raise ValueError(f"LLM returned {len(tool_calls)} tool calls for task {task.index}, none for {actual_tool}")
 
     if len(matching) == 1:
         return matching[0]
@@ -175,9 +172,7 @@ def _select_param_tool_call(tool_calls: List[Dict[str, Any]], actual_tool: str, 
         )
         return ranked[0][2]
 
-    raise ValueError(
-        f"LLM returned multiple ambiguous {actual_tool} tool calls for task {task.index}"
-    )
+    raise ValueError(f"LLM returned multiple ambiguous {actual_tool} tool calls for task {task.index}")
 
 
 def _build_param_population_message(goal: str, tool_name: str, alias_hint: str = "") -> str:
@@ -240,10 +235,15 @@ def _build_early_tool_event(
             event_tool_name = "spawn_general_purpose_agent"
             title = "Spawning sub-agent"
             message = ""
+            metadata = {"spawnGroupId": spawn_group_id(tool_call_id)}
         elif agent_type == "for_each":
             event_tool_name = "spawn_general_purpose_agent_for_each"
             title = "Spawning agent cluster"
             message = ""
+            metadata = {"spawnGroupId": spawn_group_id(tool_call_id)}
+
+    metadata["dagTaskIndex"] = task.index
+    metadata["plannedToolName"] = task.tool_name
 
     return event_tool_name, ToolEvent(
         type=EventType.POST_MESSAGE,
@@ -338,13 +338,19 @@ class TaskDAG:
         dependencies = plan_data.get("dependencies", {})
 
         for i, task_data in enumerate(raw_tasks):
-            # Handle both old format (string) and new format (dict)
             if isinstance(task_data, str):
-                goal = task_data
-                tool_name = "reasoning"  # Default if no tool specified
-            else:
-                goal = task_data.get("goal", "")
-                tool_name = task_data.get("tool_name", "reasoning")
+                raise ValueError(
+                    f"Plan task {i} must be an object with explicit goal and tool_name; "
+                    "string tasks are not supported"
+                )
+            if not isinstance(task_data, dict):
+                raise ValueError(f"Plan task {i} must be an object, got {type(task_data).__name__}")
+
+            goal = task_data.get("goal", "")
+            tool_name = task_data.get("tool_name")
+            if not isinstance(tool_name, str) or not tool_name.strip():
+                raise ValueError(f"Plan task {i} missing required tool_name")
+            tool_name = tool_name.strip()
 
             # Get dependencies for this task index
             deps = dependencies.get(str(i), [])
@@ -392,6 +398,71 @@ class TaskDAG:
         """Mark a task as failed."""
         self.tasks[index].state = TaskState.FAILED
 
+    def resume_completed_tasks_from_context(self, context: List[Dict[str, Any]]) -> List[int]:
+        """Mark already-finished DAG tasks from persisted messages.
+
+        New DAG messages carry ``dagTaskIndex`` metadata. Older transcripts do
+        not, so fall back to matching terminal tool rows to the first pending
+        planned task with the same logical tool. Reasoning DAG tasks complete
+        as normal assistant rows, because their live output uses the existing
+        assistant stream path rather than a persisted synthetic tool row.
+        """
+        completed: List[int] = []
+        tool_call_to_task: Dict[str, int] = {}
+
+        for msg in context:
+            metadata = msg.get("metadata") or {}
+            if not isinstance(metadata, dict):
+                continue
+            tool_call_id = metadata.get("toolCallId")
+            dag_task_index = metadata.get("dagTaskIndex")
+            if isinstance(tool_call_id, str) and isinstance(dag_task_index, int):
+                tool_call_to_task[tool_call_id] = dag_task_index
+
+        for msg in context:
+            metadata = msg.get("metadata") or {}
+            if not isinstance(metadata, dict):
+                continue
+            is_finished_tool = metadata.get("toolStatus") == "FINISHED" and not metadata.get("error")
+            is_finished_reasoning = (
+                msg.get("role") == "ASSISTANT"
+                and metadata.get("plannedToolName") == "reasoning"
+                and isinstance(metadata.get("dagTaskIndex"), int)
+                and not metadata.get("error")
+            )
+            if not is_finished_tool and not is_finished_reasoning:
+                continue
+
+            tool_call_id = metadata.get("toolCallId")
+            task_index = metadata.get("dagTaskIndex") if is_finished_reasoning else None
+            if task_index is None:
+                task_index = tool_call_to_task.get(tool_call_id) if isinstance(tool_call_id, str) else None
+            if task_index is None:
+                task_index = self._legacy_completed_task_index(metadata)
+            if task_index is None or task_index < 0 or task_index >= len(self.tasks):
+                continue
+            task = self.tasks[task_index]
+            if task.state != TaskState.PENDING:
+                continue
+            if not all(self.tasks[dep_idx].state == TaskState.COMPLETED for dep_idx in task.depends_on):
+                continue
+
+            task.state = TaskState.COMPLETED
+            if isinstance(tool_call_id, str):
+                task.tool_call_id = tool_call_id
+            completed.append(task_index)
+
+        return completed
+
+    def _legacy_completed_task_index(self, metadata: Dict[str, Any]) -> Optional[int]:
+        """Best-effort mapping for pre-dagTaskIndex persisted messages."""
+        for task in self.tasks:
+            if task.state != TaskState.PENDING:
+                continue
+            if _metadata_matches_task(metadata, task):
+                return task.index
+        return None
+
     def is_complete(self) -> bool:
         """
         Check if DAG execution is complete.
@@ -427,6 +498,31 @@ def extract_plan_from_context(context: List[Dict]) -> Optional[Dict[str, Any]]:
         if metadata.get("toolName") == "set_plan" and metadata.get("toolStatus") == "FINISHED":
             return metadata.get("data")
     return None
+
+
+def _metadata_matches_task(metadata: Dict[str, Any], task: DAGTask) -> bool:
+    """Return whether a terminal tool row represents a planned DAG task."""
+    tool_name = metadata.get("toolName")
+    if not isinstance(tool_name, str):
+        return False
+    if tool_name == task.tool_name:
+        return True
+
+    actual_tool = TOOL_ALIASES.get(task.tool_name, task.tool_name)
+    if tool_name == actual_tool:
+        if actual_tool == "spawn_agent":
+            expected_type = ALIAS_TYPE_OVERRIDES.get(task.tool_name, {}).get("type")
+            agent_type = metadata.get("agentType") or metadata.get("agent_type")
+            if task.tool_name == "spawn_explore_agent":
+                return agent_type in {None, "explore"}
+            return agent_type == expected_type
+        return True
+
+    if task.tool_name == "spawn_code_agent" and tool_name == "spawn_claude_code_agent":
+        return True
+    if task.tool_name == "reasoning" and tool_name == DAG_REASONING_UI_TOOL_NAME:
+        return True
+    return False
 
 
 async def execute_dag(
@@ -482,30 +578,50 @@ async def execute_dag(
 
     workflow.logger.info(f"[DAG] Starting execution with {len(dag.tasks)} tasks, join={dag.join}")
 
-    # Warm the Anthropic prompt cache before parallel DAG tasks fire.
-    # A throwaway LLM call with the execute-phase system+tools+context
-    # writes the cache prefix once; subsequent parallel param-populator
-    # calls all read from it without needing serialization.
-    has_llm_tasks = any(
-        t.tool_name != "reasoning" for t in dag.tasks
-    )
-    if has_llm_tasks and system_prompt_text and (claude_token or gpt_token):
+    cache_warm_complete = False
+
+    async def warm_cache_before_tool_tasks() -> None:
+        nonlocal cache_warm_complete
+        if cache_warm_complete:
+            return
+        cache_warm_complete = True
+        if not system_prompt_text or not (claude_token or gpt_token):
+            return
         try:
             _pending_llm_context[agent_id] = (list(context), system_prompt_text, None)
             await execute_activity(
                 call_llm_activity,
                 args=[
-                    agent_id, model, tool_names or [], 1,
-                    agent_id, None, None, claude_token,
-                    "dag_cache_warm", system_prompt_text,
-                    None, None, False,
+                    agent_id,
+                    model,
+                    tool_names or [],
+                    1,
+                    agent_id,
+                    None,
+                    None,
+                    claude_token,
+                    "dag_cache_warm",
+                    system_prompt_text,
+                    None,
+                    None,
+                    False,
                     "",
-                    claude_token_source, claude_token_pool_id, user_id,
-                    gpt_token, gpt_account_id, gpt_token_source, gpt_token_pool_id, user_id,
-                    None, None, user_id,
+                    claude_token_source,
+                    claude_token_pool_id,
+                    user_id,
+                    gpt_token,
+                    gpt_account_id,
+                    gpt_token_source,
+                    gpt_token_pool_id,
+                    user_id,
+                    None,
+                    None,
+                    user_id,
                     # Fast Mode: cache-warm keys by canonical request fingerprint;
                     # enabled+goal auto-resolve from the agent row.
-                    False, None, 0,
+                    False,
+                    None,
+                    0,
                 ],
                 start_to_close_timeout=timedelta(seconds=STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS),
                 retry_policy=RetryPolicy(maximum_attempts=1),
@@ -537,6 +653,12 @@ async def execute_dag(
 
         # Start newly ready tasks
         ready = dag.get_ready_tasks()
+        if any(task.tool_name != "reasoning" for task in ready):
+            # Warm immediately before the first concrete tool batch needs a
+            # param-populator prefix. This preserves cache behavior for tool
+            # nodes without blocking earlier reasoning-only DAG steps from
+            # streaming to the frontend.
+            await warm_cache_before_tool_tasks()
         for task in ready:
             if task.index not in pending_tasks:
                 workflow.logger.info(f"[DAG] Starting task {task.index}: {task.tool_name} - {task.goal[:50]}...")
@@ -656,29 +778,24 @@ async def _execute_single_task(
     """
     from activities.reasoning import execute_reasoning_activity
 
-    tool_call_id = str(uuid.uuid4())
+    # MUST be workflow.uuid4() (not uuid.uuid4()): this id runs in workflow
+    # scope and is recorded in Temporal history. Raw uuid.uuid4() is recomputed
+    # on every replay, so a worker migration/restart mid-fan-out regenerates the
+    # id — IN_PROGRESS child events land under the pre-replay id and FINISHED
+    # events under the post-replay id, splitting one for_each into two bubbles
+    # (the pre-replay one spins forever, never receiving a matching FINISHED).
+    tool_call_id = str(workflow.uuid4())
+    reasoning_stream_id: Optional[str] = None
+    reasoning_started_at: Optional[str] = None
     dag.mark_in_progress(task.index, tool_call_id)
 
     try:
         if task.tool_name == "reasoning":
             # Reasoning task - execute via activity (streams to frontend via Supabase Realtime)
-            stream_id = f"dag-reasoning-{task.index}-{uuid.uuid4()}"
-
-            # Emit an IN_PROGRESS DB row so external monitors (and the FE) can see
-            # the reasoning task started. Without this, the parent agent appears
-            # silent for the full reasoning duration — frontend/benchmark stall
-            # detectors interpret that as a hung agent. The reasoning activity
-            # itself only writes a single ASSISTANT row at the end.
-            await handle_tool_event_fn(
-                ToolEvent(
-                    type=EventType.POST_MESSAGE,
-                    title=DAG_REASONING_IN_PROGRESS_TITLE,
-                    message=task.goal,
-                    status=MessageStatus.IN_PROGRESS,
-                ),
-                tool_call_id,
-                DAG_REASONING_UI_TOOL_NAME,
-            )
+            # workflow.uuid4() for replay-stability (see tool_call_id note above).
+            stream_id = f"dag-reasoning-{task.index}-{workflow.uuid4()}"
+            reasoning_stream_id = stream_id
+            reasoning_started_at = workflow.now().isoformat()
 
             # Trim context to the same window the reasoning activity will use
             # internally (MAX_CONTEXT_MESSAGES). Without this, the FULL context
@@ -689,9 +806,7 @@ async def _execute_single_task(
             # would just truncate this anyway, so trimming at the call site
             # both keeps the payload under cap AND saves serialization work.
             trimmed_context = (
-                context[-REASONING_MAX_CONTEXT_MESSAGES:]
-                if len(context) > REASONING_MAX_CONTEXT_MESSAGES
-                else context
+                context[-REASONING_MAX_CONTEXT_MESSAGES:] if len(context) > REASONING_MAX_CONTEXT_MESSAGES else context
             )
             reasoning_args = [
                 task.goal,
@@ -710,6 +825,7 @@ async def _execute_single_task(
                 user_id,
                 # Fast Mode: reasoning keys by canonical request fingerprint.
                 task.index,
+                system_prompt_text,
             ]
             # Fail fast if context has grown past Temporal's 2 MiB payload limit —
             # otherwise the workflow-task encoder loops silently on replay.
@@ -767,19 +883,17 @@ async def _execute_single_task(
                     except Exception as e:
                         workflow.logger.warning(f"on_tokens failed for dag_reasoning: {e}")
 
-            await handle_tool_event_fn(
-                ToolEvent(
-                    type=EventType.POST_MESSAGE,
-                    title=DAG_REASONING_FINISHED_TITLE,
-                    message=reasoning_content,
-                    status=MessageStatus.FINISHED,
-                ),
-                tool_call_id,
-                DAG_REASONING_UI_TOOL_NAME,
+            await post_message(
+                reasoning_content,
+                "ASSISTANT",
+                {
+                    "dagTaskIndex": task.index,
+                    "plannedToolName": task.tool_name,
+                    "streamId": stream_id,
+                    "firstTimestamp": reasoning_started_at,
+                    "startedAt": reasoning_started_at,
+                },
             )
-
-            # Post reasoning to DB as ASSISTANT message
-            await post_message(reasoning_content, "ASSISTANT", {"reasoning": True, "dagTaskIndex": task.index})
 
             return True
 
@@ -839,7 +953,9 @@ async def _execute_single_task(
                     None,
                     user_id,
                     # Fast Mode: DAG node keys by canonical request fingerprint.
-                    False, None, task.index,
+                    False,
+                    None,
+                    task.index,
                 ],
                 start_to_close_timeout=timedelta(seconds=600),
                 retry_policy=RetryPolicy(maximum_attempts=2),
@@ -879,7 +995,9 @@ async def _execute_single_task(
             type_override = ALIAS_TYPE_OVERRIDES.get(task.tool_name)
             if type_override:
                 _apply_alias_override(params, task.tool_name)
-                workflow.logger.info(f"[DAG] Applying type override for {task.tool_name}: {params.get('type')} start_phase={params.get('start_phase')}")
+                workflow.logger.info(
+                    f"[DAG] Applying type override for {task.tool_name}: {params.get('type')} start_phase={params.get('start_phase')}"
+                )
                 # Explore agents don't use these type-specific params — strip them if LLM added them
                 if type_override.get("type") == "explore":
                     params.pop("output_schema", None)
@@ -891,28 +1009,75 @@ async def _execute_single_task(
                     # fan-out. Force quick here; deliberate deep research should be its own task.
                     params["depth"] = "quick"
 
+                if type_override.get("type") in {"general_purpose", "for_each"}:
+                    params["_spawn_group_id"] = spawn_group_id(tool_call_id)
+
             # Execute tool (uses existing flow - posts result to context)
             result = await execute_tool(actual_tool, params, tool_call_id)
 
             # Check for error status
             # _execute_tool returns {"error": True} on exception, {"success": False} on tool failure
-            return not (result.get("error") or result.get("success") is False or result.get("status") == "error")
+            failed = bool(result.get("error") or result.get("success") is False or result.get("status") == "error")
+            if failed:
+                # Surface the swallowed tool-result error — without this, a DAG task
+                # failure shows only "[DAG] Task N failed" with no reason, making
+                # e.g. a for_each spawn validation failure invisible.
+                workflow.logger.warning(
+                    f"[DAG] Task {task.index} tool '{actual_tool}' returned failure: "
+                    f"{str(result.get('message') or result.get('error') or result)[:300]} "
+                    f"| type={params.get('type')} start_phase={params.get('start_phase')} "
+                    f"items={len(params.get('items')) if isinstance(params.get('items'), list) else params.get('items')}"
+                )
+            return not failed
 
     except Exception as e:
         # Extract actual error message (unwrap Temporal's ActivityError wrapper)
         error_msg = extract_error_message(e)
         workflow.logger.error(f"[DAG] Task {task.index} error: {error_msg}", exc_info=True)
+        if task.tool_name == "reasoning":
+            await post_message(
+                f"Error: {error_msg}",
+                "ASSISTANT",
+                {
+                    "dagTaskIndex": task.index,
+                    "plannedToolName": task.tool_name,
+                    "streamId": reasoning_stream_id,
+                    "firstTimestamp": reasoning_started_at,
+                    "startedAt": reasoning_started_at,
+                    "error": True,
+                },
+            )
+            await handle_tool_event_fn(
+                ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title=DAG_REASONING_FINISHED_TITLE,
+                    message=f"Error: {error_msg}",
+                    status=MessageStatus.ERROR,
+                    metadata={"dagTaskIndex": task.index, "plannedToolName": task.tool_name},
+                ),
+                tool_call_id,
+                DAG_REASONING_UI_TOOL_NAME,
+            )
+            return False
+
+        error_tool_name = (
+            DAG_REASONING_UI_TOOL_NAME if task.tool_name == "reasoning" else task.tool_name
+        )
+        error_title = (
+            DAG_REASONING_FINISHED_TITLE if task.tool_name == "reasoning" else task.tool_name
+        )
 
         # Post error via handle_tool_event (adds to context)
         await handle_tool_event_fn(
             ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title=task.tool_name,
+                title=error_title,
                 message=f"Error: {error_msg}",
                 status=MessageStatus.ERROR,
+                metadata={"dagTaskIndex": task.index, "plannedToolName": task.tool_name},
             ),
             tool_call_id,
-            task.tool_name,
+            error_tool_name,
         )
 
         return False

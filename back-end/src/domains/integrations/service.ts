@@ -473,7 +473,7 @@ export async function uploadGptCodeCredentials(userId: string, encryptedCredenti
     lastSyncAt: new Date(),
     lastSuccessfulSyncAt: new Date(),
     config: { encryptedCredentials },
-    updateExtra: { failureReason: null },
+    updateExtra: { failureReason: null, rateLimitedUntil: null, lastUsedAt: null },
   });
   log.info('GPT Code credentials stored', { userId });
 }

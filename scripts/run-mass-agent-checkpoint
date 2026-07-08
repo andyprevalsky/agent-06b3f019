@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ARGS=(test-mass-agent-run-0)
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --services-json)
+      echo "--services-json is no longer used; checkpoint runs are owned by scripts/run-bench isolated stacks." >&2
+      exit 2
+      ;;
+    --through-index)
+      ARGS+=(--checkpoint "$2")
+      shift 2
+      ;;
+    --no-start)
+      ARGS+=(--checkpoint-no-start)
+      shift
+      ;;
+    --source-json)
+      ARGS+=(--checkpoint-source-json "$2")
+      shift 2
+      ;;
+    --tree-json)
+      ARGS+=(--checkpoint-tree-json "$2")
+      shift 2
+      ;;
+    --no-tree)
+      ARGS+=(--checkpoint-no-tree)
+      shift
+      ;;
+    --timeout-seconds)
+      ARGS+=(--checkpoint-timeout-seconds "$2")
+      shift 2
+      ;;
+    --price-limit-cents)
+      ARGS+=(--checkpoint-price-limit-cents "$2")
+      shift 2
+      ;;
+    --fast-mode-cache)
+      ARGS+=(--checkpoint-fast-mode-cache "$2")
+      shift 2
+      ;;
+    --start-agent-id)
+      ARGS+=(--checkpoint-start-agent-id "$2")
+      shift 2
+      ;;
+    -h|--help)
+      cat <<'EOF'
+usage: scripts/run-mass-agent-checkpoint [options]
+
+Compatibility wrapper for:
+  scripts/run-bench test-mass-agent-run-0 --checkpoint <turn_n>
+
+Prefer scripts/run-bench directly for new checkpoint work.
+EOF
+      exit 0
+      ;;
+    *)
+      ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+exec "$ROOT_DIR/scripts/run-bench" "${ARGS[@]}"

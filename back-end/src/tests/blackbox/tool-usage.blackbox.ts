@@ -40,6 +40,7 @@
 
 import { config } from 'dotenv';
 import { z } from 'zod';
+import { prisma } from '../../providers/database';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -179,23 +180,23 @@ async function setupAuth(): Promise<void> {
 }
 
 async function createTestAgent(): Promise<void> {
-  const res = await request(`${BASE_URL}/api/agents`, {
-    method: 'POST',
-    headers: apiKeyHeaders(ctx.user1Id!),
-    body: JSON.stringify({ goal: 'Tool-usage blackbox test agent - do nothing' }),
+  const agent = await prisma.agent.create({
+    data: {
+      userId: ctx.user1Id!,
+      goal: 'Tool-usage blackbox test agent - fixture only',
+      status: 'PAUSED',
+      source: 'WEB',
+      temporalWorkflowId: null,
+    },
   });
-  assertStatus(res.status, 201, res.data);
-  const body = res.data as { agent_id: string };
-  assert(!!body.agent_id, `Missing agent_id: ${JSON.stringify(res.data).substring(0, 300)}`);
-  ctx.agentId = body.agent_id;
+  ctx.agentId = agent.id;
 }
 
 async function cleanup(): Promise<void> {
-  if (ctx.agentId)
-    await request(`${BASE_URL}/api/agents/${ctx.agentId}`, {
-      method: 'DELETE',
-      headers: apiKeyHeaders(ctx.user1Id!),
-    });
+  if (ctx.agentId) {
+    await prisma.toolUsage.deleteMany({ where: { agentId: ctx.agentId } });
+    await prisma.agent.deleteMany({ where: { id: ctx.agentId } });
+  }
 }
 
 // ==================== POST — AUTH & VALIDATION ====================

@@ -1,6 +1,11 @@
 /**
  * ASSISTANT messages that carry a file attachment (output files from Claude
  * Code, screenshots, etc.). Rendered left-aligned without avatar / label.
+ *
+ * STATE MACHINE:
+ * [NO FILE]     -> null
+ * [TEXT + FILE] -> text bubble plus full-width AttachmentDisplay
+ * [FILE ONLY]   -> full-width AttachmentDisplay
  */
 import { cn } from '@/lib/utils';
 import type { Message } from '../../hooks';
@@ -18,7 +23,7 @@ export function AssistantAttachmentBubble({ message, agentId }: AssistantAttachm
   const attachments = [message.file_pointer];
 
   return (
-    <div className="flex flex-col items-start gap-2 animate-in fade-in duration-300">
+    <div className="flex w-full flex-col items-start gap-2 animate-in fade-in duration-300">
       {message.text && (
         <div
           className={cn(

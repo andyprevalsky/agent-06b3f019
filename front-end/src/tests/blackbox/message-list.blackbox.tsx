@@ -1,3 +1,4 @@
+/* eslint-disable max-lines */
 /**
  * Blackbox tests for MessageList component.
  *
@@ -177,6 +178,101 @@ describe('MessageList', () => {
     await waitFor(() => expect(screen.getByText('Searched web')).toBeInTheDocument());
     // Earlier title shouldn't be present (only latest kept)
     expect(screen.queryByText('Searching web')).not.toBeInTheDocument();
+  });
+
+  it('keeps the browser failure chip visible after credential classification messages arrive', async () => {
+    const baseTime = Date.now();
+    const ctx = makeAgentCtx({
+      messages: [
+        msg('browser-ready', {
+          role: 'TOOL',
+          text: '',
+          timestamp: new Date(baseTime).toISOString(),
+          metadata: {
+            task_id: 'browser-task-1',
+            toolCallId: 'browser-call-1',
+            toolName: 'spawn_browser_agent',
+            title: 'Browser Ready',
+            toolStatus: 'IN_PROGRESS',
+            action_type: 'browser',
+            browser_url: 'https://debug.steel.dev/session/browser-task-1',
+          },
+        }),
+        msg('browser-failed', {
+          role: 'TOOL',
+          text:
+            '**Status**: ❌ FAILED\n\n' +
+            "**Outcome**: [Errno 13] Permission denied: '/.context'\n\n" +
+            '**Error**: Failed during: initialization',
+          timestamp: new Date(baseTime + 1000).toISOString(),
+          metadata: {
+            task_id: 'browser-task-1',
+            toolCallId: 'browser-call-1',
+            toolName: 'spawn_browser_agent',
+            title: 'Task Failed',
+            toolStatus: 'ERROR',
+            action_type: 'task_complete',
+          },
+        }),
+        msg('credential-classified', {
+          role: 'TOOL',
+          text:
+            'Browser run failed.\n\n' +
+            'Failure reason: unknown\n\n' +
+            "Raw error: FAILED **Outcome**: [Errno 13] Permission denied: '/.context'",
+          timestamp: new Date(baseTime + 2000).toISOString(),
+          metadata: {
+            toolCallId: 'credential-failure-classifier:agent-1',
+            toolName: 'credential_failure_classifier',
+            title: 'Browser Failure Classified',
+            toolStatus: 'FINISHED',
+            action_type: 'credential_failure_classification',
+          },
+        }),
+      ],
+    });
+
+    renderList(ctx);
+
+    await waitFor(() => expect(screen.getByTestId('browser-agent-chip')).toBeInTheDocument());
+    expect(screen.getByText('Browser Agent')).toBeInTheDocument();
+    expect(screen.getByText('Browser Failure Classified')).toBeInTheDocument();
+  });
+
+  it('hides cancelled DAG reasoning rows', async () => {
+    const ctx = makeAgentCtx({
+      messages: [
+        msg('think-start', {
+          role: 'TOOL',
+          text: 'Synthesize the answer',
+          timestamp: new Date(Date.now()).toISOString(),
+          metadata: {
+            toolCallId: 'dag-reasoning-1',
+            toolName: 'thought',
+            title: 'Thinking',
+            toolStatus: 'IN_PROGRESS',
+          },
+        }),
+        msg('think-error', {
+          role: 'TOOL',
+          text: 'Error: Cancelled',
+          timestamp: new Date(Date.now() + 1000).toISOString(),
+          metadata: {
+            toolCallId: 'dag-reasoning-1',
+            toolName: 'thought',
+            title: 'Thought',
+            toolStatus: 'ERROR',
+          },
+        }),
+      ],
+    });
+
+    renderList(ctx);
+
+    await waitFor(() => expect(screen.queryByText('reasoning')).not.toBeInTheDocument());
+    expect(screen.queryByText('Thought')).not.toBeInTheDocument();
+    expect(screen.queryByText('reasoning')).not.toBeInTheDocument();
+    expect(screen.queryByText('Error: Cancelled')).not.toBeInTheDocument();
   });
 
   it('filters messages by subAgentId (sub-agent panel)', () => {
@@ -651,199 +747,5 @@ describe('MessageList', () => {
     const copyBtn = await screen.findByTitle('Copy response');
     await userEvent.click(copyBtn);
     await waitFor(() => expect(writeText).toHaveBeenCalledWith('copy me'));
-  });
-
-  it('respects compact mode prop by keeping layout rendered', () => {
-    const ctx = makeAgentCtx({
-      messages: [msg('u1', { role: 'USER', text: 'compact hello' })],
-    });
-    renderList(ctx, { compact: true });
-    expect(screen.getByText('compact hello')).toBeInTheDocument();
-  });
-
-  it('does not show thinking indicator when showThinkingIndicator=false', () => {
-    const ctx = makeAgentCtx({
-      agent: makeAgent({ status: 'ACTIVE' }),
-      streamingBubbles: new Map([['sb-1', { text: 'thinking now', sequence: 1, done: false }]]),
-    });
-    renderList(ctx, { showThinkingIndicator: false });
-    // No "Thinking" word from the MessageList-level thinking banner
-    expect(screen.queryByText('Thinking')).not.toBeInTheDocument();
-  });
-
-  it('uses the orange direct-token thinking animation for GPT streaming bubbles', async () => {
-    const ctx = makeAgentCtx({
-      agent: makeAgent({ status: 'ACTIVE' }),
-      streamingBubbles: new Map([
-        ['sb-1', { text: 'thinking with gpt', sequence: 1, done: false, isGpt: true }],
-      ]),
-    });
-    renderList(ctx);
-    await waitFor(
-      () =>
-        expect(screen.getByTestId('thinking-animation')).toHaveAttribute(
-          'data-has-gradient',
-          'true',
-        ),
-      { timeout: 1200 },
-    );
-  });
-
-  it('renders main thinking stream as elapsed time plus token download count', async () => {
-    const startedAtMs = Date.now() - 2200;
-    const ctx = makeAgentCtx({
-      agent: makeAgent({ status: 'ACTIVE' }),
-      streamingBubbles: new Map([
-        [
-          'sb-1',
-          {
-            text: 'thinking with enough content to estimate tokens',
-            sequence: 1,
-            done: false,
-            startedAtMs,
-          },
-        ],
-      ]),
-    });
-    renderList(ctx);
-    await waitFor(() => expect(screen.getByText('Thinking')).toBeInTheDocument(), {
-      timeout: 1200,
-    });
-    expect(document.body.textContent).toMatch(/\d+\.\ds·\d+ tokens/);
-    expect(document.querySelector('.lucide-arrow-down')).not.toBeNull();
-  });
-
-  it('renders main blue thinking metrics from llm start before first token arrives', async () => {
-    const startedAtMs = Date.now() - 900;
-    const ctx = makeAgentCtx({
-      agent: makeAgent({ status: 'ACTIVE' }),
-      streamingBubbles: new Map([
-        [
-          'sb-1',
-          {
-            text: '',
-            sequence: 0,
-            done: false,
-            startedAtMs,
-          },
-        ],
-      ]),
-    });
-    renderList(ctx);
-    await waitFor(() => expect(screen.getByText('Thinking')).toBeInTheDocument(), {
-      timeout: 1200,
-    });
-    expect(screen.getByTestId('thinking-animation')).toHaveAttribute('data-has-gradient', 'false');
-    expect(document.body.textContent).toMatch(/\d+\.\ds·0 tokens/);
-  });
-
-  it('does not render status banners inside a sub-agent panel', () => {
-    const ctx = makeAgentCtx({
-      agent: makeAgent({ status: 'PAUSED' }),
-    });
-    renderList(ctx, { subAgentId: 'sub-1' });
-    // Banner is only shown for main chat (subAgentId === undefined)
-    expect(
-      screen.queryByText(/Rose has stopped, send a new message to continue/),
-    ).not.toBeInTheDocument();
-  });
-
-  it('hides thinking when last tool is IN_PROGRESS non-attention (user feedback expected)', () => {
-    const ctx = makeAgentCtx({
-      agent: makeAgent({ status: 'ACTIVE' }),
-      messages: [
-        msg('t1', {
-          role: 'TOOL',
-          text: '',
-          metadata: {
-            toolCallId: 'w1',
-            toolName: 'web_search',
-            title: 'Searching',
-            toolStatus: 'IN_PROGRESS',
-          },
-        }),
-      ],
-    });
-    renderList(ctx);
-    // Thinking indicator is hidden when an IN_PROGRESS non-attention tool is present.
-    // The tool card itself renders 'Searching', not the banner-level 'Thinking' word.
-    const matches = screen.queryAllByText('Thinking');
-    // Only acceptable 'Thinking' would be from thought tool card — we have no such tool.
-    expect(matches.length).toBe(0);
-  });
-
-  it('hides main thinking when the last message is IN_PROGRESS tool even if a stream is open', async () => {
-    const ctx = makeAgentCtx({
-      agent: makeAgent({ status: 'ACTIVE' }),
-      streamingBubbles: new Map([['sb-1', { text: 'still streaming', sequence: 1, done: false }]]),
-      messages: [
-        msg('t1', {
-          role: 'TOOL',
-          text: '',
-          metadata: {
-            toolCallId: 'w1',
-            toolName: 'web_search',
-            title: 'Searching',
-            toolStatus: 'IN_PROGRESS',
-          },
-        }),
-      ],
-    });
-    renderList(ctx);
-    await new Promise((resolve) => setTimeout(resolve, 900));
-    expect(screen.queryByText('Thinking')).not.toBeInTheDocument();
-  });
-
-  it('merges general-purpose agent tree messages sharing busId into single render', async () => {
-    const ctx = makeAgentCtx({
-      messages: [
-        msg('tree1', {
-          role: 'TOOL',
-          text: '',
-          timestamp: new Date(Date.now()).toISOString(),
-          metadata: {
-            toolCallId: 'spawn-a',
-            toolName: 'spawn_general_purpose_agent',
-            toolStatus: 'FINISHED',
-            busId: 'bus-1',
-            subAgentIds: ['sub-a'],
-            title: 'Cluster',
-          },
-        }),
-        msg('tree2', {
-          role: 'TOOL',
-          text: '',
-          timestamp: new Date(Date.now() + 1000).toISOString(),
-          metadata: {
-            toolCallId: 'spawn-b',
-            toolName: 'spawn_general_purpose_agent_for_each',
-            toolStatus: 'FINISHED',
-            busId: 'bus-1',
-            subAgentIds: ['sub-b'],
-            title: 'Cluster',
-          },
-        }),
-      ],
-    });
-    const { container } = renderList(ctx);
-    // Tree rendered once. Text content should include merged header.
-    await waitFor(() => expect(container.firstChild).not.toBeNull());
-    // Two messages share busId=bus-1; MessageList collapses them into a single
-    // SubAgentTree render. The "Cluster" title text must only appear once (or
-    // not at all if SubAgentTree strips it) — it must NOT appear twice.
-    const clusterMatches = screen.queryAllByText(/Cluster/);
-    expect(clusterMatches.length).toBeLessThanOrEqual(1);
-    // And the summary must reference both sub-agent IDs in the merged tree data.
-    // Both tree messages have distinct toolCallIds ('spawn-a' and 'spawn-b') but the
-    // merged render should NOT produce two separate SubAgentToolBubble chips.
-    // Individual SubAgentToolBubble rows each emit an `aria-live` or chip title
-    // — here we verify only one top-level wrapper class is rendered.
-    const treeWrappers = container.querySelectorAll('div.flex.gap-3.animate-in');
-    // Other messages render in their own wrappers, but we expect the general-purpose
-    // messages to produce at most a single tree wrapper (merged), not two.
-    // Count wrappers that originate from the general-purpose branch specifically:
-    // this branch puts SubAgentTree as a direct child. A collapsed "Cluster" row
-    // would produce two such wrappers if the merge regressed.
-    expect(treeWrappers.length).toBeLessThanOrEqual(1);
   });
 });

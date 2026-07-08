@@ -1170,3 +1170,4 @@
 {"task": "spawn-sub-agents", "duration_seconds": 146.4, "cost_cents": 2.0, "timestamp": "2026-07-01T04:34:31.176931+00:00", "agent_id": "d49857b5-306b-4297-95be-138187c0bbdd"}
 {"task": "browser-biometrics-webdecoy", "duration_seconds": 176.5, "cost_cents": 3.0, "timestamp": "2026-07-01T04:34:31.176931+00:00", "agent_id": "a83fb824-a331-44a8-97a3-ebfd6de3d8de"}
 {"task": "parallel-tool-calls", "duration_seconds": 201.7, "cost_cents": 7.0, "timestamp": "2026-07-01T04:34:31.176931+00:00", "agent_id": "ed06eed2-22fc-4747-a1fb-364a221de185"}
+{"task": "test-mass-agent-run-0", "duration_seconds": 19.6, "cost_cents": 0.0, "timestamp": "2026-07-08T05:40:29.398207+00:00", "agent_id": "6ff575ae-12f0-4d8f-8c36-fd6d3e1bb89e"}

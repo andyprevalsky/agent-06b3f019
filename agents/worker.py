@@ -6,6 +6,7 @@ import os
 import re
 import signal
 import sys
+from datetime import timedelta
 
 import psutil
 import structlog
@@ -202,11 +203,19 @@ import httpx
 #                     machine, watch for backlog
 # ─────────────────────────────────────────────────────────────────────────
 
-MIN_MACHINES = 2
-MAX_MACHINES = 10
+MIN_MACHINES = int(os.getenv("MIN_MACHINES", "2"))
+MAX_MACHINES = int(os.getenv("MAX_MACHINES", "15"))  # raised from 10 to fit deep for_each trees
 SCALE_DOWN_COOLDOWN_SECS = 60  # Seconds of zero backlog before probing downward
 SCALE_UP_THRESHOLD = 0.2  # Fraction of machine capacity that triggers scale-up
 SCALE_UP_COOLDOWN_SECS = 20  # Seconds to wait after a scale-up before allowing another
+# Workflow-slot occupancy scaling. A for_each parent holds a workflow slot while it
+# awaits its children, so a wide/deep fan-out can pin every workflow slot WITHOUT
+# generating a Temporal backlog hint (children can't be scheduled to even enter the
+# backlog). Temporal's backlog_count_hint is blind to this, so we also scale on
+# observed workflow-slot occupancy. Target occupancy < 1 leaves headroom so awaiting
+# parents never starve their own children of slots (the deadlock we observed).
+WORKFLOW_SATURATION_SCALE_UP = float(os.getenv("WORKFLOW_SATURATION_SCALE_UP", "0.75"))
+WORKFLOW_SLOT_TARGET_OCCUPANCY = float(os.getenv("WORKFLOW_SLOT_TARGET_OCCUPANCY", "0.6"))
 ADMISSION_PRESSURE_SCALE_UP_SECS = 60
 POLL_INTERVAL_SECS = 1  # 3 Temporal API calls/s — well within 1000 req/s limit
 LOG_INTERVAL_SECS = 30  # Periodic summary log (avoid 86k lines/day at 1s polls)
@@ -241,21 +250,39 @@ class ActivityAdmissionSnapshot:
         maximum_slots: int,
         close_memory_percent: float,
         open_memory_percent: float,
+        close_cpu_percent: float = 85.0,
+        open_cpu_percent: float = 70.0,
         poll_interval_s: float = 0.1,
     ) -> None:
         if open_memory_percent >= close_memory_percent:
             raise ValueError("ACTIVITY_ADMISSION_OPEN_MEMORY_PERCENT must be below close threshold")
+        if open_cpu_percent >= close_cpu_percent:
+            raise ValueError("ACTIVITY_ADMISSION_OPEN_CPU_PERCENT must be below close threshold")
         self.maximum_slots = maximum_slots
         self.close_memory_percent = close_memory_percent
         self.open_memory_percent = open_memory_percent
+        self.close_cpu_percent = close_cpu_percent
+        self.open_cpu_percent = open_cpu_percent
         self._admission_open = True
         self._memory_percent = 0.0
+        self._cpu_percent = 0.0
+        # Prime psutil's system-wide CPU sampler so the first real read measures
+        # the interval since construction rather than returning 0.0.
+        psutil.cpu_percent(None)
 
     def _refresh_admission(self) -> None:
         self._memory_percent = float(psutil.virtual_memory().percent)
-        if self._admission_open and self._memory_percent >= self.close_memory_percent:
+        # System-wide CPU over the interval since the last poll (non-blocking).
+        # On a 1-vCPU Fly VM this is the guest core's utilization — the direct
+        # signal for GIL/event-loop saturation from concurrent agent activities.
+        self._cpu_percent = float(psutil.cpu_percent(None))
+        # Close on EITHER pressure; only reopen when BOTH have recovered, so a
+        # still-pegged core can't flap admission back open on a memory dip.
+        under_close = self._memory_percent >= self.close_memory_percent or self._cpu_percent >= self.close_cpu_percent
+        under_open = self._memory_percent <= self.open_memory_percent and self._cpu_percent <= self.open_cpu_percent
+        if self._admission_open and under_close:
             self._admission_open = False
-        elif not self._admission_open and self._memory_percent <= self.open_memory_percent:
+        elif not self._admission_open and under_open:
             self._admission_open = True
 
     def snapshot(self) -> dict[str, int | float | bool]:
@@ -265,6 +292,9 @@ class ActivityAdmissionSnapshot:
             "activity_admission_memory_percent": self._memory_percent,
             "activity_admission_close_memory_percent": self.close_memory_percent,
             "activity_admission_open_memory_percent": self.open_memory_percent,
+            "activity_admission_cpu_percent": self._cpu_percent,
+            "activity_admission_close_cpu_percent": self.close_cpu_percent,
+            "activity_admission_open_cpu_percent": self.open_cpu_percent,
             "activity_admission_max_slots": self.maximum_slots,
         }
 
@@ -559,6 +589,7 @@ async def poll_queue_metrics(
     namespace: str,
     task_queue: str,
     activity_admission_snapshot: ActivityAdmissionSnapshot,
+    max_workflow_slots: int,
 ):
     """Adaptive autoscaler: poll Temporal, compute desired machines, actuate via Fly API.
 
@@ -658,8 +689,7 @@ async def poll_queue_metrics(
                 now = time.monotonic()
                 in_cooldown = (now - _last_scale_up_time) < SCALE_UP_COOLDOWN_SECS
                 admission_pressure = (
-                    workflow_count > 0
-                    and activity_admission_unavailable_count >= activity_admission_scale_threshold
+                    workflow_count > 0 and activity_admission_unavailable_count >= activity_admission_scale_threshold
                 )
                 if admission_pressure:
                     if _admission_pressure_since is None:
@@ -669,14 +699,29 @@ async def poll_queue_metrics(
                 admission_pressure_seconds = (
                     0.0 if _admission_pressure_since is None else now - _admission_pressure_since
                 )
-                if backlog > 0:
+                # Workflow-slot occupancy: a for_each parent holds a workflow slot
+                # while awaiting its children, so a deep/wide fan-out can pin every
+                # workflow slot with ZERO Temporal backlog hint (the children can't be
+                # scheduled to even enter the backlog). Scale on observed occupancy too,
+                # or the tree deadlocks — awaiting parents starve their own children of
+                # slots — invisibly to the backlog-based signal.
+                workflow_slot_capacity = max(1, max_workflow_slots * max(current_machines, 1))
+                workflow_saturation = workflow_count / workflow_slot_capacity
+                slot_pressure = workflow_saturation >= WORKFLOW_SATURATION_SCALE_UP
+                # Machines to hold running + backlogged workflows at target occupancy,
+                # leaving headroom for the children the running parents will spawn.
+                slot_target_machines = math.ceil(
+                    (workflow_count + backlog) / max(1.0, max_workflow_slots * WORKFLOW_SLOT_TARGET_OCCUPANCY)
+                )
+
+                if backlog > 0 or slot_pressure:
                     _backlog_zero_since = None
                     scale_capacity = observed_capacity or DEFAULT_CAPACITY
                     additional = backlog / scale_capacity
                     # Cooldown: after a scale-up, wait for DNS to propagate
                     # before allowing another (prevents overshoot)
-                    if additional >= SCALE_UP_THRESHOLD and not in_cooldown:
-                        _desired_machines = current_machines + math.ceil(additional)
+                    if not in_cooldown and (additional >= SCALE_UP_THRESHOLD or slot_pressure):
+                        _desired_machines = max(current_machines + math.ceil(additional), slot_target_machines)
                     else:
                         _desired_machines = current_machines  # Transient blip or in cooldown
                 elif (
@@ -690,7 +735,10 @@ async def poll_queue_metrics(
                     _backlog_zero_since = None
                     _desired_machines = current_machines
                 else:
-                    # Backlog is 0 — scale down after cooldown
+                    # Backlog is 0 AND workflow slots are not saturated — safe to probe
+                    # down. NEVER drain while slots are saturated: pulling a machine out
+                    # from under awaiting-parent workflows re-creates the fan-out deadlock
+                    # (this stalled agents mid-run and forced expensive re-spawns).
                     if _backlog_zero_since is None:
                         _backlog_zero_since = now
 
@@ -723,9 +771,7 @@ async def poll_queue_metrics(
                     workflow_task_pollers=sdk_metrics.get("workflow_task_pollers"),
                     sticky_workflow_task_pollers=sdk_metrics.get("sticky_workflow_task_pollers"),
                     activity_admission_open=activity_admission_open,
-                    activity_admission_memory_percent=float(
-                        admission_snapshot["activity_admission_memory_percent"]
-                    ),
+                    activity_admission_memory_percent=float(admission_snapshot["activity_admission_memory_percent"]),
                     activity_admission_close_memory_percent=float(
                         admission_snapshot["activity_admission_close_memory_percent"]
                     ),
@@ -925,6 +971,8 @@ async def main():
         maximum_slots=config.temporal.max_concurrent_activities,
         close_memory_percent=config.temporal.activity_admission_close_memory_percent,
         open_memory_percent=config.temporal.activity_admission_open_memory_percent,
+        close_cpu_percent=config.temporal.activity_admission_close_cpu_percent,
+        open_cpu_percent=config.temporal.activity_admission_open_cpu_percent,
     )
 
     # Workflow slots still use Temporal's resource tuner. Activity slots use
@@ -951,6 +999,7 @@ async def main():
             config.temporal.namespace,
             config.temporal.task_queue,
             activity_admission_snapshot,
+            config.temporal.max_concurrent_workflows,
         ),
     )
 
@@ -1045,8 +1094,12 @@ async def main():
         ],
         tuner=tuner,
         max_cached_workflows=config.temporal.max_cached_workflows,
+        sticky_queue_schedule_to_start_timeout=timedelta(
+            seconds=config.temporal.sticky_queue_schedule_to_start_timeout_seconds
+        ),
         max_concurrent_activity_task_polls=config.temporal.max_concurrent_activity_task_polls,
         max_concurrent_workflow_task_polls=config.temporal.max_concurrent_workflow_task_polls,
+        nonsticky_to_sticky_poll_ratio=config.temporal.nonsticky_to_sticky_poll_ratio,
         workflow_runner=SandboxedWorkflowRunner(restrictions=sandbox_restrictions),
     )
 
@@ -1056,6 +1109,10 @@ async def main():
         activity_admission_open_memory_percent=config.temporal.activity_admission_open_memory_percent,
         max_activity_slots=config.temporal.max_concurrent_activities,
         max_workflow_slots=config.temporal.max_concurrent_workflows,
+        nonsticky_to_sticky_poll_ratio=config.temporal.nonsticky_to_sticky_poll_ratio,
+        sticky_queue_schedule_to_start_timeout_seconds=(
+            config.temporal.sticky_queue_schedule_to_start_timeout_seconds
+        ),
         target_cpu=0.8,
         workflow_target_memory=0.8,
     )

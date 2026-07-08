@@ -15,6 +15,13 @@ export { updateAgentConfig } from './agentConfigService';
 
 const log = createLogger('Agents');
 const TERMINAL_STATUSES = new Set(['COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED']);
+const IRREVERSIBLE_STATUSES = new Set([
+  'COMPLETED',
+  'FAILED',
+  'OUT_OF_CREDITS',
+  'COST_LIMIT_REACHED',
+]);
+const NON_TERMINAL_STATUSES = new Set(['STARTING_UP', 'ACTIVE', 'PAUSED']);
 
 // ---------------------------------------------------------------------------
 // Pause / Resume
@@ -241,6 +248,16 @@ export async function updateAgentStatus(agentId: string, body: UpdateStatusBody)
 
   if (!agent) {
     return null;
+  }
+
+  if (IRREVERSIBLE_STATUSES.has(agent.status) && NON_TERMINAL_STATUSES.has(body.status)) {
+    log.info('Ignoring stale non-terminal status update for terminal agent', {
+      agent_id: agentId,
+      current_status: agent.status,
+      attempted_status: body.status,
+      attempted_progress: body.progress,
+    });
+    return agent;
   }
 
   const updated = await repo.updateAgent(agentId, {

@@ -35,8 +35,20 @@ const SCHEMA_FILE = path.join(BACKEND_DIR, 'prisma/schema.prisma');
 
 type TableState = Map<string, Set<string>>;
 
+// Identifier prefixes vary by SQL source:
+//   - Prisma-generated migrations: `"Agent"` (always double-quoted, no schema).
+//   - pg_dump baseline (the squash): `public."Agent"` (schema-qualified), with
+//     columns that may be quoted (`"userId"`) OR bare lowercase (`id text`).
+// The parser handles both. SCHEMA_PREFIX matches an optional `public.` /
+// `"public".`; IDENT matches a quoted-or-bare identifier (capture groups 1|2).
+const SCHEMA_PREFIX = '(?:"?public"?\\.)?';
+const NON_COLUMN_KEYWORDS = /^(CONSTRAINT|PRIMARY|FOREIGN|UNIQUE|CHECK|EXCLUDE)\b/i;
+
 function parseCreateTable(sql: string, state: TableState): void {
-  const re = /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"([^"]+)"\s*\(([\s\S]+?)\)\s*;/gi;
+  const re = new RegExp(
+    `CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${SCHEMA_PREFIX}"([^"]+)"\\s*\\(([\\s\\S]+?)\\n\\)\\s*;`,
+    'gi'
+  );
   let m: RegExpExecArray | null;
   while ((m = re.exec(sql)) !== null) {
     const table = m[1];
@@ -44,35 +56,55 @@ function parseCreateTable(sql: string, state: TableState): void {
     const columns = new Set<string>();
     for (const line of body.split('\n')) {
       const trimmed = line.trim().replace(/,$/, '');
-      const colMatch = trimmed.match(/^"([^"]+)"\s+/);
-      if (colMatch && !trimmed.startsWith('CONSTRAINT') && !trimmed.startsWith('PRIMARY KEY')) {
-        columns.add(colMatch[1]);
-      }
+      if (!trimmed || NON_COLUMN_KEYWORDS.test(trimmed)) continue;
+      // Column def starts with a quoted OR bare identifier followed by a type.
+      const colMatch = trimmed.match(/^(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))\s+\S/);
+      if (colMatch) columns.add(colMatch[1] ?? colMatch[2]);
     }
     state.set(table, columns);
   }
 }
 
-function parseAlterAddColumn(sql: string, state: TableState): void {
-  const re = /ALTER\s+TABLE\s+"([^"]+)"\s+ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?"([^"]+)"/gi;
+// Prisma emits multiple column changes in a single statement, e.g.
+//   ALTER TABLE "Agent" ADD COLUMN "a" INT, ADD COLUMN "b" INT;
+// A regex anchored on `ALTER TABLE ... ADD COLUMN` only captures the FIRST
+// clause. So we match each ALTER TABLE statement (up to its terminating `;`)
+// and then scan every ADD/DROP COLUMN clause inside it.
+function forEachAlterStatement(sql: string, fn: (table: string, body: string) => void): void {
+  const stmtRe = new RegExp(
+    `ALTER\\s+TABLE\\s+(?:ONLY\\s+)?${SCHEMA_PREFIX}"([^"]+)"([\\s\\S]*?);`,
+    'gi'
+  );
   let m: RegExpExecArray | null;
-  while ((m = re.exec(sql)) !== null) {
-    const cols = state.get(m[1]);
-    if (cols) cols.add(m[2]);
-  }
+  while ((m = stmtRe.exec(sql)) !== null) fn(m[1], m[2]);
+}
+
+function parseAlterAddColumn(sql: string, state: TableState): void {
+  forEachAlterStatement(sql, (table, body) => {
+    const cols = state.get(table);
+    if (!cols) return;
+    const addRe =
+      /ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))/gi;
+    let a: RegExpExecArray | null;
+    while ((a = addRe.exec(body)) !== null) cols.add(a[1] ?? a[2]);
+  });
 }
 
 function parseAlterDropColumn(sql: string, state: TableState): void {
-  const re = /ALTER\s+TABLE\s+"([^"]+)"\s+DROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?"([^"]+)"/gi;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(sql)) !== null) {
-    const cols = state.get(m[1]);
-    if (cols) cols.delete(m[2]);
-  }
+  forEachAlterStatement(sql, (table, body) => {
+    const cols = state.get(table);
+    if (!cols) return;
+    const dropRe = /DROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))/gi;
+    let d: RegExpExecArray | null;
+    while ((d = dropRe.exec(body)) !== null) cols.delete(d[1] ?? d[2]);
+  });
 }
 
 function parseAlterRenameColumn(sql: string, state: TableState): void {
-  const re = /ALTER\s+TABLE\s+"([^"]+)"\s+RENAME\s+COLUMN\s+"([^"]+)"\s+TO\s+"([^"]+)"/gi;
+  const re = new RegExp(
+    `ALTER\\s+TABLE\\s+${SCHEMA_PREFIX}"([^"]+)"\\s+RENAME\\s+COLUMN\\s+"([^"]+)"\\s+TO\\s+"([^"]+)"`,
+    'gi'
+  );
   let m: RegExpExecArray | null;
   while ((m = re.exec(sql)) !== null) {
     const cols = state.get(m[1]);
@@ -84,7 +116,7 @@ function parseAlterRenameColumn(sql: string, state: TableState): void {
 }
 
 function parseDropTable(sql: string, state: TableState): void {
-  const re = /DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?"([^"]+)"/gi;
+  const re = new RegExp(`DROP\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?${SCHEMA_PREFIX}"([^"]+)"`, 'gi');
   let m: RegExpExecArray | null;
   while ((m = re.exec(sql)) !== null) {
     state.delete(m[1]);
@@ -92,7 +124,10 @@ function parseDropTable(sql: string, state: TableState): void {
 }
 
 function parseAlterRenameTable(sql: string, state: TableState): void {
-  const re = /ALTER\s+TABLE\s+"([^"]+)"\s+RENAME\s+TO\s+"([^"]+)"/gi;
+  const re = new RegExp(
+    `ALTER\\s+TABLE\\s+${SCHEMA_PREFIX}"([^"]+)"\\s+RENAME\\s+TO\\s+${SCHEMA_PREFIX}"([^"]+)"`,
+    'gi'
+  );
   let m: RegExpExecArray | null;
   while ((m = re.exec(sql)) !== null) {
     const cols = state.get(m[1]);
@@ -170,13 +205,16 @@ function parseSchemaPrisma(): TableState {
 }
 
 interface Drift {
-  kind: 'orphan-table' | 'orphan-column';
+  kind: 'orphan-table' | 'orphan-column' | 'missing-table' | 'missing-column';
   table: string;
   column?: string;
 }
 
 function compare(migrations: TableState, schema: TableState): Drift[] {
   const drift: Drift[] = [];
+  // Direction 1 (migrations -> schema): a table/column exists in the migration
+  // history but not in schema.prisma. This is the "dropped a model/column but
+  // forgot the DROP migration" bug (PR #558).
   for (const [table, migCols] of migrations) {
     const schemaCols = schema.get(table);
     if (!schemaCols) {
@@ -189,12 +227,33 @@ function compare(migrations: TableState, schema: TableState): Drift[] {
       }
     }
   }
+  // Direction 2 (schema -> migrations): a model/column exists in schema.prisma
+  // but NO migration ever creates it. Local `db push` conjures the table from
+  // schema.prisma so blackbox tests pass, but prod `migrate deploy` never
+  // creates it, so every query 500s with "table does not exist". This is the
+  // ComputeTokenLineageLease incident (2026-07-06). This is the direction the
+  // original test was missing.
+  for (const [table, schemaCols] of schema) {
+    const migCols = migrations.get(table);
+    if (!migCols) {
+      drift.push({ kind: 'missing-table', table });
+      continue;
+    }
+    for (const col of schemaCols) {
+      if (!migCols.has(col)) {
+        drift.push({ kind: 'missing-column', table, column: col });
+      }
+    }
+  }
   return drift;
 }
 
-// Tables/columns that exist in prod but were intentionally dropped from the
-// schema model AND have a paired drop migration scheduled. Add an entry here
-// only when you ship a DROP migration in the same change.
+// Non-Prisma tables that live in the DB but have no schema.prisma model:
+// Prisma's own bookkeeping table and PostGIS's system table. The migration
+// history was squashed to a single pg_dump baseline on 2026-07-06 (see
+// prisma/migrations/00000000000000_init), so the previous "known incomplete
+// history" allowlist is gone — the baseline now creates every model, and the
+// reverse-direction check fails the build on ANY new untracked model/column.
 const KNOWN_NON_PRISMA_TABLES = new Set(['_prisma_migrations', 'spatial_ref_sys']);
 
 const drift = compare(buildMigrationState(), parseSchemaPrisma()).filter(
@@ -213,18 +272,31 @@ for (const d of drift) {
       `  - Table "${d.table}" exists in migration history but not in schema.prisma.\n` +
         `    Fix: add a "DROP TABLE" migration, or re-add the model to schema.prisma.`
     );
-  } else {
+  } else if (d.kind === 'orphan-column') {
     console.error(
       `  - Column "${d.table}"."${d.column}" exists in migration history but not in schema.prisma.\n` +
         `    Fix: add an "ALTER TABLE \\"${d.table}\\" DROP COLUMN \\"${d.column}\\"" migration,\n` +
         `         or re-add the field to model ${d.table} in schema.prisma.`
+    );
+  } else if (d.kind === 'missing-table') {
+    console.error(
+      `  - Model "${d.table}" exists in schema.prisma but NO migration creates it.\n` +
+        `    Fix: author a "CREATE TABLE \\"${d.table}\\"" migration directory\n` +
+        `         (prisma migrate dev --create-only). A loose .sql file in the\n` +
+        `         migrations root is NOT enough — it must be <timestamp>_<name>/migration.sql.`
+    );
+  } else {
+    console.error(
+      `  - Column "${d.table}"."${d.column}" exists in schema.prisma but NO migration creates it.\n` +
+        `    Fix: author an "ALTER TABLE \\"${d.table}\\" ADD COLUMN \\"${d.column}\\"" migration.`
     );
   }
 }
 console.error(
   `\nWhy this matters: local dev uses \`prisma db push\` (auto-syncs DB to schema.prisma)\n` +
     `but prod uses \`prisma migrate deploy\` (only applies committed migrations). Drift here\n` +
-    `means prod will keep an orphaned column/table that schema.prisma no longer knows about,\n` +
-    `and the next INSERT will fail with a NOT NULL constraint violation.`
+    `means prod's schema diverges from schema.prisma: orphaned columns fail the next INSERT\n` +
+    `with a NOT NULL violation, and models with no migration 500 every query with\n` +
+    `"table does not exist" (the ComputeTokenLineageLease incident).`
 );
 process.exit(1);

@@ -30,10 +30,24 @@ interface OpenRouterModel {
 // per spawn during sub-agent fan-outs.
 const memoryCache = new Map<string, { pricing: ModelPricing; expiresAt: number }>();
 
+const FIXED_MODEL_PRICING: Record<string, ModelPricing> = {
+  'gpt-5.4-openai': {
+    prompt: (1.75 / 1_000_000).toString(),
+    completion: (14.0 / 1_000_000).toString(),
+  },
+  'gpt-5.5-openai': {
+    prompt: (5.0 / 1_000_000).toString(),
+    completion: (30.0 / 1_000_000).toString(),
+  },
+};
+
 /**
  * Fetch model pricing - checks in-process cache, then Supabase cache, then OpenRouter API
  */
 export async function getModelPricing(modelId: string): Promise<ModelPricing | null> {
+  const fixed = FIXED_MODEL_PRICING[modelId.toLowerCase()];
+  if (fixed) return fixed;
+
   const nowMs = Date.now();
   const memHit = memoryCache.get(modelId);
   if (memHit && memHit.expiresAt > nowMs) {

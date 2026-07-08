@@ -21,6 +21,10 @@ load_dotenv(AGENTS_ROOT / ".env")
 
 # Activate capture mode
 os.environ["BLACKBOX_TEST_CAPTURE_OUTBOUND"] = "1"
+# Most blackbox tests mock only the specific provider path they exercise. Do not
+# let a developer's funded GPT fallback key from agents/.env alter route order
+# process-wide; tests that cover that route set GPT_API_KEY explicitly.
+os.environ["GPT_API_KEY"] = ""
 
 import httpx
 from helpers.httpx_capture import (
@@ -33,6 +37,22 @@ from helpers.httpx_capture import (
 
 # Install capture harness once at import time
 install_capture()
+
+# Stub Temporal's replay-stable workflow clock (workflow.uuid4/workflow.now) so
+# workflow-scope code — loop.run_agent, loop.dag_executor, workflows.agent_workflow —
+# can be unit-tested outside a real workflow event loop. Those APIs raise
+# "Not in workflow event loop" when called directly; production keeps the real
+# deterministic implementations. Blackbox tests never execute inside a workflow,
+# so a process-wide stub is correct. Started (not stopped) for the test process.
+import uuid as _uuid
+from datetime import datetime as _dt
+from datetime import timezone as _tz
+from unittest.mock import patch as _patch
+
+import temporalio.workflow as _temporal_workflow
+
+_patch.object(_temporal_workflow, "uuid4", side_effect=_uuid.uuid4).start()
+_patch.object(_temporal_workflow, "now", return_value=_dt(2026, 1, 1, tzinfo=_tz.utc)).start()
 
 
 def setup_mock(routes: dict[str, dict[str, Any]]) -> None:
@@ -93,35 +113,27 @@ def assert_captured_call(
 ) -> dict[str, Any]:
     """Assert properties of a captured HTTP call."""
     captures = get_captures()
-    assert len(captures) > index, (
-        f"Expected at least {index + 1} captures, got {len(captures)}"
-    )
+    assert len(captures) > index, f"Expected at least {index + 1} captures, got {len(captures)}"
 
     call = captures[index]
 
     if url_contains is not None:
-        assert url_contains in call["url"], (
-            f"Expected URL to contain '{url_contains}', got '{call['url']}'"
-        )
+        assert url_contains in call["url"], f"Expected URL to contain '{url_contains}', got '{call['url']}'"
 
     if method is not None:
-        assert call["method"] == method, (
-            f"Expected method '{method}', got '{call['method']}'"
-        )
+        assert call["method"] == method, f"Expected method '{method}', got '{call['method']}'"
 
     if body_contains is not None and call["requestBody"]:
         body = json.loads(call["requestBody"])
         for key, value in body_contains.items():
             assert key in body, f"Expected key '{key}' in request body, got {list(body.keys())}"
             if value is not None:
-                assert body[key] == value, (
-                    f"Expected body['{key}'] = {value}, got {body[key]}"
-                )
+                assert body[key] == value, f"Expected body['{key}'] = {value}, got {body[key]}"
 
     if header_present is not None:
-        assert header_present.lower() in {
-            k.lower() for k in call["requestHeaders"]
-        }, f"Expected header '{header_present}' in request"
+        assert header_present.lower() in {k.lower() for k in call["requestHeaders"]}, (
+            f"Expected header '{header_present}' in request"
+        )
 
     return call
 

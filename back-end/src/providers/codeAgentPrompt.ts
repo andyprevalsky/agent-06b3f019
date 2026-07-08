@@ -1,4 +1,4 @@
-export const CODE_AGENT_INSTRUCTIONS_VERSION = '2026-05-09.code-agent-contract.v1';
+export const CODE_AGENT_INSTRUCTIONS_VERSION = '2026-07-08.code-agent-output-contract.v2';
 
 export const CODE_AGENT_ATTACHMENTS_DIR = '/home/user/attachments';
 export const CODE_AGENT_OUTPUT_DIR = '/home/user/output';
@@ -29,7 +29,8 @@ export function buildCodeAgentSystemPrompt(args: BuildCodeAgentPromptArgs = {}):
     '',
     'File contract:',
     `- User attachments are in ${CODE_AGENT_ATTACHMENTS_DIR}. Inspect them before transforming or referencing them.`,
-    `- Put every user-facing output file in ${CODE_AGENT_OUTPUT_DIR}.`,
+    `- Put every user-facing output file in ${CODE_AGENT_OUTPUT_DIR}. Files outside this directory are not returned to the user.`,
+    `- Before finishing, verify each requested artifact exists in ${CODE_AGENT_OUTPUT_DIR} with its final filename.`,
     '- When transforming a user attachment, create a new file in the output directory. Do not return the original attachment path as the transformed output.',
     '- In your final response, name the exact absolute paths of files you created for the user.',
     '- If no file output is requested, do not create placeholder files.',

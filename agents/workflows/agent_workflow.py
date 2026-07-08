@@ -43,7 +43,6 @@ with workflow.unsafe.imports_passed_through():
     from helpers.context_scope import filter_internal_subagent_messages
     from helpers.handle_tool_event import handle_tool_event
     from helpers.llm import (
-        check_progress,
         fetch_compute_token_activity,
         mark_compute_token_rate_limited_activity,
         set_response_schema_activity,
@@ -54,7 +53,7 @@ with workflow.unsafe.imports_passed_through():
     from helpers.save_tool_usage import save_tool_usage
     from helpers.sms_activities import get_agent_source, notify_sms_event_activity
     from loop.dag_executor import TaskDAG, execute_dag, extract_plan_from_context
-    from loop.run_agent import run_agent
+    from loop.run_agent import _run_verifier, run_agent
     from providers.rose.pricing import get_model_pricing as get_in_process_model_pricing
     from tools.attempt_completion import attempt_completion
     from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent
@@ -100,6 +99,7 @@ def _fast_cache_compute_affinity_key(user_id: str, goal: str) -> str:
         separators=(",", ":"),
     )
     return "fast-cache-agent-provider:" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
 
 # =============================================================================
 # TOOL CONFIGURATION
@@ -354,7 +354,9 @@ class AgentWorkflow:
         goal_text = result.get("goal", "")
 
         child_status_normalized = str(child_status or "").strip().lower()
-        child_failed = child_status_normalized in {"failed", "error", "max_iterations"} or result.get("success") is False
+        child_failed = (
+            child_status_normalized in {"failed", "error", "max_iterations"} or result.get("success") is False
+        )
 
         if child_failed:
             # Child agent failed
@@ -635,9 +637,7 @@ class AgentWorkflow:
                     # Compute-token cache affinity pins by goal too — keep it on
                     # the same stable namespace.
                     self.compute_token_fast_cache_affinity_key = (
-                        _fast_cache_compute_affinity_key(user_id, persisted_goal)
-                        if fast_mode_cache_enabled
-                        else None
+                        _fast_cache_compute_affinity_key(user_id, persisted_goal) if fast_mode_cache_enabled else None
                     )
             except Exception as e:
                 workflow.logger.warning(f"Failed to resolve Fast Mode cache goal, using workflow input goal: {e}")
@@ -815,8 +815,11 @@ class AgentWorkflow:
         plan_tools = PLAN_PHASE_TOOLS
         execute_tools = EXECUTE_PHASE_TOOLS
 
-        # Determine whether to skip PLAN phase and/or DAG
-        skip_plan = start_phase in ("execute", "execute_continued")
+        # Determine whether to skip PLAN phase and/or DAG. ``execute_dag_resume``
+        # is a local checkpoint/debug phase: it keeps the persisted plan, marks
+        # already-finished DAG nodes from DB messages, then runs remaining nodes.
+        resume_dag_from_context = start_phase == "execute_dag_resume"
+        skip_plan = start_phase in ("execute", "execute_continued", "execute_dag_resume")
         skip_dag = start_phase == "execute_continued"  # After continue_as_new, DAG already ran
 
         if init_message_posted:
@@ -925,63 +928,84 @@ class AgentWorkflow:
             plan_data = extract_plan_from_context(execute_context)
             if plan_data:
                 workflow.logger.info("[DAG] Found plan, attempting DAG execution")
-                dag = TaskDAG(plan_data)
+                try:
+                    dag = TaskDAG(plan_data)
+                except ValueError as exc:
+                    raw_tasks = plan_data.get("tasks", []) if isinstance(plan_data, dict) else []
+                    if any(isinstance(task, str) for task in raw_tasks):
+                        workflow.logger.warning(f"[DAG] Stale persisted plan; falling back to normal execution: {exc}")
+                        dag = None
+                    else:
+                        raise
 
-                execute_system_prompt = await self.build_system_prompt()
+                if dag is not None:
+                    if resume_dag_from_context:
+                        resumed = dag.resume_completed_tasks_from_context(execute_context)
+                        workflow.logger.info(f"[DAG] Resuming from context; completed tasks={resumed}")
 
-                dag_result = await execute_dag(
-                    dag=dag,
-                    agent_id=agent_id,
-                    user_id=user_id,
-                    model=model,
-                    context=execute_context,
-                    execute_activity=workflow.execute_activity,
-                    post_message=self._post_message,
-                    execute_tool=self._execute_tool,
-                    handle_tool_event_fn=self._handle_tool_event,
-                    poll_messages=self._poll_messages,
-                    claude_token=self._active_claude_token(),
-                    claude_token_source=self._active_claude_source(),
-                    claude_token_pool_id=self._active_claude_pool_id(),
-                    gpt_token=self._active_gpt_token(),
-                    gpt_account_id=self._active_gpt_account_id(),
-                    gpt_token_source=self._active_gpt_source(),
-                    gpt_token_pool_id=self._active_gpt_pool_id(),
-                    on_tokens=self._on_tokens,
-                    system_prompt_text=execute_system_prompt,
-                    tool_names=execute_tools,
-                )
+                    execute_system_prompt = await self.build_system_prompt()
 
-                # DAG completed or failed - both hand off to run_agent
-                # run_agent polls from DB (DAG already posted results there)
-                if dag_result["status"] == "completed":
-                    workflow.logger.info("[DAG] Tasks completed, running verifier directly (skip LLM detour)")
-                    # Force-attempt completion: run the verifier on the post-DAG
-                    # context. If it scores 1.0, mark the agent complete and
-                    # skip run_agent entirely — saves the LLM detour where
-                    # agents otherwise spawn redundant claude_code/explore
-                    # agents to "double-check" the DAG result.
-                    post_dag_result = await self._run_post_dag_verifier(
+                    dag_result = await execute_dag(
+                        dag=dag,
                         agent_id=agent_id,
                         user_id=user_id,
                         model=model,
+                        context=execute_context,
+                        execute_activity=workflow.execute_activity,
+                        post_message=self._post_message,
+                        execute_tool=self._execute_tool,
+                        handle_tool_event_fn=self._handle_tool_event,
+                        poll_messages=self._poll_messages,
+                        claude_token=self._active_claude_token(),
+                        claude_token_source=self._active_claude_source(),
+                        claude_token_pool_id=self._active_claude_pool_id(),
+                        gpt_token=self._active_gpt_token(),
+                        gpt_account_id=self._active_gpt_account_id(),
+                        gpt_token_source=self._active_gpt_source(),
+                        gpt_token_pool_id=self._active_gpt_pool_id(),
+                        on_tokens=self._on_tokens,
+                        system_prompt_text=execute_system_prompt,
+                        tool_names=execute_tools,
                     )
-                    if post_dag_result and post_dag_result.get("score", 0.0) >= 1.0:
+
+                    # DAG completed or failed - both hand off to normal completion/recovery.
+                    # The completed path must use the attempt_completion tool so
+                    # the UI and transcript show the same visible completion
+                    # attempt as an LLM-initiated finish.
+                    if dag_result["status"] == "completed":
+                        workflow.logger.info("[DAG] Tasks completed, attempting completion")
+                        post_dag_result = await self._attempt_post_dag_completion(
+                            agent_id=agent_id,
+                            user_id=user_id,
+                            model=model,
+                        )
+                        if post_dag_result and post_dag_result.get("score", 0.0) >= 1.0:
+                            workflow.logger.info(
+                                f"✓ Post-DAG verifier passed (score={post_dag_result['score']}) — marking complete"
+                            )
+                            await self._mark_complete(
+                                execute_context,
+                                post_dag_result.get("structured_response"),
+                            )
+                            return {"status": "completed", "goal": goal}
+                        if post_dag_result and post_dag_result.get("verifier_error"):
+                            message = post_dag_result.get("reasoning") or "Post-DAG verifier failed"
+                            workflow.logger.warning(f"[DAG] Post-DAG attempt_completion errored: {message}")
+                            return await self._handle_incomplete(
+                                {
+                                    "status": "error",
+                                    "context": post_dag_result.get("context", []),
+                                    "message": message,
+                                },
+                                "EXECUTE",
+                            )
                         workflow.logger.info(
-                            f"✓ Post-DAG verifier passed (score={post_dag_result['score']}) — marking complete"
+                            f"[DAG] Post-DAG verifier did not pass "
+                            f"(score={post_dag_result.get('score', 0.0) if post_dag_result else 'n/a'}) "
+                            "— falling through to run_agent for recovery"
                         )
-                        await self._mark_complete(
-                            execute_context,
-                            post_dag_result.get("structured_response"),
-                        )
-                        return {"status": "completed", "goal": goal}
-                    workflow.logger.info(
-                        f"[DAG] Post-DAG verifier did not pass "
-                        f"(score={post_dag_result.get('score', 0.0) if post_dag_result else 'n/a'}) "
-                        "— falling through to run_agent for recovery"
-                    )
-                else:
-                    workflow.logger.info("[DAG] Execution needs LLM recovery, falling through to run_agent")
+                    else:
+                        workflow.logger.info("[DAG] Execution needs LLM recovery, falling through to run_agent")
             else:
                 workflow.logger.info("[DAG] No plan found, using LLM-driven execution")
 
@@ -1045,27 +1069,34 @@ class AgentWorkflow:
     # CALLBACKS FOR run_agent
     # =========================================================================
 
-    async def _run_post_dag_verifier(
+    async def _attempt_post_dag_completion(
         self,
         agent_id: str,
         user_id: str,
         model: str,
     ) -> Optional[Dict]:
-        """Run the verifier directly after a successful DAG to short-circuit
-        the LLM detour.
+        """Call attempt_completion after a successful DAG, then verify it.
 
-        After the DAG finishes, the agent's TOOL messages already contain
-        every tool result needed to populate the goal's output schema. The
-        verifier can transform those results into the schema in a single
-        reasoning call. Letting the LLM iterate again invites it to spawn
-        redundant claude_code/explore sub-agents to "double-check" the DAG
-        result, burning the bench budget.
+        After the DAG finishes, the transcript should show a real
+        attempt_completion tool call, not a hidden custom verifier call. This
+        preserves the same UI/tool-result contract as an LLM-initiated
+        completion attempt while still avoiding an extra LLM detour before the
+        attempt.
 
         Returns the verifier result dict (with `score`, `reasoning`,
-        `structured_response`) or None if the call failed.
+        `structured_response`) or an error-shaped dict if the verifier failed.
         """
+        tool_call_id = f"post-dag-attempt-completion-{workflow.uuid4()}"
         try:
-            # Poll fresh context — DAG has been posting tool results to the DB.
+            await self._execute_tool(
+                "attempt_completion",
+                {"_verification_pending": True},
+                tool_call_id,
+            )
+
+            # Refresh compute token in case it expired during DAG.
+            await self._refresh_compute_token(user_id)
+
             context = await workflow.execute_activity(
                 poll_new_messages,
                 args=[agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
@@ -1074,52 +1105,37 @@ class AgentWorkflow:
             )
             context = filter_internal_subagent_messages(context)
 
-            # Build verifier prompt (schema-driven only).
-            prompt_gen = self._make_verifier_prompt_generator()
-            verifier_prompt = await prompt_gen()
-
-            # Refresh compute token in case it expired during DAG.
-            await self._refresh_compute_token(user_id)
-
-            # C7: dead `phase` positional arg has been removed from
-            # check_progress; callers no longer pass it.
-            # C14: `context` is already agent-scoped — poll_new_messages
-            # queries the backend by `agent_id`, so sub-agent rows never
-            # appear here.
-            result = await workflow.execute_activity(
-                check_progress,
-                args=[
-                    context,
-                    verifier_prompt,
-                    model,
-                    self.output_schema,
-                    self._active_claude_token(),
-                    "verifier_post_dag",
-                    agent_id,
-                    self._active_claude_source(),
-                    self._active_claude_pool_id(),
-                    user_id,
-                    self._active_gpt_token(),
-                    self._active_gpt_account_id(),
-                    self._active_gpt_source(),
-                    self._active_gpt_pool_id(),
-                    user_id,
-                    self.compute_token_lineage_key,
-                    self.compute_token_fast_cache_affinity_key,
-                    None,  # dump_extra
-                    # Fast Mode: verifier keys by canonical request fingerprint;
-                    # fast_mode_step is retained only for activity signature compatibility.
-                    self.fast_mode_cache_enabled,
-                    self.fast_cache_goal,
-                    0,
-                ],
-                start_to_close_timeout=timedelta(seconds=60),
-                retry_policy=RetryPolicy(maximum_attempts=3),
+            result = await _run_verifier(
+                execute_activity=workflow.execute_activity,
+                context=context,
+                verifier_prompt_generator=self._make_verifier_prompt_generator(),
+                model=model,
+                agent_id=agent_id,
+                task_id=None,
+                post_message=self._post_message,
+                response_schema=self.output_schema,
+                get_response_schema=self._make_response_schema_getter(),
+                claude_token=self._active_claude_token(),
+                claude_token_source=self._active_claude_source(),
+                claude_token_pool_id=self._active_claude_pool_id(),
+                claude_token_user_id=user_id,
+                gpt_token=self._active_gpt_token(),
+                gpt_account_id=self._active_gpt_account_id(),
+                gpt_token_source=self._active_gpt_source(),
+                gpt_token_pool_id=self._active_gpt_pool_id(),
+                gpt_token_user_id=user_id,
+                compute_token_lineage_key=self.compute_token_lineage_key,
+                compute_token_fast_cache_affinity_key=self.compute_token_fast_cache_affinity_key,
+                is_plan_loop=False,
+                tool_call_id=tool_call_id,
+                fast_mode_cache_enabled=self.fast_mode_cache_enabled,
+                fast_mode_goal=self.fast_cache_goal,
+                fast_mode_step=0,
             )
 
-            # C6: route post-DAG verifier cost through _on_tokens so this LLM
-            # call doesn't drop off the cost ledger. _on_tokens is the canonical
-            # entry-point for any LLM usage outside run_agent's own loop.
+            # Route verifier cost through _on_tokens so this LLM call doesn't
+            # drop off the cost ledger. _run_verifier uses the normal
+            # verifier_execute call path for attempt_completion.
             v_usage = result.get("usage", {}) if result else {}
             v_tokens_in = v_usage.get("prompt_tokens", 0)
             v_tokens_out = v_usage.get("completion_tokens", 0)
@@ -1131,7 +1147,7 @@ class AgentWorkflow:
                         v_usage.get("actual_model"),
                         cache_read_input_tokens=v_usage.get("cache_read_input_tokens", 0),
                         cache_creation_input_tokens=v_usage.get("cache_creation_input_tokens", 0),
-                        call_site="verifier_post_dag",
+                        call_site="verifier_execute",
                         claude_token_error=v_usage.get("claude_token_error"),
                         gpt_token_error=v_usage.get("gpt_token_error"),
                         claude_token_rotated=v_usage.get("claude_token_rotated", False),
@@ -1144,8 +1160,31 @@ class AgentWorkflow:
 
             return result
         except Exception as e:
-            workflow.logger.warning(f"[DAG] Post-DAG verifier failed: {e}")
-            return None
+            message = f"Post-DAG attempt_completion verifier failed: {extract_error_message(e)}"
+            workflow.logger.warning(f"[DAG] {message}")
+            await self._handle_tool_event(
+                ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="❌ Attempt completion failed",
+                    message=message,
+                    status=MessageStatus.ERROR,
+                ),
+                tool_call_id,
+                "attempt_completion",
+            )
+            context = await workflow.execute_activity(
+                poll_new_messages,
+                args=[agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+            return {
+                "score": 0.0,
+                "reasoning": message,
+                "structured_response": None,
+                "verifier_error": True,
+                "context": filter_internal_subagent_messages(context),
+            }
 
     def _make_verifier_prompt_generator(self):
         """Create a generator function that builds the verifier prompt at verification time.
@@ -1316,9 +1355,7 @@ class AgentWorkflow:
             age = now - fetched_at
             if age < self.COMPUTE_TOKEN_TTL:
                 return  # Still fresh
-            workflow.logger.info(
-                f"🔑 Compute token expired ({age.total_seconds():.0f}s old), refreshing"
-            )
+            workflow.logger.info(f"🔑 Compute token expired ({age.total_seconds():.0f}s old), refreshing")
 
         try:
             result = await workflow.execute_activity(
@@ -1507,6 +1544,7 @@ class AgentWorkflow:
             # poll result so run_agent can still advance last_checked past
             # filtered sub-agent rows and avoid re-polling them forever.
             if messages:
+
                 def _message_dedupe_key(msg: Dict) -> str:
                     metadata = msg.get("metadata") or {}
                     return "|".join(
@@ -1525,9 +1563,7 @@ class AgentWorkflow:
                     if msg.get("message_id") or msg.get("id")
                 }
                 seen_message_keys = {
-                    _message_dedupe_key(msg)
-                    for msg in self.context
-                    if not (msg.get("message_id") or msg.get("id"))
+                    _message_dedupe_key(msg) for msg in self.context if not (msg.get("message_id") or msg.get("id"))
                 }
                 for msg in filter_internal_subagent_messages(messages):
                     message_id = msg.get("message_id") or msg.get("id")
@@ -1760,6 +1796,9 @@ class AgentWorkflow:
                 bus_id = getattr(self, "bus_id", None)
                 if bus_id:
                     meta["busId"] = bus_id
+                spawn_group_id = tool_args.get("_spawn_group_id")
+                if isinstance(spawn_group_id, str) and spawn_group_id:
+                    meta["spawnGroupId"] = spawn_group_id
                 if meta:
                     error_metadata = meta
 
@@ -2250,9 +2289,7 @@ class AgentWorkflow:
                 and claude_token_rotated
                 and not compute_token_used
             ):
-                workflow.logger.info(
-                    "🔁 Claude token rotated inside RoseClient; refreshing workflow cached token"
-                )
+                workflow.logger.info("🔁 Claude token rotated inside RoseClient; refreshing workflow cached token")
                 self._clear_compute_token()
                 if self.user_id:
                     try:
@@ -2299,9 +2336,7 @@ class AgentWorkflow:
                                 retry_policy=RetryPolicy(maximum_attempts=2),
                             )
                         except Exception as mark_error:
-                            workflow.logger.warning(
-                                f"Failed to mark Claude token rate-limited: {mark_error}"
-                            )
+                            workflow.logger.warning(f"Failed to mark Claude token rate-limited: {mark_error}")
                     # Clear cache to force refetch on next call → rotation kicks in
                     self._clear_compute_token()
                     # Proactively refetch so subsequent LLM calls in this phase use the
@@ -2311,9 +2346,7 @@ class AgentWorkflow:
                         try:
                             await self._refresh_compute_token(self.user_id)
                         except Exception as refresh_error:
-                            workflow.logger.warning(
-                                f"Rotation refetch failed: {refresh_error}"
-                            )
+                            workflow.logger.warning(f"Rotation refetch failed: {refresh_error}")
                 else:
                     workflow.logger.info(
                         f"ℹ️ Claude token fallback (transient: {claude_token_error}): "
@@ -2326,9 +2359,7 @@ class AgentWorkflow:
                 and gpt_token_rotated
                 and not compute_token_used
             ):
-                workflow.logger.info(
-                    "🔁 GPT token rotated inside RoseClient; refreshing workflow cached token"
-                )
+                workflow.logger.info("🔁 GPT token rotated inside RoseClient; refreshing workflow cached token")
                 self._clear_compute_token()
                 if self.user_id:
                     try:
@@ -2366,17 +2397,13 @@ class AgentWorkflow:
                                 retry_policy=RetryPolicy(maximum_attempts=2),
                             )
                         except Exception as mark_error:
-                            workflow.logger.warning(
-                                f"Failed to mark GPT token rate-limited: {mark_error}"
-                            )
+                            workflow.logger.warning(f"Failed to mark GPT token rate-limited: {mark_error}")
                     self._clear_compute_token()
                     if self.user_id:
                         try:
                             await self._refresh_compute_token(self.user_id)
                         except Exception as refresh_error:
-                            workflow.logger.warning(
-                                f"GPT rotation refetch failed: {refresh_error}"
-                            )
+                            workflow.logger.warning(f"GPT rotation refetch failed: {refresh_error}")
                 else:
                     workflow.logger.info(
                         f"ℹ️ GPT token fallback (transient: {gpt_token_error}): "
@@ -2699,7 +2726,13 @@ class AgentWorkflow:
                     self.parent_agent_id,
                     self.depth,
                     self.bus_id,
-                    "execute",  # start_phase: skip PLAN since we already have context
+                    # skip PLAN *and* DAG: on pause/resume the DAG (e.g. a for_each
+                    # fan-out) has already run and spawned its children. Using plain
+                    # "execute" set skip_dag=False, so resume re-ran the DAG and
+                    # re-spawned a fresh fan-out, orphaning the paused children. Match
+                    # the context-overflow continue_as_new, which correctly resumes
+                    # into the LLM loop (it polls the DB for the resumed children).
+                    "execute_continued",
                     self.max_iterations,
                     self.price_limit_cents,
                     self.context_gates or None,  # Preserve context gates across pause/resume

@@ -8,7 +8,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
-import { useAgentContext, type ResponseSchemaField } from '../hooks';
+import { useAgentContext, type Message, type ResponseSchemaField } from '../hooks';
 import { type ChipState, type CodeProvider } from '../types';
 import {
   useClaudeCodeWebSocket,
@@ -20,11 +20,74 @@ export interface ChipDerived {
   isComplete: boolean;
   isSuccess: boolean;
   isVerifying: boolean;
+  turnCount: number;
   outputSchema: { fields: ResponseSchemaField[] } | undefined;
   structuredResponse: Record<string, unknown> | undefined;
   failureMessage: string | null;
   githubRepoUrl: string | undefined;
   codeProvider: CodeProvider;
+}
+
+function textValue(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function numberValue(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+/*
+ * Turn-count data flow:
+ *
+ * Codex CLI SDK event: turn.completed
+ *   -> E2B ws-server normalizes event
+ *   -> agents/domains/spawn_claude_code_agent counts completed_turns
+ *   -> Message.metadata.completed_turns
+ *   -> deriveTurnCount()
+ *   -> TurnCounter label
+ *
+ * Periodic agent_observation messages are heartbeats, not turns.
+ */
+function deriveTurnCount(taskMessages: Message[]): number {
+  const maxExplicitTurn = taskMessages
+    .flatMap((message) => {
+      const metadata = message.metadata ?? {};
+      return [
+        metadata.turnCount,
+        metadata.turn_count,
+        metadata.completedTurns,
+        metadata.completed_turns,
+      ];
+    })
+    .map(numberValue)
+    .filter((value): value is number => value !== null)
+    .reduce((max, value) => Math.max(max, value), 0);
+
+  return Math.max(0, Math.floor(maxExplicitTurn));
+}
+
+function isTaskCompletionSuccess(message: Message | undefined): boolean {
+  if (message?.metadata?.action_type !== 'task_complete') return false;
+
+  const metadata = message.metadata ?? {};
+  const title = textValue(metadata.title);
+  const body = textValue(message.text);
+  const combined = `${title}\n${body}`;
+
+  if (metadata.error === true || metadata.toolStatus === 'ERROR') return false;
+  if (/\b(?:FAILED|Task Failed|Task Incomplete)\b/i.test(combined) || combined.includes('❌')) {
+    return false;
+  }
+  if (/\bTask Complete(?:d)?\b/i.test(title)) return true;
+  if (/\bStatus\*\*:\s*(?:✅\s*)?SUCCESS\b/i.test(body)) return true;
+  if (/\bStatus:\s*(?:✅\s*)?SUCCESS\b/i.test(body)) return true;
+
+  return false;
 }
 
 /** Derive chip-visible state from agent messages matching a taskId. */
@@ -44,7 +107,7 @@ export function useClaudeCodeChipState(
         : initialCodeProvider;
 
     const complete = lastMessage?.metadata?.action_type === 'task_complete';
-    const success = complete && !!lastMessage?.metadata?.title?.includes('Completed');
+    const success = isTaskCompletionSuccess(lastMessage);
 
     const verifying =
       !complete &&
@@ -54,13 +117,11 @@ export function useClaudeCodeChipState(
 
     const initMessage = taskMessages.find((m) => m.metadata?.output_schema);
     const schema = initMessage?.metadata?.output_schema as
-      | { fields: ResponseSchemaField[] }
-      | undefined;
+      { fields: ResponseSchemaField[] } | undefined;
 
     const completionMsg = taskMessages.find((m) => m.metadata?.action_type === 'task_complete');
     const extracted = completionMsg?.metadata?.structured_response as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
 
     let failureText: string | null = null;
     const errorMsg = taskMessages.find((m) => m.metadata?.toolStatus === 'ERROR');
@@ -71,11 +132,13 @@ export function useClaudeCodeChipState(
     }
 
     const githubUrl = initMessage?.metadata?.github_repo_url as string | undefined;
+    const turnCount = deriveTurnCount(taskMessages);
 
     return {
       isComplete: complete,
       isSuccess: success,
       isVerifying: verifying,
+      turnCount,
       outputSchema: schema,
       structuredResponse: extracted,
       failureMessage: failureText,
@@ -89,6 +152,7 @@ export interface ClaudeCodeChipVM extends ChipDerived {
   chipState: ChipState;
   isExpanded: boolean;
   isFullscreen: boolean;
+  terminalTranscript: string;
   terminalContainerRef: RefObject<HTMLDivElement | null>;
   fullscreenContainerRef: RefObject<HTMLDivElement | null>;
   openFullscreen: () => void;
@@ -103,17 +167,26 @@ export function useClaudeCodeChip(
   forceShow: boolean,
   initialCodeProvider: CodeProvider = 'claude',
 ): ClaudeCodeChipVM {
-  const [chipState, setChipState] = useState<ChipState>('spinning_up');
-  const [isExpanded, setIsExpanded] = useState(false);
-  const [isFullscreen, setIsFullscreen] = useState(false);
-
-  const isCompletedRef = useRef(false);
   const terminalContainerRef = useRef<HTMLDivElement>(null);
   const fullscreenContainerRef = useRef<HTMLDivElement>(null);
 
   const { terminalRef, outputBufferRef, mount } = useTerminalManager();
   const derived = useClaudeCodeChipState(taskId, initialCodeProvider);
   const { isComplete, isSuccess, isVerifying } = derived;
+  const initialChipState: ChipState = isComplete
+    ? isSuccess
+      ? 'completed'
+      : 'failed'
+    : isVerifying
+      ? 'verifying'
+      : 'spinning_up';
+
+  const [chipState, setChipState] = useState<ChipState>(initialChipState);
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [terminalTranscript, setTerminalTranscript] = useState('');
+
+  const isCompletedRef = useRef(false);
 
   useEffect(() => {
     if (isComplete) {
@@ -143,21 +216,30 @@ export function useClaudeCodeChip(
 
   useSavedOutputFetch({
     taskId,
+    codeProvider: derived.codeProvider,
     shouldFetch:
       (isExpanded || isFullscreen) && (chipState === 'completed' || chipState === 'failed'),
     terminalRef,
     outputBufferRef,
+    onOutputLoaded: setTerminalTranscript,
   });
 
-  const openFullscreen = useCallback(() => setIsFullscreen(true), []);
+  const openFullscreen = useCallback(() => {
+    if (outputBufferRef.current) setTerminalTranscript(outputBufferRef.current);
+    setIsFullscreen(true);
+  }, [outputBufferRef]);
   const closeFullscreen = useCallback(() => setIsFullscreen(false), []);
-  const toggleExpand = useCallback(() => setIsExpanded((v) => !v), []);
+  const toggleExpand = useCallback(() => {
+    if (outputBufferRef.current) setTerminalTranscript(outputBufferRef.current);
+    setIsExpanded((v) => !v);
+  }, [outputBufferRef]);
 
   return {
     ...derived,
     chipState,
     isExpanded,
     isFullscreen,
+    terminalTranscript,
     terminalContainerRef,
     fullscreenContainerRef,
     openFullscreen,

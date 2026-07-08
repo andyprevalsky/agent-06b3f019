@@ -54,8 +54,16 @@ export function handleInsertMessage(
 
   if (message.role === 'ASSISTANT') {
     const subAgentId = message.metadata?.subAgentId ?? null;
+    const streamId =
+      typeof message.metadata?.streamId === 'string' ? message.metadata.streamId : null;
     setters.setStreamingBubbles((prev) => {
       const newMap = new Map(prev);
+      if (streamId) {
+        const bubble = newMap.get(streamId);
+        if (bubble?.timeoutId) window.clearTimeout(bubble.timeoutId);
+        newMap.delete(streamId);
+        return newMap;
+      }
       for (const [streamId, bubble] of newMap) {
         if ((bubble.subAgentId ?? null) === subAgentId) {
           if (bubble.timeoutId) window.clearTimeout(bubble.timeoutId);

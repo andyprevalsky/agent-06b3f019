@@ -15,6 +15,7 @@ import mimetypes
 import os
 import re
 import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -51,10 +52,25 @@ def browser_recordings_enabled() -> bool:
     return "localhost" in api_url or "127.0.0.1" in api_url
 
 
+def _is_production_runtime() -> bool:
+    return os.getenv("FLY_APP_NAME") is not None or os.getenv("ENVIRONMENT") == "production"
+
+
+def cleanup_local_recording_artifacts_enabled() -> bool:
+    value = os.getenv("BROWSER_AGENT_RECORDINGS_CLEANUP_LOCAL", "").strip().lower()
+    if value in TRUE_VALUES:
+        return True
+    if value in FALSE_VALUES:
+        return False
+    return _is_production_runtime() and not os.getenv("CONDUCTOR_WORKSPACE_NAME")
+
+
 def _recording_root() -> Path:
     override = os.getenv("BROWSER_AGENT_RECORDINGS_DIR")
     if override:
         return Path(override).expanduser().resolve()
+    if _is_production_runtime() and not os.getenv("CONDUCTOR_WORKSPACE_NAME"):
+        return Path(tempfile.gettempdir()) / "rose-browser-agent-recordings"
     return Path(__file__).resolve().parents[3] / ".context" / "browser-agent-recordings"
 
 
@@ -209,7 +225,18 @@ class BrowserAgentRecorder:
             browser_url=browser_url or "",
             session_metadata=session_metadata,
         )
-        await recorder.start()
+        try:
+            await recorder.start()
+        except Exception as exc:
+            logger.warning(
+                "Browser agent recording failed to start",
+                agent_id=agent_id,
+                task_id=task_id,
+                session_id=session_id,
+                error=str(exc),
+            )
+            recorder.cleanup_local_artifacts(force=True)
+            return None
         return recorder
 
     async def start(self) -> None:
@@ -493,6 +520,30 @@ class BrowserAgentRecorder:
                 "Browser agent recording archive failed",
                 agent_id=self.agent_id,
                 task_id=self.task_id,
+                error=str(exc)[:300],
+            )
+
+    def cleanup_local_artifacts(self, *, persisted: bool = False, force: bool = False) -> None:
+        if not persisted and not force:
+            return
+        if not cleanup_local_recording_artifacts_enabled():
+            return
+        try:
+            shutil.rmtree(self.output_dir, ignore_errors=False)
+            logger.info(
+                "Browser agent local recording scratch cleaned up",
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                output_dir=str(self.output_dir),
+            )
+        except FileNotFoundError:
+            return
+        except Exception as exc:  # noqa: BLE001 - cleanup must not fail browser runs
+            logger.warning(
+                "Browser agent local recording scratch cleanup failed",
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                output_dir=str(self.output_dir),
                 error=str(exc)[:300],
             )
 

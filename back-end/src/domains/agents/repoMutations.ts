@@ -142,53 +142,77 @@ export interface BatchCreateAgentParams {
 /** Create N agents (each with verifier + goal message) in a single transaction.
  *  All-or-nothing: if any row fails to insert, the whole batch rolls back. */
 export async function createAgentBatchTransaction(items: BatchCreateAgentParams[]) {
+  if (items.length === 0) return [];
+
   return prisma.$transaction(async (tx) => {
-    const results: Array<{ agent: Awaited<ReturnType<typeof tx.agent.create>> }> = [];
-    for (const params of items) {
-      const newAgent = await tx.agent.create({
-        data: {
-          id: params.agentId,
-          userId: params.userId,
-          parentAgentId: params.parentAgentId,
-          parentWorkflowId: params.parentWorkflowId,
-          depth: params.depth,
-          busId: params.busId,
-          goal: params.goal,
-          model: params.model,
-          reasoningMaxTokens: params.reasoningMaxTokens,
-          source: params.source as AgentSource,
-          tokenInPriceMicrodollars: params.tokenInPriceMicrodollars,
-          tokenOutPriceMicrodollars: params.tokenOutPriceMicrodollars,
-          progress: 0.0,
-          status: params.pauseState ? 'PAUSED' : 'STARTING_UP',
-          responseSchema: params.responseSchema ?? undefined,
-          proxyCountry: params.proxyCountry,
-          proxyState: params.proxyState,
-          proxyCity: params.proxyCity,
-          temporalWorkflowId: params.temporalWorkflowId,
-          ...(params.priceLimitCents !== undefined && params.priceLimitCents !== 0
-            ? { priceLimitCents: params.priceLimitCents }
-            : {}),
-          ...(params.writeLockEnabled !== undefined
-            ? { writeLockEnabled: params.writeLockEnabled }
-            : {}),
-          ...(params.fastModeCacheEnabled !== undefined
-            ? { fastModeCacheEnabled: params.fastModeCacheEnabled }
-            : {}),
-        },
-      });
-      await tx.verifier.create({
-        data: { agentId: newAgent.id, type: params.verifierType as VerifierType },
-      });
-      await tx.message.create({
-        data: { agentId: newAgent.id, text: params.goal, role: 'USER', timestamp: new Date() },
-      });
-      if (params.attachments !== undefined && params.attachments.length > 0) {
-        await createAttachmentMessages(tx, newAgent.id, params.attachments);
-      }
-      results.push({ agent: newAgent });
+    const goalMessageTimestamp = new Date();
+    await tx.agent.createMany({
+      data: items.map((params) => ({
+        id: params.agentId,
+        userId: params.userId,
+        parentAgentId: params.parentAgentId,
+        parentWorkflowId: params.parentWorkflowId,
+        depth: params.depth,
+        busId: params.busId,
+        goal: params.goal,
+        model: params.model,
+        reasoningMaxTokens: params.reasoningMaxTokens,
+        source: params.source as AgentSource,
+        tokenInPriceMicrodollars: params.tokenInPriceMicrodollars,
+        tokenOutPriceMicrodollars: params.tokenOutPriceMicrodollars,
+        progress: 0.0,
+        status: params.pauseState ? 'PAUSED' : 'STARTING_UP',
+        responseSchema: params.responseSchema ?? undefined,
+        proxyCountry: params.proxyCountry,
+        proxyState: params.proxyState,
+        proxyCity: params.proxyCity,
+        temporalWorkflowId: params.temporalWorkflowId,
+        ...(params.priceLimitCents !== undefined && params.priceLimitCents !== 0
+          ? { priceLimitCents: params.priceLimitCents }
+          : {}),
+        ...(params.writeLockEnabled !== undefined
+          ? { writeLockEnabled: params.writeLockEnabled }
+          : {}),
+        ...(params.fastModeCacheEnabled !== undefined
+          ? { fastModeCacheEnabled: params.fastModeCacheEnabled }
+          : {}),
+      })),
+    });
+
+    await tx.verifier.createMany({
+      data: items.map((params) => ({
+        agentId: params.agentId,
+        type: params.verifierType as VerifierType,
+      })),
+    });
+
+    await tx.message.createMany({
+      data: items.map((params) => ({
+        agentId: params.agentId,
+        text: params.goal,
+        role: 'USER',
+        timestamp: goalMessageTimestamp,
+      })),
+    });
+
+    const attachmentMessages = items.flatMap((params) =>
+      (params.attachments ?? []).map((attachment) => ({
+        agentId: params.agentId,
+        text: '',
+        role: 'USER' as const,
+        timestamp: goalMessageTimestamp,
+        filePointer: attachment as Prisma.JsonObject,
+      }))
+    );
+    if (attachmentMessages.length > 0) {
+      await tx.message.createMany({ data: attachmentMessages });
     }
-    return results;
+
+    const createdAgents = await tx.agent.findMany({
+      where: { id: { in: items.map((params) => params.agentId) } },
+    });
+    const createdById = new Map(createdAgents.map((agent) => [agent.id, agent]));
+    return items.map((params) => ({ agent: createdById.get(params.agentId)! }));
   });
 }
 

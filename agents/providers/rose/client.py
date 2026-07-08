@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import time
 import uuid
 from typing import Any, AsyncIterator, Dict, List, Optional, Type, cast
@@ -51,7 +52,7 @@ from providers.rose.errors import (
     RoseServerError,
     RoseStallError,
 )
-from providers.rose.gpt_auth import gpt_auth_complete
+from providers.rose.gpt_auth import gpt_auth_complete, openai_api_key_complete
 from providers.rose.legacy_adapter import classify_claude_token_error, classify_gpt_token_error
 from providers.rose.pools import PoolName, get_pool
 from providers.rose.schema import (
@@ -111,6 +112,10 @@ _FALL_THROUGH_ERRORS = (
 # A real stall still falls through to rotation/waterfall on the first
 # attempt (see classify_*_token_error below).
 _STALL_TTFT_MULTIPLIERS: tuple[float, ...] = ()
+
+
+def _openai_api_key() -> str:
+    return (os.getenv("GPT_API_KEY") or "").strip()
 
 
 def _is_synthetic_output_toolset(tools: Optional[List[Dict[str, Any]]]) -> bool:
@@ -364,6 +369,8 @@ def _dump_display_model(actual_model: str) -> str:
         return actual_model[: -len("-claude")]
     if actual_model.endswith("-gpt"):
         return actual_model[: -len("-gpt")]
+    if actual_model.endswith("-openai"):
+        return actual_model[: -len("-openai")]
     return actual_model
 
 
@@ -707,6 +714,8 @@ class RoseClient:
         claude_auth_tool_choice = None
         gpt_auth_tools = None
         gpt_auth_tool_choice = None
+        gpt_api_key_tools = None
+        gpt_api_key_tool_choice = None
         anthropic_api_key_tools = None
         anthropic_api_key_tool_choice = None
         direct_auth_tools = tools
@@ -742,6 +751,13 @@ class RoseClient:
                 gpt_auth_tools = direct_auth_tools
             if gpt_auth_tools:
                 gpt_auth_tool_choice = effective_tool_choice or "any"
+        # The funded OpenAI API-key route uses the same Responses native
+        # tool protocol as gptAuth, so it must preserve real tool schemas even
+        # when there is no direct GPT token lease.
+        if not _is_synthetic_output_toolset(direct_auth_tools):
+            gpt_api_key_tools = direct_auth_tools
+        if gpt_api_key_tools:
+            gpt_api_key_tool_choice = effective_tool_choice or "any"
         # The funded Anthropic API-key route is the same native Anthropic
         # protocol as claudeAuth, so it must preserve real tool schemas even
         # when the direct route was GPT-only and then fell through.
@@ -926,7 +942,7 @@ class RoseClient:
                 agent_id=agent_id,
                 actual_model=_seen_actual_model,
                 is_claude=_seen_actual_model.endswith("-claude"),
-                is_gpt=_seen_actual_model.endswith("-gpt"),
+                is_gpt=_seen_actual_model.endswith(("-gpt", "-openai")),
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 cache_read=cache_read,
@@ -1158,12 +1174,78 @@ class RoseClient:
                 claude_token_error = direct_token_errors.get("claude", claude_token_error)
                 gpt_token_error = direct_token_errors.get("gpt", gpt_token_error)
 
-            # ── Anthropic API-key funded default ───────────────────────────
+            # ── OpenAI API-key funded default ──────────────────────────────
             # After compute tokens (claude/gpt) are exhausted and before the
-            # OpenRouter waterfall: if a funded ANTHROPIC_API_KEY is configured
-            # and not on the shared cooldown, try it (billed, `-anthropic`
-            # suffix so cost is recorded). On out-of-credits/bad-key before
-            # first content, back it off (shared DB cooldown) and fall through.
+            # Anthropic/OpenRouter fallbacks: if a funded GPT API key is
+            # configured, try the pool's GPT model with priority service tier.
+            openai_api_key = _openai_api_key()
+            if openai_api_key:
+                active_route = "openai_apikey"
+                openai_yielded_any = False
+                try:
+                    async for chunk in _guarded(
+                        _try_openai_api_key(
+                            pool_spec=pool_spec,
+                            model=pool_spec.gpt_auth_model,
+                            messages=messages,
+                            api_key=openai_api_key,
+                            tools=gpt_api_key_tools,
+                            tool_choice=gpt_api_key_tool_choice,
+                            response_format=None if gpt_api_key_tools else openrouter_response_format,
+                            temperature=temperature,
+                            effort=effort,
+                            provider_fast_mode=True,
+                            request_id=rid,
+                            agent_id=agent_id,
+                            call_site=call_site,
+                            ttft_timeout_s=ttft_timeout_s,
+                            idle_timeout_s=idle_timeout_s,
+                        )
+                    ):
+                        chunk = _with_timing_if_done(chunk)
+                        openai_yielded_any = True
+                        if chunk.kind == "metadata":
+                            metadata = dict(chunk.data)
+                            if claude_token_error is not None:
+                                metadata["claude_token_error"] = claude_token_error
+                            if gpt_token_error is not None:
+                                metadata["gpt_token_error"] = gpt_token_error
+                            chunk = StreamChunk(kind="metadata", data=metadata)
+                            if chunk.data.get("actual_model"):
+                                _seen_actual_model = chunk.data["actual_model"]
+                        elif chunk.kind == "usage":
+                            _emit_llm_cache(chunk.data)
+                        _record_dump_chunk(chunk)
+                        yield chunk
+                    logger.info(
+                        "rose.complete.openai_apikey.done",
+                        request_id=rid,
+                        agent_id=agent_id,
+                        call_site=call_site,
+                        elapsed_s=round(time.monotonic() - started, 3),
+                        **_observability_fields(),
+                    )
+                    _finalize_dump()
+                    return
+                except (_FallThrough, RoseStallError) as exc:
+                    if openai_yielded_any:
+                        raise
+                    cause = exc.__cause__ if isinstance(exc, _FallThrough) else exc
+                    logger.info(
+                        "rose.complete.openai_apikey.fall_through",
+                        request_id=rid,
+                        agent_id=agent_id,
+                        call_site=call_site,
+                        reason=type(cause).__name__ if cause else "unknown",
+                    )
+
+            # ── Anthropic API-key funded default ───────────────────────────
+            # After compute tokens (claude/gpt) and the shared GPT key are
+            # exhausted and before the OpenRouter waterfall: if a funded
+            # ANTHROPIC_API_KEY is configured and not on the shared cooldown,
+            # try it (billed, `-anthropic` suffix so cost is recorded). On
+            # out-of-credits/bad-key before first content, back it off (shared
+            # DB cooldown) and fall through.
             anthropic_api_key = (load_config().anthropic.api_key or "").strip()
             if (
                 not _exclude_anthropic_family
@@ -1615,6 +1697,61 @@ async def _try_gpt_auth(
         temperature=temperature,
         effort=effort,
         auth=auth,
+        request_id=request_id,
+        agent_id=agent_id,
+        call_site=call_site,
+        provider_fast_mode=provider_fast_mode,
+        ttft_timeout_s=ttft_timeout_s,
+        idle_timeout_s=idle_timeout_s,
+    )
+    try:
+        async for chunk in gen:
+            if chunk.kind == "metadata" and buffered is None and not yielded_any:
+                buffered = chunk
+                continue
+            if buffered is not None:
+                yield buffered
+                buffered = None
+            yield chunk
+            yielded_any = True
+    except _FALL_THROUGH_ERRORS as exc:
+        if not yielded_any:
+            raise _FallThrough() from exc
+        raise
+
+
+async def _try_openai_api_key(
+    *,
+    pool_spec: Any,
+    model: str,
+    messages: List[Dict[str, Any]],
+    api_key: str,
+    tools: Optional[List[Dict[str, Any]]],
+    tool_choice: Any,
+    response_format: Optional[Dict[str, Any]],
+    temperature: Optional[float],
+    effort: Optional[str],
+    provider_fast_mode: bool = True,
+    request_id: str,
+    agent_id: Optional[str],
+    call_site: Optional[str],
+    ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
+    idle_timeout_s: Optional[float] = _DEFAULT_IDLE_TIMEOUT_S,
+) -> AsyncIterator[StreamChunk]:
+    """Yield from the funded OpenAI API-key route, buffering metadata for
+    pre-content fall-through."""
+    buffered: Optional[StreamChunk] = None
+    yielded_any = False
+    gen = openai_api_key_complete(
+        pool_spec=pool_spec,
+        model=model,
+        messages=messages,
+        response_format=response_format,
+        tools=tools,
+        tool_choice=tool_choice,
+        temperature=temperature,
+        effort=effort,
+        openai_key=api_key,
         request_id=request_id,
         agent_id=agent_id,
         call_site=call_site,

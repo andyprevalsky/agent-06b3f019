@@ -25,7 +25,7 @@ import {
 } from './helpers';
 
 test.describe('login', () => {
-  // The OTP flow relies on the dev-only magic OTP (181818) which is rejected
+  // The OTP flow relies on local/review magic OTP credentials which are rejected
   // by production Supabase. Skip when running against prod.
   test.skip(IS_PROD, 'Login OTP flow requires dev environment (magic OTP)');
 

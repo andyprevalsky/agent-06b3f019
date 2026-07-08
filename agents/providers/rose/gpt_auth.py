@@ -28,7 +28,7 @@ from providers.rose.errors import (
 )
 from providers.rose.pools import PoolSpec
 from providers.rose.streaming import parse_responses_sse
-from providers.rose.transport import get_error_body, post_codex_stream
+from providers.rose.transport import get_error_body, post_codex_stream, post_openai_responses_stream
 from providers.rose.types import GptAuthContext, StreamChunk
 from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 
@@ -305,12 +305,13 @@ def _build_instructions(messages: List[Dict[str, Any]]) -> Optional[str]:
 def _build_prompt_cache_key(
     *,
     pool_spec: PoolSpec,
+    model_override: Optional[str] = None,
     instructions: Optional[str],
     response_format: Optional[Dict[str, Any]],
 ) -> str:
     fingerprint = json.dumps(
         {
-            "model": pool_spec.gpt_auth_model,
+            "model": model_override or pool_spec.gpt_auth_model,
             "instructions": instructions or "",
             "responseFormat": response_format.get("json_schema") if response_format else None,
         },
@@ -331,6 +332,7 @@ def _normalize_reasoning_effort(effort: Optional[str]) -> str:
 def build_codex_responses_body(
     *,
     pool_spec: PoolSpec,
+    model_override: Optional[str] = None,
     messages: List[Dict[str, Any]],
     response_format: Optional[Dict[str, Any]] = None,
     tools: Optional[List[Dict[str, Any]]] = None,
@@ -347,7 +349,7 @@ def build_codex_responses_body(
     """
     instructions = _build_instructions(messages) or _DEFAULT_CODEX_INSTRUCTIONS
     body: Dict[str, Any] = {
-        "model": pool_spec.gpt_auth_model,
+        "model": model_override or pool_spec.gpt_auth_model,
         "input": _build_responses_input(messages),
         "stream": True,
         "store": False,
@@ -355,6 +357,7 @@ def build_codex_responses_body(
         "tool_choice": _responses_tool_choice(tool_choice),
         "prompt_cache_key": _build_prompt_cache_key(
             pool_spec=pool_spec,
+            model_override=model_override,
             instructions=instructions,
             response_format=response_format,
         ),
@@ -472,6 +475,98 @@ async def gpt_auth_complete(
                     status=getattr(exc, "status", None),
                 ) from exc
             current_auth = fresh
+
+
+async def openai_api_key_complete(
+    *,
+    pool_spec: PoolSpec,
+    model: str,
+    messages: List[Dict[str, Any]],
+    response_format: Optional[Dict[str, Any]] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tool_choice: Any = None,
+    temperature: Optional[float] = None,
+    effort: Optional[str] = None,
+    openai_key: str,
+    request_id: str,
+    agent_id: Optional[str] = None,
+    call_site: Optional[str] = None,
+    provider_fast_mode: bool = False,
+    ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
+    idle_timeout_s: Optional[float] = None,
+) -> AsyncIterator[StreamChunk]:
+    body = build_codex_responses_body(
+        pool_spec=pool_spec,
+        model_override=model,
+        messages=messages,
+        response_format=response_format,
+        tools=tools,
+        tool_choice=tool_choice,
+        temperature=temperature,
+        effort=effort,
+        provider_fast_mode=provider_fast_mode,
+        request_id=request_id,
+    )
+    actual_model = f"{model}-openai"
+    last_error: Optional[Exception] = None
+
+    for attempt in range(_MAX_ATTEMPTS_PER_TOKEN):
+        try:
+            async with post_openai_responses_stream(
+                body=body,
+                openai_key=openai_key,
+                request_id=request_id,
+                agent_id=agent_id,
+                call_site=call_site,
+                connect_timeout_s=ttft_timeout_s,
+            ) as response:
+                status = response.status_code
+                if status == 200:
+                    async for chunk in parse_responses_sse(
+                        response,
+                        actual_model=actual_model,
+                        pool_name="openai-api-key",
+                        request_id=request_id,
+                        idle_timeout_s=idle_timeout_s,
+                    ):
+                        yield chunk
+                    return
+
+                error_body = get_error_body(response)
+
+                if status == 429:
+                    if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
+                        await asyncio.sleep(_backoff_for_429(response, attempt))
+                        continue
+                    raise RoseRateLimitError(f"OpenAI 429: {error_body[:2000]}", status=status)
+
+                if status in (401, 403):
+                    raise RoseAuthError(f"OpenAI {status}: {error_body[:2000]}", status=status)
+
+                if status == 400:
+                    raise RoseInvalidRequest(f"OpenAI 400: {error_body[:2000]}", status=status)
+
+                if status >= 500:
+                    if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
+                        await asyncio.sleep(min(2 ** attempt, _BACKOFF_CAP_S))
+                        continue
+                    raise RoseServerError(f"OpenAI {status}: {error_body[:2000]}", status=status)
+
+                raise RoseError(f"OpenAI {status}: {error_body[:2000]}", status=status)
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
+            last_error = exc
+            if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
+                await asyncio.sleep(min(2 ** attempt, _BACKOFF_CAP_S))
+                continue
+            raise RoseServerError(f"OpenAI connect/read error: {exc}") from exc
+        except RoseStallError:
+            raise
+        except RoseError:
+            raise
+
+    if last_error:
+        raise RoseServerError(f"OpenAI: exhausted retries: {last_error}") from last_error
+    raise RoseServerError("OpenAI: exhausted retries with no error captured")
 
 
 async def _attempt_with_token(

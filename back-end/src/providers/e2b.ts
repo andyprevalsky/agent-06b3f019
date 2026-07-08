@@ -461,9 +461,23 @@ export async function createCodexCodeSession(
       },
     }
   );
+  log.info('Fast Mode: Codex code-agent cache config', {
+    agentId,
+    taskId,
+    fastModeCacheEnabled: fastModeCacheEnabled === true,
+    fastModeWriteEnabled,
+    hasCodexProxyUrl: Boolean(process.env.FAST_MODE_CODEX_PROXY_URL),
+    hasAnthropicProxyUrl: Boolean(process.env.FAST_MODE_ANTHROPIC_PROXY_URL),
+    proxyInjected: fastModeEnv.CODEX_FAST_MODE_PROXY_URL !== undefined,
+  });
   if (fastModeEnv.CODEX_FAST_MODE_PROXY_URL !== undefined) {
     envs.CODEX_FAST_MODE_PROXY_URL = fastModeEnv.CODEX_FAST_MODE_PROXY_URL;
     log.info(`Fast Mode: routing sandbox Codex calls via ${envs.CODEX_FAST_MODE_PROXY_URL}`);
+  } else if (fastModeCacheEnabled === true) {
+    throw new Error(
+      'Fast Mode cache is enabled for Codex code agent but no Codex proxy URL is configured. ' +
+        'Set FAST_MODE_CODEX_PROXY_URL or FAST_MODE_ANTHROPIC_PROXY_URL ending in /anthropic-proxy.'
+    );
   } else if (fastModeWriteEnabled) {
     log.warn(
       'Fast Mode cache active but FAST_MODE_CODEX_PROXY_URL unset — Codex code agent not cached'

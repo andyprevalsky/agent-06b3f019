@@ -26,9 +26,47 @@ const PROD_SESSION = process.env.PROD_SESSION ?? '';
 export const TEST_API_KEY =
   process.env.TEST_API_KEY ?? 'AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=';
 export const TEST_USER_ID = process.env.TEST_USER_ID ?? '1f85ff25-6e29-4c1b-8739-f917bd101a30';
-export const TEST_PHONE_DIGITS = process.env.TEST_PHONE_DIGITS ?? '9729777432';
-export const TEST_PHONE_E164 = process.env.TEST_PHONE_E164 ?? '+19729777432';
-export const TEST_OTP = process.env.TEST_OTP ?? '181818';
+export const TEST_PHONE_DIGITS = process.env.TEST_PHONE_DIGITS ?? '5555550123';
+export const TEST_PHONE_E164 = process.env.TEST_PHONE_E164 ?? '+15555550123';
+export const TEST_OTP = process.env.TEST_OTP ?? '191919';
+
+let resolvedLocalUserId: Promise<string> | null = null;
+
+async function parseJsonResponse(res: Response): Promise<Record<string, unknown>> {
+  const raw = await res.text();
+  try {
+    return raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+  } catch {
+    return { raw };
+  }
+}
+
+async function resolveTestUserId(): Promise<string> {
+  if (IS_PROD || process.env.TEST_USER_ID !== undefined) return TEST_USER_ID;
+  resolvedLocalUserId ??= (async () => {
+    const sendRes = await fetch(`${BACKEND_URL}/api/auth/send-otp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phone: TEST_PHONE_E164 }),
+    });
+    if (!sendRes.ok) {
+      const body = await sendRes.text();
+      throw new Error(`Test user OTP send failed: ${sendRes.status} ${body.slice(0, 500)}`);
+    }
+    const verifyRes = await fetch(`${BACKEND_URL}/api/auth/verify-otp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phone: TEST_PHONE_E164, token: TEST_OTP }),
+    });
+    const data = await parseJsonResponse(verifyRes);
+    const userId = (data.user as { id?: string } | undefined)?.id;
+    if (!verifyRes.ok || userId === undefined || userId === '') {
+      throw new Error(`Test user OTP verify failed: ${verifyRes.status} ${JSON.stringify(data)}`);
+    }
+    return userId;
+  })();
+  return resolvedLocalUserId;
+}
 
 export interface Recorder {
   console: { type: string; text: string }[];
@@ -153,11 +191,12 @@ export async function createAgent(goal: string, startPhase?: 'plan' | 'execute')
   // Omit start_phase entirely to start in chat mode (per CLAUDE.md).
   const body: Record<string, unknown> = { goal };
   if (startPhase) body.start_phase = startPhase;
+  const userId = await resolveTestUserId();
   const res = await fetch(`${BACKEND_URL}/api/agents`, {
     method: 'POST',
     headers: {
       'X-API-Key': TEST_API_KEY,
-      'X-User-Id': TEST_USER_ID,
+      'X-User-Id': userId,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),
@@ -205,9 +244,10 @@ export async function deleteAgent(agentId: string): Promise<void> {
   // visible in CI logs, but don't throw — test teardown must not mask the
   // real assertion failure that caused it to run.
   try {
+    const userId = await resolveTestUserId();
     const res = await fetch(`${BACKEND_URL}/api/agents/${agentId}`, {
       method: 'DELETE',
-      headers: { 'X-API-Key': TEST_API_KEY, 'X-User-Id': TEST_USER_ID },
+      headers: { 'X-API-Key': TEST_API_KEY, 'X-User-Id': userId },
     });
     if (!res.ok) {
       console.warn(`deleteAgent(${agentId}) returned ${res.status} ${res.statusText}`);

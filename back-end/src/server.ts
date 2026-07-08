@@ -56,6 +56,7 @@ import { prisma } from './providers/database';
 import { createLogger } from './providers/logger';
 import { installFetchCapture, captureTokenMiddleware } from './providers/fetchCapture';
 import { tracingMiddleware } from './providers/tracing';
+import { getTemporalClient } from './providers/temporal';
 
 // System tools available to all Rose agents (mirrors the live tool registry in
 // agents/tools/). Drives the public Bazaar listing description below.
@@ -556,6 +557,15 @@ app.listen(PORT, () => {
     ...(x402ReceivingWallet ? { x402: 'POST /api/x402/spawn-agent (min $0.05 USDC)' } : {}),
   });
 
+  if (process.env.TEMPORAL_NAMESPACE && process.env.TEMPORAL_API_KEY) {
+    getTemporalClient()
+      .then(() => log.info('Temporal client prewarmed'))
+      .catch((err: unknown) => {
+        log.warn('Temporal client prewarm failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+  }
   // Contract-test backends should not run unrelated background jobs.
   if (process.env.DISABLE_GMAIL_SYNC === '1') {
     createLogger('Cron').info('Gmail sync disabled by DISABLE_GMAIL_SYNC');
