@@ -13,6 +13,7 @@
  *   dashed yellow indicator + optional "Start Autonomous Execution" button.
  */
 import { memo, useState } from 'react';
+import { Check, Loader2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { MarkdownText } from '../MarkdownText';
@@ -26,6 +27,85 @@ interface AttentionMessageProps {
   onComplete?: () => void;
   onStartExecution?: () => void;
   isStreaming?: boolean;
+  attentionRequestId?: string;
+  onApprove?: (requestId: string) => Promise<void>;
+  onDecline?: (requestId: string) => Promise<void>;
+}
+
+type ActionState = 'approving' | 'declining' | 'done' | null;
+
+function InlineApprovalActions({
+  actionState,
+  onApprove,
+  onDecline,
+}: {
+  actionState: ActionState;
+  onApprove: () => void;
+  onDecline: () => void;
+}): JSX.Element {
+  return (
+    <div className="flex items-center gap-2">
+      <Button
+        size="sm"
+        onClick={onApprove}
+        disabled={actionState !== null}
+        className="h-8 bg-green-600 px-3 text-white hover:bg-green-700"
+      >
+        {actionState === 'approving' ? <Loader2 className="h-4 w-4 animate-spin" /> : <><Check className="h-4 w-4" />Approve</>}
+      </Button>
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={onDecline}
+        disabled={actionState !== null}
+        className="h-8 border-red-500/30 px-3 text-red-600 hover:bg-red-50 hover:text-red-700 dark:hover:bg-red-950/30"
+      >
+        {actionState === 'declining' ? <Loader2 className="h-4 w-4 animate-spin" /> : <><X className="h-4 w-4" />Decline</>}
+      </Button>
+      {actionState === 'done' && <span className="text-xs text-muted-foreground">Sent</span>}
+    </div>
+  );
+}
+
+function WaitingIndicator(): JSX.Element {
+  return (
+    <div className="flex items-center gap-2 text-amber-500">
+      <div
+        className="w-4 h-4 rounded-full border-2 border-dashed border-amber-500"
+        style={{ animation: 'spin 3s linear infinite' }}
+      />
+      <span className="text-xs font-medium">
+        Your Rose agent will continue working after your reply
+      </span>
+    </div>
+  );
+}
+
+function AutonomousExecutionButton({ onStartExecution }: { onStartExecution: () => void }) {
+  return (
+    <TooltipProvider delayDuration={300}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onStartExecution}
+            className="flex items-center gap-2 text-muted-foreground hover:bg-muted/30 hover:text-muted-foreground"
+          >
+            <AutonomousExecutionIcon />
+            Start Autonomous Execution
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="top" className="max-w-xs text-left text-xs">
+          <p>
+            Once Rose enters <strong>Autonomous Execution</strong> mode they will not ask you any
+            more questions and will relentlessly explore all possible avenues in order to
+            accomplish your goal given the context at its disposal.
+          </p>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
 }
 
 export const AttentionMessage = memo(function AttentionMessage({
@@ -34,8 +114,12 @@ export const AttentionMessage = memo(function AttentionMessage({
   onComplete,
   onStartExecution,
   isStreaming = false,
+  attentionRequestId,
+  onApprove,
+  onDecline,
 }: AttentionMessageProps) {
   const [hasAnimated, setHasAnimated] = useState(false);
+  const [actionState, setActionState] = useState<ActionState>(null);
 
   const handleAnimationComplete = () => {
     setHasAnimated(true);
@@ -45,6 +129,23 @@ export const AttentionMessage = memo(function AttentionMessage({
       });
     }
   };
+
+  const handleAction = (kind: 'approving' | 'declining') => {
+    if (attentionRequestId === undefined || actionState !== null) return;
+    const run = kind === 'approving' ? onApprove : onDecline;
+    if (run === undefined) return;
+    setActionState(kind);
+    run(attentionRequestId)
+      .then(() => setActionState('done'))
+      .catch(() => setActionState(null));
+  };
+
+  const showInlineApproval =
+    isWaiting &&
+    !isStreaming &&
+    attentionRequestId !== undefined &&
+    onApprove !== undefined &&
+    onDecline !== undefined;
 
   return (
     <div className="flex gap-3 animate-in fade-in duration-300">
@@ -63,40 +164,16 @@ export const AttentionMessage = memo(function AttentionMessage({
 
         {isWaiting && !isStreaming && (
           <>
-            <div className="flex items-center gap-2 text-amber-500">
-              <div
-                className="w-4 h-4 rounded-full border-2 border-dashed border-amber-500"
-                style={{ animation: 'spin 3s linear infinite' }}
+            {showInlineApproval && (
+              <InlineApprovalActions
+                actionState={actionState}
+                onApprove={() => handleAction('approving')}
+                onDecline={() => handleAction('declining')}
               />
-              <span className="text-xs font-medium">
-                Your Rose agent will continue working after your reply
-              </span>
-            </div>
-
-            {onStartExecution && (
-              <TooltipProvider delayDuration={300}>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={onStartExecution}
-                      className="flex items-center gap-2 text-muted-foreground hover:bg-muted/30 hover:text-muted-foreground"
-                    >
-                      <AutonomousExecutionIcon />
-                      Start Autonomous Execution
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="top" className="max-w-xs text-left text-xs">
-                    <p>
-                      Once Rose enters <strong>Autonomous Execution</strong> mode they will not ask
-                      you any more questions and will relentlessly explore all possible avenues in
-                      order to accomplish your goal given the context at its disposal.
-                    </p>
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
             )}
+            <WaitingIndicator />
+
+            {onStartExecution && <AutonomousExecutionButton onStartExecution={onStartExecution} />}
           </>
         )}
       </div>

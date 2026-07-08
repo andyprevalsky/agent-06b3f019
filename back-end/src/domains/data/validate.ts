@@ -162,7 +162,7 @@ function parseMessageFilters(
 ): MessageGrepFilters | undefined {
   const raw = requireFilterObject(params);
   const merged =
-    selectedSource === 'messages'
+    selectedSource === 'messages' || selectedSource === 'gmail'
       ? {
           ...raw,
           ...(params.person !== undefined ? { person: params.person } : {}),
@@ -234,6 +234,7 @@ export function validateGrepInput(params: GrepParams): ValidatedGrepInput {
   if (
     selectedSource !== undefined &&
     selectedSource !== 'messages' &&
+    selectedSource !== 'gmail' &&
     selectedSource !== 'transactions' &&
     selectedSource !== 'documents'
   ) {
@@ -283,7 +284,7 @@ export function validateGrepInput(params: GrepParams): ValidatedGrepInput {
     offset: parseBoundedNumber(params.offset, 0, 0, 10_000),
     filters: {
       messages:
-        selectedSource === undefined || selectedSource === 'messages'
+        selectedSource === undefined || selectedSource === 'messages' || selectedSource === 'gmail'
           ? parseMessageFilters(params, selectedSource)
           : undefined,
       transactions: selectedSource === 'transactions' ? parseTransactionFilters(params) : undefined,

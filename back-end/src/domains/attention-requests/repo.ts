@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client';
 import { prisma } from '../../providers/database';
 import type { CreateAttentionRequestInput } from './types';
 
@@ -10,8 +11,45 @@ export async function create(data: CreateAttentionRequestInput) {
       question: data.question,
       imageUrl: data.imageUrl,
       metadata: data.metadata,
+      gateKey: data.gateKey,
     },
   });
+}
+
+/**
+ * Find the single PENDING (unanswered) request for a (userId, gateKey) gate, if
+ * any. Used to fan multiple agents in onto one gate instead of duplicating it.
+ */
+export async function findPendingByGateKey(userId: string, gateKey: string) {
+  return prisma.agentAttentionRequest.findFirst({
+    where: { userId, gateKey, userResponse: null },
+    orderBy: { createdAt: 'asc' },
+  });
+}
+
+/** Overwrite the metadata blob (used to append gate waiters on dedup). */
+export async function updateMetadata(id: string, metadata: Prisma.InputJsonValue) {
+  return prisma.agentAttentionRequest.update({
+    where: { id },
+    data: { metadata },
+  });
+}
+
+/** Source of the agent that raised a request (SMS agents get a gate SMS). */
+export async function findAgentSource(agentId: string) {
+  return prisma.agent.findUnique({
+    where: { id: agentId },
+    select: { source: true },
+  });
+}
+
+/** The user's phone number, if any (for dispatching a gate SMS). */
+export async function findUserPhone(userId: string): Promise<string | null> {
+  const user = await prisma.user.findUnique({
+    where: { userId },
+    select: { phone: true },
+  });
+  return user?.phone ?? null;
 }
 
 export async function findById(id: string) {

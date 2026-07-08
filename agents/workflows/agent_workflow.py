@@ -1619,7 +1619,6 @@ class AgentWorkflow:
                 "web_fetch",
                 "attempt_completion",
                 "call_phone_number",
-                "grep",
             }
 
             if tool_name in NEW_SIGNATURE_TOOLS:
@@ -1717,6 +1716,12 @@ class AgentWorkflow:
                 if tool_name == "spawn_agent":
                     tool_call_dict["_phase"] = self.current_phase
                 executor_result = await executor(self, tool_call_dict, tool_call_id)
+                if isinstance(executor_result, dict):
+                    original_usage = executor_result.get("usage", {})
+                    if original_usage:
+                        await self._track_usage(original_usage, tool_name=tool_name)
+                    result = executor_result.get("result", executor_result)
+                    return {"success": True, "message": f"{tool_name} completed", "result": result}
                 # spawn_agent returns (last_status, summary) tuple
                 if isinstance(executor_result, tuple):
                     last_status, result_text = executor_result

@@ -12,6 +12,7 @@ import { ClaudeCodeBubble } from './ClaudeCodeBubble';
 import BrowserAgentChip from '../BrowserAgentChip';
 import { CompletionBubble } from './CompletionBubble';
 import { AttentionMessageWrapper } from './AttentionMessageWrapper';
+import { GateMessageWrapper } from './GateMessageWrapper';
 
 interface Args {
   props: MessageBubbleProps;
@@ -81,6 +82,13 @@ export function renderChipRoutes({ props, routing }: Args): ReactElement | null 
         onSubmitFeedback={onSubmitFeedback}
       />
     );
+  }
+
+  if (routing.isGate) {
+    if (shouldType && onTypingComplete) {
+      requestAnimationFrame(() => onTypingComplete());
+    }
+    return <GateMessageWrapper message={message} />;
   }
 
   if (routing.isUserAttentionMessage) {

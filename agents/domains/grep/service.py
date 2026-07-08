@@ -5,6 +5,7 @@ from datetime import timedelta
 from typing import Any, Dict, Optional
 
 import structlog
+from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 from domains.grep.config import (
@@ -20,6 +21,12 @@ from domains.grep.repo import grep_activity
 from domains.grep.types import ExecuteActivityCallable
 from helpers.handle_tool_event import handle_tool_event
 from tools.base import EventType, MessageStatus, ToolEvent, format_error_message, format_tool_message
+from tools.gate import (
+    build_source_connect_gate,
+    has_message_corpus_activity,
+    mint_gmail_connect_activity,
+    raise_gate_direct,
+)
 
 logger = structlog.get_logger()
 
@@ -175,3 +182,50 @@ async def execute_grep(
         )
 
         raise
+
+
+async def execute_grep_with_workflow(
+    workflow_instance: Any,
+    tool_call: Dict[str, Any],
+    tool_call_id: str,
+) -> Dict[str, Any]:
+    """Workflow-aware grep path that can raise and wait on source gates."""
+    user_id = workflow_instance.user_id
+    agent_id = workflow_instance.agent_id
+
+    if tool_call.get("source") == "gmail":
+        has_corpus = await workflow.execute_activity(
+            has_message_corpus_activity,
+            args=[user_id or ""],
+            start_to_close_timeout=timedelta(seconds=ACTIVITY_TIMEOUT_SECONDS),
+            retry_policy=RetryPolicy(maximum_attempts=ACTIVITY_MAX_ATTEMPTS),
+        )
+        if not has_corpus:
+            connect_url = await workflow.execute_activity(
+                mint_gmail_connect_activity,
+                args=[user_id or ""],
+                start_to_close_timeout=timedelta(seconds=ACTIVITY_TIMEOUT_SECONDS),
+                retry_policy=RetryPolicy(maximum_attempts=ACTIVITY_MAX_ATTEMPTS),
+            )
+            await raise_gate_direct(
+                workflow_instance,
+                build_source_connect_gate(
+                    "gmail",
+                    "Connect Gmail so Rose can search your email",
+                    "This task needs access to your Gmail messages before I can grep them.",
+                    connect_url,
+                ),
+                gate_key="source_connect:gmail",
+            )
+
+    normalized_call = dict(tool_call)
+    if normalized_call.get("source") == "gmail":
+        normalized_call["source"] = "messages"
+
+    return await execute_grep(
+        execute_activity=workflow.execute_activity,
+        tool_call=normalized_call,
+        tool_call_id=tool_call_id,
+        agent_id=agent_id,
+        user_id=user_id,
+    )

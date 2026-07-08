@@ -1,6 +1,12 @@
 import { stripe } from '../../providers/stripe';
 import * as repo from './repo';
-import { IS_PRODUCTION, RETURN_URL_PRODUCTION, RETURN_URL_DEVELOPMENT } from './config';
+import {
+  IS_PRODUCTION,
+  RETURN_URL_PRODUCTION,
+  RETURN_URL_DEVELOPMENT,
+  STRIPE_SUBSCRIPTION_PRICE_ID,
+  SUBSCRIBE_FALLBACK_URL,
+} from './config';
 
 export class NotFoundError extends Error {
   constructor(msg: string) {
@@ -26,4 +32,30 @@ export async function createPortalSession(userId: string): Promise<{ url: string
   });
 
   return { url: portalSession.url };
+}
+
+export async function createSubscriptionCheckoutSession(userId: string): Promise<{ url: string }> {
+  const returnUrl = IS_PRODUCTION ? RETURN_URL_PRODUCTION : RETURN_URL_DEVELOPMENT;
+
+  if (STRIPE_SUBSCRIPTION_PRICE_ID === '') {
+    const url = new URL(SUBSCRIBE_FALLBACK_URL);
+    url.searchParams.set('client_reference_id', userId);
+    url.searchParams.set('return_url', returnUrl);
+    return { url: url.toString() };
+  }
+
+  const session = await stripe.checkout.sessions.create({
+    mode: 'subscription',
+    client_reference_id: userId,
+    line_items: [{ price: STRIPE_SUBSCRIPTION_PRICE_ID, quantity: 1 }],
+    success_url: `${returnUrl}?subscription=success`,
+    cancel_url: `${returnUrl}?subscription=cancelled`,
+    allow_promotion_codes: true,
+  });
+
+  if (session.url === null || session.url === '') {
+    throw new Error('Stripe did not return a checkout URL');
+  }
+
+  return { url: session.url };
 }

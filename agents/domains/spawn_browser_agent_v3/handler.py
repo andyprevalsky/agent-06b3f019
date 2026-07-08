@@ -4907,6 +4907,63 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         start_to_close_timeout=timedelta(seconds=90),
                         retry_policy=RetryPolicy(maximum_attempts=1),
                     )
+
+                    # Subscription gate: minting real money requires an active
+                    # plan. If the backend says so, raise a subscription gate
+                    # ORGANICALLY (not injected) and retry once it's resolved.
+                    if card.get("status") == "subscription_required":
+                        from tools.gate import (
+                            build_subscription_gate,
+                            mint_subscription_checkout_activity,
+                            raise_gate_direct,
+                            GateRejectedError,
+                        )
+
+                        try:
+                            checkout_url = await workflow.execute_activity(
+                                mint_subscription_checkout_activity,
+                                args=[workflow_instance.user_id or ""],
+                                start_to_close_timeout=timedelta(seconds=30),
+                                retry_policy=RetryPolicy(maximum_attempts=3),
+                            )
+                            await raise_gate_direct(
+                                workflow_instance,
+                                build_subscription_gate(checkout_url=checkout_url),
+                                gate_key="subscription",
+                            )
+                        except GateRejectedError:
+                            yield ToolEvent(
+                                type=EventType.POST_MESSAGE,
+                                title="Purchase cancelled",
+                                message="A subscription is required to complete purchases — cancelled for now.",
+                                status=MessageStatus.FINISHED,
+                                metadata={
+                                    "toolName": "spawn_browser_agent",
+                                    "action_type": "purchase_cancelled",
+                                },
+                            )
+                            return
+
+                        # Resolved — retry the mint now that the user has subscribed.
+                        card = await workflow.execute_activity(
+                            mint_purchase_card_activity,
+                            args=[workflow_instance.user_id or "", payment_payload],
+                            start_to_close_timeout=timedelta(seconds=90),
+                            retry_policy=RetryPolicy(maximum_attempts=1),
+                        )
+                        if card.get("status") == "subscription_required":
+                            yield ToolEvent(
+                                type=EventType.POST_MESSAGE,
+                                title="Subscription still inactive",
+                                message="I couldn't confirm an active subscription yet, so I can't complete the purchase.",
+                                status=MessageStatus.FINISHED,
+                                metadata={
+                                    "toolName": "spawn_browser_agent",
+                                    "action_type": "purchase_blocked",
+                                },
+                            )
+                            return
+
                     card_number = card.get("pan") or card.get("cardNumber") or card.get("card_number") or ""
                     card_expiry = card.get("expiry") or card.get("expiration") or card.get("cardExpiry") or ""
                     card_cvv = card.get("cvv") or card.get("cvc") or card.get("cardCvv") or ""

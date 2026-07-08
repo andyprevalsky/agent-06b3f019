@@ -10,6 +10,13 @@ export const DATA_SOURCE_CONFIGS = {
     groupBy: 'personId',
     filters: ['person', 'since'] as const,
   },
+  gmail: {
+    description: 'Gmail/email conversation threads',
+    table: 'MessageRecord' as const,
+    searchField: 'message',
+    groupBy: 'personId',
+    filters: ['person', 'since'] as const,
+  },
   network: {
     description: 'Contact network records',
     table: 'Person' as const,

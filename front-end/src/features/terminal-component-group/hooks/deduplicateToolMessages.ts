@@ -1,17 +1,4 @@
-/**
- * Pure helper that collapses multiple TOOL messages sharing a `toolCallId`
- * into a single representative message, preserves explore-agent / wait_for
- * sub-step history, compresses `set_plan` updates, cleans up orphaned
- * IN_PROGRESS tools, and groups explore-agent messages by `taskId`.
- *
- * Returns a tuple of:
- *   [ ordered messages, exploreStepMap (repId -> steps), waitForCheckMap ]
- * so the caller can render representative messages plus attached history.
- *
- * Lives in the hooks layer (not a separate utils file) so consumers reach it
- * through hooks.ts without the api layer needing to import from a non-layer
- * module — preserving the forward-only dependency chain.
- */
+/** Deduplicates TOOL messages while preserving explore-agent and wait_for step history. */
 
 import type { Message } from '../api';
 import type { ExploreStep, WaitForCheck } from '../types';
@@ -25,9 +12,8 @@ interface ExploreData {
   steps: ExploreStep[];
 }
 
-function sortByTimestampAsc(a: Message, b: Message): number {
-  return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
-}
+const sortByTimestampAsc = (a: Message, b: Message): number =>
+  new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
 
 function isInternalLivenessTool(message: Message): boolean {
   return message.role === 'TOOL' && message.metadata?.toolName === 'agent_init';
@@ -54,11 +40,7 @@ function extractLineValue(text: string, label: string): string | undefined {
   return match?.[1] ? stripWrappingQuotes(match[1]) : undefined;
 }
 
-function formatWebSearchTitle(
-  rawTitle: string,
-  status: ExploreStep['status'],
-  query: string | undefined,
-): string {
+function formatWebSearchTitle(rawTitle: string, status: ExploreStep['status'], query: string | undefined): string {
   if (!query) return rawTitle;
   if (
     rawTitle !== 'Searching the web' &&
@@ -73,11 +55,7 @@ function formatWebSearchTitle(
   return `Searching the web for ${query}`;
 }
 
-function formatWebFetchTitle(
-  rawTitle: string,
-  status: ExploreStep['status'],
-  text: string,
-): string {
+function formatWebFetchTitle(rawTitle: string, status: ExploreStep['status'], text: string): string {
   if (
     rawTitle !== 'Fetching web content' &&
     rawTitle !== 'Web fetch complete' &&
@@ -130,10 +108,7 @@ function collectRawWaitFor(messages: Message[]): Map<string, Message[]> {
   return raw;
 }
 
-function dedupByToolCallId(messages: Message[]): {
-  toolMessages: Message[];
-  nonToolMessages: Message[];
-} {
+function dedupByToolCallId(messages: Message[]): { toolMessages: Message[]; nonToolMessages: Message[] } {
   const toolMessageMap = new Map<string, { message: Message; firstTimestamp: string }>();
   const nonToolMessages: Message[] = [];
 
@@ -180,7 +155,7 @@ function dedupByToolCallId(messages: Message[]): {
 function cleanOrphanedInProgress(tools: Message[], lastAssistantTimestamp: number): Message[] {
   return tools.filter((m) => {
     if (m.metadata?.toolStatus !== 'IN_PROGRESS') return true;
-    if (m.metadata?.isUserAttentionMessage) return true;
+    if (m.metadata?.isUserAttentionMessage || m.metadata?.gate) return true;
     if (m.metadata?.agentType === 'explore') return true;
     if (m.metadata?.toolName === 'wait_for') return true;
     const toolTime = new Date(m.timestamp).getTime();
@@ -221,14 +196,6 @@ interface ExploreGrouping {
   dataByTaskId: Map<string, ExploreData>;
 }
 
-/**
- * Thinking-step messages (`save_explore_message`) are posted with
- * toolName=spawn_agent and toolStatus=FINISHED for every iteration. They
- * must not be treated as the overall completion event — the init/final pair
- * (which carries `metadata.fullGoal`) is the only signal for the whole
- * explore-agent's status. Pick the representative from non-thinking spawn
- * messages so the chip's status reflects the run as a whole.
- */
 function isThinkingSpawnMessage(m: Message): boolean {
   return m.metadata?.toolName === 'spawn_agent' && m.metadata?.title === 'Explore agent thinking';
 }
@@ -273,10 +240,7 @@ function groupExploreMessages(messages: Message[]): ExploreGrouping {
       title: (representative.metadata?.title as string) || '',
       fullGoal: (representative.metadata?.fullGoal as string) || undefined,
       message: representative.text || '',
-      status: ((representative.metadata?.toolStatus as string) || 'IN_PROGRESS') as
-        | 'IN_PROGRESS'
-        | 'FINISHED'
-        | 'ERROR',
+      status: ((representative.metadata?.toolStatus as string) || 'IN_PROGRESS') as ExploreData['status'],
       steps,
     });
 

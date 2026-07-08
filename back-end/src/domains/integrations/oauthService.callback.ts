@@ -16,6 +16,7 @@ import { fetchGmailEmails, parseGmailOAuthEmails } from '../../services/integrat
 import { EMAIL_PROVIDER_CONFIG } from './config';
 import * as repo from './repo';
 import { exchangeProviderCode, buildRedirectUri, sendOAuthResult } from './oauthService';
+import { resolvePendingGateByKey } from '../attention-requests/service';
 
 const log = createLogger('Integrations');
 
@@ -57,8 +58,53 @@ async function syncGmailEmails(
   });
 }
 
+async function resolveSourceConnectGate(userId: string, providerKey: EmailProviderSlug): Promise<void> {
+  try {
+    await resolvePendingGateByKey(userId, `source_connect:${providerKey}`, 'SOURCE_CONNECTED');
+  } catch (error: unknown) {
+    log.warn('Failed to resolve source-connect gate after OAuth', {
+      userId,
+      providerKey,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+function maybeSyncGmailAfterOAuth(params: {
+  providerKey: EmailProviderSlug;
+  accessToken: string;
+  userEmail: string | undefined;
+  userId: string;
+  integrationId: string;
+}): void {
+  if (
+    params.providerKey !== 'gmail' ||
+    params.accessToken === '' ||
+    params.userEmail === undefined ||
+    params.userEmail === null ||
+    params.userEmail === ''
+  ) {
+    return;
+  }
+  void syncGmailEmails(
+    params.accessToken,
+    params.userEmail,
+    params.userId,
+    params.integrationId
+  ).catch((error: unknown) => {
+    log.error('Error syncing Gmail emails', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    void repo.updateIntegrationStatus(params.integrationId, IntegrationStatus.SYNC_FAILED, {
+      lastFailedSyncAt: new Date(),
+      failureReason: error instanceof Error ? error.message : 'Unknown error',
+    });
+  });
+}
+
 /** Handle an already-connected email — refresh tokens and return. */
 async function handleExistingEmail(
+  userId: string,
   tokenResult: TokenExchangeResult,
   existingCredentialId: string,
   pendingCredentialId: string,
@@ -95,6 +141,7 @@ async function handleExistingEmail(
     returnUrl,
     errorUrl,
   });
+  await resolveSourceConnectGate(userId, providerKey);
 }
 
 /** Finalize a new credential: save tokens, update integration, and start email sync. */
@@ -158,29 +205,15 @@ async function finalizeNewCredential(
     returnUrl,
     errorUrl,
   });
+  await resolveSourceConnectGate(credential.userId, providerKey);
 
-  if (
-    providerKey === 'gmail' &&
-    tokenResult.accessToken !== '' &&
-    tokenResult.userEmail !== undefined &&
-    tokenResult.userEmail !== null &&
-    tokenResult.userEmail !== ''
-  ) {
-    void syncGmailEmails(
-      tokenResult.accessToken,
-      tokenResult.userEmail,
-      credential.userId,
-      credential.integrationId
-    ).catch((error: unknown) => {
-      log.error('Error syncing Gmail emails', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-      void repo.updateIntegrationStatus(credential.integrationId, IntegrationStatus.SYNC_FAILED, {
-        lastFailedSyncAt: new Date(),
-        failureReason: error instanceof Error ? error.message : 'Unknown error',
-      });
-    });
-  }
+  maybeSyncGmailAfterOAuth({
+    providerKey,
+    accessToken: tokenResult.accessToken,
+    userEmail: tokenResult.userEmail,
+    userId: credential.userId,
+    integrationId: credential.integrationId,
+  });
 }
 
 /** Validate credential and extract metadata URLs. Returns null + sends error if invalid. */
@@ -265,6 +298,7 @@ export async function handleOAuthCallback(
 
     if (existingCredential !== null && existingCredential !== undefined) {
       return handleExistingEmail(
+        credential.userId,
         tokenResult,
         existingCredential.id,
         credential.id,

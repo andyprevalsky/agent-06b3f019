@@ -42,4 +42,36 @@ router.get(
   })
 );
 
+/**
+ * POST /api/billing/subscription-checkout
+ * Returns a Stripe Checkout URL for starting a subscription. Supports both
+ * authenticated users and internal worker calls with x-api-key + userId.
+ */
+router.post(
+  '/subscription-checkout',
+  authenticate,
+  asyncHandler<AuthRequest>(async (req: AuthRequest, res: Response) => {
+    try {
+      const internalUserId =
+        req.isInternal === true && typeof req.body?.userId === 'string'
+          ? req.body.userId.trim()
+          : undefined;
+      const userId = req.isInternal === true ? internalUserId : req.user?.id;
+
+      if (userId === undefined || userId === '') {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+
+      const result = await service.createSubscriptionCheckoutSession(userId);
+      res.json(result);
+    } catch (error) {
+      log.error('Error creating subscription checkout session', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      res.status(500).json({ error: 'Failed to create subscription checkout session' });
+    }
+  })
+);
+
 export default router;

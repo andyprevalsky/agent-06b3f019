@@ -71,6 +71,25 @@ function readString(record: Record<string, unknown>, key: string): string | unde
   return typeof value === 'string' ? value : undefined;
 }
 
+/** Gate object that rides on an AttentionRequest's metadata (metadata.gate). */
+export interface GateMetadata {
+  gateKey: string;
+  type: string;
+  presentation: { title: string; reason: string; cta: string };
+  action: { kind: 'link'; url: string } | { kind: 'reply'; tokens: string[] };
+}
+
+/** Extract a Gate from an AttentionRequest's metadata, if present. */
+export function getGateMetadata(metadata: AttentionRequest['metadata']): GateMetadata | null {
+  const record = readRecord(metadata);
+  if (!record) return null;
+  const gate = record.gate;
+  if (gate !== null && typeof gate === 'object' && 'presentation' in gate && 'action' in gate) {
+    return gate as GateMetadata;
+  }
+  return null;
+}
+
 export function getAuthAssistanceMetadata(
   request: AttentionRequest,
 ): AuthAssistanceMetadata | null {

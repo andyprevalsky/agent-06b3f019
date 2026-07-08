@@ -52,7 +52,7 @@ async function searchSource(
   source: ValidSource,
   agentId: string | undefined
 ): Promise<{ total: number; matches: GrepMatch[] }> {
-  if (source === 'messages') {
+  if (source === 'messages' || source === 'gmail') {
     // person/since narrow the messages source only.
     let personId: string | undefined;
     const messageFilters = input.filters.messages;

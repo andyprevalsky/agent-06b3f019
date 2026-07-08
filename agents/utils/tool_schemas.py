@@ -354,11 +354,12 @@ class GrepTool(BaseModel):
             "Use -i for case-insensitive matching and multiline for cross-line patterns."
         ),
     )
-    source: Optional[Literal["messages", "network", "agent_network", "transactions", "documents"]] = Field(
+    source: Optional[Literal["messages", "gmail", "network", "agent_network", "transactions", "documents"]] = Field(
         default=None,
         description=(
             "Optional source bucket. Omit to search messages, network, and the current agent_network. "
-            "messages searches user communication records. network searches contact records. "
+            "messages searches user communication records. gmail searches connected/imported Gmail messages. "
+            "network searches contact records. "
             "agent_network searches all message roles in the current agent tree and returns role/location metadata. "
             "transactions searches synced Plaid transaction rows. documents searches synced ChatGPT/Claude "
             "exports, Apple Notes, Obsidian vault notes, and generic user documents."

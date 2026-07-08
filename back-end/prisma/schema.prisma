@@ -158,11 +158,17 @@ model AgentAttentionRequest {
   updatedAt      DateTime                   @updatedAt
   imageUrl       String?
   metadata       Json?
+  // Dedup identity for Gate requests (the Gate object rides in metadata.gate).
+  // Multiple agents that hit the same gate collapse onto one PENDING
+  // (userResponse IS NULL) request. A partial unique index in the migration
+  // enforces this. See docs/plans/active/sms-onboarding-and-gates.md.
+  gateKey        String?
   authAssistance UserAuthAssistanceRequest?
 
   @@index([updatedAt])
   @@index([userId])
   @@index([workflowId])
+  @@index([userId, gateKey])
 }
 
 model ModelPricingCache {

@@ -11,6 +11,7 @@ import ResearchBlog from '@/features/research-blog';
 import ResearchBlogPost from '@/features/research-blog-post';
 import Download from '@/features/download';
 import TestPayment from '@/features/test-payment';
+import GatePlayground from '@/features/gate-playground';
 import { PlaidOAuthRedirect } from '@/features/integrations';
 
 /**
@@ -27,6 +28,7 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
   { path: '/research/:slug', component: ResearchBlogPost },
   { path: '/download', component: Download },
   { path: '/test_payment', component: TestPayment },
+  { path: '/gate-playground', component: GatePlayground },
   { path: '/plaid-oauth-redirect', component: PlaidOAuthRedirect },
   { path: '*', component: NotFound, isCatchAll: true },
 ] as const;

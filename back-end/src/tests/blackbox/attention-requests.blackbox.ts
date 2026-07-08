@@ -594,6 +594,203 @@ async function testCreate_parallelCreatesPersistBoth() {
   );
 }
 
+// Gate fan-in dedup: multiple agents that hit the same gate (same userId +
+// gateKey) collapse onto ONE pending AttentionRequest instead of spamming the
+// user with duplicates. See docs/plans/active/sms-onboarding-and-gates.md.
+async function testCreate_gateDedupCollapsesToOnePendingRequest() {
+  const fixture = await createFixture('create-gate-dedup');
+  const gateKey = `subscription:${RUN_ID}:${randomUUID().slice(0, 8)}`;
+
+  async function postGate(
+    key: string,
+    workflowLabel: string
+  ): Promise<{ id: string; deduped?: boolean }> {
+    const res = await request(`${BASE_URL}/api/attention-requests`, {
+      method: 'POST',
+      body: JSON.stringify({
+        userId: fixture.ownerUserId,
+        agentId: fixture.realAgentId,
+        workflowId: makeWorkflowId(`${fixture.label}-${workflowLabel}`),
+        question: 'Subscribe to continue',
+        gateKey: key,
+        metadata: {
+          gate: {
+            gateKey: key,
+            type: 'subscription',
+            status: 'PENDING',
+            severity: 'blocking',
+            presentation: {
+              title: 'Subscribe to continue',
+              reason: 'Out of free credit',
+              cta: 'Subscribe',
+            },
+            action: {
+              kind: 'link',
+              url: 'https://roselabs.ai/s/x',
+              expiresAt: '2026-01-01T00:00:00Z',
+            },
+            detection: { method: 'stripe_webhook', probeKey: 'subscription' },
+          },
+        },
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+    return res.data as { id: string; deduped?: boolean };
+  }
+
+  // Two sub-agents (distinct workflows) hit the same gate → ONE request.
+  const first = await postGate(gateKey, 'wf-a');
+  const second = await postGate(gateKey, 'wf-b');
+  assert(first.deduped !== true, 'First gate should create a fresh request');
+  assert(second.deduped === true, 'Second gate should dedup (deduped=true)');
+  assert(
+    second.id === first.id,
+    `Second gate should reuse the first id (${first.id} vs ${second.id})`
+  );
+
+  const pending = await prisma.agentAttentionRequest.count({
+    where: { userId: fixture.ownerUserId, gateKey, userResponse: null },
+  });
+  assert(pending === 1, `Expected exactly one pending gate row, got ${pending}`);
+
+  // A different gateKey is a distinct gate.
+  const otherKey = `kyc:${RUN_ID}:${randomUUID().slice(0, 8)}`;
+  const other = await postGate(otherKey, 'wf-c');
+  assert(other.id !== first.id, 'A different gateKey must create a new request');
+  assert(other.deduped !== true, 'A different gateKey must not dedup');
+
+  // Once the pending gate is answered, the same key no longer dedups — a fresh
+  // gate can be raised (a later run may need the user to act again).
+  await prisma.agentAttentionRequest.update({
+    where: { id: first.id },
+    data: { userResponse: 'RESOLVED' },
+  });
+  const third = await postGate(gateKey, 'wf-d');
+  assert(
+    third.id !== first.id,
+    'After the pending gate is answered, a new request should be created'
+  );
+  assert(third.deduped !== true, 'Post-resolution gate should not dedup');
+}
+
+// Resolve-all-waiters: when a second agent dedups onto a gate it is recorded as
+// a waiter, and resolving the gate resumes the primary + every waiter.
+async function testCreate_gateResolveSignalsAllWaiters() {
+  const fixture = await createFixture('gate-waiters');
+  const gateKey = `subscription:${RUN_ID}:${randomUUID().slice(0, 8)}`;
+  const wfA = makeWorkflowId(`${fixture.label}-wf-a`);
+  const wfB = makeWorkflowId(`${fixture.label}-wf-b`);
+
+  async function postGate(workflowId: string): Promise<{ id: string; deduped?: boolean }> {
+    const res = await request(`${BASE_URL}/api/attention-requests`, {
+      method: 'POST',
+      body: JSON.stringify({
+        userId: fixture.ownerUserId,
+        agentId: fixture.realAgentId,
+        workflowId,
+        question: 'Subscribe to continue',
+        gateKey,
+        metadata: {
+          gate: {
+            gateKey,
+            type: 'subscription',
+            status: 'PENDING',
+            severity: 'blocking',
+            presentation: { title: 'Subscribe', reason: 'Out of credit', cta: 'Subscribe' },
+            action: { kind: 'link', url: 'https://roselabs.ai/s/x' },
+            detection: { method: 'stripe_webhook', probeKey: 'subscription' },
+          },
+        },
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+    return res.data as { id: string; deduped?: boolean };
+  }
+
+  const first = await postGate(wfA);
+  const second = await postGate(wfB);
+  assert(second.id === first.id, 'Second agent should dedup onto the same gate');
+
+  const row = await prisma.agentAttentionRequest.findUnique({ where: { id: first.id } });
+  assert(row !== null, 'Gate request should exist');
+  assert(row.workflowId === wfA, 'Primary workflow should be the first agent (wf-a)');
+  const meta = row.metadata as { gateWaiters?: Array<{ workflowId: string }> } | null;
+  const waiters = meta?.gateWaiters ?? [];
+  assert(
+    waiters.some((w) => w.workflowId === wfB),
+    `Second agent (wf-b) should be recorded as a waiter; got ${JSON.stringify(waiters)}`
+  );
+  assert(
+    !waiters.some((w) => w.workflowId === wfA),
+    'Primary workflow must not be duplicated into the waiter list'
+  );
+
+  // Resolving succeeds (the service signals primary + every waiter).
+  const respondRes = await request(`${BASE_URL}/api/attention-requests/${first.id}/respond`, {
+    method: 'POST',
+    headers: authHeaders(fixture.ownerToken),
+    body: JSON.stringify({ response: 'resolved' }),
+  });
+  assertStatus(respondRes.status, 200, respondRes.data);
+}
+
+// One minimal SMS action: a gate raised for an SMS-source agent renders exactly
+// one tap (link) or one reply, texted to the user.
+async function testCreate_gateSmsRendersOneMinimalAction() {
+  const userId = `bb-gate-sms-${RUN_ID}-${randomUUID().slice(0, 8)}`;
+  const phone = `+1925${Math.floor(1000000 + Math.random() * 8999999)}`;
+  trackedUserIds.add(userId);
+  await prisma.user.create({ data: { userId, phone, isAnonymous: false } });
+  const agent = await prisma.agent.create({
+    data: { userId, goal: 'gate sms test', status: 'ACTIVE', source: 'SMS' },
+  });
+  trackedRequestAgentIds.add(agent.id);
+
+  try {
+    const url = 'https://roselabs.ai/s/onetap';
+    const res = await request(`${BASE_URL}/api/attention-requests`, {
+      method: 'POST',
+      body: JSON.stringify({
+        userId,
+        agentId: agent.id,
+        workflowId: makeWorkflowId('gate-sms'),
+        question: 'Subscribe to continue',
+        gateKey: `subscription:${RUN_ID}:${randomUUID().slice(0, 8)}`,
+        metadata: {
+          gate: {
+            gateKey: `subscription:${RUN_ID}`,
+            type: 'subscription',
+            status: 'PENDING',
+            severity: 'blocking',
+            presentation: {
+              title: 'Subscribe to finish your task',
+              reason: 'Out of free credit',
+              cta: 'Subscribe',
+            },
+            action: { kind: 'link', url },
+            detection: { method: 'stripe_webhook', probeKey: 'subscription' },
+          },
+        },
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+    const data = res.data as { gateSms?: string };
+    assert(typeof data.gateSms === 'string', 'Gate for an SMS agent should render an SMS body');
+    assert(
+      (data.gateSms ?? '').includes(url),
+      `SMS should carry the single action link; got "${data.gateSms}"`
+    );
+    assert(
+      !(data.gateSms ?? '').includes('\n'),
+      `SMS should be one minimal line; got "${data.gateSms}"`
+    );
+  } finally {
+    await prisma.agentAttentionRequest.deleteMany({ where: { agentId: agent.id } });
+    await prisma.agent.deleteMany({ where: { id: agent.id } });
+    await prisma.user.deleteMany({ where: { userId } });
+  }
+}
+
 async function testList_happyIsolationAndOrdering() {
   const fixture = await createFixture('list-ordering');
   const ownerFirst = await createAttentionRequest(fixture, { question: 'owner-first' });
@@ -1079,6 +1276,18 @@ async function runAll() {
         {
           name: 'parallel create persists both requests',
           fn: testCreate_parallelCreatesPersistBoth,
+        },
+        {
+          name: 'gate dedup collapses to one pending request',
+          fn: testCreate_gateDedupCollapsesToOnePendingRequest,
+        },
+        {
+          name: 'gate resolve signals all waiters (fan-in)',
+          fn: testCreate_gateResolveSignalsAllWaiters,
+        },
+        {
+          name: 'gate renders one minimal SMS action',
+          fn: testCreate_gateSmsRendersOneMinimalAction,
         },
       ],
     },

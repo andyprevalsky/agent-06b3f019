@@ -27,7 +27,14 @@ router.post(
       return res.status(400).json({ error: 'Unsupported email provider' });
     }
 
-    const userId = req.user!.id;
+    const internalUserId =
+      req.isInternal === true && typeof req.body?.user_id === 'string'
+        ? req.body.user_id.trim()
+        : undefined;
+    const userId = req.isInternal === true ? internalUserId : req.user?.id;
+    if (userId === undefined || userId === '') {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
     const returnUrl = (req.body?.returnUrl as string | undefined) ?? null;
     const errorUrl = (req.body?.errorUrl as string | undefined) ?? null;
 

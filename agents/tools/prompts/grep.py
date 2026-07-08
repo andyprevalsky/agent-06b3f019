@@ -6,7 +6,8 @@ Usage:
 - Do not use this for the public web, use web_search instead.
 - `pattern` is a regular expression. Plain text works for literal searches.
 - `source` is optional. Omit it to search messages, network, and agent_network.
-- Supported sources: messages, network, agent_network, transactions, documents.
+- Supported sources: messages, gmail, network, agent_network, transactions, documents.
+- If you specifically need Gmail/email data, use `source="gmail"` so Rose can request a Gmail connection when it is missing.
 - Grep-style flags: -A lines after, -B lines before, -C/context both sides, -n line numbers, -i case-insensitive, head_limit, offset, multiline.
 - Use nested `filters` for source-specific narrowing. For messages: `person` and `since`. Legacy top-level `person` and `since` still work for messages.
 - For transactions: `filters.since`, `filters.until`, `filters.account`, `filters.min_amount`, `filters.max_amount`, `filters.status` (`posted`, `pending`, or `all`), and `filters.include_pending_in_totals`.

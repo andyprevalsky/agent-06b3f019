@@ -5,12 +5,15 @@ from __future__ import annotations
 from typing import Any, Dict
 
 import httpx
+import structlog
 from temporalio import activity
 
 from config import load_config
 from helpers.trace_archive import archive_json
 from helpers.tracing import current_root_agent_id
 from helpers.world_model_runtime import WorldModelToolExecutionAdapter
+
+logger = structlog.get_logger()
 
 
 @activity.defn
@@ -86,6 +89,17 @@ async def _mint_purchase_card_real(user_id: str, payload: Dict[str, Any]) -> Dic
                 "Content-Type": "application/json",
             },
         )
+        # 402 = the user needs an active subscription before Rose can spend real
+        # money. Surface it as a signal (not an exception) so the workflow can
+        # raise a subscription gate organically and retry, instead of failing.
+        if response.status_code == 402:
+            detail = ""
+            try:
+                detail = str(response.json().get("error") or "")
+            except Exception:
+                detail = response.text
+            logger.info("Mint requires subscription (402)", detail=detail[:200])
+            return {"status": "subscription_required", "error": detail}
         response.raise_for_status()
         result = response.json()
         archive_root_agent_id = current_root_agent_id() or str(payload.get("agentId") or user_id)
