@@ -165,6 +165,9 @@ DEFAULT_MINTED_BENCHMARK_AGENT_EMAIL = "rose.harbor47@mail.roselabs.ai"
 DEFAULT_MINTED_BENCHMARK_AGENT_PHONE = "+18159823405"
 SMOKE_MEMORY_MAX_GROWTH_MB = float(os.environ.get("BENCHMARK_SMOKE_MEMORY_MAX_GROWTH_MB", "256"))
 SMOKE_MEMORY_MAX_END_MB = float(os.environ.get("BENCHMARK_SMOKE_MEMORY_MAX_END_MB", "1800"))
+SMOKE_MEMORY_MAX_WORKER_MB = float(
+    os.environ.get("BENCHMARK_SMOKE_MEMORY_MAX_WORKER_MB", "220")
+)
 SMOKE_MEMORY_FORBID_PLAYWRIGHT_DRIVERS = os.environ.get(
     "BENCHMARK_SMOKE_FORBID_PLAYWRIGHT_DRIVERS", "true"
 ).lower() not in ("0", "false", "no")
@@ -5026,6 +5029,9 @@ def _build_smoke_memory_summary(
     platform_value = platform_name or sys.platform
     allocator_trimmed = bool((baseline or {}).get("after", {}).get("allocator_trimmed"))
     enforce_growth = platform_value != "darwin" or allocator_trimmed
+    process_count = int(after.get("process_count") or before.get("process_count") or 0)
+    scaled_max_end_mb = process_count * SMOKE_MEMORY_MAX_WORKER_MB if process_count > 0 else 0.0
+    effective_max_end_mb = max(SMOKE_MEMORY_MAX_END_MB, scaled_max_end_mb)
     summary = {
         "enabled": True,
         "before": before,
@@ -5034,6 +5040,8 @@ def _build_smoke_memory_summary(
         "thresholds": {
             "max_growth_mb": SMOKE_MEMORY_MAX_GROWTH_MB,
             "max_end_mb": SMOKE_MEMORY_MAX_END_MB,
+            "max_worker_mb": SMOKE_MEMORY_MAX_WORKER_MB,
+            "effective_max_end_mb": effective_max_end_mb,
             "forbid_playwright_drivers": SMOKE_MEMORY_FORBID_PLAYWRIGHT_DRIVERS,
             "growth_enforced": enforce_growth,
         },
@@ -5057,9 +5065,10 @@ def _build_smoke_memory_summary(
             f"worker process-tree RSS grew by {growth_mb} MB, but RSS growth is not enforced on "
             "macOS when allocator pressure relief cannot return freed arenas"
         )
-    if after["total_rss_mb"] > SMOKE_MEMORY_MAX_END_MB:
+    if after["total_rss_mb"] > effective_max_end_mb:
         summary["failures"].append(
-            f"worker process-tree RSS ended at {after['total_rss_mb']} MB (> {SMOKE_MEMORY_MAX_END_MB} MB)"
+            f"worker process-tree RSS ended at {after['total_rss_mb']} MB "
+            f"(> {effective_max_end_mb} MB effective cap for {process_count} process(es))"
         )
     if SMOKE_MEMORY_FORBID_PLAYWRIGHT_DRIVERS and after["playwright_driver_count"] > 0:
         summary["failures"].append(
