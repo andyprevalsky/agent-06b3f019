@@ -686,7 +686,7 @@ async def _api_headers() -> dict:
 
 
 def _benchmark_agent_source_override() -> str:
-    source = (os.environ.get("BENCHMARK_AGENT_SOURCE") or "WEB").strip().upper()
+    source = (os.environ.get("BENCHMARK_AGENT_SOURCE") or "MAC_APP").strip().upper()
     if source not in {"WEB", "MAC_APP", "SMS"}:
         raise ValueError(
             "BENCHMARK_AGENT_SOURCE must be one of WEB, MAC_APP, or SMS; "

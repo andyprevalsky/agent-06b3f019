@@ -1,16 +1,25 @@
 /**
  * Renders a single attachment: image thumbnail (with loading placeholder) or
- * a downloadable non-image tile. The parent AttachmentDisplay handles signed
- * URL fetching and lightbox state.
+ * a downloadable non-image tile. Markdown attachments are auto-fetched by the
+ * parent and rendered inline with an explicit download control.
+ *
+ * STATE MACHINE:
+ *   image + url       -> [IMAGE THUMBNAIL]
+ *   image + pending   -> [IMAGE PLACEHOLDER]
+ *   markdown          -> [MD LOADING | MD READY | MD ERROR]
+ *   other             -> [DOWNLOAD TILE]
  */
 import { memo } from 'react';
 import { Download, ImageIcon } from 'lucide-react';
 import type { FilePointer } from '../../hooks';
-import { getFileIcon, formatFileSize } from './attachmentUtils';
+import { getFileIcon, formatFileSize, isMarkdownFile } from './attachmentUtils';
+import { MarkdownAttachmentCard } from './MarkdownAttachmentCard';
+import type { MarkdownAttachmentPreview } from './useMarkdownAttachments';
 
 interface AttachmentItemProps {
   fp: FilePointer;
   imageSrc: string;
+  markdownPreview?: MarkdownAttachmentPreview;
   onOpenLightbox: (fp: FilePointer) => void;
   onDownload: (fp: FilePointer) => void;
 }
@@ -18,6 +27,7 @@ interface AttachmentItemProps {
 export const AttachmentItem = memo(function AttachmentItem({
   fp,
   imageSrc,
+  markdownPreview,
   onOpenLightbox,
   onDownload,
 }: AttachmentItemProps) {
@@ -54,6 +64,10 @@ export const AttachmentItem = memo(function AttachmentItem({
         </span>
       </div>
     );
+  }
+
+  if (isMarkdownFile(fp)) {
+    return <MarkdownAttachmentCard fp={fp} preview={markdownPreview} onDownload={onDownload} />;
   }
 
   return (

@@ -18,7 +18,7 @@
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": null,
-    "start_phase": "plan",
+    "start_phase": null,
     "min_agent_count": 50,
     "bench": "rose-bench"
   },

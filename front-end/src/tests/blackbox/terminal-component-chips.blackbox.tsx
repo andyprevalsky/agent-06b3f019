@@ -581,6 +581,34 @@ describe('SubAgentTree', () => {
     expect(screen.getByText(/intermediary agent/)).toBeInTheDocument();
   });
 
+  it('caps active leaf previews in collapsed depth>=2 trees', async () => {
+    const user = userEvent.setup();
+    treeRef.current.set('root', makeNode({ agentId: 'root', goal: 'root goal' }));
+    for (let i = 0; i < 4; i++) {
+      treeRef.current.set(
+        `leaf-${i}`,
+        makeNode({
+          agentId: `leaf-${i}`,
+          parentAgentId: 'root',
+          goal: `active repeated prompt ${i}`,
+          messageCount: 1,
+        }),
+      );
+    }
+
+    renderWithProviders(
+      <SubAgentTree busId="bus-1" subAgentIds={['root']} title="t" onNavigate={vi.fn()} />,
+    );
+
+    await user.click(screen.getByText(/Collapse intermediary agents/));
+
+    expect(screen.getByText('active repeated prompt 0')).toBeInTheDocument();
+    expect(screen.getByText('thinking...')).toBeInTheDocument();
+    expect(screen.queryByText('active repeated prompt 1')).toBeNull();
+    expect(screen.queryByText('active repeated prompt 2')).toBeNull();
+    expect(screen.queryByText('active repeated prompt 3')).toBeNull();
+  });
+
   it('shows finished-summary line when multiple terminal leaves present in collapsed view', async () => {
     const user = userEvent.setup();
     // Root with many terminal leaves (depth=2 triggers collapse; > 1 terminal triggers summary)

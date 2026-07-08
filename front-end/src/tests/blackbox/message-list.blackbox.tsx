@@ -180,6 +180,65 @@ describe('MessageList', () => {
     expect(screen.queryByText('Searching web')).not.toBeInTheDocument();
   });
 
+  it('keeps the browser failure chip visible after credential classification messages arrive', async () => {
+    const baseTime = Date.now();
+    const ctx = makeAgentCtx({
+      messages: [
+        msg('browser-ready', {
+          role: 'TOOL',
+          text: '',
+          timestamp: new Date(baseTime).toISOString(),
+          metadata: {
+            task_id: 'browser-task-1',
+            toolCallId: 'browser-call-1',
+            toolName: 'spawn_browser_agent',
+            title: 'Browser Ready',
+            toolStatus: 'IN_PROGRESS',
+            action_type: 'browser',
+            browser_url: 'https://debug.steel.dev/session/browser-task-1',
+          },
+        }),
+        msg('browser-failed', {
+          role: 'TOOL',
+          text:
+            '**Status**: ❌ FAILED\n\n' +
+            "**Outcome**: [Errno 13] Permission denied: '/.context'\n\n" +
+            '**Error**: Failed during: initialization',
+          timestamp: new Date(baseTime + 1000).toISOString(),
+          metadata: {
+            task_id: 'browser-task-1',
+            toolCallId: 'browser-call-1',
+            toolName: 'spawn_browser_agent',
+            title: 'Task Failed',
+            toolStatus: 'ERROR',
+            action_type: 'task_complete',
+          },
+        }),
+        msg('credential-classified', {
+          role: 'TOOL',
+          text:
+            'Browser run failed.\n\n' +
+            'Failure reason: unknown\n\n' +
+            "Raw error: FAILED **Outcome**: [Errno 13] Permission denied: '/.context'",
+          timestamp: new Date(baseTime + 2000).toISOString(),
+          metadata: {
+            toolCallId: 'credential-failure-classifier:agent-1',
+            toolName: 'credential_failure_classifier',
+            title: 'Browser Failure Classified',
+            toolStatus: 'FINISHED',
+            action_type: 'credential_failure_classification',
+          },
+        }),
+      ],
+    });
+
+    renderList(ctx);
+
+    await waitFor(() => expect(screen.getByTestId('browser-agent-chip')).toBeInTheDocument());
+    expect(screen.getByText('Browser Agent')).toBeInTheDocument();
+    expect(screen.getByText('Browser Failure Classified')).toBeInTheDocument();
+  });
+
   it('hides cancelled DAG reasoning rows', async () => {
     const ctx = makeAgentCtx({
       messages: [
