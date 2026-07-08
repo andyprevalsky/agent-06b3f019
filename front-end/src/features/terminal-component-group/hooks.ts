@@ -65,6 +65,7 @@ export {
   fetchTestPaymentPublicUrl,
   submitFeedback,
   downloadAttachmentAsBlob,
+  downloadAttachmentAsText,
 } from './api';
 
 // ── API types (used by components alongside the functions above) ──────────
