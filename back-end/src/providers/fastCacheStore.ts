@@ -3,6 +3,7 @@ import { prisma } from './database';
 import { shouldWriteFastModeCacheForUser } from './fastCacheAccountPolicy';
 import { type CacheKind } from './fastCacheNormalizeConstants';
 import { stripSecrets } from './fastCacheNormalizeCore';
+import { withSpan } from './tracing';
 
 const globalForFastCachePrisma = global as unknown as {
   fastCacheMemory?: Map<string, FastCacheMemoryEntry>;
@@ -101,7 +102,7 @@ function getFastCacheDatabaseUrl(): string {
   try {
     const url = new URL(base);
     if (!url.searchParams.has('connection_limit')) {
-      url.searchParams.set('connection_limit', process.env.FAST_CACHE_DB_POOL ?? '25');
+      url.searchParams.set('connection_limit', process.env.FAST_CACHE_DB_POOL ?? '75');
     }
     if (!url.searchParams.has('pool_timeout')) {
       url.searchParams.set('pool_timeout', '20');
@@ -161,35 +162,56 @@ export async function cacheGetMany(keys: string[]): Promise<Record<string, Cache
   const uniqueKeys = [...new Set(keys)];
   if (uniqueKeys.length === 0) return {};
 
-  const result: Record<string, CacheGetResult> = {};
-  const missedKeys: string[] = [];
-  for (const key of uniqueKeys) {
-    const cached = readMemoryCache(key);
-    if (cached) {
-      result[key] = cached;
-    } else {
-      missedKeys.push(key);
+  const { result, missedKeys } = await withSpan(
+    'fast_cache.memory_lookup',
+    { key_count: uniqueKeys.length },
+    async () => {
+      const result: Record<string, CacheGetResult> = {};
+      const missedKeys: string[] = [];
+      for (const key of uniqueKeys) {
+        const cached = readMemoryCache(key);
+        if (cached) {
+          result[key] = cached;
+        } else {
+          missedKeys.push(key);
+        }
+      }
+      return { result, missedKeys };
     }
-  }
+  );
 
   if (missedKeys.length === 0) return result;
 
-  const rows = await fastCachePrisma.fastModeCacheEntry.findMany({
-    where: { key: { in: missedKeys } },
-    select: { key: true, value: true, blobPath: true, goalHash: true },
+  const dbSpanMeta: Record<string, unknown> = {
+    missed_key_count: missedKeys.length,
+    row_count: 0,
+  };
+  const rows = await withSpan('fast_cache.prisma_find_many', dbSpanMeta, async () => {
+    const rows = await fastCachePrisma.fastModeCacheEntry.findMany({
+      where: { key: { in: missedKeys } },
+      select: { key: true, value: true, blobPath: true, goalHash: true },
+    });
+    dbSpanMeta.row_count = rows.length;
+    return rows;
   });
 
-  const byKey = new Map(rows.map((row) => [row.key, row]));
-  for (const key of missedKeys) {
-    const row = byKey.get(key);
-    if (row === undefined) {
-      result[key] = { hit: false, value: null, blobPath: null };
-    } else {
-      const hit = { hit: true, value: row.value, blobPath: row.blobPath };
-      result[key] = hit;
-      writeMemoryCache(key, row.goalHash, hit);
+  await withSpan(
+    'fast_cache.result_build',
+    { missed_key_count: missedKeys.length, row_count: rows.length },
+    async () => {
+      const byKey = new Map(rows.map((row) => [row.key, row]));
+      for (const key of missedKeys) {
+        const row = byKey.get(key);
+        if (row === undefined) {
+          result[key] = { hit: false, value: null, blobPath: null };
+        } else {
+          const hit = { hit: true, value: row.value, blobPath: row.blobPath };
+          result[key] = hit;
+          writeMemoryCache(key, row.goalHash, hit);
+        }
+      }
     }
-  }
+  );
   return result;
 }
 

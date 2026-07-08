@@ -29,7 +29,7 @@ from domains.spawn_agent.repo import (
     save_explore_message,
 )
 from domains.spawn_agent.types import VALID_AGENT_TYPES
-from helpers.tracing import traced
+from helpers.tracing import span, traced
 from tools.base import MessageStatus
 from utils.prompts import EXPLORE_AGENT_SYSTEM_PROMPT
 from utils.tool_schemas import EXPLORE_AGENT_TOOLS
@@ -331,7 +331,13 @@ async def spawn_explore_agent_activity(  # noqa: C901
         pending = list(_pending_fe_posts)
         _pending_fe_posts.clear()
         if pending:
-            results = await asyncio.gather(*pending, return_exceptions=True)
+            async with span(
+                "explore_fe_posts.drain",
+                agent_id=agent_id,
+                task_id=task_id,
+                pending_count=len(pending),
+            ):
+                results = await asyncio.gather(*pending, return_exceptions=True)
             for result in results:
                 if isinstance(result, BaseException):
                     logger.warning("Explore FE post failed during drain", error=str(result))
@@ -434,17 +440,25 @@ async def spawn_explore_agent_activity(  # noqa: C901
 
     async def explore_post_message(message: str, role: str, metadata: Optional[Dict] = None):
         """Post messages from the explore agent to DB."""
-        _pending_fe_posts.append(
-            asyncio.create_task(
-                save_explore_message(
-                    agent_id=agent_id,
-                    title="Explore agent thinking",
-                    message=message[:EXPLORE_MESSAGE_TRUNCATE_LEN],
-                    status=MessageStatus.FINISHED,
-                    task_id=task_id,
+        async with span(
+            "explore_fe_posts.enqueue",
+            agent_id=agent_id,
+            task_id=task_id,
+            role=role,
+            message_len=len(message or ""),
+            pending_count=len(_pending_fe_posts),
+        ):
+            _pending_fe_posts.append(
+                asyncio.create_task(
+                    save_explore_message(
+                        agent_id=agent_id,
+                        title="Explore agent thinking",
+                        message=message[:EXPLORE_MESSAGE_TRUNCATE_LEN],
+                        status=MessageStatus.FINISHED,
+                        task_id=task_id,
+                    )
                 )
             )
-        )
         await _maybe_drain_pending_fe_posts()
 
     # Build initial context with goal + any resolved attachment content.
