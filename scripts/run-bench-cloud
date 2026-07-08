@@ -670,12 +670,17 @@ if [ -z "$mid" ]; then
 fi
 write_state "$mid"
 
-# ── Local dashboard proxy handle (started once the run is in flight) ─────────
+# ── Local dashboard handles (started once the run is in flight) ──────────────
 PROXY_PID=""
+DASHBOARD_PID=""
+DASHBOARD_MIRROR_PID=""
 stop_proxy() {
-    [ -n "$PROXY_PID" ] || return 0
-    kill "$PROXY_PID" 2>/dev/null || true
+    [ -n "$PROXY_PID" ] && kill "$PROXY_PID" 2>/dev/null || true
+    [ -n "$DASHBOARD_PID" ] && kill "$DASHBOARD_PID" 2>/dev/null || true
+    [ -n "$DASHBOARD_MIRROR_PID" ] && kill "$DASHBOARD_MIRROR_PID" 2>/dev/null || true
     PROXY_PID=""
+    DASHBOARD_PID=""
+    DASHBOARD_MIRROR_PID=""
 }
 
 start_local_archive_frontend() {
@@ -685,9 +690,9 @@ start_local_archive_frontend() {
 
     cp -f "$ROOT_DIR/agents/benchmarks/dashboard.html" "$ROOT_DIR/.context/dashboard.html" 2>/dev/null || true
 
-    # The live Fly proxy owns LOCAL_DASH_PORT during the run. Once results are
-    # local, shut the proxy down and open the real frontend against an archive
-    # API shim instead of leaving dead links to the stopped benchmark stack.
+    # The live dashboard mirror owns LOCAL_DASH_PORT during the run. Once results
+    # are local, shut it down and open the real frontend against an archive API
+    # shim instead of leaving dead links to the stopped benchmark stack.
     stop_proxy
 
     local ports archive_api_port archive_fe_port
@@ -839,6 +844,7 @@ if [ ! -f "$ROOT_DIR/$REMOTE_RUN_SCRIPT" ]; then
     exit 1
 fi
 RUN_SCRIPT_B64="$(base64 < "$ROOT_DIR/$REMOTE_RUN_SCRIPT" | tr -d '\n')"
+LOCAL_PATCH_B64="$(git -C "$ROOT_DIR" diff --binary | base64 | tr -d '\n')"
 
 # The wrapper (written to $REMOTE_TMP_SCRIPT) decodes the driver, exports the
 # per-run env, and execs it. run-bench-cloud then launches THIS wrapper detached.
@@ -852,6 +858,7 @@ export BENCH_MAX_CONCURRENCY=$(printf '%q' "$BENCH_MAX_CONCURRENCY")
 export BENCH_SIMULATE=$(printf '%q' "$BENCH_SIMULATE")
 export BENCH_DASHPORT=$(printf '%q' "$REMOTE_DASH_PORT")
 export CONDUCTOR_WORKSPACE_NAME=$(printf '%q' "$RUN_WORKSPACE_NAME")
+export LOCAL_PATCH_B64=$(printf '%q' "$LOCAL_PATCH_B64")
 exec bash /data/cloudbench-run.sh"
 REMOTE_WRAPPER_B64="$(printf '%s' "$REMOTE_WRAPPER" | base64 | tr -d '\n')"
 
@@ -885,18 +892,41 @@ for _ in 1 2 3 4 5; do
 done
 if [ "$_ok" = 1 ]; then echo "✅ On-box driver launched + confirmed running."; else echo "   ⚠️ driver-running check inconclusive; polling anyway."; fi
 
-# ── 3. Proxy the live dashboard to the Mac + open it in Chrome ──────────────
-# The on-box driver serves $CONTEXT_DIR (dashboard.html + report-card.json) on
-# $REMOTE_DASH_PORT. `flyctl proxy` forwards a local port to it; then open Chrome.
+# ── 3. Mirror the live dashboard to the Mac + open it in Chrome ─────────────
+# The on-box driver writes $CONTEXT_DIR/report-card.json. We mirror that JSON to
+# a local static dashboard instead of using `flyctl proxy`; proxy can connect to
+# the wrong internal address or reset while the machine is healthy, which leaves
+# Chrome blank even though the remote report card is valid.
 if [ "$DASHBOARD" = "1" ]; then
     echo ""
-    echo "🖥️  Proxying live dashboard localhost:$LOCAL_DASH_PORT → machine :$REMOTE_DASH_PORT ..."
-    FLY proxy "$LOCAL_DASH_PORT:$REMOTE_DASH_PORT" -a "$APP" >/dev/null 2>&1 &
-    PROXY_PID=$!
+    echo "🖥️  Serving live dashboard mirror on localhost:$LOCAL_DASH_PORT ..."
+    DASH_DIR="$ROOT_DIR/.context/cloudbench-live"
+    rm -rf "$DASH_DIR"
+    mkdir -p "$DASH_DIR"
+    cp -f "$ROOT_DIR/agents/benchmarks/dashboard.html" "$DASH_DIR/dashboard.html" 2>/dev/null || true
+    cat > "$DASH_DIR/report-card.json" <<JSON
+{"run_id":"starting","elapsed_s":0,"world_model_mode":"$([ "$BENCH_SIMULATE" = "1" ] && echo simulate || echo real)","tasks":{"total":${#BENCH_TASKS[@]},"running":${#BENCH_TASKS[@]},"completed":0,"queued":0},"results":{"passed":0,"failed":0,"transient":0,"success_rate":0},"cost":{"agents_llm_usd":0,"wmh_grounding_usd":0,"total_usd":0,"fast_cache_hit_rate":null},"infra":null,"per_task":[]}
+JSON
+    python3 -m http.server "$LOCAL_DASH_PORT" --bind 127.0.0.1 --directory "$DASH_DIR" \
+        > "$DASH_DIR/server.log" 2>&1 &
+    DASHBOARD_PID=$!
+    (
+        while :; do
+            tmp="$(mktemp)"
+            if ssh_read "$mid" "cat '$REMOTE_REPO/.context/cloudbench/report-card.json' 2>/dev/null" > "$tmp" 2>/dev/null \
+                && python3 -m json.tool "$tmp" >/dev/null 2>&1; then
+                mv "$tmp" "$DASH_DIR/report-card.json"
+            else
+                rm -f "$tmp"
+            fi
+            sleep 5
+        done
+    ) &
+    DASHBOARD_MIRROR_PID=$!
     DASH_URL="http://localhost:$LOCAL_DASH_PORT/dashboard.html"
-    # Give the proxy + on-box server a moment, then open Chrome (macOS/best-effort).
+    # Give the local server a moment, then open Chrome (macOS/best-effort).
     for _ in $(seq 1 20); do
-        curl -fsS "http://localhost:$LOCAL_DASH_PORT/" >/dev/null 2>&1 && break
+        curl -fsS "$DASH_URL" >/dev/null 2>&1 && break
         sleep 1
     done
     if command -v open >/dev/null 2>&1; then

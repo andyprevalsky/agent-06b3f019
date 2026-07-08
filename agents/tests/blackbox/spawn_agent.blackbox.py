@@ -821,6 +821,43 @@ async def test_handler_blocks_recursive_general_purpose_for_explore_only_child()
     assert "explore-agent web research only" in events[0].message
 
 
+async def test_handler_allows_root_explicit_general_purpose_with_explore_research_children():
+    """Root benchmark contracts may require general-purpose agents whose child work is explore-only."""
+    from tools.base import EventType, MessageStatus, ToolEvent
+    import domains.spawn_agent.handler as h
+
+    fake_mgr = _FakeDelegateManager(
+        [ToolEvent(type=EventType.POST_MESSAGE, title="Sub done", message="ok", status=MessageStatus.FINISHED)]
+    )
+    original = h.get_sub_agent_manager
+    h.get_sub_agent_manager = lambda: fake_mgr
+    try:
+        events = await _collect(
+            h.SpawnAgentManager().execute_tool(
+                workflow_instance=_FakeWFInstance(
+                    goal=(
+                        "Find the current population of Tokyo and New York City. "
+                        "You MUST use spawn_general_purpose_agent exactly twice - once per city."
+                    ),
+                ),
+                tool_call={
+                    "type": "general_purpose",
+                    "goal": (
+                        "Find current Tokyo population using only explore-agent web research. "
+                        "MUST NOT use browser agent, Claude Code, or code sandbox."
+                    ),
+                    "output_schema": {"fields": []},
+                },
+                tool_call_id="tc",
+            )
+        )
+    finally:
+        h.get_sub_agent_manager = original
+
+    assert any(e.status == MessageStatus.FINISHED for e in events)
+    assert fake_mgr.last_call["tool_call"]["sub_agent"]["goal"].startswith("Find current Tokyo population")
+
+
 async def test_handler_blocks_recursive_general_purpose_for_web_search_only_child():
     """Generated explore/web-search-only child prompts should also be protected."""
     from tools.base import MessageStatus
@@ -2000,6 +2037,10 @@ async def run_all_tests():
     await r.record_async(
         "handler_blocks_recursive_general_purpose_for_explore_only_child",
         test_handler_blocks_recursive_general_purpose_for_explore_only_child,
+    )
+    await r.record_async(
+        "handler_allows_root_explicit_general_purpose_with_explore_research_children",
+        test_handler_allows_root_explicit_general_purpose_with_explore_research_children,
     )
     await r.record_async(
         "handler_blocks_recursive_general_purpose_for_web_search_only_child",
