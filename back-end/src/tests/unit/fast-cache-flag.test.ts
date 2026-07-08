@@ -23,6 +23,7 @@ import {
   codeAgentTraceHash,
 } from '../../domains/fast-cache/codeAgentEnv';
 import { createAgentSchema } from '../../domains/agents/types';
+import { createSessionSchema as createCodexSessionSchema } from '../../domains/codex-code/types';
 import {
   applyFastModeDefault,
   applyFastModeInheritance,
@@ -185,6 +186,23 @@ test('#5 createAgentSchema accepts fast_mode_cache_enabled', () => {
   assert.strictEqual(off.fast_mode_cache_enabled, false);
   const absent = createAgentSchema.parse({ goal: 'x' });
   assert.strictEqual(absent.fast_mode_cache_enabled, undefined); // route/service applies defaults
+});
+
+test('Codex Code createSessionSchema accepts explicit Fast Mode flag', () => {
+  const on = createCodexSessionSchema.parse({
+    agent_id: '11111111-1111-4111-8111-111111111111',
+    goal: 'x',
+    user_id: '22222222-2222-4222-8222-222222222222',
+    fast_mode_cache_enabled: true,
+  });
+  assert.strictEqual(on.fast_mode_cache_enabled, true);
+
+  const absent = createCodexSessionSchema.parse({
+    agent_id: '11111111-1111-4111-8111-111111111111',
+    goal: 'x',
+    user_id: '22222222-2222-4222-8222-222222222222',
+  });
+  assert.strictEqual(absent.fast_mode_cache_enabled, undefined);
 });
 
 test('createAgentSchema accepts SMS source for SMS-origin sub-agents', () => {
@@ -436,9 +454,19 @@ test('Codex Code session service forwards persisted Fast Mode flag to E2B provid
   const createSession = extractFunction(service, 'createSession');
   assert.ok(
     createSession.includes(
-      'const fastModeCacheEnabled = await repo.findAgentFastModeCache(agent_id)'
+      'const persistedFastModeCacheEnabled = await repo.findAgentFastModeCache(agent_id)'
     ),
     'Codex Code createSession must read the persisted agent Fast Mode flag'
+  );
+  assert.ok(
+    createSession.includes(
+      'const fastModeCacheEnabled = params.fast_mode_cache_enabled ?? persistedFastModeCacheEnabled'
+    ),
+    'Codex Code createSession must prefer the explicit request flag when present'
+  );
+  assert.ok(
+    createSession.includes('Codex Code session Fast Mode flag mismatch'),
+    'Codex Code createSession must log explicit-vs-persisted Fast Mode mismatches'
   );
   assert.ok(
     /createCodexCodeSession\([\s\S]*fastModeCacheEnabled[\s\S]*\)/.test(createSession),

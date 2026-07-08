@@ -186,16 +186,17 @@ codexProxyRouter.use(
     );
 
     const cacheable = isCacheableCodexRequest(req.method, pathAndQuery);
+    const cacheStatus = result.servedFromCache
+      ? result.cacheHitKind === 'terminal_fallback'
+        ? 'TERMINAL_FALLBACK'
+        : 'HIT_EXACT'
+      : !resolvedPath.readEnabled && cacheable
+        ? 'RECORD'
+        : cacheable
+          ? 'MISS'
+          : 'PASS';
     codexLog.info(
-      `Codex proxy ${
-        result.servedFromCache
-          ? 'HIT'
-          : !resolvedPath.readEnabled && cacheable
-            ? 'RECORD'
-            : cacheable
-              ? 'MISS'
-              : 'PASS'
-      }`,
+      `Codex proxy ${cacheStatus}`,
       {
         traceHash: trace.traceHash,
         sessionId: trace.sessionId,
@@ -204,6 +205,9 @@ codexProxyRouter.use(
         readEnabled: result.readEnabled,
         ordinal: result.ordinal,
         cacheKey: result.cacheKey,
+        cacheHitKind: result.cacheHitKind,
+        fallbackSourceOrdinal: result.fallbackSourceOrdinal,
+        fallbackSourceCacheKey: result.fallbackSourceCacheKey,
         wrote: result.wrote,
       }
     );

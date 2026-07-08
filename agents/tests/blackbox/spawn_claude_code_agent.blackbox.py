@@ -801,6 +801,7 @@ async def test_repo_create_e2b_session_codex_provider():
         goal="fix",
         user_id="u1",
         code_provider="codex",
+        fast_mode_cache_enabled=True,
     )
 
     assert data["task_id"] == "codex-task-123"
@@ -808,6 +809,7 @@ async def test_repo_create_e2b_session_codex_provider():
     body = json.loads(call["requestBody"])
     assert body["agent_id"] == "agent-1"
     assert body["user_id"] == "u1"
+    assert body["fast_mode_cache_enabled"] is True
 
 
 async def test_repo_create_e2b_session_raises_on_error():
@@ -1611,8 +1613,10 @@ async def test_spawn_activity_happy_path_end_to_end():
     fake_collector = AsyncMock()
     fake_collector.start = AsyncMock()
     fake_collector.stop = AsyncMock()
+    seen_create_session = {}
 
     async def fake_create_session(**kwargs):
+        seen_create_session.update(kwargs)
         return {
             "task_id": "task-x",
             "sandbox_id": "sb",
@@ -1670,6 +1674,7 @@ async def test_spawn_activity_happy_path_end_to_end():
             attachments=[{"id": "att-1"}],
             model="rose-labs/rose-1-lite",
             github_repo_url="https://github.com/o/r",
+            fast_mode_cache_enabled=True,
         )
     assert result["status"] == "completed"
     assert result["success"] is True
@@ -1679,6 +1684,7 @@ async def test_spawn_activity_happy_path_end_to_end():
     assert any(u["type"] == "llm" for u in result["usage_items"])
     assert any(u["type"] == "service" for u in result["usage_items"])
     assert result["output_files"] == [{"id": "f1", "path": "/home/user/output/a.txt"}]
+    assert seen_create_session["fast_mode_cache_enabled"] is True
     fake_collector.start.assert_awaited()
     fake_collector.stop.assert_awaited()
 

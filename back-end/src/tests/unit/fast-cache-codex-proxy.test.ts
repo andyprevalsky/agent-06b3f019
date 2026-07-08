@@ -93,6 +93,8 @@ async function main(): Promise<void> {
     assert.strictEqual(r.cacheable, true);
     assert.strictEqual(r.readEnabled, true);
     assert.strictEqual(r.ordinal, 0);
+    assert.strictEqual(r.cacheHitKind, null);
+    assert.strictEqual(r.fallbackSourceOrdinal, null);
     assert.strictEqual(r.cacheKey, codeAgentSlotKey('codex', 'ghash', 0));
     assert.strictEqual(h.store.size, 1);
     assert.match(r.body, /response\.output_text\.delta/);
@@ -161,6 +163,8 @@ async function main(): Promise<void> {
     assert.strictEqual(r.readEnabled, true);
     assert.strictEqual(r.ordinal, 0);
     assert.strictEqual(r.cacheKey, codeAgentSlotKey('codex', 'ghash', 0));
+    assert.strictEqual(r.cacheHitKind, 'exact_slot');
+    assert.strictEqual(r.fallbackSourceOrdinal, null);
     assert.strictEqual(upstream, 0);
     assert.match(r.body, /"cached":true/);
   });
@@ -296,6 +300,12 @@ async function main(): Promise<void> {
     );
 
     assert.strictEqual(extra.servedFromCache, true);
+    assert.strictEqual(extra.cacheHitKind, 'terminal_fallback');
+    assert.strictEqual(extra.fallbackSourceOrdinal, 1);
+    assert.strictEqual(
+      extra.fallbackSourceCacheKey,
+      codeAgentSlotKey('codex', 'terminal-extra', 1)
+    );
     assert.strictEqual(extra.wrote, false);
     assert.match(extra.body, /done from terminal slot/);
     assert.strictEqual(h.stats.upstream, 0);
