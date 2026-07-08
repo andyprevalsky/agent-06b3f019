@@ -858,13 +858,7 @@ echo "✅ Machine started + ssh-ready ($mid)"
 # Warm machines can retain a detached driver from an interrupted local
 # controller. Clear it before touching the shared /data/repo checkout.
 echo "🧹 Clearing stale on-box benchmark driver..."
-ssh_read "$mid" "
-    pkill -TERM -f '/data/[c]loudbench-run.sh|[g]it -C $REMOTE_REPO fetch|[i]ndex-pack.*fetch-pack' 2>/dev/null || true
-    sleep 2
-    pkill -KILL -f '/data/[c]loudbench-run.sh|[g]it -C $REMOTE_REPO fetch|[i]ndex-pack.*fetch-pack' 2>/dev/null || true
-    rm -f '$REMOTE_REPO/.context/cloudbench/report-card.json' '$REMOTE_REPO/.context/cloudbench/run.json' 2>/dev/null || true
-    git config --global --add safe.directory '$REMOTE_REPO' 2>/dev/null || true
-" >/dev/null 2>&1 || true
+ssh_read "$mid" "pkill -TERM -f '/data/[c]loudbench-run.sh|[g]it -C $REMOTE_REPO fetch|[i]ndex-pack.*fetch-pack' 2>/dev/null || true; sleep 2; pkill -KILL -f '/data/[c]loudbench-run.sh|[g]it -C $REMOTE_REPO fetch|[i]ndex-pack.*fetch-pack' 2>/dev/null || true; rm -f '$REMOTE_REPO/.context/cloudbench/report-card.json' '$REMOTE_REPO/.context/cloudbench/run.json' 2>/dev/null || true; git config --global --add safe.directory '$REMOTE_REPO' 2>/dev/null || true" >/dev/null 2>&1 || true
 
 # ── 2. Deliver + launch the on-box driver DETACHED ──────────────────────────
 # base64 the LOCAL cloudbench-run.sh + a small invocation wrapper, write both to
