@@ -263,10 +263,10 @@ describe('MessageBubble', () => {
     await waitFor(() => expect(screen.getByText('Foo failed')).toBeInTheDocument());
   });
 
-  it('renders thought TOOL IN_PROGRESS as "Thinking" shimmer', async () => {
+  it('renders thought TOOL IN_PROGRESS as collapsed "Thinking" shimmer', async () => {
     const msg = baseMessage({
       role: 'TOOL',
-      text: '',
+      text: 'internal synthesis prompt should stay hidden',
       metadata: {
         toolCallId: 'tc-4',
         toolName: 'thought',
@@ -276,6 +276,9 @@ describe('MessageBubble', () => {
     });
     renderBubble(<MessageBubble message={msg} />);
     await waitFor(() => expect(screen.getByText('Thinking')).toBeInTheDocument());
+    expect(
+      screen.queryByText('internal synthesis prompt should stay hidden'),
+    ).not.toBeInTheDocument();
   });
 
   it('renders attention message (isUserAttentionMessage) with waiting indicator', async () => {

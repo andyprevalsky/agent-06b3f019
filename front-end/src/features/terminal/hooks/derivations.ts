@@ -33,10 +33,23 @@ export function getContextPercentage(agent: AgentDetail, models: Model[]): numbe
 
 // ── Message deduplication ─────────────────────────────────────────────────
 
+function getMessageOrderTimestamp(message: Message): number {
+  const metadata = message.metadata;
+  const firstTimestamp =
+    typeof metadata?.firstTimestamp === 'string'
+      ? metadata.firstTimestamp
+      : typeof metadata?.startedAt === 'string' && metadata?.plannedToolName === 'reasoning'
+        ? metadata.startedAt
+        : message.timestamp;
+  const orderedMs = new Date(firstTimestamp).getTime();
+  if (Number.isFinite(orderedMs)) return orderedMs;
+  return new Date(message.timestamp).getTime();
+}
+
 export function deduplicateToolMessages(messages: Message[]): Message[] {
   const sortedMessages = messages
     .filter((m) => m.role !== 'TOOL' || m.metadata?.toolName !== 'agent_init')
-    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    .sort((a, b) => getMessageOrderTimestamp(a) - getMessageOrderTimestamp(b));
 
   const toolMessageMap = new Map<string, { message: Message; firstTimestamp: string }>();
   const nonToolMessages: Message[] = [];
@@ -78,9 +91,7 @@ export function deduplicateToolMessages(messages: Message[]): Message[] {
   );
 
   const deduplicatedMessages = [...nonToolMessages, ...deduplicatedToolMessages];
-  deduplicatedMessages.sort(
-    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
-  );
+  deduplicatedMessages.sort((a, b) => getMessageOrderTimestamp(a) - getMessageOrderTimestamp(b));
 
   return deduplicatedMessages;
 }
@@ -103,6 +114,17 @@ export function sortAgents(agents: Agent[]): Agent[] {
 
 const TERMINAL_BROWSER_ACTION_TYPES = new Set(['task_complete', 'session_paused']);
 const TERMINAL_BROWSER_TOOL_STATUSES = new Set(['FINISHED', 'ERROR']);
+const BROWSER_INIT_ACTION_TYPES = new Set(['browser', 'system', 'session_started']);
+
+function isBrowserInitMessage(message: Message): boolean {
+  const actionType = message.metadata?.action_type;
+  return (
+    message.metadata?.toolName === 'spawn_browser_agent' &&
+    typeof actionType === 'string' &&
+    BROWSER_INIT_ACTION_TYPES.has(actionType) &&
+    typeof message.metadata?.browser_url === 'string'
+  );
+}
 
 function isBrowserTaskTerminalMessage(message: Message): boolean {
   const actionType = message.metadata?.action_type;
@@ -112,6 +134,7 @@ function isBrowserTaskTerminalMessage(message: Message): boolean {
 
   return (
     message.metadata?.toolName === 'spawn_browser_agent' &&
+    message.metadata?.subAgentId == null &&
     typeof message.metadata?.toolStatus === 'string' &&
     TERMINAL_BROWSER_TOOL_STATUSES.has(message.metadata.toolStatus)
   );
@@ -120,7 +143,7 @@ function isBrowserTaskTerminalMessage(message: Message): boolean {
 /**
  * Browser status chip lifecycle:
  *
- * spawn_browser_agent init/browser/system
+ * spawn_browser_agent init/browser/system/session_started
  *   -> [VISIBLE_STATUS_CHIP]
  *   -> task-scoped browser progress messages
  *   -> terminal message:
@@ -150,9 +173,7 @@ export function computeActiveBrowserPanels(messages: Message[]): BrowserPanelDat
 
   browserTaskIds.forEach((taskId) => {
     const taskMessages = messages.filter((m) => m.metadata?.task_id === taskId);
-    const initMessage = taskMessages.find(
-      (m) => m.metadata?.action_type === 'browser' || m.metadata?.action_type === 'system',
-    );
+    const initMessage = taskMessages.find(isBrowserInitMessage);
     const initToolCallId = initMessage?.metadata?.toolCallId;
 
     const hasTerminalTaskMessage = taskMessages.some(isBrowserTaskTerminalMessage);

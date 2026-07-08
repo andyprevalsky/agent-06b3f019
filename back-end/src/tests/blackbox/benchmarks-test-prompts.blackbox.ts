@@ -204,8 +204,8 @@ async function testPrompts_devDefaultPresent() {
   const res = await request(`${BASE_URL}/api/benchmarks/test-prompts`);
   if (res.status !== 200) return;
   const body = res.data as { prompts: TestPrompt[] };
-  if (!body.prompts.some((p) => p.title === 'Family Office & Angel Outreach')) {
-    throw new Error('Dev default prompt "Family Office & Angel Outreach" missing from catalog');
+  if (!body.prompts.some((p) => p.title === 'Test Mass Agent Run - 0')) {
+    throw new Error('Dev default prompt "Test Mass Agent Run - 0" missing from catalog');
   }
 }
 

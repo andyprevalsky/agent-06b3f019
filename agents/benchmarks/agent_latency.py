@@ -1978,6 +1978,187 @@ def _build_trace_from_events(
     return roots, t0, t1, stats
 
 
+# ── Agent wall-clock rollup ───────────────────────────────────────────────────
+
+_TERMINAL_AGENT_STATUSES = {
+    "COMPLETED",
+    "FAILED",
+    "CANCELLED",
+    "CANCELED",
+    "ERROR",
+    "TIMEOUT",
+    "COST_LIMIT_REACHED",
+}
+
+
+def _fetch_agent_tree_for_wall_clocks(base_url: str, seed_agent_id: str) -> List[dict]:
+    """Fetch tree agents with timestamps. Falls back to per-agent detail if needed."""
+    import urllib.parse
+    import urllib.request
+    from concurrent.futures import ThreadPoolExecutor
+
+    headers = {"X-API-Key": API_KEY, "X-User-Id": USER_ID}
+
+    def fetch_detail(agent_id: str) -> Optional[dict]:
+        req = urllib.request.Request(f"{base_url}/api/agents/{agent_id}", headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.load(resp)
+        except Exception:
+            return None
+        agent = data.get("agent") or data
+        return {
+            "agent_id": agent.get("agent_id") or agent.get("id") or agent_id,
+            "parent_agent_id": agent.get("parent_agent_id") or agent.get("parentAgentId"),
+            "goal": agent.get("goal") or "",
+            "status": agent.get("status") or "",
+            "created_at": agent.get("created_at") or agent.get("createdAt"),
+            "updated_at": agent.get("updated_at") or agent.get("updatedAt"),
+        }
+
+    agents: List[dict] = []
+    try:
+        query = urllib.parse.urlencode({"busId": seed_agent_id})
+        req = urllib.request.Request(f"{base_url}/api/agents/tree?{query}", headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            agents = list(json.load(resp).get("agents", []))
+    except Exception:
+        detail = fetch_detail(seed_agent_id)
+        return [detail] if detail else []
+
+    ids = [str(a.get("agent_id")) for a in agents if a.get("agent_id")]
+    if seed_agent_id not in ids:
+        ids.insert(0, seed_agent_id)
+
+    missing_timestamp_ids = [
+        aid
+        for aid in ids
+        if not any(
+            a.get("agent_id") == aid and a.get("created_at") and a.get("updated_at")
+            for a in agents
+        )
+    ]
+    if missing_timestamp_ids:
+        details_by_id: Dict[str, dict] = {}
+        with ThreadPoolExecutor(max_workers=12) as ex:
+            for detail in ex.map(fetch_detail, missing_timestamp_ids):
+                if detail and detail.get("agent_id"):
+                    details_by_id[str(detail["agent_id"])] = detail
+        merged: Dict[str, dict] = {str(a.get("agent_id")): dict(a) for a in agents if a.get("agent_id")}
+        merged.update(details_by_id)
+        agents = list(merged.values())
+
+    return agents
+
+
+def _agent_wall_clock_rows(base_url: str, seed_agent_id: str) -> List[dict]:
+    now = datetime.now(timezone.utc)
+    rows: List[dict] = []
+    for agent in _fetch_agent_tree_for_wall_clocks(base_url, seed_agent_id):
+        aid = agent.get("agent_id")
+        created_raw = agent.get("created_at") or agent.get("createdAt")
+        updated_raw = agent.get("updated_at") or agent.get("updatedAt")
+        if not aid or not created_raw:
+            continue
+        try:
+            start = parse_ts(str(created_raw))
+        except Exception:
+            continue
+        status = str(agent.get("status") or "")
+        if status.upper() in _TERMINAL_AGENT_STATUSES and updated_raw:
+            try:
+                end = parse_ts(str(updated_raw))
+            except Exception:
+                end = now
+        else:
+            end = now
+        if end < start:
+            end = start
+        rows.append({
+            "agent_id": str(aid),
+            "parent_agent_id": agent.get("parent_agent_id"),
+            "goal": agent.get("goal") or "",
+            "status": status,
+            "created_at": start.isoformat(),
+            "updated_at": end.isoformat(),
+            "wall_s": (end - start).total_seconds(),
+            "is_main": str(aid) == seed_agent_id or not agent.get("parent_agent_id"),
+        })
+    return rows
+
+
+def _render_agent_wall_clocks(
+    base_url: str,
+    seed_agent_id: str,
+    color: bool,
+    json_out: Optional[str] = None,
+) -> str:
+    rows = _agent_wall_clock_rows(base_url, seed_agent_id)
+    if not rows:
+        return _c(f"  [wall-clock] skipped ({base_url}): no agent timestamp data", YELLOW, color)
+
+    rows.sort(key=lambda r: r["wall_s"], reverse=True)
+    walls = sorted(r["wall_s"] for r in rows)
+
+    def pct(p: float) -> float:
+        if not walls:
+            return 0.0
+        idx = min(len(walls) - 1, int((len(walls) - 1) * p))
+        return walls[idx]
+
+    starts = [parse_ts(r["created_at"]) for r in rows]
+    ends = [parse_ts(r["updated_at"]) for r in rows]
+    tree_elapsed_s = (max(ends) - min(starts)).total_seconds()
+    sum_wall_s = sum(walls)
+    main = next((r for r in rows if r["agent_id"] == seed_agent_id), None)
+    if main is None:
+        main = next((r for r in rows if r["is_main"]), rows[0])
+    status_counts = Counter(str(r["status"] or "UNKNOWN") for r in rows)
+
+    payload = {
+        "agent_id": seed_agent_id,
+        "base_url": base_url,
+        "agent_count": len(rows),
+        "tree_elapsed_s": tree_elapsed_s,
+        "sum_agent_wall_s": sum_wall_s,
+        "main_agent_wall_s": main["wall_s"],
+        "status_counts": dict(status_counts),
+        "p50_s": pct(0.50),
+        "p90_s": pct(0.90),
+        "p95_s": pct(0.95),
+        "p99_s": pct(0.99),
+        "max_s": walls[-1],
+        "agents": rows,
+    }
+    if json_out:
+        out_dir = os.path.dirname(json_out)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        with open(json_out, "w") as f:
+            json.dump(payload, f, indent=2)
+
+    lines = [
+        _c("AGENT WALL CLOCKS", BOLD, color),
+        _c("═" * 100, BOLD, color),
+        f"  Unified sum       {sum_wall_s:.1f}s  ({sum_wall_s/60:.1f} agent-min, {sum_wall_s/3600:.2f} agent-hr)",
+        f"  Tree elapsed      {tree_elapsed_s:.1f}s",
+        f"  Main agent        {main['wall_s']:.1f}s  {main['agent_id'][:12]}  {main['status']}",
+        f"  Agents            {len(rows)} total · "
+        + ", ".join(f"{status}={count}" for status, count in status_counts.most_common()),
+        f"  Distribution      p50={pct(0.50):.1f}s p90={pct(0.90):.1f}s "
+        f"p95={pct(0.95):.1f}s p99={pct(0.99):.1f}s max={walls[-1]:.1f}s",
+    ]
+    if json_out:
+        lines.append(f"  JSON              {json_out}")
+    lines.append("  Slowest agents")
+    for r in rows[:10]:
+        lines.append(
+            f"    {r['wall_s']:7.1f}s  {r['agent_id'][:12]}  {r['status'] or 'UNKNOWN'}  "
+            f"{str(r['goal'])[:90]}"
+        )
+    return "\n".join(lines)
+
+
 # ── FE message cadence ────────────────────────────────────────────────────────
 # Message.createdAt is stamped when the backend inserts a message, which is also
 # when it auto-broadcasts the INSERT to Supabase Realtime — i.e. ≈ the moment the
@@ -2112,6 +2293,10 @@ def main() -> int:
     ap.add_argument("--no-color", action="store_true")
     ap.add_argument("--no-fe-cadence", action="store_true",
                     help="Skip the FE message-cadence analysis (per-agent Message.createdAt gaps).")
+    ap.add_argument("--no-wall-clock", action="store_true",
+                    help="Skip agent created_at→updated_at wall-clock rollup.")
+    ap.add_argument("--wall-clock-json", default=None,
+                    help="Write agent wall-clock rollup JSON to this path.")
     ap.add_argument("--fe-base-url", default=None,
                     help="Backend base URL for the FE-cadence fetch "
                          "(defaults to --url, else http://localhost:3001).")
@@ -2179,6 +2364,19 @@ def main() -> int:
         args.slow_threshold, color, span_baselines,
     )
     print(summary)
+
+    if not args.no_wall_clock:
+        wall_base = args.fe_base_url or args.url or "http://localhost:3001"
+        try:
+            print(_render_agent_wall_clocks(
+                wall_base,
+                args.agent_id,
+                color,
+                json_out=args.wall_clock_json,
+            ))
+            print("")
+        except Exception as exc:
+            print(_c(f"  [wall-clock] skipped ({wall_base}): {exc}", YELLOW, color))
 
     if not args.no_fe_cadence:
         fe_base = args.fe_base_url or args.url or "http://localhost:3001"

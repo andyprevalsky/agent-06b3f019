@@ -311,6 +311,16 @@ def _phone_approval_matches_callee(task: BenchmarkTask, req: dict) -> bool:
     return bool(expected_digits and expected_digits in haystack_digits)
 
 
+def _benchmark_context_path() -> Path:
+    raw = (os.environ.get("BENCHMARK_CONTEXT_DIR") or ".context").strip() or ".context"
+    if raw == "/.context" or raw.startswith("/.context/"):
+        raw = raw.lstrip("/")
+    path = Path(raw)
+    if path.is_absolute():
+        return path
+    return REPO_ROOT / path
+
+
 def _frontend_url_for_benchmark(base_url: str) -> str:
     explicit = os.environ.get("BENCHMARK_FRONTEND_URL", "").strip()
     if explicit:
@@ -321,8 +331,7 @@ def _frontend_url_for_benchmark(base_url: str) -> str:
     public_env = os.environ.get("PUBLIC_BASE_URL", "").strip()
     if public_env:
         return public_env.rstrip("/")
-    context_dir = os.environ.get("BENCHMARK_CONTEXT_DIR", ".context")
-    services_path = REPO_ROOT / context_dir / "services.json"
+    services_path = _benchmark_context_path() / "services.json"
     if services_path.exists():
         try:
             services = json.loads(services_path.read_text())
@@ -1301,6 +1310,76 @@ async def pause_agent(base_url: str, agent_id: str) -> bool:
         return resp.status_code in (200, 204)
 
 
+async def poll_agent_until_message_index(
+    base_url: str,
+    agent_id: str,
+    task: BenchmarkTask,
+    checkpoint_index: int,
+) -> dict:
+    """Poll until the root transcript contains checkpoint_index, then pause."""
+    resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
+    deadline = time.time() + resolved_timeout
+    required_count = checkpoint_index + 1
+    last_count = -1
+    while time.time() < deadline:
+        data = await get_agent(base_url, agent_id)
+        messages = data.get("messages", []) or []
+        status = (data.get("agent") or {}).get("status")
+        if len(messages) != last_count:
+            print(f"    checkpoint source progress: root_messages={len(messages)}/{required_count}")
+            last_count = len(messages)
+        if len(messages) >= required_count:
+            if not await pause_agent(base_url, agent_id):
+                raise RuntimeError(f"Failed to pause checkpoint source agent {agent_id}")
+            paused = await get_agent(base_url, agent_id)
+            print(f"    checkpoint source paused at root_messages={len(paused.get('messages', []) or [])}")
+            return paused
+        if status in TERMINAL_STATUSES:
+            raise RuntimeError(
+                f"Agent reached terminal status {status} before checkpoint index {checkpoint_index} "
+                f"(root_messages={len(messages)})"
+            )
+        await asyncio.sleep(POLL_INTERVAL)
+    raise TimeoutError(
+        f"Timed out waiting for checkpoint index {checkpoint_index} "
+        f"(last root_messages={last_count}, timeout={resolved_timeout}s)"
+    )
+
+
+def export_checkpoint_source_from_local_db(
+    agent_id: str,
+    *,
+    source_out: Path,
+    tree_out: Path | None,
+) -> None:
+    """Export a paused local source agent into the checkpoint clone format."""
+    command = [
+        "npx",
+        "tsx",
+        "scripts/export-agent-checkpoint.ts",
+        "--agent-id",
+        agent_id,
+        "--source-out",
+        str(source_out),
+    ]
+    if tree_out is not None:
+        command.extend(["--tree-out", str(tree_out)])
+    env = {**os.environ}
+    result = subprocess.run(
+        command,
+        cwd=REPO_ROOT / "back-end",
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+    if result.returncode != 0:
+        raise RuntimeError(f"Checkpoint export failed with exit {result.returncode}")
+
+
 async def post_attachment_message(base_url: str, agent_id: str, file_pointers: List[dict]) -> bool:
     """POST /api/agents/:id/messages with file attachments so the agent can see them."""
     headers = await _api_headers()
@@ -2106,8 +2185,7 @@ def _local_victoria_db_container() -> Optional[str]:
 
 def _local_victoria_database_url() -> Optional[str]:
     candidates: list[str] = []
-    context_dir = os.environ.get("BENCHMARK_CONTEXT_DIR", ".context")
-    services_path = REPO_ROOT / context_dir / "services.json"
+    services_path = _benchmark_context_path() / "services.json"
     if services_path.exists():
         try:
             services = json.loads(services_path.read_text())
@@ -4002,6 +4080,9 @@ async def run_single_task(
     base_url: str,
     task: BenchmarkTask,
     keep_failed_agents: bool = False,
+    checkpoint_source_index: int | None = None,
+    checkpoint_source_out: Path | None = None,
+    checkpoint_tree_out: Path | None = None,
 ) -> TaskResult:
     """Run a single benchmark task. Returns TaskResult."""
     if task.name in MINTED_AGENT_ACCOUNT_TASK_NAMES:
@@ -4191,6 +4272,29 @@ async def run_single_task(
             start_fixture_ref = await archive_agent_start(base_url, agent_id)
             if start_fixture_ref:
                 print(f"    🧊 Trace archive start fixture: {start_fixture_ref}")
+
+        if checkpoint_source_index is not None:
+            if checkpoint_source_out is None:
+                raise ValueError("checkpoint_source_out is required in checkpoint source mode")
+            data = await poll_agent_until_message_index(base_url, agent_id, task, checkpoint_source_index)
+            messages = data.get("messages", []) or []
+            export_checkpoint_source_from_local_db(
+                agent_id,
+                source_out=checkpoint_source_out,
+                tree_out=checkpoint_tree_out,
+            )
+            duration = time.time() - start
+            return TaskResult(
+                name=task.name,
+                passed=True,
+                agent_id=agent_id,
+                status=(data.get("agent") or {}).get("status", "PAUSED"),
+                progress_score=(data.get("agent") or {}).get("progress", 0),
+                duration_seconds=round(duration, 1),
+                cost_cents=0,
+                message_count=len(messages),
+                failure_reason=None,
+            )
 
         # Poll until done (or early-fail)
         data, approvals_triggered, approvals_resolved, early_fail_reason = await poll_agent(
@@ -5310,6 +5414,7 @@ async def main_async(args):
 
     # Run tasks — finally block ensures flyctl cleanup + results are always saved
     run = BenchmarkRun(suite=suite_name, base_url=base_url)
+    checkpoint_source_mode = args.checkpoint_source_index is not None
     memory_gate_enabled = (
         suite_name == "smoke"
         and not args.prod
@@ -5346,7 +5451,19 @@ async def main_async(args):
         )
 
     try:
-        if args.parallel:
+        if checkpoint_source_mode:
+            if len(tasks) != 1:
+                raise ValueError("--checkpoint-source-index requires exactly one task")
+            result = await run_single_task(
+                base_url,
+                tasks[0],
+                keep_failed_agents=True,
+                checkpoint_source_index=args.checkpoint_source_index,
+                checkpoint_source_out=Path(args.checkpoint_source_out),
+                checkpoint_tree_out=Path(args.checkpoint_tree_out) if args.checkpoint_tree_out else None,
+            )
+            run.task_results.append(result)
+        elif args.parallel:
             max_concurrency = args.max_concurrency
             if max_concurrency is None and args.prod:
                 max_concurrency = int(os.environ.get("BENCHMARK_PROD_MAX_CONCURRENCY", "2"))
@@ -5701,6 +5818,24 @@ def main():
         help="With --anon, keep seeded saved password refs visible while disabling real Steel/cookie auth. "
         "Used by the Amazon bad-auth assistance benchmark.",
     )
+    parser.add_argument(
+        "--checkpoint-source-index",
+        type=int,
+        default=None,
+        help="Run one benchmark until this root message index exists, pause it, and export checkpoint source JSON.",
+    )
+    parser.add_argument(
+        "--checkpoint-source-out",
+        type=str,
+        default=None,
+        help="Source JSON output path for --checkpoint-source-index.",
+    )
+    parser.add_argument(
+        "--checkpoint-tree-out",
+        type=str,
+        default=None,
+        help="Optional tree JSON output path for --checkpoint-source-index.",
+    )
     target_group = parser.add_mutually_exclusive_group()
     target_group.add_argument(
         "--prod",
@@ -5727,6 +5862,17 @@ def main():
         parser.error("--force-show-passwords requires --anon")
     if args.timeout_seconds is not None and args.timeout_seconds <= 0:
         parser.error("--timeout-seconds must be positive")
+    if args.checkpoint_source_index is not None:
+        if args.checkpoint_source_index < 0:
+            parser.error("--checkpoint-source-index must be non-negative")
+        if not args.task:
+            parser.error("--checkpoint-source-index requires --task")
+        if args.suite or args.parallel:
+            parser.error("--checkpoint-source-index only supports one --task, not suites or --parallel")
+        if not args.checkpoint_source_out:
+            parser.error("--checkpoint-source-out is required with --checkpoint-source-index")
+    elif args.checkpoint_source_out or args.checkpoint_tree_out:
+        parser.error("--checkpoint-source-out/--checkpoint-tree-out require --checkpoint-source-index")
 
     if args.anon:
         _apply_anon_benchmark_mode(force_show_passwords=args.force_show_passwords)

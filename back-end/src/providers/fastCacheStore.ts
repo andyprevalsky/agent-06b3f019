@@ -75,6 +75,28 @@ export async function cacheGet(key: string): Promise<CacheGetResult> {
   return { hit: true, value: row.value, blobPath: row.blobPath };
 }
 
+export async function cacheGetMany(keys: string[]): Promise<Record<string, CacheGetResult>> {
+  const uniqueKeys = [...new Set(keys)];
+  if (uniqueKeys.length === 0) return {};
+
+  const rows = await fastCachePrisma.fastModeCacheEntry.findMany({
+    where: { key: { in: uniqueKeys } },
+    select: { key: true, value: true, blobPath: true },
+  });
+
+  const byKey = new Map(rows.map((row) => [row.key, row]));
+  const result: Record<string, CacheGetResult> = {};
+  for (const key of uniqueKeys) {
+    const row = byKey.get(key);
+    if (row === undefined) {
+      result[key] = { hit: false, value: null, blobPath: null };
+    } else {
+      result[key] = { hit: true, value: row.value, blobPath: row.blobPath };
+    }
+  }
+  return result;
+}
+
 export async function cacheSet(args: {
   key: string;
   kind: CacheKind;

@@ -3,7 +3,7 @@
  * Both worker (via API) and chat handler use the same path for message creation.
  */
 
-import type { Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { prisma } from './database';
 import { broadcastMessageInsert } from './chat/supabaseBroadcast';
 import { createLogger } from './logger';
@@ -73,6 +73,7 @@ async function findDuplicateToolMessage(params: CreateMessageParams) {
       agentId: params.agentId,
       role: 'TOOL',
       text: params.text,
+      filePointer: { equals: Prisma.AnyNull },
       AND: jsonPredicates,
     },
     orderBy: { timestamp: 'desc' },

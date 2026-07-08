@@ -816,8 +816,11 @@ class AgentWorkflow:
         plan_tools = PLAN_PHASE_TOOLS
         execute_tools = EXECUTE_PHASE_TOOLS
 
-        # Determine whether to skip PLAN phase and/or DAG
-        skip_plan = start_phase in ("execute", "execute_continued")
+        # Determine whether to skip PLAN phase and/or DAG. ``execute_dag_resume``
+        # is a local checkpoint/debug phase: it keeps the persisted plan, marks
+        # already-finished DAG nodes from DB messages, then runs remaining nodes.
+        resume_dag_from_context = start_phase == "execute_dag_resume"
+        skip_plan = start_phase in ("execute", "execute_continued", "execute_dag_resume")
         skip_dag = start_phase == "execute_continued"  # After continue_as_new, DAG already ran
 
         if init_message_posted:
@@ -926,63 +929,76 @@ class AgentWorkflow:
             plan_data = extract_plan_from_context(execute_context)
             if plan_data:
                 workflow.logger.info("[DAG] Found plan, attempting DAG execution")
-                dag = TaskDAG(plan_data)
+                try:
+                    dag = TaskDAG(plan_data)
+                except ValueError as exc:
+                    raw_tasks = plan_data.get("tasks", []) if isinstance(plan_data, dict) else []
+                    if any(isinstance(task, str) for task in raw_tasks):
+                        workflow.logger.warning(f"[DAG] Stale persisted plan; falling back to normal execution: {exc}")
+                        dag = None
+                    else:
+                        raise
 
-                execute_system_prompt = await self.build_system_prompt()
+                if dag is not None:
+                    if resume_dag_from_context:
+                        resumed = dag.resume_completed_tasks_from_context(execute_context)
+                        workflow.logger.info(f"[DAG] Resuming from context; completed tasks={resumed}")
 
-                dag_result = await execute_dag(
-                    dag=dag,
-                    agent_id=agent_id,
-                    user_id=user_id,
-                    model=model,
-                    context=execute_context,
-                    execute_activity=workflow.execute_activity,
-                    post_message=self._post_message,
-                    execute_tool=self._execute_tool,
-                    handle_tool_event_fn=self._handle_tool_event,
-                    poll_messages=self._poll_messages,
-                    claude_token=self._active_claude_token(),
-                    claude_token_source=self._active_claude_source(),
-                    claude_token_pool_id=self._active_claude_pool_id(),
-                    gpt_token=self._active_gpt_token(),
-                    gpt_account_id=self._active_gpt_account_id(),
-                    gpt_token_source=self._active_gpt_source(),
-                    gpt_token_pool_id=self._active_gpt_pool_id(),
-                    on_tokens=self._on_tokens,
-                    system_prompt_text=execute_system_prompt,
-                    tool_names=execute_tools,
-                )
+                    execute_system_prompt = await self.build_system_prompt()
 
-                # DAG completed or failed - both hand off to run_agent
-                # run_agent polls from DB (DAG already posted results there)
-                if dag_result["status"] == "completed":
-                    workflow.logger.info("[DAG] Tasks completed, running verifier directly (skip LLM detour)")
-                    # Force-attempt completion: run the verifier on the post-DAG
-                    # context. If it scores 1.0, mark the agent complete and
-                    # skip run_agent entirely — saves the LLM detour where
-                    # agents otherwise spawn redundant claude_code/explore
-                    # agents to "double-check" the DAG result.
-                    post_dag_result = await self._run_post_dag_verifier(
+                    dag_result = await execute_dag(
+                        dag=dag,
                         agent_id=agent_id,
                         user_id=user_id,
                         model=model,
+                        context=execute_context,
+                        execute_activity=workflow.execute_activity,
+                        post_message=self._post_message,
+                        execute_tool=self._execute_tool,
+                        handle_tool_event_fn=self._handle_tool_event,
+                        poll_messages=self._poll_messages,
+                        claude_token=self._active_claude_token(),
+                        claude_token_source=self._active_claude_source(),
+                        claude_token_pool_id=self._active_claude_pool_id(),
+                        gpt_token=self._active_gpt_token(),
+                        gpt_account_id=self._active_gpt_account_id(),
+                        gpt_token_source=self._active_gpt_source(),
+                        gpt_token_pool_id=self._active_gpt_pool_id(),
+                        on_tokens=self._on_tokens,
+                        system_prompt_text=execute_system_prompt,
+                        tool_names=execute_tools,
                     )
-                    if post_dag_result and post_dag_result.get("score", 0.0) >= 1.0:
+
+                    # DAG completed or failed - both hand off to run_agent
+                    # run_agent polls from DB (DAG already posted results there)
+                    if dag_result["status"] == "completed":
+                        workflow.logger.info("[DAG] Tasks completed, running verifier directly (skip LLM detour)")
+                        # Force-attempt completion: run the verifier on the post-DAG
+                        # context. If it scores 1.0, mark the agent complete and
+                        # skip run_agent entirely — saves the LLM detour where
+                        # agents otherwise spawn redundant claude_code/explore
+                        # agents to "double-check" the DAG result.
+                        post_dag_result = await self._run_post_dag_verifier(
+                            agent_id=agent_id,
+                            user_id=user_id,
+                            model=model,
+                        )
+                        if post_dag_result and post_dag_result.get("score", 0.0) >= 1.0:
+                            workflow.logger.info(
+                                f"✓ Post-DAG verifier passed (score={post_dag_result['score']}) — marking complete"
+                            )
+                            await self._mark_complete(
+                                execute_context,
+                                post_dag_result.get("structured_response"),
+                            )
+                            return {"status": "completed", "goal": goal}
                         workflow.logger.info(
-                            f"✓ Post-DAG verifier passed (score={post_dag_result['score']}) — marking complete"
+                            f"[DAG] Post-DAG verifier did not pass "
+                            f"(score={post_dag_result.get('score', 0.0) if post_dag_result else 'n/a'}) "
+                            "— falling through to run_agent for recovery"
                         )
-                        await self._mark_complete(
-                            execute_context,
-                            post_dag_result.get("structured_response"),
-                        )
-                        return {"status": "completed", "goal": goal}
-                    workflow.logger.info(
-                        f"[DAG] Post-DAG verifier did not pass "
-                        f"(score={post_dag_result.get('score', 0.0) if post_dag_result else 'n/a'}) "
-                        "— falling through to run_agent for recovery"
-                    )
-                else:
-                    workflow.logger.info("[DAG] Execution needs LLM recovery, falling through to run_agent")
+                    else:
+                        workflow.logger.info("[DAG] Execution needs LLM recovery, falling through to run_agent")
             else:
                 workflow.logger.info("[DAG] No plan found, using LLM-driven execution")
 

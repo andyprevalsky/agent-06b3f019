@@ -2711,6 +2711,7 @@ async def test_save_browser_action_message_posts_metadata():
     call = assert_captured_call(url_contains="/api/agents/ag1/messages", method="POST")
     body = json.loads(call["requestBody"])
     assert body["role"] == "TOOL"
+    assert body["metadata"]["toolName"] == "spawn_browser_agent"
     assert body["metadata"]["subAgentId"] == "t1"
     assert body["metadata"]["steps_taken"] == 1
     assert body["metadata"]["total_steps"] == 30

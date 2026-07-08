@@ -1,3 +1,4 @@
+/* eslint-disable max-lines */
 /**
  * Blackbox tests for MessageList component.
  *
@@ -177,6 +178,42 @@ describe('MessageList', () => {
     await waitFor(() => expect(screen.getByText('Searched web')).toBeInTheDocument());
     // Earlier title shouldn't be present (only latest kept)
     expect(screen.queryByText('Searching web')).not.toBeInTheDocument();
+  });
+
+  it('hides cancelled DAG reasoning rows', async () => {
+    const ctx = makeAgentCtx({
+      messages: [
+        msg('think-start', {
+          role: 'TOOL',
+          text: 'Synthesize the answer',
+          timestamp: new Date(Date.now()).toISOString(),
+          metadata: {
+            toolCallId: 'dag-reasoning-1',
+            toolName: 'thought',
+            title: 'Thinking',
+            toolStatus: 'IN_PROGRESS',
+          },
+        }),
+        msg('think-error', {
+          role: 'TOOL',
+          text: 'Error: Cancelled',
+          timestamp: new Date(Date.now() + 1000).toISOString(),
+          metadata: {
+            toolCallId: 'dag-reasoning-1',
+            toolName: 'thought',
+            title: 'Thought',
+            toolStatus: 'ERROR',
+          },
+        }),
+      ],
+    });
+
+    renderList(ctx);
+
+    await waitFor(() => expect(screen.queryByText('reasoning')).not.toBeInTheDocument());
+    expect(screen.queryByText('Thought')).not.toBeInTheDocument();
+    expect(screen.queryByText('reasoning')).not.toBeInTheDocument();
+    expect(screen.queryByText('Error: Cancelled')).not.toBeInTheDocument();
   });
 
   it('filters messages by subAgentId (sub-agent panel)', () => {

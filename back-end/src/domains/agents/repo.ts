@@ -75,6 +75,8 @@ export async function findAgentsByBusId(busId: string) {
       responseSchema: true,
       structuredResponse: true,
       treeCostCents: true,
+      createdAt: true,
+      updatedAt: true,
     },
   });
 }
