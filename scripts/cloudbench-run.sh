@@ -87,6 +87,12 @@ emit_report_and_result() {
     # so the controller can retrieve output from /data/bench.log as a fallback
     # even when the direct-fetch ssh reads race the machine stop.
     local card="$CONTEXT_DIR/report-card.json"
+    local latest_run
+    latest_run="$(ls -t "$REPO_DIR/agents/benchmarks/runs/"*.json 2>/dev/null | head -1 || true)"
+    if [ -n "$latest_run" ] && [ -f "$latest_run" ]; then
+        cp -f "$latest_run" "$CONTEXT_DIR/run.json" 2>/dev/null || true
+        chown "$APP_USER:$APP_USER" "$CONTEXT_DIR/run.json" 2>/dev/null || true
+    fi
     echo "$REPORT_BEGIN"
     if [ -f "$card" ]; then
         cat "$card"
@@ -97,8 +103,6 @@ emit_report_and_result() {
     echo "$REPORT_END"
 
     echo "$RESULT_BEGIN"
-    local latest_run
-    latest_run="$(ls -t "$REPO_DIR/agents/benchmarks/runs/"*.json 2>/dev/null | head -1 || true)"
     if [ -n "$latest_run" ] && [ -f "$latest_run" ]; then
         echo "run_file: $latest_run"
         cat "$latest_run"

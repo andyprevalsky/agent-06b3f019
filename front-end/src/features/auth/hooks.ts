@@ -14,6 +14,7 @@ import {
   waitForElectronAuthBridgePrimed,
 } from '@/lib/supabase';
 import { checkNeedsInviteCode } from '@/lib/api';
+import { isBenchmarkArchiveMode } from '@/lib/benchmarkArchive';
 
 import { sendOTP, verifyOTP } from './api';
 import { IS_DEV_AUTO_LOGIN } from './config';
@@ -78,6 +79,14 @@ function getErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error) return error.message;
   return fallback;
 }
+
+const BENCHMARK_ARCHIVE_USER = {
+  id: 'benchmark-archive',
+  app_metadata: {},
+  user_metadata: {},
+  aud: 'authenticated',
+  created_at: '1970-01-01T00:00:00.000Z',
+} as User;
 
 /** Show an error toast from an unknown thrown value. */
 function toastError(
@@ -272,14 +281,17 @@ function useAuthActions(setters: AuthStateSetters) {
  * SINGLE SOURCE OF TRUTH for realtime auth — setRealtimeAuth() is called here only.
  */
 export function useAuth() {
-  const [user, setUser] = useState<User | null>(() => getCachedUser());
+  const archiveMode = isBenchmarkArchiveMode();
+  const [user, setUser] = useState<User | null>(() =>
+    archiveMode ? BENCHMARK_ARCHIVE_USER : getCachedUser(),
+  );
   const [session, setSession] = useState<Session | null>(null);
-  const [isFullySignedIn, setIsFullySignedIn] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [isFullySignedIn, setIsFullySignedIn] = useState(archiveMode);
+  const [loading, setLoading] = useState(!archiveMode);
   const [realtimeReady, setRealtimeReady] = useState(false);
   const initRef = useRef(false);
 
-  const isAuthenticated = !!session;
+  const isAuthenticated = archiveMode || !!session;
   const isAnonymous = isAnonymousUser(user);
 
   const { applySession, refreshAuthState, signOut } = useAuthActions({
@@ -290,6 +302,7 @@ export function useAuth() {
   });
 
   useEffect(() => {
+    if (archiveMode) return;
     if (initRef.current) return;
     initRef.current = true;
     let mounted = true;
@@ -302,9 +315,10 @@ export function useAuth() {
     return () => {
       mounted = false;
     };
-  }, [applySession]);
+  }, [applySession, archiveMode]);
 
   useEffect(() => {
+    if (archiveMode) return;
     const onAuthSessionChanged = () => {
       void refreshAuthState('session-storage-event');
     };
@@ -312,7 +326,7 @@ export function useAuth() {
     return () => {
       window.removeEventListener(AUTH_SESSION_CHANGED_EVENT, onAuthSessionChanged);
     };
-  }, [refreshAuthState]);
+  }, [archiveMode, refreshAuthState]);
 
   useEffect(() => {
     logAuth('State changed', {

@@ -5699,6 +5699,12 @@ async def main_async(args):
         if run.task_results:
             path = run.save()
             print(f"\n  Results saved: {path}")
+            try:
+                context_dir = Path(os.environ.get("BENCHMARK_CONTEXT_DIR", ".context"))
+                context_dir.mkdir(parents=True, exist_ok=True)
+                (context_dir / "run.json").write_text(Path(path).read_text(), encoding="utf-8")
+            except Exception as exc:
+                print(f"  ⚠ run.json archive write failed (non-fatal): {exc}")
 
     # Print summary
     s = run.summary

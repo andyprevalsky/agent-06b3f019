@@ -678,6 +678,119 @@ stop_proxy() {
     PROXY_PID=""
 }
 
+start_local_archive_frontend() {
+    [ "$DASHBOARD" = "1" ] || return 0
+    [ -s "$ROOT_DIR/.context/report-card.json" ] || return 0
+    [ -s "$ROOT_DIR/.context/run.json" ] || return 0
+
+    cp -f "$ROOT_DIR/agents/benchmarks/dashboard.html" "$ROOT_DIR/.context/dashboard.html" 2>/dev/null || true
+
+    # The live Fly proxy owns LOCAL_DASH_PORT during the run. Once results are
+    # local, shut the proxy down and open the real frontend against an archive
+    # API shim instead of leaving dead links to the stopped benchmark stack.
+    stop_proxy
+
+    local ports archive_api_port archive_fe_port
+    ports="$(python3 - "$LOCAL_DASH_PORT" <<'PY'
+import socket
+import sys
+
+preferred = int(sys.argv[1])
+for api_port in [preferred] + list(range(preferred + 1, preferred + 100)):
+    fe_port = api_port + 1
+    sockets = []
+    ok = True
+    for port in (api_port, fe_port):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.bind(("127.0.0.1", port))
+        except OSError:
+            ok = False
+        sockets.append(sock)
+    for sock in sockets:
+        sock.close()
+    if ok:
+        print(api_port, fe_port)
+        break
+PY
+)"
+    if [ -z "$ports" ]; then
+        echo "   could not find free local ports for archived frontend; files are in $ROOT_DIR/.context"
+        return 0
+    fi
+    archive_api_port="$(printf '%s' "$ports" | awk '{print $1}')"
+    archive_fe_port="$(printf '%s' "$ports" | awk '{print $2}')"
+
+    for pid_file in "$ROOT_DIR/.context/archive-frontend.pid" "$ROOT_DIR/.context/archive-api.pid"; do
+        if [ -f "$pid_file" ]; then
+            old_pid="$(cat "$pid_file" 2>/dev/null || true)"
+            [ -n "$old_pid" ] && kill "$old_pid" 2>/dev/null || true
+        fi
+    done
+
+    python3 "$ROOT_DIR/agents/benchmarks/archive_frontend.py" "$ROOT_DIR/.context/run.json" \
+        --frontend-dir "$ROOT_DIR/front-end" \
+        --context-dir "$ROOT_DIR/.context" \
+        --host 127.0.0.1 \
+        --api-port "$archive_api_port" \
+        --frontend-port "$archive_fe_port" \
+        --daemon
+
+    local archive_fe_url="http://localhost:$archive_fe_port"
+    python3 - "$ROOT_DIR/.context/report-card.json" "$archive_fe_url" <<'PY' || true
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+frontend = sys.argv[2].rstrip("/")
+card = json.loads(path.read_text())
+for task in card.get("per_task", []):
+    url = task.get("agent_url")
+    if not url:
+        continue
+    try:
+        from urllib.parse import parse_qs, urlparse
+        agent_id = (parse_qs(urlparse(url).query).get("agent-id") or [""])[0]
+    except Exception:
+        agent_id = ""
+    if agent_id:
+        task["agent_url"] = f"{frontend}/?agent-id={agent_id}"
+path.write_text(json.dumps(card, indent=2))
+PY
+
+    local first_agent
+    first_agent="$(python3 - "$ROOT_DIR/.context/run.json" <<'PY'
+import json
+import sys
+for task in json.load(open(sys.argv[1])).get("tasks", []):
+    if task.get("agent_id"):
+        print(task["agent_id"])
+        break
+PY
+)"
+    local archive_url="$archive_fe_url/"
+    if [ -n "$first_agent" ]; then
+        archive_url="$archive_fe_url/?agent-id=$first_agent"
+    fi
+
+    for _ in $(seq 1 40); do
+        curl -fsS "http://127.0.0.1:$archive_api_port/health" >/dev/null 2>&1 \
+            && curl -fsS "$archive_fe_url/" >/dev/null 2>&1 \
+            && break
+        sleep 1
+    done
+
+    if command -v open >/dev/null 2>&1; then
+        open -na "Google Chrome" --args --new-window "$archive_url" >/dev/null 2>&1 \
+            && echo "   opened archived frontend: $archive_url" \
+            || echo "   archived frontend: $archive_url"
+    else
+        echo "   archived frontend: $archive_url"
+    fi
+    echo "   archived frontend API: http://127.0.0.1:$archive_api_port"
+}
+
 # SAFETY: STOP the machine on EVERY exit (success, failure, error, timeout,
 # Ctrl-C) and always kill the local dashboard proxy. Never destroy on the per-run
 # path — only --destroy removes it. A stopped machine bills only for the volume.
@@ -850,6 +963,7 @@ echo "════════════════════ REPORT CARD �
 if [ -n "$CARD_JSON" ]; then
     echo "$CARD_JSON" | python3 -m json.tool 2>/dev/null || echo "$CARD_JSON"
     echo "$CARD_JSON" > "$CARD_OUT" 2>/dev/null && echo "" && echo "💾 Saved report card: $CARD_OUT"
+    echo "$CARD_JSON" > "$ROOT_DIR/.context/report-card.json" 2>/dev/null || true
 else
     echo "⚠️  No report card retrieved."
 fi
@@ -858,6 +972,8 @@ echo "════════════════════════�
 PASS_RATE=""
 if [ -n "$RUN_JSON" ]; then
     echo "$RUN_JSON" > "$RUN_OUT" 2>/dev/null && echo "💾 Saved run record: $RUN_OUT"
+    echo "$RUN_JSON" > "$ROOT_DIR/.context/run.json" 2>/dev/null || true
+    start_local_archive_frontend
     echo ""
     echo "──────────────────── RUN SUMMARY ────────────────────"
     PASS_RATE="$(python3 -c 'import json,sys
