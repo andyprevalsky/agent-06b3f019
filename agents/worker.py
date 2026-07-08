@@ -1089,6 +1089,7 @@ async def main():
         ),
         max_concurrent_activity_task_polls=config.temporal.max_concurrent_activity_task_polls,
         max_concurrent_workflow_task_polls=config.temporal.max_concurrent_workflow_task_polls,
+        nonsticky_to_sticky_poll_ratio=config.temporal.nonsticky_to_sticky_poll_ratio,
         workflow_runner=SandboxedWorkflowRunner(restrictions=sandbox_restrictions),
     )
 
@@ -1098,6 +1099,7 @@ async def main():
         activity_admission_open_memory_percent=config.temporal.activity_admission_open_memory_percent,
         max_activity_slots=config.temporal.max_concurrent_activities,
         max_workflow_slots=config.temporal.max_concurrent_workflows,
+        nonsticky_to_sticky_poll_ratio=config.temporal.nonsticky_to_sticky_poll_ratio,
         sticky_queue_schedule_to_start_timeout_seconds=(
             config.temporal.sticky_queue_schedule_to_start_timeout_seconds
         ),

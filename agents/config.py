@@ -52,6 +52,11 @@ class TemporalConfig:
     # the 120 s benchmark window even under load.
     max_concurrent_activity_task_polls: int = 8
     max_concurrent_workflow_task_polls: int = 8
+    # Temporal's SDK default is 0.2, which turns 8 workflow pollers into
+    # roughly 1 normal poller + 7 sticky pollers. Fanout creates many fresh
+    # child workflows that can only start on the normal task queue, so keep
+    # the split balanced unless an environment explicitly chooses otherwise.
+    nonsticky_to_sticky_poll_ratio: float = 1.0
     sticky_queue_schedule_to_start_timeout_seconds: int = 10
 
     # Timeout settings (in seconds)
@@ -241,6 +246,7 @@ def load_config() -> AppConfig:
         max_cached_workflows=int(os.getenv("MAX_CACHED_WORKFLOWS", "100")),
         max_concurrent_activity_task_polls=int(os.getenv("MAX_CONCURRENT_ACTIVITY_TASK_POLLERS", "8")),
         max_concurrent_workflow_task_polls=int(os.getenv("MAX_CONCURRENT_WORKFLOW_TASK_POLLERS", "8")),
+        nonsticky_to_sticky_poll_ratio=float(os.getenv("NONSTICKY_TO_STICKY_POLL_RATIO", "1.0")),
         sticky_queue_schedule_to_start_timeout_seconds=int(
             os.getenv("STICKY_QUEUE_SCHEDULE_TO_START_TIMEOUT_SECONDS", "10")
         ),

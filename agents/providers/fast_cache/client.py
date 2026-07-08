@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import time
 from typing import Any, Optional, TypedDict
 
@@ -18,7 +19,7 @@ import httpx
 import structlog
 
 from helpers.trace_archive import archive_json_deferred
-from helpers.tracing import current_root_agent_id, current_span_id
+from helpers.tracing import backend_api_headers, current_root_agent_id, current_span_id, span
 
 from . import normalize
 
@@ -34,15 +35,17 @@ _GET_RETRY_BACKOFF_S = 0.15
 _SET_TIMEOUT_S = 30.0
 _GET_BATCH_DELAY_S = 0.005
 _GET_BATCH_MAX_KEYS = 500
+_GET_BATCH_MAX_IN_FLIGHT = int(os.environ.get("FAST_CACHE_GET_BATCH_MAX_IN_FLIGHT", "4") or "4")
 _ARCHIVE_READ_MAX_CONCURRENCY = 4
 
 # A single pooled client per worker process. Creating a fresh httpx.AsyncClient per
 # cache call churns connections and can overwhelm the backend under the high call
 # volume Fast Mode generates (get+set on every LLM call). Reuse one bounded pool.
 _client: Optional[httpx.AsyncClient] = None
-_pending_gets: dict[str, list[asyncio.Future[CacheRecord]]] = {}
+_pending_gets: dict[str, list[tuple[asyncio.Future[CacheRecord], float]]] = {}
 _pending_gets_lock: Optional[asyncio.Lock] = None
 _pending_gets_flush_task: Optional[asyncio.Task[None]] = None
+_pending_gets_batch_tasks: set[asyncio.Task[None]] = set()
 _archive_read_tasks: set[asyncio.Task[None]] = set()
 _archive_read_semaphore: Optional[asyncio.Semaphore] = None
 _archive_read_semaphore_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -80,6 +83,15 @@ def _pending_lock() -> asyncio.Lock:
     if _pending_gets_lock is None:
         _pending_gets_lock = asyncio.Lock()
     return _pending_gets_lock
+
+
+def _key_hash(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+
+
+def _key_kind(key: str) -> str:
+    parts = key.split(":", 4)
+    return parts[2] if len(parts) >= 3 and parts[0] == "fastmode" else "unknown"
 
 
 async def cache_get_record(key: str) -> CacheRecord:
@@ -133,7 +145,7 @@ async def _cache_get_record_direct(key: str) -> tuple[CacheRecord, Optional[int]
     api_url, api_key = _backend()
     resp = await _shared_client().post(
         f"{api_url}/api/fast-cache/get",
-        headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+        headers=backend_api_headers(api_key),
         json={"key": key},
         timeout=_GET_TIMEOUT_S,
     )
@@ -152,16 +164,39 @@ async def _cache_get_record_batched(key: str) -> CacheRecord:
 
     loop = asyncio.get_running_loop()
     future: asyncio.Future[CacheRecord] = loop.create_future()
+    started = time.monotonic()
     async with _pending_lock():
-        _pending_gets.setdefault(key, []).append(future)
+        _pending_gets.setdefault(key, []).append((future, started))
         if _pending_gets_flush_task is None or _pending_gets_flush_task.done():
             _pending_gets_flush_task = asyncio.create_task(_flush_pending_gets())
-    return await future
+    async with span(
+        "fast_cache.cache_get_wait",
+        cache_key_hash=_key_hash(key),
+        cache_key_kind=_key_kind(key),
+        max_in_flight=_GET_BATCH_MAX_IN_FLIGHT,
+    ):
+        record = await future
+    logger.info(
+        "fast_cache.cache_get_timing",
+        key=key,
+        key_hash=_key_hash(key),
+        kind=_key_kind(key),
+        hit=bool(record.get("hit")),
+        total_ms=int((time.monotonic() - started) * 1000),
+    )
+    return record
 
 
 async def _flush_pending_gets() -> None:
     await asyncio.sleep(_GET_BATCH_DELAY_S)
     while True:
+        _pending_gets_batch_tasks.difference_update(task for task in _pending_gets_batch_tasks if task.done())
+        while len(_pending_gets_batch_tasks) >= max(1, _GET_BATCH_MAX_IN_FLIGHT):
+            done, _pending = await asyncio.wait(_pending_gets_batch_tasks, return_when=asyncio.FIRST_COMPLETED)
+            _pending_gets_batch_tasks.difference_update(done)
+            for task in done:
+                task.result()
+
         async with _pending_lock():
             batch_items = list(_pending_gets.items())[:_GET_BATCH_MAX_KEYS]
             if not batch_items:
@@ -169,26 +204,64 @@ async def _flush_pending_gets() -> None:
             for key, _futures in batch_items:
                 _pending_gets.pop(key, None)
 
-        keys = [key for key, _futures in batch_items]
-        try:
+        task = asyncio.create_task(_deliver_pending_get_batch(batch_items))
+        _pending_gets_batch_tasks.add(task)
+
+        def _on_done(done: asyncio.Task[None]) -> None:
+            _pending_gets_batch_tasks.discard(done)
+            try:
+                done.result()
+            except Exception as exc:
+                logger.warning("fast_cache.get_many_batch_task_error", error=str(exc)[:200])
+
+        task.add_done_callback(_on_done)
+        await asyncio.sleep(0)
+
+
+async def _deliver_pending_get_batch(
+    batch_items: list[tuple[str, list[tuple[asyncio.Future[CacheRecord], float]]]],
+) -> None:
+    now = time.monotonic()
+    keys = [key for key, _futures in batch_items]
+    waiter_count = sum(len(futures) for _key, futures in batch_items)
+    enqueued_times = [enqueued_at for _key, futures in batch_items for _future, enqueued_at in futures]
+    queue_wait_ms = [int((now - enqueued_at) * 1000) for enqueued_at in enqueued_times]
+    queue_avg_ms = int(sum(queue_wait_ms) / len(queue_wait_ms)) if queue_wait_ms else 0
+    queue_max_ms = max(queue_wait_ms) if queue_wait_ms else 0
+    try:
+        async with span(
+            "fast_cache.get_many.http",
+            key_count=len(keys),
+            waiter_count=waiter_count,
+            queue_wait_avg_ms=queue_avg_ms,
+            queue_wait_max_ms=queue_max_ms,
+            max_in_flight=_GET_BATCH_MAX_IN_FLIGHT,
+        ):
             records = await _fetch_cache_records_many(keys)
-            for key, futures in batch_items:
-                record = records.get(key) or {"hit": False, "value": None, "blobPath": None}
-                for future in futures:
-                    if not future.done():
-                        future.set_result(record)
-        except Exception as exc:
-            for _key, futures in batch_items:
-                for future in futures:
-                    if not future.done():
-                        future.set_exception(exc)
+        logger.info(
+            "fast_cache.get_many_batch",
+            key_count=len(keys),
+            waiter_count=waiter_count,
+            queue_wait_avg_ms=queue_avg_ms,
+            queue_wait_max_ms=queue_max_ms,
+        )
+        for key, futures in batch_items:
+            record = records.get(key) or {"hit": False, "value": None, "blobPath": None}
+            for future, _enqueued_at in futures:
+                if not future.done():
+                    future.set_result(record)
+    except Exception as exc:
+        for _key, futures in batch_items:
+            for future, _enqueued_at in futures:
+                if not future.done():
+                    future.set_exception(exc)
 
 
 async def _fetch_cache_records_many(keys: list[str]) -> dict[str, CacheRecord]:
     api_url, api_key = _backend()
     resp = await _shared_client().post(
         f"{api_url}/api/fast-cache/get-many",
-        headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+        headers=backend_api_headers(api_key),
         json={"keys": keys},
         timeout=_GET_TIMEOUT_S,
     )
@@ -242,7 +315,7 @@ async def resolve_agent_fast_mode(agent_id: str) -> tuple[bool, Optional[str], b
         # doesn't expose fastModeCacheEnabled and GET /agents needs an X-User-Id.
         resp = await _shared_client().post(
             f"{api_url}/api/fast-cache/agent-flag",
-            headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+            headers=backend_api_headers(api_key),
             json={"agentId": agent_id},
             timeout=_GET_TIMEOUT_S,
         )
@@ -254,7 +327,7 @@ async def resolve_agent_fast_mode(agent_id: str) -> tuple[bool, Optional[str], b
             root_agent_id = data.get("rootAgentId") if isinstance(data.get("rootAgentId"), str) else agent_id
         else:
             logger.warning("fast_cache.resolve_agent_failed", agent_id=agent_id, status=resp.status_code)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("fast_cache.resolve_agent_error", agent_id=agent_id, error=str(exc))
     # Only memoize a positive resolution — a transient failure shouldn't disable
     # the cache for the rest of the run.
@@ -335,7 +408,7 @@ async def cache_set(
         api_url, api_key = _backend()
         resp = await _shared_client().post(
             f"{api_url}/api/fast-cache/set",
-            headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+            headers=backend_api_headers(api_key),
             json={
                 "key": key,
                 "kind": kind,
