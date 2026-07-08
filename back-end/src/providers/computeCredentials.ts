@@ -350,14 +350,15 @@ async function persistOrReadFastCacheAffinity(
 ): Promise<ComputeCodeCredentialType> {
   if (affinityKey === null) return tokenType;
   try {
-    await prisma.computeTokenFastCacheAffinity.create({
+    await prisma.computeTokenFastCacheAffinity.createMany({
       data: { affinityKey, userId, tokenType },
+      skipDuplicates: true,
     });
-    return tokenType;
-  } catch {
-    const existing = await readFastCacheAffinity(affinityKey);
-    return existing ?? tokenType;
+  } catch (error) {
+    log.error('Unexpected error persisting fast-cache affinity', { affinityKey, error });
   }
+  const existing = await readFastCacheAffinity(affinityKey);
+  return existing ?? tokenType;
 }
 
 export async function fetchComputeUserToken(
