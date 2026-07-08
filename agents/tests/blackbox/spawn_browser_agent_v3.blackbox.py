@@ -377,6 +377,147 @@ async def test_browser_agent_recording_respects_disabled_env():
             os.environ["BROWSER_AGENT_RECORDINGS"] = previous_enabled
 
 
+async def test_browser_agent_recording_start_failure_is_best_effort():
+    import tempfile
+    from pathlib import Path
+
+    from domains.spawn_browser_agent_v3.recording import BrowserAgentRecorder
+
+    class FakePage:
+        async def screenshot(self, **kwargs):
+            return b"fake-jpeg-bytes"
+
+    previous_enabled = os.environ.get("BROWSER_AGENT_RECORDINGS")
+    previous_dir = os.environ.get("BROWSER_AGENT_RECORDINGS_DIR")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            blocked_path = Path(tmp) / "not-a-directory"
+            blocked_path.write_text("blocks mkdir", encoding="utf-8")
+            os.environ["BROWSER_AGENT_RECORDINGS"] = "1"
+            os.environ["BROWSER_AGENT_RECORDINGS_DIR"] = str(blocked_path)
+
+            recorder = await BrowserAgentRecorder.create(
+                page=FakePage(),
+                agent_id="agent-1",
+                task_id="task-1",
+                session_id="session-1",
+                browser_url="",
+            )
+
+            assert recorder is None
+    finally:
+        if previous_enabled is None:
+            os.environ.pop("BROWSER_AGENT_RECORDINGS", None)
+        else:
+            os.environ["BROWSER_AGENT_RECORDINGS"] = previous_enabled
+        if previous_dir is None:
+            os.environ.pop("BROWSER_AGENT_RECORDINGS_DIR", None)
+        else:
+            os.environ["BROWSER_AGENT_RECORDINGS_DIR"] = previous_dir
+
+
+def test_browser_agent_recording_prod_default_uses_writable_temp_root():
+    import tempfile
+    from pathlib import Path
+
+    from domains.spawn_browser_agent_v3.recording import _recording_root
+
+    saved_env = {
+        "ENVIRONMENT": os.environ.get("ENVIRONMENT"),
+        "FLY_APP_NAME": os.environ.get("FLY_APP_NAME"),
+        "CONDUCTOR_WORKSPACE_NAME": os.environ.get("CONDUCTOR_WORKSPACE_NAME"),
+        "BROWSER_AGENT_RECORDINGS_DIR": os.environ.get("BROWSER_AGENT_RECORDINGS_DIR"),
+    }
+    try:
+        os.environ["ENVIRONMENT"] = "production"
+        os.environ.pop("FLY_APP_NAME", None)
+        os.environ.pop("CONDUCTOR_WORKSPACE_NAME", None)
+        os.environ.pop("BROWSER_AGENT_RECORDINGS_DIR", None)
+
+        root = _recording_root()
+
+        assert root == Path(tempfile.gettempdir()) / "rose-browser-agent-recordings"
+    finally:
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def test_browser_agent_recording_fly_prod_default_uses_writable_temp_root():
+    import tempfile
+    from pathlib import Path
+
+    from domains.spawn_browser_agent_v3.recording import _recording_root
+
+    saved_env = {
+        "ENVIRONMENT": os.environ.get("ENVIRONMENT"),
+        "FLY_APP_NAME": os.environ.get("FLY_APP_NAME"),
+        "CONDUCTOR_WORKSPACE_NAME": os.environ.get("CONDUCTOR_WORKSPACE_NAME"),
+        "BROWSER_AGENT_RECORDINGS_DIR": os.environ.get("BROWSER_AGENT_RECORDINGS_DIR"),
+    }
+    try:
+        os.environ.pop("ENVIRONMENT", None)
+        os.environ["FLY_APP_NAME"] = "navi-whisper-lux"
+        os.environ.pop("CONDUCTOR_WORKSPACE_NAME", None)
+        os.environ.pop("BROWSER_AGENT_RECORDINGS_DIR", None)
+
+        root = _recording_root()
+
+        assert root == Path(tempfile.gettempdir()) / "rose-browser-agent-recordings"
+    finally:
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def test_browser_agent_recording_prod_cleanup_removes_task_scratch():
+    import tempfile
+    from pathlib import Path
+
+    from domains.spawn_browser_agent_v3.recording import BrowserAgentRecorder
+
+    saved_env = {
+        "ENVIRONMENT": os.environ.get("ENVIRONMENT"),
+        "FLY_APP_NAME": os.environ.get("FLY_APP_NAME"),
+        "CONDUCTOR_WORKSPACE_NAME": os.environ.get("CONDUCTOR_WORKSPACE_NAME"),
+        "BROWSER_AGENT_RECORDINGS_DIR": os.environ.get("BROWSER_AGENT_RECORDINGS_DIR"),
+        "BROWSER_AGENT_RECORDINGS_CLEANUP_LOCAL": os.environ.get("BROWSER_AGENT_RECORDINGS_CLEANUP_LOCAL"),
+    }
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["FLY_APP_NAME"] = "navi-whisper-lux"
+            os.environ.pop("ENVIRONMENT", None)
+            os.environ.pop("CONDUCTOR_WORKSPACE_NAME", None)
+            os.environ["BROWSER_AGENT_RECORDINGS_DIR"] = tmp
+            os.environ.pop("BROWSER_AGENT_RECORDINGS_CLEANUP_LOCAL", None)
+
+            recorder = BrowserAgentRecorder(
+                page=object(),
+                agent_id="agent-prod",
+                task_id="task-prod",
+                session_id="session-prod",
+                browser_url="",
+            )
+            recorder.output_dir.mkdir(parents=True)
+            artifact = recorder.output_dir / "index.html"
+            artifact.write_text("<html>scratch</html>", encoding="utf-8")
+
+            recorder.cleanup_local_artifacts()
+
+            assert not recorder.output_dir.exists()
+            assert Path(tmp).exists()
+    finally:
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 async def test_browser_agent_recording_enabled_by_trace_archive_in_prod():
     import tempfile
     from pathlib import Path
@@ -8351,6 +8492,22 @@ async def run_all_tests():
     await r.record_async(
         "browser_agent_recording_disabled_env",
         test_browser_agent_recording_respects_disabled_env,
+    )
+    await r.record_async(
+        "browser_agent_recording_start_failure_best_effort",
+        test_browser_agent_recording_start_failure_is_best_effort,
+    )
+    r.record(
+        "browser_agent_recording_prod_temp_root",
+        test_browser_agent_recording_prod_default_uses_writable_temp_root,
+    )
+    r.record(
+        "browser_agent_recording_fly_prod_temp_root",
+        test_browser_agent_recording_fly_prod_default_uses_writable_temp_root,
+    )
+    r.record(
+        "browser_agent_recording_prod_cleanup",
+        test_browser_agent_recording_prod_cleanup_removes_task_scratch,
     )
     await r.record_async(
         "browser_agent_recording_prod_trace_archive",
