@@ -31,6 +31,9 @@ const DEV_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 // invoke this at task setup (the `base` live fixture) so an agent always starts
 // with *current* cookies; a one-time setup-db sync goes stale as they expire.
 const CREDENTIALS_ONLY = process.argv.includes('--credentials-only');
+const SKIP_BROWSER_AUTH_SYNC =
+  process.env.BENCHMARK_SKIP_BROWSER_AUTH_SYNC === '1' ||
+  process.env.BENCHMARK_WORLD_MODEL_MODE === 'simulate';
 // Refresh ONLY the compute-token integrations (claude_code / gpt_code, the
 // dev user's own + the shared pool) from prod. Benchmark runs invoke this at
 // task setup so a frozen DB fixture or whole-DB snapshot restore can never
@@ -168,6 +171,16 @@ async function syncBrowserCredentials(): Promise<void> {
   });
 }
 
+async function syncBrowserAuthForCurrentMode(): Promise<void> {
+  if (SKIP_BROWSER_AUTH_SYNC) {
+    console.log('  ⏭️  Browser auth state: skipped for simulated benchmark setup');
+    return;
+  }
+
+  await syncBrowserState();
+  await syncBrowserCredentials();
+}
+
 async function sync() {
   console.log('🔄 Syncing from production database...');
   console.log(`   Remote: ${REMOTE_URL.replace(/:[^:@]+@/, ':***@')}`);
@@ -185,8 +198,7 @@ async function sync() {
 
   if (CREDENTIALS_ONLY) {
     // Live browser auth: cookies + storage (login state) AND passwords/passkeys.
-    await syncBrowserState();
-    await syncBrowserCredentials();
+    await syncBrowserAuthForCurrentMode();
     console.log('\n🔄 Credential sync complete.');
     return;
   }
@@ -299,9 +311,7 @@ async function sync() {
   });
 
   // ── Browser auth state (context, cookies, storage) + credentials ──
-  await syncBrowserState();
-
-  await syncBrowserCredentials();
+  await syncBrowserAuthForCurrentMode();
 
   // ── Goal Blueprints ──
   await syncTable('Goal Blueprints', async () => {
