@@ -387,16 +387,22 @@ async def test_browser_agent_recording_start_failure_is_best_effort():
         async def screenshot(self, **kwargs):
             return b"fake-jpeg-bytes"
 
+    class FailingStartRecorder(BrowserAgentRecorder):
+        async def start(self) -> None:
+            self.frames_dir.mkdir(parents=True, exist_ok=True)
+            (self.output_dir / "partial.txt").write_text("partial", encoding="utf-8")
+            raise RuntimeError("start failed after scratch creation")
+
     previous_enabled = os.environ.get("BROWSER_AGENT_RECORDINGS")
     previous_dir = os.environ.get("BROWSER_AGENT_RECORDINGS_DIR")
+    previous_cleanup = os.environ.get("BROWSER_AGENT_RECORDINGS_CLEANUP_LOCAL")
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            blocked_path = Path(tmp) / "not-a-directory"
-            blocked_path.write_text("blocks mkdir", encoding="utf-8")
             os.environ["BROWSER_AGENT_RECORDINGS"] = "1"
-            os.environ["BROWSER_AGENT_RECORDINGS_DIR"] = str(blocked_path)
+            os.environ["BROWSER_AGENT_RECORDINGS_DIR"] = tmp
+            os.environ["BROWSER_AGENT_RECORDINGS_CLEANUP_LOCAL"] = "1"
 
-            recorder = await BrowserAgentRecorder.create(
+            recorder = await FailingStartRecorder.create(
                 page=FakePage(),
                 agent_id="agent-1",
                 task_id="task-1",
@@ -405,6 +411,7 @@ async def test_browser_agent_recording_start_failure_is_best_effort():
             )
 
             assert recorder is None
+            assert not (Path(tmp) / "agent-1" / "task-1").exists()
     finally:
         if previous_enabled is None:
             os.environ.pop("BROWSER_AGENT_RECORDINGS", None)
@@ -414,6 +421,10 @@ async def test_browser_agent_recording_start_failure_is_best_effort():
             os.environ.pop("BROWSER_AGENT_RECORDINGS_DIR", None)
         else:
             os.environ["BROWSER_AGENT_RECORDINGS_DIR"] = previous_dir
+        if previous_cleanup is None:
+            os.environ.pop("BROWSER_AGENT_RECORDINGS_CLEANUP_LOCAL", None)
+        else:
+            os.environ["BROWSER_AGENT_RECORDINGS_CLEANUP_LOCAL"] = previous_cleanup
 
 
 def test_browser_agent_recording_prod_default_uses_writable_temp_root():

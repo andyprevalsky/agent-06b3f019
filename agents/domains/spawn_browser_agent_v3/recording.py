@@ -235,6 +235,7 @@ class BrowserAgentRecorder:
                 session_id=session_id,
                 error=str(exc),
             )
+            recorder.cleanup_local_artifacts(force=True)
             return None
         return recorder
 
@@ -522,8 +523,8 @@ class BrowserAgentRecorder:
                 error=str(exc)[:300],
             )
 
-    def cleanup_local_artifacts(self, *, persisted: bool = False) -> None:
-        if not persisted:
+    def cleanup_local_artifacts(self, *, persisted: bool = False, force: bool = False) -> None:
+        if not persisted and not force:
             return
         if not cleanup_local_recording_artifacts_enabled():
             return
