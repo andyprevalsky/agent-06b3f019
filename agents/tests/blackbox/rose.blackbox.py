@@ -63,7 +63,7 @@ from providers.rose.schema import (
     build_anthropic_tools_from_response_model,
     build_openai_response_format,
 )
-from providers.rose.transport import ANTHROPIC_FAST_MODE_BETA, _with_fast_mode_beta
+from providers.rose.transport import ANTHROPIC_FAST_MODE_BETA, OPENAI_RESPONSES_API_URL, _with_fast_mode_beta
 from providers.rose.transforms import (
     apply_anthropic_tool_config,
     get_messages_for_model,
@@ -2694,6 +2694,122 @@ async def test_anthropic_api_key_cooldown_mark_then_on_cooldown():
     rc._reset_anthropic_api_key_cooldown_cache()
 
 
+async def test_client_openai_api_key_serves_before_anthropic_and_openrouter():
+    lines = [
+        "event: response.output_text.delta",
+        'data: {"type":"response.output_text.delta","delta":"Hello GPT"}',
+        "",
+        "event: response.completed",
+        'data: {"type":"response.completed","response":{"usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10,"input_tokens_details":{"cached_tokens":2}}}}',
+        "",
+        "data: [DONE]",
+    ]
+    sse_ok = "\n".join(lines)
+    seen = {"openai": 0, "anthropic": 0, "openrouter": 0}
+    captured: dict[str, object] = {}
+
+    def handler(req):
+        if str(req.url) == OPENAI_RESPONSES_API_URL:
+            seen["openai"] += 1
+            captured["authorization"] = req.headers.get("authorization")
+            captured["body"] = json.loads(req.content.decode("utf-8"))
+            return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
+        if req.url.host == "api.anthropic.com":
+            seen["anthropic"] += 1
+            return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
+        if req.url.host == "openrouter.ai":
+            seen["openrouter"] += 1
+            return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+    prev_gpt = os.environ.get("GPT_API_KEY")
+    prev_anthropic = os.environ.get("ANTHROPIC_API_KEY")
+    os.environ["GPT_API_KEY"] = "sk-proj-test"
+    os.environ["ANTHROPIC_API_KEY"] = "sk-ant-api03-test"
+    try:
+        chunks = await _drain(
+            RoseClient(openrouter_key="ork-x").complete(
+                pool="rose-1-lite",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+        )
+    finally:
+        if prev_gpt is None:
+            os.environ.pop("GPT_API_KEY", None)
+        else:
+            os.environ["GPT_API_KEY"] = prev_gpt
+        if prev_anthropic is None:
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+        else:
+            os.environ["ANTHROPIC_API_KEY"] = prev_anthropic
+
+    body = captured["body"]
+    assert isinstance(body, dict)
+    assert seen == {"openai": 1, "anthropic": 0, "openrouter": 0}
+    assert captured["authorization"] == "Bearer sk-proj-test"
+    assert body.get("model") == "gpt-5.4"
+    assert body.get("service_tier") == "priority"
+    meta = next((c for c in chunks if c.kind == "metadata"), None)
+    assert meta is not None and str(meta.data.get("actual_model", "")).endswith("-openai")
+
+
+async def test_client_openai_api_key_failure_falls_through_to_anthropic_before_openrouter():
+    lines = [
+        "event: content_block_delta",
+        'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"anthropic"}}',
+        "",
+        "event: message_delta",
+        'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}',
+        "",
+        "event: message_stop",
+        'data: {"type":"message_stop"}',
+        "",
+    ]
+    sse_ok = "\n".join(lines)
+    seen = {"openai": 0, "anthropic": 0, "openrouter": 0}
+
+    def handler(req):
+        if str(req.url) == OPENAI_RESPONSES_API_URL:
+            seen["openai"] += 1
+            return httpx.Response(401, json={"error": {"message": "bad key"}})
+        if req.url.host == "api.anthropic.com":
+            seen["anthropic"] += 1
+            return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
+        if req.url.host == "openrouter.ai":
+            seen["openrouter"] += 1
+            return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
+        if req.url.path.endswith("/anthropic-key/cooldown"):
+            return httpx.Response(200, json={"onCooldown": False})
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+    prev_gpt = os.environ.get("GPT_API_KEY")
+    prev_anthropic = os.environ.get("ANTHROPIC_API_KEY")
+    os.environ["GPT_API_KEY"] = "sk-proj-test"
+    os.environ["ANTHROPIC_API_KEY"] = "sk-ant-api03-test"
+    try:
+        chunks = await _drain(
+            RoseClient(openrouter_key="ork-x").complete(
+                pool="rose-1-lite",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+        )
+    finally:
+        if prev_gpt is None:
+            os.environ.pop("GPT_API_KEY", None)
+        else:
+            os.environ["GPT_API_KEY"] = prev_gpt
+        if prev_anthropic is None:
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+        else:
+            os.environ["ANTHROPIC_API_KEY"] = prev_anthropic
+
+    assert seen == {"openai": 1, "anthropic": 1, "openrouter": 0}
+    meta = next((c for c in chunks if c.kind == "metadata"), None)
+    assert meta is not None and str(meta.data.get("actual_model", "")).endswith("-anthropic")
+
+
 async def test_client_api_key_tier_402_falls_through_to_waterfall():
     """End-to-end: no compute token → funded api-key tier hit → 402 → backs off
     and falls through to the OpenRouter waterfall (which serves the response)."""
@@ -4412,6 +4528,14 @@ async def run_all_tests():
     )
     await r.record_async(
         "anthropic_apikey_cooldown_mark", test_anthropic_api_key_cooldown_mark_then_on_cooldown
+    )
+    await r.record_async(
+        "openai_apikey_before_anthropic_openrouter",
+        test_client_openai_api_key_serves_before_anthropic_and_openrouter,
+    )
+    await r.record_async(
+        "openai_apikey_failure_to_anthropic",
+        test_client_openai_api_key_failure_falls_through_to_anthropic_before_openrouter,
     )
     await r.record_async(
         "anthropic_apikey_tier_402_to_waterfall", test_client_api_key_tier_402_falls_through_to_waterfall

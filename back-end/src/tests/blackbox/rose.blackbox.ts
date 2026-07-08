@@ -68,6 +68,7 @@ import type { RoseStreamChunk } from '../../providers/rose/types';
 import {
   ANTHROPIC_API_URL,
   CODEX_API_URL,
+  OPENAI_RESPONSES_API_URL,
   OPENROUTER_API_URL,
 } from '../../providers/rose/transport';
 import { SUPERVISOR_RESPONSE_SCHEMA } from '../../providers/smsSupervisor/schema';
@@ -88,6 +89,8 @@ async function runTest(name: string, fn: () => Promise<void>): Promise<TestResul
     // so without this every test would engage the api-key tier. Clear it (and the
     // shared cooldown) before each case; tests that exercise the tier opt back in.
     delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.GPT_API_KEY;
+    delete process.env.OPENAI_API_KEY;
     await __resetAnthropicApiKeyCooldown();
     await fn();
     return { name, passed: true, duration: Date.now() - start };
@@ -885,6 +888,97 @@ async function testClaudeAuth_noTokenGoesDirectToWaterfall() {
     assertEqual(anthropicCalls, 0, 'no anthropic call without claude_token');
     assertEqual(openrouterCalls, 1, 'direct to openrouter');
   } finally {
+    restoreFetch();
+  }
+}
+
+async function testOpenAiApiKey_servesBeforeAnthropicAndOpenRouter() {
+  process.env.GPT_API_KEY = 'sk-proj-test-key';
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-api03-test-key';
+  process.env.OPENROUTER_API_KEY = 'or-test-key';
+  let openAiCalls = 0;
+  let anthropicCalls = 0;
+  let openrouterCalls = 0;
+  let capturedBody: Record<string, unknown> | null = null;
+  let capturedHeaders: Record<string, string> = {};
+  installFetchStub((url, init) => {
+    if (url === OPENAI_RESPONSES_API_URL) {
+      openAiCalls++;
+      capturedHeaders = (init?.headers as Record<string, string>) ?? {};
+      capturedBody = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+      return sseResponse(RESPONSES_OK_SSE);
+    }
+    if (url === ANTHROPIC_API_URL) {
+      anthropicCalls++;
+      return sseResponse(ANTHROPIC_OK_SSE);
+    }
+    if (url === OPENROUTER_API_URL) {
+      openrouterCalls++;
+      return sseResponse(OPENROUTER_OK_SSE);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+
+  try {
+    const chunks = await collect(
+      await createStreamingCompletion({
+        model: 'rose-labs/rose-1-lite',
+        messages: [{ role: 'user', content: 'hi' }],
+      })
+    );
+    assertEqual(openAiCalls, 1, 'served by OpenAI API-key path');
+    assertEqual(anthropicCalls, 0, 'did NOT fall through to Anthropic');
+    assertEqual(openrouterCalls, 0, 'did NOT fall through to OpenRouter');
+    assertEqual(capturedHeaders.Authorization, 'Bearer sk-proj-test-key', 'sent OpenAI bearer');
+    assertEqual(capturedBody?.model, 'gpt-5.4', 'uses Rose Lite GPT model');
+    assertEqual(capturedBody?.service_tier, 'priority', 'uses GPT fast mode');
+    assert(chunks[0].actual_model.endsWith('-openai'), 'actual_model marks OpenAI key path');
+  } finally {
+    delete process.env.GPT_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    restoreFetch();
+  }
+}
+
+async function testOpenAiApiKey_failureFallsThroughToAnthropicBeforeOpenRouter() {
+  process.env.GPT_API_KEY = 'sk-proj-test-key';
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-api03-test-key';
+  process.env.OPENROUTER_API_KEY = 'or-test-key';
+  await __resetAnthropicApiKeyCooldown();
+  let openAiCalls = 0;
+  let anthropicCalls = 0;
+  let openrouterCalls = 0;
+  installFetchStub((url) => {
+    if (url === OPENAI_RESPONSES_API_URL) {
+      openAiCalls++;
+      return errorResponse(401, JSON.stringify({ error: { message: 'bad key' } }));
+    }
+    if (url === ANTHROPIC_API_URL) {
+      anthropicCalls++;
+      return sseResponse(ANTHROPIC_OK_SSE);
+    }
+    if (url === OPENROUTER_API_URL) {
+      openrouterCalls++;
+      return sseResponse(OPENROUTER_OK_SSE);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+
+  try {
+    const chunks = await collect(
+      await createStreamingCompletion({
+        model: 'rose-labs/rose-1-lite',
+        messages: [{ role: 'user', content: 'hi' }],
+      })
+    );
+    assertEqual(openAiCalls, 1, 'OpenAI API-key path attempted');
+    assertEqual(anthropicCalls, 1, 'Anthropic API-key path served after OpenAI failure');
+    assertEqual(openrouterCalls, 0, 'OpenRouter not reached');
+    assert(chunks[0].actual_model.endsWith('-anthropic'), 'actual_model marks Anthropic key path');
+  } finally {
+    delete process.env.GPT_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    await __resetAnthropicApiKeyCooldown();
     restoreFetch();
   }
 }
@@ -2642,6 +2736,14 @@ async function main(): Promise<void> {
     {
       name: 'claudeAuth / no token goes direct to waterfall',
       fn: testClaudeAuth_noTokenGoesDirectToWaterfall,
+    },
+    {
+      name: 'openai api-key / serves before Anthropic and OpenRouter',
+      fn: testOpenAiApiKey_servesBeforeAnthropicAndOpenRouter,
+    },
+    {
+      name: 'openai api-key / failure falls through to Anthropic before OpenRouter',
+      fn: testOpenAiApiKey_failureFallsThroughToAnthropicBeforeOpenRouter,
     },
     {
       name: 'anthropic api-key / serves as funded default when no compute token',

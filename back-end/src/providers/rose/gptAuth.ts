@@ -27,7 +27,7 @@ import {
 } from './errors';
 import type { PoolSpec } from './pools';
 import { parseResponsesSSE } from './streaming';
-import { postCodexStream } from './transport';
+import { postCodexStream, postOpenAIResponsesStream } from './transport';
 import type { CompletionMessage, ContentBlock, ResponseFormat, RoseStreamChunk } from './types';
 
 const MAX_ATTEMPTS = 3;
@@ -37,6 +37,7 @@ const DEFAULT_CODEX_INSTRUCTIONS = 'You are a helpful assistant.';
 
 interface BuildBodyOptions {
   poolSpec: PoolSpec;
+  modelOverride?: string;
   messages: CompletionMessage[];
   responseFormat?: ResponseFormat;
   tools?: Array<Record<string, unknown>>;
@@ -274,7 +275,7 @@ function buildInstructions(messages: CompletionMessage[]): string | undefined {
 
 function buildPromptCacheKey(opts: BuildBodyOptions, instructions?: string): string {
   const fingerprint = JSON.stringify({
-    model: opts.poolSpec.gptAuthModel,
+    model: opts.modelOverride ?? opts.poolSpec.gptAuthModel,
     instructions: instructions ?? '',
     responseFormat: opts.responseFormat?.json_schema ?? null,
   });
@@ -290,7 +291,7 @@ function normalizeReasoningEffort(effort?: string): string {
 export function buildCodexResponsesBody(opts: BuildBodyOptions): Record<string, unknown> {
   const instructions = buildInstructions(opts.messages) ?? DEFAULT_CODEX_INSTRUCTIONS;
   const body: Record<string, unknown> = {
-    model: opts.poolSpec.gptAuthModel,
+    model: opts.modelOverride ?? opts.poolSpec.gptAuthModel,
     input: buildResponsesInput(opts.messages),
     stream: true,
     store: false,
@@ -421,6 +422,109 @@ export async function* gptAuthComplete(opts: GptAuthOptions): AsyncIterable<Rose
 
   if (lastError) throw new RoseServerError(`Codex exhausted retries: ${lastError.message}`);
   throw new RoseServerError('Codex exhausted retries');
+}
+
+interface OpenAiApiKeyOptions {
+  poolSpec: PoolSpec;
+  model: string;
+  messages: CompletionMessage[];
+  responseFormat?: ResponseFormat;
+  temperature?: number;
+  effort?: string;
+  tools?: Array<Record<string, unknown>>;
+  toolChoice?: unknown;
+  openAiKey: string;
+  requestId: string;
+  callSite?: string;
+  providerFastMode?: boolean;
+  idleTimeoutMs?: number;
+  abortSignal?: AbortSignal;
+}
+
+export async function* openAiApiKeyComplete(
+  opts: OpenAiApiKeyOptions
+): AsyncIterable<RoseStreamChunk> {
+  const body = buildCodexResponsesBody({
+    poolSpec: opts.poolSpec,
+    modelOverride: opts.model,
+    messages: opts.messages,
+    responseFormat: opts.responseFormat,
+    tools: opts.tools,
+    toolChoice: opts.toolChoice,
+    temperature: opts.temperature,
+    effort: opts.effort,
+    providerFastMode: opts.providerFastMode,
+    requestId: opts.requestId,
+  });
+  const actualModel = `${opts.model}-openai`;
+
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    let response;
+    try {
+      response = await postOpenAIResponsesStream({
+        body,
+        openAiKey: opts.openAiKey,
+        requestId: opts.requestId,
+        callSite: opts.callSite,
+        abortSignal: opts.abortSignal,
+      });
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      if (attempt < MAX_ATTEMPTS - 1) {
+        await sleep(Math.min(2 ** attempt * 1000, BACKOFF_CAP_MS), opts.abortSignal);
+        continue;
+      }
+      throw new RoseServerError(`OpenAI connect/read error: ${lastError.message}`);
+    }
+
+    const status = response.status;
+
+    if (status === 200) {
+      if (!response.body) {
+        throw new RoseServerError('OpenAI 200 but empty body');
+      }
+      yield* parseResponsesSSE(response.body, {
+        actualModel,
+        poolName: 'openai-api-key',
+        requestId: opts.requestId,
+        idleTimeoutMs: opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
+      });
+      return;
+    }
+
+    const errorBody = response.errorBody ?? '';
+
+    if (status === 429) {
+      if (attempt < MAX_ATTEMPTS - 1) {
+        await sleep(backoffFor429(response.headers, attempt), opts.abortSignal);
+        continue;
+      }
+      throw new RoseRateLimitError(`OpenAI 429: ${errorBody.substring(0, 200)}`, status);
+    }
+
+    if (status === 401 || status === 403) {
+      throw new RoseAuthError(`OpenAI ${status}: ${errorBody.substring(0, 200)}`, status);
+    }
+
+    if (status === 400) {
+      throw new RoseInvalidRequest(`OpenAI 400: ${errorBody.substring(0, 200)}`, status);
+    }
+
+    if (status >= 500) {
+      if (attempt < MAX_ATTEMPTS - 1) {
+        await sleep(Math.min(2 ** attempt * 1000, BACKOFF_CAP_MS), opts.abortSignal);
+        continue;
+      }
+      throw new RoseServerError(`OpenAI ${status}: ${errorBody.substring(0, 200)}`, status);
+    }
+
+    throw new RoseError(`OpenAI ${status}: ${errorBody.substring(0, 200)}`, status);
+  }
+
+  if (lastError) throw new RoseServerError(`OpenAI exhausted retries: ${lastError.message}`);
+  throw new RoseServerError('OpenAI exhausted retries');
 }
 
 function backoffFor429(headers: Headers, attempt: number): number {

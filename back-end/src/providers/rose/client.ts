@@ -10,7 +10,9 @@
  *      cleanly.
  *   3. Tries gptAuth (direct ChatGPT/Codex) when `options.gpt_token` is set,
  *      using the same pre-content fall-through contract.
- *   4. Falls through to the pool's OpenRouter waterfall on any typed
+ *   4. Tries the shared OpenAI API key path when configured.
+ *   5. Tries the shared Anthropic API key path when configured.
+ *   6. Falls through to the pool's OpenRouter waterfall on any typed
  *      RoseError before first content.
  *   5. Wraps the normalized RoseStreamChunk stream into the OpenAI-shaped
  *      CompletionChunk DTO chat callers iterate.
@@ -27,7 +29,7 @@ import { logJson } from '../../utils/log';
 import { claudeAuthComplete } from './claudeAuth';
 import { isAnthropicApiKeyOnCooldown, markAnthropicApiKeyOnCooldown } from '../computeCredentials';
 import { isFallThroughError, RoseAuthError, RoseError, RosePaymentRequiredError } from './errors';
-import { gptAuthComplete } from './gptAuth';
+import { gptAuthComplete, openAiApiKeyComplete } from './gptAuth';
 import { getPool, poolForModel } from './pools';
 import { buildOpenAiResponseFormat } from './schema';
 import type { CompletionChunk, CompletionOptions, RoseStreamChunk } from './types';
@@ -52,9 +54,11 @@ class PreContentFallThroughError extends Error {
 }
 
 const OPENROUTER_API_KEY_ENV = 'OPENROUTER_API_KEY';
+const GPT_API_KEY_ENV = 'GPT_API_KEY';
 // Optional funded default: a plain Anthropic API key. When set, it serves any
-// request that has no working user/pool compute token, ahead of the OpenRouter
-// waterfall — so completions stay up even when the compute-token pool is empty.
+// request that has no working user/pool compute token or shared GPT key, ahead
+// of the OpenRouter waterfall — so completions stay up even when the
+// compute-token pool is empty.
 const ANTHROPIC_API_KEY_ENV = 'ANTHROPIC_API_KEY';
 
 // Shared circuit breaker for the global ANTHROPIC_API_KEY lives in the DB (see
@@ -72,9 +76,14 @@ function shortRequestId(): string {
   return randomUUID().replace(/-/g, '').slice(0, 12);
 }
 
+function openAiApiKey(): string | undefined {
+  return process.env[GPT_API_KEY_ENV];
+}
+
 function dumpDisplayModel(actualModel: string): string {
   if (actualModel.endsWith('-claude')) return actualModel.slice(0, -'-claude'.length);
   if (actualModel.endsWith('-gpt')) return actualModel.slice(0, -'-gpt'.length);
+  if (actualModel.endsWith('-openai')) return actualModel.slice(0, -'-openai'.length);
   return actualModel;
 }
 
@@ -307,6 +316,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
   // 1. claudeAuth attempt (with fall-through buffering)
   let claudeAuthFailed: RoseError | null = null;
   let gptAuthFailed: RoseError | null = null;
+  let openAiApiKeyFailed: RoseError | null = null;
   if (opts.options.claude_token) {
     try {
       yield* runWithFallThrough({
@@ -390,9 +400,56 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     }
   }
 
-  // 2.5 Anthropic API-key fallback — a funded default for any user. Engages
-  // when no compute token served (or it fell through) and an ANTHROPIC_API_KEY
-  // is configured, ahead of the OpenRouter waterfall. Direct Anthropic via
+  // 2.5 OpenAI API-key fallback — a funded GPT default for any user. Engages
+  // when no compute token served (or it fell through), before Anthropic and
+  // OpenRouter. Force provider fast mode for this funded route.
+  const sharedOpenAiKey = openAiApiKey();
+  if (sharedOpenAiKey) {
+    try {
+      yield* runWithFallThrough({
+        produce: () =>
+          openAiApiKeyComplete({
+            poolSpec,
+            model: poolSpec.gptAuthModel,
+            messages: opts.options.messages,
+            responseFormat: opts.options.response_format,
+            tools: opts.options.tools,
+            toolChoice: opts.options.tool_choice,
+            temperature: opts.options.temperature,
+            effort: opts.options.effort,
+            openAiKey: sharedOpenAiKey,
+            requestId: opts.requestId,
+            callSite: opts.callSite,
+            providerFastMode: true,
+          }),
+        emit: emitChunk,
+      });
+      log.info('openai_apikey.done', {
+        request_id: opts.requestId,
+        pool: opts.pool,
+        elapsed_ms: Date.now() - startedAt,
+        claude_auth_failed: claudeAuthFailed?.name ?? null,
+        gpt_auth_failed: gptAuthFailed?.name ?? null,
+      });
+      finalizeDump();
+      return;
+    } catch (err) {
+      if (err instanceof PreContentFallThroughError) {
+        openAiApiKeyFailed = err.cause;
+        log.info('fall_through_from_openai_apikey', {
+          request_id: opts.requestId,
+          reason: err.cause.name,
+        });
+      } else {
+        finalizeDump(err);
+        throw err;
+      }
+    }
+  }
+
+  // 2.6 Anthropic API-key fallback — a funded default for any user. Engages
+  // when no compute token or shared GPT key served (or it fell through) and an
+  // ANTHROPIC_API_KEY is configured, ahead of the OpenRouter waterfall. Direct Anthropic via
   // x-api-key (billed), reusing the claudeAuth request body.
   let anthropicApiKeyFailed: RoseError | null = null;
   const anthropicApiKey = process.env[ANTHROPIC_API_KEY_ENV];
@@ -459,6 +516,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
   if (opts.options.disable_waterfall) {
     const error =
       anthropicApiKeyFailed ??
+      openAiApiKeyFailed ??
       gptAuthFailed ??
       claudeAuthFailed ??
       new Error('Rose waterfall disabled');
@@ -496,6 +554,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     elapsed_ms: Date.now() - startedAt,
     claude_auth_failed: claudeAuthFailed?.name ?? null,
     gpt_auth_failed: gptAuthFailed?.name ?? null,
+    openai_apikey_failed: openAiApiKeyFailed?.name ?? null,
     anthropic_apikey_failed: anthropicApiKeyFailed?.name ?? null,
   });
   finalizeDump();

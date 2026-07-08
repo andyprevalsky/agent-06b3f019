@@ -24,6 +24,7 @@ logger = structlog.get_logger()
 
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+OPENAI_RESPONSES_API_URL = "https://api.openai.com/v1/responses"
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 CODEX_API_URL = "https://chatgpt.com/backend-api/codex/responses"
 
@@ -87,6 +88,13 @@ def _openrouter_headers(openrouter_key: str, referer: str = "https://roselabs.ai
         "Content-Type": "application/json",
         "HTTP-Referer": referer,
         "X-Title": "Rose Agents",
+    }
+
+
+def _openai_headers(openai_key: str) -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {openai_key}",
+        "Content-Type": "application/json",
     }
 
 
@@ -164,6 +172,46 @@ async def post_anthropic_stream(
                     error_body_len=len(error_body),
                 )
                 # Attach body to response for the caller's error classifier.
+                response._rose_error_body = error_body  # type: ignore[attr-defined]
+            yield response
+
+
+@contextlib.asynccontextmanager
+async def post_openai_responses_stream(
+    *,
+    body: Dict[str, Any],
+    openai_key: str,
+    request_id: str,
+    agent_id: Optional[str] = None,
+    call_site: Optional[str] = None,
+    connect_timeout_s: float = DEFAULT_CONNECT_TIMEOUT_S,
+) -> AsyncIterator[httpx.Response]:
+    """Open a streaming POST to OpenAI Responses with a project API key."""
+    timeout = httpx.Timeout(connect=connect_timeout_s, read=None, write=connect_timeout_s, pool=connect_timeout_s)
+    logger.info(
+        "rose.transport.openai.start",
+        request_id=request_id,
+        agent_id=agent_id,
+        call_site=call_site,
+        model=body.get("model"),
+    )
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        async with client.stream(
+            "POST",
+            OPENAI_RESPONSES_API_URL,
+            headers=_openai_headers(openai_key),
+            json=body,
+        ) as response:
+            if response.status_code >= 400:
+                error_body = (await response.aread()).decode("utf-8", errors="replace")
+                logger.warning(
+                    "rose.transport.openai.error",
+                    request_id=request_id,
+                    agent_id=agent_id,
+                    call_site=call_site,
+                    status=response.status_code,
+                    error_body_len=len(error_body),
+                )
                 response._rose_error_body = error_body  # type: ignore[attr-defined]
             yield response
 
