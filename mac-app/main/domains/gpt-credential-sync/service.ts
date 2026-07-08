@@ -102,6 +102,11 @@ function credentialHash(credentialsJson: string): string {
   return crypto.createHash('sha256').update(credentialsJson).digest('hex');
 }
 
+async function backendGptIntegrationIsConnected(): Promise<boolean> {
+  const integration = await IntegrationCache.getIntegration('gpt_code');
+  return integration?.status === 'CONNECTED' && integration.isActive !== false;
+}
+
 export async function syncCredentials(): Promise<SyncResult> {
   const session = await AuthService.getSession();
   if (!session) {
@@ -151,7 +156,8 @@ export async function syncExistingCredentialsIfChanged(): Promise<SyncResult> {
   if (validation !== null) return validation;
 
   const nextHash = credentialHash(credentialsJson);
-  if (nextHash === lastUploadedCredentialsHash) {
+  const backendConnected = await backendGptIntegrationIsConnected();
+  if (nextHash === lastUploadedCredentialsHash && backendConnected) {
     return { success: true, message: 'unchanged' };
   }
 

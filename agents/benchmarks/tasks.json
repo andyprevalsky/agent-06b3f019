@@ -18,18 +18,18 @@
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": null,
-    "start_phase": "plan",
+    "start_phase": null,
     "min_agent_count": 50,
     "bench": "rose-bench"
   },
   {
     "name": "single-creator-arm",
     "title": "Single-Creator Arm (baseline for mass-agent throttling)",
-    "prompt": "Analyze exactly one assigned creator using only public web/platform data and return a single structured summary. Focus only on Andrew Huberman (Huberman Lab) in the health/longevity/technology niche, across YouTube, Instagram, TikTok, and Substack. Pull their posting cadence, hook formulas, top 5 performing pieces of the last 90 days, and the gaps in what they cover.",
+    "prompt": "You are analyzing ONE creator for Aman Gottumukkala, a technology founder building a personal brand at the intersection of health, longevity, technology, and founder journey (exact angle still being refined). The attached item is a JSON object describing your assigned creator (name, niche/archetype, primary platforms, handles/URLs, rank). Analyze ONLY that creator.\n\nResearch the creator's public activity in the last 90 days (approximately 2026-04-04 through 2026-07-03) across YouTube, Instagram, TikTok, and Substack where applicable. Use web searches and public pages. Do NOT fabricate metrics — if exact data is unavailable, say so and use the best available public proxy (e.g., typical view counts, subscriber counts, engagement patterns, older representative content).\n\nReturn a structured creator analysis with these fields:\n1. creator_name — the creator's name.\n2. rank_from_initial_list — the rank number from the item.\n3. platform_handles_and_urls — string listing known handles/URLs for YouTube, Instagram, TikTok, Substack (mark N/A where not present).\n4. posting_cadence_by_platform — per-platform posting frequency with observed dates/examples and a confidence note (high/medium/low).\n5. hook_formulas — 3 to 7 recurring hook formulas the creator uses, each with a concrete example title/opening from their actual content.\n6. top_5_performing_pieces_last_90_days — 5 pieces from roughly the last 90 days, each with platform, title/caption/topic, URL if available, approximate date, publicly visible metrics or best-available proxy, and a one-line hypothesis for why it performed. If 90-day data is unavailable for a platform, clearly mark it as a proxy/older representative piece.\n7. core_content_pillars — the creator's main recurring topics.\n8. audience_persona — who they serve.\n9. monetization_funnels — visible offers, products, sponsorships, memberships, newsletters, courses, supplements, etc.\n10. content_gaps — what they do NOT cover well (topics, formats, audiences).\n11. opportunities_for_aman — how Aman (founder-led health/longevity/tech brand) could exploit those gaps without copying.\n12. engagement_approach — how Aman should engage with this creator (comments, replies, collab angles) to get on their radar.\n13. citations_sources — URLs/source notes used.\n14. confidence_level — high/medium/low overall confidence with a brief note on what was estimated.\n\nBe specific and grounded. Prefer real titles, real URLs, and real observed patterns over generic statements.\n\nUse this row context for the task below.\nRow item:\n{\"creator_name\": \"Andrew Huberman\", \"handles\": \"YouTube: @hubermanlab, IG: @hubermanlab, TikTok: @hubermanlab, Newsletter: hubermanlab.com Neural Network\", \"niche\": \"Neuroscience & health protocols\", \"platforms\": \"YouTube, Instagram, TikTok, Substack/newsletter\", \"rank\": 1}",
     "timeout_seconds": 600,
     "is_chat_mode": false,
     "expected_tools": [
-      "web_search"
+      "spawn_agent"
     ],
     "tags": [
       "load-test"
@@ -40,7 +40,7 @@
     "attachment": null,
     "approval_handling": null,
     "start_phase": "execute",
-    "min_agent_count": 1,
+    "min_agent_count": 0,
     "bench": "pipeline-e2e"
   },
   {

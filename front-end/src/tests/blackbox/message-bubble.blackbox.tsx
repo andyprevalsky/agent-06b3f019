@@ -22,11 +22,13 @@ import React from 'react';
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { http, HttpResponse } from 'msw';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import MessageBubble from '@/features/terminal-component-group/components/MessageBubble';
 import { AgentContext } from '@/features/agent-context';
 import type { AgentContextValue } from '@/features/agent-context';
 import type { Message } from '@/lib/api';
+import { server } from './msw/server';
 
 function makeAgentCtx(overrides: Partial<AgentContextValue> = {}): AgentContextValue {
   const streamedTextsRef = { current: new Set<string>() } as React.MutableRefObject<Set<string>>;
@@ -67,6 +69,17 @@ function baseMessage(overrides: Partial<Message> = {}): Message {
     role: 'ASSISTANT',
     ...overrides,
   };
+}
+
+function storeTestSession() {
+  localStorage.setItem(
+    'rose-session',
+    JSON.stringify({
+      access_token: 'test-token',
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+      user: { id: 'user-1' },
+    }),
+  );
 }
 
 describe('MessageBubble', () => {
@@ -167,6 +180,40 @@ describe('MessageBubble', () => {
     expect(screen.queryByText('Thought')).not.toBeInTheDocument();
   });
 
+  it('auto-downloads and renders Markdown attachments inline', async () => {
+    storeTestSession();
+    server.use(
+      http.get('http://localhost:3001/api/agents/agent-md/attachments/fp-md/url', () =>
+        HttpResponse.json({ signed_url: 'https://signed.test/report.md' }),
+      ),
+      http.get(
+        'https://signed.test/report.md',
+        () =>
+          new HttpResponse('# Report\n\n- item one\n- item two', {
+            headers: { 'Content-Type': 'text/markdown' },
+          }),
+      ),
+    );
+    const msg = baseMessage({
+      role: 'ASSISTANT',
+      text: '',
+      file_pointer: {
+        id: 'fp-md',
+        storage_path: 'user-1/report.md',
+        original_filename: 'report.md',
+        mime_type: 'application/octet-stream',
+        size_bytes: 29,
+        created_at: new Date().toISOString(),
+      },
+    });
+
+    renderBubble(<MessageBubble message={msg} agentId="agent-md" />);
+
+    expect(await screen.findByRole('heading', { name: 'Report' })).toBeInTheDocument();
+    expect(screen.getByText('item one')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Download report.md' })).toBeInTheDocument();
+  });
+
   it('renders TOOL FINISHED as tool card with title and chevron', async () => {
     const msg = baseMessage({
       role: 'TOOL',
@@ -263,10 +310,10 @@ describe('MessageBubble', () => {
     await waitFor(() => expect(screen.getByText('Foo failed')).toBeInTheDocument());
   });
 
-  it('renders thought TOOL IN_PROGRESS as "Thinking" shimmer', async () => {
+  it('renders thought TOOL IN_PROGRESS as collapsed "Thinking" shimmer', async () => {
     const msg = baseMessage({
       role: 'TOOL',
-      text: '',
+      text: 'internal synthesis prompt should stay hidden',
       metadata: {
         toolCallId: 'tc-4',
         toolName: 'thought',
@@ -276,6 +323,9 @@ describe('MessageBubble', () => {
     });
     renderBubble(<MessageBubble message={msg} />);
     await waitFor(() => expect(screen.getByText('Thinking')).toBeInTheDocument());
+    expect(
+      screen.queryByText('internal synthesis prompt should stay hidden'),
+    ).not.toBeInTheDocument();
   });
 
   it('renders attention message (isUserAttentionMessage) with waiting indicator', async () => {

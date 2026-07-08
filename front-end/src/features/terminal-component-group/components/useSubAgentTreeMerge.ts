@@ -61,13 +61,20 @@ function isForEachPlaceholder(m: Message): boolean {
   );
 }
 
-/** Base toolCallIds that already have live for_each child spawn-tree rows. */
-function collectForEachChildBaseCallIds(messages: Message[]): Set<string> {
+function normalizedSpawnGroupId(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  return value.startsWith('for_each:') ? value.slice('for_each:'.length) : value;
+}
+
+/** Group ids that already have live for_each child spawn-tree rows. */
+function collectForEachChildGroupIds(messages: Message[]): Set<string> {
   const ids = new Set<string>();
   for (const m of messages) {
     if (!isSpawnTree(m)) continue;
+    const spawnGroupId = normalizedSpawnGroupId(m.metadata?.spawnGroupId);
+    if (spawnGroupId) ids.add(spawnGroupId);
     const toolCallId = m.metadata?.toolCallId;
-    if (typeof toolCallId !== 'string' || !toolCallId.includes(':')) continue;
+    if (typeof toolCallId !== 'string') continue;
     const base = baseToolCallId(toolCallId);
     if (base) ids.add(base);
   }
@@ -125,12 +132,8 @@ function collectForEachTerminalGroups(messages: Message[]): Map<string, ForEachT
 }
 
 function spawnGroupKey(msg: Message): string {
-  const spawnGroupId = msg.metadata!.spawnGroupId;
-  if (typeof spawnGroupId === 'string' && spawnGroupId.length > 0) {
-    return spawnGroupId.startsWith('for_each:')
-      ? spawnGroupId.slice('for_each:'.length)
-      : spawnGroupId;
-  }
+  const spawnGroupId = normalizedSpawnGroupId(msg.metadata!.spawnGroupId);
+  if (spawnGroupId) return spawnGroupId;
   const toolCallId = msg.metadata?.toolCallId;
   const base = baseToolCallId(toolCallId);
   if (base) return base;
@@ -228,7 +231,7 @@ function buildMergedMessages(
   const newCache = new Map<string, Message>();
   const result: Message[] = [];
   const terminalGroups = collectForEachTerminalGroups(messages);
-  const forEachChildBaseCallIds = collectForEachChildBaseCallIds(messages);
+  const forEachChildGroupIds = collectForEachChildGroupIds(messages);
 
   for (let i = 0; i < messages.length; i++) {
     if (skipIndices.has(i)) continue;
@@ -238,7 +241,7 @@ function buildMergedMessages(
     // the child tree (grouped below) becomes the single visible row.
     if (isForEachPlaceholder(msg)) {
       const base = baseToolCallId(msg.metadata?.toolCallId);
-      if (base && forEachChildBaseCallIds.has(base)) continue;
+      if (base && forEachChildGroupIds.has(base)) continue;
     }
 
     if (isForEachTerminal(msg)) {
@@ -258,12 +261,23 @@ function buildMergedMessages(
     };
     const idsKey = group.ids.join(',');
 
+    const merged = { ...msg, metadata: { ...msg.metadata, subAgentIds: group.ids } };
     const cached = prevCache.get(key);
-    if (cached && (cached.metadata?.subAgentIds as string[])?.join(',') === idsKey) {
+    const cacheMatchesCurrentMessage =
+      cached &&
+      cached.content === merged.content &&
+      cached.role === merged.role &&
+      cached.metadata?.toolStatus === merged.metadata?.toolStatus &&
+      cached.metadata?.toolCallId === merged.metadata?.toolCallId &&
+      cached.metadata?.busId === merged.metadata?.busId &&
+      cached.metadata?.spawnGroupId === merged.metadata?.spawnGroupId &&
+      cached.metadata?.forEachAggregate === merged.metadata?.forEachAggregate &&
+      (cached.metadata?.subAgentIds as string[])?.join(',') === idsKey;
+
+    if (cacheMatchesCurrentMessage) {
       result.push(cached);
       newCache.set(key, cached);
     } else {
-      const merged = { ...msg, metadata: { ...msg.metadata, subAgentIds: group.ids } };
       result.push(merged);
       newCache.set(key, merged);
     }

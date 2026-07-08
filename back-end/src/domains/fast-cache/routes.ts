@@ -1,9 +1,10 @@
 /**
  * Fast Mode cache routes — thin controller.
  *
- * POST /api/fast-cache/get    { key }                       -> { hit, value, blobPath }
- * POST /api/fast-cache/set    { key, kind, goalHash, value } -> { ok }
- * POST /api/fast-cache/purge  { goalHash }                   -> { removed }
+ * POST /api/fast-cache/get      { key }                       -> { hit, value, blobPath }
+ * POST /api/fast-cache/get-many { keys }                      -> { results }
+ * POST /api/fast-cache/set      { key, kind, goalHash, value } -> { ok }
+ * POST /api/fast-cache/purge    { goalHash }                   -> { removed }
  *
  * The Python agent + browser cache call these. Gating is the caller's job: when
  * Fast Mode is off, callers never hit these routes at all.
@@ -14,12 +15,13 @@ import { z } from 'zod';
 import { type AuthRequest, authenticate } from '../../providers/auth';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { createLogger } from '../../providers/logger';
-import { cacheGet, cacheSet, cachePurge, agentFastMode } from './service';
+import { cacheGet, cacheGetMany, cacheSet, cachePurge, agentFastMode } from './service';
 
 const log = createLogger('FastCache');
 const router = Router();
 
 const getSchema = z.object({ key: z.string().min(1) });
+const getManySchema = z.object({ keys: z.array(z.string().min(1)).min(1).max(500) });
 const setSchema = z.object({
   key: z.string().min(1),
   kind: z.enum([
@@ -46,6 +48,16 @@ router.post(
     const { key } = getSchema.parse(req.body);
     const result = await cacheGet(key);
     res.json(result);
+  })
+);
+
+router.post(
+  '/get-many',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const { keys } = getManySchema.parse(req.body);
+    const results = await cacheGetMany(keys);
+    res.json({ results });
   })
 );
 

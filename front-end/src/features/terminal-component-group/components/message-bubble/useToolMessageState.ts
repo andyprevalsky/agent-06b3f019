@@ -27,13 +27,13 @@ export function useToolMessageState(
   const [isExpanded, setIsExpanded] = useState(false);
   const isThought = data.toolName === 'thought';
   const isCloudAgentLifecycle = data.toolName === 'cloud_agent';
-  const [forceExpanded, setForceExpanded] = useState(isThought && data.status === 'IN_PROGRESS');
+  const [forceExpanded, setForceExpanded] = useState(false);
 
   useEffect(() => {
     if (!isThought) return;
     if (data.status === 'IN_PROGRESS') {
-      setForceExpanded(true);
-      setIsExpanded(true);
+      setForceExpanded(false);
+      setIsExpanded(false);
     } else {
       setForceExpanded(false);
       setIsExpanded(false);

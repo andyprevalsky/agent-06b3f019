@@ -62,9 +62,29 @@ python benchmarks/run_benchmark.py --suite all --url http://localhost:3001
 # Run without retry on failure
 python benchmarks/run_benchmark.py --suite smoke --no-retry
 
+# Run a benchmark until root message index 42, export a source, and create a paused checkpoint
+../scripts/run-bench chat-mode --checkpoint 42 --checkpoint-no-start
+
+# Resume that paused checkpoint later
+../scripts/run-bench chat-mode \
+  --checkpoint-start-agent-id <agent-id> \
+  --checkpoint-manifest .context/benchmarks/<run-id>/checkpoints/chat-mode.json
+
 # Compare two runs
 python benchmarks/run_benchmark.py --compare runs/A.json runs/B.json
 ```
+
+`scripts/run-bench <task> --checkpoint <turn_n>` uses the normal local benchmark
+orchestrator: it starts an isolated stack, runs the selected benchmark with its
+usual fixtures/attachments until the root transcript contains that message index,
+pauses the source agent, exports root/tree checkpoint JSON, clones that exported
+state, starts the workflow at `execute_dag_resume`, polls the normal benchmark
+evaluator, and validates post-checkpoint reasoning-row hygiene.
+For `test-mass-agent-run-0`, the runner also enforces the expected post-fanout
+visible-card sequence. Use `--checkpoint-no-start` to leave a paused workflow
+open in the local FE; the runner keeps that isolated stack alive and prints the
+resume command. To reuse a pre-existing export instead of generating one, pass
+`--checkpoint-source-json`; optional tree cloning uses `--checkpoint-tree-json`.
 
 ## Suites (tags)
 

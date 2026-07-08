@@ -101,79 +101,146 @@ export async function collectFixture(
   const tree = await agentTree(rootAgentId);
   const agentIds = tree.agents.map((agent) => agent.id);
   const rows: JsonRows = {};
-  rows.User = asArray(await prisma.user.findUnique({ where: { userId: tree.userId } }));
-  rows.Agent = await prisma.agent.findMany({ where: { id: { in: agentIds } } });
-  rows.AgentTool = await prisma.agentTool.findMany({ where: { agentId: { in: agentIds } } });
+
+  const [
+    user,
+    agents,
+    agentTools,
+    verifiers,
+    messages,
+    toolUsages,
+    purchaseSpends,
+    attentionRequests,
+    browserSessions,
+    claudeCodeSessions,
+    people,
+    integrations,
+    userEnvironmentRows,
+    credentialPropagations,
+    toolSideEffects,
+    smsShortcodes,
+  ] = await Promise.all([
+    prisma.user.findUnique({ where: { userId: tree.userId } }),
+    prisma.agent.findMany({ where: { id: { in: agentIds } } }),
+    prisma.agentTool.findMany({ where: { agentId: { in: agentIds } } }),
+    prisma.verifier.findMany({ where: { agentId: { in: agentIds } } }),
+    prisma.message.findMany({
+      where: { agentId: { in: agentIds } },
+      orderBy: { timestamp: 'asc' },
+    }),
+    prisma.toolUsage.findMany({ where: { agentId: { in: agentIds } } }),
+    prisma.purchaseSpend.findMany({
+      where: { agentId: { in: agentIds } },
+    }),
+    prisma.agentAttentionRequest.findMany({
+      where: { agentId: { in: agentIds } },
+    }),
+    prisma.browserSession.findMany({
+      where: { agentId: { in: agentIds } },
+    }),
+    prisma.claudeCodeSession.findMany({
+      where: { agentId: { in: agentIds } },
+    }),
+    prisma.person.findMany({ where: { userId: tree.userId } }),
+    prisma.integration.findMany({ where: { userId: tree.userId } }),
+    collectUserEnvironmentRows(tree.userId),
+    prisma.agentRunCredentialPropagation.findMany({
+      where: { agentId: { in: agentIds } },
+    }),
+    prisma.toolSideEffect.findMany({
+      where: { OR: agentIds.map((id) => ({ operationKey: { contains: id } })) },
+    }),
+    prisma.smsShortcode.findMany({ where: { agentId: { in: agentIds } } }),
+  ]);
+
+  rows.User = asArray(user);
+  rows.Agent = agents;
+  rows.AgentTool = agentTools;
+  rows.Verifier = verifiers;
+  rows.Message = messages;
+  rows.ToolUsage = toolUsages;
+  rows.PurchaseSpend = purchaseSpends;
+  rows.AgentAttentionRequest = attentionRequests;
+  rows.BrowserSession = browserSessions;
+  rows.ClaudeCodeSession = claudeCodeSessions;
+  rows.Person = people;
+  rows.Integration = integrations;
+  Object.assign(rows, userEnvironmentRows);
+  rows.AgentRunCredentialPropagation = credentialPropagations;
+  rows.ToolSideEffect = toolSideEffects;
+  rows.SmsShortcode = smsShortcodes;
+
   const toolIds = rows.AgentTool.map((row) => (row as { toolId?: string }).toolId).filter(
     (id): id is string => typeof id === 'string'
   );
-  rows.Tool =
-    toolIds.length > 0 ? await prisma.tool.findMany({ where: { id: { in: toolIds } } }) : [];
-  rows.Verifier = await prisma.verifier.findMany({ where: { agentId: { in: agentIds } } });
-  rows.Message = await prisma.message.findMany({
-    where: { agentId: { in: agentIds } },
-    orderBy: { timestamp: 'asc' },
-  });
-  rows.ToolUsage = await prisma.toolUsage.findMany({ where: { agentId: { in: agentIds } } });
-  rows.PurchaseSpend = await prisma.purchaseSpend.findMany({
-    where: { agentId: { in: agentIds } },
-  });
-  rows.AgentAttentionRequest = await prisma.agentAttentionRequest.findMany({
-    where: { agentId: { in: agentIds } },
-  });
   const attentionIds = ids(rows.AgentAttentionRequest);
-  rows.UserAuthAssistanceRequest =
-    attentionIds.length > 0
-      ? await prisma.userAuthAssistanceRequest.findMany({ where: { id: { in: attentionIds } } })
-      : [];
-  rows.BrowserSession = await prisma.browserSession.findMany({
-    where: { agentId: { in: agentIds } },
-  });
   const contextIds = rows.BrowserSession.map(
     (row) => (row as { contextId?: string }).contextId
   ).filter((id): id is string => typeof id === 'string');
-  rows.BrowserContext =
-    contextIds.length > 0
-      ? await prisma.browserContext.findMany({ where: { id: { in: contextIds } } })
-      : [];
-  rows.ClaudeCodeSession = await prisma.claudeCodeSession.findMany({
-    where: { agentId: { in: agentIds } },
-  });
-  rows.Person = await prisma.person.findMany({ where: { userId: tree.userId } });
   const personIds = ids(rows.Person);
-  rows.MessageRecord =
-    personIds.length > 0
-      ? await prisma.messageRecord.findMany({ where: { personId: { in: personIds } } })
-      : [];
-  rows.Integration = await prisma.integration.findMany({ where: { userId: tree.userId } });
   const integrationIds = ids(rows.Integration);
-  rows.EmailIntegrationCredential =
-    integrationIds.length > 0
-      ? await prisma.emailIntegrationCredential.findMany({
-          where: { integrationId: { in: integrationIds } },
-        })
-      : [];
-  await collectUserEnvironmentRows(rows, tree.userId);
-  rows.AgentRunCredentialPropagation = await prisma.agentRunCredentialPropagation.findMany({
-    where: { agentId: { in: agentIds } },
-  });
-  rows.ToolSideEffect = await prisma.toolSideEffect.findMany({
-    where: { OR: agentIds.map((id) => ({ operationKey: { contains: id } })) },
-  });
-  rows.SmsShortcode = await prisma.smsShortcode.findMany({ where: { agentId: { in: agentIds } } });
+
+  const [tools, userAuthAssistanceRequests, browserContexts, messageRecords, emailCredentials] =
+    await Promise.all([
+      toolIds.length > 0 ? prisma.tool.findMany({ where: { id: { in: toolIds } } }) : [],
+      attentionIds.length > 0
+        ? prisma.userAuthAssistanceRequest.findMany({ where: { id: { in: attentionIds } } })
+        : [],
+      contextIds.length > 0
+        ? prisma.browserContext.findMany({ where: { id: { in: contextIds } } })
+        : [],
+      personIds.length > 0
+        ? prisma.messageRecord.findMany({ where: { personId: { in: personIds } } })
+        : [],
+      integrationIds.length > 0
+        ? prisma.emailIntegrationCredential.findMany({
+            where: { integrationId: { in: integrationIds } },
+          })
+        : [],
+    ]);
+
+  rows.Tool = tools;
+  rows.UserAuthAssistanceRequest = userAuthAssistanceRequests;
+  rows.BrowserContext = browserContexts;
+  rows.MessageRecord = messageRecords;
+  rows.EmailIntegrationCredential = emailCredentials;
   return buildFixture(rootAgentId, phase, tree.userId, agentIds, rows);
 }
 
-async function collectUserEnvironmentRows(rows: JsonRows, userId: string): Promise<void> {
-  rows.Cookie = await prisma.cookie.findMany({ where: { userId } });
-  rows.BrowserPassword = await prisma.browserPassword.findMany({ where: { userId } });
-  rows.CookieBundle = await prisma.cookieBundle.findMany({ where: { userId } });
-  rows.SteelSessionAuth = await prisma.steelSessionAuth.findMany({ where: { userId } });
-  rows.MintedAccount = await prisma.mintedAccount.findMany({ where: { userId } });
-  rows.PasskeyCredential = await prisma.passkeyCredential.findMany({ where: { userId } });
-  rows.AgentIdentity = asArray(await prisma.agentIdentity.findUnique({ where: { userId } }));
-  rows.AgentPhoneMessage = await prisma.agentPhoneMessage.findMany({ where: { userId } });
-  rows.SmsSession = asArray(await prisma.smsSession.findUnique({ where: { userId } }));
+async function collectUserEnvironmentRows(userId: string): Promise<JsonRows> {
+  const [
+    cookies,
+    browserPasswords,
+    cookieBundles,
+    steelSessionAuths,
+    mintedAccounts,
+    passkeyCredentials,
+    agentIdentity,
+    agentPhoneMessages,
+    smsSession,
+  ] = await Promise.all([
+    prisma.cookie.findMany({ where: { userId } }),
+    prisma.browserPassword.findMany({ where: { userId } }),
+    prisma.cookieBundle.findMany({ where: { userId } }),
+    prisma.steelSessionAuth.findMany({ where: { userId } }),
+    prisma.mintedAccount.findMany({ where: { userId } }),
+    prisma.passkeyCredential.findMany({ where: { userId } }),
+    prisma.agentIdentity.findUnique({ where: { userId } }),
+    prisma.agentPhoneMessage.findMany({ where: { userId } }),
+    prisma.smsSession.findUnique({ where: { userId } }),
+  ]);
+
+  return {
+    Cookie: cookies,
+    BrowserPassword: browserPasswords,
+    CookieBundle: cookieBundles,
+    SteelSessionAuth: steelSessionAuths,
+    MintedAccount: mintedAccounts,
+    PasskeyCredential: passkeyCredentials,
+    AgentIdentity: asArray(agentIdentity),
+    AgentPhoneMessage: agentPhoneMessages,
+    SmsSession: asArray(smsSession),
+  };
 }
 
 function buildFixture(

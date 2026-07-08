@@ -164,6 +164,26 @@ describe('MessageList thinking states', () => {
     expect(document.body.textContent).toMatch(/\d+\.\ds·0 tokens/);
   });
 
+  it('renders concurrent assistant streams as separate thinking rows', async () => {
+    const ctx = makeAgentCtx({
+      agent: makeAgent({ status: 'ACTIVE' }),
+      streamingBubbles: new Map([
+        [
+          'sb-1',
+          { text: 'first stream', sequence: 1, done: false, startedAtMs: Date.now() - 2000 },
+        ],
+        [
+          'sb-2',
+          { text: 'second stream', sequence: 1, done: false, startedAtMs: Date.now() - 1000 },
+        ],
+      ]),
+    });
+    renderList(ctx);
+    await waitFor(() => expect(screen.queryAllByText('Thinking')).toHaveLength(2), {
+      timeout: 1200,
+    });
+  });
+
   it('does not render status banners inside a sub-agent panel', () => {
     const ctx = makeAgentCtx({
       agent: makeAgent({ status: 'PAUSED' }),

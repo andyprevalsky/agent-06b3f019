@@ -662,9 +662,11 @@ async def _stop_playwright_resources(
     playwright_instance: Optional[Any],
     agent_id: str,
     close_browser: bool = True,
+    driver_pid: Optional[int] = None,
 ) -> None:
     """Disconnect Playwright's CDP client and stop its local driver process."""
     driver_process = _playwright_driver_process(playwright_instance)
+    driver_pid = driver_pid or getattr(driver_process, "pid", None)
 
     if playwright_browser and close_browser:
         try:
@@ -684,6 +686,7 @@ async def _stop_playwright_resources(
         except Exception as e:
             logger.warning("Failed to stop Playwright instance", agent_id=agent_id, error=str(e))
         await _reap_playwright_driver_process(driver_process, agent_id)
+    await _reap_playwright_driver_pid(driver_pid, agent_id)
 
 
 def _playwright_driver_process(playwright_instance: Optional[Any]) -> Optional[Any]:
@@ -735,6 +738,53 @@ async def _reap_playwright_driver_process(process: Optional[Any], agent_id: str)
         return
     except Exception as e:
         logger.warning("Failed to kill Playwright driver process", agent_id=agent_id, error=str(e))
+
+
+def _playwright_driver_command_matches(command: str) -> bool:
+    return "playwright/driver" in command and "run-driver" in command
+
+
+async def _reap_playwright_driver_pid(pid: Optional[int], agent_id: str) -> None:
+    if not pid:
+        return
+
+    try:
+        import psutil
+    except Exception as e:
+        logger.debug("psutil unavailable for Playwright driver PID reap", agent_id=agent_id, pid=pid, error=str(e))
+        return
+
+    try:
+        proc = psutil.Process(pid)
+        command = " ".join(proc.cmdline()) or proc.name()
+        if not _playwright_driver_command_matches(command):
+            logger.debug(
+                "Skipping Playwright driver PID reap because command no longer matches",
+                agent_id=agent_id,
+                pid=pid,
+                command=command[:240],
+            )
+            return
+        if proc.status() == psutil.STATUS_ZOMBIE:
+            return
+
+        proc.terminate()
+        try:
+            await asyncio.to_thread(proc.wait, 2)
+            logger.warning("Terminated lingering Playwright driver PID", agent_id=agent_id, pid=pid)
+            return
+        except psutil.TimeoutExpired:
+            pass
+
+        proc.kill()
+        await asyncio.to_thread(proc.wait, 2)
+        logger.warning("Killed lingering Playwright driver PID", agent_id=agent_id, pid=pid)
+    except ProcessLookupError:
+        return
+    except psutil.NoSuchProcess:
+        return
+    except Exception as e:
+        logger.warning("Failed to reap Playwright driver PID", agent_id=agent_id, pid=pid, error=str(e))
 
 
 def _disable_cdp_websocket_proxy() -> bool:
@@ -1892,57 +1942,64 @@ async def _finalize_browser_recording_for_fe(
     if not task_id:
         return None
 
-    recording_path = await browser_recorder.close(include_steel_media=False)
-    if not recording_path:
-        return None
-
-    recording_file_pointer = None
-    html_bytes: Optional[bytes] = None
+    cleanup_local_artifacts = False
     try:
-        html_bytes = browser_recorder.export_inline_html_bytes()
-        if html_bytes:
-            recording_file_pointer = await upload_to_storage(
-                user_id=user_id,
-                file_content=html_bytes,
-                filename=f"browser-recording-{task_id}.html",
-                mime_type="text/html",
-            )
-            logger.info(
-                "Browser recording uploaded",
+        recording_path = await browser_recorder.close(include_steel_media=False)
+        if not recording_path:
+            return None
+
+        recording_file_pointer = None
+        html_bytes: Optional[bytes] = None
+        try:
+            html_bytes = browser_recorder.export_inline_html_bytes()
+            if html_bytes:
+                recording_file_pointer = await upload_to_storage(
+                    user_id=user_id,
+                    file_content=html_bytes,
+                    filename=f"browser-recording-{task_id}.html",
+                    mime_type="text/html",
+                )
+                logger.info(
+                    "Browser recording uploaded",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    bytes=len(html_bytes),
+                    has_pointer=bool(recording_file_pointer),
+                )
+        except Exception as exc:  # noqa: BLE001 — recording upload is best-effort
+            logger.warning(
+                "Browser recording upload failed",
                 agent_id=agent_id,
                 task_id=task_id,
-                bytes=len(html_bytes),
-                has_pointer=bool(recording_file_pointer),
+                error=repr(exc),
+                html_bytes=len(html_bytes) if isinstance(html_bytes, (bytes, bytearray)) else None,
             )
-    except Exception as exc:  # noqa: BLE001 — recording upload is best-effort
-        logger.warning(
-            "Browser recording upload failed",
-            agent_id=agent_id,
-            task_id=task_id,
-            error=repr(exc),
-            html_bytes=len(html_bytes) if isinstance(html_bytes, (bytes, bytearray)) else None,
-        )
 
-    await save_browser_action_message(
-        agent_id=agent_id,
-        title="Browser recording saved",
-        task_id=task_id,
-        message=f"Local browser recording: {recording_path}",
-        status=MessageStatus.FINISHED,
-        browser_url=browser_url or "",
-        action_type="recording",
-        tool_call_id=str(uuid_module.uuid4()),
-        extra_metadata={
+        await save_browser_action_message(
+            agent_id=agent_id,
+            title="Browser recording saved",
+            task_id=task_id,
+            message=f"Local browser recording: {recording_path}",
+            status=MessageStatus.FINISHED,
+            browser_url=browser_url or "",
+            action_type="recording",
+            tool_call_id=str(uuid_module.uuid4()),
+            extra_metadata={
+                "recording_path": str(recording_path),
+                "recording_file_pointer": recording_file_pointer,
+                "browser_session_metadata": browser_session_metadata,
+            },
+        )
+        cleanup_local_artifacts = bool(recording_file_pointer)
+        return {
             "recording_path": str(recording_path),
             "recording_file_pointer": recording_file_pointer,
-            "browser_session_metadata": browser_session_metadata,
-        },
-    )
-    return {
-        "recording_path": str(recording_path),
-        "recording_file_pointer": recording_file_pointer,
-        "html_bytes": len(html_bytes) if isinstance(html_bytes, (bytes, bytearray)) else None,
-    }
+            "html_bytes": len(html_bytes) if isinstance(html_bytes, (bytes, bytearray)) else None,
+        }
+    finally:
+        cleanup = getattr(browser_recorder, "cleanup_local_artifacts", None)
+        if callable(cleanup):
+            cleanup(persisted=cleanup_local_artifacts)
 
 
 async def _finalize_browser_recording_for_fe_resilient(
@@ -2126,6 +2183,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     input_page = None
     playwright_browser = None
     playwright_instance = None
+    playwright_driver_pid: Optional[int] = None
     humanizer = None
     browser_recorder: Optional[BrowserAgentRecorder] = None
     browser_network_recorder: Optional[BrowserNetworkRecorder] = None
@@ -2437,6 +2495,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
 
         async def _setup_browser():
             """Connect DOMService + Playwright, apply fingerprint, init humanizer."""
+            nonlocal playwright_driver_pid
             _disable_cdp_websocket_proxy()
             _dom_service = DOMService(cdp_url=cdp_url)
             _playwright_instance = None
@@ -2459,6 +2518,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
 
                 _pw_instance = await async_playwright().start()
                 _playwright_instance = _pw_instance
+                playwright_driver_pid = getattr(_playwright_driver_process(_pw_instance), "pid", None)
                 try:
                     _pw_browser = await _pw_instance.chromium.connect_over_cdp(cdp_url)
                 except BaseException:
@@ -2532,7 +2592,12 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             except BaseException:
                 with contextlib.suppress(Exception):
                     await _dom_service.disconnect()
-                await _stop_playwright_resources(_playwright_browser, _playwright_instance, agent_id)
+                await _stop_playwright_resources(
+                    _playwright_browser,
+                    _playwright_instance,
+                    agent_id,
+                    driver_pid=playwright_driver_pid,
+                )
                 raise
 
             return (
@@ -3505,6 +3570,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     playwright_instance,
                     agent_id,
                     close_browser=False,
+                    driver_pid=playwright_driver_pid,
                 )
                 playwright_browser = None
                 playwright_instance = None
@@ -4572,7 +4638,12 @@ Based on this feedback, I need to continue working on the task and address the i
         if dom_service:
             with contextlib.suppress(Exception):
                 await dom_service.disconnect()
-        await _stop_playwright_resources(playwright_browser, playwright_instance, agent_id)
+        await _stop_playwright_resources(
+            playwright_browser,
+            playwright_instance,
+            agent_id,
+            driver_pid=playwright_driver_pid,
+        )
         playwright_browser = None
         playwright_instance = None
         input_page = None

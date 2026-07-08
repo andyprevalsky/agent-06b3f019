@@ -2768,6 +2768,148 @@ async def test_workflow_handle_tool_event_forwards_to_helper():
         m.handle_tool_event = orig_handle_tool_event
 
 
+async def test_workflow_post_dag_completion_dispatches_attempt_completion_tool():
+    """Post-DAG completion must be a visible attempt_completion tool call."""
+    import workflows.agent_workflow as workflow_module
+
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-1"
+    wf.user_id = "user-1"
+    wf.current_phase = "EXECUTE"
+    wf.output_schema = {"fields": []}
+    wf.fast_mode_cache_enabled = False
+    wf.fast_cache_goal = "goal"
+    wf.compute_token_lineage_key = None
+    wf.compute_token_fast_cache_affinity_key = None
+
+    dispatched_tools = []
+    verifier_kwargs = {}
+
+    async def fake_execute_tool(tool_name, tool_args, tool_call_id):
+        dispatched_tools.append((tool_name, tool_args, tool_call_id))
+        return {"success": True}
+
+    async def fake_refresh_compute_token(user_id):
+        return None
+
+    async def fake_run_verifier(**kwargs):
+        verifier_kwargs.update(kwargs)
+        return {
+            "score": 1.0,
+            "reasoning": "Complete",
+            "structured_response": {"done": True},
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            },
+        }
+
+    wf._execute_tool = fake_execute_tool
+    wf._refresh_compute_token = fake_refresh_compute_token
+
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["poll_new_messages"] = [
+        {
+            "role": "TOOL",
+            "text": "dag result",
+            "timestamp": "2025-01-01T00:00:00+00:00",
+            "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED"},
+        }
+    ]
+    original_workflow = _patch_workflow(fake)
+    original_run_verifier = workflow_module._run_verifier
+    workflow_module._run_verifier = fake_run_verifier
+    try:
+        result = await wf._attempt_post_dag_completion(
+            agent_id="agent-1",
+            user_id="user-1",
+            model="rose-labs/rose-1-lite",
+        )
+    finally:
+        workflow_module._run_verifier = original_run_verifier
+        _restore_workflow(original_workflow)
+
+    expected_tool_call_id = "post-dag-attempt-completion-00000000-0000-0000-0000-000000000001"
+    assert dispatched_tools == [
+        (
+            "attempt_completion",
+            {"_verification_pending": True},
+            expected_tool_call_id,
+        )
+    ]
+    assert verifier_kwargs["tool_call_id"] == expected_tool_call_id
+    assert verifier_kwargs["post_message"] == wf._post_message
+    assert result["score"] == 1.0
+
+
+async def test_workflow_post_dag_completion_verifier_error_closes_attempt_tool():
+    """Verifier failure after post-DAG attempt_completion must close the tool row."""
+    import workflows.agent_workflow as workflow_module
+
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-1"
+    wf.user_id = "user-1"
+    wf.current_phase = "EXECUTE"
+    wf.output_schema = {"fields": []}
+    wf.fast_mode_cache_enabled = False
+    wf.fast_cache_goal = "goal"
+    wf.compute_token_lineage_key = None
+    wf.compute_token_fast_cache_affinity_key = None
+
+    dispatched_tools = []
+    posted_events = []
+
+    async def fake_execute_tool(tool_name, tool_args, tool_call_id):
+        dispatched_tools.append((tool_name, tool_args, tool_call_id))
+        return {"success": True}
+
+    async def fake_refresh_compute_token(user_id):
+        return None
+
+    async def fake_run_verifier(**kwargs):
+        raise RuntimeError("verifier timed out")
+
+    async def fake_handle_tool_event(event, tool_call_id, tool_name):
+        posted_events.append((event, tool_call_id, tool_name))
+
+    wf._execute_tool = fake_execute_tool
+    wf._refresh_compute_token = fake_refresh_compute_token
+    wf._handle_tool_event = fake_handle_tool_event
+
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["poll_new_messages"] = []
+    original_workflow = _patch_workflow(fake)
+    original_run_verifier = workflow_module._run_verifier
+    workflow_module._run_verifier = fake_run_verifier
+    try:
+        result = await wf._attempt_post_dag_completion(
+            agent_id="agent-1",
+            user_id="user-1",
+            model="rose-labs/rose-1-lite",
+        )
+    finally:
+        workflow_module._run_verifier = original_run_verifier
+        _restore_workflow(original_workflow)
+
+    expected_tool_call_id = "post-dag-attempt-completion-00000000-0000-0000-0000-000000000001"
+    assert dispatched_tools == [
+        (
+            "attempt_completion",
+            {"_verification_pending": True},
+            expected_tool_call_id,
+        )
+    ]
+    assert result["verifier_error"] is True
+    assert result["score"] == 0.0
+    assert posted_events
+    event, tool_call_id, tool_name = posted_events[-1]
+    assert tool_call_id == expected_tool_call_id
+    assert tool_name == "attempt_completion"
+    assert event.status.name == "ERROR"
+    assert "verifier timed out" in event.message
+
+
 async def test_workflow_check_parent_state_parent_paused_inherits():
     """_check_parent_state inherits pause when parent is paused."""
     wf = _bare_workflow_instance()
@@ -3744,6 +3886,14 @@ async def run_all_tests():
         test_workflow_run_skips_response_schema_generation_for_subagent,
     )
     await r.record_async("wf_handle_tool_event_forwards", test_workflow_handle_tool_event_forwards_to_helper)
+    await r.record_async(
+        "wf_post_dag_completion_attempt_tool",
+        test_workflow_post_dag_completion_dispatches_attempt_completion_tool,
+    )
+    await r.record_async(
+        "wf_post_dag_completion_error_closes_attempt",
+        test_workflow_post_dag_completion_verifier_error_closes_attempt_tool,
+    )
     await r.record_async("wf_check_parent_paused", test_workflow_check_parent_state_parent_paused_inherits)
     await r.record_async("wf_check_parent_cost_limited", test_workflow_check_parent_state_parent_cost_limited_inherits)
     await r.record_async("wf_check_parent_resumes", test_workflow_check_parent_state_parent_resumes_clears_inherit)

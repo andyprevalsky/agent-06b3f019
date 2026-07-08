@@ -38,6 +38,7 @@ SERVICES_MANIFEST = REPO_ROOT / ".context" / "services.json"
 SERVICE_LOG = REPO_ROOT / ".context" / "local-benchmark-services.log"
 TUNNEL_LOG = REPO_ROOT / ".context" / "local-benchmark-ngrok.log"
 BENCHMARK_CONTEXT_ROOT = REPO_ROOT / ".context" / "benchmarks"
+CHECKPOINT_ROOT = REPO_ROOT / ".context" / "benchmark-checkpoints"
 RUNS_DIR = AGENTS_DIR / "benchmarks" / "runs"
 AGENT_PAYMENT_TEST_SHOP_TASK_NAME = "agent-payment-test-shop"
 BENCHMARK_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
@@ -767,6 +768,147 @@ def resolve_run_path(value: str) -> Path:
     return path
 
 
+def resolve_repo_path(value: str) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else REPO_ROOT / path
+
+
+def checkpoint_requested(args: argparse.Namespace) -> bool:
+    return args.checkpoint is not None or bool(args.checkpoint_start_agent_id)
+
+
+def checkpoint_source_path(task_name: str, args: argparse.Namespace) -> Path:
+    if args.checkpoint_source_json:
+        path = resolve_repo_path(args.checkpoint_source_json)
+    else:
+        raise ValueError("checkpoint_source_path requires --checkpoint-source-json")
+    if not path.exists():
+        raise FileNotFoundError(f"Checkpoint source JSON not found: {path}")
+    return path
+
+
+def checkpoint_tree_path(task_name: str, args: argparse.Namespace) -> Path | None:
+    if args.checkpoint_no_tree:
+        return None
+    if args.checkpoint_tree_json:
+        path = resolve_repo_path(args.checkpoint_tree_json)
+    else:
+        return None
+    if not path.exists():
+        raise FileNotFoundError(f"Checkpoint tree JSON not found: {path}")
+    return path
+
+
+def _finished_for_each_checkpoint_index(source_json: Path, requested_index: int) -> int | None:
+    try:
+        with source_json.open() as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    messages = data.get("messages") or data.get("agent", {}).get("messages") or []
+    if not isinstance(messages, list):
+        return None
+    for index in range(min(requested_index, len(messages) - 1), -1, -1):
+        message = messages[index]
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            continue
+        if (
+            metadata.get("toolName") == "spawn_general_purpose_agent_for_each"
+            and metadata.get("toolStatus") == "FINISHED"
+        ):
+            return index
+    return None
+
+
+def checkpoint_through_index(source_json: Path, args: argparse.Namespace) -> int:
+    if args.checkpoint_boundary == "for-each-finished":
+        boundary_index = _finished_for_each_checkpoint_index(source_json, args.checkpoint)
+        if boundary_index is not None:
+            return boundary_index
+    return args.checkpoint
+
+
+def manifest_backend_url(manifest: dict) -> str:
+    ports = manifest.get("ports") if isinstance(manifest, dict) else {}
+    urls = manifest.get("urls") if isinstance(manifest, dict) else {}
+    if isinstance(urls, dict):
+        value = urls.get("backend_api") or urls.get("backend")
+        if value:
+            return str(value).rstrip("/")
+    return f"http://localhost:{ports.get('backend', 3001)}"
+
+
+def manifest_frontend_url(manifest: dict) -> str:
+    ports = manifest.get("ports") if isinstance(manifest, dict) else {}
+    urls = manifest.get("urls") if isinstance(manifest, dict) else {}
+    if isinstance(urls, dict):
+        value = urls.get("frontend") or urls.get("public")
+        if value:
+            return str(value).rstrip("/")
+    return f"http://localhost:{ports.get('frontend', 3000)}"
+
+
+def manifest_database_url(manifest: dict) -> str:
+    ports = manifest.get("ports") if isinstance(manifest, dict) else {}
+    database = manifest.get("database") if isinstance(manifest, dict) else {}
+    port = 5432 if isinstance(database, dict) and database.get("use_system_postgres") else ports.get("local_db")
+    if not port:
+        raise ValueError("Services manifest is missing local_db port")
+    return f"postgresql://postgres:postgres@localhost:{port}/victoria"
+
+
+def manifest_task_queue(manifest: dict) -> str:
+    task_queue = manifest.get("temporal_task_queue") if isinstance(manifest, dict) else None
+    if not task_queue:
+        raise ValueError("Services manifest is missing temporal_task_queue")
+    return str(task_queue)
+
+
+def run_streamed_command(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    env: dict[str, str] | None = None,
+    check: bool = True,
+) -> tuple[int, str]:
+    print("$ " + " ".join(str(part) for part in command))
+    process = subprocess.Popen(
+        list(command),
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    output_lines: list[str] = []
+    assert process.stdout is not None
+    for line in process.stdout:
+        print(line, end="")
+        output_lines.append(line)
+    code = process.wait()
+    output = "".join(output_lines)
+    if check and code != 0:
+        raise RuntimeError(f"Command exited with {code}: {' '.join(str(part) for part in command)}")
+    return code, output
+
+
+def parse_key_output(output: str, key: str) -> str | None:
+    prefix = f"{key}="
+    for line in output.splitlines():
+        if line.startswith(prefix):
+            return line[len(prefix) :].strip()
+    return None
+
+
+def sync_compute_tokens() -> None:
+    print("Syncing local compute tokens")
+    script = "from benchmarks.run_benchmark import _sync_compute_tokens; _sync_compute_tokens()"
+    run_streamed_command([sys.executable, "-c", script], cwd=AGENTS_DIR, env={**os.environ}, check=True)
+
+
 def diagnostic_commands(agent_id: str, *, task_name: str, port: int) -> list[list[str]]:
     return [
         [sys.executable, "benchmarks/agent_latency.py", agent_id, "--benchmark", task_name, "--environment", "local"],
@@ -815,6 +957,194 @@ def run_diagnostics(
                 outfile.write(f"\n[diagnostic timed out after {timeout_seconds:g} seconds]\n")
             outfile.close()
     return diag_root
+
+
+def checkpoint_out_path(stack: ServiceStack, task_name: str, args: argparse.Namespace) -> Path:
+    if args.checkpoint_manifest:
+        return resolve_repo_path(args.checkpoint_manifest)
+    root = stack.context_dir / "checkpoints" if stack.isolated else CHECKPOINT_ROOT
+    return root / f"{slugify(task_name)}.json"
+
+
+def checkpoint_source_out_paths(stack: ServiceStack, task_name: str, args: argparse.Namespace) -> tuple[Path, Path | None]:
+    root = stack.context_dir / "checkpoint-source" if stack.isolated else CHECKPOINT_ROOT / "sources"
+    source_json = root / f"{slugify(task_name)}-source.json"
+    tree_json = None if args.checkpoint_no_tree else root / f"{slugify(task_name)}-tree.json"
+    return source_json, tree_json
+
+
+def create_checkpoint_source_from_task(
+    *,
+    task_name: str,
+    backend_port: int,
+    stack: ServiceStack,
+    args: argparse.Namespace,
+) -> tuple[Path, Path | None]:
+    source_json, tree_json = checkpoint_source_out_paths(stack, task_name, args)
+    command = [
+        sys.executable,
+        "-u",
+        "benchmarks/run_benchmark.py",
+        "--task",
+        task_name,
+        "--port",
+        str(backend_port),
+        "--checkpoint-source-index",
+        str(args.checkpoint),
+        "--checkpoint-source-boundary",
+        args.checkpoint_boundary,
+        "--checkpoint-source-price-limit-cents",
+        str(args.checkpoint_price_limit_cents),
+        "--timeout-seconds",
+        str(args.checkpoint_timeout_seconds),
+        "--checkpoint-source-out",
+        str(source_json),
+        "--keep-agents",
+    ]
+    if tree_json is not None:
+        command.extend(["--checkpoint-tree-out", str(tree_json)])
+    if args.bootstrap:
+        command.append("--bootstrap")
+    if args.anon:
+        command.append("--anon")
+    print("Creating checkpoint source from benchmark task")
+    code, _ = run_streamed_command(command, cwd=AGENTS_DIR, env={**os.environ, "PYTHONUNBUFFERED": "1"}, check=False)
+    if code != 0:
+        raise RuntimeError(f"Checkpoint source benchmark exited with {code}")
+    if not source_json.exists():
+        raise RuntimeError(f"Checkpoint source benchmark did not write {source_json}")
+    if tree_json is not None and not tree_json.exists():
+        raise RuntimeError(f"Checkpoint source benchmark did not write {tree_json}")
+    return source_json, tree_json
+
+
+def run_checkpoint_invocation(
+    *,
+    task_name: str,
+    manifest: dict,
+    stack: ServiceStack,
+    args: argparse.Namespace,
+    backend_port: int,
+) -> int:
+    backend_url = manifest_backend_url(manifest)
+    frontend_url = manifest_frontend_url(manifest)
+    database_url = manifest_database_url(manifest)
+    task_queue = manifest_task_queue(manifest)
+    env = {
+        **os.environ,
+        "DATABASE_URL": database_url,
+        "DIRECT_URL": database_url,
+        "TEMPORAL_TASK_QUEUE": task_queue,
+    }
+
+    print(f"\n== Running checkpointed benchmark: {task_name}")
+    print(f"Backend: {backend_url}")
+    sync_compute_tokens()
+
+    checkpoint_manifest: Path | None = None
+    agent_id = args.checkpoint_start_agent_id
+    checkpoint_count = args.checkpoint_count
+
+    if agent_id:
+        if args.checkpoint_manifest:
+            checkpoint_manifest = resolve_repo_path(args.checkpoint_manifest)
+        print(f"Starting existing checkpoint {agent_id}")
+        run_streamed_command(
+            [
+                "npx",
+                "tsx",
+                "scripts/start-agent-checkpoint.ts",
+                "--agent-id",
+                agent_id,
+                "--task-queue",
+                task_queue,
+            ],
+            cwd=REPO_ROOT / "back-end",
+            env=env,
+            check=True,
+        )
+    else:
+        if args.checkpoint_source_json:
+            source_json = checkpoint_source_path(task_name, args)
+            tree_json = checkpoint_tree_path(task_name, args)
+        else:
+            source_json, tree_json = create_checkpoint_source_from_task(
+                task_name=task_name,
+                backend_port=backend_port,
+                stack=stack,
+                args=args,
+            )
+        out_path = checkpoint_out_path(stack, task_name, args)
+        through_index = checkpoint_through_index(source_json, args)
+        create_args = [
+            "npx",
+            "tsx",
+            "scripts/create-agent-checkpoint.ts",
+            "--source-json",
+            str(source_json),
+            "--through-index",
+            str(through_index),
+            "--task-name",
+            task_name,
+            "--fast-mode-cache",
+            str(args.checkpoint_fast_mode_cache).lower(),
+            "--price-limit-cents",
+            str(args.checkpoint_price_limit_cents),
+            "--task-queue",
+            task_queue,
+            "--out",
+            str(out_path),
+        ]
+        if tree_json is not None:
+            create_args.extend(["--tree-json", str(tree_json)])
+        if args.checkpoint_no_start:
+            create_args.append("--no-start")
+
+        print("Creating checkpoint clone")
+        _, output = run_streamed_command(create_args, cwd=REPO_ROOT / "back-end", env=env, check=True)
+        parsed_agent_id = parse_key_output(output, "agent_id")
+        parsed_manifest = parse_key_output(output, "manifest")
+        if not parsed_agent_id or not parsed_manifest:
+            raise RuntimeError("Could not parse checkpoint agent_id/manifest from create-agent-checkpoint output")
+        agent_id = parsed_agent_id
+        checkpoint_manifest = Path(parsed_manifest)
+
+    assert agent_id
+    print(f"Frontend: {frontend_url}/?agent-id={agent_id}")
+    if checkpoint_manifest:
+        print(f"Checkpoint manifest: {checkpoint_manifest}")
+
+    if args.checkpoint_no_start:
+        print("Checkpoint created PAUSED. Resume with:")
+        print(
+            "scripts/run-bench "
+            f"{task_name} --checkpoint-start-agent-id {agent_id} "
+            f"--checkpoint-manifest {checkpoint_manifest}"
+        )
+        return 0
+
+    poll_args = [
+        sys.executable,
+        "benchmarks/run_checkpoint_agent.py",
+        "--task",
+        task_name,
+        "--url",
+        backend_url,
+        "--frontend-url",
+        frontend_url,
+        "--timeout-seconds",
+        str(args.checkpoint_timeout_seconds),
+    ]
+    if checkpoint_manifest and checkpoint_manifest.exists():
+        poll_args.extend(["--manifest", str(checkpoint_manifest)])
+    else:
+        if checkpoint_count is None:
+            raise ValueError("--checkpoint-count is required when starting an existing checkpoint without a manifest")
+        poll_args.extend(["--agent-id", agent_id, "--checkpoint-count", str(checkpoint_count)])
+
+    print("Polling resumed checkpoint")
+    code, _ = run_streamed_command(poll_args, cwd=AGENTS_DIR, env={**os.environ, "PYTHONUNBUFFERED": "1"}, check=False)
+    return code
 
 
 def run_benchmark_invocation(
@@ -959,6 +1289,80 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         action="store_true",
         help="Do not open the live benchmark dashboard in a Chrome window (also via BENCHMARK_NO_DASHBOARD=1)",
     )
+    parser.add_argument(
+        "--checkpoint",
+        "--through-index",
+        dest="checkpoint",
+        type=int,
+        metavar="TURN_N",
+        help=(
+            "Run one benchmark until root message index TURN_N, pause/export it, "
+            "clone the checkpoint, and resume it"
+        ),
+    )
+    parser.add_argument(
+        "--checkpoint-boundary",
+        choices=["for-each-finished", "message-index"],
+        default="for-each-finished",
+        help=(
+            "Durable boundary to prefer when it appears before the requested root message index. "
+            "Use message-index to require the raw index exactly."
+        ),
+    )
+    parser.add_argument(
+        "--checkpoint-source-json",
+        "--source-json",
+        dest="checkpoint_source_json",
+        help="Optional pre-exported root-agent transcript JSON to checkpoint instead of generating one",
+    )
+    parser.add_argument(
+        "--checkpoint-tree-json",
+        "--tree-json",
+        dest="checkpoint_tree_json",
+        help="Optional exported agent tree JSON to clone with the checkpoint",
+    )
+    parser.add_argument(
+        "--checkpoint-no-tree",
+        "--no-tree",
+        dest="checkpoint_no_tree",
+        action="store_true",
+        help="Do not clone child Agent rows from the tree export",
+    )
+    parser.add_argument(
+        "--checkpoint-no-start",
+        "--no-start",
+        dest="checkpoint_no_start",
+        action="store_true",
+        help="Create the checkpoint as PAUSED and keep the local FE stack available for inspection",
+    )
+    parser.add_argument(
+        "--checkpoint-start-agent-id",
+        "--start-agent-id",
+        dest="checkpoint_start_agent_id",
+        help="Start an existing PAUSED checkpoint instead of creating one",
+    )
+    parser.add_argument(
+        "--checkpoint-manifest",
+        help="Checkpoint manifest path. Used as create output path or existing checkpoint metadata.",
+    )
+    parser.add_argument(
+        "--checkpoint-count",
+        type=int,
+        help="Number of pre-checkpoint messages when starting an existing checkpoint without a manifest",
+    )
+    parser.add_argument("--checkpoint-timeout-seconds", type=int, default=900, help="Checkpoint poll timeout")
+    parser.add_argument(
+        "--checkpoint-price-limit-cents",
+        type=int,
+        default=5000,
+        help="Price limit for a created checkpoint agent",
+    )
+    parser.add_argument(
+        "--checkpoint-fast-mode-cache",
+        choices=["true", "false"],
+        default="false",
+        help="Fast Mode cache flag for the resumed checkpoint agent",
+    )
     args = parser.parse_args(argv)
     selected_modes = sum(
         1
@@ -977,6 +1381,22 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         parser.error("--use-existing cannot be combined with --shared-stack, --run-id, --base-port, or --no-clean")
     if args.base_port is not None and args.base_port < 1024:
         parser.error("--base-port must be >= 1024")
+    if args.checkpoint is not None and args.checkpoint < 0:
+        parser.error("--checkpoint must be a non-negative message index")
+    if args.checkpoint_count is not None and args.checkpoint_count < 0:
+        parser.error("--checkpoint-count must be non-negative")
+    if args.checkpoint_start_agent_id and args.checkpoint is not None:
+        parser.error("--checkpoint-start-agent-id cannot be combined with --checkpoint")
+    if checkpoint_requested(args) and args.eval_suite:
+        parser.error("--checkpoint is only supported for benchmark task selections, not --eval-suite")
+    if checkpoint_requested(args) and args.checkpoint_no_start and args.checkpoint_start_agent_id:
+        parser.error("--checkpoint-no-start cannot be combined with --checkpoint-start-agent-id")
+    if (args.checkpoint_source_json or args.checkpoint_tree_json or args.checkpoint_no_tree) and not checkpoint_requested(args):
+        parser.error("checkpoint source/tree options require --checkpoint or --checkpoint-start-agent-id")
+    if args.checkpoint_price_limit_cents <= 0:
+        parser.error("--checkpoint-price-limit-cents must be positive")
+    if args.checkpoint_timeout_seconds <= 0:
+        parser.error("--checkpoint-timeout-seconds must be positive")
     return args
 
 
@@ -1014,6 +1434,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     promote_direct_external_runner_tasks(args)
     selected_tasks = tasks_from_args(args)
+    if checkpoint_requested(args) and len(selected_tasks) != 1:
+        raise ValueError("--checkpoint requires exactly one resolved benchmark task")
     process: subprocess.Popen | None = None
     frontend_tunnel: FrontendTunnel | None = None
     dashboard: DashboardServer | None = None
@@ -1090,6 +1512,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 os.environ["BENCHMARK_FRONTEND_URL"] = frontend_tunnel.public_url.rstrip("/")
                 print(f"Test payment tunnel (fallback): {frontend_tunnel.public_url}")
         port = int(manifest["ports"]["backend"])
+        if checkpoint_requested(args):
+            return run_checkpoint_invocation(
+                task_name=selected_tasks[0],
+                manifest=manifest,
+                stack=stack,
+                args=args,
+                backend_port=port,
+            )
         if args.eval_suite:
             return run_eval_suite_invocation(port=port, args=args)
         for invocation in plan_invocations(selected_tasks):
@@ -1124,7 +1554,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         # final report card remains visible after teardown.
         if dashboard is not None:
             dashboard.stop()
-        if not args.keep_services and not args.use_existing:
+        keep_paused_checkpoint_stack = checkpoint_requested(args) and args.checkpoint_no_start
+        if keep_paused_checkpoint_stack and not args.keep_services and not args.use_existing:
+            print("Keeping benchmark services running so the paused checkpoint FE link remains valid.")
+        if not args.keep_services and not args.use_existing and not keep_paused_checkpoint_stack:
             stop_services(process, stack=stack)
 
 

@@ -166,6 +166,14 @@ async function testPromptBuilder_sharedContractMentionsOutputRules() {
   assert(prompt.includes(CODE_AGENT_INSTRUCTIONS_VERSION), 'Prompt version missing');
   assert(prompt.includes('/home/user/attachments'), 'Attachments directory missing');
   assert(prompt.includes('/home/user/output'), 'Output directory missing');
+  assert(
+    prompt.includes('Files outside this directory are not returned to the user'),
+    'Output directory return contract missing'
+  );
+  assert(
+    prompt.includes('verify each requested artifact exists in /home/user/output'),
+    'Output artifact verification rule missing'
+  );
   assert(prompt.includes('Do not return the original attachment path'), 'Transform rule missing');
   assert(
     prompt.includes('Do not launch a separate claude/Claude Code CLI'),

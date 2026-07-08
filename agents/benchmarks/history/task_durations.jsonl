@@ -1173,3 +1173,4 @@
 {"task": "plaid-transactions-monthly-spend", "duration_seconds": 75.9, "cost_cents": 31.0, "timestamp": "2026-07-04T21:03:05.757508+00:00", "agent_id": "ed63b8ed-095a-432b-9cb5-af9bc6ed4ee9"}
 {"task": "user-data-prod-grep", "duration_seconds": 95.8, "cost_cents": 2.0, "timestamp": "2026-07-05T01:15:21.590023+00:00", "agent_id": "19d0adf0-f5d8-4fe1-8968-5f2c3b35881e"}
 {"task": "grep-explore-stress", "duration_seconds": 164.7, "cost_cents": 9.0, "timestamp": "2026-07-05T01:15:21.590023+00:00", "agent_id": "ad873405-d8f3-4ad7-9986-ad4627f9bd12"}
+{"task": "test-mass-agent-run-0", "duration_seconds": 19.6, "cost_cents": 0.0, "timestamp": "2026-07-08T05:40:29.398207+00:00", "agent_id": "6ff575ae-12f0-4d8f-8c36-fd6d3e1bb89e"}

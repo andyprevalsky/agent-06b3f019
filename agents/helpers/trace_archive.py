@@ -17,6 +17,7 @@ import json
 import os
 import threading
 import time
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -34,6 +35,7 @@ _TRUE_VALUES = {"1", "true", "yes", "on", "enabled"}
 _MEDIA_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".m4a", ".mp3", ".wav", ".m3u8"}
 _R2_CLIENT: Any = None
 _BACKEND_CLIENTS = threading.local()
+_OUTBOX_LOCKS: dict[str, threading.Lock] = defaultdict(threading.Lock)
 
 
 def _safe_segment(value: str) -> str:
@@ -141,13 +143,15 @@ def _write_outbox(root_agent_id: str, path: str, ciphertext: bytes, metadata: di
     root = _outbox_root() / _safe_segment(root_agent_id)
     target = root / path
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_suffix(target.suffix + f".{os.getpid()}.{threading.get_ident()}.tmp")
-    tmp.write_bytes(ciphertext)
-    tmp.replace(target)
-    meta_path = target.with_suffix(target.suffix + ".meta.json")
-    meta_tmp = meta_path.with_suffix(meta_path.suffix + f".{os.getpid()}.{threading.get_ident()}.tmp")
-    meta_tmp.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
-    meta_tmp.replace(meta_path)
+    lock_key = f"{root_agent_id}:{path}"
+    with _OUTBOX_LOCKS[lock_key]:
+        tmp = target.with_suffix(target.suffix + f".{os.getpid()}.{threading.get_ident()}.tmp")
+        tmp.write_bytes(ciphertext)
+        tmp.replace(target)
+        meta_path = target.with_suffix(target.suffix + ".meta.json")
+        meta_tmp = meta_path.with_suffix(meta_path.suffix + f".{os.getpid()}.{threading.get_ident()}.tmp")
+        meta_tmp.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+        meta_tmp.replace(meta_path)
     return str(target)
 
 
@@ -505,6 +509,7 @@ _ARCHIVE_EXECUTOR = ThreadPoolExecutor(
     max_workers=int(os.environ.get("TRACE_ARCHIVE_WORKERS", "4") or "4"),
     thread_name_prefix="trace-archive",
 )
+_ARCHIVE_SLOTS = threading.BoundedSemaphore(int(os.environ.get("TRACE_ARCHIVE_MAX_IN_FLIGHT", "64") or "64"))
 
 # Artifacts ship to the backend as base64-in-JSON; a single oversized body (e.g.
 # a browser session video) freezes the Node event loop on parse/GC for minutes
@@ -563,6 +568,8 @@ def _submit_archive_job(
     if not safe_path:
         return None
 
+    _ARCHIVE_SLOTS.acquire()
+
     def _job() -> None:
         try:
             body = body_factory()
@@ -586,8 +593,14 @@ def _submit_archive_job(
                 _drain_backend_outbox()
         except Exception as exc:
             logger.warning("trace_archive.async_write_error", root_agent_id=safe_root, path=safe_path, error=str(exc)[:200])
+        finally:
+            _ARCHIVE_SLOTS.release()
 
-    _ARCHIVE_EXECUTOR.submit(_job)
+    try:
+        _ARCHIVE_EXECUTOR.submit(_job)
+    except Exception:
+        _ARCHIVE_SLOTS.release()
+        raise
     return {"ref": _expected_ref(safe_root, safe_path), "metadata": None}
 
 

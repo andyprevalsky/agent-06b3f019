@@ -1,5 +1,6 @@
 """Blackbox tests for benchmark helpers."""
 
+import json
 import os
 from pathlib import Path
 
@@ -78,6 +79,22 @@ def test_worker_pids_for_workspace_filters_short_macos_commands_by_cwd():
             }[self.pid]
 
     assert _worker_pids_for_workspace(ps_output, Path("/Users/me/workspaces/current"), Proc) == ["111"]
+
+
+def test_benchmark_context_path_treats_root_context_as_repo_local():
+    """A leading slash in /.context must not escape the repository root."""
+    import os
+    from benchmarks import run_benchmark
+
+    previous = os.environ.get("BENCHMARK_CONTEXT_DIR")
+    os.environ["BENCHMARK_CONTEXT_DIR"] = "/.context"
+    try:
+        assert run_benchmark._benchmark_context_path() == run_benchmark.REPO_ROOT / ".context"
+    finally:
+        if previous is None:
+            os.environ.pop("BENCHMARK_CONTEXT_DIR", None)
+        else:
+            os.environ["BENCHMARK_CONTEXT_DIR"] = previous
 
 
 def test_worker_queue_preflight_accepts_aligned_worker_among_other_local_queues():
@@ -2382,6 +2399,65 @@ def test_build_smoke_memory_summary_passes_stable_worker():
     assert summary["failures"] == []
 
 
+def test_build_smoke_memory_summary_scales_end_cap_by_worker_count():
+    """All-core local workers keep the absolute RSS cap proportional to process count."""
+    from benchmarks.run_benchmark import _build_smoke_memory_summary
+
+    before = {
+        "available": True,
+        "process_count": 12,
+        "total_rss_mb": 1847.6,
+        "playwright_driver_count": 0,
+        "playwright_driver_rss_mb": 0.0,
+    }
+    after = {
+        "available": True,
+        "process_count": 12,
+        "total_rss_mb": 1989.4,
+        "playwright_driver_count": 0,
+        "playwright_driver_rss_mb": 0.0,
+    }
+
+    summary = _build_smoke_memory_summary(
+        before,
+        after,
+        baseline={"after": {"allocator_trimmed": False}},
+        platform_name="darwin",
+    )
+
+    assert summary["thresholds"]["effective_max_end_mb"] == 2640.0
+    assert summary["failures"] == []
+
+
+def test_build_smoke_memory_summary_flags_scaled_end_cap_overage():
+    """The scaled cap still fails genuinely high worker RSS."""
+    from benchmarks.run_benchmark import _build_smoke_memory_summary
+
+    before = {
+        "available": True,
+        "process_count": 12,
+        "total_rss_mb": 1847.6,
+        "playwright_driver_count": 0,
+        "playwright_driver_rss_mb": 0.0,
+    }
+    after = {
+        "available": True,
+        "process_count": 12,
+        "total_rss_mb": 3000.0,
+        "playwright_driver_count": 0,
+        "playwright_driver_rss_mb": 0.0,
+    }
+
+    summary = _build_smoke_memory_summary(
+        before,
+        after,
+        baseline={"after": {"allocator_trimmed": False}},
+        platform_name="darwin",
+    )
+
+    assert any("effective cap for 12 process" in failure for failure in summary["failures"])
+
+
 def test_build_smoke_memory_summary_skips_darwin_growth_without_allocator_trim():
     """macOS RSS growth is a warning when allocator pressure relief cannot trim arenas."""
     from benchmarks.run_benchmark import _build_smoke_memory_summary
@@ -3430,6 +3506,225 @@ def test_long_horizon_idea_bank_preserves_seed_ideas_with_safety_notes():
     assert "explicit approval" in by_id["create-100-person-event"].safety_notes
 
 
+def test_local_benchmark_checkpoint_flags_parse_for_any_task():
+    """Checkpointing is a benchmark-runner mode, not a Mass-Agent-only shell branch."""
+    from benchmarks import local as local_bench
+
+    args = local_bench.parse_args(
+        [
+            "chat-mode",
+            "--checkpoint",
+            "7",
+            "--checkpoint-source-json",
+            ".context/checkpoints/chat.json",
+            "--checkpoint-no-start",
+        ]
+    )
+
+    assert args.tasks == ["chat-mode"]
+    assert args.checkpoint == 7
+    assert args.checkpoint_source_json == ".context/checkpoints/chat.json"
+    assert args.checkpoint_no_start is True
+    assert args.checkpoint_boundary == "for-each-finished"
+    assert local_bench.checkpoint_requested(args) is True
+
+
+def test_local_benchmark_checkpoint_can_generate_source_from_task():
+    """Default checkpoint mode runs the benchmark to a turn and exports source/tree JSON."""
+    import tempfile
+    from pathlib import Path
+
+    from benchmarks import local as local_bench
+
+    args = local_bench.parse_args(["chat-mode", "--checkpoint", "7"])
+    with tempfile.TemporaryDirectory() as tmp:
+        stack = local_bench.ServiceStack(
+            run_id="checkpoint-test",
+            context_dir=Path(tmp),
+            manifest_path=Path(tmp) / "services.json",
+            service_log=Path(tmp) / "services.log",
+            isolated=True,
+        )
+        calls = []
+        original = local_bench.run_streamed_command
+
+        def fake_run_streamed_command(command, *, cwd, env=None, check=True):
+            calls.append(command)
+            source_out = Path(command[command.index("--checkpoint-source-out") + 1])
+            source_out.parent.mkdir(parents=True, exist_ok=True)
+            source_out.write_text("{}")
+            tree_out = Path(command[command.index("--checkpoint-tree-out") + 1])
+            tree_out.write_text("{}")
+            return 0, ""
+
+        try:
+            local_bench.run_streamed_command = fake_run_streamed_command
+            source_json, tree_json = local_bench.create_checkpoint_source_from_task(
+                task_name="chat-mode",
+                backend_port=55101,
+                stack=stack,
+                args=args,
+            )
+        finally:
+            local_bench.run_streamed_command = original
+
+    assert source_json.name == "chat-mode-source.json"
+    assert tree_json is not None and tree_json.name == "chat-mode-tree.json"
+    assert calls
+    command = calls[0]
+    assert "benchmarks/run_benchmark.py" in command
+    assert command[command.index("--checkpoint-source-index") + 1] == "7"
+    assert command[command.index("--checkpoint-source-boundary") + 1] == "for-each-finished"
+    assert command[command.index("--checkpoint-source-price-limit-cents") + 1] == "5000"
+    assert command[command.index("--timeout-seconds") + 1] == "900"
+    assert "--checkpoint-source-out" in command
+
+
+def test_local_benchmark_checkpoint_for_each_boundary_resolves_through_index():
+    """A durable for_each boundary before a high requested index becomes the clone index."""
+    import tempfile
+    from pathlib import Path
+
+    from benchmarks import local as local_bench
+
+    args = local_bench.parse_args(["chat-mode", "--checkpoint", "500"])
+    with tempfile.TemporaryDirectory() as tmp:
+        source_json = Path(tmp) / "source.json"
+        source_json.write_text(
+            json.dumps(
+                {
+                    "messages": [
+                        {"role": "TOOL", "metadata": {"toolName": "seed", "toolStatus": "FINISHED"}},
+                        {
+                            "role": "TOOL",
+                            "metadata": {
+                                "toolName": "spawn_general_purpose_agent_for_each",
+                                "toolStatus": "FINISHED",
+                            },
+                        },
+                        {"role": "TOOL", "metadata": {"toolName": "later", "toolStatus": "FINISHED"}},
+                    ]
+                }
+            )
+        )
+
+        assert local_bench.checkpoint_through_index(source_json, args) == 1
+
+
+def test_local_benchmark_checkpoint_message_index_can_bypass_for_each_boundary():
+    """Raw index mode remains available for exact transcript cuts."""
+    import tempfile
+    from pathlib import Path
+
+    from benchmarks import local as local_bench
+
+    args = local_bench.parse_args(
+        ["chat-mode", "--checkpoint", "2", "--checkpoint-boundary", "message-index"]
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        source_json = Path(tmp) / "source.json"
+        source_json.write_text(
+            json.dumps(
+                {
+                    "messages": [
+                        {
+                            "role": "TOOL",
+                            "metadata": {
+                                "toolName": "spawn_general_purpose_agent_for_each",
+                                "toolStatus": "FINISHED",
+                            },
+                        },
+                        {"role": "TOOL", "metadata": {"toolName": "later", "toolStatus": "FINISHED"}},
+                    ]
+                }
+            )
+        )
+
+        assert local_bench.checkpoint_through_index(source_json, args) == 2
+
+
+def test_local_benchmark_checkpoint_accepts_legacy_aliases():
+    """Old checkpoint aliases route to the same local runner fields."""
+    from benchmarks import local as local_bench
+
+    args = local_bench.parse_args(
+        [
+            "test-mass-agent-run-0",
+            "--through-index",
+            "42",
+            "--source-json",
+            ".context/source.json",
+            "--tree-json",
+            ".context/tree.json",
+            "--no-start",
+        ]
+    )
+
+    assert args.checkpoint == 42
+    assert args.checkpoint_source_json == ".context/source.json"
+    assert args.checkpoint_tree_json == ".context/tree.json"
+    assert args.checkpoint_no_start is True
+
+
+def test_local_benchmark_checkpoint_options_require_checkpoint_mode():
+    """Source/tree checkpoint knobs cannot silently affect a normal benchmark run."""
+    import contextlib
+    import io
+    import pytest
+    from benchmarks import local as local_bench
+
+    with pytest.raises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+        local_bench.parse_args(["chat-mode", "--checkpoint-source-json", ".context/source.json"])
+
+
+def test_checkpoint_validation_generic_does_not_require_mass_agent_sequence():
+    """Generic checkpoint resumes only enforce reasoning-row hygiene."""
+    from benchmarks.run_checkpoint_agent import _validate_post_checkpoint
+
+    data = {
+        "messages": [
+            {"role": "TOOL", "metadata": {"toolName": "seed", "toolStatus": "FINISHED"}},
+            {
+                "role": "ASSISTANT",
+                "text": "A valid post-checkpoint thought",
+                "metadata": {"plannedToolName": "reasoning"},
+            },
+        ]
+    }
+
+    clean, reason, visible = _validate_post_checkpoint(data, 1)
+
+    assert clean is True
+    assert reason is None
+    assert visible == ["Thought"]
+
+
+def test_checkpoint_validation_mass_agent_sequence_remains_strict():
+    """Mass Agent 0 still guards the expected post-fanout card sequence."""
+    from benchmarks.run_checkpoint_agent import EXPECTED_VISIBLE_SEQUENCE, _validate_post_checkpoint
+
+    data = {
+        "messages": [
+            {"role": "TOOL", "metadata": {"toolName": "seed", "toolStatus": "FINISHED"}},
+            {
+                "role": "ASSISTANT",
+                "text": "Only one thought",
+                "metadata": {"plannedToolName": "reasoning"},
+            },
+        ]
+    }
+
+    clean, reason, visible = _validate_post_checkpoint(
+        data,
+        1,
+        expected_visible_sequence=EXPECTED_VISIBLE_SEQUENCE,
+    )
+
+    assert clean is False
+    assert "does not contain expected" in str(reason)
+    assert visible == ["Thought"]
+
+
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
@@ -3449,6 +3744,7 @@ async def run_all_tests():
     r.record("extract_worker_pids_workspace_filter", test_extract_worker_pids_from_ps_filters_to_workspace_root)
     r.record("process_cwd_workspace_filter", test_process_cwd_is_under_accepts_nested_paths)
     r.record("worker_pids_workspace_cwd_filter", test_worker_pids_for_workspace_filters_short_macos_commands_by_cwd)
+    r.record("benchmark_context_root_path", test_benchmark_context_path_treats_root_context_as_repo_local)
     r.record(
         "worker_queue_preflight_accepts_sibling_workers",
         test_worker_queue_preflight_accepts_aligned_worker_among_other_local_queues,
@@ -3574,9 +3870,37 @@ async def run_all_tests():
     r.record("agent_cache_provider_accounting", test_agent_cache_stats_respects_provider_accounting)
     r.record("local_parse_args_rejects_ambiguous_selection", test_local_parse_args_rejects_ambiguous_selection)
     r.record("local_parse_args_rejects_invalid_concurrency", test_local_parse_args_rejects_invalid_concurrency)
+    r.record("local_checkpoint_flags_parse_for_any_task", test_local_benchmark_checkpoint_flags_parse_for_any_task)
+    r.record("local_checkpoint_generates_source", test_local_benchmark_checkpoint_can_generate_source_from_task)
+    r.record(
+        "local_checkpoint_for_each_boundary_resolves_through_index",
+        test_local_benchmark_checkpoint_for_each_boundary_resolves_through_index,
+    )
+    r.record(
+        "local_checkpoint_message_index_can_bypass_for_each_boundary",
+        test_local_benchmark_checkpoint_message_index_can_bypass_for_each_boundary,
+    )
+    r.record("local_checkpoint_accepts_legacy_aliases", test_local_benchmark_checkpoint_accepts_legacy_aliases)
+    r.record(
+        "local_checkpoint_options_require_checkpoint_mode",
+        test_local_benchmark_checkpoint_options_require_checkpoint_mode,
+    )
+    r.record(
+        "checkpoint_validation_generic_not_mass_sequence",
+        test_checkpoint_validation_generic_does_not_require_mass_agent_sequence,
+    )
+    r.record("checkpoint_validation_mass_sequence", test_checkpoint_validation_mass_agent_sequence_remains_strict)
     r.record("local_diagnostics_timeout_recorded", test_local_diagnostics_timeout_is_recorded)
     r.record("smoke_memory_summary_flags_leak", test_build_smoke_memory_summary_flags_growth_and_playwright_driver)
     r.record("smoke_memory_summary_passes", test_build_smoke_memory_summary_passes_stable_worker)
+    r.record(
+        "smoke_memory_summary_scales_worker_count",
+        test_build_smoke_memory_summary_scales_end_cap_by_worker_count,
+    )
+    r.record(
+        "smoke_memory_summary_scaled_cap_overage",
+        test_build_smoke_memory_summary_flags_scaled_end_cap_overage,
+    )
     r.record(
         "smoke_memory_summary_darwin_growth_warning",
         test_build_smoke_memory_summary_skips_darwin_growth_without_allocator_trim,

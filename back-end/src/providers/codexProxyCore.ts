@@ -32,7 +32,14 @@ export interface CodexProxyResult {
   contentType: string;
   body: string;
   servedFromCache: boolean;
+  cacheHitKind: 'exact_slot' | 'terminal_fallback' | null;
   wrote: boolean;
+  cacheable: boolean;
+  readEnabled: boolean;
+  ordinal: number | null;
+  cacheKey: string | null;
+  fallbackSourceOrdinal: number | null;
+  fallbackSourceCacheKey: string | null;
 }
 
 export interface TraceReplayContext {
@@ -261,14 +268,17 @@ async function findLatestTerminalCodexSlot(
   deps: CodexProxyDeps,
   traceHash: string,
   beforeOrdinal: number
-): Promise<CachedCodexResponse | null> {
+): Promise<{ value: CachedCodexResponse; ordinal: number; cacheKey: string } | null> {
   const maxLookback = 8;
   const minOrdinal = Math.max(0, beforeOrdinal - maxLookback);
 
   for (let previous = beforeOrdinal - 1; previous >= minOrdinal; previous -= 1) {
-    const cached = await deps.cacheGet(codeAgentSlotKey('codex', traceHash, previous));
+    const previousKey = codeAgentSlotKey('codex', traceHash, previous);
+    const cached = await deps.cacheGet(previousKey);
     if (!cached.hit || cached.value === null || cached.value === undefined) continue;
-    if (isTerminalCodexResponse(cached.value)) return cached.value;
+    if (isTerminalCodexResponse(cached.value)) {
+      return { value: cached.value, ordinal: previous, cacheKey: previousKey };
+    }
   }
 
   return null;
@@ -365,7 +375,14 @@ export async function resolveCodex(
           contentType: v.contentType || 'text/event-stream',
           body: rewriteCachedCodexReplayBody(v.body, upstreamBody),
           servedFromCache: true,
+          cacheHitKind: 'exact_slot',
           wrote: false,
+          cacheable,
+          readEnabled,
+          ordinal,
+          cacheKey: key,
+          fallbackSourceOrdinal: null,
+          fallbackSourceCacheKey: null,
         };
       }
     }
@@ -375,11 +392,18 @@ export async function resolveCodex(
       if (terminal !== null) {
         consumedReservedOrdinal = true;
         return {
-          status: terminal.status,
-          contentType: terminal.contentType || 'text/event-stream',
-          body: rewriteCachedCodexReplayBody(terminal.body, upstreamBody),
+          status: terminal.value.status,
+          contentType: terminal.value.contentType || 'text/event-stream',
+          body: rewriteCachedCodexReplayBody(terminal.value.body, upstreamBody),
           servedFromCache: true,
+          cacheHitKind: 'terminal_fallback',
           wrote: false,
+          cacheable,
+          readEnabled,
+          ordinal,
+          cacheKey: key,
+          fallbackSourceOrdinal: terminal.ordinal,
+          fallbackSourceCacheKey: terminal.cacheKey,
         };
       }
     }
@@ -402,7 +426,14 @@ export async function resolveCodex(
       contentType: upstream.contentType,
       body: upstream.body,
       servedFromCache: false,
+      cacheHitKind: null,
       wrote,
+      cacheable,
+      readEnabled,
+      ordinal,
+      cacheKey: key,
+      fallbackSourceOrdinal: null,
+      fallbackSourceCacheKey: null,
     };
   } finally {
     if (!consumedReservedOrdinal) {

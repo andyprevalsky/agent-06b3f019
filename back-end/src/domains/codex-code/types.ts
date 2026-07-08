@@ -6,6 +6,7 @@ export const createSessionSchema = z.object({
   attachments: z.array(z.any()).optional(),
   github_repo_url: z.string().optional(),
   user_id: z.string().uuid(),
+  fast_mode_cache_enabled: z.boolean().optional(),
 });
 
 export const closeSessionSchema = z.object({

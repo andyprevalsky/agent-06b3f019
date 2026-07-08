@@ -322,14 +322,30 @@ async function startCodexFastModeProxy() {
       });
       const responseBody = Buffer.from(await upstream.arrayBuffer());
       res.end(responseBody);
+      const cacheHeader = upstream.headers.get("x-fast-mode-cache") || null;
       log("info", "Codex Fast Mode proxy request", {
         method,
         path: req.url,
         status: upstream.status,
-        cache: upstream.headers.get("x-fast-mode-cache") || null,
+        cache: cacheHeader,
+      });
+      appendEvent({
+        type: "fast_cache_proxy_request",
+        raw_type: "codex_fast_mode_proxy_request",
+        method,
+        path: req.url,
+        status: upstream.status,
+        cache: cacheHeader,
       });
     } catch (err) {
       log("error", "Codex Fast Mode proxy failed", { error: err.message });
+      appendEvent({
+        type: "fast_cache_proxy_error",
+        raw_type: "codex_fast_mode_proxy_error",
+        method: req.method || "GET",
+        path: req.url,
+        error: err.message,
+      });
       res.statusCode = 502;
       res.end(JSON.stringify({ error: "Codex Fast Mode proxy failed" }));
     }
@@ -340,9 +356,19 @@ async function startCodexFastModeProxy() {
     server.listen(CODEX_FAST_MODE_PROXY_PORT, "127.0.0.1", resolve);
   });
   const baseUrl = `http://127.0.0.1:${CODEX_FAST_MODE_PROXY_PORT}`;
+  const sanitizedTarget = CODEX_FAST_MODE_PROXY_URL.replace(
+    /\/[^/]*$/,
+    "/<goalHash>",
+  );
   log("info", "Codex Fast Mode proxy listening", {
     baseUrl,
-    target: CODEX_FAST_MODE_PROXY_URL.replace(/\/[^/]*$/, "/<goalHash>"),
+    target: sanitizedTarget,
+  });
+  appendEvent({
+    type: "fast_cache_proxy_started",
+    raw_type: "codex_fast_mode_proxy_started",
+    base_url: baseUrl,
+    target: sanitizedTarget,
   });
   return { server, baseUrl };
 }

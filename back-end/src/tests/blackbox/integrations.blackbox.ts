@@ -4443,6 +4443,45 @@ async function testClaudeCodeUpload_clearsRateLimitCooldown() {
   }
 }
 
+async function testGptCodeUpload_clearsExpiredAndRateLimitState() {
+  const caller = await createAnonSession();
+  const userInt = await seedGptIntegration(caller.userId, { poolingEnabled: false });
+
+  try {
+    await prisma.integration.update({
+      where: { id: userInt.id },
+      data: {
+        status: 'EXPIRED',
+        isActive: false,
+        rateLimitedUntil: new Date(Date.now() + 60 * 60 * 1000),
+        lastUsedAt: new Date(),
+        failureReason: 'auth_error',
+      },
+    });
+
+    const encryptedCredentials = buildGptCredentialPayload(
+      `gpt-resynced-${crypto.randomBytes(8).toString('hex')}`,
+      `acct-resynced-${crypto.randomBytes(6).toString('hex')}`
+    );
+    const encrypted = encryptPayload({ encryptedCredentials });
+    const res = await request(`${BASE_URL}/api/integrations/gpt-code/credentials/upload`, {
+      method: 'POST',
+      headers: authHeaders(caller.accessToken),
+      body: JSON.stringify(encrypted),
+    });
+    assertStatus(res.status, 200, res.data);
+
+    const row = await prisma.integration.findUnique({ where: { id: userInt.id } });
+    assert(row?.status === 'CONNECTED', 'upload must restore CONNECTED status');
+    assert(row?.isActive === true, 'upload must reactivate the integration');
+    assert(row?.rateLimitedUntil === null, 'upload must clear stale rateLimitedUntil');
+    assert(row?.lastUsedAt === null, 'upload must clear stale lastUsedAt');
+    assert(row?.failureReason === null, 'upload must clear stale failureReason');
+  } finally {
+    await cleanupIntegrations([userInt.id]);
+  }
+}
+
 // =====================================================================
 // Claude Code CLI exhaustion detection
 // ---------------------------------------------------------------------
@@ -5627,6 +5666,10 @@ async function runAll() {
     {
       name: 'rotation -- GPT user auth_error disables token',
       fn: testRotation_gptUserAuthErrorDisablesToken,
+    },
+    {
+      name: 'GPT upload -- clears expired/cooldown state',
+      fn: testGptCodeUpload_clearsExpiredAndRateLimitState,
     },
     {
       name: 'rotation -- compute pool rotates across providers',

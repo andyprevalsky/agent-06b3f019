@@ -9,7 +9,7 @@ import asyncio
 import json
 import os
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from _test_utils import (
     BlackboxResult,
@@ -698,6 +698,7 @@ async def test_repo_save_message_posts_json():
         structured_response={"result": "ok"},
         github_repo_url="https://github.com/foo/bar",
         code_provider="codex",
+        completed_turns=3,
     )
 
     call = assert_captured_call(url_contains="/api/agents/", method="POST")
@@ -711,6 +712,7 @@ async def test_repo_save_message_posts_json():
     assert meta["structured_response"] == {"result": "ok"}
     assert meta["github_repo_url"] == "https://github.com/foo/bar"
     assert meta["code_provider"] == "codex"
+    assert meta["completed_turns"] == 3
     # Init messages omit subAgentId
     assert "subAgentId" not in meta
 
@@ -799,6 +801,7 @@ async def test_repo_create_e2b_session_codex_provider():
         goal="fix",
         user_id="u1",
         code_provider="codex",
+        fast_mode_cache_enabled=True,
     )
 
     assert data["task_id"] == "codex-task-123"
@@ -806,6 +809,7 @@ async def test_repo_create_e2b_session_codex_provider():
     body = json.loads(call["requestBody"])
     assert body["agent_id"] == "agent-1"
     assert body["user_id"] == "u1"
+    assert body["fast_mode_cache_enabled"] is True
 
 
 async def test_repo_create_e2b_session_raises_on_error():
@@ -1532,6 +1536,52 @@ async def test_run_agentic_loop_connect_fail_raises():
             assert "Failed to connect" in str(e)
 
 
+def test_log_code_agent_event_promotes_codex_fast_cache_request():
+    """Codex proxy events are promoted into worker logs with cache details."""
+    from domains.spawn_claude_code_agent import service
+
+    fake_logger = MagicMock()
+    with patch.object(service, "logger", fake_logger):
+        service._log_code_agent_event(
+            {
+                "version": 1,
+                "provider": "codex",
+                "type": "fast_cache_proxy_request",
+                "method": "POST",
+                "path": "/backend-api/codex/responses",
+                "status": 200,
+                "cache": "miss",
+            },
+            agent_id="agent-1",
+            task_id="task-1",
+            sandbox_id="sandbox-1",
+        )
+
+    fake_logger.info.assert_called_once()
+    args, kwargs = fake_logger.info.call_args
+    assert args[0] == "[ClaudeCode] Codex Fast Mode proxy request"
+    assert kwargs["agent_id"] == "agent-1"
+    assert kwargs["task_id"] == "task-1"
+    assert kwargs["sandbox_id"] == "sandbox-1"
+    assert kwargs["path"] == "/backend-api/codex/responses"
+    assert kwargs["cache"] == "miss"
+
+
+def test_codex_completed_turn_count_counts_unique_turn_completed_events():
+    """Codex completed turns come from turn.completed SDK events, not status heartbeats."""
+    from domains.spawn_claude_code_agent import service
+
+    events = [
+        {"version": 1, "provider": "codex", "type": "usage", "raw_type": "turn.completed", "timestamp": "t1"},
+        {"version": 1, "provider": "codex", "type": "usage", "raw_type": "turn.completed", "timestamp": "t1"},
+        {"version": 1, "provider": "codex", "type": "usage", "raw_type": "turn.completed", "timestamp": "t2"},
+        {"version": 1, "provider": "codex", "type": "turn", "status": "started", "timestamp": "t3"},
+        {"version": 1, "provider": "claude", "type": "usage", "raw_type": "turn.completed", "timestamp": "t4"},
+    ]
+
+    assert service.codex_completed_turn_count(events) == 2
+
+
 # ── spawn_claude_code_activity ───────────────────────────────────────
 
 
@@ -1563,8 +1613,10 @@ async def test_spawn_activity_happy_path_end_to_end():
     fake_collector = AsyncMock()
     fake_collector.start = AsyncMock()
     fake_collector.stop = AsyncMock()
+    seen_create_session = {}
 
     async def fake_create_session(**kwargs):
+        seen_create_session.update(kwargs)
         return {
             "task_id": "task-x",
             "sandbox_id": "sb",
@@ -1622,6 +1674,7 @@ async def test_spawn_activity_happy_path_end_to_end():
             attachments=[{"id": "att-1"}],
             model="rose-labs/rose-1-lite",
             github_repo_url="https://github.com/o/r",
+            fast_mode_cache_enabled=True,
         )
     assert result["status"] == "completed"
     assert result["success"] is True
@@ -1631,6 +1684,7 @@ async def test_spawn_activity_happy_path_end_to_end():
     assert any(u["type"] == "llm" for u in result["usage_items"])
     assert any(u["type"] == "service" for u in result["usage_items"])
     assert result["output_files"] == [{"id": "f1", "path": "/home/user/output/a.txt"}]
+    assert seen_create_session["fast_mode_cache_enabled"] is True
     fake_collector.start.assert_awaited()
     fake_collector.stop.assert_awaited()
 
@@ -2119,6 +2173,8 @@ async def run_all_tests():
     # _run_agentic_loop
     await r.record_async("run_agentic_loop_exit_zero", test_run_agentic_loop_exit_zero_completes)
     await r.record_async("run_agentic_loop_connect_fail", test_run_agentic_loop_connect_fail_raises)
+    r.record("log_codex_fast_cache_event", test_log_code_agent_event_promotes_codex_fast_cache_request)
+    r.record("codex_completed_turn_count", test_codex_completed_turn_count_counts_unique_turn_completed_events)
     # spawn_claude_code_activity
     await r.record_async("spawn_activity_requires_schema", test_spawn_activity_requires_output_schema)
     await r.record_async("spawn_activity_happy", test_spawn_activity_happy_path_end_to_end)

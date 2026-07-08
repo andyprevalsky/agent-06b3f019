@@ -12,6 +12,37 @@ const log = createLogger('Broadcast');
 // Use SUPABASE_URL env var, fallback to production URL (matches agent worker behavior)
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://kzlurqihzaolhzsbkctf.supabase.co';
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+function finiteEnvNumber(value: string | undefined, fallback: number): number {
+  const parsed = Number(value ?? fallback);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+const BROADCAST_BATCH_SIZE = Math.max(
+  1,
+  finiteEnvNumber(process.env.SUPABASE_BROADCAST_BATCH_SIZE, 100)
+);
+const BROADCAST_FLUSH_DELAY_MS = Math.max(
+  0,
+  Number(process.env.SUPABASE_BROADCAST_FLUSH_DELAY_MS || 10)
+);
+const BROADCAST_TIMEOUT_MS = Math.max(
+  100,
+  Number(process.env.SUPABASE_BROADCAST_TIMEOUT_MS || 2000)
+);
+
+interface QueuedBroadcast {
+  topic: string;
+  event: string;
+  payload: Record<string, unknown>;
+  private: boolean;
+  trace: ReturnType<typeof currentTraceContext>;
+  enqueuedAt: number;
+}
+
+const broadcastQueue: QueuedBroadcast[] = [];
+let flushTimer: NodeJS.Timeout | null = null;
+let draining = false;
+const idleResolvers: Array<() => void> = [];
 
 /**
  * Stream assistant response chunks - EXACT same format as Python worker
@@ -216,39 +247,91 @@ async function broadcast(params: {
     return;
   }
 
-  const url = `${SUPABASE_URL}/realtime/v1/api/broadcast`;
   const trace = currentTraceContext();
+  broadcastQueue.push({
+    ...params,
+    private: process.env.NODE_ENV === 'production',
+    trace,
+    enqueuedAt: Date.now(),
+  });
+
+  scheduleBroadcastDrain(
+    broadcastQueue.length >= BROADCAST_BATCH_SIZE ? 0 : BROADCAST_FLUSH_DELAY_MS
+  );
+}
+
+function scheduleBroadcastDrain(delayMs: number): void {
+  if (flushTimer !== null) {
+    if (delayMs > 0) return;
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+
+  flushTimer = setTimeout(() => {
+    flushTimer = null;
+    void drainBroadcastQueue();
+  }, delayMs);
+}
+
+async function drainBroadcastQueue(): Promise<void> {
+  if (draining) return;
+  draining = true;
+  try {
+    while (broadcastQueue.length > 0) {
+      const batch = broadcastQueue.splice(0, BROADCAST_BATCH_SIZE);
+      await sendBroadcastBatch(batch);
+    }
+  } finally {
+    draining = false;
+    if (broadcastQueue.length > 0) {
+      scheduleBroadcastDrain(0);
+    } else {
+      while (idleResolvers.length > 0) idleResolvers.shift()?.();
+    }
+  }
+}
+
+async function sendBroadcastBatch(batch: QueuedBroadcast[]): Promise<void> {
+  if (batch.length === 0) return;
+
+  const url = `${SUPABASE_URL}/realtime/v1/api/broadcast`;
+  const serviceRoleKey = SUPABASE_SERVICE_ROLE_KEY;
+  if (!serviceRoleKey) return;
   const started = Date.now();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), BROADCAST_TIMEOUT_MS);
+  const first = batch[0];
 
   try {
     const response = await fetch(url, {
       method: 'POST',
       headers: {
-        apikey: SUPABASE_SERVICE_ROLE_KEY,
-        Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+        apikey: serviceRoleKey,
+        Authorization: `Bearer ${serviceRoleKey}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        messages: [
-          {
-            topic: params.topic,
-            event: params.event,
-            payload: { record: params.payload },
-            private: process.env.NODE_ENV === 'production',
-          },
-        ],
+        messages: batch.map((item) => ({
+          topic: item.topic,
+          event: item.event,
+          payload: { record: item.payload },
+          private: item.private,
+        })),
       }),
+      signal: controller.signal,
     });
 
     log.info('broadcast.span', {
       span_name: 'broadcast',
-      parent_span_id: trace?.span_id,
-      request_id: trace?.request_id,
-      agent_id: trace?.agent_id,
-      topic: params.topic,
-      event: params.event,
+      parent_span_id: first.trace?.span_id,
+      request_id: first.trace?.request_id,
+      agent_id: first.trace?.agent_id,
+      topic: first.topic,
+      event: batch.length === 1 ? first.event : 'BATCH',
       status: response.status,
       duration_ms: Date.now() - started,
+      batch_size: batch.length,
+      max_queue_delay_ms: Math.max(...batch.map((item) => started - item.enqueuedAt)),
     });
 
     if (!response.ok) {
@@ -257,14 +340,28 @@ async function broadcast(params: {
   } catch (error: unknown) {
     log.info('broadcast.span', {
       span_name: 'broadcast',
-      parent_span_id: trace?.span_id,
-      request_id: trace?.request_id,
-      agent_id: trace?.agent_id,
-      topic: params.topic,
-      event: params.event,
+      parent_span_id: first.trace?.span_id,
+      request_id: first.trace?.request_id,
+      agent_id: first.trace?.agent_id,
+      topic: first.topic,
+      event: batch.length === 1 ? first.event : 'BATCH',
       status: 'error',
       duration_ms: Date.now() - started,
+      batch_size: batch.length,
+      max_queue_delay_ms: Math.max(...batch.map((item) => started - item.enqueuedAt)),
     });
     log.error('Error', { err: error instanceof Error ? error.message : String(error) });
+  } finally {
+    clearTimeout(timeout);
   }
+}
+
+export async function __flushBroadcastQueueForTests(): Promise<void> {
+  if (flushTimer !== null) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+  await drainBroadcastQueue();
+  if (!draining && broadcastQueue.length === 0) return;
+  await new Promise<void>((resolve) => idleResolvers.push(resolve));
 }

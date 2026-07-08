@@ -58,6 +58,7 @@ export {
   subscribeToAttentionRequests,
   unsubscribe,
   getStoredSession,
+  fetchCodeAgentSession,
   fetchClaudeCodeSession,
   fetchCreditsUsage,
   fetchPublicAsset,
@@ -65,6 +66,7 @@ export {
   fetchTestPaymentPublicUrl,
   submitFeedback,
   downloadAttachmentAsBlob,
+  downloadAttachmentAsText,
 } from './api';
 
 // ── API types (used by components alongside the functions above) ──────────

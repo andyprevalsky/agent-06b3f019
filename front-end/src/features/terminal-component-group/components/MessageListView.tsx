@@ -72,12 +72,12 @@ export function MessageListView(props: MessageListViewProps) {
     streaming.attention !== null && subAgentId === undefined && streaming.bubbles.size > 0;
   const showWebPreview = showMainBanners && agent?.source === 'WEB';
   const thinkingStreamTokenCount = Math.round(streaming.charCount / 4);
+  const thinkingBubbles = [...streaming.bubbles.entries()].sort(([, a], [, b]) => {
+    return (a.startedAtMs ?? 0) - (b.startedAtMs ?? 0);
+  });
 
   return (
-    <div
-      ref={containerRef}
-      className={`${containerClassName} mobile-disable-message-entry-spawn`}
-    >
+    <div ref={containerRef} className={`${containerClassName} mobile-disable-message-entry-spawn`}>
       <MessageListItems
         filteredMessages={filteredMessages}
         currentAnimatingId={animation.currentAnimatingId}
@@ -104,7 +104,7 @@ export function MessageListView(props: MessageListViewProps) {
           onIncreaseCostLimit={onIncreaseCostLimit}
         />
       )}
-      {thinkingVisible && (
+      {thinkingVisible && thinkingBubbles.length <= 1 && (
         <ThinkingIndicator
           compact={compact}
           isClaudeStreaming={streaming.isClaude || streaming.isGpt}
@@ -113,6 +113,21 @@ export function MessageListView(props: MessageListViewProps) {
           animatedTokenCount={animatedTokenCount}
         />
       )}
+      {thinkingVisible &&
+        thinkingBubbles.length > 1 &&
+        thinkingBubbles.map(([streamId, bubble]) => {
+          const tokenCount = Math.round(bubble.text.length / 4);
+          return (
+            <ThinkingIndicator
+              key={`thinking-${streamId}`}
+              compact={compact}
+              isClaudeStreaming={bubble.isClaude === true || bubble.isGpt === true}
+              streamStartedAtMs={bubble.startedAtMs}
+              streamingTokenCount={tokenCount}
+              animatedTokenCount={tokenCount}
+            />
+          );
+        })}
       <StreamingTools tools={[...streaming.tools.values()]} compact={compact} />
       {showAttention && streaming.attention && (
         <StreamingAttentionBubble attention={streaming.attention} onSendMessage={onSendMessage} />

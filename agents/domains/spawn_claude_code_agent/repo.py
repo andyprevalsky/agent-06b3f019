@@ -35,6 +35,7 @@ async def save_claude_code_message(
     structured_response: Optional[dict] = None,
     github_repo_url: Optional[str] = None,
     code_provider: str = "claude",
+    completed_turns: Optional[int] = None,
 ) -> None:
     """Save Claude Code sub-action message directly to DB via back-end API."""
     config = load_config()
@@ -63,6 +64,9 @@ async def save_claude_code_message(
 
     if github_repo_url:
         metadata["github_repo_url"] = github_repo_url
+
+    if completed_turns is not None:
+        metadata["completed_turns"] = max(0, int(completed_turns))
 
     if not is_init_message:
         metadata["subAgentId"] = task_id
@@ -108,6 +112,7 @@ async def create_e2b_session(
     attachments: Optional[list[dict[str, Any]]] = None,
     github_repo_url: Optional[str] = None,
     code_provider: str = "claude",
+    fast_mode_cache_enabled: bool = False,
 ) -> dict[str, Any]:
     """Create an E2B sandbox session via back-end API.
 
@@ -120,6 +125,7 @@ async def create_e2b_session(
         "agent_id": agent_id,
         "goal": goal,
         "user_id": user_id,
+        "fast_mode_cache_enabled": fast_mode_cache_enabled,
     }
     if attachments:
         create_payload["attachments"] = attachments

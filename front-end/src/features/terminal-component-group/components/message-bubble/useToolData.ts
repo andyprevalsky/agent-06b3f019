@@ -61,13 +61,16 @@ export function useToolData({
     const toolStatus: ToolMessageData['status'] =
       rawStatus === 'ERROR' ? 'FINISHED' : rawStatus || 'FINISHED';
     const toolName = (metadata.toolName as string | undefined) || '';
+    const title = (metadata.title as string | undefined) || 'Tool';
+    const hideToolMessage =
+      toolName === 'cloud_agent' || (toolName === 'thought' && rawStatus === 'IN_PROGRESS');
 
     return {
       toolCallId: (metadata.toolCallId as string | undefined) || '',
       toolName,
-      title: (metadata.title as string | undefined) || 'Tool',
+      title,
       status: toolStatus,
-      message: toolName === 'cloud_agent' ? '' : message.text,
+      message: hideToolMessage ? '' : message.text,
       error: Boolean(metadata.error),
       progressComplete: metadata.progressComplete as number | undefined,
       actionMetadata,
