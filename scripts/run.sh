@@ -532,6 +532,8 @@ export DIRECT_URL="$LOCAL_DB_URL"
 # Sync Prisma schema to local DB (idempotent, dev-only)
 echo "🐘 Syncing Prisma schema..."
 (cd back-end && npx prisma db push --skip-generate --accept-data-loss 2>&1 | tail -3)
+echo "🔎 Ensuring agent-network grep indexes..."
+(cd back-end && npx tsx scripts/ensure-agent-network-grep-indexes.ts)
 
 # Seed local DB if dev user doesn't exist yet (full prod sync in scripts/setup-db.sh)
 if $DOCKER_OK && ! $USE_SYSTEM_PG; then
