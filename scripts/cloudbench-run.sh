@@ -254,6 +254,7 @@ if [ "$BENCH_SIMULATE" = "1" ]; then
     fi
 fi
 
+rm -rf "$CONTEXT_DIR"
 mkdir -p "$CONTEXT_DIR"
 chown -R "$APP_USER:$APP_USER" "$REPO_DIR/.context"
 chown -R "$APP_USER:$APP_USER" "$WMH_DIR" 2>/dev/null || true
