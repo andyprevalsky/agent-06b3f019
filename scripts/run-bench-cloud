@@ -860,16 +860,16 @@ if [ -n "$RUN_JSON" ]; then
     echo "$RUN_JSON" > "$RUN_OUT" 2>/dev/null && echo "💾 Saved run record: $RUN_OUT"
     echo ""
     echo "──────────────────── RUN SUMMARY ────────────────────"
-    PASS_RATE="$(printf '%s' "$RUN_JSON" | python3 -c 'import json,sys
+    PASS_RATE="$(python3 -c 'import json,sys
 try:
-    d=json.load(sys.stdin)
+    d=json.load(open(sys.argv[1]))
     s=d.get("summary",{})
     print(f"passed={s.get(\"passed\")} failed={s.get(\"failed\")} skipped={s.get(\"skipped\",0)} pass_rate={s.get(\"pass_rate\")} dur={s.get(\"total_duration_seconds\")}s cost_cents={s.get(\"total_cost_cents\")}")
     for t in d.get("tasks",[]):
         print(f"  task={t.get(\"name\")} passed={t.get(\"passed\")} mode={t.get(\"world_model_mode\")} dur={t.get(\"duration_seconds\")}s agent={t.get(\"agent_id\")}")
     print("PASS_RATE_VALUE=", s.get("pass_rate"))
 except Exception as e:
-    print("could not parse run json:", e)' 2>/dev/null | sed 's/^/   /')"
+    print("could not parse run json:", e)' "$RUN_OUT" 2>/dev/null | sed 's/^/   /')"
     echo "$PASS_RATE"
     echo "─────────────────────────────────────────────────────"
 fi
