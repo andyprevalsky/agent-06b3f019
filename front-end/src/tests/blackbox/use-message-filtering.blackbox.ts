@@ -94,6 +94,32 @@ describe('useMessageFiltering mergeSubAgentTreeMessages', () => {
     expect(result[0].metadata?.subAgentIds).toEqual(['agent-a', 'agent-b']);
   });
 
+  it('folds the for_each placeholder when child tree is grouped by spawnGroupId', () => {
+    const messages = [
+      msg('for-each-start', {
+        toolCallId: 'call-1',
+        toolName: 'spawn_general_purpose_agent_for_each',
+        toolStatus: 'IN_PROGRESS',
+        title: 'Spawning agent cluster',
+      }),
+      msg('child-tree', {
+        toolCallId: 'child-tree-call',
+        toolName: 'spawn_general_purpose_agent',
+        toolStatus: 'IN_PROGRESS',
+        title: 'Sub-agent starting',
+        busId: 'root-bus',
+        spawnGroupId: 'call-1',
+        subAgentIds: ['agent-a', 'agent-b'],
+      }),
+    ];
+
+    const { result } = mergeSubAgentTreeMessages(messages);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].message_id).toBe('child-tree');
+    expect(result[0].metadata?.subAgentIds).toEqual(['agent-a', 'agent-b']);
+  });
+
   it('keeps the for_each placeholder visible before any child has spawned', () => {
     const messages = [
       msg('for-each-start', {
