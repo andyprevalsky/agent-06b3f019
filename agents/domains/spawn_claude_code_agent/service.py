@@ -303,6 +303,42 @@ def _log_code_agent_event(
         )
 
 
+def is_codex_completed_turn_event(event: dict[str, Any]) -> bool:
+    """Return True for normalized Codex events that represent a completed Codex turn."""
+    if event.get("provider") != "codex":
+        return False
+    if event.get("raw_type") == "turn.completed":
+        return True
+    return event.get("type") == "turn" and event.get("status") == "completed"
+
+
+def codex_completed_turn_event_key(event: dict[str, Any], fallback_index: int) -> str:
+    timestamp = event.get("timestamp")
+    if timestamp is None:
+        return f"event:{fallback_index}"
+    return json.dumps(
+        {
+            "timestamp": timestamp,
+            "raw_type": event.get("raw_type"),
+            "type": event.get("type"),
+            "status": event.get("status"),
+            "usage": event.get("usage"),
+        },
+        sort_keys=True,
+        default=str,
+    )
+
+
+def codex_completed_turn_count(code_events: list[Dict[str, Any]]) -> int:
+    """Count unique completed Codex turns from normalized SDK events."""
+    seen: set[str] = set()
+    for index, event in enumerate(code_events):
+        if not is_codex_completed_turn_event(event):
+            continue
+        seen.add(codex_completed_turn_event_key(event, index))
+    return len(seen)
+
+
 async def _run_agentic_loop(  # noqa: C901
     *,
     agent_id: str,
@@ -341,6 +377,8 @@ async def _run_agentic_loop(  # noqa: C901
     total_input_tokens = 0
     total_output_tokens = 0
     code_events: list[Dict[str, Any]] = []
+    completed_codex_turn_keys: set[str] = set()
+    completed_codex_turns = 0
 
     async def on_output(data: str, is_buffer: bool) -> None:
         nonlocal last_output_time, pending_output
@@ -379,7 +417,13 @@ async def _run_agentic_loop(  # noqa: C901
         pending_output = True
 
     async def on_event(event: dict[str, Any]) -> None:
+        nonlocal completed_codex_turns
         code_events.append(event)
+        if is_codex_completed_turn_event(event):
+            key = codex_completed_turn_event_key(event, len(code_events) - 1)
+            if key not in completed_codex_turn_keys:
+                completed_codex_turn_keys.add(key)
+                completed_codex_turns += 1
         _log_code_agent_event(event, agent_id=agent_id, task_id=task_id, sandbox_id=sandbox_id)
         logger.debug(
             "[ClaudeCode] Received code-agent event",
@@ -577,6 +621,7 @@ async def _run_agentic_loop(  # noqa: C901
                     action_type="agent_observation",
                     tool_call_id=tool_call_id,
                     code_provider=code_provider,
+                    completed_turns=completed_codex_turns if code_provider == "codex" else None,
                 )
                 action_summary.append(f"Status update at {elapsed_int}s")
                 last_status_update = safe_time()
@@ -1504,6 +1549,7 @@ async def spawn_claude_code_activity(  # noqa: C901
             "usage_items": usage_items,
             "structured_response": structured_response,
             "output_files": output_files,
+            "completed_turns": codex_completed_turn_count(code_events) if code_provider == "codex" else None,
         }
         return result
 

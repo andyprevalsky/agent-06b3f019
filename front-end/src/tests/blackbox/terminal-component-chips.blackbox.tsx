@@ -113,7 +113,7 @@ describe('ClaudeCodeChip', () => {
     expect(buttons.length).toBeGreaterThan(0);
   });
 
-  it('shows completed turn count in code-agent headers', () => {
+  it('does not count heartbeat progress messages as completed turns', () => {
     messagesRef.current = [
       makeMsg({
         metadata: {
@@ -131,10 +131,55 @@ describe('ClaudeCodeChip', () => {
           toolStatus: 'FINISHED',
         },
       }),
+      makeMsg({
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'agent_observation',
+          title: 'Claude Code working (60s)',
+          toolStatus: 'FINISHED',
+        },
+      }),
     ];
 
     renderWithProviders(<ClaudeCodeChip taskId="task-1" forceShow />);
-    expect(screen.getByText('2 turns completed')).toBeInTheDocument();
+    expect(screen.getByText('0 turns completed')).toBeInTheDocument();
+    expect(screen.queryByText('2 turns completed')).not.toBeInTheDocument();
+  });
+
+  it('shows explicit Codex completed turn count in code-agent headers', () => {
+    messagesRef.current = [
+      makeMsg({
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'claude_code_started',
+          title: 'Codex Code Started',
+          code_provider: 'codex',
+        },
+      }),
+      makeMsg({
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'agent_observation',
+          title: 'Codex working (30s)',
+          toolStatus: 'FINISHED',
+          code_provider: 'codex',
+          completed_turns: 1,
+        },
+      }),
+      makeMsg({
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'agent_observation',
+          title: 'Codex working (60s)',
+          toolStatus: 'FINISHED',
+          code_provider: 'codex',
+          completed_turns: 1,
+        },
+      }),
+    ];
+
+    renderWithProviders(<ClaudeCodeChip taskId="task-1" forceShow codeProvider="codex" />);
+    expect(screen.getByText('1 turn completed')).toBeInTheDocument();
   });
 
   it('shows completed state and structured response when expanded', async () => {

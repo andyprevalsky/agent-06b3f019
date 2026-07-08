@@ -203,6 +203,8 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                     "task_id": result.get("task_id"),
                     "action_type": "task_complete",
                     "structured_response": result.get("structured_response"),
+                    "code_provider": code_provider,
+                    "completed_turns": result.get("completed_turns"),
                 },
                 data={"usage": tool_usage},
             )

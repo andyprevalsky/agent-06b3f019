@@ -41,6 +41,18 @@ function numberValue(value: unknown): number | null {
   return null;
 }
 
+/*
+ * Turn-count data flow:
+ *
+ * Codex CLI SDK event: turn.completed
+ *   -> E2B ws-server normalizes event
+ *   -> agents/domains/spawn_claude_code_agent counts completed_turns
+ *   -> Message.metadata.completed_turns
+ *   -> deriveTurnCount()
+ *   -> TurnCounter label
+ *
+ * Periodic agent_observation messages are heartbeats, not turns.
+ */
 function deriveTurnCount(taskMessages: Message[]): number {
   const maxExplicitTurn = taskMessages
     .flatMap((message) => {
@@ -50,23 +62,13 @@ function deriveTurnCount(taskMessages: Message[]): number {
         metadata.turn_count,
         metadata.completedTurns,
         metadata.completed_turns,
-        metadata.turn,
-        metadata.turnIndex,
-        metadata.turn_index,
       ];
     })
     .map(numberValue)
     .filter((value): value is number => value !== null)
     .reduce((max, value) => Math.max(max, value), 0);
 
-  const completedProgressMessages = taskMessages.filter((message) => {
-    const metadata = message.metadata ?? {};
-    if (metadata.toolStatus !== 'FINISHED') return false;
-    if (metadata.action_type === 'claude_code_started') return false;
-    return Boolean(metadata.action_type || metadata.title);
-  }).length;
-
-  return Math.max(0, Math.floor(Math.max(completedProgressMessages, maxExplicitTurn, 0)));
+  return Math.max(0, Math.floor(maxExplicitTurn));
 }
 
 function isTaskCompletionSuccess(message: Message | undefined): boolean {

@@ -698,6 +698,7 @@ async def test_repo_save_message_posts_json():
         structured_response={"result": "ok"},
         github_repo_url="https://github.com/foo/bar",
         code_provider="codex",
+        completed_turns=3,
     )
 
     call = assert_captured_call(url_contains="/api/agents/", method="POST")
@@ -711,6 +712,7 @@ async def test_repo_save_message_posts_json():
     assert meta["structured_response"] == {"result": "ok"}
     assert meta["github_repo_url"] == "https://github.com/foo/bar"
     assert meta["code_provider"] == "codex"
+    assert meta["completed_turns"] == 3
     # Init messages omit subAgentId
     assert "subAgentId" not in meta
 
@@ -1563,6 +1565,21 @@ def test_log_code_agent_event_promotes_codex_fast_cache_request():
     assert kwargs["cache"] == "miss"
 
 
+def test_codex_completed_turn_count_counts_unique_turn_completed_events():
+    """Codex completed turns come from turn.completed SDK events, not status heartbeats."""
+    from domains.spawn_claude_code_agent import service
+
+    events = [
+        {"version": 1, "provider": "codex", "type": "usage", "raw_type": "turn.completed", "timestamp": "t1"},
+        {"version": 1, "provider": "codex", "type": "usage", "raw_type": "turn.completed", "timestamp": "t1"},
+        {"version": 1, "provider": "codex", "type": "usage", "raw_type": "turn.completed", "timestamp": "t2"},
+        {"version": 1, "provider": "codex", "type": "turn", "status": "started", "timestamp": "t3"},
+        {"version": 1, "provider": "claude", "type": "usage", "raw_type": "turn.completed", "timestamp": "t4"},
+    ]
+
+    assert service.codex_completed_turn_count(events) == 2
+
+
 # ── spawn_claude_code_activity ───────────────────────────────────────
 
 
@@ -2151,6 +2168,7 @@ async def run_all_tests():
     await r.record_async("run_agentic_loop_exit_zero", test_run_agentic_loop_exit_zero_completes)
     await r.record_async("run_agentic_loop_connect_fail", test_run_agentic_loop_connect_fail_raises)
     r.record("log_codex_fast_cache_event", test_log_code_agent_event_promotes_codex_fast_cache_request)
+    r.record("codex_completed_turn_count", test_codex_completed_turn_count_counts_unique_turn_completed_events)
     # spawn_claude_code_activity
     await r.record_async("spawn_activity_requires_schema", test_spawn_activity_requires_output_schema)
     await r.record_async("spawn_activity_happy", test_spawn_activity_happy_path_end_to_end)
