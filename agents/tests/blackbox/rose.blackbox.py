@@ -2754,6 +2754,59 @@ async def test_client_openai_api_key_serves_before_anthropic_and_openrouter():
     assert meta is not None and str(meta.data.get("actual_model", "")).endswith("-openai")
 
 
+async def test_client_openai_api_key_preserves_tools_without_gpt_auth():
+    lines = [
+        "event: response.output_text.delta",
+        'data: {"type":"response.output_text.delta","delta":"using tool"}',
+        "",
+        "event: response.completed",
+        'data: {"type":"response.completed","response":{"usage":{"input_tokens":4,"output_tokens":2,"total_tokens":6}}}',
+        "",
+        "data: [DONE]",
+    ]
+    sse_ok = "\n".join(lines)
+    captured: dict[str, object] = {}
+
+    def handler(req):
+        if str(req.url) == OPENAI_RESPONSES_API_URL:
+            captured["body"] = json.loads(req.content.decode("utf-8"))
+            return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+    prev_gpt = os.environ.get("GPT_API_KEY")
+    os.environ["GPT_API_KEY"] = "sk-proj-test"
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "description": "Look up a value",
+                "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
+            },
+        }
+    ]
+    try:
+        await _drain(
+            RoseClient(openrouter_key="ork-x").complete(
+                pool="rose-1-lite",
+                messages=[{"role": "user", "content": "use a tool"}],
+                tools=tools,
+            )
+        )
+    finally:
+        if prev_gpt is None:
+            os.environ.pop("GPT_API_KEY", None)
+        else:
+            os.environ["GPT_API_KEY"] = prev_gpt
+
+    body = captured["body"]
+    assert isinstance(body, dict)
+    assert body["tools"][0]["name"] == "lookup"
+    assert body["tool_choice"] == "required"
+    assert "text" not in body, "native tools should suppress JSON response_format on funded GPT route"
+
+
 async def test_client_openai_api_key_failure_falls_through_to_anthropic_before_openrouter():
     lines = [
         "event: content_block_delta",
@@ -4532,6 +4585,10 @@ async def run_all_tests():
     await r.record_async(
         "openai_apikey_before_anthropic_openrouter",
         test_client_openai_api_key_serves_before_anthropic_and_openrouter,
+    )
+    await r.record_async(
+        "openai_apikey_preserves_tools_without_gpt_auth",
+        test_client_openai_api_key_preserves_tools_without_gpt_auth,
     )
     await r.record_async(
         "openai_apikey_failure_to_anthropic",

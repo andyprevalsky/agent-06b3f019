@@ -714,6 +714,8 @@ class RoseClient:
         claude_auth_tool_choice = None
         gpt_auth_tools = None
         gpt_auth_tool_choice = None
+        gpt_api_key_tools = None
+        gpt_api_key_tool_choice = None
         anthropic_api_key_tools = None
         anthropic_api_key_tool_choice = None
         direct_auth_tools = tools
@@ -749,6 +751,13 @@ class RoseClient:
                 gpt_auth_tools = direct_auth_tools
             if gpt_auth_tools:
                 gpt_auth_tool_choice = effective_tool_choice or "any"
+        # The funded OpenAI API-key route uses the same Responses native
+        # tool protocol as gptAuth, so it must preserve real tool schemas even
+        # when there is no direct GPT token lease.
+        if not _is_synthetic_output_toolset(direct_auth_tools):
+            gpt_api_key_tools = direct_auth_tools
+        if gpt_api_key_tools:
+            gpt_api_key_tool_choice = effective_tool_choice or "any"
         # The funded Anthropic API-key route is the same native Anthropic
         # protocol as claudeAuth, so it must preserve real tool schemas even
         # when the direct route was GPT-only and then fell through.
@@ -1180,9 +1189,9 @@ class RoseClient:
                             model=pool_spec.gpt_auth_model,
                             messages=messages,
                             api_key=openai_api_key,
-                            tools=gpt_auth_tools,
-                            tool_choice=gpt_auth_tool_choice,
-                            response_format=None if gpt_auth_tools else openrouter_response_format,
+                            tools=gpt_api_key_tools,
+                            tool_choice=gpt_api_key_tool_choice,
+                            response_format=None if gpt_api_key_tools else openrouter_response_format,
                             temperature=temperature,
                             effort=effort,
                             provider_fast_mode=True,
