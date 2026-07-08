@@ -118,6 +118,17 @@ test('Codex Code sandbox uses Fast Mode localhost proxy plumbing', () => {
     'backend must inject Codex proxy URL'
   );
   assert.ok(
+    e2bProvider.includes('Fast Mode: Codex code-agent cache config'),
+    'backend must log Codex Fast Mode cache configuration before sandbox launch'
+  );
+  assert.ok(
+    e2bProvider.includes('fastModeCacheEnabled === true') &&
+      e2bProvider.includes(
+        'Fast Mode cache is enabled for Codex code agent but no Codex proxy URL is configured'
+      ),
+    'read-enabled Codex Fast Mode must fail loudly instead of silently running live'
+  );
+  assert.ok(
     e2bProvider.includes('overlayCodexCodeWsServer'),
     'backend must overlay checked-in Codex server'
   );
