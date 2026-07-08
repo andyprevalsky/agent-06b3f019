@@ -35,7 +35,11 @@ _GET_RETRY_BACKOFF_S = 0.15
 _SET_TIMEOUT_S = 30.0
 _GET_BATCH_DELAY_S = 0.005
 _GET_BATCH_MAX_KEYS = 500
-_GET_BATCH_MAX_IN_FLIGHT = int(os.environ.get("FAST_CACHE_GET_BATCH_MAX_IN_FLIGHT", "4") or "4")
+_GET_BATCH_MAX_IN_FLIGHT = int(os.environ.get("FAST_CACHE_GET_BATCH_MAX_IN_FLIGHT", "16") or "16")
+_HTTP_MAX_CONNECTIONS = int(os.environ.get("FAST_CACHE_HTTP_MAX_CONNECTIONS", "80") or "80")
+_HTTP_MAX_KEEPALIVE_CONNECTIONS = int(
+    os.environ.get("FAST_CACHE_HTTP_MAX_KEEPALIVE_CONNECTIONS", "40") or "40"
+)
 _ARCHIVE_READ_MAX_CONCURRENCY = 4
 
 # A single pooled client per worker process. Creating a fresh httpx.AsyncClient per
@@ -66,7 +70,10 @@ def _shared_client() -> httpx.AsyncClient:
     if _client is None or _client.is_closed:
         _client = httpx.AsyncClient(
             timeout=_SET_TIMEOUT_S,
-            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            limits=httpx.Limits(
+                max_connections=_HTTP_MAX_CONNECTIONS,
+                max_keepalive_connections=_HTTP_MAX_KEEPALIVE_CONNECTIONS,
+            ),
         )
     return _client
 

@@ -41,7 +41,7 @@ from helpers.llm_timeouts import (
     STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS,
     VERIFIER_ACTIVITY_TIMEOUT_SECONDS,
 )
-from helpers.messages import CoalescingStreamBroadcaster
+from helpers.messages import CoalescingStreamBroadcaster, schedule_background_broadcast
 from helpers.summarize import compress_context
 from helpers.tracing import span, traced
 from helpers.update_status import update_agent_status
@@ -589,7 +589,14 @@ async def run_agent(  # noqa: C901
         # For Sonnet 200k → effective=180k → trigger=167k.
         effective_window = max_context_tokens - EFFECTIVE_OUTPUT_RESERVATION
         compaction_trigger = effective_window - AUTOCOMPACT_BUFFER_TOKENS
-        context_tokens = _estimate_tokens(context)
+        async with span(
+            "run_loop.context_token_estimate",
+            agent_id=agent_id,
+            iteration=iteration,
+            context_messages=len(context),
+            agent_type="explore" if cache_call_site == "explore_agent" else None,
+        ):
+            context_tokens = _estimate_tokens(context)
 
         if context_tokens >= compaction_trigger and compactor_failures < MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
             logger.info(
@@ -699,14 +706,34 @@ async def run_agent(  # noqa: C901
                 )
 
         # 6. Build system prompt (calls API for fresh shared memory each iteration)
-        current_system_prompt = await system_prompt()
+        async with span(
+            "run_loop.system_prompt",
+            agent_id=agent_id,
+            iteration=iteration,
+            agent_type="explore" if cache_call_site == "explore_agent" else None,
+        ):
+            current_system_prompt = await system_prompt()
 
         # 7. Build messages for LLM
         # Use custom builder if provided (e.g., browser uses compress_messages for multimodal)
-        llm_context = _context_with_plan_fsm_labels(context)
+        async with span(
+            "run_loop.prepare_llm_context",
+            agent_id=agent_id,
+            iteration=iteration,
+            context_messages=len(context),
+            agent_type="explore" if cache_call_site == "explore_agent" else None,
+        ):
+            llm_context = _context_with_plan_fsm_labels(context)
 
         if build_messages:
-            messages = build_messages(llm_context, current_system_prompt)
+            async with span(
+                "run_loop.build_messages_custom",
+                agent_id=agent_id,
+                iteration=iteration,
+                context_messages=len(llm_context),
+                agent_type="explore" if cache_call_site == "explore_agent" else None,
+            ):
+                messages = build_messages(llm_context, current_system_prompt)
         elif not is_inside_temporal_activity:
             # Workflow context: pre-download files, then defer message building to call_llm_activity
             # so that base64 content never crosses Temporal's 2MB payload boundary.
@@ -734,11 +761,18 @@ async def run_agent(  # noqa: C901
             )
             messages = None  # Signals to use shared state path below
         else:
-            messages = await build_llm_messages(
-                llm_context,
-                current_system_prompt,
-                user_id=user_id,
-            )
+            async with span(
+                "run_loop.build_llm_messages",
+                agent_id=agent_id,
+                iteration=iteration,
+                context_messages=len(llm_context),
+                agent_type="explore" if cache_call_site == "explore_agent" else None,
+            ):
+                messages = await build_llm_messages(
+                    llm_context,
+                    current_system_prompt,
+                    user_id=user_id,
+                )
 
         # Resolve direct compute tokens dynamically when the workflow provides
         # getters; otherwise use this loop's remembered successful token state.
@@ -780,15 +814,28 @@ async def run_agent(  # noqa: C901
                     sub_agent_id=task_id,
                     llm_started_at_ms=llm_started_at_ms,
                 )
-                await handle_tool_event(
-                    event=start_event,
-                    agent_id=agent_id,
-                    tool_call_id=stream_id,
-                    tool_name="llm_call",
-                    execute_activity=execute_activity,
-                    user_id=user_id,
-                    sub_agent_id=task_id,
-                )
+                async def _send_stream_start() -> None:
+                    async with span(
+                        "stream.start_event",
+                        agent_id=agent_id,
+                        stream_id=stream_id,
+                        agent_type="explore" if cache_call_site == "explore_agent" else None,
+                    ):
+                        await handle_tool_event(
+                            event=start_event,
+                            agent_id=agent_id,
+                            tool_call_id=stream_id,
+                            tool_name="llm_call",
+                            execute_activity=execute_activity,
+                            user_id=user_id,
+                            sub_agent_id=task_id,
+                        )
+
+                background_stream_start = cache_call_site == "explore_agent" and fast_mode_cache_enabled
+                if background_stream_start:
+                    schedule_background_broadcast(_send_stream_start(), label="stream.start")
+                else:
+                    await _send_stream_start()
                 sequence[0] += 1
 
                 # Decouple Supabase broadcasting from the token-read loop. Awaiting
@@ -927,8 +974,15 @@ async def run_agent(  # noqa: C901
                     final_delta = ""
                     if pydantic_result.response:
                         final_delta = pydantic_result.response[len(last_text[0]) :]
+                    await_done_broadcast = not (
+                        cache_call_site == "explore_agent" and fast_mode_cache_enabled
+                    )
                     with contextlib.suppress(Exception):
-                        await broadcaster.aclose(final_delta=final_delta, final_sequence=sequence[0])
+                        await broadcaster.aclose(
+                            final_delta=final_delta,
+                            final_sequence=sequence[0],
+                            await_done_broadcast=await_done_broadcast,
+                        )
                 finally:
                     # Guarantee the background drainer never leaks, even on error/pause.
                     await broadcaster.adispose()
@@ -1234,7 +1288,17 @@ async def run_agent(  # noqa: C901
             assistant_metadata = None
         if response_text or assistant_tool_calls:
             if post_message:
-                await post_message(response_text, "ASSISTANT", assistant_metadata)
+                async with span(
+                    "run_loop.post_assistant_message",
+                    agent_id=agent_id,
+                    iteration=iteration,
+                    role="ASSISTANT",
+                    has_tool_calls=bool(assistant_tool_calls),
+                    text_len=len(response_text or ""),
+                    context_messages=len(context),
+                    agent_type="explore" if cache_call_site == "explore_agent" else None,
+                ):
+                    await post_message(response_text, "ASSISTANT", assistant_metadata)
             # When no poll_messages (explore/browser agents in activities, or
             # fully in-memory callers with no post_message), locally append so
             # subsequent TOOL results have their declaring assistant row and
@@ -1278,149 +1342,171 @@ async def run_agent(  # noqa: C901
             tool_results = await asyncio.gather(*tasks)
 
             # Process results in order (for determinism)
-            for tool_result in tool_results:
-                tool_name = tool_result["tool_name"]
-                tool_call_id = tool_result["tool_call_id"]
-                result = tool_result["result"]
-                error = tool_result["error"]
+            async with span(
+                "run_loop.process_tool_results",
+                agent_id=agent_id,
+                iteration=iteration,
+                tool_result_count=len(tool_results),
+                context_messages=len(context),
+                agent_type="explore" if cache_call_site == "explore_agent" else None,
+            ):
+                for tool_result in tool_results:
+                    tool_name = tool_result["tool_name"]
+                    tool_call_id = tool_result["tool_call_id"]
+                    result = tool_result["result"]
+                    error = tool_result["error"]
 
-                if error:
-                    # Tool failed - add error to context
-                    if is_inside_temporal_activity and post_message:
-                        await post_message(
-                            str(error),
-                            "TOOL",
-                            {
+                    if error:
+                        # Tool failed - add error to context
+                        if is_inside_temporal_activity and post_message:
+                            async with span(
+                                "run_loop.post_tool_error_message",
+                                agent_id=agent_id,
+                                iteration=iteration,
+                                tool_name=tool_name,
+                                agent_type="explore" if cache_call_site == "explore_agent" else None,
+                            ):
+                                await post_message(
+                                    str(error),
+                                    "TOOL",
+                                    {
+                                        "toolCallId": tool_call_id,
+                                        "toolName": tool_name,
+                                        "toolStatus": "ERROR",
+                                        "title": f"{tool_name} failed",
+                                        "error": True,
+                                        "subAgentId": task_id,
+                                    },
+                                )
+                        # When no poll_messages, locally append error so agent sees it
+                        # (omit subAgentId so convert_context_to_messages doesn't filter it)
+                        if not poll_messages:
+                            context.append(
+                                {
+                                    "role": "TOOL",
+                                    "text": f"Error: {error}",
+                                    "timestamp": _safe_now().isoformat(),
+                                    "metadata": {
+                                        "toolCallId": tool_call_id,
+                                        "toolName": tool_name,
+                                        "toolStatus": "ERROR",
+                                        "error": True,
+                                    },
+                                }
+                            )
+                        continue
+
+                    # Check for special status returns (used by browser agent)
+                    if isinstance(result, dict):
+                        result_status = result.get("status", "").lower()
+
+                        if result_status == "needs_user_help":
+                            return {
+                                "status": "needs_user_help",
+                                "context": context,
+                                "tokens_in": tokens_in,
+                                "tokens_out": tokens_out,
+                                "token_count": token_count,
+                                "context_size": context_size,
+                                "cache_read_input_tokens": cache_read_total,
+                                "cache_creation_input_tokens": cache_write_total,
+                                **result,
+                            }
+
+                        if result_status == "completed":
+                            return {
+                                "status": "completed",
+                                "context": context,
+                                "tokens_in": tokens_in,
+                                "tokens_out": tokens_out,
+                                "token_count": token_count,
+                                "context_size": context_size,
+                                "cache_read_input_tokens": cache_read_total,
+                                "cache_creation_input_tokens": cache_write_total,
+                                **result,
+                            }
+
+                    # Add successful result to context
+                    is_error = isinstance(result, dict) and result.get("error", False)
+                    # Check for nested result with its own message (from NEW_SIGNATURE_TOOLS)
+                    if isinstance(result, dict) and isinstance(result.get("result"), dict):
+                        nested_result = result["result"]
+                        result_message = nested_result.get("message", result.get("message", ""))
+                    else:
+                        result_message = result.get("message", "") if isinstance(result, dict) else str(result)
+
+                    if is_error:
+                        new_msg = {
+                            "role": "TOOL",
+                            "text": f"Error: {result_message}",
+                            "timestamp": _safe_now().isoformat(),
+                            "metadata": {
                                 "toolCallId": tool_call_id,
                                 "toolName": tool_name,
                                 "toolStatus": "ERROR",
-                                "title": f"{tool_name} failed",
                                 "error": True,
-                                "subAgentId": task_id,
                             },
-                        )
-                    # When no poll_messages, locally append error so agent sees it
-                    # (omit subAgentId so convert_context_to_messages doesn't filter it)
+                        }
+                    else:
+                        new_msg = {
+                            "role": "TOOL",
+                            "text": result_message,
+                            "timestamp": _safe_now().isoformat(),
+                            "metadata": {
+                                "toolCallId": tool_call_id,
+                                "toolName": tool_name,
+                                "toolStatus": "FINISHED",
+                            },
+                        }
+                    logger.debug(
+                        "Tool result posted to DB (will be picked up by poll)",
+                        tool_name=tool_name,
+                        context_len=len(context),
+                    )
+                    # When no poll_messages, locally append so agent sees tool results
                     if not poll_messages:
-                        context.append(
-                            {
-                                "role": "TOOL",
-                                "text": f"Error: {error}",
-                                "timestamp": _safe_now().isoformat(),
-                                "metadata": {
-                                    "toolCallId": tool_call_id,
-                                    "toolName": tool_name,
-                                    "toolStatus": "ERROR",
-                                    "error": True,
-                                },
-                            }
-                        )
-                    continue
+                        context.append(new_msg)
 
-                # Check for special status returns (used by browser agent)
-                if isinstance(result, dict):
-                    result_status = result.get("status", "").lower()
-
-                    if result_status == "needs_user_help":
-                        return {
-                            "status": "needs_user_help",
-                            "context": context,
-                            "tokens_in": tokens_in,
-                            "tokens_out": tokens_out,
-                            "token_count": token_count,
-                            "context_size": context_size,
-                            "cache_read_input_tokens": cache_read_total,
-                            "cache_creation_input_tokens": cache_write_total,
-                            **result,
-                        }
-
-                    if result_status == "completed":
-                        return {
-                            "status": "completed",
-                            "context": context,
-                            "tokens_in": tokens_in,
-                            "tokens_out": tokens_out,
-                            "token_count": token_count,
-                            "context_size": context_size,
-                            "cache_read_input_tokens": cache_read_total,
-                            "cache_creation_input_tokens": cache_write_total,
-                            **result,
-                        }
-
-                # Add successful result to context
-                is_error = isinstance(result, dict) and result.get("error", False)
-                # Check for nested result with its own message (from NEW_SIGNATURE_TOOLS)
-                if isinstance(result, dict) and isinstance(result.get("result"), dict):
-                    nested_result = result["result"]
-                    result_message = nested_result.get("message", result.get("message", ""))
-                else:
-                    result_message = result.get("message", "") if isinstance(result, dict) else str(result)
-
-                if is_error:
-                    new_msg = {
-                        "role": "TOOL",
-                        "text": f"Error: {result_message}",
-                        "timestamp": _safe_now().isoformat(),
-                        "metadata": {
-                            "toolCallId": tool_call_id,
-                            "toolName": tool_name,
-                            "toolStatus": "ERROR",
-                            "error": True,
-                        },
-                    }
-                else:
-                    new_msg = {
-                        "role": "TOOL",
-                        "text": result_message,
-                        "timestamp": _safe_now().isoformat(),
-                        "metadata": {
-                            "toolCallId": tool_call_id,
-                            "toolName": tool_name,
-                            "toolStatus": "FINISHED",
-                        },
-                    }
-                logger.debug(
-                    "Tool result posted to DB (will be picked up by poll)",
-                    tool_name=tool_name,
-                    context_len=len(context),
-                )
-                # When no poll_messages, locally append so agent sees tool results
-                if not poll_messages:
-                    context.append(new_msg)
-
-                # Track set_plan success (only if no error)
-                if tool_name == "set_plan" and not is_error:
-                    set_plan_succeeded = True
+                    # Track set_plan success (only if no error)
+                    if tool_name == "set_plan" and not is_error:
+                        set_plan_succeeded = True
 
         # Repetition detection: if the agent keeps calling the same tools with identical
         # args, it's stuck. Inject a strong nudge after 3 consecutive identical iterations.
         if processed_tools:
-            call_sig = hashlib.md5(
-                json.dumps(
-                    sorted([(t, json.dumps(a, sort_keys=True, default=str)) for t, a, _ in processed_tools]),
-                    sort_keys=True,
-                ).encode()
-            ).hexdigest()
-            recent_call_hashes.append(call_sig)
-            if len(recent_call_hashes) >= 3 and len(set(list(recent_call_hashes)[-3:])) == 1:
-                same_call_streak += 1
-                tool_names = [t for t, _, _ in processed_tools]
-                logger.warning(f"[run_agent] Repetitive tool calls detected (streak={same_call_streak}): {tool_names}")
-                context.append(
-                    {
-                        "role": "SYSTEM",
-                        "text": (
-                            f"WARNING: You have called the same tool(s) with identical arguments "
-                            f"{same_call_streak + 2} times in a row without making progress. "
-                            "The previous approach is not working. You MUST try a fundamentally different strategy: "
-                            "use different arguments, a different tool, or decompose the problem differently. "
-                            "Do not repeat the same call again."
-                        ),
-                        "timestamp": _safe_now().isoformat(),
-                    }
-                )
-            else:
-                same_call_streak = 0
+            async with span(
+                "run_loop.repetition_detection",
+                agent_id=agent_id,
+                iteration=iteration,
+                processed_tool_count=len(processed_tools),
+                agent_type="explore" if cache_call_site == "explore_agent" else None,
+            ):
+                call_sig = hashlib.md5(
+                    json.dumps(
+                        sorted([(t, json.dumps(a, sort_keys=True, default=str)) for t, a, _ in processed_tools]),
+                        sort_keys=True,
+                    ).encode()
+                ).hexdigest()
+                recent_call_hashes.append(call_sig)
+                if len(recent_call_hashes) >= 3 and len(set(list(recent_call_hashes)[-3:])) == 1:
+                    same_call_streak += 1
+                    tool_names = [t for t, _, _ in processed_tools]
+                    logger.warning(f"[run_agent] Repetitive tool calls detected (streak={same_call_streak}): {tool_names}")
+                    context.append(
+                        {
+                            "role": "SYSTEM",
+                            "text": (
+                                f"WARNING: You have called the same tool(s) with identical arguments "
+                                f"{same_call_streak + 2} times in a row without making progress. "
+                                "The previous approach is not working. You MUST try a fundamentally different strategy: "
+                                "use different arguments, a different tool, or decompose the problem differently. "
+                                "Do not repeat the same call again."
+                            ),
+                            "timestamp": _safe_now().isoformat(),
+                        }
+                    )
+                else:
+                    same_call_streak = 0
 
         # Handle attempt_completion separately (should be alone due to llm.py filtering)
         if attempt_completion_tool:

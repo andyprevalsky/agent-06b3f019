@@ -105,6 +105,32 @@ def test_aclose_sends_done_marker():
         messages.stream_assistant_chunk = orig
 
 
+def test_aclose_can_background_done_marker():
+    rec = _Recorder(latency_s=0.1)
+    orig = messages.stream_assistant_chunk
+    _patch(rec)
+    try:
+        async def run():
+            b = CoalescingStreamBroadcaster(agent_id="a", stream_id="s", interval_s=0.05)
+            b.update("hello ", sequence=6)
+            start = time.monotonic()
+            await b.aclose(final_delta="done", final_sequence=7, await_done_broadcast=False)
+            elapsed = time.monotonic() - start
+            assert elapsed < 0.05, f"aclose awaited done broadcast: {elapsed:.3f}s"
+            assert rec.done_calls == []
+            for _ in range(20):
+                if rec.done_calls:
+                    break
+                await asyncio.sleep(0.01)
+            assert len(rec.done_calls) == 1, "background done marker was not sent"
+            assert rec.text == "hello done"
+            assert rec.done_calls[0]["delta"] == "done"
+            assert rec.done_calls[0]["sequence"] == 7
+        asyncio.run(run())
+    finally:
+        messages.stream_assistant_chunk = orig
+
+
 def test_reset_drops_buffered_deltas():
     rec = _Recorder(latency_s=0.001)
     orig = messages.stream_assistant_chunk
@@ -127,5 +153,6 @@ if __name__ == "__main__":
     test_update_is_non_blocking()
     test_coalesces_without_losing_text()
     test_aclose_sends_done_marker()
+    test_aclose_can_background_done_marker()
     test_reset_drops_buffered_deltas()
     print("all stream-broadcaster tests passed")
