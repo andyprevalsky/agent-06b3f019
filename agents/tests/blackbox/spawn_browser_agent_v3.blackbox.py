@@ -506,7 +506,7 @@ def test_browser_agent_recording_prod_cleanup_removes_task_scratch():
             artifact = recorder.output_dir / "index.html"
             artifact.write_text("<html>scratch</html>", encoding="utf-8")
 
-            recorder.cleanup_local_artifacts()
+            recorder.cleanup_local_artifacts(persisted=True)
 
             assert not recorder.output_dir.exists()
             assert Path(tmp).exists()
@@ -706,6 +706,63 @@ async def test_browser_recording_finalizer_uploads_frame_replay_after_cancellati
         metadata = save_mock.await_args.kwargs["extra_metadata"]
         assert metadata["recording_file_pointer"] == {"id": "file-pointer-1"}
         assert metadata["browser_session_metadata"] == {"provider": "steel"}
+
+
+async def test_browser_recording_finalizer_keeps_local_artifacts_when_upload_fails():
+    import shutil
+    import tempfile
+
+    from domains.spawn_browser_agent_v3.handler import _finalize_browser_recording_for_fe
+
+    class UploadFailRecorder:
+        def __init__(self, output_dir):
+            self.output_dir = Path(output_dir)
+            self.cleanup_persisted = None
+
+        async def close(self, *, include_steel_media=True):
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            path = self.output_dir / "index.html"
+            path.write_text("<html>recording</html>", encoding="utf-8")
+            return path
+
+        def export_inline_html_bytes(self):
+            return b"<html>inline frame replay</html>"
+
+        def cleanup_local_artifacts(self, *, persisted=False):
+            self.cleanup_persisted = persisted
+            if persisted:
+                shutil.rmtree(self.output_dir)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        recorder = UploadFailRecorder(tmp)
+        with (
+            patch(
+                "domains.spawn_browser_agent_v3.handler.upload_to_storage",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("storage down"),
+            ) as upload_mock,
+            patch(
+                "domains.spawn_browser_agent_v3.handler.save_browser_action_message",
+                new_callable=AsyncMock,
+            ) as save_mock,
+        ):
+            result = await _finalize_browser_recording_for_fe(
+                browser_recorder=recorder,
+                agent_id="agent-1",
+                task_id="task-1",
+                user_id="user-1",
+                browser_url="https://debug",
+                browser_session_metadata={"provider": "steel"},
+            )
+
+        assert result is not None
+        assert result["recording_file_pointer"] is None
+        assert recorder.cleanup_persisted is False
+        assert recorder.output_dir.exists()
+        upload_mock.assert_awaited_once()
+        save_mock.assert_awaited_once()
+        metadata = save_mock.await_args.kwargs["extra_metadata"]
+        assert metadata["recording_file_pointer"] is None
 
 
 def test_browser_agent_recording_inline_export_uses_source_frames_once():
@@ -8524,6 +8581,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_recording_finalizer_cancel_resilient",
         test_browser_recording_finalizer_uploads_frame_replay_after_cancellation,
+    )
+    await r.record_async(
+        "browser_recording_finalizer_keeps_local_artifacts_when_upload_fails",
+        test_browser_recording_finalizer_keeps_local_artifacts_when_upload_fails,
     )
     r.record(
         "browser_humanizer_visual_cursor_default_off",

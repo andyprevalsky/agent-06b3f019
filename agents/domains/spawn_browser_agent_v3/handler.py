@@ -1942,6 +1942,7 @@ async def _finalize_browser_recording_for_fe(
     if not task_id:
         return None
 
+    cleanup_local_artifacts = False
     try:
         recording_path = await browser_recorder.close(include_steel_media=False)
         if not recording_path:
@@ -1989,15 +1990,16 @@ async def _finalize_browser_recording_for_fe(
                 "browser_session_metadata": browser_session_metadata,
             },
         )
+        cleanup_local_artifacts = bool(recording_file_pointer)
         return {
             "recording_path": str(recording_path),
             "recording_file_pointer": recording_file_pointer,
             "html_bytes": len(html_bytes) if isinstance(html_bytes, (bytes, bytearray)) else None,
         }
     finally:
-        cleanup_local_artifacts = getattr(browser_recorder, "cleanup_local_artifacts", None)
-        if callable(cleanup_local_artifacts):
-            cleanup_local_artifacts()
+        cleanup = getattr(browser_recorder, "cleanup_local_artifacts", None)
+        if callable(cleanup):
+            cleanup(persisted=cleanup_local_artifacts)
 
 
 async def _finalize_browser_recording_for_fe_resilient(
