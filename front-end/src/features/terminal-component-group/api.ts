@@ -101,6 +101,15 @@ export async function downloadAttachmentAsBlob(url: string): Promise<Blob> {
   return response.blob();
 }
 
+/** Download a signed text attachment body for inline preview rendering. */
+export async function downloadAttachmentAsText(url: string): Promise<string> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to download attachment (status ${response.status})`);
+  }
+  return response.text();
+}
+
 export interface CatalogTestPrompt {
   title: string;
   description: string;
