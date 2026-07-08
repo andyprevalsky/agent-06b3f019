@@ -1,5 +1,6 @@
 """Blackbox tests for encrypted durable trace archive helpers."""
 
+import asyncio
 import base64
 import gzip
 import hashlib
@@ -381,6 +382,15 @@ async def test_fast_cache_read_archives_hit_response_for_replay():
                 for path in list_local_artifact_paths("agent-fast-cache")
                 if path.startswith(f"provider/fast-cache/read/{expected_hash}.")
             ]
+            for _ in range(100):
+                if paths and read_local_artifact(root_agent_id="agent-fast-cache", path=paths[0]) is not None:
+                    break
+                await asyncio.sleep(0.05)
+                paths = [
+                    path
+                    for path in list_local_artifact_paths("agent-fast-cache")
+                    if path.startswith(f"provider/fast-cache/read/{expected_hash}.")
+                ]
             assert len(paths) == 1
             stored = read_local_artifact(root_agent_id="agent-fast-cache", path=paths[0])
             assert stored is not None
@@ -496,12 +506,14 @@ async def test_worker_async_writes_defer_off_event_loop_and_complete():
             assert elapsed < 0.25, f"archive_json blocked the loop for {elapsed:.3f}s"
             expected = Path(tmp) / "agent-async" / "llm" / "deferred.json.gz.enc"
             assert deferred["ref"] == str(expected)
+            meta = Path(str(expected) + ".meta.json")
             for _ in range(100):
-                if expected.exists():
+                if expected.exists() and meta.exists():
                     break
                 await asyncio.sleep(0.05)
             assert expected.exists(), "deferred archive write never landed"
-            metadata = json.loads(Path(str(expected) + ".meta.json").read_text())
+            assert meta.exists(), "deferred archive metadata never landed"
+            metadata = json.loads(meta.read_text())
             assert json.loads(decrypt_and_validate_artifact(expected.read_bytes(), metadata).decode("utf-8")) == {
                 "mode": "async"
             }
@@ -542,12 +554,14 @@ async def test_deferred_json_payload_factory_runs_off_event_loop():
             assert result["metadata"] is None
             assert elapsed < 0.25, f"payload factory ran on the event loop for {elapsed:.3f}s"
             expected = Path(tmp) / "agent-deferred" / "provider" / "fast-cache" / "read" / "deferred.json.gz.enc"
+            meta = Path(str(expected) + ".meta.json")
             for _ in range(100):
-                if expected.exists():
+                if expected.exists() and meta.exists():
                     break
                 await asyncio.sleep(0.05)
             assert expected.exists(), "deferred JSON archive never landed"
-            metadata = json.loads(Path(str(expected) + ".meta.json").read_text())
+            assert meta.exists(), "deferred JSON archive metadata never landed"
+            metadata = json.loads(meta.read_text())
             assert json.loads(decrypt_and_validate_artifact(expected.read_bytes(), metadata).decode("utf-8")) == {
                 "mode": "deferred"
             }
@@ -589,11 +603,14 @@ async def test_async_archive_burst_preserves_all_artifacts():
 
             bundle = Path(tmp) / "agent-burst" / "llm"
             for _ in range(200):
-                if bundle.exists() and len(list(bundle.glob("burst-*.json.gz.enc"))) == count:
+                files = list(bundle.glob("burst-*.json.gz.enc")) if bundle.exists() else []
+                metas = list(bundle.glob("burst-*.json.gz.enc.meta.json")) if bundle.exists() else []
+                if len(files) == count and len(metas) == count:
                     break
                 await asyncio.sleep(0.05)
             assert bundle.exists()
             assert len(list(bundle.glob("burst-*.json.gz.enc"))) == count
+            assert len(list(bundle.glob("burst-*.json.gz.enc.meta.json"))) == count
         finally:
             trace_archive.store_encrypted_artifact = original_store
             if old_flag is None:

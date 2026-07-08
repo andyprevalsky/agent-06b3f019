@@ -223,6 +223,35 @@ describe('derivations.ts', () => {
       errSpy.mockRestore();
     });
 
+    it('orders DAG reasoning assistant rows by first stream timestamp', () => {
+      const msgs = [
+        {
+          message_id: 'code',
+          role: 'TOOL',
+          timestamp: ts(3),
+          text: 'code done',
+          metadata: {
+            toolCallId: 'code-1',
+            toolName: 'spawn_claude_code_agent',
+            toolStatus: 'FINISHED',
+          },
+        },
+        {
+          message_id: 'thought',
+          role: 'ASSISTANT',
+          timestamp: ts(5),
+          text: 'reasoned later',
+          metadata: {
+            dagTaskIndex: 5,
+            plannedToolName: 'reasoning',
+            firstTimestamp: ts(2),
+          },
+        },
+      ] as any;
+      const out = deduplicateToolMessages(msgs);
+      expect(out.map((m) => m.message_id)).toEqual(['thought', 'code']);
+    });
+
     it('hides internal agent init liveness tools', () => {
       const msgs = [
         {
@@ -333,6 +362,22 @@ describe('derivations.ts', () => {
       const panels = computeActiveBrowserPanels(msgs);
       expect(panels).toEqual([{ taskId: 't1', browserUrl: 'https://e.com' }]);
     });
+    it('returns panel for ready browser sessions using session_started action', () => {
+      const msgs = [
+        {
+          metadata: {
+            task_id: 'ready-task',
+            toolName: 'spawn_browser_agent',
+            action_type: 'session_started',
+            title: 'Browser ready',
+            browser_url: 'https://debug.steel.dev/session/ready',
+          },
+        },
+      ] as any;
+      expect(computeActiveBrowserPanels(msgs)).toEqual([
+        { taskId: 'ready-task', browserUrl: 'https://debug.steel.dev/session/ready' },
+      ]);
+    });
     it('excludes completed tasks', () => {
       const msgs = [
         {
@@ -413,6 +458,37 @@ describe('derivations.ts', () => {
         },
       ];
       expect(computeActiveBrowserPanels(msgs)).toEqual([]);
+    });
+    it('keeps browser task active after task-scoped action messages finish', () => {
+      const msgs: Parameters<typeof computeActiveBrowserPanels>[0] = [
+        {
+          message_id: 'init',
+          timestamp: '2026-01-01T00:00:01.000Z',
+          text: '',
+          role: 'TOOL',
+          metadata: {
+            task_id: 't1',
+            toolName: 'spawn_browser_agent',
+            action_type: 'browser',
+            browser_url: 'x',
+            toolStatus: 'IN_PROGRESS',
+          },
+        },
+        {
+          message_id: 'click',
+          timestamp: '2026-01-01T00:00:02.000Z',
+          text: '',
+          role: 'TOOL',
+          metadata: {
+            task_id: 't1',
+            subAgentId: 't1',
+            toolName: 'spawn_browser_agent',
+            action_type: 'click',
+            toolStatus: 'FINISHED',
+          },
+        },
+      ];
+      expect(computeActiveBrowserPanels(msgs)).toEqual([{ taskId: 't1', browserUrl: 'x' }]);
     });
     it('excludes failed browser tasks even when no task_complete action arrives', () => {
       const msgs: Parameters<typeof computeActiveBrowserPanels>[0] = [
@@ -907,6 +983,34 @@ describe('realtimeHandlers', () => {
       s as any,
     );
     expect(s.state.streamingBubbles.size).toBe(0);
+  });
+
+  it('handleInsertMessage: ASSISTANT message with streamId cleans only that stream', () => {
+    const s = mkSetters();
+    s.state.streamingBubbles.set('streamA', {
+      text: 'first',
+      sequence: 1,
+      done: false,
+    });
+    s.state.streamingBubbles.set('streamB', {
+      text: 'second',
+      sequence: 1,
+      done: false,
+    });
+    handleInsertMessage(
+      {
+        agentId: 'me',
+        id: 'm1',
+        timestamp: 't',
+        text: 'assistant',
+        role: 'ASSISTANT',
+        metadata: { streamId: 'streamA' },
+      } as any,
+      'me',
+      s as any,
+    );
+    expect(s.state.streamingBubbles.has('streamA')).toBe(false);
+    expect(s.state.streamingBubbles.has('streamB')).toBe(true);
   });
 
   it('handleUpdateAgent: merges partial updates and toggles chat mode', () => {

@@ -87,6 +87,7 @@ async def test_execute_reasoning_happy_path():
     from activities.reasoning import ReasoningResponse
     captured_kwargs = {}
     captured_messages = []
+    streamed_chunks = []
 
     async def fake_llm(messages, **kwargs):
         captured_kwargs.update(kwargs)
@@ -102,7 +103,13 @@ async def test_execute_reasoning_happy_path():
             [],
         )
 
-    with patch.object(rservice, "call_llm_structured_streaming", fake_llm):
+    async def fake_stream_chunk(**kwargs):
+        streamed_chunks.append(kwargs)
+
+    with (
+        patch.object(rservice, "call_llm_structured_streaming", fake_llm),
+        patch.object(rservice, "stream_assistant_chunk", fake_stream_chunk),
+    ):
         out = await rservice.execute_reasoning(
             goal="Investigate",
             context=[{"role": "USER", "text": "ctx"}],
@@ -119,6 +126,90 @@ async def test_execute_reasoning_happy_path():
     assert captured_messages[0] == {"role": "system", "content": "MAIN SYSTEM PROMPT"}
     assert captured_messages[-1]["role"] == "user"
     assert "Investigate" in captured_messages[-1]["content"]
+    assert streamed_chunks[0]["delta"] == ""
+    assert streamed_chunks[0]["done"] is False
+    assert streamed_chunks[0]["sequence"] == 0
+    assert isinstance(streamed_chunks[0]["llm_started_at_ms"], int)
+    assert streamed_chunks[1]["delta"] == "analysis so far"
+    assert streamed_chunks[-1]["done"] is True
+
+
+async def test_execute_reasoning_uses_streamed_text_when_structured_json_missing():
+    """Reasoning is raw assistant text; streamed text should survive JSON wrapper misses."""
+    from domains.reasoning import service as rservice
+
+    streamed_chunks = []
+
+    async def fake_llm(messages, **kwargs):
+        on_chunk = kwargs.get("on_chunk")
+        if on_chunk:
+            await on_chunk("streamed reasoning answer", 6)
+        raise ValueError("No JSON content received in response (chunks=12, model=test)")
+
+    async def fake_stream_chunk(**kwargs):
+        streamed_chunks.append(kwargs)
+
+    with (
+        patch.object(rservice, "call_llm_structured_streaming", fake_llm),
+        patch.object(rservice, "stream_assistant_chunk", fake_stream_chunk),
+    ):
+        out = await rservice.execute_reasoning(
+            goal="Investigate",
+            context=[],
+            model="test-model",
+            agent_id="agent-1",
+            stream_id="stream-1",
+        )
+
+    assert out["content"] == "streamed reasoning answer"
+    assert out["usage"] == {}
+    assert streamed_chunks[0]["delta"] == ""
+    assert streamed_chunks[1]["delta"] == "streamed reasoning answer"
+    assert streamed_chunks[-1]["done"] is True
+
+
+async def test_execute_reasoning_retries_provider_failure_as_raw_text():
+    """Provider/schema failures before chunks should retry once as raw assistant text."""
+    from ssl import SSLError
+
+    from domains.reasoning import service as rservice
+
+    streamed_chunks = []
+    captured_raw_kwargs = {}
+
+    async def fake_structured_llm(messages, **kwargs):
+        raise SSLError("ssl/tls alert bad record mac")
+
+    async def fake_raw_llm(**kwargs):
+        captured_raw_kwargs.update(kwargs)
+        return {
+            "content": "raw reasoning answer",
+            "usage": {"prompt_tokens": 3, "completion_tokens": 4},
+        }
+
+    async def fake_stream_chunk(**kwargs):
+        streamed_chunks.append(kwargs)
+
+    with (
+        patch.object(rservice, "call_llm_structured_streaming", fake_structured_llm),
+        patch.object(rservice, "call_llm", fake_raw_llm),
+        patch.object(rservice, "stream_assistant_chunk", fake_stream_chunk),
+    ):
+        out = await rservice.execute_reasoning(
+            goal="Investigate",
+            context=[],
+            model="test-model",
+            agent_id="agent-1",
+            stream_id="stream-1",
+        )
+
+    assert out["content"] == "raw reasoning answer"
+    assert out["usage"]["prompt_tokens"] == 3
+    assert captured_raw_kwargs["response_model"] is None
+    assert captured_raw_kwargs["skip_cache_write"] is True
+    assert streamed_chunks[0]["delta"] == ""
+    assert streamed_chunks[1]["delta"] == "raw reasoning answer"
+    assert streamed_chunks[-1]["done"] is True
 
 
 async def test_execute_reasoning_empty_response():
@@ -207,6 +298,14 @@ async def run_all_tests():
     await r.record_async("build_reasoning_messages_trims", test_build_reasoning_messages_trims_to_max)
     await r.record_async("build_reasoning_messages_small", test_build_reasoning_messages_small_context)
     await r.record_async("execute_reasoning_happy_path", test_execute_reasoning_happy_path)
+    await r.record_async(
+        "execute_reasoning_streamed_text_json_missing",
+        test_execute_reasoning_uses_streamed_text_when_structured_json_missing,
+    )
+    await r.record_async(
+        "execute_reasoning_raw_text_retry",
+        test_execute_reasoning_retries_provider_failure_as_raw_text,
+    )
     await r.record_async("execute_reasoning_empty_response", test_execute_reasoning_empty_response)
     await r.record_async("execute_reasoning_no_stream", test_execute_reasoning_no_stream_no_agent)
     await r.record_async("execute_reasoning_activity_wraps_errors", test_execute_reasoning_activity_wraps_errors)

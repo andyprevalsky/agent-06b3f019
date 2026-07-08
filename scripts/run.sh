@@ -27,6 +27,9 @@ normalize_conductor_workspace_env
 . "$SCRIPT_DIR/lib/run-process-cleanup.sh"
 
 RUN_CONTEXT_DIR="${BENCHMARK_CONTEXT_DIR:-.context}"
+case "$RUN_CONTEXT_DIR" in
+    /.context|/.context/*) RUN_CONTEXT_DIR="${RUN_CONTEXT_DIR#/}" ;;
+esac
 BENCHMARK_ISOLATED_RUN="${BENCHMARK_ISOLATED_RUN:-false}"
 
 # mac-app is Electron + requires nvm/Node 20.10.0; only runs on macOS.
@@ -776,8 +779,9 @@ data = {
         "benchmark_disable_saved_browser_auth": os.environ.get("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH", "").lower() in ("1", "true", "yes", "on"),
     },
     "logs": {
-        "backend": os.path.join(root, "back-end", "backend-logs.log"),
-        "worker": os.path.join(root, "agents", "navi-worker-log.txt"),
+        "backend": os.environ.get("BACKEND_LOG_FILE") or os.path.join(root, "back-end", "backend-logs.log"),
+        "frontend": os.environ.get("FRONTEND_LOG_FILE") or os.path.join(root, "front-end", "frontend-logs.log"),
+        "worker": os.environ.get("NAVI_WORKER_LOG_FILE") or os.path.join(root, "agents", "navi-worker-log.txt"),
     },
     "services": services,
 }
@@ -863,18 +867,35 @@ start_public_tunnel
 export FAST_MODE_ANTHROPIC_PROXY_URL="$PUBLIC_BASE_URL/anthropic-proxy"
 export FAST_MODE_CODEX_PROXY_URL="$PUBLIC_BASE_URL/codex-proxy"
 
+if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
+    BENCHMARK_LOG_DIR="$PWD/$RUN_CONTEXT_DIR/logs"
+    mkdir -p "$BENCHMARK_LOG_DIR"
+    export BACKEND_LOG_FILE="$BENCHMARK_LOG_DIR/backend.log"
+    export FRONTEND_LOG_FILE="$BENCHMARK_LOG_DIR/frontend.log"
+    export NAVI_WORKER_LOG_FILE="$BENCHMARK_LOG_DIR/worker.log"
+    export NAVI_WORKER_LOG_STREAM=false
+fi
+
 # Launch each service
 if $BENCHMARK_MODE; then
     # In benchmark mode, use plain tsx (no watch) to prevent file-change restarts from killing the backend mid-run
-    run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f backend-logs.log && PORT=$BACKEND_PORT npx tsx src/server.ts 2>&1 | tee backend-logs.log' &
+    if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
+        run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f "$BACKEND_LOG_FILE" && PORT=$BACKEND_PORT npx tsx src/server.ts > "$BACKEND_LOG_FILE" 2>&1' &
+    else
+        run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f "$BACKEND_LOG_FILE" && PORT=$BACKEND_PORT npx tsx src/server.ts 2>&1 | tee "$BACKEND_LOG_FILE"' &
+    fi
 else
-    run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f backend-logs.log && PORT=$BACKEND_PORT npx tsx watch src/server.ts 2>&1 | tee backend-logs.log' &
+    run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f "$BACKEND_LOG_FILE" && PORT=$BACKEND_PORT npx tsx watch src/server.ts 2>&1 | tee "$BACKEND_LOG_FILE"' &
 fi
 PIDS+=($!); NAMES+=("back-end")
 
 # Front-end is always launched — benchmark mode needs it for semantic tests
 # (Chrome CDP drives a real browser against the dev server in parallel with smoke).
-run_service "front-end" bash -c 'set -eo pipefail; cd front-end && rm -f frontend-logs.log && VITE_DEV_PORT=$FRONTEND_PORT npx vite 2>&1 | tee frontend-logs.log' &
+if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
+    run_service "front-end" bash -c 'set -eo pipefail; cd front-end && rm -f "$FRONTEND_LOG_FILE" && VITE_DEV_PORT=$FRONTEND_PORT npx vite > "$FRONTEND_LOG_FILE" 2>&1' &
+else
+    run_service "front-end" bash -c 'set -eo pipefail; cd front-end && rm -f "$FRONTEND_LOG_FILE" && VITE_DEV_PORT=$FRONTEND_PORT npx vite 2>&1 | tee "$FRONTEND_LOG_FILE"' &
+fi
 PIDS+=($!); NAMES+=("front-end")
 
 # mac-app is skipped in benchmark mode (Electron is heavy and smoke doesn't touch it).
@@ -940,6 +961,13 @@ while true; do
             wait "$pid" 2>/dev/null
             code=$?
             name="${NAMES[$i]}"
+            if [ "$name" = "ngrok" ]; then
+                echo "⚠️  ngrok (PID $pid) exited with code $code; keeping local services running."
+                unset "PIDS[$i]"
+                unset "NAMES[$i]"
+                write_services_manifest || true
+                continue
+            fi
             if [ $code -ne 0 ]; then
                 echo ""
                 echo "❌ $name (PID $pid) exited with code $code — shutting down all services."

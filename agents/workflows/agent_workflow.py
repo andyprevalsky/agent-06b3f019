@@ -816,8 +816,11 @@ class AgentWorkflow:
         plan_tools = PLAN_PHASE_TOOLS
         execute_tools = EXECUTE_PHASE_TOOLS
 
-        # Determine whether to skip PLAN phase and/or DAG
-        skip_plan = start_phase in ("execute", "execute_continued")
+        # Determine whether to skip PLAN phase and/or DAG. ``execute_dag_resume``
+        # is a local checkpoint/debug phase: it keeps the persisted plan, marks
+        # already-finished DAG nodes from DB messages, then runs remaining nodes.
+        resume_dag_from_context = start_phase == "execute_dag_resume"
+        skip_plan = start_phase in ("execute", "execute_continued", "execute_dag_resume")
         skip_dag = start_phase == "execute_continued"  # After continue_as_new, DAG already ran
 
         if init_message_posted:
@@ -937,6 +940,10 @@ class AgentWorkflow:
                         raise
 
                 if dag is not None:
+                    if resume_dag_from_context:
+                        resumed = dag.resume_completed_tasks_from_context(execute_context)
+                        workflow.logger.info(f"[DAG] Resuming from context; completed tasks={resumed}")
+
                     execute_system_prompt = await self.build_system_prompt()
 
                     dag_result = await execute_dag(

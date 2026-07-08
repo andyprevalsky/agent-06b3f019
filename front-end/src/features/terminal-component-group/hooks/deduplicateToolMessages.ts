@@ -27,8 +27,21 @@ interface ExploreData {
   steps: ExploreStep[];
 }
 
+function getMessageOrderTimestamp(message: Message): number {
+  const metadata = message.metadata;
+  const firstTimestamp =
+    typeof metadata?.firstTimestamp === 'string'
+      ? metadata.firstTimestamp
+      : typeof metadata?.startedAt === 'string' && metadata?.plannedToolName === 'reasoning'
+        ? metadata.startedAt
+        : message.timestamp;
+  const orderedMs = new Date(firstTimestamp).getTime();
+  if (Number.isFinite(orderedMs)) return orderedMs;
+  return new Date(message.timestamp).getTime();
+}
+
 function sortByTimestampAsc(a: Message, b: Message): number {
-  return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
+  return getMessageOrderTimestamp(a) - getMessageOrderTimestamp(b);
 }
 
 function formatWebSearchTitle(

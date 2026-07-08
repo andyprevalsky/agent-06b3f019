@@ -30,12 +30,16 @@ fi
 echo "✅ Environment ready"
 echo ""
 
+LOG_FILE="${NAVI_WORKER_LOG_FILE:-navi-worker-log.txt}"
+LOG_DIR="$(dirname "$LOG_FILE")"
+mkdir -p "$LOG_DIR"
+
 # Clear the log file before starting
 echo "🗑️  Clearing log file..."
-> navi-worker-log.txt
+> "$LOG_FILE"
 echo ""
 
-echo "📋 Logs will appear below and be saved to navi-worker-log.txt (Ctrl+C to stop):"
+echo "📋 Logs will appear below and be saved to $LOG_FILE (Ctrl+C to stop):"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
@@ -57,18 +61,25 @@ BASE_METRICS_PORT="${SDK_METRICS_PORT:-9090}"
 BASE_HEALTH_PORT="${HEALTH_CHECK_PORT:-8080}"
 
 if [ "$WORKER_PROCESSES" -le 1 ]; then
-    python worker.py 2>&1 | tee navi-worker-log.txt
+    if [ "${NAVI_WORKER_LOG_STREAM:-true}" = "false" ]; then
+        python worker.py > "$LOG_FILE" 2>&1
+    else
+        python worker.py 2>&1 | tee "$LOG_FILE"
+    fi
 else
     echo "🧵 Launching $WORKER_PROCESSES worker processes across cores..."
-    : > navi-worker-log.txt
+    : > "$LOG_FILE"
     pids=()
     for i in $(seq 0 $((WORKER_PROCESSES - 1))); do
         if [ "$i" -eq 0 ]; then
-            log="navi-worker-log.txt"
+            log="$LOG_FILE"
             mp="$BASE_METRICS_PORT"
             hp="$BASE_HEALTH_PORT"
         else
-            log="navi-worker-log.${i}.txt"
+            log="${LOG_FILE%.*}.${i}.${LOG_FILE##*.}"
+            if [ "$log" = "$LOG_FILE.$i.$LOG_FILE" ]; then
+                log="$LOG_FILE.$i"
+            fi
             # Use a high, unlikely-to-collide range for secondary workers so we
             # never clash with this workspace's other service ports (db/frontend/
             # mac-app sit just above the metrics/health base) or sibling worktrees.
@@ -80,12 +91,16 @@ else
             python worker.py >> "$log" 2>&1 &
         pids+=($!)
     done
-    # Stream the primary worker's log to stdout so run.sh readiness detection and
-    # live visibility keep working.
-    tail -f navi-worker-log.txt &
-    tail_pid=$!
-    trap 'kill "${pids[@]}" "$tail_pid" 2>/dev/null' TERM INT
+    tail_pid=""
+    if [ "${NAVI_WORKER_LOG_STREAM:-true}" != "false" ]; then
+        # Stream the primary worker's log to stdout so run.sh readiness detection and
+        # live visibility keep working.
+        tail -f "$LOG_FILE" &
+        tail_pid=$!
+    fi
+    trap 'kill "${pids[@]}" ${tail_pid:+"$tail_pid"} 2>/dev/null' TERM INT
     wait "${pids[@]}"
-    kill "$tail_pid" 2>/dev/null || true
+    if [ -n "$tail_pid" ]; then
+        kill "$tail_pid" 2>/dev/null || true
+    fi
 fi
-

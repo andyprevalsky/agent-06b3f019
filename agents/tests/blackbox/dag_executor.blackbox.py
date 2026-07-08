@@ -453,12 +453,16 @@ async def test_execute_dag_reasoning_task_succeeds():
     assistant_posts = [e for e in events if e["type"] == "post_message" and e["role"] == "ASSISTANT"]
     assert len(assistant_posts) == 1
     assert assistant_posts[0]["text"] == "Summary text"
-    assert assistant_posts[0]["metadata"] is None
+    metadata = assistant_posts[0]["metadata"]
+    assert metadata["dagTaskIndex"] == 0
+    assert metadata["plannedToolName"] == "reasoning"
+    assert metadata["streamId"].startswith("dag-reasoning-0-")
+    assert metadata["firstTimestamp"] == metadata["startedAt"]
+    datetime.fromisoformat(metadata["firstTimestamp"])
     thought_events = [e for e in events if e["type"] == "tool_event" and e["tool_name"] == "thought"]
     reasoning_events = [e for e in events if e["type"] == "tool_event" and e["tool_name"] == "reasoning"]
+    assert thought_events == []
     assert reasoning_events == []
-    assert [e["status"] for e in thought_events] == ["IN_PROGRESS"]
-    assert [e["title"] for e in thought_events] == ["Thinking"]
     assert dag.tasks[0].state.value == "COMPLETED"
 
 
