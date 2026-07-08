@@ -61,6 +61,34 @@ def test_worker_activity_supplier_is_sdk_native_fixed_size():
     raise AssertionError("WorkerTuner.create_composite call not found")
 
 
+def test_worker_passes_sticky_queue_timeout_to_temporal():
+    """Worker must pass the env-backed sticky timeout into Temporal."""
+    tree = _worker_tree()
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and func.id == "Worker":
+            timeout_kw = next(
+                (kw for kw in node.keywords if kw.arg == "sticky_queue_schedule_to_start_timeout"),
+                None,
+            )
+            assert timeout_kw is not None
+            value = timeout_kw.value
+            assert isinstance(value, ast.Call)
+            assert isinstance(value.func, ast.Name)
+            assert value.func.id == "timedelta"
+            seconds_kw = next((kw for kw in value.keywords if kw.arg == "seconds"), None)
+            assert seconds_kw is not None
+            attr = seconds_kw.value
+            assert isinstance(attr, ast.Attribute)
+            assert attr.attr == "sticky_queue_schedule_to_start_timeout_seconds"
+            return
+
+    raise AssertionError("Worker(...) call not found")
+
+
 def test_activity_admission_closes_on_cpu_pressure():
     """Activity admission must close on CPU pressure (not just memory).
 
@@ -134,6 +162,7 @@ async def run_all_tests():
     r = BlackboxResult()
     r.record("worker_does_not_use_python_custom_activity_slots", test_worker_does_not_use_python_custom_activity_slots)
     r.record("worker_activity_supplier_is_sdk_native_fixed_size", test_worker_activity_supplier_is_sdk_native_fixed_size)
+    r.record("worker_passes_sticky_queue_timeout_to_temporal", test_worker_passes_sticky_queue_timeout_to_temporal)
     r.record("activity_admission_closes_on_cpu_pressure", test_activity_admission_closes_on_cpu_pressure)
     teardown_mock()
     return r.summary()

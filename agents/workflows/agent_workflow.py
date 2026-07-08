@@ -1772,6 +1772,9 @@ class AgentWorkflow:
                 bus_id = getattr(self, "bus_id", None)
                 if bus_id:
                     meta["busId"] = bus_id
+                spawn_group_id = tool_args.get("_spawn_group_id")
+                if isinstance(spawn_group_id, str) and spawn_group_id:
+                    meta["spawnGroupId"] = spawn_group_id
                 if meta:
                     error_metadata = meta
 

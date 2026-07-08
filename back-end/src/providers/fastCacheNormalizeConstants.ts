@@ -127,6 +127,8 @@ export const VOLATILE_OBJECT_FIELDS = new Set([
   'toolcallid',
   'tool_use_id',
   'tooluseid',
+  'spawn_group_id',
+  'spawngroupid',
   'created_at',
   'createdat',
   'updated_at',

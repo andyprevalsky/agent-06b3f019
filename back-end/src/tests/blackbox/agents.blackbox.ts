@@ -1027,6 +1027,90 @@ test('POST /:id/messages — duplicate internal TOOL retry is idempotent', async
   await deleteTestAgent(agentId, session.user.id);
 });
 
+test('POST /:id/messages — changed TOOL metadata is a new event, exact retry is idempotent', async () => {
+  const session = await createAnonymousSession('msg-spawn-tree-upgrade');
+  const agentId = await createTestAgent(session.user.id, 'Spawn-tree upgrade test');
+  const toolCallId = `spawn-tree-upgrade-${randomUUID().slice(0, 8)}`;
+  const childAgentId = randomUUID();
+  const base = {
+    message: '',
+    role: 'TOOL' as const,
+    metadata: {
+      toolCallId,
+      toolName: 'spawn_general_purpose_agent',
+      toolStatus: 'IN_PROGRESS',
+      title: 'Spawning sub-agent',
+    },
+  };
+  const upgradePayload = {
+    ...base,
+    metadata: { ...base.metadata, busId: agentId, subAgentIds: [childAgentId] },
+  };
+
+  const placeholder = await request(`${BASE_URL}/api/agents/${agentId}/messages`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify(base),
+  });
+  const upgrade = await request(`${BASE_URL}/api/agents/${agentId}/messages`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify(upgradePayload),
+  });
+  const retry = await request(`${BASE_URL}/api/agents/${agentId}/messages`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify(upgradePayload),
+  });
+
+  assertStatus(placeholder.status, 201, placeholder.data);
+  assertStatus(upgrade.status, 201, upgrade.data);
+  assertStatus(retry.status, 201, retry.data);
+  const placeholderBody = assertSchema(PostMessageResponse, placeholder.data, 'spawn placeholder');
+  const upgradeBody = assertSchema(PostMessageResponse, upgrade.data, 'spawn upgrade');
+  const retryBody = assertSchema(PostMessageResponse, retry.data, 'spawn upgrade retry');
+  assert(
+    upgradeBody.message_id !== placeholderBody.message_id,
+    'same tool status/text/title with changed metadata must persist as a new event'
+  );
+  assert(
+    retryBody.message_id === upgradeBody.message_id,
+    'exact retry of the changed-metadata event must be idempotent'
+  );
+
+  const detail = await request(`${BASE_URL}/api/agents/${agentId}`, {
+    headers: apiKeyHeaders(session.user.id),
+  });
+  assertStatus(detail.status, 200, detail.data);
+  const detailBody = assertSchema(GetAgentResponse, detail.data, 'spawn-tree upgrade detail');
+  const withBusId = detailBody.messages.filter(
+    (m) =>
+      m.role === 'TOOL' &&
+      typeof m.metadata === 'object' &&
+      m.metadata !== null &&
+      (m.metadata as Record<string, unknown>).toolCallId === toolCallId &&
+      (m.metadata as Record<string, unknown>).busId !== undefined &&
+      (m.metadata as Record<string, unknown>).busId !== null
+  );
+  const matchingToolCall = detailBody.messages.filter(
+    (m) =>
+      m.role === 'TOOL' &&
+      typeof m.metadata === 'object' &&
+      m.metadata !== null &&
+      (m.metadata as Record<string, unknown>).toolCallId === toolCallId
+  );
+  assert(
+    matchingToolCall.length === 2,
+    `Expected placeholder plus changed-metadata TOOL event, got ${matchingToolCall.length}`
+  );
+  assert(
+    withBusId.length === 1,
+    `Expected exactly one persisted spawn-tree row with busId, got ${withBusId.length}`
+  );
+
+  await deleteTestAgent(agentId, session.user.id);
+});
+
 test('POST /:id/messages — read-after-write: message visible in detail', async () => {
   const session = await createAnonymousSession('msg-raw');
   const agentId = await createTestAgent(session.user.id, 'RAW message test');

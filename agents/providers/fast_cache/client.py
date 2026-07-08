@@ -17,7 +17,7 @@ from typing import Any, Optional, TypedDict
 import httpx
 import structlog
 
-from helpers.trace_archive import archive_json
+from helpers.trace_archive import archive_json_deferred
 from helpers.tracing import current_root_agent_id, current_span_id
 
 from . import normalize
@@ -279,17 +279,22 @@ async def _archive_cache_write(
         root_agent_id = await resolve_archive_root_agent_id()
         if not root_agent_id:
             return
-        archive_json(
-            root_agent_id=root_agent_id,
-            path=f"provider/fast-cache/{kind}/{hashlib.sha256(key.encode('utf-8')).hexdigest()}.json.gz.enc",
-            payload={
+        key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+        def payload() -> dict[str, Any]:
+            return {
                 "key": key,
                 "kind": kind,
                 "goal_hash": goal_hash,
                 "span_id": current_span_id(),
                 "blob_path": blob_path,
                 "value": value,
-            },
+            }
+
+        archive_json_deferred(
+            root_agent_id=root_agent_id,
+            path=f"provider/fast-cache/{kind}/{key_hash}.json.gz.enc",
+            payload_factory=payload,
         )
     except Exception as exc:  # cache/archive must never break provider calls
         logger.warning("fast_cache.archive_error", key=key, kind=kind, error=str(exc)[:200])
@@ -310,12 +315,11 @@ async def _archive_cache_read(
         root_agent_id = await resolve_archive_root_agent_id()
         if not root_agent_id:
             return
-        sanitized_value = normalize.strip_secrets(value)
         key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
-        archive_json(
-            root_agent_id=root_agent_id,
-            path=f"provider/fast-cache/read/{key_hash}.{int(time.time() * 1000)}.json.gz.enc",
-            payload={
+
+        def payload() -> dict[str, Any]:
+            sanitized_value = normalize.strip_secrets(value)
+            return {
                 "key": key,
                 "key_hash": key_hash,
                 "operation": "read",
@@ -325,7 +329,12 @@ async def _archive_cache_read(
                 "span_id": current_span_id(),
                 "blob_path": blob_path,
                 "value": sanitized_value,
-            },
+            }
+
+        archive_json_deferred(
+            root_agent_id=root_agent_id,
+            path=f"provider/fast-cache/read/{key_hash}.{int(time.time() * 1000)}.json.gz.enc",
+            payload_factory=payload,
         )
     except Exception as exc:  # cache/archive must never break provider calls
         logger.warning("fast_cache.archive_read_error", key=key, error=str(exc)[:200])

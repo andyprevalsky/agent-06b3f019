@@ -95,6 +95,11 @@ PAUSED_WAIT_FLOOR_SECONDS = 1.0
 MAX_CONSECUTIVE_PAUSED_ITERATIONS = 20
 
 
+def _is_grouped_spawn_tool(tool_name: str, tool_args: Dict[str, Any]) -> bool:
+    """Return True for spawn calls that should render in a sub-agent tree."""
+    return tool_name == "spawn_agent" and tool_args.get("type") in {"general_purpose", "for_each"}
+
+
 def _is_refusal_error(exc: BaseException) -> bool:
     current: Optional[BaseException] = exc
     seen: set[int] = set()
@@ -1164,6 +1169,7 @@ async def run_agent(  # noqa: C901
         processed_tools = []
         attempt_completion_tool = None
         assistant_tool_calls = []
+        turn_spawn_group_id = None
 
         for tc_dict in tool_calls:
             tc_dict = tc_dict.copy()  # Don't mutate original
@@ -1197,6 +1203,12 @@ async def run_agent(  # noqa: C901
                     **tool_args,
                 }
             )
+
+            if _is_grouped_spawn_tool(tool_name, tool_args):
+                if turn_spawn_group_id is None:
+                    phase_label = "plan" if is_plan_loop else "execute"
+                    turn_spawn_group_id = f"llm-turn:{phase_label}:{iteration}:{tool_call_id}"
+                tool_args["_spawn_group_id"] = turn_spawn_group_id
 
             # Special: set_plan - track that it was called (for is_plan_loop)
             if tool_name == "set_plan":

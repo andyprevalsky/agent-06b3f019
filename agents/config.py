@@ -52,6 +52,7 @@ class TemporalConfig:
     # the 120 s benchmark window even under load.
     max_concurrent_activity_task_polls: int = 8
     max_concurrent_workflow_task_polls: int = 8
+    sticky_queue_schedule_to_start_timeout_seconds: int = 10
 
     # Timeout settings (in seconds)
     activity_start_to_close_timeout: int = 300
@@ -240,6 +241,9 @@ def load_config() -> AppConfig:
         max_cached_workflows=int(os.getenv("MAX_CACHED_WORKFLOWS", "100")),
         max_concurrent_activity_task_polls=int(os.getenv("MAX_CONCURRENT_ACTIVITY_TASK_POLLERS", "8")),
         max_concurrent_workflow_task_polls=int(os.getenv("MAX_CONCURRENT_WORKFLOW_TASK_POLLERS", "8")),
+        sticky_queue_schedule_to_start_timeout_seconds=int(
+            os.getenv("STICKY_QUEUE_SCHEDULE_TO_START_TIMEOUT_SECONDS", "10")
+        ),
         activity_start_to_close_timeout=int(os.getenv("ACTIVITY_START_TO_CLOSE_TIMEOUT", "300")),
         activity_schedule_to_close_timeout=int(os.getenv("ACTIVITY_SCHEDULE_TO_CLOSE_TIMEOUT", "600")),
         activity_heartbeat_timeout=int(os.getenv("ACTIVITY_HEARTBEAT_TIMEOUT", "30")),

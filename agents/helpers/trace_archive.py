@@ -19,7 +19,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import httpx
 import structlog
@@ -33,6 +33,7 @@ _FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
 _TRUE_VALUES = {"1", "true", "yes", "on", "enabled"}
 _MEDIA_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".m4a", ".mp3", ".wav", ".m3u8"}
 _R2_CLIENT: Any = None
+_BACKEND_CLIENTS = threading.local()
 
 
 def _safe_segment(value: str) -> str:
@@ -130,6 +131,33 @@ def _write_local(root_agent_id: str, path: str, ciphertext: bytes, metadata: dic
     meta_path = target.with_suffix(target.suffix + ".meta.json")
     meta_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
     return str(target)
+
+
+def _outbox_root() -> Path:
+    return _LOCAL_ROOT.parent / "trace-archive-outbox"
+
+
+def _write_outbox(root_agent_id: str, path: str, ciphertext: bytes, metadata: dict[str, Any]) -> str:
+    root = _outbox_root() / _safe_segment(root_agent_id)
+    target = root / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(target.suffix + f".{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_bytes(ciphertext)
+    tmp.replace(target)
+    meta_path = target.with_suffix(target.suffix + ".meta.json")
+    meta_tmp = meta_path.with_suffix(meta_path.suffix + f".{os.getpid()}.{threading.get_ident()}.tmp")
+    meta_tmp.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+    meta_tmp.replace(meta_path)
+    return str(target)
+
+
+def _delete_outbox(root_agent_id: str, path: str) -> None:
+    target = _outbox_root() / _safe_segment(root_agent_id) / path
+    for item in (target, target.with_suffix(target.suffix + ".meta.json")):
+        try:
+            item.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _safe_path(path: str) -> str:
@@ -355,6 +383,87 @@ def _backend_api_key() -> str:
         return ""
 
 
+def _backend_http_client() -> httpx.Client:
+    client = getattr(_BACKEND_CLIENTS, "client", None)
+    client_factory = getattr(_BACKEND_CLIENTS, "client_factory", None)
+    if client is None or getattr(client, "is_closed", False) or client_factory is not httpx.Client:
+        client = httpx.Client(timeout=30.0, limits=httpx.Limits(max_connections=8, max_keepalive_connections=4))
+        _BACKEND_CLIENTS.client = client
+        _BACKEND_CLIENTS.client_factory = httpx.Client
+    return client
+
+
+def _post_backend_artifact(
+    *,
+    root_agent_id: str,
+    path: str,
+    ciphertext: bytes,
+    metadata: dict[str, Any],
+) -> Optional[str]:
+    url = _backend_archive_url()
+    api_key = _backend_api_key()
+    if not url or not api_key:
+        logger.warning("trace_archive.backend_missing_config", root_agent_id=root_agent_id, path=path)
+        return None
+    try:
+        resp = _backend_http_client().post(
+            url,
+            headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+            json={
+                "rootAgentId": root_agent_id,
+                "path": path,
+                "ciphertextB64": base64.b64encode(ciphertext).decode("ascii"),
+                "metadata": metadata,
+            },
+        )
+        if resp.status_code == 200:
+            return str((resp.json() or {}).get("ref") or f"trace-archive/{root_agent_id}/{path}")
+        logger.warning("trace_archive.backend_store_failed", status=resp.status_code, body=resp.text[:200])
+        return None
+    except Exception as exc:
+        logger.warning("trace_archive.backend_store_error", error=str(exc)[:200])
+        return None
+
+
+def _drain_backend_outbox(limit: int = 8) -> None:
+    root = _outbox_root()
+    if not root.exists():
+        return
+    drained = 0
+    for bundle in sorted(item for item in root.iterdir() if item.is_dir()):
+        if drained >= limit:
+            return
+        for item in sorted(bundle.rglob("*")):
+            if drained >= limit:
+                return
+            if not item.is_file() or item.name.endswith(".meta.json"):
+                continue
+            meta_path = item.with_suffix(item.suffix + ".meta.json")
+            if not meta_path.exists():
+                continue
+            root_agent_id = bundle.name
+            path = item.relative_to(bundle).as_posix()
+            try:
+                metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+                ref = _post_backend_artifact(
+                    root_agent_id=root_agent_id,
+                    path=path,
+                    ciphertext=item.read_bytes(),
+                    metadata=metadata,
+                )
+                if ref:
+                    _delete_outbox(root_agent_id, path)
+                    drained += 1
+            except Exception as exc:
+                logger.warning(
+                    "trace_archive.outbox_drain_error",
+                    root_agent_id=root_agent_id,
+                    path=path,
+                    error=str(exc)[:200],
+                )
+                return
+
+
 def store_encrypted_artifact(
     *,
     root_agent_id: str,
@@ -370,30 +479,11 @@ def store_encrypted_artifact(
 
     backend = os.environ.get("TRACE_ARCHIVE_BACKEND", "").strip().lower()
     if _is_production() or backend == "r2":
-        url = _backend_archive_url()
-        api_key = _backend_api_key()
-        if not url or not api_key:
-            logger.warning("trace_archive.backend_missing_config", root_agent_id=root_agent_id, path=path)
-            return None
-        try:
-            with httpx.Client(timeout=30.0) as client:
-                resp = client.post(
-                    url,
-                    headers={"X-API-Key": api_key, "Content-Type": "application/json"},
-                    json={
-                        "rootAgentId": root_agent_id,
-                        "path": path,
-                        "ciphertextB64": base64.b64encode(ciphertext).decode("ascii"),
-                        "metadata": metadata,
-                    },
-                )
-            if resp.status_code == 200:
-                return str((resp.json() or {}).get("ref") or f"trace-archive/{root_agent_id}/{path}")
-            logger.warning("trace_archive.backend_store_failed", status=resp.status_code, body=resp.text[:200])
-            return None
-        except Exception as exc:
-            logger.warning("trace_archive.backend_store_error", error=str(exc)[:200])
-            return None
+        ref = _post_backend_artifact(root_agent_id=root_agent_id, path=path, ciphertext=ciphertext, metadata=metadata)
+        if ref:
+            return ref
+        _write_outbox(root_agent_id, path, ciphertext, metadata)
+        return None
 
     try:
         return _write_local(root_agent_id, path, ciphertext, metadata)
@@ -407,12 +497,14 @@ def store_encrypted_artifact(
 # every LLM call, so running that work inline stalls stream reads loop-wide
 # (observed: 2k+ loop.lag warnings, 90s max lag, RoseStallError storms). When the
 # process opts in via TRACE_ARCHIVE_ASYNC_WRITES (worker.py sets it at startup)
-# and a loop is running, the write is offloaded to this bounded executor and the
-# expected ref is returned immediately. Benchmark CLI, tests, and scripts keep
-# synchronous read-after-write semantics. Archive stays best-effort: when the
-# queue is saturated the write is dropped with a warning, never backpressure.
-_ARCHIVE_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="trace-archive")
-_ARCHIVE_SLOTS = threading.BoundedSemaphore(64)
+# and a loop is running, the write is offloaded to this executor and the expected
+# ref is returned immediately. Benchmark CLI, tests, and scripts keep synchronous
+# read-after-write semantics. Backend failures are preserved as encrypted local
+# outbox entries and retried by later archive jobs.
+_ARCHIVE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=int(os.environ.get("TRACE_ARCHIVE_WORKERS", "4") or "4"),
+    thread_name_prefix="trace-archive",
+)
 
 # Artifacts ship to the backend as base64-in-JSON; a single oversized body (e.g.
 # a browser session video) freezes the Node event loop on parse/GC for minutes
@@ -458,6 +550,47 @@ def _archive_bytes_now(
     return {"ref": ref, "metadata": metadata}
 
 
+def _submit_archive_job(
+    *,
+    root_agent_id: str,
+    path: str,
+    content_type: str,
+    body_factory: Callable[[], bytes],
+    compress: Optional[bool],
+) -> Optional[dict[str, Any]]:
+    safe_root = _safe_segment(root_agent_id)
+    safe_path = _safe_path(path)
+    if not safe_path:
+        return None
+
+    def _job() -> None:
+        try:
+            body = body_factory()
+            if len(body) > _max_artifact_bytes():
+                logger.warning(
+                    "trace_archive.artifact_too_large",
+                    root_agent_id=safe_root,
+                    path=safe_path,
+                    bytes=len(body),
+                    limit=_max_artifact_bytes(),
+                )
+                return
+            result = _archive_bytes_now(
+                root_agent_id=root_agent_id,
+                path=path,
+                body=body,
+                content_type=content_type,
+                compress=compress,
+            )
+            if result is not None and _use_r2_archive():
+                _drain_backend_outbox()
+        except Exception as exc:
+            logger.warning("trace_archive.async_write_error", root_agent_id=safe_root, path=safe_path, error=str(exc)[:200])
+
+    _ARCHIVE_EXECUTOR.submit(_job)
+    return {"ref": _expected_ref(safe_root, safe_path), "metadata": None}
+
+
 def archive_bytes(
     *,
     root_agent_id: str,
@@ -486,27 +619,13 @@ def archive_bytes(
         return _archive_bytes_now(
             root_agent_id=root_agent_id, path=path, body=body, content_type=content_type, compress=compress
         )
-
-    safe_root = _safe_segment(root_agent_id)
-    safe_path = _safe_path(path)
-    if not safe_path:
-        return None
-    if not _ARCHIVE_SLOTS.acquire(blocking=False):
-        logger.warning("trace_archive.async_queue_full", root_agent_id=safe_root, path=safe_path)
-        return None
-
-    def _job() -> None:
-        try:
-            _archive_bytes_now(
-                root_agent_id=root_agent_id, path=path, body=body, content_type=content_type, compress=compress
-            )
-        except Exception as exc:
-            logger.warning("trace_archive.async_write_error", root_agent_id=safe_root, path=safe_path, error=str(exc)[:200])
-        finally:
-            _ARCHIVE_SLOTS.release()
-
-    _ARCHIVE_EXECUTOR.submit(_job)
-    return {"ref": _expected_ref(safe_root, safe_path), "metadata": None}
+    return _submit_archive_job(
+        root_agent_id=root_agent_id,
+        path=path,
+        content_type=content_type,
+        body_factory=lambda: body,
+        compress=compress,
+    )
 
 
 def archive_json(
@@ -518,3 +637,34 @@ def archive_json(
 ) -> Optional[dict[str, Any]]:
     body = json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":")).encode("utf-8")
     return archive_bytes(root_agent_id=root_agent_id, path=path, body=body, content_type=content_type, compress=True)
+
+
+def archive_json_deferred(
+    *,
+    root_agent_id: str,
+    path: str,
+    payload_factory: Callable[[], Any],
+    content_type: str = "application/json",
+) -> Optional[dict[str, Any]]:
+    if not archive_enabled():
+        return None
+    in_loop = True
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        in_loop = False
+
+    def _body() -> bytes:
+        payload = payload_factory()
+        return json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":")).encode("utf-8")
+
+    if not in_loop or not _async_writes_enabled():
+        body = _body()
+        return archive_bytes(root_agent_id=root_agent_id, path=path, body=body, content_type=content_type, compress=True)
+    return _submit_archive_job(
+        root_agent_id=root_agent_id,
+        path=path,
+        content_type=content_type,
+        body_factory=_body,
+        compress=True,
+    )
