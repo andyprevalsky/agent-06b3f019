@@ -2298,6 +2298,65 @@ def test_build_smoke_memory_summary_passes_stable_worker():
     assert summary["failures"] == []
 
 
+def test_build_smoke_memory_summary_scales_end_cap_by_worker_count():
+    """All-core local workers keep the absolute RSS cap proportional to process count."""
+    from benchmarks.run_benchmark import _build_smoke_memory_summary
+
+    before = {
+        "available": True,
+        "process_count": 12,
+        "total_rss_mb": 1847.6,
+        "playwright_driver_count": 0,
+        "playwright_driver_rss_mb": 0.0,
+    }
+    after = {
+        "available": True,
+        "process_count": 12,
+        "total_rss_mb": 1989.4,
+        "playwright_driver_count": 0,
+        "playwright_driver_rss_mb": 0.0,
+    }
+
+    summary = _build_smoke_memory_summary(
+        before,
+        after,
+        baseline={"after": {"allocator_trimmed": False}},
+        platform_name="darwin",
+    )
+
+    assert summary["thresholds"]["effective_max_end_mb"] == 2640.0
+    assert summary["failures"] == []
+
+
+def test_build_smoke_memory_summary_flags_scaled_end_cap_overage():
+    """The scaled cap still fails genuinely high worker RSS."""
+    from benchmarks.run_benchmark import _build_smoke_memory_summary
+
+    before = {
+        "available": True,
+        "process_count": 12,
+        "total_rss_mb": 1847.6,
+        "playwright_driver_count": 0,
+        "playwright_driver_rss_mb": 0.0,
+    }
+    after = {
+        "available": True,
+        "process_count": 12,
+        "total_rss_mb": 3000.0,
+        "playwright_driver_count": 0,
+        "playwright_driver_rss_mb": 0.0,
+    }
+
+    summary = _build_smoke_memory_summary(
+        before,
+        after,
+        baseline={"after": {"allocator_trimmed": False}},
+        platform_name="darwin",
+    )
+
+    assert any("effective cap for 12 process" in failure for failure in summary["failures"])
+
+
 def test_build_smoke_memory_summary_skips_darwin_growth_without_allocator_trim():
     """macOS RSS growth is a warning when allocator pressure relief cannot trim arenas."""
     from benchmarks.run_benchmark import _build_smoke_memory_summary
@@ -3644,6 +3703,14 @@ async def run_all_tests():
     r.record("local_diagnostics_timeout_recorded", test_local_diagnostics_timeout_is_recorded)
     r.record("smoke_memory_summary_flags_leak", test_build_smoke_memory_summary_flags_growth_and_playwright_driver)
     r.record("smoke_memory_summary_passes", test_build_smoke_memory_summary_passes_stable_worker)
+    r.record(
+        "smoke_memory_summary_scales_worker_count",
+        test_build_smoke_memory_summary_scales_end_cap_by_worker_count,
+    )
+    r.record(
+        "smoke_memory_summary_scaled_cap_overage",
+        test_build_smoke_memory_summary_flags_scaled_end_cap_overage,
+    )
     r.record(
         "smoke_memory_summary_darwin_growth_warning",
         test_build_smoke_memory_summary_skips_darwin_growth_without_allocator_trim,

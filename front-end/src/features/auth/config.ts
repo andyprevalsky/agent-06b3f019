@@ -11,6 +11,10 @@ import { getClientSource, type ClientSource } from '@/lib/clientSource';
 /** Backend API base URL (no trailing slash). */
 export const AUTH_API_BASE_URL = BACKEND_BASE_URL;
 
+/** Dev auto-login credential pair. Defaults to the local developer test account. */
+export const DEV_AUTO_LOGIN_PHONE = import.meta.env.VITE_DEV_AUTO_LOGIN_PHONE ?? '+19729777432';
+export const DEV_AUTO_LOGIN_OTP = import.meta.env.VITE_DEV_AUTO_LOGIN_OTP ?? '181818';
+
 /** Whether the auth feature should auto-login with dev credentials on boot. */
 export function shouldEnableDevAutoLogin({
   isDev,

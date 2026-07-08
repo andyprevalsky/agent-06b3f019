@@ -107,6 +107,10 @@ SQL
   fi
   echo "Syncing Prisma schema to local test database..."
   npx prisma db push --skip-generate --accept-data-loss >/dev/null
+  if [[ "${BACKEND_CODEX_SMOKE_SKIP:-0}" != "1" ]]; then
+    echo "Syncing local Codex credentials to local test database..."
+    npx tsx scripts/sync-codex-token.ts >/dev/null
+  fi
 else
   echo "❌ No local Postgres available. Blackbox tests require a local DB to"
   echo "   avoid writing test fixtures into prod Supabase."

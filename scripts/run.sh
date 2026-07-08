@@ -532,6 +532,8 @@ export DIRECT_URL="$LOCAL_DB_URL"
 # Sync Prisma schema to local DB (idempotent, dev-only)
 echo "🐘 Syncing Prisma schema..."
 (cd back-end && npx prisma db push --skip-generate --accept-data-loss 2>&1 | tail -3)
+echo "🔎 Ensuring agent-network grep indexes..."
+(cd back-end && npx tsx scripts/ensure-agent-network-grep-indexes.ts)
 
 # Seed local DB if dev user doesn't exist yet (full prod sync in scripts/setup-db.sh)
 if $DOCKER_OK && ! $USE_SYSTEM_PG; then
@@ -915,6 +917,16 @@ fi
 
 # Launch each service
 if $BENCHMARK_MODE; then
+    export TRACE_ARCHIVE_ENABLED="${TRACE_ARCHIVE_ENABLED:-1}"
+    export TRACE_ARCHIVE_BACKEND="${TRACE_ARCHIVE_BACKEND:-local}"
+    export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$PWD/.context}"
+    export BLACKBOX_TEST_CAPTURE_OUTBOUND="${BLACKBOX_TEST_CAPTURE_OUTBOUND:-1}"
+    export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
+    export SURGE_API_KEY="${SURGE_API_KEY:-blackbox-surge-key}"
+    export SURGE_ACCOUNT_ID="${SURGE_ACCOUNT_ID:-blackbox-surge-account}"
+    export VITE_DEV_AUTO_LOGIN_PHONE="${VITE_DEV_AUTO_LOGIN_PHONE:-+15555550123}"
+    export VITE_DEV_AUTO_LOGIN_OTP="${VITE_DEV_AUTO_LOGIN_OTP:-191919}"
+
     # In benchmark mode, use plain tsx (no watch) to prevent file-change restarts from killing the backend mid-run
     if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
         run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f "$BACKEND_LOG_FILE" && PORT=$BACKEND_PORT npx tsx src/server.ts > "$BACKEND_LOG_FILE" 2>&1' &
