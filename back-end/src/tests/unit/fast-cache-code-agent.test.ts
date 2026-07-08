@@ -135,6 +135,14 @@ test('Codex Code sandbox uses Fast Mode localhost proxy plumbing', () => {
     'wrapper model provider must use the ChatGPT Codex backend path'
   );
   assert.ok(
+    wsServer.includes('fast_cache_proxy_request'),
+    'wrapper must emit structured proxy cache events over the WebSocket'
+  );
+  assert.ok(
+    wsServer.includes('upstream.headers.get("x-fast-mode-cache")'),
+    'wrapper must record the backend fast-cache header for each proxied request'
+  );
+  assert.ok(
     wsServer.includes('wire_api="responses"'),
     'wrapper model provider must use Responses API wire format'
   );

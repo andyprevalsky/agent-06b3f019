@@ -200,6 +200,10 @@ codexProxyRouter.use(
         traceHash: trace.traceHash,
         sessionId: trace.sessionId,
         path: pathAndQuery.split('?', 1)[0],
+        cacheable: result.cacheable,
+        readEnabled: result.readEnabled,
+        ordinal: result.ordinal,
+        cacheKey: result.cacheKey,
         wrote: result.wrote,
       }
     );

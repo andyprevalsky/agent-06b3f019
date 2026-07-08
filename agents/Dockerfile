@@ -7,9 +7,15 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
+    ca-certificates \
     curl \
     git \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
+
+# Needed by helpers/e2b_log_collector.py for retained sandbox stdout/stderr logs.
+RUN npm install -g @e2b/cli@2.13.0 && npm cache clean --force
 
 # Copy requirements first for better caching
 COPY requirements.txt .

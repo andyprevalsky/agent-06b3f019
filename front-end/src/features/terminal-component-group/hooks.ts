@@ -58,6 +58,7 @@ export {
   subscribeToAttentionRequests,
   unsubscribe,
   getStoredSession,
+  fetchCodeAgentSession,
   fetchClaudeCodeSession,
   fetchCreditsUsage,
   fetchPublicAsset,

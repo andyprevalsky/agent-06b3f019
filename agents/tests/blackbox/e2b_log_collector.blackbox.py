@@ -1,6 +1,7 @@
 """Blackbox tests for e2b_log_collector domain."""
 
 import asyncio
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from _test_utils import (
@@ -28,6 +29,16 @@ def test_init_state():
     assert collector.task_id == "task-1"
     assert collector.process is None
     assert collector._stopped is False
+
+
+def test_worker_image_installs_e2b_cli():
+    """The Fly worker image must include the e2b binary used by the collector."""
+    dockerfile = Path(__file__).resolve().parents[2] / "Dockerfile"
+    text = dockerfile.read_text()
+
+    assert "nodejs" in text
+    assert "npm" in text
+    assert "npm install -g @e2b/cli@" in text
 
 
 async def test_stop_before_start():
@@ -190,6 +201,7 @@ async def run_all_tests():
     print("e2b-log-collector blackbox tests:")
     r = BlackboxResult()
     r.record("init_state", test_init_state)
+    r.record("worker_installs_e2b_cli", test_worker_image_installs_e2b_cli)
     await r.record_async("stop_before_start", test_stop_before_start)
     await r.record_async("no_outbound_http", test_no_outbound_http)
     await r.record_async("start_cli_missing_returns_false", test_start_cli_missing_returns_false)

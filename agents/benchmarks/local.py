@@ -741,6 +741,38 @@ def checkpoint_tree_path(task_name: str, args: argparse.Namespace) -> Path | Non
     return path
 
 
+def _finished_for_each_checkpoint_index(source_json: Path, requested_index: int) -> int | None:
+    try:
+        with source_json.open() as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    messages = data.get("messages") or data.get("agent", {}).get("messages") or []
+    if not isinstance(messages, list):
+        return None
+    for index in range(min(requested_index, len(messages) - 1), -1, -1):
+        message = messages[index]
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            continue
+        if (
+            metadata.get("toolName") == "spawn_general_purpose_agent_for_each"
+            and metadata.get("toolStatus") == "FINISHED"
+        ):
+            return index
+    return None
+
+
+def checkpoint_through_index(source_json: Path, args: argparse.Namespace) -> int:
+    if args.checkpoint_boundary == "for-each-finished":
+        boundary_index = _finished_for_each_checkpoint_index(source_json, args.checkpoint)
+        if boundary_index is not None:
+            return boundary_index
+    return args.checkpoint
+
+
 def manifest_backend_url(manifest: dict) -> str:
     ports = manifest.get("ports") if isinstance(manifest, dict) else {}
     urls = manifest.get("urls") if isinstance(manifest, dict) else {}
@@ -901,6 +933,12 @@ def create_checkpoint_source_from_task(
         str(backend_port),
         "--checkpoint-source-index",
         str(args.checkpoint),
+        "--checkpoint-source-boundary",
+        args.checkpoint_boundary,
+        "--checkpoint-source-price-limit-cents",
+        str(args.checkpoint_price_limit_cents),
+        "--timeout-seconds",
+        str(args.checkpoint_timeout_seconds),
         "--checkpoint-source-out",
         str(source_json),
         "--keep-agents",
@@ -979,6 +1017,7 @@ def run_checkpoint_invocation(
                 args=args,
             )
         out_path = checkpoint_out_path(stack, task_name, args)
+        through_index = checkpoint_through_index(source_json, args)
         create_args = [
             "npx",
             "tsx",
@@ -986,7 +1025,7 @@ def run_checkpoint_invocation(
             "--source-json",
             str(source_json),
             "--through-index",
-            str(args.checkpoint),
+            str(through_index),
             "--task-name",
             task_name,
             "--fast-mode-cache",
@@ -1177,6 +1216,15 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help=(
             "Run one benchmark until root message index TURN_N, pause/export it, "
             "clone the checkpoint, and resume it"
+        ),
+    )
+    parser.add_argument(
+        "--checkpoint-boundary",
+        choices=["for-each-finished", "message-index"],
+        default="for-each-finished",
+        help=(
+            "Durable boundary to prefer when it appears before the requested root message index. "
+            "Use message-index to require the raw index exactly."
         ),
     )
     parser.add_argument(

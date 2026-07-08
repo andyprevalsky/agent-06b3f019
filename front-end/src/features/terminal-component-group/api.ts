@@ -8,24 +8,26 @@
 
 import { getSession, getStoredSession } from '@/lib/supabase';
 import { API_URL, API_BASE_WITH_PATH } from './config';
-import type { UsageData } from './types';
+import type { CodeProvider, UsageData } from './types';
 
 export interface ClaudeCodeSessionResponse {
   output?: string;
 }
 
 /**
- * Fetch the saved terminal output for a Claude Code session. Best-effort:
+ * Fetch the saved terminal output for a code-agent session. Best-effort:
  * returns null on any failure (auth missing, network, non-OK response).
  */
-export async function fetchClaudeCodeSession(
+export async function fetchCodeAgentSession(
   taskId: string,
+  codeProvider: CodeProvider = 'claude',
 ): Promise<ClaudeCodeSessionResponse | null> {
   try {
     const token = getSession()?.access_token;
     if (!token) return null;
 
-    const response = await fetch(`${API_URL}/api/claude-code-session/${taskId}`, {
+    const sessionPath = codeProvider === 'codex' ? 'codex-code-session' : 'claude-code-session';
+    const response = await fetch(`${API_URL}/api/${sessionPath}/${taskId}`, {
       headers: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
@@ -37,6 +39,13 @@ export async function fetchClaudeCodeSession(
   } catch {
     return null;
   }
+}
+
+/** Backward-compatible helper for callers that only know about Claude sessions. */
+export async function fetchClaudeCodeSession(
+  taskId: string,
+): Promise<ClaudeCodeSessionResponse | null> {
+  return fetchCodeAgentSession(taskId, 'claude');
 }
 
 /** Fetch current credits usage for the authenticated user. Returns null when not authenticated or on error. */

@@ -36,6 +36,15 @@ function resolvePlanCharCount(
   return streamingPlanCharCount;
 }
 
+function getMessageRenderKey(message: Message): string {
+  const toolName = message.metadata?.toolName;
+  const toolCallId = message.metadata?.toolCallId;
+  if (toolName === 'spawn_claude_code_agent' && typeof toolCallId === 'string' && toolCallId) {
+    return `code-agent:${toolCallId}`;
+  }
+  return message.message_id;
+}
+
 export function MessageListItems({
   filteredMessages,
   currentAnimatingId,
@@ -59,7 +68,7 @@ export function MessageListItems({
 
         return (
           <div
-            key={message.message_id}
+            key={getMessageRenderKey(message)}
             data-message-id={message.message_id}
             data-message-role={message.role}
             className="min-w-0 max-w-full"
