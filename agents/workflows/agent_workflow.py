@@ -1088,15 +1088,6 @@ class AgentWorkflow:
         """
         tool_call_id = f"post-dag-attempt-completion-{workflow.uuid4()}"
         try:
-            # Poll fresh context — DAG has been posting tool results to the DB.
-            context = await workflow.execute_activity(
-                poll_new_messages,
-                args=[agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
-            )
-            context = filter_internal_subagent_messages(context)
-
             await self._execute_tool(
                 "attempt_completion",
                 {"_verification_pending": True},

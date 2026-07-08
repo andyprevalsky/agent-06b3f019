@@ -42,7 +42,7 @@ function numberValue(value: unknown): number | null {
 }
 
 function deriveTurnCount(taskMessages: Message[]): number {
-  const explicitTurns = taskMessages
+  const maxExplicitTurn = taskMessages
     .flatMap((message) => {
       const metadata = message.metadata ?? {};
       return [
@@ -56,7 +56,8 @@ function deriveTurnCount(taskMessages: Message[]): number {
       ];
     })
     .map(numberValue)
-    .filter((value): value is number => value !== null);
+    .filter((value): value is number => value !== null)
+    .reduce((max, value) => Math.max(max, value), 0);
 
   const completedProgressMessages = taskMessages.filter((message) => {
     const metadata = message.metadata ?? {};
@@ -65,7 +66,7 @@ function deriveTurnCount(taskMessages: Message[]): number {
     return Boolean(metadata.action_type || metadata.title);
   }).length;
 
-  return Math.max(0, Math.floor(Math.max(completedProgressMessages, ...explicitTurns, 0)));
+  return Math.max(0, Math.floor(Math.max(completedProgressMessages, maxExplicitTurn, 0)));
 }
 
 function isTaskCompletionSuccess(message: Message | undefined): boolean {

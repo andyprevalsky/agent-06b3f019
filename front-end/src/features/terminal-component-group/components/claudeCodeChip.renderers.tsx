@@ -329,6 +329,7 @@ function CompletedTranscriptSurface({
 }) {
   const blocks = parseCodeAgentTranscript(output);
   const label = providerLabel(codeProvider);
+  const emptyMessage = output.trim() ? 'No transcript events found.' : 'Transcript unavailable.';
 
   return (
     <div className={`code-agent-terminal-shell relative overflow-hidden ${className}`}>
@@ -355,7 +356,7 @@ function CompletedTranscriptSurface({
           </div>
         ) : (
           <div className="flex h-full items-center justify-center text-sm text-white/58">
-            Loading transcript...
+            {emptyMessage}
           </div>
         )}
       </div>
