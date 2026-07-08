@@ -377,6 +377,158 @@ async def test_browser_agent_recording_respects_disabled_env():
             os.environ["BROWSER_AGENT_RECORDINGS"] = previous_enabled
 
 
+async def test_browser_agent_recording_start_failure_is_best_effort():
+    import tempfile
+    from pathlib import Path
+
+    from domains.spawn_browser_agent_v3.recording import BrowserAgentRecorder
+
+    class FakePage:
+        async def screenshot(self, **kwargs):
+            return b"fake-jpeg-bytes"
+
+    class FailingStartRecorder(BrowserAgentRecorder):
+        async def start(self) -> None:
+            self.frames_dir.mkdir(parents=True, exist_ok=True)
+            (self.output_dir / "partial.txt").write_text("partial", encoding="utf-8")
+            raise RuntimeError("start failed after scratch creation")
+
+    previous_enabled = os.environ.get("BROWSER_AGENT_RECORDINGS")
+    previous_dir = os.environ.get("BROWSER_AGENT_RECORDINGS_DIR")
+    previous_cleanup = os.environ.get("BROWSER_AGENT_RECORDINGS_CLEANUP_LOCAL")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["BROWSER_AGENT_RECORDINGS"] = "1"
+            os.environ["BROWSER_AGENT_RECORDINGS_DIR"] = tmp
+            os.environ["BROWSER_AGENT_RECORDINGS_CLEANUP_LOCAL"] = "1"
+
+            recorder = await FailingStartRecorder.create(
+                page=FakePage(),
+                agent_id="agent-1",
+                task_id="task-1",
+                session_id="session-1",
+                browser_url="",
+            )
+
+            assert recorder is None
+            assert not (Path(tmp) / "agent-1" / "task-1").exists()
+    finally:
+        if previous_enabled is None:
+            os.environ.pop("BROWSER_AGENT_RECORDINGS", None)
+        else:
+            os.environ["BROWSER_AGENT_RECORDINGS"] = previous_enabled
+        if previous_dir is None:
+            os.environ.pop("BROWSER_AGENT_RECORDINGS_DIR", None)
+        else:
+            os.environ["BROWSER_AGENT_RECORDINGS_DIR"] = previous_dir
+        if previous_cleanup is None:
+            os.environ.pop("BROWSER_AGENT_RECORDINGS_CLEANUP_LOCAL", None)
+        else:
+            os.environ["BROWSER_AGENT_RECORDINGS_CLEANUP_LOCAL"] = previous_cleanup
+
+
+def test_browser_agent_recording_prod_default_uses_writable_temp_root():
+    import tempfile
+    from pathlib import Path
+
+    from domains.spawn_browser_agent_v3.recording import _recording_root
+
+    saved_env = {
+        "ENVIRONMENT": os.environ.get("ENVIRONMENT"),
+        "FLY_APP_NAME": os.environ.get("FLY_APP_NAME"),
+        "CONDUCTOR_WORKSPACE_NAME": os.environ.get("CONDUCTOR_WORKSPACE_NAME"),
+        "BROWSER_AGENT_RECORDINGS_DIR": os.environ.get("BROWSER_AGENT_RECORDINGS_DIR"),
+    }
+    try:
+        os.environ["ENVIRONMENT"] = "production"
+        os.environ.pop("FLY_APP_NAME", None)
+        os.environ.pop("CONDUCTOR_WORKSPACE_NAME", None)
+        os.environ.pop("BROWSER_AGENT_RECORDINGS_DIR", None)
+
+        root = _recording_root()
+
+        assert root == Path(tempfile.gettempdir()) / "rose-browser-agent-recordings"
+    finally:
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def test_browser_agent_recording_fly_prod_default_uses_writable_temp_root():
+    import tempfile
+    from pathlib import Path
+
+    from domains.spawn_browser_agent_v3.recording import _recording_root
+
+    saved_env = {
+        "ENVIRONMENT": os.environ.get("ENVIRONMENT"),
+        "FLY_APP_NAME": os.environ.get("FLY_APP_NAME"),
+        "CONDUCTOR_WORKSPACE_NAME": os.environ.get("CONDUCTOR_WORKSPACE_NAME"),
+        "BROWSER_AGENT_RECORDINGS_DIR": os.environ.get("BROWSER_AGENT_RECORDINGS_DIR"),
+    }
+    try:
+        os.environ.pop("ENVIRONMENT", None)
+        os.environ["FLY_APP_NAME"] = "navi-whisper-lux"
+        os.environ.pop("CONDUCTOR_WORKSPACE_NAME", None)
+        os.environ.pop("BROWSER_AGENT_RECORDINGS_DIR", None)
+
+        root = _recording_root()
+
+        assert root == Path(tempfile.gettempdir()) / "rose-browser-agent-recordings"
+    finally:
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def test_browser_agent_recording_prod_cleanup_removes_task_scratch():
+    import tempfile
+    from pathlib import Path
+
+    from domains.spawn_browser_agent_v3.recording import BrowserAgentRecorder
+
+    saved_env = {
+        "ENVIRONMENT": os.environ.get("ENVIRONMENT"),
+        "FLY_APP_NAME": os.environ.get("FLY_APP_NAME"),
+        "CONDUCTOR_WORKSPACE_NAME": os.environ.get("CONDUCTOR_WORKSPACE_NAME"),
+        "BROWSER_AGENT_RECORDINGS_DIR": os.environ.get("BROWSER_AGENT_RECORDINGS_DIR"),
+        "BROWSER_AGENT_RECORDINGS_CLEANUP_LOCAL": os.environ.get("BROWSER_AGENT_RECORDINGS_CLEANUP_LOCAL"),
+    }
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["FLY_APP_NAME"] = "navi-whisper-lux"
+            os.environ.pop("ENVIRONMENT", None)
+            os.environ.pop("CONDUCTOR_WORKSPACE_NAME", None)
+            os.environ["BROWSER_AGENT_RECORDINGS_DIR"] = tmp
+            os.environ.pop("BROWSER_AGENT_RECORDINGS_CLEANUP_LOCAL", None)
+
+            recorder = BrowserAgentRecorder(
+                page=object(),
+                agent_id="agent-prod",
+                task_id="task-prod",
+                session_id="session-prod",
+                browser_url="",
+            )
+            recorder.output_dir.mkdir(parents=True)
+            artifact = recorder.output_dir / "index.html"
+            artifact.write_text("<html>scratch</html>", encoding="utf-8")
+
+            recorder.cleanup_local_artifacts(persisted=True)
+
+            assert not recorder.output_dir.exists()
+            assert Path(tmp).exists()
+    finally:
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 async def test_browser_agent_recording_enabled_by_trace_archive_in_prod():
     import tempfile
     from pathlib import Path
@@ -565,6 +717,63 @@ async def test_browser_recording_finalizer_uploads_frame_replay_after_cancellati
         metadata = save_mock.await_args.kwargs["extra_metadata"]
         assert metadata["recording_file_pointer"] == {"id": "file-pointer-1"}
         assert metadata["browser_session_metadata"] == {"provider": "steel"}
+
+
+async def test_browser_recording_finalizer_keeps_local_artifacts_when_upload_fails():
+    import shutil
+    import tempfile
+
+    from domains.spawn_browser_agent_v3.handler import _finalize_browser_recording_for_fe
+
+    class UploadFailRecorder:
+        def __init__(self, output_dir):
+            self.output_dir = Path(output_dir)
+            self.cleanup_persisted = None
+
+        async def close(self, *, include_steel_media=True):
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            path = self.output_dir / "index.html"
+            path.write_text("<html>recording</html>", encoding="utf-8")
+            return path
+
+        def export_inline_html_bytes(self):
+            return b"<html>inline frame replay</html>"
+
+        def cleanup_local_artifacts(self, *, persisted=False):
+            self.cleanup_persisted = persisted
+            if persisted:
+                shutil.rmtree(self.output_dir)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        recorder = UploadFailRecorder(tmp)
+        with (
+            patch(
+                "domains.spawn_browser_agent_v3.handler.upload_to_storage",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("storage down"),
+            ) as upload_mock,
+            patch(
+                "domains.spawn_browser_agent_v3.handler.save_browser_action_message",
+                new_callable=AsyncMock,
+            ) as save_mock,
+        ):
+            result = await _finalize_browser_recording_for_fe(
+                browser_recorder=recorder,
+                agent_id="agent-1",
+                task_id="task-1",
+                user_id="user-1",
+                browser_url="https://debug",
+                browser_session_metadata={"provider": "steel"},
+            )
+
+        assert result is not None
+        assert result["recording_file_pointer"] is None
+        assert recorder.cleanup_persisted is False
+        assert recorder.output_dir.exists()
+        upload_mock.assert_awaited_once()
+        save_mock.assert_awaited_once()
+        metadata = save_mock.await_args.kwargs["extra_metadata"]
+        assert metadata["recording_file_pointer"] is None
 
 
 def test_browser_agent_recording_inline_export_uses_source_frames_once():
@@ -8353,6 +8562,22 @@ async def run_all_tests():
         test_browser_agent_recording_respects_disabled_env,
     )
     await r.record_async(
+        "browser_agent_recording_start_failure_best_effort",
+        test_browser_agent_recording_start_failure_is_best_effort,
+    )
+    r.record(
+        "browser_agent_recording_prod_temp_root",
+        test_browser_agent_recording_prod_default_uses_writable_temp_root,
+    )
+    r.record(
+        "browser_agent_recording_fly_prod_temp_root",
+        test_browser_agent_recording_fly_prod_default_uses_writable_temp_root,
+    )
+    r.record(
+        "browser_agent_recording_prod_cleanup",
+        test_browser_agent_recording_prod_cleanup_removes_task_scratch,
+    )
+    await r.record_async(
         "browser_agent_recording_prod_trace_archive",
         test_browser_agent_recording_enabled_by_trace_archive_in_prod,
     )
@@ -8367,6 +8592,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_recording_finalizer_cancel_resilient",
         test_browser_recording_finalizer_uploads_frame_replay_after_cancellation,
+    )
+    await r.record_async(
+        "browser_recording_finalizer_keeps_local_artifacts_when_upload_fails",
+        test_browser_recording_finalizer_keeps_local_artifacts_when_upload_fails,
     )
     r.record(
         "browser_humanizer_visual_cursor_default_off",

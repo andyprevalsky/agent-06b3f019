@@ -1942,57 +1942,64 @@ async def _finalize_browser_recording_for_fe(
     if not task_id:
         return None
 
-    recording_path = await browser_recorder.close(include_steel_media=False)
-    if not recording_path:
-        return None
-
-    recording_file_pointer = None
-    html_bytes: Optional[bytes] = None
+    cleanup_local_artifacts = False
     try:
-        html_bytes = browser_recorder.export_inline_html_bytes()
-        if html_bytes:
-            recording_file_pointer = await upload_to_storage(
-                user_id=user_id,
-                file_content=html_bytes,
-                filename=f"browser-recording-{task_id}.html",
-                mime_type="text/html",
-            )
-            logger.info(
-                "Browser recording uploaded",
+        recording_path = await browser_recorder.close(include_steel_media=False)
+        if not recording_path:
+            return None
+
+        recording_file_pointer = None
+        html_bytes: Optional[bytes] = None
+        try:
+            html_bytes = browser_recorder.export_inline_html_bytes()
+            if html_bytes:
+                recording_file_pointer = await upload_to_storage(
+                    user_id=user_id,
+                    file_content=html_bytes,
+                    filename=f"browser-recording-{task_id}.html",
+                    mime_type="text/html",
+                )
+                logger.info(
+                    "Browser recording uploaded",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    bytes=len(html_bytes),
+                    has_pointer=bool(recording_file_pointer),
+                )
+        except Exception as exc:  # noqa: BLE001 — recording upload is best-effort
+            logger.warning(
+                "Browser recording upload failed",
                 agent_id=agent_id,
                 task_id=task_id,
-                bytes=len(html_bytes),
-                has_pointer=bool(recording_file_pointer),
+                error=repr(exc),
+                html_bytes=len(html_bytes) if isinstance(html_bytes, (bytes, bytearray)) else None,
             )
-    except Exception as exc:  # noqa: BLE001 — recording upload is best-effort
-        logger.warning(
-            "Browser recording upload failed",
-            agent_id=agent_id,
-            task_id=task_id,
-            error=repr(exc),
-            html_bytes=len(html_bytes) if isinstance(html_bytes, (bytes, bytearray)) else None,
-        )
 
-    await save_browser_action_message(
-        agent_id=agent_id,
-        title="Browser recording saved",
-        task_id=task_id,
-        message=f"Local browser recording: {recording_path}",
-        status=MessageStatus.FINISHED,
-        browser_url=browser_url or "",
-        action_type="recording",
-        tool_call_id=str(uuid_module.uuid4()),
-        extra_metadata={
+        await save_browser_action_message(
+            agent_id=agent_id,
+            title="Browser recording saved",
+            task_id=task_id,
+            message=f"Local browser recording: {recording_path}",
+            status=MessageStatus.FINISHED,
+            browser_url=browser_url or "",
+            action_type="recording",
+            tool_call_id=str(uuid_module.uuid4()),
+            extra_metadata={
+                "recording_path": str(recording_path),
+                "recording_file_pointer": recording_file_pointer,
+                "browser_session_metadata": browser_session_metadata,
+            },
+        )
+        cleanup_local_artifacts = bool(recording_file_pointer)
+        return {
             "recording_path": str(recording_path),
             "recording_file_pointer": recording_file_pointer,
-            "browser_session_metadata": browser_session_metadata,
-        },
-    )
-    return {
-        "recording_path": str(recording_path),
-        "recording_file_pointer": recording_file_pointer,
-        "html_bytes": len(html_bytes) if isinstance(html_bytes, (bytes, bytearray)) else None,
-    }
+            "html_bytes": len(html_bytes) if isinstance(html_bytes, (bytes, bytearray)) else None,
+        }
+    finally:
+        cleanup = getattr(browser_recorder, "cleanup_local_artifacts", None)
+        if callable(cleanup):
+            cleanup(persisted=cleanup_local_artifacts)
 
 
 async def _finalize_browser_recording_for_fe_resilient(
