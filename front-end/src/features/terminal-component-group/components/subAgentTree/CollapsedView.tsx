@@ -41,8 +41,11 @@ export function CollapsedView({
 }: CollapsedViewProps) {
   const terminalLeafNodes = leafNodes.filter(isTerminalNode);
   const activeLeafNodes = leafNodes.filter((n) => !isTerminalNode(n));
+  const visibleActiveLeafNodes = activeLeafNodes.slice(0, 1);
   const showTerminalSummary = terminalLeafNodes.length > 1 && !showCompletedNodes;
-  const leavesToShow = showTerminalSummary ? activeLeafNodes : leafNodes;
+  const leavesToShow = showTerminalSummary
+    ? visibleActiveLeafNodes
+    : [...visibleActiveLeafNodes, ...terminalLeafNodes];
 
   return (
     <div className="font-mono text-sm">

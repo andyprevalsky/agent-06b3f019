@@ -28,7 +28,7 @@ vi.mock('../../main/services/auth', () => ({
 }));
 
 vi.mock('../../main/services/sync/IntegrationCache', () => ({
-  IntegrationCache: { invalidate: vi.fn() },
+  IntegrationCache: { invalidate: vi.fn(), getIntegration: vi.fn() },
 }));
 
 const fsExistsSync = vi.hoisted(() => vi.fn<(path: string) => boolean>(() => false));
@@ -81,6 +81,11 @@ describe('gpt-credential-sync blackbox', () => {
     });
     vi.mocked(AuthService.getSession).mockReset();
     vi.mocked(IntegrationCache.invalidate).mockReset();
+    vi.mocked(IntegrationCache.getIntegration).mockReset().mockResolvedValue({
+      name: 'gpt_code',
+      status: 'CONNECTED',
+      isActive: true,
+    });
   });
 
   afterEach(() => {
@@ -152,6 +157,61 @@ describe('gpt-credential-sync blackbox', () => {
       expect(req.body).not.toContain('codex-access-token-secret');
       expect(req.body).not.toContain('codex-refresh-token-secret');
 
+      expect(vi.mocked(IntegrationCache.invalidate)).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-uploads unchanged Codex auth when the backend integration is expired', async () => {
+      vi.mocked(AuthService.getSession).mockResolvedValue(SESSION);
+      vi.mocked(IntegrationCache.getIntegration)
+        .mockResolvedValueOnce({
+          name: 'gpt_code',
+          status: 'EXPIRED',
+          isActive: false,
+        })
+        .mockResolvedValue({
+          name: 'gpt_code',
+          status: 'CONNECTED',
+          isActive: true,
+        });
+      wireCodexAuthFile(
+        JSON.stringify({
+          auth_mode: 'chatgpt',
+          tokens: {
+            access_token: 'codex-access-token-expired-row',
+            refresh_token: 'codex-refresh-token-expired-row',
+          },
+        })
+      );
+      installUpload();
+
+      const first = await GptCredentialSync.syncExistingCredentialsIfChanged();
+      const second = await GptCredentialSync.syncExistingCredentialsIfChanged();
+
+      expect(first.success).toBe(true);
+      expect(second).toEqual({ success: true, message: 'unchanged' });
+      expect(fetchCaptures).toHaveLength(1);
+      expect(vi.mocked(IntegrationCache.invalidate)).toHaveBeenCalledTimes(1);
+    });
+
+    it('skips unchanged Codex auth when the backend integration is still connected', async () => {
+      vi.mocked(AuthService.getSession).mockResolvedValue(SESSION);
+      wireCodexAuthFile(
+        JSON.stringify({
+          auth_mode: 'chatgpt',
+          tokens: {
+            access_token: 'codex-access-token-connected-row',
+            refresh_token: 'codex-refresh-token-connected-row',
+          },
+        })
+      );
+      installUpload();
+
+      const first = await GptCredentialSync.syncExistingCredentialsIfChanged();
+      const second = await GptCredentialSync.syncExistingCredentialsIfChanged();
+
+      expect(first.success).toBe(true);
+      expect(second).toEqual({ success: true, message: 'unchanged' });
+      expect(fetchCaptures).toHaveLength(1);
       expect(vi.mocked(IntegrationCache.invalidate)).toHaveBeenCalledTimes(1);
     });
   });

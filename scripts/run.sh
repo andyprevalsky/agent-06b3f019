@@ -193,14 +193,43 @@ fi
 IS_CLOUD=false
 [ -f "$SCRIPT_DIR/../.cloud-env" ] && IS_CLOUD=true
 
+default_benchmark_worker_processes() {
+    local cpus
+    cpus=1
+    if command -v sysctl >/dev/null 2>&1; then
+        cpus=$(sysctl -n hw.logicalcpu 2>/dev/null || echo 1)
+    elif command -v nproc >/dev/null 2>&1; then
+        cpus=$(nproc 2>/dev/null || echo 1)
+    fi
+    case "$cpus" in
+        ''|*[!0-9]*) cpus=1 ;;
+    esac
+    if [ "$cpus" -le 2 ]; then
+        echo 1
+    elif [ "$cpus" -gt 14 ]; then
+        echo 12
+    else
+        echo $((cpus - 2))
+    fi
+}
+
 if ! $IS_CLOUD; then
-    export MAX_CONCURRENT_ACTIVITIES="${MAX_CONCURRENT_ACTIVITIES:-500}"
-    export MAX_CONCURRENT_ACTIVITY_TASK_POLLERS="${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-80}"
+    if $BENCHMARK_MODE; then
+        export WORKER_PROCESSES="${WORKER_PROCESSES:-${BENCHMARK_AGENT_WORKERS:-$(default_benchmark_worker_processes)}}"
+        export MAX_CONCURRENT_ACTIVITIES="${MAX_CONCURRENT_ACTIVITIES:-16}"
+        export MAX_CONCURRENT_ACTIVITY_TASK_POLLERS="${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-16}"
+        export MAX_CONCURRENT_WORKFLOWS="${MAX_CONCURRENT_WORKFLOWS:-32}"
+        export MAX_CACHED_WORKFLOWS="${MAX_CACHED_WORKFLOWS:-64}"
+        export MAX_CONCURRENT_WORKFLOW_TASK_POLLERS="${MAX_CONCURRENT_WORKFLOW_TASK_POLLERS:-8}"
+    else
+        export MAX_CONCURRENT_ACTIVITIES="${MAX_CONCURRENT_ACTIVITIES:-500}"
+        export MAX_CONCURRENT_ACTIVITY_TASK_POLLERS="${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-80}"
+    fi
 fi
 
 export NODE_ENV="${NODE_ENV:-development}"
 export TEMPORAL_TASK_QUEUE=navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME
-echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT mac-app=$MAC_APP_PORT metrics=$SDK_METRICS_PORT db=$LOCAL_DB_PORT ngrok_api=$NGROK_WEB_PORT queue=$TEMPORAL_TASK_QUEUE benchmark_mode=$BENCHMARK_MODE activity_max_slots=${MAX_CONCURRENT_ACTIVITIES:-100} activity_pollers=${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-8}"
+echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT mac-app=$MAC_APP_PORT metrics=$SDK_METRICS_PORT db=$LOCAL_DB_PORT ngrok_api=$NGROK_WEB_PORT queue=$TEMPORAL_TASK_QUEUE benchmark_mode=$BENCHMARK_MODE worker_processes=${WORKER_PROCESSES:-1} workflow_max_slots=${MAX_CONCURRENT_WORKFLOWS:-50} workflow_pollers=${MAX_CONCURRENT_WORKFLOW_TASK_POLLERS:-8} activity_max_slots=${MAX_CONCURRENT_ACTIVITIES:-100} activity_pollers=${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-8}"
 
 run_kill_stale_same_task_queue_workers "$PWD" "$TEMPORAL_TASK_QUEUE" "$BACKEND_API_URL" "$$"
 
@@ -777,6 +806,12 @@ data = {
     "env": {
         "benchmark_anon_steel_profile": os.environ.get("BENCHMARK_ANON_STEEL_PROFILE", "").lower() in ("1", "true", "yes", "on"),
         "benchmark_disable_saved_browser_auth": os.environ.get("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH", "").lower() in ("1", "true", "yes", "on"),
+        "worker_processes": env_int("WORKER_PROCESSES", 1),
+        "max_concurrent_workflows": env_int("MAX_CONCURRENT_WORKFLOWS", 50),
+        "max_cached_workflows": env_int("MAX_CACHED_WORKFLOWS", 100),
+        "max_concurrent_workflow_task_pollers": env_int("MAX_CONCURRENT_WORKFLOW_TASK_POLLERS", 8),
+        "max_concurrent_activities": env_int("MAX_CONCURRENT_ACTIVITIES", 100),
+        "max_concurrent_activity_task_pollers": env_int("MAX_CONCURRENT_ACTIVITY_TASK_POLLERS", 8),
     },
     "logs": {
         "backend": os.environ.get("BACKEND_LOG_FILE") or os.path.join(root, "back-end", "backend-logs.log"),
