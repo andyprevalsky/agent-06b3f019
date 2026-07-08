@@ -34,6 +34,7 @@ const CREDENTIALS_ONLY = process.argv.includes('--credentials-only');
 // agent's claudeAuth fetch fails and every LLM call falls through to the paid
 // waterfall.
 const COMPUTE_TOKENS_ONLY = process.argv.includes('--compute-tokens-only');
+const COMPUTE_TOKEN_SYNC_ATTEMPTS = 5;
 
 const remote = new PrismaClient({ datasources: { db: { url: REMOTE_URL } } });
 const local = new PrismaClient(); // uses process.env.DATABASE_URL (local)
@@ -89,6 +90,70 @@ async function syncIntegrations(): Promise<number> {
   return synced;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function hasEncryptedCredentials(config: unknown): boolean {
+  if (!config || typeof config !== 'object') return false;
+  const encryptedCredentials = (config as Record<string, unknown>).encryptedCredentials;
+  return typeof encryptedCredentials === 'string' && encryptedCredentials.length > 0;
+}
+
+async function countUsableGptCodeIntegrations(): Promise<number> {
+  const now = new Date();
+  const integrations = await local.integration.findMany({
+    where: {
+      name: 'gpt_code',
+      status: 'CONNECTED',
+      OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: now } }],
+    },
+    select: {
+      userId: true,
+      poolingEnabled: true,
+      config: true,
+    },
+  });
+
+  return integrations.filter((integration) => {
+    const isAvailableToBench = integration.userId === DEV_USER_ID || integration.poolingEnabled;
+    return isAvailableToBench && hasEncryptedCredentials(integration.config);
+  }).length;
+}
+
+async function syncComputeTokensWithRetries(): Promise<void> {
+  let lastError: unknown = null;
+
+  for (let attempt = 1; attempt <= COMPUTE_TOKEN_SYNC_ATTEMPTS; attempt++) {
+    try {
+      const count = await syncIntegrations();
+      const usableGptCodeCount = await countUsableGptCodeIntegrations();
+      if (usableGptCodeCount === 0) {
+        throw new Error('No usable gpt_code integrations after sync');
+      }
+      console.log(
+        `  ✅ Compute Tokens (integrations): ${count} synced, ${usableGptCodeCount} usable gpt_code`
+      );
+      return;
+    } catch (err) {
+      lastError = err;
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(
+        `  ❌ Compute Tokens (integrations): attempt ${attempt}/${COMPUTE_TOKEN_SYNC_ATTEMPTS} failed: ${message}`
+      );
+      if (attempt < COMPUTE_TOKEN_SYNC_ATTEMPTS) {
+        await sleep(500 * 2 ** (attempt - 1));
+      }
+    }
+  }
+
+  throw new Error(
+    `Compute token sync failed after ${COMPUTE_TOKEN_SYNC_ATTEMPTS} attempts: ${
+      lastError instanceof Error ? lastError.message : String(lastError)
+    }`
+  );
+}
+
 async function syncBrowserCredentials(): Promise<void> {
   // ── Browser Passwords ──
   await syncTable('Browser Passwords', async () => {
@@ -112,7 +177,7 @@ async function sync() {
   await remote.$queryRaw`SELECT 1`;
 
   if (COMPUTE_TOKENS_ONLY) {
-    await syncTable('Compute Tokens (integrations)', syncIntegrations);
+    await syncComputeTokensWithRetries();
     console.log('\n🔄 Compute token sync complete.');
     return;
   }

@@ -1310,13 +1310,27 @@ async def pause_agent(base_url: str, agent_id: str) -> bool:
         return resp.status_code in (200, 204)
 
 
+def _finished_for_each_checkpoint_index(messages: list[dict]) -> int | None:
+    for index in range(len(messages) - 1, -1, -1):
+        metadata = messages[index].get("metadata") or {}
+        if not isinstance(metadata, dict):
+            continue
+        if (
+            metadata.get("toolName") == "spawn_general_purpose_agent_for_each"
+            and metadata.get("toolStatus") == "FINISHED"
+        ):
+            return index
+    return None
+
+
 async def poll_agent_until_message_index(
     base_url: str,
     agent_id: str,
     task: BenchmarkTask,
     checkpoint_index: int,
+    checkpoint_source_boundary: str = "message-index",
 ) -> dict:
-    """Poll until the root transcript contains checkpoint_index, then pause."""
+    """Poll until the root transcript reaches a durable checkpoint boundary, then pause."""
     resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
     deadline = time.time() + resolved_timeout
     required_count = checkpoint_index + 1
@@ -1328,6 +1342,21 @@ async def poll_agent_until_message_index(
         if len(messages) != last_count:
             print(f"    checkpoint source progress: root_messages={len(messages)}/{required_count}")
             last_count = len(messages)
+        boundary_index = (
+            _finished_for_each_checkpoint_index(messages)
+            if checkpoint_source_boundary == "for-each-finished"
+            else None
+        )
+        if boundary_index is not None:
+            if not await pause_agent(base_url, agent_id):
+                raise RuntimeError(f"Failed to pause checkpoint source agent {agent_id}")
+            paused = await get_agent(base_url, agent_id)
+            print(
+                "    checkpoint source paused at "
+                f"for_each_finished_index={boundary_index} "
+                f"root_messages={len(paused.get('messages', []) or [])}"
+            )
+            return paused
         if len(messages) >= required_count:
             if not await pause_agent(base_url, agent_id):
                 raise RuntimeError(f"Failed to pause checkpoint source agent {agent_id}")
@@ -4081,6 +4110,7 @@ async def run_single_task(
     task: BenchmarkTask,
     keep_failed_agents: bool = False,
     checkpoint_source_index: int | None = None,
+    checkpoint_source_boundary: str = "message-index",
     checkpoint_source_out: Path | None = None,
     checkpoint_tree_out: Path | None = None,
 ) -> TaskResult:
@@ -4276,7 +4306,13 @@ async def run_single_task(
         if checkpoint_source_index is not None:
             if checkpoint_source_out is None:
                 raise ValueError("checkpoint_source_out is required in checkpoint source mode")
-            data = await poll_agent_until_message_index(base_url, agent_id, task, checkpoint_source_index)
+            data = await poll_agent_until_message_index(
+                base_url,
+                agent_id,
+                task,
+                checkpoint_source_index,
+                checkpoint_source_boundary,
+            )
             messages = data.get("messages", []) or []
             export_checkpoint_source_from_local_db(
                 agent_id,
@@ -5454,11 +5490,14 @@ async def main_async(args):
         if checkpoint_source_mode:
             if len(tasks) != 1:
                 raise ValueError("--checkpoint-source-index requires exactly one task")
+            if args.checkpoint_source_price_limit_cents is not None:
+                tasks[0].price_limit_cents = args.checkpoint_source_price_limit_cents
             result = await run_single_task(
                 base_url,
                 tasks[0],
                 keep_failed_agents=True,
                 checkpoint_source_index=args.checkpoint_source_index,
+                checkpoint_source_boundary=args.checkpoint_source_boundary,
                 checkpoint_source_out=Path(args.checkpoint_source_out),
                 checkpoint_tree_out=Path(args.checkpoint_tree_out) if args.checkpoint_tree_out else None,
             )
@@ -5825,6 +5864,21 @@ def main():
         help="Run one benchmark until this root message index exists, pause it, and export checkpoint source JSON.",
     )
     parser.add_argument(
+        "--checkpoint-source-boundary",
+        choices=["message-index", "for-each-finished"],
+        default="message-index",
+        help=(
+            "Optional earlier durable source boundary for checkpoint export. "
+            "for-each-finished pauses at the first finished spawn_general_purpose_agent_for_each row."
+        ),
+    )
+    parser.add_argument(
+        "--checkpoint-source-price-limit-cents",
+        type=int,
+        default=None,
+        help="Override the source agent price limit while generating a checkpoint source transcript.",
+    )
+    parser.add_argument(
         "--checkpoint-source-out",
         type=str,
         default=None,
@@ -5865,14 +5919,19 @@ def main():
     if args.checkpoint_source_index is not None:
         if args.checkpoint_source_index < 0:
             parser.error("--checkpoint-source-index must be non-negative")
+        if args.checkpoint_source_price_limit_cents is not None and args.checkpoint_source_price_limit_cents <= 0:
+            parser.error("--checkpoint-source-price-limit-cents must be positive")
         if not args.task:
             parser.error("--checkpoint-source-index requires --task")
         if args.suite or args.parallel:
             parser.error("--checkpoint-source-index only supports one --task, not suites or --parallel")
         if not args.checkpoint_source_out:
             parser.error("--checkpoint-source-out is required with --checkpoint-source-index")
-    elif args.checkpoint_source_out or args.checkpoint_tree_out:
-        parser.error("--checkpoint-source-out/--checkpoint-tree-out require --checkpoint-source-index")
+    elif args.checkpoint_source_out or args.checkpoint_tree_out or args.checkpoint_source_price_limit_cents:
+        parser.error(
+            "--checkpoint-source-out/--checkpoint-tree-out/--checkpoint-source-price-limit-cents "
+            "require --checkpoint-source-index"
+        )
 
     if args.anon:
         _apply_anon_benchmark_mode(force_show_passwords=args.force_show_passwords)

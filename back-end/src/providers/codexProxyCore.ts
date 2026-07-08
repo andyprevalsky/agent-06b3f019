@@ -33,6 +33,10 @@ export interface CodexProxyResult {
   body: string;
   servedFromCache: boolean;
   wrote: boolean;
+  cacheable: boolean;
+  readEnabled: boolean;
+  ordinal: number | null;
+  cacheKey: string | null;
 }
 
 export interface TraceReplayContext {
@@ -366,6 +370,10 @@ export async function resolveCodex(
           body: rewriteCachedCodexReplayBody(v.body, upstreamBody),
           servedFromCache: true,
           wrote: false,
+          cacheable,
+          readEnabled,
+          ordinal,
+          cacheKey: key,
         };
       }
     }
@@ -380,6 +388,10 @@ export async function resolveCodex(
           body: rewriteCachedCodexReplayBody(terminal.body, upstreamBody),
           servedFromCache: true,
           wrote: false,
+          cacheable,
+          readEnabled,
+          ordinal,
+          cacheKey: key,
         };
       }
     }
@@ -403,6 +415,10 @@ export async function resolveCodex(
       body: upstream.body,
       servedFromCache: false,
       wrote,
+      cacheable,
+      readEnabled,
+      ordinal,
+      cacheKey: key,
     };
   } finally {
     if (!consumedReservedOrdinal) {

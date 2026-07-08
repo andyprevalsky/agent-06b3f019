@@ -793,6 +793,7 @@ def prepare_schema_for_openai(pydantic_model: Type[BaseModel]) -> Dict[str, Any]
 def build_verifier_context_messages(  # noqa: C901
     context: List[Dict[str, Any]],
     system_prompt: str,
+    verifier_file_evidence_by_message: Optional[Dict[str, List[Dict[str, Any]]]] = None,
 ) -> List[Dict[str, Any]]:
     """Build verifier messages with compressed tool results and progressive cache.
 
@@ -826,6 +827,14 @@ def build_verifier_context_messages(  # noqa: C901
             messages.append({"role": "user", "content": "\n\n".join(current_batch)})
             current_batch = []
 
+    def _append_file_evidence(msg: Dict[str, Any]) -> None:
+        if not verifier_file_evidence_by_message:
+            return
+        for payload in verifier_file_evidence_by_message.get(_verifier_file_evidence_key(msg), []):
+            current_batch.append(
+                "TOOL_RESULT " + json.dumps(payload, ensure_ascii=False, default=str)
+            )
+
     for msg in sorted_context:
         role = msg.get("role", "")
         text = _self_close_trailing_message_reference(msg.get("text", ""))
@@ -833,11 +842,27 @@ def build_verifier_context_messages(  # noqa: C901
 
         if is_internal_subagent_message(msg):
             continue
-        if role in ("SYSTEM", "ASSISTANT"):
+        if role == "SYSTEM":
+            continue
+
+        if role == "ASSISTANT":
+            if metadata.get("plannedToolName") == "reasoning":
+                reasoning_payload = {
+                    "tool_name": "reasoning",
+                    "result": text,
+                }
+                dag_task_index = metadata.get("dagTaskIndex")
+                if isinstance(dag_task_index, int):
+                    reasoning_payload["dag_task_index"] = dag_task_index
+                current_batch.append(
+                    "TOOL_RESULT " + json.dumps(reasoning_payload, ensure_ascii=False, default=str)
+                )
+            _append_file_evidence(msg)
             continue
 
         if role == "USER":
             current_batch.append(text)
+            _append_file_evidence(msg)
             continue
 
         if role == "TOOL":
@@ -905,11 +930,116 @@ def build_verifier_context_messages(  # noqa: C901
                 continue
 
             current_batch.append(tool_text)
+            _append_file_evidence(msg)
 
     current_batch.append("Evaluate the agent's progress as JSON.")
     _flush_batch()
 
     return messages
+
+
+def _verifier_file_evidence_key(msg: Dict[str, Any]) -> str:
+    message_id = msg.get("message_id") or msg.get("id")
+    if message_id:
+        return str(message_id)
+    return str(id(msg))
+
+
+def _file_pointers_from_message(msg: Dict[str, Any]) -> List[FilePointer]:
+    metadata = msg.get("metadata", {}) or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    attachments_data: List[Any] = []
+    file_pointer = msg.get("file_pointer") or msg.get("filePointer")
+    if isinstance(file_pointer, dict):
+        attachments_data.append(file_pointer)
+
+    metadata_attachments = metadata.get("attachments")
+    if isinstance(metadata_attachments, list):
+        attachments_data.extend(metadata_attachments)
+
+    file_pointers: List[FilePointer] = []
+    seen: set[str] = set()
+    for item in attachments_data:
+        if not isinstance(item, dict):
+            continue
+        fp = FilePointer.from_dict(item)
+        if not fp.id or not fp.storage_path or fp.id in seen:
+            continue
+        seen.add(fp.id)
+        file_pointers.append(fp)
+    return file_pointers
+
+
+def _verifier_file_metadata(fp: FilePointer) -> Dict[str, Any]:
+    return {
+        "id": fp.id,
+        "storage_path": fp.storage_path,
+        "original_filename": fp.original_filename,
+        "mime_type": fp.mime_type,
+        "size_bytes": fp.size_bytes,
+        "created_at": fp.created_at,
+    }
+
+
+async def _resolve_verifier_file_evidence(
+    context: List[Dict[str, Any]],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Resolve small readable file pointers into verifier-visible tool evidence.
+
+    This mirrors the main-agent attachment loading policy: use the module cache
+    first, download only from activity context, inline small text files, and
+    fall back to metadata for large/binary/unavailable files.
+    """
+    evidence_by_message: Dict[str, List[Dict[str, Any]]] = {}
+    for msg in context:
+        if not isinstance(msg, dict) or is_internal_subagent_message(msg):
+            continue
+        if msg.get("role") == "SYSTEM":
+            continue
+
+        payloads: List[Dict[str, Any]] = []
+        for fp in _file_pointers_from_message(msg):
+            result_text = build_attachment_metadata_text(fp)
+            content_inlined = False
+
+            if fp.is_small_enough_for_llm() and fp.can_be_read_by_llm():
+                file_content = None
+                cached = get_cached_file(fp.id)
+                if cached:
+                    file_content = cached[0]
+                elif activity.in_activity():
+                    try:
+                        file_content, _ = await get_file_from_pointer(fp)
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to resolve verifier attachment",
+                            file_id=fp.id,
+                            filename=fp.original_filename,
+                            error=str(e),
+                        )
+
+                if file_content is not None and fp.is_text():
+                    try:
+                        text_content = file_content.decode("utf-8")
+                        result_text = f"[File: {fp.original_filename}]\n```\n{text_content}\n```"
+                        content_inlined = True
+                    except UnicodeDecodeError:
+                        result_text = build_attachment_metadata_text(fp)
+
+            payloads.append(
+                {
+                    "tool_name": "artifact_file",
+                    "artifact": _verifier_file_metadata(fp),
+                    "content_inlined": content_inlined,
+                    "result": result_text,
+                }
+            )
+
+        if payloads:
+            evidence_by_message[_verifier_file_evidence_key(msg)] = payloads
+    return evidence_by_message
 
 
 def _message_phase(msg: Dict[str, Any]) -> Optional[str]:
@@ -4293,7 +4423,12 @@ async def check_progress(  # noqa: C901
             **(dump_extra or {}),
         }
 
-        messages = build_verifier_context_messages(context, system_prompt)
+        verifier_file_evidence = await _resolve_verifier_file_evidence(context)
+        messages = build_verifier_context_messages(
+            context,
+            system_prompt,
+            verifier_file_evidence_by_message=verifier_file_evidence,
+        )
 
         # Resolve context pointers
         messages = await resolve_pointers_in_messages(messages, local_context=context)

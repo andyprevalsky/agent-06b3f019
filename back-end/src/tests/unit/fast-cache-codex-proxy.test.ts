@@ -90,6 +90,10 @@ async function main(): Promise<void> {
     );
     assert.strictEqual(r.servedFromCache, false);
     assert.strictEqual(r.wrote, true);
+    assert.strictEqual(r.cacheable, true);
+    assert.strictEqual(r.readEnabled, true);
+    assert.strictEqual(r.ordinal, 0);
+    assert.strictEqual(r.cacheKey, codeAgentSlotKey('codex', 'ghash', 0));
     assert.strictEqual(h.store.size, 1);
     assert.match(r.body, /response\.output_text\.delta/);
   });
@@ -153,6 +157,10 @@ async function main(): Promise<void> {
       }
     );
     assert.strictEqual(r.servedFromCache, true);
+    assert.strictEqual(r.cacheable, true);
+    assert.strictEqual(r.readEnabled, true);
+    assert.strictEqual(r.ordinal, 0);
+    assert.strictEqual(r.cacheKey, codeAgentSlotKey('codex', 'ghash', 0));
     assert.strictEqual(upstream, 0);
     assert.match(r.body, /"cached":true/);
   });
@@ -361,6 +369,10 @@ async function main(): Promise<void> {
     );
     assert.strictEqual(r.servedFromCache, false);
     assert.strictEqual(r.wrote, true);
+    assert.strictEqual(r.cacheable, true);
+    assert.strictEqual(r.readEnabled, false);
+    assert.strictEqual(r.ordinal, 0);
+    assert.strictEqual(r.cacheKey, codeAgentSlotKey('codex', 'ghash', 0));
     assert.strictEqual(h.stats.cacheGets, 0);
     assert.strictEqual(h.stats.upstream, 1);
     assert.match(r.body, /response\.output_text\.delta/);

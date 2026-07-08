@@ -9,7 +9,12 @@ RUN apt-get update && apt-get install -y \
     g++ \
     curl \
     git \
+    nodejs \
+    npm \
     && rm -rf /var/lib/apt/lists/*
+
+# Needed by helpers/e2b_log_collector.py for retained sandbox stdout/stderr logs.
+RUN npm install -g @e2b/cli@2.13.0 && npm cache clean --force
 
 # Copy requirements first for better caching
 COPY requirements.txt .

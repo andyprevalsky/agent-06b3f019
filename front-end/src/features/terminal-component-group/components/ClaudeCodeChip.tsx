@@ -44,6 +44,8 @@ export default function ClaudeCodeChip({
         outputSchema={vm.outputSchema}
         githubRepoUrl={vm.githubRepoUrl}
         codeProvider={vm.codeProvider}
+        turnCount={vm.turnCount}
+        terminalTranscript={vm.terminalTranscript}
         terminalContainerRef={vm.fullscreenContainerRef}
         onClose={vm.closeFullscreen}
       />
@@ -60,6 +62,8 @@ export default function ClaudeCodeChip({
         failureMessage={vm.failureMessage}
         githubRepoUrl={vm.githubRepoUrl}
         codeProvider={vm.codeProvider}
+        turnCount={vm.turnCount}
+        terminalTranscript={vm.terminalTranscript}
         terminalContainerRef={vm.terminalContainerRef}
         onToggleExpand={vm.toggleExpand}
         onMaximize={vm.openFullscreen}
@@ -74,6 +78,7 @@ export default function ClaudeCodeChip({
         outputSchema={vm.outputSchema}
         githubRepoUrl={vm.githubRepoUrl}
         codeProvider={vm.codeProvider}
+        turnCount={vm.turnCount}
         terminalContainerRef={vm.terminalContainerRef}
         onMaximize={vm.openFullscreen}
       />
@@ -86,6 +91,7 @@ export default function ClaudeCodeChip({
       outputSchema={vm.outputSchema}
       githubRepoUrl={vm.githubRepoUrl}
       codeProvider={vm.codeProvider}
+      turnCount={vm.turnCount}
       terminalContainerRef={vm.terminalContainerRef}
       onMaximize={vm.openFullscreen}
     />

@@ -1,5 +1,6 @@
 """Blackbox tests for benchmark helpers."""
 
+import json
 from pathlib import Path
 
 from _test_utils import BlackboxResult
@@ -3277,6 +3278,7 @@ def test_local_benchmark_checkpoint_flags_parse_for_any_task():
     assert args.checkpoint == 7
     assert args.checkpoint_source_json == ".context/checkpoints/chat.json"
     assert args.checkpoint_no_start is True
+    assert args.checkpoint_boundary == "for-each-finished"
     assert local_bench.checkpoint_requested(args) is True
 
 
@@ -3325,7 +3327,73 @@ def test_local_benchmark_checkpoint_can_generate_source_from_task():
     command = calls[0]
     assert "benchmarks/run_benchmark.py" in command
     assert command[command.index("--checkpoint-source-index") + 1] == "7"
+    assert command[command.index("--checkpoint-source-boundary") + 1] == "for-each-finished"
+    assert command[command.index("--checkpoint-source-price-limit-cents") + 1] == "5000"
+    assert command[command.index("--timeout-seconds") + 1] == "900"
     assert "--checkpoint-source-out" in command
+
+
+def test_local_benchmark_checkpoint_for_each_boundary_resolves_through_index():
+    """A durable for_each boundary before a high requested index becomes the clone index."""
+    import tempfile
+    from pathlib import Path
+
+    from benchmarks import local as local_bench
+
+    args = local_bench.parse_args(["chat-mode", "--checkpoint", "500"])
+    with tempfile.TemporaryDirectory() as tmp:
+        source_json = Path(tmp) / "source.json"
+        source_json.write_text(
+            json.dumps(
+                {
+                    "messages": [
+                        {"role": "TOOL", "metadata": {"toolName": "seed", "toolStatus": "FINISHED"}},
+                        {
+                            "role": "TOOL",
+                            "metadata": {
+                                "toolName": "spawn_general_purpose_agent_for_each",
+                                "toolStatus": "FINISHED",
+                            },
+                        },
+                        {"role": "TOOL", "metadata": {"toolName": "later", "toolStatus": "FINISHED"}},
+                    ]
+                }
+            )
+        )
+
+        assert local_bench.checkpoint_through_index(source_json, args) == 1
+
+
+def test_local_benchmark_checkpoint_message_index_can_bypass_for_each_boundary():
+    """Raw index mode remains available for exact transcript cuts."""
+    import tempfile
+    from pathlib import Path
+
+    from benchmarks import local as local_bench
+
+    args = local_bench.parse_args(
+        ["chat-mode", "--checkpoint", "2", "--checkpoint-boundary", "message-index"]
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        source_json = Path(tmp) / "source.json"
+        source_json.write_text(
+            json.dumps(
+                {
+                    "messages": [
+                        {
+                            "role": "TOOL",
+                            "metadata": {
+                                "toolName": "spawn_general_purpose_agent_for_each",
+                                "toolStatus": "FINISHED",
+                            },
+                        },
+                        {"role": "TOOL", "metadata": {"toolName": "later", "toolStatus": "FINISHED"}},
+                    ]
+                }
+            )
+        )
+
+        assert local_bench.checkpoint_through_index(source_json, args) == 2
 
 
 def test_local_benchmark_checkpoint_accepts_legacy_aliases():
@@ -3555,6 +3623,14 @@ async def run_all_tests():
     r.record("local_parse_args_rejects_invalid_concurrency", test_local_parse_args_rejects_invalid_concurrency)
     r.record("local_checkpoint_flags_parse_for_any_task", test_local_benchmark_checkpoint_flags_parse_for_any_task)
     r.record("local_checkpoint_generates_source", test_local_benchmark_checkpoint_can_generate_source_from_task)
+    r.record(
+        "local_checkpoint_for_each_boundary_resolves_through_index",
+        test_local_benchmark_checkpoint_for_each_boundary_resolves_through_index,
+    )
+    r.record(
+        "local_checkpoint_message_index_can_bypass_for_each_boundary",
+        test_local_benchmark_checkpoint_message_index_can_bypass_for_each_boundary,
+    )
     r.record("local_checkpoint_accepts_legacy_aliases", test_local_benchmark_checkpoint_accepts_legacy_aliases)
     r.record(
         "local_checkpoint_options_require_checkpoint_mode",

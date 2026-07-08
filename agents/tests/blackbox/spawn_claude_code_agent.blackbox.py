@@ -9,7 +9,7 @@ import asyncio
 import json
 import os
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from _test_utils import (
     BlackboxResult,
@@ -1532,6 +1532,37 @@ async def test_run_agentic_loop_connect_fail_raises():
             assert "Failed to connect" in str(e)
 
 
+def test_log_code_agent_event_promotes_codex_fast_cache_request():
+    """Codex proxy events are promoted into worker logs with cache details."""
+    from domains.spawn_claude_code_agent import service
+
+    fake_logger = MagicMock()
+    with patch.object(service, "logger", fake_logger):
+        service._log_code_agent_event(
+            {
+                "version": 1,
+                "provider": "codex",
+                "type": "fast_cache_proxy_request",
+                "method": "POST",
+                "path": "/backend-api/codex/responses",
+                "status": 200,
+                "cache": "miss",
+            },
+            agent_id="agent-1",
+            task_id="task-1",
+            sandbox_id="sandbox-1",
+        )
+
+    fake_logger.info.assert_called_once()
+    args, kwargs = fake_logger.info.call_args
+    assert args[0] == "[ClaudeCode] Codex Fast Mode proxy request"
+    assert kwargs["agent_id"] == "agent-1"
+    assert kwargs["task_id"] == "task-1"
+    assert kwargs["sandbox_id"] == "sandbox-1"
+    assert kwargs["path"] == "/backend-api/codex/responses"
+    assert kwargs["cache"] == "miss"
+
+
 # ── spawn_claude_code_activity ───────────────────────────────────────
 
 
@@ -2119,6 +2150,7 @@ async def run_all_tests():
     # _run_agentic_loop
     await r.record_async("run_agentic_loop_exit_zero", test_run_agentic_loop_exit_zero_completes)
     await r.record_async("run_agentic_loop_connect_fail", test_run_agentic_loop_connect_fail_raises)
+    r.record("log_codex_fast_cache_event", test_log_code_agent_event_promotes_codex_fast_cache_request)
     # spawn_claude_code_activity
     await r.record_async("spawn_activity_requires_schema", test_spawn_activity_requires_output_schema)
     await r.record_async("spawn_activity_happy", test_spawn_activity_happy_path_end_to_end)

@@ -3281,6 +3281,112 @@ def test_build_verifier_context_messages_formats_camelcase_structured_response()
     assert "fallback text" not in content
 
 
+def test_build_verifier_context_messages_includes_only_dag_reasoning_assistant_rows():
+    """Verifier sees DAG reasoning outputs but not ordinary assistant narration."""
+    from helpers.llm import build_verifier_context_messages
+
+    ctx = [
+        {
+            "role": "ASSISTANT",
+            "text": "ordinary assistant narration should stay hidden",
+            "metadata": {},
+            "timestamp": "2026-07-08T00:00:00Z",
+        },
+        {
+            "role": "ASSISTANT",
+            "text": "thirty hook-tested openings",
+            "metadata": {
+                "plannedToolName": "reasoning",
+                "dagTaskIndex": 4,
+                "streamId": "dag-reasoning-4",
+            },
+            "timestamp": "2026-07-08T00:00:01Z",
+        },
+    ]
+
+    msgs = build_verifier_context_messages(ctx, "system")
+    content = msgs[-1]["content"]
+
+    assert '"tool_name": "reasoning"' in content
+    assert '"result": "thirty hook-tested openings"' in content
+    assert '"dag_task_index": 4' in content
+    assert "ordinary assistant narration should stay hidden" not in content
+    assert "plannedToolName" not in content
+    assert "streamId" not in content
+
+
+def test_build_verifier_context_messages_includes_assistant_file_evidence_without_assistant_text():
+    """Verifier sees assistant file-output evidence without ordinary assistant narration."""
+    from helpers.llm import build_verifier_context_messages
+
+    ctx = [
+        {
+            "role": "ASSISTANT",
+            "message_id": "file-msg-1",
+            "text": "ordinary assistant narration should stay hidden",
+            "file_pointer": {
+                "id": "file-1",
+                "storage_path": "user/file-1_calendar.csv",
+                "original_filename": "calendar.csv",
+                "mime_type": "text/csv",
+                "size_bytes": 31,
+                "created_at": "2026-07-08T00:00:00Z",
+            },
+            "metadata": {},
+            "timestamp": "2026-07-08T00:00:00Z",
+        }
+    ]
+    evidence = {
+        "file-msg-1": [
+            {
+                "tool_name": "artifact_file",
+                "artifact": {"original_filename": "calendar.csv", "mime_type": "text/csv"},
+                "content_inlined": True,
+                "result": "[File: calendar.csv]\n```\ndate,platform\n2026-07-06,YouTube\n```",
+            }
+        ]
+    }
+
+    msgs = build_verifier_context_messages(ctx, "system", verifier_file_evidence_by_message=evidence)
+    content = msgs[-1]["content"]
+
+    assert '"tool_name": "artifact_file"' in content
+    assert "calendar.csv" in content
+    assert "2026-07-06,YouTube" in content
+    assert "ordinary assistant narration should stay hidden" not in content
+
+
+async def test_resolve_verifier_file_evidence_uses_cached_text_file_content():
+    """Verifier artifact evidence uses the same cached file path as main-agent attachment loading."""
+    from helpers.llm import _resolve_verifier_file_evidence
+
+    ctx = [
+        {
+            "role": "ASSISTANT",
+            "message_id": "file-msg-2",
+            "text": "",
+            "file_pointer": {
+                "id": "file-2",
+                "storage_path": "user/file-2_calendar.csv",
+                "original_filename": "calendar.csv",
+                "mime_type": "text/csv",
+                "size_bytes": 31,
+                "created_at": "2026-07-08T00:00:00Z",
+            },
+            "metadata": {},
+        }
+    ]
+
+    with patch("helpers.llm.get_cached_file", return_value=(b"date,platform\n2026-07-06,YouTube\n", {})):
+        evidence = await _resolve_verifier_file_evidence(ctx)
+
+    payload = evidence["file-msg-2"][0]
+    assert payload["tool_name"] == "artifact_file"
+    assert payload["content_inlined"] is True
+    assert payload["artifact"]["original_filename"] == "calendar.csv"
+    assert "2026-07-06,YouTube" in payload["result"]
+
+
 async def test_build_verifier_context_messages_self_closes_trailing_refs():
     """Verifier context should not expand terminal message refs inside JSON/batches."""
     from helpers.context_pointers import resolve_pointers_in_messages
@@ -5508,6 +5614,18 @@ async def run_all_tests():
     r.record(
         "verifier_ctx_camelcase_structured_response",
         test_build_verifier_context_messages_formats_camelcase_structured_response,
+    )
+    r.record(
+        "verifier_ctx_dag_reasoning_assistant_rows",
+        test_build_verifier_context_messages_includes_only_dag_reasoning_assistant_rows,
+    )
+    r.record(
+        "verifier_ctx_assistant_file_evidence",
+        test_build_verifier_context_messages_includes_assistant_file_evidence_without_assistant_text,
+    )
+    await r.record_async(
+        "verifier_file_evidence_cached_text",
+        test_resolve_verifier_file_evidence_uses_cached_text_file_content,
     )
     await r.record_async(
         "verifier_ctx_self_closes_trailing_refs",
