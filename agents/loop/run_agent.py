@@ -1316,6 +1316,42 @@ async def run_agent(  # noqa: C901
         # 11. Execute tool calls (tool_calls is always List[dict] at this point)
         # Execute regular tools in parallel
         if processed_tools and execute_tool:
+            if is_inside_temporal_activity and fast_mode_cache_enabled:
+                try:
+                    from providers.fast_cache import client as fast_cache_client
+                    from providers.fast_cache import normalize as fast_cache_normalize
+                    from providers.fast_cache.context import current_context
+                    from tools.web_search.config import DEFAULT_MAX_TOKENS as WEB_SEARCH_DEFAULT_MAX_TOKENS
+
+                    ctx = current_context()
+                    prewarm_goal = goal_text or (ctx.goal if ctx is not None else None)
+                    prewarm_keys = []
+                    if prewarm_goal:
+                        for tool_name, tool_args, _tool_call_id in processed_tools:
+                            if tool_name == "web_search":
+                                prewarm_keys.append(
+                                    fast_cache_normalize.web_search_key(
+                                        prewarm_goal,
+                                        str(tool_args.get("query", "")),
+                                        tool_args.get("max_tokens", WEB_SEARCH_DEFAULT_MAX_TOKENS),
+                                    )
+                                )
+                            elif tool_name == "web_fetch":
+                                prewarm_keys.append(
+                                    fast_cache_normalize.web_fetch_key(
+                                        prewarm_goal,
+                                        str(tool_args.get("url", "")),
+                                    )
+                                )
+                    if prewarm_keys:
+                        await fast_cache_client.prefetch_cache_records(prewarm_keys, reason="tool_dispatch")
+                except Exception as exc:
+                    logger.warning(
+                        "fast_cache.tool_prewarm_failed",
+                        agent_id=agent_id,
+                        iteration=iteration,
+                        error=str(exc)[:200],
+                    )
 
             async def execute_single_tool(tool_name: str, tool_args: dict, tool_call_id: str):
                 """Execute a single tool and return result with metadata."""

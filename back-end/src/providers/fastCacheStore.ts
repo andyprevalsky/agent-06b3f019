@@ -7,6 +7,7 @@ import { withSpan } from './tracing';
 
 const globalForFastCachePrisma = global as unknown as {
   fastCacheMemory?: Map<string, FastCacheMemoryEntry>;
+  fastCacheInFlightReads?: Map<string, InFlightFastCacheRead>;
   fastCachePrisma?: PrismaClient;
 };
 
@@ -14,6 +15,12 @@ interface FastCacheMemoryEntry {
   expiresAt: number;
   goalHash: string;
   result: CacheGetResult;
+}
+
+interface InFlightFastCacheRead {
+  promise: Promise<CacheGetResult>;
+  resolve: (result: CacheGetResult) => void;
+  reject: (error: unknown) => void;
 }
 
 const MEMORY_CACHE_TTL_MS = Number(process.env.FAST_CACHE_MEMORY_TTL_MS ?? '300000');
@@ -24,6 +31,13 @@ function getMemoryCache(): Map<string, FastCacheMemoryEntry> {
     globalForFastCachePrisma.fastCacheMemory = new Map();
   }
   return globalForFastCachePrisma.fastCacheMemory;
+}
+
+function getInFlightReads(): Map<string, InFlightFastCacheRead> {
+  if (!globalForFastCachePrisma.fastCacheInFlightReads) {
+    globalForFastCachePrisma.fastCacheInFlightReads = new Map();
+  }
+  return globalForFastCachePrisma.fastCacheInFlightReads;
 }
 
 function memoryCacheEnabled(): boolean {
@@ -144,18 +158,16 @@ export interface CacheGetResult {
   blobPath: string | null;
 }
 
-export async function cacheGet(key: string): Promise<CacheGetResult> {
-  const cached = readMemoryCache(key);
-  if (cached) return cached;
+interface FastCacheReadRow {
+  key: string;
+  value: unknown;
+  blobPath: string | null;
+  goalHash: string;
+}
 
-  const row = await fastCachePrisma.fastModeCacheEntry.findUnique({
-    where: { key },
-    select: { value: true, blobPath: true, goalHash: true },
-  });
-  if (row === null) return { hit: false, value: null, blobPath: null };
-  const result = { hit: true, value: row.value, blobPath: row.blobPath };
-  writeMemoryCache(key, row.goalHash, result);
-  return result;
+export async function cacheGet(key: string): Promise<CacheGetResult> {
+  const results = await cacheGetMany([key]);
+  return results[key] ?? { hit: false, value: null, blobPath: null };
 }
 
 export async function cacheGetMany(keys: string[]): Promise<Record<string, CacheGetResult>> {
@@ -182,36 +194,99 @@ export async function cacheGetMany(keys: string[]): Promise<Record<string, Cache
 
   if (missedKeys.length === 0) return result;
 
-  const dbSpanMeta: Record<string, unknown> = {
-    missed_key_count: missedKeys.length,
-    row_count: 0,
-  };
-  const rows = await withSpan('fast_cache.prisma_find_many', dbSpanMeta, async () => {
-    const rows = await fastCachePrisma.fastModeCacheEntry.findMany({
-      where: { key: { in: missedKeys } },
-      select: { key: true, value: true, blobPath: true, goalHash: true },
-    });
-    dbSpanMeta.row_count = rows.length;
-    return rows;
-  });
-
+  const inFlight = getInFlightReads();
+  const keysToFetch: string[] = [];
+  const waits: Promise<void>[] = [];
   await withSpan(
-    'fast_cache.result_build',
-    { missed_key_count: missedKeys.length, row_count: rows.length },
+    'fast_cache.singleflight_claim',
+    { missed_key_count: missedKeys.length },
     async () => {
-      const byKey = new Map(rows.map((row) => [row.key, row]));
       for (const key of missedKeys) {
-        const row = byKey.get(key);
-        if (row === undefined) {
-          result[key] = { hit: false, value: null, blobPath: null };
-        } else {
-          const hit = { hit: true, value: row.value, blobPath: row.blobPath };
-          result[key] = hit;
-          writeMemoryCache(key, row.goalHash, hit);
+        const existing = inFlight.get(key);
+        if (existing) {
+          waits.push(
+            existing.promise.then((value) => {
+              result[key] = cloneCacheResult(value);
+            })
+          );
+          continue;
         }
+
+        let resolve!: (value: CacheGetResult) => void;
+        let reject!: (error: unknown) => void;
+        const promise = new Promise<CacheGetResult>((res, rej) => {
+          resolve = res;
+          reject = rej;
+        });
+        inFlight.set(key, { promise, resolve, reject });
+        keysToFetch.push(key);
       }
     }
   );
+
+  const waitPromise =
+    waits.length > 0
+      ? withSpan('fast_cache.singleflight_wait', { waiter_count: waits.length }, async () => {
+          await Promise.all(waits);
+        })
+      : Promise.resolve();
+
+  if (keysToFetch.length === 0) {
+    await waitPromise;
+    return result;
+  }
+
+  const dbSpanMeta: Record<string, unknown> = {
+    missed_key_count: keysToFetch.length,
+    row_count: 0,
+  };
+  let rows: FastCacheReadRow[] = [];
+  try {
+    rows = await withSpan('fast_cache.prisma_find_many', dbSpanMeta, async () => {
+      const rows = await fastCachePrisma.fastModeCacheEntry.findMany({
+        where: { key: { in: keysToFetch } },
+        select: { key: true, value: true, blobPath: true, goalHash: true },
+      });
+      dbSpanMeta.row_count = rows.length;
+      return rows;
+    });
+
+    await withSpan(
+      'fast_cache.result_build',
+      { missed_key_count: keysToFetch.length, row_count: rows.length },
+      async () => {
+        const byKey = new Map(rows.map((row) => [row.key, row]));
+        for (const key of keysToFetch) {
+          const entry = inFlight.get(key);
+          if (!entry) continue;
+          const row = byKey.get(key);
+          let cacheResult: CacheGetResult;
+          if (row === undefined) {
+            cacheResult = { hit: false, value: null, blobPath: null };
+          } else {
+            cacheResult = { hit: true, value: row.value, blobPath: row.blobPath };
+            writeMemoryCache(key, row.goalHash, cacheResult);
+          }
+          result[key] = cloneCacheResult(cacheResult);
+          entry.resolve(cloneCacheResult(cacheResult));
+          inFlight.delete(key);
+        }
+      }
+    );
+  } catch (error) {
+    for (const key of keysToFetch) {
+      const entry = inFlight.get(key);
+      if (entry) {
+        entry.reject(error);
+        inFlight.delete(key);
+      }
+    }
+    if (waits.length > 0) {
+      await Promise.allSettled(waits);
+    }
+    throw error;
+  }
+  await waitPromise;
   return result;
 }
 
