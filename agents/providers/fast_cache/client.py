@@ -281,12 +281,14 @@ async def _archive_cache_write(
             return
         key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
 
+        span_id = current_span_id()
+
         def payload() -> dict[str, Any]:
             return {
                 "key": key,
                 "kind": kind,
                 "goal_hash": goal_hash,
-                "span_id": current_span_id(),
+                "span_id": span_id,
                 "blob_path": blob_path,
                 "value": value,
             }
@@ -316,6 +318,7 @@ async def _archive_cache_read(
         if not root_agent_id:
             return
         key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        span_id = current_span_id()
 
         def payload() -> dict[str, Any]:
             sanitized_value = normalize.strip_secrets(value)
@@ -326,7 +329,7 @@ async def _archive_cache_read(
                 "hit": hit,
                 "status": status,
                 "error": error,
-                "span_id": current_span_id(),
+                "span_id": span_id,
                 "blob_path": blob_path,
                 "value": sanitized_value,
             }

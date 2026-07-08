@@ -12,7 +12,15 @@ const log = createLogger('Broadcast');
 // Use SUPABASE_URL env var, fallback to production URL (matches agent worker behavior)
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://kzlurqihzaolhzsbkctf.supabase.co';
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const BROADCAST_BATCH_SIZE = Math.max(1, Number(process.env.SUPABASE_BROADCAST_BATCH_SIZE || 100));
+function finiteEnvNumber(value: string | undefined, fallback: number): number {
+  const parsed = Number(value ?? fallback);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+const BROADCAST_BATCH_SIZE = Math.max(
+  1,
+  finiteEnvNumber(process.env.SUPABASE_BROADCAST_BATCH_SIZE, 100)
+);
 const BROADCAST_FLUSH_DELAY_MS = Math.max(
   0,
   Number(process.env.SUPABASE_BROADCAST_FLUSH_DELAY_MS || 10)

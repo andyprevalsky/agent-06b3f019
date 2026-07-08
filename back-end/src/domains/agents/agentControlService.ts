@@ -15,7 +15,12 @@ export { updateAgentConfig } from './agentConfigService';
 
 const log = createLogger('Agents');
 const TERMINAL_STATUSES = new Set(['COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED']);
-const IRREVERSIBLE_STATUSES = new Set(['COMPLETED', 'FAILED', 'OUT_OF_CREDITS']);
+const IRREVERSIBLE_STATUSES = new Set([
+  'COMPLETED',
+  'FAILED',
+  'OUT_OF_CREDITS',
+  'COST_LIMIT_REACHED',
+]);
 const NON_TERMINAL_STATUSES = new Set(['STARTING_UP', 'ACTIVE', 'PAUSED']);
 
 // ---------------------------------------------------------------------------

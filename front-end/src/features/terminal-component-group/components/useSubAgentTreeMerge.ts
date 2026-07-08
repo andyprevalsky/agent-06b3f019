@@ -258,12 +258,23 @@ function buildMergedMessages(
     };
     const idsKey = group.ids.join(',');
 
+    const merged = { ...msg, metadata: { ...msg.metadata, subAgentIds: group.ids } };
     const cached = prevCache.get(key);
-    if (cached && (cached.metadata?.subAgentIds as string[])?.join(',') === idsKey) {
+    const cacheMatchesCurrentMessage =
+      cached &&
+      cached.content === merged.content &&
+      cached.role === merged.role &&
+      cached.metadata?.toolStatus === merged.metadata?.toolStatus &&
+      cached.metadata?.toolCallId === merged.metadata?.toolCallId &&
+      cached.metadata?.busId === merged.metadata?.busId &&
+      cached.metadata?.spawnGroupId === merged.metadata?.spawnGroupId &&
+      cached.metadata?.forEachAggregate === merged.metadata?.forEachAggregate &&
+      (cached.metadata?.subAgentIds as string[])?.join(',') === idsKey;
+
+    if (cacheMatchesCurrentMessage) {
       result.push(cached);
       newCache.set(key, cached);
     } else {
-      const merged = { ...msg, metadata: { ...msg.metadata, subAgentIds: group.ids } };
       result.push(merged);
       newCache.set(key, merged);
     }
