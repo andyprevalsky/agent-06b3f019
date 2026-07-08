@@ -66,6 +66,7 @@ async def execute_reasoning(
     gpt_token_source: str | None = None,
     gpt_token_pool_id: str | None = None,
     gpt_token_user_id: str | None = None,
+    system_prompt_text: str | None = None,
 ) -> dict[str, Any]:
     """Execute a reasoning task using LLM with streaming.
 
@@ -83,7 +84,7 @@ async def execute_reasoning(
     Returns:
         Dict with 'content' string and 'usage' dict for cost tracking
     """
-    system_prompt = build_system_prompt(goal)
+    system_prompt = system_prompt_text or build_system_prompt(goal)
     messages = await build_reasoning_messages(context, system_prompt, goal)
 
     if heartbeat_fn:
@@ -128,6 +129,7 @@ async def execute_reasoning(
         response_model=ReasoningResponse,
         on_chunk=on_chunk,
         agent_id=agent_id,
+        skip_cache_write=True,
         call_site="dag_reasoning",
         claude_token=claude_token,
         claude_token_source=claude_token_source,

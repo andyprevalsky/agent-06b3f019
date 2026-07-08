@@ -495,8 +495,6 @@ def _check_role_alternation(openai_msgs: List[Dict]) -> List[ContextViolation]:
 
     Exceptions:
     - Verifier TOOL messages converted to assistant role for context.
-    - DAG reasoning output posted as a standalone ASSISTANT row by dag_executor.
-      A [dag-reasoning→assistant, LLM→assistant] pair is expected, not corruption.
     - Text-only ASSISTANT (no tool_calls) followed by a tool-calling ASSISTANT.
       When the LLM writes a reasoning/acknowledgement message before calling tools,
       run_agent posts two consecutive ASSISTANT rows. build_llm_messages merges them

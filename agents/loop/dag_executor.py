@@ -335,13 +335,19 @@ class TaskDAG:
         dependencies = plan_data.get("dependencies", {})
 
         for i, task_data in enumerate(raw_tasks):
-            # Handle both old format (string) and new format (dict)
             if isinstance(task_data, str):
-                goal = task_data
-                tool_name = "reasoning"  # Default if no tool specified
-            else:
-                goal = task_data.get("goal", "")
-                tool_name = task_data.get("tool_name", "reasoning")
+                raise ValueError(
+                    f"Plan task {i} must be an object with explicit goal and tool_name; "
+                    "string tasks are not supported"
+                )
+            if not isinstance(task_data, dict):
+                raise ValueError(f"Plan task {i} must be an object, got {type(task_data).__name__}")
+
+            goal = task_data.get("goal", "")
+            tool_name = task_data.get("tool_name")
+            if not isinstance(tool_name, str) or not tool_name.strip():
+                raise ValueError(f"Plan task {i} missing required tool_name")
+            tool_name = tool_name.strip()
 
             # Get dependencies for this task index
             deps = dependencies.get(str(i), [])
@@ -688,8 +694,8 @@ async def _execute_single_task(
             # Emit an IN_PROGRESS DB row so external monitors (and the FE) can see
             # the reasoning task started. Without this, the parent agent appears
             # silent for the full reasoning duration — frontend/benchmark stall
-            # detectors interpret that as a hung agent. The reasoning activity
-            # itself only writes a single ASSISTANT row at the end.
+            # detectors interpret that as a hung agent. The final reasoning
+            # result is merged below as a normal ASSISTANT turn.
             await handle_tool_event_fn(
                 ToolEvent(
                     type=EventType.POST_MESSAGE,
@@ -729,6 +735,7 @@ async def _execute_single_task(
                 user_id,
                 # Fast Mode: reasoning keys by canonical request fingerprint.
                 task.index,
+                system_prompt_text,
             ]
             # Fail fast if context has grown past Temporal's 2 MiB payload limit —
             # otherwise the workflow-task encoder loops silently on replay.
@@ -786,19 +793,7 @@ async def _execute_single_task(
                     except Exception as e:
                         workflow.logger.warning(f"on_tokens failed for dag_reasoning: {e}")
 
-            await handle_tool_event_fn(
-                ToolEvent(
-                    type=EventType.POST_MESSAGE,
-                    title=DAG_REASONING_FINISHED_TITLE,
-                    message=reasoning_content,
-                    status=MessageStatus.FINISHED,
-                ),
-                tool_call_id,
-                DAG_REASONING_UI_TOOL_NAME,
-            )
-
-            # Post reasoning to DB as ASSISTANT message
-            await post_message(reasoning_content, "ASSISTANT", {"reasoning": True, "dagTaskIndex": task.index})
+            await post_message(reasoning_content, "ASSISTANT", None)
 
             return True
 
@@ -939,17 +934,23 @@ async def _execute_single_task(
         # Extract actual error message (unwrap Temporal's ActivityError wrapper)
         error_msg = extract_error_message(e)
         workflow.logger.error(f"[DAG] Task {task.index} error: {error_msg}", exc_info=True)
+        error_tool_name = (
+            DAG_REASONING_UI_TOOL_NAME if task.tool_name == "reasoning" else task.tool_name
+        )
+        error_title = (
+            DAG_REASONING_FINISHED_TITLE if task.tool_name == "reasoning" else task.tool_name
+        )
 
         # Post error via handle_tool_event (adds to context)
         await handle_tool_event_fn(
             ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title=task.tool_name,
+                title=error_title,
                 message=f"Error: {error_msg}",
                 status=MessageStatus.ERROR,
             ),
             tool_call_id,
-            task.tool_name,
+            error_tool_name,
         )
 
         return False

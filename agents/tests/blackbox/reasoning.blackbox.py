@@ -85,8 +85,12 @@ async def test_execute_reasoning_happy_path():
     """execute_reasoning returns content from a mocked LLM."""
     from domains.reasoning import service as rservice
     from activities.reasoning import ReasoningResponse
+    captured_kwargs = {}
+    captured_messages = []
 
     async def fake_llm(messages, **kwargs):
+        captured_kwargs.update(kwargs)
+        captured_messages.extend(messages)
         # Invoke on_chunk to cover streaming branch
         on_chunk = kwargs.get("on_chunk")
         if on_chunk:
@@ -106,9 +110,15 @@ async def test_execute_reasoning_happy_path():
             agent_id="agent-1",
             stream_id="stream-1",
             heartbeat_fn=lambda m: None,
+            system_prompt_text="MAIN SYSTEM PROMPT",
         )
     assert out["content"] == "final analysis"
     assert out["usage"]["input_tokens"] == 10
+    assert captured_kwargs["skip_cache_write"] is True
+    assert captured_kwargs["call_site"] == "dag_reasoning"
+    assert captured_messages[0] == {"role": "system", "content": "MAIN SYSTEM PROMPT"}
+    assert captured_messages[-1]["role"] == "user"
+    assert "Investigate" in captured_messages[-1]["content"]
 
 
 async def test_execute_reasoning_empty_response():

@@ -59,6 +59,8 @@ export async function getAgentTree(busId: string) {
           ? { partial_structured_response: agent.structuredResponse }
           : undefined,
       tree_cost_cents: agent.treeCostCents,
+      created_at: agent.createdAt,
+      updated_at: agent.updatedAt,
     })),
   };
 }

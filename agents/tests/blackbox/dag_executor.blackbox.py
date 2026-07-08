@@ -48,23 +48,37 @@ def test_extract_error_message_empty():
     assert extract_error_message(Exception("")) == "Unknown error"
 
 
-def test_task_dag_parses_string_tasks():
-    """TaskDAG handles old format string tasks with default reasoning tool."""
-    from loop.dag_executor import TaskDAG, TaskState
+def test_task_dag_rejects_string_tasks():
+    """TaskDAG requires explicit tool_name instead of defaulting string tasks to reasoning."""
+    from loop.dag_executor import TaskDAG
 
     plan_data = {
         "tasks": ["Analyze data", "Write summary"],
         "dependencies": {"1": [0]},
         "join": "all",
     }
-    dag = TaskDAG(plan_data)
 
-    assert len(dag.tasks) == 2
-    assert dag.tasks[0].goal == "Analyze data"
-    assert dag.tasks[0].tool_name == "reasoning"
-    assert dag.tasks[1].depends_on == [0]
-    assert dag.join == "all"
-    assert dag.tasks[0].state == TaskState.PENDING
+    try:
+        TaskDAG(plan_data)
+        raise AssertionError("Expected string task to fail")
+    except ValueError as e:
+        assert "explicit goal and tool_name" in str(e)
+
+
+def test_task_dag_rejects_missing_tool_name():
+    """TaskDAG rejects dict tasks without explicit tool_name."""
+    from loop.dag_executor import TaskDAG
+
+    plan_data = {
+        "tasks": [{"goal": "Analyze data"}],
+        "dependencies": {},
+    }
+
+    try:
+        TaskDAG(plan_data)
+        raise AssertionError("Expected missing tool_name to fail")
+    except ValueError as e:
+        assert "missing required tool_name" in str(e)
 
 
 def test_task_dag_parses_dict_tasks():
@@ -425,7 +439,7 @@ async def _run_execute_dag(
 
 
 async def test_execute_dag_reasoning_task_succeeds():
-    """execute_dag runs reasoning task via execute_reasoning_activity and posts ASSISTANT message."""
+    """execute_dag runs reasoning task and merges the result as an assistant turn."""
     plan_data = {
         "tasks": [{"goal": "Summarize findings", "tool_name": "reasoning"}],
         "dependencies": {},
@@ -439,12 +453,12 @@ async def test_execute_dag_reasoning_task_succeeds():
     assistant_posts = [e for e in events if e["type"] == "post_message" and e["role"] == "ASSISTANT"]
     assert len(assistant_posts) == 1
     assert assistant_posts[0]["text"] == "Summary text"
+    assert assistant_posts[0]["metadata"] is None
     thought_events = [e for e in events if e["type"] == "tool_event" and e["tool_name"] == "thought"]
     reasoning_events = [e for e in events if e["type"] == "tool_event" and e["tool_name"] == "reasoning"]
     assert reasoning_events == []
-    assert [e["status"] for e in thought_events] == ["IN_PROGRESS", "FINISHED"]
-    assert [e["title"] for e in thought_events] == ["Thinking", "Thought"]
-    assert len({e["tool_call_id"] for e in thought_events}) == 1
+    assert [e["status"] for e in thought_events] == ["IN_PROGRESS"]
+    assert [e["title"] for e in thought_events] == ["Thinking"]
     assert dag.tasks[0].state.value == "COMPLETED"
 
 
@@ -473,6 +487,7 @@ async def test_execute_dag_reasoning_forwards_gpt_token():
     assert args[10] == "acct-1"
     assert args[11] == "user"
     assert args[13] == "user-1"
+    assert args[-1] == "test system prompt"
 
 
 async def test_execute_dag_tool_task_succeeds():
@@ -751,7 +766,8 @@ async def run_all_tests():
     r.record("extract_error_message_unwraps_generic_wrapper", test_extract_error_message_unwraps_generic_wrapper)
     r.record("extract_error_message_uses_cause_attr", test_extract_error_message_uses_cause_attr)
     r.record("extract_error_message_empty", test_extract_error_message_empty)
-    r.record("task_dag_parses_string_tasks", test_task_dag_parses_string_tasks)
+    r.record("task_dag_rejects_string_tasks", test_task_dag_rejects_string_tasks)
+    r.record("task_dag_rejects_missing_tool_name", test_task_dag_rejects_missing_tool_name)
     r.record("task_dag_parses_dict_tasks", test_task_dag_parses_dict_tasks)
     r.record("task_dag_get_ready_tasks_initial", test_task_dag_get_ready_tasks_initial)
     r.record("task_dag_state_transitions", test_task_dag_state_transitions)

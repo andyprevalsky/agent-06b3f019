@@ -15,6 +15,8 @@
 
 import type { Message } from '../api';
 import type { ExploreStep, WaitForCheck } from '../types';
+import { isInternalLivenessTool, removeCancelledThoughtErrors } from './messageCleanup';
+import { extractLineValue, extractMarkdownParam } from './messageTextParsing';
 
 interface ExploreData {
   repMessageId: string;
@@ -27,31 +29,6 @@ interface ExploreData {
 
 function sortByTimestampAsc(a: Message, b: Message): number {
   return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
-}
-
-function isInternalLivenessTool(message: Message): boolean {
-  return message.role === 'TOOL' && message.metadata?.toolName === 'agent_init';
-}
-
-function stripWrappingQuotes(value: string): string {
-  const trimmed = value.trim();
-  if (
-    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
-    (trimmed.startsWith("'") && trimmed.endsWith("'"))
-  ) {
-    return trimmed.slice(1, -1).trim();
-  }
-  return trimmed;
-}
-
-function extractMarkdownParam(text: string, name: string): string | undefined {
-  const match = text.match(new RegExp(`^- \\*\\*${name}\\*\\*:\\s*(.+)$`, 'im'));
-  return match?.[1] ? stripWrappingQuotes(match[1]) : undefined;
-}
-
-function extractLineValue(text: string, label: string): string | undefined {
-  const match = text.match(new RegExp(`^${label}:\\s*(.+)$`, 'im'));
-  return match?.[1] ? stripWrappingQuotes(match[1]) : undefined;
 }
 
 function formatWebSearchTitle(
@@ -274,9 +251,7 @@ function groupExploreMessages(messages: Message[]): ExploreGrouping {
       fullGoal: (representative.metadata?.fullGoal as string) || undefined,
       message: representative.text || '',
       status: ((representative.metadata?.toolStatus as string) || 'IN_PROGRESS') as
-        | 'IN_PROGRESS'
-        | 'FINISHED'
-        | 'ERROR',
+        'IN_PROGRESS' | 'FINISHED' | 'ERROR',
       steps,
     });
 
@@ -348,7 +323,8 @@ export function deduplicateToolMessages(
 
   const rawWaitForByToolCallId = collectRawWaitFor(sortedMessages);
   const { toolMessages, nonToolMessages } = dedupByToolCallId(sortedMessages);
-  const cleanedTools = cleanOrphanedInProgress(toolMessages, lastAssistantTimestamp);
+  const withoutCancelledThoughts = removeCancelledThoughtErrors(toolMessages);
+  const cleanedTools = cleanOrphanedInProgress(withoutCancelledThoughts, lastAssistantTimestamp);
   const withCompressedPlans = compressSetPlans(cleanedTools);
 
   const explore = groupExploreMessages(withCompressedPlans);

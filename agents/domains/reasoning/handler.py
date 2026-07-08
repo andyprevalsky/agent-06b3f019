@@ -39,6 +39,7 @@ async def execute_reasoning_activity(
     gpt_token_pool_id: str | None = None,
     gpt_token_user_id: str | None = None,
     fast_mode_step: int | None = None,
+    system_prompt_text: str | None = None,
 ) -> dict:
     """Execute a reasoning task using LLM with streaming.
 
@@ -68,6 +69,7 @@ async def execute_reasoning_activity(
             gpt_token_source=gpt_token_source,
             gpt_token_pool_id=gpt_token_pool_id,
             gpt_token_user_id=gpt_token_user_id,
+            system_prompt_text=system_prompt_text,
         )
     except Exception as e:
         logger.error(f"[Reasoning] Error calling LLM: {e}")
