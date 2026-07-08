@@ -799,10 +799,31 @@ PY
 # SAFETY: STOP the machine on EVERY exit (success, failure, error, timeout,
 # Ctrl-C) and always kill the local dashboard proxy. Never destroy on the per-run
 # path — only --destroy removes it. A stopped machine bills only for the volume.
+LOCK_DIR="$ROOT_DIR/.context/cloudbench-controller.lock"
+LOCK_ACQUIRED="0"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    old_pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+    if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+        echo "❌ Another cloud benchmark controller is already running (pid $old_pid)." >&2
+        echo "   Stop that run before starting another one." >&2
+        exit 1
+    fi
+    rm -rf "$LOCK_DIR"
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+        echo "❌ Could not acquire local cloud benchmark controller lock: $LOCK_DIR" >&2
+        exit 1
+    fi
+fi
+LOCK_ACQUIRED="1"
+printf '%s\n' "$$" > "$LOCK_DIR/pid"
+
 STOP_DONE="0"
 stop_on_exit() {
     local ec=$?
     stop_proxy
+    if [ "${LOCK_ACQUIRED:-0}" = "1" ] && [ "$(cat "$LOCK_DIR/pid" 2>/dev/null || true)" = "$$" ]; then
+        rm -rf "$LOCK_DIR"
+    fi
     if [ "$STOP_DONE" != "1" ]; then
         STOP_DONE="1"
         stop_machine "$mid"
