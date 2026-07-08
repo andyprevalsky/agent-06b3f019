@@ -173,6 +173,14 @@ export FLY_API_TOKEN
 
 FLY() { flyctl "$@"; }
 
+request_machine_start() {  # request_machine_start <machine_id>
+    local id="$1"
+
+    # Keep start as a simple foreground flyctl call. Readiness is still gated by
+    # machine_state + ssh_ready below; this helper just requests the transition.
+    FLY machine start "$id" -a "$APP" 2>&1 | sed 's/^/   /' || true
+}
+
 # ── Locate flyctl ────────────────────────────────────────────────────────────
 if ! command -v flyctl >/dev/null 2>&1; then
     if [ -x "$HOME/.fly/bin/flyctl" ]; then
@@ -352,7 +360,7 @@ start_machine() {  # start_machine <id>
         return 0
     fi
     echo "▶️  Starting machine $id ..."
-    FLY machine start "$id" -a "$APP" 2>&1 | sed 's/^/   /' || true
+    request_machine_start "$id" || true
     for _ in $(seq 1 60); do
         st="$(machine_state "$id")"
         [ "$st" = "started" ] && { echo "✅ Machine started"; return 0; }
@@ -836,7 +844,7 @@ trap stop_on_exit EXIT INT TERM
 # Generous timeout: ~10s warm, minutes on a cold image pull. Gate on BOTH the Fly
 # machine state AND a trivial ssh echo (start != ssh-reachable).
 echo "▶️  Starting warm machine $mid ..."
-FLY machine start "$mid" -a "$APP" 2>&1 | sed 's/^/   /' || true
+request_machine_start "$mid" || true
 READY_TIMEOUT="${CLOUDBENCH_READY_TIMEOUT:-600}"   # 10 min ceiling for a cold pull.
 start_ts="$(date +%s)"
 while :; do
@@ -858,7 +866,7 @@ echo "✅ Machine started + ssh-ready ($mid)"
 # Warm machines can retain a detached driver from an interrupted local
 # controller. Clear it before touching the shared /data/repo checkout.
 echo "🧹 Clearing stale on-box benchmark driver..."
-ssh_read "$mid" "pkill -TERM -f '/data/[c]loudbench-run.sh|[g]it -C $REMOTE_REPO fetch|[i]ndex-pack.*fetch-pack' 2>/dev/null || true; sleep 2; pkill -KILL -f '/data/[c]loudbench-run.sh|[g]it -C $REMOTE_REPO fetch|[i]ndex-pack.*fetch-pack' 2>/dev/null || true; rm -f '$REMOTE_REPO/.context/cloudbench/report-card.json' '$REMOTE_REPO/.context/cloudbench/run.json' 2>/dev/null || true; git config --global --add safe.directory '$REMOTE_REPO' 2>/dev/null || true" >/dev/null 2>&1 || true
+ssh_read "$mid" "stale_pat='/data/[c]loudbench-run.sh|/tmp/[r]b.sh|benchmarks/[r]un_benchmark.py|[r]un_benchmark.py|scripts/[r]un.sh --benchmark|http.server $REMOTE_DASH_PORT|[g]it -C $REMOTE_REPO fetch|[i]ndex-pack.*fetch-pack'; pkill -TERM -f \"\$stale_pat\" 2>/dev/null || true; sleep 2; pkill -KILL -f \"\$stale_pat\" 2>/dev/null || true; rm -f '$REMOTE_REPO/.context/cloudbench/report-card.json' '$REMOTE_REPO/.context/cloudbench/run.json' 2>/dev/null || true; git config --global --add safe.directory '$REMOTE_REPO' 2>/dev/null || true" >/dev/null 2>&1 || true
 
 # ── 2. Deliver + launch the on-box driver DETACHED ──────────────────────────
 # base64 the LOCAL cloudbench-run.sh + a small invocation wrapper, write both to
