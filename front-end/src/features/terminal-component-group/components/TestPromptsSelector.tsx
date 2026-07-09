@@ -9,10 +9,11 @@
  *     |
  *     | (click trigger / mouse enter)
  *     v
- * [OPEN] <-- isOpen: true (shows tag filter chips + catalog prompts popover)
+ * [OPEN] <-- isOpen: true (shows search box + tag filter chips + catalog prompts popover)
  *     |    |
  *     |    | (click tag chip: toggle in/out of selectedTags — list shows prompts
  *     |    |  carrying ANY selected tag; empty selection shows all prompts)
+ *     |    | (type search query: list narrows by title, description, prompt text, or tag)
  *     |    v
  *     |  [OPEN] (filtered)
  *     |
@@ -23,6 +24,7 @@
  * State:
  * - prompts: TestPrompt[] (fetched from the unified eval catalog via the backend)
  * - selectedTags: string[] (tag filter; OR semantics across selected tags)
+ * - searchQuery: string (text filter composed with selectedTags)
  * - isOpen: boolean (popover open state)
  * - isLoading: boolean (while resolving attachment URLs into File objects)
  *
@@ -32,8 +34,8 @@
  */
 
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { FileText } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { FileText, Search } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
 import TagFilter from './test-prompts-selector/TagFilter';
 import { useTagFilter } from './test-prompts-selector/useTagFilter';
 import PromptList from './test-prompts-selector/PromptList';
@@ -63,11 +65,65 @@ async function resolvePromptText(prompt: string): Promise<string> {
   return prompt.replaceAll(TEST_PAYMENT_BASE_URL_TOKEN, tunnelUrl ?? BACKEND_BASE_URL);
 }
 
+function promptMatchesSearchQuery(prompt: TestPrompt, searchQuery: string): boolean {
+  const normalizedQuery = searchQuery.trim().toLowerCase();
+  if (!normalizedQuery) return true;
+  return [prompt.title, prompt.description, prompt.prompt, ...(prompt.tags ?? [])]
+    .join(' ')
+    .toLowerCase()
+    .includes(normalizedQuery);
+}
+
+interface TestPromptSearchInputProps {
+  searchQuery: string;
+  onSearchQueryChange: (value: string) => void;
+}
+
+function TestPromptSearchInput({ searchQuery, onSearchQueryChange }: TestPromptSearchInputProps) {
+  return (
+    <div className="relative">
+      <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+      <input
+        type="search"
+        value={searchQuery}
+        onChange={(event) => onSearchQueryChange(event.target.value)}
+        placeholder="Search prompts..."
+        aria-label="Search test prompts"
+        className="h-8 w-full rounded-md border border-border bg-background pl-8 pr-3 text-sm text-foreground placeholder:text-muted-foreground/70 focus:outline-none focus:ring-1 focus:ring-ring"
+      />
+    </div>
+  );
+}
+
+interface TestPromptTriggerButtonProps {
+  onOpen: () => void;
+  onClose: () => void;
+}
+
+function TestPromptTriggerButton({ onOpen, onClose }: TestPromptTriggerButtonProps) {
+  return (
+    <button
+      className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-muted/50 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+      title="Select a test prompt"
+      aria-label="Select a test prompt"
+      onMouseEnter={onOpen}
+      onMouseLeave={onClose}
+    >
+      <FileText className="h-3.5 w-3.5" />
+    </button>
+  );
+}
+
 export default function TestPromptsSelector({ onSelectPrompt }: TestPromptsSelectorProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
   const [prompts, setPrompts] = useState<TestPrompt[]>([]);
   const { allTags, selectedTags, toggleTag, visiblePrompts } = useTagFilter(prompts);
+
+  const searchFilteredPrompts = useMemo(() => {
+    return visiblePrompts.filter((prompt) => promptMatchesSearchQuery(prompt, searchQuery));
+  }, [searchQuery, visiblePrompts]);
 
   useEffect(() => {
     let cancelled = false;
@@ -108,15 +164,7 @@ export default function TestPromptsSelector({ onSelectPrompt }: TestPromptsSelec
   return (
     <Popover open={isOpen} onOpenChange={setIsOpen}>
       <PopoverTrigger asChild>
-        <button
-          className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-muted/50 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          title="Select a test prompt"
-          aria-label="Select a test prompt"
-          onMouseEnter={() => setIsOpen(true)}
-          onMouseLeave={() => setIsOpen(false)}
-        >
-          <FileText className="h-3.5 w-3.5" />
-        </button>
+        <TestPromptTriggerButton onOpen={() => setIsOpen(true)} onClose={() => setIsOpen(false)} />
       </PopoverTrigger>
       <PopoverContent
         className="w-[min(400px,calc(100vw-32px))] max-h-[400px] overflow-y-auto p-4 z-50"
@@ -128,12 +176,13 @@ export default function TestPromptsSelector({ onSelectPrompt }: TestPromptsSelec
           <p className="text-xs text-muted-foreground">
             Eval-catalog prompts (agents/benchmarks/tasks.json)
           </p>
+          <TestPromptSearchInput searchQuery={searchQuery} onSearchQueryChange={setSearchQuery} />
           <TagFilter tags={allTags} selectedTags={selectedTags} onToggle={toggleTag} />
           {prompts.length === 0 ? (
             <p className="text-xs text-muted-foreground">Loading catalog…</p>
           ) : (
             <PromptList
-              prompts={visiblePrompts}
+              prompts={searchFilteredPrompts}
               disabled={isLoading}
               onSelect={(p) => void handleSelectPrompt(p)}
             />
