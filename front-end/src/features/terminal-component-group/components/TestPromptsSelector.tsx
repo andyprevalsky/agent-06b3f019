@@ -35,7 +35,8 @@
 
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { FileText, Search } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { forwardRef, useEffect, useMemo, useState } from 'react';
+import type { ComponentPropsWithoutRef, MouseEvent } from 'react';
 import TagFilter from './test-prompts-selector/TagFilter';
 import { useTagFilter } from './test-prompts-selector/useTagFilter';
 import PromptList from './test-prompts-selector/PromptList';
@@ -68,10 +69,9 @@ async function resolvePromptText(prompt: string): Promise<string> {
 function promptMatchesSearchQuery(prompt: TestPrompt, searchQuery: string): boolean {
   const normalizedQuery = searchQuery.trim().toLowerCase();
   if (!normalizedQuery) return true;
-  return [prompt.title, prompt.description, prompt.prompt, ...(prompt.tags ?? [])]
-    .join(' ')
-    .toLowerCase()
-    .includes(normalizedQuery);
+  return [prompt.title, prompt.description, prompt.prompt, ...(prompt.tags ?? [])].some((field) =>
+    field.toLowerCase().includes(normalizedQuery),
+  );
 }
 
 interface TestPromptSearchInputProps {
@@ -95,24 +95,38 @@ function TestPromptSearchInput({ searchQuery, onSearchQueryChange }: TestPromptS
   );
 }
 
-interface TestPromptTriggerButtonProps {
+interface TestPromptTriggerButtonProps extends ComponentPropsWithoutRef<'button'> {
   onOpen: () => void;
   onClose: () => void;
 }
 
-function TestPromptTriggerButton({ onOpen, onClose }: TestPromptTriggerButtonProps) {
-  return (
-    <button
-      className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-muted/50 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-      title="Select a test prompt"
-      aria-label="Select a test prompt"
-      onMouseEnter={onOpen}
-      onMouseLeave={onClose}
-    >
-      <FileText className="h-3.5 w-3.5" />
-    </button>
-  );
-}
+const TestPromptTriggerButton = forwardRef<HTMLButtonElement, TestPromptTriggerButtonProps>(
+  ({ onOpen, onClose, onMouseEnter, onMouseLeave, type = 'button', ...props }, ref) => {
+    const handleMouseEnter = (event: MouseEvent<HTMLButtonElement>): void => {
+      onMouseEnter?.(event);
+      onOpen();
+    };
+    const handleMouseLeave = (event: MouseEvent<HTMLButtonElement>): void => {
+      onMouseLeave?.(event);
+      onClose();
+    };
+    return (
+      <button
+        {...props}
+        ref={ref}
+        type={type}
+        className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-muted/50 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        title="Select a test prompt"
+        aria-label="Select a test prompt"
+        onMouseEnter={handleMouseEnter}
+        onMouseLeave={handleMouseLeave}
+      >
+        <FileText className="h-3.5 w-3.5" />
+      </button>
+    );
+  },
+);
+TestPromptTriggerButton.displayName = 'TestPromptTriggerButton';
 
 export default function TestPromptsSelector({ onSelectPrompt }: TestPromptsSelectorProps) {
   const [isOpen, setIsOpen] = useState(false);
