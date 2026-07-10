@@ -1,6 +1,7 @@
 """Temporal worker for Rose autonomous agents."""
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
@@ -50,7 +51,10 @@ from domains.spawn_agent.service import (
     fetch_full_network_metadata,
     spawn_explore_agent_activity,
 )
-from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+from domains.spawn_browser_agent_v3.handler import (
+    drain_background_browser_cleanups,
+    spawn_browser_agent_activity_v3,
+)
 from domains.spawn_claude_code_agent.service import spawn_claude_code_activity
 from domains.spawn_sub_agents.service import (
     spawn_sub_agent_activity,
@@ -1172,6 +1176,11 @@ async def main():
                 logger.info("Worker shutdown complete, cancelling worker task...")
             except asyncio.TimeoutError:
                 logger.warning("⚠️ Graceful shutdown timed out after 5s, forcing exit...")
+                # os._exit() bypasses the finally block below, so drain detached
+                # browser cleanups here too (bounded) before we hard-exit, or
+                # Steel/Playwright sessions get orphaned on the timeout path.
+                with contextlib.suppress(Exception):
+                    await drain_background_browser_cleanups(timeout=10.0)
                 os._exit(1)
             finally:
                 force_task.cancel()
@@ -1197,6 +1206,12 @@ async def main():
         raise
     finally:
         set_worker_status(False)
+        # Drain detached browser cleanups so Steel/Playwright sessions and driver
+        # PIDs aren't orphaned when the worker exits mid-teardown. Uses the drain
+        # helper's default timeout, sized to the worst-case single-cleanup latency;
+        # it returns as soon as all tasks finish (typically fast).
+        with contextlib.suppress(Exception):
+            await drain_background_browser_cleanups()
         if _profiler is not None:
             _profiler.disable()
             out = f"worker-profile-{os.getenv('WORKER_INDEX', '0')}.prof"
