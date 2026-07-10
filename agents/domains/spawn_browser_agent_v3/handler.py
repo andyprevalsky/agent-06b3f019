@@ -2194,7 +2194,18 @@ def _schedule_browser_cleanup(
     return cleanup_task
 
 
-async def drain_background_browser_cleanups(timeout: float = 15.0) -> None:
+# A single background cleanup can run up to BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS
+# (recording finalization, default 45s) plus the two bounded 10s waits for the
+# interaction-layer and network-recorder tasks. Size the shutdown drain to cover that
+# worst case so we don't cut teardown short and orphan browser sessions/driver PIDs.
+# (On Fly this is still capped by the platform SIGTERM→SIGKILL window; the drain logs
+# a warning and returns best-effort if the platform kills us first.)
+_BACKGROUND_BROWSER_CLEANUP_DRAIN_TIMEOUT_SECONDS = float(BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS) + 20.0
+
+
+async def drain_background_browser_cleanups(
+    timeout: float = _BACKGROUND_BROWSER_CLEANUP_DRAIN_TIMEOUT_SECONDS,
+) -> None:
     """Await any in-flight background browser cleanups before the worker exits.
 
     ``_schedule_browser_cleanup`` detaches teardown into
@@ -2202,7 +2213,9 @@ async def drain_background_browser_cleanups(timeout: float = 15.0) -> None:
     blocking on recording finalization. Those detached tasks are invisible to
     ``worker.shutdown()``, so on graceful shutdown we must drain them here or
     Playwright/Steel teardown gets cut short, orphaning browser sessions and
-    driver PIDs. Called from the worker shutdown path (see ``worker.py``).
+    driver PIDs. Called from the worker shutdown path (see ``worker.py``). The
+    default timeout covers the worst-case single-cleanup latency; drain returns
+    as soon as all tasks finish, so the cap only bites on a genuinely stuck one.
     """
     pending = [task for task in _background_browser_cleanup_tasks if not task.done()]
     if not pending:
