@@ -2194,6 +2194,38 @@ def _schedule_browser_cleanup(
     return cleanup_task
 
 
+async def drain_background_browser_cleanups(timeout: float = 15.0) -> None:
+    """Await any in-flight background browser cleanups before the worker exits.
+
+    ``_schedule_browser_cleanup`` detaches teardown into
+    ``_background_browser_cleanup_tasks`` so the activity can return without
+    blocking on recording finalization. Those detached tasks are invisible to
+    ``worker.shutdown()``, so on graceful shutdown we must drain them here or
+    Playwright/Steel teardown gets cut short, orphaning browser sessions and
+    driver PIDs. Called from the worker shutdown path (see ``worker.py``).
+    """
+    pending = [task for task in _background_browser_cleanup_tasks if not task.done()]
+    if not pending:
+        return
+    logger.info(
+        "Draining background browser cleanups before shutdown",
+        count=len(pending),
+        timeout=timeout,
+    )
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(asyncio.gather(*pending, return_exceptions=True)),
+            timeout=timeout,
+        )
+        logger.info("Background browser cleanups drained")
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Background browser cleanup drain timed out; some sessions may be orphaned",
+            remaining=len([task for task in pending if not task.done()]),
+            timeout=timeout,
+        )
+
+
 @activity.defn
 @traced("spawn_browser_agent_activity_v3")
 async def spawn_browser_agent_activity_v3(  # noqa: C901

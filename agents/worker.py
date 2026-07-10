@@ -1,6 +1,7 @@
 """Temporal worker for Rose autonomous agents."""
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
@@ -50,7 +51,10 @@ from domains.spawn_agent.service import (
     fetch_full_network_metadata,
     spawn_explore_agent_activity,
 )
-from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+from domains.spawn_browser_agent_v3.handler import (
+    drain_background_browser_cleanups,
+    spawn_browser_agent_activity_v3,
+)
 from domains.spawn_claude_code_agent.service import spawn_claude_code_activity
 from domains.spawn_sub_agents.service import (
     spawn_sub_agent_activity,
@@ -1197,6 +1201,12 @@ async def main():
         raise
     finally:
         set_worker_status(False)
+        # Drain detached browser cleanups so Steel/Playwright sessions and driver
+        # PIDs aren't orphaned when the worker exits mid-teardown. Bounded well
+        # under the Fly WORKER_SHUTDOWN_GRACE_PERIOD (30s) alongside the 5s
+        # worker.shutdown() above.
+        with contextlib.suppress(Exception):
+            await drain_background_browser_cleanups(timeout=15.0)
         if _profiler is not None:
             _profiler.disable()
             out = f"worker-profile-{os.getenv('WORKER_INDEX', '0')}.prof"

@@ -851,6 +851,42 @@ async def test_browser_cleanup_scheduler_does_not_block_on_recording_finalizatio
         save_mock.assert_awaited_once()
 
 
+async def test_drain_background_browser_cleanups_waits_then_times_out():
+    import contextlib
+
+    from domains.spawn_browser_agent_v3.handler import (
+        _background_browser_cleanup_tasks,
+        drain_background_browser_cleanups,
+    )
+
+    # No pending tasks -> returns immediately.
+    await asyncio.wait_for(drain_background_browser_cleanups(timeout=0.1), timeout=1)
+
+    release = asyncio.Event()
+
+    async def _slow_cleanup() -> None:
+        await release.wait()
+
+    task = asyncio.create_task(_slow_cleanup())
+    _background_browser_cleanup_tasks.add(task)
+    task.add_done_callback(lambda done: _background_browser_cleanup_tasks.discard(done))
+    try:
+        # Drain blocks while the cleanup is in-flight, then times out without
+        # raising (worker shutdown must not hang forever on a stuck teardown).
+        await asyncio.wait_for(drain_background_browser_cleanups(timeout=0.2), timeout=2)
+        assert not task.done()  # still running; drain did not cancel it
+
+        # Once the cleanup finishes, drain returns promptly by awaiting it.
+        release.set()
+        await asyncio.wait_for(drain_background_browser_cleanups(timeout=1.0), timeout=2)
+        assert task.done()
+    finally:
+        release.set()
+        with contextlib.suppress(Exception):
+            await task
+        _background_browser_cleanup_tasks.discard(task)
+
+
 def test_browser_agent_recording_inline_export_uses_source_frames_once():
     import tempfile
 
@@ -8675,6 +8711,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_cleanup_scheduler_nonblocking",
         test_browser_cleanup_scheduler_does_not_block_on_recording_finalization,
+    )
+    await r.record_async(
+        "drain_background_browser_cleanups",
+        test_drain_background_browser_cleanups_waits_then_times_out,
     )
     r.record(
         "browser_humanizer_visual_cursor_default_off",
