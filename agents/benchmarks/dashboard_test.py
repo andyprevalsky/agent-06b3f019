@@ -13,6 +13,7 @@ import json
 import urllib.error
 import urllib.request
 
+from benchmarks.agent_link_server import _existing_archive_frontend
 from benchmarks.dashboard import (
     DASHBOARD_ASSET_NAME,
     DashboardServer,
@@ -201,6 +202,118 @@ def test_chrome_open_command_url_is_last_arg():
     cmd = _chrome_open_command("http://localhost:1234/dashboard.html", system="Darwin")
     assert cmd is not None
     assert cmd[-1] == "http://localhost:1234/dashboard.html"
+
+
+def test_existing_archive_frontend_ignores_dead_supervisor(tmp_path):
+    context_dir = tmp_path / "ctx"
+    context_dir.mkdir()
+    # No metadata at all → nothing to reuse.
+    assert _existing_archive_frontend(context_dir) == ""
+
+    # Metadata pointing at a dead pid / unreachable url → not reused (so the
+    # link server relaunches instead of redirecting to a dead port).
+    (context_dir / "archive-frontend-live.json").write_text(
+        json.dumps(
+            {
+                "supervisor_pid": 999999,  # not a live process
+                "frontend_url": "http://localhost:1",  # nothing listening
+            }
+        )
+    )
+    assert _existing_archive_frontend(context_dir) == ""
+
+
+def _link_server_args(tmp_path):
+    import argparse
+
+    root = tmp_path / "dash"
+    root.mkdir()
+    return argparse.Namespace(
+        root=root,
+        context_dir=tmp_path / "ctx2",
+        repo_root=tmp_path,
+        frontend_dir=tmp_path / "front-end",
+        run_json=tmp_path / "run.json",
+        preferred_archive_port=18775,
+        upstream_url="",
+        upstream_api_key="",
+        upstream_user_id="",
+    )
+
+
+def _serve(handler_cls):
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_address[1]}"
+
+
+def _no_redirect_opener():
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *_a, **_k):
+            return None
+
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+
+
+def test_open_agent_redirects_to_running_archive_frontend(tmp_path):
+    import os
+    from http.server import BaseHTTPRequestHandler
+
+    from benchmarks.agent_link_server import _make_handler
+
+    # A stand-in "archive frontend" that answers 200 on / (health probe).
+    class FakeFrontend(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *_a):
+            return
+
+    fake, fake_url = _serve(FakeFrontend)
+    args = _link_server_args(tmp_path)
+    args.context_dir.mkdir(parents=True)
+    (args.context_dir / "archive-frontend-live.json").write_text(
+        json.dumps({"supervisor_pid": os.getpid(), "frontend_url": fake_url, "live": True})
+    )
+    link, link_url = _serve(_make_handler(args))
+    try:
+        # /open-agent serves a loading page (NOT a bare 302): it confirms the agent
+        # is served + warms Vite client-side, THEN redirects — so a click never
+        # lands on a cold SPA that falls back to the home route.
+        resp = urllib.request.urlopen(f"{link_url}/open-agent?agent-id=abc123", timeout=5)
+        body = resp.read().decode()
+        assert resp.status == 200
+        assert fake_url in body            # redirect target embedded
+        assert "abc123" in body            # the agent id
+        assert "location.replace" in body  # client-side redirect once ready
+        assert "/api/agents/" in body      # polls the archive API to confirm the agent first
+    finally:
+        link.shutdown()
+        fake.shutdown()
+
+
+def test_open_agent_head_is_503_when_no_archive_yet(tmp_path):
+    from benchmarks.agent_link_server import _make_handler
+
+    args = _link_server_args(tmp_path)  # no metadata → nothing running
+    link, link_url = _serve(_make_handler(args))
+    try:
+        opener = _no_redirect_opener()
+        req = urllib.request.Request(f"{link_url}/open-agent?agent-id=abc", method="HEAD")
+        try:
+            status = opener.open(req, timeout=5).status
+        except urllib.error.HTTPError as err:
+            status = err.code
+        # Never a dead connection: a clean 503 (HEAD never spawns a viewer).
+        assert status == 503
+    finally:
+        link.shutdown()
 
 
 # --- gating -----------------------------------------------------------------

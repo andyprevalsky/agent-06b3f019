@@ -68,6 +68,10 @@ fi
 BENCH_MAX_CONCURRENCY="${BENCH_MAX_CONCURRENCY:-5}"
 BENCH_SIMULATE="${BENCH_SIMULATE:-1}"
 BENCH_DASHPORT="${BENCH_DASHPORT:-8009}"
+BENCHMARK_FAST_MODE_CACHE="${BENCHMARK_FAST_MODE_CACHE:-}"
+BENCHMARK_PEAK_FLY_MACHINES="${BENCHMARK_PEAK_FLY_MACHINES:-}"
+BENCHMARK_VM_USD_PER_HOUR="${BENCHMARK_VM_USD_PER_HOUR:-}"
+BENCHMARK_FRONTEND_URL="${BENCHMARK_FRONTEND_URL:-}"
 
 # Report/marker delimiters run-bench-cloud greps for in /data/bench.log.
 REPORT_BEGIN="::CLOUDBENCH-REPORT-CARD-BEGIN::"
@@ -152,7 +156,13 @@ if [ -n "$REF" ]; then
     gosu "$APP_USER" git -C "$REPO_DIR" reset --hard 2>&1 | sed 's/^/   /' || true
 fi
 log "checkout at $(gosu "$APP_USER" git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-if [ -n "${LOCAL_PATCH_B64:-}" ]; then
+if [ -n "${LOCAL_PATCH_FILE:-}" ] && [ -s "$LOCAL_PATCH_FILE" ]; then
+    log "applying uploaded local workspace patch on top of checkout"
+    if ! gosu "$APP_USER" git -C "$REPO_DIR" apply --whitespace=nowarn "$LOCAL_PATCH_FILE" 2>&1 | sed 's/^/   /'; then
+        log "FATAL: could not apply uploaded local workspace patch"
+        finish 1
+    fi
+elif [ -n "${LOCAL_PATCH_B64:-}" ]; then
     PATCH_FILE="/tmp/cloudbench-local.patch"
     if printf '%s' "$LOCAL_PATCH_B64" | base64 -d > "$PATCH_FILE" 2>/dev/null && [ -s "$PATCH_FILE" ]; then
         log "applying local workspace patch on top of checkout"
@@ -309,10 +319,35 @@ STACK_ENV=(
     "ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1"
     "DISABLE_GMAIL_SYNC=1"
     "FLY_APP_NAME="
+    # Compute-only autoscaler: the box worker still computes desired_machine_count
+    # (exposed on HEALTH_CHECK_PORT/metrics with prod's params) but NEVER actuates
+    # the shared bench app. run-bench-cloud's per-bench autoscaler is the sole
+    # scaler, cloning bench-queue-scoped worker machines. FLY_APP_NAME="" already
+    # short-circuits _scale_fleet; this makes the intent explicit + defends the
+    # worker-only pool nodes too.
+    "AUTOSCALER_ACTUATE=0"
+    # A bench starts at ONE machine (the box itself). The worker then computes
+    # desired off its own queue with prod's scale params; the controller adds
+    # workers from there. Prod's default MIN=2 would make an idle bench look like
+    # it wants a 2nd machine, so pin the per-bench floor to 1.
+    "MIN_MACHINES=1"
+    # Warm-start cache: run.sh restores this /data dump (persists across stop/start
+    # + fork) instead of the ~50s push+seed when the schema is unchanged. First run
+    # on a machine seeds + writes it; later claims restore in seconds.
+    "BENCHMARK_SEED_DUMP=/data/cloudbench-cache/victoria-seed.dump"
     "WMH_MODEL_NAME=$WMH_MODEL_NAME"
     "WMH_BUILD_DIR=$WMH_DIR"
     "BENCHMARK_SKIP_WMH_DELTA=1"
 )
+if [ -n "$BENCHMARK_FAST_MODE_CACHE" ]; then
+    STACK_ENV+=("BENCHMARK_FAST_MODE_CACHE=$BENCHMARK_FAST_MODE_CACHE")
+fi
+if [ -n "$BENCHMARK_PEAK_FLY_MACHINES" ]; then
+    STACK_ENV+=("BENCHMARK_PEAK_FLY_MACHINES=$BENCHMARK_PEAK_FLY_MACHINES")
+fi
+if [ -n "$BENCHMARK_VM_USD_PER_HOUR" ]; then
+    STACK_ENV+=("BENCHMARK_VM_USD_PER_HOUR=$BENCHMARK_VM_USD_PER_HOUR")
+fi
 if [ "$BENCH_SIMULATE" = "1" ]; then
     STACK_ENV+=(
         "BENCHMARK_WORLD_MODEL_MODE=simulate"
@@ -323,6 +358,11 @@ if [ "$BENCH_SIMULATE" = "1" ]; then
 else
     STACK_ENV+=("BENCHMARK_SKIP_WMH_BUILD=1")
 fi
+
+# The DB warm-start dump lives on the /data volume (persists across stop/start +
+# fork) but must be writable by $APP_USER — /data itself is root-owned and
+# /data/repo gets `git reset --hard`'d, so use a dedicated cache dir we chown.
+mkdir -p /data/cloudbench-cache && chown "$APP_USER:$APP_USER" /data/cloudbench-cache 2>/dev/null || true
 
 log "launching stack (run.sh --benchmark) — base_port=$BASE_PORT wmh_port=$WMH_PORT workspace=$WORKSPACE_NAME simulate=$BENCH_SIMULATE"
 gosu "$APP_USER" env "${STACK_ENV[@]}" bash "$REPO_DIR/scripts/run.sh" --benchmark > "$STACK_LOG" 2>&1 &
@@ -429,6 +469,24 @@ export ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1
 export CONDUCTOR_WORKSPACE_NAME='$WORKSPACE_NAME'
 export CONDUCTOR_PORT='$BASE_PORT'
 export TEMPORAL_TASK_QUEUE='navi-agent-tasks-$WORKSPACE_NAME'
+if [ -n '$BENCHMARK_FAST_MODE_CACHE' ]; then
+  export BENCHMARK_FAST_MODE_CACHE='$BENCHMARK_FAST_MODE_CACHE'
+fi
+if [ -n '$BENCHMARK_PEAK_FLY_MACHINES' ]; then
+  export BENCHMARK_PEAK_FLY_MACHINES='$BENCHMARK_PEAK_FLY_MACHINES'
+fi
+if [ -n '$BENCHMARK_VM_USD_PER_HOUR' ]; then
+  export BENCHMARK_VM_USD_PER_HOUR='$BENCHMARK_VM_USD_PER_HOUR'
+fi
+if [ -n '$BENCHMARK_FRONTEND_URL' ]; then
+  export BENCHMARK_FRONTEND_URL='$BENCHMARK_FRONTEND_URL'
+fi
+if [ '$BENCH_SIMULATE' = '1' ]; then
+  export BENCHMARK_WORLD_MODEL_MODE='simulate'
+  export WMH_BASE_URL='http://localhost:$WMH_PORT'
+else
+  export BENCHMARK_WORLD_MODEL_MODE='real'
+fi
 echo \"[cloudbench] run_benchmark env: CONDUCTOR_WORKSPACE_NAME=\$CONDUCTOR_WORKSPACE_NAME TEMPORAL_TASK_QUEUE=\$TEMPORAL_TASK_QUEUE\"
 cd '$REPO_DIR/agents' && exec venv/bin/python -u benchmarks/run_benchmark.py \"\$@\"" _ "${BENCH_ARGS[@]}"
 BENCH_RC=$?

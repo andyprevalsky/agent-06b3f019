@@ -22,12 +22,21 @@ if [[ "${1:-}" == "eval" || "${1:-}" == "eval-suite" ]]; then
 fi
 
 # --local opts out to the local isolated stack (backend + worker + WMH + Postgres
-# on THIS machine). Without it, a benchmark run defaults to CLOUD — the warm Fly
-# box (run-bench-cloud), serving the cached WMH, nothing on the laptop.
+# on THIS machine). Without it, a benchmark run defaults to CLOUD.
 if [[ "${1:-}" == "--local" ]]; then
     shift
     exec "$PY" -u benchmarks/local.py "$@"
 fi
 
-# DEFAULT: cloud-exclusive run on the warm Fly box.
-exec bash "$ROOT_DIR/scripts/run-bench-cloud" "$@"
+# --single-box opts out to the legacy shared warm box (all tasks on ONE stack).
+if [[ "${1:-}" == "--single-box" ]]; then
+    shift
+    exec bash "$ROOT_DIR/scripts/run-bench-cloud" "$@"
+fi
+
+# DEFAULT: per-bench ISOLATED cloud fleet. Every bench gets its OWN Fly machine
+# (own backend + Postgres + Temporal queue + WMH), starting at one machine and
+# autoscaling with prod's params scoped to that bench's queue. The whole run is
+# shown in ONE aggregated batch dashboard (auto-opened) covering ALL benches.
+# Sim is per-bench and OFF by default — pass --sim-on <a,b> to enable it.
+exec bash "$ROOT_DIR/scripts/run-bench-fleet" "$@"

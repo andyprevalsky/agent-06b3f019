@@ -37,7 +37,7 @@ _BENCHMARK_MEMORY_MODULES = (
 # Queue metrics (updated by background poller in worker.py)
 _task_queue_backlog = 0
 _running_workflow_count = 0
-_desired_machine_count = 2  # Adaptive autoscaler output (min=2)
+_desired_machine_count = int(os.getenv("MIN_MACHINES", "2"))  # pre-compute floor; matches worker MIN_MACHINES (prod=2, per-bench cloud=1)
 _current_machine_count = 1  # Observed via Fly DNS
 _is_leader = False  # Whether this instance is the autoscaler leader
 _observed_task_capacity: Optional[int] = None  # Dynamic capacity from SDK resource-based tuner

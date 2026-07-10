@@ -531,6 +531,29 @@ echo "🧠 Ensuring Fast Mode cache schema..."
 export DATABASE_URL="${LOCAL_DB_URL}?connection_limit=50&pool_timeout=30"
 export DIRECT_URL="$LOCAL_DB_URL"
 
+# Fast DB warm-start (cloud pool): the schema push + 10k-people seed cost ~50s and
+# run on EVERY boot because the box DB lives on ephemeral rootfs (resets on Fly
+# stop/start). BENCHMARK_SEED_DUMP points at a pg_dump on the PERSISTENT /data
+# volume; when it exists and the schema is unchanged, restore it (~fast COPY) and
+# skip BOTH the push and the seed. First run seeds normally, then writes the dump
+# for every later claim of that machine. Unset (local dev) → zero behaviour change.
+DB_RESTORED=false
+_SEED_DUMP="${BENCHMARK_SEED_DUMP:-}"
+_SCHEMA_HASH="$( (shasum back-end/prisma/schema.prisma 2>/dev/null || sha1sum back-end/prisma/schema.prisma 2>/dev/null) | awk '{print $1}')"
+if [ -n "$_SEED_DUMP" ] && [ -s "$_SEED_DUMP" ] && [ "$(cat "${_SEED_DUMP}.schemahash" 2>/dev/null || echo x)" = "$_SCHEMA_HASH" ]; then
+    echo "🗜️  Restoring seeded DB from persistent dump ($_SEED_DUMP) — skipping schema push + seed..."
+    if PGPASSWORD=postgres pg_restore -h localhost -U postgres -d victoria --clean --if-exists --no-owner "$_SEED_DUMP" >/dev/null 2>&1; then
+        DB_RESTORED=true
+        echo "   ✅ DB restored from dump"
+    else
+        echo "   ⚠️ restore failed — falling back to push + seed"
+    fi
+fi
+
+if $DB_RESTORED; then
+    :
+else
+
 # Sync Prisma schema to local DB (idempotent, dev-only)
 echo "🐘 Syncing Prisma schema..."
 (cd back-end && npx prisma db push --skip-generate --accept-data-loss 2>&1 | tail -3)
@@ -559,6 +582,20 @@ else
     echo "🌱 Local database already seeded; syncing browser credentials..."
     (cd back-end && npx tsx scripts/seed-local.ts --credentials-only)
 fi
+
+# Persist a dump on /data so the NEXT claim of this machine restores in seconds
+# instead of re-seeding. Best-effort; the schemahash guards against schema drift.
+if [ -n "$_SEED_DUMP" ]; then
+    echo "🗜️  Saving seed dump for fast future warm-starts ($_SEED_DUMP)..."
+    if PGPASSWORD=postgres pg_dump -h localhost -U postgres -Fc victoria > "$_SEED_DUMP" 2>/dev/null; then
+        printf '%s' "$_SCHEMA_HASH" > "${_SEED_DUMP}.schemahash"
+        echo "   ✅ seed dump saved ($(du -h "$_SEED_DUMP" 2>/dev/null | awk '{print $1}'))"
+    else
+        rm -f "$_SEED_DUMP" 2>/dev/null || true
+    fi
+fi
+
+fi   # end: if $DB_RESTORED / else (push + seed + dump)
 
 # ── Pre-flight: ensure node_modules exist for all JS services ──
 JS_SVC_DIRS=(back-end front-end)

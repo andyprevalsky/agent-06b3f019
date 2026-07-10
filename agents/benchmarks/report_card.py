@@ -1,7 +1,7 @@
 """Standardized live "report card" for benchmark runs.
 
 Self-contained module: pure builders + a cadence-driven emitter. Emitted every
-60s while a run is in flight (and once at the end) to stdout AND
+1s while a run is in flight (and once at the end) to stdout AND
 `.context/benchmarks/<run-id>/report-card.json`.
 
 Schema (from docs/plans/active/cloud-branch-benchmarks-simulate.md →
@@ -13,9 +13,10 @@ Schema (from docs/plans/active/cloud-branch-benchmarks-simulate.md →
       "results": { "passed", "failed", "transient", "success_rate" },
       "cost":    { "agents_llm_usd", "wmh_grounding_usd", "total_usd",
                    "fast_cache_hit_rate" },
-      "infra":   { "fleet_machines", "peak_machines", "wmh_served",
-                   "queue_depth" },          # OPTIONAL (None for local runs)
-      "per_task":[ { "name", "status", "duration_s", "cost_usd", "agent_url" } ]
+      "infra":   { "peak_machines", "wmh_served" },   # OPTIONAL (None for local runs)
+      "metadata": { "tokens_in", "tokens_out" },
+      "per_task":[ { "name", "status", "duration_s", "cost_usd", "agent_url",
+                     "tokens_in", "tokens_out", "world_model_mode" } ]
     }
 
 Design contract:
@@ -43,7 +44,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional, Union
 
-EMIT_INTERVAL_S: float = 60.0
+EMIT_INTERVAL_S: float = 1.0
 
 # Terminal statuses a benchmark task can end in. Anything not terminal is
 # considered still "running" for the tasks.running count.
@@ -55,9 +56,10 @@ class TaskCard:
     """Per-task live view fed into the report card.
 
     `status` is a lowercase display status: "passed" | "failed" | "transient"
-    | "running" | "queued" | "skipped" | "error". `duration_s` and `cost_usd`
-    may be None for tasks that haven't finished. `agent_url` is the FE deep link
-    (`http://<frontend>/?agent-id=<agent_id>`), or None if no agent exists yet.
+    | "running" | "queued" | "skipped" | "error". `duration_s`, `cost_usd`,
+    `tokens_in`, and `tokens_out` may be None for tasks that haven't finished.
+    `agent_url` is the FE deep link (`http://<frontend>/?agent-id=<id>`),
+    or None if no agent exists yet.
     """
 
     name: str
@@ -65,6 +67,19 @@ class TaskCard:
     duration_s: Optional[float] = None
     cost_usd: Optional[float] = None
     agent_url: Optional[str] = None
+    llm_call_count: Optional[int] = None
+    tree_agent_count: Optional[int] = None
+    tokens_in: Optional[int] = None
+    tokens_out: Optional[int] = None
+    # Per-bench world-model mode ("real" | "simulate" | "shadow"). None → inherit
+    # the run-level mode. With per-bench isolation each machine sets its own.
+    world_model_mode: Optional[str] = None
+    # Whether fast-mode prompt caching was enabled for this bench's agent (drives
+    # the ⚡ dashboard icon). None/False → not fast-mode.
+    fast_mode: Optional[bool] = None
+    # vCPU / machine cost for this bench's isolated Fly machine over its runtime
+    # (rate × duration). None off-cloud / before the machine cost is known.
+    infra_usd: Optional[float] = None
 
 
 @dataclass
@@ -81,10 +96,17 @@ class RunState:
                           builders pure/clock-free).
       world_model_mode  – "simulate" | "shadow" | "real" | None.
       total_tasks       – total tasks in the run (incl. not-yet-started). If
-                          None, falls back to len(per_task).
+                          None, falls back to len(task_names) or len(per_task).
+      task_names        – ordered benchmark task names for the invocation. When
+                          supplied, missing rows are rendered as queued so the
+                          dashboard always shows the whole run shape.
       per_task          – list[TaskCard], one per task the run knows about.
       agents_llm_usd    – summed agent LLM cost in USD. If None, derived by
                           summing per_task[*].cost_usd.
+      tokens_in         – tree/run input token count. If None, derived by
+                          summing per_task[*].tokens_in.
+      tokens_out        – tree/run output token count. If None, derived by
+                          summing per_task[*].tokens_out.
       wmh_grounding_usd – WMH grounding cost in USD (OPTIONAL; None local).
       fast_cache_hit_rate – 0..1 fast-cache hit rate (OPTIONAL; None if unknown).
       infra             – optional Infra block (None for local runs).
@@ -94,9 +116,22 @@ class RunState:
     elapsed_s: float
     world_model_mode: Optional[str] = None
     total_tasks: Optional[int] = None
+    task_names: List[str] = field(default_factory=list)
     per_task: List[TaskCard] = field(default_factory=list)
     agents_llm_usd: Optional[float] = None
+    llm_call_count: Optional[int] = None
+    tree_agent_count: Optional[int] = None
+    tokens_in: Optional[int] = None
+    tokens_out: Optional[int] = None
     wmh_grounding_usd: Optional[float] = None
+    # WMH inference tokens (the simulator's own Rose calls). Folded into the
+    # headline token counts so the dash reflects total tokens burned, not just
+    # the agent tree's. None when no WMH is served (real runs).
+    wmh_tokens_in: Optional[int] = None
+    wmh_tokens_out: Optional[int] = None
+    # vCPU / machine cost for the run's isolated Fly machine(s) over the run's
+    # wallclock (rate × elapsed). Folded into total_usd. None off-cloud.
+    infra_usd: Optional[float] = None
     fast_cache_hit_rate: Optional[float] = None
     infra: Optional["Infra"] = None
 
@@ -125,9 +160,17 @@ def _is_completed(status: str) -> bool:
 
 def build_report_card(state: RunState) -> dict:
     """Build the report-card dict from a RunState. Pure — no clock, no I/O."""
-    per_task = list(state.per_task)
+    if state.task_names:
+        by_name = {t.name: t for t in state.per_task}
+        per_task = [
+            by_name.get(name, TaskCard(name=name, status="queued", tokens_in=0, tokens_out=0))
+            for name in state.task_names
+        ]
+        per_task.extend(t for t in state.per_task if t.name not in set(state.task_names))
+    else:
+        per_task = list(state.per_task)
 
-    total = state.total_tasks if state.total_tasks is not None else len(per_task)
+    total = state.total_tasks if state.total_tasks is not None else max(len(state.task_names), len(per_task))
     running = sum(1 for t in per_task if _is_running(t.status))
     completed = sum(1 for t in per_task if _is_completed(t.status))
     # Queued = explicit queued cards, plus any total-vs-known shortfall (tasks
@@ -150,13 +193,46 @@ def build_report_card(state: RunState) -> dict:
     wmh_grounding_usd = (
         round(state.wmh_grounding_usd, 4) if state.wmh_grounding_usd is not None else None
     )
-    total_usd = round(agents_llm_usd + (wmh_grounding_usd or 0.0), 4)
+    # Infra (vCPU/machine) cost: prefer the run-level value; else sum per-bench.
+    infra_usd = (
+        round(state.infra_usd, 4)
+        if state.infra_usd is not None
+        else (
+            round(sum(float(t.infra_usd) for t in per_task if t.infra_usd is not None), 4)
+            if any(t.infra_usd is not None for t in per_task)
+            else None
+        )
+    )
+    total_usd = round(agents_llm_usd + (wmh_grounding_usd or 0.0) + (infra_usd or 0.0), 4)
 
     cost = {
         "agents_llm_usd": agents_llm_usd,
         "wmh_grounding_usd": wmh_grounding_usd,
+        "infra_usd": infra_usd,
         "total_usd": total_usd,
         "fast_cache_hit_rate": state.fast_cache_hit_rate,
+    }
+    agent_tokens_in = (
+        int(state.tokens_in)
+        if state.tokens_in is not None
+        else sum(int(t.tokens_in or 0) for t in per_task)
+    )
+    agent_tokens_out = (
+        int(state.tokens_out)
+        if state.tokens_out is not None
+        else sum(int(t.tokens_out or 0) for t in per_task)
+    )
+    wmh_tokens_in = int(state.wmh_tokens_in or 0)
+    wmh_tokens_out = int(state.wmh_tokens_out or 0)
+    # Headline counts INCLUDE WMH inference tokens (per the cost spec); the
+    # breakout keeps agent-vs-WMH attribution available to the dashboard.
+    metadata = {
+        "tokens_in": agent_tokens_in + wmh_tokens_in,
+        "tokens_out": agent_tokens_out + wmh_tokens_out,
+        "agent_tokens_in": agent_tokens_in,
+        "agent_tokens_out": agent_tokens_out,
+        "wmh_tokens_in": wmh_tokens_in,
+        "wmh_tokens_out": wmh_tokens_out,
     }
 
     infra: Optional[dict] = None
@@ -186,6 +262,7 @@ def build_report_card(state: RunState) -> dict:
         },
         "cost": cost,
         "infra": infra,
+        "metadata": metadata,
         "per_task": [
             {
                 "name": t.name,
@@ -193,6 +270,11 @@ def build_report_card(state: RunState) -> dict:
                 "duration_s": round(t.duration_s, 1) if t.duration_s is not None else None,
                 "cost_usd": round(t.cost_usd, 4) if t.cost_usd is not None else None,
                 "agent_url": t.agent_url,
+                "tokens_in": int(t.tokens_in or 0),
+                "tokens_out": int(t.tokens_out or 0),
+                "world_model_mode": t.world_model_mode or state.world_model_mode,
+                "fast_mode": bool(t.fast_mode) if t.fast_mode is not None else None,
+                "infra_usd": round(t.infra_usd, 4) if t.infra_usd is not None else None,
             }
             for t in per_task
         ],
@@ -295,7 +377,7 @@ def write_report_card(card: dict, context_dir: Union[str, Path]) -> Path:
 
 
 class ReportCardEmitter:
-    """Cadence-driven emitter: render to stdout + write JSON at most q60s.
+    """Cadence-driven emitter: render to stdout + write JSON at most once per second.
 
     The clock is injected (`now`) so cadence is deterministically testable.
     `maybe_emit` emits when >= EMIT_INTERVAL_S has elapsed since the last emit,

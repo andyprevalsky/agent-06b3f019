@@ -59,8 +59,10 @@ def _sample_state(**overrides) -> RunState:
         total_tasks=4,
         per_task=[
             TaskCard(name="chat-mode", status="passed", duration_s=74.0, cost_usd=0.09,
-                     agent_url="http://localhost:5050/?agent-id=aaa"),
-            TaskCard(name="web-search", status="failed", duration_s=120.0, cost_usd=0.20),
+                     agent_url="http://localhost:5050/?agent-id=aaa", tokens_in=1200,
+                     tokens_out=300),
+            TaskCard(name="web-search", status="failed", duration_s=120.0, cost_usd=0.20,
+                     tokens_in=2000, tokens_out=500),
             TaskCard(name="grep", status="running"),
             TaskCard(name="deep-research", status="queued"),
         ],
@@ -96,15 +98,82 @@ def test_report_card_schema_fields_and_types():
     assert isinstance(results["success_rate"], float)
 
     cost = card["cost"]
-    for key in ("agents_llm_usd", "wmh_grounding_usd", "total_usd", "fast_cache_hit_rate"):
+    for key in ("agents_llm_usd", "wmh_grounding_usd", "infra_usd", "total_usd", "fast_cache_hit_rate"):
         assert key in cost
     assert isinstance(cost["agents_llm_usd"], float)
     assert isinstance(cost["total_usd"], float)
 
     assert isinstance(card["per_task"], list)
     row = card["per_task"][0]
-    for key in ("name", "status", "duration_s", "cost_usd", "agent_url"):
+    for key in (
+        "name",
+        "status",
+        "duration_s",
+        "cost_usd",
+        "agent_url",
+        "tokens_in",
+        "tokens_out",
+        "world_model_mode",
+        "infra_usd",
+    ):
         assert key in row
+    assert "stop_metadata" not in row
+    # Headline counts include WMH tokens (0 here); breakout keeps attribution.
+    assert card["metadata"] == {
+        "tokens_in": 3200,
+        "tokens_out": 800,
+        "agent_tokens_in": 3200,
+        "agent_tokens_out": 800,
+        "wmh_tokens_in": 0,
+        "wmh_tokens_out": 0,
+    }
+
+
+def test_wmh_tokens_fold_into_headline_and_infra_folds_into_total():
+    state = _sample_state(
+        wmh_tokens_in=10_000,
+        wmh_tokens_out=2_000,
+        wmh_grounding_usd=0.05,
+        infra_usd=0.02,
+    )
+    card = build_report_card(state)
+    meta = card["metadata"]
+    # per_task agent totals are 1200+2000=3200 in / 300+500=800 out (from _sample_state)
+    assert meta["agent_tokens_in"] == 3200 and meta["agent_tokens_out"] == 800
+    assert meta["wmh_tokens_in"] == 10_000 and meta["wmh_tokens_out"] == 2_000
+    assert meta["tokens_in"] == 13_200 and meta["tokens_out"] == 2_800
+    # total = agents_llm + wmh_grounding + infra
+    cost = card["cost"]
+    assert cost["infra_usd"] == 0.02
+    assert cost["total_usd"] == round(cost["agents_llm_usd"] + 0.05 + 0.02, 4)
+
+
+def test_infra_usd_derived_from_per_task_when_run_level_absent():
+    state = _sample_state(
+        per_task=[
+            TaskCard(name="a", status="passed", cost_usd=0.10, infra_usd=0.03),
+            TaskCard(name="b", status="passed", cost_usd=0.20, infra_usd=0.04),
+        ],
+        total_tasks=2,
+    )
+    card = build_report_card(state)
+    assert card["cost"]["infra_usd"] == 0.07
+
+
+def test_per_task_world_model_mode_inherits_run_mode_or_overrides():
+    # Per-task None inherits the run-level mode; an explicit per-task mode wins
+    # (per-bench isolation → each bench can differ within one aggregated card).
+    state = _sample_state(
+        world_model_mode="simulate",
+        per_task=[
+            TaskCard(name="sim-bench", status="running"),
+            TaskCard(name="real-bench", status="running", world_model_mode="real"),
+        ],
+        total_tasks=2,
+    )
+    rows = {r["name"]: r for r in build_report_card(state)["per_task"]}
+    assert rows["sim-bench"]["world_model_mode"] == "simulate"
+    assert rows["real-bench"]["world_model_mode"] == "real"
 
 
 def test_cost_derived_from_per_task_when_not_supplied():
@@ -198,6 +267,27 @@ def test_implicit_queued_from_total_shortfall():
     card = build_report_card(state)
     assert card["tasks"]["total"] == 5
     assert card["tasks"]["queued"] == 3  # 5 total - 2 known cards
+
+
+def test_task_names_render_missing_rows_as_queued():
+    state = _sample_state(
+        task_names=["chat-mode", "spawn-sub-agents", "parallel-tool-calls", "user-data-prod-grep"],
+        per_task=[
+            TaskCard(name="chat-mode", status="passed", duration_s=10.0, cost_usd=0.01),
+            TaskCard(name="parallel-tool-calls", status="running"),
+        ],
+        total_tasks=4,
+    )
+    card = build_report_card(state)
+    assert card["tasks"] == {"total": 4, "running": 1, "completed": 1, "queued": 2}
+    assert [row["name"] for row in card["per_task"]] == [
+        "chat-mode",
+        "spawn-sub-agents",
+        "parallel-tool-calls",
+        "user-data-prod-grep",
+    ]
+    queued = [row for row in card["per_task"] if row["status"] == "queued"]
+    assert {row["name"] for row in queued} == {"spawn-sub-agents", "user-data-prod-grep"}
 
 
 def test_total_defaults_to_per_task_length():
@@ -362,10 +452,10 @@ def _make_emitter(tmp_path):
 
 
 def test_emit_interval_constant():
-    assert EMIT_INTERVAL_S == 60.0
+    assert EMIT_INTERVAL_S == 1.0
 
 
-def test_cadence_emits_at_t0_force_not_at_t30_yes_at_t61(tmp_path):
+def test_cadence_emits_at_t0_force_not_at_half_second_yes_at_one_second(tmp_path):
     emitter, clock, captured = _make_emitter(tmp_path)
     state = _sample_state()
 
@@ -376,16 +466,16 @@ def test_cadence_emits_at_t0_force_not_at_t30_yes_at_t61(tmp_path):
     assert len(captured) == 1
     assert (tmp_path / "report-card.json").exists()
 
-    # t=30, not forced → within interval → no emit.
-    clock.t = 30.0
-    card30 = emitter.maybe_emit(state)
-    assert card30 is None
+    # t=0.5, not forced → within interval → no emit.
+    clock.t = 0.5
+    card_half_second = emitter.maybe_emit(state)
+    assert card_half_second is None
     assert len(captured) == 1
 
-    # t=61, not forced → interval elapsed → emit.
-    clock.t = 61.0
-    card61 = emitter.maybe_emit(state)
-    assert card61 is not None
+    # t=1.0, not forced → interval elapsed → emit.
+    clock.t = 1.0
+    card_one_second = emitter.maybe_emit(state)
+    assert card_one_second is not None
     assert len(captured) == 2
 
 
@@ -421,7 +511,7 @@ def test_exactly_at_interval_emits(tmp_path):
     emitter, clock, captured = _make_emitter(tmp_path)
     clock.t = 0.0
     emitter.maybe_emit(_sample_state(), force=True)
-    clock.t = 60.0  # exactly the interval
+    clock.t = 1.0  # exactly the interval
     card = emitter.maybe_emit(_sample_state())
     assert card is not None
     assert len(captured) == 2

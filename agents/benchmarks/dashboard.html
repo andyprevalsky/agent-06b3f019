@@ -44,52 +44,96 @@
   <title>Rose Benchmark Dashboard</title>
   <style>
     :root {
-      --bg: #0d1117;
-      --panel: #161b22;
-      --panel-2: #1c2330;
-      --border: #30363d;
-      --text: #e6edf3;
-      --muted: #8b949e;
-      --accent: #58a6ff;
-      --green: #3fb950;
-      --red: #f85149;
-      --amber: #d29922;
-      --purple: #bc8cff;
+      --bg: #fafafa;
+      --surface: #ffffff;
+      --surface-soft: #f4f4f6;
+      --surface-muted: #ececf0;
+      --border: #dedee5;
+      --text: #121218;
+      --muted: #6f6f7b;
+      --accent: #121218;
+      --green: #17803d;
+      --red: #c9343c;
+      --amber: #b76b13;
+      --blue: #2563eb;
+      --purple: #7a4fd1;
+      --rose-orange: #fe7503;
+      --rose-coral: #fc585c;
+      --rose-pink: #fd5776;
+      --rose-violet: #a76ced;
+      --shadow-subtle: 0 18px 50px rgba(18, 18, 24, 0.08);
+      --shadow-card: 0 8px 24px rgba(18, 18, 24, 0.06);
+      --gradient-rose: linear-gradient(90deg, var(--rose-orange), var(--rose-coral), var(--rose-pink), var(--rose-violet));
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      background: var(--bg);
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 12% 0%, rgba(254, 117, 3, 0.10), transparent 28%),
+        radial-gradient(circle at 88% 6%, rgba(167, 108, 237, 0.10), transparent 30%),
+        linear-gradient(180deg, #ffffff 0%, var(--bg) 44%, #f2f2f5 100%);
       color: var(--text);
-      font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       font-size: 14px;
       line-height: 1.5;
     }
     header {
-      padding: 18px 24px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      padding: 18px 28px;
       border-bottom: 1px solid var(--border);
-      background: var(--panel);
+      background: rgba(255, 255, 255, 0.88);
+      backdrop-filter: blur(18px);
       display: flex;
       flex-wrap: wrap;
       align-items: baseline;
       gap: 8px 20px;
+      box-shadow: 0 1px 0 rgba(18, 18, 24, 0.03);
     }
     header h1 {
-      font-size: 16px;
+      font-size: 15px;
       margin: 0;
       color: var(--accent);
-      letter-spacing: 0.5px;
+      letter-spacing: 0;
+      font-weight: 700;
+    }
+    header h1::before {
+      content: "";
+      display: inline-block;
+      width: 9px;
+      height: 9px;
+      margin-right: 9px;
+      border-radius: 999px;
+      background: var(--gradient-rose);
+      vertical-align: 1px;
+      box-shadow: 0 0 0 4px rgba(252, 88, 92, 0.12);
     }
     .meta { color: var(--muted); }
     .meta strong { color: var(--text); font-weight: 600; }
+    .flag { position: relative; cursor: help; font-size: 12px; margin-left: 3px; vertical-align: 1px; }
+    .flag:hover::after {
+      content: attr(data-tip);
+      position: absolute; left: 50%; bottom: 150%; transform: translateX(-50%);
+      white-space: normal; width: max-content; max-width: 280px;
+      background: #121218; color: #fff; padding: 7px 10px; border-radius: 7px;
+      font-size: 12px; line-height: 1.35; font-weight: 500; z-index: 50;
+      box-shadow: 0 8px 24px rgba(18,18,24,0.22); pointer-events: none;
+    }
+    .flag:hover::before {
+      content: ""; position: absolute; left: 50%; bottom: 150%; transform: translateX(-50%) translateY(6px);
+      border: 5px solid transparent; border-top-color: #121218; z-index: 50; pointer-events: none;
+    }
     .mode-badge {
       display: inline-block;
-      padding: 2px 8px;
-      border-radius: 4px;
+      padding: 3px 9px;
+      border-radius: 999px;
       font-size: 12px;
-      background: var(--panel-2);
+      background: #f7f3ff;
       border: 1px solid var(--border);
       color: var(--purple);
+      font-weight: 600;
     }
     #status-line {
       margin-left: auto;
@@ -106,10 +150,10 @@
       background: var(--muted);
     }
     #status-line.live .dot { background: var(--green); animation: pulse 1.6s infinite; }
-    #status-line.final .dot { background: var(--accent); }
+    #status-line.final .dot { background: var(--rose-coral); }
     #status-line.waiting .dot { background: var(--amber); }
     @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
-    main { padding: 24px; max-width: 1100px; margin: 0 auto; }
+    main { padding: 28px; max-width: 1160px; margin: 0 auto; }
     .waiting-panel {
       padding: 48px 24px;
       text-align: center;
@@ -117,21 +161,32 @@
     }
     .cards {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-      gap: 14px;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 12px;
       margin-bottom: 24px;
     }
     .card {
-      background: var(--panel);
+      position: relative;
+      background: rgba(255, 255, 255, 0.82);
       border: 1px solid var(--border);
       border-radius: 8px;
       padding: 14px 16px;
+      box-shadow: var(--shadow-card);
+      overflow: hidden;
+    }
+    .card::before {
+      content: "";
+      position: absolute;
+      inset: 0 0 auto 0;
+      height: 2px;
+      background: var(--gradient-rose);
+      opacity: 0.75;
     }
     .card h2 {
       margin: 0 0 8px;
       font-size: 11px;
       text-transform: uppercase;
-      letter-spacing: 1px;
+      letter-spacing: 0.08em;
       color: var(--muted);
       font-weight: 600;
     }
@@ -142,27 +197,50 @@
     .v.green { color: var(--green); }
     .v.red { color: var(--red); }
     .v.amber { color: var(--amber); }
+    .v.blue { color: var(--blue); }
     .bar-wrap {
       margin-top: 10px;
       height: 10px;
       border-radius: 5px;
-      background: var(--panel-2);
+      background: var(--surface-muted);
       overflow: hidden;
       border: 1px solid var(--border);
     }
     .bar-fill {
       height: 100%;
-      background: linear-gradient(90deg, var(--green), #56d364);
+      background: var(--green);
       width: 0%;
       transition: width 0.4s ease;
     }
+    .bar-fill.success { background: var(--green); }
+    .bar-fill.in-progress { background: var(--amber); }
+    .bar-fill.failure { background: var(--red); }
+    .segmented-bar {
+      display: flex;
+      margin-top: 12px;
+      height: 10px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: var(--surface-muted);
+      border: 1px solid var(--border);
+    }
+    .segment {
+      height: 100%;
+      width: 0%;
+      transition: width 0.4s ease;
+    }
+    .segment.queued { background: var(--blue); }
+    .segment.running { background: var(--amber); }
+    .segment.passed { background: var(--green); }
+    .segment.failed { background: var(--red); }
     table {
       width: 100%;
       border-collapse: collapse;
-      background: var(--panel);
+      background: rgba(255, 255, 255, 0.88);
       border: 1px solid var(--border);
       border-radius: 8px;
       overflow: hidden;
+      box-shadow: var(--shadow-subtle);
     }
     th, td {
       text-align: left;
@@ -173,30 +251,45 @@
     th {
       color: var(--muted);
       text-transform: uppercase;
-      letter-spacing: 0.5px;
+      letter-spacing: 0.08em;
       font-size: 11px;
-      background: var(--panel-2);
+      background: var(--surface-soft);
     }
     tr:last-child td { border-bottom: none; }
     td.num { text-align: right; font-variant-numeric: tabular-nums; }
-    a { color: var(--accent); text-decoration: none; }
+    a { color: var(--text); text-decoration: none; font-weight: 600; }
     a:hover { text-decoration: underline; }
     .badge {
       display: inline-block;
       padding: 2px 8px;
-      border-radius: 10px;
+      border-radius: 999px;
       font-size: 11px;
       font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 0.4px;
     }
-    .badge.passed { background: rgba(63,185,80,0.15); color: var(--green); }
-    .badge.failed, .badge.error { background: rgba(248,81,73,0.15); color: var(--red); }
-    .badge.transient { background: rgba(210,153,34,0.15); color: var(--amber); }
-    .badge.running { background: rgba(88,166,255,0.15); color: var(--accent); }
-    .badge.queued { background: rgba(139,148,158,0.15); color: var(--muted); }
-    .badge.skipped { background: rgba(188,140,255,0.12); color: var(--purple); }
+    .badge.passed { background: rgba(23,128,61,0.10); color: var(--green); }
+    .badge.failed, .badge.error { background: rgba(201,52,60,0.10); color: var(--red); }
+    .badge.transient { background: rgba(183,107,19,0.12); color: var(--amber); }
+    .badge.running { background: rgba(252,88,92,0.12); color: var(--rose-coral); }
+    .badge.queued { background: rgba(37,99,235,0.10); color: var(--blue); }
+    .badge.skipped { background: rgba(122,79,209,0.10); color: var(--purple); }
+    .badge.sim { background: rgba(122,79,209,0.12); color: var(--purple); }
+    .badge.shadow { background: rgba(183,107,19,0.12); color: var(--amber); }
+    .badge.real { background: rgba(37,99,235,0.10); color: var(--blue); }
     .empty { color: var(--muted); }
+    /* Per-row startup step timeline (queued sub-states) */
+    .phase { color: var(--muted); font-size: 12px; }
+    tr.has-startup td { border-bottom: none; padding-bottom: 4px; }
+    tr.startup-row td { padding: 0 14px 12px; border-bottom: 1px solid var(--border); }
+    .startbar { display: flex; gap: 3px; height: 6px; border-radius: 999px; overflow: hidden; }
+    .startbar .seg { position: relative; background: var(--surface-muted); border-radius: 999px; overflow: hidden; min-width: 6px; }
+    .startbar .seg .fill { height: 100%; width: 0%; border-radius: 999px; transition: width 0.6s linear; }
+    .startbar .seg .seglbl { display: none; }
+    .startbar .seg.done .fill { background: var(--green); }
+    .startbar .seg.active .fill { background: var(--amber); animation: pulse 1.4s infinite; }
+    .startbar .seg.pending .fill { background: transparent; }
+    .startlbl { margin-top: 5px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
   </style>
 </head>
 <body>
@@ -204,6 +297,7 @@
     <h1>ROSE BENCHMARK</h1>
     <span class="meta">run <strong id="run-id">…</strong></span>
     <span class="meta">elapsed <strong id="elapsed">…</strong></span>
+    <span class="meta">code <strong id="code">…</strong></span>
     <span class="mode-badge" id="mode">—</span>
     <span id="status-line" class="loading"><span class="dot"></span><span id="status-text">loading…</span></span>
   </header>
@@ -214,40 +308,33 @@
     <div id="content" style="display:none;">
       <div class="cards">
         <div class="card">
-          <h2>Tasks</h2>
+          <h2>Status</h2>
           <div class="metrics">
-            <span class="metric"><span class="k">total</span> <span class="v" id="t-total">0</span></span>
-            <span class="metric"><span class="k">running</span> <span class="v amber" id="t-running">0</span></span>
-            <span class="metric"><span class="k">done</span> <span class="v" id="t-completed">0</span></span>
-            <span class="metric"><span class="k">queued</span> <span class="v" id="t-queued">0</span></span>
+            <span class="metric"><span class="k">queued</span> <span class="v blue" id="s-queued">0</span></span>
+            <span class="metric"><span class="k">in progress</span> <span class="v amber" id="s-running">0</span></span>
+            <span class="metric"><span class="k">succeeded</span> <span class="v green" id="s-passed">0</span></span>
+            <span class="metric"><span class="k">failed</span> <span class="v red" id="s-failed">0</span></span>
           </div>
-        </div>
-        <div class="card">
-          <h2>Results</h2>
-          <div class="metrics">
-            <span class="metric"><span class="k">passed</span> <span class="v green" id="r-passed">0</span></span>
-            <span class="metric"><span class="k">failed</span> <span class="v red" id="r-failed">0</span></span>
-            <span class="metric"><span class="k">transient</span> <span class="v amber" id="r-transient">0</span></span>
+          <div class="segmented-bar" aria-label="Benchmark status distribution">
+            <div class="segment queued" id="seg-queued"></div>
+            <div class="segment running" id="seg-running"></div>
+            <div class="segment passed" id="seg-passed"></div>
+            <div class="segment failed" id="seg-failed"></div>
           </div>
-          <div class="bar-wrap"><div class="bar-fill" id="rate-bar"></div></div>
           <div class="metric" style="margin-top:6px;"><span class="k">success rate</span> <span class="v" id="r-rate">—</span></div>
         </div>
         <div class="card">
-          <h2>Cost</h2>
+          <h2>Cost & Metadata</h2>
           <div class="metrics">
             <span class="metric"><span class="k">agents</span> <span class="v" id="c-agents">—</span></span>
             <span class="metric"><span class="k">wmh</span> <span class="v" id="c-wmh">—</span></span>
+            <span class="metric"><span class="k">infra (vcpu)</span> <span class="v" id="c-infra">—</span></span>
             <span class="metric"><span class="k">total</span> <span class="v" id="c-total">—</span></span>
             <span class="metric"><span class="k">cache hit</span> <span class="v" id="c-cache">—</span></span>
-          </div>
-        </div>
-        <div class="card" id="infra-card" style="display:none;">
-          <h2>Infra</h2>
-          <div class="metrics">
-            <span class="metric"><span class="k">fleet</span> <span class="v" id="i-fleet">—</span></span>
-            <span class="metric"><span class="k">peak</span> <span class="v" id="i-peak">—</span></span>
-            <span class="metric"><span class="k">wmh served</span> <span class="v" id="i-served">—</span></span>
-            <span class="metric"><span class="k">queue</span> <span class="v" id="i-queue">—</span></span>
+            <span class="metric"><span class="k">tokens in</span> <span class="v" id="m-tokens-in">—</span></span>
+            <span class="metric"><span class="k">tokens out</span> <span class="v" id="m-tokens-out">—</span></span>
+            <span class="metric"><span class="k">wmh tokens</span> <span class="v" id="m-wmh-tokens">—</span></span>
+            <span class="metric"><span class="k">peak fly machines</span> <span class="v" id="m-peak">—</span></span>
           </div>
         </div>
       </div>
@@ -259,6 +346,9 @@
             <th>Status</th>
             <th class="num">Duration</th>
             <th class="num">Cost</th>
+            <th class="num">Infra</th>
+            <th class="num">Tokens In</th>
+            <th class="num">Tokens Out</th>
             <th>Agent</th>
           </tr>
         </thead>
@@ -270,8 +360,8 @@
   <script>
     "use strict";
 
-    // Poll cadence (ms). ~3s per the dashboard spec.
-    var POLL_MS = 3000;
+    // Poll cadence (ms). Keep this tight; benchmark status is a live control surface.
+    var POLL_MS = 1000;
     // Terminal per-task statuses (mirror report_card.py display statuses).
     var TERMINAL = { passed: 1, failed: 1, error: 1, transient: 1, skipped: 1 };
 
@@ -297,9 +387,87 @@
     }
 
     function fmtUsd(v) { return v == null ? "—" : "$" + Number(v).toFixed(4); }
-    function fmtDur(v) { return v == null ? "—" : Math.round(v) + "s"; }
+    function fmtDur(v) {
+      if (v == null) return "—";
+      var remaining = Math.max(0, Math.round(Number(v) || 0));
+      var units = [
+        ["y", 365 * 24 * 60 * 60],
+        ["d", 24 * 60 * 60],
+        ["h", 60 * 60],
+        ["m", 60],
+        ["s", 1],
+      ];
+      var out = "";
+      for (var i = 0; i < units.length; i++) {
+        var label = units[i][0];
+        var size = units[i][1];
+        var amount = Math.floor(remaining / size);
+        if (amount > 0 || (label === "s" && out === "")) {
+          out += amount + label;
+          remaining -= amount * size;
+        }
+      }
+      return out;
+    }
     function fmtPct(v) { return v == null ? "—" : Math.round(Number(v) * 100) + "%"; }
-
+    function fmtCount(v) { return v == null ? "—" : String(v); }
+    function fmtCompactCount(v) {
+      if (v == null) return "—";
+      var n = Number(v) || 0;
+      var abs = Math.abs(n);
+      var units = [
+        { value: 1e9, suffix: "b" },
+        { value: 1e6, suffix: "m" },
+        { value: 1e3, suffix: "k" },
+      ];
+      for (var i = 0; i < units.length; i++) {
+        if (abs >= units[i].value) {
+          var scaled = n / units[i].value;
+          var digits = Math.abs(scaled) >= 100 ? 0 : Math.abs(scaled) >= 10 ? 1 : 2;
+          return scaled.toFixed(digits).replace(/\.0+$|(\.\d*[1-9])0+$/, "$1") + units[i].suffix;
+        }
+      }
+      return String(Math.round(n));
+    }
+    function countOrZero(v) { return v == null ? 0 : Number(v) || 0; }
+    function pctPart(v, total) { return total > 0 ? (Math.max(0, Number(v) || 0) / total * 100) + "%" : "0%"; }
+    // Per-bench world-model badge. simulate/shadow → SIM (WMH served);
+    // real/absent → REAL (hits reality, sim off).
+    // Inline flag icons next to the task name (like the query box): only shown
+    // when a special mode is active, each with a hover description. Real world +
+    // no fast-mode = no icons (the clean default).
+    function flagIcons(t) {
+      var out = "";
+      var m = String(t.world_model_mode || "").toLowerCase();
+      if (m === "simulate") out += ' <span class="flag" data-tip="Simulated world model — the WMH intercepts every environment/tool boundary (no real side effects)">🧪</span>';
+      else if (m === "shadow") out += ' <span class="flag" data-tip="Shadow mode — the WMH predicts alongside the real calls">👁️</span>';
+      if (t.fast_mode) out += ' <span class="flag" data-tip="Fast mode — prompt caching enabled for this agent">⚡</span>';
+      return out;
+    }
+    // Per-row startup timeline (queued sub-states). A thin segmented bar where each
+    // segment is a startup step sized by its EXPECTED time and filled by ELAPSED;
+    // done = full, active = animated + partial, pending = empty. When the last step
+    // fills, the bench starts its run and this bar is replaced by the running row.
+    function startupBar(su) {
+      if (!su || !su.steps || !su.steps.length) return "";
+      var total = Number(su.total_expected_s) || 1;
+      var segs = "";
+      for (var i = 0; i < su.steps.length; i++) {
+        var s = su.steps[i];
+        var flex = (Number(s.expected_s) || 1) / total;
+        var pct = s.status === "done" ? 100
+          : (s.status === "active" ? Math.min(100, (Number(s.elapsed_s) || 0) / Math.max(1, Number(s.expected_s)) * 100) : 0);
+        var tip = s.label + " — " + fmtDur(s.elapsed_s) + " / ~" + fmtDur(s.expected_s);
+        segs += '<div class="seg ' + esc(s.status) + '" style="flex:' + flex + ' 1 0" title="' + esc(tip) + '">' +
+          '<div class="fill" style="width:' + pct + '%"></div><span class="seglbl">' + esc(s.label) + "</span></div>";
+      }
+      var cur = null;
+      for (var j = 0; j < su.steps.length; j++) { if (su.steps[j].status === "active") { cur = su.steps[j]; break; } }
+      var lbl = cur ? (cur.label + " · " + fmtDur(cur.elapsed_s) + " / ~" + fmtDur(cur.expected_s)) : esc(su.label || "");
+      return '<div class="startbar">' + segs + "</div>" +
+        '<div class="startlbl">⏳ ' + esc(lbl) + " — total " + fmtDur(su.total_elapsed_s) +
+        " / ~" + fmtDur(su.total_expected_s) + "</div>";
+    }
     function setStatus(next) {
       state = next;
       var el = $("status-line");
@@ -329,42 +497,59 @@
       $("run-id").textContent = card.run_id || "—";
       $("elapsed").textContent = fmtElapsed(card.elapsed_s);
       $("mode").textContent = card.world_model_mode || "—";
+      if ($("code")) $("code").textContent = card.code || "—";
 
       var tasks = card.tasks || {};
-      $("t-total").textContent = tasks.total || 0;
-      $("t-running").textContent = tasks.running || 0;
-      $("t-completed").textContent = tasks.completed || 0;
-      $("t-queued").textContent = tasks.queued || 0;
-
       var results = card.results || {};
-      $("r-passed").textContent = results.passed || 0;
-      $("r-failed").textContent = results.failed || 0;
-      $("r-transient").textContent = results.transient || 0;
+      var queued = tasks.queued || 0;
+      var running = tasks.running || 0;
+      var passed = results.passed || 0;
+      var failed = (results.failed || 0) + (results.transient || 0);
+      var total = Math.max(0, tasks.total || queued + running + passed + failed);
+      $("s-queued").textContent = queued;
+      $("s-running").textContent = running;
+      $("s-passed").textContent = passed;
+      $("s-failed").textContent = failed;
       $("r-rate").textContent = fmtPct(results.success_rate);
-      var pct = Math.max(0, Math.min(100, Math.round((results.success_rate || 0) * 100)));
-      $("rate-bar").style.width = pct + "%";
+      $("seg-queued").style.width = pctPart(queued, total);
+      $("seg-running").style.width = pctPart(running, total);
+      $("seg-passed").style.width = pctPart(passed, total);
+      $("seg-failed").style.width = pctPart(failed, total);
 
       var cost = card.cost || {};
+      var rows = card.per_task || [];
+      var simulate = card.world_model_mode === "simulate" || (card.infra && card.infra.wmh_served === true);
+      var wmhGrounding = cost.wmh_grounding_usd;
+      if (wmhGrounding == null && simulate) wmhGrounding = 0;
       $("c-agents").textContent = fmtUsd(cost.agents_llm_usd);
-      $("c-wmh").textContent = fmtUsd(cost.wmh_grounding_usd);
+      $("c-wmh").textContent = fmtUsd(wmhGrounding);
+      $("c-infra").textContent = fmtUsd(cost.infra_usd);
       $("c-total").textContent = fmtUsd(cost.total_usd);
       $("c-cache").textContent = fmtPct(cost.fast_cache_hit_rate);
-
-      var infra = card.infra;
-      if (infra) {
-        $("infra-card").style.display = "";
-        $("i-fleet").textContent = infra.fleet_machines == null ? "—" : infra.fleet_machines;
-        $("i-peak").textContent = infra.peak_machines == null ? "—" : infra.peak_machines;
-        $("i-served").textContent = infra.wmh_served == null ? "—" : (infra.wmh_served ? "yes" : "no");
-        $("i-queue").textContent = infra.queue_depth == null ? "—" : infra.queue_depth;
-      } else {
-        $("infra-card").style.display = "none";
+      var metadata = card.metadata || {};
+      var tokensIn = metadata.tokens_in;
+      if (tokensIn == null) {
+        tokensIn = rows.reduce(function (sum, t) { return sum + countOrZero(t.tokens_in); }, 0);
       }
+      var tokensOut = metadata.tokens_out;
+      if (tokensOut == null) {
+        tokensOut = rows.reduce(function (sum, t) { return sum + countOrZero(t.tokens_out); }, 0);
+      }
+      $("m-tokens-in").textContent = fmtCompactCount(tokensIn);
+      $("m-tokens-out").textContent = fmtCompactCount(tokensOut);
+      // WMH inference tokens are folded into the headline counts above; show the
+      // breakout so it's clear how much of the burn is the simulator vs the agents.
+      var wmhIn = metadata.wmh_tokens_in, wmhOut = metadata.wmh_tokens_out;
+      $("m-wmh-tokens").textContent =
+        (wmhIn == null && wmhOut == null)
+          ? "—"
+          : fmtCompactCount(countOrZero(wmhIn)) + " / " + fmtCompactCount(countOrZero(wmhOut));
+      var infra = card.infra;
+      $("m-peak").textContent = infra && infra.peak_machines != null ? infra.peak_machines : "—";
 
-      var rows = card.per_task || [];
       var html = "";
       if (!rows.length) {
-        html = '<tr><td colspan="5" class="empty">No tasks yet…</td></tr>';
+        html = '<tr><td colspan="8" class="empty">No tasks yet…</td></tr>';
       } else {
         for (var i = 0; i < rows.length; i++) {
           var t = rows[i];
@@ -376,14 +561,27 @@
           } else {
             agent = '<span class="empty">—</span>';
           }
+          // While queued, the "duration" cell shows the live startup elapsed so the
+          // per-row timer is visible even without reading the bar underneath.
+          var su = (status === "queued") ? t.startup : null;
+          var durCell = su ? fmtDur(su.total_elapsed_s) : fmtDur(t.duration_s);
+          var statusCell = su
+            ? '<span class="badge queued">queued</span> <span class="phase">' + esc(su.label) + "</span>"
+            : '<span class="badge ' + esc(badgeClass) + '">' + esc(status) + "</span>";
           html +=
-            "<tr>" +
-            "<td>" + esc(t.name) + "</td>" +
-            '<td><span class="badge ' + esc(badgeClass) + '">' + esc(status) + "</span></td>" +
-            '<td class="num">' + esc(fmtDur(t.duration_s)) + "</td>" +
+            '<tr' + (su ? ' class="has-startup"' : "") + ">" +
+            "<td>" + esc(t.name) + flagIcons(t) + "</td>" +
+            "<td>" + statusCell + "</td>" +
+            '<td class="num">' + esc(durCell) + "</td>" +
             '<td class="num">' + esc(fmtUsd(t.cost_usd)) + "</td>" +
+            '<td class="num">' + esc(fmtUsd(t.infra_usd)) + "</td>" +
+            '<td class="num">' + esc(fmtCompactCount(countOrZero(t.tokens_in))) + "</td>" +
+            '<td class="num">' + esc(fmtCompactCount(countOrZero(t.tokens_out))) + "</td>" +
             "<td>" + agent + "</td>" +
             "</tr>";
+          if (su) {
+            html += '<tr class="startup-row"><td colspan="8">' + startupBar(su) + "</td></tr>";
+          }
         }
       }
       $("task-rows").innerHTML = html;

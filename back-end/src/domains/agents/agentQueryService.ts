@@ -52,6 +52,8 @@ export async function getAgentTree(busId: string) {
       progress: agent.progress,
       tools_in_use: agent.toolsInUse,
       message_count: agent.messageCount,
+      tokens_in: agent.tokensIn,
+      tokens_out: agent.tokensOut,
       output_schema: agent.responseSchema,
       structured_output: agent.structuredResponse,
       failure_context:

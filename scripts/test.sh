@@ -89,7 +89,6 @@ if $LIST; then
   echo ""
   echo "  benchmarks"
   (cd agents && source venv/bin/activate && python benchmarks/run_benchmark.py --list 2>/dev/null) | sed 's/^/    /'
-  echo "    (--full runs load-test-sias separately)"
   echo "    (--full prod max concurrency: $FULL_MAX_CONCURRENCY)"
   exit 0
 fi
@@ -310,10 +309,7 @@ collect_bg_suites
 # ── Smoke tests (parallel, only if --smoke --port=N; --full targets prod) ──
 if $SMOKE; then
   if $FULL; then
-    bg_suite "Full Benchmarks (prod non-load)" bash -c "cd agents && source venv/bin/activate && python benchmarks/run_benchmark.py --suite all --prod --ci --parallel --max-concurrency $FULL_MAX_CONCURRENCY --exclude-task load-test-sias"
-    collect_bg_suites
-
-    bg_suite "Full Load Benchmark (prod)" bash -c "cd agents && source venv/bin/activate && python benchmarks/run_benchmark.py --task load-test-sias --prod --ci"
+    bg_suite "Full Benchmarks (prod)" bash -c "cd agents && source venv/bin/activate && python benchmarks/run_benchmark.py --suite all --prod --ci --parallel --max-concurrency $FULL_MAX_CONCURRENCY"
     collect_bg_suites
   else
     # Frontend semantic tests require a running frontend — guard BEFORE any

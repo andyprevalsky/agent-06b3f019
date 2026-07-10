@@ -295,10 +295,10 @@ def test_timeout_default_uses_task_config_when_history_is_missing():
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import _default_timeout_for_task
 
-    task = get_task_by_name("load-test-sias")
+    task = get_task_by_name("chat-mode")
 
-    assert task.timeout_seconds == 300
-    assert _default_timeout_for_task(task) == 300
+    assert task.timeout_seconds == 120
+    assert _default_timeout_for_task(task) == 120
 
 
 def test_timeout_default_respects_explicit_floor():
@@ -633,6 +633,24 @@ def test_benchmark_agent_source_override_validates_known_sources():
             os.environ.pop("BENCHMARK_AGENT_SOURCE", None)
         else:
             os.environ["BENCHMARK_AGENT_SOURCE"] = original_env
+
+
+def test_catalog_world_model_mode_is_optional_and_validated():
+    """Per-bench world_model_mode is optional (absent = real/sim-off) and enum-checked."""
+    import pytest
+
+    from benchmarks.long_horizon import validate_task_contract
+
+    base = {"name": "t", "bench": "pipeline-e2e"}
+
+    # Absent → valid (defaults to real/sim-off at run time).
+    validate_task_contract(dict(base))
+    # Each allowed mode validates.
+    for mode in ("real", "simulate", "shadow"):
+        validate_task_contract({**base, "world_model_mode": mode})
+    # A bogus mode is rejected.
+    with pytest.raises(ValueError):
+        validate_task_contract({**base, "world_model_mode": "sim"})
 
 
 def test_local_benchmark_task_queue_uses_conductor_workspace_only_for_local_urls():
@@ -1942,15 +1960,14 @@ def test_keep_agents_env_preserves_successes_and_failures():
             os.environ["BENCHMARK_KEEP_AGENTS"] = original_env
 
 
-def test_local_plan_runs_load_tests_separately():
-    """Local orchestrator separates load-test-sias from normal parallel batches."""
+def test_local_plan_batches_selected_benchmarks_together():
+    """Local orchestrator runs selected benchmarks as one managed batch."""
     from benchmarks.local import plan_invocations
 
-    invocations = plan_invocations(["chat-mode", "load-test-sias", "browser-agent"])
+    invocations = plan_invocations(["chat-mode", "test-mass-agent-run-0", "browser-agent"])
 
     assert [(i.label, i.tasks, i.is_load) for i in invocations] == [
-        ("non-load", ["chat-mode", "browser-agent"], False),
-        ("load-test-sias", ["load-test-sias"], True),
+        ("benchmarks", ["chat-mode", "test-mass-agent-run-0", "browser-agent"], False),
     ]
 
 
@@ -2041,7 +2058,7 @@ def test_local_benchmark_args_for_multi_task_exclude_complement():
     assert "--suite" in args and "all" in args
     assert "--exclude-task" in args
     excluded = args[args.index("--exclude-task") + 1].split(",")
-    assert "load-test-sias" in excluded
+    assert "test-mass-agent-run-0" in excluded
     assert "chat-mode" not in excluded
     assert "browser-agent" not in excluded
     assert args[args.index("--port") + 1] == "55120"
@@ -2060,13 +2077,13 @@ def test_local_benchmark_args_pass_anon_to_run_benchmark():
     assert "--anon" in args
 
 
-def test_local_benchmark_args_for_single_load_task_not_parallel():
-    """A single load-test invocation is not run with --parallel."""
+def test_local_benchmark_args_for_single_task_not_parallel():
+    """A single task invocation is not run with --parallel."""
     from benchmarks.local import build_benchmark_args
 
-    args = build_benchmark_args(["load-test-sias"], port=55120)
+    args = build_benchmark_args(["test-mass-agent-run-0"], port=55120)
 
-    assert args[args.index("--task") + 1] == "load-test-sias"
+    assert args[args.index("--task") + 1] == "test-mass-agent-run-0"
     assert "--parallel" not in args
     assert "--max-concurrency" not in args
 
@@ -3237,8 +3254,8 @@ def test_phone_auto_approval_requires_active_callee_number():
 
     assert _phone_approval_matches_callee(task, {"question": "Make a phone call to +1 (415) 555-0123?"})
     assert not _phone_approval_matches_callee(task, {"question": "Make a phone call to +1 (650) 555-0123?"})
-def test_unified_catalog_validates_and_covers_all_runner_kinds():
-    """tasks.json is the ONE catalog: valid contract, agent + vitest entries, holding set split."""
+def test_unified_catalog_validates_and_covers_benchmark_tasks():
+    """tasks.json is the benchmark catalog: valid contract, ready entries, holding set split."""
     from benchmarks.long_horizon import EVALUATION_METHODS, validate_catalog
 
     tasks = validate_catalog()
@@ -3247,7 +3264,7 @@ def test_unified_catalog_validates_and_covers_all_runner_kinds():
     statuses = {(t.get("runner", "agent"), t.get("status", "ready")) for t in tasks}
     assert ("agent", "ready") in statuses
     assert ("agent", "incomplete") in statuses
-    assert ("vitest", "ready") in statuses
+    assert {runner for runner, _ in statuses} == {"agent"}
     methods = {e["method"] for t in tasks for e in t.get("evaluators", [])}
     assert methods == EVALUATION_METHODS
     # Enriched long-horizon migrations carry the full environment contract
@@ -3281,6 +3298,55 @@ def test_unified_catalog_delineates_bench_axes():
     assert live["environment"]["mode"] == "live"
     assert live["environment"]["db_fixtures"] == []
     assert live["environment"]["live_targets"] == ["https://www.amazon.com"]
+
+
+def test_browser_search_single_result_tasks_use_browser_only():
+    """Google/Bing search benchmarks exercise browser search, not web_search."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    cases = [
+        ("browser-google-search-single-result", "Google", "google.com"),
+        ("browser-bing-search-single-result", "Bing", "bing.com"),
+    ]
+    for task_name, provider, domain in cases:
+        task = get_task_by_name(task_name)
+        assert task.title == f"Browser {provider} Search Single Result"
+        assert task.start_phase == "execute"
+        assert task.expected_tools == ["spawn_agent"]
+        assert task.requires_browser_agent is True
+        assert task.requires_claude_code is False
+        assert "antibot" in task.tags
+        assert task.world_model_mode == "real"
+        assert task.forbidden_tools == ["web_search", "web_fetch", "spawn_claude_code_agent"]
+        assert "Use a browser agent" in task.prompt
+        assert "Return exactly one non-ad search result" in task.prompt
+        assert task.environment["mode"] == "live"
+        assert task.environment["services"] == [domain]
+        assert domain in task.environment["live_targets"][0]
+        assert task.evaluators[0]["method"] == "single_turn_llm_judge"
+        assert f"exactly one {provider} search result" in task.evaluators[0]["criteria"][1]
+
+
+def test_indeed_account_creation_benchmark_contract():
+    """Indeed account creation is a live browser/auth/anti-bot capability eval."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("browser-indeed-account-create")
+    assert task.title == "Browser Indeed Account Creation"
+    assert task.bench == "rose-bench"
+    assert task.start_phase == "execute"
+    assert task.expected_tools == ["spawn_agent"]
+    assert task.requires_browser_agent is True
+    assert task.requires_claude_code is False
+    assert {"browser", "auth", "antibot"} <= set(task.tags)
+    assert task.forbidden_tools == ["web_search", "web_fetch", "spawn_claude_code_agent"]
+    assert "create a new Indeed job-seeker account" in task.prompt
+    assert "Do not apply for jobs" in task.prompt
+    assert task.environment["mode"] == "live"
+    assert task.environment["services"] == ["indeed.com", "email_verification", "antibot"]
+    assert task.environment["live_targets"] == ["https://www.indeed.com/"]
+    assert task.evaluators[0]["method"] == "agentic_llm_judge"
+    assert "signed-in/account-created evidence" in task.evaluators[0]["criteria"][2]
 
 
 def test_unified_catalog_supports_multiple_evaluators_per_eval():
@@ -3318,28 +3384,31 @@ def test_unified_catalog_supports_multiple_evaluators_per_eval():
     )
 
 
-def test_suite_selection_excludes_incomplete_and_external_entries():
-    """Suite runs execute only ready agent evals; incomplete + vitest entries are catalogued but skipped."""
+def test_suite_selection_excludes_incomplete_entries():
+    """Suite runs execute only ready benchmark evals; incomplete entries are catalogued but skipped."""
     from benchmarks.benchmark_tasks import all_tasks, suite_tasks
 
     suite_names = {t.name for t in suite_tasks()}
     all_names = {t.name for t in all_tasks()}
 
-    assert "wait-for-trigger" in all_names and "wait-for-trigger" not in suite_names
+    assert "wait-for-trigger" in suite_names
     assert "raise-my-round" not in all_names
-    assert "smoke-backend-claude-code" in all_names and "smoke-backend-claude-code" not in suite_names
-    # Main added three ready Plaid transaction benchmarks during this branch.
-    assert "load-test-sias" in suite_names
+    assert "smoke-backend-claude-code" not in all_names
+    # Representative ready agent benchmarks stay in suite selection.
+    assert "test-mass-agent-run-0" in suite_names
     assert "browser-agent" in suite_names
     assert {
         "user-data-prod-grep",
         "plaid-transactions-monthly-spend",
         "plaid-transactions-doordash-count",
         "plaid-transactions-dead-subscriptions",
+        "browser-google-search-single-result",
+        "browser-bing-search-single-result",
+        "browser-indeed-account-create",
         "phone-call-client-intake",
         "phone-call-payment",
     } <= suite_names
-    assert len(suite_names) == 34
+    assert len(suite_names) == len([t for t in all_tasks() if t.status == "ready"])
 
 
 def test_every_task_has_base_image_fixture_by_default():
@@ -3355,7 +3424,7 @@ def test_every_task_has_base_image_fixture_by_default():
     by_name = {t.name: t for t in all_tasks()}
     assert by_name["chat-mode"].environment["base_images"] == [DEFAULT_BASE_IMAGE]
     # Declared environments with empty base_images also inherit it
-    assert by_name["load-test-sias"].environment["base_images"] == [DEFAULT_BASE_IMAGE]
+    assert by_name["user-data-prod-grep"].environment["base_images"] == [DEFAULT_BASE_IMAGE]
 
 
 def test_live_fixture_registry_appliers_stay_in_sync():
@@ -3937,7 +4006,7 @@ async def run_all_tests():
     )
     r.record("parallel_tool_calls_explore_sub_agents", test_parallel_tool_calls_smoke_requires_explore_sub_agents)
     r.record("spawn_sub_agents_no_browser_code_detours", test_spawn_sub_agents_smoke_forbids_browser_and_code_detours)
-    r.record("unified_catalog_core_contract", test_unified_catalog_validates_and_covers_all_runner_kinds)
+    r.record("unified_catalog_core_contract", test_unified_catalog_validates_and_covers_benchmark_tasks)
     r.record(
         "unified_catalog_bench_axes",
         test_unified_catalog_delineates_bench_axes,

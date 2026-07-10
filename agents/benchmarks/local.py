@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Local benchmark orchestrator.
 
-Owns local service startup/teardown, benchmark invocation, load-test isolation,
-and post-failure diagnostics. Benchmark definitions remain in tasks.json.
+Owns local service startup/teardown, benchmark invocation, and post-failure
+diagnostics. Benchmark definitions remain in tasks.json.
 """
 
 from __future__ import annotations
@@ -33,7 +33,6 @@ if str(AGENTS_DIR) not in sys.path:
 from benchmarks.benchmark_tasks import all_tasks
 from benchmarks.dashboard import DashboardServer, dashboard_enabled, maybe_launch_dashboard
 
-LOAD_TEST_TASKS = {"load-test-sias"}
 SERVICES_MANIFEST = REPO_ROOT / ".context" / "services.json"
 SERVICE_LOG = REPO_ROOT / ".context" / "local-benchmark-services.log"
 TUNNEL_LOG = REPO_ROOT / ".context" / "local-benchmark-ngrok.log"
@@ -180,20 +179,8 @@ def validate_task_names(names: Sequence[str]) -> list[str]:
     return deduped
 
 
-def split_load_tasks(tasks: Sequence[str]) -> tuple[list[str], list[str]]:
-    non_load = [name for name in tasks if name not in LOAD_TEST_TASKS]
-    load = [name for name in tasks if name in LOAD_TEST_TASKS]
-    return non_load, load
-
-
 def plan_invocations(tasks: Sequence[str]) -> list[BenchmarkInvocation]:
-    non_load, load = split_load_tasks(tasks)
-    invocations: list[BenchmarkInvocation] = []
-    if non_load:
-        invocations.append(BenchmarkInvocation("non-load", list(non_load), is_load=False))
-    for name in load:
-        invocations.append(BenchmarkInvocation(name, [name], is_load=True))
-    return invocations
+    return [BenchmarkInvocation("benchmarks", list(tasks), is_load=False)] if tasks else []
 
 
 def build_task_selector_args(selected_tasks: Sequence[str], all_names: Sequence[str]) -> list[str]:
@@ -1209,9 +1196,7 @@ def tasks_from_args(args: argparse.Namespace) -> list[str]:
         selected = [task for task in all_tasks() if task.status == "ready"]
         if args.bench:
             selected = [task for task in selected if task.bench == args.bench]
-        if args.agent_only:
-            selected = [task for task in selected if task.runner == "agent"]
-        return validate_task_names([task.name for task in selected if task.runner == "agent"])
+        return validate_task_names([task.name for task in selected])
     if args.rerun_failed:
         run_path = resolve_run_path(args.rerun_failed)
         failures = failed_tasks_from_run(run_path)
@@ -1248,11 +1233,10 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run local benchmarks with managed services and diagnostics")
     parser.add_argument("tasks", nargs="*", help="Benchmark task names, e.g. browser-agent cache-coverage")
     parser.add_argument("--suite", help="Benchmark suite/tag to run, e.g. smoke, rose-bench, pipeline-e2e, all")
-    parser.add_argument("--full", action="store_true", help="Run every benchmark; load-test-sias runs by itself")
+    parser.add_argument("--full", action="store_true", help="Run every benchmark")
     parser.add_argument("--eval-suite", action="store_true", help="Run benchmarks/run_eval_suite.py against isolated services")
     parser.add_argument("--rerun-failed", metavar="RUN", help="Rerun failed tasks from a result JSON or 'latest'")
     parser.add_argument("--only", help="Comma-separated eval task names for --eval-suite")
-    parser.add_argument("--agent-only", action="store_true", help="Pass --agent-only through to run_eval_suite.py")
     parser.add_argument(
         "--bench",
         choices=["rose-bench", "pipeline-e2e"],
@@ -1371,8 +1355,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     )
     if selected_modes != 1:
         parser.error("specify exactly one benchmark selection: tasks, --suite, --full, --rerun-failed, or --eval-suite")
-    if not args.eval_suite and (args.only or args.agent_only or args.bench):
-        parser.error("--only, --agent-only, and --bench require --eval-suite")
+    if not args.eval_suite and (args.only or args.bench):
+        parser.error("--only and --bench require --eval-suite")
     if args.eval_suite and (args.bootstrap or args.anon):
         parser.error("--bootstrap and --anon are task-runner options, not --eval-suite options")
     if args.max_concurrency < 1:
@@ -1404,8 +1388,6 @@ def run_eval_suite_invocation(*, port: int, args: argparse.Namespace) -> int:
     command = [sys.executable, "-u", "benchmarks/run_eval_suite.py", "--port", str(port)]
     if args.only:
         command.extend(["--only", args.only])
-    if args.agent_only:
-        command.append("--agent-only")
     if args.bench:
         command.extend(["--bench", args.bench])
     print("\n== Running eval suite")
@@ -1414,25 +1396,8 @@ def run_eval_suite_invocation(*, port: int, args: argparse.Namespace) -> int:
     return subprocess.run(command, cwd=AGENTS_DIR, env=env).returncode
 
 
-def promote_direct_external_runner_tasks(args: argparse.Namespace) -> None:
-    if args.eval_suite or not args.tasks:
-        return
-    by_name = {task.name: task for task in all_tasks()}
-    selected = [by_name[name] for name in validate_task_names(args.tasks)]
-    external = [task.name for task in selected if task.runner != "agent"]
-    if not external:
-        return
-    args.eval_suite = True
-    args.only = ",".join(task.name for task in selected)
-    print(
-        "Routing through eval suite because the selection includes external runner task(s): "
-        + ", ".join(external)
-    )
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
-    promote_direct_external_runner_tasks(args)
     selected_tasks = tasks_from_args(args)
     if checkpoint_requested(args) and len(selected_tasks) != 1:
         raise ValueError("--checkpoint requires exactly one resolved benchmark task")

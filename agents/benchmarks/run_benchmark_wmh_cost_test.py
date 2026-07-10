@@ -127,6 +127,55 @@ def test_is_simulate_mode_reads_env(monkeypatch):
     assert rb._is_simulate_mode() is False
 
 
+def test_tree_token_totals_prefers_root_agent_without_summing_children():
+    agents = [
+        {"agent_id": "root", "tokens_in": 1000, "tokens_out": 120},
+        {"agent_id": "child-1", "tokens_in": 400, "tokens_out": 30},
+        {"agent_id": "child-2", "tokens_in": 700, "tokens_out": 50},
+    ]
+
+    assert rb._tree_token_totals_from_agents(agents, "root") == (1000, 120)
+
+
+def test_tree_token_totals_falls_back_to_largest_agent_counter_when_root_missing():
+    agents = [
+        {"agent_id": "child-1", "tokens_in": 400, "tokens_out": 30},
+        {"agent_id": "child-2", "tokens_in": 700, "tokens_out": 50},
+    ]
+
+    assert rb._tree_token_totals_from_agents(agents, "root") == (700, 50)
+
+
+def test_merge_tool_and_tree_tokens_keeps_tool_total_when_it_covers_chat_loop():
+    assert rb._merge_tool_and_tree_tokens(
+        tool_tokens_in=1500,
+        tool_tokens_out=200,
+        tree_tokens_in=1000,
+        tree_tokens_out=120,
+        tool_tokens_cover_tree=True,
+    ) == (1500, 200)
+
+
+def test_merge_tool_and_tree_tokens_uses_tree_total_when_modern_tool_usage_is_lower():
+    assert rb._merge_tool_and_tree_tokens(
+        tool_tokens_in=300,
+        tool_tokens_out=40,
+        tree_tokens_in=1000,
+        tree_tokens_out=120,
+        tool_tokens_cover_tree=True,
+    ) == (1000, 120)
+
+
+def test_merge_tool_and_tree_tokens_adds_tree_total_when_cache_fallback_misses_chat_loop():
+    assert rb._merge_tool_and_tree_tokens(
+        tool_tokens_in=300,
+        tool_tokens_out=40,
+        tree_tokens_in=1000,
+        tree_tokens_out=120,
+        tool_tokens_cover_tree=False,
+    ) == (1300, 160)
+
+
 def test_report_card_folds_wmh_cost_into_total():
     """End-to-end: a fetched WMH cost lands in cost.wmh_grounding_usd + total_usd."""
     from benchmarks.report_card import RunState, TaskCard, build_report_card

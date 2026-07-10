@@ -41,7 +41,7 @@ import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 import httpx
@@ -62,6 +62,7 @@ from benchmarks.context_validator import validate_context
 from benchmarks.live_fixtures import LIVE_FIXTURE_NAMES, resolve_live_fixtures
 from benchmarks.logs import (
     collect_logs,
+    collect_tree_messages,
     load_env_var,
     start_fly_log_collector,
     start_supabase_realtime_collector,
@@ -312,14 +313,14 @@ def _phone_approval_matches_callee(task: BenchmarkTask, req: dict) -> bool:
     return bool(expected_digits and expected_digits in haystack_digits)
 
 
-def _fetch_wmh_grounding_usd() -> Optional[float]:
-    """Best-effort cumulative WMH grounding cost (USD) from the served WMH.
+def _fetch_wmh_usage() -> Optional[dict]:
+    """Best-effort cumulative WMH usage (cost + tokens) from the served WMH.
 
     The served WMH (`benchmarks.serve_world_model`) exposes `GET /rose_usage`, backed
-    by the per-process accumulator every `RoseWMHProvider` step records into. We query
-    it at report-emit time and surface `total_cost_usd` as the report card's
-    `cost.wmh_grounding_usd`. Returns None when the WMH isn't served or is unreachable —
-    the report card renders "—" rather than an invented number.
+    by the per-process accumulator every `RoseWMHProvider` step records into. Returns
+    the snapshot dict (`total_cost_usd`, `input_tokens`, `output_tokens`, `calls`), or
+    None when no WMH is served / it's unreachable — the report card then renders "—"
+    rather than an invented number.
     """
     base = os.environ.get("WMH_BASE_URL", "").strip().rstrip("/")
     if not base:
@@ -330,13 +331,38 @@ def _fetch_wmh_grounding_usd() -> Optional[float]:
         payload = resp.json()
     except Exception:
         return None
-    cost = payload.get("total_cost_usd") if isinstance(payload, dict) else None
+    return payload if isinstance(payload, dict) else None
+
+
+def _fetch_wmh_grounding_usd() -> Optional[float]:
+    """WMH grounding cost (USD) — thin wrapper over `_fetch_wmh_usage`."""
+    payload = _fetch_wmh_usage()
+    cost = payload.get("total_cost_usd") if payload else None
     if cost is None:
         return None
     try:
         return float(cost)
     except (TypeError, ValueError):
         return None
+
+
+def _infra_usd_for_elapsed(elapsed_s: float) -> Optional[float]:
+    """vCPU/machine cost for `elapsed_s` at the run's per-hour rate.
+
+    The controller (run-bench-cloud / run-bench-fleet) sets BENCHMARK_VM_USD_PER_HOUR
+    from the machine size it provisioned. Absent (local runs / not on a billed VM) →
+    None, so the dashboard shows "—" instead of a fabricated $0.
+    """
+    raw = os.environ.get("BENCHMARK_VM_USD_PER_HOUR", "").strip()
+    if not raw:
+        return None
+    try:
+        rate = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if rate <= 0:
+        return None
+    return round(rate * (max(0.0, float(elapsed_s)) / 3600.0), 6)
 
 
 def _benchmark_context_path() -> Path:
@@ -1489,6 +1515,7 @@ async def _fetch_tree_stats(base_url: str, agent_id: str) -> dict:
 
     Returns dict with:
         agent_count, total_messages, total_cost_cents, active_count, failed_count,
+        tree_tokens_in, tree_tokens_out,
         error_agents (list of dicts with agent_id, status, error details),
         all_agents (list of raw agent dicts from tree API)
     """
@@ -1501,12 +1528,15 @@ async def _fetch_tree_stats(base_url: str, agent_id: str) -> dict:
                 "total_cost_cents": 0,
                 "active_count": 0,
                 "failed_count": 0,
+                "tree_tokens_in": 0,
+                "tree_tokens_out": 0,
                 "error_agents": [],
                 "all_agents": [],
             }
 
         total_msgs = sum(a.get("message_count", 0) for a in agents)
         total_cost = sum(a.get("tree_cost_cents", 0) for a in agents)
+        tree_tokens_in, tree_tokens_out = _tree_token_totals_from_agents(agents, agent_id)
         active = [a for a in agents if a.get("status") == "ACTIVE"]
         failed = [a for a in agents if a.get("status") in ("FAILED", "OUT_OF_CREDITS", "COST_LIMIT_REACHED")]
 
@@ -1516,6 +1546,8 @@ async def _fetch_tree_stats(base_url: str, agent_id: str) -> dict:
             "total_cost_cents": total_cost,
             "active_count": len(active),
             "failed_count": len(failed),
+            "tree_tokens_in": tree_tokens_in,
+            "tree_tokens_out": tree_tokens_out,
             "error_agents": [{"agent_id": a.get("agent_id", "")[:12], "status": a.get("status")} for a in failed],
             "all_agents": agents,
         }
@@ -1526,9 +1558,65 @@ async def _fetch_tree_stats(base_url: str, agent_id: str) -> dict:
             "total_cost_cents": 0,
             "active_count": 0,
             "failed_count": 0,
+            "tree_tokens_in": 0,
+            "tree_tokens_out": 0,
             "error_agents": [],
             "all_agents": [],
         }
+
+
+def _as_nonnegative_int(value) -> int:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(parsed, 0)
+
+
+def _tree_token_totals_from_agents(agents: list[dict], root_agent_id: str) -> tuple[int, int]:
+    if not agents:
+        return 0, 0
+    root = next((a for a in agents if a.get("agent_id") == root_agent_id or a.get("id") == root_agent_id), None)
+    candidates = [root] if root else []
+    candidates.extend(agents)
+    best_in = 0
+    best_out = 0
+    for agent in candidates:
+        if not agent:
+            continue
+        tokens_in = _as_nonnegative_int(agent.get("tokens_in", agent.get("tokensIn")))
+        tokens_out = _as_nonnegative_int(agent.get("tokens_out", agent.get("tokensOut")))
+        best_in = max(best_in, tokens_in)
+        best_out = max(best_out, tokens_out)
+        if agent is root and (tokens_in > 0 or tokens_out > 0):
+            return tokens_in, tokens_out
+    return best_in, best_out
+
+
+def _merge_tool_and_tree_tokens(
+    tool_tokens_in: int,
+    tool_tokens_out: int,
+    tree_tokens_in: int,
+    tree_tokens_out: int,
+    *,
+    tool_tokens_cover_tree: bool,
+) -> tuple[int, int]:
+    """Combine tool-usage and root tree counters without dropping chat-loop tokens.
+
+    Current workers write chat-loop calls to ToolUsage, so tool totals usually
+    already cover the root tree counters. Older backends return cache counters
+    without aggregate token fields; in that case cache totals and root tree
+    counters are separate inputs and must be added.
+    """
+    tool_tokens_in = _as_nonnegative_int(tool_tokens_in)
+    tool_tokens_out = _as_nonnegative_int(tool_tokens_out)
+    tree_tokens_in = _as_nonnegative_int(tree_tokens_in)
+    tree_tokens_out = _as_nonnegative_int(tree_tokens_out)
+    if not tool_tokens_cover_tree:
+        return tool_tokens_in + tree_tokens_in, tool_tokens_out + tree_tokens_out
+    tokens_in = max(tool_tokens_in, tree_tokens_in)
+    tokens_out = max(tool_tokens_out, tree_tokens_out)
+    return tokens_in, tokens_out
 
 
 async def _fetch_message_counts(base_url: str, agent_ids: List[str]) -> Dict[str, int]:
@@ -4266,6 +4354,7 @@ async def run_single_task(
     checkpoint_source_boundary: str = "message-index",
     checkpoint_source_out: Path | None = None,
     checkpoint_tree_out: Path | None = None,
+    on_agent_created: Optional[Callable[[str, str], None]] = None,
 ) -> TaskResult:
     """Run a single benchmark task. Returns TaskResult."""
     if task.name in MINTED_AGENT_ACCOUNT_TASK_NAMES:
@@ -4399,6 +4488,8 @@ async def run_single_task(
         # Handle attachments: create agent first, upload files, then post file messages
         if all_attachments:
             agent_id = await create_agent(base_url, task)
+            if on_agent_created:
+                on_agent_created(task.name, agent_id)
             print(f"    Agent created: {agent_id[:12]}...")
             await start_realtime_capture()
             await start_realtime_monitor()
@@ -4432,6 +4523,8 @@ async def run_single_task(
                 print(f"    🧊 Trace archive start fixture: {start_fixture_ref}")
         else:
             agent_id = await create_agent(base_url, task)
+            if on_agent_created:
+                on_agent_created(task.name, agent_id)
             print(f"    Agent created: {agent_id[:12]}...")
             if task.name == GREP_EXPLORE_STRESS_TASK_NAME:
                 grep_fixture_manifest = _run_grep_fixture("apply-agent-network", agent_id)
@@ -4489,14 +4582,48 @@ async def run_single_task(
         cost_cents = 0.0
         cache_read_input_tokens = 0
         cache_creation_input_tokens = 0
+        llm_call_count = 0
+        tree_agent_count = 0
+        tool_tokens_in = 0
+        tool_tokens_out = 0
+        tool_tokens_cover_tree = False
+        tokens_in = 0
+        tokens_out = 0
         try:
             usage = await get_tool_usage(base_url, agent_id)
             cost_cents = usage.get("total_cost_cents", 0)
             cache_read_input_tokens = usage.get("cache_read_input_tokens", 0)
             cache_creation_input_tokens = usage.get("cache_creation_input_tokens", 0)
+            llm_call_count = int(usage.get("llm_call_count") or 0)
+            tree_agent_count = int(usage.get("agent_count") or 0)
+            raw_tool_tokens_in = usage.get("tokens_in")
+            raw_tool_tokens_out = usage.get("tokens_out")
+            tool_tokens_cover_tree = raw_tool_tokens_in is not None or raw_tool_tokens_out is not None
+            tool_tokens_in = int(raw_tool_tokens_in or 0)
+            tool_tokens_out = int(raw_tool_tokens_out or 0)
+            if not tool_tokens_in:
+                tool_tokens_in = int(cache_read_input_tokens or 0) + int(cache_creation_input_tokens or 0)
         except Exception:
             # Fallback to agent-level cost fields
             cost_cents = agent.get("tree_cost_cents", 0) or agent.get("tool_cost_cents", 0)
+
+        tree_stats = await _fetch_tree_stats(base_url, agent_id)
+        tree_agent_count = max(tree_agent_count, int(tree_stats.get("agent_count") or 0))
+        tree_tokens_in = max(
+            _as_nonnegative_int(tree_stats.get("tree_tokens_in")),
+            _as_nonnegative_int(agent.get("tokens_in", agent.get("tokensIn"))),
+        )
+        tree_tokens_out = max(
+            _as_nonnegative_int(tree_stats.get("tree_tokens_out")),
+            _as_nonnegative_int(agent.get("tokens_out", agent.get("tokensOut"))),
+        )
+        tokens_in, tokens_out = _merge_tool_and_tree_tokens(
+            tool_tokens_in,
+            tool_tokens_out,
+            tree_tokens_in,
+            tree_tokens_out,
+            tool_tokens_cover_tree=tool_tokens_cover_tree,
+        )
 
         # Evaluate — early-fail reasons (per-agent stall, context error, timeout)
         # override a pass. evaluate_task still runs so post-completion checks
@@ -4544,8 +4671,8 @@ async def run_single_task(
         # (excludes root and explore agents; explore agents have no output_schema)
         if task.min_agent_count and passed:
             try:
-                tree_stats = await _fetch_tree_stats(base_url, agent_id)
                 all_agents = tree_stats.get("all_agents", [])
+                tree_agent_count = max(tree_agent_count, int(tree_stats.get("agent_count") or 0))
                 spawn_agent_count = sum(1 for a in all_agents if a.get("parent_agent_id") and a.get("output_schema"))
                 if spawn_agent_count < task.min_agent_count:
                     passed = False
@@ -4564,6 +4691,8 @@ async def run_single_task(
                     actual_counts = _count_logical_tool_calls_from_messages(data.get("messages", []))
                 else:
                     actual_counts = await count_tree_tool_calls(base_url, agent_id)
+                if not llm_call_count:
+                    llm_call_count = sum(int(v) for v in actual_counts.values() if isinstance(v, int))
                 for tool_name, expected_count in (task.expected_tool_counts or {}).items():
                     actual = actual_counts.get(tool_name, 0)
                     if actual != expected_count:
@@ -4623,6 +4752,20 @@ async def run_single_task(
         # Collect prod logs for diagnostics
         print("    Collecting prod logs...")
         logs = await collect_logs(agent_id, data, start_time)
+        # Capture the FULL agent tree's messages (root + every spawned sub-agent) so
+        # the archive can render the fan-out, not just the root. Without this a
+        # for_each/spawn benchmark opens to a lone root with no visible tree. Only
+        # when the run actually fanned out (>1 agent); best-effort — a capture
+        # failure must never fail the benchmark itself.
+        if tree_agent_count and tree_agent_count > 1:
+            try:
+                tree_agents = await get_agent_tree(base_url, agent_id)
+                logs["tree"] = await collect_tree_messages(
+                    agent_id, tree_agents, lambda a: get_agent(base_url, a)
+                )
+                print(f"    Tree messages captured for {len(logs['tree'])} agent(s)")
+            except Exception as tree_err:
+                print(f"    ⚠ tree-message capture failed (archive shows root only): {tree_err}")
         log_summary = []
         for key, label in [
             ("backend_logs", "backend"),
@@ -4662,6 +4805,20 @@ async def run_single_task(
             cache_read_input_tokens=cache_read_input_tokens,
             cache_creation_input_tokens=cache_creation_input_tokens,
             cache_hit_pct=cache_hit_pct,
+            llm_call_count=llm_call_count,
+            tree_agent_count=tree_agent_count,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            stop_metadata={
+                "llm_call_count": llm_call_count,
+                "tree_agent_count": tree_agent_count,
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "message_count": len(messages),
+                "status": agent.get("status", "UNKNOWN"),
+                "cost_cents": round(cost_cents, 2),
+                "cache_hit_pct": cache_hit_pct,
+            },
             fast_mode_cache_enabled=agent.get("fast_mode_cache_enabled") is True,
             context_violations=context_violation_dicts,
             logs=logs,
@@ -4896,9 +5053,9 @@ def resolve_tasks(args) -> List[BenchmarkTask]:
         tasks = all_tasks()
 
     if not explicit_task_names:
-        # Suite selection only runs complete agent evals. `status == "incomplete"` entries
-        # (missing fixtures/judges) and external vitest smokes stay catalogued but are
-        # skipped; explicit --task still targets incomplete agent evals for dev iteration.
+        # Suite selection only runs complete benchmark evals. `status == "incomplete"`
+        # entries (missing fixtures/judges) are skipped; explicit --task still targets
+        # incomplete agent evals for dev iteration.
         tasks = [t for t in tasks if t.runner == "agent" and t.status == "ready"]
 
     excluded_names: set[str] = set()
@@ -5655,16 +5812,27 @@ async def main_async(args):
         )
 
     # Live report card: a standardized progress snapshot emitted to stdout + the run's
-    # context dir at most every 60s (and once, forced, at the end). Purely observational —
+    # context dir once per second (and once, forced, at the end). Purely observational —
     # every emit is wrapped so it can never break a benchmark run.
-    from benchmarks.report_card import ReportCardEmitter, RunState, TaskCard
+    from benchmarks.report_card import Infra, ReportCardEmitter, RunState, TaskCard
 
     _report_emitter = ReportCardEmitter(os.environ.get("BENCHMARK_CONTEXT_DIR", ".context"))
     _report_start = time.monotonic()
+    _live_task_agent_ids: dict[str, str] = {}
+
+    def _remember_live_agent(task_name: str, agent_id: str) -> None:
+        if task_name and agent_id:
+            _live_task_agent_ids[task_name] = agent_id
 
     def _report_snapshot(running_names: set[str]) -> RunState:
         finished = {r.name for r in run.task_results}
         fe = _frontend_url_for_benchmark(base_url)
+        try:
+            peak_fly_raw = os.environ.get("BENCHMARK_PEAK_FLY_MACHINES")
+            peak_fly_machines = int(peak_fly_raw) if peak_fly_raw else None
+        except (TypeError, ValueError):
+            peak_fly_machines = None
+        task_world_model_modes = {t.name: t.world_model_mode for t in tasks if t.world_model_mode}
         per_task: list[TaskCard] = []
         for r in run.task_results:
             status = "skipped" if r.status == "SKIPPED" else ("passed" if r.passed else "failed")
@@ -5675,20 +5843,46 @@ async def main_async(args):
                     duration_s=r.duration_seconds,
                     cost_usd=(r.cost_cents / 100.0) if r.cost_cents is not None else None,
                     agent_url=f"{fe}/?agent-id={r.agent_id}" if r.agent_id else None,
+                    llm_call_count=r.llm_call_count,
+                    tree_agent_count=r.tree_agent_count,
+                    tokens_in=r.tokens_in,
+                    tokens_out=r.tokens_out,
+                    world_model_mode=task_world_model_modes.get(r.name),
+                    fast_mode=bool(getattr(r, "fast_mode_cache_enabled", False)),
+                    infra_usd=_infra_usd_for_elapsed(r.duration_seconds)
+                    if r.duration_seconds is not None
+                    else None,
                 )
             )
         for name in running_names:
             if name not in finished:
-                per_task.append(TaskCard(name=name, status="running"))
+                live_agent_id = _live_task_agent_ids.get(name)
+                per_task.append(
+                    TaskCard(
+                        name=name,
+                        status="running",
+                        agent_url=f"{fe}/?agent-id={live_agent_id}" if live_agent_id else None,
+                        world_model_mode=task_world_model_modes.get(name),
+                    )
+                )
+        elapsed = time.monotonic() - _report_start
+        wmh_usage = _fetch_wmh_usage()
         return RunState(
             run_id=run.run_id,
-            elapsed_s=time.monotonic() - _report_start,
+            elapsed_s=elapsed,
             world_model_mode=os.environ.get("BENCHMARK_WORLD_MODEL_MODE", "real"),
             total_tasks=len(tasks) + len(skipped_claude_tasks),
+            task_names=[t.name for t in tasks] + [t.name for t in skipped_claude_tasks],
             per_task=per_task,
-            # WMH grounding cost is only known when a WMH is served (simulate/shadow);
-            # None for plain real runs so the card renders "—" rather than a fake $0.
-            wmh_grounding_usd=_fetch_wmh_grounding_usd(),
+            # WMH grounding cost + tokens are only known when a WMH is served
+            # (simulate/shadow); None for plain real runs so the card renders "—".
+            wmh_grounding_usd=(float(wmh_usage["total_cost_usd"]) if wmh_usage and wmh_usage.get("total_cost_usd") is not None else None),
+            wmh_tokens_in=(int(wmh_usage.get("input_tokens") or 0) if wmh_usage else None),
+            wmh_tokens_out=(int(wmh_usage.get("output_tokens") or 0) if wmh_usage else None),
+            # Whole-run infra cost = machine rate × wallclock (per-bench isolated
+            # machine); per-task infra_usd above attributes it to each bench.
+            infra_usd=_infra_usd_for_elapsed(elapsed),
+            infra=Infra(peak_machines=peak_fly_machines) if peak_fly_machines is not None else None,
         )
 
     def _emit_report(running_names: set[str], *, force: bool = False) -> None:
@@ -5706,12 +5900,13 @@ async def main_async(args):
     async def _report_ticker() -> None:
         try:
             while True:
-                await asyncio.sleep(15)
+                await asyncio.sleep(1)
                 _emit_report(set(_report_running))
         except asyncio.CancelledError:
             pass
 
     _report_ticker_task = asyncio.create_task(_report_ticker())
+    _emit_report(set(), force=True)
     try:
         if checkpoint_source_mode:
             if len(tasks) != 1:
@@ -5726,6 +5921,7 @@ async def main_async(args):
                 checkpoint_source_boundary=args.checkpoint_source_boundary,
                 checkpoint_source_out=Path(args.checkpoint_source_out),
                 checkpoint_tree_out=Path(args.checkpoint_tree_out) if args.checkpoint_tree_out else None,
+                on_agent_created=_remember_live_agent,
             )
             run.task_results.append(result)
         elif args.parallel:
@@ -5748,14 +5944,27 @@ async def main_async(args):
 
             if max_concurrency is None or max_concurrency >= len(parallel_batch):
                 print(f"\n  Running {len(parallel_batch)} tasks in parallel...")
-                task_runners = [run_single_task(base_url, task, args.keep_failed_agents) for task in parallel_batch]
+                task_runners = [
+                    run_single_task(
+                        base_url,
+                        task,
+                        args.keep_failed_agents,
+                        on_agent_created=_remember_live_agent,
+                    )
+                    for task in parallel_batch
+                ]
             else:
                 print(f"\n  Running {len(parallel_batch)} tasks in parallel (max_concurrency={max_concurrency})...")
                 semaphore = asyncio.Semaphore(max_concurrency)
 
                 async def run_limited(task: BenchmarkTask) -> TaskResult:
                     async with semaphore:
-                        return await run_single_task(base_url, task, args.keep_failed_agents)
+                        return await run_single_task(
+                            base_url,
+                            task,
+                            args.keep_failed_agents,
+                            on_agent_created=_remember_live_agent,
+                        )
 
                 task_runners = [run_limited(task) for task in parallel_batch]
 
@@ -5794,7 +6003,12 @@ async def main_async(args):
                     print(f"\n  Running DB-restore task serially: {task.name}")
                     _report_running.clear()
                     _report_running.add(task.name)
-                    result = await run_single_task(base_url, task, args.keep_failed_agents)
+                    result = await run_single_task(
+                        base_url,
+                        task,
+                        args.keep_failed_agents,
+                        on_agent_created=_remember_live_agent,
+                    )
                     run.task_results.append(result)
                     _report_running.discard(task.name)
                     _emit_report(set())
@@ -5825,7 +6039,12 @@ async def main_async(args):
             for task in tasks:
                 _report_running.clear()
                 _report_running.add(task.name)
-                result = await run_single_task(base_url, task, args.keep_failed_agents)
+                result = await run_single_task(
+                    base_url,
+                    task,
+                    args.keep_failed_agents,
+                    on_agent_created=_remember_live_agent,
+                )
                 run.task_results.append(result)
                 _report_running.discard(task.name)
                 _emit_report(set())

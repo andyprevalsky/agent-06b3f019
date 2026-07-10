@@ -11,7 +11,7 @@ System context:
             v                                     v
     run_eval_suite.py / run_benchmark.py    future /eval-from-trace promotions
 
-The catalog is data-first: `run_benchmark.py` executes agent-runner entries
+The catalog is data-first: `run_benchmark.py` executes benchmark-agent entries
 today via its built-in evaluation (expected tools, receipts, approvals), while
 `evaluators[]` declares the target contract for the judge harness. `status`
 tracks whether an entry is runnable end-to-end (`ready`) or still missing
@@ -36,12 +36,15 @@ CATALOG_VERSION = "0.1"
 EVALUATION_METHODS = {"static_check", "single_turn_llm_judge", "agentic_llm_judge"}
 ENVIRONMENT_MODES = {"synthetic", "live", "hybrid"}
 TASK_STATUSES = {"ready", "incomplete"}
-TASK_RUNNERS = {"agent", "vitest"}
+TASK_RUNNERS = {"agent"}
 # pipeline-e2e = e2e test that a harness pipe/quirk works (write locks trigger,
 # cookies inject, tool plumbing). rose-bench = harness-INDEPENDENT capability
 # measurement: fixture + prompt + evaluators are portable to any harness
 # (swap in Claude Code, measure whether/how fast it succeeds).
 TASK_BENCHES = {"pipeline-e2e", "rose-bench"}
+# Per-bench world-model (sim) toggle. Absent = "real" (sim OFF) by default; the
+# cloud runner exports this per isolated machine so each bench runs in its own mode.
+WORLD_MODEL_MODES = {"real", "simulate", "shadow"}
 IDEA_STATUSES = {"idea", "promoted", "rejected"}
 
 _HERE = Path(__file__).resolve().parent
@@ -162,17 +165,15 @@ def validate_task_contract(raw: dict[str, Any]) -> None:
         raise ValueError(f"{item_id}: runner must be one of {sorted(TASK_RUNNERS)}")
     if raw.get("bench") not in TASK_BENCHES:
         raise ValueError(f"{item_id}: bench must be declared explicitly, one of {sorted(TASK_BENCHES)}")
+    world_model_mode = raw.get("world_model_mode")
+    if world_model_mode is not None and world_model_mode not in WORLD_MODEL_MODES:
+        raise ValueError(f"{item_id}: world_model_mode must be one of {sorted(WORLD_MODEL_MODES)}")
     description = raw.get("description")
     if description is not None and (not isinstance(description, str) or not description.strip()):
         raise ValueError(f"{item_id}: description must be a non-empty string when present")
     source = raw.get("source")
     if source is not None:
         _require_string_list(raw, "source", item_id)
-    if runner == "vitest":
-        if not source:
-            raise ValueError(f"{item_id}: vitest entries must declare source pointers to their test file")
-        if status != "ready":
-            raise ValueError(f"{item_id}: vitest entries mirror existing passing smokes and must be ready")
     environment = raw.get("environment")
     if environment is not None:
         _validate_environment(environment, item_id)

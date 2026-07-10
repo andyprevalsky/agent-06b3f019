@@ -4,17 +4,17 @@ Spawns real agents against prod or localhost, polls for completion, evaluates pa
 
 ## Eval Suite (the ONE catalog)
 
-`tasks.json` is the single canonical eval catalog (see CLAUDE.md "Eval Suite"). Each entry carries the additive eval contract — `status` (`ready` | `incomplete`), `runner` (`agent` | `vitest`), `bench` (`pipeline-e2e` harness plumbing | `rose-bench` harness-independent capability), `description`, `environment`, `evaluators[]`, `source` — validated by `long_horizon.py:validate_catalog()`. Idea kernels live in `long_horizon_ideas.json`.
+`tasks.json` is the single canonical benchmark catalog (see CLAUDE.md "Eval Suite"). Each entry carries the additive eval contract — `status` (`ready` | `incomplete`), `runner` (`agent`), `bench` (`pipeline-e2e` harness plumbing | `rose-bench` harness-independent capability), `description`, `environment`, `evaluators[]`, `source` — validated by `long_horizon.py:validate_catalog()`. Idea kernels live in `long_horizon_ideas.json`.
 
 ```bash
-# THE full-suite entrypoint: every ready eval (agent + external vitest smokes)
+# THE full-suite entrypoint: every ready benchmark eval
 python benchmarks/run_eval_suite.py --port 3001
 
 # Print the holding set (ready vs incomplete)
 python benchmarks/run_eval_suite.py --list
 
-# Run a named subset across runners
-python benchmarks/run_eval_suite.py --only load-test-sias,smoke-backend-sms-supervisor
+# Run a named subset
+python benchmarks/run_eval_suite.py --only test-mass-agent-run-0,browser-agent
 
 # Run one bench axis
 python benchmarks/run_eval_suite.py --bench rose-bench --port 3001
@@ -40,7 +40,7 @@ Declare them per task, composable and ordered:
 
 Validated by `long_horizon.py:_validate_environment`: unknown fixture names and `synthetic` + live fixtures both fail catalog validation. Add a new live fixture by registering a `LiveFixtureSpec` in `live_fixtures.py` and its applier in `run_benchmark.py` — no per-task-name branching.
 
-Suite selection (`run_benchmark.py --suite ...`) runs only `runner: "agent"` + `status: "ready"` entries; explicit `--task <name>` still targets incomplete agent evals for dev iteration. **Never rename an existing task `name`** — it is the primary key into `history/task_durations.jsonl` (success ledger), `history/span_durations.jsonl` (p99 baselines), and `runs/*.json`; a rename orphans that history (guarded by `test_history_ledger_task_names_still_exist_in_catalog`). The FE dev query box reads this same catalog via `GET /api/benchmarks/test-prompts`.
+Suite selection (`run_benchmark.py --suite ...`) runs only `status: "ready"` benchmark entries; explicit `--task <name>` still targets incomplete agent evals for dev iteration. **Never rename an existing task `name`** — it is the primary key into `history/task_durations.jsonl` (success ledger), `history/span_durations.jsonl` (p99 baselines), and `runs/*.json`; a rename orphans that history (guarded by `test_history_ledger_task_names_still_exist_in_catalog`). The FE dev query box reads this same catalog via `GET /api/benchmarks/test-prompts`.
 
 ## Quick Start
 
