@@ -1434,7 +1434,14 @@ class AgentWorkflow:
         """Compatibility wrapper for older tests/callers."""
         await self._refresh_compute_token(user_id)
 
-    async def _post_message(self, text: str, role: str = "ASSISTANT", metadata: Optional[Dict] = None) -> None:
+    async def _post_message(
+        self,
+        text: str,
+        role: str = "ASSISTANT",
+        metadata: Optional[Dict] = None,
+        *,
+        update_tree: bool = True,
+    ) -> None:
         """Post message to database."""
         try:
             await workflow.execute_activity(
@@ -1445,7 +1452,8 @@ class AgentWorkflow:
             )
             # Track message count and broadcast tree state
             self.message_count += 1
-            await self._update_tree_state()
+            if update_tree:
+                await self._update_tree_state()
         except Exception as e:
             workflow.logger.error(f"Failed to post message: {e}")
 
@@ -3003,9 +3011,9 @@ class AgentWorkflow:
         Order:
         1. Post IN_PROGRESS message → FE shows loading state
         2. Generate completion summary (LLM call)
-        3. Post FINISHED message with isFinalSummary → FE renders CompletionSummaryCard
+        3. Mark finished in DB
         4. Update tree state (broadcast COMPLETED)
-        5. Mark finished in DB
+        5. Post FINISHED message with isFinalSummary → FE renders CompletionSummaryCard
         6. Signal parent (if sub-agent)
         7. Save blueprint (fire-and-forget, no UI)
         """
@@ -3120,7 +3128,33 @@ class AgentWorkflow:
             # Calculate cost from token usage (approximate: $0.001/1k input, $0.003/1k output)
             cost_dollars = (self.tokens_in / 1000 * 0.001) + (self.tokens_out / 1000 * 0.003)
 
-            # Post FINISHED message with completion summary (same toolCallId)
+            # Mark finished (includes structured_response for persistence)
+            await workflow.execute_activity(
+                mark_finished,
+                args=[
+                    self.agent_id,
+                    context,
+                    self.token_count,
+                    self.context_size,
+                    len(context),
+                    self.tokens_in,
+                    self.tokens_out,
+                    summary if self.parent_workflow_id else "",
+                    structured_response,
+                ],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+
+            # Broadcast COMPLETED status with structured output to tree
+            # (output_schema is already cached from startup and included in all broadcasts)
+            await self._update_tree_state(progress=1.0, status="COMPLETED", structured_output=structured_response)
+
+            # Post FINISHED message with completion summary (same toolCallId).
+            # This is intentionally after mark_finished so a slow/non-critical
+            # message insert cannot leave a verified agent durably ACTIVE.
+            # Suppress the automatic tree broadcast here; otherwise _post_message
+            # would emit its default ACTIVE state after the explicit COMPLETED update.
             await self._post_message(
                 "",
                 "TOOL",
@@ -3139,28 +3173,7 @@ class AgentWorkflow:
                         "costDollars": round(cost_dollars, 4),
                     },
                 },
-            )
-
-            # Broadcast COMPLETED status with structured output to tree
-            # (output_schema is already cached from startup and included in all broadcasts)
-            await self._update_tree_state(progress=1.0, status="COMPLETED", structured_output=structured_response)
-
-            # Mark finished (includes structured_response for persistence)
-            await workflow.execute_activity(
-                mark_finished,
-                args=[
-                    self.agent_id,
-                    context,
-                    self.token_count,
-                    self.context_size,
-                    len(context),
-                    self.tokens_in,
-                    self.tokens_out,
-                    summary if self.parent_workflow_id else "",
-                    structured_response,
-                ],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
+                update_tree=False,
             )
 
             # Send completion SMS notification (root + SMS-source only)
