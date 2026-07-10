@@ -264,6 +264,10 @@ def _summarize_browser_action_for_log(action: Any) -> Dict[str, Any]:
     return {key: value for key, value in summary.items() if value not in (None, {}, [])}
 
 
+def _summarize_browser_action_history_entry(action_name: str, action: Any) -> str:
+    return f"{action_name}: {json.dumps(_summarize_browser_action_for_log(action), sort_keys=True, default=str)[:500]}"
+
+
 def _stable_target_text(value: Any, *, max_length: int = 500) -> str:
     return " ".join(str(value or "").split())[:max_length]
 
@@ -2448,7 +2452,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             else:
                 logger.info("\U0001f50d Fetching session info for resumed task", task_id=task_id)
                 session_info = await fetch_session_info(config, task_id, validate_live=True)
-                if session_info.get("same_session_available") is False:
+                if session_info.get("same_session_available") is not True:
                     unavailable_reason = session_info.get("same_session_unavailable_reason")
                     logger.warning(
                         "Existing Steel session unavailable for browser resume; creating replacement session",
@@ -3495,7 +3499,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 reasoning_messages.append(thinking)
                 await save_browser_assistant_message(agent_id, thinking, task_id)
 
-            action_summary.append(f"{action_name}: {json.dumps(unified_action, sort_keys=True, default=str)[:500]}")
+            action_summary.append(_summarize_browser_action_history_entry(action_name, unified_action))
             if len(action_summary) > 20:
                 action_summary[:] = action_summary[-20:]
             if action_name == "attempt_completion":

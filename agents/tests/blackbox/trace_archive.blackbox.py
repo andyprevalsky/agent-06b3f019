@@ -770,6 +770,37 @@ def test_prod_backend_failure_outbox_avoids_filesystem_root_context():
         teardown_mock()
 
 
+def test_prod_local_root_uses_fallback_for_repo_context_path():
+    import helpers.trace_archive as trace_archive
+
+    old_env = {
+        "FLY_APP_NAME": os.environ.get("FLY_APP_NAME"),
+        "TRACE_ARCHIVE_LOCAL_ROOT": os.environ.get("TRACE_ARCHIVE_LOCAL_ROOT"),
+        "CONDUCTOR_WORKSPACE_NAME": os.environ.get("CONDUCTOR_WORKSPACE_NAME"),
+    }
+    old_repo_root = trace_archive._REPO_ROOT
+    old_local_root = trace_archive._LOCAL_ROOT
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            trace_archive._REPO_ROOT = Path(tmp) / "repo"
+            trace_archive._LOCAL_ROOT = trace_archive._REPO_ROOT / ".context" / "trace-archive"
+            os.environ["FLY_APP_NAME"] = "rose-agent-prod"
+            os.environ.pop("TRACE_ARCHIVE_LOCAL_ROOT", None)
+            os.environ.pop("CONDUCTOR_WORKSPACE_NAME", None)
+
+            assert trace_archive._local_root() == trace_archive._PROD_FALLBACK_LOCAL_ROOT
+    finally:
+        trace_archive._REPO_ROOT = old_repo_root
+        trace_archive._LOCAL_ROOT = old_local_root
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        teardown_mock()
+
+
 async def test_browser_http_cache_ops_do_not_archive():
     """browser_http cache ops fire per page subresource (thousands/session) and
     must never hit the archive endpoint; llm-kind ops keep archiving."""
@@ -867,6 +898,10 @@ async def run_all_tests():
     r.record(
         "prod_backend_failure_outbox_avoids_filesystem_root_context",
         test_prod_backend_failure_outbox_avoids_filesystem_root_context,
+    )
+    r.record(
+        "prod_local_root_uses_fallback_for_repo_context_path",
+        test_prod_local_root_uses_fallback_for_repo_context_path,
     )
     r.record("oversized_artifact_is_dropped_with_warning", test_oversized_artifact_is_dropped_with_warning)
     await r.record_async("browser_http_cache_ops_do_not_archive", test_browser_http_cache_ops_do_not_archive)

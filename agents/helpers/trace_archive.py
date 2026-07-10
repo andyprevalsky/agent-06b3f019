@@ -52,11 +52,23 @@ def _rooted_at_filesystem_context(path: Path) -> bool:
     return path.is_absolute() and len(path.parts) >= 2 and path.parts[1] == ".context"
 
 
+def _path_is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _uses_default_repo_local_root(path: Path) -> bool:
+    return _rooted_at_filesystem_context(path) or _path_is_relative_to(path, _REPO_ROOT)
+
+
 def _local_root() -> Path:
     configured = os.environ.get("TRACE_ARCHIVE_LOCAL_ROOT", "").strip()
     if configured:
         return Path(configured).expanduser()
-    if _is_production() and not os.environ.get("CONDUCTOR_WORKSPACE_NAME") and _rooted_at_filesystem_context(_LOCAL_ROOT):
+    if _is_production() and not os.environ.get("CONDUCTOR_WORKSPACE_NAME") and _uses_default_repo_local_root(_LOCAL_ROOT):
         return _PROD_FALLBACK_LOCAL_ROOT
     return _LOCAL_ROOT
 
@@ -274,7 +286,10 @@ def list_local_bundle_ids() -> list[str]:
     local_root = _local_root()
     if not local_root.exists():
         return []
-    return sorted(item.name for item in local_root.iterdir() if item.is_dir())
+    try:
+        return sorted(item.name for item in local_root.iterdir() if item.is_dir())
+    except FileNotFoundError:
+        return []
 
 
 def list_local_artifact_paths(root_agent_id: str) -> list[str]:

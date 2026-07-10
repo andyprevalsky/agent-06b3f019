@@ -125,6 +125,7 @@ async def test_cdp_use_websocket_patch_disables_proxy_discovery():
 def test_browser_action_log_summary_redacts_payment_secrets():
     from domains.spawn_browser_agent_v3.handler import (
         _redact_browser_log_value,
+        _summarize_browser_action_history_entry,
         _summarize_browser_action_for_log,
         _summarize_payment_request_for_log,
     )
@@ -158,7 +159,19 @@ def test_browser_action_log_summary_redacts_payment_secrets():
     assert payment_summary["line_items_count"] == 1
     assert _redact_browser_log_value("card_cvv", "SHOULD_NOT_LOG_CVV") == "<redacted>"
 
-    serialized = json.dumps({"action": action_summary, "payment": payment_summary}, sort_keys=True)
+    history_entry = _summarize_browser_action_history_entry(
+        "input_text",
+        {
+            "action": "input_text",
+            "params": {
+                "text": "SHOULD_NOT_LOG_TYPED_TEXT",
+                "card_cvv": "SHOULD_NOT_LOG_CVV",
+                "merchant": "Blick Art Materials",
+            },
+        },
+    )
+
+    serialized = json.dumps({"action": action_summary, "payment": payment_summary, "history": history_entry}, sort_keys=True)
     assert "SHOULD_NOT_LOG_TYPED_TEXT" not in serialized
     assert "SHOULD_NOT_LOG_CVV" not in serialized
     assert "SHOULD_NOT_LOG_PASSWORD" not in serialized
@@ -7163,6 +7176,7 @@ async def test_spawn_browser_activity_raises_when_resumed_session_has_no_cdp_url
         "current_url": "https://www.amazon.com/ap/signin",
         "start_url": "https://www.google.com/",
         "user_settings": {"name": "Resume Shopper", "addressLine1": "1 Main St"},
+        "same_session_available": True,
     }
 
     with (
@@ -7174,6 +7188,12 @@ async def test_spawn_browser_activity_raises_when_resumed_session_has_no_cdp_url
         patch(
             "domains.spawn_browser_agent_v3.handler.fetch_session_info",
             AsyncMock(return_value=session_info),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler._propagate_browser_credentials_with_progress",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
         ),
     ):
         try:
@@ -7215,6 +7235,12 @@ async def test_spawn_browser_activity_auth_assistance_resume_reuses_live_session
         patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
         patch("domains.spawn_browser_agent_v3.handler.resume_browser_session", resume_mock),
         patch("domains.spawn_browser_agent_v3.handler.fetch_session_info", fetch_mock),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler._propagate_browser_credentials_with_progress",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
     ):
         try:
             await spawn_browser_agent_activity_v3(
@@ -7274,6 +7300,12 @@ async def test_spawn_browser_activity_auth_assistance_resume_falls_back_when_liv
         patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
         patch("domains.spawn_browser_agent_v3.handler.resume_browser_session", resume_mock),
         patch("domains.spawn_browser_agent_v3.handler.fetch_session_info", fetch_mock),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler._propagate_browser_credentials_with_progress",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
     ):
         try:
             await spawn_browser_agent_activity_v3(
@@ -7334,6 +7366,12 @@ async def test_spawn_browser_activity_write_approval_resume_falls_back_when_live
         patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
         patch("domains.spawn_browser_agent_v3.handler.resume_browser_session", resume_mock),
         patch("domains.spawn_browser_agent_v3.handler.fetch_session_info", fetch_mock),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler._propagate_browser_credentials_with_progress",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
     ):
         try:
             await spawn_browser_agent_activity_v3(
@@ -7360,6 +7398,69 @@ async def test_spawn_browser_activity_write_approval_resume_falls_back_when_live
 
     assert fetch_mock.await_count == 1
     assert fetch_mock.await_args.args[1] == "task-1"
+    assert fetch_mock.await_args.kwargs == {"validate_live": True}
+    assert resume_mock.await_count == 1
+    assert resume_mock.await_args.args[1] == "task-1"
+
+
+async def test_spawn_browser_activity_write_approval_resume_falls_back_when_liveness_missing():
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    existing_session_info = {
+        "session_id": "session-1",
+        "debug_url": "https://steel.example/debug",
+        "ws_url": "ws://possibly-stale",
+        "fingerprint_injection": {"ua": "test"},
+        "passwords": [],
+    }
+    replacement_session_info = {
+        "session_id": "session-2",
+        "debug_url": "https://steel.example/debug2",
+        "ws_url": None,
+        "fingerprint_injection": {"ua": "test"},
+        "passwords": [],
+    }
+    resume_mock = AsyncMock(return_value=replacement_session_info)
+    fetch_mock = AsyncMock(return_value=existing_session_info)
+
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.handler.load_config",
+            return_value=_fake_config(),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
+        patch("domains.spawn_browser_agent_v3.handler.resume_browser_session", resume_mock),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_session_info", fetch_mock),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler._propagate_browser_credentials_with_progress",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
+    ):
+        try:
+            await spawn_browser_agent_activity_v3(
+                user_id="user-1",
+                agent_id="agent-1",
+                goal="Buy socks",
+                tool_call_id="tool-1",
+                task_id="task-1",
+                is_resume=True,
+                output_schema={"fields": [{"name": "result", "type": "string"}]},
+                use_claude_mode=False,
+                write_lock_resume_state={
+                    "approval_type": "purchase",
+                    "task_id": "task-1",
+                    "session_id": "session-1",
+                    "cdp_url": "ws://possibly-stale",
+                    "pending_action": {"action": "click", "index": 1, "params": {}},
+                },
+            )
+        except RuntimeError as exc:
+            assert "No CDP URL provided" in str(exc)
+        else:
+            raise AssertionError("expected missing fallback cdp_url to raise")
+
     assert fetch_mock.await_args.kwargs == {"validate_live": True}
     assert resume_mock.await_count == 1
     assert resume_mock.await_args.args[1] == "task-1"
@@ -7579,6 +7680,7 @@ async def test_spawn_browser_activity_auth_assistance_keeps_live_steel_session_o
         "fingerprint_injection": None,
         "passwords": [],
         "auth_options": {"realm": "example.com"},
+        "same_session_available": True,
     }
     auth_request = {
         "request": {"id": "uar1"},
@@ -9146,6 +9248,10 @@ async def run_all_tests():
     await r.record_async(
         "activity_write_approval_resume_fallback_expired",
         test_spawn_browser_activity_write_approval_resume_falls_back_when_live_session_expired,
+    )
+    await r.record_async(
+        "activity_write_approval_resume_fallback_liveness_missing",
+        test_spawn_browser_activity_write_approval_resume_falls_back_when_liveness_missing,
     )
     await r.record_async(
         "browser_supervisor_recovery_clicks_dismiss",
