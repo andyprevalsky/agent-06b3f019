@@ -121,6 +121,7 @@ from .service_crypto import (
 from .types import ClaudeTokenState
 
 logger = structlog.get_logger()
+_background_browser_cleanup_tasks: set[asyncio.Task] = set()
 
 
 def _patch_cdp_use_websocket_proxy_default() -> None:
@@ -2072,6 +2073,170 @@ async def _finalize_browser_recording_for_fe_resilient(
             error=repr(exc),
         )
         return None
+
+
+def _schedule_browser_cleanup(
+    *,
+    agent_id: str,
+    task_id: Optional[str],
+    user_id: str,
+    browser_url: Optional[str],
+    browser_session_metadata: Dict[str, Any],
+    input_page: Optional[Any],
+    start_url: str,
+    cursor_streamer: Optional[BrowserCursorRealtimeStreamer],
+    interaction_layer_task: Optional[asyncio.Task],
+    humanizer: Optional[Any],
+    browser_network_recorder: Optional[BrowserNetworkRecorder],
+    network_recorder_task: Optional[asyncio.Task],
+    browser_recorder: Optional[BrowserAgentRecorder],
+    dom_service: Optional[Any],
+    playwright_browser: Optional[Any],
+    playwright_instance: Optional[Any],
+    playwright_driver_pid: Optional[int],
+) -> asyncio.Task:
+    async def _cleanup() -> None:
+        logger.info("Browser cleanup started in background", agent_id=agent_id, task_id=task_id)
+        resolved_network_recorder = browser_network_recorder
+        try:
+            if cursor_streamer:
+                with contextlib.suppress(Exception):
+                    await cursor_streamer.close()
+            if input_page and _botsigged_diagnostics_enabled(start_url):
+                with contextlib.suppress(Exception):
+                    capture = await _capture_botsigged_diagnostics(
+                        input_page,
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        checkpoint="final",
+                    )
+                    if capture and task_id:
+                        await save_browser_action_message(
+                            agent_id=agent_id,
+                            title="BotSigged diagnostics saved",
+                            task_id=task_id,
+                            message=f"Local BotSigged diagnostics: {capture['path']}",
+                            status=MessageStatus.FINISHED,
+                            browser_url=browser_url or "",
+                            action_type="diagnostics",
+                            tool_call_id=str(uuid_module.uuid4()),
+                            extra_metadata={
+                                "botsigged_diagnostics_path": capture["path"],
+                                "botsigged_last_score": capture["diagnostics"].get("lastScore"),
+                                "botsigged_signal_counts": capture["diagnostics"].get("signalCounts"),
+                            },
+                        )
+            if interaction_layer_task is not None and not interaction_layer_task.done():
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(asyncio.shield(interaction_layer_task), timeout=10)
+            if humanizer:
+                with contextlib.suppress(Exception):
+                    await humanizer.close()
+            if network_recorder_task is not None:
+                with contextlib.suppress(Exception):
+                    resolved_network_recorder = await asyncio.wait_for(network_recorder_task, timeout=10)
+            if resolved_network_recorder:
+                with contextlib.suppress(Exception):
+                    network_index_path = await resolved_network_recorder.close()
+                    if network_index_path and task_id:
+                        await save_browser_action_message(
+                            agent_id=agent_id,
+                            title="Browser network recording saved",
+                            task_id=task_id,
+                            message=f"Local browser network log: {network_index_path}",
+                            status=MessageStatus.FINISHED,
+                            browser_url=browser_url or "",
+                            action_type="network_recording",
+                            tool_call_id=str(uuid_module.uuid4()),
+                            extra_metadata={"network_recording_path": str(network_index_path)},
+                        )
+            if browser_recorder:
+                await _finalize_browser_recording_for_fe_resilient(
+                    browser_recorder=browser_recorder,
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    user_id=user_id,
+                    browser_url=browser_url,
+                    browser_session_metadata=browser_session_metadata,
+                )
+            if dom_service:
+                with contextlib.suppress(Exception):
+                    await dom_service.disconnect()
+            await _stop_playwright_resources(
+                playwright_browser,
+                playwright_instance,
+                agent_id,
+                driver_pid=playwright_driver_pid,
+            )
+        except Exception as exc:  # noqa: BLE001 - background cleanup must never crash the worker loop
+            logger.warning(
+                "Browser cleanup failed in background",
+                agent_id=agent_id,
+                task_id=task_id,
+                error=extract_error_message(exc),
+            )
+        finally:
+            _clear_browser_activity_memory_buffers(
+                browser_recorder=browser_recorder,
+                browser_network_recorder=resolved_network_recorder,
+            )
+            logger.info("Browser cleanup finished in background", agent_id=agent_id, task_id=task_id)
+
+    cleanup_task = asyncio.create_task(_cleanup())
+    _background_browser_cleanup_tasks.add(cleanup_task)
+
+    def _discard(done: asyncio.Task) -> None:
+        _background_browser_cleanup_tasks.discard(done)
+        with contextlib.suppress(BaseException):
+            done.result()
+
+    cleanup_task.add_done_callback(_discard)
+    return cleanup_task
+
+
+# A single background cleanup can run up to BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS
+# (recording finalization, default 45s) plus the two bounded 10s waits for the
+# interaction-layer and network-recorder tasks. Size the shutdown drain to cover that
+# worst case so we don't cut teardown short and orphan browser sessions/driver PIDs.
+# (On Fly this is still capped by the platform SIGTERM→SIGKILL window; the drain logs
+# a warning and returns best-effort if the platform kills us first.)
+_BACKGROUND_BROWSER_CLEANUP_DRAIN_TIMEOUT_SECONDS = float(BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS) + 20.0
+
+
+async def drain_background_browser_cleanups(
+    timeout: float = _BACKGROUND_BROWSER_CLEANUP_DRAIN_TIMEOUT_SECONDS,
+) -> None:
+    """Await any in-flight background browser cleanups before the worker exits.
+
+    ``_schedule_browser_cleanup`` detaches teardown into
+    ``_background_browser_cleanup_tasks`` so the activity can return without
+    blocking on recording finalization. Those detached tasks are invisible to
+    ``worker.shutdown()``, so on graceful shutdown we must drain them here or
+    Playwright/Steel teardown gets cut short, orphaning browser sessions and
+    driver PIDs. Called from the worker shutdown path (see ``worker.py``). The
+    default timeout covers the worst-case single-cleanup latency; drain returns
+    as soon as all tasks finish, so the cap only bites on a genuinely stuck one.
+    """
+    pending = [task for task in _background_browser_cleanup_tasks if not task.done()]
+    if not pending:
+        return
+    logger.info(
+        "Draining background browser cleanups before shutdown",
+        count=len(pending),
+        timeout=timeout,
+    )
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(asyncio.gather(*pending, return_exceptions=True)),
+            timeout=timeout,
+        )
+        logger.info("Background browser cleanups drained")
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Background browser cleanup drain timed out; some sessions may be orphaned",
+            remaining=len([task for task in pending if not task.done()]),
+            timeout=timeout,
+        )
 
 
 @activity.defn
@@ -4573,76 +4738,24 @@ Based on this feedback, I need to continue working on the task and address the i
         _heartbeat_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await _heartbeat_task
-        if cursor_streamer:
-            with contextlib.suppress(Exception):
-                await cursor_streamer.close()
-        if input_page and _botsigged_diagnostics_enabled(start_url):
-            with contextlib.suppress(Exception):
-                capture = await _capture_botsigged_diagnostics(
-                    input_page,
-                    agent_id=agent_id,
-                    task_id=task_id,
-                    checkpoint="final",
-                )
-                if capture and task_id:
-                    await save_browser_action_message(
-                        agent_id=agent_id,
-                        title="BotSigged diagnostics saved",
-                        task_id=task_id,
-                        message=f"Local BotSigged diagnostics: {capture['path']}",
-                        status=MessageStatus.FINISHED,
-                        browser_url=browser_url or "",
-                        action_type="diagnostics",
-                        tool_call_id=str(uuid_module.uuid4()),
-                        extra_metadata={
-                            "botsigged_diagnostics_path": capture["path"],
-                            "botsigged_last_score": capture["diagnostics"].get("lastScore"),
-                            "botsigged_signal_counts": capture["diagnostics"].get("signalCounts"),
-                        },
-                    )
-        if interaction_layer_task is not None and not interaction_layer_task.done():
-            # Settle the concurrent interaction-layer setup (it may still be
-            # assigning `humanizer`/`browser_recorder`) before tearing down.
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(asyncio.shield(interaction_layer_task), timeout=10)
-        if humanizer:
-            with contextlib.suppress(Exception):
-                await humanizer.close()
-        if network_recorder_task is not None:
-            with contextlib.suppress(Exception):
-                browser_network_recorder = await asyncio.wait_for(network_recorder_task, timeout=10)
-        if browser_network_recorder:
-            with contextlib.suppress(Exception):
-                network_index_path = await browser_network_recorder.close()
-                if network_index_path and task_id:
-                    await save_browser_action_message(
-                        agent_id=agent_id,
-                        title="Browser network recording saved",
-                        task_id=task_id,
-                        message=f"Local browser network log: {network_index_path}",
-                        status=MessageStatus.FINISHED,
-                        browser_url=browser_url or "",
-                        action_type="network_recording",
-                        tool_call_id=str(uuid_module.uuid4()),
-                        extra_metadata={"network_recording_path": str(network_index_path)},
-                    )
-        if browser_recorder:
-            await _finalize_browser_recording_for_fe_resilient(
-                browser_recorder=browser_recorder,
-                agent_id=agent_id,
-                task_id=task_id,
-                user_id=user_id,
-                browser_url=browser_url,
-                browser_session_metadata=browser_session_metadata,
-            )
-        if dom_service:
-            with contextlib.suppress(Exception):
-                await dom_service.disconnect()
-        await _stop_playwright_resources(
-            playwright_browser,
-            playwright_instance,
-            agent_id,
-            driver_pid=playwright_driver_pid,
+        _schedule_browser_cleanup(
+            agent_id=agent_id,
+            task_id=task_id,
+            user_id=user_id,
+            browser_url=browser_url,
+            browser_session_metadata=dict(browser_session_metadata),
+            input_page=input_page,
+            start_url=start_url,
+            cursor_streamer=cursor_streamer,
+            interaction_layer_task=interaction_layer_task,
+            humanizer=humanizer,
+            browser_network_recorder=browser_network_recorder,
+            network_recorder_task=network_recorder_task,
+            browser_recorder=browser_recorder,
+            dom_service=dom_service,
+            playwright_browser=playwright_browser,
+            playwright_instance=playwright_instance,
+            playwright_driver_pid=playwright_driver_pid,
         )
         playwright_browser = None
         playwright_instance = None
@@ -4650,8 +4763,6 @@ Based on this feedback, I need to continue working on the task and address the i
         dom_service = None
         _clear_browser_activity_memory_buffers(
             action_history=action_history,
-            browser_recorder=browser_recorder,
-            browser_network_recorder=browser_network_recorder,
             mutable_buffers=(
                 action_entries,
                 browser_state,

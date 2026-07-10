@@ -5,9 +5,11 @@ Uses _fetch_agent_data_impl from fetch_config.py (single source for GET /api/age
 
 import asyncio
 import os
+import time
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import httpx
 import structlog
@@ -28,17 +30,251 @@ _is_production = os.environ.get("FLY_APP_NAME") is not None
 # Decouples token reading from the Supabase round-trip (see da938195 diagnosis:
 # per-chunk inline broadcasts collapsed per-stream throughput under fan-out).
 _STREAM_COALESCE_INTERVAL_S = float(os.getenv("STREAM_COALESCE_INTERVAL_S", "0.15"))
+_BROADCAST_TIMEOUT_S = float(os.getenv("REALTIME_BROADCAST_TIMEOUT_S", "2.0"))
+_BROADCAST_BATCH_DELAY_S = float(os.getenv("REALTIME_BROADCAST_BATCH_DELAY_S", "0.01"))
+_BROADCAST_BATCH_SIZE = max(1, int(os.getenv("REALTIME_BROADCAST_BATCH_SIZE", "100") or "100"))
+_BROADCAST_MAX_QUEUE_MESSAGES = max(100, int(os.getenv("REALTIME_BROADCAST_MAX_QUEUE_MESSAGES", "5000") or "5000"))
+_BROADCAST_HTTP_MAX_CONNECTIONS = int(os.getenv("REALTIME_BROADCAST_HTTP_MAX_CONNECTIONS", "80") or "80")
+_BROADCAST_HTTP_MAX_KEEPALIVE_CONNECTIONS = int(
+    os.getenv("REALTIME_BROADCAST_HTTP_MAX_KEEPALIVE_CONNECTIONS", "40") or "40"
+)
+
+
+@dataclass
+class _QueuedRealtimeMessage:
+    message: Dict[str, Any]
+    enqueued_at: float
+    order_key: str
+    coalesce_key: Optional[str] = None
+    coalesced_count: int = 1
+
 
 # Module-level HTTP client for streaming broadcasts (connection reuse)
 _broadcast_client: Optional[httpx.AsyncClient] = None
+_background_broadcast_tasks: "set[asyncio.Task[None]]" = set()
+_broadcast_batch_lock: Optional[asyncio.Lock] = None
+_broadcast_queue: "List[_QueuedRealtimeMessage]" = []
+_broadcast_coalesce_items: "Dict[str, _QueuedRealtimeMessage]" = {}
+_broadcast_flush_task: Optional[asyncio.Task[None]] = None
+_broadcast_draining = False
+_broadcast_idle_waiters: "List[asyncio.Future[None]]" = []
+
+
+def schedule_background_broadcast(coro: "Awaitable[None]", *, label: str = "broadcast") -> None:
+    """Run a best-effort realtime broadcast without blocking the caller."""
+    task = asyncio.create_task(coro)
+    _background_broadcast_tasks.add(task)
+
+    def _on_done(done: asyncio.Task[None]) -> None:
+        _background_broadcast_tasks.discard(done)
+        try:
+            done.result()
+        except Exception as exc:
+            logger.debug("Async realtime broadcast failed", label=label, error=str(exc))
+
+    task.add_done_callback(_on_done)
 
 
 def _get_broadcast_client() -> httpx.AsyncClient:
     """Get or create the shared HTTP client for streaming broadcasts."""
     global _broadcast_client
-    if _broadcast_client is None:
-        _broadcast_client = httpx.AsyncClient(timeout=2.0)
+    if _broadcast_client is None or _broadcast_client.is_closed:
+        _broadcast_client = httpx.AsyncClient(
+            timeout=_BROADCAST_TIMEOUT_S,
+            limits=httpx.Limits(
+                max_connections=_BROADCAST_HTTP_MAX_CONNECTIONS,
+                max_keepalive_connections=_BROADCAST_HTTP_MAX_KEEPALIVE_CONNECTIONS,
+            ),
+        )
     return _broadcast_client
+
+
+def _get_broadcast_batch_lock() -> asyncio.Lock:
+    global _broadcast_batch_lock
+    if _broadcast_batch_lock is None:
+        _broadcast_batch_lock = asyncio.Lock()
+    return _broadcast_batch_lock
+
+
+def _schedule_broadcast_flush(delay_s: float) -> None:
+    global _broadcast_flush_task
+    if _broadcast_flush_task is not None and not _broadcast_flush_task.done():
+        if _broadcast_flush_task is asyncio.current_task():
+            return
+        if delay_s > 0:
+            return
+        _broadcast_flush_task.cancel()
+    _broadcast_flush_task = asyncio.create_task(_flush_broadcast_queue_after(delay_s))
+
+
+def _message_order_key(message: Dict[str, Any]) -> str:
+    payload = message.get("payload")
+    record = payload.get("record") if isinstance(payload, dict) else None
+    if isinstance(record, dict) and record.get("stream_id") is not None:
+        return f"{message.get('topic')}:{message.get('event')}:{record.get('stream_id')}"
+    if isinstance(record, dict) and record.get("taskId") is not None:
+        return f"{message.get('topic')}:{message.get('event')}:{record.get('taskId')}"
+    return f"{message.get('topic')}:{message.get('event')}"
+
+
+def _assistant_delta_coalesce_key(message: Dict[str, Any]) -> Optional[str]:
+    if message.get("event") != "ASSISTANT_STREAM":
+        return None
+    payload = message.get("payload")
+    record = payload.get("record") if isinstance(payload, dict) else None
+    if not isinstance(record, dict) or record.get("done"):
+        return None
+    return (
+        f"{message.get('topic')}:ASSISTANT_STREAM:"
+        f"{record.get('stream_id')}:{record.get('subAgentId') or ''}"
+    )
+
+
+def _coalesce_assistant_delta(existing: _QueuedRealtimeMessage, message: Dict[str, Any]) -> bool:
+    existing_record = existing.message.get("payload", {}).get("record")
+    new_record = message.get("payload", {}).get("record")
+    if not isinstance(existing_record, dict) or not isinstance(new_record, dict):
+        return False
+    existing_record["delta"] = f"{existing_record.get('delta', '')}{new_record.get('delta', '')}"
+    existing_record["sequence"] = new_record.get("sequence", existing_record.get("sequence", 0))
+    if new_record.get("llm_started_at_ms") is not None:
+        existing_record["llm_started_at_ms"] = new_record["llm_started_at_ms"]
+    existing.coalesced_count += 1
+    return True
+
+
+async def _queue_realtime_message(message: Dict[str, Any]) -> None:
+    started = time.monotonic()
+    coalesce_key = _assistant_delta_coalesce_key(message)
+    async with _get_broadcast_batch_lock():
+        existing = _broadcast_coalesce_items.get(coalesce_key) if coalesce_key else None
+        if existing is not None and existing in _broadcast_queue and _coalesce_assistant_delta(existing, message):
+            logger.debug(
+                "Realtime broadcast coalesced",
+                event=message.get("event"),
+                topic=message.get("topic"),
+                queue_depth=len(_broadcast_queue),
+                coalesced_count=existing.coalesced_count,
+            )
+        else:
+            item = _QueuedRealtimeMessage(
+                message=message,
+                enqueued_at=time.monotonic(),
+                order_key=_message_order_key(message),
+                coalesce_key=coalesce_key,
+            )
+            _broadcast_queue.append(item)
+            if coalesce_key:
+                _broadcast_coalesce_items[coalesce_key] = item
+        queue_depth = len(_broadcast_queue)
+        _schedule_broadcast_flush(0 if len(_broadcast_queue) >= _BROADCAST_BATCH_SIZE else _BROADCAST_BATCH_DELAY_S)
+    logger.info(
+        "realtime.broadcast_enqueue",
+        span_name="realtime.broadcast_enqueue",
+        event_type=message.get("event"),
+        topic=message.get("topic"),
+        duration_ms=int((time.monotonic() - started) * 1000),
+        queue_depth=queue_depth,
+        over_queue_limit=queue_depth > _BROADCAST_MAX_QUEUE_MESSAGES,
+    )
+
+
+async def _queue_realtime_record(topic: str, event: str, record: Dict[str, Any]) -> None:
+    await _queue_realtime_message(
+        {
+            "topic": topic,
+            "event": event,
+            "payload": {"record": record},
+            "private": _is_production,
+        }
+    )
+
+
+async def _flush_broadcast_queue_after(delay_s: float) -> None:
+    global _broadcast_draining, _broadcast_flush_task
+    if delay_s > 0:
+        await asyncio.sleep(delay_s)
+    if _broadcast_draining:
+        return
+    _broadcast_draining = True
+    try:
+        while True:
+            async with _get_broadcast_batch_lock():
+                if not _broadcast_queue:
+                    return
+                batch = _broadcast_queue[:_BROADCAST_BATCH_SIZE]
+                del _broadcast_queue[:_BROADCAST_BATCH_SIZE]
+                for item in batch:
+                    if item.coalesce_key and _broadcast_coalesce_items.get(item.coalesce_key) is item:
+                        _broadcast_coalesce_items.pop(item.coalesce_key, None)
+
+            await _send_realtime_batch(batch)
+    finally:
+        _broadcast_draining = False
+        if _broadcast_flush_task is asyncio.current_task():
+            _broadcast_flush_task = None
+        async with _get_broadcast_batch_lock():
+            if _broadcast_queue:
+                _schedule_broadcast_flush(0)
+            else:
+                waiters = list(_broadcast_idle_waiters)
+                _broadcast_idle_waiters.clear()
+                for waiter in waiters:
+                    if not waiter.done():
+                        waiter.set_result(None)
+
+
+async def _send_realtime_batch(
+    batch: "List[_QueuedRealtimeMessage]",
+) -> None:
+    if not batch:
+        return
+    now = time.monotonic()
+    queue_waits_ms = [int((now - item.enqueued_at) * 1000) for item in batch]
+    queue_avg_ms = int(sum(queue_waits_ms) / len(queue_waits_ms)) if queue_waits_ms else 0
+    queue_max_ms = max(queue_waits_ms) if queue_waits_ms else 0
+    coalesced_count = sum(item.coalesced_count for item in batch)
+
+    try:
+        config = load_config()
+        broadcast_key = config.supabase.service_role_key or config.supabase.anon_key
+        async with span(
+            "realtime.broadcast_batch",
+            message_count=len(batch),
+            coalesced_count=coalesced_count,
+            queue_wait_avg_ms=queue_avg_ms,
+            queue_wait_max_ms=queue_max_ms,
+        ):
+            response = await _get_broadcast_client().post(
+                f"{config.supabase.url}/realtime/v1/api/broadcast",
+                json={"messages": [item.message for item in batch]},
+                headers={
+                    "apikey": broadcast_key,
+                    "Authorization": f"Bearer {broadcast_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            if response.status_code not in (200, 202):
+                raise RuntimeError(f"status={response.status_code} body={response.text[:300]}")
+    except Exception as exc:
+        logger.debug("Realtime broadcast batch error (non-fatal)", error=str(exc)[:300], message_count=len(batch))
+
+
+async def flush_realtime_broadcasts_for_tests(timeout_s: float = 5.0) -> None:
+    """Drain queued realtime broadcasts. Intended for tests only."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        async with _get_broadcast_batch_lock():
+            if not _broadcast_queue and not _broadcast_draining:
+                return
+            loop = asyncio.get_running_loop()
+            waiter: asyncio.Future[None] = loop.create_future()
+            _broadcast_idle_waiters.append(waiter)
+            _schedule_broadcast_flush(0)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Timed out waiting for realtime broadcast queue to drain")
+        await asyncio.wait_for(waiter, timeout=remaining)
 
 
 async def stream_assistant_chunk(
@@ -70,12 +306,6 @@ async def stream_assistant_chunk(
         llm_started_at_ms: Epoch ms when the LLM request started
     """
     try:
-        config = load_config()
-
-        # Broadcast directly to Supabase Realtime (skip backend for speed)
-        # https://supabase.com/docs/guides/realtime/broadcast#send-messages-using-rest-api
-        broadcast_url = f"{config.supabase.url}/realtime/v1/api/broadcast"
-
         record = {
             "agentId": agent_id,
             "stream_id": stream_id,
@@ -96,35 +326,7 @@ async def stream_assistant_chunk(
         if llm_started_at_ms is not None:
             record["llm_started_at_ms"] = llm_started_at_ms
 
-        payload = {
-            "messages": [{
-                "topic": f"agent:{agent_id}",
-                "event": "ASSISTANT_STREAM",
-                "payload": {
-                    "record": record
-                },
-                "private": _is_production  # Required for broadcasting to private channels
-            }]
-        }
-        
-        # Use service role key to broadcast to private channels (DB triggers use private)
-        # Fall back to anon_key if service role key not configured
-        broadcast_key = config.supabase.service_role_key or config.supabase.anon_key
-        
-        # Use shared client for connection reuse (much faster for rapid chunks)
-        client = _get_broadcast_client()
-        response = await client.post(
-            broadcast_url,
-            json=payload,
-            headers={
-                "apikey": broadcast_key,
-                "Authorization": f"Bearer {broadcast_key}",
-                "Content-Type": "application/json"
-            }
-        )
-        
-        if response.status_code not in (200, 202):
-            logger.debug(f"Stream broadcast failed: status={response.status_code}")
+        await _queue_realtime_record(f"agent:{agent_id}", "ASSISTANT_STREAM", record)
                 
     except Exception as e:
         # Don't fail the workflow if streaming fails - it's best-effort
@@ -151,7 +353,8 @@ class CoalescingStreamBroadcaster:
 
     Lifecycle: create before streaming, ``update()`` per chunk, ``reset()`` if the
     stream restarts (parse retry), and ``await aclose(...)`` exactly once when the
-    stream finishes (sends the final delta + done marker synchronously).
+    stream finishes. By default close sends the final delta + done marker
+    synchronously; cached explore replays can background only the done marker.
     """
 
     def __init__(
@@ -241,20 +444,30 @@ class CoalescingStreamBroadcaster:
                 llm_started_at_ms=self._llm_started_at_ms,
             )
 
-    async def aclose(self, *, final_delta: str = "", final_sequence: Optional[int] = None) -> None:
-        """Stop the drainer, flush any remainder, then send the done marker."""
+    async def aclose(
+        self,
+        *,
+        final_delta: str = "",
+        final_sequence: Optional[int] = None,
+        await_done_broadcast: bool = True,
+    ) -> None:
+        """Stop the drainer, flush any remainder, then send the done marker.
+
+        The done marker stays awaited by default because foreground chat streams
+        use it to settle UI state. Cached explore activity replays can opt out:
+        their authoritative messages are persisted separately, and awaiting one
+        realtime done broadcast per replayed LLM turn serializes fanout leaves.
+        """
         self._closed = True
         if self._drainer is not None:
             self._drainer.cancel()
             with suppress(asyncio.CancelledError):
                 await self._drainer
             self._drainer = None
-        # Flush whatever the drainer hadn't sent yet (best-effort).
-        with suppress(Exception):
-            await self._flush()
         done_seq = final_sequence if final_sequence is not None else self._sequence + 1
         is_claude, is_gpt = self._flags()
-        with suppress(Exception):
+
+        async def _send_done() -> None:
             async with span(
                 "stream.broadcast",
                 agent_id=self._agent_id,
@@ -272,6 +485,19 @@ class CoalescingStreamBroadcaster:
                     is_gpt=is_gpt,
                     llm_started_at_ms=self._llm_started_at_ms,
                 )
+
+        async def _send_final() -> None:
+            with suppress(Exception):
+                await self._flush()
+            with suppress(Exception):
+                await _send_done()
+
+        if await_done_broadcast:
+            with suppress(Exception):
+                await _send_final()
+            return
+
+        schedule_background_broadcast(_send_final(), label="stream.final")
 
 
 async def stream_plan_event(
@@ -298,11 +524,6 @@ async def stream_plan_event(
         llm_started_at_ms: Epoch ms when the planner LLM request started
     """
     try:
-
-        config = load_config()
-
-        broadcast_url = f"{config.supabase.url}/realtime/v1/api/broadcast"
-
         record = {
             "agentId": agent_id,
             "stream_id": stream_id,
@@ -312,33 +533,7 @@ async def stream_plan_event(
         }
         if llm_started_at_ms is not None:
             record["llm_started_at_ms"] = llm_started_at_ms
-
-        payload = {
-            "messages": [{
-                "topic": f"agent:{agent_id}",
-                "event": "PLAN_STREAM",
-                "payload": {
-                    "record": record
-                },
-                "private": _is_production
-            }]
-        }
-        
-        broadcast_key = config.supabase.service_role_key or config.supabase.anon_key
-        
-        client = _get_broadcast_client()
-        response = await client.post(
-            broadcast_url,
-            json=payload,
-            headers={
-                "apikey": broadcast_key,
-                "Authorization": f"Bearer {broadcast_key}",
-                "Content-Type": "application/json"
-            }
-        )
-        
-        if response.status_code not in (200, 202):
-            logger.debug(f"Plan stream broadcast failed: status={response.status_code}")
+        await _queue_realtime_record(f"agent:{agent_id}", "PLAN_STREAM", record)
                 
     except Exception as e:
         # Don't fail the workflow if streaming fails - it's best-effort
@@ -376,10 +571,6 @@ async def stream_tool_event(
         llm_started_at_ms: Epoch ms when the LLM request started
     """
     try:
-        config = load_config()
-        
-        broadcast_url = f"{config.supabase.url}/realtime/v1/api/broadcast"
-        
         # Broadcast as TOOL_STREAM event (ephemeral, like PLAN_STREAM)
         # Frontend will show this as streaming indicator after thinking bubble
         record = {
@@ -396,33 +587,7 @@ async def stream_tool_event(
             record["is_gpt"] = True
         if llm_started_at_ms is not None:
             record["llm_started_at_ms"] = llm_started_at_ms
-
-        payload = {
-            "messages": [{
-                "topic": f"agent:{agent_id}",
-                "event": "TOOL_STREAM",
-                "payload": {
-                    "record": record
-                },
-                "private": _is_production
-            }]
-        }
-        
-        broadcast_key = config.supabase.service_role_key or config.supabase.anon_key
-        
-        client = _get_broadcast_client()
-        response = await client.post(
-            broadcast_url,
-            json=payload,
-            headers={
-                "apikey": broadcast_key,
-                "Authorization": f"Bearer {broadcast_key}",
-                "Content-Type": "application/json"
-            }
-        )
-        
-        if response.status_code not in (200, 202):
-            logger.debug(f"Tool stream broadcast failed: status={response.status_code}")
+        await _queue_realtime_record(f"agent:{agent_id}", "TOOL_STREAM", record)
                 
     except Exception as e:
         # Don't fail the workflow if streaming fails - it's best-effort
@@ -454,45 +619,19 @@ async def stream_attention_event(
         sequence: Sequence number for ordering
     """
     try:
-        
-        config = load_config()
-        
-        broadcast_url = f"{config.supabase.url}/realtime/v1/api/broadcast"
-        
-        payload = {
-            "messages": [{
-                "topic": f"agent:{agent_id}",
-                "event": "ATTENTION_STREAM",
-                "payload": {
-                    "record": {
-                        "agentId": agent_id,
-                        "stream_id": stream_id,
-                        "tool_call_id": tool_call_id,
-                        "message": message,
-                        "is_question": is_question,
-                        "done": done,
-                        "sequence": sequence,
-                    }
-                },
-                "private": _is_production
-            }]
-        }
-        
-        broadcast_key = config.supabase.service_role_key or config.supabase.anon_key
-        
-        client = _get_broadcast_client()
-        response = await client.post(
-            broadcast_url,
-            json=payload,
-            headers={
-                "apikey": broadcast_key,
-                "Authorization": f"Bearer {broadcast_key}",
-                "Content-Type": "application/json"
-            }
+        await _queue_realtime_record(
+            f"agent:{agent_id}",
+            "ATTENTION_STREAM",
+            {
+                "agentId": agent_id,
+                "stream_id": stream_id,
+                "tool_call_id": tool_call_id,
+                "message": message,
+                "is_question": is_question,
+                "done": done,
+                "sequence": sequence,
+            },
         )
-        
-        if response.status_code not in (200, 202):
-            logger.debug(f"Attention stream broadcast failed: status={response.status_code}")
                 
     except Exception as e:
         # Don't fail the workflow if streaming fails - it's best-effort
@@ -515,8 +654,6 @@ async def stream_browser_cursor(
     stream keeps the live React cursor synced to synthesized mouse motion.
     """
     try:
-        config = load_config()
-        broadcast_url = f"{config.supabase.url}/realtime/v1/api/broadcast"
         record = {
             "agentId": agent_id,
             "taskId": task_id,
@@ -527,28 +664,7 @@ async def stream_browser_cursor(
         if timestamp_ms is not None:
             record["timestampMs"] = timestamp_ms
 
-        payload = {
-            "messages": [{
-                "topic": f"agent:{agent_id}",
-                "event": "BROWSER_CURSOR",
-                "payload": {"record": record},
-                "private": _is_production
-            }]
-        }
-        broadcast_key = config.supabase.service_role_key or config.supabase.anon_key
-        client = _get_broadcast_client()
-        response = await client.post(
-            broadcast_url,
-            json=payload,
-            headers={
-                "apikey": broadcast_key,
-                "Authorization": f"Bearer {broadcast_key}",
-                "Content-Type": "application/json"
-            }
-        )
-
-        if response.status_code not in (200, 202):
-            logger.debug(f"Browser cursor stream broadcast failed: status={response.status_code}")
+        await _queue_realtime_record(f"agent:{agent_id}", "BROWSER_CURSOR", record)
     except Exception as e:
         logger.debug(f"Browser cursor stream error (non-fatal): {str(e)}")
 
@@ -573,44 +689,14 @@ async def broadcast_to_bus(bus_id: str, payload: Dict[str, Any]) -> None:
             - messageCount: Total message count
     """
     try:
-        config = load_config()
-
-        broadcast_url = f"{config.supabase.url}/realtime/v1/api/broadcast"
-
-        broadcast_payload = {
-            "messages": [{
-                "topic": f"bus:{bus_id}",
-                "event": "AGENT_STATE_CHANGED",
-                "payload": {"record": payload},
-                "private": _is_production
-            }]
-        }
-
-        broadcast_key = config.supabase.service_role_key or config.supabase.anon_key
-
         logger.info(
-            "Broadcasting to bus",
+            "Queueing bus broadcast",
             bus_id=bus_id,
             agent_id=payload.get("agentId"),
             status=payload.get("status"),
             tools_in_use=payload.get("toolsInUse"),
         )
-
-        client = _get_broadcast_client()
-        response = await client.post(
-            broadcast_url,
-            json=broadcast_payload,
-            headers={
-                "apikey": broadcast_key,
-                "Authorization": f"Bearer {broadcast_key}",
-                "Content-Type": "application/json"
-            }
-        )
-
-        if response.status_code not in (200, 202):
-            logger.warning(f"Bus broadcast failed: status={response.status_code}, body={response.text}")
-        else:
-            logger.debug(f"Bus broadcast success: status={response.status_code}")
+        await _queue_realtime_record(f"bus:{bus_id}", "AGENT_STATE_CHANGED", payload)
 
     except Exception as e:
         # Don't fail the workflow if broadcast fails - it's best-effort
@@ -641,39 +727,14 @@ async def update_agent_tree_state(
     # 1. Broadcast to Supabase bus (real-time updates)
     if bus_id and broadcast_payload:
         try:
-            broadcast_url = f"{config.supabase.url}/realtime/v1/api/broadcast"
-            broadcast_key = config.supabase.service_role_key or config.supabase.anon_key
-
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    broadcast_url,
-                    json={
-                        "messages": [{
-                            "topic": f"bus:{bus_id}",
-                            "event": "AGENT_STATE_CHANGED",
-                            "payload": {"record": broadcast_payload},
-                            # Private channel - matches agent: channel pattern
-                            "private": _is_production
-                        }]
-                    },
-                    headers={
-                        "apikey": broadcast_key,
-                        "Authorization": f"Bearer {broadcast_key}",
-                        "Content-Type": "application/json"
-                    },
-                    timeout=5.0
-                )
-
-                if response.status_code not in (200, 202):
-                    logger.warning(f"Bus broadcast failed: status={response.status_code}")
-                else:
-                    logger.info(
-                        "Bus broadcast success",
-                        agent_id=agent_id,
-                        bus_id=bus_id,
-                        topic=f"bus:{bus_id}",
-                        tools=broadcast_payload.get("toolsInUse", []),
-                    )
+            await _queue_realtime_record(f"bus:{bus_id}", "AGENT_STATE_CHANGED", broadcast_payload)
+            logger.info(
+                "Bus broadcast queued",
+                agent_id=agent_id,
+                bus_id=bus_id,
+                topic=f"bus:{bus_id}",
+                tools=broadcast_payload.get("toolsInUse", []),
+            )
 
         except Exception as e:
             logger.warning(f"Bus broadcast error (non-fatal): {str(e)}")

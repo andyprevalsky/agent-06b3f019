@@ -776,6 +776,117 @@ async def test_browser_recording_finalizer_keeps_local_artifacts_when_upload_fai
         assert metadata["recording_file_pointer"] is None
 
 
+async def test_browser_cleanup_scheduler_does_not_block_on_recording_finalization():
+    import tempfile
+
+    from domains.spawn_browser_agent_v3.handler import (
+        _background_browser_cleanup_tasks,
+        _schedule_browser_cleanup,
+    )
+
+    class SlowRecorder:
+        def __init__(self, output_dir):
+            self.output_dir = Path(output_dir)
+            self.release = asyncio.Event()
+            self.cleanup_called = False
+
+        async def close(self, *, include_steel_media=True):
+            await self.release.wait()
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            path = self.output_dir / "index.html"
+            path.write_text("<html>recording</html>", encoding="utf-8")
+            return path
+
+        def export_inline_html_bytes(self):
+            return b"<html>inline replay</html>"
+
+        def cleanup_local_artifacts(self, *, persisted=False):
+            self.cleanup_called = True
+
+    with tempfile.TemporaryDirectory() as tmp:
+        recorder = SlowRecorder(tmp)
+        with (
+            patch(
+                "domains.spawn_browser_agent_v3.handler.upload_to_storage",
+                new_callable=AsyncMock,
+                return_value={"id": "file-pointer-1"},
+            ) as upload_mock,
+            patch(
+                "domains.spawn_browser_agent_v3.handler.save_browser_action_message",
+                new_callable=AsyncMock,
+            ) as save_mock,
+        ):
+            cleanup_task = _schedule_browser_cleanup(
+                agent_id="agent-1",
+                task_id="task-1",
+                user_id="user-1",
+                browser_url="https://debug",
+                browser_session_metadata={"provider": "steel"},
+                input_page=None,
+                start_url="",
+                cursor_streamer=None,
+                interaction_layer_task=None,
+                humanizer=None,
+                browser_network_recorder=None,
+                network_recorder_task=None,
+                browser_recorder=recorder,
+                dom_service=None,
+                playwright_browser=None,
+                playwright_instance=None,
+                playwright_driver_pid=None,
+            )
+            await asyncio.sleep(0)
+
+            assert cleanup_task in _background_browser_cleanup_tasks
+            assert not cleanup_task.done()
+            upload_mock.assert_not_awaited()
+            save_mock.assert_not_awaited()
+
+            recorder.release.set()
+            await cleanup_task
+
+        assert cleanup_task not in _background_browser_cleanup_tasks
+        assert recorder.cleanup_called is True
+        upload_mock.assert_awaited_once()
+        save_mock.assert_awaited_once()
+
+
+async def test_drain_background_browser_cleanups_waits_then_times_out():
+    import contextlib
+
+    from domains.spawn_browser_agent_v3.handler import (
+        _background_browser_cleanup_tasks,
+        drain_background_browser_cleanups,
+    )
+
+    # No pending tasks -> returns immediately.
+    await asyncio.wait_for(drain_background_browser_cleanups(timeout=0.1), timeout=1)
+
+    release = asyncio.Event()
+
+    async def _slow_cleanup() -> None:
+        await release.wait()
+
+    task = asyncio.create_task(_slow_cleanup())
+    _background_browser_cleanup_tasks.add(task)
+    task.add_done_callback(lambda done: _background_browser_cleanup_tasks.discard(done))
+    try:
+        # Drain blocks while the cleanup is in-flight, then times out without
+        # raising (worker shutdown must not hang forever on a stuck teardown).
+        await asyncio.wait_for(drain_background_browser_cleanups(timeout=0.2), timeout=2)
+        assert not task.done()  # still running; drain did not cancel it
+
+        # Once the cleanup finishes, drain returns promptly by awaiting it.
+        release.set()
+        await asyncio.wait_for(drain_background_browser_cleanups(timeout=1.0), timeout=2)
+        assert task.done()
+    finally:
+        release.set()
+        with contextlib.suppress(Exception):
+            await task
+        _background_browser_cleanup_tasks.discard(task)
+
+
 def test_browser_agent_recording_inline_export_uses_source_frames_once():
     import tempfile
 
@@ -8596,6 +8707,14 @@ async def run_all_tests():
     await r.record_async(
         "browser_recording_finalizer_keeps_local_artifacts_when_upload_fails",
         test_browser_recording_finalizer_keeps_local_artifacts_when_upload_fails,
+    )
+    await r.record_async(
+        "browser_cleanup_scheduler_nonblocking",
+        test_browser_cleanup_scheduler_does_not_block_on_recording_finalization,
+    )
+    await r.record_async(
+        "drain_background_browser_cleanups",
+        test_drain_background_browser_cleanups_waits_then_times_out,
     )
     r.record(
         "browser_humanizer_visual_cursor_default_off",

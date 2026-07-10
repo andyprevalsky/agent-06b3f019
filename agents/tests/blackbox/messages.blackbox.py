@@ -342,6 +342,7 @@ async def test_update_agent_tree_state_happy_path():
                 "_statusExplicit": True,
             },
         )
+    await _flush_broadcasts()
 
     captures = get_captured_requests()
     urls = [c["url"] for c in captures]
@@ -397,6 +398,7 @@ async def test_update_agent_tree_state_handles_broadcast_failure():
             bus_id="bus-err",
             broadcast_payload={"agentId": "agent-bf", "toolsInUse": ["wait_for"]},
         )
+    await _flush_broadcasts()
 
     captures = get_captured_requests()
     assert any(c["method"] == "PATCH" for c in captures)
@@ -423,6 +425,7 @@ async def test_update_agent_tree_state_patch_raises():
             bus_id="bus-pe",
             broadcast_payload={"agentId": "agent-pe"},
         )
+    await _flush_broadcasts()
 
 
 async def test_stream_assistant_chunk_happy_path():
@@ -441,6 +444,7 @@ async def test_stream_assistant_chunk_happy_path():
         is_gpt=True,
         llm_started_at_ms=1700000000000,
     )
+    await _flush_broadcasts()
 
     captures = get_captured_requests()
     assert any("/realtime/v1/api/broadcast" in c["url"] for c in captures)
@@ -461,6 +465,14 @@ def _reset_broadcast_client():
     mod = sys.modules.get("helpers.messages")
     if mod is not None:
         mod._broadcast_client = None
+        mod._broadcast_queue.clear()
+        mod._broadcast_coalesce_items.clear()
+        mod._broadcast_idle_waiters.clear()
+
+
+async def _flush_broadcasts():
+    from helpers.messages import flush_realtime_broadcasts_for_tests
+    await flush_realtime_broadcasts_for_tests()
 
 
 async def test_stream_assistant_chunk_handles_errors():
@@ -478,6 +490,7 @@ async def test_stream_assistant_chunk_handles_errors():
         stream_id="stream-err",
         delta="x",
     )
+    await _flush_broadcasts()
 
 
 async def test_stream_plan_event_broadcasts():
@@ -493,6 +506,7 @@ async def test_stream_plan_event_broadcasts():
         char_count=42,
         llm_started_at_ms=1700000000000,
     )
+    await _flush_broadcasts()
 
     captures = get_captured_requests()
     broadcast = next(c for c in captures if "/realtime/v1/api/broadcast" in c["url"])
@@ -520,6 +534,7 @@ async def test_stream_plan_event_handles_errors():
         tool_call_id="t",
         title="title",
     )
+    await _flush_broadcasts()
 
 
 async def test_stream_tool_event_broadcasts():
@@ -537,6 +552,7 @@ async def test_stream_tool_event_broadcasts():
         is_claude=True,
         llm_started_at_ms=1700000000000,
     )
+    await _flush_broadcasts()
 
     captures = get_captured_requests()
     broadcast = next(c for c in captures if "/realtime/v1/api/broadcast" in c["url"])
@@ -565,6 +581,7 @@ async def test_stream_tool_event_handles_errors():
         tool_name="wait_for",
         title="Starting wait_for...",
     )
+    await _flush_broadcasts()
 
 
 async def test_stream_attention_event_broadcasts():
@@ -581,6 +598,7 @@ async def test_stream_attention_event_broadcasts():
         done=False,
         sequence=1,
     )
+    await _flush_broadcasts()
 
     captures = get_captured_requests()
     broadcast = next(c for c in captures if "/realtime/v1/api/broadcast" in c["url"])
@@ -606,6 +624,7 @@ async def test_stream_attention_event_handles_errors():
         tool_call_id="t",
         message="m",
     )
+    await _flush_broadcasts()
 
 
 async def test_stream_browser_cursor_happy_path():
@@ -622,6 +641,7 @@ async def test_stream_browser_cursor_happy_path():
         sequence=7,
         timestamp_ms=1700000001234,
     )
+    await _flush_broadcasts()
 
     captures = get_captured_requests()
     broadcast = next(c for c in captures if "/realtime/v1/api/broadcast" in c["url"])
@@ -647,6 +667,7 @@ async def test_stream_browser_cursor_handles_errors():
     from helpers.messages import stream_browser_cursor
 
     await stream_browser_cursor(agent_id="a", task_id="t", x=1, y=2)
+    await _flush_broadcasts()
 
 
 async def test_broadcast_to_bus_happy_path():
@@ -662,6 +683,7 @@ async def test_broadcast_to_bus_happy_path():
             "toolsInUse": ["web_search"],
         },
     )
+    await _flush_broadcasts()
 
     captures = get_captured_requests()
     broadcast = next(c for c in captures if "/realtime/v1/api/broadcast" in c["url"])
@@ -680,6 +702,7 @@ async def test_broadcast_to_bus_handles_errors():
     from helpers.messages import broadcast_to_bus
 
     await broadcast_to_bus(bus_id="b", payload={})
+    await _flush_broadcasts()
 
 
 async def test_broadcast_to_bus_logs_non_success():
@@ -691,6 +714,7 @@ async def test_broadcast_to_bus_logs_non_success():
     from helpers.messages import broadcast_to_bus
 
     await broadcast_to_bus(bus_id="b", payload={"agentId": "a", "status": "IDLE"})
+    await _flush_broadcasts()
 
 
 async def run_all_tests():

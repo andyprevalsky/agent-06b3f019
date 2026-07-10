@@ -43,6 +43,17 @@ _DIRECT_TOKEN_PRICING: Dict[str, Dict[str, float]] = {
     "gpt-5.3-codex-gpt":        {"input_cents_per_1k": 0.0, "output_cents_per_1k": 0.0},
 }
 
+_DIRECT_OPENAI_API_KEY_PRICING: Dict[str, Dict[str, float]] = {
+    "gpt-5.4-openai": {
+        "input_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.4"]["prompt"] * 1000 * 100,
+        "output_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.4"]["completion"] * 1000 * 100,
+    },
+    "gpt-5.5-openai": {
+        "input_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.5"]["prompt"] * 1000 * 100,
+        "output_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.5"]["completion"] * 1000 * 100,
+    },
+}
+
 
 # Direct-Anthropic pricing — used on the verifier / planner LLM activities
 # when they hit Anthropic directly (no claudeAuth bypass).
@@ -139,4 +150,6 @@ def get_model_pricing(model: str) -> Optional[Dict[str, float]]:
             "input_cents_per_1k": pricing["prompt"] * 1000 * 100,
             "output_cents_per_1k": pricing["completion"] * 1000 * 100,
         }
+    if normalized in _DIRECT_OPENAI_API_KEY_PRICING:
+        return _DIRECT_OPENAI_API_KEY_PRICING[normalized]
     return get_anthropic_pricing(normalized)

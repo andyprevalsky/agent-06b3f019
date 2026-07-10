@@ -35,7 +35,11 @@ _GET_RETRY_BACKOFF_S = 0.15
 _SET_TIMEOUT_S = 30.0
 _GET_BATCH_DELAY_S = 0.005
 _GET_BATCH_MAX_KEYS = 500
-_GET_BATCH_MAX_IN_FLIGHT = int(os.environ.get("FAST_CACHE_GET_BATCH_MAX_IN_FLIGHT", "4") or "4")
+_GET_BATCH_MAX_IN_FLIGHT = int(os.environ.get("FAST_CACHE_GET_BATCH_MAX_IN_FLIGHT", "16") or "16")
+_HTTP_MAX_CONNECTIONS = int(os.environ.get("FAST_CACHE_HTTP_MAX_CONNECTIONS", "80") or "80")
+_HTTP_MAX_KEEPALIVE_CONNECTIONS = int(
+    os.environ.get("FAST_CACHE_HTTP_MAX_KEEPALIVE_CONNECTIONS", "40") or "40"
+)
 _ARCHIVE_READ_MAX_CONCURRENCY = 4
 
 # A single pooled client per worker process. Creating a fresh httpx.AsyncClient per
@@ -49,6 +53,8 @@ _pending_gets_batch_tasks: set[asyncio.Task[None]] = set()
 _archive_read_tasks: set[asyncio.Task[None]] = set()
 _archive_read_semaphore: Optional[asyncio.Semaphore] = None
 _archive_read_semaphore_loop: Optional[asyncio.AbstractEventLoop] = None
+_prefetched_records: dict[str, tuple[CacheRecord, float]] = {}
+_PREFETCH_TTL_S = 5.0
 
 
 class CacheRecord(TypedDict):
@@ -66,7 +72,10 @@ def _shared_client() -> httpx.AsyncClient:
     if _client is None or _client.is_closed:
         _client = httpx.AsyncClient(
             timeout=_SET_TIMEOUT_S,
-            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            limits=httpx.Limits(
+                max_connections=_HTTP_MAX_CONNECTIONS,
+                max_keepalive_connections=_HTTP_MAX_KEEPALIVE_CONNECTIONS,
+            ),
         )
     return _client
 
@@ -100,6 +109,24 @@ async def cache_get_record(key: str) -> CacheRecord:
     This exposes `blobPath` for binary cache entries while keeping `cache_get`
     as the simple value-only API used by LLM/search/fetch JSON callers.
     """
+    prefetched = _pop_valid_prefetched_record(key)
+    if prefetched is not None:
+        _queue_archive_cache_read(
+            key,
+            hit=bool(prefetched.get("hit")),
+            value=prefetched.get("value"),
+            blob_path=prefetched.get("blobPath"),
+            status=200,
+        )
+        logger.info(
+            "fast_cache.prefetch_hit",
+            key=key,
+            key_hash=_key_hash(key),
+            kind=_key_kind(key),
+            hit=bool(prefetched.get("hit")),
+        )
+        return prefetched
+
     last_status: Optional[int] = None
     last_error: Optional[str] = None
     for attempt in range(_GET_MAX_ATTEMPTS):
@@ -286,6 +313,68 @@ async def _fetch_cache_records_many(keys: list[str]) -> dict[str, CacheRecord]:
         else:
             records[key] = {"hit": False, "value": None, "blobPath": None}
     return records
+
+
+def _pop_valid_prefetched_record(key: str) -> Optional[CacheRecord]:
+    entry = _prefetched_records.pop(key, None)
+    if entry is None:
+        return None
+    record, expires_at = entry
+    if expires_at <= time.monotonic():
+        return None
+    return record
+
+
+async def prefetch_cache_records(keys: list[str], *, reason: str = "") -> None:
+    """Fetch exact fast-cache keys now so immediate tool handlers can consume them.
+
+    This is intentionally one-shot and short-lived: it is not a durable Python LRU,
+    so purge/write semantics still belong to the backend fast-cache store.
+    """
+    unique_keys = []
+    seen = set()
+    now = time.monotonic()
+    for key in keys:
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        entry = _prefetched_records.get(key)
+        if entry is not None and entry[1] > now:
+            continue
+        unique_keys.append(key)
+    if not unique_keys:
+        return
+
+    try:
+        async with span(
+            "fast_cache.prefetch",
+            key_count=len(unique_keys),
+            reason=reason,
+        ):
+            records = await _fetch_cache_records_many(unique_keys)
+    except Exception as exc:
+        logger.warning(
+            "fast_cache.prefetch_error",
+            key_count=len(unique_keys),
+            reason=reason,
+            error=str(exc)[:200],
+        )
+        return
+
+    expires_at = time.monotonic() + _PREFETCH_TTL_S
+    hit_count = 0
+    for key in unique_keys:
+        record = records.get(key)
+        if record is None or not record.get("hit"):
+            continue
+        _prefetched_records[key] = (record, expires_at)
+        hit_count += 1
+    logger.info(
+        "fast_cache.prefetch_done",
+        key_count=len(unique_keys),
+        hit_count=hit_count,
+        reason=reason,
+    )
 
 
 async def cache_get(key: str) -> Optional[Any]:

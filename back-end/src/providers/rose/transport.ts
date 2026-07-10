@@ -11,6 +11,7 @@ import { createLogger } from '../logger';
 const log = createLogger('RoseTransport');
 
 export const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
+export const OPENAI_RESPONSES_API_URL = 'https://api.openai.com/v1/responses';
 export const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 export const CODEX_API_URL = 'https://chatgpt.com/backend-api/codex/responses';
 
@@ -99,6 +100,13 @@ function openrouterHeaders(openrouterKey: string): Record<string, string> {
   };
 }
 
+function openAiHeaders(openAiKey: string): Record<string, string> {
+  return {
+    Authorization: `Bearer ${openAiKey}`,
+    'Content-Type': 'application/json',
+  };
+}
+
 function codexHeaders(gptToken: string, accountId?: string): Record<string, string> {
   return {
     Authorization: `Bearer ${gptToken}`,
@@ -146,6 +154,44 @@ async function withTimeout(
     clearTimeout(timer);
     upstream.removeEventListener('abort', onAbort);
   }
+}
+
+export async function postOpenAIResponsesStream(
+  options: PostOptions & { openAiKey: string; abortSignal?: AbortSignal }
+): Promise<StreamResponse> {
+  const timeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+  const upstream = options.abortSignal ?? new AbortController().signal;
+  log.info('openai.start', {
+    request_id: options.requestId,
+    call_site: options.callSite,
+    model: options.body.model,
+  });
+  const response = await withTimeout(upstream, timeoutMs, (signal) =>
+    fetch(OPENAI_RESPONSES_API_URL, {
+      method: 'POST',
+      headers: openAiHeaders(options.openAiKey),
+      body: JSON.stringify(options.body),
+      signal,
+    })
+  );
+
+  let errorBody: string | undefined;
+  if (!response.ok) {
+    errorBody = await response.text();
+    log.warn('openai.error', {
+      request_id: options.requestId,
+      status: response.status,
+      body: errorBody.substring(0, 500),
+    });
+  }
+
+  return {
+    status: response.status,
+    ok: response.ok,
+    headers: response.headers,
+    body: response.body,
+    errorBody,
+  };
 }
 
 export async function postAnthropicStream(
