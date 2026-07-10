@@ -3417,11 +3417,13 @@ async def test_client_reproduces_rotated_gpt_direct_auth_deadline():
     async def silent_gpt_auth(**kwargs):
         token = kwargs["auth"].token
         attempts.append(token)
+        if token == "stale-token":
+            raise RoseStallError("rose.complete TTFT exceeded 0.05s")
         if token == "fresh-token":
             yield StreamChunk(kind="metadata", data={"actual_model": "gpt-5.4-gpt"})
             yield StreamChunk(kind="content", data={"text": "partial"})
-        await asyncio.sleep(1.0)
-        yield StreamChunk(kind="metadata", data={"actual_model": "gpt-5.4-gpt"})
+            raise RoseDeadlineError("rose.complete deadline exceeded after 0.2s")
+        raise AssertionError(f"unexpected token: {token}")
 
     async def fetch_fresh(user_id: str):
         fetches.append(user_id)
@@ -3463,7 +3465,7 @@ async def test_client_reproduces_rotated_gpt_direct_auth_deadline():
                 messages=[{"role": "user", "content": "repro final explore synthesis"}],
                 gpt_auth=auth,
                 call_site="explore_agent",
-                deadline_s=0.2,
+                deadline_s=5.0,
                 ttft_timeout_s=0.05,
                 idle_timeout_s=0.5,
             ):
