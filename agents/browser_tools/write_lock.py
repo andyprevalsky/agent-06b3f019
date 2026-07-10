@@ -290,7 +290,11 @@ async def is_payment_field(
 
     try:
         # Get the Playwright page
-        page = await session.get_page()
+        get_page = getattr(session, "get_page", None)
+        if not callable(get_page):
+            return False
+
+        page = await get_page()
         if not page:
             return False
 

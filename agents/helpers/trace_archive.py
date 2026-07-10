@@ -15,6 +15,7 @@ import gzip
 import hashlib
 import json
 import os
+import tempfile
 import threading
 import time
 from collections import defaultdict
@@ -30,6 +31,7 @@ logger = structlog.get_logger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _LOCAL_ROOT = _REPO_ROOT / ".context" / "trace-archive"
+_PROD_FALLBACK_LOCAL_ROOT = Path(tempfile.gettempdir()) / "rose-trace-archive" / "trace-archive"
 _FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
 _TRUE_VALUES = {"1", "true", "yes", "on", "enabled"}
 _MEDIA_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".m4a", ".mp3", ".wav", ".m3u8"}
@@ -44,6 +46,19 @@ def _safe_segment(value: str) -> str:
 
 def _is_production() -> bool:
     return os.environ.get("FLY_APP_NAME") is not None or os.environ.get("ENVIRONMENT") == "production"
+
+
+def _rooted_at_filesystem_context(path: Path) -> bool:
+    return path.is_absolute() and len(path.parts) >= 2 and path.parts[1] == ".context"
+
+
+def _local_root() -> Path:
+    configured = os.environ.get("TRACE_ARCHIVE_LOCAL_ROOT", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    if _is_production() and not os.environ.get("CONDUCTOR_WORKSPACE_NAME") and _rooted_at_filesystem_context(_LOCAL_ROOT):
+        return _PROD_FALLBACK_LOCAL_ROOT
+    return _LOCAL_ROOT
 
 
 def archive_enabled() -> bool:
@@ -126,7 +141,7 @@ def encrypt_artifact(
 
 
 def _write_local(root_agent_id: str, path: str, ciphertext: bytes, metadata: dict[str, Any]) -> str:
-    root = _LOCAL_ROOT / _safe_segment(root_agent_id)
+    root = _local_root() / _safe_segment(root_agent_id)
     target = root / path
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(ciphertext)
@@ -136,7 +151,7 @@ def _write_local(root_agent_id: str, path: str, ciphertext: bytes, metadata: dic
 
 
 def _outbox_root() -> Path:
-    return _LOCAL_ROOT.parent / "trace-archive-outbox"
+    return _local_root().parent / "trace-archive-outbox"
 
 
 def _write_outbox(root_agent_id: str, path: str, ciphertext: bytes, metadata: dict[str, Any]) -> str:
@@ -223,7 +238,7 @@ def read_local_artifact(*, root_agent_id: str, path: str) -> Optional[tuple[byte
     """Read a locally archived encrypted artifact and its metadata."""
     safe_root = _safe_segment(root_agent_id)
     safe_path = _safe_path(path)
-    target = _LOCAL_ROOT / safe_root / safe_path
+    target = _local_root() / safe_root / safe_path
     if not target.exists():
         return None
     meta_path = target.with_suffix(target.suffix + ".meta.json")
@@ -256,13 +271,14 @@ def read_archive_artifact(*, root_agent_id: str, path: str) -> Optional[tuple[by
 
 
 def list_local_bundle_ids() -> list[str]:
-    if not _LOCAL_ROOT.exists():
+    local_root = _local_root()
+    if not local_root.exists():
         return []
-    return sorted(item.name for item in _LOCAL_ROOT.iterdir() if item.is_dir())
+    return sorted(item.name for item in local_root.iterdir() if item.is_dir())
 
 
 def list_local_artifact_paths(root_agent_id: str) -> list[str]:
-    bundle = _LOCAL_ROOT / _safe_segment(root_agent_id)
+    bundle = _local_root() / _safe_segment(root_agent_id)
     if not bundle.exists():
         return []
     paths: list[str] = []
@@ -523,7 +539,7 @@ def _expected_ref(safe_root: str, safe_path: str) -> str:
     backend = os.environ.get("TRACE_ARCHIVE_BACKEND", "").strip().lower()
     if _is_production() or backend == "r2":
         return f"trace-archive/{safe_root}/{safe_path}"
-    return str(_LOCAL_ROOT / safe_root / safe_path)
+    return str(_local_root() / safe_root / safe_path)
 
 
 def _archive_bytes_now(

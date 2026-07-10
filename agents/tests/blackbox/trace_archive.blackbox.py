@@ -697,6 +697,79 @@ async def test_backend_failure_spools_encrypted_outbox_and_async_drain():
             restore()
 
 
+def test_prod_backend_failure_outbox_avoids_filesystem_root_context():
+    import shutil
+
+    import helpers.trace_archive as trace_archive
+    from helpers.trace_archive import archive_json
+
+    agent_id = "agent-root-context-outbox"
+    old_env = {
+        "FLY_APP_NAME": os.environ.get("FLY_APP_NAME"),
+        "TRACE_ARCHIVE_BACKEND": os.environ.get("TRACE_ARCHIVE_BACKEND"),
+        "TRACE_ARCHIVE_ENABLED": os.environ.get("TRACE_ARCHIVE_ENABLED"),
+        "TRACE_ARCHIVE_ENCRYPTION_KEY_B64": os.environ.get("TRACE_ARCHIVE_ENCRYPTION_KEY_B64"),
+        "TRACE_ARCHIVE_LOCAL_ROOT": os.environ.get("TRACE_ARCHIVE_LOCAL_ROOT"),
+        "BACKEND_API_URL": os.environ.get("BACKEND_API_URL"),
+        "BACKEND_API_KEY": os.environ.get("BACKEND_API_KEY"),
+        "CONDUCTOR_WORKSPACE_NAME": os.environ.get("CONDUCTOR_WORKSPACE_NAME"),
+    }
+    old_root = trace_archive._LOCAL_ROOT
+    old_client = trace_archive.httpx.Client
+
+    class _Response:
+        status_code = 500
+        text = "backend unavailable"
+
+    class _Client:
+        is_closed = False
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def post(self, *args, **kwargs):
+            return _Response()
+
+    try:
+        os.environ["FLY_APP_NAME"] = "rose-agent-prod"
+        os.environ["TRACE_ARCHIVE_BACKEND"] = "r2"
+        os.environ["TRACE_ARCHIVE_ENABLED"] = "1"
+        os.environ["TRACE_ARCHIVE_ENCRYPTION_KEY_B64"] = base64.b64encode(b"3" * 32).decode("ascii")
+        os.environ["BACKEND_API_URL"] = "https://backend.example.test"
+        os.environ["BACKEND_API_KEY"] = "test-api-key"
+        os.environ.pop("CONDUCTOR_WORKSPACE_NAME", None)
+        os.environ.pop("TRACE_ARCHIVE_LOCAL_ROOT", None)
+        trace_archive._LOCAL_ROOT = Path("/.context/trace-archive")
+        trace_archive.httpx.Client = _Client
+        trace_archive._BACKEND_CLIENTS.client = None
+        trace_archive._BACKEND_CLIENTS.client_factory = None
+
+        result = archive_json(root_agent_id=agent_id, path="llm/root-context.json.gz.enc", payload={"ok": True})
+        assert result is None
+        expected = (
+            trace_archive._PROD_FALLBACK_LOCAL_ROOT.parent
+            / "trace-archive-outbox"
+            / agent_id
+            / "llm"
+            / "root-context.json.gz.enc"
+        )
+        assert expected.exists()
+        assert expected.with_suffix(expected.suffix + ".meta.json").exists()
+        assert not str(expected).startswith("/.context/")
+    finally:
+        trace_archive.httpx.Client = old_client
+        trace_archive._BACKEND_CLIENTS.client = None
+        trace_archive._BACKEND_CLIENTS.client_factory = None
+        trace_archive._LOCAL_ROOT = old_root
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        shutil.rmtree(trace_archive._PROD_FALLBACK_LOCAL_ROOT.parent / "trace-archive-outbox" / agent_id, ignore_errors=True)
+        teardown_mock()
+
+
 async def test_browser_http_cache_ops_do_not_archive():
     """browser_http cache ops fire per page subresource (thousands/session) and
     must never hit the archive endpoint; llm-kind ops keep archiving."""
@@ -790,6 +863,10 @@ async def run_all_tests():
     await r.record_async(
         "backend_failure_spools_encrypted_outbox_and_async_drain",
         test_backend_failure_spools_encrypted_outbox_and_async_drain,
+    )
+    r.record(
+        "prod_backend_failure_outbox_avoids_filesystem_root_context",
+        test_prod_backend_failure_outbox_avoids_filesystem_root_context,
     )
     r.record("oversized_artifact_is_dropped_with_warning", test_oversized_artifact_is_dropped_with_warning)
     await r.record_async("browser_http_cache_ops_do_not_archive", test_browser_http_cache_ops_do_not_archive)

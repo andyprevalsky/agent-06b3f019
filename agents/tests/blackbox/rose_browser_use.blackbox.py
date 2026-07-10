@@ -283,6 +283,7 @@ def test_write_lock_notification_schema_normalizes_provider_aliases():
                     {
                         "name": "Carhartt Men's Knit Cuffed Beanie, Black",
                         "quantity": 1,
+                        "rating": 5.0,
                         "price_usd": 19.99,
                         "reviews": "167,432 ratings",
                         "seller": "Amazon.com",
@@ -305,6 +306,7 @@ def test_write_lock_notification_schema_normalizes_provider_aliases():
     assert dumped["purchase"]["items"][0]["title"] == "Carhartt Men's Knit Cuffed Beanie, Black"
     assert dumped["purchase"]["items"][0]["price"] == "$19.99"
     assert dumped["purchase"]["items"][0]["quantity"] == "1"
+    assert dumped["purchase"]["items"][0]["rating"] == "5.0"
     assert dumped["purchase"]["items"][0]["review_count"] == "167,432 ratings"
     assert dumped["purchase"]["items"][0]["seller"] == "Amazon.com"
     assert dumped["purchase"]["items"][0]["shipping"] == "FREE Two Day delivery, arriving Saturday, Jun 27, 2026"
