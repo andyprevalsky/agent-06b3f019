@@ -12,6 +12,7 @@
  *   currentView === 'network'      → <NetworkView />
  *   currentView === 'admin-health' → <AdminHealth />
  *   currentView === 'agents'       → agent chat / landing
+ *   open-agent deep link           → force 'agents' even from browse/settings
  */
 
 import { useState, useMemo, lazy } from 'react';
@@ -21,7 +22,6 @@ import {
   NetworkView,
   SIDEBAR_WIDTH_COLLAPSED,
 } from '@/features/terminal-component-group';
-import { getItem } from '@/lib/storage';
 import { useAppData } from '@/hooks/useAppData';
 import { ADMIN_PHONE_DIGITS, ADMIN_USER_IDS } from '@/features/terminal-component-group/config';
 
@@ -29,6 +29,7 @@ import { useTerminalAgents } from '../hooks/useTerminalAgents';
 import { useDrippiness } from '../hooks/useDrippiness';
 import { useTileAnimation } from '../hooks/useTileAnimation';
 import { usePatternOffset } from '../hooks/usePatternOffset';
+import { resolveInitialTerminalView } from '../hooks/resolveInitialTerminalView';
 import {
   computeActiveBrowserPanels,
   derivePendingApproval,
@@ -55,24 +56,14 @@ function isAdminHealthUser(user: { id?: string; phone?: string } | null): boolea
   return ADMIN_PHONE_DIGITS.includes(phoneDigits);
 }
 
-function getInitialTerminalView(): TerminalView {
-  const stored = getItem('app-user');
-  if (stored === null) return 'agents';
-  try {
-    const user = JSON.parse(stored) as { phone?: string };
-    return user.phone === BROWSER_REVIEW_TEST_PHONE ? 'browse' : 'agents';
-  } catch {
-    return 'agents';
-  }
-}
-
 export function TerminalContent() {
   const tileAnimation = useTileAnimation();
   const drip = useDrippiness();
   const { patternOffset, tileColors, colorPalette } = usePatternOffset(tileAnimation.currentFrame);
 
   const resetAnimationState = () => tileAnimation.reset();
-  const [currentView, setCurrentView] = useState<TerminalView>(getInitialTerminalView);
+  const initialView = useMemo<TerminalView>(resolveInitialTerminalView, []);
+  const [currentView, setCurrentView] = useState<TerminalView>(initialView);
   const agents = useTerminalAgents(currentView, setCurrentView, resetAnimationState);
   const { models, modelsLoading } = useAppData();
   const derived = useTerminalDerivedState(agents);
