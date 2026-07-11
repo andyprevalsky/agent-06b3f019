@@ -118,8 +118,9 @@ export async function handleSmsSupervisorMessage(config: {
   mySeq: number;
   attachments?: SurgeAttachment[];
   abortSignal?: AbortSignal;
+  commitGuard?: () => Promise<boolean>;
 }): Promise<SmsSupervisorResult> {
-  const { userId, phoneNumber, inboundMessage, mySeq, abortSignal } = config;
+  const { userId, phoneNumber, inboundMessage, mySeq, abortSignal, commitGuard } = config;
   const attachments = config.attachments ?? [];
   const overallStart = Date.now();
 
@@ -355,6 +356,16 @@ export async function handleSmsSupervisorMessage(config: {
         userId,
         mySeq,
         currentSeq,
+        pendingWritesCount: pendingWrites.length,
+        finalResponseLength: finalResponse.length,
+      });
+      return false;
+    }
+
+    if (commitGuard && !(await commitGuard())) {
+      log.info('[SmsSupervisor] Commit guard denied SMS response and pending writes', {
+        userId,
+        mySeq,
         pendingWritesCount: pendingWrites.length,
         finalResponseLength: finalResponse.length,
       });

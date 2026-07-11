@@ -14,3 +14,10 @@ export type { SmsSupervisorResult } from './supervisorHandler';
 export { buildSmsContext } from './contextBuilder';
 export { TOOL_SCHEMAS, dispatchToolCall, commitPendingWrites } from './supervisorTools';
 export type { ToolCall, ToolResult, PendingOp } from './supervisorTools';
+export {
+  PROACTIVE_SMS_CRON_EXPRESSION,
+  PROACTIVE_SMS_OUTREACH_PROMPT,
+  PROACTIVE_SMS_TIME_ZONE,
+  runProactiveSmsOutreachJob,
+} from './proactiveOutreach';
+export type { ProactiveSmsJobOptions, ProactiveSmsJobSummary } from './proactiveOutreach';
