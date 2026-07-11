@@ -52,7 +52,7 @@ import feedbackRouter from './domains/feedback/routes';
 import imessageRouter from './domains/imessage/routes';
 import dataRouter from './domains/data/routes';
 import benchmarksRouter from './domains/benchmarks/routes';
-import { seedBenchmarkTasks } from './domains/benchmarks/service';
+import { ensureBenchmarkTasksSeeded } from './domains/benchmarks/service';
 import fastCacheRouter from './domains/fast-cache/routes';
 import archiveRouter from './domains/archive/routes';
 import worldModelsRouter from './domains/world-models/routes';
@@ -622,7 +622,9 @@ app.listen(PORT, () => {
 
   // Seed the BenchmarkTask table from tasks.json (insert-missing only; the DB
   // is the catalog's source of truth after seeding — hub edits survive).
-  seedBenchmarkTasks().catch((err: unknown) => {
+  // Catalog routes await the same memoized promise, so requests arriving
+  // before seeding completes wait instead of reading a partial catalog.
+  ensureBenchmarkTasksSeeded().catch((err: unknown) => {
     log.warn('Benchmark task seed failed', {
       error: err instanceof Error ? err.message : String(err),
     });

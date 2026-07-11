@@ -2,7 +2,9 @@
  * STATE MACHINE: BenchmarksView (the in-app Benchmark Hub)
  *
  *   mount ──► hub(loading) ──catalog+runs fetched──► hub(ready)
- *     hub polls runs + run-requests every POLL_MS while mounted (live runs).
+ *     hub polls runs + run-requests every POLL_MS while mounted (live runs);
+ *     a tick is skipped while one is in flight, and poll failures surface in
+ *     runsError (success clears it) so stale rows are never silently stuck.
  *   hub + click run row ──► run(runId) (in-app run view: tiles + task table)
  *     run + "Open agent" ──► onOpenAgent(agentId) → the MAIN agent panel
  *       (the app's normal chat view; benchmark agents are served through the
@@ -43,6 +45,7 @@ export function BenchmarksView({ onOpenAgent }: BenchmarksViewProps) {
 
   const [openRun, setOpenRun] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
+  const runsInFlightRef = useRef(false);
 
   const loadTasks = useCallback(async () => {
     setTasksLoading(true);
@@ -57,6 +60,8 @@ export function BenchmarksView({ onOpenAgent }: BenchmarksViewProps) {
   }, []);
 
   const loadRuns = useCallback(async (background = false) => {
+    if (background && runsInFlightRef.current) return;
+    runsInFlightRef.current = true;
     if (!background) setRunsLoading(true);
     try {
       const [nextRuns, nextRequests] = await Promise.all([fetchHubRuns(), fetchHubRunRequests()]);
@@ -64,8 +69,11 @@ export function BenchmarksView({ onOpenAgent }: BenchmarksViewProps) {
       setRequests(nextRequests);
       setRunsError(null);
     } catch (err) {
-      if (!background) setRunsError(err instanceof Error ? err.message : String(err));
+      // Background failures surface too — otherwise stale runs keep rendering
+      // with no signal that updates stopped (the success path clears this).
+      setRunsError(err instanceof Error ? err.message : String(err));
     } finally {
+      runsInFlightRef.current = false;
       if (!background) setRunsLoading(false);
     }
   }, []);

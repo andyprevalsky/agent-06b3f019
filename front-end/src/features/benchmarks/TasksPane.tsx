@@ -7,6 +7,8 @@
  *                           │
  *   ready + click edit ──► editing(task) ──save ok/cancel──► ready (task row updated)
  *   ready + toggle checkbox / select-all-filtered ──► ready (selection set)
+ *   catalog refetch (props.tasks) ──► ready (selection pruned to names that
+ *      still exist in the catalog)
  *   ready + click Run (selection ≥ 1) ──► dispatching ──201──► ready
  *      (selection cleared, onDispatched() tells the Runs pane to refresh)
  *
@@ -15,7 +17,7 @@
  * the selection count.
  */
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Loader2, Pencil, Play, Search } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -87,6 +89,17 @@ export function TasksPane({
       return true;
     });
   }, [tasks, search, tagFilter, groupFilter]);
+
+  // A catalog refresh can drop or rename tasks — prune stale names from the
+  // selection so Run can never dispatch tasks that no longer exist. Returning
+  // `prev` unchanged lets React bail out, so this can't loop.
+  useEffect(() => {
+    setSelected((prev) => {
+      const names = new Set(tasks.map((t) => t.name));
+      const pruned = [...prev].filter((name) => names.has(name));
+      return pruned.length === prev.size ? prev : new Set(pruned);
+    });
+  }, [tasks]);
 
   const allVisibleSelected =
     visibleTasks.length > 0 && visibleTasks.every((t) => selected.has(t.name));

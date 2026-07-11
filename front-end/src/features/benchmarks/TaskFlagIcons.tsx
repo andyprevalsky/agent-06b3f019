@@ -4,7 +4,9 @@
  *   props(simOn, fastOn) ──► render zero, one, or two static icons
  *     simOn  → <Sparkles> (same icon as the query-box SimulatorToggle)
  *     fastOn → <Zap>      (same icon as the query-box FastModeToggle)
- *   hover(icon) → tooltip with the flag description (no other state).
+ *   hover/focus(icon) → tooltip with the flag description (no other state).
+ *     Each icon wrapper is keyboard-focusable (tabIndex=0) and mirrors the
+ *     tooltip text as its aria-label for assistive tech.
  */
 
 import { Sparkles, Zap } from 'lucide-react';
@@ -14,7 +16,11 @@ function FlagIcon({ label, children }: { label: string; children: React.ReactNod
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className="inline-flex items-center cursor-help" aria-label={label}>
+        <span
+          tabIndex={0}
+          className="inline-flex items-center cursor-help rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          aria-label={label}
+        >
           {children}
         </span>
       </TooltipTrigger>

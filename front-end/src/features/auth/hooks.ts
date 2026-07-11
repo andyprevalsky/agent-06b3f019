@@ -223,6 +223,31 @@ function useAuthActions(setters: AuthStateSetters) {
 }
 
 /**
+ * Archive mode pins the hard-coded benchmark user, so the mutators returned
+ * from useAuth must be inert there — a live refreshAuthState/signOut would
+ * replace that user (with null or an anonymous session) while
+ * isAuthenticated stays true.
+ */
+function useArchiveGuardedAuthActions(
+  archiveMode: boolean,
+  actions: Pick<ReturnType<typeof useAuthActions>, 'refreshAuthState' | 'signOut'>,
+) {
+  const { refreshAuthState, signOut } = actions;
+  const guardedRefreshAuthState = useCallback(
+    async (reason?: string) => {
+      if (archiveMode) return;
+      await refreshAuthState(reason);
+    },
+    [archiveMode, refreshAuthState],
+  );
+  const guardedSignOut = useCallback(async () => {
+    if (archiveMode) return;
+    await signOut();
+  }, [archiveMode, signOut]);
+  return { refreshAuthState: guardedRefreshAuthState, signOut: guardedSignOut };
+}
+
+/**
  * Auth state hook: session, user, loading, sign-out, invite-gate check.
  * SINGLE SOURCE OF TRUTH for realtime auth — setRealtimeAuth() is called here only.
  * `passive: true` observes auth without initiating sessions (no dev auto-login /
@@ -250,6 +275,7 @@ export function useAuth(options?: { passive?: boolean }) {
     setIsFullySignedIn,
     setRealtimeReady,
   });
+  const guardedActions = useArchiveGuardedAuthActions(archiveMode, { refreshAuthState, signOut });
 
   useEffect(() => {
     if (archiveMode) return;
@@ -300,7 +326,7 @@ export function useAuth(options?: { passive?: boolean }) {
     isFullySignedIn,
     loading,
     realtimeReady,
-    refreshAuthState,
-    signOut,
+    refreshAuthState: guardedActions.refreshAuthState,
+    signOut: guardedActions.signOut,
   };
 }

@@ -153,7 +153,7 @@ print_code_provenance() {
 # Destroy a machine RELIABLY. A clone still in Fly's 'created'/provisioning state
 # no-ops a `--force` destroy (and then auto-starts later → a money-burning
 # zombie), so retry across the transition; last resort, stop then destroy.
-reap_machine() {  # reap_machine <id>
+reap_machine() {  # reap_machine <id> — returns non-zero if the machine survived
     local id="$1" i
     [ -n "$id" ] || return 0
     for i in 1 2 3 4 5; do
@@ -162,8 +162,11 @@ reap_machine() {  # reap_machine <id>
         [ "$i" = 3 ] && FLY machine stop "$id" -a "$APP" >/dev/null 2>&1 || true
         sleep 3
     done
-    FLY machines list -a "$APP" --json 2>/dev/null | grep -q "\"$id\"" \
-        && echo "  ⚠️ could not destroy machine $id — check: flyctl machines list -a $APP" >&2 || true
+    if FLY machines list -a "$APP" --json 2>/dev/null | grep -q "\"$id\""; then
+        echo "  ⚠️ could not destroy machine $id — check: flyctl machines list -a $APP" >&2
+        return 1
+    fi
+    return 0
 }
 
 # ── Pre-provisioned pool: stopped clones (current image) claimed on demand ───
@@ -263,15 +266,27 @@ cleanup() {
     for p in "${CHILD_PIDS[@]:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null || true; done
     if [ "$KEEP_CLONES" != "1" ]; then
         # Autoscaler worker-pool clones (tracked per bench) first, then the primaries.
+        # A failed destroy is a billed-forever zombie: keep it tracked (the
+        # worker-clones.ids files under $FLEET_DIR are left in place) and warn
+        # loudly with the ids so a later sweep can retry.
+        local failed_reaps=""
         for idf in "$FLEET_DIR"/*/worker-clones.ids; do
             [ -f "$idf" ] || continue
             while read -r wid; do
-                [ -n "$wid" ] && { echo "🧹 destroying worker clone $wid"; reap_machine "$wid"; }
+                [ -n "$wid" ] || continue
+                echo "🧹 destroying worker clone $wid"
+                reap_machine "$wid" || failed_reaps="$failed_reaps $wid"
             done < "$idf"
         done
         for id in "${CLONE_IDS[@]:-}"; do
-            [ -n "$id" ] && { echo "🧹 destroying fresh clone $id"; reap_machine "$id"; }
+            [ -n "$id" ] || continue
+            echo "🧹 destroying fresh clone $id"
+            reap_machine "$id" || failed_reaps="$failed_reaps $id"
         done
+        if [ -n "$failed_reaps" ]; then
+            echo "⚠️  FAILED to destroy machine(s):$failed_reaps — still alive (and billed) on Fly." >&2
+            echo "    retry: flyctl machine destroy --force <id> -a $APP  (ids also tracked under $FLEET_DIR/*/worker-clones.ids)" >&2
+        fi
     else
         echo "⚠️  --keep-clones: leaving ${#CLONE_IDS[@]} fresh clone(s) alive: ${CLONE_IDS[*]:-}"
     fi
@@ -454,7 +469,13 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
             for k in $(seq 1 "$n"); do
                 local wid; wid="$(tail -1 "$out/worker-clones.ids" 2>/dev/null)"
                 [ -n "$wid" ] || break
-                reap_machine "$wid"
+                # Only drop the id from tracking once the destroy is CONFIRMED —
+                # an untracked-but-alive machine is a billed-forever zombie. On
+                # failure keep it listed and retry on the next autoscaler tick.
+                if ! reap_machine "$wid"; then
+                    echo "  ⚠️ [$bench] failed to destroy worker $wid — kept in tracking, retrying next tick" >&2
+                    break
+                fi
                 sed '$d' "$out/worker-clones.ids" > "$out/worker-clones.ids.tmp" 2>/dev/null && mv "$out/worker-clones.ids.tmp" "$out/worker-clones.ids" || true
             done
         fi

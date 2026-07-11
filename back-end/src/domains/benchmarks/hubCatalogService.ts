@@ -4,107 +4,16 @@
  */
 
 import { z } from 'zod';
-import { createLogger } from '../../providers/logger';
 import { readTaskAttempts } from './config';
 import * as hubStore from '../../providers/benchmarkHubStore';
 import * as repo from './repo';
-import { getCachedTasks, setCachedTasks } from './catalogCache';
+import { refreshTasksFromDb } from './hubCatalogSeed';
 
-const log = createLogger('BenchmarkHub');
-
-interface RawTask extends Record<string, unknown> {
-  name: string;
-  prompt: string;
-}
-
-function taskColumns(task: RawTask) {
-  const env = task.environment as Record<string, unknown> | undefined;
-  return {
-    title: typeof task.title === 'string' ? task.title : null,
-    prompt: task.prompt,
-    status: typeof task.status === 'string' ? task.status : null,
-    bench: typeof task.bench === 'string' ? task.bench : null,
-    runner: typeof task.runner === 'string' ? task.runner : null,
-    tags: Array.isArray(task.tags)
-      ? (task.tags as unknown[]).filter((t): t is string => typeof t === 'string')
-      : [],
-    timeoutSeconds: typeof task.timeout_seconds === 'number' ? task.timeout_seconds : null,
-    priceLimitCents: typeof task.price_limit_cents === 'number' ? task.price_limit_cents : null,
-    expectedTools: Array.isArray(task.expected_tools)
-      ? (task.expected_tools as unknown[]).filter((t): t is string => typeof t === 'string')
-      : [],
-    minAgentCount: typeof task.min_agent_count === 'number' ? task.min_agent_count : null,
-    isChatMode: task.is_chat_mode === true,
-    environment: (env ?? undefined) as repo.JsonInput | undefined,
-    evaluators: (task.evaluators ?? undefined) as repo.JsonInput | undefined,
-    source: (task.source ?? undefined) as repo.JsonInput | undefined,
-    definition: task as repo.JsonInput,
-  };
-}
-
-/**
- * Seed the BenchmarkTask table from tasks.json: INSERT missing names only.
- * The DB is the source of truth after seeding — file entries never overwrite
- * rows, so hub edits survive redeploys while new catalog entries added via
- * git still show up.
- */
-export async function seedBenchmarkTasks(): Promise<{ inserted: number; total: number }> {
-  const tasks = (getCachedTasks() ?? []) as RawTask[];
-  if (tasks.length === 0) return { inserted: 0, total: 0 };
-  const known = new Set(await repo.findExistingTaskNames());
-  let inserted = 0;
-  for (const task of tasks) {
-    if (typeof task.name !== 'string' || known.has(task.name)) continue;
-    await repo.createTask({ name: task.name, ...taskColumns(task) });
-    inserted += 1;
-  }
-  await reconcileSeededRows(tasks);
-  log.info('Benchmark task seed complete', { inserted, total: known.size + inserted });
-  // Public catalog routes serve DB truth once seeded (edits included).
-  await refreshTasksFromDb();
-  return { inserted, total: known.size + inserted };
-}
-
-/**
- * Two narrow exceptions to DB-wins, applied on every seed:
- *   - empty-string descriptions violate the catalog contract (patchTask deletes
- *     the key on clear) — heal rows seeded before that rule existed
- *   - `retired` in tasks.json propagates to existing rows: retirement is a
- *     repo-level decree (the eval suite reads the file). Un-retiring via the
- *     hub still sticks — the poller exports the DB catalog back to tasks.json,
- *     after which the file no longer says retired.
- */
-async function reconcileSeededRows(tasks: RawTask[]): Promise<void> {
-  const retiredInFile = new Set(
-    tasks.filter((t) => t.status === 'retired').map((t) => t.name as string)
-  );
-  for (const row of await repo.findAllTasks()) {
-    const definition = { ...((row.definition ?? {}) as Record<string, unknown>) };
-    const data: repo.BenchmarkTaskUpdate = {};
-    if (definition.description === '') {
-      delete definition.description;
-      data.definition = definition as repo.JsonInput;
-    }
-    if (retiredInFile.has(row.name) && row.status !== 'retired') {
-      data.status = 'retired';
-      definition.status = 'retired';
-      data.definition = definition as repo.JsonInput;
-    }
-    if (Object.keys(data).length > 0) {
-      data.updatedBy = 'catalog-seed';
-      await repo.updateTask(row.name, data);
-      log.info('Reconciled seeded task row', { name: row.name, fields: Object.keys(data) });
-    }
-  }
-}
-
-/** Replace the in-memory public catalog cache with DB definitions. */
-export async function refreshTasksFromDb(): Promise<void> {
-  const rows = await repo.findAllTasks();
-  if (rows.length > 0) {
-    setCachedTasks(rows.map((r) => r.definition as Record<string, unknown>));
-  }
-}
+export {
+  seedBenchmarkTasks,
+  ensureBenchmarkTasksSeeded,
+  refreshTasksFromDb,
+} from './hubCatalogSeed';
 
 export interface TaskStats {
   attempts: number;
@@ -222,43 +131,48 @@ export interface CatalogTask {
   stats: TaskStats | null;
 }
 
+function toCatalogTask(
+  row: Awaited<ReturnType<typeof repo.findAllTasks>>[number],
+  stats: Map<string, TaskStats>
+): CatalogTask {
+  const definition = (row.definition ?? {}) as Record<string, unknown>;
+  const env = (row.environment ?? {}) as Record<string, unknown>;
+  const worldModelMode =
+    typeof env.mode === 'string'
+      ? env.mode
+      : typeof definition.world_model_mode === 'string'
+        ? definition.world_model_mode
+        : null;
+  return {
+    name: row.name,
+    title: row.title,
+    description:
+      typeof definition.description === 'string' && definition.description !== ''
+        ? definition.description
+        : null,
+    prompt: row.prompt,
+    status: row.status,
+    bench: row.bench,
+    group: taskGroup(row.status, row.bench, row.tags),
+    tags: row.tags,
+    timeout_seconds: row.timeoutSeconds,
+    price_limit_cents: row.priceLimitCents,
+    expected_tools: row.expectedTools,
+    min_agent_count: row.minAgentCount,
+    is_chat_mode: row.isChatMode,
+    world_model_mode: worldModelMode,
+    updated_at: row.updatedAt.toISOString(),
+    updated_by: row.updatedBy,
+    stats: stats.get(row.name) ?? null,
+  };
+}
+
 /** The hub catalog: every task from the DB, joined with attempt stats. */
 export async function getCatalog(): Promise<CatalogTask[]> {
   const [allRows, stats] = await Promise.all([repo.findAllTasks(), computeTaskStats()]);
   // Retired tasks exist only for history integrity — invisible in the hub.
   const rows = allRows.filter((row) => row.status !== 'retired');
-  return rows.map((row) => {
-    const definition = (row.definition ?? {}) as Record<string, unknown>;
-    const env = (row.environment ?? {}) as Record<string, unknown>;
-    const worldModelMode =
-      typeof env.mode === 'string'
-        ? env.mode
-        : typeof definition.world_model_mode === 'string'
-          ? definition.world_model_mode
-          : null;
-    return {
-      name: row.name,
-      title: row.title,
-      description:
-        typeof definition.description === 'string' && definition.description !== ''
-          ? definition.description
-          : null,
-      prompt: row.prompt,
-      status: row.status,
-      bench: row.bench,
-      group: taskGroup(row.status, row.bench, row.tags),
-      tags: row.tags,
-      timeout_seconds: row.timeoutSeconds,
-      price_limit_cents: row.priceLimitCents,
-      expected_tools: row.expectedTools,
-      min_agent_count: row.minAgentCount,
-      is_chat_mode: row.isChatMode,
-      world_model_mode: worldModelMode,
-      updated_at: row.updatedAt.toISOString(),
-      updated_by: row.updatedBy,
-      stats: stats.get(row.name) ?? null,
-    };
-  });
+  return rows.map((row) => toCatalogTask(row, stats));
 }
 
 export const taskEditSchema = z
@@ -347,8 +261,10 @@ export async function patchTask(
 
   await repo.updateTask(name, data);
   await refreshTasksFromDb();
-  const catalog = await getCatalog();
-  const updated = catalog.find((t) => t.name === name);
+  // Map the row directly rather than searching getCatalog(): an edit that sets
+  // status=retired removes the task from the catalog view, and the write must
+  // still return the updated task instead of a spurious not-found.
+  const [updated, stats] = await Promise.all([repo.findTaskByName(name), computeTaskStats()]);
   if (!updated) throw new TaskNotFoundError(name);
-  return updated;
+  return toCatalogTask(updated, stats);
 }

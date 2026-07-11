@@ -178,12 +178,35 @@ PY
     done
 }
 
+# The snapshot_loop child must never outlive the poller: an interrupt (or a
+# request blowing up) between spawn and the normal-path kill would orphan a
+# loop that keeps POSTing stale snapshots forever. One kill — used by BOTH the
+# happy path and the exit trap — reaps whichever snapshot loop is live.
+SNAP_PID=""
+kill_snapshot_loop() {
+    [ -n "${SNAP_PID:-}" ] && kill "$SNAP_PID" 2>/dev/null || true
+    SNAP_PID=""
+}
+poller_cleanup() {
+    local ec=$?
+    kill_snapshot_loop
+    exit "$ec"
+}
+trap poller_cleanup EXIT INT TERM
+
 process_request() {  # process_request <request_json>
     local req="$1"
     local req_id task_names sim_on
-    req_id="$(printf '%s' "$req" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
-    task_names="$(printf '%s' "$req" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["taskNames"]))')"
-    sim_on="$(printf '%s' "$req" | python3 -c 'import json,sys; print(",".join(json.load(sys.stdin).get("simOn") or []))')"
+    # Tolerant extraction: a malformed queue record (bad JSON, missing id or
+    # taskNames) must never kill the poller under set -e — validate BEFORE
+    # dispatching, warn with the (truncated) record, and skip it.
+    req_id="$(printf '%s' "$req" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id") or "")' 2>/dev/null || true)"
+    task_names="$(printf '%s' "$req" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin).get("taskNames") or []))' 2>/dev/null || true)"
+    sim_on="$(printf '%s' "$req" | python3 -c 'import json,sys; print(",".join(json.load(sys.stdin).get("simOn") or []))' 2>/dev/null || true)"
+    if [ -z "$req_id" ] || [ -z "$task_names" ]; then
+        echo "⚠ malformed run-request (missing id/taskNames) — skipping: $(printf '%.200s' "$req")" >&2
+        return 0
+    fi
 
     echo "── claiming request $req_id (tasks: $task_names)"
     if ! hub PATCH "/api/benchmarks/run-requests/$req_id" \
@@ -198,7 +221,7 @@ process_request() {  # process_request <request_json>
     local start_epoch; start_epoch="$(date +%s)"
     local log_file=".context/hub-poller-run-$req_id.log"
 
-    snapshot_loop "$req_id" "$hub_run_id" "$start_epoch" & local snap_pid=$!
+    snapshot_loop "$req_id" "$hub_run_id" "$start_epoch" & SNAP_PID=$!
 
     local runner_args=()
     [ "$LOCAL_RUNNER" = "1" ] && runner_args+=(--local)
@@ -213,7 +236,7 @@ process_request() {  # process_request <request_json>
     echo "   launching: $RUN_BENCH_BIN ${runner_args[*]} (log: $log_file)"
     local exit_code=0
     "$RUN_BENCH_BIN" "${runner_args[@]}" > "$log_file" 2>&1 || exit_code=$?
-    kill "$snap_pid" 2>/dev/null || true
+    kill_snapshot_loop
 
     # Final bundle: newest run record produced after launch (local or fleet).
     local final
@@ -324,7 +347,11 @@ reqs.sort(key=lambda r: r.get("createdAt") or "")
 print(json.dumps(reqs[0]) if reqs else "")
 ')"
     if [ -n "$next" ]; then
-        process_request "$next"
+        # One bad request must never take the poller down (set -e): tolerate
+        # per-item failure and keep polling.
+        if ! process_request "$next"; then
+            echo "⚠ request processing failed — continuing: $(printf '%.200s' "$next")" >&2
+        fi
         [ "$ONCE" = "1" ] && exit 0
     fi
     [ "$ONCE" = "1" ] && [ -z "$next" ] && { echo "(no queued requests)"; exit 0; }

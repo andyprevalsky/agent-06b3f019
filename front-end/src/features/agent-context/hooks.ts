@@ -158,11 +158,14 @@ export function useAgentProvider({
         setIsChatMode,
       );
       setSelectedAgentIdState(id);
-      if (id) {
+      // Same access gate as the URL-on-mount load: when access isn't ready
+      // yet, the effect above loads the id once canLoadAgent flips true
+      // (agent is null after flushState, so it fires).
+      if (id && canLoadAgent) {
         void loadAgentDetail(id);
       }
     },
-    [loadAgentDetail],
+    [canLoadAgent, loadAgentDetail],
   );
 
   // ─── Send message ───────────────────────────────────────────────────────

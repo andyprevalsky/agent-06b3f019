@@ -182,7 +182,9 @@ export async function putRun(
   options: { live?: boolean; source?: string } = {}
 ): Promise<HubRunSummary> {
   const runId = String(bundle.run_id ?? '');
-  if (!runId) throw new Error('bundle.run_id required');
+  // Same allowlist as getRunBundle: the id becomes a filename in the local-dir
+  // fallback, so anything outside it (e.g. "../../x") must never reach putObject.
+  if (!/^[A-Za-z0-9._-]+$/.test(runId)) throw new Error('bundle.run_id required (safe charset)');
   const tasks = Array.isArray(bundle.tasks) ? (bundle.tasks as Array<Record<string, unknown>>) : [];
   const summary: HubRunSummary = {
     run_id: runId,

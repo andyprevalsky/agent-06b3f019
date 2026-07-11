@@ -37,6 +37,12 @@ export async function initAuthSession(
       return;
     } catch (error) {
       console.error('[Auth] Dev auto-login failed, falling back to anonymous:', error);
+      if (existingSession) {
+        // Reuse the anonymous session we already have rather than orphaning
+        // it with a fresh createAnonymousSession() below.
+        await applySession('dev-auto-login-failed', existingSession);
+        return;
+      }
     }
   } else if (existingSession) {
     logAuth('Found session', {

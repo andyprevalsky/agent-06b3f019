@@ -5,6 +5,9 @@
  *        │                │
  *        │                └─fail──► error (retry → loading)
  *   ready(live run) ──5s poll──► ready(refreshed detail)
+ *     polls never overlap (a tick is skipped while a request is in flight) and
+ *     responses from a previous runId — or after unmount — are dropped via a
+ *     generation counter, so stale data can't regress the current view
  *   ready + click a task's "Open agent" ──► onOpenAgent(runId, agentId)
  *   Back ──► onBack() (parent restores the hub panes)
  *
@@ -17,7 +20,7 @@
  * agents, failure reason).
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, Check, GitBranch, Loader2 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -82,13 +85,7 @@ function usd(n: number | null): string {
  * The fleet dashboard's startup bar, hub edition: concrete dispatch progress
  * while a run spins up, so "queued" is never an opaque wait.
  */
-function DispatchTimeline({
-  dispatch,
-  running,
-}: {
-  dispatch: HubRunDispatch;
-  running: boolean;
-}) {
+function DispatchTimeline({ dispatch, running }: { dispatch: HubRunDispatch; running: boolean }) {
   const now = Date.now();
   const createdMs = new Date(dispatch.created_at).getTime();
   const claimedMs = dispatch.claimed_at === null ? null : new Date(dispatch.claimed_at).getTime();
@@ -171,19 +168,41 @@ export function BenchmarkRunView({ runId, onOpenAgent, onBack }: BenchmarkRunVie
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Poll serialization: `inFlightRef` skips a tick while a request is pending;
+  // `generationRef` is bumped when runId changes (and on unmount) so responses
+  // from a previous run — or a dead view — can never overwrite current state.
+  const generationRef = useRef(0);
+  const inFlightRef = useRef(false);
+
+  useEffect(() => {
+    return () => {
+      generationRef.current += 1;
+      inFlightRef.current = false;
+    };
+  }, [runId]);
+
   const load = useCallback(
     async (background = false) => {
+      if (background && inFlightRef.current) return;
+      const generation = generationRef.current;
+      inFlightRef.current = true;
       if (!background) {
         setLoading(true);
         setError(null);
       }
       try {
-        setDetail(await fetchHubRun(runId));
+        const next = await fetchHubRun(runId);
+        if (generation !== generationRef.current) return;
+        setDetail(next);
         setError(null);
       } catch (err) {
+        if (generation !== generationRef.current) return;
         if (!background) setError(err instanceof Error ? err.message : String(err));
       } finally {
-        if (!background) setLoading(false);
+        if (generation === generationRef.current) {
+          inFlightRef.current = false;
+          if (!background) setLoading(false);
+        }
       }
     },
     [runId],

@@ -28,8 +28,11 @@ agents/venv
 agents/navi-worker-log.txt
 
 # Local env / secrets — injected as Fly secrets, never baked into the image
+# (include suffixed variants like .env.local / .env.production at every depth)
 .env
+.env.*
 **/.env
+**/.env.*
 .cloud-env
 
 # Editor / OS

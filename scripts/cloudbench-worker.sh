@@ -25,18 +25,36 @@ log() { echo "[cloudbench-worker] $*"; }
 cd "$REPO_DIR" 2>/dev/null || { log "FATAL: no $REPO_DIR"; exit 1; }
 
 # ── Sync the exact ref + local patch the primary box is running ─────────────
+# Fail CLOSED: a worker on the wrong code would silently pull this bench's
+# queue and run activities against stale sources — worse than no worker at
+# all. Any checkout/patch mismatch is FATAL (the controller sees the machine's
+# /data/worker.log and the pool just stays one worker short).
 if [ -n "${REF:-}" ]; then
     log "git-syncing → $REF"
-    gosu "$APP_USER" git -C "$REPO_DIR" fetch origin "$REF" 2>&1 | sed 's/^/   /' || \
-        gosu "$APP_USER" git -C "$REPO_DIR" fetch origin 2>&1 | sed 's/^/   /' || true
-    gosu "$APP_USER" git -C "$REPO_DIR" checkout -f "$REF" 2>&1 | sed 's/^/   /' || \
-        gosu "$APP_USER" git -C "$REPO_DIR" checkout -f FETCH_HEAD 2>&1 | sed 's/^/   /' || true
+    REF_FETCHED=1
+    if ! gosu "$APP_USER" git -C "$REPO_DIR" fetch origin "$REF" 2>&1 | sed 's/^/   /'; then
+        REF_FETCHED=0
+        gosu "$APP_USER" git -C "$REPO_DIR" fetch origin 2>&1 | sed 's/^/   /' || \
+            log "WARN: git fetch failed — trying checkout from the existing clone"
+    fi
+    if ! gosu "$APP_USER" git -C "$REPO_DIR" checkout -f "$REF" 2>&1 | sed 's/^/   /'; then
+        # A bare sha that was just fetched lands in FETCH_HEAD — but FETCH_HEAD
+        # only points at $REF when the ref-specific fetch succeeded; otherwise
+        # it would silently check out some OTHER head (= wrong code).
+        if [ "$REF_FETCHED" != "1" ] || \
+           ! gosu "$APP_USER" git -C "$REPO_DIR" checkout -f FETCH_HEAD 2>&1 | sed 's/^/   /'; then
+            log "FATAL: could not check out $REF — refusing to run this bench's queue on wrong code"
+            exit 1
+        fi
+    fi
     gosu "$APP_USER" git -C "$REPO_DIR" reset --hard 2>&1 | sed 's/^/   /' || true
 fi
 if [ -n "${LOCAL_PATCH_FILE:-}" ] && [ -s "$LOCAL_PATCH_FILE" ]; then
     log "applying local workspace patch"
-    gosu "$APP_USER" git -C "$REPO_DIR" apply --whitespace=nowarn "$LOCAL_PATCH_FILE" 2>&1 | sed 's/^/   /' || \
-        log "WARN: patch apply failed (continuing on base checkout)"
+    if ! gosu "$APP_USER" git -C "$REPO_DIR" apply --whitespace=nowarn "$LOCAL_PATCH_FILE" 2>&1 | sed 's/^/   /'; then
+        log "FATAL: local workspace patch failed to apply — worker would run mismatched code"
+        exit 1
+    fi
 fi
 
 # ── Point the worker at the primary box's backend + the bench's queue ───────

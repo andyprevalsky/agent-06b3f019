@@ -40,36 +40,46 @@ function requireInternal(req: HybridAuthRequest, res: Response, next: NextFuncti
  * Returns benchmark task definitions from agents/benchmarks/tasks.json.
  * No auth required — task definitions are not sensitive.
  */
-router.get('/', (req, res) => {
-  try {
-    const tasks = service.getTasks();
-    res.json({ tasks });
-  } catch (error) {
-    if (error instanceof TasksUnavailableError) {
-      res.status(500).json({ error: 'Benchmark tasks unavailable' });
-      return;
+router.get(
+  '/',
+  asyncHandler(async (req, res) => {
+    try {
+      // Wait for the boot seed so early requests can't read a partial catalog;
+      // a failed seed still serves the file-backed cache (error already logged).
+      await service.ensureBenchmarkTasksSeeded().catch(() => undefined);
+      const tasks = service.getTasks();
+      res.json({ tasks });
+    } catch (error) {
+      if (error instanceof TasksUnavailableError) {
+        res.status(500).json({ error: 'Benchmark tasks unavailable' });
+        return;
+      }
+      throw error;
     }
-    throw error;
-  }
-});
+  })
+);
 
 /**
  * GET /api/benchmarks/test-prompts
  * Catalog entries adapted for the front-end test-prompts picker (dev query box).
  * No auth required — same public data as GET /api/benchmarks, reshaped.
  */
-router.get('/test-prompts', (req, res) => {
-  try {
-    const prompts = service.getTestPrompts();
-    res.json({ prompts });
-  } catch (error) {
-    if (error instanceof TasksUnavailableError) {
-      res.status(500).json({ error: 'Benchmark tasks unavailable' });
-      return;
+router.get(
+  '/test-prompts',
+  asyncHandler(async (req, res) => {
+    try {
+      await service.ensureBenchmarkTasksSeeded().catch(() => undefined);
+      const prompts = service.getTestPrompts();
+      res.json({ prompts });
+    } catch (error) {
+      if (error instanceof TasksUnavailableError) {
+        res.status(500).json({ error: 'Benchmark tasks unavailable' });
+        return;
+      }
+      throw error;
     }
-    throw error;
-  }
-});
+  })
+);
 
 // ── Benchmark Hub endpoints (team-gated) ────────────────────────────────────
 
@@ -79,6 +89,7 @@ router.get(
   auth,
   requireHubAdmin,
   asyncHandler<HybridAuthRequest>(async (req, res) => {
+    await service.ensureBenchmarkTasksSeeded().catch(() => undefined);
     res.json({ tasks: await service.getCatalog() });
   })
 );

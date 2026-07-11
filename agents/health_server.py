@@ -34,10 +34,24 @@ _BENCHMARK_MEMORY_MODULES = (
     "providers.rose.browser_use",
 )
 
+
+def _min_machines_floor() -> int:
+    """Parse MIN_MACHINES defensively: a malformed value must not take the
+    health server down at import time, and the floor is never below 1."""
+    raw = os.getenv("MIN_MACHINES", "2")
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(f"Invalid MIN_MACHINES value {raw!r} — falling back to 2")
+        value = 2
+    return max(value, 1)
+
+
 # Queue metrics (updated by background poller in worker.py)
 _task_queue_backlog = 0
 _running_workflow_count = 0
-_desired_machine_count = int(os.getenv("MIN_MACHINES", "2"))  # pre-compute floor; matches worker MIN_MACHINES (prod=2, per-bench cloud=1)
+# Pre-computed floor; matches worker MIN_MACHINES (prod=2, per-bench cloud=1).
+_desired_machine_count = _min_machines_floor()
 _current_machine_count = 1  # Observed via Fly DNS
 _is_leader = False  # Whether this instance is the autoscaler leader
 _observed_task_capacity: Optional[int] = None  # Dynamic capacity from SDK resource-based tuner

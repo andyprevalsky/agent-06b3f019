@@ -132,6 +132,14 @@ if [ -n "$PORT" ]; then
     exit 1
   fi
 fi
+# Validate FULL_MAX_CONCURRENCY (from BENCHMARK_PROD_MAX_CONCURRENCY) the same
+# way — it is handed to the prod benchmark runner and must be a positive integer.
+if $FULL; then
+  if ! [[ "$FULL_MAX_CONCURRENCY" =~ ^[0-9]+$ ]] || [ "$FULL_MAX_CONCURRENCY" -lt 1 ]; then
+    echo "ERROR: invalid BENCHMARK_PROD_MAX_CONCURRENCY '$FULL_MAX_CONCURRENCY' — must be a positive integer."
+    exit 1
+  fi
+fi
 
 # ── Track results ──
 SUITE_NAMES=()
@@ -309,7 +317,9 @@ collect_bg_suites
 # ── Smoke tests (parallel, only if --smoke --port=N; --full targets prod) ──
 if $SMOKE; then
   if $FULL; then
-    bg_suite "Full Benchmarks (prod)" bash -c "cd agents && source venv/bin/activate && python benchmarks/run_benchmark.py --suite all --prod --ci --parallel --max-concurrency $FULL_MAX_CONCURRENCY"
+    # Pass the concurrency as a positional arg (not string interpolation) so a
+    # hostile/typo'd env value can never be word-split or executed by bash -c.
+    bg_suite "Full Benchmarks (prod)" bash -c 'cd agents && source venv/bin/activate && python benchmarks/run_benchmark.py --suite all --prod --ci --parallel --max-concurrency "$1"' _ "$FULL_MAX_CONCURRENCY"
     collect_bg_suites
   else
     # Frontend semantic tests require a running frontend — guard BEFORE any

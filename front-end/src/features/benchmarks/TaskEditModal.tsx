@@ -9,7 +9,8 @@
  *     editing ──Cancel/backdrop──► closed (no mutation)
  *
  * Only metadata the backend allowlists is editable; tags are a chip editor
- * (enter to add, × to remove) so edits stay human-readable.
+ * (enter to add — duplicates ignored, × to remove) so edits stay
+ * human-readable and chip keys/removal stay stable.
  */
 
 import { useState } from 'react';
@@ -39,7 +40,9 @@ export function TaskEditModal({ task, onClose, onSaved }: TaskEditModalProps) {
   const [title, setTitle] = useState(task.title ?? '');
   const [description, setDescription] = useState(task.description ?? '');
   const [prompt, setPrompt] = useState(task.prompt);
-  const [tags, setTags] = useState<string[]>(task.tags);
+  // Deduped seed: duplicate catalog tags would collide on React keys, and a
+  // single × click would remove every copy (addTag already rejects dupes).
+  const [tags, setTags] = useState<string[]>(() => [...new Set(task.tags)]);
   const [tagDraft, setTagDraft] = useState('');
   const [timeoutSeconds, setTimeoutSeconds] = useState(
     task.timeout_seconds !== null ? String(task.timeout_seconds) : '',
