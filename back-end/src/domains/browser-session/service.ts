@@ -19,16 +19,45 @@ import {
 import { resumeBrowserSession as resumeBrowserSessionProvider } from '../../providers/browserSessionResume';
 import { canonicalAuthRealm } from '../../providers/authRealm';
 import * as repo from './repo';
+import {
+  injectLocalStorage,
+  SessionNoUserError,
+  SessionNotFoundError,
+} from './service.local-storage';
 import { serializePasskeys, serializePasswords, toUserSettings } from './service.serializers';
 export { getTaskInfo, getTaskOwnerUserId } from './service.task-info';
-export {
-  injectLocalStorage,
-  SessionNotFoundError,
-  SessionNoUserError,
-} from './service.local-storage';
+export { injectLocalStorage, SessionNotFoundError, SessionNoUserError };
 export { CdpInjectionError, SessionNoWsUrlError } from './types';
 
 const log = createLogger('BrowserSession');
+const SAFE_ABSOLUTE_FILE_ROOTS = ['/tmp/downloads/', '/tmp/rose-uploads/', '/home/oai/share/'];
+
+export class InvalidSessionFilePathError extends Error {
+  constructor() {
+    super('Invalid session file path');
+    this.name = 'InvalidSessionFilePathError';
+  }
+}
+
+async function requireSessionOwner(sessionId: string, userId?: string): Promise<void> {
+  if (userId === undefined) return;
+  const session = await repo.findSessionBySessionId(sessionId);
+  if (session === null || session.context.userId !== userId) {
+    throw new SessionNotFoundError();
+  }
+}
+
+function validateSessionFilePath(filePath: string): void {
+  const canonical = filePath.replace(/\\/g, '/');
+  if (
+    canonical.includes('\0') ||
+    canonical.split('/').includes('..') ||
+    (canonical.startsWith('/') &&
+      !SAFE_ABSOLUTE_FILE_ROOTS.some((root) => canonical.startsWith(root)))
+  ) {
+    throw new InvalidSessionFilePathError();
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -202,7 +231,9 @@ export async function listFiles(sessionId: string) {
   };
 }
 
-export async function downloadFile(sessionId: string, filePath: string) {
+export async function downloadFile(sessionId: string, filePath: string, userId?: string) {
+  await requireSessionOwner(sessionId, userId);
+  validateSessionFilePath(filePath);
   const content = await readSessionFile(sessionId, filePath);
   const filename = filePath.split('/').pop();
   return {
@@ -211,7 +242,8 @@ export async function downloadFile(sessionId: string, filePath: string) {
   };
 }
 
-export async function takeScreenshot(sessionId: string) {
+export async function takeScreenshot(sessionId: string, userId?: string) {
+  await requireSessionOwner(sessionId, userId);
   return captureScreenshot(sessionId);
 }
 /* c8 ignore stop */

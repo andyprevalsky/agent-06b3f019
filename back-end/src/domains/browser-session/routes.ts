@@ -30,8 +30,6 @@ import {
   getSessionById,
   uploadFile,
   listFiles,
-  downloadFile,
-  takeScreenshot,
   injectLocalStorage,
   SessionNotFoundError,
   SessionNoUserError,
@@ -44,6 +42,7 @@ import {
   resumeSessionSchema,
   injectLocalStorageSchema,
 } from './types';
+import { registerBrowserDataRoutes } from './routes.files';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -309,38 +308,7 @@ router.get(
   })
 );
 
-router.get(
-  '/:sessionId/files/content',
-  authenticate,
-  asyncHandler(async (req: AuthRequest, res: Response) => {
-    const { sessionId } = req.params;
-    const filePath = typeof req.query.path === 'string' ? req.query.path : '';
-    if (filePath === '') {
-      res.status(400).json({ error: 'path query parameter is required' });
-      return;
-    }
-    const result = await downloadFile(sessionId, filePath);
-    res.setHeader('Content-Type', 'application/octet-stream');
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="${result.filename.replace(/"/g, '')}"`
-    );
-    res.send(result.content);
-  })
-);
-
-router.post(
-  '/:sessionId/screenshot',
-  authenticate,
-  asyncHandler(async (req: AuthRequest, res: Response) => {
-    const { sessionId } = req.params;
-    const result = await takeScreenshot(sessionId);
-    res.json({
-      provider: result.provider,
-      base64_image: result.image.toString('base64'),
-    });
-  })
-);
+registerBrowserDataRoutes(router);
 
 /**
  * POST /api/browser-session/:sessionId/inject-localStorage

@@ -111,7 +111,14 @@ let fsCache: FileSystemCache | null = null;
 
 /** Control-plane calls create mutable remote resources and must never be replayed. */
 export function shouldBypassOutboundReplay(url: string): boolean {
-  return url.includes('e2b.app') || url.includes('api.onkernel.com');
+  try {
+    const hostname = new URL(url).hostname.toLowerCase();
+    return (
+      hostname === 'e2b.app' || hostname.endsWith('.e2b.app') || hostname === 'api.onkernel.com'
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**

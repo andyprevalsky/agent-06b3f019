@@ -38,6 +38,17 @@ export { selectedBrowserProvider } from './config';
 export { injectUserData, getFingerprintInjectionData };
 
 export const getOrCreateContext = getOrCreateBrowserContext;
+const PROVIDER_FETCH_TIMEOUT_MS = 15_000;
+
+async function fetchProviderApi(url: string, init: RequestInit = {}): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), PROVIDER_FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 async function providerForSession(sessionId: string): Promise<BrowserProviderName> {
   const session = await prisma.browserSession.findUnique({
@@ -159,7 +170,7 @@ export async function readSessionFile(sessionId: string, filePath: string): Prom
   const apiKey = process.env.STEEL_API_KEY?.trim();
   if (!apiKey) throw new Error('STEEL_API_KEY is required to read Steel session files');
   const relativePath = filePath.replace(/^\/files\//, '').replace(/^\//, '');
-  const response = await fetch(
+  const response = await fetchProviderApi(
     `https://api.steel.dev/v1/sessions/${encodeURIComponent(sessionId)}/files/${relativePath}`,
     { headers: { 'steel-api-key': apiKey } }
   );
@@ -178,7 +189,7 @@ export async function captureScreenshot(sessionId: string): Promise<{
 
   const apiKey = process.env.STEEL_API_KEY?.trim();
   if (!apiKey) throw new Error('STEEL_API_KEY is required to capture Steel screenshots');
-  const response = await fetch(
+  const response = await fetchProviderApi(
     `https://api.steel.dev/v1/sessions/${encodeURIComponent(sessionId)}/computer`,
     {
       method: 'POST',

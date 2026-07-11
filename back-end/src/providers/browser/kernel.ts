@@ -11,7 +11,6 @@ import { connectValidatedBrowser, validateSessionConnection } from '../steel/ses
 import { browserProviderEnabled } from './config';
 import { getProviderProfile, rememberProviderProfile } from './context';
 import {
-  forgetKernelProxy,
   getOrCreateKernelProxy,
   isKernelProxyAvailabilityError,
   kernelProxyCandidates,
@@ -74,6 +73,9 @@ async function deleteKernelBrowser(sessionId: string): Promise<void> {
             response.once('end', () => resolve(response.statusCode ?? 0));
           }
         );
+        request.setTimeout(10_000, () => {
+          request.destroy(new Error('Kernel session delete timed out'));
+        });
         request.once('error', reject);
         request.end();
       });
@@ -221,10 +223,6 @@ async function createRemoteSession(
         proxyKey: candidate.proxyKey,
         error: error instanceof Error ? error.message : String(error),
       });
-      if (resolved !== undefined) {
-        await forgetKernelProxy(resolved.proxyKey);
-        await client.proxies.delete(resolved.proxyId).catch(() => {});
-      }
       return createWithManagedProxy(candidates, index + 1);
     }
   };
@@ -261,18 +259,27 @@ export async function createKernelSessionWithContext(
   options?: { keepValidationConnection?: boolean }
 ): Promise<BrowserProviderSession> {
   const remote = await createRemoteSession(contextId, agentId, proxyLocation);
-  const dbSession = await prisma.browserSession.create({
-    data: {
-      contextId,
-      agentId,
-      sessionId: remote.sessionId,
-      debugUrl: remote.debugUrl,
-      wsUrl: remote.wsUrl,
-      status: 'ACTIVE',
-      startUrl: _startUrl || undefined,
-      provider: 'kernel',
-    },
-  });
+  let dbSession;
+  try {
+    dbSession = await prisma.browserSession.create({
+      data: {
+        contextId,
+        agentId,
+        sessionId: remote.sessionId,
+        debugUrl: remote.debugUrl,
+        wsUrl: remote.wsUrl,
+        status: 'ACTIVE',
+        startUrl: _startUrl || undefined,
+        provider: 'kernel',
+      },
+    });
+  } catch (error) {
+    await Promise.allSettled([
+      deleteKernelBrowser(remote.sessionId),
+      remote.validationBrowser.close(),
+    ]);
+    throw error;
+  }
 
   let validationBrowser: Browser | null = remote.validationBrowser;
   if (!options?.keepValidationConnection) {

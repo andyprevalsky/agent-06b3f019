@@ -12,7 +12,7 @@ import { createLocalBrowserSession, connectValidatedBrowser } from './sessionCon
 export { resumeSession } from './sessionResume';
 
 export const steel = new Steel({
-  steelAPIKey: process.env.STEEL_API_KEY ?? '',
+  steelAPIKey: process.env.STEEL_API_KEY,
 });
 
 // Max retries when session validation fails

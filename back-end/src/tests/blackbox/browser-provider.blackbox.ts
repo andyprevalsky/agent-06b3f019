@@ -2,6 +2,7 @@
 
 import { randomUUID } from 'node:crypto';
 import Kernel from '@onkernel/sdk';
+import jwt from 'jsonwebtoken';
 import { chromium } from 'playwright';
 import { prisma } from '../../providers/database';
 import { selectedBrowserProvider } from '../../providers/browser/config';
@@ -76,6 +77,27 @@ const tests: Array<[string, () => void]> = [
           'expected a provider validation error'
         );
       }),
+  ],
+  [
+    'Steel selection requires a configured API key',
+    () => {
+      const previous = process.env.STEEL_API_KEY;
+      delete process.env.STEEL_API_KEY;
+      try {
+        withProvider('steel', () => {
+          let message = '';
+          try {
+            selectedBrowserProvider();
+          } catch (error) {
+            message = error instanceof Error ? error.message : String(error);
+          }
+          assert(message.includes('STEEL_API_KEY is required'), 'expected a Steel key error');
+        });
+      } finally {
+        if (previous === undefined) delete process.env.STEEL_API_KEY;
+        else process.env.STEEL_API_KEY = previous;
+      }
+    },
   ],
   [
     'Kernel residential proxies fall back from city to state to country',
@@ -240,6 +262,32 @@ async function runLiveProviderParity(): Promise<void> {
       downloadResponse.ok && (await downloadResponse.text()) === expectedContent,
       'Kernel file download did not round-trip'
     );
+
+    const traversalResponse = await fetch(
+      `${baseUrl}/api/browser-session/${liveSessionId}/files/content?path=../etc/passwd`,
+      { headers: { 'x-api-key': apiKey } }
+    );
+    assert(traversalResponse.status === 400, 'session file traversal was not rejected');
+
+    const jwtSecret = process.env.SUPABASE_JWT_SECRET;
+    const supabaseUrl = process.env.SUPABASE_URL;
+    assert(jwtSecret !== undefined && supabaseUrl !== undefined, 'JWT test config is missing');
+    const attackerToken = jwt.sign({}, jwtSecret, {
+      algorithm: 'HS256',
+      issuer: `${supabaseUrl}/auth/v1`,
+      subject: `kernel-attacker-${randomUUID()}`,
+      expiresIn: '5m',
+    });
+    const crossTenantFile = await fetch(
+      `${baseUrl}/api/browser-session/${liveSessionId}/files/content?path=${encodeURIComponent(String(upload.path))}`,
+      { headers: { Authorization: `Bearer ${attackerToken}` } }
+    );
+    assert(crossTenantFile.status === 404, 'cross-tenant session file read was not rejected');
+    const crossTenantScreenshot = await fetch(
+      `${baseUrl}/api/browser-session/${liveSessionId}/screenshot`,
+      { method: 'POST', headers: { Authorization: `Bearer ${attackerToken}` } }
+    );
+    assert(crossTenantScreenshot.status === 404, 'cross-tenant screenshot was not rejected');
 
     const screenshot = await post(`/${liveSessionId}/screenshot`);
     assert(screenshot.provider === 'kernel', 'Kernel screenshot reported the wrong provider');

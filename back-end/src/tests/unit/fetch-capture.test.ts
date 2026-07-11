@@ -53,6 +53,15 @@ async function run(): Promise<void> {
   assert.strictEqual(shouldBypassOutboundReplay('https://api.e2b.app/sandboxes'), true);
   assert.strictEqual(shouldBypassOutboundReplay('https://api.onkernel.com/profiles'), true);
   assert.strictEqual(shouldBypassOutboundReplay('https://api.example.com/data'), false);
+  assert.strictEqual(
+    shouldBypassOutboundReplay('https://api.example.com/data?next=https://api.onkernel.com'),
+    false
+  );
+  assert.strictEqual(
+    shouldBypassOutboundReplay('https://api.onkernel.com.example.net/data'),
+    false
+  );
+  assert.strictEqual(shouldBypassOutboundReplay('not-a-url-api.onkernel.com'), false);
 
   const originalFetch = globalThis.fetch;
   const oldFakeSurge = process.env.BLACKBOX_TEST_FAKE_SURGE;
