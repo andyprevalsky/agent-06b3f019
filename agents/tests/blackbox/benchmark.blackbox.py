@@ -2134,6 +2134,7 @@ def test_run_sh_manifest_writer_publishes_wmh_when_served():
     import json
     import re
     import subprocess
+    import sys
     import tempfile
     from pathlib import Path
 
@@ -2164,7 +2165,10 @@ def test_run_sh_manifest_writer_publishes_wmh_when_served():
                 **env_extra,
             }
             subprocess.run(
-                ["python3", "-c", manifest_py],
+                # sys.executable, not PATH-resolved "python3": the child env is
+                # minimal (no HOME), which breaks version-manager shims (asdf
+                # exits 126) whenever the venv isn't first on the caller's PATH.
+                [sys.executable, "-c", manifest_py],
                 cwd=tmp,
                 env=env,
                 check=True,
@@ -3561,6 +3565,35 @@ def test_history_ledger_task_names_still_exist_in_catalog():
     assert not orphaned, f"History-orphaning rename/delete detected for: {orphaned}"
 
 
+def test_retired_tasks_hidden_from_suite_and_listing():
+    """'retired' keeps a task name alive for ledger integrity but dead everywhere.
+
+    load-test-sias is the canonical retiree: it must stay in tasks.json (the
+    history-orphan guard depends on the name existing) yet never run in the
+    eval suite and never appear in the suite listing.
+    """
+    import io
+    from contextlib import redirect_stdout
+
+    from benchmarks.benchmark_tasks import all_tasks
+    from benchmarks.run_eval_suite import _print_holding_set
+
+    tasks = all_tasks()
+    sias = next((t for t in tasks if t.name == "load-test-sias"), None)
+    assert sias is not None, "load-test-sias must remain in the catalog (history integrity)"
+    assert sias.status == "retired"
+
+    # never selected for a run (suite runs only status == "ready")
+    ready_names = {t.name for t in tasks if t.status == "ready"}
+    assert "load-test-sias" not in ready_names
+
+    # never shown in the holding-set listing
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _print_holding_set(tasks)
+    assert "load-test-sias" not in buf.getvalue(), "retired task leaked into --list output"
+
+
 def test_long_horizon_idea_bank_preserves_seed_ideas_with_safety_notes():
     """Raw idea kernels have a home before they become runnable evals."""
     from benchmarks.long_horizon import load_idea_bank
@@ -3926,11 +3959,11 @@ async def run_all_tests():
     await r.record_async("create_agent_goal_override", test_create_agent_uses_goal_override_when_env_set)
     r.record("keep_failed_agents_cleanup_policy", test_keep_failed_agents_only_preserves_failures)
     r.record("keep_agents_cleanup_policy", test_keep_agents_preserves_passed_and_failed_runs)
-    r.record("local_plan_load_separate", test_local_plan_runs_load_tests_separately)
+    r.record("local_plan_batches_together", test_local_plan_batches_selected_benchmarks_together)
     await r.record_async("tree_log_supabase_once", test_tree_log_collection_fetches_supabase_once)
     r.record("local_args_multi_exclude", test_local_benchmark_args_for_multi_task_exclude_complement)
     r.record("local_args_anon", test_local_benchmark_args_pass_anon_to_run_benchmark)
-    r.record("local_args_single_load", test_local_benchmark_args_for_single_load_task_not_parallel)
+    r.record("local_args_single_task", test_local_benchmark_args_for_single_task_not_parallel)
     r.record("local_failed_tasks_from_run", test_local_failed_tasks_from_run_reads_result_json)
     r.record("local_services_manifest_validation", test_local_services_manifest_validation_requires_ports)
     r.record("run_sh_manifest_publishes_wmh", test_run_sh_manifest_writer_publishes_wmh_when_served)
@@ -4016,8 +4049,8 @@ async def run_all_tests():
         test_unified_catalog_supports_multiple_evaluators_per_eval,
     )
     r.record(
-        "suite_selection_excludes_incomplete_external",
-        test_suite_selection_excludes_incomplete_and_external_entries,
+        "suite_selection_excludes_incomplete",
+        test_suite_selection_excludes_incomplete_entries,
     )
     r.record("every_task_has_base_image_fixture", test_every_task_has_base_image_fixture_by_default)
     r.record("live_fixture_registry_appliers_in_sync", test_live_fixture_registry_appliers_stay_in_sync)
@@ -4025,5 +4058,6 @@ async def run_all_tests():
     r.record("live_fixture_validation_guards", test_live_fixture_validation_rejects_unknown_and_synthetic_declarations)
     r.record("tag_slices_still_resolve", test_tag_slices_still_resolve)
     r.record("history_ledger_no_orphaned_task_names", test_history_ledger_task_names_still_exist_in_catalog)
+    r.record("retired_tasks_hidden", test_retired_tasks_hidden_from_suite_and_listing)
     r.record("long_horizon_idea_bank", test_long_horizon_idea_bank_preserves_seed_ideas_with_safety_notes)
     return r.all_passed

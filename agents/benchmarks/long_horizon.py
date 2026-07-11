@@ -35,7 +35,9 @@ from benchmarks.live_fixtures import LIVE_FIXTURE_NAMES
 CATALOG_VERSION = "0.1"
 EVALUATION_METHODS = {"static_check", "single_turn_llm_judge", "agentic_llm_judge"}
 ENVIRONMENT_MODES = {"synthetic", "live", "hybrid"}
-TASK_STATUSES = {"ready", "incomplete"}
+# "retired" = kept for ledger/history integrity (names are cross-store primary
+# keys) but hidden from every surface: eval suite, hub catalog, query-box picker.
+TASK_STATUSES = {"ready", "incomplete", "retired"}
 TASK_RUNNERS = {"agent"}
 # pipeline-e2e = e2e test that a harness pipe/quirk works (write locks trigger,
 # cookies inject, tool plumbing). rose-bench = harness-INDEPENDENT capability

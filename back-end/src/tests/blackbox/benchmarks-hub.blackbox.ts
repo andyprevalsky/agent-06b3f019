@@ -206,6 +206,25 @@ async function testCatalog_statsPresentForTasksWithHistory(): Promise<void> {
   assert(withStats.length > 0, 'no task has attempt stats — history ledger not being read');
 }
 
+async function testCatalog_retiredTasksInvisible(): Promise<void> {
+  // 'retired' keeps a task's name alive for ledger integrity but it must never
+  // surface: not in the hub catalog, not in the query-box picker.
+  const catalog = await request(`${BASE_URL}/api/benchmarks/tasks`, { headers: internalHeaders });
+  assertStatus(catalog.status, 200, catalog.data);
+  const names = (catalog.data as { tasks: Array<{ name: string }> }).tasks.map((t) => t.name);
+  assert(!names.includes('load-test-sias'), 'retired task leaked into the hub catalog');
+
+  const picker = await request(`${BASE_URL}/api/benchmarks/test-prompts`);
+  assertStatus(picker.status, 200, picker.data);
+  const titles = (picker.data as { prompts: Array<{ title: string }> }).prompts.map(
+    (p) => p.title
+  );
+  assert(
+    !titles.some((t) => t.includes('Load-Test: Fan Out N')),
+    'retired task leaked into the query-box picker'
+  );
+}
+
 async function testPatch_editAndRevertDescription(): Promise<void> {
   const list = await request(`${BASE_URL}/api/benchmarks/tasks`, { headers: internalHeaders });
   assertStatus(list.status, 200, list.data);
@@ -558,6 +577,7 @@ async function runAll(): Promise<void> {
     ['catalog: tasks + stats shape', testCatalog_returnsTasksWithStatsShape],
     ['catalog: groups are the four known', testCatalog_groupsAreTheThreeKnown],
     ['catalog: stats present from history ledger', testCatalog_statsPresentForTasksWithHistory],
+    ['catalog: retired tasks invisible everywhere', testCatalog_retiredTasksInvisible],
     ['patch: edit + revert description', testPatch_editAndRevertDescription],
     ['patch: rejects unknown field', testPatch_rejectsUnknownField],
     ['patch: rejects bad type', testPatch_rejectsBadType],

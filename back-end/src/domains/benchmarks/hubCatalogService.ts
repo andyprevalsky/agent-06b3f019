@@ -190,7 +190,9 @@ export interface CatalogTask {
 
 /** The hub catalog: every task from the DB, joined with attempt stats. */
 export async function getCatalog(): Promise<CatalogTask[]> {
-  const [rows, stats] = await Promise.all([repo.findAllTasks(), computeTaskStats()]);
+  const [allRows, stats] = await Promise.all([repo.findAllTasks(), computeTaskStats()]);
+  // Retired tasks exist only for history integrity — invisible in the hub.
+  const rows = allRows.filter((row) => row.status !== 'retired');
   return rows.map((row) => {
     const definition = (row.definition ?? {}) as Record<string, unknown>;
     const env = (row.environment ?? {}) as Record<string, unknown>;
@@ -228,7 +230,7 @@ export const taskEditSchema = z
     description: z.string().max(2000).optional(),
     prompt: z.string().min(1).optional(),
     tags: z.array(z.string().min(1).max(60)).max(30).optional(),
-    status: z.enum(['ready', 'incomplete']).nullable().optional(),
+    status: z.enum(['ready', 'incomplete', 'retired']).nullable().optional(),
     bench: z.enum(['rose-bench', 'pipeline-e2e']).optional(),
     timeout_seconds: z.number().int().positive().max(86_400).optional(),
     price_limit_cents: z.number().int().min(0).max(1_000_000).optional(),
@@ -261,7 +263,11 @@ export async function patchTask(
     data.title = edit.title;
     definition.title = edit.title;
   }
-  if (edit.description !== undefined) definition.description = edit.description;
+  if (edit.description !== undefined) {
+    // The catalog contract forbids empty descriptions — clearing removes the key.
+    if (edit.description === '') delete definition.description;
+    else definition.description = edit.description;
+  }
   if (edit.prompt !== undefined) {
     data.prompt = edit.prompt;
     definition.prompt = edit.prompt;

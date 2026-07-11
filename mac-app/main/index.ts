@@ -30,8 +30,9 @@ app.name = 'Rose';
 // verify which worktree's build is on screen. Never active in packaged builds;
 // only when the launcher explicitly sets MAC_APP_DEBUG_PORT. Must be appended
 // before app ready.
-if (!app.isPackaged && process.env.MAC_APP_DEBUG_PORT) {
-  app.commandLine.appendSwitch('remote-debugging-port', process.env.MAC_APP_DEBUG_PORT);
+const debugPort = process.env.MAC_APP_DEBUG_PORT;
+if (!app.isPackaged && debugPort !== undefined && debugPort !== '') {
+  app.commandLine.appendSwitch('remote-debugging-port', debugPort);
 }
 
 initLogger();

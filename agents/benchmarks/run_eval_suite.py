@@ -30,6 +30,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 def _print_holding_set(tasks: list[BenchmarkTask]) -> None:
+    # retired tasks are dead — never run, never listed (history-only names)
+    tasks = [t for t in tasks if t.status != "retired"]
     rose = [t for t in tasks if t.bench == "rose-bench"]
     pipeline = [t for t in tasks if t.bench == "pipeline-e2e"]
     incomplete = [t for t in tasks if t.status == "incomplete"]

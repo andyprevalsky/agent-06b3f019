@@ -56,6 +56,7 @@ interface CatalogTaskShape {
 export function getTestPrompts(): TestPrompt[] {
   return (getTasks() as CatalogTaskShape[])
     .filter((task) => (task.runner ?? 'agent') === 'agent')
+    .filter((task) => (task as { status?: unknown }).status !== 'retired')
     .map((task) => {
       const attachments = Array.isArray(task.attachments)
         ? (task.attachments as string[])
