@@ -65,6 +65,7 @@ from providers.rose.schema import (
     SYNTHETIC_OUTPUT_TOOL_NAME,
     build_openai_response_format,
 )
+from providers.rose.structured_output import StructuredOutputAccumulator
 from providers.rose.transforms import reconstruct_agent_response
 from utils.error_utils import extract_error_message
 from utils.tool_schemas import (
@@ -2054,6 +2055,7 @@ async def call_llm_structured_streaming(  # noqa: C901
         accumulated_reasoning = ""  # Reasoning/thinking text (displayed before response)
         codex_reasoning_items: List[Dict[str, Any]] = []  # Encrypted GPT reasoning state for replay only
         accumulated_json = ""  # JSON content for parsing (waterfall path) or filled at end (claudeAuth)
+        structured_output = StructuredOutputAccumulator()
         last_emitted_text = ""  # Track last emitted text to avoid duplicate sends
         last_emitted_for_chunk = ""  # Track what we've actually sent to on_chunk (for 18-char batching)
         token_count = 0
@@ -2328,7 +2330,8 @@ async def call_llm_structured_streaming(  # noqa: C901
                             first_response_chunk = chunk_count
                             logger.info(f"💬 C{chunk_count} RESPONSE started (native text)")
                     else:
-                        accumulated_json += content
+                        structured_output.add_chunk(chunk)
+                        accumulated_json = structured_output.current_text()
                         if first_response_chunk is None and '"response"' in accumulated_json:
                             first_response_chunk = chunk_count
                             logger.info(f"💬 C{chunk_count} RESPONSE started")
@@ -2521,6 +2524,8 @@ async def call_llm_structured_streaming(  # noqa: C901
                 # Native text only (no tool_use) — treat as the JSON envelope
                 # body; existing markdown/balanced-brace extraction handles it.
                 accumulated_json = text_buffer
+        elif structured_output.has_content():
+            accumulated_json = structured_output.final_text()
 
         logger.info(
             f"🏁 [{call_site}] Rose streaming complete, received {chunk_count} chunks, "
@@ -3479,6 +3484,7 @@ async def _call_llm_verifier(  # noqa: C901
 
     accumulated_reasoning = ""
     accumulated_json = ""
+    structured_output = StructuredOutputAccumulator()
     actual_model = "unknown"
     pool_name = "unknown"
     claude_token_error: Optional[str] = None
@@ -3588,7 +3594,8 @@ async def _call_llm_verifier(  # noqa: C901
                     gpt_token_error = chunk.data["gpt_token_error"]
                     logger.warning(f"⚠️ Verifier GPT token error: {gpt_token_error}")
             elif kind == "content":
-                accumulated_json += chunk.data.get("text", "")
+                structured_output.add_chunk(chunk)
+                accumulated_json = structured_output.current_text()
             elif kind == "reasoning":
                 accumulated_reasoning += chunk.data.get("text", "")
             elif kind == "tool_call":
@@ -3628,6 +3635,8 @@ async def _call_llm_verifier(  # noqa: C901
         if not isinstance(first_input, dict):
             raise ValueError(f"Verifier native tool payload must be an object (got {type(first_input).__name__})")
         accumulated_json = json.dumps(first_input)
+    elif structured_output.has_content():
+        accumulated_json = structured_output.final_text()
 
     # llm.cache event is emitted from RoseClient.complete (single source).
     # Still need these locally for the returned usage dict consumed by callers.

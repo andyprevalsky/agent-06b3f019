@@ -30,4 +30,15 @@ for (const [name, harness] of [
   );
 }
 
+assert.match(
+  blackboxScript,
+  /FAST_MODE_ANTHROPIC_PROXY_URL="\$\{BLACKBOX_FAST_MODE_ANTHROPIC_PROXY_URL:-\}"/,
+  'isolated blackbox backend must not inherit a developer Fast Mode Anthropic tunnel'
+);
+assert.match(
+  blackboxScript,
+  /FAST_MODE_CODEX_PROXY_URL="\$\{BLACKBOX_FAST_MODE_CODEX_PROXY_URL:-\}"/,
+  'isolated blackbox backend must not inherit a developer Fast Mode Codex tunnel'
+);
+
 process.stdout.write('coverage script contracts passed\n');

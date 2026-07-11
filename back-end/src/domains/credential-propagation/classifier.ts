@@ -1,6 +1,7 @@
 import { createLogger } from '../../providers/logger';
 import { fetchComputeTokenForUser } from '../../providers/computeCredentials';
 import { createStreamingCompletion } from '../../providers/rose/client';
+import { StructuredOutputAccumulator } from '../../providers/rose/structuredOutput';
 import type {
   AgentForPropagation,
   CredentialRef,
@@ -251,11 +252,11 @@ export async function classifyFailureBestEffort(
       },
     });
 
-    let content = '';
+    const structuredOutput = new StructuredOutputAccumulator();
     for await (const chunk of stream) {
-      const delta = chunk.choices[0]?.delta;
-      if (delta?.content !== undefined && delta.content !== '') content += delta.content;
+      structuredOutput.addCompletionChunk(chunk);
     }
+    const content = structuredOutput.finalText();
 
     const parsed = parseClassifierResponse(content);
     return {
