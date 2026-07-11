@@ -1539,10 +1539,16 @@ class PurchaseApprovalContextError(RuntimeError):
     """Raised when a purchase approval cannot meet its required context contract."""
 
 
+class PurchaseApprovalNotificationRetryableError(RuntimeError):
+    """Raised when transient notification generation should preserve checkout state for retry."""
+
+
 def _enforce_write_lock_notification_failure_policy(approval_type: str, error: Exception) -> None:
     if approval_type == "purchase":
-        raise PurchaseApprovalContextError(
-            "Purchase approval blocked because reviews and a canonical product link could not be verified"
+        if isinstance(error, PurchaseApprovalContextError):
+            raise error
+        raise PurchaseApprovalNotificationRetryableError(
+            "Purchase approval notification generation failed transiently; retry with the checkout session paused"
         ) from error
 
 
@@ -1864,6 +1870,7 @@ async def _generate_write_lock_notification(
     browser_use_mode: Optional[str],
     approval_type: str,
     current_url: str,
+    trusted_page_urls: List[str],
     pending_action: Dict[str, Any],
     write_lock_result: Dict[str, Any],
     system_name: str,
@@ -1910,9 +1917,15 @@ async def _generate_write_lock_notification(
         )
     from browser_tools.schemas import GenerateWriteLockNotificationTool
 
-    validated_notification = GenerateWriteLockNotificationTool.model_validate(
-        {"tool": "generate_write_lock_notification", **dict(action.get("params") or {})}
-    )
+    try:
+        validated_notification = GenerateWriteLockNotificationTool.model_validate(
+            {"tool": "generate_write_lock_notification", **dict(action.get("params") or {})},
+            context={"trusted_page_urls": [*trusted_page_urls, current_url]},
+        )
+    except ValueError as error:
+        raise PurchaseApprovalContextError(
+            "Purchase approval blocked because reviews and a canonical product link could not be verified"
+        ) from error
     notification = validated_notification.model_dump(exclude={"tool"}, exclude_none=True)
     notification = _normalize_write_lock_notification_media(
         notification,
@@ -3471,6 +3484,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     credential_refs_by_secret_ref=credential_refs_by_secret_ref,
                     user_id=user_id,
                     current_url=current_url,
+                    trusted_page_urls=visited_urls,
                     write_lock_enabled=write_lock_enabled,
                     write_lock_approvals=write_lock_approvals,
                     system_name=system_name,
@@ -4395,6 +4409,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         credential_refs_by_secret_ref=credential_refs_by_secret_ref,
                         user_id=user_id,
                         current_url=current_url,
+                        trusted_page_urls=visited_urls,
                         write_lock_enabled=write_lock_enabled,
                         write_lock_approvals=write_lock_approvals,
                         system_name=system_name,
@@ -4493,6 +4508,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         browser_use_mode=browser_use_mode,
                         approval_type=approval_type,
                         current_url=current_url,
+                        trusted_page_urls=visited_urls,
                         pending_action=unified_action,
                         write_lock_result=result,
                         system_name=system_name,
@@ -4617,6 +4633,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         browser_use_mode=browser_use_mode,
                         approval_type="payment",
                         current_url=current_url,
+                        trusted_page_urls=visited_urls,
                         pending_action=unified_action,
                         write_lock_result=result,
                         system_name=system_name,
@@ -4847,7 +4864,13 @@ Based on this feedback, I need to continue working on the task and address the i
                 dom_service = None
 
         if session_id:
-            await close_browser_session(config, session_id, pause=False)
+            retryable_notification_error = isinstance(e, PurchaseApprovalNotificationRetryableError)
+            await close_browser_session(
+                config,
+                session_id,
+                pause=retryable_notification_error,
+                current_url=current_url if retryable_notification_error else None,
+            )
 
         error_context = f"Failed during: {last_action}"
         error_message = build_context_summary(

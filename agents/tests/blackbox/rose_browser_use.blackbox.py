@@ -340,7 +340,7 @@ def test_write_lock_notification_schema_normalizes_provider_aliases():
     assert dumped["purchase"]["items"][0]["title"] == "Carhartt Men's Knit Cuffed Beanie, Black"
     assert dumped["purchase"]["items"][0]["price"] == "$19.99"
     assert dumped["purchase"]["items"][0]["quantity"] == "1"
-    assert dumped["purchase"]["items"][0]["rating"] == "5.0"
+    assert dumped["purchase"]["items"][0]["rating"] == "5.0 stars"
     assert dumped["purchase"]["items"][0]["review_count"] == "167,432 ratings"
     assert dumped["purchase"]["items"][0]["seller"] == "Amazon.com"
     assert dumped["purchase"]["items"][0]["shipping"] == "FREE Two Day delivery, arriving Saturday, Jun 27, 2026"
@@ -453,6 +453,43 @@ def test_write_lock_purchase_schema_rejects_current_non_product_page_as_product_
         assert "current checkout or session page" in str(error)
     else:
         raise AssertionError("purchase approval accepted the current session URL as a product link")
+
+
+def test_write_lock_purchase_schema_rejects_product_host_not_observed_by_browser():
+    from pydantic import ValidationError
+
+    from browser_tools.schemas import GenerateWriteLockNotificationTool
+
+    payload = {
+        "tool": "generate_write_lock_notification",
+        "trigger_type": "purchase",
+        "action": "buy item",
+        "service": {
+            "name": "Example Shop",
+            "domain": "example.com",
+            "url": "https://example.com/checkout",
+        },
+        "purchase": {
+            "items": [
+                {
+                    "title": "Beanie",
+                    "rating": "4.8 stars",
+                    "review_count": "312 reviews",
+                    "product_url": "https://phishing.example/products/beanie",
+                }
+            ]
+        },
+    }
+
+    try:
+        GenerateWriteLockNotificationTool.model_validate(
+            payload,
+            context={"trusted_page_urls": ["https://example.com/products/beanie", "https://example.com/checkout"]},
+        )
+    except ValidationError as error:
+        assert "host was not observed" in str(error)
+    else:
+        raise AssertionError("purchase approval accepted an unobserved product host")
 
 
 def test_normalize_write_lock_notification_tool_call_preserves_params():
@@ -1488,6 +1525,10 @@ async def run_all_tests():
     r.record(
         "write_lock_notification_rejects_current_session_link",
         test_write_lock_purchase_schema_rejects_current_non_product_page_as_product_link,
+    )
+    r.record(
+        "write_lock_notification_rejects_unobserved_product_host",
+        test_write_lock_purchase_schema_rejects_product_host_not_observed_by_browser,
     )
 
     r.record("messages_text_only_no_screenshot", test_build_messages_text_only_when_no_screenshot)

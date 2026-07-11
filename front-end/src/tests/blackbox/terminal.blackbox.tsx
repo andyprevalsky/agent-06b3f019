@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { fireEvent, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
@@ -450,7 +450,6 @@ describe('Terminal page', () => {
     });
 
     it('submit without a stored session opens login and does not create an agent', async () => {
-      const user = userEvent.setup();
       localStorage.clear();
       clearCaptures();
       renderWithProviders(<Terminal />);
@@ -459,9 +458,8 @@ describe('Terminal page', () => {
         expect(document.querySelector('textarea')).toBeInTheDocument();
       });
       const textarea = document.querySelector('textarea') as HTMLTextAreaElement;
-      await user.click(textarea);
-      await user.type(textarea, 'No stored session should sign in');
-      await user.keyboard('{Enter}');
+      fireEvent.change(textarea, { target: { value: 'No stored session should sign in' } });
+      fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
 
       await waitFor(() => {
         expect(screen.getByText('Start Building.')).toBeInTheDocument();
@@ -488,7 +486,6 @@ describe('Terminal page', () => {
     });
 
     it('anonymous submit opens login and does not create an agent', async () => {
-      const user = userEvent.setup();
       localStorage.clear();
       mockAnonymousSession();
       clearCaptures();
@@ -498,9 +495,8 @@ describe('Terminal page', () => {
         expect(document.querySelector('textarea')).toBeInTheDocument();
       });
       const textarea = document.querySelector('textarea') as HTMLTextAreaElement;
-      await user.click(textarea);
-      await user.type(textarea, 'Anonymous users should sign in');
-      await user.keyboard('{Enter}');
+      fireEvent.change(textarea, { target: { value: 'Anonymous users should sign in' } });
+      fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
 
       await waitFor(() => {
         expect(screen.getByText('Start Building.')).toBeInTheDocument();

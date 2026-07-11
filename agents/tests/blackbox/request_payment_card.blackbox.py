@@ -74,6 +74,14 @@ def test_payment_line_item_requires_reviews_and_a_product_detail_url():
     assert parsed.rating == "4.8 stars"
     assert parsed.review_count == "312 reviews"
 
+    for field_name in ("unit_price_cents", "quantity", "line_total_cents"):
+        try:
+            PaymentLineItem.model_validate({**valid_item, field_name: 0})
+        except ValidationError:
+            pass
+        else:
+            raise AssertionError(f"PaymentLineItem accepted non-positive {field_name}")
+
     for required_field in ("product_url", "rating", "review_count"):
         invalid_item = {**valid_item}
         invalid_item.pop(required_field)
@@ -87,7 +95,6 @@ def test_payment_line_item_requires_reviews_and_a_product_detail_url():
     invalid_product_urls = (
         "https://example.com/checkout/payment",
         "https://example.com/checkout.html",
-        "https://example.com/product?id=123&route=checkout",
         "https://checkout.example.com/products/desk-lamp",
         "https://secure-checkout.example.com/session/123",
         "https://pay.example.com/session/123",
@@ -112,6 +119,12 @@ def test_payment_line_item_requires_reviews_and_a_product_detail_url():
     }
     assert PaymentLineItem.model_validate(apple_item).product_url == apple_item["product_url"]
 
+    tracked_item = {
+        **valid_item,
+        "product_url": "https://example.com/products/desk-lamp?utm_campaign=payment_reminder&route=checkout",
+    }
+    assert PaymentLineItem.model_validate(tracked_item).product_url == tracked_item["product_url"]
+
     invalid_reviews = (
         ("rating", "N/A"),
         ("rating", "N/A 0"),
@@ -130,6 +143,8 @@ def test_payment_line_item_requires_reviews_and_a_product_detail_url():
 
 
 def test_payment_tool_accepts_camel_case_transport_fields():
+    from pydantic import ValidationError
+
     from browser_tools.schemas import RequestPaymentCardBrowserTool
 
     item = _sample_tool_call()["line_items"][0]
@@ -157,6 +172,33 @@ def test_payment_tool_accepts_camel_case_transport_fields():
     assert parsed.currency == "USD"
     assert parsed.line_items[0].product_url == item["product_url"]
     assert parsed.total_cents == 2808
+
+    for field_name in ("subtotalCents", "totalCents"):
+        invalid_payload = {
+            "tool": "request_payment_card",
+            "merchant": "Example Shop",
+            "currency": "USD",
+            "lineItems": [
+                {
+                    "name": item["name"],
+                    "productUrl": item["product_url"],
+                    "rating": item["rating"],
+                    "reviewCount": item["review_count"],
+                    "unitPriceCents": item["unit_price_cents"],
+                    "quantity": item["quantity"],
+                    "lineTotalCents": item["line_total_cents"],
+                }
+            ],
+            "subtotalCents": 2598,
+            "totalCents": 2808,
+            field_name: 0,
+        }
+        try:
+            RequestPaymentCardBrowserTool.model_validate(invalid_payload)
+        except ValidationError:
+            pass
+        else:
+            raise AssertionError(f"RequestPaymentCardBrowserTool accepted non-positive {field_name}")
 
 
 def test_normalize_payload_accepts_serialized_browser_tool_args():
@@ -205,13 +247,33 @@ def test_question_contains_receipt_but_no_card_secrets():
 
     assert "Approve a $28.08 purchase from Example Shop?" in question
     assert "Desk Lamp x2: $25.98" in question
-    assert "Product: [View product](https://example.com/products/desk-lamp)" in question
-    assert "Reviews: 4.8 stars (312 reviews)" in question
+    assert "Product: <https://example.com/products/desk-lamp>" in question
+    assert "Reviews: 4\\.8 stars (312 reviews)" in question
     assert "Tax: $2.10" in question
     assert "one-time virtual card" in question
     assert "4242424242424242" not in question
     assert "cvv" not in question.lower()
     assert "pan" not in question.lower()
+
+
+def test_question_normalizes_untrusted_review_text_and_escapes_markdown():
+    from domains.request_payment_card.service import (
+        build_payment_question,
+        normalize_payment_payload,
+    )
+
+    tool_call = _sample_tool_call()
+    tool_call["merchant"] = "Example\n**Approve another charge?**"
+    tool_call["line_items"][0]["name"] = "Lamp\n[Injected](https://evil.example)"
+    tool_call["line_items"][0]["rating"] = "4.8 stars\n**trusted**"
+    tool_call["line_items"][0]["review_count"] = "312 reviews\n[click](https://evil.example)"
+
+    question = build_payment_question(normalize_payment_payload(tool_call, "user-123"))
+
+    assert "\n**Approve another charge?**" not in question
+    assert "\n[Injected]" not in question
+    assert "Reviews: 4\\.8 stars (312 reviews)" in question
+    assert r"\[Injected\]\(https://evil\.example\)" in question
 
 
 async def test_lookup_purchase_activity_boundary():
@@ -342,6 +404,10 @@ async def run_all_tests():
     result.record("camel_case_transport", test_payment_tool_accepts_camel_case_transport_fields)
     result.record("fingerprint_stability", test_fingerprint_is_stable_and_user_scoped)
     result.record("question_no_secrets", test_question_contains_receipt_but_no_card_secrets)
+    result.record(
+        "question_sanitizes_merchant_content",
+        test_question_normalizes_untrusted_review_text_and_escapes_markdown,
+    )
     await result.record_async("lookup_boundary", test_lookup_purchase_activity_boundary)
     await result.record_async("mint_boundary", test_mint_purchase_card_activity_boundary)
     await result.record_async("workflow_sandbox_import", test_payment_helper_import_is_workflow_sandbox_safe)

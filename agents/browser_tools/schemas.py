@@ -9,13 +9,14 @@ The DOM tree is serialized with indices like [1] button "Submit", [2] input[type
 
 from typing import Any, List, Literal, Optional, Type
 
-from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 from utils.purchase_approval import (
     validate_product_detail_url,
     validate_product_rating,
     validate_product_review_count,
     validate_product_url_for_page,
+    validate_product_url_for_pages,
 )
 
 # ============================================================================
@@ -244,11 +245,13 @@ class PaymentLineItem(BaseModel):
     )
     unit_price_cents: int = Field(
         description="Unit price in cents",
+        ge=1,
         validation_alias=AliasChoices("unit_price_cents", "unitPriceCents"),
     )
-    quantity: int = Field(description="Quantity")
+    quantity: int = Field(description="Quantity", ge=1)
     line_total_cents: int = Field(
         description="Line total in cents",
+        ge=1,
         validation_alias=AliasChoices("line_total_cents", "lineTotalCents"),
     )
 
@@ -295,10 +298,12 @@ class RequestPaymentCardBrowserTool(BaseModel):
     fees: List[PaymentFee] = Field(default_factory=list, description="Taxes, shipping, service fees, discounts, etc.")
     subtotal_cents: int = Field(
         description="Subtotal before fees in cents",
+        ge=1,
         validation_alias=AliasChoices("subtotal_cents", "subtotalCents"),
     )
     total_cents: int = Field(
         description="Final checkout total in cents",
+        ge=1,
         validation_alias=AliasChoices("total_cents", "totalCents"),
     )
 
@@ -610,12 +615,16 @@ class GenerateWriteLockNotificationTool(BaseModel):
     )
 
     @model_validator(mode="after")
-    def require_trigger_details(self) -> "GenerateWriteLockNotificationTool":
+    def require_trigger_details(self, info: ValidationInfo) -> "GenerateWriteLockNotificationTool":
         if getattr(self, self.trigger_type) is None:
             raise ValueError(f"{self.trigger_type} details are required for a {self.trigger_type} approval")
         if self.trigger_type == "purchase" and self.purchase is not None:
+            trusted_page_urls = (info.context or {}).get("trusted_page_urls")
             for item in self.purchase.items:
-                validate_product_url_for_page(item.product_url, self.service.url)
+                if trusted_page_urls:
+                    validate_product_url_for_pages(item.product_url, trusted_page_urls)
+                else:
+                    validate_product_url_for_page(item.product_url, self.service.url)
         return self
 
 

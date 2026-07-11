@@ -327,6 +327,27 @@ describe('ApprovalChip', () => {
     ).toBeInTheDocument();
   });
 
+  it('renders historical payment metadata without undefined values or broken links', () => {
+    renderWithProviders(
+      <ApprovalChip
+        pendingApproval={{
+          attentionRequestId: 'req-old-pay',
+          question: 'Approve historical purchase?',
+          requestPaymentCard: {
+            merchant: 'Legacy Shop',
+            lineItems: [{ name: 'Old Item', unitPriceCents: 1000, quantity: 1 }],
+            totalCents: 1000,
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getByText('Review details unavailable')).toBeInTheDocument();
+    expect(screen.getByText('Product link unavailable')).toBeInTheDocument();
+    expect(screen.queryByText(/undefined/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'View product' })).not.toBeInTheDocument();
+  });
+
   it('Accept: sends "Approved" by default and calls onApprovalHandled', async () => {
     const user = userEvent.setup();
     const onHandled = vi.fn();

@@ -180,17 +180,25 @@ function PaymentReceipt({
               <div className="text-xs text-muted-foreground">
                 Qty {item.quantity || 1} · {formatCents(item.unitPriceCents)}
               </div>
-              <div className="text-xs text-muted-foreground">
-                Reviews: {item.rating} · {item.reviewCount}
-              </div>
-              <a
-                href={item.productUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-xs text-primary underline-offset-2 hover:underline"
-              >
-                View product
-              </a>
+              {item.rating && item.reviewCount ? (
+                <div className="text-xs text-muted-foreground">
+                  Reviews: {item.rating} · {item.reviewCount}
+                </div>
+              ) : (
+                <div className="text-xs text-muted-foreground">Review details unavailable</div>
+              )}
+              {item.productUrl ? (
+                <a
+                  href={item.productUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-primary underline-offset-2 hover:underline"
+                >
+                  View product
+                </a>
+              ) : (
+                <div className="text-xs text-muted-foreground">Product link unavailable</div>
+              )}
             </div>
             <div className="font-medium">{formatCents(item.lineTotalCents)}</div>
           </div>

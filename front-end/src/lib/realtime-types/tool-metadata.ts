@@ -258,9 +258,9 @@ export interface RequestPaymentCardPayload {
   lineItems?: Array<{
     name?: string;
     imageUrl?: string | null;
-    productUrl: string;
-    rating: string;
-    reviewCount: string;
+    productUrl?: string;
+    rating?: string;
+    reviewCount?: string;
     unitPriceCents?: number;
     quantity?: number;
     lineTotalCents?: number;

@@ -4,8 +4,13 @@
  */
 import { beforeAll, afterEach, afterAll } from 'vitest';
 import '@testing-library/jest-dom/vitest';
+import { configure } from '@testing-library/dom';
 import { server } from './msw/server';
 import { clearCaptures, installCapture } from './msw/capture';
+
+// Allow async UI transitions to settle under full coverage instrumentation,
+// while retaining a finite deadline for missing elements and stuck effects.
+configure({ asyncUtilTimeout: 5_000 });
 
 class MemoryStorage implements Storage {
   private readonly store = new Map<string, string>();

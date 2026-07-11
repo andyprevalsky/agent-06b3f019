@@ -1,6 +1,7 @@
 """Pure validation helpers for purchase-approval product context."""
 
 import re
+from collections.abc import Iterable
 from typing import Any
 from urllib.parse import parse_qsl, unquote, urlparse
 
@@ -42,6 +43,11 @@ _PRODUCT_ROUTE_MARKERS = {
     "sku",
 }
 _PLACEHOLDER_RE = re.compile(r"\b(?:n\s*/?\s*a|none|not\s+available|unavailable|unknown)\b", re.IGNORECASE)
+_RATING_RE = re.compile(r"(?<![\d.,])(\d(?:\.\d+)?)(?![\d.,])")
+_REVIEW_COUNT_RE = re.compile(
+    r"\b\d[\d,]*(?:\.\d+)?\s*[kmb]?\+?\s+(?:customer\s+)?(?:reviews?|ratings?)\b",
+    re.IGNORECASE,
+)
 
 
 def _decode_url_component(value: str) -> str:
@@ -80,6 +86,13 @@ def _normalized_page_route(value: str) -> tuple[str, str]:
     return hostname, path
 
 
+def _same_merchant_host(left: str, right: str) -> bool:
+    """Match an observed merchant host, including its own subdomains."""
+    if not left or not right:
+        return False
+    return left == right or left.endswith(f".{right}") or right.endswith(f".{left}")
+
+
 def _looks_like_product_route(value: str) -> bool:
     parsed = urlparse(value)
     path_segments = [segment for segment in _decode_url_component(parsed.path).lower().split("/") if segment]
@@ -94,6 +107,8 @@ def _looks_like_product_route(value: str) -> bool:
 
 def validate_product_detail_url(value: Any) -> str:
     text = str(value or "").strip()
+    if any(character.isspace() for character in text) or "<" in text or ">" in text:
+        raise ValueError("product_url must not contain whitespace or markup")
     parsed = urlparse(text)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("product_url must be an absolute http(s) product-detail URL")
@@ -102,10 +117,7 @@ def validate_product_detail_url(value: Any) -> str:
         raise ValueError("product_url must link to the product page, not cart or checkout")
 
     query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
-    route_values = [parsed.path]
-    for key, query_value in query_pairs:
-        route_values.extend((key, query_value))
-    if any(_contains_checkout_route(route_value) for route_value in route_values):
+    if _contains_checkout_route(parsed.path):
         raise ValueError("product_url must link to the product page, not cart or checkout")
 
     path_has_detail = bool(parsed.path.strip("/"))
@@ -116,12 +128,23 @@ def validate_product_detail_url(value: Any) -> str:
 
 
 def validate_product_url_for_page(value: Any, current_page_url: Any) -> str:
+    return validate_product_url_for_pages(value, [current_page_url])
+
+
+def validate_product_url_for_pages(value: Any, trusted_page_urls: Iterable[Any]) -> str:
+    """Require a product URL to use a merchant host observed by the browser."""
     product_url = validate_product_detail_url(value)
-    current_url = str(current_page_url or "").strip()
-    if (
-        current_url
-        and _normalized_page_route(product_url) == _normalized_page_route(current_url)
-        and not _looks_like_product_route(product_url)
+    product_host, product_path = _normalized_page_route(product_url)
+    observed_routes = [
+        _normalized_page_route(str(page_url).strip())
+        for page_url in trusted_page_urls
+        if str(page_url or "").strip().startswith(("http://", "https://"))
+    ]
+    if not any(_same_merchant_host(product_host, observed_host) for observed_host, _ in observed_routes):
+        raise ValueError("product_url host was not observed in the browser trajectory")
+    if any(
+        (product_host, product_path) == observed_route and not _looks_like_product_route(product_url)
+        for observed_route in observed_routes
     ):
         raise ValueError("product_url must identify the product, not the current checkout or session page")
     return product_url
@@ -138,15 +161,15 @@ def validate_product_rating(value: Any) -> str:
     text = _validated_review_text(value)
     if re.search(r"\breviews?\b|\bratings\b", text, re.IGNORECASE):
         raise ValueError("rating must be a product score, not a review count")
-    match = re.search(r"(?<![\d.,])(\d(?:\.\d+)?)(?![\d.,])", text)
+    match = _RATING_RE.search(text)
     if not match or not 0 <= float(match.group(1)) <= 5:
         raise ValueError("rating must include a numeric product score from 0 to 5")
-    return text
+    return f"{match.group(1)} stars"
 
 
 def validate_product_review_count(value: Any) -> str:
     text = _validated_review_text(value)
-    count_pattern = r"\b\d[\d,]*(?:\.\d+)?\s*[kmb]?\+?\s+(?:customer\s+)?(?:reviews?|ratings?)\b"
-    if not re.search(count_pattern, text, re.IGNORECASE):
+    match = _REVIEW_COUNT_RE.search(text)
+    if not match:
         raise ValueError("review_count must include a numeric count followed by reviews or ratings")
-    return text
+    return " ".join(match.group(0).split())

@@ -6620,6 +6620,7 @@ async def test_generate_write_lock_notification_payment_forks_and_renders_questi
             browser_use_mode="claude",
             approval_type="payment",
             current_url="https://www.delta.com/checkout",
+            trusted_page_urls=["https://www.delta.com/checkout"],
             pending_action={"action": "click", "params": {"index": 4}},
             write_lock_result={"status": "awaiting_payment_card_approval"},
             system_name="Rose",
@@ -6694,6 +6695,7 @@ async def test_generate_write_lock_notification_raises_when_fork_calls_wrong_too
                 browser_use_mode="claude",
                 approval_type="payment",
                 current_url="https://shop.example/checkout",
+                trusted_page_urls=["https://shop.example/checkout"],
                 pending_action={"action": "click"},
                 write_lock_result={"status": "awaiting_payment_card_approval"},
                 system_name="Rose",
@@ -6835,11 +6837,18 @@ def test_write_lock_notification_prompt_includes_media_candidates():
 def test_purchase_write_lock_notification_failure_blocks_approval_fallback():
     from domains.spawn_browser_agent_v3.handler import (
         PurchaseApprovalContextError,
+        PurchaseApprovalNotificationRetryableError,
         _enforce_write_lock_notification_failure_policy,
     )
 
     with pytest.raises(PurchaseApprovalContextError):
-        _enforce_write_lock_notification_failure_policy("purchase", ValueError("missing reviews"))
+        _enforce_write_lock_notification_failure_policy(
+            "purchase",
+            PurchaseApprovalContextError("missing reviews"),
+        )
+
+    with pytest.raises(PurchaseApprovalNotificationRetryableError):
+        _enforce_write_lock_notification_failure_policy("purchase", TimeoutError("provider timeout"))
 
     assert _enforce_write_lock_notification_failure_policy("message", ValueError("metadata unavailable")) is None
 

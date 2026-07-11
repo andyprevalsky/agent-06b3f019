@@ -19,7 +19,7 @@ from PIL import Image
 from browser_tools.schemas import RequestPaymentCardBrowserTool
 from domains.spawn_browser_agent_v3.config import WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS
 from domains.spawn_browser_agent_v3.service_crypto import has_payment_card_secret_refs
-from utils.purchase_approval import validate_product_url_for_page
+from utils.purchase_approval import validate_product_url_for_pages
 
 if TYPE_CHECKING:
     from browser_tools.dom_service import ActionHistory, DOMService
@@ -168,6 +168,7 @@ async def execute_action(  # noqa: C901
     credential_refs_by_secret_ref: Optional[Dict[str, Dict[str, str]]] = None,
     user_id: str = "",
     current_url: str = "",
+    trusted_page_urls: Optional[List[str]] = None,
     write_lock_enabled: bool = True,
     write_lock_approvals: Optional[Dict[str, Dict]] = None,
     system_name: str = "Rose",
@@ -254,7 +255,10 @@ async def execute_action(  # noqa: C901
             try:
                 payment_request = RequestPaymentCardBrowserTool.model_validate({"tool": action_name, **params})
                 for item in payment_request.line_items:
-                    validate_product_url_for_page(item.product_url, current_url)
+                    validate_product_url_for_pages(
+                        item.product_url,
+                        [*(trusted_page_urls or []), current_url],
+                    )
             except ValueError as error:
                 return {
                     "success": False,
