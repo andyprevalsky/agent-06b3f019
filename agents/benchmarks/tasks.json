@@ -1332,7 +1332,7 @@
     "attachment": "rs.jpeg",
     "approval_handling": null,
     "start_phase": "execute",
-    "status": "incomplete",
+    "status": "ready",
     "source": [
       "test-prompts:Test Files in Browser Agent"
     ],

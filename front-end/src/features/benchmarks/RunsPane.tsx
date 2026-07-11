@@ -73,7 +73,8 @@ export function RunsPane({ runs, requests, loading, error, onOpenAgent }: RunsPa
       <div className="flex items-center gap-2 pb-2">
         <h2 className="text-sm font-semibold tracking-wide text-foreground">Runs</h2>
         <span className="text-xs text-muted-foreground">
-          {runs.length} run{runs.length === 1 ? '' : 's'}
+          {runs.length + activeRequests.length} item
+          {runs.length + activeRequests.length === 1 ? '' : 's'}
         </span>
         {loading && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
       </div>

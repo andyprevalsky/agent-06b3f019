@@ -10,9 +10,10 @@
  *   hub + task edited ──► hub (catalog row replaced in place)
  *   hub + run dispatched ──► hub (requests refetched immediately)
  *
- * Layout: two panes side-by-side on desktop (Runs left, Tasks right), stacked
- * on small screens. This view is team-gated by the sidebar (ADMIN_USER_IDS or
- * dev mode); the backend enforces the same gate on every endpoint.
+ * Layout: stacked — Runs on top at a fixed height (internally scrollable;
+ * recent runs matter most), Tasks fills the rest. This view is team-gated by
+ * the sidebar (ADMIN_USER_IDS or dev mode); the backend enforces the same
+ * gate on every endpoint.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -97,8 +98,10 @@ export function BenchmarksView() {
           the hub poller.
         </p>
       </div>
-      <div className="flex-1 min-h-0 flex flex-col md:flex-row gap-4">
-        <div className="md:w-[42%] min-h-0 h-1/2 md:h-full rounded-xl border border-border bg-background/85 backdrop-blur-sm p-4">
+      <div className="flex-1 min-h-0 flex flex-col gap-4">
+        {/* Runs on top at a fixed height — only the most recent few matter, so
+            the pane scrolls internally instead of stealing space from Tasks. */}
+        <div className="h-60 shrink-0 rounded-xl border border-border bg-background/85 backdrop-blur-sm p-4">
           <RunsPane
             runs={runs}
             requests={requests}
@@ -107,7 +110,7 @@ export function BenchmarksView() {
             onOpenAgent={(runId, agentId) => setOpenAgent({ runId, agentId })}
           />
         </div>
-        <div className="flex-1 min-h-0 h-1/2 md:h-full rounded-xl border border-border bg-background/85 backdrop-blur-sm p-4">
+        <div className="flex-1 min-h-0 rounded-xl border border-border bg-background/85 backdrop-blur-sm p-4">
           <TasksPane
             tasks={tasks}
             loading={tasksLoading}
