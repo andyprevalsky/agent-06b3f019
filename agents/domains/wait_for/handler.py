@@ -45,16 +45,31 @@ class WaitForManager(ToolManager):
         """Dispatch to timestamp or condition mode."""
         until_timestamp = tool_call.get("until_timestamp")
         condition = tool_call.get("condition")
+        description = tool_call.get("description")
 
         if until_timestamp:
             async for event in self._timestamp_mode(workflow_instance, until_timestamp, tool_call_id):
                 yield event
         elif condition:
+            if not description:
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="wait_for failed",
+                    message="Must provide 'description' with 'condition'.",
+                    status=MessageStatus.ERROR,
+                )
+                return
             check_interval = tool_call.get("check_interval_seconds", DEFAULT_CHECK_INTERVAL_SECONDS)
             max_checks = tool_call.get("max_checks", DEFAULT_MAX_CHECKS)
             context_gates = getattr(workflow_instance, "context_gates", None) or {}
             async for event in self._condition_mode(
-                workflow_instance, condition, check_interval, max_checks, tool_call_id, context_gates
+                workflow_instance,
+                description,
+                condition,
+                check_interval,
+                max_checks,
+                tool_call_id,
+                context_gates,
             ):
                 yield event
         else:
@@ -137,6 +152,7 @@ class WaitForManager(ToolManager):
     async def _condition_mode(  # noqa: C901
         self,
         workflow_instance: Any,
+        description: str,
         condition: str,
         check_interval_seconds: int,
         max_checks_param: int,
@@ -160,11 +176,12 @@ class WaitForManager(ToolManager):
         interval_str = format_duration(check_interval_seconds)
         yield ToolEvent(
             type=EventType.POST_MESSAGE,
-            title=f"Waiting for {condition[:80]}",
+            title=f"Waiting for {description}",
             message=f"Checking every {interval_str}, up to {max_checks_param} checks",
             status=MessageStatus.IN_PROGRESS,
             metadata={
                 "waitForMode": "condition",
+                "description": description,
                 "condition": condition,
                 "checkIntervalSeconds": check_interval_seconds,
                 "maxChecks": max_checks_param,
@@ -198,6 +215,7 @@ class WaitForManager(ToolManager):
                     status=MessageStatus.ERROR,
                     metadata={
                         "waitForMode": "condition",
+                        "description": description,
                         "condition": condition,
                         "checkNum": check_num,
                         "maxChecks": max_checks_param,
@@ -221,6 +239,7 @@ class WaitForManager(ToolManager):
                 status=MessageStatus.IN_PROGRESS,
                 metadata={
                     "waitForMode": "condition",
+                    "description": description,
                     "condition": condition,
                     "checkNum": check_num,
                     "maxChecks": max_checks_param,
@@ -259,6 +278,7 @@ class WaitForManager(ToolManager):
                     status=MessageStatus.ERROR,
                     metadata={
                         "waitForMode": "condition",
+                        "description": description,
                         "condition": condition,
                         "checkNum": check_num,
                         "maxChecks": max_checks_param,
@@ -300,6 +320,7 @@ class WaitForManager(ToolManager):
                     status=MessageStatus.FINISHED,
                     metadata={
                         "waitForMode": "condition",
+                        "description": description,
                         "condition": condition,
                         "checkNum": check_num,
                         "maxChecks": max_checks_param,
@@ -323,6 +344,7 @@ class WaitForManager(ToolManager):
                 status=MessageStatus.FINISHED,
                 metadata={
                     "waitForMode": "condition",
+                    "description": description,
                     "condition": condition,
                     "checkNum": check_num,
                     "maxChecks": max_checks_param,
@@ -336,11 +358,12 @@ class WaitForManager(ToolManager):
             # reflects the actual state (still waiting, sleeping until next check)
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title=f"Waiting for {condition[:80]}",
+                title=f"Waiting for {description}",
                 message=f"Next check in {interval_str}",
                 status=MessageStatus.IN_PROGRESS,
                 metadata={
                     "waitForMode": "condition",
+                    "description": description,
                     "condition": condition,
                     "checkIntervalSeconds": check_interval_seconds,
                     "maxChecks": max_checks_param,
@@ -361,6 +384,7 @@ class WaitForManager(ToolManager):
             status=MessageStatus.ERROR,
             metadata={
                 "waitForMode": "condition",
+                "description": description,
                 "condition": condition,
                 "maxChecks": max_checks_param,
             },
