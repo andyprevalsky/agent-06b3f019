@@ -33,6 +33,7 @@ interface AppSidebarProps {
   currentView: SidebarView;
   onViewChange: (view: SidebarView) => void;
   showBrowse?: boolean;
+  showBenchmarks?: boolean;
   agents: Agent[];
   isLoadingAgents: boolean;
   selectedAgentId: string | null;
@@ -142,6 +143,7 @@ export default function AppSidebar({
   currentView,
   onViewChange,
   showBrowse = false,
+  showBenchmarks = false,
   agents,
   isLoadingAgents,
   selectedAgentId,
@@ -159,7 +161,13 @@ export default function AppSidebar({
 }: AppSidebarProps) {
   const [isCollapsed, setIsCollapsed] = useState(true);
   const currentWidth = isCollapsed ? SIDEBAR_WIDTH_COLLAPSED : SIDEBAR_WIDTH_EXPANDED;
-  const navItems = useSidebarNavItems({ currentView, onViewChange, onSelectAgent, showBrowse });
+  const navItems = useSidebarNavItems({
+    currentView,
+    onViewChange,
+    onSelectAgent,
+    showBrowse,
+    showBenchmarks,
+  });
   const style = useMemo(
     () =>
       buildSidebarStyle({

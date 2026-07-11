@@ -60,7 +60,8 @@
     "attachment": null,
     "approval_handling": null,
     "start_phase": null,
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "description": ""
   },
   {
     "name": "spawn-sub-agents",

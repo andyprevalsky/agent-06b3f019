@@ -776,6 +776,59 @@ model BenchmarkRun {
   @@index([createdAt])
 }
 
+// Benchmark task definitions (the eval catalog). Source of truth for the
+// in-app Benchmark Hub: seeded from agents/benchmarks/tasks.json at boot
+// (insert-missing only), edited via the hub UI, and exported back to
+// tasks.json by the hub run poller before dispatched runs so runners execute
+// exactly what this table says.
+model BenchmarkTask {
+  name            String   @id
+  title           String?
+  prompt          String
+  status          String? // ready | incomplete | null (legacy pre-eval-contract)
+  bench           String? // rose-bench | pipeline-e2e
+  runner          String?
+  tags            String[] @default([])
+  timeoutSeconds  Int?
+  priceLimitCents Int?
+  expectedTools   String[] @default([])
+  minAgentCount   Int?
+  isChatMode      Boolean  @default(false)
+  environment     Json?
+  evaluators      Json?
+  source          Json?
+  // Full original task object; forward-compat for runner-only fields the
+  // hub does not model as columns (expected_tool_counts, attachment, ...).
+  definition      Json
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  updatedBy       String?
+
+  @@index([bench])
+  @@index([status])
+}
+
+// A hub-dispatched benchmark run: created by the UI, claimed and executed by
+// the controller-side poller (scripts/run-bench-hub-poller), which streams
+// progress back and links the uploaded run bundle when finished. Claiming is
+// an atomic queued→running UPDATE so two pollers can never double-run.
+model BenchmarkRunRequest {
+  id          String    @id @default(uuid())
+  taskNames   String[]
+  simOn       String[]  @default([])
+  status      String    @default("queued") // queued | running | completed | failed | cancelled
+  requestedBy String
+  claimedBy   String? // poller identity (host:pid)
+  claimedAt   DateTime?
+  progress    Json? // latest report-card-ish snapshot from the poller
+  runId       String? // hub run id once uploaded
+  error       String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([status, createdAt])
+}
+
 model RoseModelLatency {
   id         String   @id @default(uuid())
   model      String

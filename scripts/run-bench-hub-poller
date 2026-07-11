@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# Benchmark Hub run poller — executes runs dispatched from the in-app hub.
+#
+#   scripts/run-bench-hub-poller                 # poll prod hub, run via cloud fleet
+#   scripts/run-bench-hub-poller --local         # run claimed requests on the local stack
+#   scripts/run-bench-hub-poller --once          # process at most one request, then exit
+#   HUB_URL=http://localhost:3901 scripts/run-bench-hub-poller --local --once
+#
+# Loop: claim a queued run-request (atomic PATCH; double-claim loses) →
+# export the DB catalog to agents/benchmarks/tasks.json (so hub edits are what
+# the runner executes) → launch scripts/run-bench → stream live report-card
+# snapshots to POST /api/benchmarks/runs?live=1 → upload the final run bundle →
+# mark the request completed/failed with the linked run_id.
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+cd "$ROOT_DIR"
+
+HUB_URL="${HUB_URL:-http://localhost:3001}"
+POLL_INTERVAL="${POLL_INTERVAL:-10}"
+LOCAL_RUNNER=0
+ONCE=0
+for arg in "$@"; do
+    case "$arg" in
+        --local) LOCAL_RUNNER=1 ;;
+        --once)  ONCE=1 ;;
+        *) echo "unknown arg: $arg" >&2; exit 2 ;;
+    esac
+done
+
+if [ -z "${BACKEND_API_KEY:-}" ]; then
+    BACKEND_API_KEY="$(grep -E '^BACKEND_API_KEY=' back-end/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"')"
+fi
+[ -n "$BACKEND_API_KEY" ] || { echo "❌ BACKEND_API_KEY not found (env or back-end/.env)"; exit 1; }
+USER_ID="${HUB_USER_ID:-1f85ff25-6e29-4c1b-8739-f917bd101a30}"
+CLAIMED_BY="$(hostname -s):$$"
+
+hub() {  # hub <method> <path> [json-body]
+    local method="$1" path="$2" body="${3:-}"
+    if [ -n "$body" ]; then
+        curl -fsS -X "$method" "$HUB_URL$path" \
+            -H "X-API-Key: $BACKEND_API_KEY" -H "X-User-Id: $USER_ID" \
+            -H "Content-Type: application/json" -d "$body"
+    else
+        curl -fsS -X "$method" "$HUB_URL$path" \
+            -H "X-API-Key: $BACKEND_API_KEY" -H "X-User-Id: $USER_ID"
+    fi
+}
+
+export_catalog() {
+    # DB → tasks.json so hub edits are real for the runner. Postgres jsonb does
+    # NOT preserve key order, so a raw dump would churn the whole file; instead
+    # MERGE each DB definition onto the existing file entry (file key order is
+    # kept, DB values win, DB-only keys append, new tasks append at the end).
+    python3 - "$HUB_URL" <<'PY'
+import json, sys, urllib.request
+url = sys.argv[1].rstrip("/") + "/api/benchmarks"
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+with opener.open(url, timeout=20) as r:
+    db_tasks = json.load(r).get("tasks") or []
+if len(db_tasks) < 1:
+    print("catalog export: EMPTY response, keeping existing tasks.json", file=sys.stderr)
+    sys.exit(0)
+path = "agents/benchmarks/tasks.json"
+try:
+    file_tasks = json.load(open(path))
+except Exception:
+    file_tasks = []
+by_name = {t.get("name"): t for t in db_tasks if isinstance(t, dict)}
+
+def merge_value(file_v, db_v):
+    # Postgres jsonb sorts object keys at EVERY depth; recursively re-impose
+    # the file's key order (incl. dicts inside lists) so unchanged values
+    # round-trip byte-identical.
+    if isinstance(file_v, dict) and isinstance(db_v, dict):
+        out = {}
+        for k in file_v:
+            out[k] = merge_value(file_v[k], db_v[k]) if k in db_v else file_v[k]
+        for k, v in db_v.items():
+            if k not in out:
+                out[k] = v
+        return out
+    if isinstance(file_v, list) and isinstance(db_v, list) and len(file_v) == len(db_v):
+        return [merge_value(f, d) for f, d in zip(file_v, db_v)]
+    return db_v
+
+merged, seen, changed = [], set(), 0
+for entry in file_tasks:
+    name = entry.get("name")
+    db = by_name.get(name)
+    if db is None:
+        merged.append(entry)  # file-only task (DB unseeded?) — keep untouched
+        continue
+    seen.add(name)
+    out = merge_value(entry, db)
+    if out != entry:
+        changed += 1
+    merged.append(out)
+for name, db in by_name.items():  # brand-new tasks created in the DB
+    if name not in seen:
+        merged.append(db)
+        changed += 1
+with open(path, "w") as f:
+    json.dump(merged, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+print(f"catalog export: {len(merged)} tasks, {changed} updated from DB → {path}")
+PY
+}
+
+snapshot_loop() {  # snapshot_loop <request_id> <hub_run_id> <start_epoch>
+    local req_id="$1" hub_run_id="$2" start_epoch="$3"
+    while :; do
+        sleep 15
+        python3 - "$HUB_URL" "$BACKEND_API_KEY" "$USER_ID" "$req_id" "$hub_run_id" "$start_epoch" <<'PY' || true
+import glob, json, os, sys, urllib.request
+hub, key, user, req_id, run_id, start = sys.argv[1:7]
+start = float(start)
+# newest report-card.json produced after our launch. local.py's emitter
+# resolves BENCHMARK_CONTEXT_DIR against AGENTS_DIR, so isolated-stack cards
+# land under agents/.context/benchmarks/<run-id>/ (NOT repo-root .context/).
+cards = [p for p in
+         glob.glob("agents/.context/benchmarks/*/report-card.json") +
+         glob.glob(".context/benchmarks/*/report-card.json") +
+         glob.glob(".context/benchmarks/*/*/report-card.json") +
+         glob.glob(".context/fleet/runs/*/_batch/report-card.json")
+         if os.path.getmtime(p) > start]
+if not cards:
+    sys.exit(0)
+card = json.load(open(max(cards, key=os.path.getmtime)))
+tasks = []
+for row in card.get("per_task") or []:
+    url = row.get("agent_url") or ""
+    agent_id = url.split("agent-id=")[-1] if "agent-id=" in url else None
+    dur = row.get("duration_s")
+    cost = row.get("cost_usd")
+    tasks.append({
+        "name": row.get("name"), "status": row.get("status") or "running",
+        "passed": True if row.get("status") == "passed" else (False if row.get("status") in ("failed", "error") else None),
+        "agent_id": agent_id, "duration_seconds": dur,
+        "cost_cents": round(cost * 100, 2) if isinstance(cost, (int, float)) else None,
+        "world_model_mode": row.get("world_model_mode"),
+        "fast_mode": bool(row.get("fast_mode")),
+    })
+bundle = {"run_id": run_id, "timestamp": card.get("timestamp") or "", "suite": "hub-dispatch",
+          "source": "hub-poller", "tasks": tasks}
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+def post(path, body, method="POST"):
+    req = urllib.request.Request(hub.rstrip("/") + path, data=json.dumps(body).encode(),
+        headers={"X-API-Key": key, "X-User-Id": user, "Content-Type": "application/json"},
+        method=method)
+    opener.open(req, timeout=20).read()
+post("/api/benchmarks/runs?live=1", bundle)
+# the run-request update route is PATCH-only (urllib defaults data= to POST)
+post(f"/api/benchmarks/run-requests/{req_id}",
+     {"action": "progress", "progress": card, "run_id": run_id}, method="PATCH")
+PY
+    done
+}
+
+process_request() {  # process_request <request_json>
+    local req="$1"
+    local req_id task_names sim_on
+    req_id="$(printf '%s' "$req" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+    task_names="$(printf '%s' "$req" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["taskNames"]))')"
+    sim_on="$(printf '%s' "$req" | python3 -c 'import json,sys; print(",".join(json.load(sys.stdin).get("simOn") or []))')"
+
+    echo "── claiming request $req_id (tasks: $task_names)"
+    if ! hub PATCH "/api/benchmarks/run-requests/$req_id" \
+        "{\"action\":\"claim\",\"claimed_by\":\"$CLAIMED_BY\"}" >/dev/null 2>&1; then
+        echo "   claim lost (another poller) — skipping"
+        return 0
+    fi
+
+    export_catalog || echo "   ⚠ catalog export failed — running with existing tasks.json"
+
+    local hub_run_id="hub-$req_id"
+    local start_epoch; start_epoch="$(date +%s)"
+    local log_file=".context/hub-poller-run-$req_id.log"
+
+    snapshot_loop "$req_id" "$hub_run_id" "$start_epoch" & local snap_pid=$!
+
+    local runner_args=()
+    [ "$LOCAL_RUNNER" = "1" ] && runner_args+=(--local)
+    # shellcheck disable=SC2086
+    runner_args+=($task_names)
+    # --sim-on is a cloud-fleet flag; the local runner derives sim from the
+    # task catalog (world_model_mode), so only pass it through for fleet runs.
+    if [ -n "$sim_on" ] && [ "$LOCAL_RUNNER" != "1" ]; then
+        runner_args+=(--sim-on "$sim_on")
+    fi
+
+    echo "   launching: scripts/run-bench ${runner_args[*]} (log: $log_file)"
+    local exit_code=0
+    scripts/run-bench "${runner_args[@]}" > "$log_file" 2>&1 || exit_code=$?
+    kill "$snap_pid" 2>/dev/null || true
+
+    # Final bundle: newest run record produced after launch (local or fleet).
+    local final
+    final="$(python3 - "$start_epoch" <<'PY'
+import glob, os, sys
+start = float(sys.argv[1])
+candidates = [p for p in
+              glob.glob("agents/benchmarks/runs/*.json") +
+              glob.glob(".context/fleet/runs/*/*/cloudbench-run.json")
+              if os.path.getmtime(p) > start]
+print(max(candidates, key=os.path.getmtime) if candidates else "")
+PY
+)"
+    if [ -n "$final" ]; then
+        echo "   uploading final bundle: $final"
+        python3 - "$HUB_URL" "$BACKEND_API_KEY" "$USER_ID" "$req_id" "$hub_run_id" "$final" "$exit_code" <<'PY'
+import json, sys, urllib.request
+hub, key, user, req_id, run_id, path, exit_code = sys.argv[1:8]
+bundle = json.load(open(path))
+bundle["run_id"] = run_id  # request-scoped id: stable across snapshot + final
+bundle.setdefault("source", "hub-poller")
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+def post(p, body, method="POST"):
+    req = urllib.request.Request(hub.rstrip("/") + p, data=json.dumps(body).encode(),
+        headers={"X-API-Key": key, "X-User-Id": user, "Content-Type": "application/json"},
+        method=method)
+    opener.open(req, timeout=60).read()
+post("/api/benchmarks/runs", bundle)
+action = "complete" if exit_code == "0" else "fail"
+body = {"action": action, "run_id": run_id}
+if action == "fail":
+    body["error"] = f"run-bench exited {exit_code}; see poller log"
+post(f"/api/benchmarks/run-requests/{req_id}", body, method="PATCH")
+print(f"request {req_id} → {action} (run {run_id})")
+PY
+    else
+        echo "   ⚠ no run bundle found after exit=$exit_code"
+        hub PATCH "/api/benchmarks/run-requests/$req_id" \
+            "{\"action\":\"fail\",\"error\":\"no run bundle produced (exit $exit_code)\"}" >/dev/null || true
+    fi
+}
+
+echo "🛰  hub poller: $HUB_URL every ${POLL_INTERVAL}s (runner: $([ "$LOCAL_RUNNER" = "1" ] && echo local || echo cloud-fleet), claimer: $CLAIMED_BY)"
+while :; do
+    queued="$(hub GET "/api/benchmarks/run-requests?status=queued" 2>/dev/null || echo '{"requests":[]}')"
+    next="$(printf '%s' "$queued" | python3 -c '
+import json, sys
+reqs = json.load(sys.stdin).get("requests") or []
+reqs.sort(key=lambda r: r.get("createdAt") or "")
+print(json.dumps(reqs[0]) if reqs else "")
+')"
+    if [ -n "$next" ]; then
+        process_request "$next"
+        [ "$ONCE" = "1" ] && exit 0
+    fi
+    [ "$ONCE" = "1" ] && [ -z "$next" ] && { echo "(no queued requests)"; exit 0; }
+    sleep "$POLL_INTERVAL"
+done

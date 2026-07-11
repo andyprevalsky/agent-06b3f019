@@ -18,7 +18,14 @@ import type { RequestPaymentCardPayload } from '@/lib/realtime-types';
 
 // ── View state ────────────────────────────────────────────────────────────
 
-export type TerminalView = 'agents' | 'browse' | 'integrations' | 'settings' | 'usage' | 'network';
+export type TerminalView =
+  | 'agents'
+  | 'browse'
+  | 'integrations'
+  | 'settings'
+  | 'usage'
+  | 'network'
+  | 'benchmarks';
 
 export type AnimationPhase = 'revealing' | 'paused' | 'fading';
 

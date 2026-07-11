@@ -10,6 +10,7 @@
  *   currentView === 'integrations' → <Integrations />
  *   currentView === 'usage'        → <Usage />
  *   currentView === 'network'      → <NetworkView />
+ *   currentView === 'benchmarks'   → <BenchmarksView /> (team-gated tab)
  *   currentView === 'agents'       → agent chat / landing
  */
 
@@ -23,8 +24,11 @@ import Browse from '@/pages/Browse';
 import Integrations from '@/pages/Integrations';
 import Usage from '@/pages/Usage';
 import { NetworkView } from '@/features/terminal-component-group';
+import { BenchmarksView } from '@/features/benchmarks';
+import { ADMIN_USER_IDS, IS_DEV_MODE } from '@/features/terminal-component-group/config';
 import { cn } from '@/lib/utils';
 import { useAppData } from '@/hooks/useAppData';
+import { getItem } from '@/lib/storage';
 
 import { useTerminalAgents } from '../hooks/useTerminalAgents';
 import { useDrippiness } from '../hooks/useDrippiness';
@@ -49,22 +53,38 @@ const BrowserStatusBarCarousel = lazy(() =>
   })),
 );
 
+function resolveInitialView(): TerminalView {
+  const stored = getItem('app-user');
+  if (stored === null) return 'agents';
+  try {
+    const user = JSON.parse(stored) as { phone?: string };
+    return user.phone === BROWSER_REVIEW_TEST_PHONE ? 'browse' : 'agents';
+  } catch {
+    return 'agents';
+  }
+}
+
+function browseOffsetStyle(currentView: TerminalView): React.CSSProperties | undefined {
+  return currentView === 'browse'
+    ? ({ '--browse-sidebar-offset': `${SIDEBAR_WIDTH_COLLAPSED}px` } as React.CSSProperties)
+    : undefined;
+}
+
+function ScrolledPage({ children }: { children: React.ReactNode }) {
+  return (
+    <ScrollArea className="flex-1 h-full">
+      <div className="pt-24 pb-8">{children}</div>
+    </ScrollArea>
+  );
+}
+
 export function TerminalContent() {
   const tileAnimation = useTileAnimation();
   const drip = useDrippiness();
   const { patternOffset, tileColors, colorPalette } = usePatternOffset(tileAnimation.currentFrame);
 
   const resetAnimationState = () => tileAnimation.reset();
-  const initialView = useMemo<TerminalView>(() => {
-    const stored = window.localStorage.getItem('app-user');
-    if (stored === null) return 'agents';
-    try {
-      const user = JSON.parse(stored) as { phone?: string };
-      return user.phone === BROWSER_REVIEW_TEST_PHONE ? 'browse' : 'agents';
-    } catch {
-      return 'agents';
-    }
-  }, []);
+  const initialView = useMemo<TerminalView>(resolveInitialView, []);
   const [currentView, setCurrentView] = useState<TerminalView>(initialView);
   const agents = useTerminalAgents(currentView, setCurrentView, resetAnimationState);
   const { models, modelsLoading } = useAppData();
@@ -122,6 +142,9 @@ export function TerminalContent() {
           currentView={currentView}
           setCurrentView={setCurrentView}
           showBrowse={currentView === 'browse' || agents.user?.phone === BROWSER_REVIEW_TEST_PHONE}
+          showBenchmarks={
+            IS_DEV_MODE || (agents.user?.id != null && ADMIN_USER_IDS.includes(agents.user.id))
+          }
         />
 
         <MainContent
@@ -151,18 +174,21 @@ function SidebarSection({
   currentView,
   setCurrentView,
   showBrowse,
+  showBenchmarks,
 }: {
   agents: ReturnType<typeof useTerminalAgents>;
   drip: ReturnType<typeof useDrippiness>;
   currentView: TerminalView;
   setCurrentView: (v: TerminalView) => void;
   showBrowse: boolean;
+  showBenchmarks: boolean;
 }) {
   return (
     <AppSidebar
       currentView={currentView}
       onViewChange={setCurrentView}
       showBrowse={showBrowse}
+      showBenchmarks={showBenchmarks}
       agents={agents.agents}
       isLoadingAgents={agents.isLoadingAgents}
       selectedAgentId={agents.selectedAgentId}
@@ -211,24 +237,21 @@ function MainContent({
     browsers: { taskId: string; browserUrl: string }[];
   }>;
 }) {
-  const browseOffsetStyle =
-    currentView === 'browse'
-      ? ({ '--browse-sidebar-offset': `${SIDEBAR_WIDTH_COLLAPSED}px` } as React.CSSProperties)
-      : undefined;
-
   return (
     <main
       className={cn(
         'flex-1 flex justify-center h-screen overflow-hidden',
         currentView === 'browse' && 'md:pl-[var(--browse-sidebar-offset)]',
       )}
-      style={{ height: '100dvh', ...browseOffsetStyle }}
+      style={{ height: '100dvh', ...browseOffsetStyle(currentView) }}
     >
       <div
         className={cn(
           'flex flex-col relative w-full h-full overflow-hidden',
           currentView === 'browse' ? 'px-0' : 'px-2 md:px-6',
-          currentView === 'network' || currentView === 'browse' ? 'max-w-none' : 'max-w-5xl',
+          currentView === 'network' || currentView === 'browse' || currentView === 'benchmarks'
+            ? 'max-w-none'
+            : 'max-w-5xl',
         )}
       >
         {agents.clientSource === 'WEB' && <DesktopNavLinks />}
@@ -236,25 +259,21 @@ function MainContent({
         {currentView === 'browse' ? (
           <Browse />
         ) : currentView === 'settings' ? (
-          <ScrollArea className="flex-1 h-full">
-            <div className="pt-24 pb-8">
-              <Settings />
-            </div>
-          </ScrollArea>
+          <ScrolledPage>
+            <Settings />
+          </ScrolledPage>
         ) : currentView === 'integrations' ? (
-          <ScrollArea className="flex-1 h-full">
-            <div className="pt-24 pb-8">
-              <Integrations />
-            </div>
-          </ScrollArea>
+          <ScrolledPage>
+            <Integrations />
+          </ScrolledPage>
         ) : currentView === 'usage' ? (
-          <ScrollArea className="flex-1 h-full">
-            <div className="pt-24 pb-8">
-              <Usage />
-            </div>
-          </ScrollArea>
+          <ScrolledPage>
+            <Usage />
+          </ScrolledPage>
         ) : currentView === 'network' ? (
           <NetworkView />
+        ) : currentView === 'benchmarks' ? (
+          <BenchmarksView />
         ) : (
           <AgentChatArea
             agents={agents}
