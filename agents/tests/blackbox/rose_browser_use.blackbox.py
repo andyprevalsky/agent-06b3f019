@@ -225,6 +225,26 @@ def test_build_browser_use_tools_preserves_catalog_descriptions():
     assert write_lock["input_schema"]["anyOf"][0]["required"] == ["purchase"]
 
 
+def test_build_browser_use_tools_emits_valid_required_keywords():
+    def walk_schema(value):
+        if isinstance(value, dict):
+            yield value
+            for nested in value.values():
+                yield from walk_schema(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                yield from walk_schema(nested)
+
+    tools = build_browser_use_tools(list(BROWSER_USE_TOOLS))
+
+    for tool in tools:
+        for schema_node in walk_schema(tool["input_schema"]):
+            if "required" in schema_node:
+                assert isinstance(schema_node["required"], list), (
+                    f"{tool['name']} emitted a non-array JSON Schema required keyword: {schema_node}"
+                )
+
+
 def test_write_lock_notification_tool_is_stable_internal_action_schema():
     from browser_tools.schemas import AVAILABLE_ACTIONS, create_browser_agent_action_model
 
@@ -1509,6 +1529,7 @@ async def run_all_tests():
         test_filter_browser_use_actions_keeps_coordinates_for_unindexed_state,
     )
     r.record("native_tool_schemas_preserve_catalog", test_build_browser_use_tools_preserves_catalog_descriptions)
+    r.record("native_tool_schemas_valid_required_keywords", test_build_browser_use_tools_emits_valid_required_keywords)
     r.record("write_lock_notification_schema", test_write_lock_notification_tool_is_stable_internal_action_schema)
     r.record(
         "write_lock_notification_alias_schema",

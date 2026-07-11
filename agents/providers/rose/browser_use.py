@@ -390,9 +390,12 @@ def build_browser_use_tools(available_actions: List[str]) -> List[Dict[str, Any]
             description = info.get("description")
             if description:
                 prop["description"] = description
-            for schema_key in ("items", "properties", "required", "additionalProperties", "enum"):
+            for schema_key in ("items", "properties", "additionalProperties", "enum"):
                 if schema_key in info:
                     prop[schema_key] = info[schema_key]
+            nested_required = info.get("required")
+            if isinstance(nested_required, list):
+                prop["required"] = nested_required
             properties[param_name] = prop
             if info.get("required") is True:
                 required.append(param_name)
