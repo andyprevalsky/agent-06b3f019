@@ -219,9 +219,7 @@ async function testCatalog_retiredTasksInvisible(): Promise<void> {
 
   const picker = await request(`${BASE_URL}/api/benchmarks/test-prompts`);
   assertStatus(picker.status, 200, picker.data);
-  const titles = (picker.data as { prompts: Array<{ title: string }> }).prompts.map(
-    (p) => p.title
-  );
+  const titles = (picker.data as { prompts: Array<{ title: string }> }).prompts.map((p) => p.title);
   assert(
     !titles.some((t) => t.includes('Load-Test: Fan Out N')),
     'retired task leaked into the query-box picker'
