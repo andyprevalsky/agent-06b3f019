@@ -180,7 +180,7 @@ def test_browser_action_log_summary_redacts_payment_secrets():
 def test_verifier_activity_timeout_allows_llm_call():
     """Browser verifier uses the standard LLM activity budget."""
     from domains.spawn_browser_agent_v3.config import VERIFIER_ULTRA_TIMEOUT_SECONDS
-    from helpers.llm_timeouts import STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
+    from utils.llm_timeouts import STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
 
     assert VERIFIER_ULTRA_TIMEOUT_SECONDS == STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
 

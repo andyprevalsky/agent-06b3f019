@@ -365,6 +365,7 @@ class _FakeSpawnWF:
     def __init__(self, activity_results=None, start_activity_result=None):
         self._activity_results = activity_results or {}
         self.activity_calls = []
+        self.start_activity_calls = []
         self._uuid_counter = 0
         self._start_activity_result = start_activity_result or _Activity(
             result={
@@ -414,6 +415,7 @@ class _FakeSpawnWF:
         return f"00000000-0000-4000-8000-{self._uuid_counter:012d}"
 
     def start_activity(self, fn, args=None, **kwargs):
+        self.start_activity_calls.append({"name": getattr(fn, "__name__", "?"), "args": args or [], "kwargs": kwargs})
         return self._start_activity_result
 
     async def wait_condition(self, predicate, timeout=None):
@@ -576,6 +578,28 @@ async def test_handler_explore_happy_path():
     finished = next(e for e in events if e.status == MessageStatus.FINISHED)
     assert "All done." in finished.message
     assert finished.data["usage"]["llm"]
+
+
+async def test_handler_explore_uses_lite_pool_independent_of_parent_model():
+    """Explore research stays on its dedicated Lite pool even when the parent uses Ultra."""
+    from domains.spawn_agent.config import EXPLORE_DEFAULT_MODEL
+    from domains.spawn_agent.handler import SpawnAgentManager
+
+    fake = _FakeSpawnWF()
+    restore = _patch_spawn_workflow(fake)
+    try:
+        await _collect(
+            SpawnAgentManager().execute_tool(
+                workflow_instance=_FakeWFInstance(model="rose-labs/rose-1-ultra"),
+                tool_call={"type": "explore", "goal": "research three current facts", "depth": "quick"},
+                tool_call_id="tc",
+            )
+        )
+    finally:
+        restore()
+
+    assert len(fake.start_activity_calls) == 1
+    assert fake.start_activity_calls[0]["args"][3] == EXPLORE_DEFAULT_MODEL
 
 
 async def test_handler_explore_gates_off_skips_fetch():
@@ -811,7 +835,11 @@ async def test_handler_blocks_recursive_general_purpose_for_explore_only_child()
     events = await _collect(
         SpawnAgentManager().execute_tool(
             workflow_instance=wf,
-            tool_call={"type": "general_purpose", "goal": "Determine Tokyo population", "output_schema": {"fields": []}},
+            tool_call={
+                "type": "general_purpose",
+                "goal": "Determine Tokyo population",
+                "output_schema": {"fields": []},
+            },
             tool_call_id="tc",
         )
     )
@@ -839,7 +867,11 @@ async def test_handler_blocks_recursive_general_purpose_for_web_search_only_chil
     events = await _collect(
         SpawnAgentManager().execute_tool(
             workflow_instance=wf,
-            tool_call={"type": "general_purpose", "goal": "Find current Tokyo population", "output_schema": {"fields": []}},
+            tool_call={
+                "type": "general_purpose",
+                "goal": "Find current Tokyo population",
+                "output_schema": {"fields": []},
+            },
             tool_call_id="tc",
         )
     )
@@ -857,7 +889,12 @@ async def test_handler_allows_explore_for_explore_only_child():
 
     fake = _FakeSpawnWF(
         start_activity_result=_Activity(
-            result={"result": "population found", "tool_call_results": [], "accumulated_usage": [], "llm_iteration_usage": []}
+            result={
+                "result": "population found",
+                "tool_call_results": [],
+                "accumulated_usage": [],
+                "llm_iteration_usage": [],
+            }
         )
     )
     restore = _patch_spawn_workflow(fake)
@@ -969,8 +1006,7 @@ async def test_handler_allows_general_purpose_when_explicitly_required():
                 workflow_instance=_FakeWFInstance(
                     depth=0,
                     goal=(
-                        "MUST use spawn_general_purpose_agent exactly twice. "
-                        "Do not use browser agent or Claude Code."
+                        "MUST use spawn_general_purpose_agent exactly twice. Do not use browser agent or Claude Code."
                     ),
                 ),
                 tool_call={"type": "general_purpose", "goal": "do work", "output_schema": {"fields": []}},
@@ -1340,9 +1376,7 @@ async def test_resolve_explore_attachments_returns_metadata_texts():
     fake_blocks = [{"type": "image", "data": "xxx"}]
     fake_meta = ["[file: r.txt]"]
 
-    with patch.object(
-        repo, "resolve_attachments_for_llm", new=AsyncMock(return_value=(fake_blocks, fake_meta))
-    ):
+    with patch.object(repo, "resolve_attachments_for_llm", new=AsyncMock(return_value=(fake_blocks, fake_meta))):
         cb, mt = await repo._resolve_explore_attachments_activity(
             [
                 {
@@ -1543,9 +1577,7 @@ async def test_spawn_explore_agent_activity_error_status_returned():
         patch("temporalio.activity.heartbeat"),
         patch("loop.run_agent.run_agent", new=fake_run_agent),
     ):
-        result = await spawn_explore_agent_activity(
-            agent_id="a", user_id="u", goal="g", model="m"
-        )
+        result = await spawn_explore_agent_activity(agent_id="a", user_id="u", goal="g", model="m")
     assert result["status"] == "error"
     assert result["result"] == "partial research summary"
     assert result["summary"] == "partial research summary"
@@ -1596,9 +1628,7 @@ async def test_spawn_explore_agent_activity_inner_callbacks_work():
         patch("loop.run_agent.run_agent", new=fake_run_agent),
         patch("domains.spawn_agent.service.save_explore_message", new=fake_save),
     ):
-        result = await spawn_explore_agent_activity(
-            agent_id="a", user_id="u", goal="g", model="m", task_id="task-1"
-        )
+        result = await spawn_explore_agent_activity(agent_id="a", user_id="u", goal="g", model="m", task_id="task-1")
 
     # on_tokens populated llm_iteration_usage
     assert len(result["llm_iteration_usage"]) == 1
@@ -1664,9 +1694,7 @@ async def test_spawn_explore_agent_activity_execute_tool_dispatch():
         patch("tools.web_fetch.WebFetchManager", return_value=fake_wf),
         patch("tools.grep.GrepManager", return_value=fake_grep),
     ):
-        result = await spawn_explore_agent_activity(
-            agent_id="a", user_id="u", goal="g", model="m"
-        )
+        result = await spawn_explore_agent_activity(agent_id="a", user_id="u", goal="g", model="m")
 
     # web_search returned success with serialized result_str
     assert captured_calls[0][1]["success"] is True
@@ -1871,9 +1899,7 @@ async def test_handler_for_each_spawn_exception_counts_as_failure():
         h.get_sub_agent_manager = original_sub
         restore_wf()
     # 2 spawn failures => aggregate error
-    assert any(
-        e.status == MessageStatus.ERROR and "2/2" in e.message for e in events
-    )
+    assert any(e.status == MessageStatus.ERROR and "2/2" in e.message for e in events)
 
 
 # ── service: explore tool dispatch wraps call_temporal_activity_from_activity ──
@@ -1917,9 +1943,7 @@ async def test_tagged_execute_activity_injects_taskid_for_post_agent_message():
         ),
         patch("tools.web_search.WebSearchManager", return_value=fake_ws),
     ):
-        await spawn_explore_agent_activity(
-            agent_id="a", user_id="u", goal="g", model="m", task_id="tt"
-        )
+        await spawn_explore_agent_activity(agent_id="a", user_id="u", goal="g", model="m", task_id="tt")
 
 
 async def run_all_tests():
@@ -1958,6 +1982,10 @@ async def run_all_tests():
     await r.record_async("handler_validation_bubbles_for_each", test_handler_validation_bubbles_for_each)
     await r.record_async("handler_validation_emits_error_for_others", test_handler_validation_emits_error_for_others)
     await r.record_async("handler_explore_happy", test_handler_explore_happy_path)
+    await r.record_async(
+        "handler_explore_uses_lite_pool",
+        test_handler_explore_uses_lite_pool_independent_of_parent_model,
+    )
     await r.record_async("handler_explore_gates_off", test_handler_explore_gates_off_skips_fetch)
     await r.record_async("handler_explore_capture", test_handler_explore_capture_tool_results)
     await r.record_async("handler_explore_cancelled", test_handler_explore_cancelled_yields_error)
@@ -2014,7 +2042,9 @@ async def run_all_tests():
     await r.record_async("handler_explore_unknown_attachment", test_handler_explore_unknown_attachment_warns)
     await r.record_async("handler_for_each_drain_exception", test_handler_for_each_drain_exception_counts_as_failure)
     await r.record_async("handler_for_each_spawn_exception", test_handler_for_each_spawn_exception_counts_as_failure)
-    await r.record_async("tagged_execute_activity_injects", test_tagged_execute_activity_injects_taskid_for_post_agent_message)
+    await r.record_async(
+        "tagged_execute_activity_injects", test_tagged_execute_activity_injects_taskid_for_post_agent_message
+    )
     teardown_mock()
     return r.all_passed
 

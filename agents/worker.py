@@ -188,9 +188,9 @@ import httpx
 # Every worker polls Temporal (1s), computes desired fleet size.
 # Only the leader (lowest-IP via Fly DNS) actuates via Fly Machines API.
 #
-# Capacity is observed in real-time from the SDK's resource-based tuner
+# Capacity is observed in real-time from the SDK's slot metrics
 # (worker_task_slots_used + worker_task_slots_available on localhost:9090).
-# No hardcoded magic numbers — the tuner adjusts slots based on CPU/memory.
+# Admission telemetry separately reports CPU/memory pressure.
 #
 # Scale-up (eager):   backlog >= 20% of observed capacity → add machines
 #                     or machine memory >= threshold with running workflows
@@ -594,7 +594,7 @@ async def poll_queue_metrics(
     API to start/stop machines.
 
     Scale-up (eager):
-      Capacity is observed in real-time from the SDK's resource-based tuner
+      Capacity is observed in real-time from the SDK's slot metrics
       (worker_task_slots_used + worker_task_slots_available on localhost:9090).
       When backlog >= 20% of observed capacity, add ceil(backlog / capacity) machines.
       The 20% threshold absorbs transient blips; ceil() ensures we add enough
@@ -908,7 +908,7 @@ async def main():
     print(f"🚀 [Agents] Mode: {'PRODUCTION' if is_production else 'DEVELOPMENT'}")
 
     # Set up Temporal SDK runtime with Prometheus metrics exporter.
-    # Exposes worker_task_slots_used/available from the resource-based tuner
+    # Exposes worker_task_slots_used/available from the SDK slot suppliers
     # on a local port. The autoscaler scrapes these to get real capacity.
     runtime = Runtime(telemetry=TelemetryConfig(metrics=PrometheusConfig(bind_address=f"0.0.0.0:{SDK_METRICS_PORT}")))
 
@@ -980,10 +980,9 @@ async def main():
     # BEFORE polling — so when host memory sits above the tuner's target (the
     # steady state on dev Macs at ~83-85% and on prod Fly machines, where the
     # autoscaler deliberately runs memory up to its 75-80% thresholds), the
-    # supplier throttles permits to its minimum and the lone sticky poller
-    # (nonsticky_to_sticky_poll_ratio=1.0 → 1 sticky poller, clamped by the
-    # SDK) loses the permit race to the nonsticky pollers. The sticky queue
-    # then goes unpolled and EVERY workflow task burns the full
+    # supplier throttles permits to its minimum and the sticky pollers lose
+    # the permit race to the nonsticky pollers. The sticky queue then goes
+    # unpolled and EVERY workflow task burns the full
     # sticky_queue_schedule_to_start_timeout (10s) before being rescheduled on
     # the normal queue, where a random other worker picks it up with a full
     # history replay. Observed: message-person smoke replay with $0 LLM cost
@@ -1113,9 +1112,7 @@ async def main():
         max_activity_slots=config.temporal.max_concurrent_activities,
         max_workflow_slots=config.temporal.max_concurrent_workflows,
         nonsticky_to_sticky_poll_ratio=config.temporal.nonsticky_to_sticky_poll_ratio,
-        sticky_queue_schedule_to_start_timeout_seconds=(
-            config.temporal.sticky_queue_schedule_to_start_timeout_seconds
-        ),
+        sticky_queue_schedule_to_start_timeout_seconds=(config.temporal.sticky_queue_schedule_to_start_timeout_seconds),
     )
 
     # Handle shutdown gracefully using asyncio signal handlers

@@ -78,11 +78,7 @@ def test_worker_workflow_supplier_is_fixed_size_not_resource_based():
 
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module == "temporalio.worker":
-            resource_imports = {
-                alias.name
-                for alias in node.names
-                if alias.name.startswith("ResourceBased")
-            }
+            resource_imports = {alias.name for alias in node.names if alias.name.startswith("ResourceBased")}
             assert resource_imports == set(), (
                 f"worker.py must not import {sorted(resource_imports)}: resource-based "
                 "slot suppliers starve sticky polling under steady-state memory pressure"
@@ -201,8 +197,11 @@ def test_activity_admission_closes_on_cpu_pressure():
     # Invalid config rejected.
     try:
         worker.ActivityAdmissionSnapshot(
-            maximum_slots=100, close_memory_percent=80, open_memory_percent=75,
-            close_cpu_percent=70, open_cpu_percent=85,
+            maximum_slots=100,
+            close_memory_percent=80,
+            open_memory_percent=75,
+            close_cpu_percent=70,
+            open_cpu_percent=85,
         )
         raise AssertionError("expected ValueError for open_cpu >= close_cpu")
     except ValueError:
@@ -213,8 +212,13 @@ async def run_all_tests():
     print("worker blackbox tests:")
     r = BlackboxResult()
     r.record("worker_does_not_use_python_custom_activity_slots", test_worker_does_not_use_python_custom_activity_slots)
-    r.record("worker_activity_supplier_is_sdk_native_fixed_size", test_worker_activity_supplier_is_sdk_native_fixed_size)
-    r.record("worker_workflow_supplier_is_fixed_size_not_resource_based", test_worker_workflow_supplier_is_fixed_size_not_resource_based)
+    r.record(
+        "worker_activity_supplier_is_sdk_native_fixed_size", test_worker_activity_supplier_is_sdk_native_fixed_size
+    )
+    r.record(
+        "worker_workflow_supplier_is_fixed_size_not_resource_based",
+        test_worker_workflow_supplier_is_fixed_size_not_resource_based,
+    )
     r.record("worker_passes_sticky_queue_timeout_to_temporal", test_worker_passes_sticky_queue_timeout_to_temporal)
     r.record("activity_admission_closes_on_cpu_pressure", test_activity_admission_closes_on_cpu_pressure)
     teardown_mock()

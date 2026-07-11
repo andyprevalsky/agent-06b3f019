@@ -1,4 +1,9 @@
+from typing import TYPE_CHECKING
+
 from .service import build_payment_fingerprint, build_payment_question, normalize_payment_payload
+
+if TYPE_CHECKING:
+    from .repo import lookup_purchase_activity, mint_purchase_card_activity
 
 __all__ = [
     "build_payment_fingerprint",

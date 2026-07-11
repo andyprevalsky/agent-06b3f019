@@ -157,15 +157,20 @@ def test_classify_claude_token_error_each_branch():
 
 
 def test_pool_registry_lookup():
+    mini = get_pool("rose-1-mini")
     lite = get_pool("rose-1-lite")
     ultra = get_pool("rose-1-ultra")
+    browser_use = get_pool("rose-1-browser-use")
+    assert mini.gpt_auth_model == "gpt-5.6-luna"
     assert lite.name == "rose-1-lite"
     assert lite.claude_auth_model.startswith("claude-")
-    assert lite.gpt_auth_model.startswith("gpt-")
+    assert lite.gpt_auth_model == "gpt-5.6-terra"
     assert len(lite.waterfall) >= 1
     assert ultra.name == "rose-1-ultra"
     assert ultra.claude_auth_model.startswith("claude-")
-    assert ultra.gpt_auth_model.startswith("gpt-")
+    assert ultra.gpt_auth_model == "gpt-5.6-sol"
+    assert browser_use.gpt_auth_model == "gpt-5.6-sol"
+    assert browser_use.waterfall[-1] == "openai/gpt-5.6-sol"
     assert lite.waterfall != ultra.waterfall
 
 
@@ -179,7 +184,7 @@ def test_all_pool_names_matches_registry():
 def test_get_pool_unknown_raises():
     raised = False
     try:
-        get_pool("rose-nonexistent")  # type: ignore[arg-type]
+        get_pool("rose-nonexistent")
     except (KeyError, ValueError):
         raised = True
     assert raised
@@ -272,8 +277,7 @@ def test_transform_messages_for_anthropic_preserves_repeated_boundaries_for_cach
     from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 
     combined = (
-        f"static instructions{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
-        f"Current time: April 28{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
+        f"static instructions{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}Current time: April 28{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
     )
     static_sys, dynamic_sys, msgs = transform_messages_for_anthropic(
         [
@@ -769,6 +773,9 @@ def test_apply_tool_config_response_format_structured_output_path():
 
 def test_is_vision_capable_membership():
     assert is_vision_capable("openai/gpt-4o")
+    assert is_vision_capable("openai/gpt-5.6-luna")
+    assert is_vision_capable("openai/gpt-5.6-terra")
+    assert is_vision_capable("openai/gpt-5.6-sol")
     assert is_vision_capable("anthropic/claude-sonnet-4.5")
     assert not is_vision_capable("google/gemini-3-flash-preview")
     assert not is_vision_capable("rose-labs/rose-1-lite")
@@ -2193,6 +2200,26 @@ def test_build_codex_responses_body_contract():
     )
     assert split_system_body["instructions"] == "static rules\n\ndynamic rules"
     assert "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__" not in split_system_body["instructions"]
+    same_static_different_dynamic_body = build_codex_responses_body(
+        pool_spec=pool,
+        messages=[
+            {
+                "role": "system",
+                "content": f"static rules{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}different agent context",
+            },
+            {"role": "user", "content": "different live input"},
+        ],
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "different_schema",
+                "strict": True,
+                "schema": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+        },
+        request_id="same-static-different-dynamic",
+    )
+    assert split_system_body["prompt_cache_key"] == same_static_different_dynamic_body["prompt_cache_key"]
     max_effort_body = build_codex_responses_body(
         pool_spec=pool,
         messages=[{"role": "user", "content": "hi"}],
@@ -2748,7 +2775,7 @@ async def test_client_openai_api_key_serves_before_anthropic_and_openrouter():
     assert isinstance(body, dict)
     assert seen == {"openai": 1, "anthropic": 0, "openrouter": 0}
     assert captured["authorization"] == "Bearer sk-proj-test"
-    assert body.get("model") == "gpt-5.4"
+    assert body.get("model") == "gpt-5.6-terra"
     assert body.get("service_tier") == "priority"
     meta = next((c for c in chunks if c.kind == "metadata"), None)
     assert meta is not None and str(meta.data.get("actual_model", "")).endswith("-openai")
@@ -4578,12 +4605,8 @@ async def run_all_tests():
     await r.record_async(
         "anthropic_apikey_402_payment_required", test_anthropic_api_key_complete_402_raises_payment_required
     )
-    await r.record_async(
-        "anthropic_apikey_suffix", test_anthropic_api_key_complete_sets_anthropic_suffix
-    )
-    await r.record_async(
-        "anthropic_apikey_cooldown_mark", test_anthropic_api_key_cooldown_mark_then_on_cooldown
-    )
+    await r.record_async("anthropic_apikey_suffix", test_anthropic_api_key_complete_sets_anthropic_suffix)
+    await r.record_async("anthropic_apikey_cooldown_mark", test_anthropic_api_key_cooldown_mark_then_on_cooldown)
     await r.record_async(
         "openai_apikey_before_anthropic_openrouter",
         test_client_openai_api_key_serves_before_anthropic_and_openrouter,
@@ -4639,12 +4662,8 @@ async def run_all_tests():
     await r.record_async(
         "client_gpt_pydantic_native_tools_split", test_client_splits_pydantic_model_to_gpt_native_tools
     )
-    await r.record_async(
-        "client_pydantic_output_config", test_client_plain_pydantic_model_uses_claude_output_config
-    )
-    await r.record_async(
-        "client_gpt_pydantic_text_format", test_client_plain_pydantic_model_uses_gpt_text_format
-    )
+    await r.record_async("client_pydantic_output_config", test_client_plain_pydantic_model_uses_claude_output_config)
+    await r.record_async("client_gpt_pydantic_text_format", test_client_plain_pydantic_model_uses_gpt_text_format)
     await r.record_async("client_deadline_enforced", test_client_deadline_enforced)
     await r.record_async("client_ttft_timeout", test_client_ttft_timeout_waits_for_first_productive_chunk)
     await r.record_async(

@@ -1,5 +1,7 @@
 #!/usr/bin/env tsx
 import { config } from 'dotenv';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { z } from 'zod';
 config();
 
@@ -182,6 +184,19 @@ async function testPromptBuilder_sharedContractMentionsOutputRules() {
   assert(prompt.includes('/home/user/workspace'), 'Repo workDir missing');
 }
 
+async function testTemplate_pinsCodexCliForGpt56() {
+  const dockerfile = readFileSync(
+    join(process.cwd(), '..', 'e2b-templates', 'codex-code', 'e2b.Dockerfile'),
+    'utf8'
+  );
+  assert(
+    dockerfile.includes('ARG CODEX_VERSION=0.144.1') &&
+      dockerfile.includes('npm install -g "@openai/codex@$CODEX_VERSION"') &&
+      !dockerfile.includes('ubuntu.mirror.constant.com'),
+    'Codex E2B template must pin the GPT-5.6-compatible Codex CLI and use reliable Ubuntu sources'
+  );
+}
+
 async function testSmoke_codexCompletesE2bTask() {
   assert(API_KEY !== '', 'BACKEND_API_KEY is required');
   assert(
@@ -260,6 +275,10 @@ async function runAll() {
     {
       name: 'prompt -- shared code-agent contract includes output rules',
       fn: testPromptBuilder_sharedContractMentionsOutputRules,
+    },
+    {
+      name: 'template -- pins GPT-5.6-compatible Codex CLI',
+      fn: testTemplate_pinsCodexCliForGpt56,
     },
   ];
   if (process.env.BACKEND_CODEX_SMOKE_SKIP === '1') {

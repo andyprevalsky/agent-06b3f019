@@ -37,10 +37,6 @@ from helpers.llm import (
     call_llm_structured_streaming,
     check_progress,
 )
-from helpers.llm_timeouts import (
-    STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS,
-    VERIFIER_ACTIVITY_TIMEOUT_SECONDS,
-)
 from helpers.messages import CoalescingStreamBroadcaster, schedule_background_broadcast
 from helpers.summarize import compress_context
 from helpers.tracing import span, traced
@@ -52,7 +48,11 @@ from loop.context_utils import poll_and_update_context
 from providers.rose.errors import RoseRefusalError
 from tools.base import EventType, MessageStatus, ToolEvent
 from tools.knowledge_base import query_blueprints
-from utils.error_utils import extract_error_message
+from utils.error_utils import error_chain_has_type, extract_error_message
+from utils.llm_timeouts import (
+    STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS,
+    VERIFIER_ACTIVITY_TIMEOUT_SECONDS,
+)
 from utils.tool_schemas import PLAN_TOOL_MODELS, create_agent_action_model
 
 logger = structlog.get_logger()
@@ -814,6 +814,7 @@ async def run_agent(  # noqa: C901
                     sub_agent_id=task_id,
                     llm_started_at_ms=llm_started_at_ms,
                 )
+
                 async def _send_stream_start() -> None:
                     async with span(
                         "stream.start_event",
@@ -974,9 +975,7 @@ async def run_agent(  # noqa: C901
                     final_delta = ""
                     if pydantic_result.response:
                         final_delta = pydantic_result.response[len(last_text[0]) :]
-                    await_done_broadcast = not (
-                        cache_call_site == "explore_agent" and fast_mode_cache_enabled
-                    )
+                    await_done_broadcast = not (cache_call_site == "explore_agent" and fast_mode_cache_enabled)
                     with contextlib.suppress(Exception):
                         await broadcaster.aclose(
                             final_delta=final_delta,
@@ -1198,6 +1197,16 @@ async def run_agent(  # noqa: C901
                     "cache_creation_input_tokens": cache_write_total,
                     "message": f"LLM call failed {consecutive_llm_failures} consecutive times: {error_message}",
                 }
+            if error_chain_has_type(e, "LLMStructuredOutputError"):
+                # call_llm_activity marks schema/required-tool violations
+                # non-retryable so Temporal does not multiply requests. The
+                # agent loop owns the bounded semantic retry instead.
+                logger.info(
+                    "run_agent.structured_output_retry",
+                    agent_id=agent_id,
+                    iteration=iteration,
+                    consecutive_failures=consecutive_llm_failures,
+                )
             if _is_refusal_error(e):
                 exclude_anthropic_family_on_llm_retry = True
                 logger.info(
@@ -1527,7 +1536,9 @@ async def run_agent(  # noqa: C901
                 if len(recent_call_hashes) >= 3 and len(set(list(recent_call_hashes)[-3:])) == 1:
                     same_call_streak += 1
                     tool_names = [t for t, _, _ in processed_tools]
-                    logger.warning(f"[run_agent] Repetitive tool calls detected (streak={same_call_streak}): {tool_names}")
+                    logger.warning(
+                        f"[run_agent] Repetitive tool calls detected (streak={same_call_streak}): {tool_names}"
+                    )
                     context.append(
                         {
                             "role": "SYSTEM",
