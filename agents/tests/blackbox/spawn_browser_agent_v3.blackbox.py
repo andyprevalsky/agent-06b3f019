@@ -1585,6 +1585,88 @@ async def test_browser_humanizer_keyboard_uses_keycap_timing_for_text_and_shortc
     assert isinstance(keyboard.events[-2][2], int) and keyboard.events[-2][2] > 0
 
 
+async def test_browser_humanizer_cdp_keyboard_transport_queues_text_before_drain():
+    from browser_tools.humanizer import BrowserHumanizer
+
+    real_sleep = asyncio.sleep
+
+    class FakeCDPSession:
+        def __init__(self):
+            self.calls = []
+            self.release = asyncio.Event()
+
+        async def send(self, method, payload):
+            self.calls.append((method, payload))
+            await self.release.wait()
+
+    class FakeContext:
+        def __init__(self, cdp):
+            self.cdp = cdp
+
+        async def new_cdp_session(self, page):
+            return self.cdp
+
+    class FakeMouse:
+        async def move(self, *args, **kwargs):
+            return None
+
+    class FakeKeyboard:
+        def __init__(self):
+            self.events = []
+
+        async def down(self, key):
+            self.events.append(("down", key))
+
+        async def up(self, key):
+            self.events.append(("up", key))
+
+    class FakeKeycap:
+        @staticmethod
+        def next(char):
+            return SimpleNamespace(dwell_s=0, interval_s=0)
+
+    cdp = FakeCDPSession()
+    keyboard = FakeKeyboard()
+    page = SimpleNamespace(
+        mouse=FakeMouse(),
+        keyboard=keyboard,
+        viewport_size={"width": 1280, "height": 800},
+        context=FakeContext(cdp),
+    )
+
+    with patch.dict(
+        os.environ,
+        {
+            "BROWSER_AGENT_HUMAN_INPUT_ENABLED": "1",
+            "BROWSER_AGENT_HUMAN_KEYBOARD_SYNTHESIS": "1",
+            "BROWSER_AGENT_CDP_KEYBOARD_TRANSPORT": "1",
+            "BROWSER_AGENT_CDP_MOUSE_TRANSPORT": "1",
+        },
+        clear=False,
+    ):
+        humanizer = BrowserHumanizer(dom_page=None, input_page=page, fast=True)
+        humanizer._keycap = FakeKeycap()
+        task = asyncio.create_task(humanizer.type_text("Ab"))
+        try:
+            for _ in range(20):
+                await real_sleep(0)
+                if len(cdp.calls) == 6:
+                    break
+
+            assert len(cdp.calls) == 6
+            assert not task.done()
+            assert keyboard.events == []
+        finally:
+            cdp.release.set()
+
+        await asyncio.wait_for(task, timeout=1)
+
+    assert [method for method, _ in cdp.calls] == ["Input.dispatchKeyEvent"] * 6
+    assert cdp.calls[1][1]["type"] == "char"
+    assert cdp.calls[1][1]["text"] == "A"
+    assert cdp.calls[4][1]["text"] == "b"
+
+
 async def test_browser_network_recording_captures_response_body():
     import tempfile
 
@@ -9350,6 +9432,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_humanizer_keyboard_synthesis",
         test_browser_humanizer_keyboard_uses_keycap_timing_for_text_and_shortcuts,
+    )
+    await r.record_async(
+        "browser_humanizer_cdp_keyboard_transport",
+        test_browser_humanizer_cdp_keyboard_transport_queues_text_before_drain,
     )
     await r.record_async(
         "browser_network_recording_captures_body",

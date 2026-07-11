@@ -163,6 +163,9 @@ class BrowserHumanizer:
         self._cdp_mouse_transport_enabled = self._input_synthesis_enabled and _env_enabled(
             "BROWSER_AGENT_CDP_MOUSE_TRANSPORT", True
         )
+        self._cdp_keyboard_transport_enabled = self._keyboard_synthesis_enabled and _env_enabled(
+            "BROWSER_AGENT_CDP_KEYBOARD_TRANSPORT", True
+        )
         self._cdp_session: Optional[Any] = None
         self._cursor_observer: Optional[Callable[[int, int], Any]] = None
         self._keycap = KeycapTimingSynthesizer(basis_count=500 if fast else 1500)
@@ -192,6 +195,7 @@ class BrowserHumanizer:
             keyboard_synthesis_enabled=self._keyboard_synthesis_enabled,
             visual_cursor_enabled=self._visual_cursor_enabled,
             cdp_mouse_transport_enabled=self._cdp_mouse_transport_enabled,
+            cdp_keyboard_transport_enabled=self._cdp_keyboard_transport_enabled,
             idle_mouse_enabled=self._idle_mouse_enabled,
         )
 
@@ -387,7 +391,7 @@ class BrowserHumanizer:
         return (1280, 800)
 
     async def _get_cdp_session(self) -> Optional[Any]:
-        if not self._cdp_mouse_transport_enabled:
+        if not self._cdp_mouse_transport_enabled and not self._cdp_keyboard_transport_enabled:
             return None
         if self._cdp_session is not None:
             return self._cdp_session
@@ -397,13 +401,14 @@ class BrowserHumanizer:
         try:
             self._cdp_session = await context.new_cdp_session(self.input_page)
         except Exception as exc:
-            logger.debug("CDP mouse transport unavailable", error=str(exc))
+            logger.debug("CDP input transport unavailable", error=str(exc))
             self._cdp_mouse_transport_enabled = False
+            self._cdp_keyboard_transport_enabled = False
             return None
         return self._cdp_session
 
     async def _move_path_with_cdp_fire_and_drain(self, samples: List[Any]) -> bool:
-        cdp_session = await self._get_cdp_session()
+        cdp_session = await self._get_cdp_session() if self._cdp_mouse_transport_enabled else None
         if cdp_session is None:
             return False
 
@@ -435,7 +440,7 @@ class BrowserHumanizer:
         return True
 
     async def _dispatch_mouse_position(self, x: int, y: int) -> None:
-        cdp_session = await self._get_cdp_session()
+        cdp_session = await self._get_cdp_session() if self._cdp_mouse_transport_enabled else None
         if cdp_session is not None:
             await cdp_session.send(
                 "Input.dispatchMouseEvent",
@@ -599,6 +604,74 @@ class BrowserHumanizer:
             self._idle_anchor = (x, y)
         logger.debug("Humanized double-click", x=x, y=y)
 
+    async def _type_text_with_cdp_fire_and_drain(self, text: str) -> bool:
+        if not self._cdp_keyboard_transport_enabled:
+            return False
+
+        cdp_session = await self._get_cdp_session()
+        if cdp_session is None:
+            return False
+
+        pending: List[asyncio.Task] = []
+        timestamp = time.time()
+        try:
+            for char in text:
+                timing = self._keycap.next(char)
+                key = " " if char == " " else "Enter" if char == "\n" else char
+                pending.append(
+                    asyncio.create_task(
+                        cdp_session.send(
+                            "Input.dispatchKeyEvent",
+                            {
+                                "type": "rawKeyDown",
+                                "key": key,
+                                "timestamp": timestamp,
+                            },
+                        )
+                    )
+                )
+                await asyncio.sleep(timing.dwell_s)
+                timestamp += timing.dwell_s
+                pending.append(
+                    asyncio.create_task(
+                        cdp_session.send(
+                            "Input.dispatchKeyEvent",
+                            {
+                                "type": "char",
+                                "key": key,
+                                "text": char,
+                                "unmodifiedText": char,
+                                "timestamp": timestamp,
+                            },
+                        )
+                    )
+                )
+                pending.append(
+                    asyncio.create_task(
+                        cdp_session.send(
+                            "Input.dispatchKeyEvent",
+                            {
+                                "type": "keyUp",
+                                "key": key,
+                                "timestamp": timestamp,
+                            },
+                        )
+                    )
+                )
+                await asyncio.sleep(timing.interval_s)
+                timestamp += timing.interval_s
+
+            if pending:
+                await asyncio.gather(*pending)
+        except BaseException:
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            raise
+        return True
+
     async def type_text(self, text: str) -> None:
         """Human-like typing at current focus.
 
@@ -610,6 +683,10 @@ class BrowserHumanizer:
         Args:
             text: Text to type
         """
+        if self._keyboard_synthesis_enabled and await self._type_text_with_cdp_fire_and_drain(text):
+            logger.debug("Humanized typing complete", chars=len(text))
+            return
+
         base_delay = 60 / self._cpm  # seconds per character
 
         for i, char in enumerate(text):
