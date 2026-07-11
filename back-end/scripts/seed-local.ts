@@ -12,7 +12,7 @@ import { PrismaClient } from '@prisma/client';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import dotenv from 'dotenv';
-import { syncPasskeyCredentials } from './seed-local-credentials';
+import { syncIntegrationCredentials, syncPasskeyCredentials } from './seed-local-credentials';
 
 // Parse .env file directly to get remote DB URL
 // (process.env.DATABASE_URL is already overridden to local by run.sh)
@@ -76,8 +76,12 @@ async function syncIntegrations(): Promise<number> {
       });
     }
   }
-  const synced = await upsertById(local.integration, all);
-  const syncedIds = all.map((integration) => integration.id);
+  // Integrations are unique by (userId, name). A local credential may have a
+  // different primary key from its production counterpart, so syncing by id
+  // can collide with that compound key and fail every benchmark preflight.
+  // Preserve the local id (and any dependent rows) while refreshing the
+  // production credential fields.
+  const syncedIds = await syncIntegrationCredentials(local.integration, all);
   const deleted = await local.integration.deleteMany({
     where: {
       name: { in: ['claude_code', 'gpt_code'] },
@@ -87,7 +91,7 @@ async function syncIntegrations(): Promise<number> {
   if (deleted.count > 0) {
     console.log(`  🧹 Integrations: ${deleted.count} stale local compute tokens deleted`);
   }
-  return synced;
+  return syncedIds.length;
 }
 
 function sleep(ms: number): Promise<void> {

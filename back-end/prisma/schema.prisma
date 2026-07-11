@@ -123,8 +123,9 @@ model Message {
 
 model Waitlist {
   id           String   @id @default(uuid())
-  name         String
-  email        String   @unique
+  name         String   @default("")
+  email        String?  @unique
+  phone        String?  @unique
   variant      String?
   referralCode String?  @map("referral_code")
   createdAt    DateTime @default(now()) @map("created_at")

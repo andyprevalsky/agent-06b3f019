@@ -15,7 +15,6 @@ export const SEND_CODE_GENERIC_FAILURE = 'Failed to send code';
 export const VERIFY_CODE_GENERIC_FAILURE = 'Failed to verify code';
 export const AUTHENTICATE_GENERIC_FAILURE = 'Failed to authenticate';
 
-export const PHONE_INPUT_PLACEHOLDER = '+1 (234)-567-8900';
 export const CODE_INPUT_PLACEHOLDER = '12345';
 export const PASSWORD_INPUT_PLACEHOLDER = 'Enter your 2FA password';
 

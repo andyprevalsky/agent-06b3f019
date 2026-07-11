@@ -1306,6 +1306,11 @@ def _render_executive_summary(
         lines.append(
             f"Sub-agents         {len(stats['sub_agent_ids'])} discovered"
         )
+    if stats.get("span_count") == 0:
+        lines.append(_c(
+            "Diagnostic         log events found, but no span or legacy timing windows were reconstructed",
+            YELLOW, color,
+        ))
 
     worker_span_names = {s.name for s in all_spans if s.source == "worker"}
     backend_span_names = {s.name for s in all_spans if s.source == "backend"}
@@ -1463,6 +1468,8 @@ def _render_tree(
     lines.append(_c(header, BOLD, color))
     lines.append("-" * 100)
     prev_end_by_depth: Dict[int, datetime] = {}
+    if not roots:
+        lines.append("  (no spans reconstructed from retained log events)")
     for r in roots:
         _render_span(r, 0, t0, lines, color, stall_threshold, code_cache,
                      span_baselines, verbose, prev_end_by_depth)
@@ -1965,8 +1972,16 @@ def _build_trace_from_events(
 
     roots = _assemble_tree(spans)
 
-    t0 = min(s.start for s in spans)
-    t1 = max((s.end or s.start) for s in spans)
+    if spans:
+        t0 = min(s.start for s in spans)
+        t1 = max((s.end or s.start) for s in spans)
+    elif combined:
+        t0 = combined[0].ts
+        t1 = combined[-1].ts
+    else:
+        now = datetime.now(timezone.utc)
+        t0 = now
+        t1 = now
 
     stats = {
         "worker_events": len(worker_raw),
@@ -1974,6 +1989,7 @@ def _build_trace_from_events(
         "research_events": len(research_raw),
         "sub_agent_ids": sub_ids,
         "has_span_events": worker_has_spans or backend_has_spans,
+        "span_count": len(spans),
     }
     return roots, t0, t1, stats
 

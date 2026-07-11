@@ -373,7 +373,7 @@ class WriteLockPurchaseItem(BaseModel):
             value["price"] = _format_write_lock_usd(value.get("price_usd"))
         return value
 
-    @field_validator("price", "quantity", "review_count", mode="before")
+    @field_validator("price", "quantity", "rating", "review_count", mode="before")
     @classmethod
     def stringify_visible_value(cls, value: Any) -> Any:
         if value is None:

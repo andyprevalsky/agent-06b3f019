@@ -4045,7 +4045,6 @@ async function testComputeTokenLineageSemaphore_capsLiveGptLeases() {
 }
 
 async function testComputeTokenFastCacheAffinity_pinsProviderFamily() {
-  const existing = await existingComputePoolIds();
   const caller = await createAnonSession();
   const gptOwner = await createAnonSession();
   const claudeOwner = await createAnonSession();
@@ -4072,7 +4071,10 @@ async function testComputeTokenFastCacheAffinity_pinsProviderFamily() {
       ...apiKeyHeaders(caller.userId),
       'X-Force-Pool': 'true',
     };
-    const exclude = existing.filter((id) => id !== gptPool.id && id !== claudePool.id);
+    // Other blackbox domains seed pool credentials concurrently. Snapshot at
+    // request time so this affinity assertion only considers its own pair.
+    const currentPoolIds = await existingComputePoolIds();
+    const exclude = currentPoolIds.filter((id) => id !== gptPool.id && id !== claudePool.id);
     if (exclude.length > 0) headers['X-Exclude-Pool-Tokens'] = exclude.join(',');
     const params = new URLSearchParams({
       lineageKey,

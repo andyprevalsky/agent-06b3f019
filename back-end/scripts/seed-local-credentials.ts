@@ -1,6 +1,34 @@
-import type { PasskeyCredential, Prisma } from '@prisma/client';
+import type { Integration, PasskeyCredential, Prisma } from '@prisma/client';
 
 type PasskeyRecord = PasskeyCredential;
+
+export type IntegrationModel = {
+  upsert(args: Prisma.IntegrationUpsertArgs): Promise<Pick<Integration, 'id'>>;
+};
+
+export async function syncIntegrationCredentials(
+  localIntegration: IntegrationModel,
+  integrations: Integration[]
+): Promise<string[]> {
+  const syncedIds: string[] = [];
+  for (const integration of integrations) {
+    const { id: remoteId, ...updateData } = integration;
+    void remoteId;
+    const synced = await localIntegration.upsert({
+      where: {
+        userId_name: {
+          userId: integration.userId,
+          name: integration.name,
+        },
+      },
+      create: integration,
+      update: updateData,
+      select: { id: true },
+    });
+    syncedIds.push(synced.id);
+  }
+  return syncedIds;
+}
 
 type PasskeyCredentialModel = {
   findMany(args: { where: { userId: string } }): Promise<PasskeyRecord[]>;

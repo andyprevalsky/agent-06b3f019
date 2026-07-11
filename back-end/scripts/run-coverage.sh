@@ -31,8 +31,10 @@ mkdir -p "$COV_TMP"
 BASE_PORT="${CONDUCTOR_PORT:-55000}"
 COV_PORT=$((BASE_PORT + 200))
 
-# Check port is free
-if lsof -ti :"$COV_PORT" >/dev/null 2>&1; then
+# Check whether a server is already listening on the coverage port. Restricting
+# the lookup to LISTEN avoids false positives from unrelated outbound sockets
+# that happen to use the same ephemeral local port.
+if lsof -tiTCP:"$COV_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   echo "❌ Port $COV_PORT is in use. Free it or set a different CONDUCTOR_PORT."
   exit 1
 fi

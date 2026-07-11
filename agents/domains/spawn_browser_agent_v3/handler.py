@@ -17,6 +17,7 @@ import os
 import random
 import re
 import time
+import traceback
 import uuid as uuid_module
 from datetime import timedelta
 from typing import Any, AsyncGenerator, Dict, List, Optional
@@ -193,6 +194,79 @@ def _botsigged_diagnostics_enabled(start_url: str) -> bool:
     if not _env_enabled("BROWSER_AGENT_BOTSIGGED_DIAGNOSTICS", False):
         return False
     return "botsigged.com" in (start_url or "").lower()
+
+
+_SENSITIVE_LOG_PARAM_KEY_RE = re.compile(
+    r"(card|pan|cvv|cvc|password|passcode|otp|token|secret|auth|cookie|text)",
+    re.IGNORECASE,
+)
+
+
+def _redact_browser_log_value(key: str, value: Any) -> Any:
+    if _SENSITIVE_LOG_PARAM_KEY_RE.search(str(key)):
+        return "<redacted>"
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        text = str(value)
+        return text[:180] + ("..." if len(text) > 180 else "")
+    if isinstance(value, list):
+        return f"<list len={len(value)}>"
+    if isinstance(value, dict):
+        return f"<dict keys={sorted(str(k) for k in value.keys())[:20]}>"
+    return f"<{type(value).__name__}>"
+
+
+def _summarize_payment_request_for_log(payment_request: Any) -> Dict[str, Any]:
+    if not isinstance(payment_request, dict):
+        return {"payload_type": type(payment_request).__name__}
+
+    line_items = payment_request.get("line_items")
+    summary: Dict[str, Any] = {
+        "merchant": _redact_browser_log_value("merchant", payment_request.get("merchant")),
+        "subtotal_cents": payment_request.get("subtotal_cents"),
+        "total_cents": payment_request.get("total_cents"),
+        "currency": payment_request.get("currency"),
+    }
+    if isinstance(line_items, list):
+        summary["line_items_count"] = len(line_items)
+    elif line_items is not None:
+        summary["line_items_type"] = type(line_items).__name__
+
+    fingerprint = payment_request.get("fingerprint")
+    if fingerprint:
+        summary["fingerprint"] = _redact_browser_log_value("fingerprint", fingerprint)
+
+    return {key: value for key, value in summary.items() if value is not None}
+
+
+def _summarize_browser_action_for_log(action: Any) -> Dict[str, Any]:
+    if not isinstance(action, dict):
+        return {"payload_type": type(action).__name__}
+
+    params = action.get("params")
+    summary: Dict[str, Any] = {
+        "action": action.get("action"),
+        "has_index": action.get("index") is not None,
+        "has_coordinates": action.get("coordinates") is not None,
+    }
+    if isinstance(params, dict):
+        summary["param_keys"] = sorted(str(key) for key in params.keys())
+        summary["params"] = {
+            str(key): _redact_browser_log_value(str(key), value)
+            for key, value in params.items()
+            if key in {"merchant", "subtotal_cents", "total_cents", "currency", "fingerprint"}
+        }
+        if "line_items" in params:
+            line_items = params.get("line_items")
+            summary["line_items_count"] = len(line_items) if isinstance(line_items, list) else None
+            summary["line_items_type"] = type(line_items).__name__
+    elif params is not None:
+        summary["params_type"] = type(params).__name__
+
+    return {key: value for key, value in summary.items() if value not in (None, {}, [])}
+
+
+def _summarize_browser_action_history_entry(action_name: str, action: Any) -> str:
+    return f"{action_name}: {json.dumps(_summarize_browser_action_for_log(action), sort_keys=True, default=str)[:500]}"
 
 
 def _stable_target_text(value: Any, *, max_length: int = 500) -> str:
@@ -2538,7 +2612,34 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     auth_assistance_resume_mode = "new_steel_session_after_unavailable"
             else:
                 logger.info("\U0001f50d Fetching session info for resumed task", task_id=task_id)
-                session_info = await fetch_session_info(config, task_id)
+                session_info = await fetch_session_info(config, task_id, validate_live=True)
+                if session_info.get("same_session_available") is not True:
+                    unavailable_reason = session_info.get("same_session_unavailable_reason")
+                    logger.warning(
+                        "Existing Steel session unavailable for browser resume; creating replacement session",
+                        task_id=task_id,
+                        session_id=session_info.get("session_id"),
+                        reason=unavailable_reason,
+                    )
+                    _session_wait_start = time.monotonic()
+                    while True:
+                        session_info = await resume_browser_session(config, task_id)
+                        if not session_info.get("rate_limited"):
+                            break
+                        _elapsed = time.monotonic() - _session_wait_start
+                        if _elapsed > SESSION_MAX_WAIT_SECONDS:
+                            raise Exception(
+                                f"Browser session unavailable after {int(_elapsed)}s (rate limited by Steel)"
+                            )
+                        logger.info(
+                            "Steel rate limited during replacement browser resume",
+                            elapsed_s=int(_elapsed),
+                            retry_in=SESSION_RETRY_INTERVAL_SECONDS,
+                        )
+                        activity.heartbeat(f"Waiting to resume browser availability ({int(_elapsed)}s)")
+                        await asyncio.sleep(SESSION_RETRY_INTERVAL_SECONDS)
+                    session_info["resume_mode"] = "new_steel_session_after_unavailable"
+                    session_info["same_session_unavailable_reason"] = unavailable_reason
             session_id = session_info.get("session_id")
             browser_url = session_info.get("debug_url")
             cdp_url = session_info.get("ws_url")
@@ -3557,7 +3658,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 reasoning_messages.append(thinking)
                 await save_browser_assistant_message(agent_id, thinking, task_id)
 
-            action_summary.append(f"{action_name}: {json.dumps(unified_action, sort_keys=True, default=str)[:500]}")
+            action_summary.append(_summarize_browser_action_history_entry(action_name, unified_action))
             if len(action_summary) > 20:
                 action_summary[:] = action_summary[-20:]
             if action_name == "attempt_completion":
@@ -4290,6 +4391,18 @@ Based on this feedback, I need to continue working on the task and address the i
                     "supervisor_recovered": True,
                 }
             except Exception as action_error:
+                logger.error(
+                    "Browser action raised exception",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    session_id=session_id,
+                    iteration=iteration,
+                    current_url=current_url,
+                    action_context=_summarize_browser_action_for_log(unified_action),
+                    error_type=type(action_error).__name__,
+                    error=extract_error_message(action_error),
+                    traceback=traceback.format_exc(),
+                )
                 await _recover_browser_step(
                     f"action_error_{action_name}:{type(action_error).__name__}:"
                     f"{extract_error_message(action_error)[:160]}",
@@ -4423,7 +4536,16 @@ Based on this feedback, I need to continue working on the task and address the i
                 }
 
             if result.get("status") in {"needs_payment_card_approval", "awaiting_payment_card_approval"}:
-                logger.info("Payment card approval required - returning to workflow", url=current_url)
+                payment_request = result.get("payment_request", {})
+                logger.info(
+                    "Payment card approval required - returning to workflow",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    session_id=session_id,
+                    iteration=iteration,
+                    url=current_url,
+                    payment_request_summary=_summarize_payment_request_for_log(payment_request),
+                )
 
                 # Close out the request_payment_card action message. This activity returns to the
                 # workflow here, BEFORE the generic success branch below that saves the FINISHED
@@ -4497,7 +4619,7 @@ Based on this feedback, I need to continue working on the task and address the i
 
                 return {
                     "status": "awaiting_payment_card_approval",
-                    "payment_request": result.get("payment_request", {}),
+                    "payment_request": payment_request,
                     "current_url": current_url,
                     "write_lock_notification": payment_write_lock_notification,
                     "write_lock_notification_usage": payment_write_lock_notification_usage,
@@ -4676,7 +4798,23 @@ Based on this feedback, I need to continue working on the task and address the i
         }
 
     except Exception as e:
-        logger.error("Browser automation failed", error=extract_error_message(e))
+        last_action = action_summary[-1] if action_summary else "initialization"
+        logger.error(
+            "Browser automation failed",
+            agent_id=agent_id,
+            task_id=task_id,
+            session_id=session_id,
+            error_type=type(e).__name__,
+            error=extract_error_message(e),
+            current_url=current_url,
+            last_action=last_action,
+            action_count=len(action_summary),
+            visited_url_count=len(visited_urls),
+            latest_structured_response_keys=(
+                list(latest_structured_response.keys()) if isinstance(latest_structured_response, dict) else None
+            ),
+            traceback=traceback.format_exc(),
+        )
 
         if dom_service:
             with contextlib.suppress(Exception):
@@ -4686,7 +4824,7 @@ Based on this feedback, I need to continue working on the task and address the i
         if session_id:
             await close_browser_session(config, session_id, pause=False)
 
-        error_context = f"Failed during: {action_summary[-1] if action_summary else 'initialization'}"
+        error_context = f"Failed during: {last_action}"
         error_message = build_context_summary(
             success=False,
             close_reasoning=extract_error_message(e),
@@ -4709,6 +4847,13 @@ Based on this feedback, I need to continue working on the task and address the i
                     tool_call_id=tool_call_id,
                     is_completion_message=True,
                     output_schema=response_schema,
+                    extra_metadata={
+                        "browser_error_type": type(e).__name__,
+                        "browser_error_message": extract_error_message(e),
+                        "browser_error_context": error_context,
+                        "browser_last_action": last_action,
+                        "browser_current_url": current_url,
+                    },
                 )
             try:
                 await _propagate_browser_credentials_with_progress(
@@ -5042,24 +5187,44 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         return
 
                 if result and result.get("status") == "awaiting_payment_card_approval":
-                    from tools.request_payment_card import (
+                    from domains.request_payment_card.service import (
                         build_payment_question,
-                        lookup_purchase_activity,
-                        mint_purchase_card_activity,
                         normalize_payment_payload,
                     )
                     from tools.request_user_approval import request_user_approval_direct
 
+                    logger.info(
+                        "Browser payment approval started",
+                        agent_id=workflow_instance.agent_id,
+                        task_id=result.get("task_id"),
+                        session_id=result.get("session_id"),
+                        current_url=result.get("current_url"),
+                        payment_request_summary=_summarize_payment_request_for_log(result.get("payment_request", {})),
+                    )
                     payment_payload = normalize_payment_payload(
                         result.get("payment_request", {}),
                         workflow_instance.user_id or "",
                     )
                     payment_payload["agentId"] = workflow_instance.agent_id
+                    logger.info(
+                        "Browser payment payload normalized",
+                        agent_id=workflow_instance.agent_id,
+                        task_id=result.get("task_id"),
+                        fingerprint=payment_payload.get("fingerprint"),
+                        payment_request_summary=_summarize_payment_request_for_log(payment_payload),
+                    )
                     lookup_result = await workflow.execute_activity(
-                        lookup_purchase_activity,
+                        "lookup_purchase_activity",
                         args=[workflow_instance.user_id or "", payment_payload["fingerprint"]],
                         start_to_close_timeout=timedelta(seconds=30),
                         retry_policy=RetryPolicy(maximum_attempts=3),
+                    )
+                    logger.info(
+                        "Browser payment purchase lookup finished",
+                        agent_id=workflow_instance.agent_id,
+                        task_id=result.get("task_id"),
+                        fingerprint=payment_payload.get("fingerprint"),
+                        reusable=lookup_result.get("reusable"),
                     )
 
                     approval_response = {"attention_request_id": None}
@@ -5076,12 +5241,25 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 "writeLockNotificationUsage": result.get("write_lock_notification_usage"),
                             },
                         )
+                        logger.info(
+                            "Browser payment approval granted",
+                            agent_id=workflow_instance.agent_id,
+                            task_id=result.get("task_id"),
+                            attention_request_id=approval_response.get("attention_request_id"),
+                        )
 
                     card = await workflow.execute_activity(
-                        mint_purchase_card_activity,
+                        "mint_purchase_card_activity",
                         args=[workflow_instance.user_id or "", payment_payload],
                         start_to_close_timeout=timedelta(seconds=90),
                         retry_policy=RetryPolicy(maximum_attempts=1),
+                    )
+                    logger.info(
+                        "Browser payment card minted",
+                        agent_id=workflow_instance.agent_id,
+                        task_id=result.get("task_id"),
+                        card_id=card.get("cardId") or card.get("id"),
+                        last4=card.get("last4"),
                     )
                     card_number = card.get("pan") or card.get("cardNumber") or card.get("card_number") or ""
                     card_expiry = card.get("expiry") or card.get("expiration") or card.get("cardExpiry") or ""
@@ -5293,6 +5471,24 @@ class SpawnBrowserAgentManagerV3(ToolManager):
             if isinstance(e, asyncio.CancelledError):
                 raise
 
+            last_result = locals().get("result")
+            logger.error(
+                "Browser manager failed",
+                agent_id=agent_id,
+                tool_call_id=tool_call_id,
+                error_type=type(e).__name__,
+                error=extract_error_message(e),
+                result_status=(last_result.get("status") if isinstance(last_result, dict) else None),
+                task_id=(last_result.get("task_id") if isinstance(last_result, dict) else None),
+                session_id=(last_result.get("session_id") if isinstance(last_result, dict) else None),
+                current_url=(last_result.get("current_url") if isinstance(last_result, dict) else None),
+                payment_request_summary=(
+                    _summarize_payment_request_for_log(last_result.get("payment_request", {}))
+                    if isinstance(last_result, dict)
+                    else None
+                ),
+                traceback=traceback.format_exc(),
+            )
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="Browser automation failed",

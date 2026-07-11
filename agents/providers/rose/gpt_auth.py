@@ -66,7 +66,7 @@ def _content_to_text(content: Any) -> str:
             elif block.get("type") == "image_url":
                 parts.append("[Image attachment]")
             elif block.get("type") == "file":
-                filename = ((block.get("file") or {}).get("filename") or "file")
+                filename = (block.get("file") or {}).get("filename") or "file"
                 parts.append(f"[File attachment: {filename}]")
         return "\n".join(p for p in parts if p)
     return str(content)
@@ -110,7 +110,7 @@ def _content_to_responses_parts(content: Any, *, role: str) -> Any:
             continue
 
         if block_type == "file":
-            filename = ((block.get("file") or {}).get("filename") or "file")
+            filename = (block.get("file") or {}).get("filename") or "file"
             parts.append({"type": _text_part_type(role), "text": f"[File attachment: {filename}]"})
 
     return parts or [{"type": _text_part_type(role), "text": ""}]
@@ -144,13 +144,15 @@ def _responses_tools(tools: Optional[List[Dict[str, Any]]]) -> Optional[List[Dic
         parameters = function.get("parameters") or function.get("input_schema") or {}
         if not isinstance(parameters, dict):
             parameters = {}
-        out.append({
-            "type": "function",
-            "name": name,
-            "description": function.get("description") or "",
-            "strict": bool(function.get("strict", False)),
-            "parameters": parameters,
-        })
+        out.append(
+            {
+                "type": "function",
+                "name": name,
+                "description": function.get("description") or "",
+                "strict": bool(function.get("strict", False)),
+                "parameters": parameters,
+            }
+        )
     return out or None
 
 
@@ -239,12 +241,14 @@ def _build_responses_input(messages: List[Dict[str, Any]]) -> List[Dict[str, Any
                     or (tool_call or {}).get("id")
                     or _stable_call_id(name, arguments, msg_index + tool_index)
                 )
-                out.append({
-                    "type": "function_call",
-                    "call_id": call_id,
-                    "name": name,
-                    "arguments": arguments,
-                })
+                out.append(
+                    {
+                        "type": "function_call",
+                        "call_id": call_id,
+                        "name": name,
+                        "arguments": arguments,
+                    }
+                )
                 emitted_call_ids.add(call_id)
             continue
 
@@ -252,20 +256,24 @@ def _build_responses_input(messages: List[Dict[str, Any]]) -> List[Dict[str, Any
             call_id = msg.get("tool_call_id") or msg.get("call_id")
             tool_text = _content_to_text(msg.get("content", ""))
             if isinstance(call_id, str) and call_id and call_id in emitted_call_ids:
-                out.append({
-                    "type": "function_call_output",
-                    "call_id": call_id,
-                    "output": tool_text,
-                })
+                out.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": tool_text,
+                    }
+                )
             else:
                 # Stored DB transcripts frequently contain TOOL rows without
                 # the matching assistant function_call item. Codex rejects
                 # orphan function_call_output items, so keep the text as normal
                 # user-visible context instead of sending an invalid sequence.
-                out.append({
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": f"[TOOL]: {tool_text}"}],
-                })
+                out.append(
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": f"[TOOL]: {tool_text}"}],
+                    }
+                )
             continue
 
         response_role = "assistant" if role == "assistant" else "user"
@@ -277,43 +285,47 @@ def _build_responses_input(messages: List[Dict[str, Any]]) -> List[Dict[str, Any
     while out and out[-1].get("role") == "assistant":
         out.pop()
     if not out:
-        out.append({
-            "role": "user",
-            "content": [{"type": "input_text", "text": "Begin."}],
-        })
+        out.append(
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Begin."}],
+            }
+        )
     return out
 
 
+def _build_system_text(messages: List[Dict[str, Any]]) -> str:
+    parts = [_content_to_text(msg.get("content", "")).strip() for msg in messages if msg.get("role") == "system"]
+    return "\n\n".join(p for p in parts if p)
+
+
 def _build_instructions(messages: List[Dict[str, Any]]) -> Optional[str]:
-    parts = [
-        _content_to_text(msg.get("content", "")).strip()
-        for msg in messages
-        if msg.get("role") == "system"
-    ]
-    text = "\n\n".join(p for p in parts if p)
+    text = _build_system_text(messages)
     if not text:
         return None
     if SYSTEM_PROMPT_DYNAMIC_BOUNDARY not in text:
         return text
-    return "\n\n".join(
-        part.strip()
-        for part in text.split(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
-        if part.strip()
-    ) or None
+    return "\n\n".join(part.strip() for part in text.split(SYSTEM_PROMPT_DYNAMIC_BOUNDARY) if part.strip()) or None
+
+
+def _build_static_cache_scope(messages: List[Dict[str, Any]]) -> Optional[str]:
+    """Return only the globally stable system prefix for GPT cache routing."""
+    text = _build_system_text(messages)
+    if SYSTEM_PROMPT_DYNAMIC_BOUNDARY in text:
+        text = text.split(SYSTEM_PROMPT_DYNAMIC_BOUNDARY, 1)[0]
+    return text.strip() or None
 
 
 def _build_prompt_cache_key(
     *,
     pool_spec: PoolSpec,
     model_override: Optional[str] = None,
-    instructions: Optional[str],
-    response_format: Optional[Dict[str, Any]],
+    static_cache_scope: str,
 ) -> str:
     fingerprint = json.dumps(
         {
             "model": model_override or pool_spec.gpt_auth_model,
-            "instructions": instructions or "",
-            "responseFormat": response_format.get("json_schema") if response_format else None,
+            "staticCacheScope": static_cache_scope,
         },
         sort_keys=True,
         default=str,
@@ -348,6 +360,7 @@ def build_codex_responses_body(
     ChatGPT backend handles limits differently from public API keys.
     """
     instructions = _build_instructions(messages) or _DEFAULT_CODEX_INSTRUCTIONS
+    static_cache_scope = _build_static_cache_scope(messages) or _DEFAULT_CODEX_INSTRUCTIONS
     body: Dict[str, Any] = {
         "model": model_override or pool_spec.gpt_auth_model,
         "input": _build_responses_input(messages),
@@ -358,8 +371,7 @@ def build_codex_responses_body(
         "prompt_cache_key": _build_prompt_cache_key(
             pool_spec=pool_spec,
             model_override=model_override,
-            instructions=instructions,
-            response_format=response_format,
+            static_cache_scope=static_cache_scope,
         ),
         "include": ["reasoning.encrypted_content"],
     }
@@ -548,7 +560,7 @@ async def openai_api_key_complete(
 
                 if status >= 500:
                     if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
-                        await asyncio.sleep(min(2 ** attempt, _BACKOFF_CAP_S))
+                        await asyncio.sleep(min(2**attempt, _BACKOFF_CAP_S))
                         continue
                     raise RoseServerError(f"OpenAI {status}: {error_body[:2000]}", status=status)
 
@@ -556,7 +568,7 @@ async def openai_api_key_complete(
         except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
             last_error = exc
             if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
-                await asyncio.sleep(min(2 ** attempt, _BACKOFF_CAP_S))
+                await asyncio.sleep(min(2**attempt, _BACKOFF_CAP_S))
                 continue
             raise RoseServerError(f"OpenAI connect/read error: {exc}") from exc
         except RoseStallError:
@@ -627,12 +639,8 @@ async def _attempt_with_token(
                         ):
                             await asyncio.sleep(_backoff_for_429(response, attempt))
                         continue
-                    rate_limited_until = _extract_rate_limited_until(
-                        response, error_body
-                    )
-                    exc = RoseRateLimitError(
-                        f"Codex 429: {error_body[:2000]}", status=status
-                    )
+                    rate_limited_until = _extract_rate_limited_until(response, error_body)
+                    exc = RoseRateLimitError(f"Codex 429: {error_body[:2000]}", status=status)
                     exc.rate_limited_until = rate_limited_until  # type: ignore[attr-defined]
                     raise exc
 
@@ -644,8 +652,10 @@ async def _attempt_with_token(
 
                 if status >= 500:
                     if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
-                        async with span("llm.backoff", reason="5xx", attempt=attempt, request_id=request_id, agent_id=agent_id):
-                            await asyncio.sleep(min(2 ** attempt, _BACKOFF_CAP_S))
+                        async with span(
+                            "llm.backoff", reason="5xx", attempt=attempt, request_id=request_id, agent_id=agent_id
+                        ):
+                            await asyncio.sleep(min(2**attempt, _BACKOFF_CAP_S))
                         continue
                     raise RoseServerError(f"Codex {status}: {error_body[:2000]}", status=status)
 
@@ -653,8 +663,10 @@ async def _attempt_with_token(
         except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
             last_error = exc
             if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
-                async with span("llm.backoff", reason="connect_error", attempt=attempt, request_id=request_id, agent_id=agent_id):
-                    await asyncio.sleep(min(2 ** attempt, _BACKOFF_CAP_S))
+                async with span(
+                    "llm.backoff", reason="connect_error", attempt=attempt, request_id=request_id, agent_id=agent_id
+                ):
+                    await asyncio.sleep(min(2**attempt, _BACKOFF_CAP_S))
                 continue
             raise RoseServerError(f"Codex connect/read error: {exc}") from exc
         except RoseStallError:
@@ -682,9 +694,7 @@ def _epoch_to_iso(epoch: float) -> Optional[str]:
     return _format_utc(datetime.fromtimestamp(epoch, tz=timezone.utc))
 
 
-def _extract_rate_limited_until(
-    response: Optional[httpx.Response], error_body: str
-) -> Optional[str]:
+def _extract_rate_limited_until(response: Optional[httpx.Response], error_body: str) -> Optional[str]:
     """Pull the upstream reset timestamp out of a Codex 429.
 
     Codex puts both `resets_at` (epoch seconds) and `resets_in_seconds`
@@ -704,9 +714,7 @@ def _extract_rate_limited_until(
                     return iso
             resets_in = err.get("resets_in_seconds")
             if isinstance(resets_in, (int, float)) and resets_in >= 0:
-                return _format_utc(
-                    datetime.now(timezone.utc) + timedelta(seconds=float(resets_in))
-                )
+                return _format_utc(datetime.now(timezone.utc) + timedelta(seconds=float(resets_in)))
     except (ValueError, TypeError):
         pass
 
@@ -718,9 +726,7 @@ def _extract_rate_limited_until(
         stripped = retry_after.strip()
         try:
             seconds = max(0.0, float(stripped))
-            return _format_utc(
-                datetime.now(timezone.utc) + timedelta(seconds=seconds)
-            )
+            return _format_utc(datetime.now(timezone.utc) + timedelta(seconds=seconds))
         except ValueError:
             try:
                 dt = parsedate_to_datetime(stripped)
@@ -773,9 +779,7 @@ async def _cool_down(
     if cooldown_seconds is None:
         cooldown_seconds = _DEFAULT_COOLDOWN_S
     try:
-        await auth.mark_rate_limited(
-            auth, cooldown_seconds, rate_limited_until, reason
-        )
+        await auth.mark_rate_limited(auth, cooldown_seconds, rate_limited_until, reason)
         logger.info(
             "rose.gpt_auth.cooldown_marked",
             request_id=request_id,
@@ -818,4 +822,4 @@ def _backoff_for_429(response: httpx.Response, attempt: int) -> float:
             return max(1.0, min(float(retry_after), _BACKOFF_CAP_S))
         except ValueError:
             pass
-    return min(2 ** attempt, _BACKOFF_CAP_S)
+    return min(2**attempt, _BACKOFF_CAP_S)

@@ -35,6 +35,20 @@ def _next_cause(e: BaseException) -> Any:
     return getattr(e, "__cause__", None)
 
 
+def error_chain_has_type(e: BaseException, error_type: str) -> bool:
+    """Return whether a wrapped exception chain contains an application error type."""
+    current: Any = e
+    seen: set[int] = set()
+
+    while isinstance(current, BaseException) and id(current) not in seen:
+        seen.add(id(current))
+        if type(current).__name__ == error_type or getattr(current, "type", None) == error_type:
+            return True
+        current = _next_cause(current)
+
+    return False
+
+
 def extract_error_message(e: Exception) -> str:
     """
     Extract the actual error message from an exception, unwrapping Temporal wrappers.

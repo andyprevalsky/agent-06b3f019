@@ -163,7 +163,7 @@ def test_check_fatal_errors_rate_limit_options():
 def test_verifier_activity_timeout_allows_llm_call():
     """Claude Code verifier uses the standard LLM activity budget."""
     from domains.spawn_claude_code_agent.service import VERIFIER_ACTIVITY_TIMEOUT_SECONDS
-    from helpers.llm_timeouts import STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
+    from utils.llm_timeouts import STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
 
     assert VERIFIER_ACTIVITY_TIMEOUT_SECONDS == STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
 

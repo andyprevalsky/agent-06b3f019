@@ -174,6 +174,23 @@ Prefer fixes that:
 - Don't add new code paths that aren't tested
 - Follow existing patterns in the codebase for similar problems
 
+## Step 7: Adversarial RCA review
+
+Before handing any RCA diagnosis back to the user, fire a sub-agent to
+adversarially review the diagnosis. The review must check whether the identified
+problem lacks precision, depth, proof, or is hand-wavy in any way.
+
+Give the sub-agent:
+
+- The draft RCA.
+- The runtime evidence used.
+- The proposed root cause and generalizable problem class.
+- The fix or next action.
+
+If the sub-agent finds gaps, fix the RCA or gather more evidence before
+returning it to the user. Do not present a diagnosis until the adversarial review
+has either passed it or its objections have been resolved.
+
 ## Anti-patterns (never do these)
 
 1. **"Pre-existing, I'll skip it"** — "Pre-existing" is NEVER an acceptable diagnosis. Just because an error exists in code you didn't touch doesn't mean you aren't responsible for fixing it. This codebase is maintained by multiple agents working in parallel, each of which will naturally produce some amount of uncaught errors. If nobody owns the errors they encounter, the codebase degrades with every commit. You are the immune system — every bug you encounter and walk past is a bug that compounds. If you find it, you fix it. No exceptions.
