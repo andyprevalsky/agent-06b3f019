@@ -7,26 +7,57 @@ import { createLogger } from '../../providers/logger';
 import {
   getOrCreateContext,
   createSessionWithContext,
-  closeSession as steelCloseSession,
-  getSession as steelGetSession,
+  closeSession,
+  getSession,
   injectUserData,
-  uploadFileToSession as steelUploadFile,
-  listSessionFiles as steelListFiles,
+  uploadSessionFile,
+  listFiles as listProviderFiles,
+  readSessionFile,
+  captureScreenshot,
   getFingerprintInjectionData,
-} from '../../providers/steel';
+} from '../../providers/browser';
 import { resumeBrowserSession as resumeBrowserSessionProvider } from '../../providers/browserSessionResume';
 import { canonicalAuthRealm } from '../../providers/authRealm';
 import * as repo from './repo';
+import {
+  injectLocalStorage,
+  SessionNoUserError,
+  SessionNotFoundError,
+} from './service.local-storage';
 import { serializePasskeys, serializePasswords, toUserSettings } from './service.serializers';
 export { getTaskInfo, getTaskOwnerUserId } from './service.task-info';
-export {
-  injectLocalStorage,
-  SessionNotFoundError,
-  SessionNoUserError,
-} from './service.local-storage';
+export { injectLocalStorage, SessionNotFoundError, SessionNoUserError };
 export { CdpInjectionError, SessionNoWsUrlError } from './types';
 
 const log = createLogger('BrowserSession');
+const SAFE_ABSOLUTE_FILE_ROOTS = ['/tmp/downloads/', '/tmp/rose-uploads/', '/home/oai/share/'];
+
+export class InvalidSessionFilePathError extends Error {
+  constructor() {
+    super('Invalid session file path');
+    this.name = 'InvalidSessionFilePathError';
+  }
+}
+
+async function requireSessionOwner(sessionId: string, userId?: string): Promise<void> {
+  if (userId === undefined) return;
+  const session = await repo.findSessionBySessionId(sessionId);
+  if (session === null || session.context.userId !== userId) {
+    throw new SessionNotFoundError();
+  }
+}
+
+function validateSessionFilePath(filePath: string): void {
+  const canonical = filePath.replace(/\\/g, '/');
+  if (
+    canonical.includes('\0') ||
+    canonical.split('/').includes('..') ||
+    (canonical.startsWith('/') &&
+      !SAFE_ABSOLUTE_FILE_ROOTS.some((root) => canonical.startsWith(root)))
+  ) {
+    throw new InvalidSessionFilePathError();
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -100,11 +131,17 @@ export async function initSession(userId: string, agentId: string, startUrl: str
     debug_url: session.debugUrl,
     ws_url: session.wsUrl,
     browser_session_metadata: {
-      provider: session.sessionId.startsWith('local-') ? 'local' : 'steel',
+      provider: session.provider,
       proxy_source: session.proxySource,
       proxy_location: session.proxyLocation,
-      steel_profile_id: session.steelProfileId,
-      steel_profile_source: session.profileSource,
+      profile_id: session.profileId,
+      profile_source: session.profileSource,
+      ...(session.provider === 'steel'
+        ? {
+            steel_profile_id: session.profileId,
+            steel_profile_source: session.profileSource,
+          }
+        : {}),
     },
     cookies_injected: injectionResult.cookies.injected,
     cookies_count: injectionResult.cookies.cookieCount,
@@ -128,7 +165,7 @@ export async function closeBrowserSession(sessionId: string, pause: boolean, cur
     currentUrl: currentUrl !== undefined && currentUrl !== '' ? currentUrl : 'NULL/EMPTY',
   });
 
-  await steelCloseSession(sessionId, pause, currentUrl);
+  await closeSession(sessionId, pause, currentUrl);
 
   return { status: pause ? ('PAUSED' as const) : ('CLOSED' as const) };
 }
@@ -154,7 +191,7 @@ export async function getContext(userId: string) {
 
 /* c8 ignore start -- getSessionById, uploadFile, listFiles require Steel SDK */
 export async function getSessionById(sessionId: string) {
-  return steelGetSession(sessionId);
+  return getSession(sessionId);
 }
 
 // ---------------------------------------------------------------------------
@@ -169,7 +206,7 @@ export async function uploadFile(
 ) {
   log.info('Uploading file to session', { sessionId, originalname, sizeBytes: buffer.length });
 
-  const result = await steelUploadFile(sessionId, buffer, originalname, mimetype);
+  const result = await uploadSessionFile(sessionId, buffer, originalname, mimetype);
 
   return {
     path: result.path,
@@ -185,12 +222,28 @@ export async function uploadFile(
 export async function listFiles(sessionId: string) {
   log.info('Listing files for session', { sessionId });
 
-  const files = await steelListFiles(sessionId);
+  const files = await listProviderFiles(sessionId);
 
   return {
     session_id: sessionId,
     files,
     count: files.length,
   };
+}
+
+export async function downloadFile(sessionId: string, filePath: string, userId?: string) {
+  await requireSessionOwner(sessionId, userId);
+  validateSessionFilePath(filePath);
+  const content = await readSessionFile(sessionId, filePath);
+  const filename = filePath.split('/').pop();
+  return {
+    content,
+    filename: filename !== undefined && filename !== '' ? filename : 'download',
+  };
+}
+
+export async function takeScreenshot(sessionId: string, userId?: string) {
+  await requireSessionOwner(sessionId, userId);
+  return captureScreenshot(sessionId);
 }
 /* c8 ignore stop */

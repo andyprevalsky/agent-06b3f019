@@ -1,6 +1,6 @@
 """Data access for spawn-browser-agent-v3 domain.
 
-All HTTP calls to backend, Steel API, and Rose API.
+All HTTP calls to backend, browser providers, and Rose API.
 Typed args in, typed results out.
 """
 
@@ -18,7 +18,6 @@ from domains.spawn_browser_agent_v3.config import (
     EXTRACT_LLM_TEMPERATURE,
     EXTRACT_MAX_CONTENT_LENGTH,
     MIME_TYPE_MAP,
-    STEEL_API_KEY,
 )
 from tools.base import MessageStatus
 from utils.error_utils import extract_error_message
@@ -293,60 +292,40 @@ async def propagate_browser_run_credentials(
 
 
 # ========================================
-# STEEL FILES
+# BROWSER SESSION FILES
 # ========================================
 
 
-async def list_session_files(session_id: str) -> List[Dict[str, Any]]:
-    """List all files in a Steel browser session by calling Steel API directly."""
-    if not STEEL_API_KEY:
-        logger.warning("STEEL_API_KEY not set, cannot list session files")
-        return []
-
+async def list_session_files(config: Any, session_id: str) -> List[Dict[str, Any]]:
+    """List all files in a browser session through the provider-neutral backend."""
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
-                f"https://api.steel.dev/v1/sessions/{session_id}/files", headers={"steel-api-key": STEEL_API_KEY}
-            )
-            logger.info(
-                f"[Steel Files API] session={session_id}, status={response.status_code}, body={response.text[:500]}"
+                f"{config.backend.api_url}/api/browser-session/{session_id}/files/list",
+                headers={"x-api-key": config.backend.api_key or ""},
             )
             if response.status_code == 200:
                 data = response.json()
-                files = data.get("data") or data.get("files") or data if isinstance(data, dict) else data
-                logger.info(f"[Steel Files API] Parsed files count: {len(files) if isinstance(files, list) else 0}")
+                files = data.get("files", []) if isinstance(data, dict) else []
                 return files if isinstance(files, list) else []
-            else:
-                logger.warning(
-                    "Failed to list session files from Steel", session_id=session_id, status=response.status_code
-                )
-                return []
+            logger.warning("Failed to list browser session files", session_id=session_id, status=response.status_code)
+            return []
     except Exception as e:
-        logger.warning("Error listing session files from Steel", session_id=session_id, error=extract_error_message(e))
+        logger.warning("Error listing browser session files", session_id=session_id, error=extract_error_message(e))
         return []
 
 
-async def download_file_from_steel(session_id: str, file_path: str) -> Optional[Dict[str, Any]]:
-    """Download a file directly from Steel API.
+async def download_session_file(config: Any, session_id: str, file_path: str) -> Optional[Dict[str, Any]]:
+    """Download a file through the provider-neutral backend.
 
     Returns Dict with content (bytes), filename, mime_type, or None on failure.
     """
-    if not STEEL_API_KEY:
-        logger.warning("STEEL_API_KEY not set, cannot download file")
-        return None
-
-    # Steel download API expects relative path
-    relative_path = file_path
-    if relative_path.startswith("/files/"):
-        relative_path = relative_path[7:]
-    elif relative_path.startswith("/"):
-        relative_path = relative_path[1:]
-
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.get(
-                f"https://api.steel.dev/v1/sessions/{session_id}/files/{relative_path}",
-                headers={"steel-api-key": STEEL_API_KEY},
+                f"{config.backend.api_url}/api/browser-session/{session_id}/files/content",
+                params={"path": file_path},
+                headers={"x-api-key": config.backend.api_key or ""},
             )
             if response.status_code == 200:
                 filename = file_path.split("/")[-1] or "download"
@@ -354,7 +333,7 @@ async def download_file_from_steel(session_id: str, file_path: str) -> Optional[
                 mime_type = MIME_TYPE_MAP.get(ext, "application/octet-stream")
 
                 logger.info(
-                    f"[Steel] Downloaded {filename} ({len(response.content)} bytes)",
+                    f"[Browser] Downloaded {filename} ({len(response.content)} bytes)",
                     session_id=session_id,
                 )
                 return {
@@ -364,7 +343,7 @@ async def download_file_from_steel(session_id: str, file_path: str) -> Optional[
                 }
             else:
                 logger.warning(
-                    "[Steel] Failed to download file",
+                    "[Browser] Failed to download file",
                     session_id=session_id,
                     path=file_path,
                     status=response.status_code,
@@ -373,7 +352,7 @@ async def download_file_from_steel(session_id: str, file_path: str) -> Optional[
                 return None
     except Exception as e:
         logger.warning(
-            "[Steel] Error downloading file",
+            "[Browser] Error downloading file",
             session_id=session_id,
             path=file_path,
             error=extract_error_message(e),
@@ -573,29 +552,20 @@ async def upload_file_to_session(
         return None
 
 
-async def take_steel_computer_screenshot(session_id: str) -> Dict[str, Any]:
-    """Capture the actual Steel browser window via the Computer API."""
-    if not STEEL_API_KEY:
-        raise RuntimeError("STEEL_API_KEY not set, cannot take Steel computer screenshot")
-
+async def take_browser_computer_screenshot(config: Any, session_id: str) -> Dict[str, Any]:
+    """Capture the browser window through the active provider."""
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(
-            f"https://api.steel.dev/v1/sessions/{session_id}/computer",
-            headers={"steel-api-key": STEEL_API_KEY, "Content-Type": "application/json"},
-            json={"action": "take_screenshot"},
+            f"{config.backend.api_url}/api/browser-session/{session_id}/screenshot",
+            headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
         )
         response.raise_for_status()
         result = response.json()
 
     screenshot_b64 = result.get("base64_image")
     if not screenshot_b64:
-        details = (
-            result.get("error")
-            or result.get("output")
-            or result.get("system")
-            or "missing base64_image"
-        )
-        raise RuntimeError(f"Steel computer screenshot did not return an image: {details}")
+        details = result.get("error") or result.get("output") or result.get("system") or "missing base64_image"
+        raise RuntimeError(f"Browser screenshot did not return an image: {details}")
     return result
 
 

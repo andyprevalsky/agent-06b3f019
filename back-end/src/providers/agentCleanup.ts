@@ -2,12 +2,12 @@ import { Sandbox } from 'e2b';
 import { prisma } from './database';
 import { createLogger } from './logger';
 import { cleanupAgentPurchaseCards } from './purchaseCleanup';
-import { closeSession } from './steel';
+import { closeSession } from './browser';
 
 const log = createLogger('Cleanup');
 
 /**
- * Clean up all active E2B sandboxes and Steel browser sessions for an agent.
+ * Clean up all active E2B sandboxes and browser sessions for an agent.
  * Called during agent deletion. Best-effort: errors are logged but never thrown.
  */
 export async function cleanupAgentSessions(agentId: string): Promise<void> {
@@ -19,7 +19,7 @@ export async function cleanupAgentSessions(agentId: string): Promise<void> {
     });
   }
 
-  // --- Steel browser sessions ---
+  // --- Browser sessions ---
   try {
     const activeBrowserSessions = await prisma.browserSession.findMany({
       where: {
@@ -30,21 +30,21 @@ export async function cleanupAgentSessions(agentId: string): Promise<void> {
     });
 
     if (activeBrowserSessions.length > 0) {
-      log.info(`Closing ${activeBrowserSessions.length} Steel session(s) for agent ${agentId}`);
+      log.info(`Closing ${activeBrowserSessions.length} browser session(s) for agent ${agentId}`);
     }
 
     for (const session of activeBrowserSessions) {
       try {
         await closeSession(session.sessionId, false);
-        log.info(`Closed Steel session ${session.sessionId}`);
+        log.info(`Closed browser session ${session.sessionId}`);
       } catch (error) {
-        log.warn(`Failed to close Steel session ${session.sessionId}`, {
+        log.warn(`Failed to close browser session ${session.sessionId}`, {
           error: error instanceof Error ? error.message : String(error),
         });
       }
     }
   } catch (error) {
-    log.warn(`Failed to query Steel sessions for agent ${agentId}`, {
+    log.warn(`Failed to query browser sessions for agent ${agentId}`, {
       error: error instanceof Error ? error.message : String(error),
     });
   }

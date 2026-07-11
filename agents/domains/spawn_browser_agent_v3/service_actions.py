@@ -10,7 +10,7 @@ import base64
 import inspect
 import time as time_module
 from io import BytesIO
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 import structlog
@@ -1349,19 +1349,23 @@ async def _execute_screenshot(
     session_id: Optional[str],
     config: Any,
 ) -> Dict[str, Any]:
-    """Execute a screenshot action using Steel's actual browser-window capture."""
+    """Execute a screenshot action using the active provider's browser-window capture."""
     from domains.spawn_browser_agent_v3.repo import (
-        take_steel_computer_screenshot,
+        take_browser_computer_screenshot,
         upload_file_to_session,
     )
 
     if not session_id:
-        raise RuntimeError("Steel session id is required for screenshot capture")
+        raise RuntimeError("Browser session id is required for screenshot capture")
 
-    screenshot_result = await take_steel_computer_screenshot(session_id)
+    screenshot_result = await take_browser_computer_screenshot(config, session_id)
     full_screenshot_b64 = screenshot_result["base64_image"]
     full_screenshot_bytes = base64.b64decode(full_screenshot_b64)
-    screenshot_bytes = _crop_steel_computer_screenshot_to_viewport(full_screenshot_bytes)
+    screenshot_bytes = (
+        _crop_steel_computer_screenshot_to_viewport(full_screenshot_bytes)
+        if screenshot_result.get("provider") == "steel"
+        else full_screenshot_bytes
+    )
     screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
 
     saved_path = None
@@ -1371,7 +1375,7 @@ async def _execute_screenshot(
         )
         if upload_result:
             saved_path = upload_result.get("path", "/tmp/screenshot.png")
-            logger.info(f"\U0001f4f8 Screenshot saved to Steel session: {saved_path} ({len(screenshot_bytes)} bytes)")
+            logger.info(f"\U0001f4f8 Screenshot saved to browser session: {saved_path} ({len(screenshot_bytes)} bytes)")
 
     await action_history.record_action(
         dom_service=dom_service,
@@ -1383,7 +1387,7 @@ async def _execute_screenshot(
 
     return {
         "success": True,
-        "message": f"Screenshot captured from Steel viewport crop ({len(screenshot_bytes)} bytes)",
+        "message": f"Screenshot captured from browser viewport ({len(screenshot_bytes)} bytes)",
         "screenshot": screenshot_b64,
         "file_path": saved_path or "screenshot.png",
     }

@@ -2573,7 +2573,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         fingerprint_injection = None
         user_profile = {}
         # Fresh sessions never carry auth_options in the init response, so the
-        # realm lookup can run concurrently with the (much slower) Steel session
+        # realm lookup can run concurrently with the browser provider session
         # creation instead of serially after it.
         auth_options_prefetch: Optional[asyncio.Task] = None
         if not (is_resume and task_id) and auth_realm:
@@ -2591,7 +2591,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             )
             if is_auth_assistance_resume:
                 logger.info(
-                    "Resuming auth-assistance browser task via existing Steel session",
+                    "Resuming auth-assistance browser task via existing browser session",
                     task_id=task_id,
                 )
                 session_info = await fetch_session_info(config, task_id, validate_live=True)
@@ -2606,7 +2606,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     session_info["resume_mode"] = "same_steel_session"
                     auth_assistance_resume_mode = "same_steel_session"
                     logger.info(
-                        "Reconnecting to live Steel session after auth assistance",
+                        "Reconnecting to live browser session after auth assistance",
                         task_id=task_id,
                         session_id=session_info.get("session_id"),
                     )
@@ -2615,7 +2615,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     if not session_matches:
                         unavailable_reason = "session_id_mismatch"
                     logger.warning(
-                        "Existing Steel session unavailable after auth assistance; creating replacement session",
+                        "Existing browser session unavailable after auth assistance; creating replacement session",
                         task_id=task_id,
                         session_id=session_info.get("session_id"),
                         expected_session_id=expected_session_id,
@@ -2628,11 +2628,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             break
                         _elapsed = time.monotonic() - _session_wait_start
                         if _elapsed > SESSION_MAX_WAIT_SECONDS:
-                            raise Exception(
-                                f"Browser session unavailable after {int(_elapsed)}s (rate limited by Steel)"
-                            )
+                            raise Exception(f"Browser session unavailable after {int(_elapsed)}s (provider rate limit)")
                         logger.info(
-                            "Steel rate limited during replacement auth-assistance resume",
+                            "Browser provider rate limited during replacement auth-assistance resume",
                             elapsed_s=int(_elapsed),
                             retry_in=SESSION_RETRY_INTERVAL_SECONDS,
                         )
@@ -2695,7 +2693,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
 
                 _elapsed = time.monotonic() - _session_wait_start
                 if _elapsed > SESSION_MAX_WAIT_SECONDS:
-                    raise Exception(f"Browser session unavailable after {int(_elapsed)}s (rate limited by Steel)")
+                    raise Exception(f"Browser session unavailable after {int(_elapsed)}s (provider rate limit)")
 
                 if not _waiting_msg_sent:
                     await save_browser_action_message(
@@ -2710,7 +2708,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     _waiting_msg_sent = True
 
                 logger.info(
-                    "Steel rate limited, waiting for browser slot",
+                    "Browser provider rate limited, waiting for browser slot",
                     elapsed_s=int(_elapsed),
                     retry_in=SESSION_RETRY_INTERVAL_SECONDS,
                 )
@@ -2731,7 +2729,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         _record_timing("session_init", t_session)
 
         if not cdp_url:
-            raise RuntimeError("No CDP URL provided - backend must return ws_url from Steel")
+            raise RuntimeError("No CDP URL provided - backend must return provider ws_url")
 
         t_auth = time.monotonic()
         auth_options = session_auth_options or {}
@@ -2859,7 +2857,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 elif fingerprint_injection and not fingerprint_injection_enabled:
                     logger.info("\U0001f510 Browser-agent fingerprint injection disabled by env")
                 else:
-                    logger.info("\U0001f510 No fingerprint injection data provided - using Steel defaults")
+                    logger.info("\U0001f510 No fingerprint injection data provided - using provider defaults")
                 _record_timing("parallel.browser.fingerprint", t)
 
                 return _pw_instance, _pw_browser, _pw_context, _pw_page
@@ -3259,7 +3257,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         # Upload attachments
         if attachments:
             t = time.monotonic()
-            logger.info(f"\U0001f4ce Uploading {len(attachments)} attachments to Steel session")
+            logger.info(f"\U0001f4ce Uploading {len(attachments)} attachments to browser session")
             from helpers.attachments import download_from_storage
 
             for fp in attachments:
@@ -4010,7 +4008,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     # claimed answer.
                     dom_tree = browser_state.get("dom_tree", "") or ""
                     final_screenshot_b64 = browser_state.get("screenshot")
-                    session_files = await list_session_files(session_id)
+                    session_files = await list_session_files(config, session_id)
                     files_text = "Downloaded Files in Session:\n"
                     if session_files:
                         for f in session_files:
