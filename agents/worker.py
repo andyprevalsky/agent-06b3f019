@@ -16,9 +16,6 @@ from temporalio.client import Client, TLSConfig
 from temporalio.runtime import PrometheusConfig, Runtime, TelemetryConfig
 from temporalio.worker import (
     FixedSizeSlotSupplier,
-    ResourceBasedSlotConfig,
-    ResourceBasedSlotSupplier,
-    ResourceBasedTunerConfig,
     Worker,
     WorkerTuner,
 )
@@ -191,9 +188,9 @@ import httpx
 # Every worker polls Temporal (1s), computes desired fleet size.
 # Only the leader (lowest-IP via Fly DNS) actuates via Fly Machines API.
 #
-# Capacity is observed in real-time from the SDK's resource-based tuner
+# Capacity is observed in real-time from the SDK's slot metrics
 # (worker_task_slots_used + worker_task_slots_available on localhost:9090).
-# No hardcoded magic numbers — the tuner adjusts slots based on CPU/memory.
+# Admission telemetry separately reports CPU/memory pressure.
 #
 # Scale-up (eager):   backlog >= 20% of observed capacity → add machines
 #                     or machine memory >= threshold with running workflows
@@ -597,7 +594,7 @@ async def poll_queue_metrics(
     API to start/stop machines.
 
     Scale-up (eager):
-      Capacity is observed in real-time from the SDK's resource-based tuner
+      Capacity is observed in real-time from the SDK's slot metrics
       (worker_task_slots_used + worker_task_slots_available on localhost:9090).
       When backlog >= 20% of observed capacity, add ceil(backlog / capacity) machines.
       The 20% threshold absorbs transient blips; ceil() ensures we add enough
@@ -911,7 +908,7 @@ async def main():
     print(f"🚀 [Agents] Mode: {'PRODUCTION' if is_production else 'DEVELOPMENT'}")
 
     # Set up Temporal SDK runtime with Prometheus metrics exporter.
-    # Exposes worker_task_slots_used/available from the resource-based tuner
+    # Exposes worker_task_slots_used/available from the SDK slot suppliers
     # on a local port. The autoscaler scrapes these to get real capacity.
     runtime = Runtime(telemetry=TelemetryConfig(metrics=PrometheusConfig(bind_address=f"0.0.0.0:{SDK_METRICS_PORT}")))
 
@@ -973,18 +970,15 @@ async def main():
         open_cpu_percent=config.temporal.activity_admission_open_cpu_percent,
     )
 
-    # Workflow slots still use Temporal's resource tuner. Activity slots use
-    # the SDK-native fixed supplier. Avoid Python CustomSlotSupplier callbacks:
-    # Temporal invokes them from Rust worker threads, and GIL re-entry can
-    # deadlock the worker under activity heartbeat traffic.
-    resource_cfg = ResourceBasedTunerConfig(target_memory_usage=0.8, target_cpu_usage=0.8)
+    # Keep both workflow and activity slots on SDK-native fixed suppliers.
+    # Resource-based workflow admission can exhaust all permits under memory
+    # pressure, leaving zero sticky pollers and adding a full sticky timeout to
+    # every workflow task. Bounded fixed workflow slots preserve sticky polling;
+    # ActivityAdmissionSnapshot still feeds CPU/memory pressure to autoscaling.
+    # Avoid Python CustomSlotSupplier callbacks: Temporal invokes them from Rust
+    # worker threads, and GIL re-entry can deadlock under heartbeat traffic.
     tuner = WorkerTuner.create_composite(
-        workflow_supplier=ResourceBasedSlotSupplier(
-            ResourceBasedSlotConfig(
-                maximum_slots=config.temporal.max_concurrent_workflows,
-            ),
-            resource_cfg,
-        ),
+        workflow_supplier=FixedSizeSlotSupplier(config.temporal.max_concurrent_workflows),
         activity_supplier=FixedSizeSlotSupplier(config.temporal.max_concurrent_activities),
         local_activity_supplier=FixedSizeSlotSupplier(100),
         nexus_supplier=FixedSizeSlotSupplier(100),
@@ -1104,11 +1098,7 @@ async def main():
         max_activity_slots=config.temporal.max_concurrent_activities,
         max_workflow_slots=config.temporal.max_concurrent_workflows,
         nonsticky_to_sticky_poll_ratio=config.temporal.nonsticky_to_sticky_poll_ratio,
-        sticky_queue_schedule_to_start_timeout_seconds=(
-            config.temporal.sticky_queue_schedule_to_start_timeout_seconds
-        ),
-        target_cpu=0.8,
-        workflow_target_memory=0.8,
+        sticky_queue_schedule_to_start_timeout_seconds=(config.temporal.sticky_queue_schedule_to_start_timeout_seconds),
     )
 
     # Handle shutdown gracefully using asyncio signal handlers

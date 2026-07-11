@@ -61,6 +61,35 @@ def test_worker_activity_supplier_is_sdk_native_fixed_size():
     raise AssertionError("WorkerTuner.create_composite call not found")
 
 
+def test_worker_workflow_supplier_is_sdk_native_fixed_size():
+    """Fixed workflow slots must preserve sticky pollers under memory pressure."""
+    tree = _worker_tree()
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr == "create_composite"
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "WorkerTuner"
+        ):
+            workflow_kw = next((kw for kw in node.keywords if kw.arg == "workflow_supplier"), None)
+            assert workflow_kw is not None
+            value = workflow_kw.value
+            assert isinstance(value, ast.Call)
+            assert isinstance(value.func, ast.Name)
+            assert value.func.id == "FixedSizeSlotSupplier"
+            assert len(value.args) == 1
+            arg = value.args[0]
+            assert isinstance(arg, ast.Attribute)
+            assert arg.attr == "max_concurrent_workflows"
+            return
+
+    raise AssertionError("WorkerTuner.create_composite call not found")
+
+
 def test_worker_passes_sticky_queue_timeout_to_temporal():
     """Worker must pass the env-backed sticky timeout into Temporal."""
     tree = _worker_tree()
@@ -149,8 +178,11 @@ def test_activity_admission_closes_on_cpu_pressure():
     # Invalid config rejected.
     try:
         worker.ActivityAdmissionSnapshot(
-            maximum_slots=100, close_memory_percent=80, open_memory_percent=75,
-            close_cpu_percent=70, open_cpu_percent=85,
+            maximum_slots=100,
+            close_memory_percent=80,
+            open_memory_percent=75,
+            close_cpu_percent=70,
+            open_cpu_percent=85,
         )
         raise AssertionError("expected ValueError for open_cpu >= close_cpu")
     except ValueError:
@@ -161,7 +193,12 @@ async def run_all_tests():
     print("worker blackbox tests:")
     r = BlackboxResult()
     r.record("worker_does_not_use_python_custom_activity_slots", test_worker_does_not_use_python_custom_activity_slots)
-    r.record("worker_activity_supplier_is_sdk_native_fixed_size", test_worker_activity_supplier_is_sdk_native_fixed_size)
+    r.record(
+        "worker_activity_supplier_is_sdk_native_fixed_size", test_worker_activity_supplier_is_sdk_native_fixed_size
+    )
+    r.record(
+        "worker_workflow_supplier_is_sdk_native_fixed_size", test_worker_workflow_supplier_is_sdk_native_fixed_size
+    )
     r.record("worker_passes_sticky_queue_timeout_to_temporal", test_worker_passes_sticky_queue_timeout_to_temporal)
     r.record("activity_admission_closes_on_cpu_pressure", test_activity_admission_closes_on_cpu_pressure)
     teardown_mock()
