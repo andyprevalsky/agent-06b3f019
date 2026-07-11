@@ -298,8 +298,10 @@ class SpawnAgentManager(ToolManager):
                     )
                     attachment_texts = metadata_texts
 
-            # Run explore agent activity with pause polling
-            model = getattr(workflow_instance, "model", EXPLORE_DEFAULT_MODEL)
+            # Explore is a bounded research worker with its own model-tier
+            # contract. Inheriting the parent's Ultra tier multiplies cost for
+            # every parallel child and bypasses EXPLORE_DEFAULT_MODEL entirely.
+            model = EXPLORE_DEFAULT_MODEL
             claude_token = (
                 workflow_instance._active_claude_token()
                 if hasattr(workflow_instance, "_active_claude_token")
@@ -700,15 +702,12 @@ class SpawnAgentManager(ToolManager):
 
         child_outputs.sort(key=lambda item: item.get("index", 0))
         sub_agent_ids = [
-            item["agent_id"]
-            for item in child_outputs
-            if isinstance(item.get("agent_id"), str) and item.get("agent_id")
+            item["agent_id"] for item in child_outputs if isinstance(item.get("agent_id"), str) and item.get("agent_id")
         ]
 
         if failed_count > 0:
             message = (
-                f"{failed_count}/{len(children)} children failed. "
-                "See structured_response.items for per-child results."
+                f"{failed_count}/{len(children)} children failed. See structured_response.items for per-child results."
             )
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,

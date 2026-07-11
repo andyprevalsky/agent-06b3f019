@@ -277,8 +277,7 @@ def test_transform_messages_for_anthropic_preserves_repeated_boundaries_for_cach
     from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 
     combined = (
-        f"static instructions{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
-        f"Current time: April 28{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
+        f"static instructions{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}Current time: April 28{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
     )
     static_sys, dynamic_sys, msgs = transform_messages_for_anthropic(
         [
@@ -2201,6 +2200,26 @@ def test_build_codex_responses_body_contract():
     )
     assert split_system_body["instructions"] == "static rules\n\ndynamic rules"
     assert "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__" not in split_system_body["instructions"]
+    same_static_different_dynamic_body = build_codex_responses_body(
+        pool_spec=pool,
+        messages=[
+            {
+                "role": "system",
+                "content": f"static rules{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}different agent context",
+            },
+            {"role": "user", "content": "different live input"},
+        ],
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "different_schema",
+                "strict": True,
+                "schema": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+        },
+        request_id="same-static-different-dynamic",
+    )
+    assert split_system_body["prompt_cache_key"] == same_static_different_dynamic_body["prompt_cache_key"]
     max_effort_body = build_codex_responses_body(
         pool_spec=pool,
         messages=[{"role": "user", "content": "hi"}],
@@ -4586,12 +4605,8 @@ async def run_all_tests():
     await r.record_async(
         "anthropic_apikey_402_payment_required", test_anthropic_api_key_complete_402_raises_payment_required
     )
-    await r.record_async(
-        "anthropic_apikey_suffix", test_anthropic_api_key_complete_sets_anthropic_suffix
-    )
-    await r.record_async(
-        "anthropic_apikey_cooldown_mark", test_anthropic_api_key_cooldown_mark_then_on_cooldown
-    )
+    await r.record_async("anthropic_apikey_suffix", test_anthropic_api_key_complete_sets_anthropic_suffix)
+    await r.record_async("anthropic_apikey_cooldown_mark", test_anthropic_api_key_cooldown_mark_then_on_cooldown)
     await r.record_async(
         "openai_apikey_before_anthropic_openrouter",
         test_client_openai_api_key_serves_before_anthropic_and_openrouter,
@@ -4647,12 +4662,8 @@ async def run_all_tests():
     await r.record_async(
         "client_gpt_pydantic_native_tools_split", test_client_splits_pydantic_model_to_gpt_native_tools
     )
-    await r.record_async(
-        "client_pydantic_output_config", test_client_plain_pydantic_model_uses_claude_output_config
-    )
-    await r.record_async(
-        "client_gpt_pydantic_text_format", test_client_plain_pydantic_model_uses_gpt_text_format
-    )
+    await r.record_async("client_pydantic_output_config", test_client_plain_pydantic_model_uses_claude_output_config)
+    await r.record_async("client_gpt_pydantic_text_format", test_client_plain_pydantic_model_uses_gpt_text_format)
     await r.record_async("client_deadline_enforced", test_client_deadline_enforced)
     await r.record_async("client_ttft_timeout", test_client_ttft_timeout_waits_for_first_productive_chunk)
     await r.record_async(
