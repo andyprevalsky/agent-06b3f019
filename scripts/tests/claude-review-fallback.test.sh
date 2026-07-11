@@ -19,9 +19,10 @@ require_text() {
 
 [ -f "$WORKFLOW" ] || fail "Claude review fallback workflow is missing"
 
-require_text "$WORKFLOW" "types: [labeled]" "fallback must be opt-in by PR label"
+require_text "$WORKFLOW" "types: [labeled, synchronize]" "fallback must support label activation and labeled-PR updates"
 require_text "$WORKFLOW" "workflow_dispatch:" "fallback must support manual dispatch"
 require_text "$WORKFLOW" "claude-review-fallback" "fallback label is not configured"
+require_text "$WORKFLOW" "contains(github.event.pull_request.labels.*.name, 'claude-review-fallback')" "synchronize events must remain gated by the fallback label"
 # The literal GitHub expression must not be expanded by this test shell.
 # shellcheck disable=SC2016
 require_text "$WORKFLOW" 'claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}' "OAuth token must come from GitHub Secrets"
@@ -29,7 +30,7 @@ require_text "$WORKFLOW" "uses: anthropics/claude-code-action@v1" "official Clau
 require_text "$WORKFLOW" "code-review@claude-code-plugins" "official code-review plugin is required"
 require_text "$WORKFLOW" "--comment" "Claude review must publish its findings to the PR"
 
-if grep -Eq 'types:.*(opened|synchronize|ready_for_review|reopened)' "$WORKFLOW"; then
+if grep -Eq 'types:.*(opened|ready_for_review|reopened)' "$WORKFLOW"; then
   fail "fallback must not run automatically on healthy CodeRabbit PRs"
 fi
 

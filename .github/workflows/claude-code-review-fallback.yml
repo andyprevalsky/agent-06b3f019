@@ -2,7 +2,7 @@ name: Claude Code Review Fallback
 
 on:
   pull_request:
-    types: [labeled]
+    types: [labeled, synchronize]
   workflow_dispatch:
     inputs:
       pr_number:
@@ -22,7 +22,9 @@ jobs:
   review:
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event.label.name == 'claude-review-fallback' &&
+      (((github.event.action == 'labeled' && github.event.label.name == 'claude-review-fallback') ||
+      (github.event.action == 'synchronize' &&
+      contains(github.event.pull_request.labels.*.name, 'claude-review-fallback'))) &&
       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 30

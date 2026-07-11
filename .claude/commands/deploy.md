@@ -903,8 +903,10 @@ FALLBACK_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 gh label create claude-review-fallback \
   --description "Run Claude Code review when the primary reviewer is unavailable" \
   --color 7B61FF --force
-gh pr edit <PR_NUMBER> --remove-label claude-review-fallback 2>/dev/null || true
-gh pr edit <PR_NUMBER> --add-label claude-review-fallback
+gh api repos/{owner}/{repo}/issues/<PR_NUMBER>/labels/claude-review-fallback \
+  -X DELETE >/dev/null 2>&1 || true
+gh api repos/{owner}/{repo}/issues/<PR_NUMBER>/labels \
+  -X POST -f 'labels[]=claude-review-fallback' >/dev/null
 ```
 
 Wait for the workflow run created after `FALLBACK_TS` and require it to succeed:
@@ -927,6 +929,13 @@ gh run watch "$FALLBACK_RUN_ID" --exit-status
 ```
 
 After success, read the three comment endpoints again and filter at `FALLBACK_TS`. The official code-review plugin posts only findings scoring at least 80; a successful workflow with no findings comment means no high-confidence issues were found. If the workflow fails, do not merge—inspect `gh run view "$FALLBACK_RUN_ID" --log-failed`, repair the fallback, and rerun it for the same HEAD.
+
+Remove the fallback label after a successful review so later pushes do not spend Claude quota unless the fallback is explicitly requested again:
+
+```bash
+gh api repos/{owner}/{repo}/issues/<PR_NUMBER>/labels/claude-review-fallback \
+  -X DELETE >/dev/null 2>&1 || true
+```
 
 ## Step 10: Handle review results
 
