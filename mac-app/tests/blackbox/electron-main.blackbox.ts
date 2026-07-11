@@ -466,6 +466,102 @@ describe('blackbox: electron-main (main-wiring)', () => {
     });
   });
 
+  it('deep-link: open restores the app and selects the web-started agent', async () => {
+    await loadMainEntry();
+    await flushWhenReady();
+
+    const openUrlListeners = await appListenersFor('open-url');
+    const electron = await import('electron');
+    const BrowserWindow = vi.mocked(electron.BrowserWindow);
+    const mainInstance = BrowserWindow.mock.results[0]?.value as {
+      isMinimized: ReturnType<typeof vi.fn>;
+      restore: ReturnType<typeof vi.fn>;
+      show: ReturnType<typeof vi.fn>;
+      moveTop: ReturnType<typeof vi.fn>;
+      focus: ReturnType<typeof vi.fn>;
+      webContents: { send: ReturnType<typeof vi.fn> };
+    };
+    mainInstance.isMinimized.mockReturnValue(true);
+
+    const fakeEvent = { preventDefault: vi.fn() } as unknown as Electron.Event;
+    openUrlListeners[0].listener(fakeEvent, 'roselabs://open?agent-id=agent-from-web');
+
+    expect(mainInstance.restore).toHaveBeenCalledTimes(1);
+    expect(mainInstance.show).toHaveBeenCalled();
+    expect(mainInstance.moveTop).toHaveBeenCalled();
+    expect(mainInstance.focus).toHaveBeenCalled();
+    expect(mainInstance.webContents.send).toHaveBeenCalledWith('open-agent', 'agent-from-web');
+  });
+
+  it('deep-link: open-url before app readiness creates the window and selects the agent', async () => {
+    await loadMainEntry((electron) => {
+      vi.mocked(electron.app.isReady).mockReturnValue(false);
+    });
+
+    const openUrlListeners = await appListenersFor('open-url');
+    const electron = await import('electron');
+    const BrowserWindow = vi.mocked(electron.BrowserWindow);
+    const fakeEvent = { preventDefault: vi.fn() } as unknown as Electron.Event;
+
+    openUrlListeners[0].listener(fakeEvent, 'roselabs://open?agent-id=cold-start-agent');
+
+    expect(fakeEvent.preventDefault).toHaveBeenCalledOnce();
+    expect(BrowserWindow).not.toHaveBeenCalled();
+
+    vi.mocked(electron.app.isReady).mockReturnValue(true);
+    await flushWhenReady();
+
+    expect(BrowserWindow).toHaveBeenCalledTimes(2);
+    const mainInstance = BrowserWindow.mock.results[0]?.value as {
+      webContents: { send: ReturnType<typeof vi.fn> };
+    };
+    expect(mainInstance.webContents.send).toHaveBeenCalledWith('open-agent', 'cold-start-agent');
+  });
+
+  it('deep-link: open recreates a closed main window before selecting the agent', async () => {
+    await loadMainEntry();
+    await flushWhenReady();
+
+    const openUrlListeners = await appListenersFor('open-url');
+    const electron = await import('electron');
+    const BrowserWindow = vi.mocked(electron.BrowserWindow);
+    const originalMain = BrowserWindow.mock.results[0]?.value as {
+      on: ReturnType<typeof vi.fn>;
+    };
+    const closedListener = originalMain.on.mock.calls.find(([event]) => event === 'closed')?.[1] as
+      (() => void) | undefined;
+    expect(closedListener).toBeDefined();
+    closedListener?.();
+
+    const fakeEvent = { preventDefault: vi.fn() } as unknown as Electron.Event;
+    openUrlListeners[0].listener(fakeEvent, 'roselabs://open?agent-id=agent-after-close');
+
+    expect(BrowserWindow).toHaveBeenCalledTimes(3);
+    const reopenedMain = BrowserWindow.mock.results[2]?.value as {
+      show: ReturnType<typeof vi.fn>;
+      moveTop: ReturnType<typeof vi.fn>;
+      focus: ReturnType<typeof vi.fn>;
+      webContents: {
+        once: ReturnType<typeof vi.fn>;
+        send: ReturnType<typeof vi.fn>;
+      };
+    };
+    expect(reopenedMain.show).toHaveBeenCalled();
+    expect(reopenedMain.moveTop).toHaveBeenCalled();
+    expect(reopenedMain.focus).toHaveBeenCalled();
+    const didFinishLoad = reopenedMain.webContents.once.mock.calls.find(
+      ([event]) => event === 'did-finish-load'
+    )?.[1] as (() => void) | undefined;
+    expect(didFinishLoad).toBeDefined();
+    expect(reopenedMain.webContents.send).not.toHaveBeenCalledWith(
+      'open-agent',
+      'agent-after-close'
+    );
+
+    didFinishLoad?.();
+    expect(reopenedMain.webContents.send).toHaveBeenCalledWith('open-agent', 'agent-after-close');
+  });
+
   it('deep-link: malformed URL is swallowed (no throw, no send)', async () => {
     await loadMainEntry();
     await flushWhenReady();

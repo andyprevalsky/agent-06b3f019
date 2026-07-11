@@ -107,7 +107,10 @@ SQL
   fi
   echo "Syncing Prisma schema to local test database..."
   npx prisma db push --skip-generate --accept-data-loss >/dev/null
-  if [[ "${BACKEND_CODEX_SMOKE_SKIP:-0}" != "1" ]]; then
+  # Credential seeding and smoke execution are separate controls. A caller may
+  # pre-seed a valid production credential without disabling the real Codex
+  # black-box test that consumes it.
+  if [[ "${BACKEND_CODEX_TOKEN_SYNC_SKIP:-0}" != "1" ]]; then
     echo "Syncing local Codex credentials to local test database..."
     npx tsx scripts/sync-codex-token.ts >/dev/null
   fi
