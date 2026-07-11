@@ -33,7 +33,7 @@ export function ThinkingIndicator({
   animatedTokenCount,
 }: ThinkingIndicatorProps) {
   return (
-    <div className={cn('flex', !compact && 'gap-3')}>
+    <div data-testid="thinking-indicator" className={cn('flex', !compact && 'gap-3')}>
       <div className="flex flex-col gap-2">
         <div className="flex items-center gap-2">
           <ThinkingAnimation

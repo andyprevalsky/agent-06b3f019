@@ -200,6 +200,8 @@ async def save_browser_assistant_message(
     agent_id: str,
     message: str,
     task_id: str,
+    *,
+    stream_id: str | None = None,
 ) -> None:
     """Save browser ASSISTANT message directly to DB."""
     from config import load_config
@@ -207,6 +209,8 @@ async def save_browser_assistant_message(
     try:
         config = load_config()
         metadata = {"subAgentId": task_id}
+        if stream_id:
+            metadata["streamId"] = stream_id
 
         async with httpx.AsyncClient(timeout=5.0) as client:
             await client.post(
