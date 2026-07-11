@@ -153,10 +153,12 @@ export function handleAssistantStream(
   selectedAgentId: string,
   streamedTextsRef: React.MutableRefObject<Set<string>>,
   setStreamingBubbles: RealtimeSetters['setStreamingBubbles'],
+  completedStreamIdsRef?: React.MutableRefObject<Set<string>>,
 ) {
   if (chunk.agentId !== selectedAgentId) return;
 
   setStreamingBubbles((prev) => {
+    if (completedStreamIdsRef?.current.has(chunk.stream_id)) return prev;
     const newMap = new Map(prev);
     const existing = newMap.get(chunk.stream_id);
 
@@ -164,6 +166,15 @@ export function handleAssistantStream(
       if (existing?.timeoutId) window.clearTimeout(existing.timeoutId);
 
       const accumulatedText = (existing?.text || '') + chunk.delta;
+
+      if (chunk.done && chunk.clear_on_done) {
+        if (accumulatedText.trim()) {
+          streamedTextsRef.current.add(accumulatedText.trim());
+        }
+        completedStreamIdsRef?.current.add(chunk.stream_id);
+        newMap.delete(chunk.stream_id);
+        return newMap;
+      }
 
       let timeoutId: number | undefined;
       if (chunk.done) {
@@ -252,6 +263,7 @@ export function handleToolStream(
       tool_call_id: tool.tool_call_id,
       tool_name: tool.tool_name,
       title: tool.title,
+      subAgentId: tool.subAgentId ?? prev.get(tool.tool_call_id)?.subAgentId,
       charCount: tool.char_count ?? prev.get(tool.tool_call_id)?.charCount ?? 0,
       startedAtMs: tool.llm_started_at_ms ?? prev.get(tool.tool_call_id)?.startedAtMs ?? Date.now(),
       isClaude: tool.is_claude ?? prev.get(tool.tool_call_id)?.isClaude ?? false,

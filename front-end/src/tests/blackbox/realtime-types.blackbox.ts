@@ -422,6 +422,7 @@ describe('isAssistantStreamPayload', () => {
         stream_id: 's',
         delta: 'hi',
         done: false,
+        clear_on_done: true,
         sequence: 1,
       }),
     ).toBe(true);
@@ -463,6 +464,19 @@ describe('isAssistantStreamPayload', () => {
         delta: 'x',
         done: false,
         sequence: '1',
+      }),
+    ).toBe(false);
+  });
+
+  it('returns false when clear_on_done is not a boolean', () => {
+    expect(
+      isAssistantStreamPayload({
+        agentId: 'a',
+        stream_id: 's',
+        delta: 'x',
+        done: false,
+        clear_on_done: 'yes',
+        sequence: 1,
       }),
     ).toBe(false);
   });

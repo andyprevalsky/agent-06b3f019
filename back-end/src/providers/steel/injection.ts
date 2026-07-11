@@ -322,7 +322,7 @@ export async function injectUserData(
   }
 
   let cookies: Awaited<ReturnType<typeof prisma.cookie.findMany>> = [];
-  const steelContextId = dbSession.context.contextId;
+  const steelContextId = dbSession.provider === 'steel' ? dbSession.context.contextId : null;
   const steelAuthForVerification =
     steelContextId !== null && authRealm !== ''
       ? await prisma.steelSessionAuth.findUnique({

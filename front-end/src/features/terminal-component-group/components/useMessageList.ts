@@ -185,6 +185,10 @@ export function useMessageListState({
   });
 
   const animatedTokenCount = useAnimatedCounter(Math.round(streaming.charCount / 4), 0.3);
+  const hasBlockingStreamingTool =
+    streaming.tools.size > 0 &&
+    (streaming.bubbles.size === 0 ||
+      [...streaming.tools.values()].some((tool) => streaming.bubbles.has(tool.stream_id)));
 
   const animation = useMessageAnimationBuffer({
     subAgentId,
@@ -200,6 +204,7 @@ export function useMessageListState({
     isChatMode: ctx.isChatMode,
     hasStreamingBubbles: streaming.bubbles.size > 0,
     hasStreamingPlan: streaming.plan !== null,
+    hasStreamingTools: hasBlockingStreamingTool,
     selectedAgentId: ctx.selectedAgentId,
     assistantInsertedRef,
   });
