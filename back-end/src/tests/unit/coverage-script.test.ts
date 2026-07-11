@@ -14,11 +14,19 @@ assert.match(
   'coverage port preflight must ignore outbound connections using the same local port'
 );
 
-for (const script of [coverageScript, blackboxScript]) {
+for (const [name, harness] of [
+  ['coverage', coverageScript],
+  ['blackbox', blackboxScript],
+] as const) {
   assert.match(
-    script,
+    harness,
     /BACKEND_CODEX_TOKEN_SYNC_SKIP/,
-    'test runners must allow an already-seeded Codex credential without skipping its smoke test'
+    `${name} harness must support preserving pre-seeded Codex credentials`
+  );
+  assert.doesNotMatch(
+    harness,
+    /if \[\[ "\$\{BACKEND_CODEX_SMOKE_SKIP:-0\}" != "1" \]\]; then\s+echo "Syncing local Codex credentials/,
+    `${name} harness must not couple credential sync to live-smoke execution`
   );
 }
 

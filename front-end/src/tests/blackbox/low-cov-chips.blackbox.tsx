@@ -16,6 +16,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { screen, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from './test-wrapper';
+import type { FilePointer } from '@/lib/api';
 
 // ── Mocks (hoisted before module-under-test imports) ─────────────────────────
 
@@ -52,7 +53,7 @@ const respondToAttentionRequestMock = vi.fn();
 const rejectAttentionRequestMock = vi.fn();
 const toastMock = vi.fn();
 vi.mock('@/features/terminal-component-group/hooks', async (importOriginal) => {
-  const actual = await importOriginal<any>();
+  const actual = await importOriginal<typeof import('@/features/terminal-component-group/hooks')>();
   return {
     ...actual,
     respondToAttentionRequest: (...args: unknown[]) => respondToAttentionRequestMock(...args),
@@ -161,19 +162,21 @@ describe('CompletionSummaryCard', () => {
   });
 
   it('renders FilePointer outputs as download chips (no copy button)', () => {
-    const filePointer = {
+    const filePointer: FilePointer = {
       id: 'file-1',
       storage_path: 'attachments/foo.pdf',
       original_filename: 'foo.pdf',
+      mime_type: 'application/pdf',
       size_bytes: 1024,
+      created_at: '2026-01-01T00:00:00Z',
     };
     renderWithProviders(
       <CompletionSummaryCard
         data={{
           summary: 'Done',
           outputs: [
-            { key: 'doc', label: 'Document', value: filePointer as any },
-            { key: 'docs', label: 'Documents', value: [filePointer] as any },
+            { key: 'doc', label: 'Document', value: filePointer },
+            { key: 'docs', label: 'Documents', value: [filePointer] },
           ],
         }}
       />,
@@ -289,6 +292,9 @@ describe('ApprovalChip', () => {
               {
                 name: 'Desk Lamp',
                 imageUrl: 'https://example.com/lamp.png',
+                productUrl: 'https://example.com/products/desk-lamp',
+                rating: '4.8 stars',
+                reviewCount: '312 reviews',
                 unitPriceCents: 1299,
                 quantity: 2,
                 lineTotalCents: 2598,
@@ -304,6 +310,11 @@ describe('ApprovalChip', () => {
 
     expect(screen.getByText('Example Shop')).toBeInTheDocument();
     expect(screen.getByText('Desk Lamp')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'View product' })).toHaveAttribute(
+      'href',
+      'https://example.com/products/desk-lamp',
+    );
+    expect(screen.getByText('Reviews: 4.8 stars · 312 reviews')).toBeInTheDocument();
     expect(screen.getByText('Qty 2 · $12.99')).toBeInTheDocument();
     expect(screen.getAllByText('$25.98').length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText('Tax')).toBeInTheDocument();
@@ -314,6 +325,27 @@ describe('ApprovalChip', () => {
         'Rose will charge your saved Stripe billing method, then issue a one-time virtual card.',
       ),
     ).toBeInTheDocument();
+  });
+
+  it('renders historical payment metadata without undefined values or broken links', () => {
+    renderWithProviders(
+      <ApprovalChip
+        pendingApproval={{
+          attentionRequestId: 'req-old-pay',
+          question: 'Approve historical purchase?',
+          requestPaymentCard: {
+            merchant: 'Legacy Shop',
+            lineItems: [{ name: 'Old Item', unitPriceCents: 1000, quantity: 1 }],
+            totalCents: 1000,
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getByText('Review details unavailable')).toBeInTheDocument();
+    expect(screen.getByText('Product link unavailable')).toBeInTheDocument();
+    expect(screen.queryByText(/undefined/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'View product' })).not.toBeInTheDocument();
   });
 
   it('Accept: sends "Approved" by default and calls onApprovalHandled', async () => {
