@@ -19,7 +19,7 @@ function requireHubAdmin(req: HybridAuthRequest, res: Response, next: NextFuncti
     next();
     return;
   }
-  if (req.userId && BENCHMARK_HUB_ADMIN_USER_IDS.has(req.userId)) {
+  if (req.userId !== undefined && BENCHMARK_HUB_ADMIN_USER_IDS.has(req.userId)) {
     next();
     return;
   }

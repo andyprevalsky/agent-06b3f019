@@ -278,7 +278,7 @@ async function testRuns_uploadListDetailAgentRoundTrip(): Promise<void> {
     assertStatus(live.status, 201, live.data);
     let list = await request(`${BASE_URL}/api/benchmarks/runs`, { headers: internalHeaders });
     assertStatus(list.status, 200, list.data);
-    let entry = (list.data as { runs: Array<{ run_id: string; live: boolean }> }).runs.find(
+    const entry = (list.data as { runs: Array<{ run_id: string; live: boolean }> }).runs.find(
       (r) => r.run_id === RUN_ID
     );
     assert(entry !== undefined, 'live snapshot missing from index');
