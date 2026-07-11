@@ -1,5 +1,7 @@
-"""Configuration constants for request_payment_card normalization."""
+"""Request-payment-card domain configuration."""
 
 DEFAULT_CURRENCY = "USD"
+LOOKUP_TIMEOUT_SECONDS = 30.0
+MINT_TIMEOUT_SECONDS = 60.0
 
-__all__ = ["DEFAULT_CURRENCY"]
+__all__ = ["DEFAULT_CURRENCY", "LOOKUP_TIMEOUT_SECONDS", "MINT_TIMEOUT_SECONDS"]

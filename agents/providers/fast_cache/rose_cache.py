@@ -1,7 +1,7 @@
 """Fast Mode cache — Rose LLM call record/replay.
 
 Wraps `RoseClient.complete()` (an async iterator of StreamChunk). On a cache HIT it
-re-emits the stored response as a synthetic stream with one assembled content chunk;
+re-emits stored content chunks with their normalized item provenance;
 on a MISS it tees the live stream (forward each chunk while accumulating) and writes
 the assembled response once the stream finishes cleanly.
 Partial / aborted streams are never written (#8).
@@ -35,6 +35,7 @@ def _empty_response() -> Dict[str, Any]:
         "pool_name": "",
         "request_id": "",
         "content": "",
+        "content_chunks": [],
         "reasoning": "",
         "tool_calls": [],
         "codex_reasoning_items": [],
@@ -75,10 +76,33 @@ async def _replay(stored: Dict[str, Any]) -> AsyncIterator["StreamChunk"]:
     )
     reasoning = stored.get("reasoning") or ""
     if reasoning:
-        yield SimpleNamespace(kind="reasoning", data={"text": reasoning})
-    content = stored.get("content") or ""
-    if content:
-        yield SimpleNamespace(kind="content", data={"text": content})
+        yield SimpleNamespace(
+            kind="reasoning",
+            data={
+                "text": reasoning,
+                "item_id": "cache:reasoning:0",
+                "output_index": 0,
+                "content_index": 0,
+                "phase": "reasoning",
+            },
+        )
+    content_chunks = stored.get("content_chunks") or []
+    if content_chunks:
+        for content_chunk in content_chunks:
+            yield SimpleNamespace(kind="content", data=dict(content_chunk))
+    else:
+        content = stored.get("content") or ""
+        if content:
+            yield SimpleNamespace(
+                kind="content",
+                data={
+                    "text": content,
+                    "item_id": "cache:legacy:0",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "phase": "final_answer",
+                },
+            )
     for tc in stored.get("tool_calls") or []:
         yield SimpleNamespace(kind="tool_call", data=tc)
     for item in stored.get("codex_reasoning_items") or []:
@@ -95,6 +119,7 @@ def _accumulate(acc: Dict[str, Any], chunk: "StreamChunk") -> None:
         acc["request_id"] = chunk.data.get("request_id", acc["request_id"])
     elif chunk.kind == "content":
         acc["content"] += chunk.data.get("text", "")
+        acc["content_chunks"].append(dict(chunk.data))
     elif chunk.kind == "reasoning":
         acc["reasoning"] += chunk.data.get("text", "")
     elif chunk.kind == "tool_call":

@@ -1,0 +1,240 @@
+{
+  "contract_version": 1,
+  "content_provenance_fields": [
+    "item_id",
+    "output_index",
+    "content_index",
+    "phase"
+  ],
+  "structured_output_policy": {
+    "group_by": "item_id",
+    "authoritative_phase": "final_answer",
+    "ignore_phases": ["commentary", "reasoning"],
+    "legacy_single_item_allowed": true,
+    "multiple_authoritative_items": "error"
+  },
+  "cases": [
+    {
+      "name": "anthropic_content_reasoning_and_tool",
+      "format": "anthropic",
+      "sse_lines": [
+        "event: message_start",
+        "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":7,\"cache_creation_input_tokens\":2,\"cache_read_input_tokens\":3}}}",
+        "",
+        "event: content_block_start",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\"}}",
+        "",
+        "event: content_block_delta",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"think\"}}",
+        "",
+        "event: content_block_stop",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}",
+        "",
+        "event: content_block_start",
+        "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\"}}",
+        "",
+        "event: content_block_delta",
+        "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"{\\\"answer\\\":\\\"anthropic\\\"}\"}}",
+        "",
+        "event: content_block_stop",
+        "data: {\"type\":\"content_block_stop\",\"index\":1}",
+        "",
+        "event: content_block_start",
+        "data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool_1\",\"name\":\"lookup\"}}",
+        "",
+        "event: content_block_delta",
+        "data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"q\\\":\\\"x\\\"}\"}}",
+        "",
+        "event: content_block_stop",
+        "data: {\"type\":\"content_block_stop\",\"index\":2}",
+        "",
+        "event: message_delta",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":5}}",
+        "",
+        "event: message_stop",
+        "data: {\"type\":\"message_stop\"}",
+        "",
+        "data: [DONE]"
+      ],
+      "expected_chunks": [
+        {
+          "kind": "reasoning",
+          "data": {
+            "text": "think",
+            "item_id": "anthropic:0",
+            "output_index": 0,
+            "content_index": 0,
+            "phase": "reasoning"
+          }
+        },
+        {
+          "kind": "content",
+          "data": {
+            "text": "{\"answer\":\"anthropic\"}",
+            "item_id": "anthropic:1",
+            "output_index": 1,
+            "content_index": 0,
+            "phase": "final_answer"
+          }
+        },
+        {
+          "kind": "tool_call",
+          "data": {
+            "id": "tool_1",
+            "name": "lookup",
+            "arguments": "{\"q\":\"x\"}"
+          }
+        },
+        {
+          "kind": "usage",
+          "data": {
+            "prompt_tokens": 7,
+            "completion_tokens": 5,
+            "total_tokens": 12,
+            "cache_creation_input_tokens": 2,
+            "cache_read_input_tokens": 3,
+            "finish_reason": "tool_calls"
+          }
+        },
+        { "kind": "done", "data": {} }
+      ],
+      "expected_structured_content": "{\"answer\":\"anthropic\"}"
+    },
+    {
+      "name": "openai_chat_content_reasoning_and_tool",
+      "format": "openai_chat",
+      "sse_lines": [
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"think\"},\"finish_reason\":null}]}",
+        "",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"{\\\"answer\\\":\\\"chat\\\"}\"},\"finish_reason\":null}]}",
+        "",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":\"}}]},\"finish_reason\":null}]}",
+        "",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"x\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}",
+        "",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":5,\"total_tokens\":12,\"prompt_tokens_details\":{\"cache_write_tokens\":2,\"cached_tokens\":3}}}",
+        "",
+        "data: [DONE]"
+      ],
+      "expected_chunks": [
+        {
+          "kind": "reasoning",
+          "data": {
+            "text": "think",
+            "item_id": "openai:choice:0",
+            "output_index": 0,
+            "content_index": 0,
+            "phase": "reasoning"
+          }
+        },
+        {
+          "kind": "content",
+          "data": {
+            "text": "{\"answer\":\"chat\"}",
+            "item_id": "openai:choice:0",
+            "output_index": 0,
+            "content_index": 0,
+            "phase": "final_answer"
+          }
+        },
+        {
+          "kind": "tool_call",
+          "data": {
+            "id": "call_1",
+            "name": "lookup",
+            "arguments": "{\"q\":\"x\"}"
+          }
+        },
+        {
+          "kind": "usage",
+          "data": {
+            "prompt_tokens": 7,
+            "completion_tokens": 5,
+            "total_tokens": 12,
+            "cache_creation_input_tokens": 2,
+            "cache_read_input_tokens": 3,
+            "finish_reason": "tool_calls"
+          }
+        },
+        { "kind": "done", "data": {} }
+      ],
+      "expected_structured_content": "{\"answer\":\"chat\"}"
+    },
+    {
+      "name": "openai_responses_multi_phase_structured_output",
+      "format": "openai_responses",
+      "sse_lines": [
+        "event: response.output_item.added",
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"id\":\"msg_commentary\",\"type\":\"message\",\"phase\":\"commentary\",\"status\":\"in_progress\"}}",
+        "",
+        "event: response.output_text.delta",
+        "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_commentary\",\"output_index\":1,\"content_index\":0,\"delta\":\"{\\\"answer\\\":\\\"commentary\\\"}\"}",
+        "",
+        "event: response.output_item.done",
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"id\":\"msg_commentary\",\"type\":\"message\",\"phase\":\"commentary\",\"status\":\"completed\"}}",
+        "",
+        "event: response.output_item.added",
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":3,\"item\":{\"id\":\"msg_final\",\"type\":\"message\",\"phase\":\"final_answer\",\"status\":\"in_progress\"}}",
+        "",
+        "event: response.output_text.delta",
+        "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_final\",\"output_index\":3,\"content_index\":0,\"delta\":\"{\\\"answer\\\":\"}",
+        "",
+        "event: response.output_text.delta",
+        "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_final\",\"output_index\":3,\"content_index\":0,\"delta\":\"\\\"final\\\"}\"}",
+        "",
+        "event: response.output_item.done",
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"id\":\"msg_final\",\"type\":\"message\",\"phase\":\"final_answer\",\"status\":\"completed\"}}",
+        "",
+        "event: response.completed",
+        "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":14,\"input_tokens_details\":{\"cache_write_tokens\":8,\"cached_tokens\":2}}}}",
+        "",
+        "data: [DONE]"
+      ],
+      "expected_chunks": [
+        {
+          "kind": "content",
+          "data": {
+            "text": "{\"answer\":\"commentary\"}",
+            "item_id": "msg_commentary",
+            "output_index": 1,
+            "content_index": 0,
+            "phase": "commentary"
+          }
+        },
+        {
+          "kind": "content",
+          "data": {
+            "text": "{\"answer\":",
+            "item_id": "msg_final",
+            "output_index": 3,
+            "content_index": 0,
+            "phase": "final_answer"
+          }
+        },
+        {
+          "kind": "content",
+          "data": {
+            "text": "\"final\"}",
+            "item_id": "msg_final",
+            "output_index": 3,
+            "content_index": 0,
+            "phase": "final_answer"
+          }
+        },
+        {
+          "kind": "usage",
+          "data": {
+            "prompt_tokens": 10,
+            "completion_tokens": 4,
+            "total_tokens": 14,
+            "cache_creation_input_tokens": 8,
+            "cache_read_input_tokens": 2,
+            "finish_reason": "stop"
+          }
+        },
+        { "kind": "done", "data": {} }
+      ],
+      "expected_structured_content": "{\"answer\":\"final\"}"
+    }
+  ]
+}
