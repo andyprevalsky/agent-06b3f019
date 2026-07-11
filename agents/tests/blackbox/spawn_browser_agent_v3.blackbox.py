@@ -3192,11 +3192,17 @@ async def test_save_browser_assistant_message():
     setup_mock({"/api/agents/": {"status": 200, "json": {"ok": True}}})
 
     with patch("config.load_config", return_value=_fake_config()):
-        await save_browser_assistant_message("ag1", "hello world", "task-1")
+        await save_browser_assistant_message(
+            "ag1",
+            "hello world",
+            "task-1",
+            stream_id="browser-stream-1",
+        )
 
     body = json.loads(get_captured_requests()[0]["requestBody"])
     assert body["role"] == "ASSISTANT"
     assert body["metadata"]["subAgentId"] == "task-1"
+    assert body["metadata"]["streamId"] == "browser-stream-1"
 
 
 async def test_save_browser_assistant_message_swallows_exception():
@@ -4054,6 +4060,122 @@ async def test_call_browser_use_with_rotation_uses_gpt_auth():
     assert client.calls[0]["browser_state"]["_extra_user_messages"] == [
         {"role": "user", "content": "resume from current live state"}
     ]
+
+
+async def test_browser_thinking_stream_routes_chunks_to_browser_message_list():
+    from domains.spawn_browser_agent_v3.streaming import BrowserThinkingStream
+    from providers.rose import StreamChunk
+
+    stream = BrowserThinkingStream(
+        agent_id="agent-1",
+        task_id="browser-task-1",
+        iteration=4,
+        started_at_ms=123_000,
+    )
+
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.streaming.stream_assistant_chunk",
+            new_callable=AsyncMock,
+        ) as publish,
+        patch(
+            "domains.spawn_browser_agent_v3.streaming.stream_tool_event",
+            new_callable=AsyncMock,
+        ) as publish_tool,
+    ):
+        await stream.start()
+        await stream.on_chunk(
+            StreamChunk(
+                kind="metadata",
+                data={"actual_model": "gpt-5.6-sol-gpt"},
+            )
+        )
+        await stream.on_chunk(StreamChunk(kind="reasoning", data={"text": "Inspecting page"}))
+        await stream.on_chunk(
+            StreamChunk(
+                kind="tool_call",
+                data={"id": "call-1", "name": "click", "arguments": '{"index":3}'},
+            )
+        )
+        await stream.finish()
+
+    published = [call.kwargs for call in publish.await_args_list]
+    assert published[0]["delta"] == ""
+    assert published[0]["done"] is False
+    assert published[-1]["done"] is True
+    assert all(item["agent_id"] == "agent-1" for item in published)
+    assert all(item["sub_agent_id"] == "browser-task-1" for item in published)
+    assert all(item["llm_started_at_ms"] == 123_000 for item in published)
+    assert all(item["clear_on_done"] is True for item in published)
+    assert any(item["is_gpt"] is True for item in published[1:])
+    assert "Inspecting page" in "".join(item["delta"] for item in published)
+    assert '"click"' in "".join(item["delta"] for item in published)
+    assert publish_tool.await_count == 2
+    assert publish_tool.await_args_list[0].kwargs == {
+        "agent_id": "agent-1",
+        "stream_id": stream.stream_id,
+        "tool_call_id": "call-1",
+        "tool_name": "click",
+        "title": "Starting click...",
+        "char_count": len('{"id":"call-1","name":"click","arguments":"{\\"index\\":3}"}'),
+        "is_gpt": True,
+        "is_claude": False,
+        "llm_started_at_ms": 123_000,
+        "sub_agent_id": "browser-task-1",
+    }
+    assert publish_tool.await_args_list[1].kwargs == {
+        "agent_id": "agent-1",
+        "stream_id": stream.stream_id,
+        "tool_call_id": "call-1",
+        "tool_name": "click",
+        "title": "Finished click",
+        "status": "FINISHED",
+        "sub_agent_id": "browser-task-1",
+    }
+
+
+async def test_browser_streaming_rose_client_forwards_and_folds_chunks():
+    from domains.spawn_browser_agent_v3.streaming import BrowserStreamingRoseClient
+    from providers.rose import RoseClient, StreamChunk
+
+    client = BrowserStreamingRoseClient()
+    sink = MagicMock()
+    sink.on_chunk = AsyncMock()
+    client.set_thinking_stream(sink)
+
+    async def fake_complete(_client, **_kwargs):
+        yield StreamChunk(
+            kind="metadata",
+            data={"actual_model": "gpt-5.6-sol-gpt", "pool_name": "rose-1-browser-use"},
+        )
+        yield StreamChunk(kind="reasoning", data={"text": "Inspect"})
+        yield StreamChunk(
+            kind="tool_call",
+            data={"id": "call-1", "name": "click", "arguments": '{"index":3}'},
+        )
+        yield StreamChunk(
+            kind="tool_call",
+            data={"id": "call-2", "name": "wait", "arguments": '{"seconds":1}'},
+        )
+        yield StreamChunk(kind="usage", data={"prompt_tokens": 10, "completion_tokens": 4})
+        yield StreamChunk(kind="done", data={})
+
+    with patch.object(RoseClient, "complete", new=fake_complete):
+        result = await client.complete_browser_use(
+            task="Click the target",
+            browser_state={"url": "https://example.com", "dom_tree": "<button>Target</button>"},
+            action_history=[],
+            available_actions=["click", "wait"],
+        )
+
+    assert result["actual_model"] == "gpt-5.6-sol-gpt"
+    assert result["action"]["action"] == "click"
+    assert result["tool_call_id"] == "call-1"
+    assert sink.on_chunk.await_count == 5
+    forwarded_tools = [
+        call.args[0].data["id"] for call in sink.on_chunk.await_args_list if call.args[0].kind == "tool_call"
+    ]
+    assert forwarded_tools == ["call-1"]
 
 
 async def test_call_browser_use_with_rotation_rotates_claude_token():
@@ -9435,6 +9557,14 @@ async def run_all_tests():
         test_append_new_otp_user_messages_skips_stale_codes,
     )
     await r.record_async("call_browser_use_gpt_auth", test_call_browser_use_with_rotation_uses_gpt_auth)
+    await r.record_async(
+        "browser_thinking_stream_routes_chunks",
+        test_browser_thinking_stream_routes_chunks_to_browser_message_list,
+    )
+    await r.record_async(
+        "browser_streaming_rose_client_forwards_chunks",
+        test_browser_streaming_rose_client_forwards_and_folds_chunks,
+    )
     await r.record_async(
         "call_browser_use_rotates_claude",
         test_call_browser_use_with_rotation_rotates_claude_token,

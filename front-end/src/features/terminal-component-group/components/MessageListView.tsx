@@ -1,4 +1,10 @@
 /**
+ * STATE MACHINE: MessageListView render tail
+ *
+ * [TOOL ACTIVE] -> render tool last; thinking hidden
+ * [NO TOOL + THINKING] -> render banners/attention, then thinking last
+ * [IDLE] -> render persisted content only
+ *
  * Presentational shell for MessageList. Receives all state/derived values
  * as props; performs no hook calls of its own. Extracted to keep the
  * MessageList top-level function body below the 80-line strict limit.
@@ -157,6 +163,11 @@ export function MessageListView(props: MessageListViewProps) {
           onIncreaseCostLimit={onIncreaseCostLimit}
         />
       )}
+      <StreamingTools tools={[...streaming.tools.values()]} compact={compact} />
+      {showAttention && streaming.attention && (
+        <StreamingAttentionBubble attention={streaming.attention} onSendMessage={onSendMessage} />
+      )}
+      {showWebPreview && agent !== null && <WebPreviewBanner agentId={agent.agent_id} />}
       <ThinkingIndicators
         visible={thinkingVisible}
         compact={compact}
@@ -164,11 +175,6 @@ export function MessageListView(props: MessageListViewProps) {
         streamingTokenCount={thinkingStreamTokenCount}
         animatedTokenCount={animatedTokenCount}
       />
-      <StreamingTools tools={[...streaming.tools.values()]} compact={compact} />
-      {showAttention && streaming.attention && (
-        <StreamingAttentionBubble attention={streaming.attention} onSendMessage={onSendMessage} />
-      )}
-      {showWebPreview && agent !== null && <WebPreviewBanner agentId={agent.agent_id} />}
       <div ref={scrollEndRef} />
     </div>
   );

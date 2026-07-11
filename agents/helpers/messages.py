@@ -124,10 +124,7 @@ def _assistant_delta_coalesce_key(message: Dict[str, Any]) -> Optional[str]:
     record = payload.get("record") if isinstance(payload, dict) else None
     if not isinstance(record, dict) or record.get("done"):
         return None
-    return (
-        f"{message.get('topic')}:ASSISTANT_STREAM:"
-        f"{record.get('stream_id')}:{record.get('subAgentId') or ''}"
-    )
+    return f"{message.get('topic')}:ASSISTANT_STREAM:{record.get('stream_id')}:{record.get('subAgentId') or ''}"
 
 
 def _coalesce_assistant_delta(existing: _QueuedRealtimeMessage, message: Dict[str, Any]) -> bool:
@@ -287,6 +284,7 @@ async def stream_assistant_chunk(
     is_claude: bool = False,
     is_gpt: bool = False,
     llm_started_at_ms: int | None = None,
+    clear_on_done: bool = False,
 ) -> None:
     """
     Send a streaming delta DIRECTLY to Supabase Realtime (bypasses backend).
@@ -304,6 +302,7 @@ async def stream_assistant_chunk(
         is_claude: Whether the model is a Claude/Anthropic model
         is_gpt: Whether the model is direct GPT/Codex
         llm_started_at_ms: Epoch ms when the LLM request started
+        clear_on_done: Remove the ephemeral bubble as soon as its terminal event arrives
     """
     try:
         record = {
@@ -325,9 +324,11 @@ async def stream_assistant_chunk(
             record["is_gpt"] = True
         if llm_started_at_ms is not None:
             record["llm_started_at_ms"] = llm_started_at_ms
+        if clear_on_done:
+            record["clear_on_done"] = True
 
         await _queue_realtime_record(f"agent:{agent_id}", "ASSISTANT_STREAM", record)
-                
+
     except Exception as e:
         # Don't fail the workflow if streaming fails - it's best-effort
         logger.debug(f"Stream chunk error (non-fatal): {str(e)}")
@@ -534,7 +535,7 @@ async def stream_plan_event(
         if llm_started_at_ms is not None:
             record["llm_started_at_ms"] = llm_started_at_ms
         await _queue_realtime_record(f"agent:{agent_id}", "PLAN_STREAM", record)
-                
+
     except Exception as e:
         # Don't fail the workflow if streaming fails - it's best-effort
         logger.debug(f"Plan stream error (non-fatal): {str(e)}")
@@ -550,15 +551,17 @@ async def stream_tool_event(
     is_claude: bool = False,
     is_gpt: bool = False,
     llm_started_at_ms: int | None = None,
+    sub_agent_id: str | None = None,
+    status: str | None = None,
 ) -> None:
     """
     Broadcast early tool detection as TOOL_STREAM event (ephemeral, no DB insert).
-    
+
     This is used to show early tool indicators during LLM streaming, before tool
     parameters are fully parsed. Uses TOOL_STREAM event (like PLAN_STREAM) so the
     frontend shows it as ephemeral state AFTER the streaming bubble, not as a
     real message that would sort before the assistant message.
-    
+
     Args:
         agent_id: The agent ID
         stream_id: Unique ID for this streaming session
@@ -569,6 +572,8 @@ async def stream_tool_event(
         is_claude: Whether the model is a Claude/Anthropic model
         is_gpt: Whether the model is direct GPT/Codex
         llm_started_at_ms: Epoch ms when the LLM request started
+        sub_agent_id: Optional browser/sub-agent route for its dedicated MessageList
+        status: Optional terminal lifecycle state (FINISHED or ERROR)
     """
     try:
         # Broadcast as TOOL_STREAM event (ephemeral, like PLAN_STREAM)
@@ -587,8 +592,12 @@ async def stream_tool_event(
             record["is_gpt"] = True
         if llm_started_at_ms is not None:
             record["llm_started_at_ms"] = llm_started_at_ms
+        if sub_agent_id:
+            record["subAgentId"] = sub_agent_id
+        if status:
+            record["status"] = status
         await _queue_realtime_record(f"agent:{agent_id}", "TOOL_STREAM", record)
-                
+
     except Exception as e:
         # Don't fail the workflow if streaming fails - it's best-effort
         logger.debug(f"Tool stream error (non-fatal): {str(e)}")
@@ -605,10 +614,10 @@ async def stream_attention_event(
 ) -> None:
     """
     Broadcast attention message streaming DIRECTLY to Supabase Realtime.
-    
+
     This streams send_message_to_user content progressively so the frontend
     can show the attention message being generated.
-    
+
     Args:
         agent_id: The agent ID
         stream_id: Unique ID for this streaming session
@@ -632,7 +641,7 @@ async def stream_attention_event(
                 "sequence": sequence,
             },
         )
-                
+
     except Exception as e:
         # Don't fail the workflow if streaming fails - it's best-effort
         logger.debug(f"Attention stream error (non-fatal): {str(e)}")
@@ -758,11 +767,8 @@ async def update_agent_tree_state(
             response = await client.patch(
                 f"{config.backend.api_url}/api/agents/{agent_id}",
                 json=update_payload,
-                headers={
-                    "X-API-Key": config.backend.api_key,
-                    "Content-Type": "application/json"
-                },
-                timeout=10.0
+                headers={"X-API-Key": config.backend.api_key, "Content-Type": "application/json"},
+                timeout=10.0,
             )
 
             if response.status_code not in (200, 204):
@@ -777,27 +783,25 @@ async def update_agent_tree_state(
 async def poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict[str, Any]]:
     """
     Poll for ALL new messages (USER, ASSISTANT, TOOL) since last check.
-    
+
     This allows the agent to rebuild context from DB, including tool messages
     that were posted via handle_tool_event.
-    
+
     Args:
         agent_id: The agent ID
         last_checked: Timestamp of last check (use epoch 0 for first poll)
-        
+
     Returns:
         List of new messages (all roles) after last_checked
     """
     try:
         activity.heartbeat(f"Polling messages for agent {agent_id}")
-        
-        logger.info(
-            f"Polling for new messages: agent_id={agent_id}, last_checked={last_checked.isoformat()}"
-        )
-        
+
+        logger.info(f"Polling for new messages: agent_id={agent_id}, last_checked={last_checked.isoformat()}")
+
         # Use the single fetch_agent_data implementation with server-side filtering
         data = await _fetch_agent_data_impl(agent_id, since=last_checked.isoformat())
-        new_messages = data.get('messages', [])
+        new_messages = data.get("messages", [])
         new_messages = project_model_context_after_compaction(new_messages)
 
         # Drop sub-agent internal work-stream rows before crossing the activity
@@ -813,11 +817,9 @@ async def poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict[
             )
 
         return new_messages
-        
+
     except Exception as e:
-        logger.error(
-            f"Failed to poll messages: agent_id={agent_id}, error={str(e)}"
-        )
+        logger.error(f"Failed to poll messages: agent_id={agent_id}, error={str(e)}")
         raise
 
 
@@ -847,10 +849,7 @@ async def post_agent_message(
 
         config = load_config()
 
-        payload = {
-            "message": text,
-            "role": role
-        }
+        payload = {"message": text, "role": role}
 
         # Add metadata if provided
         if metadata:
@@ -859,34 +858,29 @@ async def post_agent_message(
         # Add file_pointer for file attachment messages (OAI-style)
         if file_pointer:
             payload["file_pointer"] = file_pointer
-        
+
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{config.backend.api_url}/api/agents/{agent_id}/messages",
                 json=payload,
-                headers={
-                    "X-API-Key": config.backend.api_key,
-                    "Content-Type": "application/json"
-                },
-                timeout=30.0
+                headers={"X-API-Key": config.backend.api_key, "Content-Type": "application/json"},
+                timeout=30.0,
             )
             if response.status_code != 201:
                 logger.error(
                     f"Failed to post message - HTTP error: agent_id={agent_id}, status_code={response.status_code}, response_body={response.text}, payload={payload}"
                 )
-            
+
             response.raise_for_status()
-            
+
             message = response.json()
-            
+
             logger.info(
                 f"Message posted: agent_id={agent_id}, message_id={message.get('message_id')}, role={role}, has_metadata={metadata is not None}"
             )
-            
+
             return message
-            
+
     except Exception as e:
-        logger.error(
-            f"Failed to post message: agent_id={agent_id}, error={str(e)}"
-        )
+        logger.error(f"Failed to post message: agent_id={agent_id}, error={str(e)}")
         raise

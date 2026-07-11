@@ -165,6 +165,14 @@ export function handleAssistantStream(
 
       const accumulatedText = (existing?.text || '') + chunk.delta;
 
+      if (chunk.done && chunk.clear_on_done) {
+        if (accumulatedText.trim()) {
+          streamedTextsRef.current.add(accumulatedText.trim());
+        }
+        newMap.delete(chunk.stream_id);
+        return newMap;
+      }
+
       let timeoutId: number | undefined;
       if (chunk.done) {
         if (accumulatedText.trim()) {
@@ -252,6 +260,7 @@ export function handleToolStream(
       tool_call_id: tool.tool_call_id,
       tool_name: tool.tool_name,
       title: tool.title,
+      subAgentId: tool.subAgentId ?? prev.get(tool.tool_call_id)?.subAgentId,
       charCount: tool.char_count ?? prev.get(tool.tool_call_id)?.charCount ?? 0,
       startedAtMs: tool.llm_started_at_ms ?? prev.get(tool.tool_call_id)?.startedAtMs ?? Date.now(),
       isClaude: tool.is_claude ?? prev.get(tool.tool_call_id)?.isClaude ?? false,
