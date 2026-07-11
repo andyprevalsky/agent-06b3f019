@@ -80,7 +80,11 @@ export default function PrimaryMetricSection({ data }: { data: AdminHealthData }
                 />
                 <XAxis dataKey="label" tickLine={false} axisLine={false} fontSize={12} />
                 <YAxis tickFormatter={moneyTick} tickLine={false} axisLine={false} fontSize={12} />
-                <Tooltip formatter={(value) => formatCurrency(Number(value))} />
+                <Tooltip
+                  formatter={(value) =>
+                    formatCurrency(value === null || value === undefined ? null : Number(value))
+                  }
+                />
                 <Area
                   type="monotone"
                   dataKey="revenueCents"

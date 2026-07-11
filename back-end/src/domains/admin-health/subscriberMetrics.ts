@@ -1,6 +1,7 @@
 import type { AdminHealthPeriod } from './types';
 
 const ACTIVE_SUBSCRIPTION_STATUSES = new Set(['active', 'trialing']);
+const NEVER_ACTIVATED_SUBSCRIPTION_STATUSES = new Set(['incomplete', 'incomplete_expired']);
 
 export interface SubscriberLifecycle {
   customerId: string;
@@ -15,12 +16,14 @@ export interface SubscriberSeriesPoint {
 }
 
 function isCountableLifecycle(lifecycle: SubscriberLifecycle): boolean {
-  return ACTIVE_SUBSCRIPTION_STATUSES.has(lifecycle.status) || lifecycle.endedAt !== null;
+  return !NEVER_ACTIVATED_SUBSCRIPTION_STATUSES.has(lifecycle.status);
 }
 
-function wasSubscribedAt(lifecycle: SubscriberLifecycle, at: number): boolean {
+function wasSubscribedAt(lifecycle: SubscriberLifecycle, at: number, now: number): boolean {
+  const isCurrentSnapshot = at >= now && lifecycle.endedAt === null;
   return (
     isCountableLifecycle(lifecycle) &&
+    (!isCurrentSnapshot || ACTIVE_SUBSCRIPTION_STATUSES.has(lifecycle.status)) &&
     lifecycle.startedAt.getTime() < at &&
     (lifecycle.endedAt === null || lifecycle.endedAt.getTime() > at)
   );
@@ -46,7 +49,7 @@ export function buildSubscriberSeries(
     const end = Math.min(Date.parse(period.end), now.getTime());
     const subscribedCustomers = new Set(
       eligible
-        .filter((lifecycle) => wasSubscribedAt(lifecycle, end))
+        .filter((lifecycle) => wasSubscribedAt(lifecycle, end, now.getTime()))
         .map((lifecycle) => lifecycle.customerId)
     );
     const newUsers = Array.from(firstSubscriptionByCustomer.values()).filter(

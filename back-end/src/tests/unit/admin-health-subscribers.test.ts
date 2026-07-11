@@ -53,13 +53,37 @@ const series = buildSubscriberSeries(
       endedAt: null,
       status: 'past_due',
     },
+    {
+      customerId: 'cus_unpaid',
+      startedAt: new Date('2026-01-15T00:00:00.000Z'),
+      endedAt: null,
+      status: 'unpaid',
+    },
+    {
+      customerId: 'cus_paused',
+      startedAt: new Date('2026-02-05T00:00:00.000Z'),
+      endedAt: null,
+      status: 'paused',
+    },
+    {
+      customerId: 'cus_incomplete',
+      startedAt: new Date('2026-01-25T00:00:00.000Z'),
+      endedAt: null,
+      status: 'incomplete',
+    },
+    {
+      customerId: 'cus_never_activated',
+      startedAt: new Date('2026-01-03T00:00:00.000Z'),
+      endedAt: new Date('2026-01-04T00:00:00.000Z'),
+      status: 'incomplete_expired',
+    },
   ],
   new Date('2026-03-01T00:00:00.000Z')
 );
 
 assert.deepStrictEqual(series, [
+  { userCount: 4, newUsers: 4 },
   { userCount: 2, newUsers: 2 },
-  { userCount: 2, newUsers: 1 },
 ]);
 
 console.log('admin-health subscriber series: passed');

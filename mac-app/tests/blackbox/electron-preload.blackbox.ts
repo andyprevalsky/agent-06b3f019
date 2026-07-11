@@ -122,6 +122,10 @@ describe('contextBridge installation', () => {
     const keys = exposeCalls.map((c) => c.key);
     expect(keys).toEqual(['api']);
   });
+
+  it('exposes an explicit Electron renderer sentinel', () => {
+    expect(exposedApi().isElectron).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------

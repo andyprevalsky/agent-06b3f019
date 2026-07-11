@@ -12,6 +12,7 @@ function addDays(date: Date, days: number): Date {
 }
 
 function addMonths(date: Date, months: number): Date {
+  // Callers must pass day-1 dates; setUTCMonth overflows month-end dates.
   const next = new Date(date);
   next.setUTCMonth(next.getUTCMonth() + months);
   return next;

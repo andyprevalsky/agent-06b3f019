@@ -401,7 +401,13 @@ function EfficiencyCharts({ data }: { data: AdminHealthData }) {
                 axisLine={false}
                 fontSize={12}
               />
-              <Tooltip formatter={(value) => formatPercent(Number(value))} />
+              <Tooltip
+                formatter={(value) =>
+                  value === null || value === undefined
+                    ? 'Unavailable'
+                    : formatPercent(Number(value))
+                }
+              />
               <Line
                 type="monotone"
                 dataKey="taskCompletionRate"

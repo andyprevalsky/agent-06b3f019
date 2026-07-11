@@ -7,7 +7,7 @@ export function resolveBackendBaseUrl(
     : window.location,
   allowDynamicLocalInference = !import.meta.env.VITEST,
   electronRenderer = typeof window !== 'undefined' &&
-    (window as typeof window & { api?: unknown }).api !== undefined,
+    (window as typeof window & { api?: { isElectron?: boolean } }).api?.isElectron === true,
 ): string {
   const explicit = explicitUrl ? explicitUrl.replace(/\/$/, '') : '';
   if (electronRenderer) return explicit || 'http://localhost:3001';

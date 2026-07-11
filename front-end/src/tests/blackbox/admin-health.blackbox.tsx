@@ -157,12 +157,14 @@ function installAdminHealthHandler() {
 
 describe('AdminHealth page', () => {
   beforeEach(() => {
+    sessionStorage.clear();
     mockSession();
     installAdminHealthHandler();
   });
 
   afterEach(() => {
     localStorage.clear();
+    sessionStorage.clear();
   });
 
   it('renders company health metrics and charts from the admin endpoint', async () => {
@@ -250,7 +252,7 @@ describe('AdminHealth page', () => {
     });
   });
 
-  it('reuses a fresh local cache instead of refetching the same slice', async () => {
+  it('reuses a fresh session cache without persisting admin metrics locally', async () => {
     clearCaptures();
     await fetchAdminHealthData('weekly');
     await fetchAdminHealthData('weekly');
@@ -260,5 +262,24 @@ describe('AdminHealth page', () => {
         request.method === 'GET' && request.url.includes('/admin-health?timeSlice=weekly'),
     );
     expect(requests).toHaveLength(1);
+    expect(Object.keys(localStorage).some((key) => key.startsWith('admin-health:'))).toBe(false);
+    expect(Object.keys(sessionStorage).some((key) => key.startsWith('admin-health:'))).toBe(true);
+  });
+
+  it('does not share cached admin metrics across authenticated users', async () => {
+    clearCaptures();
+    await fetchAdminHealthData('weekly');
+    const nextSession = JSON.parse(localStorage.getItem('rose-session') ?? '{}') as {
+      user: { id: string };
+    };
+    nextSession.user.id = 'another-admin';
+    localStorage.setItem('rose-session', JSON.stringify(nextSession));
+    await fetchAdminHealthData('weekly');
+
+    const requests = capturedRequests.filter(
+      (request) =>
+        request.method === 'GET' && request.url.includes('/admin-health?timeSlice=weekly'),
+    );
+    expect(requests).toHaveLength(2);
   });
 });

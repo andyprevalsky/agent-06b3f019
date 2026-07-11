@@ -52,9 +52,15 @@ export function getStripeMetricsClient(): Stripe {
 
 export async function getVerifiedStripeMetricsClient(): Promise<Stripe> {
   const client = getStripeMetricsClient();
-  stripeMetricsAccountVerification ??= client.accounts.retrieve().then((account) => {
-    assertStripeMetricsAccountId(STRIPE_METRICS_ACCOUNT_ID, account.id);
-  });
+  stripeMetricsAccountVerification ??= client.accounts
+    .retrieve()
+    .then((account) => {
+      assertStripeMetricsAccountId(STRIPE_METRICS_ACCOUNT_ID, account.id);
+    })
+    .catch((error: unknown) => {
+      stripeMetricsAccountVerification = null;
+      throw error;
+    });
   await stripeMetricsAccountVerification;
   return client;
 }

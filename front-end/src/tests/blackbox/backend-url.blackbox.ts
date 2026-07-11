@@ -50,6 +50,33 @@ describe('backend URL resolution', () => {
     ).toBe('http://localhost:3001');
   });
 
+  it('recognizes Electron only through the dedicated preload sentinel', () => {
+    window.api = { isElectron: true };
+    expect(
+      resolveBackendBaseUrl(
+        'http://localhost:3001',
+        {
+          protocol: 'http:',
+          hostname: 'localhost',
+          port: '55121',
+        },
+        true,
+      ),
+    ).toBe('http://localhost:3001');
+    window.api = {};
+    expect(
+      resolveBackendBaseUrl(
+        'http://localhost:3001',
+        {
+          protocol: 'http:',
+          hostname: 'localhost',
+          port: '55121',
+        },
+        true,
+      ),
+    ).toBe('http://localhost:55120');
+  });
+
   it('uses the same-origin Vite proxy when a public dev host has a local backend URL', () => {
     expect(
       resolveBackendBaseUrl(

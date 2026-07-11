@@ -32,6 +32,8 @@ interface PageInfo {
   endCursor?: string | null;
 }
 
+const GITHUB_MAX_COMMIT_PAGES = 500;
+
 function unavailableSeries(label: string, detail: string, count: number): MetricSeries {
   return {
     values: Array.from({ length: count }, () => null),
@@ -137,7 +139,7 @@ async function fetchGithubItems(start: Date, end: Date): Promise<DatedValue[]> {
   const [owner, repoName] = GITHUB_REPO.split('/');
   if (!owner || !repoName) throw new Error(`Invalid ADMIN_HEALTH_GITHUB_REPO: ${GITHUB_REPO}`);
   const items: DatedValue[] = [];
-  for (let page = 1; page <= 100; page += 1) {
+  for (let page = 1; page <= GITHUB_MAX_COMMIT_PAGES; page += 1) {
     const url = new URL(`https://api.github.com/repos/${owner}/${repoName}/commits`);
     url.searchParams.set('since', start.toISOString());
     url.searchParams.set('until', end.toISOString());
@@ -161,6 +163,13 @@ async function fetchGithubItems(start: Date, end: Date): Promise<DatedValue[]> {
       }
     }
     if (commits.length < 100) return items;
+    if (page === GITHUB_MAX_COMMIT_PAGES) {
+      log.warn('GitHub commit pagination reached its safety limit', {
+        owner,
+        repo: repoName,
+        maxPages: GITHUB_MAX_COMMIT_PAGES,
+      });
+    }
   }
   return items;
 }
