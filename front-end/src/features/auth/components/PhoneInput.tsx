@@ -21,6 +21,7 @@ import {
   DEFAULT_COUNTRY,
   composeE164,
   detectCountry,
+  detectCountryExact,
   formatNationalDigits,
   getDialCode,
   nationalDigits,
@@ -55,9 +56,11 @@ function PhoneInput({
   const [country, setCountry] = useState<CountryCode>(DEFAULT_COUNTRY);
 
   // Re-sync the selector when the outer value carries a different country
-  // (paste of a full +52… number, restored form state, etc.).
+  // (paste of a full +52… number, restored form state, etc.). Exact parses
+  // only — ambiguous shared-code prefixes (+1 US/CA, +7 RU/KZ) must not
+  // override a manually selected country while the user is still typing.
   useEffect(() => {
-    const detected = detectCountry(value);
+    const detected = detectCountryExact(value);
     if (detected !== undefined && detected !== country) setCountry(detected);
   }, [value, country]);
 

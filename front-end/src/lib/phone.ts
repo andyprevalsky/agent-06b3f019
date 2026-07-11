@@ -111,10 +111,21 @@ export function formatNationalDigits(country: CountryCode, national: string): st
   return new AsYouType(country).input(digits);
 }
 
+/**
+ * Exact country from a complete, parseable international number.
+ * Returns undefined for partial/ambiguous input (e.g. a bare `+1…`), so
+ * callers can avoid overriding a manually selected country that shares a
+ * calling code (US/CA on +1, RU/KZ on +7).
+ */
+export function detectCountryExact(value: string): CountryCode | undefined {
+  if (!value.startsWith('+')) return undefined;
+  return parsePhoneNumberFromString(value)?.country;
+}
+
 /** Detect the country from a typed/pasted international value (`+52…`). */
 export function detectCountry(value: string): CountryCode | undefined {
   if (!value.startsWith('+')) return undefined;
-  const exact = parsePhoneNumberFromString(value)?.country;
+  const exact = detectCountryExact(value);
   if (exact !== undefined) return exact;
   // Partial input: longest matching dial code wins; picker order breaks ties.
   const digits = value.replace(/\D/g, '');

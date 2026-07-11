@@ -78,6 +78,17 @@ describe('PhoneInput (via PhoneAuthModal)', () => {
     expect(screen.getByLabelText('Country code')).toHaveValue('MX');
   });
 
+  it('does not snap a manual Canada choice back to US while typing (+1 is ambiguous)', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<PhoneAuthModal open={true} onOpenChange={onOpenChange} />);
+
+    await user.selectOptions(screen.getByLabelText('Country code'), 'CA');
+    // Partial +1 number: prefix-fallback would say US; exact parse says nothing yet
+    await user.type(screen.getByLabelText('Phone Number'), '20455');
+
+    expect(screen.getByLabelText('Country code')).toHaveValue('CA');
+  });
+
   it('keeps national digits when switching countries', async () => {
     const user = userEvent.setup();
     renderWithProviders(<PhoneAuthModal open={true} onOpenChange={onOpenChange} />);
