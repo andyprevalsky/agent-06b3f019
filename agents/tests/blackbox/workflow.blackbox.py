@@ -1723,8 +1723,8 @@ async def test_workflow_schema_refresh_skips_context_message_when_unchanged():
         _restore_workflow(original)
 
 
-async def test_workflow_schema_refresh_failure_blocks_stale_verification():
-    """A terminal refresh failure must not silently verify against the old schema."""
+async def test_workflow_schema_refresh_failure_falls_back_until_new_feedback():
+    """A terminal refresh failure keeps the last schema and later feedback can retry."""
     wf = _bare_workflow_instance()
     wf.agent_id = "agent-1"
     wf.user_id = "user-1"
@@ -1743,23 +1743,33 @@ async def test_workflow_schema_refresh_failure_blocks_stale_verification():
         await wf.receive_user_response("Also include prices")
         await asyncio.sleep(0)
 
-        try:
-            await wf._wait_for_response_schema_refresh()
-            raise AssertionError("Expected pending schema failure to block stale verification")
-        except RuntimeError as exc:
-            assert "response schema" in str(exc).lower()
+        await wf._wait_for_response_schema_refresh()
 
-        assert wf._response_schema_applied_revision == 0
+        assert wf._response_schema_applied_revision == 1
         assert wf._response_schema_revision == 1
         assert wf._response_schema_refresh_failed_revision == 1
+        assert wf._response_schema_refresh_error is None
         schema_messages = [c for c in fake.activity_calls if c[0] == "post_agent_message"]
         assert schema_messages == []
+
+        replacement_schema = {
+            "fields": [{"name": "venue_prices", "type": "list[int]", "required": True}],
+        }
+        fake.activity_returns["set_response_schema_activity"] = {
+            "schema": replacement_schema,
+            "usage": {},
+        }
+        await wf.receive_user_response("Prices are now required")
+        await wf._wait_for_response_schema_refresh()
+
+        assert wf.output_schema == replacement_schema
+        assert wf._response_schema_applied_revision == 2
     finally:
         _restore_workflow(original)
 
 
-async def test_workflow_schema_refresh_message_failure_blocks_stale_verification():
-    """The revision is not applied until its hidden context message is durable."""
+async def test_workflow_schema_refresh_message_failure_falls_back_to_last_schema():
+    """A failed hidden context write keeps the last durable schema without blocking."""
     wf = _bare_workflow_instance()
     wf.agent_id = "agent-1"
     wf.user_id = "user-1"
@@ -1782,14 +1792,11 @@ async def test_workflow_schema_refresh_message_failure_blocks_stale_verification
         await wf.receive_user_response("Return venue prices")
         await asyncio.sleep(0)
 
-        try:
-            await wf._wait_for_response_schema_refresh()
-            raise AssertionError("Expected message delivery failure to block stale verification")
-        except RuntimeError as exc:
-            assert "response schema" in str(exc).lower()
+        await wf._wait_for_response_schema_refresh()
 
         assert wf.output_schema != replacement_schema
-        assert wf._response_schema_applied_revision == 0
+        assert wf._response_schema_applied_revision == 1
+        assert wf._response_schema_refresh_error is None
     finally:
         _restore_workflow(original)
 
@@ -2690,12 +2697,23 @@ async def test_workflow_handle_incomplete_max_iterations():
     fake = _FakeWorkflowModule()
     original = _patch_workflow(fake)
     try:
+        events = []
+
+        async def wait_for_refresh():
+            events.append("refresh")
+
+        async def mark_failed(**_kwargs):
+            events.append("failed")
+
+        wf._wait_for_response_schema_refresh = wait_for_refresh
+        wf._mark_failed = mark_failed
         result = await wf._handle_incomplete(
             {"status": "max_iterations", "context": [], "verifier_progress": 0.5},
             phase="EXECUTE",
         )
         assert result["status"] == "failed"
         assert result["reason"] == "max_iterations"
+        assert events == ["refresh", "failed"]
     finally:
         _restore_workflow(original)
 
@@ -2710,12 +2728,23 @@ async def test_workflow_handle_incomplete_error():
     fake = _FakeWorkflowModule()
     original = _patch_workflow(fake)
     try:
+        events = []
+
+        async def wait_for_refresh():
+            events.append("refresh")
+
+        async def mark_failed(**_kwargs):
+            events.append("failed")
+
+        wf._wait_for_response_schema_refresh = wait_for_refresh
+        wf._mark_failed = mark_failed
         result = await wf._handle_incomplete(
             {"status": "error", "context": [], "message": "Bad happened"},
             phase="EXECUTE",
         )
         assert result["status"] == "failed"
         assert result["reason"] == "error"
+        assert events == ["refresh", "failed"]
     finally:
         _restore_workflow(original)
 
@@ -4144,12 +4173,12 @@ async def run_all_tests():
         test_workflow_schema_refresh_skips_context_message_when_unchanged,
     )
     await r.record_async(
-        "wf_schema_refresh_failure_blocks_verifier",
-        test_workflow_schema_refresh_failure_blocks_stale_verification,
+        "wf_schema_refresh_failure_falls_back",
+        test_workflow_schema_refresh_failure_falls_back_until_new_feedback,
     )
     await r.record_async(
-        "wf_schema_message_failure_blocks_verifier",
-        test_workflow_schema_refresh_message_failure_blocks_stale_verification,
+        "wf_schema_message_failure_falls_back",
+        test_workflow_schema_refresh_message_failure_falls_back_to_last_schema,
     )
     await r.record_async(
         "wf_schema_refresh_reloads_feedback",

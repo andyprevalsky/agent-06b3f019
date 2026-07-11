@@ -1423,7 +1423,19 @@ class AgentWorkflow:
                 self._response_schema_refresh_error is not None
                 and self._response_schema_refresh_failed_revision >= self._response_schema_revision
             ):
-                raise RuntimeError(f"Response schema refresh failed: {self._response_schema_refresh_error}")
+                failed_revision = self._response_schema_refresh_failed_revision
+                workflow.logger.error(
+                    f"Response schema refresh failed at revision {failed_revision}: "
+                    f"{self._response_schema_refresh_error}. Continuing with the last accepted output_schema."
+                )
+                # Consume only the failed revision. Later feedback increments
+                # _response_schema_revision and starts a fresh refresh.
+                self._response_schema_applied_revision = max(
+                    self._response_schema_applied_revision,
+                    failed_revision,
+                )
+                self._response_schema_refresh_error = None
+                return
             self._start_response_schema_refresh()
             task = self._response_schema_refresh_task
             if task is None:
@@ -2971,6 +2983,7 @@ class AgentWorkflow:
             return result
 
         if result["status"] == "max_iterations":
+            await self._wait_for_response_schema_refresh()
             await self._mark_failed(
                 context=result.get("context", []),
                 reason="max_iterations",
@@ -2982,6 +2995,7 @@ class AgentWorkflow:
             return {"status": "failed", "reason": "max_iterations", "goal": self.goal}
 
         if result["status"] == "error":
+            await self._wait_for_response_schema_refresh()
             await self._mark_failed(
                 context=result.get("context", []),
                 reason="error",
