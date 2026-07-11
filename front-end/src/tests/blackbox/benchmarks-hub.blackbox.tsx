@@ -143,6 +143,25 @@ function toDetail(run: (typeof RUNS)['runs'][number]) {
       tokens_out: 200,
       agents: 2,
     },
+    code: 'main@abc1234 (clean)',
+    elapsed_s: 41,
+    cost: {
+      agents_llm_usd: 0.03,
+      wmh_grounding_usd: 0,
+      infra_usd: 0.01,
+      total_usd: 0.04,
+      fast_cache_hit_rate: 98,
+    },
+    dispatch: run.live
+      ? {
+          status: 'running',
+          created_at: '2026-07-10T00:59:00Z',
+          claimed_at: '2026-07-10T00:59:30Z',
+          claimed_by: 'test-poller:1',
+          updated_at: '2026-07-10T01:00:00Z',
+          error: null,
+        }
+      : null,
   };
 }
 
@@ -367,7 +386,17 @@ describe('BenchmarksView (in-app hub)', () => {
     await waitFor(() => expect(screen.getByTestId('benchmark-run-view')).toBeInTheDocument());
     await waitFor(() => expect(screen.getByTestId('run-tiles')).toBeInTheDocument());
     expect(screen.getByTestId('run-view-task-chat-mode')).toBeInTheDocument();
-    expect(screen.getByTestId('run-tiles').textContent).toContain('$0.03');
+    const tiles = screen.getByTestId('run-tiles').textContent ?? '';
+    expect(tiles).toContain('$0.04'); // total from the cost breakdown
+    expect(tiles).toContain('LLM $0.03'); // LLM · WMH · infra sub-line
+    expect(tiles).toContain('infra $0.01');
+    expect(tiles).toContain('Success');
+    expect(tiles).toContain('100%'); // success rate + cache hit
+    expect(tiles).toContain('Elapsed');
+    // code provenance from the executing controller
+    expect(screen.getByTestId('run-code').textContent).toContain('main@abc1234');
+    // finished run → no dispatch timeline
+    expect(screen.queryByTestId('dispatch-timeline')).not.toBeInTheDocument();
 
     // Open agent → hands the agent to the app's MAIN panel (normal chat view)
     fireEvent.click(screen.getByTestId('run-view-open-chat-mode'));
@@ -487,6 +516,12 @@ describe('BenchmarksView edge states', () => {
     fireEvent.click(screen.getByTestId('run-row-run-live'));
     await waitFor(() => expect(screen.getByTestId('run-view-open-chat-mode')).toBeInTheDocument());
     expect(screen.getByTestId('run-view-open-chat-mode')).toBeDisabled();
+    // live run → dispatch timeline with the fleet startup-bar essence
+    const timeline = screen.getByTestId('dispatch-timeline').textContent ?? '';
+    expect(timeline).toContain('Queued');
+    expect(timeline).toContain('Claimed by poller');
+    expect(timeline).toContain('test-poller:1');
+    expect(timeline).toContain('Stack starting');
   });
 
   it('shows the dispatch error when the run request fails (B15)', async () => {

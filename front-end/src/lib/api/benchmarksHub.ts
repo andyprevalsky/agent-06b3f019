@@ -95,6 +95,23 @@ export interface HubRunTaskDetail extends HubRunTask {
   message_count: number | null;
 }
 
+export interface HubRunCost {
+  agents_llm_usd: number | null;
+  wmh_grounding_usd: number | null;
+  infra_usd: number | null;
+  total_usd: number | null;
+  fast_cache_hit_rate: number | null;
+}
+
+export interface HubRunDispatch {
+  status: string;
+  created_at: string;
+  claimed_at: string | null;
+  claimed_by: string | null;
+  updated_at: string;
+  error: string | null;
+}
+
 export interface HubRunDetail extends Omit<HubRun, 'tasks'> {
   tasks: HubRunTaskDetail[];
   totals: {
@@ -106,6 +123,10 @@ export interface HubRunDetail extends Omit<HubRun, 'tasks'> {
     tokens_out: number;
     agents: number;
   };
+  code: string | null;
+  elapsed_s: number | null;
+  cost: HubRunCost | null;
+  dispatch: HubRunDispatch | null;
 }
 
 export interface HubTreeNode {

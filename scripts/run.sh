@@ -1146,6 +1146,15 @@ else
 fi
 PIDS+=($!); NAMES+=("agents")
 
+# Benchmark Hub poller: claims runs dispatched from the in-app Benchmarks tab
+# and executes them on this machine. Without it a dispatched run sits queued
+# forever — the hub's basic flow MUST work on a plain dev stack. Skipped in
+# benchmark mode (the isolated bench stack must never claim hub dispatches).
+if ! $BENCHMARK_MODE; then
+    run_service "hub-poller" bash -c 'set -eo pipefail; rm -f hub-poller-logs.log && HUB_URL=http://localhost:$BACKEND_PORT scripts/run-bench-hub-poller --local 2>&1 | tee hub-poller-logs.log' &
+    PIDS+=($!); NAMES+=("hub-poller")
+fi
+
 # World Model Harness (benchmark/simulate only — never prod). Builds from the
 # trace corpus and serves on WMH_PORT; sets WMH_BASE_URL/WMH_MODEL_NAME + manifest
 # fields when it comes up. A no-op on plain (non-benchmark) run.sh.

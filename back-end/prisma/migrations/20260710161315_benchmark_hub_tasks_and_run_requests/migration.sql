@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS "BenchmarkRunRequest" (
     "taskNames" TEXT[],
     "simOn" TEXT[] DEFAULT ARRAY[]::TEXT[],
     "status" TEXT NOT NULL DEFAULT 'queued',
+    "scope" TEXT,
     "requestedBy" TEXT NOT NULL,
     "claimedBy" TEXT,
     "claimedAt" TIMESTAMP(3),
@@ -53,3 +54,6 @@ CREATE INDEX IF NOT EXISTS "BenchmarkTask_status_idx" ON "BenchmarkTask"("status
 -- CreateIndex
 CREATE INDEX IF NOT EXISTS "BenchmarkRunRequest_status_createdAt_idx" ON "BenchmarkRunRequest"("status", "createdAt");
 
+
+-- Idempotent for DBs where the table pre-exists (accidental prod push)
+ALTER TABLE "BenchmarkRunRequest" ADD COLUMN IF NOT EXISTS "scope" TEXT;

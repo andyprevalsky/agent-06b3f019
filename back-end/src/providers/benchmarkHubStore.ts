@@ -37,10 +37,7 @@ export const BENCHMARK_HUB_ADMIN_USER_IDS = new Set([
 
 /** Internal API key or an allowlisted team member may read the benchmark
  * archive through the normal agent APIs. */
-export function canReadBenchmarkArchive(req: {
-  isInternal?: boolean;
-  userId?: string;
-}): boolean {
+export function canReadBenchmarkArchive(req: { isInternal?: boolean; userId?: string }): boolean {
   if (req.isInternal === true) return true;
   return req.userId !== undefined && BENCHMARK_HUB_ADMIN_USER_IDS.has(req.userId);
 }
@@ -247,6 +244,14 @@ export interface HubRunTaskDetail extends HubRunTaskSummary {
   message_count: number | null;
 }
 
+export interface HubRunCost {
+  agents_llm_usd: number | null;
+  wmh_grounding_usd: number | null;
+  infra_usd: number | null;
+  total_usd: number | null;
+  fast_cache_hit_rate: number | null;
+}
+
 export interface HubRunDetail extends Omit<HubRunSummary, 'tasks'> {
   tasks: HubRunTaskDetail[];
   totals: {
@@ -258,6 +263,12 @@ export interface HubRunDetail extends Omit<HubRunSummary, 'tasks'> {
     tokens_out: number;
     agents: number;
   };
+  /** Code provenance from the executing controller (branch@ref + dirty diff). */
+  code: string | null;
+  /** Run wall-clock from the report card (falls back to now - timestamp live). */
+  elapsed_s: number | null;
+  /** Report-card cost breakdown (LLM / WMH grounding / infra vCPU / total). */
+  cost: HubRunCost | null;
 }
 
 /**
@@ -298,7 +309,25 @@ export async function getRunDetail(runId: string): Promise<HubRunDetail | null> 
     tokens_out: tasks.reduce((s, t) => s + (t.tokens_out ?? 0), 0),
     agents: tasks.reduce((s, t) => s + (t.tree_agent_count ?? 0), 0),
   };
-  return { ...summary, tasks, totals };
+  const rawCost = (bundle?.cost ?? null) as Record<string, unknown> | null;
+  const cost: HubRunCost | null =
+    rawCost === null
+      ? null
+      : {
+          agents_llm_usd: num(rawCost.agents_llm_usd),
+          wmh_grounding_usd: num(rawCost.wmh_grounding_usd),
+          infra_usd: num(rawCost.infra_usd),
+          total_usd: num(rawCost.total_usd),
+          fast_cache_hit_rate: num(rawCost.fast_cache_hit_rate),
+        };
+  return {
+    ...summary,
+    tasks,
+    totals,
+    code: typeof bundle?.code === 'string' && bundle.code !== '' ? bundle.code : null,
+    elapsed_s: num(bundle?.elapsed_s),
+    cost,
+  };
 }
 
 function frontendMessage(

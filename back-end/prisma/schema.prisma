@@ -817,6 +817,10 @@ model BenchmarkRunRequest {
   taskNames   String[]
   simOn       String[]  @default([])
   status      String    @default("queued") // queued | running | completed | failed | cancelled
+  // Claim scope: pollers only claim requests matching their scope. Unscoped
+  // (null) = normal user dispatches, claimed by the default stack poller.
+  // Tests dispatch with a private scope so they never race real pollers.
+  scope       String?
   requestedBy String
   claimedBy   String? // poller identity (host:pid)
   claimedAt   DateTime?

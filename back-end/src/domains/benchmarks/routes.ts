@@ -202,7 +202,7 @@ router.get(
   auth,
   requireHubAdmin,
   asyncHandler<HybridAuthRequest>(async (req, res) => {
-    const run = await hubStore.getRunDetail(req.params.id);
+    const run = await service.getRunView(req.params.id);
     if (run === null) {
       res.status(404).json({ error: 'Run not found' });
       return;

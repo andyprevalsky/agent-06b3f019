@@ -415,11 +415,12 @@ async function testRunRequests_lifecycle(): Promise<void> {
   const created = await request(`${BASE_URL}/api/benchmarks/run-requests`, {
     method: 'POST',
     headers: internalHeaders,
-    body: JSON.stringify({ task_names: ['chat-mode'] }),
+    body: JSON.stringify({ task_names: ['chat-mode'], scope: `blackbox-${process.pid}` }),
   });
   assertStatus(created.status, 201, created.data);
-  const createdRequest = (created.data as { request: { id: string; status: string; runId: string | null } })
-    .request;
+  const createdRequest = (
+    created.data as { request: { id: string; status: string; runId: string | null } }
+  ).request;
   const id = createdRequest.id;
   assert(createdRequest.status === 'queued', 'new request not queued');
   // INVARIANT: dispatched runs always link to a run dashboard immediately.
@@ -492,7 +493,7 @@ async function testRunRequests_cancelOnlyFromQueued(): Promise<void> {
   const created = await request(`${BASE_URL}/api/benchmarks/run-requests`, {
     method: 'POST',
     headers: internalHeaders,
-    body: JSON.stringify({ task_names: ['chat-mode'] }),
+    body: JSON.stringify({ task_names: ['chat-mode'], scope: `blackbox-${process.pid}` }),
   });
   assertStatus(created.status, 201, created.data);
   const id = (created.data as { request: { id: string } }).request.id;

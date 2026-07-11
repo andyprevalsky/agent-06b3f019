@@ -39,6 +39,20 @@ fi
 USER_ID="${HUB_USER_ID:-1f85ff25-6e29-4c1b-8739-f917bd101a30}"
 CLAIMED_BY="$(hostname -s):$$"
 
+# Code provenance — make it explicit what changes every dispatched run executes.
+code_summary() {
+    local branch ref dirty
+    branch="$(git branch --show-current 2>/dev/null || echo '?')"
+    ref="$(git rev-parse --short HEAD 2>/dev/null || echo '?')"
+    dirty="$(git diff HEAD --stat 2>/dev/null | tail -1 | sed 's/^ *//')"
+    if [ -n "$dirty" ]; then
+        printf '%s@%s (dirty: %s)' "$branch" "$ref" "$dirty"
+    else
+        printf '%s@%s (clean)' "$branch" "$ref"
+    fi
+}
+CODE_SUMMARY="$(code_summary)"
+
 hub() {  # hub <method> <path> [json-body]
     local method="$1" path="$2" body="${3:-}"
     if [ -n "$body" ]; then
@@ -115,7 +129,7 @@ snapshot_loop() {  # snapshot_loop <request_id> <hub_run_id> <start_epoch>
     local req_id="$1" hub_run_id="$2" start_epoch="$3"
     while :; do
         sleep 15
-        python3 - "$HUB_URL" "$BACKEND_API_KEY" "$USER_ID" "$req_id" "$hub_run_id" "$start_epoch" <<'PY' || true
+        HUB_CODE_SUMMARY="$CODE_SUMMARY" python3 - "$HUB_URL" "$BACKEND_API_KEY" "$USER_ID" "$req_id" "$hub_run_id" "$start_epoch" <<'PY' || true
 import glob, json, os, sys, urllib.request
 hub, key, user, req_id, run_id, start = sys.argv[1:7]
 start = float(start)
@@ -146,7 +160,10 @@ for row in card.get("per_task") or []:
         "fast_mode": bool(row.get("fast_mode")),
     })
 bundle = {"run_id": run_id, "timestamp": card.get("timestamp") or "", "suite": "hub-dispatch",
-          "source": "hub-poller", "tasks": tasks}
+          "source": "hub-poller", "tasks": tasks,
+          "code": os.environ.get("HUB_CODE_SUMMARY") or None,
+          "elapsed_s": card.get("elapsed_s"),
+          "cost": card.get("cost"), "metadata": card.get("metadata")}
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 def post(path, body, method="POST"):
     req = urllib.request.Request(hub.rstrip("/") + path, data=json.dumps(body).encode(),
@@ -212,12 +229,27 @@ PY
 )"
     if [ -n "$final" ]; then
         echo "   uploading final bundle: $final"
-        python3 - "$HUB_URL" "$BACKEND_API_KEY" "$USER_ID" "$req_id" "$hub_run_id" "$final" "$exit_code" <<'PY'
-import json, sys, urllib.request
-hub, key, user, req_id, run_id, path, exit_code = sys.argv[1:8]
+        # A hub outage here must NEVER kill the poller or strand the request
+        # as 'running' — on failure, spool the completion and flush it on a
+        # later loop tick (or the next poller start).
+        if ! HUB_CODE_SUMMARY="$CODE_SUMMARY" python3 - "$HUB_URL" "$BACKEND_API_KEY" "$USER_ID" "$req_id" "$hub_run_id" "$final" "$exit_code" "$start_epoch" <<'PY'
+import glob, json, os, sys, urllib.request
+hub, key, user, req_id, run_id, path, exit_code, start = sys.argv[1:9]
 bundle = json.load(open(path))
 bundle["run_id"] = run_id  # request-scoped id: stable across snapshot + final
 bundle.setdefault("source", "hub-poller")
+bundle["code"] = os.environ.get("HUB_CODE_SUMMARY") or None
+# fold the newest report card's cost breakdown + elapsed into the final bundle
+cards = [p for p in
+         glob.glob("agents/.context/benchmarks/*/report-card.json") +
+         glob.glob(".context/benchmarks/*/report-card.json") +
+         glob.glob(".context/fleet/runs/*/_batch/report-card.json")
+         if os.path.getmtime(p) > float(start)]
+if cards:
+    card = json.load(open(max(cards, key=os.path.getmtime)))
+    bundle.setdefault("cost", card.get("cost"))
+    bundle.setdefault("elapsed_s", card.get("elapsed_s"))
+    bundle.setdefault("metadata", card.get("metadata"))
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 def post(p, body, method="POST"):
     req = urllib.request.Request(hub.rstrip("/") + p, data=json.dumps(body).encode(),
@@ -232,6 +264,13 @@ if action == "fail":
 post(f"/api/benchmarks/run-requests/{req_id}", body, method="PATCH")
 print(f"request {req_id} → {action} (run {run_id})")
 PY
+        then
+            mkdir -p .context/hub-upload-spool
+            printf '{"req_id":"%s","run_id":"%s","bundle":"%s","exit_code":"%s"}\n' \
+                "$req_id" "$hub_run_id" "$final" "$exit_code" \
+                > ".context/hub-upload-spool/$req_id.json"
+            echo "   ⚠ hub unreachable — completion spooled to .context/hub-upload-spool/$req_id.json"
+        fi
     else
         echo "   ⚠ no run bundle found after exit=$exit_code"
         hub PATCH "/api/benchmarks/run-requests/$req_id" \
@@ -239,12 +278,48 @@ PY
     fi
 }
 
+flush_spool() {
+    local f
+    for f in .context/hub-upload-spool/*.json; do
+        [ -f "$f" ] || return 0
+        if python3 - "$HUB_URL" "$BACKEND_API_KEY" "$USER_ID" "$f" <<'PY'
+import json, sys, urllib.request
+hub, key, user, spool_path = sys.argv[1:5]
+rec = json.load(open(spool_path))
+bundle = json.load(open(rec["bundle"]))
+bundle["run_id"] = rec["run_id"]
+bundle.setdefault("source", "hub-poller")
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+def post(p, body, method="POST"):
+    req = urllib.request.Request(hub.rstrip("/") + p, data=json.dumps(body).encode(),
+        headers={"X-API-Key": key, "X-User-Id": user, "Content-Type": "application/json"},
+        method=method)
+    opener.open(req, timeout=60).read()
+post("/api/benchmarks/runs", bundle)
+action = "complete" if rec.get("exit_code") == "0" else "fail"
+body = {"action": action, "run_id": rec["run_id"]}
+if action == "fail":
+    body["error"] = f"run-bench exited {rec.get('exit_code')}; completion recovered from spool"
+post(f"/api/benchmarks/run-requests/{rec['req_id']}", body, method="PATCH")
+print(f"spool flush: request {rec['req_id']} → {action}")
+PY
+        then
+            rm -f "$f"
+        else
+            echo "   ⚠ spool flush failed for $f (hub still unreachable?)"
+        fi
+    done
+}
+
 echo "🛰  hub poller: $HUB_URL every ${POLL_INTERVAL}s (runner: $([ "$LOCAL_RUNNER" = "1" ] && echo local || echo cloud-fleet), claimer: $CLAIMED_BY)"
 while :; do
+    flush_spool
     queued="$(hub GET "/api/benchmarks/run-requests?status=queued" 2>/dev/null || echo '{"requests":[]}')"
-    next="$(printf '%s' "$queued" | python3 -c '
-import json, sys
-reqs = json.load(sys.stdin).get("requests") or []
+    next="$(printf '%s' "$queued" | HUB_CLAIM_SCOPE="${HUB_CLAIM_SCOPE:-}" python3 -c '
+import json, os, sys
+scope = os.environ.get("HUB_CLAIM_SCOPE") or ""
+reqs = [r for r in (json.load(sys.stdin).get("requests") or [])
+        if (r.get("scope") or "") == scope]
 reqs.sort(key=lambda r: r.get("createdAt") or "")
 print(json.dumps(reqs[0]) if reqs else "")
 ')"

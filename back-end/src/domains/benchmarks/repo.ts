@@ -32,10 +32,7 @@ export async function createTask(data: BenchmarkTaskCreate): Promise<BenchmarkTa
   return prisma.benchmarkTask.create({ data });
 }
 
-export async function updateTask(
-  name: string,
-  data: BenchmarkTaskUpdate
-): Promise<BenchmarkTask> {
+export async function updateTask(name: string, data: BenchmarkTaskUpdate): Promise<BenchmarkTask> {
   return prisma.benchmarkTask.update({ where: { name }, data });
 }
 
@@ -43,6 +40,7 @@ export async function createRunRequestRow(data: {
   taskNames: string[];
   simOn: string[];
   requestedBy: string;
+  scope: string | null;
 }): Promise<BenchmarkRunRequest> {
   return prisma.benchmarkRunRequest.create({ data });
 }
@@ -57,6 +55,10 @@ export async function listRunRequestRows(statuses?: string[]): Promise<Benchmark
 
 export async function findRunRequest(id: string): Promise<BenchmarkRunRequest | null> {
   return prisma.benchmarkRunRequest.findUnique({ where: { id } });
+}
+
+export async function findRunRequestByRunId(runId: string): Promise<BenchmarkRunRequest | null> {
+  return prisma.benchmarkRunRequest.findFirst({ where: { runId } });
 }
 
 /** Atomic queued→running transition; returns false when the claim was lost. */
