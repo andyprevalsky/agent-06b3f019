@@ -11,8 +11,10 @@
  *   npx tsx src/tests/blackbox/data-real-user.blackbox.ts
  */
 
+import { randomUUID } from 'crypto';
 import { config } from 'dotenv';
 import { z } from 'zod';
+import { prisma } from '../../providers/database';
 import { retryWithBackoff } from '../../providers/retry';
 config();
 
@@ -24,6 +26,66 @@ const CASE_CONCURRENCY = Number(
 
 // Real test user with tens of thousands of messages across hundreds of threads.
 const TEST_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+
+async function seedDeterministicCorpus(): Promise<string[]> {
+  await prisma.user.upsert({
+    where: { userId: TEST_USER_ID },
+    create: { userId: TEST_USER_ID, isAnonymous: true },
+    update: {},
+  });
+
+  const suffix = randomUUID();
+  const mom = await prisma.person.create({
+    data: {
+      userId: TEST_USER_ID,
+      firstName: 'Mom',
+      lastName: `Blackbox-${suffix}`,
+      email: `mom-${suffix}@data-blackbox.local`,
+      relation: 'family',
+      messagesExchanged: 3,
+    },
+  });
+  const maya = await prisma.person.create({
+    data: {
+      userId: TEST_USER_ID,
+      firstName: 'Maya',
+      lastName: `Blackbox-${suffix}`,
+      email: `maya-${suffix}@data-blackbox.local`,
+      company: 'Atlas Planning',
+      messagesExchanged: 2,
+    },
+  });
+
+  const now = Date.now();
+  await prisma.messageRecord.createMany({
+    data: [
+      {
+        personId: mom.id,
+        channel: 'IMESSAGE',
+        from: '+15550000001',
+        to: '+15550000002',
+        timestamp: new Date(now - 2 * 60 * 60 * 1000),
+        externalId: `dinner-${suffix}`,
+        message: 'Thanks for arranging dinner. The family meetup is at seven.',
+      },
+      {
+        personId: maya.id,
+        channel: 'EMAIL',
+        from: `maya-${suffix}@data-blackbox.local`,
+        to: 'owner@data-blackbox.local',
+        timestamp: new Date(now - 60 * 60 * 1000),
+        externalId: `meeting-${suffix}`,
+        message: 'The Atlas planning meeting is confirmed. Thanks again.',
+      },
+    ],
+  });
+
+  return [mom.id, maya.id];
+}
+
+async function cleanupDeterministicCorpus(personIds: string[]): Promise<void> {
+  await prisma.person.deleteMany({ where: { id: { in: personIds } } });
+}
 
 // ==================== RESPONSE SCHEMAS (unified Grep contract) ====================
 
@@ -389,6 +451,7 @@ async function runAll() {
   console.log(`Testing against: ${BASE_URL}`);
   console.log(`Using real test user: ${TEST_USER_ID}\n`);
 
+  const personIds = await seedDeterministicCorpus();
   const parallelTests = [
     {
       name: 'POST /data/grep -- real user with matches (full pipeline)',
@@ -413,7 +476,12 @@ async function runAll() {
   ];
 
   console.log(`Running ${parallelTests.length} tests (concurrency=${CASE_CONCURRENCY})...`);
-  const results = await runPool(parallelTests, CASE_CONCURRENCY);
+  let results: TestResult[];
+  try {
+    results = await runPool(parallelTests, CASE_CONCURRENCY);
+  } finally {
+    await cleanupDeterministicCorpus(personIds);
+  }
 
   for (const r of results) {
     console.log(
@@ -428,13 +496,16 @@ async function runAll() {
   if (failed > 0) {
     console.log('\nFAILURES:');
     results.filter((r) => !r.passed).forEach((r) => console.log(`   ${r.name}: ${r.error}`));
-    process.exit(1);
+    throw new Error(`${failed} data real-user black-box test(s) failed`);
   }
   console.log('\nALL DATA REAL-USER TESTS PASSED\n');
-  process.exit(0);
 }
 
-runAll().catch((error) => {
-  console.error('\nCrashed:', error);
-  process.exit(1);
-});
+runAll()
+  .catch((error) => {
+    console.error('\nCrashed:', error);
+    process.exitCode = 1;
+  })
+  .finally(async () => {
+    await prisma.$disconnect();
+  });
