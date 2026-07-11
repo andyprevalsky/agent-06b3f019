@@ -13,7 +13,7 @@ import type {
   AgentContextValue,
   AgentProviderProps,
 } from './types';
-import { fetchAgentDetail, postAgentMessage } from './api';
+import { benchmarkAgentPreviewEnabled, fetchAgentDetail, postAgentMessage } from './api';
 import { useRealtimeSubscription } from './hooks/useRealtimeSubscription';
 import { useVisibilityReconnect } from './hooks/useVisibilityReconnect';
 import { useHealthCheck } from './hooks/useHealthCheck';
@@ -50,6 +50,7 @@ export function useAgentProvider({
 }: ProviderDeps) {
   // canSubscribe requires both authentication AND realtime auth to be set
   const canSubscribe = (isAuthenticated ?? !!user) && (realtimeReady ?? false);
+  const canLoadBenchmarkPreview = benchmarkAgentPreviewEnabled();
 
   // ─── Agent state ─────────────────────────────────────────────────────────
   const [agent, setAgent] = useState<AgentDetail | null>(null);
@@ -132,10 +133,10 @@ export function useAgentProvider({
   // ─── Load agent from URL on mount ───────────────────────────────────────
 
   useEffect(() => {
-    if (selectedAgentId && canSubscribe && !agent) {
+    if (selectedAgentId && (canSubscribe || canLoadBenchmarkPreview) && !agent) {
       void loadAgentDetail(selectedAgentId);
     }
-  }, [canSubscribe, selectedAgentId, agent, loadAgentDetail]);
+  }, [canSubscribe, canLoadBenchmarkPreview, selectedAgentId, agent, loadAgentDetail]);
 
   // ─── Set selected agent (with load) ─────────────────────────────────────
 

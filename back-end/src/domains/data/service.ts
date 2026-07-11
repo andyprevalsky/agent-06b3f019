@@ -13,6 +13,8 @@ import {
 } from './format';
 import { formatTimeAgo } from './format.snippets';
 import {
+  DATA_SOURCE_CONFIGS,
+  isMessageFamilySource,
   type GrepMatch,
   type GrepParams,
   type GrepResult,
@@ -25,6 +27,10 @@ import { validateGrepInput } from './validate';
 import * as repo from './repo';
 import * as grepRepo from './grepRepo';
 import { createLogger } from '../../providers/logger';
+
+// Per-source connectivity lives in a dedicated file; re-export so routes can
+// keep importing it from `./service`.
+export { getSourceStatus, type SourceStatus } from './sourceStatus';
 
 const log = createLogger('Data');
 
@@ -52,7 +58,7 @@ async function searchSource(
   source: ValidSource,
   agentId: string | undefined
 ): Promise<{ total: number; matches: GrepMatch[] }> {
-  if (source === 'messages' || source === 'gmail') {
+  if (isMessageFamilySource(source)) {
     // person/since narrow the messages source only.
     let personId: string | undefined;
     const messageFilters = input.filters.messages;
@@ -61,6 +67,13 @@ async function searchSource(
       if (resolved === null) return { total: 0, matches: [] }; // requested person not found
       personId = resolved;
     }
+    // Channel-specific sources (email/imessage/whatsapp/sms) restrict to one
+    // MessageRecord.channel. `messages`/`gmail` keep searching all channels
+    // (channel stays undefined) so their SQL is byte-identical to before.
+    const channel =
+      source === 'messages' || source === 'gmail'
+        ? undefined
+        : (DATA_SOURCE_CONFIGS[source].channel ?? undefined);
     const [total, rows] = await Promise.all([
       grepRepo.countMessageGrepRows({
         userId,
@@ -68,6 +81,7 @@ async function searchSource(
         caseInsensitive: input.caseInsensitive,
         personId,
         since: messageFilters?.since,
+        channel,
       }),
       grepRepo.searchMessageGrepRows({
         userId,
@@ -77,6 +91,7 @@ async function searchSource(
         offset: input.offset,
         personId,
         since: messageFilters?.since,
+        channel,
       }),
     ]);
     return { total, matches: rows.map((row) => buildMessageMatch(row, input)) };

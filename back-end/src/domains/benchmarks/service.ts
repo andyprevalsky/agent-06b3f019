@@ -1,5 +1,9 @@
-import { readTasksFile } from './config';
+import {
+  benchmarkAgentPreviewEnabled as benchmarkAgentPreviewEnabledFromConfig,
+  readTasksFile,
+} from './config';
 import { createLogger } from '../../providers/logger';
+import * as agentQueryService from '../agents/agentQueryService';
 
 const log = createLogger('Benchmarks');
 
@@ -103,4 +107,15 @@ export function getTestPrompts(): TestPrompt[] {
           : [],
       };
     });
+}
+
+export function benchmarkAgentPreviewEnabled(): boolean {
+  return benchmarkAgentPreviewEnabledFromConfig();
+}
+
+export async function getBenchmarkAgentPreview(agentId: string) {
+  if (!benchmarkAgentPreviewEnabled()) {
+    return null;
+  }
+  return agentQueryService.getAgentDetail(agentId);
 }

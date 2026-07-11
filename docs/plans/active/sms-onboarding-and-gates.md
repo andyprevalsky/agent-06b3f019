@@ -195,11 +195,92 @@ AttentionRequest; any waiter left un-resumed after resolve.
 **Gate:** both tiers green + `tsc --noEmit` + eslint + structural invariants + backend/agents
 coverage thresholds.
 
+## Phase 3 — Fine-grained multi-source gating (IN PROGRESS)
+
+Pulls the deferred composite-source work forward. **The trigger point moves off the (dead) main-agent
+grep path onto the explore path, where grep actually runs.**
+
+### Why the old wiring never fired
+`source_connect` was raised inside `execute_grep_with_workflow`, which only runs when the **main**
+`AgentWorkflow` calls `grep` directly. But `grep` is not in `EXECUTE_PHASE_TOOLS` — the main agent can
+only reach data by spawning an **explore** sub-agent, and the explore agent runs inside a Temporal
+**activity** (`spawn_agent/service.py:spawn_explore_agent_activity`) whose grep uses the plain
+`execute_grep` path (no workflow, no gate). So the gate was wired to a code path the agent never takes;
+grep on an unconnected source silently returned empty. `execute_grep_with_workflow`'s gate branch is
+dead code — removed here.
+
+### Fine-grained sources
+`grep`'s single `source` becomes `sources: string[]` (the backend `data` grep already accepts a list +
+has a `DATA_SOURCE_CONFIGS` registry; `MessageRecord.channel` already tags each record). Channels are
+promoted to first-class sources so we never grep a blunt `messages` umbrella:
+
+| source key | backing | kind | gates? | connect resolver |
+|---|---|---|---|---|
+| `email` / `gmail` | `MessageRecord.channel=EMAIL` + `Integration name=gmail` | external | ✅ | real Gmail OAuth (`/api/integrations/email/gmail/start`) |
+| `imessage` | `channel=IMESSAGE` + `Integration name=imessage` | device-sync | ✅ | connect URL (mac-app sync) |
+| `whatsapp`, `sms` | `channel=WHATSAPP/SMS` (future) | external | ✅ | connect URL (stub ok) |
+| `transactions` | Plaid | external | ✅ | connect URL (stub ok) |
+| `documents` | chatgpt/claude export | external | ✅ | connect URL (stub ok) |
+| `network`, `agent_network` | local | local | ❌ (always available) | — |
+
+Connectivity probe = **`Integration` row with `status=CONNECTED`** for the source's connector — NOT
+message-count (a user with iMessage but no Gmail has a non-empty corpus yet no Gmail).
+
+### The gate flow (option 1, deferred-to-end)
+```
+main agent → spawn_agent(type=explore, "…email…")        [workflow]
+   └─ explore activity loop                                [activity — cannot pause]
+        └─ grep(sources=["email"])  → probe: gmail CONNECTED? NO
+              → return SOFT marker {status:"source_unavailable", source:"email"};
+                explore skips it, does not retry, finishes other work
+        └─ attempt_completion_with_result → result_payload.unavailable_sources=["email"], status=error
+   ▼ explore activity returns to parent
+   spawn_agent() handler  [workflow ctx — has _handle_tool_event/_signal_responses]
+      • explore result is FAILED (required source unavailable)
+      • for each unavailable source: raise_gate_direct(self, build_source_connect_gate(src,…),
+        key="source_connect:<src>")   → posts the new-chip gate tool call to the MAIN chat, BLOCKS
+        (dedup/fan-in from Phase 1b collapses N sub-agents needing the same source → 1 gate + waiters)
+      • RESOLVED → gate tool call = FINISHED ; spawn_agent returns failed → main agent re-spawns explore
+      • REJECTED → gate tool call = ERROR (raise_gate_direct decline branch now posts status=ERROR) ;
+        spawn_agent returns failed → main agent proceeds and reports the gap
+```
+
+Decisions (locked with the user): probe = integration-connected; explore = considered failed (no
+auto-retry — LLM re-spawns); resolved→FINISHED / rejected→ERROR tool call; granularity = fine
+(channels are first-class); scope = named concrete sources with a resolver; bare/ambiguous `messages`
+that doesn't name a connector stays non-gating (relevance inference still deferred).
+
+### Connect action = f(source, surface)
+Connectivity method depends on BOTH the source and the surface the user is on. Only `gmail` (OAuth),
+`plaid` (Plaid Link), `documents` (upload) are web-connectable; `imessage`/`sms`/`whatsapp`/`telegram`
+connect through the **mac-app** (Baileys QR / Messages DB / GramJS). WhatsApp/Telegram also have a web
+**upload** fallback (`uploadService.messaging.ts`), but `imessage`/`sms` are pure device-sync (no
+iPhone path). The mac-app already registers a `roselabs://` deep-link handler
+(`mac-app/main/app/deepLinks.ts`) and the FE already has a mac-app bridge (`SendIMessageAction`).
+
+CTA dispatch per surface: **in mac-app** → bridge opens the native connect modal (QR/login); **on web**
+→ web-connectable sources open OAuth/Plaid/upload modal, mac-app-only sources deep-link
+`roselabs://connect-source?source=<s>&agentId=<id>&gateId=<attentionRequestId>` (selects the agent,
+opens the modal, resolves the gate on success); **over SMS** → one short link to a mobile connect page.
+
+### SMS-spawned agents (mobile)
+When the agent's `source == SMS`:
+- **Web-connectable source** → gate stays **blocking**; the SMS link opens a mobile OAuth/upload page;
+  resolve → `signalAllWaiters` → agent resumes → Rose texts the result.
+- **Device-only source (`imessage`, `sms`)** → gate is **advisory**: still send the connect SMS but
+  worded clearly as **Mac-only** ("set up the Rose Mac app to sync these"), then **auto-reject +
+  continue** the run (do NOT block on `wait_condition`). The AttentionRequest persists so the user can
+  connect later on a Mac; the current run degrades and reports the gap. (WhatsApp/Telegram have an
+  upload path, so they stay blocking with an upload option — not auto-rejected.)
+
+This needs a non-blocking variant of `raise_gate_direct` (`block=False`): create the request (backend
+dispatches the Mac-only SMS), post the gate tool call, return immediately as rejected.
+
 ## Deferred / open
 
-- **Composite-source gating** — `messages` → sms/email/whatsapp expansion, source registry, and
-  advisory-vs-blocking relevance inference. `source_connect` here fires only for a tool that names
-  one concrete source; no inference.
+- **Advisory-vs-blocking relevance inference** — inferring that a bare request *would benefit* from an
+  unnamed source and proactively gating it. Fine-grained `source_connect` (Phase 3) fires only when the
+  agent explicitly names a concrete connector source; no inference.
 - **KYC hosted link** — provider exposes it; wiring the `mint` + webhook is Phase 2+.
 - **Age / 21+ verification** for alcohol — not a modeled gate. Open: dedicated `age` gate vs. fold
   into KYC.

@@ -31,9 +31,14 @@ logger = structlog.get_logger()
 
 TOOL_NAME = "gate"
 DEFAULT_SUBSCRIBE_URL = "https://roselabs.ai/subscribe"
+DEFAULT_KYC_URL = "https://roselabs.ai/kyc/start"
 
 
-def build_subscription_gate(checkout_url: Optional[str] = None, reason: Optional[str] = None) -> Dict[str, Any]:
+def build_subscription_gate(
+    checkout_url: Optional[str] = None,
+    reason: Optional[str] = None,
+    title: Optional[str] = None,
+) -> Dict[str, Any]:
     """Gate raised when an action needs an active subscription (e.g. a purchase)."""
     return {
         "gateKey": "subscription",
@@ -41,13 +46,31 @@ def build_subscription_gate(checkout_url: Optional[str] = None, reason: Optional
         "status": "PENDING",
         "severity": "blocking",
         "presentation": {
-            "title": "Subscribe to let Rose complete purchases",
+            "title": title or "Subscribe to let Rose complete purchases",
             "reason": reason
             or "You're out of free credit — an active plan lets me finish tasks that cost real money.",
             "cta": "Subscribe · $20/mo",
         },
         "action": {"kind": "link", "url": checkout_url or DEFAULT_SUBSCRIBE_URL},
         "detection": {"method": "stripe_webhook", "probeKey": "subscription"},
+    }
+
+
+def build_kyc_gate(kyc_url: Optional[str] = None, reason: Optional[str] = None) -> Dict[str, Any]:
+    """Gate raised when card issuing requires identity verification."""
+    return {
+        "gateKey": "kyc",
+        "type": "kyc",
+        "status": "PENDING",
+        "severity": "blocking",
+        "presentation": {
+            "title": "Verify identity to issue your Rose card",
+            "reason": reason
+            or "A one-time identity check is required before Rose can issue a payment card.",
+            "cta": "Verify identity",
+        },
+        "action": {"kind": "link", "url": kyc_url or DEFAULT_KYC_URL},
+        "detection": {"method": "agentcard_error", "probeKey": "customers_needed_kyc"},
     }
 
 
@@ -112,13 +135,16 @@ async def raise_gate_direct(workflow_instance: Any, gate: Dict[str, Any], gate_k
     declined = bool(signal_response) and signal_response.strip() == REJECTION_SENTINEL
 
     # Close the in-stream card by replacing the IN_PROGRESS gate message
-    # (same toolCallId = request_id) with a FINISHED one.
+    # (same toolCallId = request_id). A resolved gate closes as a FINISHED
+    # tool call; a declined gate closes as an ERROR tool call so the FE
+    # renders it as a failed/errored action rather than a success.
+    closed_gate = {**gate, "status": "REJECTED" if declined else "RESOLVED"}
     close_event = ToolEvent(
         type=EventType.POST_MESSAGE,
         title="Gate declined" if declined else "Gate resolved",
         message="",
-        status=MessageStatus.FINISHED,
-        metadata={"gate": gate, "attentionRequestId": request_id},
+        status=MessageStatus.ERROR if declined else MessageStatus.FINISHED,
+        metadata={"gate": closed_gate, "attentionRequestId": request_id},
     )
     await workflow_instance._handle_tool_event(close_event, request_id, TOOL_NAME)
 

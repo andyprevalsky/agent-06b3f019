@@ -20,6 +20,7 @@ import * as analytics from '@/lib/analytics';
 
 import { ApprovalChip } from '@/features/terminal-component-group';
 import { QueryInput } from '@/features/terminal-component-group';
+import { GateStack } from './GateStack';
 
 import { useTickerCarousel } from '../hooks/useTickerCarousel';
 import { useOpeningAnimation } from '../hooks/useOpeningAnimation';
@@ -28,6 +29,7 @@ import type {
   AgentSlice,
   DripSlice,
   PendingApproval,
+  PendingGate,
   BrowserPanelData,
   Message,
   Model,
@@ -44,6 +46,7 @@ interface AgentChatAreaProps {
   models: Model[];
   modelsLoading: boolean;
   pendingApproval: PendingApproval | null;
+  pendingGates: PendingGate[];
   hasActiveAttentionRequest: boolean;
   browserStatusProps: { browsers: BrowserPanelData[] } | null;
   systemMessages: Message[];
@@ -56,6 +59,7 @@ export function AgentChatArea({
   models,
   modelsLoading,
   pendingApproval,
+  pendingGates,
   hasActiveAttentionRequest,
   browserStatusProps,
   systemMessages,
@@ -67,6 +71,7 @@ export function AgentChatArea({
 
   const canSubmit =
     !a.selectedAgentId ||
+    pendingGates.length > 0 ||
     hasActiveAttentionRequest ||
     a.agentDetail?.status === 'PAUSED' ||
     a.agentDetail?.status === 'COMPLETED' ||
@@ -106,6 +111,7 @@ export function AgentChatArea({
         models={models}
         modelsLoading={modelsLoading}
         pendingApproval={pendingApproval}
+        pendingGates={pendingGates}
         canSubmit={canSubmit}
         tickerOffset={tickerOffset}
         tickerRef={tickerRef}
@@ -133,6 +139,7 @@ interface InputAreaProps {
   models: Model[];
   modelsLoading: boolean;
   pendingApproval: PendingApproval | null;
+  pendingGates: PendingGate[];
   canSubmit: boolean;
   tickerOffset: number;
   tickerRef: React.RefObject<HTMLDivElement>;
@@ -144,6 +151,7 @@ function InputArea({
   models,
   modelsLoading,
   pendingApproval,
+  pendingGates,
   canSubmit,
   tickerOffset,
   tickerRef,
@@ -152,7 +160,12 @@ function InputArea({
     <div
       data-testid="terminal-input-area"
       className="pb-1 transition-opacity duration-300 ease-in-out relative md:pb-6"
-      style={{ opacity: a.agentDetail?.status === 'FAILED' ? 0.8 : 1 }}
+      style={{
+        // A pending gate is actionable (the agent is waiting on the user), so
+        // keep it crisp even if the agent row shows FAILED — only dim a truly
+        // finished, gate-free view.
+        opacity: a.agentDetail?.status === 'FAILED' && pendingGates.length === 0 ? 0.8 : 1,
+      }}
     >
       {!a.selectedAgentId && (
         <PopularGoalsCarousel
@@ -171,6 +184,14 @@ function InputArea({
       <ApprovalChip
         pendingApproval={pendingApproval}
         onApprovalHandled={() => {
+          if (a.selectedAgentId) void a.refreshAgentDetail(a.selectedAgentId);
+        }}
+      />
+
+      <GateStack
+        pendingGates={pendingGates}
+        agentId={a.selectedAgentId}
+        onGateHandled={() => {
           if (a.selectedAgentId) void a.refreshAgentDetail(a.selectedAgentId);
         }}
       />

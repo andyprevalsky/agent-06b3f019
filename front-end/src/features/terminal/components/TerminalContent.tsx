@@ -23,6 +23,8 @@ import Browse from '@/pages/Browse';
 import Integrations from '@/pages/Integrations';
 import Usage from '@/pages/Usage';
 import { NetworkView } from '@/features/terminal-component-group';
+import { getItem } from '@/lib/storage';
+import { getQueryParams } from '@/lib/url';
 import { cn } from '@/lib/utils';
 import { useAppData } from '@/hooks/useAppData';
 
@@ -34,6 +36,7 @@ import {
   computeActiveBrowserPanels,
   derivePendingApproval,
   deriveHasActiveAttentionRequest,
+  derivePendingGates,
 } from '../hooks/derivations';
 import type { TerminalView } from '../types';
 import { BROWSER_REVIEW_TEST_PHONE } from '../config';
@@ -49,22 +52,27 @@ const BrowserStatusBarCarousel = lazy(() =>
   })),
 );
 
+function getInitialTerminalView(): TerminalView {
+  const params = getQueryParams();
+  if (params.has('agent-id')) return 'agents';
+
+  const stored = getItem('app-user');
+  if (stored === null) return 'agents';
+  try {
+    const user = JSON.parse(stored) as { phone?: string };
+    return user.phone === BROWSER_REVIEW_TEST_PHONE ? 'browse' : 'agents';
+  } catch {
+    return 'agents';
+  }
+}
+
 export function TerminalContent() {
   const tileAnimation = useTileAnimation();
   const drip = useDrippiness();
   const { patternOffset, tileColors, colorPalette } = usePatternOffset(tileAnimation.currentFrame);
 
   const resetAnimationState = () => tileAnimation.reset();
-  const initialView = useMemo<TerminalView>(() => {
-    const stored = window.localStorage.getItem('app-user');
-    if (stored === null) return 'agents';
-    try {
-      const user = JSON.parse(stored) as { phone?: string };
-      return user.phone === BROWSER_REVIEW_TEST_PHONE ? 'browse' : 'agents';
-    } catch {
-      return 'agents';
-    }
-  }, []);
+  const initialView = useMemo<TerminalView>(getInitialTerminalView, []);
   const [currentView, setCurrentView] = useState<TerminalView>(initialView);
   const agents = useTerminalAgents(currentView, setCurrentView, resetAnimationState);
   const { models, modelsLoading } = useAppData();
@@ -74,6 +82,7 @@ export function TerminalContent() {
     [agents.messages],
   );
   const pendingApproval = useMemo(() => derivePendingApproval(agents.messages), [agents.messages]);
+  const pendingGates = useMemo(() => derivePendingGates(agents.messages), [agents.messages]);
   const hasActiveAttention = useMemo(
     () => deriveHasActiveAttentionRequest(agents.messages),
     [agents.messages],
@@ -131,6 +140,7 @@ export function TerminalContent() {
           models={models}
           modelsLoading={modelsLoading}
           pendingApproval={pendingApproval}
+          pendingGates={pendingGates}
           hasActiveAttention={hasActiveAttention}
           browserStatusProps={browserStatusProps}
           systemMessages={systemMessages}
@@ -186,31 +196,24 @@ function SidebarSection({
 
 // ── Main content area (view router) ─────────────────────────────────────
 
-function MainContent({
-  agents,
-  drip,
-  currentView,
-  models,
-  modelsLoading,
-  pendingApproval,
-  hasActiveAttention,
-  browserStatusProps,
-  systemMessages,
-  BrowserStatusBarCarousel: BrowserCarousel,
-}: {
+type MainContentProps = {
   agents: ReturnType<typeof useTerminalAgents>;
   drip: ReturnType<typeof useDrippiness>;
   currentView: TerminalView;
   models: ReturnType<typeof useAppData>['models'];
   modelsLoading: boolean;
   pendingApproval: ReturnType<typeof derivePendingApproval>;
+  pendingGates: ReturnType<typeof derivePendingGates>;
   hasActiveAttention: boolean;
   browserStatusProps: { browsers: { taskId: string; browserUrl: string }[] } | null;
   systemMessages: ReturnType<typeof useTerminalAgents>['messages'];
   BrowserStatusBarCarousel: React.ComponentType<{
     browsers: { taskId: string; browserUrl: string }[];
   }>;
-}) {
+};
+
+function MainContent(props: MainContentProps) {
+  const { agents, currentView } = props;
   const browseOffsetStyle =
     currentView === 'browse'
       ? ({ '--browse-sidebar-offset': `${SIDEBAR_WIDTH_COLLAPSED}px` } as React.CSSProperties)
@@ -232,44 +235,52 @@ function MainContent({
         )}
       >
         {agents.clientSource === 'WEB' && <DesktopNavLinks />}
-
-        {currentView === 'browse' ? (
-          <Browse />
-        ) : currentView === 'settings' ? (
-          <ScrollArea className="flex-1 h-full">
-            <div className="pt-24 pb-8">
-              <Settings />
-            </div>
-          </ScrollArea>
-        ) : currentView === 'integrations' ? (
-          <ScrollArea className="flex-1 h-full">
-            <div className="pt-24 pb-8">
-              <Integrations />
-            </div>
-          </ScrollArea>
-        ) : currentView === 'usage' ? (
-          <ScrollArea className="flex-1 h-full">
-            <div className="pt-24 pb-8">
-              <Usage />
-            </div>
-          </ScrollArea>
-        ) : currentView === 'network' ? (
-          <NetworkView />
-        ) : (
-          <AgentChatArea
-            agents={agents}
-            drip={drip}
-            models={models}
-            modelsLoading={modelsLoading}
-            pendingApproval={pendingApproval}
-            hasActiveAttentionRequest={hasActiveAttention}
-            browserStatusProps={browserStatusProps}
-            systemMessages={systemMessages}
-            BrowserStatusBarCarousel={BrowserCarousel}
-          />
-        )}
+        <MainContentBody {...props} />
       </div>
     </main>
+  );
+}
+
+function MainContentBody({
+  agents,
+  drip,
+  currentView,
+  models,
+  modelsLoading,
+  pendingApproval,
+  pendingGates,
+  hasActiveAttention,
+  browserStatusProps,
+  systemMessages,
+  BrowserStatusBarCarousel: BrowserCarousel,
+}: MainContentProps) {
+  if (currentView === 'browse') return <Browse />;
+  if (currentView === 'network') return <NetworkView />;
+  if (currentView === 'settings') return <ScrollableView content={<Settings />} />;
+  if (currentView === 'integrations') return <ScrollableView content={<Integrations />} />;
+  if (currentView === 'usage') return <ScrollableView content={<Usage />} />;
+
+  return (
+    <AgentChatArea
+      agents={agents}
+      drip={drip}
+      models={models}
+      modelsLoading={modelsLoading}
+      pendingApproval={pendingApproval}
+      pendingGates={pendingGates}
+      hasActiveAttentionRequest={hasActiveAttention}
+      browserStatusProps={browserStatusProps}
+      systemMessages={systemMessages}
+      BrowserStatusBarCarousel={BrowserCarousel}
+    />
+  );
+}
+
+function ScrollableView({ content }: { content: React.ReactNode }) {
+  return (
+    <ScrollArea className="flex-1 h-full">
+      <div className="pt-24 pb-8">{content}</div>
+    </ScrollArea>
   );
 }
 

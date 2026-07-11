@@ -4,11 +4,14 @@
 
 export const DATA_SOURCE_CONFIGS = {
   messages: {
-    description: 'iMessage and email conversation threads',
+    description: 'iMessage and email conversation threads (all channels)',
     table: 'MessageRecord' as const,
     searchField: 'message',
     groupBy: 'personId',
     filters: ['person', 'since'] as const,
+    // Umbrella source: no connector requirement, no channel restriction.
+    connector: null,
+    channel: null,
   },
   gmail: {
     description: 'Gmail/email conversation threads',
@@ -16,6 +19,45 @@ export const DATA_SOURCE_CONFIGS = {
     searchField: 'message',
     groupBy: 'personId',
     filters: ['person', 'since'] as const,
+    // Alias of `email`; kept for backward compatibility.
+    connector: 'gmail',
+    channel: 'EMAIL',
+  },
+  email: {
+    description: 'Email conversation threads (Gmail-connected)',
+    table: 'MessageRecord' as const,
+    searchField: 'message',
+    groupBy: 'personId',
+    filters: ['person', 'since'] as const,
+    connector: 'gmail',
+    channel: 'EMAIL',
+  },
+  imessage: {
+    description: 'iMessage conversation threads',
+    table: 'MessageRecord' as const,
+    searchField: 'message',
+    groupBy: 'personId',
+    filters: ['person', 'since'] as const,
+    connector: 'imessage',
+    channel: 'IMESSAGE',
+  },
+  whatsapp: {
+    description: 'WhatsApp conversation threads',
+    table: 'MessageRecord' as const,
+    searchField: 'message',
+    groupBy: 'personId',
+    filters: ['person', 'since'] as const,
+    connector: 'whatsapp',
+    channel: 'WHATSAPP',
+  },
+  sms: {
+    description: 'SMS conversation threads',
+    table: 'MessageRecord' as const,
+    searchField: 'message',
+    groupBy: 'personId',
+    filters: ['person', 'since'] as const,
+    connector: 'sms',
+    channel: 'SMS',
   },
   network: {
     description: 'Contact network records',
@@ -23,6 +65,8 @@ export const DATA_SOURCE_CONFIGS = {
     searchField: 'contact fields',
     groupBy: 'personId',
     filters: [] as const,
+    connector: null,
+    channel: null,
   },
   agent_network: {
     description: 'Messages across the current agent tree',
@@ -30,6 +74,8 @@ export const DATA_SOURCE_CONFIGS = {
     searchField: 'text',
     groupBy: 'agentId',
     filters: [] as const,
+    connector: null,
+    channel: null,
   },
   transactions: {
     description: 'Plaid financial transactions',
@@ -45,6 +91,8 @@ export const DATA_SOURCE_CONFIGS = {
       'status',
       'include_pending_in_totals',
     ] as const,
+    connector: 'plaid',
+    channel: null,
   },
   documents: {
     description: 'Synced text documents from LLM exports, Apple Notes, Obsidian, and generic files',
@@ -52,6 +100,8 @@ export const DATA_SOURCE_CONFIGS = {
     searchField: 'title/content/metadata',
     groupBy: 'source',
     filters: ['document_source', 'since', 'until', 'path', 'tag'] as const,
+    connector: 'documents',
+    channel: null,
   },
 } as const;
 
@@ -59,6 +109,25 @@ export const VALID_SOURCES = DATA_SOURCE_CONFIGS;
 
 export type ValidSource = keyof typeof DATA_SOURCE_CONFIGS;
 export const DEFAULT_GREP_SOURCES: ValidSource[] = ['messages', 'network', 'agent_network'];
+
+/**
+ * Message-family sources all search `MessageRecord`. The channel-specific ones
+ * (email/imessage/whatsapp/sms) additionally restrict to a single
+ * `MessageRecord.channel` value; the umbrella `messages` and legacy `gmail`
+ * keep their existing search behavior.
+ */
+export const MESSAGE_FAMILY_SOURCES: readonly ValidSource[] = [
+  'messages',
+  'gmail',
+  'email',
+  'imessage',
+  'whatsapp',
+  'sms',
+];
+
+export function isMessageFamilySource(source: ValidSource): boolean {
+  return MESSAGE_FAMILY_SOURCES.includes(source);
+}
 
 export interface PersonInfo {
   firstName: string | null;
@@ -85,6 +154,7 @@ export interface FormattedResult {
 export interface GrepParams {
   pattern: string;
   source?: string;
+  sources?: string[];
   filters?: Record<string, unknown>;
   '-A'?: string | number;
   '-B'?: string | number;

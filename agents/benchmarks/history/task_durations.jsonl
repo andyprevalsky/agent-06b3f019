@@ -1171,3 +1171,11 @@
 {"task": "browser-biometrics-webdecoy", "duration_seconds": 176.5, "cost_cents": 3.0, "timestamp": "2026-07-01T04:34:31.176931+00:00", "agent_id": "a83fb824-a331-44a8-97a3-ebfd6de3d8de"}
 {"task": "parallel-tool-calls", "duration_seconds": 201.7, "cost_cents": 7.0, "timestamp": "2026-07-01T04:34:31.176931+00:00", "agent_id": "ed06eed2-22fc-4747-a1fb-364a221de185"}
 {"task": "test-mass-agent-run-0", "duration_seconds": 19.6, "cost_cents": 0.0, "timestamp": "2026-07-08T05:40:29.398207+00:00", "agent_id": "6ff575ae-12f0-4d8f-8c36-fd6d3e1bb89e"}
+{"task": "gate-subscription-free-credit", "duration_seconds": 15.4, "cost_cents": 0.0, "timestamp": "2026-07-10T20:24:12.605215+00:00", "agent_id": "823ac48a-09a8-4954-8634-364a3ce38b4e"}
+{"task": "gate-subscription-free-credit", "duration_seconds": 15.4, "cost_cents": 0.0, "timestamp": "2026-07-10T20:26:58.690787+00:00", "agent_id": "f81de213-c182-486b-bbc5-2342a36ca6a1"}
+{"task": "gate-subscription-free-credit", "duration_seconds": 30.4, "cost_cents": 0.0, "timestamp": "2026-07-10T20:28:33.401117+00:00", "agent_id": "73cacc67-6f87-4833-bf7b-9ee046fe6776"}
+{"task": "gate-subscription-free-credit", "duration_seconds": 15.4, "cost_cents": 0.0, "timestamp": "2026-07-10T22:27:48.371225+00:00", "agent_id": "7816e646-7407-41e5-8742-b290bd49e81f"}
+{"task": "gate-subscription-free-credit", "duration_seconds": 50.6, "cost_cents": 0.0, "timestamp": "2026-07-10T22:28:58.060037+00:00", "agent_id": "a90b22ee-b1e9-4227-b282-4d0efd53dd88"}
+{"task": "gate-subscription-free-credit", "duration_seconds": 15.4, "cost_cents": 0.0, "timestamp": "2026-07-10T23:07:10.201126+00:00", "agent_id": "7246e17f-7db2-4019-a874-e6e9f9f88519"}
+{"task": "gate-subscription-free-credit", "duration_seconds": 40.5, "cost_cents": 0.0, "timestamp": "2026-07-10T23:08:00.647728+00:00", "agent_id": "749dc24d-5e34-4674-b93d-66bffd8d960f"}
+{"task": "gate-source-connect-gmail", "duration_seconds": 66.1, "cost_cents": 0.0, "timestamp": "2026-07-10T23:39:14.615113+00:00", "agent_id": "7ce63263-db7c-4cb5-ab5b-2a58aa42b0ab"}

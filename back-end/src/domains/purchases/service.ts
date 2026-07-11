@@ -5,9 +5,10 @@ import {
   type CardProviderDetailsResult,
 } from '../../providers/card-provider';
 import { createLogger } from '../../providers/logger';
-import { stripe } from '../../providers/stripe';
-import { MAX_PURCHASE_CENTS, PURCHASE_APPROVAL_CACHE_HOURS } from './config';
+import { cancelAuthorizedHold, stripe } from '../../providers/stripe';
+import { benchmarkPurchaseKycRequired, MAX_PURCHASE_CENTS, PURCHASE_APPROVAL_CACHE_HOURS } from './config';
 import { PurchaseError } from './errors';
+import { isKycRequiredError, kycRequiredPurchaseError } from './kyc';
 import * as repo from './repo';
 import { archivePurchaseBoundary } from './archive';
 import {
@@ -299,6 +300,13 @@ async function chargeAndIssueCard(
       agent_id: input.agentId,
       error: error instanceof Error ? error.message : String(error),
     });
+    if (isKycRequiredError(error)) {
+      if (paymentIntentId !== undefined) await cancelAuthorizedHold(paymentIntentId);
+      await repo.updatePurchaseStatus(purchaseId, PurchaseSpendStatus.FAILED, {
+        stripePaymentIntentId: paymentIntentId ?? null,
+      });
+      throw kycRequiredPurchaseError();
+    }
     await repo.updatePurchaseStatus(purchaseId, PurchaseSpendStatus.FAILED, {
       stripePaymentIntentId: paymentIntentId ?? null,
     });
@@ -333,6 +341,10 @@ export async function mintPurchaseCard(
   }
 
   const purchase = await openPendingPurchase(input, existing);
+  if (benchmarkPurchaseKycRequired(input.userId)) {
+    await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.FAILED);
+    throw kycRequiredPurchaseError();
+  }
 
   const subscription = await repo.findSubscriptionByUserId(input.userId);
   const stripeCustomerId = subscription?.stripeCustomerId;

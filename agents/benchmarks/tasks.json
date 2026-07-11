@@ -434,6 +434,281 @@
     "bench": "pipeline-e2e"
   },
   {
+    "name": "gate-subscription-free-credit",
+    "title": "Gate — Free Credit Exhausted",
+    "description": "Local fixture: a new account has exactly $0.01 free credit, $0.01 non-compute usage, and no active subscription; the agent must raise a subscription gate before continuing.",
+    "prompt": "Summarize what Rose can do in one sentence. This task intentionally starts from a benchmark account whose free credits are exhausted and has no active subscription.",
+    "timeout_seconds": 120,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": [
+      "gate",
+      "subscription",
+      "local-only"
+    ],
+    "price_limit_cents": 25,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "ignore",
+    "expected_gate": {
+      "type": "subscription",
+      "gateKey": "subscription",
+      "severity": "blocking",
+      "detection": {
+        "method": "stripe_webhook",
+        "probeKey": "subscription"
+      }
+    },
+    "start_phase": "execute",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [
+        "free_credit_subscription_gate_v1"
+      ],
+      "base_images": [],
+      "services": [
+        "credits",
+        "billing",
+        "attention_requests"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Local synthetic fixture in back-end/scripts/free-credit-subscription-gate-fixture.ts seeds a dedicated benchmark user with one cent of credit, one cent of ToolUsage spend, and no Subscription row."
+    },
+    "evaluators": [
+      {
+        "id": "expected-subscription-gate",
+        "method": "static_check",
+        "criteria": [
+          "An open attention request is observed with metadata.gate.type=subscription",
+          "The gate is blocking and uses gateKey=subscription",
+          "The gate detection path is stripe_webhook/subscription"
+        ],
+        "checks": [
+          {
+            "type": "expected_gate"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "sms-onboarding-gates:free-credit-subscription-gate",
+      "fixture:back-end/scripts/free-credit-subscription-gate-fixture.ts"
+    ],
+    "bench": "pipeline-e2e"
+  },
+  {
+    "name": "gate-subscription-card-mint",
+    "title": "Gate — Card Mint Requires Subscription",
+    "description": "Local fixture: a benchmark account has enough free credits but no active subscription; when the browser agent attempts to mint a purchase card, the agent must raise a subscription gate.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\" — do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. You are paying on the user's behalf and have NO payment card of your own, so to check out you MUST obtain a card through Rose's payment-card capability (the browser agent's request_payment_card action). Do not type, invent, or reuse any card number from memory or any public test card number — the only valid card is one minted via request_payment_card.",
+    "timeout_seconds": 360,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "gate",
+      "subscription",
+      "payment",
+      "browser",
+      "local-only"
+    ],
+    "price_limit_cents": 75,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_gate": {
+      "type": "subscription",
+      "gateKey": "subscription",
+      "severity": "blocking"
+    },
+    "start_phase": "execute",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [
+        "purchase_subscription_gate_v1"
+      ],
+      "base_images": [],
+      "services": [
+        "browser_agent",
+        "test_payment",
+        "purchases",
+        "billing",
+        "attention_requests"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Local synthetic fixture in back-end/scripts/gate-benchmark-fixture.ts seeds a dedicated benchmark user with enough free credits and no Subscription row. The browser agent must reach the test-payment checkout and request a purchase card before the subscription gate appears."
+    },
+    "evaluators": [
+      {
+        "id": "expected-card-mint-subscription-gate",
+        "method": "static_check",
+        "criteria": [
+          "A payment-card approval prerequisite may be auto-approved",
+          "An open attention request is observed with metadata.gate.type=subscription",
+          "The gate is blocking and uses gateKey=subscription"
+        ],
+        "checks": [
+          {
+            "type": "expected_gate"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "sms-onboarding-gates:card-mint-subscription-gate",
+      "fixture:back-end/scripts/gate-benchmark-fixture.ts"
+    ],
+    "bench": "pipeline-e2e"
+  },
+  {
+    "name": "gate-kyc-card-mint",
+    "title": "Gate — Card Mint Requires KYC",
+    "description": "Local fixture: a benchmark account has enough free credits and an active subscription, but the purchase-card mint endpoint returns the benchmark AgentCard KYC-required response; the agent must raise a KYC gate.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\" — do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. You are paying on the user's behalf and have NO payment card of your own, so to check out you MUST obtain a card through Rose's payment-card capability (the browser agent's request_payment_card action). Do not type, invent, or reuse any card number from memory or any public test card number — the only valid card is one minted via request_payment_card.",
+    "timeout_seconds": 360,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "gate",
+      "kyc",
+      "payment",
+      "browser",
+      "local-only"
+    ],
+    "price_limit_cents": 75,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_gate": {
+      "type": "kyc",
+      "gateKey": "kyc",
+      "severity": "blocking",
+      "detection": {
+        "method": "agentcard_error",
+        "probeKey": "customers_needed_kyc"
+      }
+    },
+    "start_phase": "execute",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [
+        "purchase_kyc_gate_v1"
+      ],
+      "base_images": [],
+      "services": [
+        "browser_agent",
+        "test_payment",
+        "purchases",
+        "attention_requests"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Local synthetic fixture in back-end/scripts/gate-benchmark-fixture.ts seeds a dedicated subscribed benchmark user. In benchmark mode, /api/purchases/mint returns the same KYC-required code path for that user."
+    },
+    "evaluators": [
+      {
+        "id": "expected-card-mint-kyc-gate",
+        "method": "static_check",
+        "criteria": [
+          "A payment-card approval prerequisite may be auto-approved",
+          "An open attention request is observed with metadata.gate.type=kyc",
+          "The gate is blocking and uses gateKey=kyc",
+          "The gate detection path records agentcard_error/customers_needed_kyc"
+        ],
+        "checks": [
+          {
+            "type": "expected_gate"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "sms-onboarding-gates:card-mint-kyc-gate",
+      "fixture:back-end/scripts/gate-benchmark-fixture.ts"
+    ],
+    "bench": "pipeline-e2e"
+  },
+  {
+    "name": "gate-source-connect-gmail",
+    "title": "Gate — Gmail Source Not Connected",
+    "description": "Local fixture: a benchmark account has no connected Gmail integration; a task that explicitly requires Gmail must raise a source_connect gate.",
+    "prompt": "Search my Gmail source for the latest message about the renewal clause and summarize the renewal clause. This task explicitly requires Gmail source access.",
+    "timeout_seconds": 180,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "gate",
+      "source",
+      "local-only"
+    ],
+    "price_limit_cents": 50,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "ignore",
+    "expected_gate": {
+      "type": "source_connect",
+      "gateKey": [
+        "source_connect:gmail",
+        "source_connect:email"
+      ],
+      "severity": "blocking",
+      "context": {
+        "sourceKey": [
+          "gmail",
+          "email"
+        ]
+      }
+    },
+    "start_phase": "execute",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [
+        "source_connect_gmail_gate_v1"
+      ],
+      "base_images": [],
+      "services": [
+        "data",
+        "integrations",
+        "attention_requests"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Local synthetic fixture in back-end/scripts/gate-benchmark-fixture.ts seeds a dedicated benchmark user with a NOT_CONNECTED Gmail integration and enough free credits."
+    },
+    "evaluators": [
+      {
+        "id": "expected-source-connect-gmail-gate",
+        "method": "static_check",
+        "criteria": [
+          "An open attention request is observed with metadata.gate.type=source_connect",
+          "The gate is blocking and uses a Gmail/email source_connect gateKey",
+          "The gate context records sourceKey as gmail or email"
+        ],
+        "checks": [
+          {
+            "type": "expected_gate"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "sms-onboarding-gates:source-connect-gmail-gate",
+      "fixture:back-end/scripts/gate-benchmark-fixture.ts"
+    ],
+    "bench": "pipeline-e2e"
+  },
+  {
     "name": "browser-agent",
     "title": "Browser Agent Shopping",
     "description": "Live Amazon shopping: buy a black beanie under $35 through the cart path (no Buy Now)",
@@ -632,7 +907,7 @@
   {
     "name": "agent-payment-test-shop",
     "title": "Agent Payment Test Shop",
-    "prompt": "Use a browser agent to go to {frontend_url}/test_payment. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\" — do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. You are paying on the user's behalf and have NO payment card of your own, so to check out you MUST obtain a card through Rose's payment-card capability (the browser agent's request_payment_card action). Do not type, invent, or reuse any card number from memory or any public test card number — the only valid card is one minted via request_payment_card.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": [

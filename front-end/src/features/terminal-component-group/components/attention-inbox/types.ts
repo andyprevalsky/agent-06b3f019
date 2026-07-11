@@ -24,6 +24,8 @@ export interface MacAppBridge {
     success?: boolean;
     message?: string;
   }>;
+  /** Open a URL/deep-link in the OS (system browser or `roselabs://` handler). */
+  openExternal?: (url: string) => Promise<void> | void;
 }
 
 /** Metadata shape for the "send via iMessage" automated action. */

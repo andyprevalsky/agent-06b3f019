@@ -18,6 +18,7 @@ import { Maximize2 } from 'lucide-react';
 import { MarkdownText } from '../MarkdownText';
 import { RequestActionButtons } from './RequestActionButtons';
 import { GateRequestCard } from './GateRequestCard';
+import { runGateConnectAction } from './gateConnect';
 import {
   getAuthAssistanceMetadata,
   getGateMetadata,
@@ -97,7 +98,7 @@ function RequestBody(props: RequestListItemProps) {
       loading={loading}
       onPrimary={() => {
         if (gate.action.kind === 'link') {
-          window.open(gate.action.url, '_blank', 'noopener,noreferrer');
+          void runGateConnectAction(gate, { requestId: request.id });
           return;
         }
         const reply = gate.action.tokens[0] ?? 'YES';

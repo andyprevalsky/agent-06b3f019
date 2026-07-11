@@ -21,3 +21,11 @@ export const TASKS_PATH = path.join(
 export function readTasksFile(): unknown {
   return JSON.parse(fs.readFileSync(TASKS_PATH, 'utf-8'));
 }
+
+export function benchmarkAgentPreviewEnabled(): boolean {
+  const enabledValues = new Set(['1', 'true', 'yes', 'on']);
+  return (
+    enabledValues.has(String(process.env.BENCHMARK_MODE ?? '').toLowerCase()) ||
+    enabledValues.has(String(process.env.BENCHMARK_ISOLATED_RUN ?? '').toLowerCase())
+  );
+}

@@ -14,6 +14,13 @@ from helpers.tracing import current_root_agent_id
 from helpers.world_model_runtime import WorldModelToolExecutionAdapter
 
 logger = structlog.get_logger()
+KYC_REQUIRED_CODES = {
+    "kyc_required",
+    "customer_kyc_required",
+    "customers_needed_kyc",
+    "customer_needs_kyc",
+    "cardholder_kyc_required",
+}
 
 
 @activity.defn
@@ -89,15 +96,25 @@ async def _mint_purchase_card_real(user_id: str, payload: Dict[str, Any]) -> Dic
                 "Content-Type": "application/json",
             },
         )
+        try:
+            error_payload = response.json() if response.status_code >= 400 else {}
+        except Exception:
+            error_payload = {}
+
+        code = str(error_payload.get("code") or "").lower()
+        detail = str(error_payload.get("error") or response.text or "")
+
+        if code in KYC_REQUIRED_CODES or (
+            response.status_code in (400, 403, 409, 422)
+            and "kyc" in f"{code} {detail}".lower()
+        ):
+            logger.info("Mint requires KYC", code=code, detail=detail[:200])
+            return {"status": "kyc_required", "error": detail, "code": code or "kyc_required"}
+
         # 402 = the user needs an active subscription before Rose can spend real
         # money. Surface it as a signal (not an exception) so the workflow can
         # raise a subscription gate organically and retry, instead of failing.
         if response.status_code == 402:
-            detail = ""
-            try:
-                detail = str(response.json().get("error") or "")
-            except Exception:
-                detail = response.text
             logger.info("Mint requires subscription (402)", detail=detail[:200])
             return {"status": "subscription_required", "error": detail}
         response.raise_for_status()

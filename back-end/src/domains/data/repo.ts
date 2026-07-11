@@ -2,7 +2,20 @@
  * Data domain repo — all Prisma calls for data search and summary.
  */
 
+import { IntegrationStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
+
+/**
+ * True when the user has a CONNECTED Integration row for the given connector
+ * name (e.g. 'gmail', 'imessage', 'plaid'). Used by per-source connectivity.
+ */
+export async function isConnectorConnected(userId: string, connector: string): Promise<boolean> {
+  const integration = await prisma.integration.findFirst({
+    where: { userId, name: connector, status: IntegrationStatus.CONNECTED },
+    select: { id: true },
+  });
+  return integration !== null;
+}
 
 /**
  * Search message records by pattern with optional person and time filters.

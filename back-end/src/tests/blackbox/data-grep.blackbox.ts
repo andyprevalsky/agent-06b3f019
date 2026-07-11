@@ -41,7 +41,20 @@ const GrepResponse = z.object({
   total_matches: z.number(),
   truncated: z.boolean(),
   pattern: z.string(),
-  sources: z.array(z.enum(['messages', 'network', 'agent_network', 'transactions', 'documents'])),
+  sources: z.array(
+    z.enum([
+      'messages',
+      'gmail',
+      'email',
+      'imessage',
+      'whatsapp',
+      'sms',
+      'network',
+      'agent_network',
+      'transactions',
+      'documents',
+    ])
+  ),
   applied_limit: z.number(),
   applied_offset: z.number(),
   summaries: z
@@ -113,6 +126,15 @@ async function requestSummary(userId: string) {
   return { status: response.status, data };
 }
 
+async function requestSourceStatus(userId: string, sources: string) {
+  const response = await fetch(
+    `${BASE_URL}/api/data/source-status?sources=${encodeURIComponent(sources)}`,
+    { headers: apiHeaders(userId) }
+  );
+  const data = await response.json();
+  return { status: response.status, data };
+}
+
 function assertStatus(actual: number, expected: number, data: unknown): void {
   if (actual !== expected) {
     throw new Error(`Expected HTTP ${expected}, got ${actual}: ${JSON.stringify(data)}`);
@@ -147,7 +169,11 @@ async function cleanup(userId: string): Promise<void> {
   await prisma.plaidTransaction.deleteMany({ where: { userId } });
   await prisma.plaidAccount.deleteMany({ where: { userId } });
   await prisma.plaidItem.deleteMany({ where: { userId } });
-  await prisma.integration.deleteMany({ where: { userId, name: 'plaid' } });
+  // source-status minting an unconnected Gmail URL creates a SYNCING gmail
+  // Integration + email credential; clear them alongside the seeded rows.
+  await prisma.emailIntegrationCredential.deleteMany({ where: { userId } });
+  await prisma.integration.deleteMany({ where: { userId } });
+  await prisma.userDataDocument.deleteMany({ where: { userId } });
   await prisma.agent.deleteMany({ where: { userId } });
   await prisma.person.deleteMany({ where: { userId } });
   await prisma.user.deleteMany({ where: { userId } });
@@ -944,6 +970,114 @@ async function testDocumentSummary(userId: string): Promise<void> {
   }
 }
 
+const SourceStatusResponse = z.object({
+  statuses: z.array(
+    z.object({
+      source: z.string(),
+      connector: z.string().nullable(),
+      connected: z.boolean(),
+      connectUrl: z.string().nullable(),
+    })
+  ),
+});
+
+// Multi-source grep: `sources:['email','imessage']` searches MessageRecord and
+// returns 200. The seeded fixture only has EMAIL-channel rows, so email matches
+// (channel-filtered) while imessage returns nothing — proving channel routing.
+async function testMultiSourceGrep(userId: string): Promise<void> {
+  let res = await requestGrep(userId, {
+    pattern: 'Aurora budget',
+    sources: ['email', 'imessage'],
+  });
+  assertStatus(res.status, 200, res.data);
+  const body = assertBody(res.data);
+  if (body.sources.join(',') !== 'email,imessage') {
+    throw new Error(`Expected echoed sources email,imessage, got ${body.sources.join(',')}`);
+  }
+  requireContent(body, 'Aurora budget');
+
+  // imessage alone must find nothing (no IMESSAGE-channel rows in the fixture),
+  // confirming the channel WHERE clause actually restricts the search.
+  res = await requestGrep(userId, { pattern: 'Aurora budget', source: 'imessage' });
+  assertStatus(res.status, 200, res.data);
+  if (assertBody(res.data).total_matches !== 0) {
+    throw new Error(`Expected imessage-only grep to find 0 EMAIL rows, got ${JSON.stringify(res.data)}`);
+  }
+
+  // email alone must find the same EMAIL row that `messages` finds.
+  res = await requestGrep(userId, { pattern: 'Aurora budget', source: 'email' });
+  assertStatus(res.status, 200, res.data);
+  requireContent(assertBody(res.data), 'Aurora budget');
+
+  // unknown source in the array → 400 SOURCE_NOT_FOUND (not a 500).
+  res = await requestGrep(userId, { pattern: 'x', sources: ['email', 'not_a_source'] });
+  assertStatus(res.status, 400, res.data);
+  if ((res.data as { error?: string }).error !== 'SOURCE_NOT_FOUND') {
+    throw new Error(`Expected SOURCE_NOT_FOUND for bad sources entry, got ${JSON.stringify(res.data)}`);
+  }
+}
+
+// Per-source connectivity: local source (network) is always connected with no
+// connectUrl; a connector-backed source with no Integration row (email→gmail)
+// is disconnected with a mintable connectUrl.
+async function testSourceStatus(userId: string): Promise<void> {
+  const res = await requestSourceStatus(userId, 'email,network');
+  assertStatus(res.status, 200, res.data);
+  const body = SourceStatusResponse.parse(res.data);
+
+  const email = body.statuses.find((s) => s.source === 'email');
+  if (
+    email === undefined ||
+    email.connector !== 'gmail' ||
+    email.connected !== false ||
+    email.connectUrl === null ||
+    !email.connectUrl.startsWith('http')
+  ) {
+    throw new Error(`Expected disconnected email with connectUrl, got ${JSON.stringify(body)}`);
+  }
+
+  const network = body.statuses.find((s) => s.source === 'network');
+  if (
+    network === undefined ||
+    network.connector !== null ||
+    network.connected !== true ||
+    network.connectUrl !== null
+  ) {
+    throw new Error(`Expected local network connected with no connectUrl, got ${JSON.stringify(body)}`);
+  }
+
+  // A non-gmail connector-backed source returns the stub connect URL.
+  const smsRes = await requestSourceStatus(userId, 'sms');
+  assertStatus(smsRes.status, 200, smsRes.data);
+  const smsBody = SourceStatusResponse.parse(smsRes.data);
+  const sms = smsBody.statuses[0];
+  if (sms?.connectUrl !== 'https://roselabs.ai/connect/sms' || sms.connected !== false) {
+    throw new Error(`Expected sms stub connect URL, got ${JSON.stringify(smsBody)}`);
+  }
+
+  // Documents is an umbrella grep source; concrete document providers are
+  // separate connector keys for source-connect gates.
+  const notesRes = await requestSourceStatus(userId, 'apple_notes');
+  assertStatus(notesRes.status, 200, notesRes.data);
+  const notesBody = SourceStatusResponse.parse(notesRes.data);
+  const notes = notesBody.statuses[0];
+  if (
+    notes?.source !== 'apple_notes' ||
+    notes.connector !== 'apple_notes' ||
+    notes.connected !== false ||
+    notes.connectUrl !== 'https://roselabs.ai/connect/apple_notes'
+  ) {
+    throw new Error(`Expected apple_notes provider source status, got ${JSON.stringify(notesBody)}`);
+  }
+
+  // Unknown source key → 400, not 500.
+  const badRes = await requestSourceStatus(userId, 'not_a_source');
+  assertStatus(badRes.status, 400, badRes.data);
+  if ((badRes.data as { error?: string }).error !== 'SOURCE_NOT_FOUND') {
+    throw new Error(`Expected SOURCE_NOT_FOUND, got ${JSON.stringify(badRes.data)}`);
+  }
+}
+
 async function runAll(): Promise<void> {
   const { userId, agentId } = await seedFixture();
   const tests = [
@@ -962,6 +1096,8 @@ async function runAll(): Promise<void> {
     ['transaction grep is tenant isolated', () => testTransactionTenantIsolation(userId)],
     ['summary includes transactions', () => testTransactionSummary(userId)],
     ['summary includes documents', () => testDocumentSummary(userId)],
+    ['multi-source grep with channel routing', () => testMultiSourceGrep(userId)],
+    ['per-source connectivity status', () => testSourceStatus(userId)],
   ] as const;
 
   try {

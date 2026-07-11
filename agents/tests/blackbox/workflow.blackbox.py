@@ -2353,14 +2353,14 @@ async def test_workflow_handle_incomplete_unknown_passthrough():
 
 
 async def test_workflow_check_credits_no_credits_pauses():
-    """_check_credits flips is_paused=True when credits depleted."""
+    """_check_credits flips is_paused=True when subscribed credits are depleted."""
     wf = _bare_workflow_instance()
     wf.user_id = "u"
     fake = _FakeWorkflowModule()
 
     async def fake_exec(fn, args=None, **kwargs):
         if getattr(fn, "__name__", "") == "check_user_usage":
-            return {"has_credits": False}
+            return {"has_credits": False, "tier": 20}
         return None
 
     fake.execute_activity = fake_exec
@@ -2371,6 +2371,50 @@ async def test_workflow_check_credits_no_credits_pauses():
         assert wf._has_credits is False
     finally:
         _restore_workflow(original)
+
+
+async def test_workflow_check_credits_free_credits_exhausted_raises_subscription_gate():
+    """A no-subscription user with exhausted free credits gets a subscription gate."""
+    import workflows.agent_workflow as workflow_module
+
+    wf = _bare_workflow_instance()
+    wf.user_id = "u-free-credit"
+    wf.agent_id = "a-free-credit"
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["check_user_usage"] = {
+        "has_credits": False,
+        "remaining": 0,
+        "used": 0.01,
+        "total": 0.01,
+        "tier": None,
+    }
+    fake.activity_returns["mint_subscription_checkout_activity"] = "https://roselabs.ai/s/free-credit"
+    raised = {}
+
+    async def fake_raise_gate(workflow_instance, gate, gate_key):
+        raised["workflow"] = workflow_instance
+        raised["gate"] = gate
+        raised["gate_key"] = gate_key
+        return "resolved"
+
+    original_workflow = _patch_workflow(fake)
+    original_raise_gate = workflow_module.raise_gate_direct
+    workflow_module.raise_gate_direct = fake_raise_gate
+    try:
+        await wf._check_credits()
+        assert wf._has_credits is False
+        assert wf.is_paused is False
+        assert raised["workflow"] is wf
+        assert raised["gate_key"] == "subscription"
+        assert raised["gate"]["type"] == "subscription"
+        assert raised["gate"]["action"]["url"] == "https://roselabs.ai/s/free-credit"
+        assert raised["gate"]["presentation"]["title"] == "Subscribe to continue this task"
+        assert raised["gate"]["presentation"]["reason"].startswith("Your free credits are exhausted")
+        activity_names = [name for name, _args in fake.activity_calls]
+        assert activity_names == ["check_user_usage", "mint_subscription_checkout_activity"]
+    finally:
+        workflow_module.raise_gate_direct = original_raise_gate
+        _restore_workflow(original_workflow)
 
 
 async def test_workflow_check_credits_has_credits_no_pause():
@@ -3785,6 +3829,10 @@ async def run_all_tests():
     await r.record_async("wf_handle_incomplete_error", test_workflow_handle_incomplete_error)
     await r.record_async("wf_handle_incomplete_unknown", test_workflow_handle_incomplete_unknown_passthrough)
     await r.record_async("wf_check_credits_no_credits", test_workflow_check_credits_no_credits_pauses)
+    await r.record_async(
+        "wf_check_credits_free_credit_subscription_gate",
+        test_workflow_check_credits_free_credits_exhausted_raises_subscription_gate,
+    )
     await r.record_async("wf_check_credits_has_credits", test_workflow_check_credits_has_credits_no_pause)
     await r.record_async("wf_check_credits_exception", test_workflow_check_credits_on_exception_continues)
     await r.record_async("wf_post_message", test_workflow_post_message_executes_activity)

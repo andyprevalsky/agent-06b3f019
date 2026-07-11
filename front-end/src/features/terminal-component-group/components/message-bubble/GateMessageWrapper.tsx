@@ -7,6 +7,7 @@ import { useState } from 'react';
 import type { Message } from '../../hooks';
 import { rejectAttentionRequest, respondToAttentionRequest } from '../../hooks';
 import { GateRequestCard } from '../attention-inbox/GateRequestCard';
+import { runGateConnectAction } from '../attention-inbox/gateConnect';
 import type { GateMetadata } from '../attention-inbox/types';
 
 export function GateMessageWrapper({ message }: { message: Message }): JSX.Element | null {
@@ -46,7 +47,7 @@ export function GateMessageWrapper({ message }: { message: Message }): JSX.Eleme
         loading={loading}
         onPrimary={() => {
           if (gate.action.kind === 'link') {
-            window.open(gate.action.url, '_blank', 'noopener,noreferrer');
+            void runGateConnectAction(gate, { requestId: requestId ?? '' });
             return;
           }
           const reply = gate.action.tokens[0] ?? 'YES';

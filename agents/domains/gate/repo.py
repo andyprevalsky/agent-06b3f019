@@ -10,7 +10,7 @@ Imports: own config, external packages.
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import httpx
 import structlog
@@ -139,3 +139,32 @@ async def has_message_corpus_activity(user_id: str) -> bool:
         data = response.json()
         total = data.get("sources", {}).get("messages", {}).get("total_messages", 0)
         return isinstance(total, int) and total > 0
+
+
+@activity.defn
+async def source_status_activity(user_id: str, sources: List[str]) -> List[Dict[str, Any]]:
+    """Return connectivity status for each requested grep source.
+
+    Calls the backend source-status endpoint, which maps each source to its
+    connector (an Integration name) and reports whether that connector is
+    CONNECTED plus the connect URL to mint the gate. Local sources
+    (messages/network/agent_network) always report connected=True. Returns a
+    list of ``{source, connector, connected, connectUrl}`` dicts.
+    """
+    if not sources:
+        return []
+    config = load_config()
+    backend_url = config.backend.api_url
+    async with httpx.AsyncClient(timeout=CREATE_GATE_TIMEOUT_SECONDS) as client:
+        response = await client.get(
+            f"{backend_url}/api/data/source-status",
+            headers={
+                "X-API-Key": config.backend.api_key or "",
+                "X-User-Id": user_id,
+            },
+            params={"sources": ",".join(sources)},
+        )
+        response.raise_for_status()
+        data = response.json()
+        statuses = data.get("statuses", [])
+        return statuses if isinstance(statuses, list) else []

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import * as service from './service';
 import { TasksUnavailableError } from './service';
+import { asyncHandler } from '../../utils/asyncHandler';
 
 const router = Router();
 
@@ -39,5 +40,22 @@ router.get('/test-prompts', (req, res) => {
     throw error;
   }
 });
+
+/**
+ * GET /api/benchmarks/agent-preview/:id
+ * Benchmark-only retained-run preview used by public FE verification links.
+ */
+router.get('/agent-preview/:id', asyncHandler(async (req, res) => {
+  try {
+    const result = await service.getBenchmarkAgentPreview(req.params.id);
+    if (result === null) {
+      res.status(404).json({ error: 'Agent not found' });
+      return;
+    }
+    res.json(result);
+  } catch {
+    res.status(500).json({ error: 'Failed to fetch benchmark agent preview' });
+  }
+}));
 
 export default router;

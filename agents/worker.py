@@ -50,6 +50,7 @@ from domains.gate.repo import (
     has_message_corpus_activity,
     mint_gmail_connect_activity,
     mint_subscription_checkout_activity,
+    source_status_activity,
 )
 from domains.spawn_agent.service import (
     _resolve_explore_attachments_activity,
@@ -1019,6 +1020,7 @@ async def main():
             create_approval_request_activity,
             create_gate_request_activity,
             has_message_corpus_activity,
+            source_status_activity,
             mint_subscription_checkout_activity,
             mint_gmail_connect_activity,
             lookup_purchase_activity,

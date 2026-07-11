@@ -89,6 +89,7 @@ describe('Terminal page', () => {
 
   afterEach(() => {
     setViewport(1024, 768);
+    window.history.replaceState({}, '', '/');
     localStorage.clear();
   });
 
@@ -249,6 +250,105 @@ describe('Terminal page', () => {
 
       expect(await screen.findByLabelText('URL or search')).toHaveValue('https://www.roselabs.ai');
       expect(screen.queryByRole('button', { name: /^rose$/i })).not.toBeInTheDocument();
+    });
+
+    it('opens browser-review direct agent links in Agents view', async () => {
+      localStorage.clear();
+      mockBrowserReviewSession();
+      window.history.replaceState({}, '', '/?agent-id=agent-123');
+
+      renderWithProviders(<Terminal />);
+
+      expect(await screen.findByRole('button', { name: /^rose$/i })).toBeInTheDocument();
+      expect(screen.queryByLabelText('URL or search')).not.toBeInTheDocument();
+    });
+
+    it('pins pending gate cards above the query input', async () => {
+      window.history.replaceState({}, '', '/?agent-id=agent-gate');
+      server.use(
+        http.get(`${API_BASE}/agents/:agentId`, ({ params }) => {
+          return HttpResponse.json({
+            agent: {
+              agent_id: params.agentId,
+              goal: 'Gate test agent',
+              model: 'rose-1-lite',
+              source: 'WEB',
+              reasoning_effort: 'medium',
+              progress: 50,
+              status: 'ACTIVE',
+              status_message: null,
+              temporal_workflow_id: 'wf-gate',
+              token_count: 1000,
+              tokens_in: 800,
+              tokens_out: 200,
+              tool_tokens_in: 0,
+              tool_tokens_out: 0,
+              tool_cost_cents: 0,
+              context_size: 4096,
+              message_count: 2,
+              price_limit_cents: 100,
+              tree_cost_cents: 10,
+              created_at: '2026-01-01T00:00:00Z',
+              updated_at: '2026-01-01T00:01:00Z',
+              write_lock_enabled: false,
+              parent_agent_id: null,
+              parent_goal: null,
+              verifier: null,
+              tools: [],
+            },
+            messages: [
+              {
+                message_id: 'msg-gate-user',
+                timestamp: '2026-01-01T00:00:00Z',
+                text: 'Validate the subscription gate.',
+                role: 'USER',
+              },
+              {
+                message_id: 'msg-gate-tool',
+                timestamp: '2026-01-01T00:00:01Z',
+                text: 'Subscribe to let Rose complete purchases',
+                role: 'TOOL',
+                metadata: {
+                  toolCallId: 'gate-request-1',
+                  toolName: 'gate',
+                  toolStatus: 'IN_PROGRESS',
+                  attentionRequestId: 'attention-gate-1',
+                  gate: {
+                    type: 'subscription',
+                    gateKey: 'subscription:test',
+                    presentation: {
+                      title: 'Subscribe to let Rose complete purchases',
+                      reason:
+                        'This checkout needs an active subscription before Rose can mint a payment card.',
+                      cta: 'Subscribe · $20/mo',
+                    },
+                    action: {
+                      kind: 'link',
+                      url: 'https://roselabs.ai/subscribe?demo=gate-chip',
+                    },
+                  },
+                },
+              },
+            ],
+            pagination: {
+              has_more: false,
+              oldest_timestamp: null,
+            },
+          });
+        }),
+      );
+
+      renderWithProviders(<Terminal />);
+
+      const title = await screen.findByText('Subscribe to let Rose complete purchases');
+      expect(screen.getAllByText('Subscribe to let Rose complete purchases')).toHaveLength(1);
+      expect(screen.getByRole('button', { name: /Subscribe/ })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Cancel/ })).toBeInTheDocument();
+
+      const textarea = await screen.findByPlaceholderText('Type your message...');
+      expect(Boolean(title.compareDocumentPosition(textarea) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(
+        true,
+      );
     });
 
     it('does not show Browse in the sidebar for regular users', async () => {

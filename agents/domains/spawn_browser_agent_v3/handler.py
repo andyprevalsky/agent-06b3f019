@@ -5035,6 +5035,55 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             )
                             return
 
+                    # KYC gate: AgentCard can reject card issuing when the
+                    # customer/cardholder still needs identity verification.
+                    # Raise the blocking KYC gate and retry once the webhook
+                    # resolves it.
+                    if card.get("status") == "kyc_required":
+                        from tools.gate import (
+                            build_kyc_gate,
+                            raise_gate_direct,
+                            GateRejectedError,
+                        )
+
+                        try:
+                            await raise_gate_direct(
+                                workflow_instance,
+                                build_kyc_gate(),
+                                gate_key="kyc",
+                            )
+                        except GateRejectedError:
+                            yield ToolEvent(
+                                type=EventType.POST_MESSAGE,
+                                title="Purchase cancelled",
+                                message="Identity verification is required to issue a card — cancelled for now.",
+                                status=MessageStatus.FINISHED,
+                                metadata={
+                                    "toolName": "spawn_browser_agent",
+                                    "action_type": "purchase_cancelled",
+                                },
+                            )
+                            return
+
+                        card = await workflow.execute_activity(
+                            mint_purchase_card_activity,
+                            args=[workflow_instance.user_id or "", payment_payload],
+                            start_to_close_timeout=timedelta(seconds=90),
+                            retry_policy=RetryPolicy(maximum_attempts=1),
+                        )
+                        if card.get("status") == "kyc_required":
+                            yield ToolEvent(
+                                type=EventType.POST_MESSAGE,
+                                title="Identity verification still incomplete",
+                                message="I couldn't confirm completed identity verification yet, so I can't issue the card.",
+                                status=MessageStatus.FINISHED,
+                                metadata={
+                                    "toolName": "spawn_browser_agent",
+                                    "action_type": "purchase_blocked",
+                                },
+                            )
+                            return
+
                     card_number = card.get("pan") or card.get("cardNumber") or card.get("card_number") or ""
                     card_expiry = card.get("expiry") or card.get("expiration") or card.get("cardExpiry") or ""
                     card_cvv = card.get("cvv") or card.get("cvc") or card.get("cardCvv") or ""

@@ -134,6 +134,45 @@ describe('useAgentProvider', () => {
     unmount();
   });
 
+  it('auto-loads benchmark preview links without auth in dev/test mode', async () => {
+    localStorage.clear();
+    window.history.replaceState({}, '', '/?agent-id=bench-agent-001');
+    server.use(
+      http.get(`${API_BASE}/benchmarks/agent-preview/:agentId`, ({ params }) =>
+        HttpResponse.json({
+          agent: makeAgent({
+            agent_id: params.agentId as string,
+            goal: 'benchmark subscription gate',
+          }),
+          messages: [
+            {
+              message_id: 'm-preview',
+              timestamp: 't',
+              text: 'Subscribe to let Rose complete purchases',
+              role: 'TOOL',
+              metadata: {
+                toolName: 'gate',
+                toolStatus: 'IN_PROGRESS',
+                gate: { type: 'subscription', gateKey: 'subscription', status: 'PENDING' },
+              },
+            },
+          ],
+          pagination: { has_more: false, oldest_timestamp: null },
+        }),
+      ),
+    );
+
+    const { result, unmount } = renderHook(() =>
+      useAgentProvider(defaultDeps({ user: null, isAuthenticated: false, realtimeReady: false })),
+    );
+
+    await waitFor(() => {
+      expect(result.current.agent?.agent_id).toBe('bench-agent-001');
+    });
+    expect(result.current.messages[0]?.metadata?.gate).toMatchObject({ type: 'subscription' });
+    unmount();
+  });
+
   it('auto-load clears selection on fetch error', async () => {
     window.history.replaceState({}, '', '/?agent-id=agent-err');
     server.use(
@@ -246,13 +285,23 @@ describe('useAgentProvider', () => {
     unmount();
   });
 
-  it('does not auto-load when canSubscribe is false (unauthenticated)', async () => {
+  it('clears unauthenticated URL selection when benchmark preview is unavailable', async () => {
+    localStorage.clear();
     window.history.replaceState({}, '', '/?agent-id=noauth-1');
-    const { result, unmount } = renderHook(() =>
-      useAgentProvider(defaultDeps({ isAuthenticated: false, realtimeReady: false })),
+    server.use(
+      http.get(`${API_BASE}/benchmarks/agent-preview/:agentId`, () =>
+        HttpResponse.json({ error: 'Agent not found' }, { status: 404 }),
+      ),
     );
-    await new Promise((r) => setTimeout(r, 50));
-    expect(result.current.agent).toBeNull();
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { result, unmount } = renderHook(() =>
+      useAgentProvider(
+        defaultDeps({ user: null, isAuthenticated: false, realtimeReady: false }),
+      ),
+    );
+    await waitFor(() => expect(result.current.selectedAgentId).toBeNull());
+    expect(window.location.search).not.toContain('agent-id');
+    errSpy.mockRestore();
     unmount();
   });
 
