@@ -26,54 +26,6 @@ import {
 } from './config';
 import type { AuthStep, UseTelegramAuthModalResult } from './types';
 
-/**
- * Format a free-typed phone string as US-centric E.164 display:
- *
- *   "9729777432"  → "+1 (972)-977-7432"
- *   "19729777432" → "+1 (972)-977-7432"
- *   "44..."       → "+44…" (non-US leads get the raw-digit form)
- *
- * The displayed value is what the user sees; the value submitted to IPC is
- * the stripped E.164 form (`+<digits>`) produced by `stripPhoneNumber`.
- */
-export const formatPhoneNumber = (value: string): string => {
-  const digits = value.replace(/\D/g, '');
-  if (digits.length === 0) return '';
-  if (digits[0] === '1') return formatUSPhoneWithLeadingOne(digits.slice(1));
-  if (digits.length <= 10) return formatUSPhoneWithoutLeading(digits);
-  return '+' + digits;
-};
-
-const formatUSPhoneWithLeadingOne = (remaining: string): string => {
-  let formatted = '+1';
-  if (remaining.length === 0) return formatted;
-  formatted += ' (' + remaining.slice(0, 3);
-  if (remaining.length < 3) return formatted;
-  formatted += ')';
-  if (remaining.length > 3) {
-    formatted += '-' + remaining.slice(3, 6);
-    if (remaining.length > 6) formatted += '-' + remaining.slice(6, 10);
-  }
-  return formatted;
-};
-
-const formatUSPhoneWithoutLeading = (digits: string): string => {
-  let formatted = '+1 (' + digits.slice(0, 3);
-  if (digits.length < 3) return formatted;
-  formatted += ')';
-  if (digits.length > 3) {
-    formatted += '-' + digits.slice(3, 6);
-    if (digits.length > 6) formatted += '-' + digits.slice(6, 10);
-  }
-  return formatted;
-};
-
-/**
- * Strip formatting from a display phone to the E.164 form sent over IPC:
- *   "+1 (972)-977-7432" → "+19729777432"
- */
-export const stripPhoneNumber = (formatted: string): string => '+' + formatted.replace(/\D/g, '');
-
 const SUBMIT_LABELS: Record<AuthStep, string> = {
   phone: SUBMIT_LABEL_PHONE,
   code: SUBMIT_LABEL_CODE,
@@ -105,7 +57,8 @@ const STEP_SPECS: Record<AuthStep, StepSubmitSpec> = {
   phone: {
     emptyMessage: PHONE_EMPTY_MESSAGE,
     logMessage: '[TelegramAuthModal] Starting auth for:',
-    call: (phoneNumber) => startTelegramAuth(stripPhoneNumber(phoneNumber)),
+    // Phone state is already canonical E.164 (set by PhoneInput).
+    call: (phoneNumber) => startTelegramAuth(phoneNumber),
     successFalseFallback: START_AUTH_GENERIC_FAILURE,
     thrownFallback: SEND_CODE_GENERIC_FAILURE,
   },
@@ -147,7 +100,7 @@ const runStepSubmit = async (step: AuthStep, input: string, state: SubmitState):
   state.setLoading(true);
   state.setError(null);
   try {
-    if (step === 'phone') console.log(spec.logMessage, stripPhoneNumber(input));
+    if (step === 'phone') console.log(spec.logMessage, input);
     else console.log(spec.logMessage);
     const result = await spec.call(input);
     if (!result.success) {
@@ -239,8 +192,9 @@ export const useTelegramAuthModal = (
     subscribeToAuthEvents({ setStep, setLoading, setError, reset, onSuccess, onClose });
   }, [isOpen, onClose, onSuccess]);
 
+  // PhoneInput emits canonical E.164 (+<dialcode><digits>); store as-is.
   const setPhoneNumber = (raw: string): void => {
-    setPhoneNumberState(formatPhoneNumber(raw));
+    setPhoneNumberState(raw);
   };
 
   const handleClose = (): void => {

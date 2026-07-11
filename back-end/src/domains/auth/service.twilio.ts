@@ -13,7 +13,8 @@ import type { TwilioVerifyResponse, SupabaseAdminUserResponse } from './types';
 
 // Dev-mode test credentials: bypass Twilio for fast local login
 // Disabled when BLACKBOX_TEST_CAPTURE_OUTBOUND is set (tests need real Twilio calls)
-const DEV_TEST_PHONE = '+19729777432';
+// The +52 variant exercises the LATAM country-selector path without a real MX SMS.
+const DEV_TEST_PHONES = ['+19729777432', '+529729777432'];
 const DEV_TEST_OTP = '181818';
 
 // Review credentials: bypass Twilio in all environments so external reviewers
@@ -21,16 +22,18 @@ const DEV_TEST_OTP = '181818';
 const BROWSER_REVIEW_TEST_PHONE = '+15555550123';
 const BROWSER_REVIEW_TEST_OTP = '191919';
 
+function isDevTestPhone(phone: string): boolean {
+  return IS_DEV && !IS_BLACKBOX_TEST && DEV_TEST_PHONES.includes(phone);
+}
+
 function shouldBypassOtpSend(phone: string): boolean {
-  return (
-    phone === BROWSER_REVIEW_TEST_PHONE || (IS_DEV && !IS_BLACKBOX_TEST && phone === DEV_TEST_PHONE)
-  );
+  return phone === BROWSER_REVIEW_TEST_PHONE || isDevTestPhone(phone);
 }
 
 function shouldBypassOtpCheck(phone: string, code: string): boolean {
   return (
     (phone === BROWSER_REVIEW_TEST_PHONE && code === BROWSER_REVIEW_TEST_OTP) ||
-    (IS_DEV && !IS_BLACKBOX_TEST && phone === DEV_TEST_PHONE && code === DEV_TEST_OTP)
+    (isDevTestPhone(phone) && code === DEV_TEST_OTP)
   );
 }
 

@@ -2,7 +2,8 @@ import type { BrowserInfo, BrowserType } from '../../../shared/types/ipc';
 
 export type { BrowserInfo, BrowserType };
 
-export type OnboardingStep = 'auth' | 'customization' | 'data' | 'shortcut' | 'welcome' | 'payment';
+export type OnboardingStep =
+  'auth' | 'customization' | 'data' | 'shortcut' | 'welcome' | 'waitlist';
 
 export type AuthStep = 'signup' | 'otp';
 

@@ -221,8 +221,9 @@ describe('TelegramAuthModal — happy-path render (open)', () => {
     expect(
       screen.getByText('Enter your phone number to connect your Telegram account.')
     ).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('+1 (234)-567-8900')).toBeInTheDocument();
-    expect(screen.getByText('Include your country code (e.g., +1 for US)')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Phone number')).toBeInTheDocument();
+    expect(screen.getByText('Pick your country code from the selector.')).toBeInTheDocument();
+    expect(screen.getByLabelText('Country code')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /send code/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /cancel/i })).toBeInTheDocument();
   });
@@ -237,14 +238,14 @@ describe('TelegramAuthModal — happy-path render (open)', () => {
     expect(h.onAuthErrorRegistrations).toBe(1);
   });
 
-  it('formats the phone number as the user types (US E.164 display)', async () => {
+  it('formats the phone number as the user types (US national display)', async () => {
     const user = userEvent.setup();
     setupHarness();
     renderWithProviders(<TelegramAuthModal isOpen onClose={noop} onSuccess={noop} />);
 
-    const input = screen.getByPlaceholderText('+1 (234)-567-8900');
+    const input = screen.getByPlaceholderText('Phone number');
     await user.type(input, '9729777432');
-    expect(input).toHaveValue('+1 (972)-977-7432');
+    expect(input).toHaveValue('(972) 977-7432');
   });
 });
 
@@ -258,7 +259,7 @@ describe('TelegramAuthModal — phone + code + password flow', () => {
     const h = setupHarness();
     renderWithProviders(<TelegramAuthModal isOpen onClose={noop} onSuccess={noop} />);
 
-    await user.type(screen.getByPlaceholderText('+1 (234)-567-8900'), '9729777432');
+    await user.type(screen.getByPlaceholderText('Phone number'), '9729777432');
     await user.click(screen.getByRole('button', { name: /send code/i }));
 
     // startAuth called with E.164-stripped phone
@@ -322,7 +323,7 @@ describe('TelegramAuthModal — phone + code + password flow', () => {
       />
     );
 
-    await user.type(screen.getByPlaceholderText('+1 (234)-567-8900'), '9729777432');
+    await user.type(screen.getByPlaceholderText('Phone number'), '9729777432');
     await user.click(screen.getByRole('button', { name: /send code/i }));
 
     h.emitNeedCode();
@@ -347,7 +348,7 @@ describe('TelegramAuthModal — phone + code + password flow', () => {
     const h = setupHarness();
     renderWithProviders(<TelegramAuthModal isOpen onClose={noop} onSuccess={noop} />);
 
-    const input = screen.getByPlaceholderText('+1 (234)-567-8900');
+    const input = screen.getByPlaceholderText('Phone number');
     await user.type(input, '9729777432');
     await user.keyboard('{Enter}');
 
@@ -382,7 +383,7 @@ describe('TelegramAuthModal — error state', () => {
     });
     renderWithProviders(<TelegramAuthModal isOpen onClose={noop} onSuccess={noop} />);
 
-    await user.type(screen.getByPlaceholderText('+1 (234)-567-8900'), '9729777432');
+    await user.type(screen.getByPlaceholderText('Phone number'), '9729777432');
     await user.click(screen.getByRole('button', { name: /send code/i }));
 
     await waitFor(() => {
@@ -402,7 +403,7 @@ describe('TelegramAuthModal — error state', () => {
     });
     renderWithProviders(<TelegramAuthModal isOpen onClose={noop} onSuccess={noop} />);
 
-    await user.type(screen.getByPlaceholderText('+1 (234)-567-8900'), '9729777432');
+    await user.type(screen.getByPlaceholderText('Phone number'), '9729777432');
     await user.click(screen.getByRole('button', { name: /send code/i }));
 
     await waitFor(() => {
@@ -416,7 +417,7 @@ describe('TelegramAuthModal — error state', () => {
     const h = setupHarness();
     renderWithProviders(<TelegramAuthModal isOpen onClose={noop} onSuccess={noop} />);
 
-    await user.type(screen.getByPlaceholderText('+1 (234)-567-8900'), '9729777432');
+    await user.type(screen.getByPlaceholderText('Phone number'), '9729777432');
     await user.click(screen.getByRole('button', { name: /send code/i }));
 
     // Loading in flight (startAuth awaiting needCode event). Simulate error.
@@ -434,7 +435,7 @@ describe('TelegramAuthModal — error state', () => {
     const h = setupHarness();
     renderWithProviders(<TelegramAuthModal isOpen onClose={noop} onSuccess={noop} />);
 
-    await user.type(screen.getByPlaceholderText('+1 (234)-567-8900'), '9729777432');
+    await user.type(screen.getByPlaceholderText('Phone number'), '9729777432');
     await user.click(screen.getByRole('button', { name: /send code/i }));
     h.emitNeedCode();
 
@@ -453,7 +454,7 @@ describe('TelegramAuthModal — error state', () => {
     const h = setupHarness();
     renderWithProviders(<TelegramAuthModal isOpen onClose={noop} onSuccess={noop} />);
 
-    await user.type(screen.getByPlaceholderText('+1 (234)-567-8900'), '9729777432');
+    await user.type(screen.getByPlaceholderText('Phone number'), '9729777432');
     await user.click(screen.getByRole('button', { name: /send code/i }));
     h.emitNeedCode();
     await waitFor(() => {
@@ -478,7 +479,7 @@ describe('TelegramAuthModal — error state', () => {
     setupHarness({ telegramApi: false });
     renderWithProviders(<TelegramAuthModal isOpen onClose={noop} onSuccess={noop} />);
 
-    await user.type(screen.getByPlaceholderText('+1 (234)-567-8900'), '9729777432');
+    await user.type(screen.getByPlaceholderText('Phone number'), '9729777432');
     await user.click(screen.getByRole('button', { name: /send code/i }));
 
     expect(screen.getByText('Telegram API not available')).toBeInTheDocument();
@@ -495,7 +496,7 @@ describe('TelegramAuthModal — back navigation and cancel', () => {
     const h = setupHarness();
     renderWithProviders(<TelegramAuthModal isOpen onClose={noop} onSuccess={noop} />);
 
-    await user.type(screen.getByPlaceholderText('+1 (234)-567-8900'), '9729777432');
+    await user.type(screen.getByPlaceholderText('Phone number'), '9729777432');
     await user.click(screen.getByRole('button', { name: /send code/i }));
     h.emitNeedCode();
     await waitFor(() => {
@@ -506,10 +507,10 @@ describe('TelegramAuthModal — back navigation and cancel', () => {
     await user.click(screen.getByRole('button', { name: /wrong number\? go back/i }));
 
     await waitFor(() => {
-      expect(screen.getByPlaceholderText('+1 (234)-567-8900')).toBeInTheDocument();
+      expect(screen.getByPlaceholderText('Phone number')).toBeInTheDocument();
     });
     // Phone value preserved (the component only resets on close, not on "go back")
-    expect(screen.getByPlaceholderText('+1 (234)-567-8900')).toHaveValue('+1 (972)-977-7432');
+    expect(screen.getByPlaceholderText('Phone number')).toHaveValue('(972) 977-7432');
     expect(h.cancelAuth).toHaveBeenCalledTimes(1);
   });
 
@@ -527,7 +528,7 @@ describe('TelegramAuthModal — back navigation and cancel', () => {
       />
     );
 
-    await user.type(screen.getByPlaceholderText('+1 (234)-567-8900'), '9729777432');
+    await user.type(screen.getByPlaceholderText('Phone number'), '9729777432');
     await user.click(screen.getByRole('button', { name: /cancel/i }));
 
     expect(h.cancelAuth).toHaveBeenCalledTimes(1);
@@ -551,7 +552,7 @@ describe('TelegramAuthModal — back navigation and cancel', () => {
       />
     );
 
-    await user.type(screen.getByPlaceholderText('+1 (234)-567-8900'), '9729777432');
+    await user.type(screen.getByPlaceholderText('Phone number'), '9729777432');
     await user.click(screen.getByRole('button', { name: /send code/i }));
 
     await waitFor(() => {
@@ -579,7 +580,7 @@ describe('TelegramAuthModal — IPC boundary', () => {
 
     // User types a formatted phone (via change events); verify that what reaches
     // the IPC boundary is the stripped E.164 form.
-    await user.type(screen.getByPlaceholderText('+1 (234)-567-8900'), '9729777432');
+    await user.type(screen.getByPlaceholderText('Phone number'), '9729777432');
     await user.click(screen.getByRole('button', { name: /send code/i }));
 
     await waitFor(() => {
@@ -596,7 +597,7 @@ describe('TelegramAuthModal — IPC boundary', () => {
     });
     renderWithProviders(<TelegramAuthModal isOpen onClose={noop} onSuccess={noop} />);
 
-    await user.type(screen.getByPlaceholderText('+1 (234)-567-8900'), '9729777432');
+    await user.type(screen.getByPlaceholderText('Phone number'), '9729777432');
     const sendBtn = screen.getByRole('button', { name: /send code/i });
     await user.click(sendBtn);
 
@@ -614,7 +615,7 @@ describe('TelegramAuthModal — IPC boundary', () => {
     const h = setupHarness();
     renderWithProviders(<TelegramAuthModal isOpen onClose={noop} onSuccess={noop} />);
 
-    await user.type(screen.getByPlaceholderText('+1 (234)-567-8900'), '9729777432');
+    await user.type(screen.getByPlaceholderText('Phone number'), '9729777432');
     await user.click(screen.getByRole('button', { name: /send code/i }));
     h.emitNeedCode();
     await waitFor(() => {
@@ -636,7 +637,7 @@ describe('TelegramAuthModal — IPC boundary', () => {
     });
     renderWithProviders(<TelegramAuthModal isOpen onClose={noop} onSuccess={noop} />);
 
-    await user.type(screen.getByPlaceholderText('+1 (234)-567-8900'), '9729777432');
+    await user.type(screen.getByPlaceholderText('Phone number'), '9729777432');
     await user.click(screen.getByRole('button', { name: /send code/i }));
     h.emitNeedCode();
     await waitFor(() => {

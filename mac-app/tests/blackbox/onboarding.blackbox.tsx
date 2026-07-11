@@ -95,13 +95,13 @@ describe('OnboardingAuth — empty / initial state', () => {
     expect(continueBtn).toBeEnabled();
   });
 
-  it('formats the phone number as the user types (US E.164 display)', async () => {
+  it('formats the phone number as the user types (US national display)', async () => {
     const user = userEvent.setup();
     renderWithProviders(<OnboardingAuth onComplete={() => {}} />);
 
     const phoneInput = screen.getByPlaceholderText('Phone number');
     await user.type(phoneInput, '9729777432');
-    expect(phoneInput).toHaveValue('+1 (972)-977-7432');
+    expect(phoneInput).toHaveValue('(972) 977-7432');
   });
 });
 
@@ -293,7 +293,7 @@ describe('OnboardingAuth — back navigation', () => {
     });
     // Signup form re-rendered with prior values preserved (first name, phone)
     expect(screen.getByPlaceholderText('First name')).toHaveValue('Andy');
-    expect(screen.getByPlaceholderText('Phone number')).toHaveValue('+1 (972)-977-7432');
+    expect(screen.getByPlaceholderText('Phone number')).toHaveValue('(972) 977-7432');
   });
 });
 

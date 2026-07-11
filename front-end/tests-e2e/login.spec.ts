@@ -35,7 +35,12 @@ test.describe('login', () => {
     // Block auto-login endpoints so we can exercise the logged-out path.
     await forceLoggedOut(context);
 
-    await page.goto(`${FRONTEND_URL}/terminal`, { waitUntil: 'domcontentloaded' });
+    // ?no-auto-login: exercise the MANUAL login path deterministically — dev
+    // auto-login otherwise races this spec (its send-otp/verify-otp satisfy
+    // our waitForResponse predicates and its session churn can clobber state).
+    await page.goto(`${FRONTEND_URL}/terminal?no-auto-login=1`, {
+      waitUntil: 'domcontentloaded',
+    });
     await clearAppSession(page);
     await page.reload({ waitUntil: 'domcontentloaded' });
 
@@ -94,6 +99,26 @@ test.describe('login', () => {
 
     const verifyOtpRes = await verifyOtp;
     expect(verifyOtpRes.status(), `verify-otp non-2xx: ${verifyOtpRes.status()}`).toBeLessThan(300);
+
+    // ── Step 3b: Waitlist gate (invite-gated onboarding) ─────────────────
+    // Users without a redeemed invite code get the "You're On The Waitlist!"
+    // modal after login (server-side User.usedInviteCode). Redeem the master
+    // code through the real UI so the gate path is exercised end to end.
+    // Already-ungated users (prior redemption) skip straight through.
+    const waitlistHeading = page.getByRole('heading', { name: "You're On The Waitlist!" });
+    const gateAppeared = await waitlistHeading
+      .waitFor({ state: 'visible', timeout: 5_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (gateAppeared) {
+      const useCode = page.waitForResponse(
+        (r) => r.url().includes('/api/invite-codes/use') && r.request().method() === 'POST',
+      );
+      await page.getByLabel('Invite code').fill('181818');
+      await page.getByRole('button', { name: 'Join with invite code' }).click();
+      const useRes = await useCode;
+      expect(useRes.status(), `invite-codes/use non-2xx: ${useRes.status()}`).toBeLessThan(300);
+    }
 
     // ── Step 4: Verify authenticated state ───────────────────────────────
     await expect(dialog, 'Modal did not close after Verify').toBeHidden();

@@ -1,5 +1,11 @@
-import { PHONE_INPUT_PLACEHOLDER } from '../config';
+import PhoneInput from '@/features/auth/components/PhoneInput';
 import { TelegramIcon } from './TelegramIcon';
+
+const PHONE_FIELD_CLASS =
+  'w-full px-3 py-2 text-sm bg-surface border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-[#229ED9]/50 disabled:opacity-50';
+
+const PHONE_TRIGGER_CLASS =
+  'flex h-full items-center gap-1 px-2.5 py-2 text-sm bg-surface border border-border rounded-lg';
 
 interface PhoneStepProps {
   phoneNumber: string;
@@ -23,22 +29,23 @@ export const PhoneStep = ({
       Enter your phone number to connect your Telegram account.
     </p>
 
-    <div className="space-y-2">
+    <div
+      className="space-y-2"
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' && !loading) {
+          onSubmit();
+        }
+      }}
+    >
       <label className="text-sm font-medium text-foreground">Phone Number</label>
-      <input
-        type="tel"
+      <PhoneInput
         value={phoneNumber}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={PHONE_INPUT_PLACEHOLDER}
+        onChange={onChange}
         disabled={loading}
-        className="w-full px-3 py-2 text-sm bg-surface border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-[#229ED9]/50 disabled:opacity-50"
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && !loading) {
-            onSubmit();
-          }
-        }}
+        inputClassName={PHONE_FIELD_CLASS}
+        triggerClassName={PHONE_TRIGGER_CLASS}
       />
-      <p className="text-xs text-muted-foreground">Include your country code (e.g., +1 for US)</p>
+      <p className="text-xs text-muted-foreground">Pick your country code from the selector.</p>
     </div>
   </>
 );

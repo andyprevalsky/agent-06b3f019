@@ -87,6 +87,7 @@ router.post(
  * GET /api/invite-codes/check
  * Check if the current user needs to enter an invite code
  * Also creates user record and initializes credit on first call (OTP verification)
+ * Gated users are recorded on the waitlist so they can be invited later
  */
 router.get(
   '/check',
@@ -97,7 +98,7 @@ router.get(
       return;
     }
 
-    const result = await checkInviteCode(req.user.id);
+    const result = await checkInviteCode(req.user.id, req.user.phone);
     res.json(result);
   })
 );

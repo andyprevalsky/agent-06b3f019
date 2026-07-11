@@ -61,9 +61,28 @@ def test_worker_activity_supplier_is_sdk_native_fixed_size():
     raise AssertionError("WorkerTuner.create_composite call not found")
 
 
-def test_worker_workflow_supplier_is_sdk_native_fixed_size():
-    """Fixed workflow slots must preserve sticky pollers under memory pressure."""
+def test_worker_workflow_supplier_is_fixed_size_not_resource_based():
+    """Workflow slots must be FixedSizeSlotSupplier(max_concurrent_workflows).
+
+    ResourceBasedSlotSupplier throttles workflow-task slot permits whenever host
+    memory sits above its target — the steady state on dev Macs (~83-85%) and on
+    prod Fly machines (autoscaler runs memory up to its 75-80% thresholds).
+    Pollers must reserve a slot BEFORE polling, so the lone sticky poller loses
+    the permit race and every workflow task burns the full 10s
+    sticky_queue_schedule_to_start_timeout, then replays on a random worker.
+    Observed: a $0-LLM fast-cache smoke replay spent ~137s of 153s in
+    back-to-back 10s sticky timeouts. Memory protection belongs to the activity
+    admission gate + autoscaler, not workflow-task slot starvation.
+    """
     tree = _worker_tree()
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "temporalio.worker":
+            resource_imports = {alias.name for alias in node.names if alias.name.startswith("ResourceBased")}
+            assert resource_imports == set(), (
+                f"worker.py must not import {sorted(resource_imports)}: resource-based "
+                "slot suppliers starve sticky polling under steady-state memory pressure"
+            )
 
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -197,7 +216,8 @@ async def run_all_tests():
         "worker_activity_supplier_is_sdk_native_fixed_size", test_worker_activity_supplier_is_sdk_native_fixed_size
     )
     r.record(
-        "worker_workflow_supplier_is_sdk_native_fixed_size", test_worker_workflow_supplier_is_sdk_native_fixed_size
+        "worker_workflow_supplier_is_fixed_size_not_resource_based",
+        test_worker_workflow_supplier_is_fixed_size_not_resource_based,
     )
     r.record("worker_passes_sticky_queue_timeout_to_temporal", test_worker_passes_sticky_queue_timeout_to_temporal)
     r.record("activity_admission_closes_on_cpu_pressure", test_activity_admission_closes_on_cpu_pressure)

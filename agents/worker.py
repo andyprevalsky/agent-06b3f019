@@ -970,13 +970,27 @@ async def main():
         open_cpu_percent=config.temporal.activity_admission_open_cpu_percent,
     )
 
-    # Keep both workflow and activity slots on SDK-native fixed suppliers.
-    # Resource-based workflow admission can exhaust all permits under memory
-    # pressure, leaving zero sticky pollers and adding a full sticky timeout to
-    # every workflow task. Bounded fixed workflow slots preserve sticky polling;
-    # ActivityAdmissionSnapshot still feeds CPU/memory pressure to autoscaling.
-    # Avoid Python CustomSlotSupplier callbacks: Temporal invokes them from Rust
-    # worker threads, and GIL re-entry can deadlock under heartbeat traffic.
+    # All slot suppliers are SDK-native fixed-size. Avoid Python
+    # CustomSlotSupplier callbacks: Temporal invokes them from Rust worker
+    # threads, and GIL re-entry can deadlock the worker under activity
+    # heartbeat traffic.
+    #
+    # Workflow slots MUST NOT use ResourceBasedSlotSupplier. Workflow tasks are
+    # cheap state-machine steps, but pollers must reserve a workflow-task slot
+    # BEFORE polling — so when host memory sits above the tuner's target (the
+    # steady state on dev Macs at ~83-85% and on prod Fly machines, where the
+    # autoscaler deliberately runs memory up to its 75-80% thresholds), the
+    # supplier throttles permits to its minimum and the sticky pollers lose
+    # the permit race to the nonsticky pollers. The sticky queue then goes
+    # unpolled and EVERY workflow task burns the full
+    # sticky_queue_schedule_to_start_timeout (10s) before being rescheduled on
+    # the normal queue, where a random other worker picks it up with a full
+    # history replay. Observed: message-person smoke replay with $0 LLM cost
+    # spent ~137s of 153s in ~13 back-to-back 10s sticky timeouts.
+    # Memory protection for the actually-heavy work is the activity admission
+    # gate above (closes at activity_admission_close_memory_percent /
+    # activity_admission_close_cpu_percent) plus the fleet autoscaler — not
+    # workflow-task slot starvation.
     tuner = WorkerTuner.create_composite(
         workflow_supplier=FixedSizeSlotSupplier(config.temporal.max_concurrent_workflows),
         activity_supplier=FixedSizeSlotSupplier(config.temporal.max_concurrent_activities),
