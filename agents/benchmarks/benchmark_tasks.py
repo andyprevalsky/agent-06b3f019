@@ -58,6 +58,7 @@ class BenchmarkTask:
     anti_bot: Optional[str] = None  # "yes" or "no"; daily reporting can aggregate Anti-Bot score
     label_eval: Optional[str] = None  # Human-readable summary of the benchmark pass condition
     label_notes: Optional[str] = None  # Human-readable cleanup/review notes
+    mid_run_feedback: Optional[dict] = None  # Live USER message injected after a durable root-message boundary
 
 
 _TASKS_FILE = os.path.join(os.path.dirname(__file__), "tasks.json")

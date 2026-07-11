@@ -161,6 +161,61 @@ def test_parallel_tool_calls_smoke_cap_allows_recent_fanout_tail():
     assert get_smoke_cap("parallel-tool-calls") == 600
 
 
+def test_response_schema_feedback_benchmark_declares_real_mid_run_message():
+    """The regression benchmark must inject non-goal feedback into a live agent run."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("response-schema-non-goal-feedback")
+
+    assert task.mid_run_feedback == {
+        "after_root_message_count": 2,
+        "message": "Please keep going. Keep the final prose concise and easy to scan.",
+    }
+    assert task.start_phase == "execute"
+    assert task.runner == "agent"
+    assert task.status == "ready"
+
+
+def test_mid_run_feedback_schema_evaluator_requires_exact_stability():
+    """Non-goal feedback passes only when schema and hidden schema context stay unchanged."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _validate_mid_run_feedback_schema
+
+    task = get_task_by_name("response-schema-non-goal-feedback")
+    initial_schema = {
+        "fields": [{"name": "city_populations", "type": "list[object]", "required": True}]
+    }
+    task._mid_run_feedback_posted = True
+    task._mid_run_feedback_initial_schema = initial_schema
+
+    unchanged = {
+        "agent": {"response_schema": initial_schema},
+        "messages": [{"role": "USER", "text": task.mid_run_feedback["message"], "metadata": None}],
+    }
+    assert _validate_mid_run_feedback_schema(task, unchanged) is None
+
+    changed = {
+        "agent": {
+            "response_schema": {
+                "fields": [
+                    {"name": "city_populations", "type": "list[object]", "required": True},
+                    {"name": "concise_summary", "type": "str", "required": True},
+                ]
+            }
+        },
+        "messages": [
+            {
+                "role": "USER",
+                "text": "generated update",
+                "metadata": {"hidden": True, "isResponseSchemaUpdate": True},
+            }
+        ],
+    }
+    reason = _validate_mid_run_feedback_schema(task, changed)
+    assert reason is not None
+    assert "changed after non-goal feedback" in reason
+
+
 def test_toast_nopa_benchmark_routes_browser_to_toast_not_generic_search():
     """Toast checkout benchmark should not rely on model-discovered DoorDash/Google routing."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -172,9 +227,7 @@ def test_toast_nopa_benchmark_routes_browser_to_toast_not_generic_search():
     assert task.expected_attention_kind == "payment_approval"
     assert task.expected_payment_receipt["merchant"] == "Nopa Fish (Toast - order.toasttab.com)"
     assert task.success_on_payment_card_request is True
-    assert task.expected_payment_receipt["lineItems"] == [
-        {"name": "The Rocky Sandwich", "quantity": 1}
-    ]
+    assert task.expected_payment_receipt["lineItems"] == [{"name": "The Rocky Sandwich", "quantity": 1}]
 
 
 def test_payment_receipt_validation_allows_partial_live_receipts():
@@ -466,12 +519,7 @@ def test_minted_benchmark_cleanup_can_reset_agent_identity_when_explicit():
     try:
         bench._run_local_victoria_sql = lambda sql: queries.append(sql) or "1"
 
-        assert (
-            bench._delete_local_minted_accounts_for_user(
-                "user-123", reset_agent_identity=True
-            )
-            == 1
-        )
+        assert bench._delete_local_minted_accounts_for_user("user-123", reset_agent_identity=True) == 1
     finally:
         bench._run_local_victoria_sql = original_run_sql
 
@@ -552,10 +600,7 @@ def test_minted_x_signup_evidence_rejects_terminal_phone_blocker():
     """X benchmark must not treat a minted row alone as account-creation proof."""
     import benchmarks.run_benchmark as bench
 
-    blocker = (
-        "X forced phone auth. Final DOM showed: "
-        "An unexpected error occurred. Please try again."
-    )
+    blocker = "X forced phone auth. Final DOM showed: An unexpected error occurred. Please try again."
     success = "Account creation completed and the account is signed in on the home timeline."
 
     assert bench._x_signup_has_terminal_phone_blocker(blocker) is True
@@ -801,6 +846,7 @@ async def test_primitive_cleanup_deletes_only_exact_recipients():
     original_client = bench.httpx.AsyncClient
     original_load_env = bench.load_env_var
     try:
+
         def fake_load_env(name, *_paths):
             if name == "PRIMITIVE_API_KEY":
                 return "primitive-key"
@@ -878,6 +924,7 @@ async def test_primitive_uber_welcome_evidence_uses_exact_recipient():
     original_client = bench.httpx.AsyncClient
     original_load_env = bench.load_env_var
     try:
+
         def fake_load_env(name, *_paths):
             if name == "PRIMITIVE_API_KEY":
                 return "primitive-key"
@@ -972,6 +1019,7 @@ async def test_archive_agent_start_posts_agent_and_returns_fixture_ref():
     original_headers = bench._api_headers
     original_client = bench.httpx.AsyncClient
     try:
+
         async def fake_headers():
             return {"X-API-Key": "test-key"}
 
@@ -1024,6 +1072,7 @@ async def test_archive_agent_finalize_posts_task_and_returns_manifest_ref():
     original_headers = bench._api_headers
     original_client = bench.httpx.AsyncClient
     try:
+
         async def fake_headers():
             return {"X-API-Key": "test-key"}
 
@@ -1087,6 +1136,7 @@ async def test_archive_agent_finalize_failure_is_best_effort():
     original_headers = bench._api_headers
     original_client = bench.httpx.AsyncClient
     try:
+
         async def fake_headers():
             return {"X-API-Key": "test-key"}
 
@@ -1388,6 +1438,7 @@ async def test_code_agent_preflight_accepts_gpt_compute_token():
     original_headers = bench._api_headers
     original_client = bench.httpx.AsyncClient
     try:
+
         async def fake_headers():
             return {"X-API-Key": "test-key"}
 
@@ -1432,6 +1483,7 @@ async def test_code_agent_preflight_rejects_missing_compute_token():
     original_client = bench.httpx.AsyncClient
     original_has_fallback = bench._has_anthropic_api_key_fallback_configured
     try:
+
         async def fake_headers():
             return {"X-API-Key": "test-key"}
 
@@ -1479,6 +1531,7 @@ async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
     original_client = bench.httpx.AsyncClient
     original_has_fallback = bench._has_anthropic_api_key_fallback_configured
     try:
+
         async def fake_headers():
             return {"X-API-Key": "test-key"}
 
@@ -1528,9 +1581,7 @@ def test_attention_request_kind_distinguishes_auth_from_write_lock():
         }
     }
     write_lock_req = {
-        "metadata": {
-            "requestUserApproval": {"attentionRequestId": "approval-1", "writePermission": True}
-        }
+        "metadata": {"requestUserApproval": {"attentionRequestId": "approval-1", "writePermission": True}}
     }
     raw_write_lock_req = {"metadata": {"toolApproval": True, "writePermission": True}}
 
@@ -1569,8 +1620,7 @@ def test_webdecoy_biometrics_evaluator_requires_interaction_and_low_score():
                     "text": (
                         "Visited https://webdecoy.com/product/fcaptcha-demo/. "
                         "Clicked the checkbox mode verification control. "
-                        "Entered benchmark-human@example.com in invisible mode and clicked Submit. "
-                        + score_line
+                        "Entered benchmark-human@example.com in invisible mode and clicked Submit. " + score_line
                     ),
                 }
             ]
@@ -1708,7 +1758,10 @@ def test_count_only_approval_context_allows_open_tool_call():
     task = get_task_by_name("outreach-batch")
     data = {"_benchmark": {"expected_approval_count_seen": task.expected_approval_count}}
 
-    assert _approval_mode_allows_open_tool_context(task, data, approvals_triggered=task.expected_approval_count or 0) is True
+    assert (
+        _approval_mode_allows_open_tool_context(task, data, approvals_triggered=task.expected_approval_count or 0)
+        is True
+    )
 
 
 def test_open_approval_context_filters_expected_tool_pairing_violation():
@@ -1835,6 +1888,7 @@ async def test_create_agent_sends_write_lock_override_when_env_set():
     original_client = bench.httpx.AsyncClient
     original_env = os.environ.get("BENCHMARK_WRITE_LOCK_ENABLED")
     try:
+
         async def fake_headers():
             return {"X-API-Key": "test-key"}
 
@@ -1890,6 +1944,7 @@ async def test_create_agent_uses_goal_override_when_env_set():
     original_client = bench.httpx.AsyncClient
     original_env = os.environ.get("BENCHMARK_GOAL_OVERRIDE")
     try:
+
         async def fake_headers():
             return {"X-API-Key": "test-key"}
 
@@ -1946,6 +2001,8 @@ def test_keep_agents_preserves_passed_and_failed_runs():
 
 def test_keep_agents_env_preserves_successes_and_failures():
     """BENCHMARK_KEEP_AGENTS keeps passed agents loadable for UI audit."""
+    import os
+
     from benchmarks.run_benchmark import _should_delete_agent_after_run
 
     original_env = os.environ.get("BENCHMARK_KEEP_AGENTS")
@@ -2118,9 +2175,7 @@ def test_local_failed_tasks_from_run_reads_result_json():
 
         failures = failed_tasks_from_run(path)
 
-    assert [(f.name, f.agent_id, f.failure_reason) for f in failures] == [
-        ("browser-agent", "b2", "verifier failed")
-    ]
+    assert [(f.name, f.agent_id, f.failure_reason) for f in failures] == [("browser-agent", "b2", "verifier failed")]
 
 
 def test_run_sh_manifest_writer_publishes_wmh_when_served():
@@ -2276,7 +2331,9 @@ def test_local_extract_results_path_and_diagnostic_commands():
     commands = diagnostic_commands("agent-123", task_name="browser-agent", port=55120)
     joined = [" ".join(command) for command in commands]
     assert any("agent_latency.py agent-123" in command for command in joined)
-    assert any("agent_logs.py agent-123 --tree --diagnostics --url http://localhost:55120" in command for command in joined)
+    assert any(
+        "agent_logs.py agent-123 --tree --diagnostics --url http://localhost:55120" in command for command in joined
+    )
     assert any("agent_cache.py agent-123" in command for command in joined)
 
 
@@ -3165,9 +3222,7 @@ def test_callee_check_failures_coerce_bools_and_match_strings_loosely():
     assert len(failures) == 1
     assert failures[0].startswith("caller_requested_name")
 
-    assert callee_check_failures({"payment_completed": True}, {}) == [
-        "payment_completed: expected True, got None"
-    ]
+    assert callee_check_failures({"payment_completed": True}, {}) == ["payment_completed: expected True, got None"]
 
 
 def test_payment_audit_structured_data_since_returns_latest_successful_payment():
@@ -3197,9 +3252,7 @@ def test_payment_audit_structured_data_since_returns_latest_successful_payment()
         )
         os.environ["PHONE_BENCHMARK_PAYMENT_AUDIT_PATH"] = str(path)
         try:
-            data = payment_audit_structured_data_since(
-                datetime(2026, 7, 2, 22, 0, 0, tzinfo=timezone.utc)
-            )
+            data = payment_audit_structured_data_since(datetime(2026, 7, 2, 22, 0, 0, tzinfo=timezone.utc))
         finally:
             if previous is None:
                 os.environ.pop("PHONE_BENCHMARK_PAYMENT_AUDIT_PATH", None)
@@ -3258,6 +3311,8 @@ def test_phone_auto_approval_requires_active_callee_number():
 
     assert _phone_approval_matches_callee(task, {"question": "Make a phone call to +1 (415) 555-0123?"})
     assert not _phone_approval_matches_callee(task, {"question": "Make a phone call to +1 (650) 555-0123?"})
+
+
 def test_unified_catalog_validates_and_covers_benchmark_tasks():
     """tasks.json is the benchmark catalog: valid contract, ready entries, holding set split."""
     from benchmarks.long_horizon import EVALUATION_METHODS, validate_catalog
@@ -3411,6 +3466,7 @@ def test_suite_selection_excludes_incomplete_entries():
         "browser-indeed-account-create",
         "phone-call-client-intake",
         "phone-call-payment",
+        "response-schema-non-goal-feedback",
     } <= suite_names
     assert len(suite_names) == len([t for t in all_tasks() if t.status == "ready"])
 
@@ -3720,9 +3776,7 @@ def test_local_benchmark_checkpoint_message_index_can_bypass_for_each_boundary()
 
     from benchmarks import local as local_bench
 
-    args = local_bench.parse_args(
-        ["chat-mode", "--checkpoint", "2", "--checkpoint-boundary", "message-index"]
-    )
+    args = local_bench.parse_args(["chat-mode", "--checkpoint", "2", "--checkpoint-boundary", "message-index"])
     with tempfile.TemporaryDirectory() as tmp:
         source_json = Path(tmp) / "source.json"
         source_json.write_text(
@@ -3834,10 +3888,15 @@ async def run_all_tests():
     r.record("phone_callee_end_call_config", test_phone_callee_assistant_base_has_end_call_tool_and_duration_cap)
     r.record("phone_findings_matcher_squashes_separators", test_missing_call_findings_tolerates_spacing_and_punctuation)
     r.record("phone_search_text_includes_metadata", test_phone_search_text_includes_phone_call_metadata)
-    r.record("phone_final_result_text_excludes_raw_transcript", test_phone_final_result_text_excludes_raw_transcript_evidence)
+    r.record(
+        "phone_final_result_text_excludes_raw_transcript", test_phone_final_result_text_excludes_raw_transcript_evidence
+    )
     r.record("phone_pinned_facts_flatten", test_flatten_pinned_call_findings_extracts_string_leaves)
     r.record("phone_callee_checks_coercion", test_callee_check_failures_coerce_bools_and_match_strings_loosely)
-    r.record("phone_payment_audit_structured_data", test_payment_audit_structured_data_since_returns_latest_successful_payment)
+    r.record(
+        "phone_payment_audit_structured_data",
+        test_payment_audit_structured_data_since_returns_latest_successful_payment,
+    )
     r.record("phone_callee_prompt_resolution", test_resolve_callee_prompt_requires_active_session)
     r.record("phone_public_base_url", test_benchmark_public_base_url_uses_env_override)
     r.record("phone_auto_approval_requires_callee", test_phone_auto_approval_requires_active_callee_number)
@@ -3923,9 +3982,15 @@ async def run_all_tests():
     await r.record_async("archive_to_wmh_lifecycle", test_finalize_archive_and_score_world_model_lifecycle)
     r.record("world_model_cli_simulate_alias", test_world_model_cli_env_simulate_alias_does_not_enable_self_eval)
     r.record("world_model_cli_wmh_eval_real", test_world_model_cli_env_wmh_eval_scores_real_runs)
-    await r.record_async("simulate_preflight_world_model_update", test_simulate_preflight_updates_world_model_and_records_progress)
-    await r.record_async("code_agent_preflight_accepts_gpt_compute", test_code_agent_preflight_accepts_gpt_compute_token)
-    await r.record_async("code_agent_preflight_rejects_missing_compute", test_code_agent_preflight_rejects_missing_compute_token)
+    await r.record_async(
+        "simulate_preflight_world_model_update", test_simulate_preflight_updates_world_model_and_records_progress
+    )
+    await r.record_async(
+        "code_agent_preflight_accepts_gpt_compute", test_code_agent_preflight_accepts_gpt_compute_token
+    )
+    await r.record_async(
+        "code_agent_preflight_rejects_missing_compute", test_code_agent_preflight_rejects_missing_compute_token
+    )
     await r.record_async(
         "code_agent_preflight_accepts_anthropic_api_key_fallback",
         test_code_agent_preflight_accepts_anthropic_api_key_fallback,
@@ -4024,6 +4089,14 @@ async def run_all_tests():
     r.record(
         "parallel_tool_calls_smoke_cap",
         test_parallel_tool_calls_smoke_cap_allows_recent_fanout_tail,
+    )
+    r.record(
+        "response_schema_feedback_benchmark_mid_run",
+        test_response_schema_feedback_benchmark_declares_real_mid_run_message,
+    )
+    r.record(
+        "mid_run_feedback_schema_evaluator",
+        test_mid_run_feedback_schema_evaluator_requires_exact_stability,
     )
     r.record(
         "toast_nopa_routes_to_toast",

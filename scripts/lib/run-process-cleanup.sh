@@ -58,6 +58,36 @@ run_kill_tree() {
   kill "$pid" 2>/dev/null || true
 }
 
+run_db_container_instance_is_owned() {
+  local expected_id="$1"
+  local container_name="$2"
+  local current_id
+
+  [ -n "$expected_id" ] || return 1
+  current_id="$(docker inspect --format='{{.Id}}' "$container_name" 2>/dev/null || true)"
+  [ "$current_id" = "$expected_id" ]
+}
+
+run_cleanup_owned_db_container() {
+  local expected_id="$1"
+  local container_name="$2"
+  local volume_name="$3"
+  local isolated_run="$4"
+
+  # The normal per-workspace database is shared across sequential run.sh
+  # invocations, so service cleanup must leave it running for a newer owner.
+  [ "$isolated_run" = "true" ] || return 0
+  if ! run_db_container_instance_is_owned "$expected_id" "$container_name"; then
+    echo "⚠️  Skipping DB cleanup: $container_name was replaced by another run"
+    return 0
+  fi
+
+  # Act on the immutable instance ID so a name replacement after the ownership
+  # check cannot redirect this cleanup to another run's container.
+  docker rm -f "$expected_id" 2>/dev/null || true
+  docker volume rm "$volume_name" 2>/dev/null || true
+}
+
 run_kill_stale_same_task_queue_workers() {
   local worktree="$1"
   local task_queue="$2"

@@ -11,11 +11,6 @@ import { SteelRateLimitError, type FingerprintData, log } from './types';
 import { createLocalBrowserSession, connectValidatedBrowser } from './sessionConnection';
 export { resumeSession } from './sessionResume';
 
-// Validate required environment variables
-if (!process.env.STEEL_API_KEY) {
-  throw new Error('STEEL_API_KEY environment variable is required');
-}
-
 export const steel = new Steel({
   steelAPIKey: process.env.STEEL_API_KEY,
 });

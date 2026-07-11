@@ -12,6 +12,7 @@
  *   currentView === 'network'      → <NetworkView />
  *   currentView === 'benchmarks'   → <BenchmarksView /> (team-gated tab)
  *   currentView === 'agents'       → agent chat / landing
+ *   open-agent deep link           → force 'agents' even from browse/settings
  */
 
 import { useState, useMemo, lazy } from 'react';
@@ -28,12 +29,12 @@ import { BenchmarksView } from '@/features/benchmarks';
 import { ADMIN_USER_IDS, IS_DEV_MODE } from '@/features/terminal-component-group/config';
 import { cn } from '@/lib/utils';
 import { useAppData } from '@/hooks/useAppData';
-import { getItem } from '@/lib/storage';
 
 import { useTerminalAgents } from '../hooks/useTerminalAgents';
 import { useDrippiness } from '../hooks/useDrippiness';
 import { useTileAnimation } from '../hooks/useTileAnimation';
 import { usePatternOffset } from '../hooks/usePatternOffset';
+import { resolveInitialTerminalView } from '../hooks/resolveInitialTerminalView';
 import {
   computeActiveBrowserPanels,
   derivePendingApproval,
@@ -52,17 +53,6 @@ const BrowserStatusBarCarousel = lazy(() =>
     default: m.default,
   })),
 );
-
-function resolveInitialView(): TerminalView {
-  const stored = getItem('app-user');
-  if (stored === null) return 'agents';
-  try {
-    const user = JSON.parse(stored) as { phone?: string };
-    return user.phone === BROWSER_REVIEW_TEST_PHONE ? 'browse' : 'agents';
-  } catch {
-    return 'agents';
-  }
-}
 
 function browseOffsetStyle(currentView: TerminalView): React.CSSProperties | undefined {
   // Full-width views (browse, benchmarks) must clear the fixed sidebar rail —
@@ -86,7 +76,7 @@ export function TerminalContent() {
   const { patternOffset, tileColors, colorPalette } = usePatternOffset(tileAnimation.currentFrame);
 
   const resetAnimationState = () => tileAnimation.reset();
-  const initialView = useMemo<TerminalView>(resolveInitialView, []);
+  const initialView = useMemo<TerminalView>(resolveInitialTerminalView, []);
   const [currentView, setCurrentView] = useState<TerminalView>(initialView);
   const agents = useTerminalAgents(currentView, setCurrentView, resetAnimationState);
   const { models, modelsLoading } = useAppData();
@@ -214,18 +204,7 @@ function SidebarSection({
 
 // ── Main content area (view router) ─────────────────────────────────────
 
-function MainContent({
-  agents,
-  drip,
-  currentView,
-  models,
-  modelsLoading,
-  pendingApproval,
-  hasActiveAttention,
-  browserStatusProps,
-  systemMessages,
-  BrowserStatusBarCarousel: BrowserCarousel,
-}: {
+interface MainContentProps {
   agents: ReturnType<typeof useTerminalAgents>;
   drip: ReturnType<typeof useDrippiness>;
   currentView: TerminalView;
@@ -238,7 +217,20 @@ function MainContent({
   BrowserStatusBarCarousel: React.ComponentType<{
     browsers: { taskId: string; browserUrl: string }[];
   }>;
-}) {
+}
+
+function MainContent({
+  agents,
+  drip,
+  currentView,
+  models,
+  modelsLoading,
+  pendingApproval,
+  hasActiveAttention,
+  browserStatusProps,
+  systemMessages,
+  BrowserStatusBarCarousel: BrowserCarousel,
+}: MainContentProps) {
   return (
     <main
       className={cn(

@@ -26,7 +26,7 @@
  *
  * States:
  * - step: 'phone' | 'otp'
- * - phone: string (formatted phone number)
+ * - phone: string (E.164, e.g. +5215512345678 — set by PhoneInput's country selector)
  * - otp: string (6-digit code)
  * - loading: boolean
  */

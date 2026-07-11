@@ -11,6 +11,7 @@ import { getClientIP } from '../../providers/geoip';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { createLogger } from '../../providers/logger';
 import { createAgentSchema, updateAgentSchema, updateStatusSchema } from './types';
+import { rejectAnonymousCreate, rejectGatedCreate } from './routes.guards';
 import * as lifecycleService from './agentLifecycleService';
 import * as controlService from './agentControlService';
 import * as queryService from './agentQueryService';
@@ -30,12 +31,6 @@ function noCacheHeaders(res: Response): void {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
   res.set('Pragma', 'no-cache');
   res.set('Expires', '0');
-}
-
-function rejectAnonymousCreate(req: HybridAuthRequest, res: Response): boolean {
-  if (req.isAnonymous !== true) return false;
-  res.status(401).json({ error: 'Login required to create an agent' });
-  return true;
 }
 
 function handleRouteError(
@@ -160,6 +155,7 @@ router.post(
     try {
       const body = createAgentSchema.parse(req.body);
       if (rejectAnonymousCreate(req, res)) return;
+      if (await rejectGatedCreate(req, res)) return;
       const userId = req.userId ?? body.user_id;
       if (userId === undefined || userId === null || userId === '') {
         res.status(401).json({ error: 'Unauthorized: user_id required' });

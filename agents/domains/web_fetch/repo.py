@@ -3,6 +3,7 @@
 import re
 from typing import Any, Dict, List, Optional
 
+import httpx
 import structlog
 from temporalio import activity
 
@@ -19,9 +20,42 @@ from helpers.http_client import get_http_client
 
 logger = structlog.get_logger()
 
+FIRECRAWL_RETRYABLE_STATUSES = {408, 429, 500, 502, 503, 504}
+FIRECRAWL_NON_RETRYABLE_STATUSES = {400, 401, 402, 403, 404, 409, 413}
+PARALLEL_RETRYABLE_STATUSES = {408, 429, 500, 502, 503}
+PARALLEL_NON_RETRYABLE_STATUSES = {400, 401, 402, 403, 404, 422}
+
 
 _MARKDOWN_LINK_RE = re.compile(r"\[[^\]]+\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 _BARE_URL_RE = re.compile(r"https?://[^\s<>()\[\]{}\"']+")
+
+
+def is_retryable_provider_error(provider: str, error: BaseException) -> bool:
+    """Classify an HTTP provider failure at the data-access boundary."""
+    if isinstance(error, (httpx.TimeoutException, httpx.TransportError)):
+        return True
+
+    status = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
+    if status is None:
+        message = str(error).lower()
+        deterministic_phrases = (
+            "not configured",
+            "returned empty markdown",
+            "returned no results",
+            "invalid url",
+            "unsupported",
+        )
+        return not any(phrase in message for phrase in deterministic_phrases)
+
+    retryable_statuses = FIRECRAWL_RETRYABLE_STATUSES if provider == "Firecrawl" else PARALLEL_RETRYABLE_STATUSES
+    non_retryable_statuses = (
+        FIRECRAWL_NON_RETRYABLE_STATUSES if provider == "Firecrawl" else PARALLEL_NON_RETRYABLE_STATUSES
+    )
+    if status in retryable_statuses:
+        return True
+    if status in non_retryable_statuses:
+        return False
+    return status >= 500
 
 
 def extract_links_from_markdown(markdown: str) -> List[str]:

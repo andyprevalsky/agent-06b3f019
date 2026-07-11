@@ -55,8 +55,10 @@ def test_browser_use_pool_registered():
     spec = get_pool("rose-1-browser-use")
     assert spec.name == "rose-1-browser-use"
     assert spec.claude_auth_model == "claude-fable-5"
+    assert spec.gpt_auth_model == "gpt-5.6-sol"
     assert "anthropic/claude-opus-4.8" in spec.waterfall
-    # Legacy bu/yutori models removed; waterfall is opus → gpt-5.5
+    assert spec.waterfall[-1] == "openai/gpt-5.6-sol"
+    # Legacy bu/yutori models removed; waterfall is opus → GPT-5.6 Sol.
     assert all("yutori" not in m and "browser-use" not in m for m in spec.waterfall)
 
 
@@ -175,13 +177,27 @@ def test_build_browser_use_system_prompt_reuses_main_grading_prompt():
 
 
 def test_build_browser_use_tools_preserves_catalog_descriptions():
-    tools = build_browser_use_tools(["click", "request_user_assistance_for_authentication", "unknown_action"])
-    assert [tool["name"] for tool in tools] == ["click", "request_user_assistance_for_authentication"]
+    tools = build_browser_use_tools(
+        [
+            "click",
+            "request_user_assistance_for_authentication",
+            "request_payment_card",
+            "generate_write_lock_notification",
+            "unknown_action",
+        ]
+    )
+    assert [tool["name"] for tool in tools] == [
+        "click",
+        "request_user_assistance_for_authentication",
+        "request_payment_card",
+        "generate_write_lock_notification",
+    ]
 
     click = tools[0]
     assert click["description"] == BROWSER_USE_TOOLS["click"]["description"]
-    assert click["input_schema"]["properties"]["index"]["description"] == (
-        BROWSER_USE_TOOLS["click"]["params"]["index"]["description"]
+    assert (
+        click["input_schema"]["properties"]["index"]["description"]
+        == (BROWSER_USE_TOOLS["click"]["params"]["index"]["description"])
     )
     assert click["input_schema"]["required"] == ["index"]
 
@@ -190,6 +206,44 @@ def test_build_browser_use_tools_preserves_catalog_descriptions():
     assert auth_help["input_schema"]["properties"] == {}
     assert auth_help["input_schema"]["required"] == []
 
+    payment = tools[2]
+    line_items = payment["input_schema"]["properties"]["line_items"]
+    assert line_items["items"]["required"] == [
+        "name",
+        "product_url",
+        "rating",
+        "review_count",
+        "unit_price_cents",
+        "quantity",
+        "line_total_cents",
+    ]
+    assert "checkout" in line_items["items"]["properties"]["product_url"]["description"]
+
+    write_lock = tools[3]
+    purchase_item = write_lock["input_schema"]["properties"]["purchase"]["properties"]["items"]["items"]
+    assert purchase_item["required"] == ["title", "rating", "review_count", "product_url"]
+    assert write_lock["input_schema"]["anyOf"][0]["required"] == ["purchase"]
+
+
+def test_build_browser_use_tools_emits_valid_required_keywords():
+    def walk_schema(value):
+        if isinstance(value, dict):
+            yield value
+            for nested in value.values():
+                yield from walk_schema(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                yield from walk_schema(nested)
+
+    tools = build_browser_use_tools(list(BROWSER_USE_TOOLS))
+
+    for tool in tools:
+        for schema_node in walk_schema(tool["input_schema"]):
+            if "required" in schema_node:
+                assert isinstance(schema_node["required"], list), (
+                    f"{tool['name']} emitted a non-array JSON Schema required keyword: {schema_node}"
+                )
+
 
 def test_write_lock_notification_tool_is_stable_internal_action_schema():
     from browser_tools.schemas import AVAILABLE_ACTIONS, create_browser_agent_action_model
@@ -197,8 +251,7 @@ def test_write_lock_notification_tool_is_stable_internal_action_schema():
     assert "generate_write_lock_notification" in AVAILABLE_ACTIONS
     assert "generate_write_lock_notification" in BROWSER_USE_TOOLS
     assert (
-        "WRITE_LOCK_NOTIFICATION_FORK_REQUEST"
-        in BROWSER_USE_TOOLS["generate_write_lock_notification"]["description"]
+        "WRITE_LOCK_NOTIFICATION_FORK_REQUEST" in BROWSER_USE_TOOLS["generate_write_lock_notification"]["description"]
     )
 
     ActionModel = create_browser_agent_action_model()
@@ -283,8 +336,10 @@ def test_write_lock_notification_schema_normalizes_provider_aliases():
                     {
                         "name": "Carhartt Men's Knit Cuffed Beanie, Black",
                         "quantity": 1,
+                        "rating": 5.0,
                         "price_usd": 19.99,
                         "reviews": "167,432 ratings",
+                        "product_url": "https://www.amazon.com/dp/B000000001",
                         "seller": "Amazon.com",
                         "shipping": "FREE Two Day delivery, arriving Saturday, Jun 27, 2026",
                     }
@@ -305,6 +360,7 @@ def test_write_lock_notification_schema_normalizes_provider_aliases():
     assert dumped["purchase"]["items"][0]["title"] == "Carhartt Men's Knit Cuffed Beanie, Black"
     assert dumped["purchase"]["items"][0]["price"] == "$19.99"
     assert dumped["purchase"]["items"][0]["quantity"] == "1"
+    assert dumped["purchase"]["items"][0]["rating"] == "5.0 stars"
     assert dumped["purchase"]["items"][0]["review_count"] == "167,432 ratings"
     assert dumped["purchase"]["items"][0]["seller"] == "Amazon.com"
     assert dumped["purchase"]["items"][0]["shipping"] == "FREE Two Day delivery, arriving Saturday, Jun 27, 2026"
@@ -330,7 +386,15 @@ def test_write_lock_notification_schema_normalizes_nested_total_aliases():
                 "current_url": "https://www.amazon.com/checkout",
             },
             "purchase": {
-                "items": [{"title": "Carhartt beanie", "price": "$19.99"}],
+                "items": [
+                    {
+                        "title": "Carhartt beanie",
+                        "price": "$19.99",
+                        "rating": "4.8 stars",
+                        "review_count": "167,432 ratings",
+                        "product_url": "https://www.amazon.com/dp/B000000001",
+                    }
+                ],
                 "totals": {
                     "items": "$19.99",
                     "shipping_and_handling": "$0.00",
@@ -346,6 +410,106 @@ def test_write_lock_notification_schema_normalizes_nested_total_aliases():
     assert totals["shipping"] == "$0.00"
     assert totals["tax"] == "$1.72"
     assert totals["total"] == "$21.71"
+
+
+def test_write_lock_purchase_schema_rejects_missing_product_context():
+    from pydantic import ValidationError
+
+    from browser_tools.schemas import GenerateWriteLockNotificationTool
+
+    try:
+        GenerateWriteLockNotificationTool.model_validate(
+            {
+                "tool": "generate_write_lock_notification",
+                "trigger_type": "purchase",
+                "action": "buy item",
+                "service": {
+                    "name": "Amazon",
+                    "domain": "amazon.com",
+                    "url": "https://www.amazon.com/checkout",
+                },
+                "purchase": {"items": [{"title": "Beanie"}]},
+            }
+        )
+    except ValidationError as error:
+        message = str(error)
+        assert "rating" in message
+        assert "review_count" in message
+        assert "product_url" in message
+    else:
+        raise AssertionError("purchase approval accepted an item without reviews and a product URL")
+
+
+def test_write_lock_purchase_schema_rejects_current_non_product_page_as_product_link():
+    from pydantic import ValidationError
+
+    from browser_tools.schemas import GenerateWriteLockNotificationTool
+
+    current_url = "https://shop.example/session/abc"
+    try:
+        GenerateWriteLockNotificationTool.model_validate(
+            {
+                "tool": "generate_write_lock_notification",
+                "trigger_type": "purchase",
+                "action": "buy item",
+                "service": {
+                    "name": "Example Shop",
+                    "domain": "shop.example",
+                    "url": current_url,
+                },
+                "purchase": {
+                    "items": [
+                        {
+                            "title": "Beanie",
+                            "rating": "4.8 stars",
+                            "review_count": "312 reviews",
+                            "product_url": current_url,
+                        }
+                    ]
+                },
+            }
+        )
+    except ValidationError as error:
+        assert "current checkout or session page" in str(error)
+    else:
+        raise AssertionError("purchase approval accepted the current session URL as a product link")
+
+
+def test_write_lock_purchase_schema_rejects_product_host_not_observed_by_browser():
+    from pydantic import ValidationError
+
+    from browser_tools.schemas import GenerateWriteLockNotificationTool
+
+    payload = {
+        "tool": "generate_write_lock_notification",
+        "trigger_type": "purchase",
+        "action": "buy item",
+        "service": {
+            "name": "Example Shop",
+            "domain": "example.com",
+            "url": "https://example.com/checkout",
+        },
+        "purchase": {
+            "items": [
+                {
+                    "title": "Beanie",
+                    "rating": "4.8 stars",
+                    "review_count": "312 reviews",
+                    "product_url": "https://phishing.example/products/beanie",
+                }
+            ]
+        },
+    }
+
+    try:
+        GenerateWriteLockNotificationTool.model_validate(
+            payload,
+            context={"trusted_page_urls": ["https://example.com/products/beanie", "https://example.com/checkout"]},
+        )
+    except ValidationError as error:
+        assert "host was not observed" in str(error)
+    else:
+        raise AssertionError("purchase approval accepted an unobserved product host")
 
 
 def test_normalize_write_lock_notification_tool_call_preserves_params():
@@ -606,7 +770,7 @@ def test_extract_json_array():
 def test_extract_json_returns_none_on_garbage():
     assert extract_json("just words") is None
     assert extract_json("") is None
-    assert extract_json(None) is None  # type: ignore[arg-type]
+    assert extract_json(None) is None
 
 
 # =====================================================================
@@ -615,89 +779,108 @@ def test_extract_json_returns_none_on_garbage():
 
 
 def test_normalize_flat_action_shape():
-    out = normalize_browser_use_response({
-        "thinking": "t",
-        "action": [{"action_name": "click", "index": 5}],
-    })
+    out = normalize_browser_use_response(
+        {
+            "thinking": "t",
+            "action": [{"action_name": "click", "index": 5}],
+        }
+    )
     assert out["action"] == "click"
     assert out["index"] == 5
     assert out["thinking"] == "t"
 
 
 def test_normalize_nested_action_shape():
-    out = normalize_browser_use_response({
-        "thinking": "t",
-        "action": [{"click": {"index": 7}}],
-    })
+    out = normalize_browser_use_response(
+        {
+            "thinking": "t",
+            "action": [{"click": {"index": 7}}],
+        }
+    )
     assert out["action"] == "click"
     assert out["index"] == 7
 
 
 def test_normalize_remaps_navigate_to_goto():
-    out = normalize_browser_use_response({
-        "action": [{"navigate": {"url": "https://x.com"}}],
-    })
+    out = normalize_browser_use_response(
+        {
+            "action": [{"navigate": {"url": "https://x.com"}}],
+        }
+    )
     assert out["action"] == "goto"
     assert out["params"]["url"] == "https://x.com"
 
 
 def test_normalize_remaps_done_to_attempt_completion():
-    out = normalize_browser_use_response({
-        "action": [{"action_name": "done", "text": "all good"}],
-    })
+    out = normalize_browser_use_response(
+        {
+            "action": [{"action_name": "done", "text": "all good"}],
+        }
+    )
     assert out["action"] == "attempt_completion"
     assert out["params"]["text"] == "all good"
 
 
 def test_normalize_click_coordinates_to_click_with_coords():
-    out = normalize_browser_use_response({
-        "action": [{"click_coordinates": {"x": 100, "y": 200}}],
-    })
+    out = normalize_browser_use_response(
+        {
+            "action": [{"click_coordinates": {"x": 100, "y": 200}}],
+        }
+    )
     assert out["action"] == "click"
     assert out["coordinates"] == {"x": 100, "y": 200}
 
 
 def test_normalize_input_text_remap():
-    out = normalize_browser_use_response({
-        "action": [{"input": {"index": 2, "text": "hello"}}],
-    })
+    out = normalize_browser_use_response(
+        {
+            "action": [{"input": {"index": 2, "text": "hello"}}],
+        }
+    )
     assert out["action"] == "input_text"
     assert out["index"] == 2
     assert out["params"]["text"] == "hello"
 
 
 def test_normalize_request_user_assistance():
-    out = normalize_browser_use_response({
-        "action": [{"request_user_assistance_for_authentication": {}}],
-    })
+    out = normalize_browser_use_response(
+        {
+            "action": [{"request_user_assistance_for_authentication": {}}],
+        }
+    )
     assert out["action"] == "request_user_assistance_for_authentication"
     assert out["params"] == {}
 
 
 def test_normalize_request_payment_card_preserves_receipt():
-    out = normalize_browser_use_response({
-        "thinking": "checkout total is ready",
-        "action": [
-            {
-                "request_payment_card": {
-                    "merchant": "Rose Labs Test Payment",
-                    "currency": "USD",
-                    "line_items": [
-                        {
-                            "name": "Aurora Notebook",
-                            "image_url": "https://example.test/notebook.png",
-                            "unit_price_cents": 1200,
-                            "quantity": 1,
-                            "line_total_cents": 1200,
-                        }
-                    ],
-                    "fees": [{"label": "Tax", "amount_cents": 99}],
-                    "subtotal_cents": 1200,
-                    "total_cents": 1299,
+    out = normalize_browser_use_response(
+        {
+            "thinking": "checkout total is ready",
+            "action": [
+                {
+                    "request_payment_card": {
+                        "merchant": "Rose Labs Test Payment",
+                        "currency": "USD",
+                        "line_items": [
+                            {
+                                "name": "Aurora Notebook",
+                                "image_url": "https://example.test/notebook.png",
+                                "product_url": "https://example.test/products/aurora-notebook",
+                                "rating": "4.9 stars",
+                                "review_count": "217 reviews",
+                                "unit_price_cents": 1200,
+                                "quantity": 1,
+                                "line_total_cents": 1200,
+                            }
+                        ],
+                        "fees": [{"label": "Tax", "amount_cents": 99}],
+                        "subtotal_cents": 1200,
+                        "total_cents": 1299,
+                    }
                 }
-            }
-        ],
-    })
+            ],
+        }
+    )
 
     assert out["action"] == "request_payment_card"
     assert out["thinking"] == "checkout total is ready"
@@ -709,20 +892,22 @@ def test_normalize_request_payment_card_preserves_receipt():
 
 
 def test_normalize_request_payment_card_parses_tool_string_arguments():
-    out = normalize_browser_use_response({
-        "action": [
-            {
-                "request_payment_card": {
-                    "merchant": "Rose Labs Test Payment",
-                    "currency": "USD",
-                    "line_items": '[{"name":"Aurora Notebook","image_url":"https://example.test/notebook.png","unit_price_cents":1200,"quantity":1,"line_total_cents":1200}]',
-                    "fees": '[{"name":"Tax","amount_cents":99}]',
-                    "subtotal_cents": "1200",
-                    "total_cents": "1299",
+    out = normalize_browser_use_response(
+        {
+            "action": [
+                {
+                    "request_payment_card": {
+                        "merchant": "Rose Labs Test Payment",
+                        "currency": "USD",
+                        "line_items": '[{"name":"Aurora Notebook","image_url":"https://example.test/notebook.png","product_url":"https://example.test/products/aurora-notebook","rating":"4.9 stars","review_count":"217 reviews","unit_price_cents":1200,"quantity":1,"line_total_cents":1200}]',
+                        "fees": '[{"name":"Tax","amount_cents":99}]',
+                        "subtotal_cents": "1200",
+                        "total_cents": "1299",
+                    }
                 }
-            }
-        ],
-    })
+            ],
+        }
+    )
 
     assert out["action"] == "request_payment_card"
     assert out["params"]["line_items"][0]["name"] == "Aurora Notebook"
@@ -744,19 +929,23 @@ def test_normalize_provider_tool_call():
 def test_normalize_prefers_thinking_over_next_goal():
     # Envelope was shrunk: `thinking` is the canonical field. `next_goal` is
     # only consulted as a defensive fallback when `thinking` is absent.
-    out = normalize_browser_use_response({
-        "thinking": "thinking str",
-        "next_goal": "next goal str",
-        "action": [{"action_name": "scroll", "down": True}],
-    })
+    out = normalize_browser_use_response(
+        {
+            "thinking": "thinking str",
+            "next_goal": "next goal str",
+            "action": [{"action_name": "scroll", "down": True}],
+        }
+    )
     assert out["thinking"] == "thinking str"
 
 
 def test_normalize_falls_back_to_next_goal_when_no_thinking():
-    out = normalize_browser_use_response({
-        "next_goal": "next goal str",
-        "action": [{"action_name": "scroll", "down": True}],
-    })
+    out = normalize_browser_use_response(
+        {
+            "next_goal": "next goal str",
+            "action": [{"action_name": "scroll", "down": True}],
+        }
+    )
     assert out["thinking"] == "next goal str"
 
 
@@ -861,9 +1050,7 @@ def test_params_query_to_instruction():
 
 
 def test_params_select_dropdown_text_to_value():
-    out = _normalize_action_params(
-        "select_dropdown", "select_dropdown", {"text": "Option A"}, {}, None
-    )
+    out = _normalize_action_params("select_dropdown", "select_dropdown", {"text": "Option A"}, {}, None)
     assert out["value"] == "Option A"
 
 
@@ -888,50 +1075,76 @@ def _ev(event: str, data: dict) -> list[str]:
 def _anthropic_text_sse(text: str) -> str:
     """Build a minimal Anthropic SSE stream that emits `text` as one block."""
     lines: list[str] = []
-    lines += _ev("message_start", {
-        "type": "message_start",
-        "message": {"usage": {"input_tokens": 5}},
-    })
-    lines += _ev("content_block_start", {
-        "type": "content_block_start", "index": 0,
-        "content_block": {"type": "text", "text": ""},
-    })
-    lines += _ev("content_block_delta", {
-        "type": "content_block_delta", "index": 0,
-        "delta": {"type": "text_delta", "text": text},
-    })
+    lines += _ev(
+        "message_start",
+        {
+            "type": "message_start",
+            "message": {"usage": {"input_tokens": 5}},
+        },
+    )
+    lines += _ev(
+        "content_block_start",
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""},
+        },
+    )
+    lines += _ev(
+        "content_block_delta",
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": text},
+        },
+    )
     lines += _ev("content_block_stop", {"type": "content_block_stop", "index": 0})
-    lines += _ev("message_delta", {
-        "type": "message_delta",
-        "delta": {"stop_reason": "end_turn"},
-        "usage": {"output_tokens": 4},
-    })
+    lines += _ev(
+        "message_delta",
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": 4},
+        },
+    )
     lines += _ev("message_stop", {"type": "message_stop"})
     return "\n".join(lines)
 
 
 def _anthropic_tool_sse(name: str, arguments: str) -> str:
     lines: list[str] = []
-    lines += _ev("message_start", {
-        "type": "message_start",
-        "message": {"usage": {"input_tokens": 5}},
-    })
-    lines += _ev("content_block_start", {
-        "type": "content_block_start",
-        "index": 0,
-        "content_block": {"type": "tool_use", "id": "toolu_1", "name": name, "input": {}},
-    })
-    lines += _ev("content_block_delta", {
-        "type": "content_block_delta",
-        "index": 0,
-        "delta": {"type": "input_json_delta", "partial_json": arguments},
-    })
+    lines += _ev(
+        "message_start",
+        {
+            "type": "message_start",
+            "message": {"usage": {"input_tokens": 5}},
+        },
+    )
+    lines += _ev(
+        "content_block_start",
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "tool_use", "id": "toolu_1", "name": name, "input": {}},
+        },
+    )
+    lines += _ev(
+        "content_block_delta",
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": arguments},
+        },
+    )
     lines += _ev("content_block_stop", {"type": "content_block_stop", "index": 0})
-    lines += _ev("message_delta", {
-        "type": "message_delta",
-        "delta": {"stop_reason": "tool_use"},
-        "usage": {"output_tokens": 4},
-    })
+    lines += _ev(
+        "message_delta",
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": "tool_use"},
+            "usage": {"output_tokens": 4},
+        },
+    )
     lines += _ev("message_stop", {"type": "message_stop"})
     return "\n".join(lines)
 
@@ -941,22 +1154,28 @@ _ACTION_TEXT = '{"thinking": "x", "action": [{"action_name": "click", "index": 3
 
 async def test_complete_browser_use_waterfall_only_path():
     """No claudeAuth → goes straight to openrouter → returns waterfall mode."""
-    sse_body = _openai_sse([
-        {
-            "choices": [{
-                "delta": {
-                    "tool_calls": [{
-                        "index": 0,
-                        "id": "call_click",
-                        "type": "function",
-                        "function": {"name": "click", "arguments": '{"index": 3}'},
-                    }]
-                },
-                "finish_reason": "tool_calls",
-            }]
-        },
-        {"usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20}},
-    ])
+    sse_body = _openai_sse(
+        [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_click",
+                                    "type": "function",
+                                    "function": {"name": "click", "arguments": '{"index": 3}'},
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+            {"usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20}},
+        ]
+    )
 
     captured: list[str] = []
     captured_bodies: list[dict] = []
@@ -1005,7 +1224,8 @@ async def test_complete_browser_use_claude_path_succeeds():
         if "api.anthropic.com" in url:
             captured_bodies.append(json.loads(req.content.decode()))
             return httpx.Response(
-                200, text=_anthropic_tool_sse("click", '{"index": 3}'),
+                200,
+                text=_anthropic_tool_sse("click", '{"index": 3}'),
                 headers={"Content-Type": "text/event-stream"},
             )
         return httpx.Response(500, text="should not hit waterfall")
@@ -1036,25 +1256,31 @@ async def test_complete_browser_use_claude_path_succeeds():
 async def test_complete_browser_use_gpt_path_succeeds():
     """Valid gptAuth -> Codex Responses returns a native tool call -> mode=gpt."""
     sse_lines = []
-    sse_lines += _ev("response.output_item.done", {
-        "type": "response.output_item.done",
-        "item": {
-            "type": "function_call",
-            "call_id": "call_click",
-            "name": "click",
-            "arguments": '{"index": 3}',
+    sse_lines += _ev(
+        "response.output_item.done",
+        {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "call_id": "call_click",
+                "name": "click",
+                "arguments": '{"index": 3}',
+            },
         },
-    })
-    sse_lines += _ev("response.completed", {
-        "type": "response.completed",
-        "response": {
-            "usage": {
-                "input_tokens": 12,
-                "output_tokens": 8,
-                "total_tokens": 20,
-            }
+    )
+    sse_lines += _ev(
+        "response.completed",
+        {
+            "type": "response.completed",
+            "response": {
+                "usage": {
+                    "input_tokens": 12,
+                    "output_tokens": 8,
+                    "total_tokens": 20,
+                }
+            },
         },
-    })
+    )
     sse_body = "\n".join(sse_lines)
 
     captured: list[str] = []
@@ -1065,9 +1291,7 @@ async def test_complete_browser_use_gpt_path_succeeds():
         captured.append(url)
         if "chatgpt.com/backend-api/codex/responses" in url:
             captured_bodies.append(json.loads(req.content.decode()))
-            return httpx.Response(
-                200, text=sse_body, headers={"Content-Type": "text/event-stream"}
-            )
+            return httpx.Response(200, text=sse_body, headers={"Content-Type": "text/event-stream"})
         return httpx.Response(500, text="should not hit waterfall")
 
     set_mock_handler(handler)
@@ -1091,7 +1315,7 @@ async def test_complete_browser_use_gpt_path_succeeds():
     )
 
     assert result["mode"] == "gpt"
-    assert result["actual_model"] == "gpt-5.5-gpt"
+    assert result["actual_model"] == "gpt-5.6-sol-gpt"
     assert result["action"]["action"] == "click"
     assert result["gpt_token_error"] is None
     assert result["usage"]["total_tokens"] == 20
@@ -1108,13 +1332,13 @@ async def test_complete_browser_use_gpt_path_succeeds():
     dumps = sorted(dump_root.glob("*test-bu-gpt.json"))
     assert dumps, "complete_browser_use should dump exact LLM context"
     payload = json.loads(dumps[-1].read_text())
-    assert payload["model"] == "gpt-5.5"
+    assert payload["model"] == "gpt-5.6-sol"
     assert payload["message_count"] == 2
     assert [message["role"] for message in payload["messages"]] == ["system", "user"]
-    assert payload["config"]["actual_model"] == "gpt-5.5"
-    assert payload["config"]["actual_model_raw"] == "gpt-5.5-gpt"
+    assert payload["config"]["actual_model"] == "gpt-5.6-sol"
+    assert payload["config"]["actual_model_raw"] == "gpt-5.6-sol-gpt"
     assert payload["config"]["mode"] == "gpt"
-    assert payload["config"]["effective_params"]["model"] == "gpt-5.5"
+    assert payload["config"]["effective_params"]["model"] == "gpt-5.6-sol"
     assert payload["config"]["effective_params"]["temperature"] is None
     assert payload["config"]["effective_params"]["max_tokens"] is None
     assert payload["config"]["requested_params"]["temperature"] == 1.0
@@ -1129,19 +1353,25 @@ async def test_complete_browser_use_gpt_path_succeeds():
 async def test_complete_browser_use_bypasses_fast_cache_context():
     """Browser-use LLM calls must not read or write provider fast-cache."""
     sse_lines = []
-    sse_lines += _ev("response.output_item.done", {
-        "type": "response.output_item.done",
-        "item": {
-            "type": "function_call",
-            "call_id": "call_click",
-            "name": "click",
-            "arguments": '{"index": 3}',
+    sse_lines += _ev(
+        "response.output_item.done",
+        {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "call_id": "call_click",
+                "name": "click",
+                "arguments": '{"index": 3}',
+            },
         },
-    })
-    sse_lines += _ev("response.completed", {
-        "type": "response.completed",
-        "response": {"usage": {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20}},
-    })
+    )
+    sse_lines += _ev(
+        "response.completed",
+        {
+            "type": "response.completed",
+            "response": {"usage": {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20}},
+        },
+    )
     sse_body = "\n".join(sse_lines)
     captured: list[str] = []
 
@@ -1242,10 +1472,12 @@ async def test_complete_browser_use_gpt_rate_limit_preserves_tools_for_anthropic
 
 async def test_complete_browser_use_claude_401_falls_through_to_waterfall():
     """Anthropic 401 → fall through to openrouter; claude_token_error=auth_error."""
-    sse_body = _openai_sse([
-        {"choices": [{"delta": {"content": _ACTION_TEXT}, "finish_reason": "stop"}]},
-        {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
-    ])
+    sse_body = _openai_sse(
+        [
+            {"choices": [{"delta": {"content": _ACTION_TEXT}, "finish_reason": "stop"}]},
+            {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+        ]
+    )
 
     def handler(req):
         url = str(req.url)
@@ -1297,10 +1529,27 @@ async def run_all_tests():
         test_filter_browser_use_actions_keeps_coordinates_for_unindexed_state,
     )
     r.record("native_tool_schemas_preserve_catalog", test_build_browser_use_tools_preserves_catalog_descriptions)
+    r.record("native_tool_schemas_valid_required_keywords", test_build_browser_use_tools_emits_valid_required_keywords)
     r.record("write_lock_notification_schema", test_write_lock_notification_tool_is_stable_internal_action_schema)
     r.record(
         "write_lock_notification_alias_schema",
         test_write_lock_notification_schema_normalizes_provider_aliases,
+    )
+    r.record(
+        "write_lock_notification_nested_totals",
+        test_write_lock_notification_schema_normalizes_nested_total_aliases,
+    )
+    r.record(
+        "write_lock_notification_requires_product_context",
+        test_write_lock_purchase_schema_rejects_missing_product_context,
+    )
+    r.record(
+        "write_lock_notification_rejects_current_session_link",
+        test_write_lock_purchase_schema_rejects_current_non_product_page_as_product_link,
+    )
+    r.record(
+        "write_lock_notification_rejects_unobserved_product_host",
+        test_write_lock_purchase_schema_rejects_product_host_not_observed_by_browser,
     )
 
     r.record("messages_text_only_no_screenshot", test_build_messages_text_only_when_no_screenshot)
@@ -1356,12 +1605,16 @@ async def run_all_tests():
     await r.record_async("complete_browser_use_waterfall_only", test_complete_browser_use_waterfall_only_path)
     await r.record_async("complete_browser_use_claude_path", test_complete_browser_use_claude_path_succeeds)
     await r.record_async("complete_browser_use_gpt_path", test_complete_browser_use_gpt_path_succeeds)
-    await r.record_async("complete_browser_use_bypasses_fast_cache", test_complete_browser_use_bypasses_fast_cache_context)
+    await r.record_async(
+        "complete_browser_use_bypasses_fast_cache", test_complete_browser_use_bypasses_fast_cache_context
+    )
     await r.record_async(
         "complete_browser_use_gpt_rate_limit_api_key_tools",
         test_complete_browser_use_gpt_rate_limit_preserves_tools_for_anthropic_api_key,
     )
-    await r.record_async("complete_browser_use_claude_401_fallthrough", test_complete_browser_use_claude_401_falls_through_to_waterfall)
+    await r.record_async(
+        "complete_browser_use_claude_401_fallthrough", test_complete_browser_use_claude_401_falls_through_to_waterfall
+    )
 
     teardown_mock()
     return r.summary()

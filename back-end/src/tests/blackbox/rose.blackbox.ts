@@ -274,10 +274,14 @@ async function testPool_getPoolRegistryShape() {
   const browserUse = getPool('rose-1-browser-use');
   assertEqual(lite.name, 'rose-1-lite', 'lite.name');
   assert(lite.claudeAuthModel.startsWith('claude-'), 'lite claudeAuthModel');
+  assertEqual(lite.gptAuthModel, 'gpt-5.6-terra', 'lite.gptAuthModel');
   assert(lite.waterfall.length >= 1, 'lite.waterfall length');
   assertEqual(ultra.name, 'rose-1-ultra', 'ultra.name');
   assert(ultra.claudeAuthModel.startsWith('claude-'), 'ultra claudeAuthModel');
+  assertEqual(ultra.gptAuthModel, 'gpt-5.6-sol', 'ultra.gptAuthModel');
   assertEqual(browserUse.name, 'rose-1-browser-use', 'browserUse.name');
+  assertEqual(browserUse.gptAuthModel, 'gpt-5.6-sol', 'browserUse.gptAuthModel');
+  assertEqual(browserUse.waterfall.at(-1), 'openai/gpt-5.6-sol', 'browserUse OpenRouter fallback');
   assert(lite.waterfall !== ultra.waterfall, 'lite.waterfall !== ultra.waterfall');
   assertEqual(Object.keys(POOL_REGISTRY).length, 3, 'registry has 3 pools');
 }
@@ -930,7 +934,7 @@ async function testOpenAiApiKey_servesBeforeAnthropicAndOpenRouter() {
     assertEqual(anthropicCalls, 0, 'did NOT fall through to Anthropic');
     assertEqual(openrouterCalls, 0, 'did NOT fall through to OpenRouter');
     assertEqual(capturedHeaders.Authorization, 'Bearer sk-proj-test-key', 'sent OpenAI bearer');
-    assertEqual(capturedBody?.model, 'gpt-5.4', 'uses Rose Lite GPT model');
+    assertEqual(capturedBody?.model, 'gpt-5.6-terra', 'uses Rose Lite GPT model');
     assertEqual(capturedBody?.service_tier, 'priority', 'uses GPT fast mode');
     assert(chunks[0].actual_model.endsWith('-openai'), 'actual_model marks OpenAI key path');
   } finally {

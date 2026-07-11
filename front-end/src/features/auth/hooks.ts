@@ -20,11 +20,6 @@ import { sendOTP, verifyOTP } from './api';
 import { DEV_AUTO_LOGIN_OTP, DEV_AUTO_LOGIN_PHONE, IS_DEV_AUTO_LOGIN } from './config';
 import type { AuthStep } from './types';
 
-/** Strips a formatted phone number to E.164: +19729777432. */
-function stripPhoneNumber(formatted: string): string {
-  return '+' + formatted.replace(/\D/g, '');
-}
-
 /** Module-level logger for the auth feature. */
 function logAuth(message: string, payload?: Record<string, unknown>): void {
   console.warn(`[Auth] ${message}`, payload ?? '');
@@ -70,7 +65,10 @@ async function initAuthSession(
     await applySession('init-anonymous', anonSession);
   } catch (error) {
     console.error('[Auth] Failed to create anonymous session:', error);
-    await applySession('init-anonymous-failed', null);
+    // A concurrent login (another useAuth instance, dev auto-login) may have
+    // produced a session while this attempt was in flight — never clobber it
+    // with null; re-read storage instead.
+    await applySession('init-anonymous-failed', getSession());
   }
 }
 
@@ -149,7 +147,8 @@ export function usePhoneAuth(
       e.preventDefault();
       form.setLoading(true);
       try {
-        await sendOTP(stripPhoneNumber(form.phone));
+        // form.phone is canonical E.164 (PhoneInput owns normalization).
+        await sendOTP(form.phone);
         analytics.track('phone_entered');
         form.setStep('otp');
         toast({ title: 'Code sent!', description: 'Check your phone for the 6-digit code.' });
@@ -167,10 +166,9 @@ export function usePhoneAuth(
       e.preventDefault();
       form.setLoading(true);
       try {
-        const strippedPhone = stripPhoneNumber(form.phone);
-        await verifyOTP(strippedPhone, form.otp, anonymousUserId);
+        await verifyOTP(form.phone, form.otp, anonymousUserId);
         analytics.track('otp_code_submitted');
-        analytics.setUserId(strippedPhone);
+        analytics.setUserId(form.phone);
         completeAuth();
       } catch (error: unknown) {
         toastError(toast, 'Invalid code', error, 'Please check the code and try again.');
@@ -279,8 +277,12 @@ function useAuthActions(setters: AuthStateSetters) {
 /**
  * Auth state hook: session, user, loading, sign-out, invite-gate check.
  * SINGLE SOURCE OF TRUTH for realtime auth — setRealtimeAuth() is called here only.
+ * `passive: true` observes auth without initiating sessions (no dev auto-login /
+ * anonymous creation) — for components like WaitlistGate that only react to auth;
+ * every extra initiating instance races the others and can clobber a login.
  */
-export function useAuth() {
+export function useAuth(options?: { passive?: boolean }) {
+  const passive = options?.passive === true;
   const archiveMode = isBenchmarkArchiveMode();
   const [user, setUser] = useState<User | null>(() =>
     archiveMode ? BENCHMARK_ARCHIVE_USER : getCachedUser(),
@@ -309,13 +311,16 @@ export function useAuth() {
     const guardedApply = async (origin: string, sess: Session | null) => {
       if (mounted) await applySession(origin, sess);
     };
-    void initAuthSession(guardedApply).finally(() => {
+    const init = passive
+      ? waitForElectronAuthBridgePrimed().then(() => guardedApply('passive-init', getSession()))
+      : initAuthSession(guardedApply);
+    void init.finally(() => {
       if (mounted) setLoading(false);
     });
     return () => {
       mounted = false;
     };
-  }, [applySession, archiveMode]);
+  }, [applySession, archiveMode, passive]);
 
   useEffect(() => {
     if (archiveMode) return;

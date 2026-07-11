@@ -1,13 +1,14 @@
 /**
  * Terminal feature — quick query listener hook.
  *
- * Listens for QUICK_QUERY_EVENT dispatched from the global quick-launcher,
- * then creates an agent and routes the user into the chat view.
+ * Listens for QUICK_QUERY_EVENT from the global quick-launcher and for
+ * OPEN_AGENT_EVENT from desktop deep links, routing both into the chat view.
  */
 
 import { useEffect, useRef } from 'react';
 
 import * as analytics from '@/lib/analytics';
+import { OPEN_AGENT_EVENT } from '@/lib/openAgent';
 import { QUICK_QUERY_EVENT, type QuickLauncherPayload } from '@/lib/quickQuery';
 import type { useToast } from '@/hooks/use-toast';
 
@@ -39,8 +40,13 @@ export function useQuickQuery(deps: QuickQueryDeps) {
       if (!detail?.query?.trim()) return;
       void handleQuickQuery(depsRef.current, detail.query.trim());
     };
+    const handleOpenAgent = () => depsRef.current.setCurrentView('agents');
     window.addEventListener(QUICK_QUERY_EVENT, handler as EventListener);
-    return () => window.removeEventListener(QUICK_QUERY_EVENT, handler as EventListener);
+    window.addEventListener(OPEN_AGENT_EVENT, handleOpenAgent);
+    return () => {
+      window.removeEventListener(QUICK_QUERY_EVENT, handler as EventListener);
+      window.removeEventListener(OPEN_AGENT_EVENT, handleOpenAgent);
+    };
   }, []);
 }
 

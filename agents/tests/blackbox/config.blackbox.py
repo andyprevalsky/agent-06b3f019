@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 from _test_utils import (
@@ -30,6 +31,7 @@ _MINIMAL_ENV = {
 def _reset_config_cache():
     """Reset the config module's lazy-init state so each test starts fresh."""
     import config as config_mod
+
     config_mod._dotenv_loaded = True  # Prevent actual dotenv loading
 
 
@@ -131,6 +133,27 @@ def test_load_config_temporal_sticky_timeout_override():
     assert result.temporal.sticky_queue_schedule_to_start_timeout_seconds == 2
 
 
+def test_load_config_temporal_balances_sticky_and_nonsticky_pollers():
+    """Default workflow pollers must preserve capacity for cached workflow tasks."""
+    _reset_config_cache()
+
+    with patch.dict(os.environ, _MINIMAL_ENV, clear=True):
+        from config import load_config
+
+        temporal = load_config().temporal
+
+    pollers = temporal.max_concurrent_workflow_task_polls
+    nonsticky_pollers = max(int(pollers * temporal.nonsticky_to_sticky_poll_ratio), 1)
+    sticky_pollers = max(pollers - nonsticky_pollers, 1)
+
+    assert nonsticky_pollers >= pollers // 2
+    assert sticky_pollers >= pollers // 2
+
+    run_script = (Path(__file__).resolve().parents[3] / "scripts" / "run.sh").read_text()
+    assert "NONSTICKY_TO_STICKY_POLL_RATIO:-0.5" in run_script
+    assert "NONSTICKY_TO_STICKY_POLL_RATIO:-1.0" not in run_script
+
+
 def test_load_config_parallel_accepts_correct_spelling():
     """PARALLEL_API_KEY is accepted when the legacy misspelled key is absent."""
     _reset_config_cache()
@@ -170,6 +193,10 @@ async def run_all_tests():
     r.record("load_config_temporal_defaults", test_load_config_temporal_defaults)
     r.record("load_config_temporal_activity_slot_overrides", test_load_config_temporal_activity_slot_overrides)
     r.record("load_config_temporal_sticky_timeout_override", test_load_config_temporal_sticky_timeout_override)
+    r.record(
+        "load_config_temporal_balances_sticky_and_nonsticky_pollers",
+        test_load_config_temporal_balances_sticky_and_nonsticky_pollers,
+    )
     r.record("parallel_correct_spelling", test_load_config_parallel_accepts_correct_spelling)
     r.record("parallel_legacy_spelling_precedence", test_load_config_parallel_keeps_legacy_spelling_precedence)
     teardown_mock()

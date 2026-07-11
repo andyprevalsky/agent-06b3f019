@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Dict, Optional
 
 # Per-token USD pricing for every provider model that appears in any pool's
-# waterfall. Source: research/domains/cost/config.ts FIXED_PRICING.
+# waterfall. Values come from the providers' published per-million-token prices.
 _PROVIDER_PRICING: Dict[str, Dict[str, float]] = {
     "google/gemini-3-flash-preview": {"prompt": 0.50 / 1_000_000, "completion": 3.00 / 1_000_000},
     "google/gemini-3.5-flash":        {"prompt": 1.50 / 1_000_000, "completion": 9.00 / 1_000_000},
@@ -25,6 +25,9 @@ _PROVIDER_PRICING: Dict[str, Dict[str, float]] = {
     "google/gemini-3.1-pro-preview":  {"prompt": 2.00 / 1_000_000, "completion": 12.00 / 1_000_000},
     "openai/gpt-5.4":                 {"prompt": 1.75 / 1_000_000, "completion": 14.00 / 1_000_000},
     "openai/gpt-5.5":                 {"prompt": 5.00 / 1_000_000, "completion": 30.00 / 1_000_000},
+    "openai/gpt-5.6-luna":            {"prompt": 1.00 / 1_000_000, "completion": 6.00 / 1_000_000},
+    "openai/gpt-5.6-terra":           {"prompt": 2.50 / 1_000_000, "completion": 15.00 / 1_000_000},
+    "openai/gpt-5.6-sol":             {"prompt": 5.00 / 1_000_000, "completion": 30.00 / 1_000_000},
 }
 
 
@@ -41,6 +44,9 @@ _DIRECT_TOKEN_PRICING: Dict[str, Dict[str, float]] = {
     "gpt-5.5-gpt":              {"input_cents_per_1k": 0.0, "output_cents_per_1k": 0.0},
     "gpt-5.4-mini-gpt":         {"input_cents_per_1k": 0.0, "output_cents_per_1k": 0.0},
     "gpt-5.3-codex-gpt":        {"input_cents_per_1k": 0.0, "output_cents_per_1k": 0.0},
+    "gpt-5.6-luna-gpt":         {"input_cents_per_1k": 0.0, "output_cents_per_1k": 0.0},
+    "gpt-5.6-terra-gpt":        {"input_cents_per_1k": 0.0, "output_cents_per_1k": 0.0},
+    "gpt-5.6-sol-gpt":          {"input_cents_per_1k": 0.0, "output_cents_per_1k": 0.0},
 }
 
 _DIRECT_OPENAI_API_KEY_PRICING: Dict[str, Dict[str, float]] = {
@@ -51,6 +57,18 @@ _DIRECT_OPENAI_API_KEY_PRICING: Dict[str, Dict[str, float]] = {
     "gpt-5.5-openai": {
         "input_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.5"]["prompt"] * 1000 * 100,
         "output_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.5"]["completion"] * 1000 * 100,
+    },
+    "gpt-5.6-luna-openai": {
+        "input_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.6-luna"]["prompt"] * 1000 * 100,
+        "output_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.6-luna"]["completion"] * 1000 * 100,
+    },
+    "gpt-5.6-terra-openai": {
+        "input_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.6-terra"]["prompt"] * 1000 * 100,
+        "output_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.6-terra"]["completion"] * 1000 * 100,
+    },
+    "gpt-5.6-sol-openai": {
+        "input_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.6-sol"]["prompt"] * 1000 * 100,
+        "output_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.6-sol"]["completion"] * 1000 * 100,
     },
 }
 
@@ -79,7 +97,7 @@ ANTHROPIC_MODEL_PRICING: Dict[str, Dict[str, float]] = {
 _POOL_WATERFALLS: Dict[str, tuple[str, ...]] = {
     "rose-1-lite":         ("google/gemini-3.5-flash", "moonshotai/kimi-k2.7-code"),
     "rose-1-ultra":        ("anthropic/claude-opus-4.8", "google/gemini-3.1-pro-preview"),
-    "rose-1-browser-use":  ("anthropic/claude-opus-4.8", "openai/gpt-5.5"),
+    "rose-1-browser-use":  ("anthropic/claude-opus-4.8", "openai/gpt-5.6-sol"),
 }
 
 

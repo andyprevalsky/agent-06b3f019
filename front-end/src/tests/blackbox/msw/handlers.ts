@@ -64,6 +64,11 @@ export const handlers = [
     });
   }),
 
+  // Development-only prompt catalog mounted by Terminal's query box
+  http.get(`${API_BASE}/benchmarks/test-prompts`, () => {
+    return HttpResponse.json({ prompts: [] });
+  }),
+
   // Agents endpoints
   http.get(`${API_BASE}/agents`, () => {
     return HttpResponse.json({

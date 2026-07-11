@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Dict, List
 
@@ -26,6 +27,7 @@ from providers.fast_cache.context import (
     set_context,
 )
 from providers.fast_cache import rose_cache
+from providers.rose.pools import POOL_REGISTRY
 
 
 # ---------------------------------------------------------------------------
@@ -223,9 +225,9 @@ def test_canonical_messages_ignore_separate_dynamic_user_context_system_message_
             ["chrome", "chrome_passwords", "gpt_code"],
         )
     )
-    assert normalize.canonical_messages(request("same context", ["chrome"], "same goal")) != normalize.canonical_messages(
-        request("same context", ["chrome"], "different goal")
-    )
+    assert normalize.canonical_messages(
+        request("same context", ["chrome"], "same goal")
+    ) != normalize.canonical_messages(request("same context", ["chrome"], "different goal"))
 
 
 def test_codex_key_normalizes_run_local_rose_agent_repo_identity():
@@ -314,9 +316,9 @@ def test_codex_key_normalizes_command_wrapper_noise_and_path_listing_order():
             {
                 "type": "function_call_output",
                 "output": (
-                        "Chunk ID: abc123\n"
-                        "Wall time: 0.0000 seconds\n"
-                        "Process exited with code 0\n"
+                    "Chunk ID: abc123\n"
+                    "Wall time: 0.0000 seconds\n"
+                    "Process exited with code 0\n"
                     "Original token count: 12\n"
                     "Output:\n"
                     "/home/user/b.txt\n"
@@ -330,9 +332,9 @@ def test_codex_key_normalizes_command_wrapper_noise_and_path_listing_order():
             {
                 "type": "function_call_output",
                 "output": (
-                        "Chunk ID: def456\n"
-                        "Wall time: 0.1234 seconds\n"
-                        "Process exited with code 0\n"
+                    "Chunk ID: def456\n"
+                    "Wall time: 0.1234 seconds\n"
+                    "Process exited with code 0\n"
                     "Original token count: 99\n"
                     "Output:\n"
                     "/home/user/a.txt\n"
@@ -501,9 +503,7 @@ def test_codex_key_normalizes_live_process_polling_noise():
                 {
                     "type": "function_call",
                     "name": "write_stdin",
-                    "arguments": json.dumps(
-                        {"session_id": session_id, "chars": "", "yield_time_ms": yield_time_ms}
-                    ),
+                    "arguments": json.dumps({"session_id": session_id, "chars": "", "yield_time_ms": yield_time_ms}),
                 },
                 {
                     "type": "function_call_output",
@@ -553,9 +553,7 @@ def test_codex_key_normalizes_live_process_polling_noise():
     }
 
     assert normalize.codex_key_from_hash("abc", cold) == normalize.codex_key_from_hash("abc", hot)
-    assert normalize.codex_key_from_hash("abc", hot) != normalize.codex_key_from_hash(
-        "abc", changed_final_output
-    )
+    assert normalize.codex_key_from_hash("abc", hot) != normalize.codex_key_from_hash("abc", changed_final_output)
 
 
 def test_codex_key_normalizes_stale_process_id_failures():
@@ -802,9 +800,7 @@ def test_codex_key_normalizes_completed_package_manager_progress_noise():
             "Successfully installed numpy-2.2.6",
         ),
     )
-    assert normalize.codex_key_from_hash("abc", npm("4s")) == normalize.codex_key_from_hash(
-        "abc", npm("883ms", True)
-    )
+    assert normalize.codex_key_from_hash("abc", npm("4s")) == normalize.codex_key_from_hash("abc", npm("883ms", True))
 
 
 def test_codex_key_ignores_optional_pip_installing_status_lines():
@@ -826,9 +822,7 @@ def test_codex_key_ignores_optional_pip_installing_status_lines():
             ]
         }
 
-    assert normalize.codex_key_from_hash("abc", request(True)) == normalize.codex_key_from_hash(
-        "abc", request(False)
-    )
+    assert normalize.codex_key_from_hash("abc", request(True)) == normalize.codex_key_from_hash("abc", request(False))
 
 
 def test_canonical_messages_ignores_code_agent_heartbeat_status_updates():
@@ -848,7 +842,7 @@ def test_canonical_messages_ignores_code_agent_heartbeat_status_updates():
                 "role": "tool",
                 "content": (
                     'TOOL_RESULT {"tool_name":"claude_code_history","result":"Execution Summary:\\n\\n'
-                    'Created E2B sandbox: sandboxabc123\\nStatus update at 30s\\n'
+                    "Created E2B sandbox: sandboxabc123\\nStatus update at 30s\\n"
                     'Agentic loop finished: 0 interactions"}'
                 ),
             },
@@ -894,7 +888,7 @@ def test_canonical_messages_ignores_optional_code_agent_sandbox_action_line():
                 "role": "tool",
                 "content": (
                     'TOOL_RESULT {"tool_name":"claude_code_history","result":"Execution Summary:\\n\\n'
-                    'Created E2B sandbox: sandboxabc123\\nUploaded 1 files to /home/user/attachments/\\n'
+                    "Created E2B sandbox: sandboxabc123\\nUploaded 1 files to /home/user/attachments/\\n"
                     'Agentic loop finished: 0 interactions"}'
                 ),
             },
@@ -937,6 +931,22 @@ def test_llm_key_uses_canonical_request_fingerprint():
     assert ctx_a.llm_key("execute_loop", {"messages": [{"role": "user", "content": "hello"}]}) != ctx_b.llm_key(
         "execute_loop", {"messages": [{"role": "user", "content": "goodbye"}]}
     )
+
+
+def test_llm_request_key_changes_when_pool_model_contract_changes(monkeypatch):
+    ctx = FastCacheContext(enabled=True, goal="same goal", base_step=1)
+    original_request = rose_cache.request_key_material({"pool": "rose-1-ultra"})
+    original_key = ctx.llm_key("execute_loop", original_request)
+
+    original_pool = POOL_REGISTRY["rose-1-ultra"]
+    monkeypatch.setitem(
+        POOL_REGISTRY,
+        "rose-1-ultra",
+        replace(original_pool, gpt_auth_model="gpt-next"),
+    )
+    changed_request = rose_cache.request_key_material({"pool": "rose-1-ultra"})
+
+    assert ctx.llm_key("execute_loop", changed_request) != original_key
 
 
 def test_position_llm_key_ignores_prior_tool_outputs_but_keeps_static_prompt():
@@ -1026,19 +1036,13 @@ def test_position_llm_key_ignores_completion_summary_structured_output_block():
         "messages": [
             {
                 "role": "system",
-                "content": cold_request["messages"][0]["content"].replace(
-                    "Write a BRIEF", "Write a DETAILED"
-                ),
+                "content": cold_request["messages"][0]["content"].replace("Write a BRIEF", "Write a DETAILED"),
             }
         ],
     }
 
-    assert ctx.llm_key("completion_summary", cold_request) == ctx.llm_key(
-        "completion_summary", hot_request
-    )
-    assert ctx.llm_key("completion_summary", cold_request) != ctx.llm_key(
-        "completion_summary", changed_static_prompt
-    )
+    assert ctx.llm_key("completion_summary", cold_request) == ctx.llm_key("completion_summary", hot_request)
+    assert ctx.llm_key("completion_summary", cold_request) != ctx.llm_key("completion_summary", changed_static_prompt)
 
 
 def test_llm_key_ignores_browser_step_index_in_call_site():
@@ -1053,12 +1057,12 @@ def test_canonical_messages_ignore_run_local_ids_and_timestamps():
         "messages": [
             {
                 "role": "user",
-                "content": "[STATE: now=2026-06-24T18:28:00Z]\n\n[2026-06-24 18:28] Run the task.\nReference: <resolved-ref pointer=\"@ref:message:11111111-1111-4111-8111-111111111111\" title=\"x\">",
+                "content": '[STATE: now=2026-06-24T18:28:00Z]\n\n[2026-06-24 18:28] Run the task.\nReference: <resolved-ref pointer="@ref:message:11111111-1111-4111-8111-111111111111" title="x">',
             },
             {
                 "role": "tool",
                 "tool_call_id": "toolu_01AAAAAAAAAAAAAAAAAAAAAA",
-                "content": "TOOL_RESULT {\"tool_call_id\":\"toolu_01AAAAAAAAAAAAAAAAAAAAAA\",\"id\":\"22222222-2222-4222-8222-222222222222\"}",
+                "content": 'TOOL_RESULT {"tool_call_id":"toolu_01AAAAAAAAAAAAAAAAAAAAAA","id":"22222222-2222-4222-8222-222222222222"}',
             },
         ],
         "agent_id": "33333333-3333-4333-8333-333333333333",
@@ -1069,11 +1073,11 @@ def test_canonical_messages_ignore_run_local_ids_and_timestamps():
         "agent_id": "44444444-4444-4444-8444-444444444444",
         "messages": [
             {
-                "content": "[STATE: now=2026-06-24T18:34:00Z]\n\n[2026-06-24 18:34] Run the task.\nReference: <resolved-ref pointer=\"@ref:message:55555555-5555-4555-8555-555555555555\" title=\"x\">",
+                "content": '[STATE: now=2026-06-24T18:34:00Z]\n\n[2026-06-24 18:34] Run the task.\nReference: <resolved-ref pointer="@ref:message:55555555-5555-4555-8555-555555555555" title="x">',
                 "role": "user",
             },
             {
-                "content": "TOOL_RESULT {\"tool_call_id\":\"toolu_01BBBBBBBBBBBBBBBBBBBBBB\",\"id\":\"66666666-6666-4666-8666-666666666666\"}",
+                "content": 'TOOL_RESULT {"tool_call_id":"toolu_01BBBBBBBBBBBBBBBBBBBBBB","id":"66666666-6666-4666-8666-666666666666"}',
                 "tool_call_id": "toolu_01BBBBBBBBBBBBBBBBBBBBBB",
                 "role": "tool",
             },
@@ -1237,6 +1241,7 @@ def test_canonical_messages_canonicalizes_code_agent_sdk_event_telemetry():
             {**hot_payload["code_agent_events"][4], "output": "Total steps: 112\n"},
         ],
     }
+
     def request(payload):
         return {"messages": [{"role": "tool", "content": tool_result(payload)}]}
 
@@ -1247,7 +1252,14 @@ def test_canonical_messages_canonicalizes_code_agent_sdk_event_telemetry():
 def test_canonical_messages_repairs_capped_raw_code_agent_sdk_event_text():
     payload = {
         "code_agent_events": [
-            {"version": 1, "provider": "codex", "type": "command", "raw_type": "item.started", "status": "started", "command": "/bin/bash -lc pwd"},
+            {
+                "version": 1,
+                "provider": "codex",
+                "type": "command",
+                "raw_type": "item.started",
+                "status": "started",
+                "command": "/bin/bash -lc pwd",
+            },
             {
                 "version": 1,
                 "provider": "codex",
@@ -1280,12 +1292,13 @@ def test_canonical_messages_repairs_capped_raw_code_agent_sdk_event_text():
     started_idx = full.index('{\n      "version"')
     completed_idx = full.index('{\n      "version"', started_idx + 1)
     cold_text = "Code-agent SDK event JSON:\n\n" + full[started_idx:]
-    hot_text = "Code-agent SDK event JSON:\n\n" + ': "/bin/bash -lc pwd"\n    },\n    ' + full[completed_idx:].replace(
-        "2026-06-25T23:15:18.137Z", "2026-06-25T23:18:56.051Z"
-    ).replace(
-        "i57ri32j3jealyuuqwqhd", "ies64r770imeqmunyr0fr"
-    ).replace(
-        '    "Status update at 30s",\n', ""
+    hot_text = (
+        "Code-agent SDK event JSON:\n\n"
+        + ': "/bin/bash -lc pwd"\n    },\n    '
+        + full[completed_idx:]
+        .replace("2026-06-25T23:15:18.137Z", "2026-06-25T23:18:56.051Z")
+        .replace("i57ri32j3jealyuuqwqhd", "ies64r770imeqmunyr0fr")
+        .replace('    "Status update at 30s",\n', "")
     )
     changed_text = hot_text.replace("/home/user\\n", "/tmp\\n")
 
@@ -1445,9 +1458,7 @@ def test_canonical_messages_sort_timestamped_result_blocks_inside_text():
             {
                 "role": "user",
                 "content": (
-                    "[2026-06-24 21:48] [web_search result]: Denver\n"
-                    "\n"
-                    "[2026-06-24 21:49] [web_search result]: Austin"
+                    "[2026-06-24 21:48] [web_search result]: Denver\n\n[2026-06-24 21:49] [web_search result]: Austin"
                 ),
             }
         ],
@@ -1457,9 +1468,7 @@ def test_canonical_messages_sort_timestamped_result_blocks_inside_text():
             {
                 "role": "user",
                 "content": (
-                    "[2026-06-24 21:53] [web_search result]: Austin\n"
-                    "\n"
-                    "[2026-06-24 21:54] [web_search result]: Denver"
+                    "[2026-06-24 21:53] [web_search result]: Austin\n\n[2026-06-24 21:54] [web_search result]: Denver"
                 ),
             }
         ],
@@ -1721,8 +1730,13 @@ def test_browser_use_key_ignores_dynamic_browser_state_noise():
 def test_strip_secrets_removes_credentials():
     # #26 no token/PII leakage into the cache value.
     cleaned = normalize.strip_secrets(
-        {"Authorization": "Bearer x", "cookie": "s=1", "claude_token": "t", "keep": "ok",
-         "nested": {"x-api-key": "k", "fine": 1}}
+        {
+            "Authorization": "Bearer x",
+            "cookie": "s=1",
+            "claude_token": "t",
+            "keep": "ok",
+            "nested": {"x-api-key": "k", "fine": 1},
+        }
     )
     assert cleaned == {"keep": "ok", "nested": {"fine": 1}}
 
@@ -1840,7 +1854,9 @@ def test_hit_replays_without_calling_rose(mem):
     # #11 replay = no third-party egress; #12 re-streamed.
     async def body():
         set_context(FastCacheContext(enabled=True, goal="g"))
-        await _drain(rose_cache.cached_complete(FakeRose(_full_stream()), call_site="execute_loop", pool="rose-1-ultra"))
+        await _drain(
+            rose_cache.cached_complete(FakeRose(_full_stream()), call_site="execute_loop", pool="rose-1-ultra")
+        )
 
         # Second run, fresh context (new run, same goal) — must hit.
         set_context(FastCacheContext(enabled=True, goal="g"))
@@ -1869,10 +1885,14 @@ def test_replay_after_write_does_not_rewrite(mem):
     # #10 replaying the same key hits cache and does not call live Rose again.
     async def body():
         set_context(FastCacheContext(enabled=True, goal="g"))
-        await _drain(rose_cache.cached_complete(FakeRose(_full_stream()), call_site="execute_loop", pool="rose-1-ultra"))
+        await _drain(
+            rose_cache.cached_complete(FakeRose(_full_stream()), call_site="execute_loop", pool="rose-1-ultra")
+        )
         set_context(FastCacheContext(enabled=True, goal="g"))
         # Second run MISSes? No — same key already present → it HITS and won't write again.
-        await _drain(rose_cache.cached_complete(FakeRose(_full_stream()), call_site="execute_loop", pool="rose-1-ultra"))
+        await _drain(
+            rose_cache.cached_complete(FakeRose(_full_stream()), call_site="execute_loop", pool="rose-1-ultra")
+        )
         assert len(mem.data) == 1
         assert mem.set_calls == 1  # only the first run wrote
 

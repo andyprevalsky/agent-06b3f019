@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any, Dict
+
+from utils.purchase_approval import (
+    validate_product_detail_url,
+    validate_product_rating,
+    validate_product_review_count,
+)
 
 
 def _to_list(value: Any) -> list:
@@ -36,10 +43,16 @@ def normalize_payment_payload(tool_call: Dict[str, Any], user_id: str) -> Dict[s
     for item in _to_list(tool_call.get("line_items") or tool_call.get("lineItems")):
         if not isinstance(item, dict):
             continue
+        product_url = validate_product_detail_url(item.get("product_url") or item.get("productUrl"))
+        rating = validate_product_rating(item.get("rating"))
+        review_count = validate_product_review_count(item.get("review_count") or item.get("reviewCount"))
         line_items.append(
             {
                 "name": str(item.get("name") or "").strip(),
                 "imageUrl": item.get("image_url") or item.get("imageUrl"),
+                "productUrl": product_url,
+                "rating": rating,
+                "reviewCount": review_count,
                 "unitPriceCents": _to_int(item.get("unit_price_cents") or item.get("unitPriceCents")),
                 "quantity": _to_int(item.get("quantity")) or 1,
                 "lineTotalCents": _to_int(item.get("line_total_cents") or item.get("lineTotalCents")),
@@ -83,17 +96,28 @@ def build_payment_fingerprint(payload: Dict[str, Any]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _approval_plain_text(value: Any) -> str:
+    """Collapse newlines and escape Markdown controls in merchant-supplied text."""
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    return text.translate(str.maketrans({character: f"\\{character}" for character in r"\`*_{}[]<>()#+-.!|"}))
+
+
 def build_payment_question(payload: Dict[str, Any]) -> str:
     total = (payload.get("totalCents") or 0) / 100
-    merchant = payload.get("merchant") or "this merchant"
+    merchant = _approval_plain_text(payload.get("merchant") or "this merchant")
     lines = [f"Approve a ${total:.2f} purchase from {merchant}?"]
     for item in payload.get("lineItems") or []:
-        name = item.get("name") or "Item"
+        name = _approval_plain_text(item.get("name") or "Item")
         qty = item.get("quantity") or 1
         line_total = (item.get("lineTotalCents") or 0) / 100
         lines.append(f"- {name} x{qty}: ${line_total:.2f}")
+        lines.append(f"  Product: <{item.get('productUrl')}>")
+        lines.append(
+            f"  Reviews: {_approval_plain_text(item.get('rating'))} "
+            f"({_approval_plain_text(item.get('reviewCount'))})"
+        )
     for fee in payload.get("fees") or []:
-        label = fee.get("label") or "Fee"
+        label = _approval_plain_text(fee.get("label") or "Fee")
         amount = (fee.get("amountCents") or 0) / 100
         lines.append(f"- {label}: ${amount:.2f}")
     lines.append("\nRose will charge your saved Stripe billing method, then issue a one-time virtual card.")

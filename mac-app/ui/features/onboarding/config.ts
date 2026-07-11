@@ -38,11 +38,6 @@ export const MODIFIER_KEY_CODES = new Set([
   'ShiftRight',
 ]);
 
-const STRIPE_PAYMENT_URL_PROD = 'https://buy.stripe.com/6oU00k2kK1vi8bLdL8bQY00';
-const STRIPE_PAYMENT_URL_DEV = 'https://buy.stripe.com/test_5kQcN64tX2PccvS6dM9ws00';
-
-export const BYPASS_CODE = '181818';
-
 export const RESEND_COOLDOWN_SECONDS = 30;
 
 export function resolveBackendUrl(rawUrl: string | undefined, isProd: boolean): string {
@@ -56,9 +51,4 @@ export function resolveBackendUrl(rawUrl: string | undefined, isProd: boolean): 
 
 export const getBackendUrl = (): string => {
   return resolveBackendUrl(import.meta.env.VITE_BACKEND_API_URL, import.meta.env.PROD);
-};
-
-export const getStripePaymentUrl = (): string => {
-  const isDev = Boolean(import.meta.env.DEV);
-  return isDev ? STRIPE_PAYMENT_URL_DEV : STRIPE_PAYMENT_URL_PROD;
 };

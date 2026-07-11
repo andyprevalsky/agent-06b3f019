@@ -1,39 +1,25 @@
 #!/usr/bin/env tsx
-/* eslint-disable max-lines */
 /**
- * Black-box tests for the invite-codes domain
+ * Black-box tests for the invite-codes domain (part 1: parallel endpoint tests)
  *
  * Covers:
  *   GET  /api/invite-codes/my-code  — get or create user's 6-digit invite code + usage stats
- *   POST /api/invite-codes/use      — redeem an invite code (normal or master 181818)
- *   GET  /api/invite-codes/check    — check if user needs invite code + create user + initial credit
+ *   POST /api/invite-codes/use      — request validation + auth boundary
+ *   GET  /api/invite-codes/check    — waitlist gate check + user/credit creation
  *
- * Boundary capture tests (Phase 3):
- *   This domain has NO third-party HTTP boundaries — all operations are local (Prisma DB).
- *   Boundary tests verify 0 outbound HTTP calls for every endpoint to prove no hidden dependencies.
+ * The waitlist gate is ON: fresh users get needsInviteCode=true until they
+ * redeem a code (existing users were backfilled with the master code).
  *
- * Invariants covered:
+ * Sequential state-transition tests, waitlist-recording tests, agent-creation
+ * gating, and boundary capture tests live in invite-codes.part2.blackbox.ts.
+ * Shared infrastructure lives in invite-codes.testkit.ts.
+ *
+ * Invariants covered here:
  *   - auth boundary: all 3 endpoints reject unauthenticated requests with 401
  *   - error-surface: all error responses include { error: string }
  *   - idempotency: GET /my-code returns same code on repeat; GET /check doesn't duplicate credits
- *   - read-after-write: after using a code, inviter's uses count increments
- *   - state-transition: fresh user → uses code → cannot use again (400)
  *   - tenant isolation: one user's invite code is independent of another's
- *   - duplication prevention: user can only redeem one invite code ever
- *   - boundary param: no outbound HTTP calls made by any endpoint
- *   - reproducibility: deterministic given the same inputs
- *   - cleanup: each test creates fresh anonymous users; no shared mutable fixtures
- *
- * Invariants not applicable:
- *   - concurrency: invite code generation retries on collision; DB uniqueness enforced by Prisma
- *   - ordering/pagination: no list endpoints
- *   - atomicity: /use is a $transaction; tested via state-transition tests
- *   - referential integrity: enforced by Prisma/Postgres, not the invite-codes layer
- *   - event/job cardinality: no background jobs or events
- *   - harness independence: no background jobs involved
- *   - observability: covered by the runner's manifest and artifact directory
- *   - time/clock: no timestamp-dependent behavior
- *   - call ordering: no outbound calls to order
+ *   - waitlist gate: fresh users need an invite code
  *
  * Usage:
  *   npx tsx src/tests/blackbox/invite-codes.blackbox.ts
@@ -41,231 +27,32 @@
  */
 
 import { config } from 'dotenv';
-import { z } from 'zod';
 config();
 
-const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
-const CASE_CONCURRENCY = Number(process.env.BLACKBOX_TEST_CASE_CONCURRENCY || '30');
-
-// ==================== RESPONSE SCHEMAS ====================
-
-const ErrorResponse = z.object({
-  error: z.string(),
-});
-
-const MyCodeResponse = z.object({
-  inviteCode: z.number(),
-  uses: z.number(),
-  usesRemaining: z.number(),
-});
-
-const UseCodeResponse = z.object({
-  success: z.boolean(),
-  message: z.string(),
-});
-
-const CheckResponse = z.object({
-  needsInviteCode: z.boolean(),
-});
-
-const AnonymousResponse = z.object({
-  success: z.literal(true),
-  user: z.object({ id: z.string() }),
-  session: z.object({
-    access_token: z.string(),
-    expires_in: z.number(),
-  }),
-});
-
-const UsageResponse = z.object({
-  total: z.number(),
-  used: z.number(),
-  remaining: z.number(),
-});
-
-// ==================== CAPTURE TYPES ====================
-
-interface CapturedCall {
-  id: number;
-  timestamp: string;
-  url: string;
-  method: string;
-  requestHeaders: Record<string, string>;
-  requestBody: string | null;
-  responseStatus: number | null;
-  responseBody: string | null;
-  durationMs: number;
-  error: string | null;
-}
-
-// ==================== TEST INFRASTRUCTURE ====================
-
-interface TestResult {
-  name: string;
-  passed: boolean;
-  error?: string;
-  duration: number;
-}
+import {
+  BASE_URL,
+  CASE_CONCURRENCY,
+  CheckResponse,
+  ErrorResponse,
+  MyCodeResponse,
+  UsageResponse,
+  assert,
+  assertSchema,
+  assertStatus,
+  authHeaders,
+  createAnonSession,
+  printResults,
+  request,
+  runPool,
+  summarizeAndExit,
+} from './invite-codes.testkit';
 
 interface TestContext {
   accessToken1?: string;
   userId1?: string;
-  accessToken2?: string;
-  userId2?: string;
-  accessToken3?: string;
-  userId3?: string;
-  captureAvailable: boolean;
 }
 
-const ctx: TestContext = { captureAvailable: false };
-
-const MASTER_CODE = 181818;
-
-async function request(
-  url: string,
-  options: RequestInit = {}
-): Promise<{ status: number; data: unknown; headers: Headers }> {
-  const response = await fetch(url, {
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...options.headers },
-  });
-  let data: unknown;
-  const ct = response.headers.get('content-type');
-  if (ct?.includes('application/json')) {
-    data = await response.json();
-  } else {
-    data = await response.text();
-  }
-  return { status: response.status, data, headers: response.headers };
-}
-
-function authHeaders(token: string): Record<string, string> {
-  return { Authorization: `Bearer ${token}` };
-}
-
-async function runTest(name: string, fn: () => Promise<void>): Promise<TestResult> {
-  const start = Date.now();
-  try {
-    await fn();
-    return { name, passed: true, duration: Date.now() - start };
-  } catch (error) {
-    return {
-      name,
-      passed: false,
-      error: error instanceof Error ? error.message : String(error),
-      duration: Date.now() - start,
-    };
-  }
-}
-
-function assertStatus(actual: number, expected: number, data: unknown): void {
-  if (actual !== expected) {
-    throw new Error(`Expected status ${expected}, got ${actual}: ${JSON.stringify(data)}`);
-  }
-}
-
-function assertSchema<T>(schema: z.ZodType<T>, data: unknown, label: string): T {
-  const result = schema.safeParse(data);
-  if (!result.success) {
-    throw new Error(`${label} schema validation failed: ${result.error.message}`);
-  }
-  return result.data;
-}
-
-function assert(condition: boolean, message: string): void {
-  if (!condition) throw new Error(message);
-}
-
-/** Infrastructure URLs from concurrent tests (not from the endpoint under test). */
-const INFRA_URL_PATTERNS = [
-  'api.github.com',
-  'openrouter.ai',
-  'anthropic.com',
-  'openai.com',
-  'chatgpt.com',
-  'ip-api.com',
-  'supabase.co',
-  'surge.app',
-  'verify.twilio.com',
-  'e2b.app',
-  'stripe.com',
-  'parallel.ai',
-  'api.steel.dev',
-  'perplexity.ai',
-  'exa.ai',
-  'vapi.ai',
-  'googleapis.com',
-];
-function filterInfraCalls<T extends { url: string }>(calls: T[]): T[] {
-  return calls.filter((c) => !INFRA_URL_PATTERNS.some((p) => c.url.includes(p)));
-}
-
-async function runPool(
-  tests: { name: string; fn: () => Promise<void> }[],
-  concurrency: number
-): Promise<TestResult[]> {
-  const results: TestResult[] = new Array(tests.length);
-  let nextIndex = 0;
-
-  async function worker(): Promise<void> {
-    while (true) {
-      const idx = nextIndex++;
-      if (idx >= tests.length) return;
-      results[idx] = await runTest(tests[idx].name, tests[idx].fn);
-    }
-  }
-
-  const workerCount = Math.min(concurrency, tests.length);
-  await Promise.all(Array.from({ length: workerCount }, () => worker()));
-  return results;
-}
-
-// ==================== CAPTURE HELPERS ====================
-
-async function readCapturesForToken(token: string): Promise<CapturedCall[]> {
-  const res = await request(`${BASE_URL}/api/test/captures?token=${encodeURIComponent(token)}`);
-  assertStatus(res.status, 200, res.data);
-  return (res.data as { captures: CapturedCall[] }).captures;
-}
-
-function captureToken(prefix: string): string {
-  return `invite-codes-${prefix}-${crypto.randomUUID()}`;
-}
-
-async function checkCaptureAvailable(): Promise<boolean> {
-  try {
-    const res = await fetch(`${BASE_URL}/api/test/captures`);
-    return res.status === 200;
-  } catch {
-    return false;
-  }
-}
-
-// ==================== HELPERS ====================
-
-async function createAnonSession(): Promise<{ accessToken: string; userId: string }> {
-  const res = await request(`${BASE_URL}/api/auth/anonymous`, { method: 'POST' });
-  assertStatus(res.status, 200, res.data);
-  const body = assertSchema(AnonymousResponse, res.data, 'anonymous setup');
-  return { accessToken: body.session.access_token, userId: body.user.id };
-}
-
-// ==================== SETUP ====================
-
-async function setup(): Promise<void> {
-  const [s1, s2, s3] = await Promise.all([
-    createAnonSession(),
-    createAnonSession(),
-    createAnonSession(),
-  ]);
-  ctx.accessToken1 = s1.accessToken;
-  ctx.userId1 = s1.userId;
-  ctx.accessToken2 = s2.accessToken;
-  ctx.userId2 = s2.userId;
-  ctx.accessToken3 = s3.accessToken;
-  ctx.userId3 = s3.userId;
-  ctx.captureAvailable = await checkCaptureAvailable();
-}
+const ctx: TestContext = {};
 
 // ==================== GET /api/invite-codes/my-code ====================
 
@@ -350,7 +137,7 @@ async function testMyCode_freshUserStartsAt0Uses() {
   );
 }
 
-// ==================== POST /api/invite-codes/use ====================
+// ==================== POST /api/invite-codes/use (validation) ====================
 
 async function testUse_noAuth() {
   const res = await request(`${BASE_URL}/api/invite-codes/use`, {
@@ -402,31 +189,19 @@ async function testUse_notFoundCode() {
   assertSchema(ErrorResponse, res.data, 'POST /use not found');
 }
 
-async function testUse_masterCode() {
-  const { accessToken } = await createAnonSession();
-  const res = await request(`${BASE_URL}/api/invite-codes/use`, {
-    method: 'POST',
-    headers: authHeaders(accessToken),
-    body: JSON.stringify({ inviteCode: MASTER_CODE }),
-  });
-  assertStatus(res.status, 200, res.data);
-  const body = assertSchema(UseCodeResponse, res.data, 'POST /use master code');
-  assert(body.success === true, 'Expected success: true for master code');
-  assert(
-    body.message.toLowerCase().includes('master'),
-    `Expected master-specific message, got: "${body.message}"`
-  );
-}
-
 // ==================== GET /api/invite-codes/check ====================
 
-async function testCheck_happyPath() {
+async function testCheck_gateOnForFreshUser() {
+  const { accessToken } = await createAnonSession();
   const res = await request(`${BASE_URL}/api/invite-codes/check`, {
-    headers: authHeaders(ctx.accessToken1!),
+    headers: authHeaders(accessToken),
   });
   assertStatus(res.status, 200, res.data);
-  const body = assertSchema(CheckResponse, res.data, 'GET /check');
-  assert(body.needsInviteCode === false, 'Expected needsInviteCode: false (public beta)');
+  const body = assertSchema(CheckResponse, res.data, 'GET /check fresh user');
+  assert(
+    body.needsInviteCode === true,
+    'Expected needsInviteCode: true for a fresh user (waitlist gate ON)'
+  );
 }
 
 async function testCheck_noAuth() {
@@ -557,260 +332,19 @@ async function testTenantIsolation_separateInviteCodes() {
   );
 }
 
-// ==================== SEQUENTIAL STATE TESTS ====================
-
-/**
- * Full workflow: user1 gets code → user2 uses it → verify state changes.
- */
-async function testUse_happyPathWorkflow() {
-  const [inviter, redeemer] = await Promise.all([createAnonSession(), createAnonSession()]);
-
-  // Step 1: inviter gets their code
-  const codeRes = await request(`${BASE_URL}/api/invite-codes/my-code`, {
-    headers: authHeaders(inviter.accessToken),
-  });
-  assertStatus(codeRes.status, 200, codeRes.data);
-  const codeBefore = assertSchema(MyCodeResponse, codeRes.data, 'inviter code before');
-  assert(codeBefore.uses === 0, `Expected 0 uses before, got ${codeBefore.uses}`);
-
-  // Step 2: redeemer uses the code
-  const useRes = await request(`${BASE_URL}/api/invite-codes/use`, {
-    method: 'POST',
-    headers: authHeaders(redeemer.accessToken),
-    body: JSON.stringify({ inviteCode: codeBefore.inviteCode }),
-  });
-  assertStatus(useRes.status, 200, useRes.data);
-  const useBody = assertSchema(UseCodeResponse, useRes.data, 'POST /use happy');
-  assert(useBody.success === true, 'Expected success: true');
-
-  // Step 3: verify inviter's uses incremented
-  const codeAfter = await request(`${BASE_URL}/api/invite-codes/my-code`, {
-    headers: authHeaders(inviter.accessToken),
-  });
-  assertStatus(codeAfter.status, 200, codeAfter.data);
-  const afterBody = assertSchema(MyCodeResponse, codeAfter.data, 'inviter code after');
-  assert(afterBody.uses === 1, `Expected 1 use after, got ${afterBody.uses}`);
-  assert(afterBody.usesRemaining === 2, `Expected 2 remaining, got ${afterBody.usesRemaining}`);
-}
-
-/**
- * Duplication prevention: user cannot use a code if they already used one.
- */
-async function testUse_alreadyUsedCode() {
-  const [inviter, redeemer] = await Promise.all([createAnonSession(), createAnonSession()]);
-
-  // Get inviter's code
-  const codeRes = await request(`${BASE_URL}/api/invite-codes/my-code`, {
-    headers: authHeaders(inviter.accessToken),
-  });
-  assertStatus(codeRes.status, 200, codeRes.data);
-  const code = assertSchema(MyCodeResponse, codeRes.data, 'inviter code').inviteCode;
-
-  // Use the master code first
-  const firstUse = await request(`${BASE_URL}/api/invite-codes/use`, {
-    method: 'POST',
-    headers: authHeaders(redeemer.accessToken),
-    body: JSON.stringify({ inviteCode: MASTER_CODE }),
-  });
-  assertStatus(firstUse.status, 200, firstUse.data);
-
-  // Try to use a different code — should fail
-  const secondUse = await request(`${BASE_URL}/api/invite-codes/use`, {
-    method: 'POST',
-    headers: authHeaders(redeemer.accessToken),
-    body: JSON.stringify({ inviteCode: code }),
-  });
-  assertStatus(secondUse.status, 400, secondUse.data);
-  const errBody = assertSchema(ErrorResponse, secondUse.data, 'POST /use already used');
-  assert(
-    errBody.error.toLowerCase().includes('already'),
-    `Expected "already used" error, got: "${errBody.error}"`
-  );
-}
-
-/**
- * Code exhaustion: after 3 uses, the code returns 400.
- */
-async function testUse_codeExhaustedAfter3Uses() {
-  const inviter = await createAnonSession();
-
-  // Get inviter's code
-  const codeRes = await request(`${BASE_URL}/api/invite-codes/my-code`, {
-    headers: authHeaders(inviter.accessToken),
-  });
-  assertStatus(codeRes.status, 200, codeRes.data);
-  const code = assertSchema(MyCodeResponse, codeRes.data, 'inviter code').inviteCode;
-
-  // Use the code 3 times with different users
-  for (let i = 0; i < 3; i++) {
-    const user = await createAnonSession();
-    const res = await request(`${BASE_URL}/api/invite-codes/use`, {
-      method: 'POST',
-      headers: authHeaders(user.accessToken),
-      body: JSON.stringify({ inviteCode: code }),
-    });
-    assertStatus(res.status, 200, res.data);
-  }
-
-  // Verify inviter shows 3 uses, 0 remaining
-  const afterRes = await request(`${BASE_URL}/api/invite-codes/my-code`, {
-    headers: authHeaders(inviter.accessToken),
-  });
-  assertStatus(afterRes.status, 200, afterRes.data);
-  const afterBody = assertSchema(MyCodeResponse, afterRes.data, 'inviter after 3 uses');
-  assert(afterBody.uses === 3, `Expected 3 uses, got ${afterBody.uses}`);
-  assert(afterBody.usesRemaining === 0, `Expected 0 remaining, got ${afterBody.usesRemaining}`);
-
-  // 4th user tries to use the exhausted code → 400
-  const user4 = await createAnonSession();
-  const exhaustedRes = await request(`${BASE_URL}/api/invite-codes/use`, {
-    method: 'POST',
-    headers: authHeaders(user4.accessToken),
-    body: JSON.stringify({ inviteCode: code }),
-  });
-  assertStatus(exhaustedRes.status, 400, exhaustedRes.data);
-  const errBody = assertSchema(ErrorResponse, exhaustedRes.data, 'POST /use exhausted');
-  assert(
-    errBody.error.toLowerCase().includes('no uses remaining'),
-    `Expected "no uses remaining" error, got: "${errBody.error}"`
-  );
-}
-
-/**
- * Master code can be used by multiple users independently.
- */
-async function testUse_masterCodeMultipleUsers() {
-  const [u1, u2] = await Promise.all([createAnonSession(), createAnonSession()]);
-
-  const res1 = await request(`${BASE_URL}/api/invite-codes/use`, {
-    method: 'POST',
-    headers: authHeaders(u1.accessToken),
-    body: JSON.stringify({ inviteCode: MASTER_CODE }),
-  });
-  assertStatus(res1.status, 200, res1.data);
-
-  const res2 = await request(`${BASE_URL}/api/invite-codes/use`, {
-    method: 'POST',
-    headers: authHeaders(u2.accessToken),
-    body: JSON.stringify({ inviteCode: MASTER_CODE }),
-  });
-  assertStatus(res2.status, 200, res2.data);
-}
-
-// ==================== BOUNDARY CAPTURE TESTS ====================
-// These run sequentially because they share the capture buffer.
-// All invite-codes endpoints are purely local (Prisma DB) — assert 0 outbound calls.
-
-/**
- * GET /my-code makes NO outbound HTTP calls.
- */
-async function testBoundary_myCodeNoOutboundCalls() {
-  const token = captureToken('my-code');
-
-  await request(`${BASE_URL}/api/invite-codes/my-code`, {
-    headers: { ...authHeaders(ctx.accessToken1!), 'X-Capture-Token': token },
-  });
-
-  const calls = await readCapturesForToken(token);
-  assert(
-    filterInfraCalls(calls).length === 0,
-    `Expected 0 outbound calls for GET /my-code, got ${filterInfraCalls(calls).length}: ${JSON.stringify(filterInfraCalls(calls).map((c) => c.url))}`
-  );
-}
-
-/**
- * POST /use (validation failure) makes NO outbound HTTP calls.
- */
-async function testBoundary_useValidationNoOutbound() {
-  const token = captureToken('use-validation');
-
-  await request(`${BASE_URL}/api/invite-codes/use`, {
-    method: 'POST',
-    headers: { ...authHeaders(ctx.accessToken1!), 'X-Capture-Token': token },
-    body: JSON.stringify({}),
-  });
-
-  const calls = await readCapturesForToken(token);
-  assert(
-    filterInfraCalls(calls).length === 0,
-    `Expected 0 outbound calls for validation failure, got ${filterInfraCalls(calls).length}`
-  );
-}
-
-/**
- * POST /use (not found code) makes NO outbound HTTP calls.
- */
-async function testBoundary_useNotFoundNoOutbound() {
-  const { accessToken } = await createAnonSession();
-  const token = captureToken('use-not-found');
-
-  await request(`${BASE_URL}/api/invite-codes/use`, {
-    method: 'POST',
-    headers: { ...authHeaders(accessToken), 'X-Capture-Token': token },
-    body: JSON.stringify({ inviteCode: 999999 }),
-  });
-
-  const calls = await readCapturesForToken(token);
-  assert(
-    filterInfraCalls(calls).length === 0,
-    `Expected 0 outbound calls for not-found code, got ${filterInfraCalls(calls).length}`
-  );
-}
-
-/**
- * POST /use (master code happy path) makes NO outbound HTTP calls.
- */
-async function testBoundary_useMasterCodeNoOutbound() {
-  const { accessToken } = await createAnonSession();
-  const token = captureToken('use-master-code');
-
-  await request(`${BASE_URL}/api/invite-codes/use`, {
-    method: 'POST',
-    headers: { ...authHeaders(accessToken), 'X-Capture-Token': token },
-    body: JSON.stringify({ inviteCode: MASTER_CODE }),
-  });
-
-  const calls = await readCapturesForToken(token);
-  assert(
-    filterInfraCalls(calls).length === 0,
-    `Expected 0 outbound calls for master code use, got ${filterInfraCalls(calls).length}`
-  );
-}
-
-/**
- * GET /check makes NO outbound HTTP calls (credit creation is DB-only).
- */
-async function testBoundary_checkNoOutboundCalls() {
-  const { accessToken } = await createAnonSession();
-  const token = captureToken('check');
-
-  await request(`${BASE_URL}/api/invite-codes/check`, {
-    headers: { ...authHeaders(accessToken), 'X-Capture-Token': token },
-  });
-
-  const calls = await readCapturesForToken(token);
-  assert(
-    filterInfraCalls(calls).length === 0,
-    `Expected 0 outbound calls for GET /check, got ${filterInfraCalls(calls).length}: ${JSON.stringify(filterInfraCalls(calls).map((c) => c.url))}`
-  );
-}
-
 // ==================== RUNNER ====================
 
 async function runAll() {
-  console.log('Invite Codes Black-box Tests\n');
+  console.log('Invite Codes Black-box Tests (part 1)\n');
   console.log(`Testing against: ${BASE_URL}`);
   console.log(`Case concurrency: ${CASE_CONCURRENCY}\n`);
 
-  // Phase 1: Setup
-  console.log('Setting up auth sessions...');
-  await setup();
-  console.log(`  User 1: ${ctx.userId1}`);
-  console.log(`  User 2: ${ctx.userId2}`);
-  console.log(`  User 3: ${ctx.userId3}`);
-  console.log(`  Capture available: ${ctx.captureAvailable}\n`);
+  console.log('Setting up auth session...');
+  const s1 = await createAnonSession();
+  ctx.accessToken1 = s1.accessToken;
+  ctx.userId1 = s1.userId;
+  console.log(`  User 1: ${ctx.userId1}\n`);
 
-  // Phase 2: Parallel independent tests
   const parallelTests = [
     // GET /my-code
     { name: 'GET /my-code -- happy path + schema', fn: testMyCode_happyPath },
@@ -825,9 +359,8 @@ async function runAll() {
     { name: 'POST /use -- invalid code type -> 400', fn: testUse_invalidCodeType },
     { name: 'POST /use -- null code -> 400', fn: testUse_nullCode },
     { name: 'POST /use -- not found code -> 404', fn: testUse_notFoundCode },
-    { name: 'POST /use -- master code -> 200', fn: testUse_masterCode },
     // GET /check
-    { name: 'GET /check -- happy path (needsInviteCode=false)', fn: testCheck_happyPath },
+    { name: 'GET /check -- fresh user needs invite (gate ON)', fn: testCheck_gateOnForFreshUser },
     { name: 'GET /check -- no auth -> 401', fn: testCheck_noAuth },
     { name: 'GET /check -- invalid JWT -> 401', fn: testCheck_invalidJwt },
     { name: 'GET /check -- creates initial credit', fn: testCheck_createsInitialCredit },
@@ -845,86 +378,9 @@ async function runAll() {
     `Running ${parallelTests.length} parallel tests (concurrency=${CASE_CONCURRENCY})...`
   );
   const parallelResults = await runPool(parallelTests, CASE_CONCURRENCY);
+  printResults(parallelResults);
 
-  for (const r of parallelResults) {
-    const icon = r.passed ? '  PASS' : '  FAIL';
-    console.log(`${icon}  ${r.name}${r.passed ? '' : ` -- ${r.error}`} (${r.duration}ms)`);
-  }
-
-  // Phase 3: Sequential state-dependent tests + boundary capture tests
-  const sequentialTests: { name: string; fn: () => Promise<void> }[] = [
-    {
-      name: 'POST /use -- happy path workflow (invite + redeem + verify)',
-      fn: testUse_happyPathWorkflow,
-    },
-    { name: 'POST /use -- already used code -> 400', fn: testUse_alreadyUsedCode },
-    {
-      name: 'POST /use -- code exhausted after 3 uses -> 400',
-      fn: testUse_codeExhaustedAfter3Uses,
-    },
-    {
-      name: 'POST /use -- master code works for multiple users',
-      fn: testUse_masterCodeMultipleUsers,
-    },
-  ];
-
-  // Add boundary capture tests if capture is available
-  if (ctx.captureAvailable) {
-    sequentialTests.push(
-      {
-        name: 'boundary -- GET /my-code makes no outbound calls',
-        fn: testBoundary_myCodeNoOutboundCalls,
-      },
-      {
-        name: 'boundary -- POST /use validation makes no outbound calls',
-        fn: testBoundary_useValidationNoOutbound,
-      },
-      {
-        name: 'boundary -- POST /use not-found makes no outbound calls',
-        fn: testBoundary_useNotFoundNoOutbound,
-      },
-      {
-        name: 'boundary -- POST /use master code makes no outbound calls',
-        fn: testBoundary_useMasterCodeNoOutbound,
-      },
-      {
-        name: 'boundary -- GET /check makes no outbound calls',
-        fn: testBoundary_checkNoOutboundCalls,
-      }
-    );
-  } else {
-    console.log(
-      '\n  [info] Capture not available (BLACKBOX_TEST_CAPTURE_OUTBOUND!=1) -- skipping boundary tests'
-    );
-  }
-
-  console.log(`\nRunning ${sequentialTests.length} sequential tests...`);
-  const sequentialResults: TestResult[] = [];
-  for (const test of sequentialTests) {
-    const result = await runTest(test.name, test.fn);
-    sequentialResults.push(result);
-    const icon = result.passed ? '  PASS' : '  FAIL';
-    console.log(
-      `${icon}  ${result.name}${result.passed ? '' : ` -- ${result.error}`} (${result.duration}ms)`
-    );
-  }
-
-  // Summary
-  const allResults = [...parallelResults, ...sequentialResults];
-  const passed = allResults.filter((r) => r.passed).length;
-  const failed = allResults.filter((r) => !r.passed).length;
-
-  console.log('\n' + '='.repeat(50));
-  console.log(`\nResults: ${passed} passed, ${failed} failed, ${allResults.length} total`);
-
-  if (failed > 0) {
-    console.log('\nFAILURES:');
-    allResults.filter((r) => !r.passed).forEach((r) => console.log(`   ${r.name}: ${r.error}`));
-    process.exit(1);
-  }
-
-  console.log('\nALL INVITE CODES BLACK-BOX TESTS PASSED\n');
-  process.exit(0);
+  summarizeAndExit(parallelResults, 'INVITE CODES (PART 1)');
 }
 
 runAll().catch((error) => {

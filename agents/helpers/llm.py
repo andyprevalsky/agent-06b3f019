@@ -18,6 +18,7 @@ import structlog
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field, create_model, model_validator
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 
 from config import load_config
 from helpers.attachments import (
@@ -50,7 +51,6 @@ from providers.fast_cache.context import (
 from providers.fast_cache.context import (
     set_context as set_fast_cache_context,
 )
-from providers.fast_cache.rose_cache import cached_complete
 from providers.rose import (
     ClaudeAuthContext,
     ComputeAuthContext,
@@ -74,6 +74,15 @@ from utils.tool_schemas import (
 logger = structlog.get_logger()
 
 CLOUD_AGENT_TOOL_NAME = "cloud_agent"
+
+
+class LLMStructuredOutputError(ValueError):
+    """The provider completed, but its structured output violated our contract."""
+
+
+class ResponseSchemaPersistenceError(RuntimeError):
+    """A generated response schema could not be saved durably."""
+
 
 TRAILING_MESSAGE_REFERENCE_RE = re.compile(
     r"(?P<prefix>(?:^|\n\n)Reference:\s*)"
@@ -593,12 +602,14 @@ def _normalize_response_schema_for_goal(goal: str, schema: Dict[str, Any]) -> Di
     field_names = {str(field.get("name", "")).lower() for field in normalized["fields"]}
 
     if "order_confirmation_id" not in field_names:
-        normalized["fields"].append({
-            "name": "order_confirmation_id",
-            "type": "str",
-            "required": True,
-            "description": "Grounded order id, confirmation id, receipt number, or purchase confirmation number proving the item was actually acquired.",
-        })
+        normalized["fields"].append(
+            {
+                "name": "order_confirmation_id",
+                "type": "str",
+                "required": True,
+                "description": "Grounded order id, confirmation id, receipt number, or purchase confirmation number proving the item was actually acquired.",
+            }
+        )
 
     return normalized
 
@@ -831,9 +842,7 @@ def build_verifier_context_messages(  # noqa: C901
         if not verifier_file_evidence_by_message:
             return
         for payload in verifier_file_evidence_by_message.get(_verifier_file_evidence_key(msg), []):
-            current_batch.append(
-                "TOOL_RESULT " + json.dumps(payload, ensure_ascii=False, default=str)
-            )
+            current_batch.append("TOOL_RESULT " + json.dumps(payload, ensure_ascii=False, default=str))
 
     for msg in sorted_context:
         role = msg.get("role", "")
@@ -854,9 +863,7 @@ def build_verifier_context_messages(  # noqa: C901
                 dag_task_index = metadata.get("dagTaskIndex")
                 if isinstance(dag_task_index, int):
                     reasoning_payload["dag_task_index"] = dag_task_index
-                current_batch.append(
-                    "TOOL_RESULT " + json.dumps(reasoning_payload, ensure_ascii=False, default=str)
-                )
+                current_batch.append("TOOL_RESULT " + json.dumps(reasoning_payload, ensure_ascii=False, default=str))
             _append_file_evidence(msg)
             continue
 
@@ -1144,11 +1151,7 @@ def _filter_superseded_browser_protocol_failures(context: List[Dict[str, Any]]) 
     completed successfully, that stale failure is no longer useful evidence and
     can cause both the verifier and the next agent turn to rerun completed work.
     """
-    successful_browser_times = [
-        _context_timestamp(msg)
-        for msg in context
-        if _is_successful_browser_tool_result(msg)
-    ]
+    successful_browser_times = [_context_timestamp(msg) for msg in context if _is_successful_browser_tool_result(msg)]
     if not successful_browser_times:
         return context
 
@@ -1156,10 +1159,7 @@ def _filter_superseded_browser_protocol_failures(context: List[Dict[str, Any]]) 
     return [
         msg
         for msg in context
-        if not (
-            _is_superseded_browser_protocol_failure(msg)
-            and _context_timestamp(msg) < latest_success
-        )
+        if not (_is_superseded_browser_protocol_failure(msg) and _context_timestamp(msg) < latest_success)
     ]
 
 
@@ -2776,7 +2776,9 @@ async def call_llm_structured_streaming(  # noqa: C901
                 f"Failed to parse streaming Rose response: json={accumulated_json[:500]}",
                 error=error_message,
             )
-            raise ValueError(f"Failed to parse streaming Rose response as {response_model.__name__}: {error_message}") from e
+            raise LLMStructuredOutputError(
+                f"Failed to parse streaming Rose response as {response_model.__name__}: {error_message}"
+            ) from e
 
         # Use captured stream usage if available, otherwise fall back to estimates
         if stream_usage:
@@ -3839,11 +3841,13 @@ def _nested_fields_for_object_field(field: Dict[str, Any]) -> List[Dict[str, Any
             name = item.get("name")
             field_type = _normalize_schema_field_type(item.get("type"))
             if isinstance(name, str) and name and field_type:
-                fields.append({
-                    "name": name,
-                    "type": field_type,
-                    "description": item.get("description", ""),
-                })
+                fields.append(
+                    {
+                        "name": name,
+                        "type": field_type,
+                        "description": item.get("description", ""),
+                    }
+                )
         if fields:
             return fields
     if isinstance(explicit, dict):
@@ -4364,10 +4368,10 @@ async def check_progress(  # noqa: C901
                     after=len(context),
                 )
 
-        browser_success_context = (
-            call_site in ("verifier_execute", "verifier_post_dag")
-            and _verifier_context_has_successful_browser_result(context)
-        )
+        browser_success_context = call_site in (
+            "verifier_execute",
+            "verifier_post_dag",
+        ) and _verifier_context_has_successful_browser_result(context)
         if browser_success_context and fast_mode_goal and fast_cache_should_write:
             set_fast_cache_context(
                 FastCacheContext(
@@ -4844,10 +4848,10 @@ async def call_llm_activity(  # noqa: C901
 
         # Validate result
         if result is None:
-            raise ValueError(f"LLM returned None result (model={model})")
+            raise LLMStructuredOutputError(f"LLM returned None result (model={model})")
 
         if not hasattr(result, "response") or not hasattr(result, "tool_calls"):
-            raise ValueError(f"LLM result missing required fields (model={model})")
+            raise LLMStructuredOutputError(f"LLM result missing required fields (model={model})")
 
         # Convert tool calls to dicts
         tool_calls_dict = []
@@ -4861,7 +4865,7 @@ async def call_llm_activity(  # noqa: C901
             matching = [tc for tc in tool_calls_dict if tc.get("tool") == required_tool]
             if not matching:
                 got = [tc.get("tool") for tc in tool_calls_dict]
-                raise ValueError(f"LLM did not call required tool '{required_tool}'. Got: {got}")
+                raise LLMStructuredOutputError(f"LLM did not call required tool '{required_tool}'. Got: {got}")
 
         logger.info(
             "LLM activity completed",
@@ -4887,6 +4891,15 @@ async def call_llm_activity(  # noqa: C901
         # and the retry needs the shared state to still be present.
         # Cleanup happens on success (above) or when the workflow finishes/cancels.
         logger.error("LLM activity failed", error=extract_error_message(e))
+        if isinstance(e, LLMStructuredOutputError):
+            # A provider response that violates the requested schema is not an
+            # infrastructure failure. The owning agent loop may choose to ask the
+            # model again, but Temporal must not multiply that semantic retry.
+            raise ApplicationError(
+                str(e),
+                type="LLMStructuredOutputError",
+                non_retryable=True,
+            ) from e
         raise
 
 
@@ -5007,11 +5020,16 @@ async def set_response_schema_activity(
 
             # 2. Save schema to agent record
             save_start = time.perf_counter()
-            save_response = await client.patch(
-                f"{backend_url}/api/agents/{agent_id}",
-                headers=backend_api_headers(api_key),
-                json={"response_schema": schema},
-            )
+            try:
+                save_response = await client.patch(
+                    f"{backend_url}/api/agents/{agent_id}",
+                    headers=backend_api_headers(api_key),
+                    json={"response_schema": schema},
+                )
+            except httpx.HTTPError as e:
+                raise ResponseSchemaPersistenceError(
+                    f"Failed to save response schema for agent {agent_id}: {extract_error_message(e)}"
+                ) from e
             save_elapsed = time.perf_counter() - save_start
             logger.info(f"[TIMING] Schema save API call: {save_elapsed * 1000:.1f}ms")
 
@@ -5019,8 +5037,11 @@ async def set_response_schema_activity(
                 logger.warning(
                     "Failed to save response schema", agent_id=agent_id, status_code=save_response.status_code
                 )
-            else:
-                logger.info("Saved response schema to agent", agent_id=agent_id)
+                raise ResponseSchemaPersistenceError(
+                    f"Failed to save response schema for agent {agent_id}: HTTP {save_response.status_code}"
+                )
+
+            logger.info("Saved response schema to agent", agent_id=agent_id)
 
             activity_elapsed = time.perf_counter() - activity_start
             logger.info(
@@ -5043,6 +5064,8 @@ async def set_response_schema_activity(
             response_text=e.response.text[:500],
         )
         return None
+    except ResponseSchemaPersistenceError:
+        raise
     except Exception as e:
         logger.error("Failed to generate response schema", agent_id=agent_id, error=extract_error_message(e))
         return None

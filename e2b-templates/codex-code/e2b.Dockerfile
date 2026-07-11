@@ -1,8 +1,9 @@
 # Minimal E2B template for Codex CLI with WebSocket streaming.
 FROM ubuntu:22.04
 
-RUN sed -i 's|http://archive.ubuntu.com/ubuntu|http://ubuntu.mirror.constant.com/ubuntu|g; s|http://security.ubuntu.com/ubuntu|http://ubuntu.mirror.constant.com/ubuntu|g' /etc/apt/sources.list \
-    && apt-get update && apt-get install -y --no-install-recommends \
+ARG CODEX_VERSION=0.144.1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     git \
@@ -13,7 +14,7 @@ RUN sed -i 's|http://archive.ubuntu.com/ubuntu|http://ubuntu.mirror.constant.com
     g++ \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y nodejs \
-    && npm install -g @openai/codex \
+    && npm install -g "@openai/codex@$CODEX_VERSION" \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /home/user && chown 1000:1000 /home/user

@@ -763,6 +763,32 @@ async def test_execute_dag_parallel_independent_tasks():
     assert all(t.state.value == "COMPLETED" for t in dag.tasks)
 
 
+async def test_execute_dag_retries_structured_param_failure_once():
+    """A non-retryable activity contract failure is retried by the DAG, not Temporal."""
+    plan_data = {
+        "tasks": [{"goal": "find updates", "tool_name": "web_search"}],
+        "dependencies": {},
+    }
+    param_attempts = 0
+
+    def param_tool_calls(_args):
+        nonlocal param_attempts
+        param_attempts += 1
+        if param_attempts == 1:
+            application_error = RuntimeError("required tool missing")
+            application_error.type = "LLMStructuredOutputError"
+            activity_error = RuntimeError("Activity task failed")
+            activity_error.cause = application_error
+            raise activity_error
+        return [{"tool": "web_search", "query": "latest updates"}]
+
+    result, _events, dag = await _run_execute_dag(plan_data, param_tool_calls=param_tool_calls)
+
+    assert result["status"] == "completed"
+    assert param_attempts == 2
+    assert dag.tasks[0].state.value == "COMPLETED"
+
+
 async def run_all_tests():
     print("dag-executor blackbox tests:")
     r = BlackboxResult()
@@ -788,11 +814,20 @@ async def run_all_tests():
     r.record("build_param_population_message_basic", test_build_param_population_message_basic)
     r.record("build_param_population_message_spawn", test_build_param_population_message_spawn_adds_context_warning)
     r.record("build_param_population_message_non_spawn", test_build_param_population_message_non_spawn_no_extra)
-    r.record("select_param_tool_call_prefers_task_matching_duplicate", test_select_param_tool_call_prefers_task_matching_duplicate)
-    r.record("select_param_tool_call_rejects_ambiguous_duplicate", test_select_param_tool_call_rejects_ambiguous_duplicate)
+    r.record(
+        "select_param_tool_call_prefers_task_matching_duplicate",
+        test_select_param_tool_call_prefers_task_matching_duplicate,
+    )
+    r.record(
+        "select_param_tool_call_rejects_ambiguous_duplicate", test_select_param_tool_call_rejects_ambiguous_duplicate
+    )
     await r.record_async("execute_dag_reasoning_task_succeeds", test_execute_dag_reasoning_task_succeeds)
     await r.record_async("execute_dag_reasoning_forwards_gpt_token", test_execute_dag_reasoning_forwards_gpt_token)
     await r.record_async("execute_dag_tool_task_succeeds", test_execute_dag_tool_task_succeeds)
+    await r.record_async(
+        "execute_dag_retries_structured_param_failure_once",
+        test_execute_dag_retries_structured_param_failure_once,
+    )
     await r.record_async(
         "execute_dag_tool_llm_activity_args_match_signature",
         test_execute_dag_tool_llm_activity_args_match_signature,
@@ -808,7 +843,9 @@ async def run_all_tests():
         test_execute_dag_uses_matching_param_tool_call_for_duplicate_spawn_calls,
     )
     await r.record_async("execute_dag_tool_failure_returns_needs_llm", test_execute_dag_tool_failure_returns_needs_llm)
-    await r.record_async("execute_dag_exception_in_tool_yields_error_event", test_execute_dag_exception_in_tool_yields_error_event)
+    await r.record_async(
+        "execute_dag_exception_in_tool_yields_error_event", test_execute_dag_exception_in_tool_yields_error_event
+    )
     await r.record_async("execute_dag_parallel_independent_tasks", test_execute_dag_parallel_independent_tasks)
     teardown_mock()
     return r.summary()

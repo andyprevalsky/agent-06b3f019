@@ -36,10 +36,10 @@ from domains.spawn_claude_code_agent.types import ClaudeCodeParentResponse
 from helpers.claude_code_ws_client import ClaudeCodeWsClient
 from helpers.e2b_log_collector import SandboxLogCollector
 from helpers.file_resolution import resolve_file_pointers_from_extracted, transform_schema_for_remote_session
-from helpers.llm_timeouts import VERIFIER_ACTIVITY_TIMEOUT_SECONDS
 from helpers.tracing import traced
 from tools.base import MessageStatus
 from utils.error_utils import extract_error_message
+from utils.llm_timeouts import VERIFIER_ACTIVITY_TIMEOUT_SECONDS
 from utils.terminal_filter import TerminalFilter
 
 logger = structlog.get_logger()

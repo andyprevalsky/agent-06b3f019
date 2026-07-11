@@ -127,6 +127,7 @@ export interface IPC {
   onUpdateStatus: (callback: (payload: UpdateStatusPayload) => void) => void;
   onUpdateProgress: (callback: (percent: number) => void) => void;
   onFocusInput: (callback: () => void) => void;
+  onOpenAgent: (callback: (agentId: string) => void) => () => void;
 
   // Quick query actions
   submitQuickQuery: (payload: string | QuickQueryPayload) => Promise<{ success: boolean }>;
