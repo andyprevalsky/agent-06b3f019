@@ -6,12 +6,21 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
+import { openAgentInCurrentClient } from '@/lib/openAgent';
 import {
   fetchOnboardingComplete,
   markOnboardingCompleteOnBackend,
+  subscribeToOpenAgent,
   syncElectronOnboardingComplete,
 } from './api';
 import type { AuthSnapshot, AuthState } from './types';
+
+/** Keep the shared AgentContext URL contract as the renderer navigation boundary. */
+export const useOpenAgentDeepLink = (): void => {
+  useEffect(() => {
+    return subscribeToOpenAgent(openAgentInCurrentClient);
+  }, []);
+};
 
 /**
  * Pure orchestrator extracted from the original useEffect body. Kept as a

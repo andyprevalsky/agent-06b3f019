@@ -116,6 +116,45 @@ describe('MessageList thinking states', () => {
     );
   });
 
+  it('uses the sole bubble model and start time when a concurrent tool differs', async () => {
+    const now = Date.now();
+    const ctx = makeAgentCtx({
+      agent: makeAgent({ status: 'ACTIVE' }),
+      streamingBubbles: new Map([
+        [
+          'sb-1',
+          {
+            text: 'blue bubble',
+            sequence: 1,
+            done: false,
+            startedAtMs: now - 1000,
+          },
+        ],
+      ]),
+      streamingTools: new Map([
+        [
+          'tool-1',
+          {
+            stream_id: 'stream-tool-1',
+            tool_call_id: 'tool-1',
+            tool_name: 'web_search',
+            title: 'Concurrent GPT tool',
+            startedAtMs: now - 100_000,
+            isGpt: true,
+          },
+        ],
+      ]),
+    });
+
+    renderList(ctx);
+
+    await waitFor(() => expect(screen.getByText('Thinking')).toBeInTheDocument(), {
+      timeout: 1200,
+    });
+    expect(screen.getByTestId('thinking-animation')).toHaveAttribute('data-has-gradient', 'false');
+    expect(document.body.textContent).toMatch(/[0-5]\.\ds·\d+ tokens/);
+  });
+
   it('renders main thinking stream as elapsed time plus token download count', async () => {
     const startedAtMs = Date.now() - 2200;
     const ctx = makeAgentCtx({
