@@ -3016,6 +3016,18 @@ async def test_workflow_mark_complete_happy_path():
         assert "generate_completion_summary" in names
         assert "post_agent_message" in names
         assert "mark_finished" in names
+        final_summary_index = next(
+            i
+            for i, (name, args) in enumerate(fake.activity_calls)
+            if name == "post_agent_message"
+            and len(args or []) >= 4
+            and (args[3] or {}).get("toolName") == "completion_summary"
+            and (args[3] or {}).get("toolStatus") == "FINISHED"
+        )
+        mark_finished_index = next(
+            i for i, (name, _args) in enumerate(fake.activity_calls) if name == "mark_finished"
+        )
+        assert mark_finished_index < final_summary_index
         # Child-completed signal to parent
         signal_names = [s[1] for s in fake.signal_calls]
         assert "child_completed" in signal_names

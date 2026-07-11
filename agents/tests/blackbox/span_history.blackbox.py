@@ -223,6 +223,50 @@ def test_agent_latency_inline_baseline_requires_20_samples():
                 os.environ["SPAN_HISTORY_FILE"] = old
 
 
+def test_agent_latency_handles_events_without_reconstructed_spans():
+    from benchmarks.agent_latency import (
+        _RawEvent,
+        _build_trace_from_events,
+        _render_executive_summary,
+        _render_tree,
+        parse_ts,
+    )
+
+    event = _RawEvent(
+        ts=parse_ts("2026-05-09T12:00:00Z"),
+        source="worker",
+        event="agent.deleted.trace.retained",
+        data={
+            "timestamp": "2026-05-09T12:00:00Z",
+            "event": "agent.deleted.trace.retained",
+            "agent_id": "11111111-1111-4111-8111-111111111111",
+        },
+    )
+
+    roots, t0, t1, stats = _build_trace_from_events([event], [], [], set())
+
+    assert roots == []
+    assert t0 == event.ts
+    assert t1 == event.ts
+    assert stats["span_count"] == 0
+
+    summary = _render_executive_summary(
+        "11111111-1111-4111-8111-111111111111",
+        roots,
+        t0,
+        t1,
+        stats,
+        {},
+        300,
+        False,
+        {},
+    )
+    tree = _render_tree(roots, t0, {}, {}, False, 5.0, False)
+
+    assert "log events found, but no span or legacy timing windows were reconstructed" in summary
+    assert "(no spans reconstructed from retained log events)" in tree
+
+
 async def run_all_tests():
     print("span-history blackbox tests:")
     r = BlackboxResult()
@@ -231,6 +275,7 @@ async def run_all_tests():
     r.record("record_from_embedded_logs", test_agent_latency_records_span_history_from_embedded_logs)
     r.record("parse_nested_fly_clickhouse_json", test_agent_latency_parses_nested_fly_clickhouse_json)
     r.record("inline_baseline_requires_20_samples", test_agent_latency_inline_baseline_requires_20_samples)
+    r.record("latency_handles_events_without_spans", test_agent_latency_handles_events_without_reconstructed_spans)
     teardown_mock()
     return r.all_passed
 

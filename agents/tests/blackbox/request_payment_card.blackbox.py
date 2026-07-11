@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import tempfile
+from datetime import timedelta
 from pathlib import Path
 
 from _test_utils import (
@@ -190,6 +191,45 @@ async def test_mint_purchase_card_activity_boundary():
     assert call["requestHeaders"]["x-user-id"] == "user-123"
 
 
+async def test_payment_helper_import_is_workflow_sandbox_safe():
+    from payment_import_workflow_fixture import PaymentImportWorkflow
+    from temporalio.testing import WorkflowEnvironment
+    from temporalio.worker import Worker
+    from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
+
+    sandbox_restrictions = SandboxRestrictions.default.with_passthrough_modules(
+        "rich",
+        "rich.console",
+        "structlog.dev",
+        "markdown_it_py",
+        "pygments",
+        "httpx",
+        "sniffio",
+        "helpers.llm",
+        "helpers.attachments",
+    )
+
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue="payment-import-sandbox-test",
+            workflows=[PaymentImportWorkflow],
+            activities=[],
+            workflow_runner=SandboxedWorkflowRunner(restrictions=sandbox_restrictions),
+        ):
+            result = await env.client.execute_workflow(
+                PaymentImportWorkflow.run,
+                id="payment-import-sandbox-test-1",
+                task_queue="payment-import-sandbox-test",
+                execution_timeout=timedelta(seconds=30),
+            )
+
+    assert "Approve a $6.36 purchase from Blick Art Materials?" in result["tool_question"]
+    assert "Brush x1: $6.36" in result["tool_question"]
+    assert result["domain_question"] == result["tool_question"]
+    assert result["same_fingerprint"] is True
+
+
 async def run_all_tests():
     print("request-payment-card blackbox tests:")
     result = BlackboxResult()
@@ -198,6 +238,7 @@ async def run_all_tests():
     result.record("question_no_secrets", test_question_contains_receipt_but_no_card_secrets)
     await result.record_async("lookup_boundary", test_lookup_purchase_activity_boundary)
     await result.record_async("mint_boundary", test_mint_purchase_card_activity_boundary)
+    await result.record_async("workflow_sandbox_import", test_payment_helper_import_is_workflow_sandbox_safe)
     teardown_mock()
     return result.all_passed
 
