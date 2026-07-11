@@ -107,10 +107,10 @@ SQL
   fi
   echo "Syncing Prisma schema to local test database..."
   npx prisma db push --skip-generate --accept-data-loss >/dev/null
-  # Credential source and live-smoke execution are independent controls. A
-  # developer authenticated to Codex with an API key can pre-seed the local DB
-  # from production while still exercising the live Codex blackbox smoke.
-  if [[ "${BACKEND_CODEX_LOCAL_AUTH_SYNC_SKIP:-0}" != "1" ]]; then
+  # Credential seeding and smoke execution are separate controls. A caller may
+  # pre-seed a valid production credential without disabling the real Codex
+  # black-box test that consumes it.
+  if [[ "${BACKEND_CODEX_TOKEN_SYNC_SKIP:-0}" != "1" ]]; then
     echo "Syncing local Codex credentials to local test database..."
     npx tsx scripts/sync-codex-token.ts >/dev/null
   fi

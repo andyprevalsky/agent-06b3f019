@@ -42,6 +42,20 @@ function resolveRole(
   return { role: 'USER' };
 }
 
+export function buildUserMessageSignalValue(
+  messageText: string,
+  metadata: Record<string, unknown> | undefined
+): string {
+  const idempotencyKey = metadata?.idempotencyKey;
+  if (metadata?.isResponseSchemaUpdate === true && typeof idempotencyKey === 'string') {
+    return JSON.stringify({
+      internal_type: 'response_schema_update',
+      idempotency_key: idempotencyKey,
+    });
+  }
+  return messageText;
+}
+
 /** Handle user message routing — signal workflow or run chat handler. */
 async function routeUserMessage(agentId: string, messageText: string): Promise<void> {
   const agentForChat = await repo.findAgentUnique(agentId);
@@ -149,7 +163,7 @@ export async function postMessage(
 
   // If this is a USER message, either signal workflow or run chat handler
   if (role === 'USER') {
-    await routeUserMessage(agentId, body.message);
+    await routeUserMessage(agentId, buildUserMessageSignalValue(body.message, body.metadata));
   }
 
   return {

@@ -2,25 +2,25 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-const script = readFileSync(join(process.cwd(), 'scripts', 'run-coverage.sh'), 'utf8');
+const coverageScript = readFileSync(join(process.cwd(), 'scripts', 'run-coverage.sh'), 'utf8');
 const blackboxScript = readFileSync(
   join(process.cwd(), 'scripts', 'run-blackbox-tests.sh'),
   'utf8'
 );
 
 assert.match(
-  script,
+  coverageScript,
   /lsof -tiTCP:"\$COV_PORT" -sTCP:LISTEN/,
   'coverage port preflight must ignore outbound connections using the same local port'
 );
 
 for (const [name, harness] of [
-  ['coverage', script],
+  ['coverage', coverageScript],
   ['blackbox', blackboxScript],
 ] as const) {
   assert.match(
     harness,
-    /BACKEND_CODEX_LOCAL_AUTH_SYNC_SKIP/,
+    /BACKEND_CODEX_TOKEN_SYNC_SKIP/,
     `${name} harness must support preserving pre-seeded Codex credentials`
   );
   assert.doesNotMatch(
@@ -30,4 +30,4 @@ for (const [name, harness] of [
   );
 }
 
-process.stdout.write('coverage script port preflight test passed\n');
+process.stdout.write('coverage script contracts passed\n');
