@@ -5235,11 +5235,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         return
 
                 if result and result.get("status") == "awaiting_payment_card_approval":
-                    from domains.request_payment_card.service import (
-                        build_payment_question,
-                        normalize_payment_payload,
-                    )
                     from tools.request_user_approval import request_user_approval_direct
+                    from utils.payment_card import build_payment_question, normalize_payment_payload
 
                     logger.info(
                         "Browser payment approval started",

@@ -4,12 +4,14 @@ import { isSubmittablePhone } from '@/lib/phone';
 import { getErrorMessageOrFallback } from '../../../shared/utils/error';
 import {
   createPlaidLinkToken,
+  checkNeedsInviteCode,
   exchangePlaidPublicToken,
   fetchCustomPreviewUrl,
   fetchCustomization,
   fetchIntegrations,
   fetchPlaidItems,
   resolvePresetSamplePath,
+  redeemInviteCode,
   saveCustomization,
   sendPasswordIntegrationRequest,
   spawnLinkedInSyncAgent,
@@ -44,10 +46,18 @@ const ONBOARDING_DATA_API: {
   fetchPlaidItems,
 };
 
+const ONBOARDING_WAITLIST_API: {
+  checkNeedsInviteCode: typeof checkNeedsInviteCode;
+  redeemInviteCode: typeof redeemInviteCode;
+} = { checkNeedsInviteCode, redeemInviteCode };
+
 export const useOnboardingCustomizationApi = (): typeof ONBOARDING_CUSTOMIZATION_API =>
   ONBOARDING_CUSTOMIZATION_API;
 
 export const useOnboardingDataApi = (): typeof ONBOARDING_DATA_API => ONBOARDING_DATA_API;
+
+export const useOnboardingWaitlistApi = (): typeof ONBOARDING_WAITLIST_API =>
+  ONBOARDING_WAITLIST_API;
 
 const resolveVoicePreviewUrl = async (
   voiceId: string,

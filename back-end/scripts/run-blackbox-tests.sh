@@ -188,6 +188,12 @@ BACKEND_LOG="${BLACKBOX_TEST_BACKEND_LOG:-${CONTRACT_TEST_BACKEND_LOG:-$ARTIFACT
 export SURGE_API_KEY="${SURGE_API_KEY:-blackbox-surge-key}"
 export SURGE_ACCOUNT_ID="${SURGE_ACCOUNT_ID:-blackbox-surge-account}"
 export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
+# The isolated backend must not inherit a developer's workspace tunnel. E2B
+# cannot reach localhost, and stale ngrok URLs turn the direct Codex smoke into
+# a test of unrelated local Fast Mode infrastructure. Explicit BLACKBOX_*
+# overrides remain available for proxy-specific blackbox runs.
+export FAST_MODE_ANTHROPIC_PROXY_URL="${BLACKBOX_FAST_MODE_ANTHROPIC_PROXY_URL:-}"
+export FAST_MODE_CODEX_PROXY_URL="${BLACKBOX_FAST_MODE_CODEX_PROXY_URL:-}"
 if [[ -z "${BLACKBOX_SMS_SUPERVISOR_RESPONSE_JSON:-}" ]]; then
   export BLACKBOX_SMS_SUPERVISOR_RESPONSE_JSON='{"reasoning":"blackbox smoke fixture","tool_calls":[{"tool":"attempt_completion","arguments":{"message":"Blackbox SMS smoke reply"}}]}'
 fi
