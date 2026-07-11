@@ -91,6 +91,9 @@ test.describe('login', () => {
     const verifyOtp = page.waitForResponse(
       (r) => r.url().includes('/api/auth/verify-otp') && r.request().method() === 'POST',
     );
+    const inviteCheck = page.waitForResponse(
+      (r) => r.url().includes('/api/invite-codes/check') && r.request().method() === 'GET',
+    );
     await page.locator('#otp').fill(TEST_OTP);
     await page
       .locator('label:has-text("I authorize SMS communication") input[type="checkbox"]')
@@ -106,11 +109,14 @@ test.describe('login', () => {
     // code through the real UI so the gate path is exercised end to end.
     // Already-ungated users (prior redemption) skip straight through.
     const inviteCodeInput = page.getByLabel('Invite code');
-    const gateAppeared = await inviteCodeInput
-      .waitFor({ state: 'visible', timeout: 5_000 })
-      .then(() => true)
-      .catch(() => false);
-    if (gateAppeared) {
+    const inviteCheckRes = await inviteCheck;
+    expect(
+      inviteCheckRes.status(),
+      `invite-codes/check non-2xx: ${inviteCheckRes.status()}`,
+    ).toBeLessThan(300);
+    const { needsInviteCode } = (await inviteCheckRes.json()) as { needsInviteCode: boolean };
+    if (needsInviteCode) {
+      await expect(inviteCodeInput, 'Invite gate did not render').toBeVisible();
       const useCode = page.waitForResponse(
         (r) => r.url().includes('/api/invite-codes/use') && r.request().method() === 'POST',
       );
