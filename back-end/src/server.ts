@@ -44,6 +44,7 @@ import {
   setSupervisorFixtureOverride,
   clearSupervisorFixtureOverride,
   runProactiveSmsOutreachJob,
+  runProactiveSmsOutreachJobWithLease,
 } from './providers/smsSupervisor';
 import vcardRouter from './domains/vcard/routes';
 import uploadRouter from './domains/upload/routes';
@@ -301,6 +302,23 @@ if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1') {
     }
     runProactiveSmsOutreachJob({ now, candidateUserIds: userIds })
       .then((summary) => res.json(summary))
+      .catch(next);
+  });
+  proactiveSmsRouter.post('/run-leased', (req, res, next) => {
+    const { now: nowValue, userIds: userIdsValue } = req.body as {
+      now?: unknown;
+      userIds?: unknown;
+    };
+    const now = typeof nowValue === 'string' ? new Date(nowValue) : new Date();
+    const userIds = Array.isArray(userIdsValue)
+      ? userIdsValue.filter((value): value is string => typeof value === 'string')
+      : undefined;
+    if (Number.isNaN(now.getTime()) || (userIdsValue !== undefined && userIds === undefined)) {
+      res.status(400).json({ error: 'now must be an ISO date and userIds must be a string array' });
+      return;
+    }
+    runProactiveSmsOutreachJobWithLease({ now, candidateUserIds: userIds })
+      .then((result) => res.json(result))
       .catch(next);
   });
   app.use('/api/test/proactive-sms', proactiveSmsRouter);
@@ -632,11 +650,17 @@ app.listen(PORT, () => {
     const cronLog = createLogger('Cron');
     const runProactiveOutreach = () => {
       cronLog.info('Running proactive SMS outreach job...');
-      runProactiveSmsOutreachJob().catch((err) => {
-        cronLog.error('Proactive SMS outreach job error', {
-          error: err instanceof Error ? err.message : String(err),
+      runProactiveSmsOutreachJobWithLease()
+        .then((result) => {
+          if (!result.acquired) {
+            cronLog.info('Proactive SMS outreach skipped; another replica owns the lease');
+          }
+        })
+        .catch((err) => {
+          cronLog.error('Proactive SMS outreach job error', {
+            error: err instanceof Error ? err.message : String(err),
+          });
         });
-      });
     };
     cron.schedule(PROACTIVE_SMS_CRON_EXPRESSION, runProactiveOutreach, {
       timezone: PROACTIVE_SMS_TIME_ZONE,

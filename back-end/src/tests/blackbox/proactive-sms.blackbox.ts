@@ -6,6 +6,7 @@ import { PrismaClient } from '@prisma/client';
 
 import {
   PROACTIVE_SMS_CRON_EXPRESSION,
+  PROACTIVE_SMS_JOB_LEASE_KEY,
   PROACTIVE_SMS_OUTREACH_PROMPT,
   PROACTIVE_SMS_TIME_ZONE,
 } from '../../providers/smsSupervisor/proactiveOutreach';
@@ -38,6 +39,11 @@ interface JobSummary {
   sent: number;
   skipped: number;
   failed: number;
+}
+
+interface LeasedJobResult {
+  acquired: boolean;
+  summary: JobSummary | null;
 }
 
 function completionFixture(message: string, delayMs = 0): string {
@@ -77,6 +83,16 @@ async function runJob(userIds: string[], token: string): Promise<JobSummary> {
   });
   assertStatus(response.status, 200, response.data);
   return response.data as JobSummary;
+}
+
+async function runLeasedJob(userIds: string[], token: string): Promise<LeasedJobResult> {
+  const response = await request(`${BASE_URL}/api/test/proactive-sms/run-leased`, {
+    method: 'POST',
+    headers: { 'X-Capture-Token': token },
+    body: JSON.stringify({ now: RUN_AT.toISOString(), userIds }),
+  });
+  assertStatus(response.status, 200, response.data);
+  return response.data as LeasedJobResult;
 }
 
 function surgeCallsTo(calls: CapturedCall[], phones: Set<string>): CapturedCall[] {
@@ -254,6 +270,84 @@ async function testTaskCreatedDuringGenerationPreventsSend(): Promise<void> {
   }
 }
 
+async function testConcurrentRunsCommitOnlyOneOutreach(): Promise<void> {
+  const phone = uniqueSmsPhone();
+  const userId = await provisionUserWithPhone(prisma, phone);
+  const token = captureToken('proactive-sms-concurrent-dedupe');
+  const reply = 'I can help turn one of your saved ideas into a concrete next step.';
+
+  try {
+    await subscribe(userId, new Date(RUN_AT.getTime() + 30 * DAY_MS));
+    await setFixtureOverride(userId, completionFixture(reply, 500));
+
+    const summaries = await Promise.all([runJob([userId], token), runJob([userId], token)]);
+    const sent = summaries.reduce((total, summary) => total + summary.sent, 0);
+    const skipped = summaries.reduce((total, summary) => total + summary.skipped, 0);
+    if (sent !== 1 || skipped !== 1) {
+      throw new Error(`Expected one concurrent send and one skip: ${JSON.stringify(summaries)}`);
+    }
+
+    const calls = surgeCallsTo(await readCapturesForToken(token), new Set([phone]));
+    if (calls.length !== 1) {
+      throw new Error(`Expected one concurrent outbound SMS call, got ${calls.length}`);
+    }
+  } finally {
+    await cleanupAgentScopedUser(prisma, userId);
+  }
+}
+
+async function testSharedLeaseSerializesJobsAndRecoversStaleOwner(): Promise<void> {
+  const phone = uniqueSmsPhone();
+  const userId = await provisionUserWithPhone(prisma, phone);
+  const token = captureToken('proactive-sms-shared-lease');
+  const reply = 'Want me to help choose the most useful thing to tackle next?';
+
+  try {
+    await prisma.toolSideEffect.deleteMany({
+      where: { operationKey: PROACTIVE_SMS_JOB_LEASE_KEY },
+    });
+    await subscribe(userId, new Date(RUN_AT.getTime() + 30 * DAY_MS));
+    await setFixtureOverride(userId, completionFixture(reply, 500));
+
+    const concurrent = await Promise.all([
+      runLeasedJob([userId], token),
+      runLeasedJob([userId], token),
+    ]);
+    if (concurrent.filter((result) => result.acquired).length !== 1) {
+      throw new Error(`Expected exactly one lease owner: ${JSON.stringify(concurrent)}`);
+    }
+    if (concurrent.reduce((total, result) => total + (result.summary?.sent ?? 0), 0) !== 1) {
+      throw new Error(`Expected the lease owner to send once: ${JSON.stringify(concurrent)}`);
+    }
+
+    await prisma.toolSideEffect.upsert({
+      where: { operationKey: PROACTIVE_SMS_JOB_LEASE_KEY },
+      create: {
+        operationKey: PROACTIVE_SMS_JOB_LEASE_KEY,
+        operationType: 'PROACTIVE_SMS_JOB_LEASE',
+        status: 'STARTED',
+        externalId: 'abandoned-owner',
+      },
+      update: { status: 'STARTED', externalId: 'abandoned-owner' },
+    });
+    await prisma.$executeRaw`
+      UPDATE "ToolSideEffect"
+      SET "updatedAt" = NOW() - INTERVAL '31 minutes'
+      WHERE "operationKey" = ${PROACTIVE_SMS_JOB_LEASE_KEY}
+    `;
+
+    const recovered = await runLeasedJob([], captureToken('proactive-sms-stale-lease'));
+    if (!recovered.acquired) {
+      throw new Error('Expected an expired proactive SMS lease to be recoverable');
+    }
+  } finally {
+    await prisma.toolSideEffect.deleteMany({
+      where: { operationKey: PROACTIVE_SMS_JOB_LEASE_KEY },
+    });
+    await cleanupAgentScopedUser(prisma, userId);
+  }
+}
+
 async function main(): Promise<void> {
   const tests: Array<[string, () => Promise<void>]> = [
     ['Wednesday/Sunday schedule', async () => assertWednesdaySundaySchedule()],
@@ -265,6 +359,11 @@ async function main(): Promise<void> {
     [
       'task issued during generation suppresses outreach',
       testTaskCreatedDuringGenerationPreventsSend,
+    ],
+    ['concurrent runs commit only one outreach', testConcurrentRunsCommitOnlyOneOutreach],
+    [
+      'shared job lease serializes runs and recovers an abandoned owner',
+      testSharedLeaseSerializesJobsAndRecoversStaleOwner,
     ],
   ];
   const results = [];

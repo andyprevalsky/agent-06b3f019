@@ -5,6 +5,8 @@
  * -> inject a synthetic inbound turn into the existing SMS supervisor flow.
  */
 
+import { randomUUID } from 'node:crypto';
+
 import { prisma } from '../database';
 import { createLogger } from '../logger';
 import { handleSmsSupervisorMessage } from './supervisorHandler';
@@ -13,10 +15,14 @@ const log = createLogger('ProactiveSms');
 
 export const PROACTIVE_SMS_CRON_EXPRESSION = '0 10 * * 0,3';
 export const PROACTIVE_SMS_TIME_ZONE = 'America/Los_Angeles';
+export const PROACTIVE_SMS_JOB_LEASE_KEY = 'scheduled-job:proactive-sms';
 export const PROACTIVE_SMS_OUTREACH_PROMPT = `This is a scheduled proactive check-in. Review the person you support using the context and tools available to you, then respond with a concise SMS suggesting something you believe would be genuinely helpful for them right now. Do not mention this scheduled trigger, their subscription, or their inactivity.`;
 
 const INACTIVITY_DAYS = 7;
 const OUTREACH_CONCURRENCY = 5;
+const JOB_LEASE_DURATION_MS = 30 * 60 * 1000;
+const JOB_LEASE_HEARTBEAT_MS = 60 * 1000;
+const JOB_LEASE_OPERATION_TYPE = 'PROACTIVE_SMS_JOB_LEASE';
 
 interface EligibleUser {
   userId: string;
@@ -40,6 +46,11 @@ export interface ProactiveSmsJobSummary {
   sent: number;
   skipped: number;
   failed: number;
+}
+
+export interface ProactiveSmsLeasedJobResult {
+  acquired: boolean;
+  summary: ProactiveSmsJobSummary | null;
 }
 
 type OutreachResult = 'sent' | 'skipped' | 'failed';
@@ -79,6 +90,21 @@ function parseStoredMessages(raw: unknown): StoredSessionMessage[] {
   } catch {
     return [];
   }
+}
+
+function containsOutreachKey(raw: unknown, outreachKey: string): boolean {
+  return parseStoredMessages(raw).some(
+    (message) =>
+      message.role === 'user' && message.content.includes(`outreach key: ${outreachKey}.`)
+  );
+}
+
+async function outreachAlreadyTriggered(userId: string, outreachKey: string): Promise<boolean> {
+  const session = await prisma.smsSession.findUnique({
+    where: { userId },
+    select: { messages: true },
+  });
+  return containsOutreachKey(session?.messages, outreachKey);
 }
 
 async function findEligibleUsers(asOf: Date, candidateUserIds?: string[]): Promise<EligibleUser[]> {
@@ -137,18 +163,15 @@ async function runOutreachForUser(
   asOf: Date,
   outreachKey: string
 ): Promise<OutreachResult> {
-  const session = await prisma.smsSession.upsert({
+  await prisma.smsSession.createMany({
+    data: [{ userId: candidate.userId, messages: JSON.stringify([]) }],
+    skipDuplicates: true,
+  });
+  const session = await prisma.smsSession.findUniqueOrThrow({
     where: { userId: candidate.userId },
-    update: {},
-    create: { userId: candidate.userId, messages: JSON.stringify([]) },
     select: { lastInboundSeq: true, messages: true },
   });
-  if (
-    parseStoredMessages(session.messages).some(
-      (message) =>
-        message.role === 'user' && message.content.includes(`outreach key: ${outreachKey}.`)
-    )
-  ) {
+  if (containsOutreachKey(session.messages, outreachKey)) {
     log.info('[ProactiveSms] Skipped duplicate scheduled trigger', {
       userId: candidate.userId,
       outreachKey,
@@ -161,7 +184,13 @@ async function runOutreachForUser(
     phoneNumber: candidate.phone,
     inboundMessage: buildTriggeredInboundMessage(outreachKey),
     mySeq: session.lastInboundSeq,
-    commitGuard: () => isStillEligible(candidate, asOf),
+    commitGuard: async () => {
+      const [eligible, duplicate] = await Promise.all([
+        isStillEligible(candidate, asOf),
+        outreachAlreadyTriggered(candidate.userId, outreachKey),
+      ]);
+      return eligible && !duplicate;
+    },
   });
   if (!result.committed) {
     log.info('[ProactiveSms] Existing SMS flow skipped the triggered turn', {
@@ -226,4 +255,103 @@ export async function runProactiveSmsOutreachJob(
   };
   log.info('[ProactiveSms] Job finished', { ...summary, outreachKey });
   return summary;
+}
+
+async function acquireJobLease(ownerId: string): Promise<boolean> {
+  const now = new Date();
+  const liveCutoff = new Date(now.getTime() - JOB_LEASE_DURATION_MS);
+  const expiresAt = new Date(now.getTime() + JOB_LEASE_DURATION_MS);
+
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${PROACTIVE_SMS_JOB_LEASE_KEY}))`;
+    const existing = await tx.toolSideEffect.findUnique({
+      where: { operationKey: PROACTIVE_SMS_JOB_LEASE_KEY },
+      select: { status: true, updatedAt: true },
+    });
+    if (existing?.status === 'STARTED' && existing.updatedAt > liveCutoff) return false;
+
+    await tx.toolSideEffect.upsert({
+      where: { operationKey: PROACTIVE_SMS_JOB_LEASE_KEY },
+      create: {
+        operationKey: PROACTIVE_SMS_JOB_LEASE_KEY,
+        operationType: JOB_LEASE_OPERATION_TYPE,
+        status: 'STARTED',
+        externalId: ownerId,
+        request: { expiresAt: expiresAt.toISOString() },
+      },
+      update: {
+        operationType: JOB_LEASE_OPERATION_TYPE,
+        status: 'STARTED',
+        externalId: ownerId,
+        request: { expiresAt: expiresAt.toISOString() },
+        error: null,
+      },
+    });
+    return true;
+  });
+}
+
+async function renewJobLease(ownerId: string): Promise<void> {
+  const expiresAt = new Date(Date.now() + JOB_LEASE_DURATION_MS);
+  const result = await prisma.toolSideEffect.updateMany({
+    where: {
+      operationKey: PROACTIVE_SMS_JOB_LEASE_KEY,
+      operationType: JOB_LEASE_OPERATION_TYPE,
+      status: 'STARTED',
+      externalId: ownerId,
+    },
+    data: { request: { expiresAt: expiresAt.toISOString() } },
+  });
+  if (result.count === 0) {
+    log.warn('[ProactiveSms] Job lease heartbeat lost ownership', { ownerId });
+  }
+}
+
+async function releaseJobLease(ownerId: string): Promise<void> {
+  await prisma.toolSideEffect.updateMany({
+    where: {
+      operationKey: PROACTIVE_SMS_JOB_LEASE_KEY,
+      operationType: JOB_LEASE_OPERATION_TYPE,
+      status: 'STARTED',
+      externalId: ownerId,
+    },
+    data: {
+      status: 'RELEASED',
+      response: { releasedAt: new Date().toISOString() },
+    },
+  });
+}
+
+export async function runProactiveSmsOutreachJobWithLease(
+  options: ProactiveSmsJobOptions = {}
+): Promise<ProactiveSmsLeasedJobResult> {
+  const ownerId = randomUUID();
+  if (!(await acquireJobLease(ownerId))) {
+    log.info('[ProactiveSms] Job skipped because another replica holds the lease');
+    return { acquired: false, summary: null };
+  }
+
+  const heartbeat = setInterval(() => {
+    void renewJobLease(ownerId).catch((error) => {
+      log.error('[ProactiveSms] Job lease heartbeat failed', {
+        ownerId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }, JOB_LEASE_HEARTBEAT_MS);
+  heartbeat.unref();
+
+  try {
+    return { acquired: true, summary: await runProactiveSmsOutreachJob(options) };
+  } finally {
+    clearInterval(heartbeat);
+    try {
+      await releaseJobLease(ownerId);
+    } catch (error) {
+      log.error('[ProactiveSms] Job lease release failed', {
+        ownerId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
 }
