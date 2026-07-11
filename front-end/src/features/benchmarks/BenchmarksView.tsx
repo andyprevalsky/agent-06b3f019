@@ -4,8 +4,9 @@
  *   mount ──► hub(loading) ──catalog+runs fetched──► hub(ready)
  *     hub polls runs + run-requests every POLL_MS while mounted (live runs).
  *   hub + click run row ──► run(runId) (in-app run view: tiles + task table)
- *     run + "Open agent" ──► agent(runId, agentId)
- *       agent + Back ──► run (the run view it came from)
+ *     run + "Open agent" ──► onOpenAgent(agentId) → the MAIN agent panel
+ *       (the app's normal chat view; benchmark agents are served through the
+ *       normal agent APIs via the hub-archive fallback)
  *     run + Back ──► hub
  *   hub + task edited ──► hub (catalog row replaced in place)
  *   hub + run dispatched ──► hub (requests refetched immediately)
@@ -19,14 +20,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { HubRun, HubRunRequest, HubTask } from '@/lib/api/benchmarksHub';
 import { fetchHubRunRequests, fetchHubRuns, fetchHubTasks } from '@/lib/api/benchmarksHub';
-import { BenchmarkAgentView } from './BenchmarkAgentView';
 import { BenchmarkRunView } from './BenchmarkRunView';
 import { RunsPane } from './RunsPane';
 import { TasksPane } from './TasksPane';
 
 const POLL_MS = 5000;
 
-export function BenchmarksView() {
+interface BenchmarksViewProps {
+  /** Open an agent in the app's MAIN panel (normal chat view). */
+  onOpenAgent?: (agentId: string) => void;
+}
+
+export function BenchmarksView({ onOpenAgent }: BenchmarksViewProps) {
   const [tasks, setTasks] = useState<HubTask[]>([]);
   const [tasksLoading, setTasksLoading] = useState(true);
   const [tasksError, setTasksError] = useState<string | null>(null);
@@ -37,7 +42,6 @@ export function BenchmarksView() {
   const [runsError, setRunsError] = useState<string | null>(null);
 
   const [openRun, setOpenRun] = useState<string | null>(null);
-  const [openAgent, setOpenAgent] = useState<{ runId: string; agentId: string } | null>(null);
   const pollRef = useRef<number | null>(null);
 
   const loadTasks = useCallback(async () => {
@@ -81,21 +85,11 @@ export function BenchmarksView() {
     };
   }, [loadRuns]);
 
-  if (openAgent !== null) {
-    return (
-      <BenchmarkAgentView
-        runId={openAgent.runId}
-        agentId={openAgent.agentId}
-        onBack={() => setOpenAgent(null)}
-      />
-    );
-  }
-
   if (openRun !== null) {
     return (
       <BenchmarkRunView
         runId={openRun}
-        onOpenAgent={(runId, agentId) => setOpenAgent({ runId, agentId })}
+        onOpenAgent={(_, agentId) => onOpenAgent?.(agentId)}
         onBack={() => setOpenRun(null)}
       />
     );

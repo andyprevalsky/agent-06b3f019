@@ -67,7 +67,7 @@ function fmtTokens(n: number): string {
 
 function Tile({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-lg border border-border px-3 py-2 min-w-[92px]">
+    <div className="rounded-lg border border-border bg-background/85 backdrop-blur-sm px-3 py-2 min-w-[92px]">
       <div className="text-[11px] text-muted-foreground">{label}</div>
       <div className="text-sm font-semibold">{value}</div>
     </div>
@@ -166,7 +166,7 @@ export function BenchmarkRunView({ runId, onOpenAgent, onBack }: BenchmarkRunVie
             <Tile label="Agents" value={String(detail.totals.agents)} />
           </div>
 
-          <div className="flex-1 min-h-0 overflow-y-auto rounded-xl border border-border">
+          <div className="flex-1 min-h-0 overflow-y-auto rounded-xl border border-border bg-background/85 backdrop-blur-sm">
             <table className="w-full text-sm">
               <thead className="sticky top-0 bg-background border-b border-border">
                 <tr className="text-left text-[11px] uppercase tracking-wide text-muted-foreground">

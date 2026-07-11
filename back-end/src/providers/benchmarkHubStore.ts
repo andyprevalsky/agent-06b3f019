@@ -25,6 +25,26 @@ const log = createLogger('BenchmarkHubStore');
 const KEY_PREFIX = 'benchmark-hub';
 const LOCAL_DIR = path.join(__dirname, '..', '..', '..', '.context', 'benchmark-hub');
 
+/**
+ * Benchmark Hub access allowlist: hub reads/edits/dispatch and the benchmark-
+ * agent fallback on the normal agent APIs are internal-team tooling. Mirrors
+ * the front-end ADMIN_USER_IDS (terminal-component-group/config.ts).
+ */
+export const BENCHMARK_HUB_ADMIN_USER_IDS = new Set([
+  '1f85ff25-6e29-4c1b-8739-f917bd101a30', // Andy Prevalsky
+  '43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9', // Tamara Chayo
+]);
+
+/** Internal API key or an allowlisted team member may read the benchmark
+ * archive through the normal agent APIs. */
+export function canReadBenchmarkArchive(req: {
+  isInternal?: boolean;
+  userId?: string;
+}): boolean {
+  if (req.isInternal === true) return true;
+  return req.userId !== undefined && BENCHMARK_HUB_ADMIN_USER_IDS.has(req.userId);
+}
+
 export interface HubRunTaskSummary {
   name: string;
   passed: boolean | null;
@@ -455,8 +475,70 @@ export async function deleteRun(runId: string): Promise<boolean> {
   }
 }
 
+// agentId → run_id resolution cache (bundles are immutable once final; a live
+// re-upload keeps the same run_id, so cached mappings never go stale).
+const agentRunCache = new Map<string, string>();
+
+/**
+ * Resolve a benchmark agent (root OR sub-agent) across every stored run —
+ * newest first — and return its adapted view. Roots resolve from the index
+ * alone; sub-agents require scanning bundles (cached thereafter). This powers
+ * the normal agent-API fallback so benchmark agents open in the main panel.
+ */
+export async function findAgentAcrossRuns(agentId: string): Promise<HubAgentView | null> {
+  if (!agentId) return null;
+  const cachedRunId = agentRunCache.get(agentId);
+  if (cachedRunId !== undefined) {
+    const view = await getRunAgent(cachedRunId, agentId);
+    if (view !== null) return view;
+    agentRunCache.delete(agentId);
+  }
+  const index = await listRuns();
+  // Pass 1: roots straight from the index (no bundle reads).
+  for (const run of index) {
+    if (run.tasks.some((t) => t.agent_id === agentId)) {
+      const view = await getRunAgent(run.run_id, agentId);
+      if (view !== null) {
+        agentRunCache.set(agentId, run.run_id);
+        return view;
+      }
+    }
+  }
+  // Pass 2: sub-agents — scan bundles (bounded by index size).
+  for (const run of index) {
+    const view = await getRunAgent(run.run_id, agentId);
+    if (view !== null) {
+      agentRunCache.set(agentId, run.run_id);
+      return view;
+    }
+  }
+  return null;
+}
+
+/**
+ * The fan-out tree for a benchmark root, shaped like the normal
+ * GET /api/agents/tree response so the main panel renders it unchanged.
+ */
+export async function findTreeAcrossRuns(
+  busId: string
+): Promise<Array<Record<string, unknown>> | null> {
+  const view = await findAgentAcrossRuns(busId);
+  if (view === null) return null;
+  return view.tree.map((node) => ({
+    ...node,
+    tokens_in: 0,
+    tokens_out: 0,
+    output_schema: null,
+    structured_output: null,
+    failure_context: undefined,
+    created_at: null,
+    updated_at: null,
+  }));
+}
+
 /** Test-only: reset in-process state (local dir is controlled by the caller). */
 export function _resetForTests(): void {
   s3Client = null;
   indexLock = Promise.resolve();
+  agentRunCache.clear();
 }

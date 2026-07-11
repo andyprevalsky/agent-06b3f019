@@ -85,7 +85,7 @@ export function RunsPane({ runs, requests, loading, error, onOpenRun }: RunsPane
           return (
             <button
               key={request.id}
-              className="w-full text-left rounded-md border border-border px-3 py-2 hover:bg-muted/50"
+              className="w-full text-left rounded-md border border-border bg-background/85 backdrop-blur-sm px-3 py-2 hover:bg-muted/70"
               onClick={() =>
                 request.runId !== null
                   ? onOpenRun(request.runId)
@@ -139,7 +139,7 @@ export function RunsPane({ runs, requests, loading, error, onOpenRun }: RunsPane
         {runs.map((run) => (
           <button
             key={run.run_id}
-            className="w-full flex items-center gap-2 px-3 py-2 text-left rounded-md border border-border hover:bg-muted/50"
+            className="w-full flex items-center gap-2 px-3 py-2 text-left rounded-md border border-border bg-background/85 backdrop-blur-sm hover:bg-muted/70"
             onClick={() => onOpenRun(run.run_id)}
             data-testid={`run-row-${run.run_id}`}
           >

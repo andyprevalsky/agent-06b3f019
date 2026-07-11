@@ -432,11 +432,26 @@ export async function createRunRequest(
   const known = new Set(await repo.findExistingTaskNames(input.task_names));
   const unknown = input.task_names.filter((n) => !known.has(n));
   if (unknown.length > 0) throw new UnknownTasksError(unknown);
-  return repo.createRunRequestRow({
+  const request = await repo.createRunRequestRow({
     taskNames: input.task_names,
     simOn: input.sim_on ?? [],
     requestedBy,
   });
+  // INVARIANT: every dispatched run links to a run dashboard from the moment
+  // it exists. Create the placeholder run (queued tasks) under the same
+  // hub-<request-id> the poller streams to; snapshots/final upserts replace it.
+  const runId = `hub-${request.id}`;
+  await hubStore.putRun(
+    {
+      run_id: runId,
+      timestamp: new Date().toISOString(),
+      suite: 'hub-dispatch',
+      source: 'hub-dispatch',
+      tasks: input.task_names.map((name) => ({ name, status: 'queued' })),
+    },
+    { live: true }
+  );
+  return repo.updateRunRequestRow(request.id, { runId });
 }
 
 export async function listRunRequests(statuses?: string[]) {
@@ -482,13 +497,31 @@ export async function updateRunRequest(
     });
   }
   if (update.action === 'fail') {
-    return repo.updateRunRequestRow(id, {
+    const failed = await repo.updateRunRequestRow(id, {
       status: 'failed',
       error: update.error ?? 'unknown failure',
     });
+    // Keep the linked run dashboard truthful: mark still-pending placeholder
+    // tasks failed with the dispatch error (real uploaded results are kept).
+    if (failed.runId !== null) {
+      const bundle = await hubStore.getRunBundle(failed.runId);
+      if (bundle !== null && Array.isArray(bundle.tasks)) {
+        const tasks = (bundle.tasks as Array<Record<string, unknown>>).map((t) =>
+          t.passed === undefined && t.agent_id === undefined
+            ? { ...t, status: 'failed', passed: false, failure_reason: update.error ?? 'dispatch failed' }
+            : t
+        );
+        await hubStore.putRun({ ...bundle, tasks }, { live: false });
+      }
+    }
+    return failed;
   }
   // cancel: only queued requests can be cancelled (a running claim owns it)
   const cancelled = await repo.transitionQueuedToCancelled(id);
   if (!cancelled) return null;
-  return repo.findRunRequest(id);
+  const row = await repo.findRunRequest(id);
+  if (row !== null && row.runId !== null) {
+    await hubStore.deleteRun(row.runId); // placeholder dashboard goes with it
+  }
+  return row;
 }

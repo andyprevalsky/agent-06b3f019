@@ -2,7 +2,7 @@ import { type NextFunction, type Response, Router } from 'express';
 import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { asyncHandler } from '../../utils/asyncHandler';
 import * as hubStore from '../../providers/benchmarkHubStore';
-import { BENCHMARK_HUB_ADMIN_USER_IDS } from './config';
+import { BENCHMARK_HUB_ADMIN_USER_IDS } from '../../providers/benchmarkHubStore';
 import * as service from './service';
 import { TaskNotFoundError, TasksUnavailableError, UnknownTasksError } from './service';
 

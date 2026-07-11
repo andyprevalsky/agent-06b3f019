@@ -276,7 +276,7 @@ function MainContent({
         ) : currentView === 'network' ? (
           <NetworkView />
         ) : currentView === 'benchmarks' ? (
-          <BenchmarksView />
+          <BenchmarksView onOpenAgent={agents.handleSelectAgent} />
         ) : (
           <AgentChatArea
             agents={agents}

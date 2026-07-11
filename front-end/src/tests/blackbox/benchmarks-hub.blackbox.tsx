@@ -357,8 +357,9 @@ describe('BenchmarksView (in-app hub)', () => {
     });
   });
 
-  it('opens a run into the run view, then an agent transcript (full chain)', async () => {
-    renderWithProviders(<BenchmarksView />);
+  it('opens a run into the run view; Open agent goes to the MAIN panel', async () => {
+    const onOpenAgent = vi.fn();
+    renderWithProviders(<BenchmarksView onOpenAgent={onOpenAgent} />);
     await waitFor(() => expect(screen.getByTestId('run-row-run-abc')).toBeInTheDocument());
 
     // click the run row → the in-app run view (tiles + per-task table)
@@ -368,26 +369,11 @@ describe('BenchmarksView (in-app hub)', () => {
     expect(screen.getByTestId('run-view-task-chat-mode')).toBeInTheDocument();
     expect(screen.getByTestId('run-tiles').textContent).toContain('$0.03');
 
-    // open the agent from the run view
+    // Open agent → hands the agent to the app's MAIN panel (normal chat view)
     fireEvent.click(screen.getByTestId('run-view-open-chat-mode'));
-    await waitFor(() => expect(screen.getByTestId('benchmark-agent-view')).toBeInTheDocument());
-    await waitFor(() =>
-      // MarkdownText animates in chunks — assert on the container's text.
-      expect(screen.getByTestId('agent-messages').textContent).toContain(
-        'hello from the benchmark agent',
-      ),
-    );
+    expect(onOpenAgent).toHaveBeenCalledWith('agent-root-1');
 
-    // fan-out tree present; click sub-agent → its transcript loads
-    expect(screen.getByTestId('agent-tree')).toBeInTheDocument();
-    fireEvent.click(screen.getByTestId('tree-node-agent-sub-1'));
-    await waitFor(() =>
-      expect(screen.getByTestId('agent-messages').textContent).toContain('sub-agent findings'),
-    );
-
-    // back returns to the RUN VIEW it came from, then back again to the hub
-    fireEvent.click(screen.getByTestId('agent-back'));
-    await waitFor(() => expect(screen.getByTestId('benchmark-run-view')).toBeInTheDocument());
+    // back returns to the hub
     fireEvent.click(screen.getByTestId('run-back'));
     await waitFor(() => expect(screen.getByTestId('benchmarks-view')).toBeInTheDocument());
   });
@@ -511,45 +497,5 @@ describe('BenchmarksView edge states', () => {
     fireEvent.click(screen.getByTestId('run-selected'));
     await waitFor(() => expect(screen.getByTestId('dispatch-error')).toBeInTheDocument());
     expect(screen.getByTestId('dispatch-error').textContent).toContain('dispatch exploded');
-  });
-
-  it('agent view fetch failure shows error and retry re-fetches (E6)', async () => {
-    mockWith({ runs: RUNS, agentStatus: 500 });
-    renderWithProviders(<BenchmarksView />);
-    await waitFor(() => expect(screen.getByTestId('run-row-run-abc')).toBeInTheDocument());
-    fireEvent.click(screen.getByTestId('run-row-run-abc'));
-    await waitFor(() => expect(screen.getByTestId('run-view-open-chat-mode')).toBeInTheDocument());
-    fireEvent.click(screen.getByTestId('run-view-open-chat-mode'));
-    await waitFor(() => expect(screen.getByTestId('benchmark-agent-view')).toBeInTheDocument());
-    await waitFor(() => expect(screen.getByText(/retry/i)).toBeInTheDocument());
-    const callsBefore = capturedRequests.length;
-    fireEvent.click(screen.getByText(/retry/i));
-    await waitFor(() => {
-      // retry triggered a new fetch attempt (still failing is fine — the loop works)
-      expect(fetchSpy.mock.calls.length).toBeGreaterThan(0);
-      expect(screen.getByText(/retry/i)).toBeInTheDocument();
-    });
-    void callsBefore;
-  });
-
-  it('renders the no-transcript placeholder for an agent with zero messages (E7)', async () => {
-    window.localStorage.setItem('rose-session', JSON.stringify(SESSION));
-    fetchSpy = vi.spyOn(global, 'fetch').mockImplementation(async (input: FetchInput) => {
-      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-      if (url.includes('/benchmarks/tasks')) return jsonResponse(CATALOG);
-      if (url.includes('/benchmarks/run-requests')) return jsonResponse(REQUESTS);
-      if (url.includes('/agents/')) {
-        return jsonResponse({ ...AGENT_VIEW, messages: [], tree: [] });
-      }
-      const detailMatch = url.match(/\/benchmarks\/runs\/([^/?]+)$/);
-      if (detailMatch) return jsonResponse({ run: toDetail(RUNS.runs[0]) });
-      if (url.includes('/benchmarks/runs')) return jsonResponse(RUNS);
-      return new Response('{}', { status: 404 });
-    });
-    renderWithProviders(<BenchmarksView />);
-    await waitFor(() => expect(screen.getByTestId('run-row-run-abc')).toBeInTheDocument());
-    fireEvent.click(screen.getByTestId('run-row-run-abc'));
-    fireEvent.click(await screen.findByTestId('run-view-open-chat-mode'));
-    await waitFor(() => expect(screen.getByText(/No transcript captured/i)).toBeInTheDocument());
   });
 });

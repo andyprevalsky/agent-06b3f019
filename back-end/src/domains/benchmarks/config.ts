@@ -22,17 +22,6 @@ export function readTasksFile(): unknown {
   return JSON.parse(fs.readFileSync(TASKS_PATH, 'utf-8'));
 }
 
-/**
- * Benchmark Hub access: the hub reads/edits the eval catalog and dispatches
- * runs, so it is gated to the internal team allowlist (mirrors the front-end
- * ADMIN_USER_IDS in features/terminal-component-group/config.ts) plus the
- * internal API key (isInternal) used by the uploader/poller.
- */
-export const BENCHMARK_HUB_ADMIN_USER_IDS = new Set([
-  '1f85ff25-6e29-4c1b-8739-f917bd101a30', // Andy Prevalsky
-  '43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9', // Tamara Chayo
-]);
-
 /** Absolute path to the committed per-attempt history ledger. */
 export const TASK_ATTEMPTS_PATH = path.join(
   __dirname,

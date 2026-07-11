@@ -357,6 +357,50 @@ async function testRuns_uploadListDetailAgentRoundTrip(): Promise<void> {
   }
 }
 
+async function testAgents_mainPanelFallbackServesBenchmarkAgents(): Promise<void> {
+  try {
+    const upload = await request(`${BASE_URL}/api/benchmarks/runs`, {
+      method: 'POST',
+      headers: internalHeaders,
+      body: JSON.stringify(syntheticBundle()),
+    });
+    assertStatus(upload.status, 201, upload.data);
+
+    // normal agent detail route serves the archived benchmark agent
+    const detail = await request(`${BASE_URL}/api/agents/${ROOT_AGENT}`, {
+      headers: internalHeaders,
+    });
+    assertStatus(detail.status, 200, detail.data);
+    const agentData = detail.data as {
+      agent: { agent_id: string; busId?: string };
+      messages: Array<{ text: string }>;
+    };
+    assert(agentData.agent.agent_id === ROOT_AGENT, 'fallback agent id mismatch');
+    assert(agentData.messages.length === 2, 'fallback messages missing');
+
+    // normal tree route serves the fan-out (root + sub-agent)
+    const tree = await request(`${BASE_URL}/api/agents/tree?busId=${ROOT_AGENT}`, {
+      headers: internalHeaders,
+    });
+    assertStatus(tree.status, 200, tree.data);
+    const ids = (tree.data as { agents: Array<{ agent_id: string }> }).agents.map(
+      (a) => a.agent_id
+    );
+    assert(ids.includes(ROOT_AGENT) && ids.includes(SUB_AGENT), `tree fallback wrong: ${ids}`);
+
+    // sub-agent transcript through the normal route too
+    const sub = await request(`${BASE_URL}/api/agents/${SUB_AGENT}`, {
+      headers: internalHeaders,
+    });
+    assertStatus(sub.status, 200, sub.data);
+  } finally {
+    await request(`${BASE_URL}/api/benchmarks/runs/${RUN_ID}`, {
+      method: 'DELETE',
+      headers: internalHeaders,
+    });
+  }
+}
+
 async function testRuns_uploadRequiresRunId(): Promise<void> {
   const res = await request(`${BASE_URL}/api/benchmarks/runs`, {
     method: 'POST',
@@ -374,10 +418,20 @@ async function testRunRequests_lifecycle(): Promise<void> {
     body: JSON.stringify({ task_names: ['chat-mode'] }),
   });
   assertStatus(created.status, 201, created.data);
-  const id = (created.data as { request: { id: string; status: string } }).request.id;
+  const createdRequest = (created.data as { request: { id: string; status: string; runId: string | null } })
+    .request;
+  const id = createdRequest.id;
+  assert(createdRequest.status === 'queued', 'new request not queued');
+  // INVARIANT: dispatched runs always link to a run dashboard immediately.
+  assert(createdRequest.runId === `hub-${id}`, `dispatch not linked: ${createdRequest.runId}`);
+  const placeholder = await request(`${BASE_URL}/api/benchmarks/runs/hub-${id}`, {
+    headers: internalHeaders,
+  });
+  assertStatus(placeholder.status, 200, placeholder.data);
   assert(
-    (created.data as { request: { status: string } }).request.status === 'queued',
-    'new request not queued'
+    (placeholder.data as { run: { live: boolean; tasks: Array<{ status: string }> } }).run.tasks[0]
+      .status === 'queued',
+    'placeholder run not queued'
   );
 
   // visible in queue view
@@ -428,6 +482,10 @@ async function testRunRequests_lifecycle(): Promise<void> {
       'completed',
     'complete did not transition'
   );
+  await request(`${BASE_URL}/api/benchmarks/runs/hub-${id}`, {
+    method: 'DELETE',
+    headers: internalHeaders,
+  });
 }
 
 async function testRunRequests_cancelOnlyFromQueued(): Promise<void> {
@@ -445,6 +503,11 @@ async function testRunRequests_cancelOnlyFromQueued(): Promise<void> {
     body: JSON.stringify({ action: 'cancel' }),
   });
   assertStatus(cancel.status, 200, cancel.data);
+  // the placeholder dashboard is removed with the cancellation
+  const gone = await request(`${BASE_URL}/api/benchmarks/runs/hub-${id}`, {
+    headers: internalHeaders,
+  });
+  assertStatus(gone.status, 404, gone.data);
 
   // cancelling again (now cancelled, not queued) → 409
   const again = await request(`${BASE_URL}/api/benchmarks/run-requests/${id}`, {
@@ -500,6 +563,10 @@ async function runAll(): Promise<void> {
     ['patch: unknown task 404', testPatch_unknownTask404],
     ['runs: upload→list→detail→agents round-trip', testRuns_uploadListDetailAgentRoundTrip],
     ['runs: upload requires run_id', testRuns_uploadRequiresRunId],
+    [
+      'agents API fallback: benchmark agents open in the main panel',
+      testAgents_mainPanelFallbackServesBenchmarkAgents,
+    ],
     ['run-requests: full lifecycle + double-claim', testRunRequests_lifecycle],
     ['run-requests: cancel only from queued', testRunRequests_cancelOnlyFromQueued],
     ['run-requests: unknown task rejected', testRunRequests_unknownTaskRejected],
