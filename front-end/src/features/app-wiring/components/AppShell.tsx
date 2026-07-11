@@ -14,6 +14,9 @@
  *   +--> "/research/:slug" --> <ResearchBlogPost />
  *   +--> "/download" --> <Download />
  *   +--> "*" --> <NotFound />
+ *
+ * WaitlistGate overlays every route: authenticated users without a redeemed
+ * invite code see "You're On The Waitlist!" instead of being fully signed in.
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -23,6 +26,7 @@ import { Analytics } from '@vercel/analytics/react';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { AppDataProvider } from '@/hooks/useAppData';
 import ErrorBoundary from '@/components/ErrorBoundary';
+import { WaitlistGate } from '@/features/auth';
 
 import { ROUTE_TABLE } from '../config';
 
@@ -36,6 +40,7 @@ const AppShell = () => (
           <SpeedInsights />
           <Analytics />
           <BrowserRouter>
+            <WaitlistGate />
             <Routes>
               {ROUTE_TABLE.map(({ path, component: Page }) => (
                 <Route key={path} path={path} element={<Page />} />

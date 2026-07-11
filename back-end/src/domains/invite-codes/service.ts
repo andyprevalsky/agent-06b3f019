@@ -11,6 +11,7 @@ import {
 import type { MyCodeResponse, UseCodeResponse, CheckResponse } from './types';
 import * as repo from './repo';
 import { createInitialCredit } from '../../providers/credits';
+import { registerGatedUser } from '../../providers/inviteGate';
 
 // ---------------------------------------------------------------------------
 // Error classes
@@ -144,8 +145,9 @@ export async function useCode(userId: string, inviteCode: number): Promise<UseCo
 /**
  * Check if the current user needs to enter an invite code.
  * Also creates user record and initializes credit on first call (OTP verification).
+ * Gated users are recorded on the waitlist (phone-based entry) so they can be invited later.
  */
-export async function checkInviteCode(userId: string): Promise<CheckResponse> {
+export async function checkInviteCode(userId: string, phone?: string): Promise<CheckResponse> {
   const user = await repo.findOrCreateUser(userId);
 
   // Initialize credit only for newly created users
@@ -153,7 +155,11 @@ export async function checkInviteCode(userId: string): Promise<CheckResponse> {
     await createInitialCredit(userId);
   }
 
-  return {
-    needsInviteCode: false, // PUBLIC BETA - was: user.usedInviteCode === null
-  };
+  const needsInviteCode = user.usedInviteCode === null;
+
+  if (needsInviteCode && phone !== undefined && phone !== '') {
+    await registerGatedUser({ userId, phone });
+  }
+
+  return { needsInviteCode };
 }

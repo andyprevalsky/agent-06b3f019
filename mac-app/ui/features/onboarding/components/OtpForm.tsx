@@ -1,4 +1,5 @@
 import { ArrowRight } from 'lucide-react';
+import { formatE164Display } from '@/lib/phone';
 import { RoseLogo, ErrorBanner, fontFamily } from './OnboardingAuthShared';
 
 interface OtpFormProps {
@@ -108,7 +109,7 @@ export const OtpForm = ({
       <RoseLogo />
       <h1 className="text-2xl font-semibold text-foreground mt-4 mb-1">Verify your number</h1>
       <p className="text-muted-foreground mb-8" style={{ fontSize: '15px' }}>
-        We sent a code to {phone}
+        We sent a code to {formatE164Display(phone)}
       </p>
       <ErrorBanner error={error} />
       <form onSubmit={onSubmit} className="space-y-3">

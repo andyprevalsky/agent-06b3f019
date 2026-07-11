@@ -4,9 +4,10 @@
  *   [auth] ─(onComplete)─> [customization] ─(onComplete)─> [data] ─(onComplete)─> [shortcut]
  *                                                                                         │
  *                                                                                         v
- *                                             [payment] <─(onGetStarted)─── [welcome]
+ *                                             [waitlist] <─(onGetStarted)─── [welcome]
  *                                                │
- *                                                └─(onComplete)─> parent onComplete()
+ *                                                └─(invite code redeemed / already
+ *                                                   invited)─> parent onComplete()
  *
  *   Back button: goes one step back in navSteps. If target is [auth], signOut() first.
  */
@@ -19,7 +20,7 @@ import OnboardingCustomization from './OnboardingCustomization';
 import OnboardingData from './OnboardingData';
 import OnboardingShortcut from './OnboardingShortcut';
 import OnboardingWelcome from './OnboardingWelcome';
-import OnboardingPayment from './OnboardingPayment';
+import OnboardingWaitlist from './OnboardingWaitlist';
 import { ROSE_GRADIENT } from '../config';
 import type { OnboardingStep } from '../types';
 
@@ -59,10 +60,10 @@ const Onboarding = ({
   skipAuth = false,
 }: OnboardingProps): JSX.Element => {
   const navSteps: OnboardingStep[] = skipAuth
-    ? ['customization', 'data', 'shortcut', 'welcome', 'payment']
-    : ['auth', 'customization', 'data', 'shortcut', 'welcome', 'payment'];
+    ? ['customization', 'data', 'shortcut', 'welcome', 'waitlist']
+    : ['auth', 'customization', 'data', 'shortcut', 'welcome', 'waitlist'];
 
-  const dotSteps: OnboardingStep[] = ['customization', 'data', 'shortcut', 'welcome', 'payment'];
+  const dotSteps: OnboardingStep[] = ['customization', 'data', 'shortcut', 'welcome', 'waitlist'];
 
   const [currentStep, setCurrentStep] = useState<OnboardingStep>(navSteps[0]);
 
@@ -91,14 +92,14 @@ const Onboarding = ({
   };
 
   const currentIndex = navSteps.indexOf(currentStep);
-  const canGoBack = currentIndex > 0 && currentStep !== 'payment';
+  const canGoBack = currentIndex > 0 && currentStep !== 'waitlist';
 
   const handleGetStarted = (): void => {
     goToNext();
   };
 
   const showDots = currentStep !== 'auth';
-  const showFooter = currentStep !== 'welcome' && currentStep !== 'payment';
+  const showFooter = currentStep !== 'welcome' && currentStep !== 'waitlist';
 
   return (
     <div className="min-h-screen bg-background flex flex-col">
@@ -121,7 +122,7 @@ const Onboarding = ({
         {currentStep === 'data' ? <OnboardingData onComplete={goToNext} /> : null}
         {currentStep === 'shortcut' ? <OnboardingShortcut onComplete={goToNext} /> : null}
         {currentStep === 'welcome' ? <OnboardingWelcome onGetStarted={handleGetStarted} /> : null}
-        {currentStep === 'payment' ? <OnboardingPayment onComplete={onComplete} /> : null}
+        {currentStep === 'waitlist' ? <OnboardingWaitlist onComplete={onComplete} /> : null}
       </div>
 
       {showFooter ? (

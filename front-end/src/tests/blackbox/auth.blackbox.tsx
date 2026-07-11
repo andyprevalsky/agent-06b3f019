@@ -203,16 +203,8 @@ describe('PhoneAuthModal', () => {
     expect(continueBtn).toBeDisabled();
   });
 
-  it('formats phone number as user types (US format)', async () => {
-    const user = userEvent.setup();
-    renderWithProviders(<PhoneAuthModal open={true} onOpenChange={onOpenChange} />);
-
-    const phoneInput = screen.getByLabelText('Phone Number');
-    await user.type(phoneInput, '9729777432');
-
-    // Should be formatted as +1 (972)-977-7432
-    expect(phoneInput).toHaveValue('+1 (972)-977-7432');
-  });
+  // Phone formatting + country-selector behavior is covered in
+  // phone-input.blackbox.tsx (PhoneInput component tests).
 
   it('enables Continue button after entering a phone number', async () => {
     const user = userEvent.setup();
@@ -549,18 +541,6 @@ describe('PhoneAuthModal', () => {
       expect(screen.getByRole('button', { name: /verify/i })).toBeEnabled();
     });
     expect(screen.getByText('Verify Code')).toBeInTheDocument();
-  });
-
-  // -- Phone formatting edge cases --
-
-  it('formats phone with country code prefix (starting with 1)', async () => {
-    const user = userEvent.setup();
-    renderWithProviders(<PhoneAuthModal open={true} onOpenChange={onOpenChange} />);
-
-    const phoneInput = screen.getByLabelText('Phone Number');
-    await user.type(phoneInput, '19729777432');
-
-    expect(phoneInput).toHaveValue('+1 (972)-977-7432');
   });
 
   it('strips non-digit characters from OTP input', async () => {

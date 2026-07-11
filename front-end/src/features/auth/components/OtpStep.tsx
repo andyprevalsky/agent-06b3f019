@@ -12,6 +12,8 @@
 
 import { X } from 'lucide-react';
 
+import { formatE164Display } from '@/lib/phone';
+
 import type { OtpStepProps } from '../types';
 
 import AuthLogo from './AuthLogo';
@@ -46,7 +48,7 @@ function OtpStep({
 
       <div className="mb-6">
         <h2 className="text-2xl font-semibold text-navi-black">Verify Code</h2>
-        <p className="text-xl text-gray-400 mt-1">Code sent to {phone}</p>
+        <p className="text-xl text-gray-400 mt-1">Code sent to {formatE164Display(phone)}</p>
       </div>
 
       <div className="space-y-4">
