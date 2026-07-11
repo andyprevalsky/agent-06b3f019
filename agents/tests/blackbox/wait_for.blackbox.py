@@ -282,6 +282,24 @@ async def test_handler_condition_without_description_yields_error():
     assert "description" in events[0].message
 
 
+async def test_handler_condition_rejects_description_outside_schema_bounds():
+    """Raw handler calls enforce the schema's 3-80 character display-copy bounds."""
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import MessageStatus
+
+    for description in ("ab", "x" * 81):
+        events = await _collect(
+            WaitForManager().execute_tool(
+                workflow_instance=_WFInstance(),
+                tool_call={"condition": "the deploy is ready", "description": description},
+                tool_call_id="tc",
+            )
+        )
+        assert len(events) == 1
+        assert events[0].status == MessageStatus.ERROR
+        assert "description" in events[0].message
+
+
 async def test_handler_timestamp_invalid_format():
     """Invalid timestamp format -> ERROR."""
     from domains.wait_for.handler import WaitForManager
@@ -568,6 +586,10 @@ async def run_all_tests():
     await r.record_async(
         "handler_condition_requires_description",
         test_handler_condition_without_description_yields_error,
+    )
+    await r.record_async(
+        "handler_condition_description_bounds",
+        test_handler_condition_rejects_description_outside_schema_bounds,
     )
     await r.record_async("handler_ts_invalid", test_handler_timestamp_invalid_format)
     await r.record_async("handler_ts_past", test_handler_timestamp_in_past)

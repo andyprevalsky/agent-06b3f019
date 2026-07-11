@@ -51,7 +51,7 @@ class WaitForManager(ToolManager):
             async for event in self._timestamp_mode(workflow_instance, until_timestamp, tool_call_id):
                 yield event
         elif condition:
-            if not description:
+            if not isinstance(description, str) or not 3 <= len(description) <= 80:
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
                     title="wait_for failed",
