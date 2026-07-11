@@ -49,30 +49,36 @@ async def _run_single_iteration(
         return "Verifier prompt"
 
     async def mock_post_message(text, role, metadata=None):
-        posted_messages.append({
-            "text": text,
-            "role": role,
-            "metadata": metadata,
-        })
+        posted_messages.append(
+            {
+                "text": text,
+                "role": role,
+                "metadata": metadata,
+            }
+        )
 
     default_execute_tool = execute_tool_override
 
     async def default_mock_execute_tool(tool_name, tool_args, tool_call_id):
-        executed_tools.append({
-            "tool_name": tool_name,
-            "tool_args": tool_args,
-            "tool_call_id": tool_call_id,
-        })
+        executed_tools.append(
+            {
+                "tool_name": tool_name,
+                "tool_args": tool_args,
+                "tool_call_id": tool_call_id,
+            }
+        )
         # Simulate production tool handlers which persist a FINISHED TOOL row to DB.
-        posted_messages.append({
-            "text": f"{tool_name} complete",
-            "role": "TOOL",
-            "metadata": {
-                "toolCallId": tool_call_id,
-                "toolName": tool_name,
-                "toolStatus": "FINISHED",
-            },
-        })
+        posted_messages.append(
+            {
+                "text": f"{tool_name} complete",
+                "role": "TOOL",
+                "metadata": {
+                    "toolCallId": tool_call_id,
+                    "toolName": tool_name,
+                    "toolStatus": "FINISHED",
+                },
+            }
+        )
         return {"message": f"{tool_name} complete"}
 
     if default_execute_tool is None:
@@ -93,9 +99,11 @@ async def _run_single_iteration(
             "usage": {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11},
         }
 
-    ctx = initial_context if initial_context is not None else [
-        {"role": "USER", "text": "Find updates", "timestamp": "2024-01-01T00:00:00Z"}
-    ]
+    ctx = (
+        initial_context
+        if initial_context is not None
+        else [{"role": "USER", "text": "Find updates", "timestamp": "2024-01-01T00:00:00Z"}]
+    )
 
     with (
         patch(
@@ -220,31 +228,35 @@ async def test_general_purpose_agent_executes_after_explore_results():
     ]
     for idx, city in enumerate(("Austin", "Denver", "Lisbon"), start=1):
         tool_call_id = f"explore-{idx}"
-        initial_context.append({
-            "role": "ASSISTANT",
-            "text": "",
-            "timestamp": f"2024-01-01T00:00:0{idx}Z",
-            "metadata": {
-                "tool_calls": [
-                    {
-                        "tool": "spawn_agent",
-                        "tool_call_id": tool_call_id,
-                        "type": "explore",
-                        "goal": f"Research {city}",
-                    }
-                ]
-            },
-        })
-        initial_context.append({
-            "role": "TOOL",
-            "text": f"{city} research complete",
-            "timestamp": f"2024-01-01T00:00:1{idx}Z",
-            "metadata": {
-                "toolCallId": tool_call_id,
-                "toolName": "spawn_agent",
-                "toolStatus": "FINISHED",
-            },
-        })
+        initial_context.append(
+            {
+                "role": "ASSISTANT",
+                "text": "",
+                "timestamp": f"2024-01-01T00:00:0{idx}Z",
+                "metadata": {
+                    "tool_calls": [
+                        {
+                            "tool": "spawn_agent",
+                            "tool_call_id": tool_call_id,
+                            "type": "explore",
+                            "goal": f"Research {city}",
+                        }
+                    ]
+                },
+            }
+        )
+        initial_context.append(
+            {
+                "role": "TOOL",
+                "text": f"{city} research complete",
+                "timestamp": f"2024-01-01T00:00:1{idx}Z",
+                "metadata": {
+                    "toolCallId": tool_call_id,
+                    "toolName": "spawn_agent",
+                    "toolStatus": "FINISHED",
+                },
+            }
+        )
 
     tool_calls = [
         {
@@ -268,10 +280,7 @@ async def test_general_purpose_agent_executes_after_explore_results():
     assert len(executed) == 1
     assert executed[0]["tool_name"] == "spawn_agent"
     assert executed[0]["tool_call_id"] == "tc-general-synthesis"
-    tool_errors = [
-        m for m in posted
-        if m["role"] == "TOOL" and (m["metadata"] or {}).get("toolStatus") == "ERROR"
-    ]
+    tool_errors = [m for m in posted if m["role"] == "TOOL" and (m["metadata"] or {}).get("toolStatus") == "ERROR"]
     assert tool_errors == []
 
 
@@ -483,9 +492,7 @@ async def test_verifier_below_threshold_adds_feedback_and_loops():
     # Final verifier ran and recorded progress
     assert result.get("verifier_progress") == 0.5
     assert "not quite" in (result.get("verifier_reasoning") or "")
-    assert completion_calls == [
-        ("attempt_completion", {"_verification_pending": True}, "tc-ac-1")
-    ]
+    assert completion_calls == [("attempt_completion", {"_verification_pending": True}, "tc-ac-1")]
 
 
 async def test_verifier_score_1_returns_completed():
@@ -512,9 +519,7 @@ async def test_verifier_score_1_returns_completed():
     assert result["status"] == "completed"
     assert result["score"] == 1.0
     assert result["message"] == "perfect"
-    assert completion_calls == [
-        ("attempt_completion", {"_verification_pending": True}, "tc-ac-1")
-    ]
+    assert completion_calls == [("attempt_completion", {"_verification_pending": True}, "tc-ac-1")]
 
     # Orphan-tool guard: the returned context must contain a FINISHED tool_result
     # row for the attempt_completion tool_call_id. Without this, downstream LLM
@@ -522,7 +527,8 @@ async def test_verifier_score_1_returns_completed():
     # without a paired function_call_output and 400 on the Codex Responses API.
     returned_ctx = result["context"]
     finished_for_tc = [
-        msg for msg in returned_ctx
+        msg
+        for msg in returned_ctx
         if msg.get("role") == "TOOL"
         and (msg.get("metadata") or {}).get("toolCallId") == "tc-ac-1"
         and (msg.get("metadata") or {}).get("toolStatus") == "FINISHED"
@@ -656,15 +662,17 @@ async def test_run_agent_reuses_rotated_compute_token_next_iteration():
         posted_messages.append({"text": text, "role": role, "metadata": metadata})
 
     async def execute_tool(tool_name, tool_args, tool_call_id):
-        posted_messages.append({
-            "text": f"{tool_name} complete",
-            "role": "TOOL",
-            "metadata": {
-                "toolCallId": tool_call_id,
-                "toolName": tool_name,
-                "toolStatus": "FINISHED",
-            },
-        })
+        posted_messages.append(
+            {
+                "text": f"{tool_name} complete",
+                "role": "TOOL",
+                "metadata": {
+                    "toolCallId": tool_call_id,
+                    "toolName": tool_name,
+                    "toolStatus": "FINISHED",
+                },
+            }
+        )
         return {"message": f"{tool_name} complete"}
 
     async def mock_call_llm_structured_streaming(**kwargs):
@@ -705,9 +713,7 @@ async def test_run_agent_reuses_rotated_compute_token_next_iteration():
             verifier_prompt_generator=verifier_prompt,
             model="rose-labs/rose-1-lite",
             tools=["web_search", "attempt_completion"],
-            initial_context=[
-                {"role": "USER", "text": "Find updates", "timestamp": "2024-01-01T00:00:00Z"}
-            ],
+            initial_context=[{"role": "USER", "text": "Find updates", "timestamp": "2024-01-01T00:00:00Z"}],
             is_inside_temporal_activity=True,
             post_message=post_message,
             execute_tool=execute_tool,
@@ -776,9 +782,7 @@ async def test_fast_cache_position_retries_same_step_after_llm_failure():
             verifier_prompt_generator=verifier_prompt,
             model="rose-labs/rose-1-lite",
             tools=["attempt_completion"],
-            initial_context=[
-                {"role": "USER", "text": "Find updates", "timestamp": "2024-01-01T00:00:00Z"}
-            ],
+            initial_context=[{"role": "USER", "text": "Find updates", "timestamp": "2024-01-01T00:00:00Z"}],
             is_inside_temporal_activity=True,
             post_message=post_message,
             execute_tool=AsyncMock(),
@@ -835,9 +839,7 @@ async def test_run_agent_refusal_retry_excludes_anthropic_without_backoff():
             verifier_prompt_generator=verifier_prompt,
             model="rose-labs/rose-1-lite",
             tools=["attempt_completion"],
-            initial_context=[
-                {"role": "USER", "text": "Find updates", "timestamp": "2024-01-01T00:00:00Z"}
-            ],
+            initial_context=[{"role": "USER", "text": "Find updates", "timestamp": "2024-01-01T00:00:00Z"}],
             is_inside_temporal_activity=True,
             post_message=post_message,
             execute_tool=AsyncMock(),
@@ -875,6 +877,19 @@ def test_is_refusal_error_detects_type_message_and_cause_chain():
     benign = ValueError("deadline exceeded")
     benign.__context__ = benign
     assert _is_refusal_error(benign) is False
+
+
+def test_error_chain_has_type_detects_temporal_application_error():
+    """Workflow boundaries can identify a typed ApplicationError through its wrapper."""
+    from utils.error_utils import error_chain_has_type
+
+    application_error = RuntimeError("structured output invalid")
+    application_error.type = "LLMStructuredOutputError"
+    activity_error = RuntimeError("Activity task failed")
+    activity_error.cause = application_error
+
+    assert error_chain_has_type(activity_error, "LLMStructuredOutputError") is True
+    assert error_chain_has_type(activity_error, "RoseRefusalError") is False
 
 
 async def test_compress_context_failure_preserves_original():
@@ -920,9 +935,7 @@ async def test_run_agent_errors_when_compaction_still_over_trigger():
     async def fail_llm(**kwargs):
         raise AssertionError("LLM should not be called after ineffective compaction")
 
-    initial_context = [
-        {"role": "USER", "text": "x" * 400, "timestamp": "2024-01-01T00:00:00Z"}
-    ]
+    initial_context = [{"role": "USER", "text": "x" * 400, "timestamp": "2024-01-01T00:00:00Z"}]
 
     with (
         patch.object(run_mod, "EFFECTIVE_OUTPUT_RESERVATION", 0),
@@ -1055,11 +1068,7 @@ async def test_max_iterations_runs_final_verifier():
 
 
 def _count_winddown_msgs(context):
-    return sum(
-        1
-        for m in context
-        if m.get("role") == "SYSTEM" and "final turn" in (m.get("text") or "")
-    )
+    return sum(1 for m in context if m.get("role") == "SYSTEM" and "final turn" in (m.get("text") or ""))
 
 
 async def test_winddown_injects_one_message_near_cap():
@@ -1184,27 +1193,60 @@ async def test_paused_agent_does_not_busy_spin_and_yields_to_cold_handler():
 async def run_all_tests():
     print("run-agent blackbox tests:")
     r = BlackboxResult()
-    await r.record_async("tool_only_assistant_turn_persists_tool_calls", test_tool_only_assistant_turn_persists_tool_calls)
+    await r.record_async(
+        "tool_only_assistant_turn_persists_tool_calls", test_tool_only_assistant_turn_persists_tool_calls
+    )
     await r.record_async(
         "same_llm_turn_spawn_agents_share_spawn_group_id",
         test_same_llm_turn_spawn_agents_share_spawn_group_id_without_persisting_arg,
     )
-    await r.record_async("assistant_tool_call_ids_match_execution_and_context_results", test_assistant_tool_call_ids_match_execution_and_context_results)
-    await r.record_async("general_purpose_agent_executes_after_explore_results", test_general_purpose_agent_executes_after_explore_results)
-    await r.record_async("attempt_completion_skip_verification_returns_completed", test_attempt_completion_skip_verification_returns_completed)
-    await r.record_async("attempt_completion_result_used_when_skip_verification", test_attempt_completion_result_used_when_skip_verification)
-    await r.record_async("attempt_completion_plan_loop_requires_set_plan", test_attempt_completion_plan_loop_requires_set_plan)
-    await r.record_async("plan_loop_completes_when_set_plan_then_attempt_completion", test_plan_loop_completes_when_set_plan_then_attempt_completion)
-    await r.record_async("no_tool_calls_nudges_then_errors_after_3_consecutive", test_no_tool_calls_nudges_then_errors_after_3_consecutive)
-    await r.record_async("tool_exception_continues_loop_and_posts_error", test_tool_exception_continues_loop_and_posts_error)
+    await r.record_async(
+        "assistant_tool_call_ids_match_execution_and_context_results",
+        test_assistant_tool_call_ids_match_execution_and_context_results,
+    )
+    await r.record_async(
+        "general_purpose_agent_executes_after_explore_results",
+        test_general_purpose_agent_executes_after_explore_results,
+    )
+    await r.record_async(
+        "attempt_completion_skip_verification_returns_completed",
+        test_attempt_completion_skip_verification_returns_completed,
+    )
+    await r.record_async(
+        "attempt_completion_result_used_when_skip_verification",
+        test_attempt_completion_result_used_when_skip_verification,
+    )
+    await r.record_async(
+        "attempt_completion_plan_loop_requires_set_plan", test_attempt_completion_plan_loop_requires_set_plan
+    )
+    await r.record_async(
+        "plan_loop_completes_when_set_plan_then_attempt_completion",
+        test_plan_loop_completes_when_set_plan_then_attempt_completion,
+    )
+    await r.record_async(
+        "no_tool_calls_nudges_then_errors_after_3_consecutive",
+        test_no_tool_calls_nudges_then_errors_after_3_consecutive,
+    )
+    await r.record_async(
+        "tool_exception_continues_loop_and_posts_error", test_tool_exception_continues_loop_and_posts_error
+    )
     await r.record_async("status_needs_user_help_returned_from_tool", test_status_needs_user_help_returned_from_tool)
     await r.record_async("status_completed_from_tool", test_status_completed_from_tool)
-    await r.record_async("verifier_below_threshold_adds_feedback_and_loops", test_verifier_below_threshold_adds_feedback_and_loops)
+    await r.record_async(
+        "verifier_below_threshold_adds_feedback_and_loops", test_verifier_below_threshold_adds_feedback_and_loops
+    )
     await r.record_async("verifier_score_1_returns_completed", test_verifier_score_1_returns_completed)
     await r.record_async("estimate_tokens", test_estimate_tokens)
-    await r.record_async("compress_context_returns_new_context_on_success", test_compress_context_returns_new_context_on_success)
-    await r.record_async("compress_context_forwards_compute_token_context", test_compress_context_forwards_compute_token_context)
-    await r.record_async("run_agent_reuses_rotated_compute_token_next_iteration", test_run_agent_reuses_rotated_compute_token_next_iteration)
+    await r.record_async(
+        "compress_context_returns_new_context_on_success", test_compress_context_returns_new_context_on_success
+    )
+    await r.record_async(
+        "compress_context_forwards_compute_token_context", test_compress_context_forwards_compute_token_context
+    )
+    await r.record_async(
+        "run_agent_reuses_rotated_compute_token_next_iteration",
+        test_run_agent_reuses_rotated_compute_token_next_iteration,
+    )
     await r.record_async(
         "fast_cache_position_retries_same_step_after_llm_failure",
         test_fast_cache_position_retries_same_step_after_llm_failure,
@@ -1214,13 +1256,24 @@ async def run_all_tests():
         test_run_agent_refusal_retry_excludes_anthropic_without_backoff,
     )
     r.record("is_refusal_error_type_message_cause_chain", test_is_refusal_error_detects_type_message_and_cause_chain)
-    await r.record_async("compress_context_failure_preserves_original", test_compress_context_failure_preserves_original)
-    await r.record_async("compress_context_activity_exception_preserves_original", test_compress_context_activity_exception_preserves_original)
+    r.record(
+        "error_chain_has_type_temporal_application_error",
+        test_error_chain_has_type_detects_temporal_application_error,
+    )
+    await r.record_async(
+        "compress_context_failure_preserves_original", test_compress_context_failure_preserves_original
+    )
+    await r.record_async(
+        "compress_context_activity_exception_preserves_original",
+        test_compress_context_activity_exception_preserves_original,
+    )
     await r.record_async(
         "run_agent_errors_when_compaction_still_over_trigger",
         test_run_agent_errors_when_compaction_still_over_trigger,
     )
-    await r.record_async("run_verifier_posts_in_progress_and_finished", test_run_verifier_posts_in_progress_and_finished)
+    await r.record_async(
+        "run_verifier_posts_in_progress_and_finished", test_run_verifier_posts_in_progress_and_finished
+    )
     await r.record_async("run_verifier_dynamic_schema_getter", test_run_verifier_dynamic_schema_getter)
     await r.record_async("max_iterations_runs_final_verifier", test_max_iterations_runs_final_verifier)
     await r.record_async("winddown_injects_one_message_near_cap", test_winddown_injects_one_message_near_cap)

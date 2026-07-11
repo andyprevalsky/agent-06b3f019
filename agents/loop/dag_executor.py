@@ -29,11 +29,15 @@ from helpers.llm import _pending_llm_context, call_llm_activity
 from loop.context_utils import poll_and_update_context
 from loop.payload_guard import check_activity_payload
 from tools.base import EventType, MessageStatus, ToolEvent
+from utils.error_utils import error_chain_has_type
 from utils.llm_timeouts import STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
 from utils.prompts import CONTEXT_POINTERS_RULE
 from utils.tool_call_ids import spawn_group_id
 
 logger = structlog.get_logger()
+
+STRUCTURED_OUTPUT_ERROR_TYPE = "LLMStructuredOutputError"
+STRUCTURED_OUTPUT_MAX_ATTEMPTS = 2
 
 DAG_REASONING_UI_TOOL_NAME = "thought"
 DAG_REASONING_IN_PROGRESS_TITLE = "Thinking"
@@ -340,8 +344,7 @@ class TaskDAG:
         for i, task_data in enumerate(raw_tasks):
             if isinstance(task_data, str):
                 raise ValueError(
-                    f"Plan task {i} must be an object with explicit goal and tool_name; "
-                    "string tasks are not supported"
+                    f"Plan task {i} must be an object with explicit goal and tool_name; string tasks are not supported"
                 )
             if not isinstance(task_data, dict):
                 raise ValueError(f"Plan task {i} must be an object, got {type(task_data).__name__}")
@@ -924,43 +927,55 @@ async def _execute_single_task(
             # emit send_message instead of the planned tool — which fails the
             # required_tool check and silently kills the DAG node (e.g. a for_each
             # that never fans out). A single-tool union forces the right call.
-            llm_result = await execute_activity(
-                call_llm_activity,
-                args=[
-                    agent_id,
-                    model,
-                    [actual_tool],
-                    256,
-                    agent_id,
-                    None,
-                    None,
-                    claude_token,
-                    "dag_param_populator",
-                    system_prompt_text,
-                    extra_msg,
-                    actual_tool,
-                    True,
-                    "",
-                    claude_token_source,
-                    claude_token_pool_id,
-                    user_id,
-                    gpt_token,
-                    gpt_account_id,
-                    gpt_token_source,
-                    gpt_token_pool_id,
-                    user_id,
-                    None,
-                    None,
-                    user_id,
-                    # Fast Mode: DAG node keys by canonical request fingerprint.
-                    False,
-                    None,
-                    task.index,
-                ],
-                start_to_close_timeout=timedelta(seconds=600),
-                retry_policy=RetryPolicy(maximum_attempts=2),
-                heartbeat_timeout=timedelta(seconds=180),
-            )
+            llm_args = [
+                agent_id,
+                model,
+                [actual_tool],
+                256,
+                agent_id,
+                None,
+                None,
+                claude_token,
+                "dag_param_populator",
+                system_prompt_text,
+                extra_msg,
+                actual_tool,
+                True,
+                "",
+                claude_token_source,
+                claude_token_pool_id,
+                user_id,
+                gpt_token,
+                gpt_account_id,
+                gpt_token_source,
+                gpt_token_pool_id,
+                user_id,
+                None,
+                None,
+                user_id,
+                # Fast Mode: DAG node keys by canonical request fingerprint.
+                False,
+                None,
+                task.index,
+            ]
+            for structured_attempt in range(1, STRUCTURED_OUTPUT_MAX_ATTEMPTS + 1):
+                try:
+                    llm_result = await execute_activity(
+                        call_llm_activity,
+                        args=llm_args,
+                        start_to_close_timeout=timedelta(seconds=600),
+                        retry_policy=RetryPolicy(maximum_attempts=2),
+                        heartbeat_timeout=timedelta(seconds=180),
+                    )
+                    break
+                except Exception as exc:
+                    should_retry = error_chain_has_type(exc, STRUCTURED_OUTPUT_ERROR_TYPE)
+                    if not should_retry or structured_attempt >= STRUCTURED_OUTPUT_MAX_ATTEMPTS:
+                        raise
+                    workflow.logger.warning(
+                        f"[DAG] Param population structured output failed "
+                        f"(attempt {structured_attempt}/{STRUCTURED_OUTPUT_MAX_ATTEMPTS}); retrying"
+                    )
 
             # Extract params from the matching tool call
             tool_calls = llm_result.get("tool_calls", [])
@@ -1060,12 +1075,8 @@ async def _execute_single_task(
             )
             return False
 
-        error_tool_name = (
-            DAG_REASONING_UI_TOOL_NAME if task.tool_name == "reasoning" else task.tool_name
-        )
-        error_title = (
-            DAG_REASONING_FINISHED_TITLE if task.tool_name == "reasoning" else task.tool_name
-        )
+        error_tool_name = DAG_REASONING_UI_TOOL_NAME if task.tool_name == "reasoning" else task.tool_name
+        error_title = DAG_REASONING_FINISHED_TITLE if task.tool_name == "reasoning" else task.tool_name
 
         # Post error via handle_tool_event (adds to context)
         await handle_tool_event_fn(
