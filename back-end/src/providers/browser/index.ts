@@ -40,11 +40,16 @@ export { injectUserData, getFingerprintInjectionData };
 export const getOrCreateContext = getOrCreateBrowserContext;
 const PROVIDER_FETCH_TIMEOUT_MS = 15_000;
 
-async function fetchProviderApi(url: string, init: RequestInit = {}): Promise<Response> {
+async function fetchProviderApi<T>(
+  url: string,
+  init: RequestInit,
+  consume: (response: Response) => Promise<T>
+): Promise<T> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), PROVIDER_FETCH_TIMEOUT_MS);
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    const response = await fetch(url, { ...init, signal: controller.signal });
+    return await consume(response);
   } finally {
     clearTimeout(timeout);
   }
@@ -170,12 +175,14 @@ export async function readSessionFile(sessionId: string, filePath: string): Prom
   const apiKey = process.env.STEEL_API_KEY?.trim();
   if (!apiKey) throw new Error('STEEL_API_KEY is required to read Steel session files');
   const relativePath = filePath.replace(/^\/files\//, '').replace(/^\//, '');
-  const response = await fetchProviderApi(
+  return fetchProviderApi(
     `https://api.steel.dev/v1/sessions/${encodeURIComponent(sessionId)}/files/${relativePath}`,
-    { headers: { 'steel-api-key': apiKey } }
+    { headers: { 'steel-api-key': apiKey } },
+    async (response) => {
+      if (!response.ok) throw new Error(`Steel file read failed: HTTP ${response.status}`);
+      return Buffer.from(await response.arrayBuffer());
+    }
   );
-  if (!response.ok) throw new Error(`Steel file read failed: HTTP ${response.status}`);
-  return Buffer.from(await response.arrayBuffer());
 }
 
 export async function captureScreenshot(sessionId: string): Promise<{
@@ -189,18 +196,21 @@ export async function captureScreenshot(sessionId: string): Promise<{
 
   const apiKey = process.env.STEEL_API_KEY?.trim();
   if (!apiKey) throw new Error('STEEL_API_KEY is required to capture Steel screenshots');
-  const response = await fetchProviderApi(
+  return fetchProviderApi(
     `https://api.steel.dev/v1/sessions/${encodeURIComponent(sessionId)}/computer`,
     {
       method: 'POST',
       headers: { 'steel-api-key': apiKey, 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'take_screenshot' }),
+    },
+    async (response) => {
+      if (!response.ok) throw new Error(`Steel screenshot failed: HTTP ${response.status}`);
+      const result = (await response.json()) as { base64_image?: string };
+      if (!result.base64_image)
+        throw new Error('Steel screenshot response did not contain an image');
+      return { provider, image: Buffer.from(result.base64_image, 'base64') };
     }
   );
-  if (!response.ok) throw new Error(`Steel screenshot failed: HTTP ${response.status}`);
-  const result = (await response.json()) as { base64_image?: string };
-  if (!result.base64_image) throw new Error('Steel screenshot response did not contain an image');
-  return { provider, image: Buffer.from(result.base64_image, 'base64') };
 }
 
 export async function closeAllActiveSessions(): Promise<number> {
