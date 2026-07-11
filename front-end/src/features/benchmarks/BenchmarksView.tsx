@@ -98,7 +98,7 @@ export function BenchmarksView() {
         </p>
       </div>
       <div className="flex-1 min-h-0 flex flex-col md:flex-row gap-4">
-        <div className="md:w-[42%] min-h-0 h-1/2 md:h-full">
+        <div className="md:w-[42%] min-h-0 h-1/2 md:h-full rounded-xl border border-border bg-background/85 backdrop-blur-sm p-4">
           <RunsPane
             runs={runs}
             requests={requests}
@@ -107,7 +107,7 @@ export function BenchmarksView() {
             onOpenAgent={(runId, agentId) => setOpenAgent({ runId, agentId })}
           />
         </div>
-        <div className="flex-1 min-h-0 h-1/2 md:h-full">
+        <div className="flex-1 min-h-0 h-1/2 md:h-full rounded-xl border border-border bg-background/85 backdrop-blur-sm p-4">
           <TasksPane
             tasks={tasks}
             loading={tasksLoading}

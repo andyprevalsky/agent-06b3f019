@@ -190,10 +190,12 @@ async function testCatalog_groupsAreTheThreeKnown(): Promise<void> {
   const groups = new Set(tasks.map((t) => t.group));
   for (const g of groups) {
     assert(
-      ['rose-bench', 'pipeline-e2e', 'incomplete'].includes(g),
+      ['pre-deploy', 'daily', 'rose-bench', 'incomplete'].includes(g),
       `unexpected group: ${g}`
     );
   }
+  // the smoke-tagged suite is the pre-deploy gate — it must be represented
+  assert(groups.has('pre-deploy'), 'no pre-deploy (smoke) tasks found');
 }
 
 async function testCatalog_statsPresentForTasksWithHistory(): Promise<void> {
@@ -486,7 +488,7 @@ async function runAll(): Promise<void> {
     ['auth: /run-requests rejects unauthenticated', testAuth_runRequestsRejectsUnauthenticated],
     ['auth: POST /runs rejects unauthenticated', testAuth_uploadRejectsUnauthenticated],
     ['catalog: tasks + stats shape', testCatalog_returnsTasksWithStatsShape],
-    ['catalog: groups are the three known', testCatalog_groupsAreTheThreeKnown],
+    ['catalog: groups are the four known', testCatalog_groupsAreTheThreeKnown],
     ['catalog: stats present from history ledger', testCatalog_statsPresentForTasksWithHistory],
     ['patch: edit + revert description', testPatch_editAndRevertDescription],
     ['patch: rejects unknown field', testPatch_rejectsUnknownField],

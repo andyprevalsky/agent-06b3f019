@@ -27,7 +27,7 @@ import { createHubRunRequest } from '@/lib/api/benchmarksHub';
 import { TaskFlagIcons } from './TaskFlagIcons';
 import { TaskEditModal } from './TaskEditModal';
 
-const GROUPS = ['rose-bench', 'pipeline-e2e', 'incomplete'] as const;
+const GROUPS = ['pre-deploy', 'daily', 'rose-bench', 'incomplete'] as const;
 
 function formatDuration(seconds: number | null): string {
   if (seconds === null) return '—';

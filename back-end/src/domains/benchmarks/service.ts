@@ -253,9 +253,19 @@ export async function computeTaskStats(): Promise<Map<string, TaskStats>> {
 
 const READY_STATUSES = new Set(['ready']);
 
-function taskGroup(status: string | null, bench: string | null): string {
+/**
+ * The four catalog groups (matches how the suites actually run):
+ *   incomplete — not runnable (missing fixtures/judges; excluded from suites)
+ *   pre-deploy — the `smoke` tag set (`run_benchmark.py --suite smoke`, the
+ *                gate /deploy and scripts/test.sh run before merging)
+ *   rose-bench — harness-independent capability benches (bench field)
+ *   daily      — every other ready pipeline-e2e task (the broad eval suite)
+ */
+function taskGroup(status: string | null, bench: string | null, tags: string[]): string {
   if (status !== null && !READY_STATUSES.has(status)) return 'incomplete';
-  return bench ?? 'pipeline-e2e';
+  if (tags.includes('smoke')) return 'pre-deploy';
+  if (bench === 'rose-bench') return 'rose-bench';
+  return 'daily';
 }
 
 export interface CatalogTask {
@@ -297,7 +307,7 @@ export async function getCatalog(): Promise<CatalogTask[]> {
       prompt: row.prompt,
       status: row.status,
       bench: row.bench,
-      group: taskGroup(row.status, row.bench),
+      group: taskGroup(row.status, row.bench, row.tags),
       tags: row.tags,
       timeout_seconds: row.timeoutSeconds,
       price_limit_cents: row.priceLimitCents,

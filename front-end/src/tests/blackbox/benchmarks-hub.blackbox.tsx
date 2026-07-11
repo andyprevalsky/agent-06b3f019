@@ -30,7 +30,7 @@ const CATALOG = {
       prompt: 'say hi',
       status: null,
       bench: 'pipeline-e2e',
-      group: 'pipeline-e2e',
+      group: 'pre-deploy',
       tags: ['smoke', 'chat'],
       timeout_seconds: 240,
       price_limit_cents: 100,

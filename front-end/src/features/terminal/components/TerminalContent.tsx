@@ -65,7 +65,9 @@ function resolveInitialView(): TerminalView {
 }
 
 function browseOffsetStyle(currentView: TerminalView): React.CSSProperties | undefined {
-  return currentView === 'browse'
+  // Full-width views (browse, benchmarks) must clear the fixed sidebar rail —
+  // centered views never reach under it, but max-w-none content does.
+  return currentView === 'browse' || currentView === 'benchmarks'
     ? ({ '--browse-sidebar-offset': `${SIDEBAR_WIDTH_COLLAPSED}px` } as React.CSSProperties)
     : undefined;
 }
@@ -241,7 +243,8 @@ function MainContent({
     <main
       className={cn(
         'flex-1 flex justify-center h-screen overflow-hidden',
-        currentView === 'browse' && 'md:pl-[var(--browse-sidebar-offset)]',
+        (currentView === 'browse' || currentView === 'benchmarks') &&
+          'md:pl-[var(--browse-sidebar-offset)]',
       )}
       style={{ height: '100dvh', ...browseOffsetStyle(currentView) }}
     >

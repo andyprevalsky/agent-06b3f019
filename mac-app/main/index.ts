@@ -24,6 +24,16 @@ import { saveWindowState } from './app/windowState';
 import { getErrorMessage } from '../shared/utils/error';
 
 app.name = 'Rose';
+
+// Dev-only: expose a Chrome DevTools Protocol endpoint so local tooling
+// (playwright/Claude) can attach to the REAL window — screenshot it, drive it,
+// verify which worktree's build is on screen. Never active in packaged builds;
+// only when the launcher explicitly sets MAC_APP_DEBUG_PORT. Must be appended
+// before app ready.
+if (!app.isPackaged && process.env.MAC_APP_DEBUG_PORT) {
+  app.commandLine.appendSwitch('remote-debugging-port', process.env.MAC_APP_DEBUG_PORT);
+}
+
 initLogger();
 logConsole('Config', `Backend API URL: ${config.apiUrl}`);
 
