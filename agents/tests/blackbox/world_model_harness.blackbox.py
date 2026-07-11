@@ -1314,7 +1314,7 @@ async def test_world_model_tool_execution_adapter_simulate_and_shadow_modes():
 
 async def test_simulated_provider_activities_call_wmh_instead_of_live_services():
     from domains.call_phone_number.handler import call_phone_number_activity
-    from domains.request_payment_card.handler import lookup_purchase_activity, mint_purchase_card_activity
+    from domains.request_payment_card.repo import lookup_purchase_activity, mint_purchase_card_activity
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
     from domains.web_fetch.handler import web_fetch_activity
     from helpers.sms_activities import notify_sms_event_activity, send_direct_sms_activity
