@@ -289,6 +289,9 @@ if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1') {
 
   const proactiveSmsRouter = express.Router();
   const parseProactiveSmsJobOptions = (body: unknown) => {
+    if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+      return null;
+    }
     const { now: nowValue, userIds: userIdsValue } = body as {
       now?: unknown;
       userIds?: unknown;

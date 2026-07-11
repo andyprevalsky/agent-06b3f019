@@ -39,10 +39,14 @@ function writeCachedAdminHealth(
   timeSlice: AdminHealthTimeSlice,
   data: AdminHealthData,
 ): void {
-  sessionStore()?.setItem(
-    cacheKey(userId, timeSlice),
-    JSON.stringify({ expiresAt: Date.now() + CACHE_TTL_MS, data }),
-  );
+  try {
+    sessionStore()?.setItem(
+      cacheKey(userId, timeSlice),
+      JSON.stringify({ expiresAt: Date.now() + CACHE_TTL_MS, data }),
+    );
+  } catch {
+    // Caching is optional; a storage failure must not discard live data.
+  }
 }
 
 export async function fetchAdminHealthData(
@@ -56,24 +60,23 @@ export async function fetchAdminHealthData(
   const params = new URLSearchParams({ timeSlice });
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  let response: Response;
   try {
-    response = await fetch(`${backendApiUrl()}/admin-health?${params.toString()}`, {
+    const response = await fetch(`${backendApiUrl()}/admin-health?${params.toString()}`, {
       headers: {
         Authorization: `Bearer ${session.access_token}`,
         'Content-Type': 'application/json',
       },
       signal: controller.signal,
     });
+
+    if (!response.ok) {
+      throw new Error(`Failed to load admin health (${response.status})`);
+    }
+
+    const data = (await response.json()) as AdminHealthData;
+    writeCachedAdminHealth(session.user.id, timeSlice, data);
+    return data;
   } finally {
     window.clearTimeout(timeoutId);
   }
-
-  if (!response.ok) {
-    throw new Error(`Failed to load admin health (${response.status})`);
-  }
-
-  const data = (await response.json()) as AdminHealthData;
-  writeCachedAdminHealth(session.user.id, timeSlice, data);
-  return data;
 }

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
@@ -281,5 +281,44 @@ describe('AdminHealth page', () => {
         request.method === 'GET' && request.url.includes('/admin-health?timeSlice=weekly'),
     );
     expect(requests).toHaveLength(2);
+  });
+
+  it('returns live data when session caching is unavailable', async () => {
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('Storage unavailable', 'QuotaExceededError');
+    });
+
+    try {
+      await expect(fetchAdminHealthData('weekly')).resolves.toMatchObject({ timeSlice: 'weekly' });
+    } finally {
+      setItem.mockRestore();
+    }
+  });
+
+  it('keeps the request timeout active while parsing the response body', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      const signal = init?.signal as AbortSignal;
+      return {
+        ok: true,
+        json: () =>
+          new Promise((_resolve, reject) => {
+            signal.addEventListener('abort', () =>
+              reject(new DOMException('Aborted', 'AbortError')),
+            );
+          }),
+      } as Response;
+    });
+
+    try {
+      const request = expect(fetchAdminHealthData('weekly')).rejects.toMatchObject({
+        name: 'AbortError',
+      });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await request;
+    } finally {
+      fetchMock.mockRestore();
+      vi.useRealTimers();
+    }
   });
 });
