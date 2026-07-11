@@ -1593,6 +1593,8 @@ async def poll_agent(
     per_agent_state: Dict[str, dict] = {}
     seen_attention_ids: set[str] = set()
     chat_assistant_seen_at: Optional[float] = None
+    task._mid_run_feedback_posted = False
+    task._mid_run_feedback_initial_schema = None
 
     resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
 
@@ -1664,6 +1666,31 @@ async def poll_agent(
             if errors:
                 reason = f"Context validation error: [{errors[0].rule}] {errors[0].message}"
                 return data, approvals_triggered, approvals_resolved, reason
+
+        # Regression tasks can inject genuine USER feedback after the run has
+        # produced durable work. Capture the already-generated schema first so
+        # evaluation can prove non-goal feedback did not revise it.
+        feedback_config = task.mid_run_feedback or {}
+        if feedback_config and not task._mid_run_feedback_posted and status not in TERMINAL_STATUSES:
+            after_message_count = int(feedback_config.get("after_root_message_count", 1))
+            feedback_message = feedback_config.get("message")
+            initial_schema = agent.get("response_schema")
+            if (
+                root_msg_count >= after_message_count
+                and isinstance(feedback_message, str)
+                and feedback_message.strip()
+                and isinstance(initial_schema, dict)
+                and initial_schema.get("fields")
+            ):
+                if await post_message(base_url, agent_id, feedback_message):
+                    task._mid_run_feedback_initial_schema = json.loads(json.dumps(initial_schema))
+                    task._mid_run_feedback_posted = True
+                    print(
+                        "    💬 Injected mid-run feedback after "
+                        f"{root_msg_count} root messages; captured {len(initial_schema['fields'])} schema field(s)"
+                    )
+                else:
+                    print("    ⚠ Failed to inject configured mid-run feedback; will retry")
 
         # Chat mode: done when we have ASSISTANT responses
         if task.is_chat_mode:
@@ -2012,6 +2039,33 @@ async def poll_agent(
 # ============================================================
 
 
+def _validate_mid_run_feedback_schema(task: BenchmarkTask, data: dict) -> Optional[str]:
+    """Require non-goal mid-run feedback to leave the response schema untouched."""
+    if not task.mid_run_feedback:
+        return None
+    if not getattr(task, "_mid_run_feedback_posted", False):
+        return "Configured mid-run feedback was never posted"
+
+    initial_schema = getattr(task, "_mid_run_feedback_initial_schema", None)
+    final_schema = (data.get("agent") or {}).get("response_schema")
+    if initial_schema != final_schema:
+        return (
+            "Response schema changed after non-goal feedback: "
+            f"initial={json.dumps(initial_schema, sort_keys=True)} "
+            f"final={json.dumps(final_schema, sort_keys=True)}"
+        )
+
+    schema_update_messages = [
+        message
+        for message in data.get("messages", []) or []
+        if isinstance(message.get("metadata"), dict)
+        and message["metadata"].get("isResponseSchemaUpdate") is True
+    ]
+    if schema_update_messages:
+        return f"Non-goal feedback created {len(schema_update_messages)} hidden response-schema update message(s)"
+    return None
+
+
 def evaluate_task(
     task: BenchmarkTask,
     data: dict,
@@ -2070,6 +2124,10 @@ def evaluate_task(
     # Agent mode: must complete
     if status != "COMPLETED":
         return False, f"Agent status: {status} (expected COMPLETED)"
+
+    mid_run_schema_failure = _validate_mid_run_feedback_schema(task, data)
+    if mid_run_schema_failure:
+        return False, mid_run_schema_failure
 
     # Check expected tools were called
     all_metadata = " ".join(json.dumps(m.get("metadata", {})) for m in messages if m.get("metadata")).lower()

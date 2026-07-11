@@ -80,6 +80,10 @@ class LLMStructuredOutputError(ValueError):
     """The provider completed, but its structured output violated our contract."""
 
 
+class ResponseSchemaPersistenceError(RuntimeError):
+    """A generated response schema could not be saved durably."""
+
+
 TRAILING_MESSAGE_REFERENCE_RE = re.compile(
     r"(?P<prefix>(?:^|\n\n)Reference:\s*)"
     r"(?P<ref>@ref:message:[a-f0-9-]{36}(?:\[start=\"[^\"]+\"\|end=\"[^\"]+\"\])?)"
@@ -5016,11 +5020,16 @@ async def set_response_schema_activity(
 
             # 2. Save schema to agent record
             save_start = time.perf_counter()
-            save_response = await client.patch(
-                f"{backend_url}/api/agents/{agent_id}",
-                headers=backend_api_headers(api_key),
-                json={"response_schema": schema},
-            )
+            try:
+                save_response = await client.patch(
+                    f"{backend_url}/api/agents/{agent_id}",
+                    headers=backend_api_headers(api_key),
+                    json={"response_schema": schema},
+                )
+            except httpx.HTTPError as e:
+                raise ResponseSchemaPersistenceError(
+                    f"Failed to save response schema for agent {agent_id}: {extract_error_message(e)}"
+                ) from e
             save_elapsed = time.perf_counter() - save_start
             logger.info(f"[TIMING] Schema save API call: {save_elapsed * 1000:.1f}ms")
 
@@ -5028,8 +5037,11 @@ async def set_response_schema_activity(
                 logger.warning(
                     "Failed to save response schema", agent_id=agent_id, status_code=save_response.status_code
                 )
-            else:
-                logger.info("Saved response schema to agent", agent_id=agent_id)
+                raise ResponseSchemaPersistenceError(
+                    f"Failed to save response schema for agent {agent_id}: HTTP {save_response.status_code}"
+                )
+
+            logger.info("Saved response schema to agent", agent_id=agent_id)
 
             activity_elapsed = time.perf_counter() - activity_start
             logger.info(
@@ -5052,6 +5064,8 @@ async def set_response_schema_activity(
             response_text=e.response.text[:500],
         )
         return None
+    except ResponseSchemaPersistenceError:
+        raise
     except Exception as e:
         logger.error("Failed to generate response schema", agent_id=agent_id, error=extract_error_message(e))
         return None
