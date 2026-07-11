@@ -81,10 +81,16 @@ export function validateAssistantStreamPayload(payload: unknown): string | null 
     return `Missing or invalid 'stream_id' (got ${typeof p.stream_id})`;
   if (typeof p.delta !== 'string') return `Missing or invalid 'delta' (got ${typeof p.delta})`;
   if (typeof p.done !== 'boolean') return `Missing or invalid 'done' (got ${typeof p.done})`;
+  if (p.clear_on_done !== undefined && typeof p.clear_on_done !== 'boolean') {
+    return `Invalid 'clear_on_done' type (got ${typeof p.clear_on_done})`;
+  }
   if (typeof p.sequence !== 'number')
     return `Missing or invalid 'sequence' (got ${typeof p.sequence})`;
   if (p.llm_started_at_ms !== undefined && typeof p.llm_started_at_ms !== 'number') {
     return `Invalid 'llm_started_at_ms' type (got ${typeof p.llm_started_at_ms})`;
+  }
+  if (p.subAgentId !== undefined && typeof p.subAgentId !== 'string') {
+    return `Invalid 'subAgentId' type (got ${typeof p.subAgentId})`;
   }
   return null;
 }
@@ -143,6 +149,9 @@ export function validateToolStreamPayload(payload: unknown): string | null {
   }
   if (p.llm_started_at_ms !== undefined && typeof p.llm_started_at_ms !== 'number') {
     return `Invalid 'llm_started_at_ms' type (got ${typeof p.llm_started_at_ms})`;
+  }
+  if (p.subAgentId !== undefined && typeof p.subAgentId !== 'string') {
+    return `Invalid 'subAgentId' type (got ${typeof p.subAgentId})`;
   }
   if (p.is_claude !== undefined && typeof p.is_claude !== 'boolean') {
     return `Invalid 'is_claude' type (got ${typeof p.is_claude})`;

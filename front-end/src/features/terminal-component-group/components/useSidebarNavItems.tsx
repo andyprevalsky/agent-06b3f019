@@ -4,7 +4,7 @@
  */
 
 import { useMemo } from 'react';
-import { Globe, Network, Plug, Settings as SettingsIcon } from 'lucide-react';
+import { Activity, Globe, Network, Plug, Settings as SettingsIcon } from 'lucide-react';
 import type { SidebarNavItem, SidebarView } from '../types';
 
 interface UseSidebarNavItemsArgs {
@@ -12,6 +12,7 @@ interface UseSidebarNavItemsArgs {
   onViewChange: (view: SidebarView) => void;
   onSelectAgent: (agentId: string | null) => void;
   showBrowse: boolean;
+  showAdminHealth: boolean;
 }
 
 export function useSidebarNavItems({
@@ -19,6 +20,7 @@ export function useSidebarNavItems({
   onViewChange,
   onSelectAgent,
   showBrowse,
+  showAdminHealth,
 }: UseSidebarNavItemsArgs): SidebarNavItem[] {
   return useMemo(() => {
     const makeHandler = (view: SidebarView) => () => {
@@ -34,6 +36,17 @@ export function useSidebarNavItems({
               icon: <Globe className="h-4 w-4" />,
               onClick: makeHandler('browse'),
               isActive: currentView === 'browse',
+            },
+          ]
+        : []),
+      ...(showAdminHealth
+        ? [
+            {
+              id: 'admin-health',
+              label: 'Health',
+              icon: <Activity className="h-4 w-4" />,
+              onClick: makeHandler('admin-health'),
+              isActive: currentView === 'admin-health',
             },
           ]
         : []),
@@ -59,5 +72,5 @@ export function useSidebarNavItems({
         isActive: currentView === 'settings',
       },
     ];
-  }, [currentView, onViewChange, onSelectAgent, showBrowse]);
+  }, [currentView, onViewChange, onSelectAgent, showBrowse, showAdminHealth]);
 }

@@ -350,6 +350,9 @@ async function testSharedLeaseSerializesJobsAndRecoversStaleOwner(): Promise<voi
 
 async function testLeasedEndpointRejectsMalformedInput(): Promise<void> {
   const invalidBodies = [
+    null,
+    [],
+    'invalid',
     { now: 123, userIds: [] },
     { now: RUN_AT.toISOString(), userIds: ['valid-user-id', 42] },
   ];

@@ -1,3 +1,10 @@
+/**
+ * STATE MACHINE: thinking visibility
+ *
+ * [HIDDEN] -- active agent + no plan/tool/blocker for 800ms --> [VISIBLE]
+ * [VISIBLE] -- persisted or ephemeral tool starts -----------> [HIDDEN]
+ * [VISIBLE] -- plan/blocker/terminal state/assistant arrives -> [HIDDEN]
+ */
 import { useEffect, useRef, useState, type MutableRefObject } from 'react';
 import type { AgentDetail, Message } from '../hooks';
 
@@ -8,6 +15,7 @@ interface UseThinkingVisibilityOptions {
   isChatMode: boolean;
   hasStreamingBubbles: boolean;
   hasStreamingPlan: boolean;
+  hasStreamingTools: boolean;
   selectedAgentId: string | null;
   assistantInsertedRef: MutableRefObject<boolean>;
 }
@@ -39,6 +47,7 @@ function computeShouldShow(opts: UseThinkingVisibilityOptions): boolean {
     isChatMode,
     hasStreamingBubbles,
     hasStreamingPlan,
+    hasStreamingTools,
   } = opts;
   if (!showThinkingIndicator) return false;
 
@@ -61,7 +70,7 @@ function computeShouldShow(opts: UseThinkingVisibilityOptions): boolean {
       m.metadata?.toolStatus === 'IN_PROGRESS' &&
       !m.metadata?.isUserAttentionMessage,
   );
-  if (hasInProgressTool || hasStreamingPlan) return false;
+  if (hasInProgressTool || hasStreamingPlan || hasStreamingTools) return false;
 
   if (hasStreamingBubbles) return true;
 

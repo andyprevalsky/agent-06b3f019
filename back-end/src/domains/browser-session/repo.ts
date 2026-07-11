@@ -103,7 +103,7 @@ export async function reservePasskeysForRealm(userId: string, authRealm: string)
 export async function findSessionByTaskId(taskId: string) {
   return prisma.browserSession.findUnique({
     where: { id: taskId },
-    include: { context: true },
+    include: { context: { include: { providerProfiles: true } } },
   });
 }
 
@@ -113,7 +113,7 @@ export async function findSessionByTaskId(taskId: string) {
 export async function findSessionBySessionId(sessionId: string) {
   return prisma.browserSession.findUnique({
     where: { sessionId },
-    include: { context: true },
+    include: { context: { include: { providerProfiles: true } } },
   });
 }
 
