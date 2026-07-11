@@ -26,6 +26,7 @@ from utils.prompts import (
     PLANNER_TASK_TOOL_NAME_DESCRIPTION,
     SELF_CONTAINED_GOAL_RULE,
 )
+from utils.user_facing_writing_prompt import user_facing_text_description
 
 logger = structlog.get_logger(__name__)
 
@@ -435,7 +436,11 @@ class SendMessageToUserTool(BaseModel):
     """Message the user during PLAN phase; optionally block for a reply."""
 
     tool: Literal["send_message_to_user"]
-    message: str = Field(description="User-visible markdown text explaining the question, blocker, or FYI.")
+    message: str = Field(
+        description=user_facing_text_description(
+            "The exact user-visible message explaining the question, blocker, or FYI."
+        )
+    )
     is_question: bool = Field(
         default=True,
         description=(
@@ -449,7 +454,11 @@ class SendMessageToUserExecutePhaseTool(BaseModel):
     """Send a non-blocking informational message to the user during EXECUTE phase."""
 
     tool: Literal["send_message_to_user_execute_phase"]
-    message: str = Field(description="User-visible markdown text explaining what you want them to know.")
+    message: str = Field(
+        description=user_facing_text_description(
+            "The exact user-visible non-blocking update explaining what the user needs to know."
+        )
+    )
 
 
 class MessagePersonTool(BaseModel):

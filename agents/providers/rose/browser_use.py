@@ -27,6 +27,7 @@ from tools.prompts import attempt_completion_prompt
 # same grading block as the main agent so attempt_completion semantics do not
 # drift between agent types.
 from utils.prompts import VERIFICATION_RULES
+from utils.user_facing_writing_prompt import user_facing_text_description
 
 logger = structlog.get_logger()
 
@@ -145,7 +146,15 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
     },
     "send_message_to_user": {
         "description": "Send a message to the user (for updates or asking for help)",
-        "params": {"message": {"type": "string", "description": "Message content", "required": True}},
+        "params": {
+            "message": {
+                "type": "string",
+                "description": user_facing_text_description(
+                    "The exact message shown to the user for an update or request for help."
+                ),
+                "required": True,
+            }
+        },
     },
     "request_user_assistance_for_authentication": {
         "description": (

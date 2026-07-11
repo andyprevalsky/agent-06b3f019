@@ -2778,7 +2778,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 """Connect Playwright, then apply everything that only needs the
                 Playwright side (fast-mode route, botsigged diagnostics,
                 fingerprint injection) while DOMService is still attaching."""
-                nonlocal _playwright_browser, _playwright_instance
+                nonlocal _playwright_browser, _playwright_instance, playwright_driver_pid
                 t = time.monotonic()
                 from playwright.async_api import async_playwright
 
@@ -5193,7 +5193,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         return
 
                 if result and result.get("status") == "awaiting_payment_card_approval":
-                    from domains.request_payment_card.service import (
+                    from tools.request_payment_card import (
                         build_payment_question,
                         normalize_payment_payload,
                     )

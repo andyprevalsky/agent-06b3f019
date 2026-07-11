@@ -15,6 +15,7 @@ import { downloadFromStorage } from '../storage';
 import { createLogger } from '../logger';
 import type { ChatLlmUsage } from './routerLlm';
 import { isCloudAgentLifecycleTool } from './cloudAgentLifecycleTool';
+import { userFacingTextDescription } from '../userFacingWritingPrompt';
 
 const log = createLogger('GeneratorLLM');
 
@@ -181,7 +182,7 @@ export interface GeneratorResponse {
 // ============================================
 // JSON Schema for structured output
 // ============================================
-const GENERATOR_JSON_SCHEMA = {
+export const GENERATOR_JSON_SCHEMA = {
   type: 'object',
   properties: {
     reasoning: {
@@ -190,8 +191,7 @@ const GENERATOR_JSON_SCHEMA = {
     },
     response: {
       type: 'string',
-      description:
-        'The chat message to send to the user. Use Markdown formatting for readability (headers, lists, bold, links, etc).',
+      description: userFacingTextDescription('The exact chat message sent to the user.'),
     },
   },
   required: ['reasoning', 'response'],

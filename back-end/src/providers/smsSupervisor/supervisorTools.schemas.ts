@@ -7,6 +7,8 @@
  * Pair them with the dispatcher in supervisorTools.ts.
  */
 
+import { userFacingTextDescription } from '../userFacingWritingPrompt';
+
 export const TOOL_SCHEMAS = [
   {
     name: 'reply_to_agent',
@@ -214,7 +216,9 @@ Returns:
       properties: {
         message: {
           type: 'string' as const,
-          description: 'The SMS message to send to the user',
+          description: userFacingTextDescription(
+            'The exact final SMS message sent to the user when attempt_completion is called.'
+          ),
         },
       },
       required: ['message'],

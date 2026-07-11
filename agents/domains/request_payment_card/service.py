@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Dict
+from typing import Any
+
+from domains.request_payment_card.config import DEFAULT_CURRENCY
+from domains.request_payment_card.types import PaymentPayload, PaymentToolCall
 
 
 def _to_list(value: Any) -> list:
@@ -31,7 +34,7 @@ def _to_int(value: Any) -> int:
     return 0
 
 
-def normalize_payment_payload(tool_call: Dict[str, Any], user_id: str) -> Dict[str, Any]:
+def normalize_payment_payload(tool_call: PaymentToolCall, user_id: str) -> PaymentPayload:
     line_items = []
     for item in _to_list(tool_call.get("line_items") or tool_call.get("lineItems")):
         if not isinstance(item, dict):
@@ -60,7 +63,7 @@ def normalize_payment_payload(tool_call: Dict[str, Any], user_id: str) -> Dict[s
     payload = {
         "userId": user_id,
         "merchant": str(tool_call.get("merchant") or "").strip(),
-        "currency": str(tool_call.get("currency") or "USD").upper(),
+        "currency": str(tool_call.get("currency") or DEFAULT_CURRENCY).upper(),
         "lineItems": line_items,
         "fees": fees,
         "subtotalCents": _to_int(tool_call.get("subtotal_cents") or tool_call.get("subtotalCents")),
@@ -70,11 +73,11 @@ def normalize_payment_payload(tool_call: Dict[str, Any], user_id: str) -> Dict[s
     return payload
 
 
-def build_payment_fingerprint(payload: Dict[str, Any]) -> str:
+def build_payment_fingerprint(payload: PaymentPayload) -> str:
     stable = {
         "userId": payload.get("userId"),
         "merchant": str(payload.get("merchant") or "").strip().lower(),
-        "currency": payload.get("currency", "USD"),
+        "currency": payload.get("currency", DEFAULT_CURRENCY),
         "lineItems": payload.get("lineItems") or [],
         "fees": payload.get("fees") or [],
         "totalCents": payload.get("totalCents") or 0,
@@ -83,7 +86,7 @@ def build_payment_fingerprint(payload: Dict[str, Any]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def build_payment_question(payload: Dict[str, Any]) -> str:
+def build_payment_question(payload: PaymentPayload) -> str:
     total = (payload.get("totalCents") or 0) / 100
     merchant = payload.get("merchant") or "this merchant"
     lines = [f"Approve a ${total:.2f} purchase from {merchant}?"]
