@@ -20,16 +20,22 @@ export function shouldEnableDevAutoLogin({
   isDev,
   isVitest,
   clientSource,
+  optedOut = false,
 }: {
   readonly isDev: boolean;
   readonly isVitest: boolean;
   readonly clientSource: ClientSource;
+  /** `?no-auto-login` opt-out — lets e2e specs exercise the manual login path deterministically. */
+  readonly optedOut?: boolean;
 }): boolean {
-  return isDev && !isVitest && clientSource !== 'MAC_APP';
+  return isDev && !isVitest && clientSource !== 'MAC_APP' && !optedOut;
 }
 
 export const IS_DEV_AUTO_LOGIN = shouldEnableDevAutoLogin({
   isDev: import.meta.env.DEV,
   isVitest: Boolean(import.meta.env.VITEST),
   clientSource: getClientSource(),
+  optedOut:
+    typeof window !== 'undefined' &&
+    new URLSearchParams(window.location.search).has('no-auto-login'),
 });

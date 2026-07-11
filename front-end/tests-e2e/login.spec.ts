@@ -35,7 +35,12 @@ test.describe('login', () => {
     // Block auto-login endpoints so we can exercise the logged-out path.
     await forceLoggedOut(context);
 
-    await page.goto(`${FRONTEND_URL}/terminal`, { waitUntil: 'domcontentloaded' });
+    // ?no-auto-login: exercise the MANUAL login path deterministically — dev
+    // auto-login otherwise races this spec (its send-otp/verify-otp satisfy
+    // our waitForResponse predicates and its session churn can clobber state).
+    await page.goto(`${FRONTEND_URL}/terminal?no-auto-login=1`, {
+      waitUntil: 'domcontentloaded',
+    });
     await clearAppSession(page);
     await page.reload({ waitUntil: 'domcontentloaded' });
 

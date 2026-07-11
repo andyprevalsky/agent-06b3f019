@@ -39,7 +39,12 @@ const MODAL_STYLE = {
 const INVITE_CODE_LENGTH = 6;
 
 const WaitlistGate = () => {
-  const { isAuthenticated, isAnonymous, isFullySignedIn, loading, signOut } = useAuth();
+  // Passive: the gate only OBSERVES auth state. It must never initiate
+  // sessions (dev auto-login / anonymous creation) — a third initiating
+  // useAuth instance races the others and can clobber a concurrent login.
+  const { isAuthenticated, isAnonymous, isFullySignedIn, loading, signOut } = useAuth({
+    passive: true,
+  });
   const [code, setCode] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
