@@ -111,13 +111,20 @@ test.describe('login', () => {
       .then(() => true)
       .catch(() => false);
     if (gateAppeared) {
-      const useCode = page.waitForResponse(
-        (r) => r.url().includes('/api/invite-codes/use') && r.request().method() === 'POST',
-      );
-      await inviteCodeInput.fill('181818');
-      await page.getByRole('button', { name: 'Join with invite code' }).click();
-      const useRes = await useCode;
-      expect(useRes.status(), `invite-codes/use non-2xx: ${useRes.status()}`).toBeLessThan(300);
+      const gatePersisted = await inviteCodeInput
+        .fill('181818', { timeout: 1_000 })
+        .then(() => true)
+        .catch(() => false);
+      if (gatePersisted) {
+        const useCode = page.waitForResponse(
+          (r) => r.url().includes('/api/invite-codes/use') && r.request().method() === 'POST',
+        );
+        await page.getByRole('button', { name: 'Join with invite code' }).click();
+        const useRes = await useCode;
+        expect(useRes.status(), `invite-codes/use non-2xx: ${useRes.status()}`).toBeLessThan(300);
+      } else {
+        await expect(inviteCodeInput, 'Transient invite gate did not resolve').toBeHidden();
+      }
     }
 
     // ── Step 4: Verify authenticated state ───────────────────────────────
