@@ -97,6 +97,20 @@ def test_cache_get_batches_can_overlap_when_one_batch_is_in_flight(monkeypatch):
     asyncio.run(run())
 
 
+def test_completed_batch_tasks_are_removed_without_mutating_during_iteration():
+    async def run():
+        reset_client_state()
+        completed = asyncio.create_task(asyncio.sleep(0))
+        await completed
+        client._pending_gets_batch_tasks.add(completed)
+
+        await client._flush_pending_gets()
+
+        assert client._pending_gets_batch_tasks == set()
+
+    asyncio.run(run())
+
+
 def test_cache_get_record_does_not_wait_for_read_archive(monkeypatch):
     archive_started = asyncio.Event()
 

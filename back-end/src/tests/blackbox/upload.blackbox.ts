@@ -165,7 +165,8 @@ async function uploadFile(
   token: string,
   filename: string,
   content: string,
-  mimeType: string = 'text/plain'
+  mimeType: string = 'text/plain',
+  captureToken?: string
 ): Promise<{ status: number; data: unknown }> {
   const blob = new Blob([content], { type: mimeType });
   const formData = new FormData();
@@ -173,7 +174,10 @@ async function uploadFile(
 
   const response = await fetch(`${BASE_URL}/api/upload`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${token}` },
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...(captureToken ? { 'X-Capture-Token': captureToken } : {}),
+    },
     body: formData,
   });
 
@@ -401,21 +405,22 @@ async function testReproducibility_threeSequential() {
 
 // ==================== BOUNDARY CAPTURE — SUPABASE STORAGE ====================
 
-function readCaptureCursor(data: unknown): number | null {
-  if (data === null || data === undefined || typeof data !== 'object') return null;
-  const nextId = (data as { nextId?: unknown }).nextId;
-  return typeof nextId === 'number' && Number.isInteger(nextId) && nextId >= 1 ? nextId - 1 : null;
-}
-
 async function testBoundary_uploadCapturesSupabaseCall() {
-  const cursorRes = await request(`${BASE_URL}/api/test/captures`);
-  if (cursorRes.status !== 200) return; // capture harness not active
-  const cursor = readCaptureCursor(cursorRes.data);
-  if (cursor === null) return;
+  const probeRes = await request(`${BASE_URL}/api/test/captures`);
+  if (probeRes.status !== 200) return; // capture harness not active
+  const captureToken = `upload-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-  await uploadFile(ctx.accessToken!, 'boundary-test.txt', 'Boundary capture test content');
+  await uploadFile(
+    ctx.accessToken!,
+    'boundary-test.txt',
+    'Boundary capture test content',
+    'text/plain',
+    captureToken
+  );
 
-  const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
+  const capturesRes = await request(
+    `${BASE_URL}/api/test/captures?token=${encodeURIComponent(captureToken)}`
+  );
   assertStatus(capturesRes.status, 200, capturesRes.data);
   const body = capturesRes.data as {
     captures: { url: string; method: string; requestHeaders: Record<string, string> }[];
@@ -436,18 +441,22 @@ async function testBoundary_uploadCapturesSupabaseCall() {
 }
 
 async function testBoundary_noFileCapturesZero() {
-  const cursorRes = await request(`${BASE_URL}/api/test/captures`);
-  if (cursorRes.status !== 200) return; // capture harness not active
-  const cursor = readCaptureCursor(cursorRes.data);
-  if (cursor === null) return;
+  const probeRes = await request(`${BASE_URL}/api/test/captures`);
+  if (probeRes.status !== 200) return; // capture harness not active
+  const captureToken = `upload-no-file-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
   // Send upload without file — validation fails before any outbound call
   await request(`${BASE_URL}/api/upload`, {
     method: 'POST',
-    headers: authHeaders(ctx.accessToken!),
+    headers: {
+      ...authHeaders(ctx.accessToken!),
+      'X-Capture-Token': captureToken,
+    },
   });
 
-  const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
+  const capturesRes = await request(
+    `${BASE_URL}/api/test/captures?token=${encodeURIComponent(captureToken)}`
+  );
   assertStatus(capturesRes.status, 200, capturesRes.data);
   const body = capturesRes.data as { captures: unknown[] };
   const supabaseCalls = (body.captures as { url: string }[]).filter(

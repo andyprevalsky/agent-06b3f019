@@ -55,8 +55,10 @@ def test_browser_use_pool_registered():
     spec = get_pool("rose-1-browser-use")
     assert spec.name == "rose-1-browser-use"
     assert spec.claude_auth_model == "claude-fable-5"
+    assert spec.gpt_auth_model == "gpt-5.6-sol"
     assert "anthropic/claude-opus-4.8" in spec.waterfall
-    # Legacy bu/yutori models removed; waterfall is opus → gpt-5.5
+    assert spec.waterfall[-1] == "openai/gpt-5.6-sol"
+    # Legacy bu/yutori models removed; waterfall is opus → GPT-5.6 Sol.
     assert all("yutori" not in m and "browser-use" not in m for m in spec.waterfall)
 
 
@@ -606,7 +608,7 @@ def test_extract_json_array():
 def test_extract_json_returns_none_on_garbage():
     assert extract_json("just words") is None
     assert extract_json("") is None
-    assert extract_json(None) is None  # type: ignore[arg-type]
+    assert extract_json(None) is None
 
 
 # =====================================================================
@@ -1091,7 +1093,7 @@ async def test_complete_browser_use_gpt_path_succeeds():
     )
 
     assert result["mode"] == "gpt"
-    assert result["actual_model"] == "gpt-5.5-gpt"
+    assert result["actual_model"] == "gpt-5.6-sol-gpt"
     assert result["action"]["action"] == "click"
     assert result["gpt_token_error"] is None
     assert result["usage"]["total_tokens"] == 20
@@ -1108,13 +1110,13 @@ async def test_complete_browser_use_gpt_path_succeeds():
     dumps = sorted(dump_root.glob("*test-bu-gpt.json"))
     assert dumps, "complete_browser_use should dump exact LLM context"
     payload = json.loads(dumps[-1].read_text())
-    assert payload["model"] == "gpt-5.5"
+    assert payload["model"] == "gpt-5.6-sol"
     assert payload["message_count"] == 2
     assert [message["role"] for message in payload["messages"]] == ["system", "user"]
-    assert payload["config"]["actual_model"] == "gpt-5.5"
-    assert payload["config"]["actual_model_raw"] == "gpt-5.5-gpt"
+    assert payload["config"]["actual_model"] == "gpt-5.6-sol"
+    assert payload["config"]["actual_model_raw"] == "gpt-5.6-sol-gpt"
     assert payload["config"]["mode"] == "gpt"
-    assert payload["config"]["effective_params"]["model"] == "gpt-5.5"
+    assert payload["config"]["effective_params"]["model"] == "gpt-5.6-sol"
     assert payload["config"]["effective_params"]["temperature"] is None
     assert payload["config"]["effective_params"]["max_tokens"] is None
     assert payload["config"]["requested_params"]["temperature"] == 1.0

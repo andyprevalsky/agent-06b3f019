@@ -1,34 +1,20 @@
-"""Backend activities for request_payment_card."""
+"""Backend data access for request-payment-card."""
 
 from __future__ import annotations
 
-from typing import Any, Dict
-
 import httpx
-from temporalio import activity
 
 from config import load_config
 from helpers.trace_archive import archive_json
 from helpers.tracing import current_root_agent_id
-from helpers.world_model_runtime import WorldModelToolExecutionAdapter
+
+from .config import LOOKUP_TIMEOUT_SECONDS, MINT_TIMEOUT_SECONDS
+from .types import PaymentPayload, PurchaseResult
 
 
-@activity.defn
-async def lookup_purchase_activity(user_id: str, fingerprint: str) -> Dict[str, Any]:
-    async def real_executor(_tool_name: str, _tool_args: Dict[str, Any], _tool_call_id: str) -> Dict[str, Any]:
-        return await _lookup_purchase_real(user_id, fingerprint)
-
-    return await WorldModelToolExecutionAdapter.from_env(agent_id=user_id).execute(
-        "payment_lookup",
-        {"user_id": user_id, "fingerprint": fingerprint},
-        f"payment_lookup:{fingerprint}",
-        real_executor,
-    )
-
-
-async def _lookup_purchase_real(user_id: str, fingerprint: str) -> Dict[str, Any]:
+async def lookup_purchase_from_backend(user_id: str, fingerprint: str) -> PurchaseResult:
     config = load_config()
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=LOOKUP_TIMEOUT_SECONDS) as client:
         response = await client.get(
             f"{config.backend.api_url}/api/purchases/lookup",
             params={"fingerprint": fingerprint},
@@ -49,22 +35,7 @@ async def _lookup_purchase_real(user_id: str, fingerprint: str) -> Dict[str, Any
         return result
 
 
-@activity.defn
-async def mint_purchase_card_activity(user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    fingerprint = str(payload.get("fingerprint") or "")
-
-    async def real_executor(_tool_name: str, _tool_args: Dict[str, Any], _tool_call_id: str) -> Dict[str, Any]:
-        return await _mint_purchase_card_real(user_id, payload)
-
-    return await WorldModelToolExecutionAdapter.from_env(agent_id=str(payload.get("agentId") or user_id)).execute(
-        "payment_mint",
-        {"user_id": user_id, "payload": payload},
-        f"payment_mint:{fingerprint}",
-        real_executor,
-    )
-
-
-async def _mint_purchase_card_real(user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+async def mint_purchase_card_from_backend(user_id: str, payload: PaymentPayload) -> PurchaseResult:
     config = load_config()
     body = {
         "fingerprint": payload["fingerprint"],
@@ -76,7 +47,7 @@ async def _mint_purchase_card_real(user_id: str, payload: Dict[str, Any]) -> Dic
         "subtotalCents": payload.get("subtotalCents") or 0,
         "totalCents": payload.get("totalCents") or 0,
     }
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=MINT_TIMEOUT_SECONDS) as client:
         response = await client.post(
             f"{config.backend.api_url}/api/purchases/mint",
             json=body,

@@ -329,7 +329,7 @@ test('cache entry storage uses the shared Fast Mode database URL', () => {
     'only production may fall back to DATABASE_URL because production DATABASE_URL is the prod table'
   );
   assert.ok(
-    /fastCachePrisma\.fastModeCacheEntry\.findUnique/.test(repo),
+    /fastCachePrisma\.fastModeCacheEntry\.findMany/.test(repo),
     'cache reads use shared cache DB'
   );
   assert.ok(

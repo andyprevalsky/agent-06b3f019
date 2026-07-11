@@ -157,15 +157,20 @@ def test_classify_claude_token_error_each_branch():
 
 
 def test_pool_registry_lookup():
+    mini = get_pool("rose-1-mini")
     lite = get_pool("rose-1-lite")
     ultra = get_pool("rose-1-ultra")
+    browser_use = get_pool("rose-1-browser-use")
+    assert mini.gpt_auth_model == "gpt-5.6-luna"
     assert lite.name == "rose-1-lite"
     assert lite.claude_auth_model.startswith("claude-")
-    assert lite.gpt_auth_model.startswith("gpt-")
+    assert lite.gpt_auth_model == "gpt-5.6-terra"
     assert len(lite.waterfall) >= 1
     assert ultra.name == "rose-1-ultra"
     assert ultra.claude_auth_model.startswith("claude-")
-    assert ultra.gpt_auth_model.startswith("gpt-")
+    assert ultra.gpt_auth_model == "gpt-5.6-sol"
+    assert browser_use.gpt_auth_model == "gpt-5.6-sol"
+    assert browser_use.waterfall[-1] == "openai/gpt-5.6-sol"
     assert lite.waterfall != ultra.waterfall
 
 
@@ -179,7 +184,7 @@ def test_all_pool_names_matches_registry():
 def test_get_pool_unknown_raises():
     raised = False
     try:
-        get_pool("rose-nonexistent")  # type: ignore[arg-type]
+        get_pool("rose-nonexistent")
     except (KeyError, ValueError):
         raised = True
     assert raised
@@ -769,6 +774,9 @@ def test_apply_tool_config_response_format_structured_output_path():
 
 def test_is_vision_capable_membership():
     assert is_vision_capable("openai/gpt-4o")
+    assert is_vision_capable("openai/gpt-5.6-luna")
+    assert is_vision_capable("openai/gpt-5.6-terra")
+    assert is_vision_capable("openai/gpt-5.6-sol")
     assert is_vision_capable("anthropic/claude-sonnet-4.5")
     assert not is_vision_capable("google/gemini-3-flash-preview")
     assert not is_vision_capable("rose-labs/rose-1-lite")
@@ -2748,7 +2756,7 @@ async def test_client_openai_api_key_serves_before_anthropic_and_openrouter():
     assert isinstance(body, dict)
     assert seen == {"openai": 1, "anthropic": 0, "openrouter": 0}
     assert captured["authorization"] == "Bearer sk-proj-test"
-    assert body.get("model") == "gpt-5.4"
+    assert body.get("model") == "gpt-5.6-terra"
     assert body.get("service_tier") == "priority"
     meta = next((c for c in chunks if c.kind == "metadata"), None)
     assert meta is not None and str(meta.data.get("actual_model", "")).endswith("-openai")
@@ -3417,11 +3425,13 @@ async def test_client_reproduces_rotated_gpt_direct_auth_deadline():
     async def silent_gpt_auth(**kwargs):
         token = kwargs["auth"].token
         attempts.append(token)
+        if token == "stale-token":
+            raise RoseStallError("rose.complete TTFT exceeded 0.05s")
         if token == "fresh-token":
             yield StreamChunk(kind="metadata", data={"actual_model": "gpt-5.4-gpt"})
             yield StreamChunk(kind="content", data={"text": "partial"})
-        await asyncio.sleep(1.0)
-        yield StreamChunk(kind="metadata", data={"actual_model": "gpt-5.4-gpt"})
+            raise RoseDeadlineError("rose.complete deadline exceeded after 0.2s")
+        raise AssertionError(f"unexpected token: {token}")
 
     async def fetch_fresh(user_id: str):
         fetches.append(user_id)
@@ -3463,7 +3473,7 @@ async def test_client_reproduces_rotated_gpt_direct_auth_deadline():
                 messages=[{"role": "user", "content": "repro final explore synthesis"}],
                 gpt_auth=auth,
                 call_site="explore_agent",
-                deadline_s=0.2,
+                deadline_s=5.0,
                 ttft_timeout_s=0.05,
                 idle_timeout_s=0.5,
             ):

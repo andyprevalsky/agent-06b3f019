@@ -37,10 +37,6 @@ from helpers.llm import (
     call_llm_structured_streaming,
     check_progress,
 )
-from helpers.llm_timeouts import (
-    STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS,
-    VERIFIER_ACTIVITY_TIMEOUT_SECONDS,
-)
 from helpers.messages import CoalescingStreamBroadcaster, schedule_background_broadcast
 from helpers.summarize import compress_context
 from helpers.tracing import span, traced
@@ -53,6 +49,10 @@ from providers.rose.errors import RoseRefusalError
 from tools.base import EventType, MessageStatus, ToolEvent
 from tools.knowledge_base import query_blueprints
 from utils.error_utils import extract_error_message
+from utils.llm_timeouts import (
+    STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS,
+    VERIFIER_ACTIVITY_TIMEOUT_SECONDS,
+)
 from utils.tool_schemas import PLAN_TOOL_MODELS, create_agent_action_model
 
 logger = structlog.get_logger()

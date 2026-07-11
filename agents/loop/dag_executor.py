@@ -26,10 +26,10 @@ from temporalio.common import RetryPolicy
 
 from domains.reasoning.config import MAX_CONTEXT_MESSAGES as REASONING_MAX_CONTEXT_MESSAGES
 from helpers.llm import _pending_llm_context, call_llm_activity
-from helpers.llm_timeouts import STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
 from loop.context_utils import poll_and_update_context
 from loop.payload_guard import check_activity_payload
 from tools.base import EventType, MessageStatus, ToolEvent
+from utils.llm_timeouts import STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
 from utils.prompts import CONTEXT_POINTERS_RULE
 from utils.tool_call_ids import spawn_group_id
 

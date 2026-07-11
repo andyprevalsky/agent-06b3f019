@@ -5,7 +5,7 @@ Constants, defaults, and environment reads.
 
 import os
 
-from helpers.llm_timeouts import VERIFIER_ACTIVITY_TIMEOUT_SECONDS
+from utils.llm_timeouts import VERIFIER_ACTIVITY_TIMEOUT_SECONDS
 
 # External service keys
 STEEL_API_KEY = os.environ.get("STEEL_API_KEY", "")

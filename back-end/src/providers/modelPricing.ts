@@ -39,6 +39,18 @@ const FIXED_MODEL_PRICING: Record<string, ModelPricing> = {
     prompt: (5.0 / 1_000_000).toString(),
     completion: (30.0 / 1_000_000).toString(),
   },
+  'gpt-5.6-luna-openai': {
+    prompt: (1.0 / 1_000_000).toString(),
+    completion: (6.0 / 1_000_000).toString(),
+  },
+  'gpt-5.6-terra-openai': {
+    prompt: (2.5 / 1_000_000).toString(),
+    completion: (15.0 / 1_000_000).toString(),
+  },
+  'gpt-5.6-sol-openai': {
+    prompt: (5.0 / 1_000_000).toString(),
+    completion: (30.0 / 1_000_000).toString(),
+  },
 };
 
 /**

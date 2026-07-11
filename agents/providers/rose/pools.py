@@ -7,23 +7,23 @@ Model contract (P1):
 
     rose-1-mini:
         claudeAuth = claude-haiku-4-5
-        gptAuth    = gpt-5.4
+        gptAuth    = gpt-5.6-luna
         waterfall  = anthropic/claude-haiku-4.5 -> google/gemini-3-flash-preview
 
     rose-1-lite:
         claudeAuth = claude-sonnet-5
-        gptAuth    = gpt-5.4
+        gptAuth    = gpt-5.6-terra
         waterfall  = google/gemini-3.5-flash -> moonshotai/kimi-k2.7-code
 
     rose-1-ultra:
         claudeAuth = claude-fable-5
-        gptAuth    = gpt-5.5
+        gptAuth    = gpt-5.6-sol
         waterfall  = anthropic/claude-opus-4.8 -> google/gemini-3.1-pro-preview
 
     rose-1-browser-use:
         claudeAuth = claude-fable-5
-        gptAuth    = gpt-5.5
-        waterfall  = anthropic/claude-opus-4.8 -> openai/gpt-5.5
+        gptAuth    = gpt-5.6-sol
+        waterfall  = anthropic/claude-opus-4.8 -> openai/gpt-5.6-sol
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
     "rose-1-mini": PoolSpec(
         name="rose-1-mini",
         claude_auth_model="claude-haiku-4-5",
-        gpt_auth_model="gpt-5.4",
+        gpt_auth_model="gpt-5.6-luna",
         waterfall=(
             "anthropic/claude-haiku-4.5",
             "google/gemini-3-flash-preview",
@@ -68,7 +68,7 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
     "rose-1-lite": PoolSpec(
         name="rose-1-lite",
         claude_auth_model="claude-sonnet-5",
-        gpt_auth_model="gpt-5.4",
+        gpt_auth_model="gpt-5.6-terra",
         waterfall=(
             "google/gemini-3.5-flash",
             "moonshotai/kimi-k2.7-code",
@@ -77,7 +77,7 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
     "rose-1-ultra": PoolSpec(
         name="rose-1-ultra",
         claude_auth_model="claude-fable-5",
-        gpt_auth_model="gpt-5.5",
+        gpt_auth_model="gpt-5.6-sol",
         waterfall=(
             "anthropic/claude-opus-4.8",
             "google/gemini-3.1-pro-preview",
@@ -89,10 +89,10 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
     "rose-1-browser-use": PoolSpec(
         name="rose-1-browser-use",
         claude_auth_model="claude-fable-5",
-        gpt_auth_model="gpt-5.5",
+        gpt_auth_model="gpt-5.6-sol",
         waterfall=(
             "anthropic/claude-opus-4.8",
-            "openai/gpt-5.5",
+            "openai/gpt-5.6-sol",
         ),
     ),
 }
@@ -103,7 +103,7 @@ def get_pool(name: str) -> PoolSpec:
     if name not in POOL_REGISTRY:
         valid = ", ".join(sorted(POOL_REGISTRY.keys()))
         raise ValueError(f"Unknown Rose pool {name!r} (valid: {valid})")
-    return POOL_REGISTRY[name]  # type: ignore[index]
+    return POOL_REGISTRY[name]
 
 
 def all_pool_names() -> List[str]:
