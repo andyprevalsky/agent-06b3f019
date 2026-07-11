@@ -49,6 +49,7 @@ class BenchmarkTask:
     environment: Optional[dict] = None  # {mode, db_fixtures, base_images, services, secrets, live_targets, context_notes}
     evaluators: List[dict] = field(default_factory=list)  # Declared evaluator contract (static_check | single_turn_llm_judge | agentic_llm_judge)
     source: List[str] = field(default_factory=list)  # Provenance pointers (origin task/test-prompt/smoke/agent_id)
+    mid_run_feedback: Optional[dict] = None  # Live USER message injected after a durable root-message boundary
 
 
 _TASKS_FILE = os.path.join(os.path.dirname(__file__), "tasks.json")
