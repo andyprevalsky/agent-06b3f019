@@ -68,11 +68,16 @@ function ThinkingIndicators({
     return (a.startedAtMs ?? 0) - (b.startedAtMs ?? 0);
   });
   if (bubbles.length <= 1) {
+    const singleBubble = bubbles[0]?.[1];
     return (
       <ThinkingIndicator
         compact={compact}
-        isClaudeStreaming={streaming.isClaude || streaming.isGpt}
-        streamStartedAtMs={streaming.streamStartedAtMs}
+        isClaudeStreaming={
+          singleBubble
+            ? singleBubble.isClaude === true || singleBubble.isGpt === true
+            : streaming.isClaude || streaming.isGpt
+        }
+        streamStartedAtMs={singleBubble ? singleBubble.startedAtMs : streaming.streamStartedAtMs}
         streamingTokenCount={streamingTokenCount}
         animatedTokenCount={animatedTokenCount}
       />
