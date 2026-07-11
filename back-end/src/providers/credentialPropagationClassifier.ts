@@ -3,6 +3,7 @@ import { fetchComputeTokenForUser } from './computeCredentials';
 import { prisma } from './database';
 import { createLogger } from './logger';
 import { createStreamingCompletion } from './rose/client';
+import { StructuredOutputAccumulator } from './rose/structuredOutput';
 import {
   buildCredentialClassifierSystemPrompt,
   buildCredentialClassifierUserPrompt,
@@ -594,11 +595,10 @@ async function classifierContent(
     },
   });
 
-  let content = '';
+  const structuredOutput = new StructuredOutputAccumulator();
   for await (const chunk of stream) {
-    const delta = chunk.choices[0]?.delta;
-    if (delta?.content !== undefined && delta.content !== '') content += delta.content;
+    structuredOutput.addCompletionChunk(chunk);
   }
-  return content;
+  return structuredOutput.finalText();
   /* c8 ignore stop */
 }

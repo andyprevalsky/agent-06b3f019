@@ -6,6 +6,7 @@
 
 import { z } from 'zod';
 import { createStreamingCompletion, markCacheable } from '../rose';
+import { StructuredOutputAccumulator } from '../rose/structuredOutput';
 import { agentFastMode, cacheGet, cacheSet } from '../fastCacheStore';
 import { goalHash } from '../fastCacheNormalizeCore';
 import { contentKey } from '../fastCacheNormalizeKeys';
@@ -439,6 +440,7 @@ export async function callRouterLlm(params: {
   // Track reasoning and JSON content separately (like agent worker)
   let accumulatedReasoning = ''; // From delta.reasoning (thinking models)
   let accumulatedJson = ''; // From delta.content (JSON structure)
+  const structuredOutput = new StructuredOutputAccumulator();
   let sequence = 1;
   let lastStreamedText = ''; // What we've sent to FE so far
   let chunkCount = 0;
@@ -498,7 +500,8 @@ export async function callRouterLlm(params: {
     // Handle JSON content (delta.content)
     const contentDelta = delta?.content || '';
     if (contentDelta) {
-      accumulatedJson += contentDelta;
+      structuredOutput.addCompletionChunk(chunk);
+      accumulatedJson = structuredOutput.currentText();
     }
 
     // Extract streamable reasoning text
@@ -567,7 +570,7 @@ export async function callRouterLlm(params: {
   }
 
   // Combine for parsing - use accumulatedJson for JSON parsing
-  const fullJson = accumulatedJson;
+  const fullJson = structuredOutput.finalText();
 
   if (
     fcKey &&

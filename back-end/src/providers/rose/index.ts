@@ -30,3 +30,4 @@ export {
 } from './errors';
 export { POOL_REGISTRY, getPool, isRoseModel, poolForModel } from './pools';
 export type { PoolName, PoolSpec } from './pools';
+export { StructuredOutputAccumulator, StructuredOutputCardinalityError } from './structuredOutput';
