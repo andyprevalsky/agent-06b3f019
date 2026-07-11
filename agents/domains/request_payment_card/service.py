@@ -7,6 +7,8 @@ import json
 import re
 from typing import Any, Dict
 
+from domains.request_payment_card.config import DEFAULT_CURRENCY
+from domains.request_payment_card.types import PaymentPayload
 from utils.purchase_approval import (
     validate_product_detail_url,
     validate_product_rating,
@@ -38,7 +40,7 @@ def _to_int(value: Any) -> int:
     return 0
 
 
-def normalize_payment_payload(tool_call: Dict[str, Any], user_id: str) -> Dict[str, Any]:
+def normalize_payment_payload(tool_call: Dict[str, Any], user_id: str) -> PaymentPayload:
     line_items = []
     for item in _to_list(tool_call.get("line_items") or tool_call.get("lineItems")):
         if not isinstance(item, dict):
@@ -70,10 +72,10 @@ def normalize_payment_payload(tool_call: Dict[str, Any], user_id: str) -> Dict[s
             }
         )
 
-    payload = {
+    payload: PaymentPayload = {
         "userId": user_id,
         "merchant": str(tool_call.get("merchant") or "").strip(),
-        "currency": str(tool_call.get("currency") or "USD").upper(),
+        "currency": str(tool_call.get("currency") or DEFAULT_CURRENCY).upper(),
         "lineItems": line_items,
         "fees": fees,
         "subtotalCents": _to_int(tool_call.get("subtotal_cents") or tool_call.get("subtotalCents")),
@@ -83,7 +85,7 @@ def normalize_payment_payload(tool_call: Dict[str, Any], user_id: str) -> Dict[s
     return payload
 
 
-def build_payment_fingerprint(payload: Dict[str, Any]) -> str:
+def build_payment_fingerprint(payload: Dict[str, Any] | PaymentPayload) -> str:
     stable = {
         "userId": payload.get("userId"),
         "merchant": str(payload.get("merchant") or "").strip().lower(),
@@ -102,7 +104,7 @@ def _approval_plain_text(value: Any) -> str:
     return text.translate(str.maketrans({character: f"\\{character}" for character in r"\`*_{}[]<>()#+-.!|"}))
 
 
-def build_payment_question(payload: Dict[str, Any]) -> str:
+def build_payment_question(payload: Dict[str, Any] | PaymentPayload) -> str:
     total = (payload.get("totalCents") or 0) / 100
     merchant = _approval_plain_text(payload.get("merchant") or "this merchant")
     lines = [f"Approve a ${total:.2f} purchase from {merchant}?"]
@@ -113,8 +115,7 @@ def build_payment_question(payload: Dict[str, Any]) -> str:
         lines.append(f"- {name} x{qty}: ${line_total:.2f}")
         lines.append(f"  Product: <{item.get('productUrl')}>")
         lines.append(
-            f"  Reviews: {_approval_plain_text(item.get('rating'))} "
-            f"({_approval_plain_text(item.get('reviewCount'))})"
+            f"  Reviews: {_approval_plain_text(item.get('rating'))} ({_approval_plain_text(item.get('reviewCount'))})"
         )
     for fee in payload.get("fees") or []:
         label = _approval_plain_text(fee.get("label") or "Fee")
