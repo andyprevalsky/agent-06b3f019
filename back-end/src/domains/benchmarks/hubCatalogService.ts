@@ -58,10 +58,44 @@ export async function seedBenchmarkTasks(): Promise<{ inserted: number; total: n
     await repo.createTask({ name: task.name, ...taskColumns(task) });
     inserted += 1;
   }
+  await reconcileSeededRows(tasks);
   log.info('Benchmark task seed complete', { inserted, total: known.size + inserted });
   // Public catalog routes serve DB truth once seeded (edits included).
   await refreshTasksFromDb();
   return { inserted, total: known.size + inserted };
+}
+
+/**
+ * Two narrow exceptions to DB-wins, applied on every seed:
+ *   - empty-string descriptions violate the catalog contract (patchTask deletes
+ *     the key on clear) — heal rows seeded before that rule existed
+ *   - `retired` in tasks.json propagates to existing rows: retirement is a
+ *     repo-level decree (the eval suite reads the file). Un-retiring via the
+ *     hub still sticks — the poller exports the DB catalog back to tasks.json,
+ *     after which the file no longer says retired.
+ */
+async function reconcileSeededRows(tasks: RawTask[]): Promise<void> {
+  const retiredInFile = new Set(
+    tasks.filter((t) => t.status === 'retired').map((t) => t.name as string)
+  );
+  for (const row of await repo.findAllTasks()) {
+    const definition = { ...((row.definition ?? {}) as Record<string, unknown>) };
+    const data: repo.BenchmarkTaskUpdate = {};
+    if (definition.description === '') {
+      delete definition.description;
+      data.definition = definition as repo.JsonInput;
+    }
+    if (retiredInFile.has(row.name) && row.status !== 'retired') {
+      data.status = 'retired';
+      definition.status = 'retired';
+      data.definition = definition as repo.JsonInput;
+    }
+    if (Object.keys(data).length > 0) {
+      data.updatedBy = 'catalog-seed';
+      await repo.updateTask(row.name, data);
+      log.info('Reconciled seeded task row', { name: row.name, fields: Object.keys(data) });
+    }
+  }
 }
 
 /** Replace the in-memory public catalog cache with DB definitions. */
@@ -205,7 +239,10 @@ export async function getCatalog(): Promise<CatalogTask[]> {
     return {
       name: row.name,
       title: row.title,
-      description: typeof definition.description === 'string' ? definition.description : null,
+      description:
+        typeof definition.description === 'string' && definition.description !== ''
+          ? definition.description
+          : null,
       prompt: row.prompt,
       status: row.status,
       bench: row.bench,

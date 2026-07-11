@@ -32,6 +32,9 @@ import { retryWithBackoff } from '../../providers/retry';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { config } from 'dotenv';
+
+config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
 const API_KEY = process.env.BACKEND_API_KEY || '';

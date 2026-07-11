@@ -11,7 +11,10 @@ export class TasksUnavailableError extends Error {
 }
 
 /**
- * Returns all benchmark task definitions.
+ * Returns all visible benchmark task definitions. Retired tasks exist only
+ * for history-ledger integrity — hidden from every serving surface. (The
+ * poller's tasks.json export keeps file entries absent from this list
+ * untouched, so retired file entries survive round-trips.)
  * Throws TasksUnavailableError if tasks.json failed to load at startup.
  */
 export function getTasks(): unknown[] {
@@ -19,7 +22,7 @@ export function getTasks(): unknown[] {
   if (!cached) {
     throw new TasksUnavailableError();
   }
-  return cached;
+  return cached.filter((task) => (task as { status?: unknown }).status !== 'retired');
 }
 
 export interface TestPrompt {
@@ -56,7 +59,6 @@ interface CatalogTaskShape {
 export function getTestPrompts(): TestPrompt[] {
   return (getTasks() as CatalogTaskShape[])
     .filter((task) => (task.runner ?? 'agent') === 'agent')
-    .filter((task) => (task as { status?: unknown }).status !== 'retired')
     .map((task) => {
       const attachments = Array.isArray(task.attachments)
         ? (task.attachments as string[])
