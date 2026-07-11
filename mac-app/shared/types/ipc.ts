@@ -52,6 +52,7 @@ export interface AutoFillSettingsResult {
 
 // IPC method signatures
 export interface IPC {
+  readonly isElectron: true;
   auth: {
     check: () => Promise<AuthSession | null>;
     save: (session: AuthSession) => Promise<{ success: boolean }>;

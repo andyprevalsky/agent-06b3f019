@@ -6,12 +6,16 @@ export function resolveBackendBaseUrl(
     ? undefined
     : window.location,
   allowDynamicLocalInference = !import.meta.env.VITEST,
+  electronRenderer = typeof window !== 'undefined' &&
+    (window as typeof window & { api?: { isElectron?: boolean } }).api?.isElectron === true,
 ): string {
+  const explicit = explicitUrl ? explicitUrl.replace(/\/$/, '') : '';
+  if (electronRenderer) return explicit || 'http://localhost:3001';
+
   if (import.meta.env.DEV && allowDynamicLocalInference && locationLike) {
     const frontendPort = Number(locationLike.port);
     const isLocalHost =
       locationLike.hostname === 'localhost' || locationLike.hostname === '127.0.0.1';
-    const explicit = explicitUrl ? explicitUrl.replace(/\/$/, '') : '';
     const explicitIsDefaultLocal =
       explicit === 'http://localhost:3001' || explicit === 'http://127.0.0.1:3001';
     const explicitIsLocal =
@@ -26,7 +30,7 @@ export function resolveBackendBaseUrl(
     }
   }
 
-  if (explicitUrl) return explicitUrl.replace(/\/$/, '');
+  if (explicit) return explicit;
 
   return 'http://localhost:3001';
 }

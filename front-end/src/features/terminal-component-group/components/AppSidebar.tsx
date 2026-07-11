@@ -16,7 +16,7 @@
  * (SidebarAgentList, SidebarCreditIndicator, SidebarFeedbackButton, SidebarBottomNav).
  */
 
-import { useMemo, useState, type CSSProperties } from 'react';
+import { useCallback, useMemo, useState, type CSSProperties } from 'react';
 import { ChevronLeft, ChevronRight, Plus } from 'lucide-react';
 import type { User } from '@supabase/supabase-js';
 import { Button } from '@/components/ui/button';
@@ -43,6 +43,7 @@ interface AppSidebarProps {
   user: User | null;
   onLogout: () => void;
   onLoginClick: () => void;
+  showAdminHealth?: boolean;
   dripStyles?: SidebarDripStyles;
   blur?: number;
   backgroundColors?: number;
@@ -152,6 +153,7 @@ export default function AppSidebar({
   user,
   onLogout,
   onLoginClick,
+  showAdminHealth = false,
   dripStyles,
   blur = 0,
   backgroundColors = 0,
@@ -159,7 +161,20 @@ export default function AppSidebar({
 }: AppSidebarProps) {
   const [isCollapsed, setIsCollapsed] = useState(true);
   const currentWidth = isCollapsed ? SIDEBAR_WIDTH_COLLAPSED : SIDEBAR_WIDTH_EXPANDED;
-  const navItems = useSidebarNavItems({ currentView, onViewChange, onSelectAgent, showBrowse });
+  const handleViewChange = useCallback(
+    (view: SidebarView) => {
+      onViewChange(view);
+      if (view === 'admin-health') setIsCollapsed(true);
+    },
+    [onViewChange],
+  );
+  const navItems = useSidebarNavItems({
+    currentView,
+    onViewChange: handleViewChange,
+    onSelectAgent,
+    showBrowse,
+    showAdminHealth,
+  });
   const style = useMemo(
     () =>
       buildSidebarStyle({
