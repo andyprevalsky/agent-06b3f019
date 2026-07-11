@@ -167,6 +167,7 @@ class BrowserHumanizer:
             "BROWSER_AGENT_CDP_KEYBOARD_TRANSPORT", True
         )
         self._cdp_session: Optional[Any] = None
+        self._cdp_session_lock = asyncio.Lock()
         self._cursor_observer: Optional[Callable[[int, int], Any]] = None
         self._keycap = KeycapTimingSynthesizer(basis_count=500 if fast else 1500)
         self._movement_lock = asyncio.Lock()
@@ -395,17 +396,25 @@ class BrowserHumanizer:
             return None
         if self._cdp_session is not None:
             return self._cdp_session
-        context = getattr(self.input_page, "context", None)
-        if context is None or not hasattr(context, "new_cdp_session"):
-            return None
-        try:
-            self._cdp_session = await context.new_cdp_session(self.input_page)
-        except Exception as exc:
-            logger.debug("CDP input transport unavailable", error=str(exc))
-            self._cdp_mouse_transport_enabled = False
-            self._cdp_keyboard_transport_enabled = False
-            return None
-        return self._cdp_session
+
+        async with self._cdp_session_lock:
+            if not self._cdp_mouse_transport_enabled and not self._cdp_keyboard_transport_enabled:
+                return None
+            if self._cdp_session is not None:
+                return self._cdp_session
+
+            context = getattr(self.input_page, "context", None)
+            if context is None or not hasattr(context, "new_cdp_session"):
+                return None
+            try:
+                self._cdp_session = await context.new_cdp_session(self.input_page)
+            except Exception as exc:
+                logger.debug("CDP input transport unavailable", error=str(exc))
+                if self._cdp_session is None:
+                    self._cdp_mouse_transport_enabled = False
+                    self._cdp_keyboard_transport_enabled = False
+                return self._cdp_session
+            return self._cdp_session
 
     async def _move_path_with_cdp_fire_and_drain(self, samples: List[Any]) -> bool:
         cdp_session = await self._get_cdp_session() if self._cdp_mouse_transport_enabled else None
@@ -669,6 +678,11 @@ class BrowserHumanizer:
                     task.cancel()
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
+            async with self._cdp_session_lock:
+                if self._cdp_session is cdp_session:
+                    self._cdp_session = None
+                    self._cdp_mouse_transport_enabled = False
+                    self._cdp_keyboard_transport_enabled = False
             raise
         return True
 
