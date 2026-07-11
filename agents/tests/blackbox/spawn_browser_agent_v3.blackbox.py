@@ -17,6 +17,8 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from _test_utils import (
     BlackboxResult,
     assert_captured_call,
@@ -171,10 +173,18 @@ def test_browser_action_log_summary_redacts_payment_secrets():
         },
     )
 
-    serialized = json.dumps({"action": action_summary, "payment": payment_summary, "history": history_entry}, sort_keys=True)
+    serialized = json.dumps(
+        {"action": action_summary, "payment": payment_summary, "history": history_entry}, sort_keys=True
+    )
     assert "SHOULD_NOT_LOG_TYPED_TEXT" not in serialized
     assert "SHOULD_NOT_LOG_CVV" not in serialized
     assert "SHOULD_NOT_LOG_PASSWORD" not in serialized
+
+
+def test_browser_progress_title_describes_active_agent():
+    from domains.spawn_browser_agent_v3.handler import BROWSER_PROGRESS_TITLE
+
+    assert BROWSER_PROGRESS_TITLE == "Browser Agent In Progress"
 
 
 def test_verifier_activity_timeout_allows_llm_call():
@@ -4590,7 +4600,17 @@ async def test_execute_action_request_payment_card_requests_workflow_approval():
     ah.record_action = AsyncMock()
     payment_request = {
         "merchant": "Rose Labs Test Payment",
-        "line_items": [{"name": "Aurora Notebook", "unit_price_cents": 1200, "quantity": 1, "line_total_cents": 1200}],
+        "line_items": [
+            {
+                "name": "Aurora Notebook",
+                "product_url": "https://example.test/products/aurora-notebook",
+                "rating": "4.9 stars",
+                "review_count": "217 reviews",
+                "unit_price_cents": 1200,
+                "quantity": 1,
+                "line_total_cents": 1200,
+            }
+        ],
         "subtotal_cents": 1200,
         "total_cents": 4396,
     }
@@ -4627,6 +4647,44 @@ async def test_execute_action_request_payment_card_rejects_empty_receipt():
     assert "line_items" in out["error"]
     assert "subtotal_cents" in out["error"]
     assert "total_cents" in out["error"]
+
+
+async def test_execute_action_request_payment_card_rejects_current_session_product_link():
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom = MagicMock()
+    dom.session = MagicMock()
+    dom.selector_map = {}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    current_url = "https://example.test/session/abc"
+    out = await execute_action(
+        dom,
+        ah,
+        {
+            "action": "request_payment_card",
+            "params": {
+                "merchant": "Example Shop",
+                "line_items": [
+                    {
+                        "name": "Beanie",
+                        "product_url": current_url,
+                        "rating": "4.8 stars",
+                        "review_count": "312 reviews",
+                        "unit_price_cents": 1200,
+                        "quantity": 1,
+                        "line_total_cents": 1200,
+                    }
+                ],
+                "subtotal_cents": 1200,
+                "total_cents": 1200,
+            },
+        },
+        current_url=current_url,
+    )
+
+    assert out["success"] is False
+    assert "current checkout or session page" in out["error"]
 
 
 async def test_execute_action_request_payment_card_rejects_duplicate_after_card_ready():
@@ -6421,6 +6479,9 @@ def test_render_write_lock_notification_question_uses_purchase_metadata():
                         "title": "Carhartt Mens Knit Cuffed Beanie Hat, Black",
                         "price": "$19.99",
                         "quantity": "1",
+                        "rating": "4.8 stars",
+                        "review_count": "167,432 reviews",
+                        "product_url": "https://www.amazon.com/dp/B000000001",
                         "seller": "Amazon.com",
                         "shipping": "FREE Two Day delivery, arriving Saturday, Jun 27, 2026",
                     }
@@ -6442,6 +6503,9 @@ def test_render_write_lock_notification_question_uses_purchase_metadata():
     assert "Rose wants to buy one black Carhartt beanie on **Amazon**." in question
     assert "Carhartt Mens Knit Cuffed Beanie Hat, Black" in question
     assert "Price: $19.99" in question
+    assert "Rating: 4.8 stars" in question
+    assert "Reviews: 167,432 reviews" in question
+    assert "Product: [View product](https://www.amazon.com/dp/B000000001)" in question
     assert "Seller: Amazon.com" in question
     assert "Shipping: FREE Two Day delivery" in question
     assert "Total: $21.71" in question
@@ -6449,6 +6513,7 @@ def test_render_write_lock_notification_question_uses_purchase_metadata():
     assert "Delivery: Aman Gottumukkala" in question
     assert "**Image:** https://m.media-amazon.com/images/I/beanie.jpg" in question
     assert "fallback question" not in question
+    assert "https://www.amazon.com/checkout/spc" not in question
     assert "click" not in question.lower()
 
 
@@ -6549,6 +6614,7 @@ async def test_generate_write_lock_notification_payment_forks_and_renders_questi
             browser_use_mode="claude",
             approval_type="payment",
             current_url="https://www.delta.com/checkout",
+            trusted_page_urls=["https://www.delta.com/checkout"],
             pending_action={"action": "click", "params": {"index": 4}},
             write_lock_result={"status": "awaiting_payment_card_approval"},
             system_name="Rose",
@@ -6623,6 +6689,7 @@ async def test_generate_write_lock_notification_raises_when_fork_calls_wrong_too
                 browser_use_mode="claude",
                 approval_type="payment",
                 current_url="https://shop.example/checkout",
+                trusted_page_urls=["https://shop.example/checkout"],
                 pending_action={"action": "click"},
                 write_lock_result={"status": "awaiting_payment_card_approval"},
                 system_name="Rose",
@@ -6757,6 +6824,27 @@ def test_write_lock_notification_prompt_includes_media_candidates():
     assert "https://m.media-amazon.com/images/I/beanie.jpg" in prompt
     assert "use only those URLs for media and item image_url" in prompt
     assert "description under 80 characters" in prompt
+    assert "must already exist in the browser trajectory" in prompt
+    assert "Visit the product page" not in prompt
+
+
+def test_purchase_write_lock_notification_failure_blocks_approval_fallback():
+    from domains.spawn_browser_agent_v3.handler import (
+        PurchaseApprovalContextError,
+        PurchaseApprovalNotificationRetryableError,
+        _enforce_write_lock_notification_failure_policy,
+    )
+
+    with pytest.raises(PurchaseApprovalContextError):
+        _enforce_write_lock_notification_failure_policy(
+            "purchase",
+            PurchaseApprovalContextError("missing reviews"),
+        )
+
+    with pytest.raises(PurchaseApprovalNotificationRetryableError):
+        _enforce_write_lock_notification_failure_policy("purchase", TimeoutError("provider timeout"))
+
+    assert _enforce_write_lock_notification_failure_policy("message", ValueError("metadata unavailable")) is None
 
 
 def test_normalize_write_lock_notification_media_uses_matching_media_candidate():
@@ -8423,7 +8511,16 @@ async def test_manager_payment_card_approval_uses_registered_activity_names_and_
             "status": "awaiting_payment_card_approval",
             "payment_request": {
                 "merchant": "Blick Art Materials",
-                "line_items": [{"name": "Brush", "quantity": 1, "line_total_cents": 636}],
+                "line_items": [
+                    {
+                        "name": "Brush",
+                        "product_url": "https://www.dickblick.com/products/brush/",
+                        "rating": "4.7 stars",
+                        "review_count": "84 reviews",
+                        "quantity": 1,
+                        "line_total_cents": 636,
+                    }
+                ],
                 "subtotal_cents": 636,
                 "total_cents": 636,
             },
@@ -8550,7 +8647,10 @@ async def run_all_tests():
     r = BlackboxResult()
 
     await r.record_async("cdp_use_websocket_direct", test_cdp_use_websocket_patch_disables_proxy_discovery)
-    r.record("browser_action_log_summary_redacts_payment_secrets", test_browser_action_log_summary_redacts_payment_secrets)
+    r.record(
+        "browser_action_log_summary_redacts_payment_secrets", test_browser_action_log_summary_redacts_payment_secrets
+    )
+    r.record("browser_progress_title", test_browser_progress_title_describes_active_agent)
     r.record("verifier_timeout_standard_llm_budget", test_verifier_activity_timeout_allows_llm_call)
     r.record(
         "browser_supervisor_timeout_ordering",
@@ -8956,6 +9056,10 @@ async def run_all_tests():
         test_execute_action_request_payment_card_rejects_empty_receipt,
     )
     await r.record_async(
+        "execute_action_request_payment_card_rejects_current_session_link",
+        test_execute_action_request_payment_card_rejects_current_session_product_link,
+    )
+    await r.record_async(
         "execute_action_request_payment_card_rejects_duplicate_after_card_ready",
         test_execute_action_request_payment_card_rejects_duplicate_after_card_ready,
     )
@@ -9276,6 +9380,10 @@ async def run_all_tests():
     r.record(
         "write_lock_notification_prompt_media_candidates",
         test_write_lock_notification_prompt_includes_media_candidates,
+    )
+    r.record(
+        "purchase_write_lock_notification_failure_blocks_fallback",
+        test_purchase_write_lock_notification_failure_blocks_approval_fallback,
     )
     r.record(
         "normalize_write_lock_notification_media_candidate",

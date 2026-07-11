@@ -122,6 +122,7 @@ from .service_crypto import (
 from .types import ClaudeTokenState
 
 logger = structlog.get_logger()
+BROWSER_PROGRESS_TITLE = "Browser Agent In Progress"
 _background_browser_cleanup_tasks: set[asyncio.Task] = set()
 
 
@@ -1521,14 +1522,34 @@ def _write_lock_notification_prompt(
         "mechanic. For purchases, include every visible item being bought and set media to exactly one "
         "image when any product, checkout, or page image is visible; for multiple items, use one "
         "rendered_summary image if available. For each "
-        "purchase item, use the item key title, not name. Include visible price, quantity, description "
-        "under 80 characters, rating/reviews, seller, delivery details, product image URL, order totals, "
+        "purchase item, use the item key title, not name. You MUST include its real numeric rating and "
+        "review count plus its canonical product-detail URL; never substitute the current cart, checkout, "
+        "payment, or order URL. Those required fields must already exist in the browser trajectory; do not "
+        "invent them or perform a browser action in this fork. Also include "
+        "visible price, quantity, description under 80 characters, seller, delivery details, product image URL, order totals, "
         "delivery address, and payment method when visible. If Runtime evidence includes media_candidates, use only those "
         "URLs for media and item image_url, preferring the candidate whose alt or nearby_text best "
         "matches the purchased item. For payment, never include secrets such as card numbers, CVV, "
         "passwords, tokens, or one-time codes.\n\n"
         f"Runtime evidence:\n{json_dumps_compact(evidence)}"
     )
+
+
+class PurchaseApprovalContextError(RuntimeError):
+    """Raised when a purchase approval cannot meet its required context contract."""
+
+
+class PurchaseApprovalNotificationRetryableError(RuntimeError):
+    """Raised when transient notification generation should preserve checkout state for retry."""
+
+
+def _enforce_write_lock_notification_failure_policy(approval_type: str, error: Exception) -> None:
+    if approval_type == "purchase":
+        if isinstance(error, PurchaseApprovalContextError):
+            raise error
+        raise PurchaseApprovalNotificationRetryableError(
+            "Purchase approval notification generation failed transiently; retry with the checkout session paused"
+        ) from error
 
 
 def _format_write_lock_value(label: str, value: Any) -> Optional[str]:
@@ -1579,14 +1600,15 @@ def _render_write_lock_notification_question(
                     ("Price", "price"),
                     ("Qty", "quantity"),
                     ("Description", "description"),
-                    ("Rating", "rating"),
-                    ("Reviews", "review_count"),
                     ("Seller", "seller"),
                     ("Shipping", "shipping"),
                 ):
                     formatted = _format_write_lock_value(f"   {label}", item.get(key))
                     if formatted:
                         lines.append(formatted)
+                lines.append(f"   Rating: {item['rating']}")
+                lines.append(f"   Reviews: {item['review_count']}")
+                lines.append(f"   Product: [View product]({item['product_url']})")
         totals = purchase.get("totals") if isinstance(purchase.get("totals"), dict) else {}
         total_lines = [
             _format_write_lock_value("Subtotal", totals.get("subtotal")),
@@ -1651,7 +1673,7 @@ def _render_write_lock_notification_question(
             lines.append(f"\n**Image:** {first['url']}")
 
     url = service.get("url")
-    if url:
+    if url and trigger_type != "purchase":
         lines.append(f"\n**Page:** {url}")
 
     return "\n".join(lines)
@@ -1848,6 +1870,7 @@ async def _generate_write_lock_notification(
     browser_use_mode: Optional[str],
     approval_type: str,
     current_url: str,
+    trusted_page_urls: List[str],
     pending_action: Dict[str, Any],
     write_lock_result: Dict[str, Any],
     system_name: str,
@@ -1894,9 +1917,15 @@ async def _generate_write_lock_notification(
         )
     from browser_tools.schemas import GenerateWriteLockNotificationTool
 
-    validated_notification = GenerateWriteLockNotificationTool.model_validate(
-        {"tool": "generate_write_lock_notification", **dict(action.get("params") or {})}
-    )
+    try:
+        validated_notification = GenerateWriteLockNotificationTool.model_validate(
+            {"tool": "generate_write_lock_notification", **dict(action.get("params") or {})},
+            context={"trusted_page_urls": [*trusted_page_urls, current_url]},
+        )
+    except ValueError as error:
+        raise PurchaseApprovalContextError(
+            "Purchase approval blocked because reviews and a canonical product link could not be verified"
+        ) from error
     notification = validated_notification.model_dump(exclude={"tool"}, exclude_none=True)
     notification = _normalize_write_lock_notification_media(
         notification,
@@ -2878,7 +2907,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 t = time.monotonic()
                 await save_browser_action_message(
                     agent_id=agent_id,
-                    title="Browser Ready",
+                    title=BROWSER_PROGRESS_TITLE,
                     task_id=task_id,
                     message="",
                     status=MessageStatus.IN_PROGRESS,
@@ -2932,6 +2961,12 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     "For purchases, extract the full itemized receipt and call request_payment_card. "
                     "Never ask the user to type a payment card into chat."
                 )
+            _user_context_sections.append(
+                "## Purchase Approval Context\n"
+                "Before triggering any Buy, Place Order, or other purchase write action, collect every item's "
+                "canonical product-detail URL, numeric rating, and numeric review count. Never use a cart or "
+                "checkout URL as the product link. A purchase approval is blocked if any item lacks these fields."
+            )
             _record_timing("parallel.data.user_profile", t)
 
             t = time.monotonic()
@@ -3447,6 +3482,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     credential_refs_by_secret_ref=credential_refs_by_secret_ref,
                     user_id=user_id,
                     current_url=current_url,
+                    trusted_page_urls=visited_urls,
                     write_lock_enabled=write_lock_enabled,
                     write_lock_approvals=write_lock_approvals,
                     system_name=system_name,
@@ -4371,6 +4407,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         credential_refs_by_secret_ref=credential_refs_by_secret_ref,
                         user_id=user_id,
                         current_url=current_url,
+                        trusted_page_urls=visited_urls,
                         write_lock_enabled=write_lock_enabled,
                         write_lock_approvals=write_lock_approvals,
                         system_name=system_name,
@@ -4469,6 +4506,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         browser_use_mode=browser_use_mode,
                         approval_type=approval_type,
                         current_url=current_url,
+                        trusted_page_urls=visited_urls,
                         pending_action=unified_action,
                         write_lock_result=result,
                         system_name=system_name,
@@ -4495,6 +4533,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         ),
                     )
                 except Exception as notification_error:
+                    _enforce_write_lock_notification_failure_policy(approval_type, notification_error)
                     logger.warning(
                         "Failed to generate write lock notification metadata; using fallback question",
                         approval_type=approval_type,
@@ -4592,6 +4631,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         browser_use_mode=browser_use_mode,
                         approval_type="payment",
                         current_url=current_url,
+                        trusted_page_urls=visited_urls,
                         pending_action=unified_action,
                         write_lock_result=result,
                         system_name=system_name,
@@ -4822,7 +4862,13 @@ Based on this feedback, I need to continue working on the task and address the i
                 dom_service = None
 
         if session_id:
-            await close_browser_session(config, session_id, pause=False)
+            retryable_notification_error = isinstance(e, PurchaseApprovalNotificationRetryableError)
+            await close_browser_session(
+                config,
+                session_id,
+                pause=retryable_notification_error,
+                current_url=current_url if retryable_notification_error else None,
+            )
 
         error_context = f"Failed during: {last_action}"
         error_message = build_context_summary(

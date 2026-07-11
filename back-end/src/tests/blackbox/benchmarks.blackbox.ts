@@ -218,6 +218,8 @@ const KNOWN_TAGS = [
   'wait-for',
   'eval',
   'real-llm',
+  'response-schema',
+  'regression',
 ];
 
 // ==================== GET /api/benchmarks — CONTRACT TESTS ====================

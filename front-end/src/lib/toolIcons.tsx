@@ -119,6 +119,8 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   'Step Progress': Play,
   'Performing Action': Settings,
   'Task Complete': CheckCircle,
+  'Browser Agent In Progress': CheckCircle,
+  // Retain the old title for historical messages stored before the rename.
   'Browser Ready': CheckCircle,
   'Agent Update': Info,
 

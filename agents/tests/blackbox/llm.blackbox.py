@@ -1174,6 +1174,40 @@ async def test_set_response_schema_activity_http_error():
     assert result is None
 
 
+async def test_set_response_schema_activity_save_error_raises():
+    """A generated schema is not successful unless the agent-row save is durable."""
+    setup_mock(
+        {
+            "/api/agents/": {
+                "status": 500,
+                "json": {"error": "save failed"},
+            },
+        }
+    )
+
+    class FakeRoseClient:
+        async def collect(self, **kwargs):
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "reasoning": "Need a concise summary.",
+                        "fields": [{"name": "summary", "type": "str"}],
+                    }
+                ),
+                tool_calls=[],
+                usage={"prompt_tokens": 10, "completion_tokens": 5},
+            )
+
+    with patch("temporalio.activity.heartbeat"), patch("helpers.llm.RoseClient", FakeRoseClient):
+        from helpers.llm import set_response_schema_activity
+
+        try:
+            await set_response_schema_activity("agent-save-fails", ["goal"])
+            raise AssertionError("Expected response-schema persistence failure")
+        except RuntimeError as exc:
+            assert "save response schema" in str(exc).lower()
+
+
 async def test_call_llm_rose_path():
     """call_llm routes Rose models through the in-process Rose client."""
     sse = _anthropic_sse_body(
@@ -5553,6 +5587,10 @@ async def run_all_tests():
         "set_response_schema_activity_no_schema_returned", test_set_response_schema_activity_no_schema_returned
     )
     await r.record_async("set_response_schema_activity_http_error", test_set_response_schema_activity_http_error)
+    await r.record_async(
+        "set_response_schema_activity_save_error_raises",
+        test_set_response_schema_activity_save_error_raises,
+    )
     r.record(
         "filter_context_for_execute_verifier_boundary", test_filter_context_for_execute_verifier_uses_execute_boundary
     )
