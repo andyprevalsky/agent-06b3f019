@@ -55,6 +55,11 @@ export interface ProactiveSmsLeasedJobResult {
 
 type OutreachResult = 'sent' | 'skipped' | 'failed';
 
+interface ProactiveSmsRunControl {
+  isAborted: () => boolean;
+  retainLease: () => Promise<boolean>;
+}
+
 function inactivityCutoff(asOf: Date): Date {
   return new Date(asOf.getTime() - INACTIVITY_DAYS * 24 * 60 * 60 * 1000);
 }
@@ -161,8 +166,11 @@ async function isStillEligible(candidate: EligibleUser, asOf: Date): Promise<boo
 async function runOutreachForUser(
   candidate: EligibleUser,
   asOf: Date,
-  outreachKey: string
+  outreachKey: string,
+  control?: ProactiveSmsRunControl
 ): Promise<OutreachResult> {
+  if (control?.isAborted()) return 'skipped';
+
   await prisma.smsSession.createMany({
     data: [{ userId: candidate.userId, messages: JSON.stringify([]) }],
     skipDuplicates: true,
@@ -185,11 +193,14 @@ async function runOutreachForUser(
     inboundMessage: buildTriggeredInboundMessage(outreachKey),
     mySeq: session.lastInboundSeq,
     commitGuard: async () => {
+      if (control?.isAborted()) return false;
+      if (control && !(await control.retainLease())) return false;
+
       const [eligible, duplicate] = await Promise.all([
         isStillEligible(candidate, asOf),
         outreachAlreadyTriggered(candidate.userId, outreachKey),
       ]);
-      return eligible && !duplicate;
+      return !control?.isAborted() && eligible && !duplicate;
     },
   });
   if (!result.committed) {
@@ -209,8 +220,9 @@ async function runOutreachForUser(
   return 'sent';
 }
 
-export async function runProactiveSmsOutreachJob(
-  options: ProactiveSmsJobOptions = {}
+async function executeProactiveSmsOutreachJob(
+  options: ProactiveSmsJobOptions,
+  control?: ProactiveSmsRunControl
 ): Promise<ProactiveSmsJobSummary> {
   const asOf = options.now ?? new Date();
   const candidateUserIds = options.candidateUserIds
@@ -227,11 +239,13 @@ export async function runProactiveSmsOutreachJob(
   });
 
   for (let start = 0; start < eligibleUsers.length; start += OUTREACH_CONCURRENCY) {
+    if (control?.isAborted()) break;
+
     const batch = eligibleUsers.slice(start, start + OUTREACH_CONCURRENCY);
     const batchResults = await Promise.all(
       batch.map(async (candidate): Promise<OutreachResult> => {
         try {
-          return await runOutreachForUser(candidate, asOf, outreachKey);
+          return await runOutreachForUser(candidate, asOf, outreachKey, control);
         } catch (error) {
           log.error('[ProactiveSms] Triggered SMS flow failed', {
             userId: candidate.userId,
@@ -250,11 +264,19 @@ export async function runProactiveSmsOutreachJob(
     considered: candidateUserIds?.length ?? eligibleUsers.length,
     eligible: eligibleUsers.length,
     sent: results.filter((result) => result === 'sent').length,
-    skipped: results.filter((result) => result === 'skipped').length,
+    skipped:
+      results.filter((result) => result === 'skipped').length +
+      (eligibleUsers.length - results.length),
     failed: results.filter((result) => result === 'failed').length,
   };
   log.info('[ProactiveSms] Job finished', { ...summary, outreachKey });
   return summary;
+}
+
+export async function runProactiveSmsOutreachJob(
+  options: ProactiveSmsJobOptions = {}
+): Promise<ProactiveSmsJobSummary> {
+  return executeProactiveSmsOutreachJob(options);
 }
 
 async function acquireJobLease(ownerId: string): Promise<boolean> {
@@ -291,20 +313,21 @@ async function acquireJobLease(ownerId: string): Promise<boolean> {
   });
 }
 
-async function renewJobLease(ownerId: string): Promise<void> {
+async function renewJobLease(ownerId: string): Promise<boolean> {
   const expiresAt = new Date(Date.now() + JOB_LEASE_DURATION_MS);
-  const result = await prisma.toolSideEffect.updateMany({
-    where: {
-      operationKey: PROACTIVE_SMS_JOB_LEASE_KEY,
-      operationType: JOB_LEASE_OPERATION_TYPE,
-      status: 'STARTED',
-      externalId: ownerId,
-    },
-    data: { request: { expiresAt: expiresAt.toISOString() } },
+  const result = await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${PROACTIVE_SMS_JOB_LEASE_KEY}))`;
+    return tx.toolSideEffect.updateMany({
+      where: {
+        operationKey: PROACTIVE_SMS_JOB_LEASE_KEY,
+        operationType: JOB_LEASE_OPERATION_TYPE,
+        status: 'STARTED',
+        externalId: ownerId,
+      },
+      data: { request: { expiresAt: expiresAt.toISOString() } },
+    });
   });
-  if (result.count === 0) {
-    log.warn('[ProactiveSms] Job lease heartbeat lost ownership', { ownerId });
-  }
+  return result.count === 1;
 }
 
 async function releaseJobLease(ownerId: string): Promise<void> {
@@ -331,18 +354,36 @@ export async function runProactiveSmsOutreachJobWithLease(
     return { acquired: false, summary: null };
   }
 
-  const heartbeat = setInterval(() => {
-    void renewJobLease(ownerId).catch((error) => {
-      log.error('[ProactiveSms] Job lease heartbeat failed', {
+  let leaseLost = false;
+  const retainLease = async (): Promise<boolean> => {
+    if (leaseLost) return false;
+    try {
+      const retained = await renewJobLease(ownerId);
+      if (!retained) {
+        leaseLost = true;
+        log.warn('[ProactiveSms] Job lease lost ownership', { ownerId });
+      }
+      return retained;
+    } catch (error) {
+      leaseLost = true;
+      log.error('[ProactiveSms] Job lease renewal failed; aborting outreach', {
         ownerId,
         error: error instanceof Error ? error.message : String(error),
       });
-    });
+      return false;
+    }
+  };
+  const heartbeat = setInterval(() => {
+    void retainLease();
   }, JOB_LEASE_HEARTBEAT_MS);
   heartbeat.unref();
 
   try {
-    return { acquired: true, summary: await runProactiveSmsOutreachJob(options) };
+    const summary = await executeProactiveSmsOutreachJob(options, {
+      isAborted: () => leaseLost,
+      retainLease,
+    });
+    return { acquired: true, summary };
   } finally {
     clearInterval(heartbeat);
     try {

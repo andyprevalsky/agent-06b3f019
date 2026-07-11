@@ -287,37 +287,48 @@ if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1') {
   app.use('/api/test/sms-supervisor-fixture', fixtureRouter);
 
   const proactiveSmsRouter = express.Router();
-  proactiveSmsRouter.post('/run', (req, res, next) => {
-    const { now: nowValue, userIds: userIdsValue } = req.body as {
+  const parseProactiveSmsJobOptions = (body: unknown) => {
+    const { now: nowValue, userIds: userIdsValue } = body as {
       now?: unknown;
       userIds?: unknown;
     };
-    const now = typeof nowValue === 'string' ? new Date(nowValue) : new Date();
-    const userIds = Array.isArray(userIdsValue)
-      ? userIdsValue.filter((value): value is string => typeof value === 'string')
-      : undefined;
-    if (Number.isNaN(now.getTime()) || (userIdsValue !== undefined && userIds === undefined)) {
-      res.status(400).json({ error: 'now must be an ISO date and userIds must be a string array' });
+    const now =
+      nowValue === undefined
+        ? new Date()
+        : typeof nowValue === 'string'
+          ? new Date(nowValue)
+          : null;
+    const userIds =
+      userIdsValue === undefined
+        ? undefined
+        : Array.isArray(userIdsValue) &&
+            userIdsValue.every((value): value is string => typeof value === 'string')
+          ? userIdsValue
+          : null;
+    return now === null || Number.isNaN(now.getTime()) || userIds === null
+      ? null
+      : { now, candidateUserIds: userIds };
+  };
+  const rejectInvalidProactiveSmsOptions = (res: express.Response): void => {
+    res.status(400).json({ error: 'now must be an ISO date and userIds must be a string array' });
+  };
+  proactiveSmsRouter.post('/run', (req, res, next) => {
+    const options = parseProactiveSmsJobOptions(req.body);
+    if (options === null) {
+      rejectInvalidProactiveSmsOptions(res);
       return;
     }
-    runProactiveSmsOutreachJob({ now, candidateUserIds: userIds })
+    runProactiveSmsOutreachJob(options)
       .then((summary) => res.json(summary))
       .catch(next);
   });
   proactiveSmsRouter.post('/run-leased', (req, res, next) => {
-    const { now: nowValue, userIds: userIdsValue } = req.body as {
-      now?: unknown;
-      userIds?: unknown;
-    };
-    const now = typeof nowValue === 'string' ? new Date(nowValue) : new Date();
-    const userIds = Array.isArray(userIdsValue)
-      ? userIdsValue.filter((value): value is string => typeof value === 'string')
-      : undefined;
-    if (Number.isNaN(now.getTime()) || (userIdsValue !== undefined && userIds === undefined)) {
-      res.status(400).json({ error: 'now must be an ISO date and userIds must be a string array' });
+    const options = parseProactiveSmsJobOptions(req.body);
+    if (options === null) {
+      rejectInvalidProactiveSmsOptions(res);
       return;
     }
-    runProactiveSmsOutreachJobWithLease({ now, candidateUserIds: userIds })
+    runProactiveSmsOutreachJobWithLease(options)
       .then((result) => res.json(result))
       .catch(next);
   });

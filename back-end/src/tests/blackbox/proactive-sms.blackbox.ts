@@ -348,6 +348,62 @@ async function testSharedLeaseSerializesJobsAndRecoversStaleOwner(): Promise<voi
   }
 }
 
+async function testLeasedEndpointRejectsMalformedInput(): Promise<void> {
+  const invalidBodies = [
+    { now: 123, userIds: [] },
+    { now: RUN_AT.toISOString(), userIds: ['valid-user-id', 42] },
+  ];
+
+  for (const body of invalidBodies) {
+    const response = await request(`${BASE_URL}/api/test/proactive-sms/run-leased`, {
+      method: 'POST',
+      headers: { 'X-Capture-Token': captureToken('proactive-sms-invalid-lease-request') },
+      body: JSON.stringify(body),
+    });
+    assertStatus(response.status, 400, response.data);
+  }
+}
+
+async function testDisplacedLeaseOwnerAbortsBeforeSend(): Promise<void> {
+  const phone = uniqueSmsPhone();
+  const userId = await provisionUserWithPhone(prisma, phone);
+  const token = captureToken('proactive-sms-displaced-lease');
+
+  try {
+    await prisma.toolSideEffect.deleteMany({
+      where: { operationKey: PROACTIVE_SMS_JOB_LEASE_KEY },
+    });
+    await subscribe(userId, new Date(RUN_AT.getTime() + 30 * DAY_MS));
+    await setFixtureOverride(userId, completionFixture('This should never be sent.', 500));
+
+    const runPromise = runLeasedJob([userId], token);
+    await waitFor(() => prisma.smsSession.findUnique({ where: { userId } }));
+    await prisma.toolSideEffect.update({
+      where: { operationKey: PROACTIVE_SMS_JOB_LEASE_KEY },
+      data: { externalId: 'replacement-owner' },
+    });
+
+    const result = await runPromise;
+    if (
+      !result.acquired ||
+      result.summary?.sent !== 0 ||
+      result.summary.skipped !== 1 ||
+      result.summary.failed !== 0
+    ) {
+      throw new Error(`Expected displaced lease owner to abort: ${JSON.stringify(result)}`);
+    }
+    const calls = surgeCallsTo(await readCapturesForToken(token), new Set([phone]));
+    if (calls.length !== 0) {
+      throw new Error(`Expected no SMS from a displaced lease owner, got ${calls.length}`);
+    }
+  } finally {
+    await prisma.toolSideEffect.deleteMany({
+      where: { operationKey: PROACTIVE_SMS_JOB_LEASE_KEY },
+    });
+    await cleanupAgentScopedUser(prisma, userId);
+  }
+}
+
 async function main(): Promise<void> {
   const tests: Array<[string, () => Promise<void>]> = [
     ['Wednesday/Sunday schedule', async () => assertWednesdaySundaySchedule()],
@@ -365,6 +421,8 @@ async function main(): Promise<void> {
       'shared job lease serializes runs and recovers an abandoned owner',
       testSharedLeaseSerializesJobsAndRecoversStaleOwner,
     ],
+    ['leased endpoint rejects malformed input', testLeasedEndpointRejectsMalformedInput],
+    ['displaced lease owner aborts before send', testDisplacedLeaseOwnerAbortsBeforeSend],
   ];
   const results = [];
   for (const [name, test] of tests) results.push(await runTest(name, test));
