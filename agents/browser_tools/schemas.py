@@ -9,7 +9,15 @@ The DOM tree is serialized with indices like [1] button "Submit", [2] input[type
 
 from typing import Any, List, Literal, Optional, Type
 
-from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, ValidationInfo, field_validator, model_validator
+
+from utils.purchase_approval import (
+    validate_product_detail_url,
+    validate_product_rating,
+    validate_product_review_count,
+    validate_product_url_for_page,
+    validate_product_url_for_pages,
+)
 
 # ============================================================================
 # OBSERVATION TOOLS
@@ -18,17 +26,15 @@ from pydantic import AliasChoices, BaseModel, Field, field_validator, model_vali
 
 class ScreenshotTool(BaseModel):
     """Take a screenshot of the current page."""
-    
+
     tool: Literal["screenshot"]
 
 
 class ExtractTool(BaseModel):
     """Extract structured data from the current page using LLM analysis."""
-    
+
     tool: Literal["extract"]
-    instruction: str = Field(
-        description="Clear instruction describing what data to extract from the page"
-    )
+    instruction: str = Field(description="Clear instruction describing what data to extract from the page")
 
 
 # ============================================================================
@@ -38,44 +44,33 @@ class ExtractTool(BaseModel):
 
 class ClickTool(BaseModel):
     """Click an element by its index in the DOM tree."""
-    
+
     tool: Literal["click"]
-    index: int = Field(
-        description="Element index from the DOM tree (e.g., 4 for '[4] button \"Submit\"')"
-    )
+    index: int = Field(description="Element index from the DOM tree (e.g., 4 for '[4] button \"Submit\"')")
 
 
 class InputTextTool(BaseModel):
     """Type text into an input element. Use for forms, search boxes, etc. This clears any existing content in the field before typing the new text."""
 
     tool: Literal["input_text"]
-    index: int = Field(
-        description="Element index of the input field from the DOM tree"
-    )
-    text: str = Field(
-        description="Text to type into the field. Replaces any existing content in the field."
-    )
+    index: int = Field(description="Element index of the input field from the DOM tree")
+    text: str = Field(description="Text to type into the field. Replaces any existing content in the field.")
 
 
 class PressKeyTool(BaseModel):
     """Press a keyboard key."""
-    
+
     tool: Literal["press_key"]
-    key: str = Field(
-        description="Key to press (e.g., 'Enter', 'Tab', 'Escape', 'Control+a', 'Backspace')"
-    )
+    key: str = Field(description="Key to press (e.g., 'Enter', 'Tab', 'Escape', 'Control+a', 'Backspace')")
 
 
 class ClickAtCoordinatesTool(BaseModel):
     """Fallback: Click at specific X,Y pixel coordinates (for vision models)."""
-    
+
     tool: Literal["click_coordinates"]
     x: int = Field(description="X coordinate in pixels from left edge of viewport")
     y: int = Field(description="Y coordinate in pixels from top edge of viewport")
-    button: Literal["left", "right", "middle"] = Field(
-        default="left", 
-        description="Mouse button to click"
-    )
+    button: Literal["left", "right", "middle"] = Field(default="left", description="Mouse button to click")
 
 
 # ============================================================================
@@ -85,23 +80,17 @@ class ClickAtCoordinatesTool(BaseModel):
 
 class DropdownOptionsTool(BaseModel):
     """Get available options from a dropdown/select element."""
-    
+
     tool: Literal["dropdown_options"]
-    index: int = Field(
-        description="Element index of the dropdown/select element"
-    )
+    index: int = Field(description="Element index of the dropdown/select element")
 
 
 class SelectDropdownTool(BaseModel):
     """Select an option from a dropdown by its value or text."""
-    
+
     tool: Literal["select_dropdown"]
-    index: int = Field(
-        description="Element index of the dropdown/select element"
-    )
-    value: str = Field(
-        description="Value or visible text of the option to select"
-    )
+    index: int = Field(description="Element index of the dropdown/select element")
+    value: str = Field(description="Value or visible text of the option to select")
 
 
 # ============================================================================
@@ -111,11 +100,9 @@ class SelectDropdownTool(BaseModel):
 
 class EvaluateTool(BaseModel):
     """Execute JavaScript code in the browser console."""
-    
+
     tool: Literal["evaluate"]
-    code: str = Field(
-        description="JavaScript code to execute. Returns the result of the expression."
-    )
+    code: str = Field(description="JavaScript code to execute. Returns the result of the expression.")
 
 
 # ============================================================================
@@ -125,35 +112,31 @@ class EvaluateTool(BaseModel):
 
 class GotoTool(BaseModel):
     """Navigate to a specific URL."""
-    
+
     tool: Literal["goto"]
     url: str = Field(description="The URL to navigate to")
 
 
 class NavbackTool(BaseModel):
     """Navigate back to the previous page in browser history."""
-    
+
     tool: Literal["navback"]
 
 
 class ScrollTool(BaseModel):
     """Scroll the page or a specific scrollable element."""
-    
+
     tool: Literal["scroll"]
     direction: Literal["up", "down"] = Field(description="Direction to scroll")
-    amount: int = Field(
-        default=300, 
-        description="Number of pixels to scroll (default: 300)"
-    )
+    amount: int = Field(default=300, description="Number of pixels to scroll (default: 300)")
     index: Optional[int] = Field(
-        default=None,
-        description="Optional: element index to scroll within (for scrollable containers)"
+        default=None, description="Optional: element index to scroll within (for scrollable containers)"
     )
 
 
 class WaitTool(BaseModel):
     """Wait for a specified time in milliseconds."""
-    
+
     tool: Literal["wait"]
     time_ms: int = Field(description="Time to wait in milliseconds")
 
@@ -165,31 +148,23 @@ class WaitTool(BaseModel):
 
 class SwitchTabTool(BaseModel):
     """Switch to a different browser tab by tab ID."""
-    
+
     tool: Literal["switch_tab"]
-    tab_id: str = Field(
-        description="Tab ID to switch to (4-char suffix shown in tabs list, e.g., '1a2b')"
-    )
+    tab_id: str = Field(description="Tab ID to switch to (4-char suffix shown in tabs list, e.g., '1a2b')")
 
 
 class CloseTabTool(BaseModel):
     """Close a browser tab by tab ID."""
-    
+
     tool: Literal["close_tab"]
-    tab_id: Optional[str] = Field(
-        default=None,
-        description="Tab ID to close. If None, closes the current tab."
-    )
+    tab_id: Optional[str] = Field(default=None, description="Tab ID to close. If None, closes the current tab.")
 
 
 class OpenNewTabTool(BaseModel):
     """Open a new tab and optionally navigate to a URL."""
 
     tool: Literal["open_new_tab"]
-    url: Optional[str] = Field(
-        default=None,
-        description="URL to open in new tab (defaults to about:blank)"
-    )
+    url: Optional[str] = Field(default=None, description="URL to open in new tab (defaults to about:blank)")
 
 
 # ============================================================================
@@ -205,9 +180,7 @@ class UploadFileTool(BaseModel):
     """
 
     tool: Literal["upload_file"]
-    index: int = Field(
-        description="Element index of the file input (<input type='file'>) from the DOM tree"
-    )
+    index: int = Field(description="Element index of the file input (<input type='file'>) from the DOM tree")
     filename: str = Field(
         description="Filename to upload (must match a filename from the available_files list in the system state)"
     )
@@ -220,11 +193,9 @@ class UploadFileTool(BaseModel):
 
 class DoneTool(BaseModel):
     """Signal that the browser task is complete."""
-    
+
     tool: Literal["done"]
-    text: str = Field(
-        description="Summary of what was accomplished or the final result"
-    )
+    text: str = Field(description="Summary of what was accomplished or the final result")
 
 
 class AttemptCompletionBrowserTool(BaseModel):
@@ -237,11 +208,9 @@ class AttemptCompletionBrowserTool(BaseModel):
 
 class SendMessageToUserBrowserTool(BaseModel):
     """Request the user to complete an action (login, payment, CAPTCHA, etc.)."""
-    
+
     tool: Literal["send_message_to_user"]
-    message: str = Field(
-        description="Explain what the user needs to do and why you cannot do it"
-    )
+    message: str = Field(description="Explain what the user needs to do and why you cannot do it")
     reason: Literal["login", "payment", "captcha", "verification", "blocked", "other"] = Field(
         description="Category of the user action needed"
     )
@@ -257,17 +226,59 @@ class PaymentLineItem(BaseModel):
     """A checkout line item extracted from the merchant page."""
 
     name: str = Field(description="Item name shown on the checkout page")
-    image_url: Optional[str] = Field(default=None, description="Product image URL if visible")
-    unit_price_cents: int = Field(description="Unit price in cents")
-    quantity: int = Field(description="Quantity")
-    line_total_cents: int = Field(description="Line total in cents")
+    image_url: Optional[str] = Field(
+        default=None,
+        description="Product image URL if visible",
+        validation_alias=AliasChoices("image_url", "imageUrl"),
+    )
+    product_url: str = Field(
+        description=(
+            "Canonical product-detail page URL for this item. This must link to the product itself, "
+            "never a cart, basket, checkout, payment, or order-confirmation page."
+        ),
+        validation_alias=AliasChoices("product_url", "productUrl"),
+    )
+    rating: str = Field(description="Product rating shown on the product page, such as '4.8 stars'")
+    review_count: str = Field(
+        description="Product review count shown on the product page, preserving visible formatting",
+        validation_alias=AliasChoices("review_count", "reviewCount"),
+    )
+    unit_price_cents: int = Field(
+        description="Unit price in cents",
+        ge=1,
+        validation_alias=AliasChoices("unit_price_cents", "unitPriceCents"),
+    )
+    quantity: int = Field(description="Quantity", ge=1)
+    line_total_cents: int = Field(
+        description="Line total in cents",
+        ge=1,
+        validation_alias=AliasChoices("line_total_cents", "lineTotalCents"),
+    )
+
+    @field_validator("product_url")
+    @classmethod
+    def require_product_detail_url(cls, value: str) -> str:
+        return validate_product_detail_url(value)
+
+    @field_validator("rating")
+    @classmethod
+    def require_product_rating(cls, value: str) -> str:
+        return validate_product_rating(value)
+
+    @field_validator("review_count")
+    @classmethod
+    def require_product_review_count(cls, value: str) -> str:
+        return validate_product_review_count(value)
 
 
 class PaymentFee(BaseModel):
     """A tax, shipping, service, or other checkout fee."""
 
     label: str = Field(description="Fee label shown on the checkout page")
-    amount_cents: int = Field(description="Fee amount in cents")
+    amount_cents: int = Field(
+        description="Fee amount in cents",
+        validation_alias=AliasChoices("amount_cents", "amountCents"),
+    )
 
 
 class RequestPaymentCardBrowserTool(BaseModel):
@@ -277,11 +288,29 @@ class RequestPaymentCardBrowserTool(BaseModel):
     merchant: str = Field(description="Merchant or site name for the purchase")
     currency: Literal["USD"] = Field(default="USD", description="Purchase currency; currently only USD")
     line_items: List[PaymentLineItem] = Field(
-        description="Full itemized receipt: products/services, image URLs if visible, quantity, unit price, line total"
+        description=(
+            "Full itemized receipt. Every item must include its canonical product-detail URL, rating, "
+            "review count, image URL if visible, quantity, unit price, and line total."
+        ),
+        min_length=1,
+        validation_alias=AliasChoices("line_items", "lineItems"),
     )
     fees: List[PaymentFee] = Field(default_factory=list, description="Taxes, shipping, service fees, discounts, etc.")
-    subtotal_cents: int = Field(description="Subtotal before fees in cents")
-    total_cents: int = Field(description="Final checkout total in cents")
+    subtotal_cents: int = Field(
+        description="Subtotal before fees in cents",
+        ge=1,
+        validation_alias=AliasChoices("subtotal_cents", "subtotalCents"),
+    )
+    total_cents: int = Field(
+        description="Final checkout total in cents",
+        ge=1,
+        validation_alias=AliasChoices("total_cents", "totalCents"),
+    )
+
+    @field_validator("currency", mode="before")
+    @classmethod
+    def normalize_currency(cls, value: Any) -> Any:
+        return str(value).upper() if value is not None else value
 
 
 # ============================================================================
@@ -352,14 +381,16 @@ class WriteLockPurchaseItem(BaseModel):
         default=None,
         description="Short visible item description or variant details. Keep under 80 characters.",
     )
-    rating: Optional[str] = Field(default=None, description="Visible rating, such as '4.6 stars'.")
-    review_count: Optional[str] = Field(
-        default=None,
-        description="Visible review count, preserving formatting.",
-        validation_alias=AliasChoices("review_count", "reviews"),
+    rating: str = Field(description="Required numeric product rating, such as '4.6 stars'.")
+    review_count: str = Field(
+        description="Required numeric review count, preserving visible formatting.",
+        validation_alias=AliasChoices("review_count", "reviewCount", "reviews"),
     )
     image_url: Optional[str] = Field(default=None, description="Best image URL for this item.")
-    product_url: Optional[str] = Field(default=None, description="Product detail URL for this item.")
+    product_url: str = Field(
+        description="Required canonical product-detail URL; never use a cart, checkout, payment, or order URL.",
+        validation_alias=AliasChoices("product_url", "productUrl"),
+    )
     seller: Optional[str] = Field(default=None, description="Visible seller or merchant for this item.")
     shipping: Optional[str] = Field(default=None, description="Visible item shipping or delivery details.")
 
@@ -379,6 +410,21 @@ class WriteLockPurchaseItem(BaseModel):
         if value is None:
             return None
         return str(value)
+
+    @field_validator("rating")
+    @classmethod
+    def require_product_rating(cls, value: str) -> str:
+        return validate_product_rating(value)
+
+    @field_validator("review_count")
+    @classmethod
+    def require_product_review_count(cls, value: str) -> str:
+        return validate_product_review_count(value)
+
+    @field_validator("product_url")
+    @classmethod
+    def require_product_detail_url(cls, value: str) -> str:
+        return validate_product_detail_url(value)
 
 
 class WriteLockPurchaseTotals(BaseModel):
@@ -418,7 +464,7 @@ class WriteLockPurchaseDetails(BaseModel):
     """Purchase details for one or more items."""
 
     items: List[WriteLockPurchaseItem] = Field(
-        default_factory=list,
+        min_length=1,
         description="Every visible item being purchased, not just the clicked button's nearest item.",
     )
     totals: Optional[WriteLockPurchaseTotals] = Field(default=None, description="Visible order totals.")
@@ -434,9 +480,7 @@ class WriteLockPurchaseDetails(BaseModel):
             return value
         totals = {
             "subtotal": (
-                value.get("subtotal")
-                or value.get("cart_subtotal")
-                or _format_write_lock_usd(value.get("subtotal_usd"))
+                value.get("subtotal") or value.get("cart_subtotal") or _format_write_lock_usd(value.get("subtotal_usd"))
             ),
             "shipping": value.get("shipping") or _format_write_lock_usd(value.get("shipping_usd")),
             "tax": (
@@ -570,6 +614,19 @@ class GenerateWriteLockNotificationTool(BaseModel):
         description="Required when trigger_type is generic_write; otherwise null.",
     )
 
+    @model_validator(mode="after")
+    def require_trigger_details(self, info: ValidationInfo) -> "GenerateWriteLockNotificationTool":
+        if getattr(self, self.trigger_type) is None:
+            raise ValueError(f"{self.trigger_type} details are required for a {self.trigger_type} approval")
+        if self.trigger_type == "purchase" and self.purchase is not None:
+            trusted_page_urls = (info.context or {}).get("trusted_page_urls")
+            for item in self.purchase.items:
+                if trusted_page_urls:
+                    validate_product_url_for_pages(item.product_url, trusted_page_urls)
+                else:
+                    validate_product_url_for_page(item.product_url, self.service.url)
+        return self
+
 
 # ============================================================================
 # Tool Registry (Index-Based)
@@ -629,22 +686,22 @@ def create_browser_agent_action_model(
 ) -> Type[BaseModel]:
     """
     Dynamically create a BrowserAgentAction Pydantic model.
-    
+
     Uses the unified create_agent_action_model from utils.tool_schemas with
     the BROWSER_TOOL_MODELS registry.
-    
+
     Args:
         available_tool_names: List of tool names (defaults to all browser tools)
-        
+
     Returns:
         Pydantic model class for BrowserAgentAction with proper tool union
     """
     from utils.tool_schemas import create_agent_action_model
-    
+
     # Default to all browser tools
     if available_tool_names is None:
         available_tool_names = list(BROWSER_TOOL_MODELS.keys())
-    
+
     return create_agent_action_model(available_tool_names, tool_registry=BROWSER_TOOL_MODELS)
 
 

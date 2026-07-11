@@ -17,6 +17,8 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from _test_utils import (
     BlackboxResult,
     assert_captured_call,
@@ -171,10 +173,18 @@ def test_browser_action_log_summary_redacts_payment_secrets():
         },
     )
 
-    serialized = json.dumps({"action": action_summary, "payment": payment_summary, "history": history_entry}, sort_keys=True)
+    serialized = json.dumps(
+        {"action": action_summary, "payment": payment_summary, "history": history_entry}, sort_keys=True
+    )
     assert "SHOULD_NOT_LOG_TYPED_TEXT" not in serialized
     assert "SHOULD_NOT_LOG_CVV" not in serialized
     assert "SHOULD_NOT_LOG_PASSWORD" not in serialized
+
+
+def test_browser_progress_title_describes_active_agent():
+    from domains.spawn_browser_agent_v3.handler import BROWSER_PROGRESS_TITLE
+
+    assert BROWSER_PROGRESS_TITLE == "Browser Agent In Progress"
 
 
 def test_verifier_activity_timeout_allows_llm_call():
@@ -3227,8 +3237,8 @@ async def test_save_browser_credential_ref_message_user_role():
 async def test_list_session_files_no_api_key():
     from domains.spawn_browser_agent_v3 import repo
 
-    with patch.object(repo, "STEEL_API_KEY", ""):
-        assert await repo.list_session_files("s1") == []
+    setup_mock({"backend.example.com": {"status": 401, "json": {"error": "unauthorized"}}})
+    assert await repo.list_session_files(_fake_config(backend_api_key=""), "s1") == []
 
 
 async def test_list_session_files_success():
@@ -3236,23 +3246,21 @@ async def test_list_session_files_success():
 
     setup_mock(
         {
-            "api.steel.dev/v1/sessions/s1/files": {
+            "backend.example.com/api/browser-session/s1/files/list": {
                 "status": 200,
-                "json": {"data": [{"path": "/f/x.pdf"}]},
+                "json": {"files": [{"path": "/f/x.pdf"}]},
             }
         }
     )
-    with patch.object(repo, "STEEL_API_KEY", "sk-steel"):
-        files = await repo.list_session_files("s1")
+    files = await repo.list_session_files(_fake_config(), "s1")
     assert files == [{"path": "/f/x.pdf"}]
 
 
 async def test_list_session_files_non_200():
     from domains.spawn_browser_agent_v3 import repo
 
-    setup_mock({"api.steel.dev": {"status": 500, "json": {"err": "x"}}})
-    with patch.object(repo, "STEEL_API_KEY", "sk-steel"):
-        assert await repo.list_session_files("s1") == []
+    setup_mock({"backend.example.com": {"status": 500, "json": {"err": "x"}}})
+    assert await repo.list_session_files(_fake_config(), "s1") == []
 
 
 async def test_list_session_files_network_error():
@@ -3263,15 +3271,14 @@ async def test_list_session_files_network_error():
         raise RuntimeError("net")
 
     setup_mock_fn(boom)
-    with patch.object(repo, "STEEL_API_KEY", "sk-steel"):
-        assert await repo.list_session_files("s1") == []
+    assert await repo.list_session_files(_fake_config(), "s1") == []
 
 
 async def test_download_file_from_steel_no_api_key():
     from domains.spawn_browser_agent_v3 import repo
 
-    with patch.object(repo, "STEEL_API_KEY", ""):
-        assert await repo.download_file_from_steel("s1", "/files/x.pdf") is None
+    setup_mock({"backend.example.com": {"status": 401, "text": "unauthorized"}})
+    assert await repo.download_session_file(_fake_config(backend_api_key=""), "s1", "/files/x.pdf") is None
 
 
 async def test_download_file_from_steel_strips_prefixes():
@@ -3288,16 +3295,14 @@ async def test_download_file_from_steel_strips_prefixes():
     from _test_utils import setup_mock_fn
 
     setup_mock_fn(handler)
-    with patch.object(repo, "STEEL_API_KEY", "sk"):
-        out = await repo.download_file_from_steel("s1", "/files/doc.pdf")
+    out = await repo.download_session_file(_fake_config(), "s1", "/files/doc.pdf")
 
     assert out is not None
     assert out["content"] == b"PDFDATA"
     assert out["filename"] == "doc.pdf"
     assert out["mime_type"] == "application/pdf"
-    assert "files/doc.pdf" in captured["url"]
-    # "/files/" prefix should have been stripped before Steel path
-    assert "/files//files/" not in captured["url"]
+    assert "/api/browser-session/s1/files/content" in captured["url"]
+    assert "path=%2Ffiles%2Fdoc.pdf" in captured["url"]
 
 
 async def test_download_file_from_steel_strips_leading_slash():
@@ -3311,8 +3316,7 @@ async def test_download_file_from_steel_strips_leading_slash():
     from _test_utils import setup_mock_fn
 
     setup_mock_fn(handler)
-    with patch.object(repo, "STEEL_API_KEY", "sk"):
-        out = await repo.download_file_from_steel("s1", "/simple.txt")
+    out = await repo.download_session_file(_fake_config(), "s1", "/simple.txt")
     assert out is not None
     assert out["mime_type"] == "text/plain"
 
@@ -3320,9 +3324,8 @@ async def test_download_file_from_steel_strips_leading_slash():
 async def test_download_file_from_steel_non_200():
     from domains.spawn_browser_agent_v3 import repo
 
-    setup_mock({"api.steel.dev": {"status": 404, "text": "not found"}})
-    with patch.object(repo, "STEEL_API_KEY", "sk"):
-        assert await repo.download_file_from_steel("s1", "x") is None
+    setup_mock({"backend.example.com": {"status": 404, "text": "not found"}})
+    assert await repo.download_session_file(_fake_config(), "s1", "x") is None
 
 
 async def test_download_file_from_steel_network_error():
@@ -3333,8 +3336,7 @@ async def test_download_file_from_steel_network_error():
         raise RuntimeError("fail")
 
     setup_mock_fn(boom)
-    with patch.object(repo, "STEEL_API_KEY", "sk"):
-        assert await repo.download_file_from_steel("s1", "x") is None
+    assert await repo.download_session_file(_fake_config(), "s1", "x") is None
 
 
 async def test_take_steel_computer_screenshot_success():
@@ -3342,24 +3344,22 @@ async def test_take_steel_computer_screenshot_success():
 
     setup_mock(
         {
-            "api.steel.dev/v1/sessions/s1/computer": {
+            "backend.example.com/api/browser-session/s1/screenshot": {
                 "status": 200,
                 "json": {
-                    "output": "Screenshot taken successfully",
+                    "provider": "kernel",
                     "base64_image": "abc123",
                 },
             }
         }
     )
-    with patch.object(repo, "STEEL_API_KEY", "sk"):
-        out = await repo.take_steel_computer_screenshot("s1")
+    out = await repo.take_browser_computer_screenshot(_fake_config(), "s1")
     assert out["base64_image"] == "abc123"
     assert_captured_call(
         0,
-        url_contains="api.steel.dev/v1/sessions/s1/computer",
+        url_contains="backend.example.com/api/browser-session/s1/screenshot",
         method="POST",
-        body_contains={"action": "take_screenshot"},
-        header_present="steel-api-key",
+        header_present="x-api-key",
     )
 
 
@@ -3368,22 +3368,21 @@ async def test_take_steel_computer_screenshot_missing_image_raises():
 
     setup_mock(
         {
-            "api.steel.dev/v1/sessions/s1/computer": {
+            "backend.example.com/api/browser-session/s1/screenshot": {
                 "status": 200,
                 "json": {
                     "output": "Screenshot taken successfully",
-                    "system": "steel-browser",
+                    "provider": "kernel",
                 },
             }
         }
     )
-    with patch.object(repo, "STEEL_API_KEY", "sk"):
-        try:
-            await repo.take_steel_computer_screenshot("s1")
-        except RuntimeError as exc:
-            assert "did not return an image" in str(exc)
-        else:
-            raise AssertionError("expected missing base64_image to raise")
+    try:
+        await repo.take_browser_computer_screenshot(_fake_config(), "s1")
+    except RuntimeError as exc:
+        assert "did not return an image" in str(exc)
+    else:
+        raise AssertionError("expected missing base64_image to raise")
 
 
 # ========================================
@@ -3946,12 +3945,13 @@ def test_select_auth_assistance_current_url_keeps_current_when_it_has_query_para
 def test_build_usage_items():
     from domains.spawn_browser_agent_v3.service import build_usage_items
 
-    items = build_usage_items(
-        total_input_tokens=1000,
-        total_output_tokens=2000,
-        model_pricing={"input_cents_per_1k": 0.3, "output_cents_per_1k": 1.5},
-        execution_time_ms=60000,
-    )
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "kernel"}):
+        items = build_usage_items(
+            total_input_tokens=1000,
+            total_output_tokens=2000,
+            model_pricing={"input_cents_per_1k": 0.3, "output_cents_per_1k": 1.5},
+            execution_time_ms=60000,
+        )
     assert len(items) == 2
     assert items[0]["type"] == "llm"
     assert items[0]["provider"] == "Rose 1 Browser Use"
@@ -3960,7 +3960,11 @@ def test_build_usage_items():
     # 1k*0.3 + 2k*1.5 = 0.3 + 3.0 = 3.3
     assert items[0]["cost_cents"] == 3.3
     assert items[1]["type"] == "service"
-    assert items[1]["provider"] == "Steel.dev Browser"
+    assert items[1]["provider"] == "Kernel Browser"
+
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "steel"}):
+        steel_items = build_usage_items(0, 0, {"input_cents_per_1k": 0, "output_cents_per_1k": 0}, 1)
+    assert steel_items[1]["provider"] == "Steel.dev Browser"
 
 
 def test_get_browser_system_prompt_with_files():
@@ -4310,7 +4314,7 @@ async def test_extract_session_files_happy_path():
 
     with (
         patch.object(service, "list_session_files", AsyncMock(return_value=files_listing)),
-        patch.object(service, "download_file_from_steel", AsyncMock(return_value=download_return)),
+        patch.object(service, "download_session_file", AsyncMock(return_value=download_return)),
         patch("helpers.attachments.upload_to_storage", AsyncMock(return_value=fp)),
     ):
         out = await service.extract_session_files("s1", "u1", _fake_config())
@@ -4328,7 +4332,7 @@ async def test_extract_session_files_exclude_paths():
         patch.object(service, "list_session_files", AsyncMock(return_value=files_listing)),
         patch.object(
             service,
-            "download_file_from_steel",
+            "download_session_file",
             AsyncMock(return_value={"content": b"c", "filename": "y.pdf", "mime_type": "x"}),
         ),
         patch(
@@ -4345,7 +4349,7 @@ async def test_extract_session_files_download_fail_skipped():
 
     with (
         patch.object(service, "list_session_files", AsyncMock(return_value=[{"path": "/a"}])),
-        patch.object(service, "download_file_from_steel", AsyncMock(return_value=None)),
+        patch.object(service, "download_session_file", AsyncMock(return_value=None)),
     ):
         out = await service.extract_session_files("s1", "u1", _fake_config())
     assert out == []
@@ -4358,7 +4362,7 @@ async def test_extract_session_files_upload_failure_skipped():
         patch.object(service, "list_session_files", AsyncMock(return_value=[{"path": "/a"}])),
         patch.object(
             service,
-            "download_file_from_steel",
+            "download_session_file",
             AsyncMock(return_value={"content": b"c", "filename": "a", "mime_type": "x"}),
         ),
         patch(
@@ -4596,7 +4600,17 @@ async def test_execute_action_request_payment_card_requests_workflow_approval():
     ah.record_action = AsyncMock()
     payment_request = {
         "merchant": "Rose Labs Test Payment",
-        "line_items": [{"name": "Aurora Notebook", "unit_price_cents": 1200, "quantity": 1, "line_total_cents": 1200}],
+        "line_items": [
+            {
+                "name": "Aurora Notebook",
+                "product_url": "https://example.test/products/aurora-notebook",
+                "rating": "4.9 stars",
+                "review_count": "217 reviews",
+                "unit_price_cents": 1200,
+                "quantity": 1,
+                "line_total_cents": 1200,
+            }
+        ],
         "subtotal_cents": 1200,
         "total_cents": 4396,
     }
@@ -4633,6 +4647,44 @@ async def test_execute_action_request_payment_card_rejects_empty_receipt():
     assert "line_items" in out["error"]
     assert "subtotal_cents" in out["error"]
     assert "total_cents" in out["error"]
+
+
+async def test_execute_action_request_payment_card_rejects_current_session_product_link():
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom = MagicMock()
+    dom.session = MagicMock()
+    dom.selector_map = {}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    current_url = "https://example.test/session/abc"
+    out = await execute_action(
+        dom,
+        ah,
+        {
+            "action": "request_payment_card",
+            "params": {
+                "merchant": "Example Shop",
+                "line_items": [
+                    {
+                        "name": "Beanie",
+                        "product_url": current_url,
+                        "rating": "4.8 stars",
+                        "review_count": "312 reviews",
+                        "unit_price_cents": 1200,
+                        "quantity": 1,
+                        "line_total_cents": 1200,
+                    }
+                ],
+                "subtotal_cents": 1200,
+                "total_cents": 1200,
+            },
+        },
+        current_url=current_url,
+    )
+
+    assert out["success"] is False
+    assert "current checkout or session page" in out["error"]
 
 
 async def test_execute_action_request_payment_card_rejects_duplicate_after_card_ready():
@@ -6291,8 +6343,8 @@ async def test_execute_screenshot_success():
     upload_mock = AsyncMock(return_value={"path": "/tmp/s.png"})
     with (
         patch(
-            "domains.spawn_browser_agent_v3.repo.take_steel_computer_screenshot",
-            AsyncMock(return_value={"base64_image": screenshot_b64}),
+            "domains.spawn_browser_agent_v3.repo.take_browser_computer_screenshot",
+            AsyncMock(return_value={"provider": "steel", "base64_image": screenshot_b64}),
         ),
         patch(
             "domains.spawn_browser_agent_v3.repo.upload_file_to_session",
@@ -6318,7 +6370,7 @@ async def test_execute_screenshot_success():
 
 
 async def test_execute_screenshot_requires_steel_image():
-    """Missing Steel Computer screenshot data fails instead of falling back to CDP."""
+    """Missing provider screenshot data fails instead of falling back to CDP."""
     from domains.spawn_browser_agent_v3 import service_actions
 
     session = MagicMock()
@@ -6326,8 +6378,8 @@ async def test_execute_screenshot_requires_steel_image():
     ah = MagicMock()
     ah.record_action = AsyncMock()
     with patch(
-        "domains.spawn_browser_agent_v3.repo.take_steel_computer_screenshot",
-        AsyncMock(side_effect=RuntimeError("Steel computer screenshot did not return an image")),
+        "domains.spawn_browser_agent_v3.repo.take_browser_computer_screenshot",
+        AsyncMock(side_effect=RuntimeError("Browser screenshot did not return an image")),
     ):
         try:
             await service_actions._execute_screenshot(
@@ -6427,6 +6479,9 @@ def test_render_write_lock_notification_question_uses_purchase_metadata():
                         "title": "Carhartt Mens Knit Cuffed Beanie Hat, Black",
                         "price": "$19.99",
                         "quantity": "1",
+                        "rating": "4.8 stars",
+                        "review_count": "167,432 reviews",
+                        "product_url": "https://www.amazon.com/dp/B000000001",
                         "seller": "Amazon.com",
                         "shipping": "FREE Two Day delivery, arriving Saturday, Jun 27, 2026",
                     }
@@ -6448,6 +6503,9 @@ def test_render_write_lock_notification_question_uses_purchase_metadata():
     assert "Rose wants to buy one black Carhartt beanie on **Amazon**." in question
     assert "Carhartt Mens Knit Cuffed Beanie Hat, Black" in question
     assert "Price: $19.99" in question
+    assert "Rating: 4.8 stars" in question
+    assert "Reviews: 167,432 reviews" in question
+    assert "Product: [View product](https://www.amazon.com/dp/B000000001)" in question
     assert "Seller: Amazon.com" in question
     assert "Shipping: FREE Two Day delivery" in question
     assert "Total: $21.71" in question
@@ -6455,6 +6513,7 @@ def test_render_write_lock_notification_question_uses_purchase_metadata():
     assert "Delivery: Aman Gottumukkala" in question
     assert "**Image:** https://m.media-amazon.com/images/I/beanie.jpg" in question
     assert "fallback question" not in question
+    assert "https://www.amazon.com/checkout/spc" not in question
     assert "click" not in question.lower()
 
 
@@ -6555,6 +6614,7 @@ async def test_generate_write_lock_notification_payment_forks_and_renders_questi
             browser_use_mode="claude",
             approval_type="payment",
             current_url="https://www.delta.com/checkout",
+            trusted_page_urls=["https://www.delta.com/checkout"],
             pending_action={"action": "click", "params": {"index": 4}},
             write_lock_result={"status": "awaiting_payment_card_approval"},
             system_name="Rose",
@@ -6629,6 +6689,7 @@ async def test_generate_write_lock_notification_raises_when_fork_calls_wrong_too
                 browser_use_mode="claude",
                 approval_type="payment",
                 current_url="https://shop.example/checkout",
+                trusted_page_urls=["https://shop.example/checkout"],
                 pending_action={"action": "click"},
                 write_lock_result={"status": "awaiting_payment_card_approval"},
                 system_name="Rose",
@@ -6763,6 +6824,27 @@ def test_write_lock_notification_prompt_includes_media_candidates():
     assert "https://m.media-amazon.com/images/I/beanie.jpg" in prompt
     assert "use only those URLs for media and item image_url" in prompt
     assert "description under 80 characters" in prompt
+    assert "must already exist in the browser trajectory" in prompt
+    assert "Visit the product page" not in prompt
+
+
+def test_purchase_write_lock_notification_failure_blocks_approval_fallback():
+    from domains.spawn_browser_agent_v3.handler import (
+        PurchaseApprovalContextError,
+        PurchaseApprovalNotificationRetryableError,
+        _enforce_write_lock_notification_failure_policy,
+    )
+
+    with pytest.raises(PurchaseApprovalContextError):
+        _enforce_write_lock_notification_failure_policy(
+            "purchase",
+            PurchaseApprovalContextError("missing reviews"),
+        )
+
+    with pytest.raises(PurchaseApprovalNotificationRetryableError):
+        _enforce_write_lock_notification_failure_policy("purchase", TimeoutError("provider timeout"))
+
+    assert _enforce_write_lock_notification_failure_policy("message", ValueError("metadata unavailable")) is None
 
 
 def test_normalize_write_lock_notification_media_uses_matching_media_candidate():
@@ -7009,8 +7091,7 @@ def test_disable_cdp_websocket_proxy_sets_default_proxy_none():
         assert calls[-1]["proxy"] is None
 
         assert (
-            fake_cdp_client.websockets.connect("ws://example.test/devtools", proxy="http://proxy.local")
-            == "connected"
+            fake_cdp_client.websockets.connect("ws://example.test/devtools", proxy="http://proxy.local") == "connected"
         )
         assert calls[-1]["proxy"] == "http://proxy.local"
         assert _disable_cdp_websocket_proxy() is False
@@ -7986,9 +8067,7 @@ async def test_manager_disables_fast_mode_cache_for_browser_activity():
         ),
     ):
         events = []
-        async for event in manager.execute_tool(
-            workflow_instance, {"goal": "Buy socks"}, "tool-1"
-        ):
+        async for event in manager.execute_tool(workflow_instance, {"goal": "Buy socks"}, "tool-1"):
             events.append(event)
 
     assert events[-1].status.name == "FINISHED"
@@ -8176,9 +8255,7 @@ async def test_manager_failed_tool_event_includes_structured_response_values():
         ):
             events.append(event)
 
-    failed_event = next(
-        e for e in events if getattr(e, "status", None) == MessageStatus.ERROR
-    )
+    failed_event = next(e for e in events if getattr(e, "status", None) == MessageStatus.ERROR)
     assert failed_event.message == "best effort only"
     assert failed_event.metadata["structured_response"] == {
         "selected_black_beanie_url": "https://amazon.com/item",
@@ -8434,7 +8511,16 @@ async def test_manager_payment_card_approval_uses_registered_activity_names_and_
             "status": "awaiting_payment_card_approval",
             "payment_request": {
                 "merchant": "Blick Art Materials",
-                "line_items": [{"name": "Brush", "quantity": 1, "line_total_cents": 636}],
+                "line_items": [
+                    {
+                        "name": "Brush",
+                        "product_url": "https://www.dickblick.com/products/brush/",
+                        "rating": "4.7 stars",
+                        "review_count": "84 reviews",
+                        "quantity": 1,
+                        "line_total_cents": 636,
+                    }
+                ],
                 "subtotal_cents": 636,
                 "total_cents": 636,
             },
@@ -8561,7 +8647,10 @@ async def run_all_tests():
     r = BlackboxResult()
 
     await r.record_async("cdp_use_websocket_direct", test_cdp_use_websocket_patch_disables_proxy_discovery)
-    r.record("browser_action_log_summary_redacts_payment_secrets", test_browser_action_log_summary_redacts_payment_secrets)
+    r.record(
+        "browser_action_log_summary_redacts_payment_secrets", test_browser_action_log_summary_redacts_payment_secrets
+    )
+    r.record("browser_progress_title", test_browser_progress_title_describes_active_agent)
     r.record("verifier_timeout_standard_llm_budget", test_verifier_activity_timeout_allows_llm_call)
     r.record(
         "browser_supervisor_timeout_ordering",
@@ -8967,6 +9056,10 @@ async def run_all_tests():
         test_execute_action_request_payment_card_rejects_empty_receipt,
     )
     await r.record_async(
+        "execute_action_request_payment_card_rejects_current_session_link",
+        test_execute_action_request_payment_card_rejects_current_session_product_link,
+    )
+    await r.record_async(
         "execute_action_request_payment_card_rejects_duplicate_after_card_ready",
         test_execute_action_request_payment_card_rejects_duplicate_after_card_ready,
     )
@@ -9287,6 +9380,10 @@ async def run_all_tests():
     r.record(
         "write_lock_notification_prompt_media_candidates",
         test_write_lock_notification_prompt_includes_media_candidates,
+    )
+    r.record(
+        "purchase_write_lock_notification_failure_blocks_fallback",
+        test_purchase_write_lock_notification_failure_blocks_approval_fallback,
     )
     r.record(
         "normalize_write_lock_notification_media_candidate",

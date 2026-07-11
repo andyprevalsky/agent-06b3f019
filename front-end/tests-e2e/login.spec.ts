@@ -91,6 +91,9 @@ test.describe('login', () => {
     const verifyOtp = page.waitForResponse(
       (r) => r.url().includes('/api/auth/verify-otp') && r.request().method() === 'POST',
     );
+    const inviteCheck = page.waitForResponse(
+      (r) => r.url().includes('/api/invite-codes/check') && r.request().method() === 'GET',
+    );
     await page.locator('#otp').fill(TEST_OTP);
     await page
       .locator('label:has-text("I authorize SMS communication") input[type="checkbox"]')
@@ -106,25 +109,21 @@ test.describe('login', () => {
     // code through the real UI so the gate path is exercised end to end.
     // Already-ungated users (prior redemption) skip straight through.
     const inviteCodeInput = page.getByLabel('Invite code');
-    const gateAppeared = await inviteCodeInput
-      .waitFor({ state: 'visible', timeout: 5_000 })
-      .then(() => true)
-      .catch(() => false);
-    if (gateAppeared) {
-      const gatePersisted = await inviteCodeInput
-        .fill('181818', { timeout: 1_000 })
-        .then(() => true)
-        .catch(() => false);
-      if (gatePersisted) {
-        const useCode = page.waitForResponse(
-          (r) => r.url().includes('/api/invite-codes/use') && r.request().method() === 'POST',
-        );
-        await page.getByRole('button', { name: 'Join with invite code' }).click();
-        const useRes = await useCode;
-        expect(useRes.status(), `invite-codes/use non-2xx: ${useRes.status()}`).toBeLessThan(300);
-      } else {
-        await expect(inviteCodeInput, 'Transient invite gate did not resolve').toBeHidden();
-      }
+    const inviteCheckRes = await inviteCheck;
+    expect(
+      inviteCheckRes.status(),
+      `invite-codes/check non-2xx: ${inviteCheckRes.status()}`,
+    ).toBeLessThan(300);
+    const { needsInviteCode } = (await inviteCheckRes.json()) as { needsInviteCode: boolean };
+    if (needsInviteCode) {
+      await expect(inviteCodeInput, 'Invite gate did not render').toBeVisible();
+      const useCode = page.waitForResponse(
+        (r) => r.url().includes('/api/invite-codes/use') && r.request().method() === 'POST',
+      );
+      await inviteCodeInput.fill('181818');
+      await page.getByRole('button', { name: 'Join with invite code' }).click();
+      const useRes = await useCode;
+      expect(useRes.status(), `invite-codes/use non-2xx: ${useRes.status()}`).toBeLessThan(300);
     }
 
     // ── Step 4: Verify authenticated state ───────────────────────────────

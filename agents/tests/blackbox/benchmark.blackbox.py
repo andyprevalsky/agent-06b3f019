@@ -160,6 +160,61 @@ def test_parallel_tool_calls_smoke_cap_allows_recent_fanout_tail():
     assert get_smoke_cap("parallel-tool-calls") == 600
 
 
+def test_response_schema_feedback_benchmark_declares_real_mid_run_message():
+    """The regression benchmark must inject non-goal feedback into a live agent run."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("response-schema-non-goal-feedback")
+
+    assert task.mid_run_feedback == {
+        "after_root_message_count": 2,
+        "message": "Please keep going. Keep the final prose concise and easy to scan.",
+    }
+    assert task.start_phase == "execute"
+    assert task.runner == "agent"
+    assert task.status == "ready"
+
+
+def test_mid_run_feedback_schema_evaluator_requires_exact_stability():
+    """Non-goal feedback passes only when schema and hidden schema context stay unchanged."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _validate_mid_run_feedback_schema
+
+    task = get_task_by_name("response-schema-non-goal-feedback")
+    initial_schema = {
+        "fields": [{"name": "city_populations", "type": "list[object]", "required": True}]
+    }
+    task._mid_run_feedback_posted = True
+    task._mid_run_feedback_initial_schema = initial_schema
+
+    unchanged = {
+        "agent": {"response_schema": initial_schema},
+        "messages": [{"role": "USER", "text": task.mid_run_feedback["message"], "metadata": None}],
+    }
+    assert _validate_mid_run_feedback_schema(task, unchanged) is None
+
+    changed = {
+        "agent": {
+            "response_schema": {
+                "fields": [
+                    {"name": "city_populations", "type": "list[object]", "required": True},
+                    {"name": "concise_summary", "type": "str", "required": True},
+                ]
+            }
+        },
+        "messages": [
+            {
+                "role": "USER",
+                "text": "generated update",
+                "metadata": {"hidden": True, "isResponseSchemaUpdate": True},
+            }
+        ],
+    }
+    reason = _validate_mid_run_feedback_schema(task, changed)
+    assert reason is not None
+    assert "changed after non-goal feedback" in reason
+
+
 def test_toast_nopa_benchmark_routes_browser_to_toast_not_generic_search():
     """Toast checkout benchmark should not rely on model-discovered DoorDash/Google routing."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -3237,8 +3292,9 @@ def test_suite_selection_excludes_incomplete_and_external_entries():
         "plaid-transactions-dead-subscriptions",
         "phone-call-client-intake",
         "phone-call-payment",
+        "response-schema-non-goal-feedback",
     } <= suite_names
-    assert len(suite_names) == 34
+    assert len(suite_names) == 35
 
 
 def test_every_task_has_base_image_fixture_by_default():
@@ -3741,6 +3797,14 @@ async def run_all_tests():
     r.record(
         "parallel_tool_calls_smoke_cap",
         test_parallel_tool_calls_smoke_cap_allows_recent_fanout_tail,
+    )
+    r.record(
+        "response_schema_feedback_benchmark_mid_run",
+        test_response_schema_feedback_benchmark_declares_real_mid_run_message,
+    )
+    r.record(
+        "mid_run_feedback_schema_evaluator",
+        test_mid_run_feedback_schema_evaluator_requires_exact_stability,
     )
     r.record(
         "toast_nopa_routes_to_toast",

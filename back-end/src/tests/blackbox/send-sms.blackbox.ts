@@ -66,6 +66,26 @@ const TEST_PHONE = '+19729777432';
 const FAKE_AGENT_ID = '00000000-0000-0000-0000-fakeagent001';
 const prisma = new PrismaClient();
 
+async function setTestUserPhone(): Promise<string | null> {
+  const existing = await prisma.user.findUnique({
+    where: { userId: TEST_USER_ID },
+    select: { phone: true },
+  });
+  await prisma.user.upsert({
+    where: { userId: TEST_USER_ID },
+    create: { userId: TEST_USER_ID, phone: TEST_PHONE, isAnonymous: true },
+    update: { phone: TEST_PHONE },
+  });
+  return existing?.phone ?? null;
+}
+
+async function restoreTestUserPhone(previousPhone: string | null): Promise<void> {
+  await prisma.user.updateMany({
+    where: { userId: TEST_USER_ID },
+    data: { phone: previousPhone },
+  });
+}
+
 // ==================== RESPONSE SCHEMAS ====================
 
 const SendSuccessSchema = z.object({
@@ -1555,15 +1575,22 @@ async function runAll() {
   if (failed > 0) {
     console.log('\nFAILURES:');
     allResults.filter((r) => !r.passed).forEach((r) => console.log(`   ${r.name}: ${r.error}`));
-    await prisma.$disconnect();
-    process.exit(1);
+    throw new Error(`${failed} send-sms black-box test(s) failed`);
   }
-  await prisma.$disconnect();
   console.log('\nALL BLACK-BOX TESTS PASSED\n');
-  process.exit(0);
 }
 
-runAll().catch((error) => {
+async function runWithFixture(): Promise<void> {
+  const previousPhone = await setTestUserPhone();
+  try {
+    await runAll();
+  } finally {
+    await restoreTestUserPhone(previousPhone);
+    await prisma.$disconnect();
+  }
+}
+
+runWithFixture().catch((error) => {
   console.error('\nBlack-box test suite crashed:', error);
-  process.exit(1);
+  process.exitCode = 1;
 });
