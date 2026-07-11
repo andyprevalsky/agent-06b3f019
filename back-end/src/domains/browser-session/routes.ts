@@ -16,7 +16,7 @@ import { type RequestHandler, type Response, Router } from 'express';
 import { type AuthRequest, authenticate } from '../../providers/auth';
 import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { createLogger } from '../../providers/logger';
-import { SteelRateLimitError } from '../../providers/steel';
+import { BrowserProviderRateLimitError } from '../../providers/browser';
 // eslint-disable-next-line no-restricted-imports -- Express file upload middleware, configured per-route
 import multer from 'multer';
 import { asyncHandler } from '../../utils/asyncHandler';
@@ -30,6 +30,8 @@ import {
   getSessionById,
   uploadFile,
   listFiles,
+  downloadFile,
+  takeScreenshot,
   injectLocalStorage,
   SessionNotFoundError,
   SessionNoUserError,
@@ -76,10 +78,13 @@ router.post(
 
       res.json({ success: true, ...result });
     } catch (error) {
-      if (error instanceof SteelRateLimitError) {
-        log.warn('Steel rate limit hit during session init');
+      if (error instanceof BrowserProviderRateLimitError) {
+        log.warn('Browser provider rate limit hit during session init', {
+          provider: error.provider,
+        });
         res.status(429).json({
-          error: 'steel_rate_limit',
+          error: 'browser_provider_rate_limit',
+          provider: error.provider,
           message: 'Browser session rate limit exceeded. Retry after delay.',
         });
         return;
@@ -134,10 +139,13 @@ router.post(
 
       res.json({ success: true, ...result });
     } catch (error) {
-      if (error instanceof SteelRateLimitError) {
-        log.warn('Steel rate limit hit during session resume');
+      if (error instanceof BrowserProviderRateLimitError) {
+        log.warn('Browser provider rate limit hit during session resume', {
+          provider: error.provider,
+        });
         res.status(429).json({
-          error: 'steel_rate_limit',
+          error: 'browser_provider_rate_limit',
+          provider: error.provider,
           message: 'Browser session rate limit exceeded. Retry after delay.',
         });
         return;
@@ -298,6 +306,39 @@ router.get(
         error: error instanceof Error ? error.message : 'Failed to list session files',
       });
     }
+  })
+);
+
+router.get(
+  '/:sessionId/files/content',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const { sessionId } = req.params;
+    const filePath = typeof req.query.path === 'string' ? req.query.path : '';
+    if (filePath === '') {
+      res.status(400).json({ error: 'path query parameter is required' });
+      return;
+    }
+    const result = await downloadFile(sessionId, filePath);
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${result.filename.replace(/"/g, '')}"`
+    );
+    res.send(result.content);
+  })
+);
+
+router.post(
+  '/:sessionId/screenshot',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const { sessionId } = req.params;
+    const result = await takeScreenshot(sessionId);
+    res.json({
+      provider: result.provider,
+      base64_image: result.image.toString('base64'),
+    });
   })
 );
 

@@ -3,7 +3,7 @@
 import assert from 'node:assert';
 import http from 'node:http';
 import express from 'express';
-import { installFetchCapture } from '../../providers/fetchCapture';
+import { installFetchCapture, shouldBypassOutboundReplay } from '../../providers/fetchCapture';
 
 interface CaptureResponse {
   captures: Array<{
@@ -50,6 +50,10 @@ async function readCaptures(baseUrl: string, query = ''): Promise<CaptureRespons
 }
 
 async function run(): Promise<void> {
+  assert.strictEqual(shouldBypassOutboundReplay('https://api.e2b.app/sandboxes'), true);
+  assert.strictEqual(shouldBypassOutboundReplay('https://api.onkernel.com/profiles'), true);
+  assert.strictEqual(shouldBypassOutboundReplay('https://api.example.com/data'), false);
+
   const originalFetch = globalThis.fetch;
   const oldFakeSurge = process.env.BLACKBOX_TEST_FAKE_SURGE;
   const upstreamCalls: Array<{ url: string; bodyType: string }> = [];
@@ -95,6 +99,9 @@ async function run(): Promise<void> {
     const e2b = await fetch('https://sandbox.e2b.app/health');
     assert.strictEqual(e2b.status, 201);
 
+    const kernel = await fetch('https://api.onkernel.com/profiles');
+    assert.strictEqual(kernel.status, 201);
+
     await assert.rejects(fetch('https://error.e2b.app/health'), /e2b unavailable/);
 
     const surge = await fetch('https://api.surge.app/accounts/acct/messages', {
@@ -104,27 +111,29 @@ async function run(): Promise<void> {
     });
     assert.strictEqual(surge.status, 200);
     const surgeBody = (await surge.json()) as { id?: string };
-    assert.strictEqual(surgeBody.id, 'blackbox-surge-message-4');
+    assert.strictEqual(surgeBody.id, 'blackbox-surge-message-5');
 
     const all = await readCaptures(baseUrl);
-    assert.strictEqual(all.captures.length, 4);
+    assert.strictEqual(all.captures.length, 5);
     assert.strictEqual(all.captures[0].requestBody, '[non-string body]');
     assert.strictEqual(all.captures[0].responseStatus, 201);
     assert.strictEqual(all.captures[1].url, 'https://sandbox.e2b.app/health');
     assert.strictEqual(all.captures[1].requestBody, null);
-    assert.strictEqual(all.captures[2].error, 'e2b unavailable');
+    assert.strictEqual(all.captures[2].url, 'https://api.onkernel.com/profiles');
+    assert.strictEqual(all.captures[2].cached, false);
+    assert.strictEqual(all.captures[3].error, 'e2b unavailable');
     assert.strictEqual(
-      all.captures[3].requestHeaders.Authorization,
+      all.captures[4].requestHeaders.Authorization,
       'Bearer surge-sec...[redacted]'
     );
-    assert.strictEqual(all.captures[3].responseBody, '{"id":"blackbox-surge-message-4"}');
+    assert.strictEqual(all.captures[4].responseBody, '{"id":"blackbox-surge-message-5"}');
     assert.deepStrictEqual(
       upstreamCalls.map((call) => call.bodyType),
-      ['FormData', 'none', 'none']
+      ['FormData', 'none', 'none', 'none']
     );
 
     const afterFirst = await readCaptures(baseUrl, '?after=1');
-    assert.strictEqual(afterFirst.captures.length, 3);
+    assert.strictEqual(afterFirst.captures.length, 4);
 
     const cleared = await fetch(`${baseUrl}/captures`, { method: 'DELETE' });
     assert.strictEqual(cleared.status, 200);

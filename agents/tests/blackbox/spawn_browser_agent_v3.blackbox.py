@@ -3172,8 +3172,8 @@ async def test_save_browser_credential_ref_message_user_role():
 async def test_list_session_files_no_api_key():
     from domains.spawn_browser_agent_v3 import repo
 
-    with patch.object(repo, "STEEL_API_KEY", ""):
-        assert await repo.list_session_files("s1") == []
+    setup_mock({"backend.example.com": {"status": 401, "json": {"error": "unauthorized"}}})
+    assert await repo.list_session_files(_fake_config(backend_api_key=""), "s1") == []
 
 
 async def test_list_session_files_success():
@@ -3181,23 +3181,21 @@ async def test_list_session_files_success():
 
     setup_mock(
         {
-            "api.steel.dev/v1/sessions/s1/files": {
+            "backend.example.com/api/browser-session/s1/files/list": {
                 "status": 200,
-                "json": {"data": [{"path": "/f/x.pdf"}]},
+                "json": {"files": [{"path": "/f/x.pdf"}]},
             }
         }
     )
-    with patch.object(repo, "STEEL_API_KEY", "sk-steel"):
-        files = await repo.list_session_files("s1")
+    files = await repo.list_session_files(_fake_config(), "s1")
     assert files == [{"path": "/f/x.pdf"}]
 
 
 async def test_list_session_files_non_200():
     from domains.spawn_browser_agent_v3 import repo
 
-    setup_mock({"api.steel.dev": {"status": 500, "json": {"err": "x"}}})
-    with patch.object(repo, "STEEL_API_KEY", "sk-steel"):
-        assert await repo.list_session_files("s1") == []
+    setup_mock({"backend.example.com": {"status": 500, "json": {"err": "x"}}})
+    assert await repo.list_session_files(_fake_config(), "s1") == []
 
 
 async def test_list_session_files_network_error():
@@ -3208,15 +3206,14 @@ async def test_list_session_files_network_error():
         raise RuntimeError("net")
 
     setup_mock_fn(boom)
-    with patch.object(repo, "STEEL_API_KEY", "sk-steel"):
-        assert await repo.list_session_files("s1") == []
+    assert await repo.list_session_files(_fake_config(), "s1") == []
 
 
 async def test_download_file_from_steel_no_api_key():
     from domains.spawn_browser_agent_v3 import repo
 
-    with patch.object(repo, "STEEL_API_KEY", ""):
-        assert await repo.download_file_from_steel("s1", "/files/x.pdf") is None
+    setup_mock({"backend.example.com": {"status": 401, "text": "unauthorized"}})
+    assert await repo.download_session_file(_fake_config(backend_api_key=""), "s1", "/files/x.pdf") is None
 
 
 async def test_download_file_from_steel_strips_prefixes():
@@ -3233,16 +3230,14 @@ async def test_download_file_from_steel_strips_prefixes():
     from _test_utils import setup_mock_fn
 
     setup_mock_fn(handler)
-    with patch.object(repo, "STEEL_API_KEY", "sk"):
-        out = await repo.download_file_from_steel("s1", "/files/doc.pdf")
+    out = await repo.download_session_file(_fake_config(), "s1", "/files/doc.pdf")
 
     assert out is not None
     assert out["content"] == b"PDFDATA"
     assert out["filename"] == "doc.pdf"
     assert out["mime_type"] == "application/pdf"
-    assert "files/doc.pdf" in captured["url"]
-    # "/files/" prefix should have been stripped before Steel path
-    assert "/files//files/" not in captured["url"]
+    assert "/api/browser-session/s1/files/content" in captured["url"]
+    assert "path=%2Ffiles%2Fdoc.pdf" in captured["url"]
 
 
 async def test_download_file_from_steel_strips_leading_slash():
@@ -3256,8 +3251,7 @@ async def test_download_file_from_steel_strips_leading_slash():
     from _test_utils import setup_mock_fn
 
     setup_mock_fn(handler)
-    with patch.object(repo, "STEEL_API_KEY", "sk"):
-        out = await repo.download_file_from_steel("s1", "/simple.txt")
+    out = await repo.download_session_file(_fake_config(), "s1", "/simple.txt")
     assert out is not None
     assert out["mime_type"] == "text/plain"
 
@@ -3265,9 +3259,8 @@ async def test_download_file_from_steel_strips_leading_slash():
 async def test_download_file_from_steel_non_200():
     from domains.spawn_browser_agent_v3 import repo
 
-    setup_mock({"api.steel.dev": {"status": 404, "text": "not found"}})
-    with patch.object(repo, "STEEL_API_KEY", "sk"):
-        assert await repo.download_file_from_steel("s1", "x") is None
+    setup_mock({"backend.example.com": {"status": 404, "text": "not found"}})
+    assert await repo.download_session_file(_fake_config(), "s1", "x") is None
 
 
 async def test_download_file_from_steel_network_error():
@@ -3278,8 +3271,7 @@ async def test_download_file_from_steel_network_error():
         raise RuntimeError("fail")
 
     setup_mock_fn(boom)
-    with patch.object(repo, "STEEL_API_KEY", "sk"):
-        assert await repo.download_file_from_steel("s1", "x") is None
+    assert await repo.download_session_file(_fake_config(), "s1", "x") is None
 
 
 async def test_take_steel_computer_screenshot_success():
@@ -3287,24 +3279,22 @@ async def test_take_steel_computer_screenshot_success():
 
     setup_mock(
         {
-            "api.steel.dev/v1/sessions/s1/computer": {
+            "backend.example.com/api/browser-session/s1/screenshot": {
                 "status": 200,
                 "json": {
-                    "output": "Screenshot taken successfully",
+                    "provider": "kernel",
                     "base64_image": "abc123",
                 },
             }
         }
     )
-    with patch.object(repo, "STEEL_API_KEY", "sk"):
-        out = await repo.take_steel_computer_screenshot("s1")
+    out = await repo.take_browser_computer_screenshot(_fake_config(), "s1")
     assert out["base64_image"] == "abc123"
     assert_captured_call(
         0,
-        url_contains="api.steel.dev/v1/sessions/s1/computer",
+        url_contains="backend.example.com/api/browser-session/s1/screenshot",
         method="POST",
-        body_contains={"action": "take_screenshot"},
-        header_present="steel-api-key",
+        header_present="x-api-key",
     )
 
 
@@ -3313,22 +3303,21 @@ async def test_take_steel_computer_screenshot_missing_image_raises():
 
     setup_mock(
         {
-            "api.steel.dev/v1/sessions/s1/computer": {
+            "backend.example.com/api/browser-session/s1/screenshot": {
                 "status": 200,
                 "json": {
                     "output": "Screenshot taken successfully",
-                    "system": "steel-browser",
+                    "provider": "kernel",
                 },
             }
         }
     )
-    with patch.object(repo, "STEEL_API_KEY", "sk"):
-        try:
-            await repo.take_steel_computer_screenshot("s1")
-        except RuntimeError as exc:
-            assert "did not return an image" in str(exc)
-        else:
-            raise AssertionError("expected missing base64_image to raise")
+    try:
+        await repo.take_browser_computer_screenshot(_fake_config(), "s1")
+    except RuntimeError as exc:
+        assert "did not return an image" in str(exc)
+    else:
+        raise AssertionError("expected missing base64_image to raise")
 
 
 # ========================================
@@ -3891,12 +3880,13 @@ def test_select_auth_assistance_current_url_keeps_current_when_it_has_query_para
 def test_build_usage_items():
     from domains.spawn_browser_agent_v3.service import build_usage_items
 
-    items = build_usage_items(
-        total_input_tokens=1000,
-        total_output_tokens=2000,
-        model_pricing={"input_cents_per_1k": 0.3, "output_cents_per_1k": 1.5},
-        execution_time_ms=60000,
-    )
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "kernel"}):
+        items = build_usage_items(
+            total_input_tokens=1000,
+            total_output_tokens=2000,
+            model_pricing={"input_cents_per_1k": 0.3, "output_cents_per_1k": 1.5},
+            execution_time_ms=60000,
+        )
     assert len(items) == 2
     assert items[0]["type"] == "llm"
     assert items[0]["provider"] == "Rose 1 Browser Use"
@@ -3905,7 +3895,11 @@ def test_build_usage_items():
     # 1k*0.3 + 2k*1.5 = 0.3 + 3.0 = 3.3
     assert items[0]["cost_cents"] == 3.3
     assert items[1]["type"] == "service"
-    assert items[1]["provider"] == "Steel.dev Browser"
+    assert items[1]["provider"] == "Kernel Browser"
+
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "steel"}):
+        steel_items = build_usage_items(0, 0, {"input_cents_per_1k": 0, "output_cents_per_1k": 0}, 1)
+    assert steel_items[1]["provider"] == "Steel.dev Browser"
 
 
 def test_get_browser_system_prompt_with_files():
@@ -4255,7 +4249,7 @@ async def test_extract_session_files_happy_path():
 
     with (
         patch.object(service, "list_session_files", AsyncMock(return_value=files_listing)),
-        patch.object(service, "download_file_from_steel", AsyncMock(return_value=download_return)),
+        patch.object(service, "download_session_file", AsyncMock(return_value=download_return)),
         patch("helpers.attachments.upload_to_storage", AsyncMock(return_value=fp)),
     ):
         out = await service.extract_session_files("s1", "u1", _fake_config())
@@ -4273,7 +4267,7 @@ async def test_extract_session_files_exclude_paths():
         patch.object(service, "list_session_files", AsyncMock(return_value=files_listing)),
         patch.object(
             service,
-            "download_file_from_steel",
+            "download_session_file",
             AsyncMock(return_value={"content": b"c", "filename": "y.pdf", "mime_type": "x"}),
         ),
         patch(
@@ -4290,7 +4284,7 @@ async def test_extract_session_files_download_fail_skipped():
 
     with (
         patch.object(service, "list_session_files", AsyncMock(return_value=[{"path": "/a"}])),
-        patch.object(service, "download_file_from_steel", AsyncMock(return_value=None)),
+        patch.object(service, "download_session_file", AsyncMock(return_value=None)),
     ):
         out = await service.extract_session_files("s1", "u1", _fake_config())
     assert out == []
@@ -4303,7 +4297,7 @@ async def test_extract_session_files_upload_failure_skipped():
         patch.object(service, "list_session_files", AsyncMock(return_value=[{"path": "/a"}])),
         patch.object(
             service,
-            "download_file_from_steel",
+            "download_session_file",
             AsyncMock(return_value={"content": b"c", "filename": "a", "mime_type": "x"}),
         ),
         patch(
@@ -6226,8 +6220,8 @@ async def test_execute_screenshot_success():
     upload_mock = AsyncMock(return_value={"path": "/tmp/s.png"})
     with (
         patch(
-            "domains.spawn_browser_agent_v3.repo.take_steel_computer_screenshot",
-            AsyncMock(return_value={"base64_image": screenshot_b64}),
+            "domains.spawn_browser_agent_v3.repo.take_browser_computer_screenshot",
+            AsyncMock(return_value={"provider": "steel", "base64_image": screenshot_b64}),
         ),
         patch(
             "domains.spawn_browser_agent_v3.repo.upload_file_to_session",
@@ -6253,7 +6247,7 @@ async def test_execute_screenshot_success():
 
 
 async def test_execute_screenshot_requires_steel_image():
-    """Missing Steel Computer screenshot data fails instead of falling back to CDP."""
+    """Missing provider screenshot data fails instead of falling back to CDP."""
     from domains.spawn_browser_agent_v3 import service_actions
 
     session = MagicMock()
@@ -6261,8 +6255,8 @@ async def test_execute_screenshot_requires_steel_image():
     ah = MagicMock()
     ah.record_action = AsyncMock()
     with patch(
-        "domains.spawn_browser_agent_v3.repo.take_steel_computer_screenshot",
-        AsyncMock(side_effect=RuntimeError("Steel computer screenshot did not return an image")),
+        "domains.spawn_browser_agent_v3.repo.take_browser_computer_screenshot",
+        AsyncMock(side_effect=RuntimeError("Browser screenshot did not return an image")),
     ):
         try:
             await service_actions._execute_screenshot(
@@ -6944,8 +6938,7 @@ def test_disable_cdp_websocket_proxy_sets_default_proxy_none():
         assert calls[-1]["proxy"] is None
 
         assert (
-            fake_cdp_client.websockets.connect("ws://example.test/devtools", proxy="http://proxy.local")
-            == "connected"
+            fake_cdp_client.websockets.connect("ws://example.test/devtools", proxy="http://proxy.local") == "connected"
         )
         assert calls[-1]["proxy"] == "http://proxy.local"
         assert _disable_cdp_websocket_proxy() is False
@@ -7771,9 +7764,7 @@ async def test_manager_disables_fast_mode_cache_for_browser_activity():
         ),
     ):
         events = []
-        async for event in manager.execute_tool(
-            workflow_instance, {"goal": "Buy socks"}, "tool-1"
-        ):
+        async for event in manager.execute_tool(workflow_instance, {"goal": "Buy socks"}, "tool-1"):
             events.append(event)
 
     assert events[-1].status.name == "FINISHED"
@@ -7961,9 +7952,7 @@ async def test_manager_failed_tool_event_includes_structured_response_values():
         ):
             events.append(event)
 
-    failed_event = next(
-        e for e in events if getattr(e, "status", None) == MessageStatus.ERROR
-    )
+    failed_event = next(e for e in events if getattr(e, "status", None) == MessageStatus.ERROR)
     assert failed_event.message == "best effort only"
     assert failed_event.metadata["structured_response"] == {
         "selected_black_beanie_url": "https://amazon.com/item",

@@ -3,6 +3,7 @@
  */
 
 import { createLogger } from '../logger';
+import { BrowserProviderRateLimitError } from '../browser/types';
 
 export const log = createLogger('Steel');
 
@@ -10,9 +11,9 @@ export const log = createLogger('Steel');
  * Thrown when Steel.dev returns HTTP 429 (concurrent session limit reached).
  * The agent should back off and retry rather than failing immediately.
  */
-export class SteelRateLimitError extends Error {
+export class SteelRateLimitError extends BrowserProviderRateLimitError {
   constructor(message: string = 'Steel session rate limit exceeded') {
-    super(message);
+    super('steel', message);
     this.name = 'SteelRateLimitError';
   }
 }

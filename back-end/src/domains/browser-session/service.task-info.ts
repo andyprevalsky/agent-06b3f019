@@ -1,4 +1,8 @@
-import { getFingerprintInjectionData, getSteelSessionHealth } from '../../providers/steel';
+import {
+  getBrowserSessionHealth,
+  getFingerprintInjectionData,
+  type BrowserSessionHealth,
+} from '../../providers/browser';
 import { createLogger } from '../../providers/logger';
 import { canonicalAuthRealm } from '../../providers/authRealm';
 import * as repo from './repo';
@@ -21,14 +25,16 @@ type TaskInfoResponse = {
   user_settings: ReturnType<typeof toUserSettings>;
   browser_session_metadata: {
     provider: string;
-    steel_profile_id: string | null;
+    profile_id: string | null;
+    steel_profile_id?: string | null;
   };
   same_session_available?: boolean;
   same_session_unavailable_reason?: string;
-  steel_session_health?: Awaited<ReturnType<typeof getSteelSessionHealth>>;
+  browser_session_health?: BrowserSessionHealth;
+  steel_session_health?: BrowserSessionHealth;
 };
 
-function isLiveSteelStatus(status: string | null): boolean {
+function isLiveBrowserStatus(status: string | null): boolean {
   if (status === null) return false;
   return ['live', 'active', 'running'].includes(status.toLowerCase());
 }
@@ -91,6 +97,12 @@ function buildTaskInfoResponse(
   authRealm: string,
   injection: Awaited<ReturnType<typeof collectUserInjectionData>>
 ): TaskInfoResponse {
+  const provider = session.provider === 'kernel' ? 'kernel' : 'steel';
+  const providerProfile = session.context.providerProfiles.find(
+    (profile) => profile.provider === provider
+  );
+  const profileId =
+    providerProfile?.profileId ?? (provider === 'steel' ? session.context.contextId : null);
   return {
     task_id: session.id,
     session_id: session.sessionId,
@@ -105,8 +117,9 @@ function buildTaskInfoResponse(
     passkeys: injection.passkeys,
     user_settings: injection.userSettings,
     browser_session_metadata: {
-      provider: session.sessionId.startsWith('local-') ? 'local' : 'steel',
-      steel_profile_id: session.context?.contextId ?? null,
+      provider: session.sessionId.startsWith('local-') ? 'local' : provider,
+      profile_id: profileId,
+      ...(provider === 'steel' ? { steel_profile_id: profileId } : {}),
     },
   };
 }
@@ -115,6 +128,7 @@ async function applyLiveSessionAvailability(
   response: TaskInfoResponse,
   session: NonNullable<Awaited<ReturnType<typeof repo.findSessionByTaskId>>>
 ) {
+  const legacySteelResponse = session.provider !== 'kernel';
   if (session.status !== 'ACTIVE') {
     response.same_session_available = false;
     response.same_session_unavailable_reason = `db_status_${session.status.toLowerCase()}`;
@@ -126,26 +140,33 @@ async function applyLiveSessionAvailability(
     return response;
   }
 
-  let health: Awaited<ReturnType<typeof getSteelSessionHealth>>;
+  let health: BrowserSessionHealth;
   try {
-    health = await getSteelSessionHealth(session.sessionId);
+    health = await getBrowserSessionHealth(session.sessionId);
   } catch (error) {
-    log.warn('Steel session health check failed', {
+    log.warn('Browser session health check failed', {
       sessionId: session.sessionId,
       error: error instanceof Error ? error.message : String(error),
     });
     response.same_session_available = false;
-    response.same_session_unavailable_reason = 'steel_health_check_failed';
+    response.same_session_unavailable_reason = legacySteelResponse
+      ? 'steel_health_check_failed'
+      : 'browser_health_check_failed';
     return response;
   }
-  response.steel_session_health = health;
+  response.browser_session_health = health;
+  if (health.provider === 'steel') response.steel_session_health = health;
   const hasTtl = health.ttlMs === null || health.ttlMs > 0;
-  response.same_session_available = isLiveSteelStatus(health.status) && hasTtl;
+  response.same_session_available = isLiveBrowserStatus(health.status) && hasTtl;
   if (!response.same_session_available) {
     response.same_session_unavailable_reason =
       health.ttlMs !== null && health.ttlMs <= 0
-        ? 'steel_session_expired'
-        : `steel_status_${String(health.status ?? 'unknown').toLowerCase()}`;
+        ? legacySteelResponse
+          ? 'steel_session_expired'
+          : 'browser_session_expired'
+        : `${legacySteelResponse ? 'steel' : 'browser'}_status_${String(
+            health.status ?? 'unknown'
+          ).toLowerCase()}`;
   }
 
   return response;

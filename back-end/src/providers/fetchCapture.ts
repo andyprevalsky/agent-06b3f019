@@ -109,6 +109,11 @@ const captures: CapturedCall[] = [];
 let nextId = 1;
 let fsCache: FileSystemCache | null = null;
 
+/** Control-plane calls create mutable remote resources and must never be replayed. */
+export function shouldBypassOutboundReplay(url: string): boolean {
+  return url.includes('e2b.app') || url.includes('api.onkernel.com');
+}
+
 /**
  * Install the global fetch wrapper with fast-forward replay cache.
  * Call once at server startup. Returns the Express router for capture endpoints.
@@ -148,11 +153,10 @@ export function installFetchCapture(): Router {
       return originalFetch(input, init);
     }
 
-    // E2B calls bypass the serialization pipeline entirely — the E2B SDK
-    // uses Request objects with streaming bodies that can't be round-tripped
-    // through our string-based cache layer. We still record the capture entry
-    // (URL + method) so boundary assertion tests can detect the outbound call.
-    if (url.includes('e2b.app')) {
+    // Mutable control-plane calls bypass replay. E2B also uses Request objects
+    // with streaming bodies that cannot round-trip through the string cache.
+    // Captures are still recorded for outbound boundary assertions.
+    if (shouldBypassOutboundReplay(url)) {
       const captureId = nextId++;
       const captureStart = Date.now();
       const captureMethod = init?.method ?? 'GET';

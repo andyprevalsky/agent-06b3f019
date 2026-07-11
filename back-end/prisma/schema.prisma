@@ -280,7 +280,7 @@ model Subscription {
 }
 
 model PurchaseSpend {
-  id                    String              @id @default(uuid())
+  id                    String                 @id @default(uuid())
   userId                String
   agentId               String?
   fingerprint           String
@@ -288,11 +288,11 @@ model PurchaseSpend {
   merchant              String
   lineItemsJson         Json
   totalCents            Int
-  status                PurchaseSpendStatus @default(PENDING_APPROVAL)
+  status                PurchaseSpendStatus    @default(PENDING_APPROVAL)
   stripePaymentIntentId String?
-  provider              String              @default("agentcard")
-  createdAt             DateTime            @default(now())
-  updatedAt             DateTime            @updatedAt
+  provider              String                 @default("agentcard")
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
   user                  User                   @relation(fields: [userId], references: [userId], onDelete: Cascade)
   agent                 Agent?                 @relation(fields: [agentId], references: [id], onDelete: SetNull)
   walletFunding         PurchaseWalletFunding?
@@ -340,15 +340,45 @@ model PurchaseWalletFunding {
 }
 
 model BrowserContext {
-  id        String           @id @default(uuid())
-  userId    String           @unique
-  contextId String?          @unique
-  createdAt DateTime         @default(now())
-  updatedAt DateTime         @updatedAt
-  sessions  BrowserSession[]
+  id               String                   @id @default(uuid())
+  userId           String                   @unique
+  contextId        String?                  @unique
+  createdAt        DateTime                 @default(now())
+  updatedAt        DateTime                 @updatedAt
+  sessions         BrowserSession[]
+  providerProfiles BrowserProviderProfile[]
 
   @@index([userId])
   @@index([contextId])
+}
+
+model BrowserProviderProfile {
+  id        String         @id @default(uuid())
+  contextId String
+  provider  String
+  profileId String
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+  context   BrowserContext @relation(fields: [contextId], references: [id], onDelete: Cascade)
+
+  @@unique([contextId, provider])
+  @@unique([provider, profileId])
+  @@index([contextId])
+}
+
+model BrowserProviderProxy {
+  id        String   @id @default(uuid())
+  provider  String
+  proxyKey  String
+  proxyId   String
+  proxyType String
+  config    Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([provider, proxyKey])
+  @@unique([provider, proxyId])
+  @@index([provider])
 }
 
 model BrowserSession {
@@ -363,6 +393,7 @@ model BrowserSession {
   createdAt       DateTime             @default(now())
   closedAt        DateTime?
   wsUrl           String?
+  provider        String               @default("steel")
   injectedOrigins Json?
   context         BrowserContext       @relation(fields: [contextId], references: [id], onDelete: Cascade)
 
@@ -1216,4 +1247,3 @@ model SmsShortcode {
   @@index([userId])
   @@index([expiresAt])
 }
-
