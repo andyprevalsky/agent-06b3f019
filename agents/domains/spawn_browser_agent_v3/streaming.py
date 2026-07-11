@@ -129,19 +129,26 @@ class BrowserThinkingStream:
             return
 
     async def finish(self) -> None:
+        """Close the assistant decision stream without resolving its action."""
         if self._finished:
             return
         if not self._started:
             await self.start()
         self._finished = True
         await self._publish_assistant(delta="", done=True)
-        for tool_call_id, tool_name in self._tool_calls.items():
+
+    async def finish_tools(self, *, status: str) -> None:
+        """Resolve detected tools when the corresponding browser action resolves."""
+        tool_calls = list(self._tool_calls.items())
+        self._tool_calls.clear()
+        for tool_call_id, tool_name in tool_calls:
+            title_prefix = "Finished" if status == "FINISHED" else "Failed"
             await stream_tool_event(
                 agent_id=self.agent_id,
                 stream_id=self.stream_id,
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
-                title=f"Finished {tool_name}",
-                status="FINISHED",
+                title=f"{title_prefix} {tool_name}",
+                status=status,
                 sub_agent_id=self.task_id,
             )

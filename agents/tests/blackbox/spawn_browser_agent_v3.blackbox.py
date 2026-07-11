@@ -4098,6 +4098,8 @@ async def test_browser_thinking_stream_routes_chunks_to_browser_message_list():
             )
         )
         await stream.finish()
+        assert publish_tool.await_count == 1
+        await stream.finish_tools(status="FINISHED")
 
     published = [call.kwargs for call in publish.await_args_list]
     assert published[0]["delta"] == ""

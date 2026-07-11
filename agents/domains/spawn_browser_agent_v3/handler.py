@@ -3649,6 +3649,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 )
                 await browser_stream.start()
                 rose_client.set_thinking_stream(browser_stream)
+                decision_succeeded = False
                 try:
                     llm_result = await asyncio.wait_for(
                         cached_browser_decision(
@@ -3669,9 +3670,12 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         ),
                         timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
                     )
+                    decision_succeeded = True
                 finally:
                     rose_client.set_thinking_stream(None)
                     await browser_stream.finish()
+                    if not decision_succeeded:
+                        await browser_stream.finish_tools(status="ERROR")
                 llm_result = {**llm_result, "_thinking_stream_id": browser_stream.stream_id}
                 # Track waterfall fall-through so subsequent iterations skip claudeAuth.
                 if llm_result.get("mode") != "claude" and browser_use_mode == "claude":
@@ -3813,6 +3817,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             result=blocked_result,
                             tool_call_id=tool_call_id_action,
                         )
+                        await browser_stream.finish_tools(status="ERROR")
                         continue
                 allowed, guard_reason, guard_state = auth_runtime_state.user_assistance_guard()
                 if not allowed:
@@ -3856,6 +3861,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         total_steps=MAX_ITERATIONS,
                         extra_metadata={"auth_guard_state": guard_state},
                     )
+                    await browser_stream.finish_tools(status="ERROR")
                     continue
                 logger.info(
                     "Browser agent requested user authentication assistance",
@@ -3934,6 +3940,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     success=False,
                     message="Automated authentication options were exhausted; requesting user assistance.",
                 )
+                await browser_stream.finish_tools(status="FINISHED")
 
                 return {
                     "status": "awaiting_auth_assistance",
@@ -3978,6 +3985,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     model_pricing,
                     execution_time_ms,
                 )
+                await browser_stream.finish_tools(status="FINISHED")
 
                 return {
                     "status": "needs_user_help",
@@ -3997,6 +4005,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 ).get("text", "")
 
                 verifier_call_id = str(uuid_module.uuid4())
+                completion_tool_status = "ERROR"
                 try:
                     await save_browser_action_message(
                         agent_id=agent_id,
@@ -4205,6 +4214,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         )
 
                     if score >= 1.0:
+                        completion_tool_status = "FINISHED"
                         execution_time_ms = (safe_time() - start_time) * 1000
                         structured_response = progress_result.get("structured_response")
 
@@ -4383,6 +4393,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     )
 
                 except Exception as verifier_error:
+                    completion_tool_status = "ERROR"
                     logger.error(f"Verifier failed: {verifier_error}")
                     await save_browser_action_message(
                         agent_id=agent_id,
@@ -4394,6 +4405,8 @@ Based on this feedback, I need to continue working on the task and address the i
                         action_type="error",
                         tool_call_id=verifier_call_id,
                     )
+                finally:
+                    await browser_stream.finish_tools(status=completion_tool_status)
 
                 continue
 
@@ -4611,6 +4624,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     session_id=session_id,
                     cdp_url=cdp_url[:50] if cdp_url else None,
                 )
+                await browser_stream.finish_tools(status="FINISHED")
                 return {
                     "status": "awaiting_write_approval",
                     "approval_type": approval_type,
@@ -4709,6 +4723,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     except Exception as e:
                         logger.warning(f"Failed to disconnect browser before payment card return: {e}")
 
+                await browser_stream.finish_tools(status="FINISHED")
                 return {
                     "status": "awaiting_payment_card_approval",
                     "payment_request": payment_request,
@@ -4766,6 +4781,7 @@ Based on this feedback, I need to continue working on the task and address the i
                             "target_coordinates": coords_for_cursor,
                         },
                     )
+                await browser_stream.finish_tools(status="FINISHED")
             else:
                 logger.error(
                     f"Action {action_name} failed",
@@ -4802,6 +4818,7 @@ Based on this feedback, I need to continue working on the task and address the i
                             "target_coordinates": coords_for_cursor,
                         },
                     )
+                await browser_stream.finish_tools(status="ERROR")
 
             await asyncio.sleep(ACTION_LOOP_DELAY_SECONDS)
 

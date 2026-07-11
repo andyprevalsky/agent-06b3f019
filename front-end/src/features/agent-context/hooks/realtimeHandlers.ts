@@ -153,10 +153,12 @@ export function handleAssistantStream(
   selectedAgentId: string,
   streamedTextsRef: React.MutableRefObject<Set<string>>,
   setStreamingBubbles: RealtimeSetters['setStreamingBubbles'],
+  completedStreamIdsRef?: React.MutableRefObject<Set<string>>,
 ) {
   if (chunk.agentId !== selectedAgentId) return;
 
   setStreamingBubbles((prev) => {
+    if (completedStreamIdsRef?.current.has(chunk.stream_id)) return prev;
     const newMap = new Map(prev);
     const existing = newMap.get(chunk.stream_id);
 
@@ -169,6 +171,7 @@ export function handleAssistantStream(
         if (accumulatedText.trim()) {
           streamedTextsRef.current.add(accumulatedText.trim());
         }
+        completedStreamIdsRef?.current.add(chunk.stream_id);
         newMap.delete(chunk.stream_id);
         return newMap;
       }

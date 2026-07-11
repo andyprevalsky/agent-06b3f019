@@ -163,11 +163,11 @@ export function MessageListView(props: MessageListViewProps) {
           onIncreaseCostLimit={onIncreaseCostLimit}
         />
       )}
-      <StreamingTools tools={[...streaming.tools.values()]} compact={compact} />
       {showAttention && streaming.attention && (
         <StreamingAttentionBubble attention={streaming.attention} onSendMessage={onSendMessage} />
       )}
       {showWebPreview && agent !== null && <WebPreviewBanner agentId={agent.agent_id} />}
+      <StreamingTools tools={[...streaming.tools.values()]} compact={compact} />
       <ThinkingIndicators
         visible={thinkingVisible}
         compact={compact}

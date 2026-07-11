@@ -76,6 +76,7 @@ describe('browser realtime stream lifecycle', () => {
   it('removes sequential tool-only thinking streams immediately on done', () => {
     const { state, setters } = makeHarness();
     const streamedTextsRef = { current: new Set<string>() };
+    const completedStreamIdsRef = { current: new Set<string>() };
 
     for (const streamId of ['browser-1', 'browser-2']) {
       handleAssistantStream(
@@ -91,6 +92,7 @@ describe('browser realtime stream lifecycle', () => {
         'agent',
         streamedTextsRef,
         setters.setStreamingBubbles,
+        completedStreamIdsRef,
       );
       expect(state.bubbles.has(streamId)).toBe(true);
 
@@ -107,9 +109,39 @@ describe('browser realtime stream lifecycle', () => {
         'agent',
         streamedTextsRef,
         setters.setStreamingBubbles,
+        completedStreamIdsRef,
       );
       expect(state.bubbles.size).toBe(0);
     }
+  });
+
+  it('does not resurrect a cleared stream when an earlier delta arrives late', () => {
+    const { state, setters } = makeHarness();
+    const streamedTextsRef = { current: new Set<string>() };
+    const completedStreamIdsRef = { current: new Set<string>() };
+    const base = {
+      agentId: 'agent',
+      stream_id: 'browser-completed',
+      subAgentId: 'browser-task',
+      clear_on_done: true,
+    };
+
+    handleAssistantStream(
+      { ...base, sequence: 2, delta: '', done: true },
+      'agent',
+      streamedTextsRef,
+      setters.setStreamingBubbles,
+      completedStreamIdsRef,
+    );
+    handleAssistantStream(
+      { ...base, sequence: 1, delta: 'late', done: false },
+      'agent',
+      streamedTextsRef,
+      setters.setStreamingBubbles,
+      completedStreamIdsRef,
+    );
+
+    expect(state.bubbles.size).toBe(0);
   });
 
   it('keeps the current iteration when a prior assistant INSERT arrives late', () => {
