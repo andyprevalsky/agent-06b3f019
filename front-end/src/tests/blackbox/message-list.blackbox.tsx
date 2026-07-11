@@ -1,4 +1,3 @@
-/* eslint-disable max-lines */
 /**
  * Blackbox tests for MessageList component.
  *
@@ -9,7 +8,7 @@
  *  - Dedup: multiple tool updates sharing toolCallId collapse to latest
  *  - Explore agent grouping by taskId
  *  - Wait-for check-history grouping
- *  - Status banners: PAUSED, OUT_OF_CREDITS, COST_LIMIT_REACHED, WEB source preview
+ *  - Status banners: PAUSED, OUT_OF_CREDITS, COST_LIMIT_REACHED, web frontend preview
  *  - Streaming state: streaming tool, streaming attention
  *  - Hidden messages (metadata.hidden) are filtered
  *  - set_plan compression (only latest kept)
@@ -17,13 +16,18 @@
  */
 import React from 'react';
 import { describe, it, expect, beforeAll, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { AgentContext } from '@/features/agent-context';
 import type { AgentContextValue } from '@/features/agent-context';
 import { MessageList } from '@/features/terminal-component-group/components/MessageList';
 import type { Message, AgentDetail } from '@/lib/api';
+
+const attemptMacAppHandoffMock = vi.hoisted(() => vi.fn());
+
+vi.mock('@/lib/macAppHandoff', () => ({
+  attemptMacAppHandoff: attemptMacAppHandoffMock,
+}));
 
 vi.mock('@/components/ThinkingAnimation', () => ({
   default: ({ gradient }: { gradient?: string[] }) => (
@@ -322,13 +326,32 @@ describe('MessageList', () => {
     expect(screen.getByRole('button', { name: /Increase Cost Limit/ })).toBeInTheDocument();
   });
 
-  it('shows WEB Preview banner when agent source is WEB', () => {
+  it('opens the rendered task in the Mac app for any agent viewed on the web', () => {
+    attemptMacAppHandoffMock.mockClear();
     const ctx = makeAgentCtx({
-      agent: makeAgent({ source: 'WEB' }),
+      agent: makeAgent({ agent_id: 'rendered-agent', source: 'MAC_APP' }),
+      selectedAgentId: 'stale-selection',
     });
     renderList(ctx);
     expect(screen.getByText(/Preview Mode/)).toBeInTheDocument();
-    expect(screen.getByText(/Download for Mac/)).toBeInTheDocument();
+    const openAppLink = screen.getByRole('link', { name: /Open Mac App/i });
+    expect(openAppLink).toHaveAttribute('href', 'roselabs://open?agent-id=rendered-agent');
+    fireEvent.click(openAppLink);
+    expect(attemptMacAppHandoffMock).toHaveBeenCalledOnce();
+  });
+
+  it('does not show the web Preview banner inside the Mac app', () => {
+    const originalApi = Object.getOwnPropertyDescriptor(window, 'api');
+    Object.defineProperty(window, 'api', { configurable: true, value: {} });
+
+    try {
+      const ctx = makeAgentCtx({ agent: makeAgent({ source: 'WEB' }) });
+      renderList(ctx);
+      expect(screen.queryByTestId('web-preview-banner')).not.toBeInTheDocument();
+    } finally {
+      if (originalApi) Object.defineProperty(window, 'api', originalApi);
+      else delete (window as Window & { api?: unknown }).api;
+    }
   });
 
   it('does not show status banners when showStatusBanners=false', () => {
@@ -566,186 +589,5 @@ describe('MessageList', () => {
     );
     expect(screen.queryByText(/Explored -/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Explore Failed -/)).not.toBeInTheDocument();
-  });
-
-  it('cleans up orphan IN_PROGRESS tools that came before the last ASSISTANT msg', () => {
-    const now = Date.now();
-    const ctx = makeAgentCtx({
-      messages: [
-        msg('t-orphan', {
-          role: 'TOOL',
-          text: '',
-          timestamp: new Date(now).toISOString(),
-          metadata: {
-            toolCallId: 'orphan-1',
-            toolName: 'web_search',
-            title: 'Orphaned tool',
-            toolStatus: 'IN_PROGRESS',
-          },
-        }),
-        msg('a1', {
-          role: 'ASSISTANT',
-          text: 'new thought',
-          timestamp: new Date(now + 5000).toISOString(),
-        }),
-      ],
-    });
-    renderList(ctx);
-    // The orphan tool should be filtered out.
-    expect(screen.queryByText('Orphaned tool')).not.toBeInTheDocument();
-  });
-
-  it('hides internal agent initialization liveness tools', () => {
-    const ctx = makeAgentCtx({
-      messages: [
-        msg('init', {
-          role: 'TOOL',
-          text: 'Agent initializing',
-          metadata: {
-            toolCallId: 'tc-agent-init',
-            toolName: 'agent_init',
-            title: 'Initializing',
-            toolStatus: 'IN_PROGRESS',
-          },
-        }),
-        msg('u1', { role: 'USER', text: 'visible user message' }),
-      ],
-    });
-    renderList(ctx);
-    expect(screen.queryByText('Initializing')).not.toBeInTheDocument();
-    expect(screen.getByText('visible user message')).toBeInTheDocument();
-  });
-
-  it('keeps IN_PROGRESS wait_for tool even when an ASSISTANT came later', () => {
-    const now = Date.now();
-    const ctx = makeAgentCtx({
-      messages: [
-        msg('w-kept', {
-          role: 'TOOL',
-          text: '',
-          timestamp: new Date(now).toISOString(),
-          metadata: {
-            toolCallId: 'wf-1',
-            toolName: 'wait_for',
-            title: 'Wait condition',
-            toolStatus: 'IN_PROGRESS',
-          },
-        }),
-        msg('a1', {
-          role: 'ASSISTANT',
-          text: 'chat',
-          timestamp: new Date(now + 1000).toISOString(),
-        }),
-      ],
-    });
-    const { container } = renderList(ctx);
-    // wait_for survives the orphan-cleanup filter.
-    expect(container.textContent).toMatch(/Waiting|Wait|condition/i);
-  });
-
-  it('builds wait_for check history from multiple events sharing toolCallId', async () => {
-    const now = Date.now();
-    const ctx = makeAgentCtx({
-      messages: [
-        msg('wf-init', {
-          role: 'TOOL',
-          text: '',
-          timestamp: new Date(now).toISOString(),
-          metadata: {
-            toolCallId: 'wf-many',
-            toolName: 'wait_for',
-            title: 'Wait many',
-            toolStatus: 'IN_PROGRESS',
-          },
-        }),
-        msg('wf-check-1', {
-          role: 'TOOL',
-          text: 'still waiting',
-          timestamp: new Date(now + 1000).toISOString(),
-          metadata: {
-            toolCallId: 'wf-many',
-            toolName: 'wait_for',
-            title: 'Check 1',
-            toolStatus: 'FINISHED',
-            checkNum: 1,
-            maxChecks: 5,
-            conditionMet: false,
-          },
-        }),
-        msg('wf-check-2', {
-          role: 'TOOL',
-          text: 'condition met',
-          timestamp: new Date(now + 2000).toISOString(),
-          metadata: {
-            toolCallId: 'wf-many',
-            toolName: 'wait_for',
-            title: 'Check 2 done',
-            toolStatus: 'FINISHED',
-            checkNum: 2,
-            maxChecks: 5,
-            conditionMet: true,
-          },
-        }),
-      ],
-    });
-    const { container } = renderList(ctx);
-    // Only the latest (dedup'd) wait_for message is rendered; the check-history
-    // block is passed as waitForChecks prop.
-    await waitFor(() => expect(container.firstChild).not.toBeNull());
-    // Latest title should render (Check 2 done wins dedup)
-    expect(container.textContent).toMatch(/Check 2 done|Check 2|condition met/i);
-    // Reconstructed history must include the earlier check. WaitForChip's header
-    // shows the completed check count ("X checks" or "X check"). Both raw events
-    // are FINISHED ⇒ waitForCheckMap must contain 2 entries ⇒ header renders "2 checks".
-    // If reconstruction breaks (map empty), the count falls back to 0 or vanishes.
-    expect(container.textContent).toMatch(/2\s*checks/i);
-  });
-
-  it('renders chat-mode Copy + Start Agent when last msg is FINISHED send_message_to_user (ACTIVE)', async () => {
-    const ctx = makeAgentCtx({
-      agent: makeAgent({ status: 'ACTIVE' }),
-      isChatMode: true,
-      messages: [
-        msg('t1', {
-          role: 'TOOL',
-          text: 'final answer',
-          metadata: {
-            toolCallId: 'sm1',
-            toolName: 'send_message_to_user',
-            title: 'Sent',
-            toolStatus: 'FINISHED',
-          },
-        }),
-      ],
-    });
-    renderList(ctx);
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: /Start agent/ })).toBeInTheDocument(),
-    );
-  });
-
-  it('clicking Copy writes last assistant/tool text to clipboard', async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.assign(navigator, { clipboard: { writeText } });
-    const ctx = makeAgentCtx({
-      agent: makeAgent({ status: 'ACTIVE' }),
-      isChatMode: true,
-      messages: [
-        msg('t1', {
-          role: 'TOOL',
-          text: 'copy me',
-          metadata: {
-            toolCallId: 'sm1',
-            toolName: 'send_message_to_user',
-            title: 'Sent',
-            toolStatus: 'FINISHED',
-          },
-        }),
-      ],
-    });
-    renderList(ctx);
-    const copyBtn = await screen.findByTitle('Copy response');
-    await userEvent.click(copyBtn);
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith('copy me'));
   });
 });

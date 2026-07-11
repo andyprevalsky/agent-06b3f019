@@ -5,7 +5,7 @@
  * [HIDDEN] <-- no pending approval for selected agent
  *     |
  *     v (approval request detected via messages)
- * [VISIBLE] <-- shows approval chip above query input
+ * [VISIBLE] <-- replaces the query input with the approval chip
  *     |
  *     v (accept/reject)
  * [HIDDEN]
@@ -176,10 +176,29 @@ function PaymentReceipt({
               <img src={item.imageUrl} alt="" className="h-10 w-10 rounded object-cover" />
             )}
             <div className="min-w-0 flex-1">
-              <div className="truncate">{item.name || 'Item'}</div>
+              <div className="break-words">{item.name || 'Item'}</div>
               <div className="text-xs text-muted-foreground">
                 Qty {item.quantity || 1} · {formatCents(item.unitPriceCents)}
               </div>
+              {item.rating && item.reviewCount ? (
+                <div className="text-xs text-muted-foreground">
+                  Reviews: {item.rating} · {item.reviewCount}
+                </div>
+              ) : (
+                <div className="text-xs text-muted-foreground">Review details unavailable</div>
+              )}
+              {item.productUrl ? (
+                <a
+                  href={item.productUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-primary underline-offset-2 hover:underline"
+                >
+                  View product
+                </a>
+              ) : (
+                <div className="text-xs text-muted-foreground">Product link unavailable</div>
+              )}
             </div>
             <div className="font-medium">{formatCents(item.lineTotalCents)}</div>
           </div>

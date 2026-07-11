@@ -14,7 +14,16 @@ class PaymentImportWorkflow:
         payload = normalize_payment_payload(
             {
                 "merchant": "Blick Art Materials",
-                "line_items": [{"name": "Brush", "quantity": 1, "line_total_cents": 636}],
+                "line_items": [
+                    {
+                        "name": "Brush",
+                        "product_url": "https://www.dickblick.com/products/brush/",
+                        "rating": "4.7 stars",
+                        "review_count": "84 reviews",
+                        "quantity": 1,
+                        "line_total_cents": 636,
+                    }
+                ],
                 "subtotal_cents": 636,
                 "total_cents": 636,
             },
@@ -23,7 +32,16 @@ class PaymentImportWorkflow:
         domain_payload = normalize_domain_payment_payload(
             {
                 "merchant": "Blick Art Materials",
-                "line_items": [{"name": "Brush", "quantity": 1, "line_total_cents": 636}],
+                "line_items": [
+                    {
+                        "name": "Brush",
+                        "product_url": "https://www.dickblick.com/products/brush/",
+                        "rating": "4.7 stars",
+                        "review_count": "84 reviews",
+                        "quantity": 1,
+                        "line_total_cents": 636,
+                    }
+                ],
                 "subtotal_cents": 636,
                 "total_cents": 636,
             },

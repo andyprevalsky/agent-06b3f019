@@ -379,7 +379,8 @@ fi
 
 DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME}"
 DB_VOLUME="victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME}"
-DB_OWNED_BY_US=false  # Track whether we started/created the DB (cleanup only stops what we own)
+DB_OWNED_BY_US=false  # Track whether this run started/created the DB.
+DB_OWNED_CONTAINER_ID=""
 USE_SYSTEM_PG=false
 
 if $DOCKER_OK; then
@@ -439,6 +440,10 @@ if $DOCKER_OK; then
         echo "🐘 Creating local Postgres container..."
         create_db_container
         DB_OWNED_BY_US=true
+    fi
+
+    if $DB_OWNED_BY_US; then
+        DB_OWNED_CONTAINER_ID="$(docker inspect --format='{{.Id}}' "$DB_CONTAINER")"
     fi
 
     # Wait for Postgres to accept connections
@@ -869,12 +874,8 @@ cleanup() {
         bash "$SCRIPT_DIR/kill-services.sh" || true
     fi
     if $DB_OWNED_BY_US && ! $USE_SYSTEM_PG; then
-        if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
-            docker rm -f "$DB_CONTAINER" 2>/dev/null || true
-            docker volume rm "$DB_VOLUME" 2>/dev/null || true
-        else
-            docker stop "$DB_CONTAINER" 2>/dev/null || true
-        fi
+        run_cleanup_owned_db_container \
+            "$DB_OWNED_CONTAINER_ID" "$DB_CONTAINER" "$DB_VOLUME" "$BENCHMARK_ISOLATED_RUN"
     fi
     SERVICE_STATUS=stopped
     write_services_manifest || true
