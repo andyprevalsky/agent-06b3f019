@@ -61,6 +61,58 @@ def test_worker_activity_supplier_is_sdk_native_fixed_size():
     raise AssertionError("WorkerTuner.create_composite call not found")
 
 
+def test_worker_workflow_supplier_is_fixed_size_not_resource_based():
+    """Workflow slots must be FixedSizeSlotSupplier(max_concurrent_workflows).
+
+    ResourceBasedSlotSupplier throttles workflow-task slot permits whenever host
+    memory sits above its target — the steady state on dev Macs (~83-85%) and on
+    prod Fly machines (autoscaler runs memory up to its 75-80% thresholds).
+    Pollers must reserve a slot BEFORE polling, so the lone sticky poller loses
+    the permit race and every workflow task burns the full 10s
+    sticky_queue_schedule_to_start_timeout, then replays on a random worker.
+    Observed: a $0-LLM fast-cache smoke replay spent ~137s of 153s in
+    back-to-back 10s sticky timeouts. Memory protection belongs to the activity
+    admission gate + autoscaler, not workflow-task slot starvation.
+    """
+    tree = _worker_tree()
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "temporalio.worker":
+            resource_imports = {
+                alias.name
+                for alias in node.names
+                if alias.name.startswith("ResourceBased")
+            }
+            assert resource_imports == set(), (
+                f"worker.py must not import {sorted(resource_imports)}: resource-based "
+                "slot suppliers starve sticky polling under steady-state memory pressure"
+            )
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr == "create_composite"
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "WorkerTuner"
+        ):
+            workflow_kw = next((kw for kw in node.keywords if kw.arg == "workflow_supplier"), None)
+            assert workflow_kw is not None
+            value = workflow_kw.value
+            assert isinstance(value, ast.Call)
+            assert isinstance(value.func, ast.Name)
+            assert value.func.id == "FixedSizeSlotSupplier"
+            assert len(value.args) == 1
+            arg = value.args[0]
+            assert isinstance(arg, ast.Attribute)
+            assert arg.attr == "max_concurrent_workflows"
+            return
+
+    raise AssertionError("WorkerTuner.create_composite call not found")
+
+
 def test_worker_passes_sticky_queue_timeout_to_temporal():
     """Worker must pass the env-backed sticky timeout into Temporal."""
     tree = _worker_tree()
@@ -162,6 +214,7 @@ async def run_all_tests():
     r = BlackboxResult()
     r.record("worker_does_not_use_python_custom_activity_slots", test_worker_does_not_use_python_custom_activity_slots)
     r.record("worker_activity_supplier_is_sdk_native_fixed_size", test_worker_activity_supplier_is_sdk_native_fixed_size)
+    r.record("worker_workflow_supplier_is_fixed_size_not_resource_based", test_worker_workflow_supplier_is_fixed_size_not_resource_based)
     r.record("worker_passes_sticky_queue_timeout_to_temporal", test_worker_passes_sticky_queue_timeout_to_temporal)
     r.record("activity_admission_closes_on_cpu_pressure", test_activity_admission_closes_on_cpu_pressure)
     teardown_mock()
