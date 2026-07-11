@@ -112,8 +112,9 @@ export function BenchmarksView() {
       </div>
       <div className="flex-1 min-h-0 flex flex-col gap-4">
         {/* Runs on top at a fixed height — only the most recent few matter, so
-            the pane scrolls internally instead of stealing space from Tasks. */}
-        <div className="h-60 shrink-0 rounded-xl border border-border bg-background/85 backdrop-blur-sm p-4">
+            the list scrolls internally instead of stealing space from Tasks.
+            No wrapper card: rows sit directly on the page. */}
+        <div className="h-60 shrink-0">
           <RunsPane
             runs={runs}
             requests={requests}
