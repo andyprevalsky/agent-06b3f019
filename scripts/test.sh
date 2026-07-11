@@ -225,6 +225,7 @@ if $PROMPT_HUMAN_APPROVAL_RETRIEVED; then
 else
   run_suite "Prompt Human Approval Guard" bash scripts/check-prompt-human-approval.sh
 fi
+run_suite "Claude Review Fallback" bash scripts/tests/claude-review-fallback.test.sh
 
 # ── Build checks (run in parallel with blackbox tests) ──
 BUILD_PIDS=()
