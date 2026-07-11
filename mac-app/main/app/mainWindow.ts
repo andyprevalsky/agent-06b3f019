@@ -155,7 +155,9 @@ export function createMainWindow({
 
   if (config.isDev) {
     void mainWindow.loadURL(getDevRendererUrl());
-    mainWindow.webContents.openDevTools();
+    if (process.env.OPEN_DEVTOOLS === '1') {
+      mainWindow.webContents.openDevTools();
+    }
   } else {
     void mainWindow.loadFile(getPackagedRendererPath('index.html'));
   }

@@ -5,13 +5,17 @@
  *
  * [MOUNTED]
  *   |
+ *   +--> tracks landing_page_viewed once
+ *   |
  *   +--> earlyAccess=true --> shows PreOrderSection + WaitlistSection(customOnly)
  *   +--> earlyAccess=false --> shows WaitlistSection only
  */
 
+import { useEffect } from 'react';
 import { Toaster } from '@/components/ui/toaster';
 import NaviHeader from '@/components/NaviHeader';
 import NaviFooter from '@/components/NaviFooter';
+import * as analytics from '@/lib/analytics';
 import HeroSection from './HeroSection';
 import PoweredByTicker from './PoweredByTicker';
 import FeaturesSection from './FeaturesSection';
@@ -22,6 +26,10 @@ import { useEarlyAccess } from '../hooks';
 
 const Index = () => {
   const earlyAccess = useEarlyAccess();
+  useEffect(() => {
+    analytics.track('landing_page_viewed');
+  }, []);
+
   return (
     <div className="min-h-screen overflow-visible">
       <NaviHeader />
