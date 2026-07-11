@@ -6,11 +6,6 @@ import hashlib
 import json
 from typing import Any, Dict
 
-from helpers.world_model_runtime import WorldModelToolExecutionAdapter
-
-from .repo import lookup_purchase_from_backend, mint_purchase_card_from_backend
-from .types import PaymentPayload, PurchaseResult
-
 
 def _to_list(value: Any) -> list:
     if isinstance(value, list):
@@ -103,37 +98,3 @@ def build_payment_question(payload: Dict[str, Any]) -> str:
         lines.append(f"- {label}: ${amount:.2f}")
     lines.append("\nRose will charge your saved Stripe billing method, then issue a one-time virtual card.")
     return "\n".join(lines)
-
-
-async def lookup_purchase(user_id: str, fingerprint: str) -> PurchaseResult:
-    async def real_executor(
-        _tool_name: str,
-        _tool_args: dict[str, Any],
-        _tool_call_id: str,
-    ) -> PurchaseResult:
-        return await lookup_purchase_from_backend(user_id, fingerprint)
-
-    return await WorldModelToolExecutionAdapter.from_env(agent_id=user_id).execute(
-        "payment_lookup",
-        {"user_id": user_id, "fingerprint": fingerprint},
-        f"payment_lookup:{fingerprint}",
-        real_executor,
-    )
-
-
-async def mint_purchase_card(user_id: str, payload: PaymentPayload) -> PurchaseResult:
-    fingerprint = str(payload.get("fingerprint") or "")
-
-    async def real_executor(
-        _tool_name: str,
-        _tool_args: dict[str, Any],
-        _tool_call_id: str,
-    ) -> PurchaseResult:
-        return await mint_purchase_card_from_backend(user_id, payload)
-
-    return await WorldModelToolExecutionAdapter.from_env(agent_id=str(payload.get("agentId") or user_id)).execute(
-        "payment_mint",
-        {"user_id": user_id, "payload": payload},
-        f"payment_mint:{fingerprint}",
-        real_executor,
-    )
