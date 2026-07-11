@@ -59,9 +59,9 @@ let s3Client: S3Client | null = null;
 function r2Configured(): boolean {
   return Boolean(
     process.env.R2_ACCOUNT_ID &&
-      process.env.R2_ACCESS_KEY_ID &&
-      process.env.R2_SECRET_ACCESS_KEY &&
-      process.env.R2_BUCKET_TRACE_ARCHIVE
+    process.env.R2_ACCESS_KEY_ID &&
+    process.env.R2_SECRET_ACCESS_KEY &&
+    process.env.R2_BUCKET_TRACE_ARCHIVE
   );
 }
 
@@ -219,6 +219,68 @@ export async function getRunBundle(runId: string): Promise<Record<string, unknow
   }
 }
 
+export interface HubRunTaskDetail extends HubRunTaskSummary {
+  tokens_in: number | null;
+  tokens_out: number | null;
+  cache_hit_pct: number | null;
+  llm_call_count: number | null;
+  message_count: number | null;
+}
+
+export interface HubRunDetail extends Omit<HubRunSummary, 'tasks'> {
+  tasks: HubRunTaskDetail[];
+  totals: {
+    passed: number;
+    failed: number;
+    running: number;
+    cost_cents: number;
+    tokens_in: number;
+    tokens_out: number;
+    agents: number;
+  };
+}
+
+/**
+ * The run view's data: index summary enriched per-task from the stored bundle
+ * (tokens, cache hit, call/message counts — the report-card fields the fleet
+ * dashboard showed) plus run-level totals. Falls back to summary-only fields
+ * when the bundle is gone or live-thin.
+ */
+export async function getRunDetail(runId: string): Promise<HubRunDetail | null> {
+  const index = await listRuns();
+  const summary = index.find((r) => r.run_id === runId);
+  if (!summary) return null;
+  const bundle = await getRunBundle(runId);
+  const bundleTasks = new Map<string, Record<string, unknown>>();
+  if (bundle && Array.isArray(bundle.tasks)) {
+    for (const task of bundle.tasks as Array<Record<string, unknown>>) {
+      if (typeof task.name === 'string') bundleTasks.set(task.name, task);
+    }
+  }
+  const num = (v: unknown): number | null => (typeof v === 'number' ? v : null);
+  const tasks: HubRunTaskDetail[] = summary.tasks.map((t) => {
+    const raw = bundleTasks.get(t.name) ?? {};
+    return {
+      ...t,
+      tokens_in: num(raw.tokens_in),
+      tokens_out: num(raw.tokens_out),
+      cache_hit_pct: num(raw.cache_hit_pct),
+      llm_call_count: num(raw.llm_call_count),
+      message_count: num(raw.message_count),
+    };
+  });
+  const totals = {
+    passed: tasks.filter((t) => t.passed === true).length,
+    failed: tasks.filter((t) => t.passed === false).length,
+    running: tasks.filter((t) => t.passed === null).length,
+    cost_cents: tasks.reduce((s, t) => s + (t.cost_cents ?? 0), 0),
+    tokens_in: tasks.reduce((s, t) => s + (t.tokens_in ?? 0), 0),
+    tokens_out: tasks.reduce((s, t) => s + (t.tokens_out ?? 0), 0),
+    agents: tasks.reduce((s, t) => s + (t.tree_agent_count ?? 0), 0),
+  };
+  return { ...summary, tasks, totals };
+}
+
 function frontendMessage(
   agentId: string,
   index: number,
@@ -270,7 +332,9 @@ function agentSummaryFromTask(
     token_out_price_microdollars: null,
     created_at: runTimestamp,
     updated_at:
-      messages.length > 0 ? (messages[messages.length - 1].timestamp ?? runTimestamp) : runTimestamp,
+      messages.length > 0
+        ? (messages[messages.length - 1].timestamp ?? runTimestamp)
+        : runTimestamp,
     write_lock_enabled: true,
     structured_output: null,
     failure_context: null,
@@ -308,7 +372,14 @@ export async function getRunAgent(runId: string, agentId: string): Promise<HubAg
       : [];
     const passedStatus = task.passed === true ? 'COMPLETED' : 'FAILED';
 
-    const nodeInfo = (id: string): { parent: string | null; goal: string; status: string; raw: Array<Record<string, unknown>> } => {
+    const nodeInfo = (
+      id: string
+    ): {
+      parent: string | null;
+      goal: string;
+      status: string;
+      raw: Array<Record<string, unknown>>;
+    } => {
       const info = tree[id] ?? {};
       const treeMessages = Array.isArray(info.messages)
         ? (info.messages as Array<Record<string, unknown>>)
@@ -321,7 +392,8 @@ export async function getRunAgent(runId: string, agentId: string): Promise<HubAg
             ? info.goal
             : isRootNode
               ? String(
-                  rootMessages.find((m) => String(m.role ?? '').toUpperCase() === 'USER')?.message ??
+                  rootMessages.find((m) => String(m.role ?? '').toUpperCase() === 'USER')
+                    ?.message ??
                     task.name ??
                     'benchmark task'
                 )

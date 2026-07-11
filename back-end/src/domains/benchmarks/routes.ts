@@ -95,11 +95,7 @@ router.patch(
       return;
     }
     try {
-      const task = await service.patchTask(
-        req.params.name,
-        parsed.data,
-        req.userId ?? 'internal'
-      );
+      const task = await service.patchTask(req.params.name, parsed.data, req.userId ?? 'internal');
       res.json({ task });
     } catch (error) {
       if (error instanceof TaskNotFoundError) {
@@ -200,15 +196,14 @@ router.get(
   })
 );
 
-/** GET /api/benchmarks/runs/:id — per-task detail for one run. */
+/** GET /api/benchmarks/runs/:id — run view: per-task detail + totals. */
 router.get(
   '/runs/:id',
   auth,
   requireHubAdmin,
   asyncHandler<HybridAuthRequest>(async (req, res) => {
-    const runs = await hubStore.listRuns();
-    const run = runs.find((r) => r.run_id === req.params.id);
-    if (!run) {
+    const run = await hubStore.getRunDetail(req.params.id);
+    if (run === null) {
       res.status(404).json({ error: 'Run not found' });
       return;
     }

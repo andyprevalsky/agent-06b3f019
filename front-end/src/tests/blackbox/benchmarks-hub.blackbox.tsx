@@ -121,6 +121,31 @@ const RUNS = {
 
 const REQUESTS = { requests: [] };
 
+// The run view's enriched detail, derived from a runs fixture entry.
+function toDetail(run: (typeof RUNS)['runs'][number]) {
+  const tasks = run.tasks.map((t) => ({
+    ...t,
+    tokens_in: 1000,
+    tokens_out: 200,
+    cache_hit_pct: 98,
+    llm_call_count: 2,
+    message_count: 5,
+  }));
+  return {
+    ...run,
+    tasks,
+    totals: {
+      passed: tasks.filter((t) => t.passed === true).length,
+      failed: tasks.filter((t) => t.passed === false).length,
+      running: tasks.filter((t) => t.passed === null).length,
+      cost_cents: 3,
+      tokens_in: 1000,
+      tokens_out: 200,
+      agents: 2,
+    },
+  };
+}
+
 const AGENT_VIEW = {
   agent: {
     agent_id: 'agent-root-1',
@@ -234,6 +259,12 @@ function installFetchMock() {
     if (url.includes('/benchmarks/run-requests')) return jsonResponse(REQUESTS);
     if (url.includes('/agents/agent-sub-1')) return jsonResponse(SUB_AGENT_VIEW);
     if (url.includes('/agents/agent-root-1')) return jsonResponse(AGENT_VIEW);
+    const detailMatch = url.match(/\/benchmarks\/runs\/([^/?]+)$/);
+    if (detailMatch) {
+      const fixture = RUNS.runs.find((r) => r.run_id === decodeURIComponent(detailMatch[1]));
+      if (!fixture) return new Response('{"error":"Run not found"}', { status: 404 });
+      return jsonResponse({ run: toDetail(fixture) });
+    }
     if (url.includes('/benchmarks/runs')) return jsonResponse(RUNS);
     return new Response('{}', { status: 404 });
   });
@@ -326,15 +357,19 @@ describe('BenchmarksView (in-app hub)', () => {
     });
   });
 
-  it('shows runs and opens an agent transcript in-app (root + tree swap)', async () => {
+  it('opens a run into the run view, then an agent transcript (full chain)', async () => {
     renderWithProviders(<BenchmarksView />);
     await waitFor(() => expect(screen.getByTestId('run-row-run-abc')).toBeInTheDocument());
 
-    // expand the run → task rows with open-agent
-    fireEvent.click(within(screen.getByTestId('run-row-run-abc')).getByRole('button'));
-    await waitFor(() => expect(screen.getByTestId('open-agent-chat-mode')).toBeInTheDocument());
+    // click the run row → the in-app run view (tiles + per-task table)
+    fireEvent.click(screen.getByTestId('run-row-run-abc'));
+    await waitFor(() => expect(screen.getByTestId('benchmark-run-view')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId('run-tiles')).toBeInTheDocument());
+    expect(screen.getByTestId('run-view-task-chat-mode')).toBeInTheDocument();
+    expect(screen.getByTestId('run-tiles').textContent).toContain('$0.03');
 
-    fireEvent.click(screen.getByTestId('open-agent-chat-mode'));
+    // open the agent from the run view
+    fireEvent.click(screen.getByTestId('run-view-open-chat-mode'));
     await waitFor(() => expect(screen.getByTestId('benchmark-agent-view')).toBeInTheDocument());
     await waitFor(() =>
       // MarkdownText animates in chunks — assert on the container's text.
@@ -350,8 +385,10 @@ describe('BenchmarksView (in-app hub)', () => {
       expect(screen.getByTestId('agent-messages').textContent).toContain('sub-agent findings'),
     );
 
-    // back returns to the hub
+    // back returns to the RUN VIEW it came from, then back again to the hub
     fireEvent.click(screen.getByTestId('agent-back'));
+    await waitFor(() => expect(screen.getByTestId('benchmark-run-view')).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('run-back'));
     await waitFor(() => expect(screen.getByTestId('benchmarks-view')).toBeInTheDocument());
   });
 });
@@ -437,6 +474,14 @@ describe('BenchmarksView edge states', () => {
           headers: { 'content-type': 'application/json' },
         });
       }
+      const detailMatch = url.match(/\/benchmarks\/runs\/([^/?]+)$/);
+      if (detailMatch) {
+        const fixture = (overrides.runs ?? RUNS).runs.find(
+          (r) => r.run_id === decodeURIComponent(detailMatch[1]),
+        );
+        if (!fixture) return new Response('{"error":"Run not found"}', { status: 404 });
+        return jsonResponse({ run: toDetail(fixture) });
+      }
       if (url.includes('/benchmarks/runs')) return jsonResponse(overrides.runs ?? RUNS);
       return new Response('{}', { status: 404 });
     });
@@ -453,9 +498,9 @@ describe('BenchmarksView edge states', () => {
     mockWith({ runs: LIVE_RUN_NO_AGENT });
     renderWithProviders(<BenchmarksView />);
     await waitFor(() => expect(screen.getByTestId('run-row-run-live')).toBeInTheDocument());
-    fireEvent.click(within(screen.getByTestId('run-row-run-live')).getByRole('button'));
-    await waitFor(() => expect(screen.getByTestId('open-agent-chat-mode')).toBeInTheDocument());
-    expect(screen.getByTestId('open-agent-chat-mode')).toBeDisabled();
+    fireEvent.click(screen.getByTestId('run-row-run-live'));
+    await waitFor(() => expect(screen.getByTestId('run-view-open-chat-mode')).toBeInTheDocument());
+    expect(screen.getByTestId('run-view-open-chat-mode')).toBeDisabled();
   });
 
   it('shows the dispatch error when the run request fails (B15)', async () => {
@@ -472,9 +517,9 @@ describe('BenchmarksView edge states', () => {
     mockWith({ runs: RUNS, agentStatus: 500 });
     renderWithProviders(<BenchmarksView />);
     await waitFor(() => expect(screen.getByTestId('run-row-run-abc')).toBeInTheDocument());
-    fireEvent.click(within(screen.getByTestId('run-row-run-abc')).getByRole('button'));
-    await waitFor(() => expect(screen.getByTestId('open-agent-chat-mode')).toBeInTheDocument());
-    fireEvent.click(screen.getByTestId('open-agent-chat-mode'));
+    fireEvent.click(screen.getByTestId('run-row-run-abc'));
+    await waitFor(() => expect(screen.getByTestId('run-view-open-chat-mode')).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('run-view-open-chat-mode'));
     await waitFor(() => expect(screen.getByTestId('benchmark-agent-view')).toBeInTheDocument());
     await waitFor(() => expect(screen.getByText(/retry/i)).toBeInTheDocument());
     const callsBefore = capturedRequests.length;
@@ -496,13 +541,15 @@ describe('BenchmarksView edge states', () => {
       if (url.includes('/agents/')) {
         return jsonResponse({ ...AGENT_VIEW, messages: [], tree: [] });
       }
+      const detailMatch = url.match(/\/benchmarks\/runs\/([^/?]+)$/);
+      if (detailMatch) return jsonResponse({ run: toDetail(RUNS.runs[0]) });
       if (url.includes('/benchmarks/runs')) return jsonResponse(RUNS);
       return new Response('{}', { status: 404 });
     });
     renderWithProviders(<BenchmarksView />);
     await waitFor(() => expect(screen.getByTestId('run-row-run-abc')).toBeInTheDocument());
-    fireEvent.click(within(screen.getByTestId('run-row-run-abc')).getByRole('button'));
-    fireEvent.click(await screen.findByTestId('open-agent-chat-mode'));
+    fireEvent.click(screen.getByTestId('run-row-run-abc'));
+    fireEvent.click(await screen.findByTestId('run-view-open-chat-mode'));
     await waitFor(() => expect(screen.getByText(/No transcript captured/i)).toBeInTheDocument());
   });
 });

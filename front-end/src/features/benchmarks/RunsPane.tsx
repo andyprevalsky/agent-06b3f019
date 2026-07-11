@@ -2,23 +2,17 @@
  * STATE MACHINE: RunsPane
  *
  *   (parent polls) props(runs, requests) ──► render
- *     requests in {queued, running} render FIRST (current work, live badge,
- *     poller progress); runs (uploaded index) render below, newest first.
- *   click run row ──► expanded(run_id) ──click again──► collapsed
- *   expanded + click task's "Open agent" ──► onOpenAgent(runId, agentId)
- *     (parent swaps the hub for the in-app transcript view)
+ *     requests in {queued, running, failed-without-run} render FIRST (current
+ *     work + failures that never produced a run); uploaded runs render below,
+ *     newest first.
+ *   click run row ──► onOpenRun(run_id) (parent opens the in-app run view)
  *
- * A queued/running request whose runId matches an uploaded live run is shown
- * once (the run row wins — it carries per-task status).
+ * Rows are single-line summaries — the run view owns per-task detail.
  */
 
-import { useState } from 'react';
-import { ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
+import { ChevronRight, Loader2 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { cn } from '@/lib/utils';
 import type { HubRun, HubRunRequest } from '@/lib/api/benchmarksHub';
-import { TaskFlagIcons } from './TaskFlagIcons';
 
 function statusBadge(status: string, live: boolean) {
   const s = status.toLowerCase();
@@ -52,12 +46,10 @@ interface RunsPaneProps {
   requests: HubRunRequest[];
   loading: boolean;
   error: string | null;
-  onOpenAgent: (runId: string, agentId: string) => void;
+  onOpenRun: (runId: string) => void;
 }
 
-export function RunsPane({ runs, requests, loading, error, onOpenAgent }: RunsPaneProps) {
-  const [expanded, setExpanded] = useState<string | null>(null);
-
+export function RunsPane({ runs, requests, loading, error, onOpenRun }: RunsPaneProps) {
   const liveRunIds = new Set(runs.map((r) => r.run_id));
   // Show in-flight requests AND failed dispatches (a failure with no uploaded
   // run would otherwise vanish silently); completed requests are represented
@@ -100,86 +92,26 @@ export function RunsPane({ runs, requests, loading, error, onOpenAgent }: RunsPa
           </div>
         ))}
 
-        {runs.map((run) => {
-          const verdict = runVerdict(run);
-          const isExpanded = expanded === run.run_id;
-          return (
-            <div
-              key={run.run_id}
-              className="rounded-md border border-border"
-              data-testid={`run-row-${run.run_id}`}
-            >
-              <button
-                className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-muted/50 rounded-md"
-                onClick={() => setExpanded(isExpanded ? null : run.run_id)}
-              >
-                {isExpanded ? (
-                  <ChevronDown className="h-3.5 w-3.5 shrink-0" />
-                ) : (
-                  <ChevronRight className="h-3.5 w-3.5 shrink-0" />
-                )}
-                {statusBadge(verdict, run.live)}
-                <span className="text-sm font-medium truncate flex-1">{run.run_id}</span>
-                <span className="text-[11px] text-muted-foreground shrink-0">
-                  {run.tasks.length} task{run.tasks.length === 1 ? '' : 's'} ·{' '}
-                  {new Date(run.timestamp || run.uploaded_at).toLocaleString()}
-                </span>
-              </button>
-
-              {isExpanded && (
-                <div className="border-t border-border/60 px-3 py-1.5 space-y-1">
-                  {run.tasks.map((task) => (
-                    <div
-                      key={`${run.run_id}-${task.name}`}
-                      className="flex items-center gap-2 py-1"
-                      data-testid={`run-task-${task.name}`}
-                    >
-                      {statusBadge(task.status, false)}
-                      <span className="text-sm truncate flex-1">
-                        {task.name}
-                        <TaskFlagIcons
-                          simOn={task.world_model_mode === 'simulate'}
-                          fastOn={task.fast_mode}
-                        />
-                      </span>
-                      <span className="text-[11px] text-muted-foreground shrink-0">
-                        {task.duration_seconds !== null
-                          ? `${Math.round(task.duration_seconds)}s`
-                          : '—'}
-                        {task.cost_cents !== null && ` · $${(task.cost_cents / 100).toFixed(2)}`}
-                        {task.tree_agent_count !== null && ` · ${task.tree_agent_count} agents`}
-                      </span>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className={cn('h-7 px-2 text-xs', task.agent_id === null && 'opacity-50')}
-                        disabled={task.agent_id === null}
-                        onClick={() =>
-                          task.agent_id !== null && onOpenAgent(run.run_id, task.agent_id)
-                        }
-                        data-testid={`open-agent-${task.name}`}
-                      >
-                        Open agent
-                      </Button>
-                    </div>
-                  ))}
-                  {run.tasks.some((t) => t.failure_reason !== null) && (
-                    <div className="text-[11px] text-red-600/90 pb-1">
-                      {run.tasks
-                        .filter((t) => t.failure_reason !== null)
-                        .map((t) => `${t.name}: ${t.failure_reason}`)
-                        .join(' · ')}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          );
-        })}
+        {runs.map((run) => (
+          <button
+            key={run.run_id}
+            className="w-full flex items-center gap-2 px-3 py-2 text-left rounded-md border border-border hover:bg-muted/50"
+            onClick={() => onOpenRun(run.run_id)}
+            data-testid={`run-row-${run.run_id}`}
+          >
+            {statusBadge(runVerdict(run), run.live)}
+            <span className="text-sm font-medium truncate flex-1">{run.run_id}</span>
+            <span className="text-[11px] text-muted-foreground shrink-0">
+              {run.tasks.length} task{run.tasks.length === 1 ? '' : 's'} ·{' '}
+              {new Date(run.timestamp || run.uploaded_at).toLocaleString()}
+            </span>
+            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          </button>
+        ))}
 
         {!loading && error === null && runs.length === 0 && activeRequests.length === 0 && (
           <div className="py-6 text-sm text-muted-foreground">
-            No runs yet — select tasks on the right and press Run.
+            No runs yet — select tasks below and press Run.
           </div>
         )}
       </div>

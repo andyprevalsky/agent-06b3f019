@@ -203,17 +203,13 @@ async function testCatalog_statsPresentForTasksWithHistory(): Promise<void> {
   assertStatus(res.status, 200, res.data);
   const tasks = (res.data as { tasks: Array<{ stats: { attempts: number } | null }> }).tasks;
   const withStats = tasks.filter((t) => t.stats !== null && t.stats.attempts > 0);
-  assert(
-    withStats.length > 0,
-    'no task has attempt stats — history ledger not being read'
-  );
+  assert(withStats.length > 0, 'no task has attempt stats — history ledger not being read');
 }
 
 async function testPatch_editAndRevertDescription(): Promise<void> {
   const list = await request(`${BASE_URL}/api/benchmarks/tasks`, { headers: internalHeaders });
   assertStatus(list.status, 200, list.data);
-  const tasks = (list.data as { tasks: Array<{ name: string; description: string | null }> })
-    .tasks;
+  const tasks = (list.data as { tasks: Array<{ name: string; description: string | null }> }).tasks;
   const target = tasks.find((t) => t.name === 'chat-mode');
   assert(target !== undefined, 'chat-mode task missing from catalog');
   const original = target!.description;
@@ -311,6 +307,14 @@ async function testRuns_uploadListDetailAgentRoundTrip(): Promise<void> {
       .run;
     assert(run.tasks.length === 1 && run.tasks[0].name === 'chat-mode', 'detail tasks wrong');
     assert(run.tasks[0].fast_mode === true, 'fast_mode flag lost');
+    // run-view enrichment: totals + per-task bundle fields
+    const detailRun = run as unknown as {
+      totals: { passed: number; failed: number; cost_cents: number };
+      tasks: Array<{ tokens_in: number | null; cache_hit_pct: number | null }>;
+    };
+    assert(detailRun.totals !== undefined, 'detail missing totals');
+    assert(detailRun.totals.passed === 1 && detailRun.totals.failed === 0, 'totals wrong');
+    assert(detailRun.totals.cost_cents === 3, `totals cost ${detailRun.totals.cost_cents} != 3`);
 
     // root agent transcript
     const rootView = await request(
@@ -330,20 +334,20 @@ async function testRuns_uploadListDetailAgentRoundTrip(): Promise<void> {
     assert(sub?.parent_agent_id === ROOT_AGENT, 'sub-agent parent link missing');
 
     // sub-agent transcript (the fan-out renders)
-    const subView = await request(
-      `${BASE_URL}/api/benchmarks/runs/${RUN_ID}/agents/${SUB_AGENT}`,
-      { headers: internalHeaders }
-    );
+    const subView = await request(`${BASE_URL}/api/benchmarks/runs/${RUN_ID}/agents/${SUB_AGENT}`, {
+      headers: internalHeaders,
+    });
     assertStatus(subView.status, 200, subView.data);
     const subData = subView.data as { messages: Array<{ text: string }> };
-    assert(subData.messages.length === 1 && subData.messages[0].text === 'sub result',
-      'sub-agent transcript wrong');
+    assert(
+      subData.messages.length === 1 && subData.messages[0].text === 'sub result',
+      'sub-agent transcript wrong'
+    );
 
     // unknown agent → 404
-    const missing = await request(
-      `${BASE_URL}/api/benchmarks/runs/${RUN_ID}/agents/not-an-agent`,
-      { headers: internalHeaders }
-    );
+    const missing = await request(`${BASE_URL}/api/benchmarks/runs/${RUN_ID}/agents/not-an-agent`, {
+      headers: internalHeaders,
+    });
     assertStatus(missing.status, 404, missing.data);
   } finally {
     await request(`${BASE_URL}/api/benchmarks/runs/${RUN_ID}`, {
@@ -509,7 +513,9 @@ async function runAll(): Promise<void> {
   console.log('\nBenchmark Hub black-box results');
   console.log('='.repeat(50));
   for (const r of results) {
-    console.log(`${r.passed ? '  PASS' : '  FAIL'}  ${r.name}${r.passed ? '' : ` -- ${r.error}`} (${r.duration}ms)`);
+    console.log(
+      `${r.passed ? '  PASS' : '  FAIL'}  ${r.name}${r.passed ? '' : ` -- ${r.error}`} (${r.duration}ms)`
+    );
   }
   const failed = results.filter((r) => !r.passed);
   console.log(`\nResults: ${results.length - failed.length} passed, ${failed.length} failed`);

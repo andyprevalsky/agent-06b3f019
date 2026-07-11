@@ -3,10 +3,10 @@
  *
  *   mount ──► hub(loading) ──catalog+runs fetched──► hub(ready)
  *     hub polls runs + run-requests every POLL_MS while mounted (live runs).
- *   hub + onOpenAgent(runId, agentId) ──► agent(runId, agentId)
- *     agent + Back ──► hub (pane state preserved: filters/selection live in
- *     TasksPane which stays mounted-hidden? No — TasksPane unmounts; filters
- *     reset on back. Selection intent is short-lived; acceptable v1.)
+ *   hub + click run row ──► run(runId) (in-app run view: tiles + task table)
+ *     run + "Open agent" ──► agent(runId, agentId)
+ *       agent + Back ──► run (the run view it came from)
+ *     run + Back ──► hub
  *   hub + task edited ──► hub (catalog row replaced in place)
  *   hub + run dispatched ──► hub (requests refetched immediately)
  *
@@ -20,6 +20,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { HubRun, HubRunRequest, HubTask } from '@/lib/api/benchmarksHub';
 import { fetchHubRunRequests, fetchHubRuns, fetchHubTasks } from '@/lib/api/benchmarksHub';
 import { BenchmarkAgentView } from './BenchmarkAgentView';
+import { BenchmarkRunView } from './BenchmarkRunView';
 import { RunsPane } from './RunsPane';
 import { TasksPane } from './TasksPane';
 
@@ -35,6 +36,7 @@ export function BenchmarksView() {
   const [runsLoading, setRunsLoading] = useState(true);
   const [runsError, setRunsError] = useState<string | null>(null);
 
+  const [openRun, setOpenRun] = useState<string | null>(null);
   const [openAgent, setOpenAgent] = useState<{ runId: string; agentId: string } | null>(null);
   const pollRef = useRef<number | null>(null);
 
@@ -89,6 +91,16 @@ export function BenchmarksView() {
     );
   }
 
+  if (openRun !== null) {
+    return (
+      <BenchmarkRunView
+        runId={openRun}
+        onOpenAgent={(runId, agentId) => setOpenAgent({ runId, agentId })}
+        onBack={() => setOpenRun(null)}
+      />
+    );
+  }
+
   return (
     <div className="flex flex-col h-full min-h-0 pt-20 pb-4" data-testid="benchmarks-view">
       <div className="pb-3">
@@ -107,7 +119,7 @@ export function BenchmarksView() {
             requests={requests}
             loading={runsLoading}
             error={runsError}
-            onOpenAgent={(runId, agentId) => setOpenAgent({ runId, agentId })}
+            onOpenRun={(runId) => setOpenRun(runId)}
           />
         </div>
         <div className="flex-1 min-h-0 rounded-xl border border-border bg-background/85 backdrop-blur-sm p-4">

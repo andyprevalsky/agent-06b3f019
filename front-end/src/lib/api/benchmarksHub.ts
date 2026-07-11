@@ -87,6 +87,27 @@ export interface HubRunRequest {
   updatedAt: string;
 }
 
+export interface HubRunTaskDetail extends HubRunTask {
+  tokens_in: number | null;
+  tokens_out: number | null;
+  cache_hit_pct: number | null;
+  llm_call_count: number | null;
+  message_count: number | null;
+}
+
+export interface HubRunDetail extends Omit<HubRun, 'tasks'> {
+  tasks: HubRunTaskDetail[];
+  totals: {
+    passed: number;
+    failed: number;
+    running: number;
+    cost_cents: number;
+    tokens_in: number;
+    tokens_out: number;
+    agents: number;
+  };
+}
+
 export interface HubTreeNode {
   agent_id: string;
   parent_agent_id: string | null;
@@ -163,6 +184,13 @@ export async function createHubRunRequest(
     body: JSON.stringify({ task_names: taskNames, ...(simOn.length > 0 ? { sim_on: simOn } : {}) }),
   });
   return data.request;
+}
+
+export async function fetchHubRun(runId: string): Promise<HubRunDetail> {
+  const data = await hubFetch<{ run: HubRunDetail }>(
+    `/benchmarks/runs/${encodeURIComponent(runId)}`,
+  );
+  return data.run;
 }
 
 export async function fetchHubRunAgent(runId: string, agentId: string): Promise<HubAgentView> {
