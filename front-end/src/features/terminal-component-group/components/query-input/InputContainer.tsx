@@ -16,6 +16,10 @@
  *   [SEND]  <-- canSubmit === true
  *   [STOP]  <-- canSubmit === false (renders pause/stop button)
  *   [PAUSING] <-- isPausing === true (spinner, disabled)
+ *
+ * KEYBOARD:
+ *   plain Enter                 -> submit
+ *   Cmd/Shift/Ctrl/Alt + Enter  -> native textarea newline
  */
 
 import { useRef, forwardRef } from 'react';
@@ -140,7 +144,8 @@ const TextareaRow = forwardRef<HTMLTextAreaElement, TextareaRowProps>(
     const hasTrackedTyping = useRef(false);
     const hasTrackedFocus = useRef(false);
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      const isModifiedEnter = e.metaKey || e.shiftKey || e.ctrlKey || e.altKey;
+      if (e.key === 'Enter' && !isModifiedEnter && !e.nativeEvent.isComposing) {
         e.preventDefault();
         onSubmit();
       }
@@ -296,10 +301,8 @@ function SubmitTooltipBody({ hasUploadingAttachments }: { hasUploadingAttachment
     <p className="text-xs flex items-center gap-1">
       <span>Send</span>
       <span>(</span>
-      <span className="font-mono text-base" style={{ transform: 'translateY(1px)' }}>
-        ⌘
-      </span>
-      <span>+ Enter )</span>
+      <span>Enter</span>
+      <span>)</span>
     </p>
   );
 }

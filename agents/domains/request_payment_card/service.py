@@ -6,6 +6,12 @@ import hashlib
 import json
 from typing import Any, Dict
 
+from utils.purchase_approval import (
+    validate_product_detail_url,
+    validate_product_rating,
+    validate_product_review_count,
+)
+
 
 def _to_list(value: Any) -> list:
     if isinstance(value, list):
@@ -36,10 +42,16 @@ def normalize_payment_payload(tool_call: Dict[str, Any], user_id: str) -> Dict[s
     for item in _to_list(tool_call.get("line_items") or tool_call.get("lineItems")):
         if not isinstance(item, dict):
             continue
+        product_url = validate_product_detail_url(item.get("product_url") or item.get("productUrl"))
+        rating = validate_product_rating(item.get("rating"))
+        review_count = validate_product_review_count(item.get("review_count") or item.get("reviewCount"))
         line_items.append(
             {
                 "name": str(item.get("name") or "").strip(),
                 "imageUrl": item.get("image_url") or item.get("imageUrl"),
+                "productUrl": product_url,
+                "rating": rating,
+                "reviewCount": review_count,
                 "unitPriceCents": _to_int(item.get("unit_price_cents") or item.get("unitPriceCents")),
                 "quantity": _to_int(item.get("quantity")) or 1,
                 "lineTotalCents": _to_int(item.get("line_total_cents") or item.get("lineTotalCents")),
@@ -92,6 +104,8 @@ def build_payment_question(payload: Dict[str, Any]) -> str:
         qty = item.get("quantity") or 1
         line_total = (item.get("lineTotalCents") or 0) / 100
         lines.append(f"- {name} x{qty}: ${line_total:.2f}")
+        lines.append(f"  Product: [View product]({item.get('productUrl')})")
+        lines.append(f"  Reviews: {item.get('rating')} ({item.get('reviewCount')})")
     for fee in payload.get("fees") or []:
         label = fee.get("label") or "Fee"
         amount = (fee.get("amountCents") or 0) / 100

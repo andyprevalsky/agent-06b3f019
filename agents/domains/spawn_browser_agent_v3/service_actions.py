@@ -8,16 +8,18 @@ from __future__ import annotations
 import asyncio
 import base64
 import inspect
-from io import BytesIO
 import time as time_module
+from io import BytesIO
 from typing import TYPE_CHECKING, Any, Dict, Optional
 from urllib.parse import urlparse
 
 import structlog
 from PIL import Image
 
+from browser_tools.schemas import RequestPaymentCardBrowserTool
 from domains.spawn_browser_agent_v3.config import WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS
 from domains.spawn_browser_agent_v3.service_crypto import has_payment_card_secret_refs
+from utils.purchase_approval import validate_product_url_for_page
 
 if TYPE_CHECKING:
     from browser_tools.dom_service import ActionHistory, DOMService
@@ -249,18 +251,14 @@ async def execute_action(  # noqa: C901
                         "into the payment fields, then submit the checkout form."
                     ),
                 }
-            missing_fields = [
-                field
-                for field in ("merchant", "line_items", "subtotal_cents", "total_cents")
-                if not params.get(field)
-            ]
-            if missing_fields:
+            try:
+                payment_request = RequestPaymentCardBrowserTool.model_validate({"tool": action_name, **params})
+                for item in payment_request.line_items:
+                    validate_product_url_for_page(item.product_url, current_url)
+            except ValueError as error:
                 return {
                     "success": False,
-                    "error": (
-                        "request_payment_card requires merchant, line_items, subtotal_cents, "
-                        f"and total_cents before approval. Missing: {', '.join(missing_fields)}"
-                    ),
+                    "error": f"request_payment_card receipt is incomplete: {error}",
                 }
             return {
                 "status": "awaiting_payment_card_approval",
@@ -1369,9 +1367,7 @@ async def _execute_screenshot(
         )
         if upload_result:
             saved_path = upload_result.get("path", "/tmp/screenshot.png")
-            logger.info(
-                f"\U0001f4f8 Screenshot saved to Steel session: {saved_path} ({len(screenshot_bytes)} bytes)"
-            )
+            logger.info(f"\U0001f4f8 Screenshot saved to Steel session: {saved_path} ({len(screenshot_bytes)} bytes)")
 
     await action_history.record_action(
         dom_service=dom_service,

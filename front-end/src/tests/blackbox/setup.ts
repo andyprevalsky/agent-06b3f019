@@ -144,7 +144,48 @@ class MockWebSocket extends EventTarget {
     this.dispatchEvent(event);
   }
 
-  send(): void {}
+  send(data: string | ArrayBufferLike | Blob | ArrayBufferView): void {
+    if (typeof data !== 'string') return;
+
+    let frame: unknown;
+    try {
+      frame = JSON.parse(data);
+    } catch {
+      return;
+    }
+    if (!Array.isArray(frame) || frame.length !== 5) return;
+
+    const [joinRef, ref, topic, event] = frame as [
+      string | null,
+      string | null,
+      string,
+      string,
+      unknown,
+    ];
+    if (
+      (event !== 'phx_join' &&
+        event !== 'phx_leave' &&
+        event !== 'heartbeat' &&
+        event !== 'access_token') ||
+      ref === null
+    ) {
+      return;
+    }
+
+    const reply = JSON.stringify([
+      joinRef,
+      ref,
+      topic,
+      'phx_reply',
+      { status: 'ok', response: {} },
+    ]);
+    setTimeout(() => {
+      if (this.readyState !== MockWebSocket.OPEN) return;
+      const message = new MessageEvent('message', { data: reply });
+      this.onmessage?.(message);
+      this.dispatchEvent(message);
+    }, 0);
+  }
 }
 
 Object.defineProperty(window, 'WebSocket', {

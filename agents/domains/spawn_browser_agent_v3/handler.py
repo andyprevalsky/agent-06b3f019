@@ -122,6 +122,7 @@ from .service_crypto import (
 from .types import ClaudeTokenState
 
 logger = structlog.get_logger()
+BROWSER_PROGRESS_TITLE = "Browser Agent In Progress"
 _background_browser_cleanup_tasks: set[asyncio.Task] = set()
 
 
@@ -1383,13 +1384,11 @@ async def _perform_generic_browser_recovery(
         ).all()
         for locator in candidates[:80]:
             try:
-                text = (
-                    await locator.evaluate(
-                        """el => (
+                text = await locator.evaluate(
+                    """el => (
                             el.innerText || el.value || el.getAttribute('aria-label') ||
                             el.getAttribute('title') || ''
                         ).trim()"""
-                    )
                 )
                 if not _GENERIC_DISMISS_BUTTON_RE.match(str(text or "")):
                     continue
@@ -1523,14 +1522,28 @@ def _write_lock_notification_prompt(
         "mechanic. For purchases, include every visible item being bought and set media to exactly one "
         "image when any product, checkout, or page image is visible; for multiple items, use one "
         "rendered_summary image if available. For each "
-        "purchase item, use the item key title, not name. Include visible price, quantity, description "
-        "under 80 characters, rating/reviews, seller, delivery details, product image URL, order totals, "
+        "purchase item, use the item key title, not name. You MUST include its real numeric rating and "
+        "review count plus its canonical product-detail URL; never substitute the current cart, checkout, "
+        "payment, or order URL. Those required fields must already exist in the browser trajectory; do not "
+        "invent them or perform a browser action in this fork. Also include "
+        "visible price, quantity, description under 80 characters, seller, delivery details, product image URL, order totals, "
         "delivery address, and payment method when visible. If Runtime evidence includes media_candidates, use only those "
         "URLs for media and item image_url, preferring the candidate whose alt or nearby_text best "
         "matches the purchased item. For payment, never include secrets such as card numbers, CVV, "
         "passwords, tokens, or one-time codes.\n\n"
         f"Runtime evidence:\n{json_dumps_compact(evidence)}"
     )
+
+
+class PurchaseApprovalContextError(RuntimeError):
+    """Raised when a purchase approval cannot meet its required context contract."""
+
+
+def _enforce_write_lock_notification_failure_policy(approval_type: str, error: Exception) -> None:
+    if approval_type == "purchase":
+        raise PurchaseApprovalContextError(
+            "Purchase approval blocked because reviews and a canonical product link could not be verified"
+        ) from error
 
 
 def _format_write_lock_value(label: str, value: Any) -> Optional[str]:
@@ -1581,14 +1594,15 @@ def _render_write_lock_notification_question(
                     ("Price", "price"),
                     ("Qty", "quantity"),
                     ("Description", "description"),
-                    ("Rating", "rating"),
-                    ("Reviews", "review_count"),
                     ("Seller", "seller"),
                     ("Shipping", "shipping"),
                 ):
                     formatted = _format_write_lock_value(f"   {label}", item.get(key))
                     if formatted:
                         lines.append(formatted)
+                lines.append(f"   Rating: {item['rating']}")
+                lines.append(f"   Reviews: {item['review_count']}")
+                lines.append(f"   Product: [View product]({item['product_url']})")
         totals = purchase.get("totals") if isinstance(purchase.get("totals"), dict) else {}
         total_lines = [
             _format_write_lock_value("Subtotal", totals.get("subtotal")),
@@ -1653,7 +1667,7 @@ def _render_write_lock_notification_question(
             lines.append(f"\n**Image:** {first['url']}")
 
     url = service.get("url")
-    if url:
+    if url and trigger_type != "purchase":
         lines.append(f"\n**Page:** {url}")
 
     return "\n".join(lines)
@@ -2778,7 +2792,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 """Connect Playwright, then apply everything that only needs the
                 Playwright side (fast-mode route, botsigged diagnostics,
                 fingerprint injection) while DOMService is still attaching."""
-                nonlocal _playwright_browser, _playwright_instance
+                nonlocal _playwright_browser, _playwright_instance, playwright_driver_pid
                 t = time.monotonic()
                 from playwright.async_api import async_playwright
 
@@ -2882,7 +2896,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 t = time.monotonic()
                 await save_browser_action_message(
                     agent_id=agent_id,
-                    title="Browser Ready",
+                    title=BROWSER_PROGRESS_TITLE,
                     task_id=task_id,
                     message="",
                     status=MessageStatus.IN_PROGRESS,
@@ -2936,6 +2950,12 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     "For purchases, extract the full itemized receipt and call request_payment_card. "
                     "Never ask the user to type a payment card into chat."
                 )
+            _user_context_sections.append(
+                "## Purchase Approval Context\n"
+                "Before triggering any Buy, Place Order, or other purchase write action, collect every item's "
+                "canonical product-detail URL, numeric rating, and numeric review count. Never use a cart or "
+                "checkout URL as the product link. A purchase approval is blocked if any item lacks these fields."
+            )
             _record_timing("parallel.data.user_profile", t)
 
             t = time.monotonic()
@@ -3622,9 +3642,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     await asyncio.sleep(1)
                     continue
                 if consecutive_api_failures >= MAX_CONSECUTIVE_API_FAILURES:
-                    logger.error(
-                        f"Aborting: {MAX_CONSECUTIVE_API_FAILURES} consecutive browser decision timeouts"
-                    )
+                    logger.error(f"Aborting: {MAX_CONSECUTIVE_API_FAILURES} consecutive browser decision timeouts")
                     break
                 raise
             except Exception as e:
@@ -4359,7 +4377,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         "action": action_name,
                         "target_coordinates": coords_for_cursor,
                     },
-            )
+                )
 
             activity.heartbeat(f"Step {iteration} - executing {action_name}")
             try:
@@ -4501,6 +4519,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         ),
                     )
                 except Exception as notification_error:
+                    _enforce_write_lock_notification_failure_policy(approval_type, notification_error)
                     logger.warning(
                         "Failed to generate write lock notification metadata; using fallback question",
                         approval_type=approval_type,
