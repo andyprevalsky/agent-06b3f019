@@ -39,8 +39,12 @@ import credentialPropagationRouter from './domains/credential-propagation/routes
 import purchasesRouter, { agentCardWebhookHandler } from './domains/purchases/routes';
 import testPaymentRouter from './domains/test-payment/routes';
 import {
+  PROACTIVE_SMS_CRON_EXPRESSION,
+  PROACTIVE_SMS_TIME_ZONE,
   setSupervisorFixtureOverride,
   clearSupervisorFixtureOverride,
+  runProactiveSmsOutreachJob,
+  runProactiveSmsOutreachJobWithLease,
 } from './providers/smsSupervisor';
 import vcardRouter from './domains/vcard/routes';
 import uploadRouter from './domains/upload/routes';
@@ -281,6 +285,54 @@ if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1') {
     res.json({ ok: true });
   });
   app.use('/api/test/sms-supervisor-fixture', fixtureRouter);
+
+  const proactiveSmsRouter = express.Router();
+  const parseProactiveSmsJobOptions = (body: unknown) => {
+    const { now: nowValue, userIds: userIdsValue } = body as {
+      now?: unknown;
+      userIds?: unknown;
+    };
+    const now =
+      nowValue === undefined
+        ? new Date()
+        : typeof nowValue === 'string'
+          ? new Date(nowValue)
+          : null;
+    const userIds =
+      userIdsValue === undefined
+        ? undefined
+        : Array.isArray(userIdsValue) &&
+            userIdsValue.every((value): value is string => typeof value === 'string')
+          ? userIdsValue
+          : null;
+    return now === null || Number.isNaN(now.getTime()) || userIds === null
+      ? null
+      : { now, candidateUserIds: userIds };
+  };
+  const rejectInvalidProactiveSmsOptions = (res: express.Response): void => {
+    res.status(400).json({ error: 'now must be an ISO date and userIds must be a string array' });
+  };
+  proactiveSmsRouter.post('/run', (req, res, next) => {
+    const options = parseProactiveSmsJobOptions(req.body);
+    if (options === null) {
+      rejectInvalidProactiveSmsOptions(res);
+      return;
+    }
+    runProactiveSmsOutreachJob(options)
+      .then((summary) => res.json(summary))
+      .catch(next);
+  });
+  proactiveSmsRouter.post('/run-leased', (req, res, next) => {
+    const options = parseProactiveSmsJobOptions(req.body);
+    if (options === null) {
+      rejectInvalidProactiveSmsOptions(res);
+      return;
+    }
+    runProactiveSmsOutreachJobWithLease(options)
+      .then((result) => res.json(result))
+      .catch(next);
+  });
+  app.use('/api/test/proactive-sms', proactiveSmsRouter);
 
   log.info('Fetch capture + supervisor fixture override enabled for blackbox tests');
 }
@@ -599,6 +651,35 @@ app.listen(PORT, () => {
     };
     cron.schedule('*/5 * * * *', runPlaidSync);
     cronLog.info('Plaid transaction sync scheduled (every 5 minutes)');
+  }
+
+  if (!isProduction || process.env.DISABLE_PROACTIVE_SMS === '1') {
+    createLogger('Cron').info('Proactive SMS outreach disabled', {
+      reason: !isProduction ? 'non-production' : 'DISABLE_PROACTIVE_SMS',
+    });
+  } else {
+    const cronLog = createLogger('Cron');
+    const runProactiveOutreach = () => {
+      cronLog.info('Running proactive SMS outreach job...');
+      runProactiveSmsOutreachJobWithLease()
+        .then((result) => {
+          if (!result.acquired) {
+            cronLog.info('Proactive SMS outreach skipped; another replica owns the lease');
+          }
+        })
+        .catch((err) => {
+          cronLog.error('Proactive SMS outreach job error', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+    };
+    cron.schedule(PROACTIVE_SMS_CRON_EXPRESSION, runProactiveOutreach, {
+      timezone: PROACTIVE_SMS_TIME_ZONE,
+    });
+    cronLog.info('Proactive SMS outreach scheduled', {
+      cron: PROACTIVE_SMS_CRON_EXPRESSION,
+      timezone: PROACTIVE_SMS_TIME_ZONE,
+    });
   }
 });
 
