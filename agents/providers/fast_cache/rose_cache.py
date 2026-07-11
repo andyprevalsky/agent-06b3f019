@@ -21,6 +21,7 @@ import structlog
 
 from providers.fast_cache import client as cache_client
 from providers.fast_cache.context import current_context
+from providers.rose.pools import get_pool
 
 if TYPE_CHECKING:
     from providers.rose.types import StreamChunk
@@ -114,6 +115,15 @@ accumulate_chunk = _accumulate
 
 def request_key_material(complete_kwargs: Dict[str, Any]) -> Dict[str, Any]:
     """Stable, behavior-shaping request material for LLM cache keys."""
+    pool_name = complete_kwargs.get("pool")
+    pool_contract: Any = None
+    if isinstance(pool_name, str):
+        pool = get_pool(pool_name)
+        pool_contract = {
+            "claude_auth_model": pool.claude_auth_model,
+            "gpt_auth_model": pool.gpt_auth_model,
+            "waterfall": pool.waterfall,
+        }
     response_model = complete_kwargs.get("response_model")
     response_schema: Any = None
     if response_model is not None:
@@ -122,7 +132,8 @@ def request_key_material(complete_kwargs: Dict[str, Any]) -> Dict[str, Any]:
         except Exception:
             response_schema = getattr(response_model, "__name__", str(response_model))
     return {
-        "pool": complete_kwargs.get("pool"),
+        "pool": pool_name,
+        "pool_contract": pool_contract,
         "messages": complete_kwargs.get("messages"),
         "tools": complete_kwargs.get("tools"),
         "tool_choice": complete_kwargs.get("tool_choice"),
