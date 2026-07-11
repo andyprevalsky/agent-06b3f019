@@ -105,7 +105,9 @@ async function main(): Promise<void> {
   } else if (action === 'cleanup') {
     await cleanup();
     const mode = fixtureMode();
-    console.log(JSON.stringify({ cleaned: true, fixture_mode: mode, user_id: benchmarkUserId(mode) }));
+    console.log(
+      JSON.stringify({ cleaned: true, fixture_mode: mode, user_id: benchmarkUserId(mode) })
+    );
   } else {
     throw new Error(`Unknown action "${action}". Expected apply or cleanup.`);
   }

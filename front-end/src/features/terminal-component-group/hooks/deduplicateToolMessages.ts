@@ -31,7 +31,11 @@ function sortByTimestampAsc(a: Message, b: Message): number {
   return getMessageOrderTimestamp(a) - getMessageOrderTimestamp(b);
 }
 
-function formatWebSearchTitle(rawTitle: string, status: ExploreStep['status'], query: string | undefined): string {
+function formatWebSearchTitle(
+  rawTitle: string,
+  status: ExploreStep['status'],
+  query: string | undefined,
+): string {
   if (!query) return rawTitle;
   if (
     rawTitle !== 'Searching the web' &&
@@ -46,7 +50,11 @@ function formatWebSearchTitle(rawTitle: string, status: ExploreStep['status'], q
   return `Searching the web for ${query}`;
 }
 
-function formatWebFetchTitle(rawTitle: string, status: ExploreStep['status'], text: string): string {
+function formatWebFetchTitle(
+  rawTitle: string,
+  status: ExploreStep['status'],
+  text: string,
+): string {
   if (
     rawTitle !== 'Fetching web content' &&
     rawTitle !== 'Web fetch complete' &&
@@ -99,7 +107,10 @@ function collectRawWaitFor(messages: Message[]): Map<string, Message[]> {
   return raw;
 }
 
-function dedupByToolCallId(messages: Message[]): { toolMessages: Message[]; nonToolMessages: Message[] } {
+function dedupByToolCallId(messages: Message[]): {
+  toolMessages: Message[];
+  nonToolMessages: Message[];
+} {
   const toolMessageMap = new Map<string, { message: Message; firstTimestamp: string }>();
   const nonToolMessages: Message[] = [];
 
@@ -231,7 +242,8 @@ function groupExploreMessages(messages: Message[]): ExploreGrouping {
       title: (representative.metadata?.title as string) || '',
       fullGoal: (representative.metadata?.fullGoal as string) || undefined,
       message: representative.text || '',
-      status: ((representative.metadata?.toolStatus as string) || 'IN_PROGRESS') as ExploreData['status'],
+      status: ((representative.metadata?.toolStatus as string) ||
+        'IN_PROGRESS') as ExploreData['status'],
       steps,
     });
 
@@ -251,10 +263,9 @@ function buildWaitForChecks(
   childIds: Set<string>,
 ): WaitForCheck[] {
   rawMsgs.sort(sortByTimestampAsc);
-  const withCheckNum = rawMsgs.filter((m) => m.metadata?.checkNum != null);
 
   const latestByCheckNum = new Map<number, Message>();
-  for (const m of withCheckNum) {
+  for (const m of rawMsgs.filter((msg) => msg.metadata?.checkNum != null)) {
     latestByCheckNum.set(m.metadata!.checkNum as number, m);
   }
 

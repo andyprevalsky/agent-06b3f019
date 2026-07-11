@@ -3,7 +3,7 @@ import {
   readTasksFile,
 } from './config';
 import { createLogger } from '../../providers/logger';
-import * as agentQueryService from '../agents/agentQueryService';
+import { getAgentDetailForPreview } from '../../providers/agentDetailQuery';
 
 const log = createLogger('Benchmarks');
 
@@ -117,5 +117,5 @@ export async function getBenchmarkAgentPreview(agentId: string) {
   if (!benchmarkAgentPreviewEnabled()) {
     return null;
   }
-  return agentQueryService.getAgentDetail(agentId);
+  return getAgentDetailForPreview(agentId);
 }

@@ -28,8 +28,7 @@ export function AttentionMessageWrapper({
     (message.metadata?.attentionMessage as string | undefined) || message.text;
   const isWaiting = message.metadata?.toolStatus === 'IN_PROGRESS';
   const approvalMetadata = message.metadata?.requestUserApproval as
-    | { attentionRequestId?: unknown }
-    | undefined;
+    { attentionRequestId?: unknown } | undefined;
   const attentionRequestId =
     typeof approvalMetadata?.attentionRequestId === 'string'
       ? approvalMetadata.attentionRequestId

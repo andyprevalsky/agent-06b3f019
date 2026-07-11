@@ -6,7 +6,11 @@ import {
 } from '../../providers/card-provider';
 import { createLogger } from '../../providers/logger';
 import { cancelAuthorizedHold, stripe } from '../../providers/stripe';
-import { benchmarkPurchaseKycRequired, MAX_PURCHASE_CENTS, PURCHASE_APPROVAL_CACHE_HOURS } from './config';
+import {
+  benchmarkPurchaseKycRequired,
+  MAX_PURCHASE_CENTS,
+  PURCHASE_APPROVAL_CACHE_HOURS,
+} from './config';
 import { PurchaseError } from './errors';
 import { isKycRequiredError, kycRequiredPurchaseError } from './kyc';
 import * as repo from './repo';
@@ -300,17 +304,13 @@ async function chargeAndIssueCard(
       agent_id: input.agentId,
       error: error instanceof Error ? error.message : String(error),
     });
-    if (isKycRequiredError(error)) {
-      if (paymentIntentId !== undefined) await cancelAuthorizedHold(paymentIntentId);
-      await repo.updatePurchaseStatus(purchaseId, PurchaseSpendStatus.FAILED, {
-        stripePaymentIntentId: paymentIntentId ?? null,
-      });
-      throw kycRequiredPurchaseError();
-    }
+    // Cancel any authorized hold before surfacing a KYC gate so money isn't stranded.
+    const kycRequired = isKycRequiredError(error);
+    if (kycRequired && paymentIntentId !== undefined) await cancelAuthorizedHold(paymentIntentId);
     await repo.updatePurchaseStatus(purchaseId, PurchaseSpendStatus.FAILED, {
       stripePaymentIntentId: paymentIntentId ?? null,
     });
-    throw error;
+    throw kycRequired ? kycRequiredPurchaseError() : error;
   }
 }
 

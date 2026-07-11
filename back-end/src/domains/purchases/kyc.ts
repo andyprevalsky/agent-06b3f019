@@ -28,7 +28,9 @@ function providerErrorStatus(error: unknown): number | undefined {
 export function isKycRequiredError(error: unknown): boolean {
   const status = providerErrorStatus(error);
   if (status !== undefined && ![400, 403, 409, 422].includes(status)) return false;
-  const normalized = errorText(error).toLowerCase().replace(/[\s-]+/g, '_');
+  const normalized = errorText(error)
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_');
   return (
     normalized.includes('kyc_required') ||
     normalized.includes('customer_kyc_required') ||

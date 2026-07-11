@@ -16,7 +16,7 @@ import { fetchGmailEmails, parseGmailOAuthEmails } from '../../services/integrat
 import { EMAIL_PROVIDER_CONFIG } from './config';
 import * as repo from './repo';
 import { exchangeProviderCode, buildRedirectUri, sendOAuthResult } from './oauthService';
-import { resolvePendingGateByKey } from '../attention-requests/service';
+import { resolvePendingGateByKey } from '../../providers/gateResolution';
 
 const log = createLogger('Integrations');
 
@@ -58,7 +58,10 @@ async function syncGmailEmails(
   });
 }
 
-async function resolveSourceConnectGate(userId: string, providerKey: EmailProviderSlug): Promise<void> {
+async function resolveSourceConnectGate(
+  userId: string,
+  providerKey: EmailProviderSlug
+): Promise<void> {
   try {
     await resolvePendingGateByKey(userId, `source_connect:${providerKey}`, 'SOURCE_CONNECTED');
   } catch (error: unknown) {

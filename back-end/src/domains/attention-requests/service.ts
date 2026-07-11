@@ -5,13 +5,8 @@ import { createMessage } from '../../providers/messages';
 import { createLogger } from '../../providers/logger';
 import { completeAuthAssistanceForUser } from '../../providers/authAssistanceCompletion';
 import { logJson } from '../../utils/log';
-import {
-  emitGateMessage,
-  extractGate,
-  maybeDispatchGateSms,
-  readWaiters,
-  toCreateResult,
-} from './gateHelpers';
+import { emitGateMessage, extractGate, maybeDispatchGateSms, toCreateResult } from './gateHelpers';
+import { resolveAndSignal, signalWorkflow } from '../../providers/gateResolution';
 
 const log = createLogger('Attention');
 
@@ -29,64 +24,6 @@ export class BadRequestError extends Error {
   constructor(msg: string) {
     super(msg);
   }
-}
-
-function errMsg(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-async function signalWorkflow(
-  workflowId: string,
-  agentId: string,
-  requestId: string,
-  response: string
-): Promise<void> {
-  try {
-    const { getTemporalClient } = await import('../../providers/temporal');
-    const client = await getTemporalClient();
-    const handle = client.workflow.getHandle(workflowId);
-    await handle.signal(
-      'receive_user_response',
-      JSON.stringify({ request_id: requestId, response })
-    );
-  } catch (error) {
-    log.error('Failed to signal workflow', {
-      workflow_id: workflowId,
-      agent_id: agentId,
-      error: errMsg(error),
-    });
-  }
-}
-
-/** Signal the primary workflow AND every deduped waiter that the gate resolved. */
-async function signalAllWaiters(
-  request: { id: string; workflowId: string; agentId: string; metadata: unknown },
-  response: string
-): Promise<void> {
-  const targets = new Map<string, string>();
-  targets.set(request.workflowId, request.agentId);
-  for (const w of readWaiters(request.metadata)) {
-    if (!targets.has(w.workflowId)) targets.set(w.workflowId, w.agentId);
-  }
-  for (const [workflowId, agentId] of targets) {
-    await signalWorkflow(workflowId, agentId, request.id, response);
-  }
-}
-
-/**
- * Resolve a gate: mark the response, then signal every waiter. The waiter list
- * is re-read AFTER updateResponse (not from the pre-update snapshot) so a waiter
- * that joined during the resolve is included; once userResponse is set, the
- * atomic appendGateWaiter can no longer add new waiters (it returns the response
- * and the joiner is signaled directly), so this read captures the final set.
- */
-async function resolveAndSignal(
-  request: { id: string; workflowId: string; agentId: string; metadata: unknown },
-  response: string
-): Promise<void> {
-  await repo.updateResponse(request.id, response);
-  const fresh = await repo.findById(request.id);
-  await signalAllWaiters(fresh ?? request, response);
 }
 
 /**
@@ -254,21 +191,4 @@ export async function reject(id: string, userId: string, message: string | undef
   await resolveAndSignal(request, REJECTED_RESPONSE);
 
   return { success: true, request_id: id };
-}
-
-/**
- * Resolver hook for external detections (Stripe webhook, OAuth callback, KYC
- * webhook). Finds the pending gate by dedup key, marks it answered, and signals
- * the primary workflow plus all deduped waiters.
- */
-export async function resolvePendingGateByKey(
-  userId: string,
-  gateKey: string,
-  response = 'RESOLVED'
-): Promise<{ resolved: boolean; request_id?: string }> {
-  const request = await repo.findPendingByGateKey(userId, gateKey);
-  if (request === null) return { resolved: false };
-
-  await resolveAndSignal(request, response);
-  return { resolved: true, request_id: request.id };
 }

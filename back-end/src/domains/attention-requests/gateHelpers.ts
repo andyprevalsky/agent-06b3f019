@@ -7,29 +7,11 @@ import type { CreateAttentionRequestInput, Gate } from './types';
 const log = createLogger('AttentionRequests');
 const errMsg = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
-export interface GateWaiter {
-  workflowId: string;
-  agentId: string;
-}
-
 export function extractGate(metadata: unknown): unknown {
   if (metadata !== null && typeof metadata === 'object' && 'gate' in metadata) {
     return (metadata as { gate?: unknown }).gate;
   }
   return undefined;
-}
-
-export function readWaiters(metadata: unknown): GateWaiter[] {
-  if (metadata === null || typeof metadata !== 'object') return [];
-  const raw = (metadata as { gateWaiters?: unknown }).gateWaiters;
-  if (!Array.isArray(raw)) return [];
-  return raw.filter(
-    (x): x is GateWaiter =>
-      x !== null &&
-      typeof x === 'object' &&
-      typeof (x as GateWaiter).workflowId === 'string' &&
-      typeof (x as GateWaiter).agentId === 'string'
-  );
 }
 
 function renderGateSms(gate: Gate): string {

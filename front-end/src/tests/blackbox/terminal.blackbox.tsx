@@ -346,9 +346,9 @@ describe('Terminal page', () => {
       expect(screen.getByRole('button', { name: /Cancel/ })).toBeInTheDocument();
 
       const textarea = await screen.findByPlaceholderText('Type your message...');
-      expect(Boolean(title.compareDocumentPosition(textarea) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(
-        true,
-      );
+      expect(
+        Boolean(title.compareDocumentPosition(textarea) & Node.DOCUMENT_POSITION_FOLLOWING),
+      ).toBe(true);
     });
 
     it('does not show Browse in the sidebar for regular users', async () => {

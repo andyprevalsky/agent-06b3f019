@@ -51,7 +51,14 @@ function InlineApprovalActions({
         disabled={actionState !== null}
         className="h-8 bg-green-600 px-3 text-white hover:bg-green-700"
       >
-        {actionState === 'approving' ? <Loader2 className="h-4 w-4 animate-spin" /> : <><Check className="h-4 w-4" />Approve</>}
+        {actionState === 'approving' ? (
+          <Loader2 className="h-4 w-4 animate-spin" />
+        ) : (
+          <>
+            <Check className="h-4 w-4" />
+            Approve
+          </>
+        )}
       </Button>
       <Button
         variant="outline"
@@ -60,7 +67,14 @@ function InlineApprovalActions({
         disabled={actionState !== null}
         className="h-8 border-red-500/30 px-3 text-red-600 hover:bg-red-50 hover:text-red-700 dark:hover:bg-red-950/30"
       >
-        {actionState === 'declining' ? <Loader2 className="h-4 w-4 animate-spin" /> : <><X className="h-4 w-4" />Decline</>}
+        {actionState === 'declining' ? (
+          <Loader2 className="h-4 w-4 animate-spin" />
+        ) : (
+          <>
+            <X className="h-4 w-4" />
+            Decline
+          </>
+        )}
       </Button>
       {actionState === 'done' && <span className="text-xs text-muted-foreground">Sent</span>}
     </div>
@@ -99,8 +113,8 @@ function AutonomousExecutionButton({ onStartExecution }: { onStartExecution: () 
         <TooltipContent side="top" className="max-w-xs text-left text-xs">
           <p>
             Once Rose enters <strong>Autonomous Execution</strong> mode they will not ask you any
-            more questions and will relentlessly explore all possible avenues in order to
-            accomplish your goal given the context at its disposal.
+            more questions and will relentlessly explore all possible avenues in order to accomplish
+            your goal given the context at its disposal.
           </p>
         </TooltipContent>
       </Tooltip>

@@ -273,8 +273,14 @@ const tests: Array<[string, () => Promise<void>]> = [
         assert(caught instanceof purchasesService.PurchaseError, 'expected PurchaseError');
         const purchaseError = caught as purchasesService.PurchaseError;
         assert(purchaseError.statusCode === 422, `expected 422, got ${purchaseError.statusCode}`);
-        assert(purchaseError.code === 'kyc_required', `expected kyc_required, got ${purchaseError.code}`);
-        assert(calls.charges.length === 1, 'Stripe hold should have been authorized before card mint');
+        assert(
+          purchaseError.code === 'kyc_required',
+          `expected kyc_required, got ${purchaseError.code}`
+        );
+        assert(
+          calls.charges.length === 1,
+          'Stripe hold should have been authorized before card mint'
+        );
         assert(calls.cancels.length === 1, 'KYC failure must cancel the authorized hold');
 
         const row = await prisma.purchaseSpend.findFirst({

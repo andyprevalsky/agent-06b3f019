@@ -12,6 +12,7 @@ import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { clearCaptures, capturedRequests } from './msw/capture';
 import React from 'react';
+import type { AgentContextValue, AgentProviderProps } from '@/features/agent-context/types';
 
 // Mock subs BEFORE importing hook
 vi.mock('@/features/agent-context/hooks/useRealtimeSubscription', () => ({
@@ -36,7 +37,6 @@ vi.mock('@/lib/realtime', async (importOriginal) => {
   };
 });
 
-// eslint-disable-next-line import/first
 import { useAgentProvider, useAgentContext, AgentContext } from '@/features/agent-context/hooks';
 
 const API_BASE = 'http://localhost:3001/api';
@@ -54,7 +54,7 @@ function mockSession() {
   localStorage.setItem('app-user', JSON.stringify({ id: 'test-user', is_anonymous: false }));
 }
 
-function makeAgent(overrides: Partial<any> = {}) {
+function makeAgent(overrides: Record<string, unknown> = {}) {
   return {
     agent_id: 'agent-001',
     goal: 'test goal',
@@ -97,9 +97,9 @@ describe('useAgentProvider', () => {
     window.history.replaceState({}, '', '/');
   });
 
-  function defaultDeps(overrides: Partial<any> = {}) {
+  function defaultDeps(overrides: Partial<AgentProviderProps> = {}) {
     return {
-      user: { id: 'u-1', is_anonymous: false } as any,
+      user: { id: 'u-1', is_anonymous: false },
       isAuthenticated: true,
       realtimeReady: true,
       onLoadAgents: vi.fn(async () => {}),
@@ -295,9 +295,7 @@ describe('useAgentProvider', () => {
     );
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const { result, unmount } = renderHook(() =>
-      useAgentProvider(
-        defaultDeps({ user: null, isAuthenticated: false, realtimeReady: false }),
-      ),
+      useAgentProvider(defaultDeps({ user: null, isAuthenticated: false, realtimeReady: false })),
     );
     await waitFor(() => expect(result.current.selectedAgentId).toBeNull());
     expect(window.location.search).not.toContain('agent-id');
@@ -352,7 +350,7 @@ describe('useAgentContext', () => {
       streamingPlan: null,
       streamingAttention: null,
       streamingTools: new Map(),
-      streamedTextsRef: { current: new Set<string>() } as any,
+      streamedTextsRef: { current: new Set<string>() },
       setAgent: vi.fn(),
       setSelectedAgentId: vi.fn(),
       setMessages: vi.fn(),
@@ -361,7 +359,7 @@ describe('useAgentContext', () => {
       isLoadingAgent: false,
       forceResubscribe: vi.fn(),
       isChatMode: true,
-    } as any;
+    } as unknown as AgentContextValue;
     const wrapper = ({ children }: { children: React.ReactNode }) =>
       React.createElement(AgentContext.Provider, { value }, children);
     const { result } = renderHook(() => useAgentContext(), { wrapper });
