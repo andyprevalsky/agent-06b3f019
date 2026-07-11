@@ -416,6 +416,13 @@ class BrowserHumanizer:
                 return self._cdp_session
             return self._cdp_session
 
+    async def _invalidate_cdp_session(self, cdp_session: Any) -> None:
+        async with self._cdp_session_lock:
+            if self._cdp_session is cdp_session:
+                self._cdp_session = None
+                self._cdp_mouse_transport_enabled = False
+                self._cdp_keyboard_transport_enabled = False
+
     async def _move_path_with_cdp_fire_and_drain(self, samples: List[Any]) -> bool:
         cdp_session = await self._get_cdp_session() if self._cdp_mouse_transport_enabled else None
         if cdp_session is None:
@@ -424,44 +431,67 @@ class BrowserHumanizer:
         await self._schedule_visual_cursor_path(samples)
         pending = []
         timestamp = time.time()
-        for sample in samples:
-            timestamp += max(0, float(sample.delay_s))
-            pending.append(
-                asyncio.create_task(
-                    cdp_session.send(
-                        "Input.dispatchMouseEvent",
-                        {
-                            "type": "mouseMoved",
-                            "x": int(sample.x),
-                            "y": int(sample.y),
-                            "button": "none",
-                            "buttons": 0,
-                            "timestamp": timestamp,
-                        },
+        try:
+            for sample in samples:
+                timestamp += max(0, float(sample.delay_s))
+                pending.append(
+                    asyncio.create_task(
+                        cdp_session.send(
+                            "Input.dispatchMouseEvent",
+                            {
+                                "type": "mouseMoved",
+                                "x": int(sample.x),
+                                "y": int(sample.y),
+                                "button": "none",
+                                "buttons": 0,
+                                "timestamp": timestamp,
+                            },
+                        )
                     )
                 )
-            )
-            await self._notify_cursor_observer(sample.x, sample.y)
-            await asyncio.sleep(sample.delay_s)
+                await self._notify_cursor_observer(sample.x, sample.y)
+                await asyncio.sleep(sample.delay_s)
 
-        if pending:
-            await asyncio.gather(*pending)
+            if pending:
+                await asyncio.gather(*pending)
+        except asyncio.CancelledError:
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            raise
+        except Exception as exc:
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            await self._invalidate_cdp_session(cdp_session)
+            logger.debug("CDP mouse path failed; using Playwright fallback", error=str(exc))
+            return False
+
         return True
 
     async def _dispatch_mouse_position(self, x: int, y: int) -> None:
         cdp_session = await self._get_cdp_session() if self._cdp_mouse_transport_enabled else None
         if cdp_session is not None:
-            await cdp_session.send(
-                "Input.dispatchMouseEvent",
-                {
-                    "type": "mouseMoved",
-                    "x": int(x),
-                    "y": int(y),
-                    "button": "none",
-                    "buttons": 0,
-                    "timestamp": time.time(),
-                },
-            )
+            try:
+                await cdp_session.send(
+                    "Input.dispatchMouseEvent",
+                    {
+                        "type": "mouseMoved",
+                        "x": int(x),
+                        "y": int(y),
+                        "button": "none",
+                        "buttons": 0,
+                        "timestamp": time.time(),
+                    },
+                )
+            except Exception as exc:
+                await self._invalidate_cdp_session(cdp_session)
+                logger.debug("CDP mouse dispatch failed; using Playwright fallback", error=str(exc))
+                await self.input_page.mouse.move(int(x), int(y))
         else:
             await self.input_page.mouse.move(int(x), int(y))
         await self._publish_cursor(int(x), int(y))
@@ -678,11 +708,7 @@ class BrowserHumanizer:
                     task.cancel()
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
-            async with self._cdp_session_lock:
-                if self._cdp_session is cdp_session:
-                    self._cdp_session = None
-                    self._cdp_mouse_transport_enabled = False
-                    self._cdp_keyboard_transport_enabled = False
+            await self._invalidate_cdp_session(cdp_session)
             raise
         return True
 

@@ -1761,6 +1761,82 @@ async def test_browser_humanizer_cdp_send_failure_enables_keyboard_fallback():
     assert keyboard.events == [("down", "B"), ("up", "B")]
 
 
+async def test_browser_humanizer_cdp_mouse_path_failure_enables_fallback():
+    from browser_tools.humanizer import BrowserHumanizer
+
+    class FailingCDPSession:
+        async def send(self, method, payload):
+            raise RuntimeError("CDP mouse transport closed")
+
+    class FakeContext:
+        async def new_cdp_session(self, page):
+            return FailingCDPSession()
+
+    class FakeMouse:
+        def __init__(self):
+            self.moves = []
+
+        async def move(self, x, y):
+            self.moves.append((x, y))
+
+    mouse = FakeMouse()
+    page = SimpleNamespace(
+        mouse=mouse,
+        keyboard=SimpleNamespace(),
+        viewport_size={"width": 1280, "height": 800},
+        context=FakeContext(),
+    )
+    humanizer = BrowserHumanizer(dom_page=None, input_page=page, fast=True)
+    sample = SimpleNamespace(x=25, y=40, delay_s=0)
+
+    used_cdp = await humanizer._move_path_with_cdp_fire_and_drain([sample])
+
+    assert not used_cdp
+    assert humanizer._cdp_session is None
+    assert not humanizer._cdp_mouse_transport_enabled
+    assert not humanizer._cdp_keyboard_transport_enabled
+
+    await humanizer._move_to_unlocked(25, 40)
+
+    assert mouse.moves
+    assert mouse.moves[-1] == (25, 40)
+
+
+async def test_browser_humanizer_cdp_idle_mouse_failure_enables_fallback():
+    from browser_tools.humanizer import BrowserHumanizer
+
+    class FailingCDPSession:
+        async def send(self, method, payload):
+            raise RuntimeError("CDP idle transport closed")
+
+    class FakeContext:
+        async def new_cdp_session(self, page):
+            return FailingCDPSession()
+
+    class FakeMouse:
+        def __init__(self):
+            self.moves = []
+
+        async def move(self, x, y):
+            self.moves.append((x, y))
+
+    mouse = FakeMouse()
+    page = SimpleNamespace(
+        mouse=mouse,
+        keyboard=SimpleNamespace(),
+        viewport_size={"width": 1280, "height": 800},
+        context=FakeContext(),
+    )
+    humanizer = BrowserHumanizer(dom_page=None, input_page=page, fast=True)
+
+    await humanizer._dispatch_mouse_position(15, 30)
+
+    assert mouse.moves == [(15, 30)]
+    assert humanizer._cdp_session is None
+    assert not humanizer._cdp_mouse_transport_enabled
+    assert not humanizer._cdp_keyboard_transport_enabled
+
+
 async def test_browser_network_recording_captures_response_body():
     import tempfile
 
@@ -9656,6 +9732,14 @@ async def run_all_tests():
     await r.record_async(
         "browser_humanizer_cdp_send_failure_fallback",
         test_browser_humanizer_cdp_send_failure_enables_keyboard_fallback,
+    )
+    await r.record_async(
+        "browser_humanizer_cdp_mouse_path_failure_fallback",
+        test_browser_humanizer_cdp_mouse_path_failure_enables_fallback,
+    )
+    await r.record_async(
+        "browser_humanizer_cdp_idle_mouse_failure_fallback",
+        test_browser_humanizer_cdp_idle_mouse_failure_enables_fallback,
     )
     await r.record_async(
         "browser_network_recording_captures_body",
