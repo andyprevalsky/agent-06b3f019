@@ -5,8 +5,8 @@ import {
   waitForElectronAuthBridgePrimed,
 } from '@/lib/supabase';
 
-import { sendOTP, verifyOTP } from './api';
-import { DEV_AUTO_LOGIN_OTP, DEV_AUTO_LOGIN_PHONE, IS_DEV_AUTO_LOGIN } from './config';
+import { sendOTP, verifyOTP } from '../api';
+import { DEV_AUTO_LOGIN_OTP, DEV_AUTO_LOGIN_PHONE, IS_DEV_AUTO_LOGIN } from '../config';
 
 /** Module-level logger for the auth feature. */
 export function logAuth(message: string, payload?: Record<string, unknown>): void {

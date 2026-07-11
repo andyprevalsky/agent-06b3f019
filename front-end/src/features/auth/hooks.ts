@@ -17,7 +17,7 @@ import { checkNeedsInviteCode } from '@/lib/api';
 import { isBenchmarkArchiveMode } from '@/lib/benchmarkArchive';
 
 import { sendOTP, verifyOTP } from './api';
-import { initAuthSession, logAuth } from './initAuthSession';
+import { initAuthSession, logAuth } from './hooks/initAuthSession';
 import type { AuthStep } from './types';
 
 /** Extract a human-readable message from an unknown error value. */
