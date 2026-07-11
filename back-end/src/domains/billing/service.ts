@@ -44,14 +44,21 @@ export async function createSubscriptionCheckoutSession(userId: string): Promise
     return { url: url.toString() };
   }
 
-  const session = await stripe.checkout.sessions.create({
-    mode: 'subscription',
-    client_reference_id: userId,
-    line_items: [{ price: STRIPE_SUBSCRIPTION_PRICE_ID, quantity: 1 }],
-    success_url: `${returnUrl}?subscription=success`,
-    cancel_url: `${returnUrl}?subscription=cancelled`,
-    allow_promotion_codes: true,
-  });
+  const session = await stripe.checkout.sessions.create(
+    {
+      mode: 'subscription',
+      client_reference_id: userId,
+      line_items: [{ price: STRIPE_SUBSCRIPTION_PRICE_ID, quantity: 1 }],
+      success_url: `${returnUrl}?subscription=success`,
+      cancel_url: `${returnUrl}?subscription=cancelled`,
+      allow_promotion_codes: true,
+    },
+    // Per-user idempotency: the subscription gate that mints this is a per-user
+    // singleton and its Temporal mint activity is at-least-once, so a retry must
+    // reuse the same Checkout session (within Stripe's 24h key window) instead of
+    // creating a duplicate. Params are stable per user+env.
+    { idempotencyKey: `subscription-checkout:${userId}` }
+  );
 
   if (session.url === null || session.url === '') {
     throw new Error('Stripe did not return a checkout URL');

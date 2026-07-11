@@ -256,30 +256,30 @@ function resolveSourceSelection(params: GrepParams): ResolvedSourceSelection {
     throw new InvalidGrepParamError('filters');
   }
 
-  // Single-source callers (no `sources` array): top-level `person`/`since`
-  // narrowing merges into message filters only when the single source is in the
-  // message family, matching historical behavior.
-  const selectedSource = source as ValidSource | undefined;
+  const hasMessageFamily = resolvedSources.some(isMessageFamilySource);
+  const hasTransactions = resolvedSources.includes('transactions');
+  const hasDocuments = resolvedSources.includes('documents');
 
-  // Reject filters for a single non-filterable source (byte-identical to the
-  // pre-`sources` behavior). Multi-source queries route filters by family.
-  if (
-    sources === undefined &&
-    selectedSource !== undefined &&
-    !isMessageFamilySource(selectedSource) &&
-    selectedSource !== 'transactions' &&
-    selectedSource !== 'documents'
-  ) {
-    rejectUnsupportedFilters(selectedSource, requireFilterObject(params));
+  // Reject filters that NO resolved source can consume. Message/transaction/
+  // document families reject unsupported keys inside their own parse step; the
+  // gap is a purely-local selection (e.g. sources=['network']) where none of
+  // those parsers run — without this the filters would be silently dropped.
+  // Covers both the single-source (byte-identical to pre-`sources` behavior when
+  // resolvedSources===[selectedSource]) and the multi-source path.
+  const filterObj = requireFilterObject(params);
+  if (Object.keys(filterObj).length > 0 && !hasMessageFamily && !hasTransactions && !hasDocuments) {
+    rejectUnsupportedFilters(resolvedSources[0], filterObj);
   }
 
   return {
     resolvedSources,
-    hasMessageFamily: resolvedSources.some(isMessageFamilySource),
-    hasTransactions: resolvedSources.includes('transactions'),
-    hasDocuments: resolvedSources.includes('documents'),
-    mergeTopLevelNarrowing:
-      selectedSource !== undefined && isMessageFamilySource(selectedSource),
+    hasMessageFamily,
+    hasTransactions,
+    hasDocuments,
+    // Merge top-level `person`/`since` into message filters whenever a message-
+    // family source is EXPLICITLY selected — via singular `source` OR `sources`.
+    // (Not for the implicit default trio, matching historical behavior.)
+    mergeTopLevelNarrowing: (source !== undefined || sources !== undefined) && hasMessageFamily,
   };
 }
 

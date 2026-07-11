@@ -35,6 +35,55 @@ export async function updateMetadata(id: string, metadata: Prisma.InputJsonValue
   });
 }
 
+/**
+ * Atomically append a gate waiter under a row lock. Two agents deduping onto the
+ * same gate concurrently would otherwise last-write-wins each other's waiter (a
+ * lost waiter parks forever). The `FOR UPDATE` lock also serializes against the
+ * resolver's `updateResponse`, so if the gate resolved during the join race we
+ * return the stored response and skip the append — the caller signals the late
+ * waiter directly instead of parking it on an already-resolved gate.
+ */
+export async function appendGateWaiter(
+  id: string,
+  workflowId: string,
+  agentId: string
+): Promise<{ pending: boolean; response: string | null }> {
+  return prisma.$transaction(async (tx) => {
+    const locked = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM "AgentAttentionRequest" WHERE id = ${id} FOR UPDATE`;
+    if (locked.length === 0) return { pending: false, response: null };
+
+    const row = await tx.agentAttentionRequest.findUnique({
+      where: { id },
+      select: { userResponse: true, workflowId: true, metadata: true },
+    });
+    if (row === null) return { pending: false, response: null };
+    if (row.userResponse !== null) return { pending: false, response: row.userResponse };
+    if (row.workflowId === workflowId) return { pending: true, response: null };
+
+    const base =
+      row.metadata !== null && typeof row.metadata === 'object' && !Array.isArray(row.metadata)
+        ? { ...(row.metadata as Record<string, unknown>) }
+        : {};
+    const waiters = Array.isArray(base.gateWaiters) ? [...(base.gateWaiters as unknown[])] : [];
+    const already = waiters.some(
+      (w) =>
+        w !== null &&
+        typeof w === 'object' &&
+        (w as { workflowId?: unknown }).workflowId === workflowId
+    );
+    if (!already) {
+      waiters.push({ workflowId, agentId });
+      base.gateWaiters = waiters;
+      await tx.agentAttentionRequest.update({
+        where: { id },
+        data: { metadata: base as Prisma.InputJsonValue },
+      });
+    }
+    return { pending: true, response: null };
+  });
+}
+
 /** Source of the agent that raised a request (SMS agents get a gate SMS). */
 export async function findAgentSource(agentId: string) {
   return prisma.agent.findUnique({

@@ -9,7 +9,6 @@
 import { SourceNotFoundError } from './errors';
 import * as repo from './repo';
 import { DATA_SOURCE_CONFIGS, type ValidSource } from './types';
-import { startEmailOAuth } from '../integrations/oauthService';
 
 export interface SourceStatus {
   source: string;
@@ -37,15 +36,14 @@ function connectorForSource(rawSource: string): string | null {
 }
 
 /**
- * Mint (or stub) the connect URL for a not-yet-connected connector. Gmail gets
- * a real OAuth start URL via the integrations service; every other connector
- * returns a stable stub landing page.
+ * The connect URL a not-yet-connected connector renders on its gate. This is a
+ * STABLE per-connector route, not a pre-minted OAuth URL: minting the actual
+ * OAuth link at probe time created a throwaway EmailCredential row on every
+ * source-status probe (the FE re-mints fresh on click via the Integrations
+ * path, and SMS opens a mobile connect page that mints on load), so the
+ * pre-minted URL was always discarded — pure waste + orphaned credential rows.
  */
-async function connectUrlForConnector(userId: string, connector: string): Promise<string> {
-  if (connector === 'gmail') {
-    const { authUrl } = await startEmailOAuth(userId, 'gmail', null, null);
-    return authUrl;
-  }
+function connectUrlForConnector(connector: string): string {
   return `https://roselabs.ai/connect/${connector}`;
 }
 
@@ -68,7 +66,7 @@ export async function getSourceStatus(userId: string, sources: string[]): Promis
       source: rawSource,
       connector,
       connected,
-      connectUrl: connected ? null : await connectUrlForConnector(userId, connector),
+      connectUrl: connected ? null : connectUrlForConnector(connector),
     });
   }
   return statuses;

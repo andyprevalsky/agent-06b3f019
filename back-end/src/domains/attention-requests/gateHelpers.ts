@@ -1,4 +1,3 @@
-import type { Prisma } from '@prisma/client';
 import { createMessage } from '../../providers/messages';
 import { sendSms } from '../../providers/smsQueue';
 import { createLogger } from '../../providers/logger';
@@ -30,29 +29,6 @@ export function readWaiters(metadata: unknown): GateWaiter[] {
       typeof x === 'object' &&
       typeof (x as GateWaiter).workflowId === 'string' &&
       typeof (x as GateWaiter).agentId === 'string'
-  );
-}
-
-function withWaiters(metadata: unknown, waiters: GateWaiter[]): Prisma.InputJsonValue {
-  const base =
-    metadata !== null && typeof metadata === 'object'
-      ? { ...(metadata as Record<string, unknown>) }
-      : {};
-  base.gateWaiters = waiters as unknown as Prisma.InputJsonValue;
-  return base as Prisma.InputJsonValue;
-}
-
-export async function addWaiterIfNew(
-  request: { id: string; workflowId: string; metadata: unknown },
-  workflowId: string,
-  agentId: string
-): Promise<void> {
-  if (workflowId === request.workflowId) return;
-  const current = readWaiters(request.metadata);
-  if (current.some((w) => w.workflowId === workflowId)) return;
-  await repo.updateMetadata(
-    request.id,
-    withWaiters(request.metadata, [...current, { workflowId, agentId }])
   );
 }
 

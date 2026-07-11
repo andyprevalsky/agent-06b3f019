@@ -36,15 +36,33 @@ export function gateSourceKey(gate: GateMetadata): string | null {
   return match ? match[1] : null;
 }
 
-/** Open a URL the right way for the current surface (Mac app vs web). */
+/**
+ * Open a connect/OAuth URL for the current surface. Mac app → system browser
+ * via the bridge; web → navigate in-place so the OAuth/connect redirect (and
+ * `roselabs://` deep link) returns to this page.
+ */
 function openConnectUrl(url: string): void {
   const bridge = getMacAppBridge();
   if (bridge?.openExternal) {
     void bridge.openExternal(url);
     return;
   }
-  // Web: navigate in-place so the OAuth/connect redirect returns to this page.
   window.location.assign(url);
+}
+
+/**
+ * Open an external hosted link (Stripe Checkout / KYC). Mac app → system browser
+ * via the bridge (a plain window.open('_blank') is blocked/captured into a
+ * chromeless Electron window); web → a new tab so the agent view stays put and
+ * the provider returns via its own success/cancel URL.
+ */
+function openExternalLink(url: string): void {
+  const bridge = getMacAppBridge();
+  if (bridge?.openExternal) {
+    void bridge.openExternal(url);
+    return;
+  }
+  window.open(url, '_blank', 'noopener,noreferrer');
 }
 
 /** Build the Mac-app connect deep link for a device-sync source. */
@@ -84,5 +102,5 @@ export async function runGateConnectAction(
   }
 
   // subscription / kyc / other web sources: the carried URL is fresh + stable.
-  window.open(gate.action.url, '_blank', 'noopener,noreferrer');
+  openExternalLink(gate.action.url);
 }

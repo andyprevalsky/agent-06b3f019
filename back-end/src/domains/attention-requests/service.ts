@@ -6,7 +6,6 @@ import { createLogger } from '../../providers/logger';
 import { completeAuthAssistanceForUser } from '../../providers/authAssistanceCompletion';
 import { logJson } from '../../utils/log';
 import {
-  addWaiterIfNew,
   emitGateMessage,
   extractGate,
   maybeDispatchGateSms,
@@ -74,6 +73,36 @@ async function signalAllWaiters(
   }
 }
 
+/**
+ * Resolve a gate: mark the response, then signal every waiter. The waiter list
+ * is re-read AFTER updateResponse (not from the pre-update snapshot) so a waiter
+ * that joined during the resolve is included; once userResponse is set, the
+ * atomic appendGateWaiter can no longer add new waiters (it returns the response
+ * and the joiner is signaled directly), so this read captures the final set.
+ */
+async function resolveAndSignal(
+  request: { id: string; workflowId: string; agentId: string; metadata: unknown },
+  response: string
+): Promise<void> {
+  await repo.updateResponse(request.id, response);
+  const fresh = await repo.findById(request.id);
+  await signalAllWaiters(fresh ?? request, response);
+}
+
+/**
+ * Join an existing pending gate as a waiter. If the gate resolved during the
+ * join race, signal this workflow directly so it isn't parked forever.
+ */
+async function joinGateAsWaiter(
+  existingId: string,
+  data: CreateAttentionRequestInput
+): Promise<void> {
+  const joined = await repo.appendGateWaiter(existingId, data.workflowId, data.agentId);
+  if (!joined.pending && joined.response !== null) {
+    await signalWorkflow(data.workflowId, data.agentId, existingId, joined.response);
+  }
+}
+
 export async function create(data: CreateAttentionRequestInput) {
   log.info('Received attention request', {
     agent_id: data.agentId,
@@ -91,7 +120,7 @@ export async function create(data: CreateAttentionRequestInput) {
   if (data.gateKey !== undefined) {
     const existing = await repo.findPendingByGateKey(data.userId, data.gateKey);
     if (existing !== null) {
-      await addWaiterIfNew(existing, data.workflowId, data.agentId);
+      await joinGateAsWaiter(existing.id, data);
       log.info('Gate deduped onto existing pending request', {
         request_id: existing.id,
         gate_key: data.gateKey,
@@ -115,7 +144,7 @@ export async function create(data: CreateAttentionRequestInput) {
       if ((error as { code?: unknown }).code === 'P2002') {
         const raced = await repo.findPendingByGateKey(data.userId, data.gateKey);
         if (raced !== null) {
-          await addWaiterIfNew(raced, data.workflowId, data.agentId);
+          await joinGateAsWaiter(raced.id, data);
           return toCreateResult(raced, true);
         }
       }
@@ -193,8 +222,7 @@ export async function respond(id: string, userId: string, data: RespondInput) {
     return { success: true, request_id: id };
   }
 
-  await repo.updateResponse(id, data.response);
-  await signalAllWaiters(request, data.response);
+  await resolveAndSignal(request, data.response);
 
   return { success: true, request_id: id };
 }
@@ -223,8 +251,7 @@ export async function reject(id: string, userId: string, message: string | undef
     });
   }
 
-  await repo.updateResponse(id, REJECTED_RESPONSE);
-  await signalAllWaiters(request, REJECTED_RESPONSE);
+  await resolveAndSignal(request, REJECTED_RESPONSE);
 
   return { success: true, request_id: id };
 }
@@ -242,7 +269,6 @@ export async function resolvePendingGateByKey(
   const request = await repo.findPendingByGateKey(userId, gateKey);
   if (request === null) return { resolved: false };
 
-  await repo.updateResponse(request.id, response);
-  await signalAllWaiters(request, response);
+  await resolveAndSignal(request, response);
   return { resolved: true, request_id: request.id };
 }

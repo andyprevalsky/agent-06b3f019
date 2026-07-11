@@ -94,6 +94,23 @@ describe('runGateConnectAction', () => {
     expect(startGmailOAuthApi).not.toHaveBeenCalled();
   });
 
+  it('opens subscription/kyc links through the Mac-app bridge when embedded', async () => {
+    const openExternal = vi.fn();
+    (window as unknown as { api?: unknown }).api = { openExternal };
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const gate: GateMetadata = {
+      gateKey: 'subscription',
+      type: 'subscription',
+      presentation: { title: 'Subscribe', reason: 'x', cta: 'Subscribe · $20/mo' },
+      action: { kind: 'link', url: 'https://checkout.stripe.com/c/session' },
+    };
+
+    await runGateConnectAction(gate, { requestId: 'req-2' });
+
+    expect(openExternal).toHaveBeenCalledWith('https://checkout.stripe.com/c/session');
+    expect(open).not.toHaveBeenCalled();
+  });
+
   it('falls back to the carried url if the fresh Gmail mint fails', async () => {
     startGmailOAuthApi.mockRejectedValue(new Error('oauth down'));
 

@@ -169,8 +169,8 @@ async function cleanup(userId: string): Promise<void> {
   await prisma.plaidTransaction.deleteMany({ where: { userId } });
   await prisma.plaidAccount.deleteMany({ where: { userId } });
   await prisma.plaidItem.deleteMany({ where: { userId } });
-  // source-status minting an unconnected Gmail URL creates a SYNCING gmail
-  // Integration + email credential; clear them alongside the seeded rows.
+  // Defensive: clear any Integration / email-credential rows for this user.
+  // (source-status no longer mints a Gmail OAuth URL at probe time.)
   await prisma.emailIntegrationCredential.deleteMany({ where: { userId } });
   await prisma.integration.deleteMany({ where: { userId } });
   await prisma.userDataDocument.deleteMany({ where: { userId } });
@@ -750,6 +750,22 @@ async function testPersonAndSinceFilters(userId: string): Promise<void> {
     throw new Error(`Expected 0 matches for unknown person, got ${JSON.stringify(res.data)}`);
   }
 
+  // Top-level `person` must also merge on the multi-source `sources` path (a
+  // message-family source selected via `sources`, not singular `source`).
+  // Regression: an unknown person here must still scope to zero — if `person`
+  // were dropped on the plural path the query would return unscoped matches.
+  res = await requestGrep(userId, {
+    pattern: 'Ledger entry',
+    sources: ['messages'],
+    person: 'Nobody Here',
+  });
+  assertStatus(res.status, 200, res.data);
+  if (assertBody(res.data).total_matches !== 0) {
+    throw new Error(
+      `Expected 0 matches for unknown person via sources[], got ${JSON.stringify(res.data)}`
+    );
+  }
+
   // since excludes the 2026-01-01 Aurora message but keeps the 2026-01-03 ledger.
   res = await requestGrep(userId, {
     pattern: 'Aurora budget|Ledger entry',
@@ -784,6 +800,17 @@ async function testSourceSpecificFilterValidation(userId: string): Promise<void>
   });
   assertStatus(res.status, 400, res.data);
   requireInvalidGrepParam(res.data, 'unsupported message filter');
+
+  // Filters against a purely-local `sources` selection (no filterable family)
+  // must be rejected, not silently dropped — the multi-source path had bypassed
+  // rejectUnsupportedFilters entirely.
+  res = await requestGrep(userId, {
+    pattern: 'anything',
+    sources: ['network'],
+    filters: { min_amount: 1 },
+  });
+  assertStatus(res.status, 400, res.data);
+  requireInvalidGrepParam(res.data, 'unsupported local-source filter');
 
   res = await requestGrep(userId, {
     pattern: 'Starbucks',
@@ -1001,7 +1028,9 @@ async function testMultiSourceGrep(userId: string): Promise<void> {
   res = await requestGrep(userId, { pattern: 'Aurora budget', source: 'imessage' });
   assertStatus(res.status, 200, res.data);
   if (assertBody(res.data).total_matches !== 0) {
-    throw new Error(`Expected imessage-only grep to find 0 EMAIL rows, got ${JSON.stringify(res.data)}`);
+    throw new Error(
+      `Expected imessage-only grep to find 0 EMAIL rows, got ${JSON.stringify(res.data)}`
+    );
   }
 
   // email alone must find the same EMAIL row that `messages` finds.
@@ -1013,7 +1042,9 @@ async function testMultiSourceGrep(userId: string): Promise<void> {
   res = await requestGrep(userId, { pattern: 'x', sources: ['email', 'not_a_source'] });
   assertStatus(res.status, 400, res.data);
   if ((res.data as { error?: string }).error !== 'SOURCE_NOT_FOUND') {
-    throw new Error(`Expected SOURCE_NOT_FOUND for bad sources entry, got ${JSON.stringify(res.data)}`);
+    throw new Error(
+      `Expected SOURCE_NOT_FOUND for bad sources entry, got ${JSON.stringify(res.data)}`
+    );
   }
 }
 
@@ -1043,7 +1074,9 @@ async function testSourceStatus(userId: string): Promise<void> {
     network.connected !== true ||
     network.connectUrl !== null
   ) {
-    throw new Error(`Expected local network connected with no connectUrl, got ${JSON.stringify(body)}`);
+    throw new Error(
+      `Expected local network connected with no connectUrl, got ${JSON.stringify(body)}`
+    );
   }
 
   // A non-gmail connector-backed source returns the stub connect URL.
@@ -1067,7 +1100,9 @@ async function testSourceStatus(userId: string): Promise<void> {
     notes.connected !== false ||
     notes.connectUrl !== 'https://roselabs.ai/connect/apple_notes'
   ) {
-    throw new Error(`Expected apple_notes provider source status, got ${JSON.stringify(notesBody)}`);
+    throw new Error(
+      `Expected apple_notes provider source status, got ${JSON.stringify(notesBody)}`
+    );
   }
 
   // Unknown source key → 400, not 500.
