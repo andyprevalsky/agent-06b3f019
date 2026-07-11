@@ -111,7 +111,7 @@ LOCAL_DASH_PORT="8765"
 FLEET_MACHINE_ID=""     # set by run-bench-fleet to pin a per-bench cloned machine.
 OUT_DIR=""              # set by run-bench-fleet to isolate a bench's .context outputs.
 SKIP_CONTROLLER_LOCK="0"  # set by run-bench-fleet (fleet owns one lock for its children).
-NO_OPEN="${NO_OPEN:-0}"   # suppress Chrome auto-open (fleet opens one batch dashboard).
+NO_OPEN="${NO_OPEN:-0}"   # legacy flag; nothing auto-opens a browser anymore (in-app hub).
 
 # ── Arg parsing ──────────────────────────────────────────────────────────────
 while [ $# -gt 0 ]; do
@@ -130,7 +130,7 @@ while [ $# -gt 0 ]; do
         --machine)        FLEET_MACHINE_ID="${2:-}"; shift 2 ;;   # target this machine; caller owns its lifecycle
         --out-dir)        OUT_DIR="${2:-}"; shift 2 ;;            # isolate this run's .context outputs
         --no-lock)        SKIP_CONTROLLER_LOCK="1"; shift ;;      # fleet holds one lock for all its children
-        --no-open)        NO_OPEN="1"; shift ;;                   # serve dashboard/viewer but don't auto-open Chrome (fleet opens the batch dashboard)
+        --no-open)        NO_OPEN="1"; shift ;;                   # legacy no-op (nothing auto-opens a browser anymore)
         --model)          WMH_MODEL_NAME="${2:-}"; shift 2 ;;
         --vm-size)        VM_SIZE="${2:-}"; shift 2 ;;
         --vm-memory)      VM_MEMORY="${2:-}"; shift 2 ;;
@@ -926,9 +926,7 @@ PY
     if [ "${NO_OPEN:-0}" = "1" ]; then
         echo "   archived frontend live (batch controller opens the aggregate): $archive_url"
     elif command -v open >/dev/null 2>&1; then
-        open -na "Google Chrome" --args --new-window "$archive_url" >/dev/null 2>&1 \
-            && echo "   opened archived frontend: $archive_url" \
-            || echo "   archived frontend: $archive_url"
+        echo "   view: $archive_url (or use the in-app Benchmarks tab)"
     else
         echo "   archived frontend: $archive_url"
     fi
@@ -1183,7 +1181,7 @@ if [ "$DASHBOARD" = "1" ] && [ -n "$LIVE_BACKEND_PORT" ]; then
             > "$OUT_DIR/.upstream.json" 2>/dev/null || true
 fi
 
-# ── 3. Mirror the live dashboard to the Mac + open it in Chrome ─────────────
+# ── 3. Mirror the live dashboard to the Mac (URL printed; no auto-open) ─────
 # The on-box driver writes $CONTEXT_DIR/report-card.json. We mirror that JSON to
 # a local static dashboard instead of using `flyctl proxy`; proxy can connect to
 # the wrong internal address or reset while the machine is healthy, which leaves
@@ -1316,9 +1314,7 @@ PY
     if [ "${NO_OPEN:-0}" = "1" ]; then
         echo "   dashboard live (batch controller opens the aggregate): $DASH_URL"
     elif command -v open >/dev/null 2>&1; then
-        open -na "Google Chrome" --args --new-window "$DASH_URL" >/dev/null 2>&1 \
-            && echo "   opened $DASH_URL in a new Chrome window" \
-            || echo "   could not auto-open Chrome; open manually: $DASH_URL"
+        echo "   view: $DASH_URL (or use the in-app Benchmarks tab)"
     else
         echo "   dashboard live (open manually): $DASH_URL"
     fi

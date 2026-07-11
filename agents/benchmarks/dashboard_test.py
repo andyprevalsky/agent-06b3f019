@@ -391,13 +391,13 @@ def test_maybe_launch_dashboard_disabled_returns_none(tmp_path):
     assert not (tmp_path / DASHBOARD_ASSET_NAME).exists()
 
 
-def test_maybe_launch_dashboard_starts_server_and_opens_browser(tmp_path, monkeypatch):
+def test_maybe_launch_dashboard_optin_opens_browser(tmp_path, monkeypatch):
     import benchmarks.dashboard as dash
 
     opened = []
     monkeypatch.setattr(dash, "open_in_chrome", lambda url: opened.append(url) or True)
     logs = []
-    server = maybe_launch_dashboard(tmp_path, enabled=True, stream=logs.append)
+    server = maybe_launch_dashboard(tmp_path, enabled=True, open_browser=True, stream=logs.append)
     assert server is not None
     try:
         assert (tmp_path / DASHBOARD_ASSET_NAME).exists()
@@ -408,12 +408,12 @@ def test_maybe_launch_dashboard_starts_server_and_opens_browser(tmp_path, monkey
         server.stop()
 
 
-def test_maybe_launch_dashboard_no_open_browser(tmp_path, monkeypatch):
+def test_maybe_launch_dashboard_default_does_not_open_browser(tmp_path, monkeypatch):
     import benchmarks.dashboard as dash
 
     opened = []
     monkeypatch.setattr(dash, "open_in_chrome", lambda url: opened.append(url) or True)
-    server = maybe_launch_dashboard(tmp_path, enabled=True, open_browser=False, stream=lambda _m: None)
+    server = maybe_launch_dashboard(tmp_path, enabled=True, stream=lambda _m: None)
     assert server is not None
     try:
         assert opened == []
@@ -426,7 +426,7 @@ def test_maybe_launch_dashboard_logs_when_chrome_fails(tmp_path, monkeypatch):
 
     monkeypatch.setattr(dash, "open_in_chrome", lambda url: False)
     logs = []
-    server = maybe_launch_dashboard(tmp_path, enabled=True, stream=logs.append)
+    server = maybe_launch_dashboard(tmp_path, enabled=True, open_browser=True, stream=logs.append)
     assert server is not None
     try:
         assert any("could not auto-open" in line for line in logs)

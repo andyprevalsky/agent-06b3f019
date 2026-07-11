@@ -219,13 +219,15 @@ def maybe_launch_dashboard(
     context_dir: os.PathLike | str,
     *,
     enabled: bool = True,
-    open_browser: bool = True,
+    open_browser: bool = False,
     stream=print,
 ) -> Optional[DashboardServer]:
     """Single entry point local.py calls on run start.
 
-    Writes the dashboard asset, starts the HTTP server, and (best-effort) opens
-    Chrome. Returns the running DashboardServer, or None when disabled/failed.
+    Writes the dashboard asset and starts the HTTP server; the URL is printed
+    but NO browser window is opened (runs are viewed in the in-app Benchmarks
+    tab — pass open_browser=True only for an explicit opt-in).
+    Returns the running DashboardServer, or None when disabled/failed.
 
     `enabled` is the caller's resolved gate (already ANDed with `dashboard_enabled`
     at the call site); passing enabled=False short-circuits to None.

@@ -20,6 +20,7 @@ ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$ROOT_DIR"
 
 HUB_URL="${HUB_URL:-http://localhost:3001}"
+RUN_BENCH_BIN="${RUN_BENCH_BIN:-scripts/run-bench}"   # test hook: stub the runner
 POLL_INTERVAL="${POLL_INTERVAL:-10}"
 LOCAL_RUNNER=0
 ONCE=0
@@ -192,9 +193,9 @@ process_request() {  # process_request <request_json>
         runner_args+=(--sim-on "$sim_on")
     fi
 
-    echo "   launching: scripts/run-bench ${runner_args[*]} (log: $log_file)"
+    echo "   launching: $RUN_BENCH_BIN ${runner_args[*]} (log: $log_file)"
     local exit_code=0
-    scripts/run-bench "${runner_args[@]}" > "$log_file" 2>&1 || exit_code=$?
+    "$RUN_BENCH_BIN" "${runner_args[@]}" > "$log_file" 2>&1 || exit_code=$?
     kill "$snap_pid" 2>/dev/null || true
 
     # Final bundle: newest run record produced after launch (local or fleet).

@@ -13,7 +13,8 @@
 #
 # This is the DEFAULT cloud-bench path (scripts/run-bench delegates here). Autoscaling
 # is ON by default and the whole run is shown in ONE aggregated batch dashboard,
-# auto-opened in Chrome, covering EVERY bench in the run (queued → running → done).
+# served on the central hub (no browser window is opened — view runs in the
+# in-app Benchmarks tab, or open the printed URL manually).
 #
 # Usage:
 #   bash scripts/run-bench <bench> [<bench>...] [flags]        # via the common entry
@@ -532,7 +533,7 @@ done
 echo ""
 echo "⏳ ${#CHILD_PIDS[@]} isolated bench machine(s) running."
 
-# ── ONE aggregated batch dashboard (opened in Chrome) ───────────────────────
+# ── ONE aggregated batch dashboard (served; never auto-opens a browser) ─────
 # Merge every bench's live report-card.json into a single card (N per_task rows,
 # summed cost + tokens) and serve it on DASH_BASE. Each row's agent_url already
 # points at its own bench's /open-agent (localhost:<bench-port>), so clicking
@@ -667,10 +668,8 @@ else
     printf '%s\n' "$UNIFIED_DASH_PID" > "$HUB_CTX_DIR/agent-link-server.pid"
     for _ in $(seq 1 20); do curl -fsS "$HUB_URL" >/dev/null 2>&1 && break; sleep 1; done
 fi
-if [ "$HUB_WAS_UP" = "0" ] && command -v open >/dev/null 2>&1; then
-    open -na "Google Chrome" --args --new-window "$HUB_URL" >/dev/null 2>&1 \
-        && echo "📊 opened the central hub: $HUB_URL" \
-        || echo "📊 central hub (open manually): $HUB_URL"
+if [ "$HUB_WAS_UP" = "0" ]; then
+    echo "📊 central hub: $HUB_URL (in-app: Benchmarks tab)"
 fi
 echo "   this run: $RUN_URL"
 echo "   per-bench viewers: $(for j in "${!CHILD_PORT[@]}"; do printf '%s→:%s ' "${CHILD_BENCH[$j]}" "${CHILD_PORT[$j]}"; done)"

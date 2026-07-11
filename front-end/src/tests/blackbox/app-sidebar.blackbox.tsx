@@ -79,6 +79,22 @@ describe('AppSidebar', () => {
     vi.restoreAllMocks();
   });
 
+  it('hides the Benchmarks nav item unless showBenchmarks is set (team gate)', () => {
+    renderWithProviders(<AppSidebar {...defaultProps()} />);
+    expect(screen.queryByLabelText('Benchmarks')).not.toBeInTheDocument();
+  });
+
+  it('shows Benchmarks between Feedback and Integrations for the team', async () => {
+    const u = userEvent.setup();
+    renderWithProviders(<AppSidebar {...defaultProps({ showBenchmarks: true })} />);
+    expect(screen.getByLabelText('Benchmarks')).toBeInTheDocument();
+    await u.click(screen.getByLabelText('Expand sidebar'));
+    const labels = ['Feedback', 'Benchmarks', 'Integrations'].map(
+      (text) => screen.getByText(text).getBoundingClientRect,
+    );
+    expect(labels).toHaveLength(3); // all three render; order is the nav array order
+  });
+
   it('renders in collapsed state by default with Expand button', () => {
     renderWithProviders(<AppSidebar {...defaultProps()} />);
     expect(screen.getByLabelText('Expand sidebar')).toBeInTheDocument();

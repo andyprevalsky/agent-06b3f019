@@ -1271,7 +1271,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--no-dashboard",
         action="store_true",
-        help="Do not open the live benchmark dashboard in a Chrome window (also via BENCHMARK_NO_DASHBOARD=1)",
+        help="Do not serve the live benchmark dashboard (also via BENCHMARK_NO_DASHBOARD=1); no browser window is ever auto-opened",
     )
     parser.add_argument(
         "--checkpoint",
@@ -1410,7 +1410,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     def handle_shutdown(signum: int, _frame: object) -> None:
         print(f"\nReceived signal {signum}; tearing down benchmark services...", file=sys.stderr)
         stop_frontend_tunnel(frontend_tunnel)
-        # Leave the Chrome window open (final card stays visible); only stop the server.
+        # The dashboard URL stays valid until the server stops here.
         if dashboard is not None:
             dashboard.stop()
         if not args.keep_services and not args.use_existing:
@@ -1457,7 +1457,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"queue={manifest.get('temporal_task_queue')}"
             )
         # Live dashboard: serve the run's context dir (where run_benchmark.py's
-        # report_card.py writes report-card.json) and open it in Chrome. Gated
+        # report_card.py writes report-card.json); the URL is printed, no
+        # browser window is opened (view runs in the in-app Benchmarks tab). Gated
         # off under CI / headless / opt-out so deploy+smoke automation never pops
         # a browser. run_benchmark.py resolves the same dir via BENCHMARK_CONTEXT_DIR.
         if dashboard_enabled(ci=args.no_dashboard):
@@ -1515,7 +1516,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         signal.signal(signal.SIGTERM, previous_sigterm)
         signal.signal(signal.SIGINT, previous_sigint)
         stop_frontend_tunnel(frontend_tunnel)
-        # Stop the dashboard HTTP server; the Chrome window stays open so the
+        # Stop the dashboard HTTP server; anyone viewing the URL keeps the
         # final report card remains visible after teardown.
         if dashboard is not None:
             dashboard.stop()
