@@ -217,7 +217,8 @@ async def _cache_get_record_batched(key: str) -> CacheRecord:
 async def _flush_pending_gets() -> None:
     await asyncio.sleep(_GET_BATCH_DELAY_S)
     while True:
-        _pending_gets_batch_tasks.difference_update(task for task in _pending_gets_batch_tasks if task.done())
+        done_tasks = [task for task in list(_pending_gets_batch_tasks) if task.done()]
+        _pending_gets_batch_tasks.difference_update(done_tasks)
         while len(_pending_gets_batch_tasks) >= max(1, _GET_BATCH_MAX_IN_FLIGHT):
             done, _pending = await asyncio.wait(_pending_gets_batch_tasks, return_when=asyncio.FIRST_COMPLETED)
             _pending_gets_batch_tasks.difference_update(done)
