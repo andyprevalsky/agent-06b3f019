@@ -16,6 +16,10 @@ import { getSession } from '@/lib/supabase';
 import { BACKEND_URL } from './config';
 import type { UserSettingsResponse } from './types';
 
+/** Subscribe to app deep links that request a specific agent. */
+export const subscribeToOpenAgent = (callback: (agentId: string) => void): (() => void) =>
+  window.api.onOpenAgent(callback);
+
 /**
  * Mirror completed-onboarding state into the Electron main process.
  *
