@@ -91,6 +91,39 @@ export const saveCustomization = async (
   }
 };
 
+/**
+ * Waitlist gate: whether the signed-in user still needs an invite code.
+ * Server-side state (User.usedInviteCode) — survives app relaunches.
+ */
+export const checkNeedsInviteCode = async (): Promise<boolean> => {
+  const token = requireToken();
+  const response = await fetch(`${getBackendUrl()}/api/invite-codes/check`, {
+    headers: authHeader(token),
+  });
+  if (!response.ok) {
+    throw new Error('Failed to check invite code status');
+  }
+  const payload = (await response.json()) as { needsInviteCode?: boolean };
+  return payload.needsInviteCode === true;
+};
+
+/** Redeem an invite code; throws with the server's message on rejection. */
+export const redeemInviteCode = async (inviteCode: number): Promise<void> => {
+  const token = requireToken();
+  const response = await fetch(`${getBackendUrl()}/api/invite-codes/use`, {
+    method: 'POST',
+    headers: {
+      ...authHeader(token),
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ inviteCode }),
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(payload?.error ?? 'Invalid invite code');
+  }
+};
+
 export const fetchIntegrations = async (): Promise<Integration[]> => {
   const token = maybeToken();
   if (token === null) return [];
