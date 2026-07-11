@@ -6,6 +6,7 @@
  */
 
 import { createStreamingCompletion, markCacheable } from '../rose';
+import { StructuredOutputAccumulator } from '../rose/structuredOutput';
 import { agentFastMode, cacheGet, cacheSet } from '../fastCacheStore';
 import { goalHash } from '../fastCacheNormalizeCore';
 import { contentKey } from '../fastCacheNormalizeKeys';
@@ -464,6 +465,7 @@ export async function callGeneratorLlm(params: {
   // Track reasoning and JSON content separately (like agent worker)
   let accumulatedReasoning = ''; // From delta.reasoning (thinking models)
   let accumulatedJson = ''; // From delta.content (JSON structure)
+  const structuredOutput = new StructuredOutputAccumulator();
   let sequence = 1;
   let lastStreamedText = ''; // What we've sent to FE so far
   let chunkCount = 0;
@@ -512,7 +514,8 @@ export async function callGeneratorLlm(params: {
     // Handle JSON content (delta.content)
     const contentDelta = delta?.content || '';
     if (contentDelta) {
-      accumulatedJson += contentDelta;
+      structuredOutput.addCompletionChunk(chunk);
+      accumulatedJson = structuredOutput.currentText();
     }
 
     // Extract streamable text (combines reasoning + response fields)
@@ -557,7 +560,7 @@ export async function callGeneratorLlm(params: {
   }
 
   // Combine for parsing - use accumulatedJson for JSON parsing
-  const fullJson = accumulatedJson;
+  const fullJson = structuredOutput.finalText();
 
   // Fast Mode: record the generator response so an identical re-ask replays it.
   if (

@@ -1,3 +1,4 @@
-"""Constants for the request-payment-card domain."""
+"""Request-payment-card domain configuration."""
 
-DEFAULT_CURRENCY = "USD"
+LOOKUP_TIMEOUT_SECONDS = 30.0
+MINT_TIMEOUT_SECONDS = 60.0

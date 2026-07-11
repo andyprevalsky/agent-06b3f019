@@ -24,29 +24,30 @@ Failure modes raise typed errors from `errors.py`. The orchestration in
 propagating typed errors through the deadline.
 """
 
+from providers.rose.client import RoseClient
 from providers.rose.errors import (
     RoseAllFailed,
     RoseAuthError,
     RoseDeadlineError,
     RoseError,
     RoseInvalidRequest,
-    RoseRefusalError,
     RoseRateLimitError,
+    RoseRefusalError,
     RoseServerError,
     RoseStallError,
     RoseStepError,
 )
-from providers.rose.client import RoseClient
 from providers.rose.legacy_adapter import (
-    claude_auth_from_token,
     classify_claude_token_error,
     classify_gpt_token_error,
+    claude_auth_from_token,
     gpt_auth_from_token,
     is_rose_model,
     pool_for_model,
 )
 from providers.rose.pools import POOL_REGISTRY, PoolName, PoolSpec, all_pool_names, get_pool
 from providers.rose.streaming import parse_anthropic_sse, parse_openai_sse, parse_responses_sse
+from providers.rose.structured_output import StructuredOutputAccumulator, StructuredOutputCardinalityError
 from providers.rose.types import (
     ChunkKind,
     ClaudeAuthContext,
@@ -98,6 +99,8 @@ __all__ = [
     "parse_anthropic_sse",
     "parse_openai_sse",
     "parse_responses_sse",
+    "StructuredOutputAccumulator",
+    "StructuredOutputCardinalityError",
     # types
     "ChunkKind",
     "ClaudeAuthContext",

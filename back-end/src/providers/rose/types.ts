@@ -79,6 +79,10 @@ export interface CompletionChunk {
       content?: string;
       reasoning?: string;
       role?: string;
+      item_id?: string;
+      output_index?: number;
+      content_index?: number;
+      phase?: string;
       tool_calls?: Array<{
         id: string;
         type: 'function';
@@ -109,13 +113,20 @@ export interface CompletionChunk {
 export type ChunkKind =
   'metadata' | 'content' | 'tool_call' | 'reasoning' | 'codex_reasoning_item' | 'usage' | 'done';
 
+export interface OutputProvenance {
+  item_id: string;
+  output_index: number;
+  content_index: number;
+  phase: string;
+}
+
 export type RoseStreamChunk =
   | {
       kind: 'metadata';
       data: { actual_model: string; pool_name: string; request_id: string };
     }
-  | { kind: 'content'; data: { text: string } }
-  | { kind: 'reasoning'; data: { text: string } }
+  | { kind: 'content'; data: { text: string } & OutputProvenance }
+  | { kind: 'reasoning'; data: { text: string } & OutputProvenance }
   | { kind: 'tool_call'; data: { id: string; name: string; arguments: string } }
   | { kind: 'codex_reasoning_item'; data: Record<string, unknown> }
   | {

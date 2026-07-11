@@ -47,8 +47,8 @@ from providers.rose.errors import (
     RoseError,
     RoseInvalidRequest,
     RosePaymentRequiredError,
-    RoseRefusalError,
     RoseRateLimitError,
+    RoseRefusalError,
     RoseServerError,
     RoseStallError,
 )
@@ -60,6 +60,7 @@ from providers.rose.schema import (
     build_anthropic_tools_from_response_model,
     build_openai_response_format,
 )
+from providers.rose.structured_output import StructuredOutputAccumulator
 from providers.rose.types import (
     ChunkKind,
     ClaudeAuthContext,
@@ -651,9 +652,7 @@ class RoseClient:
                             "gpt": gpt_auth is not None,
                         },
                         "candidate_models": {
-                            "claude_auth": (
-                                None if _exclude_anthropic_family else pool_spec.claude_auth_model
-                            ),
+                            "claude_auth": (None if _exclude_anthropic_family else pool_spec.claude_auth_model),
                             "gpt_auth": pool_spec.gpt_auth_model,
                             "waterfall": [
                                 model
@@ -1078,10 +1077,7 @@ class RoseClient:
                         return
                     except _FallThrough as ft:
                         cause = ft.__cause__
-                        if (
-                            isinstance(cause, RoseStallError)
-                            and stall_retry_idx < len(_STALL_TTFT_MULTIPLIERS)
-                        ):
+                        if isinstance(cause, RoseStallError) and stall_retry_idx < len(_STALL_TTFT_MULTIPLIERS):
                             stall_retry_idx += 1
                             next_ttft_s = ttft_timeout_s * _STALL_TTFT_MULTIPLIERS[stall_retry_idx - 1]
                             logger.info(
@@ -1101,18 +1097,10 @@ class RoseClient:
                 assert ft is not None
                 cause = ft.__cause__
                 if direct_auth.token_type == "claude":
-                    token_error = (
-                        classify_claude_token_error(cause)
-                        if isinstance(cause, RoseError)
-                        else "server_error"
-                    )
+                    token_error = classify_claude_token_error(cause) if isinstance(cause, RoseError) else "server_error"
                     claude_token_error = token_error
                 else:
-                    token_error = (
-                        classify_gpt_token_error(cause)
-                        if isinstance(cause, RoseError)
-                        else "server_error"
-                    )
+                    token_error = classify_gpt_token_error(cause) if isinstance(cause, RoseError) else "server_error"
                     gpt_token_error = token_error
                 direct_token_errors[direct_auth.token_type] = token_error
                 logger.info(
@@ -1247,11 +1235,7 @@ class RoseClient:
             # out-of-credits/bad-key before first content, back it off (shared
             # DB cooldown) and fall through.
             anthropic_api_key = (load_config().anthropic.api_key or "").strip()
-            if (
-                not _exclude_anthropic_family
-                and anthropic_api_key
-                and not await _anthropic_api_key_on_cooldown()
-            ):
+            if not _exclude_anthropic_family and anthropic_api_key and not await _anthropic_api_key_on_cooldown():
                 active_route = "anthropic_apikey"
                 api_yielded_any = False
                 try:
@@ -1553,6 +1537,7 @@ class RoseClient:
         """Consume the stream into a single `RoseResponse` — convenience for
         non-streaming callers who don't care about incremental chunks."""
         result = RoseResponse()
+        structured_output = StructuredOutputAccumulator() if response_model is not None else None
         async for chunk in self.complete(
             pool=pool,
             messages=messages,
@@ -1572,7 +1557,12 @@ class RoseClient:
             dump_context=dump_context,
             dump_extra=dump_extra,
         ):
-            _fold(result, chunk)
+            if chunk.kind == "content" and structured_output is not None:
+                structured_output.add_chunk(chunk)
+            else:
+                _fold(result, chunk)
+        if structured_output is not None and structured_output.has_content():
+            result.content = structured_output.final_text()
         return result
 
 
@@ -1588,10 +1578,10 @@ def _fold(result: RoseResponse, chunk: StreamChunk) -> None:
             result.claude_token_error = chunk.data["claude_token_error"]
         if "gpt_token_error" in chunk.data:
             result.gpt_token_error = chunk.data["gpt_token_error"]
-    elif kind == "content":
-        result.content += chunk.data.get("text", "")
     elif kind == "reasoning":
         result.reasoning += chunk.data.get("text", "")
+    elif kind == "content":
+        result.content += chunk.data.get("text", "")
     elif kind == "codex_reasoning_item":
         result.codex_reasoning_items.append(dict(chunk.data))
     elif kind == "tool_call":

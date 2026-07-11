@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://roselabs.ai/contracts/llm-stream-chunk/v1",
+  "title": "Rose normalized LLM stream chunk",
+  "type": "object",
+  "required": ["kind", "data"],
+  "properties": {
+    "kind": {
+      "enum": [
+        "metadata",
+        "content",
+        "reasoning",
+        "tool_call",
+        "codex_reasoning_item",
+        "usage",
+        "done"
+      ]
+    },
+    "data": { "type": "object" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "kind": { "enum": ["content", "reasoning"] } }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": [
+              "text",
+              "item_id",
+              "output_index",
+              "content_index",
+              "phase"
+            ],
+            "properties": {
+              "text": { "type": "string" },
+              "item_id": { "type": "string", "minLength": 1 },
+              "output_index": { "type": "integer", "minimum": 0 },
+              "content_index": { "type": "integer", "minimum": 0 },
+              "phase": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    }
+  ],
+  "additionalProperties": false
+}

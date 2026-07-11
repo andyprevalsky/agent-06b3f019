@@ -212,7 +212,19 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     if (chunk.kind === 'content') {
       outputParts.push(chunk.data.text);
       return {
-        choices: [{ index: 0, delta: { content: chunk.data.text }, finish_reason: null }],
+        choices: [
+          {
+            index: 0,
+            delta: {
+              content: chunk.data.text,
+              item_id: chunk.data.item_id,
+              output_index: chunk.data.output_index,
+              content_index: chunk.data.content_index,
+              phase: chunk.data.phase,
+            },
+            finish_reason: null,
+          },
+        ],
         requested_model: opts.options.model,
         actual_model: metadata.actual_model,
         pool_name: metadata.pool_name,
@@ -222,7 +234,19 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     if (chunk.kind === 'reasoning') {
       reasoningParts.push(chunk.data.text);
       return {
-        choices: [{ index: 0, delta: { reasoning: chunk.data.text }, finish_reason: null }],
+        choices: [
+          {
+            index: 0,
+            delta: {
+              reasoning: chunk.data.text,
+              item_id: chunk.data.item_id,
+              output_index: chunk.data.output_index,
+              content_index: chunk.data.content_index,
+              phase: chunk.data.phase,
+            },
+            finish_reason: null,
+          },
+        ],
         requested_model: opts.options.model,
         actual_model: metadata.actual_model,
         pool_name: metadata.pool_name,

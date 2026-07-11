@@ -1,7 +1,5 @@
-"""Runtime boundary for the request-payment-card domain.
+"""Request-payment-card domain entry points."""
 
-Payment approval is orchestrated by the browser workflow that owns the active
-session. Public helper and activity access is exposed through
-``tools.request_payment_card`` so other domains do not import this domain's
-internal layers directly.
-"""
+from .service import build_payment_question, normalize_payment_payload
+
+__all__ = ["build_payment_question", "normalize_payment_payload"]

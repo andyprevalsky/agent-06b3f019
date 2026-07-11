@@ -17,7 +17,7 @@
 import { useEffect, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { getErrorMessageOrFallback } from '../../../../shared/utils/error';
-import { checkNeedsInviteCode, redeemInviteCode } from '../api';
+import { useOnboardingWaitlistApi } from '../hooks';
 
 const INVITE_CODE_LENGTH = 6;
 
@@ -74,6 +74,7 @@ const WaitlistView = ({
 );
 
 const OnboardingWaitlist = ({ onComplete }: OnboardingWaitlistProps): JSX.Element => {
+  const { checkNeedsInviteCode, redeemInviteCode } = useOnboardingWaitlistApi();
   const [checking, setChecking] = useState(true);
   const [code, setCode] = useState('');
   const [submitting, setSubmitting] = useState(false);

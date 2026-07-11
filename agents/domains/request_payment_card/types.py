@@ -1,16 +1,5 @@
-"""Type definitions for the request-payment-card domain."""
+"""Request-payment-card domain types."""
 
-from typing import Any, TypedDict
+from typing import Any, Dict
 
-
-class PaymentPayload(TypedDict):
-    """Normalized purchase data passed across the approval boundary."""
-
-    userId: str
-    merchant: str
-    currency: str
-    lineItems: list[dict[str, Any]]
-    fees: list[dict[str, Any]]
-    subtotalCents: int
-    totalCents: int
-    fingerprint: str
+PaymentPayload = Dict[str, Any]

@@ -52,7 +52,7 @@ The symptom is where you NOTICE the bug. The root cause could be upstream, downs
 
 ## Step 3: Create a fast isolated reproduction
 
-Once you have found the most upstream suspicious point, reproduce the failure in the smallest environment that still exercises the same mechanism. This is required before writing the fix whenever the bug can be isolated without losing the behavior under investigation.
+Once you have found the most upstream suspicious point, reproduce the failure locally in the smallest environment that still exercises the same mechanism. This is required before the diagnosis may be called an RCA, whether or not a fix will be written in the current task.
 
 The isolated reproduction should:
 
@@ -62,7 +62,19 @@ The isolated reproduction should:
 - Fail before the fix and pass after the fix
 - Preserve the exact behavior being diagnosed, not a similar but different bug
 
-If an isolated reproduction is not feasible, state why explicitly and use the narrowest available integration test or benchmark rerun instead. Do not use the benchmark itself as the only reproduction when a smaller one can prove the same causal mechanism.
+If a unit-level reproduction would lose the behavior under investigation, use the narrowest local integration test, recorded-response replay, or benchmark checkpoint that preserves it. Do not use a full benchmark as the only reproduction when a smaller local test can prove the same causal mechanism.
+
+### RCA completion gate
+
+An RCA is **incomplete** until all of the following are true:
+
+1. A deterministic reproduction artifact exists locally (an automated test, fixture replay, or executable repro script).
+2. The artifact exercises the same code path or first-bad boundary identified by the runtime evidence.
+3. The artifact has actually been run locally and demonstrates the observed failure on the buggy code.
+4. The RCA records the exact command and the failure output or assertion that proves the reproduction.
+5. If a fix is made, the same artifact passes after the fix without weakening its assertion.
+
+There is no “not feasible” exception that turns unreproduced findings into a completed RCA. If production-only or third-party state cannot be recreated directly, capture and replay that state at the owned boundary. If the required request, response, event stream, or state was not captured and therefore cannot be replayed, classify the result as **preliminary findings plus an observability gap**, add the missing capture, and keep the RCA open. Do not present a hypothesis, code inspection, production correlation, or external-state explanation as a completed RCA without an executed local reproduction.
 
 ### Step 3a: Reconstruct failing LLM calls
 
@@ -76,10 +88,9 @@ Required reconstruction evidence:
 - Generation config that can affect behavior, including reasoning budget, max tokens, response schema, tool choice, cache controls, and timeout/deadline settings
 - The captured failure span/log line, including provider, request/span id, duration, timeout type, and any token/auth rotation metadata
 
-The RCA is incomplete until you either:
+The RCA is incomplete until you re-run the reconstructed call through the same local client path and reproduce the failure, then iteratively reduce or vary the request to identify which input/config/provider condition makes it fail.
 
-1. Re-run the reconstructed call through the same local client path and reproduce the failure, then iteratively reduce or vary the request to identify which input/config/provider condition makes it fail; or
-2. Prove the failure cannot be reproduced locally because it depends on an unavailable external state, such as an expired provider token, provider incident, or production-only compute-token lease, and document the narrowest replay that was attempted plus the exact missing state.
+Unavailable external state does not waive the local-reproduction requirement. Replay the captured provider response, token error, timeout sequence, or lease state through the same local boundary. If the evidence needed for that replay was not captured, the result remains preliminary until the observability gap is fixed and a subsequent occurrence or controlled replay provides the missing artifact.
 
 Do not classify an LLM issue as "model/provider timeout" and stop there. Treat the LLM request as data: preserve it, replay it, diff it against nearby successful calls, and identify whether the failing condition is in our prompt/context/schema/config, our provider-routing/auth code, or a third-party service state.
 
