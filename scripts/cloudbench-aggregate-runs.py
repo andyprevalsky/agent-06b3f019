@@ -56,7 +56,7 @@ def aggregate(fleet_dir: Path) -> dict:
             "passed": passed,
             "failed": len(tasks) - passed,
             "total_cost_cents": round(costs, 4),
-            "total_duration_seconds": round(max(durations, default=0), 1),
+            "total_duration_seconds": round(sum(durations), 1),
             "pass_rate": passed / max(1, len(tasks)),
             "cache_read_input_tokens": cache_read,
             "cache_creation_input_tokens": cache_create,

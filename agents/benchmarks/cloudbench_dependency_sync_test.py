@@ -59,6 +59,40 @@ def test_refreshes_stale_volume_dependency_trees(tmp_path: Path) -> None:
     assert (repo / "agents/venv/.cloudbench-deps-fingerprint").is_file()
 
 
+def test_relocates_donor_virtualenv_text_prefixes_after_sync(tmp_path: Path) -> None:
+    donor = tmp_path / "donor"
+    repo = tmp_path / "repo"
+    _write_manifests(donor)
+    _write_manifests(repo)
+    (donor / "node_modules/current-package").mkdir(parents=True)
+    donor_bin = donor / "agents/venv/bin"
+    donor_bin.mkdir(parents=True)
+    (donor_bin / "python").write_text("current")
+    (donor_bin / "example-tool").write_text(
+        f"#!{donor / 'agents/venv/bin/python'}\nprint('ok')\n"
+    )
+    (donor / "agents/venv/pyvenv.cfg").write_text(
+        f"command = python -m venv {donor / 'agents/venv'}\n"
+    )
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT), str(donor), str(repo)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    repo_prefix = str(repo / "agents/venv")
+    assert (repo / "agents/venv/bin/example-tool").read_text().splitlines()[0] == (
+        f"#!{repo_prefix}/bin/python"
+    )
+    assert repo_prefix in (repo / "agents/venv/pyvenv.cfg").read_text()
+    assert str(donor / "agents/venv") not in (
+        repo / "agents/venv/pyvenv.cfg"
+    ).read_text()
+
+
 def test_rejects_branch_whose_manifests_do_not_match_donor_image(tmp_path: Path) -> None:
     donor = tmp_path / "donor"
     repo = tmp_path / "repo"
@@ -247,6 +281,14 @@ def test_fetch_ref_never_falls_back_to_stale_fetch_head(tmp_path: Path) -> None:
     assert after == before
 
 
+def test_fetch_ref_keeps_auth_header_out_of_git_argv() -> None:
+    fetch = FETCH_SCRIPT.read_text()
+
+    assert "GIT_CONFIG_GLOBAL" in fetch
+    assert 'chmod 600 "$auth_config"' in fetch
+    assert 'fetch_args=(-c "http.extraheader=$auth")' not in fetch
+
+
 def test_snapshot_selector_prefers_new_completed_incremental_snapshot() -> None:
     spec = importlib.util.spec_from_file_location("cloudbench_select_snapshot", SNAPSHOT_SCRIPT)
     assert spec is not None and spec.loader is not None
@@ -317,3 +359,4 @@ def test_fleet_aggregate_contains_every_isolated_task(tmp_path: Path) -> None:
     assert aggregated["summary"]["total"] == 2
     assert aggregated["summary"]["passed"] == 1
     assert aggregated["summary"]["failed"] == 1
+    assert aggregated["summary"]["total_duration_seconds"] == 30

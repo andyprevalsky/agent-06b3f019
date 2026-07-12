@@ -34,13 +34,48 @@ sync_tree() {
     local label="$1" donor_tree="$2" repo_tree="$3" expected="$4"
     local marker="$repo_tree/.cloudbench-deps-fingerprint"
     local installed=""
+    SYNC_TREE_REFRESHED=0
     [ -f "$marker" ] && installed="$(cat "$marker" 2>/dev/null || true)"
     if [ ! -d "$repo_tree" ] || [ "$installed" != "$expected" ]; then
         echo "[cloudbench] refreshing baked $label dependencies → $repo_tree"
         mkdir -p "$repo_tree"
         rsync -a --delete "$donor_tree/" "$repo_tree/"
         printf '%s\n' "$expected" > "$marker"
+        SYNC_TREE_REFRESHED=1
     fi
+}
+
+relocate_venv() {
+    local donor_tree="$1" repo_tree="$2"
+    python3 - "$donor_tree" "$repo_tree" <<'PY'
+import os
+import pathlib
+import sys
+
+donor = os.fsencode(os.path.abspath(sys.argv[1]))
+repo = os.fsencode(os.path.abspath(sys.argv[2]))
+root = pathlib.Path(sys.argv[2])
+rewritten = 0
+for path in root.rglob("*"):
+    if path.is_symlink():
+        target = os.readlink(path)
+        target_bytes = os.fsencode(target)
+        if donor in target_bytes:
+            path.unlink()
+            path.symlink_to(os.fsdecode(target_bytes.replace(donor, repo)))
+            rewritten += 1
+        continue
+    if not path.is_file():
+        continue
+    data = path.read_bytes()
+    if donor not in data:
+        continue
+    if b"\0" in data:
+        raise SystemExit(f"binary venv file contains donor prefix and cannot be relocated safely: {path}")
+    path.write_bytes(data.replace(donor, repo))
+    rewritten += 1
+print(f"[cloudbench] relocated {rewritten} Python venv path(s) to {root}")
+PY
 }
 
 NODE_MANIFESTS=(
@@ -76,6 +111,9 @@ if [ "$installed_python" != "$repo_python" ]; then
         exit 1
     fi
     sync_tree "Python" "$DEPS_DIR/agents/venv" "$REPO_DIR/agents/venv" "$repo_python"
+    if [ "$SYNC_TREE_REFRESHED" = "1" ]; then
+        relocate_venv "$DEPS_DIR/agents/venv" "$REPO_DIR/agents/venv"
+    fi
 fi
 
 # npm workspaces hoist runtime packages to the root. These marker directories
