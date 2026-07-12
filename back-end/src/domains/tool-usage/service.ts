@@ -109,6 +109,9 @@ export async function getToolUsageForAgent(
 
   // Aggregate token counts (only from LLM-type usage items)
   let totalTokens = 0;
+  let llmCallCount = 0;
+  let tokensIn = 0;
+  let tokensOut = 0;
   let cacheReadInputTokens = 0;
   let cacheCreationInputTokens = 0;
   for (const usage of toolUsages) {
@@ -116,8 +119,15 @@ export async function getToolUsageForAgent(
     const items = usage.usageItems as UsageItem[];
     for (const item of items) {
       if (item.type === 'llm') {
+        llmCallCount += 1;
         if (item.number_of_tokens !== undefined && item.number_of_tokens !== 0) {
           totalTokens += item.number_of_tokens;
+        }
+        tokensIn += item.tokens_in ?? 0;
+        tokensIn += item.cache_read_input_tokens ?? 0;
+        tokensIn += item.cache_creation_input_tokens ?? 0;
+        if (item.tokens_out !== undefined && item.tokens_out !== 0) {
+          tokensOut += item.tokens_out;
         }
         if (item.cache_read_input_tokens !== undefined && item.cache_read_input_tokens !== 0) {
           cacheReadInputTokens += item.cache_read_input_tokens;
@@ -135,6 +145,9 @@ export async function getToolUsageForAgent(
   return {
     agent_id: agentId,
     tool_usage_count: toolUsages.length,
+    llm_call_count: llmCallCount,
+    tokens_in: tokensIn,
+    tokens_out: tokensOut,
     total_cost_cents: totalCostCents,
     total_cost_dollars: totalCostCents / 100,
     total_tokens_from_tools: totalTokens,
@@ -186,6 +199,9 @@ export async function getToolUsageForTree(
   // Aggregate totals
   let totalCostCents = 0;
   let totalTokens = 0;
+  let llmCallCount = 0;
+  let tokensIn = 0;
+  let tokensOut = 0;
   let cacheReadInputTokens = 0;
   let cacheCreationInputTokens = 0;
 
@@ -195,8 +211,15 @@ export async function getToolUsageForTree(
     const items = usage.usageItems as UsageItem[];
     for (const item of items) {
       if (item.type === 'llm') {
+        llmCallCount += 1;
         if (item.number_of_tokens !== undefined && item.number_of_tokens !== 0) {
           totalTokens += item.number_of_tokens;
+        }
+        tokensIn += item.tokens_in ?? 0;
+        tokensIn += item.cache_read_input_tokens ?? 0;
+        tokensIn += item.cache_creation_input_tokens ?? 0;
+        if (item.tokens_out !== undefined && item.tokens_out !== 0) {
+          tokensOut += item.tokens_out;
         }
         if (item.cache_read_input_tokens !== undefined && item.cache_read_input_tokens !== 0) {
           cacheReadInputTokens += item.cache_read_input_tokens;
@@ -215,6 +238,9 @@ export async function getToolUsageForTree(
     root_agent_id: agentId,
     agent_count: agentIds.length,
     tool_usage_count: toolUsages.length,
+    llm_call_count: llmCallCount,
+    tokens_in: tokensIn,
+    tokens_out: tokensOut,
     total_cost_cents: totalCostCents,
     total_cost_dollars: totalCostCents / 100,
     total_tokens_from_tools: totalTokens,

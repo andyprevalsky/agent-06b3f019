@@ -1,13 +1,15 @@
 /**
  * STATE MACHINE: TerminalMainContent
  *
- * [VIEW] -> browse | settings | integrations | usage | admin-health | network | agents
+ * [VIEW] -> browse | settings | integrations | usage | admin-health | benchmarks | network | agents
  * Each view is selected by TerminalContent's currentView state.
+ * benchmarks is team-gated (admin allowlist or dev mode) and full-width.
  */
 
 import { useNavigate } from 'react-router-dom';
 
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { BenchmarksView } from '@/features/benchmarks';
 import { useAppData } from '@/hooks/useAppData';
 import { cn } from '@/lib/utils';
 import AdminHealth from '@/pages/AdminHealth';
@@ -41,17 +43,19 @@ interface MainContentProps {
 }
 
 export function MainContent(props: MainContentProps) {
-  const browseOffsetStyle =
-    props.currentView === 'browse'
-      ? ({
-          '--browse-sidebar-offset': `${props.sidebarWidthCollapsed}px`,
-        } as React.CSSProperties)
-      : undefined;
+  // Full-width views (browse, benchmarks) must clear the fixed sidebar rail —
+  // centered views never reach under it, but max-w-none content does.
+  const fullWidthView = props.currentView === 'browse' || props.currentView === 'benchmarks';
+  const browseOffsetStyle = fullWidthView
+    ? ({
+        '--browse-sidebar-offset': `${props.sidebarWidthCollapsed}px`,
+      } as React.CSSProperties)
+    : undefined;
   return (
     <main
       className={cn(
         'flex-1 flex justify-center h-screen overflow-hidden',
-        props.currentView === 'browse' && 'md:pl-[var(--browse-sidebar-offset)]',
+        fullWidthView && 'md:pl-[var(--browse-sidebar-offset)]',
       )}
       style={{ height: '100dvh', ...browseOffsetStyle }}
     >
@@ -70,7 +74,9 @@ export function MainContent(props: MainContentProps) {
 }
 
 function isWideView(view: TerminalView): boolean {
-  return view === 'network' || view === 'browse' || view === 'admin-health';
+  return (
+    view === 'network' || view === 'browse' || view === 'admin-health' || view === 'benchmarks'
+  );
 }
 
 function StandardView({ children }: { children: React.ReactNode }) {
@@ -107,6 +113,8 @@ function TerminalViewContent(props: MainContentProps) {
         <AdminHealth />
       </StandardView>
     );
+  if (props.currentView === 'benchmarks')
+    return <BenchmarksView onOpenAgent={props.agents.handleSelectAgent} />;
   if (props.currentView === 'network') return <props.NetworkView />;
   return (
     <AgentChatArea

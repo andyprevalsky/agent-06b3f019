@@ -4,13 +4,39 @@ set -eo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR/agents"
 
+# Use the agents venv interpreter so subprocesses (run_benchmark.py) inherit the full
+# dependency set — notably boto3 for R2 world-model/trace-archive reads under --simulate.
+# The system/asdf python may lack these. Fall back to PATH python if the venv is absent.
+PY="python"
+if [ -x "venv/bin/python" ]; then
+    PY="venv/bin/python"
+fi
+
 if [[ "${1:-}" == "list" || "${1:-}" == "--list" ]]; then
-    exec python -u benchmarks/run_benchmark.py --list
+    exec "$PY" -u benchmarks/run_benchmark.py --list
 fi
 
 if [[ "${1:-}" == "eval" || "${1:-}" == "eval-suite" ]]; then
     shift
-    exec python -u benchmarks/local.py --eval-suite "$@"
+    exec "$PY" -u benchmarks/local.py --eval-suite "$@"
 fi
 
-exec python -u benchmarks/local.py "$@"
+# --local opts out to the local isolated stack (backend + worker + WMH + Postgres
+# on THIS machine). Without it, a benchmark run defaults to CLOUD.
+if [[ "${1:-}" == "--local" ]]; then
+    shift
+    exec "$PY" -u benchmarks/local.py "$@"
+fi
+
+# --single-box opts out to the legacy shared warm box (all tasks on ONE stack).
+if [[ "${1:-}" == "--single-box" ]]; then
+    shift
+    exec bash "$ROOT_DIR/scripts/run-bench-cloud" "$@"
+fi
+
+# DEFAULT: per-bench ISOLATED cloud fleet. Every bench gets its OWN Fly machine
+# (own backend + Postgres + Temporal queue + WMH), starting at one machine and
+# autoscaling with prod's params scoped to that bench's queue. The whole run is
+# shown in ONE aggregated batch dashboard (auto-opened) covering ALL benches.
+# Sim is per-bench and OFF by default — pass --sim-on <a,b> to enable it.
+exec bash "$ROOT_DIR/scripts/run-bench-fleet" "$@"

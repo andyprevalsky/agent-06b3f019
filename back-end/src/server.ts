@@ -53,6 +53,7 @@ import adminHealthRouter from './domains/admin-health/routes';
 import imessageRouter from './domains/imessage/routes';
 import dataRouter from './domains/data/routes';
 import benchmarksRouter from './domains/benchmarks/routes';
+import { ensureBenchmarkTasksSeeded } from './domains/benchmarks/service';
 import fastCacheRouter from './domains/fast-cache/routes';
 import archiveRouter from './domains/archive/routes';
 import worldModelsRouter from './domains/world-models/routes';
@@ -623,6 +624,16 @@ app.listen(PORT, () => {
         });
       });
   }
+
+  // Seed the BenchmarkTask table from tasks.json (insert-missing only; the DB
+  // is the catalog's source of truth after seeding — hub edits survive).
+  // Catalog routes await the same memoized promise, so requests arriving
+  // before seeding completes wait instead of reading a partial catalog.
+  ensureBenchmarkTasksSeeded().catch((err: unknown) => {
+    log.warn('Benchmark task seed failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
   // Contract-test backends should not run unrelated background jobs.
   if (process.env.DISABLE_GMAIL_SYNC === '1') {
     createLogger('Cron').info('Gmail sync disabled by DISABLE_GMAIL_SYNC');

@@ -89,7 +89,6 @@ if $LIST; then
   echo ""
   echo "  benchmarks"
   (cd agents && source venv/bin/activate && python benchmarks/run_benchmark.py --list 2>/dev/null) | sed 's/^/    /'
-  echo "    (--full runs load-test-sias separately)"
   echo "    (--full prod max concurrency: $FULL_MAX_CONCURRENCY)"
   exit 0
 fi
@@ -130,6 +129,14 @@ fi
 if [ -n "$PORT" ]; then
   if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
     echo "ERROR: invalid port '$PORT' — must be an integer in 1..65535."
+    exit 1
+  fi
+fi
+# Validate FULL_MAX_CONCURRENCY (from BENCHMARK_PROD_MAX_CONCURRENCY) the same
+# way — it is handed to the prod benchmark runner and must be a positive integer.
+if $FULL; then
+  if ! [[ "$FULL_MAX_CONCURRENCY" =~ ^[0-9]+$ ]] || [ "$FULL_MAX_CONCURRENCY" -lt 1 ]; then
+    echo "ERROR: invalid BENCHMARK_PROD_MAX_CONCURRENCY '$FULL_MAX_CONCURRENCY' — must be a positive integer."
     exit 1
   fi
 fi
@@ -311,10 +318,9 @@ collect_bg_suites
 # ── Smoke tests (parallel, only if --smoke --port=N; --full targets prod) ──
 if $SMOKE; then
   if $FULL; then
-    bg_suite "Full Benchmarks (prod non-load)" bash -c "cd agents && source venv/bin/activate && python benchmarks/run_benchmark.py --suite all --prod --ci --parallel --max-concurrency $FULL_MAX_CONCURRENCY --exclude-task load-test-sias"
-    collect_bg_suites
-
-    bg_suite "Full Load Benchmark (prod)" bash -c "cd agents && source venv/bin/activate && python benchmarks/run_benchmark.py --task load-test-sias --prod --ci"
+    # Pass the concurrency as a positional arg (not string interpolation) so a
+    # hostile/typo'd env value can never be word-split or executed by bash -c.
+    bg_suite "Full Benchmarks (prod)" bash -c 'cd agents && source venv/bin/activate && python benchmarks/run_benchmark.py --suite all --prod --ci --parallel --max-concurrency "$1"' _ "$FULL_MAX_CONCURRENCY"
     collect_bg_suites
   else
     # Frontend semantic tests require a running frontend — guard BEFORE any

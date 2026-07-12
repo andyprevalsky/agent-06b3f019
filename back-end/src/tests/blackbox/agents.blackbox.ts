@@ -95,6 +95,8 @@ const TreeAgentItem = z.object({
   progress: z.number(),
   tools_in_use: z.array(z.string()),
   message_count: z.number(),
+  tokens_in: z.number(),
+  tokens_out: z.number(),
   output_schema: z.unknown().nullable(),
   structured_output: z.unknown().nullable(),
   tree_cost_cents: z.number(),
@@ -640,6 +642,14 @@ test('GET /tree — happy path — schema validated', async () => {
   assert(body.agents.length >= 1, 'Expected at least 1 agent in tree');
   const self = body.agents.find((a) => a.agent_id === agentId);
   assert(self, 'Agent should appear in its own tree');
+  assert(
+    typeof self.tokens_in === 'number',
+    `Expected tree tokens_in number, got ${self.tokens_in}`
+  );
+  assert(
+    typeof self.tokens_out === 'number',
+    `Expected tree tokens_out number, got ${self.tokens_out}`
+  );
 
   await deleteTestAgent(agentId, session.user.id);
 });

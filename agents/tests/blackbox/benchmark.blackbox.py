@@ -1,6 +1,7 @@
 """Blackbox tests for benchmark helpers."""
 
 import json
+import os
 from pathlib import Path
 
 from _test_utils import BlackboxResult
@@ -347,10 +348,10 @@ def test_timeout_default_uses_task_config_when_history_is_missing():
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import _default_timeout_for_task
 
-    task = get_task_by_name("load-test-sias")
+    task = get_task_by_name("chat-mode")
 
-    assert task.timeout_seconds == 300
-    assert _default_timeout_for_task(task) == 300
+    assert task.timeout_seconds == 120
+    assert _default_timeout_for_task(task) == 120
 
 
 def test_timeout_default_respects_explicit_floor():
@@ -677,6 +678,24 @@ def test_benchmark_agent_source_override_validates_known_sources():
             os.environ.pop("BENCHMARK_AGENT_SOURCE", None)
         else:
             os.environ["BENCHMARK_AGENT_SOURCE"] = original_env
+
+
+def test_catalog_world_model_mode_is_optional_and_validated():
+    """Per-bench world_model_mode is optional (absent = real/sim-off) and enum-checked."""
+    import pytest
+
+    from benchmarks.long_horizon import validate_task_contract
+
+    base = {"name": "t", "bench": "pipeline-e2e"}
+
+    # Absent → valid (defaults to real/sim-off at run time).
+    validate_task_contract(dict(base))
+    # Each allowed mode validates.
+    for mode in ("real", "simulate", "shadow"):
+        validate_task_contract({**base, "world_model_mode": mode})
+    # A bogus mode is rejected.
+    with pytest.raises(ValueError):
+        validate_task_contract({**base, "world_model_mode": "sim"})
 
 
 def test_local_benchmark_task_queue_uses_conductor_workspace_only_for_local_urls():
@@ -1998,15 +2017,14 @@ def test_keep_agents_env_preserves_successes_and_failures():
             os.environ["BENCHMARK_KEEP_AGENTS"] = original_env
 
 
-def test_local_plan_runs_load_tests_separately():
-    """Local orchestrator separates load-test-sias from normal parallel batches."""
+def test_local_plan_batches_selected_benchmarks_together():
+    """Local orchestrator runs selected benchmarks as one managed batch."""
     from benchmarks.local import plan_invocations
 
-    invocations = plan_invocations(["chat-mode", "load-test-sias", "browser-agent"])
+    invocations = plan_invocations(["chat-mode", "test-mass-agent-run-0", "browser-agent"])
 
     assert [(i.label, i.tasks, i.is_load) for i in invocations] == [
-        ("non-load", ["chat-mode", "browser-agent"], False),
-        ("load-test-sias", ["load-test-sias"], True),
+        ("benchmarks", ["chat-mode", "test-mass-agent-run-0", "browser-agent"], False),
     ]
 
 
@@ -2097,7 +2115,7 @@ def test_local_benchmark_args_for_multi_task_exclude_complement():
     assert "--suite" in args and "all" in args
     assert "--exclude-task" in args
     excluded = args[args.index("--exclude-task") + 1].split(",")
-    assert "load-test-sias" in excluded
+    assert "test-mass-agent-run-0" in excluded
     assert "chat-mode" not in excluded
     assert "browser-agent" not in excluded
     assert args[args.index("--port") + 1] == "55120"
@@ -2116,13 +2134,13 @@ def test_local_benchmark_args_pass_anon_to_run_benchmark():
     assert "--anon" in args
 
 
-def test_local_benchmark_args_for_single_load_task_not_parallel():
-    """A single load-test invocation is not run with --parallel."""
+def test_local_benchmark_args_for_single_task_not_parallel():
+    """A single task invocation is not run with --parallel."""
     from benchmarks.local import build_benchmark_args
 
-    args = build_benchmark_args(["load-test-sias"], port=55120)
+    args = build_benchmark_args(["test-mass-agent-run-0"], port=55120)
 
-    assert args[args.index("--task") + 1] == "load-test-sias"
+    assert args[args.index("--task") + 1] == "test-mass-agent-run-0"
     assert "--parallel" not in args
     assert "--max-concurrency" not in args
 
@@ -2158,6 +2176,110 @@ def test_local_failed_tasks_from_run_reads_result_json():
         failures = failed_tasks_from_run(path)
 
     assert [(f.name, f.agent_id, f.failure_reason) for f in failures] == [("browser-agent", "b2", "verifier failed")]
+
+
+def test_run_sh_manifest_writer_publishes_wmh_when_served():
+    """run.sh's manifest writer carries ports.wmh + urls.wmh + a wmh service entry.
+
+    Drives the exact embedded manifest-writer python from scripts/run.sh with WMH
+    env set (as start_world_model_harness exports once the server is confirmed up),
+    and asserts the additive WMH fields land in services.json. When WMH is NOT
+    served, ports.wmh is 0 and urls.wmh is empty (gated off).
+    """
+    import json
+    import re
+    import subprocess
+    import sys
+    import tempfile
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[3]
+    run_sh = (repo_root / "scripts" / "run.sh").read_text(encoding="utf-8")
+    # Extract the embedded manifest-writer python heredoc (the one that emits
+    # services.json — identified by its schema_version key, not the ngrok probe).
+    candidates = re.findall(r"python3 - <<'PY'\n(.*?)\nPY\n", run_sh, re.DOTALL)
+    manifest_pys = [c for c in candidates if "schema_version" in c and '"wmh"' in c]
+    assert len(manifest_pys) == 1, "could not uniquely locate manifest-writer heredoc in scripts/run.sh"
+    manifest_py = manifest_pys[0]
+
+    def _write_manifest(env_extra: dict) -> dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / ".context").mkdir()
+            env = {
+                "SERVICE_NAMES": "back-end,agents,wmh",
+                "SERVICE_PIDS": "111,222,333",
+                "SERVICE_STATUS": "running",
+                "BENCHMARK_MODE": "true",
+                "BACKEND_PORT": "55020",
+                "HEALTH_PORT": "55022",
+                "LOCAL_DB_PORT": "55025",
+                "NGROK_WEB_PORT": "55029",
+                "RUN_SH_PID": "999",
+                "RUN_CONTEXT_DIR": ".context",
+                "PATH": os.environ.get("PATH", ""),
+                **env_extra,
+            }
+            subprocess.run(
+                # sys.executable, not PATH-resolved "python3": the child env is
+                # minimal (no HOME), which breaks version-manager shims (asdf
+                # exits 126) whenever the venv isn't first on the caller's PATH.
+                [sys.executable, "-c", manifest_py],
+                cwd=tmp,
+                env=env,
+                check=True,
+            )
+            return json.loads((Path(tmp) / ".context" / "services.json").read_text())
+
+    # Served: WMH manifest env is exported by run.sh once /healthz answers.
+    served = _write_manifest(
+        {
+            "WMH_MANIFEST_PORT": "55026",
+            "WMH_MANIFEST_URL": "http://localhost:55026",
+            "WMH_MANIFEST_MODEL_NAME": "rose-archive",
+        }
+    )
+    assert served["ports"]["wmh"] == 55026
+    assert served["urls"]["wmh"] == "http://localhost:55026"
+    assert served["wmh_model_name"] == "rose-archive"
+    assert any(s["name"] == "wmh" and s["pid"] == 333 for s in served["services"])
+
+    # Not served (plain run.sh): gated off — wmh port 0, url empty.
+    gated = _write_manifest({})
+    assert gated["ports"]["wmh"] == 0
+    assert gated["urls"]["wmh"] == ""
+
+
+def test_apply_manifest_environment_injects_wmh_base_url_and_model():
+    """local.py injects WMH_BASE_URL + WMH_MODEL_NAME from the served manifest."""
+    import os
+
+    from benchmarks.local import apply_manifest_environment
+
+    saved = {k: os.environ.get(k) for k in ("WMH_BASE_URL", "WMH_MODEL_NAME")}
+    for key in saved:
+        os.environ.pop(key, None)
+    try:
+        apply_manifest_environment(
+            {
+                "ports": {"backend": 55020, "health": 55022, "local_db": 55025, "wmh": 55026},
+                "urls": {"wmh": "http://localhost:55026/"},
+                "wmh_model_name": "rose-archive",
+            }
+        )
+        assert os.environ["WMH_BASE_URL"] == "http://localhost:55026"
+        assert os.environ["WMH_MODEL_NAME"] == "rose-archive"
+
+        # No wmh url in the manifest (gated off) → WMH env is left unset.
+        os.environ.pop("WMH_BASE_URL", None)
+        os.environ.pop("WMH_MODEL_NAME", None)
+        apply_manifest_environment({"ports": {"backend": 55020, "health": 55022}, "urls": {}})
+        assert "WMH_BASE_URL" not in os.environ
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def test_local_services_manifest_validation_requires_ports():
@@ -3191,8 +3313,8 @@ def test_phone_auto_approval_requires_active_callee_number():
     assert not _phone_approval_matches_callee(task, {"question": "Make a phone call to +1 (650) 555-0123?"})
 
 
-def test_unified_catalog_validates_and_covers_all_runner_kinds():
-    """tasks.json is the ONE catalog: valid contract, agent + vitest entries, holding set split."""
+def test_unified_catalog_validates_and_covers_benchmark_tasks():
+    """tasks.json is the benchmark catalog: valid contract, ready entries, holding set split."""
     from benchmarks.long_horizon import EVALUATION_METHODS, validate_catalog
 
     tasks = validate_catalog()
@@ -3201,7 +3323,7 @@ def test_unified_catalog_validates_and_covers_all_runner_kinds():
     statuses = {(t.get("runner", "agent"), t.get("status", "ready")) for t in tasks}
     assert ("agent", "ready") in statuses
     assert ("agent", "incomplete") in statuses
-    assert ("vitest", "ready") in statuses
+    assert {runner for runner, _ in statuses} == {"agent"}
     methods = {e["method"] for t in tasks for e in t.get("evaluators", [])}
     assert methods == EVALUATION_METHODS
     # Enriched long-horizon migrations carry the full environment contract
@@ -3235,6 +3357,55 @@ def test_unified_catalog_delineates_bench_axes():
     assert live["environment"]["mode"] == "live"
     assert live["environment"]["db_fixtures"] == []
     assert live["environment"]["live_targets"] == ["https://www.amazon.com"]
+
+
+def test_browser_search_single_result_tasks_use_browser_only():
+    """Google/Bing search benchmarks exercise browser search, not web_search."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    cases = [
+        ("browser-google-search-single-result", "Google", "google.com"),
+        ("browser-bing-search-single-result", "Bing", "bing.com"),
+    ]
+    for task_name, provider, domain in cases:
+        task = get_task_by_name(task_name)
+        assert task.title == f"Browser {provider} Search Single Result"
+        assert task.start_phase == "execute"
+        assert task.expected_tools == ["spawn_agent"]
+        assert task.requires_browser_agent is True
+        assert task.requires_claude_code is False
+        assert "antibot" in task.tags
+        assert task.world_model_mode == "real"
+        assert task.forbidden_tools == ["web_search", "web_fetch", "spawn_claude_code_agent"]
+        assert "Use a browser agent" in task.prompt
+        assert "Return exactly one non-ad search result" in task.prompt
+        assert task.environment["mode"] == "live"
+        assert task.environment["services"] == [domain]
+        assert domain in task.environment["live_targets"][0]
+        assert task.evaluators[0]["method"] == "single_turn_llm_judge"
+        assert f"exactly one {provider} search result" in task.evaluators[0]["criteria"][1]
+
+
+def test_indeed_account_creation_benchmark_contract():
+    """Indeed account creation is a live browser/auth/anti-bot capability eval."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("browser-indeed-account-create")
+    assert task.title == "Browser Indeed Account Creation"
+    assert task.bench == "rose-bench"
+    assert task.start_phase == "execute"
+    assert task.expected_tools == ["spawn_agent"]
+    assert task.requires_browser_agent is True
+    assert task.requires_claude_code is False
+    assert {"browser", "auth", "antibot"} <= set(task.tags)
+    assert task.forbidden_tools == ["web_search", "web_fetch", "spawn_claude_code_agent"]
+    assert "create a new Indeed job-seeker account" in task.prompt
+    assert "Do not apply for jobs" in task.prompt
+    assert task.environment["mode"] == "live"
+    assert task.environment["services"] == ["indeed.com", "email_verification", "antibot"]
+    assert task.environment["live_targets"] == ["https://www.indeed.com/"]
+    assert task.evaluators[0]["method"] == "agentic_llm_judge"
+    assert "signed-in/account-created evidence" in task.evaluators[0]["criteria"][2]
 
 
 def test_unified_catalog_supports_multiple_evaluators_per_eval():
@@ -3272,29 +3443,32 @@ def test_unified_catalog_supports_multiple_evaluators_per_eval():
     )
 
 
-def test_suite_selection_excludes_incomplete_and_external_entries():
-    """Suite runs execute only ready agent evals; incomplete + vitest entries are catalogued but skipped."""
+def test_suite_selection_excludes_incomplete_entries():
+    """Suite runs execute only ready benchmark evals; incomplete entries are catalogued but skipped."""
     from benchmarks.benchmark_tasks import all_tasks, suite_tasks
 
     suite_names = {t.name for t in suite_tasks()}
     all_names = {t.name for t in all_tasks()}
 
-    assert "wait-for-trigger" in all_names and "wait-for-trigger" not in suite_names
+    assert "wait-for-trigger" in suite_names
     assert "raise-my-round" not in all_names
-    assert "smoke-backend-claude-code" in all_names and "smoke-backend-claude-code" not in suite_names
-    # Main added three ready Plaid transaction benchmarks during this branch.
-    assert "load-test-sias" in suite_names
+    assert "smoke-backend-claude-code" not in all_names
+    # Representative ready agent benchmarks stay in suite selection.
+    assert "test-mass-agent-run-0" in suite_names
     assert "browser-agent" in suite_names
     assert {
         "user-data-prod-grep",
         "plaid-transactions-monthly-spend",
         "plaid-transactions-doordash-count",
         "plaid-transactions-dead-subscriptions",
+        "browser-google-search-single-result",
+        "browser-bing-search-single-result",
+        "browser-indeed-account-create",
         "phone-call-client-intake",
         "phone-call-payment",
         "response-schema-non-goal-feedback",
     } <= suite_names
-    assert len(suite_names) == 35
+    assert len(suite_names) == len([t for t in all_tasks() if t.status == "ready"])
 
 
 def test_every_task_has_base_image_fixture_by_default():
@@ -3310,7 +3484,94 @@ def test_every_task_has_base_image_fixture_by_default():
     by_name = {t.name: t for t in all_tasks()}
     assert by_name["chat-mode"].environment["base_images"] == [DEFAULT_BASE_IMAGE]
     # Declared environments with empty base_images also inherit it
-    assert by_name["load-test-sias"].environment["base_images"] == [DEFAULT_BASE_IMAGE]
+    assert by_name["user-data-prod-grep"].environment["base_images"] == [DEFAULT_BASE_IMAGE]
+
+
+def test_live_fixture_registry_appliers_stay_in_sync():
+    """Every declared live fixture must have a runtime applier, and vice-versa.
+
+    The metadata registry (live_fixtures.py) and the runtime dispatch table
+    (run_benchmark.py) are asserted equal at import; this pins that contract so a
+    fixture can never be declared without a way to apply it.
+    """
+    from benchmarks.live_fixtures import LIVE_FIXTURE_NAMES
+    from benchmarks.run_benchmark import LIVE_FIXTURE_APPLIERS
+
+    assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES)
+    assert "base" in LIVE_FIXTURE_NAMES  # the default every live task inherits
+
+
+def test_live_fixtures_default_to_base_and_synthetic_to_none():
+    """Live/hybrid tasks inherit ["base"]; synthetic tasks resolve to []."""
+    from benchmarks.benchmark_tasks import all_tasks
+    from benchmarks.live_fixtures import resolve_live_fixtures
+
+    # Pure resolver contract
+    assert resolve_live_fixtures(None) == ["base"]
+    assert resolve_live_fixtures({"mode": "live"}) == ["base"]
+    assert resolve_live_fixtures({"mode": "hybrid"}) == ["base"]
+    assert resolve_live_fixtures({"mode": "synthetic"}) == []
+    assert resolve_live_fixtures({"mode": "live", "live_fixtures": []}) == []  # explicit wins
+    assert resolve_live_fixtures({"mode": "live", "live_fixtures": ["base", "amazon_auth"]}) == [
+        "base",
+        "amazon_auth",
+    ]
+
+    # Loaded catalog: every task has effective live_fixtures matching its mode
+    for t in all_tasks():
+        env = t.environment
+        assert env is not None and "live_fixtures" in env, f"{t.name}: no effective live_fixtures"
+        if env.get("mode") == "synthetic":
+            assert env["live_fixtures"] == [], f"{t.name}: synthetic must not carry live fixtures"
+        else:
+            assert env["live_fixtures"], f"{t.name}: live/hybrid must inherit a live fixture"
+
+    by_name = {t.name: t for t in all_tasks()}
+    # Amazon tasks compose amazon_auth onto the base fixture
+    assert by_name["browser-agent"].environment["live_fixtures"] == ["base", "amazon_auth"]
+    assert by_name["browser-agent-amazon-cookie-payment"].environment["live_fixtures"] == [
+        "base",
+        "amazon_auth",
+    ]
+    # An undeclared-environment task inherits ["base"]
+    assert by_name["chat-mode"].environment["live_fixtures"] == ["base"]
+
+
+def test_live_fixture_validation_rejects_unknown_and_synthetic_declarations():
+    """Catalog validation refuses live fixtures the harness can't satisfy."""
+    from benchmarks.long_horizon import _validate_environment
+
+    base_env = {
+        "mode": "live",
+        "db_fixtures": [],
+        "base_images": [],
+        "services": [],
+        "secrets": [],
+        "live_targets": [],
+        "context_notes": "x",
+    }
+
+    # Unknown fixture name fails
+    bad = {**base_env, "live_fixtures": ["does_not_exist"]}
+    raised = False
+    try:
+        _validate_environment(bad, "t-unknown")
+    except ValueError as e:
+        raised = "unknown live_fixtures" in str(e)
+    assert raised, "unknown live_fixture must fail validation"
+
+    # Synthetic task declaring live fixtures fails
+    syn = {**base_env, "mode": "synthetic", "live_fixtures": ["base"]}
+    raised = False
+    try:
+        _validate_environment(syn, "t-synthetic")
+    except ValueError as e:
+        raised = "synthetic evals must not declare live_fixtures" in str(e)
+    assert raised, "synthetic + live_fixtures must fail validation"
+
+    # A valid declaration passes
+    ok = {**base_env, "live_fixtures": ["base", "amazon_auth"]}
+    assert _validate_environment(ok, "t-ok")["live_fixtures"] == ["base", "amazon_auth"]
 
 
 def test_tag_slices_still_resolve():
@@ -3358,6 +3619,35 @@ def test_history_ledger_task_names_still_exist_in_catalog():
     catalog_names = {t.name for t in all_tasks()}
     orphaned = sorted(recorded - catalog_names)
     assert not orphaned, f"History-orphaning rename/delete detected for: {orphaned}"
+
+
+def test_retired_tasks_hidden_from_suite_and_listing():
+    """'retired' keeps a task name alive for ledger integrity but dead everywhere.
+
+    load-test-sias is the canonical retiree: it must stay in tasks.json (the
+    history-orphan guard depends on the name existing) yet never run in the
+    eval suite and never appear in the suite listing.
+    """
+    import io
+    from contextlib import redirect_stdout
+
+    from benchmarks.benchmark_tasks import all_tasks
+    from benchmarks.run_eval_suite import _print_holding_set
+
+    tasks = all_tasks()
+    sias = next((t for t in tasks if t.name == "load-test-sias"), None)
+    assert sias is not None, "load-test-sias must remain in the catalog (history integrity)"
+    assert sias.status == "retired"
+
+    # never selected for a run (suite runs only status == "ready")
+    ready_names = {t.name for t in tasks if t.status == "ready"}
+    assert "load-test-sias" not in ready_names
+
+    # never shown in the holding-set listing
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _print_holding_set(tasks)
+    assert "load-test-sias" not in buf.getvalue(), "retired task leaked into --list output"
 
 
 def test_long_horizon_idea_bank_preserves_seed_ideas_with_safety_notes():
@@ -3734,13 +4024,15 @@ async def run_all_tests():
     await r.record_async("create_agent_goal_override", test_create_agent_uses_goal_override_when_env_set)
     r.record("keep_failed_agents_cleanup_policy", test_keep_failed_agents_only_preserves_failures)
     r.record("keep_agents_cleanup_policy", test_keep_agents_preserves_passed_and_failed_runs)
-    r.record("local_plan_load_separate", test_local_plan_runs_load_tests_separately)
+    r.record("local_plan_batches_together", test_local_plan_batches_selected_benchmarks_together)
     await r.record_async("tree_log_supabase_once", test_tree_log_collection_fetches_supabase_once)
     r.record("local_args_multi_exclude", test_local_benchmark_args_for_multi_task_exclude_complement)
     r.record("local_args_anon", test_local_benchmark_args_pass_anon_to_run_benchmark)
-    r.record("local_args_single_load", test_local_benchmark_args_for_single_load_task_not_parallel)
+    r.record("local_args_single_task", test_local_benchmark_args_for_single_task_not_parallel)
     r.record("local_failed_tasks_from_run", test_local_failed_tasks_from_run_reads_result_json)
     r.record("local_services_manifest_validation", test_local_services_manifest_validation_requires_ports)
+    r.record("run_sh_manifest_publishes_wmh", test_run_sh_manifest_writer_publishes_wmh_when_served)
+    r.record("apply_manifest_env_injects_wmh", test_apply_manifest_environment_injects_wmh_base_url_and_model)
     r.record("local_results_and_diagnostics", test_local_extract_results_path_and_diagnostic_commands)
     r.record("agent_cache_provider_accounting", test_agent_cache_stats_respects_provider_accounting)
     r.record("local_parse_args_rejects_ambiguous_selection", test_local_parse_args_rejects_ambiguous_selection)
@@ -3820,7 +4112,7 @@ async def run_all_tests():
     )
     r.record("parallel_tool_calls_explore_sub_agents", test_parallel_tool_calls_smoke_requires_explore_sub_agents)
     r.record("spawn_sub_agents_no_browser_code_detours", test_spawn_sub_agents_smoke_forbids_browser_and_code_detours)
-    r.record("unified_catalog_core_contract", test_unified_catalog_validates_and_covers_all_runner_kinds)
+    r.record("unified_catalog_core_contract", test_unified_catalog_validates_and_covers_benchmark_tasks)
     r.record(
         "unified_catalog_bench_axes",
         test_unified_catalog_delineates_bench_axes,
@@ -3830,11 +4122,15 @@ async def run_all_tests():
         test_unified_catalog_supports_multiple_evaluators_per_eval,
     )
     r.record(
-        "suite_selection_excludes_incomplete_external",
-        test_suite_selection_excludes_incomplete_and_external_entries,
+        "suite_selection_excludes_incomplete",
+        test_suite_selection_excludes_incomplete_entries,
     )
     r.record("every_task_has_base_image_fixture", test_every_task_has_base_image_fixture_by_default)
+    r.record("live_fixture_registry_appliers_in_sync", test_live_fixture_registry_appliers_stay_in_sync)
+    r.record("live_fixtures_default_to_base", test_live_fixtures_default_to_base_and_synthetic_to_none)
+    r.record("live_fixture_validation_guards", test_live_fixture_validation_rejects_unknown_and_synthetic_declarations)
     r.record("tag_slices_still_resolve", test_tag_slices_still_resolve)
     r.record("history_ledger_no_orphaned_task_names", test_history_ledger_task_names_still_exist_in_catalog)
+    r.record("retired_tasks_hidden", test_retired_tasks_hidden_from_suite_and_listing)
     r.record("long_horizon_idea_bank", test_long_horizon_idea_bank_preserves_seed_ideas_with_safety_notes)
     return r.all_passed

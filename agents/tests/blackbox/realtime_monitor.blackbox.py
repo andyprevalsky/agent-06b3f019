@@ -20,6 +20,14 @@ def _tool_record(agent_id: str, status: str, tool_call_id: str = "tc-1") -> dict
     }
 
 
+def _spawn_tool_record(agent_id: str, status: str, tool_call_id: str = "spawn-1") -> dict:
+    record = _tool_record(agent_id, status, tool_call_id)
+    record["id"] = f"spawn-{status}"
+    record["metadata"]["toolName"] = "spawn_general_purpose_agent"
+    record["metadata"]["spawnGroupId"] = tool_call_id
+    return record
+
+
 def _assistant_record(agent_id: str, timestamp: str = "2026-01-01T00:00:01Z", metadata: dict | None = None) -> dict:
     return {
         "agentId": agent_id,
@@ -61,6 +69,23 @@ def test_no_hanging_tool_calls_allows_late_in_progress_after_finished():
     invariant.handle_insert(_tool_record("agent-1", "FINISHED"))
     invariant.handle_insert(_tool_record("agent-1", "IN_PROGRESS"))
     invariant.handle_insert(_assistant_record("agent-1"))
+
+    assert invariant.failure_reason is None
+
+
+def test_no_hanging_tool_calls_allows_assistant_while_spawn_agent_runs():
+    from benchmarks.realtime_monitor import NoHangingToolCallsInvariant
+
+    invariant = NoHangingToolCallsInvariant("agent-1")
+    invariant.handle_insert(_spawn_tool_record("agent-1", "IN_PROGRESS", "spawn-1"))
+    invariant.handle_insert(
+        _assistant_record(
+            "agent-1",
+            "2026-01-01T00:00:02Z",
+            {"tool_calls": [{"tool_call_id": "spawn-2", "name": "spawn_agent"}]},
+        )
+    )
+    invariant.handle_insert(_spawn_tool_record("agent-1", "FINISHED", "spawn-1"))
 
     assert invariant.failure_reason is None
 
@@ -168,6 +193,10 @@ async def run_all_tests():
     r.record(
         "no_hanging_tool_calls_allows_late_in_progress_after_finished",
         test_no_hanging_tool_calls_allows_late_in_progress_after_finished,
+    )
+    r.record(
+        "no_hanging_tool_calls_allows_assistant_while_spawn_agent_runs",
+        test_no_hanging_tool_calls_allows_assistant_while_spawn_agent_runs,
     )
     r.record("no_hanging_tool_calls_ignores_other_agents", test_no_hanging_tool_calls_ignores_other_agents)
     r.record(

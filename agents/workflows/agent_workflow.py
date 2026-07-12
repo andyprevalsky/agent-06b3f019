@@ -83,6 +83,12 @@ with workflow.unsafe.imports_passed_through():
 
 logger = structlog.get_logger()
 
+# Consecutive transient parent-state read failures (while paused-by-parent) after
+# which a child treats its parent as gone and aborts. Backstop for when the parent
+# is unreachable in a way that can't be classified as terminal. With the loop's 1s
+# floor sleep this is ~30s+ of continuous unreachability before giving up.
+_ORPHAN_TRANSIENT_FAILURE_LIMIT = 30
+
 CLOUD_AGENT_TOOL_NAME = "cloud_agent"
 CREATING_CLOUD_AGENT_TITLE = "Creating Cloud Agent"
 PREPARING_CLOUD_AGENT_TITLE = "Preparing Cloud Agent"
@@ -163,6 +169,12 @@ class AgentWorkflow:
         self.context_size: int = 0  # Current context window usage (from last LLM call)
         self.is_paused: bool = False
         self._paused_by_parent: bool = False  # Track if pause was inherited from parent
+        # Orphan detection: a child that inherited a pause from its parent only
+        # unpauses when the parent reports running. If the parent terminates, that
+        # never happens and the child pauses forever (busy-spin livelock). These
+        # let the child detect a gone parent and abort instead of waiting on it.
+        self._orphaned: bool = False
+        self._parent_query_failures_while_paused: int = 0
         self._has_new_messages: bool = False
         self._last_signal_response: Optional[str] = None  # Stores response from receive_user_response signal
         self._signal_responses: dict = {}  # Per-request responses keyed by attention request ID
@@ -1528,6 +1540,13 @@ class AgentWorkflow:
         await asyncio.sleep(0)
         return self.is_paused
 
+    async def _check_orphaned(self) -> bool:
+        """Terminal abort signal for run_agent. True once this child has been
+        orphaned (parent workflow gone) — set by _check_parent_state during the
+        preceding _check_paused. The loop then returns status='aborted' instead of
+        waiting forever on a parent that will never resume it."""
+        return self._orphaned
+
     async def _check_credits(self) -> None:
         """Check user credits. Sets is_paused=True if depleted."""
         try:
@@ -2428,8 +2447,40 @@ class AgentWorkflow:
             return
 
         state = await self._query_parent_state()
-        if not state:
+
+        # Parent confirmed gone (terminated / not found). A child that inherited its
+        # pause from the parent is now orphaned — it can never be unpaused by the
+        # dead parent, so abort instead of waiting forever.
+        if state.get("parent_missing"):
+            if self._paused_by_parent and not self._orphaned:
+                workflow.logger.warning(
+                    "Parent workflow gone — orphaned child aborting (was paused by parent)"
+                )
+                self._orphaned = True
+                self.is_paused = False
+                self._paused_by_parent = False
+            self._parent_query_failures_while_paused = 0
             return
+
+        if not state:
+            # Transient failure. If we've been paused-by-parent and unable to read
+            # the parent for many consecutive checks, treat the parent as gone
+            # (backstop for when terminal status can't be classified) and abort.
+            if self._paused_by_parent and not self._orphaned:
+                self._parent_query_failures_while_paused += 1
+                if self._parent_query_failures_while_paused >= _ORPHAN_TRANSIENT_FAILURE_LIMIT:
+                    workflow.logger.warning(
+                        "Parent unreachable for %d consecutive checks while paused — "
+                        "orphaned child aborting",
+                        self._parent_query_failures_while_paused,
+                    )
+                    self._orphaned = True
+                    self.is_paused = False
+                    self._paused_by_parent = False
+            return
+
+        # Successful read — reset the transient-failure backstop.
+        self._parent_query_failures_while_paused = 0
 
         parent_cost_limited = state.get("is_cost_limit_reached", False)
         parent_paused = state.get("is_paused", False)
@@ -2981,6 +3032,20 @@ class AgentWorkflow:
                 ]
             )
             return result
+
+        if result["status"] == "aborted":
+            # Orphaned (parent workflow gone) or otherwise terminally aborted.
+            # Finalize as failed immediately — do NOT wait_condition or
+            # continue_as_new: the parent that would resume us no longer exists.
+            await self._mark_failed(
+                context=result.get("context", []),
+                reason="orphaned",
+                message="Parent agent ended; orphaned sub-agent stopped.",
+                verifier_progress=result.get("verifier_progress", 0.0),
+                verifier_reasoning=result.get("verifier_reasoning", ""),
+                partial_structured_response=result.get("partial_structured_response"),
+            )
+            return {"status": "failed", "reason": "orphaned", "goal": self.goal}
 
         if result["status"] == "max_iterations":
             await self._wait_for_response_schema_refresh()

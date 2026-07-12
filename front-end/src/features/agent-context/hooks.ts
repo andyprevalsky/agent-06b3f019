@@ -3,6 +3,7 @@ import { type RealtimeChannel } from '@supabase/supabase-js';
 import { unsubscribe } from '@/lib/realtime';
 import { getQueryParams } from '@/lib/url';
 import type { AgentDetail, Message } from '@/lib/api';
+import { isBenchmarkArchiveMode } from '@/lib/benchmarkArchive';
 
 import type {
   StreamingBubble,
@@ -48,8 +49,10 @@ export function useAgentProvider({
   realtimeReady,
   onLoadAgents,
 }: ProviderDeps) {
+  const archiveMode = isBenchmarkArchiveMode();
   // canSubscribe requires both authentication AND realtime auth to be set
   const canSubscribe = (isAuthenticated ?? !!user) && (realtimeReady ?? false);
+  const canLoadAgent = canSubscribe || archiveMode;
 
   // ─── Agent state ─────────────────────────────────────────────────────────
   const [agent, setAgent] = useState<AgentDetail | null>(null);
@@ -133,10 +136,10 @@ export function useAgentProvider({
   // ─── Load agent from URL on mount ───────────────────────────────────────
 
   useEffect(() => {
-    if (selectedAgentId && canSubscribe && !agent) {
+    if (selectedAgentId && canLoadAgent && !agent) {
       void loadAgentDetail(selectedAgentId);
     }
-  }, [canSubscribe, selectedAgentId, agent, loadAgentDetail]);
+  }, [canLoadAgent, selectedAgentId, agent, loadAgentDetail]);
 
   // ─── Set selected agent (with load) ─────────────────────────────────────
 
@@ -157,11 +160,14 @@ export function useAgentProvider({
         setIsChatMode,
       );
       setSelectedAgentIdState(id);
-      if (id) {
+      // Same access gate as the URL-on-mount load: when access isn't ready
+      // yet, the effect above loads the id once canLoadAgent flips true
+      // (agent is null after flushState, so it fires).
+      if (id && canLoadAgent) {
         void loadAgentDetail(id);
       }
     },
-    [loadAgentDetail],
+    [canLoadAgent, loadAgentDetail],
   );
 
   // ─── Send message ───────────────────────────────────────────────────────

@@ -1,0 +1,50 @@
+# Cloud-exclusive benchmark box — WARM / PERSISTENT variant.
+#
+# A single persistent Fly machine (app "navi-whisper-lux-bench") with a Fly
+# VOLUME at /data. Built from Dockerfile.cloudbench-warm (deps baked; CMD =
+# sleep infinity). Driven by scripts/run-bench-cloud, which START/STOPS the
+# machine per run (never destroys it), git-syncs the branch into /data/repo, and
+# serves a CACHED WMH model from /data/world-model. A STOPPED machine bills only
+# for the small volume, so idle cost is ~0.
+#
+# This config is consumed ONLY for `--build-only` image builds
+# (`flyctl deploy -c fly.cloudbench-warm.toml --build-only`). The machine
+# lifecycle (create/start/stop/destroy, --volume mount, --restart no) is applied
+# imperatively per-machine by the controller, which is the authoritative path.
+#
+# NOT the prod worker (that is app "navi-whisper-lux" — do not touch it).
+
+app = "navi-whisper-lux-bench"
+primary_region = "iad"  # Ashburn, Virginia — same region as prod deps.
+
+[build]
+  dockerfile = "Dockerfile.cloudbench-warm"
+
+[env]
+  PYTHONUNBUFFERED = "1"
+  PYTHON_VERSION = "3.11"
+  NODE_ENV = "development"
+
+  # run.sh's World Model Harness serve-guard refuses to serve when
+  # ENVIRONMENT=production. --simulate REQUIRES a served WMH, so the box runs with
+  # the non-production ENVIRONMENT that agents/.env carries ("development"). Do
+  # NOT set ENVIRONMENT=production here or simulate breaks.
+
+  # Worker concurrency — a single machine, sized for one benchmark task + its
+  # sub-agent fan-out. Kept modest to fit shared-cpu-4x / 8GB alongside the
+  # backend, WMH, and Postgres.
+  MAX_CONCURRENT_ACTIVITIES = "100"
+  MAX_CONCURRENT_WORKFLOWS = "50"
+  MAX_CACHED_WORKFLOWS = "50"
+  MAX_CONCURRENT_ACTIVITY_TASK_POLLERS = "5"
+  MAX_CONCURRENT_WORKFLOW_TASK_POLLERS = "5"
+
+  # Per-run parameters (task/ref/simulate/model) are delivered over SSH by the
+  # controller (scripts/cloudbench-run.sh), NOT via image env — so nothing
+  # benchmark-specific is baked here.
+
+# No [[vm]] / [mounts] block: the persistent machine's size + volume mount
+# (`--vm-size`, `--vm-memory`, `--volume <name>:/data`, `--restart no`) are set
+# imperatively at `--setup` time by the controller (`flyctl machine run`). A
+# [mounts] block here would only apply to `flyctl deploy`-driven machines, which
+# this warm-box lifecycle never uses.

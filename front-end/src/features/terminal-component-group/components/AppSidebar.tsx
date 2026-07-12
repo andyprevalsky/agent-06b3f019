@@ -33,6 +33,7 @@ interface AppSidebarProps {
   currentView: SidebarView;
   onViewChange: (view: SidebarView) => void;
   showBrowse?: boolean;
+  showBenchmarks?: boolean;
   agents: Agent[];
   isLoadingAgents: boolean;
   selectedAgentId: string | null;
@@ -139,10 +140,25 @@ function SidebarCreateAgentButton({
   );
 }
 
+/** Admin-health opens full-width, so selecting it also collapses the rail. */
+function useCollapsingViewChange(
+  onViewChange: (view: SidebarView) => void,
+  setIsCollapsed: (collapsed: boolean) => void,
+) {
+  return useCallback(
+    (view: SidebarView) => {
+      onViewChange(view);
+      if (view === 'admin-health') setIsCollapsed(true);
+    },
+    [onViewChange, setIsCollapsed],
+  );
+}
+
 export default function AppSidebar({
   currentView,
   onViewChange,
   showBrowse = false,
+  showBenchmarks = false,
   agents,
   isLoadingAgents,
   selectedAgentId,
@@ -161,18 +177,13 @@ export default function AppSidebar({
 }: AppSidebarProps) {
   const [isCollapsed, setIsCollapsed] = useState(true);
   const currentWidth = isCollapsed ? SIDEBAR_WIDTH_COLLAPSED : SIDEBAR_WIDTH_EXPANDED;
-  const handleViewChange = useCallback(
-    (view: SidebarView) => {
-      onViewChange(view);
-      if (view === 'admin-health') setIsCollapsed(true);
-    },
-    [onViewChange],
-  );
+  const handleViewChange = useCollapsingViewChange(onViewChange, setIsCollapsed);
   const navItems = useSidebarNavItems({
     currentView,
     onViewChange: handleViewChange,
     onSelectAgent,
     showBrowse,
+    showBenchmarks,
     showAdminHealth,
   });
   const style = useMemo(

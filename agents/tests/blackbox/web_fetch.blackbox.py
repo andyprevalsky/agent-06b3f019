@@ -687,6 +687,43 @@ async def test_handler_fast_cache_scrape_hit_has_no_service_cost():
     assert FAST_CACHE_HIT_FIELD not in finished["args"][1]
 
 
+async def test_web_fetch_activity_ignores_unavailable_fast_cache_when_fallback_enabled():
+    """Benchmark fallback mode treats unavailable WMH scrape observations as cache misses."""
+    from domains.web_fetch.handler import FAST_CACHE_HIT_FIELD, web_fetch_activity
+
+    cached = {
+        "markdown": '{"result_unavailable": true}',
+        "metadata": {"result_unavailable": True},
+    }
+    live = {
+        "markdown": "live page",
+        "links": [],
+        "metadata": {"provider": "Firecrawl scrape"},
+    }
+
+    with patch.dict(
+        "os.environ",
+        {
+            "BENCHMARK_WMH_FALLBACK_ON_UNAVAILABLE": "1",
+            "BENCHMARK_WORLD_MODEL_MODE": "",
+        },
+        clear=False,
+    ):
+        with patch("providers.fast_cache.client.cache_get", new=AsyncMock(return_value=cached)):
+            with patch("providers.fast_cache.client.cache_set", new=AsyncMock(return_value=True)) as set_cache:
+                with patch("domains.web_fetch.handler.scrape_url", new=AsyncMock(return_value=live)) as scrape:
+                    result = await web_fetch_activity(
+                        url="https://example.com/a",
+                        fast_mode_cache_enabled=True,
+                        fast_mode_goal="goal",
+                    )
+
+    scrape.assert_awaited_once_with("https://example.com/a")
+    assert result == live
+    assert FAST_CACHE_HIT_FIELD not in result
+    assert set_cache.await_count == 1
+
+
 async def test_handler_skips_download_when_haiku_returns_no_files():
     """When the Haiku filter returns an empty files_to_download list, the download activity is not invoked."""
     from domains.web_fetch.handler import WebFetchManager
@@ -829,6 +866,10 @@ async def run_all_tests() -> bool:
     await r.record_async("handler_exec_happy", test_handler_execute_tool_happy_path)
     await r.record_async("handler_reports_parallel_provider", test_handler_reports_parallel_provider_when_fallback_succeeds)
     await r.record_async("handler_fast_cache_scrape_no_cost", test_handler_fast_cache_scrape_hit_has_no_service_cost)
+    await r.record_async(
+        "activity_fast_cache_ignores_unavailable",
+        test_web_fetch_activity_ignores_unavailable_fast_cache_when_fallback_enabled,
+    )
     await r.record_async("handler_skips_download_when_no_files", test_handler_skips_download_when_haiku_returns_no_files)
     await r.record_async("handler_activity_error_reraises", test_handler_execute_tool_activity_error_reraises)
 

@@ -200,6 +200,13 @@ import httpx
 
 MIN_MACHINES = int(os.getenv("MIN_MACHINES", "2"))
 MAX_MACHINES = int(os.getenv("MAX_MACHINES", "15"))  # raised from 10 to fit deep for_each trees
+# Actuation gate. Prod leaves this unset → the leader actuates the Fly fleet as
+# always. Per-bench cloud benchmarks set AUTOSCALER_ACTUATE=0 so the box worker
+# still COMPUTES desired_machine_count (exposed via /metrics with prod's params)
+# but never touches the shared bench app — run-bench-fleet is the sole actuator,
+# cloning bench-queue-scoped worker machines. This keeps each bench's autoscaling
+# isolated (no cross-bench leader stealing/stopping another bench's machines).
+AUTOSCALER_ACTUATE = os.getenv("AUTOSCALER_ACTUATE", "1") != "0"
 SCALE_DOWN_COOLDOWN_SECS = 60  # Seconds of zero backlog before probing downward
 SCALE_UP_THRESHOLD = 0.2  # Fraction of machine capacity that triggers scale-up
 SCALE_UP_COOLDOWN_SECS = 20  # Seconds to wait after a scale-up before allowing another
@@ -775,8 +782,8 @@ async def poll_queue_metrics(
                     ),
                 )
 
-                # ── Leader actuates ───────────────────────────────────────
-                if is_leader and _desired_machines != current_machines:
+                # ── Leader actuates (unless compute-only, e.g. per-bench cloud) ─
+                if is_leader and AUTOSCALER_ACTUATE and _desired_machines != current_machines:
                     if _desired_machines > current_machines:
                         _last_scale_up_time = time.monotonic()
                     await _scale_fleet(_desired_machines, http)

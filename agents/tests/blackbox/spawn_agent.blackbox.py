@@ -849,6 +849,43 @@ async def test_handler_blocks_recursive_general_purpose_for_explore_only_child()
     assert "explore-agent web research only" in events[0].message
 
 
+async def test_handler_allows_root_explicit_general_purpose_with_explore_research_children():
+    """Root benchmark contracts may require general-purpose agents whose child work is explore-only."""
+    from tools.base import EventType, MessageStatus, ToolEvent
+    import domains.spawn_agent.handler as h
+
+    fake_mgr = _FakeDelegateManager(
+        [ToolEvent(type=EventType.POST_MESSAGE, title="Sub done", message="ok", status=MessageStatus.FINISHED)]
+    )
+    original = h.get_sub_agent_manager
+    h.get_sub_agent_manager = lambda: fake_mgr
+    try:
+        events = await _collect(
+            h.SpawnAgentManager().execute_tool(
+                workflow_instance=_FakeWFInstance(
+                    goal=(
+                        "Find the current population of Tokyo and New York City. "
+                        "You MUST use spawn_general_purpose_agent exactly twice - once per city."
+                    ),
+                ),
+                tool_call={
+                    "type": "general_purpose",
+                    "goal": (
+                        "Find current Tokyo population using only explore-agent web research. "
+                        "MUST NOT use browser agent, Claude Code, or code sandbox."
+                    ),
+                    "output_schema": {"fields": []},
+                },
+                tool_call_id="tc",
+            )
+        )
+    finally:
+        h.get_sub_agent_manager = original
+
+    assert any(e.status == MessageStatus.FINISHED for e in events)
+    assert fake_mgr.last_call["tool_call"]["sub_agent"]["goal"].startswith("Find current Tokyo population")
+
+
 async def test_handler_blocks_recursive_general_purpose_for_web_search_only_child():
     """Generated explore/web-search-only child prompts should also be protected."""
     from tools.base import MessageStatus
@@ -1017,6 +1054,38 @@ async def test_handler_allows_general_purpose_when_explicitly_required():
         h.get_sub_agent_manager = original
 
     assert any(e.status == MessageStatus.FINISHED for e in events)
+
+
+async def test_handler_blocks_child_general_purpose_even_when_parent_required_general_purpose():
+    """Parent benchmark wording must not disable explore-only guard inside children."""
+    from tools.base import MessageStatus
+
+    from domains.spawn_agent.handler import SpawnAgentManager
+
+    wf = _FakeWFInstance(
+        depth=1,
+        goal=(
+            "Root task: MUST use spawn_general_purpose_agent exactly twice. "
+            "Child task: use explore-agent web research and MUST NOT use a browser agent, "
+            "Claude Code, or code sandbox."
+        ),
+    )
+
+    events = await _collect(
+        SpawnAgentManager().execute_tool(
+            workflow_instance=wf,
+            tool_call={
+                "type": "general_purpose",
+                "goal": "Find current Tokyo population using only explore-agent web research.",
+                "output_schema": {"fields": []},
+            },
+            tool_call_id="tc",
+        )
+    )
+
+    assert len(events) == 1
+    assert events[0].status == MessageStatus.ERROR
+    assert "explore-agent web research only" in events[0].message
 
 
 async def test_handler_for_each_depth_exceeded_raises():
@@ -1998,6 +2067,10 @@ async def run_all_tests():
         test_handler_blocks_recursive_general_purpose_for_explore_only_child,
     )
     await r.record_async(
+        "handler_allows_root_explicit_general_purpose_with_explore_research_children",
+        test_handler_allows_root_explicit_general_purpose_with_explore_research_children,
+    )
+    await r.record_async(
         "handler_blocks_recursive_general_purpose_for_web_search_only_child",
         test_handler_blocks_recursive_general_purpose_for_web_search_only_child,
     )
@@ -2016,6 +2089,10 @@ async def run_all_tests():
     await r.record_async(
         "handler_allows_general_purpose_when_explicitly_required",
         test_handler_allows_general_purpose_when_explicitly_required,
+    )
+    await r.record_async(
+        "handler_blocks_child_general_purpose_even_when_parent_required_general_purpose",
+        test_handler_blocks_child_general_purpose_even_when_parent_required_general_purpose,
     )
     await r.record_async("handler_for_each_depth", test_handler_for_each_depth_exceeded_raises)
     await r.record_async("handler_for_each_no_items", test_handler_for_each_no_items_raises)
