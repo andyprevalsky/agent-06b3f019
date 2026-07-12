@@ -62,6 +62,7 @@ RUN_TIMEOUT="3600"
 AUTOSCALE="1"           # per-bench worker autoscaling (prod params, scoped to the bench queue) — ON by default
 AUTOSCALE_MAX="15"      # prod MAX_MACHINES; per-bench ceiling of worker machines
 AUTOSCALE_POLL="10"     # seconds between desired-count reads off the box /metrics
+SYNCHRONIZED_START="${CLOUDBENCH_SYNCHRONIZED_START:-1}"
 PROVISION_POOL=""       # --provision-pool N: pre-provision N stopped clones (current image) then exit
 POOL_IDS_FILE="$ROOT_DIR/.context/cloudbench-pool.ids"   # persistent pool machine ids (one per line)
 while [ $# -gt 0 ]; do
@@ -138,13 +139,13 @@ print_code_provenance() {
     echo "  branch : $branch"
     echo "  ref    : $BENCH_REF  ($head_sha $head_sub)"
     echo "  pushed : $pushed"
-    if git -C "$ROOT_DIR" diff --quiet 2>/dev/null; then
+    if git -C "$ROOT_DIR" diff HEAD --quiet 2>/dev/null; then
         echo "  diff   : clean working tree (running committed $head_sha exactly)"
         CODE_SUMMARY="$branch@$head_sha (clean)"
     else
-        dirtystat="$(git -C "$ROOT_DIR" diff --shortstat 2>/dev/null | sed 's/^ *//')"
+        dirtystat="$(git -C "$ROOT_DIR" diff HEAD --shortstat 2>/dev/null | sed 's/^ *//')"
         echo "  diff   : DIRTY — shipped as a patch on top of $head_sha: $dirtystat"
-        git -C "$ROOT_DIR" diff --stat 2>/dev/null | sed 's/^/           /' | tail -30
+        git -C "$ROOT_DIR" diff HEAD --stat 2>/dev/null | sed 's/^/           /' | tail -30
         CODE_SUMMARY="$branch@$head_sha +patch($dirtystat)"
     fi
     echo "══════════════════════════════════════════════════════════"
@@ -254,6 +255,7 @@ CHILD_OUT=()
 CHILD_BENCH=()
 CHILD_MODE=()
 CHILD_PORT=()
+CHILD_MACHINE=()
 
 cleanup() {
     local ec=$?
@@ -290,11 +292,17 @@ cleanup() {
     else
         echo "⚠️  --keep-clones: leaving ${#CLONE_IDS[@]} fresh clone(s) alive: ${CLONE_IDS[*]:-}"
     fi
-    # Pool machines are RETURNED (stopped), never destroyed — that's the whole point
-    # of the pool ($0 compute while stopped, reusable next run; run resets its state).
-    for id in "${CLAIMED_POOL_IDS[@]:-}"; do
-        [ -n "$id" ] && { echo "↩️  returning pool machine $id (stop)"; FLY machine stop "$id" -a "$APP" >/dev/null 2>&1 || true; }
-    done
+    # Pool claims happen inside command substitution, so mutations to the shell
+    # array do not survive in the parent. The persistent id file is the
+    # authoritative ownership record while this controller lock is held: stop
+    # every listed machine so no claimed pool VM can remain billed after exit.
+    if [ -f "$POOL_IDS_FILE" ]; then
+        while read -r id; do
+            [ -n "$id" ] || continue
+            echo "↩️  reconciling authoritative pool machine $id (stop)"
+            FLY machine stop "$id" -a "$APP" >/dev/null 2>&1 || true
+        done < "$POOL_IDS_FILE"
+    fi
     # NOTE: do NOT pkill viewers by "$FLEET_DIR" — the batch resolver (and the
     # archive Vites it spawns for durable /open-agent) carry $FLEET_DIR in their
     # argv too, so that sweep KILLED the very resolver we persist (→ dead link
@@ -323,13 +331,10 @@ warm_region="$(printf '%s' "$warm_pair" | awk '{print $2}')"
 [ -n "$warm_region" ] && REGION="$warm_region"
 echo "🏭 warm source machine: $WARM_ID (region $REGION)"
 
-# Clones fork the warm volume from a snapshot. We must pick a COMPLETE snapshot:
-# restoring from one that is still uploading leaves the clone wedged in Fly's
-# 'created' state forever (it can never start). Both complete and in-progress
-# snapshots report status "created", so we select by size — the newest snapshot
-# whose stored size is a real fraction of the volume (in-progress ones are tiny).
-# The on-box driver re-fetches the repo to $REF, so snapshot age only affects the
-# WMH corpus (fine: real benches don't use it; sim benches tolerate minor drift).
+# Clones fork the warm volume from a completed snapshot. Fly reports incremental
+# stored size, not logical completeness, so a valid current snapshot can be much
+# smaller than an older one. Select by lifecycle status + real creation timestamp;
+# exclude the zero-byte `running` placeholder exposed while upload is in flight.
 VOL_ID="$(FLY volumes list -a "$APP" --json 2>/dev/null | VN="$VOLUME_NAME" python3 -c '
 import json,os,sys
 try: d=json.load(sys.stdin) or []
@@ -339,15 +344,7 @@ for v in d:
     if v.get("name")==vn and v.get("id"): print(v["id"]); break
 ' 2>/dev/null || true)"
 [ -n "$VOL_ID" ] || { echo "❌ Could not find warm volume '$VOLUME_NAME' in $APP" >&2; exit 1; }
-SNAP_ID="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null | python3 -c '
-import json,sys
-try: snaps=json.load(sys.stdin) or []
-except Exception: snaps=[]
-# Keep only snapshots that look fully written (>=25% of the volume), newest first.
-ready=[s for s in snaps if (s.get("size") or 0) >= 0.25*(s.get("volume_size") or 1)]
-ready.sort(key=lambda s: s.get("created_at") or "", reverse=True)
-print(ready[0]["id"] if ready else "")
-' 2>/dev/null || true)"
+SNAP_ID="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null | python3 "$ROOT_DIR/scripts/cloudbench-select-snapshot.py" 2>/dev/null || true)"
 if [ -z "$SNAP_ID" ]; then
     echo "❌ No complete snapshot for warm volume $VOL_ID. Create one and wait for it to finish:" >&2
     echo "   flyctl volume snapshots create $VOL_ID -a $APP   # then wait until STORED SIZE ≈ VOL SIZE" >&2
@@ -376,8 +373,8 @@ BOX_HEALTH_PORT="3003"     # cloudbench-run.sh HEALTH_PORT = CONDUCTOR_PORT(3001
 BOX_BACKEND_PORT="3001"
 BOX_WMH_PORT="3007"        # run.sh WMH_PORT = base+6
 FLEET_PATCH_FILE=""
-if ! git -C "$ROOT_DIR" diff --quiet --binary 2>/dev/null; then
-    FLEET_PATCH_FILE="$(mktemp)"; git -C "$ROOT_DIR" diff --binary > "$FLEET_PATCH_FILE"
+if ! git -C "$ROOT_DIR" diff HEAD --quiet --binary 2>/dev/null; then
+    FLEET_PATCH_FILE="$(mktemp)"; git -C "$ROOT_DIR" diff HEAD --binary > "$FLEET_PATCH_FILE"
 fi
 
 _machine_priv_ip() {  # _machine_priv_ip <machine_id>
@@ -523,7 +520,9 @@ for bench in "${BENCHES[@]}"; do
     # autoscaler knows which queue its worker pool must poll.
     local_ws="$(printf 'flt-%s-%s-%s' "$bench" "$$" "$i" | tr -c 'a-z0-9-' '-' | cut -c1-48)"
     (
-        CLOUDBENCH_WORKSPACE_NAME="$local_ws" NO_OPEN=1 \
+        CLOUDBENCH_WORKSPACE_NAME="$local_ws" \
+        CLOUDBENCH_START_BARRIER="$([ "$SYNCHRONIZED_START" = "1" ] && printf '%s' "$RUN_ID")" \
+        NO_OPEN=1 \
         bash scripts/run-bench-cloud "$bench" \
             --machine "$cid" \
             --out-dir "$out" \
@@ -539,6 +538,7 @@ for bench in "${BENCHES[@]}"; do
     CHILD_BENCH+=("$bench")
     CHILD_MODE+=("$mode_label")
     CHILD_PORT+=("$port")
+    CHILD_MACHINE+=("$cid")
 
     if [ "$AUTOSCALE" = "1" ]; then
         local_sim=0; [ "$mode_label" = "SIM" ] && local_sim=1
@@ -696,10 +696,55 @@ echo "   this run: $RUN_URL"
 echo "   per-bench viewers: $(for j in "${!CHILD_PORT[@]}"; do printf '%s→:%s ' "${CHILD_BENCH[$j]}" "${CHILD_PORT[$j]}"; done)"
 echo ""
 
+# A fleet run means simultaneous benchmark execution, not merely concurrent
+# provisioning. Each on-box driver announces after its isolated stack is
+# healthy; only then do we touch every machine's release file in parallel.
+release_start_barrier() {
+    [ "$SYNCHRONIZED_START" = "1" ] || return 0
+    local expected="${#CHILD_PIDS[@]}" ready deadline now out p mid
+    deadline=$(( $(date +%s) + 900 ))
+    echo "⏸️  waiting for $expected isolated stacks at synchronized start barrier..."
+    while :; do
+        ready=0
+        for out in "${CHILD_OUT[@]}"; do
+            grep -aFq "synchronized start barrier ready: $RUN_ID" "$out/fleet-child.log" 2>/dev/null && ready=$((ready + 1))
+        done
+        [ "$ready" = "$expected" ] && break
+        for p in "${CHILD_PIDS[@]}"; do
+            if ! kill -0 "$p" 2>/dev/null; then
+                echo "❌ isolated runner exited before synchronized start barrier ($ready/$expected ready)" >&2
+                return 1
+            fi
+        done
+        now="$(date +%s)"
+        if [ "$now" -ge "$deadline" ]; then
+            echo "❌ synchronized start barrier timed out ($ready/$expected ready)" >&2
+            return 1
+        fi
+        sleep 2
+    done
+    echo "✅ all $expected isolated stacks reached the synchronized start barrier"
+    echo "🚦 releasing synchronized start barrier on all machines..."
+    local release_pids=()
+    for mid in "${CHILD_MACHINE[@]}"; do
+        ( FLY ssh console -a "$APP" --machine "$mid" -q \
+            -C "touch '/data/cloudbench-start-$RUN_ID.release'" >/dev/null 2>&1 ) &
+        release_pids+=("$!")
+    done
+    for p in "${release_pids[@]}"; do
+        wait "$p" || { echo "❌ failed to release synchronized start barrier" >&2; return 1; }
+    done
+}
+
+if ! release_start_barrier; then
+    exit 1
+fi
+
 # ── Wait for all children, then aggregate ────────────────────────────────────
 for p in "${CHILD_PIDS[@]}"; do wait "$p" 2>/dev/null || true; done
 # One final merge so the batch dashboard reflects terminal results, then stop the aggregator.
 kill "$UNIFIED_AGG_PID" 2>/dev/null || true
+python3 "$ROOT_DIR/scripts/cloudbench-aggregate-runs.py" "$FLEET_DIR" "$UNIFIED_DIR/run.json"
 
 echo ""
 echo "════════════════════ FLEET SUMMARY ════════════════════"

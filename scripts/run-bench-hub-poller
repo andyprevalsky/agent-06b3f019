@@ -215,7 +215,11 @@ process_request() {  # process_request <request_json>
         return 0
     fi
 
-    export_catalog || echo "   ⚠ catalog export failed — running with existing tasks.json"
+    if [ "${HUB_SKIP_CATALOG_EXPORT:-0}" = "1" ]; then
+        echo "   catalog export skipped by HUB_SKIP_CATALOG_EXPORT=1 — using repository tasks.json unchanged"
+    else
+        export_catalog || echo "   ⚠ catalog export failed — running with existing tasks.json"
+    fi
 
     local hub_run_id="hub-$req_id"
     local start_epoch; start_epoch="$(date +%s)"
@@ -245,6 +249,7 @@ import glob, os, sys
 start = float(sys.argv[1])
 candidates = [p for p in
               glob.glob("agents/benchmarks/runs/*.json") +
+              glob.glob(".context/fleet/runs/*/_batch/run.json") +
               glob.glob(".context/fleet/runs/*/*/cloudbench-run.json")
               if os.path.getmtime(p) > start]
 print(max(candidates, key=os.path.getmtime) if candidates else "")
