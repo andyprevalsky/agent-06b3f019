@@ -76,3 +76,40 @@ cloudbench_validate_browser_provider_contract() {
   fi
   echo "browser provider contract verified: backend=$prod_backend worker=$prod_worker"
 }
+
+cloudbench_controller_lock_acquire() {
+  local path="$1"
+  mkdir -p "$(dirname "$path")"
+  if command -v shlock >/dev/null 2>&1; then
+    shlock -p "$$" -f "$path" || return 1
+    CLOUDBENCH_CONTROLLER_LOCK_KIND="shlock"
+  elif command -v flock >/dev/null 2>&1; then
+    exec {CLOUDBENCH_CONTROLLER_LOCK_FD}> "$path"
+    if ! flock -n "$CLOUDBENCH_CONTROLLER_LOCK_FD"; then
+      eval "exec ${CLOUDBENCH_CONTROLLER_LOCK_FD}>&-"
+      unset CLOUDBENCH_CONTROLLER_LOCK_FD
+      return 1
+    fi
+    printf '%s\n' "$$" >&"$CLOUDBENCH_CONTROLLER_LOCK_FD"
+    CLOUDBENCH_CONTROLLER_LOCK_KIND="flock"
+  else
+    echo "FATAL: shlock or flock is required for the cloud benchmark controller lock" >&2
+    return 1
+  fi
+  CLOUDBENCH_CONTROLLER_LOCK_PATH="$path"
+}
+
+cloudbench_controller_lock_release() {
+  local path="${1:-${CLOUDBENCH_CONTROLLER_LOCK_PATH:-}}" owner
+  [ -n "$path" ] || return 0
+  owner="$(cat "$path" 2>/dev/null || true)"
+  [ "$owner" = "$$" ] || return 0
+  if [ "${CLOUDBENCH_CONTROLLER_LOCK_KIND:-}" = "flock" ] && \
+     [ -n "${CLOUDBENCH_CONTROLLER_LOCK_FD:-}" ]; then
+    flock -u "$CLOUDBENCH_CONTROLLER_LOCK_FD" 2>/dev/null || true
+    eval "exec ${CLOUDBENCH_CONTROLLER_LOCK_FD}>&-"
+    unset CLOUDBENCH_CONTROLLER_LOCK_FD
+  fi
+  rm -f "$path"
+  unset CLOUDBENCH_CONTROLLER_LOCK_KIND CLOUDBENCH_CONTROLLER_LOCK_PATH
+}

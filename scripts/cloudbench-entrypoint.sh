@@ -91,6 +91,7 @@ ENV_HELPER="$APP_DIR/scripts/lib/cloudbench-env.sh"
 [ -f "$ENV_HELPER" ] || { log "FATAL: missing $ENV_HELPER"; exit 1; }
 # shellcheck source=lib/cloudbench-env.sh
 source "$ENV_HELPER"
+umask 077
 if [ -n "${AGENTS_ENV_B64:-}" ]; then
     echo "$AGENTS_ENV_B64" | base64 -d > "$APP_DIR/agents/.env" || { log "FATAL: failed to decode AGENTS_ENV_B64"; exit 1; }
     log "wrote agents/.env ($(wc -l < "$APP_DIR/agents/.env") lines)"
@@ -103,13 +104,13 @@ if [ -n "${BACKEND_ENV_B64:-}" ]; then
 else
     log "FATAL: BACKEND_ENV_B64 secret is not set"; exit 1
 fi
+chown "$APP_USER:$APP_USER" "$APP_DIR/agents/.env" "$APP_DIR/back-end/.env"
+chmod 600 "$APP_DIR/agents/.env" "$APP_DIR/back-end/.env"
 cloudbench_verify_env_file "$APP_DIR/agents/.env" "${AGENTS_ENV_SHA256:-}" agents || exit 1
 cloudbench_verify_env_file "$APP_DIR/back-end/.env" "${BACKEND_ENV_SHA256:-}" backend || exit 1
 cloudbench_validate_browser_provider_contract \
     "$APP_DIR/agents/.env" "$APP_DIR/back-end/.env" \
     "${CLOUDBENCH_BROWSER_PROVIDER:-}" "${CLOUDBENCH_BROWSER_PROVIDER:-}" || exit 1
-chown "$APP_USER:$APP_USER" "$APP_DIR/agents/.env" "$APP_DIR/back-end/.env"
-chmod 600 "$APP_DIR/agents/.env" "$APP_DIR/back-end/.env"
 
 # ── 2. Pin a stable single-tenant workspace + base port for this box ───────
 # One machine == one worktree, so a fixed workspace id / base port is fine and

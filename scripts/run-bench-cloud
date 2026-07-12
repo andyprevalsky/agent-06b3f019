@@ -321,28 +321,29 @@ resolve_render_env_value() {
         echo "FATAL: RENDER_API_KEY and RENDER_SERVICE_ID are required for production env verification" >&2
         return 1
     }
-    response="$(curl -fsS "https://api.render.com/v1/services/$service_id/env-vars" \
+    response="$(curl -fsS --connect-timeout 5 --max-time 15 \
+        --retry 2 --retry-delay 1 --retry-all-errors \
+        "https://api.render.com/v1/services/$service_id/env-vars/$key" \
         -H "Authorization: Bearer $api_key" -H 'Accept: application/json')" || {
-        echo "FATAL: could not read the production Render environment" >&2
+        echo "FATAL: could not read $key from the production Render environment" >&2
         return 1
     }
-    printf '%s' "$response" | PROD_ENV_KEY="$key" python3 -c '
-import json, os, sys
-items = json.load(sys.stdin)
-wanted = os.environ["PROD_ENV_KEY"]
-for item in items:
-    env = item.get("envVar") or item
-    if env.get("key") == wanted:
-        print(env.get("value") or "")
-        break
+    printf '%s' "$response" | python3 -c '
+import json, sys
+item = json.load(sys.stdin)
+env = item.get("envVar") or item
+print(env.get("value") or "")
 '
 }
 
 resolve_prod_backend_browser_provider() {
     local provider
     provider="$(resolve_render_env_value BROWSER_PROVIDER)" || return 1
-    # back-end/src/providers/browser/config.ts defaults an absent value to kernel.
-    printf '%s\n' "${provider:-kernel}"
+    [ -n "$provider" ] || {
+        echo "FATAL: production Render BROWSER_PROVIDER is empty" >&2
+        return 1
+    }
+    printf '%s\n' "$provider"
 }
 
 resolve_prod_worker_browser_provider() {
@@ -354,12 +355,14 @@ resolve_prod_worker_browser_provider() {
     printf '%s' "$machines" | python3 -c '
 import json, sys
 machines = json.load(sys.stdin) or []
-providers = {
+values = [
     str(((machine.get("config") or {}).get("env") or {}).get("BROWSER_PROVIDER") or "").strip().lower()
     for machine in machines
-}
-providers.discard("")
-if not machines or len(providers) != 1:
+]
+if not machines or any(not value for value in values):
+    raise SystemExit("FATAL: every production Fly worker must expose BROWSER_PROVIDER")
+providers = set(values)
+if len(providers) != 1:
     raise SystemExit(f"FATAL: production Fly workers do not expose one BROWSER_PROVIDER: {sorted(providers)!r}")
 print(next(iter(providers)))
 '
@@ -459,19 +462,18 @@ if [ "$MODE" = "refresh-secrets" ]; then
     refresh_lock="$ROOT_DIR/.context/cloudbench-controller.lock"
     refresh_lock_acquired="0"
     if [ "${CLOUDBENCH_PARENT_LOCK_HELD:-0}" != "1" ]; then
-        mkdir -p "$ROOT_DIR/.context"
-        if ! mkdir "$refresh_lock" 2>/dev/null; then
-            old_pid="$(cat "$refresh_lock/pid" 2>/dev/null || true)"
-            if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
-                echo "❌ Another cloud benchmark controller is already running (pid $old_pid)." >&2
-                exit 1
-            fi
-            rm -rf "$refresh_lock"
-            mkdir "$refresh_lock" || exit 1
+        if ! cloudbench_controller_lock_acquire "$refresh_lock"; then
+            old_pid="$(cat "$refresh_lock" 2>/dev/null || true)"
+            echo "❌ Another cloud benchmark controller is already running${old_pid:+ (pid $old_pid)}." >&2
+            exit 1
         fi
         refresh_lock_acquired="1"
-        printf '%s\n' "$$" > "$refresh_lock/pid"
-        trap '[ "$refresh_lock_acquired" = "1" ] && rm -rf "$refresh_lock"' EXIT INT TERM
+        cleanup_refresh_lock() {
+            [ "$refresh_lock_acquired" = "1" ] && cloudbench_controller_lock_release "$refresh_lock"
+        }
+        trap cleanup_refresh_lock EXIT
+        trap 'cleanup_refresh_lock; exit 130' INT
+        trap 'cleanup_refresh_lock; exit 143' TERM
     fi
     ensure_app
     inject_secrets
@@ -1082,21 +1084,16 @@ LOCK_ACQUIRED="0"
 # Fleet mode: run-bench-fleet holds a single controller lock for all its children,
 # so each per-bench child skips its own lock (they run concurrently by design).
 if [ "$SKIP_CONTROLLER_LOCK" != "1" ]; then
-    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-        old_pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
-        if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
-            echo "❌ Another cloud benchmark controller is already running (pid $old_pid)." >&2
-            echo "   Stop that run before starting another one." >&2
-            exit 1
-        fi
-        rm -rf "$LOCK_DIR"
-        if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-            echo "❌ Could not acquire local cloud benchmark controller lock: $LOCK_DIR" >&2
-            exit 1
-        fi
+    if ! cloudbench_controller_lock_acquire "$LOCK_DIR"; then
+        old_pid="$(cat "$LOCK_DIR" 2>/dev/null || true)"
+        echo "❌ Another cloud benchmark controller is already running${old_pid:+ (pid $old_pid)}." >&2
+        echo "   Stop that run before starting another one." >&2
+        exit 1
     fi
     LOCK_ACQUIRED="1"
-    printf '%s\n' "$$" > "$LOCK_DIR/pid"
+    trap 'cloudbench_controller_lock_release "$LOCK_DIR"' EXIT
+    trap 'cloudbench_controller_lock_release "$LOCK_DIR"; exit 130' INT
+    trap 'cloudbench_controller_lock_release "$LOCK_DIR"; exit 143' TERM
 fi
 
 if [ "$DIRECT_ENV_REFRESH" = "1" ]; then
@@ -1115,8 +1112,8 @@ stop_on_exit() {
     # the run ("otherwise dead") — no orphaned link server, archive Vite, or proxy.
     stop_live_archive_frontend
     stop_all_local_viewers
-    if [ "${LOCK_ACQUIRED:-0}" = "1" ] && [ "$(cat "$LOCK_DIR/pid" 2>/dev/null || true)" = "$$" ]; then
-        rm -rf "$LOCK_DIR"
+    if [ "${LOCK_ACQUIRED:-0}" = "1" ]; then
+        cloudbench_controller_lock_release "$LOCK_DIR"
     fi
     # In fleet mode the machine is a per-bench clone owned by run-bench-fleet,
     # which destroys it after collecting results — never stop it here.
@@ -1126,7 +1123,9 @@ stop_on_exit() {
     fi
     echo "Original exit code: $ec"
 }
-trap stop_on_exit EXIT INT TERM
+trap stop_on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ── 1. Start the warm machine + wait until it is start+ssh-ready ────────────
 # Generous timeout: ~10s warm, minutes on a cold image pull. Gate on BOTH the Fly

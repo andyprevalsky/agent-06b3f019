@@ -66,15 +66,16 @@ ENV_HELPER="$REPO_DIR/scripts/lib/cloudbench-env.sh"
 source "$ENV_HELPER"
 [ -n "${AGENTS_ENV_B64:-}" ] || { log "FATAL: AGENTS_ENV_B64 is not set"; exit 1; }
 [ -n "${BACKEND_ENV_B64:-}" ] || { log "FATAL: BACKEND_ENV_B64 is not set"; exit 1; }
+umask 077
 printf '%s' "$AGENTS_ENV_B64" | base64 -d > "$REPO_DIR/agents/.env" || exit 1
 printf '%s' "$BACKEND_ENV_B64" | base64 -d > "$REPO_DIR/back-end/.env" || exit 1
+chown "$APP_USER:$APP_USER" "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env"
+chmod 600 "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env"
 cloudbench_verify_env_file "$REPO_DIR/agents/.env" "${AGENTS_ENV_SHA256:-}" agents || exit 1
 cloudbench_verify_env_file "$REPO_DIR/back-end/.env" "${BACKEND_ENV_SHA256:-}" backend || exit 1
 cloudbench_validate_browser_provider_contract \
     "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env" \
     "${CLOUDBENCH_BROWSER_PROVIDER:-}" "${CLOUDBENCH_BROWSER_PROVIDER:-}" || exit 1
-chown "$APP_USER:$APP_USER" "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env"
-chmod 600 "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env"
 
 # ── Point the worker at the primary box's backend + the bench's queue ───────
 PRIMARY_HOST="${PRIMARY_HOST:?PRIMARY_HOST required}"

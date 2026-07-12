@@ -42,6 +42,14 @@ if cloudbench_verify_env_file "$agents_env" "$backend_digest" agents >/dev/null 
   fail "a mismatched injected env digest must fail closed"
 fi
 
+lock_file="$TMP_ROOT/controller.lock"
+cloudbench_controller_lock_acquire "$lock_file"
+if bash -c 'source "$1"; cloudbench_controller_lock_acquire "$2"' _ "$HELPER_SRC" "$lock_file"; then
+  fail "a second controller must not acquire an owned lock"
+fi
+cloudbench_controller_lock_release "$lock_file"
+[ ! -e "$lock_file" ] || fail "controller lock must be removed by its owner"
+
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'bash scripts/run-bench-cloud --refresh-secrets' \
   "fleet controller must refresh the environment once before cloning"
@@ -66,5 +74,8 @@ require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
 require_text "$ROOT_DIR/scripts/cloudbench-worker.sh" \
   'cloudbench_verify_env_file' \
   "autoscaled benchmark workers must refresh and verify their env files"
+require_text "$ROOT_DIR/scripts/cloudbench-worker.sh" \
+  'umask 077' \
+  "decoded benchmark secrets must be owner-only from file creation"
 
 echo "All cloud benchmark environment checks passed."

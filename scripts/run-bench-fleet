@@ -38,6 +38,8 @@ set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+# shellcheck source=lib/cloudbench-env.sh
+source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
 
 APP="navi-whisper-lux-bench"
 REGION="${CLOUDBENCH_REGION:-iad}"
@@ -239,14 +241,11 @@ claim_pool_machine() {  # echo a started, claimed pool machine id (or '' if none
 }
 
 # ── One controller lock for the whole fleet (children run with --no-lock) ────
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    old_pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
-    if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
-        echo "❌ Another cloud benchmark controller is already running (pid $old_pid)." >&2; exit 1
-    fi
-    rm -rf "$LOCK_DIR"; mkdir "$LOCK_DIR" 2>/dev/null || { echo "❌ lock: $LOCK_DIR" >&2; exit 1; }
+if ! cloudbench_controller_lock_acquire "$LOCK_DIR"; then
+    old_pid="$(cat "$LOCK_DIR" 2>/dev/null || true)"
+    echo "❌ Another cloud benchmark controller is already running${old_pid:+ (pid $old_pid)}." >&2
+    exit 1
 fi
-printf '%s\n' "$$" > "$LOCK_DIR/pid"
 
 CLONE_IDS=()
 AUTOSCALER_PIDS=()
@@ -309,10 +308,12 @@ cleanup() {
     # post-run). Per-bench viewers are reaped by their own run-bench-cloud child's
     # exit trap when we SIGTERM CHILD_PIDS above; the batch resolver lives on.
     [ -n "${FLEET_PATCH_FILE:-}" ] && rm -f "$FLEET_PATCH_FILE" 2>/dev/null || true
-    [ "$(cat "$LOCK_DIR/pid" 2>/dev/null || true)" = "$$" ] && rm -rf "$LOCK_DIR"
+    cloudbench_controller_lock_release "$LOCK_DIR"
     exit "$ec"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 echo "🔐 Refreshing + production-verifying the shared benchmark environment before machine start..."
 if ! CLOUDBENCH_PARENT_LOCK_HELD=1 bash scripts/run-bench-cloud --refresh-secrets; then
