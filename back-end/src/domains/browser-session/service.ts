@@ -197,7 +197,8 @@ export async function resizeBrowserViewport(
     throw new SessionNotFoundError();
   }
 
-  return resizeSessionViewport(session.sessionId, viewport);
+  const provider = session.provider === 'kernel' ? 'kernel' : 'steel';
+  return resizeSessionViewport(session.sessionId, viewport, provider);
 }
 
 // ---------------------------------------------------------------------------

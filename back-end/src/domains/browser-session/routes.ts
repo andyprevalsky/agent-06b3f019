@@ -55,17 +55,11 @@ const log = createLogger('BrowserSession');
 
 const router = Router();
 const auth = asyncHandler<HybridAuthRequest>(hybridAuth);
-const MIN_VIEWPORT_DIMENSION = 200;
 const MAX_VIEWPORT_WIDTH = 4096;
 const MAX_VIEWPORT_HEIGHT = 2160;
 
 function isValidViewportDimension(value: unknown, maximum: number): value is number {
-  return (
-    typeof value === 'number' &&
-    Number.isInteger(value) &&
-    value >= MIN_VIEWPORT_DIMENSION &&
-    value <= maximum
-  );
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= maximum;
 }
 
 /* c8 ignore start -- init, close, resume require Steel SDK; files + inject require Steel/CDP */
@@ -219,7 +213,11 @@ router.post(
   auth,
   asyncHandler<HybridAuthRequest>(async (req, res: Response) => {
     const { taskId } = req.params;
-    const { width, height } = req.body as { width?: unknown; height?: unknown };
+    const body =
+      typeof req.body === 'object' && req.body !== null
+        ? (req.body as { width?: unknown; height?: unknown })
+        : {};
+    const { width, height } = body;
     if (
       !isValidViewportDimension(width, MAX_VIEWPORT_WIDTH) ||
       !isValidViewportDimension(height, MAX_VIEWPORT_HEIGHT)

@@ -535,6 +535,24 @@ async function testResizeViewport_invalidDimensions() {
   assertStatus(res.status, 400, res.data);
 }
 
+async function testResizeViewport_nullBody() {
+  const res = await request(`${BASE_URL}/api/browser-session/task/nonexistent/viewport`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: 'null',
+  });
+  assertStatus(res.status, 400, res.data);
+}
+
+async function testResizeViewport_acceptsNarrowDimensions() {
+  const res = await request(`${BASE_URL}/api/browser-session/task/nonexistent/viewport`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({ width: 120, height: 80 }),
+  });
+  assertStatus(res.status, 404, res.data);
+}
+
 async function testResizeViewport_sessionNotFound() {
   const res = await request(`${BASE_URL}/api/browser-session/task/nonexistent/viewport`, {
     method: 'POST',
@@ -656,6 +674,11 @@ async function runAll() {
     {
       name: 'POST /viewport -- invalid dimensions -> 400',
       fn: testResizeViewport_invalidDimensions,
+    },
+    { name: 'POST /viewport -- null body -> 400', fn: testResizeViewport_nullBody },
+    {
+      name: 'POST /viewport -- narrow positive dimensions are valid',
+      fn: testResizeViewport_acceptsNarrowDimensions,
     },
     { name: 'POST /viewport -- session not found -> 404', fn: testResizeViewport_sessionNotFound },
     // invariants

@@ -1510,7 +1510,9 @@ describe('BrowserStatusBar (blackbox)', () => {
 
   it('uses auth liveViewUrl for the fullscreen browser iframe while auth assistance is pending', async () => {
     let completedRequestId: string | null = null;
-    let resizedViewport: { taskId: string; width: number; height: number } | null = null;
+    const resizedViewports: Array<{ taskId: string; width: number; height: number }> = [];
+    let emitResize: ((width: number, height: number) => void) | null = null;
+    let releaseFirstResize: (() => void) | null = null;
     const originalResizeObserver = window.ResizeObserver;
     class ImmediateResizeObserver {
       private readonly callback: ResizeObserverCallback;
@@ -1520,15 +1522,18 @@ describe('BrowserStatusBar (blackbox)', () => {
       }
 
       observe(target: Element) {
-        this.callback(
-          [
-            {
-              target,
-              contentRect: { width: 1180, height: 720 } as DOMRectReadOnly,
-            } as ResizeObserverEntry,
-          ],
-          this as unknown as ResizeObserver,
-        );
+        emitResize = (width, height) => {
+          this.callback(
+            [
+              {
+                target,
+                contentRect: { width, height } as DOMRectReadOnly,
+              } as ResizeObserverEntry,
+            ],
+            this as unknown as ResizeObserver,
+          );
+        };
+        emitResize(1180, 720);
       }
 
       unobserve() {}
@@ -1552,7 +1557,12 @@ describe('BrowserStatusBar (blackbox)', () => {
         `${API_BASE}/browser-session/task/:taskId/viewport`,
         async ({ params, request }) => {
           const body = (await request.json()) as { width: number; height: number };
-          resizedViewport = { taskId: String(params.taskId), ...body };
+          resizedViewports.push({ taskId: String(params.taskId), ...body });
+          if (resizedViewports.length === 1) {
+            await new Promise<void>((resolve) => {
+              releaseFirstResize = resolve;
+            });
+          }
           return HttpResponse.json({ success: true, resized: true, viewport: body });
         },
       ),
@@ -1609,7 +1619,19 @@ describe('BrowserStatusBar (blackbox)', () => {
     expect(screen.queryByTestId('browser-border-glow')).toBeNull();
     expect(screen.queryByTestId('browser-cursor-overlay')).toBeNull();
     await waitFor(() => {
-      expect(resizedViewport).toEqual({ taskId: 'task-auth', width: 1180, height: 720 });
+      expect(resizedViewports).toEqual([{ taskId: 'task-auth', width: 1180, height: 720 }]);
+    });
+    await act(async () => {
+      emitResize?.(1280, 760);
+      await new Promise((resolve) => window.setTimeout(resolve, 200));
+    });
+    expect(resizedViewports).toHaveLength(1);
+    releaseFirstResize?.();
+    await waitFor(() => {
+      expect(resizedViewports).toEqual([
+        { taskId: 'task-auth', width: 1180, height: 720 },
+        { taskId: 'task-auth', width: 1280, height: 760 },
+      ]);
     });
 
     await user.click(screen.getByRole('button', { name: 'Start Agent' }));

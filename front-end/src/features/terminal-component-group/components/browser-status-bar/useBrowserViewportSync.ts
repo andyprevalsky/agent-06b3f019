@@ -16,7 +16,9 @@ export function useBrowserViewportSync(taskId: string, paneRef: RefObject<HTMLEl
     if (!pane) return;
 
     let timeoutId: number | undefined;
-    let lastSent = '';
+    let lastQueued = '';
+    let disposed = false;
+    let resizeQueue = Promise.resolve();
     const observer = new ResizeObserver(([entry]) => {
       if (!entry) return;
       const width = Math.round(entry.contentRect.width);
@@ -26,14 +28,19 @@ export function useBrowserViewportSync(taskId: string, paneRef: RefObject<HTMLEl
       window.clearTimeout(timeoutId);
       timeoutId = window.setTimeout(() => {
         const dimensions = `${width}x${height}`;
-        if (dimensions === lastSent) return;
-        lastSent = dimensions;
-        void resizeBrowserSessionViewport(taskId, { width, height }).catch(() => undefined);
+        if (dimensions === lastQueued) return;
+        lastQueued = dimensions;
+        resizeQueue = resizeQueue
+          .then(() =>
+            disposed ? undefined : resizeBrowserSessionViewport(taskId, { width, height }),
+          )
+          .catch(() => undefined);
       }, RESIZE_DEBOUNCE_MS);
     });
 
     observer.observe(pane);
     return () => {
+      disposed = true;
       window.clearTimeout(timeoutId);
       observer.disconnect();
     };

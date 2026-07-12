@@ -158,9 +158,10 @@ export async function getBrowserSessionHealth(sessionId: string): Promise<Browse
 
 export async function resizeSessionViewport(
   sessionId: string,
-  viewport: BrowserViewport
+  viewport: BrowserViewport,
+  knownProvider?: BrowserProviderName
 ): Promise<BrowserViewportResizeResult> {
-  const provider = await providerForSession(sessionId);
+  const provider = knownProvider ?? (await providerForSession(sessionId));
   if (provider === 'kernel') {
     return {
       provider,
