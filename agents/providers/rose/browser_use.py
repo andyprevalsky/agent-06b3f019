@@ -84,8 +84,15 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "For deeply long pages, you may need multiple scroll calls; pages=10 is approximate and may not actually reach the bottom/top in one call."
         ),
         "params": {
-            "down": {"type": "boolean", "description": "True=scroll down, False=scroll up (default: true)", "required": True},
-            "pages": {"type": "number", "description": "0.5=half page, 1=full page, 10=approximately to bottom/top (default: 1.0). Approximate; may need multiple calls."},
+            "down": {
+                "type": "boolean",
+                "description": "True=scroll down, False=scroll up (default: true)",
+                "required": True,
+            },
+            "pages": {
+                "type": "number",
+                "description": "0.5=half page, 1=full page, 10=approximately to bottom/top (default: 1.0). Approximate; may need multiple calls.",
+            },
             "index": {"type": "integer", "description": "Optional element index to scroll within specific container"},
         },
     },
@@ -136,7 +143,11 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
         ),
         "params": {
             "index": {"type": "integer", "description": "Element index of the <input type='file'>", "required": True},
-            "filename": {"type": "string", "description": "Filename to upload (must match available_files)", "required": True},
+            "filename": {
+                "type": "string",
+                "description": "Filename to upload (must match available_files)",
+                "required": True,
+            },
         },
     },
     "attempt_completion": {
@@ -160,8 +171,10 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
         "description": (
             "Request a one-time virtual payment card for the current checkout. Call this when you reach a "
             "checkout/payment page and BEFORE typing any card details. First read the full itemized receipt off "
-            "the page (each product's name, image URL if visible, unit price in cents, quantity, line total in "
-            "cents; plus every fee, the subtotal, and the final total). After the user approves, the card is "
+            "the page and visit each product page as needed. Every item MUST include its canonical product-detail "
+            "URL (never the cart or checkout URL), numeric rating, and numeric review count, plus its name, image "
+            "URL if visible, unit price in cents, quantity, and line total in cents. Include every fee, the "
+            "subtotal, and the final total. After the user approves, the card is "
             "minted on demand and the one-time card refs are returned for you to type into the payment fields. "
             "Never ask the user to enter a card and never type stored card details."
         ),
@@ -171,10 +184,44 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "line_items": {
                 "type": "array",
                 "description": (
-                    "Full itemized receipt. One object per product/service: "
-                    "{name, image_url (if visible), unit_price_cents, quantity, line_total_cents}."
+                    "Full itemized receipt. Reviews and canonical product links are required for every item."
                 ),
                 "required": True,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Product or service name"},
+                        "image_url": {"type": "string", "description": "Product image URL, when visible"},
+                        "product_url": {
+                            "type": "string",
+                            "description": (
+                                "Canonical product-detail URL. Never use a cart, basket, checkout, payment, "
+                                "or order-confirmation URL."
+                            ),
+                        },
+                        "rating": {
+                            "type": "string",
+                            "description": "Numeric rating shown on the product page, such as '4.8 stars'",
+                        },
+                        "review_count": {
+                            "type": "string",
+                            "description": "Numeric review count shown on the product page, such as '312 reviews'",
+                        },
+                        "unit_price_cents": {"type": "integer", "description": "Unit price in cents"},
+                        "quantity": {"type": "integer", "description": "Quantity"},
+                        "line_total_cents": {"type": "integer", "description": "Line total in cents"},
+                    },
+                    "required": [
+                        "name",
+                        "product_url",
+                        "rating",
+                        "review_count",
+                        "unit_price_cents",
+                        "quantity",
+                        "line_total_cents",
+                    ],
+                    "additionalProperties": False,
+                },
             },
             "fees": {
                 "type": "array",
@@ -192,6 +239,13 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "or DOM mechanic that triggered the write lock. Do not execute, approve, reject, browse, "
             "or continue the task."
         ),
+        "anyOf": [
+            {"properties": {"trigger_type": {"enum": ["purchase"]}}, "required": ["purchase"]},
+            {"properties": {"trigger_type": {"enum": ["payment"]}}, "required": ["payment"]},
+            {"properties": {"trigger_type": {"enum": ["message"]}}, "required": ["message"]},
+            {"properties": {"trigger_type": {"enum": ["social_post"]}}, "required": ["social_post"]},
+            {"properties": {"trigger_type": {"enum": ["generic_write"]}}, "required": ["generic_write"]},
+        ],
         "params": {
             "trigger_type": {
                 "type": "string",
@@ -218,10 +272,38 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "purchase": {
                 "type": "object",
                 "description": (
-                    "Purchase details when trigger_type is purchase. Use items[].title for item names, plus "
-                    "visible price, quantity, description under 80 chars, rating, review_count, image_url, seller, shipping, "
-                    "totals, payment_method, and delivery_address when available."
+                    "Required when trigger_type is purchase. Every item MUST include a real numeric rating, "
+                    "numeric review count, and canonical product-detail URL. Never use the current cart or checkout URL."
                 ),
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string", "description": "Visible item title"},
+                                "price": {"type": "string", "description": "Visible item price"},
+                                "quantity": {"type": "string", "description": "Visible quantity"},
+                                "description": {"type": "string", "description": "Visible variant details"},
+                                "rating": {"type": "string", "description": "Required numeric rating"},
+                                "review_count": {"type": "string", "description": "Required numeric review count"},
+                                "image_url": {"type": "string", "description": "Best visible product image URL"},
+                                "product_url": {
+                                    "type": "string",
+                                    "description": "Required canonical product-detail URL; never cart or checkout",
+                                },
+                                "seller": {"type": "string", "description": "Visible seller"},
+                                "shipping": {"type": "string", "description": "Visible delivery details"},
+                            },
+                            "required": ["title", "rating", "review_count", "product_url"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "totals": {"type": "object", "description": "Visible subtotal, shipping, tax, and total"},
+                    "payment_method": {"type": "string", "description": "Visible redacted payment method"},
+                    "delivery_address": {"type": "string", "description": "Visible delivery address"},
+                },
+                "required": ["items"],
             },
             "payment": {"type": "object", "description": "Payment details when trigger_type is payment"},
             "message": {"type": "object", "description": "Outbound message details when trigger_type is message"},
@@ -308,20 +390,25 @@ def build_browser_use_tools(available_actions: List[str]) -> List[Dict[str, Any]
             description = info.get("description")
             if description:
                 prop["description"] = description
+            for schema_key in ("items", "properties", "additionalProperties", "enum"):
+                if schema_key in info:
+                    prop[schema_key] = info[schema_key]
+            nested_required = info.get("required")
+            if isinstance(nested_required, list):
+                prop["required"] = nested_required
             properties[param_name] = prop
             if info.get("required") is True:
                 required.append(param_name)
 
-        tools.append({
-            "name": action_name,
-            "description": tool["description"],
-            "input_schema": {
-                "type": "object",
-                "properties": properties,
-                "required": required,
-                "additionalProperties": False,
-            },
-        })
+        input_schema = {
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": False,
+        }
+        if "anyOf" in tool:
+            input_schema["anyOf"] = tool["anyOf"]
+        tools.append({"name": action_name, "description": tool["description"], "input_schema": input_schema})
     return tools
 
 
@@ -586,9 +673,7 @@ def build_browser_use_messages(
         messages.append({"role": "user", "content": user_content})
 
     state_extra_user_messages = (
-        browser_state.get("_extra_user_messages")
-        or browser_state.get("extra_user_messages")
-        or []
+        browser_state.get("_extra_user_messages") or browser_state.get("extra_user_messages") or []
     )
     merged_extra_user_messages = list(extra_user_messages or []) + list(state_extra_user_messages or [])
     for extra in merged_extra_user_messages:
@@ -616,7 +701,12 @@ def extract_json(content: str) -> Any:
     if not isinstance(content, str) or not content:
         return None
     trimmed = content.strip()
-    for raw in (trimmed, _match(_FENCED_JSON_RE, trimmed, group=1), _match(_OBJECT_RE, trimmed), _match(_ARRAY_RE, trimmed)):
+    for raw in (
+        trimmed,
+        _match(_FENCED_JSON_RE, trimmed, group=1),
+        _match(_OBJECT_RE, trimmed),
+        _match(_ARRAY_RE, trimmed),
+    ):
         if raw is None:
             continue
         try:
@@ -646,11 +736,7 @@ def normalize_browser_use_tool_call(
     if not isinstance(name, str) or not name:
         raise ValueError(f"normalize_browser_use_tool_call: missing tool name in {tool_call}")
 
-    raw_args: Any = (
-        tool_call.get("arguments")
-        if "arguments" in tool_call
-        else tool_call.get("input")
-    )
+    raw_args: Any = tool_call.get("arguments") if "arguments" in tool_call else tool_call.get("input")
     if raw_args is None and function:
         raw_args = function.get("arguments")
     if raw_args in (None, ""):
@@ -663,9 +749,7 @@ def normalize_browser_use_tool_call(
                 f"normalize_browser_use_tool_call: invalid JSON arguments for {name}: {raw_args[:200]}"
             ) from exc
         if not isinstance(parsed, dict):
-            raise ValueError(
-                f"normalize_browser_use_tool_call: arguments for {name} must decode to an object"
-            )
+            raise ValueError(f"normalize_browser_use_tool_call: arguments for {name} must decode to an object")
         args = parsed
     elif isinstance(raw_args, dict):
         args = raw_args
@@ -674,10 +758,12 @@ def normalize_browser_use_tool_call(
             f"normalize_browser_use_tool_call: unsupported arguments type for {name}: {type(raw_args).__name__}"
         )
 
-    return normalize_browser_use_response({
-        "thinking": thinking,
-        "action": [{name: args}],
-    })
+    return normalize_browser_use_response(
+        {
+            "thinking": thinking,
+            "action": [{name: args}],
+        }
+    )
 
 
 _ACTION_NAME_MAP: Dict[str, str] = {
@@ -690,18 +776,37 @@ _ACTION_NAME_MAP: Dict[str, str] = {
     "done": "attempt_completion",
 }
 
-_VALID_ACTIONS = frozenset({
-    "click", "click_coordinates", "scroll", "wait", "extract", "evaluate",
-    "dropdown_options", "select_dropdown", "screenshot", "find_text",
-    "upload_file", "search", "goto", "navback", "input_text", "press_key",
-    "switch_tab", "close_tab", "open_new_tab", "attempt_completion",
-    # BROWSER_USE_TOOLS advertises send_message_to_user so the model can ask
-    # the user for help mid-task. Keep the allowlist in sync with the tool
-    # schema or normalize_browser_use_response() will reject it.
-    "send_message_to_user", "request_user_assistance_for_authentication",
-    "request_payment_card",
-    "generate_write_lock_notification",
-})
+_VALID_ACTIONS = frozenset(
+    {
+        "click",
+        "click_coordinates",
+        "scroll",
+        "wait",
+        "extract",
+        "evaluate",
+        "dropdown_options",
+        "select_dropdown",
+        "screenshot",
+        "find_text",
+        "upload_file",
+        "search",
+        "goto",
+        "navback",
+        "input_text",
+        "press_key",
+        "switch_tab",
+        "close_tab",
+        "open_new_tab",
+        "attempt_completion",
+        # BROWSER_USE_TOOLS advertises send_message_to_user so the model can ask
+        # the user for help mid-task. Keep the allowlist in sync with the tool
+        # schema or normalize_browser_use_response() will reject it.
+        "send_message_to_user",
+        "request_user_assistance_for_authentication",
+        "request_payment_card",
+        "generate_write_lock_notification",
+    }
+)
 
 
 def normalize_browser_use_response(completion: Any) -> Dict[str, Any]:
@@ -770,9 +875,7 @@ def normalize_browser_use_response(completion: Any) -> Dict[str, Any]:
         x = params.get("x", params.get("coordinate_x"))
         y = params.get("y", params.get("coordinate_y"))
         if x is None or y is None:
-            raise ValueError(
-                f"normalize_browser_use_response: click_coordinates requires x and y, got: {params}"
-            )
+            raise ValueError(f"normalize_browser_use_response: click_coordinates requires x and y, got: {params}")
         return {
             "action": "click",
             "thinking": thinking,
@@ -852,6 +955,7 @@ def _normalize_action_params(
         out["value"] = params["value"]
 
     if normalized_action == "request_payment_card":
+
         def _maybe_json_list(value: Any) -> Any:
             if isinstance(value, str):
                 try:
@@ -889,7 +993,9 @@ def _normalize_action_params(
         out["tab_id"] = params["tab_id"]
     if params.get("message"):
         out["message"] = params["message"]
-    cookie_bundle_id = params.get("cookie_bundle_id") or params.get("cookieBundleId") or first_action.get("cookie_bundle_id")
+    cookie_bundle_id = (
+        params.get("cookie_bundle_id") or params.get("cookieBundleId") or first_action.get("cookie_bundle_id")
+    )
     if cookie_bundle_id:
         out["cookie_bundle_id"] = cookie_bundle_id
     label = params.get("label") or first_action.get("label")

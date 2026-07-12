@@ -226,6 +226,8 @@ const KNOWN_TAGS = [
   'subscription',
   'kyc',
   'source',
+  'response-schema',
+  'regression',
 ];
 
 // ==================== GET /api/benchmarks — CONTRACT TESTS ====================

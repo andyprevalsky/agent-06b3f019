@@ -80,7 +80,11 @@ with workflow.unsafe.imports_passed_through():
     from tools.web_search import web_search
     from utils.error_utils import extract_error_message
     from utils.format_tool_display import format_tool_display
-    from utils.prompts import build_system_prompt, build_verifier_prompt
+    from utils.prompts import (
+        build_system_prompt,
+        build_verifier_prompt,
+        format_required_output_schema_user_message,
+    )
     from utils.tool_schemas import EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS
 
 logger = structlog.get_logger()
@@ -96,6 +100,7 @@ CLOUD_AGENT_IN_PROGRESS_TITLES = {
     STARTING_REASONING_TITLE,
 }
 FAST_MODE_WRITE_THROUGH_USER_IDS = {"1f85ff25-6e29-4c1b-8739-f917bd101a30"}
+RESPONSE_SCHEMA_UPDATE_PREFIX = "Output schema revised from user feedback."
 
 
 def _fast_cache_compute_affinity_key(user_id: str, goal: str) -> str:
@@ -167,6 +172,21 @@ class AgentWorkflow:
         self._has_new_messages: bool = False
         self._last_signal_response: Optional[str] = None  # Stores response from receive_user_response signal
         self._signal_responses: dict = {}  # Per-request responses keyed by attention request ID
+        # Free-form feedback can change the required final shape after the run
+        # starts. Revisions let prompt/verifier boundaries refresh exactly once
+        # per accepted batch while still catching feedback that arrives during
+        # the schema-generation activity.
+        self._response_schema_feedback: List[str] = []
+        self._response_schema_revision: int = 0
+        self._response_schema_applied_revision: int = 0
+        self._response_schema_initialized: bool = False
+        self._response_schema_refresh_task: Optional[asyncio.Task[Any]] = None
+        self._response_schema_refresh_failed_revision: int = 0
+        self._response_schema_refresh_error: Optional[str] = None
+        self._response_schema_internal_signal_keys: Set[str] = set()
+        # Keep the main-agent system prefix stable for provider prompt caching.
+        # Later schema revisions are delivered as USER context messages instead.
+        self._system_prompt_output_schema: Optional[Dict] = None
         self._has_credits: bool = True  # Cached credit status
         self._last_credit_check: int = 0  # Iteration count at last check
         self.write_lock_enabled: bool = True  # Write lock for browser agent actions
@@ -300,6 +320,19 @@ class AgentWorkflow:
         # Try to parse as JSON with request_id (from attention request endpoints)
         try:
             data = _json.loads(response)
+            internal_schema_key = data.get("idempotency_key") if isinstance(data, dict) else None
+            if (
+                isinstance(data, dict)
+                and data.get("internal_type") == "response_schema_update"
+                and isinstance(internal_schema_key, str)
+                and internal_schema_key in self._response_schema_internal_signal_keys
+            ):
+                # The hidden USER row is already durable. Wake the main loop so
+                # its next poll picks up the new tail context without treating
+                # the generated message as fresh user feedback.
+                self._has_new_messages = True
+                workflow.logger.info("Waking main loop for generated response-schema context message")
+                return
             if isinstance(data, dict) and "request_id" in data:
                 req_id = data["request_id"]
                 actual_response = data.get("response", "")
@@ -310,7 +343,11 @@ class AgentWorkflow:
             pass
         # Legacy: plain string (from chat messages, SMS, etc.)
         self._last_signal_response = response
+        self._response_schema_feedback.append(response)
+        self._response_schema_revision += 1
+        self._response_schema_refresh_error = None
         self._has_new_messages = True
+        self._start_response_schema_refresh()
 
     @workflow.signal
     async def child_progress(self, data: dict):
@@ -753,11 +790,9 @@ class AgentWorkflow:
             workflow.logger.warning(f"Failed to fetch agent config for response_schema: {e}")
 
         # If no schema was provided at create time, generate one synchronously NOW.
-        # The schema is injected into the first user message at LLM-call time
-        # and also appears in the verifier system prompt; if it arrives lazily
-        # mid-run, every LLM call before generation has different context than
-        # every call after. Awaiting it here keeps the run stable from the first
-        # model call.
+        # The schema appears in the initial main/verifier system prompts. Awaiting
+        # startup generation keeps that initial cache prefix stable; later user
+        # feedback revisions take the non-blocking context-message path below.
         is_sub_agent = bool(parent_workflow_id or parent_agent_id or fetched_parent_agent_id)
         if response_schema is None and self.goal and not is_sub_agent:
             try:
@@ -787,6 +822,13 @@ class AgentWorkflow:
                 workflow.logger.warning(f"Failed to generate response_schema at startup: {e}")
         elif response_schema is None and is_sub_agent:
             workflow.logger.info("Skipping response_schema generation for sub-agent")
+
+        # Freeze the schema used in the main-agent system prompt. Any later
+        # feedback-driven revision is appended at the conversation tail so the
+        # provider can reuse the existing system/message cache prefix.
+        self._system_prompt_output_schema = self.output_schema
+        self._response_schema_initialized = True
+        self._start_response_schema_refresh()
 
         # Resolve model pricing in-process so startup is not blocked by the activity queue.
         pricing = get_in_process_model_pricing(model) or get_default_pricing(model)
@@ -1199,13 +1241,12 @@ class AgentWorkflow:
     def _make_verifier_prompt_generator(self):
         """Create a generator function that builds the verifier prompt at verification time.
 
-        The verifier prompt is now schema-driven only — no per-agent custom
-        judge prompt. Schema is set synchronously during workflow setup
-        (no lazy population, no schema polling), so this just returns the
-        already-resolved schema-bound prompt.
+        Main-agent reasoning never waits for schema generation, but completion
+        verification must use the latest accepted revision.
         """
 
         async def generate() -> str:
+            await self._wait_for_response_schema_refresh()
             return build_verifier_prompt(response_schema=self.output_schema)
 
         return generate
@@ -1213,14 +1254,203 @@ class AgentWorkflow:
     def _make_response_schema_getter(self):
         """Create a getter that returns the current output_schema.
 
-        Called at verification time, after verifier_prompt_generator has polled for schema.
-        This ensures check_progress receives the dynamically-fetched schema for structured output extraction.
+        Called at verification time after verifier_prompt_generator. Waiting
+        here too keeps direct getter callers from observing a pending revision.
         """
 
         async def get_schema() -> Optional[Dict]:
+            await self._wait_for_response_schema_refresh()
             return self.output_schema
 
         return get_schema
+
+    async def _response_schema_user_messages(self) -> List[str]:
+        """Return durable, ordered user requirements for schema generation."""
+        messages: List[str] = []
+
+        def append_message(value: Any) -> None:
+            if not isinstance(value, str):
+                return
+            text = value.strip()
+            if text and text not in messages:
+                messages.append(text)
+
+        append_message(self.fast_cache_goal or self.goal)
+        if isinstance(self.output_schema, dict) and self.output_schema.get("fields"):
+            append_message(
+                "Current output schema (preserve fields unless later user feedback changes them):\n"
+                + _json.dumps(self.output_schema, sort_keys=True, separators=(",", ":"))
+            )
+
+        # A continue-as-new resets in-memory context and revision counters.
+        # Reload durable USER rows so a later revision still includes feedback
+        # accepted by an earlier workflow run.
+        try:
+            persisted_messages = await workflow.execute_activity(
+                poll_new_messages,
+                args=[self.agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except Exception as e:
+            workflow.logger.warning(f"Failed to reload durable feedback for response_schema refresh: {e}")
+            persisted_messages = []
+
+        for message in persisted_messages or []:
+            if (message.get("role") or "").upper() != "USER":
+                continue
+            metadata = message.get("metadata") or {}
+            if metadata.get("hidden"):
+                continue
+            append_message(message.get("text"))
+
+        for message in self.context:
+            if (message.get("role") or "").upper() != "USER":
+                continue
+            metadata = message.get("metadata") or {}
+            if metadata.get("hidden"):
+                continue
+            append_message(message.get("text"))
+        for feedback in self._response_schema_feedback:
+            append_message(feedback)
+
+        return messages
+
+    def _start_response_schema_refresh(self) -> None:
+        """Start one coalescing background schema worker without blocking reasoning."""
+        if not self._response_schema_initialized:
+            return
+        if self._response_schema_applied_revision >= self._response_schema_revision:
+            return
+        if (
+            self._response_schema_refresh_error is not None
+            and self._response_schema_refresh_failed_revision >= self._response_schema_revision
+        ):
+            return
+        if self._response_schema_refresh_task is not None and not self._response_schema_refresh_task.done():
+            return
+        self._response_schema_refresh_task = asyncio.create_task(self._run_response_schema_refreshes())
+
+    def _record_response_schema_refresh_failure(self, revision: int, error: str) -> None:
+        """Record a terminal background failure without accepting a stale schema."""
+        self._response_schema_refresh_failed_revision = revision
+        self._response_schema_refresh_error = error
+        workflow.logger.error(f"Response schema refresh failed at revision {revision}: {error}")
+
+    async def _run_response_schema_refreshes(self) -> None:
+        """Apply the newest feedback revision and append changed schemas to context."""
+        try:
+            while self._response_schema_applied_revision < self._response_schema_revision:
+                target_revision = self._response_schema_revision
+                user_messages = await self._response_schema_user_messages()
+
+                try:
+                    activity_handle = workflow.start_activity(
+                        set_response_schema_activity,
+                        args=[
+                            self.agent_id,
+                            user_messages,
+                            self._active_compute_token_payload(),
+                            self.fast_mode_cache_enabled,
+                        ],
+                        start_to_close_timeout=timedelta(seconds=90),
+                        retry_policy=RetryPolicy(maximum_attempts=3),
+                    )
+                    generated = await activity_handle
+                except Exception as e:
+                    self._record_response_schema_refresh_failure(target_revision, str(e))
+                    return
+
+                # More feedback arrived while this activity was running. Its
+                # persisted result is immediately superseded by the next pass,
+                # so do not inject an obsolete schema into model context.
+                if target_revision < self._response_schema_revision:
+                    self._response_schema_applied_revision = target_revision
+                    continue
+
+                schema = generated.get("schema") if isinstance(generated, dict) else None
+                if isinstance(schema, dict) and schema.get("fields"):
+                    if schema != self.output_schema:
+                        schema_message = format_required_output_schema_user_message(schema)
+                        idempotency_key = str(workflow.uuid4())
+                        self._response_schema_internal_signal_keys.add(idempotency_key)
+                        try:
+                            await workflow.execute_activity(
+                                post_agent_message,
+                                args=[
+                                    self.agent_id,
+                                    (
+                                        f"{RESPONSE_SCHEMA_UPDATE_PREFIX}\n"
+                                        "This replaces every earlier output-schema requirement.\n\n"
+                                        f"{schema_message}"
+                                    ),
+                                    "USER",
+                                    {
+                                        "hidden": True,
+                                        "isResponseSchemaUpdate": True,
+                                        "responseSchemaRevision": target_revision,
+                                        "idempotencyKey": idempotency_key,
+                                    },
+                                ],
+                                start_to_close_timeout=timedelta(seconds=30),
+                                retry_policy=RetryPolicy(maximum_attempts=3),
+                            )
+                        except Exception as e:
+                            self._record_response_schema_refresh_failure(
+                                target_revision,
+                                f"failed to persist schema context message: {e}",
+                            )
+                            return
+
+                        self.output_schema = schema
+                        self.message_count += 1
+                        workflow.logger.info(
+                            f"Updated output_schema from user feedback revision {target_revision} "
+                            f"with {len(schema['fields'])} field(s)"
+                        )
+                    else:
+                        workflow.logger.info(f"Feedback revision {target_revision} left output_schema unchanged")
+                else:
+                    self._record_response_schema_refresh_failure(
+                        target_revision,
+                        "schema generation returned no fields",
+                    )
+                    return
+
+                self._response_schema_applied_revision = target_revision
+                self._response_schema_refresh_failed_revision = 0
+                self._response_schema_refresh_error = None
+        finally:
+            self._response_schema_refresh_task = None
+            # Close the race where feedback arrives after the loop condition is
+            # checked but before this task clears itself.
+            self._start_response_schema_refresh()
+
+    async def _wait_for_response_schema_refresh(self) -> None:
+        """Wait for the latest revision only at correctness/continuation boundaries."""
+        while self._response_schema_applied_revision < self._response_schema_revision:
+            if (
+                self._response_schema_refresh_error is not None
+                and self._response_schema_refresh_failed_revision >= self._response_schema_revision
+            ):
+                failed_revision = self._response_schema_refresh_failed_revision
+                workflow.logger.error(
+                    f"Response schema refresh failed at revision {failed_revision}: "
+                    f"{self._response_schema_refresh_error}. Continuing with the last accepted output_schema."
+                )
+                # Consume only the failed revision. Later feedback increments
+                # _response_schema_revision and starts a fresh refresh.
+                self._response_schema_applied_revision = max(
+                    self._response_schema_applied_revision,
+                    failed_revision,
+                )
+                self._response_schema_refresh_error = None
+                return
+            self._start_response_schema_refresh()
+            task = self._response_schema_refresh_task
+            if task is None:
+                raise RuntimeError("Response schema refresh did not start")
+            await task
 
     async def build_system_prompt(self) -> str:
         """Build system prompt for the current phase.
@@ -1233,7 +1463,7 @@ class AgentWorkflow:
             enabled_tools=self._current_tools,
             disabled_tools=self._disabled_tools,
             user_context_section=self.user_context_section,
-            response_schema=self.output_schema,
+            response_schema=self._system_prompt_output_schema,
             tool_prompts=TOOL_PROMPTS,
         )
 
@@ -1252,6 +1482,11 @@ class AgentWorkflow:
     async def _handle_context_overflow(self, compressed_context: List[Dict]) -> None:
         """Handle context overflow via continue_as_new."""
         workflow.logger.info("Context overflow → continue_as_new")
+
+        # A new workflow instance does not inherit signal-only revision state.
+        # Persist any pending feedback-derived schema before crossing that
+        # boundary so the continued run fetches the current schema from DB.
+        await self._wait_for_response_schema_refresh()
 
         # Post a visible tool message so the user sees the context reset
         with contextlib.suppress(Exception):
@@ -2750,6 +2985,9 @@ class AgentWorkflow:
 
         if result["status"] == "paused":
             await workflow.wait_condition(lambda: not self.is_paused)
+            # Preserve feedback received while paused before continue-as-new
+            # resets this workflow instance's revision counters.
+            await self._wait_for_response_schema_refresh()
             # Temporal SDK requires args=[] for multi-param workflows
             workflow.continue_as_new(
                 args=[
@@ -2780,6 +3018,7 @@ class AgentWorkflow:
             return result
 
         if result["status"] == "max_iterations":
+            await self._wait_for_response_schema_refresh()
             await self._mark_failed(
                 context=result.get("context", []),
                 reason="max_iterations",
@@ -2791,6 +3030,7 @@ class AgentWorkflow:
             return {"status": "failed", "reason": "max_iterations", "goal": self.goal}
 
         if result["status"] == "error":
+            await self._wait_for_response_schema_refresh()
             await self._mark_failed(
                 context=result.get("context", []),
                 reason="error",

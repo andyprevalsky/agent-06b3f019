@@ -5,7 +5,7 @@ Constants, defaults, and environment reads.
 
 import os
 
-from helpers.llm_timeouts import VERIFIER_ACTIVITY_TIMEOUT_SECONDS
+from utils.llm_timeouts import VERIFIER_ACTIVITY_TIMEOUT_SECONDS
 
 # External service keys
 STEEL_API_KEY = os.environ.get("STEEL_API_KEY", "")
@@ -66,8 +66,9 @@ VERIFIER_ULTRA_TIMEOUT_SECONDS = VERIFIER_ACTIVITY_TIMEOUT_SECONDS
 # Write lock approval timeout
 WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS = 120
 
-# Steel pricing: $1/hour = 100 cents / 3,600,000 ms
+# Browser-provider pricing defaults. Override when contracted pricing differs.
 STEEL_COST_CENTS_PER_MS = 100 / 3_600_000  # ~0.00002778
+KERNEL_COST_CENTS_PER_MS = float(os.getenv("KERNEL_COST_CENTS_PER_HOUR", "48")) / 3_600_000
 
 # Action loop delay between iterations (seconds)
 ACTION_LOOP_DELAY_SECONDS = 0.5

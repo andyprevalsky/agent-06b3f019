@@ -1,7 +1,7 @@
 """Fast Mode cache — Rose LLM call record/replay.
 
 Wraps `RoseClient.complete()` (an async iterator of StreamChunk). On a cache HIT it
-re-emits the stored response as a synthetic stream with one assembled content chunk;
+re-emits stored content chunks with their normalized item provenance;
 on a MISS it tees the live stream (forward each chunk while accumulating) and writes
 the assembled response once the stream finishes cleanly.
 Partial / aborted streams are never written (#8).
@@ -21,6 +21,7 @@ import structlog
 
 from providers.fast_cache import client as cache_client
 from providers.fast_cache.context import current_context
+from providers.rose.pools import get_pool
 
 if TYPE_CHECKING:
     from providers.rose.types import StreamChunk
@@ -34,6 +35,7 @@ def _empty_response() -> Dict[str, Any]:
         "pool_name": "",
         "request_id": "",
         "content": "",
+        "content_chunks": [],
         "reasoning": "",
         "tool_calls": [],
         "codex_reasoning_items": [],
@@ -74,10 +76,33 @@ async def _replay(stored: Dict[str, Any]) -> AsyncIterator["StreamChunk"]:
     )
     reasoning = stored.get("reasoning") or ""
     if reasoning:
-        yield SimpleNamespace(kind="reasoning", data={"text": reasoning})
-    content = stored.get("content") or ""
-    if content:
-        yield SimpleNamespace(kind="content", data={"text": content})
+        yield SimpleNamespace(
+            kind="reasoning",
+            data={
+                "text": reasoning,
+                "item_id": "cache:reasoning:0",
+                "output_index": 0,
+                "content_index": 0,
+                "phase": "reasoning",
+            },
+        )
+    content_chunks = stored.get("content_chunks") or []
+    if content_chunks:
+        for content_chunk in content_chunks:
+            yield SimpleNamespace(kind="content", data=dict(content_chunk))
+    else:
+        content = stored.get("content") or ""
+        if content:
+            yield SimpleNamespace(
+                kind="content",
+                data={
+                    "text": content,
+                    "item_id": "cache:legacy:0",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "phase": "final_answer",
+                },
+            )
     for tc in stored.get("tool_calls") or []:
         yield SimpleNamespace(kind="tool_call", data=tc)
     for item in stored.get("codex_reasoning_items") or []:
@@ -94,6 +119,7 @@ def _accumulate(acc: Dict[str, Any], chunk: "StreamChunk") -> None:
         acc["request_id"] = chunk.data.get("request_id", acc["request_id"])
     elif chunk.kind == "content":
         acc["content"] += chunk.data.get("text", "")
+        acc["content_chunks"].append(dict(chunk.data))
     elif chunk.kind == "reasoning":
         acc["reasoning"] += chunk.data.get("text", "")
     elif chunk.kind == "tool_call":
@@ -114,6 +140,15 @@ accumulate_chunk = _accumulate
 
 def request_key_material(complete_kwargs: Dict[str, Any]) -> Dict[str, Any]:
     """Stable, behavior-shaping request material for LLM cache keys."""
+    pool_name = complete_kwargs.get("pool")
+    pool_contract: Any = None
+    if isinstance(pool_name, str):
+        pool = get_pool(pool_name)
+        pool_contract = {
+            "claude_auth_model": pool.claude_auth_model,
+            "gpt_auth_model": pool.gpt_auth_model,
+            "waterfall": pool.waterfall,
+        }
     response_model = complete_kwargs.get("response_model")
     response_schema: Any = None
     if response_model is not None:
@@ -122,7 +157,8 @@ def request_key_material(complete_kwargs: Dict[str, Any]) -> Dict[str, Any]:
         except Exception:
             response_schema = getattr(response_model, "__name__", str(response_model))
     return {
-        "pool": complete_kwargs.get("pool"),
+        "pool": pool_name,
+        "pool_contract": pool_contract,
         "messages": complete_kwargs.get("messages"),
         "tools": complete_kwargs.get("tools"),
         "tool_choice": complete_kwargs.get("tool_choice"),

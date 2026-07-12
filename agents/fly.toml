@@ -9,6 +9,8 @@ primary_region = "iad"  # Ashburn, Virginia
   dockerfile = "Dockerfile"
 
 [env]
+  BROWSER_PROVIDER = "kernel"
+
   # Python configuration
   PYTHONUNBUFFERED = "1"
   PYTHON_VERSION = "3.11"

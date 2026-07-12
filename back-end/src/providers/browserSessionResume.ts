@@ -3,9 +3,7 @@ import { prisma } from './database';
 import { DEFAULT_GEOLOCATION } from './geoip';
 import { createLogger } from './logger';
 import { canonicalAuthRealm } from './authRealm';
-import { getFingerprintInjectionData } from './steel/files';
-import { injectUserData } from './steel/injection';
-import { resumeSession as steelResumeSession } from './steel/session';
+import { getFingerprintInjectionData, injectUserData, resumeSession } from './browser';
 
 const log = createLogger('BrowserSessionResume');
 
@@ -153,7 +151,7 @@ async function reservePasskeysForRealm(userId: string, authRealm: string) {
 export async function resumeBrowserSession(taskId: string) {
   log.info('Resuming browser task', { taskId });
 
-  const result = await steelResumeSession(taskId);
+  const result = await resumeSession(taskId);
   const session = await prisma.browserSession.findUnique({
     where: { id: taskId },
     include: { context: true },
@@ -201,11 +199,17 @@ export async function resumeBrowserSession(taskId: string) {
     auth_realm: authRealm,
     status: 'ACTIVE' as const,
     browser_session_metadata: {
-      provider: result.sessionId.startsWith('local-') ? 'local' : 'steel',
+      provider: result.provider,
       proxy_source: result.proxySource,
       proxy_location: result.proxyLocation ?? DEFAULT_GEOLOCATION,
-      steel_profile_id: result.steelProfileId,
-      steel_profile_source: result.profileSource,
+      profile_id: result.profileId,
+      profile_source: result.profileSource,
+      ...(result.provider === 'steel'
+        ? {
+            steel_profile_id: result.profileId,
+            steel_profile_source: result.profileSource,
+          }
+        : {}),
     },
     cookies_injected: injectionResult.cookies.injected,
     cookies_count: injectionResult.cookies.cookieCount,

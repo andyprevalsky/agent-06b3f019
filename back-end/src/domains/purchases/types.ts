@@ -6,6 +6,9 @@ export type { PurchaseSpend };
 export interface PurchaseLineItem {
   name: string;
   imageUrl?: string | null;
+  productUrl: string;
+  rating: string;
+  reviewCount: string;
   unitPriceCents: number;
   quantity: number;
   lineTotalCents: number;

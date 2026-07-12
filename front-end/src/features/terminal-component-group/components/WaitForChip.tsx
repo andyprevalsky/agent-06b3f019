@@ -6,9 +6,9 @@
  *   Condition: expandable chip with check history + embedded explore agents
  *
  * CONDITION MODE STATES:
- *   [COLLAPSED] header + live explore (if check running)
+ *   [COLLAPSED] compact header only
  *       ↕ click header
- *   [EXPANDED] header + check history + live explore
+ *   [EXPANDED] header + all checks, each rendered by InlineExploreChip
  *
  * Explore chips within checks are independently expandable.
  * Live embedded explore chips receive active stream timing/counts so their
@@ -39,6 +39,7 @@ interface WaitForChipProps {
   checks: WaitForCheck[];
   metadata?: {
     waitForMode?: 'condition' | 'timestamp';
+    description?: string;
     condition?: string;
     untilTimestamp?: string;
     checkIntervalSeconds?: number;
@@ -100,25 +101,24 @@ const WaitForChip = memo(function WaitForChip({
   const liveCheck = isInProgress
     ? [...checks].reverse().find((c) => c.status === 'IN_PROGRESS' && c.explore)
     : undefined;
-  const pastChecks = checks.filter((c) => c !== liveCheck);
   const completedChecks = checks.filter(
     (c) => c.status === 'FINISHED' || c.status === 'ERROR',
   ).length;
   const condition =
     metadata?.condition || title.replace(/^Waiting for /, '').replace(/^Polling: /, '');
+  const description = metadata?.description || condition;
 
   return (
     <WaitForConditionChip
-      title={title}
-      condition={condition}
+      description={description}
       isInProgress={isInProgress}
       isComplete={isComplete}
       isError={isError}
       conditionMet={conditionMet}
       checks={checks}
       liveCheck={liveCheck}
-      pastChecks={pastChecks}
       completedChecks={completedChecks}
+      currentCheckNum={metadata?.checkNum}
       checkIntervalSeconds={metadata?.checkIntervalSeconds}
       totalChecksCompleted={metadata?.data?.checks_completed}
       thinkingStreamTokenCount={thinkingStreamTokenCount}

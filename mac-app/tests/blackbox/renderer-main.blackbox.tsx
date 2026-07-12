@@ -145,6 +145,13 @@ function resetAuth() {
   });
 }
 
+function installElectronAppIpcMock(overrides: Partial<IPC> = {}): IPC {
+  return installIpcMock({
+    onOpenAgent: vi.fn(() => () => undefined),
+    ...overrides,
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -169,7 +176,7 @@ describe('renderer-main blackbox', () => {
   describe('ElectronApp shell', () => {
     it('shows loading spinner while auth is still resolving (loading state)', () => {
       setAuth({ loading: true, isFullySignedIn: false, isAnonymous: true });
-      installIpcMock();
+      installElectronAppIpcMock();
 
       renderWithProviders(<ElectronApp />, { withRouter: false });
 
@@ -182,7 +189,7 @@ describe('renderer-main blackbox', () => {
 
     it('renders onboarding (auth-first) for an unauthenticated user', async () => {
       setAuth({ loading: false, isFullySignedIn: false, isAnonymous: true });
-      installIpcMock();
+      installElectronAppIpcMock();
 
       renderWithProviders(<ElectronApp />, { withRouter: false });
 
@@ -197,7 +204,7 @@ describe('renderer-main blackbox', () => {
 
     it('renders Terminal when signed-in and onboarding complete (happy path + API capture)', async () => {
       setAuth({ loading: false, isFullySignedIn: true, isAnonymous: false });
-      installIpcMock();
+      installElectronAppIpcMock();
 
       server.use(
         http.get(`${BACKEND_URL}/api/user-settings`, () =>
@@ -219,7 +226,7 @@ describe('renderer-main blackbox', () => {
 
     it('renders Onboarding with skipAuth=true when signed-in but not yet onboarded', async () => {
       setAuth({ loading: false, isFullySignedIn: true, isAnonymous: false });
-      installIpcMock();
+      installElectronAppIpcMock();
 
       server.use(
         http.get(`${BACKEND_URL}/api/user-settings`, () =>
@@ -237,7 +244,7 @@ describe('renderer-main blackbox', () => {
 
     it('falls back to Onboarding gracefully when /api/user-settings errors (error state)', async () => {
       setAuth({ loading: false, isFullySignedIn: true, isAnonymous: false });
-      installIpcMock();
+      installElectronAppIpcMock();
 
       server.use(
         http.get(`${BACKEND_URL}/api/user-settings`, () =>
@@ -259,7 +266,7 @@ describe('renderer-main blackbox', () => {
 
     it('treats a backend response with null onboardingCompletedAt as empty state (no Terminal)', async () => {
       setAuth({ loading: false, isFullySignedIn: true, isAnonymous: false });
-      installIpcMock();
+      installElectronAppIpcMock();
 
       server.use(http.get(`${BACKEND_URL}/api/user-settings`, () => HttpResponse.json({})));
 
@@ -274,7 +281,7 @@ describe('renderer-main blackbox', () => {
       const user = userEvent.setup();
       const setComplete = vi.fn(async () => ({ success: true }));
       const enable = vi.fn(async () => ({ success: true, enabled: true }));
-      installIpcMock({
+      installElectronAppIpcMock({
         onboarding: {
           isComplete: vi.fn(async () => false),
           setComplete,
@@ -328,7 +335,7 @@ describe('renderer-main blackbox', () => {
     it('skips /api/user-settings when no session token is present', async () => {
       setAuth({ loading: false, isFullySignedIn: true, isAnonymous: false });
       sessionRef.current = null;
-      installIpcMock();
+      installElectronAppIpcMock();
 
       renderWithProviders(<ElectronApp />, { withRouter: false });
 
@@ -559,7 +566,7 @@ describe('renderer-main blackbox', () => {
   describe('backend boundary allow-list', () => {
     it('touches only /api/user-settings on a cold signed-in mount', async () => {
       setAuth({ loading: false, isFullySignedIn: true, isAnonymous: false });
-      installIpcMock();
+      installElectronAppIpcMock();
 
       server.use(
         http.get(`${BACKEND_URL}/api/user-settings`, () =>

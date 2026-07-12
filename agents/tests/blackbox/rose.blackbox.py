@@ -157,15 +157,20 @@ def test_classify_claude_token_error_each_branch():
 
 
 def test_pool_registry_lookup():
+    mini = get_pool("rose-1-mini")
     lite = get_pool("rose-1-lite")
     ultra = get_pool("rose-1-ultra")
+    browser_use = get_pool("rose-1-browser-use")
+    assert mini.gpt_auth_model == "gpt-5.6-luna"
     assert lite.name == "rose-1-lite"
     assert lite.claude_auth_model.startswith("claude-")
-    assert lite.gpt_auth_model.startswith("gpt-")
+    assert lite.gpt_auth_model == "gpt-5.6-terra"
     assert len(lite.waterfall) >= 1
     assert ultra.name == "rose-1-ultra"
     assert ultra.claude_auth_model.startswith("claude-")
-    assert ultra.gpt_auth_model.startswith("gpt-")
+    assert ultra.gpt_auth_model == "gpt-5.6-sol"
+    assert browser_use.gpt_auth_model == "gpt-5.6-sol"
+    assert browser_use.waterfall[-1] == "openai/gpt-5.6-sol"
     assert lite.waterfall != ultra.waterfall
 
 
@@ -179,7 +184,7 @@ def test_all_pool_names_matches_registry():
 def test_get_pool_unknown_raises():
     raised = False
     try:
-        get_pool("rose-nonexistent")  # type: ignore[arg-type]
+        get_pool("rose-nonexistent")
     except (KeyError, ValueError):
         raised = True
     assert raised
@@ -272,8 +277,7 @@ def test_transform_messages_for_anthropic_preserves_repeated_boundaries_for_cach
     from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 
     combined = (
-        f"static instructions{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
-        f"Current time: April 28{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
+        f"static instructions{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}Current time: April 28{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
     )
     static_sys, dynamic_sys, msgs = transform_messages_for_anthropic(
         [
@@ -537,7 +541,7 @@ def test_pydantic_response_model_builds_anthropic_native_tools_without_strict_by
     assert "tool" not in wait_schema["required"]
     # Pydantic runtime validators/defaults remain authoritative. The native
     # Anthropic schema should not force defaults/nulls into tool arguments.
-    assert wait_schema["required"] == []
+    assert wait_schema["required"] == ["description"]
     assert wait_schema["properties"]["check_interval_seconds"]["minimum"] == 60
     assert wait_schema["properties"]["check_interval_seconds"]["maximum"] == 86400
 
@@ -769,6 +773,9 @@ def test_apply_tool_config_response_format_structured_output_path():
 
 def test_is_vision_capable_membership():
     assert is_vision_capable("openai/gpt-4o")
+    assert is_vision_capable("openai/gpt-5.6-luna")
+    assert is_vision_capable("openai/gpt-5.6-terra")
+    assert is_vision_capable("openai/gpt-5.6-sol")
     assert is_vision_capable("anthropic/claude-sonnet-4.5")
     assert not is_vision_capable("google/gemini-3-flash-preview")
     assert not is_vision_capable("rose-labs/rose-1-lite")
@@ -2193,6 +2200,26 @@ def test_build_codex_responses_body_contract():
     )
     assert split_system_body["instructions"] == "static rules\n\ndynamic rules"
     assert "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__" not in split_system_body["instructions"]
+    same_static_different_dynamic_body = build_codex_responses_body(
+        pool_spec=pool,
+        messages=[
+            {
+                "role": "system",
+                "content": f"static rules{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}different agent context",
+            },
+            {"role": "user", "content": "different live input"},
+        ],
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "different_schema",
+                "strict": True,
+                "schema": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+        },
+        request_id="same-static-different-dynamic",
+    )
+    assert split_system_body["prompt_cache_key"] == same_static_different_dynamic_body["prompt_cache_key"]
     max_effort_body = build_codex_responses_body(
         pool_spec=pool,
         messages=[{"role": "user", "content": "hi"}],
@@ -2748,7 +2775,7 @@ async def test_client_openai_api_key_serves_before_anthropic_and_openrouter():
     assert isinstance(body, dict)
     assert seen == {"openai": 1, "anthropic": 0, "openrouter": 0}
     assert captured["authorization"] == "Bearer sk-proj-test"
-    assert body.get("model") == "gpt-5.4"
+    assert body.get("model") == "gpt-5.6-terra"
     assert body.get("service_tier") == "priority"
     meta = next((c for c in chunks if c.kind == "metadata"), None)
     assert meta is not None and str(meta.data.get("actual_model", "")).endswith("-openai")
@@ -2999,6 +3026,82 @@ async def test_client_collect_waterfall_only_path():
     assert resp.content == "hello"
     assert resp.actual_model == "google/gemini-3.5-flash"
     assert resp.usage.get("total_tokens") == 6
+
+
+async def test_client_collect_preserves_multiple_unstructured_text_items():
+    async def complete(**_kwargs):
+        yield StreamChunk(
+            kind="content",
+            data={
+                "text": "hello ",
+                "item_id": "text-1",
+                "output_index": 0,
+                "content_index": 0,
+                "phase": "final_answer",
+            },
+        )
+        yield StreamChunk(
+            kind="content",
+            data={
+                "text": "world",
+                "item_id": "text-2",
+                "output_index": 1,
+                "content_index": 0,
+                "phase": "final_answer",
+            },
+        )
+        yield StreamChunk(kind="done", data={})
+
+    client = RoseClient(openrouter_key="ork-x")
+    client.complete = complete
+    response = await client.collect(
+        pool="rose-1-lite",
+        messages=[{"role": "user", "content": "hi"}],
+        call_site="test-collect-multiple-items",
+    )
+
+    assert response.content == "hello world"
+
+
+async def test_client_collect_selects_final_structured_output_item():
+    from pydantic import BaseModel
+
+    class Answer(BaseModel):
+        answer: str
+
+    async def complete(**_kwargs):
+        yield StreamChunk(
+            kind="content",
+            data={
+                "text": '{"answer":"commentary"}',
+                "item_id": "commentary",
+                "output_index": 0,
+                "content_index": 0,
+                "phase": "commentary",
+            },
+        )
+        yield StreamChunk(
+            kind="content",
+            data={
+                "text": '{"answer":"final"}',
+                "item_id": "final",
+                "output_index": 1,
+                "content_index": 0,
+                "phase": "final_answer",
+            },
+        )
+        yield StreamChunk(kind="done", data={})
+
+    client = RoseClient(openrouter_key="ork-x")
+    client.complete = complete
+    response = await client.collect(
+        pool="rose-1-lite",
+        messages=[{"role": "user", "content": "hi"}],
+        response_model=Answer,
+        call_site="test-collect-structured-items",
+    )
+
+    assert response.content == '{"answer":"final"}'
 
 
 async def test_client_collect_emits_common_rose_timing_logs():
@@ -3417,11 +3520,13 @@ async def test_client_reproduces_rotated_gpt_direct_auth_deadline():
     async def silent_gpt_auth(**kwargs):
         token = kwargs["auth"].token
         attempts.append(token)
+        if token == "stale-token":
+            raise RoseStallError("rose.complete TTFT exceeded 0.05s")
         if token == "fresh-token":
             yield StreamChunk(kind="metadata", data={"actual_model": "gpt-5.4-gpt"})
             yield StreamChunk(kind="content", data={"text": "partial"})
-        await asyncio.sleep(1.0)
-        yield StreamChunk(kind="metadata", data={"actual_model": "gpt-5.4-gpt"})
+            raise RoseDeadlineError("rose.complete deadline exceeded after 0.2s")
+        raise AssertionError(f"unexpected token: {token}")
 
     async def fetch_fresh(user_id: str):
         fetches.append(user_id)
@@ -3463,7 +3568,7 @@ async def test_client_reproduces_rotated_gpt_direct_auth_deadline():
                 messages=[{"role": "user", "content": "repro final explore synthesis"}],
                 gpt_auth=auth,
                 call_site="explore_agent",
-                deadline_s=0.2,
+                deadline_s=5.0,
                 ttft_timeout_s=0.05,
                 idle_timeout_s=0.5,
             ):
@@ -3622,7 +3727,7 @@ async def test_client_splits_pydantic_model_to_claude_native_tools():
             "index": 0,
             "delta": {
                 "type": "input_json_delta",
-                "partial_json": '{"condition":"package ships"}',
+                "partial_json": '{"description":"the package to ship","condition":"package ships"}',
             },
         },
     )
@@ -3665,13 +3770,16 @@ async def test_client_splits_pydantic_model_to_claude_native_tools():
     assert "strict" not in tools["wait_for"]
     wait_schema = tools["wait_for"]["input_schema"]
     assert "tool" not in wait_schema["properties"]
-    assert wait_schema["required"] == []
+    assert wait_schema["required"] == ["description"]
     assert wait_schema["properties"]["check_interval_seconds"]["minimum"] == 60
     assert wait_schema["properties"]["check_interval_seconds"]["maximum"] == 86400
 
     tool_call = next(c for c in chunks if c.kind == "tool_call")
     assert tool_call.data["name"] == "wait_for"
-    assert json.loads(tool_call.data["arguments"]) == {"condition": "package ships"}
+    assert json.loads(tool_call.data["arguments"]) == {
+        "description": "the package to ship",
+        "condition": "package ships",
+    }
 
 
 async def test_client_splits_pydantic_model_to_gpt_native_tools():
@@ -3686,7 +3794,7 @@ async def test_client_splits_pydantic_model_to_gpt_native_tools():
                 "type": "function_call",
                 "call_id": "call_wait",
                 "name": "wait_for",
-                "arguments": '{"condition":"package ships"}',
+                "arguments": '{"description":"the package to ship","condition":"package ships"}',
             },
         },
     )
@@ -3730,13 +3838,16 @@ async def test_client_splits_pydantic_model_to_gpt_native_tools():
     assert seen_body["tool_choice"] == "required"
     tools = {tool["name"]: tool for tool in seen_body["tools"]}
     assert set(tools) == {"wait_for", "attempt_completion"}
-    assert tools["wait_for"]["parameters"]["required"] == []
+    assert tools["wait_for"]["parameters"]["required"] == ["description"]
 
     metadata = next(c for c in chunks if c.kind == "metadata")
     assert metadata.data["actual_model"].endswith("-gpt")
     tool_call = next(c for c in chunks if c.kind == "tool_call")
     assert tool_call.data["name"] == "wait_for"
-    assert json.loads(tool_call.data["arguments"]) == {"condition": "package ships"}
+    assert json.loads(tool_call.data["arguments"]) == {
+        "description": "the package to ship",
+        "condition": "package ships",
+    }
 
 
 async def test_client_plain_pydantic_model_uses_claude_output_config():
@@ -4576,12 +4687,8 @@ async def run_all_tests():
     await r.record_async(
         "anthropic_apikey_402_payment_required", test_anthropic_api_key_complete_402_raises_payment_required
     )
-    await r.record_async(
-        "anthropic_apikey_suffix", test_anthropic_api_key_complete_sets_anthropic_suffix
-    )
-    await r.record_async(
-        "anthropic_apikey_cooldown_mark", test_anthropic_api_key_cooldown_mark_then_on_cooldown
-    )
+    await r.record_async("anthropic_apikey_suffix", test_anthropic_api_key_complete_sets_anthropic_suffix)
+    await r.record_async("anthropic_apikey_cooldown_mark", test_anthropic_api_key_cooldown_mark_then_on_cooldown)
     await r.record_async(
         "openai_apikey_before_anthropic_openrouter",
         test_client_openai_api_key_serves_before_anthropic_and_openrouter,
@@ -4602,6 +4709,14 @@ async def run_all_tests():
     )
 
     await r.record_async("client_collect_waterfall", test_client_collect_waterfall_only_path)
+    await r.record_async(
+        "client_collect_multiple_unstructured_items",
+        test_client_collect_preserves_multiple_unstructured_text_items,
+    )
+    await r.record_async(
+        "client_collect_selects_final_structured_item",
+        test_client_collect_selects_final_structured_output_item,
+    )
     await r.record_async("client_collect_common_timing_logs", test_client_collect_emits_common_rose_timing_logs)
     await r.record_async("client_fallthrough_to_waterfall", test_client_falls_through_from_claude_auth_to_waterfall)
     await r.record_async(
@@ -4637,12 +4752,8 @@ async def run_all_tests():
     await r.record_async(
         "client_gpt_pydantic_native_tools_split", test_client_splits_pydantic_model_to_gpt_native_tools
     )
-    await r.record_async(
-        "client_pydantic_output_config", test_client_plain_pydantic_model_uses_claude_output_config
-    )
-    await r.record_async(
-        "client_gpt_pydantic_text_format", test_client_plain_pydantic_model_uses_gpt_text_format
-    )
+    await r.record_async("client_pydantic_output_config", test_client_plain_pydantic_model_uses_claude_output_config)
+    await r.record_async("client_gpt_pydantic_text_format", test_client_plain_pydantic_model_uses_gpt_text_format)
     await r.record_async("client_deadline_enforced", test_client_deadline_enforced)
     await r.record_async("client_ttft_timeout", test_client_ttft_timeout_waits_for_first_productive_chunk)
     await r.record_async(

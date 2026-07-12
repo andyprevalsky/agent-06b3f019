@@ -1,6 +1,10 @@
 #!/usr/bin/env tsx
 
-import { syncPasskeyCredentials } from '../../../scripts/seed-local-credentials';
+import {
+  syncIntegrationCredentials,
+  syncPasskeyCredentials,
+  type IntegrationModel,
+} from '../../../scripts/seed-local-credentials';
 
 type TestFn = () => Promise<void>;
 const tests: Array<{ name: string; fn: TestFn }> = [];
@@ -126,6 +130,45 @@ test('syncPasskeyCredentials copies passkeys and never moves local signCount bac
     'expected new passkey copied'
   );
   assert(!('id' in upserts[0].update), 'expected update not to rewrite local primary key');
+});
+
+test('syncIntegrationCredentials preserves a local id for the same user and name', async () => {
+  const remote = {
+    id: 'remote-gpt-id',
+    userId: 'seed-user',
+    type: 'API' as const,
+    name: 'gpt_code',
+    status: 'CONNECTED' as const,
+    isActive: true,
+    lastSyncAt: null,
+    lastSuccessfulSyncAt: null,
+    lastFailedSyncAt: null,
+    failureReason: null,
+    config: { encryptedCredentials: 'fresh-envelope' },
+    poolingEnabled: false,
+    rateLimitedUntil: null,
+    lastUsedAt: null,
+    createdAt: new Date('2026-01-01T00:00:00Z'),
+    updatedAt: new Date('2026-01-02T00:00:00Z'),
+  };
+  let captured: Record<string, unknown> | undefined;
+  const localModel: IntegrationModel = {
+    upsert: async (args) => {
+      captured = args;
+      return { id: 'local-gpt-id' };
+    },
+  };
+
+  const ids = await syncIntegrationCredentials(localModel, [remote]);
+
+  assert(ids.length === 1 && ids[0] === 'local-gpt-id', 'expected preserved local id');
+  const where = captured?.where as {
+    userId_name?: { userId?: string; name?: string };
+  };
+  assert(where.userId_name?.userId === remote.userId, 'expected compound user id selector');
+  assert(where.userId_name?.name === remote.name, 'expected compound integration name selector');
+  const update = captured?.update as Record<string, unknown>;
+  assert(!('id' in update), 'expected update not to rewrite local primary key');
 });
 
 (async () => {

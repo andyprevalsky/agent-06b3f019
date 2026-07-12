@@ -18,6 +18,7 @@
 
 import { prisma } from '../database';
 import { createStreamingCompletion, CompletionMessage, ContentBlock, markCacheable } from '../rose';
+import { StructuredOutputAccumulator } from '../rose/structuredOutput';
 import { sendSms } from '../smsQueue';
 import { buildSmsContext } from './contextBuilder';
 import { processInboundAttachments, type SurgeAttachment } from './inboundMedia';
@@ -118,8 +119,9 @@ export async function handleSmsSupervisorMessage(config: {
   mySeq: number;
   attachments?: SurgeAttachment[];
   abortSignal?: AbortSignal;
+  commitGuard?: () => Promise<boolean>;
 }): Promise<SmsSupervisorResult> {
-  const { userId, phoneNumber, inboundMessage, mySeq, abortSignal } = config;
+  const { userId, phoneNumber, inboundMessage, mySeq, abortSignal, commitGuard } = config;
   const attachments = config.attachments ?? [];
   const overallStart = Date.now();
 
@@ -361,6 +363,16 @@ export async function handleSmsSupervisorMessage(config: {
       return false;
     }
 
+    if (commitGuard && !(await commitGuard())) {
+      log.info('[SmsSupervisor] Commit guard denied SMS response and pending writes', {
+        userId,
+        mySeq,
+        pendingWritesCount: pendingWrites.length,
+        finalResponseLength: finalResponse.length,
+      });
+      return false;
+    }
+
     // Flush queued writes in order. Each commitX function is idempotent enough
     // for v1 (start_new_agent dedupes on PK; kill is a no-op on absence;
     // increase_budget and reply_to_agent are guarded by this commit-lock).
@@ -537,6 +549,7 @@ async function callSupervisorLlm(
   });
 
   let accumulatedContent = '';
+  const structuredOutput = new StructuredOutputAccumulator();
   let accumulatedReasoning = '';
   const accumulatedToolCalls: ToolCall[] = [];
   let usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | undefined;
@@ -546,7 +559,8 @@ async function callSupervisorLlm(
   for await (const chunk of stream) {
     const choice = chunk.choices?.[0];
     if (choice?.delta?.content) {
-      accumulatedContent += choice.delta.content;
+      structuredOutput.addCompletionChunk(chunk);
+      accumulatedContent = structuredOutput.currentText();
     }
     if (choice?.delta?.reasoning) {
       accumulatedReasoning += choice.delta.reasoning;
@@ -607,6 +621,8 @@ async function callSupervisorLlm(
       tool_calls: accumulatedToolCalls,
     };
   }
+
+  accumulatedContent = structuredOutput.finalText();
 
   // Fallback: structured-output JSON envelope arrived as content (Codex /
   // waterfall path, or claudeAuth when extraction didn't fit the schema shape).

@@ -2,7 +2,7 @@ import { canonicalAuthRealm } from '../../providers/authRealm';
 import { completeAuthAssistanceForUser } from '../../providers/authAssistanceCompletion';
 import { createLogger } from '../../providers/logger';
 import { notifyAuthAssistance } from '../../providers/smsSupervisor/outboundEvents';
-import { getSteelSessionHealth } from '../../providers/steel';
+import { getBrowserSessionHealth } from '../../providers/browser';
 import { resumeBrowserSession } from '../../providers/browserSessionResume';
 import * as repo from './repo';
 import type {
@@ -48,6 +48,7 @@ function interactiveDebugUrl(debugUrl: string | null | undefined): string | null
   if (debugUrl === null || debugUrl === undefined || debugUrl === '') return null;
   try {
     const url = new URL(debugUrl);
+    url.searchParams.delete('readOnly');
     url.searchParams.set('interactive', 'true');
     url.searchParams.set('showControls', 'true');
     return url.toString();
@@ -69,7 +70,7 @@ function handoffForMode(
   };
 }
 
-function isLiveSteelStatus(status: string | null): boolean {
+function isLiveBrowserStatus(status: string | null): boolean {
   if (status === null) return false;
   return ['live', 'active', 'running'].includes(status.toLowerCase());
 }
@@ -205,12 +206,12 @@ export async function refreshAuthAssistanceSession(id: string, userId: string) {
   let sameSessionAvailable = session.status === 'ACTIVE';
   if (sameSessionAvailable) {
     try {
-      const health = await getSteelSessionHealth(liveSteelSessionId);
+      const health = await getBrowserSessionHealth(liveSteelSessionId);
       const hasEnoughTtl = health.ttlMs === null || health.ttlMs > REFRESH_TTL_BUFFER_MS;
-      sameSessionAvailable = isLiveSteelStatus(health.status) && hasEnoughTtl;
+      sameSessionAvailable = isLiveBrowserStatus(health.status) && hasEnoughTtl;
     } catch (error) {
       sameSessionAvailable = false;
-      log.warn('Steel session refresh health check failed', {
+      log.warn('Browser session refresh health check failed', {
         request_id: id,
         session_id: liveSteelSessionId,
         error: error instanceof Error ? error.message : String(error),

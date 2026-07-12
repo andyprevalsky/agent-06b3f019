@@ -221,7 +221,7 @@ if ! $IS_CLOUD; then
         export MAX_CONCURRENT_WORKFLOWS="${MAX_CONCURRENT_WORKFLOWS:-32}"
         export MAX_CACHED_WORKFLOWS="${MAX_CACHED_WORKFLOWS:-64}"
         export MAX_CONCURRENT_WORKFLOW_TASK_POLLERS="${MAX_CONCURRENT_WORKFLOW_TASK_POLLERS:-8}"
-        export NONSTICKY_TO_STICKY_POLL_RATIO="${NONSTICKY_TO_STICKY_POLL_RATIO:-1.0}"
+        export NONSTICKY_TO_STICKY_POLL_RATIO="${NONSTICKY_TO_STICKY_POLL_RATIO:-0.5}"
     else
         export MAX_CONCURRENT_ACTIVITIES="${MAX_CONCURRENT_ACTIVITIES:-500}"
         export MAX_CONCURRENT_ACTIVITY_TASK_POLLERS="${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-80}"
@@ -230,7 +230,7 @@ fi
 
 export NODE_ENV="${NODE_ENV:-development}"
 export TEMPORAL_TASK_QUEUE=navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME
-echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT mac-app=$MAC_APP_PORT metrics=$SDK_METRICS_PORT db=$LOCAL_DB_PORT ngrok_api=$NGROK_WEB_PORT queue=$TEMPORAL_TASK_QUEUE benchmark_mode=$BENCHMARK_MODE worker_processes=${WORKER_PROCESSES:-1} workflow_max_slots=${MAX_CONCURRENT_WORKFLOWS:-50} workflow_pollers=${MAX_CONCURRENT_WORKFLOW_TASK_POLLERS:-8} nonsticky_to_sticky=${NONSTICKY_TO_STICKY_POLL_RATIO:-1.0} activity_max_slots=${MAX_CONCURRENT_ACTIVITIES:-100} activity_pollers=${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-8}"
+echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT mac-app=$MAC_APP_PORT metrics=$SDK_METRICS_PORT db=$LOCAL_DB_PORT ngrok_api=$NGROK_WEB_PORT queue=$TEMPORAL_TASK_QUEUE benchmark_mode=$BENCHMARK_MODE worker_processes=${WORKER_PROCESSES:-1} workflow_max_slots=${MAX_CONCURRENT_WORKFLOWS:-50} workflow_pollers=${MAX_CONCURRENT_WORKFLOW_TASK_POLLERS:-8} nonsticky_to_sticky=${NONSTICKY_TO_STICKY_POLL_RATIO:-0.5} activity_max_slots=${MAX_CONCURRENT_ACTIVITIES:-100} activity_pollers=${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-8}"
 
 run_kill_stale_same_task_queue_workers "$PWD" "$TEMPORAL_TASK_QUEUE" "$BACKEND_API_URL" "$$"
 
@@ -379,7 +379,8 @@ fi
 
 DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME}"
 DB_VOLUME="victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME}"
-DB_OWNED_BY_US=false  # Track whether we started/created the DB (cleanup only stops what we own)
+DB_OWNED_BY_US=false  # Track whether this run started/created the DB.
+DB_OWNED_CONTAINER_ID=""
 USE_SYSTEM_PG=false
 
 if $DOCKER_OK; then
@@ -439,6 +440,10 @@ if $DOCKER_OK; then
         echo "🐘 Creating local Postgres container..."
         create_db_container
         DB_OWNED_BY_US=true
+    fi
+
+    if $DB_OWNED_BY_US; then
+        DB_OWNED_CONTAINER_ID="$(docker inspect --format='{{.Id}}' "$DB_CONTAINER")"
     fi
 
     # Wait for Postgres to accept connections
@@ -813,7 +818,7 @@ data = {
         "max_concurrent_workflows": env_int("MAX_CONCURRENT_WORKFLOWS", 50),
         "max_cached_workflows": env_int("MAX_CACHED_WORKFLOWS", 100),
         "max_concurrent_workflow_task_pollers": env_int("MAX_CONCURRENT_WORKFLOW_TASK_POLLERS", 8),
-        "nonsticky_to_sticky_poll_ratio": float(os.environ.get("NONSTICKY_TO_STICKY_POLL_RATIO", "1.0")),
+        "nonsticky_to_sticky_poll_ratio": float(os.environ.get("NONSTICKY_TO_STICKY_POLL_RATIO", "0.5")),
         "max_concurrent_activities": env_int("MAX_CONCURRENT_ACTIVITIES", 100),
         "max_concurrent_activity_task_pollers": env_int("MAX_CONCURRENT_ACTIVITY_TASK_POLLERS", 8),
     },
@@ -869,12 +874,8 @@ cleanup() {
         bash "$SCRIPT_DIR/kill-services.sh" || true
     fi
     if $DB_OWNED_BY_US && ! $USE_SYSTEM_PG; then
-        if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
-            docker rm -f "$DB_CONTAINER" 2>/dev/null || true
-            docker volume rm "$DB_VOLUME" 2>/dev/null || true
-        else
-            docker stop "$DB_CONTAINER" 2>/dev/null || true
-        fi
+        run_cleanup_owned_db_container \
+            "$DB_OWNED_CONTAINER_ID" "$DB_CONTAINER" "$DB_VOLUME" "$BENCHMARK_ISOLATED_RUN"
     fi
     SERVICE_STATUS=stopped
     write_services_manifest || true

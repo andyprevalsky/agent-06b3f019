@@ -1,7 +1,7 @@
 {
   "name": "rose-desktop",
   "productName": "Rose",
-  "version": "1.1.37",
+  "version": "1.1.38",
   "engines": {
     "node": "20.10.0"
   },
@@ -12,7 +12,7 @@
   },
   "main": "dist/main/main/index.js",
   "scripts": {
-    "dev": "MAC_APP_PORT=${MAC_APP_PORT:-5174} && tsc -p tsconfig.main.json && bash native/passkey-import/build.sh && concurrently \"tsc -p tsconfig.main.json --watch\" \"vite\" \"wait-on http://localhost:$MAC_APP_PORT && electron .\"",
+    "dev": "MAC_APP_PORT=${MAC_APP_PORT:-5174} && tsc -p tsconfig.main.json && npm run build:native && concurrently \"tsc -p tsconfig.main.json --watch\" \"vite\" \"wait-on http://localhost:$MAC_APP_PORT && electron .\"",
     "build": "vite build && tsc -p tsconfig.main.json && npm run build:native && electron-builder",
     "build:native": "bash native/passkey-import/build.sh && bash native/user-activity-bridge/build.sh",
     "build:vite": "vite build && tsc -p tsconfig.main.json",
@@ -47,7 +47,8 @@
     "electron-store": "^8.1.0",
     "electron-updater": "^6.1.7",
     "glob": "^13.0.3",
-    "lucide-react": "^0.263.1",
+    "libphonenumber-js": "^1.13.8",
+    "lucide-react": "^0.462.0",
     "node-mac-contacts": "^1.7.2",
     "puppeteer-core": "^24.36.0",
     "qrcode.react": "^4.2.0",

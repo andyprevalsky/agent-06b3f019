@@ -8,6 +8,8 @@ Usage:
 
 # Examples
 Timestamp mode:
-  wait_for(until_timestamp="2026-03-12T09:00:00Z")
+  wait_for(description="9:00 AM on March 12", until_timestamp="2026-03-12T09:00:00Z")
 Condition mode:
-  wait_for(condition="Bitcoin price is above $100k", check_interval_seconds=900, max_checks=10)"""
+  wait_for(description="BTC price to exceed $100k", condition="Bitcoin price is above $100k", check_interval_seconds=900, max_checks=10)
+  wait_for(description="ticket sales to go live", condition="Tickets on the official event page are publicly available to purchase")
+  wait_for(description="Bar Shoji to reply", condition="Bar Shoji has replied with information about tonight's walk-in availability")"""

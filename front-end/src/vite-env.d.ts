@@ -7,6 +7,7 @@ interface ElectronAuthBridge {
 }
 
 interface ElectronApiBridge {
+  isElectron?: boolean;
   auth?: ElectronAuthBridge;
 }
 

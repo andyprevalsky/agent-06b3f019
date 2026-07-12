@@ -44,7 +44,7 @@ const quickQuery = new QuickQueryController({
 });
 
 registerDeepLinkProtocol(PROTOCOL);
-registerOpenUrlHandler(() => mainWindow);
+registerOpenUrlHandler(() => mainWindow, openAppFromDeepLink);
 
 console.log(`🚀 [Mac App] Mode: ${config.isDev ? 'DEVELOPMENT' : 'PRODUCTION'}`);
 
@@ -101,7 +101,7 @@ function initializeWindowsAndIpc(): void {
 function handleInitialDeepLink(): void {
   const deepLinkArg = process.argv.find((arg) => arg.startsWith(`${PROTOCOL}://`));
   if (deepLinkArg !== undefined) {
-    setTimeout(() => handleDeepLink(deepLinkArg, () => mainWindow), 500);
+    setTimeout(() => handleDeepLink(deepLinkArg, () => mainWindow, openAppFromDeepLink), 500);
   }
 }
 
@@ -138,7 +138,7 @@ app.on('window-all-closed', () => {
 });
 
 function handleActivate(): void {
-  if (mainWindow === null) {
+  if (mainWindow === null || mainWindow.isDestroyed()) {
     const window = buildMainWindow();
     setAutoUpdaterWindow(window);
   }
@@ -148,6 +148,27 @@ function handleActivate(): void {
   }
 
   showMainWindow();
+}
+
+function openAppFromDeepLink(agentId: string | null): void {
+  if (!app.isReady()) {
+    void app.whenReady().then(() => openAppFromDeepLink(agentId));
+    return;
+  }
+
+  const mustWaitForRenderer = mainWindow === null || mainWindow.isDestroyed();
+  handleActivate();
+  const window = mainWindow;
+  if (agentId === null || window === null || window.isDestroyed()) return;
+
+  const selectAgent = () => {
+    if (!window.isDestroyed()) window.webContents.send('open-agent', agentId);
+  };
+  if (mustWaitForRenderer || window.webContents.isLoading()) {
+    window.webContents.once('did-finish-load', selectAgent);
+  } else {
+    selectAgent();
+  }
 }
 
 app.on('activate', () => {

@@ -16,7 +16,7 @@ import { type RequestHandler, type Response, Router } from 'express';
 import { type AuthRequest, authenticate } from '../../providers/auth';
 import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { createLogger } from '../../providers/logger';
-import { SteelRateLimitError } from '../../providers/steel';
+import { BrowserProviderRateLimitError } from '../../providers/browser';
 // eslint-disable-next-line no-restricted-imports -- Express file upload middleware, configured per-route
 import multer from 'multer';
 import { asyncHandler } from '../../utils/asyncHandler';
@@ -42,6 +42,7 @@ import {
   resumeSessionSchema,
   injectLocalStorageSchema,
 } from './types';
+import { registerBrowserDataRoutes } from './routes.files';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -76,10 +77,13 @@ router.post(
 
       res.json({ success: true, ...result });
     } catch (error) {
-      if (error instanceof SteelRateLimitError) {
-        log.warn('Steel rate limit hit during session init');
+      if (error instanceof BrowserProviderRateLimitError) {
+        log.warn('Browser provider rate limit hit during session init', {
+          provider: error.provider,
+        });
         res.status(429).json({
-          error: 'steel_rate_limit',
+          error: 'browser_provider_rate_limit',
+          provider: error.provider,
           message: 'Browser session rate limit exceeded. Retry after delay.',
         });
         return;
@@ -134,10 +138,13 @@ router.post(
 
       res.json({ success: true, ...result });
     } catch (error) {
-      if (error instanceof SteelRateLimitError) {
-        log.warn('Steel rate limit hit during session resume');
+      if (error instanceof BrowserProviderRateLimitError) {
+        log.warn('Browser provider rate limit hit during session resume', {
+          provider: error.provider,
+        });
         res.status(429).json({
-          error: 'steel_rate_limit',
+          error: 'browser_provider_rate_limit',
+          provider: error.provider,
           message: 'Browser session rate limit exceeded. Retry after delay.',
         });
         return;
@@ -300,6 +307,8 @@ router.get(
     }
   })
 );
+
+registerBrowserDataRoutes(router);
 
 /**
  * POST /api/browser-session/:sessionId/inject-localStorage

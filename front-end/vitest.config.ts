@@ -27,6 +27,12 @@ export default defineConfig({
     css: false,
     maxWorkers: 8,
     minWorkers: 1,
+    // Coverage instrumentation plus the deploy workflow's concurrent backend
+    // verifier can push the full Terminal interaction tests past Vitest's 5s
+    // default on shared CI/developer machines. Keep a bounded but realistic
+    // ceiling so genuine hangs still fail quickly.
+    testTimeout: 15_000,
+    hookTimeout: 15_000,
     coverage: {
       provider: 'v8',
       reporter: ['text', 'text-summary', 'json-summary'],

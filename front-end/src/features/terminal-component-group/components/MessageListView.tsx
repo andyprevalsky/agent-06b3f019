@@ -1,7 +1,18 @@
 /**
+ * STATE MACHINE: MessageListView render tail
+ *
+ * [TOOL ACTIVE] -> render tool last; thinking hidden
+ * [NO TOOL + THINKING] -> render banners/attention, then thinking last
+ * [IDLE] -> render persisted content only
+ *
  * Presentational shell for MessageList. Receives all state/derived values
  * as props; performs no hook calls of its own. Extracted to keep the
  * MessageList top-level function body below the 80-line strict limit.
+ *
+ * STATE MACHINE:
+ *   Any task + web client --> preview banner --> open app | automatic download fallback
+ *   Any task + Mac client ---------------------> no preview banner
+ *   <=1 thinking stream --> one indicator; >1 streams --> one per stream
  *
  * MOBILE ENTRY ANIMATION:
  * The container scope lets CSS disable only direct message root entry
@@ -9,6 +20,7 @@
  * non-message panel flashes.
  */
 import type { AgentDetail, Message } from '../hooks';
+import { getClientSource } from '@/lib/clientSource';
 import type { ExploreStep, FeedbackData, WaitForCheck } from '../types';
 import type { FilteredStreamingState } from './useMessageFiltering';
 import type { MessageAnimationState } from './useMessageList';
@@ -42,6 +54,56 @@ export interface MessageListViewProps {
   onSendMessage: (text: string) => void;
 }
 
+interface ThinkingIndicatorsProps {
+  visible: boolean;
+  compact: boolean;
+  streaming: FilteredStreamingState;
+  streamingTokenCount: number;
+  animatedTokenCount: number;
+}
+
+function ThinkingIndicators({
+  visible,
+  compact,
+  streaming,
+  streamingTokenCount,
+  animatedTokenCount,
+}: ThinkingIndicatorsProps) {
+  if (!visible) return null;
+  const bubbles = [...streaming.bubbles.entries()].sort(([, a], [, b]) => {
+    return (a.startedAtMs ?? 0) - (b.startedAtMs ?? 0);
+  });
+  if (bubbles.length <= 1) {
+    const singleBubble = bubbles[0]?.[1];
+    return (
+      <ThinkingIndicator
+        compact={compact}
+        isClaudeStreaming={
+          singleBubble
+            ? singleBubble.isClaude === true || singleBubble.isGpt === true
+            : streaming.isClaude || streaming.isGpt
+        }
+        streamStartedAtMs={singleBubble ? singleBubble.startedAtMs : streaming.streamStartedAtMs}
+        streamingTokenCount={streamingTokenCount}
+        animatedTokenCount={animatedTokenCount}
+      />
+    );
+  }
+  return bubbles.map(([streamId, bubble]) => {
+    const tokenCount = Math.round(bubble.text.length / 4);
+    return (
+      <ThinkingIndicator
+        key={`thinking-${streamId}`}
+        compact={compact}
+        isClaudeStreaming={bubble.isClaude === true || bubble.isGpt === true}
+        streamStartedAtMs={bubble.startedAtMs}
+        streamingTokenCount={tokenCount}
+        animatedTokenCount={tokenCount}
+      />
+    );
+  });
+}
+
 export function MessageListView(props: MessageListViewProps) {
   const {
     containerRef,
@@ -70,11 +132,8 @@ export function MessageListView(props: MessageListViewProps) {
   const showMainBanners = showStatusBanners && subAgentId === undefined;
   const showAttention =
     streaming.attention !== null && subAgentId === undefined && streaming.bubbles.size > 0;
-  const showWebPreview = showMainBanners && agent?.source === 'WEB';
+  const showWebPreview = showMainBanners && agent !== null && getClientSource() === 'WEB';
   const thinkingStreamTokenCount = Math.round(streaming.charCount / 4);
-  const thinkingBubbles = [...streaming.bubbles.entries()].sort(([, a], [, b]) => {
-    return (a.startedAtMs ?? 0) - (b.startedAtMs ?? 0);
-  });
 
   return (
     <div ref={containerRef} className={`${containerClassName} mobile-disable-message-entry-spawn`}>
@@ -104,35 +163,18 @@ export function MessageListView(props: MessageListViewProps) {
           onIncreaseCostLimit={onIncreaseCostLimit}
         />
       )}
-      {thinkingVisible && thinkingBubbles.length <= 1 && (
-        <ThinkingIndicator
-          compact={compact}
-          isClaudeStreaming={streaming.isClaude || streaming.isGpt}
-          streamStartedAtMs={streaming.streamStartedAtMs}
-          streamingTokenCount={thinkingStreamTokenCount}
-          animatedTokenCount={animatedTokenCount}
-        />
-      )}
-      {thinkingVisible &&
-        thinkingBubbles.length > 1 &&
-        thinkingBubbles.map(([streamId, bubble]) => {
-          const tokenCount = Math.round(bubble.text.length / 4);
-          return (
-            <ThinkingIndicator
-              key={`thinking-${streamId}`}
-              compact={compact}
-              isClaudeStreaming={bubble.isClaude === true || bubble.isGpt === true}
-              streamStartedAtMs={bubble.startedAtMs}
-              streamingTokenCount={tokenCount}
-              animatedTokenCount={tokenCount}
-            />
-          );
-        })}
-      <StreamingTools tools={[...streaming.tools.values()]} compact={compact} />
       {showAttention && streaming.attention && (
         <StreamingAttentionBubble attention={streaming.attention} onSendMessage={onSendMessage} />
       )}
-      {showWebPreview && <WebPreviewBanner />}
+      {showWebPreview && agent !== null && <WebPreviewBanner agentId={agent.agent_id} />}
+      <StreamingTools tools={[...streaming.tools.values()]} compact={compact} />
+      <ThinkingIndicators
+        visible={thinkingVisible}
+        compact={compact}
+        streaming={streaming}
+        streamingTokenCount={thinkingStreamTokenCount}
+        animatedTokenCount={animatedTokenCount}
+      />
       <div ref={scrollEndRef} />
     </div>
   );

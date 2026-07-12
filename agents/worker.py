@@ -1,6 +1,7 @@
 """Temporal worker for Rose autonomous agents."""
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
@@ -15,9 +16,6 @@ from temporalio.client import Client, TLSConfig
 from temporalio.runtime import PrometheusConfig, Runtime, TelemetryConfig
 from temporalio.worker import (
     FixedSizeSlotSupplier,
-    ResourceBasedSlotConfig,
-    ResourceBasedSlotSupplier,
-    ResourceBasedTunerConfig,
     Worker,
     WorkerTuner,
 )
@@ -57,7 +55,10 @@ from domains.spawn_agent.service import (
     fetch_full_network_metadata,
     spawn_explore_agent_activity,
 )
-from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+from domains.spawn_browser_agent_v3.handler import (
+    drain_background_browser_cleanups,
+    spawn_browser_agent_activity_v3,
+)
 from domains.spawn_claude_code_agent.service import spawn_claude_code_activity
 from domains.spawn_sub_agents.service import (
     spawn_sub_agent_activity,
@@ -194,9 +195,9 @@ import httpx
 # Every worker polls Temporal (1s), computes desired fleet size.
 # Only the leader (lowest-IP via Fly DNS) actuates via Fly Machines API.
 #
-# Capacity is observed in real-time from the SDK's resource-based tuner
+# Capacity is observed in real-time from the SDK's slot metrics
 # (worker_task_slots_used + worker_task_slots_available on localhost:9090).
-# No hardcoded magic numbers — the tuner adjusts slots based on CPU/memory.
+# Admission telemetry separately reports CPU/memory pressure.
 #
 # Scale-up (eager):   backlog >= 20% of observed capacity → add machines
 #                     or machine memory >= threshold with running workflows
@@ -600,7 +601,7 @@ async def poll_queue_metrics(
     API to start/stop machines.
 
     Scale-up (eager):
-      Capacity is observed in real-time from the SDK's resource-based tuner
+      Capacity is observed in real-time from the SDK's slot metrics
       (worker_task_slots_used + worker_task_slots_available on localhost:9090).
       When backlog >= 20% of observed capacity, add ceil(backlog / capacity) machines.
       The 20% threshold absorbs transient blips; ceil() ensures we add enough
@@ -914,7 +915,7 @@ async def main():
     print(f"🚀 [Agents] Mode: {'PRODUCTION' if is_production else 'DEVELOPMENT'}")
 
     # Set up Temporal SDK runtime with Prometheus metrics exporter.
-    # Exposes worker_task_slots_used/available from the resource-based tuner
+    # Exposes worker_task_slots_used/available from the SDK slot suppliers
     # on a local port. The autoscaler scrapes these to get real capacity.
     runtime = Runtime(telemetry=TelemetryConfig(metrics=PrometheusConfig(bind_address=f"0.0.0.0:{SDK_METRICS_PORT}")))
 
@@ -976,18 +977,29 @@ async def main():
         open_cpu_percent=config.temporal.activity_admission_open_cpu_percent,
     )
 
-    # Workflow slots still use Temporal's resource tuner. Activity slots use
-    # the SDK-native fixed supplier. Avoid Python CustomSlotSupplier callbacks:
-    # Temporal invokes them from Rust worker threads, and GIL re-entry can
-    # deadlock the worker under activity heartbeat traffic.
-    resource_cfg = ResourceBasedTunerConfig(target_memory_usage=0.8, target_cpu_usage=0.8)
+    # All slot suppliers are SDK-native fixed-size. Avoid Python
+    # CustomSlotSupplier callbacks: Temporal invokes them from Rust worker
+    # threads, and GIL re-entry can deadlock the worker under activity
+    # heartbeat traffic.
+    #
+    # Workflow slots MUST NOT use ResourceBasedSlotSupplier. Workflow tasks are
+    # cheap state-machine steps, but pollers must reserve a workflow-task slot
+    # BEFORE polling — so when host memory sits above the tuner's target (the
+    # steady state on dev Macs at ~83-85% and on prod Fly machines, where the
+    # autoscaler deliberately runs memory up to its 75-80% thresholds), the
+    # supplier throttles permits to its minimum and the sticky pollers lose
+    # the permit race to the nonsticky pollers. The sticky queue then goes
+    # unpolled and EVERY workflow task burns the full
+    # sticky_queue_schedule_to_start_timeout (10s) before being rescheduled on
+    # the normal queue, where a random other worker picks it up with a full
+    # history replay. Observed: message-person smoke replay with $0 LLM cost
+    # spent ~137s of 153s in ~13 back-to-back 10s sticky timeouts.
+    # Memory protection for the actually-heavy work is the activity admission
+    # gate above (closes at activity_admission_close_memory_percent /
+    # activity_admission_close_cpu_percent) plus the fleet autoscaler — not
+    # workflow-task slot starvation.
     tuner = WorkerTuner.create_composite(
-        workflow_supplier=ResourceBasedSlotSupplier(
-            ResourceBasedSlotConfig(
-                maximum_slots=config.temporal.max_concurrent_workflows,
-            ),
-            resource_cfg,
-        ),
+        workflow_supplier=FixedSizeSlotSupplier(config.temporal.max_concurrent_workflows),
         activity_supplier=FixedSizeSlotSupplier(config.temporal.max_concurrent_activities),
         local_activity_supplier=FixedSizeSlotSupplier(100),
         nexus_supplier=FixedSizeSlotSupplier(100),
@@ -1112,11 +1124,7 @@ async def main():
         max_activity_slots=config.temporal.max_concurrent_activities,
         max_workflow_slots=config.temporal.max_concurrent_workflows,
         nonsticky_to_sticky_poll_ratio=config.temporal.nonsticky_to_sticky_poll_ratio,
-        sticky_queue_schedule_to_start_timeout_seconds=(
-            config.temporal.sticky_queue_schedule_to_start_timeout_seconds
-        ),
-        target_cpu=0.8,
-        workflow_target_memory=0.8,
+        sticky_queue_schedule_to_start_timeout_seconds=(config.temporal.sticky_queue_schedule_to_start_timeout_seconds),
     )
 
     # Handle shutdown gracefully using asyncio signal handlers
@@ -1184,6 +1192,11 @@ async def main():
                 logger.info("Worker shutdown complete, cancelling worker task...")
             except asyncio.TimeoutError:
                 logger.warning("⚠️ Graceful shutdown timed out after 5s, forcing exit...")
+                # os._exit() bypasses the finally block below, so drain detached
+                # browser cleanups here too (bounded) before we hard-exit, or
+                # Steel/Playwright sessions get orphaned on the timeout path.
+                with contextlib.suppress(Exception):
+                    await drain_background_browser_cleanups(timeout=10.0)
                 os._exit(1)
             finally:
                 force_task.cancel()
@@ -1209,6 +1222,12 @@ async def main():
         raise
     finally:
         set_worker_status(False)
+        # Drain detached browser cleanups so Steel/Playwright sessions and driver
+        # PIDs aren't orphaned when the worker exits mid-teardown. Uses the drain
+        # helper's default timeout, sized to the worst-case single-cleanup latency;
+        # it returns as soon as all tasks finish (typically fast).
+        with contextlib.suppress(Exception):
+            await drain_background_browser_cleanups()
         if _profiler is not None:
             _profiler.disable()
             out = f"worker-profile-{os.getenv('WORKER_INDEX', '0')}.prof"

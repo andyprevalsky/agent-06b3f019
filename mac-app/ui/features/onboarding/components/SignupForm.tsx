@@ -1,6 +1,12 @@
 import { ArrowRight } from 'lucide-react';
+import PhoneInput from '@/features/auth/components/PhoneInput';
 import { RoseLogo, ErrorBanner, fontFamily } from './OnboardingAuthShared';
-import { formatPhoneNumber } from '../hooks';
+
+const PHONE_FIELD_CLASS =
+  'w-full px-3 py-3 bg-muted/30 border border-border rounded-xl text-foreground text-sm placeholder-muted-foreground/50 focus:outline-none focus:border-foreground/20 transition-all';
+
+const PHONE_TRIGGER_CLASS =
+  'flex h-full items-center gap-1 px-2.5 py-3 bg-muted/30 border border-border rounded-xl text-foreground text-sm';
 
 interface SignupFormProps {
   firstName: string;
@@ -55,14 +61,12 @@ export const SignupForm = ({
           className="w-full px-3 py-3 bg-muted/30 border border-border rounded-xl text-foreground text-sm placeholder-muted-foreground/50 focus:outline-none focus:border-foreground/20 transition-all"
           disabled={loading}
         />
-        <input
-          type="tel"
-          placeholder="Phone number"
+        <PhoneInput
           value={phone}
-          onChange={(e) => onPhoneChange(formatPhoneNumber(e.target.value))}
-          required
-          className="w-full px-3 py-3 bg-muted/30 border border-border rounded-xl text-foreground text-sm placeholder-muted-foreground/50 focus:outline-none focus:border-foreground/20 transition-all"
+          onChange={onPhoneChange}
           disabled={loading}
+          inputClassName={PHONE_FIELD_CLASS}
+          triggerClassName={PHONE_TRIGGER_CLASS}
         />
         <button
           type="submit"

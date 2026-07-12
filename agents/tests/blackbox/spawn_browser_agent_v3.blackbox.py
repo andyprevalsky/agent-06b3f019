@@ -17,6 +17,8 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from _test_utils import (
     BlackboxResult,
     assert_captured_call,
@@ -122,10 +124,73 @@ async def test_cdp_use_websocket_patch_disables_proxy_discovery():
         cdp_client.websockets.connect = original_connect
 
 
+def test_browser_action_log_summary_redacts_payment_secrets():
+    from domains.spawn_browser_agent_v3.handler import (
+        _redact_browser_log_value,
+        _summarize_browser_action_history_entry,
+        _summarize_browser_action_for_log,
+        _summarize_payment_request_for_log,
+    )
+
+    action_summary = _summarize_browser_action_for_log(
+        {
+            "action": "request_payment_card",
+            "params": {
+                "merchant": "Blick Art Materials",
+                "line_items": [{"name": "Brush", "quantity": 1, "line_total_cents": 636}],
+                "subtotal_cents": 636,
+                "total_cents": 636,
+                "text": "SHOULD_NOT_LOG_TYPED_TEXT",
+                "card_cvv": "SHOULD_NOT_LOG_CVV",
+                "password": "SHOULD_NOT_LOG_PASSWORD",
+            },
+        }
+    )
+    payment_summary = _summarize_payment_request_for_log(
+        {
+            "merchant": "Blick Art Materials",
+            "line_items": [{"name": "Brush", "quantity": 1, "line_total_cents": 636}],
+            "subtotal_cents": 636,
+            "total_cents": 636,
+        }
+    )
+
+    assert action_summary["action"] == "request_payment_card"
+    assert action_summary["line_items_count"] == 1
+    assert action_summary["params"]["merchant"] == "Blick Art Materials"
+    assert payment_summary["line_items_count"] == 1
+    assert _redact_browser_log_value("card_cvv", "SHOULD_NOT_LOG_CVV") == "<redacted>"
+
+    history_entry = _summarize_browser_action_history_entry(
+        "input_text",
+        {
+            "action": "input_text",
+            "params": {
+                "text": "SHOULD_NOT_LOG_TYPED_TEXT",
+                "card_cvv": "SHOULD_NOT_LOG_CVV",
+                "merchant": "Blick Art Materials",
+            },
+        },
+    )
+
+    serialized = json.dumps(
+        {"action": action_summary, "payment": payment_summary, "history": history_entry}, sort_keys=True
+    )
+    assert "SHOULD_NOT_LOG_TYPED_TEXT" not in serialized
+    assert "SHOULD_NOT_LOG_CVV" not in serialized
+    assert "SHOULD_NOT_LOG_PASSWORD" not in serialized
+
+
+def test_browser_progress_title_describes_active_agent():
+    from domains.spawn_browser_agent_v3.handler import BROWSER_PROGRESS_TITLE
+
+    assert BROWSER_PROGRESS_TITLE == "Browser Agent In Progress"
+
+
 def test_verifier_activity_timeout_allows_llm_call():
     """Browser verifier uses the standard LLM activity budget."""
     from domains.spawn_browser_agent_v3.config import VERIFIER_ULTRA_TIMEOUT_SECONDS
-    from helpers.llm_timeouts import STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
+    from utils.llm_timeouts import STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
 
     assert VERIFIER_ULTRA_TIMEOUT_SECONDS == STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
 
@@ -774,6 +839,117 @@ async def test_browser_recording_finalizer_keeps_local_artifacts_when_upload_fai
         save_mock.assert_awaited_once()
         metadata = save_mock.await_args.kwargs["extra_metadata"]
         assert metadata["recording_file_pointer"] is None
+
+
+async def test_browser_cleanup_scheduler_does_not_block_on_recording_finalization():
+    import tempfile
+
+    from domains.spawn_browser_agent_v3.handler import (
+        _background_browser_cleanup_tasks,
+        _schedule_browser_cleanup,
+    )
+
+    class SlowRecorder:
+        def __init__(self, output_dir):
+            self.output_dir = Path(output_dir)
+            self.release = asyncio.Event()
+            self.cleanup_called = False
+
+        async def close(self, *, include_steel_media=True):
+            await self.release.wait()
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            path = self.output_dir / "index.html"
+            path.write_text("<html>recording</html>", encoding="utf-8")
+            return path
+
+        def export_inline_html_bytes(self):
+            return b"<html>inline replay</html>"
+
+        def cleanup_local_artifacts(self, *, persisted=False):
+            self.cleanup_called = True
+
+    with tempfile.TemporaryDirectory() as tmp:
+        recorder = SlowRecorder(tmp)
+        with (
+            patch(
+                "domains.spawn_browser_agent_v3.handler.upload_to_storage",
+                new_callable=AsyncMock,
+                return_value={"id": "file-pointer-1"},
+            ) as upload_mock,
+            patch(
+                "domains.spawn_browser_agent_v3.handler.save_browser_action_message",
+                new_callable=AsyncMock,
+            ) as save_mock,
+        ):
+            cleanup_task = _schedule_browser_cleanup(
+                agent_id="agent-1",
+                task_id="task-1",
+                user_id="user-1",
+                browser_url="https://debug",
+                browser_session_metadata={"provider": "steel"},
+                input_page=None,
+                start_url="",
+                cursor_streamer=None,
+                interaction_layer_task=None,
+                humanizer=None,
+                browser_network_recorder=None,
+                network_recorder_task=None,
+                browser_recorder=recorder,
+                dom_service=None,
+                playwright_browser=None,
+                playwright_instance=None,
+                playwright_driver_pid=None,
+            )
+            await asyncio.sleep(0)
+
+            assert cleanup_task in _background_browser_cleanup_tasks
+            assert not cleanup_task.done()
+            upload_mock.assert_not_awaited()
+            save_mock.assert_not_awaited()
+
+            recorder.release.set()
+            await cleanup_task
+
+        assert cleanup_task not in _background_browser_cleanup_tasks
+        assert recorder.cleanup_called is True
+        upload_mock.assert_awaited_once()
+        save_mock.assert_awaited_once()
+
+
+async def test_drain_background_browser_cleanups_waits_then_times_out():
+    import contextlib
+
+    from domains.spawn_browser_agent_v3.handler import (
+        _background_browser_cleanup_tasks,
+        drain_background_browser_cleanups,
+    )
+
+    # No pending tasks -> returns immediately.
+    await asyncio.wait_for(drain_background_browser_cleanups(timeout=0.1), timeout=1)
+
+    release = asyncio.Event()
+
+    async def _slow_cleanup() -> None:
+        await release.wait()
+
+    task = asyncio.create_task(_slow_cleanup())
+    _background_browser_cleanup_tasks.add(task)
+    task.add_done_callback(lambda done: _background_browser_cleanup_tasks.discard(done))
+    try:
+        # Drain blocks while the cleanup is in-flight, then times out without
+        # raising (worker shutdown must not hang forever on a stuck teardown).
+        await asyncio.wait_for(drain_background_browser_cleanups(timeout=0.2), timeout=2)
+        assert not task.done()  # still running; drain did not cancel it
+
+        # Once the cleanup finishes, drain returns promptly by awaiting it.
+        release.set()
+        await asyncio.wait_for(drain_background_browser_cleanups(timeout=1.0), timeout=2)
+        assert task.done()
+    finally:
+        release.set()
+        with contextlib.suppress(Exception):
+            await task
+        _background_browser_cleanup_tasks.discard(task)
 
 
 def test_browser_agent_recording_inline_export_uses_source_frames_once():
@@ -3016,11 +3192,17 @@ async def test_save_browser_assistant_message():
     setup_mock({"/api/agents/": {"status": 200, "json": {"ok": True}}})
 
     with patch("config.load_config", return_value=_fake_config()):
-        await save_browser_assistant_message("ag1", "hello world", "task-1")
+        await save_browser_assistant_message(
+            "ag1",
+            "hello world",
+            "task-1",
+            stream_id="browser-stream-1",
+        )
 
     body = json.loads(get_captured_requests()[0]["requestBody"])
     assert body["role"] == "ASSISTANT"
     assert body["metadata"]["subAgentId"] == "task-1"
+    assert body["metadata"]["streamId"] == "browser-stream-1"
 
 
 async def test_save_browser_assistant_message_swallows_exception():
@@ -3061,8 +3243,8 @@ async def test_save_browser_credential_ref_message_user_role():
 async def test_list_session_files_no_api_key():
     from domains.spawn_browser_agent_v3 import repo
 
-    with patch.object(repo, "STEEL_API_KEY", ""):
-        assert await repo.list_session_files("s1") == []
+    setup_mock({"backend.example.com": {"status": 401, "json": {"error": "unauthorized"}}})
+    assert await repo.list_session_files(_fake_config(backend_api_key=""), "s1") == []
 
 
 async def test_list_session_files_success():
@@ -3070,23 +3252,21 @@ async def test_list_session_files_success():
 
     setup_mock(
         {
-            "api.steel.dev/v1/sessions/s1/files": {
+            "backend.example.com/api/browser-session/s1/files/list": {
                 "status": 200,
-                "json": {"data": [{"path": "/f/x.pdf"}]},
+                "json": {"files": [{"path": "/f/x.pdf"}]},
             }
         }
     )
-    with patch.object(repo, "STEEL_API_KEY", "sk-steel"):
-        files = await repo.list_session_files("s1")
+    files = await repo.list_session_files(_fake_config(), "s1")
     assert files == [{"path": "/f/x.pdf"}]
 
 
 async def test_list_session_files_non_200():
     from domains.spawn_browser_agent_v3 import repo
 
-    setup_mock({"api.steel.dev": {"status": 500, "json": {"err": "x"}}})
-    with patch.object(repo, "STEEL_API_KEY", "sk-steel"):
-        assert await repo.list_session_files("s1") == []
+    setup_mock({"backend.example.com": {"status": 500, "json": {"err": "x"}}})
+    assert await repo.list_session_files(_fake_config(), "s1") == []
 
 
 async def test_list_session_files_network_error():
@@ -3097,15 +3277,14 @@ async def test_list_session_files_network_error():
         raise RuntimeError("net")
 
     setup_mock_fn(boom)
-    with patch.object(repo, "STEEL_API_KEY", "sk-steel"):
-        assert await repo.list_session_files("s1") == []
+    assert await repo.list_session_files(_fake_config(), "s1") == []
 
 
 async def test_download_file_from_steel_no_api_key():
     from domains.spawn_browser_agent_v3 import repo
 
-    with patch.object(repo, "STEEL_API_KEY", ""):
-        assert await repo.download_file_from_steel("s1", "/files/x.pdf") is None
+    setup_mock({"backend.example.com": {"status": 401, "text": "unauthorized"}})
+    assert await repo.download_session_file(_fake_config(backend_api_key=""), "s1", "/files/x.pdf") is None
 
 
 async def test_download_file_from_steel_strips_prefixes():
@@ -3122,16 +3301,14 @@ async def test_download_file_from_steel_strips_prefixes():
     from _test_utils import setup_mock_fn
 
     setup_mock_fn(handler)
-    with patch.object(repo, "STEEL_API_KEY", "sk"):
-        out = await repo.download_file_from_steel("s1", "/files/doc.pdf")
+    out = await repo.download_session_file(_fake_config(), "s1", "/files/doc.pdf")
 
     assert out is not None
     assert out["content"] == b"PDFDATA"
     assert out["filename"] == "doc.pdf"
     assert out["mime_type"] == "application/pdf"
-    assert "files/doc.pdf" in captured["url"]
-    # "/files/" prefix should have been stripped before Steel path
-    assert "/files//files/" not in captured["url"]
+    assert "/api/browser-session/s1/files/content" in captured["url"]
+    assert "path=%2Ffiles%2Fdoc.pdf" in captured["url"]
 
 
 async def test_download_file_from_steel_strips_leading_slash():
@@ -3145,8 +3322,7 @@ async def test_download_file_from_steel_strips_leading_slash():
     from _test_utils import setup_mock_fn
 
     setup_mock_fn(handler)
-    with patch.object(repo, "STEEL_API_KEY", "sk"):
-        out = await repo.download_file_from_steel("s1", "/simple.txt")
+    out = await repo.download_session_file(_fake_config(), "s1", "/simple.txt")
     assert out is not None
     assert out["mime_type"] == "text/plain"
 
@@ -3154,9 +3330,8 @@ async def test_download_file_from_steel_strips_leading_slash():
 async def test_download_file_from_steel_non_200():
     from domains.spawn_browser_agent_v3 import repo
 
-    setup_mock({"api.steel.dev": {"status": 404, "text": "not found"}})
-    with patch.object(repo, "STEEL_API_KEY", "sk"):
-        assert await repo.download_file_from_steel("s1", "x") is None
+    setup_mock({"backend.example.com": {"status": 404, "text": "not found"}})
+    assert await repo.download_session_file(_fake_config(), "s1", "x") is None
 
 
 async def test_download_file_from_steel_network_error():
@@ -3167,8 +3342,7 @@ async def test_download_file_from_steel_network_error():
         raise RuntimeError("fail")
 
     setup_mock_fn(boom)
-    with patch.object(repo, "STEEL_API_KEY", "sk"):
-        assert await repo.download_file_from_steel("s1", "x") is None
+    assert await repo.download_session_file(_fake_config(), "s1", "x") is None
 
 
 async def test_take_steel_computer_screenshot_success():
@@ -3176,24 +3350,22 @@ async def test_take_steel_computer_screenshot_success():
 
     setup_mock(
         {
-            "api.steel.dev/v1/sessions/s1/computer": {
+            "backend.example.com/api/browser-session/s1/screenshot": {
                 "status": 200,
                 "json": {
-                    "output": "Screenshot taken successfully",
+                    "provider": "kernel",
                     "base64_image": "abc123",
                 },
             }
         }
     )
-    with patch.object(repo, "STEEL_API_KEY", "sk"):
-        out = await repo.take_steel_computer_screenshot("s1")
+    out = await repo.take_browser_computer_screenshot(_fake_config(), "s1")
     assert out["base64_image"] == "abc123"
     assert_captured_call(
         0,
-        url_contains="api.steel.dev/v1/sessions/s1/computer",
+        url_contains="backend.example.com/api/browser-session/s1/screenshot",
         method="POST",
-        body_contains={"action": "take_screenshot"},
-        header_present="steel-api-key",
+        header_present="x-api-key",
     )
 
 
@@ -3202,22 +3374,21 @@ async def test_take_steel_computer_screenshot_missing_image_raises():
 
     setup_mock(
         {
-            "api.steel.dev/v1/sessions/s1/computer": {
+            "backend.example.com/api/browser-session/s1/screenshot": {
                 "status": 200,
                 "json": {
                     "output": "Screenshot taken successfully",
-                    "system": "steel-browser",
+                    "provider": "kernel",
                 },
             }
         }
     )
-    with patch.object(repo, "STEEL_API_KEY", "sk"):
-        try:
-            await repo.take_steel_computer_screenshot("s1")
-        except RuntimeError as exc:
-            assert "did not return an image" in str(exc)
-        else:
-            raise AssertionError("expected missing base64_image to raise")
+    try:
+        await repo.take_browser_computer_screenshot(_fake_config(), "s1")
+    except RuntimeError as exc:
+        assert "did not return an image" in str(exc)
+    else:
+        raise AssertionError("expected missing base64_image to raise")
 
 
 # ========================================
@@ -3780,12 +3951,13 @@ def test_select_auth_assistance_current_url_keeps_current_when_it_has_query_para
 def test_build_usage_items():
     from domains.spawn_browser_agent_v3.service import build_usage_items
 
-    items = build_usage_items(
-        total_input_tokens=1000,
-        total_output_tokens=2000,
-        model_pricing={"input_cents_per_1k": 0.3, "output_cents_per_1k": 1.5},
-        execution_time_ms=60000,
-    )
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "kernel"}):
+        items = build_usage_items(
+            total_input_tokens=1000,
+            total_output_tokens=2000,
+            model_pricing={"input_cents_per_1k": 0.3, "output_cents_per_1k": 1.5},
+            execution_time_ms=60000,
+        )
     assert len(items) == 2
     assert items[0]["type"] == "llm"
     assert items[0]["provider"] == "Rose 1 Browser Use"
@@ -3794,7 +3966,11 @@ def test_build_usage_items():
     # 1k*0.3 + 2k*1.5 = 0.3 + 3.0 = 3.3
     assert items[0]["cost_cents"] == 3.3
     assert items[1]["type"] == "service"
-    assert items[1]["provider"] == "Steel.dev Browser"
+    assert items[1]["provider"] == "Kernel Browser"
+
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "steel"}):
+        steel_items = build_usage_items(0, 0, {"input_cents_per_1k": 0, "output_cents_per_1k": 0}, 1)
+    assert steel_items[1]["provider"] == "Steel.dev Browser"
 
 
 def test_get_browser_system_prompt_with_files():
@@ -3884,6 +4060,124 @@ async def test_call_browser_use_with_rotation_uses_gpt_auth():
     assert client.calls[0]["browser_state"]["_extra_user_messages"] == [
         {"role": "user", "content": "resume from current live state"}
     ]
+
+
+async def test_browser_thinking_stream_routes_chunks_to_browser_message_list():
+    from domains.spawn_browser_agent_v3.streaming import BrowserThinkingStream
+    from providers.rose import StreamChunk
+
+    stream = BrowserThinkingStream(
+        agent_id="agent-1",
+        task_id="browser-task-1",
+        iteration=4,
+        started_at_ms=123_000,
+    )
+
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.streaming.stream_assistant_chunk",
+            new_callable=AsyncMock,
+        ) as publish,
+        patch(
+            "domains.spawn_browser_agent_v3.streaming.stream_tool_event",
+            new_callable=AsyncMock,
+        ) as publish_tool,
+    ):
+        await stream.start()
+        await stream.on_chunk(
+            StreamChunk(
+                kind="metadata",
+                data={"actual_model": "gpt-5.6-sol-gpt"},
+            )
+        )
+        await stream.on_chunk(StreamChunk(kind="reasoning", data={"text": "Inspecting page"}))
+        await stream.on_chunk(
+            StreamChunk(
+                kind="tool_call",
+                data={"id": "call-1", "name": "click", "arguments": '{"index":3}'},
+            )
+        )
+        await stream.finish()
+        assert publish_tool.await_count == 1
+        await stream.finish_tools(status="FINISHED")
+
+    published = [call.kwargs for call in publish.await_args_list]
+    assert published[0]["delta"] == ""
+    assert published[0]["done"] is False
+    assert published[-1]["done"] is True
+    assert all(item["agent_id"] == "agent-1" for item in published)
+    assert all(item["sub_agent_id"] == "browser-task-1" for item in published)
+    assert all(item["llm_started_at_ms"] == 123_000 for item in published)
+    assert all(item["clear_on_done"] is True for item in published)
+    assert any(item["is_gpt"] is True for item in published[1:])
+    assert "Inspecting page" in "".join(item["delta"] for item in published)
+    assert '"click"' in "".join(item["delta"] for item in published)
+    assert publish_tool.await_count == 2
+    assert publish_tool.await_args_list[0].kwargs == {
+        "agent_id": "agent-1",
+        "stream_id": stream.stream_id,
+        "tool_call_id": "call-1",
+        "tool_name": "click",
+        "title": "Starting click...",
+        "char_count": len('{"id":"call-1","name":"click","arguments":"{\\"index\\":3}"}'),
+        "is_gpt": True,
+        "is_claude": False,
+        "llm_started_at_ms": 123_000,
+        "sub_agent_id": "browser-task-1",
+    }
+    assert publish_tool.await_args_list[1].kwargs == {
+        "agent_id": "agent-1",
+        "stream_id": stream.stream_id,
+        "tool_call_id": "call-1",
+        "tool_name": "click",
+        "title": "Finished click",
+        "status": "FINISHED",
+        "sub_agent_id": "browser-task-1",
+    }
+
+
+async def test_browser_streaming_rose_client_forwards_and_folds_chunks():
+    from domains.spawn_browser_agent_v3.streaming import BrowserStreamingRoseClient
+    from providers.rose import RoseClient, StreamChunk
+
+    client = BrowserStreamingRoseClient()
+    sink = MagicMock()
+    sink.on_chunk = AsyncMock()
+    client.set_thinking_stream(sink)
+
+    async def fake_complete(_client, **_kwargs):
+        yield StreamChunk(
+            kind="metadata",
+            data={"actual_model": "gpt-5.6-sol-gpt", "pool_name": "rose-1-browser-use"},
+        )
+        yield StreamChunk(kind="reasoning", data={"text": "Inspect"})
+        yield StreamChunk(
+            kind="tool_call",
+            data={"id": "call-1", "name": "click", "arguments": '{"index":3}'},
+        )
+        yield StreamChunk(
+            kind="tool_call",
+            data={"id": "call-2", "name": "wait", "arguments": '{"seconds":1}'},
+        )
+        yield StreamChunk(kind="usage", data={"prompt_tokens": 10, "completion_tokens": 4})
+        yield StreamChunk(kind="done", data={})
+
+    with patch.object(RoseClient, "complete", new=fake_complete):
+        result = await client.complete_browser_use(
+            task="Click the target",
+            browser_state={"url": "https://example.com", "dom_tree": "<button>Target</button>"},
+            action_history=[],
+            available_actions=["click", "wait"],
+        )
+
+    assert result["actual_model"] == "gpt-5.6-sol-gpt"
+    assert result["action"]["action"] == "click"
+    assert result["tool_call_id"] == "call-1"
+    assert sink.on_chunk.await_count == 5
+    forwarded_tools = [
+        call.args[0].data["id"] for call in sink.on_chunk.await_args_list if call.args[0].kind == "tool_call"
+    ]
+    assert forwarded_tools == ["call-1"]
 
 
 async def test_call_browser_use_with_rotation_rotates_claude_token():
@@ -4144,7 +4438,7 @@ async def test_extract_session_files_happy_path():
 
     with (
         patch.object(service, "list_session_files", AsyncMock(return_value=files_listing)),
-        patch.object(service, "download_file_from_steel", AsyncMock(return_value=download_return)),
+        patch.object(service, "download_session_file", AsyncMock(return_value=download_return)),
         patch("helpers.attachments.upload_to_storage", AsyncMock(return_value=fp)),
     ):
         out = await service.extract_session_files("s1", "u1", _fake_config())
@@ -4162,7 +4456,7 @@ async def test_extract_session_files_exclude_paths():
         patch.object(service, "list_session_files", AsyncMock(return_value=files_listing)),
         patch.object(
             service,
-            "download_file_from_steel",
+            "download_session_file",
             AsyncMock(return_value={"content": b"c", "filename": "y.pdf", "mime_type": "x"}),
         ),
         patch(
@@ -4179,7 +4473,7 @@ async def test_extract_session_files_download_fail_skipped():
 
     with (
         patch.object(service, "list_session_files", AsyncMock(return_value=[{"path": "/a"}])),
-        patch.object(service, "download_file_from_steel", AsyncMock(return_value=None)),
+        patch.object(service, "download_session_file", AsyncMock(return_value=None)),
     ):
         out = await service.extract_session_files("s1", "u1", _fake_config())
     assert out == []
@@ -4192,7 +4486,7 @@ async def test_extract_session_files_upload_failure_skipped():
         patch.object(service, "list_session_files", AsyncMock(return_value=[{"path": "/a"}])),
         patch.object(
             service,
-            "download_file_from_steel",
+            "download_session_file",
             AsyncMock(return_value={"content": b"c", "filename": "a", "mime_type": "x"}),
         ),
         patch(
@@ -4430,7 +4724,17 @@ async def test_execute_action_request_payment_card_requests_workflow_approval():
     ah.record_action = AsyncMock()
     payment_request = {
         "merchant": "Rose Labs Test Payment",
-        "line_items": [{"name": "Aurora Notebook", "unit_price_cents": 1200, "quantity": 1, "line_total_cents": 1200}],
+        "line_items": [
+            {
+                "name": "Aurora Notebook",
+                "product_url": "https://example.test/products/aurora-notebook",
+                "rating": "4.9 stars",
+                "review_count": "217 reviews",
+                "unit_price_cents": 1200,
+                "quantity": 1,
+                "line_total_cents": 1200,
+            }
+        ],
         "subtotal_cents": 1200,
         "total_cents": 4396,
     }
@@ -4467,6 +4771,44 @@ async def test_execute_action_request_payment_card_rejects_empty_receipt():
     assert "line_items" in out["error"]
     assert "subtotal_cents" in out["error"]
     assert "total_cents" in out["error"]
+
+
+async def test_execute_action_request_payment_card_rejects_current_session_product_link():
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom = MagicMock()
+    dom.session = MagicMock()
+    dom.selector_map = {}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    current_url = "https://example.test/session/abc"
+    out = await execute_action(
+        dom,
+        ah,
+        {
+            "action": "request_payment_card",
+            "params": {
+                "merchant": "Example Shop",
+                "line_items": [
+                    {
+                        "name": "Beanie",
+                        "product_url": current_url,
+                        "rating": "4.8 stars",
+                        "review_count": "312 reviews",
+                        "unit_price_cents": 1200,
+                        "quantity": 1,
+                        "line_total_cents": 1200,
+                    }
+                ],
+                "subtotal_cents": 1200,
+                "total_cents": 1200,
+            },
+        },
+        current_url=current_url,
+    )
+
+    assert out["success"] is False
+    assert "current checkout or session page" in out["error"]
 
 
 async def test_execute_action_request_payment_card_rejects_duplicate_after_card_ready():
@@ -5376,6 +5718,16 @@ def test_write_lock_submit_button_excludes_auth_navigation_controls():
     assert not is_submit_button("Log in\nsubmit")
 
 
+async def test_write_lock_payment_field_missing_page_accessor_fails_closed():
+    from browser_tools.write_lock import is_payment_field
+
+    session = MagicMock()
+    if hasattr(session, "get_page"):
+        delattr(session, "get_page")
+
+    assert await is_payment_field(session, MagicMock(), 1) is False
+
+
 async def test_execute_click_write_lock_social_triggers_approval():
     from domains.spawn_browser_agent_v3 import service_actions
 
@@ -6115,8 +6467,8 @@ async def test_execute_screenshot_success():
     upload_mock = AsyncMock(return_value={"path": "/tmp/s.png"})
     with (
         patch(
-            "domains.spawn_browser_agent_v3.repo.take_steel_computer_screenshot",
-            AsyncMock(return_value={"base64_image": screenshot_b64}),
+            "domains.spawn_browser_agent_v3.repo.take_browser_computer_screenshot",
+            AsyncMock(return_value={"provider": "steel", "base64_image": screenshot_b64}),
         ),
         patch(
             "domains.spawn_browser_agent_v3.repo.upload_file_to_session",
@@ -6142,7 +6494,7 @@ async def test_execute_screenshot_success():
 
 
 async def test_execute_screenshot_requires_steel_image():
-    """Missing Steel Computer screenshot data fails instead of falling back to CDP."""
+    """Missing provider screenshot data fails instead of falling back to CDP."""
     from domains.spawn_browser_agent_v3 import service_actions
 
     session = MagicMock()
@@ -6150,8 +6502,8 @@ async def test_execute_screenshot_requires_steel_image():
     ah = MagicMock()
     ah.record_action = AsyncMock()
     with patch(
-        "domains.spawn_browser_agent_v3.repo.take_steel_computer_screenshot",
-        AsyncMock(side_effect=RuntimeError("Steel computer screenshot did not return an image")),
+        "domains.spawn_browser_agent_v3.repo.take_browser_computer_screenshot",
+        AsyncMock(side_effect=RuntimeError("Browser screenshot did not return an image")),
     ):
         try:
             await service_actions._execute_screenshot(
@@ -6251,6 +6603,9 @@ def test_render_write_lock_notification_question_uses_purchase_metadata():
                         "title": "Carhartt Mens Knit Cuffed Beanie Hat, Black",
                         "price": "$19.99",
                         "quantity": "1",
+                        "rating": "4.8 stars",
+                        "review_count": "167,432 reviews",
+                        "product_url": "https://www.amazon.com/dp/B000000001",
                         "seller": "Amazon.com",
                         "shipping": "FREE Two Day delivery, arriving Saturday, Jun 27, 2026",
                     }
@@ -6272,6 +6627,9 @@ def test_render_write_lock_notification_question_uses_purchase_metadata():
     assert "Rose wants to buy one black Carhartt beanie on **Amazon**." in question
     assert "Carhartt Mens Knit Cuffed Beanie Hat, Black" in question
     assert "Price: $19.99" in question
+    assert "Rating: 4.8 stars" in question
+    assert "Reviews: 167,432 reviews" in question
+    assert "Product: [View product](https://www.amazon.com/dp/B000000001)" in question
     assert "Seller: Amazon.com" in question
     assert "Shipping: FREE Two Day delivery" in question
     assert "Total: $21.71" in question
@@ -6279,6 +6637,7 @@ def test_render_write_lock_notification_question_uses_purchase_metadata():
     assert "Delivery: Aman Gottumukkala" in question
     assert "**Image:** https://m.media-amazon.com/images/I/beanie.jpg" in question
     assert "fallback question" not in question
+    assert "https://www.amazon.com/checkout/spc" not in question
     assert "click" not in question.lower()
 
 
@@ -6379,6 +6738,7 @@ async def test_generate_write_lock_notification_payment_forks_and_renders_questi
             browser_use_mode="claude",
             approval_type="payment",
             current_url="https://www.delta.com/checkout",
+            trusted_page_urls=["https://www.delta.com/checkout"],
             pending_action={"action": "click", "params": {"index": 4}},
             write_lock_result={"status": "awaiting_payment_card_approval"},
             system_name="Rose",
@@ -6453,6 +6813,7 @@ async def test_generate_write_lock_notification_raises_when_fork_calls_wrong_too
                 browser_use_mode="claude",
                 approval_type="payment",
                 current_url="https://shop.example/checkout",
+                trusted_page_urls=["https://shop.example/checkout"],
                 pending_action={"action": "click"},
                 write_lock_result={"status": "awaiting_payment_card_approval"},
                 system_name="Rose",
@@ -6587,6 +6948,27 @@ def test_write_lock_notification_prompt_includes_media_candidates():
     assert "https://m.media-amazon.com/images/I/beanie.jpg" in prompt
     assert "use only those URLs for media and item image_url" in prompt
     assert "description under 80 characters" in prompt
+    assert "must already exist in the browser trajectory" in prompt
+    assert "Visit the product page" not in prompt
+
+
+def test_purchase_write_lock_notification_failure_blocks_approval_fallback():
+    from domains.spawn_browser_agent_v3.handler import (
+        PurchaseApprovalContextError,
+        PurchaseApprovalNotificationRetryableError,
+        _enforce_write_lock_notification_failure_policy,
+    )
+
+    with pytest.raises(PurchaseApprovalContextError):
+        _enforce_write_lock_notification_failure_policy(
+            "purchase",
+            PurchaseApprovalContextError("missing reviews"),
+        )
+
+    with pytest.raises(PurchaseApprovalNotificationRetryableError):
+        _enforce_write_lock_notification_failure_policy("purchase", TimeoutError("provider timeout"))
+
+    assert _enforce_write_lock_notification_failure_policy("message", ValueError("metadata unavailable")) is None
 
 
 def test_normalize_write_lock_notification_media_uses_matching_media_candidate():
@@ -6833,8 +7215,7 @@ def test_disable_cdp_websocket_proxy_sets_default_proxy_none():
         assert calls[-1]["proxy"] is None
 
         assert (
-            fake_cdp_client.websockets.connect("ws://example.test/devtools", proxy="http://proxy.local")
-            == "connected"
+            fake_cdp_client.websockets.connect("ws://example.test/devtools", proxy="http://proxy.local") == "connected"
         )
         assert calls[-1]["proxy"] == "http://proxy.local"
         assert _disable_cdp_websocket_proxy() is False
@@ -7111,6 +7492,7 @@ async def test_spawn_browser_activity_raises_when_resumed_session_has_no_cdp_url
         "current_url": "https://www.amazon.com/ap/signin",
         "start_url": "https://www.google.com/",
         "user_settings": {"name": "Resume Shopper", "addressLine1": "1 Main St"},
+        "same_session_available": True,
     }
 
     with (
@@ -7122,6 +7504,12 @@ async def test_spawn_browser_activity_raises_when_resumed_session_has_no_cdp_url
         patch(
             "domains.spawn_browser_agent_v3.handler.fetch_session_info",
             AsyncMock(return_value=session_info),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler._propagate_browser_credentials_with_progress",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
         ),
     ):
         try:
@@ -7163,6 +7551,12 @@ async def test_spawn_browser_activity_auth_assistance_resume_reuses_live_session
         patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
         patch("domains.spawn_browser_agent_v3.handler.resume_browser_session", resume_mock),
         patch("domains.spawn_browser_agent_v3.handler.fetch_session_info", fetch_mock),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler._propagate_browser_credentials_with_progress",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
     ):
         try:
             await spawn_browser_agent_activity_v3(
@@ -7222,6 +7616,12 @@ async def test_spawn_browser_activity_auth_assistance_resume_falls_back_when_liv
         patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
         patch("domains.spawn_browser_agent_v3.handler.resume_browser_session", resume_mock),
         patch("domains.spawn_browser_agent_v3.handler.fetch_session_info", fetch_mock),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler._propagate_browser_credentials_with_progress",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
     ):
         try:
             await spawn_browser_agent_activity_v3(
@@ -7247,6 +7647,136 @@ async def test_spawn_browser_activity_auth_assistance_resume_falls_back_when_liv
 
     assert fetch_mock.await_count == 1
     assert fetch_mock.await_args.args[1] == "task-1"
+    assert fetch_mock.await_args.kwargs == {"validate_live": True}
+    assert resume_mock.await_count == 1
+    assert resume_mock.await_args.args[1] == "task-1"
+
+
+async def test_spawn_browser_activity_write_approval_resume_falls_back_when_live_session_expired():
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    existing_session_info = {
+        "session_id": "session-1",
+        "debug_url": "https://steel.example/debug",
+        "ws_url": "ws://stale",
+        "fingerprint_injection": {"ua": "test"},
+        "passwords": [],
+        "same_session_available": False,
+        "same_session_unavailable_reason": "steel_session_expired",
+    }
+    replacement_session_info = {
+        "session_id": "session-2",
+        "debug_url": "https://steel.example/debug2",
+        "ws_url": None,
+        "fingerprint_injection": {"ua": "test"},
+        "passwords": [],
+    }
+    resume_mock = AsyncMock(return_value=replacement_session_info)
+    fetch_mock = AsyncMock(return_value=existing_session_info)
+
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.handler.load_config",
+            return_value=_fake_config(),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
+        patch("domains.spawn_browser_agent_v3.handler.resume_browser_session", resume_mock),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_session_info", fetch_mock),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler._propagate_browser_credentials_with_progress",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
+    ):
+        try:
+            await spawn_browser_agent_activity_v3(
+                user_id="user-1",
+                agent_id="agent-1",
+                goal="Buy socks",
+                tool_call_id="tool-1",
+                task_id="task-1",
+                is_resume=True,
+                output_schema={"fields": [{"name": "result", "type": "string"}]},
+                use_claude_mode=False,
+                write_lock_resume_state={
+                    "approval_type": "purchase",
+                    "task_id": "task-1",
+                    "session_id": "session-1",
+                    "cdp_url": "ws://stale",
+                    "pending_action": {"action": "click", "index": 1, "params": {}},
+                },
+            )
+        except RuntimeError as exc:
+            assert "No CDP URL provided" in str(exc)
+        else:
+            raise AssertionError("expected missing fallback cdp_url to raise")
+
+    assert fetch_mock.await_count == 1
+    assert fetch_mock.await_args.args[1] == "task-1"
+    assert fetch_mock.await_args.kwargs == {"validate_live": True}
+    assert resume_mock.await_count == 1
+    assert resume_mock.await_args.args[1] == "task-1"
+
+
+async def test_spawn_browser_activity_write_approval_resume_falls_back_when_liveness_missing():
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    existing_session_info = {
+        "session_id": "session-1",
+        "debug_url": "https://steel.example/debug",
+        "ws_url": "ws://possibly-stale",
+        "fingerprint_injection": {"ua": "test"},
+        "passwords": [],
+    }
+    replacement_session_info = {
+        "session_id": "session-2",
+        "debug_url": "https://steel.example/debug2",
+        "ws_url": None,
+        "fingerprint_injection": {"ua": "test"},
+        "passwords": [],
+    }
+    resume_mock = AsyncMock(return_value=replacement_session_info)
+    fetch_mock = AsyncMock(return_value=existing_session_info)
+
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.handler.load_config",
+            return_value=_fake_config(),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
+        patch("domains.spawn_browser_agent_v3.handler.resume_browser_session", resume_mock),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_session_info", fetch_mock),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler._propagate_browser_credentials_with_progress",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
+    ):
+        try:
+            await spawn_browser_agent_activity_v3(
+                user_id="user-1",
+                agent_id="agent-1",
+                goal="Buy socks",
+                tool_call_id="tool-1",
+                task_id="task-1",
+                is_resume=True,
+                output_schema={"fields": [{"name": "result", "type": "string"}]},
+                use_claude_mode=False,
+                write_lock_resume_state={
+                    "approval_type": "purchase",
+                    "task_id": "task-1",
+                    "session_id": "session-1",
+                    "cdp_url": "ws://possibly-stale",
+                    "pending_action": {"action": "click", "index": 1, "params": {}},
+                },
+            )
+        except RuntimeError as exc:
+            assert "No CDP URL provided" in str(exc)
+        else:
+            raise AssertionError("expected missing fallback cdp_url to raise")
+
     assert fetch_mock.await_args.kwargs == {"validate_live": True}
     assert resume_mock.await_count == 1
     assert resume_mock.await_args.args[1] == "task-1"
@@ -7466,6 +7996,7 @@ async def test_spawn_browser_activity_auth_assistance_keeps_live_steel_session_o
         "fingerprint_injection": None,
         "passwords": [],
         "auth_options": {"realm": "example.com"},
+        "same_session_available": True,
     }
     auth_request = {
         "request": {"id": "uar1"},
@@ -7660,9 +8191,7 @@ async def test_manager_disables_fast_mode_cache_for_browser_activity():
         ),
     ):
         events = []
-        async for event in manager.execute_tool(
-            workflow_instance, {"goal": "Buy socks"}, "tool-1"
-        ):
+        async for event in manager.execute_tool(workflow_instance, {"goal": "Buy socks"}, "tool-1"):
             events.append(event)
 
     assert events[-1].status.name == "FINISHED"
@@ -7850,9 +8379,7 @@ async def test_manager_failed_tool_event_includes_structured_response_values():
         ):
             events.append(event)
 
-    failed_event = next(
-        e for e in events if getattr(e, "status", None) == MessageStatus.ERROR
-    )
+    failed_event = next(e for e in events if getattr(e, "status", None) == MessageStatus.ERROR)
     assert failed_event.message == "best effort only"
     assert failed_event.metadata["structured_response"] == {
         "selected_black_beanie_url": "https://amazon.com/item",
@@ -7950,6 +8477,290 @@ async def test_manager_auth_assistance_pauses_and_resumes():
     assert second_args[12]["cdp_url"] == "ws://old"
 
 
+async def test_manager_write_approval_after_hour_wait_resumes_and_finishes():
+    from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
+    from domains.spawn_browser_agent_v3.service_actions import get_domain_from_url
+    from tools.base import MessageStatus
+
+    class _FakeActivityHandle:
+        def __init__(self, result):
+            self._result = result
+
+        def done(self):
+            return True
+
+        def cancel(self):
+            raise AssertionError("done activity should not be cancelled")
+
+        def __await__(self):
+            async def _result():
+                return self._result
+
+            return _result().__await__()
+
+    current_time = datetime(2026, 7, 9, 21, 58, 7, tzinfo=timezone.utc)
+    approval_time = current_time + timedelta(seconds=3601)
+    approval_calls = []
+    start_calls = []
+
+    first = _FakeActivityHandle(
+        {
+            "status": "awaiting_write_approval",
+            "approval_type": "purchase",
+            "question": "Approve checkout?",
+            "current_url": "https://www.dickblick.com/cart/",
+            "pending_action": {
+                "action": "click",
+                "index": 42,
+                "params": {},
+                "thinking": "Click Checkout Now",
+            },
+            "write_lock_approvals": {},
+            "step_count": 5,
+            "session_id": "session-1",
+            "cdp_url": "wss://connect.steel.dev/session-1",
+            "task_id": "task-1",
+        }
+    )
+    second = _FakeActivityHandle(
+        {
+            "success": True,
+            "message": "Purchase completed.",
+            "structured_response": {"purchase_complete": True},
+            "output_files": [],
+        }
+    )
+
+    workflow_instance = SimpleNamespace(
+        user_id="user-1",
+        agent_id="agent-1",
+        is_paused=False,
+        write_lock_enabled=True,
+        system_name="Rose",
+    )
+
+    async def fake_request_user_approval_direct(*_args, **kwargs):
+        nonlocal current_time
+        approval_calls.append(kwargs)
+        current_time = approval_time
+        return {"attention_request_id": "approval-1"}
+
+    def fake_now():
+        return current_time
+
+    def fake_start_activity(*args, **kwargs):
+        start_calls.append((args, kwargs))
+        return [first, second][len(start_calls) - 1]
+
+    manager = SpawnBrowserAgentManagerV3()
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.handler.workflow.start_activity",
+            side_effect=fake_start_activity,
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.workflow.wait_condition",
+            AsyncMock(return_value=None),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.now", side_effect=fake_now),
+        patch(
+            "tools.request_user_approval.request_user_approval_direct",
+            side_effect=fake_request_user_approval_direct,
+        ),
+    ):
+        events = []
+        async for event in manager.execute_tool(
+            workflow_instance,
+            {
+                "goal": "Buy one R&F Drawing Oil Stick",
+                "output_schema": {"fields": [{"name": "purchase_complete", "type": "bool"}]},
+            },
+            "tool-1",
+        ):
+            events.append(event)
+
+    assert len(approval_calls) == 1
+    assert approval_calls[0]["question"] == "Approve checkout?"
+    assert approval_calls[0]["metadata"]["url"] == "https://www.dickblick.com/cart/"
+    assert len(start_calls) == 2
+
+    resumed_args = start_calls[1][1]["args"]
+    assert resumed_args[4] == "task-1"
+    assert resumed_args[5] == "session-1"
+    assert resumed_args[6] == "wss://connect.steel.dev/session-1"
+    assert resumed_args[7] is True
+    resume_state = resumed_args[12]
+    assert resume_state["pending_action"]["action"] == "click"
+    assert resume_state["approval_type"] == "purchase"
+    assert resume_state["step_count"] == 5
+    assert resume_state["write_lock_approvals"]["purchase"] == {
+        "domain": get_domain_from_url("https://www.dickblick.com/cart/"),
+        "approved_at": approval_time.timestamp(),
+    }
+
+    final_event = events[-1]
+    assert final_event.status == MessageStatus.FINISHED
+    assert final_event.message == "Purchase completed."
+    assert final_event.metadata["structured_response"] == {"purchase_complete": True}
+
+
+async def test_manager_payment_card_approval_uses_registered_activity_names_and_resumes():
+    from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
+    from domains.spawn_browser_agent_v3.service_actions import get_domain_from_url
+    from tools.base import MessageStatus
+
+    class _FakeActivityHandle:
+        def __init__(self, result):
+            self._result = result
+
+        def done(self):
+            return True
+
+        def cancel(self):
+            raise AssertionError("done activity should not be cancelled")
+
+        def __await__(self):
+            async def _result():
+                return self._result
+
+            return _result().__await__()
+
+    current_time = datetime(2026, 7, 9, 23, 50, 0, tzinfo=timezone.utc)
+    approval_calls = []
+    start_calls = []
+    execute_activity_calls = []
+
+    first = _FakeActivityHandle(
+        {
+            "status": "awaiting_payment_card_approval",
+            "payment_request": {
+                "merchant": "Blick Art Materials",
+                "line_items": [
+                    {
+                        "name": "Brush",
+                        "product_url": "https://www.dickblick.com/products/brush/",
+                        "rating": "4.7 stars",
+                        "review_count": "84 reviews",
+                        "quantity": 1,
+                        "line_total_cents": 636,
+                    }
+                ],
+                "subtotal_cents": 636,
+                "total_cents": 636,
+            },
+            "current_url": "https://www.dickblick.com/checkout/",
+            "write_lock_approvals": {},
+            "step_count": 12,
+            "session_id": "session-1",
+            "cdp_url": "wss://connect.steel.dev/session-1",
+            "task_id": "task-1",
+        }
+    )
+    second = _FakeActivityHandle(
+        {
+            "success": True,
+            "message": "Purchase completed.",
+            "structured_response": {"purchase_complete": True},
+            "output_files": [],
+        }
+    )
+
+    workflow_instance = SimpleNamespace(
+        user_id="user-1",
+        agent_id="agent-1",
+        is_paused=False,
+        write_lock_enabled=True,
+        system_name="Rose",
+    )
+
+    async def fake_execute_activity(activity_name, *args, **kwargs):
+        execute_activity_calls.append((activity_name, args, kwargs))
+        if activity_name == "lookup_purchase_activity":
+            return {"found": False, "reusable": False, "purchase": None}
+        if activity_name == "mint_purchase_card_activity":
+            return {
+                "cardId": "card-1",
+                "pan": "4242424242424242",
+                "expiry": "12/30",
+                "cvv": "123",
+                "last4": "4242",
+            }
+        raise AssertionError(f"unexpected activity: {activity_name}")
+
+    async def fake_request_user_approval_direct(*_args, **kwargs):
+        approval_calls.append(kwargs)
+        return {"attention_request_id": "approval-1"}
+
+    def fake_start_activity(*args, **kwargs):
+        start_calls.append((args, kwargs))
+        return [first, second][len(start_calls) - 1]
+
+    manager = SpawnBrowserAgentManagerV3()
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.handler.workflow.start_activity",
+            side_effect=fake_start_activity,
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.workflow.wait_condition",
+            AsyncMock(return_value=None),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.workflow.execute_activity",
+            side_effect=fake_execute_activity,
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.now", return_value=current_time),
+        patch(
+            "tools.request_user_approval.request_user_approval_direct",
+            side_effect=fake_request_user_approval_direct,
+        ),
+    ):
+        events = []
+        async for event in manager.execute_tool(
+            workflow_instance,
+            {
+                "goal": "Buy one brush",
+                "output_schema": {"fields": [{"name": "purchase_complete", "type": "bool"}]},
+            },
+            "tool-1",
+        ):
+            events.append(event)
+
+    assert [call[0] for call in execute_activity_calls] == [
+        "lookup_purchase_activity",
+        "mint_purchase_card_activity",
+    ]
+    assert len(approval_calls) == 1
+    assert approval_calls[0]["metadata"]["requestPaymentCard"]["merchant"] == "Blick Art Materials"
+    assert approval_calls[0]["metadata"]["requestPaymentCard"]["totalCents"] == 636
+    assert len(start_calls) == 2
+
+    resumed_args = start_calls[1][1]["args"]
+    assert resumed_args[4] == "task-1"
+    assert resumed_args[5] == "session-1"
+    assert resumed_args[6] == "wss://connect.steel.dev/session-1"
+    assert resumed_args[7] is True
+    resume_state = resumed_args[12]
+    assert resume_state["approval_type"] == "payment"
+    assert resume_state["step_count"] == 12
+    assert resume_state["write_lock_approvals"]["payment"] == {
+        "domain": get_domain_from_url("https://www.dickblick.com/checkout/"),
+        "approved_at": current_time.timestamp(),
+    }
+    assert resume_state["payment_card_refs"] == {
+        "card_number": "4242424242424242",
+        "card_name": "Rose Labs",
+        "card_expiry": "12/30",
+        "card_cvv": "123",
+    }
+
+    payment_ready = next(event for event in events if getattr(event, "title", "") == "Payment card ready")
+    assert payment_ready.status == MessageStatus.FINISHED
+    final_event = events[-1]
+    assert final_event.status == MessageStatus.FINISHED
+    assert final_event.metadata["structured_response"] == {"purchase_complete": True}
+
+
 # ========================================
 # Runner
 # ========================================
@@ -7960,6 +8771,10 @@ async def run_all_tests():
     r = BlackboxResult()
 
     await r.record_async("cdp_use_websocket_direct", test_cdp_use_websocket_patch_disables_proxy_discovery)
+    r.record(
+        "browser_action_log_summary_redacts_payment_secrets", test_browser_action_log_summary_redacts_payment_secrets
+    )
+    r.record("browser_progress_title", test_browser_progress_title_describes_active_agent)
     r.record("verifier_timeout_standard_llm_budget", test_verifier_activity_timeout_allows_llm_call)
     r.record(
         "browser_supervisor_timeout_ordering",
@@ -8365,6 +9180,10 @@ async def run_all_tests():
         test_execute_action_request_payment_card_rejects_empty_receipt,
     )
     await r.record_async(
+        "execute_action_request_payment_card_rejects_current_session_link",
+        test_execute_action_request_payment_card_rejects_current_session_product_link,
+    )
+    await r.record_async(
         "execute_action_request_payment_card_rejects_duplicate_after_card_ready",
         test_execute_action_request_payment_card_rejects_duplicate_after_card_ready,
     )
@@ -8471,6 +9290,10 @@ async def run_all_tests():
     r.record(
         "write_lock_submit_button_excludes_auth_navigation_controls",
         test_write_lock_submit_button_excludes_auth_navigation_controls,
+    )
+    await r.record_async(
+        "write_lock_payment_field_missing_page_accessor_fails_closed",
+        test_write_lock_payment_field_missing_page_accessor_fails_closed,
     )
     await r.record_async(
         "execute_click_write_lock_social",
@@ -8597,6 +9420,14 @@ async def run_all_tests():
         "browser_recording_finalizer_keeps_local_artifacts_when_upload_fails",
         test_browser_recording_finalizer_keeps_local_artifacts_when_upload_fails,
     )
+    await r.record_async(
+        "browser_cleanup_scheduler_nonblocking",
+        test_browser_cleanup_scheduler_does_not_block_on_recording_finalization,
+    )
+    await r.record_async(
+        "drain_background_browser_cleanups",
+        test_drain_background_browser_cleanups_waits_then_times_out,
+    )
     r.record(
         "browser_humanizer_visual_cursor_default_off",
         test_browser_humanizer_visual_cursor_defaults_off_but_keeps_cursor_observer,
@@ -8675,6 +9506,10 @@ async def run_all_tests():
         test_write_lock_notification_prompt_includes_media_candidates,
     )
     r.record(
+        "purchase_write_lock_notification_failure_blocks_fallback",
+        test_purchase_write_lock_notification_failure_blocks_approval_fallback,
+    )
+    r.record(
         "normalize_write_lock_notification_media_candidate",
         test_normalize_write_lock_notification_media_uses_matching_media_candidate,
     )
@@ -8725,6 +9560,14 @@ async def run_all_tests():
     )
     await r.record_async("call_browser_use_gpt_auth", test_call_browser_use_with_rotation_uses_gpt_auth)
     await r.record_async(
+        "browser_thinking_stream_routes_chunks",
+        test_browser_thinking_stream_routes_chunks_to_browser_message_list,
+    )
+    await r.record_async(
+        "browser_streaming_rose_client_forwards_chunks",
+        test_browser_streaming_rose_client_forwards_and_folds_chunks,
+    )
+    await r.record_async(
         "call_browser_use_rotates_claude",
         test_call_browser_use_with_rotation_rotates_claude_token,
     )
@@ -8749,6 +9592,14 @@ async def run_all_tests():
     await r.record_async(
         "activity_auth_assistance_resume_fallback_expired",
         test_spawn_browser_activity_auth_assistance_resume_falls_back_when_live_session_expired,
+    )
+    await r.record_async(
+        "activity_write_approval_resume_fallback_expired",
+        test_spawn_browser_activity_write_approval_resume_falls_back_when_live_session_expired,
+    )
+    await r.record_async(
+        "activity_write_approval_resume_fallback_liveness_missing",
+        test_spawn_browser_activity_write_approval_resume_falls_back_when_liveness_missing,
     )
     await r.record_async(
         "browser_supervisor_recovery_clicks_dismiss",
@@ -8785,6 +9636,14 @@ async def run_all_tests():
     await r.record_async(
         "manager_auth_assistance_resume",
         test_manager_auth_assistance_pauses_and_resumes,
+    )
+    await r.record_async(
+        "manager_write_approval_hour_wait_resume",
+        test_manager_write_approval_after_hour_wait_resumes_and_finishes,
+    )
+    await r.record_async(
+        "manager_payment_card_approval_activity_names",
+        test_manager_payment_card_approval_uses_registered_activity_names_and_resumes,
     )
 
     teardown_mock()

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { fireEvent, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
@@ -242,6 +242,54 @@ describe('Terminal page', () => {
       expect(inputArea).toHaveClass('md:pb-6');
     });
 
+    it('replaces the query box with a pending approval request', async () => {
+      const user = userEvent.setup();
+      server.use(
+        http.get(`${API_BASE}/agents/:agentId`, ({ params }) => {
+          return HttpResponse.json({
+            agent: {
+              agent_id: params.agentId,
+              goal: 'Test agent',
+              model: 'rose-1-lite',
+              source: 'WEB',
+              status: 'ACTIVE',
+              temporal_workflow_id: 'wf-001',
+              context_size: 4096,
+              parent_agent_id: null,
+              tools: [],
+            },
+            messages: [
+              {
+                message_id: 'approval-001',
+                timestamp: '2026-01-01T00:00:02Z',
+                text: 'May I continue?',
+                role: 'TOOL',
+                metadata: {
+                  isUserAttentionMessage: true,
+                  toolCallId: 'approval-tool-001',
+                  toolStatus: 'IN_PROGRESS',
+                  toolName: 'request_user_approval',
+                  requestUserApproval: {
+                    toolApproval: true,
+                    attentionRequestId: 'request-001',
+                  },
+                },
+              },
+            ],
+            pagination: { has_more: false, oldest_timestamp: null },
+          });
+        }),
+      );
+
+      renderWithProviders(<Terminal />);
+      await user.click(await screen.findByLabelText('Expand sidebar'));
+      await user.click(await screen.findByText('Test agent'));
+
+      expect(await screen.findByText('Approval Required')).toBeInTheDocument();
+      expect(screen.queryByPlaceholderText('Type your message...')).not.toBeInTheDocument();
+      expect(screen.getByPlaceholderText('Add context (optional)...')).toBeInTheDocument();
+    });
+
     it('lands the browser-review account on Browse by default', async () => {
       localStorage.clear();
       mockBrowserReviewSession();
@@ -402,8 +450,8 @@ describe('Terminal page', () => {
       await user.click(textarea);
       await user.type(textarea, 'Build me a website');
 
-      // Submit via Cmd+Enter (meta+Enter)
-      await user.keyboard('{Meta>}{Enter}{/Meta}');
+      // Submit via plain Enter.
+      await user.keyboard('{Enter}');
 
       await waitFor(() => {
         const createReq = capturedRequests.find(
@@ -501,7 +549,6 @@ describe('Terminal page', () => {
     });
 
     it('submit without a stored session opens login and does not create an agent', async () => {
-      const user = userEvent.setup({ delay: null });
       localStorage.clear();
       clearCaptures();
       renderWithProviders(<Terminal />);
@@ -510,9 +557,8 @@ describe('Terminal page', () => {
         expect(document.querySelector('textarea')).toBeInTheDocument();
       });
       const textarea = document.querySelector('textarea') as HTMLTextAreaElement;
-      await user.click(textarea);
-      await user.type(textarea, 'No stored session should sign in');
-      await user.keyboard('{Meta>}{Enter}{/Meta}');
+      fireEvent.change(textarea, { target: { value: 'No stored session should sign in' } });
+      fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
 
       await waitFor(() => {
         expect(screen.getByText('Start Building.')).toBeInTheDocument();
@@ -541,7 +587,6 @@ describe('Terminal page', () => {
     });
 
     it('anonymous submit opens login and does not create an agent', async () => {
-      const user = userEvent.setup({ delay: null });
       localStorage.clear();
       mockAnonymousSession();
       clearCaptures();
@@ -551,9 +596,8 @@ describe('Terminal page', () => {
         expect(document.querySelector('textarea')).toBeInTheDocument();
       });
       const textarea = document.querySelector('textarea') as HTMLTextAreaElement;
-      await user.click(textarea);
-      await user.type(textarea, 'Anonymous users should sign in');
-      await user.keyboard('{Meta>}{Enter}{/Meta}');
+      fireEvent.change(textarea, { target: { value: 'Anonymous users should sign in' } });
+      fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
 
       await waitFor(() => {
         expect(screen.getByText('Start Building.')).toBeInTheDocument();

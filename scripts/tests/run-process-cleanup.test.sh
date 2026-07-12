@@ -58,6 +58,38 @@ assert_alive() {
   exit 1
 }
 
+assert_db_cleanup_guard() {
+  local expected_id="$1"
+  local fake_current_id="$2"
+  local isolated_run="$3"
+  local expected_calls="$4"
+  local label="$5"
+  local calls_file="$TMP_ROOT/docker-calls"
+  local actual_calls
+
+  : > "$calls_file"
+
+  docker() {
+    if [ "$1" = "inspect" ]; then
+      printf '%s\n' "$fake_current_id"
+      return 0
+    fi
+    printf '%s\n' "$*" >> "$calls_file"
+    return 0
+  }
+
+  run_cleanup_owned_db_container "$expected_id" "victoria-db-test" "victoria-pgdata-test" "$isolated_run"
+  unset -f docker
+  actual_calls="$(cat "$calls_file")"
+
+  if [ "$actual_calls" = "$expected_calls" ]; then
+    echo "PASS: $label"
+    return 0
+  fi
+  echo "FAIL: $label: expected calls '$expected_calls', got '$actual_calls'" >&2
+  exit 1
+}
+
 workspace="$TMP_ROOT/salvador-v1"
 other_workspace="$TMP_ROOT/delhi"
 mkdir -p "$workspace/agents" "$other_workspace/agents"
@@ -95,5 +127,9 @@ run_kill_stale_same_task_queue_workers "$workspace" "$queue" "$expected_backend"
 assert_dead "$stale_pid" "same-worktree worker with stale backend is killed"
 assert_alive "$current_pid" "same-worktree worker with current backend survives"
 assert_alive "$other_pid" "other-worktree worker survives"
+
+assert_db_cleanup_guard "container-old" "container-old" true $'rm -f container-old\nvolume rm victoria-pgdata-test' "isolated owner removes its exact DB instance ID"
+assert_db_cleanup_guard "container-old" "container-new" true "" "stale owner cannot remove a replacement DB container"
+assert_db_cleanup_guard "container-old" "container-old" false "" "normal service cleanup preserves a shared DB instance"
 
 echo "All run process cleanup tests passed."

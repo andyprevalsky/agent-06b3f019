@@ -413,7 +413,7 @@ export async function createCodexCodeSession(
 
   const taskId = uuidv4();
   const templateId = process.env.E2B_CODEX_CODE_TEMPLATE_ID || DEFAULT_CODEX_CODE_TEMPLATE_ID;
-  const model = process.env.CODEX_CODE_MODEL || 'gpt-5.4';
+  const model = process.env.CODEX_CODE_MODEL || 'gpt-5.6-terra';
   const workDir = workDirForGithubRepo(githubRepoUrl);
   const runtimeFingerprint = [
     `template:${templateId}`,

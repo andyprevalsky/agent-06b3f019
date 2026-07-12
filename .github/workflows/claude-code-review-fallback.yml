@@ -1,0 +1,69 @@
+name: Claude Code Review Fallback
+
+on:
+  pull_request:
+    types: [labeled, synchronize]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to review
+        required: true
+        type: number
+      head_sha:
+        description: Exact pull request HEAD SHA to review
+        required: true
+        type: string
+
+concurrency:
+  group: claude-code-review-fallback-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (((github.event.action == 'labeled' && github.event.label.name == 'claude-review-fallback') ||
+      (github.event.action == 'synchronize' &&
+      contains(github.event.pull_request.labels.*.name, 'claude-review-fallback'))) &&
+      github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+      PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || inputs.head_sha }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Verify pull request HEAD
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_sha="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')"
+          if [ "$actual_sha" != "$PR_HEAD_SHA" ]; then
+            echo "Refusing stale review: expected $PR_HEAD_SHA, current HEAD is $actual_sha" >&2
+            exit 1
+          fi
+
+      - name: Checkout reviewed commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PR_HEAD_SHA }}
+          fetch-depth: 0
+
+      - name: Review with Claude Code
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          plugin_marketplaces: https://github.com/anthropics/claude-code.git
+          plugins: code-review@claude-code-plugins
+          prompt: /code-review:code-review ${{ github.repository }}/pull/${{ env.PR_NUMBER }} --comment
+          claude_args: |
+            --model opus
+            --effort high
+            --max-turns 40

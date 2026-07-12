@@ -46,6 +46,7 @@ const authState: MockAuthState = {
   refreshAuthState: vi.fn(async () => {}),
 };
 let mockSessionToken: string | null = null;
+let openAgentCallback: ((agentId: string) => void) | null = null;
 
 vi.mock('@/features/auth', () => ({
   useAuth: () => authState,
@@ -70,6 +71,9 @@ vi.mock('@/components/ErrorBoundary', () => ({
 
 vi.mock('@/pages/Terminal', () => ({
   default: () => <div data-testid="terminal-page">terminal</div>,
+}));
+vi.mock('@/pages/Browse', () => ({
+  default: () => <div data-testid="browse-page">browse</div>,
 }));
 vi.mock('@/pages/Privacy', () => ({
   default: () => <div data-testid="privacy-page">privacy</div>,
@@ -139,7 +143,46 @@ describe('electron-app blackbox', () => {
   beforeEach(() => {
     clearCaptures();
     resetAuth();
-    installIpcMock({});
+    openAgentCallback = null;
+    window.history.replaceState({}, '', '/');
+    installIpcMock({
+      onOpenAgent: vi.fn((callback: (agentId: string) => void) => {
+        openAgentCallback = callback;
+        return () => {
+          openAgentCallback = null;
+        };
+      }),
+    });
+  });
+
+  it('routes an open-agent event into the renderer URL for AgentContext', async () => {
+    setAuth({ loading: true, isFullySignedIn: false });
+    window.history.replaceState({}, '', '/?agent-id=old-agent&browser-id=stale-browser#/browse');
+    const popstate = vi.fn();
+    window.addEventListener('popstate', popstate);
+
+    render(<ElectronApp />);
+    await waitFor(() => expect(openAgentCallback).not.toBeNull());
+    act(() => openAgentCallback?.('agent-from-web'));
+
+    expect(new URL(window.location.href).searchParams.get('agent-id')).toBe('agent-from-web');
+    expect(new URL(window.location.href).searchParams.get('browser-id')).toBeNull();
+    expect(window.location.hash).toBe('#/');
+    expect(popstate).toHaveBeenCalledTimes(1);
+    window.removeEventListener('popstate', popstate);
+  });
+
+  it('brings the task UI into view when the app is on another route', async () => {
+    mockSessionToken = 'done-token';
+    setAuth({ loading: false, isFullySignedIn: true });
+    server.use(userSettingsHandler({ onboardingCompletedAt: '2025-01-01T00:00:00Z' }));
+    window.history.replaceState({}, '', '/#/browse');
+
+    render(<ElectronApp />);
+    expect(await screen.findByTestId('browse-page')).toBeInTheDocument();
+    act(() => openAgentCallback?.('agent-from-web'));
+
+    expect(await screen.findByTestId('terminal-page')).toBeInTheDocument();
   });
 
   it('renders loading spinner while auth is resolving (no backend call yet)', async () => {

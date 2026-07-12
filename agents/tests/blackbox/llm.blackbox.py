@@ -627,26 +627,30 @@ def test_build_verifier_response_model_requires_nested_object_properties():
     }
     model = _build_verifier_response_model(response_schema)
 
-    parsed = model.model_validate({
-        "output": {
-            "selected_beanie": {"title": "Ribbed beanie", "price_usd": 12.99},
-            "added_to_cart": True,
-        },
-        "reasoning": "The cart shows the selected beanie.",
-        "score": 1,
-    })
+    parsed = model.model_validate(
+        {
+            "output": {
+                "selected_beanie": {"title": "Ribbed beanie", "price_usd": 12.99},
+                "added_to_cart": True,
+            },
+            "reasoning": "The cart shows the selected beanie.",
+            "score": 1,
+        }
+    )
     assert parsed.output.selected_beanie.title == "Ribbed beanie"
 
     raised = False
     try:
-        model.model_validate({
-            "output": {
-                "selected_beanie": {"title": "Ribbed beanie"},
-                "added_to_cart": True,
-            },
-            "reasoning": "Partial cart state.",
-            "score": 0.5,
-        })
+        model.model_validate(
+            {
+                "output": {
+                    "selected_beanie": {"title": "Ribbed beanie"},
+                    "added_to_cart": True,
+                },
+                "reasoning": "Partial cart state.",
+                "score": 0.5,
+            }
+        )
     except ValidationError as exc:
         raised = True
         assert "price_usd" in str(exc)
@@ -1127,9 +1131,7 @@ async def test_codex_responses_body_has_input_for_system_only_context():
         request_id="req-1",
     )
 
-    assert body["input"] == [
-        {"role": "user", "content": [{"type": "input_text", "text": "Begin."}]}
-    ]
+    assert body["input"] == [{"role": "user", "content": [{"type": "input_text", "text": "Begin."}]}]
 
 
 async def test_set_response_schema_activity_empty_goal():
@@ -1144,6 +1146,7 @@ async def test_set_response_schema_activity_empty_goal():
 
 async def test_set_response_schema_activity_no_schema_returned():
     """Returns None when Rose returns no schema content."""
+
     class FakeRoseClient:
         async def collect(self, **kwargs):
             return SimpleNamespace(content="", tool_calls=[], usage={})
@@ -1158,6 +1161,7 @@ async def test_set_response_schema_activity_no_schema_returned():
 
 async def test_set_response_schema_activity_http_error():
     """Returns None on schema generation error."""
+
     class FakeRoseClient:
         async def collect(self, **kwargs):
             raise RuntimeError("boom")
@@ -1168,6 +1172,40 @@ async def test_set_response_schema_activity_http_error():
         result = await set_response_schema_activity("agent-c", ["goal"])
 
     assert result is None
+
+
+async def test_set_response_schema_activity_save_error_raises():
+    """A generated schema is not successful unless the agent-row save is durable."""
+    setup_mock(
+        {
+            "/api/agents/": {
+                "status": 500,
+                "json": {"error": "save failed"},
+            },
+        }
+    )
+
+    class FakeRoseClient:
+        async def collect(self, **kwargs):
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "reasoning": "Need a concise summary.",
+                        "fields": [{"name": "summary", "type": "str"}],
+                    }
+                ),
+                tool_calls=[],
+                usage={"prompt_tokens": 10, "completion_tokens": 5},
+            )
+
+    with patch("temporalio.activity.heartbeat"), patch("helpers.llm.RoseClient", FakeRoseClient):
+        from helpers.llm import set_response_schema_activity
+
+        try:
+            await set_response_schema_activity("agent-save-fails", ["goal"])
+            raise AssertionError("Expected response-schema persistence failure")
+        except RuntimeError as exc:
+            assert "save response schema" in str(exc).lower()
 
 
 async def test_call_llm_rose_path():
@@ -1196,9 +1234,7 @@ async def test_call_llm_rose_path():
 
     rose_client._reset_anthropic_api_key_cooldown_cache()
     try:
-        with patch("temporalio.activity.heartbeat"), patch.dict(
-            os.environ, {"ANTHROPIC_API_KEY": "sk-ant-api03-test"}
-        ):
+        with patch("temporalio.activity.heartbeat"), patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-api03-test"}):
             from helpers.llm import call_llm
 
             result = await call_llm(
@@ -2388,9 +2424,12 @@ async def test_check_progress_disables_fast_cache_read_after_verifier_parse_fail
         )
 
     try:
-        with patch("temporalio.activity.heartbeat"), patch(
-            "helpers.llm._call_llm_verifier", fake_call_llm_verifier
-        ), patch("helpers.llm.asyncio.sleep", AsyncMock()), patch("helpers.llm.random.uniform", return_value=0):
+        with (
+            patch("temporalio.activity.heartbeat"),
+            patch("helpers.llm._call_llm_verifier", fake_call_llm_verifier),
+            patch("helpers.llm.asyncio.sleep", AsyncMock()),
+            patch("helpers.llm.random.uniform", return_value=0),
+        ):
             result = await check_progress(
                 context=[{"role": "USER", "text": "finish the task", "timestamp": "2024-01-01T00:00:00Z"}],
                 verifier_system_prompt="VERIFY",
@@ -2824,9 +2863,10 @@ async def test_call_llm_activity_happy_path_with_messages_list():
 
     set_mock_handler(handler)
 
-    with patch("temporalio.activity.heartbeat"), patch(
-        "helpers.llm.stream_assistant_chunk", new_callable=AsyncMock
-    ) as stream_mock:
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("helpers.llm.stream_assistant_chunk", new_callable=AsyncMock) as stream_mock,
+    ):
         result = await call_llm_activity(
             messages_or_agent_id=[{"role": "user", "content": "hi"}],
             model="rose-labs/rose-1-lite",
@@ -2846,6 +2886,69 @@ async def test_call_llm_activity_happy_path_with_messages_list():
     assert first_stream["done"] is False
     assert first_stream["sequence"] == 0
     assert isinstance(first_stream["llm_started_at_ms"], int)
+
+
+async def test_call_llm_activity_marks_structured_contract_failures_non_retryable():
+    """Malformed structured output must not be multiplied by Temporal retries."""
+    import httpx
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import call_llm_activity
+    from temporalio.exceptions import ApplicationError
+
+    payload = {
+        "actual_model": "google/gemini-3.1-pro-preview",
+        "choices": [
+            {
+                "delta": {
+                    "content": json.dumps(
+                        {
+                            "response": "Sending the message now.",
+                            "tool_calls": [
+                                {
+                                    "tool": "send_message",
+                                    "person_id": "+19729777432",
+                                    "channel": "imessage",
+                                    "from_email": None,
+                                    "intent": "Send a short hello.",
+                                    "context_gates": None,
+                                }
+                            ],
+                        }
+                    )
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30},
+    }
+    completion_calls = 0
+
+    def handler(req):
+        nonlocal completion_calls
+        if "/completions" in str(req.url):
+            completion_calls += 1
+            return httpx.Response(200, text=_sse_body([payload]))
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+
+    with patch("temporalio.activity.heartbeat"):
+        try:
+            await call_llm_activity(
+                messages_or_agent_id=[{"role": "user", "content": "Say hello"}],
+                model="rose-labs/rose-1-ultra",
+                tool_names=["message_person"],
+                reasoning_max_tokens=0,
+                call_site="structured-contract-test",
+            )
+            error = None
+        except ApplicationError as exc:
+            error = exc
+
+    assert error is not None
+    assert error.non_retryable is True
+    assert error.type == "LLMStructuredOutputError"
+    assert completion_calls == 1
 
 
 async def test_call_llm_activity_with_agent_id_reads_shared_context():
@@ -3995,7 +4098,6 @@ async def _call_llm_structured_streaming_replayed_native_tool_call_without_json_
 
 def test_call_llm_structured_streaming_replayed_native_tool_call_without_json():
     asyncio.run(_call_llm_structured_streaming_replayed_native_tool_call_without_json_case())
-
 
 
 async def test_call_llm_structured_streaming_attention_streaming():
@@ -5485,7 +5587,13 @@ async def run_all_tests():
         "set_response_schema_activity_no_schema_returned", test_set_response_schema_activity_no_schema_returned
     )
     await r.record_async("set_response_schema_activity_http_error", test_set_response_schema_activity_http_error)
-    r.record("filter_context_for_execute_verifier_boundary", test_filter_context_for_execute_verifier_uses_execute_boundary)
+    await r.record_async(
+        "set_response_schema_activity_save_error_raises",
+        test_set_response_schema_activity_save_error_raises,
+    )
+    r.record(
+        "filter_context_for_execute_verifier_boundary", test_filter_context_for_execute_verifier_uses_execute_boundary
+    )
     await r.record_async(
         "check_progress_execute_filters_plan_context",
         test_check_progress_execute_filters_plan_context_before_llm,
@@ -5495,7 +5603,9 @@ async def run_all_tests():
         "call_llm_rose_with_claude_token_and_skip_cache_write",
         test_call_llm_rose_with_claude_token_and_skip_cache_write,
     )
-    await r.record_async("call_llm_rose_response_model_output_config", test_call_llm_rose_response_model_uses_output_config)
+    await r.record_async(
+        "call_llm_rose_response_model_output_config", test_call_llm_rose_response_model_uses_output_config
+    )
     await r.record_async("call_llm_rose_http_error_raises", test_call_llm_rose_http_error_raises)
     await r.record_async(
         "build_llm_messages_preserves_tool_calls_and_tool_role",
@@ -5664,6 +5774,10 @@ async def run_all_tests():
     await r.record_async("verifier_no_json_raises", test_call_llm_verifier_no_json_raises)
     await r.record_async(
         "call_llm_activity_no_stream_id", test_call_llm_activity_no_stream_id_skips_streaming_callbacks
+    )
+    await r.record_async(
+        "call_llm_activity_structured_contract_non_retryable",
+        test_call_llm_activity_marks_structured_contract_failures_non_retryable,
     )
     await r.record_async("mark_claude_token_rate_limited_exception", test_mark_claude_token_rate_limited_exception_path)
     await r.record_async("fetch_claude_max_token_exception", test_fetch_claude_max_token_exception_path)

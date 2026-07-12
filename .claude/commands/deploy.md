@@ -1,10 +1,10 @@
 ---
-description: "Push current branch, wait for PR review to pass, merge, and wait for deploy to complete."
+description: "Push current branch, obtain a CodeRabbit or Claude fallback review, merge, and wait for deploy to complete."
 ---
 
 # Deploy
 
-Push the current branch, create a PR, wait for CodeRabbit review, merge, and wait for deploys to finish.
+Push the current branch, create a PR, obtain a CodeRabbit review (or Claude Code fallback), merge, and wait for deploys to finish.
 
 **This is a loop. Do NOT stop until the PR is merged and deploys are complete (or the user tells you to stop).**
 
@@ -878,7 +878,7 @@ done
 gh pr checks <PR_NUMBER> --watch
 ```
 
-This blocks until CodeRabbit actually reviews the current HEAD. Once it returns, read reviews from ALL three comment locations:
+This blocks until the CodeRabbit check completes for the current HEAD. **A green check alone does not prove a review happened.** Once it returns, read reviews from ALL three comment locations:
 
 ```bash
 gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/reviews
@@ -888,13 +888,63 @@ gh api repos/{owner}/{repo}/issues/<PR_NUMBER>/comments
 
 Filter reviews/comments by `submitted_at > PUSH_TS` (or `commit_id == HEAD_SHA` for inline comments) so you only act on findings for the newest commit.
 
+### Step 9a: Verify CodeRabbit delivered a substantive review
+
+Inspect the newest CodeRabbit-authored content from all three endpoints. Treat CodeRabbit as unavailable and run the Claude fallback when any of these is true:
+
+- The check is missing, failed, or timed out.
+- The newest bot output contains `Review limit reached`, `rate limited`, `usage spending cap`, `review skipped`, or a service/internal error.
+- The check is green but there is no substantive review result for `HEAD_SHA`. A quota/error comment is not a review.
+
+Do not repeatedly request more CodeRabbit reviews during a quota window. Trigger exactly one Claude review for the current HEAD by toggling the opt-in label:
+
+```bash
+FALLBACK_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+gh label create claude-review-fallback \
+  --description "Run Claude Code review when the primary reviewer is unavailable" \
+  --color 7B61FF --force
+gh api repos/{owner}/{repo}/issues/<PR_NUMBER>/labels/claude-review-fallback \
+  -X DELETE >/dev/null 2>&1 || true
+gh api repos/{owner}/{repo}/issues/<PR_NUMBER>/labels \
+  -X POST -f 'labels[]=claude-review-fallback' >/dev/null
+```
+
+Wait for the workflow run created after `FALLBACK_TS` and require it to succeed:
+
+```bash
+FALLBACK_RUN_ID=""
+for i in $(seq 1 40); do
+  FALLBACK_RUN_ID=$(gh run list \
+    --workflow claude-code-review-fallback.yml \
+    --event pull_request \
+    --limit 20 \
+    --json databaseId,createdAt,headSha \
+    --jq ".[] | select(.headSha == \"$HEAD_SHA\" and .createdAt > \"$FALLBACK_TS\") | .databaseId" \
+    | head -1)
+  [ -n "$FALLBACK_RUN_ID" ] && break
+  sleep 15
+done
+[ -n "$FALLBACK_RUN_ID" ] || { echo "Claude fallback did not start" >&2; exit 1; }
+gh run watch "$FALLBACK_RUN_ID" --exit-status
+```
+
+After success, read the three comment endpoints again and filter at `FALLBACK_TS`. The official code-review plugin posts only findings scoring at least 80; a successful workflow with no findings comment means no high-confidence issues were found. If the workflow fails, do not merge—inspect `gh run view "$FALLBACK_RUN_ID" --log-failed`, repair the fallback, and rerun it for the same HEAD.
+
+Remove the fallback label after a successful review so later pushes do not spend Claude quota unless the fallback is explicitly requested again:
+
+```bash
+gh api repos/{owner}/{repo}/issues/<PR_NUMBER>/labels/claude-review-fallback \
+  -X DELETE >/dev/null 2>&1 || true
+```
+
 ## Step 10: Handle review results
 
-Look across all three endpoints for review feedback from CodeRabbit. It may post findings as formal reviews or regular comments.
+Look across all three endpoints for review feedback from CodeRabbit or the Claude fallback. Either reviewer may post findings as formal reviews or regular comments.
 
 - **APPROVED** with no critical issues → proceed to Phase 3.
 - **CHANGES_REQUESTED** or any comment flagging issues → fix them, push, **re-run the full Test Loop (Phase 1)**, then come back to Step 9.
-- **REVIEW SKIPPED** (e.g., "Too many files!") → first try filtering, then escalate only if filtering doesn't fit. CodeRabbit Free caps reviews at 150 files. Add safe path filters to `.coderabbit.yaml`'s `reviews.path_filters` block, push, and let the next CodeRabbit run pick up the new filter. The list below is the canonical safe-filter set — these paths are already gated by /deploy's local checks, so excluding them from CodeRabbit doesn't lose coverage:
+- **CODE RABBIT UNAVAILABLE** (quota, spending cap, rate limit, service failure, or false-green check) → use the Claude fallback from Step 9a.
+- **REVIEW SKIPPED** (e.g., "Too many files!") → first try filtering, then use the Claude fallback if filtering doesn't fit. CodeRabbit Free caps reviews at 150 files. Add safe path filters to `.coderabbit.yaml`'s `reviews.path_filters` block, push, and let the next CodeRabbit run pick up the new filter. The list below is the canonical safe-filter set — these paths are already gated by /deploy's local checks, so excluding them from CodeRabbit doesn't lose coverage:
   ```yaml
   # Tests (gated by Step 5a / Step 6 / Step 6b locally)
   - "!**/tests/**"
@@ -939,7 +989,7 @@ Look across all three endpoints for review feedback from CodeRabbit. It may post
   If the projected count is still ≥150 after applying the canonical set, escalate to the user — splitting the PR or upgrading CodeRabbit is the only remaining option.
 - **No issues found** → proceed to Phase 3.
 
-**Fix ALL valid issues**, regardless of whether the code was modified in this PR. "Pre-existing" or "not my code" is NOT a valid reason to skip a real bug, security issue, or correctness problem. If CodeRabbit found it, and it's a real issue, fix it. Only skip true style nits (formatting, naming preferences, etc.) that have zero correctness impact.
+**Fix ALL valid issues**, regardless of whether the code was modified in this PR. "Pre-existing" or "not my code" is NOT a valid reason to skip a real bug, security issue, or correctness problem. If CodeRabbit or Claude found it, and it's a real issue, fix it. Only skip true style nits (formatting, naming preferences, etc.) that have zero correctness impact.
 
 **Reply to every review comment** before proceeding. For each comment, reply with one of:
 

@@ -16,6 +16,7 @@ import {
   RoseServerError,
   RoseStallError,
 } from './errors';
+import { responsesOutputProvenance, type ResponsesOutputProvenance } from './streamProvenance';
 import type { RoseStreamChunk } from './types';
 
 const log = createLogger('RoseStreaming');
@@ -84,6 +85,7 @@ export async function* parseAnthropicSSE(
   // Per-content-block state. Anthropic streams blocks one-at-a-time so a
   // single mutable slot is sufficient.
   let currentBlockKind: 'text' | 'thinking' | 'tool_use' | null = null;
+  let currentBlockIndex = 0;
   let currentToolId: string | null = null;
   let currentToolName: string | null = null;
   let currentToolArgs: string[] = [];
@@ -135,6 +137,7 @@ export async function* parseAnthropicSSE(
     if (type === 'content_block_start') {
       const block = event.content_block ?? {};
       const blockType = block.type;
+      currentBlockIndex = numberValue(event.index) ?? 0;
       if (blockType === 'tool_use') {
         currentBlockKind = 'tool_use';
         currentToolId = typeof block.id === 'string' ? block.id : null;
@@ -156,13 +159,31 @@ export async function* parseAnthropicSSE(
         const text = delta.text ?? '';
         if (text) {
           emittedContentOrTool = true;
-          yield { kind: 'content', data: { text } };
+          yield {
+            kind: 'content',
+            data: {
+              text,
+              item_id: `anthropic:${currentBlockIndex}`,
+              output_index: currentBlockIndex,
+              content_index: 0,
+              phase: 'final_answer',
+            },
+          };
         }
       } else if (delta.type === 'thinking_delta') {
         const text = delta.thinking ?? '';
         if (text) {
           emittedContentOrTool = true;
-          yield { kind: 'reasoning', data: { text } };
+          yield {
+            kind: 'reasoning',
+            data: {
+              text,
+              item_id: `anthropic:${currentBlockIndex}`,
+              output_index: currentBlockIndex,
+              content_index: 0,
+              phase: 'reasoning',
+            },
+          };
         }
       } else if (delta.type === 'input_json_delta') {
         const fragment = delta.partial_json ?? '';
@@ -186,6 +207,7 @@ export async function* parseAnthropicSSE(
         };
       }
       currentBlockKind = null;
+      currentBlockIndex = 0;
       currentToolId = null;
       currentToolName = null;
       currentToolArgs = [];
@@ -246,10 +268,23 @@ export async function* parseOpenAISSE(
     },
   };
 
-  let usage: Record<string, number> = {};
+  let usage: Record<string, unknown> = {};
   let finishReason = '';
   let emittedContentOrTool = false;
   let sawDone = false;
+  const toolCalls = new Map<number, { id: string; name: string; arguments: string }>();
+  const flushedToolIndices = new Set<number>();
+
+  const flushToolCalls = (): RoseStreamChunk[] => {
+    const chunks: RoseStreamChunk[] = [];
+    for (const index of [...toolCalls.keys()].sort((left, right) => left - right)) {
+      if (flushedToolIndices.has(index)) continue;
+      const toolCall = toolCalls.get(index)!;
+      chunks.push({ kind: 'tool_call', data: { ...toolCall } });
+      flushedToolIndices.add(index);
+    }
+    return chunks;
+  };
 
   for await (const line of iterLinesWithIdleTimeout(body, idleTimeoutMs, options.requestId)) {
     if (!line || !line.startsWith('data: ')) continue;
@@ -277,20 +312,60 @@ export async function* parseOpenAISSE(
 
     const choice = choices[0];
     const delta = choice.delta ?? {};
+    const choiceIndex = numberValue(choice.index) ?? 0;
 
     const content: string | undefined = delta.content;
     if (content) {
       emittedContentOrTool = true;
-      yield { kind: 'content', data: { text: content } };
+      yield {
+        kind: 'content',
+        data: {
+          text: content,
+          item_id: `openai:choice:${choiceIndex}`,
+          output_index: choiceIndex,
+          content_index: 0,
+          phase: 'final_answer',
+        },
+      };
     }
 
     const reasoningText: string | undefined = delta.reasoning ?? delta.reasoning_content;
     if (reasoningText) {
       emittedContentOrTool = true;
-      yield { kind: 'reasoning', data: { text: reasoningText } };
+      yield {
+        kind: 'reasoning',
+        data: {
+          text: reasoningText,
+          item_id: `openai:choice:${choiceIndex}`,
+          output_index: choiceIndex,
+          content_index: 0,
+          phase: 'reasoning',
+        },
+      };
     }
 
-    if (choice.finish_reason) finishReason = choice.finish_reason;
+    for (const toolDelta of delta.tool_calls ?? []) {
+      const index = numberValue(toolDelta.index) ?? 0;
+      const slot = toolCalls.get(index) ?? { id: '', name: '', arguments: '' };
+      if (typeof toolDelta.id === 'string' && toolDelta.id) slot.id = toolDelta.id;
+      const fn = toolDelta.function ?? {};
+      if (typeof fn.name === 'string' && fn.name) slot.name = fn.name;
+      if (typeof fn.arguments === 'string' && fn.arguments) slot.arguments += fn.arguments;
+      toolCalls.set(index, slot);
+    }
+
+    if (choice.finish_reason) {
+      finishReason = choice.finish_reason;
+      for (const chunk of flushToolCalls()) {
+        emittedContentOrTool = true;
+        yield chunk;
+      }
+    }
+  }
+
+  for (const chunk of flushToolCalls()) {
+    emittedContentOrTool = true;
+    yield chunk;
   }
 
   if (finishReason === 'refusal') {
@@ -309,11 +384,21 @@ export async function* parseOpenAISSE(
   yield {
     kind: 'usage',
     data: {
-      prompt_tokens: usage.prompt_tokens ?? 0,
-      completion_tokens: usage.completion_tokens ?? 0,
-      total_tokens: usage.total_tokens ?? 0,
-      cache_creation_input_tokens: usage.cache_creation_input_tokens ?? 0,
-      cache_read_input_tokens: usage.cache_read_input_tokens ?? 0,
+      prompt_tokens: numberValue(usage.prompt_tokens) ?? 0,
+      completion_tokens: numberValue(usage.completion_tokens) ?? 0,
+      total_tokens: numberValue(usage.total_tokens) ?? 0,
+      cache_creation_input_tokens:
+        numberValue(usage.cache_creation_input_tokens) ??
+        numberValue(
+          (usage.prompt_tokens_details as Record<string, unknown> | undefined)?.cache_write_tokens
+        ) ??
+        0,
+      cache_read_input_tokens:
+        numberValue(usage.cache_read_input_tokens) ??
+        numberValue(
+          (usage.prompt_tokens_details as Record<string, unknown> | undefined)?.cached_tokens
+        ) ??
+        0,
       finish_reason: finishReason,
     },
   };
@@ -346,10 +431,12 @@ export async function* parseResponsesSSE(
   let promptTokens = 0;
   let completionTokens = 0;
   let totalTokens = 0;
+  let cacheWriteTokens = 0;
   let cacheReadTokens = 0;
   let finishReason = '';
   let emittedContentOrTool = false;
   let sawDone = false;
+  const outputItems = new Map<string, ResponsesOutputProvenance>();
 
   const applyUsage = (usage: Record<string, unknown> | undefined): void => {
     if (!usage) return;
@@ -357,6 +444,7 @@ export async function* parseResponsesSSE(
     completionTokens = numberValue(usage.output_tokens) ?? completionTokens;
     totalTokens = numberValue(usage.total_tokens) ?? totalTokens;
     const details = usage.input_tokens_details as Record<string, unknown> | undefined;
+    cacheWriteTokens = numberValue(details?.cache_write_tokens) ?? cacheWriteTokens;
     cacheReadTokens = numberValue(details?.cached_tokens) ?? cacheReadTokens;
   };
 
@@ -382,6 +470,22 @@ export async function* parseResponsesSSE(
     }
 
     const type = String(event.type ?? '');
+    if (type === 'response.output_item.added') {
+      const item = event.item as Record<string, unknown> | undefined;
+      const itemId = stringValue(item?.id);
+      if (itemId) {
+        const itemType = stringValue(item?.type);
+        outputItems.set(itemId, {
+          item_id: itemId,
+          output_index: numberValue(event.output_index) ?? 0,
+          content_index: 0,
+          phase:
+            stringValue(item?.phase) ?? (itemType === 'reasoning' ? 'reasoning' : 'final_answer'),
+        });
+      }
+      continue;
+    }
+
     const delta = stringValue(event.delta) ?? stringValue(event.text);
     if (
       delta &&
@@ -390,19 +494,42 @@ export async function* parseResponsesSSE(
         type === 'response.output_item.delta')
     ) {
       emittedContentOrTool = true;
-      yield { kind: 'content', data: { text: delta } };
+      yield {
+        kind: 'content',
+        data: {
+          text: delta,
+          ...responsesOutputProvenance(event, outputItems, 'final_answer'),
+        },
+      };
       continue;
     }
 
     const reasoningDelta = reasoningDeltaText(event, type);
     if (reasoningDelta) {
       emittedContentOrTool = true;
-      yield { kind: 'reasoning', data: { text: reasoningDelta } };
+      yield {
+        kind: 'reasoning',
+        data: {
+          text: reasoningDelta,
+          ...responsesOutputProvenance(event, outputItems, 'reasoning'),
+        },
+      };
       continue;
     }
 
     if (type === 'response.output_item.done') {
       const item = event.item as Record<string, unknown> | undefined;
+      const itemId = stringValue(item?.id);
+      if (itemId && !outputItems.has(itemId)) {
+        const itemType = stringValue(item?.type);
+        outputItems.set(itemId, {
+          item_id: itemId,
+          output_index: numberValue(event.output_index) ?? 0,
+          content_index: 0,
+          phase:
+            stringValue(item?.phase) ?? (itemType === 'reasoning' ? 'reasoning' : 'final_answer'),
+        });
+      }
       if (item?.type === 'reasoning') {
         const encryptedContent = stringValue(item.encrypted_content);
         if (encryptedContent) {
@@ -472,7 +599,7 @@ export async function* parseResponsesSSE(
       prompt_tokens: promptTokens,
       completion_tokens: completionTokens,
       total_tokens: totalTokens || promptTokens + completionTokens,
-      cache_creation_input_tokens: 0,
+      cache_creation_input_tokens: cacheWriteTokens || Math.max(promptTokens - cacheReadTokens, 0),
       cache_read_input_tokens: cacheReadTokens,
       finish_reason: finishReason || 'stop',
     },

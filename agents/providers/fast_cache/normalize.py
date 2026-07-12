@@ -18,17 +18,49 @@ CACHE_KEY_VERSION = "v42"
 
 # Query params that vary per-request and must never participate in a key.
 _VOLATILE_QUERY_PARAMS = {
-    "_", "cb", "cache", "cachebuster", "v", "ver", "version", "t", "ts", "time",
-    "timestamp", "nonce", "rand", "random", "r", "_t", "gclid", "fbclid", "msclkid",
-    "sid", "sessionid", "session_id", "token", "signature", "sig", "expires", "expiry",
+    "_",
+    "cb",
+    "cache",
+    "cachebuster",
+    "v",
+    "ver",
+    "version",
+    "t",
+    "ts",
+    "time",
+    "timestamp",
+    "nonce",
+    "rand",
+    "random",
+    "r",
+    "_t",
+    "gclid",
+    "fbclid",
+    "msclkid",
+    "sid",
+    "sessionid",
+    "session_id",
+    "token",
+    "signature",
+    "sig",
+    "expires",
+    "expiry",
 }
 _VOLATILE_QUERY_PREFIXES = ("utm_", "x-amz-", "x_amz_", "amp;")
 
 # Field names that hold secrets — stripped before any value is written.
 _SECRET_FIELDS = {
-    "authorization", "cookie", "set-cookie", "x-api-key", "api-key",
-    "anthropic-api-key", "x-anthropic-api-key", "proxy-authorization",
-    "claude_token", "gpt_token", "apikey",
+    "authorization",
+    "cookie",
+    "set-cookie",
+    "x-api-key",
+    "api-key",
+    "anthropic-api-key",
+    "x-anthropic-api-key",
+    "proxy-authorization",
+    "claude_token",
+    "gpt_token",
+    "apikey",
 }
 _REQUEST_PARTITION_HEADERS = {"authorization", "cookie", "proxy-authorization", "x-api-key"}
 _SYSTEM_PROMPT_DYNAMIC_BOUNDARY = "\n__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__\n"
@@ -144,9 +176,7 @@ _COMMAND_UNKNOWN_PROCESS_ID_RE = re.compile(r"write_stdin failed: Unknown proces
 _JSON_NUMERIC_VOLATILE_FIELD_RE = re.compile(
     r'(?P<prefix>\\?"(?:session_id|sessionId|yield_time_ms|yieldTimeMs)\\?"\s*:\s*)\d+'
 )
-_CODEX_SHELL_SNAPSHOT_RE = re.compile(
-    r"(?:/+home/user/)?\.codex/shell_snapshots/[0-9a-fA-F-]{36}\.\d+\.sh"
-)
+_CODEX_SHELL_SNAPSHOT_RE = re.compile(r"(?:/+home/user/)?\.codex/shell_snapshots/[0-9a-fA-F-]{36}\.\d+\.sh")
 _NPM_NOTICE_LINE_RE = re.compile(r"(?m)^npm notice.*(?:\n|$)")
 _NPM_WARN_LINE_RE = re.compile(r"(?m)^npm warn.*(?:\n|$)")
 _NPM_INSTALL_DURATION_RE = re.compile(
@@ -161,12 +191,8 @@ _LS_LONG_MTIME_RE = re.compile(
     r"(?m)^([bcdlps-][rwxStTs-]{9}[.+@]?\s+\d+\s+\S+\s+\S+\s+\S+\s+)"
     r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+(?:\d{2}:\d{2}|\d{4})(\s+)"
 )
-_FILE_TIMESTAMP_PATH_LINE_RE = re.compile(
-    r"(?m)^\d+(?:\.\d+)?\s+((?:/|\./|\.\./|~/|[A-Za-z]:[\\/])\S+)"
-)
-_COMMAND_OUTPUT_ISO_TIMESTAMP_RE = re.compile(
-    r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\b"
-)
+_FILE_TIMESTAMP_PATH_LINE_RE = re.compile(r"(?m)^\d+(?:\.\d+)?\s+((?:/|\./|\.\./|~/|[A-Za-z]:[\\/])\S+)")
+_COMMAND_OUTPUT_ISO_TIMESTAMP_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\b")
 _COMMAND_NORMALIZED_RUNNING_RE = re.compile(r"(^|\n)Process running with session ID <session_id>(?=\n|$)")
 _COMMAND_EXIT_ZERO_RE = re.compile(r"(^|\n)Process exited with code 0(?=\n|$)")
 _PACKAGE_DOWNLOAD_RATE_RE = re.compile(
@@ -188,9 +214,7 @@ _BROWSER_TOKEN_LINE_RE = re.compile(r"(?m)^Token:\s*\S+$")
 _RESOLVED_REF_RE = re.compile(r"<resolved-ref pointer=\"@ref:message:[^\"]+\"[^>]*>")
 _AGENT_RECORDING_PATH_RE = re.compile(r"\.context/browser-agent-recordings/[^\s\"']+")
 _GITHUB_CREDENTIAL_URL_RE = re.compile(r"https://[^@\s\"']+@github\.com/")
-_ROSE_AGENT_REPO_URL_RE = re.compile(
-    r"https://github\.com/rose-gh-agent/agent-[0-9a-fA-F]{8}(?:\.git)?"
-)
+_ROSE_AGENT_REPO_URL_RE = re.compile(r"https://github\.com/rose-gh-agent/agent-[0-9a-fA-F]{8}(?:\.git)?")
 _ROSE_AGENT_WORKDIR_RE = re.compile(r"/home/user/agent-[0-9a-fA-F]{8}\b")
 _ROSE_AGENT_REPO_SLUG_RE = re.compile(r"\bagent-[0-9a-fA-F]{8}\b")
 _E2B_SANDBOX_TEXT_RE = re.compile(r"(?i)(Created E2B sandbox:\s*)[a-z0-9]{10,64}\b")
@@ -207,9 +231,7 @@ _PARALLEL_RESULT_MESSAGE_RE = re.compile(
 _TIMESTAMPED_RESULT_BLOCK_RE = re.compile(
     r"(?ms)(^\[timestamp\]\s+\[(?:spawn_agent|spawn_general_purpose_agent|web_search|web_fetch) result\]:.*?)(?=^\[timestamp\]\s+\[(?:spawn_agent|spawn_general_purpose_agent|web_search|web_fetch) result\]:|\Z)"
 )
-_PARAM_BLOCK_RE = re.compile(
-    r"(?ms)\*\*Params Passed:\*\*\s*(?P<params>.*?)\n\s*\*\*Result:\*\*\s*(?P<result>.*)\s*$"
-)
+_PARAM_BLOCK_RE = re.compile(r"(?ms)\*\*Params Passed:\*\*\s*(?P<params>.*?)\n\s*\*\*Result:\*\*\s*(?P<result>.*)\s*$")
 _PARAM_LINE_RE = re.compile(r"(?m)^-\s+\*\*(?P<name>[^*]+)\*\*:\s*(?P<value>.*)$")
 _PARALLEL_TOOL_RESULT_NAMES = (
     '"tool_name": "spawn_agent"',
@@ -264,9 +286,7 @@ def _normalize_volatile_text(text: str) -> str:
     text = _STATE_NOW_RE.sub("[STATE: now=<timestamp>]\n\n", text)
     text = _RESOLVED_REF_RE.sub("<resolved-ref>", text)
     text = re.sub(r"@ref:message:" + _UUID_RE.pattern, "@ref:message:<uuid>", text)
-    text = _COMPLETION_SUMMARY_STRUCTURED_OUTPUT_RE.sub(
-        r"\g<1><structured-output>\g<2>", text
-    )
+    text = _COMPLETION_SUMMARY_STRUCTURED_OUTPUT_RE.sub(r"\g<1><structured-output>\g<2>", text)
     text = _AGENT_RECORDING_PATH_RE.sub(".context/browser-agent-recordings/<recording>", text)
     text = _GITHUB_CREDENTIAL_URL_RE.sub("https://github.com/", text)
     text = _ROSE_AGENT_REPO_URL_RE.sub("https://github.com/rose-gh-agent/agent-<root>", text)
@@ -334,7 +354,7 @@ def _canonicalize_empty_or_running_command_output(text: str) -> str:
     if idx < 0:
         return text
     before_output = text[:idx]
-    output = text[idx + len(marker):]
+    output = text[idx + len(marker) :]
     is_running = "Process running with session ID <session_id>" in before_output
     is_exit_zero = bool(_COMMAND_EXIT_ZERO_RE.search(before_output))
     if not is_running and not is_exit_zero:
@@ -371,7 +391,7 @@ def _parse_code_agent_sdk_payload_text(payload_text: str) -> Any | None:
     match = re.search(r'\{\s*"version"\s*:', stripped)
     if not match:
         return None
-    candidate = '{"code_agent_events":[' + stripped[match.start():]
+    candidate = '{"code_agent_events":[' + stripped[match.start() :]
     try:
         return json.loads(candidate)
     except json.JSONDecodeError:
@@ -383,12 +403,11 @@ def _canonicalize_raw_code_agent_sdk_events_text(text: str) -> str:
     if prefix_idx < 0 or text[:prefix_idx].strip():
         return text
 
-    payload = _parse_code_agent_sdk_payload_text(text[prefix_idx + len(_CODE_AGENT_SDK_EVENTS_PREFIX):])
+    payload = _parse_code_agent_sdk_payload_text(text[prefix_idx + len(_CODE_AGENT_SDK_EVENTS_PREFIX) :])
     if payload is None:
         return text
-    return (
-        text[: prefix_idx + len(_CODE_AGENT_SDK_EVENTS_PREFIX)]
-        + _stable_json(_canonicalize_code_agent_sdk_payload(payload))
+    return text[: prefix_idx + len(_CODE_AGENT_SDK_EVENTS_PREFIX)] + _stable_json(
+        _canonicalize_code_agent_sdk_payload(payload)
     )
 
 
@@ -405,7 +424,7 @@ def _canonicalize_code_agent_sdk_events_text(text: str) -> str:
         result = outer["result"]
         if not result.startswith(_CODE_AGENT_SDK_EVENTS_PREFIX):
             return match.group(0)
-        payload = _parse_code_agent_sdk_payload_text(result[len(_CODE_AGENT_SDK_EVENTS_PREFIX):])
+        payload = _parse_code_agent_sdk_payload_text(result[len(_CODE_AGENT_SDK_EVENTS_PREFIX) :])
         if payload is None:
             return match.group(0)
         canonical = {
@@ -430,8 +449,10 @@ def _canonicalize_code_agent_sdk_payload(value: Any) -> Any:
         if key == "code_agent_events" and isinstance(raw, list):
             events = []
             for event in raw:
-                if isinstance(event, dict) and event.get("type") == "command" and (
-                    event.get("raw_type") == "item.started" or event.get("status") == "started"
+                if (
+                    isinstance(event, dict)
+                    and event.get("type") == "command"
+                    and (event.get("raw_type") == "item.started" or event.get("status") == "started")
                 ):
                     continue
                 events.append(_canonicalize_code_agent_sdk_payload(event))
@@ -513,7 +534,7 @@ def _sort_timestamped_result_blocks(text: str) -> str:
     i = 0
     while i < len(matches):
         m = matches[i]
-        out.append(text[last_end:m.start()])
+        out.append(text[last_end : m.start()])
 
         batch = [m.group(1).strip()]
         batch_end = m.end()
@@ -571,7 +592,7 @@ def _parse_provider_json_payload(text: str) -> tuple[str, Any] | None:
     payload = text
     if payload.startswith("[timestamp] "):
         prefix = "[timestamp] "
-        payload = payload[len("[timestamp] "):]
+        payload = payload[len("[timestamp] ") :]
 
     stripped = payload.lstrip()
     prefix += payload[: len(payload) - len(stripped)]
@@ -606,7 +627,22 @@ def _looks_like_provider_json(value: Any) -> bool:
     return (
         ("answer" in keys and bool(keys & {"query", "sources", "provider", "images"}))
         or ("markdown" in keys and bool(keys & {"links", "metadata"}))
-        or ("content" in keys and bool(keys & {"links", "sources", "metadata", "provider", "url", "objective", "downloaded_files", "links_discovered"}))
+        or (
+            "content" in keys
+            and bool(
+                keys
+                & {
+                    "links",
+                    "sources",
+                    "metadata",
+                    "provider",
+                    "url",
+                    "objective",
+                    "downloaded_files",
+                    "links_discovered",
+                }
+            )
+        )
     )
 
 
@@ -744,7 +780,9 @@ def canonical_messages(messages: Any) -> str:
         if item.get("role") == "tool":
             return True
         content = item.get("content")
-        return item.get("role") == "user" and isinstance(content, str) and bool(_PARALLEL_RESULT_MESSAGE_RE.match(content))
+        return (
+            item.get("role") == "user" and isinstance(content, str) and bool(_PARALLEL_RESULT_MESSAGE_RE.match(content))
+        )
 
     def _sort_parallel_tool_batches(items: list[Any]) -> list[Any]:
         """Parallel tool results can arrive in any order; sort only contiguous
@@ -837,6 +875,7 @@ def position_request_fingerprint(request: Any) -> str:
 
     material: dict[str, Any] = {
         "pool": request.get("pool"),
+        "pool_contract": request.get("pool_contract"),
         "static_messages": static_messages,
         "tools": request.get("tools"),
         "tool_choice": request.get("tool_choice"),
@@ -863,7 +902,9 @@ def llm_key(goal: str, call_site: str, request: Any) -> str:
 
 
 def browser_use_key(goal: str, request: Any) -> str:
-    return build_key("browser_use", goal, f"c:{sha256(canonical_messages(canonical_browser_use_request(request)))[:32]}")
+    return build_key(
+        "browser_use", goal, f"c:{sha256(canonical_messages(canonical_browser_use_request(request)))[:32]}"
+    )
 
 
 def browser_http_key(goal: str, method: str, url: str, headers: Any = None, body: Any = None) -> str:
@@ -918,7 +959,9 @@ def canonical_browser_use_request(request: Any) -> Any:
                 "clear",
             ):
                 if key in params:
-                    stable_params[key] = normalize_url(params[key]) if key == "url" and isinstance(params[key], str) else params[key]
+                    stable_params[key] = (
+                        normalize_url(params[key]) if key == "url" and isinstance(params[key], str) else params[key]
+                    )
         out: dict[str, Any] = {}
         if action:
             out["action"] = action

@@ -12,33 +12,12 @@
 
 import { X } from 'lucide-react';
 
+import { isSubmittablePhone } from '@/lib/phone';
+
 import type { PhoneStepProps } from '../types';
 
 import AuthLogo from './AuthLogo';
-
-function appendUSFormatted(prefix: string, digits: string): string {
-  let out = prefix + '(' + digits.slice(0, 3);
-  if (digits.length >= 3) {
-    out += ')';
-    if (digits.length > 3) {
-      out += '-' + digits.slice(3, 6);
-      if (digits.length > 6) out += '-' + digits.slice(6, 10);
-    }
-  }
-  return out;
-}
-
-/** Formats a raw digit string into a display phone number: +1 (XXX)-XXX-XXXX. */
-function formatPhoneNumber(value: string): string {
-  const digits = value.replace(/\D/g, '');
-  if (digits.length === 0) return '';
-  if (digits[0] === '1') {
-    const rest = digits.slice(1);
-    return rest.length === 0 ? '+1' : appendUSFormatted('+1 ', rest);
-  }
-  if (digits.length <= 10) return appendUSFormatted('+1 ', digits);
-  return '+' + digits;
-}
+import PhoneInput from './PhoneInput';
 
 function PhoneStep({ phone, onPhoneChange, loading, onSubmit, onClose }: PhoneStepProps) {
   const handleSubmit = (e: React.FormEvent) => {
@@ -68,16 +47,7 @@ function PhoneStep({ phone, onPhoneChange, loading, onSubmit, onClose }: PhoneSt
           <label htmlFor="phone" className="block text-sm text-gray-500 mb-1">
             Phone Number
           </label>
-          <input
-            id="phone"
-            type="tel"
-            placeholder="+1 (972)-977-7432"
-            value={phone}
-            onChange={(e) => onPhoneChange(formatPhoneNumber(e.target.value))}
-            required
-            className="w-full px-3 py-2 bg-[#EEEFF2] border border-gray-300 rounded-lg text-navi-black text-sm placeholder-navi-black/30 focus:outline-none focus:border-gray-400"
-            disabled={loading}
-          />
+          <PhoneInput id="phone" value={phone} onChange={onPhoneChange} disabled={loading} />
           <p className="text-xs text-gray-500 mt-2">
             By submitting, you authorize Rose Labs to send an automated text message containing a
             one-time password (OTP) to the number you provided. Message/data rates may apply. See{' '}
@@ -104,7 +74,7 @@ function PhoneStep({ phone, onPhoneChange, loading, onSubmit, onClose }: PhoneSt
 
         <button
           type="submit"
-          disabled={loading || !phone}
+          disabled={loading || !isSubmittablePhone(phone)}
           className="w-full px-3 py-2 bg-navi-black text-white text-sm rounded-lg hover:bg-navi-black/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {loading ? 'Sending...' : 'Continue'}

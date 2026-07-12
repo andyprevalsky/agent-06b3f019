@@ -19,7 +19,8 @@ import type { GateMetadata } from '@/features/terminal-component-group/component
 
 // ── View state ────────────────────────────────────────────────────────────
 
-export type TerminalView = 'agents' | 'browse' | 'integrations' | 'settings' | 'usage' | 'network';
+export type TerminalView =
+  'agents' | 'browse' | 'integrations' | 'settings' | 'usage' | 'network' | 'admin-health';
 
 export type AnimationPhase = 'revealing' | 'paused' | 'fading';
 

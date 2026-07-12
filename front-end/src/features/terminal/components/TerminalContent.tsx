@@ -10,40 +10,38 @@
  *   currentView === 'integrations' → <Integrations />
  *   currentView === 'usage'        → <Usage />
  *   currentView === 'network'      → <NetworkView />
+ *   currentView === 'admin-health' → <AdminHealth />
  *   currentView === 'agents'       → agent chat / landing
+ *   open-agent deep link           → force 'agents' even from browse/settings
  */
 
 import { useState, useMemo, lazy } from 'react';
-import { useNavigate } from 'react-router-dom';
 
-import { ScrollArea } from '@/components/ui/scroll-area';
-import { AppSidebar, SIDEBAR_WIDTH_COLLAPSED } from '@/features/terminal-component-group';
-import Settings from '@/pages/Settings';
-import Browse from '@/pages/Browse';
-import Integrations from '@/pages/Integrations';
-import Usage from '@/pages/Usage';
-import { NetworkView } from '@/features/terminal-component-group';
-import { getItem } from '@/lib/storage';
-import { getQueryParams } from '@/lib/url';
-import { cn } from '@/lib/utils';
+import {
+  AppSidebar,
+  NetworkView,
+  SIDEBAR_WIDTH_COLLAPSED,
+} from '@/features/terminal-component-group';
 import { useAppData } from '@/hooks/useAppData';
+import { ADMIN_PHONE_DIGITS, ADMIN_USER_IDS } from '@/features/terminal-component-group/config';
 
 import { useTerminalAgents } from '../hooks/useTerminalAgents';
 import { useDrippiness } from '../hooks/useDrippiness';
 import { useTileAnimation } from '../hooks/useTileAnimation';
 import { usePatternOffset } from '../hooks/usePatternOffset';
+import { resolveInitialTerminalView } from '../hooks/resolveInitialTerminalView';
 import {
   computeActiveBrowserPanels,
   derivePendingApproval,
-  deriveHasActiveAttentionRequest,
   derivePendingGates,
+  deriveHasActiveAttentionRequest,
 } from '../hooks/derivations';
 import type { TerminalView } from '../types';
 import { BROWSER_REVIEW_TEST_PHONE } from '../config';
 
 import { BackgroundPattern } from './BackgroundPattern';
 import { TerminalHeader } from './TerminalHeader';
-import { AgentChatArea } from './AgentChatArea';
+import { MainContent } from './TerminalMainContent';
 import { TerminalModals } from './TerminalModals';
 
 const BrowserStatusBarCarousel = lazy(() =>
@@ -52,18 +50,11 @@ const BrowserStatusBarCarousel = lazy(() =>
   })),
 );
 
-function getInitialTerminalView(): TerminalView {
-  const params = getQueryParams();
-  if (params.has('agent-id')) return 'agents';
-
-  const stored = getItem('app-user');
-  if (stored === null) return 'agents';
-  try {
-    const user = JSON.parse(stored) as { phone?: string };
-    return user.phone === BROWSER_REVIEW_TEST_PHONE ? 'browse' : 'agents';
-  } catch {
-    return 'agents';
-  }
+function isAdminHealthUser(user: { id?: string; phone?: string } | null): boolean {
+  if (!user) return false;
+  if (user.id && ADMIN_USER_IDS.includes(user.id)) return true;
+  const phoneDigits = (user.phone ?? '').replace(/\D/g, '');
+  return ADMIN_PHONE_DIGITS.includes(phoneDigits);
 }
 
 export function TerminalContent() {
@@ -72,11 +63,30 @@ export function TerminalContent() {
   const { patternOffset, tileColors, colorPalette } = usePatternOffset(tileAnimation.currentFrame);
 
   const resetAnimationState = () => tileAnimation.reset();
-  const initialView = useMemo<TerminalView>(getInitialTerminalView, []);
+  const initialView = useMemo<TerminalView>(resolveInitialTerminalView, []);
   const [currentView, setCurrentView] = useState<TerminalView>(initialView);
   const agents = useTerminalAgents(currentView, setCurrentView, resetAnimationState);
   const { models, modelsLoading } = useAppData();
+  const derived = useTerminalDerivedState(agents);
 
+  return (
+    <TerminalLayout
+      agents={agents}
+      drip={drip}
+      tileAnimation={tileAnimation}
+      patternOffset={patternOffset}
+      tileColors={tileColors}
+      colorPalette={colorPalette}
+      currentView={currentView}
+      setCurrentView={setCurrentView}
+      models={models}
+      modelsLoading={modelsLoading}
+      derived={derived}
+    />
+  );
+}
+
+function useTerminalDerivedState(agents: ReturnType<typeof useTerminalAgents>) {
   const activeBrowserPanels = useMemo(
     () => computeActiveBrowserPanels(agents.messages),
     [agents.messages],
@@ -87,21 +97,45 @@ export function TerminalContent() {
     () => deriveHasActiveAttentionRequest(agents.messages),
     [agents.messages],
   );
-  const browserStatusProps = useMemo(() => {
-    if (activeBrowserPanels.length === 0) return null;
-    return { browsers: activeBrowserPanels };
-  }, [activeBrowserPanels]);
-  const systemMessages = agents.messages.filter((m) => m.role === 'SYSTEM');
+  const browserStatusProps = useMemo(
+    () => (activeBrowserPanels.length === 0 ? null : { browsers: activeBrowserPanels }),
+    [activeBrowserPanels],
+  );
+  return {
+    pendingApproval,
+    pendingGates,
+    hasActiveAttention,
+    browserStatusProps,
+    systemMessages: agents.messages.filter((message) => message.role === 'SYSTEM'),
+    showAdminHealth: isAdminHealthUser(agents.user),
+  };
+}
 
+interface TerminalLayoutProps {
+  agents: ReturnType<typeof useTerminalAgents>;
+  drip: ReturnType<typeof useDrippiness>;
+  tileAnimation: ReturnType<typeof useTileAnimation>;
+  patternOffset: ReturnType<typeof usePatternOffset>['patternOffset'];
+  tileColors: ReturnType<typeof usePatternOffset>['tileColors'];
+  colorPalette: ReturnType<typeof usePatternOffset>['colorPalette'];
+  currentView: TerminalView;
+  setCurrentView: (view: TerminalView) => void;
+  models: ReturnType<typeof useAppData>['models'];
+  modelsLoading: boolean;
+  derived: ReturnType<typeof useTerminalDerivedState>;
+}
+
+function TerminalLayout(props: TerminalLayoutProps) {
+  const { agents, drip, tileAnimation, currentView, setCurrentView, derived } = props;
   return (
     <div
       className="h-screen w-screen flex flex-col bg-background dark:bg-navi-black relative overflow-hidden"
       style={{ height: '100dvh' }}
     >
       <BackgroundPattern
-        patternOffset={patternOffset}
-        tileColors={tileColors}
-        colorPalette={colorPalette}
+        patternOffset={props.patternOffset}
+        tileColors={props.tileColors}
+        colorPalette={props.colorPalette}
         animationResetKey={tileAnimation.animationResetKey}
         animationComplete={tileAnimation.animationComplete}
         currentFrame={tileAnimation.currentFrame}
@@ -131,20 +165,23 @@ export function TerminalContent() {
           currentView={currentView}
           setCurrentView={setCurrentView}
           showBrowse={currentView === 'browse' || agents.user?.phone === BROWSER_REVIEW_TEST_PHONE}
+          showAdminHealth={derived.showAdminHealth}
         />
 
         <MainContent
           agents={agents}
           drip={drip}
           currentView={currentView}
-          models={models}
-          modelsLoading={modelsLoading}
-          pendingApproval={pendingApproval}
-          pendingGates={pendingGates}
-          hasActiveAttention={hasActiveAttention}
-          browserStatusProps={browserStatusProps}
-          systemMessages={systemMessages}
+          models={props.models}
+          modelsLoading={props.modelsLoading}
+          pendingApproval={derived.pendingApproval}
+          pendingGates={derived.pendingGates}
+          hasActiveAttention={derived.hasActiveAttention}
+          browserStatusProps={derived.browserStatusProps}
+          systemMessages={derived.systemMessages}
           BrowserStatusBarCarousel={BrowserStatusBarCarousel}
+          NetworkView={NetworkView}
+          sidebarWidthCollapsed={SIDEBAR_WIDTH_COLLAPSED}
         />
       </div>
 
@@ -161,12 +198,14 @@ function SidebarSection({
   currentView,
   setCurrentView,
   showBrowse,
+  showAdminHealth,
 }: {
   agents: ReturnType<typeof useTerminalAgents>;
   drip: ReturnType<typeof useDrippiness>;
   currentView: TerminalView;
   setCurrentView: (v: TerminalView) => void;
   showBrowse: boolean;
+  showAdminHealth: boolean;
 }) {
   return (
     <AppSidebar
@@ -185,124 +224,12 @@ function SidebarSection({
         void agents.handleLogout();
       }}
       onLoginClick={agents.handleLoginClick}
+      showAdminHealth={showAdminHealth}
       dripStyles={drip.dripStyles}
       blur={drip.blur}
       backgroundColors={drip.backgroundColors}
       borderColor={drip.borderColor}
       shadowIntensity={drip.shadowIntensity}
     />
-  );
-}
-
-// ── Main content area (view router) ─────────────────────────────────────
-
-type MainContentProps = {
-  agents: ReturnType<typeof useTerminalAgents>;
-  drip: ReturnType<typeof useDrippiness>;
-  currentView: TerminalView;
-  models: ReturnType<typeof useAppData>['models'];
-  modelsLoading: boolean;
-  pendingApproval: ReturnType<typeof derivePendingApproval>;
-  pendingGates: ReturnType<typeof derivePendingGates>;
-  hasActiveAttention: boolean;
-  browserStatusProps: { browsers: { taskId: string; browserUrl: string }[] } | null;
-  systemMessages: ReturnType<typeof useTerminalAgents>['messages'];
-  BrowserStatusBarCarousel: React.ComponentType<{
-    browsers: { taskId: string; browserUrl: string }[];
-  }>;
-};
-
-function MainContent(props: MainContentProps) {
-  const { agents, currentView } = props;
-  const browseOffsetStyle =
-    currentView === 'browse'
-      ? ({ '--browse-sidebar-offset': `${SIDEBAR_WIDTH_COLLAPSED}px` } as React.CSSProperties)
-      : undefined;
-
-  return (
-    <main
-      className={cn(
-        'flex-1 flex justify-center h-screen overflow-hidden',
-        currentView === 'browse' && 'md:pl-[var(--browse-sidebar-offset)]',
-      )}
-      style={{ height: '100dvh', ...browseOffsetStyle }}
-    >
-      <div
-        className={cn(
-          'flex flex-col relative w-full h-full overflow-hidden',
-          currentView === 'browse' ? 'px-0' : 'px-2 md:px-6',
-          currentView === 'network' || currentView === 'browse' ? 'max-w-none' : 'max-w-5xl',
-        )}
-      >
-        {agents.clientSource === 'WEB' && <DesktopNavLinks />}
-        <MainContentBody {...props} />
-      </div>
-    </main>
-  );
-}
-
-function MainContentBody({
-  agents,
-  drip,
-  currentView,
-  models,
-  modelsLoading,
-  pendingApproval,
-  pendingGates,
-  hasActiveAttention,
-  browserStatusProps,
-  systemMessages,
-  BrowserStatusBarCarousel: BrowserCarousel,
-}: MainContentProps) {
-  if (currentView === 'browse') return <Browse />;
-  if (currentView === 'network') return <NetworkView />;
-  if (currentView === 'settings') return <ScrollableView content={<Settings />} />;
-  if (currentView === 'integrations') return <ScrollableView content={<Integrations />} />;
-  if (currentView === 'usage') return <ScrollableView content={<Usage />} />;
-
-  return (
-    <AgentChatArea
-      agents={agents}
-      drip={drip}
-      models={models}
-      modelsLoading={modelsLoading}
-      pendingApproval={pendingApproval}
-      pendingGates={pendingGates}
-      hasActiveAttentionRequest={hasActiveAttention}
-      browserStatusProps={browserStatusProps}
-      systemMessages={systemMessages}
-      BrowserStatusBarCarousel={BrowserCarousel}
-    />
-  );
-}
-
-function ScrollableView({ content }: { content: React.ReactNode }) {
-  return (
-    <ScrollArea className="flex-1 h-full">
-      <div className="pt-24 pb-8">{content}</div>
-    </ScrollArea>
-  );
-}
-
-function DesktopNavLinks() {
-  const navigate = useNavigate();
-
-  return (
-    <div className="hidden md:flex items-center gap-2 absolute top-5 right-2 z-50">
-      <button
-        onClick={() => navigate('/research')}
-        className="px-3 py-1.5 bg-navi-white text-navi-black text-xs font-medium rounded-full border border-border hover:bg-navi-white/80 transition-colors shadow-sm"
-      >
-        Research
-      </button>
-      <a
-        href="/download"
-        target="_blank"
-        rel="noopener noreferrer"
-        className="px-3 py-1.5 bg-navi-black text-white text-xs font-medium rounded-full hover:bg-navi-black/80 transition-colors shadow-lg"
-      >
-        Download
-      </a>
-    </div>
   );
 }

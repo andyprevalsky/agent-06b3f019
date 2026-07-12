@@ -7,6 +7,10 @@
  *   AGENT_SELECTED + LOADING → show "Loading AI Network..." dots
  *   AGENT_SELECTED + READY   → show message list, query input, browser status
  *
+ * INPUT ROUTING:
+ *   pendingApproval === null  → show QueryInput
+ *   pendingApproval !== null  → replace QueryInput with ApprovalChip
+ *
  * MOBILE CHROME:
  *   Legal links sit below the mobile visual viewport so Safari's bottom URL bar
  *   occludes them, while desktop keeps the links visible above the bottom edge.
@@ -181,13 +185,7 @@ function InputArea({
         />
       )}
 
-      <ApprovalChip
-        pendingApproval={pendingApproval}
-        onApprovalHandled={() => {
-          if (a.selectedAgentId) void a.refreshAgentDetail(a.selectedAgentId);
-        }}
-      />
-
+      {/* Gate cards pin above the input UI regardless of the approval/query toggle. */}
       <GateStack
         pendingGates={pendingGates}
         agentId={a.selectedAgentId}
@@ -196,13 +194,22 @@ function InputArea({
         }}
       />
 
-      <ChatQueryInputBox
-        agents={a}
-        drip={drip}
-        models={models}
-        modelsLoading={modelsLoading}
-        canSubmit={canSubmit}
-      />
+      {pendingApproval ? (
+        <ApprovalChip
+          pendingApproval={pendingApproval}
+          onApprovalHandled={() => {
+            if (a.selectedAgentId) void a.refreshAgentDetail(a.selectedAgentId);
+          }}
+        />
+      ) : (
+        <ChatQueryInputBox
+          agents={a}
+          drip={drip}
+          models={models}
+          modelsLoading={modelsLoading}
+          canSubmit={canSubmit}
+        />
+      )}
     </div>
   );
 }

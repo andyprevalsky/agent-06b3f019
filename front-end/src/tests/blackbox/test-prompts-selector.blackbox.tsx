@@ -103,6 +103,58 @@ describe('TestPromptsSelector', () => {
     expect(chipLabels.filter((label) => label === 'smoke')).toHaveLength(1);
   });
 
+  it('renders the search bar above the tag chips', async () => {
+    renderWithProviders(<TestPromptsSelector onSelectPrompt={vi.fn()} />);
+    fireEvent.mouseEnter(screen.getByTitle('Select a test prompt'));
+    await waitFor(() => expect(screen.getByText(/Basic Chat Response/i)).toBeInTheDocument());
+
+    const search = screen.getByRole('searchbox', { name: 'Search test prompts' });
+    const firstTag = screen.getByRole('button', { name: 'attachment' });
+    expect(search.compareDocumentPosition(firstTag) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+  });
+
+  it('searching filters prompts by title, description, prompt text, or tag', async () => {
+    renderWithProviders(<TestPromptsSelector onSelectPrompt={vi.fn()} />);
+    fireEvent.mouseEnter(screen.getByTitle('Select a test prompt'));
+    await waitFor(() => expect(screen.getByText(/Basic Chat Response/i)).toBeInTheDocument());
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search test prompts' }), {
+      target: { value: 'red-tinted' },
+    });
+
+    expect(screen.queryByText(/Basic Chat Response/i)).toBeNull();
+    expect(screen.getByText(/Image Attachment Processing/i)).toBeInTheDocument();
+  });
+
+  it('does not match search text across field boundaries', async () => {
+    renderWithProviders(<TestPromptsSelector onSelectPrompt={vi.fn()} />);
+    fireEvent.mouseEnter(screen.getByTitle('Select a test prompt'));
+    await waitFor(() => expect(screen.getByText(/Basic Chat Response/i)).toBeInTheDocument());
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search test prompts' }), {
+      target: { value: 'Response Tests' },
+    });
+
+    expect(screen.queryByText(/Basic Chat Response/i)).toBeNull();
+    expect(screen.queryByText(/Image Attachment Processing/i)).toBeNull();
+  });
+
+  it('combines search and tag filters', async () => {
+    renderWithProviders(<TestPromptsSelector onSelectPrompt={vi.fn()} />);
+    fireEvent.mouseEnter(screen.getByTitle('Select a test prompt'));
+    await waitFor(() => expect(screen.getByText(/Basic Chat Response/i)).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole('button', { name: 'chat' }));
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search test prompts' }), {
+      target: { value: 'red-tinted' },
+    });
+
+    expect(screen.queryByText(/Basic Chat Response/i)).toBeNull();
+    expect(screen.queryByText(/Image Attachment Processing/i)).toBeNull();
+  });
+
   it('selecting a tag filters the list to prompts carrying it', async () => {
     renderWithProviders(<TestPromptsSelector onSelectPrompt={vi.fn()} />);
     fireEvent.mouseEnter(screen.getByTitle('Select a test prompt'));
