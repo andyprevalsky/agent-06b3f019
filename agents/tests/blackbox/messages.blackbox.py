@@ -23,32 +23,38 @@ def _mock_handler(request: httpx.Request) -> httpx.Response:
 
     # POST /api/agents/{id}/messages
     if "/messages" in url and method == "POST":
-        return httpx.Response(201, json={
-            "message_id": "msg-created-1",
-            "role": "ASSISTANT",
-            "message": "test message",
-            "timestamp": "2026-04-05T12:00:00Z",
-        })
+        return httpx.Response(
+            201,
+            json={
+                "message_id": "msg-created-1",
+                "role": "ASSISTANT",
+                "message": "test message",
+                "timestamp": "2026-04-05T12:00:00Z",
+            },
+        )
 
     # GET /api/agents/{id} (used by poll_new_messages via _fetch_agent_data_impl)
     if "/api/agents/" in url and method == "GET":
-        return httpx.Response(200, json={
-            "agent": {"id": "agent-test-1", "status": "ACTIVE"},
-            "messages": [
-                {
-                    "role": "USER",
-                    "message": "Hello",
-                    "timestamp": "2026-04-05T12:00:00Z",
-                    "metadata": {},
-                },
-                {
-                    "role": "ASSISTANT",
-                    "message": "Hi there!",
-                    "timestamp": "2026-04-05T12:01:00Z",
-                    "metadata": {},
-                },
-            ],
-        })
+        return httpx.Response(
+            200,
+            json={
+                "agent": {"id": "agent-test-1", "status": "ACTIVE"},
+                "messages": [
+                    {
+                        "role": "USER",
+                        "message": "Hello",
+                        "timestamp": "2026-04-05T12:00:00Z",
+                        "metadata": {},
+                    },
+                    {
+                        "role": "ASSISTANT",
+                        "message": "Hi there!",
+                        "timestamp": "2026-04-05T12:01:00Z",
+                        "metadata": {},
+                    },
+                ],
+            },
+        )
 
     # PATCH /api/agents/{id} (used by update_agent_tree_state)
     if "/api/agents/" in url and method == "PATCH":
@@ -149,8 +155,10 @@ async def test_post_message_no_metadata():
 
 async def test_post_message_raises_on_http_error():
     """post_agent_message raises when the backend returns non-201."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, json={"error": "boom"})
+
     setup_mock_fn(handler)
 
     with patch("temporalio.activity.heartbeat"):
@@ -243,44 +251,47 @@ async def test_poll_messages_projects_context_compaction_checkpoint():
 
     def handler(request: httpx.Request) -> httpx.Response:
         if "/api/agents/" in str(request.url) and request.method == "GET":
-            return httpx.Response(200, json={
-                "agent": {"id": "agent-compact-1", "status": "ACTIVE"},
-                "messages": [
-                    {
-                        "role": "USER",
-                        "text": "Original goal",
-                        "timestamp": "2026-04-05T12:00:00Z",
-                        "metadata": {},
-                    },
-                    {
-                        "role": "TOOL",
-                        "text": "Very large raw tool output",
-                        "timestamp": "2026-04-05T12:01:00Z",
-                        "metadata": {},
-                    },
-                    {
-                        "message_id": "msg-reset-1",
-                        "role": "TOOL",
-                        "text": "Context compressed — continuing with summarized history.",
-                        "timestamp": "2026-04-05T12:04:00Z",
-                        "metadata": {
-                            "toolName": "context_reset",
-                            "toolStatus": "FINISHED",
-                            "contextCompaction": {
-                                "version": 1,
-                                "compressedContext": compressed_context,
-                                "compressedMessageCount": len(compressed_context),
+            return httpx.Response(
+                200,
+                json={
+                    "agent": {"id": "agent-compact-1", "status": "ACTIVE"},
+                    "messages": [
+                        {
+                            "role": "USER",
+                            "text": "Original goal",
+                            "timestamp": "2026-04-05T12:00:00Z",
+                            "metadata": {},
+                        },
+                        {
+                            "role": "TOOL",
+                            "text": "Very large raw tool output",
+                            "timestamp": "2026-04-05T12:01:00Z",
+                            "metadata": {},
+                        },
+                        {
+                            "message_id": "msg-reset-1",
+                            "role": "TOOL",
+                            "text": "Context compressed — continuing with summarized history.",
+                            "timestamp": "2026-04-05T12:04:00Z",
+                            "metadata": {
+                                "toolName": "context_reset",
+                                "toolStatus": "FINISHED",
+                                "contextCompaction": {
+                                    "version": 1,
+                                    "compressedContext": compressed_context,
+                                    "compressedMessageCount": len(compressed_context),
+                                },
                             },
                         },
-                    },
-                    {
-                        "role": "ASSISTANT",
-                        "text": "Continuing after reset",
-                        "timestamp": "2026-04-05T12:05:00Z",
-                        "metadata": {},
-                    },
-                ],
-            })
+                        {
+                            "role": "ASSISTANT",
+                            "text": "Continuing after reset",
+                            "timestamp": "2026-04-05T12:05:00Z",
+                            "metadata": {},
+                        },
+                    ],
+                },
+            )
         return httpx.Response(404, json={"error": "no mock"})
 
     setup_mock_fn(handler)
@@ -303,8 +314,10 @@ async def test_poll_messages_projects_context_compaction_checkpoint():
 
 async def test_poll_messages_raises_on_error():
     """poll_new_messages raises when the underlying fetch fails."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, json={"error": "boom"})
+
     setup_mock_fn(handler)
 
     with patch("temporalio.activity.heartbeat"):
@@ -349,7 +362,9 @@ async def test_update_agent_tree_state_happy_path():
 
     # Should have both a broadcast POST and a PATCH to agents endpoint
     assert any("/realtime/v1/api/broadcast" in u for u in urls), f"Expected broadcast call, got {urls}"
-    assert any(c["method"] == "PATCH" and "/api/agents/" in c["url"] for c in captures), f"Expected PATCH to agents, got {urls}"
+    assert any(c["method"] == "PATCH" and "/api/agents/" in c["url"] for c in captures), (
+        f"Expected PATCH to agents, got {urls}"
+    )
 
     # Verify PATCH body includes tools_in_use, progress, message_count, status
     patch_call = next(c for c in captures if c["method"] == "PATCH")
@@ -379,6 +394,7 @@ async def test_update_agent_tree_state_no_broadcast():
 
 async def test_update_agent_tree_state_handles_broadcast_failure():
     """update_agent_tree_state swallows broadcast errors but still PATCHes."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
         if "/realtime/v1/api/broadcast" in url:
@@ -386,6 +402,7 @@ async def test_update_agent_tree_state_handles_broadcast_failure():
         if "/api/agents/" in url and request.method == "PATCH":
             return httpx.Response(200, json={"ok": True})
         return httpx.Response(404)
+
     setup_mock_fn(handler)
 
     with patch("temporalio.activity.heartbeat"):
@@ -406,6 +423,7 @@ async def test_update_agent_tree_state_handles_broadcast_failure():
 
 async def test_update_agent_tree_state_patch_raises():
     """update_agent_tree_state swallows exceptions when PATCH raises."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
         if "/realtime/v1/api/broadcast" in url:
@@ -413,6 +431,7 @@ async def test_update_agent_tree_state_patch_raises():
         if "/api/agents/" in url and request.method == "PATCH":
             raise RuntimeError("patch failed")
         return httpx.Response(404)
+
     setup_mock_fn(handler)
 
     with patch("temporalio.activity.heartbeat"):
@@ -443,6 +462,7 @@ async def test_stream_assistant_chunk_happy_path():
         is_claude=True,
         is_gpt=True,
         llm_started_at_ms=1700000000000,
+        clear_on_done=True,
     )
     await _flush_broadcasts()
 
@@ -456,12 +476,14 @@ async def test_stream_assistant_chunk_happy_path():
     assert record["is_claude"] is True
     assert record["is_gpt"] is True
     assert record["llm_started_at_ms"] == 1700000000000
+    assert record["clear_on_done"] is True
     assert body["messages"][0]["event"] == "ASSISTANT_STREAM"
 
 
 def _reset_broadcast_client():
     """Reset module-level broadcast client so mocks take effect."""
     import sys
+
     mod = sys.modules.get("helpers.messages")
     if mod is not None:
         mod._broadcast_client = None
@@ -472,13 +494,16 @@ def _reset_broadcast_client():
 
 async def _flush_broadcasts():
     from helpers.messages import flush_realtime_broadcasts_for_tests
+
     await flush_realtime_broadcasts_for_tests()
 
 
 async def test_stream_assistant_chunk_handles_errors():
     """stream_assistant_chunk swallows exceptions silently."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         raise RuntimeError("network down")
+
     setup_mock_fn(handler)
     _reset_broadcast_client()
 
@@ -520,8 +545,10 @@ async def test_stream_plan_event_broadcasts():
 
 async def test_stream_plan_event_handles_errors():
     """stream_plan_event swallows exceptions."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         raise RuntimeError("fail")
+
     setup_mock_fn(handler)
     _reset_broadcast_client()
 
@@ -551,6 +578,8 @@ async def test_stream_tool_event_broadcasts():
         char_count=123,
         is_claude=True,
         llm_started_at_ms=1700000000000,
+        sub_agent_id="browser-task-1",
+        status="FINISHED",
     )
     await _flush_broadcasts()
 
@@ -563,12 +592,16 @@ async def test_stream_tool_event_broadcasts():
     assert record["char_count"] == 123
     assert record["is_claude"] is True
     assert record["llm_started_at_ms"] == 1700000000000
+    assert record["subAgentId"] == "browser-task-1"
+    assert record["status"] == "FINISHED"
 
 
 async def test_stream_tool_event_handles_errors():
     """stream_tool_event swallows exceptions."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         raise RuntimeError("fail")
+
     setup_mock_fn(handler)
     _reset_broadcast_client()
 
@@ -611,8 +644,10 @@ async def test_stream_attention_event_broadcasts():
 
 async def test_stream_attention_event_handles_errors():
     """stream_attention_event swallows exceptions."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         raise RuntimeError("fail")
+
     setup_mock_fn(handler)
     _reset_broadcast_client()
 
@@ -659,8 +694,10 @@ async def test_stream_browser_cursor_happy_path():
 
 async def test_stream_browser_cursor_handles_errors():
     """stream_browser_cursor swallows broadcast errors."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         raise RuntimeError("fail")
+
     setup_mock_fn(handler)
     _reset_broadcast_client()
 
@@ -694,8 +731,10 @@ async def test_broadcast_to_bus_happy_path():
 
 async def test_broadcast_to_bus_handles_errors():
     """broadcast_to_bus swallows exceptions (non-fatal)."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         raise RuntimeError("fail")
+
     setup_mock_fn(handler)
     _reset_broadcast_client()
 
@@ -707,8 +746,10 @@ async def test_broadcast_to_bus_handles_errors():
 
 async def test_broadcast_to_bus_logs_non_success():
     """broadcast_to_bus logs warning when status is not 200/202."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, text="nope")
+
     setup_mock_fn(handler)
 
     from helpers.messages import broadcast_to_bus
@@ -726,8 +767,13 @@ async def run_all_tests():
     await r.record_async("post_message_no_metadata", test_post_message_no_metadata)
     await r.record_async("post_message_raises_on_http_error", test_post_message_raises_on_http_error)
     await r.record_async("poll_messages_happy_path", test_poll_messages_happy_path)
-    await r.record_async("context_compaction_projection_keeps_checkpoint_tail", test_context_compaction_projection_keeps_checkpoint_tail)
-    await r.record_async("poll_messages_projects_context_compaction_checkpoint", test_poll_messages_projects_context_compaction_checkpoint)
+    await r.record_async(
+        "context_compaction_projection_keeps_checkpoint_tail", test_context_compaction_projection_keeps_checkpoint_tail
+    )
+    await r.record_async(
+        "poll_messages_projects_context_compaction_checkpoint",
+        test_poll_messages_projects_context_compaction_checkpoint,
+    )
     await r.record_async("poll_messages_raises_on_error", test_poll_messages_raises_on_error)
     await r.record_async("update_tree_state_happy_path", test_update_agent_tree_state_happy_path)
     await r.record_async("update_tree_state_no_broadcast", test_update_agent_tree_state_no_broadcast)

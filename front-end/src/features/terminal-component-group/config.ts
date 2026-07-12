@@ -40,6 +40,9 @@ export const ADMIN_USER_IDS: readonly string[] = [
   '43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9', // Tamara Chayo
 ];
 
+/** Admin phone numbers that unlock company-health dashboards in local/session state. */
+export const ADMIN_PHONE_DIGITS: readonly string[] = ['19729777432', '9729777432'];
+
 /** Upper bound for a single attachment (20MB — canonical client-side cap). */
 export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 

@@ -17,6 +17,7 @@ export type SidebarView =
   | 'settings'
   | 'usage'
   | 'network'
+  | 'admin-health'
   | 'benchmarks';
 
 /** One bottom-navigation entry in the sidebar. */

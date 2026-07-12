@@ -1,8 +1,7 @@
 """Blackbox tests for message-person domain."""
 
 import asyncio
-import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from _test_utils import (
     BlackboxResult,
@@ -14,18 +13,24 @@ from _test_utils import (
 
 
 def _setup():
-    setup_mock({
-        "/api/people/messages/recent": {
-            "status": 200,
-            "json": {
-                "messages": [
-                    {"text": "Hey, how's the project going?", "person": "Alice", "timestamp": "2026-04-01T10:00:00Z"},
-                    {"text": "Let's sync tomorrow", "person": "Bob", "timestamp": "2026-04-01T09:00:00Z"},
-                ],
-                "count": 2,
+    setup_mock(
+        {
+            "/api/people/messages/recent": {
+                "status": 200,
+                "json": {
+                    "messages": [
+                        {
+                            "text": "Hey, how's the project going?",
+                            "person": "Alice",
+                            "timestamp": "2026-04-01T10:00:00Z",
+                        },
+                        {"text": "Let's sync tomorrow", "person": "Bob", "timestamp": "2026-04-01T09:00:00Z"},
+                    ],
+                    "count": 2,
+                },
             },
-        },
-    })
+        }
+    )
 
 
 async def test_fetch_recent_messages_happy_path():
@@ -213,10 +218,12 @@ def test_format_messages_for_context_happy():
     """Messages render with channel/timestamp/arrow/content."""
     from domains.message_person.service import format_messages_for_context
 
-    out = format_messages_for_context([
-        {"channel": "imessage", "from": "+15551111111", "to": "+15552222222", "timestamp": "T1", "message": "hi"},
-        {"channel": "email", "from": "a@x.com", "to": "b@x.com", "timestamp": "T2", "message": "yo"},
-    ])
+    out = format_messages_for_context(
+        [
+            {"channel": "imessage", "from": "+15551111111", "to": "+15552222222", "timestamp": "T1", "message": "hi"},
+            {"channel": "email", "from": "a@x.com", "to": "b@x.com", "timestamp": "T2", "message": "yo"},
+        ]
+    )
     assert "[imessage]" in out
     assert "[email]" in out
     assert "hi" in out and "yo" in out
@@ -272,11 +279,13 @@ def test_build_conversation_summary_empty():
 def test_build_conversation_summary_with_messages():
     from domains.message_person.service import build_conversation_summary
 
-    out = build_conversation_summary([
-        {"role": "USER", "text": "hello"},
-        {"role": "ASSISTANT", "text": "world"},
-        {"role": "TOOL", "text": ""},  # skipped
-    ])
+    out = build_conversation_summary(
+        [
+            {"role": "USER", "text": "hello"},
+            {"role": "ASSISTANT", "text": "world"},
+            {"role": "TOOL", "text": ""},  # skipped
+        ]
+    )
     assert "[USER]: hello" in out
     assert "[ASSISTANT]: world" in out
 
@@ -424,6 +433,7 @@ def test_build_finished_event_imessage():
     from domains.message_person.handler import MessagePersonManager
     from tools.base import MessageStatus
 
+    generated_message = "Hey Alice, long text " * 20
     ev = MessagePersonManager._build_finished_event(
         channel="imessage",
         channel_label="iMessage",
@@ -431,14 +441,14 @@ def test_build_finished_event_imessage():
         recipient="+15551234",
         from_email="",
         generated_subject=None,
-        generated_message="Hey Alice, long text " * 20,
+        generated_message=generated_message,
         gen_usage={"prompt_tokens": 100, "completion_tokens": 20, "actual_model": "rose-ultra"},
         model="rose-labs/rose-1-lite",
     )
     assert ev.status == MessageStatus.FINISHED
     assert "Alice" in ev.title
-    # Message preview should be truncated
-    assert "..." in ev.message
+    assert generated_message in ev.message
+    assert ev.message.endswith(generated_message)
     # LLM usage attached
     assert ev.data and ev.data["usage"]["llm"][0]["tokens_in"] == 100
 
@@ -446,6 +456,7 @@ def test_build_finished_event_imessage():
 def test_build_finished_event_email_with_subject():
     from domains.message_person.handler import MessagePersonManager
 
+    generated_message = "Detailed email body. " * 20
     ev = MessagePersonManager._build_finished_event(
         channel="email",
         channel_label="Email",
@@ -453,12 +464,13 @@ def test_build_finished_event_email_with_subject():
         recipient="a@b.com",
         from_email="sender@mine.com",
         generated_subject="Hello",
-        generated_message="Short body",
+        generated_message=generated_message,
         gen_usage={},
         model="rose-labs/rose-1-lite",
     )
     assert "sender@mine.com" in ev.message
     assert "Hello" in ev.message
+    assert ev.message.endswith(generated_message)
     # No usage → no data
     assert ev.data is None
 
@@ -563,9 +575,7 @@ async def test_handler_read_history_failure_yields_error():
     from domains.message_person.handler import MessagePersonManager
     from tools.base import MessageStatus
 
-    fake = _FakeWFModule(
-        activity_results={"read_message_history_activity": RuntimeError("boom")}
-    )
+    fake = _FakeWFModule(activity_results={"read_message_history_activity": RuntimeError("boom")})
     restore = _patch_handler_workflow(fake)
     try:
         events = await _collect(

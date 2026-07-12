@@ -49,6 +49,7 @@ import {
 import vcardRouter from './domains/vcard/routes';
 import uploadRouter from './domains/upload/routes';
 import feedbackRouter from './domains/feedback/routes';
+import adminHealthRouter from './domains/admin-health/routes';
 import imessageRouter from './domains/imessage/routes';
 import dataRouter from './domains/data/routes';
 import benchmarksRouter from './domains/benchmarks/routes';
@@ -289,6 +290,9 @@ if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1') {
 
   const proactiveSmsRouter = express.Router();
   const parseProactiveSmsJobOptions = (body: unknown) => {
+    if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+      return null;
+    }
     const { now: nowValue, userIds: userIdsValue } = body as {
       now?: unknown;
       userIds?: unknown;
@@ -559,6 +563,7 @@ app.use('/api/billing', billingRouter);
 app.use('/api/api-keys', apiKeysRouter);
 app.use('/api/upload', uploadRouter);
 app.use('/api/feedback', feedbackRouter);
+app.use('/api/admin-health', adminHealthRouter);
 app.use('/api/data', dataRouter);
 app.use('/api/purchases', purchasesRouter);
 app.use('/api/test-payment', testPaymentRouter);

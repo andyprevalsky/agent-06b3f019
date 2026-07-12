@@ -4,7 +4,14 @@
  */
 
 import { useMemo } from 'react';
-import { FlaskConical, Globe, Network, Plug, Settings as SettingsIcon } from 'lucide-react';
+import {
+  Activity,
+  FlaskConical,
+  Globe,
+  Network,
+  Plug,
+  Settings as SettingsIcon,
+} from 'lucide-react';
 import type { SidebarNavItem, SidebarView } from '../types';
 
 interface UseSidebarNavItemsArgs {
@@ -13,6 +20,7 @@ interface UseSidebarNavItemsArgs {
   onSelectAgent: (agentId: string | null) => void;
   showBrowse: boolean;
   showBenchmarks: boolean;
+  showAdminHealth: boolean;
 }
 
 export function useSidebarNavItems({
@@ -21,6 +29,7 @@ export function useSidebarNavItems({
   onSelectAgent,
   showBrowse,
   showBenchmarks,
+  showAdminHealth,
 }: UseSidebarNavItemsArgs): SidebarNavItem[] {
   return useMemo(() => {
     const makeHandler = (view: SidebarView) => () => {
@@ -52,6 +61,17 @@ export function useSidebarNavItems({
             },
           ]
         : []),
+      ...(showAdminHealth
+        ? [
+            {
+              id: 'admin-health',
+              label: 'Health',
+              icon: <Activity className="h-4 w-4" />,
+              onClick: makeHandler('admin-health'),
+              isActive: currentView === 'admin-health',
+            },
+          ]
+        : []),
       {
         id: 'integrations',
         label: 'Integrations',
@@ -74,5 +94,5 @@ export function useSidebarNavItems({
         isActive: currentView === 'settings',
       },
     ];
-  }, [currentView, onViewChange, onSelectAgent, showBrowse, showBenchmarks]);
+  }, [currentView, onViewChange, onSelectAgent, showBrowse, showBenchmarks, showAdminHealth]);
 }

@@ -25,8 +25,14 @@ def test_tool_models_has_all_tools():
     from utils.tool_schemas import TOOL_MODELS
 
     expected_tools = [
-        "web_search", "web_fetch", "spawn_agent", "attempt_completion",
-        "send_message_to_user", "wait_for", "message_person", "set_plan",
+        "web_search",
+        "web_fetch",
+        "spawn_agent",
+        "attempt_completion",
+        "send_message_to_user",
+        "wait_for",
+        "message_person",
+        "set_plan",
         "grep",
     ]
 
@@ -39,9 +45,7 @@ def test_plan_phase_tools_subset():
     from utils.tool_schemas import PLAN_PHASE_TOOLS, TOOL_MODELS
 
     for tool_name in PLAN_PHASE_TOOLS:
-        assert tool_name in TOOL_MODELS, (
-            f"PLAN_PHASE_TOOLS contains '{tool_name}' which is not in TOOL_MODELS"
-        )
+        assert tool_name in TOOL_MODELS, f"PLAN_PHASE_TOOLS contains '{tool_name}' which is not in TOOL_MODELS"
 
 
 def test_execute_phase_tools_subset():
@@ -49,9 +53,7 @@ def test_execute_phase_tools_subset():
     from utils.tool_schemas import EXECUTE_PHASE_TOOLS, TOOL_MODELS
 
     for tool_name in EXECUTE_PHASE_TOOLS:
-        assert tool_name in TOOL_MODELS, (
-            f"EXECUTE_PHASE_TOOLS contains '{tool_name}' which is not in TOOL_MODELS"
-        )
+        assert tool_name in TOOL_MODELS, f"EXECUTE_PHASE_TOOLS contains '{tool_name}' which is not in TOOL_MODELS"
 
 
 def test_execute_phase_excludes_direct_web_search():
@@ -70,9 +72,7 @@ def test_all_phase_tools_superset():
     for tool_name in EXECUTE_PHASE_TOOLS:
         assert tool_name in ALL_PHASE_TOOLS
     for tool_name in ALL_PHASE_TOOLS:
-        assert tool_name in TOOL_MODELS, (
-            f"ALL_PHASE_TOOLS contains '{tool_name}' which is not in TOOL_MODELS"
-        )
+        assert tool_name in TOOL_MODELS, f"ALL_PHASE_TOOLS contains '{tool_name}' which is not in TOOL_MODELS"
 
 
 def test_create_agent_action_model():
@@ -195,8 +195,16 @@ def test_grep_tool_schema_exact_contract():
     assert enum_values == {"messages", "network", "agent_network", "transactions", "documents"}
 
     removed = {
-        "path", "glob", "type", "output_mode", "person_id", "limit",
-        "roles", "search_in", "tool_name", "tool_status",
+        "path",
+        "glob",
+        "type",
+        "output_mode",
+        "person_id",
+        "limit",
+        "roles",
+        "search_in",
+        "tool_name",
+        "tool_status",
     }
     assert props.isdisjoint(removed)
 
@@ -210,7 +218,10 @@ def test_wait_for_tool_mutually_exclusive_raises():
 
     _assert_raises(
         lambda: WaitForTool(
-            tool="wait_for", until_timestamp="2026-01-01T00:00:00Z", condition="when ready"
+            tool="wait_for",
+            description="the task to be ready",
+            until_timestamp="2026-01-01T00:00:00Z",
+            condition="when ready",
         ),
         "mutually exclusive",
     )
@@ -220,24 +231,46 @@ def test_wait_for_tool_neither_raises():
     """WaitForTool requires either until_timestamp or condition."""
     from utils.tool_schemas import WaitForTool
 
-    _assert_raises(lambda: WaitForTool(tool="wait_for"), "must be provided")
+    _assert_raises(
+        lambda: WaitForTool(tool="wait_for", description="the wait to finish"),
+        "must be provided",
+    )
 
 
 def test_wait_for_tool_with_timestamp_only():
     """WaitForTool accepts until_timestamp alone."""
     from utils.tool_schemas import WaitForTool
 
-    t = WaitForTool(tool="wait_for", until_timestamp="2026-01-01T00:00:00Z")
+    t = WaitForTool(
+        tool="wait_for",
+        description="midnight on January 1",
+        until_timestamp="2026-01-01T00:00:00Z",
+    )
     assert t.until_timestamp == "2026-01-01T00:00:00Z"
     assert t.condition is None
 
 
-def test_wait_for_tool_with_condition_only():
-    """WaitForTool accepts condition alone."""
+def test_wait_for_tool_condition_requires_description():
+    """Condition mode requires display copy from the original tool call."""
     from utils.tool_schemas import WaitForTool
 
-    t = WaitForTool(tool="wait_for", condition="When the user replies")
+    _assert_raises(
+        lambda: WaitForTool(tool="wait_for", condition="When the user replies"),
+        "description",
+    )
+
+
+def test_wait_for_tool_with_condition_and_description():
+    """Condition mode accepts concise display copy with the full condition."""
+    from utils.tool_schemas import WaitForTool
+
+    t = WaitForTool(
+        tool="wait_for",
+        description="Bar Shoji to reply",
+        condition="When the user replies",
+    )
     assert t.condition == "When the user replies"
+    assert t.description == "Bar Shoji to reply"
     assert t.until_timestamp is None
 
 
@@ -490,11 +523,7 @@ def test_response_schema_passthrough_canonical():
     """ResponseSchemaConfig passes the canonical {"fields": [...]} form unchanged."""
     from utils.tool_schemas import ResponseSchemaConfig
 
-    raw = {
-        "fields": [
-            {"name": "x", "type": "str", "required": True, "description": "d"}
-        ]
-    }
+    raw = {"fields": [{"name": "x", "type": "str", "required": True, "description": "d"}]}
     cfg = ResponseSchemaConfig.model_validate(raw)
     assert len(cfg.fields) == 1
     assert cfg.fields[0].name == "x"
@@ -741,7 +770,9 @@ async def run_all_tests():
         "create_agent_action_model_injects_completion_result_only_when_requested",
         test_create_agent_action_model_injects_completion_result_only_when_requested,
     )
-    r.record("explore_agent_action_model_accepts_documents_grep", test_explore_agent_action_model_accepts_documents_grep)
+    r.record(
+        "explore_agent_action_model_accepts_documents_grep", test_explore_agent_action_model_accepts_documents_grep
+    )
     r.record("planner_assignable_tools", test_planner_assignable_tools)
     r.record("planner_response_schema_compact", test_planner_response_schema_is_compact)
     r.record("grep_tool_schema_exact_contract", test_grep_tool_schema_exact_contract)
@@ -749,7 +780,8 @@ async def run_all_tests():
     r.record("wait_for_mutually_exclusive", test_wait_for_tool_mutually_exclusive_raises)
     r.record("wait_for_neither", test_wait_for_tool_neither_raises)
     r.record("wait_for_with_timestamp", test_wait_for_tool_with_timestamp_only)
-    r.record("wait_for_with_condition", test_wait_for_tool_with_condition_only)
+    r.record("wait_for_condition_requires_description", test_wait_for_tool_condition_requires_description)
+    r.record("wait_for_with_condition", test_wait_for_tool_with_condition_and_description)
     # WebFetchTool validation
     r.record("web_fetch_fields_url_objective_only", test_web_fetch_tool_fields_are_url_and_objective_only)
     r.record("web_fetch_drops_removed_params", test_web_fetch_tool_drops_removed_params)

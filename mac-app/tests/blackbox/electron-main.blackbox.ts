@@ -196,6 +196,7 @@ describe('blackbox: electron-main (main-wiring)', () => {
   beforeEach(async () => {
     onboardingCompleteFlag = true;
     configIsDev = false;
+    delete process.env.OPEN_DEVTOOLS;
     initAutoUpdaterMock.mockClear();
     setAutoUpdaterWindowMock.mockClear();
     registerUpdateIpcMock.mockClear();
@@ -295,6 +296,33 @@ describe('blackbox: electron-main (main-wiring)', () => {
 
     const continueActivityListeners = await appListenersFor('continue-activity');
     expect(continueActivityListeners.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('dev window: keeps DevTools closed unless explicitly requested', async () => {
+    configIsDev = true;
+    await loadMainEntry();
+    await flushWhenReady();
+
+    const electron = await import('electron');
+    const mainWindow = vi.mocked(electron.BrowserWindow).mock.results[0]?.value as {
+      webContents: { openDevTools: ReturnType<typeof vi.fn> };
+    };
+
+    expect(mainWindow.webContents.openDevTools).not.toHaveBeenCalled();
+  });
+
+  it('dev window: opens DevTools when OPEN_DEVTOOLS=1', async () => {
+    configIsDev = true;
+    process.env.OPEN_DEVTOOLS = '1';
+    await loadMainEntry();
+    await flushWhenReady();
+
+    const electron = await import('electron');
+    const mainWindow = vi.mocked(electron.BrowserWindow).mock.results[0]?.value as {
+      webContents: { openDevTools: ReturnType<typeof vi.fn> };
+    };
+
+    expect(mainWindow.webContents.openDevTools).toHaveBeenCalledTimes(1);
   });
 
   it('module-load: constructs a window-state electron-store with name "window-state"', async () => {

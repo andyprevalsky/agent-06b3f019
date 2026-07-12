@@ -57,6 +57,7 @@ model Agent {
   @@index([createdAt])
   @@index([temporalWorkflowId])
   @@index([parentAgentId])
+  @@index([parentAgentId, createdAt])
   @@index([busId])
 }
 
@@ -909,6 +910,7 @@ model GoalHistory {
   @@index([userId])
   @@index([archivedAt])
   @@index([originalAgentId])
+  @@index([depth, agentCreatedAt])
 }
 
 model ImessageQueue {

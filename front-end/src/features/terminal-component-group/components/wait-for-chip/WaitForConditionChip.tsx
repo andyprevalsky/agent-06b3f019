@@ -1,22 +1,39 @@
-import { CheckCircle, ChevronRight, Clock, XCircle } from 'lucide-react';
+/**
+ * STATE MACHINE: WaitForConditionChip
+ *
+ * COLLAPSED (default)
+ *   Header only: concise description + real polling context + status badge.
+ *   No Explore implementation detail is visible.
+ *       ↕ click header
+ * EXPANDED
+ *   Header + newest-first check history.
+ *   Each check composes its status and the existing InlineExploreChip on one row.
+ *   Explore expansion and nested tool-step expansion remain owned by InlineExploreChip.
+ *
+ * Runtime status:
+ *   IN_PROGRESS + live check → Checking
+ *   IN_PROGRESS, no live check → Next in Xm
+ *   FINISHED + conditionMet → Complete
+ *   ERROR → Stopped
+ */
+
+import { CheckCircle, XCircle } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { cn } from '@/lib/utils';
-import ThinkingAnimation from '@/components/ThinkingAnimation';
 import type { WaitForCheck } from '../../types';
 import { formatDuration, timeAgo } from './helpers';
 import { InlineExploreChip } from './InlineExploreChip';
+import { WaitForConditionHeader } from './WaitForConditionHeader';
 
 export interface WaitForConditionChipProps {
-  title: string;
-  condition: string;
+  description: string;
   isInProgress: boolean;
   isComplete: boolean;
   isError: boolean;
   conditionMet: boolean | undefined;
   checks: WaitForCheck[];
   liveCheck?: WaitForCheck;
-  pastChecks: WaitForCheck[];
   completedChecks: number;
+  currentCheckNum?: number;
   checkIntervalSeconds?: number;
   totalChecksCompleted?: number;
   thinkingStreamTokenCount?: number;
@@ -31,26 +48,26 @@ function useNextCheckCountdown(params: {
 }): string {
   const { isInProgress, checkIntervalSeconds, checks, liveCheck } = params;
   const [nextCheckIn, setNextCheckIn] = useState('');
-  const [, setTick] = useState(0);
   const intervalRef = useRef<ReturnType<typeof setInterval>>();
 
   useEffect(() => {
     const update = () => {
-      if (isInProgress && checkIntervalSeconds) {
-        const latestFinished = [...checks].reverse().find((c) => c.status === 'FINISHED');
+      if (!isInProgress || !checkIntervalSeconds) return;
+      const latestFinished = [...checks].reverse().find((check) => check.status === 'FINISHED');
 
-        if (liveCheck) {
-          setNextCheckIn('checking...');
-        } else if (latestFinished?.timestamp) {
-          const lastCheckTime = new Date(latestFinished.timestamp).getTime();
-          const nextCheckTime = lastCheckTime + checkIntervalSeconds * 1000;
-          const remaining = Math.max(0, Math.floor((nextCheckTime - Date.now()) / 1000));
-          setNextCheckIn(remaining > 0 ? `next in ${formatDuration(remaining)}` : 'checking...');
-        } else {
-          setNextCheckIn('checking...');
-        }
+      if (liveCheck) {
+        setNextCheckIn('Checking');
+        return;
       }
-      setTick((t) => t + 1);
+      if (!latestFinished?.timestamp) {
+        setNextCheckIn('Checking');
+        return;
+      }
+
+      const lastCheckTime = new Date(latestFinished.timestamp).getTime();
+      const nextCheckTime = lastCheckTime + checkIntervalSeconds * 1000;
+      const remaining = Math.max(0, Math.floor((nextCheckTime - Date.now()) / 1000));
+      setNextCheckIn(remaining > 0 ? `Next in ${formatDuration(remaining)}` : 'Checking');
     };
 
     update();
@@ -63,104 +80,112 @@ function useNextCheckCountdown(params: {
   return nextCheckIn;
 }
 
-function HeaderIcon({
-  isInProgress,
-  isError,
-  conditionMet,
-}: {
-  isInProgress: boolean;
-  isError: boolean;
-  conditionMet: boolean | undefined;
-}) {
-  if (isInProgress) {
-    return (
-      <div className="h-4 w-4 flex-shrink-0 mt-0.5">
-        <ThinkingAnimation autoplay loop playbackSpeed={1} style={{ width: 16, height: 16 }} />
-      </div>
-    );
+function CheckStatusIcon({ check }: { check: WaitForCheck }) {
+  if (check.conditionMet === true) {
+    return <CheckCircle className="h-3 w-3 flex-shrink-0 text-emerald-400" />;
   }
-  if (isError) return <XCircle className="h-4 w-4 flex-shrink-0 text-red-400 mt-0.5" />;
-  if (conditionMet)
-    return <CheckCircle className="h-4 w-4 flex-shrink-0 text-emerald-400 mt-0.5" />;
-  return <Clock className="h-4 w-4 flex-shrink-0 text-amber-400 mt-0.5" />;
+  if (check.status === 'ERROR') {
+    return <XCircle className="h-3 w-3 flex-shrink-0 text-red-400/70" />;
+  }
+  if (check.conditionMet === false) {
+    return <XCircle className="h-3 w-3 flex-shrink-0 text-muted-foreground/45" />;
+  }
+  return <span className="h-3 w-3 flex-shrink-0 rounded-full border border-blue-400/60" />;
 }
 
-function CheckStatusIcon({
-  isError,
-  checkPassed,
-  checkFailed,
+function getCheckState(check: WaitForCheck): string {
+  if (check.conditionMet === true) return 'Condition met';
+  if (check.status === 'ERROR') return 'Check failed';
+  if (check.conditionMet === false) return 'Condition not met';
+  if (check.status === 'IN_PROGRESS') return 'Checking now';
+  return 'Check complete';
+}
+
+function CheckLeadingContent({
+  check,
+  fallbackNumber,
 }: {
-  isError: boolean;
-  checkPassed: boolean;
-  checkFailed: boolean;
+  check: WaitForCheck;
+  fallbackNumber: number;
 }) {
-  if (checkPassed) return <CheckCircle className="h-3 w-3 flex-shrink-0 text-emerald-400/70" />;
-  if (isError || checkFailed) return <XCircle className="h-3 w-3 flex-shrink-0 text-red-400/50" />;
-  return <span className="h-3 w-3 flex-shrink-0 rounded-full border border-muted-foreground/30" />;
+  const ago = check.timestamp ? timeAgo(check.timestamp) : '';
+  return (
+    <span
+      data-testid={`wait-for-check-${check.checkNum || fallbackNumber}`}
+      className="flex min-w-0 flex-shrink items-center gap-1.5"
+    >
+      <CheckStatusIcon check={check} />
+      <span className="min-w-0 truncate text-[11px] text-muted-foreground/70">
+        <strong className="font-medium text-foreground/75">
+          Check {check.checkNum || fallbackNumber}
+        </strong>
+        <span> · {getCheckState(check)}</span>
+        {ago && <span className="text-muted-foreground/40"> · {ago}</span>}
+      </span>
+      <span className="mx-0.5 h-3 w-px flex-shrink-0 bg-border/70" />
+    </span>
+  );
 }
 
 function CheckHistoryRow({
   check,
-  index,
+  fallbackNumber,
+  isLive,
   thinkingStreamTokenCount,
   thinkingStreamStartedAtMs,
 }: {
   check: WaitForCheck;
-  index: number;
+  fallbackNumber: number;
+  isLive: boolean;
   thinkingStreamTokenCount: number;
   thinkingStreamStartedAtMs?: number;
 }) {
-  const isError = check.status === 'ERROR';
-  const checkPassed = check.conditionMet === true;
-  const checkFailed = check.conditionMet === false;
-  const checkLabel = `Check ${check.checkNum || index + 1}`;
-  const ago = check.timestamp ? timeAgo(check.timestamp) : '';
+  if (!check.explore) {
+    return (
+      <div className="flex items-center gap-1.5 border-t border-border/40 px-3 py-2">
+        <CheckLeadingContent check={check} fallbackNumber={fallbackNumber} />
+      </div>
+    );
+  }
 
   return (
-    <div>
-      <div className="flex items-center gap-1.5 px-3 py-1.5">
-        <CheckStatusIcon isError={isError} checkPassed={checkPassed} checkFailed={checkFailed} />
-        <span className="text-[11px] text-muted-foreground/70 flex-1 min-w-0 break-words">
-          {checkLabel}
-          {ago && <span className="text-muted-foreground/40"> · {ago}</span>}
-        </span>
-      </div>
-
-      {check.explore && (
-        <InlineExploreChip
-          explore={check.explore}
-          isLive={false}
-          thinkingStreamTokenCount={thinkingStreamTokenCount}
-          thinkingStreamStartedAtMs={thinkingStreamStartedAtMs}
-        />
-      )}
-    </div>
+    <InlineExploreChip
+      explore={check.explore}
+      isLive={isLive}
+      leadingContent={<CheckLeadingContent check={check} fallbackNumber={fallbackNumber} />}
+      collapseTerminalResult
+      thinkingStreamTokenCount={thinkingStreamTokenCount}
+      thinkingStreamStartedAtMs={thinkingStreamStartedAtMs}
+    />
   );
 }
 
 function CheckHistory({
-  pastChecks,
+  checks,
+  liveCheck,
   thinkingStreamTokenCount,
   thinkingStreamStartedAtMs,
 }: {
-  pastChecks: WaitForCheck[];
+  checks: WaitForCheck[];
+  liveCheck?: WaitForCheck;
   thinkingStreamTokenCount: number;
   thinkingStreamStartedAtMs?: number;
 }) {
+  const newestFirst = [...checks].reverse();
   return (
     <div className="border-t border-border/40">
-      <div className="px-3 pt-2 pb-1">
-        <span className="text-[10px] font-medium text-muted-foreground/50 uppercase tracking-wider">
+      <div className="px-3 pb-1 pt-2">
+        <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground/50">
           Check History
         </span>
       </div>
-
       <div className="max-h-[400px] overflow-y-auto">
-        {pastChecks.map((check, i) => (
+        {newestFirst.map((check, index) => (
           <CheckHistoryRow
-            key={`check-${check.timestamp}-${i}`}
+            key={`check-${check.checkNum || index}-${check.timestamp || index}`}
             check={check}
-            index={i}
+            fallbackNumber={checks.length - index}
+            isLive={check === liveCheck}
             thinkingStreamTokenCount={thinkingStreamTokenCount}
             thinkingStreamStartedAtMs={thinkingStreamStartedAtMs}
           />
@@ -170,134 +195,16 @@ function CheckHistory({
   );
 }
 
-function buildRightParts(params: {
-  isInProgress: boolean;
-  isComplete: boolean;
-  isError: boolean;
-  completedChecks: number;
-  totalChecksCompleted?: number;
-  nextCheckIn: string;
-}): string[] {
-  const { isInProgress, isComplete, isError, completedChecks, totalChecksCompleted, nextCheckIn } =
-    params;
-  const parts: string[] = [];
-  if (isInProgress) {
-    if (completedChecks > 0) {
-      parts.push(`${completedChecks} check${completedChecks !== 1 ? 's' : ''}`);
-    }
-    if (nextCheckIn) parts.push(nextCheckIn);
-  }
-  if (isComplete || isError) {
-    const total = totalChecksCompleted || completedChecks;
-    parts.push(`${total} check${total !== 1 ? 's' : ''}`);
-  }
-  return parts;
-}
-
-function ConditionHeader({
-  isInProgress,
-  isError,
-  conditionMet,
-  headerTitle,
-  rightParts,
-  showExpandChevron,
-  isExpanded,
-  onToggle,
-}: {
-  isInProgress: boolean;
-  isError: boolean;
-  conditionMet: boolean | undefined;
-  headerTitle: string;
-  rightParts: string[];
-  showExpandChevron: boolean;
-  isExpanded: boolean;
-  onToggle: () => void;
-}) {
-  return (
-    <div
-      className="flex items-start gap-2 min-h-[24px] px-3 py-2 cursor-pointer select-none"
-      onClick={onToggle}
-    >
-      <HeaderIcon isInProgress={isInProgress} isError={isError} conditionMet={conditionMet} />
-
-      <div className="flex-1 min-w-0">
-        <span className="text-xs font-medium text-foreground/80">
-          {headerTitle.replace(/\n/g, ' ')}
-        </span>
-      </div>
-
-      {rightParts.length > 0 && (
-        <span className="text-[10px] text-muted-foreground/50 tabular-nums flex-shrink-0 whitespace-nowrap mt-0.5">
-          {rightParts.join(' \u00b7 ')}
-        </span>
-      )}
-
-      {showExpandChevron && (
-        <ChevronRight
-          className={cn(
-            'h-3 w-3 flex-shrink-0 transition-transform text-muted-foreground/40 mt-0.5',
-            isExpanded && 'rotate-90',
-          )}
-        />
-      )}
-    </div>
-  );
-}
-
-function LiveCheckSection({
-  liveCheck,
-  showCheckHistory,
-  thinkingStreamTokenCount,
-  thinkingStreamStartedAtMs,
-}: {
-  liveCheck: WaitForCheck;
-  showCheckHistory: boolean;
-  thinkingStreamTokenCount: number;
-  thinkingStreamStartedAtMs?: number;
-}) {
-  if (!liveCheck.explore) return null;
-  return (
-    <>
-      {showCheckHistory && (
-        <div className="border-t border-border/40 px-3 pt-2 pb-1">
-          <span className="text-[10px] font-medium text-muted-foreground/50 uppercase tracking-wider">
-            Current Check
-          </span>
-        </div>
-      )}
-      <InlineExploreChip
-        explore={liveCheck.explore}
-        isLive={true}
-        thinkingStreamTokenCount={thinkingStreamTokenCount}
-        thinkingStreamStartedAtMs={thinkingStreamStartedAtMs}
-      />
-    </>
-  );
-}
-
-function buildHeaderTitle(params: {
-  isComplete: boolean;
-  isError: boolean;
-  title: string;
-  condition: string;
-}): string {
-  const { isComplete, isError, title, condition } = params;
-  if (isComplete) return `Waited for ${condition}`;
-  if (isError) return title || `Error waiting for ${condition}`;
-  return `Waiting for ${condition}`;
-}
-
 export function WaitForConditionChip({
-  title,
-  condition,
+  description,
   isInProgress,
   isComplete,
   isError,
   conditionMet,
   checks,
   liveCheck,
-  pastChecks,
   completedChecks,
+  currentCheckNum,
   checkIntervalSeconds,
   totalChecksCompleted,
   thinkingStreamTokenCount = 0,
@@ -310,47 +217,33 @@ export function WaitForConditionChip({
     checks,
     liveCheck,
   });
-
-  const toggleExpanded = useCallback(() => setIsExpanded((prev) => !prev), []);
-
-  const rightParts = buildRightParts({
-    isInProgress,
-    isComplete,
-    isError,
-    completedChecks,
-    totalChecksCompleted,
-    nextCheckIn,
-  });
-  const headerTitle = buildHeaderTitle({ isComplete, isError, title, condition });
-  const showCheckHistory = isExpanded && pastChecks.length > 0;
+  const toggleExpanded = useCallback(() => setIsExpanded((previous) => !previous), []);
+  const checkCount =
+    totalChecksCompleted ?? Math.max(completedChecks, currentCheckNum || 0, checks.length);
+  const statusBadge = isComplete ? 'Complete' : isError ? 'Stopped' : nextCheckIn || 'Checking';
+  const showHistory = isExpanded && checks.length > 0;
 
   return (
     <div className="min-w-0 max-w-full animate-in fade-in duration-300">
       <div className="min-w-0 max-w-full flex-1">
-        <div className="rounded-xl border border-border bg-card/50 backdrop-blur-sm shadow-sm overflow-hidden">
-          <ConditionHeader
+        <div className="min-w-0 max-w-full overflow-hidden rounded-xl border border-border bg-card/50 shadow-sm backdrop-blur-sm">
+          <WaitForConditionHeader
+            description={description}
             isInProgress={isInProgress}
+            isComplete={isComplete}
             isError={isError}
             conditionMet={conditionMet}
-            headerTitle={headerTitle}
-            rightParts={rightParts}
-            showExpandChevron={pastChecks.length > 0}
+            checkCount={checkCount}
+            checkIntervalSeconds={checkIntervalSeconds}
+            statusBadge={statusBadge}
+            showExpandChevron={checks.length > 0}
             isExpanded={isExpanded}
             onToggle={toggleExpanded}
           />
-
-          {showCheckHistory && (
+          {showHistory && (
             <CheckHistory
-              pastChecks={pastChecks}
-              thinkingStreamTokenCount={thinkingStreamTokenCount}
-              thinkingStreamStartedAtMs={thinkingStreamStartedAtMs}
-            />
-          )}
-
-          {liveCheck && (
-            <LiveCheckSection
+              checks={checks}
               liveCheck={liveCheck}
-              showCheckHistory={showCheckHistory}
               thinkingStreamTokenCount={thinkingStreamTokenCount}
               thinkingStreamStartedAtMs={thinkingStreamStartedAtMs}
             />

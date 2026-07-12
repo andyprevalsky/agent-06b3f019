@@ -78,6 +78,7 @@ export function useAgentProvider({
   const initialLoadDoneRef = useRef<string | null>(null);
   const messageHandlersRef = useRef<Map<string | null, MessageHandler>>(new Map());
   const streamedTextsRef = useRef<Set<string>>(new Set());
+  const completedStreamIdsRef = useRef<Set<string>>(new Set());
 
   // ─── Message handler registration ───────────────────────────────────────
 
@@ -154,6 +155,7 @@ export function useAgentProvider({
         setStreamingTools,
         setAgent,
         streamedTextsRef,
+        completedStreamIdsRef,
         initialLoadDoneRef,
         setIsChatMode,
       );
@@ -198,6 +200,7 @@ export function useAgentProvider({
     isReconnectingRef,
     initialLoadDoneRef,
     streamedTextsRef,
+    completedStreamIdsRef,
     setStreamingBubbles,
     setStreamingPlan,
     setStreamingAttention,
@@ -301,6 +304,7 @@ function flushState(
   setStreamingTools: React.Dispatch<React.SetStateAction<Map<string, StreamingTool>>>,
   setAgent: React.Dispatch<React.SetStateAction<AgentDetail | null>>,
   streamedTextsRef: React.MutableRefObject<Set<string>>,
+  completedStreamIdsRef: React.MutableRefObject<Set<string>>,
   initialLoadDoneRef: React.MutableRefObject<string | null>,
   setIsChatMode: React.Dispatch<React.SetStateAction<boolean>>,
 ) {
@@ -316,6 +320,7 @@ function flushState(
   setStreamingTools(new Map());
   setAgent(null);
   streamedTextsRef.current.clear();
+  completedStreamIdsRef.current.clear();
   initialLoadDoneRef.current = null;
   setIsChatMode(true);
 }

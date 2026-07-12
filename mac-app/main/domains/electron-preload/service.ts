@@ -263,6 +263,7 @@ function buildSystemAndUpdateBridge(
  */
 export function buildIpcApi(ipcRenderer: IpcRenderer): IPC {
   return {
+    isElectron: true,
     auth: buildAuthBridge(ipcRenderer),
     shortcut: buildShortcutBridge(ipcRenderer),
     onboarding: buildOnboardingBridge(ipcRenderer),

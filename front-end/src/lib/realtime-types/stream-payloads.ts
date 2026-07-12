@@ -19,6 +19,8 @@ export interface AssistantStreamPayload {
   delta: string;
   /** True when streaming is complete */
   done: boolean;
+  /** Clear this purely-ephemeral stream as soon as its done event arrives */
+  clear_on_done?: boolean;
   /** Sequence number for ordering and deduplication */
   sequence: number;
   /** Routes to sub-agent's MessageList (e.g., browser panel) */
@@ -84,6 +86,8 @@ export interface ToolStreamPayload {
   char_count?: number;
   /** Epoch ms when the LLM request started, before first token */
   llm_started_at_ms?: number;
+  /** Routes ephemeral browser/sub-agent tools to their dedicated MessageList */
+  subAgentId?: string;
   /** True when the streaming model is Claude (Anthropic) - used for thinking animation theming */
   is_claude?: boolean;
   /** True when the streaming model is direct GPT/Codex - used for thinking animation theming */

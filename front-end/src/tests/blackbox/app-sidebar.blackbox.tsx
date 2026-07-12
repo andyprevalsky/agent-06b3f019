@@ -219,6 +219,29 @@ describe('AppSidebar', () => {
     expect(onSelectAgent).toHaveBeenCalledWith(null);
   });
 
+  it('shows Health directly below Feedback only when admin health is enabled', async () => {
+    const u = userEvent.setup();
+    const onViewChange = vi.fn();
+    const onSelectAgent = vi.fn();
+    const { rerender } = renderWithProviders(
+      <AppSidebar {...defaultProps({ onViewChange, onSelectAgent, showAdminHealth: true })} />,
+    );
+    await u.click(screen.getByLabelText('Expand sidebar'));
+
+    const feedback = screen.getByText('Feedback');
+    const health = screen.getByText('Health');
+    expect(
+      feedback.compareDocumentPosition(health) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    await u.click(health);
+    expect(onViewChange).toHaveBeenCalledWith('admin-health');
+    expect(onSelectAgent).toHaveBeenCalledWith(null);
+
+    rerender(<AppSidebar {...defaultProps({ showAdminHealth: false })} />);
+    expect(screen.queryByText('Health')).not.toBeInTheDocument();
+  });
+
   it('renders Login when user is null, calls onLoginClick on click', async () => {
     const u = userEvent.setup();
     const onLoginClick = vi.fn();

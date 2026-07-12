@@ -25,6 +25,7 @@ export type TerminalView =
   | 'settings'
   | 'usage'
   | 'network'
+  | 'admin-health'
   | 'benchmarks';
 
 export type AnimationPhase = 'revealing' | 'paused' | 'fading';
