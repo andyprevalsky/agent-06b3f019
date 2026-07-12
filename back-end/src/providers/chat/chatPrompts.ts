@@ -141,7 +141,6 @@ Respond with two fields:
 # Response Guidelines
 
 - This is a chat, be conversational and helpful
-- Use Markdown formatting (headers, lists, **bold**, [links](url), etc)
 - If citing search results, include the source
 - Be concise but thorough
 - Don't mention your internal reasoning or decision-making`;

@@ -272,6 +272,24 @@ async function legHappyPath(tmp: string): Promise<void> {
     });
     assert(final.elapsed_s !== null, 'final run missing elapsed');
     assert(final.cost?.total_usd !== null, 'final run missing cost breakdown');
+
+    // A snapshot request that was already in flight when the poller finalized
+    // must not regress the completed bundle back to live/running.
+    const lateSnapshot = await api('POST', '/api/benchmarks/runs?live=1', {
+      run_id: request.runId,
+      timestamp: new Date().toISOString(),
+      suite: 'hub-dispatch',
+      source: 'pipeline-test-late-snapshot',
+      tasks: [{ name: 'chat-mode', status: 'running', passed: null }],
+    });
+    assert(lateSnapshot.status === 201, `late snapshot returned ${lateSnapshot.status}`);
+    const afterLateSnapshot = await getRun(request.runId!);
+    assert(
+      afterLateSnapshot !== null &&
+        !afterLateSnapshot.live &&
+        afterLateSnapshot.tasks[0].status === 'passed',
+      'late snapshot regressed a finalized run'
+    );
   } finally {
     poller?.kill('SIGKILL');
     await cleanup(runId);

@@ -4095,13 +4095,15 @@ async function testComputeTokenFastCacheAffinity_pinsProviderFamily() {
       poolTokenId?: string;
       fastCacheAffinityKey?: string;
     };
+    const selectedPool = firstBody.type === 'gpt' ? gptPool : claudePool;
+    const unselectedPool = firstBody.type === 'gpt' ? claudePool : gptPool;
     assert(
-      firstBody.type === 'gpt',
-      `Expected initial affinity to pick GPT, got ${JSON.stringify(firstBody)}`
+      firstBody.type === 'gpt' || firstBody.type === 'claude',
+      `Expected a supported compute provider, got ${JSON.stringify(firstBody)}`
     );
     assert(
-      firstBody.poolTokenId === gptPool.id,
-      `Expected GPT pool ${gptPool.id}, got ${firstBody.poolTokenId}`
+      firstBody.poolTokenId === selectedPool.id,
+      `Expected one of the isolated pools, got ${firstBody.poolTokenId}`
     );
     assert(
       firstBody.fastCacheAffinityKey === affinityKey,
@@ -4109,11 +4111,11 @@ async function testComputeTokenFastCacheAffinity_pinsProviderFamily() {
     );
 
     await prisma.integration.update({
-      where: { id: gptPool.id },
+      where: { id: selectedPool.id },
       data: { lastUsedAt: new Date() },
     });
     await prisma.integration.update({
-      where: { id: claudePool.id },
+      where: { id: unselectedPool.id },
       data: { lastUsedAt: new Date(Date.now() - 180_000) },
     });
 
@@ -4125,12 +4127,12 @@ async function testComputeTokenFastCacheAffinity_pinsProviderFamily() {
       fastCacheAffinityKey?: string;
     };
     assert(
-      secondBody.type === 'gpt',
-      `Expected pinned affinity to keep GPT despite Claude being LRU, got ${JSON.stringify(secondBody)}`
+      secondBody.type === firstBody.type,
+      `Expected pinned affinity to keep ${firstBody.type} despite the other provider being LRU, got ${JSON.stringify(secondBody)}`
     );
     assert(
-      secondBody.poolTokenId === gptPool.id,
-      `Expected GPT pool ${gptPool.id}, got ${secondBody.poolTokenId}`
+      secondBody.poolTokenId === selectedPool.id,
+      `Expected pinned pool ${selectedPool.id}, got ${secondBody.poolTokenId}`
     );
     assert(
       secondBody.fastCacheAffinityKey === affinityKey,

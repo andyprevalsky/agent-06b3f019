@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import { buildOpenAiResponseFormat, responseModel } from '../rose';
+import { userFacingTextDescription } from '../userFacingWritingPrompt';
 
 const replyToAgentCallSchema = z.object({
   tool: z.literal('reply_to_agent'),
@@ -151,7 +152,13 @@ Returns:
 const attemptCompletionCallSchema = z.object({
   tool: z.literal('attempt_completion'),
   arguments: z.object({
-    message: z.string(),
+    message: z
+      .string()
+      .describe(
+        userFacingTextDescription(
+          'The exact final SMS message sent to the user when attempt_completion is called.'
+        )
+      ),
   }),
 });
 

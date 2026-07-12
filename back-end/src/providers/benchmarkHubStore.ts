@@ -18,6 +18,7 @@
 import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import fs from 'fs';
 import path from 'path';
+import { prisma } from './database';
 import { createLogger } from './logger';
 
 const log = createLogger('BenchmarkHubStore');
@@ -74,7 +75,14 @@ export interface HubAgentView {
 let s3Client: S3Client | null = null;
 
 function r2Configured(): boolean {
+  // Local workspaces have production R2 credentials available for trace
+  // diagnostics, but Benchmark Hub writes must stay worktree-local. Otherwise
+  // independent test databases race through one production index and local
+  // cleanup can hide real runs. Use Render's deployment identity rather than
+  // NODE_ENV: local production-mode builds must remain isolated too.
+  const useR2 = process.env.BENCHMARK_HUB_STORAGE !== 'local' && process.env.RENDER === 'true';
   return Boolean(
+    useR2 &&
     process.env.R2_ACCOUNT_ID &&
     process.env.R2_ACCESS_KEY_ID &&
     process.env.R2_SECRET_ACCESS_KEY &&
@@ -144,9 +152,24 @@ async function getObject(key: string): Promise<string | null> {
   }
 }
 
-// Serialize index read-modify-write within this process. Uploads come from
-// one poller at a time in practice; this guards concurrent snapshot posts.
-let indexLock: Promise<void> = Promise.resolve();
+const INDEX_LOCK_KEY = 'benchmark-hub:index';
+
+/**
+ * Serialize the shared index read-modify-write across every backend process.
+ * The index lives in R2, so an in-memory mutex cannot prevent two Render or
+ * local workspace processes from reading the same version and losing one
+ * another's update. The transaction-scoped Postgres lock is released even
+ * when an R2 operation throws.
+ */
+async function withIndexLock<T>(operation: () => Promise<T>): Promise<T> {
+  return prisma.$transaction(
+    async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${INDEX_LOCK_KEY}))`;
+      return operation();
+    },
+    { maxWait: 30_000, timeout: 30_000 }
+  );
+}
 
 function taskSummary(task: Record<string, unknown>): HubRunTaskSummary {
   const passed = typeof task.passed === 'boolean' ? task.passed : null;
@@ -196,24 +219,28 @@ export async function putRun(
     tasks: tasks.map(taskSummary),
   };
 
-  await putObject(`runs/${runId}.json`, JSON.stringify(bundle));
-
-  const release = indexLock;
-  let done: () => void = () => {};
-  indexLock = new Promise((resolve) => {
-    done = resolve;
-  });
-  try {
-    await release;
+  let storedSummary = summary;
+  await withIndexLock(async () => {
     const index = await listRuns();
+    const existing = index.find((run) => run.run_id === runId);
+    // Final is an absorbing state. A snapshot loop already in flight may
+    // arrive after completion; it must not regress either the bundle or index
+    // back to live/running.
+    if (existing !== undefined && !existing.live && summary.live) {
+      storedSummary = existing;
+      return;
+    }
+    await putObject(`runs/${runId}.json`, JSON.stringify(bundle));
     const next = [summary, ...index.filter((r) => r.run_id !== runId)];
     next.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
     await putObject('index.json', JSON.stringify(next));
-  } finally {
-    done();
-  }
-  log.info('Stored benchmark run bundle', { runId, live: summary.live, tasks: tasks.length });
-  return summary;
+  });
+  log.info('Stored benchmark run bundle', {
+    runId,
+    live: storedSummary.live,
+    tasks: storedSummary.tasks.length,
+  });
+  return storedSummary;
 }
 
 export async function listRuns(): Promise<HubRunSummary[]> {
@@ -489,21 +516,13 @@ export async function getRunAgent(runId: string, agentId: string): Promise<HubAg
  * Returns false when the run id was not present.
  */
 export async function deleteRun(runId: string): Promise<boolean> {
-  const release = indexLock;
-  let done: () => void = () => {};
-  indexLock = new Promise((resolve) => {
-    done = resolve;
-  });
-  try {
-    await release;
+  return withIndexLock(async () => {
     const index = await listRuns();
     const next = index.filter((r) => r.run_id !== runId);
     if (next.length === index.length) return false;
     await putObject('index.json', JSON.stringify(next));
     return true;
-  } finally {
-    done();
-  }
+  });
 }
 
 // agentId → run_id resolution cache (bundles are immutable once final; a live
@@ -570,6 +589,5 @@ export async function findTreeAcrossRuns(
 /** Test-only: reset in-process state (local dir is controlled by the caller). */
 export function _resetForTests(): void {
   s3Client = null;
-  indexLock = Promise.resolve();
   agentRunCache.clear();
 }

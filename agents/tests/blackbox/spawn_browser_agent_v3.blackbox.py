@@ -1585,6 +1585,258 @@ async def test_browser_humanizer_keyboard_uses_keycap_timing_for_text_and_shortc
     assert isinstance(keyboard.events[-2][2], int) and keyboard.events[-2][2] > 0
 
 
+async def test_browser_humanizer_cdp_keyboard_transport_queues_text_before_drain():
+    from browser_tools.humanizer import BrowserHumanizer
+
+    real_sleep = asyncio.sleep
+
+    class FakeCDPSession:
+        def __init__(self):
+            self.calls = []
+            self.release = asyncio.Event()
+
+        async def send(self, method, payload):
+            self.calls.append((method, payload))
+            await self.release.wait()
+
+    class FakeContext:
+        def __init__(self, cdp):
+            self.cdp = cdp
+
+        async def new_cdp_session(self, page):
+            return self.cdp
+
+    class FakeMouse:
+        async def move(self, *args, **kwargs):
+            return None
+
+    class FakeKeyboard:
+        def __init__(self):
+            self.events = []
+
+        async def down(self, key):
+            self.events.append(("down", key))
+
+        async def up(self, key):
+            self.events.append(("up", key))
+
+    class FakeKeycap:
+        @staticmethod
+        def next(char):
+            return SimpleNamespace(dwell_s=0, interval_s=0)
+
+    cdp = FakeCDPSession()
+    keyboard = FakeKeyboard()
+    page = SimpleNamespace(
+        mouse=FakeMouse(),
+        keyboard=keyboard,
+        viewport_size={"width": 1280, "height": 800},
+        context=FakeContext(cdp),
+    )
+
+    with patch.dict(
+        os.environ,
+        {
+            "BROWSER_AGENT_HUMAN_INPUT_ENABLED": "1",
+            "BROWSER_AGENT_HUMAN_KEYBOARD_SYNTHESIS": "1",
+            "BROWSER_AGENT_CDP_KEYBOARD_TRANSPORT": "1",
+            "BROWSER_AGENT_CDP_MOUSE_TRANSPORT": "1",
+        },
+        clear=False,
+    ):
+        humanizer = BrowserHumanizer(dom_page=None, input_page=page, fast=True)
+        humanizer._keycap = FakeKeycap()
+        task = asyncio.create_task(humanizer.type_text("Ab"))
+        try:
+            for _ in range(20):
+                await real_sleep(0)
+                if len(cdp.calls) == 6:
+                    break
+
+            assert len(cdp.calls) == 6
+            assert not task.done()
+            assert keyboard.events == []
+        finally:
+            cdp.release.set()
+
+        await asyncio.wait_for(task, timeout=1)
+
+    assert [method for method, _ in cdp.calls] == ["Input.dispatchKeyEvent"] * 6
+    assert cdp.calls[1][1]["type"] == "char"
+    assert cdp.calls[1][1]["text"] == "A"
+    assert cdp.calls[4][1]["text"] == "b"
+
+
+async def test_browser_humanizer_cdp_session_initialization_is_serialized():
+    from browser_tools.humanizer import BrowserHumanizer
+
+    session = SimpleNamespace(send=AsyncMock())
+
+    class FakeContext:
+        def __init__(self):
+            self.calls = 0
+            self.release = asyncio.Event()
+
+        async def new_cdp_session(self, page):
+            self.calls += 1
+            await self.release.wait()
+            return session
+
+    context = FakeContext()
+    page = SimpleNamespace(
+        mouse=SimpleNamespace(),
+        keyboard=SimpleNamespace(),
+        viewport_size={"width": 1280, "height": 800},
+        context=context,
+    )
+    humanizer = BrowserHumanizer(dom_page=None, input_page=page, fast=True)
+
+    first = asyncio.create_task(humanizer._get_cdp_session())
+    second = asyncio.create_task(humanizer._get_cdp_session())
+    await asyncio.sleep(0)
+    assert context.calls == 1
+
+    context.release.set()
+    first_session, second_session = await asyncio.gather(first, second)
+
+    assert first_session is session
+    assert second_session is session
+    assert context.calls == 1
+
+
+async def test_browser_humanizer_cdp_send_failure_enables_keyboard_fallback():
+    from browser_tools.humanizer import BrowserHumanizer
+
+    class FailingCDPSession:
+        async def send(self, method, payload):
+            raise RuntimeError("CDP transport closed")
+
+    class FakeContext:
+        def __init__(self):
+            self.calls = 0
+
+        async def new_cdp_session(self, page):
+            self.calls += 1
+            return FailingCDPSession()
+
+    class FakeKeyboard:
+        def __init__(self):
+            self.events = []
+
+        async def down(self, key):
+            self.events.append(("down", key))
+
+        async def up(self, key):
+            self.events.append(("up", key))
+
+    class FakeKeycap:
+        @staticmethod
+        def next(char):
+            return SimpleNamespace(dwell_s=0, interval_s=0)
+
+    context = FakeContext()
+    keyboard = FakeKeyboard()
+    page = SimpleNamespace(
+        mouse=SimpleNamespace(),
+        keyboard=keyboard,
+        viewport_size={"width": 1280, "height": 800},
+        context=context,
+    )
+    humanizer = BrowserHumanizer(dom_page=None, input_page=page, fast=True)
+    humanizer._keycap = FakeKeycap()
+
+    try:
+        await humanizer.type_text("A")
+        raise AssertionError("Expected the failed CDP send to propagate")
+    except RuntimeError as exc:
+        assert str(exc) == "CDP transport closed"
+
+    assert humanizer._cdp_session is None
+    assert not humanizer._cdp_mouse_transport_enabled
+    assert not humanizer._cdp_keyboard_transport_enabled
+
+    await humanizer.type_text("B")
+
+    assert context.calls == 1
+    assert keyboard.events == [("down", "B"), ("up", "B")]
+
+
+async def test_browser_humanizer_cdp_mouse_path_failure_enables_fallback():
+    from browser_tools.humanizer import BrowserHumanizer
+
+    class FailingCDPSession:
+        async def send(self, method, payload):
+            raise RuntimeError("CDP mouse transport closed")
+
+    class FakeContext:
+        async def new_cdp_session(self, page):
+            return FailingCDPSession()
+
+    class FakeMouse:
+        def __init__(self):
+            self.moves = []
+
+        async def move(self, x, y):
+            self.moves.append((x, y))
+
+    mouse = FakeMouse()
+    page = SimpleNamespace(
+        mouse=mouse,
+        keyboard=SimpleNamespace(),
+        viewport_size={"width": 1280, "height": 800},
+        context=FakeContext(),
+    )
+    humanizer = BrowserHumanizer(dom_page=None, input_page=page, fast=True)
+    sample = SimpleNamespace(x=25, y=40, delay_s=0)
+
+    used_cdp = await humanizer._move_path_with_cdp_fire_and_drain([sample])
+
+    assert not used_cdp
+    assert humanizer._cdp_session is None
+    assert not humanizer._cdp_mouse_transport_enabled
+    assert not humanizer._cdp_keyboard_transport_enabled
+
+    await humanizer._move_to_unlocked(25, 40)
+
+    assert mouse.moves
+    assert mouse.moves[-1] == (25, 40)
+
+
+async def test_browser_humanizer_cdp_idle_mouse_failure_enables_fallback():
+    from browser_tools.humanizer import BrowserHumanizer
+
+    class FailingCDPSession:
+        async def send(self, method, payload):
+            raise RuntimeError("CDP idle transport closed")
+
+    class FakeContext:
+        async def new_cdp_session(self, page):
+            return FailingCDPSession()
+
+    class FakeMouse:
+        def __init__(self):
+            self.moves = []
+
+        async def move(self, x, y):
+            self.moves.append((x, y))
+
+    mouse = FakeMouse()
+    page = SimpleNamespace(
+        mouse=mouse,
+        keyboard=SimpleNamespace(),
+        viewport_size={"width": 1280, "height": 800},
+        context=FakeContext(),
+    )
+    humanizer = BrowserHumanizer(dom_page=None, input_page=page, fast=True)
+
+    await humanizer._dispatch_mouse_position(15, 30)
+
+    assert mouse.moves == [(15, 30)]
+    assert humanizer._cdp_session is None
+    assert not humanizer._cdp_mouse_transport_enabled
+    assert not humanizer._cdp_keyboard_transport_enabled
+
+
 async def test_browser_network_recording_captures_response_body():
     import tempfile
 
@@ -9468,6 +9720,26 @@ async def run_all_tests():
     await r.record_async(
         "browser_humanizer_keyboard_synthesis",
         test_browser_humanizer_keyboard_uses_keycap_timing_for_text_and_shortcuts,
+    )
+    await r.record_async(
+        "browser_humanizer_cdp_keyboard_transport",
+        test_browser_humanizer_cdp_keyboard_transport_queues_text_before_drain,
+    )
+    await r.record_async(
+        "browser_humanizer_cdp_session_initialization",
+        test_browser_humanizer_cdp_session_initialization_is_serialized,
+    )
+    await r.record_async(
+        "browser_humanizer_cdp_send_failure_fallback",
+        test_browser_humanizer_cdp_send_failure_enables_keyboard_fallback,
+    )
+    await r.record_async(
+        "browser_humanizer_cdp_mouse_path_failure_fallback",
+        test_browser_humanizer_cdp_mouse_path_failure_enables_fallback,
+    )
+    await r.record_async(
+        "browser_humanizer_cdp_idle_mouse_failure_fallback",
+        test_browser_humanizer_cdp_idle_mouse_failure_enables_fallback,
     )
     await r.record_async(
         "browser_network_recording_captures_body",

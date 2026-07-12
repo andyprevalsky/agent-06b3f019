@@ -2,6 +2,48 @@
   "_doc": "Catalog of every prompt to review. Each entry has: repo (ours|claude-code-src|openclaw|hermes-agent), path (relative to repo root), id (stable name \u2014 variable name, function, or basename), category, summary, keywords. The build script extracts text using id (regex anchor) with line-range as fallback. To add a prompt, append to the relevant list \u2014 no schema changes needed.",
   "ours": [
     {
+      "path": "agents/utils/user_facing_writing_prompt.py",
+      "anchor": "USER_FACING_WRITING_STYLE = ",
+      "id": "USER_FACING_WRITING_STYLE",
+      "category": "instruction_block",
+      "summary": "Reusable humanized writing contract attached to exact user-visible output fields.",
+      "keywords": [
+        "writing",
+        "human",
+        "prose",
+        "user-facing",
+        "sms",
+        "chat"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": null
+      },
+      "agent": "shared"
+    },
+    {
+      "path": "back-end/src/providers/userFacingWritingPrompt.ts",
+      "anchor": "USER_FACING_WRITING_STYLE = ",
+      "id": "USER_FACING_WRITING_STYLE_TS",
+      "category": "instruction_block",
+      "summary": "TypeScript mirror of the user-facing humanized writing contract.",
+      "keywords": [
+        "writing",
+        "human",
+        "prose",
+        "user-facing",
+        "sms",
+        "chat"
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": null
+      },
+      "agent": "shared"
+    },
+    {
       "path": "agents/utils/prompts.py",
       "anchor": "VERIFICATION_RULES = ",
       "id": "VERIFICATION_RULES",

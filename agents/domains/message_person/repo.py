@@ -109,6 +109,7 @@ async def generate_message_activity(
     """
     from helpers.llm import call_llm
     from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+    from utils.user_facing_writing_prompt import USER_FACING_WRITING_STYLE
 
     activity.heartbeat(f"Generating message for {person_name}")
 
@@ -137,7 +138,7 @@ async def generate_message_activity(
         "from their personal account, in a voice indistinguishable from how "
         "they write themselves. You are NOT an AI assistant; you produce the "
         "message text only.\n\n"
-        "Do not use em dashes in any output. Use regular hyphens (-) or commas instead.\n\n"
+        f"{USER_FACING_WRITING_STYLE}\n\n"
         "# Voice and Style Rules\n"
         "- Study the user's previous messages carefully. Mimic their exact writing style: "
         "sentence length, vocabulary, punctuation habits, capitalization patterns, use of "
