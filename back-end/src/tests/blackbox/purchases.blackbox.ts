@@ -19,7 +19,7 @@ import { config } from 'dotenv';
 import { z } from 'zod';
 import { PurchaseSpendStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
-import type { CardProvider } from '../../providers/card-provider';
+import { AgentCardProviderError, type CardProvider } from '../../providers/card-provider';
 import * as purchasesService from '../../domains/purchases/service';
 import {
   assert,
@@ -45,6 +45,7 @@ const trackedAgentIds = new Set<string>();
 
 const ErrorResponse = z.object({
   error: z.string(),
+  code: z.string().optional(),
 });
 
 const PurchaseLookupResponse = z.object({
@@ -235,6 +236,63 @@ const tests: Array<[string, () => Promise<void>]> = [
         assert(
           calls.captures.length === 0 && calls.cancels.length === 0,
           'minting alone must not capture or cancel the hold'
+        );
+      });
+    },
+  ],
+  [
+    'service mint maps AgentCard KYC requirement to a typed error and cancels the hold',
+    async () => {
+      const userId = await createSubscribedUser('service-kyc-required');
+      const fingerprint = `service-kyc-${randomUUID()}`;
+      const provider: CardProvider = {
+        async mintCard() {
+          throw new AgentCardProviderError(
+            'AgentCard request failed with 422',
+            422,
+            '{"code":"customers_needed_kyc","message":"Customer needs KYC"}'
+          );
+        },
+        async getDetails() {
+          throw new Error('getDetails should not run after KYC rejection');
+        },
+        async closeCard() {},
+      };
+
+      await withFakeStripe(async (calls) => {
+        let caught: unknown;
+        try {
+          await purchasesService.mintPurchaseCard(
+            validMintBody({ userId, fingerprint, totalCents: 1000 }) as never,
+            provider
+          );
+        } catch (error) {
+          caught = error;
+        }
+
+        assert(caught instanceof purchasesService.PurchaseError, 'expected PurchaseError');
+        const purchaseError = caught as purchasesService.PurchaseError;
+        assert(purchaseError.statusCode === 422, `expected 422, got ${purchaseError.statusCode}`);
+        assert(
+          purchaseError.code === 'kyc_required',
+          `expected kyc_required, got ${purchaseError.code}`
+        );
+        assert(
+          calls.charges.length === 1,
+          'Stripe hold should have been authorized before card mint'
+        );
+        assert(calls.cancels.length === 1, 'KYC failure must cancel the authorized hold');
+
+        const row = await prisma.purchaseSpend.findFirst({
+          where: { userId, fingerprint },
+          orderBy: { createdAt: 'desc' },
+        });
+        assert(row !== null, 'KYC mint failure should persist a purchase spend row');
+        assert(row?.status === PurchaseSpendStatus.FAILED, `expected FAILED, got ${row?.status}`);
+        assert(row?.cardId === null, 'KYC failure should not store a card id');
+        assert(
+          row?.stripePaymentIntentId !== null,
+          'failed KYC row should keep the canceled payment intent id for audit'
         );
       });
     },

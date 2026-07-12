@@ -249,6 +249,24 @@ const KNOWN_VIOLATIONS: Record<string, string[]> = {
     'Cross-domain import: "@/features/agent-context"',
     'components layer imports "../api"',
   ],
+  // SMS-onboarding Gate primitive — the Gate card and its connect dispatch live
+  // in terminal-component-group's attention-inbox and are reused wherever a gate
+  // renders (query-box stack, inline stream). The connect dispatch reuses the
+  // Integrations OAuth start path so links are minted fresh, never stale.
+  'features/terminal/components/GateStack.tsx': [
+    'Cross-domain import: "@/features/terminal-component-group',
+  ],
+  'features/terminal/types.ts': ['Cross-domain import: "@/features/terminal-component-group'],
+  'features/terminal-component-group/components/attention-inbox/gateConnect.ts': [
+    'Cross-domain import: "@/features/integrations',
+  ],
+  // /gate-playground is a dev-only sandbox; its components read local preset data.
+  'features/gate-playground/components/FauxChat.tsx': ['components layer imports "../presets"'],
+  'features/gate-playground/components/GateCard.tsx': ['components layer imports "../presets"'],
+  'features/gate-playground/components/GateControls.tsx': ['components layer imports "../presets"'],
+  'features/gate-playground/components/GatePlayground.tsx': [
+    'components layer imports "../presets"',
+  ],
 };
 
 // ─── Test ──────────────────────────────────────────────────────────────────

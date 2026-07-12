@@ -5,6 +5,7 @@ from datetime import timedelta
 from typing import Any, Dict, Optional
 
 import structlog
+from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 from domains.grep.config import (
@@ -20,6 +21,7 @@ from domains.grep.repo import grep_activity
 from domains.grep.types import ExecuteActivityCallable
 from helpers.handle_tool_event import handle_tool_event
 from tools.base import EventType, MessageStatus, ToolEvent, format_error_message, format_tool_message
+from tools.gate import source_status_activity
 
 logger = structlog.get_logger()
 
@@ -31,6 +33,7 @@ _GREP_DISPLAY_KEY_ALIASES = {
     "case_insensitive": "-i",
 }
 _GREP_INTERNAL_DISPLAY_KEYS = {"tool", "tool_call_id"}
+_GREP_AGENT_ONLY_KEYS = {"require_source_access"}
 
 
 def _safe_time() -> float:
@@ -62,10 +65,98 @@ def _format_grep_title(prefix: str, pattern: str, source: str) -> str:
 def _public_grep_params(tool_call: Dict[str, Any]) -> Dict[str, Any]:
     params: Dict[str, Any] = {}
     for key, value in tool_call.items():
-        if key in _GREP_INTERNAL_DISPLAY_KEYS or value is None:
+        if key in _GREP_INTERNAL_DISPLAY_KEYS or key in _GREP_AGENT_ONLY_KEYS or value is None:
             continue
         params[_GREP_DISPLAY_KEY_ALIASES.get(key, key)] = value
     return params
+
+
+def _backend_grep_call(tool_call: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: value for key, value in tool_call.items() if key not in _GREP_AGENT_ONLY_KEYS}
+
+
+# Local, always-available sources: no external connector, so they never gate
+# and don't need a connectivity probe.
+_LOCAL_SOURCES = {"messages", "network", "agent_network"}
+_DOCUMENT_PROVIDER_ALIASES = {
+    "chat_gpt": "chatgpt",
+    "chatgpy": "chatgpt",
+    "notes": "apple_notes",
+    "apple_notes": "apple_notes",
+    "apple": "apple_notes",
+}
+
+
+def _normalize_source_key(value: Any) -> str:
+    source = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return _DOCUMENT_PROVIDER_ALIASES.get(source, source)
+
+
+def _document_provider(tool_call: Dict[str, Any]) -> Optional[str]:
+    filters = tool_call.get("filters")
+    if not isinstance(filters, dict):
+        return None
+    raw_provider = filters.get("document_source")
+    if not raw_provider:
+        return None
+    return _normalize_source_key(raw_provider)
+
+
+def _requires_source_access(tool_call: Dict[str, Any]) -> bool:
+    return tool_call.get("require_source_access") is True
+
+
+def _extract_sources(tool_call: Dict[str, Any]) -> list:
+    """The explicit source list the caller asked for.
+
+    Supports the multi-source ``sources: [...]`` form and the legacy single
+    ``source``. Empty means "no explicit source" — the backend defaults to the
+    local corpus (messages/network/agent_network), which never gates.
+    """
+    raw = tool_call.get("sources")
+    if isinstance(raw, list) and raw:
+        return [str(s) for s in raw if s]
+    single = tool_call.get("source")
+    return [str(single)] if single else []
+
+
+def _source_status_targets(tool_call: Dict[str, Any]) -> tuple[list, Dict[str, set]]:
+    """Map requested grep sources to concrete connector keys for gate probing.
+
+    `documents` is a searchable corpus, not a real connector. If the caller
+    narrows documents to a provider, probe that provider and map an unavailable
+    provider back to the `documents` search source so the backend grep is
+    skipped until the concrete connector is resolved.
+    """
+    requested_sources = _extract_sources(tool_call)
+    document_provider = _document_provider(tool_call)
+    targets: list = []
+    target_to_search_sources: Dict[str, set] = {}
+    for source in requested_sources:
+        normalized_source = _normalize_source_key(source)
+        if normalized_source in _LOCAL_SOURCES:
+            continue
+        if normalized_source == "documents":
+            if not document_provider or not _requires_source_access(tool_call):
+                continue
+            target = document_provider
+        else:
+            target = normalized_source
+        if not target:
+            continue
+        targets.append(target)
+        target_to_search_sources.setdefault(target, set()).add(source)
+    return list(dict.fromkeys(targets)), target_to_search_sources
+
+
+def _unavailable_marker(unavailable: list) -> str:
+    names = ", ".join(str(u.get("source")) for u in unavailable)
+    return (
+        f"⚠️ Source(s) not connected: {names}. These were skipped — do NOT retry them. "
+        "A one-time connect request will be sent to the user after this exploration "
+        "finishes; continue with any other available sources and report what you "
+        "could and could not complete."
+    )
 
 
 async def execute_grep(
@@ -101,6 +192,61 @@ async def execute_grep(
     )
 
     try:
+        # Per-source connectivity: any explicitly-named source whose connector
+        # isn't connected is a "source_unavailable" — skip it here (activities
+        # can't pause) and hand the marker up. The parent workflow raises the
+        # blocking source_connect gate after the explore agent returns.
+        requested_sources = _extract_sources(tool_call)
+        gateable_sources, gate_target_search_sources = _source_status_targets(tool_call)
+        unavailable: list = []
+        search_call = _backend_grep_call(tool_call)
+        if gateable_sources:
+            statuses = (
+                await execute_activity(
+                    source_status_activity,
+                    args=[user_id or "", gateable_sources],
+                    start_to_close_timeout=timedelta(seconds=ACTIVITY_TIMEOUT_SECONDS),
+                    retry_policy=RetryPolicy(maximum_attempts=ACTIVITY_MAX_ATTEMPTS),
+                )
+                or []
+            )
+            unavailable = [
+                s for s in statuses if isinstance(s, dict) and not s.get("connected", True)
+            ]
+            if unavailable:
+                unavailable_targets = {str(s.get("source")) for s in unavailable}
+                unavailable_search_sources = set()
+                for target in unavailable_targets:
+                    unavailable_search_sources.update(gate_target_search_sources.get(target, set()))
+                # Everything requested minus the unavailable ones stays searchable
+                # (keeps local sources + any connected external source).
+                connected_sources = [s for s in requested_sources if s not in unavailable_search_sources]
+                if not connected_sources:
+                    # Nothing searchable — return an unavailable-only marker and
+                    # skip the backend grep entirely.
+                    marker = _unavailable_marker(unavailable)
+                    await handle_tool_event(
+                        event=ToolEvent(
+                            type=EventType.POST_MESSAGE,
+                            title=completed_title,
+                            message=marker,
+                            status=MessageStatus.FINISHED,
+                        ),
+                        agent_id=agent_id,
+                        tool_call_id=tool_call_id,
+                        tool_name="grep",
+                        execute_activity=execute_activity,
+                        user_id=user_id,
+                    )
+                    return {
+                        "result": marker,
+                        "usage": {"llm": [], "service": []},
+                        "unavailable_sources": unavailable,
+                    }
+                # Partial: search only the connected sources this call.
+                search_call = {**_backend_grep_call(tool_call), "sources": connected_sources}
+                search_call.pop("source", None)
+
         logger.info(
             "Calling grep_activity",
             pattern=pattern[:LOG_PATTERN_MAX_LENGTH],
@@ -109,7 +255,7 @@ async def execute_grep(
 
         result = await execute_activity(
             grep_activity,
-            args=[tool_call, user_id, agent_id],
+            args=[search_call, user_id, agent_id],
             start_to_close_timeout=timedelta(seconds=ACTIVITY_TIMEOUT_SECONDS),
             retry_policy=RetryPolicy(
                 maximum_attempts=ACTIVITY_MAX_ATTEMPTS,
@@ -122,11 +268,13 @@ async def execute_grep(
         elapsed_time = _safe_time() - start_time
 
         message = format_tool_message(
-            params=_public_grep_params(tool_call),
+            params=_public_grep_params(search_call),
             result=result,
             time_elapsed=elapsed_time,
             cost_cents=0,
         )
+        if unavailable:
+            message = f"{message}\n\n{_unavailable_marker(unavailable)}"
 
         await handle_tool_event(
             event=ToolEvent(
@@ -148,6 +296,7 @@ async def execute_grep(
                 "llm": [],
                 "service": [],
             },
+            "unavailable_sources": unavailable,
         }
 
     except Exception as e:
@@ -175,3 +324,25 @@ async def execute_grep(
         )
 
         raise
+
+
+async def execute_grep_with_workflow(
+    workflow_instance: Any,
+    tool_call: Dict[str, Any],
+    tool_call_id: str,
+) -> Dict[str, Any]:
+    """Workflow-aware grep path — a thin pass-through to ``execute_grep``.
+
+    Source-connect gating no longer lives here. The main agent has no direct
+    grep tool; grep runs inside the explore activity, where per-source
+    connectivity is detected (``execute_grep`` returns a ``source_unavailable``
+    marker) and the blocking gate is raised by the parent workflow after the
+    explore agent returns (see ``spawn_agent`` + the ``gate`` domain).
+    """
+    return await execute_grep(
+        execute_activity=workflow.execute_activity,
+        tool_call=tool_call,
+        tool_call_id=tool_call_id,
+        agent_id=workflow_instance.agent_id,
+        user_id=workflow_instance.user_id,
+    )

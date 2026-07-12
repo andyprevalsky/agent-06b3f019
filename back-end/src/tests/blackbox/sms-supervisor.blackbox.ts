@@ -118,7 +118,7 @@ async function testSmoke_knownPhoneSupervisorSendsSmsResponse() {
 
 // ==================== BOUNDARY ====================
 
-async function testBoundary_unknownPhoneCapturesSurgeCall() {
+async function testBoundary_inboundCapturesSurgeCall() {
   const cursorRes = await request(`${BASE_URL}/api/test/captures`);
   if (cursorRes.status !== 200) {
     console.warn('  ⚠ capture harness not active — skipping');
@@ -126,41 +126,69 @@ async function testBoundary_unknownPhoneCapturesSurgeCall() {
   }
   const cursor = (cursorRes.data as { nextId: number }).nextId - 1;
 
-  await request(`${BASE_URL}/api/sms/inbound`, {
-    method: 'POST',
-    body: JSON.stringify({
-      data: {
-        body: 'Boundary test message',
-        conversation: {
-          contact: { phone_number: '+10000000099' },
-          phone_number: { number: '+14154498072' },
+  // A first-time phone is now silently provisioned + routed to the supervisor,
+  // which itself POSTs to Surge (async). We still assert any captured Surge call
+  // is a well-formed POST /messages, then clean up the provisioned user.
+  const phone = '+10000000099';
+  try {
+    await request(`${BASE_URL}/api/sms/inbound`, {
+      method: 'POST',
+      body: JSON.stringify({
+        data: {
+          body: 'Boundary test message',
+          conversation: {
+            contact: { phone_number: phone },
+            phone_number: { number: '+14154498072' },
+          },
         },
-      },
-    }),
-  });
+      }),
+    });
 
-  const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
-  assertStatus(capturesRes.status, 200, capturesRes.data);
-  const body = capturesRes.data as {
-    captures: { url: string; method: string; requestHeaders: Record<string, string> }[];
-  };
+    const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
+    assertStatus(capturesRes.status, 200, capturesRes.data);
+    const body = capturesRes.data as {
+      captures: { url: string; method: string; requestHeaders: Record<string, string> }[];
+    };
 
-  const surgeCalls = body.captures.filter((c) => c.url.includes('surge.app'));
-  if (surgeCalls.length === 0) {
-    // SURGE_API_KEY not configured — no outbound call, acceptable
-    return;
-  }
+    const surgeCalls = body.captures.filter((c) => c.url.includes('surge.app'));
+    if (surgeCalls.length === 0) {
+      // SURGE_API_KEY not configured, or the async supervisor hasn't emitted its
+      // reply yet — no outbound call captured, acceptable.
+      return;
+    }
 
-  const call = surgeCalls[0];
-  if (call.method !== 'POST') {
-    throw new Error(`Expected POST to Surge, got ${call.method}`);
-  }
-  if (!call.url.includes('/messages')) {
-    throw new Error(`Expected /messages in URL, got ${call.url}`);
-  }
-  const headerKeys = Object.keys(call.requestHeaders).map((k) => k.toLowerCase());
-  if (!headerKeys.includes('authorization')) {
-    throw new Error('Expected Authorization header in Surge call');
+    const call = surgeCalls[0];
+    if (call.method !== 'POST') {
+      throw new Error(`Expected POST to Surge, got ${call.method}`);
+    }
+    if (!call.url.includes('/messages')) {
+      throw new Error(`Expected /messages in URL, got ${call.url}`);
+    }
+    const headerKeys = Object.keys(call.requestHeaders).map((k) => k.toLowerCase());
+    if (!headerKeys.includes('authorization')) {
+      throw new Error('Expected Authorization header in Surge call');
+    }
+  } finally {
+    const user = await prisma.user.findFirst({ where: { phone } });
+    if (user) {
+      // Abort the async supervisor, then delete the provisioned rows.
+      await request(`${BASE_URL}/api/sms/inbound`, {
+        method: 'POST',
+        body: JSON.stringify({
+          data: {
+            body: '/clear',
+            conversation: {
+              contact: { phone_number: phone },
+              phone_number: { number: '+14154498072' },
+            },
+          },
+        }),
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      await prisma.smsSession.deleteMany({ where: { userId: user.userId } });
+      await prisma.credit.deleteMany({ where: { userId: user.userId } });
+      await prisma.user.deleteMany({ where: { userId: user.userId } });
+    }
   }
 }
 
@@ -576,8 +604,8 @@ async function runAll() {
       fn: testSmoke_knownPhoneSupervisorSendsSmsResponse,
     },
     {
-      name: 'boundary -- unknown phone captures Surge SMS call',
-      fn: testBoundary_unknownPhoneCapturesSurgeCall,
+      name: 'boundary -- inbound provisions + supervisor captures Surge SMS call',
+      fn: testBoundary_inboundCapturesSurgeCall,
     },
     {
       name: 'boundary -- invalid payload produces 0 captures',

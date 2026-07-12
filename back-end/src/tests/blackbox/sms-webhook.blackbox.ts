@@ -11,7 +11,9 @@
  *   - idempotency: same invalid payload always returns same error
  *   - concurrency: 10 parallel invalid requests all return 400 consistently
  *   - same-input reproducibility: three sequential invalid requests return identical status
- *   - cleanup: unknown phone tests send async SMS but don't mutate test-visible state
+ *   - provisioning: an unknown (new) phone is SILENTLY onboarded — a User row is created and the
+ *     message routes straight to the supervisor (no "please sign up" dead-end). Each provisioning
+ *     test cleans up the User/Credit/SmsSession rows it creates.
  *   - harness independence: supervisor runs async; webhook returns 200 immediately
  *   - smoke: known-phone regular SMS reaches supervisor loop and emits outbound SMS response
  *   - observability: covered by runner manifest and artifact directory
@@ -206,23 +208,19 @@ async function testInbound_whitespaceOnlyBody() {
 }
 
 async function testInbound_attachmentOnlyPayload() {
-  // Media-only MMS (photo/voice note, no text) must be accepted, not dropped.
-  const res = await request(`${BASE_URL}/api/sms/inbound`, {
-    method: 'POST',
-    body: JSON.stringify({
-      data: {
-        body: '',
-        attachments: [{ url: 'https://example.com/photo.jpg', type: 'image/jpeg' }],
-        conversation: {
-          contact: { phone_number: '+10000000004' },
-          phone_number: { number: '+14154498072' },
-        },
-      },
-    }),
-  });
-  // Unknown phone → 200 with async "unknown phone" SMS; the point is the
-  // payload parses instead of 400ing on the empty body.
-  assertStatus(res.status, 200, res.data);
+  // Media-only MMS (photo/voice note, no text) must parse (not 400 on empty
+  // body). A new phone provisions + routes, so clean up afterward.
+  const phone = uniqueSmsPhone();
+  let userId: string | undefined;
+  try {
+    const res = await postInbound(phone, '', [
+      { url: 'https://example.com/photo.jpg', type: 'image/jpeg' },
+    ]);
+    assertStatus(res.status, 200, res.data);
+    userId = (await prisma.user.findFirst({ where: { phone } }))?.userId;
+  } finally {
+    if (userId) await clearAndCleanup(phone, userId).catch(() => {});
+  }
 }
 
 async function testInbound_invalidAttachmentsStillRejected() {
@@ -243,61 +241,69 @@ async function testInbound_invalidAttachmentsStillRejected() {
   assertStatus(res.status, 400, res.data);
 }
 
-// --- unknown phone (returns 200, sends async SMS) ---
+// --- new phone provisions + routes (the onboarding entry point) ---
 
-async function testInbound_unknownPhone() {
-  const res = await request(`${BASE_URL}/api/sms/inbound`, {
-    method: 'POST',
-    body: JSON.stringify({
-      data: {
-        body: 'Hello from unknown',
-        conversation: {
-          contact: { phone_number: '+10000000001' },
-          phone_number: { number: '+14154498072' },
-        },
-      },
-    }),
-  });
-  // Returns 200 with { ok: true } even for unknown phone (sends SMS reply async)
-  assertStatus(res.status, 200, res.data);
-  const body = res.data as { ok: boolean };
-  if (body.ok !== true) {
-    throw new Error(`Expected { ok: true }, got: ${JSON.stringify(res.data)}`);
+async function testInbound_newPhoneProvisionsAndRoutes() {
+  // A first-time (unknown) number is silently onboarded: a User row is created
+  // and the message routes straight to the supervisor — no signup dead-end.
+  const phone = uniqueSmsPhone();
+  let userId: string | undefined;
+  try {
+    const res = await postInbound(phone, 'hey rose, what can you do?');
+    assertStatus(res.status, 200, res.data);
+    const body = res.data as { ok: boolean };
+    if (body.ok !== true) {
+      throw new Error(`Expected { ok: true }, got: ${JSON.stringify(res.data)}`);
+    }
+    // PROVISIONED: a User now exists for this previously-unknown phone.
+    const user = await prisma.user.findFirst({ where: { phone } });
+    if (!user) throw new Error('Expected new phone to be provisioned as a User row');
+    userId = user.userId;
+    // ROUTED: routeToSupervisor bumped the inbound seq (set synchronously).
+    const session = await prisma.smsSession.findUnique({ where: { userId } });
+    if (!session || session.lastInboundSeq < 1) {
+      throw new Error('Expected provisioned user to route to supervisor (lastInboundSeq >= 1)');
+    }
+  } finally {
+    if (userId) await clearAndCleanup(phone, userId).catch(() => {});
   }
 }
 
 // --- Surge data envelope format ---
 
 async function testInbound_surgeDataEnvelope() {
-  // Surge wraps payload under a `data` key
-  const res = await request(`${BASE_URL}/api/sms/inbound`, {
-    method: 'POST',
-    body: JSON.stringify({
-      data: {
-        body: 'Test via data envelope',
-        conversation: {
-          contact: { phone_number: '+10000000002' },
-          phone_number: { number: '+14154498072' },
-        },
-      },
-    }),
-  });
-  assertStatus(res.status, 200, res.data);
+  // Surge wraps payload under a `data` key.
+  const phone = uniqueSmsPhone();
+  let userId: string | undefined;
+  try {
+    const res = await postInbound(phone, 'Test via data envelope');
+    assertStatus(res.status, 200, res.data);
+    userId = (await prisma.user.findFirst({ where: { phone } }))?.userId;
+  } finally {
+    if (userId) await clearAndCleanup(phone, userId).catch(() => {});
+  }
 }
 
 async function testInbound_flatPayload() {
-  // Also handles flat payload (no data envelope)
-  const res = await request(`${BASE_URL}/api/sms/inbound`, {
-    method: 'POST',
-    body: JSON.stringify({
-      body: 'Test flat payload',
-      conversation: {
-        contact: { phone_number: '+10000000003' },
-        phone_number: { number: '+14154498072' },
-      },
-    }),
-  });
-  assertStatus(res.status, 200, res.data);
+  // Also handles flat payload (no data envelope).
+  const phone = uniqueSmsPhone();
+  let userId: string | undefined;
+  try {
+    const res = await request(`${BASE_URL}/api/sms/inbound`, {
+      method: 'POST',
+      body: JSON.stringify({
+        body: 'Test flat payload',
+        conversation: {
+          contact: { phone_number: phone },
+          phone_number: { number: '+14154498072' },
+        },
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+    userId = (await prisma.user.findFirst({ where: { phone } }))?.userId;
+  } finally {
+    if (userId) await clearAndCleanup(phone, userId).catch(() => {});
+  }
 }
 
 // --- method checks ---
@@ -396,6 +402,35 @@ async function provisionUserWithPhone(phone: string): Promise<string> {
     },
   });
   return userId;
+}
+
+/** POST a Surge `data`-envelope inbound SMS. */
+async function postInbound(phone: string, body: string, attachments?: unknown[]) {
+  return request(`${BASE_URL}/api/sms/inbound`, {
+    method: 'POST',
+    body: JSON.stringify({
+      data: {
+        body,
+        ...(attachments ? { attachments } : {}),
+        conversation: {
+          contact: { phone_number: phone },
+          phone_number: { number: '+14154498072' },
+        },
+      },
+    }),
+  });
+}
+
+/**
+ * Abort the async supervisor (via /clear) and delete every row a provisioning
+ * test created (SmsSession, Credit, User) so concurrent/repeat runs don't drift.
+ */
+async function clearAndCleanup(phone: string, userId: string): Promise<void> {
+  await postInbound(phone, '/clear');
+  await new Promise((r) => setTimeout(r, 200));
+  await prisma.smsSession.deleteMany({ where: { userId } });
+  await prisma.credit.deleteMany({ where: { userId } });
+  await prisma.user.deleteMany({ where: { userId } });
 }
 
 // Covers service.ts lines 162-179, 203-204 — handleClearCommand path:
@@ -602,19 +637,10 @@ async function runAll() {
       fn: testInbound_whitespaceOnlyBody,
     },
     {
-      name: 'POST /sms/inbound -- attachment-only payload -> 200',
-      fn: testInbound_attachmentOnlyPayload,
-    },
-    {
       name: 'POST /sms/inbound -- invalid attachments with empty body -> 400',
       fn: testInbound_invalidAttachmentsStillRejected,
     },
     { name: 'POST /sms/inbound -- error response shape', fn: testInbound_errorShape },
-    // unknown phone
-    { name: 'POST /sms/inbound -- unknown phone -> 200', fn: testInbound_unknownPhone },
-    // payload formats
-    { name: 'POST /sms/inbound -- Surge data envelope', fn: testInbound_surgeDataEnvelope },
-    { name: 'POST /sms/inbound -- flat payload', fn: testInbound_flatPayload },
     // method check
     { name: 'GET /sms/inbound -- not allowed', fn: testInbound_getNotAllowed },
     // invariants
@@ -630,6 +656,18 @@ async function runAll() {
   ];
 
   const sequentialTests = [
+    // ---- provisioning: a new phone is silently onboarded + routed. These fire
+    // the async supervisor, so run sequentially with per-test cleanup.
+    {
+      name: 'POST /sms/inbound -- new phone provisions + routes to supervisor',
+      fn: testInbound_newPhoneProvisionsAndRoutes,
+    },
+    {
+      name: 'POST /sms/inbound -- attachment-only payload provisions -> 200',
+      fn: testInbound_attachmentOnlyPayload,
+    },
+    { name: 'POST /sms/inbound -- Surge data envelope -> 200', fn: testInbound_surgeDataEnvelope },
+    { name: 'POST /sms/inbound -- flat payload -> 200', fn: testInbound_flatPayload },
     // ---- known-phone branch coverage (handleClearCommand and routeToSupervisor
     // call site). Each test provisions its own User row keyed
     // by a synthetic phone so they don't collide with seed data.

@@ -17,7 +17,14 @@ import { Textarea } from '@/components/ui/textarea';
 import { Maximize2 } from 'lucide-react';
 import { MarkdownText } from '../MarkdownText';
 import { RequestActionButtons } from './RequestActionButtons';
-import { getAuthAssistanceMetadata, getSendSmsMetadata, type AttentionRequest } from './types';
+import { GateRequestCard } from './GateRequestCard';
+import { runGateConnectAction } from './gateConnect';
+import {
+  getAuthAssistanceMetadata,
+  getGateMetadata,
+  getSendSmsMetadata,
+  type AttentionRequest,
+} from './types';
 import { hasIMessageBridge } from './macAppBridge';
 
 interface RequestListItemProps {
@@ -35,22 +42,8 @@ interface RequestListItemProps {
   onSendViaIMessage: (request: AttentionRequest) => void;
 }
 
-export function RequestListItem({
-  request,
-  remainingCount,
-  responseText,
-  loading,
-  actionRequestId,
-  onSelectAgent,
-  onClose,
-  onChangeResponse,
-  onAccept,
-  onSkip,
-  onReject,
-  onSendViaIMessage,
-}: RequestListItemProps) {
-  const sms = getSendSmsMetadata(request.metadata);
-  const authAssistance = getAuthAssistanceMetadata(request);
+export function RequestListItem(props: RequestListItemProps) {
+  const { request, remainingCount, onSelectAgent, onClose } = props;
 
   return (
     <div className="space-y-3">
@@ -70,6 +63,70 @@ export function RequestListItem({
         </div>
       )}
 
+      <RequestBody {...props} />
+
+      <Button
+        variant="link"
+        size="sm"
+        className="p-0 h-auto text-xs"
+        onClick={() => {
+          if (onSelectAgent) {
+            onSelectAgent(request.agent_id);
+            onClose();
+          }
+        }}
+      >
+        View agent →
+      </Button>
+
+      <p className="text-xs text-muted-foreground">
+        Asked {new Date(request.created_at).toLocaleString()}
+      </p>
+    </div>
+  );
+}
+
+/** Gate requests render the Gate card; everything else uses the generic body. */
+function RequestBody(props: RequestListItemProps) {
+  const { request, loading, onAccept, onReject } = props;
+  const gate = getGateMetadata(request.metadata);
+  if (!gate) return <GenericRequestBody {...props} />;
+
+  return (
+    <GateRequestCard
+      gate={gate}
+      loading={loading}
+      onPrimary={() => {
+        if (gate.action.kind === 'link') {
+          void runGateConnectAction(gate, { requestId: request.id });
+          return;
+        }
+        const reply = gate.action.tokens[0] ?? 'YES';
+        onAccept(request.id, reply);
+      }}
+      onCancel={() => onReject(request.id)}
+    />
+  );
+}
+
+function GenericRequestBody({
+  request,
+  responseText,
+  loading,
+  actionRequestId,
+  onSelectAgent,
+  onClose,
+  onChangeResponse,
+  onAccept,
+  onSkip,
+  onReject,
+  onSendViaIMessage,
+}: RequestListItemProps) {
+  const sms = getSendSmsMetadata(request.metadata);
+  const authAssistance = getAuthAssistanceMetadata(request);
+
+  return (
+    <>
       <div className="max-h-[300px] overflow-y-auto">
         <MarkdownText text={request.question} breaks />
       </div>
@@ -101,20 +158,6 @@ export function RequestListItem({
         />
       )}
 
-      <Button
-        variant="link"
-        size="sm"
-        className="p-0 h-auto text-xs"
-        onClick={() => {
-          if (onSelectAgent) {
-            onSelectAgent(request.agent_id);
-            onClose();
-          }
-        }}
-      >
-        View agent →
-      </Button>
-
       {!authAssistance && (
         <>
           <Textarea
@@ -133,11 +176,7 @@ export function RequestListItem({
           />
         </>
       )}
-
-      <p className="text-xs text-muted-foreground">
-        Asked {new Date(request.created_at).toLocaleString()}
-      </p>
-    </div>
+    </>
   );
 }
 

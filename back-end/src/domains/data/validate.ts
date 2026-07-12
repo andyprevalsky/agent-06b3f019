@@ -10,6 +10,7 @@ import {
   DATA_SOURCE_CONFIGS,
   DEFAULT_GREP_SOURCES,
   VALID_SOURCES,
+  isMessageFamilySource,
   type DocumentGrepFilters,
   type GrepParams,
   type MessageGrepFilters,
@@ -21,6 +22,7 @@ import {
 const ALLOWED_GREP_KEYS = new Set([
   'pattern',
   'source',
+  'sources',
   'filters',
   '-A',
   '-B',
@@ -158,17 +160,16 @@ function rejectUnsupportedFilters(source: ValidSource, filters: Record<string, u
 
 function parseMessageFilters(
   params: GrepParams,
-  selectedSource?: ValidSource
+  mergeTopLevelNarrowing: boolean
 ): MessageGrepFilters | undefined {
   const raw = requireFilterObject(params);
-  const merged =
-    selectedSource === 'messages'
-      ? {
-          ...raw,
-          ...(params.person !== undefined ? { person: params.person } : {}),
-          ...(params.since !== undefined ? { since: params.since } : {}),
-        }
-      : raw;
+  const merged = mergeTopLevelNarrowing
+    ? {
+        ...raw,
+        ...(params.person !== undefined ? { person: params.person } : {}),
+        ...(params.since !== undefined ? { since: params.since } : {}),
+      }
+    : raw;
   if (Object.keys(merged).length === 0) return undefined;
   rejectUnsupportedFilters('messages', merged);
   return {
@@ -213,6 +214,75 @@ function parseDocumentFilters(params: GrepParams): DocumentGrepFilters | undefin
   };
 }
 
+interface ResolvedSourceSelection {
+  resolvedSources: ValidSource[];
+  hasMessageFamily: boolean;
+  hasTransactions: boolean;
+  hasDocuments: boolean;
+  mergeTopLevelNarrowing: boolean;
+}
+
+/**
+ * Validate the source selection (single `source` or multi `sources`), resolve
+ * the effective list, and derive which filter families apply. Also enforces the
+ * legacy filter-rejection rules so single-source behavior is unchanged.
+ */
+function resolveSourceSelection(params: GrepParams): ResolvedSourceSelection {
+  const { source, sources } = params;
+  if (source !== undefined && !(source in VALID_SOURCES)) {
+    throw new SourceNotFoundError(source);
+  }
+  if (sources !== undefined) {
+    if (!Array.isArray(sources)) {
+      throw new InvalidGrepParamError('sources');
+    }
+    for (const entry of sources) {
+      if (typeof entry !== 'string' || !(entry in VALID_SOURCES)) {
+        throw new SourceNotFoundError(typeof entry === 'string' ? entry : String(entry));
+      }
+    }
+  }
+
+  // Explicit `sources` array (deduped) wins, then a single `source`, else the
+  // default trio.
+  const resolvedSources: ValidSource[] =
+    sources !== undefined
+      ? [...new Set(sources as ValidSource[])]
+      : source !== undefined
+        ? [source as ValidSource]
+        : DEFAULT_GREP_SOURCES;
+
+  if (params.filters !== undefined && source === undefined && sources === undefined) {
+    throw new InvalidGrepParamError('filters');
+  }
+
+  const hasMessageFamily = resolvedSources.some(isMessageFamilySource);
+  const hasTransactions = resolvedSources.includes('transactions');
+  const hasDocuments = resolvedSources.includes('documents');
+
+  // Reject filters that NO resolved source can consume. Message/transaction/
+  // document families reject unsupported keys inside their own parse step; the
+  // gap is a purely-local selection (e.g. sources=['network']) where none of
+  // those parsers run — without this the filters would be silently dropped.
+  // Covers both the single-source (byte-identical to pre-`sources` behavior when
+  // resolvedSources===[selectedSource]) and the multi-source path.
+  const filterObj = requireFilterObject(params);
+  if (Object.keys(filterObj).length > 0 && !hasMessageFamily && !hasTransactions && !hasDocuments) {
+    rejectUnsupportedFilters(resolvedSources[0], filterObj);
+  }
+
+  return {
+    resolvedSources,
+    hasMessageFamily,
+    hasTransactions,
+    hasDocuments,
+    // Merge top-level `person`/`since` into message filters whenever a message-
+    // family source is EXPLICITLY selected — via singular `source` OR `sources`.
+    // (Not for the implicit default trio, matching historical behavior.)
+    mergeTopLevelNarrowing: (source !== undefined || sources !== undefined) && hasMessageFamily,
+  };
+}
+
 export function validateGrepInput(params: GrepParams): ValidatedGrepInput {
   for (const key of Object.keys(params)) {
     if (!ALLOWED_GREP_KEYS.has(key)) {
@@ -220,25 +290,18 @@ export function validateGrepInput(params: GrepParams): ValidatedGrepInput {
     }
   }
 
-  const { pattern, source } = params;
+  const { pattern } = params;
   if (pattern === undefined || pattern === null || typeof pattern !== 'string') {
     throw new InvalidPatternError();
   }
-  if (source !== undefined && !(source in VALID_SOURCES)) {
-    throw new SourceNotFoundError(source);
-  }
-  if (params.filters !== undefined && source === undefined) {
-    throw new InvalidGrepParamError('filters');
-  }
-  const selectedSource = source as ValidSource | undefined;
-  if (
-    selectedSource !== undefined &&
-    selectedSource !== 'messages' &&
-    selectedSource !== 'transactions' &&
-    selectedSource !== 'documents'
-  ) {
-    rejectUnsupportedFilters(selectedSource, requireFilterObject(params));
-  }
+
+  const {
+    resolvedSources,
+    hasMessageFamily,
+    hasTransactions,
+    hasDocuments,
+    mergeTopLevelNarrowing,
+  } = resolveSourceSelection(params);
 
   const multiline = parseBoolean(params.multiline, false);
   // Fix 1: fold inline (?i) into case-insensitivity (JS RegExp + Postgres ARE reject it).
@@ -272,7 +335,7 @@ export function validateGrepInput(params: GrepParams): ValidatedGrepInput {
     pattern,
     // Strip named-capture syntax for Postgres ARE (we only boolean-match).
     dbPattern: databaseRegexPattern(stripNamedGroups(normalizedPattern), multiline),
-    sources: source !== undefined ? [source as ValidSource] : DEFAULT_GREP_SOURCES,
+    sources: resolvedSources,
     regex,
     caseInsensitive,
     multiline,
@@ -282,12 +345,9 @@ export function validateGrepInput(params: GrepParams): ValidatedGrepInput {
     headLimit: parseBoundedNumber(params.head_limit, 20, 1, MAX_RESULTS),
     offset: parseBoundedNumber(params.offset, 0, 0, 10_000),
     filters: {
-      messages:
-        selectedSource === undefined || selectedSource === 'messages'
-          ? parseMessageFilters(params, selectedSource)
-          : undefined,
-      transactions: selectedSource === 'transactions' ? parseTransactionFilters(params) : undefined,
-      documents: selectedSource === 'documents' ? parseDocumentFilters(params) : undefined,
+      messages: hasMessageFamily ? parseMessageFilters(params, mergeTopLevelNarrowing) : undefined,
+      transactions: hasTransactions ? parseTransactionFilters(params) : undefined,
+      documents: hasDocuments ? parseDocumentFilters(params) : undefined,
     },
   };
 }

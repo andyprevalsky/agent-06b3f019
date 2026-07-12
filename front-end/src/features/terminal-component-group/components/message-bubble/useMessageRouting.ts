@@ -28,6 +28,7 @@ export interface MessageRouting {
   isClaudeCodeChipMessage: boolean;
   isBrowserAgentChipMessage: boolean;
   isCompletionSummary: boolean;
+  isGate: boolean;
 }
 
 export function useMessageRouting(message: Message): MessageRouting {
@@ -53,6 +54,7 @@ export function useMessageRouting(message: Message): MessageRouting {
   const isPhoneCallTool = isTool && metadata?.toolName === 'call_phone_number';
   const isClaudeCodeToolMessage = isTool && metadata?.toolName === 'spawn_claude_code_agent';
   const isCompletionSummary = isTool && metadata?.isFinalSummary === true;
+  const isGate = Boolean(isTool && metadata?.gate);
 
   const isClaudeCodeInProgress = isClaudeCodeToolMessage && metadata?.toolStatus === 'IN_PROGRESS';
   const isClaudeCodeStarted =
@@ -71,9 +73,9 @@ export function useMessageRouting(message: Message): MessageRouting {
   // result with Recording/Trajectory unavailable.
   const isBrowserAgentChipMessage = Boolean(
     isTool &&
-      metadata?.toolName === 'spawn_browser_agent' &&
-      !metadata?.subAgentId &&
-      (metadata?.toolStatus === 'FINISHED' || metadata?.toolStatus === 'ERROR'),
+    metadata?.toolName === 'spawn_browser_agent' &&
+    !metadata?.subAgentId &&
+    (metadata?.toolStatus === 'FINISHED' || metadata?.toolStatus === 'ERROR'),
   );
 
   return {
@@ -93,5 +95,6 @@ export function useMessageRouting(message: Message): MessageRouting {
     isClaudeCodeChipMessage,
     isBrowserAgentChipMessage,
     isCompletionSummary,
+    isGate,
   };
 }

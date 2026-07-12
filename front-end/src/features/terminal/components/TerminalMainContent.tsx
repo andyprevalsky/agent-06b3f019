@@ -19,7 +19,7 @@ import Settings from '@/pages/Settings';
 import Usage from '@/pages/Usage';
 
 import type { TerminalView } from '../types';
-import type { derivePendingApproval } from '../hooks/derivations';
+import type { derivePendingApproval, derivePendingGates } from '../hooks/derivations';
 import type { useDrippiness } from '../hooks/useDrippiness';
 import type { useTerminalAgents } from '../hooks/useTerminalAgents';
 
@@ -32,6 +32,7 @@ interface MainContentProps {
   models: ReturnType<typeof useAppData>['models'];
   modelsLoading: boolean;
   pendingApproval: ReturnType<typeof derivePendingApproval>;
+  pendingGates: ReturnType<typeof derivePendingGates>;
   hasActiveAttention: boolean;
   browserStatusProps: { browsers: { taskId: string; browserUrl: string }[] } | null;
   systemMessages: ReturnType<typeof useTerminalAgents>['messages'];
@@ -123,6 +124,7 @@ function TerminalViewContent(props: MainContentProps) {
       models={props.models}
       modelsLoading={props.modelsLoading}
       pendingApproval={props.pendingApproval}
+      pendingGates={props.pendingGates}
       hasActiveAttentionRequest={props.hasActiveAttention}
       browserStatusProps={props.browserStatusProps}
       systemMessages={props.systemMessages}

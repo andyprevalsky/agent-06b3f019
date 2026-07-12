@@ -169,11 +169,21 @@ export async function resolvePersonId(userId: string, identifier: string): Promi
   return person?.id ?? null;
 }
 
-/** Optional messages-only narrowing: scope to one contact and/or a time cutoff. */
-function messageFilters(personId: string | undefined, since: Date | undefined): Prisma.Sql {
+/**
+ * Optional messages narrowing: scope to one contact, a time cutoff, and/or a
+ * single channel. `channel` is only set by the fine-grained channel sources
+ * (email/imessage/whatsapp/sms); when undefined the emitted SQL is byte-
+ * identical to the pre-channel query used by messages/gmail.
+ */
+function messageFilters(
+  personId: string | undefined,
+  since: Date | undefined,
+  channel: string | undefined
+): Prisma.Sql {
   const parts: Prisma.Sql[] = [];
   if (personId !== undefined) parts.push(Prisma.sql`AND m."personId" = ${personId}`);
   if (since !== undefined) parts.push(Prisma.sql`AND m.timestamp >= ${since}`);
+  if (channel !== undefined) parts.push(Prisma.sql`AND m.channel::text = ${channel}`);
   return parts.length > 0 ? Prisma.join(parts, ' ') : Prisma.empty;
 }
 
@@ -249,9 +259,10 @@ export async function countMessageGrepRows(params: {
   caseInsensitive: boolean;
   personId?: string;
   since?: Date;
+  channel?: string;
 }): Promise<number> {
   const predicate = regexPredicate(Prisma.sql`m.message`, params.pattern, params.caseInsensitive);
-  const filters = messageFilters(params.personId, params.since);
+  const filters = messageFilters(params.personId, params.since, params.channel);
   const rows = await prisma.$queryRaw<Array<{ count: bigint }>>`
     SELECT COUNT(*)::bigint AS count
     FROM "MessageRecord" m
@@ -271,9 +282,10 @@ export async function searchMessageGrepRows(params: {
   offset: number;
   personId?: string;
   since?: Date;
+  channel?: string;
 }): Promise<MessageGrepRow[]> {
   const predicate = regexPredicate(Prisma.sql`m.message`, params.pattern, params.caseInsensitive);
-  const filters = messageFilters(params.personId, params.since);
+  const filters = messageFilters(params.personId, params.since, params.channel);
   return prisma.$queryRaw<MessageGrepRow[]>`
     SELECT
       m.id,

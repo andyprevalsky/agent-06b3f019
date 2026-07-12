@@ -66,6 +66,7 @@ async def check_user_usage(user_id: str) -> dict:
                         "remaining": remaining,
                         "used": usage_data.get("used", 0),
                         "total": usage_data.get("total", 0),
+                        "tier": usage_data.get("tier"),
                     }
                 else:
                     activity.logger.warning(

@@ -363,6 +363,146 @@ async def test_manager_execute_tool():
     assert out["result"] == activity_result
 
 
+async def test_execute_grep_source_unavailable():
+    """An unconnected external source returns a source_unavailable marker and
+    skips grep_activity when nothing else is searchable."""
+    from domains.grep.service import execute_grep
+
+    calls = []
+
+    async def mock_execute_activity(activity_fn, *, args, start_to_close_timeout, retry_policy):
+        name = getattr(activity_fn, "__name__", "")
+        calls.append(name)
+        if name == "source_status_activity":
+            return [
+                {"source": "email", "connector": "gmail", "connected": False, "connectUrl": "https://x"}
+            ]
+        if name == "grep_activity":
+            return {"matches": [], "total_matches": 0}
+        return None
+
+    out = await execute_grep(
+        execute_activity=mock_execute_activity,
+        tool_call={"pattern": "flight", "sources": ["email"]},
+        tool_call_id="tc-1",
+        agent_id="a-1",
+        user_id="u-1",
+    )
+    assert out["unavailable_sources"] and out["unavailable_sources"][0]["source"] == "email"
+    assert "not connected" in out["result"].lower()
+    # grep_activity is NOT called — email was the only (unavailable) source.
+    assert "grep_activity" not in calls
+    assert "source_status_activity" in calls
+
+
+async def test_execute_grep_partial_connectivity():
+    """One unavailable + one available source: grep runs on the available one,
+    the unavailable one is still surfaced."""
+    from domains.grep.service import execute_grep
+
+    grep_called_with = {}
+
+    async def mock_execute_activity(activity_fn, *, args, start_to_close_timeout, retry_policy):
+        name = getattr(activity_fn, "__name__", "")
+        if name == "source_status_activity":
+            return [
+                {"source": "email", "connector": "gmail", "connected": False, "connectUrl": "https://x"},
+                {"source": "transactions", "connector": "plaid", "connected": True, "connectUrl": None},
+            ]
+        if name == "grep_activity":
+            grep_called_with.update(args[0])
+            return {"matches": [], "total_matches": 0}
+        return None
+
+    out = await execute_grep(
+        execute_activity=mock_execute_activity,
+        tool_call={"pattern": "x", "sources": ["email", "transactions"]},
+        tool_call_id="tc-1",
+        agent_id="a-1",
+        user_id="u-1",
+    )
+    assert out["unavailable_sources"][0]["source"] == "email"
+    # grep ran only on the connected source
+    assert grep_called_with.get("sources") == ["transactions"]
+
+
+async def test_execute_grep_documents_provider_gate():
+    """Documents is an umbrella grep corpus; provider filters drive source gates."""
+    from domains.grep.service import execute_grep
+
+    source_status_args = []
+    calls = []
+
+    async def mock_execute_activity(activity_fn, *, args, start_to_close_timeout, retry_policy):
+        name = getattr(activity_fn, "__name__", "")
+        calls.append(name)
+        if name == "source_status_activity":
+            source_status_args.extend(args[1])
+            return [
+                {
+                    "source": "apple_notes",
+                    "connector": "apple_notes",
+                    "connected": False,
+                    "connectUrl": "https://roselabs.ai/connect/apple_notes",
+                }
+            ]
+        if name == "grep_activity":
+            return {"matches": [], "total_matches": 0}
+        return None
+
+    out = await execute_grep(
+        execute_activity=mock_execute_activity,
+        tool_call={
+            "pattern": "renewal clause",
+            "source": "documents",
+            "filters": {"document_source": "apple_notes"},
+            "require_source_access": True,
+        },
+        tool_call_id="tc-1",
+        agent_id="a-1",
+        user_id="u-1",
+    )
+
+    assert source_status_args == ["apple_notes"]
+    assert out["unavailable_sources"][0]["source"] == "apple_notes"
+    assert "documents" not in [item["source"] for item in out["unavailable_sources"]]
+    assert "grep_activity" not in calls
+
+
+async def test_execute_grep_documents_provider_opportunistic_does_not_gate():
+    """Opportunistic document-provider checks should not block on missing access."""
+    from domains.grep.service import execute_grep
+
+    calls = []
+    grep_called_with = {}
+
+    async def mock_execute_activity(activity_fn, *, args, start_to_close_timeout, retry_policy):
+        name = getattr(activity_fn, "__name__", "")
+        calls.append(name)
+        if name == "grep_activity":
+            grep_called_with.update(args[0])
+            return {"matches": [], "total_matches": 0}
+        return None
+
+    out = await execute_grep(
+        execute_activity=mock_execute_activity,
+        tool_call={
+            "pattern": "Cali gift preferences",
+            "source": "documents",
+            "filters": {"document_source": "apple_notes"},
+        },
+        tool_call_id="tc-1",
+        agent_id="a-1",
+        user_id="u-1",
+    )
+
+    assert "source_status_activity" not in calls
+    assert "grep_activity" in calls
+    assert grep_called_with["source"] == "documents"
+    assert "require_source_access" not in grep_called_with
+    assert out["unavailable_sources"] == []
+
+
 async def run_all_tests():
     print("grep blackbox tests:")
     r = BlackboxResult()
@@ -378,6 +518,13 @@ async def run_all_tests():
     await r.record_async("execute_grep_empty_pattern_path", test_execute_grep_empty_pattern_path)
     await r.record_async("execute_grep_error_reraises", test_execute_grep_error_reraises)
     await r.record_async("manager_execute_tool", test_manager_execute_tool)
+    await r.record_async("execute_grep_source_unavailable", test_execute_grep_source_unavailable)
+    await r.record_async("execute_grep_partial_connectivity", test_execute_grep_partial_connectivity)
+    await r.record_async("execute_grep_documents_provider_gate", test_execute_grep_documents_provider_gate)
+    await r.record_async(
+        "execute_grep_documents_provider_opportunistic_does_not_gate",
+        test_execute_grep_documents_provider_opportunistic_does_not_gate,
+    )
     teardown_mock()
     return r.all_passed
 

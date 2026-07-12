@@ -267,6 +267,11 @@ async def spawn_explore_agent_activity(  # noqa: C901
     # Collect raw tool call results for callers that need evidence
     tool_call_results: List[str] = []
 
+    # Data sources the explore agent tried to grep but whose connector isn't
+    # connected. Surfaced to the parent workflow, which raises one blocking
+    # source_connect gate per unavailable source after this explore returns.
+    unavailable_sources_collected: List[Dict] = []
+
     async def on_tokens(
         tokens_in_delta: int,
         tokens_out_delta: int,
@@ -415,6 +420,13 @@ async def spawn_explore_agent_activity(  # noqa: C901
                 agent_id=agent_id,
                 user_id=user_id,
             )
+            if isinstance(result, dict):
+                for st in result.get("unavailable_sources") or []:
+                    key = st.get("source") if isinstance(st, dict) else st
+                    if key and not any(
+                        u.get("source") == key for u in unavailable_sources_collected
+                    ):
+                        unavailable_sources_collected.append(st)
         elif tool_name == "attempt_completion":
             return {"success": True, "message": "Completion accepted"}
         else:
@@ -536,15 +548,26 @@ async def spawn_explore_agent_activity(  # noqa: C901
             f"{joined}"
         )
 
+    # A required data source that isn't connected means the explore could not
+    # do its job — it is FAILED (the parent will raise the connect gate). This
+    # takes precedence over the run's own completed/error status.
+    has_unavailable = bool(unavailable_sources_collected)
+    unavailable_names = ", ".join(
+        str(u.get("source")) for u in unavailable_sources_collected
+    )
+    run_completed = result.get("status") == "completed"
     result_payload = {
-        "status": "completed" if result.get("status") == "completed" else "error",
+        "status": "error" if has_unavailable else ("completed" if run_completed else "error"),
         "result": final_response,
         "summary": final_response,
         "final_response": final_response,
         "best_effort_response": result.get("best_effort_response") or final_response,
-        "error_reason": None
-        if result.get("status") == "completed"
-        else (result.get("message") or result.get("status")),
+        "error_reason": (
+            f"required data source(s) not connected: {unavailable_names}"
+            if has_unavailable
+            else (None if run_completed else (result.get("message") or result.get("status")))
+        ),
+        "unavailable_sources": unavailable_sources_collected,
         "partial_structured_response": result.get("partial_structured_response"),
         "structured_response": result.get("structured_response") or result.get("partial_structured_response"),
         "tokens_in": result.get("tokens_in", 0),

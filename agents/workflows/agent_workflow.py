@@ -64,6 +64,12 @@ with workflow.unsafe.imports_passed_through():
 
     # Tool executors (map tool name → workflow helper)
     from tools.grep import grep
+    from tools.gate import (
+        GateRejectedError,
+        build_subscription_gate,
+        mint_subscription_checkout_activity,
+        raise_gate_direct,
+    )
     from tools.knowledge_base import save_blueprint_activity
     from tools.message_person import message_person
     from tools.prompts import TOOL_PROMPTS
@@ -898,6 +904,10 @@ class AgentWorkflow:
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
 
+        # Pre-flight credit gate: if a user starts with exhausted free credits
+        # and no subscription, block before spending more compute or running tools.
+        await self._check_credits()
+
         # =====================================================================
         # PHASE 1: PLAN (research + create execution plan)
         # =====================================================================
@@ -1560,8 +1570,28 @@ class AgentWorkflow:
             )
             if result and not result.get("has_credits", True):
                 workflow.logger.warning("💰 Credits depleted - pausing agent")
-                self.is_paused = True
                 self._has_credits = False
+                if result.get("tier") is None:
+                    checkout_url = await workflow.execute_activity(
+                        mint_subscription_checkout_activity,
+                        args=[self.user_id],
+                        start_to_close_timeout=timedelta(seconds=30),
+                        retry_policy=RetryPolicy(maximum_attempts=3),
+                    )
+                    try:
+                        await raise_gate_direct(
+                            self,
+                            build_subscription_gate(
+                                checkout_url=checkout_url,
+                                reason="Your free credits are exhausted — subscribe to continue this task.",
+                                title="Subscribe to continue this task",
+                            ),
+                            gate_key="subscription",
+                        )
+                    except GateRejectedError:
+                        self.is_paused = True
+                else:
+                    self.is_paused = True
             else:
                 self._has_credits = True
         except Exception as e:
@@ -1933,7 +1963,6 @@ class AgentWorkflow:
                 "web_fetch",
                 "attempt_completion",
                 "call_phone_number",
-                "grep",
             }
 
             if tool_name in NEW_SIGNATURE_TOOLS:
@@ -2031,6 +2060,12 @@ class AgentWorkflow:
                 if tool_name == "spawn_agent":
                     tool_call_dict["_phase"] = self.current_phase
                 executor_result = await executor(self, tool_call_dict, tool_call_id)
+                if isinstance(executor_result, dict):
+                    original_usage = executor_result.get("usage", {})
+                    if original_usage:
+                        await self._track_usage(original_usage, tool_name=tool_name)
+                    result = executor_result.get("result", executor_result)
+                    return {"success": True, "message": f"{tool_name} completed", "result": result}
                 # spawn_agent returns (last_status, summary) tuple
                 if isinstance(executor_result, tuple):
                     last_status, result_text = executor_result

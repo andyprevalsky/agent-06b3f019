@@ -13,6 +13,7 @@ import type {
   Model,
   BrowserPanelData,
   PendingApproval,
+  PendingGate,
 } from '../types';
 
 // ── Context window helpers ────────────────────────────────────────────────
@@ -247,4 +248,31 @@ export function deriveHasActiveAttentionRequest(messages: Message[]): boolean {
   return Array.from(attentionByToolCallId.values()).some(
     (m) => m.metadata?.toolStatus === 'IN_PROGRESS',
   );
+}
+
+// ── Gate derivation ──────────────────────────────────────────────────────
+
+export function derivePendingGates(messages: Message[]): PendingGate[] {
+  const gateByKey = new Map<string, Message>();
+
+  for (const m of messages) {
+    if (!m.metadata?.gate) continue;
+    const gateRecord = m.metadata.gate as { gateKey?: unknown };
+    const attentionRequestId = m.metadata.attentionRequestId;
+    if (typeof attentionRequestId !== 'string') continue;
+
+    const key = typeof gateRecord.gateKey === 'string' ? gateRecord.gateKey : attentionRequestId;
+    const existing = gateByKey.get(key);
+    if (!existing || new Date(m.timestamp) > new Date(existing.timestamp)) {
+      gateByKey.set(key, m);
+    }
+  }
+
+  return Array.from(gateByKey.values())
+    .filter((m) => m.metadata?.toolStatus === 'IN_PROGRESS')
+    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+    .map((m) => ({
+      attentionRequestId: m.metadata?.attentionRequestId as string,
+      gate: m.metadata?.gate as PendingGate['gate'],
+    }));
 }

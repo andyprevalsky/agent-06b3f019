@@ -38,6 +38,7 @@ import { resolveInitialTerminalView } from '../hooks/resolveInitialTerminalView'
 import {
   computeActiveBrowserPanels,
   derivePendingApproval,
+  derivePendingGates,
   deriveHasActiveAttentionRequest,
 } from '../hooks/derivations';
 import type { TerminalView } from '../types';
@@ -96,6 +97,7 @@ function useTerminalDerivedState(agents: ReturnType<typeof useTerminalAgents>) {
     [agents.messages],
   );
   const pendingApproval = useMemo(() => derivePendingApproval(agents.messages), [agents.messages]);
+  const pendingGates = useMemo(() => derivePendingGates(agents.messages), [agents.messages]);
   const hasActiveAttention = useMemo(
     () => deriveHasActiveAttentionRequest(agents.messages),
     [agents.messages],
@@ -106,6 +108,7 @@ function useTerminalDerivedState(agents: ReturnType<typeof useTerminalAgents>) {
   );
   return {
     pendingApproval,
+    pendingGates,
     hasActiveAttention,
     browserStatusProps,
     systemMessages: agents.messages.filter((message) => message.role === 'SYSTEM'),
@@ -180,6 +183,7 @@ function TerminalLayout(props: TerminalLayoutProps) {
           models={props.models}
           modelsLoading={props.modelsLoading}
           pendingApproval={derived.pendingApproval}
+          pendingGates={derived.pendingGates}
           hasActiveAttention={derived.hasActiveAttention}
           browserStatusProps={derived.browserStatusProps}
           systemMessages={derived.systemMessages}

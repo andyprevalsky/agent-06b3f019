@@ -34,7 +34,8 @@ interface AgentCardDetailsResponse {
 export class AgentCardProviderError extends Error {
   constructor(
     message: string,
-    readonly status?: number
+    readonly status?: number,
+    readonly body?: string
   ) {
     super(message);
   }
@@ -181,7 +182,8 @@ export class AgentCardProvider implements CardProvider {
       });
       throw new AgentCardProviderError(
         `AgentCard request failed with ${response.status}`,
-        response.status
+        response.status,
+        safeBody
       );
     }
 

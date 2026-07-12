@@ -83,6 +83,13 @@ export function renderChipRoutes({ props, routing }: Args): ReactElement | null 
     );
   }
 
+  if (routing.isGate) {
+    if (shouldType && onTypingComplete) {
+      requestAnimationFrame(() => onTypingComplete());
+    }
+    return null;
+  }
+
   if (routing.isUserAttentionMessage) {
     return (
       <AttentionMessageWrapper

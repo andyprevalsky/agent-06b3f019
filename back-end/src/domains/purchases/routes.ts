@@ -70,7 +70,10 @@ router.post(
       res.json(result);
     } catch (error) {
       if (error instanceof service.PurchaseError) {
-        res.status(error.statusCode).json({ error: error.message });
+        res.status(error.statusCode).json({
+          error: error.message,
+          ...(error.code !== undefined ? { code: error.code } : {}),
+        });
         return;
       }
       log.error('Mint purchase failed', {
