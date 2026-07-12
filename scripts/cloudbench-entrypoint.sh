@@ -87,6 +87,10 @@ cd "$APP_DIR" || { log "FATAL: cannot cd $APP_DIR"; exit 1; }
 # agents worker loads agents/.env (load_dotenv from agents/); backend loads
 # back-end/.env (dotenv.config from back-end/). Injected as base64 blobs so the
 # entire file is captured exactly, key-for-key, with no per-key drift.
+ENV_HELPER="$APP_DIR/scripts/lib/cloudbench-env.sh"
+[ -f "$ENV_HELPER" ] || { log "FATAL: missing $ENV_HELPER"; exit 1; }
+# shellcheck source=lib/cloudbench-env.sh
+source "$ENV_HELPER"
 if [ -n "${AGENTS_ENV_B64:-}" ]; then
     echo "$AGENTS_ENV_B64" | base64 -d > "$APP_DIR/agents/.env" || { log "FATAL: failed to decode AGENTS_ENV_B64"; exit 1; }
     log "wrote agents/.env ($(wc -l < "$APP_DIR/agents/.env") lines)"
@@ -99,6 +103,11 @@ if [ -n "${BACKEND_ENV_B64:-}" ]; then
 else
     log "FATAL: BACKEND_ENV_B64 secret is not set"; exit 1
 fi
+cloudbench_verify_env_file "$APP_DIR/agents/.env" "${AGENTS_ENV_SHA256:-}" agents || exit 1
+cloudbench_verify_env_file "$APP_DIR/back-end/.env" "${BACKEND_ENV_SHA256:-}" backend || exit 1
+cloudbench_validate_browser_provider_contract \
+    "$APP_DIR/agents/.env" "$APP_DIR/back-end/.env" \
+    "${CLOUDBENCH_BROWSER_PROVIDER:-}" "${CLOUDBENCH_BROWSER_PROVIDER:-}" || exit 1
 chown "$APP_USER:$APP_USER" "$APP_DIR/agents/.env" "$APP_DIR/back-end/.env"
 chmod 600 "$APP_DIR/agents/.env" "$APP_DIR/back-end/.env"
 

@@ -50,6 +50,7 @@
 # Flags:
 #   --setup            one-time: create volume + persistent machine + git clone
 #   --refresh-wmh      explicit-only: (re)build the cached WMH model on /data/world-model
+#   --refresh-secrets  refresh + verify the app environment, then exit
 #   --destroy          explicit-only: destroy the machine + volume
 #   --simulate         pass --simulate to run_benchmark (default for a task run)
 #   --no-simulate      real mode (no WMH); serves nothing, runs the live stack
@@ -77,6 +78,8 @@ MACHINE_NAME="cloudbench-warm"
 VOLUME_NAME="cloudbench_data"     # Fly volume names must be [a-z0-9_].
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR" || exit 1
+# shellcheck source=lib/cloudbench-env.sh
+source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
 
 STATE_FILE="$ROOT_DIR/.context/cloudbench-machine.json"
 
@@ -95,7 +98,7 @@ REMOTE_BACKEND_PORT="3001"        # scripts/run.sh backend port for CONDUCTOR_PO
 CLOUDBENCH_RUNNER_USER_ID="1f85ff25-6e29-4c1b-8739-f917bd101a30"
 
 # ── Defaults ───────────────────────────────────────────────────────────────
-MODE="run"              # run | setup | refresh-wmh | destroy
+MODE="run"              # run | setup | refresh-wmh | refresh-secrets | destroy
 BENCH_TASKS=()          # one or more task names (positional).
 BENCH_SIMULATE="1"
 BENCH_PARALLEL="0"
@@ -118,6 +121,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --setup)          MODE="setup"; shift ;;
         --refresh-wmh)    MODE="refresh-wmh"; shift ;;
+        --refresh-secrets) MODE="refresh-secrets"; shift ;;
         --destroy)        MODE="destroy"; shift ;;
         --simulate)       BENCH_SIMULATE="1"; shift ;;
         --no-simulate)    BENCH_SIMULATE="0"; shift ;;
@@ -309,8 +313,72 @@ resolve_github_token() {
     echo "$t"
 }
 
-# Inject the two base64 .env blobs + GITHUB_TOKEN as Fly secrets (present on the
-# machine env + in ssh sessions). Idempotent: only re-stages when the files exist.
+resolve_render_env_value() {
+    local key="$1" api_key service_id response
+    api_key="$(cloudbench_env_value back-end/.env RENDER_API_KEY)"
+    service_id="$(cloudbench_env_value back-end/.env RENDER_SERVICE_ID)"
+    [ -n "$api_key" ] && [ -n "$service_id" ] || {
+        echo "FATAL: RENDER_API_KEY and RENDER_SERVICE_ID are required for production env verification" >&2
+        return 1
+    }
+    response="$(curl -fsS "https://api.render.com/v1/services/$service_id/env-vars" \
+        -H "Authorization: Bearer $api_key" -H 'Accept: application/json')" || {
+        echo "FATAL: could not read the production Render environment" >&2
+        return 1
+    }
+    printf '%s' "$response" | PROD_ENV_KEY="$key" python3 -c '
+import json, os, sys
+items = json.load(sys.stdin)
+wanted = os.environ["PROD_ENV_KEY"]
+for item in items:
+    env = item.get("envVar") or item
+    if env.get("key") == wanted:
+        print(env.get("value") or "")
+        break
+'
+}
+
+resolve_prod_backend_browser_provider() {
+    local provider
+    provider="$(resolve_render_env_value BROWSER_PROVIDER)" || return 1
+    # back-end/src/providers/browser/config.ts defaults an absent value to kernel.
+    printf '%s\n' "${provider:-kernel}"
+}
+
+resolve_prod_worker_browser_provider() {
+    local machines
+    machines="$(FLY machines list -a "$PROD_APP" --json)" || {
+        echo "FATAL: could not read production Fly worker configuration" >&2
+        return 1
+    }
+    printf '%s' "$machines" | python3 -c '
+import json, sys
+machines = json.load(sys.stdin) or []
+providers = {
+    str(((machine.get("config") or {}).get("env") or {}).get("BROWSER_PROVIDER") or "").strip().lower()
+    for machine in machines
+}
+providers.discard("")
+if not machines or len(providers) != 1:
+    raise SystemExit(f"FATAL: production Fly workers do not expose one BROWSER_PROVIDER: {sorted(providers)!r}")
+print(next(iter(providers)))
+'
+}
+
+validate_environment_contract() {
+    local prod_backend prod_worker
+    prod_backend="$(resolve_prod_backend_browser_provider)" || exit 1
+    prod_worker="$(resolve_prod_worker_browser_provider)" || exit 1
+    cloudbench_validate_browser_provider_contract \
+        agents/.env back-end/.env "$prod_backend" "$prod_worker" || exit 1
+    CLOUDBENCH_PROD_BROWSER_PROVIDER="$prod_backend"
+    export CLOUDBENCH_PROD_BROWSER_PROVIDER
+}
+
+# Inject the two base64 .env blobs + GITHUB_TOKEN as active Fly secrets (present
+# on machine init + in ssh sessions). The benchmark app uses the Machines API,
+# not Fly Launch releases: stage app secrets, then update each stopped machine
+# with --skip-start so staged-only values can never be mistaken for active ones.
 # GITHUB_TOKEN is injected as a secret so the on-box per-run git-sync (private
 # repo) can authenticate via git http.extraheader without the token ever being
 # stored in .git/config on the volume.
@@ -320,14 +388,22 @@ inject_secrets() {
         echo "❌ agents/.env and back-end/.env are required to inject secrets." >&2
         exit 1
     fi
-    local agents_b64 backend_b64 gh_token
+    validate_environment_contract
+    local agents_b64 backend_b64 gh_token agents_sha backend_sha
     agents_b64="$(base64 < agents/.env | tr -d '\n')"
     backend_b64="$(base64 < back-end/.env | tr -d '\n')"
+    agents_sha="$(cloudbench_env_sha256 agents/.env)"
+    backend_sha="$(cloudbench_env_sha256 back-end/.env)"
     gh_token="$(resolve_github_token)"
-    echo "   secret files: AGENTS_ENV_B64 ($(wc -l < agents/.env | tr -d ' ') lines), BACKEND_ENV_B64 ($(wc -l < back-end/.env | tr -d ' ') lines)"
+    echo "   env provenance: Render backend + Fly workers → provider=$CLOUDBENCH_PROD_BROWSER_PROVIDER"
+    echo "   agents/.env sha256=${agents_sha:0:12} ($(wc -l < agents/.env | tr -d ' ') lines)"
+    echo "   back-end/.env sha256=${backend_sha:0:12} ($(wc -l < back-end/.env | tr -d ' ') lines)"
     local -a set_args=(
         "AGENTS_ENV_B64=$agents_b64"
         "BACKEND_ENV_B64=$backend_b64"
+        "AGENTS_ENV_SHA256=$agents_sha"
+        "BACKEND_ENV_SHA256=$backend_sha"
+        "CLOUDBENCH_BROWSER_PROVIDER=$CLOUDBENCH_PROD_BROWSER_PROVIDER"
     )
     if [ -n "$gh_token" ]; then
         set_args+=("GITHUB_TOKEN=$gh_token")
@@ -336,11 +412,72 @@ inject_secrets() {
         echo "   ⚠️  GITHUB_TOKEN not found — private-repo fetches will fail"
     fi
     FLY secrets set --stage -a "$APP" "${set_args[@]}" 2>&1 | sed 's/^/   /' || {
-        echo "❌ Failed to set secrets"; exit 1
+        echo "❌ Failed to stage benchmark environment secrets"; exit 1
     }
-    FLY secrets deploy -a "$APP" 2>&1 | sed 's/^/   /' || true
+    local machine_ids machine_id
+    machine_ids="$(_machines_json | python3 -c '
+import json, sys
+for machine in json.load(sys.stdin) or []:
+    if machine.get("id"):
+        print(machine["id"])
+')"
+    [ -n "$machine_ids" ] || {
+        echo "❌ No benchmark machines exist to activate staged secrets." >&2
+        exit 1
+    }
+    while IFS= read -r machine_id; do
+        [ -n "$machine_id" ] || continue
+        echo "   activating env on machine $machine_id (skip-start)"
+        FLY machine update "$machine_id" -a "$APP" --skip-start --yes 2>&1 | sed 's/^/      /' || {
+            echo "❌ Failed to activate environment on machine $machine_id" >&2
+            exit 1
+        }
+    done <<< "$machine_ids"
+    mkdir -p "$ROOT_DIR/.context"
+    python3 - "$ROOT_DIR/.context/cloudbench-env-manifest.json" \
+        "$agents_sha" "$backend_sha" "$CLOUDBENCH_PROD_BROWSER_PROVIDER" <<'PY'
+import json, sys
+path, agents_sha, backend_sha, provider = sys.argv[1:]
+with open(path, "w") as handle:
+    json.dump({
+        "agents_env_sha256": agents_sha,
+        "backend_env_sha256": backend_sha,
+        "browser_provider": provider,
+        "production_sources": {
+            "backend": "render:Navi",
+            "worker": "fly:navi-whisper-lux",
+        },
+        "isolation_overrides": ["DATABASE_URL", "DIRECT_URL", "BACKEND_API_URL", "TEMPORAL_TASK_QUEUE", "ports", "workspace"],
+    }, handle, indent=2)
+    handle.write("\n")
+PY
     echo "✅ Secrets set (active)"
 }
+
+if [ "$MODE" = "refresh-secrets" ]; then
+    echo "═══ run-bench-cloud --refresh-secrets ═══"
+    refresh_lock="$ROOT_DIR/.context/cloudbench-controller.lock"
+    refresh_lock_acquired="0"
+    if [ "${CLOUDBENCH_PARENT_LOCK_HELD:-0}" != "1" ]; then
+        mkdir -p "$ROOT_DIR/.context"
+        if ! mkdir "$refresh_lock" 2>/dev/null; then
+            old_pid="$(cat "$refresh_lock/pid" 2>/dev/null || true)"
+            if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+                echo "❌ Another cloud benchmark controller is already running (pid $old_pid)." >&2
+                exit 1
+            fi
+            rm -rf "$refresh_lock"
+            mkdir "$refresh_lock" || exit 1
+        fi
+        refresh_lock_acquired="1"
+        printf '%s\n' "$$" > "$refresh_lock/pid"
+        trap '[ "$refresh_lock_acquired" = "1" ] && rm -rf "$refresh_lock"' EXIT INT TERM
+    fi
+    ensure_app
+    inject_secrets
+    echo "✅ Cloud benchmark environment refreshed from current production-aligned sources."
+    exit 0
+fi
 
 # SSH-exec a shell snippet on the machine, streaming output. $1 = machine id.
 ssh_exec() {  # ssh_exec <machine_id> <remote-shell-command>
@@ -718,14 +855,18 @@ echo "ref=${BENCH_REF:-<HEAD>} model=$WMH_MODEL_NAME app=$APP dashboard=$DASHBOA
 echo ""
 
 ensure_app
-# Secrets (AGENTS_ENV_B64 / BACKEND_ENV_B64) are already present on the warm box
-# and visible to ssh sessions, so the per-run path does NOT re-inject by default:
-# a `secrets deploy` can bounce the machine, defeating the warm-reuse goal. Set
-# CLOUDBENCH_REFRESH_SECRETS=1 to force a refresh (e.g. after rotating a token).
-if [ "${CLOUDBENCH_REFRESH_SECRETS:-0}" = "1" ]; then
-    inject_secrets
+# Fleet children must inherit proof that their controller refreshed the shared
+# app secrets once before any clone was started. Direct runs refresh only after
+# taking the controller lock below, so app-level machine updates cannot race.
+DIRECT_ENV_REFRESH="0"
+if [ -n "$FLEET_MACHINE_ID" ]; then
+    if [ "${CLOUDBENCH_ENV_REFRESHED:-0}" != "1" ]; then
+        echo "❌ Fleet child has no controller environment-refresh proof." >&2
+        exit 1
+    fi
+    echo "🔐 Environment refreshed and production-verified by fleet controller."
 else
-    echo "🔐 Reusing existing box secrets (set CLOUDBENCH_REFRESH_SECRETS=1 to re-inject)."
+    DIRECT_ENV_REFRESH="1"
 fi
 
 mid="$(resolve_machine_id)"
@@ -936,7 +1077,7 @@ PY
 # SAFETY: STOP the machine on EVERY exit (success, failure, error, timeout,
 # Ctrl-C) and always kill the local dashboard proxy. Never destroy on the per-run
 # path — only --destroy removes it. A stopped machine bills only for the volume.
-LOCK_DIR="$OUT_DIR/cloudbench-controller.lock"
+LOCK_DIR="$ROOT_DIR/.context/cloudbench-controller.lock"
 LOCK_ACQUIRED="0"
 # Fleet mode: run-bench-fleet holds a single controller lock for all its children,
 # so each per-bench child skips its own lock (they run concurrently by design).
@@ -956,6 +1097,10 @@ if [ "$SKIP_CONTROLLER_LOCK" != "1" ]; then
     fi
     LOCK_ACQUIRED="1"
     printf '%s\n' "$$" > "$LOCK_DIR/pid"
+fi
+
+if [ "$DIRECT_ENV_REFRESH" = "1" ]; then
+    inject_secrets
 fi
 
 STOP_DONE="0"

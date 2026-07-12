@@ -233,6 +233,7 @@ else
   run_suite "Prompt Human Approval Guard" bash scripts/check-prompt-human-approval.sh
 fi
 run_suite "Claude Review Fallback" bash scripts/tests/claude-review-fallback.test.sh
+run_suite "Cloud Benchmark Environment" bash scripts/tests/cloudbench-env.test.sh
 
 # ── Build checks (run in parallel with blackbox tests) ──
 BUILD_PIDS=()

@@ -199,6 +199,10 @@ fi
 
 # ── 2. Decode injected secrets into the repo .env files the stack reads ─────
 # Fly secrets are exposed as env vars in the machine init AND in ssh sessions.
+ENV_HELPER="$REPO_DIR/scripts/lib/cloudbench-env.sh"
+[ -f "$ENV_HELPER" ] || { log "FATAL: missing $ENV_HELPER"; finish 1; }
+# shellcheck source=lib/cloudbench-env.sh
+source "$ENV_HELPER"
 if [ -n "${AGENTS_ENV_B64:-}" ]; then
     echo "$AGENTS_ENV_B64" | base64 -d > "$REPO_DIR/agents/.env" || { log "FATAL: failed to decode AGENTS_ENV_B64"; finish 1; }
     log "wrote agents/.env ($(wc -l < "$REPO_DIR/agents/.env") lines)"
@@ -211,6 +215,11 @@ if [ -n "${BACKEND_ENV_B64:-}" ]; then
 else
     log "FATAL: BACKEND_ENV_B64 secret is not set"; finish 1
 fi
+cloudbench_verify_env_file "$REPO_DIR/agents/.env" "${AGENTS_ENV_SHA256:-}" agents || finish 1
+cloudbench_verify_env_file "$REPO_DIR/back-end/.env" "${BACKEND_ENV_SHA256:-}" backend || finish 1
+cloudbench_validate_browser_provider_contract \
+    "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env" \
+    "${CLOUDBENCH_BROWSER_PROVIDER:-}" "${CLOUDBENCH_BROWSER_PROVIDER:-}" || finish 1
 chown "$APP_USER:$APP_USER" "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env"
 chmod 600 "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env"
 

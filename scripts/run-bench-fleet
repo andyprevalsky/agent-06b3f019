@@ -314,6 +314,12 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+echo "🔐 Refreshing + production-verifying the shared benchmark environment before machine start..."
+if ! CLOUDBENCH_PARENT_LOCK_HELD=1 bash scripts/run-bench-cloud --refresh-secrets; then
+    echo "❌ Cloud benchmark environment refresh failed; no benchmark machine was started." >&2
+    exit 1
+fi
+
 # ── Resolve the warm machine (clone source) + its volume ────────────────────
 warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null || echo '[]')"
 warm_pair="$(printf '%s' "$warm_json" | MN="$MACHINE_NAME" python3 -c '
@@ -521,6 +527,7 @@ for bench in "${BENCHES[@]}"; do
     local_ws="$(printf 'flt-%s-%s-%s' "$bench" "$$" "$i" | tr -c 'a-z0-9-' '-' | cut -c1-48)"
     (
         CLOUDBENCH_WORKSPACE_NAME="$local_ws" \
+        CLOUDBENCH_ENV_REFRESHED=1 \
         CLOUDBENCH_START_BARRIER="$([ "$SYNCHRONIZED_START" = "1" ] && printf '%s' "$RUN_ID")" \
         NO_OPEN=1 \
         bash scripts/run-bench-cloud "$bench" \
