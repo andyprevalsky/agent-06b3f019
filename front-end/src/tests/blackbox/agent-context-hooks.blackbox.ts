@@ -285,20 +285,41 @@ describe('useAgentProvider', () => {
     unmount();
   });
 
-  it('clears unauthenticated URL selection when benchmark preview is unavailable', async () => {
+  it('keeps unauthenticated URL selection when preview fails, then retries once auth completes', async () => {
+    // Regression: dev auto-login is async, so "not authenticated yet" must
+    // not be treated as "never will be". A failed pre-auth preview attempt
+    // must keep ?agent-id= so the authenticated path can retry after login.
     localStorage.clear();
     window.history.replaceState({}, '', '/?agent-id=noauth-1');
     server.use(
       http.get(`${API_BASE}/benchmarks/agent-preview/:agentId`, () =>
         HttpResponse.json({ error: 'Agent not found' }, { status: 404 }),
       ),
+      http.get(`${API_BASE}/agents/:agentId`, () =>
+        HttpResponse.json({
+          agent: makeAgent({ agent_id: 'noauth-1', goal: 'post-login goal' }),
+          messages: [{ message_id: 'm1', timestamp: 't', text: 'hi', role: 'USER' }],
+          pagination: { has_more: false, oldest_timestamp: null },
+        }),
+      ),
     );
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const { result, unmount } = renderHook(() =>
-      useAgentProvider(defaultDeps({ user: null, isAuthenticated: false, realtimeReady: false })),
+    const { result, rerender, unmount } = renderHook(
+      (deps: ReturnType<typeof defaultDeps>) => useAgentProvider(deps),
+      { initialProps: defaultDeps({ user: null, isAuthenticated: false, realtimeReady: false }) },
     );
-    await waitFor(() => expect(result.current.selectedAgentId).toBeNull());
-    expect(window.location.search).not.toContain('agent-id');
+
+    // Pre-auth preview attempt fails -> selection + URL must survive.
+    await waitFor(() => expect(errSpy).toHaveBeenCalled());
+    expect(result.current.selectedAgentId).toBe('noauth-1');
+    expect(window.location.search).toContain('agent-id=noauth-1');
+    expect(result.current.agent).toBeNull();
+
+    // Dev auto-login completes -> authenticated retry loads the agent.
+    mockSession();
+    rerender(defaultDeps());
+    await waitFor(() => expect(result.current.agent?.agent_id).toBe('noauth-1'));
+    expect(window.location.search).toContain('agent-id=noauth-1');
     errSpy.mockRestore();
     unmount();
   });

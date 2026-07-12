@@ -52,9 +52,13 @@ export function useAgentProvider({
   const archiveMode = isBenchmarkArchiveMode();
   // canSubscribe requires both authentication AND realtime auth to be set
   const canSubscribe = (isAuthenticated ?? !!user) && (realtimeReady ?? false);
+  // Full access = the normal authenticated path (or the RLS-free archive
+  // viewer). A failed load under full access is terminal; a failed load via
+  // the dev/benchmark preview endpoint is not — auth may still be in flight.
+  const hasFullAccess = canSubscribe || archiveMode;
   // Direct ?agent-id= links can load via realtime auth, the benchmark archive
   // viewer, or the dev/benchmark preview endpoint.
-  const canLoadAgent = canSubscribe || archiveMode || benchmarkAgentPreviewEnabled();
+  const canLoadAgent = hasFullAccess || benchmarkAgentPreviewEnabled();
 
   // ─── Agent state ─────────────────────────────────────────────────────────
   const [agent, setAgent] = useState<AgentDetail | null>(null);
@@ -112,7 +116,7 @@ export function useAgentProvider({
 
   // ─── Load agent ─────────────────────────────────────────────────────────
 
-  const loadAgentDetail = useCallback(async (agentId: string) => {
+  const loadAgentDetail = useCallback(async (agentId: string, clearSelectionOnFailure: boolean) => {
     try {
       setIsLoadingAgent(true);
       const data = await fetchAgentDetail(agentId);
@@ -126,22 +130,29 @@ export function useAgentProvider({
       initialLoadDoneRef.current = agentId;
     } catch (error) {
       console.error('Failed to load agent:', error);
-      setSelectedAgentIdState(null);
-      const url = new URL(window.location.href);
-      url.searchParams.delete('agent-id');
-      window.history.replaceState({}, '', url.toString());
+      // A preview-only attempt (no full access yet — e.g. dev auto-login still
+      // in flight) must NOT clear the selection: the load effect retries via
+      // the authenticated path once hasFullAccess flips true.
+      if (clearSelectionOnFailure) {
+        setSelectedAgentIdState(null);
+        const url = new URL(window.location.href);
+        url.searchParams.delete('agent-id');
+        window.history.replaceState({}, '', url.toString());
+      }
     } finally {
       setIsLoadingAgent(false);
     }
   }, []);
 
   // ─── Load agent from URL on mount ───────────────────────────────────────
+  // Re-fires when hasFullAccess flips true so a failed pre-auth preview
+  // attempt is retried through the authenticated path (agent is still null).
 
   useEffect(() => {
     if (selectedAgentId && canLoadAgent && !agent) {
-      void loadAgentDetail(selectedAgentId);
+      void loadAgentDetail(selectedAgentId, hasFullAccess);
     }
-  }, [canLoadAgent, selectedAgentId, agent, loadAgentDetail]);
+  }, [canLoadAgent, hasFullAccess, selectedAgentId, agent, loadAgentDetail]);
 
   // ─── Set selected agent (with load) ─────────────────────────────────────
 
@@ -166,10 +177,10 @@ export function useAgentProvider({
       // yet, the effect above loads the id once canLoadAgent flips true
       // (agent is null after flushState, so it fires).
       if (id && canLoadAgent) {
-        void loadAgentDetail(id);
+        void loadAgentDetail(id, hasFullAccess);
       }
     },
-    [canLoadAgent, loadAgentDetail],
+    [canLoadAgent, hasFullAccess, loadAgentDetail],
   );
 
   // ─── Send message ───────────────────────────────────────────────────────

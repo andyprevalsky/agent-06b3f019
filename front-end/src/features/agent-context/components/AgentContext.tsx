@@ -34,6 +34,9 @@
  * [LOADING_AGENT] <-- fetch agent detail + subscribe, gate: closed, URL: ?agent-id=X
  *     |
  *     v (benchmark dev preview without auth) -> fetch retained run only, skip realtime
+ *     |   (preview fetch FAILS without full access -> KEEP selection + URL;
+ *     |    retry via authenticated path once canSubscribe flips true.
+ *     |    Only a failure WITH full access clears selection -> [NO_AGENT])
  *     |
  *     v (subscription + fetch complete) -> OPEN GATE
  * [AGENT_ACTIVE] <-- agentDetail: AgentDetail, messages: Message[], gate: open, URL: ?agent-id=X
