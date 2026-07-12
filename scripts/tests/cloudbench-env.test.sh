@@ -77,5 +77,11 @@ require_text "$ROOT_DIR/scripts/cloudbench-worker.sh" \
 require_text "$ROOT_DIR/scripts/cloudbench-worker.sh" \
   'umask 077' \
   "decoded benchmark secrets must be owner-only from file creation"
+if grep -Fq -- 'eval "exec ${CLOUDBENCH_CONTROLLER_LOCK_FD}' "$HELPER_SRC"; then
+  fail "controller lock fd cleanup must not use eval"
+fi
+require_text "$HELPER_SRC" \
+  'exec {CLOUDBENCH_CONTROLLER_LOCK_FD}<> "$path"' \
+  "flock fallback must open without truncating the current owner"
 
 echo "All cloud benchmark environment checks passed."
