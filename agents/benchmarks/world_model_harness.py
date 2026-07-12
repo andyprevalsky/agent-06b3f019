@@ -1449,6 +1449,13 @@ def update_world_model_for_simulation(
 
     all_bundle_ids = sorted(list(root_agent_ids) if root_agent_ids is not None else list_archive_bundle_ids())
     bundle_ids, excluded_bundles = partition_real_world_bundles(all_bundle_ids)
+    # Corpus cap for fast benchmark/cloud builds. The full R2 archive is large and
+    # downloads slowly from some hosts (~KB/s); WMH_MAX_BUNDLES bounds the first
+    # build to N bundles so a serving model is ready in minutes, not hours. A later
+    # explicit --refresh-wmh (higher/unset cap) can grow it. 0/unset = no cap.
+    _wmh_max_bundles = int(os.environ.get("WMH_MAX_BUNDLES", "0") or "0")
+    if _wmh_max_bundles > 0 and len(bundle_ids) > _wmh_max_bundles:
+        bundle_ids = bundle_ids[:_wmh_max_bundles]
     split = deterministic_split(bundle_ids, heldout_fraction=heldout_fraction) if bundle_ids else {}
     index = _read_delta_index(index_path)
     old_bundles = index.get("bundles") if isinstance(index.get("bundles"), dict) else {}
@@ -1798,11 +1805,18 @@ class WorldModelToolExecutionAdapter:
             started = time.monotonic()
             observation = await self.client.step(self.world_model_name, self.session_id, action)
             wall_elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
-            return world_model_observation_to_tool_result(
+            result = world_model_observation_to_tool_result(
                 observation,
                 simulated=True,
                 wall_elapsed_ms=wall_elapsed_ms,
             )
+            if _wmh_fallback_on_unavailable_enabled() and _wmh_result_unavailable(result):
+                real_result = await real_executor(tool_name, tool_args, tool_call_id)
+                if isinstance(real_result, dict):
+                    real_result.setdefault("world_model_unavailable_fallback", True)
+                    real_result.setdefault("world_model_unavailable_observation", observation)
+                return real_result
+            return result
         real_result = await real_executor(tool_name, tool_args, tool_call_id)
         started = time.monotonic()
         try:
@@ -1814,6 +1828,37 @@ class WorldModelToolExecutionAdapter:
             real_result.setdefault("world_model_shadow", observation)
             real_result.setdefault("world_model_shadow_wall_elapsed_ms", wall_elapsed_ms)
         return real_result
+
+
+def _wmh_fallback_on_unavailable_enabled() -> bool:
+    return os.environ.get("BENCHMARK_WMH_FALLBACK_ON_UNAVAILABLE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _wmh_result_unavailable(value: Any) -> bool:
+    if isinstance(value, dict):
+        metadata = value.get("metadata")
+        if isinstance(metadata, dict) and metadata.get("result_unavailable") is True:
+            return True
+        if value.get("result_unavailable") is True:
+            return True
+        for key in ("content", "message"):
+            content = value.get(key)
+            if isinstance(content, str) and content.strip():
+                try:
+                    parsed = json.loads(content)
+                except json.JSONDecodeError:
+                    continue
+                if _wmh_result_unavailable(parsed):
+                    return True
+        for key in ("result", "tool_result", "world_model_observation"):
+            if _wmh_result_unavailable(value.get(key)):
+                return True
+    return False
 
 
 def _coerce_non_negative_int(value: Any) -> int | None:

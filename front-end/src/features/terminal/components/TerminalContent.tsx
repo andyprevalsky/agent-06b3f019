@@ -11,6 +11,7 @@
  *   currentView === 'usage'        → <Usage />
  *   currentView === 'network'      → <NetworkView />
  *   currentView === 'admin-health' → <AdminHealth />
+ *   currentView === 'benchmarks'   → <BenchmarksView /> (team-gated tab)
  *   currentView === 'agents'       → agent chat / landing
  *   open-agent deep link           → force 'agents' even from browse/settings
  */
@@ -23,7 +24,11 @@ import {
   SIDEBAR_WIDTH_COLLAPSED,
 } from '@/features/terminal-component-group';
 import { useAppData } from '@/hooks/useAppData';
-import { ADMIN_PHONE_DIGITS, ADMIN_USER_IDS } from '@/features/terminal-component-group/config';
+import {
+  ADMIN_PHONE_DIGITS,
+  ADMIN_USER_IDS,
+  IS_DEV_MODE,
+} from '@/features/terminal-component-group/config';
 
 import { useTerminalAgents } from '../hooks/useTerminalAgents';
 import { useDrippiness } from '../hooks/useDrippiness';
@@ -162,6 +167,9 @@ function TerminalLayout(props: TerminalLayoutProps) {
           currentView={currentView}
           setCurrentView={setCurrentView}
           showBrowse={currentView === 'browse' || agents.user?.phone === BROWSER_REVIEW_TEST_PHONE}
+          showBenchmarks={
+            IS_DEV_MODE || (agents.user?.id != null && ADMIN_USER_IDS.includes(agents.user.id))
+          }
           showAdminHealth={derived.showAdminHealth}
         />
 
@@ -194,6 +202,7 @@ function SidebarSection({
   currentView,
   setCurrentView,
   showBrowse,
+  showBenchmarks,
   showAdminHealth,
 }: {
   agents: ReturnType<typeof useTerminalAgents>;
@@ -201,6 +210,7 @@ function SidebarSection({
   currentView: TerminalView;
   setCurrentView: (v: TerminalView) => void;
   showBrowse: boolean;
+  showBenchmarks: boolean;
   showAdminHealth: boolean;
 }) {
   return (
@@ -208,6 +218,7 @@ function SidebarSection({
       currentView={currentView}
       onViewChange={setCurrentView}
       showBrowse={showBrowse}
+      showBenchmarks={showBenchmarks}
       agents={agents.agents}
       isLoadingAgents={agents.isLoadingAgents}
       selectedAgentId={agents.selectedAgentId}

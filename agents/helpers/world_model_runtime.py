@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -248,6 +249,33 @@ def _redact(value: Any) -> Any:
     return value
 
 
+# The adapter is constructed per tool call (each handler calls `from_env().execute()`),
+# so WMH sessions are cached at module level keyed by (agent_id, world_model). Repeated
+# boundary calls for one agent reuse the same world session, and no session id needs to be
+# pre-provisioned or injected via env. `agent_id` is None for handlers that don't thread it
+# yet (web_search/people_search) — those share a "default" session per worker process, which
+# is correct for a single-agent run; threading agent_id in is the per-agent/cloud follow-up.
+_WMH_SESSION_CACHE: dict[tuple[str, str], str] = {}
+_WMH_SESSION_LOCK = asyncio.Lock()
+
+
+async def ensure_world_model_session(
+    client: "WMHHttpClient", world_model_name: str, agent_id: str | None
+) -> str:
+    """Return a cached WMH session for (agent_id, world_model), creating one if absent."""
+    key = (agent_id or "default", world_model_name)
+    cached = _WMH_SESSION_CACHE.get(key)
+    if cached:
+        return cached
+    async with _WMH_SESSION_LOCK:
+        cached = _WMH_SESSION_CACHE.get(key)
+        if cached:
+            return cached
+        session_id = await client.create_session(world_model_name, task=None)
+        _WMH_SESSION_CACHE[key] = session_id
+        return session_id
+
+
 class WorldModelToolExecutionAdapter:
     """Adapter for WMH simulation at provider/environment boundaries."""
 
@@ -303,22 +331,34 @@ class WorldModelToolExecutionAdapter:
     ) -> JsonObject:
         if self.mode == "real" or not is_world_model_environment_boundary(tool_name):
             return await real_executor(tool_name, tool_args, tool_call_id)
-        if not self.client or not self.world_model_name or not self.session_id:
-            raise RuntimeError("WMH simulation requires WMH_BASE_URL, WMH_MODEL_NAME, and WMH_SESSION_ID")
+        if not self.client or not self.world_model_name:
+            raise RuntimeError("WMH simulation requires WMH_BASE_URL and WMH_MODEL_NAME")
+        # Session is created lazily on first boundary tool and cached per (agent, model);
+        # an explicit WMH_SESSION_ID (if set) still wins.
+        session_id = self.session_id or await ensure_world_model_session(
+            self.client, self.world_model_name, self.agent_id
+        )
         action = self.action_for_tool(tool_name, tool_args, tool_call_id)
         if self.mode == "simulate":
             started = time.monotonic()
-            observation = await self.client.step(self.world_model_name, self.session_id, action)
+            observation = await self.client.step(self.world_model_name, session_id, action)
             wall_elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
-            return world_model_observation_to_tool_result(
+            result = world_model_observation_to_tool_result(
                 observation,
                 simulated=True,
                 wall_elapsed_ms=wall_elapsed_ms,
             )
+            if _wmh_fallback_on_unavailable_enabled() and _wmh_result_unavailable(result):
+                real_result = await real_executor(tool_name, tool_args, tool_call_id)
+                if isinstance(real_result, dict):
+                    real_result.setdefault("world_model_unavailable_fallback", True)
+                    real_result.setdefault("world_model_unavailable_observation", observation)
+                return real_result
+            return result
         real_result = await real_executor(tool_name, tool_args, tool_call_id)
         started = time.monotonic()
         try:
-            observation = await self.client.step(self.world_model_name, self.session_id, action)
+            observation = await self.client.step(self.world_model_name, session_id, action)
         except Exception as exc:
             observation = {"error": str(exc)[:300], "is_error": True}
         wall_elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
@@ -407,6 +447,45 @@ def _observation_tool_result_payload(observation: JsonObject) -> Any:
         if candidate is not None:
             return candidate
     return None
+
+
+def _wmh_fallback_on_unavailable_enabled() -> bool:
+    return os.environ.get("BENCHMARK_WMH_FALLBACK_ON_UNAVAILABLE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def wmh_fallback_on_unavailable_enabled() -> bool:
+    return _wmh_fallback_on_unavailable_enabled()
+
+
+def _wmh_result_unavailable(value: Any) -> bool:
+    if isinstance(value, dict):
+        metadata = value.get("metadata")
+        if isinstance(metadata, dict) and metadata.get("result_unavailable") is True:
+            return True
+        if value.get("result_unavailable") is True:
+            return True
+        for key in ("content", "message"):
+            content = value.get(key)
+            if isinstance(content, str) and content.strip():
+                try:
+                    parsed = json.loads(content)
+                except json.JSONDecodeError:
+                    continue
+                if _wmh_result_unavailable(parsed):
+                    return True
+        for key in ("result", "tool_result", "world_model_observation"):
+            if _wmh_result_unavailable(value.get(key)):
+                return True
+    return False
+
+
+def wmh_result_unavailable(value: Any) -> bool:
+    return _wmh_result_unavailable(value)
 
 
 @activity.defn

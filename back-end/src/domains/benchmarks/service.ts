@@ -1,39 +1,8 @@
-import { readTasksFile } from './config';
 import { createLogger } from '../../providers/logger';
+import { getCachedTasks } from './catalogCache';
 
 const log = createLogger('Benchmarks');
-
-// Read once at startup — task definitions are static
-let cachedTasks: unknown[] | null = null;
-try {
-  const parsed = readTasksFile();
-  if (!Array.isArray(parsed)) {
-    log.error('Benchmark tasks file is not an array');
-  } else {
-    // tasks.json entries are keyed by `name` and `prompt` (mirrors
-    // benchmarks.blackbox.ts BenchmarkTaskSchema). The earlier `id`/`goal`
-    // validator never matched any entry, which silently turned the route into
-    // a permanent 500 — fix is to validate the actual shape.
-    const valid = parsed.every(
-      (t: unknown) =>
-        typeof t === 'object' &&
-        t !== null &&
-        'name' in t &&
-        'prompt' in t &&
-        typeof (t as Record<string, unknown>).name === 'string' &&
-        typeof (t as Record<string, unknown>).prompt === 'string'
-    );
-    if (!valid) {
-      log.error('Benchmark tasks file contains malformed entries');
-    } else {
-      cachedTasks = parsed;
-    }
-  }
-} catch (err) {
-  log.error('Failed to load benchmark tasks at startup', {
-    error: err instanceof Error ? err.message : String(err),
-  });
-}
+void log; // logger retained for future route-level diagnostics
 
 export class TasksUnavailableError extends Error {
   constructor() {
@@ -42,14 +11,18 @@ export class TasksUnavailableError extends Error {
 }
 
 /**
- * Returns all benchmark task definitions.
+ * Returns all visible benchmark task definitions. Retired tasks exist only
+ * for history-ledger integrity — hidden from every serving surface. (The
+ * poller's tasks.json export keeps file entries absent from this list
+ * untouched, so retired file entries survive round-trips.)
  * Throws TasksUnavailableError if tasks.json failed to load at startup.
  */
 export function getTasks(): unknown[] {
-  if (!cachedTasks) {
+  const cached = getCachedTasks();
+  if (!cached) {
     throw new TasksUnavailableError();
   }
-  return cachedTasks;
+  return cached.filter((task) => (task as { status?: unknown }).status !== 'retired');
 }
 
 export interface TestPrompt {
@@ -104,3 +77,6 @@ export function getTestPrompts(): TestPrompt[] {
       };
     });
 }
+
+export * from './hubCatalogService';
+export * from './hubDispatchService';

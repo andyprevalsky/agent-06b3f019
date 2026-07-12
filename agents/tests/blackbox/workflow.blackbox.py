@@ -3392,6 +3392,94 @@ async def test_workflow_check_parent_state_parent_resumes_clears_inherit():
         _restore_workflow(original)
 
 
+async def test_workflow_check_parent_state_parent_missing_orphans_child():
+    """A child paused by its parent is orphaned (aborts) once the parent is gone,
+    instead of staying paused forever (the busy-spin livelock)."""
+    wf = _bare_workflow_instance()
+    wf.parent_workflow_id = "parent-wf"
+    wf.agent_id = "child"
+    wf.bus_id = "bus-1"
+    wf.goal = "g"
+    wf.is_paused = True
+    wf._paused_by_parent = True
+    fake = _FakeWorkflowModule()
+
+    async def fake_exec(fn, args=None, **kwargs):
+        if getattr(fn, "__name__", "") == "query_parent_state_activity":
+            return {"parent_missing": True}
+        return None
+
+    fake.execute_activity = fake_exec
+    original = _patch_workflow(fake)
+    try:
+        await wf._check_parent_state()
+        assert wf._orphaned is True
+        assert wf.is_paused is False
+        assert wf._paused_by_parent is False
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_check_parent_state_parent_missing_ignores_manual_pause():
+    """parent_missing must NOT abort a child that paused for its own reasons
+    (user/credits) — only one that inherited its pause from the parent."""
+    wf = _bare_workflow_instance()
+    wf.parent_workflow_id = "parent-wf"
+    wf.agent_id = "child"
+    wf.bus_id = "bus-1"
+    wf.goal = "g"
+    wf.is_paused = True
+    wf._paused_by_parent = False  # manual / credits pause, not inherited
+    fake = _FakeWorkflowModule()
+
+    async def fake_exec(fn, args=None, **kwargs):
+        if getattr(fn, "__name__", "") == "query_parent_state_activity":
+            return {"parent_missing": True}
+        return None
+
+    fake.execute_activity = fake_exec
+    original = _patch_workflow(fake)
+    try:
+        await wf._check_parent_state()
+        assert wf._orphaned is False
+        assert wf.is_paused is True  # left as-is
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_check_parent_state_transient_failure_backstop_orphans():
+    """After N consecutive transient parent-read failures while paused-by-parent,
+    the child gives up and orphans — backstop for a parent whose 'gone' state can't
+    be cleanly classified."""
+    from workflows.agent_workflow import _ORPHAN_TRANSIENT_FAILURE_LIMIT
+
+    wf = _bare_workflow_instance()
+    wf.parent_workflow_id = "parent-wf"
+    wf.agent_id = "child"
+    wf.bus_id = "bus-1"
+    wf.goal = "g"
+    wf.is_paused = True
+    wf._paused_by_parent = True
+    fake = _FakeWorkflowModule()
+
+    async def fake_exec(fn, args=None, **kwargs):
+        if getattr(fn, "__name__", "") == "query_parent_state_activity":
+            return {}  # transient failure every time
+        return None
+
+    fake.execute_activity = fake_exec
+    original = _patch_workflow(fake)
+    try:
+        for _ in range(_ORPHAN_TRANSIENT_FAILURE_LIMIT - 1):
+            await wf._check_parent_state()
+        assert wf._orphaned is False  # not yet
+        await wf._check_parent_state()  # hits the limit
+        assert wf._orphaned is True
+        assert wf.is_paused is False
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_mark_complete_happy_path():
     """_mark_complete posts summary, updates tree, signals parent."""
     wf = _bare_workflow_instance()
@@ -4266,6 +4354,9 @@ async def run_all_tests():
     await r.record_async("wf_check_parent_paused", test_workflow_check_parent_state_parent_paused_inherits)
     await r.record_async("wf_check_parent_cost_limited", test_workflow_check_parent_state_parent_cost_limited_inherits)
     await r.record_async("wf_check_parent_resumes", test_workflow_check_parent_state_parent_resumes_clears_inherit)
+    await r.record_async("wf_check_parent_missing_orphans", test_workflow_check_parent_state_parent_missing_orphans_child)
+    await r.record_async("wf_check_parent_missing_ignores_manual", test_workflow_check_parent_state_parent_missing_ignores_manual_pause)
+    await r.record_async("wf_check_parent_transient_backstop", test_workflow_check_parent_state_transient_failure_backstop_orphans)
     await r.record_async("wf_mark_complete_happy", test_workflow_mark_complete_happy_path)
     await r.record_async("wf_mark_complete_no_parent", test_workflow_mark_complete_no_parent_no_signal)
     await r.record_async("wf_format_outputs_with_schema", test_workflow_format_outputs_with_schema)

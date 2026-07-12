@@ -4,7 +4,14 @@
  */
 
 import { useMemo } from 'react';
-import { Activity, Globe, Network, Plug, Settings as SettingsIcon } from 'lucide-react';
+import {
+  Activity,
+  FlaskConical,
+  Globe,
+  Network,
+  Plug,
+  Settings as SettingsIcon,
+} from 'lucide-react';
 import type { SidebarNavItem, SidebarView } from '../types';
 
 interface UseSidebarNavItemsArgs {
@@ -12,6 +19,7 @@ interface UseSidebarNavItemsArgs {
   onViewChange: (view: SidebarView) => void;
   onSelectAgent: (agentId: string | null) => void;
   showBrowse: boolean;
+  showBenchmarks: boolean;
   showAdminHealth: boolean;
 }
 
@@ -20,6 +28,7 @@ export function useSidebarNavItems({
   onViewChange,
   onSelectAgent,
   showBrowse,
+  showBenchmarks,
   showAdminHealth,
 }: UseSidebarNavItemsArgs): SidebarNavItem[] {
   return useMemo(() => {
@@ -36,6 +45,19 @@ export function useSidebarNavItems({
               icon: <Globe className="h-4 w-4" />,
               onClick: makeHandler('browse'),
               isActive: currentView === 'browse',
+            },
+          ]
+        : []),
+      // Benchmarks sits below the Feedback button and above Integrations —
+      // internal-team only (admin allowlist or dev mode).
+      ...(showBenchmarks
+        ? [
+            {
+              id: 'benchmarks',
+              label: 'Benchmarks',
+              icon: <FlaskConical className="h-4 w-4" />,
+              onClick: makeHandler('benchmarks'),
+              isActive: currentView === 'benchmarks',
             },
           ]
         : []),
@@ -72,5 +94,5 @@ export function useSidebarNavItems({
         isActive: currentView === 'settings',
       },
     ];
-  }, [currentView, onViewChange, onSelectAgent, showBrowse, showAdminHealth]);
+  }, [currentView, onViewChange, onSelectAgent, showBrowse, showBenchmarks, showAdminHealth]);
 }

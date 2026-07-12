@@ -6,6 +6,7 @@
 import { type Response, Router } from 'express';
 import { z } from 'zod';
 import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
+import { canReadBenchmarkArchive } from '../../providers/benchmarkHubStore';
 import { getClientIP } from '../../providers/geoip';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { createLogger } from '../../providers/logger';
@@ -81,7 +82,7 @@ router.get(
         res.status(400).json({ error: 'busId query parameter is required' });
         return;
       }
-      res.json(await queryService.getAgentTree(busId));
+      res.json(await queryService.getAgentTree(busId, canReadBenchmarkArchive(req)));
     } catch (error) {
       handleRouteError(res, error, 'Failed to fetch agent tree');
     }
@@ -97,7 +98,12 @@ router.get(
       const userId = req.isInternal === true ? undefined : req.userId;
       const rawSince = typeof req.query.since === 'string' ? new Date(req.query.since) : undefined;
       const since = rawSince && !isNaN(rawSince.getTime()) ? rawSince : undefined;
-      const result = await queryService.getAgentDetail(req.params.id, userId, since);
+      const result = await queryService.getAgentDetail(
+        req.params.id,
+        userId,
+        since,
+        canReadBenchmarkArchive(req)
+      );
       if (result === null) {
         res.status(404).json({ error: 'Agent not found' });
         return;

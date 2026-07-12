@@ -174,6 +174,10 @@ const KNOWN_VIOLATIONS: Record<string, string[]> = {
     'Cross-domain import: "@/features/terminal-component-group"',
     'Cross-domain import: "@/features/terminal-component-group/',
   ],
+  'features/terminal/components/TerminalMainContent.tsx': [
+    // View router: the team-gated Benchmarks tab renders the benchmarks feature.
+    'Cross-domain import: "@/features/benchmarks"',
+  ],
   'features/terminal/components/TerminalHeader.tsx': [
     'Cross-domain import: "@/features/terminal-component-group"',
   ],

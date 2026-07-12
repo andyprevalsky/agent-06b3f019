@@ -14,68 +14,25 @@ import {
   waitForElectronAuthBridgePrimed,
 } from '@/lib/supabase';
 import { checkNeedsInviteCode } from '@/lib/api';
+import { isBenchmarkArchiveMode } from '@/lib/benchmarkArchive';
 
 import { sendOTP, verifyOTP } from './api';
-import { DEV_AUTO_LOGIN_OTP, DEV_AUTO_LOGIN_PHONE, IS_DEV_AUTO_LOGIN } from './config';
+import { initAuthSession, logAuth } from './hooks/initAuthSession';
 import type { AuthStep } from './types';
-
-/** Module-level logger for the auth feature. */
-function logAuth(message: string, payload?: Record<string, unknown>): void {
-  console.warn(`[Auth] ${message}`, payload ?? '');
-}
-
-/** Initial auth resolution: restore existing session, dev auto-login, or create anonymous session. */
-async function initAuthSession(
-  applySession: (origin: string, nextSession: Session | null) => Promise<void>,
-): Promise<void> {
-  logAuth('Initializing auth state...');
-  await waitForElectronAuthBridgePrimed();
-  const existingSession = getSession();
-
-  if (existingSession && !existingSession.user?.is_anonymous) {
-    logAuth('Found non-anonymous session', { userId: existingSession.user?.id });
-    await applySession('init', existingSession);
-    return;
-  }
-
-  if (IS_DEV_AUTO_LOGIN) {
-    logAuth('Dev mode: auto-logging in with test credentials...');
-    try {
-      await sendOTP(DEV_AUTO_LOGIN_PHONE);
-      const { session: devSession } = await verifyOTP(DEV_AUTO_LOGIN_PHONE, DEV_AUTO_LOGIN_OTP);
-      await applySession('dev-auto-login', devSession);
-      logAuth('Dev auto-login complete', { userId: devSession.user.id });
-      return;
-    } catch (error) {
-      console.error('[Auth] Dev auto-login failed, falling back to anonymous:', error);
-    }
-  } else if (existingSession) {
-    logAuth('Found session', {
-      userId: existingSession.user?.id,
-      isAnonymous: existingSession.user?.is_anonymous,
-    });
-    await applySession('init', existingSession);
-    return;
-  }
-
-  logAuth('No session found, creating anonymous session...');
-  try {
-    const { session: anonSession } = await createAnonymousSession();
-    await applySession('init-anonymous', anonSession);
-  } catch (error) {
-    console.error('[Auth] Failed to create anonymous session:', error);
-    // A concurrent login (another useAuth instance, dev auto-login) may have
-    // produced a session while this attempt was in flight — never clobber it
-    // with null; re-read storage instead.
-    await applySession('init-anonymous-failed', getSession());
-  }
-}
 
 /** Extract a human-readable message from an unknown error value. */
 function getErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error) return error.message;
   return fallback;
 }
+
+const BENCHMARK_ARCHIVE_USER = {
+  id: 'benchmark-archive',
+  app_metadata: {},
+  user_metadata: {},
+  aud: 'authenticated',
+  created_at: '1970-01-01T00:00:00.000Z',
+} as User;
 
 /** Show an error toast from an unknown thrown value. */
 function toastError(
@@ -266,6 +223,31 @@ function useAuthActions(setters: AuthStateSetters) {
 }
 
 /**
+ * Archive mode pins the hard-coded benchmark user, so the mutators returned
+ * from useAuth must be inert there — a live refreshAuthState/signOut would
+ * replace that user (with null or an anonymous session) while
+ * isAuthenticated stays true.
+ */
+function useArchiveGuardedAuthActions(
+  archiveMode: boolean,
+  actions: Pick<ReturnType<typeof useAuthActions>, 'refreshAuthState' | 'signOut'>,
+) {
+  const { refreshAuthState, signOut } = actions;
+  const guardedRefreshAuthState = useCallback(
+    async (reason?: string) => {
+      if (archiveMode) return;
+      await refreshAuthState(reason);
+    },
+    [archiveMode, refreshAuthState],
+  );
+  const guardedSignOut = useCallback(async () => {
+    if (archiveMode) return;
+    await signOut();
+  }, [archiveMode, signOut]);
+  return { refreshAuthState: guardedRefreshAuthState, signOut: guardedSignOut };
+}
+
+/**
  * Auth state hook: session, user, loading, sign-out, invite-gate check.
  * SINGLE SOURCE OF TRUTH for realtime auth — setRealtimeAuth() is called here only.
  * `passive: true` observes auth without initiating sessions (no dev auto-login /
@@ -274,14 +256,17 @@ function useAuthActions(setters: AuthStateSetters) {
  */
 export function useAuth(options?: { passive?: boolean }) {
   const passive = options?.passive === true;
-  const [user, setUser] = useState<User | null>(() => getCachedUser());
+  const archiveMode = isBenchmarkArchiveMode();
+  const [user, setUser] = useState<User | null>(() =>
+    archiveMode ? BENCHMARK_ARCHIVE_USER : getCachedUser(),
+  );
   const [session, setSession] = useState<Session | null>(null);
-  const [isFullySignedIn, setIsFullySignedIn] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [isFullySignedIn, setIsFullySignedIn] = useState(archiveMode);
+  const [loading, setLoading] = useState(!archiveMode);
   const [realtimeReady, setRealtimeReady] = useState(false);
   const initRef = useRef(false);
 
-  const isAuthenticated = !!session;
+  const isAuthenticated = archiveMode || !!session;
   const isAnonymous = isAnonymousUser(user);
 
   const { applySession, refreshAuthState, signOut } = useAuthActions({
@@ -290,8 +275,10 @@ export function useAuth(options?: { passive?: boolean }) {
     setIsFullySignedIn,
     setRealtimeReady,
   });
+  const guardedActions = useArchiveGuardedAuthActions(archiveMode, { refreshAuthState, signOut });
 
   useEffect(() => {
+    if (archiveMode) return;
     if (initRef.current) return;
     initRef.current = true;
     let mounted = true;
@@ -307,9 +294,10 @@ export function useAuth(options?: { passive?: boolean }) {
     return () => {
       mounted = false;
     };
-  }, [applySession, passive]);
+  }, [applySession, archiveMode, passive]);
 
   useEffect(() => {
+    if (archiveMode) return;
     const onAuthSessionChanged = () => {
       void refreshAuthState('session-storage-event');
     };
@@ -317,7 +305,7 @@ export function useAuth(options?: { passive?: boolean }) {
     return () => {
       window.removeEventListener(AUTH_SESSION_CHANGED_EVENT, onAuthSessionChanged);
     };
-  }, [refreshAuthState]);
+  }, [archiveMode, refreshAuthState]);
 
   useEffect(() => {
     logAuth('State changed', {
@@ -338,7 +326,7 @@ export function useAuth(options?: { passive?: boolean }) {
     isFullySignedIn,
     loading,
     realtimeReady,
-    refreshAuthState,
-    signOut,
+    refreshAuthState: guardedActions.refreshAuthState,
+    signOut: guardedActions.signOut,
   };
 }
