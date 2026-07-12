@@ -234,6 +234,14 @@ class WaitForTool(BaseModel):
     """Pause execution until a timestamp or natural-language condition is met."""
 
     tool: Literal["wait_for"]
+    description: str = Field(
+        min_length=3,
+        max_length=80,
+        description=(
+            "Short UI phrase completing 'Waiting for ...' (3-80 characters). "
+            "Required for every wait_for call."
+        ),
+    )
     until_timestamp: Optional[str] = Field(
         default=None,
         description="ISO 8601 timestamp to wait until. Mutually exclusive with condition.",

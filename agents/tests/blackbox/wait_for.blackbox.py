@@ -259,12 +259,45 @@ async def test_handler_neither_timestamp_nor_condition_yields_error():
     from tools.base import MessageStatus
 
     events = await _collect(
+        WaitForManager().execute_tool(workflow_instance=_WFInstance(), tool_call={}, tool_call_id="tc")
+    )
+    assert len(events) == 1
+    assert events[0].status == MessageStatus.ERROR
+
+
+async def test_handler_condition_without_description_yields_error():
+    """Condition mode rejects calls that cannot render concise display copy."""
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import MessageStatus
+
+    events = await _collect(
         WaitForManager().execute_tool(
-            workflow_instance=_WFInstance(), tool_call={}, tool_call_id="tc"
+            workflow_instance=_WFInstance(),
+            tool_call={"condition": "the deploy is ready"},
+            tool_call_id="tc",
         )
     )
     assert len(events) == 1
     assert events[0].status == MessageStatus.ERROR
+    assert "description" in events[0].message
+
+
+async def test_handler_condition_rejects_description_outside_schema_bounds():
+    """Raw handler calls enforce the schema's 3-80 character display-copy bounds."""
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import MessageStatus
+
+    for description in ("ab", "x" * 81):
+        events = await _collect(
+            WaitForManager().execute_tool(
+                workflow_instance=_WFInstance(),
+                tool_call={"condition": "the deploy is ready", "description": description},
+                tool_call_id="tc",
+            )
+        )
+        assert len(events) == 1
+        assert events[0].status == MessageStatus.ERROR
+        assert "description" in events[0].message
 
 
 async def test_handler_timestamp_invalid_format():
@@ -371,7 +404,12 @@ async def test_handler_condition_paused_yields_error():
         events = await _collect(
             WaitForManager().execute_tool(
                 workflow_instance=wf,
-                tool_call={"condition": "is it done?", "check_interval_seconds": 30, "max_checks": 3},
+                tool_call={
+                    "description": "the task to finish",
+                    "condition": "is it done?",
+                    "check_interval_seconds": 30,
+                    "max_checks": 3,
+                },
                 tool_call_id="tc",
             )
         )
@@ -399,7 +437,12 @@ async def test_handler_condition_network_fetch_failure_tolerated():
         events = await _collect(
             WaitForManager().execute_tool(
                 workflow_instance=wf,
-                tool_call={"condition": "c", "check_interval_seconds": 30, "max_checks": 1},
+                tool_call={
+                    "description": "the condition to hold",
+                    "condition": "c",
+                    "check_interval_seconds": 30,
+                    "max_checks": 1,
+                },
                 tool_call_id="tc",
             )
         )
@@ -425,6 +468,7 @@ async def test_handler_condition_gates_off_skip_fetch():
             WaitForManager().execute_tool(
                 workflow_instance=wf,
                 tool_call={
+                    "description": "the condition to hold",
                     "condition": "cond",
                     "check_interval_seconds": 30,
                     "max_checks": 1,
@@ -478,9 +522,7 @@ async def test_handler_condition_check_messages_carry_explore_task_id():
     def eval_result():
         calls["n"] += 1
         return (
-            {"satisfied": False, "reasoning": "not yet"}
-            if calls["n"] == 1
-            else {"satisfied": True, "reasoning": "met"}
+            {"satisfied": False, "reasoning": "not yet"} if calls["n"] == 1 else {"satisfied": True, "reasoning": "met"}
         )
 
     fake = _FakeWFModule(activity_results={"evaluate_condition_activity": eval_result})
@@ -492,6 +534,7 @@ async def test_handler_condition_check_messages_carry_explore_task_id():
             WaitForManager().execute_tool(
                 workflow_instance=_WFInstance(),
                 tool_call={
+                    "description": "the deploy to be ready",
                     "condition": "deploy ready",
                     "check_interval_seconds": 30,
                     "max_checks": 3,
@@ -505,6 +548,7 @@ async def test_handler_condition_check_messages_carry_explore_task_id():
 
     check_msgs = [e for e in events if e.metadata.get("checkNum") is not None]
     assert check_msgs, "expected per-check messages"
+    assert all(e.metadata.get("description") == "the deploy to be ready" for e in check_msgs)
     missing = [e.title for e in check_msgs if not e.metadata.get("exploreTaskId")]
     assert not missing, f"per-check messages missing exploreTaskId: {missing}"
 
@@ -539,6 +583,14 @@ async def run_all_tests():
     r.record("cap_evidence_short", test_cap_evidence_short)
     r.record("cap_evidence_truncated", test_cap_evidence_truncated)
     await r.record_async("handler_neither_input", test_handler_neither_timestamp_nor_condition_yields_error)
+    await r.record_async(
+        "handler_condition_requires_description",
+        test_handler_condition_without_description_yields_error,
+    )
+    await r.record_async(
+        "handler_condition_description_bounds",
+        test_handler_condition_rejects_description_outside_schema_bounds,
+    )
     await r.record_async("handler_ts_invalid", test_handler_timestamp_invalid_format)
     await r.record_async("handler_ts_past", test_handler_timestamp_in_past)
     await r.record_async("handler_ts_too_far", test_handler_timestamp_too_far_future)
@@ -546,9 +598,7 @@ async def run_all_tests():
     await r.record_async("handler_cond_paused", test_handler_condition_paused_yields_error)
     await r.record_async("handler_cond_fetch_fail", test_handler_condition_network_fetch_failure_tolerated)
     await r.record_async("handler_cond_gates_off", test_handler_condition_gates_off_skip_fetch)
-    await r.record_async(
-        "handler_cond_explore_task_id", test_handler_condition_check_messages_carry_explore_task_id
-    )
+    await r.record_async("handler_cond_explore_task_id", test_handler_condition_check_messages_carry_explore_task_id)
     teardown_mock()
     return r.all_passed
 

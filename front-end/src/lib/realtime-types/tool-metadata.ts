@@ -149,6 +149,8 @@ export interface WaitForMetadata extends BaseToolMetadata {
   waitForMode?: 'condition' | 'timestamp';
   /** Natural-language condition being polled (condition mode) */
   condition?: string;
+  /** Concise phrase used in the collapsed "Waiting for ..." title */
+  description?: string;
   /** ISO 8601 target timestamp (timestamp mode) */
   untilTimestamp?: string;
   /** Seconds between checks (condition mode) */

@@ -541,7 +541,7 @@ def test_pydantic_response_model_builds_anthropic_native_tools_without_strict_by
     assert "tool" not in wait_schema["required"]
     # Pydantic runtime validators/defaults remain authoritative. The native
     # Anthropic schema should not force defaults/nulls into tool arguments.
-    assert wait_schema["required"] == []
+    assert wait_schema["required"] == ["description"]
     assert wait_schema["properties"]["check_interval_seconds"]["minimum"] == 60
     assert wait_schema["properties"]["check_interval_seconds"]["maximum"] == 86400
 
@@ -3727,7 +3727,7 @@ async def test_client_splits_pydantic_model_to_claude_native_tools():
             "index": 0,
             "delta": {
                 "type": "input_json_delta",
-                "partial_json": '{"condition":"package ships"}',
+                "partial_json": '{"description":"the package to ship","condition":"package ships"}',
             },
         },
     )
@@ -3770,13 +3770,16 @@ async def test_client_splits_pydantic_model_to_claude_native_tools():
     assert "strict" not in tools["wait_for"]
     wait_schema = tools["wait_for"]["input_schema"]
     assert "tool" not in wait_schema["properties"]
-    assert wait_schema["required"] == []
+    assert wait_schema["required"] == ["description"]
     assert wait_schema["properties"]["check_interval_seconds"]["minimum"] == 60
     assert wait_schema["properties"]["check_interval_seconds"]["maximum"] == 86400
 
     tool_call = next(c for c in chunks if c.kind == "tool_call")
     assert tool_call.data["name"] == "wait_for"
-    assert json.loads(tool_call.data["arguments"]) == {"condition": "package ships"}
+    assert json.loads(tool_call.data["arguments"]) == {
+        "description": "the package to ship",
+        "condition": "package ships",
+    }
 
 
 async def test_client_splits_pydantic_model_to_gpt_native_tools():
@@ -3791,7 +3794,7 @@ async def test_client_splits_pydantic_model_to_gpt_native_tools():
                 "type": "function_call",
                 "call_id": "call_wait",
                 "name": "wait_for",
-                "arguments": '{"condition":"package ships"}',
+                "arguments": '{"description":"the package to ship","condition":"package ships"}',
             },
         },
     )
@@ -3835,13 +3838,16 @@ async def test_client_splits_pydantic_model_to_gpt_native_tools():
     assert seen_body["tool_choice"] == "required"
     tools = {tool["name"]: tool for tool in seen_body["tools"]}
     assert set(tools) == {"wait_for", "attempt_completion"}
-    assert tools["wait_for"]["parameters"]["required"] == []
+    assert tools["wait_for"]["parameters"]["required"] == ["description"]
 
     metadata = next(c for c in chunks if c.kind == "metadata")
     assert metadata.data["actual_model"].endswith("-gpt")
     tool_call = next(c for c in chunks if c.kind == "tool_call")
     assert tool_call.data["name"] == "wait_for"
-    assert json.loads(tool_call.data["arguments"]) == {"condition": "package ships"}
+    assert json.loads(tool_call.data["arguments"]) == {
+        "description": "the package to ship",
+        "condition": "package ships",
+    }
 
 
 async def test_client_plain_pydantic_model_uses_claude_output_config():
