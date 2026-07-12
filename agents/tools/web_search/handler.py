@@ -12,7 +12,11 @@ from temporalio.common import RetryPolicy
 
 from helpers.handle_tool_event import handle_tool_event
 from helpers.tracing import traced
-from helpers.world_model_runtime import WorldModelToolExecutionAdapter
+from helpers.world_model_runtime import (
+    WorldModelToolExecutionAdapter,
+    wmh_fallback_on_unavailable_enabled,
+    wmh_result_unavailable,
+)
 from providers.fast_cache import client as fast_cache_client
 from providers.fast_cache import normalize as fast_cache_normalize
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager, format_error_message, format_tool_message
@@ -265,11 +269,15 @@ async def web_search_activity(
     if cache_key is not None and read_cache:
         stored = await fast_cache_client.cache_get(cache_key)
         if stored is not None:
-            logger.info("fast_cache.web_search_hit", key=cache_key)
-            if isinstance(stored, dict):
-                return {**stored, FAST_CACHE_HIT_FIELD: True}
-            return stored
-        logger.info("fast_cache.web_search_miss", key=cache_key)
+            if wmh_fallback_on_unavailable_enabled() and wmh_result_unavailable(stored):
+                logger.info("fast_cache.web_search_unavailable_ignored", key=cache_key)
+            else:
+                logger.info("fast_cache.web_search_hit", key=cache_key)
+                if isinstance(stored, dict):
+                    return {**stored, FAST_CACHE_HIT_FIELD: True}
+                return stored
+        if stored is None:
+            logger.info("fast_cache.web_search_miss", key=cache_key)
     elif cache_key is not None:
         logger.info("fast_cache.web_search_write_only", key=cache_key)
 

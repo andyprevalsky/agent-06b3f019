@@ -3,6 +3,7 @@
  */
 
 import * as repo from './repo';
+import { findAgentAcrossRuns, findTreeAcrossRuns } from '../../providers/benchmarkHubStore';
 
 // ---------------------------------------------------------------------------
 // List agents
@@ -40,8 +41,13 @@ export async function listAgents(userId: string) {
 // ---------------------------------------------------------------------------
 
 /** Get all agents in a sub-agent tree by busId. */
-export async function getAgentTree(busId: string) {
+export async function getAgentTree(busId: string, allowBenchmarkArchive = false) {
   const agents = await repo.findAgentsByBusId(busId);
+
+  if (agents.length === 0 && allowBenchmarkArchive) {
+    const archived = await getBenchmarkArchivedTree(busId);
+    if (archived !== null) return archived;
+  }
 
   return {
     agents: agents.map((agent) => ({
@@ -52,6 +58,8 @@ export async function getAgentTree(busId: string) {
       progress: agent.progress,
       tools_in_use: agent.toolsInUse,
       message_count: agent.messageCount,
+      tokens_in: agent.tokensIn,
+      tokens_out: agent.tokensOut,
       output_schema: agent.responseSchema,
       structured_output: agent.structuredResponse,
       failure_context:
@@ -101,11 +109,37 @@ function computeToolTokens(toolUsages: { totalCostCents: number; usageItems: unk
 
 /** Get agent details with messages and tool usage.
  *  If `since` is provided, only messages after that timestamp are returned. */
-export async function getAgentDetail(agentId: string, userId?: string, since?: Date) {
+/**
+ * Benchmark agents live in torn-down bench stacks; when allowed, the hub
+ * archive serves them through the normal detail/tree shapes so "Open agent"
+ * lands in the main panel like any other agent.
+ */
+export async function getBenchmarkArchivedDetail(agentId: string) {
+  const archived = await findAgentAcrossRuns(agentId);
+  if (archived === null) return null;
+  return {
+    agent: archived.agent,
+    messages: archived.messages,
+    pagination: { has_more: false, oldest_timestamp: null as string | null },
+  };
+}
+
+export async function getBenchmarkArchivedTree(busId: string) {
+  const archived = await findTreeAcrossRuns(busId);
+  if (archived === null) return null;
+  return { agents: archived };
+}
+
+export async function getAgentDetail(
+  agentId: string,
+  userId?: string,
+  since?: Date,
+  allowBenchmarkArchive = false
+) {
   const agent = await repo.findAgentWithRelations(agentId, userId);
 
   if (!agent) {
-    return null;
+    return allowBenchmarkArchive ? getBenchmarkArchivedDetail(agentId) : null;
   }
 
   const messages = await repo.findMessages(agentId, since);

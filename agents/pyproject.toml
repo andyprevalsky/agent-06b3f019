@@ -73,6 +73,8 @@ known-first-party = [
 "worker.py" = ["E402"]
 # Activity-only imports after sys.path setup (intentional)
 "tools/knowledge_base.py" = ["E402"]
+# Benchmark orchestrator: benchmark_tasks import after sys.path bootstrap (intentional)
+"benchmarks/local.py" = ["E402"]
 
 # ── Banned APIs: enforce canonical utils/ imports ──
 # Modules moved from helpers/ to utils/. helpers.* aliases are removed; imports

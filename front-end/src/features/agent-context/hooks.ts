@@ -3,6 +3,7 @@ import { type RealtimeChannel } from '@supabase/supabase-js';
 import { unsubscribe } from '@/lib/realtime';
 import { getQueryParams } from '@/lib/url';
 import type { AgentDetail, Message } from '@/lib/api';
+import { isBenchmarkArchiveMode } from '@/lib/benchmarkArchive';
 
 import type {
   StreamingBubble,
@@ -48,9 +49,12 @@ export function useAgentProvider({
   realtimeReady,
   onLoadAgents,
 }: ProviderDeps) {
+  const archiveMode = isBenchmarkArchiveMode();
   // canSubscribe requires both authentication AND realtime auth to be set
   const canSubscribe = (isAuthenticated ?? !!user) && (realtimeReady ?? false);
-  const canLoadBenchmarkPreview = benchmarkAgentPreviewEnabled();
+  // Direct ?agent-id= links can load via realtime auth, the benchmark archive
+  // viewer, or the dev/benchmark preview endpoint.
+  const canLoadAgent = canSubscribe || archiveMode || benchmarkAgentPreviewEnabled();
 
   // ─── Agent state ─────────────────────────────────────────────────────────
   const [agent, setAgent] = useState<AgentDetail | null>(null);
@@ -134,10 +138,10 @@ export function useAgentProvider({
   // ─── Load agent from URL on mount ───────────────────────────────────────
 
   useEffect(() => {
-    if (selectedAgentId && (canSubscribe || canLoadBenchmarkPreview) && !agent) {
+    if (selectedAgentId && canLoadAgent && !agent) {
       void loadAgentDetail(selectedAgentId);
     }
-  }, [canSubscribe, canLoadBenchmarkPreview, selectedAgentId, agent, loadAgentDetail]);
+  }, [canLoadAgent, selectedAgentId, agent, loadAgentDetail]);
 
   // ─── Set selected agent (with load) ─────────────────────────────────────
 
@@ -158,11 +162,14 @@ export function useAgentProvider({
         setIsChatMode,
       );
       setSelectedAgentIdState(id);
-      if (id) {
+      // Same access gate as the URL-on-mount load: when access isn't ready
+      // yet, the effect above loads the id once canLoadAgent flips true
+      // (agent is null after flushState, so it fires).
+      if (id && canLoadAgent) {
         void loadAgentDetail(id);
       }
     },
-    [loadAgentDetail],
+    [canLoadAgent, loadAgentDetail],
   );
 
   // ─── Send message ───────────────────────────────────────────────────────

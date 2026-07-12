@@ -11,7 +11,14 @@ import type { FilePointer } from '@/lib/api';
 
 /** Sidebar top-level view identifier. */
 export type SidebarView =
-  'agents' | 'browse' | 'integrations' | 'settings' | 'usage' | 'network' | 'admin-health';
+  | 'agents'
+  | 'browse'
+  | 'integrations'
+  | 'settings'
+  | 'usage'
+  | 'network'
+  | 'admin-health'
+  | 'benchmarks';
 
 /** One bottom-navigation entry in the sidebar. */
 export interface SidebarNavItem {

@@ -69,6 +69,9 @@ const UsageItemSchema = z.object({
 const GetToolUsageResponseSchema = z.object({
   agent_id: z.string(),
   tool_usage_count: z.number(),
+  llm_call_count: z.number(),
+  tokens_in: z.number(),
+  tokens_out: z.number(),
   total_cost_cents: z.number(),
   total_cost_dollars: z.number(),
   total_tokens_from_tools: z.number(),
@@ -384,8 +387,14 @@ async function testTokenAggregation() {
     tool_name: 'llm_call',
     total_cost_cents: 10,
     usage_items: [
-      { type: 'llm', number_of_tokens: 500, description: 'prompt' },
-      { type: 'llm', number_of_tokens: 300, description: 'completion' },
+      {
+        type: 'llm',
+        number_of_tokens: 500,
+        tokens_in: 500,
+        cache_read_input_tokens: 100,
+        description: 'prompt',
+      },
+      { type: 'llm', number_of_tokens: 300, tokens_out: 300, description: 'completion' },
       { type: 'api_call', number_of_tokens: 9999, description: 'non-llm with tokens' },
     ],
   });
@@ -393,12 +402,18 @@ async function testTokenAggregation() {
   ctx.createdUsageIds.push((res.data as { id: string }).id);
   const getRes = await getUsage(ctx.agentId!, apiKeyHeaders(ctx.user1Id!));
   assertStatus(getRes.status, 200, getRes.data);
-  const body = getRes.data as { total_tokens_from_tools: number };
+  const body = getRes.data as {
+    total_tokens_from_tools: number;
+    tokens_in: number;
+    tokens_out: number;
+  };
   // At this point, prior usages have 0 LLM tokens (web_search, ct_check), so total should be exactly 800
   assert(
     body.total_tokens_from_tools === 800,
     `Expected total_tokens === 800, got ${body.total_tokens_from_tools} (non-LLM tokens may be leaking)`
   );
+  assert(body.tokens_in === 600, `Expected tokens_in === 600, got ${body.tokens_in}`);
+  assert(body.tokens_out === 300, `Expected tokens_out === 300, got ${body.tokens_out}`);
 }
 async function testUsageOrdering() {
   const res = await getUsage(ctx.agentId!, apiKeyHeaders(ctx.user1Id!));

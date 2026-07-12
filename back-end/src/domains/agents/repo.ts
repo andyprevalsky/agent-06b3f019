@@ -72,6 +72,8 @@ export async function findAgentsByBusId(busId: string) {
       progress: true,
       toolsInUse: true,
       messageCount: true,
+      tokensIn: true,
+      tokensOut: true,
       responseSchema: true,
       structuredResponse: true,
       treeCostCents: true,

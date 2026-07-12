@@ -84,7 +84,7 @@ service_like_process() {
             return
             ;;
         "$WORKTREE_DIR/agents"|"$WORKTREE_DIR/agents"/*)
-            echo "$cmd" | grep -Eq 'worker\.py|run_local_worker|playwright.*/driver|package/cli\.js run-driver'
+            echo "$cmd" | grep -Eq 'worker\.py|run_local_worker|playwright.*/driver|package/cli\.js run-driver|wmh serve|uvicorn'
             return
             ;;
         "$WORKTREE_DIR/mac-app"|"$WORKTREE_DIR/mac-app"/*)
@@ -121,7 +121,7 @@ with open(sys.argv[1]) as f:
     data = json.load(f)
 
 ports = data.get("ports", {})
-for key in ("backend", "frontend", "health", "mac_app", "sdk_metrics"):
+for key in ("backend", "frontend", "health", "mac_app", "sdk_metrics", "wmh"):
     value = ports.get(key)
     if isinstance(value, int) and value > 0:
         print(value)
@@ -195,6 +195,7 @@ for pattern in \
     "$WORKTREE_DIR/back-end.*tsx.*server\.ts" \
     "$WORKTREE_DIR/agents/scripts/run_local_worker" \
     "$WORKTREE_DIR/agents.*worker\.py" \
+    "$WORKTREE_DIR/agents.*wmh serve" \
     "$WORKTREE_DIR/front-end.*vite" \
     "$WORKTREE_DIR/mac-app/node_modules"; do
     for pid in $(pgrep -f "$pattern" 2>/dev/null); do

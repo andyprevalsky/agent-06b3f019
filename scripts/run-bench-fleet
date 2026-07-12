@@ -1,0 +1,734 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# run-bench-fleet — per-bench ISOLATED cloud benchmarks.
+#
+# Each bench task gets its OWN isolated resources: a dedicated Fly machine cloned
+# from the warm box (own backend + Postgres + Temporal queue + WMH), starting at
+# one machine per bench. Concurrency = one machine per bench (the n=1,2,4,… rungs
+# of the validation ladder), each an independent bubble — no shared stack, no
+# cross-bench interference.
+#
+# Sim is per-bench: every bench defaults to REAL (world model OFF). Pass
+# --sim-on <csv> to turn the world-model simulator ON for specific benches.
+#
+# This is the DEFAULT cloud-bench path (scripts/run-bench delegates here). Autoscaling
+# is ON by default and the whole run is shown in ONE aggregated batch dashboard,
+# served on the central hub (no browser window is opened — view runs in the
+# in-app Benchmarks tab, or open the printed URL manually).
+#
+# Usage:
+#   bash scripts/run-bench <bench> [<bench>...] [flags]        # via the common entry
+#   bash scripts/run-bench-fleet spawn-sub-agents parallel-tool-calls
+#   bash scripts/run-bench-fleet order-doordash-dinner --sim-on order-doordash-dinner
+#
+# Flags:
+#   --sim-on <a,b>     comma list of benches to run with the WMH simulator ON
+#                      (default: all benches REAL / world model OFF)
+#   --ref <sha|branch> code ref to check out on each clone (default: HEAD)
+#   --dash-base <port> aggregated batch dashboard port; bench i viewer = base+(i+1)*20 (default 8765)
+#   --keep-clones      do NOT destroy the per-bench machines on exit (debugging)
+#   --timeout <s>      per-bench ceiling passed to run-bench-cloud (default 3600)
+#   --autoscale        per-bench worker autoscaling, prod params, scoped to the bench queue (DEFAULT ON)
+#   --no-autoscale     keep each bench at its single machine
+#   --autoscale-max N  per-bench ceiling of worker machines (default 15 = prod MAX_MACHINES)
+#
+# Prereq: a warm box exists (bash scripts/run-bench-cloud --setup).
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+APP="navi-whisper-lux-bench"
+REGION="${CLOUDBENCH_REGION:-iad}"
+MACHINE_NAME="cloudbench-warm"
+VOLUME_NAME="cloudbench_data"
+# Every run lands in its OWN dir under the runs-root; the central hub (one
+# persistent dashboard on DASH_BASE) scans the runs-root so ALL runs show up and
+# each is clickable at /run/<id>/. Runs never clobber each other.
+RUNS_ROOT="$ROOT_DIR/.context/fleet/runs"
+RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
+FLEET_DIR="$RUNS_ROOT/$RUN_ID"
+HUB_CTX_DIR="$RUNS_ROOT/_hub"
+LOCK_DIR="$ROOT_DIR/.context/cloudbench-controller.lock"
+
+# ── Args ─────────────────────────────────────────────────────────────────────
+BENCHES=()
+SIM_ON_CSV=""
+BENCH_REF=""
+DASH_BASE="8765"
+KEEP_CLONES="0"
+RUN_TIMEOUT="3600"
+AUTOSCALE="1"           # per-bench worker autoscaling (prod params, scoped to the bench queue) — ON by default
+AUTOSCALE_MAX="15"      # prod MAX_MACHINES; per-bench ceiling of worker machines
+AUTOSCALE_POLL="10"     # seconds between desired-count reads off the box /metrics
+PROVISION_POOL=""       # --provision-pool N: pre-provision N stopped clones (current image) then exit
+POOL_IDS_FILE="$ROOT_DIR/.context/cloudbench-pool.ids"   # persistent pool machine ids (one per line)
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --sim-on)         SIM_ON_CSV="${2:-}"; shift 2 ;;
+        --ref)            BENCH_REF="${2:-}"; shift 2 ;;
+        --dash-base)      DASH_BASE="${2:-}"; shift 2 ;;
+        --keep-clones)    KEEP_CLONES="1"; shift ;;
+        --timeout)        RUN_TIMEOUT="${2:-}"; shift 2 ;;
+        --autoscale)      AUTOSCALE="1"; shift ;;
+        --no-autoscale)   AUTOSCALE="0"; shift ;;   # each bench stays at its single machine
+        --autoscale-max)  AUTOSCALE_MAX="${2:-}"; shift 2 ;;
+        --provision-pool) PROVISION_POOL="${2:-}"; shift 2 ;;   # one-time: create N stopped clones, then exit
+        -h|--help)        sed -n '2,36p' "$0"; exit 0 ;;
+        --*)              echo "❌ Unknown flag: $1" >&2; exit 2 ;;
+        *)                BENCHES+=("$1"); shift ;;
+    esac
+done
+# --provision-pool takes no bench args; everything else needs at least one bench.
+[ -n "$PROVISION_POOL" ] || true
+[ -n "$PROVISION_POOL" ] || [ "${#BENCHES[@]}" -ge 1 ] || { echo "usage: run-bench-fleet <bench> [<bench>...] [--sim-on a,b] [--ref X]  |  --provision-pool N" >&2; exit 2; }
+[ -z "$BENCH_REF" ] && BENCH_REF="$(git rev-parse HEAD 2>/dev/null || echo '')"
+
+# ── flyctl + token (mirror run-bench-cloud) ─────────────────────────────────
+if ! command -v flyctl >/dev/null 2>&1; then
+    if [ -x "$HOME/.fly/bin/flyctl" ]; then export PATH="$HOME/.fly/bin:$PATH"; else
+        echo "❌ flyctl not found on PATH." >&2; exit 1; fi
+fi
+resolve_fly_token() {
+    if [ -n "${FLY_BENCH_API_TOKEN:-}" ]; then echo "$FLY_BENCH_API_TOKEN"; return; fi
+    local cfg="$HOME/.fly/config.yml"
+    if [ -f "$cfg" ]; then
+        local t; t="$(grep -E '^access_token:' "$cfg" 2>/dev/null | head -1 | sed 's/^access_token:[[:space:]]*//; s/^["'\'']//; s/["'\'']$//')"
+        [ -n "$t" ] && { echo "$t"; return; }
+    fi
+    if [ -n "${FLY_API_TOKEN:-}" ]; then echo "$FLY_API_TOKEN"; return; fi
+    grep -E '^FLY_API_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//'
+}
+FLY_API_TOKEN="$(resolve_fly_token)"
+[ -n "${FLY_API_TOKEN:-}" ] || { echo "❌ No Fly auth token found." >&2; exit 1; }
+export FLY_API_TOKEN
+FLY() { flyctl "$@"; }
+
+is_sim_on() { case ",$SIM_ON_CSV," in *",$1,"*) return 0 ;; esac; return 1; }
+
+# Per-bench world-model mode from tasks.json (the catalog is the source of truth):
+# world_model_mode == "simulate" → SIM; anything else (real/shadow/unset) → REAL.
+# --sim-on <csv> is an explicit OVERRIDE on top of this.
+_catalog_wmm() {
+    BENCH="$1" agents/venv/bin/python - <<'PY' 2>/dev/null || echo real
+import json, os
+t = json.load(open("agents/benchmarks/tasks.json"))
+tasks = t if isinstance(t, list) else t.get("tasks", [])
+e = next((x for x in tasks if x.get("name") == os.environ["BENCH"]), {})
+wmm = str(e.get("world_model_mode") or "").lower()
+print("simulate" if wmm == "simulate" else "real")
+PY
+}
+
+# Print EXACTLY what code the run will execute on the box: the ref (HEAD), whether
+# it is on origin (unpushed commits never reach the box), and the uncommitted diff
+# that is shipped as a patch. Also stashed to $UNIFIED_DIR for the dashboard header.
+print_code_provenance() {
+    local branch head_sha head_sub pushed dirtystat
+    branch="$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+    head_sha="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo '?')"
+    head_sub="$(git -C "$ROOT_DIR" log -1 --pretty=%s 2>/dev/null || echo '')"
+    if git -C "$ROOT_DIR" branch -r --contains HEAD 2>/dev/null | grep -q origin/; then
+        pushed="on origin ✓"
+    else
+        pushed="⚠ NOT on origin — unpushed commits will NOT run on the box (only uncommitted changes ship)"
+    fi
+    echo "════════════════════ CODE UNDER TEST ════════════════════"
+    echo "  branch : $branch"
+    echo "  ref    : $BENCH_REF  ($head_sha $head_sub)"
+    echo "  pushed : $pushed"
+    if git -C "$ROOT_DIR" diff --quiet 2>/dev/null; then
+        echo "  diff   : clean working tree (running committed $head_sha exactly)"
+        CODE_SUMMARY="$branch@$head_sha (clean)"
+    else
+        dirtystat="$(git -C "$ROOT_DIR" diff --shortstat 2>/dev/null | sed 's/^ *//')"
+        echo "  diff   : DIRTY — shipped as a patch on top of $head_sha: $dirtystat"
+        git -C "$ROOT_DIR" diff --stat 2>/dev/null | sed 's/^/           /' | tail -30
+        CODE_SUMMARY="$branch@$head_sha +patch($dirtystat)"
+    fi
+    echo "══════════════════════════════════════════════════════════"
+}
+
+# Destroy a machine RELIABLY. A clone still in Fly's 'created'/provisioning state
+# no-ops a `--force` destroy (and then auto-starts later → a money-burning
+# zombie), so retry across the transition; last resort, stop then destroy.
+reap_machine() {  # reap_machine <id> — returns non-zero if the machine survived
+    local id="$1" i
+    [ -n "$id" ] || return 0
+    for i in 1 2 3 4 5; do
+        FLY machine destroy --force "$id" -a "$APP" >/dev/null 2>&1 || true
+        FLY machines list -a "$APP" --json 2>/dev/null | grep -q "\"$id\"" || return 0
+        [ "$i" = 3 ] && FLY machine stop "$id" -a "$APP" >/dev/null 2>&1 || true
+        sleep 3
+    done
+    if FLY machines list -a "$APP" --json 2>/dev/null | grep -q "\"$id\""; then
+        echo "  ⚠️ could not destroy machine $id — check: flyctl machines list -a $APP" >&2
+        return 1
+    fi
+    return 0
+}
+
+# ── Pre-provisioned pool: stopped clones (current image) claimed on demand ───
+# A claimed pool machine skips the ~300s volume fork (its volume is already
+# forked). It still git-fetches the ref + applies the patch on claim, so it runs
+# the CURRENT branch code — the baked image only supplies deps. Stopped pool
+# machines cost $0 compute (volumes only) between runs.
+_clone_one() {  # echo the id of the machine a clone just created (list-diff)
+    local before after id newid=""
+    before="$(FLY machines list -a "$APP" --json 2>/dev/null | python3 -c 'import json,sys;print(" ".join(m["id"] for m in (json.load(sys.stdin) or []) if m.get("id")))' 2>/dev/null || true)"
+    FLY machine clone "$WARM_ID" -a "$APP" --from-snapshot "$SNAP_ID" --region "$REGION" >/dev/null 2>&1 || true
+    after="$(FLY machines list -a "$APP" --json 2>/dev/null | python3 -c 'import json,sys;print(" ".join(m["id"] for m in (json.load(sys.stdin) or []) if m.get("id")))' 2>/dev/null || true)"
+    for id in $after; do case " $before " in *" $id "*) : ;; *) newid="$id" ;; esac; done
+    printf '%s' "$newid"
+}
+
+provision_pool() {  # provision_pool <N> — create N stopped clones, record ids, exit
+    local n="$1" i id ready
+    mkdir -p "$(dirname "$POOL_IDS_FILE")"; : > "$POOL_IDS_FILE"
+    echo "🏊 Provisioning pool of $n stopped machines (image = warm $WARM_ID, snapshot $SNAP_ID, region $REGION)..."
+    for i in $(seq 1 "$n"); do
+        id="$(_clone_one)"
+        if [ -n "$id" ]; then echo "  [$i/$n] created $id"; printf '%s\n' "$id" >> "$POOL_IDS_FILE"; else echo "  [$i/$n] ⚠ clone failed"; fi
+    done
+    echo "⏳ waiting for volumes to provision, then stopping (pool idles at \$0 compute)..."
+    while read -r id; do
+        [ -n "$id" ] || continue
+        ready=0
+        for _ in $(seq 1 90); do
+            if FLY machine status "$id" -a "$APP" 2>/dev/null | grep -qiE "State.*(started|stopped)"; then ready=1; break; fi
+            FLY machine start "$id" -a "$APP" >/dev/null 2>&1 || true
+            sleep 5
+        done
+        [ "$ready" = 1 ] && { FLY machine stop "$id" -a "$APP" >/dev/null 2>&1 || true; echo "  ✅ pooled (stopped): $id"; } || echo "  ⚠ $id never became startable"
+    done < "$POOL_IDS_FILE"
+    echo "✅ pool ready: $(grep -c . "$POOL_IDS_FILE" 2>/dev/null || echo 0) machines → $POOL_IDS_FILE"
+}
+
+CLAIMED_POOL_IDS=()
+# Self-heal the pool: a killed run can't run its return-to-stopped step, leaving a
+# claimed machine 'started' and un-claimable (claim only takes 'stopped'). At fleet
+# START the controller lock is held → no other run owns these → any 'started' pool
+# machine is orphaned → stop it so it's claimable again (avoids "pool empty" →
+# fresh clone → the 5-min volume-fork slow start).
+reconcile_pool() {
+    [ -f "$POOL_IDS_FILE" ] || return 0
+    local id st
+    while read -r id; do
+        [ -n "$id" ] || continue
+        st="$(FLY machine status "$id" -a "$APP" 2>/dev/null | grep -iE '^[[:space:]]*State' | head -1)"
+        if printf '%s' "$st" | grep -qi "started"; then
+            echo "  ♻️  reclaiming orphaned pool machine $id (started → stopped)"
+            FLY machine stop "$id" -a "$APP" >/dev/null 2>&1 || true
+        fi
+    done < "$POOL_IDS_FILE"
+}
+claim_pool_machine() {  # echo a started, claimed pool machine id (or '' if none free)
+    [ -f "$POOL_IDS_FILE" ] || return 0
+    local id st
+    while read -r id; do
+        [ -n "$id" ] || continue
+        case " ${CLAIMED_POOL_IDS[*]:-} " in *" $id "*) continue ;; esac
+        st="$(FLY machine status "$id" -a "$APP" 2>/dev/null | grep -iE '^[[:space:]]*State' | head -1)"
+        printf '%s' "$st" | grep -qi "stopped" || continue   # only claim an existing, stopped machine
+        FLY machine start "$id" -a "$APP" >/dev/null 2>&1 || true
+        CLAIMED_POOL_IDS+=("$id")
+        printf '%s' "$id"; return 0
+    done < "$POOL_IDS_FILE"
+}
+
+# ── One controller lock for the whole fleet (children run with --no-lock) ────
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    old_pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+    if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+        echo "❌ Another cloud benchmark controller is already running (pid $old_pid)." >&2; exit 1
+    fi
+    rm -rf "$LOCK_DIR"; mkdir "$LOCK_DIR" 2>/dev/null || { echo "❌ lock: $LOCK_DIR" >&2; exit 1; }
+fi
+printf '%s\n' "$$" > "$LOCK_DIR/pid"
+
+CLONE_IDS=()
+AUTOSCALER_PIDS=()
+CHILD_PIDS=()
+CHILD_OUT=()
+CHILD_BENCH=()
+CHILD_MODE=()
+CHILD_PORT=()
+
+cleanup() {
+    local ec=$?
+    [ -n "${UNIFIED_AGG_PID:-}" ] && kill "$UNIFIED_AGG_PID" 2>/dev/null || true
+    # Do NOT kill the central hub (UNIFIED_DASH_PID): it is THE one persistent
+    # dashboard — shared across every run, carrying the user's open tab, resolving
+    # "open agent" from local run data long after teardown. The next fleet run
+    # REUSES it (never rebinds/kills it), so exactly one hub ever runs.
+    for p in "${AUTOSCALER_PIDS[@]:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null || true; done
+    for p in "${CHILD_PIDS[@]:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null || true; done
+    if [ "$KEEP_CLONES" != "1" ]; then
+        # Autoscaler worker-pool clones (tracked per bench) first, then the primaries.
+        # A failed destroy is a billed-forever zombie: keep it tracked (the
+        # worker-clones.ids files under $FLEET_DIR are left in place) and warn
+        # loudly with the ids so a later sweep can retry.
+        local failed_reaps=""
+        for idf in "$FLEET_DIR"/*/worker-clones.ids; do
+            [ -f "$idf" ] || continue
+            while read -r wid; do
+                [ -n "$wid" ] || continue
+                echo "🧹 destroying worker clone $wid"
+                reap_machine "$wid" || failed_reaps="$failed_reaps $wid"
+            done < "$idf"
+        done
+        for id in "${CLONE_IDS[@]:-}"; do
+            [ -n "$id" ] || continue
+            echo "🧹 destroying fresh clone $id"
+            reap_machine "$id" || failed_reaps="$failed_reaps $id"
+        done
+        if [ -n "$failed_reaps" ]; then
+            echo "⚠️  FAILED to destroy machine(s):$failed_reaps — still alive (and billed) on Fly." >&2
+            echo "    retry: flyctl machine destroy --force <id> -a $APP  (ids also tracked under $FLEET_DIR/*/worker-clones.ids)" >&2
+        fi
+    else
+        echo "⚠️  --keep-clones: leaving ${#CLONE_IDS[@]} fresh clone(s) alive: ${CLONE_IDS[*]:-}"
+    fi
+    # Pool machines are RETURNED (stopped), never destroyed — that's the whole point
+    # of the pool ($0 compute while stopped, reusable next run; run resets its state).
+    for id in "${CLAIMED_POOL_IDS[@]:-}"; do
+        [ -n "$id" ] && { echo "↩️  returning pool machine $id (stop)"; FLY machine stop "$id" -a "$APP" >/dev/null 2>&1 || true; }
+    done
+    # NOTE: do NOT pkill viewers by "$FLEET_DIR" — the batch resolver (and the
+    # archive Vites it spawns for durable /open-agent) carry $FLEET_DIR in their
+    # argv too, so that sweep KILLED the very resolver we persist (→ dead link
+    # post-run). Per-bench viewers are reaped by their own run-bench-cloud child's
+    # exit trap when we SIGTERM CHILD_PIDS above; the batch resolver lives on.
+    [ -n "${FLEET_PATCH_FILE:-}" ] && rm -f "$FLEET_PATCH_FILE" 2>/dev/null || true
+    [ "$(cat "$LOCK_DIR/pid" 2>/dev/null || true)" = "$$" ] && rm -rf "$LOCK_DIR"
+    exit "$ec"
+}
+trap cleanup EXIT INT TERM
+
+# ── Resolve the warm machine (clone source) + its volume ────────────────────
+warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null || echo '[]')"
+warm_pair="$(printf '%s' "$warm_json" | MN="$MACHINE_NAME" python3 -c '
+import json,os,sys
+d=json.load(sys.stdin) or []
+mn=os.environ["MN"]
+for m in d:
+    if m.get("name")==mn and m.get("id"):
+        print(m["id"], m.get("region") or ""); break
+' 2>/dev/null || true)"
+WARM_ID="$(printf '%s' "$warm_pair" | awk '{print $1}')"
+warm_region="$(printf '%s' "$warm_pair" | awk '{print $2}')"
+[ -n "$WARM_ID" ] || { echo "❌ No warm machine '$MACHINE_NAME' in $APP — run: bash scripts/run-bench-cloud --setup" >&2; exit 1; }
+# Volume snapshots are region-scoped, so clones MUST land in the warm box's region.
+[ -n "$warm_region" ] && REGION="$warm_region"
+echo "🏭 warm source machine: $WARM_ID (region $REGION)"
+
+# Clones fork the warm volume from a snapshot. We must pick a COMPLETE snapshot:
+# restoring from one that is still uploading leaves the clone wedged in Fly's
+# 'created' state forever (it can never start). Both complete and in-progress
+# snapshots report status "created", so we select by size — the newest snapshot
+# whose stored size is a real fraction of the volume (in-progress ones are tiny).
+# The on-box driver re-fetches the repo to $REF, so snapshot age only affects the
+# WMH corpus (fine: real benches don't use it; sim benches tolerate minor drift).
+VOL_ID="$(FLY volumes list -a "$APP" --json 2>/dev/null | VN="$VOLUME_NAME" python3 -c '
+import json,os,sys
+try: d=json.load(sys.stdin) or []
+except Exception: d=[]
+vn=os.environ["VN"]
+for v in d:
+    if v.get("name")==vn and v.get("id"): print(v["id"]); break
+' 2>/dev/null || true)"
+[ -n "$VOL_ID" ] || { echo "❌ Could not find warm volume '$VOLUME_NAME' in $APP" >&2; exit 1; }
+SNAP_ID="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null | python3 -c '
+import json,sys
+try: snaps=json.load(sys.stdin) or []
+except Exception: snaps=[]
+# Keep only snapshots that look fully written (>=25% of the volume), newest first.
+ready=[s for s in snaps if (s.get("size") or 0) >= 0.25*(s.get("volume_size") or 1)]
+ready.sort(key=lambda s: s.get("created_at") or "", reverse=True)
+print(ready[0]["id"] if ready else "")
+' 2>/dev/null || true)"
+if [ -z "$SNAP_ID" ]; then
+    echo "❌ No complete snapshot for warm volume $VOL_ID. Create one and wait for it to finish:" >&2
+    echo "   flyctl volume snapshots create $VOL_ID -a $APP   # then wait until STORED SIZE ≈ VOL SIZE" >&2
+    exit 1
+fi
+echo "🧊 forking clones from complete snapshot: $SNAP_ID"
+
+# --provision-pool: one-time pre-provision of N stopped clones, then exit.
+if [ -n "$PROVISION_POOL" ]; then
+    provision_pool "$PROVISION_POOL"
+    exit 0
+fi
+
+CODE_SUMMARY=""
+print_code_provenance
+
+# ── Per-bench worker autoscaling (prod params, scoped to the bench's queue) ──
+# The box worker computes desired_machine_count off its own Temporal queue with
+# prod's exact params (backlog ≥20% capacity → add ceil(backlog/capacity); 60s
+# zero backlog → remove) and exposes it on HEALTH_CHECK_PORT/metrics, but never
+# actuates (FLY_APP_NAME="" + AUTOSCALER_ACTUATE=0). We read that number and
+# reconcile a pool of WORKER-ONLY clones bound to THIS bench's queue + backend
+# (Fly 6PN) — the same shape as prod's pool, isolated per bench. Workers are torn
+# down on scale-down and at fleet exit.
+BOX_HEALTH_PORT="3003"     # cloudbench-run.sh HEALTH_PORT = CONDUCTOR_PORT(3001)+2
+BOX_BACKEND_PORT="3001"
+BOX_WMH_PORT="3007"        # run.sh WMH_PORT = base+6
+FLEET_PATCH_FILE=""
+if ! git -C "$ROOT_DIR" diff --quiet --binary 2>/dev/null; then
+    FLEET_PATCH_FILE="$(mktemp)"; git -C "$ROOT_DIR" diff --binary > "$FLEET_PATCH_FILE"
+fi
+
+_machine_priv_ip() {  # _machine_priv_ip <machine_id>
+    FLY machines list -a "$APP" --json 2>/dev/null | MID="$1" python3 -c '
+import json,os,sys
+try: d=json.load(sys.stdin) or []
+except Exception: d=[]
+mid=os.environ["MID"]
+for m in d:
+    if m.get("id")==mid: print(m.get("private_ip") or ""); break
+' 2>/dev/null || true
+}
+
+_box_desired() {  # _box_desired <machine_id> → desired_machine_count or empty
+    FLY ssh console -a "$APP" --machine "$1" -q \
+        -C "bash -c \"curl -s localhost:$BOX_HEALTH_PORT/metrics 2>/dev/null | grep -E '^desired_machine_count ' | awk '{print \\\$2}'\"" 2>/dev/null \
+        | tr -dc '0-9'
+}
+
+# The worker-clones id-file is the SOURCE OF TRUTH for the pool size: a machine
+# is recorded the instant Fly creates it (BEFORE staging), so a slow/failed stage
+# can never make the reconcile think the pool is empty and re-clone in a loop.
+_pool_ids() {  # count of tracked worker machines (clean single integer)
+    local f="$1/worker-clones.ids" n
+    [ -f "$f" ] || { echo 0; return; }
+    n="$(grep -c . "$f" 2>/dev/null)"   # grep -c always prints a number; ignore its exit code
+    printf '%s' "${n:-0}" | tr -dc '0-9'
+    printf '\n'
+}
+
+provision_worker() {  # provision_worker <bench> <workspace> <primary_ip> <sim01> <out>
+    local bench="$1" ws="$2" pip="$3" sim="$4" out="$5"
+    # Bulletproof id capture: snapshot machine ids, clone, diff (clone-output
+    # parsing was unreliable inside the autoscaler subshell → untracked zombies).
+    local before after wid
+    before="$(FLY machines list -a "$APP" --json 2>/dev/null | python3 -c 'import json,sys;print(" ".join(m["id"] for m in (json.load(sys.stdin) or []) if m.get("id")))' 2>/dev/null || true)"
+    FLY machine clone "$WARM_ID" -a "$APP" --from-snapshot "$SNAP_ID" --region "$REGION" >/dev/null 2>&1 || true
+    after="$(FLY machines list -a "$APP" --json 2>/dev/null | python3 -c 'import json,sys;print(" ".join(m["id"] for m in (json.load(sys.stdin) or []) if m.get("id")))' 2>/dev/null || true)"
+    for id in $after; do case " $before " in *" $id "*) : ;; *) wid="$id";; esac; done
+    [ -n "${wid:-}" ] || { echo "  ⚠️ [$bench] worker clone did not appear" >&2; return 1; }
+    printf '%s\n' "$wid" >> "$out/worker-clones.ids"    # COUNT it now, before staging
+    echo "  ➕ [$bench] worker $wid created"
+    # Stage the boot script + patch + env wrapper, then launch (best-effort;
+    # counted regardless — a laggy volume just delays this worker joining).
+    local wrapper; wrapper="$(mktemp)"
+    {
+        echo "set -e"
+        echo "export REF=$(printf '%q' "$BENCH_REF")"
+        echo "export WORKSPACE_NAME=$(printf '%q' "$ws")"
+        echo "export PRIMARY_HOST=$(printf '%q' "$pip")"
+        echo "export BACKEND_PORT=$(printf '%q' "$BOX_BACKEND_PORT")"
+        echo "export WMH_PORT=$(printf '%q' "$BOX_WMH_PORT")"
+        echo "export BENCH_SIMULATE=$(printf '%q' "$sim")"
+        [ -n "$FLEET_PATCH_FILE" ] && echo "export LOCAL_PATCH_FILE=/tmp/cloudbench-local.patch" || echo "unset LOCAL_PATCH_FILE"
+        echo "exec bash /data/cloudbench-worker.sh"
+    } > "$wrapper"
+    ( for _ in $(seq 1 40); do
+        FLY machine start "$wid" -a "$APP" >/dev/null 2>&1 || true
+        if FLY ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-worker.sh" /data/cloudbench-worker.sh >/dev/null 2>&1 \
+           && FLY ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$wrapper" /tmp/rbw.sh >/dev/null 2>&1; then
+            [ -n "$FLEET_PATCH_FILE" ] && FLY ssh sftp put -a "$APP" --machine "$wid" -q -m 0644 "$FLEET_PATCH_FILE" /tmp/cloudbench-local.patch >/dev/null 2>&1 || true
+            FLY ssh console -a "$APP" --machine "$wid" -C "bash -c \"setsid bash /tmp/rbw.sh >> /data/worker.log 2>&1 < /dev/null &\"" >/dev/null 2>&1 || true
+            echo "  ✅ [$bench] worker $wid staged + launched"
+            break
+        fi
+        sleep 3
+      done; rm -f "$wrapper" 2>/dev/null || true ) &
+    return 0
+}
+
+bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim01> <out>
+    local bench="$1" cid="$2" ws="$3" sim="$4" out="$5"
+    local pip=""; : > "$out/worker-clones.ids"
+    # Wait for the box /metrics to answer (stack up) before scaling.
+    for _ in $(seq 1 60); do pip="$(_machine_priv_ip "$cid")"; [ -n "$pip" ] && break; sleep 5; done
+    [ -n "$pip" ] || { echo "  ⚠️ [$bench] autoscaler: no primary IP; disabled" >&2; return 0; }
+    while FLY machine status "$cid" -a "$APP" >/dev/null 2>&1; do
+        local desired want cur; desired="$(_box_desired "$cid")"; [ -z "$desired" ] && { sleep "$AUTOSCALE_POLL"; continue; }
+        want=$((desired - 1)); [ "$want" -lt 0 ] && want=0
+        [ "$want" -gt $((AUTOSCALE_MAX - 1)) ] && want=$((AUTOSCALE_MAX - 1))
+        cur="$(_pool_ids "$out")"
+        if [ "$want" -gt "$cur" ]; then
+            local n=$((want - cur)) k
+            echo "  ⤴️  [$bench] scale up +$n (desired=$desired, pool=$cur)"
+            for k in $(seq 1 "$n"); do provision_worker "$bench" "$ws" "$pip" "$sim" "$out"; done
+        elif [ "$want" -lt "$cur" ]; then
+            local n=$((cur - want)) k
+            echo "  ⤵️  [$bench] scale down -$n (desired=$desired, pool=$cur)"
+            for k in $(seq 1 "$n"); do
+                local wid; wid="$(tail -1 "$out/worker-clones.ids" 2>/dev/null)"
+                [ -n "$wid" ] || break
+                # Only drop the id from tracking once the destroy is CONFIRMED —
+                # an untracked-but-alive machine is a billed-forever zombie. On
+                # failure keep it listed and retry on the next autoscaler tick.
+                if ! reap_machine "$wid"; then
+                    echo "  ⚠️ [$bench] failed to destroy worker $wid — kept in tracking, retrying next tick" >&2
+                    break
+                fi
+                sed '$d' "$out/worker-clones.ids" > "$out/worker-clones.ids.tmp" 2>/dev/null && mv "$out/worker-clones.ids.tmp" "$out/worker-clones.ids" || true
+            done
+        fi
+        sleep "$AUTOSCALE_POLL"
+    done
+}
+
+# ── Clone one machine per bench + launch its isolated run ────────────────────
+mkdir -p "$FLEET_DIR"
+reconcile_pool   # reclaim any orphaned-started pool machines before claiming
+echo ""
+echo "═══ run-bench-fleet — ${#BENCHES[@]} bench(es), one isolated machine each ═══"
+i=0
+for bench in "${BENCHES[@]}"; do
+    # Default from the catalog's world_model_mode; --sim-on is an explicit override.
+    mode_label="REAL"; [ "$(_catalog_wmm "$bench")" = "simulate" ] && mode_label="SIM"
+    is_sim_on "$bench" && mode_label="SIM"
+    mode_flag="--no-simulate"; [ "$mode_label" = "SIM" ] && mode_flag="--simulate"
+    # DASH_BASE is reserved for the ONE aggregated batch dashboard; per-bench
+    # viewers live above it (their /open-agent deep-links back the batch rows).
+    port=$((DASH_BASE + (i + 1) * 20))
+    out="$FLEET_DIR/$bench"
+    rm -rf "$out" 2>/dev/null || true; mkdir -p "$out"
+
+    echo ""
+    # Prefer a pre-provisioned pool machine (skips the ~300s volume fork); fall
+    # back to cloning fresh if the pool is empty/exhausted.
+    cid="$(claim_pool_machine)"
+    if [ -n "$cid" ]; then
+        echo "▶️  [$bench] claimed POOL machine $cid (no fork, mode=$mode_label, dash=$port) — starting ..."
+    else
+        echo "▶️  [$bench] pool empty → cloning fresh isolated machine (mode=$mode_label, dash=$port) ..."
+        clone_out="$(FLY machine clone "$WARM_ID" -a "$APP" --from-snapshot "$SNAP_ID" --region "$REGION" 2>&1)"
+        cid="$(printf '%s' "$clone_out" | grep -oiE 'Machine ID: [0-9a-f]+' | tail -1 | awk '{print $3}')"
+        [ -z "$cid" ] && cid="$(printf '%s' "$clone_out" | grep -oiE '\b[0-9a-f]{14}\b' | tail -1)"
+        if [ -z "$cid" ]; then
+            echo "   ❌ clone failed for $bench:"; printf '%s\n' "$clone_out" | tail -8 | sed 's/^/      /'
+            i=$((i + 1)); continue
+        fi
+        CLONE_IDS+=("$cid")   # only FRESH clones are destroyed on teardown; pool machines are returned
+    fi
+    echo "   ✅ machine=$cid → launching run-bench-cloud (isolated) ..."
+
+    # Deterministic per-bench workspace → deterministic Temporal queue, so the
+    # autoscaler knows which queue its worker pool must poll.
+    local_ws="$(printf 'flt-%s-%s-%s' "$bench" "$$" "$i" | tr -c 'a-z0-9-' '-' | cut -c1-48)"
+    (
+        CLOUDBENCH_WORKSPACE_NAME="$local_ws" NO_OPEN=1 \
+        bash scripts/run-bench-cloud "$bench" \
+            --machine "$cid" \
+            --out-dir "$out" \
+            --dash-port "$port" \
+            --no-lock \
+            --no-open \
+            "$mode_flag" \
+            --ref "$BENCH_REF" \
+            --timeout "$RUN_TIMEOUT"
+    ) > "$out/fleet-child.log" 2>&1 &
+    CHILD_PIDS+=("$!")
+    CHILD_OUT+=("$out")
+    CHILD_BENCH+=("$bench")
+    CHILD_MODE+=("$mode_label")
+    CHILD_PORT+=("$port")
+
+    if [ "$AUTOSCALE" = "1" ]; then
+        local_sim=0; [ "$mode_label" = "SIM" ] && local_sim=1
+        echo "   ⚖️  [$bench] per-bench autoscaler ON (prod params, max=$AUTOSCALE_MAX, queue=navi-agent-tasks-$local_ws)"
+        ( bench_autoscaler "$bench" "$cid" "$local_ws" "$local_sim" "$out" ) >> "$out/autoscaler.log" 2>&1 &
+        AUTOSCALER_PIDS+=("$!")
+    fi
+    i=$((i + 1))
+done
+
+[ "${#CHILD_PIDS[@]}" -ge 1 ] || { echo "❌ no benches launched (all clones failed)." >&2; exit 1; }
+
+echo ""
+echo "⏳ ${#CHILD_PIDS[@]} isolated bench machine(s) running."
+
+# ── ONE aggregated batch dashboard (served; never auto-opens a browser) ─────
+# Merge every bench's live report-card.json into a single card (N per_task rows,
+# summed cost + tokens) and serve it on DASH_BASE. Each row's agent_url already
+# points at its own bench's /open-agent (localhost:<bench-port>), so clicking
+# "open" from the batch view routes to the right isolated machine's viewer.
+UNIFIED_DIR="$FLEET_DIR/_batch"
+rm -rf "$UNIFIED_DIR" 2>/dev/null || true; mkdir -p "$UNIFIED_DIR"
+printf '%s' "${CODE_SUMMARY:-}" > "$UNIFIED_DIR/code.txt"   # shown in the dashboard header
+cp -f "$ROOT_DIR/agents/benchmarks/dashboard.html" "$UNIFIED_DIR/dashboard.html" 2>/dev/null || true
+# NOTE: never kill whatever holds DASH_BASE — that is the ONE persistent central
+# hub, shared across every run + carrying the user's open tab. It picks up this
+# new run dir on its next scan. We (re)start it below ONLY if it isn't already up.
+# Manifest of EVERY bench in the batch — the dashboard always renders all N rows
+# (queued → running → done), never a subset while some machines are still booting.
+{
+    printf '['
+    for j in "${!CHILD_BENCH[@]}"; do
+        [ "$j" -gt 0 ] && printf ','
+        printf '{"name":"%s","mode":"%s","port":%s}' "${CHILD_BENCH[$j]}" "${CHILD_MODE[$j]}" "${CHILD_PORT[$j]}"
+    done
+    printf ']'
+} > "$UNIFIED_DIR/benches.json"
+(
+    while :; do
+        FLEET_DIR="$FLEET_DIR" UNIFIED_DIR="$UNIFIED_DIR" DASH_BASE="$DASH_BASE" python3 - "$UNIFIED_DIR/report-card.json" <<'PY' 2>/dev/null || true
+import json, os, sys
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+out = sys.argv[1]; fleet = os.environ["FLEET_DIR"]; dash_base = os.environ.get("DASH_BASE", "8765")
+# Startup-phase tracker (stdlib-only) → per-row step timeline while queued.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(fleet)), "agents"))
+try:
+    from benchmarks.fleet_startup_phase import startup_state
+except Exception:
+    startup_state = None
+benches = json.load(open(os.path.join(os.environ["UNIFIED_DIR"], "benches.json")))
+per_task = []
+ci = {"agents_llm_usd": 0.0, "wmh_grounding_usd": 0.0, "infra_usd": 0.0, "total_usd": 0.0}
+mi = {"tokens_in": 0, "tokens_out": 0}
+modes, elapsed = set(), 0.0
+for b in benches:
+    name = b["name"]; default_mode = "simulate" if b.get("mode") == "SIM" else "real"
+    card = None
+    try: card = json.load(open(os.path.join(fleet, name, "cloudbench-live", "report-card.json")))
+    except Exception: card = None
+    row = None
+    if card:
+        rows = card.get("per_task") or []
+        row = next((r for r in rows if r.get("name") == name), rows[0] if rows else None)
+    if row is None:   # seed a queued placeholder so ALL N benches always show
+        row = {"name": name, "status": "queued", "duration_s": None, "cost_usd": None,
+               "agent_url": None, "tokens_in": 0, "tokens_out": 0,
+               "world_model_mode": default_mode, "infra_usd": None}
+    row.setdefault("world_model_mode", default_mode)
+    # Route "open" through the DURABLE batch resolver (DASH_BASE) — never the
+    # per-bench port that dies with the run. The resolver serves from local run
+    # data, so the link can't go dead.
+    url = row.get("agent_url")
+    if url:
+        try:
+            aid = (parse_qs(urlparse(url).query).get("agent-id") or [""])[0]
+        except Exception:
+            aid = ""
+        if aid:
+            row["agent_url"] = f"http://localhost:{dash_base}/open-agent?agent-id={aid}"
+    # While queued (before the on-box run_benchmark emits a card), surface the
+    # concrete startup step + expected/elapsed so the dashboard shows progress.
+    if row.get("status") == "queued" and startup_state is not None:
+        try:
+            row["startup"] = startup_state(
+                Path(fleet) / name / "fleet-child.log",
+                Path(fleet) / name / ".startup-state.json",
+            )
+        except Exception:
+            pass
+    per_task.append(row)
+    if card:
+        cost = card.get("cost") or {}
+        for k in ci:
+            v = cost.get(k)
+            if isinstance(v, (int, float)): ci[k] += v
+        md = card.get("metadata") or {}
+        mi["tokens_in"] += int(md.get("tokens_in") or 0); mi["tokens_out"] += int(md.get("tokens_out") or 0)
+        elapsed = max(elapsed, float(card.get("elapsed_s") or 0))
+    if row.get("world_model_mode"): modes.add(row["world_model_mode"])
+st = lambda s: sum(1 for t in per_task if t.get("status") == s)
+passed, failed = st("passed"), st("failed") + st("error")
+running = sum(1 for t in per_task if t.get("status") == "running")
+queued = sum(1 for t in per_task if t.get("status") == "queued")
+try:
+    code_summary = open(os.path.join(os.environ["UNIFIED_DIR"], "code.txt")).read().strip()
+except Exception:
+    code_summary = ""
+card = {
+    "run_id": "batch",
+    "code": code_summary,
+    "elapsed_s": elapsed,
+    "world_model_mode": (list(modes)[0] if len(modes) == 1 else "mixed") if modes else "real",
+    "tasks": {"total": len(benches), "running": running, "completed": passed + failed, "queued": queued},
+    "results": {"passed": passed, "failed": failed, "transient": st("transient"),
+                "success_rate": round(passed / max(1, passed + failed), 3)},
+    "cost": {**{k: round(v, 4) for k, v in ci.items()}, "fast_cache_hit_rate": None},
+    "metadata": mi,
+    "infra": None,
+    "per_task": per_task,
+}
+with open(out, "w") as f: json.dump(card, f); f.write("\n")
+PY
+        sleep 1
+    done
+) & UNIFIED_AGG_PID=$!
+# The CENTRAL HUB is the durable open-agent resolver (agent_link_server --hub):
+# ONE persistent server over the runs-root that serves a run-index at /, each
+# run's dashboard at /run/<id>/, and resolves any agent from any run's local data
+# on demand. It PERSISTS across runs + past fleet exit (see cleanup), so it is the
+# single dashboard, "open" is never a dead link, and we never clutter the screen
+# with a new window per run. Start it ONLY if it isn't already up.
+mkdir -p "$HUB_CTX_DIR"
+HUB_URL="http://localhost:$DASH_BASE/"
+RUN_URL="http://localhost:$DASH_BASE/run/$RUN_ID/dashboard.html"
+HUB_WAS_UP=0
+if curl -fsS "$HUB_URL" 2>/dev/null | grep -q "Benchmark runs"; then
+    HUB_WAS_UP=1
+    echo "📊 reusing the central hub already open on :$DASH_BASE (no new window)"
+else
+    for pp in $(lsof -tiTCP:"$DASH_BASE" -sTCP:LISTEN 2>/dev/null || true); do kill "$pp" 2>/dev/null || true; done
+    python3 "$ROOT_DIR/agents/benchmarks/agent_link_server.py" \
+        --root "$RUNS_ROOT" --host 127.0.0.1 --port "$DASH_BASE" \
+        --repo-root "$ROOT_DIR" --context-dir "$HUB_CTX_DIR" \
+        --frontend-dir "$ROOT_DIR/front-end" --hub-runs-dir "$RUNS_ROOT" \
+        --preferred-archive-port "$((DASH_BASE + 200))" \
+        > "$HUB_CTX_DIR/hub.log" 2>&1 & UNIFIED_DASH_PID=$!
+    printf '%s\n' "$UNIFIED_DASH_PID" > "$HUB_CTX_DIR/agent-link-server.pid"
+    for _ in $(seq 1 20); do curl -fsS "$HUB_URL" >/dev/null 2>&1 && break; sleep 1; done
+fi
+if [ "$HUB_WAS_UP" = "0" ]; then
+    echo "📊 central hub: $HUB_URL (in-app: Benchmarks tab)"
+fi
+echo "   this run: $RUN_URL"
+echo "   per-bench viewers: $(for j in "${!CHILD_PORT[@]}"; do printf '%s→:%s ' "${CHILD_BENCH[$j]}" "${CHILD_PORT[$j]}"; done)"
+echo ""
+
+# ── Wait for all children, then aggregate ────────────────────────────────────
+for p in "${CHILD_PIDS[@]}"; do wait "$p" 2>/dev/null || true; done
+# One final merge so the batch dashboard reflects terminal results, then stop the aggregator.
+kill "$UNIFIED_AGG_PID" 2>/dev/null || true
+
+echo ""
+echo "════════════════════ FLEET SUMMARY ════════════════════"
+FLEET_PASS=0; FLEET_TOTAL=0
+for j in "${!CHILD_BENCH[@]}"; do
+    bench="${CHILD_BENCH[$j]}"; out="${CHILD_OUT[$j]}"; mode="${CHILD_MODE[$j]}"
+    line="$(RUN_JSON_PATH="$out/cloudbench-run.json" python3 -c '
+import json,os
+p=os.environ["RUN_JSON_PATH"]
+try:
+    r=json.load(open(p)); tasks=r.get("tasks",[])
+    t=tasks[0] if tasks else {}
+    passed=bool(t.get("passed"))
+    aid=t.get("agent_id") or ""
+    dur=t.get("duration_seconds")
+    print(("PASS" if passed else "FAIL"), aid, ("" if dur is None else round(float(dur),1)))
+except Exception as e:
+    print("NORESULT", "", "")
+' 2>/dev/null || echo "NORESULT  ")"
+    status="$(printf '%s' "$line" | awk '{print $1}')"
+    aid="$(printf '%s' "$line" | awk '{print $2}')"
+    FLEET_TOTAL=$((FLEET_TOTAL + 1))
+    [ "$status" = "PASS" ] && FLEET_PASS=$((FLEET_PASS + 1))
+    icon="❌"; [ "$status" = "PASS" ] && icon="✅"; [ "$status" = "NORESULT" ] && icon="⚠️ "
+    printf '  %s %-38s %-4s %-9s' "$icon" "$bench" "$mode" "$status"
+    [ -n "$aid" ] && printf '  agent=%s' "$aid"
+    printf '\n'
+done
+echo "  ────────────────────────────────────────────────────"
+echo "  $FLEET_PASS/$FLEET_TOTAL passed"
+echo "════════════════════════════════════════════════════════"
+[ "$FLEET_PASS" = "$FLEET_TOTAL" ]

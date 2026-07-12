@@ -36,8 +36,9 @@ BENCHMARK_ISOLATED_RUN="${BENCHMARK_ISOLATED_RUN:-false}"
 IS_MAC=false
 [ "$(uname)" = "Darwin" ] && IS_MAC=true
 
-# Assign ports from a base port. Uses offsets 0-5 (5 services + 1 DB).
+# Assign ports from a base port. Uses offsets 0-6 (5 services + 1 DB + WMH).
 # Research was retired post-rose-migration so no research ports are reserved.
+# +6 is the World Model Harness serving port (benchmark/simulate only).
 assign_ports() {
     local base=$1
     export BACKEND_PORT=$base
@@ -46,6 +47,7 @@ assign_ports() {
     export MAC_APP_PORT=$((base + 3))
     export SDK_METRICS_PORT=$((base + 4))
     export LOCAL_DB_PORT=$((base + 5))
+    export WMH_PORT=$((base + 6))
     export NGROK_WEB_PORT=$((base + 9))
     export BACKEND_API_URL=http://localhost:$BACKEND_PORT
     export VITE_BACKEND_API_URL=http://localhost:$BACKEND_PORT
@@ -155,7 +157,7 @@ assign_ports "$CONDUCTOR_PORT"
 
 # If any port in our range is held by another process, find a safe range
 COLLISION=false
-for port in $BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $MAC_APP_PORT $SDK_METRICS_PORT $LOCAL_DB_PORT $NGROK_WEB_PORT; do
+for port in $BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $MAC_APP_PORT $SDK_METRICS_PORT $LOCAL_DB_PORT $WMH_PORT $NGROK_WEB_PORT; do
     if port_requires_reassign "$port"; then
         COLLISION=true
         break
@@ -169,7 +171,7 @@ if $COLLISION; then
     FOUND=false
     while [ $CANDIDATE -lt 65500 ]; do
         RANGE_FREE=true
-        for offset in 0 1 2 3 4 5 9; do
+        for offset in 0 1 2 3 4 5 6 9; do
             p=$((CANDIDATE + offset))
             if ! port_is_free_for_candidate_range "$p"; then
                 RANGE_FREE=false
@@ -230,7 +232,7 @@ fi
 
 export NODE_ENV="${NODE_ENV:-development}"
 export TEMPORAL_TASK_QUEUE=navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME
-echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT mac-app=$MAC_APP_PORT metrics=$SDK_METRICS_PORT db=$LOCAL_DB_PORT ngrok_api=$NGROK_WEB_PORT queue=$TEMPORAL_TASK_QUEUE benchmark_mode=$BENCHMARK_MODE worker_processes=${WORKER_PROCESSES:-1} workflow_max_slots=${MAX_CONCURRENT_WORKFLOWS:-50} workflow_pollers=${MAX_CONCURRENT_WORKFLOW_TASK_POLLERS:-8} nonsticky_to_sticky=${NONSTICKY_TO_STICKY_POLL_RATIO:-0.5} activity_max_slots=${MAX_CONCURRENT_ACTIVITIES:-100} activity_pollers=${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-8}"
+echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT mac-app=$MAC_APP_PORT metrics=$SDK_METRICS_PORT db=$LOCAL_DB_PORT wmh=$WMH_PORT ngrok_api=$NGROK_WEB_PORT queue=$TEMPORAL_TASK_QUEUE benchmark_mode=$BENCHMARK_MODE worker_processes=${WORKER_PROCESSES:-1} workflow_max_slots=${MAX_CONCURRENT_WORKFLOWS:-50} workflow_pollers=${MAX_CONCURRENT_WORKFLOW_TASK_POLLERS:-8} nonsticky_to_sticky=${NONSTICKY_TO_STICKY_POLL_RATIO:-0.5} activity_max_slots=${MAX_CONCURRENT_ACTIVITIES:-100} activity_pollers=${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-8}"
 
 run_kill_stale_same_task_queue_workers "$PWD" "$TEMPORAL_TASK_QUEUE" "$BACKEND_API_URL" "$$"
 
@@ -534,6 +536,29 @@ echo "🧠 Ensuring Fast Mode cache schema..."
 export DATABASE_URL="${LOCAL_DB_URL}?connection_limit=50&pool_timeout=30"
 export DIRECT_URL="$LOCAL_DB_URL"
 
+# Fast DB warm-start (cloud pool): the schema push + 10k-people seed cost ~50s and
+# run on EVERY boot because the box DB lives on ephemeral rootfs (resets on Fly
+# stop/start). BENCHMARK_SEED_DUMP points at a pg_dump on the PERSISTENT /data
+# volume; when it exists and the schema is unchanged, restore it (~fast COPY) and
+# skip BOTH the push and the seed. First run seeds normally, then writes the dump
+# for every later claim of that machine. Unset (local dev) → zero behaviour change.
+DB_RESTORED=false
+_SEED_DUMP="${BENCHMARK_SEED_DUMP:-}"
+_SCHEMA_HASH="$( (shasum back-end/prisma/schema.prisma 2>/dev/null || sha1sum back-end/prisma/schema.prisma 2>/dev/null) | awk '{print $1}')"
+if [ -n "$_SEED_DUMP" ] && [ -s "$_SEED_DUMP" ] && [ "$(cat "${_SEED_DUMP}.schemahash" 2>/dev/null || echo x)" = "$_SCHEMA_HASH" ]; then
+    echo "🗜️  Restoring seeded DB from persistent dump ($_SEED_DUMP) — skipping schema push + seed..."
+    if PGPASSWORD=postgres pg_restore -h localhost -U postgres -d victoria --clean --if-exists --no-owner "$_SEED_DUMP" >/dev/null 2>&1; then
+        DB_RESTORED=true
+        echo "   ✅ DB restored from dump"
+    else
+        echo "   ⚠️ restore failed — falling back to push + seed"
+    fi
+fi
+
+if $DB_RESTORED; then
+    :
+else
+
 # Sync Prisma schema to local DB (idempotent, dev-only)
 echo "🐘 Syncing Prisma schema..."
 (cd back-end && npx prisma db push --skip-generate --accept-data-loss 2>&1 | tail -3)
@@ -551,10 +576,31 @@ fi
 if [ "$USER_EXISTS" = "0" ]; then
     echo "🌱 Syncing production data to local database (first run)..."
     (cd back-end && npx tsx scripts/seed-local.ts)
+elif [ "${BENCHMARK_WORLD_MODEL_MODE:-}" = "simulate" ]; then
+    # Simulate mode: the World Model Harness intercepts every environment-boundary
+    # tool, so real browser cookies/passwords are never exercised. Re-syncing all
+    # 21k+ cookie rows on every stack start is pure overhead (and stalls on a
+    # throttled cloud uplink). Compute tokens stay fresh via run_benchmark's
+    # per-task base fixture (_sync_compute_tokens), so skip the cred sync here.
+    echo "🌍 simulate mode — skipping startup browser credential sync (WMH mocks env tools)"
 else
     echo "🌱 Local database already seeded; syncing browser credentials..."
     (cd back-end && npx tsx scripts/seed-local.ts --credentials-only)
 fi
+
+# Persist a dump on /data so the NEXT claim of this machine restores in seconds
+# instead of re-seeding. Best-effort; the schemahash guards against schema drift.
+if [ -n "$_SEED_DUMP" ]; then
+    echo "🗜️  Saving seed dump for fast future warm-starts ($_SEED_DUMP)..."
+    if PGPASSWORD=postgres pg_dump -h localhost -U postgres -Fc victoria > "$_SEED_DUMP" 2>/dev/null; then
+        printf '%s' "$_SCHEMA_HASH" > "${_SEED_DUMP}.schemahash"
+        echo "   ✅ seed dump saved ($(du -h "$_SEED_DUMP" 2>/dev/null | awk '{print $1}'))"
+    else
+        rm -f "$_SEED_DUMP" 2>/dev/null || true
+    fi
+fi
+
+fi   # end: if $DB_RESTORED / else (push + seed + dump)
 
 # ── Pre-flight: ensure node_modules exist for all JS services ──
 JS_SVC_DIRS=(back-end front-end)
@@ -753,6 +799,8 @@ write_services_manifest() {
     SERVICE_NAMES="$names_csv" SERVICE_PIDS="$pids_csv" SERVICE_STATUS="$SERVICE_STATUS" \
         BENCHMARK_MODE="$BENCHMARK_MODE" DB_CONTAINER="$DB_CONTAINER" \
         DB_VOLUME="$DB_VOLUME" DB_OWNED_BY_US="$DB_OWNED_BY_US" USE_SYSTEM_PG="$USE_SYSTEM_PG" \
+        WMH_MANIFEST_PORT="${WMH_MANIFEST_PORT:-0}" WMH_MANIFEST_URL="${WMH_MANIFEST_URL:-}" \
+        WMH_MANIFEST_MODEL_NAME="${WMH_MANIFEST_MODEL_NAME:-}" \
         RUN_SH_PID="$$" RUN_CONTEXT_DIR="$RUN_CONTEXT_DIR" python3 - <<'PY'
 import json
 import os
@@ -794,6 +842,8 @@ data = {
         "mac_app": env_int("MAC_APP_PORT"),
         "sdk_metrics": env_int("SDK_METRICS_PORT"),
         "local_db": env_int("LOCAL_DB_PORT"),
+        # WMH port is only serving in benchmark/simulate context; 0 otherwise.
+        "wmh": env_int("WMH_MANIFEST_PORT"),
         "ngrok_api": env_int("NGROK_WEB_PORT"),
     },
     "urls": {
@@ -803,8 +853,11 @@ data = {
         "public": os.environ.get("PUBLIC_BASE_URL", ""),
         "health": f"http://localhost:{os.environ.get('HEALTH_PORT', '')}",
         "sdk_metrics": f"http://localhost:{os.environ.get('SDK_METRICS_PORT', '')}",
+        # Empty until the WMH server is confirmed serving (benchmark/simulate only).
+        "wmh": os.environ.get("WMH_MANIFEST_URL", ""),
     },
     "temporal_task_queue": os.environ.get("TEMPORAL_TASK_QUEUE", ""),
+    "wmh_model_name": os.environ.get("WMH_MANIFEST_MODEL_NAME", ""),
         "database": {
             "container": os.environ.get("DB_CONTAINER", ""),
             "volume": os.environ.get("DB_VOLUME", ""),
@@ -836,6 +889,124 @@ with open(tmp_path, "w") as f:
     f.write("\n")
 os.replace(tmp_path, path)
 PY
+}
+
+# ── World Model Harness (WMH) ──
+# The WMH is a trace-grounded environment emulator used by simulate/shadow
+# benchmarks. It runs as a standard run.sh-managed service on ALL non-prod runs
+# (local + cloud). Two costs, gated differently:
+#   - Serving (`wmh serve`, a loaded model idling on WMH_PORT): CHEAP → we serve
+#     on every non-prod run whenever a built model artifact already exists.
+#   - The first GEPA build from the R2 trace corpus: EXPENSIVE + needs R2 creds →
+#     only attempted when this is a benchmark run (BENCHMARK_MODE) or an explicit
+#     opt-in (SERVE_WORLD_MODEL=1). Building is NEVER fatal: a failed/absent build
+#     just means no WMH this run (simulate benchmarks will error clearly; smoke
+#     and plain dev runs are unaffected).
+# Hard guard: NEVER in prod (ENVIRONMENT=production; prod agents run on Fly via
+# worker.py and never invoke run.sh, but the guard makes the invariant explicit).
+WMH_PID=""
+WMH_MODEL_NAME="${WMH_MODEL_NAME:-rose-archive}"
+
+should_serve_world_model() {
+    # Serve on every non-prod run; only prod is excluded.
+    [ "${ENVIRONMENT:-}" = "production" ] && return 1
+    # Explicit opt-out: the cloud-bench box uses this for real-mode (non-simulate)
+    # runs where no WMH is needed, so the (slow, R2-corpus + GEPA) cold build never
+    # blocks status=running. Simulate runs leave this unset and still build/serve.
+    [ "${BENCHMARK_SKIP_WMH_BUILD:-}" = "1" ] && return 1
+    return 0
+}
+
+start_world_model_harness() {
+    should_serve_world_model || return 0
+
+    mkdir -p "$RUN_CONTEXT_DIR"
+    local wmh_log="$RUN_CONTEXT_DIR/wmh-serve-log.txt"
+
+    # Shared, persistent build root so the model is built ONCE and reused across
+    # every run — NOT the per-run context dir (that would rebuild each time).
+    # Mirrors _DEFAULT_WMH_BUILD_ROOT in agents/benchmarks/world_model_harness.py.
+    local build_dir="${WMH_BUILD_DIR:-$PWD/.context/world-model}"
+    case "$build_dir" in
+        /*) : ;;                       # already absolute
+        *)  build_dir="$PWD/$build_dir" ;;
+    esac
+
+    local model_ready=false
+    if [ -f "$build_dir/build.manifest.json" ] && [ -d "$build_dir/models/$WMH_MODEL_NAME" ]; then
+        model_ready=true
+    fi
+
+    _wmh_build() {
+        (cd agents && source venv/bin/activate && \
+            WMH_BUILD_DIR="$build_dir" WMH_MODEL_NAME="$WMH_MODEL_NAME" \
+            python -c "from benchmarks.world_model_harness import update_world_model_for_simulation as u; u(progress=lambda e: print('[WMH]', e.get('title'), e.get('status'), flush=True))" \
+            >>"$wmh_log" 2>&1)
+    }
+
+    if ! $model_ready; then
+        # First build (GEPA) is expensive + needs the R2 corpus — only when this
+        # run is allowed to build. Non-fatal: on failure we warn and skip serving.
+        if $BENCHMARK_MODE || [ "${SERVE_WORLD_MODEL:-}" = "1" ]; then
+            echo "🌍 Building World Model Harness corpus ($WMH_MODEL_NAME) from trace archive → $build_dir (first build)"
+            if _wmh_build; then
+                model_ready=true
+            else
+                echo "⚠️  World Model Harness build failed — WMH not served this run (see $wmh_log). Simulate benchmarks will error until it builds; smoke/dev runs are unaffected."
+                tail -20 "$wmh_log" || true
+            fi
+        else
+            echo "ℹ️  No prebuilt World Model at $build_dir — skipping WMH serve. Build it via a benchmark run or SERVE_WORLD_MODEL=1."
+        fi
+    elif $BENCHMARK_MODE && [ "${BENCHMARK_SKIP_WMH_DELTA:-}" != "1" ]; then
+        # Cheap delta refresh so benchmark runs pick up new traces; never fatal.
+        # BENCHMARK_SKIP_WMH_DELTA=1 serves the pre-built model verbatim with NO
+        # archive read/refresh — the fast per-run path for the persistent cloud-bench
+        # box, where the model is (re)built ONLY via an explicit --refresh-wmh step
+        # and every per-run start must SERVE the cached artifact, never touch R2.
+        _wmh_build || echo "⚠️  WMH delta refresh failed — serving existing model (see $wmh_log)."
+    elif $BENCHMARK_MODE; then
+        echo "🌍 BENCHMARK_SKIP_WMH_DELTA=1 — serving pre-built World Model verbatim (no delta refresh)"
+    fi
+
+    $model_ready || return 0
+
+    echo "🌍 Starting World Model Harness: serve $WMH_MODEL_NAME on port $WMH_PORT (root $build_dir)"
+    # Serve via serve_world_model.py (Rose inference provider: compute tokens +
+    # claudeAuth + rotation) instead of `wmh serve` (raw direct-Anthropic key).
+    (cd agents && source venv/bin/activate && \
+        exec python -m benchmarks.serve_world_model --name "$WMH_MODEL_NAME" --port "$WMH_PORT" --root "$build_dir") \
+        >>"$wmh_log" 2>&1 &
+    WMH_PID=$!
+    PIDS+=($WMH_PID); NAMES+=("wmh")
+
+    # Health-wait on GET /healthz (short timeout — check the log if it never comes up).
+    local ready=false
+    for _ in $(seq 1 30); do
+        if ! kill -0 "$WMH_PID" 2>/dev/null; then
+            echo "⚠️  WMH server exited before becoming ready — not served this run (see $wmh_log)."
+            tail -20 "$wmh_log" || true
+            return 0
+        fi
+        if curl -fsS "http://localhost:$WMH_PORT/healthz" >/dev/null 2>&1; then
+            ready=true
+            break
+        fi
+        sleep 1
+    done
+    if ! $ready; then
+        echo "⚠️  WMH server did not answer /healthz on port $WMH_PORT within 30s — not served this run (see $wmh_log)."
+        tail -20 "$wmh_log" || true
+        return 0
+    fi
+
+    # Only now publish WMH to the manifest and benchmark env — the server is confirmed up.
+    export WMH_MANIFEST_PORT="$WMH_PORT"
+    export WMH_MANIFEST_URL="http://localhost:$WMH_PORT"
+    export WMH_MANIFEST_MODEL_NAME="$WMH_MODEL_NAME"
+    export WMH_BASE_URL="http://localhost:$WMH_PORT"
+    export WMH_MODEL_NAME
+    echo "🌍 World Model Harness ready: $WMH_BASE_URL (model $WMH_MODEL_NAME)"
 }
 
 kill_tree() {
@@ -903,7 +1074,22 @@ run_service() {
 #   CONDUCTOR_WORKSPACE_NAME -> rose-<workspace>.<suffix>
 #   ngrok reserved domain -> Vite dev server on FRONTEND_PORT
 #   backend exposes PUBLIC_BASE_URL for /api/test-payment/public-url
-start_public_tunnel
+#
+# BENCHMARK_SKIP_PUBLIC_TUNNEL=1 opt-out: a self-contained cloud-bench box
+# (scripts/run-bench-cloud) runs simulate-only, where the WMH intercepts every
+# provider/environment boundary and no external browser ever needs to reach the
+# frontend over the internet. Standing up an ngrok reserved domain per one-shot
+# Fly machine is fragile and unnecessary there, so we point PUBLIC_BASE_URL at the
+# local frontend and skip the tunnel + tunnel smoke. Never set this for the normal
+# dev/benchmark stack — real browser agents need the public URL.
+if [ "${BENCHMARK_SKIP_PUBLIC_TUNNEL:-}" = "1" ]; then
+    export PUBLIC_BASE_URL="http://localhost:$FRONTEND_PORT"
+    export VITE_ALLOWED_HOSTS="localhost"
+    export ALLOWED_ORIGINS="$ALLOWED_ORIGINS,$PUBLIC_BASE_URL"
+    echo "🌐 BENCHMARK_SKIP_PUBLIC_TUNNEL=1 — skipping ngrok public tunnel; PUBLIC_BASE_URL=$PUBLIC_BASE_URL (simulate-only cloud bench)"
+else
+    start_public_tunnel
+fi
 export FAST_MODE_ANTHROPIC_PROXY_URL="$PUBLIC_BASE_URL/anthropic-proxy"
 export FAST_MODE_CODEX_PROXY_URL="$PUBLIC_BASE_URL/codex-proxy"
 
@@ -961,13 +1147,31 @@ else
 fi
 PIDS+=($!); NAMES+=("agents")
 
+# Benchmark Hub poller: claims runs dispatched from the in-app Benchmarks tab
+# and executes them on this machine. Without it a dispatched run sits queued
+# forever — the hub's basic flow MUST work on a plain dev stack. Skipped in
+# benchmark mode (the isolated bench stack must never claim hub dispatches).
+if ! $BENCHMARK_MODE; then
+    run_service "hub-poller" bash -c 'set -eo pipefail; rm -f hub-poller-logs.log && HUB_URL=http://localhost:$BACKEND_PORT scripts/run-bench-hub-poller --local 2>&1 | tee hub-poller-logs.log' &
+    PIDS+=($!); NAMES+=("hub-poller")
+fi
+
+# World Model Harness (benchmark/simulate only — never prod). Builds from the
+# trace corpus and serves on WMH_PORT; sets WMH_BASE_URL/WMH_MODEL_NAME + manifest
+# fields when it comes up. A no-op on plain (non-benchmark) run.sh.
+start_world_model_harness
+
 SERVICE_STATUS=running
 write_services_manifest
 echo "🧭 Service manifest: $RUN_CONTEXT_DIR/services.json"
 echo "🌐 Public frontend: $PUBLIC_BASE_URL"
 
-echo "⏳ Verifying public tunnel smoke..."
-bash scripts/test-public-tunnel.sh
+if [ "${BENCHMARK_SKIP_PUBLIC_TUNNEL:-}" = "1" ]; then
+    echo "⏭️  BENCHMARK_SKIP_PUBLIC_TUNNEL=1 — skipping public tunnel smoke (no ngrok on this cloud bench box)"
+else
+    echo "⏳ Verifying public tunnel smoke..."
+    bash scripts/test-public-tunnel.sh
+fi
 
 # ── Post-launch: verify exactly one listener per service port ──
 # Wait for services to bind, then confirm no duplicate listeners.

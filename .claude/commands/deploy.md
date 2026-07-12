@@ -75,6 +75,12 @@ CHANGED_RUNTIME_SURFACE=$([ -n "$CHANGED_BACKEND$CHANGED_AGENTS$CHANGED_RESEARCH
 
 Prompt modifications are high-risk behavior changes. **Any prompt modification MUST be approved by a human before deploy proceeds.** This includes system prompts, tool prompts, agent/skill instructions, `CLAUDE.md`, `.claude/commands/*.md`, prompt template files, strategy overrides, and prompt-related diff hunks.
 
+**What "prompt modification" means — LLM-visible text, not file membership.** The rule reviews changes to what an LLM actually reads: prompt/instruction text baked in at compile time (system prompts, tool descriptions, skill/command instructions, tasks.json `prompt`/`description` fields, template files) AND text assembled at runtime (string-building logic, template interpolation, context-chunk selection, truncation — anything that changes the bytes an LLM ultimately sees). The guard script flags candidate FILES, which over-approximates: a validation helper, UI accessibility tweak, or state-handling fix inside a flagged file is NOT a prompt modification. When the guard fires:
+
+1. Examine every flagged hunk and classify it: does it change (or change the construction of) text an LLM ever sees — at compile time or runtime?
+2. If NO hunk changes LLM-visible text: state that determination in the deploy log (per file, one line on why it is code-behavior only), then pass the guard with the mandatory flag WITHOUT waiting for human approval. Record `Prompt Human Approval Guard | Pass | flagged files are code-behavior only (no LLM-visible text changed): <files>` in `TEST_REPORT`.
+3. If ANY hunk changes LLM-visible text — or you are unsure (runtime string construction counts) — stop and request human approval for those hunks. When mixed, list which hunks need review and which are code-behavior-only so the human reviews only what matters.
+
 Run the guard without the approval flag first:
 
 ```bash
@@ -83,9 +89,9 @@ bash scripts/check-prompt-human-approval.sh
 
 If it passes, record `Prompt Human Approval Guard | Pass | no prompt edits detected` in `TEST_REPORT`.
 
-If it fails, stop and ask the human to review the listed prompt modifications. Do not infer approval from silence, prior discussion, or the fact that the branch exists.
+If it fails, apply the classification above. For hunks that change LLM-visible text, stop and ask the human to review them. Do not infer approval from silence, prior discussion, or the fact that the branch exists.
 
-Human approval is scoped only to the prompt diff that exists when approval is requested. If any prompt, instruction, command, skill, or prompt-related file changes later — including changes made to fix tests or smoke benchmarks — re-run the guard without the approval flag, show the new prompt diff, and wait for fresh explicit approval before continuing.
+Human approval is scoped only to the prompt diff that exists when approval is requested. If LLM-visible text in any prompt, instruction, command, skill, or prompt-related file changes later — including changes made to fix tests or smoke benchmarks — re-run the guard without the approval flag, show the new prompt diff, and wait for fresh explicit approval before continuing. Later code-behavior-only changes to flagged files follow rule 2 above (classify, log, proceed).
 
 After the human explicitly approves the current prompt changes, rerun the guard with the mandatory flag:
 

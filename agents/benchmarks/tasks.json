@@ -800,6 +800,10 @@
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
+      "live_fixtures": [
+        "base",
+        "amazon_auth"
+      ],
       "services": [
         "amazon.com",
         "write_lock"
@@ -810,7 +814,7 @@
       "live_targets": [
         "https://www.amazon.com"
       ],
-      "context_notes": "Live Amazon with real account/auth state and payment/write-lock controls. A synthetic digital-twin variant of this scenario lives in the idea bank (black-beanie)."
+      "context_notes": "Live Amazon with real account/auth state and payment/write-lock controls. The base live fixture refreshes compute tokens + cookies + passwords from prod; amazon_auth builds the active CookieBundle. A synthetic digital-twin variant of this scenario lives in the idea bank (black-beanie)."
     },
     "evaluators": [
       {
@@ -850,6 +854,26 @@
     "approval_handling": "ignore",
     "expected_attention_kind": "write_lock",
     "start_phase": "execute",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "base",
+        "amazon_auth"
+      ],
+      "services": [
+        "amazon.com",
+        "write_lock"
+      ],
+      "secrets": [
+        "amazon_auth_bundle"
+      ],
+      "live_targets": [
+        "https://www.amazon.com"
+      ],
+      "context_notes": "Live Amazon via synced-prod cookie auth. The base live fixture refreshes compute tokens + cookies + passwords from prod; amazon_auth builds the active CookieBundle used to reach the payment write-lock."
+    },
     "bench": "pipeline-e2e"
   },
   {
@@ -930,6 +954,65 @@
     "bench": "pipeline-e2e"
   },
   {
+    "name": "browser-indeed-account-create",
+    "title": "Browser Indeed Account Creation",
+    "description": "Use the browser agent to create a benchmark-safe Indeed job-seeker account.",
+    "prompt": "Use a browser agent to go to https://www.indeed.com/ and create a new Indeed job-seeker account using only benchmark-safe agent identity details. Use a minted or test email from the browser auth options if one is offered. If Indeed asks for email, phone, or SMS verification, complete it only when the verification code is available through the browser agent auth/OTP assistance. Do not apply for jobs, upload a resume, message employers, or use a real person's identity. Stop once Indeed shows the account is signed in or account creation is complete. If Indeed blocks account creation, requires unavailable verification, or presents an anti-bot challenge that cannot be completed, stop and report the exact visible blocker.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "antibot"
+    ],
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "bench": "rose-bench",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "indeed.com",
+        "email_verification",
+        "antibot"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.indeed.com/"
+      ],
+      "context_notes": "Live Indeed account-creation flow with benchmark-safe identity only. The task may pass with signed-in/account-created evidence or with a precise terminal blocker when Indeed requires unavailable verification or blocks automation."
+    },
+    "evaluators": [
+      {
+        "id": "primary",
+        "method": "agentic_llm_judge",
+        "criteria": [
+          "The transcript shows the task was performed through a browser agent",
+          "The agent attempted to create a new Indeed account with benchmark-safe identity details",
+          "The final answer includes either signed-in/account-created evidence or a precise terminal blocker",
+          "The agent did not apply for jobs, upload a resume, message employers, or use a real person's identity"
+        ],
+        "judge_prompt": "Review the browser transcript and final answer. Pass only if the agent attempted the live Indeed account-creation flow using benchmark-safe identity details and either reached signed-in/account-created evidence or reported a precise terminal verification/anti-bot blocker without applying for jobs or uploading a resume."
+      }
+    ],
+    "source": [
+      "user-request:indeed-account-create"
+    ]
+  },
+  {
     "name": "claude-code-agent",
     "title": "Claude Code Sandbox",
     "prompt": "Using Claude Code, write and run a Python program that computes the Collatz sequence starting from 27. Print every number in the sequence until it reaches 1, and print the total count of steps.",
@@ -970,6 +1053,120 @@
     "approval_handling": null,
     "start_phase": "execute",
     "bench": "pipeline-e2e"
+  },
+  {
+    "name": "browser-google-search-single-result",
+    "title": "Browser Google Search Single Result",
+    "description": "Use the browser agent to perform a Google search and return one result.",
+    "prompt": "Use a browser agent, not web_search or web_fetch, to go to https://www.google.com/search?q=OpenAI+official+website and inspect the visible Google results page. Return exactly one non-ad search result: include only the result title and URL. If a cookie consent or interstitial appears, use normal visible browser actions to continue.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "antibot"
+    ],
+    "price_limit_cents": 50,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "bench": "pipeline-e2e",
+    "world_model_mode": "real",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "google.com"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.google.com/search?q=OpenAI+official+website"
+      ],
+      "context_notes": "Live public Google search page; no account or secrets required. The task exercises browser navigation, search-result inspection, and a single-result final answer."
+    },
+    "evaluators": [
+      {
+        "id": "single-result",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The transcript shows the task was performed through a browser agent",
+          "The final answer contains exactly one Google search result",
+          "The result includes a title and URL",
+          "The final answer does not summarize or list multiple results"
+        ],
+        "judge_prompt": "Review the final answer and transcript. Pass only if the agent used browser automation to inspect Google results and returned exactly one non-ad result with a title and URL."
+      }
+    ],
+    "source": [
+      "user-request:browser-google-single-result"
+    ]
+  },
+  {
+    "name": "browser-bing-search-single-result",
+    "title": "Browser Bing Search Single Result",
+    "description": "Use the browser agent to perform a Bing search and return one result.",
+    "prompt": "Use a browser agent, not web_search or web_fetch, to go to https://www.bing.com/search?q=OpenAI+official+website and inspect the visible Bing results page. Return exactly one non-ad search result: include only the result title and URL. If a cookie consent or interstitial appears, use normal visible browser actions to continue.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "antibot"
+    ],
+    "price_limit_cents": 50,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "bench": "pipeline-e2e",
+    "world_model_mode": "real",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "bing.com"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.bing.com/search?q=OpenAI+official+website"
+      ],
+      "context_notes": "Live public Bing search page; no account or secrets required. The task exercises browser navigation, search-result inspection, and a single-result final answer."
+    },
+    "evaluators": [
+      {
+        "id": "single-result",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The transcript shows the task was performed through a browser agent",
+          "The final answer contains exactly one Bing search result",
+          "The result includes a title and URL",
+          "The final answer does not summarize or list multiple results"
+        ],
+        "judge_prompt": "Review the final answer and transcript. Pass only if the agent used browser automation to inspect Bing results and returned exactly one non-ad result with a title and URL."
+      }
+    ],
+    "source": [
+      "user-request:browser-bing-single-result"
+    ]
   },
   {
     "name": "agent-payment-test-shop",
@@ -1176,6 +1373,8 @@
   {
     "name": "outreach-batch",
     "title": "Outreach in Batch",
+    "status": "incomplete",
+    "description": "Retired duplicate of family-office-angel-outreach; kept only to preserve historical task identity.",
     "prompt": "I've attached a CSV of angels. Reach out to every person in this CSV.\n\nUse spawn_general_purpose_agent_for_each to spawn one general-purpose agent per row.\n\nEach message should be personalized, sent from a@roselabs.ai and be centered around getting feedback about ML research I'm doing in mass agent networks. Here is the blog post I wrote: https://www.roselabs.ai/research/task-decomposer\n\nWe need to make sure we run this process with world class persistence, etiquette, and attention to detail. I want to have one general-purpose agent per row.\n\nPROCESS GUIDELINES\n===\n0. Use spawn_general_purpose_agent_for_each when spawning a general-purpose agent per row.\n1. At the start, do research for best practices on cold email outreach.\n2. When doing research on each person, try to find any unique commonalities between me and the person I'm reaching out to that help build trust in the email (school alma mater, fellow YC founder, any unique commonality).\n3. We are trying to eventually get this person to invest. Don't mention that, but just know that this is my goal. The first step is to build a relationship.\n4. Keep the email short and sweet, be personable, no dashes, or language that makes the email read like an AI wrote it. Do research on common phrases or patterns that AIs use when writing a message, and actively avoid them.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
@@ -1227,6 +1426,59 @@
       "test-prompts:Outreach In Batch"
     ],
     "bench": "rose-bench"
+  },
+  {
+    "name": "load-test-sias",
+    "title": "Load-Test: Fan Out N General-Purpose Agents",
+    "prompt": "LOAD TEST — your only goal is to spawn exactly {n} general-purpose agents in parallel and aggregate their results. Do this:\n\n1. Make a SINGLE spawn_general_purpose_agent_for_each call with type=\"for_each\", start_phase=\"execute\", and items set to the integers 1, 2, 3, ..., {n} (every integer from 1 through {n}, inclusive — no skips).\n2. Set output_schema to {\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"integer\"}},\"required\":[\"value\"]}.\n3. Use this exact goal for every general-purpose agent (the row context will append the assigned ID): \"You are a load-test general-purpose agent. Your assigned integer ID is in the row context above. Compute via PURE REASONING — do NOT call web_search, web_fetch, grep, spawn_agent, message_person, or any tool other than send_message_to_user_execute_phase and attempt_completion. Compute: value = (ID * ID) + (ID * 3) + 7. (a) Call send_message_to_user_execute_phase with the arithmetic shown (e.g. 'ID=7: 7*7 + 7*3 + 7 = 49 + 21 + 7 = 77'). (b) Then call attempt_completion with {\\\"value\\\": <integer>}.\"\n4. Once every general-purpose agent completes, sum the `value` fields from all {n} structured outputs and report ONLY the final sum as your answer.\n\nDo NOT use spawn_explore_agent, browser, code, or any other tool path — only spawn_general_purpose_agent_for_each + send_message_to_user_execute_phase + attempt_completion.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_general_purpose_agent_for_each"
+    ],
+    "tags": [
+      "load-test"
+    ],
+    "price_limit_cents": 300,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "sub_agent_count": 30,
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "No external fixture required; the harness substitutes {n} and {expected_sum} and evaluates deterministic orchestration behavior."
+    },
+    "evaluators": [
+      {
+        "id": "primary",
+        "method": "static_check",
+        "criteria": [
+          "Final answer contains the expected deterministic sum",
+          "At least n sub-agents are created",
+          "No browser or code sandbox detour is used"
+        ],
+        "checks": [
+          {
+            "type": "string_match",
+            "expected_strings": [
+              "{expected_sum}"
+            ]
+          }
+        ]
+      }
+    ],
+    "source": [
+      "long-horizon:load-test-mass-agent-arithmetic"
+    ],
+    "bench": "pipeline-e2e",
+    "status": "retired"
   },
   {
     "name": "build-boxing-payment",
@@ -1352,58 +1604,6 @@
     "bench": "rose-bench"
   },
   {
-    "name": "load-test-sias",
-    "title": "Load-Test: Fan Out N General-Purpose Agents",
-    "prompt": "LOAD TEST — your only goal is to spawn exactly {n} general-purpose agents in parallel and aggregate their results. Do this:\n\n1. Make a SINGLE spawn_general_purpose_agent_for_each call with type=\"for_each\", start_phase=\"execute\", and items set to the integers 1, 2, 3, ..., {n} (every integer from 1 through {n}, inclusive — no skips).\n2. Set output_schema to {\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"integer\"}},\"required\":[\"value\"]}.\n3. Use this exact goal for every general-purpose agent (the row context will append the assigned ID): \"You are a load-test general-purpose agent. Your assigned integer ID is in the row context above. Compute via PURE REASONING — do NOT call web_search, web_fetch, grep, spawn_agent, message_person, or any tool other than send_message_to_user_execute_phase and attempt_completion. Compute: value = (ID * ID) + (ID * 3) + 7. (a) Call send_message_to_user_execute_phase with the arithmetic shown (e.g. 'ID=7: 7*7 + 7*3 + 7 = 49 + 21 + 7 = 77'). (b) Then call attempt_completion with {\\\"value\\\": <integer>}.\"\n4. Once every general-purpose agent completes, sum the `value` fields from all {n} structured outputs and report ONLY the final sum as your answer.\n\nDo NOT use spawn_explore_agent, browser, code, or any other tool path — only spawn_general_purpose_agent_for_each + send_message_to_user_execute_phase + attempt_completion.",
-    "timeout_seconds": 300,
-    "is_chat_mode": false,
-    "expected_tools": [
-      "spawn_general_purpose_agent_for_each"
-    ],
-    "tags": [
-      "load-test"
-    ],
-    "price_limit_cents": 300,
-    "requires_browser_agent": false,
-    "requires_claude_code": false,
-    "attachment": null,
-    "approval_handling": null,
-    "start_phase": "plan",
-    "sub_agent_count": 30,
-    "environment": {
-      "mode": "synthetic",
-      "db_fixtures": [],
-      "base_images": [],
-      "services": [],
-      "secrets": [],
-      "live_targets": [],
-      "context_notes": "No external fixture required; the harness substitutes {n} and {expected_sum} and evaluates deterministic orchestration behavior."
-    },
-    "evaluators": [
-      {
-        "id": "primary",
-        "method": "static_check",
-        "criteria": [
-          "Final answer contains the expected deterministic sum",
-          "At least n sub-agents are created",
-          "No browser or code sandbox detour is used"
-        ],
-        "checks": [
-          {
-            "type": "string_match",
-            "expected_strings": [
-              "{expected_sum}"
-            ]
-          }
-        ]
-      }
-    ],
-    "source": [
-      "long-horizon:load-test-mass-agent-arithmetic"
-    ],
-    "bench": "pipeline-e2e"
-  },
-  {
     "name": "calendly-schedule-meeting",
     "title": "Create Calendly Link & Send Meeting Invite",
     "prompt": "Schedule a meeting with Andy Prevalsky (andyprevalsky@yahoo.com). Go to Calendly (log in with a@roselabs.ai, which is aliased to andy@roselabs.ai), create a new 30-minute one-on-one event type, and send the scheduling link to Andy via email at andyprevalsky@yahoo.com. The email should be short and friendly, just letting him know you'd like to set up a quick 30-min chat and including the Calendly link so he can pick a time that works. IMPORTANT: Don't waste time trying to rename the event — the default name is fine. Focus on setting it to 30 minutes, saving it, copying the link, and sending the email.",
@@ -1507,56 +1707,6 @@
     "bench": "pipeline-e2e"
   },
   {
-    "name": "spawn-depth-debug",
-    "title": "Recursive Spawn Depth Debug",
-    "description": "Tests recursive general-purpose agent spawning with depth parameter",
-    "prompt": "Spawn 2 general-purpose agents with the same goal as yourself, this is for debugging of the systems max depth parameter. Current Depth Left == 2, when spawning a general-purpose agent decrease this count by 1. If Depth Left == 0, then output a random integer between 0 - 10. If Depth > 0 then output the multiplication of each general-purpose agent you spawned.",
-    "timeout_seconds": 300,
-    "is_chat_mode": false,
-    "expected_tools": [
-      "spawn_general_purpose_agent"
-    ],
-    "tags": [
-      "mass-agent"
-    ],
-    "price_limit_cents": 100,
-    "requires_browser_agent": false,
-    "requires_claude_code": false,
-    "attachment": null,
-    "approval_handling": null,
-    "start_phase": "plan",
-    "status": "incomplete",
-    "source": [
-      "test-prompts:Test Spawn General-Purpose Agents"
-    ],
-    "bench": "pipeline-e2e"
-  },
-  {
-    "name": "dag-executor-plan-mode",
-    "title": "DAG Executor Plan Mode",
-    "description": "Tests DAG executor with plan mode (no web searches during planning)",
-    "prompt": "Do 3 parallel web_searches to get data for the best of each of these items\n1. Cities to live in in your 20s\n2. place to vacation\n3. cheapest cost of living in NA\n\nno questions ask\nstart in plan mode\ndont use any websearches in plan mode\nno general-purpose agents",
-    "timeout_seconds": 300,
-    "is_chat_mode": false,
-    "expected_tools": [
-      "spawn_agent"
-    ],
-    "tags": [
-      "eval"
-    ],
-    "price_limit_cents": 100,
-    "requires_browser_agent": false,
-    "requires_claude_code": false,
-    "attachment": null,
-    "approval_handling": null,
-    "start_phase": "plan",
-    "status": "incomplete",
-    "source": [
-      "test-prompts:Test DAG Executor"
-    ],
-    "bench": "pipeline-e2e"
-  },
-  {
     "name": "browser-file-upload-tinypng",
     "title": "Browser File Upload TinyPNG",
     "description": "Tests browser agent file upload with TinyPNG",
@@ -1576,7 +1726,7 @@
     "attachment": "rs.jpeg",
     "approval_handling": null,
     "start_phase": "execute",
-    "status": "incomplete",
+    "status": "ready",
     "source": [
       "test-prompts:Test Files in Browser Agent"
     ],
@@ -1584,10 +1734,10 @@
   },
   {
     "name": "wait-for-trigger",
-    "title": "Wait For Price Trigger",
-    "description": "Tests wait_for with price trigger and phone call action",
-    "prompt": "Once bitcoin reaches 72K, call my phone number and tell me.",
-    "timeout_seconds": 300,
+    "title": "Call When Bitcoin Hits Immediate Price Trigger",
+    "description": "Tests wait_for with an immediately satisfied Bitcoin price trigger and phone call action",
+    "prompt": "Use wait_for to call my phone number when Bitcoin reaches $10. This price threshold should already be satisfied immediately; once the trigger fires, call me and tell me Bitcoin hit the target.",
+    "timeout_seconds": 600,
     "is_chat_mode": false,
     "expected_tools": [
       "wait_for"
@@ -1602,257 +1752,16 @@
     "attachment": null,
     "approval_handling": null,
     "start_phase": "execute",
-    "status": "incomplete",
+    "status": "ready",
     "source": [
-      "test-prompts:Test Wait For"
-    ],
-    "bench": "pipeline-e2e"
-  },
-  {
-    "name": "smoke-backend-claude-code",
-    "title": "Backend Smoke: Claude Code E2B Session",
-    "description": "Backend blackbox smoke: real Claude Code session in an E2B sandbox writes a sentinel file",
-    "prompt": "External vitest smoke — not an agent goal. Runs back-end/src/tests/blackbox/claude-code.blackbox.ts (testSmoke_claudeCodeAnswersQuestion): creates a real Claude Code E2B session, asks it to write /home/user/output/claude-smoke.txt with CLAUDE_E2B_OK, asserts the websocket stream and sandbox file contents.",
-    "timeout_seconds": 300,
-    "is_chat_mode": false,
-    "expected_tools": [],
-    "tags": [
-      "smoke",
-      "claude-code"
-    ],
-    "price_limit_cents": 100,
-    "requires_browser_agent": false,
-    "requires_claude_code": true,
-    "attachment": null,
-    "approval_handling": null,
-    "start_phase": null,
-    "runner": "vitest",
-    "evaluators": [
-      {
-        "id": "primary",
-        "method": "static_check",
-        "criteria": [
-          "Session creation returns ws_url, task_id, sandbox_id",
-          "Stream contains CLAUDE_E2B_DONE within 240s",
-          "Sandbox file /home/user/output/claude-smoke.txt contains exactly CLAUDE_E2B_OK"
-        ],
-        "checks": [
-          {
-            "type": "vitest",
-            "file": "back-end/src/tests/blackbox/claude-code.blackbox.ts",
-            "test": "testSmoke_claudeCodeAnswersQuestion"
-          }
-        ]
-      }
-    ],
-    "source": [
-      "smoke:back-end/src/tests/blackbox/claude-code.blackbox.ts:testSmoke_claudeCodeAnswersQuestion"
-    ],
-    "bench": "pipeline-e2e"
-  },
-  {
-    "name": "smoke-backend-codex-code",
-    "title": "Backend Smoke: Codex E2B Session",
-    "description": "Backend blackbox smoke: real Codex session in an E2B sandbox writes a sentinel file",
-    "prompt": "External vitest smoke — not an agent goal. Runs back-end/src/tests/blackbox/codex-code.blackbox.ts (testSmoke_codexCompletesE2bTask): creates a real Codex E2B session, asks it to write /home/user/output/codex-smoke.txt with CODEX_E2B_OK, asserts the websocket stream and sandbox file contents.",
-    "timeout_seconds": 300,
-    "is_chat_mode": false,
-    "expected_tools": [],
-    "tags": [
-      "smoke"
-    ],
-    "price_limit_cents": 100,
-    "requires_browser_agent": false,
-    "requires_claude_code": false,
-    "attachment": null,
-    "approval_handling": null,
-    "start_phase": null,
-    "runner": "vitest",
-    "evaluators": [
-      {
-        "id": "primary",
-        "method": "static_check",
-        "criteria": [
-          "Session creation returns ws_url, task_id, sandbox_id",
-          "Stream contains CODEX_E2B_DONE within 240s",
-          "Sandbox file /home/user/output/codex-smoke.txt contains exactly CODEX_E2B_OK"
-        ],
-        "checks": [
-          {
-            "type": "vitest",
-            "file": "back-end/src/tests/blackbox/codex-code.blackbox.ts",
-            "test": "testSmoke_codexCompletesE2bTask"
-          }
-        ]
-      }
-    ],
-    "source": [
-      "smoke:back-end/src/tests/blackbox/codex-code.blackbox.ts:testSmoke_codexCompletesE2bTask"
-    ],
-    "bench": "pipeline-e2e"
-  },
-  {
-    "name": "smoke-backend-sms-supervisor",
-    "title": "Backend Smoke: SMS Supervisor Loop",
-    "description": "Backend blackbox smoke: inbound SMS drives the supervisor loop to send the fixture response",
-    "prompt": "External vitest smoke — not an agent goal. Runs back-end/src/tests/blackbox/sms-supervisor.blackbox.ts (testSmoke_knownPhoneSupervisorSendsSmsResponse): posts an inbound SMS for a provisioned user, asserts the supervisor loop sends the configured outbound reply and session state advances.",
-    "timeout_seconds": 300,
-    "is_chat_mode": false,
-    "expected_tools": [],
-    "tags": [
-      "smoke"
-    ],
-    "price_limit_cents": 100,
-    "requires_browser_agent": false,
-    "requires_claude_code": false,
-    "attachment": null,
-    "approval_handling": null,
-    "start_phase": null,
-    "runner": "vitest",
-    "evaluators": [
-      {
-        "id": "primary",
-        "method": "static_check",
-        "criteria": [
-          "POST /api/sms/inbound returns 200",
-          "Outbound Surge SMS call captured with the fixture reply",
-          "SmsSession records both inbound and assistant messages"
-        ],
-        "checks": [
-          {
-            "type": "vitest",
-            "file": "back-end/src/tests/blackbox/sms-supervisor.blackbox.ts",
-            "test": "testSmoke_knownPhoneSupervisorSendsSmsResponse"
-          }
-        ]
-      }
-    ],
-    "source": [
-      "smoke:back-end/src/tests/blackbox/sms-supervisor.blackbox.ts:testSmoke_knownPhoneSupervisorSendsSmsResponse"
-    ],
-    "bench": "pipeline-e2e"
-  },
-  {
-    "name": "eval-sms-supervisor-grep-over-ask",
-    "title": "SMS Supervisor: greps user data instead of asking",
-    "description": "Real-LLM behavior eval: a factual question about a contact is answered from the user's own data via the supervisor's grep tool (source=network, seeded Person DB fixture) instead of texting a clarifying question back. Requires BLACKBOX_SMS_SUPERVISOR_REAL_LLM=1.",
-    "prompt": "External vitest eval — not an agent goal. Runs back-end/src/tests/blackbox/sms-supervisor.blackbox.ts (testRealLlm_answersContactFactViaGrep): seeds a Person row (name + email) as the DB fixture, sends inbound SMS 'What is Jane <LastName>'s email address?' with the real-LLM bypass, asserts the outbound SMS contains the seeded email.",
-    "timeout_seconds": 300,
-    "is_chat_mode": false,
-    "expected_tools": [],
-    "tags": [
-      "eval",
-      "external",
-      "real-llm"
-    ],
-    "price_limit_cents": 100,
-    "requires_browser_agent": false,
-    "requires_claude_code": false,
-    "attachment": null,
-    "approval_handling": null,
-    "start_phase": null,
-    "runner": "vitest",
-    "environment": {
-      "mode": "hybrid",
-      "db_fixtures": [
-        "Person row seeded by the test: firstName Jane, unique lastName, unique email"
-      ],
-      "base_images": [],
-      "services": [
-        "back-end blackbox harness (isolated backend + local Postgres)"
-      ],
-      "secrets": [
-        "BLACKBOX_SMS_SUPERVISOR_REAL_LLM=1"
-      ],
-      "live_targets": [
-        "Rose completions (claudeAuth/waterfall)"
-      ],
-      "context_notes": "Acceptance eval for the supervisor grep tool + search-first prompt rule."
-    },
-    "evaluators": [
-      {
-        "id": "primary",
-        "method": "static_check",
-        "criteria": [
-          "POST /api/sms/inbound returns 200",
-          "Outbound Surge SMS contains the seeded contact email",
-          "No clarifying question sent instead of the answer"
-        ],
-        "checks": [
-          {
-            "type": "vitest",
-            "file": "back-end/src/tests/blackbox/sms-supervisor.blackbox.ts",
-            "test": "testRealLlm_answersContactFactViaGrep"
-          }
-        ]
-      }
-    ],
-    "source": [
-      "eval:back-end/src/tests/blackbox/sms-supervisor.behavior.ts:testRealLlm_answersContactFactViaGrep"
-    ],
-    "bench": "pipeline-e2e"
-  },
-  {
-    "name": "eval-sms-supervisor-purchase-spawns-agent",
-    "title": "SMS Supervisor: clear purchase request spawns agent",
-    "description": "Real-LLM behavior eval: 'get me the best lip balm from amazon' spawns a superintelligence agent (start_new_agent) with a clear purchase goal instead of replying with a clarifying question. Requires BLACKBOX_SMS_SUPERVISOR_REAL_LLM=1.",
-    "prompt": "External vitest eval — not an agent goal. Runs back-end/src/tests/blackbox/sms-supervisor.blackbox.ts (testRealLlm_purchaseRequestSpawnsAgent): sends inbound SMS 'get me the best lip balm from amazon' with the real-LLM bypass, asserts an Agent row is created whose goal mentions lip balm and a purchase intent (amazon/purchase/buy/order).",
-    "timeout_seconds": 300,
-    "is_chat_mode": false,
-    "expected_tools": [],
-    "tags": [
-      "eval",
-      "external",
-      "real-llm"
-    ],
-    "price_limit_cents": 100,
-    "requires_browser_agent": false,
-    "requires_claude_code": false,
-    "attachment": null,
-    "approval_handling": null,
-    "start_phase": null,
-    "runner": "vitest",
-    "environment": {
-      "mode": "live",
-      "db_fixtures": [],
-      "base_images": [],
-      "services": [
-        "back-end blackbox harness (isolated backend + local Postgres)"
-      ],
-      "secrets": [
-        "BLACKBOX_SMS_SUPERVISOR_REAL_LLM=1"
-      ],
-      "live_targets": [
-        "Rose completions (claudeAuth/waterfall)"
-      ],
-      "context_notes": "Acceptance eval for the ported bias-to-action personality block in the supervisor prompt."
-    },
-    "evaluators": [
-      {
-        "id": "primary",
-        "method": "static_check",
-        "criteria": [
-          "POST /api/sms/inbound returns 200",
-          "Agent row created via start_new_agent commit",
-          "Agent goal mentions lip balm and a purchase intent"
-        ],
-        "checks": [
-          {
-            "type": "vitest",
-            "file": "back-end/src/tests/blackbox/sms-supervisor.blackbox.ts",
-            "test": "testRealLlm_purchaseRequestSpawnsAgent"
-          }
-        ]
-      }
-    ],
-    "source": [
-      "eval:back-end/src/tests/blackbox/sms-supervisor.behavior.ts:testRealLlm_purchaseRequestSpawnsAgent"
+      "test-prompts:Test Wait For",
+      "user-label:daily-immediate-bitcoin-trigger"
     ],
     "bench": "pipeline-e2e"
   },
   {
     "name": "phone-call-client-intake",
-    "title": "Phone Call — Client Intake (Name + Address)",
+    "title": "Call Client To Collect Intake Details",
     "prompt": "Call our new client at {callee_phone_number} exactly once and collect their full name and complete mailing address for our records. Do not call back or place a second phone call; if the single call fails, report that failure. When the call is done, report the exact full name and full mailing address back to me.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
@@ -1922,14 +1831,22 @@
       "provided_mailing_address": "4821 Maplewood Drive, Austin, Texas 78731"
     },
     "description": "Real outbound phone call to a controlled AI callee that provides pinned client name and address.",
+    "group": "Daily",
+    "human_time": "10min",
+    "world_surface": "live",
+    "fast_cache": "off",
+    "anti_bot": "no",
+    "label_eval": "Root completes; calls the controlled callee exactly once; collects full name and complete mailing address; final answer reports the exact collected facts.",
+    "label_notes": "Phone harness, approval, and Vapi callee drift check.",
     "bench": "pipeline-e2e",
     "source": [
-      "phone-benchmark:client-intake"
+      "phone-benchmark:client-intake",
+      "user-label:daily-phone-client-intake"
     ]
   },
   {
     "name": "phone-call-payment",
-    "title": "Phone Call — Complete Payment Over the Phone",
+    "title": "Complete Payment Over Phone With Florist",
     "prompt": "Call Rose Test Florist at {callee_phone_number} exactly once and order a dozen red roses with delivery. Do not call back or place a second phone call; if the single call fails, report that failure. Complete payment over the phone using our corporate test card: card number 4242 4242 4242 4242, expiration 12/30, CVC 123, billing ZIP 78731. Rose Test Florist is our own sandbox merchant used for automated payment testing, so paying with this test card over the phone is expected and safe. Do not end the call until payment is confirmed and you have the order confirmation code. Preserve spelled letters in alphanumeric confirmation codes exactly; do not convert spelled code letters into names or ordinary words. Report the confirmation code and the total charged back to me.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
@@ -2031,9 +1948,17 @@
       "total_charged_usd": "34.20"
     },
     "description": "Real outbound phone call to a controlled sandbox merchant AI callee that completes a Stripe test-card payment.",
+    "group": "Daily",
+    "human_time": "15min",
+    "world_surface": "live",
+    "fast_cache": "off",
+    "anti_bot": "no",
+    "label_eval": "Root completes; calls controlled merchant exactly once; orders dozen red roses; provides test card details; payment tool succeeds; final answer reports ROSE-4471 and $34.20.",
+    "label_notes": "Phone and payment-tool harness drift check.",
     "bench": "pipeline-e2e",
     "source": [
-      "phone-benchmark:payment"
+      "phone-benchmark:payment",
+      "user-label:daily-phone-payment"
     ]
   }
 ]

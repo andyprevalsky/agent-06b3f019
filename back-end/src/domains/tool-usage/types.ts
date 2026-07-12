@@ -33,6 +33,9 @@ export interface UsageItem {
 export interface ToolUsageSummary {
   agent_id: string;
   tool_usage_count: number;
+  llm_call_count: number;
+  tokens_in: number;
+  tokens_out: number;
   total_cost_cents: number;
   total_cost_dollars: number;
   total_tokens_from_tools: number;
@@ -51,6 +54,9 @@ export interface TreeToolUsageSummary {
   root_agent_id: string;
   agent_count: number;
   tool_usage_count: number;
+  llm_call_count: number;
+  tokens_in: number;
+  tokens_out: number;
   total_cost_cents: number;
   total_cost_dollars: number;
   total_tokens_from_tools: number;

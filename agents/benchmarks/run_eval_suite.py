@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-"""THE single full-suite eval entrypoint (see CLAUDE.md "Eval Suite").
+"""THE single full-suite benchmark entrypoint (see CLAUDE.md "Eval Suite").
 
-Runs every `status == "ready"` entry in the unified catalog
-(agents/benchmarks/tasks.json), dispatching by runner:
-
-  - runner == "agent"  → one run_benchmark.py invocation (its built-in
-    evaluation: expected tools, receipts, approvals, timeouts)
-  - runner == "vitest" → the entry's back-end blackbox script via `npx tsx`
+Runs every `status == "ready"` benchmark entry in the unified catalog
+(agents/benchmarks/tasks.json) through one run_benchmark.py invocation
+(expected tools, receipts, approvals, timeouts).
 
 `status == "incomplete"` entries are listed as skipped so the holding set is
 always visible in the output — no silent truncation.
@@ -14,14 +11,12 @@ always visible in the output — no silent truncation.
 Usage:
     python benchmarks/run_eval_suite.py --port 3001          # full suite
     python benchmarks/run_eval_suite.py --list               # holding set only
-    python benchmarks/run_eval_suite.py --only load-test-sias,smoke-backend-sms-supervisor
-    python benchmarks/run_eval_suite.py --agent-only         # skip vitest smokes
+    python benchmarks/run_eval_suite.py --only test-mass-agent-run-0,browser-agent
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -32,10 +27,11 @@ from benchmarks.benchmark_tasks import BenchmarkTask, all_tasks  # noqa: E402
 from benchmarks.long_horizon import validate_catalog  # noqa: E402
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-_BACKEND_DIR = _REPO_ROOT / "back-end"
 
 
 def _print_holding_set(tasks: list[BenchmarkTask]) -> None:
+    # retired tasks are dead — never run, never listed (history-only names)
+    tasks = [t for t in tasks if t.status != "retired"]
     rose = [t for t in tasks if t.bench == "rose-bench"]
     pipeline = [t for t in tasks if t.bench == "pipeline-e2e"]
     incomplete = [t for t in tasks if t.status == "incomplete"]
@@ -46,7 +42,7 @@ def _print_holding_set(tasks: list[BenchmarkTask]) -> None:
         print(f"    {t.name:<40} {t.title}{flag}")
     print(f"\n  PIPELINE E2E ({len(pipeline)}) — harness plumbing tests:")
     for t in pipeline:
-        flag = "" if t.status == "ready" and t.runner == "agent" else f"  [{t.runner}:{t.status}]"
+        flag = "" if t.status == "ready" else f"  [{t.status}]"
         print(f"    {t.name:<40} {t.title}{flag}")
     print(f"\n  INCOMPLETE ({len(incomplete)}) — missing fixtures/evaluators, excluded from suite runs:")
     for t in incomplete:
@@ -57,32 +53,9 @@ def _print_holding_set(tasks: list[BenchmarkTask]) -> None:
     print()
 
 
-def _vitest_script_path(task: BenchmarkTask) -> Path:
-    for evaluator in task.evaluators:
-        for check in evaluator.get("checks", []):
-            if check.get("type") == "vitest" and check.get("file"):
-                return _REPO_ROOT / check["file"]
-    raise ValueError(f"vitest task '{task.name}' declares no checks[].file")
-
-
-def _run_vitest_task(task: BenchmarkTask, args: argparse.Namespace) -> bool:
-    script = _vitest_script_path(task)
-    rel = script.relative_to(_BACKEND_DIR)
-    print(f"\n=== {task.name}: npx tsx {rel} ===")
-    env = os.environ.copy()
-    if args.url:
-        env["TEST_BASE_URL"] = args.url.rstrip("/")
-    elif args.port:
-        env["TEST_BASE_URL"] = f"http://localhost:{args.port}"
-    result = subprocess.run(["npx", "tsx", str(rel)], cwd=_BACKEND_DIR, timeout=task.timeout_seconds + 60, env=env)
-    passed = result.returncode == 0
-    print(f"=== {task.name}: {'PASS' if passed else 'FAIL'} (exit {result.returncode}) ===")
-    return passed
-
-
 def _run_agent_tasks(names: list[str], args: argparse.Namespace) -> bool:
     """Run agent evals through run_benchmark.py (the only agent-eval executor)."""
-    ready_agent_names = {t.name for t in all_tasks() if t.runner == "agent" and t.status == "ready"}
+    ready_agent_names = {t.name for t in all_tasks() if t.status == "ready"}
     command = [sys.executable, str(Path(__file__).resolve().parent / "run_benchmark.py")]
     if set(names) == ready_agent_names:
         command += ["--suite", "all"]
@@ -107,8 +80,7 @@ def main() -> int:
     parser.add_argument("--port", type=int, help="Local backend port (passed to run_benchmark.py)")
     parser.add_argument("--url", help="Backend base URL (passed to run_benchmark.py)")
     parser.add_argument("--list", action="store_true", help="Print the holding set and exit")
-    parser.add_argument("--only", help="Comma-separated task names to run (any runner)")
-    parser.add_argument("--agent-only", action="store_true", help="Skip external vitest smokes")
+    parser.add_argument("--only", help="Comma-separated benchmark task names to run")
     parser.add_argument(
         "--bench",
         choices=["rose-bench", "pipeline-e2e"],
@@ -136,18 +108,12 @@ def main() -> int:
 
     if args.bench:
         selected = [t for t in selected if t.bench == args.bench]
-    if args.agent_only:
-        selected = [t for t in selected if t.runner == "agent"]
-
     skipped = [t for t in tasks if t.status == "incomplete"]
-    agent_names = [t.name for t in selected if t.runner == "agent"]
-    vitest_tasks = [t for t in selected if t.runner == "vitest"]
+    agent_names = [t.name for t in selected]
 
     results: dict[str, bool] = {}
     if agent_names:
         results["agent-suite"] = _run_agent_tasks(agent_names, args)
-    for task in vitest_tasks:
-        results[task.name] = _run_vitest_task(task, args)
 
     print("\n" + "=" * 60)
     print("  EVAL SUITE SUMMARY")
@@ -160,5 +126,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    os.environ.setdefault("PYTHONUNBUFFERED", "1")
     sys.exit(main())

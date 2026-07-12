@@ -216,6 +216,7 @@ def _r2_client() -> Any:
         return _R2_CLIENT
     try:
         import boto3
+        from botocore.config import Config as BotoConfig
     except ModuleNotFoundError as exc:
         raise RuntimeError("boto3 is required for TRACE_ARCHIVE_BACKEND=r2 reads") from exc
     account_id = os.environ.get("R2_ACCOUNT_ID", "")
@@ -223,12 +224,22 @@ def _r2_client() -> Any:
     secret_access_key = os.environ.get("R2_SECRET_ACCESS_KEY", "")
     if not account_id or not access_key_id or not secret_access_key:
         raise RuntimeError("R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, and R2_SECRET_ACCESS_KEY are required")
+    # Bounded connect/read timeouts + retries: without these, a stalled R2
+    # connection leaves boto3 blocked in poll() forever (observed hanging the
+    # WMH corpus first-build on a cloud box). Adaptive retries re-establish a
+    # dropped connection instead of waiting indefinitely.
+    _r2_config = BotoConfig(
+        connect_timeout=int(os.environ.get("R2_CONNECT_TIMEOUT", "15")),
+        read_timeout=int(os.environ.get("R2_READ_TIMEOUT", "60")),
+        retries={"max_attempts": int(os.environ.get("R2_MAX_ATTEMPTS", "5")), "mode": "adaptive"},
+    )
     _R2_CLIENT = boto3.client(
         "s3",
         endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",
         aws_access_key_id=access_key_id,
         aws_secret_access_key=secret_access_key,
         region_name="auto",
+        config=_r2_config,
     )
     return _R2_CLIENT
 
