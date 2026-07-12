@@ -17,6 +17,7 @@ import {
   getKernelSessionHealth,
   listKernelSessionFiles,
   readKernelSessionFile,
+  resizeKernelViewport,
   resumeKernelSession,
   uploadKernelSessionFile,
 } from './kernel';
@@ -26,6 +27,8 @@ import type {
   BrowserProviderResumeSession,
   BrowserProviderSession,
   BrowserSessionHealth,
+  BrowserViewport,
+  BrowserViewportResizeResult,
 } from './types';
 
 export {
@@ -33,6 +36,8 @@ export {
   type BrowserFileInfo,
   type BrowserProviderName,
   type BrowserSessionHealth,
+  type BrowserViewport,
+  type BrowserViewportResizeResult,
 } from './types';
 export { selectedBrowserProvider } from './config';
 export { injectUserData, getFingerprintInjectionData };
@@ -149,6 +154,23 @@ export async function getBrowserSessionHealth(sessionId: string): Promise<Browse
 
   const health = await getSteelSessionHealth(sessionId);
   return { provider: 'steel', ...health };
+}
+
+export async function resizeSessionViewport(
+  sessionId: string,
+  viewport: BrowserViewport
+): Promise<BrowserViewportResizeResult> {
+  const provider = await providerForSession(sessionId);
+  if (provider === 'kernel') {
+    return {
+      provider,
+      supported: true,
+      resized: true,
+      viewport: await resizeKernelViewport(sessionId, viewport),
+    };
+  }
+
+  return { provider, supported: false, resized: false, viewport };
 }
 
 export async function uploadSessionFile(

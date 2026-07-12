@@ -13,7 +13,9 @@ import {
   uploadSessionFile,
   listFiles as listProviderFiles,
   readSessionFile,
+  resizeSessionViewport,
   captureScreenshot,
+  type BrowserViewport,
   getFingerprintInjectionData,
 } from '../../providers/browser';
 import { resumeBrowserSession as resumeBrowserSessionProvider } from '../../providers/browserSessionResume';
@@ -183,6 +185,19 @@ export const resumeBrowserSession = resumeBrowserSessionProvider;
 
 export async function getContext(userId: string) {
   return repo.findContextByUserId(userId);
+}
+
+export async function resizeBrowserViewport(
+  taskId: string,
+  viewport: BrowserViewport,
+  userId?: string
+) {
+  const session = await repo.findSessionByTaskId(taskId);
+  if (session === null || (userId !== undefined && session.context.userId !== userId)) {
+    throw new SessionNotFoundError();
+  }
+
+  return resizeSessionViewport(session.sessionId, viewport);
 }
 
 // ---------------------------------------------------------------------------
