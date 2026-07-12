@@ -74,6 +74,11 @@ def test_relocates_donor_virtualenv_text_prefixes_after_sync(tmp_path: Path) -> 
     (donor / "agents/venv/pyvenv.cfg").write_text(
         f"command = python -m venv {donor / 'agents/venv'}\n"
     )
+    donor_cache = donor / "agents/venv/lib/python3.11/site-packages/demo/__pycache__"
+    donor_cache.mkdir(parents=True)
+    (donor_cache / "module.cpython-311.pyc").write_bytes(
+        b"\0compiled:" + str(donor / "agents/venv").encode()
+    )
 
     result = subprocess.run(
         ["bash", str(SCRIPT), str(donor), str(repo)],
@@ -91,6 +96,36 @@ def test_relocates_donor_virtualenv_text_prefixes_after_sync(tmp_path: Path) -> 
     assert str(donor / "agents/venv") not in (
         repo / "agents/venv/pyvenv.cfg"
     ).read_text()
+    assert not (
+        repo
+        / "agents/venv/lib/python3.11/site-packages/demo/__pycache__/module.cpython-311.pyc"
+    ).exists()
+
+
+def test_does_not_persist_python_fingerprint_when_relocation_fails(
+    tmp_path: Path,
+) -> None:
+    donor = tmp_path / "donor"
+    repo = tmp_path / "repo"
+    _write_manifests(donor)
+    _write_manifests(repo)
+    (donor / "node_modules/current-package").mkdir(parents=True)
+    donor_venv = donor / "agents/venv"
+    (donor_venv / "bin").mkdir(parents=True)
+    (donor_venv / "bin/python").write_text("current")
+    (donor_venv / "binary-extension.so").write_bytes(
+        b"\0embedded:" + str(donor_venv).encode()
+    )
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT), str(donor), str(repo)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert not (repo / "agents/venv/.cloudbench-deps-fingerprint").exists()
 
 
 def test_rejects_branch_whose_manifests_do_not_match_donor_image(tmp_path: Path) -> None:

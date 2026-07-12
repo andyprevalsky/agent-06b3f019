@@ -40,7 +40,6 @@ sync_tree() {
         echo "[cloudbench] refreshing baked $label dependencies → $repo_tree"
         mkdir -p "$repo_tree"
         rsync -a --delete "$donor_tree/" "$repo_tree/"
-        printf '%s\n' "$expected" > "$marker"
         SYNC_TREE_REFRESHED=1
     fi
 }
@@ -57,6 +56,9 @@ repo = os.fsencode(os.path.abspath(sys.argv[2]))
 root = pathlib.Path(sys.argv[2])
 rewritten = 0
 for path in root.rglob("*"):
+    if path.suffix == ".pyc":
+        path.unlink(missing_ok=True)
+        continue
     if path.is_symlink():
         target = os.readlink(path)
         target_bytes = os.fsencode(target)
@@ -96,6 +98,9 @@ if [ "$installed_node" != "$repo_node" ]; then
         exit 1
     fi
     sync_tree "JavaScript" "$DEPS_DIR/node_modules" "$REPO_DIR/node_modules" "$repo_node"
+    if [ "$SYNC_TREE_REFRESHED" = "1" ]; then
+        printf '%s\n' "$repo_node" > "$node_marker"
+    fi
 fi
 
 PYTHON_MANIFESTS=(agents/requirements.txt)
@@ -113,6 +118,7 @@ if [ "$installed_python" != "$repo_python" ]; then
     sync_tree "Python" "$DEPS_DIR/agents/venv" "$REPO_DIR/agents/venv" "$repo_python"
     if [ "$SYNC_TREE_REFRESHED" = "1" ]; then
         relocate_venv "$DEPS_DIR/agents/venv" "$REPO_DIR/agents/venv"
+        printf '%s\n' "$repo_python" > "$python_marker"
     fi
 fi
 
