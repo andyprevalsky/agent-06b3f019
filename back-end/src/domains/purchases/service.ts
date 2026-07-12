@@ -13,6 +13,7 @@ import {
 } from './config';
 import { PurchaseError } from './errors';
 import { isKycRequiredError, kycRequiredPurchaseError } from './kyc';
+import { getCustomerDefaultPaymentMethodId } from './stripeCustomer';
 import * as repo from './repo';
 import { archivePurchaseBoundary } from './archive';
 import {
@@ -58,29 +59,6 @@ function normalizeCurrency(currency: string): string {
     throw new PurchaseError('Only USD purchases are currently supported');
   }
   return normalized;
-}
-
-async function getCustomerDefaultPaymentMethodId(customerId: string): Promise<string> {
-  const customer = await stripe.customers.retrieve(customerId);
-  if ('deleted' in customer && customer.deleted) {
-    throw new PurchaseError('Stripe billing customer has been deleted', 402);
-  }
-
-  const defaultPaymentMethod = customer.invoice_settings?.default_payment_method;
-  if (typeof defaultPaymentMethod === 'string' && defaultPaymentMethod.trim() !== '') {
-    return defaultPaymentMethod;
-  }
-  if (
-    defaultPaymentMethod !== null &&
-    typeof defaultPaymentMethod === 'object' &&
-    'id' in defaultPaymentMethod &&
-    typeof defaultPaymentMethod.id === 'string' &&
-    defaultPaymentMethod.id.trim() !== ''
-  ) {
-    return defaultPaymentMethod.id;
-  }
-
-  throw new PurchaseError('User does not have a default Stripe payment method', 402);
 }
 
 function isReusableStatus(status: PurchaseSpendStatus): boolean {

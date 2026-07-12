@@ -372,7 +372,7 @@ class GrepTool(BaseModel):
     ] = Field(
         default=None,
         description=(
-            "The specific data source(s) to search — pass a list and pick the exact source(s) the "
+            "The specific data source(s) to search - pass a list and pick the exact source(s) the "
             "task needs. Do NOT default to a blunt catch-all when you know the channel; name the "
             "concrete sources (e.g. [\"email\"], or [\"email\", \"imessage\"]). Omit entirely to "
             "search the local defaults (messages, network, agent_network). "
@@ -384,7 +384,7 @@ class GrepTool(BaseModel):
             "transactions searches synced Plaid transaction rows. documents searches synced "
             "ChatGPT/Claude exports, Apple Notes, Obsidian vault notes, and generic user documents. "
             "If a named source's connector isn't connected, the search returns a 'source not "
-            "connected' notice and the user is automatically asked to connect it — do NOT retry "
+            "connected' notice and the user is automatically asked to connect it - do NOT retry "
             "that source; continue with the sources you can reach."
         ),
     )

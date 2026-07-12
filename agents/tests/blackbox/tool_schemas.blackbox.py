@@ -173,7 +173,9 @@ def test_grep_tool_schema_exact_contract():
     assert props == {
         "tool",
         "pattern",
+        "sources",
         "source",
+        "require_source_access",
         "-B",
         "-A",
         "-C",
@@ -188,11 +190,32 @@ def test_grep_tool_schema_exact_contract():
         "since",
     }
 
-    source_schema = schema["properties"]["source"]
-    enum_values = set()
-    for option in source_schema.get("anyOf", []):
-        enum_values.update(option.get("enum", []))
-    assert enum_values == {"messages", "network", "agent_network", "transactions", "documents"}
+    # Channel-first sources: concrete communication channels plus the umbrellas.
+    expected_sources = {
+        "messages",
+        "email",
+        "gmail",
+        "imessage",
+        "whatsapp",
+        "sms",
+        "network",
+        "agent_network",
+        "transactions",
+        "documents",
+    }
+
+    def _enum_values(prop_schema: dict) -> set:
+        values: set = set()
+        for option in prop_schema.get("anyOf", []):
+            values.update(option.get("enum", []))
+            # `sources` is a list: its options are arrays whose items carry the enum.
+            items = option.get("items")
+            if isinstance(items, dict):
+                values.update(items.get("enum", []))
+        return values
+
+    assert _enum_values(schema["properties"]["source"]) == expected_sources
+    assert _enum_values(schema["properties"]["sources"]) == expected_sources
 
     removed = {
         "path", "glob", "type", "output_mode", "person_id", "limit",

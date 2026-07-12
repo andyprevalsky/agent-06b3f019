@@ -122,7 +122,7 @@ describe('Terminal page', () => {
     });
 
     it('renders sidebar with agent list items', async () => {
-      const user = userEvent.setup();
+      const user = userEvent.setup({ delay: null });
       renderWithProviders(<Terminal />);
 
       // Sidebar starts collapsed (compact mode shows only icons, no text).
@@ -352,7 +352,7 @@ describe('Terminal page', () => {
     });
 
     it('does not show Browse in the sidebar for regular users', async () => {
-      const user = userEvent.setup();
+      const user = userEvent.setup({ delay: null });
       renderWithProviders(<Terminal />);
 
       await user.click(await screen.findByLabelText('Expand sidebar'));
@@ -368,7 +368,7 @@ describe('Terminal page', () => {
 
   describe('user interactions', () => {
     it('typing in the query input updates the value', async () => {
-      const user = userEvent.setup();
+      const user = userEvent.setup({ delay: null });
       renderWithProviders(<Terminal />);
 
       const textarea = await screen.findByPlaceholderText('Enter any goal');
@@ -378,7 +378,7 @@ describe('Terminal page', () => {
     });
 
     it('clicking a popular goal populates the input', async () => {
-      const user = userEvent.setup();
+      const user = userEvent.setup({ delay: null });
       renderWithProviders(<Terminal />);
 
       await waitFor(() => {
@@ -394,7 +394,7 @@ describe('Terminal page', () => {
     });
 
     it('submitting a goal creates a new agent via POST /api/agents', async () => {
-      const user = userEvent.setup();
+      const user = userEvent.setup({ delay: null });
       clearCaptures();
       renderWithProviders(<Terminal />);
 
@@ -501,7 +501,7 @@ describe('Terminal page', () => {
     });
 
     it('submit without a stored session opens login and does not create an agent', async () => {
-      const user = userEvent.setup();
+      const user = userEvent.setup({ delay: null });
       localStorage.clear();
       clearCaptures();
       renderWithProviders(<Terminal />);
@@ -521,7 +521,9 @@ describe('Terminal page', () => {
         (r) => r.url.includes('/api/agents') && r.method === 'POST' && !r.url.includes('/messages'),
       );
       expect(createReq).toBeUndefined();
-    });
+      // Interaction + waitFor(login modal) is slow under coverage instrumentation
+      // and full-suite contention (passes fast in isolation); give it headroom.
+    }, 30000);
 
     it('renders with anonymous session', async () => {
       localStorage.clear();
@@ -539,7 +541,7 @@ describe('Terminal page', () => {
     });
 
     it('anonymous submit opens login and does not create an agent', async () => {
-      const user = userEvent.setup();
+      const user = userEvent.setup({ delay: null });
       localStorage.clear();
       mockAnonymousSession();
       clearCaptures();
@@ -560,6 +562,7 @@ describe('Terminal page', () => {
         (r) => r.url.includes('/api/agents') && r.method === 'POST' && !r.url.includes('/messages'),
       );
       expect(createReq).toBeUndefined();
-    });
+      // Slow under coverage instrumentation + full-suite contention (see above).
+    }, 30000);
   });
 });

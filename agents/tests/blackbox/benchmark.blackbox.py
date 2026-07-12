@@ -889,9 +889,15 @@ async def test_api_headers_honors_internal_api_key_auth():
 
     original_authenticate = bench.authenticate
     original_cached_headers = bench._cached_headers
+    original_cached_headers_user_id = bench._cached_headers_user_id
     original_auth_mode = bench._auth_mode
     original_api_key = bench.API_KEY
     original_user_id = bench.USER_ID
+    # `_api_headers` now resolves the effective benchmark user via
+    # `_current_benchmark_user_id()` (a BENCHMARK_RUN_USER_ID override used by the
+    # gate fixtures). Pin it to USER_ID so a leaked override from another test
+    # can't route this contract test down the user-override branch.
+    original_current_user_id = bench._current_benchmark_user_id
 
     async def fake_authenticate():
         return {
@@ -904,9 +910,14 @@ async def test_api_headers_honors_internal_api_key_auth():
     try:
         bench.authenticate = fake_authenticate
         bench._cached_headers = None
+        bench._cached_headers_user_id = None
         bench._auth_mode = None
         bench.API_KEY = "fallback-api-key"
-        bench.USER_ID = "fallback-user"
+        # USER_ID matches the authenticated user so the per-user header cache (keyed
+        # on `_current_benchmark_user_id()`) hits on the second call, mirroring prod
+        # where authenticate() resolves the same user _current_benchmark_user_id does.
+        bench.USER_ID = "user-123"
+        bench._current_benchmark_user_id = lambda: bench.USER_ID
 
         headers = await bench._api_headers()
         assert headers == {
@@ -918,9 +929,11 @@ async def test_api_headers_honors_internal_api_key_auth():
     finally:
         bench.authenticate = original_authenticate
         bench._cached_headers = original_cached_headers
+        bench._cached_headers_user_id = original_cached_headers_user_id
         bench._auth_mode = original_auth_mode
         bench.API_KEY = original_api_key
         bench.USER_ID = original_user_id
+        bench._current_benchmark_user_id = original_current_user_id
 
 
 async def test_archive_agent_start_posts_agent_and_returns_fixture_ref():
@@ -3238,7 +3251,15 @@ def test_suite_selection_excludes_incomplete_and_external_entries():
         "phone-call-client-intake",
         "phone-call-payment",
     } <= suite_names
-    assert len(suite_names) == 34
+    # This branch added four ready gate benchmarks (subscription free-credit,
+    # subscription card-mint, kyc card-mint, source-connect gmail).
+    assert {
+        "gate-subscription-free-credit",
+        "gate-subscription-card-mint",
+        "gate-kyc-card-mint",
+        "gate-source-connect-gmail",
+    } <= suite_names
+    assert len(suite_names) == 38
 
 
 def test_every_task_has_base_image_fixture_by_default():

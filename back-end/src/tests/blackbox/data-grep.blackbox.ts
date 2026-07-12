@@ -1113,6 +1113,61 @@ async function testSourceStatus(userId: string): Promise<void> {
   }
 }
 
+async function requestSnapshot(userId: string) {
+  const response = await fetch(`${BASE_URL}/api/data/snapshot`, {
+    headers: apiHeaders(userId),
+  });
+  const data = await response.json();
+  return { status: response.status, data };
+}
+
+// GET /api/data/snapshot returns the distilled user snapshot plus its recent
+// revision ledger (repo.getUserSnapshot). Seed a snapshot + one revision, then
+// read it back through the authenticated route.
+async function testSnapshotEndpoint(userId: string): Promise<void> {
+  const snapshot = await prisma.userSnapshot.create({
+    data: {
+      userId,
+      content: { headline: 'Lighthouse archive lead', focus: ['signal', 'cartography'] },
+      version: 3,
+    },
+  });
+  await prisma.userSnapshotRevision.create({
+    data: {
+      userId,
+      snapshotId: snapshot.id,
+      source: 'grep-blackbox',
+      changes: { added: ['focus'] },
+      model: 'rose-1-lite',
+      promptKey: 'snapshot.distill',
+    },
+  });
+
+  const res = await requestSnapshot(userId);
+  assertStatus(res.status, 200, res.data);
+  const body = res.data as {
+    snapshot: {
+      content?: { headline?: string };
+      version?: number;
+      revisions?: Array<{ source?: string; model?: string }>;
+    } | null;
+  };
+  if (body.snapshot === null) {
+    throw new Error(`Expected a snapshot, got null: ${JSON.stringify(res.data)}`);
+  }
+  if (
+    body.snapshot.version !== 3 ||
+    body.snapshot.content?.headline !== 'Lighthouse archive lead'
+  ) {
+    throw new Error(`Unexpected snapshot content/version: ${JSON.stringify(body.snapshot)}`);
+  }
+  if (
+    !body.snapshot.revisions?.some((r) => r.source === 'grep-blackbox' && r.model === 'rose-1-lite')
+  ) {
+    throw new Error(`Expected the seeded revision in the ledger: ${JSON.stringify(body.snapshot)}`);
+  }
+}
+
 async function runAll(): Promise<void> {
   const { userId, agentId } = await seedFixture();
   const tests = [
@@ -1133,6 +1188,10 @@ async function runAll(): Promise<void> {
     ['summary includes documents', () => testDocumentSummary(userId)],
     ['multi-source grep with channel routing', () => testMultiSourceGrep(userId)],
     ['per-source connectivity status', () => testSourceStatus(userId)],
+    [
+      'snapshot endpoint returns distilled snapshot + revisions',
+      () => testSnapshotEndpoint(userId),
+    ],
   ] as const;
 
   try {
