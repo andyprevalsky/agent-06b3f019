@@ -357,6 +357,32 @@ async def test_mint_purchase_card_activity_boundary():
     assert call["requestHeaders"]["x-user-id"] == "user-123"
 
 
+async def test_mint_purchase_card_activity_maps_kyc_required():
+    setup_mock(
+        {
+            "/api/purchases/mint": {
+                "status": 422,
+                "json": {
+                    "error": "Customer requires KYC before Rose can issue a payment card",
+                    "code": "customers_needed_kyc",
+                },
+            }
+        }
+    )
+
+    from domains.request_payment_card.service import normalize_payment_payload
+    from tools.request_payment_card import mint_purchase_card_activity
+
+    payload = normalize_payment_payload(_sample_tool_call(), "user-123")
+    payload["agentId"] = "agent-1"
+
+    result = await mint_purchase_card_activity("user-123", payload)
+
+    assert result["status"] == "kyc_required"
+    assert result["code"] == "customers_needed_kyc"
+    assert "KYC" in result["error"]
+
+
 async def test_payment_helper_import_is_workflow_sandbox_safe():
     from payment_import_workflow_fixture import PaymentImportWorkflow
     from temporalio.testing import WorkflowEnvironment
@@ -410,6 +436,7 @@ async def run_all_tests():
     )
     await result.record_async("lookup_boundary", test_lookup_purchase_activity_boundary)
     await result.record_async("mint_boundary", test_mint_purchase_card_activity_boundary)
+    await result.record_async("mint_maps_kyc_required", test_mint_purchase_card_activity_maps_kyc_required)
     await result.record_async("workflow_sandbox_import", test_payment_helper_import_is_workflow_sandbox_safe)
     teardown_mock()
     return result.all_passed

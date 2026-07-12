@@ -569,7 +569,7 @@ def _format_user_context(  # noqa: C901
             # Parse timestamp and format nicely
             try:
                 dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-                time_str = dt.strftime("%Y-%m-%d %H:%M")
+                time_str = dt.isoformat(timespec="minutes")
             except Exception:
                 time_str = timestamp[:16] if len(timestamp) >= 16 else timestamp
 

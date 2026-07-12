@@ -2,80 +2,19 @@
  * Data domain repo — all Prisma calls for data search and summary.
  */
 
+import { IntegrationStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
 
 /**
- * Search message records by pattern with optional person and time filters.
+ * True when the user has a CONNECTED Integration row for the given connector
+ * name (e.g. 'gmail', 'imessage', 'plaid'). Used by per-source connectivity.
  */
-export async function searchMessages(params: {
-  userId: string;
-  trimmedPattern: string;
-  cutoffTime: Date;
-  personId?: string;
-  limit: number;
-}) {
-  const { userId, trimmedPattern, cutoffTime, personId, limit } = params;
-
-  return prisma.messageRecord.findMany({
-    where: {
-      person: { userId },
-      ...(trimmedPattern.length > 0
-        ? { message: { contains: trimmedPattern, mode: 'insensitive' as const } }
-        : {}),
-      timestamp: { gte: cutoffTime },
-      ...(personId !== undefined ? { personId } : {}),
-    },
-    orderBy: { timestamp: 'desc' },
-    take: limit,
-    select: {
-      id: true,
-      personId: true,
-      channel: true,
-      from: true,
-      to: true,
-      timestamp: true,
-      message: true,
-      person: {
-        select: {
-          firstName: true,
-          lastName: true,
-          phoneNumber: true,
-          email: true,
-        },
-      },
-    },
+export async function isConnectorConnected(userId: string, connector: string): Promise<boolean> {
+  const integration = await prisma.integration.findFirst({
+    where: { userId, name: connector, status: IntegrationStatus.CONNECTED },
+    select: { id: true },
   });
-}
-
-/**
- * Fetch context messages around matches in a specific thread (person).
- */
-export async function fetchContextMessages(params: {
-  personId: string;
-  userId: string;
-  contextStart: Date;
-  contextEnd: Date;
-  takeLimit: number;
-}) {
-  const { personId, userId, contextStart, contextEnd, takeLimit } = params;
-
-  return prisma.messageRecord.findMany({
-    where: {
-      personId,
-      person: { userId },
-      timestamp: { gte: contextStart, lte: contextEnd },
-    },
-    orderBy: { timestamp: 'asc' },
-    take: takeLimit,
-    select: {
-      id: true,
-      channel: true,
-      from: true,
-      to: true,
-      timestamp: true,
-      message: true,
-    },
-  });
+  return integration !== null;
 }
 
 /**

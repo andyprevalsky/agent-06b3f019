@@ -1,4 +1,6 @@
+import { benchmarkAgentPreviewEnabled as benchmarkAgentPreviewEnabledFromConfig } from './config';
 import { createLogger } from '../../providers/logger';
+import { getAgentDetailForPreview } from '../../providers/agentDetailQuery';
 import { getCachedTasks } from './catalogCache';
 
 const log = createLogger('Benchmarks');
@@ -76,6 +78,17 @@ export function getTestPrompts(): TestPrompt[] {
           : [],
       };
     });
+}
+
+export function benchmarkAgentPreviewEnabled(): boolean {
+  return benchmarkAgentPreviewEnabledFromConfig();
+}
+
+export async function getBenchmarkAgentPreview(agentId: string) {
+  if (!benchmarkAgentPreviewEnabled()) {
+    return null;
+  }
+  return getAgentDetailForPreview(agentId);
 }
 
 export * from './hubCatalogService';

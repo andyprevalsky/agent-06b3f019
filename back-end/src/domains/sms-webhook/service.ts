@@ -15,7 +15,7 @@ import { validateSurgeSignature, parseSurgePayload } from './service.validation'
 import type { SurgeAttachment } from './types';
 import { getTemporalClient } from '../../providers/temporal';
 import { sendSms } from '../../providers/smsQueue';
-import { SMS_TEMPLATES } from '../../providers/smsTemplates';
+import { createSignupBonusCredit } from '../../providers/credits';
 import { handleSmsSupervisorMessage } from '../../providers/smsSupervisor';
 import { createLogger } from '../../providers/logger';
 
@@ -282,21 +282,33 @@ export async function handleInboundSms(input: InboundSmsInput): Promise<InboundS
 
   const { fromPhone, messageBody, attachments } = parsed;
 
-  // Look up user by phone number
-  const user = await repo.findUserByPhone(fromPhone);
+  // Resolve (or provision) the user. An inbound SMS proves possession of the
+  // number, so a first-time texter is onboarded SILENTLY — no OTP, no signup
+  // wall, no welcome nag — then handled exactly like a known user. This replaces
+  // the old "please sign up at roselabs.ai first" dead-end.
+  const { user, created } = await repo.provisionUserByPhone(fromPhone);
 
-  if (!user) {
-    log.info('Unknown phone number', {
+  if (created) {
+    log.info('Provisioned new SMS user (first contact)', {
+      userId: user.userId,
       phone: fromPhone?.substring(0, 7) + '****',
     });
-    await sendSms(fromPhone, SMS_TEMPLATES.unknownPhone());
-    return { ok: true };
+    // Free-tier starting credit, mirroring web signup. Non-fatal: the user can
+    // still be served if credit creation fails.
+    try {
+      await createSignupBonusCredit(user.userId);
+    } catch (error) {
+      log.error('Failed to create signup bonus credit for provisioned user', {
+        userId: user.userId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  } else {
+    log.info('User found', {
+      userId: user.userId,
+      phone: fromPhone?.substring(0, 7) + '****',
+    });
   }
-
-  log.info('User found', {
-    userId: user.userId,
-    phone: fromPhone?.substring(0, 7) + '****',
-  });
 
   // FAST PATH: /clear command (reset SMS session)
   if (messageBody.toLowerCase() === '/clear') {

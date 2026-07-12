@@ -175,6 +175,10 @@ const KNOWN_TASK_NAMES = [
   'job-applications',
   'cache-coverage',
   'user-data-prod-grep',
+  'gate-subscription-free-credit',
+  'gate-subscription-card-mint',
+  'gate-kyc-card-mint',
+  'gate-source-connect-gmail',
 ];
 
 const KNOWN_TAGS = [
@@ -218,6 +222,10 @@ const KNOWN_TAGS = [
   'wait-for',
   'eval',
   'real-llm',
+  'gate',
+  'subscription',
+  'kyc',
+  'source',
   'response-schema',
   'regression',
 ];
@@ -328,6 +336,15 @@ async function testList_noAuthRequired() {
   const response = await fetch(`${BASE_URL}/api/benchmarks`);
   if (response.status !== 200 && response.status !== 500) {
     throw new Error(`Expected 200 or 500 without auth, got ${response.status}`);
+  }
+}
+
+async function testPreview_disabledOutsideBenchmark() {
+  const response = await fetch(`${BASE_URL}/api/benchmarks/agent-preview/not-real`);
+  if (response.status !== 404) {
+    throw new Error(
+      `Expected benchmark preview to be hidden outside benchmark mode, got ${response.status}`
+    );
   }
 }
 
@@ -598,7 +615,13 @@ async function runAll() {
     },
     {
       name: 'Auth boundary',
-      tests: [{ name: 'no auth required', fn: testList_noAuthRequired }],
+      tests: [
+        { name: 'no auth required', fn: testList_noAuthRequired },
+        {
+          name: 'agent preview hidden outside benchmark mode',
+          fn: testPreview_disabledOutsideBenchmark,
+        },
+      ],
     },
     {
       name: 'Error surface',

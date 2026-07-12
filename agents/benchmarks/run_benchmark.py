@@ -160,6 +160,24 @@ _AGENTS_ENV = os.path.join(os.path.dirname(__file__), "..", ".env")
 _BACKEND_ENV = os.path.join(os.path.dirname(__file__), "..", "..", "back-end", ".env")
 API_KEY = load_env_var("BACKEND_API_KEY", _AGENTS_ENV, _BACKEND_ENV)
 USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
+FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME = "gate-subscription-free-credit"
+FREE_CREDIT_SUBSCRIPTION_GATE_USER_ID = "00000000-0000-4000-8000-000000000101"
+PURCHASE_SUBSCRIPTION_GATE_TASK_NAME = "gate-subscription-card-mint"
+PURCHASE_KYC_GATE_TASK_NAME = "gate-kyc-card-mint"
+SOURCE_CONNECT_GATE_TASK_NAME = "gate-source-connect-gmail"
+PURCHASE_SUBSCRIPTION_GATE_USER_ID = "00000000-0000-4000-8000-000000000102"
+PURCHASE_KYC_GATE_USER_ID = "00000000-0000-4000-8000-000000000103"
+SOURCE_CONNECT_GATE_USER_ID = "00000000-0000-4000-8000-000000000104"
+GATE_FIXTURE_TASK_MODES = {
+    PURCHASE_SUBSCRIPTION_GATE_TASK_NAME: "purchase-subscription",
+    PURCHASE_KYC_GATE_TASK_NAME: "purchase-kyc",
+    SOURCE_CONNECT_GATE_TASK_NAME: "source-connect",
+}
+GATE_FIXTURE_TASK_USER_IDS = {
+    PURCHASE_SUBSCRIPTION_GATE_TASK_NAME: PURCHASE_SUBSCRIPTION_GATE_USER_ID,
+    PURCHASE_KYC_GATE_TASK_NAME: PURCHASE_KYC_GATE_USER_ID,
+    SOURCE_CONNECT_GATE_TASK_NAME: SOURCE_CONNECT_GATE_USER_ID,
+}
 DEFAULT_MINTED_BENCHMARK_AGENT_EMAIL = "rose.harbor47@mail.roselabs.ai"
 DEFAULT_MINTED_BENCHMARK_AGENT_PHONE = "+18159823405"
 SMOKE_MEMORY_MAX_GROWTH_MB = float(os.environ.get("BENCHMARK_SMOKE_MEMORY_MAX_GROWTH_MB", "256"))
@@ -270,6 +288,9 @@ def _attention_request_kind(req: dict) -> str:
     """Classify attention request metadata for typed benchmark assertions."""
     metadata = req.get("metadata") if isinstance(req, dict) else None
     metadata = metadata if isinstance(metadata, dict) else {}
+    gate = metadata.get("gate")
+    if isinstance(gate, dict) and isinstance(gate.get("type"), str):
+        return f"gate:{gate['type']}"
     explicit_kind = metadata.get("attentionKind") or metadata.get("attention_kind")
     if isinstance(explicit_kind, str) and explicit_kind:
         return explicit_kind
@@ -290,10 +311,44 @@ def _attention_request_kind(req: dict) -> str:
 
 
 def _attention_request_matches_task(task: BenchmarkTask, req: dict) -> bool:
+    if task.expected_gate:
+        return _gate_request_matches_task(task, req)
     expected_kind = task.expected_attention_kind
     if not expected_kind:
         return True
     return _attention_request_kind(req) == expected_kind
+
+
+def _gate_request_matches_task(task: BenchmarkTask, req: dict) -> bool:
+    metadata = req.get("metadata") if isinstance(req, dict) else None
+    metadata = metadata if isinstance(metadata, dict) else {}
+    gate = metadata.get("gate")
+    if not isinstance(gate, dict):
+        return False
+    expected = task.expected_gate or {}
+    for key in ("type", "gateKey", "severity"):
+        value = expected.get(key)
+        if value is not None and not _expected_gate_value_matches(gate.get(key), value):
+            return False
+    expected_context = expected.get("context")
+    if isinstance(expected_context, dict):
+        context = gate.get("context") if isinstance(gate.get("context"), dict) else {}
+        for key, value in expected_context.items():
+            if not _expected_gate_value_matches(context.get(key), value):
+                return False
+    expected_detection = expected.get("detection")
+    if isinstance(expected_detection, dict):
+        detection = gate.get("detection") if isinstance(gate.get("detection"), dict) else {}
+        for key, value in expected_detection.items():
+            if not _expected_gate_value_matches(detection.get(key), value):
+                return False
+    return True
+
+
+def _expected_gate_value_matches(actual: Any, expected: Any) -> bool:
+    if isinstance(expected, list):
+        return actual in expected
+    return actual == expected
 
 
 def _digits_only(value: object) -> str:
@@ -690,21 +745,48 @@ def _default_timeout_for_task(task: BenchmarkTask, max_seconds: int | None = Non
 # ============================================================
 
 _cached_headers: Optional[dict] = None
+_cached_headers_user_id: Optional[str] = None
 _auth_mode: Optional[str] = None  # "jwt" or "api_key"
+
+
+def _current_benchmark_user_id() -> str:
+    return os.environ.get("BENCHMARK_RUN_USER_ID", "").strip() or USER_ID
+
+
+def _free_credit_subscription_gate_user_id() -> str:
+    return (
+        os.environ.get("BENCHMARK_FREE_CREDIT_SUBSCRIPTION_GATE_USER_ID", "").strip()
+        or FREE_CREDIT_SUBSCRIPTION_GATE_USER_ID
+    )
 
 
 async def _api_headers() -> dict:
     """Get auth headers — JWT for prod, API key fallback. Caches after first success."""
-    global _cached_headers, _auth_mode
+    global _cached_headers, _cached_headers_user_id, _auth_mode
 
-    if _cached_headers and _auth_mode in {"jwt", "api_key"}:
+    user_id = _current_benchmark_user_id()
+
+    if _cached_headers and _cached_headers_user_id == user_id and _auth_mode in {"jwt", "api_key"}:
+        return dict(_cached_headers)
+
+    if user_id != USER_ID:
+        if not API_KEY:
+            raise RuntimeError("BACKEND_API_KEY env var is required for benchmark user overrides.")
+        _auth_mode = "api_key"
+        _cached_headers_user_id = user_id
+        _cached_headers = {
+            "X-API-Key": API_KEY,
+            "X-User-Id": user_id,
+            "Content-Type": "application/json",
+        }
         return dict(_cached_headers)
 
     # If we already know API key is the only option, skip JWT attempts
     if _auth_mode == "api_key":
+        _cached_headers_user_id = user_id
         _cached_headers = {
             "X-API-Key": API_KEY,
-            "X-User-Id": USER_ID,
+            "X-User-Id": user_id,
             "Content-Type": "application/json",
         }
         return dict(_cached_headers)
@@ -721,6 +803,7 @@ async def _api_headers() -> dict:
                 "X-User-Id": user_id,
                 "Content-Type": "application/json",
             }
+            _cached_headers_user_id = user_id
             _auth_mode = "api_key"
             return dict(_cached_headers)
 
@@ -731,6 +814,7 @@ async def _api_headers() -> dict:
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json",
         }
+        _cached_headers_user_id = user_id
         _auth_mode = "jwt"
         return dict(_cached_headers)
     except Exception:
@@ -738,9 +822,10 @@ async def _api_headers() -> dict:
         if not API_KEY:
             raise RuntimeError("BACKEND_API_KEY env var is required when JWT auth is unavailable.")
         _auth_mode = "api_key"
+        _cached_headers_user_id = user_id
         _cached_headers = {
             "X-API-Key": API_KEY,
-            "X-User-Id": USER_ID,
+            "X-User-Id": user_id,
             "Content-Type": "application/json",
         }
         return dict(_cached_headers)
@@ -760,7 +845,7 @@ def _apply_local_agent_source_override(agent_id: str, source: str) -> None:
     _run_local_victoria_sql(
         'UPDATE "Agent" '
         f'SET source = {_sql_literal(source)} '
-        f'WHERE id = {_sql_literal(agent_id)} AND "userId" = {_sql_literal(USER_ID)};'
+        f'WHERE id = {_sql_literal(agent_id)} AND "userId" = {_sql_literal(_current_benchmark_user_id())};'
     )
 
 
@@ -2028,6 +2113,17 @@ async def poll_agent(
                             seen_attention_ids.add(req_id)
                             if not _attention_request_matches_task(task, req):
                                 observed_kind = _attention_request_kind(req)
+                                if (
+                                    task.expected_gate
+                                    and task.approval_handling == "auto_approve"
+                                    and observed_kind == "payment_approval"
+                                ):
+                                    await respond_to_attention_request(base_url, req_id, "approved")
+                                    approvals_resolved += 1
+                                    print(
+                                        f"    ✅ Auto-approved payment-card prerequisite {req_id[:8]}"
+                                    )
+                                    continue
                                 expected_kind = task.expected_attention_kind
                                 data["_benchmark"] = {
                                     **data.get("_benchmark", {}),
@@ -2035,6 +2131,13 @@ async def poll_agent(
                                     "expected_attention_kind": expected_kind,
                                     "unexpected_attention_request_id": req_id,
                                 }
+                                if task.expected_gate:
+                                    return (
+                                        data,
+                                        approvals_triggered,
+                                        approvals_resolved,
+                                        f"Expected gate {task.expected_gate}, observed {observed_kind}",
+                                    )
                                 return (
                                     data,
                                     approvals_triggered,
@@ -2055,6 +2158,13 @@ async def poll_agent(
                                     **data.get("_benchmark", {}),
                                     "expected_attention_kind_seen": task.expected_attention_kind,
                                     "expected_attention_request_id": req_id,
+                                }
+                            if task.expected_gate:
+                                data["_benchmark"] = {
+                                    **data.get("_benchmark", {}),
+                                    "expected_gate_seen": True,
+                                    "expected_gate": (req.get("metadata") or {}).get("gate"),
+                                    "expected_gate_request_id": req_id,
                                 }
                             if task.expected_payment_receipt:
                                 data["_benchmark"] = {
@@ -2651,6 +2761,61 @@ def _run_user_data_fixture(action: str) -> dict:
     if result.returncode != 0:
         raise RuntimeError(
             f"user-data benchmark fixture {action} failed: "
+            f"{(result.stderr or result.stdout).strip()}"
+        )
+    return _parse_last_json_line(result.stdout)
+
+
+def _free_credit_subscription_fixture_env() -> dict:
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        raise RuntimeError("Local Victoria DB connection not found for free-credit subscription fixture")
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["BENCHMARK_USER_ID"] = _free_credit_subscription_gate_user_id()
+    return env
+
+
+def _run_free_credit_subscription_fixture(action: str) -> dict:
+    result = subprocess.run(
+        ["npx", "tsx", "scripts/free-credit-subscription-gate-fixture.ts", action],
+        cwd=REPO_ROOT / "back-end",
+        env=_free_credit_subscription_fixture_env(),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"free-credit subscription benchmark fixture {action} failed: "
+            f"{(result.stderr or result.stdout).strip()}"
+        )
+    return _parse_last_json_line(result.stdout)
+
+
+def _gate_fixture_env(task_name: str) -> dict:
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        raise RuntimeError("Local Victoria DB connection not found for gate benchmark fixture")
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["BENCHMARK_GATE_FIXTURE_MODE"] = GATE_FIXTURE_TASK_MODES[task_name]
+    env["BENCHMARK_USER_ID"] = GATE_FIXTURE_TASK_USER_IDS[task_name]
+    return env
+
+
+def _run_gate_fixture(task_name: str, action: str) -> dict:
+    result = subprocess.run(
+        ["npx", "tsx", "scripts/gate-benchmark-fixture.ts", action],
+        cwd=REPO_ROOT / "back-end",
+        env=_gate_fixture_env(task_name),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"gate benchmark fixture {action} failed for {task_name}: "
             f"{(result.stderr or result.stdout).strip()}"
         )
     return _parse_last_json_line(result.stdout)
@@ -4415,6 +4580,12 @@ async def run_single_task(
     on_agent_created: Optional[Callable[[str, str], None]] = None,
 ) -> TaskResult:
     """Run a single benchmark task. Returns TaskResult."""
+    previous_benchmark_user_id = os.environ.get("BENCHMARK_RUN_USER_ID")
+    if task.name == FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME:
+        os.environ["BENCHMARK_RUN_USER_ID"] = _free_credit_subscription_gate_user_id()
+    elif task.name in GATE_FIXTURE_TASK_USER_IDS:
+        os.environ["BENCHMARK_RUN_USER_ID"] = GATE_FIXTURE_TASK_USER_IDS[task.name]
+
     if task.name in MINTED_AGENT_ACCOUNT_TASK_NAMES:
         return await run_minted_agent_account_task(base_url, task, keep_failed_agents)
 
@@ -4435,6 +4606,27 @@ async def run_single_task(
     grep_fixture_manifest: Optional[dict] = None
     plaid_transactions_manifest: Optional[dict] = None
     plaid_transactions_fixture_action: Optional[str] = None
+    free_credit_subscription_manifest: Optional[dict] = None
+    gate_fixture_manifest: Optional[dict] = None
+    if task.name == FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME:
+        if not _is_local_base_url(base_url):
+            raise RuntimeError(f"{task.name} must run against the local benchmark stack")
+        free_credit_subscription_manifest = _run_free_credit_subscription_fixture("apply")
+        print(
+            "    💳 Prepared free-credit subscription gate fixture: "
+            f"user={free_credit_subscription_manifest.get('user_id')} "
+            f"credit={free_credit_subscription_manifest.get('credit_cents')}c "
+            f"used={free_credit_subscription_manifest.get('used_cents')}c"
+        )
+    if task.name in GATE_FIXTURE_TASK_MODES:
+        if not _is_local_base_url(base_url):
+            raise RuntimeError(f"{task.name} must run against the local benchmark stack")
+        gate_fixture_manifest = _run_gate_fixture(task.name, "apply")
+        print(
+            "    🚧 Prepared gate fixture: "
+            f"mode={gate_fixture_manifest.get('fixture_mode')} "
+            f"user={gate_fixture_manifest.get('user_id')}"
+        )
     if task.name == GREP_EXPLORE_STRESS_TASK_NAME:
         if not _is_local_base_url(base_url):
             raise RuntimeError("grep-explore-stress must run against the local benchmark stack")
@@ -5052,6 +5244,10 @@ async def run_single_task(
                 _run_plaid_transactions_fixture("cleanup")
             except Exception as exc:
                 print(f"    ⚠ Failed to clean up synthetic Plaid transaction fixture: {exc}")
+        if previous_benchmark_user_id is None:
+            os.environ.pop("BENCHMARK_RUN_USER_ID", None)
+        else:
+            os.environ["BENCHMARK_RUN_USER_ID"] = previous_benchmark_user_id
 
 
 # ============================================================

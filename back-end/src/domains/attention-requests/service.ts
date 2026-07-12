@@ -1,10 +1,12 @@
 import * as repo from './repo';
-import type { CreateAttentionRequestInput, RespondInput } from './types';
+import { gateSchema, type CreateAttentionRequestInput, type RespondInput } from './types';
 import { REJECTED_RESPONSE } from './config';
 import { createMessage } from '../../providers/messages';
 import { createLogger } from '../../providers/logger';
 import { completeAuthAssistanceForUser } from '../../providers/authAssistanceCompletion';
 import { logJson } from '../../utils/log';
+import { emitGateMessage, extractGate, maybeDispatchGateSms, toCreateResult } from './gateHelpers';
+import { resolveAndSignal, signalWorkflow } from '../../providers/gateResolution';
 
 const log = createLogger('Attention');
 
@@ -24,30 +26,17 @@ export class BadRequestError extends Error {
   }
 }
 
-function errMsg(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-async function signalWorkflow(
-  workflowId: string,
-  agentId: string,
-  requestId: string,
-  response: string
+/**
+ * Join an existing pending gate as a waiter. If the gate resolved during the
+ * join race, signal this workflow directly so it isn't parked forever.
+ */
+async function joinGateAsWaiter(
+  existingId: string,
+  data: CreateAttentionRequestInput
 ): Promise<void> {
-  try {
-    const { getTemporalClient } = await import('../../providers/temporal');
-    const client = await getTemporalClient();
-    const handle = client.workflow.getHandle(workflowId);
-    await handle.signal(
-      'receive_user_response',
-      JSON.stringify({ request_id: requestId, response })
-    );
-  } catch (error) {
-    log.error('Failed to signal workflow', {
-      workflow_id: workflowId,
-      agent_id: agentId,
-      error: errMsg(error),
-    });
+  const joined = await repo.appendGateWaiter(existingId, data.workflowId, data.agentId);
+  if (!joined.pending && joined.response !== null) {
+    await signalWorkflow(data.workflowId, data.agentId, existingId, joined.response);
   }
 }
 
@@ -57,18 +46,57 @@ export async function create(data: CreateAttentionRequestInput) {
     body: logJson(data),
   });
 
-  const request = await repo.create(data);
+  // Validate the Gate payload when one is attached (the standard object rides in
+  // metadata.gate). An invalid gate throws ZodError → 400 via the route handler.
+  const rawGate = extractGate(data.metadata);
+  const gate = rawGate !== undefined ? gateSchema.parse(rawGate) : undefined;
 
+  // Fan-in dedup: a PENDING gate with the same (userId, gateKey) is reused, so
+  // multiple agents that hit the same gate collapse onto one request. Extra
+  // agents become waiters so resolving the gate resumes all of them.
+  if (data.gateKey !== undefined) {
+    const existing = await repo.findPendingByGateKey(data.userId, data.gateKey);
+    if (existing !== null) {
+      await joinGateAsWaiter(existing.id, data);
+      log.info('Gate deduped onto existing pending request', {
+        request_id: existing.id,
+        gate_key: data.gateKey,
+        agent_id: data.agentId,
+      });
+      return toCreateResult(existing, true);
+    }
+    try {
+      const created = await repo.create(data);
+      if (gate !== undefined) await emitGateMessage(data.agentId, gate, created.id);
+      const gateSms = gate !== undefined ? await maybeDispatchGateSms(data, gate) : undefined;
+      log.info('Attention request created (gate)', {
+        request_id: created.id,
+        gate_key: data.gateKey,
+        agent_id: data.agentId,
+      });
+      return toCreateResult(created, false, gateSms);
+    } catch (error) {
+      // Lost a race to a concurrent create for the same gate (partial unique
+      // index) — join the winner as a waiter instead of erroring.
+      if ((error as { code?: unknown }).code === 'P2002') {
+        const raced = await repo.findPendingByGateKey(data.userId, data.gateKey);
+        if (raced !== null) {
+          await joinGateAsWaiter(raced.id, data);
+          return toCreateResult(raced, true);
+        }
+      }
+      throw error;
+    }
+  }
+
+  const request = await repo.create(data);
+  if (gate !== undefined) await emitGateMessage(data.agentId, gate, request.id);
+  const gateSms = gate !== undefined ? await maybeDispatchGateSms(data, gate) : undefined;
   log.info('Attention request created', {
     request_id: request.id,
     agent_id: data.agentId,
   });
-
-  return {
-    id: request.id,
-    created_at: request.createdAt,
-    metadata: request.metadata,
-  };
+  return toCreateResult(request, false, gateSms);
 }
 
 export async function listForUser(userId: string) {
@@ -131,8 +159,7 @@ export async function respond(id: string, userId: string, data: RespondInput) {
     return { success: true, request_id: id };
   }
 
-  await repo.updateResponse(id, data.response);
-  await signalWorkflow(request.workflowId, request.agentId, id, data.response);
+  await resolveAndSignal(request, data.response);
 
   return { success: true, request_id: id };
 }
@@ -161,8 +188,7 @@ export async function reject(id: string, userId: string, message: string | undef
     });
   }
 
-  await repo.updateResponse(id, REJECTED_RESPONSE);
-  await signalWorkflow(request.workflowId, request.agentId, id, REJECTED_RESPONSE);
+  await resolveAndSignal(request, REJECTED_RESPONSE);
 
   return { success: true, request_id: id };
 }

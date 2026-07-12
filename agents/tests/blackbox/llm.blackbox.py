@@ -1410,6 +1410,24 @@ async def test_build_llm_messages_preserves_tool_calls_and_tool_role():
     assert "Found 3 recent updates" in tool_msg["content"]
 
 
+async def test_build_llm_messages_preserves_timestamp_timezone():
+    """LLM timestamp headers must retain the source offset so local-time math is unambiguous."""
+    from helpers.llm import build_llm_messages
+
+    context = [
+        {
+            "role": "USER",
+            "text": "What time is it here?",
+            "timestamp": "2026-07-11T13:45:00-07:00",
+        }
+    ]
+
+    with patch("helpers.llm.activity.in_activity", return_value=False):
+        messages = await build_llm_messages(context, "System prompt")
+
+    assert messages[1]["content"].startswith("[2026-07-11T13:45-07:00] ")
+
+
 async def test_build_llm_messages_preserves_codex_reasoning_metadata_separately():
     """Encrypted GPT reasoning state should be replayable without entering visible assistant text."""
     from helpers.llm import build_llm_messages
@@ -3075,6 +3093,66 @@ async def test_call_llm_activity_cross_machine_fallback():
     assert result["response"] == "cross-machine ok"
     assert backend_called[0], "Should have fetched context from backend API"
     assert agent_id_key not in _pending_llm_context
+
+
+async def test_call_llm_activity_force_backend_ignores_and_preserves_shared_context():
+    """Forced backend context cannot consume a concurrent param-populator's shared slot."""
+    import httpx
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import _pending_llm_context, call_llm_activity
+
+    agent_id_key = "agent-forced-backend-1"
+    stale_pending = (
+        [{"role": "USER", "text": "Concurrent DAG snapshot", "timestamp": "2024-01-01T00:00:00Z"}],
+        "other system prompt",
+        set(),
+    )
+    _pending_llm_context[agent_id_key] = stale_pending
+    agent_data = {
+        "agent": {"id": agent_id_key, "model": "rose"},
+        "messages": [{"role": "USER", "text": "Canonical backend context", "timestamp": "2024-01-01T00:00:00Z"}],
+    }
+    llm_payload = {
+        "actual_model": "claude-opus-4-7",
+        "choices": [
+            {
+                "delta": {"content": '{"response": "forced backend ok", "tool_calls": []}'},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10},
+    }
+    body = _sse_body([llm_payload])
+    backend_called = [False]
+
+    def handler(req):
+        url = str(req.url)
+        if f"/api/agents/{agent_id_key}" in url:
+            backend_called[0] = True
+            return httpx.Response(200, json=agent_data)
+        if "/completions" in url:
+            return httpx.Response(200, text=body)
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+    try:
+        with patch("temporalio.activity.heartbeat"), patch("helpers.llm.activity.in_activity", return_value=False):
+            result = await call_llm_activity(
+                messages_or_agent_id=agent_id_key,
+                model="rose",
+                tool_names=[],
+                reasoning_max_tokens=0,
+                agent_id=agent_id_key,
+                call_site="forced-backend-test",
+                system_prompt="You are a test assistant.",
+                force_backend_context=True,
+            )
+
+        assert result["response"] == "forced backend ok"
+        assert backend_called[0] is True
+        assert _pending_llm_context[agent_id_key] is stale_pending
+    finally:
+        _pending_llm_context.pop(agent_id_key, None)
 
 
 async def test_call_planner_llm_activity_failure_raises():
@@ -5612,6 +5690,10 @@ async def run_all_tests():
         test_build_llm_messages_preserves_tool_calls_and_tool_role,
     )
     await r.record_async(
+        "build_llm_messages_preserves_timestamp_timezone",
+        test_build_llm_messages_preserves_timestamp_timezone,
+    )
+    await r.record_async(
         "build_llm_messages_preserves_codex_reasoning_metadata_separately",
         test_build_llm_messages_preserves_codex_reasoning_metadata_separately,
     )
@@ -5700,6 +5782,10 @@ async def run_all_tests():
     )
     await r.record_async("call_llm_activity_missing_ctx", test_call_llm_activity_missing_context_raises)
     await r.record_async("call_llm_activity_cross_machine_fb", test_call_llm_activity_cross_machine_fallback)
+    await r.record_async(
+        "call_llm_activity_force_backend",
+        test_call_llm_activity_force_backend_ignores_and_preserves_shared_context,
+    )
     await r.record_async("call_planner_llm_activity_failure", test_call_planner_llm_activity_failure_raises)
     await r.record_async("verifier_schema_file_pointer", test_build_verifier_json_schema_file_pointer_type)
     await r.record_async("verifier_schema_list_file_pointer", test_build_verifier_json_schema_list_file_pointer_type)

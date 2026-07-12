@@ -11,6 +11,7 @@ import { asyncHandler } from '../../utils/asyncHandler';
 import {
   grep,
   getSnapshot,
+  getSourceStatus,
   getSummary,
   InvalidPatternError,
   SourceNotFoundError,
@@ -129,6 +130,65 @@ router.get(
       });
       res.status(500).json({
         error: 'Failed to fetch data summary',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  })
+);
+
+/**
+ * GET /api/data/source-status?sources=email,network
+ *
+ * Per-source connectivity for the agent gate. For each requested source,
+ * reports whether its backing connector is CONNECTED and, when not, a URL the
+ * user can follow to connect it (a real Gmail OAuth start URL, a stub for
+ * other connectors, or null for local sources).
+ */
+router.get(
+  '/source-status',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const startTime = Date.now();
+    try {
+      const userId =
+        req.isInternal === true ? (req.headers['x-user-id'] as string | undefined) : req.user?.id;
+
+      if (userId === undefined || userId === null) {
+        res.status(401).json({ error: 'User not authenticated' });
+        return;
+      }
+
+      const sourcesParam = req.query.sources;
+      const sources =
+        typeof sourcesParam === 'string'
+          ? sourcesParam
+              .split(',')
+              .map((s) => s.trim())
+              .filter((s) => s.length > 0)
+          : [];
+
+      const statuses = await getSourceStatus(userId, sources);
+
+      const elapsed = Date.now() - startTime;
+      log.info(`source-status [${elapsed}ms] ${sources.join(',')}`);
+
+      res.json({ statuses });
+    } catch (error) {
+      const elapsed = Date.now() - startTime;
+      if (error instanceof SourceNotFoundError) {
+        res.status(400).json({
+          error: 'SOURCE_NOT_FOUND',
+          message: error.message,
+          available_sources: error.availableSources,
+        });
+        return;
+      }
+      log.error(`source-status failed [${elapsed}ms]`, {
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+      res.status(500).json({
+        error: 'SOURCE_STATUS_FAILED',
+        message: 'Failed to resolve source connectivity.',
         details: error instanceof Error ? error.message : 'Unknown error',
       });
     }

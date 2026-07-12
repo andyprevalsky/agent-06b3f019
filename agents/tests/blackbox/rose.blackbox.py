@@ -1073,10 +1073,63 @@ def test_build_anthropic_body_caps_anthropic_cache_control_blocks():
     )
 
     assert _count_cache_control_blocks(body) == 4
-    assert all("cache_control" in block for block in body["system"][2:])
+    last_content = body["messages"][-1]["content"]
+    assert isinstance(last_content, list)
+    assert last_content[-1]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in body["system"][-1]
+    assert all("cache_control" in block for block in body["system"][2:-1])
     assert body["tools"][-1]["cache_control"] == {"type": "ephemeral"}
-    for block in body["messages"][-1]["content"]:
-        assert "cache_control" not in block
+
+
+def test_param_populator_bodies_share_cached_conversation_prefix():
+    """Different task suffixes leave the marked execute context byte-identical."""
+    from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+
+    system_content = (
+        f"static instructions{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
+        f"user context{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
+        f"execute phase{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
+    )
+    tools = [
+        {"name": "web_search", "description": "search", "input_schema": {"type": "object", "properties": {}}},
+        {"name": "web_fetch", "description": "fetch", "input_schema": {"type": "object", "properties": {}}},
+    ]
+
+    def build(task_prompt):
+        return build_anthropic_body(
+            pool_spec=get_pool("rose-1-lite"),
+            messages=[
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": "original request"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "current plan",
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                },
+                {"role": "user", "content": task_prompt},
+            ],
+            tools=tools,
+            tool_choice="any",
+            response_format=None,
+            max_tokens=256,
+            skip_cache_write=True,
+        )
+
+    first = build("Please execute task 1 of the plan: search")
+    second = build("Please execute task 2 of the plan: fetch")
+
+    assert first["system"] == second["system"]
+    assert first["tools"] == second["tools"]
+    assert first["messages"][:-1] == second["messages"][:-1]
+    stable_block = first["messages"][-2]["content"][-1]
+    assert stable_block["text"] == "current plan"
+    assert stable_block["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in first["messages"][-1]
 
 
 def test_build_anthropic_body_message_cache_breakpoint():
@@ -4607,6 +4660,10 @@ async def run_all_tests():
     r.record("anthropic_body_static_dynamic_split", test_build_anthropic_body_static_dynamic_split)
     r.record("anthropic_body_multi_boundary_cached", test_build_anthropic_body_multi_boundary_system_blocks_are_cached)
     r.record("anthropic_body_cache_control_cap", test_build_anthropic_body_caps_anthropic_cache_control_blocks)
+    r.record(
+        "anthropic_param_populator_shared_prefix",
+        test_param_populator_bodies_share_cached_conversation_prefix,
+    )
     r.record("anthropic_body_message_breakpoint", test_build_anthropic_body_message_cache_breakpoint)
     r.record("anthropic_body_skip_cache_write", test_build_anthropic_body_skip_cache_write_keeps_system_markers)
     r.record("anthropic_body_provider_fast_mode", test_build_anthropic_body_provider_fast_mode_supported_opus_only)

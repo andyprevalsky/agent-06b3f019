@@ -24,6 +24,7 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 # - Third-party libraries (httpx, instructor) may have import-time issues
 # - This is a safety net, not strictly required for our code
 with workflow.unsafe.imports_passed_through():
+    from domains.request_user_approval.config import APPROVAL_SIGNAL_PARAM_REFRESH_PATCH
     from domains.spawn_agent.handler import spawn_agent  # Unified: browser/code/general_purpose/explore
     from helpers import (
         check_user_usage,
@@ -43,6 +44,7 @@ with workflow.unsafe.imports_passed_through():
     from helpers.context_scope import filter_internal_subagent_messages
     from helpers.handle_tool_event import handle_tool_event
     from helpers.llm import (
+        call_llm_activity,
         fetch_compute_token_activity,
         mark_compute_token_rate_limited_activity,
         set_response_schema_activity,
@@ -62,6 +64,12 @@ with workflow.unsafe.imports_passed_through():
 
     # Tool executors (map tool name → workflow helper)
     from tools.grep import grep
+    from tools.gate import (
+        GateRejectedError,
+        build_subscription_gate,
+        mint_subscription_checkout_activity,
+        raise_gate_direct,
+    )
     from tools.knowledge_base import save_blueprint_activity
     from tools.message_person import message_person
     from tools.prompts import TOOL_PROMPTS
@@ -896,6 +904,10 @@ class AgentWorkflow:
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
 
+        # Pre-flight credit gate: if a user starts with exhausted free credits
+        # and no subscription, block before spending more compute or running tools.
+        await self._check_credits()
+
         # =====================================================================
         # PHASE 1: PLAN (research + create execution plan)
         # =====================================================================
@@ -1558,8 +1570,28 @@ class AgentWorkflow:
             )
             if result and not result.get("has_credits", True):
                 workflow.logger.warning("💰 Credits depleted - pausing agent")
-                self.is_paused = True
                 self._has_credits = False
+                if result.get("tier") is None:
+                    checkout_url = await workflow.execute_activity(
+                        mint_subscription_checkout_activity,
+                        args=[self.user_id],
+                        start_to_close_timeout=timedelta(seconds=30),
+                        retry_policy=RetryPolicy(maximum_attempts=3),
+                    )
+                    try:
+                        await raise_gate_direct(
+                            self,
+                            build_subscription_gate(
+                                checkout_url=checkout_url,
+                                reason="Your free credits are exhausted — subscribe to continue this task.",
+                                title="Subscribe to continue this task",
+                            ),
+                            gate_key="subscription",
+                        )
+                    except GateRejectedError:
+                        self.is_paused = True
+                else:
+                    self.is_paused = True
             else:
                 self._has_credits = True
         except Exception as e:
@@ -1906,7 +1938,21 @@ class AgentWorkflow:
                     )
                     # Let UserRejectedError bubble up to outer Exception handler
                     # which posts ERROR for tool_call_id_A
-                    await request_user_approval_direct(self, question=question, metadata={"toolApproval": True})
+                    approval = await request_user_approval_direct(
+                        self,
+                        question=question,
+                        metadata={"toolApproval": True},
+                    )
+                    approval_response = str(approval.get("response") or "").strip()
+                    if (
+                        workflow.patched(APPROVAL_SIGNAL_PARAM_REFRESH_PATCH)
+                        and approval_response.casefold() not in {"", "approve", "approved"}
+                    ):
+                        tool_args = await self._repopulate_approved_tool_args(
+                            tool_name,
+                            tool_args,
+                            approval_response,
+                        )
 
             executor = TOOL_EXECUTORS[tool_name]
 
@@ -1917,7 +1963,6 @@ class AgentWorkflow:
                 "web_fetch",
                 "attempt_completion",
                 "call_phone_number",
-                "grep",
             }
 
             if tool_name in NEW_SIGNATURE_TOOLS:
@@ -2015,6 +2060,12 @@ class AgentWorkflow:
                 if tool_name == "spawn_agent":
                     tool_call_dict["_phase"] = self.current_phase
                 executor_result = await executor(self, tool_call_dict, tool_call_id)
+                if isinstance(executor_result, dict):
+                    original_usage = executor_result.get("usage", {})
+                    if original_usage:
+                        await self._track_usage(original_usage, tool_name=tool_name)
+                    result = executor_result.get("result", executor_result)
+                    return {"success": True, "message": f"{tool_name} completed", "result": result}
                 # spawn_agent returns (last_status, summary) tuple
                 if isinstance(executor_result, tuple):
                     last_status, result_text = executor_result
@@ -2076,6 +2127,112 @@ class AgentWorkflow:
             # Remove tool from in-use and broadcast tree state
             self.tools_in_use.discard(tool_display)
             await self._update_tree_state()
+
+    async def _repopulate_approved_tool_args(
+        self,
+        tool_name: str,
+        original_args: Dict[str, Any],
+        approval_response: str,
+    ) -> Dict[str, Any]:
+        """Apply approval-time feedback to one already-approved tool call.
+
+        This is parameter population, not a new action proposal: validation
+        requires the original tool and execution resumes directly with the
+        refreshed arguments.
+        """
+        system_prompt_text = await self.build_system_prompt()
+        original_json = _json.dumps(original_args, ensure_ascii=False, sort_keys=True)
+        extra_message = (
+            f"Update the parameters for the already-approved `{tool_name}` call using the user's "
+            "approval-time feedback.\n\n"
+            f"Original parameters:\n{original_json}\n\n"
+            f"User approval feedback:\n{approval_response}\n\n"
+            f"Call exactly `{tool_name}` once with the complete updated parameters. Preserve every "
+            "original parameter unless the feedback requires changing it. Do not call another tool "
+            "and do not ask for approval; this action is already approved."
+        )
+
+        # Force the canonical backend context so same-worker and cross-worker
+        # activities see identical context, including the just-finished approval
+        # event. The stable system/history prefix remains cache-readable; the
+        # unique instruction is trailing and skip_cache_write avoids caching it.
+        llm_result = await workflow.execute_activity(
+            call_llm_activity,
+            args=[
+                self.agent_id,
+                self.model,
+                self._current_tools,
+                256,
+                self.agent_id,
+                None,
+                None,
+                self._active_claude_token(),
+                "approval_param_populator",
+                system_prompt_text,
+                extra_message,
+                tool_name,
+                True,
+                "",
+                self._active_claude_source(),
+                self._active_claude_pool_id(),
+                self.user_id,
+                self._active_gpt_token(),
+                self._active_gpt_account_id(),
+                self._active_gpt_source(),
+                self._active_gpt_pool_id(),
+                self.user_id,
+                self.compute_token_lineage_key,
+                self.compute_token_fast_cache_affinity_key,
+                self.user_id,
+                self.fast_mode_cache_enabled,
+                self.fast_cache_goal,
+                None,
+                True,
+                True,
+            ],
+            start_to_close_timeout=timedelta(seconds=600),
+            retry_policy=RetryPolicy(maximum_attempts=2),
+            heartbeat_timeout=timedelta(seconds=180),
+        )
+
+        matching_calls = [
+            call for call in llm_result.get("tool_calls", []) if call.get("tool") == tool_name
+        ]
+        if len(matching_calls) != 1:
+            raise ValueError(
+                f"Approval parameter population expected exactly one {tool_name} call; "
+                f"received {len(matching_calls)}"
+            )
+
+        refreshed_args = {
+            key: value for key, value in matching_calls[0].items() if key != "tool"
+        }
+        merged_args = dict(original_args)
+        merged_args.update(refreshed_args)
+
+        usage = llm_result.get("usage", {})
+        prompt_tokens = usage.get("prompt_tokens", 0)
+        completion_tokens = usage.get("completion_tokens", 0)
+        if prompt_tokens > 0 or completion_tokens > 0:
+            try:
+                await self._on_tokens(
+                    prompt_tokens,
+                    completion_tokens,
+                    usage.get("actual_model"),
+                    cache_read_input_tokens=usage.get("cache_read_input_tokens", 0),
+                    cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
+                    call_site="approval_param_populator",
+                    claude_token_rotated=usage.get("claude_token_rotated", False),
+                    claude_token_error=usage.get("claude_token_error"),
+                    gpt_token_error=usage.get("gpt_token_error"),
+                    gpt_token_rotated=usage.get("gpt_token_rotated", False),
+                    compute_token_used=usage.get("compute_token_used"),
+                    from_fast_cache=usage.get("from_fast_cache", False),
+                )
+            except Exception as error:
+                workflow.logger.warning(f"on_tokens failed for approval_param_populator: {error}")
+
+        return merged_args
 
     async def _handle_tool_event(self, event: ToolEvent, tool_call_id: str, tool_name: str) -> None:
         """

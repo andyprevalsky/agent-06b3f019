@@ -363,14 +363,63 @@ class GrepTool(BaseModel):
             "Use -i for case-insensitive matching and multiline for cross-line patterns."
         ),
     )
-    source: Optional[Literal["messages", "network", "agent_network", "transactions", "documents"]] = Field(
+    sources: Optional[
+        List[
+            Literal[
+                "messages",
+                "email",
+                "gmail",
+                "imessage",
+                "whatsapp",
+                "sms",
+                "network",
+                "agent_network",
+                "transactions",
+                "documents",
+            ]
+        ]
+    ] = Field(
         default=None,
         description=(
-            "Optional source bucket. Omit to search messages, network, and the current agent_network. "
-            "messages searches user communication records. network searches contact records. "
-            "agent_network searches all message roles in the current agent tree and returns role/location metadata. "
-            "transactions searches synced Plaid transaction rows. documents searches synced ChatGPT/Claude "
-            "exports, Apple Notes, Obsidian vault notes, and generic user documents."
+            "The specific data source(s) to search - pass a list and pick the exact source(s) the "
+            "task needs. Do NOT default to a blunt catch-all when you know the channel; name the "
+            "concrete sources (e.g. [\"email\"], or [\"email\", \"imessage\"]). Omit entirely to "
+            "search the local defaults (messages, network, agent_network). "
+            "Channels of the user's communications: email searches the user's email/Gmail; "
+            "imessage searches iMessage; whatsapp searches WhatsApp; sms searches SMS. "
+            "messages is the umbrella over all communication channels (use only when the channel "
+            "is genuinely unknown). network searches contact records. agent_network searches all "
+            "message roles in the current agent tree and returns role/location metadata. "
+            "transactions searches synced Plaid transaction rows. documents searches synced "
+            "ChatGPT/Claude exports, Apple Notes, Obsidian vault notes, and generic user documents. "
+            "If a named source's connector isn't connected, the search returns a 'source not "
+            "connected' notice and the user is automatically asked to connect it - do NOT retry "
+            "that source; continue with the sources you can reach."
+        ),
+    )
+    source: Optional[
+        Literal[
+            "messages",
+            "email",
+            "gmail",
+            "imessage",
+            "whatsapp",
+            "sms",
+            "network",
+            "agent_network",
+            "transactions",
+            "documents",
+        ]
+    ] = Field(
+        default=None,
+        description="Legacy single-source alias for `sources`. Prefer `sources` (a list of the exact sources the task needs).",
+    )
+    require_source_access: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Agent-side gating hint for documents-provider searches. Set true only when the user "
+            "explicitly requires that document provider; leave unset for opportunistic searches, "
+            "so missing access does not block the task."
         ),
     )
     before: Optional[int] = Field(
@@ -419,7 +468,9 @@ class GrepTool(BaseModel):
         description=(
             "Source-specific nested filters. For transactions: since, until, account, min_amount, "
             "max_amount, status ('posted', 'pending', or 'all'), include_pending_in_totals. "
-            "For messages: person and since. For documents: document_source, since, until, path, and tag. "
+            "For messages: person and since. For documents: document_source, since, until, path, and tag; "
+            "documents is an umbrella corpus, so set document_source to the concrete provider "
+            "(chatgpt, claude, apple_notes, or obsidian). "
             "Unsupported filters are rejected by the backend for the selected source."
         ),
     )

@@ -38,6 +38,7 @@ from domains.spawn_agent.service import (
 from helpers.attachments import extract_attachments_from_context, fetch_parent_attachments_activity
 from helpers.tracing import span
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
+from tools.gate import GateRejectedError, build_source_connect_gate, raise_gate_direct
 from tools.spawn_browser_agent_v3 import get_manager as get_browser_manager
 from tools.spawn_claude_code_agent import get_manager as get_code_manager
 from tools.spawn_sub_agents import get_manager as get_sub_agent_manager
@@ -403,6 +404,10 @@ class SpawnAgentManager(ToolManager):
             explore_tool_call_results = result.get("tool_call_results") or []
             accumulated_usage = result.get("accumulated_usage", [])
             llm_iteration_usage = result.get("llm_iteration_usage", [])
+            # Data sources the explore tried to grep but whose connector isn't
+            # connected. When present the explore is a FAILED sub-agent, and the
+            # parent (spawn_agent) raises one blocking source_connect gate each.
+            unavailable_sources = result.get("unavailable_sources") or []
 
             # Hand raw tool-call traces to any caller that asked for them
             # (wait_for's condition-judge). Keeping this out of the persisted
@@ -417,18 +422,20 @@ class SpawnAgentManager(ToolManager):
                 combined_llm.extend(usage.get("llm", []))
                 combined_service.extend(usage.get("service", []))
 
-            # FINISHED with result and usage
+            # FINISHED with result and usage — or ERROR when a required data
+            # source wasn't connected (the explore couldn't finish its job).
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title=ui_goal[:EXPLORE_GOAL_DISPLAY_LEN],
                 message=explore_result,
-                status=MessageStatus.FINISHED,
+                status=MessageStatus.ERROR if unavailable_sources else MessageStatus.FINISHED,
                 data={
                     "usage": {
                         "llm": combined_llm,
                         "service": combined_service,
                     },
                     "result": explore_result,
+                    "unavailable_sources": unavailable_sources,
                 },
                 metadata={"agentType": "explore", "taskId": task_id, "fullGoal": ui_goal},
             )
@@ -778,6 +785,7 @@ async def spawn_agent(workflow_instance, tool_call: Dict, tool_call_id: str):
     manager = get_manager()
     last_status = None
     last_result = ""
+    unavailable_sources: List[Dict] = []
     event_count = 0
     async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
         event_count += 1
@@ -787,11 +795,57 @@ async def spawn_agent(workflow_instance, tool_call: Dict, tool_call_id: str):
         # Capture the result from the FINISHED event
         if isinstance(event, ToolEvent) and event.data and event.data.get("result"):
             last_result = event.data["result"]
+        # Capture data sources the explore couldn't reach (connector not connected)
+        if isinstance(event, ToolEvent) and event.data and event.data.get("unavailable_sources"):
+            unavailable_sources = event.data["unavailable_sources"]
         # Track usage from events
         if isinstance(event, ToolEvent) and event.data and event.data.get("usage"):
             await workflow_instance._track_usage(
                 event.data["usage"], tool_name="spawn_agent", call_site="explore_agent"
             )
 
+    # A required data source wasn't connected: raise one blocking source_connect
+    # gate per source (dedup/fan-in collapses duplicates across sub-agents). Each
+    # gate posts its own card to the main chat and blocks until the user resolves
+    # it. The explore stays FAILED so the main agent re-spawns once connected.
+    if unavailable_sources:
+        await _raise_source_connect_gates(workflow_instance, unavailable_sources)
+
     workflow.logger.info(f"[spawn_agent] Finished type={agent_type}, events={event_count}, last_status={last_status}")
     return last_status, last_result
+
+
+async def _raise_source_connect_gates(workflow_instance, unavailable_sources: List[Dict]) -> None:
+    """Raise a blocking source_connect gate for each unavailable data source.
+
+    Runs in workflow context (has ``_handle_tool_event``/``_signal_responses``),
+    mirroring the subscription gate in spawn_browser_agent_v3. A declined gate
+    is swallowed — the explore already failed, so the main agent reports the gap.
+    """
+    for status in unavailable_sources:
+        if not isinstance(status, dict):
+            continue
+        source = str(status.get("source") or "")
+        if not source:
+            continue
+        connector = str(status.get("connector") or source)
+        connect_url = str(status.get("connectUrl") or "")
+        pretty = connector.replace("_", " ").title()
+        # Key the gate by the CONNECTOR, not the raw grep source. The OAuth
+        # callback resolves `source_connect:<providerKey>` (e.g. "gmail"), so a
+        # gate keyed on the source alias ("email") would never auto-resolve and
+        # the workflow would park forever. Connector-keying also dedups sources
+        # that share one connector (email + gmail → one Gmail gate).
+        gate = build_source_connect_gate(
+            connector,
+            f"Connect {pretty} so Rose can use your {source}",
+            f"This task needs your {source} data, but {pretty} isn't connected yet — "
+            "tap to connect and I'll pick right back up.",
+            connect_url,
+        )
+        try:
+            await raise_gate_direct(
+                workflow_instance, gate, gate_key=f"source_connect:{connector}"
+            )
+        except GateRejectedError:
+            workflow.logger.info(f"[spawn_agent] source_connect gate declined for {connector}")

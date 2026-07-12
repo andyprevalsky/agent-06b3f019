@@ -5,9 +5,15 @@ import {
   type CardProviderDetailsResult,
 } from '../../providers/card-provider';
 import { createLogger } from '../../providers/logger';
-import { stripe } from '../../providers/stripe';
-import { MAX_PURCHASE_CENTS, PURCHASE_APPROVAL_CACHE_HOURS } from './config';
+import { cancelAuthorizedHold, stripe } from '../../providers/stripe';
+import {
+  benchmarkPurchaseKycRequired,
+  MAX_PURCHASE_CENTS,
+  PURCHASE_APPROVAL_CACHE_HOURS,
+} from './config';
 import { PurchaseError } from './errors';
+import { isKycRequiredError, kycRequiredPurchaseError } from './kyc';
+import { getCustomerDefaultPaymentMethodId } from './stripeCustomer';
 import * as repo from './repo';
 import { archivePurchaseBoundary } from './archive';
 import {
@@ -53,29 +59,6 @@ function normalizeCurrency(currency: string): string {
     throw new PurchaseError('Only USD purchases are currently supported');
   }
   return normalized;
-}
-
-async function getCustomerDefaultPaymentMethodId(customerId: string): Promise<string> {
-  const customer = await stripe.customers.retrieve(customerId);
-  if ('deleted' in customer && customer.deleted) {
-    throw new PurchaseError('Stripe billing customer has been deleted', 402);
-  }
-
-  const defaultPaymentMethod = customer.invoice_settings?.default_payment_method;
-  if (typeof defaultPaymentMethod === 'string' && defaultPaymentMethod.trim() !== '') {
-    return defaultPaymentMethod;
-  }
-  if (
-    defaultPaymentMethod !== null &&
-    typeof defaultPaymentMethod === 'object' &&
-    'id' in defaultPaymentMethod &&
-    typeof defaultPaymentMethod.id === 'string' &&
-    defaultPaymentMethod.id.trim() !== ''
-  ) {
-    return defaultPaymentMethod.id;
-  }
-
-  throw new PurchaseError('User does not have a default Stripe payment method', 402);
 }
 
 function isReusableStatus(status: PurchaseSpendStatus): boolean {
@@ -299,10 +282,13 @@ async function chargeAndIssueCard(
       agent_id: input.agentId,
       error: error instanceof Error ? error.message : String(error),
     });
+    // Cancel any authorized hold before surfacing a KYC gate so money isn't stranded.
+    const kycRequired = isKycRequiredError(error);
+    if (kycRequired && paymentIntentId !== undefined) await cancelAuthorizedHold(paymentIntentId);
     await repo.updatePurchaseStatus(purchaseId, PurchaseSpendStatus.FAILED, {
       stripePaymentIntentId: paymentIntentId ?? null,
     });
-    throw error;
+    throw kycRequired ? kycRequiredPurchaseError() : error;
   }
 }
 
@@ -333,6 +319,10 @@ export async function mintPurchaseCard(
   }
 
   const purchase = await openPendingPurchase(input, existing);
+  if (benchmarkPurchaseKycRequired(input.userId)) {
+    await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.FAILED);
+    throw kycRequiredPurchaseError();
+  }
 
   const subscription = await repo.findSubscriptionByUserId(input.userId);
   const stripeCustomerId = subscription?.stripeCustomerId;

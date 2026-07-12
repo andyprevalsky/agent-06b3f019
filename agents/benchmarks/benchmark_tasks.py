@@ -29,6 +29,7 @@ class BenchmarkTask:
     row_end: Optional[int] = None    # Slice CSV attachments ending at this 1-indexed data row (inclusive)
     expected_approval_count: Optional[int] = None  # Exact number of approvals expected (used with count_only)
     expected_attention_kind: Optional[str] = None  # metadata.attentionKind expected for approval-style tasks
+    expected_gate: Optional[dict] = None  # Expected metadata.gate fields for gate-blocked tasks
     min_agent_count: Optional[int] = None  # Minimum total agents in tree (root + sub-agents)
     expected_tool_counts: Optional[dict] = None  # Exact tool call counts (toolName → count)
     min_tool_counts: Optional[dict] = None  # Minimum tool call counts (toolName → min count)

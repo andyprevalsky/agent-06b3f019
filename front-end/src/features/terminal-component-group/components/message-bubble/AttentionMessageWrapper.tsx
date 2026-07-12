@@ -3,6 +3,7 @@
  * onSendMessage callback is available.
  */
 import type { Message } from '../../hooks';
+import { rejectAttentionRequest, respondToAttentionRequest } from '../../hooks';
 import { AttentionMessage } from './AttentionMessage';
 
 const AUTONOMOUS_EXECUTION_PROMPT =
@@ -26,6 +27,12 @@ export function AttentionMessageWrapper({
   const attentionMessage =
     (message.metadata?.attentionMessage as string | undefined) || message.text;
   const isWaiting = message.metadata?.toolStatus === 'IN_PROGRESS';
+  const approvalMetadata = message.metadata?.requestUserApproval as
+    { attentionRequestId?: unknown } | undefined;
+  const attentionRequestId =
+    typeof approvalMetadata?.attentionRequestId === 'string'
+      ? approvalMetadata.attentionRequestId
+      : undefined;
 
   const handleStartExecution = onSendMessage
     ? () => onSendMessage(AUTONOMOUS_EXECUTION_PROMPT)
@@ -39,6 +46,9 @@ export function AttentionMessageWrapper({
       onComplete={onTypingComplete}
       onStartExecution={handleStartExecution}
       isStreaming={isStreaming}
+      attentionRequestId={attentionRequestId}
+      onApprove={(requestId) => respondToAttentionRequest(requestId, 'Approved')}
+      onDecline={(requestId) => rejectAttentionRequest(requestId)}
     />
   );
 }

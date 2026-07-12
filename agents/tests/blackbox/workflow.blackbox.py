@@ -1375,7 +1375,7 @@ class _FakeExternalHandle:
 class _FakeWorkflowModule:
     """Stand-in for temporalio.workflow inside a workflow method. Captures activities + signals."""
 
-    def __init__(self):
+    def __init__(self, *, patched: bool = True):
         self.logger = _FakeWorkflowLogger()
         self.activity_calls: List[tuple] = []  # (fn_name, args)
         self.signal_calls: List[tuple] = []  # (wf_id, name, data)
@@ -1383,6 +1383,7 @@ class _FakeWorkflowModule:
         self.activity_returns: Dict[str, Any] = {}  # fn_name -> return value override
         self.activity_blockers: Dict[str, asyncio.Event] = {}
         self.now_value = datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        self._patched = patched
 
     async def execute_activity(self, fn, args=None, **kwargs):
         fn_name = getattr(fn, "__name__", str(fn))
@@ -1407,6 +1408,9 @@ class _FakeWorkflowModule:
 
     def uuid4(self):
         return "00000000-0000-0000-0000-000000000001"
+
+    def patched(self, patch_id):
+        return self._patched
 
 
 def _patch_workflow(fake: _FakeWorkflowModule):
@@ -2762,14 +2766,14 @@ async def test_workflow_handle_incomplete_unknown_passthrough():
 
 
 async def test_workflow_check_credits_no_credits_pauses():
-    """_check_credits flips is_paused=True when credits depleted."""
+    """_check_credits flips is_paused=True when subscribed credits are depleted."""
     wf = _bare_workflow_instance()
     wf.user_id = "u"
     fake = _FakeWorkflowModule()
 
     async def fake_exec(fn, args=None, **kwargs):
         if getattr(fn, "__name__", "") == "check_user_usage":
-            return {"has_credits": False}
+            return {"has_credits": False, "tier": 20}
         return None
 
     fake.execute_activity = fake_exec
@@ -2780,6 +2784,50 @@ async def test_workflow_check_credits_no_credits_pauses():
         assert wf._has_credits is False
     finally:
         _restore_workflow(original)
+
+
+async def test_workflow_check_credits_free_credits_exhausted_raises_subscription_gate():
+    """A no-subscription user with exhausted free credits gets a subscription gate."""
+    import workflows.agent_workflow as workflow_module
+
+    wf = _bare_workflow_instance()
+    wf.user_id = "u-free-credit"
+    wf.agent_id = "a-free-credit"
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["check_user_usage"] = {
+        "has_credits": False,
+        "remaining": 0,
+        "used": 0.01,
+        "total": 0.01,
+        "tier": None,
+    }
+    fake.activity_returns["mint_subscription_checkout_activity"] = "https://roselabs.ai/s/free-credit"
+    raised = {}
+
+    async def fake_raise_gate(workflow_instance, gate, gate_key):
+        raised["workflow"] = workflow_instance
+        raised["gate"] = gate
+        raised["gate_key"] = gate_key
+        return "resolved"
+
+    original_workflow = _patch_workflow(fake)
+    original_raise_gate = workflow_module.raise_gate_direct
+    workflow_module.raise_gate_direct = fake_raise_gate
+    try:
+        await wf._check_credits()
+        assert wf._has_credits is False
+        assert wf.is_paused is False
+        assert raised["workflow"] is wf
+        assert raised["gate_key"] == "subscription"
+        assert raised["gate"]["type"] == "subscription"
+        assert raised["gate"]["action"]["url"] == "https://roselabs.ai/s/free-credit"
+        assert raised["gate"]["presentation"]["title"] == "Subscribe to continue this task"
+        assert raised["gate"]["presentation"]["reason"].startswith("Your free credits are exhausted")
+        activity_names = [name for name, _args in fake.activity_calls]
+        assert activity_names == ["check_user_usage", "mint_subscription_checkout_activity"]
+    finally:
+        workflow_module.raise_gate_direct = original_raise_gate
+        _restore_workflow(original_workflow)
 
 
 async def test_workflow_check_credits_has_credits_no_pause():
@@ -3869,6 +3917,283 @@ async def test_workflow_execute_tool_web_fetch_preserves_fast_mode_kwargs():
         _restore_workflow(original)
 
 
+async def test_workflow_approval_text_repopulates_same_tool_then_executes_once():
+    """Approved-with-text refreshes only the pending call's params and does not gate twice."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-approval-jit"
+    wf.user_id = "user-1"
+    wf.current_phase = "EXECUTE"
+    wf.fast_mode_cache_enabled = True
+    wf.fast_cache_goal = "Call the restaurant and book dinner"
+    wf._current_tools = ["call_phone_number", "web_search", "attempt_completion"]
+    wf.context = [
+        {
+            "role": "USER",
+            "text": "Call the restaurant and book dinner",
+            "timestamp": "2026-07-11T20:40:00+00:00",
+        }
+    ]
+    original_args = {
+        "to": "+15555550123",
+        "system_prompt": "Book dinner for 8:44 PM local time.",
+        "output_schema": {
+            "fields": [
+                {
+                    "name": "reservation_status",
+                    "type": "str",
+                    "required": True,
+                    "description": "Whether the reservation was booked",
+                }
+            ]
+        },
+    }
+    updated_args = {
+        **original_args,
+        "system_prompt": "Book dinner for 1:45 PM local time.",
+    }
+    approval_calls: List[str] = []
+    executor_calls: List[Dict[str, Any]] = []
+    token_calls: List[Dict[str, Any]] = []
+
+    import workflows.agent_workflow as workflow_module
+
+    async def fake_approval(workflow_instance, question, metadata=None, **kwargs):
+        approval_calls.append(question)
+        return {
+            "response": "its 1:45pm local time",
+            "question": question,
+            "attention_request_id": "req-approval-jit",
+        }
+
+    async def fake_call_executor(**kwargs):
+        executor_calls.append(kwargs)
+        return {"result": {"status": "queued"}}
+
+    async def fake_build_system_prompt():
+        return "stable system prompt"
+
+    async def fake_on_tokens(*args, **kwargs):
+        token_calls.append({"args": args, "kwargs": kwargs})
+
+    wf.build_system_prompt = fake_build_system_prompt
+    wf._on_tokens = fake_on_tokens
+
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["call_llm_activity"] = {
+        "tool_calls": [{"tool": "call_phone_number", **updated_args}],
+        "usage": {
+            "prompt_tokens": 120,
+            "completion_tokens": 20,
+            "cache_read_input_tokens": 100,
+            "cache_creation_input_tokens": 0,
+            "actual_model": "anthropic/claude-sonnet-4.6",
+        },
+    }
+    original_workflow = _patch_workflow(fake)
+    original_approval = workflow_module.request_user_approval_direct
+    original_executor = workflow_module.TOOL_EXECUTORS["call_phone_number"]
+    workflow_module.request_user_approval_direct = fake_approval
+    workflow_module.TOOL_EXECUTORS["call_phone_number"] = fake_call_executor
+    try:
+        result = await wf._execute_tool("call_phone_number", original_args, "tc-approval-jit")
+
+        assert result["success"] is True
+        assert len(approval_calls) == 1, "The already-approved refreshed call must not be gated again"
+        assert len(executor_calls) == 1
+        assert executor_calls[0]["tool_call"] == {"tool": "call_phone_number", **updated_args}
+
+        llm_calls = [call for call in fake.activity_calls if call[0] == "call_llm_activity"]
+        assert len(llm_calls) == 1
+        llm_args = llm_calls[0][1]
+        import inspect
+
+        positional_params = [
+            parameter
+            for parameter in inspect.signature(workflow_module.call_llm_activity).parameters.values()
+            if parameter.kind
+            in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        assert len(llm_args) <= len(positional_params)
+        assert llm_args[2] == wf._current_tools, "JIT must preserve the execute-phase tool schema"
+        assert llm_args[8] == "approval_param_populator"
+        assert llm_args[9] == "stable system prompt"
+        assert "its 1:45pm local time" in llm_args[10]
+        assert llm_args[11] == "call_phone_number"
+        assert llm_args[12] is True, "JIT calls must read the stable prefix without writing a new cache tail"
+        assert llm_args[25] is True, "JIT calls must inherit the workflow's Fast Mode setting"
+        assert llm_args[26] == "Call the restaurant and book dinner"
+        assert llm_args[28] is True, "JIT calls must force canonical backend context on every worker"
+        assert llm_args[29] is True, "JIT must cache the stable context before its unique feedback suffix"
+        assert len(token_calls) == 1
+        assert token_calls[0]["kwargs"]["cache_read_input_tokens"] == 100
+        assert token_calls[0]["kwargs"]["call_site"] == "approval_param_populator"
+    finally:
+        workflow_module.request_user_approval_direct = original_approval
+        workflow_module.TOOL_EXECUTORS["call_phone_number"] = original_executor
+        _restore_workflow(original_workflow)
+
+
+async def test_workflow_plain_approval_executes_original_params_without_jit():
+    """A plain Approve click remains the direct approval -> execution path."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-plain-approval"
+    wf.user_id = "user-1"
+    wf.current_phase = "EXECUTE"
+    original_args = {
+        "to": "+15555550123",
+        "system_prompt": "Confirm the restaurant's hours.",
+        "output_schema": {
+            "fields": [
+                {
+                    "name": "hours",
+                    "type": "str",
+                    "required": True,
+                    "description": "Restaurant hours",
+                }
+            ]
+        },
+    }
+    executor_calls: List[Dict[str, Any]] = []
+
+    import workflows.agent_workflow as workflow_module
+
+    async def fake_approval(workflow_instance, question, metadata=None, **kwargs):
+        return {"response": "Approved", "question": question, "attention_request_id": "req-plain"}
+
+    async def fake_call_executor(**kwargs):
+        executor_calls.append(kwargs)
+        return {"result": {"status": "queued"}}
+
+    fake = _FakeWorkflowModule()
+    original_workflow = _patch_workflow(fake)
+    original_approval = workflow_module.request_user_approval_direct
+    original_executor = workflow_module.TOOL_EXECUTORS["call_phone_number"]
+    workflow_module.request_user_approval_direct = fake_approval
+    workflow_module.TOOL_EXECUTORS["call_phone_number"] = fake_call_executor
+    try:
+        result = await wf._execute_tool("call_phone_number", original_args, "tc-plain-approval")
+
+        assert result["success"] is True
+        assert len(executor_calls) == 1
+        assert executor_calls[0]["tool_call"] == {"tool": "call_phone_number", **original_args}
+        assert not any(call[0] == "call_llm_activity" for call in fake.activity_calls)
+    finally:
+        workflow_module.request_user_approval_direct = original_approval
+        workflow_module.TOOL_EXECUTORS["call_phone_number"] = original_executor
+        _restore_workflow(original_workflow)
+
+
+async def test_workflow_rejection_fails_tool_with_feedback_without_jit_or_execution():
+    """Reject remains a terminal error and carries typed feedback into tool context."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-rejected-approval"
+    wf.user_id = "user-1"
+    wf.current_phase = "EXECUTE"
+    tool_args = {
+        "to": "+15555550123",
+        "system_prompt": "Book dinner.",
+        "output_schema": {
+            "fields": [
+                {
+                    "name": "status",
+                    "type": "str",
+                    "required": True,
+                    "description": "Booking status",
+                }
+            ]
+        },
+    }
+    executor_calls: List[Dict[str, Any]] = []
+    handled_events = []
+
+    import workflows.agent_workflow as workflow_module
+
+    async def fake_approval(workflow_instance, question, metadata=None, **kwargs):
+        raise workflow_module.UserRejectedError(
+            "User rejected the approval request",
+            rejection_message="the local time is wrong",
+        )
+
+    async def fake_call_executor(**kwargs):
+        executor_calls.append(kwargs)
+        return {"result": {"status": "queued"}}
+
+    async def fake_handle(event, tool_call_id, tool_name):
+        handled_events.append((event, tool_call_id, tool_name))
+
+    wf._handle_tool_event = fake_handle
+    fake = _FakeWorkflowModule()
+    original_workflow = _patch_workflow(fake)
+    original_approval = workflow_module.request_user_approval_direct
+    original_executor = workflow_module.TOOL_EXECUTORS["call_phone_number"]
+    workflow_module.request_user_approval_direct = fake_approval
+    workflow_module.TOOL_EXECUTORS["call_phone_number"] = fake_call_executor
+    try:
+        result = await wf._execute_tool("call_phone_number", tool_args, "tc-rejected-approval")
+
+        assert result["error"] is True
+        assert result["message"] == 'User rejected with feedback: "the local time is wrong"'
+        assert executor_calls == []
+        assert not any(call[0] == "call_llm_activity" for call in fake.activity_calls)
+        assert len(handled_events) == 1
+        assert handled_events[0][0].status.name == "ERROR"
+        assert "the local time is wrong" in handled_events[0][0].message
+    finally:
+        workflow_module.request_user_approval_direct = original_approval
+        workflow_module.TOOL_EXECUTORS["call_phone_number"] = original_executor
+        _restore_workflow(original_workflow)
+
+
+async def test_workflow_pre_patch_replay_skips_new_jit_command():
+    """Old Temporal histories replay their original approval -> executor command order."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-legacy-replay"
+    wf.user_id = "user-1"
+    wf.current_phase = "EXECUTE"
+    tool_args = {
+        "to": "+15555550123",
+        "system_prompt": "Book dinner at the proposed time.",
+        "output_schema": {
+            "fields": [
+                {
+                    "name": "status",
+                    "type": "str",
+                    "required": True,
+                    "description": "Booking status",
+                }
+            ]
+        },
+    }
+    executor_calls: List[Dict[str, Any]] = []
+
+    import workflows.agent_workflow as workflow_module
+
+    async def fake_approval(workflow_instance, question, metadata=None, **kwargs):
+        return {"response": "its 1:45pm local time", "question": question}
+
+    async def fake_call_executor(**kwargs):
+        executor_calls.append(kwargs)
+        return {"result": {"status": "queued"}}
+
+    fake = _FakeWorkflowModule(patched=False)
+    original_workflow = _patch_workflow(fake)
+    original_approval = workflow_module.request_user_approval_direct
+    original_executor = workflow_module.TOOL_EXECUTORS["call_phone_number"]
+    workflow_module.request_user_approval_direct = fake_approval
+    workflow_module.TOOL_EXECUTORS["call_phone_number"] = fake_call_executor
+    try:
+        result = await wf._execute_tool("call_phone_number", tool_args, "tc-legacy-replay")
+
+        assert result["success"] is True
+        assert len(executor_calls) == 1
+        assert executor_calls[0]["tool_call"] == {"tool": "call_phone_number", **tool_args}
+        assert not any(call[0] == "call_llm_activity" for call in fake.activity_calls)
+    finally:
+        workflow_module.request_user_approval_direct = original_approval
+        workflow_module.TOOL_EXECUTORS["call_phone_number"] = original_executor
+        _restore_workflow(original_workflow)
+
+
 async def test_workflow_refresh_claude_token_missing_fetches_and_sets():
     wf = _bare_workflow_instance()
     wf.claude_max_token = None
@@ -4330,6 +4655,10 @@ async def run_all_tests():
     await r.record_async("wf_handle_incomplete_error", test_workflow_handle_incomplete_error)
     await r.record_async("wf_handle_incomplete_unknown", test_workflow_handle_incomplete_unknown_passthrough)
     await r.record_async("wf_check_credits_no_credits", test_workflow_check_credits_no_credits_pauses)
+    await r.record_async(
+        "wf_check_credits_free_credit_subscription_gate",
+        test_workflow_check_credits_free_credits_exhausted_raises_subscription_gate,
+    )
     await r.record_async("wf_check_credits_has_credits", test_workflow_check_credits_has_credits_no_pause)
     await r.record_async("wf_check_credits_exception", test_workflow_check_credits_on_exception_continues)
     await r.record_async("wf_post_message", test_workflow_post_message_executes_activity)
@@ -4386,6 +4715,22 @@ async def run_all_tests():
     await r.record_async(
         "wf_execute_tool_web_fetch_fast_mode_kwargs",
         test_workflow_execute_tool_web_fetch_preserves_fast_mode_kwargs,
+    )
+    await r.record_async(
+        "wf_approval_text_repopulates_same_tool",
+        test_workflow_approval_text_repopulates_same_tool_then_executes_once,
+    )
+    await r.record_async(
+        "wf_plain_approval_executes_original_params",
+        test_workflow_plain_approval_executes_original_params_without_jit,
+    )
+    await r.record_async(
+        "wf_rejection_fails_with_feedback",
+        test_workflow_rejection_fails_tool_with_feedback_without_jit_or_execution,
+    )
+    await r.record_async(
+        "wf_pre_patch_replay_skips_jit",
+        test_workflow_pre_patch_replay_skips_new_jit_command,
     )
     await r.record_async("wf_refresh_claude_token_missing", test_workflow_refresh_claude_token_missing_fetches_and_sets)
     await r.record_async(

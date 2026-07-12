@@ -5,6 +5,7 @@ import { createClient } from '@supabase/supabase-js';
 import { getUserUsage } from '../../providers/credits';
 import { createLogger } from '../../providers/logger';
 import { getTemporalClient } from '../../providers/temporal';
+import { resolvePendingGateByKey } from '../../providers/gateResolution';
 import * as repo from './repo';
 import { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, STRIPE_WEBHOOK_SECRET } from './config';
 
@@ -78,6 +79,7 @@ export async function handlePaymentSuccess(invoice: Stripe.Invoice): Promise<voi
   });
 
   await unpauseUserAgents(userId);
+  await resolvePendingGateByKey(userId, 'subscription', 'SUBSCRIPTION_ACTIVE');
 
   await autoGenerateApiKeyIfNeeded(userId);
 }

@@ -15,6 +15,7 @@ import type {
   CreateAgentPayload,
 } from '@/lib/api';
 import type { RequestPaymentCardPayload } from '@/lib/realtime-types';
+import type { GateMetadata } from '@/features/terminal-component-group/components/attention-inbox/types';
 
 // ── View state ────────────────────────────────────────────────────────────
 
@@ -67,6 +68,11 @@ export interface PendingApproval {
   question: string;
   imageUrl: string | null;
   requestPaymentCard?: RequestPaymentCardPayload;
+}
+
+export interface PendingGate {
+  attentionRequestId: string;
+  gate: GateMetadata;
 }
 
 // ── Opening message tuple: [text, pauseDurationMs] ────────────────────────

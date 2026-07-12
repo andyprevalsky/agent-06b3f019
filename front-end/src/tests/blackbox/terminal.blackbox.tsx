@@ -122,7 +122,7 @@ describe('Terminal page', () => {
     });
 
     it('renders sidebar with agent list items', async () => {
-      const user = userEvent.setup();
+      const user = userEvent.setup({ delay: null });
       renderWithProviders(<Terminal />);
 
       // Sidebar starts collapsed (compact mode shows only icons, no text).
@@ -300,8 +300,107 @@ describe('Terminal page', () => {
       expect(screen.queryByRole('button', { name: /^rose$/i })).not.toBeInTheDocument();
     });
 
+    it('opens browser-review direct agent links in Agents view', async () => {
+      localStorage.clear();
+      mockBrowserReviewSession();
+      window.history.replaceState({}, '', '/?agent-id=agent-123');
+
+      renderWithProviders(<Terminal />);
+
+      expect(await screen.findByRole('button', { name: /^rose$/i })).toBeInTheDocument();
+      expect(screen.queryByLabelText('URL or search')).not.toBeInTheDocument();
+    });
+
+    it('pins pending gate cards above the query input', async () => {
+      window.history.replaceState({}, '', '/?agent-id=agent-gate');
+      server.use(
+        http.get(`${API_BASE}/agents/:agentId`, ({ params }) => {
+          return HttpResponse.json({
+            agent: {
+              agent_id: params.agentId,
+              goal: 'Gate test agent',
+              model: 'rose-1-lite',
+              source: 'WEB',
+              reasoning_effort: 'medium',
+              progress: 50,
+              status: 'ACTIVE',
+              status_message: null,
+              temporal_workflow_id: 'wf-gate',
+              token_count: 1000,
+              tokens_in: 800,
+              tokens_out: 200,
+              tool_tokens_in: 0,
+              tool_tokens_out: 0,
+              tool_cost_cents: 0,
+              context_size: 4096,
+              message_count: 2,
+              price_limit_cents: 100,
+              tree_cost_cents: 10,
+              created_at: '2026-01-01T00:00:00Z',
+              updated_at: '2026-01-01T00:01:00Z',
+              write_lock_enabled: false,
+              parent_agent_id: null,
+              parent_goal: null,
+              verifier: null,
+              tools: [],
+            },
+            messages: [
+              {
+                message_id: 'msg-gate-user',
+                timestamp: '2026-01-01T00:00:00Z',
+                text: 'Validate the subscription gate.',
+                role: 'USER',
+              },
+              {
+                message_id: 'msg-gate-tool',
+                timestamp: '2026-01-01T00:00:01Z',
+                text: 'Subscribe to let Rose complete purchases',
+                role: 'TOOL',
+                metadata: {
+                  toolCallId: 'gate-request-1',
+                  toolName: 'gate',
+                  toolStatus: 'IN_PROGRESS',
+                  attentionRequestId: 'attention-gate-1',
+                  gate: {
+                    type: 'subscription',
+                    gateKey: 'subscription:test',
+                    presentation: {
+                      title: 'Subscribe to let Rose complete purchases',
+                      reason:
+                        'This checkout needs an active subscription before Rose can mint a payment card.',
+                      cta: 'Subscribe · $20/mo',
+                    },
+                    action: {
+                      kind: 'link',
+                      url: 'https://roselabs.ai/subscribe?demo=gate-chip',
+                    },
+                  },
+                },
+              },
+            ],
+            pagination: {
+              has_more: false,
+              oldest_timestamp: null,
+            },
+          });
+        }),
+      );
+
+      renderWithProviders(<Terminal />);
+
+      const title = await screen.findByText('Subscribe to let Rose complete purchases');
+      expect(screen.getAllByText('Subscribe to let Rose complete purchases')).toHaveLength(1);
+      expect(screen.getByRole('button', { name: /Subscribe/ })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Cancel/ })).toBeInTheDocument();
+
+      const textarea = await screen.findByPlaceholderText('Type your message...');
+      expect(
+        Boolean(title.compareDocumentPosition(textarea) & Node.DOCUMENT_POSITION_FOLLOWING),
+      ).toBe(true);
+    });
+
     it('does not show Browse in the sidebar for regular users', async () => {
-      const user = userEvent.setup();
+      const user = userEvent.setup({ delay: null });
       renderWithProviders(<Terminal />);
 
       await user.click(await screen.findByLabelText('Expand sidebar'));
@@ -317,7 +416,7 @@ describe('Terminal page', () => {
 
   describe('user interactions', () => {
     it('typing in the query input updates the value', async () => {
-      const user = userEvent.setup();
+      const user = userEvent.setup({ delay: null });
       renderWithProviders(<Terminal />);
 
       const textarea = await screen.findByPlaceholderText('Enter any goal');
@@ -327,7 +426,7 @@ describe('Terminal page', () => {
     });
 
     it('clicking a popular goal populates the input', async () => {
-      const user = userEvent.setup();
+      const user = userEvent.setup({ delay: null });
       renderWithProviders(<Terminal />);
 
       await waitFor(() => {
@@ -343,7 +442,7 @@ describe('Terminal page', () => {
     });
 
     it('submitting a goal creates a new agent via POST /api/agents', async () => {
-      const user = userEvent.setup();
+      const user = userEvent.setup({ delay: null });
       clearCaptures();
       renderWithProviders(<Terminal />);
 
@@ -468,7 +567,9 @@ describe('Terminal page', () => {
         (r) => r.url.includes('/api/agents') && r.method === 'POST' && !r.url.includes('/messages'),
       );
       expect(createReq).toBeUndefined();
-    });
+      // Interaction + waitFor(login modal) is slow under coverage instrumentation
+      // and full-suite contention (passes fast in isolation); give it headroom.
+    }, 30000);
 
     it('renders with anonymous session', async () => {
       localStorage.clear();
@@ -505,6 +606,7 @@ describe('Terminal page', () => {
         (r) => r.url.includes('/api/agents') && r.method === 'POST' && !r.url.includes('/messages'),
       );
       expect(createReq).toBeUndefined();
-    });
+      // Slow under coverage instrumentation + full-suite contention (see above).
+    }, 30000);
   });
 });

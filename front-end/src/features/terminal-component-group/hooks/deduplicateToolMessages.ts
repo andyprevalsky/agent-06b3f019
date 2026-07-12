@@ -1,17 +1,4 @@
-/**
- * Pure helper that collapses multiple TOOL messages sharing a `toolCallId`
- * into a single representative message, preserves explore-agent / wait_for
- * sub-step history, compresses `set_plan` updates, cleans up orphaned
- * IN_PROGRESS tools, and groups explore-agent messages by `taskId`.
- *
- * Returns a tuple of:
- *   [ ordered messages, exploreStepMap (repId -> steps), waitForCheckMap ]
- * so the caller can render representative messages plus attached history.
- *
- * Lives in the hooks layer (not a separate utils file) so consumers reach it
- * through hooks.ts without the api layer needing to import from a non-layer
- * module — preserving the forward-only dependency chain.
- */
+/** Deduplicates TOOL messages while preserving explore-agent and wait_for step history. */
 
 import type { Message } from '../api';
 import type { ExploreStep, WaitForCheck } from '../types';
@@ -170,7 +157,7 @@ function dedupByToolCallId(messages: Message[]): {
 function cleanOrphanedInProgress(tools: Message[], lastAssistantTimestamp: number): Message[] {
   return tools.filter((m) => {
     if (m.metadata?.toolStatus !== 'IN_PROGRESS') return true;
-    if (m.metadata?.isUserAttentionMessage) return true;
+    if (m.metadata?.isUserAttentionMessage || m.metadata?.gate) return true;
     if (m.metadata?.agentType === 'explore') return true;
     if (m.metadata?.toolName === 'wait_for') return true;
     const toolTime = new Date(m.timestamp).getTime();
@@ -211,14 +198,6 @@ interface ExploreGrouping {
   dataByTaskId: Map<string, ExploreData>;
 }
 
-/**
- * Thinking-step messages (`save_explore_message`) are posted with
- * toolName=spawn_agent and toolStatus=FINISHED for every iteration. They
- * must not be treated as the overall completion event — the init/final pair
- * (which carries `metadata.fullGoal`) is the only signal for the whole
- * explore-agent's status. Pick the representative from non-thinking spawn
- * messages so the chip's status reflects the run as a whole.
- */
 function isThinkingSpawnMessage(m: Message): boolean {
   return m.metadata?.toolName === 'spawn_agent' && m.metadata?.title === 'Explore agent thinking';
 }
@@ -263,8 +242,8 @@ function groupExploreMessages(messages: Message[]): ExploreGrouping {
       title: (representative.metadata?.title as string) || '',
       fullGoal: (representative.metadata?.fullGoal as string) || undefined,
       message: representative.text || '',
-      status: ((representative.metadata?.toolStatus as string) || 'IN_PROGRESS') as
-        'IN_PROGRESS' | 'FINISHED' | 'ERROR',
+      status: ((representative.metadata?.toolStatus as string) ||
+        'IN_PROGRESS') as ExploreData['status'],
       steps,
     });
 
@@ -284,10 +263,9 @@ function buildWaitForChecks(
   childIds: Set<string>,
 ): WaitForCheck[] {
   rawMsgs.sort(sortByTimestampAsc);
-  const withCheckNum = rawMsgs.filter((m) => m.metadata?.checkNum != null);
 
   const latestByCheckNum = new Map<number, Message>();
-  for (const m of withCheckNum) {
+  for (const m of rawMsgs.filter((msg) => msg.metadata?.checkNum != null)) {
     latestByCheckNum.set(m.metadata!.checkNum as number, m);
   }
 
