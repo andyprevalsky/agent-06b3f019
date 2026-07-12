@@ -29,6 +29,51 @@ git_cmd() {
     fi
 }
 
+# Persistent benchmark volumes repeatedly fetch detached SHAs without advancing
+# a remote-tracking ref. Those fetches can add another near-complete pack, while
+# interrupted fetches leave large tmp_pack_* files behind. Bound that growth
+# before a fetch needs scratch space: discard only Git's incomplete temporary
+# packs, compact when the
+# pack store is large or the volume is low, then fail closed if recovery did not
+# leave enough room for a fetch.
+maintain_object_store() {
+    local pack_dir="$REPO_DIR/.git/objects/pack"
+    local compact_at_kb="${CLOUDBENCH_GIT_COMPACT_AT_KB:-4194304}"
+    local min_free_kb="${CLOUDBENCH_GIT_MIN_FREE_KB:-2097152}"
+    local pack_kb free_kb
+
+    [[ "$compact_at_kb" =~ ^[0-9]+$ ]] || {
+        echo "[cloudbench] FATAL: CLOUDBENCH_GIT_COMPACT_AT_KB must be an integer" >&2
+        return 1
+    }
+    [[ "$min_free_kb" =~ ^[0-9]+$ ]] || {
+        echo "[cloudbench] FATAL: CLOUDBENCH_GIT_MIN_FREE_KB must be an integer" >&2
+        return 1
+    }
+
+    if [ -d "$pack_dir" ]; then
+        find "$pack_dir" -maxdepth 1 -type f -name 'tmp_pack_*' -delete
+    fi
+    pack_kb="$(du -sk "$pack_dir" 2>/dev/null | awk '{print $1}')"
+    free_kb="$(df -Pk "$REPO_DIR" | awk 'NR == 2 {print $4}')"
+    pack_kb="${pack_kb:-0}"
+    free_kb="${free_kb:-0}"
+
+    if [ "$pack_kb" -ge "$compact_at_kb" ] || [ "$free_kb" -lt "$min_free_kb" ]; then
+        echo "[cloudbench] compacting persistent Git object store (pack_kb=$pack_kb free_kb=$free_kb)"
+        git_cmd gc --prune=now
+        free_kb="$(df -Pk "$REPO_DIR" | awk 'NR == 2 {print $4}')"
+        free_kb="${free_kb:-0}"
+    fi
+
+    if [ "$free_kb" -lt "$min_free_kb" ]; then
+        echo "[cloudbench] FATAL: insufficient volume space for git fetch (${free_kb}KB free; need ${min_free_kb}KB)" >&2
+        return 1
+    fi
+}
+
+maintain_object_store
+
 remote_url="$(git_cmd remote get-url origin)"
 if [[ "$remote_url" == https://github.com/* || "$remote_url" == *github.com/* ]]; then
     token=""
