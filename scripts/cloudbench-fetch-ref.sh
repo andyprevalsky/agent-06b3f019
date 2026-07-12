@@ -7,11 +7,42 @@ REPO_DIR="${1:?usage: cloudbench-fetch-ref.sh <repo-dir> <ref>}"
 REF="${2:?usage: cloudbench-fetch-ref.sh <repo-dir> <ref>}"
 APP_USER="${CLOUDBENCH_APP_USER:-}"
 auth_config=""
+fetch_lock_kind=""
+fetch_lock_fd=""
+fetch_lock_path="$REPO_DIR/.git/cloudbench-fetch.lock"
 
 cleanup() {
     [ -n "$auth_config" ] && rm -f "$auth_config" 2>/dev/null || true
+    if [ "$fetch_lock_kind" = "flock" ] && [ -n "$fetch_lock_fd" ]; then
+        flock -u "$fetch_lock_fd" 2>/dev/null || true
+        exec 9>&-
+    elif [ "$fetch_lock_kind" = "shlock" ] && [ "$(cat "$fetch_lock_path" 2>/dev/null || true)" = "$$" ]; then
+        rm -f "$fetch_lock_path"
+    fi
 }
 trap cleanup EXIT
+
+acquire_fetch_lock() {
+    if command -v flock >/dev/null 2>&1; then
+        exec 9<> "$fetch_lock_path"
+        fetch_lock_fd=9
+        if ! flock -n "$fetch_lock_fd"; then
+            echo "[cloudbench] FATAL: another Git maintenance or fetch still owns $fetch_lock_path" >&2
+            return 1
+        fi
+        printf '%s\n' "$$" > "$fetch_lock_path"
+        fetch_lock_kind="flock"
+    elif command -v shlock >/dev/null 2>&1; then
+        if ! shlock -p "$$" -f "$fetch_lock_path"; then
+            echo "[cloudbench] FATAL: another Git maintenance or fetch still owns $fetch_lock_path" >&2
+            return 1
+        fi
+        fetch_lock_kind="shlock"
+    else
+        echo "[cloudbench] FATAL: flock or shlock is required for serialized Git maintenance" >&2
+        return 1
+    fi
+}
 
 git_cmd() {
     if [ -n "$auth_config" ]; then
@@ -71,6 +102,7 @@ maintain_object_store() {
     fi
 }
 
+acquire_fetch_lock
 maintain_object_store
 
 remote_url="$(git_cmd remote get-url origin)"
