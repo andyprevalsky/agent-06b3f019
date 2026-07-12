@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# Dispatch the catalog's Pre-Deploy/smoke group through the production Benchmark
+# Hub, execute it on the isolated cloud fleet, and require the visible Hub run
+# to finish with every task passing.
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+read_predeploy_tasks() {
+    python3 - "$ROOT_DIR/agents/benchmarks/tasks.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as handle:
+    tasks = json.load(handle)
+for task in tasks:
+    if "smoke" in (task.get("tags") or []):
+        print(task["name"])
+PY
+}
+
+if [ "${1:-}" = "--list" ]; then
+    read_predeploy_tasks
+    exit 0
+fi
+if [ "$#" -ne 0 ]; then
+    echo "usage: scripts/run-predeploy-cloud [--list]" >&2
+    exit 2
+fi
+
+PREDEPLOY_TASKS=()
+while IFS= read -r task; do
+    [ -n "$task" ] && PREDEPLOY_TASKS+=("$task")
+done < <(read_predeploy_tasks)
+[ "${#PREDEPLOY_TASKS[@]}" -gt 0 ] || { echo "no smoke-tagged benchmark tasks found" >&2; exit 1; }
+
+HUB_URL="${HUB_URL:-https://navi-j9a9.onrender.com}"
+HUB_USER_ID="${HUB_USER_ID:-1f85ff25-6e29-4c1b-8739-f917bd101a30}"
+HUB_POLLER_BIN="${HUB_POLLER_BIN:-$ROOT_DIR/scripts/run-bench-hub-poller}"
+if [ -z "${BACKEND_API_KEY:-}" ]; then
+    BACKEND_API_KEY="$(grep -E '^BACKEND_API_KEY=' "$ROOT_DIR/back-end/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\"')"
+fi
+[ -n "${BACKEND_API_KEY:-}" ] || { echo "BACKEND_API_KEY not found" >&2; exit 1; }
+
+head_sha="$(git rev-parse --short HEAD)"
+scope="deploy-predeploy-${head_sha}-$(date -u +%Y%m%d%H%M%S)-$$"
+payload="$(python3 - "$scope" "${PREDEPLOY_TASKS[@]}" <<'PY'
+import json
+import sys
+
+print(json.dumps({"scope": sys.argv[1], "task_names": sys.argv[2:]}))
+PY
+)"
+
+response="$(curl -fsS -X POST "$HUB_URL/api/benchmarks/run-requests" \
+    -H "X-API-Key: $BACKEND_API_KEY" \
+    -H "X-User-Id: $HUB_USER_ID" \
+    -H "Content-Type: application/json" \
+    -d "$payload")"
+read -r request_id run_id < <(printf '%s' "$response" | python3 -c '
+import json, sys
+request = json.load(sys.stdin)["request"]
+print(request["id"], request["runId"])
+')
+[ -n "$request_id" ] && [ -n "$run_id" ] || { echo "Hub did not return a linked run" >&2; exit 1; }
+
+echo "☁️  Pre-Deploy cloud request: $request_id"
+echo "📊 Benchmarks → Runs: $run_id"
+echo "🧪 Tasks (${#PREDEPLOY_TASKS[@]}): ${PREDEPLOY_TASKS[*]}"
+
+HUB_URL="$HUB_URL" \
+HUB_USER_ID="$HUB_USER_ID" \
+BACKEND_API_KEY="$BACKEND_API_KEY" \
+HUB_CLAIM_SCOPE="$scope" \
+HUB_SKIP_CATALOG_EXPORT=1 \
+"$HUB_POLLER_BIN" --once
+
+final="$(curl -fsS "$HUB_URL/api/benchmarks/runs/$run_id" \
+    -H "X-API-Key: $BACKEND_API_KEY" \
+    -H "X-User-Id: $HUB_USER_ID")"
+mkdir -p "$ROOT_DIR/.context/predeploy-runs"
+printf '%s\n' "$final" > "$ROOT_DIR/.context/predeploy-runs/$request_id.json"
+python3 - "$ROOT_DIR/.context/predeploy-runs/$request_id.json" "${PREDEPLOY_TASKS[@]}" <<'PY'
+import json
+import sys
+
+expected = sys.argv[2:]
+with open(sys.argv[1]) as handle:
+    payload = json.load(handle)
+run = payload.get("run") or {}
+dispatch = run.get("dispatch") or {}
+tasks = run.get("tasks") or []
+by_name = {task.get("name"): task for task in tasks}
+
+errors = []
+if dispatch.get("status") != "completed":
+    errors.append(f"dispatch status={dispatch.get('status')!r}")
+if set(by_name) != set(expected):
+    errors.append(f"task set mismatch: expected={expected!r} actual={list(by_name)!r}")
+for name in expected:
+    task = by_name.get(name) or {}
+    if task.get("passed") is not True or task.get("status") != "passed":
+        errors.append(f"{name}: status={task.get('status')!r} passed={task.get('passed')!r}")
+if errors:
+    print("Pre-Deploy cloud gate failed:", file=sys.stderr)
+    for error in errors:
+        print(f"- {error}", file=sys.stderr)
+    raise SystemExit(1)
+
+print(f"✅ Pre-Deploy cloud gate: {len(expected)}/{len(expected)} passed")
+for name in expected:
+    task = by_name[name]
+    duration = task.get("duration_seconds")
+    suffix = f" ({duration:.1f}s)" if isinstance(duration, (int, float)) else ""
+    print(f"   ✅ {name}{suffix}")
+PY

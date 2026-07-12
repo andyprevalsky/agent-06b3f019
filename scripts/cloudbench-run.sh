@@ -19,13 +19,13 @@
 #   - /data/world-model is a PRE-BUILT WMH model. We SERVE it (never build from R2:
 #     R2→Fly is throttled to ~14 KB/s = hours). run.sh serves a pre-built model with
 #     no R2 access when WMH_BUILD_DIR=/data/world-model AND BENCHMARK_SKIP_WMH_DELTA=1.
-#   - Deps (agents venv + node_modules) are baked into /app; mirrored into /data/repo
-#     only when missing (rsync), so after the first run this is a near-noop.
+#   - Deps (agents venv + node_modules) are baked into /app; manifest fingerprints
+#     refresh the volume trees when the donor image changes and reject stale images.
 #
 # Per-run flow:
 #   1. cd /data/repo → git fetch/checkout/reset --hard "$REF" (pre-authed remote).
 #   2. Decode AGENTS_ENV_B64 / BACKEND_ENV_B64 → repo .env files.
-#   3. Mirror baked venv + node_modules from /app → /data/repo if missing.
+#   3. Fingerprint + sync baked venv/node_modules from /app → /data/repo.
 #   4. Ensure the system Postgres cluster is up + the victoria DB exists (:5432).
 #   5. Stage the live dashboard (copy dashboard.html into the context dir + start a
 #      static http server rooted there on DASHPORT) so run-bench-cloud can proxy it.
@@ -55,6 +55,10 @@ DEPS_DIR="${CLOUDBENCH_DEPS_DIR:-/app}"           # baked dependency donor image
 WMH_DIR="${CLOUDBENCH_WMH_DIR:-/data/world-model}"
 APP_USER=rose
 CONTEXT_DIR="$REPO_DIR/.context/cloudbench"
+RUN_OUTPUT_MARKER="/tmp/cloudbench-run-start.$$"
+FETCH_REF_SCRIPT="${CLOUDBENCH_FETCH_REF_SCRIPT:-$REPO_DIR/scripts/cloudbench-fetch-ref.sh}"
+SYNC_DEPS_SCRIPT="${CLOUDBENCH_SYNC_DEPS_SCRIPT:-$REPO_DIR/scripts/cloudbench-sync-deps.sh}"
+CURRENT_RUN_ARTIFACT_SCRIPT="${CLOUDBENCH_CURRENT_RUN_ARTIFACT_SCRIPT:-$REPO_DIR/scripts/cloudbench-current-run-artifact.py}"
 
 # ── Inputs (env) ────────────────────────────────────────────────────────────
 REF="${REF:-}"
@@ -72,6 +76,7 @@ BENCHMARK_FAST_MODE_CACHE="${BENCHMARK_FAST_MODE_CACHE:-}"
 BENCHMARK_PEAK_FLY_MACHINES="${BENCHMARK_PEAK_FLY_MACHINES:-}"
 BENCHMARK_VM_USD_PER_HOUR="${BENCHMARK_VM_USD_PER_HOUR:-}"
 BENCHMARK_FRONTEND_URL="${BENCHMARK_FRONTEND_URL:-}"
+CLOUDBENCH_START_BARRIER="${CLOUDBENCH_START_BARRIER:-}"
 
 # Report/marker delimiters run-bench-cloud greps for in /data/bench.log.
 REPORT_BEGIN="::CLOUDBENCH-REPORT-CARD-BEGIN::"
@@ -92,13 +97,13 @@ emit_report_and_result() {
     # even when the direct-fetch ssh reads race the machine stop.
     local card="$CONTEXT_DIR/report-card.json"
     local latest_run
-    latest_run="$(ls -t "$REPO_DIR/agents/benchmarks/runs/"*.json 2>/dev/null | head -1 || true)"
+    latest_run="$(python3 "$CURRENT_RUN_ARTIFACT_SCRIPT" "$REPO_DIR/agents/benchmarks/runs" "$RUN_OUTPUT_MARKER" 2>/dev/null || true)"
     if [ -n "$latest_run" ] && [ -f "$latest_run" ]; then
         cp -f "$latest_run" "$CONTEXT_DIR/run.json" 2>/dev/null || true
         chown "$APP_USER:$APP_USER" "$CONTEXT_DIR/run.json" 2>/dev/null || true
     fi
     echo "$REPORT_BEGIN"
-    if [ -f "$card" ]; then
+    if [ -f "$card" ] && [ "$card" -nt "$RUN_OUTPUT_MARKER" ]; then
         cat "$card"
     else
         echo '{"error":"no report-card.json produced"}'
@@ -133,6 +138,15 @@ finish() {
     exit "$code"
 }
 
+if [ -n "$CLOUDBENCH_START_BARRIER" ]; then
+    case "$CLOUDBENCH_START_BARRIER" in
+        *[!a-zA-Z0-9._-]*)
+            log "FATAL: invalid synchronized start barrier token"
+            finish 1
+            ;;
+    esac
+fi
+
 # ── 0. Sanity: the volume + repo checkout must exist (created at box setup) ──
 if [ ! -d "$REPO_DIR/.git" ]; then
     log "FATAL: $REPO_DIR is not a git checkout (expected a pre-authed volume checkout)"
@@ -140,21 +154,31 @@ if [ ! -d "$REPO_DIR/.git" ]; then
 fi
 cd "$REPO_DIR" || { log "FATAL: cannot cd $REPO_DIR"; finish 1; }
 
+# Snapshot clones retain the source machine's ignored .context tree. Clear it
+# before any setup step that can fail so an infrastructure error can never be
+# presented as a benchmark result from the snapshot's previous run.
+rm -rf "$CONTEXT_DIR"
+mkdir -p "$CONTEXT_DIR"
+chown -R "$APP_USER:$APP_USER" "$REPO_DIR/.context"
+touch "$RUN_OUTPUT_MARKER"
+if [ -n "$CLOUDBENCH_START_BARRIER" ]; then
+    rm -f "/data/cloudbench-start-$CLOUDBENCH_START_BARRIER.ready" \
+        "/data/cloudbench-start-$CLOUDBENCH_START_BARRIER.release"
+fi
+
 # ── 1. git-sync the branch/sha under test ───────────────────────────────────
 # The volume checkout's origin URL already embeds a working repo token (set at
 # box provisioning), so a plain fetch/checkout/reset needs NO token handling here.
 if [ -n "$REF" ]; then
-    log "git-syncing $REPO_DIR → $REF (pre-authed remote)"
-    gosu "$APP_USER" git -C "$REPO_DIR" fetch origin "$REF" 2>&1 | sed 's/^/   /' || \
-        gosu "$APP_USER" git -C "$REPO_DIR" fetch origin 2>&1 | sed 's/^/   /' || true
-    if ! gosu "$APP_USER" git -C "$REPO_DIR" checkout -f "$REF" 2>&1 | sed 's/^/   /'; then
-        # A bare sha that was just fetched lands in FETCH_HEAD; fall back to it.
-        gosu "$APP_USER" git -C "$REPO_DIR" checkout -f FETCH_HEAD 2>&1 | sed 's/^/   /' || {
-            log "FATAL: could not checkout $REF"; finish 1
-        }
+    log "git-syncing + verifying $REPO_DIR → $REF"
+    if ! CLOUDBENCH_APP_USER="$APP_USER" bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF" 2>&1 | sed 's/^/   /'; then
+        log "FATAL: could not verify requested ref $REF"
+        finish 1
     fi
-    gosu "$APP_USER" git -C "$REPO_DIR" reset --hard 2>&1 | sed 's/^/   /' || true
 fi
+# The controller credential is needed only for this exact fetch. Do not let it
+# flow into the benchmark stack, workers, or agent subprocess environments.
+unset CLOUDBENCH_GITHUB_TOKEN_B64
 log "checkout at $(gosu "$APP_USER" git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 if [ -n "${LOCAL_PATCH_FILE:-}" ] && [ -s "$LOCAL_PATCH_FILE" ]; then
     log "applying uploaded local workspace patch on top of checkout"
@@ -190,31 +214,14 @@ fi
 chown "$APP_USER:$APP_USER" "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env"
 chmod 600 "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env"
 
-# ── 3. Mirror baked deps from the image into the volume checkout ────────────
-# The image bakes node_modules (hoisted at /app) + the agents venv. A git checkout
-# on the volume has neither, so mirror them — but ONLY if missing (rsync is
-# incremental; after the first run this is a near-noop).
-if [ ! -d "$REPO_DIR/node_modules" ] || [ ! -f "$REPO_DIR/node_modules/.hoisted-to-root" ]; then
-    log "mirroring baked node_modules → $REPO_DIR/node_modules"
-    rsync -a --delete "$DEPS_DIR/node_modules/" "$REPO_DIR/node_modules/" 2>&1 | tail -1 | sed 's/^/   /' || true
-fi
-mkdir -p "$REPO_DIR/back-end/node_modules" "$REPO_DIR/agents/node_modules"
-touch "$REPO_DIR/node_modules/.hoisted-to-root" 2>/dev/null || true
-touch "$REPO_DIR/back-end/node_modules/.hoisted-to-root" "$REPO_DIR/agents/node_modules/.hoisted-to-root" 2>/dev/null || true
-# back-end node_modules (Prisma client + its own deps) is a separate tree from the
-# hoisted root; mirror it only when missing.
-if [ ! -x "$REPO_DIR/back-end/node_modules/.bin/tsx" ] && [ -d "$DEPS_DIR/back-end/node_modules" ]; then
-    log "mirroring baked back-end/node_modules → $REPO_DIR/back-end/node_modules"
-    rsync -a "$DEPS_DIR/back-end/node_modules/" "$REPO_DIR/back-end/node_modules/" 2>&1 | tail -1 | sed 's/^/   /' || true
-fi
-if [ ! -x "$REPO_DIR/agents/venv/bin/python" ]; then
-    log "mirroring baked agents venv → $REPO_DIR/agents/venv"
-    rsync -a "$DEPS_DIR/agents/venv/" "$REPO_DIR/agents/venv/" 2>&1 | tail -1 | sed 's/^/   /' || true
-fi
-# The back-end postinstall generated the Prisma client into /app; mirror it so the
-# branch checkout can import it without re-running `prisma generate`.
-if [ -d "$DEPS_DIR/node_modules/.prisma" ] && [ ! -d "$REPO_DIR/node_modules/.prisma" ]; then
-    rsync -a "$DEPS_DIR/node_modules/.prisma/" "$REPO_DIR/node_modules/.prisma/" 2>&1 | tail -1 | sed 's/^/   /' || true
+# ── 3. Sync baked deps from the image into the volume checkout ──────────────
+# A persistent volume can outlive many donor images. Missing-only checks leave
+# old package trees behind after package-lock/requirements changes, so compare
+# fingerprints and refresh atomically from the image. A donor/ref mismatch is a
+# hard infrastructure error: the image must be rebuilt before this ref can run.
+if ! bash "$SYNC_DEPS_SCRIPT" "$DEPS_DIR" "$REPO_DIR"; then
+    log "FATAL: cloudbench dependency synchronization failed"
+    finish 1
 fi
 chown -R "$APP_USER:$APP_USER" "$REPO_DIR/node_modules" "$REPO_DIR/back-end/node_modules" "$REPO_DIR/agents/venv" 2>/dev/null || true
 
@@ -274,9 +281,6 @@ if [ "$BENCH_SIMULATE" = "1" ]; then
     fi
 fi
 
-rm -rf "$CONTEXT_DIR"
-mkdir -p "$CONTEXT_DIR"
-chown -R "$APP_USER:$APP_USER" "$REPO_DIR/.context"
 chown -R "$APP_USER:$APP_USER" "$WMH_DIR" 2>/dev/null || true
 
 # ── 7. Stage + serve the live dashboard (proxied to the Mac by run-bench-cloud) ─
@@ -434,6 +438,30 @@ if ! $STACK_READY; then
 fi
 log "stack healthy — backend :$BACKEND_PORT, WMH :$WMH_PORT, dashboard :$BENCH_DASHPORT"
 
+# Fleet batches hold every task here until every isolated stack is healthy.
+# The controller releases all machines together, so slow database/bootstrap
+# work cannot turn a nominally parallel batch into serial benchmark execution.
+if [ -n "$CLOUDBENCH_START_BARRIER" ]; then
+    BARRIER_READY="/data/cloudbench-start-$CLOUDBENCH_START_BARRIER.ready"
+    BARRIER_RELEASE="/data/cloudbench-start-$CLOUDBENCH_START_BARRIER.release"
+    touch "$BARRIER_READY"
+    log "synchronized start barrier ready: $CLOUDBENCH_START_BARRIER"
+    BARRIER_RELEASED=false
+    for _ in $(seq 1 "${CLOUDBENCH_START_BARRIER_WAIT_SECONDS:-900}"); do
+        if [ -f "$BARRIER_RELEASE" ]; then
+            BARRIER_RELEASED=true
+            break
+        fi
+        sleep 1
+    done
+    if ! $BARRIER_RELEASED; then
+        log "FATAL: synchronized start barrier timed out"
+        finish 1
+    fi
+    rm -f "$BARRIER_READY" "$BARRIER_RELEASE"
+    log "synchronized start barrier released: $CLOUDBENCH_START_BARRIER"
+fi
+
 # ── 10. Run the benchmark ──────────────────────────────────────────────────
 if [ "${#BENCH_TASK_LIST[@]}" -eq 0 ]; then
     log "FATAL: BENCH_TASKS is empty"
@@ -457,6 +485,9 @@ if [ "$BENCH_SIMULATE" = "1" ]; then
 fi
 
 log "running benchmark: run_benchmark.py ${BENCH_ARGS[*]}"
+# Retouch after checkout/setup so files merely restored or rewritten during
+# clone initialization cannot qualify as output from this benchmark process.
+touch "$RUN_OUTPUT_MARKER"
 set +e
 # Export the workspace/queue env explicitly INSIDE the shell (not just an `env`
 # prefix) so run_benchmark's _verify_worker_queue_alignment() reliably sees

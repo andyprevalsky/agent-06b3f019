@@ -1048,6 +1048,9 @@ if [ ! -f "$ROOT_DIR/$REMOTE_RUN_SCRIPT" ]; then
     echo "❌ Missing $REMOTE_RUN_SCRIPT locally." >&2
     exit 1
 fi
+for helper in cloudbench-fetch-ref.sh cloudbench-sync-deps.sh cloudbench-current-run-artifact.py; do
+    [ -f "$ROOT_DIR/scripts/$helper" ] || { echo "❌ Missing scripts/$helper locally." >&2; exit 1; }
+done
 STAGED_LOCAL_FILES=()
 cleanup_staged_local_files() {
     for p in "${STAGED_LOCAL_FILES[@]}"; do
@@ -1056,10 +1059,10 @@ cleanup_staged_local_files() {
 }
 
 LOCAL_PATCH_FILE=""
-if ! git -C "$ROOT_DIR" diff --quiet --binary; then
+if ! git -C "$ROOT_DIR" diff HEAD --quiet --binary; then
     LOCAL_PATCH_FILE="$(mktemp)"
     STAGED_LOCAL_FILES+=("$LOCAL_PATCH_FILE")
-    git -C "$ROOT_DIR" diff --binary > "$LOCAL_PATCH_FILE"
+    git -C "$ROOT_DIR" diff HEAD --binary > "$LOCAL_PATCH_FILE"
 fi
 
 # Proxy the box BACKEND (not its frontend) to the Mac. The local archive frontend
@@ -1083,6 +1086,9 @@ CLOUDBENCH_API_KEY="$(
     { grep -h '^BACKEND_API_KEY' "$ROOT_DIR/back-end/.env" "$ROOT_DIR/agents/.env" 2>/dev/null | head -1; } \
         | sed -E 's/^BACKEND_API_KEY=//; s/^"//; s/"$//'
 )"
+CONTROLLER_GITHUB_TOKEN="$(gh auth token 2>/dev/null || resolve_github_token)"
+[ -n "$CONTROLLER_GITHUB_TOKEN" ] || { echo "❌ No current controller GitHub token available." >&2; exit 1; }
+CONTROLLER_GITHUB_TOKEN_B64="$(printf '%s' "$CONTROLLER_GITHUB_TOKEN" | base64 | tr -d '\n')"
 
 WRAPPER_LOCAL="$(mktemp)"
 STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
@@ -1090,6 +1096,11 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     echo "set -e"
     echo "chmod +x /data/cloudbench-run.sh"
     echo "export REF=$(printf '%q' "$BENCH_REF")"
+    echo "export CLOUDBENCH_GITHUB_TOKEN_B64=$(printf '%q' "$CONTROLLER_GITHUB_TOKEN_B64")"
+    echo "export CLOUDBENCH_FETCH_REF_SCRIPT=/data/cloudbench-fetch-ref.sh"
+    echo "export CLOUDBENCH_SYNC_DEPS_SCRIPT=/data/cloudbench-sync-deps.sh"
+    echo "export CLOUDBENCH_CURRENT_RUN_ARTIFACT_SCRIPT=/data/cloudbench-current-run-artifact.py"
+    echo "export CLOUDBENCH_START_BARRIER=$(printf '%q' "${CLOUDBENCH_START_BARRIER:-}")"
     echo "export WMH_MODEL_NAME=$(printf '%q' "$WMH_MODEL_NAME")"
     echo "export BENCH_TASKS_B64=$(printf '%q' "$TASKS_CSV_B64")"
     echo "export BENCH_MAX_CONCURRENCY=$(printf '%q' "$BENCH_MAX_CONCURRENCY")"
@@ -1111,6 +1122,7 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     else
         echo "unset LOCAL_PATCH_FILE LOCAL_PATCH_B64"
     fi
+    echo "rm -f $(printf '%q' "$REMOTE_TMP_SCRIPT")"
     echo "exec bash /data/cloudbench-run.sh"
 } > "$WRAPPER_LOCAL"
 
@@ -1137,8 +1149,11 @@ STAGED_LOCAL_FILES+=("$stage_err")
 # reliability of the staging step matters more than ~30s, so we keep the puts.)
 for _ in 1 2 3 4 5; do
     : > "$stage_err"
-    ssh_read "$mid" "rm -f /data/cloudbench-run.sh '$REMOTE_TMP_SCRIPT' /tmp/cloudbench-local.patch" >/dev/null 2>&1 || true
+    ssh_read "$mid" "rm -f /data/cloudbench-run.sh /data/cloudbench-fetch-ref.sh /data/cloudbench-sync-deps.sh /data/cloudbench-current-run-artifact.py '$REMOTE_TMP_SCRIPT' /tmp/cloudbench-local.patch" >/dev/null 2>&1 || true
     if FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$ROOT_DIR/$REMOTE_RUN_SCRIPT" /data/cloudbench-run.sh >"$stage_err" 2>&1 \
+        && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" /data/cloudbench-fetch-ref.sh >>"$stage_err" 2>&1 \
+        && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-sync-deps.sh" /data/cloudbench-sync-deps.sh >>"$stage_err" 2>&1 \
+        && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-current-run-artifact.py" /data/cloudbench-current-run-artifact.py >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$WRAPPER_LOCAL" "$REMOTE_TMP_SCRIPT" >>"$stage_err" 2>&1; then
         if [ -n "$LOCAL_PATCH_FILE" ]; then
             FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0644 "$LOCAL_PATCH_FILE" /tmp/cloudbench-local.patch >>"$stage_err" 2>&1 || { sleep 3; continue; }
@@ -1367,7 +1382,7 @@ if [ -z "$CARD_JSON" ]; then
     # Fallback: extract from the polled log between markers.
     CARD_JSON="$(awk "/$REPORT_BEGIN/{f=1;next} /$REPORT_END/{f=0} f" "$SSH_LOG" 2>/dev/null)"
 fi
-RUN_JSON="$(ssh_read "$mid" "f=\$(ls -t '$REMOTE_REPO/agents/benchmarks/runs/'*.json 2>/dev/null | head -1); [ -n \"\$f\" ] && cat \"\$f\"" 2>/dev/null || true)"
+RUN_JSON="$(ssh_read "$mid" "cat '$REMOTE_REPO/.context/cloudbench/run.json' 2>/dev/null" 2>/dev/null || true)"
 if [ -z "$RUN_JSON" ]; then
     RUN_JSON="$(awk "/$RESULT_BEGIN/{f=1;next} /$RESULT_END/{f=0} f" "$SSH_LOG" 2>/dev/null | grep -av '^run_file:')"
 fi
