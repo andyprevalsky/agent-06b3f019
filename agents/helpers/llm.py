@@ -167,6 +167,30 @@ def _is_cloud_agent_lifecycle_tool(metadata: Dict[str, Any]) -> bool:
 _pending_llm_context: Dict[str, Any] = {}  # agent_id -> (context, system_prompt, pre_resolved_ids)
 
 
+def _add_cache_breakpoint_before_extra_user_message(messages: List[Dict[str, Any]]) -> bool:
+    """Mark the latest stable conversational block before a per-call suffix.
+
+    The caller invokes this before appending ``extra_user_message``. That keeps
+    the full system+tools+conversation prefix identical across param-populator
+    calls while the task-specific suffix remains outside the cached prefix.
+    """
+    for message in reversed(messages):
+        if message.get("role") in {"system", "tool"}:
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and content:
+            message["content"] = [
+                {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}
+            ]
+            return True
+        if isinstance(content, list):
+            for block in reversed(content):
+                if isinstance(block, dict):
+                    block["cache_control"] = {"type": "ephemeral"}
+                    return True
+    return False
+
+
 def _safe_heartbeat(message: str) -> None:
     """Call activity.heartbeat() if we're in an activity context, otherwise silently skip."""
     with contextlib.suppress(Exception):
@@ -1505,7 +1529,7 @@ async def build_llm_messages(  # noqa: C901
         dt = parse_timestamp(ts)
         if dt.year == 1970:
             return ""
-        return f"[{dt.strftime('%Y-%m-%d %H:%M')}] "
+        return f"[{dt.isoformat(timespec='minutes')}] "
 
     messages = [{"role": "system", "content": system_prompt}]
     declared_tool_call_ids: set[str] = set()
@@ -4598,6 +4622,8 @@ async def call_llm_activity(  # noqa: C901
     fast_mode_cache_enabled: bool = False,
     fast_mode_goal: Optional[str] = None,
     fast_mode_step: Optional[int] = None,
+    force_backend_context: bool = False,
+    cache_before_extra_user_message: bool = False,
 ) -> Dict[str, Any]:
     """
     Activity wrapper for LLM calls with structured output and streaming.
@@ -4610,7 +4636,8 @@ async def call_llm_activity(  # noqa: C901
             When agent_id string: reads context from _pending_llm_context shared state,
             builds messages inside the activity (so file downloads work and base64
             content never crosses the Temporal 2MB payload boundary).
-            On cross-machine miss, falls back to fetching context from backend API.
+            On a cross-machine miss, or when force_backend_context is set, fetches
+            context from the backend API.
         model: Model to use
         tool_names: List of tool names for dynamic AgentAction model
         reasoning_max_tokens: Max reasoning tokens (0 disables)
@@ -4625,9 +4652,14 @@ async def call_llm_activity(  # noqa: C901
             without changing system prompt/tools (preserves cache prefix).
         required_tool: If set, validates the LLM called this tool. Raises ValueError
             if the tool is not in the response.
-        skip_cache_write: If True, skips message-level cache breakpoint (avoids
-            writing a cache entry for the unique trailing message) but keeps
-            system+tools markers so the shared prefix can still be read from cache.
+        skip_cache_write: If True, skips the automatic trailing message cache
+            breakpoint. Explicit prefix markers are preserved.
+        force_backend_context: If True, bypasses process-global pending context
+            and fetches the canonical agent messages from the backend.
+        cache_before_extra_user_message: Mark the latest stable conversation
+            block before appending extra_user_message. This lets productive
+            param calls create/read one shared prefix without caching the unique
+            task instruction.
 
     Returns:
         Dict with:
@@ -4659,8 +4691,8 @@ async def call_llm_activity(  # noqa: C901
         _context_key = None
         if isinstance(messages_or_agent_id, str):
             _context_key = messages_or_agent_id
-            pending = _pending_llm_context.get(_context_key)
-            if pending is None:
+            pending = None if force_backend_context else _pending_llm_context.get(_context_key)
+            if pending is None and not force_backend_context:
                 await asyncio.sleep(0.5)
                 pending = _pending_llm_context.get(_context_key)
             if pending is not None:
@@ -4681,7 +4713,11 @@ async def call_llm_activity(  # noqa: C901
                 # Fetch messages from backend; files download live via activity.in_activity().
                 from helpers.fetch_config import _fetch_agent_data_impl
 
-                logger.info("Cross-machine LLM context fallback", agent_id=_context_key)
+                logger.info(
+                    "Backend LLM context fetch",
+                    agent_id=_context_key,
+                    forced=force_backend_context,
+                )
                 data = await _fetch_agent_data_impl(_context_key)
                 context = data.get("messages", [])
                 messages = await build_llm_messages(
@@ -4691,7 +4727,8 @@ async def call_llm_activity(  # noqa: C901
                     llm_only_user_preamble=llm_only_user_preamble,
                     user_id=user_id,
                 )
-                _pending_llm_context[_context_key] = (context, system_prompt, None, user_id)
+                if not force_backend_context:
+                    _pending_llm_context[_context_key] = (context, system_prompt, None, user_id)
             else:
                 raise ValueError(f"No pending LLM context for agent {_context_key} and no system_prompt provided")
         else:
@@ -4699,6 +4736,9 @@ async def call_llm_activity(  # noqa: C901
             messages = messages_or_agent_id
             if llm_only_user_preamble:
                 messages = inject_llm_only_user_preamble(messages, llm_only_user_preamble)
+
+        if cache_before_extra_user_message and extra_user_message:
+            _add_cache_breakpoint_before_extra_user_message(messages)
 
         if extra_user_message:
             messages.append({"role": "user", "content": extra_user_message})
@@ -4871,10 +4911,11 @@ async def call_llm_activity(  # noqa: C901
                     tool_calls_dict.append(tc_dict)
 
         if required_tool:
-            matching = [tc for tc in tool_calls_dict if tc.get("tool") == required_tool]
-            if not matching:
-                got = [tc.get("tool") for tc in tool_calls_dict]
-                raise LLMStructuredOutputError(f"LLM did not call required tool '{required_tool}'. Got: {got}")
+            got = [tc.get("tool") for tc in tool_calls_dict]
+            if len(tool_calls_dict) != 1 or got[0] != required_tool:
+                raise LLMStructuredOutputError(
+                    f"LLM must call exactly one tool, '{required_tool}'. Got: {got}"
+                )
 
         logger.info(
             "LLM activity completed",
@@ -4884,7 +4925,7 @@ async def call_llm_activity(  # noqa: C901
         )
 
         # Clean up shared state on success
-        if _context_key:
+        if _context_key and not force_backend_context:
             _pending_llm_context.pop(_context_key, None)
 
         return {

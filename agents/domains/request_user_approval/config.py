@@ -17,3 +17,6 @@ TOOL_NAME = "request_user_approval"
 
 # Rejection sentinel value sent via signal
 REJECTION_SENTINEL = "__REJECTED__"
+
+# Temporal patch marker for the request-scoped approval response + JIT param refresh.
+APPROVAL_SIGNAL_PARAM_REFRESH_PATCH = "approval-signal-param-refresh-v1"

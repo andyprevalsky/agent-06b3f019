@@ -557,6 +557,28 @@ def test_format_user_context_recent_msg_to_direction():
     assert "To:" in result
 
 
+def test_format_user_context_recent_msg_preserves_timezone():
+    """Recent communications retain their offset instead of presenting UTC as local time."""
+    from helpers.get_user_context import _format_user_context
+
+    result = _format_user_context(
+        authenticated_sites=[],
+        user_settings={},
+        recent_messages=[
+            {
+                "channel": "SMS",
+                "timestamp": "2026-07-11T13:45:00-07:00",
+                "from": "+15555550123",
+                "to": "",
+                "message": "The local time is 1:45pm",
+            },
+        ],
+        frequent_contacts=[],
+    )
+
+    assert "2026-07-11T13:45-07:00" in result
+
+
 def test_format_user_context_contacts_variants():
     """Network section handles contacts with/without phone/email/relation."""
     from helpers.get_user_context import _format_user_context
@@ -735,6 +757,7 @@ async def run_all_tests():
     r.record("fmt_ctx_msg_truncate", test_format_user_context_recent_message_truncation)
     r.record("fmt_ctx_address", test_format_user_context_address_variants)
     r.record("fmt_ctx_to_direction", test_format_user_context_recent_msg_to_direction)
+    r.record("fmt_ctx_timezone", test_format_user_context_recent_msg_preserves_timezone)
     r.record("fmt_ctx_contacts", test_format_user_context_contacts_variants)
     await r.record_async("fetch_integrations_err", test_fetch_integrations_error_returns_empty_lists)
     await r.record_async("fetch_settings_err", test_fetch_user_settings_error_returns_empty)

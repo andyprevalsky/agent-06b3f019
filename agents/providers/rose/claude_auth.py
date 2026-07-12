@@ -146,24 +146,17 @@ def _count_cache_control_blocks(body: Dict[str, Any]) -> int:
 
 
 def _enforce_cache_control_cap(body: Dict[str, Any]) -> None:
-    """Anthropic accepts at most 4 blocks with cache_control per request."""
+    """Keep Anthropic's four most useful cumulative cache breakpoints.
+
+    A message breakpoint includes the system and tools that precede it, so it
+    is the only marker that can reuse a long conversation. When the execute
+    prompt's three system markers plus tools and messages exceed Anthropic's
+    four-marker cap, drop the latest redundant system markers first. Dropping
+    messages first silently reduced agent calls to system+tool cache hits.
+    """
 
     def over_cap() -> bool:
         return _count_cache_control_blocks(body) > _MAX_CACHE_CONTROL_BLOCKS
-
-    messages = body.get("messages")
-    if isinstance(messages, list):
-        for msg in reversed(messages):
-            if not over_cap() or not isinstance(msg, dict):
-                break
-            content = msg.get("content")
-            if isinstance(content, list):
-                for block in reversed(content):
-                    if not over_cap():
-                        break
-                    _drop_cache_control(block)
-            elif isinstance(content, dict) and over_cap():
-                _drop_cache_control(content)
 
     system = body.get("system")
     if isinstance(system, list):
@@ -171,6 +164,20 @@ def _enforce_cache_control_cap(body: Dict[str, Any]) -> None:
             if not over_cap():
                 break
             _drop_cache_control(block)
+
+    messages = body.get("messages")
+    if isinstance(messages, list):
+        for msg in messages:
+            if not over_cap() or not isinstance(msg, dict):
+                break
+            content = msg.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if not over_cap():
+                        break
+                    _drop_cache_control(block)
+            elif isinstance(content, dict) and over_cap():
+                _drop_cache_control(content)
 
     tools = body.get("tools")
     if isinstance(tools, list):
