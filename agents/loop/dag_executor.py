@@ -13,8 +13,6 @@ USAGE:
 """
 
 import asyncio
-import json
-import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -31,7 +29,6 @@ from loop.payload_guard import check_activity_payload
 from tools.base import EventType, MessageStatus, ToolEvent
 from utils.error_utils import error_chain_has_type
 from utils.llm_timeouts import STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
-from utils.prompts import CONTEXT_POINTERS_RULE
 from utils.tool_call_ids import spawn_group_id
 
 logger = structlog.get_logger()
@@ -90,119 +87,29 @@ def _apply_alias_override(params: Dict[str, Any], tool_name: str) -> Dict[str, A
     return params
 
 
-_PARAM_SELECTION_STOPWORDS = {
-    "a",
-    "an",
-    "and",
-    "are",
-    "as",
-    "be",
-    "by",
-    "do",
-    "for",
-    "from",
-    "has",
-    "in",
-    "is",
-    "it",
-    "its",
-    "no",
-    "not",
-    "of",
-    "on",
-    "or",
-    "only",
-    "the",
-    "to",
-    "use",
-    "with",
-    "you",
-}
-
-
-def _param_selection_tokens(value: Any) -> set[str]:
-    """Tokenize a task/candidate string for deterministic param-call disambiguation."""
-    text = value if isinstance(value, str) else json.dumps(value, sort_keys=True, default=str)
-    return {
-        token
-        for token in re.findall(r"[a-z0-9]+", text.lower())
-        if len(token) > 1 and token not in _PARAM_SELECTION_STOPWORDS
-    }
-
-
-def _tool_call_task_text(tool_call: Dict[str, Any]) -> Any:
-    """Return the task-bearing field from a populated tool call."""
-    for key in ("goal", "query", "url", "condition", "message"):
-        value = tool_call.get(key)
-        if isinstance(value, str) and value.strip():
-            return value
-    return {k: v for k, v in tool_call.items() if k != "tool"}
-
-
 def _select_param_tool_call(tool_calls: List[Dict[str, Any]], actual_tool: str, task: "DAGTask") -> Dict[str, Any]:
-    """Select exactly one param-populator tool call for a DAG task.
+    """Require the one planned tool call promised by the param-populator prompt."""
+    if len(tool_calls) != 1:
+        raise ValueError(f"LLM must return exactly one tool call for task {task.index}; got {len(tool_calls)}")
 
-    The param-populator prompt requires exactly one tool call. If the model
-    returns several matching calls anyway, choose the one whose task-bearing
-    fields best match the DAG node instead of executing the first call blindly.
-    """
-    if not tool_calls:
-        raise ValueError(f"LLM returned no tool calls for task {task.index}")
-
-    matching = [tc for tc in tool_calls if tc.get("tool") == actual_tool]
-    if not matching:
-        if len(tool_calls) == 1:
-            workflow.logger.warning(f"[DAG] Expected tool {actual_tool}, got {tool_calls[0].get('tool')}")
-            return tool_calls[0]
-        raise ValueError(f"LLM returned {len(tool_calls)} tool calls for task {task.index}, none for {actual_tool}")
-
-    if len(matching) == 1:
-        return matching[0]
-
-    task_tokens = _param_selection_tokens(task.goal)
-    ranked: list[tuple[int, int, Dict[str, Any]]] = []
-    for order, tool_call in enumerate(matching):
-        candidate_tokens = _param_selection_tokens(_tool_call_task_text(tool_call))
-        score = len(task_tokens & candidate_tokens)
-        ranked.append((score, -order, tool_call))
-
-    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    best_score = ranked[0][0]
-    second_score = ranked[1][0]
-    if best_score > second_score:
-        workflow.logger.warning(
-            f"[DAG] Param populator returned {len(matching)} {actual_tool} calls for task {task.index}; "
-            f"selected best task match"
-        )
-        return ranked[0][2]
-
-    raise ValueError(f"LLM returned multiple ambiguous {actual_tool} tool calls for task {task.index}")
+    tool_call = tool_calls[0]
+    returned_tool = tool_call.get("tool")
+    if returned_tool != actual_tool:
+        raise ValueError(f"LLM expected {actual_tool}, got {returned_tool} for task {task.index}")
+    return tool_call
 
 
-def _build_param_population_message(goal: str, tool_name: str, alias_hint: str = "") -> str:
+def _build_param_population_message(task_number: int, goal: str, tool_name: str) -> str:
     """Build user message that prompts the LLM to call a specific tool.
 
     Appended to the existing agent context so the system prompt, tools, and
     conversation are identical to the main agent loop — giving us cache reads
     on the entire prefix.
     """
-    msg = (
-        f"Execute this task by calling the `{tool_name}` tool with the correct parameters.\n\n"
-        f"Task: {goal}\n\n"
+    return (
+        f"Please execute task {task_number} of the plan: {goal}\n\n"
         f"You MUST call exactly one tool: `{tool_name}`. Do not respond with text only."
     )
-
-    if tool_name == "spawn_agent" or alias_hint.startswith("spawn_"):
-        msg += (
-            "\n\nThe spawned agent has NO access to your conversation or prior context. "
-            "The goal string is its ONLY source of information — embed ALL relevant details. "
-            "\n\n"
-            f"{CONTEXT_POINTERS_RULE.strip()} "
-            "Pass files via `attachments` using exact `original_filename` values. "
-            "For file outputs in output_schema, use type='file_pointer'."
-        )
-
-    return msg
 
 
 def _build_early_tool_event(
@@ -581,59 +488,6 @@ async def execute_dag(
 
     workflow.logger.info(f"[DAG] Starting execution with {len(dag.tasks)} tasks, join={dag.join}")
 
-    cache_warm_complete = False
-
-    async def warm_cache_before_tool_tasks() -> None:
-        nonlocal cache_warm_complete
-        if cache_warm_complete:
-            return
-        cache_warm_complete = True
-        if not system_prompt_text or not (claude_token or gpt_token):
-            return
-        try:
-            _pending_llm_context[agent_id] = (list(context), system_prompt_text, None)
-            await execute_activity(
-                call_llm_activity,
-                args=[
-                    agent_id,
-                    model,
-                    tool_names or [],
-                    1,
-                    agent_id,
-                    None,
-                    None,
-                    claude_token,
-                    "dag_cache_warm",
-                    system_prompt_text,
-                    None,
-                    None,
-                    False,
-                    "",
-                    claude_token_source,
-                    claude_token_pool_id,
-                    user_id,
-                    gpt_token,
-                    gpt_account_id,
-                    gpt_token_source,
-                    gpt_token_pool_id,
-                    user_id,
-                    None,
-                    None,
-                    user_id,
-                    # Fast Mode: cache-warm keys by canonical request fingerprint;
-                    # enabled+goal auto-resolve from the agent row.
-                    False,
-                    None,
-                    0,
-                ],
-                start_to_close_timeout=timedelta(seconds=STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS),
-                retry_policy=RetryPolicy(maximum_attempts=1),
-                heartbeat_timeout=timedelta(seconds=60),
-            )
-            workflow.logger.info("[DAG] Cache warm complete")
-        except Exception as e:
-            workflow.logger.warning(f"[DAG] Cache warm failed (non-fatal): {e}")
-
     first_iteration = True
     # Seed last_checked from existing context to avoid fetching entire message history
     last_checked = datetime.fromtimestamp(0, tz=timezone.utc)
@@ -656,12 +510,12 @@ async def execute_dag(
 
         # Start newly ready tasks
         ready = dag.get_ready_tasks()
-        if any(task.tool_name != "reasoning" for task in ready):
-            # Warm immediately before the first concrete tool batch needs a
-            # param-populator prefix. This preserves cache behavior for tool
-            # nodes without blocking earlier reasoning-only DAG steps from
-            # streaming to the frontend.
-            await warm_cache_before_tool_tasks()
+        # The first productive param-populator in each ready batch seeds the
+        # shared prompt prefix. Peers wait only for that LLM call, then populate
+        # in parallel against the newly-created cache entry. There is no
+        # separate throwaway cache-warm completion.
+        param_cache_seed_event = asyncio.Event()
+        param_cache_seed_lock = asyncio.Lock()
         for task in ready:
             if task.index not in pending_tasks:
                 workflow.logger.info(f"[DAG] Starting task {task.index}: {task.tool_name} - {task.goal[:50]}...")
@@ -687,6 +541,8 @@ async def execute_dag(
                     on_tokens=on_tokens,
                     system_prompt_text=system_prompt_text,
                     tool_names=tool_names,
+                    param_cache_seed_event=param_cache_seed_event,
+                    param_cache_seed_lock=param_cache_seed_lock,
                 )
                 asyncio_task = asyncio.create_task(coro)
                 pending_tasks[task.index] = asyncio_task
@@ -764,6 +620,8 @@ async def _execute_single_task(
     on_tokens: Optional[Callable[..., Awaitable[None]]] = None,
     system_prompt_text: Optional[str] = None,
     tool_names: Optional[List[str]] = None,
+    param_cache_seed_event: Optional[asyncio.Event] = None,
+    param_cache_seed_lock: Optional[asyncio.Lock] = None,
 ) -> bool:
     """
     Execute a single task from the DAG.
@@ -914,23 +772,23 @@ async def _execute_single_task(
             # Populate tool params by extending the current agent context with a
             # user message that prompts the LLM to call the specific tool.
             # Same system prompt + tools + conversation = cache prefix hit.
-            extra_msg = _build_param_population_message(task.goal, actual_tool, task.tool_name)
+            extra_msg = _build_param_population_message(task.index + 1, task.goal, actual_tool)
 
             # Store context snapshot in shared memory for same-machine activity pickup.
             # Parallel DAG tasks share the key — same data, and worst case the
             # second task falls back to backend API after the first cleans up.
             _pending_llm_context[agent_id] = (list(context), system_prompt_text, None)
 
-            # Constrain the param-population schema to ONLY the required tool.
-            # call_llm_activity uses structured output (create_agent_action_model),
-            # so passing the full tool-set lets a weak model (e.g. rose-1-lite)
-            # emit send_message instead of the planned tool — which fails the
-            # required_tool check and silently kills the DAG node (e.g. a for_each
-            # that never fans out). A single-tool union forces the right call.
+            # Keep the exact execute-phase tool schema so every param-populator
+            # shares the same system+tools+conversation cache prefix. The
+            # required_tool contract below validates the planned action without
+            # mutating the schema per DAG node.
+            if not tool_names:
+                raise ValueError("DAG param population requires the full execute-phase tool schema")
             llm_args = [
                 agent_id,
                 model,
-                [actual_tool],
+                tool_names,
                 256,
                 agent_id,
                 None,
@@ -957,25 +815,42 @@ async def _execute_single_task(
                 False,
                 None,
                 task.index,
+                False,
+                True,
             ]
-            for structured_attempt in range(1, STRUCTURED_OUTPUT_MAX_ATTEMPTS + 1):
-                try:
-                    llm_result = await execute_activity(
-                        call_llm_activity,
-                        args=llm_args,
-                        start_to_close_timeout=timedelta(seconds=600),
-                        retry_policy=RetryPolicy(maximum_attempts=2),
-                        heartbeat_timeout=timedelta(seconds=180),
-                    )
-                    break
-                except Exception as exc:
-                    should_retry = error_chain_has_type(exc, STRUCTURED_OUTPUT_ERROR_TYPE)
-                    if not should_retry or structured_attempt >= STRUCTURED_OUTPUT_MAX_ATTEMPTS:
-                        raise
-                    workflow.logger.warning(
-                        f"[DAG] Param population structured output failed "
-                        f"(attempt {structured_attempt}/{STRUCTURED_OUTPUT_MAX_ATTEMPTS}); retrying"
-                    )
+            async def populate_params() -> Dict[str, Any]:
+                for structured_attempt in range(1, STRUCTURED_OUTPUT_MAX_ATTEMPTS + 1):
+                    try:
+                        return await execute_activity(
+                            call_llm_activity,
+                            args=llm_args,
+                            start_to_close_timeout=timedelta(seconds=600),
+                            retry_policy=RetryPolicy(maximum_attempts=2),
+                            heartbeat_timeout=timedelta(seconds=180),
+                        )
+                    except Exception as exc:
+                        should_retry = error_chain_has_type(exc, STRUCTURED_OUTPUT_ERROR_TYPE)
+                        if not should_retry or structured_attempt >= STRUCTURED_OUTPUT_MAX_ATTEMPTS:
+                            raise
+                        workflow.logger.warning(
+                            f"[DAG] Param population structured output failed "
+                            f"(attempt {structured_attempt}/{STRUCTURED_OUTPUT_MAX_ATTEMPTS}); retrying"
+                        )
+                raise RuntimeError("Param population exhausted attempts")
+
+            llm_result: Optional[Dict[str, Any]] = None
+            if param_cache_seed_event is not None and param_cache_seed_lock is not None:
+                async with param_cache_seed_lock:
+                    if not param_cache_seed_event.is_set():
+                        try:
+                            llm_result = await populate_params()
+                        finally:
+                            param_cache_seed_event.set()
+
+            if llm_result is None:
+                if param_cache_seed_event is not None:
+                    await param_cache_seed_event.wait()
+                llm_result = await populate_params()
 
             # Extract params from the matching tool call
             tool_calls = llm_result.get("tool_calls", [])

@@ -288,36 +288,39 @@ def test_dag_foreach_alias_override_passes_spawn_agent_validation():
 
 
 def test_build_param_population_message_basic():
-    """_build_param_population_message includes tool name and goal."""
+    """Param-populator prompt anchors the call to a numbered plan task."""
     from loop.dag_executor import _build_param_population_message
 
-    msg = _build_param_population_message("Search for restaurants", "web_search")
-    assert "web_search" in msg
-    assert "Search for restaurants" in msg
-    assert "MUST call exactly one tool" in msg
+    msg = _build_param_population_message(3, "Search for restaurants", "web_search")
+    assert msg == (
+        "Please execute task 3 of the plan: Search for restaurants\n\n"
+        "You MUST call exactly one tool: `web_search`. Do not respond with text only."
+    )
 
 
-def test_build_param_population_message_spawn_adds_context_warning():
-    """Spawn-type alias adds self-contained goal warning without schema redefinition."""
+def test_build_param_population_message_spawn_has_no_tool_specific_context():
+    """Spawn tasks use the same plan-relative prompt without per-tool instructions."""
     from loop.dag_executor import _build_param_population_message
 
-    msg = _build_param_population_message("Explore competitors", "spawn_agent", "spawn_explore_agent")
-    assert "NO access to your conversation" in msg
-    assert "SPAWN TYPE" not in msg
-    assert 'type="explore"' not in msg
+    msg = _build_param_population_message(2, "Explore competitors", "spawn_agent")
+    assert msg.startswith("Please execute task 2 of the plan: Explore competitors")
+    assert "NO access to your conversation" not in msg
+    assert "attachments" not in msg
 
 
 def test_build_param_population_message_non_spawn_no_extra():
     """Non-spawn tool does not include spawn-specific warnings."""
     from loop.dag_executor import _build_param_population_message
 
-    msg = _build_param_population_message("Wait 10s", "wait_for")
+    msg = _build_param_population_message(4, "Wait 10s", "wait_for")
     assert "NO access to your conversation" not in msg
     assert "SPAWN TYPE" not in msg
 
 
-def test_select_param_tool_call_prefers_task_matching_duplicate():
-    """Duplicate matching tool calls are disambiguated by DAG task text."""
+def test_select_param_tool_call_requires_exactly_one_call():
+    """Param population rejects multiple calls instead of guessing which one to execute."""
+    import pytest
+
     from loop.dag_executor import DAGTask, _select_param_tool_call
 
     task = DAGTask(
@@ -325,8 +328,8 @@ def test_select_param_tool_call_prefers_task_matching_duplicate():
         goal="Find the current population of New York City using explore-agent web research.",
         tool_name="spawn_general_purpose_agent",
     )
-    with patch("loop.dag_executor.workflow.logger", MagicMock()):
-        selected = _select_param_tool_call(
+    with pytest.raises(ValueError, match="exactly one tool call"):
+        _select_param_tool_call(
             [
                 {"tool": "spawn_agent", "goal": "Find the current population of Tokyo."},
                 {"tool": "spawn_agent", "goal": "Find the current population of New York City."},
@@ -335,23 +338,18 @@ def test_select_param_tool_call_prefers_task_matching_duplicate():
             task,
         )
 
-    assert selected["goal"] == "Find the current population of New York City."
 
-
-def test_select_param_tool_call_rejects_ambiguous_duplicate():
-    """Ambiguous duplicate tool calls fail before the wrong tool can execute."""
+def test_select_param_tool_call_rejects_wrong_single_tool():
+    """A single call to a different tool still fails validation."""
     import pytest
 
     from loop.dag_executor import DAGTask, _select_param_tool_call
 
     task = DAGTask(index=0, goal="Find a population figure.", tool_name="spawn_general_purpose_agent")
 
-    with pytest.raises(ValueError, match="multiple ambiguous spawn_agent"):
+    with pytest.raises(ValueError, match="expected spawn_agent, got web_search"):
         _select_param_tool_call(
-            [
-                {"tool": "spawn_agent", "goal": "Find a population figure."},
-                {"tool": "spawn_agent", "goal": "Find a population figure."},
-            ],
+            [{"tool": "web_search", "query": "Find a population figure."}],
             "spawn_agent",
             task,
         )
@@ -515,7 +513,7 @@ async def test_execute_dag_tool_task_succeeds():
 
 
 async def test_execute_dag_tool_llm_activity_args_match_signature():
-    """DAG cache warm + param population pass the current call_llm_activity argument contract."""
+    """The productive param call uses the full execute schema and writes the reusable prefix."""
     from helpers.llm import call_llm_activity
 
     plan_data = {
@@ -539,7 +537,7 @@ async def test_execute_dag_tool_llm_activity_args_match_signature():
     assert result["status"] == "completed"
 
     llm_calls = [c for c in calls if c["fn"] == "call_llm_activity"]
-    assert len(llm_calls) == 2
+    assert len(llm_calls) == 1
 
     max_positional = len(
         [
@@ -550,23 +548,10 @@ async def test_execute_dag_tool_llm_activity_args_match_signature():
     )
     assert all(len(c["args"]) <= max_positional for c in llm_calls)
 
-    cache_args = llm_calls[0]["args"]
-    assert cache_args[8] == "dag_cache_warm"
-    assert cache_args[13] == ""
-    assert cache_args[14] == "user"
-    assert cache_args[15] == "pool-1"
-    assert cache_args[16] == "user-1"
-    assert cache_args[17] == "gpt-access"
-    assert cache_args[18] == "acct-1"
-    assert cache_args[19] == "compute"
-    assert cache_args[20] == "gpt-pool-1"
-    assert cache_args[21] == "user-1"
-    assert cache_args[22] is None
-    assert cache_args[23] is None
-    assert cache_args[24] == "user-1"
-
-    param_args = llm_calls[1]["args"]
+    param_args = llm_calls[0]["args"]
+    assert param_args[2] == ["web_search", "spawn_agent", "attempt_completion"]
     assert param_args[8] == "dag_param_populator"
+    assert param_args[9] == "test system prompt"
     assert param_args[11] == "web_search"
     assert param_args[12] is True
     assert param_args[13] == ""
@@ -581,6 +566,8 @@ async def test_execute_dag_tool_llm_activity_args_match_signature():
     assert param_args[22] is None
     assert param_args[23] is None
     assert param_args[24] == "user-1"
+    assert param_args[28] is False
+    assert param_args[29] is True
 
 
 async def test_execute_dag_alias_resolution_spawn_explore():
@@ -663,8 +650,8 @@ async def test_execute_dag_general_purpose_spawn_emits_subagent_placeholder():
     assert dag.tasks[0].tool_call_id == recorded[0][2]
 
 
-async def test_execute_dag_uses_matching_param_tool_call_for_duplicate_spawn_calls():
-    """DAG execution does not run a wrong first spawn_agent call from param population."""
+async def test_execute_dag_rejects_multiple_param_tool_calls():
+    """DAG execution refuses an ambiguous multi-call param-populator result."""
     plan_data = {
         "tasks": [
             {
@@ -693,20 +680,9 @@ async def test_execute_dag_uses_matching_param_tool_call_for_duplicate_spawn_cal
         param_tool_calls=param_tool_calls,
     )
 
-    assert result["status"] == "completed"
-    assert recorded[0][1].pop("_spawn_group_id") == dag.tasks[0].tool_call_id
-    assert recorded == [
-        (
-            "spawn_agent",
-            {
-                "goal": "Find the current population of New York City.",
-                "type": "general_purpose",
-                # start_phase is now supplied by the alias override so the
-                # resolved spawn_agent call passes SpawnAgentTool validation.
-                "start_phase": "EXECUTE",
-            },
-        )
-    ]
+    assert result["status"] == "needs_llm"
+    assert recorded == []
+    assert dag.tasks[0].state.value == "FAILED"
 
 
 async def test_execute_dag_tool_failure_returns_needs_llm():
@@ -812,14 +788,17 @@ async def run_all_tests():
         test_dag_foreach_alias_override_passes_spawn_agent_validation,
     )
     r.record("build_param_population_message_basic", test_build_param_population_message_basic)
-    r.record("build_param_population_message_spawn", test_build_param_population_message_spawn_adds_context_warning)
+    r.record(
+        "build_param_population_message_spawn",
+        test_build_param_population_message_spawn_has_no_tool_specific_context,
+    )
     r.record("build_param_population_message_non_spawn", test_build_param_population_message_non_spawn_no_extra)
     r.record(
-        "select_param_tool_call_prefers_task_matching_duplicate",
-        test_select_param_tool_call_prefers_task_matching_duplicate,
+        "select_param_tool_call_requires_exactly_one_call",
+        test_select_param_tool_call_requires_exactly_one_call,
     )
     r.record(
-        "select_param_tool_call_rejects_ambiguous_duplicate", test_select_param_tool_call_rejects_ambiguous_duplicate
+        "select_param_tool_call_rejects_wrong_single_tool", test_select_param_tool_call_rejects_wrong_single_tool
     )
     await r.record_async("execute_dag_reasoning_task_succeeds", test_execute_dag_reasoning_task_succeeds)
     await r.record_async("execute_dag_reasoning_forwards_gpt_token", test_execute_dag_reasoning_forwards_gpt_token)
@@ -839,8 +818,8 @@ async def run_all_tests():
         test_execute_dag_general_purpose_spawn_emits_subagent_placeholder,
     )
     await r.record_async(
-        "execute_dag_uses_matching_param_tool_call_for_duplicate_spawn_calls",
-        test_execute_dag_uses_matching_param_tool_call_for_duplicate_spawn_calls,
+        "execute_dag_rejects_multiple_param_tool_calls",
+        test_execute_dag_rejects_multiple_param_tool_calls,
     )
     await r.record_async("execute_dag_tool_failure_returns_needs_llm", test_execute_dag_tool_failure_returns_needs_llm)
     await r.record_async(
