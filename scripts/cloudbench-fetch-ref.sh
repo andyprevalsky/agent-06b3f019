@@ -33,9 +33,8 @@ git_cmd() {
 # a remote-tracking ref. Those fetches can add another near-complete pack, while
 # interrupted fetches leave large tmp_pack_* files behind. Bound that growth
 # before a fetch needs scratch space: discard only Git's incomplete temporary
-# packs, compact when the
-# pack store is large or the volume is low, then fail closed if recovery did not
-# leave enough room for a fetch.
+# packs, compact when the pack store is large or the volume is low, then fail
+# closed if recovery did not leave enough room for a fetch.
 maintain_object_store() {
     local pack_dir="$REPO_DIR/.git/objects/pack"
     local compact_at_kb="${CLOUDBENCH_GIT_COMPACT_AT_KB:-4194304}"
