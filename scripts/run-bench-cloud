@@ -254,8 +254,10 @@ _machines_json() {
     FLY machines list -a "$APP" --json 2>/dev/null || echo '[]'
 }
 
-# Resolve the persistent machine id: prefer the stored id, else match by name.
-# Fleet mode pins an explicit per-bench machine and skips the warm-box state file.
+# Resolve the persistent warm machine id from the provider-authoritative name.
+# The local state file is only a tie-breaker among exact warm-name matches; it
+# must never redirect warm operations to a live pool/ephemeral machine. Fleet
+# mode pins an explicit per-bench machine and skips the warm-box state file.
 resolve_machine_id() {
     if [ -n "$FLEET_MACHINE_ID" ]; then
         printf '%s' "$FLEET_MACHINE_ID"
@@ -275,14 +277,13 @@ except Exception:
     data=[]
 name=os.environ.get("MACHINE_NAME")
 stored=os.environ.get("STORED") or ""
-ids={m.get("id") for m in data if m.get("id")}
-# stored id still present?
-if stored and stored in ids:
-    print(stored); sys.exit(0)
-# else match by name
-for m in data:
-    if m.get("name")==name and m.get("id"):
-        print(m["id"]); sys.exit(0)
+warm=[m for m in data if m.get("name")==name and m.get("id")]
+if stored:
+    cached=next((m for m in warm if m.get("id")==stored), None)
+    if cached:
+        print(cached["id"]); sys.exit(0)
+if warm:
+    print(warm[0]["id"]); sys.exit(0)
 print("")
 ' 2>/dev/null || echo ""
 }
@@ -430,10 +431,59 @@ print(machine.get("state") or "unknown")
 '
 }
 
-activate_machine_environment() {  # activate_machine_environment <machine_id> [warm|pool]
-    local machine_id="$1" role="${2:-warm}" attempt=1 output status state presence
+machine_has_activation_image() {  # machine_has_activation_image <machine_id> <image_ref>
+    local machine_id="$1" image_ref="$2" machines
+    machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 2
+    printf '%s' "$machines" | MACHINE_ID="$machine_id" IMAGE_REF="$image_ref" python3 -c '
+import json, os, sys
+try:
+    machines = json.load(sys.stdin)
+except (TypeError, ValueError):
+    raise SystemExit(2)
+if not isinstance(machines, list) or any(not isinstance(machine, dict) for machine in machines):
+    raise SystemExit(2)
+machine_id = os.environ["MACHINE_ID"]
+machine = next((item for item in machines if item.get("id") == machine_id), None)
+if machine is None:
+    raise SystemExit(1)
+config = machine.get("config") or {}
+actual = config.get("image") if isinstance(config, dict) else None
+expected = os.environ["IMAGE_REF"]
+if not isinstance(actual, str):
+    raise SystemExit(1)
+if "@" in expected:
+    raise SystemExit(0 if actual == expected else 1)
+raise SystemExit(0 if actual.split("@", 1)[0] == expected else 1)
+'
+}
+
+wait_for_activation_image() {  # wait_for_activation_image <machine_id> <image_ref>
+    local machine_id="$1" image_ref="$2" state presence attempt=1
+    local attempts="${CLOUDBENCH_IMAGE_SETTLE_ATTEMPTS:-15}"
+    local retry_delay="${CLOUDBENCH_IMAGE_SETTLE_RETRY_DELAY:-2}"
+    while [ "$attempt" -le "$attempts" ]; do
+        state="$(machine_state_for_activation "$machine_id")"
+        presence=$?
+        [ "$presence" -eq 0 ] || return 1
+        if [ "$state" = "stopped" ] \
+            && machine_has_activation_image "$machine_id" "$image_ref"; then
+            return 0
+        fi
+        case "$state" in
+            stopped|created|pending|replacing|stopping) ;;
+            *) return 1 ;;
+        esac
+        [ "$attempt" -lt "$attempts" ] && sleep "$retry_delay"
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
+activate_machine_environment() {  # activate_machine_environment <machine_id> [warm|pool] [image_ref]
+    local machine_id="$1" role="${2:-warm}" image_ref="${3:-}" attempt=1 output status state presence
     local attempts="${CLOUDBENCH_UPDATE_ATTEMPTS:-3}"
     local retry_delay="${CLOUDBENCH_UPDATE_RETRY_DELAY:-2}"
+    local -a update_args
     while [ "$attempt" -le "$attempts" ]; do
         state="$(machine_state_for_activation "$machine_id")"
         presence=$?
@@ -462,10 +512,18 @@ activate_machine_environment() {  # activate_machine_environment <machine_id> [w
             return 1
         fi
         assert_app_environment_lock_ownership || return 1
-        output="$(FLY machine update "$machine_id" -a "$APP" --skip-start --yes 2>&1)"
+        update_args=(machine update "$machine_id" -a "$APP")
+        [ -n "$image_ref" ] && update_args+=(--image "$image_ref")
+        update_args+=(--skip-start --yes)
+        output="$(FLY "${update_args[@]}" 2>&1)"
         status=$?
         printf '%s\n' "$output" | sed 's/^/      /'
         [ "$status" -eq 0 ] && return 0
+        if [ -n "$image_ref" ] \
+            && wait_for_activation_image "$machine_id" "$image_ref"; then
+            echo "      Fly CLI reported failure, but provider confirms desired image on stopped machine"
+            return 0
+        fi
         if [ "$role" = "pool" ]; then
             state="$(machine_state_for_activation "$machine_id")"
             presence=$?
@@ -514,6 +572,16 @@ for machine in machines:
     if machine_id in pool_ids and machine_id != warm[0]["id"]:
         print("pool", machine_id, sep="\t")
 '
+}
+
+activate_owned_machine_images() {  # activate_owned_machine_images <image_ref>
+    local image_ref="$1" activation_targets role machine_id
+    activation_targets="$(environment_activation_targets)" || return 1
+    while IFS=$'\t' read -r role machine_id; do
+        [ -n "$machine_id" ] || continue
+        echo "   activating image on $role machine $machine_id (skip-start)"
+        activate_machine_environment "$machine_id" "$role" "$image_ref" || return 1
+    done <<< "$activation_targets"
 }
 
 assert_app_environment_lock_ownership() {
@@ -888,7 +956,12 @@ print("1" if any(v.get("name")==os.environ["VN"] for v in data) else "0")' 2>/de
     echo ""
     mid="$(resolve_machine_id)"
     if [ -n "$mid" ]; then
-        echo "✅ Persistent machine already exists: $mid (skipping create)"
+        echo "🔄 Updating the existing warm source and pool to image $IMAGE_REF ..."
+        activate_owned_machine_images "$IMAGE_REF" || {
+            echo "❌ Failed to activate the rebuilt dependency image" >&2
+            exit 1
+        }
+        echo "✅ Persistent machine already exists: $mid (image refreshed)"
     else
         echo "🖥️  Creating persistent machine $MACHINE_NAME ($VM_SIZE / ${VM_MEMORY}MB, volume→/data) ..."
         RUN_LOG="$(mktemp)"
@@ -913,8 +986,7 @@ print("1" if any(v.get("name")==os.environ["VN"] for v in data) else "0")' 2>/de
     wait_for_ssh "$mid"
 
     # ── git clone the repo into /data/repo (auth via GITHUB_TOKEN) ────────────
-    gh_token="$(resolve_github_token)"
-    if [ -z "$gh_token" ]; then
+    if [ -z "$(resolve_github_token)" ]; then
         echo "❌ GITHUB_TOKEN not found in back-end/.env or agents/.env — cannot clone the repo." >&2
         echo "   Stopping machine; add GITHUB_TOKEN and re-run --setup." >&2
         stop_machine "$mid"
@@ -922,28 +994,32 @@ print("1" if any(v.get("name")==os.environ["VN"] for v in data) else "0")' 2>/de
     fi
     echo ""
     echo "📥 Cloning repo into $REMOTE_REPO on the box (branch $BENCH_REF) ..."
-    # The token is passed as a transient env var to the remote shell and used via
-    # git's http.extraheader (Basic auth header) rather than embedded in the clone
-    # URL — so it never lands in git's process argv OR in the stored remote URL.
+    # GITHUB_TOKEN is already active as a Fly machine secret. The non-secret
+    # script is base64-transported into one remote Bash process so multiline
+    # quoting cannot split the auth setup from the Git commands. The token is
+    # used via http.extraheader rather than embedded in Git argv/config.
     # The remote stays clean (https://github.com/...) for all future fetches, which
     # then reuse the same header only when the run/refresh paths re-supply it.
     CLONE_CMD="set -e
 mkdir -p /data
-AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GH_TOKEN\" | base64 | tr -d '\n')\"
+AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GITHUB_TOKEN\" | base64 | tr -d '\n')\"
 if [ -d '$REMOTE_REPO/.git' ]; then
   echo 'repo already present — fetching latest'
-  git -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin
+  git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin
 else
   git -c http.extraheader=\"\$AUTH_HDR\" clone --quiet 'https://github.com/Rose-Ai-Labs/rose.git' '$REMOTE_REPO'
 fi
-git -C '$REMOTE_REPO' remote set-url origin 'https://github.com/Rose-Ai-Labs/rose.git'
+git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' remote set-url origin 'https://github.com/Rose-Ai-Labs/rose.git'
 chown -R rose:rose '$REMOTE_REPO' 2>/dev/null || true
 echo 'clone/fetch complete'"
-    FLY ssh console -a "$APP" --machine "$mid" \
-        -C "bash -lc $(printf 'GH_TOKEN=%q; %s' "$gh_token" "$CLONE_CMD")" 2>&1 \
-        | grep -av '^Connecting to' | sed 's/^/   /' || {
+    CLONE_CMD_B64="$(printf '%s' "$CLONE_CMD" | base64 | tr -d '\n')"
+    clone_output=""
+    if ! clone_output="$(FLY ssh console -a "$APP" --machine "$mid" \
+        -C "bash -lc \"printf '%s' '$CLONE_CMD_B64' | base64 -d | bash\"" 2>&1)"; then
+        printf '%s\n' "$clone_output" | grep -av '^Connecting to' | sed 's/^/   /'
         echo "❌ git clone failed"; stop_machine "$mid"; exit 1
-    }
+    fi
+    printf '%s\n' "$clone_output" | grep -av '^Connecting to' | sed 's/^/   /'
 
     stop_machine "$mid"
     echo ""
