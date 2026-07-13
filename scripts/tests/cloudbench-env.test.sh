@@ -92,6 +92,26 @@ activation_ids="$(printf '%s\n' '[{"id":"warm-1","name":"cloudbench-warm"},{"id"
 [ "$activation_ids" = $'warm-1\nclone-1' ] ||
   fail "environment activation must exclude the leased controller-lock sentinel"
 
+node_a="$TMP_ROOT/node-a"
+node_b="$TMP_ROOT/node-b"
+mkdir -p "$node_a/back-end" "$node_a/front-end" "$node_b/back-end" "$node_b/front-end"
+printf '{"lockfileVersion":3,"packages":{}}\n' > "$node_a/package-lock.json"
+cp "$node_a/package-lock.json" "$node_b/package-lock.json"
+printf '{"scripts":{"test":"old"},"dependencies":{"tsx":"1.0.0"}}\n' > "$node_a/package.json"
+printf '{"scripts":{"test":"new"},"dependencies":{"tsx":"1.0.0"}}\n' > "$node_b/package.json"
+for relative in back-end/package.json front-end/package.json; do
+  printf '{"scripts":{"test":"old"}}\n' > "$node_a/$relative"
+  printf '{"scripts":{"test":"new"}}\n' > "$node_b/$relative"
+done
+node_a_fingerprint="$(cloudbench_node_dependency_fingerprint "$node_a")"
+node_b_fingerprint="$(cloudbench_node_dependency_fingerprint "$node_b")"
+[ "$node_a_fingerprint" = "$node_b_fingerprint" ] ||
+  fail "script-only package.json changes must not invalidate baked dependencies"
+printf '{"scripts":{"test":"new"},"dependencies":{"tsx":"2.0.0"}}\n' > "$node_b/package.json"
+node_b_fingerprint="$(cloudbench_node_dependency_fingerprint "$node_b")"
+[ "$node_a_fingerprint" != "$node_b_fingerprint" ] ||
+  fail "dependency field changes must invalidate baked dependencies"
+
 lock_file="$TMP_ROOT/controller.lock"
 cloudbench_controller_lock_acquire "$lock_file"
 if bash -c 'source "$1"; cloudbench_controller_lock_acquire "$2"' _ "$HELPER_SRC" "$lock_file"; then
@@ -139,6 +159,9 @@ require_text "$ROOT_DIR/scripts/cloudbench-worker.sh" \
 require_text "$ROOT_DIR/scripts/cloudbench-worker.sh" \
   'umask 077' \
   "decoded benchmark secrets must be owner-only from file creation"
+require_text "$ROOT_DIR/scripts/cloudbench-sync-deps.sh" \
+  'cloudbench_node_dependency_fingerprint' \
+  "cloud dependency sync must ignore package scripts while binding dependency fields"
 if grep -Fq -- 'eval "exec ${CLOUDBENCH_CONTROLLER_LOCK_FD}' "$HELPER_SRC"; then
   fail "controller lock fd cleanup must not use eval"
 fi

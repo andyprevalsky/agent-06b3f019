@@ -143,6 +143,54 @@ for machine in json.load(sys.stdin) or []:
 '
 }
 
+cloudbench_node_dependency_fingerprint() {
+  local root="$1"
+  python3 - "$root" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+digest = hashlib.sha256()
+dependency_fields = (
+    "dependencies",
+    "devDependencies",
+    "optionalDependencies",
+    "peerDependencies",
+    "peerDependenciesMeta",
+    "bundledDependencies",
+    "bundleDependencies",
+    "overrides",
+    "workspaces",
+)
+
+lock_path = root / "package-lock.json"
+if not lock_path.is_file():
+    raise SystemExit(f"missing dependency manifest: {lock_path}")
+digest.update(b"package-lock.json\0")
+digest.update(lock_path.read_bytes())
+digest.update(b"\0")
+
+for relative in ("package.json", "back-end/package.json", "front-end/package.json"):
+    path = root / relative
+    if not path.is_file():
+        raise SystemExit(f"missing dependency manifest: {path}")
+    package = json.loads(path.read_text())
+    dependency_config = {
+        field: package[field]
+        for field in dependency_fields
+        if field in package
+    }
+    digest.update(relative.encode())
+    digest.update(b"\0")
+    digest.update(json.dumps(dependency_config, sort_keys=True, separators=(",", ":")).encode())
+    digest.update(b"\0")
+
+print(digest.hexdigest())
+PY
+}
+
 cloudbench_controller_lock_acquire() {
   local path="$1"
   mkdir -p "$(dirname "$path")"
