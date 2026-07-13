@@ -956,8 +956,7 @@ print("1" if any(v.get("name")==os.environ["VN"] for v in data) else "0")' 2>/de
     wait_for_ssh "$mid"
 
     # ── git clone the repo into /data/repo (auth via GITHUB_TOKEN) ────────────
-    gh_token="$(resolve_github_token)"
-    if [ -z "$gh_token" ]; then
+    if [ -z "$(resolve_github_token)" ]; then
         echo "❌ GITHUB_TOKEN not found in back-end/.env or agents/.env — cannot clone the repo." >&2
         echo "   Stopping machine; add GITHUB_TOKEN and re-run --setup." >&2
         stop_machine "$mid"
@@ -965,14 +964,15 @@ print("1" if any(v.get("name")==os.environ["VN"] for v in data) else "0")' 2>/de
     fi
     echo ""
     echo "📥 Cloning repo into $REMOTE_REPO on the box (branch $BENCH_REF) ..."
-    # The token is passed as a transient env var to the remote shell and used via
-    # git's http.extraheader (Basic auth header) rather than embedded in the clone
-    # URL — so it never lands in git's process argv OR in the stored remote URL.
+    # GITHUB_TOKEN is already active as a Fly machine secret. The non-secret
+    # script is base64-transported into one remote Bash process so multiline
+    # quoting cannot split the auth setup from the Git commands. The token is
+    # used via http.extraheader rather than embedded in Git argv/config.
     # The remote stays clean (https://github.com/...) for all future fetches, which
     # then reuse the same header only when the run/refresh paths re-supply it.
     CLONE_CMD="set -e
 mkdir -p /data
-AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GH_TOKEN\" | base64 | tr -d '\n')\"
+AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GITHUB_TOKEN\" | base64 | tr -d '\n')\"
 if [ -d '$REMOTE_REPO/.git' ]; then
   echo 'repo already present — fetching latest'
   git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin
@@ -982,8 +982,9 @@ fi
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' remote set-url origin 'https://github.com/Rose-Ai-Labs/rose.git'
 chown -R rose:rose '$REMOTE_REPO' 2>/dev/null || true
 echo 'clone/fetch complete'"
+    CLONE_CMD_B64="$(printf '%s' "$CLONE_CMD" | base64 | tr -d '\n')"
     FLY ssh console -a "$APP" --machine "$mid" \
-        -C "bash -lc $(printf 'GH_TOKEN=%q; %s' "$gh_token" "$CLONE_CMD")" 2>&1 \
+        -C "printf '%s' '$CLONE_CMD_B64' | base64 -d | bash" 2>&1 \
         | grep -av '^Connecting to' | sed 's/^/   /' || {
         echo "❌ git clone failed"; stop_machine "$mid"; exit 1
     }
