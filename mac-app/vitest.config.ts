@@ -40,6 +40,11 @@ export default defineConfig({
     globals: true,
     css: false,
     pool: 'forks',
+    // /deploy intentionally runs coverage and blackbox verification together.
+    // Bound each Vitest process so the pair cannot over-subscribe every CPU
+    // core and starve async module setup past the suite's real timeouts.
+    minWorkers: 1,
+    maxWorkers: 2,
     testTimeout: 10000,
     hookTimeout: 10000,
     coverage: {
