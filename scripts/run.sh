@@ -863,6 +863,9 @@ data = {
             "volume": os.environ.get("DB_VOLUME", ""),
             "owned_by_run_sh": os.environ.get("DB_OWNED_BY_US", "false").lower() == "true",
             "use_system_postgres": os.environ.get("USE_SYSTEM_PG", "false").lower() == "true",
+            "runtime_port": 5432
+            if os.environ.get("USE_SYSTEM_PG", "false").lower() == "true"
+            else env_int("LOCAL_DB_PORT"),
         },
     "env": {
         "benchmark_anon_steel_profile": os.environ.get("BENCHMARK_ANON_STEEL_PROFILE", "").lower() in ("1", "true", "yes", "on"),

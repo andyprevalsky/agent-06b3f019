@@ -231,6 +231,18 @@ def test_fleet_waits_for_every_isolated_stack_before_releasing_benchmarks() -> N
 
     assert "synchronized start barrier ready" in driver
     assert "CLOUDBENCH_START_BARRIER" in cloud
+    assert "export CLOUDBENCH_START_BARRIER_WAIT_SECONDS" in cloud
+    assert (
+        'START_BARRIER_WAIT_SECONDS="${CLOUDBENCH_START_BARRIER_WAIT_SECONDS:-$RUN_TIMEOUT}"'
+        in fleet
+    )
+    assert "CHILD_RUN_TIMEOUT=$((RUN_TIMEOUT + START_BARRIER_WAIT_SECONDS))" in fleet
+    assert (
+        'CLOUDBENCH_START_BARRIER_WAIT_SECONDS="$START_BARRIER_WAIT_SECONDS"'
+        in fleet
+    )
+    assert '--timeout "$CHILD_RUN_TIMEOUT"' in fleet
+    assert "deadline=$(( $(date +%s) + START_BARRIER_WAIT_SECONDS ))" in fleet
     assert 'CHILD_MACHINE+=("$cid")' in fleet
     assert "isolated stacks reached the synchronized start barrier" in fleet
     assert "releasing synchronized start barrier" in fleet

@@ -3,7 +3,7 @@
 import { randomUUID } from 'node:crypto';
 import Kernel from '@onkernel/sdk';
 import jwt from 'jsonwebtoken';
-import { chromium } from 'playwright';
+import { chromium, type Page } from 'playwright';
 import { prisma } from '../../providers/database';
 import { selectedBrowserProvider } from '../../providers/browser/config';
 import {
@@ -16,10 +16,32 @@ function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message);
 }
 
+function isRetryableKernelNavigationError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return [
+    'net::ERR_CONNECTION_CLOSED',
+    'net::ERR_PROXY_CONNECTION_FAILED',
+    'net::ERR_TUNNEL_CONNECTION_FAILED',
+    'Timeout 30000ms exceeded',
+  ].some((fragment) => message.includes(fragment));
+}
+
+async function navigateKernelPage(page: Page, url: string): Promise<void> {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      return;
+    } catch (error) {
+      if (attempt === 3 || !isRetryableKernelNavigationError(error)) throw error;
+      await page.waitForTimeout(attempt * 1_000);
+    }
+  }
+}
+
 interface BrowserMetadataResponse {
   provider?: string;
   proxy_source?: string;
-  proxy_location?: { city?: string };
+  proxy_location?: { country?: string; state?: string; city?: string };
   profile_id?: string;
 }
 
@@ -147,6 +169,19 @@ const tests: Array<[string, () => void]> = [
       assert(isKernelProxyAvailabilityError(error), 'expected proxy availability error');
     },
   ],
+  [
+    'Kernel navigation retries only transient proxy failures',
+    () => {
+      assert(
+        isRetryableKernelNavigationError(new Error('page.goto: net::ERR_CONNECTION_CLOSED')),
+        'expected a closed proxy connection to be retryable'
+      );
+      assert(
+        !isRetryableKernelNavigationError(new Error('Kernel CDP navigation failed')),
+        'semantic navigation failures must fail closed'
+      );
+    },
+  ],
 ];
 
 async function deleteKernelResource(path: string): Promise<void> {
@@ -208,8 +243,15 @@ async function runLiveProviderParity(): Promise<void> {
     liveSessionId = String(init.session_id);
     const metadata = init.browser_session_metadata ?? {};
     assert(metadata.provider === 'kernel', 'live init did not select Kernel');
-    assert(metadata.proxy_source === 'kernel_residential_city', 'city proxy was not selected');
-    assert(metadata.proxy_location?.city === 'san_francisco', 'city proxy was not resolved');
+    assert(
+      [
+        'kernel_residential_city',
+        'kernel_residential_state',
+        'kernel_residential_country',
+      ].includes(String(metadata.proxy_source)),
+      `managed residential proxy was not selected: ${String(metadata.proxy_source)}`
+    );
+    assert(metadata.proxy_location?.country === 'US', 'US proxy location was not resolved');
     profileId = metadata.profile_id;
     assert(profileId !== undefined && profileId !== '', 'Kernel profile was not persisted');
 
@@ -228,11 +270,14 @@ async function runLiveProviderParity(): Promise<void> {
     );
 
     const browser = await chromium.connectOverCDP(String(init.ws_url));
-    const context = browser.contexts()[0];
-    const page = context.pages()[0] ?? (await context.newPage());
-    await page.goto('https://example.com', { waitUntil: 'domcontentloaded', timeout: 30_000 });
-    assert((await page.title()) === 'Example Domain', 'Kernel CDP navigation failed');
-    await browser.close();
+    try {
+      const context = browser.contexts()[0];
+      const page = context.pages()[0] ?? (await context.newPage());
+      await navigateKernelPage(page, 'https://example.com');
+      assert((await page.title()) === 'Example Domain', 'Kernel CDP navigation failed');
+    } finally {
+      await browser.close();
+    }
 
     const kernel = new Kernel({ apiKey: kernelApiKey });
     const firstRemote = await kernel.browsers.retrieve(liveSessionId, { include_deleted: true });
@@ -343,8 +388,9 @@ async function runLiveProviderParity(): Promise<void> {
     assert(resumedMetadata.provider === 'kernel', 'resume changed providers');
     assert(resumedMetadata.profile_id === profileId, 'resume did not reuse the Kernel profile');
     assert(
-      resumedMetadata.proxy_location?.city === 'san_francisco',
-      'resume lost resolved city metadata'
+      resumedMetadata.proxy_source === metadata.proxy_source &&
+        JSON.stringify(resumedMetadata.proxy_location) === JSON.stringify(metadata.proxy_location),
+      'resume lost resolved proxy fallback metadata'
     );
 
     const secondRemote = await kernel.browsers.retrieve(liveSessionId, { include_deleted: true });

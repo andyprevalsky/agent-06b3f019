@@ -3,9 +3,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-cd "$BACKEND_DIR"
-
 ROOT_DIR="$(cd "$BACKEND_DIR/.." && pwd)"
+
+# Match run.sh's resource naming even when Conductor exposes a stale branch-
+# based workspace name. Without normalization, tests can miss the worktree's
+# Docker database and silently fall back to a shared system Postgres instance.
+cd "$ROOT_DIR"
+source scripts/lib/workspace-env.sh
+normalize_conductor_workspace_env
+cd "$BACKEND_DIR"
 source "$SCRIPT_DIR/local-db-container.sh"
 RUN_ID="${BLACKBOX_TEST_RUN_ID:-${CONTRACT_TEST_RUN_ID:-$(date +%s)-$$-$RANDOM}}"
 export BLACKBOX_TEST_RUN_ID="$RUN_ID"
@@ -20,9 +26,16 @@ export TRACE_ARCHIVE_ENABLED="${TRACE_ARCHIVE_ENABLED:-1}"
 export TRACE_ARCHIVE_BACKEND="${TRACE_ARCHIVE_BACKEND:-local}"
 export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$ROOT_DIR/.context}"
 
+# Domains share one test database and several suites intentionally clean up
+# broad fixture classes. Run domains serially by default so one suite cannot
+# delete another suite's records; callers can still opt into parallel domains.
+export BLACKBOX_TEST_CONCURRENCY="${BLACKBOX_TEST_CONCURRENCY:-${CONTRACT_TEST_CONCURRENCY:-1}}"
+export CONTRACT_TEST_CONCURRENCY="$BLACKBOX_TEST_CONCURRENCY"
+
 RUNNER_CMD=(npx tsx src/tests/blackbox/run.ts)
 RUNNER_LOG="$ARTIFACT_DIR/runner.log"
 MANIFEST_PATH="$ARTIFACT_DIR/manifest.json"
+USE_EXISTING_BACKEND="${BLACKBOX_TEST_USE_EXISTING_BACKEND:-${CONTRACT_TEST_USE_EXISTING_BACKEND:-0}}"
 
 # --list only needs filesystem discovery; skip backend boot for speed.
 for arg in "$@"; do
@@ -52,10 +65,59 @@ if [[ -n "${CONDUCTOR_PORT:-}" ]]; then
 fi
 DB_CONTAINER="victoria-db-${WORKSPACE_HINT}"
 DB_FOUND=false
+STACK_DB_EXPECTED=false
+SELECTED_DB_URL=""
 ISOLATED_DB_RESOLVED=false
 
+# Managed existing-backend callers (for example, run-coverage.sh) know the
+# exact database used by the backend they launched. Prefer that explicit
+# contract over every local discovery mechanism.
+EXPLICIT_TEST_DB_URL="${BLACKBOX_TEST_DATABASE_URL:-${CONTRACT_TEST_DATABASE_URL:-}}"
+if [[ "$USE_EXISTING_BACKEND" == "1" && -n "$EXPLICIT_TEST_DB_URL" ]]; then
+  STACK_DB_EXPECTED=true
+  if [[ ! "$EXPLICIT_TEST_DB_URL" =~ ^postgres(ql)?://([^/]*@)?(localhost|127\.0\.0\.1)(:[0-9]+)?/ ]]; then
+    echo "❌ BLACKBOX_TEST_DATABASE_URL must point at localhost for fixture safety."
+    exit 1
+  fi
+  if psql "$EXPLICIT_TEST_DB_URL" -v ON_ERROR_STOP=1 -c 'SELECT 1' >/dev/null 2>&1; then
+    DB_FOUND=true
+    SELECTED_DB_URL="$EXPLICIT_TEST_DB_URL"
+    echo "Using database explicitly provided by the existing backend launcher"
+  fi
+fi
+
+# When testing an already-running stack, use the same database selected by
+# run.sh. Re-probing Docker here can choose a different healthy local database
+# after run.sh has fallen back to system Postgres (or vice versa).
+STACK_MANIFEST="$ROOT_DIR/.context/services.json"
+if ! $STACK_DB_EXPECTED && [[ "$USE_EXISTING_BACKEND" == "1" && -f "$STACK_MANIFEST" && -n "${TEST_BASE_URL:-}" ]]; then
+  MANIFEST_BACKEND_URL=$(jq -r '.urls.backend // empty' "$STACK_MANIFEST")
+  if [[ "${TEST_BASE_URL%/}" == "${MANIFEST_BACKEND_URL%/}" ]]; then
+    STACK_DB_EXPECTED=true
+    USE_MANIFEST_SYSTEM_PG=$(jq -r '.database.use_system_postgres // false' "$STACK_MANIFEST")
+    if [[ "$USE_MANIFEST_SYSTEM_PG" == "true" ]]; then
+      LOCAL_DB_PORT=$(jq -r '.database.runtime_port // 5432' "$STACK_MANIFEST")
+      if pg_isready -h localhost -p "$LOCAL_DB_PORT" -U postgres -q 2>/dev/null; then
+        DB_FOUND=true
+        echo "Using existing stack Postgres (system) at localhost:$LOCAL_DB_PORT"
+      fi
+    else
+      MANIFEST_DB_CONTAINER=$(jq -r '.database.container // empty' "$STACK_MANIFEST")
+      if [[ -n "$MANIFEST_DB_CONTAINER" ]]; then
+        DB_CONTAINER="$MANIFEST_DB_CONTAINER"
+      fi
+      MANIFEST_DB_PORT=$(jq -r '.database.runtime_port // .ports.local_db // empty' "$STACK_MANIFEST")
+      ACTUAL_PORT=$(docker port "$DB_CONTAINER" 5432 2>/dev/null | head -1 | sed 's/.*://') || true
+      LOCAL_DB_PORT="${ACTUAL_PORT:-$MANIFEST_DB_PORT}"
+      if [[ -n "$LOCAL_DB_PORT" ]] && docker exec "$DB_CONTAINER" pg_isready -U postgres -q 2>/dev/null; then
+        DB_FOUND=true
+        echo "Using existing stack Postgres (Docker container=$DB_CONTAINER) at localhost:$LOCAL_DB_PORT"
+      fi
+    fi
+  fi
+fi
 # Try Docker container first
-if docker info >/dev/null 2>&1; then
+if ! $STACK_DB_EXPECTED && docker info >/dev/null 2>&1; then
   # Prefer the workspace-named container; fall back to the only running
   # victoria-db-* container if there's exactly one (covers cases where the
   # caller hasn't exported CONDUCTOR_WORKSPACE_NAME).
@@ -86,7 +148,7 @@ if docker info >/dev/null 2>&1; then
 fi
 
 # Fall back to system Postgres
-if ! $DB_FOUND; then
+if ! $STACK_DB_EXPECTED && ! $DB_FOUND; then
   SYSTEM_PG_PORT=5432
   if pg_isready -h localhost -p "$SYSTEM_PG_PORT" -U postgres -q 2>/dev/null; then
     LOCAL_DB_PORT="$SYSTEM_PG_PORT"
@@ -95,8 +157,14 @@ if ! $DB_FOUND; then
   fi
 fi
 
+if $STACK_DB_EXPECTED && ! $DB_FOUND; then
+  echo "❌ The database recorded for existing backend $TEST_BASE_URL is unavailable."
+  echo "   Refusing to select a different local database because fixtures would be invisible to the backend."
+  exit 1
+fi
+
 if $DB_FOUND; then
-  LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria"
+  LOCAL_DB_URL="${SELECTED_DB_URL:-postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria}"
   export DATABASE_URL="$LOCAL_DB_URL"
   export DIRECT_URL="$LOCAL_DB_URL"
   export FAST_MODE_CACHE_DATABASE_URL="${FAST_MODE_CACHE_DATABASE_URL:-$LOCAL_DB_URL}"
@@ -132,8 +200,6 @@ else
   echo "   Or install system Postgres: scripts/cloud-build.sh"
   exit 1
 fi
-
-USE_EXISTING_BACKEND="${BLACKBOX_TEST_USE_EXISTING_BACKEND:-${CONTRACT_TEST_USE_EXISTING_BACKEND:-0}}"
 
 if [[ "$USE_EXISTING_BACKEND" == "1" ]]; then
   if [[ -z "${TEST_BASE_URL:-}" ]]; then
