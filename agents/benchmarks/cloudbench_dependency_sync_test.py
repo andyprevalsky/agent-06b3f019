@@ -651,6 +651,48 @@ activate_machine_environment machine-1
     assert len(exhausted_calls) == 3
 
 
+def test_image_activation_accepts_fly_cli_false_negative_after_update(
+    tmp_path: Path,
+) -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    function_start = cloud.index("machine_state_for_activation() {")
+    activation_start = cloud.index("activate_machine_environment() {", function_start)
+    function_end = cloud.index("\n}\n", activation_start) + 3
+    activation_functions = cloud[function_start:function_end]
+    calls_file = tmp_path / "calls"
+    image_ref = "registry.fly.io/bench:current"
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
+APP=bench
+assert_app_environment_lock_ownership() {{ return 0; }}
+FLY() {{
+  if [ "$1 $2" = "machines list" ]; then
+    printf '[{{"id":"machine-1","state":"stopped","config":{{"image":"{image_ref}@sha256:abc"}}}}]\n'
+    return 0
+  fi
+  printf '%s\n' "$*" >> "$CALLS_FILE"
+  echo "machine failed to reach desired start state, and restart policy was set to no restart"
+  return 1
+}}
+{activation_functions}
+activate_machine_environment machine-1 warm {image_ref}
+""",
+        ],
+        env={"CALLS_FILE": str(calls_file)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert len(calls_file.read_text().splitlines()) == 1
+    assert "provider confirms desired image" in result.stdout
+
+
 def test_pool_activation_rechecks_state_and_never_updates_concurrent_runs(tmp_path: Path) -> None:
     cloud = CLOUD_SCRIPT.read_text()
     function_start = cloud.index("machine_state_for_activation() {")

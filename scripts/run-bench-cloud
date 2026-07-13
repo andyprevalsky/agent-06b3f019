@@ -422,6 +422,32 @@ print(machine.get("state") or "unknown")
 '
 }
 
+machine_has_activation_image() {  # machine_has_activation_image <machine_id> <image_ref>
+    local machine_id="$1" image_ref="$2" machines
+    machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 2
+    printf '%s' "$machines" | MACHINE_ID="$machine_id" IMAGE_REF="$image_ref" python3 -c '
+import json, os, sys
+try:
+    machines = json.load(sys.stdin)
+except (TypeError, ValueError):
+    raise SystemExit(2)
+if not isinstance(machines, list) or any(not isinstance(machine, dict) for machine in machines):
+    raise SystemExit(2)
+machine_id = os.environ["MACHINE_ID"]
+machine = next((item for item in machines if item.get("id") == machine_id), None)
+if machine is None:
+    raise SystemExit(1)
+config = machine.get("config") or {}
+actual = config.get("image") if isinstance(config, dict) else None
+expected = os.environ["IMAGE_REF"]
+if not isinstance(actual, str):
+    raise SystemExit(1)
+if "@" in expected:
+    raise SystemExit(0 if actual == expected else 1)
+raise SystemExit(0 if actual.split("@", 1)[0] == expected else 1)
+'
+}
+
 activate_machine_environment() {  # activate_machine_environment <machine_id> [warm|pool] [image_ref]
     local machine_id="$1" role="${2:-warm}" image_ref="${3:-}" attempt=1 output status state presence
     local attempts="${CLOUDBENCH_UPDATE_ATTEMPTS:-3}"
@@ -462,6 +488,15 @@ activate_machine_environment() {  # activate_machine_environment <machine_id> [w
         status=$?
         printf '%s\n' "$output" | sed 's/^/      /'
         [ "$status" -eq 0 ] && return 0
+        if [ -n "$image_ref" ]; then
+            state="$(machine_state_for_activation "$machine_id")"
+            presence=$?
+            if [ "$presence" -eq 0 ] && [ "$state" = "stopped" ] \
+                && machine_has_activation_image "$machine_id" "$image_ref"; then
+                echo "      Fly CLI reported failure, but provider confirms desired image on stopped machine"
+                return 0
+            fi
+        fi
         if [ "$role" = "pool" ]; then
             state="$(machine_state_for_activation "$machine_id")"
             presence=$?
