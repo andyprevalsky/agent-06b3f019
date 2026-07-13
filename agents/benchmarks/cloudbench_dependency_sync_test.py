@@ -727,6 +727,15 @@ cat "$POOL_PROVENANCE_FILE"
     )
 
 
+def test_fleet_run_directory_exists_before_provision_mode_dispatch() -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    controller_acquire = fleet.index('if ! cloudbench_controller_acquire "$LOCK_DIR" "$APP"; then')
+    provision_dispatch = fleet.index("# --provision-pool:")
+    run_dir_create = fleet.index('mkdir -p "$FLEET_DIR"', controller_acquire)
+
+    assert controller_acquire < run_dir_create < provision_dispatch
+
+
 def test_pool_provisioning_rotates_stale_snapshot_capacity_under_lease(
     tmp_path: Path,
 ) -> None:

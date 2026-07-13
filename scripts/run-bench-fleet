@@ -987,6 +987,7 @@ if ! cloudbench_controller_acquire "$LOCK_DIR" "$APP"; then
     echo "❌ Another cloud benchmark controller is already running${old_pid:+ (pid $old_pid)}." >&2
     exit 1
 fi
+mkdir -p "$FLEET_DIR"
 
 OWNED_CLONES_FILE="$FLEET_DIR/owned-clones.ids"
 AUTOSCALER_PIDS=()
