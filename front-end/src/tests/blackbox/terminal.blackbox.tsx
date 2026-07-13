@@ -242,8 +242,9 @@ describe('Terminal page', () => {
       expect(inputArea).toHaveClass('md:pb-6');
     });
 
-    it('replaces the query box with a pending approval request', async () => {
+    it.each(['Accept', 'Reject'])('restores the query box after %s succeeds', async (action) => {
       const user = userEvent.setup();
+      let approvalResolved = false;
       server.use(
         http.get(`${API_BASE}/agents/:agentId`, ({ params }) => {
           return HttpResponse.json({
@@ -267,7 +268,7 @@ describe('Terminal page', () => {
                 metadata: {
                   isUserAttentionMessage: true,
                   toolCallId: 'approval-tool-001',
-                  toolStatus: 'IN_PROGRESS',
+                  toolStatus: approvalResolved ? 'FINISHED' : 'IN_PROGRESS',
                   toolName: 'request_user_approval',
                   requestUserApproval: {
                     toolApproval: true,
@@ -279,6 +280,14 @@ describe('Terminal page', () => {
             pagination: { has_more: false, oldest_timestamp: null },
           });
         }),
+        http.post(`${API_BASE}/attention-requests/:requestId/respond`, () => {
+          approvalResolved = true;
+          return HttpResponse.json({ success: true, request_id: 'request-001' });
+        }),
+        http.post(`${API_BASE}/attention-requests/:requestId/reject`, () => {
+          approvalResolved = true;
+          return HttpResponse.json({ success: true, request_id: 'request-001' });
+        }),
       );
 
       renderWithProviders(<Terminal />);
@@ -288,6 +297,11 @@ describe('Terminal page', () => {
       expect(await screen.findByText('Approval Required')).toBeInTheDocument();
       expect(screen.queryByPlaceholderText('Type your message...')).not.toBeInTheDocument();
       expect(screen.getByPlaceholderText('Add context (optional)...')).toBeInTheDocument();
+
+      await user.click(screen.getByRole('button', { name: action }));
+
+      expect(await screen.findByPlaceholderText('Type your message...')).toBeInTheDocument();
+      expect(screen.queryByText('Approval Required')).not.toBeInTheDocument();
     });
 
     it('lands the browser-review account on Browse by default', async () => {

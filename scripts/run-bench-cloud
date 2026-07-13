@@ -80,8 +80,13 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR" || exit 1
 # shellcheck source=lib/cloudbench-env.sh
 source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
+MACHINE_READINESS_SCRIPT="$ROOT_DIR/scripts/cloudbench-machine-readiness.py"
 
 STATE_FILE="$ROOT_DIR/.context/cloudbench-machine.json"
+POOL_IDS_FILE="$ROOT_DIR/.context/cloudbench-pool.ids"
+GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null || echo "$ROOT_DIR/.git")"
+case "$GIT_COMMON_DIR" in /*) ;; *) GIT_COMMON_DIR="$ROOT_DIR/$GIT_COMMON_DIR" ;; esac
+APP_ENV_LOCK_FILE="$GIT_COMMON_DIR/cloudbench-app-env.lock"
 
 # On-box paths (mirror scripts/cloudbench-run.sh).
 REMOTE_REPO="/data/repo"
@@ -222,11 +227,15 @@ if [ "$APP" = "$PROD_APP" ]; then
 fi
 
 # Markers the on-box per-run script prints (parsed from the SSH transcript).
-DONE_MARKER="::CLOUDBENCH-DONE::"
-REPORT_BEGIN="::CLOUDBENCH-REPORT-CARD-BEGIN::"
-REPORT_END="::CLOUDBENCH-REPORT-CARD-END::"
-RESULT_BEGIN="::CLOUDBENCH-RESULT-BEGIN::"
-RESULT_END="::CLOUDBENCH-RESULT-END::"
+# Persistent pool volumes can still have a previous detached driver unwinding
+# while the next run starts. Scope every terminal marker to this controller so
+# stale output can never complete or populate the new run.
+RUN_LOG_TOKEN="$$-$(date +%s)-$RANDOM"
+DONE_MARKER="::CLOUDBENCH-DONE:: token=$RUN_LOG_TOKEN"
+REPORT_BEGIN="::CLOUDBENCH-REPORT-CARD-BEGIN:: token=$RUN_LOG_TOKEN"
+REPORT_END="::CLOUDBENCH-REPORT-CARD-END:: token=$RUN_LOG_TOKEN"
+RESULT_BEGIN="::CLOUDBENCH-RESULT-BEGIN:: token=$RUN_LOG_TOKEN"
+RESULT_END="::CLOUDBENCH-RESULT-END:: token=$RUN_LOG_TOKEN"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -284,7 +293,23 @@ print("gone")
 ' 2>/dev/null || echo "gone"
 }
 
+# A snapshot-backed clone is visible in `created` before its volume restore is
+# mountable. Fly rejects start during that window. Machine identity therefore is
+# not a startability signal: require every configured volume to reach a state
+# Fly documents as mountable before requesting the machine transition.
+machine_storage_ready() {  # machine_storage_ready <id>
+    local id="$1" machines volumes
+    machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 1
+    volumes="$(FLY volumes list -a "$APP" --json 2>/dev/null)" || return 1
+    python3 "$MACHINE_READINESS_SCRIPT" "$id" \
+        <(printf '%s' "$machines") <(printf '%s' "$volumes") >/dev/null
+}
+
 write_state() {  # write_state <machine_id>
+    # Fleet children target caller-owned ephemeral/pool machines. Recording one
+    # as the persistent warm source would make a later controller follow a
+    # clone that cleanup is about to destroy.
+    [ -n "$FLEET_MACHINE_ID" ] && return 0
     mkdir -p "$ROOT_DIR/.context"
     printf '{"app":"%s","machine_id":"%s","machine_name":"%s","volume_name":"%s","region":"%s"}\n' \
         "$APP" "$1" "$MACHINE_NAME" "$VOLUME_NAME" "$REGION" > "$STATE_FILE"
@@ -378,6 +403,126 @@ validate_environment_contract() {
     export CLOUDBENCH_PROD_BROWSER_PROVIDER
 }
 
+machine_state_for_activation() {  # machine_state_for_activation <machine_id>: 0=present, 1=absent, 2=invalid
+    local machine_id="$1" machines
+    machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 2
+    printf '%s' "$machines" | MACHINE_ID="$machine_id" python3 -c '
+import json, os, sys
+try:
+    machines = json.load(sys.stdin)
+except (TypeError, ValueError):
+    raise SystemExit(2)
+if not isinstance(machines, list) or any(not isinstance(machine, dict) for machine in machines):
+    raise SystemExit(2)
+machine_id = os.environ["MACHINE_ID"]
+machine = next((item for item in machines if item.get("id") == machine_id), None)
+if machine is None:
+    raise SystemExit(1)
+print(machine.get("state") or "unknown")
+'
+}
+
+activate_machine_environment() {  # activate_machine_environment <machine_id> [warm|pool]
+    local machine_id="$1" role="${2:-warm}" attempt=1 output status state presence
+    local attempts="${CLOUDBENCH_UPDATE_ATTEMPTS:-3}"
+    local retry_delay="${CLOUDBENCH_UPDATE_RETRY_DELAY:-2}"
+    while [ "$attempt" -le "$attempts" ]; do
+        state="$(machine_state_for_activation "$machine_id")"
+        presence=$?
+        if [ "$presence" -eq 1 ]; then
+            if [ "$role" = "pool" ]; then
+                echo "      pool machine $machine_id disappeared; skipping stale owned entry" >&2
+                return 0
+            fi
+            echo "      warm source $machine_id disappeared before activation" >&2
+            return 1
+        fi
+        [ "$presence" -eq 0 ] || return 1
+        if [ "$role" = "pool" ]; then
+            case "$state" in
+                stopped) ;;
+                started|starting) echo "      pool machine $machine_id is $state; skipping concurrently active machine" >&2; return 0 ;;
+                *) echo "      pool machine $machine_id has unsafe activation state '$state'" >&2; return 1 ;;
+            esac
+        elif [ "$role" = "warm" ]; then
+            [ "$state" = "stopped" ] || {
+                echo "      warm source $machine_id must be stopped for strict environment activation (state=$state)" >&2
+                return 1
+            }
+        else
+            echo "      unknown environment activation role '$role'" >&2
+            return 1
+        fi
+        assert_app_environment_lock_ownership || return 1
+        output="$(FLY machine update "$machine_id" -a "$APP" --skip-start --yes 2>&1)"
+        status=$?
+        printf '%s\n' "$output" | sed 's/^/      /'
+        [ "$status" -eq 0 ] && return 0
+        if [ "$role" = "pool" ]; then
+            state="$(machine_state_for_activation "$machine_id")"
+            presence=$?
+            if [ "$presence" -eq 1 ]; then
+                echo "      pool machine $machine_id disappeared during activation; skipping" >&2
+                return 0
+            fi
+            [ "$presence" -eq 0 ] || return 1
+            case "$state" in
+                stopped) ;;
+                started|starting) echo "      pool machine $machine_id became $state during activation; skipping concurrent owner" >&2; return 0 ;;
+                *) echo "      pool machine $machine_id reached unsafe activation state '$state'" >&2; return 1 ;;
+            esac
+        fi
+        if [ "$attempt" -ge "$attempts" ] || ! printf '%s' "$output" \
+            | grep -qiE '(^|[^[:alnum:]])(408|429|5[0-9][0-9])([^[:alnum:]]|$)|timed? out|timeout|context deadline|connection reset|unexpected EOF|temporar(y|ily)'; then
+            return "$status"
+        fi
+        echo "      transient Fly update failure; retrying machine $machine_id ($attempt/$attempts)" >&2
+        sleep "$retry_delay"
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
+environment_activation_targets() {  # warm source + this workspace's declared pool only
+    local machines pool_ids=""
+    machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 2
+    [ -f "$POOL_IDS_FILE" ] && pool_ids="$(grep -E '^[0-9a-f]+$' "$POOL_IDS_FILE" 2>/dev/null || true)"
+    printf '%s' "$machines" | MACHINE_NAME="$MACHINE_NAME" POOL_IDS="$pool_ids" python3 -c '
+import json, os, sys
+try:
+    machines = json.load(sys.stdin)
+except (TypeError, ValueError):
+    raise SystemExit(2)
+if not isinstance(machines, list) or any(not isinstance(machine, dict) for machine in machines):
+    raise SystemExit(2)
+machine_name = os.environ["MACHINE_NAME"]
+warm = [machine for machine in machines if machine.get("name") == machine_name]
+if len(warm) != 1 or not warm[0].get("id"):
+    raise SystemExit("expected exactly one warm source named %r" % machine_name)
+print("warm", warm[0]["id"], sep="\t")
+pool_ids = set(os.environ.get("POOL_IDS", "").split())
+for machine in machines:
+    machine_id = machine.get("id")
+    if machine_id in pool_ids and machine_id != warm[0]["id"]:
+        print("pool", machine_id, sep="\t")
+'
+}
+
+assert_app_environment_lock_ownership() {
+    local expected_owner actual_owner
+    if [ "${CLOUDBENCH_APP_ENV_LOCK_HELD:-0}" = "1" ]; then
+        expected_owner="${CLOUDBENCH_APP_ENV_LOCK_OWNER_PID:-}"
+    else
+        expected_owner="$$"
+    fi
+    actual_owner="$(cat "$APP_ENV_LOCK_FILE" 2>/dev/null || true)"
+    if [ -z "$expected_owner" ] || [ "$actual_owner" != "$expected_owner" ] || \
+        ! kill -0 "$expected_owner" 2>/dev/null; then
+        echo "❌ Lost ownership of shared benchmark app environment lock." >&2
+        return 1
+    fi
+}
+
 # Inject the two base64 .env blobs + GITHUB_TOKEN as active Fly secrets (present
 # on machine init + in ssh sessions). The benchmark app uses the Machines API,
 # not Fly Launch releases: stage app secrets, then update each stopped machine
@@ -385,7 +530,7 @@ validate_environment_contract() {
 # GITHUB_TOKEN is injected as a secret so the on-box per-run git-sync (private
 # repo) can authenticate via git http.extraheader without the token ever being
 # stored in .git/config on the volume.
-inject_secrets() {
+_inject_secrets_locked() {
     echo "🔐 Injecting secrets into $APP ..."
     if [ ! -f agents/.env ] || [ ! -f back-end/.env ]; then
         echo "❌ agents/.env and back-end/.env are required to inject secrets." >&2
@@ -414,27 +559,24 @@ inject_secrets() {
     else
         echo "   ⚠️  GITHUB_TOKEN not found — private-repo fetches will fail"
     fi
+    assert_app_environment_lock_ownership || exit 1
     FLY secrets set --stage -a "$APP" "${set_args[@]}" 2>&1 | sed 's/^/   /' || {
         echo "❌ Failed to stage benchmark environment secrets"; exit 1
     }
-    local machine_ids machine_id
-    # The controller-lock sentinel and another controller's active/provisioning
-    # machines may carry legitimate Fly leases. Only idle benchmark machines
-    # need the staged environment activated by this refresh.
-    machine_ids="$(_machines_json | cloudbench_env_activation_machine_ids)"
-    [ -n "$machine_ids" ] || {
-        echo "❌ No benchmark machines exist to activate staged secrets." >&2
+    local activation_targets role machine_id
+    activation_targets="$(environment_activation_targets)" || {
+        echo "❌ Could not resolve owned benchmark machines for environment activation." >&2
         exit 1
     }
-    while IFS= read -r machine_id; do
+    while IFS=$'\t' read -r role machine_id; do
         [ -n "$machine_id" ] || continue
-        echo "   activating env on machine $machine_id (skip-start)"
-        cloudbench_retry_command 3 5 \
-            FLY machine update "$machine_id" -a "$APP" --skip-start --yes 2>&1 | sed 's/^/      /' || {
+        assert_app_environment_lock_ownership || exit 1
+        echo "   activating env on $role machine $machine_id (skip-start)"
+        activate_machine_environment "$machine_id" "$role" || {
             echo "❌ Failed to activate environment on machine $machine_id" >&2
             exit 1
         }
-    done <<< "$machine_ids"
+    done <<< "$activation_targets"
     mkdir -p "$ROOT_DIR/.context"
     python3 - "$ROOT_DIR/.context/cloudbench-env-manifest.json" \
         "$agents_sha" "$backend_sha" "$CLOUDBENCH_PROD_BROWSER_PROVIDER" <<'PY'
@@ -454,6 +596,45 @@ with open(path, "w") as handle:
     handle.write("\n")
 PY
     echo "✅ Secrets set (active)"
+}
+
+acquire_app_environment_lock() {
+    local attempt owner
+    command -v shlock >/dev/null 2>&1 || {
+        echo "❌ shlock is required for cross-workspace benchmark environment locking." >&2
+        return 1
+    }
+    for attempt in $(seq 1 60); do
+        shlock -p "$$" -f "$APP_ENV_LOCK_FILE" && return 0
+        owner="$(cat "$APP_ENV_LOCK_FILE" 2>/dev/null || true)"
+        [ "$attempt" -eq 1 ] && echo "⏳ waiting for shared benchmark app environment lock (owner=${owner:-unknown})..."
+        sleep 2
+    done
+    echo "❌ Timed out waiting for shared benchmark app environment lock." >&2
+    return 1
+}
+
+release_app_environment_lock() {
+    local owner
+    owner="$(cat "$APP_ENV_LOCK_FILE" 2>/dev/null || true)"
+    [ "$owner" = "$$" ] && rm -f "$APP_ENV_LOCK_FILE" 2>/dev/null || true
+}
+
+inject_secrets() {
+    if [ "${CLOUDBENCH_APP_ENV_LOCK_HELD:-0}" = "1" ]; then
+        assert_app_environment_lock_ownership || exit 1
+        _inject_secrets_locked
+        return $?
+    fi
+    acquire_app_environment_lock || exit 1
+    ( _inject_secrets_locked )
+    local status=$?
+    if [ "$status" -eq 0 ] && [ "${CLOUDBENCH_HOLD_APP_ENV_LOCK:-0}" = "1" ]; then
+        return 0
+    fi
+    release_app_environment_lock
+    [ "$status" -eq 0 ] || exit "$status"
+    return "$status"
 }
 
 if [ "$MODE" = "refresh-secrets" ]; then
@@ -526,18 +707,23 @@ ssh_ready() {  # ssh_ready <machine_id>
 
 # Start the machine and wait until Fly reports it "started".
 start_machine() {  # start_machine <id>
-    local id="$1" st
+    local id="$1" st now last_start_ts=0
     st="$(machine_state "$id")"
     if [ "$st" = "started" ]; then
         echo "✅ Machine $id already started"
         return 0
     fi
     echo "▶️  Starting machine $id ..."
-    request_machine_start "$id" || true
     for _ in $(seq 1 60); do
         st="$(machine_state "$id")"
         [ "$st" = "started" ] && { echo "✅ Machine started"; return 0; }
         [ "$st" = "gone" ] && { echo "❌ Machine $id disappeared while starting"; return 1; }
+        now="$(date +%s)"
+        if machine_storage_ready "$id" \
+            && { [ "$last_start_ts" -eq 0 ] || [ $((now - last_start_ts)) -ge 20 ]; }; then
+            request_machine_start "$id" || true
+            last_start_ts="$now"
+        fi
         sleep 2
     done
     echo "⚠️  Machine $id did not report 'started' in time (state=$st) — continuing; SSH will retry."
@@ -612,6 +798,10 @@ if [ "$MODE" = "setup" ]; then
     echo ""
 
     ensure_app
+    CLOUDBENCH_HOLD_APP_ENV_LOCK=1
+    trap 'release_app_environment_lock' EXIT
+    trap 'release_app_environment_lock; exit 130' INT
+    trap 'release_app_environment_lock; exit 143' TERM
     inject_secrets
 
     # ── Build + push the KEEP-ALIVE image (deps baked; CMD = sleep infinity) ──
@@ -742,14 +932,19 @@ if [ "$MODE" = "refresh-wmh" ]; then
     echo "model=$WMH_MODEL_NAME target=$REMOTE_WMH"
     echo ""
     ensure_app
+    cleanup_refresh_wmh() {
+        stop_machine "${mid:-}"
+        release_app_environment_lock
+    }
+    trap cleanup_refresh_wmh EXIT
+    trap 'cleanup_refresh_wmh; exit 130' INT
+    trap 'cleanup_refresh_wmh; exit 143' TERM
+    CLOUDBENCH_HOLD_APP_ENV_LOCK=1
     inject_secrets      # refresh secrets so R2 creds for the corpus read are current.
 
     mid="$(resolve_machine_id)"
     [ -z "$mid" ] && { echo "❌ No persistent machine — run 'run-bench-cloud --setup' first."; exit 1; }
     write_state "$mid"
-
-    # STOP the machine on ANY exit — the refresh must never leak a running box.
-    trap 'stop_machine "$mid"' EXIT INT TERM
 
     start_machine "$mid"
     wait_for_ssh "$mid"
@@ -1096,6 +1291,10 @@ if [ "$SKIP_CONTROLLER_LOCK" != "1" ]; then
 fi
 
 if [ "$DIRECT_ENV_REFRESH" = "1" ]; then
+    CLOUDBENCH_HOLD_APP_ENV_LOCK=1
+    trap 'release_app_environment_lock; cloudbench_controller_lock_release "$LOCK_DIR"' EXIT
+    trap 'release_app_environment_lock; cloudbench_controller_lock_release "$LOCK_DIR"; exit 130' INT
+    trap 'release_app_environment_lock; cloudbench_controller_lock_release "$LOCK_DIR"; exit 143' TERM
     inject_secrets
 fi
 
@@ -1111,18 +1310,20 @@ stop_on_exit() {
     # the run ("otherwise dead") — no orphaned link server, archive Vite, or proxy.
     stop_live_archive_frontend
     stop_all_local_viewers
-    if [ "${LOCK_ACQUIRED:-0}" = "1" ]; then
-        cloudbench_controller_lock_release "$LOCK_DIR"
-    fi
     # In fleet mode the machine is a per-bench clone owned by run-bench-fleet,
     # which destroys it after collecting results — never stop it here.
     if [ "$STOP_DONE" != "1" ] && [ -z "$FLEET_MACHINE_ID" ]; then
         STOP_DONE="1"
         stop_machine "$mid"
     fi
+    release_app_environment_lock
+    if [ "${LOCK_ACQUIRED:-0}" = "1" ]; then
+        cloudbench_controller_lock_release "$LOCK_DIR"
+    fi
     echo "Original exit code: $ec"
 }
 trap stop_on_exit EXIT
+trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
@@ -1130,10 +1331,15 @@ trap 'exit 143' TERM
 # Generous timeout: ~10s warm, minutes on a cold image pull. Gate on BOTH the Fly
 # machine state AND a trivial ssh echo (start != ssh-reachable).
 echo "▶️  Starting warm machine $mid ..."
-request_machine_start "$mid" || true
 READY_TIMEOUT="${CLOUDBENCH_READY_TIMEOUT:-600}"   # 10 min ceiling for a cold pull.
 start_ts="$(date +%s)"
-last_start_ts="$(date +%s)"
+last_start_ts=0
+if machine_storage_ready "$mid"; then
+    request_machine_start "$mid" || true
+    last_start_ts="$start_ts"
+else
+    echo "⏳ Machine storage is still provisioning; waiting until it is mountable ..."
+fi
 gone_streak=0
 while :; do
     if ssh_ready "$mid"; then break; fi
@@ -1153,15 +1359,15 @@ while :; do
         continue
     fi
     gone_streak=0
-    # A freshly-cloned machine sits in 'created' (or drops back to 'stopped')
-    # until its forked volume is provisioned, and the first `start` fails with
-    # failed_precondition. Re-issue start every ~20s while it isn't running so a
-    # fleet clone actually boots instead of hanging until READY_TIMEOUT.
+    # Once clone storage is mountable, request start immediately and retry every
+    # ~20s for ordinary transient start failures. Never ask Fly to start while
+    # the attached snapshot volume is still restoring.
     now="$(date +%s)"
     case "$st" in
         started|starting) : ;;
         *)
-            if [ $((now - last_start_ts)) -ge 20 ]; then
+            if machine_storage_ready "$mid" \
+                && { [ "$last_start_ts" -eq 0 ] || [ $((now - last_start_ts)) -ge 20 ]; }; then
                 request_machine_start "$mid" >/dev/null 2>&1 || true
                 last_start_ts="$now"
             fi
@@ -1243,6 +1449,7 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     echo "export CLOUDBENCH_FETCH_REF_SCRIPT=/data/cloudbench-fetch-ref.sh"
     echo "export CLOUDBENCH_SYNC_DEPS_SCRIPT=/data/cloudbench-sync-deps.sh"
     echo "export CLOUDBENCH_CURRENT_RUN_ARTIFACT_SCRIPT=/data/cloudbench-current-run-artifact.py"
+    echo "export CLOUDBENCH_RUN_TOKEN=$(printf '%q' "$RUN_LOG_TOKEN")"
     echo "export CLOUDBENCH_START_BARRIER=$(printf '%q' "${CLOUDBENCH_START_BARRIER:-}")"
     echo "export WMH_MODEL_NAME=$(printf '%q' "$WMH_MODEL_NAME")"
     echo "export BENCH_TASKS_B64=$(printf '%q' "$TASKS_CSV_B64")"
@@ -1279,8 +1486,9 @@ echo "   tasks=[$TASKS_DISPLAY] ref=${BENCH_REF:-<HEAD>} simulate=$BENCH_SIMULAT
 # steps: (a) reset+stamp the log, (b) upload/stage the driver, wrapper, and patch,
 # (c) launch appending after the stamp — each retried until confirmed.
 _ok=0
-for _ in 1 2 3 4 5; do
-    o="$(ssh_read "$mid" "printf '%s\n' 'RUNSTAMP-$$' > '$REMOTE_LOG'; grep -q 'RUNSTAMP-$$' '$REMOTE_LOG' && echo STAMPED")"
+LOG_RESET_ATTEMPTS="${CLOUDBENCH_LOG_RESET_ATTEMPTS:-20}"
+for _ in $(seq 1 "$LOG_RESET_ATTEMPTS"); do
+    o="$(ssh_read "$mid" "printf '%s\n' 'RUNSTAMP-$RUN_LOG_TOKEN' > '$REMOTE_LOG'; grep -q 'RUNSTAMP-$RUN_LOG_TOKEN' '$REMOTE_LOG' && echo STAMPED")"
     printf '%s' "$o" | grep -q STAMPED && { _ok=1; break; }; sleep 3
 done
 [ "$_ok" = 1 ] || { echo "❌ could not reset the on-box log after retries"; exit 1; }
@@ -1290,7 +1498,8 @@ STAGED_LOCAL_FILES+=("$stage_err")
 # Stage the driver + wrapper (+ patch) as separate sftp puts. (A tar-in-one-upload
 # variant was tried to cut SSH round-trips but proved flaky on reused pool boxes;
 # reliability of the staging step matters more than ~30s, so we keep the puts.)
-for _ in 1 2 3 4 5; do
+STAGE_ATTEMPTS="${CLOUDBENCH_STAGE_ATTEMPTS:-20}"
+for _ in $(seq 1 "$STAGE_ATTEMPTS"); do
     : > "$stage_err"
     ssh_read "$mid" "rm -f /data/cloudbench-run.sh /data/cloudbench-fetch-ref.sh /data/cloudbench-sync-deps.sh /data/cloudbench-current-run-artifact.py '$REMOTE_TMP_SCRIPT' /tmp/cloudbench-local.patch" >/dev/null 2>&1 || true
     if FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$ROOT_DIR/$REMOTE_RUN_SCRIPT" /data/cloudbench-run.sh >"$stage_err" 2>&1 \

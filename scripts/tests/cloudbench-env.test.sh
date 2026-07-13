@@ -122,6 +122,50 @@ fi
 cloudbench_controller_lock_release "$lock_file"
 [ ! -e "$lock_file" ] || fail "controller lock must be removed by its owner"
 
+cloud_lease_state="$TMP_ROOT/cloud-lease"
+cloud_lease_calls="$TMP_ROOT/cloud-lease-calls"
+CLOUDBENCH_MACHINES_API_TOKEN="test-token"
+cloudbench_machines_api_request() {
+  local method="$1" path="$2" body="${3:-}" nonce="${4:-}"
+  printf '%s|%s|%s|%s\n' "$method" "$path" "$body" "$nonce" >> "$cloud_lease_calls"
+  case "$method|$path" in
+    'GET|/v1/apps/bench-app/machines')
+      CLOUDBENCH_API_STATUS=200
+      CLOUDBENCH_API_BODY='[{"id":"lock-machine","name":"cloudbench-controller-lock"}]'
+      ;;
+    'POST|/v1/apps/bench-app/machines/lock-machine/lease')
+      if [ -e "$cloud_lease_state" ]; then
+        CLOUDBENCH_API_STATUS=409
+        CLOUDBENCH_API_BODY='{"error":"lease held"}'
+      else
+        : > "$cloud_lease_state"
+        CLOUDBENCH_API_STATUS=201
+        CLOUDBENCH_API_BODY='{"data":{"nonce":"lease-nonce"}}'
+      fi
+      ;;
+    'DELETE|/v1/apps/bench-app/machines/lock-machine/lease')
+      [ "$nonce" = "lease-nonce" ] || fail "cloud lock release omitted its lease nonce"
+      rm -f "$cloud_lease_state"
+      CLOUDBENCH_API_STATUS=200
+      CLOUDBENCH_API_BODY='{"ok":true}'
+      ;;
+    *) fail "unexpected mocked Machines API request: $method $path" ;;
+  esac
+}
+cloudbench_cloud_lock_acquire bench-app
+[ "$CLOUDBENCH_CLOUD_LOCK_MACHINE_ID" = "lock-machine" ] ||
+  fail "cloud lock must bind the shared sentinel"
+[ "$CLOUDBENCH_CLOUD_LOCK_NONCE" = "lease-nonce" ] ||
+  fail "cloud lock must retain the provider nonce"
+if (cloudbench_cloud_lock_acquire bench-app >/dev/null 2>&1); then
+  fail "a second controller must not acquire an occupied Fly sentinel lease"
+fi
+cloudbench_cloud_lock_release bench-app
+require_text "$cloud_lease_calls" \
+  'DELETE|/v1/apps/bench-app/machines/lock-machine/lease||lease-nonce' \
+  "cloud lock release must authenticate with its provider nonce"
+unset CLOUDBENCH_MACHINES_API_TOKEN
+
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'bash scripts/run-bench-cloud --refresh-secrets' \
   "fleet controller must refresh the environment once before cloning"
@@ -131,23 +175,32 @@ require_text "$ROOT_DIR/scripts/run-bench-fleet" \
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'CLOUDBENCH_ENV_REFRESHED=1' \
   "fleet children must receive proof that the controller refreshed the environment"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'cloudbench_controller_acquire "$LOCK_DIR" "$APP"' \
+  "fleet controllers must acquire the cross-host Fly sentinel lease"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'cloudbench_controller_release "$LOCK_DIR" "$APP"' \
+  "fleet cleanup must release the cross-host Fly sentinel lease"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'FLY secrets set --stage -a "$APP"' \
   "Machines API apps must stage the app-level environment before machine updates"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'cloudbench_retry_command 3 5' \
+  'transient Fly update failure; retrying machine $machine_id' \
   "machine environment activation must retry transient Fly API failures"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'FLY machine update "$machine_id" -a "$APP" --skip-start --yes' \
-  "every existing benchmark machine must activate staged secrets without starting"
+  "every owned benchmark machine must activate staged secrets without starting"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'machine_ids="$(_machines_json | cloudbench_env_activation_machine_ids)"' \
-  "environment activation must exclude lock and in-use benchmark machines"
+  'activation_targets="$(environment_activation_targets)"' \
+  "environment activation must be scoped to the owned warm source and pool"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'activate_machine_environment "$machine_id" "$role"' \
+  "environment activation must preserve role-specific concurrency checks"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'cloudbench_wait_machine_startable fleet_machine_state "$cid"' \
   "fleet children must not launch while a fresh clone is still in created state"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
-  '--name "$clone_name"' \
+  '--name "$target_name"' \
   "fresh fleet clones must use an exact unique name for id resolution"
 if grep -Fq -- 'FLY secrets deploy' "$ROOT_DIR/scripts/run-bench-cloud"; then
   fail "Machines API apps must not use Fly Launch secrets deploy"
