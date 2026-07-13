@@ -405,7 +405,7 @@ release_app_environment_lock() {
 }
 
 # ── One controller lock for the whole fleet (children run with --no-lock) ────
-if ! cloudbench_controller_lock_acquire "$LOCK_DIR"; then
+if ! cloudbench_controller_acquire "$LOCK_DIR" "$APP"; then
     old_pid="$(cat "$LOCK_DIR" 2>/dev/null || true)"
     echo "❌ Another cloud benchmark controller is already running${old_pid:+ (pid $old_pid)}." >&2
     exit 1
@@ -522,7 +522,7 @@ cleanup() {
     # post-run). Per-bench viewers are reaped by their own run-bench-cloud child's
     # exit trap when we SIGTERM CHILD_PIDS above; the batch resolver lives on.
     [ -n "${FLEET_PATCH_FILE:-}" ] && rm -f "$FLEET_PATCH_FILE" 2>/dev/null || true
-    cloudbench_controller_lock_release "$LOCK_DIR"
+    cloudbench_controller_release "$LOCK_DIR" "$APP"
     exit "$ec"
 }
 trap cleanup EXIT
