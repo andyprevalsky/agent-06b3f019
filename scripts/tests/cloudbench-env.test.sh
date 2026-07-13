@@ -188,8 +188,14 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'transient Fly update failure; retrying machine $machine_id' \
   "machine environment activation must retry transient Fly API failures"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'FLY machine update "$machine_id" -a "$APP" --skip-start --yes' \
+  'update_args=(machine update "$machine_id" -a "$APP")' \
+  "every owned benchmark machine must build a scoped Fly update command"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'update_args+=(--skip-start --yes)' \
   "every owned benchmark machine must activate staged secrets without starting"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'update_args+=(--image "$image_ref")' \
+  "dependency image refresh must reuse the stopped-machine activation boundary"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'activation_targets="$(environment_activation_targets)"' \
   "environment activation must be scoped to the owned warm source and pool"

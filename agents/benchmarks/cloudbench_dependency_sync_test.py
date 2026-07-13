@@ -813,6 +813,47 @@ environment_activation_targets
     assert malformed.returncode != 0
 
 
+def test_setup_refreshes_existing_warm_and_pool_machine_images(tmp_path: Path) -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    function_start = cloud.index("activate_owned_machine_images() {")
+    function_end = cloud.index("\n}\n", function_start) + 3
+    refresh_function = cloud[function_start:function_end]
+    calls_file = tmp_path / "calls"
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
+environment_activation_targets() {{
+  printf 'warm\\twarm-1\\npool\\tpool-1\\n'
+}}
+activate_machine_environment() {{
+  printf '%s|%s|%s\\n' "$1" "$2" "$3" >> "$CALLS_FILE"
+}}
+{refresh_function}
+activate_owned_machine_images registry.fly.io/bench:new
+""",
+        ],
+        env={"CALLS_FILE": str(calls_file)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert calls_file.read_text().splitlines() == [
+        "warm-1|warm|registry.fly.io/bench:new",
+        "pool-1|pool|registry.fly.io/bench:new",
+    ]
+    setup_start = cloud.index('if [ "$MODE" = "setup" ]; then')
+    setup_end = cloud.index("# MODE: --refresh-wmh", setup_start)
+    setup = cloud[setup_start:setup_end]
+    assert setup.index('activate_owned_machine_images "$IMAGE_REF"') < setup.index(
+        'start_machine "$mid"'
+    )
+
+
 def test_environment_refresh_serializes_shared_app_and_reconciles_pool_first() -> None:
     cloud = CLOUD_SCRIPT.read_text()
     fleet = FLEET_SCRIPT.read_text()

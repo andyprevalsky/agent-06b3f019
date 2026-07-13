@@ -422,10 +422,11 @@ print(machine.get("state") or "unknown")
 '
 }
 
-activate_machine_environment() {  # activate_machine_environment <machine_id> [warm|pool]
-    local machine_id="$1" role="${2:-warm}" attempt=1 output status state presence
+activate_machine_environment() {  # activate_machine_environment <machine_id> [warm|pool] [image_ref]
+    local machine_id="$1" role="${2:-warm}" image_ref="${3:-}" attempt=1 output status state presence
     local attempts="${CLOUDBENCH_UPDATE_ATTEMPTS:-3}"
     local retry_delay="${CLOUDBENCH_UPDATE_RETRY_DELAY:-2}"
+    local -a update_args
     while [ "$attempt" -le "$attempts" ]; do
         state="$(machine_state_for_activation "$machine_id")"
         presence=$?
@@ -454,7 +455,10 @@ activate_machine_environment() {  # activate_machine_environment <machine_id> [w
             return 1
         fi
         assert_app_environment_lock_ownership || return 1
-        output="$(FLY machine update "$machine_id" -a "$APP" --skip-start --yes 2>&1)"
+        update_args=(machine update "$machine_id" -a "$APP")
+        [ -n "$image_ref" ] && update_args+=(--image "$image_ref")
+        update_args+=(--skip-start --yes)
+        output="$(FLY "${update_args[@]}" 2>&1)"
         status=$?
         printf '%s\n' "$output" | sed 's/^/      /'
         [ "$status" -eq 0 ] && return 0
@@ -506,6 +510,16 @@ for machine in machines:
     if machine_id in pool_ids and machine_id != warm[0]["id"]:
         print("pool", machine_id, sep="\t")
 '
+}
+
+activate_owned_machine_images() {  # activate_owned_machine_images <image_ref>
+    local image_ref="$1" activation_targets role machine_id
+    activation_targets="$(environment_activation_targets)" || return 1
+    while IFS=$'\t' read -r role machine_id; do
+        [ -n "$machine_id" ] || continue
+        echo "   activating image on $role machine $machine_id (skip-start)"
+        activate_machine_environment "$machine_id" "$role" "$image_ref" || return 1
+    done <<< "$activation_targets"
 }
 
 assert_app_environment_lock_ownership() {
@@ -858,7 +872,12 @@ print("1" if any(v.get("name")==os.environ["VN"] for v in data) else "0")' 2>/de
     echo ""
     mid="$(resolve_machine_id)"
     if [ -n "$mid" ]; then
-        echo "✅ Persistent machine already exists: $mid (skipping create)"
+        echo "🔄 Updating the existing warm source and pool to image $IMAGE_REF ..."
+        activate_owned_machine_images "$IMAGE_REF" || {
+            echo "❌ Failed to activate the rebuilt dependency image" >&2
+            exit 1
+        }
+        echo "✅ Persistent machine already exists: $mid (image refreshed)"
     else
         echo "🖥️  Creating persistent machine $MACHINE_NAME ($VM_SIZE / ${VM_MEMORY}MB, volume→/data) ..."
         RUN_LOG="$(mktemp)"
