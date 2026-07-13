@@ -7,13 +7,11 @@ import { isPostgresRegexError } from './regexSafety';
 import {
   buildAgentNetworkMatch,
   buildDocumentMatch,
-  buildMessageMatch,
   buildNetworkMatch,
   buildTransactionMatch,
 } from './format';
 import { formatTimeAgo } from './format.snippets';
 import {
-  DATA_SOURCE_CONFIGS,
   isMessageFamilySource,
   type GrepMatch,
   type GrepParams,
@@ -26,6 +24,7 @@ import { AgentNotFoundError, InvalidPatternError, MissingAgentIdError } from './
 import { validateGrepInput } from './validate';
 import * as repo from './repo';
 import * as grepRepo from './grepRepo';
+import { searchMessageSource } from './messageSearchService';
 import { createLogger } from '../../providers/logger';
 
 // Per-source connectivity lives in a dedicated file; re-export so routes can
@@ -59,42 +58,7 @@ async function searchSource(
   agentId: string | undefined
 ): Promise<{ total: number; matches: GrepMatch[] }> {
   if (isMessageFamilySource(source)) {
-    // person/since narrow the messages source only.
-    let personId: string | undefined;
-    const messageFilters = input.filters.messages;
-    if (messageFilters?.person !== undefined) {
-      const resolved = await grepRepo.resolvePersonId(userId, messageFilters.person);
-      if (resolved === null) return { total: 0, matches: [] }; // requested person not found
-      personId = resolved;
-    }
-    // Channel-specific sources (email/imessage/whatsapp/sms) restrict to one
-    // MessageRecord.channel. `messages`/`gmail` keep searching all channels
-    // (channel stays undefined) so their SQL is byte-identical to before.
-    const channel =
-      source === 'messages' || source === 'gmail'
-        ? undefined
-        : (DATA_SOURCE_CONFIGS[source].channel ?? undefined);
-    const [total, rows] = await Promise.all([
-      grepRepo.countMessageGrepRows({
-        userId,
-        pattern: input.dbPattern,
-        caseInsensitive: input.caseInsensitive,
-        personId,
-        since: messageFilters?.since,
-        channel,
-      }),
-      grepRepo.searchMessageGrepRows({
-        userId,
-        pattern: input.dbPattern,
-        caseInsensitive: input.caseInsensitive,
-        limit: input.headLimit,
-        offset: input.offset,
-        personId,
-        since: messageFilters?.since,
-        channel,
-      }),
-    ]);
-    return { total, matches: rows.map((row) => buildMessageMatch(row, input)) };
+    return searchMessageSource({ userId, input, source });
   }
 
   if (source === 'network') {
@@ -193,9 +157,11 @@ async function searchSource(
   return { total, matches: rows.map((row) => buildAgentNetworkMatch(row, input)) };
 }
 
-function sortMatches(matches: GrepMatch[]): GrepMatch[] {
+function sortMatches(matches: GrepMatch[], oldestFirst: boolean): GrepMatch[] {
   return [...matches].sort((a, b) => {
-    const byTime = Date.parse(b.timestamp) - Date.parse(a.timestamp);
+    const byTime = oldestFirst
+      ? Date.parse(a.timestamp) - Date.parse(b.timestamp)
+      : Date.parse(b.timestamp) - Date.parse(a.timestamp);
     if (byTime !== 0) return byTime;
     return a.path.localeCompare(b.path);
   });
@@ -224,7 +190,11 @@ export async function grep(userId: string, params: GrepParams): Promise<GrepResu
   }
 
   const totalMatches = sourceResults.reduce((sum, result) => sum + result.total, 0);
-  const merged = sortMatches(sourceResults.flatMap((result) => result.matches));
+  const oldestFirst = input.sources.every(isMessageFamilySource);
+  const merged = sortMatches(
+    sourceResults.flatMap((result) => result.matches),
+    oldestFirst
+  );
   const matches = merged.slice(input.offset, input.offset + input.headLimit);
   const truncated = totalMatches > input.offset + matches.length;
   const summaries: GrepResult['summaries'] = {};
@@ -267,6 +237,15 @@ export async function grep(userId: string, params: GrepParams): Promise<GrepResu
     sources: input.sources,
     applied_limit: input.headLimit,
     applied_offset: input.offset,
+    returned: matches.length,
+    has_more: truncated,
+    next_offset: truncated ? input.offset + matches.length : null,
+    display_order: oldestFirst ? 'oldest_first' : 'newest_first',
+    context_unit: oldestFirst
+      ? 'message_record'
+      : input.sources.some(isMessageFamilySource)
+        ? 'mixed'
+        : 'logical_line',
     ...(Object.keys(summaries).length > 0 ? { summaries } : {}),
     ...(matches.length === 0
       ? {

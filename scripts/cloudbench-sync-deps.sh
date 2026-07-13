@@ -7,6 +7,8 @@ set -euo pipefail
 
 DEPS_DIR="${1:?usage: cloudbench-sync-deps.sh <donor-dir> <repo-dir>}"
 REPO_DIR="${2:?usage: cloudbench-sync-deps.sh <donor-dir> <repo-dir>}"
+# shellcheck source=lib/cloudbench-env.sh
+source "$REPO_DIR/scripts/lib/cloudbench-env.sh"
 
 fingerprint() {
     local root="$1"
@@ -80,18 +82,12 @@ print(f"[cloudbench] relocated {rewritten} Python venv path(s) to {root}")
 PY
 }
 
-NODE_MANIFESTS=(
-    package.json
-    package-lock.json
-    back-end/package.json
-    front-end/package.json
-)
-repo_node="$(fingerprint "$REPO_DIR" "${NODE_MANIFESTS[@]}")"
+repo_node="$(cloudbench_node_dependency_fingerprint "$REPO_DIR")"
 node_marker="$REPO_DIR/node_modules/.cloudbench-deps-fingerprint"
 installed_node=""
 [ -f "$node_marker" ] && installed_node="$(cat "$node_marker" 2>/dev/null || true)"
 if [ "$installed_node" != "$repo_node" ]; then
-    donor_node="$(fingerprint "$DEPS_DIR" "${NODE_MANIFESTS[@]}")"
+    donor_node="$(cloudbench_node_dependency_fingerprint "$DEPS_DIR")"
     if [ "$donor_node" != "$repo_node" ]; then
         echo "[cloudbench] FATAL: warm image/volume JavaScript dependencies do not match the checked-out ref" >&2
         echo "[cloudbench]        rebuild the image or refresh the warm volume before running benchmarks" >&2

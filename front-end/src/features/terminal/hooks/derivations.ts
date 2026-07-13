@@ -144,11 +144,26 @@ function isBrowserTaskTerminalMessage(message: Message): boolean {
   );
 }
 
+function getBrowserMessageTimestamp(message: Message): number {
+  const timestamp = Date.parse(message.timestamp);
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function compareBrowserMessageOrder(a: Message, b: Message): number {
+  const timestampDelta = getBrowserMessageTimestamp(a) - getBrowserMessageTimestamp(b);
+  if (timestampDelta !== 0) return timestampDelta;
+  if (a.message_id < b.message_id) return -1;
+  if (a.message_id > b.message_id) return 1;
+  return 0;
+}
+
 /**
  * Browser status chip lifecycle:
  *
  * spawn_browser_agent init/browser/system/session_started
  *   -> [VISIBLE_STATUS_CHIP]
+ *   -> browser URL events --sort by persisted event time--> [LATEST_LIVE_VIEW]
+ *      (API hydration/realtime delivery order does not affect the selected URL)
  *   -> task-scoped browser progress messages
  *   -> terminal message:
  *        - action_type task_complete/session_paused, or
@@ -177,7 +192,9 @@ export function computeActiveBrowserPanels(messages: Message[]): BrowserPanelDat
   });
 
   browserTaskIds.forEach((taskId) => {
-    const taskMessages = messages.filter((m) => m.metadata?.task_id === taskId);
+    const taskMessages = messages
+      .filter((m) => m.metadata?.task_id === taskId)
+      .sort(compareBrowserMessageOrder);
     const initMessage = taskMessages.find(isBrowserInitMessage);
     const initToolCallId = initMessage?.metadata?.toolCallId;
     const latestBrowserMessage = [...taskMessages]

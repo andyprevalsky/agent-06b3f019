@@ -1,4 +1,3 @@
-#!/usr/bin/env tsx
 /**
  * Black-box tests for the SMS supervisor's tool-loop + deferred-commit gate.
  *
@@ -15,11 +14,10 @@
  *   npx tsx src/tests/blackbox/sms-supervisor.blackbox.ts
  */
 
-import { config } from 'dotenv';
+import 'dotenv/config';
 import { PrismaClient } from '@prisma/client';
 import {
   BASE_URL,
-  TestResult,
   assertStatus,
   assertRecentCompletedRootStaysInHierarchy,
   buildStartNewAgentFixture,
@@ -37,6 +35,7 @@ import {
   waitFor,
 } from './sms-supervisor.helpers';
 import {
+  testAttemptCompletion_requiresSuccessfulUserMessage,
   testGrep_failureBlocksCompletionAndFallsBackGracefully,
   testGrep_searchUserDataInlineSuccessCompletes,
   testNaturalApproval_ambiguousApprovalAsksClarification,
@@ -46,14 +45,14 @@ import {
   testRealLlm_purchaseRequestSpawnsAgent,
   testRealLlm_supervisorRoundTrip,
 } from './sms-supervisor.behavior';
+import { smsDeliveryBehaviorCases } from './sms-supervisor.delivery.behavior';
 import {
   testRealLlm_photoAttachmentRoundTrip,
   testRealLlm_voiceNoteRoundTrip,
 } from './sms-supervisor.media.behavior';
+import { replyIntentBlackboxCase } from './sms-supervisor.intent.behavior';
 import { buildToolFailureMessage } from '../../providers/smsSupervisor/supervisorHandler';
 import { commitPendingWrites, PendingOp } from '../../providers/smsSupervisor/supervisorTools';
-config();
-
 const prisma = new PrismaClient();
 
 // ==================== SMOKE — inbound → supervisor loop → outbound SMS ====================
@@ -330,6 +329,18 @@ async function testWs2_consecutiveInboundCommitsOnlyLatest() {
       );
     }
     const messages = JSON.parse(session.messages) as { role?: string; content?: string }[];
+    const persistedInbound = messages
+      .filter((message) => message.role === 'user')
+      .map((message) => message.content);
+    if (
+      !persistedInbound.includes(firstText) ||
+      !persistedInbound.includes(secondText) ||
+      persistedInbound.indexOf(firstText) > persistedInbound.indexOf(secondText)
+    ) {
+      throw new Error(
+        `Expected both inbound SMS records in arrival order, got ${JSON.stringify(persistedInbound)}`
+      );
+    }
     const replied = messages.some((m) => m.role === 'assistant' && m.content === expectedReply);
     if (!replied) {
       throw new Error('Expected the fixture reply to be persisted by the committing run');
@@ -339,9 +350,9 @@ async function testWs2_consecutiveInboundCommitsOnlyLatest() {
   }
 }
 
-// ==================== WRITE-TOOL COMMIT — start_new_agent fires on attempt_completion ====================
+// ==================== WRITE-TOOL COMMIT — start_new_agent applies before user send ====================
 
-async function testWriteCommit_startNewAgentCommitsOnAttemptCompletion() {
+async function testWriteCommit_startNewAgentCommitsBeforeUserSend() {
   const probeRes = await request(`${BASE_URL}/api/test/captures`);
   if (probeRes.status !== 200) {
     console.warn('  ⚠ capture harness not active — skipping write-commit test');
@@ -393,22 +404,15 @@ async function testWriteCommit_startNewAgentCommitsOnAttemptCompletion() {
 
     // Session shape: only inbound user message + assistant reply persisted —
     // not the start_new_agent tool turn. Per WS-1.
-    const session = await prisma.smsSession.findUnique({ where: { userId } });
-    if (!session) {
-      throw new Error('Expected SmsSession to exist after run');
-    }
-    const messages = JSON.parse(session.messages) as { role?: string; content?: string }[];
-    const userMsgs = messages.filter((m) => m.role === 'user');
-    const asstMsgs = messages.filter((m) => m.role === 'assistant');
-    if (userMsgs.length !== 1 || asstMsgs.length !== 1) {
-      throw new Error(
-        `Expected exactly one user + one assistant message in session, got ` +
-          `user=${userMsgs.length} assistant=${asstMsgs.length}: ` +
-          JSON.stringify(
-            messages.map((m) => ({ role: m.role, content: m.content?.substring(0, 40) }))
-          )
-      );
-    }
+    const messages = await waitFor(async () => {
+      const session = await prisma.smsSession.findUnique({ where: { userId } });
+      if (!session) return null;
+      const parsed = JSON.parse(session.messages) as { role?: string; content?: string }[];
+      const userCount = parsed.filter((message) => message.role === 'user').length;
+      const assistantCount = parsed.filter((message) => message.role === 'assistant').length;
+      return userCount === 1 && assistantCount === 1 ? parsed : null;
+    });
+    const asstMsgs = messages.filter((message) => message.role === 'assistant');
     if (asstMsgs[0].content !== replyText) {
       throw new Error(
         `Expected assistant content to match fixture reply, got: ${asstMsgs[0].content?.substring(0, 80)}`
@@ -616,8 +620,8 @@ async function runAll() {
       fn: testWs2_consecutiveInboundCommitsOnlyLatest,
     },
     {
-      name: 'write-commit -- start_new_agent fires on attempt_completion',
-      fn: testWriteCommit_startNewAgentCommitsOnAttemptCompletion,
+      name: 'write-commit -- start_new_agent applies before user send',
+      fn: testWriteCommit_startNewAgentCommitsBeforeUserSend,
     },
     {
       name: 'write-commit -- commit failure produces user-visible error',
@@ -635,6 +639,7 @@ async function runAll() {
       name: 'natural approval -- ambiguous approval asks clarification',
       fn: () => testNaturalApproval_ambiguousApprovalAsksClarification(prisma),
     },
+    replyIntentBlackboxCase(prisma),
     {
       name: 'prompt -- supervisor never exposes routing identifiers',
       fn: () => testPrompt_neverExposeRoutingIds(prisma),
@@ -651,6 +656,11 @@ async function runAll() {
       name: 'grep -- failed dispatch blocks completion and falls back gracefully',
       fn: () => testGrep_failureBlocksCompletionAndFallsBackGracefully(prisma),
     },
+    {
+      name: 'completion -- rejected until this run sends a user message',
+      fn: () => testAttemptCompletion_requiresSuccessfulUserMessage(prisma),
+    },
+    ...smsDeliveryBehaviorCases(prisma),
     {
       name: 'real-llm -- answers contact fact via grep without asking user (opt-in)',
       fn: () => testRealLlm_answersContactFactViaGrep(prisma),
@@ -673,7 +683,7 @@ async function runAll() {
     },
   ];
 
-  const results: TestResult[] = [];
+  const results = [];
   for (const t of tests) {
     results.push(await runTest(t.name, t.fn));
   }

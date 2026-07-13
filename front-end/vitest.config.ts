@@ -25,14 +25,17 @@ export default defineConfig({
     ],
     globals: true,
     css: false,
-    maxWorkers: 8,
+    // /deploy verifies the front-end alongside backend, agents, and both Mac
+    // suites. Eight workers here can starve user-event timers and turn valid
+    // interaction tests into timeouts on shared developer machines.
+    maxWorkers: 2,
     minWorkers: 1,
     // Coverage instrumentation plus the deploy workflow's concurrent backend
     // verifier can push the full Terminal interaction tests past Vitest's 5s
     // default on shared CI/developer machines. Keep a bounded but realistic
     // ceiling so genuine hangs still fail quickly.
-    testTimeout: 15_000,
-    hookTimeout: 15_000,
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
     coverage: {
       provider: 'v8',
       reporter: ['text', 'text-summary', 'json-summary'],
