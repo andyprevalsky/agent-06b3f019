@@ -32,6 +32,15 @@ export interface UserDataGrepMatch {
   role?: string;
   line_numbers?: boolean;
   content: string;
+  records?: Array<{
+    message_id: string;
+    channel: string;
+    from: string;
+    to: string;
+    timestamp: string;
+    message: string;
+    relation: 'before' | 'match' | 'after';
+  }>;
 }
 
 export interface UserDataGrepResult {
@@ -42,6 +51,11 @@ export interface UserDataGrepResult {
   sources: string[];
   applied_limit: number;
   applied_offset: number;
+  returned: number;
+  has_more: boolean;
+  next_offset: number | null;
+  display_order: 'oldest_first' | 'newest_first';
+  context_unit: 'message_record' | 'logical_line' | 'mixed';
   summaries?: Partial<Record<string, unknown>>;
   message?: string;
 }

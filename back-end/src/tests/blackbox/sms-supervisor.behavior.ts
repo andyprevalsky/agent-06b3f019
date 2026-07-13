@@ -7,7 +7,6 @@ import {
   captureToken,
   capturedSmsBody,
   cleanupAgentScopedUser,
-  cleanupSessionScopedUser,
   findSurgeCallForReply,
   provisionUserWithPhone,
   readCapturesAfter,
@@ -37,7 +36,8 @@ function buildReplyToAgentFixture(params: {
           reject: false,
         },
       },
-      { tool: 'attempt_completion', arguments: { message: params.smsReply } },
+      { tool: 'send_user_message', arguments: { message: params.smsReply } },
+      { tool: 'attempt_completion', arguments: {} },
     ],
   });
 }
@@ -175,7 +175,10 @@ export async function testNaturalApproval_ambiguousApprovalAsksClarification(pri
       userId,
       JSON.stringify({
         reasoning: 'the approval is ambiguous because two pending purchases match',
-        tool_calls: [{ tool: 'attempt_completion', arguments: { message: clarification } }],
+        tool_calls: [
+          { tool: 'send_user_message', arguments: { message: clarification } },
+          { tool: 'attempt_completion', arguments: {} },
+        ],
       })
     );
 
@@ -224,7 +227,7 @@ export async function testPrompt_neverExposeRoutingIds(prisma: PrismaClient) {
       throw new Error('Supervisor prompt still tells the model to expose agent prefixes');
     }
   } finally {
-    await cleanupSessionScopedUser(prisma, userId);
+    await cleanupAgentScopedUser(prisma, userId);
   }
 }
 
@@ -473,9 +476,9 @@ export async function testGrep_failureBlocksCompletionAndFallsBackGracefully(pri
   const userId = await provisionUserWithPhone(prisma, phone);
   const token = captureToken('sms-supervisor-grep-failure');
   const blockedReply = 'This reply must never be sent';
-  // The blocked-completion path exits the loop with no finalResponse, so the
-  // post-loop gate substitutes this fallback (supervisorHandler step 6).
-  const fallbackReply = "Sorry, I couldn't process that. Try again or text a task to get started.";
+  // The blocked-completion path reaches the safety cap without a successful
+  // send_user_message, so the runtime sends its failure fallback.
+  const fallbackReply = 'Sorry, I had trouble processing that. Please try again.';
 
   try {
     // Invalid regex → dispatch fails every round → attempt_completion in the
@@ -506,6 +509,43 @@ export async function testGrep_failureBlocksCompletionAndFallsBackGracefully(pri
     if (blocked) {
       throw new Error('Fixture reply was sent despite the grep dispatch failing every round');
     }
+  } finally {
+    await cleanupAgentScopedUser(prisma, userId);
+  }
+}
+
+export async function testAttemptCompletion_requiresSuccessfulUserMessage(prisma: PrismaClient) {
+  const probeRes = await request(`${BASE_URL}/api/test/captures`);
+  if (probeRes.status !== 200) return;
+  const cursor = (probeRes.data as { nextId: number }).nextId - 1;
+  const phone = uniqueSmsPhone();
+  const userId = await provisionUserWithPhone(prisma, phone);
+  const token = captureToken('sms-supervisor-completion-invariant');
+  const fallback = 'Sorry, I had trouble processing that. Please try again.';
+
+  try {
+    await setFixtureOverride(
+      userId,
+      JSON.stringify({
+        reasoning: 'incorrectly trying to stop without sending',
+        tool_calls: [{ tool: 'attempt_completion', arguments: {} }],
+      })
+    );
+    const res = await request(`${BASE_URL}/api/sms/inbound`, {
+      method: 'POST',
+      headers: { 'X-Capture-Token': token },
+      body: JSON.stringify({
+        data: {
+          body: 'Answer my question',
+          conversation: {
+            contact: { phone_number: phone },
+            phone_number: { number: '+14154498072' },
+          },
+        },
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+    await waitFor(() => findSurgeCallForReply(token, cursor, phone, fallback));
   } finally {
     await cleanupAgentScopedUser(prisma, userId);
   }

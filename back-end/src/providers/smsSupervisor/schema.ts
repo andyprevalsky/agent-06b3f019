@@ -43,6 +43,24 @@ const webSearchCallSchema = z.object({
   }),
 });
 
+const sendUserMessageCallSchema = z.object({
+  tool: z.literal('send_user_message'),
+  arguments: z.object({
+    message: z
+      .string()
+      .describe(
+        userFacingTextDescription(
+          'The exact SMS message to send to the user. Sending does not end the run.'
+        )
+      ),
+  }),
+});
+
+const getEnvironmentCallSchema = z.object({
+  tool: z.literal('get_environment'),
+  arguments: z.object({}).strict(),
+});
+
 // Symmetrical port of the explore agent's grep tool (agents/utils/tool_schemas.py
 // GrepTool + agents/tools/prompts/grep.py), minus the agent_network source —
 // that source needs an agent_id and the supervisor is not an agent.
@@ -65,18 +83,30 @@ const grepCallSchema = z
             'transactions searches synced Plaid transaction rows. documents searches synced ChatGPT/Claude ' +
             'exports, Apple Notes, Obsidian vault notes, and generic user documents.'
         ),
-      '-B': z.number().nullable().describe('Number of logical lines to show before each match.'),
-      '-A': z.number().nullable().describe('Number of logical lines to show after each match.'),
+      '-B': z
+        .number()
+        .nullable()
+        .describe(
+          'Context before each match: adjacent message records for messages, logical lines for text records.'
+        ),
+      '-A': z
+        .number()
+        .nullable()
+        .describe(
+          'Context after each match: adjacent message records for messages, logical lines for text records.'
+        ),
       '-C': z
         .number()
         .nullable()
         .describe(
-          'Number of logical lines to show before and after each match. Alias for context.'
+          'Context on both sides: adjacent message records for messages, logical lines for text records. Alias for context.'
         ),
       context: z
         .number()
         .nullable()
-        .describe('Number of logical lines to show before and after each match.'),
+        .describe(
+          'Context on both sides: adjacent message records for messages, logical lines for text records.'
+        ),
       '-n': z
         .boolean()
         .nullable()
@@ -85,7 +115,7 @@ const grepCallSchema = z
       head_limit: z
         .number()
         .nullable()
-        .describe('Maximum number of returned result snippets. Defaults to 20.'),
+        .describe('Maximum number of returned records (1-100). Defaults to 20.'),
       offset: z
         .number()
         .nullable()
@@ -139,27 +169,19 @@ Usage:
 - \`pattern\` is a regular expression. Plain text works for literal searches.
 - \`source\` is optional. Omit it to search messages and network.
 - Supported sources: messages, network, transactions, documents.
-- Grep-style flags: -A lines after, -B lines before, -C/context both sides, -n line numbers, -i case-insensitive, head_limit, offset, multiline.
+- Grep-style flags: for messages, -A/-B/-C/context return adjacent message records; for text records they return logical lines. -n controls numbering, -i is case-insensitive, head_limit supports up to 100, plus offset and multiline.
 - Use nested \`filters\` for source-specific narrowing. For messages: \`person\` and \`since\`. Legacy top-level \`person\` and \`since\` still work for messages.
 - For transactions: \`filters.since\`, \`filters.until\`, \`filters.account\`, \`filters.min_amount\`, \`filters.max_amount\`, \`filters.status\` (\`posted\`, \`pending\`, or \`all\`), and \`filters.include_pending_in_totals\`.
 - Transaction results include row snippets plus full-result aggregate totals by currency. Pending rows are visible, but excluded from totals unless \`include_pending_in_totals\` is true.
 - Use \`source="documents"\` for synced ChatGPT/Claude exports, Apple Notes, Obsidian vault notes, and generic text documents. For documents: \`filters.document_source\` (\`chatgpt\`, \`claude\`, \`apple_notes\`, \`obsidian\`), \`filters.since\`, \`filters.until\`, \`filters.path\`, and \`filters.tag\`.
 
 Returns:
-- matching records with surrounding context and location metadata.`
+- matching records with full bodies, aligned per-record metadata, explicit pagination metadata, and oldest-first display for message conversations.`
   );
 
 const attemptCompletionCallSchema = z.object({
   tool: z.literal('attempt_completion'),
-  arguments: z.object({
-    message: z
-      .string()
-      .describe(
-        userFacingTextDescription(
-          'The exact final SMS message sent to the user when attempt_completion is called.'
-        )
-      ),
-  }),
+  arguments: z.object({}).strict(),
 });
 
 export const SmsSupervisorToolCallSchema = z.discriminatedUnion('tool', [
@@ -169,6 +191,8 @@ export const SmsSupervisorToolCallSchema = z.discriminatedUnion('tool', [
   startNewAgentCallSchema,
   webSearchCallSchema,
   grepCallSchema,
+  getEnvironmentCallSchema,
+  sendUserMessageCallSchema,
   attemptCompletionCallSchema,
 ]);
 
@@ -176,7 +200,9 @@ export const SmsSupervisorResponseSchema = z.object({
   reasoning: z.string().describe('Internal thought process (not shown to user)'),
   tool_calls: z
     .array(SmsSupervisorToolCallSchema)
-    .describe('Tool calls to execute. Include attempt_completion when ready to respond.'),
+    .describe(
+      'Tool calls to execute. Use send_user_message for user-visible text. Include argument-free attempt_completion only after this run has sent at least one user message.'
+    ),
 });
 
 export type SmsSupervisorResponse = z.infer<typeof SmsSupervisorResponseSchema>;

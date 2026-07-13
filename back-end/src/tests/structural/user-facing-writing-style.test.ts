@@ -52,14 +52,14 @@ check(
 
 check(
   hasDescriptionContaining(SUPERVISOR_RESPONSE_SCHEMA, USER_FACING_WRITING_STYLE),
-  'Live SMS attempt_completion.message schema is missing the shared style'
+  'Live SMS send_user_message.message schema is missing the shared style'
 );
 
-const smsAttemptCompletion = TOOL_SCHEMAS.find((tool) => tool.name === 'attempt_completion');
-const smsToolDescription = smsAttemptCompletion?.parameters.properties.message.description ?? '';
+const smsSendUserMessage = TOOL_SCHEMAS.find((tool) => tool.name === 'send_user_message');
+const smsToolDescription = smsSendUserMessage?.parameters.properties.message?.description ?? '';
 check(
   smsToolDescription.includes(USER_FACING_WRITING_STYLE),
-  'SMS tool catalog attempt_completion.message is missing the shared style'
+  'SMS tool catalog send_user_message.message is missing the shared style'
 );
 
 const chatResponseDescription = GENERATOR_JSON_SCHEMA.properties.response.description;

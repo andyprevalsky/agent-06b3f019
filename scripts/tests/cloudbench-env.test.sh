@@ -42,9 +42,77 @@ if cloudbench_verify_env_file "$agents_env" "$backend_digest" agents >/dev/null 
   fail "a mismatched injected env digest must fail closed"
 fi
 
+retry_attempts=0
+fail_twice_then_succeed() {
+  retry_attempts=$((retry_attempts + 1))
+  [ "$retry_attempts" -ge 3 ]
+}
+cloudbench_retry_command 3 0 fail_twice_then_succeed >/dev/null 2>&1 ||
+  fail "a transient command must succeed within its retry budget"
+[ "$retry_attempts" -eq 3 ] || fail "a transient command must be retried exactly to success"
+
+retry_attempts=0
+always_fail() {
+  retry_attempts=$((retry_attempts + 1))
+  return 9
+}
+if cloudbench_retry_command 3 0 always_fail >/dev/null 2>&1; then
+  fail "a permanently failing command must fail closed"
+fi
+[ "$retry_attempts" -eq 3 ] || fail "a permanent failure must exhaust its retry budget"
+
+machine_states="$TMP_ROOT/machine-states"
+printf 'created\ncreated\nstopped\n' > "$machine_states"
+read_machine_state() {
+  local state
+  state="$(head -1 "$machine_states")"
+  tail -n +2 "$machine_states" > "$machine_states.next"
+  mv "$machine_states.next" "$machine_states"
+  printf '%s\n' "$state"
+}
+cloudbench_wait_machine_startable read_machine_state machine-1 3 0 ||
+  fail "a provisioning clone must wait until it becomes stopped/startable"
+[ ! -s "$machine_states" ] || fail "the startable-state wait must consume the transition sequence"
+
+printf 'created\ndestroyed\n' > "$machine_states"
+if cloudbench_wait_machine_startable read_machine_state machine-2 3 0 >/dev/null 2>&1; then
+  fail "a destroyed provisioning clone must fail closed"
+fi
+
+cloudbench_validate_fresh_clone_id clone-2 warm-1 clone-1 ||
+  fail "a unique non-source clone id must be accepted"
+if cloudbench_validate_fresh_clone_id warm-1 warm-1 clone-1; then
+  fail "the warm source id must never be accepted as a fresh clone"
+fi
+if cloudbench_validate_fresh_clone_id clone-1 warm-1 clone-1; then
+  fail "a duplicate clone id must never be accepted"
+fi
+
 activation_ids="$(printf '%s\n' '[{"id":"warm-1","name":"cloudbench-warm","state":"stopped"},{"id":"lock-1","name":"cloudbench-controller-lock","state":"stopped"},{"id":"clone-1","name":"fleet-1","state":"stopped"},{"id":"provisioning-1","name":"other-controller-clone","state":"created"},{"id":"running-1","name":"other-controller-run","state":"started"}]' | cloudbench_env_activation_machine_ids)"
 [ "$activation_ids" = $'warm-1\nclone-1' ] ||
   fail "environment activation must target only stopped non-lock benchmark machines"
+
+node_a="$TMP_ROOT/node-a"
+node_b="$TMP_ROOT/node-b"
+mkdir -p "$node_a/back-end" "$node_a/front-end" "$node_b/back-end" "$node_b/front-end"
+printf '{"lockfileVersion":3,"packages":{"generated":"old"}}\n' > "$node_a/package-lock.json"
+printf '{"lockfileVersion":3,"packages":{"generated":"new"}}\n' > "$node_b/package-lock.json"
+printf '{"lockfileVersion":3,"packages":{}}\n' > "$node_a/back-end/package-lock.json"
+cp "$node_a/back-end/package-lock.json" "$node_b/back-end/package-lock.json"
+printf '{"scripts":{"test":"old"},"dependencies":{"tsx":"1.0.0"}}\n' > "$node_a/package.json"
+printf '{"scripts":{"test":"new"},"dependencies":{"tsx":"1.0.0"}}\n' > "$node_b/package.json"
+for relative in back-end/package.json front-end/package.json; do
+  printf '{"scripts":{"test":"old"}}\n' > "$node_a/$relative"
+  printf '{"scripts":{"test":"new"}}\n' > "$node_b/$relative"
+done
+node_a_fingerprint="$(cloudbench_node_dependency_fingerprint "$node_a")"
+node_b_fingerprint="$(cloudbench_node_dependency_fingerprint "$node_b")"
+[ "$node_a_fingerprint" = "$node_b_fingerprint" ] ||
+  fail "scripts and the generated root lock must not invalidate baked dependencies"
+printf '{"scripts":{"test":"new"},"dependencies":{"tsx":"2.0.0"}}\n' > "$node_b/package.json"
+node_b_fingerprint="$(cloudbench_node_dependency_fingerprint "$node_b")"
+[ "$node_a_fingerprint" != "$node_b_fingerprint" ] ||
+  fail "dependency field changes must invalidate baked dependencies"
 
 lock_file="$TMP_ROOT/controller.lock"
 cloudbench_controller_lock_acquire "$lock_file"
@@ -67,11 +135,20 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'FLY secrets set --stage -a "$APP"' \
   "Machines API apps must stage the app-level environment before machine updates"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'cloudbench_retry_command 3 5' \
+  "machine environment activation must retry transient Fly API failures"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'FLY machine update "$machine_id" -a "$APP" --skip-start --yes' \
   "every existing benchmark machine must activate staged secrets without starting"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'machine_ids="$(_machines_json | cloudbench_env_activation_machine_ids)"' \
   "environment activation must exclude lock and in-use benchmark machines"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'cloudbench_wait_machine_startable fleet_machine_state "$cid"' \
+  "fleet children must not launch while a fresh clone is still in created state"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  '--name "$clone_name"' \
+  "fresh fleet clones must use an exact unique name for id resolution"
 if grep -Fq -- 'FLY secrets deploy' "$ROOT_DIR/scripts/run-bench-cloud"; then
   fail "Machines API apps must not use Fly Launch secrets deploy"
 fi
@@ -84,6 +161,9 @@ require_text "$ROOT_DIR/scripts/cloudbench-worker.sh" \
 require_text "$ROOT_DIR/scripts/cloudbench-worker.sh" \
   'umask 077' \
   "decoded benchmark secrets must be owner-only from file creation"
+require_text "$ROOT_DIR/scripts/cloudbench-sync-deps.sh" \
+  'cloudbench_node_dependency_fingerprint' \
+  "cloud dependency sync must ignore package scripts while binding dependency fields"
 if grep -Fq -- 'eval "exec ${CLOUDBENCH_CONTROLLER_LOCK_FD}' "$HELPER_SRC"; then
   fail "controller lock fd cleanup must not use eval"
 fi

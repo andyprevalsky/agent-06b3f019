@@ -418,9 +418,9 @@ inject_secrets() {
         echo "❌ Failed to stage benchmark environment secrets"; exit 1
     }
     local machine_ids machine_id
-    # The controller lock and another controller's active/provisioning machines
-    # may carry legitimate Fly leases. Only idle benchmark machines need the
-    # staged environment activated by this refresh.
+    # The controller-lock sentinel and another controller's active/provisioning
+    # machines may carry legitimate Fly leases. Only idle benchmark machines
+    # need the staged environment activated by this refresh.
     machine_ids="$(_machines_json | cloudbench_env_activation_machine_ids)"
     [ -n "$machine_ids" ] || {
         echo "❌ No benchmark machines exist to activate staged secrets." >&2
@@ -429,7 +429,8 @@ inject_secrets() {
     while IFS= read -r machine_id; do
         [ -n "$machine_id" ] || continue
         echo "   activating env on machine $machine_id (skip-start)"
-        FLY machine update "$machine_id" -a "$APP" --skip-start --yes 2>&1 | sed 's/^/      /' || {
+        cloudbench_retry_command 3 5 \
+            FLY machine update "$machine_id" -a "$APP" --skip-start --yes 2>&1 | sed 's/^/      /' || {
             echo "❌ Failed to activate environment on machine $machine_id" >&2
             exit 1
         }
