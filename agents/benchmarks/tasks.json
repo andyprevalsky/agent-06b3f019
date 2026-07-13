@@ -877,6 +877,135 @@
     "bench": "pipeline-e2e"
   },
   {
+    "name": "browser-agent-amazon-passkey",
+    "title": "Amazon Kernel Passkey Authentication",
+    "description": "Live Amazon sign-in from a fresh Kernel profile using only the synced passkey",
+    "prompt": "Open https://www.amazon.com and first confirm the page visibly shows the signed-out 'Hello, sign in' state. Click that signed-out Account & Lists control, then sign in using the saved Amazon passkey. Do not use a password, OTP, cookie/session authentication, or ask me to sign in. Once Amazon shows 'Hello, Andy', click that authenticated Account & Lists greeting once so the state is recorded, then stop and report success.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth"
+    ],
+    "price_limit_cents": 200,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "expected_credential_ref_kind": "passkey",
+    "forbidden_credential_ref_kinds": [
+      "password",
+      "email_otp",
+      "sms_otp"
+    ],
+    "expected_browser_provider": "kernel",
+    "expected_browser_session_metadata_values": {
+      "profile_source": "new_user_persistent",
+      "auth_source": "none",
+      "cookies_injected": false,
+      "cookies_count": 0,
+      "local_storage_origin_count": 0,
+      "indexed_db_origin_count": 0,
+      "permission_grant_count": 0,
+      "cache_storage_origin_count": 0
+    },
+    "expected_pre_credential_message_contains": [
+      "Hello, sign in"
+    ],
+    "expected_post_credential_message_contains": [
+      "Hello, Andy"
+    ],
+    "success_on_browser_auth_evidence": true,
+    "start_phase": "execute",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "compute_tokens",
+        "amazon_passkey"
+      ],
+      "services": [
+        "amazon.com",
+        "kernel"
+      ],
+      "secrets": [
+        "amazon_passkey"
+      ],
+      "live_targets": [
+        "https://www.amazon.com"
+      ],
+      "context_notes": "compute_tokens refreshes only LLM credentials. amazon_passkey syncs only the live passkey, deletes Amazon cookies and origin storage, disables saved-session/password alternatives, and detaches the local Kernel profile mapping so the run proves CDP passkey injection from a fresh profile."
+    },
+    "evaluators": [
+      {
+        "id": "kernel-passkey-authentication",
+        "method": "static_check",
+        "criteria": [
+          "Browser session metadata identifies Kernel as the provider",
+          "Browser session metadata proves a new profile with zero cookie or origin-state injection",
+          "The transcript shows Amazon signed out before passkey use",
+          "A passkey credential_ref is persisted before task completion",
+          "Amazon shows an authenticated account state",
+          "The transcript uses neither password nor OTP"
+        ],
+        "checks": [
+          {
+            "type": "browser_provider",
+            "value": "kernel"
+          },
+          {
+            "type": "browser_session_metadata_values",
+            "value": {
+              "profile_source": "new_user_persistent",
+              "auth_source": "none",
+              "cookies_injected": false,
+              "cookies_count": 0,
+              "local_storage_origin_count": 0,
+              "indexed_db_origin_count": 0,
+              "permission_grant_count": 0,
+              "cache_storage_origin_count": 0
+            }
+          },
+          {
+            "type": "message_before_credential_contains",
+            "credential_kind": "passkey",
+            "value": [
+              "Hello, sign in"
+            ]
+          },
+          {
+            "type": "credential_ref_kind",
+            "value": "passkey"
+          },
+          {
+            "type": "message_after_credential_contains",
+            "credential_kind": "passkey",
+            "value": [
+              "Hello, Andy"
+            ]
+          },
+          {
+            "type": "forbidden_credential_ref_kinds",
+            "value": [
+              "password",
+              "email_otp",
+              "sms_otp"
+            ]
+          }
+        ]
+      }
+    ],
+    "source": [
+      "commit:8923d6e87",
+      "live-amazon:kernel-passkey"
+    ],
+    "bench": "rose-bench"
+  },
+  {
     "name": "browser-toast-nopa-write-lock",
     "title": "Toast Nopa Fish Order - Cloudflare Challenge + Payment Card",
     "prompt": "Order me 1 rocky fish sandwich from Nopa Fish Ferry Building using the official Toast pickup flow. Start the browser order at https://order.toasttab.com/online/nopafish for Nopa Fish, 1 Ferry Building Suite 31, San Francisco, CA. Inspect the live Toast menu, choose the closest matching single rocky fish sandwich item (currently often named The Rocky Sandwich), add quantity 1, proceed through checkout, and stop at/handle the write-lock approval before placing the order as the harness expects. Do not use Google, DoorDash, Uber Eats, or other delivery-platform search as the primary path; only fall back away from Toast if the Toast ordering page itself is technically blocked, and report the exact blocker.",

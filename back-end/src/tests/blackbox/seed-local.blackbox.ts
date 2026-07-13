@@ -422,6 +422,32 @@ test('full sync defers browser-auth failure until later tables finish', async ()
   );
 });
 
+test('passkeys-only seed mode never enters browser state or password sync', async () => {
+  const source = readFileSync(resolve(__dirname, '../../../scripts/seed-local.ts'), 'utf8');
+  const flag = source.indexOf("process.argv.includes('--passkeys-only')");
+  const branch = source.indexOf('if (PASSKEYS_ONLY)');
+  const passkeySync = source.indexOf(
+    'await syncPasskeysOnly(undefined, { authoritative: true });',
+    branch
+  );
+  const branchReturn = source.indexOf('return;', passkeySync);
+  const credentialsOnlyBranch = source.indexOf('if (CREDENTIALS_ONLY)');
+
+  assert(flag > 0, 'expected a dedicated --passkeys-only CLI flag');
+  assert(branch > flag, 'expected passkeys-only branch after flag declaration');
+  assert(passkeySync > branch, 'expected passkeys-only branch to sync passkeys');
+  assert(branchReturn > passkeySync, 'expected passkeys-only branch to return immediately');
+  assert(
+    source.includes("'Stale Local Passkeys'") &&
+      source.includes('local.passkeyCredential.deleteMany'),
+    'expected passkeys-only mode to remove stale local passkeys'
+  );
+  assert(
+    credentialsOnlyBranch > branchReturn,
+    'expected passkeys-only mode to return before browser state/password sync'
+  );
+});
+
 test('browser-state natural-key sync crosses the real Prisma uniqueness boundary', async () => {
   const databaseUrl = process.env.DATABASE_URL;
   assert(databaseUrl, 'DATABASE_URL is required for the seed-local database blackbox');

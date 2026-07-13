@@ -36,9 +36,11 @@ if (!REMOTE_URL) {
 const DEV_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 // Merge production browser auth state into local by each table's natural
 // identity. Matching rows are refreshed and missing production rows are added;
-// local-only rows are deliberately preserved because this is not an
-// authoritative mirror and must not erase developer-owned credentials.
+// local-only rows are deliberately preserved by normal/full sync. The explicit
+// --passkeys-only benchmark mode is authoritative and removes stale local
+// passkeys so its live-fixture preflight cannot succeed on obsolete material.
 const CREDENTIALS_ONLY = process.argv.includes('--credentials-only');
+const PASSKEYS_ONLY = process.argv.includes('--passkeys-only');
 const SKIP_BROWSER_AUTH_SYNC =
   process.env.BENCHMARK_SKIP_BROWSER_AUTH_SYNC === '1' ||
   process.env.BENCHMARK_WORLD_MODEL_MODE === 'simulate';
@@ -282,6 +284,13 @@ async function syncBrowserCredentials(failures?: Error[]): Promise<void> {
     failures
   );
 
+  await syncPasskeysOnly(failures);
+}
+
+async function syncPasskeysOnly(
+  failures?: Error[],
+  options: { authoritative?: boolean } = {}
+): Promise<void> {
   // ── Passkey Credentials ──
   await syncRequiredTable(
     'Passkey Credentials',
@@ -290,6 +299,34 @@ async function syncBrowserCredentials(failures?: Error[]): Promise<void> {
     },
     failures
   );
+
+  if (options.authoritative) {
+    await syncRequiredTable(
+      'Stale Local Passkeys',
+      async () => {
+        const remoteKeys = await remote.passkeyCredential.findMany({
+          where: { userId: DEV_USER_ID },
+          select: { rpId: true, credentialId: true },
+        });
+        const liveKeys = new Set(
+          remoteKeys.map(({ rpId, credentialId }) => `${rpId}\u0000${credentialId}`)
+        );
+        const localKeys = await local.passkeyCredential.findMany({
+          where: { userId: DEV_USER_ID },
+          select: { id: true, rpId: true, credentialId: true },
+        });
+        const staleIds = localKeys
+          .filter(({ rpId, credentialId }) => !liveKeys.has(`${rpId}\u0000${credentialId}`))
+          .map(({ id }) => id);
+        if (staleIds.length === 0) return 0;
+        const deleted = await local.passkeyCredential.deleteMany({
+          where: { id: { in: staleIds } },
+        });
+        return deleted.count;
+      },
+      failures
+    );
+  }
 }
 
 async function syncBrowserAuthForCurrentMode(failures?: Error[]): Promise<void> {
@@ -324,6 +361,15 @@ async function sync() {
   if (COMPUTE_TOKENS_ONLY) {
     await syncComputeTokensWithRetries();
     console.log('\n🔄 Compute token sync complete.');
+    return;
+  }
+
+  if (PASSKEYS_ONLY) {
+    console.log(
+      '  ℹ️  Syncing authoritative passkeys only; browser state and passwords are excluded'
+    );
+    await syncPasskeysOnly(undefined, { authoritative: true });
+    console.log('\n🔄 Passkey sync complete.');
     return;
   }
 

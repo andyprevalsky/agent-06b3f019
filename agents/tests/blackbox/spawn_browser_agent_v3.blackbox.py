@@ -3473,18 +3473,37 @@ async def test_save_browser_credential_ref_message_user_role():
     setup_mock({"/api/agents/": {"status": 200, "json": {"ok": True}}})
 
     with patch("config.load_config", return_value=_fake_config()):
-        await save_browser_credential_ref_message(
+        saved = await save_browser_credential_ref_message(
             agent_id="ag1",
             task_id="task-1",
             message="OTP code",
             role="USER",
             credential_ref={"kind": "email_otp", "id": "msg1"},
+            browser_url="https://kernel.example/live/session-1",
         )
 
+    assert saved is True
     body = json.loads(get_captured_requests()[0]["requestBody"])
     assert body["role"] == "USER"
     assert body["metadata"]["subAgentId"] == "task-1"
     assert body["metadata"]["credential_ref"] == {"kind": "email_otp", "id": "msg1"}
+    assert body["metadata"]["browser_url"] == "https://kernel.example/live/session-1"
+
+
+async def test_save_browser_credential_ref_message_reports_backend_failure():
+    from domains.spawn_browser_agent_v3.repo import save_browser_credential_ref_message
+
+    setup_mock({"/api/agents/": {"status": 503, "json": {"error": "unavailable"}}})
+
+    with patch("config.load_config", return_value=_fake_config()):
+        saved = await save_browser_credential_ref_message(
+            agent_id="ag1",
+            task_id="task-1",
+            message="Passkey used for authentication.",
+            credential_ref={"kind": "passkey", "id": "passkey-row"},
+        )
+
+    assert saved is False
 
 
 # ========================================
@@ -5768,6 +5787,129 @@ async def test_dom_service_passkey_webauthn_uses_cdp_client_session_api():
     webauthn.addCredential.assert_awaited_once()
     page.setInterceptFileChooserDialog.assert_awaited_once_with(params={"enabled": True}, session_id="cdp-session")
     assert await dom.get_used_passkey_credential_ids() == ["cred-1"]
+
+
+async def test_passkey_usage_is_recorded_once_before_browser_task_completion():
+    """A sign-counter advance must be durable before approvals pause the browser task."""
+    from domains.spawn_browser_agent_v3 import handler
+
+    dom_service = SimpleNamespace(
+        get_used_passkey_credential_ids=AsyncMock(return_value=["amazon-credential"])
+    )
+    recorded_credential_ids: set[str] = set()
+
+    with patch.object(
+        handler,
+        "save_browser_credential_ref_message",
+        new=AsyncMock(return_value=True),
+    ) as save_ref:
+        first = await handler.record_used_passkey_credentials(
+            dom_service=dom_service,
+            passkey_ref_by_credential_id={
+                "amazon-credential": {"kind": "passkey", "id": "passkey-row"}
+            },
+            recorded_credential_ids=recorded_credential_ids,
+            agent_id="agent-1",
+            task_id="task-1",
+            browser_url="https://kernel.example/live/session-1",
+        )
+        second = await handler.record_used_passkey_credentials(
+            dom_service=dom_service,
+            passkey_ref_by_credential_id={
+                "amazon-credential": {"kind": "passkey", "id": "passkey-row"}
+            },
+            recorded_credential_ids=recorded_credential_ids,
+            agent_id="agent-1",
+            task_id="task-1",
+            browser_url="https://kernel.example/live/session-1",
+        )
+
+    assert first == 1
+    assert second == 0
+    assert recorded_credential_ids == {"amazon-credential"}
+    save_ref.assert_awaited_once_with(
+        agent_id="agent-1",
+        task_id="task-1",
+        message="Passkey used for authentication.",
+        role="TOOL",
+        tool_name="browser_session_auth",
+        credential_ref={"kind": "passkey", "id": "passkey-row"},
+        browser_url="https://kernel.example/live/session-1",
+    )
+
+
+async def test_passkey_usage_retries_after_credential_ref_write_failure():
+    """A failed outcome write must not suppress the next observation's retry."""
+    from domains.spawn_browser_agent_v3 import handler
+
+    dom_service = SimpleNamespace(
+        get_used_passkey_credential_ids=AsyncMock(return_value=["amazon-credential"])
+    )
+    recorded_credential_ids: set[str] = set()
+
+    with patch.object(
+        handler,
+        "save_browser_credential_ref_message",
+        new=AsyncMock(side_effect=[False, True]),
+    ) as save_ref:
+        first = await handler.record_used_passkey_credentials(
+            dom_service=dom_service,
+            passkey_ref_by_credential_id={
+                "amazon-credential": {"kind": "passkey", "id": "passkey-row"}
+            },
+            recorded_credential_ids=recorded_credential_ids,
+            agent_id="agent-1",
+            task_id="task-1",
+            browser_url="https://kernel.example/live/session-1",
+        )
+        second = await handler.record_used_passkey_credentials(
+            dom_service=dom_service,
+            passkey_ref_by_credential_id={
+                "amazon-credential": {"kind": "passkey", "id": "passkey-row"}
+            },
+            recorded_credential_ids=recorded_credential_ids,
+            agent_id="agent-1",
+            task_id="task-1",
+            browser_url="https://kernel.example/live/session-1",
+        )
+
+    assert first == 0
+    assert second == 1
+    assert recorded_credential_ids == {"amazon-credential"}
+    assert save_ref.await_count == 2
+
+
+async def test_disconnect_browser_captures_passkey_usage_before_disconnect():
+    from domains.spawn_browser_agent_v3.handler import disconnect_browser_after_passkey_capture
+
+    events = []
+
+    async def capture_usage():
+        events.append("credential_ref_saved")
+
+    dom_service = SimpleNamespace(disconnect=AsyncMock(side_effect=lambda: events.append("disconnected")))
+
+    await disconnect_browser_after_passkey_capture(dom_service, capture_usage)
+
+    assert events == ["credential_ref_saved", "disconnected"]
+    dom_service.disconnect.assert_awaited_once()
+
+
+def test_passkey_usage_is_sampled_before_every_terminal_browser_disconnect():
+    """Completion, approvals, handoffs, cancellation, and errors all capture usage."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    post_injection = source.split("# ===== PHASE 3: POST-SETUP =====", maxsplit=1)[1]
+    lines = post_injection.splitlines()
+    capture_disconnects = [
+        line for line in lines if "await disconnect_browser_after_passkey_capture(" in line
+    ]
+
+    assert len(capture_disconnects) == 8
+    assert not any("await dom_service.disconnect()" in line for line in lines)
 
 
 # ── _execute_click ───────────────────────────────────────────────────
@@ -9026,6 +9168,22 @@ async def run_all_tests():
     r = BlackboxResult()
 
     await r.record_async("cdp_use_websocket_direct", test_cdp_use_websocket_patch_disables_proxy_discovery)
+    await r.record_async(
+        "passkey_usage_recorded_before_completion",
+        test_passkey_usage_is_recorded_once_before_browser_task_completion,
+    )
+    await r.record_async(
+        "passkey_usage_retries_after_write_failure",
+        test_passkey_usage_retries_after_credential_ref_write_failure,
+    )
+    await r.record_async(
+        "passkey_usage_captured_before_disconnect",
+        test_disconnect_browser_captures_passkey_usage_before_disconnect,
+    )
+    r.record(
+        "passkey_usage_sampled_before_terminal_disconnects",
+        test_passkey_usage_is_sampled_before_every_terminal_browser_disconnect,
+    )
     r.record(
         "browser_action_log_summary_redacts_payment_secrets", test_browser_action_log_summary_redacts_payment_secrets
     )
@@ -9272,6 +9430,10 @@ async def run_all_tests():
         test_save_browser_assistant_message_swallows_exception,
     )
     await r.record_async("save_credential_ref_user", test_save_browser_credential_ref_message_user_role)
+    await r.record_async(
+        "save_credential_ref_reports_failure",
+        test_save_browser_credential_ref_message_reports_backend_failure,
+    )
 
     await r.record_async("list_session_files_no_api_key", test_list_session_files_no_api_key)
     await r.record_async("list_session_files_success", test_list_session_files_success)
