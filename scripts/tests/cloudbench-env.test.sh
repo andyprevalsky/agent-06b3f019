@@ -61,24 +61,6 @@ if cloudbench_retry_command 3 0 always_fail >/dev/null 2>&1; then
 fi
 [ "$retry_attempts" -eq 3 ] || fail "a permanent failure must exhaust its retry budget"
 
-machine_states="$TMP_ROOT/machine-states"
-printf 'created\ncreated\nstopped\n' > "$machine_states"
-read_machine_state() {
-  local state
-  state="$(head -1 "$machine_states")"
-  tail -n +2 "$machine_states" > "$machine_states.next"
-  mv "$machine_states.next" "$machine_states"
-  printf '%s\n' "$state"
-}
-cloudbench_wait_machine_startable read_machine_state machine-1 3 0 ||
-  fail "a provisioning clone must wait until it becomes stopped/startable"
-[ ! -s "$machine_states" ] || fail "the startable-state wait must consume the transition sequence"
-
-printf 'created\ndestroyed\n' > "$machine_states"
-if cloudbench_wait_machine_startable read_machine_state machine-2 3 0 >/dev/null 2>&1; then
-  fail "a destroyed provisioning clone must fail closed"
-fi
-
 cloudbench_validate_fresh_clone_id clone-2 warm-1 clone-1 ||
   fail "a unique non-source clone id must be accepted"
 if cloudbench_validate_fresh_clone_id warm-1 warm-1 clone-1; then
@@ -196,9 +178,16 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'activate_machine_environment "$machine_id" "$role"' \
   "environment activation must preserve role-specific concurrency checks"
-require_text "$ROOT_DIR/scripts/run-bench-fleet" \
-  'cloudbench_wait_machine_startable fleet_machine_state "$cid"' \
-  "fleet children must not launch while a fresh clone is still in created state"
+if grep -Fq -- 'cloudbench_wait_machine_startable fleet_machine_state "$cid"' \
+  "$ROOT_DIR/scripts/run-bench-fleet"; then
+  fail "fleet controller must delegate created-clone storage/start lifecycle to run-bench-cloud"
+fi
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'if machine_storage_ready "$mid"; then' \
+  "cloud child must wait for clone storage before requesting start"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'request_machine_start "$mid"' \
+  "cloud child must own the transition from created to started"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   '--name "$target_name"' \
   "fresh fleet clones must use an exact unique name for id resolution"

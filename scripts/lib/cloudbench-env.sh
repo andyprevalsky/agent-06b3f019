@@ -99,26 +99,6 @@ cloudbench_retry_command() {
   done
 }
 
-cloudbench_wait_machine_startable() {
-  local state_reader="$1" machine_id="$2" max_attempts="$3" retry_delay_seconds="$4"
-  local attempt state
-
-  for attempt in $(seq 1 "$max_attempts"); do
-    state="$($state_reader "$machine_id" 2>/dev/null || true)"
-    case "$state" in
-      started|stopped) return 0 ;;
-      destroyed|destroying)
-        echo "Machine $machine_id became unavailable while provisioning (state=$state)" >&2
-        return 1
-        ;;
-    esac
-    [ "$attempt" -ge "$max_attempts" ] || sleep "$retry_delay_seconds"
-  done
-
-  echo "Machine $machine_id did not become startable (last_state=${state:-unknown})" >&2
-  return 1
-}
-
 cloudbench_validate_fresh_clone_id() {
   local candidate="$1" source_id="$2"
   shift 2
