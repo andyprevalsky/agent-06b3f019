@@ -1,8 +1,10 @@
 #!/usr/bin/env tsx
 
 import {
+  syncCookieCredentials,
   syncIntegrationCredentials,
   syncPasskeyCredentials,
+  type CookieModel,
   type IntegrationModel,
 } from '../../../scripts/seed-local-credentials';
 
@@ -169,6 +171,52 @@ test('syncIntegrationCredentials preserves a local id for the same user and name
   assert(where.userId_name?.name === remote.name, 'expected compound integration name selector');
   const update = captured?.update as Record<string, unknown>;
   assert(!('id' in update), 'expected update not to rewrite local primary key');
+});
+
+test('syncCookieCredentials preserves a local id for the same compound cookie key', async () => {
+  const now = new Date('2026-07-12T00:00:00Z');
+  const remoteCookie = {
+    id: 'remote-cookie-id',
+    userId: 'seed-user',
+    domain: '.example.com',
+    name: 'session',
+    path: '/',
+    value: 'fresh-value',
+    expiresUtc: null,
+    isSecure: true,
+    isHttpOnly: true,
+    browserSource: 'chrome',
+    syncedAt: now,
+    creationUtc: null,
+    hasExpires: true,
+    isPersistent: true,
+    lastAccessUtc: null,
+    lastUpdateUtc: null,
+    priority: 1,
+    sameSite: -1,
+    sourcePort: -1,
+    sourceScheme: 0,
+    topFrameSiteKey: '',
+    browserProfile: 'Default',
+  };
+  let captured: Record<string, unknown> | undefined;
+  const localModel: CookieModel = {
+    upsert: async (args) => {
+      captured = args;
+      return { id: 'local-cookie-id' };
+    },
+  };
+
+  const count = await syncCookieCredentials(localModel, [remoteCookie]);
+
+  assert(count === 1, `expected one synced cookie, got ${count}`);
+  const where = captured?.where as Record<string, Record<string, unknown>>;
+  const compound = where.userId_domain_name_path_topFrameSiteKey_browserSource_browserProfile;
+  assert(compound.userId === remoteCookie.userId, 'expected compound cookie user id selector');
+  assert(compound.domain === remoteCookie.domain, 'expected compound cookie domain selector');
+  assert(compound.name === remoteCookie.name, 'expected compound cookie name selector');
+  const update = captured?.update as Record<string, unknown>;
+  assert(!('id' in update), 'expected update not to rewrite local cookie primary key');
 });
 
 (async () => {

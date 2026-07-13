@@ -12,7 +12,11 @@ import { PrismaClient } from '@prisma/client';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import dotenv from 'dotenv';
-import { syncIntegrationCredentials, syncPasskeyCredentials } from './seed-local-credentials';
+import {
+  syncCookieCredentials,
+  syncIntegrationCredentials,
+  syncPasskeyCredentials,
+} from './seed-local-credentials';
 
 // Parse .env file directly to get remote DB URL
 // (process.env.DATABASE_URL is already overridden to local by run.sh)
@@ -122,20 +126,9 @@ async function syncBrowserState(): Promise<void> {
   // ── Cookies ──
   await syncTable('Cookies', async () => {
     const cookies = await remote.cookie.findMany({ where: { userId: DEV_USER_ID } });
-
-    for (let i = 0; i < cookies.length; i += 500) {
-      const batch = cookies.slice(i, i + 500);
-      await Promise.all(
-        batch.map((c) => {
-          const { id, ...rest } = c;
-          return local.cookie.upsert({ where: { id }, create: c as any, update: rest as any });
-        })
-      );
-      if (cookies.length > 500 && i + 500 < cookies.length) {
-        process.stdout.write(`     ${Math.min(i + 500, cookies.length)}/${cookies.length}...\r`);
-      }
-    }
-    return cookies.length;
+    return syncCookieCredentials(local.cookie, cookies, 500, (synced, total) => {
+      process.stdout.write(`     ${synced}/${total}...\r`);
+    });
   });
 
   // ── LocalStorage Origins ──

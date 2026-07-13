@@ -1,4 +1,4 @@
-import type { Integration, PasskeyCredential, Prisma } from '@prisma/client';
+import type { Cookie, Integration, PasskeyCredential, Prisma } from '@prisma/client';
 
 type PasskeyRecord = PasskeyCredential;
 
@@ -28,6 +28,45 @@ export async function syncIntegrationCredentials(
     syncedIds.push(synced.id);
   }
   return syncedIds;
+}
+
+export type CookieModel = {
+  upsert(args: Prisma.CookieUpsertArgs): Promise<unknown>;
+};
+
+export async function syncCookieCredentials(
+  localCookie: CookieModel,
+  cookies: Cookie[],
+  batchSize = 500,
+  onBatch?: (synced: number, total: number) => void
+): Promise<number> {
+  for (let i = 0; i < cookies.length; i += batchSize) {
+    const batch = cookies.slice(i, i + batchSize);
+    await Promise.all(
+      batch.map((cookie) => {
+        const { id, ...updateData } = cookie;
+        void id;
+        return localCookie.upsert({
+          where: {
+            userId_domain_name_path_topFrameSiteKey_browserSource_browserProfile: {
+              userId: cookie.userId,
+              domain: cookie.domain,
+              name: cookie.name,
+              path: cookie.path,
+              topFrameSiteKey: cookie.topFrameSiteKey,
+              browserSource: cookie.browserSource,
+              browserProfile: cookie.browserProfile,
+            },
+          },
+          create: cookie,
+          update: updateData,
+        });
+      })
+    );
+    const synced = Math.min(i + batch.length, cookies.length);
+    if (synced < cookies.length) onBatch?.(synced, cookies.length);
+  }
+  return cookies.length;
 }
 
 type PasskeyCredentialModel = {
