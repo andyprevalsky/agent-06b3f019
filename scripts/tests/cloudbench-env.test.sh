@@ -670,6 +670,18 @@ require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'cloudbench_wait_machine_startable fleet_machine_state "$cid"' \
   "fleet children must not launch while a fresh clone is still in created state"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'wait_seconds="${CLOUDBENCH_APP_ENV_LOCK_WAIT_SECONDS:-1800}"' \
+  "fleet environment refreshes must allow legitimate long-running setup owners"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'wait_seconds="${CLOUDBENCH_APP_ENV_LOCK_WAIT_SECONDS:-1800}"' \
+  "direct environment refreshes must allow legitimate long-running setup owners"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'Timed out after ${wait_seconds}s waiting for shared benchmark app environment lock.' \
+  "fleet environment lock waits must remain bounded and observable"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'Timed out after ${wait_seconds}s waiting for shared benchmark app environment lock.' \
+  "direct environment lock waits must remain bounded and observable"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   '--name "$target_name"' \
   "fresh fleet clones must use an exact unique name for id resolution"
 if grep -Fq -- 'FLY secrets deploy' "$ROOT_DIR/scripts/run-bench-cloud"; then
