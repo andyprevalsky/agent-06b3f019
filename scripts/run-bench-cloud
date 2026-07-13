@@ -461,7 +461,7 @@ wait_for_activation_image() {  # wait_for_activation_image <machine_id> <image_r
             return 0
         fi
         case "$state" in
-            stopped|created|pending|stopping) ;;
+            stopped|created|pending|replacing|stopping) ;;
             *) return 1 ;;
         esac
         [ "$attempt" -lt "$attempts" ] && sleep "$retry_delay"

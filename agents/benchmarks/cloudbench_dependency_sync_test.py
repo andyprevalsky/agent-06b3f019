@@ -677,7 +677,7 @@ FLY() {{
     printf '%s' "$list_call" > "$LIST_CALLS_FILE"
     case "$list_call" in
       1) state=stopped; image=previous ;;
-      2) state=created; image=current ;;
+      2) state=replacing; image=current ;;
       *) state=stopped; image=current ;;
     esac
     printf '[{{"id":"machine-1","state":"%s","config":{{"image":"registry.fly.io/bench:%s@sha256:abc"}}}}]\n' "$state" "$image"
