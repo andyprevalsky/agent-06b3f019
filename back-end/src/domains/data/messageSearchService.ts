@@ -1,0 +1,68 @@
+import { buildMessageConversationMatch } from './format.messages';
+import * as grepRepo from './grepRepo';
+import { findMessageContextRows, searchConversationMatchRows } from './messageContextRepo';
+import {
+  DATA_SOURCE_CONFIGS,
+  type GrepMatch,
+  type ValidSource,
+  type ValidatedGrepInput,
+} from './types';
+
+export async function searchMessageSource(params: {
+  userId: string;
+  input: ValidatedGrepInput;
+  source: ValidSource;
+}): Promise<{ total: number; matches: GrepMatch[] }> {
+  const { userId, input, source } = params;
+  let personId: string | undefined;
+  const messageFilters = input.filters.messages;
+  if (messageFilters?.person !== undefined) {
+    const resolved = await grepRepo.resolvePersonId(userId, messageFilters.person);
+    if (resolved === null) return { total: 0, matches: [] };
+    personId = resolved;
+  }
+  const channel =
+    source === 'messages' || source === 'gmail'
+      ? undefined
+      : (DATA_SOURCE_CONFIGS[source].channel ?? undefined);
+  const [total, rows] = await Promise.all([
+    grepRepo.countMessageGrepRows({
+      userId,
+      pattern: input.dbPattern,
+      caseInsensitive: input.caseInsensitive,
+      personId,
+      since: messageFilters?.since,
+      channel,
+    }),
+    searchConversationMatchRows({
+      userId,
+      pattern: input.dbPattern,
+      caseInsensitive: input.caseInsensitive,
+      limit: input.headLimit,
+      offset: input.offset,
+      personId,
+      since: messageFilters?.since,
+      channel,
+    }),
+  ]);
+  const contextRows = await findMessageContextRows({
+    userId,
+    anchorIds: rows.map((row) => row.id),
+    before: input.contextBefore,
+    after: input.contextAfter,
+    since: messageFilters?.since,
+    channel,
+  });
+  const contextByAnchor = new Map<string, typeof contextRows>();
+  for (const row of contextRows) {
+    const current = contextByAnchor.get(row.anchorId) ?? [];
+    current.push(row);
+    contextByAnchor.set(row.anchorId, current);
+  }
+  return {
+    total,
+    matches: rows.map((row) =>
+      buildMessageConversationMatch(row, contextByAnchor.get(row.id) ?? [], input)
+    ),
+  };
+}

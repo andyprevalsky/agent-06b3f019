@@ -516,6 +516,52 @@ async function testInjectLocalStorage_sessionNotFound() {
   assertStatus(res.status, 404, res.data);
 }
 
+// ==================== POST /api/browser-session/task/:taskId/viewport ====================
+
+async function testResizeViewport_noAuth() {
+  const res = await request(`${BASE_URL}/api/browser-session/task/nonexistent/viewport`, {
+    method: 'POST',
+    body: JSON.stringify({ width: 1180, height: 720 }),
+  });
+  assertStatus(res.status, 401, res.data);
+}
+
+async function testResizeViewport_invalidDimensions() {
+  const res = await request(`${BASE_URL}/api/browser-session/task/nonexistent/viewport`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({ width: 0, height: 720 }),
+  });
+  assertStatus(res.status, 400, res.data);
+}
+
+async function testResizeViewport_nullBody() {
+  const res = await request(`${BASE_URL}/api/browser-session/task/nonexistent/viewport`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: 'null',
+  });
+  assertStatus(res.status, 400, res.data);
+}
+
+async function testResizeViewport_acceptsNarrowDimensions() {
+  const res = await request(`${BASE_URL}/api/browser-session/task/nonexistent/viewport`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({ width: 120, height: 80 }),
+  });
+  assertStatus(res.status, 404, res.data);
+}
+
+async function testResizeViewport_sessionNotFound() {
+  const res = await request(`${BASE_URL}/api/browser-session/task/nonexistent/viewport`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({ width: 1180, height: 720 }),
+  });
+  assertStatus(res.status, 404, res.data);
+}
+
 // ==================== INVARIANTS ====================
 
 async function testIdempotency_taskNotFound() {
@@ -623,6 +669,18 @@ async function runAll() {
       name: 'POST /inject-localStorage -- session not found -> 404',
       fn: testInjectLocalStorage_sessionNotFound,
     },
+    // POST /task/:taskId/viewport
+    { name: 'POST /viewport -- no auth -> 401', fn: testResizeViewport_noAuth },
+    {
+      name: 'POST /viewport -- invalid dimensions -> 400',
+      fn: testResizeViewport_invalidDimensions,
+    },
+    { name: 'POST /viewport -- null body -> 400', fn: testResizeViewport_nullBody },
+    {
+      name: 'POST /viewport -- narrow positive dimensions are valid',
+      fn: testResizeViewport_acceptsNarrowDimensions,
+    },
+    { name: 'POST /viewport -- session not found -> 404', fn: testResizeViewport_sessionNotFound },
     // invariants
     { name: 'idempotency -- task not found same on repeat', fn: testIdempotency_taskNotFound },
     {

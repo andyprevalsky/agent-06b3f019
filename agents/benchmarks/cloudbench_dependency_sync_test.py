@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -29,7 +30,10 @@ def _write_manifests(root: Path, *, lock: str = "same", requirements: str = "sam
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{}\n")
-    (root / "package-lock.json").write_text(lock)
+    (root / "back-end/package-lock.json").write_text(lock)
+    cloudbench_env = root / "scripts/lib/cloudbench-env.sh"
+    cloudbench_env.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(ROOT / "scripts/lib/cloudbench-env.sh", cloudbench_env)
     req = root / "agents/requirements.txt"
     req.parent.mkdir(parents=True, exist_ok=True)
     req.write_text(requirements)

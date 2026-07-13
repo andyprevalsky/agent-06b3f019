@@ -61,15 +61,18 @@ export const SYSTEM_PROMPT_DYNAMIC_BOUNDARY = '\n__SYSTEM_PROMPT_DYNAMIC_BOUNDAR
  *   The cache-stable portion of the system prompt. This is what gets the
  *   `cache_control: ephemeral` marker on Anthropic. MUST NOT contain
  *   per-call dynamic state (current datetime, agent hierarchy, etc.) — that
- *   lives in `dynamicSuffix` or, better, in a separate trailing user-role
- *   message (see SMS supervisor for the recommended pattern).
+ *   lives in `dynamicSuffix` or, for runtime state, in a non-persisted tool
+ *   result after the current user message (see the SMS supervisor pattern).
  * @param dynamicSuffix
  *   Optional per-call portion appended after the boundary. Use sparingly —
  *   on the claudeAuth path this is *not* cached. Most call sites should
- *   leave this empty and inject dynamic state as a separate user message
- *   instead.
+ *   leave this empty and inject dynamic state after the stable conversation
+ *   prefix instead.
  */
-export function markCacheable(staticPrefix: string, dynamicSuffix?: string): CompletionMessage {
+export function markCacheable(
+  staticPrefix: string,
+  dynamicSuffix?: string
+): CompletionMessage & { role: 'system'; content: string } {
   const trimmedStatic = staticPrefix.trimEnd();
   const trimmedDynamic = dynamicSuffix?.trimStart() ?? '';
 

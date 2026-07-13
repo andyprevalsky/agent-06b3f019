@@ -165,9 +165,10 @@ runCheck(
   'grep grounding sentence missing from the SMS overlay'
 );
 runCheck(
-  'block 3 states attempt_completion sends the SMS',
-  SMS_SURFACE_OVERLAY.includes('attempt_completion both sends your SMS'),
-  'SMS completion contract missing from the overlay'
+  'block 3 separates send_user_message from attempt_completion',
+  SMS_SURFACE_OVERLAY.includes('attempt_completion sends nothing') &&
+    SMS_SURFACE_OVERLAY.includes('Sending a message does not end your run'),
+  'SMS send/completion contract missing from the overlay'
 );
 
 // The SMS prompt must NOT contain main-agent phase/grader prose.

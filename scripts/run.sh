@@ -1097,7 +1097,10 @@ export FAST_MODE_ANTHROPIC_PROXY_URL="$PUBLIC_BASE_URL/anthropic-proxy"
 export FAST_MODE_CODEX_PROXY_URL="$PUBLIC_BASE_URL/codex-proxy"
 
 if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
-    BENCHMARK_LOG_DIR="$PWD/$RUN_CONTEXT_DIR/logs"
+    case "$RUN_CONTEXT_DIR" in
+        /*) BENCHMARK_LOG_DIR="$RUN_CONTEXT_DIR/logs" ;;
+        *) BENCHMARK_LOG_DIR="$PWD/$RUN_CONTEXT_DIR/logs" ;;
+    esac
     mkdir -p "$BENCHMARK_LOG_DIR"
     export BACKEND_LOG_FILE="$BENCHMARK_LOG_DIR/backend.log"
     export FRONTEND_LOG_FILE="$BENCHMARK_LOG_DIR/frontend.log"
@@ -1215,8 +1218,13 @@ while true; do
         pid="${PIDS[$i]}"
         if ! kill -0 "$pid" 2>/dev/null; then
             # Process is gone — get its exit code
-            wait "$pid" 2>/dev/null
-            code=$?
+            # `run.sh` uses `set -e`; a bare non-zero `wait` would trigger the
+            # EXIT trap before we can identify the failed service and code.
+            if wait "$pid" 2>/dev/null; then
+                code=0
+            else
+                code=$?
+            fi
             name="${NAMES[$i]}"
             if [ "$name" = "ngrok" ]; then
                 echo "⚠️  ngrok (PID $pid) exited with code $code; keeping local services running."

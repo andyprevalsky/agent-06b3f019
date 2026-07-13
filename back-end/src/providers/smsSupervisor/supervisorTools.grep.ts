@@ -76,6 +76,14 @@ function mergeFanOutResults(results: UserDataGrepResult[], limit: number): UserD
     sources: results.flatMap((r) => r.sources),
     applied_limit: limit,
     applied_offset: results[0].applied_offset,
+    returned: matches.length,
+    has_more: totalMatches > matches.length || results.some((r) => r.has_more),
+    next_offset:
+      totalMatches > matches.length || results.some((r) => r.has_more)
+        ? results[0].applied_offset + matches.length
+        : null,
+    display_order: 'newest_first',
+    context_unit: 'mixed',
     ...(messages.length === results.length && messages.length > 0
       ? { message: messages.join(' ') }
       : {}),

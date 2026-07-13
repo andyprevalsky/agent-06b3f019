@@ -193,7 +193,8 @@ export function buildStartNewAgentFixture(
     reasoning: 'spawn agent then send sms',
     tool_calls: [
       { tool: 'start_new_agent', arguments: { goal, budget_dollars: budgetDollars } },
-      { tool: 'attempt_completion', arguments: { message: replyText } },
+      { tool: 'send_user_message', arguments: { message: replyText } },
+      { tool: 'attempt_completion', arguments: {} },
     ],
     ...(delayMs > 0 ? { delay_ms: delayMs } : {}),
   });
@@ -231,7 +232,8 @@ export function buildGrepFixture(params: {
           since: null,
         },
       },
-      { tool: 'attempt_completion', arguments: { message: params.replyText } },
+      { tool: 'send_user_message', arguments: { message: params.replyText } },
+      { tool: 'attempt_completion', arguments: {} },
     ],
   });
 }
@@ -244,8 +246,8 @@ export function fixtureSmsReply(): string | null {
   const parsed = JSON.parse(raw) as {
     tool_calls?: { tool?: string; arguments?: { message?: unknown } }[];
   };
-  const completion = parsed.tool_calls?.find((tc) => tc.tool === 'attempt_completion');
-  return typeof completion?.arguments?.message === 'string' ? completion.arguments.message : null;
+  const send = parsed.tool_calls?.find((tc) => tc.tool === 'send_user_message');
+  return typeof send?.arguments?.message === 'string' ? send.arguments.message : null;
 }
 
 // ==================== CLEANUP ====================

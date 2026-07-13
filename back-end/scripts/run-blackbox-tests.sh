@@ -12,7 +12,7 @@ cd "$ROOT_DIR"
 source scripts/lib/workspace-env.sh
 normalize_conductor_workspace_env
 cd "$BACKEND_DIR"
-
+source "$SCRIPT_DIR/local-db-container.sh"
 RUN_ID="${BLACKBOX_TEST_RUN_ID:-${CONTRACT_TEST_RUN_ID:-$(date +%s)-$$-$RANDOM}}"
 export BLACKBOX_TEST_RUN_ID="$RUN_ID"
 export CONTRACT_TEST_RUN_ID="$RUN_ID"
@@ -57,7 +57,8 @@ done
 # We must run this whether or not CONDUCTOR_PORT/CONDUCTOR_WORKSPACE_NAME are
 # set in the caller's env, because back-end/.env's DATABASE_URL points at
 # prod Supabase by default; silently inheriting it for tests is a footgun.
-WORKSPACE_HINT="${CONDUCTOR_WORKSPACE_NAME:-$(basename "$(cd "$BACKEND_DIR/.." && pwd)")}"
+WORKTREE_HINT="$(basename "$ROOT_DIR")"
+WORKSPACE_HINT="${CONDUCTOR_WORKSPACE_NAME:-$WORKTREE_HINT}"
 LOCAL_DB_PORT=""
 if [[ -n "${CONDUCTOR_PORT:-}" ]]; then
   LOCAL_DB_PORT=$(($CONDUCTOR_PORT + 5))
@@ -66,6 +67,7 @@ DB_CONTAINER="victoria-db-${WORKSPACE_HINT}"
 DB_FOUND=false
 STACK_DB_EXPECTED=false
 SELECTED_DB_URL=""
+ISOLATED_DB_RESOLVED=false
 
 # Managed existing-backend callers (for example, run-coverage.sh) know the
 # exact database used by the backend they launched. Prefer that explicit
@@ -114,17 +116,20 @@ if ! $STACK_DB_EXPECTED && [[ "$USE_EXISTING_BACKEND" == "1" && -f "$STACK_MANIF
     fi
   fi
 fi
-
 # Try Docker container first
 if ! $STACK_DB_EXPECTED && docker info >/dev/null 2>&1; then
   # Prefer the workspace-named container; fall back to the only running
   # victoria-db-* container if there's exactly one (covers cases where the
   # caller hasn't exported CONDUCTOR_WORKSPACE_NAME).
-  if ! docker inspect "$DB_CONTAINER" >/dev/null 2>&1; then
-    CANDIDATES=$(docker ps --filter "name=^victoria-db-" --format "{{.Names}}")
-    CANDIDATE_COUNT=$(echo "$CANDIDATES" | grep -c . || true)
-    if [[ "$CANDIDATE_COUNT" == "1" ]]; then
-      DB_CONTAINER="$CANDIDATES"
+  if RESOLVED_CONTAINER="$(resolve_local_db_container "$WORKSPACE_HINT" "$WORKTREE_HINT")"; then
+    DB_CONTAINER="$RESOLVED_CONTAINER"
+    ISOLATED_DB_RESOLVED=true
+  else
+    if ! system_db_fallback_is_safe; then
+      echo "❌ No ready Postgres container owned by this worktree." >&2
+      echo "   Tried: victoria-db-$WORKSPACE_HINT and victoria-db-$WORKTREE_HINT" >&2
+      echo "   Refusing shared system Postgres while other workspace DBs are active." >&2
+      exit 1
     fi
   fi
 
@@ -135,6 +140,10 @@ if ! $STACK_DB_EXPECTED && docker info >/dev/null 2>&1; then
   if [[ -n "$LOCAL_DB_PORT" ]] && docker exec "$DB_CONTAINER" pg_isready -U postgres -q 2>/dev/null; then
     DB_FOUND=true
     echo "Using local Postgres (Docker container=$DB_CONTAINER) at localhost:$LOCAL_DB_PORT"
+  fi
+  if $ISOLATED_DB_RESOLVED && ! $DB_FOUND; then
+    echo "❌ Owned Postgres container $DB_CONTAINER is not reachable on a mapped port." >&2
+    exit 1
   fi
 fi
 
@@ -263,7 +272,7 @@ export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
 export FAST_MODE_ANTHROPIC_PROXY_URL="${BLACKBOX_FAST_MODE_ANTHROPIC_PROXY_URL:-}"
 export FAST_MODE_CODEX_PROXY_URL="${BLACKBOX_FAST_MODE_CODEX_PROXY_URL:-}"
 if [[ -z "${BLACKBOX_SMS_SUPERVISOR_RESPONSE_JSON:-}" ]]; then
-  export BLACKBOX_SMS_SUPERVISOR_RESPONSE_JSON='{"reasoning":"blackbox smoke fixture","tool_calls":[{"tool":"attempt_completion","arguments":{"message":"Blackbox SMS smoke reply"}}]}'
+  export BLACKBOX_SMS_SUPERVISOR_RESPONSE_JSON='{"reasoning":"blackbox smoke fixture","tool_calls":[{"tool":"send_user_message","arguments":{"message":"Blackbox SMS smoke reply"}},{"tool":"attempt_completion","arguments":{}}]}'
 fi
 
 cat >"$MANIFEST_PATH" <<EOF

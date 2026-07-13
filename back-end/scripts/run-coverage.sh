@@ -22,6 +22,7 @@ ROOT_DIR="$(cd "$BACKEND_DIR/.." && pwd)"
 cd "$ROOT_DIR"
 source scripts/lib/workspace-env.sh
 normalize_conductor_workspace_env
+source "$SCRIPT_DIR/local-db-container.sh"
 cd "$BACKEND_DIR"
 
 REPORT_ONLY=0
@@ -78,20 +79,26 @@ export CONTRACT_TEST_ARTIFACT_DIR="$BLACKBOX_ARTIFACT_DIR"
 # Keep this in sync with run-blackbox-tests.sh so the instrumented backend and
 # test processes read/write the same database even when Conductor env vars are
 # not exported in the shell.
-WORKSPACE_HINT="${CONDUCTOR_WORKSPACE_NAME:-$(basename "$(cd "$BACKEND_DIR/.." && pwd)")}"
+WORKTREE_HINT="$(basename "$ROOT_DIR")"
+WORKSPACE_HINT="${CONDUCTOR_WORKSPACE_NAME:-$WORKTREE_HINT}"
 LOCAL_DB_PORT=""
 if [[ -n "${CONDUCTOR_PORT:-}" ]]; then
   LOCAL_DB_PORT=$(($CONDUCTOR_PORT + 5))
 fi
 DB_CONTAINER="victoria-db-${WORKSPACE_HINT}"
 DB_FOUND=false
+ISOLATED_DB_RESOLVED=false
 
 if docker info >/dev/null 2>&1; then
-  if ! docker inspect "$DB_CONTAINER" >/dev/null 2>&1; then
-    CANDIDATES=$(docker ps --filter "name=^victoria-db-" --format "{{.Names}}")
-    CANDIDATE_COUNT=$(echo "$CANDIDATES" | grep -c . || true)
-    if [[ "$CANDIDATE_COUNT" == "1" ]]; then
-      DB_CONTAINER="$CANDIDATES"
+  if RESOLVED_CONTAINER="$(resolve_local_db_container "$WORKSPACE_HINT" "$WORKTREE_HINT")"; then
+    DB_CONTAINER="$RESOLVED_CONTAINER"
+    ISOLATED_DB_RESOLVED=true
+  else
+    if ! system_db_fallback_is_safe; then
+      echo "❌ No ready Postgres container owned by this worktree." >&2
+      echo "   Tried: victoria-db-$WORKSPACE_HINT and victoria-db-$WORKTREE_HINT" >&2
+      echo "   Refusing shared system Postgres while other workspace DBs are active." >&2
+      exit 1
     fi
   fi
 
@@ -102,6 +109,10 @@ if docker info >/dev/null 2>&1; then
   if [[ -n "$LOCAL_DB_PORT" ]] && docker exec "$DB_CONTAINER" pg_isready -U postgres -q 2>/dev/null; then
     DB_FOUND=true
     echo "Using local Postgres (Docker container=$DB_CONTAINER) at localhost:$LOCAL_DB_PORT"
+  fi
+  if $ISOLATED_DB_RESOLVED && ! $DB_FOUND; then
+    echo "❌ Owned Postgres container $DB_CONTAINER is not reachable on a mapped port." >&2
+    exit 1
   fi
 fi
 
