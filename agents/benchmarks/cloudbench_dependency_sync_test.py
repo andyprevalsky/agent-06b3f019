@@ -660,6 +660,8 @@ def test_image_activation_accepts_fly_cli_false_negative_after_update(
     function_end = cloud.index("\n}\n", activation_start) + 3
     activation_functions = cloud[function_start:function_end]
     calls_file = tmp_path / "calls"
+    list_calls_file = tmp_path / "list-calls"
+    list_calls_file.write_text("0")
     image_ref = "registry.fly.io/bench:current"
 
     result = subprocess.run(
@@ -671,7 +673,14 @@ APP=bench
 assert_app_environment_lock_ownership() {{ return 0; }}
 FLY() {{
   if [ "$1 $2" = "machines list" ]; then
-    printf '[{{"id":"machine-1","state":"stopped","config":{{"image":"{image_ref}@sha256:abc"}}}}]\n'
+    list_call=$(( $(cat "$LIST_CALLS_FILE") + 1 ))
+    printf '%s' "$list_call" > "$LIST_CALLS_FILE"
+    case "$list_call" in
+      1) state=stopped; image=previous ;;
+      2) state=created; image=current ;;
+      *) state=stopped; image=current ;;
+    esac
+    printf '[{{"id":"machine-1","state":"%s","config":{{"image":"registry.fly.io/bench:%s@sha256:abc"}}}}]\n' "$state" "$image"
     return 0
   fi
   printf '%s\n' "$*" >> "$CALLS_FILE"
@@ -682,7 +691,11 @@ FLY() {{
 activate_machine_environment machine-1 warm {image_ref}
 """,
         ],
-        env={"CALLS_FILE": str(calls_file)},
+        env={
+            "CALLS_FILE": str(calls_file),
+            "LIST_CALLS_FILE": str(list_calls_file),
+            "CLOUDBENCH_IMAGE_SETTLE_RETRY_DELAY": "0",
+        },
         text=True,
         capture_output=True,
         check=False,
@@ -690,6 +703,7 @@ activate_machine_environment machine-1 warm {image_ref}
 
     assert result.returncode == 0, result.stderr
     assert len(calls_file.read_text().splitlines()) == 1
+    assert int(list_calls_file.read_text()) >= 4
     assert "provider confirms desired image" in result.stdout
 
 
