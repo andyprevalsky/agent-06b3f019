@@ -195,6 +195,17 @@ export interface GrepMatch {
   role?: 'SYSTEM' | 'ASSISTANT' | 'USER' | 'TOOL';
   location: GrepLocation;
   content: string;
+  records?: GrepMessageRecord[];
+}
+
+export interface GrepMessageRecord {
+  message_id: string;
+  channel: string;
+  from: string;
+  to: string;
+  timestamp: string;
+  message: string;
+  relation: 'before' | 'match' | 'after';
 }
 
 export interface GrepResult {
@@ -205,6 +216,11 @@ export interface GrepResult {
   sources: ValidSource[];
   applied_limit: number;
   applied_offset: number;
+  returned: number;
+  has_more: boolean;
+  next_offset: number | null;
+  display_order: 'oldest_first' | 'newest_first';
+  context_unit: 'message_record' | 'logical_line' | 'mixed';
   summaries?: Partial<Record<ValidSource, unknown>>;
   message?: string;
 }

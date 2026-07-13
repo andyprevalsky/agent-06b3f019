@@ -31,9 +31,9 @@ const log = createLogger('SmsContext');
 // site (supervisorHandler.ts) wraps the result in `markCacheable()`, which
 // appends one trailing boundary. claudeAuth.ts (buildAnthropicBody) then marks
 // each non-empty section a globally-cached system block. Per-SMS dynamic state
-// (datetime, hierarchy, attention requests, recent activity) lives in
-// `contextUserMessage` — a separate trailing user-role message — so it never
-// invalidates any cached block.
+// (datetime, hierarchy, attention requests, recent activity) is returned as
+// `contextUserMessage`, then injected by the handler as a run-local
+// get_environment tool result after the newest inbound SMS.
 
 // Tool names whose messages are visible to users in the frontend
 const VISIBLE_TOOL_NAMES = [
@@ -115,19 +115,22 @@ export interface UserProfileContext {
 export interface SmsContext {
   systemPrompt: string;
   /**
-   * Volatile per-SMS state (agent hierarchy, pending attention requests, recent
-   * visible messages, current datetime). Injected as a `user`-role message
-   * BEFORE the inbound user message so the static system prompt stays
-   * cache-stable across SMSes within a 5-min Anthropic ephemeral window.
+   * Volatile per-SMS state (agent hierarchy, pending attention requests,
+   * recent visible messages, current datetime). The handler injects this as a
+   * run-local get_environment tool result after the newest inbound SMS.
    */
   contextUserMessage: string;
   sessionHistory: CompletionMessage[];
+  pendingAttentionRequestIds: string[];
 }
 
 /**
  * Build the full SMS supervisor context for a user.
  */
-export async function buildSmsContext(userId: string): Promise<SmsContext> {
+export async function buildSmsContext(
+  userId: string,
+  options: { excludeInboundSeq?: number } = {}
+): Promise<SmsContext> {
   const startTime = Date.now();
 
   log.info('[SmsContext] Building context', { userId });
@@ -186,8 +189,8 @@ export async function buildSmsContext(userId: string): Promise<SmsContext> {
   const systemPrompt = assembleSystemPrompt({ userContextSection });
 
   // DYNAMIC: hierarchy, attention requests, recent activity, current datetime —
-  // these change on every SMS and live in a trailing user message so they
-  // don't invalidate the cached system prefix.
+  // these change on every SMS and are injected after the newest inbound SMS
+  // as the synthetic get_environment result.
   const hierarchySection = formatAgentHierarchy(rootAgents);
   const attentionSection = formatAttentionRequests(attentionRequests);
   const messagesSection = formatVisibleMessages(visibleMessages, rootAgents);
@@ -217,12 +220,14 @@ export async function buildSmsContext(userId: string): Promise<SmsContext> {
   const sessionMessages: CompletionMessage[] = Array.isArray(parsedSessionMessages)
     ? parsedSessionMessages
         .filter(
-          (m): m is { role: 'user' | 'assistant'; content: string } =>
+          (m): m is { role: 'user' | 'assistant'; content: string; inboundSeq?: number } =>
             typeof m === 'object' &&
             m !== null &&
             ((m as Record<string, unknown>).role === 'user' ||
               (m as Record<string, unknown>).role === 'assistant') &&
-            typeof (m as Record<string, unknown>).content === 'string'
+            typeof (m as Record<string, unknown>).content === 'string' &&
+            (options.excludeInboundSeq === undefined ||
+              (m as Record<string, unknown>).inboundSeq !== options.excludeInboundSeq)
         )
         .map((entry) => ({ role: entry.role, content: entry.content }))
     : [];
@@ -242,7 +247,12 @@ export async function buildSmsContext(userId: string): Promise<SmsContext> {
     durationMs: totalDurationMs,
   });
 
-  return { systemPrompt, contextUserMessage, sessionHistory: sessionMessages };
+  return {
+    systemPrompt,
+    contextUserMessage,
+    sessionHistory: sessionMessages,
+    pendingAttentionRequestIds: attentionRequests.map((request) => request.id),
+  };
 }
 
 // ============================================
@@ -609,14 +619,15 @@ Recent Activity
 
 # How to Respond
 
-Think step by step. Use tools as needed to gather information or take actions. When you are done, call attempt_completion with the SMS text to send to the user.
+Think step by step. Use tools as needed to gather information or take actions. Use send_user_message whenever the user should receive an SMS. Sending a message does not end your run, so continue working and send a later result when needed. When the work is actually complete, call argument-free attempt_completion().
 
 Parallelize as many tool calls per turn as reasonable so you respond quickly with grounded, accurate answers.
 
 - Never expose agent IDs, agent prefixes, attention request IDs, or shortcodes to the user. Use internal IDs only for tool calls.
 - Resolve natural approval language against pending requests. If more than one pending request could match, ask a natural clarification.
 - Be conversational but concise, this is texting, not email
-- Calling attempt_completion both sends your SMS and commits every write-tool call you made this turn. There is no separate commit step and no retraction after you call it.`;
+- attempt_completion sends nothing and accepts no message. The runtime rejects it unless this run has already successfully sent at least one SMS with send_user_message.
+- Do not send a placeholder such as "I'll check now" and then stop. If you send a progress message, keep working in the same run and send the substantive result before attempt_completion.`;
 
 /**
  * Compose the three-block SMS supervisor system prompt:
