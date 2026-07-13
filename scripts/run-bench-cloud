@@ -1485,7 +1485,8 @@ echo "   tasks=[$TASKS_DISPLAY] ref=${BENCH_REF:-<HEAD>} simulate=$BENCH_SIMULAT
 # steps: (a) reset+stamp the log, (b) upload/stage the driver, wrapper, and patch,
 # (c) launch appending after the stamp — each retried until confirmed.
 _ok=0
-for _ in 1 2 3 4 5; do
+LOG_RESET_ATTEMPTS="${CLOUDBENCH_LOG_RESET_ATTEMPTS:-20}"
+for _ in $(seq 1 "$LOG_RESET_ATTEMPTS"); do
     o="$(ssh_read "$mid" "printf '%s\n' 'RUNSTAMP-$RUN_LOG_TOKEN' > '$REMOTE_LOG'; grep -q 'RUNSTAMP-$RUN_LOG_TOKEN' '$REMOTE_LOG' && echo STAMPED")"
     printf '%s' "$o" | grep -q STAMPED && { _ok=1; break; }; sleep 3
 done
