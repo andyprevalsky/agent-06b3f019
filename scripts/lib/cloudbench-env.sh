@@ -521,6 +521,16 @@ cloudbench_machine_start_with_lease() {
   return 1
 }
 
+cloudbench_machine_destroy_with_lease() {
+  local app="$1" machine_id="$2" nonce="$3"
+  cloudbench_machines_api_request \
+    DELETE "/v1/apps/$app/machines/$machine_id?force=true" "" "$nonce" || return 1
+  [ "$CLOUDBENCH_API_STATUS" = "200" ] || {
+    echo "Machine destroy failed for $machine_id (HTTP $CLOUDBENCH_API_STATUS)" >&2
+    return 1
+  }
+}
+
 cloudbench_activate_machine_environment_with_lease() {
   local app="$1" machine_id="$2" nonce="$3" body
   local attempts="${CLOUDBENCH_MACHINE_ACTIVATION_ATTEMPTS:-3}"

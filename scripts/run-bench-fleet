@@ -68,6 +68,8 @@ AUTOSCALE_POLL="10"     # seconds between desired-count reads off the box /metri
 SYNCHRONIZED_START="${CLOUDBENCH_SYNCHRONIZED_START:-1}"
 PROVISION_POOL=""       # --provision-pool N: pre-provision N stopped clones (current image) then exit
 POOL_IDS_FILE="$ROOT_DIR/.context/cloudbench-pool.ids"   # persistent pool machine ids (one per line)
+POOL_PROVENANCE_FILE="$ROOT_DIR/.context/cloudbench-pool.provenance.tsv" # id, warm id, snapshot id, immutable image, volume ids
+POOL_RETIREMENT_FILE="$ROOT_DIR/.context/cloudbench-pool.retirement.tsv" # stale machine/volume + copied creation binding
 GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null || echo "$ROOT_DIR/.git")"
 case "$GIT_COMMON_DIR" in /*) ;; *) GIT_COMMON_DIR="$ROOT_DIR/$GIT_COMMON_DIR" ;; esac
 APP_ENV_LOCK_FILE="$GIT_COMMON_DIR/cloudbench-app-env.lock"
@@ -92,6 +94,13 @@ done
 case "$RUN_TIMEOUT" in
     ''|*[!0-9]*|0) echo "❌ --timeout must be a positive integer." >&2; exit 2 ;;
 esac
+if [ -n "$PROVISION_POOL" ]; then
+    case "$PROVISION_POOL" in
+        ''|*[!0-9]*) echo "❌ --provision-pool requires a positive integer." >&2; exit 2 ;;
+    esac
+    [ "$PROVISION_POOL" -gt 0 ] \
+        || { echo "❌ --provision-pool requires a positive integer." >&2; exit 2; }
+fi
 required_lock_ttl=$((RUN_TIMEOUT + 3600))
 if [ -n "${CLOUDBENCH_CLOUD_LOCK_TTL:-}" ] && [ "$CLOUDBENCH_CLOUD_LOCK_TTL" -lt "$required_lock_ttl" ] 2>/dev/null; then
     echo "❌ CLOUDBENCH_CLOUD_LOCK_TTL must be at least $required_lock_ttl seconds for this fleet run." >&2
@@ -163,6 +172,102 @@ for machine in json.load(sys.stdin) or []:
         print(machine.get("state") or "")
         break
 ' 2>/dev/null || true
+}
+
+fleet_machine_image() {
+    local id="$1"
+    FLY machines list -a "$APP" --json 2>/dev/null | ID="$id" python3 -c '
+import json, os, sys
+wanted = os.environ["ID"]
+for machine in json.load(sys.stdin) or []:
+    if machine.get("id") == wanted:
+        print((machine.get("config") or {}).get("image") or "")
+        break
+' 2>/dev/null || true
+}
+
+POOL_PROVENANCE_LINE=""
+POOL_PROVENANCE_WARM=""
+POOL_PROVENANCE_SNAPSHOT=""
+POOL_PROVENANCE_IMAGE=""
+POOL_PROVENANCE_VOLUMES=""
+pool_machine_provenance_load() {  # exact durable creation record; no live-resource inference
+    local id="$1" matches provenance_id provenance_warm provenance_snapshot provenance_image provenance_volumes
+    [ -f "$POOL_PROVENANCE_FILE" ] || {
+        echo "❌ pool provenance ledger is missing: $POOL_PROVENANCE_FILE" >&2
+        return 2
+    }
+    matches="$(awk -F '\t' -v wanted="$id" '$1 == wanted { print }' "$POOL_PROVENANCE_FILE")"
+    if [ "$(printf '%s\n' "$matches" | grep -c . 2>/dev/null || true)" != "1" ]; then
+        echo "❌ pool machine $id has missing or ambiguous creation provenance" >&2
+        return 2
+    fi
+    if [ "$(printf '%s\n' "$matches" | awk -F '\t' '{ print NF }')" != "5" ]; then
+        echo "❌ pool machine $id creation provenance lacks an exact machine-to-volume binding" >&2
+        return 2
+    fi
+    IFS=$'\t' read -r provenance_id provenance_warm provenance_snapshot provenance_image provenance_volumes <<< "$matches"
+    if [ "$provenance_id" != "$id" ] || [ -z "$provenance_warm" ] || \
+       [ -z "$provenance_snapshot" ] || [ -z "$provenance_image" ] || \
+       [ -z "$provenance_volumes" ] || \
+       [ -n "$(printf '%s' "$provenance_volumes" | tr ',' '\n' | grep -Ev '^[A-Za-z0-9_-]+$' || true)" ]; then
+        echo "❌ pool machine $id has malformed creation provenance" >&2
+        return 2
+    fi
+    POOL_PROVENANCE_WARM="$provenance_warm"
+    POOL_PROVENANCE_SNAPSHOT="$provenance_snapshot"
+    POOL_PROVENANCE_IMAGE="$provenance_image"
+    POOL_PROVENANCE_VOLUMES="$provenance_volumes"
+    POOL_PROVENANCE_LINE="$matches"
+}
+
+pool_machine_provenance_classify() {  # 0=current, 10=provably owned stale generation, 2=unverifiable
+    local id="$1" live_image
+    pool_machine_provenance_load "$id" || return 2
+    live_image="$(fleet_machine_image "$id")"
+    if [ -z "$live_image" ]; then
+        echo "❌ pool machine $id live image could not be read" >&2
+        return 2
+    fi
+    if [ "$live_image" != "$POOL_PROVENANCE_IMAGE" ]; then
+        echo "❌ pool machine $id live image does not match its recorded immutable image" >&2
+        return 2
+    fi
+    if [ "$POOL_PROVENANCE_WARM" = "$WARM_ID" ] && \
+       [ "$POOL_PROVENANCE_SNAPSHOT" = "$SNAP_ID" ] && \
+       [ "$POOL_PROVENANCE_IMAGE" = "$WARM_IMAGE_IDENTITY" ]; then
+        return 0
+    fi
+    return 10
+}
+
+pool_machine_provenance_valid() {  # pool_machine_provenance_valid <id>
+    local id="$1" classification
+    if pool_machine_provenance_classify "$id"; then
+        return 0
+    else
+        classification=$?
+    fi
+    if [ "$classification" -eq 10 ]; then
+        echo "❌ pool machine $id provenance belongs to a stale warm image/snapshot generation" >&2
+    fi
+    return 1
+}
+
+validate_tracked_pool_provenance() {
+    [ -f "$POOL_IDS_FILE" ] || return 0
+    local id st presence
+    while read -r id; do
+        [ -n "$id" ] || continue
+        st="$(pool_machine_state "$id")"
+        presence=$?
+        [ "$presence" -eq 1 ] && continue
+        [ "$presence" -eq 0 ] || {
+            echo "❌ could not inspect tracked pool machine $id for provenance" >&2
+            return 1
+        }
+        pool_machine_provenance_valid "$id" || return 1
+    done < "$POOL_IDS_FILE"
 }
 
 is_sim_on() { case ",$SIM_ON_CSV," in *",$1,"*) return 0 ;; esac; return 1; }
@@ -294,35 +399,448 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id];
     printf '%s' "$target_id"
 }
 
-provision_pool() {  # provision_pool <N> — create N stopped clones, record ids, exit
-    local n="$1" i id ready
-    mkdir -p "$(dirname "$POOL_IDS_FILE")"; : > "$POOL_IDS_FILE"
-    echo "🏊 Provisioning pool of $n stopped machines (image = warm $WARM_ID, snapshot $SNAP_ID, region $REGION)..."
-    for i in $(seq 1 "$n"); do
-        id="$(clone_machine_target "$OWNED_CLONES_FILE")"
-        if [ -n "$id" ]; then
-            echo "  [$i/$n] created $id"
-            printf '%s\n' "$id" >> "$POOL_IDS_FILE"
-            grep -Fxv "$id" "$OWNED_CLONES_FILE" > "$OWNED_CLONES_FILE.tmp" 2>/dev/null || true
-            mv "$OWNED_CLONES_FILE.tmp" "$OWNED_CLONES_FILE"
-        else
-            echo "  [$i/$n] ⚠ clone failed"
+fleet_machine_volume_ids() {  # fleet_machine_volume_ids <machine-id>
+    local id="$1"
+    FLY volumes list -a "$APP" --json 2>/dev/null | MACHINE_ID="$id" python3 -c '
+import json, os, sys
+try:
+    volumes = json.load(sys.stdin)
+except (TypeError, ValueError):
+    raise SystemExit(2)
+if not isinstance(volumes, list) or any(not isinstance(volume, dict) for volume in volumes):
+    raise SystemExit(2)
+for volume in volumes:
+    if volume.get("attached_machine_id") == os.environ["MACHINE_ID"] and volume.get("id"):
+        print(volume["id"])
+'
+}
+
+fleet_volume_presence() {  # fleet_volume_presence <volume-id>: 0=present, 1=absent, 2=invalid read
+    local id="$1" volumes
+    volumes="$(FLY volumes list -a "$APP" --json 2>/dev/null)" || return 2
+    printf '%s' "$volumes" | VOLUME_ID="$id" python3 -c '
+import json, os, sys
+try:
+    volumes = json.load(sys.stdin)
+except (TypeError, ValueError):
+    raise SystemExit(2)
+if not isinstance(volumes, list) or any(not isinstance(volume, dict) for volume in volumes):
+    raise SystemExit(2)
+raise SystemExit(0 if any(volume.get("id") == os.environ["VOLUME_ID"] for volume in volumes) else 1)
+'
+}
+
+upgrade_pool_provenance_volume_bindings() {
+    [ -f "$POOL_IDS_FILE" ] || return 0
+    local id st presence matches field_count provenance_id provenance_warm provenance_snapshot provenance_image
+    local live_image volume_ids volume_csv replacement tmp="$POOL_PROVENANCE_FILE.tmp"
+    while read -r id; do
+        [ -n "$id" ] || continue
+        st="$(pool_machine_state "$id")"
+        presence=$?
+        [ "$presence" -eq 1 ] && continue
+        [ "$presence" -eq 0 ] || {
+            echo "❌ could not inspect tracked pool machine $id during provenance migration" >&2
+            return 1
+        }
+        matches="$(awk -F '\t' -v wanted="$id" '$1 == wanted { print }' "$POOL_PROVENANCE_FILE")"
+        [ "$(printf '%s\n' "$matches" | grep -c . 2>/dev/null || true)" = "1" ] || {
+            echo "❌ cannot migrate missing or ambiguous pool provenance for $id" >&2
+            return 1
+        }
+        field_count="$(printf '%s\n' "$matches" | awk -F '\t' '{ print NF }')"
+        if [ "$field_count" = "5" ]; then
+            pool_machine_provenance_load "$id" || return 1
+            continue
         fi
-    done
+        [ "$field_count" = "4" ] || {
+            echo "❌ cannot migrate malformed pool provenance for $id" >&2
+            return 1
+        }
+        IFS=$'\t' read -r provenance_id provenance_warm provenance_snapshot provenance_image <<< "$matches"
+        [ "$provenance_id" = "$id" ] && [ -n "$provenance_warm" ] && \
+            [ -n "$provenance_snapshot" ] && [ -n "$provenance_image" ] || return 1
+        live_image="$(fleet_machine_image "$id")"
+        [ -n "$live_image" ] && [ "$live_image" = "$provenance_image" ] || {
+            echo "❌ refusing to bind volumes for $id without its recorded immutable live image" >&2
+            return 1
+        }
+        volume_ids="$(fleet_machine_volume_ids "$id")" || {
+            echo "❌ could not inspect volumes attached to pool machine $id" >&2
+            return 1
+        }
+        volume_csv="$(printf '%s\n' "$volume_ids" | grep -E '^[A-Za-z0-9_-]+$' | sort -u | paste -sd, -)"
+        [ -n "$volume_csv" ] || {
+            echo "❌ pool machine $id has no provider-bound volume to record" >&2
+            return 1
+        }
+        replacement="$(printf '%s\t%s\t%s\t%s\t%s' "$id" "$provenance_warm" \
+            "$provenance_snapshot" "$provenance_image" "$volume_csv")"
+        awk -F '\t' -v wanted="$id" -v replacement="$replacement" \
+            '$1 == wanted { print replacement; next } { print }' \
+            "$POOL_PROVENANCE_FILE" > "$tmp" || return 1
+        mv "$tmp" "$POOL_PROVENANCE_FILE"
+        echo "  🔗 recorded provider-bound pool volumes for $id"
+    done < "$POOL_IDS_FILE"
+}
+
+record_pool_retirement() {  # record_pool_retirement <machine-id> <newline-separated-volume-ids>
+    local id="$1" volume_ids="$2" volume_id row
+    [ -n "$POOL_PROVENANCE_WARM" ] && [ -n "$POOL_PROVENANCE_SNAPSHOT" ] && \
+        [ -n "$POOL_PROVENANCE_IMAGE" ] && [ -n "$POOL_PROVENANCE_VOLUMES" ] || return 1
+    mkdir -p "$(dirname "$POOL_RETIREMENT_FILE")"
+    touch "$POOL_RETIREMENT_FILE"
+    while read -r volume_id; do
+        [ -n "$volume_id" ] || continue
+        case ",$POOL_PROVENANCE_VOLUMES," in
+            *",$volume_id,"*) ;;
+            *) echo "❌ volume $volume_id is not bound to pool machine $id provenance" >&2; return 1 ;;
+        esac
+        row="$(printf '%s\t%s\t%s\t%s\t%s\t%s' "$id" "$volume_id" \
+            "$POOL_PROVENANCE_WARM" "$POOL_PROVENANCE_SNAPSHOT" "$POOL_PROVENANCE_IMAGE" \
+            "$POOL_PROVENANCE_VOLUMES")"
+        grep -Fxq "$row" "$POOL_RETIREMENT_FILE" 2>/dev/null \
+            || printf '%s\n' "$row" >> "$POOL_RETIREMENT_FILE"
+    done <<< "$volume_ids"
+}
+
+pool_retirement_provenance_valid() {  # persistent proof for interrupted post-destroy cleanup
+    local id="$1" invalid count
+    pool_machine_provenance_load "$id" || return 1
+    count="$(awk -F '\t' -v machine="$id" '$1 == machine && NF == 6 { count++ } END { print count+0 }' \
+        "$POOL_RETIREMENT_FILE" 2>/dev/null)"
+    [ "$count" -gt 0 ] || {
+        echo "❌ pool retirement $id has no persisted ownership proof" >&2
+        return 1
+    }
+    invalid="$(awk -F '\t' -v machine="$id" -v warm="$POOL_PROVENANCE_WARM" \
+        -v snapshot="$POOL_PROVENANCE_SNAPSHOT" -v image="$POOL_PROVENANCE_IMAGE" \
+        -v volumes="$POOL_PROVENANCE_VOLUMES" \
+        '$1 == machine { owned=0; n=split($6, ids, ","); for (i=1; i<=n; i++) if (ids[i] == $2) owned=1; if (!(NF == 6 && $3 == warm && $4 == snapshot && $5 == image && $6 == volumes && owned)) count++ } END { print count+0 }' \
+        "$POOL_RETIREMENT_FILE" 2>/dev/null)"
+    [ "$invalid" -eq 0 ] || {
+        echo "❌ pool retirement $id does not match its durable creation provenance" >&2
+        return 1
+    }
+}
+
+forget_pool_retirement_volume() {  # forget_pool_retirement_volume <machine-id> <volume-id>
+    local id="$1" volume_id="$2" tmp="$POOL_RETIREMENT_FILE.tmp"
+    [ -f "$POOL_RETIREMENT_FILE" ] || return 0
+    awk -F '\t' -v machine="$id" -v volume="$volume_id" \
+        '!(NF == 6 && $1 == machine && $2 == volume)' \
+        "$POOL_RETIREMENT_FILE" > "$tmp" || return 1
+    mv "$tmp" "$POOL_RETIREMENT_FILE"
+}
+
+retire_pool_machine() {  # retire_pool_machine <provably-owned-stale-machine-id>
+    local id="$1" st presence provenance_classification retirement_count volume_ids expected_volume_ids volume_id nonce lease_index="" destroyed=0
+    [ -n "$id" ] && [ "$id" != "$WARM_ID" ] || {
+        echo "❌ refusing to retire empty/warm pool machine id '$id'" >&2
+        return 1
+    }
+    st="$(pool_machine_state "$id")"
+    presence=$?
+    [ "$presence" -ne 2 ] || {
+        echo "❌ could not inspect stale pool machine $id" >&2
+        return 1
+    }
+    retirement_count="$(awk -F '\t' -v machine="$id" '$1 == machine { count++ } END { print count+0 }' \
+        "$POOL_RETIREMENT_FILE" 2>/dev/null)"
+    if [ "$presence" -eq 0 ]; then
+        if pool_machine_provenance_classify "$id"; then
+            provenance_classification=0
+        else
+            provenance_classification=$?
+        fi
+        [ "$provenance_classification" -eq 10 ] || {
+            echo "❌ refusing to retire pool machine $id without live proof of its recorded stale image" >&2
+            return 1
+        }
+        [ "$retirement_count" -eq 0 ] || pool_retirement_provenance_valid "$id" || return 1
+    else
+        pool_retirement_provenance_valid "$id" || return 1
+    fi
+    if [ "$presence" -eq 0 ]; then
+        volume_ids="$(fleet_machine_volume_ids "$id")" || {
+            echo "❌ could not inspect volumes owned by stale pool machine $id" >&2
+            return 1
+        }
+        volume_ids="$(printf '%s\n' "$volume_ids" | grep -E '^[A-Za-z0-9_-]+$' | sort -u)"
+        expected_volume_ids="$(printf '%s' "$POOL_PROVENANCE_VOLUMES" | tr ',' '\n' | sort -u)"
+        [ "$volume_ids" = "$expected_volume_ids" ] || {
+            echo "❌ live volumes on stale pool machine $id do not match its durable volume binding" >&2
+            return 1
+        }
+        [ -n "$volume_ids" ] || {
+            echo "❌ stale pool machine $id has no provable owned volume" >&2
+            return 1
+        }
+        # Persist the machine→volume ownership proof before destroying either
+        # resource. If this controller is interrupted between the two deletes,
+        # the next provisioning pass resumes the recorded retirement.
+        record_pool_retirement "$id" "$volume_ids"
+        nonce="$(cloudbench_machine_lease_acquire_retry "$APP" "$id" \
+            "cloudbench-pool-retire run=$RUN_ID" \
+            "${CLOUDBENCH_PRIMARY_LEASE_ATTEMPTS:-45}" \
+            "${CLOUDBENCH_PRIMARY_LEASE_RETRY_DELAY:-2}")" || nonce=""
+        [ -n "$nonce" ] || {
+            echo "❌ stale pool machine $id is leased by another owner; refusing retirement" >&2
+            return 1
+        }
+        lease_index="${#LEASED_PRIMARY_IDS[@]}"
+        LEASED_PRIMARY_IDS+=("$id")
+        LEASED_PRIMARY_NONCES+=("$nonce")
+        if cloudbench_machine_destroy_with_lease "$APP" "$id" "$nonce"; then
+            LEASED_PRIMARY_NONCES[$lease_index]=""
+            nonce=""
+            destroyed=1
+        else
+            echo "❌ failed to destroy stale pool machine $id under its lease" >&2
+            return 1
+        fi
+        for _ in $(seq 1 60); do
+            st="$(pool_machine_state "$id")"
+            presence=$?
+            [ "$presence" -eq 1 ] && break
+            [ "$presence" -eq 0 ] || return 1
+            sleep 2
+        done
+        [ "$presence" -eq 1 ] || {
+            echo "❌ stale pool machine $id remained present after leased destroy" >&2
+            return 1
+        }
+    fi
+
+    volume_ids="$(awk -F '\t' -v machine="$id" '$1 == machine && NF == 6 { print $2 }' \
+        "$POOL_RETIREMENT_FILE" 2>/dev/null | sort -u)"
+    while read -r volume_id; do
+        [ -n "$volume_id" ] || continue
+        fleet_volume_presence "$volume_id"
+        presence=$?
+        if [ "$presence" -eq 1 ]; then
+            forget_pool_retirement_volume "$id" "$volume_id" || return 1
+            continue
+        fi
+        [ "$presence" -eq 0 ] || {
+            echo "❌ could not inspect retired pool volume $volume_id" >&2
+            return 1
+        }
+        destroyed=0
+        for _ in 1 2 3 4 5; do
+            if FLY volumes destroy "$volume_id" -a "$APP" --yes >/dev/null 2>&1; then
+                fleet_volume_presence "$volume_id"
+                presence=$?
+                [ "$presence" -eq 1 ] && { destroyed=1; break; }
+                [ "$presence" -eq 0 ] || return 1
+            fi
+            sleep 2
+        done
+        [ "$destroyed" -eq 1 ] || {
+            echo "❌ failed to destroy retired pool volume $volume_id" >&2
+            return 1
+        }
+        forget_pool_retirement_volume "$id" "$volume_id" || return 1
+    done <<< "$volume_ids"
+    echo "  ♻️ retired stale pool machine $id and its owned volumes"
+}
+
+resume_pool_retirements() {
+    [ -s "$POOL_RETIREMENT_FILE" ] || return 0
+    local id
+    while read -r id; do
+        [ -n "$id" ] || continue
+        retire_pool_machine "$id" || return 1
+    done < <(cut -f1 "$POOL_RETIREMENT_FILE" | sort -u)
+}
+
+provision_pool() {  # provision_pool <N> — ensure at least N stopped clones, record ids, exit
+    local n="$1" i id ready st presence existing create_count position tracked ready_count=0
+    local nonce lease_index live_image volume_ids volume_csv provenance_classification
+    local reconciled_file="$FLEET_DIR/reconciled-pool.ids"
+    local reconciled_provenance_file="$FLEET_DIR/reconciled-pool.provenance.tsv"
+    case "$n" in
+        ''|*[!0-9]*) echo "❌ --provision-pool requires a positive integer." >&2; return 2 ;;
+    esac
+    [ "$n" -gt 0 ] || { echo "❌ --provision-pool requires a positive integer." >&2; return 2; }
+
+    # Preserve valid tracked machines and only top up the pool. Truncating this
+    # ledger would orphan every prior clone (and its billed volume) on each
+    # provisioning pass. Missing machines are dropped; an unreadable control
+    # plane response fails closed instead of silently replacing ownership data.
+    mkdir -p "$(dirname "$POOL_IDS_FILE")"
+    touch "$POOL_IDS_FILE"
+    touch "$POOL_PROVENANCE_FILE"
+    touch "$POOL_RETIREMENT_FILE"
+    upgrade_pool_provenance_volume_bindings || return 1
+    resume_pool_retirements || return 1
+    : > "$reconciled_file"
+    : > "$reconciled_provenance_file"
+    while read -r id; do
+        case "$id" in ''|*[!0-9a-f]*) continue ;; esac
+        [ "$id" != "$WARM_ID" ] || continue
+        grep -Fxq "$id" "$reconciled_file" 2>/dev/null && continue
+        st="$(pool_machine_state "$id")"
+        presence=$?
+        [ "$presence" -eq 1 ] && continue
+        [ "$presence" -eq 0 ] || {
+            echo "❌ could not reconcile existing pool machine $id" >&2
+            return 1
+        }
+
+        # A stopped Machine is not interchangeable with the current warm
+        # source. Count it only when both the durable creation provenance and
+        # its live immutable image prove that it came from this exact warm
+        # image + snapshot generation. Only a unique prior creation record
+        # whose immutable image still matches the live machine is safe to
+        # rotate. Missing/ambiguous/unreadable/mismatched evidence fails closed.
+        if pool_machine_provenance_classify "$id"; then
+            provenance_classification=0
+        else
+            provenance_classification=$?
+        fi
+        case "$provenance_classification" in
+            0) ;;
+            10)
+                echo "  ♻️ rotating provably owned stale pool capacity $id"
+                retire_pool_machine "$id" || return 1
+                continue
+                ;;
+            *) return 1 ;;
+        esac
+        printf '%s\n' "$id" >> "$reconciled_file"
+        printf '%s\n' "$POOL_PROVENANCE_LINE" >> "$reconciled_provenance_file"
+    done < "$POOL_IDS_FILE"
+    mv "$reconciled_file" "$POOL_IDS_FILE"
+    mv "$reconciled_provenance_file" "$POOL_PROVENANCE_FILE"
+
+    existing="$(grep -c . "$POOL_IDS_FILE" 2>/dev/null || true)"
+    existing="${existing:-0}"
+    create_count=$((n - existing))
+    [ "$create_count" -gt 0 ] || create_count=0
+    echo "🏊 Ensuring pool has at least $n stopped machines ($existing tracked, $create_count to create; image = warm $WARM_ID, snapshot $SNAP_ID, region $REGION)..."
+    if [ "$create_count" -gt 0 ]; then
+        for i in $(seq 1 "$create_count"); do
+            position=$((existing + i))
+            id="$(clone_machine_target "$OWNED_CLONES_FILE")"
+            if [ -n "$id" ]; then
+                live_image="$(fleet_machine_image "$id")"
+                if [ "$live_image" = "$WARM_IMAGE_IDENTITY" ]; then
+                    volume_ids="$(fleet_machine_volume_ids "$id")" || volume_ids=""
+                    volume_csv="$(printf '%s\n' "$volume_ids" | grep -E '^[A-Za-z0-9_-]+$' | sort -u | paste -sd, -)"
+                    if [ -n "$volume_csv" ]; then
+                        echo "  [$position/$n] created $id"
+                        printf '%s\t%s\t%s\t%s\t%s\n' \
+                            "$id" "$WARM_ID" "$SNAP_ID" "$WARM_IMAGE_IDENTITY" "$volume_csv" \
+                            >> "$POOL_PROVENANCE_FILE"
+                        printf '%s\n' "$id" >> "$POOL_IDS_FILE"
+                        grep -Fxv "$id" "$OWNED_CLONES_FILE" > "$OWNED_CLONES_FILE.tmp" 2>/dev/null || true
+                        mv "$OWNED_CLONES_FILE.tmp" "$OWNED_CLONES_FILE"
+                    else
+                        echo "  [$position/$n] ⚠ clone volume binding missing; retaining $id for cleanup"
+                    fi
+                else
+                    echo "  [$position/$n] ⚠ clone image provenance mismatch; retaining $id for cleanup"
+                fi
+            else
+                echo "  [$position/$n] ⚠ clone failed"
+            fi
+        done
+    fi
+
     echo "⏳ waiting for volumes to provision, then stopping (pool idles at \$0 compute)..."
     while read -r id; do
         [ -n "$id" ] || continue
-        ready=0
+        ready=0; st=""; nonce=""; lease_index=""
         for _ in $(seq 1 90); do
-            if FLY machine status "$id" -a "$APP" 2>/dev/null | grep -qiE "State.*(started|stopped)"; then ready=1; break; fi
-            if machine_storage_ready "$id"; then
-                FLY machine start "$id" -a "$APP" >/dev/null 2>&1 || true
+            # Read the exact JSON machine state. A `flyctl status | grep -q`
+            # pipeline is incorrect under pipefail: grep exits on its first
+            # match, flyctl receives SIGPIPE, and the successful state is
+            # misclassified as a failure.
+            st="$(fleet_machine_state "$id")"
+            case "$st" in
+                started|stopped)
+                    if machine_storage_ready "$id"; then
+                        ready=1
+                        break
+                    fi
+                    ;;
+                destroyed|destroying) break ;;
+            esac
+            if machine_storage_ready "$id" && [ -z "$nonce" ]; then
+                # Even controller-owned fresh clones can still be inside Fly's
+                # bootstrap lease handoff. Acquire the platform Machine lease
+                # before issuing any lifecycle mutation, and track it so the
+                # controller cleanup can recover an ambiguous start/stop.
+                nonce="$(cloudbench_machine_lease_acquire_retry "$APP" "$id" \
+                    "cloudbench-pool-provision run=$RUN_ID" \
+                    "${CLOUDBENCH_PRIMARY_LEASE_ATTEMPTS:-45}" \
+                    "${CLOUDBENCH_PRIMARY_LEASE_RETRY_DELAY:-2}")"
+                if [ -z "$nonce" ]; then
+                    echo "  ⚠ $id is leased by another owner; leaving it untouched"
+                    break
+                fi
+                lease_index="${#LEASED_PRIMARY_IDS[@]}"
+                LEASED_PRIMARY_IDS+=("$id")
+                LEASED_PRIMARY_NONCES+=("$nonce")
+                if ! cloudbench_machine_start_with_lease "$APP" "$id" "$nonce"; then
+                    echo "  ⚠ $id could not be started under its provisioning lease"
+                    break
+                fi
             fi
             sleep 5
         done
-        [ "$ready" = 1 ] && { FLY machine stop "$id" -a "$APP" >/dev/null 2>&1 || true; echo "  ✅ pooled (stopped): $id"; } || echo "  ⚠ $id never became startable"
+        if [ "$ready" != 1 ]; then
+            echo "  ⚠ $id never became startable (last_state=${st:-unknown})"
+            if [ -n "$nonce" ] && cloudbench_machine_stop_and_release_lease "$APP" "$id" "$nonce"; then
+                LEASED_PRIMARY_NONCES[$lease_index]=""
+                nonce=""
+            fi
+            continue
+        fi
+        if [ "$st" != "stopped" ]; then
+            if [ -z "$nonce" ]; then
+                nonce="$(cloudbench_machine_lease_acquire_retry "$APP" "$id" \
+                    "cloudbench-pool-provision run=$RUN_ID" \
+                    "${CLOUDBENCH_PRIMARY_LEASE_ATTEMPTS:-45}" \
+                    "${CLOUDBENCH_PRIMARY_LEASE_RETRY_DELAY:-2}")"
+                if [ -n "$nonce" ]; then
+                    lease_index="${#LEASED_PRIMARY_IDS[@]}"
+                    LEASED_PRIMARY_IDS+=("$id")
+                    LEASED_PRIMARY_NONCES+=("$nonce")
+                fi
+            fi
+            if [ -z "$nonce" ]; then
+                echo "  ⚠ $id is actively leased; refusing to stop another owner"
+                continue
+            fi
+            if cloudbench_machine_stop_and_release_lease "$APP" "$id" "$nonce"; then
+                LEASED_PRIMARY_NONCES[$lease_index]=""
+                nonce=""
+                for _ in $(seq 1 60); do
+                    st="$(fleet_machine_state "$id")"
+                    [ "$st" = "stopped" ] && break
+                    sleep 2
+                done
+            else
+                echo "  ⚠ $id could not be stopped under its provisioning lease"
+                continue
+            fi
+        fi
+        if [ "$st" = "stopped" ] && machine_storage_ready "$id"; then
+            ready_count=$((ready_count + 1))
+            echo "  ✅ pooled (stopped): $id"
+        else
+            echo "  ⚠ $id could not be verified stopped with ready storage (last_state=${st:-unknown})"
+        fi
     done < "$POOL_IDS_FILE"
-    echo "✅ pool ready: $(grep -c . "$POOL_IDS_FILE" 2>/dev/null || echo 0) machines → $POOL_IDS_FILE"
+    tracked="$(grep -c . "$POOL_IDS_FILE" 2>/dev/null || true)"
+    tracked="${tracked:-0}"
+    echo "✅ pool readiness: $ready_count/$tracked tracked machines stopped → $POOL_IDS_FILE"
+    [ "$ready_count" -ge "$n" ] || {
+        echo "❌ pool target unmet: need $n ready machines, verified $ready_count" >&2
+        return 1
+    }
 }
 
 CLAIMED_POOL_FILE="$FLEET_DIR/claimed-pool.ids"
@@ -377,13 +895,18 @@ reconcile_pool() {
 }
 claim_pool_machine() {  # echo a started, claimed pool machine id (or '' if none free)
     [ -f "$POOL_IDS_FILE" ] || return 0
-    local id st claim_path owner
+    local id st presence claim_path owner
     mkdir -p "$POOL_CLAIMS_DIR" "$(dirname "$CLAIMED_POOL_FILE")"
     while read -r id; do
         [ -n "$id" ] || continue
         case "$id" in *[!0-9a-f]*) continue ;; esac
         case " ${UNAVAILABLE_POOL_IDS[*]:-} " in *" $id "*) continue ;; esac
         grep -Fxq "$id" "$CLAIMED_POOL_FILE" 2>/dev/null && continue
+        st="$(pool_machine_state "$id")"
+        presence=$?
+        [ "$presence" -eq 1 ] && continue
+        [ "$presence" -eq 0 ] || return 2
+        pool_machine_provenance_valid "$id" || return 2
         claim_path="$POOL_CLAIMS_DIR/$id"
         if [ -f "$claim_path" ]; then
             owner="$(head -1 "$claim_path" 2>/dev/null || true)"
@@ -392,8 +915,7 @@ claim_pool_machine() {  # echo a started, claimed pool machine id (or '' if none
             fi
             rm -f "$claim_path"
         fi
-        st="$(FLY machine status "$id" -a "$APP" 2>/dev/null | grep -iE '^[[:space:]]*State' | head -1)"
-        printf '%s' "$st" | grep -qi "stopped" || continue   # only claim an existing, stopped machine
+        [ "$st" = "stopped" ] || continue   # only claim an existing, stopped machine
         machine_storage_ready "$id" || continue
         # claim_pool_machine is called through command substitution, so shell
         # arrays mutate in a subshell. Files are the cross-subshell and
@@ -513,6 +1035,9 @@ cleanup_impl() {
             if cloudbench_machine_stop_and_release_lease "$APP" "$id" "$nonce"; then
                 nonce=""
                 LEASED_PRIMARY_NONCES[$lease_index]=""
+                if grep -Fxq "$id" "$POOL_IDS_FILE" 2>/dev/null; then
+                    echo "↩️ returning claimed pool machine $id to the stopped pool"
+                fi
                 release_pool_claim "$id"
                 break
             fi
@@ -622,6 +1147,14 @@ for m in d:
 WARM_ID="$(printf '%s' "$warm_pair" | awk '{print $1}')"
 warm_region="$(printf '%s' "$warm_pair" | awk '{print $2}')"
 [ -n "$WARM_ID" ] || { echo "❌ No warm machine '$MACHINE_NAME' in $APP — run: bash scripts/run-bench-cloud --setup" >&2; exit 1; }
+WARM_IMAGE_IDENTITY="$(printf '%s' "$warm_json" | WARM_ID="$WARM_ID" python3 -c '
+import json, os, sys
+for machine in json.load(sys.stdin) or []:
+    if machine.get("id") == os.environ["WARM_ID"]:
+        print((machine.get("config") or {}).get("image") or "")
+        break
+' 2>/dev/null || true)"
+[ -n "$WARM_IMAGE_IDENTITY" ] || { echo "❌ Could not resolve immutable warm image identity for $WARM_ID" >&2; exit 1; }
 # Volume snapshots are region-scoped, so clones MUST land in the warm box's region.
 [ -n "$warm_region" ] && REGION="$warm_region"
 echo "🏭 warm source machine: $WARM_ID (region $REGION)"
@@ -650,8 +1183,13 @@ echo "🧊 forking clones from complete snapshot: $SNAP_ID"
 # --provision-pool: one-time pre-provision of N stopped clones, then exit.
 if [ -n "$PROVISION_POOL" ]; then
     provision_pool "$PROVISION_POOL"
-    exit 0
+    provision_status=$?
+    exit "$provision_status"
 fi
+# Normal runs migrate legacy creation records through the same provider-bound,
+# fail-closed path as explicit provisioning before strict consumption checks.
+upgrade_pool_provenance_volume_bindings || exit 1
+validate_tracked_pool_provenance || exit 1
 
 CODE_SUMMARY=""
 print_code_provenance
@@ -798,6 +1336,11 @@ for bench in "${BENCHES[@]}"; do
     primary_lease_rc=0
     while :; do
         cid="$(claim_pool_machine)"
+        pool_claim_rc=$?
+        if [ "$pool_claim_rc" -ne 0 ]; then
+            echo "❌ pool claim failed closed (status=$pool_claim_rc)" >&2
+            exit "$pool_claim_rc"
+        fi
         [ -n "$cid" ] || break
         echo "▶️  [$bench] claimed POOL candidate $cid (no fork, mode=$mode_label, dash=$port) ..."
         if primary_nonce="$(cloudbench_machine_lease_acquire "$APP" "$cid" \

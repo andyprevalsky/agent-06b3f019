@@ -409,6 +409,11 @@ cloudbench_machines_api_request() {
       CLOUDBENCH_API_STATUS=200
       CLOUDBENCH_API_BODY='{"ok":true}'
       ;;
+    'DELETE|/v1/apps/bench-app/machines/primary-machine?force=true')
+      [ "$nonce" = "primary-nonce" ] || fail "primary destroy omitted its Fly lease nonce"
+      CLOUDBENCH_API_STATUS=200
+      CLOUDBENCH_API_BODY='{"ok":true}'
+      ;;
     'POST|/v1/apps/bench-app/machines/fresh-machine/lease')
       [ "$(printf '%s' "$body" | jq -r '.description' | wc -m | tr -d ' ')" -le 65 ] || \
         fail "Machine lease descriptions must respect Fly's 64-rune limit"
@@ -489,6 +494,10 @@ release_count_after="$(grep -c 'DELETE|/v1/apps/bench-app/machines/primary-machi
 [ "$release_count_after" -eq "$release_count_before" ] || \
   fail "a failed primary stop must retain its live lease for cleanup retry"
 rm -f "$api_primary_stop_fail"
+cloudbench_machine_destroy_with_lease bench-app primary-machine "$primary_nonce"
+require_text "$api_calls" \
+  'DELETE|/v1/apps/bench-app/machines/primary-machine?force=true||primary-nonce' \
+  "stale pool retirement must destroy through the Machines API under its lease"
 
 long_description="cloudbench-primary-run-with-a-description-that-exceeds-the-provider-limit-by-design-1234567890"
 fresh_nonce="$(cloudbench_machine_lease_acquire_retry bench-app fresh-machine "$long_description" 3 0)"
@@ -681,6 +690,46 @@ require_text "$ROOT_DIR/scripts/run-bench-fleet" \
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'Timed out after ${wait_seconds}s waiting for shared benchmark app environment lock.' \
   "direct environment lock waits must remain bounded and observable"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'st="$(fleet_machine_state "$id")"' \
+  "pool readiness must use the exact JSON machine state reader"
+if grep -Fq 'machine status "$id" -a "$APP" 2>/dev/null | grep -qiE' "$ROOT_DIR/scripts/run-bench-fleet"; then
+  fail "pool readiness must not use a grep -q pipeline that fails under pipefail/SIGPIPE"
+fi
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'touch "$POOL_IDS_FILE"' \
+  "pool provisioning must preserve and reconcile its ownership ledger"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'provenance belongs to a stale warm image/snapshot generation' \
+  "preserved pool capacity must fail closed across warm snapshot generations"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'validate_tracked_pool_provenance || exit 1' \
+  "normal fleet startup must validate provenance before consuming pool capacity"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'pool_machine_provenance_valid "$id" || return 2' \
+  "every pool claim must fail closed if provenance changes after startup validation"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'live image does not match its recorded immutable image' \
+  "preserved pool capacity must verify its live immutable image"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  '"$id" "$WARM_ID" "$SNAP_ID" "$WARM_IMAGE_IDENTITY" "$volume_csv"' \
+  "new pool machines must persist exact creation and volume provenance before ownership promotion"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  '"cloudbench-pool-provision run=$RUN_ID"' \
+  "pool provisioning must acquire a task-scoped platform Machine lease"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'cloudbench_machine_stop_and_release_lease "$APP" "$id" "$nonce"' \
+  "pool provisioning must stop non-idle machines before releasing their leases"
+if sed -n '/^provision_pool()/,/^}/p' "$ROOT_DIR/scripts/run-bench-fleet" \
+  | grep -Fq 'FLY machine stop "$id" -a "$APP"'; then
+  fail "pool provisioning must not stop a tracked machine outside its platform lease"
+fi
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'pool target unmet: need $n ready machines, verified $ready_count' \
+  "pool provisioning must fail closed unless its requested ready capacity is verified"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'exit "$provision_status"' \
+  "the pool provisioning mode must propagate readiness failures to its caller"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   '--name "$target_name"' \
   "fresh fleet clones must use an exact unique name for id resolution"

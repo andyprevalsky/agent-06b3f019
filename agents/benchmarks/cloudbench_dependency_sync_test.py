@@ -530,26 +530,632 @@ def test_fresh_clone_start_paths_honor_storage_readiness_contract() -> None:
     )[0]
 
     assert 'MACHINE_READINESS_SCRIPT="$ROOT_DIR/scripts/cloudbench-machine-readiness.py"' in cloud
-    assert startup.count('if machine_storage_ready "$mid"') == 2
+    assert startup.count('machine_storage_ready "$mid"') == 2
     assert startup.count('request_machine_start "$mid"') == 2
     assert startup.index('if machine_storage_ready "$mid"') < startup.index(
         'request_machine_start "$mid"'
     )
     assert 'MACHINE_READINESS_SCRIPT="$ROOT_DIR/scripts/cloudbench-machine-readiness.py"' in fleet
-    assert (
-        'if machine_storage_ready "$id"; then\n'
-        '                FLY machine start "$id"' in fleet
+    provision_start = fleet.index("provision_pool() {")
+    provision_end = fleet.index("\n}\n\nCLAIMED_POOL_FILE", provision_start)
+    provision = fleet[provision_start:provision_end]
+    assert 'st="$(fleet_machine_state "$id")"' in provision
+    assert 'machine_storage_ready "$id"' in provision
+    assert provision.index("cloudbench_machine_lease_acquire_retry") < provision.index(
+        'cloudbench_machine_start_with_lease "$APP" "$id" "$nonce"'
     )
+    retire_start = fleet.index("retire_pool_machine() {")
+    retire_end = fleet.index("\n}\n\nresume_pool_retirements()", retire_start)
+    retire = fleet[retire_start:retire_end]
+    assert retire.index("record_pool_retirement") < retire.index(
+        "cloudbench_machine_lease_acquire_retry"
+    )
+    assert retire.index("cloudbench_machine_lease_acquire_retry") < retire.index(
+        "cloudbench_machine_destroy_with_lease"
+    )
+    assert 'FLY volumes destroy "$volume_id"' in retire
     claim_start = fleet.index("claim_pool_machine() {")
     claim_end = fleet.index("\n}\n", claim_start)
     claim = fleet[claim_start:claim_end]
-    assert claim.index('machine_storage_ready "$id" || continue') < claim.index(
-        'FLY machine start "$id"'
+    assert claim.index('pool_machine_provenance_valid "$id"') < claim.index(
+        'machine_storage_ready "$id" || continue'
     )
+    assert 'FLY machine start "$id"' not in claim
     assert (
         'if machine_storage_ready "$wid"; then\n'
         '            FLY machine start "$wid"' in fleet
     )
+
+
+def test_fleet_machine_state_avoids_pipefail_status_sigpipe() -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    function_start = fleet.index("fleet_machine_state() {")
+    function_end = fleet.index("\n}\n", function_start) + 3
+    state_function = fleet[function_start:function_end]
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
+APP=bench-app
+FLY() {{
+  if [ "$1 $2" = "machine status" ]; then
+    python3 -c 'import os; os.write(1, b"State: stopped\\n" + b"x" * 1000000)'
+    return
+  fi
+  printf '%s\\n' '[{{"id":"machine-1","state":"stopped"}}]'
+}}
+set +e
+FLY machine status machine-1 -a bench-app 2>/dev/null | grep -qiE 'State.*(started|stopped)'
+legacy_status=$?
+set -e
+{state_function}
+printf 'legacy=%s\\n' "$legacy_status"
+fleet_machine_state machine-1
+""",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert lines[-1] == "stopped"
+    assert int(lines[-2].split("=", 1)[1]) != 0
+
+
+def test_pool_provenance_validates_snapshot_and_live_image(tmp_path: Path) -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    image_start = fleet.index("fleet_machine_image() {")
+    validator_end = fleet.index("\n}\n\nvalidate_tracked_pool_provenance()", image_start) + 3
+    functions = fleet[image_start:validator_end]
+    provenance = tmp_path / "pool.provenance.tsv"
+    image = "registry.example/bench@sha256:current"
+    provenance.write_text(f"abc123\twarm-1\tsnapshot-1\t{image}\tvol-1\n")
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
+APP=bench-app
+POOL_PROVENANCE_FILE="$PROVENANCE_FILE"
+WARM_ID=warm-1
+SNAP_ID=snapshot-1
+WARM_IMAGE_IDENTITY="$EXPECTED_IMAGE"
+LIVE_IMAGE="$EXPECTED_IMAGE"
+FLY() {{
+  printf '[{{"id":"abc123","config":{{"image":"%s"}}}}]\\n' "$LIVE_IMAGE"
+}}
+{functions}
+pool_machine_provenance_valid abc123
+printf 'valid\\n'
+LIVE_IMAGE=registry.example/bench@sha256:stale
+if pool_machine_provenance_valid abc123 >/dev/null 2>&1; then exit 31; fi
+printf 'stale-image-rejected\\n'
+LIVE_IMAGE="$EXPECTED_IMAGE"
+SNAP_ID=snapshot-2
+if pool_machine_provenance_valid abc123 >/dev/null 2>&1; then exit 32; fi
+printf 'stale-snapshot-rejected\\n'
+""",
+        ],
+        env={
+            "PROVENANCE_FILE": str(provenance),
+            "EXPECTED_IMAGE": image,
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "valid",
+        "stale-image-rejected",
+        "stale-snapshot-rejected",
+    ]
+
+
+def test_normal_startup_migrates_legacy_volume_binding_before_validation(
+    tmp_path: Path,
+) -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    image_start = fleet.index("fleet_machine_image() {")
+    validator_end = fleet.index("\n}\n\nvalidate_tracked_pool_provenance()", image_start) + 3
+    provenance_functions = fleet[image_start:validator_end]
+    validate_start = fleet.index("validate_tracked_pool_provenance() {")
+    validate_end = fleet.index("\n}\n", validate_start) + 3
+    validate_function = fleet[validate_start:validate_end]
+    volume_start = fleet.index("fleet_machine_volume_ids() {")
+    upgrade_start = fleet.index("upgrade_pool_provenance_volume_bindings() {")
+    volume_functions = fleet[volume_start:upgrade_start]
+    upgrade_end = fleet.index("\n}\n\nrecord_pool_retirement()", upgrade_start) + 3
+    upgrade_function = fleet[upgrade_start:upgrade_end]
+    pool_file = tmp_path / "pool.ids"
+    provenance_file = tmp_path / "pool.provenance.tsv"
+    image = "registry.example/bench@sha256:current"
+    pool_file.write_text("abc111\n")
+    provenance_file.write_text(f"abc111\twarm-1\tsnapshot-1\t{image}\n")
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
+APP=bench-app
+POOL_IDS_FILE="$POOL_FILE"
+POOL_PROVENANCE_FILE="$PROVENANCE_FILE"
+WARM_ID=warm-1
+SNAP_ID=snapshot-1
+WARM_IMAGE_IDENTITY="$EXPECTED_IMAGE"
+pool_machine_state() {{ printf 'stopped\n'; }}
+FLY() {{
+  if [ "$1 $2" = "volumes list" ]; then
+    printf '[{{"id":"vol-1","attached_machine_id":"abc111"}}]\n'
+  else
+    printf '[{{"id":"abc111","config":{{"image":"%s"}}}}]\n' "$EXPECTED_IMAGE"
+  fi
+}}
+{provenance_functions}
+{validate_function}
+{volume_functions}
+{upgrade_function}
+upgrade_pool_provenance_volume_bindings
+validate_tracked_pool_provenance
+cat "$POOL_PROVENANCE_FILE"
+""",
+        ],
+        env={
+            "POOL_FILE": str(pool_file),
+            "PROVENANCE_FILE": str(provenance_file),
+            "EXPECTED_IMAGE": image,
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[-1] == (
+        f"abc111\twarm-1\tsnapshot-1\t{image}\tvol-1"
+    )
+    normal_startup = fleet[fleet.index("# --provision-pool:") : fleet.index("CODE_SUMMARY=\"\"")]
+    assert normal_startup.index("upgrade_pool_provenance_volume_bindings || exit 1") < (
+        normal_startup.index("validate_tracked_pool_provenance || exit 1")
+    )
+
+
+def test_pool_provisioning_rotates_stale_snapshot_capacity_under_lease(
+    tmp_path: Path,
+) -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    image_start = fleet.index("fleet_machine_image() {")
+    validator_end = fleet.index("\n}\n\nvalidate_tracked_pool_provenance()", image_start) + 3
+    provenance_functions = fleet[image_start:validator_end]
+    validate_start = fleet.index("validate_tracked_pool_provenance() {")
+    validate_end = fleet.index("\n}\n", validate_start) + 3
+    validate_function = fleet[validate_start:validate_end]
+    provision_start = fleet.index("provision_pool() {")
+    provision_end = fleet.index("\n}\n\nCLAIMED_POOL_FILE", provision_start) + 3
+    provision_function = fleet[provision_start:provision_end]
+    retirement_start = fleet.index("fleet_machine_volume_ids() {")
+    retirement_end = fleet.index("\n}\n\nprovision_pool()", retirement_start) + 3
+    retirement_functions = fleet[retirement_start:retirement_end]
+    pool_file = tmp_path / "pool.ids"
+    provenance_file = tmp_path / "pool.provenance.tsv"
+    fleet_dir = tmp_path / "run"
+    machine_present_file = tmp_path / "machine-present"
+    volume_present_file = tmp_path / "volume-present"
+    operations_file = tmp_path / "operations"
+    old_id = "abc111"
+    new_id = "def222"
+    image = "registry.example/bench@sha256:current"
+    pool_file.write_text(f"{old_id}\n")
+    provenance_file.write_text(f"{old_id}\twarm-1\tsnapshot-old\t{image}\n")
+    machine_present_file.write_text("1\n")
+    volume_present_file.write_text("1\n")
+    operations_file.write_text("")
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
+APP=bench-app
+POOL_IDS_FILE="$POOL_FILE"
+POOL_PROVENANCE_FILE="$PROVENANCE_FILE"
+POOL_RETIREMENT_FILE="$FLEET_DIR_PATH/pool.retirement.tsv"
+FLEET_DIR="$FLEET_DIR_PATH"
+OWNED_CLONES_FILE="$FLEET_DIR/owned-clones.ids"
+WARM_ID=warm-1
+SNAP_ID=snapshot-current
+WARM_IMAGE_IDENTITY="$EXPECTED_IMAGE"
+REGION=ord
+RUN_ID=test-run
+LEASED_PRIMARY_IDS=()
+LEASED_PRIMARY_NONCES=()
+mkdir -p "$FLEET_DIR"
+touch "$OWNED_CLONES_FILE"
+FLY() {{
+  if [ "$1 $2" = "volumes list" ]; then
+    if [ "$(cat "$VOLUME_PRESENT_FILE")" = 1 ]; then
+      printf '[{{"id":"vol-old","attached_machine_id":"{old_id}"}}]\n'
+    else
+      printf '[{{"id":"vol-new","attached_machine_id":"{new_id}"}}]\n'
+    fi
+    return
+  fi
+  if [ "$1 $2" = "volumes destroy" ]; then
+    printf 'volume-destroy:%s\n' "$3" >> "$OPERATIONS_FILE"
+    printf '0\n' > "$VOLUME_PRESENT_FILE"
+    return
+  fi
+  printf '[{{"id":"{old_id}","config":{{"image":"%s"}}}},{{"id":"{new_id}","config":{{"image":"%s"}}}}]\n' \
+    "$EXPECTED_IMAGE" "$EXPECTED_IMAGE"
+}}
+pool_machine_state() {{
+  if [ "$1" = {old_id} ] && [ "$(cat "$MACHINE_PRESENT_FILE")" = 0 ]; then return 1; fi
+  printf 'stopped\n'
+}}
+fleet_machine_state() {{ printf 'stopped\n'; }}
+machine_storage_ready() {{ return 0; }}
+cloudbench_machine_lease_acquire_retry() {{
+  printf 'lease:%s\n' "$2" >> "$OPERATIONS_FILE"
+  printf 'retirement-nonce\n'
+}}
+cloudbench_machine_destroy_with_lease() {{
+  printf 'destroy:%s:%s\n' "$2" "$3" >> "$OPERATIONS_FILE"
+  printf '0\n' > "$MACHINE_PRESENT_FILE"
+}}
+clone_machine_target() {{ printf '%s\n' '{new_id}' >> "$1"; printf '%s' '{new_id}'; }}
+cloudbench_machine_start_with_lease() {{ return 0; }}
+cloudbench_machine_stop_and_release_lease() {{ return 0; }}
+sleep() {{ :; }}
+{provenance_functions}
+{validate_function}
+{retirement_functions}
+{provision_function}
+if validate_tracked_pool_provenance >/dev/null 2>&1; then exit 61; fi
+provision_pool 1
+printf 'pool=%s\n' "$(paste -sd, "$POOL_IDS_FILE")"
+printf 'retirement-rows=%s\n' "$(grep -c . "$POOL_RETIREMENT_FILE" || true)"
+""",
+        ],
+        env={
+            "POOL_FILE": str(pool_file),
+            "PROVENANCE_FILE": str(provenance_file),
+            "FLEET_DIR_PATH": str(fleet_dir),
+            "MACHINE_PRESENT_FILE": str(machine_present_file),
+            "VOLUME_PRESENT_FILE": str(volume_present_file),
+            "OPERATIONS_FILE": str(operations_file),
+            "EXPECTED_IMAGE": image,
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"pool={new_id}" in result.stdout
+    assert "retirement-rows=0" in result.stdout
+    assert operations_file.read_text().splitlines() == [
+        f"lease:{old_id}",
+        f"destroy:{old_id}:retirement-nonce",
+        "volume-destroy:vol-old",
+    ]
+    assert pool_file.read_text() == f"{new_id}\n"
+    assert provenance_file.read_text() == (
+        f"{new_id}\twarm-1\tsnapshot-current\t{image}\tvol-new\n"
+    )
+
+
+def test_pool_provisioning_rejects_stopped_capacity_with_unready_storage(
+    tmp_path: Path,
+) -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    image_start = fleet.index("fleet_machine_image() {")
+    validator_end = fleet.index("\n}\n\nvalidate_tracked_pool_provenance()", image_start) + 3
+    provenance_functions = fleet[image_start:validator_end]
+    provision_start = fleet.index("provision_pool() {")
+    provision_end = fleet.index("\n}\n\nCLAIMED_POOL_FILE", provision_start) + 3
+    provision_function = fleet[provision_start:provision_end]
+    pool_file = tmp_path / "pool.ids"
+    provenance_file = tmp_path / "pool.provenance.tsv"
+    fleet_dir = tmp_path / "run"
+    machine_id = "abc111"
+    image = "registry.example/bench@sha256:current"
+    pool_file.write_text(f"{machine_id}\n")
+    provenance_file.write_text(
+        f"{machine_id}\twarm-1\tsnapshot-current\t{image}\tvol-1\n"
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
+APP=bench-app
+POOL_IDS_FILE="$POOL_FILE"
+POOL_PROVENANCE_FILE="$PROVENANCE_FILE"
+POOL_RETIREMENT_FILE="$FLEET_DIR_PATH/pool.retirement.tsv"
+FLEET_DIR="$FLEET_DIR_PATH"
+OWNED_CLONES_FILE="$FLEET_DIR/owned-clones.ids"
+WARM_ID=warm-1
+SNAP_ID=snapshot-current
+WARM_IMAGE_IDENTITY="$EXPECTED_IMAGE"
+REGION=ord
+RUN_ID=test-run
+LEASED_PRIMARY_IDS=()
+LEASED_PRIMARY_NONCES=()
+mkdir -p "$FLEET_DIR"
+touch "$OWNED_CLONES_FILE"
+FLY() {{ printf '[{{"id":"{machine_id}","config":{{"image":"%s"}}}}]\n' "$EXPECTED_IMAGE"; }}
+pool_machine_state() {{ printf 'stopped\n'; }}
+fleet_machine_state() {{ printf 'stopped\n'; }}
+machine_storage_ready() {{ return 1; }}
+upgrade_pool_provenance_volume_bindings() {{ return 0; }}
+resume_pool_retirements() {{ return 0; }}
+sleep() {{ :; }}
+{provenance_functions}
+{provision_function}
+if provision_pool 1 >/dev/null 2>&1; then exit 71; fi
+printf 'unready-storage-rejected\n'
+""",
+        ],
+        env={
+            "POOL_FILE": str(pool_file),
+            "PROVENANCE_FILE": str(provenance_file),
+            "FLEET_DIR_PATH": str(fleet_dir),
+            "EXPECTED_IMAGE": image,
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["unready-storage-rejected"]
+
+
+def test_pool_retirement_resumes_volume_cleanup_after_machine_disappears(
+    tmp_path: Path,
+) -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    image_start = fleet.index("fleet_machine_image() {")
+    validator_end = fleet.index("\n}\n\nvalidate_tracked_pool_provenance()", image_start) + 3
+    provenance_functions = fleet[image_start:validator_end]
+    retirement_start = fleet.index("fleet_machine_volume_ids() {")
+    retirement_end = fleet.index("\n}\n\nprovision_pool()", retirement_start) + 3
+    retirement_functions = fleet[retirement_start:retirement_end]
+    retirement_file = tmp_path / "pool.retirement.tsv"
+    provenance_file = tmp_path / "pool.provenance.tsv"
+    volume_present_file = tmp_path / "volume-present"
+    operations_file = tmp_path / "operations"
+    image = "registry.example/bench@sha256:old"
+    provenance_file.write_text(f"abc111\twarm-old\tsnapshot-old\t{image}\tvol-old\n")
+    retirement_file.write_text(
+        f"abc111\tvol-old\twarm-old\tsnapshot-old\t{image}\tvol-old\n"
+    )
+    volume_present_file.write_text("1\n")
+    operations_file.write_text("")
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
+APP=bench-app
+POOL_RETIREMENT_FILE="$RETIREMENT_FILE"
+POOL_PROVENANCE_FILE="$PROVENANCE_FILE"
+WARM_ID=warm-current
+SNAP_ID=snapshot-current
+WARM_IMAGE_IDENTITY=registry.example/bench@sha256:current
+RUN_ID=test-run
+LEASED_PRIMARY_IDS=()
+LEASED_PRIMARY_NONCES=()
+pool_machine_state() {{ return 1; }}
+cloudbench_machine_lease_acquire_retry() {{ exit 81; }}
+FLY() {{
+  if [ "$1 $2" = "volumes list" ]; then
+    if [ "$(cat "$VOLUME_PRESENT_FILE")" = 1 ]; then printf '[{{"id":"vol-old"}}]\n'; else printf '[]\n'; fi
+    return
+  fi
+  if [ "$1 $2" = "volumes destroy" ]; then
+    printf '%s\n' "$3" >> "$OPERATIONS_FILE"
+    printf '0\n' > "$VOLUME_PRESENT_FILE"
+    return
+  fi
+  return 2
+}}
+sleep() {{ :; }}
+{provenance_functions}
+{retirement_functions}
+resume_pool_retirements
+printf 'remaining=%s\n' "$(grep -c . "$POOL_RETIREMENT_FILE" || true)"
+""",
+        ],
+        env={
+            "RETIREMENT_FILE": str(retirement_file),
+            "PROVENANCE_FILE": str(provenance_file),
+            "VOLUME_PRESENT_FILE": str(volume_present_file),
+            "OPERATIONS_FILE": str(operations_file),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "remaining=0" in result.stdout
+    assert operations_file.read_text().splitlines() == ["vol-old"]
+
+
+def test_pool_provisioning_never_retires_unverified_machine_ids(tmp_path: Path) -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    image_start = fleet.index("fleet_machine_image() {")
+    validator_end = fleet.index("\n}\n\nvalidate_tracked_pool_provenance()", image_start) + 3
+    provenance_functions = fleet[image_start:validator_end]
+    provision_start = fleet.index("provision_pool() {")
+    provision_end = fleet.index("\n}\n\nCLAIMED_POOL_FILE", provision_start) + 3
+    provision_function = fleet[provision_start:provision_end]
+    image = "registry.example/bench@sha256:recorded"
+
+    cases = {
+        "missing": "",
+        "duplicate": (
+            f"abc111\twarm-old\tsnapshot-old\t{image}\tvol-1\n"
+            f"abc111\twarm-old\tsnapshot-old\t{image}\tvol-1\n"
+        ),
+        "live-image-mismatch": f"abc111\twarm-old\tsnapshot-old\t{image}\tvol-1\n",
+        "unreadable-live-image": f"abc111\twarm-old\tsnapshot-old\t{image}\tvol-1\n",
+    }
+    for case_name, provenance_text in cases.items():
+        case_dir = tmp_path / case_name
+        case_dir.mkdir()
+        pool_file = case_dir / "pool.ids"
+        provenance_file = case_dir / "pool.provenance.tsv"
+        retirement_log = case_dir / "retired.ids"
+        pool_file.write_text("abc111\n")
+        provenance_file.write_text(provenance_text)
+        live_payload = (
+            "not-json"
+            if case_name == "unreadable-live-image"
+            else json.dumps(
+                [
+                    {
+                        "id": "abc111",
+                        "config": {
+                            "image": (
+                                "registry.example/bench@sha256:different"
+                                if case_name == "live-image-mismatch"
+                                else image
+                            )
+                        },
+                    }
+                ]
+            )
+        )
+
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"""set -uo pipefail
+APP=bench-app
+POOL_IDS_FILE="$POOL_FILE"
+POOL_PROVENANCE_FILE="$PROVENANCE_FILE"
+POOL_RETIREMENT_FILE="$CASE_DIR/pool.retirement.tsv"
+FLEET_DIR="$CASE_DIR/run"
+OWNED_CLONES_FILE="$FLEET_DIR/owned-clones.ids"
+WARM_ID=warm-current
+SNAP_ID=snapshot-current
+WARM_IMAGE_IDENTITY=registry.example/bench@sha256:current
+REGION=ord
+RUN_ID=test-run
+LEASED_PRIMARY_IDS=()
+LEASED_PRIMARY_NONCES=()
+mkdir -p "$FLEET_DIR"
+touch "$OWNED_CLONES_FILE"
+FLY() {{ printf '%s\n' "$LIVE_PAYLOAD"; }}
+pool_machine_state() {{ printf 'stopped\n'; }}
+upgrade_pool_provenance_volume_bindings() {{ return 0; }}
+resume_pool_retirements() {{ return 0; }}
+retire_pool_machine() {{ printf '%s\n' "$1" >> "$RETIREMENT_LOG"; }}
+{provenance_functions}
+{provision_function}
+if provision_pool 1 >/dev/null 2>&1; then exit 91; fi
+[ ! -e "$RETIREMENT_LOG" ] || exit 92
+printf 'rejected:%s\n' "$CASE_NAME"
+""",
+            ],
+            env={
+                "POOL_FILE": str(pool_file),
+                "PROVENANCE_FILE": str(provenance_file),
+                "CASE_DIR": str(case_dir),
+                "RETIREMENT_LOG": str(retirement_log),
+                "LIVE_PAYLOAD": live_payload,
+                "CASE_NAME": case_name,
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, f"{case_name}: {result.stderr}"
+        assert result.stdout.splitlines() == [f"rejected:{case_name}"]
+
+
+def test_corrupt_retirement_record_cannot_delete_machine_or_volume(tmp_path: Path) -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    image_start = fleet.index("fleet_machine_image() {")
+    validator_end = fleet.index("\n}\n\nvalidate_tracked_pool_provenance()", image_start) + 3
+    provenance_functions = fleet[image_start:validator_end]
+    retirement_start = fleet.index("fleet_machine_volume_ids() {")
+    retirement_end = fleet.index("\n}\n\nprovision_pool()", retirement_start) + 3
+    retirement_functions = fleet[retirement_start:retirement_end]
+    provenance_file = tmp_path / "pool.provenance.tsv"
+    retirement_file = tmp_path / "pool.retirement.tsv"
+    operations_file = tmp_path / "operations"
+    old_image = "registry.example/bench@sha256:old"
+    provenance_file.write_text(
+        f"abc111\twarm-old\tsnapshot-old\t{old_image}\tvol-owned\n"
+    )
+    retirement_file.write_text(
+        f"abc111\tvol-unrelated\twarm-old\tsnapshot-old\t{old_image}\tvol-owned\n"
+    )
+    operations_file.write_text("")
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
+APP=bench-app
+POOL_PROVENANCE_FILE="$PROVENANCE_FILE"
+POOL_RETIREMENT_FILE="$RETIREMENT_FILE"
+WARM_ID=warm-current
+SNAP_ID=snapshot-current
+WARM_IMAGE_IDENTITY=registry.example/bench@sha256:current
+RUN_ID=test-run
+LEASED_PRIMARY_IDS=()
+LEASED_PRIMARY_NONCES=()
+pool_machine_state() {{ printf 'stopped\n'; }}
+cloudbench_machine_lease_acquire_retry() {{ printf 'lease\n' >> "$OPERATIONS_FILE"; printf 'nonce\n'; }}
+cloudbench_machine_destroy_with_lease() {{ printf 'machine-destroy\n' >> "$OPERATIONS_FILE"; }}
+FLY() {{
+  if [ "$1 $2" = "machines list" ]; then
+    printf '[{{"id":"abc111","config":{{"image":"%s"}}}}]\n' "$OLD_IMAGE"
+    return
+  fi
+  if [ "$1 $2" = "volumes list" ]; then
+    printf '[{{"id":"vol-owned","attached_machine_id":"abc111"}},{{"id":"vol-unrelated"}}]\n'
+    return
+  fi
+  if [ "$1 $2" = "volumes destroy" ]; then printf 'volume-destroy\n' >> "$OPERATIONS_FILE"; return; fi
+  return 2
+}}
+{provenance_functions}
+{retirement_functions}
+if retire_pool_machine abc111 >/dev/null 2>&1; then exit 101; fi
+[ ! -s "$OPERATIONS_FILE" ] || exit 102
+printf 'corrupt-retirement-rejected\n'
+""",
+        ],
+        env={
+            "PROVENANCE_FILE": str(provenance_file),
+            "RETIREMENT_FILE": str(retirement_file),
+            "OPERATIONS_FILE": str(operations_file),
+            "OLD_IMAGE": old_image,
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["corrupt-retirement-rejected"]
 
 
 def test_fleet_children_cannot_replace_persistent_warm_state() -> None:
@@ -852,8 +1458,8 @@ def test_environment_refresh_serializes_shared_app_and_reconciles_pool_first() -
     assert "CLOUDBENCH_HOLD_APP_ENV_LOCK=1" in cloud
     assert cloud.count("assert_app_environment_lock_ownership || exit 1") >= 3
 
-    cleanup_start = fleet.index("cleanup() {")
-    cleanup_end = fleet.index("\n}", cleanup_start)
+    cleanup_start = fleet.index("cleanup_impl() {")
+    cleanup_end = fleet.index("\n}\ncleanup() {", cleanup_start)
     cleanup = fleet[cleanup_start:cleanup_end]
     assert cleanup.index("trap - EXIT") < cleanup.index("terminate_and_wait")
     assert cleanup.index("trap '' HUP INT TERM") < cleanup.index(
@@ -944,7 +1550,7 @@ def test_pool_claims_survive_command_substitution_and_stay_distinct(tmp_path: Pa
     claims_file = tmp_path / "run" / "claimed-pool.ids"
     global_claims = tmp_path / "global-claims"
     starts_file = tmp_path / "starts"
-    pool_file.write_text("abc123\ndef456\nfed789\n")
+    pool_file.write_text("abc123\nbad999\ndef456\nfed789\n")
 
     result = subprocess.run(
         [
@@ -957,8 +1563,9 @@ CLAIMED_POOL_FILE="$CLAIMS_FILE"
 POOL_CLAIMS_DIR="$GLOBAL_CLAIMS"
 UNAVAILABLE_POOL_IDS=(abc123)
 machine_storage_ready() {{ return 0; }}
+pool_machine_provenance_valid() {{ [ "$1" != bad999 ]; }}
+pool_machine_state() {{ [ "$1" = bad999 ] && return 1; printf 'stopped\\n'; }}
 FLY() {{
-  if [ "$1 $2" = "machine status" ]; then printf 'State stopped\\n'; return 0; fi
   if [ "$1 $2" = "machine start" ]; then printf '%s\\n' "$3" >> "$STARTS_FILE"; return 0; fi
   return 2
 }}
@@ -982,7 +1589,7 @@ printf '%s\\n%s\\n' "$first" "$second"
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == ["def456", "fed789"]
     assert claims_file.read_text().splitlines() == ["def456", "fed789"]
-    assert starts_file.read_text().splitlines() == ["def456", "fed789"]
+    assert not starts_file.exists()
 
 
 def test_pool_reconcile_fails_closed_on_falsy_non_list_machine_json(tmp_path: Path) -> None:
