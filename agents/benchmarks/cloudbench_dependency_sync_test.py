@@ -242,6 +242,7 @@ def test_fleet_waits_for_every_isolated_stack_before_releasing_benchmarks() -> N
         in fleet
     )
     assert '--timeout "$CHILD_RUN_TIMEOUT"' in fleet
+    assert "deadline=$(( $(date +%s) + START_BARRIER_WAIT_SECONDS ))" in fleet
     assert 'CHILD_MACHINE+=("$cid")' in fleet
     assert "isolated stacks reached the synchronized start barrier" in fleet
     assert "releasing synchronized start barrier" in fleet

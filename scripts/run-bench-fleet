@@ -957,7 +957,7 @@ echo ""
 release_start_barrier() {
     [ "$SYNCHRONIZED_START" = "1" ] || return 0
     local expected="${#CHILD_PIDS[@]}" ready deadline now out p mid
-    deadline=$(( $(date +%s) + 900 ))
+    deadline=$(( $(date +%s) + START_BARRIER_WAIT_SECONDS ))
     echo "⏸️  waiting for $expected isolated stacks at synchronized start barrier..."
     while :; do
         ready=0
