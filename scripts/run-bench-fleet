@@ -533,7 +533,9 @@ for bench in "${BENCHES[@]}"; do
         fi
         CLONE_IDS+=("$cid")   # only FRESH clones are destroyed on teardown; pool machines are returned
     fi
-    if ! cloudbench_wait_machine_startable fleet_machine_state "$cid" 60 2; then
+    # Snapshot forks are documented above as taking about 300s; allow twice
+    # that envelope for Fly to leave the transient `created` state.
+    if ! cloudbench_wait_machine_startable fleet_machine_state "$cid" 300 2; then
         echo "   ❌ machine=$cid never became startable; skipping $bench" >&2
         i=$((i + 1))
         continue
