@@ -1,4 +1,5 @@
 import { Prisma } from '@prisma/client';
+import { randomUUID } from 'node:crypto';
 
 import { prisma } from '../database';
 
@@ -10,20 +11,20 @@ export interface SmsSessionMessage {
   providerMessageId?: string;
 }
 
-function storedMessagesArray(): Prisma.Sql {
+function storedMessagesArray(column: Prisma.Sql = Prisma.sql`messages`): Prisma.Sql {
   return Prisma.sql`CASE
-    WHEN jsonb_typeof(messages) = 'array' THEN messages
-    WHEN jsonb_typeof(messages) = 'string' THEN COALESCE((messages #>> '{}')::jsonb, '[]'::jsonb)
+    WHEN jsonb_typeof(${column}) = 'array' THEN ${column}
+    WHEN jsonb_typeof(${column}) = 'string' THEN COALESCE((${column} #>> '{}')::jsonb, '[]'::jsonb)
     ELSE '[]'::jsonb
   END`;
 }
 
 async function ensureSession(userId: string): Promise<void> {
-  await prisma.smsSession.upsert({
-    where: { userId },
-    update: {},
-    create: { userId, messages: JSON.stringify([]) },
-  });
+  await prisma.$executeRaw`
+    INSERT INTO "SmsSession" (id, "userId", messages, "lastInboundSeq", "createdAt", "updatedAt")
+    VALUES (${randomUUID()}, ${userId}, to_jsonb('[]'::text), 0, NOW(), NOW())
+    ON CONFLICT ("userId") DO NOTHING
+  `;
 }
 
 /**
@@ -32,23 +33,38 @@ async function ensureSession(userId: string): Promise<void> {
  * or overwrite the user message that caused that run.
  */
 export async function recordInboundSms(userId: string, content: string): Promise<number> {
-  await ensureSession(userId);
+  const sessionMessages = storedMessagesArray(Prisma.sql`"SmsSession".messages`);
   const rows = await prisma.$queryRaw<Array<{ lastInboundSeq: number }>>`
-    UPDATE "SmsSession"
+    INSERT INTO "SmsSession" (id, "userId", messages, "lastInboundSeq", "createdAt", "updatedAt")
+    VALUES (
+      ${randomUUID()},
+      ${userId},
+      to_jsonb(jsonb_build_array(
+        jsonb_build_object(
+          'role', 'user',
+          'content', ${content},
+          'timestamp', NOW()::text,
+          'inboundSeq', 1
+        )
+      )::text),
+      1,
+      NOW(),
+      NOW()
+    )
+    ON CONFLICT ("userId") DO UPDATE
     SET
-      "lastInboundSeq" = "lastInboundSeq" + 1,
+      "lastInboundSeq" = "SmsSession"."lastInboundSeq" + 1,
       messages = to_jsonb((
-        ${storedMessagesArray()} || jsonb_build_array(
+        ${sessionMessages} || jsonb_build_array(
           jsonb_build_object(
             'role', 'user',
             'content', ${content},
             'timestamp', NOW()::text,
-            'inboundSeq', "lastInboundSeq" + 1
+            'inboundSeq', "SmsSession"."lastInboundSeq" + 1
           )
         )
       )::text),
       "updatedAt" = NOW()
-    WHERE "userId" = ${userId}
     RETURNING "lastInboundSeq"
   `;
   const sequence = rows[0]?.lastInboundSeq;

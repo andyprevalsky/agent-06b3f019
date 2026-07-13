@@ -404,22 +404,15 @@ async function testWriteCommit_startNewAgentCommitsBeforeUserSend() {
 
     // Session shape: only inbound user message + assistant reply persisted —
     // not the start_new_agent tool turn. Per WS-1.
-    const session = await prisma.smsSession.findUnique({ where: { userId } });
-    if (!session) {
-      throw new Error('Expected SmsSession to exist after run');
-    }
-    const messages = JSON.parse(session.messages) as { role?: string; content?: string }[];
-    const userMsgs = messages.filter((m) => m.role === 'user');
-    const asstMsgs = messages.filter((m) => m.role === 'assistant');
-    if (userMsgs.length !== 1 || asstMsgs.length !== 1) {
-      throw new Error(
-        `Expected exactly one user + one assistant message in session, got ` +
-          `user=${userMsgs.length} assistant=${asstMsgs.length}: ` +
-          JSON.stringify(
-            messages.map((m) => ({ role: m.role, content: m.content?.substring(0, 40) }))
-          )
-      );
-    }
+    const messages = await waitFor(async () => {
+      const session = await prisma.smsSession.findUnique({ where: { userId } });
+      if (!session) return null;
+      const parsed = JSON.parse(session.messages) as { role?: string; content?: string }[];
+      const userCount = parsed.filter((message) => message.role === 'user').length;
+      const assistantCount = parsed.filter((message) => message.role === 'assistant').length;
+      return userCount === 1 && assistantCount === 1 ? parsed : null;
+    });
+    const asstMsgs = messages.filter((message) => message.role === 'assistant');
     if (asstMsgs[0].content !== replyText) {
       throw new Error(
         `Expected assistant content to match fixture reply, got: ${asstMsgs[0].content?.substring(0, 80)}`

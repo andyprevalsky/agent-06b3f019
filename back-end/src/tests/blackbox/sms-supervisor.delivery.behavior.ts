@@ -2,6 +2,10 @@ import type { PrismaClient } from '@prisma/client';
 
 import { grep as userDataGrep } from '../../domains/data/service';
 import { executeGrepTool } from '../../providers/smsSupervisor/supervisorTools.grep';
+import {
+  parseSmsSessionMessages,
+  recordInboundSms,
+} from '../../providers/smsSupervisor/sessionStore';
 import { registerUserDataGrep } from '../../providers/userDataSearch';
 import {
   BASE_URL,
@@ -16,6 +20,38 @@ import {
   uniqueSmsPhone,
   waitFor,
 } from './sms-supervisor.helpers';
+
+export async function testConcurrentFirstInboundsCreateOneOrderedSession(prisma: PrismaClient) {
+  const phone = uniqueSmsPhone();
+  const userId = await provisionUserWithPhone(prisma, phone);
+  const messages = Array.from({ length: 12 }, (_, index) => `concurrent-inbound-${index}`);
+
+  try {
+    const sequences = await Promise.all(
+      messages.map((message) => recordInboundSms(userId, message))
+    );
+    const sortedSequences = [...sequences].sort((left, right) => left - right);
+    const expectedSequences = messages.map((_, index) => index + 1);
+    if (JSON.stringify(sortedSequences) !== JSON.stringify(expectedSequences)) {
+      throw new Error(`Expected unique sequences 1..12, got ${JSON.stringify(sequences)}`);
+    }
+
+    const session = await prisma.smsSession.findUnique({ where: { userId } });
+    if (!session) throw new Error('Expected one SMS session after concurrent first inbounds');
+    const stored = parseSmsSessionMessages(session.messages);
+    const inboundSequences = stored.map((message) => message.inboundSeq);
+    if (JSON.stringify(inboundSequences) !== JSON.stringify(expectedSequences)) {
+      throw new Error(
+        `Expected stored inbound sequence order 1..12, got ${JSON.stringify(inboundSequences)}`
+      );
+    }
+    if (new Set(stored.map((message) => message.content)).size !== messages.length) {
+      throw new Error(`Expected all concurrent inbound bodies once, got ${JSON.stringify(stored)}`);
+    }
+  } finally {
+    await cleanupAgentScopedUser(prisma, userId);
+  }
+}
 
 export async function testSendUserMessage_continuesUntilSubstantiveResult(prisma: PrismaClient) {
   const probe = await request(`${BASE_URL}/api/test/captures`);
@@ -141,6 +177,10 @@ export async function testGrep_fanOutPaginationMetadataAligns(prisma: PrismaClie
 
 export function smsDeliveryBehaviorCases(prisma: PrismaClient) {
   return [
+    {
+      name: 'session -- concurrent first inbounds create one ordered transcript',
+      fn: () => testConcurrentFirstInboundsCreateOneOrderedSession(prisma),
+    },
     {
       name: 'grep -- mixed-source pagination metadata stays aligned',
       fn: () => testGrep_fanOutPaginationMetadataAligns(prisma),

@@ -77,6 +77,28 @@ cloudbench_validate_browser_provider_contract() {
   echo "browser provider contract verified: backend=$prod_backend worker=$prod_worker"
 }
 
+cloudbench_retry_command() {
+  local max_attempts="$1" retry_delay_seconds="$2"
+  shift 2
+
+  local attempt=1 status
+  while true; do
+    if "$@"; then
+      return 0
+    else
+      status=$?
+    fi
+
+    if [ "$attempt" -ge "$max_attempts" ]; then
+      return "$status"
+    fi
+
+    echo "Transient command failure (attempt $attempt/$max_attempts, exit=$status); retrying in ${retry_delay_seconds}s..." >&2
+    sleep "$retry_delay_seconds"
+    attempt=$((attempt + 1))
+  done
+}
+
 cloudbench_controller_lock_acquire() {
   local path="$1"
   mkdir -p "$(dirname "$path")"

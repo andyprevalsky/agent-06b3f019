@@ -42,6 +42,25 @@ if cloudbench_verify_env_file "$agents_env" "$backend_digest" agents >/dev/null 
   fail "a mismatched injected env digest must fail closed"
 fi
 
+retry_attempts=0
+fail_twice_then_succeed() {
+  retry_attempts=$((retry_attempts + 1))
+  [ "$retry_attempts" -ge 3 ]
+}
+cloudbench_retry_command 3 0 fail_twice_then_succeed >/dev/null 2>&1 ||
+  fail "a transient command must succeed within its retry budget"
+[ "$retry_attempts" -eq 3 ] || fail "a transient command must be retried exactly to success"
+
+retry_attempts=0
+always_fail() {
+  retry_attempts=$((retry_attempts + 1))
+  return 9
+}
+if cloudbench_retry_command 3 0 always_fail >/dev/null 2>&1; then
+  fail "a permanently failing command must fail closed"
+fi
+[ "$retry_attempts" -eq 3 ] || fail "a permanent failure must exhaust its retry budget"
+
 lock_file="$TMP_ROOT/controller.lock"
 cloudbench_controller_lock_acquire "$lock_file"
 if bash -c 'source "$1"; cloudbench_controller_lock_acquire "$2"' _ "$HELPER_SRC" "$lock_file"; then
@@ -62,6 +81,9 @@ require_text "$ROOT_DIR/scripts/run-bench-fleet" \
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'FLY secrets set --stage -a "$APP"' \
   "Machines API apps must stage the app-level environment before machine updates"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'cloudbench_retry_command 3 5' \
+  "machine environment activation must retry transient Fly API failures"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'FLY machine update "$machine_id" -a "$APP" --skip-start --yes' \
   "every existing benchmark machine must activate staged secrets without starting"

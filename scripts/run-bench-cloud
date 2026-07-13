@@ -431,7 +431,8 @@ for machine in json.load(sys.stdin) or []:
     while IFS= read -r machine_id; do
         [ -n "$machine_id" ] || continue
         echo "   activating env on machine $machine_id (skip-start)"
-        FLY machine update "$machine_id" -a "$APP" --skip-start --yes 2>&1 | sed 's/^/      /' || {
+        cloudbench_retry_command 3 5 \
+            FLY machine update "$machine_id" -a "$APP" --skip-start --yes 2>&1 | sed 's/^/      /' || {
             echo "❌ Failed to activate environment on machine $machine_id" >&2
             exit 1
         }
