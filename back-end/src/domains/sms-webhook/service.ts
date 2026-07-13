@@ -18,6 +18,7 @@ import { sendSms } from '../../providers/smsQueue';
 import { createSignupBonusCredit } from '../../providers/credits';
 import { handleSmsSupervisorMessage } from '../../providers/smsSupervisor';
 import { createLogger } from '../../providers/logger';
+import { recordInboundSms } from '../../providers/smsSupervisor/sessionStore';
 
 const log = createLogger('SMS Webhook');
 
@@ -133,11 +134,15 @@ export async function routeToSupervisor(
   attachments: SurgeAttachment[],
   requestStart: number
 ): Promise<void> {
-  // Atomically bump the per-user inbound counter and capture the new value as
-  // `mySeq`. The supervisor re-reads this value at attempt_completion time —
-  // if a newer SMS has bumped it past `mySeq`, this run discards its queued
-  // writes and stays silent. See providers/smsSupervisor/supervisorHandler.ts.
-  const mySeq = await repo.bumpInboundSeq(userId);
+  // Persist first, before any asynchronous supervisor work. Advancing the
+  // sequence and appending this exact inbound record happen atomically.
+  const persistedInbound = [
+    messageBody,
+    attachments.length > 0 ? `[${attachments.length} attachment(s)]` : '',
+  ]
+    .filter((part) => part !== '')
+    .join('\n\n');
+  const mySeq = await recordInboundSms(userId, persistedInbound);
 
   log.info('Routing to SMS Supervisor', {
     userId,
@@ -155,6 +160,7 @@ export async function routeToSupervisor(
     phoneNumber: fromPhone,
     inboundMessage: messageBody,
     mySeq,
+    inboundAlreadyPersisted: true,
     attachments,
     abortSignal: abortController.signal,
   })

@@ -5,6 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "cloudbench-sync-deps.sh"
+ENV_HELPER_SCRIPT = ROOT / "scripts" / "lib" / "cloudbench-env.sh"
 ARTIFACT_SCRIPT = ROOT / "scripts" / "cloudbench-current-run-artifact.py"
 FETCH_SCRIPT = ROOT / "scripts" / "cloudbench-fetch-ref.sh"
 SNAPSHOT_SCRIPT = ROOT / "scripts" / "cloudbench-select-snapshot.py"
@@ -27,6 +28,10 @@ def _write_manifests(root: Path, *, lock: str = "same", requirements: str = "sam
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{}\n")
     (root / "package-lock.json").write_text(lock)
+    (root / "back-end/package-lock.json").write_text(lock)
+    helper = root / "scripts/lib/cloudbench-env.sh"
+    helper.parent.mkdir(parents=True, exist_ok=True)
+    helper.write_text(ENV_HELPER_SCRIPT.read_text())
     req = root / "agents/requirements.txt"
     req.parent.mkdir(parents=True, exist_ok=True)
     req.write_text(requirements)
