@@ -127,57 +127,64 @@ PY
 
 snapshot_loop() {  # snapshot_loop <request_id> <hub_run_id> <start_epoch> <artifact_root> <local_artifact_root> <task_names>
     local req_id="$1" hub_run_id="$2" start_epoch="$3" artifact_root="$4" local_artifact_root="$5" task_names="$6"
-    while :; do
-        sleep 15
-        HUB_CODE_SUMMARY="$CODE_SUMMARY" python3 - "$HUB_URL" "$BACKEND_API_KEY" "$USER_ID" "$req_id" "$hub_run_id" "$start_epoch" "$artifact_root" "$local_artifact_root" "$task_names" <<'PY' || true
-import collections, glob, json, os, sys, urllib.request
+    # This function is launched in the background. exec makes SNAP_PID the
+    # uploader itself (not a wrapper shell with a python child), so teardown can
+    # terminate and reap the complete snapshot loop before a terminal PATCH.
+    HUB_CODE_SUMMARY="$CODE_SUMMARY" exec python3 - "$HUB_URL" "$BACKEND_API_KEY" "$USER_ID" "$req_id" "$hub_run_id" "$start_epoch" "$artifact_root" "$local_artifact_root" "$task_names" <<'PY'
+import collections, glob, json, os, sys, time, urllib.request
 hub, key, user, req_id, run_id, start, artifact_root, local_artifact_root, expected_raw = sys.argv[1:10]
 start = float(start)
-# Only inspect this request's output root. Mtime alone is not ownership: another
-# benchmark producer can write a newer canonical artifact while this request is
-# running or unwinding.
-cards = [p for p in
-         glob.glob(os.path.join(local_artifact_root, "report-card.json")) +
-         glob.glob(os.path.join(artifact_root, "fleet", "runs", "*", "_batch", "report-card.json"))
-         if os.path.getmtime(p) > start]
-if not cards:
-    sys.exit(0)
-card = json.load(open(max(cards, key=os.path.getmtime)))
 expected = collections.Counter(expected_raw.split())
-actual = collections.Counter(row.get("name") for row in card.get("per_task") or [])
-if actual != expected:
-    sys.exit(0)
-tasks = []
-for row in card.get("per_task") or []:
-    url = row.get("agent_url") or ""
-    agent_id = url.split("agent-id=")[-1] if "agent-id=" in url else None
-    dur = row.get("duration_s")
-    cost = row.get("cost_usd")
-    tasks.append({
-        "name": row.get("name"), "status": row.get("status") or "running",
-        "passed": True if row.get("status") == "passed" else (False if row.get("status") in ("failed", "error") else None),
-        "agent_id": agent_id, "duration_seconds": dur,
-        "cost_cents": round(cost * 100, 2) if isinstance(cost, (int, float)) else None,
-        "world_model_mode": row.get("world_model_mode"),
-        "fast_mode": bool(row.get("fast_mode")),
-    })
-bundle = {"run_id": run_id, "timestamp": card.get("timestamp") or "", "suite": "hub-dispatch",
-          "source": "hub-poller", "tasks": tasks,
-          "code": os.environ.get("HUB_CODE_SUMMARY") or None,
-          "elapsed_s": card.get("elapsed_s"),
-          "cost": card.get("cost"), "metadata": card.get("metadata")}
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 def post(path, body, method="POST"):
     req = urllib.request.Request(hub.rstrip("/") + path, data=json.dumps(body).encode(),
         headers={"X-API-Key": key, "X-User-Id": user, "Content-Type": "application/json"},
         method=method)
     opener.open(req, timeout=20).read()
-post("/api/benchmarks/runs?live=1", bundle)
-# the run-request update route is PATCH-only (urllib defaults data= to POST)
-post(f"/api/benchmarks/run-requests/{req_id}",
-     {"action": "progress", "progress": card, "run_id": run_id}, method="PATCH")
+
+while True:
+    time.sleep(15)
+    try:
+        # Only inspect this request's output root. Mtime alone is not ownership:
+        # another benchmark producer can write a newer canonical artifact while
+        # this request is running or unwinding.
+        cards = [p for p in
+                 glob.glob(os.path.join(local_artifact_root, "report-card.json")) +
+                 glob.glob(os.path.join(artifact_root, "fleet", "runs", "*", "_batch", "report-card.json"))
+                 if os.path.getmtime(p) > start]
+        if not cards:
+            continue
+        card = json.load(open(max(cards, key=os.path.getmtime)))
+        actual = collections.Counter(row.get("name") for row in card.get("per_task") or [])
+        if actual != expected:
+            continue
+        tasks = []
+        for row in card.get("per_task") or []:
+            url = row.get("agent_url") or ""
+            agent_id = url.split("agent-id=")[-1] if "agent-id=" in url else None
+            dur = row.get("duration_s")
+            cost = row.get("cost_usd")
+            tasks.append({
+                "name": row.get("name"), "status": row.get("status") or "running",
+                "passed": True if row.get("status") == "passed" else (False if row.get("status") in ("failed", "error") else None),
+                "agent_id": agent_id, "duration_seconds": dur,
+                "cost_cents": round(cost * 100, 2) if isinstance(cost, (int, float)) else None,
+                "world_model_mode": row.get("world_model_mode"),
+                "fast_mode": bool(row.get("fast_mode")),
+            })
+        bundle = {"run_id": run_id, "timestamp": card.get("timestamp") or "", "suite": "hub-dispatch",
+                  "source": "hub-poller", "tasks": tasks,
+                  "code": os.environ.get("HUB_CODE_SUMMARY") or None,
+                  "elapsed_s": card.get("elapsed_s"),
+                  "cost": card.get("cost"), "metadata": card.get("metadata")}
+        post("/api/benchmarks/runs?live=1", bundle)
+        # the run-request update route is PATCH-only (urllib defaults data= to POST)
+        post(f"/api/benchmarks/run-requests/{req_id}",
+             {"action": "progress", "progress": card, "run_id": run_id}, method="PATCH")
+    except Exception:
+        # Snapshot upload is best-effort; the terminal result remains authoritative.
+        pass
 PY
-    done
 }
 
 # The snapshot_loop child must never outlive the poller: an interrupt (or a
@@ -186,7 +193,10 @@ PY
 # happy path and the exit trap — reaps whichever snapshot loop is live.
 SNAP_PID=""
 kill_snapshot_loop() {
-    [ -n "${SNAP_PID:-}" ] && kill "$SNAP_PID" 2>/dev/null || true
+    if [ -n "${SNAP_PID:-}" ]; then
+        kill "$SNAP_PID" 2>/dev/null || true
+        wait "$SNAP_PID" 2>/dev/null || true
+    fi
     SNAP_PID=""
 }
 poller_cleanup() {
@@ -237,10 +247,10 @@ process_request() {  # process_request <request_json>
 
     snapshot_loop "$req_id" "$hub_run_id" "$start_epoch" "$artifact_root" "$local_artifact_root" "$task_names" & SNAP_PID=$!
 
-    local runner_args=()
+    local runner_args=() task_args=()
     [ "$LOCAL_RUNNER" = "1" ] && runner_args+=(--local)
-    # shellcheck disable=SC2086
-    runner_args+=($task_names)
+    read -r -a task_args <<< "$task_names"
+    runner_args+=("${task_args[@]}")
     [ "$LOCAL_RUNNER" = "1" ] && runner_args+=(--run-id "hub-$req_id")
     # --sim-on is a cloud-fleet flag; the local runner derives sim from the
     # task catalog (world_model_mode), so only pass it through for fleet runs.

@@ -37,8 +37,8 @@
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT_DIR"
-# shellcheck source=lib/cloudbench-env.sh
+cd "$ROOT_DIR" || exit
+# shellcheck source=scripts/lib/cloudbench-env.sh
 source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
 MACHINE_READINESS_SCRIPT="$ROOT_DIR/scripts/cloudbench-machine-readiness.py"
 
@@ -703,11 +703,11 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
         if [ "$want" -gt "$cur" ]; then
             local n=$((want - cur)) k
             echo "  ⤴️  [$bench] scale up +$n (desired=$desired, pool=$cur)"
-            for k in $(seq 1 "$n"); do provision_worker "$bench" "$ws" "$cid" "$pip" "$sim" "$out"; done
+            for ((k = 0; k < n; k++)); do provision_worker "$bench" "$ws" "$cid" "$pip" "$sim" "$out"; done
         elif [ "$want" -lt "$cur" ]; then
             local n=$((cur - want)) k
             echo "  ⤵️  [$bench] scale down -$n (desired=$desired, pool=$cur)"
-            for k in $(seq 1 "$n"); do
+            for ((k = 0; k < n; k++)); do
                 local wid; wid="$(tail -1 "$out/worker-clones.ids" 2>/dev/null)"
                 [ -n "$wid" ] || break
                 # Only drop the id from tracking once the destroy is CONFIRMED —
@@ -833,8 +833,9 @@ cp -f "$ROOT_DIR/agents/benchmarks/dashboard.html" "$UNIFIED_DIR/dashboard.html"
     printf ']'
 } > "$UNIFIED_DIR/benches.json"
 (
+    report_card_path="$UNIFIED_DIR/report-card.json"
     while :; do
-        FLEET_DIR="$FLEET_DIR" UNIFIED_DIR="$UNIFIED_DIR" DASH_BASE="$DASH_BASE" python3 - "$UNIFIED_DIR/report-card.json" <<'PY' 2>/dev/null || true
+        FLEET_DIR="$FLEET_DIR" UNIFIED_DIR="$UNIFIED_DIR" DASH_BASE="$DASH_BASE" python3 - "$report_card_path" <<'PY' 2>/dev/null || true
 import json, os, sys
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse

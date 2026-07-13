@@ -463,6 +463,107 @@ async function legForeignArtifactIsolation(tmp: string): Promise<void> {
   }
 }
 
+async function legSnapshotStopsBeforeTerminal(tmp: string): Promise<void> {
+  const stub = writeStubRunner(tmp, 'pass');
+  let runId: string | null = null;
+  let poller: ChildProcess | null = null;
+  let snapshotStarted = false;
+  let terminalSeen = false;
+  let staleProgressAfterTerminal = false;
+  const heldSnapshotTimers = new Set<NodeJS.Timeout>();
+
+  // Hold the live-snapshot response until after the runner exits. A leaked
+  // uploader will then send its progress PATCH after the terminal PATCH; a
+  // correctly reaped uploader disappears before the held response is released.
+  const proxy = http.createServer((req, res) => {
+    const requestPath = req.url ?? '';
+    const forward = (body?: Buffer): void => {
+      const upstreamHeaders = { ...req.headers };
+      if (body !== undefined) upstreamHeaders['content-length'] = String(body.length);
+      const upstream = http.request(
+        `${BASE_URL}${requestPath}`,
+        { method: req.method, headers: upstreamHeaders },
+        (response) => {
+          res.writeHead(response.statusCode ?? 502, response.headers);
+          response.pipe(res);
+        }
+      );
+      upstream.on('error', () => {
+        if (!res.headersSent) res.writeHead(502);
+        res.end();
+      });
+      if (body === undefined) req.pipe(upstream);
+      else upstream.end(body);
+    };
+
+    if (req.method === 'POST' && requestPath.startsWith('/api/benchmarks/runs?live=1')) {
+      snapshotStarted = true;
+      req.resume();
+      const timer = setTimeout(() => {
+        heldSnapshotTimers.delete(timer);
+        if (res.destroyed) return;
+        res.writeHead(201, { 'Content-Type': 'application/json' });
+        res.end('{}');
+      }, 7_000);
+      heldSnapshotTimers.add(timer);
+      return;
+    }
+
+    if (req.method === 'PATCH' && requestPath.includes('/api/benchmarks/run-requests/')) {
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      req.on('end', () => {
+        const body = Buffer.concat(chunks);
+        try {
+          const action = (JSON.parse(body.toString()) as { action?: string }).action;
+          if (action === 'complete' || action === 'fail') terminalSeen = true;
+          if (action === 'progress' && terminalSeen) staleProgressAfterTerminal = true;
+        } catch {
+          // The backend remains authoritative for malformed-request handling.
+        }
+        forward(body);
+      });
+      return;
+    }
+
+    forward();
+  });
+  await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+  const address = proxy.address();
+  const proxyUrl = `http://127.0.0.1:${
+    typeof address === 'object' && address !== null ? address.port : 0
+  }`;
+
+  try {
+    const created = await api('POST', '/api/benchmarks/run-requests', {
+      task_names: ['chat-mode'],
+      scope: SCOPE,
+    });
+    assert(created.status === 201, `dispatch failed: ${created.status}`);
+    const request = (created.data as { request: RequestRow }).request;
+    runId = request.runId;
+
+    poller = startPoller(stub, path.join(tmp, 'poller-snapshot-teardown.log'), proxyUrl);
+    await within('snapshot upload enters proxy', 30_000, async () => snapshotStarted || null);
+    await within('request completes after snapshot cancellation', 60_000, async () => {
+      const row = await getRequest(request.id);
+      return row.status === 'completed' ? row : null;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 8_000));
+
+    assert(terminalSeen, 'terminal completion PATCH never reached the hub');
+    assert(
+      !staleProgressAfterTerminal,
+      'snapshot uploader survived completion and sent stale progress after the terminal PATCH'
+    );
+  } finally {
+    for (const timer of heldSnapshotTimers) clearTimeout(timer);
+    await stopPoller(poller);
+    proxy.close();
+    await cleanup(runId);
+  }
+}
+
 async function legHubOutageSpool(tmp: string): Promise<void> {
   // Simulate the hub dying mid-run (the exact incident class: backend down at
   // completion time). The poller must survive, spool the completion, and a
@@ -550,6 +651,7 @@ async function main(): Promise<void> {
     ['failure honesty: runner crash → failed + error + dashboard reflects', legFailureHonesty],
     ['late poller: queued is visible, then still picked up', legLatePollerPickup],
     ['artifact isolation: newer foreign bundle is rejected', legForeignArtifactIsolation],
+    ['snapshot uploader is reaped before terminal completion', legSnapshotStopsBeforeTerminal],
     ['hub outage at completion: poller survives, spools, flushes on recovery', legHubOutageSpool],
   ];
   const results: StepResult[] = [];
