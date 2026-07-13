@@ -170,6 +170,9 @@ function startPoller(stubPath: string, log: string, hubUrl: string = BASE_URL): 
       RUN_BENCH_BIN: stubPath,
       POLL_INTERVAL: '2',
       HUB_CLAIM_SCOPE: SCOPE,
+      // Catalog export is production behavior, not part of this pipeline
+      // contract. Keep the black-box hermetic so it cannot rewrite source.
+      HUB_SKIP_CATALOG_EXPORT: '1',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });

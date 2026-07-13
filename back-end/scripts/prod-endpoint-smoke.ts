@@ -1,5 +1,4 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
 /**
  * Light multi-domain endpoint smoke for a running backend (defaults to prod).
  *
@@ -17,7 +16,7 @@
  * alive and did not crash" — we are catching server crashes and schema/migration
  * drift, not asserting business results.
  *
- * Runs read-only GETs only. Safe against prod.
+ * Runs read-only GETs plus OPTIONS preflights. Safe against prod.
  *
  * Usage:
  *   npx tsx scripts/prod-endpoint-smoke.ts
@@ -32,6 +31,7 @@
  *   SMOKE_USER_ID    X-User-Id            (default: shared dev test user, see CLAUDE.md)
  */
 import { config } from 'dotenv';
+import { runAuthCorsPreflights } from '../src/providers/corsSmoke';
 config();
 
 const BASE_URL = (process.env.SMOKE_BASE_URL ?? 'https://navi-j9a9.onrender.com').replace(
@@ -130,7 +130,10 @@ function isFailure(r: ProbeResult): boolean {
 
 async function main(): Promise<void> {
   console.log(`Endpoint smoke against ${BASE_URL} (user ${USER_ID.slice(0, 8)})\n`);
-  const results = await Promise.all(PROBES.map(runProbe));
+  const [results, corsResults] = await Promise.all([
+    Promise.all(PROBES.map(runProbe)),
+    runAuthCorsPreflights(BASE_URL),
+  ]);
 
   let failed = 0;
   for (const r of results) {
@@ -142,13 +145,21 @@ async function main(): Promise<void> {
     if (fail) console.log(`       ${r.probe.path}`);
   }
 
-  console.log(`\n${results.length - failed}/${results.length} endpoints healthy.`);
+  for (const result of corsResults) {
+    if (!result.ok) failed++;
+    const mark = result.ok ? '✅' : '❌';
+    const status = result.status === null ? 'ERR' : String(result.status);
+    console.log(`  ${mark} ${status.padEnd(18)} CORS ${result.origin} → ${result.path}`);
+    if (!result.ok) console.log(`       ${result.error ?? 'unknown preflight failure'}`);
+  }
+
+  const totalChecks = results.length + corsResults.length;
+  console.log(`\n${totalChecks - failed}/${totalChecks} production checks healthy.`);
   if (failed > 0) {
     console.error(
-      `\n❌ ${failed} endpoint(s) returned 5xx / network error / unexpected status.\n` +
-        `   A 5xx here is a live prod incident — most likely a schema/migration\n` +
-        `   mismatch (deployed code queries a table/column the DB lacks) or a bad\n` +
-        `   env var. Check prod logs for "does not exist" / "prisma:error".`
+      `\n❌ ${failed} production check(s) failed.\n` +
+        `   A failed endpoint or CORS preflight is a live prod incident. Check\n` +
+        `   Render configuration and logs before promoting the deployment.`
     );
     process.exit(1);
   }

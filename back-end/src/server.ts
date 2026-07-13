@@ -63,6 +63,7 @@ import { createLogger } from './providers/logger';
 import { installFetchCapture, captureTokenMiddleware } from './providers/fetchCapture';
 import { tracingMiddleware } from './providers/tracing';
 import { getTemporalClient } from './providers/temporal';
+import { resolveAllowedOrigins } from './providers/corsConfig';
 
 // System tools available to all Rose agents (mirrors the live tool registry in
 // agents/tools/). Drives the public Bazaar listing description below.
@@ -169,19 +170,9 @@ app.use(
   })
 ); // Increased to handle large encrypted payloads
 
-// CORS configuration - allow all localhost origins for development
-const defaultOrigins = [
-  'http://localhost:8080',
-  'http://127.0.0.1:8080',
-  'http://localhost:5173',
-  'http://localhost:5174',
-  'http://localhost:3002',
-  'http://localhost:8081',
-];
-
-const allowedOrigins = process.env.ALLOWED_ORIGINS
-  ? process.env.ALLOWED_ORIGINS.split(',').map((o) => o.trim())
-  : defaultOrigins;
+// Production must explicitly authorize both public web origins. A missing or
+// partial value aborts startup so Render cannot promote a login-breaking release.
+const allowedOrigins = resolveAllowedOrigins(process.env);
 
 log.info('CORS Configuration', { allowed_origins: allowedOrigins.join(', ') });
 

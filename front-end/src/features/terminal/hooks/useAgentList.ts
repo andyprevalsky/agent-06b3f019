@@ -1,5 +1,9 @@
 /**
  * Terminal feature — agent list loading and polling hook.
+ *
+ * Request state:
+ *   IDLE --loadAgents()--> LOADING --settled--> IDLE
+ *   IDLE --cannot submit goals----------------> IDLE
  */
 
 import { useState, useEffect, useCallback } from 'react';
@@ -13,23 +17,19 @@ import type { Agent } from '../types';
 export function useAgentList(canSubmitGoals: boolean) {
   const { toast } = useToast();
   const [agents, setAgents] = useState<Agent[]>([]);
-  const [isLoadingAgents, setIsLoadingAgents] = useState(true);
-  const [isFirstLoad, setIsFirstLoad] = useState(true);
+  const [isLoadingAgents, setIsLoadingAgents] = useState(false);
 
   const loadAgents = useCallback(async () => {
+    setIsLoadingAgents(true);
     try {
-      if (isFirstLoad) setIsLoadingAgents(true);
       const fetched = await fetchAgents();
       setAgents(fetched);
     } catch (_err: unknown) {
       toast({ title: 'Error', description: 'Failed to load agents', variant: 'destructive' });
     } finally {
-      if (isFirstLoad) {
-        setIsLoadingAgents(false);
-        setIsFirstLoad(false);
-      }
+      setIsLoadingAgents(false);
     }
-  }, [isFirstLoad, toast]);
+  }, [toast]);
 
   useEffect(() => {
     if (canSubmitGoals) void loadAgents();
