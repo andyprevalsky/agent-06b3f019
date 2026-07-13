@@ -4,12 +4,12 @@
  * Provides the LLM-powered SMS interface for managing agents via text message.
  */
 
+export { handleSmsSupervisorMessage } from './supervisorHandler';
 export {
-  handleSmsSupervisorMessage,
   setSupervisorFixtureOverride,
   clearSupervisorFixtureOverride,
   BYPASS_FIXTURE_REAL_LLM,
-} from './supervisorHandler';
+} from './supervisorFixtures';
 export type { SmsSupervisorResult } from './supervisorHandler';
 export { buildSmsContext } from './contextBuilder';
 export { TOOL_SCHEMAS, dispatchToolCall, commitPendingWrites } from './supervisorTools';

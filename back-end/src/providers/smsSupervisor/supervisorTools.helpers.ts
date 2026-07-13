@@ -14,6 +14,58 @@ import { createLogger } from '../logger';
 
 const log = createLogger('SmsSupervisorTools');
 
+const REPLY_INTENT_STOP_WORDS = new Set([
+  'agent',
+  'task',
+  'call',
+  'ask',
+  'tell',
+  'reply',
+  'message',
+  'please',
+  'about',
+  'with',
+  'that',
+  'this',
+  'from',
+  'have',
+  'what',
+  'when',
+  'where',
+]);
+
+function intentKeywords(value: string): Set<string> {
+  return new Set(
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ')
+      .split(' ')
+      .filter((word) => word.length >= 3 && !REPLY_INTENT_STOP_WORDS.has(word))
+  );
+}
+
+function referencesGoal(message: string, goal: string): boolean {
+  const messageWords = intentKeywords(message);
+  return [...intentKeywords(goal)].some((word) => messageWords.has(word));
+}
+
+/** Require the current SMS—not ambient agent state—to justify an agent reply. */
+export function smsIntendsAgentReply(params: {
+  currentUserMessage: string;
+  visibleSessionHistory: string[];
+  agentGoal: string;
+}): boolean {
+  if (referencesGoal(params.currentUserMessage, params.agentGoal)) return true;
+  const isShortConfirmation =
+    /^(yes|yep|yeah|ok|okay|sure|approved?|go ahead|do it|proceed|sounds good)[.!\s]*$/i.test(
+      params.currentUserMessage.trim()
+    );
+  if (!isShortConfirmation) return false;
+  return params.visibleSessionHistory
+    .slice(-4)
+    .some((message) => referencesGoal(message, params.agentGoal));
+}
+
 /**
  * Resolve a 6-char prefix or full UUID to the user's agent row, scoped to the
  * given userId so SMS never reaches across tenants. Returns null when nothing

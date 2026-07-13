@@ -1,14 +1,16 @@
 /**
  * SMS Supervisor Tools
  *
- * 7 tools available to the SMS supervisor LLM:
+ * 9 tools available to the SMS supervisor LLM:
  * 1. reply_to_agent — Send a reply to an agent (answers questions, approves/rejects write-locks)
  * 2. kill_agent — Terminate an agent and all sub-agents
  * 3. increase_budget — Increase an agent's cost limit
  * 4. start_new_agent — Create and start a new agent
  * 5. web_search — Search the web for information
  * 6. grep — Search the user's local data (messages, network, transactions, documents)
- * 7. attempt_completion — Send final SMS to user (loop terminator)
+ * 7. get_environment — Refresh runtime agent/environment state
+ * 8. send_user_message — Send an SMS without ending the run
+ * 9. attempt_completion — End a run after at least one successful send
  *
  * Each tool has a JSON schema for the LLM and an executor function.
  * All executors log extensively at boundaries.
@@ -22,7 +24,11 @@ import { executeWebSearch } from '../chat/chatTools';
 import { getAgentUrl } from '../smsTemplates';
 import { createMessage } from '../messages';
 import { createLogger } from '../logger';
-import { deleteAgentRecursive, resolveAgentPrefix } from './supervisorTools.helpers';
+import {
+  deleteAgentRecursive,
+  resolveAgentPrefix,
+  smsIntendsAgentReply,
+} from './supervisorTools.helpers';
 import { executeGrepTool, GrepArgs } from './supervisorTools.grep';
 
 const log = createLogger('SmsSupervisorTools');
@@ -50,6 +56,12 @@ export interface ToolResult {
   success: boolean;
   result: string;
   error?: string;
+}
+
+export interface ToolInvocationContext {
+  currentUserMessage: string;
+  visibleSessionHistory: string[];
+  pendingAttentionRequestIds: string[];
 }
 
 // Per-tool argument types (validated upstream via JSON schema)
@@ -93,16 +105,16 @@ interface WebSearchArgs {
 // Read-only tools run inline so the model sees their results within the same
 // LLM round-trip. Write tools (start_new_agent, kill_agent, increase_budget,
 // reply_to_agent) are NEVER executed inside the loop — they only get queued
-// to a per-run `PendingOp[]` buffer. The supervisor handler later calls
-// `commitPendingWrites` exactly once, at attempt_completion, after re-checking
-// that no newer inbound SMS arrived. If the gate denies the commit, the buffer
-// is discarded; no side effect ever fires.
+// to a per-run `PendingOp[]` buffer. The supervisor handler flushes that buffer
+// immediately before the next user-visible send, or as a final flush when an
+// already-messaged run terminates. Every flush first re-checks that no newer
+// inbound SMS arrived. If the gate denies the commit, no side effect fires.
 //
 // This gives us:
 //   - Natural debounce: a follow-up SMS while a run is mid-flight invalidates
 //     the queued writes; only the latest run produces side effects + reply.
-//   - Atomic per-turn commit: every queued op fires together with the SMS, or
-//     none of them do.
+//   - Ordered user visibility: queued ops are applied before the SMS that
+//     reports their outcome.
 //   - Idempotency without per-tool rollback: writes never run speculatively,
 //     so there's nothing to undo on abort.
 
@@ -120,7 +132,8 @@ export type PendingOp =
 export async function dispatchToolCall(
   toolCall: ToolCall,
   userId: string,
-  pendingWrites: PendingOp[]
+  pendingWrites: PendingOp[],
+  invocationContext?: ToolInvocationContext
 ): Promise<ToolResult> {
   const startTime = Date.now();
   const { tool, arguments: args } = toolCall;
@@ -135,7 +148,8 @@ export async function dispatchToolCall(
         result = await validateReplyToAgent(
           args as unknown as ReplyToAgentArgs,
           userId,
-          pendingWrites
+          pendingWrites,
+          invocationContext
         );
         break;
       case 'kill_agent':
@@ -160,6 +174,14 @@ export async function dispatchToolCall(
       case 'attempt_completion':
         // Loop terminator — the handler intercepts before reaching this point.
         result = { tool, success: true, result: 'Completion signaled' };
+        break;
+      case 'send_user_message':
+        // Delivery needs run sequence + phone context, so the handler owns it.
+        result = { tool, success: false, result: '', error: 'Delivery context unavailable' };
+        break;
+      case 'get_environment':
+        // Context construction lives in the handler to avoid a dispatcher cycle.
+        result = { tool, success: false, result: '', error: 'Environment context unavailable' };
         break;
       default:
         result = { tool, success: false, result: '', error: `Unknown tool: ${tool}` };
@@ -249,7 +271,8 @@ export async function commitPendingWrites(
 async function validateReplyToAgent(
   args: ReplyToAgentArgs,
   userId: string,
-  pendingWrites: PendingOp[]
+  pendingWrites: PendingOp[],
+  invocationContext?: ToolInvocationContext
 ): Promise<ToolResult> {
   const agent = await resolveAgentPrefix(args.agent_id_or_prefix, userId);
   if (!agent) {
@@ -258,6 +281,24 @@ async function validateReplyToAgent(
       success: false,
       result: '',
       error: `No agent found matching "${args.agent_id_or_prefix}"`,
+    };
+  }
+  const attentionMatches =
+    args.attention_request_id !== undefined &&
+    invocationContext?.pendingAttentionRequestIds.includes(args.attention_request_id) === true;
+  const currentSmsMatches =
+    invocationContext !== undefined &&
+    smsIntendsAgentReply({
+      currentUserMessage: invocationContext.currentUserMessage,
+      visibleSessionHistory: invocationContext.visibleSessionHistory,
+      agentGoal: agent.goal,
+    });
+  if (!attentionMatches && !currentSmsMatches) {
+    return {
+      tool: 'reply_to_agent',
+      success: false,
+      result: '',
+      error: 'Current SMS does not identify this agent task or a matching pending request',
     };
   }
   pendingWrites.push({ kind: 'reply_to_agent', args, agentId: agent.id });

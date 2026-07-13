@@ -1286,12 +1286,9 @@ model SmsSession {
   id             String   @id @default(uuid())
   userId         String   @unique
   messages       Json     @default("[]")
-  // Monotonic per-user inbound-SMS counter. Incremented on every inbound SMS.
-  // Each supervisor run captures it at start (`mySeq`); at attempt_completion
-  // the run re-reads it. If the persisted value now exceeds `mySeq`, a newer
-  // SMS arrived during this run — the run discards its pendingWrites buffer
-  // and stays silent, letting the newer run produce the user-facing reply.
-  // See providers/smsSupervisor/supervisorHandler.ts for the gate.
+  // Monotonic per-user inbound-SMS counter. Its increment and the inbound
+  // transcript append happen atomically before supervisor work starts. A run
+  // re-checks it before every outbound send or queued-write commit.
   lastInboundSeq Int      @default(0)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt

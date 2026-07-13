@@ -74,6 +74,26 @@ An RCA is **incomplete** until all of the following are true:
 4. The RCA records the exact command and the failure output or assertion that proves the reproduction.
 5. If a fix is made, the same artifact passes after the fix without weakening its assertion.
 
+### Fix approval and verification handoff
+
+When the current task is RCA-only, stop after presenting the evidence-backed diagnosis,
+the proposed generalizable fix, and the exact local reproduction command. Do not treat the
+diagnosis itself as approval to implement the fix.
+
+After the user agrees on the fix:
+
+1. Implement the agreed fix without changing the reproduction's asserted behavior.
+2. Run the exact same local reproduction command that demonstrated the pre-fix failure.
+3. Report the post-fix command, exit status, and relevant passing assertion back to the user,
+   alongside the recorded pre-fix failure.
+4. If the reproduction still fails, the fix is not complete; continue the fix-and-test loop
+   rather than reporting success.
+
+Changing or weakening the reproduction so the fix appears to pass does not satisfy this
+handoff. If new evidence proves the original reproduction targeted the wrong boundary, explain
+that evidence to the user and obtain agreement on the corrected reproduction before using it
+as the acceptance test.
+
 There is no “not feasible” exception that turns unreproduced findings into a completed RCA. If production-only or third-party state cannot be recreated directly, capture and replay that state at the owned boundary. If the required request, response, event stream, or state was not captured and therefore cannot be replayed, classify the result as **preliminary findings plus an observability gap**, add the missing capture, and keep the RCA open. Do not present a hypothesis, code inspection, production correlation, or external-state explanation as a completed RCA without an executed local reproduction.
 
 ### Step 3a: Reconstruct failing LLM calls
