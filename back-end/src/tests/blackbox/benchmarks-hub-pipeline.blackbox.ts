@@ -117,14 +117,15 @@ function writeStubRunner(dir: string, mode: 'pass' | 'fail'): string {
   const stub = path.join(dir, 'stub-run-bench');
   const script = `#!/usr/bin/env bash
 # Stub runner for the pipeline blackbox — emits the REAL artifact layout the
-# poller discovers (report-card.json under agents/.context/benchmarks/<id>/ and
-# a final run record under agents/benchmarks/runs/), then exits.
+# poller discovers (report-card.json + run.json in the request-owned context),
+# then exits.
 set -euo pipefail
 shift || true  # --local
 TASK="\${1:-chat-mode}"
 STAMP="stub-$(date +%s)-$$"
-CARD_DIR="agents/.context/benchmarks/$STAMP"
-mkdir -p "$CARD_DIR" agents/benchmarks/runs
+ARTIFACT_ROOT="\${BENCHMARK_CONTEXT_DIR:-agents/.context/benchmarks}"
+CARD_DIR="$ARTIFACT_ROOT"
+mkdir -p "$CARD_DIR"
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 cat > "$CARD_DIR/report-card.json" <<CARD
 {"run_id":"$STAMP","timestamp":"$NOW","elapsed_s":7.5,
@@ -145,7 +146,7 @@ exit 7`
  "per_task":[{"name":"$TASK","status":"passed","duration_s":18.0,"cost_usd":0.03,
    "agent_url":"http://localhost/?agent-id=stub-agent-1","world_model_mode":"real","fast_mode":true}]}
 CARD
-cat > "agents/benchmarks/runs/$(date +%Y%m%d_%H%M%S)_$TASK.json" <<RUN
+cat > "$ARTIFACT_ROOT/run.json" <<RUN
 {"run_id":"$STAMP","timestamp":"$NOW","suite":"stub",
  "tasks":[{"name":"$TASK","passed":true,"status":"COMPLETED","agent_id":"stub-agent-1",
    "duration_seconds":18.0,"cost_cents":3,"tokens_in":1200,"tokens_out":300,
@@ -158,6 +159,36 @@ exit 0`
 `;
   fs.writeFileSync(stub, script, { mode: 0o755 });
   return stub;
+}
+
+function writeForeignArtifactRunner(dir: string): {
+  stub: string;
+  cardDir: string;
+  runFile: string;
+} {
+  const foreignId = `foreign-${process.pid}-${Date.now()}`;
+  const cardDir = path.join(REPO_ROOT, 'agents', '.context', 'benchmarks', foreignId);
+  const runFile = path.join(REPO_ROOT, 'agents', 'benchmarks', 'runs', `${foreignId}.json`);
+  const stub = path.join(dir, 'stub-run-bench-foreign');
+  const script = `#!/usr/bin/env bash
+set -euo pipefail
+shift || true
+TASK="\${1:-chat-mode}"
+NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+mkdir -p "${cardDir}" "$(dirname "${runFile}")"
+cat > "${cardDir}/report-card.json" <<CARD
+{"run_id":"${foreignId}","timestamp":"$NOW","elapsed_s":1,
+ "per_task":[{"name":"$TASK","status":"passed"}]}
+CARD
+cat > "${runFile}" <<RUN
+{"run_id":"${foreignId}","timestamp":"$NOW","suite":"foreign",
+ "tasks":[{"name":"$TASK","passed":true,"status":"COMPLETED"}]}
+RUN
+echo "foreign artifact emitted; owned runner failed" >&2
+exit 7
+`;
+  fs.writeFileSync(stub, script, { mode: 0o755 });
+  return { stub, cardDir, runFile };
 }
 
 function startPoller(
@@ -395,6 +426,43 @@ async function legLatePollerPickup(tmp: string): Promise<void> {
   }
 }
 
+async function legForeignArtifactIsolation(tmp: string): Promise<void> {
+  const foreign = writeForeignArtifactRunner(tmp);
+  let runId: string | null = null;
+  let poller: ChildProcess | null = null;
+  const log = path.join(tmp, 'poller-foreign.log');
+  try {
+    const created = await api('POST', '/api/benchmarks/run-requests', {
+      task_names: ['chat-mode'],
+      scope: SCOPE,
+    });
+    assert(created.status === 201, `dispatch failed: ${created.status}`);
+    const request = (created.data as { request: RequestRow }).request;
+    runId = request.runId;
+
+    poller = startPoller(foreign.stub, log);
+    const failed = await within('foreign artifact rejected', 30_000, async () => {
+      const row = await getRequest(request.id);
+      return row.status === 'failed' ? row : null;
+    });
+    assert(
+      failed.error?.includes('no run bundle produced (exit 7)') === true,
+      `foreign artifact was not rejected honestly: ${failed.error}`
+    );
+    const pollerLog = fs.readFileSync(log, 'utf8');
+    assert(
+      pollerLog.includes('no run bundle found after exit=7'),
+      'poller did not report the missing request-owned bundle'
+    );
+    assert(!pollerLog.includes('uploading final bundle'), 'poller uploaded a foreign run bundle');
+  } finally {
+    await stopPoller(poller);
+    fs.rmSync(foreign.cardDir, { recursive: true, force: true });
+    fs.rmSync(foreign.runFile, { force: true });
+    await cleanup(runId);
+  }
+}
+
 async function legHubOutageSpool(tmp: string): Promise<void> {
   // Simulate the hub dying mid-run (the exact incident class: backend down at
   // completion time). The poller must survive, spool the completion, and a
@@ -481,6 +549,7 @@ async function main(): Promise<void> {
     ['happy path: dispatch → claim → live → completed (hard deadlines)', legHappyPath],
     ['failure honesty: runner crash → failed + error + dashboard reflects', legFailureHonesty],
     ['late poller: queued is visible, then still picked up', legLatePollerPickup],
+    ['artifact isolation: newer foreign bundle is rejected', legForeignArtifactIsolation],
     ['hub outage at completion: poller survives, spools, flushes on recovery', legHubOutageSpool],
   ];
   const results: StepResult[] = [];

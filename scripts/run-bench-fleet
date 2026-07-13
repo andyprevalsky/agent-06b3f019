@@ -49,7 +49,8 @@ VOLUME_NAME="cloudbench_data"
 # Every run lands in its OWN dir under the runs-root; the central hub (one
 # persistent dashboard on DASH_BASE) scans the runs-root so ALL runs show up and
 # each is clickable at /run/<id>/. Runs never clobber each other.
-RUNS_ROOT="$ROOT_DIR/.context/fleet/runs"
+RUNS_ROOT="${CLOUDBENCH_RUNS_ROOT:-$ROOT_DIR/.context/fleet/runs}"
+case "$RUNS_ROOT" in /*) ;; *) RUNS_ROOT="$ROOT_DIR/$RUNS_ROOT" ;; esac
 RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
 FLEET_DIR="$RUNS_ROOT/$RUN_ID"
 HUB_CTX_DIR="$RUNS_ROOT/_hub"
