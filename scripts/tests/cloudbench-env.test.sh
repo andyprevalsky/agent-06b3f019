@@ -88,9 +88,9 @@ if cloudbench_validate_fresh_clone_id clone-1 warm-1 clone-1; then
   fail "a duplicate clone id must never be accepted"
 fi
 
-activation_ids="$(printf '%s\n' '[{"id":"warm-1","name":"cloudbench-warm"},{"id":"lock-1","name":"cloudbench-controller-lock"},{"id":"clone-1","name":"fleet-1"}]' | cloudbench_env_activation_machine_ids)"
+activation_ids="$(printf '%s\n' '[{"id":"warm-1","name":"cloudbench-warm","state":"stopped"},{"id":"lock-1","name":"cloudbench-controller-lock","state":"stopped"},{"id":"clone-1","name":"fleet-1","state":"stopped"},{"id":"provisioning-1","name":"other-controller-clone","state":"created"},{"id":"running-1","name":"other-controller-run","state":"started"}]' | cloudbench_env_activation_machine_ids)"
 [ "$activation_ids" = $'warm-1\nclone-1' ] ||
-  fail "environment activation must exclude the leased controller-lock sentinel"
+  fail "environment activation must target only stopped non-lock benchmark machines"
 
 node_a="$TMP_ROOT/node-a"
 node_b="$TMP_ROOT/node-b"

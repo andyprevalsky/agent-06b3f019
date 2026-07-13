@@ -138,6 +138,8 @@ import json, os, sys
 for machine in json.load(sys.stdin) or []:
     if machine.get("name") == os.environ["CONTROLLER_LOCK_NAME"]:
         continue
+    if machine.get("state") != "stopped":
+        continue
     if machine.get("id"):
         print(machine["id"])
 '
