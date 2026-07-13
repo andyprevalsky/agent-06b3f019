@@ -324,7 +324,7 @@ reconcile_pool() {
         [ "$presence" -eq 0 ] || { echo "❌ could not read pool machine $id before refresh" >&2; return 1; }
         [ "$st" = "stopped" ] && continue
         case "$st" in
-            started|starting|stopping)
+            created|replacing|started|starting|stopping)
                 UNAVAILABLE_POOL_IDS+=("$id")
                 echo "  ↪️  pool machine $id is $st; leaving concurrent owner untouched"
                 continue

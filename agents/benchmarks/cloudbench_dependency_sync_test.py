@@ -915,6 +915,8 @@ printf 'refresh\\n' >> "$OPERATIONS_FILE"
     ]
     assert states_file.read_text() == ""
 
+    assert "created|replacing|started|starting|stopping" in fleet
+
 
 def test_pool_claims_survive_command_substitution_and_stay_distinct(tmp_path: Path) -> None:
     fleet = FLEET_SCRIPT.read_text()
