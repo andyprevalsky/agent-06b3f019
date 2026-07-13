@@ -983,11 +983,13 @@ git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' remote set-url origin 'ht
 chown -R rose:rose '$REMOTE_REPO' 2>/dev/null || true
 echo 'clone/fetch complete'"
     CLONE_CMD_B64="$(printf '%s' "$CLONE_CMD" | base64 | tr -d '\n')"
-    FLY ssh console -a "$APP" --machine "$mid" \
-        -C "printf '%s' '$CLONE_CMD_B64' | base64 -d | bash" 2>&1 \
-        | grep -av '^Connecting to' | sed 's/^/   /' || {
+    clone_output=""
+    if ! clone_output="$(FLY ssh console -a "$APP" --machine "$mid" \
+        -C "bash -lc \"printf '%s' '$CLONE_CMD_B64' | base64 -d | bash\"" 2>&1)"; then
+        printf '%s\n' "$clone_output" | grep -av '^Connecting to' | sed 's/^/   /'
         echo "❌ git clone failed"; stop_machine "$mid"; exit 1
-    }
+    fi
+    printf '%s\n' "$clone_output" | grep -av '^Connecting to' | sed 's/^/   /'
 
     stop_machine "$mid"
     echo ""

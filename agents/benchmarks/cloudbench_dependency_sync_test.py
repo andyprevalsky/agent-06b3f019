@@ -959,6 +959,8 @@ def test_setup_fetch_trusts_only_the_rose_owned_warm_checkout() -> None:
     assert r'\"\$GITHUB_TOKEN\"' in setup
     assert 'CLONE_CMD_B64=' in setup
     assert "base64 -d | bash" in setup
+    assert '-C "bash -lc \\"printf' in setup
+    assert 'if ! clone_output="$(FLY ssh console' in setup
     assert "GH_TOKEN=%q" not in setup
 
 
