@@ -535,8 +535,9 @@ def test_fresh_clone_start_paths_honor_storage_readiness_contract() -> None:
 
 def test_environment_activation_retries_only_transient_fly_failures(tmp_path: Path) -> None:
     cloud = CLOUD_SCRIPT.read_text()
-    function_start = cloud.index("activate_machine_environment() {")
-    function_end = cloud.index("\n}\n", function_start) + 3
+    function_start = cloud.index("machine_state_for_activation() {")
+    activation_start = cloud.index("activate_machine_environment() {", function_start)
+    function_end = cloud.index("\n}\n", activation_start) + 3
     activation_function = cloud[function_start:function_end]
 
     def activate(responses: list[tuple[int, str]]) -> tuple[subprocess.CompletedProcess[str], list[str]]:
@@ -550,7 +551,12 @@ def test_environment_activation_retries_only_transient_fly_failures(tmp_path: Pa
                 "-c",
                 f"""set -uo pipefail
 APP=bench-app
+assert_app_environment_lock_ownership() {{ return 0; }}
 FLY() {{
+  if [ "$1 $2" = "machines list" ]; then
+    printf '[{{"id":"machine-1","state":"stopped"}}]\n'
+    return 0
+  fi
   printf '%s\\n' "$*" >> "$CALLS_FILE"
   response="$(head -1 "$RESPONSES_FILE")"
   tail -n +2 "$RESPONSES_FILE" > "$RESPONSES_FILE.tmp"
@@ -605,70 +611,322 @@ activate_machine_environment machine-1
     assert len(exhausted_calls) == 3
 
 
-def test_environment_activation_skips_only_confirmed_disappeared_machines() -> None:
+def test_pool_activation_rechecks_state_and_never_updates_concurrent_runs(tmp_path: Path) -> None:
     cloud = CLOUD_SCRIPT.read_text()
-    fleet = FLEET_SCRIPT.read_text()
-    function_start = cloud.index("activate_machine_environment() {")
-    wrapper_start = cloud.index("activate_or_skip_disappeared_machine() {", function_start)
-    function_end = cloud.index("\n}\n", wrapper_start) + 3
+    function_start = cloud.index("machine_state_for_activation() {")
+    activation_start = cloud.index("activate_machine_environment() {", function_start)
+    function_end = cloud.index("\n}\n", activation_start) + 3
     activation_functions = cloud[function_start:function_end]
 
-    def activate(presence: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
+    def activate(
+        states: list[str],
+        update_status: int = 1,
+        role: str = "pool",
+        guard_updates: int = 99,
+    ) -> tuple[subprocess.CompletedProcess[str], int]:
+        states_file = tmp_path / "states"
+        updates_file = tmp_path / "updates"
+        states_file.write_text("\n".join(states) + "\n")
+        updates_file.write_text("")
+        result = subprocess.run(
             [
                 "bash",
                 "-c",
                 f"""set -uo pipefail
 APP=bench-app
+assert_app_environment_lock_ownership() {{
+  updates="$(wc -l < "$UPDATES_FILE" | tr -d ' ')"
+  [ "${{updates:-0}}" -lt "$GUARD_UPDATES" ]
+}}
 FLY() {{
   if [ "$1 $2" = "machine update" ]; then
-    echo 'failed to obtain lease: machine not found'
-    return 1
+    printf 'update\\n' >> "$UPDATES_FILE"
+    echo 'request returned non-2xx status: 408'
+    return "$UPDATE_STATUS"
   fi
   if [ "$1 $2" = "machines list" ]; then
-    if [ "$PRESENCE" = "error" ]; then return 1; fi
-    if [ "$PRESENCE" = "object" ]; then printf '{{"id":"machine-1"}}\\n'; return 0; fi
-    if [ "$PRESENCE" = "invalid-item" ]; then printf '["machine-1"]\\n'; return 0; fi
-    if [ "$PRESENCE" = "present" ]; then
-      printf '[{{"id":"machine-1"}}]\\n'
-    else
+    state="$(head -1 "$STATES_FILE")"
+    tail -n +2 "$STATES_FILE" > "$STATES_FILE.tmp"
+    mv "$STATES_FILE.tmp" "$STATES_FILE"
+    if [ "$state" = "absent" ]; then
       printf '[]\\n'
+    elif [ "$state" = "malformed-item" ]; then
+      printf '[null]\\n'
+    elif [ "$state" = "malformed-object" ]; then
+      printf '{{}}\\n'
+    elif [ "$state" = "malformed-null" ]; then
+      printf 'null\\n'
+    else
+      printf '[{{"id":"machine-1","state":"%s"}}]\\n' "$state"
     fi
     return 0
   fi
   return 2
 }}
 {activation_functions}
-activate_or_skip_disappeared_machine machine-1
+activate_machine_environment machine-1 "$ROLE"
 """,
             ],
             env={
+                "STATES_FILE": str(states_file),
+                "UPDATES_FILE": str(updates_file),
+                "UPDATE_STATUS": str(update_status),
+                "ROLE": role,
+                "GUARD_UPDATES": str(guard_updates),
                 "CLOUDBENCH_UPDATE_RETRY_DELAY": "0",
-                "PRESENCE": presence,
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        return result, len(updates_file.read_text().splitlines())
+
+    already_started, already_started_updates = activate(["started"])
+    became_started, became_started_updates = activate(["stopped", "started"])
+    disappeared, disappeared_updates = activate(["absent"])
+    stopped_failure, stopped_failure_updates = activate(["stopped"] * 6, update_status=1)
+    malformed_item, malformed_item_updates = activate(["malformed-item"])
+    malformed_object, malformed_object_updates = activate(["malformed-object"])
+    malformed_null, malformed_null_updates = activate(["malformed-null"])
+    unsafe_state, unsafe_state_updates = activate(["created"])
+    active_warm, active_warm_updates = activate(["started"], role="warm")
+    lost_owner, lost_owner_updates = activate(
+        ["stopped"] * 4, update_status=1, guard_updates=1
+    )
+
+    assert already_started.returncode == 0, already_started.stderr
+    assert already_started_updates == 0
+    assert "skipping concurrently active machine" in already_started.stderr
+    assert became_started.returncode == 0, became_started.stderr
+    assert became_started_updates == 1
+    assert "skipping concurrent owner" in became_started.stderr
+    assert disappeared.returncode == 0, disappeared.stderr
+    assert disappeared_updates == 0
+    assert stopped_failure.returncode == 1
+    assert stopped_failure_updates == 3
+    assert malformed_item.returncode == 1
+    assert malformed_item_updates == 0
+    assert malformed_object.returncode == 1
+    assert malformed_object_updates == 0
+    assert malformed_null.returncode == 1
+    assert malformed_null_updates == 0
+    assert unsafe_state.returncode == 1
+    assert unsafe_state_updates == 0
+    assert "unsafe activation state" in unsafe_state.stderr
+    assert active_warm.returncode == 1
+    assert active_warm_updates == 0
+    assert "must be stopped" in active_warm.stderr
+    assert lost_owner.returncode == 1
+    assert lost_owner_updates == 1
+
+
+def test_environment_activation_targets_only_warm_and_workspace_pool(tmp_path: Path) -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    function_start = cloud.index("environment_activation_targets() {")
+    function_end = cloud.index("\n}\n", function_start) + 3
+    targets_function = cloud[function_start:function_end]
+    pool_file = tmp_path / "pool.ids"
+    pool_file.write_text("abc123\n")
+
+    def targets(machines: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"""set -uo pipefail
+APP=bench-app
+MACHINE_NAME=cloudbench-warm
+POOL_IDS_FILE="$POOL_FILE"
+FLY() {{ printf '%s\\n' "$MACHINES_JSON"; }}
+{targets_function}
+environment_activation_targets
+""",
+            ],
+            env={"MACHINES_JSON": json.dumps(machines), "POOL_FILE": str(pool_file)},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    selected = targets(
+        [
+            {"id": "warm-1", "name": "cloudbench-warm", "state": "stopped"},
+            {"id": "abc123", "name": "pooled", "state": "stopped"},
+            {"id": "other-1", "name": "blue-dream-4251", "state": "started"},
+        ]
+    )
+    missing_warm = targets([{"id": "other-1", "name": "blue-dream-4251", "state": "started"}])
+    duplicate_warm = targets(
+        [
+            {"id": "warm-1", "name": "cloudbench-warm"},
+            {"id": "warm-2", "name": "cloudbench-warm"},
+        ]
+    )
+    malformed = targets([None])
+
+    assert selected.returncode == 0, selected.stderr
+    assert selected.stdout.splitlines() == ["warm\twarm-1", "pool\tabc123"]
+    assert "other-1" not in selected.stdout
+    assert missing_warm.returncode != 0
+    assert "expected exactly one warm source" in missing_warm.stderr
+    assert duplicate_warm.returncode != 0
+    assert malformed.returncode != 0
+
+
+def test_environment_refresh_serializes_shared_app_and_reconciles_pool_first() -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    fleet = FLEET_SCRIPT.read_text()
+
+    assert 'APP_ENV_LOCK_FILE="$GIT_COMMON_DIR/cloudbench-app-env.lock"' in cloud
+    assert 'shlock -p "$$" -f "$APP_ENV_LOCK_FILE"' in cloud
+    wrapper_start = cloud.index("inject_secrets() {")
+    wrapper_end = cloud.index("\n}\n", wrapper_start)
+    wrapper = cloud[wrapper_start:wrapper_end]
+    assert "assert_app_environment_lock_ownership" in wrapper
+    assert wrapper.index("acquire_app_environment_lock") < wrapper.index(
+        "( _inject_secrets_locked )"
+    )
+    assert wrapper.index("( _inject_secrets_locked )") < wrapper.index(
+        "release_app_environment_lock"
+    )
+    locked_start = cloud.index("_inject_secrets_locked() {")
+    locked_end = cloud.index("\n}\n", locked_start)
+    assert 'FLY secrets set --stage -a "$APP"' in cloud[locked_start:locked_end]
+
+    refresh_call = 'bash scripts/run-bench-cloud --refresh-secrets'
+    assert fleet.index("reconcile_pool || exit 1") < fleet.index(refresh_call)
+    assert fleet.index(refresh_call) < fleet.index('cid="$(claim_pool_machine)"')
+    allocation_start = fleet.index("# ── Clone one machine per bench")
+    allocation_end = fleet.index('[ "${#CHILD_PIDS[@]}" -ge 1 ]', allocation_start)
+    allocation = fleet[allocation_start:allocation_end]
+    assert "release_app_environment_lock" in allocation
+    assert "CLOUDBENCH_APP_ENV_LOCK_OWNER_PID" in fleet
+    assert 'clone_machine_target "$out/worker-clones.ids" "$primary_id"' in fleet
+
+    stop_cleanup_start = cloud.index("stop_on_exit() {")
+    stop_cleanup_end = cloud.index("\n}", stop_cleanup_start)
+    stop_cleanup = cloud[stop_cleanup_start:stop_cleanup_end]
+    assert stop_cleanup.index('stop_machine "$mid"') < stop_cleanup.index(
+        "release_app_environment_lock"
+    )
+    assert "CLOUDBENCH_HOLD_APP_ENV_LOCK=1" in cloud
+    assert cloud.count("assert_app_environment_lock_ownership || exit 1") >= 3
+
+    cleanup_start = fleet.index("cleanup() {")
+    cleanup_end = fleet.index("\n}", cleanup_start)
+    cleanup = fleet[cleanup_start:cleanup_end]
+    assert cleanup.index('wait "$p"') < cleanup.index("release_app_environment_lock")
+
+
+def test_pool_reconcile_waits_for_stopped_before_environment_refresh(tmp_path: Path) -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    function_start = fleet.index("pool_machine_state() {")
+    reconcile_start = fleet.index("reconcile_pool() {", function_start)
+    function_end = fleet.index("\n}\n", reconcile_start) + 3
+    reconcile_functions = fleet[function_start:function_end]
+
+    pool_file = tmp_path / "pool.ids"
+    states_file = tmp_path / "states"
+    operations_file = tmp_path / "operations"
+    pool_file.write_text("abc123\n")
+    states_file.write_text("started\nstopping\nstopped\n")
+    operations_file.write_text("")
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
+APP=bench-app
+POOL_IDS_FILE="$POOL_FILE"
+FLY() {{
+  if [ "$1 $2" = "machines list" ]; then
+    state="$(head -1 "$STATES_FILE")"
+    tail -n +2 "$STATES_FILE" > "$STATES_FILE.tmp"
+    mv "$STATES_FILE.tmp" "$STATES_FILE"
+    printf 'list %s\\n' "$state" >> "$OPERATIONS_FILE"
+    printf '[{{"id":"abc123","state":"%s"}}]\\n' "$state"
+    return 0
+  fi
+  if [ "$1 $2" = "machine stop" ]; then
+    printf 'stop\\n' >> "$OPERATIONS_FILE"
+    return 0
+  fi
+  return 2
+}}
+{reconcile_functions}
+reconcile_pool || exit $?
+printf 'refresh\\n' >> "$OPERATIONS_FILE"
+""",
+        ],
+        env={
+            "POOL_FILE": str(pool_file),
+            "STATES_FILE": str(states_file),
+            "OPERATIONS_FILE": str(operations_file),
+            "CLOUDBENCH_POOL_STOP_DELAY": "0",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert operations_file.read_text().splitlines() == [
+        "list started",
+        "stop",
+        "list stopping",
+        "list stopped",
+        "refresh",
+    ]
+    assert states_file.read_text() == ""
+
+
+def test_pool_reconcile_fails_closed_on_falsy_non_list_machine_json(tmp_path: Path) -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    function_start = fleet.index("pool_machine_state() {")
+    reconcile_start = fleet.index("reconcile_pool() {", function_start)
+    function_end = fleet.index("\n}\n", reconcile_start) + 3
+    reconcile_functions = fleet[function_start:function_end]
+    pool_file = tmp_path / "pool.ids"
+    stops_file = tmp_path / "stops"
+    pool_file.write_text("abc123\n")
+
+    for payload in ("{}", "null", "0", '""'):
+        stops_file.write_text("")
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"""set -uo pipefail
+APP=bench-app
+POOL_IDS_FILE="$POOL_FILE"
+FLY() {{
+  if [ "$1 $2" = "machines list" ]; then
+    printf '%s\\n' "$MACHINES_JSON"
+    return 0
+  fi
+  if [ "$1 $2" = "machine stop" ]; then
+    printf 'stop\\n' >> "$STOPS_FILE"
+    return 0
+  fi
+  return 2
+}}
+{reconcile_functions}
+reconcile_pool
+""",
+            ],
+            env={
+                "POOL_FILE": str(pool_file),
+                "STOPS_FILE": str(stops_file),
+                "MACHINES_JSON": payload,
             },
             text=True,
             capture_output=True,
             check=False,
         )
 
-    disappeared = activate("absent")
-    still_present = activate("present")
-    unknown = activate("error")
-    object_shape = activate("object")
-    invalid_item_shape = activate("invalid-item")
-
-    assert disappeared.returncode == 0, disappeared.stderr
-    assert "skipping stale entry" in disappeared.stderr
-    assert still_present.returncode == 1
-    assert "skipping stale entry" not in still_present.stderr
-    assert unknown.returncode == 1
-    assert "skipping stale entry" not in unknown.stderr
-    assert object_shape.returncode == 1
-    assert "skipping stale entry" not in object_shape.stderr
-    assert invalid_item_shape.returncode == 1
-    assert "skipping stale entry" not in invalid_item_shape.stderr
-    assert 'WARM_ID="$(printf \'%s\' "$warm_pair" | awk \'{print $1}\')"' in fleet
-    assert "No warm machine '$MACHINE_NAME'" in fleet
+        assert result.returncode != 0, payload
+        assert stops_file.read_text() == "", payload
 
 
 def test_fleet_clone_identity_requires_a_distinct_authoritative_target(

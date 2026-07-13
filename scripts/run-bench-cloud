@@ -83,6 +83,10 @@ source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
 MACHINE_READINESS_SCRIPT="$ROOT_DIR/scripts/cloudbench-machine-readiness.py"
 
 STATE_FILE="$ROOT_DIR/.context/cloudbench-machine.json"
+POOL_IDS_FILE="$ROOT_DIR/.context/cloudbench-pool.ids"
+GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null || echo "$ROOT_DIR/.git")"
+case "$GIT_COMMON_DIR" in /*) ;; *) GIT_COMMON_DIR="$ROOT_DIR/$GIT_COMMON_DIR" ;; esac
+APP_ENV_LOCK_FILE="$GIT_COMMON_DIR/cloudbench-app-env.lock"
 
 # On-box paths (mirror scripts/cloudbench-run.sh).
 REMOTE_REPO="/data/repo"
@@ -391,15 +395,75 @@ validate_environment_contract() {
     export CLOUDBENCH_PROD_BROWSER_PROVIDER
 }
 
-activate_machine_environment() {  # activate_machine_environment <machine_id>
-    local machine_id="$1" attempt=1 output status
+machine_state_for_activation() {  # machine_state_for_activation <machine_id>: 0=present, 1=absent, 2=invalid
+    local machine_id="$1" machines
+    machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 2
+    printf '%s' "$machines" | MACHINE_ID="$machine_id" python3 -c '
+import json, os, sys
+try:
+    machines = json.load(sys.stdin)
+except (TypeError, ValueError):
+    raise SystemExit(2)
+if not isinstance(machines, list) or any(not isinstance(machine, dict) for machine in machines):
+    raise SystemExit(2)
+machine_id = os.environ["MACHINE_ID"]
+machine = next((item for item in machines if item.get("id") == machine_id), None)
+if machine is None:
+    raise SystemExit(1)
+print(machine.get("state") or "unknown")
+'
+}
+
+activate_machine_environment() {  # activate_machine_environment <machine_id> [warm|pool]
+    local machine_id="$1" role="${2:-warm}" attempt=1 output status state presence
     local attempts="${CLOUDBENCH_UPDATE_ATTEMPTS:-3}"
     local retry_delay="${CLOUDBENCH_UPDATE_RETRY_DELAY:-2}"
     while [ "$attempt" -le "$attempts" ]; do
+        state="$(machine_state_for_activation "$machine_id")"
+        presence=$?
+        if [ "$presence" -eq 1 ]; then
+            if [ "$role" = "pool" ]; then
+                echo "      pool machine $machine_id disappeared; skipping stale owned entry" >&2
+                return 0
+            fi
+            echo "      warm source $machine_id disappeared before activation" >&2
+            return 1
+        fi
+        [ "$presence" -eq 0 ] || return 1
+        if [ "$role" = "pool" ]; then
+            case "$state" in
+                stopped) ;;
+                started|starting) echo "      pool machine $machine_id is $state; skipping concurrently active machine" >&2; return 0 ;;
+                *) echo "      pool machine $machine_id has unsafe activation state '$state'" >&2; return 1 ;;
+            esac
+        elif [ "$role" = "warm" ]; then
+            [ "$state" = "stopped" ] || {
+                echo "      warm source $machine_id must be stopped for strict environment activation (state=$state)" >&2
+                return 1
+            }
+        else
+            echo "      unknown environment activation role '$role'" >&2
+            return 1
+        fi
+        assert_app_environment_lock_ownership || return 1
         output="$(FLY machine update "$machine_id" -a "$APP" --skip-start --yes 2>&1)"
         status=$?
         printf '%s\n' "$output" | sed 's/^/      /'
         [ "$status" -eq 0 ] && return 0
+        if [ "$role" = "pool" ]; then
+            state="$(machine_state_for_activation "$machine_id")"
+            presence=$?
+            if [ "$presence" -eq 1 ]; then
+                echo "      pool machine $machine_id disappeared during activation; skipping" >&2
+                return 0
+            fi
+            [ "$presence" -eq 0 ] || return 1
+            case "$state" in
+                stopped) ;;
+                started|starting) echo "      pool machine $machine_id became $state during activation; skipping concurrent owner" >&2; return 0 ;;
+                *) echo "      pool machine $machine_id reached unsafe activation state '$state'" >&2; return 1 ;;
+            esac
+        fi
         if [ "$attempt" -ge "$attempts" ] || ! printf '%s' "$output" \
             | grep -qiE '(^|[^[:alnum:]])(408|429|5[0-9][0-9])([^[:alnum:]]|$)|timed? out|timeout|context deadline|connection reset|unexpected EOF|temporar(y|ily)'; then
             return "$status"
@@ -411,32 +475,44 @@ activate_machine_environment() {  # activate_machine_environment <machine_id>
     return 1
 }
 
-machine_presence() {  # machine_presence <machine_id>: 0=present, 1=absent, 2=list failed
-    local machine_id="$1" machines
+environment_activation_targets() {  # warm source + this workspace's declared pool only
+    local machines pool_ids=""
     machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 2
-    printf '%s' "$machines" | MACHINE_ID="$machine_id" python3 -c '
+    [ -f "$POOL_IDS_FILE" ] && pool_ids="$(grep -E '^[0-9a-f]+$' "$POOL_IDS_FILE" 2>/dev/null || true)"
+    printf '%s' "$machines" | MACHINE_NAME="$MACHINE_NAME" POOL_IDS="$pool_ids" python3 -c '
 import json, os, sys
 try:
-    machines = json.load(sys.stdin) or []
+    machines = json.load(sys.stdin)
 except (TypeError, ValueError):
     raise SystemExit(2)
 if not isinstance(machines, list) or any(not isinstance(machine, dict) for machine in machines):
     raise SystemExit(2)
-machine_id = os.environ["MACHINE_ID"]
-raise SystemExit(0 if any(machine.get("id") == machine_id for machine in machines) else 1)
+machine_name = os.environ["MACHINE_NAME"]
+warm = [machine for machine in machines if machine.get("name") == machine_name]
+if len(warm) != 1 or not warm[0].get("id"):
+    raise SystemExit("expected exactly one warm source named %r" % machine_name)
+print("warm", warm[0]["id"], sep="\t")
+pool_ids = set(os.environ.get("POOL_IDS", "").split())
+for machine in machines:
+    machine_id = machine.get("id")
+    if machine_id in pool_ids and machine_id != warm[0]["id"]:
+        print("pool", machine_id, sep="\t")
 '
 }
 
-activate_or_skip_disappeared_machine() {  # activate_or_skip_disappeared_machine <machine_id>
-    local machine_id="$1" presence
-    activate_machine_environment "$machine_id" && return 0
-    machine_presence "$machine_id"
-    presence=$?
-    if [ "$presence" -eq 1 ]; then
-        echo "      machine $machine_id disappeared after environment snapshot; skipping stale entry" >&2
-        return 0
+assert_app_environment_lock_ownership() {
+    local expected_owner actual_owner
+    if [ "${CLOUDBENCH_APP_ENV_LOCK_HELD:-0}" = "1" ]; then
+        expected_owner="${CLOUDBENCH_APP_ENV_LOCK_OWNER_PID:-}"
+    else
+        expected_owner="$$"
     fi
-    return 1
+    actual_owner="$(cat "$APP_ENV_LOCK_FILE" 2>/dev/null || true)"
+    if [ -z "$expected_owner" ] || [ "$actual_owner" != "$expected_owner" ] || \
+        ! kill -0 "$expected_owner" 2>/dev/null; then
+        echo "❌ Lost ownership of shared benchmark app environment lock." >&2
+        return 1
+    fi
 }
 
 # Inject the two base64 .env blobs + GITHUB_TOKEN as active Fly secrets (present
@@ -446,7 +522,7 @@ activate_or_skip_disappeared_machine() {  # activate_or_skip_disappeared_machine
 # GITHUB_TOKEN is injected as a secret so the on-box per-run git-sync (private
 # repo) can authenticate via git http.extraheader without the token ever being
 # stored in .git/config on the volume.
-inject_secrets() {
+_inject_secrets_locked() {
     echo "🔐 Injecting secrets into $APP ..."
     if [ ! -f agents/.env ] || [ ! -f back-end/.env ]; then
         echo "❌ agents/.env and back-end/.env are required to inject secrets." >&2
@@ -475,28 +551,24 @@ inject_secrets() {
     else
         echo "   ⚠️  GITHUB_TOKEN not found — private-repo fetches will fail"
     fi
+    assert_app_environment_lock_ownership || exit 1
     FLY secrets set --stage -a "$APP" "${set_args[@]}" 2>&1 | sed 's/^/   /' || {
         echo "❌ Failed to stage benchmark environment secrets"; exit 1
     }
-    local machine_ids machine_id
-    machine_ids="$(_machines_json | python3 -c '
-import json, sys
-for machine in json.load(sys.stdin) or []:
-    if machine.get("id"):
-        print(machine["id"])
-')"
-    [ -n "$machine_ids" ] || {
-        echo "❌ No benchmark machines exist to activate staged secrets." >&2
+    local activation_targets role machine_id
+    activation_targets="$(environment_activation_targets)" || {
+        echo "❌ Could not resolve owned benchmark machines for environment activation." >&2
         exit 1
     }
-    while IFS= read -r machine_id; do
+    while IFS=$'\t' read -r role machine_id; do
         [ -n "$machine_id" ] || continue
-        echo "   activating env on machine $machine_id (skip-start)"
-        activate_or_skip_disappeared_machine "$machine_id" || {
+        assert_app_environment_lock_ownership || exit 1
+        echo "   activating env on $role machine $machine_id (skip-start)"
+        activate_machine_environment "$machine_id" "$role" || {
             echo "❌ Failed to activate environment on machine $machine_id" >&2
             exit 1
         }
-    done <<< "$machine_ids"
+    done <<< "$activation_targets"
     mkdir -p "$ROOT_DIR/.context"
     python3 - "$ROOT_DIR/.context/cloudbench-env-manifest.json" \
         "$agents_sha" "$backend_sha" "$CLOUDBENCH_PROD_BROWSER_PROVIDER" <<'PY'
@@ -516,6 +588,45 @@ with open(path, "w") as handle:
     handle.write("\n")
 PY
     echo "✅ Secrets set (active)"
+}
+
+acquire_app_environment_lock() {
+    local attempt owner
+    command -v shlock >/dev/null 2>&1 || {
+        echo "❌ shlock is required for cross-workspace benchmark environment locking." >&2
+        return 1
+    }
+    for attempt in $(seq 1 60); do
+        shlock -p "$$" -f "$APP_ENV_LOCK_FILE" && return 0
+        owner="$(cat "$APP_ENV_LOCK_FILE" 2>/dev/null || true)"
+        [ "$attempt" -eq 1 ] && echo "⏳ waiting for shared benchmark app environment lock (owner=${owner:-unknown})..."
+        sleep 2
+    done
+    echo "❌ Timed out waiting for shared benchmark app environment lock." >&2
+    return 1
+}
+
+release_app_environment_lock() {
+    local owner
+    owner="$(cat "$APP_ENV_LOCK_FILE" 2>/dev/null || true)"
+    [ "$owner" = "$$" ] && rm -f "$APP_ENV_LOCK_FILE" 2>/dev/null || true
+}
+
+inject_secrets() {
+    if [ "${CLOUDBENCH_APP_ENV_LOCK_HELD:-0}" = "1" ]; then
+        assert_app_environment_lock_ownership || exit 1
+        _inject_secrets_locked
+        return $?
+    fi
+    acquire_app_environment_lock || exit 1
+    ( _inject_secrets_locked )
+    local status=$?
+    if [ "$status" -eq 0 ] && [ "${CLOUDBENCH_HOLD_APP_ENV_LOCK:-0}" = "1" ]; then
+        return 0
+    fi
+    release_app_environment_lock
+    [ "$status" -eq 0 ] || exit "$status"
+    return "$status"
 }
 
 if [ "$MODE" = "refresh-secrets" ]; then
@@ -679,6 +790,10 @@ if [ "$MODE" = "setup" ]; then
     echo ""
 
     ensure_app
+    CLOUDBENCH_HOLD_APP_ENV_LOCK=1
+    trap 'release_app_environment_lock' EXIT
+    trap 'release_app_environment_lock; exit 130' INT
+    trap 'release_app_environment_lock; exit 143' TERM
     inject_secrets
 
     # ── Build + push the KEEP-ALIVE image (deps baked; CMD = sleep infinity) ──
@@ -809,14 +924,19 @@ if [ "$MODE" = "refresh-wmh" ]; then
     echo "model=$WMH_MODEL_NAME target=$REMOTE_WMH"
     echo ""
     ensure_app
+    cleanup_refresh_wmh() {
+        stop_machine "${mid:-}"
+        release_app_environment_lock
+    }
+    trap cleanup_refresh_wmh EXIT
+    trap 'cleanup_refresh_wmh; exit 130' INT
+    trap 'cleanup_refresh_wmh; exit 143' TERM
+    CLOUDBENCH_HOLD_APP_ENV_LOCK=1
     inject_secrets      # refresh secrets so R2 creds for the corpus read are current.
 
     mid="$(resolve_machine_id)"
     [ -z "$mid" ] && { echo "❌ No persistent machine — run 'run-bench-cloud --setup' first."; exit 1; }
     write_state "$mid"
-
-    # STOP the machine on ANY exit — the refresh must never leak a running box.
-    trap 'stop_machine "$mid"' EXIT INT TERM
 
     start_machine "$mid"
     wait_for_ssh "$mid"
@@ -1163,6 +1283,10 @@ if [ "$SKIP_CONTROLLER_LOCK" != "1" ]; then
 fi
 
 if [ "$DIRECT_ENV_REFRESH" = "1" ]; then
+    CLOUDBENCH_HOLD_APP_ENV_LOCK=1
+    trap 'release_app_environment_lock; cloudbench_controller_lock_release "$LOCK_DIR"' EXIT
+    trap 'release_app_environment_lock; cloudbench_controller_lock_release "$LOCK_DIR"; exit 130' INT
+    trap 'release_app_environment_lock; cloudbench_controller_lock_release "$LOCK_DIR"; exit 143' TERM
     inject_secrets
 fi
 
@@ -1178,14 +1302,15 @@ stop_on_exit() {
     # the run ("otherwise dead") — no orphaned link server, archive Vite, or proxy.
     stop_live_archive_frontend
     stop_all_local_viewers
-    if [ "${LOCK_ACQUIRED:-0}" = "1" ]; then
-        cloudbench_controller_lock_release "$LOCK_DIR"
-    fi
     # In fleet mode the machine is a per-bench clone owned by run-bench-fleet,
     # which destroys it after collecting results — never stop it here.
     if [ "$STOP_DONE" != "1" ] && [ -z "$FLEET_MACHINE_ID" ]; then
         STOP_DONE="1"
         stop_machine "$mid"
+    fi
+    release_app_environment_lock
+    if [ "${LOCK_ACQUIRED:-0}" = "1" ]; then
+        cloudbench_controller_lock_release "$LOCK_DIR"
     fi
     echo "Original exit code: $ec"
 }
