@@ -17,6 +17,7 @@ async function main(): Promise<void> {
       status: 204,
       headers: {
         'Access-Control-Allow-Origin': origin,
+        'Access-Control-Allow-Credentials': 'true',
         'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type,Authorization',
       },
@@ -46,6 +47,9 @@ async function main(): Promise<void> {
   );
   assert.ok(rejectedResults.every((result) => !result.ok));
   assert.ok(rejectedResults.every((result) => result.error?.includes('expected status 204')));
+  assert.ok(
+    rejectedResults.every((result) => result.error?.includes('allow-credentials is missing true'))
+  );
 
   const timedOutResults = await runAuthCorsPreflights(
     'https://backend.example',

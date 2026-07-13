@@ -20,14 +20,16 @@ export function useAgentList(canSubmitGoals: boolean) {
   const { toast } = useToast();
   const [agents, setAgents] = useState<Agent[]>([]);
   const [isLoadingAgents, setIsLoadingAgents] = useState(false);
+  const latestLoad = useRef(0);
   const activeLoads = useRef(0);
 
   const loadAgents = useCallback(async () => {
+    const loadId = ++latestLoad.current;
     activeLoads.current += 1;
     setIsLoadingAgents(true);
     try {
       const fetched = await fetchAgents();
-      setAgents(fetched);
+      if (loadId === latestLoad.current) setAgents(fetched);
     } catch (_err: unknown) {
       toast({ title: 'Error', description: 'Failed to load agents', variant: 'destructive' });
     } finally {

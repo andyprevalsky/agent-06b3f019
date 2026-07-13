@@ -198,6 +198,25 @@ export FLY_API_TOKEN
 
 FLY() { flyctl "$@"; }
 
+SHARED_LOCK="${CLOUDBENCH_CONTROLLER_LOCK_FILE:-$HOME/.cache/rose/$APP-controller.lock}"
+MODE_LOCK_ACQUIRED="0"
+cleanup_mode_lock() {
+    [ "$MODE_LOCK_ACQUIRED" = "1" ] && cloudbench_controller_lock_release "$SHARED_LOCK"
+}
+# Lifecycle modes dispatch before the normal run lock below. Guard them here so
+# setup/refresh/destroy cannot race a controller in another worktree.
+if [ "$MODE" != "run" ] && [ "${CLOUDBENCH_PARENT_LOCK_HELD:-0}" != "1" ]; then
+    if ! cloudbench_controller_lock_acquire "$SHARED_LOCK"; then
+        old_pid="$(cat "$SHARED_LOCK" 2>/dev/null || true)"
+        echo "❌ Another cloud benchmark controller is already running${old_pid:+ (pid $old_pid)}." >&2
+        exit 1
+    fi
+    MODE_LOCK_ACQUIRED="1"
+    trap cleanup_mode_lock EXIT
+    trap 'cleanup_mode_lock; exit 130' INT
+    trap 'cleanup_mode_lock; exit 143' TERM
+fi
+
 request_machine_start() {  # request_machine_start <machine_id>
     local id="$1"
 
@@ -250,24 +269,8 @@ resolve_machine_id() {
 try: print(json.load(open(sys.argv[1])).get("machine_id",""))
 except Exception: print("")' "$STATE_FILE" 2>/dev/null || echo '')"
     fi
-    _machines_json | MACHINE_NAME="$MACHINE_NAME" STORED="$stored" python3 -c '
-import json,os,sys
-try:
-    data=json.load(sys.stdin) or []
-except Exception:
-    data=[]
-name=os.environ.get("MACHINE_NAME")
-stored=os.environ.get("STORED") or ""
-ids={m.get("id") for m in data if m.get("id")}
-# stored id still present?
-if stored and stored in ids:
-    print(stored); sys.exit(0)
-# else match by name
-for m in data:
-    if m.get("name")==name and m.get("id"):
-        print(m["id"]); sys.exit(0)
-print("")
-' 2>/dev/null || echo ""
+    _machines_json | python3 "$ROOT_DIR/scripts/cloudbench-select-machine.py" \
+        "$MACHINE_NAME" "$stored" 2>/dev/null || echo ""
 }
 
 machine_state() {  # machine_state <id>
@@ -459,22 +462,6 @@ PY
 
 if [ "$MODE" = "refresh-secrets" ]; then
     echo "═══ run-bench-cloud --refresh-secrets ═══"
-    refresh_lock="$ROOT_DIR/.context/cloudbench-controller.lock"
-    refresh_lock_acquired="0"
-    if [ "${CLOUDBENCH_PARENT_LOCK_HELD:-0}" != "1" ]; then
-        if ! cloudbench_controller_lock_acquire "$refresh_lock"; then
-            old_pid="$(cat "$refresh_lock" 2>/dev/null || true)"
-            echo "❌ Another cloud benchmark controller is already running${old_pid:+ (pid $old_pid)}." >&2
-            exit 1
-        fi
-        refresh_lock_acquired="1"
-        cleanup_refresh_lock() {
-            [ "$refresh_lock_acquired" = "1" ] && cloudbench_controller_lock_release "$refresh_lock"
-        }
-        trap cleanup_refresh_lock EXIT
-        trap 'cleanup_refresh_lock; exit 130' INT
-        trap 'cleanup_refresh_lock; exit 143' TERM
-    fi
     ensure_app
     inject_secrets
     echo "✅ Cloud benchmark environment refreshed from current production-aligned sources."
@@ -749,8 +736,14 @@ if [ "$MODE" = "refresh-wmh" ]; then
     [ -z "$mid" ] && { echo "❌ No persistent machine — run 'run-bench-cloud --setup' first."; exit 1; }
     write_state "$mid"
 
-    # STOP the machine on ANY exit — the refresh must never leak a running box.
-    trap 'stop_machine "$mid"' EXIT INT TERM
+    # STOP the machine and release the lifecycle lock on every exit.
+    cleanup_wmh_refresh() {
+        stop_machine "$mid"
+        cleanup_mode_lock
+    }
+    trap cleanup_wmh_refresh EXIT
+    trap 'cleanup_wmh_refresh; exit 130' INT
+    trap 'cleanup_wmh_refresh; exit 143' TERM
 
     start_machine "$mid"
     wait_for_ssh "$mid"
@@ -1079,7 +1072,10 @@ PY
 # SAFETY: STOP the machine on EVERY exit (success, failure, error, timeout,
 # Ctrl-C) and always kill the local dashboard proxy. Never destroy on the per-run
 # path — only --destroy removes it. A stopped machine bills only for the volume.
-LOCK_DIR="$ROOT_DIR/.context/cloudbench-controller.lock"
+# The Fly app is shared by every Conductor worktree, so the controller lock must
+# also be shared. This prevents direct runs, fleet runs, and secret refreshes from
+# mutating the same machines concurrently from different worktrees.
+LOCK_DIR="$SHARED_LOCK"
 LOCK_ACQUIRED="0"
 # Fleet mode: run-bench-fleet holds a single controller lock for all its children,
 # so each per-bench child skips its own lock (they run concurrently by design).

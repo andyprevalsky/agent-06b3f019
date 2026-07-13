@@ -160,8 +160,15 @@ exit 0`
   return stub;
 }
 
-function startPoller(stubPath: string, log: string, hubUrl: string = BASE_URL): ChildProcess {
-  const child = spawn(POLLER, ['--local', '--once'], {
+function startPoller(
+  stubPath: string,
+  log: string,
+  hubUrl: string = BASE_URL,
+  continuous = false
+): ChildProcess {
+  // Spawn Bash directly instead of relying on the script's env/bash shebang.
+  // Signalling a shebang wrapper can leave its real poller child orphaned.
+  const child = spawn('bash', [POLLER, ...(continuous ? ['--local'] : ['--local', '--once'])], {
     cwd: REPO_ROOT,
     env: {
       ...process.env,
@@ -180,6 +187,25 @@ function startPoller(stubPath: string, log: string, hubUrl: string = BASE_URL): 
   child.stdout?.pipe(out);
   child.stderr?.pipe(out);
   return child;
+}
+
+async function stopPoller(child: ChildProcess | null): Promise<void> {
+  if (child === null || child.exitCode !== null || child.signalCode !== null) return;
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(forceKill);
+      resolve();
+    };
+    child.once('exit', finish);
+    const forceKill = setTimeout(() => {
+      child.kill('SIGKILL');
+    }, 2_000);
+    forceKill.unref();
+    if (!child.kill('SIGTERM')) finish();
+  });
 }
 
 interface RequestRow {
@@ -294,7 +320,7 @@ async function legHappyPath(tmp: string): Promise<void> {
       'late snapshot regressed a finalized run'
     );
   } finally {
-    poller?.kill('SIGKILL');
+    await stopPoller(poller);
     await cleanup(runId);
   }
 }
@@ -329,7 +355,7 @@ async function legFailureHonesty(tmp: string): Promise<void> {
       'failed task missing failure_reason'
     );
   } finally {
-    poller?.kill('SIGKILL');
+    await stopPoller(poller);
     await cleanup(runId);
   }
 }
@@ -364,7 +390,7 @@ async function legLatePollerPickup(tmp: string): Promise<void> {
       return row.status === 'completed' ? row : null;
     });
   } finally {
-    poller?.kill('SIGKILL');
+    await stopPoller(poller);
     await cleanup(runId);
   }
 }
@@ -408,7 +434,10 @@ async function legHubOutageSpool(tmp: string): Promise<void> {
     const request = (created.data as { request: RequestRow }).request;
     runId = request.runId;
 
-    poller = startPoller(stub, path.join(tmp, 'poller-outage.log'), proxyUrl);
+    // This leg exercises the production poller's long-running recovery mode.
+    // A one-shot poller intentionally exits after one empty/transient queue
+    // read, which can make the proxy setup—not outage recovery—the assertion.
+    poller = startPoller(stub, path.join(tmp, 'poller-outage.log'), proxyUrl, true);
     await within('claimed (via proxy)', 25_000, async () => {
       const row = await getRequest(request.id);
       return row.status === 'running' ? row : null;
@@ -433,8 +462,8 @@ async function legHubOutageSpool(tmp: string): Promise<void> {
     });
     assert(!fs.existsSync(spoolFile), 'spool file should be removed after flush');
   } finally {
-    poller?.kill('SIGKILL');
-    flusher?.kill('SIGKILL');
+    await stopPoller(poller);
+    await stopPoller(flusher);
     proxy.close();
     await cleanup(runId);
   }

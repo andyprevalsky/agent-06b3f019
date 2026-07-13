@@ -73,7 +73,7 @@ SELECTED_DB_URL=""
 EXPLICIT_TEST_DB_URL="${BLACKBOX_TEST_DATABASE_URL:-${CONTRACT_TEST_DATABASE_URL:-}}"
 if [[ "$USE_EXISTING_BACKEND" == "1" && -n "$EXPLICIT_TEST_DB_URL" ]]; then
   STACK_DB_EXPECTED=true
-  if [[ ! "$EXPLICIT_TEST_DB_URL" =~ ^postgres(ql)?://[^/]*@(localhost|127\.0\.0\.1)(:[0-9]+)?/ ]]; then
+  if [[ ! "$EXPLICIT_TEST_DB_URL" =~ ^postgres(ql)?://([^/]*@)?(localhost|127\.0\.0\.1)(:[0-9]+)?/ ]]; then
     echo "❌ BLACKBOX_TEST_DATABASE_URL must point at localhost for fixture safety."
     exit 1
   fi

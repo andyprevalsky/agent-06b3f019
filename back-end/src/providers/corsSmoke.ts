@@ -47,6 +47,9 @@ async function runCorsPreflight(
     if (allowedOrigin !== origin) {
       failures.push(`expected allow-origin ${origin}, received ${allowedOrigin ?? '<missing>'}`);
     }
+    if (response.headers.get('Access-Control-Allow-Credentials') !== 'true') {
+      failures.push('allow-credentials is missing true');
+    }
     if (
       !commaSeparatedHeaderIncludes(response.headers.get('Access-Control-Allow-Methods'), 'POST')
     ) {

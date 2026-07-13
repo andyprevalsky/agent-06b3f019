@@ -219,6 +219,19 @@ test('syncCookieCredentials preserves a local id for the same compound cookie ke
   assert(!('id' in update), 'expected update not to rewrite local cookie primary key');
 });
 
+test('syncCookieCredentials rejects a non-positive batch size', async () => {
+  const localModel: CookieModel = {
+    upsert: async () => ({ id: 'unused' }),
+  };
+  let rejection: unknown;
+  try {
+    await syncCookieCredentials(localModel, [], 0);
+  } catch (error) {
+    rejection = error;
+  }
+  assert(rejection instanceof RangeError, 'expected an invalid batch size to throw RangeError');
+});
+
 (async () => {
   let failed = 0;
   for (const { name, fn } of tests) {

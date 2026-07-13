@@ -161,6 +161,13 @@ if [[ -z "${FAST_MODE_CACHE_DATABASE_URL:-}" ]]; then
   exit 1
 fi
 
+STARTUP_TIMEOUT_SECONDS="${BACKEND_COVERAGE_STARTUP_TIMEOUT_SECONDS:-180}"
+if [[ ! "$STARTUP_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] || [[ "$STARTUP_TIMEOUT_SECONDS" -le 0 ]]; then
+  echo "❌ BACKEND_COVERAGE_STARTUP_TIMEOUT_SECONDS must be a positive integer" >&2
+  exit 1
+fi
+STARTUP_ATTEMPTS=$((STARTUP_TIMEOUT_SECONDS * 2))
+
 echo "Starting backend with coverage collection on port $COV_PORT..."
 NODE_V8_COVERAGE="$COV_TMP" PORT="$COV_PORT" DISABLE_GMAIL_SYNC=1 BLACKBOX_TEST_CAPTURE_OUTBOUND=1 \
   npx tsx src/server.ts >"$COV_LOG" 2>&1 &
@@ -176,7 +183,7 @@ trap cleanup EXIT INT TERM
 
 # Wait for backend to be ready
 READY=0
-for _ in $(seq 1 120); do
+for _ in $(seq 1 "$STARTUP_ATTEMPTS"); do
   if curl -fsS -m 2 "$TEST_BASE_URL/health" >/dev/null 2>&1; then
     READY=1
     break
@@ -190,7 +197,7 @@ for _ in $(seq 1 120); do
 done
 
 if [[ "$READY" -ne 1 ]]; then
-  echo "❌ Timed out waiting for backend health on $TEST_BASE_URL/health"
+  echo "❌ Timed out after ${STARTUP_TIMEOUT_SECONDS}s waiting for backend health on $TEST_BASE_URL/health"
   tail -n 40 "$COV_LOG" || true
   exit 1
 fi

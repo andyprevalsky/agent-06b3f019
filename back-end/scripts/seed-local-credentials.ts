@@ -40,6 +40,9 @@ export async function syncCookieCredentials(
   batchSize = 500,
   onBatch?: (synced: number, total: number) => void
 ): Promise<number> {
+  if (!Number.isSafeInteger(batchSize) || batchSize <= 0) {
+    throw new RangeError('batchSize must be a positive integer');
+  }
   for (let i = 0; i < cookies.length; i += batchSize) {
     const batch = cookies.slice(i, i + batchSize);
     await Promise.all(

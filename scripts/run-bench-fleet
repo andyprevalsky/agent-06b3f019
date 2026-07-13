@@ -52,7 +52,11 @@ RUNS_ROOT="$ROOT_DIR/.context/fleet/runs"
 RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
 FLEET_DIR="$RUNS_ROOT/$RUN_ID"
 HUB_CTX_DIR="$RUNS_ROOT/_hub"
-LOCK_DIR="$ROOT_DIR/.context/cloudbench-controller.lock"
+# The Fly app is shared by every Conductor worktree, so the controller lock must
+# also be shared. A worktree-local lock allowed concurrent clone list-diffs to
+# claim (and later destroy) another controller's machine.
+LOCK_DIR="${CLOUDBENCH_CONTROLLER_LOCK_FILE:-$HOME/.cache/rose/$APP-controller.lock}"
+PENDING_CLONES_DIR="${CLOUDBENCH_PENDING_CLONES_DIR:-$HOME/.cache/rose/$APP-pending-clones}"
 
 # ── Args ─────────────────────────────────────────────────────────────────────
 BENCHES=()
@@ -107,6 +111,52 @@ FLY_API_TOKEN="$(resolve_fly_token)"
 [ -n "${FLY_API_TOKEN:-}" ] || { echo "❌ No Fly auth token found." >&2; exit 1; }
 export FLY_API_TOKEN
 FLY() { flyctl "$@"; }
+
+clone_machine_from_snapshot() {  # prints exactly one verified new machine id
+    local before after clone_log machine_id attempt clone_name
+    before="$(mktemp)"
+    after="$(mktemp)"
+    clone_log="$(mktemp)"
+    if ! FLY machines list -a "$APP" --json > "$before" 2>/dev/null; then
+        echo "  ❌ could not snapshot the Fly machine list before cloning" >&2
+        rm -f "$before" "$after" "$clone_log"
+        return 1
+    fi
+    clone_name="cb-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+    mkdir -p "$PENDING_CLONES_DIR"
+    : > "$PENDING_CLONES_DIR/$clone_name"
+    if ! FLY machine clone "$WARM_ID" -a "$APP" --name "$clone_name" \
+        --from-snapshot "$SNAP_ID" --region "$REGION" > "$clone_log" 2>&1; then
+        echo "  ❌ Fly clone command failed:" >&2
+        tail -8 "$clone_log" | sed 's/^/     /' >&2
+        rm -f "$before" "$after" "$clone_log"
+        return 1
+    fi
+    machine_id=""
+    for attempt in $(seq 1 30); do
+        if FLY machines list -a "$APP" --json > "$after" 2>/dev/null; then
+            machine_id="$(python3 "$ROOT_DIR/scripts/cloudbench-new-machine-id.py" \
+                "$before" "$after" "$WARM_ID" "$clone_name" 2>/dev/null || true)"
+            [ -n "$machine_id" ] && break
+        fi
+        sleep 2
+    done
+    rm -f "$before" "$after" "$clone_log"
+    if [ -z "$machine_id" ]; then
+        echo "  ❌ clone succeeded but its named machine '$clone_name' was not observable" >&2
+        echo "     ownership marker retained: $PENDING_CLONES_DIR/$clone_name" >&2
+        return 1
+    fi
+    rm -f "$PENDING_CLONES_DIR/$clone_name"
+    printf '%s\n' "$machine_id"
+}
+
+if [ "${CLOUDBENCH_TEST_CLONE_HELPER:-0}" = "1" ]; then
+    WARM_ID="${CLOUDBENCH_TEST_WARM_ID:?test warm id required}"
+    SNAP_ID="${CLOUDBENCH_TEST_SNAPSHOT_ID:-test-snapshot}"
+    clone_machine_from_snapshot
+    exit $?
+fi
 
 is_sim_on() { case ",$SIM_ON_CSV," in *",$1,"*) return 0 ;; esac; return 1; }
 
@@ -178,12 +228,7 @@ reap_machine() {  # reap_machine <id> — returns non-zero if the machine surviv
 # the CURRENT branch code — the baked image only supplies deps. Stopped pool
 # machines cost $0 compute (volumes only) between runs.
 _clone_one() {  # echo the id of the machine a clone just created (list-diff)
-    local before after id newid=""
-    before="$(FLY machines list -a "$APP" --json 2>/dev/null | python3 -c 'import json,sys;print(" ".join(m["id"] for m in (json.load(sys.stdin) or []) if m.get("id")))' 2>/dev/null || true)"
-    FLY machine clone "$WARM_ID" -a "$APP" --from-snapshot "$SNAP_ID" --region "$REGION" >/dev/null 2>&1 || true
-    after="$(FLY machines list -a "$APP" --json 2>/dev/null | python3 -c 'import json,sys;print(" ".join(m["id"] for m in (json.load(sys.stdin) or []) if m.get("id")))' 2>/dev/null || true)"
-    for id in $after; do case " $before " in *" $id "*) : ;; *) newid="$id" ;; esac; done
-    printf '%s' "$newid"
+    clone_machine_from_snapshot
 }
 
 provision_pool() {  # provision_pool <N> — create N stopped clones, record ids, exit
@@ -257,7 +302,7 @@ CHILD_PORT=()
 CHILD_MACHINE=()
 
 cleanup() {
-    local ec=$?
+    local ec=$? marker pending_name pending_id
     [ -n "${UNIFIED_AGG_PID:-}" ] && kill "$UNIFIED_AGG_PID" 2>/dev/null || true
     # Do NOT kill the central hub (UNIFIED_DASH_PID): it is THE one persistent
     # dashboard — shared across every run, carrying the user's open tab, resolving
@@ -283,6 +328,24 @@ cleanup() {
             [ -n "$id" ] || continue
             echo "🧹 destroying fresh clone $id"
             reap_machine "$id" || failed_reaps="$failed_reaps $id"
+        done
+        # Every clone request is owned by a unique-name marker before Fly sees
+        # it. Recover ambiguous/eventually-consistent creations by name so they
+        # cannot become untracked billed machines.
+        for marker in "$PENDING_CLONES_DIR"/*; do
+            [ -f "$marker" ] || continue
+            pending_name="$(basename "$marker")"
+            pending_id="$(FLY machines list -a "$APP" --json 2>/dev/null | \
+                NAME="$pending_name" python3 -c 'import json,os,sys
+for m in (json.load(sys.stdin) or []):
+    if m.get("name")==os.environ["NAME"] and m.get("id"):
+        print(m["id"]); break' 2>/dev/null || true)"
+            if [ -n "$pending_id" ]; then
+                echo "🧹 destroying recovered pending clone $pending_id ($pending_name)"
+                reap_machine "$pending_id" && rm -f "$marker" || failed_reaps="$failed_reaps $pending_id"
+            else
+                echo "⚠️  pending clone '$pending_name' not yet observable; ownership marker retained" >&2
+            fi
         done
         if [ -n "$failed_reaps" ]; then
             echo "⚠️  FAILED to destroy machine(s):$failed_reaps — still alive (and billed) on Fly." >&2
@@ -414,13 +477,8 @@ _pool_ids() {  # count of tracked worker machines (clean single integer)
 
 provision_worker() {  # provision_worker <bench> <workspace> <primary_ip> <sim01> <out>
     local bench="$1" ws="$2" pip="$3" sim="$4" out="$5"
-    # Bulletproof id capture: snapshot machine ids, clone, diff (clone-output
-    # parsing was unreliable inside the autoscaler subshell → untracked zombies).
-    local before after wid
-    before="$(FLY machines list -a "$APP" --json 2>/dev/null | python3 -c 'import json,sys;print(" ".join(m["id"] for m in (json.load(sys.stdin) or []) if m.get("id")))' 2>/dev/null || true)"
-    FLY machine clone "$WARM_ID" -a "$APP" --from-snapshot "$SNAP_ID" --region "$REGION" >/dev/null 2>&1 || true
-    after="$(FLY machines list -a "$APP" --json 2>/dev/null | python3 -c 'import json,sys;print(" ".join(m["id"] for m in (json.load(sys.stdin) or []) if m.get("id")))' 2>/dev/null || true)"
-    for id in $after; do case " $before " in *" $id "*) : ;; *) wid="$id";; esac; done
+    local wid
+    wid="$(clone_machine_from_snapshot || true)"
     [ -n "${wid:-}" ] || { echo "  ⚠️ [$bench] worker clone did not appear" >&2; return 1; }
     printf '%s\n' "$wid" >> "$out/worker-clones.ids"    # COUNT it now, before staging
     echo "  ➕ [$bench] worker $wid created"
@@ -512,11 +570,9 @@ for bench in "${BENCHES[@]}"; do
         echo "▶️  [$bench] claimed POOL machine $cid (no fork, mode=$mode_label, dash=$port) — starting ..."
     else
         echo "▶️  [$bench] pool empty → cloning fresh isolated machine (mode=$mode_label, dash=$port) ..."
-        clone_out="$(FLY machine clone "$WARM_ID" -a "$APP" --from-snapshot "$SNAP_ID" --region "$REGION" 2>&1)"
-        cid="$(printf '%s' "$clone_out" | grep -oiE 'Machine ID: [0-9a-f]+' | tail -1 | awk '{print $3}')"
-        [ -z "$cid" ] && cid="$(printf '%s' "$clone_out" | grep -oiE '\b[0-9a-f]{14}\b' | tail -1)"
+        cid="$(clone_machine_from_snapshot || true)"
         if [ -z "$cid" ]; then
-            echo "   ❌ clone failed for $bench:"; printf '%s\n' "$clone_out" | tail -8 | sed 's/^/      /'
+            echo "   ❌ clone failed for $bench"
             i=$((i + 1)); continue
         fi
         CLONE_IDS+=("$cid")   # only FRESH clones are destroyed on teardown; pool machines are returned

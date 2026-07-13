@@ -101,4 +101,37 @@ describe('useAgentList', () => {
     await act(async () => secondLoad);
     expect(result.current.isLoadingAgents).toBe(false);
   });
+
+  it('does not let an older overlapping response replace newer agent data', async () => {
+    mockSession();
+    const finishRequests: Array<(agentId: string) => void> = [];
+    server.use(
+      http.get(
+        `${API_BASE}/agents`,
+        () =>
+          new Promise((resolve) => {
+            finishRequests.push((agentId) =>
+              resolve(HttpResponse.json({ agents: [{ agent_id: agentId }] })),
+            );
+          }),
+      ),
+    );
+
+    const { result } = renderHook(() => useAgentList(false));
+    let firstLoad: Promise<void> | undefined;
+    let secondLoad: Promise<void> | undefined;
+    act(() => {
+      firstLoad = result.current.loadAgents();
+      secondLoad = result.current.loadAgents();
+    });
+
+    await waitFor(() => expect(finishRequests).toHaveLength(2));
+    finishRequests[1]('newer-agent');
+    await act(async () => secondLoad);
+    expect(result.current.agents[0]?.agent_id).toBe('newer-agent');
+
+    finishRequests[0]('older-agent');
+    await act(async () => firstLoad);
+    expect(result.current.agents[0]?.agent_id).toBe('newer-agent');
+  });
 });

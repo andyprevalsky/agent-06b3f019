@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -9,6 +10,8 @@ SCRIPT = ROOT / "scripts" / "cloudbench-sync-deps.sh"
 ARTIFACT_SCRIPT = ROOT / "scripts" / "cloudbench-current-run-artifact.py"
 FETCH_SCRIPT = ROOT / "scripts" / "cloudbench-fetch-ref.sh"
 SNAPSHOT_SCRIPT = ROOT / "scripts" / "cloudbench-select-snapshot.py"
+NEW_MACHINE_SCRIPT = ROOT / "scripts" / "cloudbench-new-machine-id.py"
+SELECT_MACHINE_SCRIPT = ROOT / "scripts" / "cloudbench-select-machine.py"
 AGGREGATE_SCRIPT = ROOT / "scripts" / "cloudbench-aggregate-runs.py"
 DRIVER_SCRIPT = ROOT / "scripts" / "cloudbench-run.sh"
 FLEET_SCRIPT = ROOT / "scripts" / "run-bench-fleet"
@@ -230,6 +233,123 @@ def test_fleet_waits_for_every_isolated_stack_before_releasing_benchmarks() -> N
     assert "isolated stacks reached the synchronized start barrier" in fleet
     assert "releasing synchronized start barrier" in fleet
     assert "reconciling authoritative pool machine" in fleet
+
+
+def test_clone_id_selector_never_returns_the_warm_source_from_an_error() -> None:
+    spec = importlib.util.spec_from_file_location("cloudbench_new_machine", NEW_MACHINE_SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    source = "6834251fe05798"
+    before = [{"id": source, "name": "cloudbench-warm"}]
+
+    assert module.select_new_machine_id(before, before, source) == ""
+    assert module.select_new_machine_id([], before, source, "cloudbench-warm") == ""
+    assert module.select_new_machine_id(
+        before,
+        before + [{"id": "1234567890abcd", "name": "fresh-clone"}],
+        source,
+        "fresh-clone",
+    ) == "1234567890abcd"
+    assert module.select_new_machine_id(
+        before,
+        before
+        + [
+            {"id": "1234567890abcd", "name": "clone-one"},
+            {"id": "abcdef12345678", "name": "clone-two"},
+        ],
+        source,
+        "missing-name",
+    ) == ""
+    assert module.select_new_machine_id(
+        before,
+        before
+        + [
+            {"id": "1234567890abcd", "name": "clone-one"},
+            {"id": "abcdef12345678", "name": "clone-two"},
+        ],
+        source,
+    ) == ""
+
+
+def test_persistent_machine_selector_rejects_stored_clone_id() -> None:
+    spec = importlib.util.spec_from_file_location(
+        "cloudbench_select_machine", SELECT_MACHINE_SCRIPT
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    machines = [
+        {"id": "clone-id", "name": "cloudbench-run-123"},
+        {"id": "warm-id", "name": "cloudbench-warm"},
+    ]
+
+    assert module.select_machine_id(machines, "cloudbench-warm", "clone-id") == "warm-id"
+    assert module.select_machine_id(machines, "cloudbench-warm", "warm-id") == "warm-id"
+    assert module.select_machine_id([machines[0]], "cloudbench-warm", "clone-id") == ""
+    assert (
+        module.select_machine_id(
+            machines + [{"id": "other-warm-id", "name": "cloudbench-warm"}],
+            "cloudbench-warm",
+            "warm-id",
+        )
+        == ""
+    )
+
+
+def test_failed_clone_output_cannot_claim_the_warm_source(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    flyctl = fake_bin / "flyctl"
+    flyctl.write_text(
+        """#!/usr/bin/env bash
+if [ "$1 $2" = "machines list" ]; then
+  printf '[{"id":"6834251fe05798","name":"cloudbench-warm"}]\\n'
+  exit 0
+fi
+if [ "$1 $2" = "machine clone" ]; then
+  echo 'Error: cannot clone source machine 6834251fe05798: volume fork unavailable' >&2
+  exit 1
+fi
+exit 2
+"""
+    )
+    flyctl.chmod(0o755)
+    pending = tmp_path / "pending"
+    result = subprocess.run(
+        ["bash", str(FLEET_SCRIPT), "test-task"],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "FLY_BENCH_API_TOKEN": "test-token",
+            "CLOUDBENCH_TEST_CLONE_HELPER": "1",
+            "CLOUDBENCH_TEST_WARM_ID": "6834251fe05798",
+            "CLOUDBENCH_PENDING_CLONES_DIR": str(pending),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "6834251fe05798" not in result.stdout
+    assert "Fly clone command failed" in result.stderr
+    assert len(list(pending.iterdir())) == 1
+
+
+def test_cloudbench_controllers_share_one_cross_worktree_lock() -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    cloud = CLOUD_SCRIPT.read_text()
+    shared_lock = '$HOME/.cache/rose/$APP-controller.lock'
+
+    assert shared_lock in fleet
+    assert shared_lock in cloud
+    assert '$ROOT_DIR/.context/cloudbench-controller.lock' not in fleet
+    assert '$ROOT_DIR/.context/cloudbench-controller.lock' not in cloud
+    assert cloud.index('if [ "$MODE" != "run" ]') < cloud.index(
+        'if [ "$MODE" = "destroy" ]'
+    )
 
 
 def test_predeploy_cloud_runner_selects_the_catalog_smoke_group() -> None:
