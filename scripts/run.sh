@@ -25,6 +25,7 @@ fi
 . "$SCRIPT_DIR/lib/workspace-env.sh"
 normalize_conductor_workspace_env
 . "$SCRIPT_DIR/lib/run-process-cleanup.sh"
+. "$SCRIPT_DIR/lib/ngrok-tunnel.sh"
 
 RUN_CONTEXT_DIR="${BENCHMARK_CONTEXT_DIR:-.context}"
 case "$RUN_CONTEXT_DIR" in
@@ -267,7 +268,7 @@ kill_stale_same_worktree_benchmark_stack() {
     $BENCHMARK_MODE || return 0
 
     local killed_any=false
-    local pattern='scripts/run\.sh --benchmark|worker\.py|tsx.*src/server\.ts|node_modules/.bin/vite|ngrok http'
+    local pattern='scripts/run\.sh --benchmark|worker\.py|tsx.*src/server\.ts|node_modules/.bin/vite|ngrok http|cloudflared tunnel'
     for pid in $(pgrep -f "$pattern" 2>/dev/null); do
         [ "$pid" = "$$" ] && continue
         is_current_process_family "$pid" && continue
@@ -660,6 +661,7 @@ PIDS=()
 NAMES=()
 NGROK_PID=""
 NGROK_CONFIG_FILE=""
+PUBLIC_TUNNEL_SERVICE_NAME=""
 SHUTTING_DOWN=false
 SERVICE_STATUS=starting
 
@@ -707,33 +709,72 @@ ensure_ngrok_domain_reserved() {
     }
 }
 
-start_public_tunnel() {
+start_cloudflare_quick_tunnel() {
+    if ! command -v cloudflared >/dev/null 2>&1; then
+        echo "❌ cloudflared is required for isolated benchmark public tunnels."
+        exit 1
+    fi
+    mkdir -p "$RUN_CONTEXT_DIR"
+    local tunnel_log="$RUN_CONTEXT_DIR/cloudflared.log"
+    local tunnel_home="$RUN_CONTEXT_DIR/cloudflared-home"
+    mkdir -p "$tunnel_home"
+    echo "🌐 Starting run-scoped public frontend tunnel → localhost:$FRONTEND_PORT"
+    HOME="$tunnel_home" cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:$FRONTEND_PORT" \
+        > "$tunnel_log" 2>&1 &
+    NGROK_PID=$!
+    PUBLIC_TUNNEL_SERVICE_NAME="cloudflared"
+    PIDS+=($NGROK_PID); NAMES+=("$PUBLIC_TUNNEL_SERVICE_NAME")
+
+    for attempt in $(seq 1 60); do
+        if ! kill -0 "$NGROK_PID" 2>/dev/null; then
+            echo "❌ cloudflared exited before the public tunnel became ready."
+            tail -80 "$tunnel_log" || true
+            exit 1
+        fi
+        if cloudflare_publish_reported_environment "$tunnel_log" "$ALLOWED_ORIGINS"; then
+            echo "🌐 Public tunnel ready: $PUBLIC_BASE_URL"
+            return 0
+        fi
+        sleep 1
+    done
+
+    echo "❌ cloudflared did not publish a valid run-scoped HTTPS origin for :$FRONTEND_PORT"
+    tail -80 "$tunnel_log" || true
+    exit 1
+}
+
+start_ngrok_public_tunnel() {
     if ! command -v ngrok >/dev/null 2>&1; then
         echo "❌ ngrok is required for scripts/run.sh. Install it and configure an authtoken."
         exit 1
     fi
-    ngrok config check >/dev/null 2>&1 || {
-        echo "❌ ngrok config is invalid or missing an authtoken. Run: ngrok config add-authtoken <token>"
-        exit 1
-    }
+    if [ -z "${NGROK_AUTHTOKEN:-}" ]; then
+        ngrok config check >/dev/null 2>&1 || {
+            echo "❌ ngrok config is invalid or missing an authtoken. Run: ngrok config add-authtoken <token>"
+            exit 1
+        }
+    fi
 
     WORKSPACE_DNS_LABEL="$(dns_label_from_workspace)"
-    NGROK_DOMAIN_SUFFIX="${NGROK_DOMAIN_SUFFIX:-ngrok.app}"
-    WORKTREE_DOMAIN="${NGROK_WORKTREE_DOMAIN:-rose-${WORKSPACE_DNS_LABEL}.${NGROK_DOMAIN_SUFFIX}}"
-    export WORKTREE_DOMAIN
-    export PUBLIC_BASE_URL="https://$WORKTREE_DOMAIN"
-    export VITE_ALLOWED_HOSTS="$WORKTREE_DOMAIN"
-    export ALLOWED_ORIGINS="$ALLOWED_ORIGINS,$PUBLIC_BASE_URL"
     export NGROK_API_URL="http://127.0.0.1:$NGROK_WEB_PORT/api/tunnels"
-
-    ensure_ngrok_domain_reserved
+    NGROK_DOMAIN_SUFFIX="${NGROK_DOMAIN_SUFFIX:-ngrok.app}"
+    local configured_domain="${NGROK_WORKTREE_DOMAIN:-rose-${WORKSPACE_DNS_LABEL}.${NGROK_DOMAIN_SUFFIX}}"
+    ngrok_configure_endpoint_mode 0 "$configured_domain"
+    if [ "$NGROK_RESERVE_DOMAIN" = "1" ]; then
+        WORKTREE_DOMAIN="$configured_domain"
+        export WORKTREE_DOMAIN
+        export PUBLIC_BASE_URL="https://$WORKTREE_DOMAIN"
+        export VITE_ALLOWED_HOSTS="$WORKTREE_DOMAIN"
+        export ALLOWED_ORIGINS="$ALLOWED_ORIGINS,$PUBLIC_BASE_URL"
+        ensure_ngrok_domain_reserved
+    fi
 
     mkdir -p "$RUN_CONTEXT_DIR"
     local ngrok_base_config="$HOME/Library/Application Support/ngrok/ngrok.yml"
     if [ ! -f "$ngrok_base_config" ]; then
         ngrok_base_config="$HOME/.config/ngrok/ngrok.yml"
     fi
-    if [ ! -f "$ngrok_base_config" ]; then
+    if [ ! -f "$ngrok_base_config" ] && [ -z "${NGROK_AUTHTOKEN:-}" ]; then
         echo "❌ Could not find the ngrok config file after ngrok config check succeeded."
         exit 1
     fi
@@ -745,16 +786,20 @@ agent:
   web_addr: 127.0.0.1:$NGROK_WEB_PORT
 EOF
 
+    local -a ngrok_config_args=(--config "$NGROK_CONFIG_FILE")
+    if [ -f "$ngrok_base_config" ]; then
+        ngrok_config_args=(--config "$ngrok_base_config" --config "$NGROK_CONFIG_FILE")
+    fi
     echo "🌐 Starting public frontend tunnel: $PUBLIC_BASE_URL → localhost:$FRONTEND_PORT"
     ngrok http "$FRONTEND_PORT" \
-        --config "$ngrok_base_config" \
-        --config "$NGROK_CONFIG_FILE" \
-        --domain "$WORKTREE_DOMAIN" \
+        "${ngrok_config_args[@]}" \
+        "${NGROK_ENDPOINT_ARGS[@]}" \
         --log stdout \
         --log-format logfmt \
         --log-level info > "$RUN_CONTEXT_DIR/ngrok.log" 2>&1 &
     NGROK_PID=$!
-    PIDS+=($NGROK_PID); NAMES+=("ngrok")
+    PUBLIC_TUNNEL_SERVICE_NAME="ngrok"
+    PIDS+=($NGROK_PID); NAMES+=("$PUBLIC_TUNNEL_SERVICE_NAME")
 
     for attempt in $(seq 1 60); do
         if ! kill -0 "$NGROK_PID" 2>/dev/null; then
@@ -765,19 +810,10 @@ EOF
             echo "Checkout: https://dashboard.ngrok.com/billing/choose-a-plan"
             exit 1
         fi
-        if curl -fsS "$NGROK_API_URL" >/tmp/rose-ngrok-tunnels.json 2>/dev/null; then
-            if python3 - <<'PY'
-import json
-from pathlib import Path
-
-data = json.loads(Path("/tmp/rose-ngrok-tunnels.json").read_text())
-for tunnel in data.get("tunnels", []):
-    if tunnel.get("proto") == "https" and tunnel.get("public_url"):
-        raise SystemExit(0)
-raise SystemExit(1)
-PY
-            then
-                rm -f /tmp/rose-ngrok-tunnels.json
+        local tunnels_json="$RUN_CONTEXT_DIR/ngrok-tunnels.json"
+        if curl -fsS "$NGROK_API_URL" > "$tunnels_json" 2>/dev/null; then
+            if ngrok_publish_reported_environment "$tunnels_json" "$ALLOWED_ORIGINS"; then
+                rm -f "$tunnels_json"
                 echo "🌐 Public tunnel ready: $PUBLIC_BASE_URL"
                 return 0
             fi
@@ -785,10 +821,18 @@ PY
         sleep 1
     done
 
-    echo "❌ ngrok tunnel did not become ready for $PUBLIC_BASE_URL → :$FRONTEND_PORT"
+    echo "❌ ngrok tunnel did not become ready for ${PUBLIC_BASE_URL:-provider-assigned endpoint} → :$FRONTEND_PORT"
     echo "   ngrok API: $NGROK_API_URL"
     tail -80 "$RUN_CONTEXT_DIR/ngrok.log" || true
     exit 1
+}
+
+start_public_tunnel() {
+    case "$(public_tunnel_provider_for_mode "${BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL:-0}")" in
+        cloudflare) start_cloudflare_quick_tunnel ;;
+        ngrok) start_ngrok_public_tunnel ;;
+        *) echo "❌ Invalid public tunnel mode." >&2; exit 2 ;;
+    esac
 }
 
 write_services_manifest() {
@@ -892,6 +936,17 @@ with open(tmp_path, "w") as f:
     f.write("\n")
 os.replace(tmp_path, path)
 PY
+    if [ "${BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL:-0}" = "1" ]; then
+        local services_manifest
+        case "$RUN_CONTEXT_DIR" in
+            /*) services_manifest="$RUN_CONTEXT_DIR/services.json" ;;
+            *) services_manifest="$PWD/$RUN_CONTEXT_DIR/services.json" ;;
+        esac
+        public_tunnel_publish_url_manifest "$services_manifest" || {
+            echo "❌ Failed to publish ephemeral public URL to $services_manifest" >&2
+            return 1
+        }
+    fi
 }
 
 # ── World Model Harness (WMH) ──
@@ -1075,13 +1130,13 @@ run_service() {
 
 # Public URL flow:
 #   CONDUCTOR_WORKSPACE_NAME -> rose-<workspace>.<suffix>
-#   ngrok reserved domain -> Vite dev server on FRONTEND_PORT
+#   stable local ngrok or run-scoped cloud tunnel -> Vite on FRONTEND_PORT
 #   backend exposes PUBLIC_BASE_URL for /api/test-payment/public-url
 #
 # BENCHMARK_SKIP_PUBLIC_TUNNEL=1 opt-out: a self-contained cloud-bench box
 # (scripts/run-bench-cloud) runs simulate-only, where the WMH intercepts every
 # provider/environment boundary and no external browser ever needs to reach the
-# frontend over the internet. Standing up an ngrok reserved domain per one-shot
+# frontend over the internet. Standing up a public tunnel per one-shot
 # Fly machine is fragile and unnecessary there, so we point PUBLIC_BASE_URL at the
 # local frontend and skip the tunnel + tunnel smoke. Never set this for the normal
 # dev/benchmark stack — real browser agents need the public URL.
@@ -1089,7 +1144,7 @@ if [ "${BENCHMARK_SKIP_PUBLIC_TUNNEL:-}" = "1" ]; then
     export PUBLIC_BASE_URL="http://localhost:$FRONTEND_PORT"
     export VITE_ALLOWED_HOSTS="localhost"
     export ALLOWED_ORIGINS="$ALLOWED_ORIGINS,$PUBLIC_BASE_URL"
-    echo "🌐 BENCHMARK_SKIP_PUBLIC_TUNNEL=1 — skipping ngrok public tunnel; PUBLIC_BASE_URL=$PUBLIC_BASE_URL (simulate-only cloud bench)"
+    echo "🌐 BENCHMARK_SKIP_PUBLIC_TUNNEL=1 — skipping public tunnel; PUBLIC_BASE_URL=$PUBLIC_BASE_URL (simulate-only cloud bench)"
 else
     start_public_tunnel
 fi
@@ -1114,6 +1169,7 @@ if $BENCHMARK_MODE; then
     export TRACE_ARCHIVE_BACKEND="${TRACE_ARCHIVE_BACKEND:-local}"
     export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$PWD/.context}"
     export BLACKBOX_TEST_CAPTURE_OUTBOUND="${BLACKBOX_TEST_CAPTURE_OUTBOUND:-1}"
+    export BLACKBOX_TEST_REPLAY_OUTBOUND="${BLACKBOX_TEST_REPLAY_OUTBOUND:-0}"
     export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
     export SURGE_API_KEY="${SURGE_API_KEY:-blackbox-surge-key}"
     export SURGE_ACCOUNT_ID="${SURGE_ACCOUNT_ID:-blackbox-surge-account}"
@@ -1173,7 +1229,7 @@ echo "🧭 Service manifest: $RUN_CONTEXT_DIR/services.json"
 echo "🌐 Public frontend: $PUBLIC_BASE_URL"
 
 if [ "${BENCHMARK_SKIP_PUBLIC_TUNNEL:-}" = "1" ]; then
-    echo "⏭️  BENCHMARK_SKIP_PUBLIC_TUNNEL=1 — skipping public tunnel smoke (no ngrok on this cloud bench box)"
+    echo "⏭️  BENCHMARK_SKIP_PUBLIC_TUNNEL=1 — skipping public tunnel smoke (simulate-only cloud bench)"
 else
     echo "⏳ Verifying public tunnel smoke..."
     bash scripts/test-public-tunnel.sh
@@ -1226,12 +1282,19 @@ while true; do
                 code=$?
             fi
             name="${NAMES[$i]}"
-            if [ "$name" = "ngrok" ]; then
-                echo "⚠️  ngrok (PID $pid) exited with code $code; keeping local services running."
+            if [ "$name" = "ngrok" ] && \
+                ! public_tunnel_process_is_required "$name" "${BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL:-0}"; then
+                echo "⚠️  local public tunnel $name (PID $pid) exited with code $code; keeping local services running."
                 unset "PIDS[$i]"
                 unset "NAMES[$i]"
                 write_services_manifest || true
                 continue
+            fi
+            if public_tunnel_process_is_required "$name" "${BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL:-0}" && \
+                [ "$code" -eq 0 ]; then
+                # A required long-running tunnel exiting cleanly is still a stack
+                # failure: the published callback URL is now permanently dead.
+                code=1
             fi
             if [ $code -ne 0 ]; then
                 echo ""

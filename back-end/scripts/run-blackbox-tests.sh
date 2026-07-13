@@ -283,7 +283,7 @@ echo "Starting isolated backend for black-box tests on port $PORT"
 echo "Backend log: $BACKEND_LOG"
 echo "Artifacts: $ARTIFACT_DIR"
 
-PORT="$PORT" DISABLE_GMAIL_SYNC=1 BLACKBOX_TEST_CAPTURE_OUTBOUND=1 npx tsx src/server.ts >"$BACKEND_LOG" 2>&1 &
+PORT="$PORT" DISABLE_GMAIL_SYNC=1 BLACKBOX_TEST_CAPTURE_OUTBOUND=1 BLACKBOX_TEST_REPLAY_OUTBOUND=1 npx tsx src/server.ts >"$BACKEND_LOG" 2>&1 &
 BACKEND_PID=$!
 
 cleanup() {

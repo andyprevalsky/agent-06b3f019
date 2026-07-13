@@ -53,7 +53,7 @@ RUNS_ROOT="$ROOT_DIR/.context/fleet/runs"
 RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
 FLEET_DIR="$RUNS_ROOT/$RUN_ID"
 HUB_CTX_DIR="$RUNS_ROOT/_hub"
-LOCK_DIR="$ROOT_DIR/.context/cloudbench-controller.lock"
+LOCK_DIR="$(cloudbench_controller_lock_path "$ROOT_DIR" "$APP")"
 
 # ── Args ─────────────────────────────────────────────────────────────────────
 BENCHES=()
@@ -89,6 +89,16 @@ while [ $# -gt 0 ]; do
         *)                BENCHES+=("$1"); shift ;;
     esac
 done
+case "$RUN_TIMEOUT" in
+    ''|*[!0-9]*|0) echo "❌ --timeout must be a positive integer." >&2; exit 2 ;;
+esac
+required_lock_ttl=$((RUN_TIMEOUT + 3600))
+if [ -n "${CLOUDBENCH_CLOUD_LOCK_TTL:-}" ] && [ "$CLOUDBENCH_CLOUD_LOCK_TTL" -lt "$required_lock_ttl" ] 2>/dev/null; then
+    echo "❌ CLOUDBENCH_CLOUD_LOCK_TTL must be at least $required_lock_ttl seconds for this fleet run." >&2
+    exit 2
+fi
+CLOUDBENCH_CLOUD_LOCK_TTL="${CLOUDBENCH_CLOUD_LOCK_TTL:-$required_lock_ttl}"
+export CLOUDBENCH_CLOUD_LOCK_TTL
 # --provision-pool takes no bench args; everything else needs at least one bench.
 [ -n "$PROVISION_POOL" ] || true
 [ -n "$PROVISION_POOL" ] || [ "${#BENCHES[@]}" -ge 1 ] || { echo "usage: run-bench-fleet <bench> [<bench>...] [--sim-on a,b] [--ref X]  |  --provision-pool N" >&2; exit 2; }
@@ -390,9 +400,20 @@ claim_pool_machine() {  # echo a started, claimed pool machine id (or '' if none
         # cross-workspace ownership source of truth while the app lock is held.
         printf '%s\n' "$$" > "$claim_path"
         printf '%s\n' "$id" >> "$CLAIMED_POOL_FILE"
-        FLY machine start "$id" -a "$APP" >/dev/null 2>&1 || true
         printf '%s' "$id"; return 0
     done < "$POOL_IDS_FILE"
+}
+
+release_pool_claim() {  # release only a same-controller local claim; never stop the machine here
+    local id="$1" claim_path owner
+    [ -n "$id" ] || return 0
+    claim_path="$POOL_CLAIMS_DIR/$id"
+    owner="$(head -1 "$claim_path" 2>/dev/null || true)"
+    [ "$owner" = "$$" ] && rm -f "$claim_path" || true
+    if [ -f "$CLAIMED_POOL_FILE" ]; then
+        grep -Fxv "$id" "$CLAIMED_POOL_FILE" > "$CLAIMED_POOL_FILE.tmp" 2>/dev/null || true
+        mv "$CLAIMED_POOL_FILE.tmp" "$CLAIMED_POOL_FILE"
+    fi
 }
 
 acquire_app_environment_lock() {
@@ -437,6 +458,8 @@ CHILD_BENCH=()
 CHILD_MODE=()
 CHILD_PORT=()
 CHILD_MACHINE=()
+LEASED_PRIMARY_IDS=()
+LEASED_PRIMARY_NONCES=()
 
 terminate_and_wait() {  # bounded TERM→KILL for controller-owned local children
     [ "$#" -gt 0 ] || return 0
@@ -451,8 +474,9 @@ terminate_and_wait() {  # bounded TERM→KILL for controller-owned local childre
     wait "$watchdog" 2>/dev/null || true
 }
 
-cleanup() {
-    local ec=$? id clone_name name_matches named_id name_deadline failed_names claim_path owner st
+cleanup_impl() {
+    local ec="$1" id clone_name name_matches named_id name_deadline failed_names
+    local lease_index nonce lease_stop_attempt failed_leased_primaries=""
     # The poller and terminal can deliver TERM to the same process group. Do not
     # let a second signal interrupt teardown after the EXIT trap has begun.
     trap - EXIT
@@ -464,24 +488,25 @@ cleanup() {
     # REUSES it (never rebinds/kills it), so exactly one hub ever runs.
     terminate_and_wait "${AUTOSCALER_PIDS[@]:-}"
     terminate_and_wait "${CHILD_PIDS[@]:-}"
-    # Return only machines this fleet actually claimed. The pool ledger can be
-    # shared by sibling workspaces, so stopping every listed ID would interrupt
-    # their active runs. Keep the global lease until the machine is stopped.
-    if [ -f "$CLAIMED_POOL_FILE" ]; then
-        while read -r id; do
-            [ -n "$id" ] || continue
-            echo "↩️  returning claimed pool machine $id (stop)"
-            FLY machine stop "$id" -a "$APP" >/dev/null 2>&1 || true
-            for _ in $(seq 1 30); do
-                st="$(pool_machine_state "$id")"; [ $? -eq 1 ] && break
-                [ "$st" = "stopped" ] && break
-                sleep 2
-            done
-            claim_path="$POOL_CLAIMS_DIR/$id"
-            owner="$(head -1 "$claim_path" 2>/dev/null || true)"
-            [ "$owner" = "$$" ] && rm -f "$claim_path" || true
-        done < "$CLAIMED_POOL_FILE"
-    fi
+    for lease_index in "${!LEASED_PRIMARY_IDS[@]}"; do
+        id="${LEASED_PRIMARY_IDS[$lease_index]}"
+        nonce="${LEASED_PRIMARY_NONCES[$lease_index]:-}"
+        [ -n "$id" ] && [ -n "$nonce" ] || continue
+        echo "🔒 stopping leased primary $id"
+        for lease_stop_attempt in 1 2 3; do
+            if cloudbench_machine_stop_and_release_lease "$APP" "$id" "$nonce"; then
+                nonce=""
+                LEASED_PRIMARY_NONCES[$lease_index]=""
+                release_pool_claim "$id"
+                break
+            fi
+            sleep 2
+        done
+        if [ -n "$nonce" ]; then
+            failed_leased_primaries="$failed_leased_primaries $id"
+            echo "  ⚠️ failed to stop leased primary $id; retaining lease until TTL" >&2
+        fi
+    done
     release_app_environment_lock
     if [ "$KEEP_CLONES" != "1" ]; then
         # Autoscaler worker-pool clones (tracked per bench) first, then the primaries.
@@ -518,6 +543,7 @@ cleanup() {
         if [ -f "$OWNED_CLONES_FILE" ]; then
             while read -r id; do
                 [ -n "$id" ] || continue
+                case " $failed_leased_primaries " in *" $id "*) continue ;; esac
                 echo "🧹 destroying fresh clone $id"
                 reap_machine "$id" || failed_reaps="$failed_reaps $id"
             done < "$OWNED_CLONES_FILE"
@@ -534,6 +560,8 @@ cleanup() {
     else
         echo "⚠️  --keep-clones: leaving $(grep -c . "$OWNED_CLONES_FILE" 2>/dev/null || echo 0) fresh clone(s) alive"
     fi
+    # Pool primaries are stopped above while their per-Machine lease is still
+    # held. Never sweep the shared pool: another controller may own a machine.
     # NOTE: do NOT pkill viewers by "$FLEET_DIR" — the batch resolver (and the
     # archive Vites it spawns for durable /open-agent) carry $FLEET_DIR in their
     # argv too, so that sweep KILLED the very resolver we persist (→ dead link
@@ -541,7 +569,12 @@ cleanup() {
     # exit trap when we SIGTERM CHILD_PIDS above; the batch resolver lives on.
     [ -n "${FLEET_PATCH_FILE:-}" ] && rm -f "$FLEET_PATCH_FILE" 2>/dev/null || true
     cloudbench_controller_release "$LOCK_DIR" "$APP"
-    exit "$ec"
+}
+cleanup() {
+    local ec=$?
+    # Fleet lifecycle belongs exclusively to the top-level controller. A
+    # non-owner shell must preserve the triggering status without side effects.
+    cloudbench_dispatch_controller_cleanup "$ec" cleanup_impl "$ec"
 }
 trap cleanup EXIT
 trap 'exit 129' HUP
@@ -554,6 +587,7 @@ echo "🔐 Refreshing + production-verifying the shared benchmark environment be
 if ! CLOUDBENCH_PARENT_LOCK_HELD=1 \
     CLOUDBENCH_APP_ENV_LOCK_HELD=1 \
     CLOUDBENCH_APP_ENV_LOCK_OWNER_PID="$$" \
+    CLOUDBENCH_SKIP_MACHINE_ACTIVATION=1 \
     bash scripts/run-bench-cloud --refresh-secrets; then
     echo "❌ Cloud benchmark environment refresh failed; no benchmark machine was started." >&2
     exit 1
@@ -743,10 +777,29 @@ for bench in "${BENCHES[@]}"; do
     echo ""
     # Prefer a pre-provisioned pool machine (skips the ~300s volume fork); fall
     # back to cloning fresh if the pool is empty/exhausted.
-    cid="$(claim_pool_machine)"
-    if [ -n "$cid" ]; then
-        echo "▶️  [$bench] claimed POOL machine $cid (no fork, mode=$mode_label, dash=$port) — starting ..."
-    else
+    cid=""
+    primary_nonce=""
+    primary_lease_rc=0
+    while :; do
+        cid="$(claim_pool_machine)"
+        [ -n "$cid" ] || break
+        echo "▶️  [$bench] claimed POOL candidate $cid (no fork, mode=$mode_label, dash=$port) ..."
+        if primary_nonce="$(cloudbench_machine_lease_acquire "$APP" "$cid" \
+            "cloudbench-primary run=$RUN_ID bench=$bench")"; then
+            break
+        else
+            primary_lease_rc=$?
+        fi
+        if [ "$primary_lease_rc" -ne 75 ]; then
+            echo "   ❌ platform lease request failed for pool candidate $cid" >&2
+            release_pool_claim "$cid"
+            exit "$primary_lease_rc"
+        fi
+        echo "   ⚠️ candidate primary $cid is currently leased; trying next pool machine"
+        release_pool_claim "$cid"
+        cid=""
+    done
+    if [ -z "$cid" ]; then
         echo "▶️  [$bench] pool empty → cloning fresh isolated machine (mode=$mode_label, dash=$port) ..."
         if ! cid="$(clone_machine_target "$OWNED_CLONES_FILE")"; then
             echo "   ❌ clone failed for $bench"
@@ -760,10 +813,41 @@ for bench in "${BENCHES[@]}"; do
     # that envelope for Fly to leave the transient `created` state.
     if ! cloudbench_wait_machine_startable fleet_machine_state "$cid" 300 2; then
         echo "   ❌ machine=$cid never became startable; skipping $bench" >&2
+        release_pool_claim "$cid"
         i=$((i + 1))
         continue
     fi
-    echo "   ✅ machine=$cid is startable → launching run-bench-cloud (isolated) ..."
+    if [ -z "$primary_nonce" ]; then
+        primary_nonce="$(cloudbench_machine_lease_acquire_retry "$APP" "$cid" \
+            "cloudbench-primary run=$RUN_ID bench=$bench" \
+            "${CLOUDBENCH_PRIMARY_LEASE_ATTEMPTS:-45}" \
+            "${CLOUDBENCH_PRIMARY_LEASE_RETRY_DELAY:-2}")"
+    fi
+    if [ -z "$primary_nonce" ]; then
+        echo "   ❌ could not acquire platform lease for primary $cid" >&2
+        i=$((i + 1)); continue
+    fi
+    lease_track_index="${#LEASED_PRIMARY_IDS[@]}"
+    LEASED_PRIMARY_IDS+=("$cid")
+    LEASED_PRIMARY_NONCES+=("$primary_nonce")
+    echo "   🔐 activating staged environment on leased primary $cid ..."
+    if ! cloudbench_activate_machine_environment_with_lease "$APP" "$cid" "$primary_nonce"; then
+        echo "   ❌ could not activate environment on leased primary $cid" >&2
+        if cloudbench_machine_stop_and_release_lease "$APP" "$cid" "$primary_nonce"; then
+            LEASED_PRIMARY_NONCES[$lease_track_index]=""
+            release_pool_claim "$cid"
+        fi
+        i=$((i + 1)); continue
+    fi
+    if ! cloudbench_machine_start_with_lease "$APP" "$cid" "$primary_nonce"; then
+        echo "   ❌ could not start leased primary $cid" >&2
+        if cloudbench_machine_stop_and_release_lease "$APP" "$cid" "$primary_nonce"; then
+            LEASED_PRIMARY_NONCES[$lease_track_index]=""
+            release_pool_claim "$cid"
+        fi
+        i=$((i + 1)); continue
+    fi
+    echo "   ✅ machine=$cid → leased + launching run-bench-cloud (isolated) ..."
 
     # Deterministic per-bench workspace → deterministic Temporal queue, so the
     # autoscaler knows which queue its worker pool must poll.

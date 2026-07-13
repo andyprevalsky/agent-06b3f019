@@ -29,17 +29,17 @@ via its `call_phone_number` tool, the two AIs talk, and we verify BOTH sides:
     6. PhoneCalleeSession.cleanup(): end live persona calls, detach, then delete
        persona assistant/tools
 
-The inbound phone number is a persistent, shared resource (one per Vapi
-account, named `rose-benchmark-callee`); only the persona assistant is
-per-task. A module-level lock serializes phone tasks within a run so two
-tasks never fight over the number's attached assistant.
+Each session owns a transient inbound number. Cloud fleet benchmarks run in
+separate processes and machines, so an in-process lock cannot protect one
+mutable phone-number-to-assistant attachment across distributed runners.
 """
 
 import asyncio
 import json
 import os
 import re
-from datetime import datetime, timezone
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
 
@@ -49,17 +49,19 @@ from benchmarks.logs import load_env_var
 
 VAPI_BASE_URL = "https://api.vapi.ai"
 CALLEE_NUMBER_NAME = "rose-benchmark-callee"
+CALLEE_SESSION_NUMBER_PREFIX = f"{CALLEE_NUMBER_NAME}-session-"
 CALLEE_NUMBER_ID_ENV = "BENCHMARK_CALLEE_PHONE_NUMBER_ID"
+CALLEE_SESSION_NUMBER_TTL = timedelta(hours=2)
+# Vapi documents a "couple of minutes" before free numbers become functional;
+# keep a small propagation margin so benchmark calls never race that boundary.
+CALLEE_SESSION_NUMBER_ACTIVATION_DELAY = timedelta(minutes=3)
+VAPI_PHONE_NUMBER_NAME_MAX_LENGTH = 40
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _BACKEND_ENV = str(_REPO_ROOT / "back-end" / ".env")
-_SERVICES_JSON = _REPO_ROOT / ".context" / "services.json"
+_DEFAULT_SERVICES_JSON = _REPO_ROOT / ".context" / "services.json"
 _PAYMENT_AUDIT_PATH_ENV = "PHONE_BENCHMARK_PAYMENT_AUDIT_PATH"
 _PAYMENT_AUDIT_JSONL = _REPO_ROOT / ".context" / "phone-benchmark-payments.jsonl"
-
-# One inbound number is shared by all phone tasks — serialize sessions so a
-# parallel suite run never swaps the number's assistant mid-call.
-_callee_lock = asyncio.Lock()
 
 # Voice/transcriber mirror back-end/src/domains/vapi/config.ts so the callee
 # leg behaves like our outbound leg (same STT quality, similar latency).
@@ -82,14 +84,27 @@ def vapi_private_key() -> str:
     return load_env_var("VAPI_PRIVATE_KEY", _BACKEND_ENV)
 
 
+def _session_phone_number_name() -> str:
+    """Build a collision-resistant session name within Vapi's API contract."""
+    suffix_length = VAPI_PHONE_NUMBER_NAME_MAX_LENGTH - len(CALLEE_SESSION_NUMBER_PREFIX)
+    if suffix_length < 8:
+        raise RuntimeError("Benchmark callee number prefix leaves insufficient room for a unique suffix")
+    return f"{CALLEE_SESSION_NUMBER_PREFIX}{uuid.uuid4().hex[:suffix_length]}"
+
+
 def benchmark_public_base_url() -> str:
-    for key in ("BENCHMARK_PHONE_TOOL_BASE_URL", "BENCHMARK_FRONTEND_URL", "PUBLIC_BASE_URL"):
+    # BENCHMARK_FRONTEND_URL is report-card/dashboard metadata and is commonly a
+    # controller-local URL in cloud runs. It is never a valid server-to-server
+    # webhook target for Vapi.
+    for key in ("BENCHMARK_PHONE_TOOL_BASE_URL", "PUBLIC_BASE_URL"):
         value = os.environ.get(key, "").strip()
         if value:
             return value.rstrip("/")
-    if _SERVICES_JSON.exists():
+    context_dir = os.environ.get("BENCHMARK_CONTEXT_DIR", "").strip()
+    services_json = Path(context_dir) / "services.json" if context_dir else _DEFAULT_SERVICES_JSON
+    if services_json.exists():
         try:
-            services = json.loads(_SERVICES_JSON.read_text())
+            services = json.loads(services_json.read_text())
             public_url = ((services.get("urls") or {}).get("public") or "").strip()
             if public_url:
                 return public_url.rstrip("/")
@@ -276,17 +291,16 @@ class PhoneCalleeSession:
             )
         self.phone_number: str = ""
         self.phone_number_id: str = ""
+        self.phone_number_name = _session_phone_number_name()
+        self._owns_phone_number = False
         self.assistant_id: str = ""
         self.tool_ids: List[str] = []
         self.started_at: Optional[datetime] = None
-        self._lock_held = False
 
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
 
     async def setup(self) -> None:
-        await _callee_lock.acquire()
-        self._lock_held = True
         try:
             async with httpx.AsyncClient(base_url=VAPI_BASE_URL, headers=self._headers(), timeout=45) as client:
                 await self._ensure_phone_number(client)
@@ -303,22 +317,31 @@ class PhoneCalleeSession:
         resp.raise_for_status()
         numbers = resp.json() or []
         override_id = load_env_var(CALLEE_NUMBER_ID_ENV, _BACKEND_ENV)
-        chosen = None
-        for entry in numbers:
-            if override_id and entry.get("id") == override_id:
-                chosen = entry
-                break
-            if not override_id and entry.get("name") == CALLEE_NUMBER_NAME:
-                chosen = entry
-                break
-        if chosen is None and override_id:
-            raise RuntimeError(f"{CALLEE_NUMBER_ID_ENV}={override_id} not found in Vapi phone numbers")
-        if chosen is None:
+        chosen = next((entry for entry in numbers if override_id and entry.get("id") == override_id), None)
+        if override_id:
+            if chosen is None:
+                raise RuntimeError(f"{CALLEE_NUMBER_ID_ENV}={override_id} not found in Vapi phone numbers")
+        else:
+            await self._reclaim_stale_session_numbers(client, numbers)
             chosen = await self._provision_number(client)
+            self._owns_phone_number = True
         self.phone_number_id = chosen["id"]
         self.phone_number = chosen.get("number") or ""
         if not self.phone_number:
             raise RuntimeError(f"Benchmark callee number {self.phone_number_id} has no E.164 number assigned yet")
+        if self._owns_phone_number:
+            await self._wait_for_number_activation(chosen)
+
+    async def _wait_for_number_activation(self, phone_number: dict) -> None:
+        """Honor Vapi's activation window before placing calls to a new free number."""
+        created_at = _parse_audit_timestamp(phone_number.get("createdAt"))
+        elapsed = datetime.now(timezone.utc) - created_at if created_at else timedelta(0)
+        remaining = CALLEE_SESSION_NUMBER_ACTIVATION_DELAY - elapsed
+        if remaining.total_seconds() <= 0:
+            return
+        wait_seconds = remaining.total_seconds()
+        print(f"    ⏳ Waiting {wait_seconds:.0f}s for Vapi callee number activation")
+        await asyncio.sleep(wait_seconds)
 
     async def _provision_number(self, client: httpx.AsyncClient) -> dict:
         """Provision a free Vapi US number dedicated to benchmark callees.
@@ -333,7 +356,11 @@ class PhoneCalleeSession:
         while area_codes:
             create = await client.post(
                 "/phone-number",
-                json={"provider": "vapi", "name": CALLEE_NUMBER_NAME, "numberDesiredAreaCode": area_codes.pop(0)},
+                json={
+                    "provider": "vapi",
+                    "name": self.phone_number_name,
+                    "numberDesiredAreaCode": area_codes.pop(0),
+                },
             )
             if create.status_code in (200, 201):
                 return create.json()
@@ -344,9 +371,24 @@ class PhoneCalleeSession:
                 area_codes = [c for c in suggested if c != "400"][:3]
         raise RuntimeError(
             f"Failed to provision benchmark callee number: {last_error}. "
-            f"Provision one in the Vapi dashboard named '{CALLEE_NUMBER_NAME}' or set "
+            f"Provision one in the Vapi dashboard or set "
             f"{CALLEE_NUMBER_ID_ENV}."
         )
+
+    async def _reclaim_stale_session_numbers(self, client: httpx.AsyncClient, numbers: list[dict]) -> None:
+        cutoff = datetime.now(timezone.utc) - CALLEE_SESSION_NUMBER_TTL
+        for entry in numbers:
+            if not str(entry.get("name") or "").startswith(CALLEE_SESSION_NUMBER_PREFIX):
+                continue
+            created_at = _parse_audit_timestamp(entry.get("createdAt"))
+            if created_at is None or created_at >= cutoff:
+                continue
+            number_id = str(entry.get("id") or "")
+            if not number_id:
+                continue
+            response = await client.delete(f"/phone-number/{number_id}")
+            if response.status_code != 200:
+                print(f"    ⚠ Failed to reclaim stale callee number {number_id[:8]}: {response.status_code}")
 
     async def _create_persona_tools(self, client: httpx.AsyncClient) -> None:
         tool_specs = self.persona.get("tools") or []
@@ -481,8 +523,21 @@ class PhoneCalleeSession:
             except Exception as exc:
                 print(f"    ⚠ Failed to end active callee call {str(call.get('id', ''))[:8]}: {exc}")
 
+    async def _delete_owned_phone_number(self, client: httpx.AsyncClient) -> None:
+        if not (self._owns_phone_number and self.phone_number_id):
+            return
+        response = await client.delete(f"/phone-number/{self.phone_number_id}")
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Failed to delete callee number {self.phone_number_id}: "
+                f"{response.status_code} {response.text}"
+            )
+        self._owns_phone_number = False
+        self.phone_number_id = ""
+        self.phone_number = ""
+
     async def cleanup(self) -> None:
-        """Best-effort: detach + delete persona assistant, then release the lock."""
+        """Best-effort: detach and delete every resource owned by this session."""
         try:
             async with httpx.AsyncClient(base_url=VAPI_BASE_URL, headers=self._headers(), timeout=30) as client:
                 try:
@@ -506,9 +561,9 @@ class PhoneCalleeSession:
                     except Exception as exc:
                         print(f"    ⚠ Failed to delete callee tool {tool_id[:8]}: {exc}")
                 self.tool_ids = []
+                try:
+                    await self._delete_owned_phone_number(client)
+                except Exception as exc:
+                    print(f"    ⚠ Failed to delete callee number {self.phone_number_id[:8]}: {exc}")
         except Exception as exc:
             print(f"    ⚠ Callee cleanup error: {exc}")
-        finally:
-            if self._lock_held:
-                self._lock_held = False
-                _callee_lock.release()

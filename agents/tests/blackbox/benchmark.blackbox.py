@@ -3142,6 +3142,255 @@ def test_phone_callee_assistant_base_has_end_call_tool_and_duration_cap():
     assert _CALLEE_ASSISTANT_BASE["maxDurationSeconds"] == 150
 
 
+def test_phone_callee_session_number_names_follow_provider_contract():
+    """Transient number names remain unique within Vapi's documented API limit."""
+    from benchmarks.phone_callee import PhoneCalleeSession, VAPI_PHONE_NUMBER_NAME_MAX_LENGTH
+
+    first = PhoneCalleeSession("phone-a", {"system_prompt": "persona a"}, api_key="test")
+    second = PhoneCalleeSession("phone-b", {"system_prompt": "persona b"}, api_key="test")
+
+    assert VAPI_PHONE_NUMBER_NAME_MAX_LENGTH == 40
+    assert first.phone_number_name != second.phone_number_name
+    assert len(first.phone_number_name) <= 40
+    assert len(second.phone_number_name) <= 40
+
+
+async def test_phone_callee_waits_for_new_number_activation():
+    """Fresh Vapi numbers wait out the provider's documented activation window."""
+    from datetime import datetime, timedelta, timezone
+    from unittest.mock import AsyncMock, patch
+
+    from benchmarks.phone_callee import CALLEE_SESSION_NUMBER_ACTIVATION_DELAY, PhoneCalleeSession
+
+    session = PhoneCalleeSession("phone-a", {"system_prompt": "persona"}, api_key="test")
+    fresh = {"createdAt": datetime.now(timezone.utc).isoformat()}
+    active = {
+        "createdAt": (
+            datetime.now(timezone.utc) - CALLEE_SESSION_NUMBER_ACTIVATION_DELAY - timedelta(seconds=1)
+        ).isoformat()
+    }
+
+    sleep = AsyncMock()
+    with patch("benchmarks.phone_callee.asyncio.sleep", sleep):
+        await session._wait_for_number_activation(fresh)
+        await session._wait_for_number_activation(active)
+
+    sleep.assert_awaited_once()
+    assert CALLEE_SESSION_NUMBER_ACTIVATION_DELAY.total_seconds() - 1 <= sleep.await_args.args[0]
+    assert sleep.await_args.args[0] <= CALLEE_SESSION_NUMBER_ACTIVATION_DELAY.total_seconds()
+
+
+async def test_phone_callee_activation_cancellation_deletes_owned_number():
+    """Cancellation during activation cannot orphan a quota-limited Vapi number."""
+    import asyncio
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock, patch
+
+    from benchmarks.phone_callee import PhoneCalleeSession
+
+    class Response:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+            self.text = json.dumps(payload)
+
+        def json(self):
+            return self._payload
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise AssertionError(f"unexpected response status {self.status_code}")
+
+    class Client:
+        def __init__(self):
+            self.deleted = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def get(self, path):
+            assert path == "/phone-number"
+            return Response(200, [])
+
+        async def post(self, path, json):
+            assert path == "/phone-number"
+            return Response(
+                201,
+                {
+                    "id": "fresh-owned-number",
+                    "name": json["name"],
+                    "number": "+16195550109",
+                    "createdAt": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+
+        async def delete(self, path):
+            self.deleted.append(path)
+            return Response(200, {})
+
+    client = Client()
+    session = PhoneCalleeSession("phone-a", {"system_prompt": "persona"}, api_key="test")
+    with (
+        patch("benchmarks.phone_callee.httpx.AsyncClient", return_value=client),
+        patch("benchmarks.phone_callee.asyncio.sleep", AsyncMock(side_effect=asyncio.CancelledError)),
+    ):
+        try:
+            await session.setup()
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("activation cancellation must propagate")
+
+    assert client.deleted == ["/phone-number/fresh-owned-number"]
+
+
+async def test_phone_callee_sessions_isolate_distributed_phone_number_resources():
+    """Independent benchmark processes must not attach personas to one shared number."""
+    import asyncio
+
+    from benchmarks.phone_callee import CALLEE_NUMBER_NAME, PhoneCalleeSession
+
+    class Response:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+            self.text = json.dumps(payload)
+
+        def json(self):
+            return self._payload
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise AssertionError(f"unexpected response status {self.status_code}")
+
+    class Client:
+        def __init__(self, suffix):
+            self.suffix = suffix
+            self.created = []
+
+        async def get(self, path):
+            assert path == "/phone-number"
+            return Response(
+                200,
+                [
+                    {
+                        "id": "shared-number",
+                        "name": CALLEE_NUMBER_NAME,
+                        "number": "+16195550100",
+                    }
+                ],
+            )
+
+        async def post(self, path, json):
+            assert path == "/phone-number"
+            self.created.append(json)
+            return Response(
+                201,
+                {
+                    "id": f"isolated-{self.suffix}",
+                    "name": json["name"],
+                    "number": f"+1619555010{self.suffix}",
+                    "createdAt": "2020-01-01T00:00:00Z",
+                },
+            )
+
+    first = PhoneCalleeSession("phone-a", {"system_prompt": "persona a"}, api_key="test")
+    second = PhoneCalleeSession("phone-b", {"system_prompt": "persona b"}, api_key="test")
+    first_client = Client("1")
+    second_client = Client("2")
+    await asyncio.gather(
+        first._ensure_phone_number(first_client),
+        second._ensure_phone_number(second_client),
+    )
+
+    assert first.phone_number_id != second.phone_number_id, (
+        f"distributed sessions shared phone number {first.phone_number_id}"
+    )
+    assert len(first_client.created) == 1
+    assert len(second_client.created) == 1
+
+
+async def test_phone_callee_reclaims_only_stale_session_owned_numbers():
+    """Orphan reclamation cannot delete persistent or currently live callee numbers."""
+    from datetime import datetime, timedelta, timezone
+
+    from benchmarks.phone_callee import CALLEE_NUMBER_NAME, CALLEE_SESSION_NUMBER_PREFIX, PhoneCalleeSession
+
+    class Response:
+        status_code = 200
+        text = "ok"
+
+    class Client:
+        def __init__(self):
+            self.deleted = []
+
+        async def delete(self, path):
+            self.deleted.append(path)
+            return Response()
+
+    now = datetime.now(timezone.utc)
+    client = Client()
+    session = PhoneCalleeSession("phone-a", {"system_prompt": "persona"}, api_key="test")
+    await session._reclaim_stale_session_numbers(
+        client,
+        [
+            {
+                "id": "persistent",
+                "name": CALLEE_NUMBER_NAME,
+                "createdAt": (now - timedelta(days=1)).isoformat(),
+            },
+            {
+                "id": "fresh-session",
+                "name": f"{CALLEE_SESSION_NUMBER_PREFIX}fresh",
+                "createdAt": now.isoformat(),
+            },
+            {
+                "id": "stale-session",
+                "name": f"{CALLEE_SESSION_NUMBER_PREFIX}stale",
+                "createdAt": (now - timedelta(days=1)).isoformat(),
+            },
+        ],
+    )
+
+    assert client.deleted == ["/phone-number/stale-session"]
+
+
+async def test_phone_callee_cleanup_deletes_only_explicitly_owned_number():
+    """Cleanup deletes transient session numbers without touching configured overrides."""
+    from benchmarks.phone_callee import PhoneCalleeSession
+
+    class Response:
+        status_code = 200
+        text = "ok"
+
+    class Client:
+        def __init__(self):
+            self.deleted = []
+
+        async def delete(self, path):
+            self.deleted.append(path)
+            return Response()
+
+    client = Client()
+    owned = PhoneCalleeSession("phone-a", {"system_prompt": "persona"}, api_key="test")
+    owned.phone_number_id = "owned-number"
+    owned.phone_number = "+16195550101"
+    owned._owns_phone_number = True
+    await owned._delete_owned_phone_number(client)
+
+    configured = PhoneCalleeSession("phone-b", {"system_prompt": "persona"}, api_key="test")
+    configured.phone_number_id = "configured-number"
+    configured.phone_number = "+16195550102"
+    await configured._delete_owned_phone_number(client)
+
+    assert client.deleted == ["/phone-number/owned-number"]
+    assert owned.phone_number_id == ""
+    assert configured.phone_number_id == "configured-number"
+
+
 def test_missing_call_findings_tolerates_spacing_and_punctuation():
     """Finding matcher survives transcript formatting like '48 21' or 'rose 4471'."""
     from benchmarks.phone_callee import missing_call_findings
@@ -3312,6 +3561,39 @@ def test_benchmark_public_base_url_uses_env_override():
             os.environ.pop("BENCHMARK_PHONE_TOOL_BASE_URL", None)
         else:
             os.environ["BENCHMARK_PHONE_TOOL_BASE_URL"] = previous
+
+
+def test_benchmark_public_base_url_uses_isolated_context_manifest_not_dashboard_url():
+    """Vapi callbacks use the isolated stack's public origin, never controller-local UI metadata."""
+    import os
+    import tempfile
+    from pathlib import Path
+
+    from benchmarks.phone_callee import benchmark_public_base_url
+
+    keys = (
+        "BENCHMARK_PHONE_TOOL_BASE_URL",
+        "PUBLIC_BASE_URL",
+        "BENCHMARK_FRONTEND_URL",
+        "BENCHMARK_CONTEXT_DIR",
+    )
+    previous = {key: os.environ.get(key) for key in keys}
+    with tempfile.TemporaryDirectory() as tmp:
+        Path(tmp, "services.json").write_text(
+            '{"urls":{"public":"https://isolated-phone.ngrok.app"}}\n'
+        )
+        os.environ.pop("BENCHMARK_PHONE_TOOL_BASE_URL", None)
+        os.environ.pop("PUBLIC_BASE_URL", None)
+        os.environ["BENCHMARK_FRONTEND_URL"] = "http://localhost:8805"
+        os.environ["BENCHMARK_CONTEXT_DIR"] = tmp
+        try:
+            assert benchmark_public_base_url() == "https://isolated-phone.ngrok.app"
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
 
 def test_phone_auto_approval_requires_active_callee_number():
@@ -3907,6 +4189,30 @@ async def run_all_tests():
     r = BlackboxResult()
     r.record("phone_call_tasks_two_sided_verification", test_phone_call_tasks_define_two_sided_verification)
     r.record("phone_callee_end_call_config", test_phone_callee_assistant_base_has_end_call_tool_and_duration_cap)
+    r.record(
+        "phone_callee_session_number_name_contract",
+        test_phone_callee_session_number_names_follow_provider_contract,
+    )
+    await r.record_async(
+        "phone_callee_number_activation_window",
+        test_phone_callee_waits_for_new_number_activation,
+    )
+    await r.record_async(
+        "phone_callee_activation_cancellation_cleanup",
+        test_phone_callee_activation_cancellation_deletes_owned_number,
+    )
+    await r.record_async(
+        "phone_callee_distributed_resource_isolation",
+        test_phone_callee_sessions_isolate_distributed_phone_number_resources,
+    )
+    await r.record_async(
+        "phone_callee_stale_resource_reclamation",
+        test_phone_callee_reclaims_only_stale_session_owned_numbers,
+    )
+    await r.record_async(
+        "phone_callee_owned_resource_cleanup",
+        test_phone_callee_cleanup_deletes_only_explicitly_owned_number,
+    )
     r.record("phone_findings_matcher_squashes_separators", test_missing_call_findings_tolerates_spacing_and_punctuation)
     r.record("phone_search_text_includes_metadata", test_phone_search_text_includes_phone_call_metadata)
     r.record(
@@ -3920,6 +4226,10 @@ async def run_all_tests():
     )
     r.record("phone_callee_prompt_resolution", test_resolve_callee_prompt_requires_active_session)
     r.record("phone_public_base_url", test_benchmark_public_base_url_uses_env_override)
+    r.record(
+        "phone_public_base_url_isolated_manifest",
+        test_benchmark_public_base_url_uses_isolated_context_manifest_not_dashboard_url,
+    )
     r.record("phone_auto_approval_requires_callee", test_phone_auto_approval_requires_active_callee_number)
     r.record("extract_worker_pids_macos_python", test_extract_worker_pids_from_ps_matches_macos_python_executable)
     r.record("extract_worker_pids_lowercase_python", test_extract_worker_pids_from_ps_matches_lowercase_python)

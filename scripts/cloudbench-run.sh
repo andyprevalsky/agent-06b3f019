@@ -59,6 +59,7 @@ RUN_OUTPUT_MARKER="/tmp/cloudbench-run-start.$$"
 FETCH_REF_SCRIPT="${CLOUDBENCH_FETCH_REF_SCRIPT:-$REPO_DIR/scripts/cloudbench-fetch-ref.sh}"
 SYNC_DEPS_SCRIPT="${CLOUDBENCH_SYNC_DEPS_SCRIPT:-$REPO_DIR/scripts/cloudbench-sync-deps.sh}"
 CURRENT_RUN_ARTIFACT_SCRIPT="${CLOUDBENCH_CURRENT_RUN_ARTIFACT_SCRIPT:-$REPO_DIR/scripts/cloudbench-current-run-artifact.py}"
+PREPARE_PATCH_SCRIPT="${CLOUDBENCH_PREPARE_PATCH_SCRIPT:-$REPO_DIR/scripts/cloudbench-prepare-patch.sh}"
 
 # ── Inputs (env) ────────────────────────────────────────────────────────────
 REF="${REF:-}"
@@ -194,6 +195,10 @@ unset CLOUDBENCH_GITHUB_TOKEN_B64
 log "checkout at $(gosu "$APP_USER" git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 if [ -n "${LOCAL_PATCH_FILE:-}" ] && [ -s "$LOCAL_PATCH_FILE" ]; then
     log "applying uploaded local workspace patch on top of checkout"
+    if ! bash "$PREPARE_PATCH_SCRIPT" "$REPO_DIR" "$LOCAL_PATCH_FILE"; then
+        log "FATAL: could not prepare uploaded local workspace patch"
+        finish 1
+    fi
     if ! gosu "$APP_USER" git -C "$REPO_DIR" apply --whitespace=nowarn "$LOCAL_PATCH_FILE" 2>&1 | sed 's/^/   /'; then
         log "FATAL: could not apply uploaded local workspace patch"
         finish 1
@@ -202,6 +207,10 @@ elif [ -n "${LOCAL_PATCH_B64:-}" ]; then
     PATCH_FILE="/tmp/cloudbench-local.patch"
     if printf '%s' "$LOCAL_PATCH_B64" | base64 -d > "$PATCH_FILE" 2>/dev/null && [ -s "$PATCH_FILE" ]; then
         log "applying local workspace patch on top of checkout"
+        if ! bash "$PREPARE_PATCH_SCRIPT" "$REPO_DIR" "$PATCH_FILE"; then
+            log "FATAL: could not prepare local workspace patch"
+            finish 1
+        fi
         if ! gosu "$APP_USER" git -C "$REPO_DIR" apply --whitespace=nowarn "$PATCH_FILE" 2>&1 | sed 's/^/   /'; then
             log "FATAL: could not apply local workspace patch"
             finish 1
@@ -333,13 +342,39 @@ log "dashboard static server pid=$DASH_PID on :$BENCH_DASHPORT (root $CONTEXT_DI
 # refresh / rebuild. FLY_APP_NAME="" disables the worker's prod-style fleet
 # autoscaler (the Fly runtime injects the app name; _scale_fleet() would otherwise
 # hammer the Fly API with the prod-scoped token → 403 log spam).
+ensure_cloudflared_agent() {
+    command -v cloudflared >/dev/null 2>&1 && return 0
+    log "cloudflared missing from warm image — installing official release"
+    local attempt
+    for attempt in 1 2 3; do
+        rm -f /tmp/cloudflared.deb
+        if curl -fsSL --connect-timeout 10 --max-time 120 \
+                "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$(dpkg --print-architecture).deb" \
+                -o /tmp/cloudflared.deb \
+            && apt-get install -y -qq --no-install-recommends /tmp/cloudflared.deb; then
+            rm -f /tmp/cloudflared.deb
+            command -v cloudflared >/dev/null 2>&1 && return 0
+        fi
+        log "cloudflared install attempt $attempt/3 failed"
+        sleep 2
+    done
+    rm -f /tmp/cloudflared.deb
+    return 1
+}
+
+if [ "$BENCH_SIMULATE" != "1" ]; then
+    if ! ensure_cloudflared_agent; then
+        log "FATAL: could not install cloudflared for isolated benchmark webhooks"
+        finish 1
+    fi
+fi
+
 STACK_LOG="$CONTEXT_DIR/stack.log"
 STACK_ENV=(
     "HOME=/home/$APP_USER"
     "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     "BENCHMARK_ISOLATED_RUN=true"
     "BENCHMARK_CONTEXT_DIR=$CONTEXT_DIR"
-    "BENCHMARK_SKIP_PUBLIC_TUNNEL=1"
     "CONDUCTOR_PORT=$BASE_PORT"
     "CONDUCTOR_WORKSPACE_NAME=$WORKSPACE_NAME"
     "ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1"
@@ -377,12 +412,18 @@ fi
 if [ "$BENCH_SIMULATE" = "1" ]; then
     STACK_ENV+=(
         "BENCHMARK_WORLD_MODEL_MODE=simulate"
+        "BENCHMARK_SKIP_PUBLIC_TUNNEL=1"
         "BENCHMARK_SKIP_BROWSER_AUTH_SYNC=1"
         "BENCHMARK_WMH_FALLBACK_ON_UNAVAILABLE=1"
         "WMH_BASE_URL=http://localhost:$WMH_PORT"
     )
 else
-    STACK_ENV+=("BENCHMARK_SKIP_WMH_BUILD=1")
+    STACK_ENV+=(
+        "BENCHMARK_SKIP_WMH_BUILD=1"
+        # Each isolated VM gets a random Quick Tunnel URL for this run. The URL
+        # is process-scoped, so concurrent benchmark stacks cannot share traffic.
+        "BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL=1"
+    )
 fi
 
 # The DB warm-start dump lives on the /data volume (persists across stop/start +

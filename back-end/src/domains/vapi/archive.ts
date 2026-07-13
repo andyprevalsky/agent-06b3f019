@@ -6,6 +6,20 @@ import { findToolSideEffectOperationKey } from './repo';
 const log = createLogger('VapiArchive');
 const VAPI_CALL_OPERATION_TYPE = 'vapi.outbound_call';
 
+export type VapiPollExchange = {
+  request: {
+    method: 'GET';
+    url: string;
+    startedAt: string;
+  };
+  response: {
+    status: number;
+    headers: Record<string, string>;
+    receivedAt: string;
+    durationMs: number;
+  };
+};
+
 export function agentIdFromOperationKey(operationKey?: string): string | null {
   if (operationKey === undefined) return null;
   const prefix = `${VAPI_CALL_OPERATION_TYPE}:`;
@@ -68,11 +82,13 @@ export async function archiveVapiRecording(
 
 export async function archiveVapiPollResult(
   callId: string,
-  result: Record<string, unknown>
+  result: Record<string, unknown>,
+  exchange?: VapiPollExchange
 ): Promise<void> {
   const rootAgentId = await agentIdForCallId(callId);
   await archiveVapiJson(rootAgentId, `${callId}.poll.${Date.now()}.json.gz.enc`, {
-    request: { method: 'GET', url: `${VAPI_BASE_URL}/call/${callId}` },
+    request: exchange?.request ?? { method: 'GET', url: `${VAPI_BASE_URL}/call/${callId}` },
+    http: exchange?.response,
     response: result,
   });
   if (result.status === 'ended') {

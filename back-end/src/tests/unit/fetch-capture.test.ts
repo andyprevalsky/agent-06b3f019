@@ -65,8 +65,11 @@ async function run(): Promise<void> {
 
   const originalFetch = globalThis.fetch;
   const oldFakeSurge = process.env.BLACKBOX_TEST_FAKE_SURGE;
+  const oldReplayOutbound = process.env.BLACKBOX_TEST_REPLAY_OUTBOUND;
   const upstreamCalls: Array<{ url: string; bodyType: string }> = [];
+  let mutableVersion = 0;
   process.env.BLACKBOX_TEST_FAKE_SURGE = '1';
+  delete process.env.BLACKBOX_TEST_REPLAY_OUTBOUND;
 
   globalThis.fetch = (async (
     input: string | URL | Request,
@@ -83,6 +86,13 @@ async function run(): Promise<void> {
     });
     if (url.includes('error.e2b.app')) {
       throw new Error('e2b unavailable');
+    }
+    if (url.includes('api.example.com/mutable')) {
+      mutableVersion += 1;
+      return new Response(JSON.stringify({ version: mutableVersion }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
     }
     return new Response('upstream-ok', {
       status: 201,
@@ -152,12 +162,26 @@ async function run(): Promise<void> {
     const cacheClear = await fetch(`${baseUrl}/captures/cache`, { method: 'DELETE' });
     assert.strictEqual(cacheClear.status, 200);
 
+    const mutableFirst = (await (await fetch('https://api.example.com/mutable')).json()) as {
+      version: number;
+    };
+    const mutableSecond = (await (await fetch('https://api.example.com/mutable')).json()) as {
+      version: number;
+    };
+    assert.deepStrictEqual([mutableFirst.version, mutableSecond.version], [1, 2]);
+    assert.strictEqual(
+      upstreamCalls.filter((call) => call.url === 'https://api.example.com/mutable').length,
+      2
+    );
+
     writeLine('fetch-capture passthrough/capture tests passed');
   } finally {
     await close(server);
     globalThis.fetch = originalFetch;
     if (oldFakeSurge === undefined) delete process.env.BLACKBOX_TEST_FAKE_SURGE;
     else process.env.BLACKBOX_TEST_FAKE_SURGE = oldFakeSurge;
+    if (oldReplayOutbound === undefined) delete process.env.BLACKBOX_TEST_REPLAY_OUTBOUND;
+    else process.env.BLACKBOX_TEST_REPLAY_OUTBOUND = oldReplayOutbound;
   }
 }
 

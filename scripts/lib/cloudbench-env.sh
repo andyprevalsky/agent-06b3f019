@@ -99,6 +99,40 @@ cloudbench_retry_command() {
   done
 }
 
+cloudbench_activate_machine_environment() {
+  local machine_id="$1" app="$2"
+  local max_attempts="${CLOUDBENCH_MACHINE_UPDATE_ATTEMPTS:-3}"
+  local retry_delay="${CLOUDBENCH_MACHINE_UPDATE_RETRY_DELAY:-2}"
+  local attempt=1 output
+
+  case "$max_attempts" in
+    ''|*[!0-9]*|0)
+      echo "FATAL: CLOUDBENCH_MACHINE_UPDATE_ATTEMPTS must be a positive integer" >&2
+      return 2
+      ;;
+  esac
+  case "$retry_delay" in
+    ''|*[!0-9]*)
+      echo "FATAL: CLOUDBENCH_MACHINE_UPDATE_RETRY_DELAY must be a non-negative integer" >&2
+      return 2
+      ;;
+  esac
+
+  while [ "$attempt" -le "$max_attempts" ]; do
+    if output="$(FLY machine update "$machine_id" -a "$app" --skip-start --yes 2>&1)"; then
+      printf '%s\n' "$output" | sed 's/^/      /'
+      return 0
+    fi
+    printf '%s\n' "$output" | sed 's/^/      /' >&2
+    if [ "$attempt" -eq "$max_attempts" ]; then
+      return 1
+    fi
+    echo "      machine update attempt $attempt/$max_attempts failed; retrying in ${retry_delay}s" >&2
+    sleep "$retry_delay"
+    attempt=$((attempt + 1))
+  done
+}
+
 cloudbench_wait_machine_startable() {
   local state_reader="$1" machine_id="$2" max_attempts="$3" retry_delay_seconds="$4"
   local attempt state
@@ -197,8 +231,54 @@ print(digest.hexdigest())
 PY
 }
 
+cloudbench_is_controller_shell() {
+  [ "${BASH_SUBSHELL:-0}" -eq 0 ]
+}
+
+cloudbench_dispatch_controller_cleanup() {
+  local exit_code="$1" callback="$2"
+  shift 2
+  if cloudbench_is_controller_shell; then
+    "$callback" "$@"
+  fi
+  return "$exit_code"
+}
+
+cloudbench_controller_lock_path() {
+  local root_dir="$1" resource_name="$2" common_dir safe_resource
+  common_dir="$(git -C "$root_dir" rev-parse --git-common-dir 2>/dev/null || true)"
+  if [ -n "$common_dir" ]; then
+    case "$common_dir" in
+      /*) ;;
+      *) common_dir="$root_dir/$common_dir" ;;
+    esac
+    common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || common_dir=""
+  fi
+  [ -n "$common_dir" ] || common_dir="$root_dir/.context"
+  safe_resource="$(printf '%s' "$resource_name" | tr -c 'A-Za-z0-9._-' '-')"
+  printf '%s/cloudbench-controller-%s.lock\n' "$common_dir" "$safe_resource"
+}
+
+cloudbench_random_token() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 32
+  else
+    od -An -N32 -tx1 /dev/urandom | tr -d ' \n'
+  fi
+}
+
+cloudbench_controller_parent_valid() {
+  local path="$1" owner_pid owner_token lock_pid
+  [ -n "${CLOUDBENCH_CONTROLLER_TOKEN:-}" ] || return 1
+  read -r owner_pid owner_token < "$path.owner" 2>/dev/null || return 1
+  lock_pid="$(cat "$path" 2>/dev/null || true)"
+  [ "$owner_pid" = "$lock_pid" ] || return 1
+  [ "$owner_token" = "$CLOUDBENCH_CONTROLLER_TOKEN" ] || return 1
+  kill -0 "$owner_pid" 2>/dev/null
+}
+
 cloudbench_controller_lock_acquire() {
-  local path="$1"
+  local path="$1" owner_file
   mkdir -p "$(dirname "$path")"
   if command -v shlock >/dev/null 2>&1; then
     shlock -p "$$" -f "$path" || return 1
@@ -216,6 +296,14 @@ cloudbench_controller_lock_acquire() {
     echo "FATAL: shlock or flock is required for the cloud benchmark controller lock" >&2
     return 1
   fi
+  CLOUDBENCH_CONTROLLER_PID="$$"
+  CLOUDBENCH_CONTROLLER_TOKEN="$(cloudbench_random_token)"
+  owner_file="$path.owner"
+  if ! (umask 077; printf '%s %s\n' "$CLOUDBENCH_CONTROLLER_PID" "$CLOUDBENCH_CONTROLLER_TOKEN" > "$owner_file"); then
+    rm -f "$path" "$owner_file"
+    return 1
+  fi
+  export CLOUDBENCH_CONTROLLER_PID CLOUDBENCH_CONTROLLER_TOKEN
   CLOUDBENCH_CONTROLLER_LOCK_PATH="$path"
 }
 
@@ -230,16 +318,9 @@ cloudbench_controller_lock_release() {
     exec {CLOUDBENCH_CONTROLLER_LOCK_FD}>&-
     unset CLOUDBENCH_CONTROLLER_LOCK_FD
   fi
-  rm -f "$path"
-  unset CLOUDBENCH_CONTROLLER_LOCK_KIND CLOUDBENCH_CONTROLLER_LOCK_PATH
-}
-
-cloudbench_random_token() {
-  if command -v openssl >/dev/null 2>&1; then
-    openssl rand -hex 32
-  else
-    od -An -N32 -tx1 /dev/urandom | tr -d ' \n'
-  fi
+  rm -f "$path" "$path.owner"
+  unset CLOUDBENCH_CONTROLLER_LOCK_KIND CLOUDBENCH_CONTROLLER_LOCK_PATH \
+    CLOUDBENCH_CONTROLLER_PID CLOUDBENCH_CONTROLLER_TOKEN
 }
 
 cloudbench_machines_api_request() {
@@ -284,6 +365,30 @@ cloudbench_cloud_lock_machine_id() {
   [ "$CLOUDBENCH_API_STATUS" = "200" ] || return 1
   printf '%s' "$CLOUDBENCH_API_BODY" | jq -r --arg name "$machine_name" \
     '.[] | select(.name == $name) | .id' | head -1
+}
+
+cloudbench_cloud_lock_machine_ensure() {
+  local app="$1" region="$2" image="${3:-flyio/hellofly:latest}" machine_name machine_id body
+  machine_name="$(cloudbench_cloud_lock_machine_name)"
+  machine_id="$(cloudbench_cloud_lock_machine_id "$app" || true)"
+  [ -n "$machine_id" ] && { printf '%s\n' "$machine_id"; return 0; }
+  body="$(jq -cn --arg name "$machine_name" --arg region "$region" --arg image "$image" '{
+    name: $name,
+    region: $region,
+    config: {
+      image: $image,
+      auto_destroy: false,
+      restart: {policy: "no"},
+      guest: {cpu_kind: "shared", cpus: 1, memory_mb: 256}
+    },
+    skip_launch: true
+  }')"
+  cloudbench_machines_api_request POST "/v1/apps/$app/machines" "$body" || return 1
+  case "$CLOUDBENCH_API_STATUS" in 200|201|409) ;; *) return 1 ;; esac
+  machine_id="$(printf '%s' "$CLOUDBENCH_API_BODY" | jq -r '.id // empty' 2>/dev/null)"
+  [ -n "$machine_id" ] || machine_id="$(cloudbench_cloud_lock_machine_id "$app" || true)"
+  [ -n "$machine_id" ] || return 1
+  printf '%s\n' "$machine_id"
 }
 
 cloudbench_cloud_lock_acquire() {
@@ -343,6 +448,123 @@ cloudbench_cloud_lock_release() {
   unset CLOUDBENCH_CLOUD_LOCK_MACHINE_ID CLOUDBENCH_CLOUD_LOCK_NONCE \
     CLOUDBENCH_CLOUD_LOCK_WATCHDOG_PID CLOUDBENCH_CLOUD_LOCK_EXPIRES_AT \
     CLOUDBENCH_MACHINES_API_TOKEN
+}
+
+cloudbench_cloud_lock_machine_destroy() {
+  local app="$1" machine_id="${CLOUDBENCH_CLOUD_LOCK_MACHINE_ID:-}" nonce="${CLOUDBENCH_CLOUD_LOCK_NONCE:-}"
+  [ -n "$machine_id" ] && [ -n "$nonce" ] || return 1
+  cloudbench_machines_api_request DELETE "/v1/apps/$app/machines/$machine_id?force=true" "" "$nonce" || return 1
+  [ "$CLOUDBENCH_API_STATUS" = "200" ] || return 1
+  unset CLOUDBENCH_CLOUD_LOCK_MACHINE_ID CLOUDBENCH_CLOUD_LOCK_NONCE
+}
+
+cloudbench_machine_lease_acquire() {
+  local app="$1" machine_id="$2" description="${3:-cloudbench-primary}" ttl body nonce
+  ttl="${CLOUDBENCH_CLOUD_LOCK_TTL:-7200}"
+  # Fly accepts at most 64 runes for an AcquireLeaseRequest description. Keep
+  # the stable prefix plus as much run/bench context as the provider permits.
+  description="${description:0:64}"
+  body="$(jq -cn --arg description "$description" --argjson ttl "$ttl" '{description:$description, ttl:$ttl}')"
+  cloudbench_machines_api_request POST "/v1/apps/$app/machines/$machine_id/lease" "$body" || return 1
+  case "$CLOUDBENCH_API_STATUS" in
+    201) ;;
+    409) return 75 ;;
+    *)
+      echo "Machine lease acquisition failed for $machine_id (HTTP $CLOUDBENCH_API_STATUS)" >&2
+      return 1
+      ;;
+  esac
+  nonce="$(printf '%s' "$CLOUDBENCH_API_BODY" | jq -r '.data.nonce // .nonce // empty' 2>/dev/null)"
+  [ -n "$nonce" ] || return 1
+  printf '%s\n' "$nonce"
+}
+
+cloudbench_machine_lease_acquire_retry() {
+  local app="$1" machine_id="$2" description="$3" attempts="${4:-45}" delay="${5:-2}" attempt nonce rc
+  case "$attempts" in ''|*[!0-9]*|0) return 2 ;; esac
+  case "$delay" in ''|*[!0-9]*) return 2 ;; esac
+  attempt=1
+  while [ "$attempt" -le "$attempts" ]; do
+    if nonce="$(cloudbench_machine_lease_acquire "$app" "$machine_id" "$description")"; then
+      printf '%s\n' "$nonce"
+      return 0
+    else
+      rc=$?
+    fi
+    [ "$rc" -eq 75 ] || return "$rc"
+    [ "$attempt" -eq "$attempts" ] && break
+    sleep "$delay"
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
+cloudbench_machine_start_with_lease() {
+  local app="$1" machine_id="$2" nonce="$3"
+  local attempts="${CLOUDBENCH_MACHINE_START_ATTEMPTS:-30}"
+  local delay="${CLOUDBENCH_MACHINE_START_RETRY_DELAY:-1}" attempt=1
+  case "$attempts" in ''|*[!0-9]*|0) return 2 ;; esac
+  case "$delay" in ''|*[!0-9]*) return 2 ;; esac
+  while [ "$attempt" -le "$attempts" ]; do
+    cloudbench_machines_api_request POST "/v1/apps/$app/machines/$machine_id/start" '{}' "$nonce" || return 1
+    [ "$CLOUDBENCH_API_STATUS" = "200" ] && return 0
+    if [ "$CLOUDBENCH_API_STATUS" != "412" ] || \
+       ! printf '%s' "$CLOUDBENCH_API_BODY" | grep -Fqi 'machine getting replaced'; then
+      echo "Machine start failed for $machine_id (HTTP $CLOUDBENCH_API_STATUS)" >&2
+      return 1
+    fi
+    [ "$attempt" -eq "$attempts" ] && break
+    sleep "$delay"
+    attempt=$((attempt + 1))
+  done
+  echo "Machine replacement did not settle before start for $machine_id" >&2
+  return 1
+}
+
+cloudbench_activate_machine_environment_with_lease() {
+  local app="$1" machine_id="$2" nonce="$3" body
+  local attempts="${CLOUDBENCH_MACHINE_ACTIVATION_ATTEMPTS:-3}"
+  local delay="${CLOUDBENCH_MACHINE_ACTIVATION_RETRY_DELAY:-2}" attempt=1
+  case "$attempts" in ''|*[!0-9]*|0) return 2 ;; esac
+  case "$delay" in ''|*[!0-9]*) return 2 ;; esac
+  while [ "$attempt" -le "$attempts" ]; do
+    # Re-read on every attempt: an ambiguous 408 may have committed the prior
+    # update, in which case current_version must advance before retrying.
+    cloudbench_machines_api_request GET "/v1/apps/$app/machines/$machine_id" || return 1
+    [ "$CLOUDBENCH_API_STATUS" = "200" ] || return 1
+    body="$(printf '%s' "$CLOUDBENCH_API_BODY" | jq -c '{
+      config: .config,
+      name: .name,
+      region: .region,
+      skip_launch: true
+    } + (if .version then {current_version: .version} else {} end)')"
+    [ -n "$body" ] || return 1
+    cloudbench_machines_api_request POST "/v1/apps/$app/machines/$machine_id" "$body" "$nonce" || return 1
+    [ "$CLOUDBENCH_API_STATUS" = "200" ] && return 0
+    if [ "$CLOUDBENCH_API_STATUS" != "408" ]; then
+      echo "Machine environment activation failed for $machine_id (HTTP $CLOUDBENCH_API_STATUS)" >&2
+      return 1
+    fi
+    [ "$attempt" -eq "$attempts" ] && break
+    sleep "$delay"
+    attempt=$((attempt + 1))
+  done
+  echo "Machine environment activation timed out for $machine_id after $attempts attempts" >&2
+  return 1
+}
+
+cloudbench_machine_release_lease() {
+  local app="$1" machine_id="$2" nonce="$3"
+  cloudbench_machines_api_request DELETE "/v1/apps/$app/machines/$machine_id/lease" "" "$nonce" >/dev/null 2>&1 || true
+}
+
+cloudbench_machine_stop_and_release_lease() {
+  local app="$1" machine_id="$2" nonce="$3" stop_ok=0
+  if cloudbench_machines_api_request POST "/v1/apps/$app/machines/$machine_id/stop" '{}' "$nonce"; then
+    case "$CLOUDBENCH_API_STATUS" in 200|409) stop_ok=1 ;; esac
+  fi
+  [ "$stop_ok" = "1" ] || return 1
+  cloudbench_machine_release_lease "$app" "$machine_id" "$nonce"
 }
 
 cloudbench_controller_acquire() {

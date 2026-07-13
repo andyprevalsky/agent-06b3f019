@@ -3,11 +3,11 @@
  *
  * When active (BLACKBOX_TEST_CAPTURE_OUTBOUND=1), wraps the global `fetch` to:
  * 1. Record every outbound HTTP call (URL, method, headers, body, response) for test assertions
- * 2. Cache responses via @with-logic/fast-forward FileSystemCache so subsequent runs
- *    replay from cache instead of hitting real third-party APIs
+ * 2. Optionally cache responses when BLACKBOX_TEST_REPLAY_OUTBOUND=1 so explicit
+ *    blackbox runs can replay stable third-party fixtures.
  *
- * First run:  real outbound calls are made, responses cached to .context/fast-forward-cache/
- * Later runs: cached responses are returned instantly — no real API calls.
+ * With replay enabled, the first run caches real outbound responses under
+ * .context/fast-forward-cache/ and later runs return those fixtures instantly.
  * Tests always see capture entries regardless of cache hit/miss.
  *
  * REST endpoints (mounted at /api/test/captures):
@@ -15,7 +15,8 @@
  *   DELETE /               — clear capture log (resets in-memory list, not cache)
  *   DELETE /cache          — clear fast-forward cache (forces re-record on next run)
  *
- * Activation: BLACKBOX_TEST_CAPTURE_OUTBOUND=1 before server boot.
+ * Activation: BLACKBOX_TEST_CAPTURE_OUTBOUND=1 before server boot. Replay is a
+ * separate opt-in via BLACKBOX_TEST_REPLAY_OUTBOUND=1.
  * Only intended for isolated blackbox test backends — never in production.
  */
 
@@ -127,6 +128,7 @@ export function shouldBypassOutboundReplay(url: string): boolean {
  */
 export function installFetchCapture(): Router {
   const originalFetch = globalThis.fetch;
+  const replayEnabled = process.env.BLACKBOX_TEST_REPLAY_OUTBOUND === '1';
 
   // Set up fast-forward with persistent filesystem cache
   const cacheDir = resolve(__dirname, '../../../.context/fast-forward-cache');
@@ -334,17 +336,14 @@ export function installFetchCapture(): Router {
     try {
       const headersJson = JSON.stringify(fullHeaders);
 
-      // Check if fast-forward has a cached response (pre-flight check)
+      // Real benchmarks capture pass-through traffic but must observe mutable
+      // provider state. Only explicit blackbox runs opt into replay.
       const cacheKey = JSON.stringify({ method: 'call', args: [url, method, requestBody] });
-      const wasCached = fsCache ? await fsCache.has(cacheKey) : false;
+      const wasCached = replayEnabled && fsCache ? await fsCache.has(cacheKey) : false;
 
-      // Call through fast-forward — cache hit returns instantly, miss makes real call
-      const serialized: SerializedResponse = await cachedClient.call(
-        url,
-        method,
-        headersJson,
-        requestBody
-      );
+      const serialized: SerializedResponse = replayEnabled
+        ? await cachedClient.call(url, method, headersJson, requestBody)
+        : await rawClient.call(url, method, headersJson, requestBody);
 
       entry.durationMs = Date.now() - start;
       entry.responseStatus = serialized.status;
