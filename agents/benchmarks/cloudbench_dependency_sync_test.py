@@ -823,6 +823,8 @@ def test_environment_refresh_serializes_shared_app_and_reconciles_pool_first() -
     cleanup_start = fleet.index("cleanup() {")
     cleanup_end = fleet.index("\n}", cleanup_start)
     cleanup = fleet[cleanup_start:cleanup_end]
+    assert cleanup.index("trap - EXIT") < cleanup.index('kill "$p"')
+    assert cleanup.index("trap '' INT TERM") < cleanup.index('kill "$p"')
     assert cleanup.index('wait "$p"') < cleanup.index("release_app_environment_lock")
 
 

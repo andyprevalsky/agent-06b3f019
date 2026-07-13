@@ -407,6 +407,10 @@ CHILD_MACHINE=()
 
 cleanup() {
     local ec=$? id clone_name name_matches named_id name_deadline failed_names claim_path owner st
+    # The poller and terminal can deliver TERM to the same process group. Do not
+    # let a second signal interrupt teardown after the EXIT trap has begun.
+    trap - EXIT
+    trap '' INT TERM
     [ -n "${UNIFIED_AGG_PID:-}" ] && kill "$UNIFIED_AGG_PID" 2>/dev/null || true
     # Do NOT kill the central hub (UNIFIED_DASH_PID): it is THE one persistent
     # dashboard — shared across every run, carrying the user's open tab, resolving
