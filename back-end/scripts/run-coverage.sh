@@ -167,9 +167,12 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Wait for backend to be ready
+# Wait for backend to be ready. Instrumented TypeScript startup can take more
+# than a minute on shared Conductor hosts when several workspaces run coverage
+# concurrently, so use the repository's five-minute timeout ceiling and emit
+# progress every ten seconds instead of failing silently during host pressure.
 READY=0
-for _ in $(seq 1 120); do
+for attempt in $(seq 1 600); do
   if curl -fsS -m 2 "$TEST_BASE_URL/health" >/dev/null 2>&1; then
     READY=1
     break
@@ -178,6 +181,9 @@ for _ in $(seq 1 120); do
     echo "❌ Backend process exited before becoming ready"
     tail -n 40 "$COV_LOG" || true
     exit 1
+  fi
+  if (( attempt % 20 == 0 )); then
+    echo "Waiting for backend health on $TEST_BASE_URL/health ($((attempt / 2))s elapsed)..."
   fi
   sleep 0.5
 done
