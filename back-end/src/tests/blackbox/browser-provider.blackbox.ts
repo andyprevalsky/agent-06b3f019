@@ -48,6 +48,7 @@ interface BrowserMetadataResponse {
 interface BrowserApiResponse {
   session_id?: string;
   task_id?: string;
+  debug_url?: string;
   ws_url?: string;
   saved_url?: string;
   provider?: string;
@@ -253,6 +254,20 @@ async function runLiveProviderParity(): Promise<void> {
     assert(metadata.proxy_location?.country === 'US', 'US proxy location was not resolved');
     profileId = metadata.profile_id;
     assert(profileId !== undefined && profileId !== '', 'Kernel profile was not persisted');
+
+    const liveViewUrl = init.debug_url;
+    assert(
+      liveViewUrl !== undefined && liveViewUrl !== '',
+      'Kernel live-view URL was not returned'
+    );
+    const liveViewResponse = await fetch(liveViewUrl, {
+      signal: AbortSignal.timeout(15_000),
+    });
+    const liveViewBody = await liveViewResponse.text();
+    assert(
+      liveViewResponse.ok && !/session not found/i.test(liveViewBody),
+      `Kernel live view was not ready: HTTP ${liveViewResponse.status} ${liveViewBody.slice(0, 200)}`
+    );
 
     const browser = await chromium.connectOverCDP(String(init.ws_url));
     try {

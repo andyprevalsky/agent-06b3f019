@@ -172,13 +172,6 @@ if [[ -z "${FAST_MODE_CACHE_DATABASE_URL:-}" ]]; then
   exit 1
 fi
 
-STARTUP_TIMEOUT_SECONDS="${BACKEND_COVERAGE_STARTUP_TIMEOUT_SECONDS:-180}"
-if [[ ! "$STARTUP_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] || [[ "$STARTUP_TIMEOUT_SECONDS" -le 0 ]]; then
-  echo "❌ BACKEND_COVERAGE_STARTUP_TIMEOUT_SECONDS must be a positive integer" >&2
-  exit 1
-fi
-STARTUP_ATTEMPTS=$((STARTUP_TIMEOUT_SECONDS * 2))
-
 echo "Starting backend with coverage collection on port $COV_PORT..."
 NODE_V8_COVERAGE="$COV_TMP" PORT="$COV_PORT" DISABLE_GMAIL_SYNC=1 BLACKBOX_TEST_CAPTURE_OUTBOUND=1 \
   npx tsx src/server.ts >"$COV_LOG" 2>&1 &
@@ -192,10 +185,20 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Wait for backend to be ready
+# Wait for backend to be ready. Instrumented TypeScript startup can exceed a
+# minute on a busy shared host, so use a wall-clock five-minute deadline and
+# emit progress every ten seconds instead of failing silently.
 READY=0
-for _ in $(seq 1 "$STARTUP_ATTEMPTS"); do
-  if curl -fsS -m 2 "$TEST_BASE_URL/health" >/dev/null 2>&1; then
+READINESS_STARTED_AT=$SECONDS
+READINESS_DEADLINE=$((READINESS_STARTED_AT + 300))
+NEXT_READINESS_PROGRESS=10
+while ((SECONDS < READINESS_DEADLINE)); do
+  REMAINING_READINESS_SECONDS=$((READINESS_DEADLINE - SECONDS))
+  CURL_TIMEOUT_SECONDS=2
+  if ((REMAINING_READINESS_SECONDS < CURL_TIMEOUT_SECONDS)); then
+    CURL_TIMEOUT_SECONDS=$REMAINING_READINESS_SECONDS
+  fi
+  if curl -fsS -m "$CURL_TIMEOUT_SECONDS" "$TEST_BASE_URL/health" >/dev/null 2>&1; then
     READY=1
     break
   fi
@@ -204,11 +207,18 @@ for _ in $(seq 1 "$STARTUP_ATTEMPTS"); do
     tail -n 40 "$COV_LOG" || true
     exit 1
   fi
-  sleep 0.5
+  READINESS_ELAPSED=$((SECONDS - READINESS_STARTED_AT))
+  if ((READINESS_ELAPSED >= NEXT_READINESS_PROGRESS)); then
+    echo "Waiting for backend health on $TEST_BASE_URL/health (${READINESS_ELAPSED}s elapsed)..."
+    NEXT_READINESS_PROGRESS=$((READINESS_ELAPSED + 10))
+  fi
+  if ((SECONDS < READINESS_DEADLINE)); then
+    sleep 0.5
+  fi
 done
 
 if [[ "$READY" -ne 1 ]]; then
-  echo "❌ Timed out after ${STARTUP_TIMEOUT_SECONDS}s waiting for backend health on $TEST_BASE_URL/health"
+  echo "❌ Timed out waiting for backend health on $TEST_BASE_URL/health"
   tail -n 40 "$COV_LOG" || true
   exit 1
 fi
