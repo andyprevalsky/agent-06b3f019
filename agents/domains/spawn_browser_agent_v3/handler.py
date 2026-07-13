@@ -2640,7 +2640,13 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     seen_otp_codes: set[str] = set()
     available_file_paths: Dict[str, str] = {}
     passkey_ref_by_credential_id: Dict[str, Dict[str, str]] = {}
-    recorded_passkey_credential_ids: set[str] = set()
+    recorded_passkey_credential_ids: set[str] = {
+        credential_id
+        for credential_id in (write_lock_resume_state or {}).get(
+            "recorded_passkey_credential_ids", []
+        )
+        if isinstance(credential_id, str) and credential_id
+    }
 
     async def record_passkey_usage_once() -> None:
         if dom_service is None:
@@ -4003,6 +4009,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     "cdp_url": cdp_url,
                     "handoff_mode": "same_steel_session_live_view",
                     "step_count": iteration,
+                    "recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids),
                     "execution_time_ms": execution_time_ms,
                     "usage_items": usage_items,
                 }
@@ -4686,6 +4693,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     "session_id": session_id,
                     "cdp_url": cdp_url,
                     "task_id": task_id,
+                    "recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids),
                 }
 
             if result.get("status") in {"needs_payment_card_approval", "awaiting_payment_card_approval"}:
@@ -4783,6 +4791,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     "session_id": session_id,
                     "cdp_url": cdp_url,
                     "task_id": task_id,
+                    "recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids),
                 }
 
             if result.get("success", True):
@@ -5302,6 +5311,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             "session_id": result.get("session_id"),
                             "cdp_url": result.get("cdp_url"),
                             "task_id": result.get("task_id"),
+                            "recorded_passkey_credential_ids": result.get(
+                                "recorded_passkey_credential_ids", []
+                            ),
                         }
 
                         logger.info(
@@ -5555,6 +5567,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "cdp_url": result.get("cdp_url"),
                         "task_id": result.get("task_id"),
                         "payment_card_refs": payment_card_refs,
+                        "recorded_passkey_credential_ids": result.get(
+                            "recorded_passkey_credential_ids", []
+                        ),
                     }
 
                     yield ToolEvent(
@@ -5652,6 +5667,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "handoff_mode": result.get("handoff_mode"),
                         "task_id": result.get("task_id"),
                         "auth_realm": result.get("auth_realm"),
+                        "recorded_passkey_credential_ids": result.get(
+                            "recorded_passkey_credential_ids", []
+                        ),
                     }
 
                     yield ToolEvent(

@@ -53,6 +53,19 @@ const SKIP_BROWSER_AUTH_SYNC =
 const COMPUTE_TOKENS_ONLY = process.argv.includes('--compute-tokens-only');
 const COMPUTE_TOKEN_SYNC_ATTEMPTS = 5;
 
+const requestedSeedModes = [
+  ['--compute-tokens-only', COMPUTE_TOKENS_ONLY],
+  ['--passkeys-only', PASSKEYS_ONLY],
+  ['--credentials-only', CREDENTIALS_ONLY],
+].filter(([, enabled]) => enabled);
+if (requestedSeedModes.length > 1) {
+  throw new Error(
+    `Seed modes are mutually exclusive; received ${requestedSeedModes
+      .map(([flag]) => flag)
+      .join(', ')}`
+  );
+}
+
 const remote = new PrismaClient({ datasources: { db: { url: REMOTE_URL } } });
 const local = new PrismaClient(); // uses process.env.DATABASE_URL (local)
 

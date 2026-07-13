@@ -5912,6 +5912,25 @@ def test_passkey_usage_is_sampled_before_every_terminal_browser_disconnect():
     assert not any("await dom_service.disconnect()" in line for line in lines)
 
 
+def test_passkey_usage_dedupe_survives_every_browser_activity_resume_boundary():
+    """Approval and auth handoffs must carry recorded passkey IDs into the next activity."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    activity_source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    manager_source = inspect.getsource(handler.SpawnBrowserAgentManagerV3.execute_tool)
+
+    assert activity_source.count(
+        '"recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids)'
+    ) == 3
+    assert manager_source.count(
+        '"recorded_passkey_credential_ids": result.get('
+    ) == 3
+    assert '(write_lock_resume_state or {}).get(' in activity_source
+    assert '"recorded_passkey_credential_ids", []' in activity_source
+
+
 # ── _execute_click ───────────────────────────────────────────────────
 
 
@@ -9183,6 +9202,10 @@ async def run_all_tests():
     r.record(
         "passkey_usage_sampled_before_terminal_disconnects",
         test_passkey_usage_is_sampled_before_every_terminal_browser_disconnect,
+    )
+    r.record(
+        "passkey_usage_dedupe_survives_resume_boundaries",
+        test_passkey_usage_dedupe_survives_every_browser_activity_resume_boundary,
     )
     r.record(
         "browser_action_log_summary_redacts_payment_secrets", test_browser_action_log_summary_redacts_payment_secrets

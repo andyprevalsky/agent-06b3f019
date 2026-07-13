@@ -448,6 +448,19 @@ test('passkeys-only seed mode never enters browser state or password sync', asyn
   );
 });
 
+test('seed-local rejects conflicting exclusive sync modes before creating database clients', async () => {
+  const source = readFileSync(resolve(__dirname, '../../../scripts/seed-local.ts'), 'utf8');
+  const validation = source.indexOf('if (requestedSeedModes.length > 1)');
+  const clients = source.indexOf('const remote = new PrismaClient');
+
+  assert(validation > 0, 'expected mutually exclusive seed-mode validation');
+  assert(clients > validation, 'expected seed-mode validation before database client creation');
+  assert(
+    source.includes('Seed modes are mutually exclusive; received'),
+    'expected conflicting flags to be named in the failure'
+  );
+});
+
 test('browser-state natural-key sync crosses the real Prisma uniqueness boundary', async () => {
   const databaseUrl = process.env.DATABASE_URL;
   assert(databaseUrl, 'DATABASE_URL is required for the seed-local database blackbox');
