@@ -943,6 +943,21 @@ resolve_machine_id
     assert result.stdout.strip() == "warm-1"
 
 
+def test_setup_fetch_trusts_only_the_rose_owned_warm_checkout() -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    setup_start = cloud.index('if [ "$MODE" = "setup" ]; then')
+    setup_end = cloud.index("# MODE: --refresh-wmh", setup_start)
+    setup = cloud[setup_start:setup_end]
+
+    assert (
+        setup.count(
+            "git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO'"
+        )
+        >= 2
+    )
+    assert "git config --global --add safe.directory" not in setup
+
+
 def test_environment_refresh_serializes_shared_app_and_reconciles_pool_first() -> None:
     cloud = CLOUD_SCRIPT.read_text()
     fleet = FLEET_SCRIPT.read_text()

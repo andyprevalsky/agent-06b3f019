@@ -975,11 +975,11 @@ mkdir -p /data
 AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GH_TOKEN\" | base64 | tr -d '\n')\"
 if [ -d '$REMOTE_REPO/.git' ]; then
   echo 'repo already present — fetching latest'
-  git -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin
+  git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin
 else
   git -c http.extraheader=\"\$AUTH_HDR\" clone --quiet 'https://github.com/Rose-Ai-Labs/rose.git' '$REMOTE_REPO'
 fi
-git -C '$REMOTE_REPO' remote set-url origin 'https://github.com/Rose-Ai-Labs/rose.git'
+git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' remote set-url origin 'https://github.com/Rose-Ai-Labs/rose.git'
 chown -R rose:rose '$REMOTE_REPO' 2>/dev/null || true
 echo 'clone/fetch complete'"
     FLY ssh console -a "$APP" --machine "$mid" \
