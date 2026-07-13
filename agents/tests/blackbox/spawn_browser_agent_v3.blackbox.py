@@ -8710,10 +8710,13 @@ async def test_manager_auth_assistance_pauses_and_resumes():
             events.append(event)
 
     titles = [getattr(event, "title", "") for event in events]
+    assert titles.count("Starting up a browser") == 1
     assert "Requesting User Assistance for example.com Login" in titles
     assert "User Assistance Received" in titles
     assert events[-1].status == MessageStatus.FINISHED
     assert workflow_instance.is_paused is False
+    assert len(start_calls) == 2
+    assert {call[1]["args"][3] for call in start_calls} == {"tool-1"}
     first_auth_event = next(
         event for event in events if getattr(event, "title", "") == "Requesting User Assistance for example.com Login"
     )
