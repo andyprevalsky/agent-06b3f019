@@ -66,6 +66,7 @@ AUTOSCALE="1"           # per-bench worker autoscaling (prod params, scoped to t
 AUTOSCALE_MAX="15"      # prod MAX_MACHINES; per-bench ceiling of worker machines
 AUTOSCALE_POLL="10"     # seconds between desired-count reads off the box /metrics
 SYNCHRONIZED_START="${CLOUDBENCH_SYNCHRONIZED_START:-1}"
+CONTROLLER_RETRY_SECONDS="${CLOUDBENCH_CONTROLLER_RETRY_SECONDS:-10}"
 PROVISION_POOL=""       # --provision-pool N: pre-provision N stopped clones (current image) then exit
 POOL_IDS_FILE="$ROOT_DIR/.context/cloudbench-pool.ids"   # persistent pool machine ids (one per line)
 GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null || echo "$ROOT_DIR/.git")"
@@ -107,6 +108,9 @@ for seconds in "$RUN_TIMEOUT" "$START_BARRIER_WAIT_SECONDS"; do
     [ "$seconds" -gt 0 ] \
         || { echo "❌ --timeout and CLOUDBENCH_START_BARRIER_WAIT_SECONDS must be positive integers" >&2; exit 2; }
 done
+case "$CONTROLLER_RETRY_SECONDS" in
+    ''|*[!0-9]*|0) echo "❌ CLOUDBENCH_CONTROLLER_RETRY_SECONDS must be a positive integer" >&2; exit 2 ;;
+esac
 CHILD_RUN_TIMEOUT="$RUN_TIMEOUT"
 if [ "$SYNCHRONIZED_START" = "1" ]; then
     CHILD_RUN_TIMEOUT=$((RUN_TIMEOUT + START_BARRIER_WAIT_SECONDS))
@@ -425,10 +429,15 @@ release_app_environment_lock() {
 }
 
 # ── One controller lock for the whole fleet (children run with --no-lock) ────
-if ! cloudbench_controller_acquire "$LOCK_DIR" "$APP"; then
-    old_pid="$(cat "$LOCK_DIR" 2>/dev/null || true)"
-    echo "❌ Another cloud benchmark controller is already running${old_pid:+ (pid $old_pid)}." >&2
-    exit 1
+# Capacity contention is expected: another workspace may legitimately own the
+# shared Fly app for a full smoke run. Keep this controller alive and retry the
+# typed temporary failure. Every other acquisition error remains terminal.
+controller_status=0
+cloudbench_controller_acquire_wait "$LOCK_DIR" "$APP" "$CONTROLLER_RETRY_SECONDS" ||
+    controller_status=$?
+if [ "$controller_status" -ne 0 ]; then
+    echo "❌ Cloud benchmark controller acquisition failed (exit $controller_status)." >&2
+    exit "$controller_status"
 fi
 
 OWNED_CLONES_FILE="$FLEET_DIR/owned-clones.ids"

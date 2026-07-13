@@ -3,6 +3,10 @@
 # Shared fail-closed helpers for the cloud benchmark environment handoff.
 # This file is sourced by both the macOS controller and Linux benchmark VMs.
 
+# sysexits.h EX_TEMPFAIL: the caller may retry this exact failure without
+# weakening handling for ordinary runner/configuration failures.
+CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE=75
+
 cloudbench_env_value() {
   local path="$1" key="$2"
   python3 - "$path" "$key" <<'PY'
@@ -198,17 +202,40 @@ PY
 }
 
 cloudbench_controller_lock_acquire() {
-  local path="$1"
-  mkdir -p "$(dirname "$path")"
+  local path="$1" owner status
+  if ! mkdir -p "$(dirname "$path")"; then
+    echo "FATAL: could not create cloud benchmark controller lock directory" >&2
+    return 1
+  fi
   if command -v shlock >/dev/null 2>&1; then
-    shlock -p "$$" -f "$path" || return 1
+    status=0
+    shlock -p "$$" -f "$path" || status=$?
+    if [ "$status" -ne 0 ]; then
+      owner="$(cat "$path" 2>/dev/null || true)"
+      if [[ "$owner" =~ ^[0-9]+$ ]] && kill -0 "$owner" 2>/dev/null; then
+        echo "CLOUDBENCH_RETRYABLE_CAPACITY=local_lock_busy" >&2
+        return "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE"
+      fi
+      echo "FATAL: cloud benchmark local controller lock acquisition failed" >&2
+      return 1
+    fi
     CLOUDBENCH_CONTROLLER_LOCK_KIND="shlock"
   elif command -v flock >/dev/null 2>&1; then
-    exec {CLOUDBENCH_CONTROLLER_LOCK_FD}<> "$path"
-    if ! flock -n "$CLOUDBENCH_CONTROLLER_LOCK_FD"; then
+    if ! exec {CLOUDBENCH_CONTROLLER_LOCK_FD}<> "$path"; then
+      echo "FATAL: could not open cloud benchmark local controller lock" >&2
+      return 1
+    fi
+    status=0
+    flock -n "$CLOUDBENCH_CONTROLLER_LOCK_FD" || status=$?
+    if [ "$status" -ne 0 ]; then
       exec {CLOUDBENCH_CONTROLLER_LOCK_FD}>&-
       unset CLOUDBENCH_CONTROLLER_LOCK_FD
-      return 1
+      if [ "$status" -eq 1 ]; then
+        echo "CLOUDBENCH_RETRYABLE_CAPACITY=local_lock_busy" >&2
+        return "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE"
+      fi
+      echo "FATAL: cloud benchmark local controller lock acquisition failed (exit $status)" >&2
+      return "$status"
     fi
     printf '%s\n' "$$" > "$path"
     CLOUDBENCH_CONTROLLER_LOCK_KIND="flock"
@@ -298,8 +325,13 @@ cloudbench_cloud_lock_acquire() {
   description="cloudbench-controller pid=$$ host=$(hostname 2>/dev/null || echo unknown)"
   body="$(jq -cn --arg description "$description" --argjson ttl "$ttl" '{description:$description, ttl:$ttl}')"
   cloudbench_machines_api_request POST "/v1/apps/$app/machines/$machine_id/lease" "$body" || return 1
+  if [ "$CLOUDBENCH_API_STATUS" = "409" ]; then
+    echo "CLOUDBENCH_RETRYABLE_CAPACITY=lease_busy" >&2
+    echo "Cloud benchmark app is leased by another controller (HTTP 409); waiting is safe." >&2
+    return "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE"
+  fi
   if [ "$CLOUDBENCH_API_STATUS" != "201" ]; then
-    echo "FATAL: cloud benchmark app is already leased by another controller (HTTP $CLOUDBENCH_API_STATUS)" >&2
+    echo "FATAL: cloud benchmark lease acquisition failed (HTTP $CLOUDBENCH_API_STATUS)" >&2
     return 1
   fi
   nonce="$(printf '%s' "$CLOUDBENCH_API_BODY" | jq -r '.data.nonce // .nonce // empty' 2>/dev/null)"
@@ -346,16 +378,41 @@ cloudbench_cloud_lock_release() {
 }
 
 cloudbench_controller_acquire() {
-  local path="$1" app="$2"
-  cloudbench_controller_lock_acquire "$path" || return 1
+  local path="$1" app="$2" status
+  status=0
+  cloudbench_controller_lock_acquire "$path" || status=$?
+  [ "$status" -eq 0 ] || return "$status"
   if ! cloudbench_machines_api_token_ensure "$app"; then
     cloudbench_controller_lock_release "$path"
     return 1
   fi
-  if ! cloudbench_cloud_lock_acquire "$app"; then
+  status=0
+  cloudbench_cloud_lock_acquire "$app" || status=$?
+  if [ "$status" -ne 0 ]; then
     cloudbench_controller_lock_release "$path"
-    return 1
+    return "$status"
   fi
+}
+
+cloudbench_controller_acquire_wait() {
+  local path="$1" app="$2" retry_seconds="$3" status old_pid
+  case "$retry_seconds" in
+    ''|*[!0-9]*|0)
+      echo "FATAL: cloud benchmark controller retry interval must be a positive integer" >&2
+      return 2
+      ;;
+  esac
+
+  while true; do
+    status=0
+    cloudbench_controller_acquire "$path" "$app" || status=$?
+    [ "$status" -eq 0 ] && return 0
+    [ "$status" -eq "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE" ] || return "$status"
+
+    old_pid="$(cat "$path" 2>/dev/null || true)"
+    echo "Cloud benchmark capacity is busy${old_pid:+ (local pid $old_pid)}; retrying in ${retry_seconds}s..."
+    sleep "$retry_seconds"
+  done
 }
 
 cloudbench_controller_release() {
