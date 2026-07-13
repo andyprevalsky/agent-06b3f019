@@ -411,6 +411,34 @@ activate_machine_environment() {  # activate_machine_environment <machine_id>
     return 1
 }
 
+machine_presence() {  # machine_presence <machine_id>: 0=present, 1=absent, 2=list failed
+    local machine_id="$1" machines
+    machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 2
+    printf '%s' "$machines" | MACHINE_ID="$machine_id" python3 -c '
+import json, os, sys
+try:
+    machines = json.load(sys.stdin) or []
+except (TypeError, ValueError):
+    raise SystemExit(2)
+if not isinstance(machines, list) or any(not isinstance(machine, dict) for machine in machines):
+    raise SystemExit(2)
+machine_id = os.environ["MACHINE_ID"]
+raise SystemExit(0 if any(machine.get("id") == machine_id for machine in machines) else 1)
+'
+}
+
+activate_or_skip_disappeared_machine() {  # activate_or_skip_disappeared_machine <machine_id>
+    local machine_id="$1" presence
+    activate_machine_environment "$machine_id" && return 0
+    machine_presence "$machine_id"
+    presence=$?
+    if [ "$presence" -eq 1 ]; then
+        echo "      machine $machine_id disappeared after environment snapshot; skipping stale entry" >&2
+        return 0
+    fi
+    return 1
+}
+
 # Inject the two base64 .env blobs + GITHUB_TOKEN as active Fly secrets (present
 # on machine init + in ssh sessions). The benchmark app uses the Machines API,
 # not Fly Launch releases: stage app secrets, then update each stopped machine
@@ -464,7 +492,7 @@ for machine in json.load(sys.stdin) or []:
     while IFS= read -r machine_id; do
         [ -n "$machine_id" ] || continue
         echo "   activating env on machine $machine_id (skip-start)"
-        activate_machine_environment "$machine_id" || {
+        activate_or_skip_disappeared_machine "$machine_id" || {
             echo "❌ Failed to activate environment on machine $machine_id" >&2
             exit 1
         }

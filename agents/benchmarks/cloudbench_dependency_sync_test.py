@@ -605,6 +605,72 @@ activate_machine_environment machine-1
     assert len(exhausted_calls) == 3
 
 
+def test_environment_activation_skips_only_confirmed_disappeared_machines() -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    fleet = FLEET_SCRIPT.read_text()
+    function_start = cloud.index("activate_machine_environment() {")
+    wrapper_start = cloud.index("activate_or_skip_disappeared_machine() {", function_start)
+    function_end = cloud.index("\n}\n", wrapper_start) + 3
+    activation_functions = cloud[function_start:function_end]
+
+    def activate(presence: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"""set -uo pipefail
+APP=bench-app
+FLY() {{
+  if [ "$1 $2" = "machine update" ]; then
+    echo 'failed to obtain lease: machine not found'
+    return 1
+  fi
+  if [ "$1 $2" = "machines list" ]; then
+    if [ "$PRESENCE" = "error" ]; then return 1; fi
+    if [ "$PRESENCE" = "object" ]; then printf '{{"id":"machine-1"}}\\n'; return 0; fi
+    if [ "$PRESENCE" = "invalid-item" ]; then printf '["machine-1"]\\n'; return 0; fi
+    if [ "$PRESENCE" = "present" ]; then
+      printf '[{{"id":"machine-1"}}]\\n'
+    else
+      printf '[]\\n'
+    fi
+    return 0
+  fi
+  return 2
+}}
+{activation_functions}
+activate_or_skip_disappeared_machine machine-1
+""",
+            ],
+            env={
+                "CLOUDBENCH_UPDATE_RETRY_DELAY": "0",
+                "PRESENCE": presence,
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    disappeared = activate("absent")
+    still_present = activate("present")
+    unknown = activate("error")
+    object_shape = activate("object")
+    invalid_item_shape = activate("invalid-item")
+
+    assert disappeared.returncode == 0, disappeared.stderr
+    assert "skipping stale entry" in disappeared.stderr
+    assert still_present.returncode == 1
+    assert "skipping stale entry" not in still_present.stderr
+    assert unknown.returncode == 1
+    assert "skipping stale entry" not in unknown.stderr
+    assert object_shape.returncode == 1
+    assert "skipping stale entry" not in object_shape.stderr
+    assert invalid_item_shape.returncode == 1
+    assert "skipping stale entry" not in invalid_item_shape.stderr
+    assert 'WARM_ID="$(printf \'%s\' "$warm_pair" | awk \'{print $1}\')"' in fleet
+    assert "No warm machine '$MACHINE_NAME'" in fleet
+
+
 def test_fleet_clone_identity_requires_a_distinct_authoritative_target(
     tmp_path: Path,
 ) -> None:
