@@ -339,6 +339,31 @@ describe('AdminHealth page', () => {
     }
   });
 
+  it('rejects unauthenticated requests before calling the backend', async () => {
+    localStorage.removeItem('rose-session');
+    clearCaptures();
+
+    await expect(fetchAdminHealthData('weekly')).rejects.toThrow('Not authenticated');
+    expect(
+      capturedRequests.some(
+        (request) =>
+          request.method === 'GET' && request.url.includes('/admin-health?timeSlice=weekly'),
+      ),
+    ).toBe(false);
+  });
+
+  it('surfaces backend failures instead of rendering stale health data', async () => {
+    server.use(
+      http.get(`${API_BASE}/admin-health`, () =>
+        HttpResponse.json({ error: 'metrics unavailable' }, { status: 503 }),
+      ),
+    );
+
+    await expect(fetchAdminHealthData('weekly')).rejects.toThrow(
+      'Failed to load admin health (503)',
+    );
+  });
+
   it('keeps the request timeout active while parsing the response body', async () => {
     vi.useFakeTimers();
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
