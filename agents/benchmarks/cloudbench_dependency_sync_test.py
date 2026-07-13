@@ -338,6 +338,241 @@ exit 2
     assert len(list(pending.iterdir())) == 1
 
 
+def test_clone_reconciles_exact_named_machine_after_flyctl_failure(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    flyctl = fake_bin / "flyctl"
+    flyctl.write_text(
+        """#!/usr/bin/env bash
+state="${CLOUDBENCH_TEST_FAKE_STATE:?}"
+if [ "$1 $2" = "machines list" ]; then
+  if [ -f "$state" ]; then
+    name="$(cat "$state")"
+    printf '[{"id":"6834251fe05798","name":"cloudbench-warm"},{"id":"286d152f59e298","name":"%s","state":"created"}]\\n' "$name"
+  else
+    printf '[{"id":"6834251fe05798","name":"cloudbench-warm"}]\\n'
+  fi
+  exit 0
+fi
+if [ "$1 $2" = "machine clone" ]; then
+  name=""
+  detached=0
+  shift 2
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --name) name="${2:-}"; shift 2 ;;
+      --detach) detached=1; shift ;;
+      *) shift ;;
+    esac
+  done
+  printf '%s' "$name" > "$state"
+  printf '%s' "$detached" > "${state}.detached"
+  echo 'Machine 286d152f59e298 has been created'
+  echo 'Error: machine failed to reach desired start state, and restart policy was set to no restart' >&2
+  exit 1
+fi
+exit 2
+"""
+    )
+    flyctl.chmod(0o755)
+    pending = tmp_path / "pending"
+    result = subprocess.run(
+        ["bash", str(FLEET_SCRIPT), "test-task"],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "FLY_BENCH_API_TOKEN": "test-token",
+            "CLOUDBENCH_TEST_CLONE_HELPER": "1",
+            "CLOUDBENCH_TEST_WARM_ID": "6834251fe05798",
+            "CLOUDBENCH_TEST_FAKE_STATE": str(tmp_path / "clone-state"),
+            "CLOUDBENCH_PENDING_CLONES_DIR": str(pending),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "286d152f59e298"
+    assert (tmp_path / "clone-state.detached").read_text() == "1"
+    assert "adopting exact named clone" in result.stderr
+    markers = list(pending.iterdir())
+    assert len(markers) == 1
+    assert markers[0].read_text().strip() == "286d152f59e298"
+
+
+def test_clone_fails_closed_when_ownership_marker_cannot_be_created(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    clone_called = tmp_path / "clone-called"
+    flyctl = fake_bin / "flyctl"
+    flyctl.write_text(
+        """#!/usr/bin/env bash
+if [ "$1 $2" = "machines list" ]; then
+  printf '[{"id":"6834251fe05798","name":"cloudbench-warm"}]\\n'
+  exit 0
+fi
+if [ "$1 $2" = "machine clone" ]; then
+  : > "${CLOUDBENCH_TEST_CLONE_CALLED:?}"
+  exit 0
+fi
+exit 2
+"""
+    )
+    flyctl.chmod(0o755)
+    blocked_pending_path = tmp_path / "pending-is-a-file"
+    blocked_pending_path.write_text("not a directory")
+    result = subprocess.run(
+        ["bash", str(FLEET_SCRIPT), "test-task"],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "FLY_BENCH_API_TOKEN": "test-token",
+            "CLOUDBENCH_TEST_CLONE_HELPER": "1",
+            "CLOUDBENCH_TEST_WARM_ID": "6834251fe05798",
+            "CLOUDBENCH_PENDING_CLONES_DIR": str(blocked_pending_path),
+            "CLOUDBENCH_TEST_CLONE_CALLED": str(clone_called),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "refusing to clone" in result.stderr
+    assert not clone_called.exists()
+
+
+def test_cleanup_recovers_resolved_clone_from_durable_marker(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    pending = tmp_path / "pending"
+    pending.mkdir()
+    clone_name = "cb-crash-recovery"
+    clone_id = "286d152f59e298"
+    marker = pending / clone_name
+    marker.write_text(f"{clone_id}\n")
+    alive = tmp_path / "clone-alive"
+    alive.touch()
+    destroyed = tmp_path / "destroyed"
+    flyctl = fake_bin / "flyctl"
+    flyctl.write_text(
+        """#!/usr/bin/env bash
+if [ "$1 $2" = "machines list" ]; then
+  if [ -f "${CLOUDBENCH_TEST_CLONE_ALIVE:?}" ]; then
+    printf '[{"id":"6834251fe05798","name":"cloudbench-warm"},{"id":"286d152f59e298","name":"cb-crash-recovery"}]\\n'
+  else
+    printf '[{"id":"6834251fe05798","name":"cloudbench-warm"}]\\n'
+  fi
+  exit 0
+fi
+if [ "$1 $2" = "machine destroy" ]; then
+  printf '%s\\n' "$4" >> "${CLOUDBENCH_TEST_DESTROYED:?}"
+  rm -f "${CLOUDBENCH_TEST_CLONE_ALIVE:?}"
+  exit 0
+fi
+exit 0
+"""
+    )
+    flyctl.chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(FLEET_SCRIPT), "test-task"],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "FLY_BENCH_API_TOKEN": "test-token",
+            "CLOUDBENCH_TEST_PENDING_CLEANUP": "1",
+            "CLOUDBENCH_PENDING_CLONES_DIR": str(pending),
+            "CLOUDBENCH_CONTROLLER_LOCK_FILE": str(tmp_path / "controller.lock"),
+            "CLOUDBENCH_TEST_CLONE_ALIVE": str(alive),
+            "CLOUDBENCH_TEST_DESTROYED": str(destroyed),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert destroyed.read_text().strip() == clone_id
+    assert not alive.exists()
+    assert not marker.exists()
+
+
+def test_pool_handoff_records_id_before_releasing_marker(tmp_path: Path) -> None:
+    pending = tmp_path / "pending"
+    pending.mkdir()
+    clone_id = "286d152f59e298"
+    marker = pending / "cb-pool-handoff"
+    marker.write_text(f"{clone_id}\n")
+    pool_ids = tmp_path / "pool.ids"
+    result = subprocess.run(
+        ["bash", str(FLEET_SCRIPT), "test-task"],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "FLY_BENCH_API_TOKEN": "test-token",
+            "CLOUDBENCH_TEST_POOL_HANDOFF_ID": clone_id,
+            "CLOUDBENCH_PENDING_CLONES_DIR": str(pending),
+            "CLOUDBENCH_POOL_IDS_FILE": str(pool_ids),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert pool_ids.read_text().splitlines() == [clone_id]
+    assert not marker.exists()
+
+
+def test_cleanup_retains_marker_when_fly_machine_list_fails(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    pending = tmp_path / "pending"
+    pending.mkdir()
+    clone_id = "286d152f59e298"
+    marker = pending / "cb-unknown-state"
+    marker.write_text(f"{clone_id}\n")
+    destroyed = tmp_path / "destroyed"
+    flyctl = fake_bin / "flyctl"
+    flyctl.write_text(
+        """#!/usr/bin/env bash
+if [ "$1 $2" = "machines list" ]; then exit 1; fi
+if [ "$1 $2" = "machine destroy" ]; then
+  : > "${CLOUDBENCH_TEST_DESTROYED:?}"
+  exit 0
+fi
+exit 0
+"""
+    )
+    flyctl.chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(FLEET_SCRIPT), "test-task"],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "FLY_BENCH_API_TOKEN": "test-token",
+            "CLOUDBENCH_TEST_PENDING_CLEANUP": "1",
+            "CLOUDBENCH_PENDING_CLONES_DIR": str(pending),
+            "CLOUDBENCH_CONTROLLER_LOCK_FILE": str(tmp_path / "controller.lock"),
+            "CLOUDBENCH_POOL_IDS_FILE": str(tmp_path / "pool.ids"),
+            "CLOUDBENCH_TEST_DESTROYED": str(destroyed),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert marker.read_text().strip() == clone_id
+    assert not destroyed.exists()
+    assert "ownership marker retained" in result.stderr
+
+
 def test_cloudbench_controllers_share_one_cross_worktree_lock() -> None:
     fleet = FLEET_SCRIPT.read_text()
     cloud = CLOUD_SCRIPT.read_text()

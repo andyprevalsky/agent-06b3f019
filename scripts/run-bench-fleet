@@ -70,7 +70,7 @@ AUTOSCALE_MAX="15"      # prod MAX_MACHINES; per-bench ceiling of worker machine
 AUTOSCALE_POLL="10"     # seconds between desired-count reads off the box /metrics
 SYNCHRONIZED_START="${CLOUDBENCH_SYNCHRONIZED_START:-1}"
 PROVISION_POOL=""       # --provision-pool N: pre-provision N stopped clones (current image) then exit
-POOL_IDS_FILE="$ROOT_DIR/.context/cloudbench-pool.ids"   # persistent pool machine ids (one per line)
+POOL_IDS_FILE="${CLOUDBENCH_POOL_IDS_FILE:-$ROOT_DIR/.context/cloudbench-pool.ids}"   # persistent pool machine ids (one per line)
 while [ $# -gt 0 ]; do
     case "$1" in
         --sim-on)         SIM_ON_CSV="${2:-}"; shift 2 ;;
@@ -112,8 +112,27 @@ FLY_API_TOKEN="$(resolve_fly_token)"
 export FLY_API_TOKEN
 FLY() { flyctl "$@"; }
 
+release_resolved_clone_marker() {  # release_resolved_clone_marker <durably-owned-id>
+    local id="$1" marker
+    for marker in "$PENDING_CLONES_DIR"/*; do
+        [ -f "$marker" ] || continue
+        if [ "$(cat "$marker" 2>/dev/null || true)" = "$id" ]; then
+            rm -f "$marker"
+        fi
+    done
+}
+
+record_pool_clone() {  # durable pool ownership must precede marker release
+    local id="$1"
+    if ! printf '%s\n' "$id" >> "$POOL_IDS_FILE"; then
+        echo "  ❌ could not durably record pool clone $id; recovery marker retained" >&2
+        return 1
+    fi
+    release_resolved_clone_marker "$id"
+}
+
 clone_machine_from_snapshot() {  # prints exactly one verified new machine id
-    local before after clone_log machine_id attempt clone_name
+    local before after clone_log machine_id attempt clone_name clone_uuid clone_rc
     before="$(mktemp)"
     after="$(mktemp)"
     clone_log="$(mktemp)"
@@ -122,16 +141,26 @@ clone_machine_from_snapshot() {  # prints exactly one verified new machine id
         rm -f "$before" "$after" "$clone_log"
         return 1
     fi
-    clone_name="cb-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
-    mkdir -p "$PENDING_CLONES_DIR"
-    : > "$PENDING_CLONES_DIR/$clone_name"
-    if ! FLY machine clone "$WARM_ID" -a "$APP" --name "$clone_name" \
-        --from-snapshot "$SNAP_ID" --region "$REGION" > "$clone_log" 2>&1; then
-        echo "  ❌ Fly clone command failed:" >&2
-        tail -8 "$clone_log" | sed 's/^/     /' >&2
+    clone_uuid="$(python3 -c 'import uuid; print(uuid.uuid4().hex)' 2>/dev/null || true)"
+    if [ -z "$clone_uuid" ]; then
+        echo "  ❌ could not generate a unique clone ownership name" >&2
         rm -f "$before" "$after" "$clone_log"
         return 1
     fi
+    clone_name="cb-$clone_uuid"
+    if ! mkdir -p "$PENDING_CLONES_DIR" || ! : > "$PENDING_CLONES_DIR/$clone_name"; then
+        echo "  ❌ could not persist clone ownership marker; refusing to clone" >&2
+        rm -f "$before" "$after" "$clone_log"
+        return 1
+    fi
+    # `fly machine clone` normally waits for an automatic start after the API has
+    # already created the machine. Fleet children own a more generous, retrying
+    # start/readiness loop, so detach from that redundant CLI wait. Still
+    # reconcile by the unguessable exact name if flyctl reports non-zero: the API
+    # can create the machine before a later client-side/API response fails.
+    clone_rc=0
+    FLY machine clone "$WARM_ID" -a "$APP" --name "$clone_name" \
+        --from-snapshot "$SNAP_ID" --region "$REGION" --detach > "$clone_log" 2>&1 || clone_rc=$?
     machine_id=""
     for attempt in $(seq 1 30); do
         if FLY machines list -a "$APP" --json > "$after" 2>/dev/null; then
@@ -141,15 +170,41 @@ clone_machine_from_snapshot() {  # prints exactly one verified new machine id
         fi
         sleep 2
     done
-    rm -f "$before" "$after" "$clone_log"
     if [ -z "$machine_id" ]; then
-        echo "  ❌ clone succeeded but its named machine '$clone_name' was not observable" >&2
+        if [ "$clone_rc" -ne 0 ]; then
+            echo "  ❌ Fly clone command failed:" >&2
+            tail -8 "$clone_log" | sed 's/^/     /' >&2
+        else
+            echo "  ❌ clone succeeded but its named machine '$clone_name' was not observable" >&2
+        fi
         echo "     ownership marker retained: $PENDING_CLONES_DIR/$clone_name" >&2
+        rm -f "$before" "$after" "$clone_log"
         return 1
     fi
-    rm -f "$PENDING_CLONES_DIR/$clone_name"
+    if [ "$clone_rc" -ne 0 ]; then
+        echo "  ⚠️ flyctl reported failure after creating $machine_id; adopting exact named clone '$clone_name'" >&2
+    fi
+    rm -f "$before" "$after" "$clone_log"
+    if [ "$KEEP_CLONES" = "1" ]; then
+        # Explicit keep is the ownership disposition: later controllers must not
+        # mistake this machine for an abandoned request.
+        rm -f "$PENDING_CLONES_DIR/$clone_name"
+    else
+        # Keep recovery durable across the command-substitution handoff to the
+        # caller. A SIGKILL before CLONE_IDS is updated can then still reap the
+        # exact machine by both its random name and authoritative ID.
+        if ! printf '%s\n' "$machine_id" > "$PENDING_CLONES_DIR/$clone_name"; then
+            echo "  ❌ could not finalize durable ownership marker for $machine_id" >&2
+            return 1
+        fi
+    fi
     printf '%s\n' "$machine_id"
 }
+
+if [ -n "${CLOUDBENCH_TEST_POOL_HANDOFF_ID:-}" ]; then
+    record_pool_clone "$CLOUDBENCH_TEST_POOL_HANDOFF_ID"
+    exit $?
+fi
 
 if [ "${CLOUDBENCH_TEST_CLONE_HELPER:-0}" = "1" ]; then
     WARM_ID="${CLOUDBENCH_TEST_WARM_ID:?test warm id required}"
@@ -237,7 +292,11 @@ provision_pool() {  # provision_pool <N> — create N stopped clones, record ids
     echo "🏊 Provisioning pool of $n stopped machines (image = warm $WARM_ID, snapshot $SNAP_ID, region $REGION)..."
     for i in $(seq 1 "$n"); do
         id="$(_clone_one)"
-        if [ -n "$id" ]; then echo "  [$i/$n] created $id"; printf '%s\n' "$id" >> "$POOL_IDS_FILE"; else echo "  [$i/$n] ⚠ clone failed"; fi
+        if [ -n "$id" ] && record_pool_clone "$id"; then
+            echo "  [$i/$n] created $id"
+        else
+            echo "  [$i/$n] ⚠ clone failed"
+        fi
     done
     echo "⏳ waiting for volumes to provision, then stopping (pool idles at \$0 compute)..."
     while read -r id; do
@@ -302,7 +361,7 @@ CHILD_PORT=()
 CHILD_MACHINE=()
 
 cleanup() {
-    local ec=$? marker pending_name pending_id
+    local ec=$? marker pending_name pending_id pending_expected pending_list pending_parse_rc
     [ -n "${UNIFIED_AGG_PID:-}" ] && kill "$UNIFIED_AGG_PID" 2>/dev/null || true
     # Do NOT kill the central hub (UNIFIED_DASH_PID): it is THE one persistent
     # dashboard — shared across every run, carrying the user's open tab, resolving
@@ -335,12 +394,36 @@ cleanup() {
         for marker in "$PENDING_CLONES_DIR"/*; do
             [ -f "$marker" ] || continue
             pending_name="$(basename "$marker")"
-            pending_id="$(FLY machines list -a "$APP" --json 2>/dev/null | \
-                NAME="$pending_name" python3 -c 'import json,os,sys
+            pending_expected="$(cat "$marker" 2>/dev/null || true)"
+            if [ -n "$pending_expected" ] && [ -f "$POOL_IDS_FILE" ] && \
+                    grep -Fxq "$pending_expected" "$POOL_IDS_FILE" 2>/dev/null; then
+                # Pool ownership is durable; this request is no longer pending.
+                rm -f "$marker"
+                continue
+            fi
+            pending_list="$(mktemp 2>/dev/null || true)"
+            if [ -z "$pending_list" ] || ! FLY machines list -a "$APP" --json > "$pending_list" 2>/dev/null; then
+                echo "⚠️  could not verify pending clone '$pending_name'; ownership marker retained" >&2
+                rm -f "$pending_list"
+                continue
+            fi
+            pending_id="$(NAME="$pending_name" python3 -c 'import json,os,sys
 for m in (json.load(sys.stdin) or []):
     if m.get("name")==os.environ["NAME"] and m.get("id"):
-        print(m["id"]); break' 2>/dev/null || true)"
-            if [ -n "$pending_id" ]; then
+        print(m["id"]); break' < "$pending_list" 2>/dev/null)"
+            pending_parse_rc=$?
+            rm -f "$pending_list"
+            if [ "$pending_parse_rc" -ne 0 ]; then
+                echo "⚠️  invalid Fly machine list for pending clone '$pending_name'; ownership marker retained" >&2
+                continue
+            fi
+            if [ -n "$pending_expected" ] && [ -z "$pending_id" ]; then
+                # A resolved request whose exact named machine is gone was
+                # already reaped through CLONE_IDS/worker-clones.ids.
+                rm -f "$marker"
+            elif [ -n "$pending_expected" ] && [ "$pending_id" != "$pending_expected" ]; then
+                echo "⚠️  pending clone '$pending_name' changed id; refusing to destroy $pending_id" >&2
+            elif [ -n "$pending_id" ]; then
                 echo "🧹 destroying recovered pending clone $pending_id ($pending_name)"
                 reap_machine "$pending_id" && rm -f "$marker" || failed_reaps="$failed_reaps $pending_id"
             else
@@ -377,6 +460,10 @@ for m in (json.load(sys.stdin) or []):
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+if [ "${CLOUDBENCH_TEST_PENDING_CLEANUP:-0}" = "1" ]; then
+    exit 0
+fi
 
 echo "🔐 Refreshing + production-verifying the shared benchmark environment before machine start..."
 if ! CLOUDBENCH_PARENT_LOCK_HELD=1 bash scripts/run-bench-cloud --refresh-secrets; then
