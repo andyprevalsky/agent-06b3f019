@@ -61,6 +61,24 @@ if cloudbench_retry_command 3 0 always_fail >/dev/null 2>&1; then
 fi
 [ "$retry_attempts" -eq 3 ] || fail "a permanent failure must exhaust its retry budget"
 
+machine_states="$TMP_ROOT/machine-states"
+printf 'created\ncreated\nstopped\n' > "$machine_states"
+read_machine_state() {
+  local state
+  state="$(head -1 "$machine_states")"
+  tail -n +2 "$machine_states" > "$machine_states.next"
+  mv "$machine_states.next" "$machine_states"
+  printf '%s\n' "$state"
+}
+cloudbench_wait_machine_startable read_machine_state machine-1 3 0 ||
+  fail "a provisioning clone must wait until it becomes stopped/startable"
+[ ! -s "$machine_states" ] || fail "the startable-state wait must consume the transition sequence"
+
+printf 'created\ndestroyed\n' > "$machine_states"
+if cloudbench_wait_machine_startable read_machine_state machine-2 3 0 >/dev/null 2>&1; then
+  fail "a destroyed provisioning clone must fail closed"
+fi
+
 lock_file="$TMP_ROOT/controller.lock"
 cloudbench_controller_lock_acquire "$lock_file"
 if bash -c 'source "$1"; cloudbench_controller_lock_acquire "$2"' _ "$HELPER_SRC" "$lock_file"; then
@@ -87,6 +105,9 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'FLY machine update "$machine_id" -a "$APP" --skip-start --yes' \
   "every existing benchmark machine must activate staged secrets without starting"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'cloudbench_wait_machine_startable fleet_machine_state "$cid"' \
+  "fleet children must not launch while a fresh clone is still in created state"
 if grep -Fq -- 'FLY secrets deploy' "$ROOT_DIR/scripts/run-bench-cloud"; then
   fail "Machines API apps must not use Fly Launch secrets deploy"
 fi
