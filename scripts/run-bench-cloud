@@ -80,6 +80,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR" || exit 1
 # shellcheck source=lib/cloudbench-env.sh
 source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
+MACHINE_READINESS_SCRIPT="$ROOT_DIR/scripts/cloudbench-machine-readiness.py"
 
 STATE_FILE="$ROOT_DIR/.context/cloudbench-machine.json"
 
@@ -282,6 +283,18 @@ for m in data:
         print(m.get("state","")); sys.exit(0)
 print("gone")
 ' 2>/dev/null || echo "gone"
+}
+
+# A snapshot-backed clone is visible in `created` before its volume restore is
+# mountable. Fly rejects start during that window. Machine identity therefore is
+# not a startability signal: require every configured volume to reach a state
+# Fly documents as mountable before requesting the machine transition.
+machine_storage_ready() {  # machine_storage_ready <id>
+    local id="$1" machines volumes
+    machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 1
+    volumes="$(FLY volumes list -a "$APP" --json 2>/dev/null)" || return 1
+    python3 "$MACHINE_READINESS_SCRIPT" "$id" \
+        <(printf '%s' "$machines") <(printf '%s' "$volumes") >/dev/null
 }
 
 write_state() {  # write_state <machine_id>
@@ -527,18 +540,23 @@ ssh_ready() {  # ssh_ready <machine_id>
 
 # Start the machine and wait until Fly reports it "started".
 start_machine() {  # start_machine <id>
-    local id="$1" st
+    local id="$1" st now last_start_ts=0
     st="$(machine_state "$id")"
     if [ "$st" = "started" ]; then
         echo "✅ Machine $id already started"
         return 0
     fi
     echo "▶️  Starting machine $id ..."
-    request_machine_start "$id" || true
     for _ in $(seq 1 60); do
         st="$(machine_state "$id")"
         [ "$st" = "started" ] && { echo "✅ Machine started"; return 0; }
         [ "$st" = "gone" ] && { echo "❌ Machine $id disappeared while starting"; return 1; }
+        now="$(date +%s)"
+        if machine_storage_ready "$id" \
+            && { [ "$last_start_ts" -eq 0 ] || [ $((now - last_start_ts)) -ge 20 ]; }; then
+            request_machine_start "$id" || true
+            last_start_ts="$now"
+        fi
         sleep 2
     done
     echo "⚠️  Machine $id did not report 'started' in time (state=$st) — continuing; SSH will retry."
@@ -1131,10 +1149,15 @@ trap 'exit 143' TERM
 # Generous timeout: ~10s warm, minutes on a cold image pull. Gate on BOTH the Fly
 # machine state AND a trivial ssh echo (start != ssh-reachable).
 echo "▶️  Starting warm machine $mid ..."
-request_machine_start "$mid" || true
 READY_TIMEOUT="${CLOUDBENCH_READY_TIMEOUT:-600}"   # 10 min ceiling for a cold pull.
 start_ts="$(date +%s)"
-last_start_ts="$(date +%s)"
+last_start_ts=0
+if machine_storage_ready "$mid"; then
+    request_machine_start "$mid" || true
+    last_start_ts="$start_ts"
+else
+    echo "⏳ Machine storage is still provisioning; waiting until it is mountable ..."
+fi
 gone_streak=0
 while :; do
     if ssh_ready "$mid"; then break; fi
@@ -1154,15 +1177,15 @@ while :; do
         continue
     fi
     gone_streak=0
-    # A freshly-cloned machine sits in 'created' (or drops back to 'stopped')
-    # until its forked volume is provisioned, and the first `start` fails with
-    # failed_precondition. Re-issue start every ~20s while it isn't running so a
-    # fleet clone actually boots instead of hanging until READY_TIMEOUT.
+    # Once clone storage is mountable, request start immediately and retry every
+    # ~20s for ordinary transient start failures. Never ask Fly to start while
+    # the attached snapshot volume is still restoring.
     now="$(date +%s)"
     case "$st" in
         started|starting) : ;;
         *)
-            if [ $((now - last_start_ts)) -ge 20 ]; then
+            if machine_storage_ready "$mid" \
+                && { [ "$last_start_ts" -eq 0 ] || [ $((now - last_start_ts)) -ge 20 ]; }; then
                 request_machine_start "$mid" >/dev/null 2>&1 || true
                 last_start_ts="$now"
             fi

@@ -3,12 +3,12 @@ import json
 import subprocess
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "cloudbench-sync-deps.sh"
 ARTIFACT_SCRIPT = ROOT / "scripts" / "cloudbench-current-run-artifact.py"
 FETCH_SCRIPT = ROOT / "scripts" / "cloudbench-fetch-ref.sh"
 SNAPSHOT_SCRIPT = ROOT / "scripts" / "cloudbench-select-snapshot.py"
+MACHINE_READINESS_SCRIPT = ROOT / "scripts" / "cloudbench-machine-readiness.py"
 AGGREGATE_SCRIPT = ROOT / "scripts" / "cloudbench-aggregate-runs.py"
 DRIVER_SCRIPT = ROOT / "scripts" / "cloudbench-run.sh"
 FLEET_SCRIPT = ROOT / "scripts" / "run-bench-fleet"
@@ -354,6 +354,183 @@ def test_snapshot_selector_prefers_new_completed_incremental_snapshot() -> None:
     ]
 
     assert module.select_snapshot(snapshots) == "current-incremental"
+
+
+def test_snapshot_clone_is_not_startable_until_its_volume_is_mountable() -> None:
+    machine_id = "machine-1"
+    machines = [
+        {
+            "id": machine_id,
+            "state": "created",
+            "config": {
+                "mounts": [
+                    {"volume": "volume-1", "path": "/data"},
+                    {"volume": "volume-2", "path": "/cache"},
+                ]
+            },
+        }
+    ]
+
+    restoring = subprocess.run(
+        ["python3", str(MACHINE_READINESS_SCRIPT), machine_id],
+        input=json.dumps(
+            {
+                "machines": machines,
+                "volumes": [
+                    {"id": "volume-1", "state": "created"},
+                    {"id": "volume-2", "state": "restoring"},
+                ],
+            }
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    mountable = subprocess.run(
+        ["python3", str(MACHINE_READINESS_SCRIPT), machine_id],
+        input=json.dumps(
+            {
+                "machines": machines,
+                "volumes": [
+                    {"id": "volume-1", "state": "created"},
+                    {"id": "volume-2", "state": "created"},
+                ],
+            }
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert restoring.returncode == 1
+    assert restoring.stdout.strip() == "waiting:volume-2=restoring"
+    assert mountable.returncode == 0
+    assert mountable.stdout.strip() == "ready"
+
+
+def test_start_gate_replays_created_machine_with_restoring_volume(
+    tmp_path: Path,
+) -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    function_start = cloud.index("machine_storage_ready() {")
+    function_end = cloud.index("\n}\n", function_start) + 3
+    readiness_function = cloud[function_start:function_end]
+    machine_id = "machine-1"
+    machines_path = tmp_path / "machines.json"
+    volumes_path = tmp_path / "volumes.json"
+    start_log = tmp_path / "starts.log"
+    machines_path.write_text(
+        json.dumps(
+            [
+                {
+                    "id": machine_id,
+                    "state": "created",
+                    "config": {
+                        "mounts": [{"volume": "volume-1", "path": "/data"}]
+                    },
+                }
+            ]
+        )
+    )
+    volumes_path.write_text(json.dumps([{"id": "volume-1", "state": "restoring"}]))
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_fly = fake_bin / "flyctl"
+    fake_fly.write_text(
+        """#!/usr/bin/env bash
+set -u
+if [ "$1 $2" = "machines list" ]; then cat "$MACHINES_PATH"; exit 0; fi
+if [ "$1 $2" = "volumes list" ]; then cat "$VOLUMES_PATH"; exit 0; fi
+if [ "$1 $2" = "machine start" ]; then
+  printf '%s\n' "$*" >> "$START_LOG"
+  if grep -q restoring "$VOLUMES_PATH"; then
+    echo "failed_precondition: unable to start machine from current state: 'created'" >&2
+    exit 1
+  fi
+  exit 0
+fi
+exit 2
+"""
+    )
+    fake_fly.chmod(0o755)
+    env = {
+        "PATH": f"{fake_bin}:{Path('/usr/bin')}:{Path('/bin')}",
+        "MACHINES_PATH": str(machines_path),
+        "VOLUMES_PATH": str(volumes_path),
+        "START_LOG": str(start_log),
+        "MACHINE_READINESS_SCRIPT": str(MACHINE_READINESS_SCRIPT),
+    }
+
+    legacy = subprocess.run(
+        [str(fake_fly), "machine", "start", machine_id, "-a", "bench-app"],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    start_log.unlink()
+    gate = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
+APP=bench-app
+FLY() {{ flyctl "$@"; }}
+{readiness_function}
+if machine_storage_ready {machine_id}; then
+  FLY machine start {machine_id} -a "$APP"
+fi
+""",
+        ],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert legacy.returncode == 1
+    assert "failed_precondition" in legacy.stderr
+    assert gate.returncode == 0, gate.stderr
+    assert not start_log.exists()
+
+    volumes_path.write_text(json.dumps([{"id": "volume-1", "state": "created"}]))
+    ready_gate = subprocess.run(
+        gate.args,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert ready_gate.returncode == 0, ready_gate.stderr
+    assert start_log.read_text().strip() == f"machine start {machine_id} -a bench-app"
+
+
+def test_fresh_clone_start_paths_honor_storage_readiness_contract() -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    fleet = FLEET_SCRIPT.read_text()
+    startup = cloud.split("# ── 1. Start the warm machine", 1)[1].split(
+        "# ── 2.", 1
+    )[0]
+
+    assert 'MACHINE_READINESS_SCRIPT="$ROOT_DIR/scripts/cloudbench-machine-readiness.py"' in cloud
+    assert startup.count('if machine_storage_ready "$mid"') == 2
+    assert startup.count('request_machine_start "$mid"') == 2
+    assert startup.index('if machine_storage_ready "$mid"') < startup.index(
+        'request_machine_start "$mid"'
+    )
+    assert 'MACHINE_READINESS_SCRIPT="$ROOT_DIR/scripts/cloudbench-machine-readiness.py"' in fleet
+    assert (
+        'if machine_storage_ready "$id"; then\n'
+        '                FLY machine start "$id"' in fleet
+    )
+    assert (
+        'machine_storage_ready "$id" || continue\n'
+        '        FLY machine start "$id"' in fleet
+    )
+    assert (
+        'if machine_storage_ready "$wid"; then\n'
+        '            FLY machine start "$wid"' in fleet
+    )
 
 
 def test_fleet_aggregate_contains_every_isolated_task(tmp_path: Path) -> None:
