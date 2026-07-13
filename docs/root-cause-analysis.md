@@ -61,8 +61,28 @@ The isolated reproduction should:
 - Run quickly enough to iterate repeatedly while fixing
 - Fail before the fix and pass after the fix
 - Preserve the exact behavior being diagnosed, not a similar but different bug
+- Be promoted into the permanent, checked-in blackbox suite for the boundary that owns the bug before the fix is considered complete
 
 If a unit-level reproduction would lose the behavior under investigation, use the narrowest local integration test, recorded-response replay, or benchmark checkpoint that preserves it. Do not use a full benchmark as the only reproduction when a smaller local test can prove the same causal mechanism.
+
+### Permanent deploy regression coverage
+
+A scratch test, executable repro script, benchmark checkpoint, or fixture replay may be useful while reducing the failure, but it is not sufficient regression coverage. Once the reproduction fails for the diagnosed bug, preserve it as a checked-in blackbox test in the suite owned by the first-bad boundary:
+
+| First-bad owned boundary      | Required permanent suite                                         | `/deploy` gate that must run it                     |
+| ----------------------------- | ---------------------------------------------------------------- | --------------------------------------------------- |
+| Back-end API or service       | `back-end/src/tests/blackbox/<domain>.blackbox.ts`               | Step 5a: full back-end blackbox suite               |
+| Agent, Temporal, tool, or LLM | `agents/tests/blackbox/<domain>.blackbox.py`                     | Step 4g: agent coverage runs the blackbox suite     |
+| Front-end component or state  | `front-end/src/tests/blackbox/<domain>.blackbox.tsx`             | Step 4b: front-end coverage runs the blackbox suite |
+| Mac app renderer or main      | `mac-app/tests/blackbox/<domain>.blackbox.ts` or `.blackbox.tsx` | Step 4m: full mac-app blackbox suite                |
+
+The correct suite is determined by the layer that owns the first bad data or violated contract, not by whichever file happened to be edited for the fix. Reuse the captured request, response, event stream, or fixture from the isolated reproduction inside that blackbox test so it exercises the same causal mechanism and retains the same assertion.
+
+The permanent blackbox test itself must be run against the buggy code and observed failing before the production fix is written, then run again unchanged and observed passing after the fix. Do not weaken the assertion, replace the captured failure with friendlier data, or leave the actual regression only in a unit test or scratch artifact.
+
+For a cross-service or UI-visible regression, the owning-boundary blackbox test is mandatory. Add a smoke or semantic test as additional coverage when the user-visible failure cannot be proven at that boundary alone; higher-level coverage supplements rather than replaces the owning blackbox test.
+
+Before closing the RCA, verify that the repository's blackbox runner discovers the new test and that `/deploy` invokes that runner for changes to the affected production surface. If it does not, update the runner or `/deploy` wiring as part of the fix. A passing test that future deploys skip does not satisfy this requirement.
 
 ### RCA completion gate
 
@@ -73,6 +93,9 @@ An RCA is **incomplete** until all of the following are true:
 3. The artifact has actually been run locally and demonstrates the observed failure on the buggy code.
 4. The RCA records the exact command and the failure output or assertion that proves the reproduction.
 5. If a fix is made, the same artifact passes after the fix without weakening its assertion.
+6. If a fix is made, the reproduction is preserved as a checked-in test in the owning boundary's permanent blackbox suite; a scratch artifact alone is not sufficient.
+7. The full blackbox runner that `/deploy` uses discovers and passes the new regression test.
+8. `/deploy` is wired to run that blackbox runner whenever the affected production surface changes.
 
 There is no “not feasible” exception that turns unreproduced findings into a completed RCA. If production-only or third-party state cannot be recreated directly, capture and replay that state at the owned boundary. If the required request, response, event stream, or state was not captured and therefore cannot be replayed, classify the result as **preliminary findings plus an observability gap**, add the missing capture, and keep the RCA open. Do not present a hypothesis, code inspection, production correlation, or external-state explanation as a completed RCA without an executed local reproduction.
 
