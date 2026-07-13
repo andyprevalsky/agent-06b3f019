@@ -104,6 +104,7 @@ export interface Message {
 }
 
 export interface CreateAgentPayload {
+  agent_id?: string;
   goal: string;
   model?: string;
   // tool_ids removed - LLM auto-selects based on goal

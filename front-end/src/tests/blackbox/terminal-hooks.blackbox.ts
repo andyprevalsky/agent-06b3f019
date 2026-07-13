@@ -37,6 +37,9 @@ const ctxState = {
   streamedTextsRef: { current: new Set<string>() } as any,
   setAgent: vi.fn(),
   setSelectedAgentId: vi.fn(),
+  stagePendingAgentCreation: vi.fn(),
+  reconcilePendingAgentCreation: vi.fn(async () => {}),
+  rollbackPendingAgentCreation: vi.fn(() => true),
   setMessages: vi.fn(),
   registerMessageHandler: vi.fn(() => () => {}),
   sendMessage: vi.fn(async () => {}),
@@ -361,11 +364,13 @@ describe('useMessageSending', () => {
       canSubmitGoals: true,
       isFullySignedIn: true,
       clientSource: 'WEB',
-      setSelectedAgentIdContext: vi.fn(),
       setCurrentView: vi.fn(),
       setLoginModalOpen: vi.fn(),
       setIsLoadingNetwork: vi.fn(),
       loadAgents: vi.fn(async () => {}),
+      stagePendingAgentCreation: vi.fn(),
+      reconcilePendingAgentCreation: vi.fn(async () => {}),
+      rollbackPendingAgentCreation: vi.fn(() => true),
       ...overrides,
     };
   }
@@ -405,7 +410,10 @@ describe('useMessageSending', () => {
 
   it('handleSendMessage creates a new agent when no selectedAgentId', async () => {
     server.use(
-      http.post(`${API_BASE}/agents`, () => HttpResponse.json(makeAgent({ agent_id: 'new-a' }))),
+      http.post(`${API_BASE}/agents`, async ({ request }) => {
+        const body = (await request.json()) as { agent_id: string };
+        return HttpResponse.json(makeAgent({ agent_id: body.agent_id }));
+      }),
     );
     const args = defaultArgs();
     const { result } = renderHook(() => useMessageSending(args as any));
@@ -414,7 +422,8 @@ describe('useMessageSending', () => {
       await result.current.handleSendMessage();
     });
     expect(args.loadAgents).toHaveBeenCalled();
-    expect(args.setSelectedAgentIdContext).toHaveBeenCalledWith('new-a');
+    expect(args.stagePendingAgentCreation).toHaveBeenCalled();
+    expect(args.reconcilePendingAgentCreation).toHaveBeenCalled();
     expect(args.setCurrentView).toHaveBeenCalledWith('agents');
   });
 
