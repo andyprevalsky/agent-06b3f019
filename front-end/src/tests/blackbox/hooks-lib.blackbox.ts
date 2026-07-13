@@ -490,6 +490,94 @@ describe('derivations.ts', () => {
       ];
       expect(computeActiveBrowserPanels(msgs)).toEqual([{ taskId: 't1', browserUrl: 'x' }]);
     });
+    it('keeps browser task active when auth assistance finishes and a later request is pending', () => {
+      const msgs: Parameters<typeof computeActiveBrowserPanels>[0] = [
+        {
+          message_id: 'init',
+          timestamp: '2026-01-01T00:00:01.000Z',
+          text: '',
+          role: 'TOOL',
+          metadata: {
+            task_id: 't1',
+            toolName: 'spawn_browser_agent',
+            action_type: 'browser',
+            browser_url: 'https://debug.example/session/first',
+            toolStatus: 'IN_PROGRESS',
+          },
+        },
+        {
+          message_id: 'auth-request-1',
+          timestamp: '2026-01-01T00:00:02.000Z',
+          text: '',
+          role: 'TOOL',
+          metadata: {
+            task_id: 't1',
+            toolName: 'spawn_browser_agent',
+            action_type: 'auth_assistance',
+            toolStatus: 'IN_PROGRESS',
+            requestUserAuthentication: { requestId: 'request-1', taskId: 't1' },
+          },
+        },
+        {
+          message_id: 'auth-finished-1',
+          timestamp: '2026-01-01T00:00:03.000Z',
+          text: '',
+          role: 'TOOL',
+          metadata: {
+            task_id: 't1',
+            toolName: 'spawn_browser_agent',
+            action_type: 'auth_assistance',
+            toolStatus: 'FINISHED',
+            requestUserAuthentication: { requestId: 'request-1', taskId: 't1' },
+          },
+        },
+        {
+          message_id: 'resumed-browser-action',
+          timestamp: '2026-01-01T00:00:03.500Z',
+          text: '',
+          role: 'TOOL',
+          metadata: {
+            task_id: 't1',
+            subAgentId: 't1',
+            toolName: 'spawn_browser_agent',
+            action_type: 'evaluate',
+            browser_url: 'https://debug.example/session/resumed',
+            toolStatus: 'FINISHED',
+          },
+        },
+        {
+          message_id: 'auth-request-2',
+          timestamp: '2026-01-01T00:00:04.000Z',
+          text: '',
+          role: 'TOOL',
+          metadata: {
+            task_id: 't1',
+            toolName: 'spawn_browser_agent',
+            action_type: 'auth_assistance',
+            toolStatus: 'IN_PROGRESS',
+            requestUserAuthentication: { requestId: 'request-2', taskId: 't1' },
+          },
+        },
+        {
+          message_id: 'late-cleanup-from-first-session',
+          timestamp: '2026-01-01T00:00:04.500Z',
+          text: '',
+          role: 'TOOL',
+          metadata: {
+            task_id: 't1',
+            subAgentId: 't1',
+            toolName: 'spawn_browser_agent',
+            action_type: 'recording',
+            browser_url: 'https://debug.example/session/first',
+            toolStatus: 'FINISHED',
+          },
+        },
+      ];
+
+      expect(computeActiveBrowserPanels(msgs)).toEqual([
+        { taskId: 't1', browserUrl: 'https://debug.example/session/resumed' },
+      ]);
+    });
     it('excludes failed browser tasks even when no task_complete action arrives', () => {
       const msgs: Parameters<typeof computeActiveBrowserPanels>[0] = [
         {
