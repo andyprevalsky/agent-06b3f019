@@ -95,8 +95,10 @@ activation_ids="$(printf '%s\n' '[{"id":"warm-1","name":"cloudbench-warm"},{"id"
 node_a="$TMP_ROOT/node-a"
 node_b="$TMP_ROOT/node-b"
 mkdir -p "$node_a/back-end" "$node_a/front-end" "$node_b/back-end" "$node_b/front-end"
-printf '{"lockfileVersion":3,"packages":{}}\n' > "$node_a/package-lock.json"
-cp "$node_a/package-lock.json" "$node_b/package-lock.json"
+printf '{"lockfileVersion":3,"packages":{"generated":"old"}}\n' > "$node_a/package-lock.json"
+printf '{"lockfileVersion":3,"packages":{"generated":"new"}}\n' > "$node_b/package-lock.json"
+printf '{"lockfileVersion":3,"packages":{}}\n' > "$node_a/back-end/package-lock.json"
+cp "$node_a/back-end/package-lock.json" "$node_b/back-end/package-lock.json"
 printf '{"scripts":{"test":"old"},"dependencies":{"tsx":"1.0.0"}}\n' > "$node_a/package.json"
 printf '{"scripts":{"test":"new"},"dependencies":{"tsx":"1.0.0"}}\n' > "$node_b/package.json"
 for relative in back-end/package.json front-end/package.json; do
@@ -106,7 +108,7 @@ done
 node_a_fingerprint="$(cloudbench_node_dependency_fingerprint "$node_a")"
 node_b_fingerprint="$(cloudbench_node_dependency_fingerprint "$node_b")"
 [ "$node_a_fingerprint" = "$node_b_fingerprint" ] ||
-  fail "script-only package.json changes must not invalidate baked dependencies"
+  fail "scripts and the generated root lock must not invalidate baked dependencies"
 printf '{"scripts":{"test":"new"},"dependencies":{"tsx":"2.0.0"}}\n' > "$node_b/package.json"
 node_b_fingerprint="$(cloudbench_node_dependency_fingerprint "$node_b")"
 [ "$node_a_fingerprint" != "$node_b_fingerprint" ] ||
