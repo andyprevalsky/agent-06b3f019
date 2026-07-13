@@ -222,7 +222,11 @@ process_request() {  # process_request <request_json>
     fi
 
     local hub_run_id="hub-$req_id"
-    local start_epoch; start_epoch="$(date +%s)"
+    # Preserve sub-second precision. Integer seconds can make a final bundle
+    # from the immediately preceding request look newer than this request and
+    # falsely attach its verdict (especially in the failure path).
+    local start_epoch
+    start_epoch="$(python3 -c 'import time; print(time.time())')"
     local log_file=".context/hub-poller-run-$req_id.log"
 
     snapshot_loop "$req_id" "$hub_run_id" "$start_epoch" & SNAP_PID=$!

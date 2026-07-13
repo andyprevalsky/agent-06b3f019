@@ -1,8 +1,10 @@
 #!/usr/bin/env tsx
 
 import {
+  syncCookies,
   syncIntegrationCredentials,
   syncPasskeyCredentials,
+  type CookieModel,
   type IntegrationModel,
 } from '../../../scripts/seed-local-credentials';
 
@@ -34,6 +36,112 @@ type PasskeyRecord = {
 function compoundKey(pk: { userId: string; rpId: string; credentialId: string }) {
   return `${pk.userId}:${pk.rpId}:${pk.credentialId}`;
 }
+
+test('syncCookies preserves a local id for the same browser cookie identity', async () => {
+  const remote = {
+    id: 'remote-cookie-id',
+    userId: 'seed-user',
+    domain: '.example.com',
+    name: 'session',
+    path: '/',
+    value: 'fresh-cookie',
+    expiresUtc: 100n,
+    isSecure: true,
+    isHttpOnly: true,
+    browserSource: 'chrome',
+    syncedAt: new Date('2026-07-13T00:00:00Z'),
+    creationUtc: 1n,
+    hasExpires: true,
+    isPersistent: true,
+    lastAccessUtc: 2n,
+    lastUpdateUtc: 3n,
+    priority: 1,
+    sameSite: 0,
+    sourcePort: 443,
+    sourceScheme: 2,
+    topFrameSiteKey: '',
+    browserProfile: 'Profile 1',
+  };
+  const local = { ...remote, id: 'local-cookie-id', value: 'stale-cookie' };
+  const rows = new Map([[local.id, local]]);
+  const identityKey = (cookie: typeof remote) =>
+    [
+      cookie.userId,
+      cookie.domain,
+      cookie.name,
+      cookie.path,
+      cookie.topFrameSiteKey,
+      cookie.browserSource,
+      cookie.browserProfile,
+    ].join('\u0000');
+  const localModel: CookieModel = {
+    upsert: async (args) => {
+      const where = args.where as {
+        id?: string;
+        userId_domain_name_path_topFrameSiteKey_browserSource_browserProfile?: {
+          userId: string;
+          domain: string;
+          name: string;
+          path: string;
+          topFrameSiteKey: string;
+          browserSource: string;
+          browserProfile: string;
+        };
+      };
+      const compound = where.userId_domain_name_path_topFrameSiteKey_browserSource_browserProfile;
+      const existing = where.id
+        ? rows.get(where.id)
+        : [...rows.values()].find(
+            (row) =>
+              identityKey(row) ===
+              identityKey({
+                ...remote,
+                ...compound,
+              })
+          );
+
+      if (existing) {
+        const updated = { ...existing, ...(args.update as Partial<typeof remote>) };
+        rows.set(existing.id, updated);
+        return { id: existing.id };
+      }
+
+      const created = args.create as typeof remote;
+      if ([...rows.values()].some((row) => identityKey(row) === identityKey(created))) {
+        throw Object.assign(new Error('Unique constraint failed on browser cookie identity'), {
+          code: 'P2002',
+        });
+      }
+      rows.set(created.id, created);
+      return { id: created.id };
+    },
+  };
+
+  const { id: ignoredRemoteId, ...oldUpdate } = remote;
+  void ignoredRemoteId;
+  let reproducedCollision = false;
+  try {
+    await localModel.upsert({
+      where: { id: remote.id },
+      create: remote,
+      update: oldUpdate,
+      select: { id: true },
+    });
+  } catch (error) {
+    reproducedCollision = (error as { code?: string }).code === 'P2002';
+  }
+  assert(reproducedCollision, 'expected id-based upsert to reproduce the P2002 collision');
+
+  const count = await syncCookies(localModel, [remote]);
+
+  assert(count === 1, `expected one synced cookie, got ${count}`);
+  assert(rows.size === 1, `expected one cookie after sync, got ${rows.size}`);
+  assert(rows.has(local.id), 'expected local primary key to be preserved');
+  assert(
+    rows.get(local.id)?.value === remote.value,
+    'expected remote cookie value to refresh local'
+  );
+});
 
 test('syncPasskeyCredentials copies passkeys and never moves local signCount backward', async () => {
   const userId = 'seed-user';

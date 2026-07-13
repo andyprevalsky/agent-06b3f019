@@ -19,7 +19,7 @@ set -euo pipefail
 #   - Chromium downloaded: `npx playwright install chromium`
 #
 # Requirements (--prod):
-#   - SUPABASE_JWT_SECRET set in back-end/.env (shared across environments)
+#   - SUPABASE_JWT_SECRET, or SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY
 #   - Chromium downloaded: `npx playwright install chromium`
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -51,8 +51,8 @@ fi
 
 if [[ "$PROD_MODE" -eq 1 ]]; then
   # ── Production mode ──────────────────────────────────────────────────
-  export BACKEND_URL="https://navi-j9a9.onrender.com"
-  export FRONTEND_URL="https://roselabs.ai"
+  export BACKEND_URL="${BACKEND_URL:-https://navi-j9a9.onrender.com}"
+  export FRONTEND_URL="${FRONTEND_URL:-https://roselabs.ai}"
   export SEMANTIC_PROD=1
 
   echo "=== Semantic tests: PRODUCTION mode ==="
@@ -69,15 +69,6 @@ if [[ "$PROD_MODE" -eq 1 ]]; then
     exit 1
   fi
 
-  # Generate a JWT session for the test user via back-end helper
-  echo "Generating prod session token..."
-  PROD_SESSION=$(cd "$REPO_DIR/back-end" && npx tsx scripts/generate-test-session.ts 2>/dev/null)
-  if [[ -z "$PROD_SESSION" ]]; then
-    echo "FAIL: Could not generate prod session. Check SUPABASE_JWT_SECRET in back-end/.env" >&2
-    exit 1
-  fi
-  export PROD_SESSION
-  echo "  Session generated for test user"
 else
   # ── Local mode (default) ─────────────────────────────────────────────
   BACKEND_PORT="${BACKEND_PORT:-3001}"
@@ -94,8 +85,28 @@ else
   fi
 fi
 
+# Generate exactly one authenticated session for the complete Playwright run.
+# Every worker injects this session instead of racing the OTP endpoints.
+echo "Generating shared semantic test session..."
+SEMANTIC_SESSION=$(cd "$REPO_DIR/back-end" && npx tsx scripts/generate-test-session.ts)
+if [[ -z "$SEMANTIC_SESSION" ]]; then
+  echo "FAIL: Could not generate semantic session. Check Supabase test credentials." >&2
+  exit 1
+fi
+export SEMANTIC_SESSION
+TEST_USER_ID=$(printf '%s' "$SEMANTIC_SESSION" | node -e \
+  'let input=""; process.stdin.on("data", chunk => input += chunk); process.stdin.on("end", () => process.stdout.write(JSON.parse(input).user.id));')
+export TEST_USER_ID
+echo "  Session generated for test user $TEST_USER_ID"
+
+SEMANTIC_WORKERS="${SEMANTIC_WORKERS:-1}"
+if ! [[ "$SEMANTIC_WORKERS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "FAIL: SEMANTIC_WORKERS must be a positive integer, got $SEMANTIC_WORKERS" >&2
+  exit 1
+fi
+
 if [[ $# -eq 0 ]]; then
-  exec npx playwright test --reporter=list
+  exec npx playwright test --reporter=list --workers="$SEMANTIC_WORKERS"
 fi
 
 TEST_NAME="$1"
@@ -110,4 +121,4 @@ if [[ ! -f "$TEST_FILE" ]]; then
   exit 1
 fi
 
-exec npx playwright test "$TEST_FILE" --reporter=list
+exec npx playwright test "$TEST_FILE" --reporter=list --workers="$SEMANTIC_WORKERS"

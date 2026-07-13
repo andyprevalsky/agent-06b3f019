@@ -6,6 +6,8 @@
  * count, stream count) from MessageList so this component stays focused on
  * render. A keyed final-answer stream is replaced only by the canonical TOOL
  * message with the same toolCallId, so selectors expose both identities.
+ * Tool name/status and cloud-agent start phase are exposed as inert data
+ * attributes for end-to-end route verification.
  */
 import MessageBubble from './MessageBubble';
 import type { Message } from '../hooks';
@@ -71,6 +73,18 @@ export function MessageListItems({
           typeof message.metadata?.toolCallId === 'string'
             ? message.metadata.toolCallId
             : undefined;
+        const toolName =
+          typeof message.metadata?.toolName === 'string' ? message.metadata.toolName : undefined;
+        const toolStatus =
+          typeof message.metadata?.toolStatus === 'string'
+            ? message.metadata.toolStatus
+            : undefined;
+        const rawAgentStartPhase = message.metadata?.startPhase;
+        const agentStartPhase =
+          toolName === 'cloud_agent' &&
+          (rawAgentStartPhase === 'plan' || rawAgentStartPhase === 'execute')
+            ? rawAgentStartPhase
+            : undefined;
 
         return (
           <div
@@ -80,6 +94,9 @@ export function MessageListItems({
             data-message-kind={isFinalAnswer ? 'final-answer' : undefined}
             data-message-state={isFinalAnswer ? 'canonical' : undefined}
             data-tool-call-id={toolCallId}
+            data-tool-name={toolName}
+            data-tool-status={toolStatus}
+            data-agent-start-phase={agentStartPhase}
             className="min-w-0 max-w-full"
           >
             <MessageBubble

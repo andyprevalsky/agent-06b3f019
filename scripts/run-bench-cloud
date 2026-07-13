@@ -82,6 +82,7 @@ cd "$ROOT_DIR" || exit 1
 source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
 
 STATE_FILE="$ROOT_DIR/.context/cloudbench-machine.json"
+LOCK_DIR="$(cloudbench_controller_lock_path "$ROOT_DIR" "$APP")"
 
 # On-box paths (mirror scripts/cloudbench-run.sh).
 REMOTE_REPO="/data/repo"
@@ -147,6 +148,11 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+if [ "$SKIP_CONTROLLER_LOCK" = "1" ] && [ -z "$FLEET_MACHINE_ID" ]; then
+    echo "❌ --no-lock is valid only for a fleet child pinned with --machine." >&2
+    exit 2
+fi
+
 # CI never pops a browser / proxy.
 if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ] || [ -n "${CONTINUOUS_INTEGRATION:-}" ]; then
     DASHBOARD="0"
@@ -197,6 +203,36 @@ fi
 export FLY_API_TOKEN
 
 FLY() { flyctl "$@"; }
+
+case "$RUN_TIMEOUT" in
+    ''|*[!0-9]*|0) echo "❌ --timeout must be a positive integer." >&2; exit 2 ;;
+esac
+if [ "$MODE" = "run" ]; then
+    CONTROLLER_LEASE_TTL=$((RUN_TIMEOUT + 3600))
+else
+    CONTROLLER_LEASE_TTL=21600
+fi
+CONTROLLER_LOCK_ACQUIRED="0"
+cleanup_controller_lock() {
+    if [ "$CONTROLLER_LOCK_ACQUIRED" = "1" ]; then
+        CONTROLLER_LOCK_ACQUIRED="0"
+        cloudbench_controller_release "$LOCK_DIR" "$APP"
+    fi
+}
+# Every top-level mode takes both the repo-common host lock and the Fly sentinel
+# lease before touching app secrets or machines. Fleet children inherit the
+# parent's ownership and deliberately do not reacquire either lock.
+if [ "${CLOUDBENCH_PARENT_LOCK_HELD:-0}" != "1" ] && [ "$SKIP_CONTROLLER_LOCK" != "1" ]; then
+    if ! cloudbench_controller_acquire "$LOCK_DIR" "$APP" "$REGION" "$CONTROLLER_LEASE_TTL"; then
+        old_pid="$(cat "$LOCK_DIR" 2>/dev/null || true)"
+        echo "❌ Another cloud benchmark controller owns the shared app${old_pid:+ (local pid $old_pid)}." >&2
+        exit 1
+    fi
+    CONTROLLER_LOCK_ACQUIRED="1"
+    trap cleanup_controller_lock EXIT
+    trap 'cleanup_controller_lock; exit 130' INT
+    trap 'cleanup_controller_lock; exit 143' TERM
+fi
 
 request_machine_start() {  # request_machine_start <machine_id>
     local id="$1"
@@ -418,16 +454,19 @@ inject_secrets() {
         echo "❌ Failed to stage benchmark environment secrets"; exit 1
     }
     local machine_ids machine_id
-    machine_ids="$(_machines_json | python3 -c '
-import json, sys
-for machine in json.load(sys.stdin) or []:
-    if machine.get("id"):
-        print(machine["id"])
-')"
-    [ -n "$machine_ids" ] || {
-        echo "❌ No benchmark machines exist to activate staged secrets." >&2
-        exit 1
-    }
+    # The controller-lock sentinel is the ownership primitive and runs no
+    # benchmark code. Running/provisioning machines may still belong to an
+    # older controller that predates the sentinel contract. Neither is a safe
+    # secret-activation target.
+    machine_ids="$(_machines_json | cloudbench_env_activation_machine_ids)"
+    if [ -z "$machine_ids" ]; then
+        if [ "${CLOUDBENCH_ALLOW_NO_ACTIVATION_TARGETS:-0}" = "1" ]; then
+            echo "   no stopped benchmark machines exist yet; staged secrets will activate when setup creates one"
+        else
+            echo "❌ No stopped benchmark machines are available for secret activation." >&2
+            exit 1
+        fi
+    fi
     while IFS= read -r machine_id; do
         [ -n "$machine_id" ] || continue
         echo "   activating env on machine $machine_id (skip-start)"
@@ -459,22 +498,6 @@ PY
 
 if [ "$MODE" = "refresh-secrets" ]; then
     echo "═══ run-bench-cloud --refresh-secrets ═══"
-    refresh_lock="$ROOT_DIR/.context/cloudbench-controller.lock"
-    refresh_lock_acquired="0"
-    if [ "${CLOUDBENCH_PARENT_LOCK_HELD:-0}" != "1" ]; then
-        if ! cloudbench_controller_lock_acquire "$refresh_lock"; then
-            old_pid="$(cat "$refresh_lock" 2>/dev/null || true)"
-            echo "❌ Another cloud benchmark controller is already running${old_pid:+ (pid $old_pid)}." >&2
-            exit 1
-        fi
-        refresh_lock_acquired="1"
-        cleanup_refresh_lock() {
-            [ "$refresh_lock_acquired" = "1" ] && cloudbench_controller_lock_release "$refresh_lock"
-        }
-        trap cleanup_refresh_lock EXIT
-        trap 'cleanup_refresh_lock; exit 130' INT
-        trap 'cleanup_refresh_lock; exit 143' TERM
-    fi
     ensure_app
     inject_secrets
     echo "✅ Cloud benchmark environment refreshed from current production-aligned sources."
@@ -578,10 +601,10 @@ if [ "$MODE" = "destroy" ]; then
         FLY machine destroy --force "$mid" -a "$APP" 2>&1 | sed 's/^/   /' || true
     fi
     # Belt-and-suspenders: sweep any leftover machines in the app.
-    for id in $(_machines_json | python3 -c 'import json,sys
+    for id in $(_machines_json | CONTROLLER_LOCK_NAME="$(cloudbench_cloud_lock_machine_name)" python3 -c 'import json,os,sys
 try:
     for m in (json.load(sys.stdin) or []):
-        if m.get("id"): print(m["id"])
+        if m.get("id") and m.get("name") != os.environ["CONTROLLER_LOCK_NAME"]: print(m["id"])
 except Exception: pass' 2>/dev/null); do
         echo "   destroying leftover machine $id"
         FLY machine destroy --force "$id" -a "$APP" 2>&1 | sed 's/^/   /' || true
@@ -595,6 +618,12 @@ except Exception: pass' 2>/dev/null); do
         echo "   destroying volume $vid"
         FLY volumes destroy "$vid" -a "$APP" --yes 2>&1 | sed 's/^/   /' || true
     done
+    # The sentinel is the ownership primitive, so destroy it last with its
+    # nonce only after every other shared resource is gone.
+    if ! cloudbench_cloud_lock_machine_destroy "$APP"; then
+        echo "❌ Failed to destroy the leased cloud controller sentinel." >&2
+        exit 1
+    fi
     rm -f "$STATE_FILE"
     echo ""
     echo "🔎 Proof — remaining machines / volumes:"
@@ -613,7 +642,7 @@ if [ "$MODE" = "setup" ]; then
     echo ""
 
     ensure_app
-    inject_secrets
+    CLOUDBENCH_ALLOW_NO_ACTIVATION_TARGETS=1 inject_secrets
 
     # ── Build + push the KEEP-ALIVE image (deps baked; CMD = sleep infinity) ──
     # Uses the Fly classic remote builder (plain manifest) so `machine run <tag>`
@@ -749,8 +778,14 @@ if [ "$MODE" = "refresh-wmh" ]; then
     [ -z "$mid" ] && { echo "❌ No persistent machine — run 'run-bench-cloud --setup' first."; exit 1; }
     write_state "$mid"
 
-    # STOP the machine on ANY exit — the refresh must never leak a running box.
-    trap 'stop_machine "$mid"' EXIT INT TERM
+    # STOP the machine and release both controller locks on every exit.
+    cleanup_wmh_refresh() {
+        stop_machine "$mid"
+        cleanup_controller_lock
+    }
+    trap cleanup_wmh_refresh EXIT
+    trap 'cleanup_wmh_refresh; exit 130' INT
+    trap 'cleanup_wmh_refresh; exit 143' TERM
 
     start_machine "$mid"
     wait_for_ssh "$mid"
@@ -1079,23 +1114,6 @@ PY
 # SAFETY: STOP the machine on EVERY exit (success, failure, error, timeout,
 # Ctrl-C) and always kill the local dashboard proxy. Never destroy on the per-run
 # path — only --destroy removes it. A stopped machine bills only for the volume.
-LOCK_DIR="$ROOT_DIR/.context/cloudbench-controller.lock"
-LOCK_ACQUIRED="0"
-# Fleet mode: run-bench-fleet holds a single controller lock for all its children,
-# so each per-bench child skips its own lock (they run concurrently by design).
-if [ "$SKIP_CONTROLLER_LOCK" != "1" ]; then
-    if ! cloudbench_controller_lock_acquire "$LOCK_DIR"; then
-        old_pid="$(cat "$LOCK_DIR" 2>/dev/null || true)"
-        echo "❌ Another cloud benchmark controller is already running${old_pid:+ (pid $old_pid)}." >&2
-        echo "   Stop that run before starting another one." >&2
-        exit 1
-    fi
-    LOCK_ACQUIRED="1"
-    trap 'cloudbench_controller_lock_release "$LOCK_DIR"' EXIT
-    trap 'cloudbench_controller_lock_release "$LOCK_DIR"; exit 130' INT
-    trap 'cloudbench_controller_lock_release "$LOCK_DIR"; exit 143' TERM
-fi
-
 if [ "$DIRECT_ENV_REFRESH" = "1" ]; then
     inject_secrets
 fi
@@ -1112,15 +1130,13 @@ stop_on_exit() {
     # the run ("otherwise dead") — no orphaned link server, archive Vite, or proxy.
     stop_live_archive_frontend
     stop_all_local_viewers
-    if [ "${LOCK_ACQUIRED:-0}" = "1" ]; then
-        cloudbench_controller_lock_release "$LOCK_DIR"
-    fi
     # In fleet mode the machine is a per-bench clone owned by run-bench-fleet,
     # which destroys it after collecting results — never stop it here.
     if [ "$STOP_DONE" != "1" ] && [ -z "$FLEET_MACHINE_ID" ]; then
         STOP_DONE="1"
         stop_machine "$mid"
     fi
+    cleanup_controller_lock
     echo "Original exit code: $ec"
 }
 trap stop_on_exit EXIT

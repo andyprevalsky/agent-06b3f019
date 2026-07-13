@@ -37,7 +37,7 @@
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT_DIR"
+cd "$ROOT_DIR" || exit 1
 # shellcheck source=lib/cloudbench-env.sh
 source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
 
@@ -52,7 +52,7 @@ RUNS_ROOT="$ROOT_DIR/.context/fleet/runs"
 RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
 FLEET_DIR="$RUNS_ROOT/$RUN_ID"
 HUB_CTX_DIR="$RUNS_ROOT/_hub"
-LOCK_DIR="$ROOT_DIR/.context/cloudbench-controller.lock"
+LOCK_DIR="$(cloudbench_controller_lock_path "$ROOT_DIR" "$APP")"
 
 # ── Args ─────────────────────────────────────────────────────────────────────
 BENCHES=()
@@ -87,6 +87,9 @@ done
 [ -n "$PROVISION_POOL" ] || true
 [ -n "$PROVISION_POOL" ] || [ "${#BENCHES[@]}" -ge 1 ] || { echo "usage: run-bench-fleet <bench> [<bench>...] [--sim-on a,b] [--ref X]  |  --provision-pool N" >&2; exit 2; }
 [ -z "$BENCH_REF" ] && BENCH_REF="$(git rev-parse HEAD 2>/dev/null || echo '')"
+case "$RUN_TIMEOUT" in
+    ''|*[!0-9]*|0) echo "❌ --timeout must be a positive integer." >&2; exit 2 ;;
+esac
 
 # ── flyctl + token (mirror run-bench-cloud) ─────────────────────────────────
 if ! command -v flyctl >/dev/null 2>&1; then
@@ -241,7 +244,7 @@ claim_pool_machine() {  # echo a started, claimed pool machine id (or '' if none
 }
 
 # ── One controller lock for the whole fleet (children run with --no-lock) ────
-if ! cloudbench_controller_lock_acquire "$LOCK_DIR"; then
+if ! cloudbench_controller_acquire "$LOCK_DIR" "$APP" "$REGION" "$((RUN_TIMEOUT + 3600))"; then
     old_pid="$(cat "$LOCK_DIR" 2>/dev/null || true)"
     echo "❌ Another cloud benchmark controller is already running${old_pid:+ (pid $old_pid)}." >&2
     exit 1
@@ -308,7 +311,7 @@ cleanup() {
     # post-run). Per-bench viewers are reaped by their own run-bench-cloud child's
     # exit trap when we SIGTERM CHILD_PIDS above; the batch resolver lives on.
     [ -n "${FLEET_PATCH_FILE:-}" ] && rm -f "$FLEET_PATCH_FILE" 2>/dev/null || true
-    cloudbench_controller_lock_release "$LOCK_DIR"
+    cloudbench_controller_release "$LOCK_DIR" "$APP"
     exit "$ec"
 }
 trap cleanup EXIT
@@ -464,13 +467,13 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
         [ "$want" -gt $((AUTOSCALE_MAX - 1)) ] && want=$((AUTOSCALE_MAX - 1))
         cur="$(_pool_ids "$out")"
         if [ "$want" -gt "$cur" ]; then
-            local n=$((want - cur)) k
+            local n=$((want - cur))
             echo "  ⤴️  [$bench] scale up +$n (desired=$desired, pool=$cur)"
-            for k in $(seq 1 "$n"); do provision_worker "$bench" "$ws" "$pip" "$sim" "$out"; done
+            for _ in $(seq 1 "$n"); do provision_worker "$bench" "$ws" "$pip" "$sim" "$out"; done
         elif [ "$want" -lt "$cur" ]; then
-            local n=$((cur - want)) k
+            local n=$((cur - want))
             echo "  ⤵️  [$bench] scale down -$n (desired=$desired, pool=$cur)"
-            for k in $(seq 1 "$n"); do
+            for _ in $(seq 1 "$n"); do
                 local wid; wid="$(tail -1 "$out/worker-clones.ids" 2>/dev/null)"
                 [ -n "$wid" ] || break
                 # Only drop the id from tracking once the destroy is CONFIRMED —
@@ -585,8 +588,9 @@ cp -f "$ROOT_DIR/agents/benchmarks/dashboard.html" "$UNIFIED_DIR/dashboard.html"
     printf ']'
 } > "$UNIFIED_DIR/benches.json"
 (
+    export FLEET_DIR UNIFIED_DIR DASH_BASE
     while :; do
-        FLEET_DIR="$FLEET_DIR" UNIFIED_DIR="$UNIFIED_DIR" DASH_BASE="$DASH_BASE" python3 - "$UNIFIED_DIR/report-card.json" <<'PY' 2>/dev/null || true
+        python3 - "$UNIFIED_DIR/report-card.json" <<'PY' 2>/dev/null || true
 import json, os, sys
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse

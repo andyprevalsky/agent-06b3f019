@@ -157,6 +157,36 @@ describe('useRealtimeSubscription', () => {
     expect(RealtimeMod.unsubscribe).toHaveBeenCalled();
   });
 
+  it('leaves chat mode as soon as the routed cloud-agent message arrives', async () => {
+    let capturedHandlers: CapturedAgentHandlers = {};
+    vi.mocked(RealtimeMod.subscribeToAgent).mockImplementation(async (_, handlers) => {
+      capturedHandlers = handlers as CapturedAgentHandlers;
+      return fakeChannel();
+    });
+    const deps = makeDeps();
+    const { unmount } = renderHook(() => useRealtimeSubscription(deps));
+    await waitFor(() => expect(RealtimeMod.subscribeToAgent).toHaveBeenCalled());
+
+    act(() => {
+      capturedHandlers.onInsert?.({
+        agentId: 'agent-1',
+        id: 'cloud-agent-route',
+        timestamp: new Date().toISOString(),
+        text: '',
+        role: 'TOOL',
+        metadata: {
+          toolCallId: 'cloud-agent-call',
+          toolName: 'cloud_agent',
+          toolStatus: 'IN_PROGRESS',
+          startPhase: 'plan',
+        },
+      });
+    });
+
+    expect(deps.setIsChatMode).toHaveBeenCalledWith(false);
+    unmount();
+  });
+
   it('onDisconnect schedules a reconnect (increments attempt ref)', async () => {
     let capturedHandlers: CapturedAgentHandlers = {};
     vi.mocked(RealtimeMod.subscribeToAgent).mockImplementation(async (_, h) => {

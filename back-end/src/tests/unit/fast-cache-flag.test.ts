@@ -359,7 +359,7 @@ test('cache writes are last-write-wins', () => {
   );
 });
 
-test('chat router is cached before downstream chat generation', () => {
+test('chat router caches successful output without gating downstream work', () => {
   const router = readFileSync(
     join(process.cwd(), 'src', 'providers', 'chat', 'routerLlm.ts'),
     'utf8'
@@ -379,6 +379,24 @@ test('chat router is cached before downstream chat generation', () => {
     'router must log write-only mode'
   );
   assert.ok(router.includes('fast_cache.chat_router_stored'), 'router must log Fast Mode writes');
+  assert.doesNotMatch(
+    router,
+    /await cacheSet\(/,
+    'writing the optional router cache must not gate a lifecycle decision'
+  );
+});
+
+test('web search caches successful output without gating the final answer', () => {
+  const tools = readFileSync(
+    join(process.cwd(), 'src', 'providers', 'chat', 'chatTools.ts'),
+    'utf8'
+  );
+  assert.ok(tools.includes('cacheSet({'), 'web search must store successful search output');
+  assert.doesNotMatch(
+    tools,
+    /await cacheSet\(/,
+    'writing the optional web-search cache must not gate the final answer'
+  );
 });
 
 test('backend chat cache sites support write-only without reads', () => {

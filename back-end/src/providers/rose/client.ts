@@ -30,7 +30,7 @@ import { createLogger } from '../logger';
 import { logJson } from '../../utils/log';
 import { claudeAuthComplete } from './claudeAuth';
 import { isAnthropicApiKeyOnCooldown, markAnthropicApiKeyOnCooldown } from '../computeCredentials';
-import { isFallThroughError, RoseAuthError, RoseError, RosePaymentRequiredError } from './errors';
+import { RoseAuthError, RoseError, RosePaymentRequiredError } from './errors';
 import { gptAuthComplete, openAiApiKeyComplete } from './gptAuth';
 import { getPool, poolForModel } from './pools';
 import { buildOpenAiResponseFormat } from './schema';
@@ -38,23 +38,11 @@ import type { CompletionChunk, CompletionOptions, RoseStreamChunk } from './type
 import { waterfallComplete } from './waterfall';
 import { dumpLlmContext, updateLlmDump } from '../llmDump';
 import { exclusiveOpenRouterWaterfall } from './openrouterRoute';
+import { PreContentFallThroughError, runWithFallThrough } from './fallThroughStream';
+import { selectExclusiveCerebrasChatRoute } from './exclusiveCerebrasChatRoute';
+import { selectDirectCerebrasFailover } from './directCerebrasFailover';
 
 const log = createLogger('Rose');
-
-/**
- * Internal sentinel — a fall-through RoseError captured *before* any chunk
- * was emitted to the caller. Only these can be swallowed and replaced with
- * waterfall output. A mid-stream fall-through MUST propagate directly so we
- * don't splice partial content from two different models.
- */
-class PreContentFallThroughError extends Error {
-  readonly cause: RoseError;
-  constructor(cause: RoseError) {
-    super(cause.message);
-    this.name = 'PreContentFallThroughError';
-    this.cause = cause;
-  }
-}
 
 const OPENROUTER_API_KEY_ENV = 'OPENROUTER_API_KEY';
 const GPT_API_KEY_ENV = 'GPT_API_KEY';
@@ -341,6 +329,51 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
       },
     });
   };
+
+  // Both Chat routes stay pinned to GLM-4.7 on Cerebras. OpenRouter is the
+  // preferred transport; a failure before caller-visible content may use the
+  // funded direct Cerebras key without changing model or provider.
+  let cerebrasRoute;
+  try {
+    cerebrasRoute = selectExclusiveCerebrasChatRoute({
+      options: opts.options,
+      requestId: opts.requestId,
+      callSite: opts.callSite,
+    });
+  } catch (error) {
+    finalizeDump(error);
+    throw error;
+  }
+  if (cerebrasRoute !== null) {
+    try {
+      yield* runWithFallThrough({ produce: cerebrasRoute.produce, emit: emitChunk });
+    } catch (error) {
+      const cause = error instanceof PreContentFallThroughError ? error.cause : error;
+      const directFailover = selectDirectCerebrasFailover({
+        error,
+        options: opts.options,
+        requestId: opts.requestId,
+        callSite: opts.callSite,
+        pool: opts.pool,
+        startedAt,
+        emit: emitChunk,
+        finalize: finalizeDump,
+      });
+      if (directFailover) {
+        yield* directFailover;
+        return;
+      }
+      finalizeDump(cause);
+      throw cause;
+    }
+    log.info(cerebrasRoute.doneEvent, {
+      request_id: opts.requestId,
+      pool: opts.pool,
+      elapsed_ms: Date.now() - startedAt,
+    });
+    finalizeDump();
+    return;
+  }
 
   // Exclusive OpenRouter route used by the synchronous Chat Generator. It preserves
   // the pool's ordered pre-content fallback and bypasses every OAuth/shared-key
@@ -662,59 +695,4 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     anthropic_apikey_failed: anthropicApiKeyFailed?.name ?? null,
   });
   finalizeDump();
-}
-
-interface RunWithFallThroughOptions {
-  produce: () => AsyncIterable<RoseStreamChunk>;
-  emit: (chunk: RoseStreamChunk) => CompletionChunk | null;
-}
-
-/**
- * Iterate `produce()` and yield non-null `emit()` results. Buffers the first
- * metadata chunk so a pre-first-content RoseError can propagate without the
- * caller seeing partial output. Once content has flowed, errors propagate
- * normally (we can't undo what's already been streamed).
- */
-async function* runWithFallThrough(
-  opts: RunWithFallThroughOptions
-): AsyncIterable<CompletionChunk> {
-  let yieldedAny = false;
-  const iterator = opts.produce()[Symbol.asyncIterator]();
-
-  try {
-    while (true) {
-      let result: IteratorResult<RoseStreamChunk>;
-      try {
-        result = await iterator.next();
-      } catch (err) {
-        if (!yieldedAny && err instanceof RoseError && isFallThroughError(err)) {
-          // Caller-visible "no content yet" failure — safe to swap pipelines.
-          throw new PreContentFallThroughError(err);
-        }
-        // Post-content failures must propagate directly: partial output has
-        // already been streamed to the caller, so splicing in a second model's
-        // output would corrupt the response.
-        throw err;
-      }
-      if (result.done) return;
-      const out = opts.emit(result.value);
-      if (out) {
-        yield out;
-        yieldedAny = true;
-      }
-    }
-  } finally {
-    // Close the upstream iterator when the consumer stops early (throw/return)
-    // so `produce()`'s finally blocks — socket cleanup, AbortController signal
-    // tripping, stream cancellation — actually run. Without this, an early
-    // exit (e.g. a consumer break) would leak the underlying fetch response.
-    if (iterator.return) {
-      try {
-        await iterator.return();
-      } catch {
-        // Nothing useful we can do here; the finally's sole purpose was
-        // plumbing cleanup into the upstream generator.
-      }
-    }
-  }
 }

@@ -1,4 +1,14 @@
-import type { Integration, PasskeyCredential, Prisma } from '@prisma/client';
+import type {
+  BrowserPassword,
+  BrowserPermission,
+  CacheStorageOrigin,
+  Cookie,
+  IndexedDBOrigin,
+  Integration,
+  LocalStorageOrigin,
+  PasskeyCredential,
+  Prisma,
+} from '@prisma/client';
 
 type PasskeyRecord = PasskeyCredential;
 
@@ -28,6 +38,186 @@ export async function syncIntegrationCredentials(
     syncedIds.push(synced.id);
   }
   return syncedIds;
+}
+
+export type CookieModel = {
+  upsert(args: Prisma.CookieUpsertArgs): Promise<Pick<Cookie, 'id'>>;
+};
+
+export async function syncCookies(
+  localCookie: CookieModel,
+  cookies: Cookie[],
+  batchSize = 500
+): Promise<number> {
+  for (let index = 0; index < cookies.length; index += batchSize) {
+    const batch = cookies.slice(index, index + batchSize);
+    await Promise.all(
+      batch.map((cookie) => {
+        const { id: remoteId, ...updateData } = cookie;
+        void remoteId;
+        return localCookie.upsert({
+          where: {
+            userId_domain_name_path_topFrameSiteKey_browserSource_browserProfile: {
+              userId: cookie.userId,
+              domain: cookie.domain,
+              name: cookie.name,
+              path: cookie.path,
+              topFrameSiteKey: cookie.topFrameSiteKey,
+              browserSource: cookie.browserSource,
+              browserProfile: cookie.browserProfile,
+            },
+          },
+          create: cookie,
+          update: updateData,
+          select: { id: true },
+        });
+      })
+    );
+  }
+  return cookies.length;
+}
+
+async function syncInBatches<T>(
+  records: T[],
+  syncRecord: (record: T) => Promise<unknown>,
+  batchSize: number
+): Promise<number> {
+  for (let index = 0; index < records.length; index += batchSize) {
+    await Promise.all(records.slice(index, index + batchSize).map(syncRecord));
+  }
+  return records.length;
+}
+
+type LocalStorageOriginModel = {
+  upsert(args: Prisma.LocalStorageOriginUpsertArgs): Promise<unknown>;
+};
+
+export async function syncLocalStorageOrigins(
+  model: LocalStorageOriginModel,
+  records: LocalStorageOrigin[],
+  batchSize = 500
+): Promise<number> {
+  return syncInBatches(
+    records,
+    (record) => {
+      const { id, ...update } = record;
+      void id;
+      return model.upsert({
+        where: { userId_origin: { userId: record.userId, origin: record.origin } },
+        create: record,
+        update,
+      });
+    },
+    batchSize
+  );
+}
+
+type IndexedDBOriginModel = {
+  upsert(args: Prisma.IndexedDBOriginUpsertArgs): Promise<unknown>;
+};
+
+export async function syncIndexedDBOrigins(
+  model: IndexedDBOriginModel,
+  records: IndexedDBOrigin[],
+  batchSize = 500
+): Promise<number> {
+  return syncInBatches(
+    records,
+    (record) => {
+      const { id, ...update } = record;
+      void id;
+      return model.upsert({
+        where: { userId_origin: { userId: record.userId, origin: record.origin } },
+        create: record,
+        update,
+      });
+    },
+    batchSize
+  );
+}
+
+type BrowserPermissionModel = {
+  upsert(args: Prisma.BrowserPermissionUpsertArgs): Promise<unknown>;
+};
+
+export async function syncBrowserPermissions(
+  model: BrowserPermissionModel,
+  records: BrowserPermission[],
+  batchSize = 500
+): Promise<number> {
+  return syncInBatches(
+    records,
+    (record) => {
+      const { id, ...update } = record;
+      void id;
+      return model.upsert({
+        where: {
+          userId_origin_permission: {
+            userId: record.userId,
+            origin: record.origin,
+            permission: record.permission,
+          },
+        },
+        create: record,
+        update,
+      });
+    },
+    batchSize
+  );
+}
+
+type CacheStorageOriginModel = {
+  upsert(args: Prisma.CacheStorageOriginUpsertArgs): Promise<unknown>;
+};
+
+export async function syncCacheStorageOrigins(
+  model: CacheStorageOriginModel,
+  records: CacheStorageOrigin[],
+  batchSize = 500
+): Promise<number> {
+  return syncInBatches(
+    records,
+    (record) => {
+      const { id, ...update } = record;
+      void id;
+      return model.upsert({
+        where: { userId_origin: { userId: record.userId, origin: record.origin } },
+        create: record,
+        update,
+      });
+    },
+    batchSize
+  );
+}
+
+type BrowserPasswordModel = {
+  upsert(args: Prisma.BrowserPasswordUpsertArgs): Promise<unknown>;
+};
+
+export async function syncBrowserPasswords(
+  model: BrowserPasswordModel,
+  records: BrowserPassword[],
+  batchSize = 500
+): Promise<number> {
+  return syncInBatches(
+    records,
+    (record) => {
+      const { id, ...update } = record;
+      void id;
+      return model.upsert({
+        where: {
+          userId_origin_username: {
+            userId: record.userId,
+            origin: record.origin,
+            username: record.username,
+          },
+        },
+        create: record,
+        update,
+      });
+    },
+    batchSize
+  );
 }
 
 type PasskeyCredentialModel = {

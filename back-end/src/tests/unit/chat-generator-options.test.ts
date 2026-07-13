@@ -21,7 +21,7 @@ async function run(): Promise<void> {
   });
 
   assert.strictEqual(options.model, 'rose-labs/rose-1-lite');
-  assert.strictEqual(options.provider_route, 'openrouter-waterfall');
+  assert.strictEqual(options.provider_route, 'openrouter-cerebras');
   assert.strictEqual(options.provider_fast_mode, true);
   assert.strictEqual(options.abort_signal, abortController.signal);
   assert.strictEqual(options.temperature, 0.7);
@@ -77,7 +77,7 @@ async function run(): Promise<void> {
   }
 
   process.stdout.write('PASS chat Generator options exclude ignored compute-auth fields\n');
-  process.stdout.write('PASS Generator OpenRouter route fails closed without provider leakage\n');
+  process.stdout.write('PASS Generator pinned Cerebras route fails closed without leakage\n');
 }
 
 run().catch((error: unknown) => {

@@ -312,6 +312,8 @@ export async function prepareAgentStartArchiveTask<TFixture>(
 export async function prepareAgentStartArchive(
   agentId: string
 ): Promise<(() => Promise<void>) | null> {
+  if (!archiveEnabled()) return null;
+
   const reportUnavailable = (error: unknown) => {
     log.warn('Trace archive start fixture unavailable', {
       agent_id: agentId,

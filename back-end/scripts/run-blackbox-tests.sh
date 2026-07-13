@@ -6,6 +6,7 @@ BACKEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$BACKEND_DIR"
 
 ROOT_DIR="$(cd "$BACKEND_DIR/.." && pwd)"
+source "$ROOT_DIR/scripts/lib/blackbox-db.sh"
 RUN_ID="${BLACKBOX_TEST_RUN_ID:-${CONTRACT_TEST_RUN_ID:-$(date +%s)-$$-$RANDOM}}"
 export BLACKBOX_TEST_RUN_ID="$RUN_ID"
 export CONTRACT_TEST_RUN_ID="$RUN_ID"
@@ -22,6 +23,7 @@ export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$ROOT_DIR/.context}"
 RUNNER_CMD=(npx tsx src/tests/blackbox/run.ts)
 RUNNER_LOG="$ARTIFACT_DIR/runner.log"
 MANIFEST_PATH="$ARTIFACT_DIR/manifest.json"
+USE_EXISTING_BACKEND="${BLACKBOX_TEST_USE_EXISTING_BACKEND:-${CONTRACT_TEST_USE_EXISTING_BACKEND:-0}}"
 
 # --list only needs filesystem discovery; skip backend boot for speed.
 for arg in "$@"; do
@@ -51,8 +53,38 @@ fi
 DB_CONTAINER="victoria-db-${WORKSPACE_HINT}"
 DB_FOUND=false
 
-# Try Docker container first
-if docker info >/dev/null 2>&1; then
+# A pre-existing backend is authoritative about its own database. Do not run a
+# second Docker-vs-system probe here: Docker Desktop startup latency can make
+# run.sh choose system Postgres while this later probe chooses Docker, splitting
+# direct Prisma fixtures from the HTTP server.
+if [[ "$USE_EXISTING_BACKEND" == "1" ]]; then
+  if [[ -z "${TEST_BASE_URL:-}" ]]; then
+    echo "❌ TEST_BASE_URL must be set when BLACKBOX_TEST_USE_EXISTING_BACKEND=1 or CONTRACT_TEST_USE_EXISTING_BACKEND=1"
+    exit 1
+  fi
+  DB_SELECTION="${BLACKBOX_EXISTING_DB_SELECTION:-}"
+  if [[ -z "$DB_SELECTION" ]]; then
+    EXISTING_BACKEND_MANIFEST="${BLACKBOX_EXISTING_BACKEND_MANIFEST:-$ROOT_DIR/.context/services.json}"
+    if ! DB_SELECTION="$(blackbox_existing_backend_db_selection "$EXISTING_BACKEND_MANIFEST" "$TEST_BASE_URL")"; then
+      echo "❌ Cannot prove that direct Prisma fixtures share the existing backend database." >&2
+      exit 1
+    fi
+  fi
+  IFS='|' read -r DB_KIND LOCAL_DB_PORT DB_CONTAINER <<<"$DB_SELECTION"
+  if [[ "$DB_KIND" == "system" ]] &&
+    pg_isready -h localhost -p "$LOCAL_DB_PORT" -U postgres -q 2>/dev/null; then
+    DB_FOUND=true
+    echo "Using existing backend Postgres (system) at localhost:$LOCAL_DB_PORT"
+  elif [[ "$DB_KIND" == "docker" ]] &&
+    docker exec "$DB_CONTAINER" pg_isready -U postgres -q 2>/dev/null; then
+    DB_FOUND=true
+    echo "Using existing backend Postgres (Docker container=$DB_CONTAINER) at localhost:$LOCAL_DB_PORT"
+  else
+    echo "❌ Existing backend database is not reachable: kind=$DB_KIND port=$LOCAL_DB_PORT" >&2
+    exit 1
+  fi
+# For an isolated backend, try the workspace Docker container first.
+elif docker info >/dev/null 2>&1; then
   # Prefer the workspace-named container; fall back to the only running
   # victoria-db-* container if there's exactly one (covers cases where the
   # caller hasn't exported CONDUCTOR_WORKSPACE_NAME).
@@ -122,13 +154,7 @@ else
   exit 1
 fi
 
-USE_EXISTING_BACKEND="${BLACKBOX_TEST_USE_EXISTING_BACKEND:-${CONTRACT_TEST_USE_EXISTING_BACKEND:-0}}"
-
 if [[ "$USE_EXISTING_BACKEND" == "1" ]]; then
-  if [[ -z "${TEST_BASE_URL:-}" ]]; then
-    echo "❌ TEST_BASE_URL must be set when BLACKBOX_TEST_USE_EXISTING_BACKEND=1 or CONTRACT_TEST_USE_EXISTING_BACKEND=1"
-    exit 1
-  fi
   cat >"$MANIFEST_PATH" <<EOF
 {"run_id":"$RUN_ID","mode":"existing-blackbox-backend","base_url":"$TEST_BASE_URL","artifact_dir":"$ARTIFACT_DIR","runner_log":"$RUNNER_LOG"}
 EOF

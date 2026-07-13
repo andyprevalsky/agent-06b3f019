@@ -77,6 +77,41 @@ cloudbench_validate_browser_provider_contract() {
   echo "browser provider contract verified: backend=$prod_backend worker=$prod_worker"
 }
 
+cloudbench_env_activation_machine_ids() {
+  local controller_lock_name="${1:-cloudbench-controller-lock}"
+  CONTROLLER_LOCK_NAME="$controller_lock_name" python3 -c '
+import json, os, sys
+for machine in json.load(sys.stdin) or []:
+    if machine.get("name") == os.environ["CONTROLLER_LOCK_NAME"]:
+        continue
+    if machine.get("state") != "stopped":
+        continue
+    if machine.get("id"):
+        print(machine["id"])
+'
+}
+
+cloudbench_controller_lock_path() {
+  local root_dir="$1" resource_name="$2" common_dir safe_resource
+  common_dir="$(git -C "$root_dir" rev-parse --git-common-dir 2>/dev/null || true)"
+  if [ -n "$common_dir" ]; then
+    case "$common_dir" in
+      /*) ;;
+      *) common_dir="$root_dir/$common_dir" ;;
+    esac
+    common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || common_dir=""
+  fi
+  [ -n "$common_dir" ] || common_dir="$root_dir/.context"
+  safe_resource="$(printf '%s' "$resource_name" | tr -c 'A-Za-z0-9._-' '-')"
+  printf '%s/cloudbench-controller-%s.lock\n' "$common_dir" "$safe_resource"
+}
+
+cloudbench_controller_mode_needs_lock() {
+  local mode="$1" parent_lock_held="${2:-0}"
+  [ "$parent_lock_held" != "1" ] || return 1
+  [ "$mode" != "run" ]
+}
+
 cloudbench_controller_lock_acquire() {
   local path="$1"
   mkdir -p "$(dirname "$path")"
@@ -112,4 +147,177 @@ cloudbench_controller_lock_release() {
   fi
   rm -f "$path"
   unset CLOUDBENCH_CONTROLLER_LOCK_KIND CLOUDBENCH_CONTROLLER_LOCK_PATH
+}
+
+cloudbench_machines_api_request() {
+  local method="$1" path="$2" body="${3:-}" nonce="${4:-}" response
+  local api_host="${FLY_API_HOSTNAME:-https://api.machines.dev}"
+  local api_token="${CLOUDBENCH_MACHINES_API_TOKEN:-${FLY_API_TOKEN:-}}"
+  [ -n "$api_token" ] || {
+    echo "FATAL: Machines API token is required" >&2
+    return 1
+  }
+  local -a args=(
+    -sS --connect-timeout 5 --max-time 30 -X "$method"
+    -H "Authorization: Bearer $api_token"
+    -H "Content-Type: application/json"
+  )
+  [ -n "$nonce" ] && args+=(-H "fly-machine-lease-nonce: $nonce")
+  [ -n "$body" ] && args+=(-d "$body")
+  if ! response="$(curl "${args[@]}" -w $'\n%{http_code}' "$api_host$path")"; then
+    CLOUDBENCH_API_STATUS="0"
+    CLOUDBENCH_API_BODY="$response"
+    return 1
+  fi
+  CLOUDBENCH_API_STATUS="${response##*$'\n'}"
+  CLOUDBENCH_API_BODY="${response%$'\n'*}"
+}
+
+cloudbench_cloud_lock_machine_name() {
+  printf '%s\n' "${CLOUDBENCH_CLOUD_LOCK_MACHINE_NAME:-cloudbench-controller-lock}"
+}
+
+cloudbench_cloud_lock_machine_id() {
+  local app="$1" machine_name
+  machine_name="$(cloudbench_cloud_lock_machine_name)"
+  cloudbench_machines_api_request GET "/v1/apps/$app/machines" || return 1
+  [ "$CLOUDBENCH_API_STATUS" = "200" ] || return 1
+  printf '%s' "$CLOUDBENCH_API_BODY" | CONTROLLER_LOCK_NAME="$machine_name" python3 -c '
+import json, os, sys
+for machine in json.load(sys.stdin) or []:
+    if machine.get("name") == os.environ["CONTROLLER_LOCK_NAME"] and machine.get("id"):
+        print(machine["id"])
+        break
+'
+}
+
+cloudbench_cloud_lock_machine_ensure() {
+  local app="$1" region="$2" machine_name machine_id body
+  machine_name="$(cloudbench_cloud_lock_machine_name)"
+  machine_id="$(cloudbench_cloud_lock_machine_id "$app" || true)"
+  [ -n "$machine_id" ] && {
+    printf '%s\n' "$machine_id"
+    return 0
+  }
+  body="$(python3 - "$machine_name" "$region" <<'PY'
+import json, sys
+name, region = sys.argv[1:]
+print(json.dumps({
+    "name": name,
+    "region": region,
+    "config": {
+        "image": "flyio/hellofly:latest",
+        "auto_destroy": False,
+        "restart": {"policy": "no"},
+        "guest": {"cpu_kind": "shared", "cpus": 1, "memory_mb": 256},
+    },
+    "skip_launch": True,
+}, separators=(",", ":")))
+PY
+)"
+  cloudbench_machines_api_request POST "/v1/apps/$app/machines" "$body" || return 1
+  case "$CLOUDBENCH_API_STATUS" in 200|201|409) ;; *) return 1 ;; esac
+  machine_id="$(printf '%s' "$CLOUDBENCH_API_BODY" | python3 -c '
+import json, sys
+try:
+    print((json.load(sys.stdin) or {}).get("id") or "")
+except Exception:
+    print("")
+' 2>/dev/null)"
+  [ -n "$machine_id" ] || machine_id="$(cloudbench_cloud_lock_machine_id "$app" || true)"
+  [ -n "$machine_id" ] || return 1
+  printf '%s\n' "$machine_id"
+}
+
+cloudbench_cloud_lock_acquire() {
+  local app="$1" region="$2" ttl="$3" machine_id description body nonce expires_at now watchdog_delay owner_pid
+  case "$ttl" in
+    ''|*[!0-9]*|0) echo "FATAL: cloud controller lease TTL must be a positive integer" >&2; return 2 ;;
+  esac
+  machine_id="$(cloudbench_cloud_lock_machine_ensure "$app" "$region")" || {
+    echo "FATAL: could not create or resolve the cloud controller sentinel" >&2
+    return 1
+  }
+  description="cloudbench pid=$$ host=$(hostname 2>/dev/null || echo unknown)"
+  body="$(python3 - "$description" "$ttl" <<'PY'
+import json, sys
+print(json.dumps({"description": sys.argv[1][:64], "ttl": int(sys.argv[2])}, separators=(",", ":")))
+PY
+)"
+  cloudbench_machines_api_request POST "/v1/apps/$app/machines/$machine_id/lease" "$body" || return 1
+  if [ "$CLOUDBENCH_API_STATUS" = "409" ]; then
+    echo "FATAL: cloud benchmark app is owned by another controller (Fly lease conflict)" >&2
+    return 75
+  fi
+  [ "$CLOUDBENCH_API_STATUS" = "201" ] || {
+    echo "FATAL: cloud controller lease acquisition failed (HTTP $CLOUDBENCH_API_STATUS)" >&2
+    return 1
+  }
+  nonce="$(printf '%s' "$CLOUDBENCH_API_BODY" | python3 -c '
+import json, sys
+data = json.load(sys.stdin) or {}
+print((data.get("data") or data).get("nonce") or "")
+')"
+  [ -n "$nonce" ] || {
+    echo "FATAL: Fly lease response omitted its nonce" >&2
+    return 1
+  }
+  expires_at="$(printf '%s' "$CLOUDBENCH_API_BODY" | python3 -c '
+import json, sys
+data = json.load(sys.stdin) or {}
+print((data.get("data") or data).get("expires_at") or "")
+')"
+  now="$(date +%s)"
+  case "$expires_at" in ''|*[!0-9]*) expires_at=$((now + ttl)) ;; esac
+  watchdog_delay=$((expires_at - now - 60))
+  if [ "$watchdog_delay" -le 0 ]; then
+    echo "FATAL: Fly granted a controller lease without a 60-second safety margin" >&2
+    cloudbench_machines_api_request DELETE "/v1/apps/$app/machines/$machine_id/lease" "" "$nonce" >/dev/null 2>&1 || true
+    return 1
+  fi
+  CLOUDBENCH_CLOUD_LOCK_MACHINE_ID="$machine_id"
+  CLOUDBENCH_CLOUD_LOCK_NONCE="$nonce"
+  owner_pid="$$"
+  (
+    sleep "$watchdog_delay"
+    [ "$PPID" = "$owner_pid" ] || exit 0
+    kill -TERM "$owner_pid" 2>/dev/null || true
+  ) &
+  CLOUDBENCH_CLOUD_LOCK_WATCHDOG_PID="$!"
+}
+
+cloudbench_cloud_lock_release() {
+  local app="$1" machine_id="${CLOUDBENCH_CLOUD_LOCK_MACHINE_ID:-}" nonce="${CLOUDBENCH_CLOUD_LOCK_NONCE:-}"
+  if [ -n "${CLOUDBENCH_CLOUD_LOCK_WATCHDOG_PID:-}" ]; then
+    kill "$CLOUDBENCH_CLOUD_LOCK_WATCHDOG_PID" 2>/dev/null || true
+    wait "$CLOUDBENCH_CLOUD_LOCK_WATCHDOG_PID" 2>/dev/null || true
+  fi
+  if [ -n "$machine_id" ] && [ -n "$nonce" ]; then
+    cloudbench_machines_api_request DELETE "/v1/apps/$app/machines/$machine_id/lease" "" "$nonce" >/dev/null 2>&1 || true
+  fi
+  unset CLOUDBENCH_CLOUD_LOCK_MACHINE_ID CLOUDBENCH_CLOUD_LOCK_NONCE CLOUDBENCH_CLOUD_LOCK_WATCHDOG_PID
+}
+
+cloudbench_cloud_lock_machine_destroy() {
+  local app="$1" machine_id="${CLOUDBENCH_CLOUD_LOCK_MACHINE_ID:-}" nonce="${CLOUDBENCH_CLOUD_LOCK_NONCE:-}"
+  [ -n "$machine_id" ] && [ -n "$nonce" ] || return 1
+  cloudbench_machines_api_request DELETE "/v1/apps/$app/machines/$machine_id?force=true" "" "$nonce" || return 1
+  [ "$CLOUDBENCH_API_STATUS" = "200" ] || return 1
+  unset CLOUDBENCH_CLOUD_LOCK_MACHINE_ID CLOUDBENCH_CLOUD_LOCK_NONCE
+}
+
+cloudbench_controller_acquire() {
+  local path="$1" app="$2" region="$3" ttl="$4" rc
+  cloudbench_controller_lock_acquire "$path" || return 1
+  cloudbench_cloud_lock_acquire "$app" "$region" "$ttl" || {
+    rc=$?
+    cloudbench_controller_lock_release "$path"
+    return "$rc"
+  }
+}
+
+cloudbench_controller_release() {
+  local path="$1" app="$2"
+  cloudbench_cloud_lock_release "$app"
+  cloudbench_controller_lock_release "$path"
 }

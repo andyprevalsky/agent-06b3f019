@@ -9,7 +9,8 @@ import {
   createClosedRouterActionDetector,
   type ClosedRouterAction,
 } from '../../providers/chat/routerJsonStream';
-import { getPool, poolForModel } from '../../providers/rose/pools';
+import { poolForModel } from '../../providers/rose/pools';
+import { CEREBRAS_CHAT_MODEL } from '../../providers/rose/cerebrasRoute';
 
 interface TestResult {
   name: string;
@@ -50,21 +51,17 @@ const tests: Array<[string, () => Promise<void> | void]> = [
 
       assertEqual(selected.requested, requestedModel, 'persisted requested model');
       assertEqual(selected.router, 'rose-labs/rose-1-lite', 'router model');
-      assertEqual(selected.routerProviderRoute, 'shared-openai-priority', 'router provider route');
+      assertEqual(selected.routerProviderRoute, 'openrouter-cerebras', 'router provider route');
       assertEqual(selected.generator, 'rose-labs/rose-1-lite', 'generator model');
       assertEqual(
         selected.generatorProviderRoute,
-        'openrouter-waterfall',
+        'openrouter-cerebras',
         'generator provider route'
       );
       const generatorPool = poolForModel(selected.generator);
       assertEqual(generatorPool, 'rose-1-lite', 'generator pool');
       if (!generatorPool) throw new Error('generator model did not resolve to a Rose pool');
-      assertEqual(
-        getPool(generatorPool).waterfall[0],
-        'google/gemini-3.5-flash',
-        'generator primary model'
-      );
+      assertEqual(CEREBRAS_CHAT_MODEL, 'zai-glm-4.7', 'generator primary model');
     },
   ],
   [
@@ -78,14 +75,14 @@ const tests: Array<[string, () => Promise<void> | void]> = [
     },
   ],
   [
-    'dedicated chat router resolves through the Rose Lite GPT provider model',
+    'dedicated chat router resolves through the pinned Cerebras model',
     () => {
       const selected = selectChatPhaseModels('rose-labs/rose-1-ultra');
       const poolName = poolForModel(selected.router);
 
       assertEqual(poolName, 'rose-1-lite', 'router pool');
       if (!poolName) throw new Error('router model did not resolve to a Rose pool');
-      assertEqual(getPool(poolName).gptAuthModel, 'gpt-5.6-terra', 'router GPT model');
+      assertEqual(CEREBRAS_CHAT_MODEL, 'zai-glm-4.7', 'router Cerebras model');
     },
   ],
   [

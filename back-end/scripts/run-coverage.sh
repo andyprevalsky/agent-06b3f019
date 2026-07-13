@@ -15,6 +15,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROOT_DIR="$(cd "$BACKEND_DIR/.." && pwd)"
+# shellcheck source=scripts/lib/blackbox-db.sh
+source "$ROOT_DIR/scripts/lib/blackbox-db.sh"
 cd "$BACKEND_DIR"
 
 REPORT_ONLY=0
@@ -78,8 +80,34 @@ if [[ -n "${CONDUCTOR_PORT:-}" ]]; then
 fi
 DB_CONTAINER="victoria-db-${WORKSPACE_HINT}"
 DB_FOUND=false
+COVERAGE_DB_SELECTION=""
 
-if docker info >/dev/null 2>&1; then
+# A live scripts/run.sh manifest is the authoritative database binding for this
+# workspace. Resolve it before broad Docker/system discovery so concurrent
+# workspaces cannot redirect coverage to a different Postgres instance.
+SERVICE_MANIFEST="$ROOT_DIR/.context/services.json"
+if [[ -f "$SERVICE_MANIFEST" ]]; then
+  DB_SELECTION="$(blackbox_service_manifest_db_selection "$SERVICE_MANIFEST")"
+  IFS='|' read -r MANIFEST_DB_KIND MANIFEST_DB_PORT MANIFEST_DB_CONTAINER <<<"$DB_SELECTION"
+  if [[ "$MANIFEST_DB_KIND" == "docker" ]]; then
+    DB_CONTAINER="$MANIFEST_DB_CONTAINER"
+    LOCAL_DB_PORT="$MANIFEST_DB_PORT"
+    if docker exec "$DB_CONTAINER" pg_isready -U postgres -q 2>/dev/null; then
+      DB_FOUND=true
+      COVERAGE_DB_SELECTION="$DB_SELECTION"
+      echo "Using workspace-manifest Postgres (Docker container=$DB_CONTAINER) at localhost:$LOCAL_DB_PORT"
+    fi
+  elif [[ "$MANIFEST_DB_KIND" == "system" ]]; then
+    LOCAL_DB_PORT="$MANIFEST_DB_PORT"
+    if pg_isready -h localhost -p "$LOCAL_DB_PORT" -U postgres -q 2>/dev/null; then
+      DB_FOUND=true
+      COVERAGE_DB_SELECTION="$DB_SELECTION"
+      echo "Using workspace-manifest Postgres (system) at localhost:$LOCAL_DB_PORT"
+    fi
+  fi
+fi
+
+if ! $DB_FOUND && docker info >/dev/null 2>&1; then
   if ! docker inspect "$DB_CONTAINER" >/dev/null 2>&1; then
     CANDIDATES=$(docker ps --filter "name=^victoria-db-" --format "{{.Names}}")
     CANDIDATE_COUNT=$(echo "$CANDIDATES" | grep -c . || true)
@@ -94,6 +122,7 @@ if docker info >/dev/null 2>&1; then
   fi
   if [[ -n "$LOCAL_DB_PORT" ]] && docker exec "$DB_CONTAINER" pg_isready -U postgres -q 2>/dev/null; then
     DB_FOUND=true
+    COVERAGE_DB_SELECTION="docker|$LOCAL_DB_PORT|$DB_CONTAINER"
     echo "Using local Postgres (Docker container=$DB_CONTAINER) at localhost:$LOCAL_DB_PORT"
   fi
 fi
@@ -103,6 +132,7 @@ if ! $DB_FOUND; then
   if pg_isready -h localhost -p "$SYSTEM_PG_PORT" -U postgres -q 2>/dev/null; then
     LOCAL_DB_PORT="$SYSTEM_PG_PORT"
     DB_FOUND=true
+    COVERAGE_DB_SELECTION="system|$LOCAL_DB_PORT|"
     echo "Using local Postgres (system) at localhost:$SYSTEM_PG_PORT"
   fi
 fi
@@ -199,6 +229,7 @@ echo "Running blackbox tests..."
 TEST_EXIT=0
 NODE_V8_COVERAGE="$COV_TMP" \
 BLACKBOX_TEST_USE_EXISTING_BACKEND=1 CONTRACT_TEST_USE_EXISTING_BACKEND=1 \
+BLACKBOX_EXISTING_DB_SELECTION="$COVERAGE_DB_SELECTION" \
 BLACKBOX_TEST_CONCURRENCY="${BLACKBOX_TEST_CONCURRENCY:-1}" CONTRACT_TEST_CONCURRENCY="${CONTRACT_TEST_CONCURRENCY:-1}" \
 BLACKBOX_TEST_CASE_CONCURRENCY="${BLACKBOX_TEST_CASE_CONCURRENCY:-1}" CONTRACT_TEST_CASE_CONCURRENCY="${CONTRACT_TEST_CASE_CONCURRENCY:-1}" \
   bash scripts/run-blackbox-tests.sh || TEST_EXIT=$?

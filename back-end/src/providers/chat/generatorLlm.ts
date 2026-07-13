@@ -8,11 +8,12 @@
 import {
   createStreamingCompletion,
   markCacheable,
+  type CompletionChunk,
   type CompletionMessage,
   type CompletionOptions,
 } from '../rose';
 import { StructuredOutputAccumulator } from '../rose/structuredOutput';
-import { agentFastMode, cacheGet, cacheSet } from '../fastCacheStore';
+import { agentFastMode, cacheSet } from '../fastCacheStore';
 import { goalHash } from '../fastCacheNormalizeCore';
 import { contentKey } from '../fastCacheNormalizeKeys';
 import { GENERATOR_SYSTEM_PROMPT } from './chatPrompts';
@@ -28,6 +29,8 @@ import {
 } from './generatorAttentionStream';
 import { isCloudAgentLifecycleTool } from './cloudAgentLifecycleTool';
 import { userFacingTextDescription } from '../userFacingWritingPrompt';
+import { createGeneratorCacheStream } from './generatorCacheStream';
+import { runCacheWriteInBackground } from './backgroundCacheWrite';
 
 const log = createLogger('GeneratorLLM');
 
@@ -469,7 +472,7 @@ async function callGeneratorLlmCore(
   const fastModeWrite = fastMode.writeEnabled === true && fastMode.goal !== null;
   const providerFastMode = fastModeRead || fastModeWrite;
   let fcKey: string | null = null;
-  let fcCachedJson: string | null = null;
+  let fcCacheWon = false;
   if ((fastModeRead || fastModeWrite) && fastMode.goal) {
     fcKey = contentKey(fastMode.goal, 'chat_generator', {
       model: params.model,
@@ -484,41 +487,51 @@ async function callGeneratorLlmCore(
       messages: openaiMessages,
     });
   }
-  if (fcKey && fastModeRead) {
-    const hit = await cacheGet(fcKey);
-    if (hit.hit && hit.value) {
-      fcCachedJson = (hit.value as { json?: string }).json ?? null;
-      log.info('fast_cache.chat_generator_hit', { agentId: params.agentId, key: fcKey });
-    } else {
-      log.info('fast_cache.chat_generator_miss', { agentId: params.agentId, key: fcKey });
-    }
-  } else if (fcKey) {
-    log.info('fast_cache.chat_generator_write_only', { agentId: params.agentId, key: fcKey });
-  }
-
-  async function* syntheticChatStream(json: string): AsyncGenerator<unknown> {
+  async function* syntheticChatStream(json: string): AsyncGenerator<CompletionChunk> {
     yield {
+      requested_model: params.model,
       actual_model: 'fast-cache',
-      choices: [{ delta: { content: json }, finish_reason: 'stop' }],
+      pool_name: 'fast-cache',
+      pool_size: 0,
+      choices: [{ index: 0, delta: { content: json }, finish_reason: 'stop' }],
       usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
     };
   }
 
-  // Create an in-process Rose stream (or replay Fast Mode cache).
-  const stream =
-    fcCachedJson !== null
-      ? (syntheticChatStream(fcCachedJson) as unknown as Awaited<
-          ReturnType<typeof createStreamingCompletion>
-        >)
-      : await createStreamingCompletion(
-          buildGeneratorCompletionOptions({
-            model: params.model,
-            messages: openaiMessages,
-            providerRoute: params.providerRoute,
-            providerFastMode,
-            abortSignal: params.abortSignal,
-          })
-        );
+  const createLiveStream = (hedgeSignal?: AbortSignal) =>
+    createStreamingCompletion(
+      buildGeneratorCompletionOptions({
+        model: params.model,
+        messages: openaiMessages,
+        providerRoute: params.providerRoute,
+        providerFastMode,
+        abortSignal:
+          params.abortSignal && hedgeSignal
+            ? AbortSignal.any([params.abortSignal, hedgeSignal])
+            : (params.abortSignal ?? hedgeSignal),
+      })
+    );
+
+  // Fast Mode's remote cache is optional. Give it a 25ms head start, then race
+  // it against Cerebras so a slow cache lookup can never gate first tokens.
+  let stream: AsyncIterable<CompletionChunk>;
+  if (fcKey && fastModeRead) {
+    const cacheKey = fcKey;
+    stream = createGeneratorCacheStream({
+      agentId: params.agentId,
+      cacheKey,
+      createLive: (abortSignal) => createLiveStream(abortSignal),
+      createCached: syntheticChatStream,
+      onWinner: (winner) => {
+        fcCacheWon = winner === 'cache';
+      },
+    });
+  } else {
+    if (fcKey) {
+      log.info('fast_cache.chat_generator_write_only', { agentId: params.agentId, key: fcKey });
+    }
+    stream = await createLiveStream();
+  }
 
   // isClaude = user's own Claude token was used ($0 cost, "-claude" suffix in actual_model)
   let isClaude = false;
@@ -623,30 +636,25 @@ async function callGeneratorLlmCore(
   const fullJson = structuredOutput.finalText();
 
   // Fast Mode: record the generator response so an identical re-ask replays it.
+  const cacheGoal = fastMode.goal;
   const committed = await runAfterStreamCommit(params.streamGate, async () => {
-    if (
-      fcKey &&
-      fcCachedJson === null &&
-      fullJson !== '' &&
-      fastMode.goal !== null &&
-      fastModeWrite
-    ) {
-      await cacheSet({
-        key: fcKey,
-        kind: 'llm',
-        goalHash: goalHash(fastMode.goal),
-        value: { json: fullJson },
-      })
-        .then(() =>
-          log.info('fast_cache.chat_generator_stored', { agentId: params.agentId, key: fcKey })
-        )
-        .catch((error) =>
+    if (fcKey && !fcCacheWon && fullJson !== '' && cacheGoal !== null && fastModeWrite) {
+      runCacheWriteInBackground(
+        () =>
+          cacheSet({
+            key: fcKey,
+            kind: 'llm',
+            goalHash: goalHash(cacheGoal),
+            value: { json: fullJson },
+          }),
+        () => log.info('fast_cache.chat_generator_stored', { agentId: params.agentId, key: fcKey }),
+        (error) =>
           log.warn('fast_cache.chat_generator_store_failed', {
             agentId: params.agentId,
             key: fcKey,
             error: error instanceof Error ? error.message : String(error),
           })
-        );
+      );
     }
   });
   if (!committed) {

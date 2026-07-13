@@ -1,5 +1,6 @@
 /**
- * HTTP transport for direct provider calls — Anthropic + OpenRouter.
+ * HTTP transport for direct provider calls — Cerebras, Anthropic, OpenAI,
+ * and OpenRouter.
  *
  * Mirrors agents/providers/rose/transport.py. Returns the raw streaming
  * Response so the SSE parsers can iterate. No retry, no rotation — those
@@ -13,6 +14,7 @@ const log = createLogger('RoseTransport');
 export const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 export const OPENAI_RESPONSES_API_URL = 'https://api.openai.com/v1/responses';
 export const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
+export const CEREBRAS_API_URL = 'https://api.cerebras.ai/v1/chat/completions';
 export const CODEX_API_URL = 'https://chatgpt.com/backend-api/codex/responses';
 
 /**
@@ -104,6 +106,16 @@ function openAiHeaders(openAiKey: string): Record<string, string> {
   return {
     Authorization: `Bearer ${openAiKey}`,
     'Content-Type': 'application/json',
+  };
+}
+
+function cerebrasHeaders(cerebrasKey: string): Record<string, string> {
+  return {
+    Authorization: `Bearer ${cerebrasKey}`,
+    'Content-Type': 'application/json',
+    // Validate against the stricter schema/tool behavior before it becomes
+    // the default Cerebras API version on 2026-07-21.
+    'X-Cerebras-Version-Patch': '2',
   };
 }
 
@@ -239,6 +251,52 @@ export async function postOpenAIResponsesStream(
       cleanup();
     }
     log.warn('openai.error', {
+      request_id: options.requestId,
+      status: response.status,
+      body: errorBody.substring(0, 500),
+    });
+  }
+
+  const body =
+    response.ok && response.body ? keepAbortConnectedToBody(response.body, cleanup) : null;
+  if (!body) cleanup();
+
+  return {
+    status: response.status,
+    ok: response.ok,
+    headers: response.headers,
+    body,
+    errorBody,
+  };
+}
+
+export async function postCerebrasStream(
+  options: PostOptions & { cerebrasKey: string; abortSignal?: AbortSignal }
+): Promise<StreamResponse> {
+  const timeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+  const upstream = options.abortSignal ?? new AbortController().signal;
+  log.info('cerebras.start', {
+    request_id: options.requestId,
+    call_site: options.callSite,
+    model: options.body.model,
+  });
+  const { response, cleanup } = await withStreamingConnectTimeout(upstream, timeoutMs, (signal) =>
+    fetch(CEREBRAS_API_URL, {
+      method: 'POST',
+      headers: cerebrasHeaders(options.cerebrasKey),
+      body: JSON.stringify(options.body),
+      signal,
+    })
+  );
+
+  let errorBody: string | undefined;
+  if (!response.ok) {
+    try {
+      errorBody = await response.text();
+    } finally {
+      cleanup();
+    }
+    log.warn('cerebras.error', {
       request_id: options.requestId,
       status: response.status,
       body: errorBody.substring(0, 500),

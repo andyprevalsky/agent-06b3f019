@@ -27,6 +27,7 @@ import {
 } from './routerJsonStream';
 import { delayedCacheStreamHedge, type CacheLookupResult } from './delayedCacheStreamHedge';
 import type { ChatProviderRoute } from './phaseModels';
+import { runCacheWriteInBackground } from './backgroundCacheWrite';
 
 const log = createLogger('RouterLLM');
 const ROUTER_CACHE_GRACE_MS = 25;
@@ -591,23 +592,24 @@ export async function callRouterLlm(params: {
   // Combine for parsing - use accumulatedJson for JSON parsing
   const fullJson = structuredOutput.finalText();
 
-  if (fcKey && !fcCacheWon && fullJson !== '' && fastMode.goal !== null && fastModeWrite) {
-    await cacheSet({
-      key: fcKey,
-      kind: 'llm',
-      goalHash: goalHash(fastMode.goal),
-      value: { json: fullJson },
-    })
-      .then(() =>
-        log.info('fast_cache.chat_router_stored', { agentId: params.agentId, key: fcKey })
-      )
-      .catch((error) =>
+  const cacheGoal = fastMode.goal;
+  if (fcKey && !fcCacheWon && fullJson !== '' && cacheGoal !== null && fastModeWrite) {
+    runCacheWriteInBackground(
+      () =>
+        cacheSet({
+          key: fcKey,
+          kind: 'llm',
+          goalHash: goalHash(cacheGoal),
+          value: { json: fullJson },
+        }),
+      () => log.info('fast_cache.chat_router_stored', { agentId: params.agentId, key: fcKey }),
+      (error) =>
         log.warn('fast_cache.chat_router_store_failed', {
           agentId: params.agentId,
           key: fcKey,
           error: error instanceof Error ? error.message : String(error),
         })
-      );
+    );
   }
 
   // Broadcast final "done" signal for reasoning stream

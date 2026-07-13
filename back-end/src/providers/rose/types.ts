@@ -59,7 +59,8 @@ export interface CompletionOptions {
    * Selects an exclusive provider path. Omitted requests keep the normal
    * OAuth -> shared keys -> OpenRouter Rose routing contract.
    */
-  provider_route?: 'shared-openai-priority' | 'openrouter-waterfall';
+  provider_route?:
+    'direct-cerebras' | 'openrouter-cerebras' | 'shared-openai-priority' | 'openrouter-waterfall';
   /** Internal cancellation used by bounded provider hedges; never serialized. */
   abort_signal?: AbortSignal;
   claude_token?: string;

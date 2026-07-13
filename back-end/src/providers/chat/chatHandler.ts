@@ -11,12 +11,12 @@
  *
  * System context / state flow:
  *
- *   startInitialChatContext ──┬─ messages ──> Router (Lite) ──> shared OpenAI priority
+ *   startInitialChatContext ──┬─ messages ──> Router (GLM) ──> OpenRouter → Cerebras
  *                             │                 │                 (fail closed)
  *                             │                 ├─ escalation ──> Temporal (router only)
  *                             │                 v
  *                             │             Generator (Lite)
- *                             │                 └─ OpenRouter Gemini -> Kimi fallback
+ *                             │                 └─ OpenRouter -> Cerebras GLM-4.7
  *                             ├─ direct_answer ──> reuse initial message snapshot
  *                             │    └─ Router-start Generator ──> buffered until commit
  *                             ├─ web_search/future writes ──> refresh messages
@@ -162,6 +162,7 @@ export async function handleChatMessage(config: {
         toolName: CLOUD_AGENT_TOOL_NAME,
         toolStatus: 'IN_PROGRESS',
         title: CREATING_CLOUD_AGENT_TITLE,
+        startPhase: decision.mode,
       },
     });
 

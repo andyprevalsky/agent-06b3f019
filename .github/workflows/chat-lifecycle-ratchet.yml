@@ -1,0 +1,78 @@
+name: Production Semantic Frontend Gate
+
+on:
+  deployment_status:
+  workflow_dispatch:
+    inputs:
+      frontend_url:
+        description: Frontend URL to verify
+        required: false
+        default: https://roselabs.ai
+      backend_url:
+        description: Backend URL to verify
+        required: false
+        default: https://navi-j9a9.onrender.com
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-semantic-${{ github.event.deployment.id || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  semantic:
+    name: All semantic flows and chat lifecycle ratchet
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.deployment_status.state == 'success' &&
+       github.event.deployment.creator.login == 'vercel[bot]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out trusted semantic harness
+        uses: actions/checkout@v4
+        with:
+          # Test the deployed URL without executing code from a preview branch
+          # that could otherwise read the authentication secrets below.
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            front-end/package-lock.json
+            back-end/package-lock.json
+
+      - name: Install test dependencies
+        run: |
+          npm ci --ignore-scripts --prefix front-end
+          npm ci --ignore-scripts --prefix back-end
+
+      - name: Install Chromium
+        working-directory: front-end
+        run: npx playwright install chromium --with-deps
+
+      - name: Run all semantic frontend tests
+        env:
+          BACKEND_URL: ${{ inputs.backend_url || 'https://navi-j9a9.onrender.com' }}
+          FRONTEND_URL: ${{ inputs.frontend_url || github.event.deployment_status.environment_url || 'https://roselabs.ai' }}
+          SEMANTIC_WORKERS: 4
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          TEST_API_KEY: ${{ secrets.BACKEND_API_KEY }}
+        run: bash front-end/scripts/run-semantic-tests.sh --prod
+
+      - name: Upload browser failure artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semantic-frontend-${{ github.run_id }}
+          path: |
+            front-end/playwright-report
+            front-end/test-results
+          if-no-files-found: ignore
+          retention-days: 14

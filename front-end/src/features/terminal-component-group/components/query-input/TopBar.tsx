@@ -37,6 +37,7 @@ interface TopBarProps {
   simulatorMode?: boolean;
   onSimulatorModeChange?: (enabled: boolean) => void;
   onSelectPrompt: (prompt: string, files?: File[]) => void;
+  shouldAutoLoadDefaultPrompt: () => boolean;
   pendingPriceLimitCents: number;
   priceLimit: UsePriceLimitResult;
   contextPercentage: number;
@@ -56,6 +57,7 @@ export function TopBar({
   simulatorMode = false,
   onSimulatorModeChange,
   onSelectPrompt,
+  shouldAutoLoadDefaultPrompt,
   pendingPriceLimitCents,
   priceLimit,
   contextPercentage,
@@ -72,7 +74,12 @@ export function TopBar({
             onUpdate={onAgentUpdate}
           />
         </div>
-        {showTestPrompts && <TestPromptsSelector onSelectPrompt={onSelectPrompt} />}
+        {showTestPrompts && (
+          <TestPromptsSelector
+            onSelectPrompt={onSelectPrompt}
+            shouldAutoLoadDefaultPrompt={shouldAutoLoadDefaultPrompt}
+          />
+        )}
         <RoseToolSetChip />
         {showFastMode && (
           <FastModeToggle enabled={fastMode} onChange={onFastModeChange ?? (() => {})} />

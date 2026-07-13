@@ -12,7 +12,16 @@ import { PrismaClient } from '@prisma/client';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import dotenv from 'dotenv';
-import { syncIntegrationCredentials, syncPasskeyCredentials } from './seed-local-credentials';
+import {
+  syncBrowserPasswords,
+  syncBrowserPermissions,
+  syncCacheStorageOrigins,
+  syncCookies,
+  syncIndexedDBOrigins,
+  syncIntegrationCredentials,
+  syncLocalStorageOrigins,
+  syncPasskeyCredentials,
+} from './seed-local-credentials';
 
 // Parse .env file directly to get remote DB URL
 // (process.env.DATABASE_URL is already overridden to local by run.sh)
@@ -41,6 +50,7 @@ const SKIP_BROWSER_AUTH_SYNC =
 // agent's claudeAuth fetch fails and every LLM call falls through to the paid
 // waterfall.
 const COMPUTE_TOKENS_ONLY = process.argv.includes('--compute-tokens-only');
+const PASSKEYS_ONLY = process.argv.includes('--passkeys-only');
 const COMPUTE_TOKEN_SYNC_ATTEMPTS = 5;
 
 const remote = new PrismaClient({ datasources: { db: { url: REMOTE_URL } } });
@@ -52,6 +62,7 @@ async function syncTable(name: string, fn: () => Promise<number>): Promise<void>
     console.log(`  ✅ ${name}: ${count} synced`);
   } catch (err) {
     console.error(`  ❌ ${name}: ${err instanceof Error ? err.message : err}`);
+    throw err;
   }
 }
 
@@ -122,44 +133,31 @@ async function syncBrowserState(): Promise<void> {
   // ── Cookies ──
   await syncTable('Cookies', async () => {
     const cookies = await remote.cookie.findMany({ where: { userId: DEV_USER_ID } });
-
-    for (let i = 0; i < cookies.length; i += 500) {
-      const batch = cookies.slice(i, i + 500);
-      await Promise.all(
-        batch.map((c) => {
-          const { id, ...rest } = c;
-          return local.cookie.upsert({ where: { id }, create: c as any, update: rest as any });
-        })
-      );
-      if (cookies.length > 500 && i + 500 < cookies.length) {
-        process.stdout.write(`     ${Math.min(i + 500, cookies.length)}/${cookies.length}...\r`);
-      }
-    }
-    return cookies.length;
+    return syncCookies(local.cookie, cookies);
   });
 
   // ── LocalStorage Origins ──
   await syncTable('LocalStorage', async () => {
     const origins = await remote.localStorageOrigin.findMany({ where: { userId: DEV_USER_ID } });
-    return upsertById(local.localStorageOrigin, origins);
+    return syncLocalStorageOrigins(local.localStorageOrigin, origins);
   });
 
   // ── IndexedDB Origins ──
   await syncTable('IndexedDB', async () => {
     const origins = await remote.indexedDBOrigin.findMany({ where: { userId: DEV_USER_ID } });
-    return upsertById(local.indexedDBOrigin, origins);
+    return syncIndexedDBOrigins(local.indexedDBOrigin, origins);
   });
 
   // ── Browser Permissions ──
   await syncTable('Browser Permissions', async () => {
     const perms = await remote.browserPermission.findMany({ where: { userId: DEV_USER_ID } });
-    return upsertById(local.browserPermission, perms);
+    return syncBrowserPermissions(local.browserPermission, perms);
   });
 
   // ── Cache Storage Origins ──
   await syncTable('Cache Storage', async () => {
     const caches = await remote.cacheStorageOrigin.findMany({ where: { userId: DEV_USER_ID } });
-    return upsertById(local.cacheStorageOrigin, caches);
+    return syncCacheStorageOrigins(local.cacheStorageOrigin, caches);
   });
 }
 
@@ -231,13 +229,16 @@ async function syncBrowserCredentials(): Promise<void> {
   // ── Browser Passwords ──
   await syncTable('Browser Passwords', async () => {
     const passwords = await remote.browserPassword.findMany({ where: { userId: DEV_USER_ID } });
-    return upsertById(local.browserPassword, passwords);
+    return syncBrowserPasswords(local.browserPassword, passwords);
   });
 
-  // ── Passkey Credentials ──
-  await syncTable('Passkey Credentials', async () => {
-    return syncPasskeyCredentials(remote.passkeyCredential, local.passkeyCredential, DEV_USER_ID);
-  });
+  await syncPasskeys();
+}
+
+async function syncPasskeys(): Promise<void> {
+  await syncTable('Passkey Credentials', async () =>
+    syncPasskeyCredentials(remote.passkeyCredential, local.passkeyCredential, DEV_USER_ID)
+  );
 }
 
 async function syncBrowserAuthForCurrentMode(): Promise<void> {
@@ -262,6 +263,12 @@ async function sync() {
   if (COMPUTE_TOKENS_ONLY) {
     await syncComputeTokensWithRetries();
     console.log('\n🔄 Compute token sync complete.');
+    return;
+  }
+
+  if (PASSKEYS_ONLY) {
+    await syncPasskeys();
+    console.log('\n🔄 Passkey sync complete.');
     return;
   }
 

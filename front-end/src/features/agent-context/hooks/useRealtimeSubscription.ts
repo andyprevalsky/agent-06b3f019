@@ -137,6 +137,19 @@ export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
       try {
         const channel = await subscribeToAgent(selectedAgentId, {
           onInsert: (data: InsertMessagePayload) => {
+            const metadata = data.metadata;
+            if (
+              data.agentId === selectedAgentId &&
+              metadata?.toolName === 'cloud_agent' &&
+              metadata.toolStatus === 'IN_PROGRESS' &&
+              (metadata.startPhase === 'plan' || metadata.startPhase === 'execute')
+            ) {
+              // The router has committed to agent mode and the backend starts
+              // Temporal immediately after persisting this message. Transition
+              // from chat now; AGENT_MODE_STARTED remains the confirmation and
+              // reconnect fallback if this insert was missed.
+              setIsChatMode(false);
+            }
             handleInsertMessage(data, selectedAgentId, {
               setStreamingBubbles,
               setStreamingPlan,

@@ -7,6 +7,7 @@ import { createLogger } from '../logger';
 import { cacheGet, cacheSet } from '../fastCacheStore';
 import { goalHash } from '../fastCacheNormalizeCore';
 import { webSearchKey } from '../fastCacheNormalizeKeys';
+import { runCacheWriteInBackground } from './backgroundCacheWrite';
 
 const log = createLogger('WebSearch');
 
@@ -92,18 +93,20 @@ export async function executeWebSearch(
     // eslint-disable-next-line no-restricted-syntax -- retry is interleaved with per-attempt HTTP status branching and response parsing
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const response = await fetch('https://api.parallel.ai/v1beta/search', {
+        const response = await fetch('https://api.parallel.ai/v1/search', {
           method: 'POST',
           headers: {
             'x-api-key': apiKey,
-            'parallel-beta': 'search-extract-2025-10-10',
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
+            mode: 'turbo',
             objective: query,
             search_queries: [query],
-            max_results: 10,
-            excerpts: { max_chars_per_result: 6000 },
+            advanced_settings: {
+              max_results: 10,
+              excerpt_settings: { max_chars_per_result: 6000 },
+            },
           }),
         });
 
@@ -168,19 +171,21 @@ export async function executeWebSearch(
     };
 
     if (cacheKey !== null && fastModeGoal && fastModeWriteEnabled) {
-      await cacheSet({
-        key: cacheKey,
-        kind: 'web_search',
-        goalHash: goalHash(fastModeGoal),
-        value: result,
-      })
-        .then(() => log.info('fast_cache.chat_web_search_stored', { key: cacheKey }))
-        .catch((error) =>
+      runCacheWriteInBackground(
+        () =>
+          cacheSet({
+            key: cacheKey,
+            kind: 'web_search',
+            goalHash: goalHash(fastModeGoal),
+            value: result,
+          }),
+        () => log.info('fast_cache.chat_web_search_stored', { key: cacheKey }),
+        (error) =>
           log.warn('fast_cache.chat_web_search_store_failed', {
             key: cacheKey,
             error: error instanceof Error ? error.message : String(error),
           })
-        );
+      );
     }
 
     return result;
