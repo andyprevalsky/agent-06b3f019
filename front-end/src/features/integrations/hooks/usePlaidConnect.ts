@@ -36,12 +36,7 @@ import { PLAID_OAUTH_CONTEXT_STORAGE_KEY, PLAID_OAUTH_LINK_TOKEN_STORAGE_KEY } f
 import type { PlaidItem } from '../types';
 
 type ConnectState =
-  | 'idle'
-  | 'fetching_link_token'
-  | 'link_open'
-  | 'exchanging'
-  | 'disconnecting'
-  | 'error';
+  'idle' | 'fetching_link_token' | 'link_open' | 'exchanging' | 'disconnecting' | 'error';
 
 interface UsePlaidConnectOptions {
   onConnected?: (item: PlaidItem) => void;

@@ -32,7 +32,7 @@
     "harbor:install": "echo 'Harbor installation: Install uv first (https://docs.astral.sh/uv/), then run: uv tool install harbor'",
     "harbor:check": "harbor --version || python3 -m harbor --version",
     "format": "prettier --write",
-    "format:check": "prettier --check",
+    "format:check": "prettier --check 'src/**/*.ts'",
     "lint": "eslint",
     "lint:fix": "eslint --fix",
     "map-domains": "tsx scripts/map-domains.ts",

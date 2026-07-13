@@ -23,12 +23,7 @@ import { completePlaidUpdateModeApi, exchangePlaidPublicTokenApi } from '../api'
 import { PLAID_OAUTH_CONTEXT_STORAGE_KEY, PLAID_OAUTH_LINK_TOKEN_STORAGE_KEY } from '../config';
 
 export type PlaidOAuthResumeState =
-  | 'reading_token'
-  | 'ready'
-  | 'exchanging'
-  | 'done'
-  | 'error_no_token'
-  | 'error_link';
+  'reading_token' | 'ready' | 'exchanging' | 'done' | 'error_no_token' | 'error_link';
 
 type PlaidOAuthContext =
   | { mode: 'create' }

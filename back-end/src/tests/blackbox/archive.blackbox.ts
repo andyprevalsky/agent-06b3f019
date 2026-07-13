@@ -9,6 +9,7 @@ import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
 import {
   collectFixture,
+  collectFixtureSnapshot,
   restoreFixture,
   type ScopedDbFixture,
 } from '../../domains/archive/fixture';
@@ -234,6 +235,51 @@ async function testFixtureScopeAndRestore(): Promise<void> {
     );
     assert(otherPerson !== null, 'restore must not delete unrelated user rows');
   } finally {
+    await cleanup(seed);
+  }
+}
+
+async function testStartFixtureSnapshotExcludesPostReadyWrites(): Promise<void> {
+  const seed = await seedRun();
+  const postReadyChildId = randomUUID();
+  const postReadyMessageId = randomUUID();
+  try {
+    const fixture = await collectFixtureSnapshot(seed.rootAgentId, 'start', async () => {
+      await prisma.agent.create({
+        data: {
+          id: postReadyChildId,
+          userId: seed.userId,
+          goal: 'created after snapshot readiness',
+          model: 'rose-labs/rose-1-lite',
+          status: 'COMPLETED',
+          parentAgentId: seed.rootAgentId,
+          busId: seed.rootAgentId,
+          depth: 1,
+        },
+      });
+      await prisma.message.create({
+        data: {
+          id: postReadyMessageId,
+          agentId: seed.rootAgentId,
+          text: 'created after snapshot readiness',
+          role: 'ASSISTANT',
+        },
+      });
+    });
+
+    assert(
+      !ids(fixture.rows.Agent).includes(postReadyChildId),
+      'repeatable-read fixture must exclude an agent created after snapshot readiness'
+    );
+    assert(
+      !ids(fixture.rows.Message).includes(postReadyMessageId),
+      'repeatable-read fixture must exclude a message created after snapshot readiness'
+    );
+    assert(ids(fixture.rows.Agent).includes(seed.rootAgentId));
+    assert(ids(fixture.rows.Message).includes(seed.messageId));
+  } finally {
+    await prisma.message.deleteMany({ where: { id: postReadyMessageId } });
+    await prisma.agent.deleteMany({ where: { id: postReadyChildId } });
     await cleanup(seed);
   }
 }
@@ -465,6 +511,10 @@ async function testEmailProviderBoundaryArchivedWithAgentCorrelation(): Promise<
 async function runAll(): Promise<void> {
   const tests = [
     { name: 'fixture scope and restore replacement', fn: testFixtureScopeAndRestore },
+    {
+      name: 'start fixture snapshot excludes post-ready writes',
+      fn: testStartFixtureSnapshotExcludesPostReadyWrites,
+    },
     {
       name: 'archive endpoints write fixture and manifest',
       fn: testArchiveEndpointsWriteFixtureAndManifest,

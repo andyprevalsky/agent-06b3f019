@@ -5,7 +5,12 @@
  * Uses structured output with separate reasoning (thinking) and response (true message) fields.
  */
 
-import { createStreamingCompletion, markCacheable } from '../rose';
+import {
+  createStreamingCompletion,
+  markCacheable,
+  type CompletionMessage,
+  type CompletionOptions,
+} from '../rose';
 import { StructuredOutputAccumulator } from '../rose/structuredOutput';
 import { agentFastMode, cacheGet, cacheSet } from '../fastCacheStore';
 import { goalHash } from '../fastCacheNormalizeCore';
@@ -15,6 +20,12 @@ import { broadcastAssistantStream, generateStreamId } from './supabaseBroadcast'
 import { downloadFromStorage } from '../storage';
 import { createLogger } from '../logger';
 import type { ChatLlmUsage } from './routerLlm';
+import type { ChatProviderRoute } from './phaseModels';
+import { runAfterStreamCommit, type TransactionalStreamGate } from './earlyDirectGenerator';
+import {
+  createGeneratorAttentionLifecycle,
+  type GeneratorAttentionLifecycle,
+} from './generatorAttentionStream';
 import { isCloudAgentLifecycleTool } from './cloudAgentLifecycleTool';
 import { userFacingTextDescription } from '../userFacingWritingPrompt';
 
@@ -177,6 +188,7 @@ export interface GeneratorResponse {
   reasoning: string;
   response: string;
   streamId: string;
+  toolCallId: string;
   usage: ChatLlmUsage;
 }
 
@@ -266,10 +278,10 @@ function extractPartialStringField(json: string, fieldName: string): string | nu
 }
 
 // ============================================
-// Extract streamable text from partial JSON (like agent worker)
-// Combines reasoning + response fields as they stream
+// Extract reasoning only. Final-answer response text streams through the keyed
+// ATTENTION_STREAM lifecycle instead of the thinking bubble.
 // ============================================
-function extractStreamableText(
+function extractStreamableReasoning(
   accumulatedReasoning: string,
   accumulatedJson: string
 ): string | null {
@@ -289,27 +301,63 @@ function extractStreamableText(
     }
   }
 
-  // Try to extract the response field
-  const response = extractPartialStringField(accumulatedJson, 'response');
-  if (response && response.trim()) {
-    parts.push(response.trim());
-  }
-
   return parts.length > 0 ? parts.join('\n\n') : null;
 }
 
 // ============================================
 // Generator LLM Call with Streaming
 // ============================================
-export async function callGeneratorLlm(params: {
+export function buildGeneratorCompletionOptions(params: {
+  model: string;
+  messages: CompletionMessage[];
+  providerRoute: ChatProviderRoute;
+  providerFastMode: boolean;
+  abortSignal?: AbortSignal;
+}): CompletionOptions {
+  return {
+    model: params.model,
+    messages: params.messages,
+    temperature: 0.7,
+    response_format: {
+      type: 'json_schema',
+      json_schema: {
+        name: 'generator_response',
+        strict: true,
+        schema: GENERATOR_JSON_SCHEMA,
+      },
+    },
+    provider_fast_mode: params.providerFastMode,
+    provider_route: params.providerRoute,
+    abort_signal: params.abortSignal,
+  };
+}
+
+type GeneratorLlmParams = {
   agentId: string;
   messages: ChatMessage[];
   model: string;
-  claudeToken: string | null;
-  gptToken?: string | null;
-  gptAccountId?: string;
-  disableWaterfall?: boolean;
-}): Promise<GeneratorResponse> {
+  providerRoute: ChatProviderRoute;
+  abortSignal?: AbortSignal;
+  streamGate?: TransactionalStreamGate;
+};
+
+export async function callGeneratorLlm(params: GeneratorLlmParams): Promise<GeneratorResponse> {
+  const attention = createGeneratorAttentionLifecycle({
+    agentId: params.agentId,
+    streamGate: params.streamGate,
+  });
+  try {
+    return await callGeneratorLlmCore(params, attention);
+  } catch (error) {
+    await attention.cancel();
+    throw error;
+  }
+}
+
+async function callGeneratorLlmCore(
+  params: GeneratorLlmParams,
+  attention: GeneratorAttentionLifecycle
+): Promise<GeneratorResponse> {
   const streamId = generateStreamId();
 
   // Convert messages to OpenAI format (with multimodal support).
@@ -388,7 +436,29 @@ export async function callGeneratorLlm(params: {
     });
   });
 
-  await broadcastAssistantStream(params.agentId, streamId, '', false, 0, false, false, startTime);
+  const emitAssistantStream = (
+    delta: string,
+    done: boolean,
+    sequence: number,
+    isClaude: boolean,
+    isGpt: boolean
+  ): Promise<void> => {
+    const delivery = (): Promise<void> =>
+      broadcastAssistantStream(
+        params.agentId,
+        streamId,
+        delta,
+        done,
+        sequence,
+        isClaude,
+        isGpt,
+        startTime
+      );
+    return params.streamGate ? params.streamGate.emit(delivery) : delivery();
+  };
+
+  await emitAssistantStream('', false, 0, false, false);
+  await attention.start();
 
   // Fast Mode: the chat path runs in-process (not through the Python Rose notch),
   // so it caches here. Content-keyed on the conversation so an identical re-ask
@@ -410,6 +480,7 @@ export async function callGeneratorLlm(params: {
         schema: GENERATOR_JSON_SCHEMA,
       },
       provider_fast_mode: providerFastMode,
+      provider_route: params.providerRoute,
       messages: openaiMessages,
     });
   }
@@ -433,30 +504,21 @@ export async function callGeneratorLlm(params: {
     };
   }
 
-  // Create streaming completion via Supabase completions endpoint (or replay).
+  // Create an in-process Rose stream (or replay Fast Mode cache).
   const stream =
     fcCachedJson !== null
       ? (syntheticChatStream(fcCachedJson) as unknown as Awaited<
           ReturnType<typeof createStreamingCompletion>
         >)
-      : await createStreamingCompletion({
-          model: params.model,
-          messages: openaiMessages,
-          temperature: 0.7,
-          response_format: {
-            type: 'json_schema',
-            json_schema: {
-              name: 'generator_response',
-              strict: true,
-              schema: GENERATOR_JSON_SCHEMA,
-            },
-          },
-          claude_token: params.claudeToken ?? undefined,
-          gpt_token: params.gptToken ?? undefined,
-          gpt_account_id: params.gptAccountId,
-          provider_fast_mode: providerFastMode,
-          disable_waterfall: params.disableWaterfall,
-        });
+      : await createStreamingCompletion(
+          buildGeneratorCompletionOptions({
+            model: params.model,
+            messages: openaiMessages,
+            providerRoute: params.providerRoute,
+            providerFastMode,
+            abortSignal: params.abortSignal,
+          })
+        );
 
   // isClaude = user's own Claude token was used ($0 cost, "-claude" suffix in actual_model)
   let isClaude = false;
@@ -488,117 +550,112 @@ export async function callGeneratorLlm(params: {
     | undefined;
 
   // Process stream chunks - stream every delta immediately
-  for await (const chunk of stream) {
-    chunkCount++;
+  try {
+    for await (const chunk of stream) {
+      chunkCount++;
 
-    // Detect user's Claude token usage from "-claude" suffix in actual_model
-    if (chunk.actual_model) actualModel = chunk.actual_model;
-    if (chunk.usage)
-      usageData = { ...chunk.usage, finish_reason: chunk.choices[0]?.finish_reason ?? undefined };
-    if (!isClaude && actualModel?.endsWith('-claude')) {
-      isClaude = true;
-    }
-    if (!isGpt && actualModel?.endsWith('-gpt')) {
-      isGpt = true;
-    }
+      // Detect user's Claude token usage from "-claude" suffix in actual_model
+      if (chunk.actual_model) actualModel = chunk.actual_model;
+      if (chunk.usage)
+        usageData = { ...chunk.usage, finish_reason: chunk.choices[0]?.finish_reason ?? undefined };
+      if (!isClaude && actualModel?.endsWith('-claude')) {
+        isClaude = true;
+      }
+      if (!isGpt && actualModel?.endsWith('-gpt')) {
+        isGpt = true;
+      }
 
-    // Get delta from chunk
-    const delta = chunk.choices[0]?.delta;
+      // Get delta from chunk
+      const delta = chunk.choices[0]?.delta;
 
-    // Handle reasoning from thinking models (delta.reasoning)
-    const reasoningDelta = delta?.reasoning || '';
-    if (reasoningDelta) {
-      accumulatedReasoning += reasoningDelta;
-    }
+      // Handle reasoning from thinking models (delta.reasoning)
+      const reasoningDelta = delta?.reasoning || '';
+      if (reasoningDelta) {
+        accumulatedReasoning += reasoningDelta;
+      }
 
-    // Handle JSON content (delta.content)
-    const contentDelta = delta?.content || '';
-    if (contentDelta) {
-      structuredOutput.addCompletionChunk(chunk);
-      accumulatedJson = structuredOutput.currentText();
-    }
+      // Handle JSON content (delta.content)
+      const contentDelta = delta?.content || '';
+      if (contentDelta) {
+        structuredOutput.addCompletionChunk(chunk);
+        accumulatedJson = structuredOutput.currentText();
+      }
 
-    // Extract streamable text (combines reasoning + response fields)
-    const streamableText = extractStreamableText(accumulatedReasoning, accumulatedJson);
+      const streamableText = extractStreamableReasoning(accumulatedReasoning, accumulatedJson);
 
-    if (streamableText && streamableText !== lastStreamedText) {
-      const newText = streamableText.slice(lastStreamedText.length);
-      lastStreamedText = streamableText;
+      if (streamableText && streamableText !== lastStreamedText) {
+        const newText = streamableText.slice(lastStreamedText.length);
+        lastStreamedText = streamableText;
 
-      // Stream every delta immediately
-      if (newText) {
-        await broadcastAssistantStream(
-          params.agentId,
-          streamId,
-          newText,
-          false,
-          sequence++,
-          isClaude,
-          isGpt,
-          startTime
-        );
+        // Stream every delta immediately
+        if (newText) {
+          await emitAssistantStream(newText, false, sequence++, isClaude, isGpt);
+        }
+      }
+
+      const accumulatedResponse = extractPartialStringField(accumulatedJson, 'response');
+      if (accumulatedResponse) await attention.update(accumulatedResponse);
+
+      if (chunk.usage) {
+        usage.prompt_tokens = chunk.usage.prompt_tokens ?? 0;
+        usage.completion_tokens = chunk.usage.completion_tokens ?? 0;
+        usage.total_tokens = chunk.usage.total_tokens ?? 0;
+        usage.cache_creation_input_tokens = chunk.usage.cache_creation_input_tokens ?? 0;
+        usage.cache_read_input_tokens = chunk.usage.cache_read_input_tokens ?? 0;
+      }
+
+      // Log progress every 50 chunks
+      if (chunkCount % 50 === 0) {
+        log.info('[GeneratorLLM] Progress', {
+          chunk: chunkCount,
+          reasoning: accumulatedReasoning.length,
+          json: accumulatedJson.length,
+          streamed: sequence,
+        });
       }
     }
-
-    if (chunk.usage) {
-      usage.prompt_tokens = chunk.usage.prompt_tokens ?? 0;
-      usage.completion_tokens = chunk.usage.completion_tokens ?? 0;
-      usage.total_tokens = chunk.usage.total_tokens ?? 0;
-      usage.cache_creation_input_tokens = chunk.usage.cache_creation_input_tokens ?? 0;
-      usage.cache_read_input_tokens = chunk.usage.cache_read_input_tokens ?? 0;
-    }
-
-    // Log progress every 50 chunks
-    if (chunkCount % 50 === 0) {
-      log.info('[GeneratorLLM] Progress', {
-        chunk: chunkCount,
-        reasoning: accumulatedReasoning.length,
-        json: accumulatedJson.length,
-        streamed: sequence,
-      });
-    }
+  } catch (error) {
+    await attention.cancel();
+    throw error;
   }
 
   // Combine for parsing - use accumulatedJson for JSON parsing
   const fullJson = structuredOutput.finalText();
 
   // Fast Mode: record the generator response so an identical re-ask replays it.
-  if (
-    fcKey &&
-    fcCachedJson === null &&
-    fullJson !== '' &&
-    fastMode.goal !== null &&
-    fastModeWrite
-  ) {
-    await cacheSet({
-      key: fcKey,
-      kind: 'llm',
-      goalHash: goalHash(fastMode.goal),
-      value: { json: fullJson },
-    })
-      .then(() =>
-        log.info('fast_cache.chat_generator_stored', { agentId: params.agentId, key: fcKey })
-      )
-      .catch((error) =>
-        log.warn('fast_cache.chat_generator_store_failed', {
-          agentId: params.agentId,
-          key: fcKey,
-          error: error instanceof Error ? error.message : String(error),
-        })
-      );
+  const committed = await runAfterStreamCommit(params.streamGate, async () => {
+    if (
+      fcKey &&
+      fcCachedJson === null &&
+      fullJson !== '' &&
+      fastMode.goal !== null &&
+      fastModeWrite
+    ) {
+      await cacheSet({
+        key: fcKey,
+        kind: 'llm',
+        goalHash: goalHash(fastMode.goal),
+        value: { json: fullJson },
+      })
+        .then(() =>
+          log.info('fast_cache.chat_generator_stored', { agentId: params.agentId, key: fcKey })
+        )
+        .catch((error) =>
+          log.warn('fast_cache.chat_generator_store_failed', {
+            agentId: params.agentId,
+            key: fcKey,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        );
+    }
+  });
+  if (!committed) {
+    await attention.cancel();
+    throw new Error('Early generator result discarded before Router commit');
   }
 
   // Broadcast final "done" signal
-  await broadcastAssistantStream(
-    params.agentId,
-    streamId,
-    '',
-    true,
-    sequence,
-    isClaude,
-    isGpt,
-    startTime
-  );
+  await emitAssistantStream('', true, sequence, isClaude, isGpt);
 
   const streamDuration = Date.now() - startTime;
   log.info('[GeneratorLLM] Streaming complete', {
@@ -638,6 +695,7 @@ export async function callGeneratorLlm(params: {
       agentId: params.agentId,
       streamId,
     });
+    await attention.cancel();
     throw new Error('Generator LLM returned no content');
   }
 
@@ -651,6 +709,7 @@ export async function callGeneratorLlm(params: {
       error: error instanceof Error ? error.message : String(error),
       jsonPreview: fullJson.substring(0, 500),
     });
+    await attention.cancel();
     throw new Error(`Failed to parse generator response as JSON: ${fullJson.substring(0, 200)}`);
   }
 
@@ -662,10 +721,13 @@ export async function callGeneratorLlm(params: {
     responseLength: parsed.response?.length || 0,
   });
 
+  await attention.complete(parsed.response || '');
+
   return {
     reasoning: parsed.reasoning || '',
     response: parsed.response || '',
     streamId,
+    toolCallId: attention.toolCallId,
     usage,
   };
 }

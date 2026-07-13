@@ -30,6 +30,8 @@ export interface StreamingAttention {
   tool_call_id: string;
   message: string;
   is_question: boolean;
+  sequence: number;
+  done: boolean;
   subAgentId?: string;
 }
 
@@ -71,9 +73,9 @@ export interface AgentContextValue {
   setAgent: React.Dispatch<React.SetStateAction<AgentDetail | null>>;
   selectedAgentId: string | null;
   setSelectedAgentId: (id: string | null) => void;
-  stagePendingAgentCreation?: (input: PendingAgentCreationInput) => void;
-  reconcilePendingAgentCreation?: (agentId: string) => Promise<void>;
-  rollbackPendingAgentCreation?: (agentId: string) => boolean;
+  stagePendingAgentCreation: (input: PendingAgentCreationInput) => void;
+  reconcilePendingAgentCreation: (agentId: string) => Promise<void>;
+  rollbackPendingAgentCreation: (agentId: string) => boolean;
 
   // Messages (history, not buffer - buffer is in MessageList)
   messages: Message[];

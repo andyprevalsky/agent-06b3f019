@@ -5,16 +5,18 @@
  * point, `createStreamingCompletion(options)`, that:
  *
  *   1. Resolves the pool from `options.model` (`rose-labs/rose-1-lite`, etc).
- *   2. Tries claudeAuth (direct Anthropic) when `options.claude_token` is set,
+ *   2. When explicitly selected, routes exclusively through either the pool's
+ *      OpenRouter waterfall or shared OpenAI priority, failing closed on config.
+ *   3. Tries claudeAuth (direct Anthropic) when `options.claude_token` is set,
  *      buffering the metadata chunk so a pre-content failure can fall through
  *      cleanly.
- *   3. Tries gptAuth (direct ChatGPT/Codex) when `options.gpt_token` is set,
+ *   4. Tries gptAuth (direct ChatGPT/Codex) when `options.gpt_token` is set,
  *      using the same pre-content fall-through contract.
- *   4. Tries the shared OpenAI API key path when configured.
- *   5. Tries the shared Anthropic API key path when configured.
- *   6. Falls through to the pool's OpenRouter waterfall on any typed
+ *   5. Tries the shared OpenAI API key path when configured.
+ *   6. Tries the shared Anthropic API key path when configured.
+ *   7. Falls through to the pool's OpenRouter waterfall on any typed
  *      RoseError before first content.
- *   5. Wraps the normalized RoseStreamChunk stream into the OpenAI-shaped
+ *   8. Wraps the normalized RoseStreamChunk stream into the OpenAI-shaped
  *      CompletionChunk DTO chat callers iterate.
  *
  * No top-level deadline / heartbeat — those are agent-side concerns
@@ -35,6 +37,7 @@ import { buildOpenAiResponseFormat } from './schema';
 import type { CompletionChunk, CompletionOptions, RoseStreamChunk } from './types';
 import { waterfallComplete } from './waterfall';
 import { dumpLlmContext, updateLlmDump } from '../llmDump';
+import { exclusiveOpenRouterWaterfall } from './openrouterRoute';
 
 const log = createLogger('Rose');
 
@@ -128,6 +131,7 @@ export async function createStreamingCompletion(
       response_format: normalizedOptions.response_format?.json_schema?.name,
       response_model: normalizedOptions.response_model?.name,
       temperature: normalizedOptions.temperature,
+      provider_route: normalizedOptions.provider_route,
     }),
   });
 
@@ -191,6 +195,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
           response_format: opts.options.response_format,
           tool_choice: opts.options.tool_choice,
           provider_fast_mode: opts.options.provider_fast_mode,
+          provider_route: opts.options.provider_route,
         },
         ...(opts.options.dump_context.config ?? {}),
       },
@@ -336,6 +341,81 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
       },
     });
   };
+
+  // Exclusive OpenRouter route used by the synchronous Chat Generator. It preserves
+  // the pool's ordered pre-content fallback and bypasses every OAuth/shared-key
+  // provider. Missing configuration fails closed before any provider call.
+  if (opts.options.provider_route === 'openrouter-waterfall') {
+    try {
+      yield* runWithFallThrough({
+        produce: () =>
+          exclusiveOpenRouterWaterfall({
+            poolSpec,
+            options: opts.options,
+            requestId: opts.requestId,
+            callSite: opts.callSite,
+          }),
+        emit: emitChunk,
+      });
+    } catch (error) {
+      const cause = error instanceof PreContentFallThroughError ? error.cause : error;
+      finalizeDump(cause);
+      throw cause;
+    }
+
+    log.info('openrouter_waterfall.done', {
+      request_id: opts.requestId,
+      pool: opts.pool,
+      elapsed_ms: Date.now() - startedAt,
+    });
+    finalizeDump();
+    return;
+  }
+
+  // Exclusive low-latency route used by the synchronous Chat Router. This
+  // branch precedes every user OAuth, shared Anthropic, and OpenRouter path.
+  if (opts.options.provider_route === 'shared-openai-priority') {
+    const sharedOpenAiKey = openAiApiKey();
+    if (!sharedOpenAiKey) {
+      const error = new Error('Rose shared-openai-priority route requires GPT_API_KEY');
+      finalizeDump(error);
+      throw error;
+    }
+
+    try {
+      yield* runWithFallThrough({
+        produce: () =>
+          openAiApiKeyComplete({
+            poolSpec,
+            model: poolSpec.gptAuthModel,
+            messages: opts.options.messages,
+            responseFormat: opts.options.response_format,
+            tools: opts.options.tools,
+            toolChoice: opts.options.tool_choice,
+            temperature: opts.options.temperature,
+            effort: opts.options.effort,
+            openAiKey: sharedOpenAiKey,
+            requestId: opts.requestId,
+            callSite: opts.callSite,
+            providerFastMode: true,
+            abortSignal: opts.options.abort_signal,
+          }),
+        emit: emitChunk,
+      });
+    } catch (error) {
+      const cause = error instanceof PreContentFallThroughError ? error.cause : error;
+      finalizeDump(cause);
+      throw cause;
+    }
+
+    log.info('shared_openai_priority.done', {
+      request_id: opts.requestId,
+      pool: opts.pool,
+      elapsed_ms: Date.now() - startedAt,
+    });
+    finalizeDump();
+    return;
+  }
 
   // 1. claudeAuth attempt (with fall-through buffering)
   let claudeAuthFailed: RoseError | null = null;

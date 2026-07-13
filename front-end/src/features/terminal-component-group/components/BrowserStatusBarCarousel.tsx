@@ -17,6 +17,7 @@
 
 import { memo, useState, useCallback, useEffect } from 'react';
 import { ChevronUp, ChevronDown } from 'lucide-react';
+import { getQueryParams } from '@/lib/url';
 import BrowserStatusBar from './BrowserStatusBar';
 
 interface BrowserSession {
@@ -109,7 +110,7 @@ function BrowserStatusBarCarouselImpl({ browsers }: BrowserStatusBarCarouselProp
   }, [browsers.length, activeIndex]);
 
   useEffect(() => {
-    const browserId = new URLSearchParams(window.location.search).get('browser-id');
+    const browserId = getQueryParams().get('browser-id');
     if (!browserId) return;
     const idx = browsers.findIndex((browser) => browser.taskId === browserId);
     if (idx >= 0) setActiveIndex(idx);
@@ -175,7 +176,7 @@ export default BrowserStatusBarCarousel;
 
 function findInitialBrowserIndex(browsers: BrowserSession[]): number {
   if (typeof window === 'undefined') return 0;
-  const browserId = new URLSearchParams(window.location.search).get('browser-id');
+  const browserId = getQueryParams().get('browser-id');
   if (!browserId) return 0;
   const idx = browsers.findIndex((browser) => browser.taskId === browserId);
   return idx >= 0 ? idx : 0;

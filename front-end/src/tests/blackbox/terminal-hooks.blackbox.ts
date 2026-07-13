@@ -10,6 +10,10 @@ import { renderHook, act, waitFor } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { clearCaptures, capturedRequests } from './msw/capture';
+import {
+  makeTerminalHookAgent as makeAgent,
+  mockTerminalHookSession as mockSession,
+} from './terminal-hooks.fixtures';
 
 // Mock composed sub-hooks of useTerminalAgents so we don't need the whole
 // AgentProvider / realtime subscription infra. We still exercise the
@@ -27,14 +31,14 @@ const authState = {
   signOut: vi.fn(async () => {}),
 };
 const ctxState = {
-  agent: null as any,
+  agent: null as never,
   selectedAgentId: null as string | null,
   messages: [],
   streamingBubbles: new Map(),
   streamingPlan: null,
   streamingAttention: null,
   streamingTools: new Map(),
-  streamedTextsRef: { current: new Set<string>() } as any,
+  streamedTextsRef: { current: new Set<string>() } as never,
   setAgent: vi.fn(),
   setSelectedAgentId: vi.fn(),
   stagePendingAgentCreation: vi.fn(),
@@ -62,63 +66,13 @@ vi.mock('@/lib/supabase', async (importOriginal) => {
   };
 });
 
-// eslint-disable-next-line import/first
 import { useAgentActions } from '@/features/terminal/hooks/useAgentActions';
-// eslint-disable-next-line import/first
 import { useMessageSending } from '@/features/terminal/hooks/useMessageSending';
-// eslint-disable-next-line import/first
 import { useTerminalAgents } from '@/features/terminal/hooks/useTerminalAgents';
-// eslint-disable-next-line import/first
 import { dispatchQuickQueryEvent } from '@/lib/quickQuery';
-// eslint-disable-next-line import/first
 import { signOut } from '@/lib/supabase';
 
 const API_BASE = 'http://localhost:3001/api';
-
-function mockSession() {
-  const session = {
-    access_token: 'test-token',
-    refresh_token: 'test-refresh',
-    expires_in: 3600,
-    expires_at: Math.floor(Date.now() / 1000) + 3600,
-    token_type: 'bearer',
-    user: { id: 'test-user', is_anonymous: false },
-  };
-  localStorage.setItem('rose-session', JSON.stringify(session));
-  localStorage.setItem('app-user', JSON.stringify({ id: 'test-user', is_anonymous: false }));
-}
-
-function makeAgent(overrides: Partial<any> = {}) {
-  return {
-    agent_id: 'agent-001',
-    goal: 'test goal',
-    model: 'rose-1-lite',
-    source: 'WEB',
-    reasoning_effort: 'medium',
-    progress: 0.5,
-    status: 'ACTIVE',
-    status_message: null,
-    temporal_workflow_id: 'wf-001',
-    token_count: 10,
-    tokens_in: 5,
-    tokens_out: 5,
-    tool_tokens_in: 0,
-    tool_tokens_out: 0,
-    tool_cost_cents: 0,
-    context_size: 1000,
-    message_count: 2,
-    price_limit_cents: 500,
-    tree_cost_cents: 10,
-    created_at: '2026-01-01T00:00:00Z',
-    updated_at: '2026-01-01T00:00:01Z',
-    write_lock_enabled: false,
-    parent_agent_id: null,
-    parent_goal: null,
-    verifier: null,
-    tools: [],
-    ...overrides,
-  };
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // useAgentActions
@@ -133,7 +87,7 @@ describe('useAgentActions', () => {
     localStorage.clear();
   });
 
-  function defaultArgs(overrides: Partial<any> = {}) {
+  function defaultArgs(overrides: Record<string, unknown> = {}) {
     return {
       selectedAgentId: 'agent-001',
       agentDetail: makeAgent(),
@@ -150,7 +104,7 @@ describe('useAgentActions', () => {
 
   it('handleSelectAgent switches view + context on non-null agent', () => {
     const args = defaultArgs();
-    const { result } = renderHook(() => useAgentActions(args as any));
+    const { result } = renderHook(() => useAgentActions(args as never));
     act(() => {
       result.current.handleSelectAgent('agent-002');
     });
@@ -160,7 +114,7 @@ describe('useAgentActions', () => {
 
   it('handleSelectAgent(null) clears selected agent without changing view', () => {
     const args = defaultArgs();
-    const { result } = renderHook(() => useAgentActions(args as any));
+    const { result } = renderHook(() => useAgentActions(args as never));
     act(() => {
       result.current.handleSelectAgent(null);
     });
@@ -178,7 +132,7 @@ describe('useAgentActions', () => {
       ),
     );
     const args = defaultArgs();
-    const { result } = renderHook(() => useAgentActions(args as any));
+    const { result } = renderHook(() => useAgentActions(args as never));
     await act(async () => {
       await result.current.refreshAgentDetail('agent-001');
     });
@@ -193,7 +147,7 @@ describe('useAgentActions', () => {
     );
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const args = defaultArgs();
-    const { result } = renderHook(() => useAgentActions(args as any));
+    const { result } = renderHook(() => useAgentActions(args as never));
     await act(async () => {
       await result.current.refreshAgentDetail('agent-001');
     });
@@ -208,9 +162,9 @@ describe('useAgentActions', () => {
       ),
     );
     const args = defaultArgs();
-    const { result } = renderHook(() => useAgentActions(args as any));
+    const { result } = renderHook(() => useAgentActions(args as never));
     await act(async () => {
-      await result.current.handleCreateAgent({ goal: 'new goal' } as any);
+      await result.current.handleCreateAgent({ goal: 'new goal' } as never);
     });
     expect(args.loadAgents).toHaveBeenCalled();
     expect(args.setCurrentView).toHaveBeenCalledWith('agents');
@@ -229,7 +183,7 @@ describe('useAgentActions', () => {
       ),
     );
     const args = defaultArgs();
-    const { result } = renderHook(() => useAgentActions(args as any));
+    const { result } = renderHook(() => useAgentActions(args as never));
     await act(async () => {
       await result.current.handleResumeAgent('agent-001');
     });
@@ -245,7 +199,7 @@ describe('useAgentActions', () => {
       ),
     );
     const args = defaultArgs();
-    const { result } = renderHook(() => useAgentActions(args as any));
+    const { result } = renderHook(() => useAgentActions(args as never));
     await act(async () => {
       await result.current.handleResumeAgent('agent-001');
     });
@@ -255,7 +209,7 @@ describe('useAgentActions', () => {
 
   it('handlePauseAgent no-op when no agent selected', async () => {
     const args = defaultArgs({ selectedAgentId: null, agentDetail: null });
-    const { result } = renderHook(() => useAgentActions(args as any));
+    const { result } = renderHook(() => useAgentActions(args as never));
     await act(async () => {
       await result.current.handlePauseAgent();
     });
@@ -274,7 +228,7 @@ describe('useAgentActions', () => {
       ),
     );
     const args = defaultArgs();
-    const { result } = renderHook(() => useAgentActions(args as any));
+    const { result } = renderHook(() => useAgentActions(args as never));
     await act(async () => {
       await result.current.handlePauseAgent();
     });
@@ -287,7 +241,7 @@ describe('useAgentActions', () => {
       http.post(`${API_BASE}/agents/:agentId/pause`, () => new HttpResponse(null, { status: 500 })),
     );
     const args = defaultArgs();
-    const { result } = renderHook(() => useAgentActions(args as any));
+    const { result } = renderHook(() => useAgentActions(args as never));
     await act(async () => {
       await result.current.handlePauseAgent();
     });
@@ -296,9 +250,9 @@ describe('useAgentActions', () => {
 
   it('handleSubmitFeedback noops when no agentDetail', async () => {
     const args = defaultArgs({ agentDetail: null });
-    const { result } = renderHook(() => useAgentActions(args as any));
+    const { result } = renderHook(() => useAgentActions(args as never));
     await act(async () => {
-      await result.current.handleSubmitFeedback({ rating: 1 } as any);
+      await result.current.handleSubmitFeedback({ rating: 1 } as never);
     });
     // No API hit
     const posts = capturedRequests.filter((r) => r.method === 'POST');
@@ -311,9 +265,9 @@ describe('useAgentActions', () => {
     );
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const args = defaultArgs();
-    const { result } = renderHook(() => useAgentActions(args as any));
+    const { result } = renderHook(() => useAgentActions(args as never));
     await act(async () => {
-      await result.current.handleSubmitFeedback({ rating: 1 } as any);
+      await result.current.handleSubmitFeedback({ rating: 1 } as never);
     });
     expect(warnSpy).toHaveBeenCalled();
     warnSpy.mockRestore();
@@ -331,11 +285,11 @@ describe('useAgentActions', () => {
       ),
     );
     const args = defaultArgs();
-    const { result } = renderHook(() => useAgentActions(args as any));
+    const { result } = renderHook(() => useAgentActions(args as never));
     let thrown: unknown = null;
     await act(async () => {
       try {
-        await result.current.handleSubmitFeedback({ rating: 1 } as any);
+        await result.current.handleSubmitFeedback({ rating: 1 } as never);
       } catch (err) {
         thrown = err;
       }
@@ -357,13 +311,14 @@ describe('useMessageSending', () => {
     localStorage.clear();
   });
 
-  function defaultArgs(overrides: Partial<any> = {}) {
+  function defaultArgs(overrides: Record<string, unknown> = {}) {
     return {
       selectedAgentId: null,
       agentDetail: null,
       canSubmitGoals: true,
       isFullySignedIn: true,
       clientSource: 'WEB',
+      setSelectedAgentIdContext: vi.fn(),
       setCurrentView: vi.fn(),
       setLoginModalOpen: vi.fn(),
       setIsLoadingNetwork: vi.fn(),
@@ -376,7 +331,7 @@ describe('useMessageSending', () => {
   }
 
   it('initial state: empty input + default model', () => {
-    const { result } = renderHook(() => useMessageSending(defaultArgs() as any));
+    const { result } = renderHook(() => useMessageSending(defaultArgs() as never));
     expect(result.current.messageInput).toBe('');
     expect(result.current.selectedModel).toBeTruthy();
     expect(result.current.isSendingMessage).toBe(false);
@@ -384,14 +339,14 @@ describe('useMessageSending', () => {
 
   it('sets messageInput from localStorage prefill then clears it', () => {
     localStorage.setItem('onboarding_prefill_query', 'hello world');
-    const { result } = renderHook(() => useMessageSending(defaultArgs() as any));
+    const { result } = renderHook(() => useMessageSending(defaultArgs() as never));
     expect(result.current.messageInput).toBe('hello world');
     expect(localStorage.getItem('onboarding_prefill_query')).toBeNull();
   });
 
   it('handleSendMessage with empty input is a no-op', async () => {
     const args = defaultArgs();
-    const { result } = renderHook(() => useMessageSending(args as any));
+    const { result } = renderHook(() => useMessageSending(args as never));
     await act(async () => {
       await result.current.handleSendMessage();
     });
@@ -400,7 +355,7 @@ describe('useMessageSending', () => {
 
   it('handleSendMessage without auth opens login modal', async () => {
     const args = defaultArgs({ canSubmitGoals: false });
-    const { result } = renderHook(() => useMessageSending(args as any));
+    const { result } = renderHook(() => useMessageSending(args as never));
     act(() => result.current.setMessageInput('go'));
     await act(async () => {
       await result.current.handleSendMessage();
@@ -416,7 +371,7 @@ describe('useMessageSending', () => {
       }),
     );
     const args = defaultArgs();
-    const { result } = renderHook(() => useMessageSending(args as any));
+    const { result } = renderHook(() => useMessageSending(args as never));
     act(() => result.current.setMessageInput('goal X'));
     await act(async () => {
       await result.current.handleSendMessage();
@@ -424,6 +379,7 @@ describe('useMessageSending', () => {
     expect(args.loadAgents).toHaveBeenCalled();
     expect(args.stagePendingAgentCreation).toHaveBeenCalled();
     expect(args.reconcilePendingAgentCreation).toHaveBeenCalled();
+    expect(args.setSelectedAgentIdContext).not.toHaveBeenCalled();
     expect(args.setCurrentView).toHaveBeenCalledWith('agents');
   });
 
@@ -441,7 +397,7 @@ describe('useMessageSending', () => {
       ),
     );
     const args = defaultArgs({ selectedAgentId: 'agent-001', agentDetail: makeAgent() });
-    const { result } = renderHook(() => useMessageSending(args as any));
+    const { result } = renderHook(() => useMessageSending(args as never));
     act(() => result.current.setMessageInput('hello'));
     await act(async () => {
       await result.current.handleSendMessage();
@@ -469,7 +425,7 @@ describe('useMessageSending', () => {
       selectedAgentId: 'agent-001',
       agentDetail: makeAgent({ status: 'PAUSED' }),
     });
-    const { result } = renderHook(() => useMessageSending(args as any));
+    const { result } = renderHook(() => useMessageSending(args as never));
     act(() => result.current.setMessageInput('resume please'));
     await act(async () => {
       await result.current.handleSendMessage();
@@ -489,7 +445,7 @@ describe('useMessageSending', () => {
       ),
     );
     const args = defaultArgs();
-    const { result } = renderHook(() => useMessageSending(args as any));
+    const { result } = renderHook(() => useMessageSending(args as never));
     act(() => result.current.setMessageInput('hello'));
     await act(async () => {
       await result.current.handleSendMessage();
@@ -503,7 +459,7 @@ describe('useMessageSending', () => {
       http.post(`${API_BASE}/agents`, () => HttpResponse.json({ error: 'boom' }, { status: 500 })),
     );
     const args = defaultArgs();
-    const { result } = renderHook(() => useMessageSending(args as any));
+    const { result } = renderHook(() => useMessageSending(args as never));
     act(() => result.current.setMessageInput('hello'));
     await act(async () => {
       await result.current.handleSendMessage();
@@ -513,13 +469,13 @@ describe('useMessageSending', () => {
   });
 
   it('setPendingPriceLimitCents updates state', () => {
-    const { result } = renderHook(() => useMessageSending(defaultArgs() as any));
+    const { result } = renderHook(() => useMessageSending(defaultArgs() as never));
     act(() => result.current.setPendingPriceLimitCents(9999));
     expect(result.current.pendingPriceLimitCents).toBe(9999);
   });
 
   it('setSelectedModel updates state and syncs from agentDetail on change', () => {
-    const { rerender, result } = renderHook(({ args }) => useMessageSending(args as any), {
+    const { rerender, result } = renderHook(({ args }) => useMessageSending(args as never), {
       initialProps: { args: defaultArgs() },
     });
     act(() => result.current.setSelectedModel('custom'));
@@ -545,7 +501,7 @@ describe('useTerminalAgents', () => {
     resetAnimationState.mockReset();
     ctxState.agent = null;
     ctxState.selectedAgentId = null;
-    (ctxState.setSelectedAgentId as any).mockReset();
+    (ctxState.setSelectedAgentId as never).mockReset();
     authState.isAuthenticated = true;
     authState.isAnonymous = false;
     authState.isFullySignedIn = true;
@@ -563,7 +519,7 @@ describe('useTerminalAgents', () => {
 
   it('returns composed state with empty defaults', () => {
     const { result, unmount } = renderHook(() =>
-      useTerminalAgents('agents' as any, setCurrentView, resetAnimationState),
+      useTerminalAgents('agents' as never, setCurrentView, resetAnimationState),
     );
     expect(result.current.agentDetail).toBeNull();
     expect(result.current.selectedAgentId).toBeNull();
@@ -576,7 +532,7 @@ describe('useTerminalAgents', () => {
     authState.isAnonymous = true;
     authState.isFullySignedIn = false;
     const { result, unmount } = renderHook(() =>
-      useTerminalAgents('agents' as any, setCurrentView, resetAnimationState),
+      useTerminalAgents('agents' as never, setCurrentView, resetAnimationState),
     );
     expect(result.current.canSubmitGoals).toBe(false);
     unmount();
@@ -592,7 +548,7 @@ describe('useTerminalAgents', () => {
       ),
     );
     const { result, unmount } = renderHook(() =>
-      useTerminalAgents('agents' as any, setCurrentView, resetAnimationState),
+      useTerminalAgents('agents' as never, setCurrentView, resetAnimationState),
     );
     await waitFor(() => expect(result.current.ancestors.length).toBeGreaterThan(0));
     unmount();
@@ -600,7 +556,7 @@ describe('useTerminalAgents', () => {
 
   it('handleCreateNewAgent clears selection and switches view', () => {
     const { result, unmount } = renderHook(() =>
-      useTerminalAgents('agents' as any, setCurrentView, resetAnimationState),
+      useTerminalAgents('agents' as never, setCurrentView, resetAnimationState),
     );
     act(() => result.current.handleCreateNewAgent());
     expect(ctxState.setSelectedAgentId).toHaveBeenCalledWith(null);
@@ -611,7 +567,7 @@ describe('useTerminalAgents', () => {
 
   it('handleLoginClick opens login modal', () => {
     const { result, unmount } = renderHook(() =>
-      useTerminalAgents('agents' as any, setCurrentView, resetAnimationState),
+      useTerminalAgents('agents' as never, setCurrentView, resetAnimationState),
     );
     act(() => result.current.handleLoginClick());
     expect(result.current.loginModalOpen).toBe(true);
@@ -620,7 +576,7 @@ describe('useTerminalAgents', () => {
 
   it('handleLogout calls signOut + refreshAuthState + clears state', async () => {
     const { result, unmount } = renderHook(() =>
-      useTerminalAgents('agents' as any, setCurrentView, resetAnimationState),
+      useTerminalAgents('agents' as never, setCurrentView, resetAnimationState),
     );
     await act(async () => {
       await result.current.handleLogout();
@@ -640,7 +596,7 @@ describe('useTerminalAgents', () => {
     );
 
     const { result, unmount } = renderHook(() =>
-      useTerminalAgents('agents' as any, setCurrentView, resetAnimationState),
+      useTerminalAgents('agents' as never, setCurrentView, resetAnimationState),
     );
 
     let logoutResolved = false;
@@ -665,7 +621,7 @@ describe('useTerminalAgents', () => {
     authState.isAuthenticated = false;
     authState.isFullySignedIn = false;
     const { result, unmount } = renderHook(() =>
-      useTerminalAgents('agents' as any, setCurrentView, resetAnimationState),
+      useTerminalAgents('agents' as never, setCurrentView, resetAnimationState),
     );
     act(() => {
       dispatchQuickQueryEvent({ query: 'hi there', submittedAt: Date.now() });
@@ -676,7 +632,7 @@ describe('useTerminalAgents', () => {
 
   it('quick-query event (empty query) is a no-op', () => {
     const { unmount } = renderHook(() =>
-      useTerminalAgents('agents' as any, setCurrentView, resetAnimationState),
+      useTerminalAgents('agents' as never, setCurrentView, resetAnimationState),
     );
     act(() => {
       dispatchQuickQueryEvent({ query: '   ', submittedAt: Date.now() });
@@ -689,7 +645,7 @@ describe('useTerminalAgents', () => {
 
   it('setCreateModalOpen toggles state', () => {
     const { result, unmount } = renderHook(() =>
-      useTerminalAgents('agents' as any, setCurrentView, resetAnimationState),
+      useTerminalAgents('agents' as never, setCurrentView, resetAnimationState),
     );
     act(() => result.current.setCreateModalOpen(true));
     expect(result.current.createModalOpen).toBe(true);
@@ -698,7 +654,7 @@ describe('useTerminalAgents', () => {
 
   it('setShowCreditModal + setShowCostLimitModal toggle state', () => {
     const { result, unmount } = renderHook(() =>
-      useTerminalAgents('agents' as any, setCurrentView, resetAnimationState),
+      useTerminalAgents('agents' as never, setCurrentView, resetAnimationState),
     );
     act(() => result.current.setShowCreditModal(true));
     expect(result.current.showCreditModal).toBe(true);
@@ -709,7 +665,7 @@ describe('useTerminalAgents', () => {
 
   it('cleanupAgentState resets selection and input', () => {
     const { result, unmount } = renderHook(() =>
-      useTerminalAgents('agents' as any, setCurrentView, resetAnimationState),
+      useTerminalAgents('agents' as never, setCurrentView, resetAnimationState),
     );
     act(() => {
       result.current.setMessageInput('hello');

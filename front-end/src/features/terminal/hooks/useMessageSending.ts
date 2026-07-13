@@ -18,6 +18,7 @@ import * as amplitude from '@amplitude/analytics-browser';
 import { useToast } from '@/hooks/use-toast';
 import { DEFAULT_FAST_MODE_USER_IDS, FAST_MODE_USER_IDS } from '@/lib/fastModeAccounts';
 import { SIMULATOR_USER_IDS } from '@/lib/simulatorAccounts';
+import { getItem, removeItem } from '@/lib/storage';
 
 import { DEFAULT_MODEL, DEFAULT_PRICE_LIMIT_CENTS } from '../config';
 import { createAgent, postMessage, resumeAgent, checkAndRespondToAttention } from '../api';
@@ -57,9 +58,9 @@ export function useMessageSending({
   const { toast } = useToast();
 
   const [messageInput, setMessageInput] = useState(() => {
-    const prefill = localStorage.getItem('onboarding_prefill_query');
+    const prefill = getItem('onboarding_prefill_query');
     if (prefill) {
-      localStorage.removeItem('onboarding_prefill_query');
+      removeItem('onboarding_prefill_query');
       return prefill;
     }
     return '';

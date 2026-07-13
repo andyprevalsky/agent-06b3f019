@@ -71,11 +71,8 @@ describe('app-wiring/hooks', () => {
   });
 
   afterEach(() => {
-    // eslint-disable-next-line no-console -- restoring spies
     console.log = originals.log;
-    // eslint-disable-next-line no-console -- restoring spies
     console.warn = originals.warn;
-    // eslint-disable-next-line no-console -- restoring spies
     console.error = originals.error;
     Object.defineProperty(navigator, 'userAgent', {
       value: originals.userAgent,
@@ -121,7 +118,6 @@ describe('app-wiring/hooks', () => {
 
     it('preserves original console output (forwards to original fn)', () => {
       const origSpy = vi.fn();
-      // eslint-disable-next-line no-console -- intentional override for test
       console.log = origSpy;
       initDevLogging();
       console.log('still works');

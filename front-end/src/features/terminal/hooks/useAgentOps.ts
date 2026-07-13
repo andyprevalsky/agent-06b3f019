@@ -59,9 +59,9 @@ export function useAgentOps({
     setLoginModalOpen,
     setIsLoadingNetwork: loading.setIsLoadingNetwork,
     loadAgents: agentList.loadAgents,
-    stagePendingAgentCreation: ctx.stagePendingAgentCreation!,
-    reconcilePendingAgentCreation: ctx.reconcilePendingAgentCreation!,
-    rollbackPendingAgentCreation: ctx.rollbackPendingAgentCreation!,
+    stagePendingAgentCreation: ctx.stagePendingAgentCreation,
+    reconcilePendingAgentCreation: ctx.reconcilePendingAgentCreation,
+    rollbackPendingAgentCreation: ctx.rollbackPendingAgentCreation,
   });
 
   return { actions, messaging };

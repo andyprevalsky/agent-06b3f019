@@ -1,13 +1,5 @@
 export type BrowserType =
-  | 'chrome'
-  | 'edge'
-  | 'brave'
-  | 'arc'
-  | 'opera'
-  | 'vivaldi'
-  | 'chromium'
-  | 'atlas'
-  | 'safari';
+  'chrome' | 'edge' | 'brave' | 'arc' | 'opera' | 'vivaldi' | 'chromium' | 'atlas' | 'safari';
 
 export interface BrowserInfo {
   type: BrowserType;

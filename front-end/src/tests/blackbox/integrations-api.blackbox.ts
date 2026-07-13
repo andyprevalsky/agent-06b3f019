@@ -268,7 +268,7 @@ describe('integrations/api', () => {
 
   describe('createLinkedInSyncAgentApi', () => {
     it('posts a LinkedIn sync goal to /api/agents and resolves on success', async () => {
-      let body: any = null;
+      let body: unknown = null;
       server.use(
         http.post(`${API_BASE}/agents`, async ({ request }) => {
           body = await request.json();

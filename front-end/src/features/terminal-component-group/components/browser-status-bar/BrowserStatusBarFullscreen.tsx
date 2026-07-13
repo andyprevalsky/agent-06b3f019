@@ -181,6 +181,57 @@ function BrowserFrameHeader({
   );
 }
 
+function FullscreenSidebar({
+  taskId,
+  outputSchema,
+  stepProgress,
+  isDisconnected,
+  isWaitingForAuthAssistance,
+  pendingWriteLockApproval,
+}: Pick<
+  FullscreenProps,
+  | 'taskId'
+  | 'outputSchema'
+  | 'stepProgress'
+  | 'isDisconnected'
+  | 'isWaitingForAuthAssistance'
+  | 'pendingWriteLockApproval'
+>) {
+  return (
+    <div
+      className="w-[min(320px,calc(100vw-60px))] h-full bg-muted/10 border-r border-border flex-shrink-0 flex flex-col overflow-hidden"
+      style={{ backdropFilter: 'blur(8px)', WebkitBackdropFilter: 'blur(8px)' }}
+    >
+      <div className="p-3 border-b border-border">
+        <div className="flex items-center justify-between">
+          <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+            Task progress
+          </h4>
+          <SchemaChip outputSchema={outputSchema} size="sm" tooltipPosition="top" />
+        </div>
+        {stepProgress && <StepProgressBar progress={stepProgress} />}
+      </div>
+      <div className="flex-1 overflow-y-auto overflow-x-hidden p-3">
+        <div className="pb-[80vh]">
+          <MessageList
+            subAgentId={taskId}
+            containerClassName="flex flex-col gap-1.5 overflow-x-hidden"
+            showStatusBanners={false}
+            showThinkingIndicator={!isDisconnected && !isWaitingForAuthAssistance}
+            compact
+          />
+        </div>
+      </div>
+      {pendingWriteLockApproval && (
+        <BrowserWriteLockApproval
+          attentionRequestId={pendingWriteLockApproval.attentionRequestId}
+          question={pendingWriteLockApproval.question}
+        />
+      )}
+    </div>
+  );
+}
+
 export function BrowserStatusBarFullscreen(props: FullscreenProps) {
   const {
     agentId,
@@ -200,41 +251,14 @@ export function BrowserStatusBarFullscreen(props: FullscreenProps) {
 
   return createPortal(
     <div className="fixed inset-0 z-50 bg-background flex flex-row">
-      <div
-        className="w-[min(320px,calc(100vw-60px))] h-full bg-muted/10 border-r border-border flex-shrink-0 flex flex-col overflow-hidden"
-        style={{ backdropFilter: 'blur(8px)', WebkitBackdropFilter: 'blur(8px)' }}
-      >
-        <div className="p-3 border-b border-border">
-          <div className="flex items-center justify-between">
-            <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-              Task progress
-            </h4>
-            <SchemaChip outputSchema={outputSchema} size="sm" tooltipPosition="top" />
-          </div>
-          {stepProgress && (
-            <div className="mt-1">
-              <StepProgressBar progress={stepProgress} />
-            </div>
-          )}
-        </div>
-        <div className="flex-1 overflow-y-auto overflow-x-hidden p-3">
-          <div className="pb-[80vh]">
-            <MessageList
-              subAgentId={taskId}
-              containerClassName="flex flex-col gap-1.5 overflow-x-hidden"
-              showStatusBanners={false}
-              showThinkingIndicator={!isDisconnected && !isWaitingForAuthAssistance}
-              compact
-            />
-          </div>
-        </div>
-        {pendingWriteLockApproval && (
-          <BrowserWriteLockApproval
-            attentionRequestId={pendingWriteLockApproval.attentionRequestId}
-            question={pendingWriteLockApproval.question}
-          />
-        )}
-      </div>
+      <FullscreenSidebar
+        taskId={taskId}
+        outputSchema={outputSchema}
+        stepProgress={stepProgress}
+        isDisconnected={isDisconnected}
+        isWaitingForAuthAssistance={isWaitingForAuthAssistance}
+        pendingWriteLockApproval={pendingWriteLockApproval}
+      />
 
       <div className="flex-1 flex flex-col">
         <BrowserFrameHeader

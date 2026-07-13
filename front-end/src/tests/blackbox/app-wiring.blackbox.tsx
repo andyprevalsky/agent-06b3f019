@@ -16,7 +16,7 @@ import Download from '@/features/download';
  * Renders the full route table from App.tsx inside the test wrapper's MemoryRouter.
  * This tests that the route config correctly maps paths to page components.
  */
-function AppRoutes() {
+export function AppRoutes() {
   return (
     <Routes>
       <Route path="/" element={<Terminal />} />

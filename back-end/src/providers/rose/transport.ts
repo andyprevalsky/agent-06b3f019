@@ -156,6 +156,62 @@ async function withTimeout(
   }
 }
 
+async function withStreamingConnectTimeout(
+  upstream: AbortSignal,
+  timeoutMs: number,
+  fn: (signal: AbortSignal) => Promise<Response>
+): Promise<{ response: Response; cleanup: () => void }> {
+  const controller = new AbortController();
+  const onAbort = (): void => controller.abort(upstream.reason);
+  if (upstream.aborted) controller.abort(upstream.reason);
+  else upstream.addEventListener('abort', onAbort, { once: true });
+
+  const timer = setTimeout(
+    () => controller.abort(new Error(`connect timeout ${timeoutMs}ms`)),
+    timeoutMs
+  );
+  const cleanup = (): void => {
+    clearTimeout(timer);
+    upstream.removeEventListener('abort', onAbort);
+  };
+
+  try {
+    const response = await fn(controller.signal);
+    clearTimeout(timer);
+    return { response, cleanup };
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
+}
+
+function keepAbortConnectedToBody(
+  body: ReadableStream<Uint8Array>,
+  cleanup: () => void
+): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const result = await reader.read();
+        if (result.done) {
+          cleanup();
+          controller.close();
+          return;
+        }
+        controller.enqueue(result.value);
+      } catch (error) {
+        cleanup();
+        controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      cleanup();
+      await reader.cancel(reason);
+    },
+  });
+}
+
 export async function postOpenAIResponsesStream(
   options: PostOptions & { openAiKey: string; abortSignal?: AbortSignal }
 ): Promise<StreamResponse> {
@@ -166,7 +222,7 @@ export async function postOpenAIResponsesStream(
     call_site: options.callSite,
     model: options.body.model,
   });
-  const response = await withTimeout(upstream, timeoutMs, (signal) =>
+  const { response, cleanup } = await withStreamingConnectTimeout(upstream, timeoutMs, (signal) =>
     fetch(OPENAI_RESPONSES_API_URL, {
       method: 'POST',
       headers: openAiHeaders(options.openAiKey),
@@ -177,7 +233,11 @@ export async function postOpenAIResponsesStream(
 
   let errorBody: string | undefined;
   if (!response.ok) {
-    errorBody = await response.text();
+    try {
+      errorBody = await response.text();
+    } finally {
+      cleanup();
+    }
     log.warn('openai.error', {
       request_id: options.requestId,
       status: response.status,
@@ -185,11 +245,15 @@ export async function postOpenAIResponsesStream(
     });
   }
 
+  const body =
+    response.ok && response.body ? keepAbortConnectedToBody(response.body, cleanup) : null;
+  if (!body) cleanup();
+
   return {
     status: response.status,
     ok: response.ok,
     headers: response.headers,
-    body: response.body,
+    body,
     errorBody,
   };
 }
@@ -280,7 +344,7 @@ export async function postOpenRouterStream(
     call_site: options.callSite,
     model: options.body.model,
   });
-  const response = await withTimeout(upstream, timeoutMs, (signal) =>
+  const { response, cleanup } = await withStreamingConnectTimeout(upstream, timeoutMs, (signal) =>
     fetch(OPENROUTER_API_URL, {
       method: 'POST',
       headers: openrouterHeaders(options.openrouterKey),
@@ -291,7 +355,11 @@ export async function postOpenRouterStream(
 
   let errorBody: string | undefined;
   if (!response.ok) {
-    errorBody = await response.text();
+    try {
+      errorBody = await response.text();
+    } finally {
+      cleanup();
+    }
     log.warn('openrouter.error', {
       request_id: options.requestId,
       status: response.status,
@@ -299,11 +367,15 @@ export async function postOpenRouterStream(
     });
   }
 
+  const body =
+    response.ok && response.body ? keepAbortConnectedToBody(response.body, cleanup) : null;
+  if (!body) cleanup();
+
   return {
     status: response.status,
     ok: response.ok,
     headers: response.headers,
-    body: response.body,
+    body,
     errorBody,
   };
 }

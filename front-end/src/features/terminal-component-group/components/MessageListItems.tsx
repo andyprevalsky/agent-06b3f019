@@ -4,7 +4,8 @@
  * Pure presentational map that renders one MessageBubble per filtered message.
  * Receives pre-computed metadata (step history, wait-for checks, plan char
  * count, stream count) from MessageList so this component stays focused on
- * render.
+ * render. A keyed final-answer stream is replaced only by the canonical TOOL
+ * message with the same toolCallId, so selectors expose both identities.
  */
 import MessageBubble from './MessageBubble';
 import type { Message } from '../hooks';
@@ -65,12 +66,20 @@ export function MessageListItems({
     <>
       {filteredMessages.map((message) => {
         const planCharCount = resolvePlanCharCount(message, streamingPlanCharCount);
+        const isFinalAnswer = message.metadata?.isUserAttentionMessage === true;
+        const toolCallId =
+          typeof message.metadata?.toolCallId === 'string'
+            ? message.metadata.toolCallId
+            : undefined;
 
         return (
           <div
             key={getMessageRenderKey(message)}
             data-message-id={message.message_id}
             data-message-role={message.role}
+            data-message-kind={isFinalAnswer ? 'final-answer' : undefined}
+            data-message-state={isFinalAnswer ? 'canonical' : undefined}
+            data-tool-call-id={toolCallId}
             className="min-w-0 max-w-full"
           >
             <MessageBubble

@@ -10,7 +10,7 @@
 // ── React Hooks ───────────────────────────────────────────────────────────
 export { useToast } from '@/hooks/use-toast';
 export { useAuth } from '@/features/auth';
-export { useAppData } from '@/hooks/useAppData';
+export { useAppData } from '@/hooks/appDataContext';
 export type { Model } from '@/hooks/useAppData';
 export { useAnimatedCounter } from '@/hooks/useAnimatedCounter';
 export { useSmallTileAnimations } from '@/hooks/useSmallTileAnimations';

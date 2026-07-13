@@ -1,0 +1,86 @@
+#!/usr/bin/env tsx
+
+import assert from 'node:assert';
+import { buildGeneratorCompletionOptions } from '../../providers/chat/generatorLlm';
+import { selectChatPhaseModels } from '../../providers/chat/phaseModels';
+import { createStreamingCompletion } from '../../providers/rose';
+import { contentKey } from '../../providers/fastCacheNormalizeKeys';
+
+async function run(): Promise<void> {
+  const phases = selectChatPhaseModels('rose-labs/rose-1-ultra');
+  const abortController = new AbortController();
+  const options = buildGeneratorCompletionOptions({
+    model: phases.generator,
+    messages: [
+      { role: 'system', content: 'generator system' },
+      { role: 'user', content: 'answer this' },
+    ],
+    providerRoute: phases.generatorProviderRoute,
+    providerFastMode: true,
+    abortSignal: abortController.signal,
+  });
+
+  assert.strictEqual(options.model, 'rose-labs/rose-1-lite');
+  assert.strictEqual(options.provider_route, 'openrouter-waterfall');
+  assert.strictEqual(options.provider_fast_mode, true);
+  assert.strictEqual(options.abort_signal, abortController.signal);
+  assert.strictEqual(options.temperature, 0.7);
+  assert.strictEqual(options.response_format?.json_schema.name, 'generator_response');
+  assert.strictEqual(options.response_format?.json_schema.strict, true);
+  for (const property of ['claude_token', 'gpt_token', 'gpt_account_id', 'disable_waterfall']) {
+    assert.strictEqual(
+      Object.hasOwn(options, property),
+      false,
+      `Generator options must not own ${property}`
+    );
+  }
+  const liteCacheKey = contentKey('same goal', 'chat_generator', options);
+  const ultraCacheKey = contentKey('same goal', 'chat_generator', {
+    ...options,
+    model: 'rose-labs/rose-1-ultra',
+  });
+  assert.notStrictEqual(liteCacheKey, ultraCacheKey, 'Generator cache identity includes model');
+  const sharedRouteCacheKey = contentKey('same goal', 'chat_generator', {
+    ...options,
+    provider_route: 'shared-openai-priority',
+  });
+  assert.notStrictEqual(
+    liteCacheKey,
+    sharedRouteCacheKey,
+    'Generator cache identity includes provider route'
+  );
+
+  const originalFetch = globalThis.fetch;
+  const oldOpenRouterKey = process.env.OPENROUTER_API_KEY;
+  const oldGptKey = process.env.GPT_API_KEY;
+  delete process.env.OPENROUTER_API_KEY;
+  process.env.GPT_API_KEY = 'shared-provider-must-not-run';
+  let providerCalls = 0;
+  globalThis.fetch = (async () => {
+    providerCalls += 1;
+    throw new Error('no provider call expected');
+  }) as typeof fetch;
+
+  try {
+    await assert.rejects(async () => {
+      for await (const chunk of await createStreamingCompletion(options)) {
+        assert.fail(`unexpected chunk without OpenRouter key: ${chunk.actual_model}`);
+      }
+    }, /OPENROUTER_API_KEY/);
+    assert.strictEqual(providerCalls, 0, 'missing OpenRouter key must fail before provider calls');
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (oldOpenRouterKey === undefined) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = oldOpenRouterKey;
+    if (oldGptKey === undefined) delete process.env.GPT_API_KEY;
+    else process.env.GPT_API_KEY = oldGptKey;
+  }
+
+  process.stdout.write('PASS chat Generator options exclude ignored compute-auth fields\n');
+  process.stdout.write('PASS Generator OpenRouter route fails closed without provider leakage\n');
+}
+
+run().catch((error: unknown) => {
+  process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
+  process.exit(1);
+});
