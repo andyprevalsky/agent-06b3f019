@@ -1323,6 +1323,7 @@ stop_on_exit() {
     echo "Original exit code: $ec"
 }
 trap stop_on_exit EXIT
+trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
