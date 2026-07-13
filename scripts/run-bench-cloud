@@ -50,7 +50,11 @@
 # Flags:
 #   --setup            one-time: create volume + persistent machine + git clone
 #   --refresh-wmh      explicit-only: (re)build the cached WMH model on /data/world-model
-#   --refresh-secrets  refresh + verify the app environment, then exit
+#   --refresh-secrets  refresh + verify the app environment, then exit (maintenance
+#                      op — the ONLY path that stages/activates app secrets)
+#   --verify-secrets   READ-ONLY check that the app environment exists, then exit.
+#                      Used by every run path so concurrent workstreams never
+#                      mutate (and therefore never race) the shared environment.
 #   --destroy          explicit-only: destroy the machine + volume
 #   --simulate         pass --simulate to run_benchmark (default for a task run)
 #   --no-simulate      real mode (no WMH); serves nothing, runs the live stack
@@ -58,7 +62,8 @@
 #   --max-concurrency <n>  cap concurrent tasks when running multiple (default 5)
 #   --ref <branch|sha> branch/sha to git-sync + run (default: current HEAD sha)
 #   --no-dashboard     do NOT proxy/open the live dashboard (implied under CI)
-#   --dash-port <n>    local port for the proxied dashboard (default 8765)
+#   --dash-port <n>    local port for the proxied dashboard (default CONDUCTOR_PORT+5764
+#                      → 8765 on the standard 3001 workspace)
 #   --model <name>     WMH model artifact name (default rose-r2-archive-anthropic)
 #   --vm-size <size>   machine size at --setup (default shared-cpu-4x)
 #   --vm-memory <mb>   machine memory at --setup (default 8192)
@@ -115,7 +120,9 @@ VM_MEMORY="8192"
 VOLUME_SIZE="20"
 RUN_TIMEOUT="3600"      # 60 min per-run ceiling (warm: no WMH build; serve-only).
 DASHBOARD="1"           # proxy + open the live dashboard (auto-off under CI).
-LOCAL_DASH_PORT="8765"
+# Per-workspace default so concurrent workspaces get non-colliding dashboards
+# (CONDUCTOR_PORT=3001 → 8765, the historical default).
+LOCAL_DASH_PORT="${CLOUDBENCH_DASH_BASE:-$(( ${CONDUCTOR_PORT:-3001} + 5764 ))}"
 FLEET_MACHINE_ID=""     # set by run-bench-fleet to pin a per-bench cloned machine.
 OUT_DIR=""              # set by run-bench-fleet to isolate a bench's .context outputs.
 SKIP_CONTROLLER_LOCK="0"  # set by run-bench-fleet (fleet owns one lock for its children).
@@ -127,6 +134,7 @@ while [ $# -gt 0 ]; do
         --setup)          MODE="setup"; shift ;;
         --refresh-wmh)    MODE="refresh-wmh"; shift ;;
         --refresh-secrets) MODE="refresh-secrets"; shift ;;
+        --verify-secrets) MODE="verify-secrets"; shift ;;   # read-only preflight (concurrency-safe)
         --destroy)        MODE="destroy"; shift ;;
         --simulate)       BENCH_SIMULATE="1"; shift ;;
         --no-simulate)    BENCH_SIMULATE="0"; shift ;;
@@ -146,7 +154,7 @@ while [ $# -gt 0 ]; do
         --volume-size)    VOLUME_SIZE="${2:-}"; shift 2 ;;
         --timeout)        RUN_TIMEOUT="${2:-}"; shift 2 ;;
         -h|--help)
-            sed -n '2,72p' "$0"; exit 0 ;;
+            sed -n '2,76p' "$0"; exit 0 ;;
         --*)              echo "❌ Unknown flag: $1" >&2; exit 2 ;;
         *)                BENCH_TASKS+=("$1"); shift ;;
     esac
@@ -509,15 +517,9 @@ for machine in machines:
 }
 
 assert_app_environment_lock_ownership() {
-    local expected_owner actual_owner
-    if [ "${CLOUDBENCH_APP_ENV_LOCK_HELD:-0}" = "1" ]; then
-        expected_owner="${CLOUDBENCH_APP_ENV_LOCK_OWNER_PID:-}"
-    else
-        expected_owner="$$"
-    fi
+    local actual_owner
     actual_owner="$(cat "$APP_ENV_LOCK_FILE" 2>/dev/null || true)"
-    if [ -z "$expected_owner" ] || [ "$actual_owner" != "$expected_owner" ] || \
-        ! kill -0 "$expected_owner" 2>/dev/null; then
+    if [ "$actual_owner" != "$$" ] || ! kill -0 "$$" 2>/dev/null; then
         echo "❌ Lost ownership of shared benchmark app environment lock." >&2
         return 1
     fi
@@ -621,11 +623,6 @@ release_app_environment_lock() {
 }
 
 inject_secrets() {
-    if [ "${CLOUDBENCH_APP_ENV_LOCK_HELD:-0}" = "1" ]; then
-        assert_app_environment_lock_ownership || exit 1
-        _inject_secrets_locked
-        return $?
-    fi
     acquire_app_environment_lock || exit 1
     ( _inject_secrets_locked )
     local status=$?
@@ -637,24 +634,57 @@ inject_secrets() {
     return "$status"
 }
 
+# READ-ONLY env preflight for every RUN path: assert the prod-aligned app
+# secrets exist WITHOUT staging or activating anything, so concurrent
+# workstreams never race each other's environment. Staging/activation lives
+# only in the explicit maintenance ops (--refresh-secrets/--setup/--refresh-wmh).
+REQUIRED_APP_SECRETS="AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER"
+verify_app_environment() {
+    local listing missing
+    listing="$(FLY secrets list -a "$APP" --json 2>/dev/null)" || {
+        echo "❌ Could not read app secrets for $APP (app missing or no access)." >&2
+        echo "   One-time setup: bash scripts/run-bench-cloud --setup" >&2
+        return 1
+    }
+    if ! missing="$(printf '%s' "$listing" | REQUIRED="$REQUIRED_APP_SECRETS" python3 -c '
+import json, os, sys
+try:
+    secrets = json.load(sys.stdin) or []
+except Exception:
+    raise SystemExit("unreadable secrets listing")
+names = {str(item.get("Name") or item.get("name") or "") for item in secrets if isinstance(item, dict)}
+print(" ".join(key for key in os.environ["REQUIRED"].split() if key not in names))
+')"; then
+        echo "❌ Unreadable app secrets listing for $APP." >&2
+        return 1
+    fi
+    if [ -n "$missing" ]; then
+        echo "❌ Benchmark app environment is missing secrets: $missing" >&2
+        echo "   Refresh explicitly (maintenance op): bash scripts/run-bench-cloud --refresh-secrets" >&2
+        return 1
+    fi
+    echo "✅ Shared benchmark app environment verified (read-only): $REQUIRED_APP_SECRETS"
+}
+
+if [ "$MODE" = "verify-secrets" ]; then
+    verify_app_environment
+    exit $?
+fi
+
 if [ "$MODE" = "refresh-secrets" ]; then
     echo "═══ run-bench-cloud --refresh-secrets ═══"
     refresh_lock="$ROOT_DIR/.context/cloudbench-controller.lock"
-    refresh_lock_acquired="0"
-    if [ "${CLOUDBENCH_PARENT_LOCK_HELD:-0}" != "1" ]; then
-        if ! cloudbench_controller_lock_acquire "$refresh_lock"; then
-            old_pid="$(cat "$refresh_lock" 2>/dev/null || true)"
-            echo "❌ Another cloud benchmark controller is already running${old_pid:+ (pid $old_pid)}." >&2
-            exit 1
-        fi
-        refresh_lock_acquired="1"
-        cleanup_refresh_lock() {
-            [ "$refresh_lock_acquired" = "1" ] && cloudbench_controller_lock_release "$refresh_lock"
-        }
-        trap cleanup_refresh_lock EXIT
-        trap 'cleanup_refresh_lock; exit 130' INT
-        trap 'cleanup_refresh_lock; exit 143' TERM
+    if ! cloudbench_controller_lock_acquire "$refresh_lock"; then
+        old_pid="$(cat "$refresh_lock" 2>/dev/null || true)"
+        echo "❌ Another cloud benchmark controller is already running in this workspace${old_pid:+ (pid $old_pid)}." >&2
+        exit 1
     fi
+    cleanup_refresh_lock() {
+        cloudbench_controller_lock_release "$refresh_lock"
+    }
+    trap cleanup_refresh_lock EXIT
+    trap 'cleanup_refresh_lock; exit 130' INT
+    trap 'cleanup_refresh_lock; exit 143' TERM
     ensure_app
     inject_secrets
     echo "✅ Cloud benchmark environment refreshed from current production-aligned sources."
@@ -1051,18 +1081,17 @@ echo "ref=${BENCH_REF:-<HEAD>} model=$WMH_MODEL_NAME app=$APP dashboard=$DASHBOA
 echo ""
 
 ensure_app
-# Fleet children must inherit proof that their controller refreshed the shared
-# app secrets once before any clone was started. Direct runs refresh only after
-# taking the controller lock below, so app-level machine updates cannot race.
-DIRECT_ENV_REFRESH="0"
+# READ-ONLY env preflight (concurrent-workstream safe): the run path only
+# verifies the prod-aligned app secrets exist — it never stages them. Fleet
+# children inherit their controller's verification; direct runs verify here.
 if [ -n "$FLEET_MACHINE_ID" ]; then
-    if [ "${CLOUDBENCH_ENV_REFRESHED:-0}" != "1" ]; then
-        echo "❌ Fleet child has no controller environment-refresh proof." >&2
+    if [ "${CLOUDBENCH_ENV_VERIFIED:-0}" != "1" ]; then
+        echo "❌ Fleet child has no controller environment-verification proof." >&2
         exit 1
     fi
-    echo "🔐 Environment refreshed and production-verified by fleet controller."
+    echo "🔎 Environment verified by fleet controller."
 else
-    DIRECT_ENV_REFRESH="1"
+    verify_app_environment || exit 1
 fi
 
 mid="$(resolve_machine_id)"
@@ -1290,14 +1319,6 @@ if [ "$SKIP_CONTROLLER_LOCK" != "1" ]; then
     trap 'cloudbench_controller_lock_release "$LOCK_DIR"; exit 143' TERM
 fi
 
-if [ "$DIRECT_ENV_REFRESH" = "1" ]; then
-    CLOUDBENCH_HOLD_APP_ENV_LOCK=1
-    trap 'release_app_environment_lock; cloudbench_controller_lock_release "$LOCK_DIR"' EXIT
-    trap 'release_app_environment_lock; cloudbench_controller_lock_release "$LOCK_DIR"; exit 130' INT
-    trap 'release_app_environment_lock; cloudbench_controller_lock_release "$LOCK_DIR"; exit 143' TERM
-    inject_secrets
-fi
-
 STOP_DONE="0"
 stop_on_exit() {
     local ec=$?
@@ -1316,7 +1337,6 @@ stop_on_exit() {
         STOP_DONE="1"
         stop_machine "$mid"
     fi
-    release_app_environment_lock
     if [ "${LOCK_ACQUIRED:-0}" = "1" ]; then
         cloudbench_controller_lock_release "$LOCK_DIR"
     fi
@@ -1526,7 +1546,7 @@ done
     exit 1
 }
 FLY ssh console -a "$APP" --machine "$mid" -C "bash -c \"setsid bash '$REMOTE_TMP_SCRIPT' >> '$REMOTE_LOG' 2>&1 < /dev/null &\"" >/dev/null 2>&1 || true
-sleep 5
+sleep "${CLOUDBENCH_LAUNCH_SETTLE_SECONDS:-5}"
 o="$(ssh_read "$mid" "pgrep -f cloudbench-run.sh >/dev/null 2>&1 && echo RUNNING")"
 _ok=0
 printf '%s' "$o" | grep -q RUNNING && _ok=1
@@ -1717,7 +1737,7 @@ while :; do
             break
         fi
     fi
-    sleep 10
+    sleep "${CLOUDBENCH_POLL_INTERVAL:-10}"
 done
 
 # ── 5. Retrieve report-card.json + newest runs/*.json directly from the box ──

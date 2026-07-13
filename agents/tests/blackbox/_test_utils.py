@@ -8,6 +8,7 @@ and provides mock response helpers.
 import json
 import os
 import sys
+import traceback
 from pathlib import Path
 from typing import Any, Callable
 
@@ -157,6 +158,7 @@ class BlackboxResult:
             self.failed += 1
             self.errors.append(f"{name}: {e}")
             print(f"  ❌ {name}: {e}")
+            traceback.print_exc()
 
     async def record_async(self, name: str, fn: Callable) -> None:
         """Run an async test function, record the result."""
@@ -169,6 +171,7 @@ class BlackboxResult:
             self.failed += 1
             self.errors.append(f"{name}: {e}")
             print(f"  ❌ {name}: {e}")
+            traceback.print_exc()
 
     def summary(self) -> dict[str, Any]:
         return {
