@@ -424,9 +424,12 @@ release_app_environment_lock() {
 }
 
 # ── One controller lock for the whole fleet (children run with --no-lock) ────
-if ! cloudbench_controller_acquire "$LOCK_DIR" "$APP"; then
-    old_pid="$(cat "$LOCK_DIR" 2>/dev/null || true)"
-    echo "❌ Another cloud benchmark controller is already running${old_pid:+ (pid $old_pid)}." >&2
+# A sibling workspace holding the app-wide Fly lease is normal queue pressure.
+# Wait for its handoff so the already-claimed Hub request remains queued/running
+# instead of being finalized as seven synthetic failures without agent IDs.
+cloudbench_controller_install_release_guard "$LOCK_DIR" "$APP"
+if ! cloudbench_controller_wait_acquire "$LOCK_DIR" "$APP"; then
+    echo "❌ Cloud benchmark controller acquisition failed." >&2
     exit 1
 fi
 
