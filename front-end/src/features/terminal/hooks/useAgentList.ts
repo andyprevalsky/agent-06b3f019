@@ -1,8 +1,14 @@
 /**
  * Terminal feature — agent list loading and polling hook.
+ *
+ * Request state:
+ *   IDLE --loadAgents()--> LOADING --final request settles--> IDLE
+ *                            |  ^
+ *                            +--+ overlapping request starts/settles
+ *   IDLE --cannot submit goals----------------> IDLE
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 
 import { useToast } from '@/hooks/use-toast';
 
@@ -13,23 +19,24 @@ import type { Agent } from '../types';
 export function useAgentList(canSubmitGoals: boolean) {
   const { toast } = useToast();
   const [agents, setAgents] = useState<Agent[]>([]);
-  const [isLoadingAgents, setIsLoadingAgents] = useState(true);
-  const [isFirstLoad, setIsFirstLoad] = useState(true);
+  const [isLoadingAgents, setIsLoadingAgents] = useState(false);
+  const latestLoad = useRef(0);
+  const activeLoads = useRef(0);
 
   const loadAgents = useCallback(async () => {
+    const loadId = ++latestLoad.current;
+    activeLoads.current += 1;
+    setIsLoadingAgents(true);
     try {
-      if (isFirstLoad) setIsLoadingAgents(true);
       const fetched = await fetchAgents();
-      setAgents(fetched);
+      if (loadId === latestLoad.current) setAgents(fetched);
     } catch (_err: unknown) {
       toast({ title: 'Error', description: 'Failed to load agents', variant: 'destructive' });
     } finally {
-      if (isFirstLoad) {
-        setIsLoadingAgents(false);
-        setIsFirstLoad(false);
-      }
+      activeLoads.current -= 1;
+      setIsLoadingAgents(activeLoads.current > 0);
     }
-  }, [isFirstLoad, toast]);
+  }, [toast]);
 
   useEffect(() => {
     if (canSubmitGoals) void loadAgents();

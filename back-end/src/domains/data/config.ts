@@ -3,7 +3,7 @@
  */
 
 // Limits
-export const MAX_RESULTS = 50;
+export const MAX_RESULTS = 100;
 export const MAX_CONTEXT_MESSAGES = 3; // Messages before/after each match
 export const MAX_RESULT_TOKENS = 8000; // Approximate token cap (~4 chars per token)
 export const MAX_RESULT_CHARS = MAX_RESULT_TOKENS * 4;

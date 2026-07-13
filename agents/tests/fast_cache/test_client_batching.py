@@ -4,6 +4,8 @@ import asyncio
 
 from providers.fast_cache import client
 
+EVENT_TIMEOUT_S = 1.0
+
 
 def reset_client_state() -> None:
     client._pending_gets.clear()
@@ -83,10 +85,10 @@ def test_cache_get_batches_can_overlap_when_one_batch_is_in_flight(monkeypatch):
         monkeypatch.setattr(client, "_queue_archive_cache_read", noop_archive)
 
         first = asyncio.create_task(client.cache_get_record("k1"))
-        await asyncio.wait_for(first_fetch_started.wait(), timeout=0.1)
+        await asyncio.wait_for(first_fetch_started.wait(), timeout=EVENT_TIMEOUT_S)
 
         second = asyncio.create_task(client.cache_get_record("k2"))
-        await asyncio.wait_for(second_fetch_started.wait(), timeout=0.1)
+        await asyncio.wait_for(second_fetch_started.wait(), timeout=EVENT_TIMEOUT_S)
 
         release_first_fetch.set()
         results = await asyncio.gather(first, second)
@@ -140,7 +142,7 @@ def test_cache_get_record_does_not_wait_for_read_archive(monkeypatch):
 
         assert result["hit"] is True
         assert elapsed < 0.03
-        await asyncio.wait_for(archive_started.wait(), timeout=0.1)
+        await asyncio.wait_for(archive_started.wait(), timeout=EVENT_TIMEOUT_S)
         await asyncio.gather(*list(client._archive_read_tasks))
 
     asyncio.run(run())

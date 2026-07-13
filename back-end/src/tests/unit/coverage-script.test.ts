@@ -13,6 +13,31 @@ assert.match(
   /lsof -tiTCP:"\$COV_PORT" -sTCP:LISTEN/,
   'coverage port preflight must ignore outbound connections using the same local port'
 );
+assert.match(
+  coverageScript,
+  /READINESS_STARTED_AT=\$SECONDS/,
+  'coverage readiness must measure a wall-clock start time'
+);
+assert.match(
+  coverageScript,
+  /READINESS_DEADLINE=\$\(\(READINESS_STARTED_AT \+ 300\)\)/,
+  'coverage readiness must use the five-minute deadline ceiling'
+);
+assert.match(
+  coverageScript,
+  /REMAINING_READINESS_SECONDS=\$\(\(READINESS_DEADLINE - SECONDS\)\)/,
+  'coverage readiness must compute the actual time remaining'
+);
+assert.match(
+  coverageScript,
+  /curl -fsS -m "\$CURL_TIMEOUT_SECONDS"/,
+  'coverage readiness must clip each health request to its remaining deadline'
+);
+assert.doesNotMatch(
+  coverageScript,
+  /for attempt in \$\(seq 1 600\)/,
+  'coverage readiness must not use a fixed attempt-count timeout'
+);
 
 for (const [name, harness] of [
   ['coverage', coverageScript],

@@ -187,10 +187,12 @@ async function runOutreachForUser(
     return 'skipped';
   }
 
+  const triggeredInbound = buildTriggeredInboundMessage(outreachKey);
+  let deliveryClaimedByThisRun = false;
   const result = await handleSmsSupervisorMessage({
     userId: candidate.userId,
     phoneNumber: candidate.phone,
-    inboundMessage: buildTriggeredInboundMessage(outreachKey),
+    inboundMessage: triggeredInbound,
     mySeq: session.lastInboundSeq,
     commitGuard: async () => {
       if (control?.isAborted()) return false;
@@ -200,7 +202,9 @@ async function runOutreachForUser(
         isStillEligible(candidate, asOf),
         outreachAlreadyTriggered(candidate.userId, outreachKey),
       ]);
-      return !control?.isAborted() && eligible && !duplicate;
+      const allowed = !control?.isAborted() && eligible && (deliveryClaimedByThisRun || !duplicate);
+      if (allowed) deliveryClaimedByThisRun = true;
+      return allowed;
     },
   });
   if (!result.committed) {

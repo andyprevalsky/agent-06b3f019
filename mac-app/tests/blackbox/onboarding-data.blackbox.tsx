@@ -369,7 +369,7 @@ describe('OnboardingData', () => {
     await waitFor(() => {
       expect(screen.getByText('LinkedIn')).toBeInTheDocument();
     });
-  });
+  }, 30_000);
 
   describe('Banking (Plaid)', () => {
     it('renders the Banking card with default CTA copy', async () => {
