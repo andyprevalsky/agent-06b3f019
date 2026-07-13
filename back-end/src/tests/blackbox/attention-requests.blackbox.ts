@@ -433,6 +433,33 @@ async function countAgentMessages(agentId: string): Promise<number> {
   );
 }
 
+async function createPendingApprovalMessage(agentId: string, requestId: string): Promise<string> {
+  const message = await prisma.message.create({
+    data: {
+      agentId,
+      text: 'Approve this action?',
+      role: 'TOOL',
+      metadata: {
+        isUserAttentionMessage: true,
+        toolCallId: `approval-tool-${randomUUID()}`,
+        toolName: 'request_user_approval',
+        toolStatus: 'IN_PROGRESS',
+        requestUserApproval: { toolApproval: true, attentionRequestId: requestId },
+      },
+    },
+  });
+  return message.id;
+}
+
+async function expectApprovalMessageFinished(messageId: string): Promise<void> {
+  const message = await prisma.message.findUnique({ where: { id: messageId } });
+  const metadata = message?.metadata as { toolStatus?: unknown } | null;
+  assert(
+    metadata?.toolStatus === 'FINISHED',
+    `Resolved approval message should be FINISHED, got ${String(metadata?.toolStatus)}`
+  );
+}
+
 async function cleanupFixtures(): Promise<void> {
   const realAgentIds = Array.from(trackedRealAgentIds);
   const requestAgentIds = Array.from(trackedRequestAgentIds);
@@ -911,6 +938,7 @@ async function testRespond_happyPersistsStateAndDecrementsCount() {
     question: 'respond-happy',
     workflowId: makeWorkflowId('respond-happy'),
   });
+  const approvalMessageId = await createPendingApprovalMessage(fixture.realAgentId, created.id);
 
   const res = await request(`${BASE_URL}/api/attention-requests/${created.id}/respond`, {
     method: 'POST',
@@ -933,6 +961,7 @@ async function testRespond_happyPersistsStateAndDecrementsCount() {
   const listItem = list.requests.find((request) => request.id === created.id);
   assert(listItem?.answered === true, 'Responded request should be marked answered in the list');
   assert(listItem?.user_response === 'Yes, go ahead', 'List should expose the stored response');
+  await expectApprovalMessageFinished(approvalMessageId);
 }
 
 async function testRespond_authLookingMetadataWithoutAuthRowIsGeneric() {
@@ -1118,6 +1147,7 @@ async function testReject_happyPersistsRejectedState() {
   const fixture = await createFixture('reject-happy');
   const countBefore = await getCount(fixture.ownerToken);
   const created = await createAttentionRequest(fixture, { question: 'reject-happy' });
+  const approvalMessageId = await createPendingApprovalMessage(fixture.realAgentId, created.id);
 
   const res = await request(`${BASE_URL}/api/attention-requests/${created.id}/reject`, {
     method: 'POST',
@@ -1137,6 +1167,7 @@ async function testReject_happyPersistsRejectedState() {
     countAfter === countBefore,
     `Reject should restore unanswered count to ${countBefore}, got ${countAfter}`
   );
+  await expectApprovalMessageFinished(approvalMessageId);
 }
 
 async function testReject_withMessageCreatesTrimmedUserMessage() {
