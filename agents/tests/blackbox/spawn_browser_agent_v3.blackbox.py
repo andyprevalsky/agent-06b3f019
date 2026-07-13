@@ -7714,6 +7714,10 @@ async def test_spawn_browser_activity_raises_when_new_session_has_no_cdp_url():
             "domains.spawn_browser_agent_v3.handler.init_browser_session",
             AsyncMock(return_value=session_data),
         ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.fetch_auth_options",
+            AsyncMock(return_value={"realm": "example.com"}),
+        ),
     ):
         try:
             await spawn_browser_agent_activity_v3(
@@ -7794,7 +7798,6 @@ async def test_spawn_browser_activity_auth_assistance_resume_reuses_live_session
     }
     resume_mock = AsyncMock()
     fetch_mock = AsyncMock(return_value=session_info)
-
     with (
         patch(
             "domains.spawn_browser_agent_v3.handler.load_config",
@@ -7836,6 +7839,85 @@ async def test_spawn_browser_activity_auth_assistance_resume_reuses_live_session
     assert fetch_mock.await_args.args[1] == "task-1"
     assert fetch_mock.await_args.kwargs == {"validate_live": True}
     resume_mock.assert_not_awaited()
+
+
+async def test_spawn_browser_activity_auth_assistance_resume_reuses_backend_refreshed_session():
+    """A handoff refresh may replace the provider session while keeping the browser task stable."""
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    session_info = {
+        "session_id": "session-refreshed-by-auth-page",
+        "debug_url": "https://kernel.example/refreshed",
+        "ws_url": "ws://refreshed-by-auth-page",
+        "fingerprint_injection": {"ua": "test"},
+        "passwords": [],
+        "same_session_available": True,
+    }
+    resume_mock = AsyncMock(
+        return_value={
+            "session_id": "unexpected-second-session",
+            "debug_url": "https://kernel.example/unexpected",
+            "ws_url": None,
+            "fingerprint_injection": {"ua": "test"},
+            "passwords": [],
+        }
+    )
+    fetch_mock = AsyncMock(return_value=session_info)
+    connected_cdp_urls = []
+
+    def capture_refreshed_cdp(*, cdp_url):
+        connected_cdp_urls.append(cdp_url)
+        raise RuntimeError("stop-after-refreshed-cdp-selection")
+
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.handler.load_config",
+            return_value=_fake_config(),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
+        patch("domains.spawn_browser_agent_v3.handler.resume_browser_session", resume_mock),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_session_info", fetch_mock),
+        patch("browser_tools.dom_service.DOMService", capture_refreshed_cdp),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler._propagate_browser_credentials_with_progress",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
+    ):
+        try:
+            await spawn_browser_agent_activity_v3(
+                user_id="user-1",
+                agent_id="agent-1",
+                goal="Buy socks",
+                tool_call_id="tool-1",
+                task_id="task-1",
+                is_resume=True,
+                output_schema={"fields": [{"name": "result", "type": "string"}]},
+                use_claude_mode=False,
+                write_lock_resume_state={
+                    "approval_type": "auth_assistance",
+                    "task_id": "task-1",
+                    # This was the provider session when the worker paused. The
+                    # auth page refreshed that expired session before the user
+                    # signed in, so the task now owns a different live session.
+                    "session_id": "session-before-handoff-refresh",
+                    "cdp_url": "ws://old",
+                },
+            )
+        except RuntimeError as exc:
+            assert "stop-after-refreshed-cdp-selection" in str(exc)
+        else:
+            raise AssertionError("expected test CDP interception to stop the activity")
+
+    assert fetch_mock.await_count == 1
+    assert fetch_mock.await_args.args[1] == "task-1"
+    assert fetch_mock.await_args.kwargs == {"validate_live": True}
+    # The refreshed live session is the only provider browser that should be
+    # used after handoff. Creating another browser races profile persistence.
+    resume_mock.assert_not_awaited()
+    assert connected_cdp_urls == ["ws://refreshed-by-auth-page"]
+    assert session_info["resume_mode"] == "backend_refreshed_session"
 
 
 async def test_spawn_browser_activity_auth_assistance_resume_falls_back_when_live_session_expired():
@@ -9863,6 +9945,10 @@ async def run_all_tests():
     await r.record_async(
         "activity_auth_assistance_resume_reuses_live",
         test_spawn_browser_activity_auth_assistance_resume_reuses_live_session,
+    )
+    await r.record_async(
+        "activity_auth_assistance_resume_reuses_backend_refreshed",
+        test_spawn_browser_activity_auth_assistance_resume_reuses_backend_refreshed_session,
     )
     await r.record_async(
         "activity_auth_assistance_resume_fallback_expired",
