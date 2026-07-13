@@ -88,6 +88,10 @@ if cloudbench_validate_fresh_clone_id clone-1 warm-1 clone-1; then
   fail "a duplicate clone id must never be accepted"
 fi
 
+activation_ids="$(printf '%s\n' '[{"id":"warm-1","name":"cloudbench-warm"},{"id":"lock-1","name":"cloudbench-controller-lock"},{"id":"clone-1","name":"fleet-1"}]' | cloudbench_env_activation_machine_ids)"
+[ "$activation_ids" = $'warm-1\nclone-1' ] ||
+  fail "environment activation must exclude the leased controller-lock sentinel"
+
 lock_file="$TMP_ROOT/controller.lock"
 cloudbench_controller_lock_acquire "$lock_file"
 if bash -c 'source "$1"; cloudbench_controller_lock_acquire "$2"' _ "$HELPER_SRC" "$lock_file"; then
@@ -114,6 +118,9 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'FLY machine update "$machine_id" -a "$APP" --skip-start --yes' \
   "every existing benchmark machine must activate staged secrets without starting"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'machine_ids="$(_machines_json | cloudbench_env_activation_machine_ids)"' \
+  "environment activation must exclude the leased controller-lock sentinel"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'cloudbench_wait_machine_startable fleet_machine_state "$cid"' \
   "fleet children must not launch while a fresh clone is still in created state"

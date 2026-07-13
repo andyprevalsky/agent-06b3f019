@@ -131,6 +131,18 @@ cloudbench_validate_fresh_clone_id() {
   done
 }
 
+cloudbench_env_activation_machine_ids() {
+  local controller_lock_name="${1:-cloudbench-controller-lock}"
+  CONTROLLER_LOCK_NAME="$controller_lock_name" python3 -c '
+import json, os, sys
+for machine in json.load(sys.stdin) or []:
+    if machine.get("name") == os.environ["CONTROLLER_LOCK_NAME"]:
+        continue
+    if machine.get("id"):
+        print(machine["id"])
+'
+}
+
 cloudbench_controller_lock_acquire() {
   local path="$1"
   mkdir -p "$(dirname "$path")"
