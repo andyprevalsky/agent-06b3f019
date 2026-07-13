@@ -42,6 +42,10 @@ if cloudbench_verify_env_file "$agents_env" "$backend_digest" agents >/dev/null 
   fail "a mismatched injected env digest must fail closed"
 fi
 
+activation_ids="$(printf '%s\n' '[{"id":"warm-1","name":"cloudbench-warm","state":"stopped"},{"id":"lock-1","name":"cloudbench-controller-lock","state":"stopped"},{"id":"clone-1","name":"fleet-1","state":"stopped"},{"id":"provisioning-1","name":"other-controller-clone","state":"created"},{"id":"running-1","name":"other-controller-run","state":"started"}]' | cloudbench_env_activation_machine_ids)"
+[ "$activation_ids" = $'warm-1\nclone-1' ] ||
+  fail "environment activation must target only stopped non-lock benchmark machines"
+
 lock_file="$TMP_ROOT/controller.lock"
 cloudbench_controller_lock_acquire "$lock_file"
 if bash -c 'source "$1"; cloudbench_controller_lock_acquire "$2"' _ "$HELPER_SRC" "$lock_file"; then
@@ -65,6 +69,9 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'FLY machine update "$machine_id" -a "$APP" --skip-start --yes' \
   "every existing benchmark machine must activate staged secrets without starting"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'machine_ids="$(_machines_json | cloudbench_env_activation_machine_ids)"' \
+  "environment activation must exclude lock and in-use benchmark machines"
 if grep -Fq -- 'FLY secrets deploy' "$ROOT_DIR/scripts/run-bench-cloud"; then
   fail "Machines API apps must not use Fly Launch secrets deploy"
 fi

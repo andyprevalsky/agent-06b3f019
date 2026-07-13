@@ -149,6 +149,14 @@ function getBrowserMessageTimestamp(message: Message): number {
   return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
+function compareBrowserMessageOrder(a: Message, b: Message): number {
+  const timestampDelta = getBrowserMessageTimestamp(a) - getBrowserMessageTimestamp(b);
+  if (timestampDelta !== 0) return timestampDelta;
+  if (a.message_id < b.message_id) return -1;
+  if (a.message_id > b.message_id) return 1;
+  return 0;
+}
+
 /**
  * Browser status chip lifecycle:
  *
@@ -186,7 +194,7 @@ export function computeActiveBrowserPanels(messages: Message[]): BrowserPanelDat
   browserTaskIds.forEach((taskId) => {
     const taskMessages = messages
       .filter((m) => m.metadata?.task_id === taskId)
-      .sort((a, b) => getBrowserMessageTimestamp(a) - getBrowserMessageTimestamp(b));
+      .sort(compareBrowserMessageOrder);
     const initMessage = taskMessages.find(isBrowserInitMessage);
     const initToolCallId = initMessage?.metadata?.toolCallId;
     const latestBrowserMessage = [...taskMessages]

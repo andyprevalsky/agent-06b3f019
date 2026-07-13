@@ -22,6 +22,8 @@ import {
   type LocalStorageOrigin,
 } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 type TestFn = () => Promise<void>;
 const tests: Array<{ name: string; fn: TestFn }> = [];
@@ -387,6 +389,36 @@ test('required credential table sync propagates write failures', async () => {
   assert(
     failure.message.includes('database write rejected'),
     'expected original database failure in propagated error'
+  );
+});
+
+test('full sync defers browser-auth failure until later tables finish', async () => {
+  const source = readFileSync(resolve(__dirname, '../../../scripts/seed-local.ts'), 'utf8');
+  const fullSyncCollector = source.indexOf('const browserAuthSyncFailures: Error[] = [];');
+  const collectedBrowserSync = source.indexOf(
+    'await syncBrowserAuthForCurrentMode(browserAuthSyncFailures);'
+  );
+  const laterTable = source.indexOf("await syncTable('Goal Blueprints'");
+  const deferredFailure = source.indexOf('throwBrowserAuthSyncFailures(browserAuthSyncFailures);');
+  const credentialsOnlyBranch = source.indexOf('if (CREDENTIALS_ONLY)');
+  const failFastBrowserSync = source.indexOf(
+    'await syncBrowserAuthForCurrentMode();',
+    credentialsOnlyBranch
+  );
+
+  assert(fullSyncCollector > 0, 'expected full sync to collect browser-auth failures');
+  assert(
+    collectedBrowserSync > fullSyncCollector,
+    'expected full sync to pass its failure collector to browser-auth sync'
+  );
+  assert(laterTable > collectedBrowserSync, 'expected later full-sync tables after browser auth');
+  assert(
+    deferredFailure > laterTable,
+    'expected collected browser-auth failures to throw only after later tables finish'
+  );
+  assert(
+    failFastBrowserSync > credentialsOnlyBranch && failFastBrowserSync < fullSyncCollector,
+    'expected credentials-only sync to remain fail-fast'
   );
 });
 

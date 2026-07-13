@@ -63,13 +63,22 @@ async function syncTable(name: string, fn: () => Promise<number>): Promise<void>
   }
 }
 
-async function syncRequiredTable(name: string, fn: () => Promise<number>): Promise<void> {
+async function syncRequiredTable(
+  name: string,
+  fn: () => Promise<number>,
+  failures?: Error[]
+): Promise<void> {
   try {
     const count = await syncRequiredCredentialTable(name, fn);
     console.log(`  ✅ ${name}: ${count} synced`);
   } catch (err) {
-    console.error(`  ❌ ${err instanceof Error ? err.message : err}`);
-    throw err;
+    const failure = err instanceof Error ? err : new Error(String(err));
+    console.error(`  ❌ ${failure.message}`);
+    if (failures) {
+      failures.push(failure);
+      return;
+    }
+    throw failure;
   }
 }
 
@@ -121,57 +130,81 @@ async function syncIntegrations(): Promise<number> {
 
 // Browser auth merge shared by full sync and --credentials-only. Production
 // identities refresh or add rows, while local-only identities are preserved.
-async function syncBrowserState(): Promise<void> {
+async function syncBrowserState(failures?: Error[]): Promise<void> {
   // ── Browser Context ──
-  await syncRequiredTable('Browser Context', async () => {
-    const ctx = await remote.browserContext.findUnique({ where: { userId: DEV_USER_ID } });
-    if (!ctx) return 0;
-    const { id, ...rest } = ctx;
-    await local.browserContext.upsert({
-      where: { userId: DEV_USER_ID },
-      create: ctx as any,
-      update: rest as any,
-    });
-    return 1;
-  });
+  await syncRequiredTable(
+    'Browser Context',
+    async () => {
+      const ctx = await remote.browserContext.findUnique({ where: { userId: DEV_USER_ID } });
+      if (!ctx) return 0;
+      const { id, ...rest } = ctx;
+      await local.browserContext.upsert({
+        where: { userId: DEV_USER_ID },
+        create: ctx as any,
+        update: rest as any,
+      });
+      return 1;
+    },
+    failures
+  );
 
   // ── Cookies ──
-  await syncRequiredTable('Cookies', async () => {
-    const cookies = await remote.cookie.findMany({ where: { userId: DEV_USER_ID } });
+  await syncRequiredTable(
+    'Cookies',
+    async () => {
+      const cookies = await remote.cookie.findMany({ where: { userId: DEV_USER_ID } });
 
-    for (let i = 0; i < cookies.length; i += 500) {
-      const batch = cookies.slice(i, i + 500);
-      await syncCookieCredentials(local.cookie, batch);
-      if (cookies.length > 500 && i + 500 < cookies.length) {
-        process.stdout.write(`     ${Math.min(i + 500, cookies.length)}/${cookies.length}...\r`);
+      for (let i = 0; i < cookies.length; i += 500) {
+        const batch = cookies.slice(i, i + 500);
+        await syncCookieCredentials(local.cookie, batch);
+        if (cookies.length > 500 && i + 500 < cookies.length) {
+          process.stdout.write(`     ${Math.min(i + 500, cookies.length)}/${cookies.length}...\r`);
+        }
       }
-    }
-    return cookies.length;
-  });
+      return cookies.length;
+    },
+    failures
+  );
 
   // ── LocalStorage Origins ──
-  await syncRequiredTable('LocalStorage', async () => {
-    const origins = await remote.localStorageOrigin.findMany({ where: { userId: DEV_USER_ID } });
-    return syncOriginCredentials(local.localStorageOrigin, origins);
-  });
+  await syncRequiredTable(
+    'LocalStorage',
+    async () => {
+      const origins = await remote.localStorageOrigin.findMany({ where: { userId: DEV_USER_ID } });
+      return syncOriginCredentials(local.localStorageOrigin, origins);
+    },
+    failures
+  );
 
   // ── IndexedDB Origins ──
-  await syncRequiredTable('IndexedDB', async () => {
-    const origins = await remote.indexedDBOrigin.findMany({ where: { userId: DEV_USER_ID } });
-    return syncOriginCredentials(local.indexedDBOrigin, origins);
-  });
+  await syncRequiredTable(
+    'IndexedDB',
+    async () => {
+      const origins = await remote.indexedDBOrigin.findMany({ where: { userId: DEV_USER_ID } });
+      return syncOriginCredentials(local.indexedDBOrigin, origins);
+    },
+    failures
+  );
 
   // ── Browser Permissions ──
-  await syncRequiredTable('Browser Permissions', async () => {
-    const perms = await remote.browserPermission.findMany({ where: { userId: DEV_USER_ID } });
-    return syncBrowserPermissionCredentials(local.browserPermission, perms);
-  });
+  await syncRequiredTable(
+    'Browser Permissions',
+    async () => {
+      const perms = await remote.browserPermission.findMany({ where: { userId: DEV_USER_ID } });
+      return syncBrowserPermissionCredentials(local.browserPermission, perms);
+    },
+    failures
+  );
 
   // ── Cache Storage Origins ──
-  await syncRequiredTable('Cache Storage', async () => {
-    const caches = await remote.cacheStorageOrigin.findMany({ where: { userId: DEV_USER_ID } });
-    return syncOriginCredentials(local.cacheStorageOrigin, caches);
-  });
+  await syncRequiredTable(
+    'Cache Storage',
+    async () => {
+      const caches = await remote.cacheStorageOrigin.findMany({ where: { userId: DEV_USER_ID } });
+      return syncOriginCredentials(local.cacheStorageOrigin, caches);
+    },
+    failures
+  );
 }
 
 function sleep(ms: number): Promise<void> {
@@ -238,27 +271,45 @@ async function syncComputeTokensWithRetries(): Promise<void> {
   );
 }
 
-async function syncBrowserCredentials(): Promise<void> {
+async function syncBrowserCredentials(failures?: Error[]): Promise<void> {
   // ── Browser Passwords ──
-  await syncRequiredTable('Browser Passwords', async () => {
-    const passwords = await remote.browserPassword.findMany({ where: { userId: DEV_USER_ID } });
-    return syncBrowserPasswordCredentials(local.browserPassword, passwords);
-  });
+  await syncRequiredTable(
+    'Browser Passwords',
+    async () => {
+      const passwords = await remote.browserPassword.findMany({ where: { userId: DEV_USER_ID } });
+      return syncBrowserPasswordCredentials(local.browserPassword, passwords);
+    },
+    failures
+  );
 
   // ── Passkey Credentials ──
-  await syncRequiredTable('Passkey Credentials', async () => {
-    return syncPasskeyCredentials(remote.passkeyCredential, local.passkeyCredential, DEV_USER_ID);
-  });
+  await syncRequiredTable(
+    'Passkey Credentials',
+    async () => {
+      return syncPasskeyCredentials(remote.passkeyCredential, local.passkeyCredential, DEV_USER_ID);
+    },
+    failures
+  );
 }
 
-async function syncBrowserAuthForCurrentMode(): Promise<void> {
+async function syncBrowserAuthForCurrentMode(failures?: Error[]): Promise<void> {
   if (SKIP_BROWSER_AUTH_SYNC) {
     console.log('  ⏭️  Browser auth state: skipped for simulated benchmark setup');
     return;
   }
 
-  await syncBrowserState();
-  await syncBrowserCredentials();
+  await syncBrowserState(failures);
+  await syncBrowserCredentials(failures);
+}
+
+function throwBrowserAuthSyncFailures(failures: Error[]): void {
+  if (failures.length === 0) return;
+  if (failures.length === 1) throw failures[0];
+  throw new Error(
+    `Browser auth sync failed for ${failures.length} tables: ${failures
+      .map((failure) => failure.message)
+      .join('; ')}`
+  );
 }
 
 async function sync() {
@@ -391,7 +442,8 @@ async function sync() {
   });
 
   // ── Browser auth state (context, cookies, storage) + credentials ──
-  await syncBrowserAuthForCurrentMode();
+  const browserAuthSyncFailures: Error[] = [];
+  await syncBrowserAuthForCurrentMode(browserAuthSyncFailures);
 
   // ── Goal Blueprints ──
   await syncTable('Goal Blueprints', async () => {
@@ -423,6 +475,8 @@ async function sync() {
     const feedback = await remote.feedback.findMany({ where: { userId: DEV_USER_ID } });
     return upsertById(local.feedback, feedback);
   });
+
+  throwBrowserAuthSyncFailures(browserAuthSyncFailures);
 
   console.log('\n🔄 Sync complete.');
 }
