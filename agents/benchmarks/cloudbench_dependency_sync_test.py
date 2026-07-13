@@ -541,6 +541,17 @@ def test_fleet_children_cannot_replace_persistent_warm_state() -> None:
     assert '[ -n "$FLEET_MACHINE_ID" ] && return 0' in cloud
 
 
+def test_persistent_pool_logs_use_run_scoped_terminal_markers() -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    driver = DRIVER_SCRIPT.read_text()
+
+    assert 'DONE_MARKER="::CLOUDBENCH-DONE:: token=$RUN_LOG_TOKEN"' in cloud
+    assert 'export CLOUDBENCH_RUN_TOKEN=' in cloud
+    assert "RUNSTAMP-$RUN_LOG_TOKEN" in cloud
+    assert 'DONE_MARKER="::CLOUDBENCH-DONE::$MARKER_SUFFIX"' in driver
+    assert 'MARKER_SUFFIX=" token=$CLOUDBENCH_RUN_TOKEN"' in driver
+
+
 def test_environment_activation_retries_only_transient_fly_failures(tmp_path: Path) -> None:
     cloud = CLOUD_SCRIPT.read_text()
     function_start = cloud.index("machine_state_for_activation() {")

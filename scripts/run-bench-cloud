@@ -227,11 +227,15 @@ if [ "$APP" = "$PROD_APP" ]; then
 fi
 
 # Markers the on-box per-run script prints (parsed from the SSH transcript).
-DONE_MARKER="::CLOUDBENCH-DONE::"
-REPORT_BEGIN="::CLOUDBENCH-REPORT-CARD-BEGIN::"
-REPORT_END="::CLOUDBENCH-REPORT-CARD-END::"
-RESULT_BEGIN="::CLOUDBENCH-RESULT-BEGIN::"
-RESULT_END="::CLOUDBENCH-RESULT-END::"
+# Persistent pool volumes can still have a previous detached driver unwinding
+# while the next run starts. Scope every terminal marker to this controller so
+# stale output can never complete or populate the new run.
+RUN_LOG_TOKEN="$$-$(date +%s)-$RANDOM"
+DONE_MARKER="::CLOUDBENCH-DONE:: token=$RUN_LOG_TOKEN"
+REPORT_BEGIN="::CLOUDBENCH-REPORT-CARD-BEGIN:: token=$RUN_LOG_TOKEN"
+REPORT_END="::CLOUDBENCH-REPORT-CARD-END:: token=$RUN_LOG_TOKEN"
+RESULT_BEGIN="::CLOUDBENCH-RESULT-BEGIN:: token=$RUN_LOG_TOKEN"
+RESULT_END="::CLOUDBENCH-RESULT-END:: token=$RUN_LOG_TOKEN"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -1444,6 +1448,7 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     echo "export CLOUDBENCH_FETCH_REF_SCRIPT=/data/cloudbench-fetch-ref.sh"
     echo "export CLOUDBENCH_SYNC_DEPS_SCRIPT=/data/cloudbench-sync-deps.sh"
     echo "export CLOUDBENCH_CURRENT_RUN_ARTIFACT_SCRIPT=/data/cloudbench-current-run-artifact.py"
+    echo "export CLOUDBENCH_RUN_TOKEN=$(printf '%q' "$RUN_LOG_TOKEN")"
     echo "export CLOUDBENCH_START_BARRIER=$(printf '%q' "${CLOUDBENCH_START_BARRIER:-}")"
     echo "export WMH_MODEL_NAME=$(printf '%q' "$WMH_MODEL_NAME")"
     echo "export BENCH_TASKS_B64=$(printf '%q' "$TASKS_CSV_B64")"
@@ -1481,7 +1486,7 @@ echo "   tasks=[$TASKS_DISPLAY] ref=${BENCH_REF:-<HEAD>} simulate=$BENCH_SIMULAT
 # (c) launch appending after the stamp — each retried until confirmed.
 _ok=0
 for _ in 1 2 3 4 5; do
-    o="$(ssh_read "$mid" "printf '%s\n' 'RUNSTAMP-$$' > '$REMOTE_LOG'; grep -q 'RUNSTAMP-$$' '$REMOTE_LOG' && echo STAMPED")"
+    o="$(ssh_read "$mid" "printf '%s\n' 'RUNSTAMP-$RUN_LOG_TOKEN' > '$REMOTE_LOG'; grep -q 'RUNSTAMP-$RUN_LOG_TOKEN' '$REMOTE_LOG' && echo STAMPED")"
     printf '%s' "$o" | grep -q STAMPED && { _ok=1; break; }; sleep 3
 done
 [ "$_ok" = 1 ] || { echo "❌ could not reset the on-box log after retries"; exit 1; }
