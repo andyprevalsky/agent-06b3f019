@@ -1497,7 +1497,8 @@ STAGED_LOCAL_FILES+=("$stage_err")
 # Stage the driver + wrapper (+ patch) as separate sftp puts. (A tar-in-one-upload
 # variant was tried to cut SSH round-trips but proved flaky on reused pool boxes;
 # reliability of the staging step matters more than ~30s, so we keep the puts.)
-for _ in 1 2 3 4 5; do
+STAGE_ATTEMPTS="${CLOUDBENCH_STAGE_ATTEMPTS:-20}"
+for _ in $(seq 1 "$STAGE_ATTEMPTS"); do
     : > "$stage_err"
     ssh_read "$mid" "rm -f /data/cloudbench-run.sh /data/cloudbench-fetch-ref.sh /data/cloudbench-sync-deps.sh /data/cloudbench-current-run-artifact.py '$REMOTE_TMP_SCRIPT' /tmp/cloudbench-local.patch" >/dev/null 2>&1 || true
     if FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$ROOT_DIR/$REMOTE_RUN_SCRIPT" /data/cloudbench-run.sh >"$stage_err" 2>&1 \

@@ -550,6 +550,8 @@ def test_persistent_pool_logs_use_run_scoped_terminal_markers() -> None:
     assert "RUNSTAMP-$RUN_LOG_TOKEN" in cloud
     assert 'LOG_RESET_ATTEMPTS="${CLOUDBENCH_LOG_RESET_ATTEMPTS:-20}"' in cloud
     assert 'for _ in $(seq 1 "$LOG_RESET_ATTEMPTS")' in cloud
+    assert 'STAGE_ATTEMPTS="${CLOUDBENCH_STAGE_ATTEMPTS:-20}"' in cloud
+    assert 'for _ in $(seq 1 "$STAGE_ATTEMPTS")' in cloud
     assert 'DONE_MARKER="::CLOUDBENCH-DONE::$MARKER_SUFFIX"' in driver
     assert 'MARKER_SUFFIX=" token=$CLOUDBENCH_RUN_TOKEN"' in driver
 
