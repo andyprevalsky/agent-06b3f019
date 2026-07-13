@@ -405,6 +405,19 @@ CHILD_MODE=()
 CHILD_PORT=()
 CHILD_MACHINE=()
 
+terminate_and_wait() {  # bounded TERM→KILL for controller-owned local children
+    [ "$#" -gt 0 ] || return 0
+    local p watchdog
+    for p in "$@"; do [ -n "$p" ] && kill "$p" 2>/dev/null || true; done
+    (
+        sleep "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}"
+        for p in "$@"; do [ -n "$p" ] && kill -KILL "$p" 2>/dev/null || true; done
+    ) & watchdog=$!
+    for p in "$@"; do [ -n "$p" ] && wait "$p" 2>/dev/null || true; done
+    kill "$watchdog" 2>/dev/null || true
+    wait "$watchdog" 2>/dev/null || true
+}
+
 cleanup() {
     local ec=$? id clone_name name_matches named_id name_deadline failed_names claim_path owner st
     # The poller and terminal can deliver TERM to the same process group. Do not
@@ -416,10 +429,8 @@ cleanup() {
     # dashboard — shared across every run, carrying the user's open tab, resolving
     # "open agent" from local run data long after teardown. The next fleet run
     # REUSES it (never rebinds/kills it), so exactly one hub ever runs.
-    for p in "${AUTOSCALER_PIDS[@]:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null || true; done
-    for p in "${AUTOSCALER_PIDS[@]:-}"; do [ -n "$p" ] && wait "$p" 2>/dev/null || true; done
-    for p in "${CHILD_PIDS[@]:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null || true; done
-    for p in "${CHILD_PIDS[@]:-}"; do [ -n "$p" ] && wait "$p" 2>/dev/null || true; done
+    terminate_and_wait "${AUTOSCALER_PIDS[@]:-}"
+    terminate_and_wait "${CHILD_PIDS[@]:-}"
     # Return only machines this fleet actually claimed. The pool ledger can be
     # shared by sibling workspaces, so stopping every listed ID would interrupt
     # their active runs. Keep the global lease until the machine is stopped.

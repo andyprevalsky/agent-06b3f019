@@ -838,9 +838,15 @@ def test_environment_refresh_serializes_shared_app_and_reconciles_pool_first() -
     cleanup_start = fleet.index("cleanup() {")
     cleanup_end = fleet.index("\n}", cleanup_start)
     cleanup = fleet[cleanup_start:cleanup_end]
-    assert cleanup.index("trap - EXIT") < cleanup.index('kill "$p"')
-    assert cleanup.index("trap '' INT TERM") < cleanup.index('kill "$p"')
-    assert cleanup.index('wait "$p"') < cleanup.index("release_app_environment_lock")
+    assert cleanup.index("trap - EXIT") < cleanup.index("terminate_and_wait")
+    assert cleanup.index("trap '' INT TERM") < cleanup.index("terminate_and_wait")
+    assert 'terminate_and_wait "${AUTOSCALER_PIDS[@]:-}"' in cleanup
+    assert 'terminate_and_wait "${CHILD_PIDS[@]:-}"' in cleanup
+    assert cleanup.index("terminate_and_wait") < cleanup.index(
+        "release_app_environment_lock"
+    )
+    assert 'CLOUDBENCH_CHILD_TERM_SECONDS:-30' in fleet
+    assert 'kill -KILL "$p"' in fleet
 
 
 def test_pool_reconcile_leaves_concurrent_owner_untouched(tmp_path: Path) -> None:
