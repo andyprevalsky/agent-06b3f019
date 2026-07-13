@@ -4,26 +4,26 @@
  *
  * Domain surface:
  *   POST /api/imessage/queue     — queue an iMessage for sending (auth: API key or JWT)
- *   GET  /api/imessage/queue/pop — pop next pending iMessage (auth: JWT)
+ *   GET  /api/imessage/queue/pop — claim next pending iMessage (auth: JWT)
+ *   GET  /api/imessage/queue/:id/status — read durable send state (auth: API key or JWT)
+ *   POST /api/imessage/queue/:id/result — acknowledge send or release for retry (auth: JWT)
  *
  * Invariants covered:
- *   - auth boundary: unauthenticated requests return 401 for both endpoints
+ *   - auth boundary: unauthenticated requests return 401 for every endpoint
  *   - error-surface: missing user_id returns 401 (auth check before validation); missing other fields or invalid phone return 400
  *   - read-after-write: queue a message then pop it
  *   - idempotency: pop from empty queue always returns { message: null }
- *   - atomicity: pop deletes the message in one transaction (no double-pop)
+ *   - atomicity: a claim hides the message from concurrent claims
  *   - concurrency: 10 parallel empty-pop requests all return null
  *   - same-input reproducibility: three sequential empty-pops return identical responses
  *   - ordering: messages pop in FIFO order (oldest first)
- *   - cleanup: each test run creates a fresh user; queued messages are popped in tests
+ *   - cleanup: each test run creates a fresh user; legacy pops terminally dispatch leftovers
  *   - harness independence: no background jobs involved
  *   - observability: covered by runner manifest and artifact directory
  *
  * Invariants not applicable:
- *   - state-transition: no state machine (queue → sent is handled by mac app)
  *   - referential integrity: userId/agentId are plain strings, not FK-validated
  *   - event/job cardinality: no events emitted
- *   - duplication prevention: duplicate queue entries are allowed by design
  *   - tenant isolation: pop only returns messages for the authenticated user (tested via read-after-write)
  *   - time/clock: created_at in pop response but not assertion-worthy
  *   - boundary param: no third-party HTTP calls
@@ -34,135 +34,29 @@
  *   BLACKBOX_TEST_CASE_CONCURRENCY=30 npx tsx src/tests/blackbox/imessage.blackbox.ts
  */
 
-import { config } from 'dotenv';
-import { z } from 'zod';
-config();
-
-const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
-const API_KEY = process.env.BACKEND_API_KEY || '';
-const CASE_CONCURRENCY = Number(
-  process.env.BLACKBOX_TEST_CASE_CONCURRENCY ?? process.env.CONTRACT_TEST_CASE_CONCURRENCY ?? 30
-);
-
-// ==================== RESPONSE SCHEMAS ====================
-
-const QueueSuccessResponse = z.object({
-  success: z.literal(true),
-  queue_id: z.string(),
-});
-
-const PopMessageShape = z.object({
-  id: z.string(),
-  phone_number: z.string(),
-  message: z.string(),
-  agent_id: z.string(),
-  created_at: z.string(),
-});
-
-const PopResponse = z.object({
-  message: PopMessageShape.nullable(),
-});
-
-// ==================== TEST INFRASTRUCTURE ====================
-
-interface TestResult {
-  name: string;
-  passed: boolean;
-  error?: string;
-  duration: number;
-}
-
-interface TestContext {
-  accessToken?: string;
-  userId?: string;
-}
-
-const ctx: TestContext = {};
-
-async function request(
-  url: string,
-  options: RequestInit = {}
-): Promise<{ status: number; data: unknown; headers: Headers }> {
-  const response = await fetch(url, {
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...options.headers },
-  });
-  let data: unknown;
-  const ct = response.headers.get('content-type');
-  if (ct?.includes('application/json')) {
-    data = await response.json();
-  } else {
-    data = await response.text();
-  }
-  return { status: response.status, data, headers: response.headers };
-}
-
-function authHeaders(token: string): Record<string, string> {
-  return { Authorization: `Bearer ${token}` };
-}
-
-function apiKeyHeaders(): Record<string, string> {
-  return { 'X-API-Key': API_KEY };
-}
-
-async function runTest(name: string, fn: () => Promise<void>): Promise<TestResult> {
-  const start = Date.now();
-  try {
-    await fn();
-    return { name, passed: true, duration: Date.now() - start };
-  } catch (error) {
-    return {
-      name,
-      passed: false,
-      error: error instanceof Error ? error.message : String(error),
-      duration: Date.now() - start,
-    };
-  }
-}
-
-function assertStatus(actual: number, expected: number, data: unknown): void {
-  if (actual !== expected) {
-    throw new Error(
-      `Expected status ${expected}, got ${actual}: ${JSON.stringify(data).substring(0, 300)}`
-    );
-  }
-}
-
-function assertSchema<T>(schema: z.ZodType<T>, data: unknown, label: string): T {
-  const result = schema.safeParse(data);
-  if (!result.success) {
-    throw new Error(`${label} schema validation failed: ${result.error.message}`);
-  }
-  return result.data;
-}
-
-async function runPool(
-  tests: { name: string; fn: () => Promise<void> }[],
-  concurrency: number
-): Promise<TestResult[]> {
-  const results: TestResult[] = new Array(tests.length);
-  let nextIndex = 0;
-  async function worker(): Promise<void> {
-    while (true) {
-      const idx = nextIndex++;
-      if (idx >= tests.length) return;
-      results[idx] = await runTest(tests[idx].name, tests[idx].fn);
-    }
-  }
-  const workerCount = Math.min(concurrency, tests.length);
-  await Promise.all(Array.from({ length: workerCount }, () => worker()));
-  return results;
-}
-
-// ==================== SETUP ====================
-
-async function setup(): Promise<void> {
-  const res = await request(`${BASE_URL}/api/auth/anonymous`, { method: 'POST' });
-  assertStatus(res.status, 200, res.data);
-  const d = res.data as { session: { access_token: string }; user: { id: string } };
-  ctx.accessToken = d.session.access_token;
-  ctx.userId = d.user.id;
-}
+import {
+  BASE_URL,
+  CASE_CONCURRENCY,
+  PopResponse,
+  QueueSuccessResponse,
+  ackAuthHeaders,
+  apiKeyHeaders,
+  assertSchema,
+  assertStatus,
+  authHeaders,
+  ctx,
+  drainQueueForCurrentUser,
+  request,
+  runPool,
+  runTest,
+  setup,
+  testBridgeHeartbeatMakesExactBackendReady,
+  testDeliveryResultThirdFailureIsTerminal,
+  testQueueDatabaseDefaultDoesNotExpire,
+  testQueuedEntryPersistsUntilMacReturns,
+  testQueueReceiptIncludesRelayStatusAtEnqueue,
+  type TestResult,
+} from './imessage.blackbox.helpers';
 
 // ==================== POST /api/imessage/queue ====================
 
@@ -294,6 +188,24 @@ async function testPop_invalidToken() {
   assertStatus(res.status, 401, res.data);
 }
 
+async function testDeliveryResult_noAuth() {
+  const res = await request(`${BASE_URL}/api/imessage/queue/queue-id/result`, {
+    method: 'POST',
+    body: JSON.stringify({ success: true }),
+  });
+  assertStatus(res.status, 401, res.data);
+}
+
+async function testDeliveryStatus_noAuth() {
+  const res = await request(`${BASE_URL}/api/imessage/queue/queue-id/status`);
+  assertStatus(res.status, 401, res.data);
+}
+
+async function testBridgeStatus_noAuth() {
+  const res = await request(`${BASE_URL}/api/imessage/bridge/status`);
+  assertStatus(res.status, 401, res.data);
+}
+
 async function testPop_emptyQueue() {
   const res = await request(`${BASE_URL}/api/imessage/queue/pop`, {
     headers: authHeaders(ctx.accessToken!),
@@ -346,7 +258,7 @@ async function testReadAfterWrite_queueThenPop() {
 async function testAtomicity_noDuplicate() {
   // Queue one message
   const uniqueMsg = `Atomic test ${Date.now()}`;
-  await request(`${BASE_URL}/api/imessage/queue`, {
+  const queued = await request(`${BASE_URL}/api/imessage/queue`, {
     method: 'POST',
     headers: apiKeyHeaders(),
     body: JSON.stringify({
@@ -367,14 +279,187 @@ async function testAtomicity_noDuplicate() {
     throw new Error('First pop should return the queued message');
   }
 
-  // Second pop should be empty (message was deleted atomically)
+  // Second legacy pop is empty: old deployed clients keep one-shot behavior.
   const pop2 = await request(`${BASE_URL}/api/imessage/queue/pop`, {
     headers: authHeaders(ctx.accessToken!),
   });
   assertStatus(pop2.status, 200, pop2.data);
   const body2 = pop2.data as { message: null };
   if (body2.message !== null) {
-    throw new Error('Second pop should return null (message already consumed)');
+    throw new Error('Second legacy pop should return null (message already dispatched)');
+  }
+
+  const receipt = queued.data as { queue_id: string };
+  const status = await request(`${BASE_URL}/api/imessage/queue/${receipt.queue_id}/status`, {
+    headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+  });
+  assertStatus(status.status, 200, status.data);
+  if ((status.data as { status: string }).status !== 'legacy_dispatched') {
+    throw new Error('Legacy pop must be terminal but must not claim confirmed send');
+  }
+}
+
+async function testIdempotency_queueRetryAfterPopDoesNotDuplicate() {
+  const idempotencyKey = `tool-call-${Date.now()}`;
+  const uniqueMsg = `Idempotent queue test ${Date.now()}`;
+  const payload = {
+    user_id: ctx.userId,
+    agent_id: 'idempotent-agent',
+    idempotency_key: idempotencyKey,
+    phone_number: '+19729777432',
+    message: uniqueMsg,
+  };
+
+  const firstQueue = await request(`${BASE_URL}/api/imessage/queue`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify(payload),
+  });
+  assertStatus(firstQueue.status, 200, firstQueue.data);
+
+  const firstPop = await request(`${BASE_URL}/api/imessage/queue/pop`, {
+    headers: authHeaders(ctx.accessToken!),
+  });
+  assertStatus(firstPop.status, 200, firstPop.data);
+  const firstMessage = (firstPop.data as { message: { message: string } | null }).message;
+  if (firstMessage?.message !== uniqueMsg) {
+    throw new Error(
+      `Expected first pop to return idempotent message, got ${firstMessage?.message}`
+    );
+  }
+
+  const retryQueue = await request(`${BASE_URL}/api/imessage/queue`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify(payload),
+  });
+  assertStatus(retryQueue.status, 200, retryQueue.data);
+  const firstReceipt = firstQueue.data as { queue_id: string };
+  const retryReceipt = retryQueue.data as { queue_id: string };
+  if (retryReceipt.queue_id !== firstReceipt.queue_id) {
+    throw new Error('Activity retry returned a different queue receipt');
+  }
+
+  const secondPop = await request(`${BASE_URL}/api/imessage/queue/pop`, {
+    headers: authHeaders(ctx.accessToken!),
+  });
+  assertStatus(secondPop.status, 200, secondPop.data);
+  if ((secondPop.data as { message: unknown | null }).message !== null) {
+    throw new Error('Activity retry recreated an iMessage after it was already consumed');
+  }
+}
+
+async function testIdempotency_conflictingPayloadRejected() {
+  const idempotencyKey = `conflict-${Date.now()}`;
+  const basePayload = {
+    user_id: ctx.userId,
+    agent_id: 'conflict-agent',
+    idempotency_key: idempotencyKey,
+    phone_number: '+19729777432',
+  };
+  const first = await request(`${BASE_URL}/api/imessage/queue`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({ ...basePayload, message: 'first payload' }),
+  });
+  assertStatus(first.status, 200, first.data);
+
+  const conflict = await request(`${BASE_URL}/api/imessage/queue`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({ ...basePayload, message: 'different payload' }),
+  });
+  assertStatus(conflict.status, 409, conflict.data);
+
+  const cleanup = await request(`${BASE_URL}/api/imessage/queue/pop`, {
+    headers: authHeaders(ctx.accessToken!),
+  });
+  assertStatus(cleanup.status, 200, cleanup.data);
+  const cleanupMessage = (cleanup.data as { message: { message: string } | null }).message;
+  if (cleanupMessage?.message !== 'first payload') {
+    throw new Error('Conflicting retry changed or lost the original queued payload');
+  }
+}
+
+async function testDeliveryResult_failedSendIsRetriedThenAcknowledged() {
+  const uniqueMsg = `Retryable Mac send ${Date.now()}`;
+  const queued = await request(`${BASE_URL}/api/imessage/queue`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({
+      user_id: ctx.userId,
+      agent_id: 'mac-retry-agent',
+      idempotency_key: `mac-retry-${Date.now()}`,
+      phone_number: '+19729777432',
+      message: uniqueMsg,
+    }),
+  });
+  assertStatus(queued.status, 200, queued.data);
+
+  const firstClaim = await request(`${BASE_URL}/api/imessage/queue/pop`, {
+    headers: ackAuthHeaders(ctx.accessToken!),
+  });
+  const firstMessage = (
+    firstClaim.data as {
+      message: { id: string; message: string; claim_token: string } | null;
+    }
+  ).message;
+  if (firstMessage?.message !== uniqueMsg)
+    throw new Error('Mac did not claim the queued retry test message');
+
+  const failed = await request(`${BASE_URL}/api/imessage/queue/${firstMessage.id}/result`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken!),
+    body: JSON.stringify({
+      claim_token: firstMessage.claim_token,
+      success: false,
+      error: 'Messages permission denied',
+    }),
+  });
+  assertStatus(failed.status, 200, failed.data);
+
+  const retryClaim = await request(`${BASE_URL}/api/imessage/queue/pop`, {
+    headers: ackAuthHeaders(ctx.accessToken!),
+  });
+  const retryMessage = (
+    retryClaim.data as {
+      message: { id: string; message: string; claim_token: string } | null;
+    }
+  ).message;
+  if (retryMessage?.id !== firstMessage.id)
+    throw new Error('Failed Mac send was not released for retry');
+  if (retryMessage.claim_token === firstMessage.claim_token)
+    throw new Error('A retry must receive a new claim token');
+
+  const stale = await request(`${BASE_URL}/api/imessage/queue/${retryMessage.id}/result`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken!),
+    body: JSON.stringify({ claim_token: firstMessage.claim_token, success: true }),
+  });
+  assertStatus(stale.status, 409, stale.data);
+
+  const delivered = await request(`${BASE_URL}/api/imessage/queue/${retryMessage.id}/result`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken!),
+    body: JSON.stringify({ claim_token: retryMessage.claim_token, success: true }),
+  });
+  assertStatus(delivered.status, 200, delivered.data);
+
+  const afterDelivery = await request(`${BASE_URL}/api/imessage/queue/pop`, {
+    headers: authHeaders(ctx.accessToken!),
+  });
+  if ((afterDelivery.data as { message: unknown | null }).message !== null) {
+    throw new Error('Delivered iMessage remained eligible for another send');
+  }
+
+  const receipt = queued.data as { queue_id: string };
+  const status = await request(`${BASE_URL}/api/imessage/queue/${receipt.queue_id}/status`, {
+    headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+  });
+  assertStatus(status.status, 200, status.data);
+  const statusBody = status.data as { status: string; sent_at: string | null };
+  if (statusBody.status !== 'sent' || statusBody.sent_at === null) {
+    throw new Error(`Expected confirmed send status, got ${JSON.stringify(status.data)}`);
   }
 }
 
@@ -488,24 +573,7 @@ async function runAll() {
   console.log(`  User: ${ctx.userId}\n`);
 
   // Drain any existing queued messages for this user first
-  let drained = 0;
-  let drainErrors = 0;
-  // eslint-disable-next-line no-restricted-syntax
-  while (drainErrors < 10) {
-    const res = await request(`${BASE_URL}/api/imessage/queue/pop`, {
-      headers: authHeaders(ctx.accessToken!),
-    });
-    if (res.status !== 200) {
-      drainErrors++;
-      await new Promise((r) => setTimeout(r, 100));
-      continue;
-    }
-    const body = res.data as { message: unknown | null };
-    if (!body.message) break;
-    drained++;
-    drainErrors = 0;
-    if (drained > 1000) break; // safety limit
-  }
+  const drained = await drainQueueForCurrentUser();
   if (drained > 0) console.log(`  Drained ${drained} existing messages\n`);
 
   const parallelTests = [
@@ -514,6 +582,9 @@ async function runAll() {
     { name: 'POST /queue -- invalid token -> 401', fn: testQueue_invalidToken },
     { name: 'GET /queue/pop -- no auth -> 401', fn: testPop_noAuth },
     { name: 'GET /queue/pop -- invalid token -> 401', fn: testPop_invalidToken },
+    { name: 'POST /queue/:id/result -- no auth -> 401', fn: testDeliveryResult_noAuth },
+    { name: 'GET /queue/:id/status -- no auth -> 401', fn: testDeliveryStatus_noAuth },
+    { name: 'GET /bridge/status -- no auth -> 401', fn: testBridgeStatus_noAuth },
     // validation
     { name: 'POST /queue -- missing all fields -> 401', fn: testQueue_missingAllFields },
     { name: 'POST /queue -- missing user_id -> 401', fn: testQueue_missingUserId },
@@ -541,6 +612,38 @@ async function runAll() {
     // read-after-write (queue then pop, must be sequential)
     { name: 'read-after-write -- queue then pop', fn: testReadAfterWrite_queueThenPop },
     { name: 'atomicity -- no duplicate pop', fn: testAtomicity_noDuplicate },
+    {
+      name: 'idempotency -- activity retry after pop does not duplicate',
+      fn: testIdempotency_queueRetryAfterPopDoesNotDuplicate,
+    },
+    {
+      name: 'idempotency -- conflicting payload rejected',
+      fn: testIdempotency_conflictingPayloadRejected,
+    },
+    {
+      name: 'delivery result -- failed send retries then success acknowledges',
+      fn: testDeliveryResult_failedSendIsRetriedThenAcknowledged,
+    },
+    {
+      name: 'delivery result -- third reported send failure is terminal',
+      fn: testDeliveryResultThirdFailureIsTerminal,
+    },
+    {
+      name: 'durability -- queued entry remains sendable when Mac returns later',
+      fn: testQueuedEntryPersistsUntilMacReturns,
+    },
+    {
+      name: 'durability -- database default does not expire queued sends',
+      fn: testQueueDatabaseDefaultDoesNotExpire,
+    },
+    {
+      name: 'relay status -- queue receipt reports current Mac availability',
+      fn: testQueueReceiptIncludesRelayStatusAtEnqueue,
+    },
+    {
+      name: 'bridge preflight -- ack poll makes exact backend ready',
+      fn: testBridgeHeartbeatMakesExactBackendReady,
+    },
     { name: 'ordering -- FIFO pop order', fn: testOrdering_fifo },
     {
       name: 'concurrency -- 10 parallel empty pops all null',
@@ -560,24 +663,7 @@ async function runAll() {
   }
 
   // Drain messages left by happy path tests before RAW/atomicity/ordering tests
-  let postDrain = 0;
-  let postDrainErrors = 0;
-  // eslint-disable-next-line no-restricted-syntax
-  while (postDrainErrors < 10) {
-    const res = await request(`${BASE_URL}/api/imessage/queue/pop`, {
-      headers: authHeaders(ctx.accessToken!),
-    });
-    if (res.status !== 200) {
-      postDrainErrors++;
-      await new Promise((r) => setTimeout(r, 100));
-      continue;
-    }
-    const body = res.data as { message: unknown | null };
-    if (!body.message) break;
-    postDrain++;
-    postDrainErrors = 0;
-    if (postDrain > 1000) break;
-  }
+  const postDrain = await drainQueueForCurrentUser();
   if (postDrain > 0) console.log(`  Drained ${postDrain} messages from happy-path tests`);
 
   console.log(`Running ${drainTests.length} sequential RAW tests...`);

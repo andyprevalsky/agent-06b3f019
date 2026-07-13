@@ -21,6 +21,15 @@ export interface AgentPhoneInboundMessage {
   receivedAt: Date;
 }
 
+export interface AgentPhoneOutboundMessage {
+  id: string;
+  status: string;
+  channel: string;
+  fromNumber: string;
+  toNumber: string;
+  conversationId: string | null;
+}
+
 function apiKey() {
   return process.env.AGENTPHONE_API_KEY?.trim() || '';
 }
@@ -129,6 +138,57 @@ export async function createAgentPhoneNumber(params: {
     agentId,
     numberId: number.id,
     phoneNumber: number.phoneNumber,
+  };
+}
+
+export async function sendAgentPhoneMessage(params: {
+  agentId?: string | null;
+  numberId?: string | null;
+  fromNumber?: string | null;
+  toNumber: string;
+  body: string;
+}): Promise<AgentPhoneOutboundMessage> {
+  if (!isAgentPhoneConfigured()) {
+    throw new Error('AGENTPHONE_API_KEY is not configured');
+  }
+
+  const response = await fetch(`${baseUrl()}/messages`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({
+      body: params.body,
+      to_number: params.toNumber,
+      ...(params.numberId
+        ? { number_id: params.numberId }
+        : params.fromNumber
+          ? { from_number: params.fromNumber }
+          : params.agentId
+            ? { agent_id: params.agentId }
+            : {}),
+    }),
+  });
+  const data = await parseJson(response);
+  if (!response.ok) {
+    throw new Error(
+      `AgentPhone message send failed: HTTP ${response.status} ${JSON.stringify(data).slice(0, 300)}`
+    );
+  }
+
+  const id = stringValue(data.id);
+  const status = stringValue(data.status);
+  const channel = stringValue(data.channel);
+  const fromNumber = stringValue(data.from_number);
+  const toNumber = stringValue(data.to_number);
+  if (id === '' || status === '' || channel === '' || fromNumber === '' || toNumber === '') {
+    throw new Error('AgentPhone message send response missing delivery receipt fields');
+  }
+  return {
+    id,
+    status,
+    channel,
+    fromNumber,
+    toNumber,
+    conversationId: stringValue(data.conversation_id) || null,
   };
 }
 

@@ -81,7 +81,7 @@ const SYSTEM_TOOLS = [
   { name: 'read_message_history', description: "Read the user's recent message history" },
   {
     name: 'message_person',
-    description: 'Send messages via iMessage or email with AI-generated content',
+    description: 'Send via user iMessage relay, immediate agent SMS, or email',
   },
   {
     name: 'send_message_to_user',
@@ -145,7 +145,7 @@ app.use(
 );
 app.use(
   '/api/agentphone',
-  express.raw({ type: 'application/json', limit: '1mb' }),
+  express.json({ type: 'application/json', limit: '1mb' }),
   agentPhoneRouter
 );
 

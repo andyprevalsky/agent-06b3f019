@@ -1,0 +1,140 @@
+import { describe, expect, it, vi } from 'vitest';
+import {
+  runRelay,
+  type RelayDependencies,
+  type RelayMarkerStore,
+  type RelayOutcome,
+  type RelayQueueMessage,
+} from '../../scripts/cloudbench-imessage-relay';
+
+const queuedMessage = (claimToken = 'claim-1'): RelayQueueMessage => ({
+  id: 'queue-1',
+  phone_number: '+19729777432',
+  message: 'Hi! This is the Rose iMessage send bench.',
+  agent_id: 'agent-1',
+  created_at: '2026-07-13T00:00:00.000Z',
+  claim_token: claimToken,
+});
+
+function success<T>(data?: T): RelayOutcome<T> {
+  return { ok: true, status: 200, statusText: 'OK', data };
+}
+
+function harness(popResults: RelayOutcome<{ message: RelayQueueMessage | null }>[]) {
+  let now = 0;
+  const sentMarkers = new Set<string>();
+  const markers: RelayMarkerStore = {
+    has: vi.fn((id) => sentMarkers.has(id)),
+    mark: vi.fn((id) => sentMarkers.add(id)),
+    clear: vi.fn((id) => sentMarkers.delete(id)),
+  };
+  const dependencies: RelayDependencies = {
+    pop: vi.fn(async () => popResults.shift() ?? success({ message: null })),
+    report: vi.fn(async () => success()),
+    send: vi.fn(async () => undefined),
+    markers,
+    now: () => now,
+    sleep: vi.fn(async (milliseconds) => {
+      now += milliseconds;
+    }),
+    log: vi.fn(),
+  };
+  return { dependencies, markers };
+}
+
+const config = {
+  expectedPhone: '+19729777432',
+  expectedMessage: 'Hi! This is the Rose iMessage send bench.',
+  timeoutMs: 10_000,
+  pollIntervalMs: 100,
+};
+
+describe('cloudbench iMessage relay', () => {
+  it('establishes a heartbeat, sends the exact message, and ACKs durably', async () => {
+    const { dependencies, markers } = harness([
+      success({ message: null }),
+      success({ message: queuedMessage() }),
+    ]);
+
+    await expect(runRelay(config, dependencies)).resolves.toEqual({
+      queueId: 'queue-1',
+      agentId: 'agent-1',
+      phoneNumber: '+19729777432',
+    });
+    expect(dependencies.send).toHaveBeenCalledTimes(1);
+    expect(dependencies.report).toHaveBeenCalledWith('queue-1', {
+      claim_token: 'claim-1',
+      success: true,
+    });
+    expect(markers.mark).toHaveBeenCalledWith('queue-1');
+    expect(markers.clear).toHaveBeenCalledWith('queue-1');
+    expect(dependencies.log).toHaveBeenCalledWith('bridge heartbeat established');
+  });
+
+  it('never runs AppleScript twice when an ACK is lost and the item is reclaimed', async () => {
+    const { dependencies, markers } = harness([
+      success({ message: queuedMessage('claim-1') }),
+      success({ message: queuedMessage('claim-2') }),
+    ]);
+    vi.mocked(dependencies.report)
+      .mockResolvedValueOnce({ ok: false, status: 503, statusText: 'Unavailable' })
+      .mockResolvedValueOnce(success());
+
+    await runRelay(config, dependencies);
+
+    expect(dependencies.send).toHaveBeenCalledTimes(1);
+    expect(dependencies.report).toHaveBeenNthCalledWith(1, 'queue-1', {
+      claim_token: 'claim-1',
+      success: true,
+    });
+    expect(dependencies.report).toHaveBeenNthCalledWith(2, 'queue-1', {
+      claim_token: 'claim-2',
+      success: true,
+    });
+    expect(markers.clear).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed and reports a mismatched queue item without sending it', async () => {
+    const unexpected = { ...queuedMessage(), message: 'unrelated user message' };
+    const { dependencies } = harness([success({ message: unexpected })]);
+
+    await expect(runRelay(config, dependencies)).rejects.toThrow('Refusing unexpected queue item');
+    expect(dependencies.send).not.toHaveBeenCalled();
+    expect(dependencies.report).toHaveBeenCalledWith(
+      'queue-1',
+      expect.objectContaining({ claim_token: 'claim-1', success: false })
+    );
+  });
+
+  it('reports AppleScript failures and retries only after the backend requeues', async () => {
+    const { dependencies } = harness([
+      success({ message: queuedMessage('claim-1') }),
+      success({ message: queuedMessage('claim-2') }),
+    ]);
+    vi.mocked(dependencies.send)
+      .mockRejectedValueOnce(new Error('Messages unavailable'))
+      .mockResolvedValueOnce(undefined);
+
+    await runRelay(config, dependencies);
+
+    expect(dependencies.send).toHaveBeenCalledTimes(2);
+    expect(dependencies.report).toHaveBeenNthCalledWith(1, 'queue-1', {
+      claim_token: 'claim-1',
+      success: false,
+      error: 'Messages unavailable',
+    });
+    expect(dependencies.report).toHaveBeenNthCalledWith(2, 'queue-1', {
+      claim_token: 'claim-2',
+      success: true,
+    });
+  });
+
+  it('times out instead of claiming success from heartbeats alone', async () => {
+    const { dependencies } = harness([]);
+
+    await expect(runRelay({ ...config, timeoutMs: 250 }, dependencies)).rejects.toThrow(
+      'Timed out waiting for confirmed benchmark iMessage'
+    );
+    expect(dependencies.send).not.toHaveBeenCalled();
+  });
+});

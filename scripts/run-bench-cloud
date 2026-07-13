@@ -1015,6 +1015,12 @@ fi
 # Comma-joined task list for the on-box driver + human-readable display.
 TASKS_CSV="$(IFS=,; echo "${BENCH_TASKS[*]}")"
 TASKS_DISPLAY="${BENCH_TASKS[*]}"
+NEEDS_IMESSAGE_RELAY="0"
+for task_name in "${BENCH_TASKS[@]}"; do
+    [ "$task_name" = "message-person" ] && NEEDS_IMESSAGE_RELAY="1"
+done
+IMESSAGE_RELAY_EXPECTED_PHONE="+19729777432"
+IMESSAGE_RELAY_EXPECTED_MESSAGE="Hi! This is the Rose iMessage send bench."
 # base64 the task list so it survives the base64/exec layers verbatim (printf %q
 # escapes the comma to '\,', which the double-decode + `bash` re-parse mangled,
 # dropping every task after the first).
@@ -1078,6 +1084,7 @@ write_state "$mid"
 PROXY_PID=""
 DASHBOARD_PID=""
 DASHBOARD_MIRROR_PID=""
+IMESSAGE_RELAY_PID=""
 stop_proxy() {
     # `FLY proxy … &` backgrounds the FLY() shell function, so $PROXY_PID is the
     # subshell — the actual `flyctl proxy` runs as its child and would orphan
@@ -1091,8 +1098,14 @@ stop_proxy() {
         pkill -f "flyctl proxy $LIVE_BACKEND_PORT:$REMOTE_BACKEND_PORT -a $APP" 2>/dev/null || true
     fi
     [ -n "$DASHBOARD_MIRROR_PID" ] && kill "$DASHBOARD_MIRROR_PID" 2>/dev/null || true
+    if [ -n "$IMESSAGE_RELAY_PID" ]; then
+        pkill -P "$IMESSAGE_RELAY_PID" 2>/dev/null || true
+        kill "$IMESSAGE_RELAY_PID" 2>/dev/null || true
+        wait "$IMESSAGE_RELAY_PID" 2>/dev/null || true
+    fi
     PROXY_PID=""
     DASHBOARD_MIRROR_PID=""
+    IMESSAGE_RELAY_PID=""
 }
 
 # Reap the live archive-frontend Vite (spawned on-demand by agent_link_server for
@@ -1408,10 +1421,11 @@ cleanup_staged_local_files() {
 }
 
 LOCAL_PATCH_FILE=""
-if ! git -C "$ROOT_DIR" diff HEAD --quiet --binary; then
+if ! git -C "$ROOT_DIR" diff --quiet --binary \
+    || [ -n "$(git -C "$ROOT_DIR" ls-files --others --exclude-standard | head -1)" ]; then
     LOCAL_PATCH_FILE="$(mktemp)"
     STAGED_LOCAL_FILES+=("$LOCAL_PATCH_FILE")
-    git -C "$ROOT_DIR" diff HEAD --binary > "$LOCAL_PATCH_FILE"
+    bash "$ROOT_DIR/scripts/create-worktree-patch.sh" "$ROOT_DIR" > "$LOCAL_PATCH_FILE"
 fi
 
 # Proxy the box BACKEND (not its frontend) to the Mac. The local archive frontend
@@ -1420,7 +1434,7 @@ fi
 # frontend was fragile AND RLS-blocked; see agent_link_server.py.)
 LIVE_BACKEND_PORT=""
 LIVE_BACKEND_URL=""
-if [ "$DASHBOARD" = "1" ]; then
+if [ "$DASHBOARD" = "1" ] || [ "$NEEDS_IMESSAGE_RELAY" = "1" ]; then
     LIVE_BACKEND_PORT="$(choose_free_local_port "$((LOCAL_DASH_PORT + 1))")"
     if [ -n "$LIVE_BACKEND_PORT" ]; then
         LIVE_BACKEND_URL="http://localhost:$LIVE_BACKEND_PORT"
@@ -1535,8 +1549,9 @@ if [ "$_ok" = 1 ]; then echo "✅ On-box driver launched + confirmed running."; 
 # ── 3a. Proxy the box BACKEND to the Mac so running rows open a live view ────
 # The local archive frontend renders benchmark agents by reading a local archive
 # API that proxies live GETs here with the benchmark API key (bypassing RLS).
-if [ "$DASHBOARD" = "1" ] && [ -n "$LIVE_BACKEND_PORT" ]; then
-        FLY proxy "$LIVE_BACKEND_PORT:$REMOTE_BACKEND_PORT" -a "$APP" --bind-addr 127.0.0.1 -q \
+if { [ "$DASHBOARD" = "1" ] || [ "$NEEDS_IMESSAGE_RELAY" = "1" ]; } && [ -n "$LIVE_BACKEND_PORT" ]; then
+        REMOTE_BACKEND_HOST="${mid}.vm.${APP}.internal"
+        FLY proxy "$LIVE_BACKEND_PORT:$REMOTE_BACKEND_PORT" "$REMOTE_BACKEND_HOST" -a "$APP" --bind-addr 127.0.0.1 -q \
             > "$OUT_DIR/cloudbench-backend-proxy.log" 2>&1 &
         PROXY_PID=$!
         echo "🌐 Live backend proxy: $LIVE_BACKEND_URL → fly:$REMOTE_BACKEND_PORT"
@@ -1547,6 +1562,60 @@ if [ "$DASHBOARD" = "1" ] && [ -n "$LIVE_BACKEND_PORT" ]; then
         printf '{"upstream_url":"%s","upstream_api_key":"%s","upstream_user_id":"%s","machine_id":"%s","app":"%s"}\n' \
             "$LIVE_BACKEND_URL" "$CLOUDBENCH_API_KEY" "$CLOUDBENCH_RUNNER_USER_ID" "$mid" "$APP" \
             > "$OUT_DIR/.upstream.json" 2>/dev/null || true
+fi
+
+# ── 3b. Bridge the exact benchmark backend to this Mac's Messages app ──────
+# The backend/worker run inside Fly, but AppleScript must execute on macOS. For
+# the live iMessage task only, run a fail-closed local relay through the exact
+# machine-pinned backend proxy. It uses the installed Rose user's encrypted
+# session and the current branch's IMessageSender implementation.
+IMESSAGE_RELAY_LOG="$OUT_DIR/cloudbench-imessage-relay.log"
+IMESSAGE_RELAY_MARKERS="$OUT_DIR/cloudbench-imessage-relay-markers.json"
+if [ "$NEEDS_IMESSAGE_RELAY" = "1" ]; then
+    if [ "$(uname -s)" != "Darwin" ]; then
+        echo "❌ Live message-person benchmark requires a macOS controller for Apple Messages." >&2
+        exit 1
+    fi
+    if [ -z "$LIVE_BACKEND_URL" ]; then
+        echo "❌ Could not allocate the run-scoped backend proxy required by the iMessage relay." >&2
+        exit 1
+    fi
+    RELAY_ENTRY="$ROOT_DIR/mac-app/scripts/cloudbench-imessage-relay.ts"
+    RELAY_TSX="$ROOT_DIR/mac-app/node_modules/.bin/tsx"
+    [ -f "$RELAY_ENTRY" ] || { echo "❌ Missing $RELAY_ENTRY" >&2; exit 1; }
+    [ -x "$RELAY_TSX" ] || { echo "❌ Missing executable $RELAY_TSX" >&2; exit 1; }
+    rm -f "$IMESSAGE_RELAY_LOG" "$IMESSAGE_RELAY_MARKERS"
+    (
+        cd "$ROOT_DIR/mac-app" || exit 1
+        "$RELAY_TSX" "$RELAY_ENTRY" \
+            --base-url "$LIVE_BACKEND_URL" \
+            --expected-user-id "$CLOUDBENCH_RUNNER_USER_ID" \
+            --expected-phone "$IMESSAGE_RELAY_EXPECTED_PHONE" \
+            --expected-message "$IMESSAGE_RELAY_EXPECTED_MESSAGE" \
+            --marker-file "$IMESSAGE_RELAY_MARKERS" \
+            --timeout-seconds "$RUN_TIMEOUT"
+    ) > "$IMESSAGE_RELAY_LOG" 2>&1 &
+    IMESSAGE_RELAY_PID=$!
+    echo "📨 Starting authenticated Mac iMessage relay (pid=$IMESSAGE_RELAY_PID) ..."
+    RELAY_READY="0"
+    for _ in $(seq 1 180); do
+        if grep -q 'bridge heartbeat established' "$IMESSAGE_RELAY_LOG" 2>/dev/null; then
+            RELAY_READY="1"
+            break
+        fi
+        if ! kill -0 "$IMESSAGE_RELAY_PID" 2>/dev/null; then
+            echo "❌ Mac iMessage relay exited before establishing its heartbeat." >&2
+            tail -80 "$IMESSAGE_RELAY_LOG" 2>/dev/null | sed 's/^/   /' || true
+            exit 1
+        fi
+        sleep 1
+    done
+    if [ "$RELAY_READY" != "1" ]; then
+        echo "❌ Mac iMessage relay did not establish a heartbeat within 180 seconds." >&2
+        tail -80 "$IMESSAGE_RELAY_LOG" 2>/dev/null | sed 's/^/   /' || true
+        exit 1
+    fi
+    echo "✅ Authenticated Mac iMessage relay is polling this benchmark backend."
 fi
 
 # ── 3. Mirror the live dashboard to the Mac (URL printed; no auto-open) ─────
@@ -1720,6 +1789,19 @@ while :; do
     sleep 10
 done
 
+# Preserve the complete remote driver and service logs before the EXIT trap
+# stops/destroys the machine. Console progress intentionally shows only a tail;
+# these artifacts are the authoritative failure evidence.
+mkdir -p "$OUT_DIR/remote-logs"
+cp -f "$SSH_LOG" "$OUT_DIR/remote-logs/cloudbench-driver.log" 2>/dev/null || true
+for remote_log_name in stack.log services.json logs/backend.log logs/worker.log logs/research.log; do
+    local_log_name="$(printf '%s' "$remote_log_name" | tr '/' '-')"
+    ssh_read "$mid" "cat '$REMOTE_REPO/.context/cloudbench/$remote_log_name' 2>/dev/null" \
+        > "$OUT_DIR/remote-logs/$local_log_name" 2>/dev/null || true
+    [ -s "$OUT_DIR/remote-logs/$local_log_name" ] \
+        || rm -f "$OUT_DIR/remote-logs/$local_log_name" 2>/dev/null || true
+done
+
 # ── 5. Retrieve report-card.json + newest runs/*.json directly from the box ──
 # The bench.log already contains the report card / run record between markers as
 # a fallback, but fetch the on-disk files directly for fidelity while the machine
@@ -1729,6 +1811,9 @@ CARD_OUT="$OUT_DIR/cloudbench-report-card.json"
 RUN_OUT="$OUT_DIR/cloudbench-run.json"
 RUN_CONTEXT_DIR="$OUT_DIR/cloudbench-runs/$RUN_WORKSPACE_NAME"
 mkdir -p "$RUN_CONTEXT_DIR"
+if [ "$NEEDS_IMESSAGE_RELAY" = "1" ] && [ -f "$IMESSAGE_RELAY_LOG" ]; then
+    cp -f "$IMESSAGE_RELAY_LOG" "$RUN_CONTEXT_DIR/imessage-relay.log" 2>/dev/null || true
+fi
 
 CARD_JSON="$(ssh_read "$mid" "cat '$REMOTE_REPO/.context/cloudbench/report-card.json' 2>/dev/null" 2>/dev/null || true)"
 if [ -z "$CARD_JSON" ]; then
@@ -1738,6 +1823,24 @@ fi
 RUN_JSON="$(ssh_read "$mid" "cat '$REMOTE_REPO/.context/cloudbench/run.json' 2>/dev/null" 2>/dev/null || true)"
 if [ -z "$RUN_JSON" ]; then
     RUN_JSON="$(awk "/$RESULT_BEGIN/{f=1;next} /$RESULT_END/{f=0} f" "$SSH_LOG" 2>/dev/null | grep -av '^run_file:')"
+fi
+
+RUN_IDENTITY_OK="0"
+if [ -n "$RUN_JSON" ]; then
+    candidate_run="$(mktemp)"
+    printf '%s\n' "$RUN_JSON" > "$candidate_run"
+    validation_args=()
+    for task_name in "${BENCH_TASKS[@]}"; do
+        validation_args+=(--expected-task "$task_name")
+    done
+    if python3 "$ROOT_DIR/scripts/cloudbench_result.py" "$candidate_run" "${validation_args[@]}"; then
+        RUN_IDENTITY_OK="1"
+    else
+        echo "❌ Rejected stale or mismatched cloud benchmark artifact."
+        cp -f "$candidate_run" "$OUT_DIR/rejected-run.json" 2>/dev/null || true
+        RUN_JSON=""
+    fi
+    rm -f "$candidate_run"
 fi
 
 echo ""
@@ -1785,15 +1888,32 @@ echo ""
 echo "🏁 benchmark exit code (run_benchmark.py --ci): ${BENCH_EXIT:-unknown}   (finished=$FINISHED, timed_out=$TIMED_OUT)"
 
 OUTCOME_OK="0"
+IMESSAGE_RELAY_OK="1"
+if [ "$NEEDS_IMESSAGE_RELAY" = "1" ]; then
+    IMESSAGE_RELAY_OK="0"
+    if grep -q 'complete queue_id=' "$IMESSAGE_RELAY_LOG" 2>/dev/null; then
+        IMESSAGE_RELAY_OK="1"
+    else
+        echo "❌ Missing confirmed completion from the local Mac iMessage relay." >&2
+        tail -80 "$IMESSAGE_RELAY_LOG" 2>/dev/null | sed 's/^/   /' || true
+    fi
+fi
 RUN_PASS_RATE="$(printf '%s' "$PASS_RATE" | grep -oE 'PASS_RATE_VALUE= [0-9.]+' | awk '{print $2}' || true)"
-if [ -n "$RUN_PASS_RATE" ]; then
-    case "$RUN_PASS_RATE" in
-        1|1.0|1.00) OUTCOME_OK="1" ;;
-    esac
-    echo "🎯 authoritative pass_rate from run record: $RUN_PASS_RATE (ok=$OUTCOME_OK)"
-elif [ "$FINISHED" = "1" ] && [ "${BENCH_EXIT:-1}" = "0" ]; then
+RUN_PASS_OK="0"
+if [ "$RUN_IDENTITY_OK" = "1" ] && [ -s "$RUN_OUT" ]; then
+    validation_args=()
+    for task_name in "${BENCH_TASKS[@]}"; do
+        validation_args+=(--expected-task "$task_name")
+    done
+    if python3 "$ROOT_DIR/scripts/cloudbench_result.py" "$RUN_OUT" "${validation_args[@]}" --require-pass; then
+        RUN_PASS_OK="1"
+    fi
+fi
+if [ "$FINISHED" = "1" ] && [ "$TIMED_OUT" = "0" ] && [ "${BENCH_EXIT:-1}" = "0" ] \
+    && [ "$RUN_PASS_OK" = "1" ] && [ "$IMESSAGE_RELAY_OK" = "1" ]; then
     OUTCOME_OK="1"
 fi
+echo "🎯 result contract: identity=$RUN_IDENTITY_OK pass=$RUN_PASS_OK relay=$IMESSAGE_RELAY_OK benchmark_exit=${BENCH_EXIT:-unknown} (ok=$OUTCOME_OK)"
 
 rm -f "$SSH_LOG"
 

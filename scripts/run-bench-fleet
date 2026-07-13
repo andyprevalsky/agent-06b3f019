@@ -175,7 +175,7 @@ PY
 # it is on origin (unpushed commits never reach the box), and the uncommitted diff
 # that is shipped as a patch. Also stashed to $UNIFIED_DIR for the dashboard header.
 print_code_provenance() {
-    local branch head_sha head_sub pushed dirtystat
+    local branch head_sha head_sub pushed dirtystat untracked_count
     branch="$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
     head_sha="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo '?')"
     head_sub="$(git -C "$ROOT_DIR" log -1 --pretty=%s 2>/dev/null || echo '')"
@@ -188,14 +188,16 @@ print_code_provenance() {
     echo "  branch : $branch"
     echo "  ref    : $BENCH_REF  ($head_sha $head_sub)"
     echo "  pushed : $pushed"
-    if git -C "$ROOT_DIR" diff HEAD --quiet 2>/dev/null; then
+    untracked_count="$(git -C "$ROOT_DIR" ls-files --others --exclude-standard | wc -l | tr -d ' ')"
+    if git -C "$ROOT_DIR" diff --quiet 2>/dev/null && [ "$untracked_count" = "0" ]; then
         echo "  diff   : clean working tree (running committed $head_sha exactly)"
         CODE_SUMMARY="$branch@$head_sha (clean)"
     else
-        dirtystat="$(git -C "$ROOT_DIR" diff HEAD --shortstat 2>/dev/null | sed 's/^ *//')"
-        echo "  diff   : DIRTY — shipped as a patch on top of $head_sha: $dirtystat"
-        git -C "$ROOT_DIR" diff HEAD --stat 2>/dev/null | sed 's/^/           /' | tail -30
-        CODE_SUMMARY="$branch@$head_sha +patch($dirtystat)"
+        dirtystat="$(git -C "$ROOT_DIR" diff --shortstat 2>/dev/null | sed 's/^ *//')"
+        echo "  diff   : DIRTY — shipped as a patch on top of $head_sha: $dirtystat, $untracked_count untracked"
+        git -C "$ROOT_DIR" diff --stat 2>/dev/null | sed 's/^/           /' | tail -30
+        git -C "$ROOT_DIR" ls-files --others --exclude-standard | sed 's/^/           + /' | tail -30
+        CODE_SUMMARY="$branch@$head_sha +patch($dirtystat, $untracked_count untracked)"
     fi
     echo "══════════════════════════════════════════════════════════"
 }
@@ -432,6 +434,7 @@ fi
 OWNED_CLONES_FILE="$FLEET_DIR/owned-clones.ids"
 AUTOSCALER_PIDS=()
 CHILD_PIDS=()
+CHILD_EXIT_CODES=()
 CHILD_OUT=()
 CHILD_BENCH=()
 CHILD_MODE=()
@@ -618,8 +621,10 @@ BOX_HEALTH_PORT="3003"     # cloudbench-run.sh HEALTH_PORT = CONDUCTOR_PORT(3001
 BOX_BACKEND_PORT="3001"
 BOX_WMH_PORT="3007"        # run.sh WMH_PORT = base+6
 FLEET_PATCH_FILE=""
-if ! git -C "$ROOT_DIR" diff HEAD --quiet --binary 2>/dev/null; then
-    FLEET_PATCH_FILE="$(mktemp)"; git -C "$ROOT_DIR" diff HEAD --binary > "$FLEET_PATCH_FILE"
+if ! git -C "$ROOT_DIR" diff --quiet --binary 2>/dev/null \
+    || [ -n "$(git -C "$ROOT_DIR" ls-files --others --exclude-standard | head -1)" ]; then
+    FLEET_PATCH_FILE="$(mktemp)"
+    bash "$ROOT_DIR/scripts/create-worktree-patch.sh" "$ROOT_DIR" > "$FLEET_PATCH_FILE"
 fi
 
 _machine_priv_ip() {  # _machine_priv_ip <machine_id>
@@ -996,7 +1001,14 @@ if ! release_start_barrier; then
 fi
 
 # ── Wait for all children, then aggregate ────────────────────────────────────
-for p in "${CHILD_PIDS[@]}"; do wait "$p" 2>/dev/null || true; done
+for j in "${!CHILD_PIDS[@]}"; do
+    p="${CHILD_PIDS[$j]}"
+    if wait "$p" 2>/dev/null; then
+        CHILD_EXIT_CODES[$j]="0"
+    else
+        CHILD_EXIT_CODES[$j]="$?"
+    fi
+done
 # One final merge so the batch dashboard reflects terminal results, then stop the aggregator.
 kill "$UNIFIED_AGG_PID" 2>/dev/null || true
 python3 "$ROOT_DIR/scripts/cloudbench-aggregate-runs.py" "$FLEET_DIR" "$UNIFIED_DIR/run.json"
@@ -1006,16 +1018,26 @@ echo "════════════════════ FLEET SUMMARY
 FLEET_PASS=0; FLEET_TOTAL=0
 for j in "${!CHILD_BENCH[@]}"; do
     bench="${CHILD_BENCH[$j]}"; out="${CHILD_OUT[$j]}"; mode="${CHILD_MODE[$j]}"
-    line="$(RUN_JSON_PATH="$out/cloudbench-run.json" python3 -c '
-import json,os
+    child_rc="${CHILD_EXIT_CODES[$j]:-1}"
+    line="$(RUN_JSON_PATH="$out/cloudbench-run.json" EXPECTED_TASK="$bench" CHILD_RC="$child_rc" python3 -c '
+import json,os,subprocess,sys
 p=os.environ["RUN_JSON_PATH"]
+expected=os.environ["EXPECTED_TASK"]
+child_rc=int(os.environ["CHILD_RC"])
 try:
+    check=subprocess.run(
+        [sys.executable, "scripts/cloudbench_result.py", p, "--expected-task", expected, "--require-pass"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
     r=json.load(open(p)); tasks=r.get("tasks",[])
     t=tasks[0] if tasks else {}
-    passed=bool(t.get("passed"))
+    passed=child_rc == 0 and check.returncode == 0
     aid=t.get("agent_id") or ""
     dur=t.get("duration_seconds")
-    print(("PASS" if passed else "FAIL"), aid, ("" if dur is None else round(float(dur),1)))
+    status="PASS" if passed else ("CHILDFAIL" if child_rc != 0 else "FAIL")
+    print(status, aid, ("" if dur is None else round(float(dur),1)))
 except Exception as e:
     print("NORESULT", "", "")
 ' 2>/dev/null || echo "NORESULT  ")"

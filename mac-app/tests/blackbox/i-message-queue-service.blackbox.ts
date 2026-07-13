@@ -52,10 +52,12 @@ vi.mock('../../main/services/iMessageSender', () => ({
 
 const POP_PATH = '/api/imessage/queue/pop';
 const POP_URL = `http://localhost:3001${POP_PATH}`;
+const RESULT_PATH = '/api/imessage/queue/';
 
 // Drive the pop endpoint via a queue of responses so each test can script the
 // exact sequence the polling loop will observe.
 let popQueue: Response[] = [];
+let resultQueue: Response[] = [];
 const popResponder: MockResponder = () => {
   if (popQueue.length === 0) {
     return new Response(JSON.stringify({ message: null }), {
@@ -65,12 +67,19 @@ const popResponder: MockResponder = () => {
   }
   return popQueue.shift()!;
 };
+const resultResponder: MockResponder = () =>
+  resultQueue.shift() ??
+  new Response(JSON.stringify({ success: true }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
 
 function enqueueMessage(overrides: {
   id?: string;
   phone_number?: string;
   message?: string;
   agent_id?: string;
+  claim_token?: string;
 }): void {
   popQueue.push(
     new Response(
@@ -81,6 +90,7 @@ function enqueueMessage(overrides: {
           message: overrides.message ?? 'hello',
           agent_id: overrides.agent_id ?? 'agent-1',
           created_at: '2025-01-01T00:00:00.000Z',
+          claim_token: overrides.claim_token ?? `claim-${overrides.id ?? 'msg-1'}`,
         },
       }),
       { status: 200, headers: { 'content-type': 'application/json' } }
@@ -102,6 +112,10 @@ function enqueueStatus(status: number, body = ''): void {
 }
 
 const popCalls = () => fetchCaptures.filter((c) => c.url.includes(POP_PATH));
+const resultCalls = () =>
+  fetchCaptures.filter(
+    (capture) => capture.url.includes(RESULT_PATH) && capture.url.endsWith('/result')
+  );
 
 describe('i-message-queue-service blackbox', () => {
   let restoreFetch: (() => void) | null = null;
@@ -109,6 +123,7 @@ describe('i-message-queue-service blackbox', () => {
   beforeEach(async () => {
     clearFetchCaptures();
     popQueue = [];
+    resultQueue = [];
     vi.clearAllMocks();
 
     const { AuthService } = await import('../../main/services/auth');
@@ -119,7 +134,10 @@ describe('i-message-queue-service blackbox', () => {
       expires_at: Date.now() + 60 * 60 * 1000,
     });
 
-    restoreFetch = installFetchCapture({ [POP_PATH]: popResponder });
+    restoreFetch = installFetchCapture({
+      [POP_PATH]: popResponder,
+      [RESULT_PATH]: resultResponder,
+    });
 
     // Ensure the singleton service is stopped between tests so interval
     // ownership (the class-level `intervalId`) can't leak across cases.
@@ -174,6 +192,11 @@ describe('i-message-queue-service blackbox', () => {
       to: '+15555559999',
       message: 'second',
     });
+    expect(resultCalls()).toHaveLength(2);
+    expect(resultCalls().map((call) => JSON.parse(call.body ?? '{}'))).toEqual([
+      { claim_token: 'claim-msg-1', success: true },
+      { claim_token: 'claim-msg-2', success: true },
+    ]);
   });
 
   it('fetch-capture boundary: exact URL, method GET, Authorization header carries session token', async () => {
@@ -188,6 +211,7 @@ describe('i-message-queue-service blackbox', () => {
     expect(call.url).toBe(POP_URL);
     expect(call.method).toBe('GET');
     expect(call.headers['authorization']).toBe('Bearer test-access-token');
+    expect(call.headers['x-imessage-delivery-results']).toBe('v1');
     // Pop is a read endpoint — body must be null.
     expect(call.body).toBeNull();
   });
@@ -231,7 +255,7 @@ describe('i-message-queue-service blackbox', () => {
     expect(vi.mocked(IMessageSender.send)).not.toHaveBeenCalled();
   });
 
-  it('sender failure: send rejects → queue keeps draining, error swallowed', async () => {
+  it('sender failure: failure is reported for retry and queue keeps draining', async () => {
     const { IMessageSender } = await import('../../main/services/iMessageSender');
     const { IMessageQueueService } = await import('../../main/services/IMessageQueueService');
 
@@ -249,6 +273,46 @@ describe('i-message-queue-service blackbox', () => {
     await vi.waitFor(() => expect(popCalls()).toHaveLength(3));
 
     expect(vi.mocked(IMessageSender.send)).toHaveBeenCalledTimes(2);
+    expect(resultCalls()).toHaveLength(2);
+    expect(JSON.parse(resultCalls()[0].body ?? '{}')).toEqual({
+      claim_token: 'claim-msg-1',
+      success: false,
+      error: 'osascript timeout',
+    });
+    expect(JSON.parse(resultCalls()[1].body ?? '{}')).toEqual({
+      claim_token: 'claim-msg-2',
+      success: true,
+    });
+  });
+
+  it('send succeeded but ACK failed: next lease retries ACK without sending again', async () => {
+    const { IMessageSender } = await import('../../main/services/iMessageSender');
+    const { drainQueue } = await import('../../main/domains/i-message-queue-service/service');
+
+    resultQueue.push(
+      new Response('backend unavailable', { status: 503, statusText: 'Unavailable' }),
+      new Response(JSON.stringify({ success: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    );
+    enqueueMessage({ id: 'ack-loss', claim_token: 'claim-first' });
+    enqueueEmpty();
+    await drainQueue();
+
+    expect(vi.mocked(IMessageSender.send)).toHaveBeenCalledTimes(1);
+    expect(resultCalls()).toHaveLength(1);
+
+    enqueueMessage({ id: 'ack-loss', claim_token: 'claim-second' });
+    enqueueEmpty();
+    await drainQueue();
+
+    expect(vi.mocked(IMessageSender.send)).toHaveBeenCalledTimes(1);
+    expect(resultCalls()).toHaveLength(2);
+    expect(resultCalls().map((call) => JSON.parse(call.body ?? '{}'))).toEqual([
+      { claim_token: 'claim-first', success: true },
+      { claim_token: 'claim-second', success: true },
+    ]);
   });
 
   it('idempotent start: calling start() twice does not duplicate polling intervals', async () => {

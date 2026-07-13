@@ -6,11 +6,39 @@
  * args in, typed results out; no business logic.
  */
 
+import Store from 'electron-store';
 import { AuthService } from '../../services/auth';
 import { IMessageSender } from '../../services/iMessageSender';
 import { config } from '../../base/config';
-import { QUEUE_POP_PATH } from './config';
-import type { PopOutcome, PopResponse, Session } from './types';
+import { DELIVERY_MARKER_STORE_NAME, QUEUE_POP_PATH, queueResultPath } from './config';
+import type { DeliveryResultOutcome, PopOutcome, PopResponse, Session } from './types';
+
+interface DeliveryMarkerSchema {
+  sentQueueIds: Record<string, true>;
+}
+
+const deliveryMarkerStore = new Store<DeliveryMarkerSchema>({
+  name: DELIVERY_MARKER_STORE_NAME,
+  encryptionKey: config.encryptionKey,
+  clearInvalidConfig: true,
+});
+
+export function hasSentQueueMarker(queueId: string): boolean {
+  return deliveryMarkerStore.get('sentQueueIds', {})[queueId] === true;
+}
+
+export function markQueueMessageSent(queueId: string): void {
+  deliveryMarkerStore.set('sentQueueIds', {
+    ...deliveryMarkerStore.get('sentQueueIds', {}),
+    [queueId]: true,
+  });
+}
+
+export function clearSentQueueMarker(queueId: string): void {
+  const markers = { ...deliveryMarkerStore.get('sentQueueIds', {}) };
+  delete markers[queueId];
+  deliveryMarkerStore.set('sentQueueIds', markers);
+}
 
 /**
  * Fetch the current authenticated session, if any.
@@ -26,6 +54,7 @@ export async function popQueuedMessage(accessToken: string): Promise<PopOutcome>
   const response = await fetch(`${config.apiUrl}${QUEUE_POP_PATH}`, {
     headers: {
       Authorization: `Bearer ${accessToken}`,
+      'X-iMessage-Delivery-Results': 'v1',
     },
   });
 
@@ -42,4 +71,24 @@ export async function popQueuedMessage(accessToken: string): Promise<PopOutcome>
  */
 export async function sendIMessage(to: string, message: string): Promise<void> {
   await IMessageSender.send({ to, message });
+}
+
+/** Report the AppleScript send result so failed claims can be retried. */
+export async function reportDeliveryResult(
+  accessToken: string,
+  queueId: string,
+  result: { claim_token: string; success: boolean; error?: string }
+): Promise<DeliveryResultOutcome> {
+  const response = await fetch(`${config.apiUrl}${queueResultPath(queueId)}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(result),
+  });
+  if (!response.ok) {
+    return { ok: false, status: response.status, statusText: response.statusText };
+  }
+  return { ok: true };
 }

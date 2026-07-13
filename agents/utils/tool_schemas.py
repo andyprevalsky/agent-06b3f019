@@ -222,10 +222,7 @@ class ResponseSchemaConfig(BaseModel):
         if isinstance(value, dict) and "fields" not in value and value:
             if all(isinstance(v, str) for v in value.values()):
                 return {
-                    "fields": [
-                        {"name": k, "description": v, "type": "str", "required": True}
-                        for k, v in value.items()
-                    ]
+                    "fields": [{"name": k, "description": v, "type": "str", "required": True} for k, v in value.items()]
                 }
         return value
 
@@ -238,8 +235,7 @@ class WaitForTool(BaseModel):
         min_length=3,
         max_length=80,
         description=(
-            "Short UI phrase completing 'Waiting for ...' (3-80 characters). "
-            "Required for every wait_for call."
+            "Short UI phrase completing 'Waiting for ...' (3-80 characters). Required for every wait_for call."
         ),
     )
     until_timestamp: Optional[str] = Field(
@@ -262,6 +258,7 @@ class WaitForTool(BaseModel):
         le=100,
         description="Maximum number of condition checks before giving up (1-100, default 20). Only used with condition.",
     )
+
     @model_validator(mode="after")
     def check_mutual_exclusion(self) -> "WaitForTool":
         if self.until_timestamp and self.condition:
@@ -502,10 +499,7 @@ class SendMessageToUserTool(BaseModel):
     )
     is_question: bool = Field(
         default=True,
-        description=(
-            "True to block workflow until the user responds. "
-            "False to send a non-blocking FYI."
-        ),
+        description=("True to block workflow until the user responds. False to send a non-blocking FYI."),
     )
 
 
@@ -530,8 +524,12 @@ class MessagePersonTool(BaseModel):
             "Full name must resolve unambiguously to one person."
         )
     )
-    channel: Literal["imessage", "email"] = Field(
-        description="Communication channel: 'imessage' or 'email'.",
+    channel: Literal["imessage", "agent_sms", "email"] = Field(
+        description=(
+            "Communication channel: 'imessage' uses the user's Mac and queues while it is offline; "
+            "'agent_sms' sends immediately from the agent's own AgentPhone number and never queues; "
+            "'email' is reserved for connected email delivery."
+        ),
     )
     from_email: Optional[str] = Field(
         default=None,
@@ -546,8 +544,7 @@ class MessagePersonTool(BaseModel):
     context_gates: Optional[Dict[str, bool]] = Field(
         default=None,
         description=(
-            "Optional gates controlling which user-context chunks are included. "
-            "Allowed key: 'recent_communications'."
+            "Optional gates controlling which user-context chunks are included. Allowed key: 'recent_communications'."
         ),
     )
 
@@ -813,14 +810,10 @@ class CallPhoneNumberTool(BaseModel):
     tool: Literal["call_phone_number"]
     to: str = Field(description="Phone number to call in E.164 format.")
     system_prompt: str = Field(
-        description=(
-            "Instructions for the voice agent's identity, tone, and conversation goals during the call."
-        )
+        description=("Instructions for the voice agent's identity, tone, and conversation goals during the call.")
     )
     output_schema: ResponseSchemaConfig = Field(
-        description=(
-            "Fields to extract from the conversation when the call completes."
-        )
+        description=("Fields to extract from the conversation when the call completes.")
     )
 
 
@@ -924,6 +917,7 @@ def render_tool_list(
             description = "No description"
         lines.append(f"- {name}: {description}")
     return "\n".join(lines)
+
 
 # ============================================================================
 # Dynamic AgentAction Model Generation

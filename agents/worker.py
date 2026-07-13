@@ -38,7 +38,12 @@ from config import load_config
 from domains.call_phone_number.handler import call_phone_number_activity
 from domains.grep.repo import fetch_local_data_summary, grep_activity
 from domains.knowledge_base.handler import query_blueprints_activity, save_blueprint_activity
-from domains.message_person.repo import fetch_recent_messages_activity, generate_message_activity
+from domains.message_person.repo import (
+    fetch_recent_messages_activity,
+    generate_message_activity,
+    queue_imessage_activity,
+    send_agent_sms_activity,
+)
 from domains.read_message_history.handler import read_message_history_activity
 from domains.reasoning.handler import execute_reasoning_activity
 from domains.request_payment_card.repo import lookup_purchase_activity, mint_purchase_card_activity
@@ -1055,6 +1060,8 @@ async def main():
             read_message_history_activity,
             generate_message_activity,
             fetch_recent_messages_activity,
+            queue_imessage_activity,
+            send_agent_sms_activity,
             # Phone call activity
             call_phone_number_activity,
             # Helper activities
