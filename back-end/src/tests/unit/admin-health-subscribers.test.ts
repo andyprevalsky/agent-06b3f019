@@ -6,6 +6,7 @@ import {
   ADMIN_HEALTH_EXCLUDED_USER_IDS,
   ADMIN_USER_IDS,
 } from '../../domains/admin-health/config';
+import { recoverMissingStripeUserIds } from '../../domains/admin-health/stripeRecovery';
 import { buildSubscriberSeries } from '../../domains/admin-health/subscriberMetrics';
 import type { AdminHealthPeriod } from '../../domains/admin-health/types';
 
@@ -120,3 +121,51 @@ assert.ok(!ADMIN_HEALTH_ADDITIONAL_USER_IDS.has('1f85ff25-6e29-4c1b-8739-f917bd1
 assert.ok(ADMIN_HEALTH_ADDITIONAL_USER_IDS.has('43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9'));
 assert.ok(ADMIN_HEALTH_EXCLUDED_USER_IDS.has('1f85ff25-6e29-4c1b-8739-f917bd101a30'));
 assert.ok(!ADMIN_HEALTH_EXCLUDED_USER_IDS.has('43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9'));
+
+async function assertStripeRecoveryConcurrency(): Promise<void> {
+  const recoveredUsers = new Map([['cus_existing', 'existing-user']]);
+  const recoveryCalls: string[] = [];
+  let activeLookups = 0;
+  let maximumActiveLookups = 0;
+  await recoverMissingStripeUserIds(
+    new Map([
+      ['cus_existing', ['sub_existing']],
+      ['cus_one', ['sub_one_first', 'sub_one_unused']],
+      ['cus_two', ['sub_two_missing', 'sub_two_found']],
+      ['cus_three', ['sub_three_found']],
+    ]),
+    recoveredUsers,
+    async (subscriptionId) => {
+      recoveryCalls.push(subscriptionId);
+      activeLookups += 1;
+      maximumActiveLookups = Math.max(maximumActiveLookups, activeLookups);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      activeLookups -= 1;
+      return (
+        {
+          sub_one_first: 'user-one',
+          sub_two_found: 'user-two',
+          sub_three_found: 'user-three',
+        } as Record<string, string | undefined>
+      )[subscriptionId];
+    },
+    2
+  );
+  assert.equal(maximumActiveLookups, 2);
+  assert.ok(!recoveryCalls.includes('sub_existing'));
+  assert.ok(!recoveryCalls.includes('sub_one_unused'));
+  assert.deepStrictEqual(
+    recoveredUsers,
+    new Map([
+      ['cus_existing', 'existing-user'],
+      ['cus_one', 'user-one'],
+      ['cus_two', 'user-two'],
+      ['cus_three', 'user-three'],
+    ])
+  );
+}
+
+assertStripeRecoveryConcurrency().catch((error: unknown) => {
+  process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
+  process.exitCode = 1;
+});

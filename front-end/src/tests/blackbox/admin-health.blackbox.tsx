@@ -7,6 +7,7 @@ import { capturedRequests, clearCaptures } from './msw/capture';
 import { renderWithProviders } from './test-wrapper';
 import AdminHealth from '@/pages/AdminHealth';
 import { fetchAdminHealthData } from '@/features/admin-health/api';
+import { funnelEndToEnd } from '@/features/admin-health/components/AdminHealth';
 
 const API_BASE = 'http://localhost:3001/api';
 const defaultResizeObserver = window.ResizeObserver;
@@ -293,6 +294,22 @@ describe('AdminHealth page', () => {
             request.headers.authorization === 'Bearer admin-token',
         ),
       ).toBe(true);
+    });
+  });
+
+  it('rejects anomalous end-to-end funnel growth in current and prior periods', () => {
+    const currentAnomaly = makeFunnelSteps().slice(0, 6);
+    currentAnomaly[5].count = currentAnomaly[0].count + 1;
+    expect(funnelEndToEnd(currentAnomaly)).toEqual({
+      conversionRate: null,
+      conversionRateChange: null,
+    });
+
+    const priorAnomaly = makeFunnelSteps().slice(0, 6);
+    priorAnomaly[5].previousCount = priorAnomaly[0].previousCount + 1;
+    expect(funnelEndToEnd(priorAnomaly)).toEqual({
+      conversionRate: 0.2,
+      conversionRateChange: null,
     });
   });
 

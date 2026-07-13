@@ -184,7 +184,7 @@ function FunnelStepMetrics({
   return <span className="text-xs text-muted-foreground">Needs analytics</span>;
 }
 
-function funnelEndToEnd(steps: AdminHealthFunnelStep[]) {
+export function funnelEndToEnd(steps: AdminHealthFunnelStep[]) {
   const first = steps[0];
   const last = steps.at(-1);
   const conversionRate =
@@ -192,7 +192,8 @@ function funnelEndToEnd(steps: AdminHealthFunnelStep[]) {
     first?.count === undefined ||
     first.count === 0 ||
     last?.count === null ||
-    last?.count === undefined
+    last?.count === undefined ||
+    last.count > first.count
       ? null
       : last.count / first.count;
   const previousConversionRate =
@@ -200,7 +201,8 @@ function funnelEndToEnd(steps: AdminHealthFunnelStep[]) {
     first?.previousCount === undefined ||
     first.previousCount === 0 ||
     last?.previousCount === null ||
-    last?.previousCount === undefined
+    last?.previousCount === undefined ||
+    last.previousCount > first.previousCount
       ? null
       : last.previousCount / first.previousCount;
   return {

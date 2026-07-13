@@ -7,6 +7,7 @@ import {
   type SubscriberLifecycle,
   type SubscriberSeriesPoint,
 } from './subscriberMetrics';
+import { recoverMissingStripeUserIds } from './stripeRecovery';
 import type { AdminHealthPeriod } from './types';
 
 const log = createLogger('AdminHealth');
@@ -49,21 +50,18 @@ export async function fetchStripeSubscribersByPeriod(
     );
 
     // Recover missing local mappings from the same checkout-session client_reference_id used by
-    // webhooks. A customer can have multiple subscriptions, so try each until one identifies them.
-    for (const [customerId, subscriptionIds] of subscriptionIdsByCustomerId) {
-      if (userIdByCustomerId.has(customerId)) continue;
-      for (const subscriptionId of subscriptionIds) {
+    // webhooks. Bound concurrent Stripe calls while checking every customer accurately.
+    await recoverMissingStripeUserIds(
+      subscriptionIdsByCustomerId,
+      userIdByCustomerId,
+      async (subscriptionId) => {
         const sessions = await stripe.checkout.sessions.list({
           subscription: subscriptionId,
           limit: 1,
         });
-        const userId = sessions.data[0]?.client_reference_id;
-        if (userId !== undefined && userId !== null && userId !== '') {
-          userIdByCustomerId.set(customerId, userId);
-          break;
-        }
+        return sessions.data[0]?.client_reference_id;
       }
-    }
+    );
 
     return buildSubscriberSeries(
       periods,
