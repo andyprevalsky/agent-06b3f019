@@ -79,6 +79,15 @@ if cloudbench_wait_machine_startable read_machine_state machine-2 3 0 >/dev/null
   fail "a destroyed provisioning clone must fail closed"
 fi
 
+cloudbench_validate_fresh_clone_id clone-2 warm-1 clone-1 ||
+  fail "a unique non-source clone id must be accepted"
+if cloudbench_validate_fresh_clone_id warm-1 warm-1 clone-1; then
+  fail "the warm source id must never be accepted as a fresh clone"
+fi
+if cloudbench_validate_fresh_clone_id clone-1 warm-1 clone-1; then
+  fail "a duplicate clone id must never be accepted"
+fi
+
 lock_file="$TMP_ROOT/controller.lock"
 cloudbench_controller_lock_acquire "$lock_file"
 if bash -c 'source "$1"; cloudbench_controller_lock_acquire "$2"' _ "$HELPER_SRC" "$lock_file"; then
@@ -108,6 +117,9 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'cloudbench_wait_machine_startable fleet_machine_state "$cid"' \
   "fleet children must not launch while a fresh clone is still in created state"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  '--name "$clone_name"' \
+  "fresh fleet clones must use an exact unique name for id resolution"
 if grep -Fq -- 'FLY secrets deploy' "$ROOT_DIR/scripts/run-bench-cloud"; then
   fail "Machines API apps must not use Fly Launch secrets deploy"
 fi

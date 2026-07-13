@@ -524,10 +524,16 @@ for bench in "${BENCHES[@]}"; do
         echo "▶️  [$bench] claimed POOL machine $cid (no fork, mode=$mode_label, dash=$port) — starting ..."
     else
         echo "▶️  [$bench] pool empty → cloning fresh isolated machine (mode=$mode_label, dash=$port) ..."
-        clone_out="$(FLY machine clone "$WARM_ID" -a "$APP" --from-snapshot "$SNAP_ID" --region "$REGION" 2>&1)"
-        cid="$(printf '%s' "$clone_out" | grep -oiE 'Machine ID: [0-9a-f]+' | tail -1 | awk '{print $3}')"
-        [ -z "$cid" ] && cid="$(printf '%s' "$clone_out" | grep -oiE '\b[0-9a-f]{14}\b' | tail -1)"
-        if [ -z "$cid" ]; then
+        clone_name="$(printf 'fleet-%s-%s-%s' "$$" "$i" "$bench" | tr -c 'a-z0-9-' '-' | cut -c1-63)"
+        clone_out="$(FLY machine clone "$WARM_ID" -a "$APP" --name "$clone_name" --from-snapshot "$SNAP_ID" --region "$REGION" 2>&1)"
+        cid="$(FLY machines list -a "$APP" --json 2>/dev/null | NAME="$clone_name" python3 -c '
+import json, os, sys
+for machine in json.load(sys.stdin) or []:
+    if machine.get("name") == os.environ["NAME"] and machine.get("id"):
+        print(machine["id"])
+        break
+' 2>/dev/null || true)"
+        if ! cloudbench_validate_fresh_clone_id "$cid" "$WARM_ID" "${CLONE_IDS[@]:-}"; then
             echo "   ❌ clone failed for $bench:"; printf '%s\n' "$clone_out" | tail -8 | sed 's/^/      /'
             i=$((i + 1)); continue
         fi

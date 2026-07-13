@@ -119,6 +119,18 @@ cloudbench_wait_machine_startable() {
   return 1
 }
 
+cloudbench_validate_fresh_clone_id() {
+  local candidate="$1" source_id="$2"
+  shift 2
+
+  [ -n "$candidate" ] || return 1
+  [ "$candidate" != "$source_id" ] || return 1
+  local used_id
+  for used_id in "$@"; do
+    [ "$candidate" != "$used_id" ] || return 1
+  done
+}
+
 cloudbench_controller_lock_acquire() {
   local path="$1"
   mkdir -p "$(dirname "$path")"
