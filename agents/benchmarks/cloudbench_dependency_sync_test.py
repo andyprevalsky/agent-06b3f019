@@ -874,6 +874,7 @@ def test_pool_reconcile_leaves_concurrent_owner_untouched(tmp_path: Path) -> Non
             f"""set -uo pipefail
 APP=bench-app
 POOL_IDS_FILE="$POOL_FILE"
+UNAVAILABLE_POOL_IDS=()
 FLY() {{
   if [ "$1 $2" = "machines list" ]; then
     state="$(head -1 "$STATES_FILE")"
@@ -891,6 +892,7 @@ FLY() {{
 }}
 {reconcile_functions}
 reconcile_pool || exit $?
+printf 'unavailable=%s\\n' "${{UNAVAILABLE_POOL_IDS[*]}}"
 printf 'refresh\\n' >> "$OPERATIONS_FILE"
 """,
         ],
@@ -906,6 +908,7 @@ printf 'refresh\\n' >> "$OPERATIONS_FILE"
     )
 
     assert result.returncode == 0, result.stderr
+    assert "unavailable=abc123" in result.stdout
     assert operations_file.read_text().splitlines() == [
         "list started",
         "refresh",
@@ -922,7 +925,7 @@ def test_pool_claims_survive_command_substitution_and_stay_distinct(tmp_path: Pa
     claims_file = tmp_path / "run" / "claimed-pool.ids"
     global_claims = tmp_path / "global-claims"
     starts_file = tmp_path / "starts"
-    pool_file.write_text("abc123\ndef456\n")
+    pool_file.write_text("abc123\ndef456\nfed789\n")
 
     result = subprocess.run(
         [
@@ -933,6 +936,7 @@ APP=bench-app
 POOL_IDS_FILE="$POOL_FILE"
 CLAIMED_POOL_FILE="$CLAIMS_FILE"
 POOL_CLAIMS_DIR="$GLOBAL_CLAIMS"
+UNAVAILABLE_POOL_IDS=(abc123)
 machine_storage_ready() {{ return 0; }}
 FLY() {{
   if [ "$1 $2" = "machine status" ]; then printf 'State stopped\\n'; return 0; fi
@@ -957,9 +961,9 @@ printf '%s\\n%s\\n' "$first" "$second"
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.splitlines() == ["abc123", "def456"]
-    assert claims_file.read_text().splitlines() == ["abc123", "def456"]
-    assert starts_file.read_text().splitlines() == ["abc123", "def456"]
+    assert result.stdout.splitlines() == ["def456", "fed789"]
+    assert claims_file.read_text().splitlines() == ["def456", "fed789"]
+    assert starts_file.read_text().splitlines() == ["def456", "fed789"]
 
 
 def test_pool_reconcile_fails_closed_on_falsy_non_list_machine_json(tmp_path: Path) -> None:

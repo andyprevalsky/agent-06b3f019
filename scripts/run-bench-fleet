@@ -286,6 +286,7 @@ provision_pool() {  # provision_pool <N> — create N stopped clones, record ids
 }
 
 CLAIMED_POOL_FILE="$FLEET_DIR/claimed-pool.ids"
+UNAVAILABLE_POOL_IDS=()
 # Self-heal the pool: a killed run can't run its return-to-stopped step, leaving a
 # claimed machine 'started' and un-claimable (claim only takes 'stopped'). At fleet
 # START this workspace's controller lock is held, so any active machine in this
@@ -324,6 +325,7 @@ reconcile_pool() {
         [ "$st" = "stopped" ] && continue
         case "$st" in
             started|starting|stopping)
+                UNAVAILABLE_POOL_IDS+=("$id")
                 echo "  ↪️  pool machine $id is $st; leaving concurrent owner untouched"
                 continue
                 ;;
@@ -340,6 +342,7 @@ claim_pool_machine() {  # echo a started, claimed pool machine id (or '' if none
     while read -r id; do
         [ -n "$id" ] || continue
         case "$id" in *[!0-9a-f]*) continue ;; esac
+        case " ${UNAVAILABLE_POOL_IDS[*]:-} " in *" $id "*) continue ;; esac
         grep -Fxq "$id" "$CLAIMED_POOL_FILE" 2>/dev/null && continue
         claim_path="$POOL_CLAIMS_DIR/$id"
         if [ -f "$claim_path" ]; then
