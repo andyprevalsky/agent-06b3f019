@@ -62,7 +62,10 @@ class Controller:
         - lower (int): Lower bound for n.
         - upper (int): Upper bound for n.
         """
-        self.n = random.randint(lower, upper)
+        if self.rng is not None:
+            self.n = int(self.rng.integers(lower, upper + 1))
+        else:
+            self.n = random.randint(lower, upper)
 
     def generate_D(self, lower=0.1, upper=5):
         """

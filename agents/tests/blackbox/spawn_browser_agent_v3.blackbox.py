@@ -1209,6 +1209,33 @@ def test_keycap_input_synthesis_rng_isolated_from_global_numpy_state():
         assert len(set(intervals)) > 5
 
 
+def test_keycap_controller_generate_n_uses_injected_rng():
+    import random
+
+    import numpy as np
+
+    from keycap import Controller
+
+    random_state = random.getstate()
+    try:
+        generated = []
+        for global_seed in (17, 229):
+            random.seed(global_seed)
+            controller = Controller(
+                n=None,
+                D=[],
+                alpha=[],
+                w=[],
+                rng=np.random.default_rng(11),
+            )
+            generated.append(controller.n)
+    finally:
+        random.setstate(random_state)
+
+    assert generated[0] == generated[1]
+    assert 500 <= generated[0] <= 5000
+
+
 def test_mouse_click_synthesis_uses_paper_duration_distribution():
     import random
 
@@ -9812,6 +9839,10 @@ async def run_all_tests():
     r.record(
         "keycap_input_synthesis_rng_isolation",
         test_keycap_input_synthesis_rng_isolated_from_global_numpy_state,
+    )
+    r.record(
+        "keycap_controller_generate_n_injected_rng",
+        test_keycap_controller_generate_n_uses_injected_rng,
     )
     await r.record_async(
         "browser_humanizer_click_synthesis",
