@@ -533,6 +533,201 @@ def test_fresh_clone_start_paths_honor_storage_readiness_contract() -> None:
     )
 
 
+def test_fleet_clone_identity_requires_a_distinct_authoritative_target(
+    tmp_path: Path,
+) -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    function_start = fleet.index("machine_id_for_clone_name() {")
+    clone_start = fleet.index("clone_machine_target() {", function_start)
+    function_end = fleet.index("\n}\n", clone_start) + 3
+    clone_function = fleet[function_start:function_end]
+    source_id = "6834251fe05798"
+    target_id = "d895d2efe7d418"
+
+    allocation = 0
+
+    def allocate(output: str, status: int, returned_id: str) -> tuple[subprocess.CompletedProcess[str], Path]:
+        nonlocal allocation
+        allocation += 1
+        ledger = tmp_path / f"owned-{allocation}.ids"
+        target_name_file = tmp_path / f"target-name-{allocation}"
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"""set -uo pipefail
+APP=bench-app
+WARM_ID={source_id}
+SNAP_ID=snapshot-1
+REGION=ord
+FLY() {{
+  if [ "$1 $2" = "machine clone" ]; then
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "--name" ]; then printf '%s' "$2" > "$TARGET_NAME_FILE"; break; fi
+      shift
+    done
+    printf '%s\\n' "$CLONE_OUTPUT"
+    return "$CLONE_STATUS"
+  fi
+  if [ "$1 $2" = "machines list" ]; then
+    target_name="$(cat "$TARGET_NAME_FILE")"
+    if [ -n "$RETURNED_ID" ]; then
+      printf '[{{"id":"unrelated0001","name":"someone-else"}},{{"id":"%s","name":"%s"}}]\\n' "$RETURNED_ID" "$target_name"
+    else
+      printf '[]\\n'
+    fi
+    return 0
+  fi
+  return 2
+}}
+{clone_function}
+clone_machine_target "$LEDGER"
+""",
+            ],
+            env={
+                "CLONE_OUTPUT": output,
+                "CLONE_STATUS": str(status),
+                "LEDGER": str(ledger),
+                "RETURNED_ID": returned_id,
+                "TARGET_NAME_FILE": str(target_name_file),
+                "CLOUDBENCH_CLONE_LOOKUP_SECONDS": "0",
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        return result, ledger
+
+    source_only_failure, source_only_ledger = allocate(
+        "\n".join(
+            [
+                f"Cloning Machine {source_id} into region ord",
+                "Creating new volume from snapshot: snapshot-1",
+                "Error: volume provisioning failed",
+            ]
+        ),
+        1,
+        "",
+    )
+    aliased_success, aliased_ledger = allocate(
+        f"Cloning Machine {source_id} into region ord",
+        0,
+        source_id,
+    )
+    created_target, target_ledger = allocate(
+        "\n".join(
+            [
+                f"Cloning Machine {source_id} into region ord",
+                "Provisioning a new Machine with image registry.example/image...",
+                "human output format intentionally has no target id",
+            ]
+        ),
+        0,
+        target_id,
+    )
+    failed_after_create, failed_target_ledger = allocate(
+        f"Cloning Machine {source_id} into region ord\nError: monitor failed",
+        1,
+        target_id,
+    )
+
+    assert source_only_failure.returncode == 1
+    assert source_only_failure.stdout == ""
+    assert "volume provisioning failed" in source_only_failure.stderr
+    assert not source_only_ledger.exists()
+    assert len(source_only_ledger.with_suffix(".names").read_text().splitlines()) == 1
+    assert aliased_success.returncode == 1
+    assert aliased_success.stdout == ""
+    assert not aliased_ledger.exists()
+    assert len(aliased_ledger.with_suffix(".names").read_text().splitlines()) == 1
+    assert created_target.returncode == 0, created_target.stderr
+    assert created_target.stdout == target_id
+    assert target_ledger.read_text().splitlines() == [target_id]
+    assert target_ledger.with_suffix(".names").read_text() == ""
+    assert failed_after_create.returncode == 1
+    assert failed_after_create.stdout == ""
+    assert failed_target_ledger.read_text().splitlines() == [target_id]
+    assert failed_target_ledger.with_suffix(".names").read_text() == ""
+    assert "--detach" in clone_function
+    assert "--name" in clone_function
+    assert fleet.count("FLY machine clone") == 1
+    assert "\\b[0-9a-f]{14}\\b" not in fleet
+
+
+def test_pool_promotes_only_successful_owned_clone_ids() -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    pool_start = fleet.index("provision_pool() {")
+    pool_end = fleet.index("\n}\n", pool_start) + 3
+    pool_function = fleet[pool_start:pool_end]
+
+    clone_call = 'id="$(clone_machine_target "$OWNED_CLONES_FILE")"'
+    promotion = 'printf \'%s\\n\' "$id" >> "$POOL_IDS_FILE"'
+    release = 'grep -Fxv "$id" "$OWNED_CLONES_FILE"'
+    assert clone_call in pool_function
+    assert pool_function.index(clone_call) < pool_function.index(promotion)
+    assert pool_function.index(promotion) < pool_function.index(release)
+    assert 'clone_machine_target "$POOL_IDS_FILE"' not in pool_function
+
+
+def test_unresolved_clone_name_fails_loudly_without_polling_past_deadline() -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    function_start = fleet.index("machine_id_for_clone_name() {")
+    function_end = fleet.index("\n}\n", function_start) + 3
+    resolver_function = fleet[function_start:function_end]
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
+APP=bench-app
+FLY() {{ printf '[]\\n'; }}
+{resolver_function}
+machine_id_for_clone_name cloudbench-late "$SECONDS"
+""",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert "unresolved clone name 'cloudbench-late'" in result.stderr
+    assert "flyctl machines list -a bench-app --json" in result.stderr
+
+
+def test_fleet_cleanup_refuses_to_destroy_the_warm_source(tmp_path: Path) -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    function_start = fleet.index("reap_machine() {")
+    function_end = fleet.index("\n}\n", function_start) + 3
+    reap_function = fleet[function_start:function_end]
+    source_id = "6834251fe05798"
+    fly_log = tmp_path / "fly.log"
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
+APP=bench-app
+WARM_ID={source_id}
+FLY() {{ printf '%s\\n' "$*" >> "$FLY_LOG"; }}
+{reap_function}
+reap_machine "$WARM_ID"
+""",
+        ],
+        env={"FLY_LOG": str(fly_log)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "refusing to destroy warm source machine" in result.stderr
+    assert not fly_log.exists()
+
+
 def test_fleet_aggregate_contains_every_isolated_task(tmp_path: Path) -> None:
     fleet = tmp_path / "run-1"
     batch = fleet / "_batch"
