@@ -116,9 +116,11 @@ node_b_fingerprint="$(cloudbench_node_dependency_fingerprint "$node_b")"
 
 lock_file="$TMP_ROOT/controller.lock"
 cloudbench_controller_lock_acquire "$lock_file"
-if bash -c 'source "$1"; cloudbench_controller_lock_acquire "$2"' _ "$HELPER_SRC" "$lock_file"; then
-  fail "a second controller must not acquire an owned lock"
-fi
+local_lock_status=0
+bash -c 'source "$1"; cloudbench_controller_acquire "$2" bench-app' _ "$HELPER_SRC" "$lock_file" ||
+  local_lock_status=$?
+[ "$local_lock_status" -eq "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE" ] ||
+  fail "an occupied local controller lock must return the typed capacity-busy status"
 cloudbench_controller_lock_release "$lock_file"
 [ ! -e "$lock_file" ] || fail "controller lock must be removed by its owner"
 
@@ -134,7 +136,10 @@ cloudbench_machines_api_request() {
       CLOUDBENCH_API_BODY='[{"id":"lock-machine","name":"cloudbench-controller-lock"}]'
       ;;
     'POST|/v1/apps/bench-app/machines/lock-machine/lease')
-      if [ -e "$cloud_lease_state" ]; then
+      if [ "${cloud_lease_force_error:-0}" = "1" ]; then
+        CLOUDBENCH_API_STATUS=500
+        CLOUDBENCH_API_BODY='{"error":"provider failure"}'
+      elif [ -e "$cloud_lease_state" ]; then
         CLOUDBENCH_API_STATUS=409
         CLOUDBENCH_API_BODY='{"error":"lease held"}'
       else
@@ -157,14 +162,56 @@ cloudbench_cloud_lock_acquire bench-app
   fail "cloud lock must bind the shared sentinel"
 [ "$CLOUDBENCH_CLOUD_LOCK_NONCE" = "lease-nonce" ] ||
   fail "cloud lock must retain the provider nonce"
-if (cloudbench_cloud_lock_acquire bench-app >/dev/null 2>&1); then
-  fail "a second controller must not acquire an occupied Fly sentinel lease"
-fi
+cloud_lock_status=0
+(cloudbench_cloud_lock_acquire bench-app >/dev/null 2>&1) || cloud_lock_status=$?
+[ "$cloud_lock_status" -eq "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE" ] ||
+  fail "an occupied Fly sentinel must return the typed capacity-busy status"
 cloudbench_cloud_lock_release bench-app
+cloud_lease_force_error=1
+cloud_lock_status=0
+(cloudbench_cloud_lock_acquire bench-app >/dev/null 2>&1) || cloud_lock_status=$?
+[ "$cloud_lock_status" -eq 1 ] ||
+  fail "a non-contention Fly lease error must remain terminal"
+unset cloud_lease_force_error
 require_text "$cloud_lease_calls" \
   'DELETE|/v1/apps/bench-app/machines/lock-machine/lease||lease-nonce' \
   "cloud lock release must authenticate with its provider nonce"
 unset CLOUDBENCH_MACHINES_API_TOKEN
+
+cloudbench_controller_lock_acquire() { return 9; }
+local_lock_failure_status=0
+cloudbench_controller_acquire "$TMP_ROOT/failing-controller.lock" bench-app ||
+  local_lock_failure_status=$?
+[ "$local_lock_failure_status" -eq 9 ] ||
+  fail "a non-contention local lock failure must remain terminal"
+
+wait_acquire_attempts=0
+wait_sleep_calls=0
+cloudbench_controller_acquire() {
+  wait_acquire_attempts=$((wait_acquire_attempts + 1))
+  [ "$wait_acquire_attempts" -ge 3 ] || return "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE"
+}
+sleep() {
+  [ "$1" = "7" ] || fail "controller wait used the wrong retry interval"
+  wait_sleep_calls=$((wait_sleep_calls + 1))
+}
+cloudbench_controller_acquire_wait "$TMP_ROOT/wait-controller.lock" bench-app 7 ||
+  fail "controller wait must eventually acquire after retryable contention clears"
+[ "$wait_acquire_attempts" -eq 3 ] ||
+  fail "controller wait must retry until typed contention clears"
+[ "$wait_sleep_calls" -eq 2 ] ||
+  fail "controller wait must sleep exactly once per typed contention result"
+
+wait_sleep_calls=0
+cloudbench_controller_acquire() { return 9; }
+terminal_wait_status=0
+cloudbench_controller_acquire_wait "$TMP_ROOT/wait-controller.lock" bench-app 7 ||
+  terminal_wait_status=$?
+[ "$terminal_wait_status" -eq 9 ] ||
+  fail "controller wait must preserve a non-contention acquisition failure"
+[ "$wait_sleep_calls" -eq 0 ] ||
+  fail "controller wait must not retry a non-contention acquisition failure"
+unset -f sleep
 
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'bash scripts/run-bench-cloud --refresh-secrets' \
@@ -175,9 +222,12 @@ require_text "$ROOT_DIR/scripts/run-bench-fleet" \
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'CLOUDBENCH_ENV_REFRESHED=1' \
   "fleet children must receive proof that the controller refreshed the environment"
+require_text "$HELPER_SRC" \
+  'cloudbench_controller_acquire "$path" "$app"' \
+  "controller wait must acquire the cross-host Fly sentinel lease"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
-  'cloudbench_controller_acquire "$LOCK_DIR" "$APP"' \
-  "fleet controllers must acquire the cross-host Fly sentinel lease"
+  'cloudbench_controller_acquire_wait "$LOCK_DIR" "$APP" "$CONTROLLER_RETRY_SECONDS"' \
+  "fleet controllers must use the behaviorally tested capacity wait"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'cloudbench_controller_release "$LOCK_DIR" "$APP"' \
   "fleet cleanup must release the cross-host Fly sentinel lease"
@@ -229,5 +279,8 @@ fi
 require_text "$HELPER_SRC" \
   'exec {CLOUDBENCH_CONTROLLER_LOCK_FD}<> "$path"' \
   "flock fallback must open without truncating the current owner"
+require_text "$ROOT_DIR/scripts/run-bench-hub-poller" \
+  'exit_code" -ne "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE' \
+  "hub requests must retry only the typed capacity-busy runner status"
 
 echo "All cloud benchmark environment checks passed."
