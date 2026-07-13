@@ -533,6 +533,12 @@ def test_fresh_clone_start_paths_honor_storage_readiness_contract() -> None:
     )
 
 
+def test_fleet_children_cannot_replace_persistent_warm_state() -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+
+    assert '[ -n "$FLEET_MACHINE_ID" ] && return 0' in cloud
+
+
 def test_environment_activation_retries_only_transient_fly_failures(tmp_path: Path) -> None:
     cloud = CLOUD_SCRIPT.read_text()
     function_start = cloud.index("machine_state_for_activation() {")

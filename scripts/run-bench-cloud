@@ -302,6 +302,10 @@ machine_storage_ready() {  # machine_storage_ready <id>
 }
 
 write_state() {  # write_state <machine_id>
+    # Fleet children target caller-owned ephemeral/pool machines. Recording one
+    # as the persistent warm source would make a later controller follow a
+    # clone that cleanup is about to destroy.
+    [ -n "$FLEET_MACHINE_ID" ] && return 0
     mkdir -p "$ROOT_DIR/.context"
     printf '{"app":"%s","machine_id":"%s","machine_name":"%s","volume_name":"%s","region":"%s"}\n' \
         "$APP" "$1" "$MACHINE_NAME" "$VOLUME_NAME" "$REGION" > "$STATE_FILE"
