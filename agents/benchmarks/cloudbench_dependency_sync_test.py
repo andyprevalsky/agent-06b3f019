@@ -229,7 +229,7 @@ def test_fleet_waits_for_every_isolated_stack_before_releasing_benchmarks() -> N
     assert 'CHILD_MACHINE+=("$cid")' in fleet
     assert "isolated stacks reached the synchronized start barrier" in fleet
     assert "releasing synchronized start barrier" in fleet
-    assert "reconciling authoritative pool machine" in fleet
+    assert "returning claimed pool machine" in fleet
 
 
 def test_predeploy_cloud_runner_selects_the_catalog_smoke_group() -> None:
@@ -523,9 +523,11 @@ def test_fresh_clone_start_paths_honor_storage_readiness_contract() -> None:
         'if machine_storage_ready "$id"; then\n'
         '                FLY machine start "$id"' in fleet
     )
-    assert (
-        'machine_storage_ready "$id" || continue\n'
-        '        FLY machine start "$id"' in fleet
+    claim_start = fleet.index("claim_pool_machine() {")
+    claim_end = fleet.index("\n}\n", claim_start)
+    claim = fleet[claim_start:claim_end]
+    assert claim.index('machine_storage_ready "$id" || continue') < claim.index(
+        'FLY machine start "$id"'
     )
     assert (
         'if machine_storage_ready "$wid"; then\n'
@@ -824,7 +826,7 @@ def test_environment_refresh_serializes_shared_app_and_reconciles_pool_first() -
     assert cleanup.index('wait "$p"') < cleanup.index("release_app_environment_lock")
 
 
-def test_pool_reconcile_waits_for_stopped_before_environment_refresh(tmp_path: Path) -> None:
+def test_pool_reconcile_leaves_concurrent_owner_untouched(tmp_path: Path) -> None:
     fleet = FLEET_SCRIPT.read_text()
     function_start = fleet.index("pool_machine_state() {")
     reconcile_start = fleet.index("reconcile_pool() {", function_start)
@@ -835,7 +837,7 @@ def test_pool_reconcile_waits_for_stopped_before_environment_refresh(tmp_path: P
     states_file = tmp_path / "states"
     operations_file = tmp_path / "operations"
     pool_file.write_text("abc123\n")
-    states_file.write_text("started\nstopping\nstopped\n")
+    states_file.write_text("started\n")
     operations_file.write_text("")
 
     result = subprocess.run(
@@ -879,12 +881,58 @@ printf 'refresh\\n' >> "$OPERATIONS_FILE"
     assert result.returncode == 0, result.stderr
     assert operations_file.read_text().splitlines() == [
         "list started",
-        "stop",
-        "list stopping",
-        "list stopped",
         "refresh",
     ]
     assert states_file.read_text() == ""
+
+
+def test_pool_claims_survive_command_substitution_and_stay_distinct(tmp_path: Path) -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    function_start = fleet.index("claim_pool_machine() {")
+    function_end = fleet.index("\n}\n", function_start) + 3
+    claim_function = fleet[function_start:function_end]
+    pool_file = tmp_path / "pool.ids"
+    claims_file = tmp_path / "run" / "claimed-pool.ids"
+    global_claims = tmp_path / "global-claims"
+    starts_file = tmp_path / "starts"
+    pool_file.write_text("abc123\ndef456\n")
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
+APP=bench-app
+POOL_IDS_FILE="$POOL_FILE"
+CLAIMED_POOL_FILE="$CLAIMS_FILE"
+POOL_CLAIMS_DIR="$GLOBAL_CLAIMS"
+machine_storage_ready() {{ return 0; }}
+FLY() {{
+  if [ "$1 $2" = "machine status" ]; then printf 'State stopped\\n'; return 0; fi
+  if [ "$1 $2" = "machine start" ]; then printf '%s\\n' "$3" >> "$STARTS_FILE"; return 0; fi
+  return 2
+}}
+{claim_function}
+first="$(claim_pool_machine)"
+second="$(claim_pool_machine)"
+printf '%s\\n%s\\n' "$first" "$second"
+""",
+        ],
+        env={
+            "POOL_FILE": str(pool_file),
+            "CLAIMS_FILE": str(claims_file),
+            "GLOBAL_CLAIMS": str(global_claims),
+            "STARTS_FILE": str(starts_file),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["abc123", "def456"]
+    assert claims_file.read_text().splitlines() == ["abc123", "def456"]
+    assert starts_file.read_text().splitlines() == ["abc123", "def456"]
 
 
 def test_pool_reconcile_fails_closed_on_falsy_non_list_machine_json(tmp_path: Path) -> None:

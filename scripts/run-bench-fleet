@@ -71,6 +71,7 @@ POOL_IDS_FILE="$ROOT_DIR/.context/cloudbench-pool.ids"   # persistent pool machi
 GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null || echo "$ROOT_DIR/.git")"
 case "$GIT_COMMON_DIR" in /*) ;; *) GIT_COMMON_DIR="$ROOT_DIR/$GIT_COMMON_DIR" ;; esac
 APP_ENV_LOCK_FILE="$GIT_COMMON_DIR/cloudbench-app-env.lock"
+POOL_CLAIMS_DIR="$GIT_COMMON_DIR/cloudbench-pool-claims"
 APP_ENV_LOCK_HELD=0
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -284,7 +285,7 @@ provision_pool() {  # provision_pool <N> — create N stopped clones, record ids
     echo "✅ pool ready: $(grep -c . "$POOL_IDS_FILE" 2>/dev/null || echo 0) machines → $POOL_IDS_FILE"
 }
 
-CLAIMED_POOL_IDS=()
+CLAIMED_POOL_FILE="$FLEET_DIR/claimed-pool.ids"
 # Self-heal the pool: a killed run can't run its return-to-stopped step, leaving a
 # claimed machine 'started' and un-claimable (claim only takes 'stopped'). At fleet
 # START this workspace's controller lock is held, so any active machine in this
@@ -313,7 +314,7 @@ print(state)
 
 reconcile_pool() {
     [ -f "$POOL_IDS_FILE" ] || return 0
-    local id st presence attempt stopped
+    local id st presence
     while read -r id; do
         [ -n "$id" ] || continue
         st="$(pool_machine_state "$id")"
@@ -321,39 +322,42 @@ reconcile_pool() {
         [ "$presence" -eq 1 ] && continue
         [ "$presence" -eq 0 ] || { echo "❌ could not read pool machine $id before refresh" >&2; return 1; }
         [ "$st" = "stopped" ] && continue
-        case "$st" in started|starting|stopping) ;; *)
+        case "$st" in
+            started|starting|stopping)
+                echo "  ↪️  pool machine $id is $st; leaving concurrent owner untouched"
+                continue
+                ;;
+            *)
             echo "❌ pool machine $id has unsafe pre-refresh state '$st'" >&2
             return 1
         esac
-        echo "  ♻️  reclaiming orphaned pool machine $id ($st → stopped)"
-        FLY machine stop "$id" -a "$APP" >/dev/null 2>&1 || true
-        stopped=0
-        for attempt in $(seq 1 30); do
-            st="$(pool_machine_state "$id")"
-            presence=$?
-            if [ "$presence" -eq 1 ]; then stopped=1; break; fi
-            [ "$presence" -eq 0 ] || { echo "❌ could not verify pool machine $id stopped" >&2; return 1; }
-            if [ "$st" = "stopped" ]; then stopped=1; break; fi
-            case "$st" in started|starting|stopping) ;; *)
-                echo "❌ pool machine $id entered unsafe stop state '$st'" >&2
-                return 1
-            esac
-            sleep "${CLOUDBENCH_POOL_STOP_DELAY:-2}"
-        done
-        [ "$stopped" -eq 1 ] || { echo "❌ pool machine $id did not stop before environment refresh" >&2; return 1; }
     done < "$POOL_IDS_FILE"
 }
 claim_pool_machine() {  # echo a started, claimed pool machine id (or '' if none free)
     [ -f "$POOL_IDS_FILE" ] || return 0
-    local id st
+    local id st claim_path owner
+    mkdir -p "$POOL_CLAIMS_DIR" "$(dirname "$CLAIMED_POOL_FILE")"
     while read -r id; do
         [ -n "$id" ] || continue
-        case " ${CLAIMED_POOL_IDS[*]:-} " in *" $id "*) continue ;; esac
+        case "$id" in *[!0-9a-f]*) continue ;; esac
+        grep -Fxq "$id" "$CLAIMED_POOL_FILE" 2>/dev/null && continue
+        claim_path="$POOL_CLAIMS_DIR/$id"
+        if [ -f "$claim_path" ]; then
+            owner="$(head -1 "$claim_path" 2>/dev/null || true)"
+            if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+                continue
+            fi
+            rm -f "$claim_path"
+        fi
         st="$(FLY machine status "$id" -a "$APP" 2>/dev/null | grep -iE '^[[:space:]]*State' | head -1)"
         printf '%s' "$st" | grep -qi "stopped" || continue   # only claim an existing, stopped machine
         machine_storage_ready "$id" || continue
+        # claim_pool_machine is called through command substitution, so shell
+        # arrays mutate in a subshell. Files are the cross-subshell and
+        # cross-workspace ownership source of truth while the app lock is held.
+        printf '%s\n' "$$" > "$claim_path"
+        printf '%s\n' "$id" >> "$CLAIMED_POOL_FILE"
         FLY machine start "$id" -a "$APP" >/dev/null 2>&1 || true
-        CLAIMED_POOL_IDS+=("$id")
         printf '%s' "$id"; return 0
     done < "$POOL_IDS_FILE"
 }
@@ -402,7 +406,7 @@ CHILD_PORT=()
 CHILD_MACHINE=()
 
 cleanup() {
-    local ec=$? clone_name name_matches named_id name_deadline failed_names
+    local ec=$? id clone_name name_matches named_id name_deadline failed_names claim_path owner st
     [ -n "${UNIFIED_AGG_PID:-}" ] && kill "$UNIFIED_AGG_PID" 2>/dev/null || true
     # Do NOT kill the central hub (UNIFIED_DASH_PID): it is THE one persistent
     # dashboard — shared across every run, carrying the user's open tab, resolving
@@ -412,6 +416,24 @@ cleanup() {
     for p in "${AUTOSCALER_PIDS[@]:-}"; do [ -n "$p" ] && wait "$p" 2>/dev/null || true; done
     for p in "${CHILD_PIDS[@]:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null || true; done
     for p in "${CHILD_PIDS[@]:-}"; do [ -n "$p" ] && wait "$p" 2>/dev/null || true; done
+    # Return only machines this fleet actually claimed. The pool ledger can be
+    # shared by sibling workspaces, so stopping every listed ID would interrupt
+    # their active runs. Keep the global lease until the machine is stopped.
+    if [ -f "$CLAIMED_POOL_FILE" ]; then
+        while read -r id; do
+            [ -n "$id" ] || continue
+            echo "↩️  returning claimed pool machine $id (stop)"
+            FLY machine stop "$id" -a "$APP" >/dev/null 2>&1 || true
+            for _ in $(seq 1 30); do
+                st="$(pool_machine_state "$id")"; [ $? -eq 1 ] && break
+                [ "$st" = "stopped" ] && break
+                sleep 2
+            done
+            claim_path="$POOL_CLAIMS_DIR/$id"
+            owner="$(head -1 "$claim_path" 2>/dev/null || true)"
+            [ "$owner" = "$$" ] && rm -f "$claim_path" || true
+        done < "$CLAIMED_POOL_FILE"
+    fi
     release_app_environment_lock
     if [ "$KEEP_CLONES" != "1" ]; then
         # Autoscaler worker-pool clones (tracked per bench) first, then the primaries.
@@ -463,17 +485,6 @@ cleanup() {
         fi
     else
         echo "⚠️  --keep-clones: leaving $(grep -c . "$OWNED_CLONES_FILE" 2>/dev/null || echo 0) fresh clone(s) alive"
-    fi
-    # Pool claims happen inside command substitution, so mutations to the shell
-    # array do not survive in the parent. The persistent id file is the
-    # authoritative ownership record while this controller lock is held: stop
-    # every listed machine so no claimed pool VM can remain billed after exit.
-    if [ -f "$POOL_IDS_FILE" ]; then
-        while read -r id; do
-            [ -n "$id" ] || continue
-            echo "↩️  reconciling authoritative pool machine $id (stop)"
-            FLY machine stop "$id" -a "$APP" >/dev/null 2>&1 || true
-        done < "$POOL_IDS_FILE"
     fi
     # NOTE: do NOT pkill viewers by "$FLEET_DIR" — the batch resolver (and the
     # archive Vites it spawns for durable /open-agent) carry $FLEET_DIR in their
@@ -665,6 +676,7 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
 
 # ── Clone one machine per bench + launch its isolated run ────────────────────
 mkdir -p "$FLEET_DIR"
+: > "$CLAIMED_POOL_FILE"
 echo ""
 echo "═══ run-bench-fleet — ${#BENCHES[@]} bench(es), one isolated machine each ═══"
 i=0
@@ -692,6 +704,9 @@ for bench in "${BENCHES[@]}"; do
             i=$((i + 1)); continue
         fi
     fi
+    case " ${CHILD_MACHINE[*]:-} " in
+        *" $cid "*) echo "❌ isolation violation: machine $cid was allocated twice" >&2; exit 1 ;;
+    esac
     echo "   ✅ machine=$cid → launching run-bench-cloud (isolated) ..."
 
     # Deterministic per-bench workspace → deterministic Temporal queue, so the
