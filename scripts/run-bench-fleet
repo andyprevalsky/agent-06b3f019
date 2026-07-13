@@ -94,6 +94,24 @@ done
 [ -n "$PROVISION_POOL" ] || [ "${#BENCHES[@]}" -ge 1 ] || { echo "usage: run-bench-fleet <bench> [<bench>...] [--sim-on a,b] [--ref X]  |  --provision-pool N" >&2; exit 2; }
 [ -z "$BENCH_REF" ] && BENCH_REF="$(git rev-parse HEAD 2>/dev/null || echo '')"
 
+# A synchronized child begins polling before the controller has finished
+# provisioning the remaining machines. Give the remote barrier the full
+# per-benchmark timeout, then add that barrier budget to the child's outer
+# polling ceiling so benchmark execution still receives RUN_TIMEOUT seconds
+# after every isolated stack is ready.
+START_BARRIER_WAIT_SECONDS="${CLOUDBENCH_START_BARRIER_WAIT_SECONDS:-$RUN_TIMEOUT}"
+for seconds in "$RUN_TIMEOUT" "$START_BARRIER_WAIT_SECONDS"; do
+    case "$seconds" in
+        ''|*[!0-9]*) echo "❌ --timeout and CLOUDBENCH_START_BARRIER_WAIT_SECONDS must be positive integers" >&2; exit 2 ;;
+    esac
+    [ "$seconds" -gt 0 ] \
+        || { echo "❌ --timeout and CLOUDBENCH_START_BARRIER_WAIT_SECONDS must be positive integers" >&2; exit 2; }
+done
+CHILD_RUN_TIMEOUT="$RUN_TIMEOUT"
+if [ "$SYNCHRONIZED_START" = "1" ]; then
+    CHILD_RUN_TIMEOUT=$((RUN_TIMEOUT + START_BARRIER_WAIT_SECONDS))
+fi
+
 # ── flyctl + token (mirror run-bench-cloud) ─────────────────────────────────
 if ! command -v flyctl >/dev/null 2>&1; then
     if [ -x "$HOME/.fly/bin/flyctl" ]; then export PATH="$HOME/.fly/bin:$PATH"; else
@@ -754,6 +772,7 @@ for bench in "${BENCHES[@]}"; do
         CLOUDBENCH_WORKSPACE_NAME="$local_ws" \
         CLOUDBENCH_ENV_REFRESHED=1 \
         CLOUDBENCH_START_BARRIER="$([ "$SYNCHRONIZED_START" = "1" ] && printf '%s' "$RUN_ID")" \
+        CLOUDBENCH_START_BARRIER_WAIT_SECONDS="$START_BARRIER_WAIT_SECONDS" \
         NO_OPEN=1 \
         bash scripts/run-bench-cloud "$bench" \
             --machine "$cid" \
@@ -763,7 +782,7 @@ for bench in "${BENCHES[@]}"; do
             --no-open \
             "$mode_flag" \
             --ref "$BENCH_REF" \
-            --timeout "$RUN_TIMEOUT"
+            --timeout "$CHILD_RUN_TIMEOUT"
     ) > "$out/fleet-child.log" 2>&1 &
     CHILD_PIDS+=("$!")
     CHILD_OUT+=("$out")

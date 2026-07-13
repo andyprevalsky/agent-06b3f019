@@ -1451,6 +1451,7 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     echo "export CLOUDBENCH_CURRENT_RUN_ARTIFACT_SCRIPT=/data/cloudbench-current-run-artifact.py"
     echo "export CLOUDBENCH_RUN_TOKEN=$(printf '%q' "$RUN_LOG_TOKEN")"
     echo "export CLOUDBENCH_START_BARRIER=$(printf '%q' "${CLOUDBENCH_START_BARRIER:-}")"
+    echo "export CLOUDBENCH_START_BARRIER_WAIT_SECONDS=$(printf '%q' "${CLOUDBENCH_START_BARRIER_WAIT_SECONDS:-$RUN_TIMEOUT}")"
     echo "export WMH_MODEL_NAME=$(printf '%q' "$WMH_MODEL_NAME")"
     echo "export BENCH_TASKS_B64=$(printf '%q' "$TASKS_CSV_B64")"
     echo "export BENCH_MAX_CONCURRENCY=$(printf '%q' "$BENCH_MAX_CONCURRENCY")"
