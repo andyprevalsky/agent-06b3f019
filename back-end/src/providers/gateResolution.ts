@@ -9,6 +9,7 @@
  * Prisma + the Temporal client directly.
  */
 
+import { Prisma } from '@prisma/client';
 import { prisma } from './database';
 import { getTemporalClient } from './temporal';
 import { createLogger } from './logger';
@@ -77,6 +78,48 @@ async function signalAllWaiters(request: ResolvableGateRequest, response: string
   }
 }
 
+async function finishAttentionMessages(
+  tx: Prisma.TransactionClient,
+  request: ResolvableGateRequest
+): Promise<number> {
+  const pendingMessages = await tx.message.findMany({
+    where: {
+      agentId: request.agentId,
+      role: 'TOOL',
+      AND: [
+        { metadata: { path: ['toolStatus'], equals: 'IN_PROGRESS' } },
+        {
+          OR: [
+            {
+              metadata: {
+                path: ['requestUserApproval', 'attentionRequestId'],
+                equals: request.id,
+              },
+            },
+            { metadata: { path: ['attentionRequestId'], equals: request.id } },
+          ],
+        },
+      ],
+    },
+    select: { id: true, metadata: true },
+  });
+
+  for (const message of pendingMessages) {
+    if (message.metadata === null || Array.isArray(message.metadata)) continue;
+    await tx.message.update({
+      where: { id: message.id },
+      data: {
+        metadata: {
+          ...(message.metadata as Prisma.JsonObject),
+          toolStatus: 'FINISHED',
+        },
+      },
+    });
+  }
+
+  return pendingMessages.length;
+}
+
 /**
  * Resolve a gate: mark the response, then signal every waiter. The waiter list is
  * re-read AFTER the update (not from the pre-update snapshot) so a waiter that
@@ -88,12 +131,20 @@ export async function resolveAndSignal(
   request: ResolvableGateRequest,
   response: string
 ): Promise<void> {
-  await prisma.agentAttentionRequest.update({
-    where: { id: request.id },
-    data: { userResponse: response },
+  const { fresh, finishedMessageCount } = await prisma.$transaction(async (tx) => {
+    const updated = await tx.agentAttentionRequest.update({
+      where: { id: request.id },
+      data: { userResponse: response },
+    });
+    const finishedCount = await finishAttentionMessages(tx, request);
+    return { fresh: updated, finishedMessageCount: finishedCount };
   });
-  const fresh = await prisma.agentAttentionRequest.findUnique({ where: { id: request.id } });
-  await signalAllWaiters(fresh ?? request, response);
+  log.info('Resolved attention request read model', {
+    request_id: request.id,
+    agent_id: request.agentId,
+    finished_message_count: finishedMessageCount,
+  });
+  await signalAllWaiters(fresh, response);
 }
 
 /**
