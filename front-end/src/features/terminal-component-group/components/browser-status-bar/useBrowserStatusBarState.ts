@@ -110,6 +110,9 @@ function extractPendingAuthAssistance(
     return {
       requestId: auth.requestId,
       authRealm: auth.authRealm,
+      request: auth.authRealm
+        ? `Sign in to ${auth.authRealm} so I can continue`
+        : 'Complete the sign-in so I can continue',
       liveViewUrl: auth.liveViewUrl,
     };
   }

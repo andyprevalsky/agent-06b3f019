@@ -23,6 +23,7 @@ import {
   type BrowserProviderResumeSession,
   type BrowserProviderSession,
   type BrowserSessionHealth,
+  type BrowserViewport,
 } from './types';
 
 const log = createLogger('Kernel');
@@ -395,6 +396,16 @@ export async function getKernelSessionHealth(sessionId: string): Promise<Browser
     profileId: session.profile?.id ?? null,
     uptimeMs: session.usage?.uptime_ms ?? null,
   };
+}
+
+export async function resizeKernelViewport(
+  sessionId: string,
+  viewport: BrowserViewport
+): Promise<BrowserViewport> {
+  await kernelClient().browsers.update(sessionId, {
+    viewport: { ...viewport, force: true },
+  });
+  return viewport;
 }
 
 const FILE_DIRECTORIES = ['/tmp/downloads', '/tmp/rose-uploads', '/home/oai/share'];

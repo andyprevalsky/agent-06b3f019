@@ -48,6 +48,18 @@ export interface BrowserFileInfo {
   lastModified?: string;
 }
 
+export interface BrowserViewport {
+  width: number;
+  height: number;
+}
+
+export interface BrowserViewportResizeResult {
+  provider: BrowserProviderName;
+  supported: boolean;
+  resized: boolean;
+  viewport: BrowserViewport;
+}
+
 export class BrowserProviderRateLimitError extends Error {
   readonly provider: BrowserProviderName;
 

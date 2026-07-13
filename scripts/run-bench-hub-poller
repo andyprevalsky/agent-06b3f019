@@ -222,7 +222,9 @@ process_request() {  # process_request <request_json>
     fi
 
     local hub_run_id="hub-$req_id"
-    local start_epoch; start_epoch="$(date +%s)"
+    # Preserve sub-second precision so a run cannot adopt an artifact written
+    # by the previous request during the same wall-clock second.
+    local start_epoch; start_epoch="$(python3 -c 'import time; print(time.time())')"
     local log_file=".context/hub-poller-run-$req_id.log"
 
     snapshot_loop "$req_id" "$hub_run_id" "$start_epoch" & SNAP_PID=$!

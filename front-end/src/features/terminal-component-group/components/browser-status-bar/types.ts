@@ -35,6 +35,7 @@ export interface PendingWriteLockApproval {
 export interface PendingAuthAssistance {
   requestId: string;
   authRealm?: string;
+  request: string;
   liveViewUrl: string;
 }
 

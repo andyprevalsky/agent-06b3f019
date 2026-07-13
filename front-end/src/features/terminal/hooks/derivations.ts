@@ -115,7 +115,9 @@ export function sortAgents(agents: Agent[]): Agent[] {
 
 const TERMINAL_BROWSER_ACTION_TYPES = new Set(['task_complete', 'session_paused']);
 const TERMINAL_BROWSER_TOOL_STATUSES = new Set(['FINISHED', 'ERROR']);
+const LEGACY_TERMINAL_BROWSER_ACTION_TYPES = new Set(['system']);
 const BROWSER_INIT_ACTION_TYPES = new Set(['browser', 'system', 'session_started']);
+const BROWSER_CLEANUP_ACTION_TYPES = new Set(['diagnostics', 'network_recording', 'recording']);
 
 function isBrowserInitMessage(message: Message): boolean {
   const actionType = message.metadata?.action_type;
@@ -136,6 +138,7 @@ function isBrowserTaskTerminalMessage(message: Message): boolean {
   return (
     message.metadata?.toolName === 'spawn_browser_agent' &&
     message.metadata?.subAgentId == null &&
+    (actionType == null || LEGACY_TERMINAL_BROWSER_ACTION_TYPES.has(actionType)) &&
     typeof message.metadata?.toolStatus === 'string' &&
     TERMINAL_BROWSER_TOOL_STATUSES.has(message.metadata.toolStatus)
   );
@@ -149,7 +152,8 @@ function isBrowserTaskTerminalMessage(message: Message): boolean {
  *   -> task-scoped browser progress messages
  *   -> terminal message:
  *        - action_type task_complete/session_paused, or
- *        - spawn_browser_agent toolStatus FINISHED/ERROR
+ *        - legacy system/untyped spawn_browser_agent toolStatus FINISHED/ERROR
+ *   -> auth_assistance FINISHED remains non-terminal and resumes this task
  *   -> [HIDDEN_STATUS_CHIP]
  */
 export function computeActiveBrowserPanels(messages: Message[]): BrowserPanelData[] {
@@ -176,6 +180,14 @@ export function computeActiveBrowserPanels(messages: Message[]): BrowserPanelDat
     const taskMessages = messages.filter((m) => m.metadata?.task_id === taskId);
     const initMessage = taskMessages.find(isBrowserInitMessage);
     const initToolCallId = initMessage?.metadata?.toolCallId;
+    const latestBrowserMessage = [...taskMessages]
+      .reverse()
+      .find(
+        (m) =>
+          typeof m.metadata?.browser_url === 'string' &&
+          m.metadata.browser_url !== '' &&
+          !BROWSER_CLEANUP_ACTION_TYPES.has(m.metadata.action_type ?? ''),
+      );
 
     const hasTerminalTaskMessage = taskMessages.some(isBrowserTaskTerminalMessage);
 
@@ -186,7 +198,8 @@ export function computeActiveBrowserPanels(messages: Message[]): BrowserPanelDat
     if (!isComplete && initMessage) {
       panels.push({
         taskId,
-        browserUrl: initMessage.metadata?.browser_url || '',
+        browserUrl:
+          latestBrowserMessage?.metadata?.browser_url || initMessage.metadata?.browser_url || '',
       });
     }
   });

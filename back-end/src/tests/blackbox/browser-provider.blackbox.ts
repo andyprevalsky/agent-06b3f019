@@ -32,6 +32,8 @@ interface BrowserApiResponse {
   path?: string;
   base64_image?: string;
   same_session_available?: boolean;
+  resized?: boolean;
+  viewport?: { width?: number; height?: number };
   browser_session_metadata?: BrowserMetadataResponse;
 }
 
@@ -232,6 +234,21 @@ async function runLiveProviderParity(): Promise<void> {
         task.browser_session_metadata?.provider === 'kernel' &&
         task.same_session_available === true,
       'Kernel health validation failed'
+    );
+
+    const viewport = await post(`/task/${String(init.task_id)}/viewport`, {
+      width: 1440,
+      height: 900,
+    });
+    assert(viewport.resized === true, 'Kernel viewport resize was not acknowledged');
+    assert(
+      viewport.viewport?.width === 1440 && viewport.viewport.height === 900,
+      'Kernel viewport resize response did not preserve the requested dimensions'
+    );
+    const resizedRemote = await kernel.browsers.retrieve(liveSessionId, { include_deleted: true });
+    assert(
+      resizedRemote.viewport?.width === 1440 && resizedRemote.viewport.height === 900,
+      'Kernel remote viewport did not resize'
     );
 
     const expectedContent = 'kernel-provider-file-parity';

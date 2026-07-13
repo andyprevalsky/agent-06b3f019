@@ -4,6 +4,29 @@ export interface BrowserSessionResumeResponse {
   debug_url: string;
 }
 
+export interface BrowserViewport {
+  width: number;
+  height: number;
+}
+
+export async function resizeBrowserSessionViewport(
+  taskId: string,
+  viewport: BrowserViewport,
+): Promise<void> {
+  const response = await fetch(
+    `${API_BASE_WITH_PATH}/browser-session/task/${encodeURIComponent(taskId)}/viewport`,
+    {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(viewport),
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error('Failed to resize browser viewport');
+  }
+}
+
 export async function resumeBrowserSession(taskId: string): Promise<BrowserSessionResumeResponse> {
   const headers = getAuthHeaders();
 
