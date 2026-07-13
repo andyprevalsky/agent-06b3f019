@@ -167,13 +167,20 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Wait for backend to be ready. Instrumented TypeScript startup can take more
-# than a minute on shared Conductor hosts when several workspaces run coverage
-# concurrently, so use the repository's five-minute timeout ceiling and emit
-# progress every ten seconds instead of failing silently during host pressure.
+# Wait for backend to be ready. Instrumented TypeScript startup can exceed a
+# minute on a busy shared host, so use a wall-clock five-minute deadline and
+# emit progress every ten seconds instead of failing silently.
 READY=0
-for attempt in $(seq 1 600); do
-  if curl -fsS -m 2 "$TEST_BASE_URL/health" >/dev/null 2>&1; then
+READINESS_STARTED_AT=$SECONDS
+READINESS_DEADLINE=$((READINESS_STARTED_AT + 300))
+NEXT_READINESS_PROGRESS=10
+while ((SECONDS < READINESS_DEADLINE)); do
+  REMAINING_READINESS_SECONDS=$((READINESS_DEADLINE - SECONDS))
+  CURL_TIMEOUT_SECONDS=2
+  if ((REMAINING_READINESS_SECONDS < CURL_TIMEOUT_SECONDS)); then
+    CURL_TIMEOUT_SECONDS=$REMAINING_READINESS_SECONDS
+  fi
+  if curl -fsS -m "$CURL_TIMEOUT_SECONDS" "$TEST_BASE_URL/health" >/dev/null 2>&1; then
     READY=1
     break
   fi
@@ -182,10 +189,14 @@ for attempt in $(seq 1 600); do
     tail -n 40 "$COV_LOG" || true
     exit 1
   fi
-  if (( attempt % 20 == 0 )); then
-    echo "Waiting for backend health on $TEST_BASE_URL/health ($((attempt / 2))s elapsed)..."
+  READINESS_ELAPSED=$((SECONDS - READINESS_STARTED_AT))
+  if ((READINESS_ELAPSED >= NEXT_READINESS_PROGRESS)); then
+    echo "Waiting for backend health on $TEST_BASE_URL/health (${READINESS_ELAPSED}s elapsed)..."
+    NEXT_READINESS_PROGRESS=$((READINESS_ELAPSED + 10))
   fi
-  sleep 0.5
+  if ((SECONDS < READINESS_DEADLINE)); then
+    sleep 0.5
+  fi
 done
 
 if [[ "$READY" -ne 1 ]]; then

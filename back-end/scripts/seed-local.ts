@@ -12,7 +12,15 @@ import { PrismaClient } from '@prisma/client';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import dotenv from 'dotenv';
-import { syncIntegrationCredentials, syncPasskeyCredentials } from './seed-local-credentials';
+import {
+  syncBrowserPasswordCredentials,
+  syncBrowserPermissionCredentials,
+  syncCookieCredentials,
+  syncIntegrationCredentials,
+  syncOriginCredentials,
+  syncPasskeyCredentials,
+  syncRequiredCredentialTable,
+} from './seed-local-credentials';
 
 // Parse .env file directly to get remote DB URL
 // (process.env.DATABASE_URL is already overridden to local by run.sh)
@@ -26,10 +34,10 @@ if (!REMOTE_URL) {
 }
 
 const DEV_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
-// Refresh ONLY live browser auth state — cookies + browser context + storage
-// origins (login state) plus passwords + passkeys — from prod. Benchmark runs
-// invoke this at task setup (the `base` live fixture) so an agent always starts
-// with *current* cookies; a one-time setup-db sync goes stale as they expire.
+// Merge production browser auth state into local by each table's natural
+// identity. Matching rows are refreshed and missing production rows are added;
+// local-only rows are deliberately preserved because this is not an
+// authoritative mirror and must not erase developer-owned credentials.
 const CREDENTIALS_ONLY = process.argv.includes('--credentials-only');
 const SKIP_BROWSER_AUTH_SYNC =
   process.env.BENCHMARK_SKIP_BROWSER_AUTH_SYNC === '1' ||
@@ -52,6 +60,16 @@ async function syncTable(name: string, fn: () => Promise<number>): Promise<void>
     console.log(`  ✅ ${name}: ${count} synced`);
   } catch (err) {
     console.error(`  ❌ ${name}: ${err instanceof Error ? err.message : err}`);
+  }
+}
+
+async function syncRequiredTable(name: string, fn: () => Promise<number>): Promise<void> {
+  try {
+    const count = await syncRequiredCredentialTable(name, fn);
+    console.log(`  ✅ ${name}: ${count} synced`);
+  } catch (err) {
+    console.error(`  ❌ ${err instanceof Error ? err.message : err}`);
+    throw err;
   }
 }
 
@@ -101,13 +119,11 @@ async function syncIntegrations(): Promise<number> {
   return syncedIds.length;
 }
 
-// Live browser auth state: the cookies + storage that make a site consider the
-// user logged in. Shared by the full sync and the --credentials-only refresh so
-// benchmarks can pull *current* cookies from prod right before an agent starts
-// (a one-time setup-db sync goes stale as cookies expire).
+// Browser auth merge shared by full sync and --credentials-only. Production
+// identities refresh or add rows, while local-only identities are preserved.
 async function syncBrowserState(): Promise<void> {
   // ── Browser Context ──
-  await syncTable('Browser Context', async () => {
+  await syncRequiredTable('Browser Context', async () => {
     const ctx = await remote.browserContext.findUnique({ where: { userId: DEV_USER_ID } });
     if (!ctx) return 0;
     const { id, ...rest } = ctx;
@@ -120,17 +136,12 @@ async function syncBrowserState(): Promise<void> {
   });
 
   // ── Cookies ──
-  await syncTable('Cookies', async () => {
+  await syncRequiredTable('Cookies', async () => {
     const cookies = await remote.cookie.findMany({ where: { userId: DEV_USER_ID } });
 
     for (let i = 0; i < cookies.length; i += 500) {
       const batch = cookies.slice(i, i + 500);
-      await Promise.all(
-        batch.map((c) => {
-          const { id, ...rest } = c;
-          return local.cookie.upsert({ where: { id }, create: c as any, update: rest as any });
-        })
-      );
+      await syncCookieCredentials(local.cookie, batch);
       if (cookies.length > 500 && i + 500 < cookies.length) {
         process.stdout.write(`     ${Math.min(i + 500, cookies.length)}/${cookies.length}...\r`);
       }
@@ -139,27 +150,27 @@ async function syncBrowserState(): Promise<void> {
   });
 
   // ── LocalStorage Origins ──
-  await syncTable('LocalStorage', async () => {
+  await syncRequiredTable('LocalStorage', async () => {
     const origins = await remote.localStorageOrigin.findMany({ where: { userId: DEV_USER_ID } });
-    return upsertById(local.localStorageOrigin, origins);
+    return syncOriginCredentials(local.localStorageOrigin, origins);
   });
 
   // ── IndexedDB Origins ──
-  await syncTable('IndexedDB', async () => {
+  await syncRequiredTable('IndexedDB', async () => {
     const origins = await remote.indexedDBOrigin.findMany({ where: { userId: DEV_USER_ID } });
-    return upsertById(local.indexedDBOrigin, origins);
+    return syncOriginCredentials(local.indexedDBOrigin, origins);
   });
 
   // ── Browser Permissions ──
-  await syncTable('Browser Permissions', async () => {
+  await syncRequiredTable('Browser Permissions', async () => {
     const perms = await remote.browserPermission.findMany({ where: { userId: DEV_USER_ID } });
-    return upsertById(local.browserPermission, perms);
+    return syncBrowserPermissionCredentials(local.browserPermission, perms);
   });
 
   // ── Cache Storage Origins ──
-  await syncTable('Cache Storage', async () => {
+  await syncRequiredTable('Cache Storage', async () => {
     const caches = await remote.cacheStorageOrigin.findMany({ where: { userId: DEV_USER_ID } });
-    return upsertById(local.cacheStorageOrigin, caches);
+    return syncOriginCredentials(local.cacheStorageOrigin, caches);
   });
 }
 
@@ -229,13 +240,13 @@ async function syncComputeTokensWithRetries(): Promise<void> {
 
 async function syncBrowserCredentials(): Promise<void> {
   // ── Browser Passwords ──
-  await syncTable('Browser Passwords', async () => {
+  await syncRequiredTable('Browser Passwords', async () => {
     const passwords = await remote.browserPassword.findMany({ where: { userId: DEV_USER_ID } });
-    return upsertById(local.browserPassword, passwords);
+    return syncBrowserPasswordCredentials(local.browserPassword, passwords);
   });
 
   // ── Passkey Credentials ──
-  await syncTable('Passkey Credentials', async () => {
+  await syncRequiredTable('Passkey Credentials', async () => {
     return syncPasskeyCredentials(remote.passkeyCredential, local.passkeyCredential, DEV_USER_ID);
   });
 }
@@ -266,7 +277,7 @@ async function sync() {
   }
 
   if (CREDENTIALS_ONLY) {
-    // Live browser auth: cookies + storage (login state) AND passwords/passkeys.
+    console.log('  ℹ️  Browser auth merge refreshes production rows and preserves local-only rows');
     await syncBrowserAuthForCurrentMode();
     console.log('\n🔄 Credential sync complete.');
     return;
