@@ -700,6 +700,15 @@ require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'touch "$POOL_IDS_FILE"' \
   "pool provisioning must preserve and reconcile its ownership ledger"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'retiring orphaned volume bindings for missing pool machine $id' \
+  "pool reconciliation must retire exact bound volumes when a tracked Machine disappears"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'fleet_orphan_volume_safe_for_missing_machine "$volume_id"' \
+  "missing-Machine cleanup must reject recorded volumes still attached elsewhere"
+require_text "$ROOT_DIR/scripts/test.sh" \
+  'agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py' \
+  "the normal repository test gate must execute behavioral cloud lifecycle regressions"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'provenance belongs to a stale warm image/snapshot generation' \
   "preserved pool capacity must fail closed across warm snapshot generations"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \

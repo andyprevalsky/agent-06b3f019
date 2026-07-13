@@ -430,6 +430,46 @@ raise SystemExit(0 if any(volume.get("id") == os.environ["VOLUME_ID"] for volume
 '
 }
 
+fleet_orphan_volume_safe_for_missing_machine() {  # exact recorded volume must be absent or detached
+    local id="$1" volumes
+    volumes="$(FLY volumes list -a "$APP" --json 2>/dev/null)" || return 1
+    printf '%s' "$volumes" | VOLUME_ID="$id" python3 -c '
+import json, os, sys
+try:
+    volumes = json.load(sys.stdin)
+except (TypeError, ValueError):
+    raise SystemExit(1)
+if not isinstance(volumes, list) or any(not isinstance(volume, dict) for volume in volumes):
+    raise SystemExit(1)
+matches = [volume for volume in volumes if volume.get("id") == os.environ["VOLUME_ID"]]
+if len(matches) > 1:
+    raise SystemExit(1)
+if not matches:
+    raise SystemExit(0)
+if "attached_machine_id" not in matches[0]:
+    raise SystemExit(1)
+attachment = matches[0].get("attached_machine_id")
+raise SystemExit(0 if attachment in (None, "") else 1)
+'
+}
+
+pool_retirement_target_stably_detached() {  # confirm missing Machine + absent/detached exact volume twice
+    local id="$1" volume_id="$2" st presence attempt
+    for attempt in 1 2; do
+        st="$(pool_machine_state "$id")"
+        presence=$?
+        [ "$presence" -eq 1 ] || {
+            echo "❌ pool machine $id is present or unreadable while retiring volume $volume_id" >&2
+            return 1
+        }
+        fleet_orphan_volume_safe_for_missing_machine "$volume_id" || {
+            echo "❌ recorded volume $volume_id for missing pool machine $id is attached or unreadable" >&2
+            return 1
+        }
+        [ "$attempt" -eq 2 ] || sleep 2
+    done
+}
+
 upgrade_pool_provenance_volume_bindings() {
     [ -f "$POOL_IDS_FILE" ] || return 0
     local id st presence matches field_count provenance_id provenance_warm provenance_snapshot provenance_image
@@ -484,28 +524,36 @@ upgrade_pool_provenance_volume_bindings() {
     done < "$POOL_IDS_FILE"
 }
 
-record_pool_retirement() {  # record_pool_retirement <machine-id> <newline-separated-volume-ids>
-    local id="$1" volume_ids="$2" volume_id row
+record_pool_retirement() {  # atomically record exact machine→volume ownership before mutation
+    local id="$1" volume_ids="$2" volume_id row tmp="$POOL_RETIREMENT_FILE.tmp.$$"
     [ -n "$POOL_PROVENANCE_WARM" ] && [ -n "$POOL_PROVENANCE_SNAPSHOT" ] && \
         [ -n "$POOL_PROVENANCE_IMAGE" ] && [ -n "$POOL_PROVENANCE_VOLUMES" ] || return 1
     mkdir -p "$(dirname "$POOL_RETIREMENT_FILE")"
     touch "$POOL_RETIREMENT_FILE"
+    rm -f "$tmp"
+    cp "$POOL_RETIREMENT_FILE" "$tmp" || return 1
     while read -r volume_id; do
         [ -n "$volume_id" ] || continue
         case ",$POOL_PROVENANCE_VOLUMES," in
             *",$volume_id,"*) ;;
-            *) echo "❌ volume $volume_id is not bound to pool machine $id provenance" >&2; return 1 ;;
+            *)
+                echo "❌ volume $volume_id is not bound to pool machine $id provenance" >&2
+                rm -f "$tmp"
+                return 1
+                ;;
         esac
         row="$(printf '%s\t%s\t%s\t%s\t%s\t%s' "$id" "$volume_id" \
             "$POOL_PROVENANCE_WARM" "$POOL_PROVENANCE_SNAPSHOT" "$POOL_PROVENANCE_IMAGE" \
             "$POOL_PROVENANCE_VOLUMES")"
-        grep -Fxq "$row" "$POOL_RETIREMENT_FILE" 2>/dev/null \
-            || printf '%s\n' "$row" >> "$POOL_RETIREMENT_FILE"
+        if ! grep -Fxq "$row" "$tmp" 2>/dev/null; then
+            printf '%s\n' "$row" >> "$tmp" || { rm -f "$tmp"; return 1; }
+        fi
     done <<< "$volume_ids"
+    mv "$tmp" "$POOL_RETIREMENT_FILE" || { rm -f "$tmp"; return 1; }
 }
 
 pool_retirement_provenance_valid() {  # persistent proof for interrupted post-destroy cleanup
-    local id="$1" invalid count
+    local id="$1" invalid count expected_count recorded_volumes expected_volumes
     pool_machine_provenance_load "$id" || return 1
     count="$(awk -F '\t' -v machine="$id" '$1 == machine && NF == 6 { count++ } END { print count+0 }' \
         "$POOL_RETIREMENT_FILE" 2>/dev/null)"
@@ -522,13 +570,21 @@ pool_retirement_provenance_valid() {  # persistent proof for interrupted post-de
         echo "❌ pool retirement $id does not match its durable creation provenance" >&2
         return 1
     }
+    expected_volumes="$(printf '%s' "$POOL_PROVENANCE_VOLUMES" | tr ',' '\n' | sort -u)"
+    recorded_volumes="$(awk -F '\t' -v machine="$id" '$1 == machine && NF == 6 { print $2 }' \
+        "$POOL_RETIREMENT_FILE" 2>/dev/null | sort -u)"
+    expected_count="$(printf '%s\n' "$expected_volumes" | grep -c . 2>/dev/null || true)"
+    if [ "$count" -ne "$expected_count" ] || [ "$recorded_volumes" != "$expected_volumes" ]; then
+        echo "❌ pool retirement $id does not journal its exact durable volume set" >&2
+        return 1
+    fi
 }
 
-forget_pool_retirement_volume() {  # forget_pool_retirement_volume <machine-id> <volume-id>
-    local id="$1" volume_id="$2" tmp="$POOL_RETIREMENT_FILE.tmp"
+forget_pool_retirement_machine() {  # clear a complete retirement only after every bound volume is absent
+    local id="$1" tmp="$POOL_RETIREMENT_FILE.tmp"
     [ -f "$POOL_RETIREMENT_FILE" ] || return 0
-    awk -F '\t' -v machine="$id" -v volume="$volume_id" \
-        '!(NF == 6 && $1 == machine && $2 == volume)' \
+    awk -F '\t' -v machine="$id" \
+        '!(NF == 6 && $1 == machine)' \
         "$POOL_RETIREMENT_FILE" > "$tmp" || return 1
     mv "$tmp" "$POOL_RETIREMENT_FILE"
 }
@@ -559,6 +615,25 @@ retire_pool_machine() {  # retire_pool_machine <provably-owned-stale-machine-id>
         }
         [ "$retirement_count" -eq 0 ] || pool_retirement_provenance_valid "$id" || return 1
     else
+        if [ "$retirement_count" -eq 0 ]; then
+            # The provider can drop a clone whose snapshot-backed volume never
+            # finishes restoring. Its five-field creation record is the only
+            # durable machine→volume ownership proof left. Promote that exact
+            # proof into the retirement journal only when every recorded
+            # volume is absent or detached; an attachment to any live Machine
+            # fails closed instead of deleting potentially reused storage.
+            pool_machine_provenance_load "$id" || return 1
+            expected_volume_ids="$(printf '%s' "$POOL_PROVENANCE_VOLUMES" | tr ',' '\n' | sort -u)"
+            [ -n "$expected_volume_ids" ] || {
+                echo "❌ missing pool machine $id has no durable volume binding" >&2
+                return 1
+            }
+            while read -r volume_id; do
+                [ -n "$volume_id" ] || continue
+                pool_retirement_target_stably_detached "$id" "$volume_id" || return 1
+            done <<< "$expected_volume_ids"
+            record_pool_retirement "$id" "$expected_volume_ids" || return 1
+        fi
         pool_retirement_provenance_valid "$id" || return 1
     fi
     if [ "$presence" -eq 0 ]; then
@@ -579,7 +654,7 @@ retire_pool_machine() {  # retire_pool_machine <provably-owned-stale-machine-id>
         # Persist the machine→volume ownership proof before destroying either
         # resource. If this controller is interrupted between the two deletes,
         # the next provisioning pass resumes the recorded retirement.
-        record_pool_retirement "$id" "$volume_ids"
+        record_pool_retirement "$id" "$volume_ids" || return 1
         nonce="$(cloudbench_machine_lease_acquire_retry "$APP" "$id" \
             "cloudbench-pool-retire run=$RUN_ID" \
             "${CLOUDBENCH_PRIMARY_LEASE_ATTEMPTS:-45}" \
@@ -616,18 +691,20 @@ retire_pool_machine() {  # retire_pool_machine <provably-owned-stale-machine-id>
         "$POOL_RETIREMENT_FILE" 2>/dev/null | sort -u)"
     while read -r volume_id; do
         [ -n "$volume_id" ] || continue
+        pool_retirement_target_stably_detached "$id" "$volume_id" || return 1
         fleet_volume_presence "$volume_id"
         presence=$?
         if [ "$presence" -eq 1 ]; then
-            forget_pool_retirement_volume "$id" "$volume_id" || return 1
             continue
         fi
         [ "$presence" -eq 0 ] || {
             echo "❌ could not inspect retired pool volume $volume_id" >&2
             return 1
         }
+        pool_retirement_target_stably_detached "$id" "$volume_id" || return 1
         destroyed=0
         for _ in 1 2 3 4 5; do
+            pool_retirement_target_stably_detached "$id" "$volume_id" || return 1
             if FLY volumes destroy "$volume_id" -a "$APP" --yes >/dev/null 2>&1; then
                 fleet_volume_presence "$volume_id"
                 presence=$?
@@ -640,8 +717,11 @@ retire_pool_machine() {  # retire_pool_machine <provably-owned-stale-machine-id>
             echo "❌ failed to destroy retired pool volume $volume_id" >&2
             return 1
         }
-        forget_pool_retirement_volume "$id" "$volume_id" || return 1
     done <<< "$volume_ids"
+    # Keep the exact full volume set journaled across any partial cleanup. Only
+    # after every bound volume has been confirmed absent can the retirement be
+    # cleared atomically; otherwise a retry must retain proof for the remainder.
+    forget_pool_retirement_machine "$id" || return 1
     echo "  ♻️ retired stale pool machine $id and its owned volumes"
 }
 
@@ -666,8 +746,9 @@ provision_pool() {  # provision_pool <N> — ensure at least N stopped clones, r
 
     # Preserve valid tracked machines and only top up the pool. Truncating this
     # ledger would orphan every prior clone (and its billed volume) on each
-    # provisioning pass. Missing machines are dropped; an unreadable control
-    # plane response fails closed instead of silently replacing ownership data.
+    # provisioning pass. Missing machines retire only their exact detached,
+    # durably bound volumes; an unreadable control-plane response fails closed
+    # instead of silently replacing ownership data.
     mkdir -p "$(dirname "$POOL_IDS_FILE")"
     touch "$POOL_IDS_FILE"
     touch "$POOL_PROVENANCE_FILE"
@@ -682,7 +763,11 @@ provision_pool() {  # provision_pool <N> — ensure at least N stopped clones, r
         grep -Fxq "$id" "$reconciled_file" 2>/dev/null && continue
         st="$(pool_machine_state "$id")"
         presence=$?
-        [ "$presence" -eq 1 ] && continue
+        if [ "$presence" -eq 1 ]; then
+            echo "  ♻️ retiring orphaned volume bindings for missing pool machine $id"
+            retire_pool_machine "$id" || return 1
+            continue
+        fi
         [ "$presence" -eq 0 ] || {
             echo "❌ could not reconcile existing pool machine $id" >&2
             return 1
