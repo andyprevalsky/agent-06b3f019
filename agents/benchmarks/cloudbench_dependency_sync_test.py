@@ -533,6 +533,78 @@ def test_fresh_clone_start_paths_honor_storage_readiness_contract() -> None:
     )
 
 
+def test_environment_activation_retries_only_transient_fly_failures(tmp_path: Path) -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    function_start = cloud.index("activate_machine_environment() {")
+    function_end = cloud.index("\n}\n", function_start) + 3
+    activation_function = cloud[function_start:function_end]
+
+    def activate(responses: list[tuple[int, str]]) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+        responses_file = tmp_path / "responses"
+        calls_file = tmp_path / "calls"
+        responses_file.write_text("\n".join(f"{status}|{message}" for status, message in responses) + "\n")
+        calls_file.write_text("")
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"""set -uo pipefail
+APP=bench-app
+FLY() {{
+  printf '%s\\n' "$*" >> "$CALLS_FILE"
+  response="$(head -1 "$RESPONSES_FILE")"
+  tail -n +2 "$RESPONSES_FILE" > "$RESPONSES_FILE.tmp"
+  mv "$RESPONSES_FILE.tmp" "$RESPONSES_FILE"
+  printf '%s\\n' "${{response#*|}}"
+  return "${{response%%|*}}"
+}}
+{activation_function}
+activate_machine_environment machine-1
+""",
+            ],
+            env={
+                "CALLS_FILE": str(calls_file),
+                "RESPONSES_FILE": str(responses_file),
+                "CLOUDBENCH_UPDATE_ATTEMPTS": "3",
+                "CLOUDBENCH_UPDATE_RETRY_DELAY": "0",
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        return result, calls_file.read_text().splitlines()
+
+    recovered, recovered_calls = activate(
+        [
+            (1, "request returned non-2xx status: 408"),
+            (0, "Machine machine-1 updated successfully!"),
+        ]
+    )
+    rejected, rejected_calls = activate([(1, "request returned non-2xx status: 401")])
+    embedded_status, embedded_status_calls = activate(
+        [(1, "machine abc503def returned nontransient validation error")]
+    )
+    exhausted, exhausted_calls = activate(
+        [
+            (1, "request returned non-2xx status: 503"),
+            (1, "context deadline exceeded"),
+            (1, "unexpected EOF"),
+        ]
+    )
+
+    assert recovered.returncode == 0, recovered.stderr
+    assert len(recovered_calls) == 2
+    assert "transient Fly update failure" in recovered.stderr
+    assert rejected.returncode == 1
+    assert len(rejected_calls) == 1
+    assert "transient Fly update failure" not in rejected.stderr
+    assert embedded_status.returncode == 1
+    assert len(embedded_status_calls) == 1
+    assert "transient Fly update failure" not in embedded_status.stderr
+    assert exhausted.returncode == 1
+    assert len(exhausted_calls) == 3
+
+
 def test_fleet_clone_identity_requires_a_distinct_authoritative_target(
     tmp_path: Path,
 ) -> None:

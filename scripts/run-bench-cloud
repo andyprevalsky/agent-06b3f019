@@ -391,6 +391,26 @@ validate_environment_contract() {
     export CLOUDBENCH_PROD_BROWSER_PROVIDER
 }
 
+activate_machine_environment() {  # activate_machine_environment <machine_id>
+    local machine_id="$1" attempt=1 output status
+    local attempts="${CLOUDBENCH_UPDATE_ATTEMPTS:-3}"
+    local retry_delay="${CLOUDBENCH_UPDATE_RETRY_DELAY:-2}"
+    while [ "$attempt" -le "$attempts" ]; do
+        output="$(FLY machine update "$machine_id" -a "$APP" --skip-start --yes 2>&1)"
+        status=$?
+        printf '%s\n' "$output" | sed 's/^/      /'
+        [ "$status" -eq 0 ] && return 0
+        if [ "$attempt" -ge "$attempts" ] || ! printf '%s' "$output" \
+            | grep -qiE '(^|[^[:alnum:]])(408|429|5[0-9][0-9])([^[:alnum:]]|$)|timed? out|timeout|context deadline|connection reset|unexpected EOF|temporar(y|ily)'; then
+            return "$status"
+        fi
+        echo "      transient Fly update failure; retrying machine $machine_id ($attempt/$attempts)" >&2
+        sleep "$retry_delay"
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
 # Inject the two base64 .env blobs + GITHUB_TOKEN as active Fly secrets (present
 # on machine init + in ssh sessions). The benchmark app uses the Machines API,
 # not Fly Launch releases: stage app secrets, then update each stopped machine
@@ -444,7 +464,7 @@ for machine in json.load(sys.stdin) or []:
     while IFS= read -r machine_id; do
         [ -n "$machine_id" ] || continue
         echo "   activating env on machine $machine_id (skip-start)"
-        FLY machine update "$machine_id" -a "$APP" --skip-start --yes 2>&1 | sed 's/^/      /' || {
+        activate_machine_environment "$machine_id" || {
             echo "❌ Failed to activate environment on machine $machine_id" >&2
             exit 1
         }
