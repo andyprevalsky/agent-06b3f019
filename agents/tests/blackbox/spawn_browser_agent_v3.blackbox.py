@@ -1186,6 +1186,29 @@ def test_keycap_input_synthesis_generates_variable_key_timings():
     assert all(0.03 <= timing.dwell_s <= 0.15 for timing in timings)
 
 
+def test_keycap_input_synthesis_rng_isolated_from_global_numpy_state():
+    import random
+
+    import numpy as np
+
+    from browser_tools.input_synthesis import KeycapTimingSynthesizer
+
+    numpy_state = np.random.get_state()
+    try:
+        sequences = []
+        for numpy_seed in (17, 229):
+            np.random.seed(numpy_seed)
+            synth = KeycapTimingSynthesizer(rng=random.Random(11), basis_count=48)
+            sequences.append([synth.next(char) for char in "hello world."])
+    finally:
+        np.random.set_state(numpy_state)
+
+    assert sequences[0] == sequences[1]
+    for timings in sequences:
+        intervals = [round(timing.interval_s, 4) for timing in timings]
+        assert len(set(intervals)) > 5
+
+
 def test_mouse_click_synthesis_uses_paper_duration_distribution():
     import random
 
@@ -9785,6 +9808,10 @@ async def run_all_tests():
     r.record(
         "keycap_input_synthesis_timing",
         test_keycap_input_synthesis_generates_variable_key_timings,
+    )
+    r.record(
+        "keycap_input_synthesis_rng_isolation",
+        test_keycap_input_synthesis_rng_isolated_from_global_numpy_state,
     )
     await r.record_async(
         "browser_humanizer_click_synthesis",

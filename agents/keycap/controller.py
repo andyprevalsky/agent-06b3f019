@@ -15,7 +15,7 @@ class Controller:
     - generate_w(self, start_value=1, random_range=(0.1, 0.5)): Generates w values based on an increasing pattern with randomness.
     - generate_model_values(self, t): Generates model values for the given time series using the current D, alpha, and w, and applies velocity constraints.
     """
-    def __init__(self, n=None, D=None, alpha=None, w=None, min_velocity=1, max_velocity=100):
+    def __init__(self, n=None, D=None, alpha=None, w=None, min_velocity=1, max_velocity=100, rng=None):
         """
         Initializes the Controller with a given number of keycaps.
         
@@ -27,6 +27,8 @@ class Controller:
         - min_velocity (float): Minimum allowed velocity for model values.
         - max_velocity (float): Maximum allowed velocity for model values.
         """
+        self.rng = rng
+
         if (n is None):
             self.generate_n()
         else:
@@ -70,7 +72,8 @@ class Controller:
         - lower (float): Lower bound for D.
         - upper (float): Upper bound for D.
         """
-        self.D = np.random.uniform(lower, upper, self.n)
+        generator = self.rng if self.rng is not None else np.random
+        self.D = generator.uniform(lower, upper, self.n)
 
     def add_gaussian_noise(self, data, mean_variation=0.1, std_variation=0.5):
         """
@@ -85,7 +88,8 @@ class Controller:
         Returns:
         - (array-like): Data with Gaussian noise.
         """
-        gaussian_noise = np.random.normal(mean_variation, std_variation, len(data))
+        generator = self.rng if self.rng is not None else np.random
+        gaussian_noise = generator.normal(mean_variation, std_variation, len(data))
         return data + gaussian_noise
 
 
@@ -108,7 +112,8 @@ class Controller:
         - start_value (float): Starting value for w.
         - random_range (tuple of float): Range to generate randomness for w.
         """
-        random_values = np.random.uniform(lower, upper, self.n)
+        generator = self.rng if self.rng is not None else np.random
+        random_values = generator.uniform(lower, upper, self.n)
         self.w = np.array([start_value + i + random_values[i] for i in range(self.n)])
     
 
