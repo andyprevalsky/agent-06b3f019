@@ -2,11 +2,13 @@
  * Terminal feature — agent list loading and polling hook.
  *
  * Request state:
- *   IDLE --loadAgents()--> LOADING --settled--> IDLE
+ *   IDLE --loadAgents()--> LOADING --final request settles--> IDLE
+ *                            |  ^
+ *                            +--+ overlapping request starts/settles
  *   IDLE --cannot submit goals----------------> IDLE
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 
 import { useToast } from '@/hooks/use-toast';
 
@@ -18,8 +20,10 @@ export function useAgentList(canSubmitGoals: boolean) {
   const { toast } = useToast();
   const [agents, setAgents] = useState<Agent[]>([]);
   const [isLoadingAgents, setIsLoadingAgents] = useState(false);
+  const activeLoads = useRef(0);
 
   const loadAgents = useCallback(async () => {
+    activeLoads.current += 1;
     setIsLoadingAgents(true);
     try {
       const fetched = await fetchAgents();
@@ -27,7 +31,8 @@ export function useAgentList(canSubmitGoals: boolean) {
     } catch (_err: unknown) {
       toast({ title: 'Error', description: 'Failed to load agents', variant: 'destructive' });
     } finally {
-      setIsLoadingAgents(false);
+      activeLoads.current -= 1;
+      setIsLoadingAgents(activeLoads.current > 0);
     }
   }, [toast]);
 

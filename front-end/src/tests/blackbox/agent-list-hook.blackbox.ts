@@ -69,4 +69,36 @@ describe('useAgentList', () => {
       expect(result.current.isLoadingAgents).toBe(false);
     });
   });
+
+  it('stays loading until every overlapping request settles', async () => {
+    mockSession();
+    const finishRequests: Array<() => void> = [];
+    server.use(
+      http.get(`${API_BASE}/agents`, async () => {
+        await new Promise<void>((resolve) => finishRequests.push(resolve));
+        return HttpResponse.json({ agents: [] });
+      }),
+    );
+
+    const { result } = renderHook(() => useAgentList(false));
+    let firstLoad: Promise<void> | undefined;
+    let secondLoad: Promise<void> | undefined;
+    act(() => {
+      firstLoad = result.current.loadAgents();
+      secondLoad = result.current.loadAgents();
+    });
+
+    await waitFor(() => {
+      expect(finishRequests).toHaveLength(2);
+      expect(result.current.isLoadingAgents).toBe(true);
+    });
+
+    finishRequests[0]();
+    await act(async () => firstLoad);
+    expect(result.current.isLoadingAgents).toBe(true);
+
+    finishRequests[1]();
+    await act(async () => secondLoad);
+    expect(result.current.isLoadingAgents).toBe(false);
+  });
 });

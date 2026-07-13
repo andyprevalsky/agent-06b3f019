@@ -23,11 +23,18 @@ async function runCorsPreflight(
   baseUrl: string,
   origin: string,
   path: (typeof AUTH_CORS_PATHS)[number],
-  fetchForProbe: FetchForCorsProbe
+  fetchForProbe: FetchForCorsProbe,
+  timeoutMs: number
 ): Promise<CorsPreflightResult> {
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(new Error(`CORS preflight timed out after ${timeoutMs}ms`)),
+    timeoutMs
+  );
   try {
     const response = await fetchForProbe(`${baseUrl}${path}`, {
       method: 'OPTIONS',
+      signal: controller.signal,
       headers: {
         Origin: origin,
         'Access-Control-Request-Method': 'POST',
@@ -68,16 +75,21 @@ async function runCorsPreflight(
       ok: false,
       error: error instanceof Error ? error.message : String(error),
     };
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
 export async function runAuthCorsPreflights(
   baseUrl: string,
-  fetchForProbe: FetchForCorsProbe = fetch
+  fetchForProbe: FetchForCorsProbe = fetch,
+  timeoutMs = 15_000
 ): Promise<CorsPreflightResult[]> {
   return Promise.all(
     PRODUCTION_WEB_ORIGINS.flatMap((origin) =>
-      AUTH_CORS_PATHS.map((path) => runCorsPreflight(baseUrl, origin, path, fetchForProbe))
+      AUTH_CORS_PATHS.map((path) =>
+        runCorsPreflight(baseUrl, origin, path, fetchForProbe, timeoutMs)
+      )
     )
   );
 }

@@ -47,6 +47,18 @@ async function main(): Promise<void> {
   assert.ok(rejectedResults.every((result) => !result.ok));
   assert.ok(rejectedResults.every((result) => result.error?.includes('expected status 204')));
 
+  const timedOutResults = await runAuthCorsPreflights(
+    'https://backend.example',
+    async (_url, init) =>
+      new Promise<Response>((_resolve, reject) => {
+        assert.ok(init.signal);
+        init.signal.addEventListener('abort', () => reject(init.signal?.reason));
+      }),
+    5
+  );
+  assert.ok(timedOutResults.every((result) => !result.ok));
+  assert.ok(timedOutResults.every((result) => result.error?.includes('timed out after 5ms')));
+
   process.stdout.write('CORS production smoke contracts passed\n');
 }
 

@@ -132,7 +132,7 @@ async function main(): Promise<void> {
   console.log(`Endpoint smoke against ${BASE_URL} (user ${USER_ID.slice(0, 8)})\n`);
   const [results, corsResults] = await Promise.all([
     Promise.all(PROBES.map(runProbe)),
-    runAuthCorsPreflights(BASE_URL),
+    runAuthCorsPreflights(BASE_URL, fetch, REQUEST_TIMEOUT_MS),
   ]);
 
   let failed = 0;

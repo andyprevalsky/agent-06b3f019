@@ -56,3 +56,15 @@ export function resolveAllowedOrigins(environment: CorsEnvironment): string[] {
 
   return configuredOrigins;
 }
+
+export function isCorsOriginAllowed(
+  origin: string | undefined,
+  allowedOrigins: readonly string[],
+  nodeEnv: string | undefined
+): boolean {
+  if (origin === undefined || origin === '') return true;
+  if (allowedOrigins.includes(origin)) return true;
+  if (nodeEnv === 'production') return false;
+
+  return /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin) || origin.endsWith('.vercel.app');
+}

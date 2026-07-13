@@ -63,7 +63,7 @@ import { createLogger } from './providers/logger';
 import { installFetchCapture, captureTokenMiddleware } from './providers/fetchCapture';
 import { tracingMiddleware } from './providers/tracing';
 import { getTemporalClient } from './providers/temporal';
-import { resolveAllowedOrigins } from './providers/corsConfig';
+import { isCorsOriginAllowed, resolveAllowedOrigins } from './providers/corsConfig';
 
 // System tools available to all Rose agents (mirrors the live tool registry in
 // agents/tools/). Drives the public Bazaar listing description below.
@@ -182,26 +182,10 @@ app.use(
       origin: string | undefined,
       callback: (err: Error | null, allow?: boolean) => void
     ) => {
-      // Allow requests with no origin (like mobile apps or curl)
-      if (!origin) return callback(null, true);
-
-      // Check exact matches
-      if (allowedOrigins.indexOf(origin) !== -1) {
-        return callback(null, true);
-      }
-
-      // In development the frontend, mac app, and semantic tests can run on
-      // different localhost ports. Keep production pinned to the explicit list.
-      if (
-        process.env.NODE_ENV !== 'production' &&
-        /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin)
-      ) {
-        return callback(null, true);
-      }
-
-      // Allow Vercel preview URLs (*.vercel.app)
-      if (origin.endsWith('.vercel.app')) {
-        log.info('Allowed Vercel preview origin', { origin });
+      if (isCorsOriginAllowed(origin, allowedOrigins, process.env.NODE_ENV)) {
+        if (origin?.endsWith('.vercel.app') === true) {
+          log.info('Allowed configured or development Vercel preview origin', { origin });
+        }
         return callback(null, true);
       }
 
