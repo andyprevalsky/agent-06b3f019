@@ -170,6 +170,7 @@ function startPoller(stubPath: string, log: string, hubUrl: string = BASE_URL): 
       RUN_BENCH_BIN: stubPath,
       POLL_INTERVAL: '2',
       HUB_CLAIM_SCOPE: SCOPE,
+      HUB_SKIP_CATALOG_EXPORT: '1',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });

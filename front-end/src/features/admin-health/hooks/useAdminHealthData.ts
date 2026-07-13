@@ -1,18 +1,17 @@
 import { useEffect, useState } from 'react';
 
-import { fetchAdminHealthData, readCachedAdminHealth } from '../api';
+import { fetchAdminHealthData } from '../api';
 import type { AdminHealthData, AdminHealthTimeSlice } from '../types';
 
 export function useAdminHealthData(timeSlice: AdminHealthTimeSlice) {
-  const [data, setData] = useState<AdminHealthData | null>(() => readCachedAdminHealth(timeSlice));
-  const [loading, setLoading] = useState(() => data === null);
+  const [data, setData] = useState<AdminHealthData | null>(null);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
-    const cached = readCachedAdminHealth(timeSlice);
-    setData(cached);
-    setLoading(cached === null);
+    setData(null);
+    setLoading(true);
     setError(null);
 
     fetchAdminHealthData(timeSlice)
