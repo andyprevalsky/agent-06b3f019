@@ -910,6 +910,39 @@ activate_owned_machine_images registry.fly.io/bench:new
     )
 
 
+def test_warm_resolver_ignores_live_cached_pool_machine(tmp_path: Path) -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    function_start = cloud.index("resolve_machine_id() {")
+    function_end = cloud.index("\n}\n", function_start) + 3
+    resolver = cloud[function_start:function_end]
+    state_file = tmp_path / "cloudbench-machine.json"
+    state_file.write_text(json.dumps({"machine_id": "pool-1"}))
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
+FLEET_MACHINE_ID=
+STATE_FILE="$STATE_FILE_PATH"
+MACHINE_NAME=cloudbench-warm
+_machines_json() {{
+  printf '[{{"id":"pool-1","name":"pool-machine"}},{{"id":"warm-1","name":"cloudbench-warm"}}]\n'
+}}
+{resolver}
+resolve_machine_id
+""",
+        ],
+        env={"STATE_FILE_PATH": str(state_file)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "warm-1"
+
+
 def test_environment_refresh_serializes_shared_app_and_reconciles_pool_first() -> None:
     cloud = CLOUD_SCRIPT.read_text()
     fleet = FLEET_SCRIPT.read_text()

@@ -246,8 +246,10 @@ _machines_json() {
     FLY machines list -a "$APP" --json 2>/dev/null || echo '[]'
 }
 
-# Resolve the persistent machine id: prefer the stored id, else match by name.
-# Fleet mode pins an explicit per-bench machine and skips the warm-box state file.
+# Resolve the persistent warm machine id from the provider-authoritative name.
+# The local state file is only a tie-breaker among exact warm-name matches; it
+# must never redirect warm operations to a live pool/ephemeral machine. Fleet
+# mode pins an explicit per-bench machine and skips the warm-box state file.
 resolve_machine_id() {
     if [ -n "$FLEET_MACHINE_ID" ]; then
         printf '%s' "$FLEET_MACHINE_ID"
@@ -267,14 +269,13 @@ except Exception:
     data=[]
 name=os.environ.get("MACHINE_NAME")
 stored=os.environ.get("STORED") or ""
-ids={m.get("id") for m in data if m.get("id")}
-# stored id still present?
-if stored and stored in ids:
-    print(stored); sys.exit(0)
-# else match by name
-for m in data:
-    if m.get("name")==name and m.get("id"):
-        print(m["id"]); sys.exit(0)
+warm=[m for m in data if m.get("name")==name and m.get("id")]
+if stored:
+    cached=next((m for m in warm if m.get("id")==stored), None)
+    if cached:
+        print(cached["id"]); sys.exit(0)
+if warm:
+    print(warm[0]["id"]); sys.exit(0)
 print("")
 ' 2>/dev/null || echo ""
 }
