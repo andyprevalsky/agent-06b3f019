@@ -1700,8 +1700,16 @@ if [ "$NEEDS_IMESSAGE_RELAY" = "1" ]; then
     ) > "$IMESSAGE_RELAY_LOG" 2>&1 &
     IMESSAGE_RELAY_PID=$!
     echo "📨 Starting authenticated Mac iMessage relay (pid=$IMESSAGE_RELAY_PID) ..."
+    # The relay establishes its heartbeat by polling this clone's backend, which
+    # only serves after the on-box stack finishes booting (checkout → env → deps
+    # refresh → credential sync → services) — the same multi-minute timeline the
+    # fleet already budgets for reaching the synchronized start barrier. Wait for
+    # that full window rather than a fixed 180s, which was shorter than a cold
+    # backend boot and made message-person exit before the barrier (aborting the
+    # whole group). The relay's own run deadline (--timeout-seconds) is unchanged.
+    RELAY_HEARTBEAT_WAIT_SECONDS="${CLOUDBENCH_START_BARRIER_WAIT_SECONDS:-900}"
     RELAY_READY="0"
-    for _ in $(seq 1 180); do
+    for _ in $(seq 1 "$RELAY_HEARTBEAT_WAIT_SECONDS"); do
         if grep -q 'bridge heartbeat established' "$IMESSAGE_RELAY_LOG" 2>/dev/null; then
             RELAY_READY="1"
             break
@@ -1714,7 +1722,7 @@ if [ "$NEEDS_IMESSAGE_RELAY" = "1" ]; then
         sleep 1
     done
     if [ "$RELAY_READY" != "1" ]; then
-        echo "❌ Mac iMessage relay did not establish a heartbeat within 180 seconds." >&2
+        echo "❌ Mac iMessage relay did not establish a heartbeat within ${RELAY_HEARTBEAT_WAIT_SECONDS} seconds." >&2
         tail -80 "$IMESSAGE_RELAY_LOG" 2>/dev/null | sed 's/^/   /' || true
         exit 1
     fi
