@@ -173,8 +173,11 @@ require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'CLOUDBENCH_ENV_VERIFIED=1' \
   "fleet children must receive proof that the controller verified the environment"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
-  'set -C; printf '"'"'%s\n'"'"' "$$" > "$claim_path"' \
-  "pool claims must be atomic (noclobber) so concurrent controllers cannot double-claim"
+  'write_pool_claim "$claim_path"' \
+  "pool claims must use the atomic host/PID-birth ownership writer"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'printf '"'"'pid_start=%s\n'"'"' "$FLEET_OWNER_PID_START"' \
+  "pool and fleet ownership must disambiguate PID reuse"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'verify_app_environment' \
   "run-bench-cloud must expose the read-only environment preflight"

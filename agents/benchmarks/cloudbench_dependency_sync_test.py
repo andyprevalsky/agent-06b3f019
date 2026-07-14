@@ -1042,9 +1042,12 @@ def test_pool_reconcile_leaves_concurrent_owner_untouched(tmp_path: Path) -> Non
     function_end = fleet.index("\n}\n", reconcile_start) + 3
     reconcile_functions = fleet[function_start:function_end]
 
-    pool_file = tmp_path / "pool.ids"
+    git_common = tmp_path / "git-common"
+    pool_file = git_common / "cloudbench-pools" / "workspace.ids"
+    claims_dir = git_common / "cloudbench-pool-claims"
     states_file = tmp_path / "states"
     operations_file = tmp_path / "operations"
+    pool_file.parent.mkdir(parents=True)
     pool_file.write_text("abc123\n")
     states_file.write_text("started\n")
     operations_file.write_text("")
@@ -1055,7 +1058,9 @@ def test_pool_reconcile_leaves_concurrent_owner_untouched(tmp_path: Path) -> Non
             "-c",
             f"""set -uo pipefail
 APP=bench-app
+GIT_COMMON_DIR="$GIT_COMMON"
 POOL_IDS_FILE="$POOL_FILE"
+POOL_CLAIMS_DIR="$CLAIMS_DIR"
 UNAVAILABLE_POOL_IDS=()
 FLY() {{
   if [ "$1 $2" = "machines list" ]; then
@@ -1080,6 +1085,8 @@ printf 'refresh\\n' >> "$OPERATIONS_FILE"
         ],
         env={
             "POOL_FILE": str(pool_file),
+            "GIT_COMMON": str(git_common),
+            "CLAIMS_DIR": str(claims_dir),
             "STATES_FILE": str(states_file),
             "OPERATIONS_FILE": str(operations_file),
             "CLOUDBENCH_POOL_STOP_DELAY": "0",
@@ -1102,6 +1109,9 @@ printf 'refresh\\n' >> "$OPERATIONS_FILE"
 
 def test_pool_claims_survive_command_substitution_and_stay_distinct(tmp_path: Path) -> None:
     fleet = FLEET_SCRIPT.read_text()
+    write_start = fleet.index("write_pool_claim() {")
+    write_end = fleet.index("\n}\n", write_start) + 3
+    write_function = fleet[write_start:write_end]
     function_start = fleet.index("claim_pool_machine() {")
     function_end = fleet.index("\n}\n", function_start) + 3
     claim_function = fleet[function_start:function_end]
@@ -1121,12 +1131,15 @@ POOL_IDS_FILE="$POOL_FILE"
 CLAIMED_POOL_FILE="$CLAIMS_FILE"
 POOL_CLAIMS_DIR="$GLOBAL_CLAIMS"
 UNAVAILABLE_POOL_IDS=(abc123)
+FLEET_OWNER_HOST=test-host
+FLEET_OWNER_PID_START='Mon Jan  1 00:00:00 2001'
 machine_storage_ready() {{ return 0; }}
 FLY() {{
   if [ "$1 $2" = "machine status" ]; then printf 'State stopped\\n'; return 0; fi
   if [ "$1 $2" = "machine start" ]; then printf '%s\\n' "$3" >> "$STARTS_FILE"; return 0; fi
   return 2
 }}
+{write_function}
 {claim_function}
 first="$(claim_pool_machine)"
 second="$(claim_pool_machine)"
@@ -1245,6 +1258,8 @@ FLY() {{
   fi
   return 2
 }}
+fleet_registry_record_name() {{ return 0; }}
+fleet_registry_record_id() {{ return 0; }}
 {clone_function}
 clone_machine_target "$LEDGER"
 """,
@@ -1326,11 +1341,13 @@ def test_pool_promotes_only_successful_owned_clone_ids() -> None:
     pool_function = fleet[pool_start:pool_end]
 
     clone_call = 'id="$(clone_machine_target "$OWNED_CLONES_FILE")"'
-    promotion = 'printf \'%s\\n\' "$id" >> "$POOL_IDS_FILE"'
+    promotion = 'if pool_ledger_record_id "$id"; then'
+    registry_release = 'fleet_registry_release_id "$id"'
     release = 'grep -Fxv "$id" "$OWNED_CLONES_FILE"'
     assert clone_call in pool_function
     assert pool_function.index(clone_call) < pool_function.index(promotion)
-    assert pool_function.index(promotion) < pool_function.index(release)
+    assert pool_function.index(promotion) < pool_function.index(registry_release)
+    assert pool_function.index(registry_release) < pool_function.index(release)
     assert 'clone_machine_target "$POOL_IDS_FILE"' not in pool_function
 
 
