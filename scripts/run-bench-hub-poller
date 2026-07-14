@@ -225,6 +225,13 @@ process_request() {  # process_request <request_json>
         echo "⚠ malformed run-request (missing id/taskNames) — skipping: $(printf '%.200s' "$req")" >&2
         return 0
     fi
+    # req_id is interpolated into artifact paths (and a later `rm -rf`). Enforce a
+    # strict allowlist so hostile/garbled queue data (e.g. "../../../target") can
+    # never escape the artifact roots and delete other poller-accessible data.
+    if [[ ! "$req_id" =~ ^[A-Za-z0-9_-]{1,128}$ ]]; then
+        echo "⚠ malformed run-request (invalid id) — skipping: $(printf '%.200s' "$req_id")" >&2
+        return 0
+    fi
 
     echo "── claiming request $req_id (tasks: $task_names)"
     if ! hub PATCH "/api/benchmarks/run-requests/$req_id" \
