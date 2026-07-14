@@ -13,28 +13,25 @@ import type { PendingAuthAssistance } from './types';
 export function useRefreshedAuthAssistanceUrl(
   pendingAuthAssistance: PendingAuthAssistance | null,
 ): string | null {
-  const [liveViewUrl, setLiveViewUrl] = useState<string | null>(
-    pendingAuthAssistance?.liveViewUrl ?? null,
-  );
+  const requestId = pendingAuthAssistance?.requestId;
+  const requestedLiveViewUrl = pendingAuthAssistance?.liveViewUrl ?? null;
+  const [liveViewUrl, setLiveViewUrl] = useState<string | null>(requestedLiveViewUrl);
 
   useEffect(() => {
     let cancelled = false;
-    setLiveViewUrl(pendingAuthAssistance?.liveViewUrl ?? null);
+    setLiveViewUrl(requestedLiveViewUrl);
 
-    if (!pendingAuthAssistance) {
+    if (!requestId) {
       return () => {
         cancelled = true;
       };
     }
 
-    refreshAuthAssistanceSession(pendingAuthAssistance.requestId)
+    refreshAuthAssistanceSession(requestId)
       .then((result) => {
         if (cancelled) return;
         setLiveViewUrl(
-          result.liveViewUrl ??
-            result.handoff?.liveViewUrl ??
-            pendingAuthAssistance.liveViewUrl ??
-            null,
+          result.liveViewUrl ?? result.handoff?.liveViewUrl ?? requestedLiveViewUrl ?? null,
         );
       })
       .catch((error) => {
@@ -44,7 +41,7 @@ export function useRefreshedAuthAssistanceUrl(
     return () => {
       cancelled = true;
     };
-  }, [pendingAuthAssistance?.requestId, pendingAuthAssistance?.liveViewUrl]);
+  }, [requestId, requestedLiveViewUrl]);
 
   return liveViewUrl;
 }

@@ -53,19 +53,21 @@ export function useTerminalAgents(
   });
 
   const isInitialLoadRef = useRef(false);
+  const { setIsSendingMessage, setMessageInput, setSelectedModel } = messaging;
+  const { agent, setSelectedAgentId } = ctx;
   useEffect(() => {
-    if (ctx.agent?.model) {
-      messaging.setSelectedModel(ctx.agent.model);
+    if (agent?.model) {
+      setSelectedModel(agent.model);
       isInitialLoadRef.current = true;
     }
-  }, [ctx.agent?.model, messaging.setSelectedModel]);
+  }, [agent?.model, setSelectedModel]);
 
   const cleanupAgentState = useCallback(() => {
-    ctx.setSelectedAgentId(null);
+    setSelectedAgentId(null);
     isInitialLoadRef.current = false;
-    messaging.setIsSendingMessage(false);
-    messaging.setMessageInput('');
-  }, [ctx.setSelectedAgentId, messaging]);
+    setIsSendingMessage(false);
+    setMessageInput('');
+  }, [setIsSendingMessage, setMessageInput, setSelectedAgentId]);
 
   const { handleLogout } = useTerminalAuth({
     auth,

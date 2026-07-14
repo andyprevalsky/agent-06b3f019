@@ -82,8 +82,14 @@ export function handleInsertMessage(
     setters.setStreamingPlan(null);
   }
 
-  if (message.role === 'TOOL' && message.metadata?.toolName === 'send_message_to_user') {
-    setters.setStreamingAttention(null);
+  if (
+    message.role === 'TOOL' &&
+    message.metadata?.toolName === 'send_message_to_user' &&
+    typeof message.metadata?.toolCallId === 'string'
+  ) {
+    setters.setStreamingAttention((prev) =>
+      prev?.tool_call_id === message.metadata?.toolCallId ? null : prev,
+    );
   }
 
   if (message.role === 'TOOL' && message.metadata?.toolCallId) {
@@ -236,11 +242,21 @@ export function handleAttentionStream(
 ) {
   if (attention.agentId !== selectedAgentId) return;
 
-  setStreamingAttention({
-    stream_id: attention.stream_id,
-    tool_call_id: attention.tool_call_id,
-    message: attention.message,
-    is_question: false,
+  setStreamingAttention((prev) => {
+    const isMatchingStream = prev?.tool_call_id === attention.tool_call_id;
+    if (isMatchingStream && attention.sequence <= prev.sequence) return prev;
+    if (attention.done && attention.message.length === 0) {
+      return isMatchingStream || prev === null ? null : prev;
+    }
+    if (attention.message.length === 0) return prev;
+    return {
+      stream_id: attention.stream_id,
+      tool_call_id: attention.tool_call_id,
+      message: attention.message,
+      is_question: false,
+      sequence: attention.sequence,
+      done: attention.done,
+    };
   });
 }
 

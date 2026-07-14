@@ -40,7 +40,6 @@ const DEV_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 // --passkeys-only benchmark mode is authoritative and removes stale local
 // passkeys so its live-fixture preflight cannot succeed on obsolete material.
 const CREDENTIALS_ONLY = process.argv.includes('--credentials-only');
-const PASSKEYS_ONLY = process.argv.includes('--passkeys-only');
 const SKIP_BROWSER_AUTH_SYNC =
   process.env.BENCHMARK_SKIP_BROWSER_AUTH_SYNC === '1' ||
   process.env.BENCHMARK_WORLD_MODEL_MODE === 'simulate';
@@ -51,6 +50,7 @@ const SKIP_BROWSER_AUTH_SYNC =
 // agent's claudeAuth fetch fails and every LLM call falls through to the paid
 // waterfall.
 const COMPUTE_TOKENS_ONLY = process.argv.includes('--compute-tokens-only');
+const PASSKEYS_ONLY = process.argv.includes('--passkeys-only');
 const COMPUTE_TOKEN_SYNC_ATTEMPTS = 5;
 
 const requestedSeedModes = [

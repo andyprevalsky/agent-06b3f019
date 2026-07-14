@@ -30,6 +30,16 @@
  * AGENT SELECTION STATES:
  * [NO_AGENT] <-- selectedAgentId: null, gate: open, URL: no agent-id param
  *     |
+ *     v (new goal) -> mint id -> sync URL -> project agent + USER message
+ * [PENDING_CREATION] <-- detail GET suppressed, realtime subscribes immediately
+ *     |
+ *     v POST success -> canonical detail merges by id + removes projected duplicate
+ * [AGENT_ACTIVE]
+ *     |
+ *     v POST failure while same id selected -> flush projection -> [NO_AGENT]
+ *
+ * [NO_AGENT]
+ *     |
  *     v (setSelectedAgentId) -> SYNC URL -> CLOSE GATE -> KILL -> FLUSH
  * [LOADING_AGENT] <-- fetch agent detail + subscribe, gate: closed, URL: ?agent-id=X
  *     |

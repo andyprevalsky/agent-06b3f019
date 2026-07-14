@@ -3899,6 +3899,54 @@ def test_live_fixture_registry_appliers_stay_in_sync():
 
     assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES)
     assert "base" in LIVE_FIXTURE_NAMES  # the default every live task inherits
+    assert {"compute_tokens", "amazon_passkey"} <= LIVE_FIXTURE_NAMES
+
+
+def test_amazon_passkey_fixture_is_exclusive_and_restorable():
+    """Passkey-only state cannot race siblings and its shared mutations are undone."""
+    import benchmarks.run_benchmark as bench
+
+    assert bench.AMAZON_PASSKEY_TASK_NAME in bench.EXCLUSIVE_SHARED_DB_TASK_NAMES
+
+    sql_calls = []
+    original_sync = bench._sync_browser_credentials
+    original_sql = bench._run_local_victoria_sql
+    try:
+        bench._sync_browser_credentials = lambda: True
+        bench._run_local_victoria_sql = lambda sql: sql_calls.append(sql) or ""
+        bench._restore_amazon_passkey_fixture(
+            {
+                "fixture": "amazon_passkey",
+                "user_id": "user-1",
+                "auth_realm": "amazon.com",
+                "restore_snapshot": {
+                    "steel_ids": ["steel-1"],
+                    "bundle_ids": ["bundle-1"],
+                    "password_ids": ["password-1"],
+                    "profiles": [
+                        {
+                            "id": "profile-1",
+                            "contextId": "context-1",
+                            "provider": "kernel",
+                            "profileId": "remote-profile-1",
+                            "createdAt": "2026-07-13T00:00:00Z",
+                            "updatedAt": "2026-07-13T00:00:00Z",
+                        }
+                    ],
+                },
+            }
+        )
+    finally:
+        bench._sync_browser_credentials = original_sync
+        bench._run_local_victoria_sql = original_sql
+
+    assert len(sql_calls) == 1
+    restore_sql = sql_calls[0]
+    assert 'UPDATE "SteelSessionAuth"' in restore_sql and "'steel-1'" in restore_sql
+    assert 'UPDATE "CookieBundle"' in restore_sql and "'bundle-1'" in restore_sql
+    assert 'UPDATE "BrowserPassword"' in restore_sql and "'password-1'" in restore_sql
+    assert 'DELETE FROM "BrowserProviderProfile"' in restore_sql
+    assert 'INSERT INTO "BrowserProviderProfile"' in restore_sql
 
 
 def test_live_fixtures_default_to_base_and_synthetic_to_none():
@@ -3932,6 +3980,18 @@ def test_live_fixtures_default_to_base_and_synthetic_to_none():
     assert by_name["browser-agent-amazon-cookie-payment"].environment["live_fixtures"] == [
         "base",
         "amazon_auth",
+    ]
+    # Passkey auth must refresh compute separately and start from passkey-only
+    # browser state; inheriting base would silently restore cookies/passwords.
+    assert by_name["browser-agent-amazon-passkey"].environment["live_fixtures"] == [
+        "compute_tokens",
+        "amazon_passkey",
+    ]
+    assert by_name["browser-agent-amazon-passkey"].expected_credential_ref_kind == "passkey"
+    assert by_name["browser-agent-amazon-passkey"].forbidden_credential_ref_kinds == [
+        "password",
+        "email_otp",
+        "sms_otp",
     ]
     # An undeclared-environment task inherits ["base"]
     assert by_name["chat-mode"].environment["live_fixtures"] == ["base"]
@@ -4539,6 +4599,10 @@ async def run_all_tests():
     )
     r.record("every_task_has_base_image_fixture", test_every_task_has_base_image_fixture_by_default)
     r.record("live_fixture_registry_appliers_in_sync", test_live_fixture_registry_appliers_stay_in_sync)
+    r.record(
+        "amazon_passkey_fixture_is_exclusive_and_restorable",
+        test_amazon_passkey_fixture_is_exclusive_and_restorable,
+    )
     r.record("live_fixtures_default_to_base", test_live_fixtures_default_to_base_and_synthetic_to_none)
     r.record("live_fixture_validation_guards", test_live_fixture_validation_rejects_unknown_and_synthetic_declarations)
     r.record("tag_slices_still_resolve", test_tag_slices_still_resolve)

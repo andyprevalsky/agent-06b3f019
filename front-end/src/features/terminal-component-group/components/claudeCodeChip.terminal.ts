@@ -13,30 +13,7 @@ import '@xterm/xterm/css/xterm.css';
 import { fetchCodeAgentSession } from '../hooks';
 import { CLAUDE_CODE_WS_MAX_RETRIES, CLAUDE_CODE_WS_RETRY_DELAYS } from '../config';
 import { type ChipState, type CodeProvider, type WsMessage } from '../types';
-
-const TERMINAL_THEME = {
-  background: '#101211',
-  foreground: '#ecf0e8',
-  cursor: '#f7d774',
-  cursorAccent: '#101211',
-  selectionBackground: '#375f62',
-  black: '#101211',
-  red: '#ff6b6b',
-  green: '#7ee787',
-  yellow: '#f7d774',
-  blue: '#7dcfff',
-  magenta: '#d2a8ff',
-  cyan: '#79d4d7',
-  white: '#ecf0e8',
-  brightBlack: '#758078',
-  brightRed: '#ff8f8f',
-  brightGreen: '#a6f3a6',
-  brightYellow: '#ffe58f',
-  brightBlue: '#9bdcff',
-  brightMagenta: '#e2c4ff',
-  brightCyan: '#a2f0f2',
-  brightWhite: '#ffffff',
-} as const;
+import { parseExitCode, TERMINAL_THEME, type TerminalStream } from './claudeCodeChip.theme';
 
 const ANSI_RESET = '\x1b[0m';
 const ANSI_DIM = '\x1b[2m';
@@ -48,22 +25,10 @@ const ANSI_CYAN = '\x1b[38;2;162;240;242m';
 const ANSI_BLUE = '\x1b[38;2;155;220;255m';
 const ANSI_BG_RED = '\x1b[48;2;72;32;32m';
 const ANSI_BG_GREEN = '\x1b[48;2;28;72;44m';
-const ANSI_BG_YELLOW = '\x1b[48;2;78;61;24m';
 const ANSI_BG_CYAN = '\x1b[48;2;20;68;72m';
 const ANSI_BG_BLUE = '\x1b[48;2;31;55;82m';
-const ANSI_PATTERN = /\x1b\[[0-9;]*m/g;
+const ANSI_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g');
 const RUNAWAY_INDENT_PATTERN = /^([ \t]{24,})(?=\S)/;
-
-type TerminalStream = 'stdout' | 'stderr' | 'buffer' | 'error';
-
-function parseExitCode(code: unknown): number | null {
-  if (typeof code === 'number' && Number.isFinite(code)) return code;
-  if (typeof code === 'string' && code.trim() !== '') {
-    const parsed = Number(code);
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  return null;
-}
 
 function stripAnsi(value: string): string {
   return value.replace(ANSI_PATTERN, '');

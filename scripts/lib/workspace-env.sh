@@ -37,3 +37,8 @@ normalize_conductor_workspace_env() {
   fi
   export CONDUCTOR_WORKSPACE_PATH="$workspace_physical"
 }
+
+resolve_temporal_task_queue() {
+  local workspace_name="$1"
+  printf '%s\n' "${TEMPORAL_TASK_QUEUE:-navi-agent-tasks-$workspace_name}"
+}

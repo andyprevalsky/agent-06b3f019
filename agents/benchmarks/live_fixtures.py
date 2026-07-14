@@ -64,11 +64,15 @@ LIVE_FIXTURES: dict[str, LiveFixtureSpec] = {
             "synced prod cookies, so the browser agent starts logged in."
         ),
     ),
+    "compute_tokens": LiveFixtureSpec(
+        name="compute_tokens",
+        description="Refresh only live LLM compute credentials from production.",
+    ),
     "amazon_passkey": LiveFixtureSpec(
         name="amazon_passkey",
         description=(
-            "Sync only the live Amazon passkey, remove Amazon cookies and origin storage, "
-            "disable session/password alternatives, and detach the saved Kernel profile."
+            "Refresh Amazon passkeys, then remove saved browser state, passwords, "
+            "cookie sessions, and the persisted Kernel profile."
         ),
     ),
 }

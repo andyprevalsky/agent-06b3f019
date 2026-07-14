@@ -1,19 +1,14 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useCallback } from 'react';
 
-import type {
-  AutoFillSettingsResult,
-  PasskeyImportResult,
-  useIntegrationHandlers,
-} from '@/features/integration-handlers-context';
+import type { useIntegrationHandlers } from '@/features/integration-handlers-context';
 
 import type { PasswordSyncType } from '../types';
-
-const AUTO_FILL_PERMISSION_TIMEOUT_MS = 120_000;
-const AUTO_FILL_PERMISSION_POLL_MS = 250;
-
-function wait(ms: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
+import {
+  useAutoFillPermission,
+  useChromePasswordSync,
+  usePasskeyImportListener,
+  usePendingPasskeyImport,
+} from './usePasswordSyncHelpers';
 
 export function usePasswordSync(
   handlers: ReturnType<typeof useIntegrationHandlers>,
@@ -22,101 +17,22 @@ export function usePasswordSync(
   const [passwordSyncLoading, setPasswordSyncLoading] = useState<PasswordSyncType | null>(null);
   const [passkeysModalOpen, setPasskeysModalOpen] = useState(false);
   const [atlasPasswordsModalOpen, setAtlasPasswordsModalOpen] = useState(false);
-  const pendingPasskeyImport = useRef<{
-    resolve: (result: PasskeyImportResult) => void;
-    reject: (error: Error) => void;
-    timeoutId: number;
-  } | null>(null);
+  const { finish: finishPendingPasskeyImport, waitForImport: waitForPasskeyImport } =
+    usePendingPasskeyImport();
+  const waitForAutoFillEnabled = useAutoFillPermission(handlers.passkeys);
 
-  const finishPendingPasskeyImport = useCallback((result: PasskeyImportResult) => {
-    const pending = pendingPasskeyImport.current;
-    if (pending === null) return;
-
-    window.clearTimeout(pending.timeoutId);
-    pendingPasskeyImport.current = null;
-
-    const importedPasskeys = result.passkeyCount ?? result.count ?? 0;
-    const importedPasswords = result.passwordCount ?? 0;
-    if (result.success && (importedPasskeys > 0 || importedPasswords > 0)) {
-      pending.resolve(result);
-      return;
-    }
-
-    pending.reject(new Error(result.message ?? 'No credentials were transferred'));
-  }, []);
-
-  const waitForPasskeyImport = useCallback(() => {
-    if (pendingPasskeyImport.current !== null) {
-      window.clearTimeout(pendingPasskeyImport.current.timeoutId);
-      pendingPasskeyImport.current.reject(new Error('A newer Apple Passwords sync was started'));
-      pendingPasskeyImport.current = null;
-    }
-
-    return new Promise<PasskeyImportResult>((resolve, reject) => {
-      const timeoutId = window.setTimeout(() => {
-        pendingPasskeyImport.current = null;
-        reject(new Error('Apple Passwords did not send Rose an import token'));
-      }, 120_000);
-      pendingPasskeyImport.current = { resolve, reject, timeoutId };
-    });
-  }, []);
-
-  const waitForAutoFillEnabled = useCallback(
-    async (initialResult: AutoFillSettingsResult): Promise<AutoFillSettingsResult> => {
-      if (initialResult.enabled === true) {
-        return initialResult;
-      }
-      if (!handlers.passkeys?.checkAutoFillSettings) {
-        throw new Error('Enable Rose in AutoFill, then click Sync again');
-      }
-
-      const deadline = Date.now() + AUTO_FILL_PERMISSION_TIMEOUT_MS;
-      while (Date.now() < deadline) {
-        await wait(AUTO_FILL_PERMISSION_POLL_MS);
-        const status = await handlers.passkeys.checkAutoFillSettings();
-        if (status.success && status.enabled === true) {
-          return status;
-        }
-      }
-
-      throw new Error('Timed out waiting for Rose AutoFill permission');
-    },
-    [handlers.passkeys],
+  usePasskeyImportListener(
+    handlers.passkeys,
+    finishPendingPasskeyImport,
+    fetchIntegrations,
+    setPasskeysModalOpen,
+    setPasswordSyncLoading,
   );
-
-  useEffect(() => {
-    return handlers.passkeys?.onImportComplete?.((result) => {
-      const importedPasskeys = result.passkeyCount ?? result.count ?? 0;
-      const importedPasswords = result.passwordCount ?? 0;
-      if (result.success && (importedPasskeys > 0 || importedPasswords > 0)) {
-        setPasskeysModalOpen(false);
-      }
-      finishPendingPasskeyImport(result);
-      setPasswordSyncLoading(null);
-      void fetchIntegrations();
-    });
-  }, [finishPendingPasskeyImport, handlers.passkeys, fetchIntegrations]);
-
-  useEffect(() => {
-    return () => {
-      if (pendingPasskeyImport.current !== null) {
-        window.clearTimeout(pendingPasskeyImport.current.timeoutId);
-        pendingPasskeyImport.current.reject(new Error('Apple Passwords sync was cancelled'));
-        pendingPasskeyImport.current = null;
-      }
-    };
-  }, []);
-
-  const handleChromePasswordsSync = useCallback(async () => {
-    if (!handlers.browserCookies) return;
-    setPasswordSyncLoading('chrome');
-    try {
-      await handlers.browserCookies.syncBrowserPasswords('chrome');
-      await fetchIntegrations();
-    } finally {
-      setPasswordSyncLoading(null);
-    }
-  }, [handlers.browserCookies, fetchIntegrations]);
+  const handleChromePasswordsSync = useChromePasswordSync(
+    handlers.browserCookies,
+    fetchIntegrations,
+    setPasswordSyncLoading,
+  );
 
   const handleAtlasPasswordsSync = useCallback(
     async (keychainPassword: string) => {

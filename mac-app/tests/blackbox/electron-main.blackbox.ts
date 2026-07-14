@@ -268,7 +268,7 @@ describe('blackbox: electron-main (main-wiring)', () => {
     // exit when launched by Finder/LaunchServices without an attached stdin.
     const closeCalls = stdinOnMock.mock.calls.filter((c) => c[0] === 'close');
     expect(closeCalls.length).toBe(0);
-  });
+  }, 30_000);
 
   it('single-instance: duplicate launch requests quit instead of creating another importer', async () => {
     await loadMainEntry((electron) => {

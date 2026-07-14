@@ -19,7 +19,7 @@ import chatgptIcon from '@/assets/chatgpt-icon.webp';
 import type { PasswordSyncType } from '../types';
 import DropdownIconFrame, {
   dropdownIconImageClassName,
-  dropdownIconPreset,
+  DropdownIconPreset,
 } from './DropdownIconFrame';
 import PasskeysConnectRow from './PasskeysConnectRow';
 import SectionToggleButton from './SectionToggleButton';
@@ -67,7 +67,7 @@ function DesktopOnlyRow({ icon, label }: { icon: string; label: string }) {
     <div className="px-4 py-2 flex items-center justify-between flex-wrap gap-2 border-b border-border/50">
       <div className="flex items-center gap-3">
         <DropdownIconFrame
-          {...(label === 'ChatGPT Atlas' ? dropdownIconPreset.atlas : dropdownIconPreset.chrome)}
+          {...(label === 'ChatGPT Atlas' ? DropdownIconPreset.atlas : DropdownIconPreset.chrome)}
         >
           <img src={icon} alt={label} className={dropdownIconImageClassName} />
         </DropdownIconFrame>
@@ -102,7 +102,7 @@ function PasswordItemRow({
     <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
       <div className="flex items-center gap-3">
         <DropdownIconFrame
-          {...(label === 'ChatGPT Atlas' ? dropdownIconPreset.atlas : dropdownIconPreset.chrome)}
+          {...(label === 'ChatGPT Atlas' ? DropdownIconPreset.atlas : DropdownIconPreset.chrome)}
           isSynced={isSynced}
         >
           <img src={icon} alt={label} className={dropdownIconImageClassName} />
@@ -161,7 +161,7 @@ export default function PasswordsSection(props: PasswordsSectionProps) {
     <div className="rounded-lg border border-border bg-card/60 overflow-hidden">
       <div className="p-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <DropdownIconFrame {...dropdownIconPreset.passwordsMain} isSynced={anyPasswordSynced}>
+          <DropdownIconFrame {...DropdownIconPreset.passwordsMain} isSynced={anyPasswordSynced}>
             <KeyIcon />
           </DropdownIconFrame>
           <div className="flex flex-col">

@@ -81,6 +81,7 @@ AUTOSCALE="1"           # per-bench worker autoscaling (prod params, scoped to t
 AUTOSCALE_MAX="15"      # prod MAX_MACHINES; per-bench ceiling of worker machines
 AUTOSCALE_POLL="10"     # seconds between desired-count reads off the box /metrics
 SYNCHRONIZED_START="${CLOUDBENCH_SYNCHRONIZED_START:-1}"
+CONTROLLER_RETRY_SECONDS="${CLOUDBENCH_CONTROLLER_RETRY_SECONDS:-10}"
 PROVISION_POOL=""       # --provision-pool N: pre-provision N stopped clones (current image) then exit
 POOL_IDS_FILE="$ROOT_DIR/.context/cloudbench-pool.ids"   # persistent pool machine ids (one per line)
 GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null || echo "$ROOT_DIR/.git")"
@@ -120,6 +121,9 @@ for seconds in "$RUN_TIMEOUT" "$START_BARRIER_WAIT_SECONDS"; do
     [ "$seconds" -gt 0 ] \
         || { echo "❌ --timeout and CLOUDBENCH_START_BARRIER_WAIT_SECONDS must be positive integers" >&2; exit 2; }
 done
+case "$CONTROLLER_RETRY_SECONDS" in
+    ''|*[!0-9]*|0) echo "❌ CLOUDBENCH_CONTROLLER_RETRY_SECONDS must be a positive integer" >&2; exit 2 ;;
+esac
 CHILD_RUN_TIMEOUT="$RUN_TIMEOUT"
 if [ "$SYNCHRONIZED_START" = "1" ]; then
     CHILD_RUN_TIMEOUT=$((RUN_TIMEOUT + START_BARRIER_WAIT_SECONDS))
@@ -154,18 +158,6 @@ machine_storage_ready() {  # machine_storage_ready <id>
     volumes="$(FLY volumes list -a "$APP" --json 2>/dev/null)" || return 1
     python3 "$MACHINE_READINESS_SCRIPT" "$id" \
         <(printf '%s' "$machines") <(printf '%s' "$volumes") >/dev/null
-}
-
-fleet_machine_state() {
-    local id="$1"
-    FLY machines list -a "$APP" --json 2>/dev/null | ID="$id" python3 -c '
-import json, os, sys
-wanted = os.environ["ID"]
-for machine in json.load(sys.stdin) or []:
-    if machine.get("id") == wanted:
-        print(machine.get("state") or "")
-        break
-' 2>/dev/null || true
 }
 
 is_sim_on() { case ",$SIM_ON_CSV," in *",$1,"*) return 0 ;; esac; return 1; }
@@ -751,14 +743,9 @@ for bench in "${BENCHES[@]}"; do
     case " ${CHILD_MACHINE[*]:-} " in
         *" $cid "*) echo "❌ isolation violation: machine $cid was allocated twice" >&2; exit 1 ;;
     esac
-    # Snapshot forks are documented above as taking about 300s; allow twice
-    # that envelope for Fly to leave the transient `created` state.
-    if ! cloudbench_wait_machine_startable fleet_machine_state "$cid" 300 2; then
-        echo "   ❌ machine=$cid never became startable; skipping $bench" >&2
-        i=$((i + 1))
-        continue
-    fi
-    echo "   ✅ machine=$cid is startable → launching run-bench-cloud (isolated) ..."
+    # run-bench-cloud owns the clone lifecycle: it waits for snapshot storage to
+    # become mountable, then requests the created → started transition.
+    echo "   ✅ machine=$cid allocated → launching run-bench-cloud (isolated) ..."
 
     # Deterministic per-bench workspace → deterministic Temporal queue, so the
     # autoscaler knows which queue its worker pool must poll.

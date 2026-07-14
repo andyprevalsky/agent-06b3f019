@@ -70,6 +70,13 @@ class BenchmarkTask:
     label_eval: Optional[str] = None  # Human-readable summary of the benchmark pass condition
     label_notes: Optional[str] = None  # Human-readable cleanup/review notes
     mid_run_feedback: Optional[dict] = None  # Live USER message injected after a durable root-message boundary
+    expected_browser_provider: Optional[str] = None
+    expected_credential_ref_kind: Optional[str] = None
+    forbidden_credential_ref_kinds: List[str] = field(default_factory=list)
+    success_on_browser_auth_evidence: bool = False
+    expected_browser_session_metadata_values: Optional[dict] = None
+    expected_pre_credential_message_contains: List[str] = field(default_factory=list)
+    expected_post_credential_message_contains: List[str] = field(default_factory=list)
 
 
 _TASKS_FILE = os.path.join(os.path.dirname(__file__), "tasks.json")

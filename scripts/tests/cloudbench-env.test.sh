@@ -199,9 +199,16 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'activate_machine_environment "$machine_id" "$role"' \
   "environment activation must preserve role-specific concurrency checks"
-require_text "$ROOT_DIR/scripts/run-bench-fleet" \
-  'cloudbench_wait_machine_startable fleet_machine_state "$cid"' \
-  "fleet children must not launch while a fresh clone is still in created state"
+if grep -Fq -- 'cloudbench_wait_machine_startable fleet_machine_state "$cid"' \
+  "$ROOT_DIR/scripts/run-bench-fleet"; then
+  fail "fleet controller must delegate created-clone storage/start lifecycle to run-bench-cloud"
+fi
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'if machine_storage_ready "$mid"; then' \
+  "cloud child must wait for clone storage before requesting start"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'request_machine_start "$mid"' \
+  "cloud child must own the transition from created to started"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   '--name "$target_name"' \
   "fresh fleet clones must use an exact unique name for id resolution"
@@ -226,5 +233,8 @@ fi
 require_text "$HELPER_SRC" \
   'exec {CLOUDBENCH_CONTROLLER_LOCK_FD}<> "$path"' \
   "flock fallback must open without truncating the current owner"
+require_text "$ROOT_DIR/scripts/run-bench-hub-poller" \
+  'exit_code" -ne "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE' \
+  "hub requests must retry only the typed capacity-busy runner status"
 
 echo "All cloud benchmark environment checks passed."

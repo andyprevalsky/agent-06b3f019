@@ -1964,8 +1964,26 @@ test('GET /:id/attachments/:fileId/url — wrong user path → 403', async () =>
 test('state: pause → resume round-trip preserves agent data', async () => {
   const session = await createAnonymousSession('state-round-trip');
 
-  // Create agent via HTTP so it's visible to the server
-  const agentId = await createTestAgent(session.user.id, 'State round-trip test');
+  // Seed the state-machine precondition directly. Creating a chat-mode root via
+  // HTTP starts a background LLM request whose terminal failure can race this
+  // route-level transition assertion.
+  const agentId = randomUUID();
+  trackedAgentIds.add(agentId);
+  await withTransientDbRetry('create-state-round-trip', async () => {
+    await prisma.agent.create({
+      data: {
+        id: agentId,
+        userId: session.user.id,
+        goal: 'State round-trip test',
+        status: 'ACTIVE',
+        model: 'rose-labs/rose-1-ultra',
+        busId: agentId,
+      },
+    });
+    await prisma.verifier.create({
+      data: { agentId, type: 'FLOAT_LLM_JUDGE' },
+    });
+  });
 
   // Get initial state
   const before = await request(`${BASE_URL}/api/agents/${agentId}`, {

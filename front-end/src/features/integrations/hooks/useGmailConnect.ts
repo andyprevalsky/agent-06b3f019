@@ -68,5 +68,10 @@ export function useGmailConnect(fetchIntegrations: () => Promise<void>) {
     [fetchIntegrations],
   );
 
-  return { connectingProvider, disconnectingEmail, handleEmailConnect, handleEmailDisconnect } as const;
+  return {
+    connectingProvider,
+    disconnectingEmail,
+    handleEmailConnect,
+    handleEmailDisconnect,
+  } as const;
 }

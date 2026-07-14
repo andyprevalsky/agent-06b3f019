@@ -171,7 +171,12 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
         />
         <span className="truncate font-medium">Browser Agent</span>
         {/* Output schema + populated result values, on hover. */}
-        <SchemaChip outputSchema={outputSchema} values={structuredValues} size="sm" tooltipPosition="bottom" />
+        <SchemaChip
+          outputSchema={outputSchema}
+          values={structuredValues}
+          size="sm"
+          tooltipPosition="bottom"
+        />
         <span className="min-w-0 flex-1" />
         <span className="truncate text-muted-foreground">
           {failed ? 'Failed' : 'Done'} · {trajectory.length} steps
@@ -234,7 +239,9 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
             {tab === 'recording' && (
               <div>
                 {!recordingPointer && (
-                  <p className="text-xs text-muted-foreground">Recording unavailable for this run.</p>
+                  <p className="text-xs text-muted-foreground">
+                    Recording unavailable for this run.
+                  </p>
                 )}
                 {recordingPointer && recordingState === 'loading' && (
                   <p className="text-xs text-muted-foreground">Loading recording…</p>

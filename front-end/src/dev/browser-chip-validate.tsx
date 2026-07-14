@@ -127,7 +127,7 @@ function makeContext(): AgentContextValue {
 
 const queryClient = new QueryClient();
 
-function ValidateApp() {
+export function ValidateApp() {
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider delayDuration={100}>

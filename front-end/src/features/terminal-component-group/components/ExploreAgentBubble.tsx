@@ -35,12 +35,13 @@
  */
 
 import { ChevronRight, Lightbulb, Sparkles, Globe } from 'lucide-react';
-import { memo, useState, useCallback, useEffect } from 'react';
+import { memo, useState, useCallback, useEffect, useRef } from 'react';
 import { cn } from '@/lib/utils';
 import ThinkingAnimation from '@/components/ThinkingAnimation';
 import { MarkdownText } from './MarkdownText';
 import { TOOL_ICONS } from '@/lib/toolIcons';
 import type { ExploreStep } from '../types';
+import { ExploreAgentSteps } from './ExploreAgentSteps';
 import {
   ExploreActiveToolCarousel,
   type ExploreActiveToolCarouselItem,
@@ -225,79 +226,6 @@ function Header({
   );
 }
 
-interface StepRowProps {
-  step: ExploreStep;
-  index: number;
-  isStepExpanded: boolean;
-  onToggleStep: (index: number, e: React.MouseEvent) => void;
-}
-
-function StepRow({ step, index, isStepExpanded, onToggleStep }: StepRowProps) {
-  const thinking = isThinkingStep(step);
-  const hasContent = !!step.message?.trim();
-  const StepIcon = getStepIcon(step);
-
-  if (thinking) {
-    const thinkingText = step.message?.trim();
-    return (
-      <div className="flex items-start gap-1.5 text-[11px] text-muted-foreground/60 py-0.5 px-1 -mx-1">
-        <Lightbulb className="h-3 w-3 flex-shrink-0 text-amber-400/70 mt-0.5" />
-        <span className="italic min-w-0 flex-1 break-words">{thinkingText || 'Thinking...'}</span>
-      </div>
-    );
-  }
-
-  return (
-    <div>
-      <div
-        className={cn(
-          'flex items-center gap-1.5 text-[11px] text-muted-foreground/70 py-0.5 rounded px-1 -mx-1',
-          hasContent && 'cursor-pointer hover:bg-foreground/5',
-        )}
-        onClick={hasContent ? (e) => onToggleStep(index, e) : undefined}
-      >
-        <StepIcon className="h-3 w-3 flex-shrink-0 text-muted-foreground/50" />
-        {hasContent && (
-          <ChevronRight
-            className={cn(
-              'h-2.5 w-2.5 flex-shrink-0 transition-transform text-muted-foreground/40',
-              isStepExpanded && 'rotate-90',
-            )}
-          />
-        )}
-        <span className="min-w-0 flex-1 truncate">{step.title}</span>
-      </div>
-      {isStepExpanded && hasContent && (
-        <div className="ml-4 mt-0.5 mb-1 text-[11px] text-muted-foreground/50 whitespace-pre-wrap break-words max-h-[150px] overflow-y-auto border-l border-border/30 pl-2">
-          {step.message}
-        </div>
-      )}
-    </div>
-  );
-}
-
-interface StepsListProps {
-  steps: ExploreStep[];
-  expandedSteps: Set<number>;
-  onToggleStep: (index: number, e: React.MouseEvent) => void;
-}
-
-function StepsList({ steps, expandedSteps, onToggleStep }: StepsListProps) {
-  return (
-    <div className="mt-1 min-w-0 max-w-full space-y-0.5 overflow-y-auto overflow-x-hidden max-h-[300px]">
-      {steps.map((step, i) => (
-        <StepRow
-          key={`${step.timestamp}-${i}`}
-          step={step}
-          index={i}
-          isStepExpanded={expandedSteps.has(i)}
-          onToggleStep={onToggleStep}
-        />
-      ))}
-    </div>
-  );
-}
-
 const ExploreAgentBubble = memo(function ExploreAgentBubble({
   title,
   fullGoal,
@@ -310,16 +238,10 @@ const ExploreAgentBubble = memo(function ExploreAgentBubble({
 }: ExploreAgentBubbleProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [expandedSteps, setExpandedSteps] = useState<Set<number>>(new Set());
-  const isComplete = status === 'FINISHED';
-  const isError = status === 'ERROR';
-  const isInProgress = status === 'IN_PROGRESS';
+  const onTypingCompleteRef = useRef(onTypingComplete);
 
   useEffect(() => {
-    if (onTypingComplete) {
-      requestAnimationFrame(() => onTypingComplete());
-    }
-    // Fire-once on mount; omitting onTypingComplete is intentional.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (onTypingCompleteRef.current) requestAnimationFrame(onTypingCompleteRef.current);
   }, []);
 
   const toggleExpanded = useCallback(() => setIsExpanded((prev) => !prev), []);
@@ -337,36 +259,15 @@ const ExploreAgentBubble = memo(function ExploreAgentBubble({
     });
   }, []);
 
-  const goal = truncate(fullGoal || title || 'Researching...', 100);
-  const steps = stepHistory;
-  const hasSteps = steps.length > 0;
-  const activeActions = isInProgress ? getActiveActions(steps) : [];
-  const postToolThinkingStartedAtMs =
-    isInProgress && activeActions.length === 0
-      ? getLatestFinishedActionStartedAtMs(steps)
-      : undefined;
-  const showThinking = thinkingStreamTokenCount > 0 || postToolThinkingStartedAtMs !== undefined;
-  const thinkingStartedAtMs = getThinkingStartedAtMs(
-    postToolThinkingStartedAtMs,
-    thinkingStreamStartedAtMs,
-  );
-  const displayActions = isInProgress
-    ? activeActions.length > 0
-      ? activeActions
-      : showThinking
-        ? []
-        : getFallbackActions(steps)
-    : [];
-  const titleText = isInProgress ? 'Exploring' : isError ? 'Explore Failed' : 'Explored';
-  const carouselItems = isInProgress
-    ? buildCarouselItems(
-        displayActions,
-        goal,
-        thinkingStreamTokenCount,
-        thinkingStartedAtMs,
-        showThinking,
-      )
-    : [];
+  const { isComplete, isError, isInProgress, steps, hasSteps, titleText, carouselItems } =
+    deriveExplorePresentation({
+      title,
+      fullGoal,
+      status,
+      stepHistory,
+      thinkingStreamTokenCount,
+      thinkingStreamStartedAtMs,
+    });
 
   return (
     <div className="flex gap-3 animate-in fade-in duration-300">
@@ -395,12 +296,65 @@ const ExploreAgentBubble = memo(function ExploreAgentBubble({
             </div>
           )}
           {isExpanded && hasSteps && (
-            <StepsList steps={steps} expandedSteps={expandedSteps} onToggleStep={toggleStep} />
+            <ExploreAgentSteps
+              steps={steps}
+              expandedSteps={expandedSteps}
+              onToggleStep={toggleStep}
+            />
           )}
         </div>
       </div>
     </div>
   );
 });
+
+function deriveExplorePresentation(
+  props: Pick<
+    ExploreAgentBubbleProps,
+    | 'title'
+    | 'fullGoal'
+    | 'status'
+    | 'stepHistory'
+    | 'thinkingStreamTokenCount'
+    | 'thinkingStreamStartedAtMs'
+  >,
+) {
+  const isComplete = props.status === 'FINISHED';
+  const isError = props.status === 'ERROR';
+  const isInProgress = props.status === 'IN_PROGRESS';
+  const goal = truncate(props.fullGoal || props.title || 'Researching...', 100);
+  const steps = props.stepHistory;
+  const activeActions = isInProgress ? getActiveActions(steps) : [];
+  const postToolThinkingStartedAtMs =
+    isInProgress && activeActions.length === 0
+      ? getLatestFinishedActionStartedAtMs(steps)
+      : undefined;
+  const tokenCount = props.thinkingStreamTokenCount ?? 0;
+  const showThinking = tokenCount > 0 || postToolThinkingStartedAtMs !== undefined;
+  const thinkingStartedAtMs = getThinkingStartedAtMs(
+    postToolThinkingStartedAtMs,
+    props.thinkingStreamStartedAtMs,
+  );
+  const displayActions = isInProgress
+    ? activeActions.length > 0
+      ? activeActions
+      : showThinking
+        ? []
+        : getFallbackActions(steps)
+    : [];
+  const titleText = isInProgress ? 'Exploring' : isError ? 'Explore Failed' : 'Explored';
+  const carouselItems = isInProgress
+    ? buildCarouselItems(displayActions, goal, tokenCount, thinkingStartedAtMs, showThinking)
+    : [];
+  return {
+    isComplete,
+    isError,
+    isInProgress,
+    steps,
+    hasSteps: steps.length > 0,
+    titleText,
+    carouselItems,
+  };
+}
 
 export default ExploreAgentBubble;
