@@ -18,6 +18,18 @@ const MIN_CURSOR_ANIMATION_MS = 35;
 const MAX_CURSOR_ANIMATION_MS = 120;
 const DEFAULT_CURSOR_ANIMATION_MS = 70;
 
+/**
+ * Cursor animation state machine:
+ *
+ *   [IDLE] -- first realtime sample --> [IDLE at sample]
+ *   [IDLE | ANIMATING] -- later sample --> [ANIMATING]
+ *   [ANIMATING] -- RAF progress < 1 --> [ANIMATING]
+ *   [ANIMATING] -- RAF progress = 1 / stop --> [IDLE]
+ *
+ * A newer sample cancels the scheduled frame and starts from cursorPosRef, so
+ * rapid realtime updates remain continuous instead of jumping backward.
+ */
+
 export function useCursorAnimation() {
   const [cursorPos, setCursorPos] = useState<CursorPosition>({ x: 640, y: 400 });
   const cursorPosRef = useRef(cursorPos);

@@ -21,6 +21,18 @@ interface SelectionOptions {
   hasFullAccess: boolean;
 }
 
+/**
+ * Selection state machine:
+ *
+ *   [EMPTY/SELECTED] -- stage optimistic create --> [PENDING PROJECTION]
+ *   [PENDING PROJECTION] -- canonical fetch succeeds --> [SELECTED CANONICAL]
+ *   [PENDING PROJECTION] -- create fails/rollback --> [EMPTY]
+ *   [ANY SELECTION] -- select another id --> [LOADING] --> [SELECTED | EMPTY on failure]
+ *
+ * Every async transition is guarded by selectedAgentIdRef so stale fetches cannot
+ * reconcile or roll back a newer selection.
+ */
+
 export function useAgentSelection(state: AgentProviderState, options: SelectionOptions) {
   const {
     initialLoadDoneRef,
