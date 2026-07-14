@@ -5,6 +5,7 @@ export interface PhoneAuthModalProps {
   onOpenChange: (open: boolean) => void;
   onAuthComplete?: () => void;
   anonymousUserId?: string;
+  title?: string;
 }
 
 export interface ProtectedRouteProps {
@@ -17,6 +18,7 @@ export interface PhoneStepProps {
   loading: boolean;
   onSubmit: (e: React.FormEvent) => Promise<void>;
   onClose: () => void;
+  title?: string;
 }
 
 export interface OtpStepProps {

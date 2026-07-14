@@ -12,6 +12,7 @@
 
 import { X } from 'lucide-react';
 
+import { DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { isSubmittablePhone } from '@/lib/phone';
 
 import type { PhoneStepProps } from '../types';
@@ -19,7 +20,14 @@ import type { PhoneStepProps } from '../types';
 import AuthLogo from './AuthLogo';
 import PhoneInput from './PhoneInput';
 
-function PhoneStep({ phone, onPhoneChange, loading, onSubmit, onClose }: PhoneStepProps) {
+function PhoneStep({
+  phone,
+  onPhoneChange,
+  loading,
+  onSubmit,
+  onClose,
+  title = 'Start Building.',
+}: PhoneStepProps) {
   const handleSubmit = (e: React.FormEvent) => {
     void onSubmit(e);
   };
@@ -38,8 +46,10 @@ function PhoneStep({ phone, onPhoneChange, loading, onSubmit, onClose }: PhoneSt
       </div>
 
       <div className="mb-6">
-        <h2 className="text-2xl font-semibold text-navi-black">Start Building.</h2>
-        <p className="text-xl text-gray-400 mt-1">Create free account</p>
+        <DialogTitle className="text-2xl font-semibold text-navi-black">{title}</DialogTitle>
+        <DialogDescription className="text-xl text-gray-400 mt-1">
+          Create free account
+        </DialogDescription>
       </div>
 
       <div className="space-y-4">
