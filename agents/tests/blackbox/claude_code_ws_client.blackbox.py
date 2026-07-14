@@ -244,8 +244,13 @@ async def test_send_stdin_timeout_returns_false():
     mock_ws.send_str = AsyncMock()
     client._ws = mock_ws
 
-    # Patch wait_for to raise TimeoutError
-    with patch("helpers.claude_code_ws_client.asyncio.wait_for", side_effect=asyncio.TimeoutError()):
+    async def fake_wait_for(coro, timeout):
+        # asyncio.wait_for owns and consumes the coroutine it receives. Keep that
+        # contract in the test double so the Event.wait coroutine is not leaked.
+        coro.close()
+        raise asyncio.TimeoutError()
+
+    with patch("helpers.claude_code_ws_client.asyncio.wait_for", side_effect=fake_wait_for):
         ok = await client.send_stdin("test data")
 
     assert ok is False

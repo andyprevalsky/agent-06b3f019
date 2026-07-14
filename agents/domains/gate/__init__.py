@@ -12,7 +12,7 @@ from .repo import (
     mint_subscription_checkout_activity,
     source_status_activity,
 )
-from .service import (
+from .handler import (
     build_kyc_gate,
     build_source_connect_gate,
     build_subscription_gate,

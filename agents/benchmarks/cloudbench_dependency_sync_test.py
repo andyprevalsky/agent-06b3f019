@@ -1052,16 +1052,18 @@ def test_setup_fetch_trusts_only_the_rose_owned_warm_checkout() -> None:
     assert "GH_TOKEN=%q" not in setup
 
 
-def test_environment_refresh_serializes_shared_app_and_reconciles_pool_first() -> None:
+def test_environment_mutation_is_maintenance_only_and_run_path_read_only() -> None:
     cloud = CLOUD_SCRIPT.read_text()
     fleet = FLEET_SCRIPT.read_text()
 
+    # Maintenance ops (--setup / --refresh-wmh / --refresh-secrets) remain the
+    # ONLY paths that mutate the shared app environment, and they still
+    # serialize behind the cross-worktree app-environment lock.
     assert 'APP_ENV_LOCK_FILE="$GIT_COMMON_DIR/cloudbench-app-env.lock"' in cloud
     assert 'shlock -p "$$" -f "$APP_ENV_LOCK_FILE"' in cloud
     wrapper_start = cloud.index("inject_secrets() {")
     wrapper_end = cloud.index("\n}\n", wrapper_start)
     wrapper = cloud[wrapper_start:wrapper_end]
-    assert "assert_app_environment_lock_ownership" in wrapper
     assert wrapper.index("acquire_app_environment_lock") < wrapper.index(
         "( _inject_secrets_locked )"
     )
@@ -1071,25 +1073,32 @@ def test_environment_refresh_serializes_shared_app_and_reconciles_pool_first() -
     locked_start = cloud.index("_inject_secrets_locked() {")
     locked_end = cloud.index("\n}\n", locked_start)
     assert 'FLY secrets set --stage -a "$APP"' in cloud[locked_start:locked_end]
+    assert "CLOUDBENCH_HOLD_APP_ENV_LOCK=1" in cloud
+    assert cloud.count("assert_app_environment_lock_ownership || exit 1") >= 2
 
-    refresh_call = 'bash scripts/run-bench-cloud --refresh-secrets'
-    assert fleet.index("reconcile_pool || exit 1") < fleet.index(refresh_call)
-    assert fleet.index(refresh_call) < fleet.index('cid="$(claim_pool_machine)"')
-    allocation_start = fleet.index("# ── Clone one machine per bench")
-    allocation_end = fleet.index('[ "${#CHILD_PIDS[@]}" -ge 1 ]', allocation_start)
-    allocation = fleet[allocation_start:allocation_end]
-    assert "release_app_environment_lock" in allocation
-    assert "CLOUDBENCH_APP_ENV_LOCK_OWNER_PID" in fleet
+    # The RUN path is concurrent-workstream safe: it reconciles its own pool,
+    # then READ-ONLY verifies the shared environment. It never refreshes it,
+    # never inherits another process's lock ownership, and never references
+    # the app-environment lock at all.
+    verify_call = "bash scripts/run-bench-cloud --verify-secrets"
+    assert fleet.index("reconcile_pool || exit 1") < fleet.index(verify_call)
+    assert fleet.index(verify_call) < fleet.index('cid="$(claim_pool_machine)"')
+    assert "run-bench-cloud --refresh-secrets;" not in fleet
+    assert "APP_ENV_LOCK" not in fleet
+    assert "acquire_app_environment_lock" not in fleet
+    assert "CLOUDBENCH_APP_ENV_LOCK_OWNER_PID" not in cloud
     assert 'clone_machine_target "$out/worker-clones.ids" "$primary_id"' in fleet
+    verify_start = cloud.index("verify_app_environment() {")
+    verify_end = cloud.index("\n}\n", verify_start)
+    verify = cloud[verify_start:verify_end]
+    assert 'FLY secrets list -a "$APP" --json' in verify
+    assert "secrets set" not in verify
 
     stop_cleanup_start = cloud.index("stop_on_exit() {")
     stop_cleanup_end = cloud.index("\n}", stop_cleanup_start)
     stop_cleanup = cloud[stop_cleanup_start:stop_cleanup_end]
-    assert stop_cleanup.index('stop_machine "$mid"') < stop_cleanup.index(
-        "release_app_environment_lock"
-    )
-    assert "CLOUDBENCH_HOLD_APP_ENV_LOCK=1" in cloud
-    assert cloud.count("assert_app_environment_lock_ownership || exit 1") >= 3
+    assert 'stop_machine "$mid"' in stop_cleanup
+    assert "release_app_environment_lock" not in stop_cleanup
 
     cleanup_start = fleet.index("cleanup() {")
     cleanup_end = fleet.index("\n}", cleanup_start)
@@ -1098,13 +1107,18 @@ def test_environment_refresh_serializes_shared_app_and_reconciles_pool_first() -
     assert cleanup.index("trap '' HUP INT TERM") < cleanup.index(
         "terminate_and_wait"
     )
-    assert 'terminate_and_wait "${AUTOSCALER_PIDS[@]:-}"' in cleanup
-    assert 'terminate_and_wait "${CHILD_PIDS[@]:-}"' in cleanup
-    assert cleanup.index("terminate_and_wait") < cleanup.index(
-        "release_app_environment_lock"
-    )
+    assert (
+        'cloudbench_terminate_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" '
+        '"${AUTOSCALER_PIDS[@]:-}"'
+    ) in cleanup
+    assert (
+        'cloudbench_terminate_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" '
+        '"${CHILD_PIDS[@]:-}"'
+    ) in cleanup
     assert 'CLOUDBENCH_CHILD_TERM_SECONDS:-30' in fleet
-    assert 'kill -KILL "$p"' in fleet
+    helper = ENV_HELPER_SCRIPT.read_text()
+    assert "cloudbench_terminate_and_wait() {" in helper
+    assert 'kill -KILL "$pid"' in helper
     assert "trap 'exit 129' HUP" in fleet
     assert "trap 'exit 129' HUP" in cloud
 
