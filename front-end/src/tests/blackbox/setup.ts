@@ -188,12 +188,18 @@ class MockWebSocket extends EventTarget {
       return;
     }
 
+    // Opt-in join rejection: topics containing "deny-join" get an error reply so
+    // tests can exercise the CHANNEL_ERROR path (e.g. an auth/RLS-rejected join).
+    // The response object becomes the Error surfaced to subscribe()'s callback.
+    const rejectJoin = event === 'phx_join' && topic.includes('deny-join');
     const reply = JSON.stringify([
       joinRef,
       ref,
       topic,
       'phx_reply',
-      { status: 'ok', response: {} },
+      rejectJoin
+        ? { status: 'error', response: { reason: 'access denied' } }
+        : { status: 'ok', response: {} },
     ]);
     this.schedule(() => {
       if (this.readyState !== MockWebSocket.OPEN) return;
