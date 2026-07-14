@@ -1,11 +1,56 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  isUsableSession,
   runRelay,
+  sessionExpiresAtMs,
   type RelayDependencies,
   type RelayMarkerStore,
   type RelayOutcome,
   type RelayQueueMessage,
 } from '../../scripts/cloudbench-imessage-relay';
+
+const USER = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+const farFuture = () => Math.floor(Date.now() / 1000) + 3600;
+
+describe('installed-session usability (drives relay auto-login)', () => {
+  it('accepts a fresh session for the expected user', () => {
+    expect(
+      isUsableSession({ access_token: 'a', expires_at: farFuture(), user: { id: USER } }, USER)
+    ).toBe(true);
+  });
+  it('rejects when no session / no token (triggers auto-login)', () => {
+    expect(isUsableSession(undefined, USER)).toBe(false);
+    expect(isUsableSession({ expires_at: farFuture(), user: { id: USER } }, USER)).toBe(false);
+  });
+  it('rejects a session belonging to a different user', () => {
+    expect(
+      isUsableSession(
+        { access_token: 'a', expires_at: farFuture(), user: { id: 'someone-else' } },
+        USER
+      )
+    ).toBe(false);
+  });
+  it('rejects an expired / about-to-expire session', () => {
+    expect(
+      isUsableSession(
+        { access_token: 'a', expires_at: Math.floor(Date.now() / 1000) - 10, user: { id: USER } },
+        USER
+      )
+    ).toBe(false);
+    expect(
+      isUsableSession(
+        { access_token: 'a', expires_at: Math.floor(Date.now() / 1000) + 30, user: { id: USER } },
+        USER
+      )
+    ).toBe(false);
+  });
+  it('normalizes both second- and millisecond-epoch expiries', () => {
+    const secs = Math.floor(Date.now() / 1000) + 3600;
+    expect(sessionExpiresAtMs({ expires_at: secs })).toBe(secs * 1000);
+    expect(sessionExpiresAtMs({ expires_at: secs * 1000 })).toBe(secs * 1000);
+    expect(sessionExpiresAtMs(undefined)).toBe(0);
+  });
+});
 
 const queuedMessage = (claimToken = 'claim-1'): RelayQueueMessage => ({
   id: 'queue-1',

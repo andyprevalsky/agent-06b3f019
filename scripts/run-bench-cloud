@@ -1681,6 +1681,11 @@ if [ "$NEEDS_IMESSAGE_RELAY" = "1" ]; then
     [ -f "$RELAY_ENTRY" ] || { echo "❌ Missing $RELAY_ENTRY" >&2; exit 1; }
     [ -x "$RELAY_TSX" ] || { echo "❌ Missing executable $RELAY_TSX" >&2; exit 1; }
     rm -f "$IMESSAGE_RELAY_LOG" "$IMESSAGE_RELAY_MARKERS"
+    # Auto-login credentials for the benchmark user. If the installed Rose app
+    # has no usable session, the relay signs in (as the expected user) via the
+    # dev SMS OTP bypass instead of failing the run. Overridable via env.
+    IMESSAGE_RELAY_AUTOLOGIN_PHONE="${CLOUDBENCH_IMESSAGE_AUTOLOGIN_PHONE:-+19729777432}"
+    IMESSAGE_RELAY_AUTOLOGIN_OTP="${CLOUDBENCH_IMESSAGE_AUTOLOGIN_OTP:-181818}"
     (
         cd "$ROOT_DIR/mac-app" || exit 1
         "$RELAY_TSX" "$RELAY_ENTRY" \
@@ -1689,7 +1694,9 @@ if [ "$NEEDS_IMESSAGE_RELAY" = "1" ]; then
             --expected-phone "$IMESSAGE_RELAY_EXPECTED_PHONE" \
             --expected-message "$IMESSAGE_RELAY_EXPECTED_MESSAGE" \
             --marker-file "$IMESSAGE_RELAY_MARKERS" \
-            --timeout-seconds "$RUN_TIMEOUT"
+            --timeout-seconds "$RUN_TIMEOUT" \
+            --auto-login-phone "$IMESSAGE_RELAY_AUTOLOGIN_PHONE" \
+            --auto-login-otp "$IMESSAGE_RELAY_AUTOLOGIN_OTP"
     ) > "$IMESSAGE_RELAY_LOG" 2>&1 &
     IMESSAGE_RELAY_PID=$!
     echo "📨 Starting authenticated Mac iMessage relay (pid=$IMESSAGE_RELAY_PID) ..."
