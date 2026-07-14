@@ -211,7 +211,7 @@ describe('AdminHealth page', () => {
     expect(screen.getByText('$1,840')).toBeInTheDocument();
     expect(screen.getByText('Waitlist Signups')).toBeInTheDocument();
     expect(screen.getAllByText('14').length).toBeGreaterThan(0);
-    expect(screen.getByText('Email and phone entries added this month.')).toBeInTheDocument();
+    expect(screen.getByText('Email and phone entries added this period.')).toBeInTheDocument();
     expect(screen.getByText('# of Users')).toBeInTheDocument();
     expect(screen.getAllByText('42').length).toBeGreaterThan(0);
     expect(screen.getByText('2 new users this period.')).toBeInTheDocument();

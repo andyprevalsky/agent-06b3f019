@@ -393,7 +393,7 @@ function SecondaryMetricGrid({ data }: { data: AdminHealthData }) {
       <MetricPanel
         title="Waitlist Signups"
         value={formatNumber(data.summary.waitlistSignups)}
-        detail={`Email and phone entries added this ${period.noun}.`}
+        detail="Email and phone entries added this period."
         icon={<UserPlus className="h-5 w-5" />}
         change={
           <MetricChange
