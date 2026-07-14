@@ -8,7 +8,7 @@
  *         -> backend admin check
  *         -> rolling 7|30|90|365-day periods anchored to the UTC retrieval day
  *         -> backend day + time-slice response cache
- *         -> Stripe charges + Prisma task/user metrics + Linear/GitHub velocity
+ *         -> Stripe charges + Prisma waitlist/task/user metrics + Linear/GitHub velocity
  *      -> ordered website funnel -> horizontal volume BarChart + comparison tiles
  *      -> verified-account activation -> separate BarChart + comparison tiles
  *
@@ -24,7 +24,7 @@
  */
 
 import { useMemo, useState } from 'react';
-import { Activity, CircleCheckBig, Loader2, TrendingUp, Users, Zap } from 'lucide-react';
+import { Activity, CircleCheckBig, Loader2, TrendingUp, UserPlus, Users, Zap } from 'lucide-react';
 import {
   Area,
   AreaChart,
@@ -389,7 +389,19 @@ function SecondaryMetricGrid({ data }: { data: AdminHealthData }) {
   const newUsers = data.series.at(-1)?.newUsers ?? 0;
   const period = PERIOD_COPY[data.timeSlice];
   return (
-    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
+      <MetricPanel
+        title="Waitlist Signups"
+        value={formatNumber(data.summary.waitlistSignups)}
+        detail="Email and phone entries added this period."
+        icon={<UserPlus className="h-5 w-5" />}
+        change={
+          <MetricChange
+            value={seriesMetricChange(data, 'waitlistSignups')}
+            timeSlice={data.timeSlice}
+          />
+        }
+      />
       <MetricPanel
         title="# of Users"
         value={formatNumber(data.summary.userCount)}

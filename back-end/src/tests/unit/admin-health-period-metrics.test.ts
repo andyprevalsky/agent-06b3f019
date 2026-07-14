@@ -31,6 +31,8 @@ const task = (id: string, createdAt: string, userId = 'subscriber-user') => ({
   status: 'COMPLETED' as AgentStatus,
 });
 
+const waitlistSignup = (createdAt: string) => ({ createdAt: new Date(createdAt) });
+
 const series = buildSeries(
   periods,
   [
@@ -41,6 +43,11 @@ const series = buildSeries(
     task('jun-2', '2026-06-10T00:00:00.000Z'),
     task('jun-3', '2026-06-20T00:00:00.000Z'),
     task('jun-outside-cohort', '2026-06-21T00:00:00.000Z', 'outside-user'),
+  ],
+  [
+    waitlistSignup('2026-05-07T00:00:00.000Z'),
+    waitlistSignup('2026-06-08T00:00:00.000Z'),
+    waitlistSignup('2026-06-21T00:00:00.000Z'),
   ],
   [
     { userCount: 2, newUsers: 2, userIds: new Set(['subscriber-user']) },
@@ -57,6 +64,11 @@ assert.deepStrictEqual(
   series.map((point) => point.tasksIssuedPerUser),
   [1, 3],
   "Each bucket must divide only that period's tasks by that period's subscribed users"
+);
+assert.deepStrictEqual(
+  series.map((point) => point.waitlistSignups),
+  [1, 2],
+  'Each bucket must include waitlist entries created during that period'
 );
 assert.deepStrictEqual(
   series.map((point) => point.taskCount),
@@ -128,3 +140,5 @@ for (const [timeSlice, days] of Object.entries(rollingDays)) {
     `${timeSlice} periods must roll over on the next UTC retrieval day`
   );
 }
+
+process.stdout.write('admin-health period metrics: passed\n');
