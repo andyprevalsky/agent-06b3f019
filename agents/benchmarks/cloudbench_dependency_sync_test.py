@@ -2138,3 +2138,12 @@ write_startup_card "healing warm snapshot (dep trees)"
     assert card["summary"]["total"] == 2
     assert [t["name"] for t in card["tasks"]] == ["alpha", "beta"]
     assert all(t["status"] == "starting" for t in card["tasks"])
+
+
+def test_controller_names_the_signal_that_killed_it() -> None:
+    """Silent teardowns (children mass-TERM'd, no error, no barrier release)
+    repeatedly masqueraded as infra failures when the controller was signalled
+    externally. Each fatal signal trap must announce itself before exiting."""
+    fleet = FLEET_SCRIPT.read_text()
+    for sig in ("HUP", "INT", "TERM"):
+        assert f"controller received {sig}" in fleet, f"unannounced {sig} trap"

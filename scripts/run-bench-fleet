@@ -729,9 +729,12 @@ cleanup() {
     exit "$ec"
 }
 trap cleanup EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
+# Name the killer: silent teardowns (no ❌, no barrier release) have repeatedly
+# looked like infra failures when the controller was actually signalled from
+# outside (session kill, stray pkill). Record which signal fired before exiting.
+trap 'echo "⚰️  controller received HUP ($(date -u +%H:%M:%S))"; exit 129' HUP
+trap 'echo "⚰️  controller received INT ($(date -u +%H:%M:%S))"; exit 130' INT
+trap 'echo "⚰️  controller received TERM ($(date -u +%H:%M:%S))"; exit 143' TERM
 
 reconcile_pool || exit 1   # stop + verify this workspace's pool before machine start
 # READ-ONLY env preflight: the run path never stages/mutates the shared
