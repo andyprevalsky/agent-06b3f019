@@ -60,17 +60,13 @@ export interface UseAttentionActionsResult {
   handleSendViaIMessage: (request: AttentionRequest) => void;
 }
 
-export function useAttentionActions({
-  requests,
-  responses,
-  clearResponse,
-  refetch,
-  setIsOpen,
-}: UseAttentionActionsArgs): UseAttentionActionsResult {
+function useActionRunner(
+  clearResponse: (requestId: string) => void,
+  refetch: () => Promise<void>,
+  setIsOpen: (open: boolean) => void,
+  toast: ToastFn,
+) {
   const [loading, setLoading] = useState(false);
-  const [actionRequestId, setActionRequestId] = useState<string | null>(null);
-  const { toast } = useToast();
-
   const run = async (spec: ActionSpec) => {
     try {
       setLoading(true);
@@ -86,6 +82,19 @@ export function useAttentionActions({
       setLoading(false);
     }
   };
+  return { loading, run };
+}
+
+export function useAttentionActions({
+  requests,
+  responses,
+  clearResponse,
+  refetch,
+  setIsOpen,
+}: UseAttentionActionsArgs): UseAttentionActionsResult {
+  const [actionRequestId, setActionRequestId] = useState<string | null>(null);
+  const { toast } = useToast();
+  const { loading, run } = useActionRunner(clearResponse, refetch, setIsOpen, toast);
 
   const handleRespond = (requestId: string, overrideResponse?: string) => {
     const request = requests.find((item) => item.id === requestId);

@@ -15,14 +15,8 @@ router.post(
   authenticate,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
-      const {
-        agent_id,
-        goal,
-        attachments,
-        github_repo_url,
-        user_id,
-        fast_mode_cache_enabled,
-      } = createSessionSchema.parse(req.body);
+      const { agent_id, goal, attachments, github_repo_url, user_id, fast_mode_cache_enabled } =
+        createSessionSchema.parse(req.body);
 
       const result = await service.createSession({
         agent_id,

@@ -252,5 +252,8 @@ fi
 require_text "$HELPER_SRC" \
   'exec {CLOUDBENCH_CONTROLLER_LOCK_FD}<> "$path"' \
   "flock fallback must open without truncating the current owner"
+require_text "$ROOT_DIR/scripts/run-bench-hub-poller" \
+  'exit_code" -ne "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE' \
+  "hub requests must retry only the typed capacity-busy runner status"
 
 echo "All cloud benchmark environment checks passed."

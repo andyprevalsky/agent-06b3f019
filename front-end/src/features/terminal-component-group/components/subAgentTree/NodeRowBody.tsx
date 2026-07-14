@@ -147,10 +147,7 @@ function displayGoal(node: TreeNode): string {
 
   const failedStructuredCanonicalName =
     node.status === 'FAILED' ? node.structuredOutput?.canonical_name : undefined;
-  if (
-    typeof failedStructuredCanonicalName === 'string' &&
-    failedStructuredCanonicalName.trim()
-  ) {
+  if (typeof failedStructuredCanonicalName === 'string' && failedStructuredCanonicalName.trim()) {
     return failedStructuredCanonicalName.trim();
   }
 

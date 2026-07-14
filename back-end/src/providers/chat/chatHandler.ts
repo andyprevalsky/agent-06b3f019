@@ -8,6 +8,22 @@
  *
  * Both Router and Generator stream their reasoning as ASSISTANT_STREAM (thinking).
  * Only the Generator's response field is saved as the true ASSISTANT message (INSERT).
+ *
+ * System context / state flow:
+ *
+ *   startInitialChatContext ──┬─ messages ──> Router (GLM) ──> Cerebras
+ *                             │                 │                 (fail closed)
+ *                             │                 ├─ escalation ──> Temporal (router only)
+ *                             │                 v
+ *                             │             Generator (Lite)
+ *                             │                 └─ Cerebras GLM-4.7
+ *                             ├─ direct_answer ──> reuse initial message snapshot
+ *                             │    └─ Router-start Generator ──> buffered until commit
+ *                             ├─ web_search/future writes ──> refresh messages
+ *                             │    └─ closed action ──> abort/discard speculation
+ *
+ * Synchronous chat uses explicit phase routes and performs no OAuth credential
+ * lookup or rotation. A later Temporal workflow retains its requested-model auth path.
  */
 
 import { v4 as uuidv4 } from 'uuid';
@@ -16,9 +32,14 @@ import { startAgentWorkflow } from '../temporal';
 import { createMessage } from '../messages';
 import { callRouterLlm, RouterDecision, type ChatLlmUsage } from './routerLlm';
 import { callGeneratorLlm } from './generatorLlm';
+import { selectChatPhaseModels } from './phaseModels';
 import { executeWebSearch } from './chatTools';
 import { agentFastMode } from '../fastCacheStore';
-import { callWithChatComputeRotation, fetchChatComputeAuth } from './computeRotation';
+import {
+  mapChatDatabaseMessages,
+  resolveGeneratorMessages,
+  startInitialChatContext,
+} from './initialContext';
 import {
   broadcastToolEvent,
   broadcastAgentModeStarted,
@@ -26,6 +47,10 @@ import {
 } from './supabaseBroadcast';
 import { CLOUD_AGENT_TOOL_NAME, CREATING_CLOUD_AGENT_TITLE } from './cloudAgentLifecycleTool';
 import { createLogger } from '../logger';
+import {
+  createEarlyDirectGeneratorCoordinator,
+  type TransactionalStreamGate,
+} from './earlyDirectGenerator';
 
 const log = createLogger('ChatHandler');
 
@@ -35,14 +60,6 @@ const log = createLogger('ChatHandler');
 export interface ChatResult {
   status: 'complete' | 'escalated';
   decision: RouterDecision;
-}
-
-// ChatMessage type - compatible with routerLlm and generatorLlm
-interface ChatMessage {
-  role: 'USER' | 'ASSISTANT' | 'TOOL' | 'SYSTEM';
-  text: string;
-  filePointer?: Record<string, unknown>;
-  metadata?: Record<string, unknown>;
 }
 
 // ============================================
@@ -58,45 +75,55 @@ export async function handleChatMessage(config: {
     model: config.model,
   });
 
-  let computeAuth = await fetchChatComputeAuth(config.userId);
+  const phaseModels = selectChatPhaseModels(config.model);
 
-  // Fetch messages from DB
-  const dbMessages = await prisma.message.findMany({
-    where: { agentId: config.agentId },
-    orderBy: { timestamp: 'asc' },
+  const initialContext = startInitialChatContext(config);
+  const messages = await initialContext.messages;
+
+  const runGenerator = async (
+    generatorMessages: typeof messages,
+    speculative?: { abortSignal: AbortSignal; streamGate: TransactionalStreamGate }
+  ) => {
+    return callGeneratorLlm({
+      agentId: config.agentId,
+      messages: generatorMessages,
+      model: phaseModels.generator,
+      providerRoute: phaseModels.generatorProviderRoute,
+      abortSignal: speculative?.abortSignal,
+      streamGate: speculative?.streamGate,
+    });
+  };
+
+  const speculativeGenerator = createEarlyDirectGeneratorCoordinator({
+    start: ({ abortSignal, streamGate }) => runGenerator(messages, { abortSignal, streamGate }),
   });
-
-  const messages: ChatMessage[] = dbMessages.map((m) => ({
-    role: m.role as 'USER' | 'ASSISTANT' | 'TOOL' | 'SYSTEM',
-    text: m.text,
-    filePointer: m.filePointer as Record<string, unknown> | undefined,
-    metadata: m.metadata as Record<string, unknown> | undefined,
-  }));
 
   // ============================================
   // LLM CALL 1: Router - Decide action
   // Streams reasoning as thinking, detects web_search early
   // ============================================
-  const routerAttempt = await callWithChatComputeRotation({
-    userId: config.userId,
-    agentId: config.agentId,
-    phase: 'router',
-    initialAuth: computeAuth,
-    invoke: (auth, options) =>
-      callRouterLlm({
-        agentId: config.agentId,
-        messages,
-        model: config.model,
-        claudeToken: auth.claudeToken,
-        gptToken: auth.gptToken,
-        gptAccountId: auth.gptAccountId,
-        disableWaterfall: options.disableWaterfall,
-      }),
-  });
-  computeAuth = routerAttempt.auth;
-  const routerResponse = routerAttempt.result;
+  let routerResponse;
+  try {
+    routerResponse = await callRouterLlm({
+      agentId: config.agentId,
+      messages,
+      model: phaseModels.router,
+      providerRoute: phaseModels.routerProviderRoute,
+      onRouterStarted: speculativeGenerator.start,
+      onActionDetected: (action) => {
+        if (action !== 'direct_answer') void speculativeGenerator.discard();
+      },
+    });
+  } catch (error) {
+    await speculativeGenerator.discard();
+    throw error;
+  }
 
   const { decision, webSearchToolCallId } = routerResponse;
+
+  if (decision.action !== 'direct_answer') {
+    await speculativeGenerator.discard();
+  }
 
   recordChatUsage(config.agentId, config.userId, 'chat_router', routerResponse.usage);
 
@@ -130,11 +157,13 @@ export async function handleChatMessage(config: {
       agentId: config.agentId,
       role: 'TOOL',
       text: '',
+      skipDuplicateToolCheck: true,
       metadata: {
         toolCallId: cloudAgentToolCallId,
         toolName: CLOUD_AGENT_TOOL_NAME,
         toolStatus: 'IN_PROGRESS',
         title: CREATING_CLOUD_AGENT_TITLE,
+        startPhase: decision.mode,
       },
     });
 
@@ -194,6 +223,7 @@ export async function handleChatMessage(config: {
       agentId: config.agentId,
       role: 'TOOL',
       text: '',
+      skipDuplicateToolCheck: true,
       metadata: {
         title: searchTitle,
         toolName: 'web_search',
@@ -218,6 +248,7 @@ export async function handleChatMessage(config: {
       agentId: config.agentId,
       role: 'TOOL',
       text: `Web search: "${decision.query}"\n\n${searchResult.answer}\n\nSources: ${searchResult.sources.join(', ')}`,
+      skipDuplicateToolCheck: true,
       metadata: {
         title: `Web search completed for ${displayQuery}`,
         toolName: 'web_search',
@@ -236,35 +267,21 @@ export async function handleChatMessage(config: {
   // ============================================
   log.info('[ChatHandler] Generating response', { agentId: config.agentId });
 
-  // Re-fetch messages to include any new TOOL message
-  const updatedDbMessages = await prisma.message.findMany({
-    where: { agentId: config.agentId },
-    orderBy: { timestamp: 'asc' },
+  const generatorMessages = await resolveGeneratorMessages({
+    action: decision.action,
+    initialMessages: messages,
+    refreshMessages: async () => {
+      const refreshedDbMessages = await prisma.message.findMany({
+        where: { agentId: config.agentId },
+        orderBy: { timestamp: 'asc' },
+      });
+      return mapChatDatabaseMessages(refreshedDbMessages);
+    },
   });
 
-  const updatedMessages: ChatMessage[] = updatedDbMessages.map((m) => ({
-    role: m.role as 'USER' | 'ASSISTANT' | 'TOOL' | 'SYSTEM',
-    text: m.text,
-    filePointer: m.filePointer as Record<string, unknown> | undefined,
-  }));
-
-  const generatorAttempt = await callWithChatComputeRotation({
-    userId: config.userId,
-    agentId: config.agentId,
-    phase: 'generator',
-    initialAuth: computeAuth,
-    invoke: (auth, options) =>
-      callGeneratorLlm({
-        agentId: config.agentId,
-        messages: updatedMessages,
-        model: config.model,
-        claudeToken: auth.claudeToken,
-        gptToken: auth.gptToken,
-        gptAccountId: auth.gptAccountId,
-        disableWaterfall: options.disableWaterfall,
-      }),
-  });
-  const generatorResponse = generatorAttempt.result;
+  const earlyGeneratorResponse =
+    decision.action === 'direct_answer' ? await speculativeGenerator.commitDirectAnswer() : null;
+  const generatorResponse = earlyGeneratorResponse ?? (await runGenerator(generatorMessages));
 
   recordChatUsage(config.agentId, config.userId, 'chat_generator', generatorResponse.usage);
 
@@ -277,13 +294,13 @@ export async function handleChatMessage(config: {
 
   // 2. Save response as TOOL message with send_message_to_user metadata - matches worker behavior
   // createMessage() auto-broadcasts INSERT event to frontend
-  const toolCallId = uuidv4();
   await createMessage({
     agentId: config.agentId,
     role: 'TOOL',
     text: generatorResponse.response,
+    skipDuplicateToolCheck: true,
     metadata: {
-      toolCallId,
+      toolCallId: generatorResponse.toolCallId,
       toolName: 'send_message_to_user',
       toolStatus: 'FINISHED',
       title: 'FYI for User',
@@ -298,7 +315,7 @@ export async function handleChatMessage(config: {
   });
 
   // Update agent message count
-  const messageCount = updatedDbMessages.length + 1;
+  const messageCount = generatorMessages.length + 1;
   await prisma.agent.update({
     where: { id: config.agentId },
     data: { messageCount },
@@ -317,6 +334,35 @@ export async function handleChatMessage(config: {
 // ============================================
 // Helper: Start Temporal Workflow on Escalation
 // ============================================
+interface ChatTemporalAgentConfig {
+  goal: string;
+  model: string;
+  reasoningMaxTokens: number;
+  verifier: { type: string };
+  priceLimitCents: number;
+  fastModeCacheEnabled: boolean;
+}
+
+export function buildChatTemporalStartParams(params: {
+  agentId: string;
+  userId: string;
+  goal: string;
+  startPhase: 'plan' | 'execute';
+  agent: ChatTemporalAgentConfig;
+}) {
+  return {
+    agentId: params.agentId,
+    userId: params.userId,
+    goal: params.goal || params.agent.goal,
+    model: params.agent.model,
+    reasoningMaxTokens: params.agent.reasoningMaxTokens,
+    verifier: { type: params.agent.verifier.type },
+    startPhase: params.startPhase,
+    priceLimitCents: params.agent.priceLimitCents,
+    fastModeCacheEnabled: params.agent.fastModeCacheEnabled,
+  };
+}
+
 async function startTemporalWorkflowForChat(
   agentId: string,
   userId: string,
@@ -338,19 +384,22 @@ async function startTemporalWorkflowForChat(
   }
 
   // Start Temporal workflow (existing function)
-  const workflowId = await startAgentWorkflow({
-    agentId,
-    userId,
-    goal: goal || agent.goal, // Use refined goal if provided
-    model: agent.model,
-    reasoningMaxTokens: agent.reasoningMaxTokens,
-    verifier: {
-      type: agent.verifier.type,
-    },
-    startPhase, // 'plan' or 'execute' - determines whether to skip PLAN phase
-    priceLimitCents: agent.priceLimitCents,
-    fastModeCacheEnabled: agent.fastModeCacheEnabled,
-  });
+  const workflowId = await startAgentWorkflow(
+    buildChatTemporalStartParams({
+      agentId,
+      userId,
+      goal,
+      startPhase,
+      agent: {
+        goal: agent.goal,
+        model: agent.model,
+        reasoningMaxTokens: agent.reasoningMaxTokens,
+        verifier: { type: agent.verifier.type },
+        priceLimitCents: agent.priceLimitCents,
+        fastModeCacheEnabled: agent.fastModeCacheEnabled,
+      },
+    })
+  );
 
   // Update agent with workflow ID
   await prisma.agent.update({

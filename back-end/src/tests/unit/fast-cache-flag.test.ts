@@ -1,5 +1,4 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
 /**
  * Unit/structural tests for Fast Mode flag plumbing + invariants.
  *
@@ -28,6 +27,7 @@ import {
   applyFastModeDefault,
   applyFastModeInheritance,
 } from '../../domains/agents/agentLifecycleService';
+import { buildChatTemporalStartParams } from '../../providers/chat/chatHandler';
 
 let passed = 0;
 const failures: string[] = [];
@@ -35,10 +35,10 @@ function test(name: string, fn: () => void): void {
   try {
     fn();
     passed += 1;
-    console.log(`  ✅ ${name}`);
+    process.stdout.write(`  ✅ ${name}\n`);
   } catch (err) {
     failures.push(`${name}: ${err instanceof Error ? err.message : String(err)}`);
-    console.log(`  ❌ ${name}`);
+    process.stdout.write(`  ❌ ${name}\n`);
   }
 }
 
@@ -359,7 +359,7 @@ test('cache writes are last-write-wins', () => {
   );
 });
 
-test('chat router is cached before downstream chat generation', () => {
+test('chat router caches successful output without gating downstream work', () => {
   const router = readFileSync(
     join(process.cwd(), 'src', 'providers', 'chat', 'routerLlm.ts'),
     'utf8'
@@ -370,7 +370,7 @@ test('chat router is cached before downstream chat generation', () => {
     'router must use a canonical request key'
   );
   assert.ok(router.includes('fastMode.writeEnabled'), 'router must honor write-through accounts');
-  assert.ok(router.includes('cacheGet(fcKey)'), 'router must read before live LLM');
+  assert.ok(router.includes('cacheGet(cacheKey)'), 'router must read before live LLM');
   assert.ok(router.includes('cacheSet({'), 'router must store successful router output');
   assert.ok(router.includes('fast_cache.chat_router_hit'), 'router must log Fast Mode hits');
   assert.ok(router.includes('fast_cache.chat_router_miss'), 'router must log Fast Mode misses');
@@ -379,6 +379,24 @@ test('chat router is cached before downstream chat generation', () => {
     'router must log write-only mode'
   );
   assert.ok(router.includes('fast_cache.chat_router_stored'), 'router must log Fast Mode writes');
+  assert.doesNotMatch(
+    router,
+    /await cacheSet\(/,
+    'writing the optional router cache must not gate a lifecycle decision'
+  );
+});
+
+test('web search caches successful output without gating the final answer', () => {
+  const tools = readFileSync(
+    join(process.cwd(), 'src', 'providers', 'chat', 'chatTools.ts'),
+    'utf8'
+  );
+  assert.ok(tools.includes('cacheSet({'), 'web search must store successful search output');
+  assert.doesNotMatch(
+    tools,
+    /await cacheSet\(/,
+    'writing the optional web-search cache must not gate the final answer'
+  );
 });
 
 test('backend chat cache sites support write-only without reads', () => {
@@ -418,15 +436,22 @@ test('backend chat cache sites support write-only without reads', () => {
 });
 
 test('chat escalation preserves Fast Mode on the root Temporal workflow', () => {
-  const handler = readFileSync(
-    join(process.cwd(), 'src', 'providers', 'chat', 'chatHandler.ts'),
-    'utf8'
-  );
-  const startHelper = extractFunction(handler, 'startTemporalWorkflowForChat');
-  assert.ok(
-    startHelper.includes('fastModeCacheEnabled: agent.fastModeCacheEnabled'),
-    'chat escalation must pass the persisted Agent fast-mode flag into AgentWorkflow'
-  );
+  const params = buildChatTemporalStartParams({
+    agentId: 'agent-1',
+    userId: 'user-1',
+    goal: 'goal',
+    startPhase: 'plan',
+    agent: {
+      goal: 'persisted goal',
+      model: 'rose-labs/rose-1-ultra',
+      reasoningMaxTokens: 4096,
+      verifier: { type: 'default' },
+      priceLimitCents: 100,
+      fastModeCacheEnabled: true,
+    },
+  });
+  assert.strictEqual(params.fastModeCacheEnabled, true);
+  assert.strictEqual(params.model, 'rose-labs/rose-1-ultra');
 });
 
 test('Claude Code session service forwards persisted Fast Mode flag to E2B provider', () => {
@@ -518,7 +543,9 @@ function extractFunction(source: string, name: string): string {
 }
 
 if (failures.length > 0) {
-  console.error(`\n❌ ${failures.length} failed:\n${failures.map((f) => `  - ${f}`).join('\n')}`);
+  process.stderr.write(
+    `\n❌ ${failures.length} failed:\n${failures.map((f) => `  - ${f}`).join('\n')}\n`
+  );
   process.exit(1);
 }
-console.log(`\n✅ fast-cache flag/invariants: ${passed}/${passed} passed`);
+process.stdout.write(`\n✅ fast-cache flag/invariants: ${passed}/${passed} passed\n`);

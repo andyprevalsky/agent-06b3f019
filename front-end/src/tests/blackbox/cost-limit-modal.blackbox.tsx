@@ -146,7 +146,7 @@ describe('CostLimitModal', () => {
         (r) => r.method === 'PATCH' && r.url.includes('/api/agents/a-1'),
       );
       expect(req).toBeDefined();
-      expect((req!.body as any).price_limit_cents).toBe(999);
+      expect((req!.body as never).price_limit_cents).toBe(999);
     });
     await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
     await waitFor(() => expect(onIncrease).toHaveBeenCalled());

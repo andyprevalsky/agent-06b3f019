@@ -235,6 +235,7 @@ else
   run_suite "Prompt Human Approval Guard" bash scripts/check-prompt-human-approval.sh
 fi
 run_suite "Claude Review Fallback" bash scripts/tests/claude-review-fallback.test.sh
+run_suite "Semantic Deploy Gate" bash scripts/tests/semantic-deploy-gate.test.sh
 run_suite "Cloud Benchmark Environment" bash scripts/tests/cloudbench-env.test.sh
 run_suite "Cloud Benchmark Git Fetch" bash scripts/tests/cloudbench-fetch-ref.test.sh
 run_suite "Cloud Benchmark Multi-Workstream" bash scripts/tests/cloudbench-multi-workstream.test.sh

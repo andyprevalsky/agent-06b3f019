@@ -17,6 +17,15 @@ function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message);
 }
 
+function isTransientKernelConnectionError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes('proxy connection failed') ||
+    message.includes('context deadline exceeded') ||
+    message.includes('Client.Timeout exceeded')
+  );
+}
+
 function isRetryableKernelNavigationError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return [
@@ -24,18 +33,6 @@ function isRetryableKernelNavigationError(error: unknown): boolean {
     'net::ERR_PROXY_CONNECTION_FAILED',
     'net::ERR_TUNNEL_CONNECTION_FAILED',
     'Timeout 30000ms exceeded',
-  ].some((fragment) => message.includes(fragment));
-}
-
-function isRetryableKernelInitError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return [
-    'unexpected EOF',
-    'proxy connection failed',
-    'HTTP 429',
-    'HTTP 502',
-    'HTTP 503',
-    'HTTP 504',
   ].some((fragment) => message.includes(fragment));
 }
 
@@ -71,18 +68,6 @@ interface BrowserApiResponse {
   resized?: boolean;
   viewport?: { width?: number; height?: number };
   browser_session_metadata?: BrowserMetadataResponse;
-}
-
-async function initializeKernelSession(
-  post: (path: string, body?: unknown) => Promise<BrowserApiResponse>,
-  body: unknown
-): Promise<BrowserApiResponse> {
-  return retryWithBackoff(() => post('/init', body), {
-    maxRetries: 3,
-    fixedDelays: [1_000, 2_000],
-    isRetryable: isRetryableKernelInitError,
-    component: 'Kernel provider blackbox init',
-  });
 }
 
 function withProvider(value: string | undefined, test: () => void): void {
@@ -205,14 +190,6 @@ const tests: Array<[string, () => void]> = [
         !isRetryableKernelNavigationError(new Error('Kernel CDP navigation failed')),
         'semantic navigation failures must fail closed'
       );
-      assert(
-        isRetryableKernelInitError(new Error('/init 500: proxy connection failed: unexpected EOF')),
-        'expected a transient proxy init failure to be retryable'
-      );
-      assert(
-        !isRetryableKernelInitError(new Error('/init 400: unsupported provider')),
-        'semantic init failures must fail closed'
-      );
     },
   ],
 ];
@@ -254,6 +231,16 @@ async function runLiveProviderParity(): Promise<void> {
     if (!response.ok) throw new Error(`${path} ${response.status}: ${JSON.stringify(json)}`);
     return json;
   };
+  const postWithKernelConnectionRetry = async (
+    path: string,
+    body?: unknown
+  ): Promise<BrowserApiResponse> =>
+    retryWithBackoff(() => post(path, body), {
+      maxRetries: 3,
+      fixedDelays: [750, 1_500],
+      isRetryable: isTransientKernelConnectionError,
+      component: `browser-provider:${path}`,
+    });
 
   await prisma.user.create({ data: { userId, name: 'Kernel Provider Blackbox' } });
   await prisma.agent.create({
@@ -268,7 +255,7 @@ async function runLiveProviderParity(): Promise<void> {
   });
 
   try {
-    const init = await initializeKernelSession(post, {
+    const init = await postWithKernelConnectionRetry('/init', {
       user_id: userId,
       agent_id: agentId,
       start_url: 'https://example.com',
@@ -413,7 +400,7 @@ async function runLiveProviderParity(): Promise<void> {
     });
     liveSessionId = undefined;
 
-    const resumed = await post('/resume', { task_id: init.task_id });
+    const resumed = await postWithKernelConnectionRetry('/resume', { task_id: init.task_id });
     liveSessionId = String(resumed.session_id);
     const resumedMetadata = resumed.browser_session_metadata ?? {};
     assert(resumed.task_id === init.task_id, 'resume changed the stable task ID');

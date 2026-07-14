@@ -1,5 +1,6 @@
 /**
- * Rose chat completions provider — direct calls to Anthropic + OpenRouter.
+ * Rose chat completions provider — direct calls to Cerebras, Anthropic,
+ * OpenAI, and OpenRouter.
  *
  * Replaces the deleted Supabase /completions edge function. Both this and
  * agents/providers/rose/ share the same model contract (see pools.ts /

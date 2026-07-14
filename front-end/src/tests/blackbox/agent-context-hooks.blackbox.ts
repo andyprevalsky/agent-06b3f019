@@ -212,6 +212,112 @@ describe('useAgentProvider', () => {
     unmount();
   });
 
+  it('stages a pending creation without a detail GET, then reconciles without duplicate user text', async () => {
+    server.use(
+      http.get(`${API_BASE}/agents/:agentId`, ({ params }) =>
+        HttpResponse.json({
+          agent: makeAgent({ agent_id: params.agentId as string, goal: 'instant goal' }),
+          messages: [
+            {
+              message_id: 'canonical-user',
+              timestamp: '2026-01-01T00:00:00Z',
+              text: 'instant goal',
+              role: 'USER',
+            },
+          ],
+          pagination: { has_more: false, oldest_timestamp: null },
+        }),
+      ),
+    );
+    const { result, unmount } = renderHook(() => useAgentProvider(defaultDeps()));
+
+    act(() => {
+      result.current.stagePendingAgentCreation({
+        agentId: 'pending-agent',
+        goal: 'instant goal',
+        model: 'rose-1-lite',
+        source: 'WEB',
+        priceLimitCents: 500,
+      });
+    });
+
+    expect(result.current.selectedAgentId).toBe('pending-agent');
+    expect(result.current.agent?.agent_id).toBe('pending-agent');
+    expect(result.current.messages).toEqual([
+      expect.objectContaining({ text: 'instant goal', role: 'USER' }),
+    ]);
+    expect(capturedRequests.some((request) => request.method === 'GET')).toBe(false);
+
+    act(() => {
+      result.current.setMessages((previous) => [
+        ...previous,
+        {
+          message_id: 'realtime-assistant',
+          timestamp: '2026-01-01T00:00:00.500Z',
+          text: 'Already streaming',
+          role: 'ASSISTANT',
+        },
+      ]);
+    });
+    await act(async () => {
+      await result.current.reconcilePendingAgentCreation('pending-agent');
+    });
+
+    expect(result.current.messages.map((message) => message.message_id)).toEqual([
+      'canonical-user',
+      'realtime-assistant',
+    ]);
+    expect(
+      result.current.messages.filter((message) => message.text === 'instant goal'),
+    ).toHaveLength(1);
+    unmount();
+  });
+
+  it('rolls back a pending creation only while that exact staged agent is selected', async () => {
+    server.use(
+      http.get(`${API_BASE}/agents/:agentId`, ({ params }) =>
+        HttpResponse.json({
+          agent: makeAgent({ agent_id: params.agentId as string }),
+          messages: [],
+          pagination: { has_more: false, oldest_timestamp: null },
+        }),
+      ),
+    );
+    const { result, unmount } = renderHook(() => useAgentProvider(defaultDeps()));
+
+    act(() => {
+      result.current.stagePendingAgentCreation({
+        agentId: 'pending-agent',
+        goal: 'instant goal',
+        model: 'rose-1-lite',
+        source: 'WEB',
+        priceLimitCents: 500,
+      });
+      result.current.setSelectedAgentId('other-agent');
+    });
+    expect(result.current.rollbackPendingAgentCreation('pending-agent')).toBe(false);
+    expect(result.current.selectedAgentId).toBe('other-agent');
+
+    await waitFor(() => expect(result.current.agent?.agent_id).toBe('other-agent'));
+    act(() => {
+      result.current.stagePendingAgentCreation({
+        agentId: 'second-pending-agent',
+        goal: 'retryable goal',
+        model: 'rose-1-lite',
+        source: 'WEB',
+        priceLimitCents: 500,
+      });
+    });
+    let rolledBack = false;
+    act(() => {
+      rolledBack = result.current.rollbackPendingAgentCreation('second-pending-agent');
+    });
+    expect(rolledBack).toBe(true);
+    expect(result.current.selectedAgentId).toBeNull();
+    expect(result.current.messages).toEqual([]);
+    unmount();
+  });
+
   it('sendMessage throws when no agent selected', async () => {
     const { result, unmount } = renderHook(() => useAgentProvider(defaultDeps()));
     let threw: unknown = null;
@@ -374,6 +480,9 @@ describe('useAgentContext', () => {
       streamedTextsRef: { current: new Set<string>() },
       setAgent: vi.fn(),
       setSelectedAgentId: vi.fn(),
+      stagePendingAgentCreation: vi.fn(),
+      reconcilePendingAgentCreation: vi.fn(async () => {}),
+      rollbackPendingAgentCreation: vi.fn(() => true),
       setMessages: vi.fn(),
       registerMessageHandler: vi.fn(() => () => {}),
       sendMessage: vi.fn(async () => {}),
