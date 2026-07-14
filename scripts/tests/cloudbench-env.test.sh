@@ -130,14 +130,27 @@ CLOUDBENCH_MACHINES_API_TOKEN="test-token"
 cloudbench_machines_api_request() {
   local method="$1" path="$2" body="${3:-}" nonce="${4:-}"
   printf '%s|%s|%s|%s\n' "$method" "$path" "$body" "$nonce" >> "$cloud_lease_calls"
+  if [ "${cloud_api_transport_key:-}" = "$method|$path" ]; then
+    CLOUDBENCH_API_STATUS=0
+    CLOUDBENCH_API_BODY='transport unavailable'
+    return 1
+  fi
   case "$method|$path" in
     'GET|/v1/apps/bench-app/machines')
-      CLOUDBENCH_API_STATUS=200
-      CLOUDBENCH_API_BODY='[{"id":"lock-machine","name":"cloudbench-controller-lock"}]'
+      if [ -n "${cloud_list_force_status:-}" ]; then
+        CLOUDBENCH_API_STATUS="$cloud_list_force_status"
+        CLOUDBENCH_API_BODY='{"error":"list failure"}'
+      elif [ "${cloud_lease_missing_sentinel:-0}" = "1" ]; then
+        CLOUDBENCH_API_STATUS=200
+        CLOUDBENCH_API_BODY='[]'
+      else
+        CLOUDBENCH_API_STATUS=200
+        CLOUDBENCH_API_BODY='[{"id":"lock-machine","name":"cloudbench-controller-lock"}]'
+      fi
       ;;
     'POST|/v1/apps/bench-app/machines/lock-machine/lease')
-      if [ "${cloud_lease_force_error:-0}" = "1" ]; then
-        CLOUDBENCH_API_STATUS=500
+      if [ -n "${cloud_lease_force_status:-}" ]; then
+        CLOUDBENCH_API_STATUS="$cloud_lease_force_status"
         CLOUDBENCH_API_BODY='{"error":"provider failure"}'
       elif [ -e "$cloud_lease_state" ]; then
         CLOUDBENCH_API_STATUS=409
@@ -167,12 +180,46 @@ cloud_lock_status=0
 [ "$cloud_lock_status" -eq "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE" ] ||
   fail "an occupied Fly sentinel must return the typed capacity-busy status"
 cloudbench_cloud_lock_release bench-app
-cloud_lease_force_error=1
+cloud_api_transport_key='GET|/v1/apps/bench-app/machines'
+cloud_lock_status=0
+(cloudbench_cloud_lock_acquire bench-app >/dev/null 2>&1) || cloud_lock_status=$?
+[ "$cloud_lock_status" -eq "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE" ] ||
+  fail "a Machines API transport failure during sentinel lookup must remain retryable"
+unset cloud_api_transport_key
+cloud_list_force_status=503
+cloud_lock_status=0
+(cloudbench_cloud_lock_acquire bench-app >/dev/null 2>&1) || cloud_lock_status=$?
+[ "$cloud_lock_status" -eq "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE" ] ||
+  fail "a retryable sentinel lookup response must remain retryable"
+cloud_list_force_status=401
 cloud_lock_status=0
 (cloudbench_cloud_lock_acquire bench-app >/dev/null 2>&1) || cloud_lock_status=$?
 [ "$cloud_lock_status" -eq 1 ] ||
-  fail "a non-contention Fly lease error must remain terminal"
-unset cloud_lease_force_error
+  fail "a sentinel lookup auth failure must remain terminal"
+unset cloud_list_force_status
+cloud_lease_missing_sentinel=1
+cloud_lock_status=0
+(cloudbench_cloud_lock_acquire bench-app >/dev/null 2>&1) || cloud_lock_status=$?
+[ "$cloud_lock_status" -eq 1 ] ||
+  fail "a successful lookup without the configured sentinel must remain terminal"
+unset cloud_lease_missing_sentinel
+cloud_api_transport_key='POST|/v1/apps/bench-app/machines/lock-machine/lease'
+cloud_lock_status=0
+(cloudbench_cloud_lock_acquire bench-app >/dev/null 2>&1) || cloud_lock_status=$?
+[ "$cloud_lock_status" -eq "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE" ] ||
+  fail "a Machines API transport failure during lease creation must remain retryable"
+unset cloud_api_transport_key
+cloud_lease_force_status=503
+cloud_lock_status=0
+(cloudbench_cloud_lock_acquire bench-app >/dev/null 2>&1) || cloud_lock_status=$?
+[ "$cloud_lock_status" -eq "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE" ] ||
+  fail "a retryable Fly lease response must remain retryable"
+cloud_lease_force_status=401
+cloud_lock_status=0
+(cloudbench_cloud_lock_acquire bench-app >/dev/null 2>&1) || cloud_lock_status=$?
+[ "$cloud_lock_status" -eq 1 ] ||
+  fail "a Fly lease auth failure must remain terminal"
+unset cloud_lease_force_status
 require_text "$cloud_lease_calls" \
   'DELETE|/v1/apps/bench-app/machines/lock-machine/lease||lease-nonce' \
   "cloud lock release must authenticate with its provider nonce"

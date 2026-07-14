@@ -273,7 +273,12 @@ cloudbench_machines_api_request() {
   local method="$1" path="$2" body="${3:-}" nonce="${4:-}" response
   local api_host="${FLY_API_HOSTNAME:-https://api.machines.dev}"
   local api_token="${CLOUDBENCH_MACHINES_API_TOKEN:-${FLY_API_TOKEN:-}}"
-  [ -n "$api_token" ] || { echo "FATAL: Machines API token is required" >&2; return 1; }
+  if [ -z "$api_token" ]; then
+    CLOUDBENCH_API_STATUS=missing_token
+    CLOUDBENCH_API_BODY=""
+    echo "FATAL: Machines API token is required" >&2
+    return 1
+  fi
   local -a args=(
     -sS -X "$method"
     -H "Authorization: Bearer $api_token"
@@ -288,6 +293,20 @@ cloudbench_machines_api_request() {
   fi
   CLOUDBENCH_API_STATUS="${response##*$'\n'}"
   CLOUDBENCH_API_BODY="${response%$'\n'*}"
+}
+
+cloudbench_machines_api_status_is_retryable() {
+  case "${1:-}" in
+    0|408|425|429|5[0-9][0-9]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+cloudbench_machines_api_retryable_failure() {
+  local status="${1:-0}"
+  echo "CLOUDBENCH_RETRYABLE_CAPACITY=machines_api_unavailable" >&2
+  echo "Cloud benchmark lease API is temporarily unavailable (HTTP $status); retrying is safe." >&2
+  return "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE"
 }
 
 cloudbench_machines_api_token_ensure() {
@@ -305,17 +324,35 @@ cloudbench_cloud_lock_machine_name() {
 }
 
 cloudbench_cloud_lock_machine_id() {
-  local app="$1" machine_name
+  local app="$1" machine_name request_status
   machine_name="$(cloudbench_cloud_lock_machine_name)"
-  cloudbench_machines_api_request GET "/v1/apps/$app/machines" || return 1
-  [ "$CLOUDBENCH_API_STATUS" = "200" ] || return 1
+  request_status=0
+  cloudbench_machines_api_request GET "/v1/apps/$app/machines" || request_status=$?
+  if [ "$request_status" -ne 0 ]; then
+    if cloudbench_machines_api_status_is_retryable "${CLOUDBENCH_API_STATUS:-0}"; then
+      cloudbench_machines_api_retryable_failure "${CLOUDBENCH_API_STATUS:-0}"
+      return $?
+    fi
+    echo "FATAL: cloud benchmark sentinel lookup failed before receiving a response" >&2
+    return "$request_status"
+  fi
+  if cloudbench_machines_api_status_is_retryable "$CLOUDBENCH_API_STATUS"; then
+    cloudbench_machines_api_retryable_failure "$CLOUDBENCH_API_STATUS"
+    return $?
+  fi
+  if [ "$CLOUDBENCH_API_STATUS" != "200" ]; then
+    echo "FATAL: cloud benchmark sentinel lookup failed (HTTP $CLOUDBENCH_API_STATUS)" >&2
+    return 1
+  fi
   printf '%s' "$CLOUDBENCH_API_BODY" | jq -r --arg name "$machine_name" \
     '.[] | select(.name == $name) | .id' | head -1
 }
 
 cloudbench_cloud_lock_acquire() {
-  local app="$1" machine_id body nonce description ttl expires_at now watchdog_delay owner_pid
-  machine_id="$(cloudbench_cloud_lock_machine_id "$app" || true)"
+  local app="$1" machine_id body nonce description ttl expires_at now watchdog_delay owner_pid status
+  status=0
+  machine_id="$(cloudbench_cloud_lock_machine_id "$app")" || status=$?
+  [ "$status" -eq 0 ] || return "$status"
   if [ -z "$machine_id" ]; then
     echo "FATAL: cloud benchmark controller sentinel is missing; run run-bench-cloud --setup" >&2
     return 1
@@ -324,11 +361,24 @@ cloudbench_cloud_lock_acquire() {
   case "$ttl" in ''|*[!0-9]*|0) echo "FATAL: invalid cloud lock TTL" >&2; return 2 ;; esac
   description="cloudbench-controller pid=$$ host=$(hostname 2>/dev/null || echo unknown)"
   body="$(jq -cn --arg description "$description" --argjson ttl "$ttl" '{description:$description, ttl:$ttl}')"
-  cloudbench_machines_api_request POST "/v1/apps/$app/machines/$machine_id/lease" "$body" || return 1
+  status=0
+  cloudbench_machines_api_request POST "/v1/apps/$app/machines/$machine_id/lease" "$body" || status=$?
+  if [ "$status" -ne 0 ]; then
+    if cloudbench_machines_api_status_is_retryable "${CLOUDBENCH_API_STATUS:-0}"; then
+      cloudbench_machines_api_retryable_failure "${CLOUDBENCH_API_STATUS:-0}"
+      return $?
+    fi
+    echo "FATAL: cloud benchmark lease acquisition failed before receiving a response" >&2
+    return "$status"
+  fi
   if [ "$CLOUDBENCH_API_STATUS" = "409" ]; then
     echo "CLOUDBENCH_RETRYABLE_CAPACITY=lease_busy" >&2
     echo "Cloud benchmark app is leased by another controller (HTTP 409); waiting is safe." >&2
     return "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE"
+  fi
+  if cloudbench_machines_api_status_is_retryable "$CLOUDBENCH_API_STATUS"; then
+    cloudbench_machines_api_retryable_failure "$CLOUDBENCH_API_STATUS"
+    return $?
   fi
   if [ "$CLOUDBENCH_API_STATUS" != "201" ]; then
     echo "FATAL: cloud benchmark lease acquisition failed (HTTP $CLOUDBENCH_API_STATUS)" >&2
