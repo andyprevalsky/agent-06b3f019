@@ -84,7 +84,10 @@ async function amplitudeGet<T>(path: string, query?: URLSearchParams): Promise<T
   if (query !== undefined) url.search = query.toString();
   return withRequestSlot(async () => {
     const response = await fetch(url, { headers: { Authorization: authHeader() } });
-    if (!response.ok) throw new Error(`Amplitude ${response.status}`);
+    if (!response.ok) {
+      const detail = (await response.text()).slice(0, 500);
+      throw new Error(`Amplitude ${response.status}: ${detail}`);
+    }
     return (await response.json()) as T;
   });
 }
@@ -94,17 +97,17 @@ async function fetchKnownEvents(): Promise<Set<string>> {
     return knownEventsCache.value;
   }
   if (knownEventsRequest !== null) return knownEventsRequest;
-  knownEventsRequest = amplitudeGet<{ data?: Array<{ name?: string }> }>('/api/2/events/list').then(
-    (body) => {
-      const value = new Set(
-        body.data?.flatMap((event) =>
-          event.name === undefined || event.name === '' ? [] : [event.name]
-        ) ?? []
-      );
-      knownEventsCache = { expiresAt: Date.now() + CACHE_TTL_MS, value };
-      return value;
-    }
-  );
+  knownEventsRequest = amplitudeGet<{ data?: Array<{ value?: string }> }>(
+    '/api/2/events/list'
+  ).then((body) => {
+    const value = new Set(
+      body.data?.flatMap((event) =>
+        event.value === undefined || event.value === '' ? [] : [event.value]
+      ) ?? []
+    );
+    knownEventsCache = { expiresAt: Date.now() + CACHE_TTL_MS, value };
+    return value;
+  });
   try {
     return await knownEventsRequest;
   } finally {
@@ -120,36 +123,49 @@ function formatDate(date: Date): string {
   ].join('');
 }
 
-async function fetchEventPair(
-  events: FunnelEvent[],
-  start: Date,
-  end: Date
-): Promise<Array<{ id: AmplitudeFunnelStepId; count: number }>> {
-  const query = new URLSearchParams({
-    e: JSON.stringify({ event_type: events[0].eventType, filters: events[0].filters ?? [] }),
-    m: 'uniques',
-    start: formatDate(start),
-    end: formatDate(new Date(end.getTime() - 1)),
-  });
-  if (events[1] !== undefined) {
-    query.set(
-      'e2',
-      JSON.stringify({ event_type: events[1].eventType, filters: events[1].filters ?? [] })
-    );
-  }
-  const body = await amplitudeGet<{
-    data?: { seriesCollapsed?: Array<Array<{ value?: number }>> };
-  }>('/api/2/events/segmentation', query);
-  return events.map((event, index) => ({
-    id: event.id,
-    count: body.data?.seriesCollapsed?.[index]?.[0]?.value ?? 0,
-  }));
+function eventQuery(event: FunnelEvent): { event_type: string; filters: FunnelEvent['filters'] } {
+  // These are raw event types returned by /events/list. Amplitude's `ce:` prefix is only for
+  // dashboard-defined Custom Events (composite definitions), not ordinary instrumented events.
+  return { event_type: event.eventType, filters: event.filters ?? [] };
 }
 
-function pairs<T>(items: T[]): T[][] {
-  const result: T[][] = [];
-  for (let index = 0; index < items.length; index += 2) result.push(items.slice(index, index + 2));
-  return result;
+async function fetchOrderedFunnel(
+  start: Date,
+  end: Date
+): Promise<AmplitudeFunnelResult['counts']> {
+  const query = new URLSearchParams({
+    start: formatDate(start),
+    end: formatDate(new Date(end.getTime() - 1)),
+    mode: 'ordered',
+    n: 'active',
+    cs: String(24 * 60 * 60),
+  });
+  for (const event of FUNNEL_EVENTS) query.append('e', JSON.stringify(eventQuery(event)));
+  const body = await amplitudeGet<{
+    data?: Array<{ cumulativeRaw?: number[] }>;
+  }>('/api/2/funnels', query);
+  if (body.data?.length === 0) return emptyCounts(0);
+  return orderedFunnelCounts(body.data?.[0]?.cumulativeRaw);
+}
+
+export function orderedFunnelCounts(
+  cumulativeRaw: number[] | undefined
+): AmplitudeFunnelResult['counts'] {
+  if (cumulativeRaw === undefined || cumulativeRaw.length !== FUNNEL_EVENTS.length) {
+    throw new Error('Amplitude funnel response did not include every configured step');
+  }
+  for (let index = 0; index < cumulativeRaw.length; index += 1) {
+    const count = cumulativeRaw[index];
+    if (!Number.isFinite(count) || count < 0) {
+      throw new Error(`Amplitude funnel step ${index} returned an invalid count`);
+    }
+    if (index > 0 && count > cumulativeRaw[index - 1]) {
+      throw new Error('Amplitude ordered funnel counts must be non-increasing');
+    }
+  }
+  return Object.fromEntries(
+    FUNNEL_EVENTS.map((event, index) => [event.id, cumulativeRaw[index]])
+  ) as AmplitudeFunnelResult['counts'];
 }
 
 export async function fetchAmplitudeFunnel(start: Date, end: Date): Promise<AmplitudeFunnelResult> {
@@ -163,15 +179,17 @@ export async function fetchAmplitudeFunnel(start: Date, end: Date): Promise<Ampl
   try {
     const effectiveEnd = new Date(Math.min(end.getTime(), Date.now()));
     const knownEvents = await fetchKnownEvents();
-    const counts = emptyCounts(null);
-    const trackedEvents = FUNNEL_EVENTS.filter((event) => knownEvents.has(event.eventType));
-    for (const eventPair of pairs(trackedEvents)) {
-      const results = await fetchEventPair(eventPair, start, effectiveEnd);
-      for (const result of results) counts[result.id] = result.count;
+    const missingEvents = FUNNEL_EVENTS.filter((event) => !knownEvents.has(event.eventType));
+    if (missingEvents.length > 0) {
+      return {
+        counts: emptyCounts(null),
+        detail: `Amplitude is missing required events: ${missingEvents.map((event) => event.eventType).join(', ')}.`,
+      };
     }
+    const counts = await fetchOrderedFunnel(start, effectiveEnd);
     const value = {
       counts,
-      detail: 'Unique users recorded by Amplitude in the selected period.',
+      detail: 'Ordered unique users who completed each prior website step within 24 hours.',
     };
     funnelCache.set(cacheKey, { expiresAt: Date.now() + CACHE_TTL_MS, value });
     return value;

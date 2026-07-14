@@ -1,3 +1,9 @@
+/**
+ * STATE MACHINE: PrimaryMetricSection
+ * [READY] -> Stripe revenue value, comparison, and time series
+ * [UNAVAILABLE] -> explicit unavailable value with the same stable layout
+ */
+
 import { DollarSign } from 'lucide-react';
 import {
   Area,
@@ -101,13 +107,3 @@ export default function PrimaryMetricSection({ data }: { data: AdminHealthData }
     </section>
   );
 }
-/**
- * STATE MACHINE: PrimaryMetricSection
- * [READY] -> Stripe revenue value, comparison, and time series
- * [UNAVAILABLE] -> explicit unavailable value with the same stable layout
- */
-/**
- * STATE MACHINE: PrimaryMetricSection
- * [READY] -> Stripe revenue value, comparison, and time series
- * [UNAVAILABLE] -> explicit unavailable value with the same stable layout
- */
