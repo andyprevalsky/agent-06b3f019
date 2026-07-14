@@ -82,6 +82,9 @@ export const TEST_PAYMENT_ITEMS: TestPaymentItem[] = [
     description: 'Hardcover planning notebook with dotted pages.',
     imageUrl: 'https://placehold.co/320x220/png?text=Aurora+Notebook',
     priceCents: 1200,
+    productUrl: '/p/aurora-notebook',
+    rating: '4.8 stars',
+    reviewCount: '1,284 reviews',
   },
   {
     id: 'copper-pen',
@@ -89,6 +92,9 @@ export const TEST_PAYMENT_ITEMS: TestPaymentItem[] = [
     description: 'Weighted refillable pen for precise notes.',
     imageUrl: 'https://placehold.co/320x220/png?text=Copper+Pen',
     priceCents: 700,
+    productUrl: '/p/copper-pen',
+    rating: '4.7 stars',
+    reviewCount: '610 reviews',
   },
   {
     id: 'ceramic-mug',
@@ -96,6 +102,9 @@ export const TEST_PAYMENT_ITEMS: TestPaymentItem[] = [
     description: 'Matte white mug for long checkout tests.',
     imageUrl: 'https://placehold.co/320x220/png?text=Ceramic+Mug',
     priceCents: 900,
+    productUrl: '/p/ceramic-mug',
+    rating: '4.6 stars',
+    reviewCount: '932 reviews',
   },
   {
     id: 'canvas-tote',
@@ -103,6 +112,9 @@ export const TEST_PAYMENT_ITEMS: TestPaymentItem[] = [
     description: 'Heavy canvas tote with reinforced handles.',
     imageUrl: 'https://placehold.co/320x220/png?text=Canvas+Tote',
     priceCents: 1500,
+    productUrl: '/p/canvas-tote',
+    rating: '4.9 stars',
+    reviewCount: '2,051 reviews',
   },
   {
     id: 'desk-lamp',
@@ -110,6 +122,9 @@ export const TEST_PAYMENT_ITEMS: TestPaymentItem[] = [
     description: 'Compact LED lamp with warm dimming.',
     imageUrl: 'https://placehold.co/320x220/png?text=Desk+Lamp',
     priceCents: 2200,
+    productUrl: '/p/desk-lamp',
+    rating: '4.5 stars',
+    reviewCount: '1,478 reviews',
   },
 ];
 

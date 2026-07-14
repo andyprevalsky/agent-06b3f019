@@ -11,6 +11,9 @@ export const ABANDONMENT_BENCHMARK_ITEMS: TestPaymentItem[] = [
     description: 'Hardcover planning notebook with dotted pages.',
     imageUrl: 'https://placehold.co/320x220/png?text=Aurora+Notebook',
     priceCents: 1200,
+    productUrl: '/p/aurora-notebook',
+    rating: '4.8 stars',
+    reviewCount: '1,284 reviews',
   },
   {
     id: 'ceramic-mug',
@@ -18,6 +21,9 @@ export const ABANDONMENT_BENCHMARK_ITEMS: TestPaymentItem[] = [
     description: 'Matte white mug for long checkout tests.',
     imageUrl: 'https://placehold.co/320x220/png?text=Ceramic+Mug',
     priceCents: 900,
+    productUrl: '/p/ceramic-mug',
+    rating: '4.6 stars',
+    reviewCount: '932 reviews',
   },
   {
     id: 'canvas-tote',
@@ -25,6 +31,9 @@ export const ABANDONMENT_BENCHMARK_ITEMS: TestPaymentItem[] = [
     description: 'Heavy canvas tote with reinforced handles.',
     imageUrl: 'https://placehold.co/320x220/png?text=Canvas+Tote',
     priceCents: 1500,
+    productUrl: '/p/canvas-tote',
+    rating: '4.9 stars',
+    reviewCount: '2,051 reviews',
   },
 ];
 export const LIVE_LIFECYCLE_ITEM: TestPaymentItem = {
@@ -33,6 +42,9 @@ export const LIVE_LIFECYCLE_ITEM: TestPaymentItem = {
   description: 'Single-use checkout verification item.',
   imageUrl: 'https://placehold.co/320x220/png?text=Agent+Card+Lifecycle+Probe',
   priceCents: 50,
+  productUrl: '/p/agentcard-lifecycle-probe',
+  rating: '5.0 stars',
+  reviewCount: '128 reviews',
 };
 
 export const EMPTY_CARD_FORM: TestPaymentCardForm = {

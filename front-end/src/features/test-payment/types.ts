@@ -4,6 +4,12 @@ export interface TestPaymentItem {
   description: string;
   imageUrl: string;
   priceCents: number;
+  /** Relative product-page path, e.g. `/p/aurora-notebook`. Absolutized against window.location.origin for display. */
+  productUrl: string;
+  /** Human-readable rating containing a 0-5 numeric score, e.g. `4.8 stars`. */
+  rating: string;
+  /** Human-readable review count, e.g. `1,284 reviews`. */
+  reviewCount: string;
 }
 
 export interface TestPaymentReceiptLine {

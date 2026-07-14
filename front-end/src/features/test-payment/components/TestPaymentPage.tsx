@@ -14,6 +14,12 @@
  * This page is a local benchmark merchant. It intentionally exposes real card
  * fields so browser agents must use request_payment_card and produce a full
  * receipt approval before filling the one-time card.
+ *
+ * Each product card renders the fields a payment-line-item receipt requires:
+ * name, description, imageUrl, priceCents, an absolute productUrl
+ * (`${window.location.origin}${item.productUrl}`), rating, and reviewCount —
+ * exposed both as visible text and as data attributes so a browser agent can
+ * extract valid product_url / rating / review_count values.
  */
 
 import { useEffect, useMemo, useState } from 'react';
@@ -84,6 +90,7 @@ function ProductGrid({
     <section className="grid gap-4 md:grid-cols-5" aria-label="Test payment products">
       {items.map((item) => {
         const selected = selectedIds.includes(item.id);
+        const absoluteProductUrl = `${window.location.origin}${item.productUrl}`;
         return (
           <article
             key={item.id}
@@ -91,6 +98,9 @@ function ProductGrid({
             data-product-name={item.name}
             data-image-url={item.imageUrl}
             data-unit-price-cents={item.priceCents}
+            data-product-url={absoluteProductUrl}
+            data-product-rating={item.rating}
+            data-product-review-count={item.reviewCount}
             className="rounded-lg border bg-card text-card-foreground shadow-sm"
           >
             <img
@@ -104,6 +114,11 @@ function ProductGrid({
                 <h2 className="text-base font-semibold">{item.name}</h2>
                 <p className="mt-1 text-sm text-muted-foreground">{item.description}</p>
                 <p className="mt-2 break-all text-xs text-muted-foreground">
+                  Product page: {absoluteProductUrl}
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">Rating: {item.rating}</p>
+                <p className="mt-1 text-xs text-muted-foreground">{item.reviewCount}</p>
+                <p className="mt-1 break-all text-xs text-muted-foreground">
                   Image URL: {item.imageUrl}
                 </p>
               </div>
