@@ -256,9 +256,39 @@ for machine in machines:
     done
 }
 
+# Run `FLY <args>` under a hard wall-clock ceiling, echoing its combined output.
+# `flyctl machine clone` has been observed to hang indefinitely on a stalled Fly
+# API call (even with --detach), which freezes the whole sequential provisioning
+# loop and starves the synchronized barrier. Backgrounding FLY (a function → its
+# flyctl child is a grandchild of this subshell) lets a watchdog reap the child
+# by parent (pkill -P) on timeout; returns 142 so the caller's retry loop treats
+# a hang exactly like any other transient clone failure. Portable (no `timeout`).
+fly_with_timeout() {  # fly_with_timeout <seconds> <FLY args...>
+    local secs="$1"; shift
+    local out; out="$(mktemp)"
+    FLY "$@" >"$out" 2>&1 &
+    local pid=$! waited=0 rc
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ "$waited" -ge "$secs" ]; then
+            pkill -TERM -P "$pid" 2>/dev/null || true
+            kill -TERM "$pid" 2>/dev/null || true
+            sleep 2
+            pkill -KILL -P "$pid" 2>/dev/null || true
+            kill -KILL "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            cat "$out"; rm -f "$out"
+            return 142
+        fi
+        sleep 1; waited=$((waited + 1))
+    done
+    wait "$pid"; rc=$?
+    cat "$out"; rm -f "$out"
+    return "$rc"
+}
+
 clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id]; echo target id
     local ledger="$1" source_id="${2:-$WARM_ID}" clone_out clone_status target_id target_name diagnostic_log names_ledger deadline
-    local attempt max_attempts retry_delay
+    local attempt max_attempts retry_delay clone_timeout
     # Fly clone-from-snapshot occasionally loses a create-volume→launch-VM race
     # ("failed to launch VM: volume not found") or leaves the new machine
     # momentarily unlistable — both transient, both fatal to a synchronized
@@ -267,6 +297,9 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id];
     # teardown reaps any machine that did materialize — no new leak path).
     max_attempts="${CLOUDBENCH_CLONE_MAX_ATTEMPTS:-3}"
     retry_delay="${CLOUDBENCH_CLONE_RETRY_SECONDS:-8}"
+    # Bound each clone so a hung Fly API call can't freeze the whole loop. A real
+    # clone-from-snapshot + --detach returns well under this; 25min+ = hung.
+    clone_timeout="${CLOUDBENCH_CLONE_TIMEOUT_SECONDS:-240}"
     mkdir -p "$(dirname "$ledger")"
     names_ledger="${ledger%.ids}.names"
     diagnostic_log="${ledger%.ids}.log"
@@ -274,7 +307,7 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id];
     while :; do
         target_name="cloudbench-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:24])')"
         printf '%s\n' "$target_name" >> "$names_ledger"
-        clone_out="$(FLY machine clone "$source_id" -a "$APP" \
+        clone_out="$(fly_with_timeout "$clone_timeout" machine clone "$source_id" -a "$APP" \
             --from-snapshot "$SNAP_ID" --region "$REGION" --name "$target_name" --detach 2>&1)"
         clone_status=$?
         {

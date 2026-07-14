@@ -1318,7 +1318,10 @@ clone_machine_target "$LEDGER"
     assert failed_target_ledger.with_suffix(".names").read_text() == ""
     assert "--detach" in clone_function
     assert "--name" in clone_function
-    assert fleet.count("FLY machine clone") == 1
+    # Exactly one clone-from-source call site, and it is bounded by the
+    # hung-clone watchdog (fly_with_timeout) rather than an unbounded FLY call.
+    assert fleet.count('machine clone "$source_id"') == 1
+    assert "fly_with_timeout" in clone_function
     assert "\\b[0-9a-f]{14}\\b" not in fleet
 
 
@@ -1449,6 +1452,7 @@ def test_clone_retries_transient_volume_not_found(tmp_path: Path) -> None:
     transient failure clears. Guards the 28-wide synchronized-start barrier
     against one flaky clone tearing down every isolated stack."""
     fleet = FLEET_SCRIPT.read_text()
+    timeout_fn = _extract_fleet_function(fleet, "fly_with_timeout() {")
     resolver = _extract_fleet_function(fleet, "machine_id_for_clone_name() {")
     cloner = _extract_fleet_function(fleet, "clone_machine_target() {")
     ledger = tmp_path / "owned-clones.ids"
@@ -1483,6 +1487,7 @@ FLY() {{
 CLOUDBENCH_CLONE_RETRY_SECONDS=0
 CLOUDBENCH_CLONE_LOOKUP_SECONDS=0
 CLOUDBENCH_CLONE_MAX_ATTEMPTS=3
+{timeout_fn}
 {resolver}
 {cloner}
 clone_machine_target "$LEDGER"
@@ -1513,6 +1518,7 @@ def test_clone_gives_up_after_max_attempts(tmp_path: Path) -> None:
     """Persistent (non-transient) clone failure still fails closed after the
     bounded retry budget — retries must not loop forever."""
     fleet = FLEET_SCRIPT.read_text()
+    timeout_fn = _extract_fleet_function(fleet, "fly_with_timeout() {")
     resolver = _extract_fleet_function(fleet, "machine_id_for_clone_name() {")
     cloner = _extract_fleet_function(fleet, "clone_machine_target() {")
     ledger = tmp_path / "owned-clones.ids"
@@ -1535,6 +1541,7 @@ FLY() {{
 CLOUDBENCH_CLONE_RETRY_SECONDS=0
 CLOUDBENCH_CLONE_LOOKUP_SECONDS=0
 CLOUDBENCH_CLONE_MAX_ATTEMPTS=3
+{timeout_fn}
 {resolver}
 {cloner}
 clone_machine_target "$LEDGER"
@@ -1551,3 +1558,70 @@ clone_machine_target "$LEDGER"
     assert result.returncode == 1, result.stdout
     assert attempt_file.read_text().strip() == "3", "should stop at the attempt budget"
     assert "after 3 attempt(s)" in result.stderr
+
+
+def test_clone_times_out_and_retries_a_hung_clone(tmp_path: Path) -> None:
+    """A hung `flyctl machine clone` (stalled Fly API) must not freeze the
+    sequential provisioning loop: fly_with_timeout reaps it and the retry loop
+    proceeds with a fresh clone. This is the iteration-3 failure (controller
+    blocked 25min on one clone → barrier never released → 0/28)."""
+    fleet = FLEET_SCRIPT.read_text()
+    timeout_fn = _extract_fleet_function(fleet, "fly_with_timeout() {")
+    resolver = _extract_fleet_function(fleet, "machine_id_for_clone_name() {")
+    cloner = _extract_fleet_function(fleet, "clone_machine_target() {")
+    ledger = tmp_path / "owned-clones.ids"
+    attempt_file = tmp_path / "attempts"
+    machines_file = tmp_path / "machines"
+    machines_file.write_text("")
+
+    script = f"""set -uo pipefail
+APP=bench-app
+REGION=iad
+WARM_ID=warm-1
+SNAP_ID=vs_test
+export ATTEMPT_FILE="$ATTEMPT_FILE" MACHINES_FILE="$MACHINES_FILE"
+FLY() {{
+  if [ "$1 $2" = "machine clone" ]; then
+    local name=""
+    while [ $# -gt 0 ]; do
+      if [ "$1" = "--name" ]; then name="$2"; shift 2; continue; fi
+      shift
+    done
+    local n; n=$(( $(cat "$ATTEMPT_FILE" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$ATTEMPT_FILE"
+    if [ "$n" -lt 2 ]; then sleep 30; return 0; fi
+    printf '{{"id":"clone-%s","name":"%s"}}\\n' "$n" "$name" >> "$MACHINES_FILE"
+    return 0
+  fi
+  if [ "$1 $2" = "machines list" ]; then
+    python3 -c 'import os; ls=[l.strip() for l in open(os.environ["MACHINES_FILE"]) if l.strip()]; print("["+",".join(ls)+"]")'
+    return 0
+  fi
+  return 0
+}}
+CLOUDBENCH_CLONE_TIMEOUT_SECONDS=1
+CLOUDBENCH_CLONE_RETRY_SECONDS=0
+CLOUDBENCH_CLONE_LOOKUP_SECONDS=0
+CLOUDBENCH_CLONE_MAX_ATTEMPTS=3
+{timeout_fn}
+{resolver}
+{cloner}
+clone_machine_target "$LEDGER"
+"""
+
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={
+            "ATTEMPT_FILE": str(attempt_file),
+            "MACHINES_FILE": str(machines_file),
+            "LEDGER": str(ledger),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "clone-2", result.stdout
+    assert attempt_file.read_text().strip() == "2", "hung clone should be reaped then retried once"
+    assert "retrying" in result.stderr
