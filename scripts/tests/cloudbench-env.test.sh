@@ -842,7 +842,10 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'if [ "${CLOUDBENCH_PARENT_LOCK_HELD:-0}" = "1" ]; then' \
   "authenticated fleet helpers must preserve their parent lease ceiling"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'cloudbench-prepare-patch.sh" /data/cloudbench-prepare-patch.sh' \
+  '"$payload_dir/cloudbench-prepare-patch.sh" prepare' \
+  "fleet children must bundle patch preparation independently of the patch itself"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  '/data/cloudbench-prepare-patch.sh' \
   "fleet children must receive patch preparation independently of the patch itself"
 require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
   'if [ "$BENCH_SIMULATE" != "1" ]; then' \

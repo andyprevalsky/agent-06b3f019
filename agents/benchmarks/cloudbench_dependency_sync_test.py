@@ -1794,10 +1794,167 @@ def test_persistent_pool_logs_use_run_scoped_terminal_markers() -> None:
     assert "RUNSTAMP-$RUN_LOG_TOKEN" in cloud
     assert 'LOG_RESET_ATTEMPTS="${CLOUDBENCH_LOG_RESET_ATTEMPTS:-20}"' in cloud
     assert 'for _ in $(seq 1 "$LOG_RESET_ATTEMPTS")' in cloud
-    assert 'STAGE_ATTEMPTS="${CLOUDBENCH_STAGE_ATTEMPTS:-20}"' in cloud
-    assert 'for _ in $(seq 1 "$STAGE_ATTEMPTS")' in cloud
+    assert 'local attempts="${CLOUDBENCH_STAGE_ATTEMPTS:-20}"' in cloud
+    assert 'stage_cloudbench_payload "$mid" "$STAGE_BUNDLE"' in cloud
     assert 'DONE_MARKER="::CLOUDBENCH-DONE::$MARKER_SUFFIX"' in driver
     assert 'MARKER_SUFFIX=" token=$CLOUDBENCH_RUN_TOKEN"' in driver
+
+
+def test_cloudbench_payload_staging_uses_one_upload_per_attempt() -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    stage_start = cloud.index("stage_cloudbench_payload() {")
+    stage_end = cloud.index("\n}\n", stage_start) + 3
+    stage_function = cloud[stage_start:stage_end]
+
+    assert stage_function.count("FLY ssh sftp put") == 1
+    assert '"$local_bundle" "$remote_bundle"' in stage_function
+    assert "cloudbench-run.sh" not in stage_function
+    assert "cloudbench-fetch-ref.sh" not in stage_function
+    assert "cloudbench-sync-deps.sh" not in stage_function
+    assert "cloudbench-current-run-artifact.py" not in stage_function
+    assert "cloudbench-prepare-patch.sh" not in stage_function
+
+    for payload_name in (
+        "cloudbench-run.sh",
+        "cloudbench-fetch-ref.sh",
+        "cloudbench-sync-deps.sh",
+        "cloudbench-current-run-artifact.py",
+        "cloudbench-prepare-patch.sh",
+    ):
+        assert payload_name in cloud
+    assert 'write_cloudbench_stage_bundle "$STAGE_BUNDLE"' in cloud
+
+
+def test_cloudbench_payload_staging_retries_upload_without_refanning_helpers(
+    tmp_path: Path,
+) -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    stage_start = cloud.index("stage_cloudbench_payload() {")
+    stage_end = cloud.index("\n}\n", stage_start) + 3
+    stage_function = cloud[stage_start:stage_end]
+    calls_file = tmp_path / "upload-calls"
+    upload_count_file = tmp_path / "upload-count"
+    install_count_file = tmp_path / "install-count"
+    stage_error_file = tmp_path / "stage-error"
+    bundle_file = tmp_path / "payload.sh"
+    bundle_file.write_text("payload\n")
+    calls_file.write_text("")
+    upload_count_file.write_text("0\n")
+    install_count_file.write_text("0\n")
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
+{stage_function}
+APP=bench-app
+FLY() {{
+  printf '%s\\n' "$*" >> "$CALLS_FILE"
+  n=$(cat "$UPLOAD_COUNT_FILE")
+  n=$((n + 1))
+  printf '%s\\n' "$n" > "$UPLOAD_COUNT_FILE"
+  if [ "$n" -lt 3 ]; then
+    printf 'Error: failed to list active VMs: rate limited\\n' >&2
+    return 1
+  fi
+}}
+ssh_read() {{
+  n=$(cat "$INSTALL_COUNT_FILE")
+  n=$((n + 1))
+  printf '%s\\n' "$n" > "$INSTALL_COUNT_FILE"
+  [ "$n" -ge 3 ] && printf 'WROTE\\n'
+}}
+CLOUDBENCH_STAGE_ATTEMPTS=8
+CLOUDBENCH_STAGE_REUPLOAD_AFTER=99
+CLOUDBENCH_STAGE_RETRY_DELAY_SECONDS=0
+stage_cloudbench_payload machine-1 "$BUNDLE_FILE" /tmp/payload.sh "$STAGE_ERROR_FILE"
+""",
+        ],
+        env={
+            "CALLS_FILE": str(calls_file),
+            "UPLOAD_COUNT_FILE": str(upload_count_file),
+            "INSTALL_COUNT_FILE": str(install_count_file),
+            "STAGE_ERROR_FILE": str(stage_error_file),
+            "BUNDLE_FILE": str(bundle_file),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = calls_file.read_text().splitlines()
+    assert len(calls) == 3
+    assert all("ssh sftp put" in call for call in calls)
+    assert all("machine-1" in call for call in calls)
+    assert install_count_file.read_text().strip() == "3"
+
+
+def test_cloudbench_stage_bundle_is_valid_with_and_without_a_patch(
+    tmp_path: Path,
+) -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    append_start = cloud.index("append_cloudbench_stage_file() {")
+    append_end = cloud.index("\n}\n", append_start) + 3
+    write_start = cloud.index("write_cloudbench_stage_bundle() {")
+    write_end = cloud.index("\n}\n", write_start) + 3
+    functions = cloud[append_start:append_end] + cloud[write_start:write_end]
+
+    repo = tmp_path / "repo"
+    scripts = repo / "scripts"
+    scripts.mkdir(parents=True)
+    payload_names = (
+        "cloudbench-run.sh",
+        "cloudbench-fetch-ref.sh",
+        "cloudbench-sync-deps.sh",
+        "cloudbench-current-run-artifact.py",
+        "cloudbench-prepare-patch.sh",
+    )
+    for payload_name in payload_names:
+        (scripts / payload_name).write_text(f"payload:{payload_name}\n")
+    wrapper = tmp_path / "wrapper.sh"
+    wrapper.write_text("exec bash /data/cloudbench-run.sh\n")
+    patch = tmp_path / "change.patch"
+    patch.write_bytes(b"binary-patch\x00content\n")
+
+    for label, patch_path in (("clean", ""), ("patched", str(patch))):
+        bundle = tmp_path / f"{label}.sh"
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"""set -euo pipefail
+{functions}
+ROOT_DIR="$ROOT"
+REMOTE_RUN_SCRIPT=scripts/cloudbench-run.sh
+REMOTE_TMP_SCRIPT=/tmp/rb.sh
+WRAPPER_LOCAL="$WRAPPER"
+LOCAL_PATCH_FILE="$PATCH_FILE"
+write_cloudbench_stage_bundle "$BUNDLE" /tmp/cloudbench-stage-test.sh
+bash -n "$BUNDLE"
+""",
+            ],
+            env={
+                "ROOT": str(repo),
+                "WRAPPER": str(wrapper),
+                "PATCH_FILE": patch_path,
+                "BUNDLE": str(bundle),
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        generated = bundle.read_text()
+        assert generated.count("base64 -d") == (7 if patch_path else 6)
+        assert "install -m 0755" in generated
+        assert "WROTE" in generated
+        if patch_path:
+            assert "install -m 0644" in generated
+        else:
+            assert "rm -f /tmp/cloudbench-local.patch" in generated
 
 
 def test_environment_activation_retries_only_transient_fly_failures(tmp_path: Path) -> None:

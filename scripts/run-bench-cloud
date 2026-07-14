@@ -744,6 +744,102 @@ ssh_read() {  # ssh_read <machine_id> <remote-shell-command>
     return 1
 }
 
+# Append one local file to a self-extracting staging bundle. The bundle is sent
+# with one SFTP command, so a fleet does not multiply Fly's active-VM inventory
+# reads by every helper file. Base64 is used only inside the uploaded file (never
+# in an ssh argv), preserving binary patches and arbitrarily large wrappers.
+append_cloudbench_stage_file() {  # <bundle> <source> <staged-path> <tag>
+    local bundle_path="$1" source_path="$2" staged_path="$3" tag="$4"
+    local delimiter="__CLOUDBENCH_PAYLOAD_${tag}__"
+    printf "base64 -d > %q <<'%s'\n" "$staged_path" "$delimiter" >> "$bundle_path"
+    base64 < "$source_path" >> "$bundle_path" || return 1
+    printf '\n%s\n' "$delimiter" >> "$bundle_path"
+}
+
+write_cloudbench_stage_bundle() {  # <local-bundle> <remote-bundle>
+    local bundle_path="$1" remote_bundle="$2"
+    local payload_dir="${remote_bundle}.payload"
+
+    printf '#!/usr/bin/env bash\nset -euo pipefail\numask 077\n' > "$bundle_path" || return 1
+    printf 'rm -rf -- %q\nmkdir -p -- %q\n' "$payload_dir" "$payload_dir" >> "$bundle_path" || return 1
+    append_cloudbench_stage_file "$bundle_path" "$ROOT_DIR/$REMOTE_RUN_SCRIPT" \
+        "$payload_dir/cloudbench-run.sh" run || return 1
+    append_cloudbench_stage_file "$bundle_path" "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" \
+        "$payload_dir/cloudbench-fetch-ref.sh" fetch || return 1
+    append_cloudbench_stage_file "$bundle_path" "$ROOT_DIR/scripts/cloudbench-sync-deps.sh" \
+        "$payload_dir/cloudbench-sync-deps.sh" deps || return 1
+    append_cloudbench_stage_file "$bundle_path" "$ROOT_DIR/scripts/cloudbench-current-run-artifact.py" \
+        "$payload_dir/cloudbench-current-run-artifact.py" artifact || return 1
+    append_cloudbench_stage_file "$bundle_path" "$ROOT_DIR/scripts/cloudbench-prepare-patch.sh" \
+        "$payload_dir/cloudbench-prepare-patch.sh" prepare || return 1
+    append_cloudbench_stage_file "$bundle_path" "$WRAPPER_LOCAL" \
+        "$payload_dir/rb.sh" wrapper || return 1
+    if [ -n "$LOCAL_PATCH_FILE" ]; then
+        append_cloudbench_stage_file "$bundle_path" "$LOCAL_PATCH_FILE" \
+            "$payload_dir/cloudbench-local.patch" patch || return 1
+    fi
+
+    printf 'install -m 0755 %q /data/cloudbench-run.sh\n' "$payload_dir/cloudbench-run.sh" >> "$bundle_path" || return 1
+    printf 'install -m 0755 %q /data/cloudbench-fetch-ref.sh\n' "$payload_dir/cloudbench-fetch-ref.sh" >> "$bundle_path" || return 1
+    printf 'install -m 0755 %q /data/cloudbench-sync-deps.sh\n' "$payload_dir/cloudbench-sync-deps.sh" >> "$bundle_path" || return 1
+    printf 'install -m 0755 %q /data/cloudbench-current-run-artifact.py\n' "$payload_dir/cloudbench-current-run-artifact.py" >> "$bundle_path" || return 1
+    printf 'install -m 0755 %q /data/cloudbench-prepare-patch.sh\n' "$payload_dir/cloudbench-prepare-patch.sh" >> "$bundle_path" || return 1
+    printf 'install -m 0755 %q %q\n' "$payload_dir/rb.sh" "$REMOTE_TMP_SCRIPT" >> "$bundle_path" || return 1
+    if [ -n "$LOCAL_PATCH_FILE" ]; then
+        printf 'install -m 0644 %q /tmp/cloudbench-local.patch\n' "$payload_dir/cloudbench-local.patch" >> "$bundle_path" || return 1
+    else
+        printf 'rm -f /tmp/cloudbench-local.patch\n' >> "$bundle_path" || return 1
+    fi
+    printf 'test -x /data/cloudbench-run.sh\ngrep -q cloudbench-run %q\n' "$REMOTE_TMP_SCRIPT" >> "$bundle_path" || return 1
+    printf 'rm -rf -- %q\nprintf "WROTE\\n"\n' "$payload_dir" >> "$bundle_path" || return 1
+    chmod 0700 "$bundle_path"
+}
+
+# Retry the single bundle upload independently from its idempotent installation.
+# Once SFTP succeeds, transient SSH/read failures do not fan back out into another
+# upload. A few inconclusive installs force one fresh upload to recover from the
+# unlikely case of a silently incomplete remote file.
+stage_cloudbench_payload() {  # <machine> <local-bundle> <remote-bundle> <error-file>
+    local machine_id="$1" local_bundle="$2" remote_bundle="$3" error_file="$4"
+    local attempts="${CLOUDBENCH_STAGE_ATTEMPTS:-20}"
+    local reupload_after="${CLOUDBENCH_STAGE_REUPLOAD_AFTER:-3}"
+    local base_delay="${CLOUDBENCH_STAGE_RETRY_DELAY_SECONDS:-3}"
+    local upload_complete=0 install_failures=0 attempt=1 delay o
+
+    : > "$error_file"
+    while [ "$attempt" -le "$attempts" ]; do
+        if [ "$upload_complete" != "1" ]; then
+            if FLY ssh sftp put -a "$APP" --machine "$machine_id" -q -m 0700 \
+                "$local_bundle" "$remote_bundle" >> "$error_file" 2>&1; then
+                upload_complete=1
+                install_failures=0
+            else
+                delay=$((base_delay * attempt))
+                [ "$delay" -gt 30 ] && delay=30
+                [ "$delay" -gt 0 ] && sleep "$delay"
+                attempt=$((attempt + 1))
+                continue
+            fi
+        fi
+
+        o="$(ssh_read "$machine_id" "bash $(printf '%q' "$remote_bundle")" \
+            2>> "$error_file" || true)"
+        if printf '%s' "$o" | grep -q WROTE; then
+            return 0
+        fi
+        install_failures=$((install_failures + 1))
+        if [ "$install_failures" -ge "$reupload_after" ]; then
+            upload_complete=0
+            install_failures=0
+        fi
+        delay=$((base_delay * attempt))
+        [ "$delay" -gt 30 ] && delay=30
+        [ "$delay" -gt 0 ] && sleep "$delay"
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
 # True (0) iff Fly reports the machine started AND a trivial ssh command returns R.
 # Used to gate the run start: warm ~10s, cold pull can take minutes.
 ssh_ready() {  # ssh_ready <machine_id>
@@ -1522,6 +1618,7 @@ if ! git -C "$ROOT_DIR" diff HEAD --quiet --binary; then
     STAGED_LOCAL_FILES+=("$LOCAL_PATCH_FILE")
     git -C "$ROOT_DIR" diff HEAD --binary > "$LOCAL_PATCH_FILE"
 fi
+REMOTE_STAGE_BUNDLE="/tmp/cloudbench-stage-$RUN_LOG_TOKEN.sh"
 
 # Proxy the box BACKEND (not its frontend) to the Mac. The local archive frontend
 # talks to a local archive API which proxies live agent reads here with the
@@ -1583,7 +1680,7 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     else
         echo "unset LOCAL_PATCH_FILE LOCAL_PATCH_B64"
     fi
-    echo "rm -f $(printf '%q' "$REMOTE_TMP_SCRIPT")"
+    echo "rm -f $(printf '%q' "$REMOTE_TMP_SCRIPT") $(printf '%q' "$REMOTE_STAGE_BUNDLE")"
     echo "exec bash /data/cloudbench-run.sh"
 } > "$WRAPPER_LOCAL"
 
@@ -1606,30 +1703,15 @@ done
 _ok=0
 stage_err="$(mktemp)"
 STAGED_LOCAL_FILES+=("$stage_err")
-# Stage the driver + wrapper (+ patch) as separate sftp puts. (A tar-in-one-upload
-# variant was tried to cut SSH round-trips but proved flaky on reused pool boxes;
-# reliability of the staging step matters more than ~30s, so we keep the puts.)
-STAGE_ATTEMPTS="${CLOUDBENCH_STAGE_ATTEMPTS:-20}"
-for _ in $(seq 1 "$STAGE_ATTEMPTS"); do
-    : > "$stage_err"
-    ssh_read "$mid" "rm -f /data/cloudbench-run.sh /data/cloudbench-fetch-ref.sh /data/cloudbench-sync-deps.sh /data/cloudbench-current-run-artifact.py /data/cloudbench-prepare-patch.sh '$REMOTE_TMP_SCRIPT' /tmp/cloudbench-local.patch" >/dev/null 2>&1 || true
-    if FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$ROOT_DIR/$REMOTE_RUN_SCRIPT" /data/cloudbench-run.sh >"$stage_err" 2>&1 \
-        && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" /data/cloudbench-fetch-ref.sh >>"$stage_err" 2>&1 \
-        && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-sync-deps.sh" /data/cloudbench-sync-deps.sh >>"$stage_err" 2>&1 \
-        && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-current-run-artifact.py" /data/cloudbench-current-run-artifact.py >>"$stage_err" 2>&1 \
-        && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-prepare-patch.sh" /data/cloudbench-prepare-patch.sh >>"$stage_err" 2>&1 \
-        && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$WRAPPER_LOCAL" "$REMOTE_TMP_SCRIPT" >>"$stage_err" 2>&1; then
-        if [ -n "$LOCAL_PATCH_FILE" ]; then
-            FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0644 "$LOCAL_PATCH_FILE" /tmp/cloudbench-local.patch >>"$stage_err" 2>&1 || { sleep 3; continue; }
-        else
-            ssh_read "$mid" "rm -f /tmp/cloudbench-local.patch" >/dev/null 2>&1 || true
-        fi
-        o="$(ssh_read "$mid" "test -x /data/cloudbench-run.sh && grep -q cloudbench-run '$REMOTE_TMP_SCRIPT' && echo WROTE" 2>>"$stage_err")"
-    else
-        o=""
-    fi
-    printf '%s' "$o" | grep -q WROTE && { _ok=1; break; }; sleep 3
-done
+STAGE_BUNDLE="$(mktemp)"
+STAGED_LOCAL_FILES+=("$STAGE_BUNDLE")
+if ! write_cloudbench_stage_bundle "$STAGE_BUNDLE" "$REMOTE_STAGE_BUNDLE"; then
+    echo "❌ could not build the local cloud benchmark staging bundle" >&2
+    exit 1
+fi
+if stage_cloudbench_payload "$mid" "$STAGE_BUNDLE" "$REMOTE_STAGE_BUNDLE" "$stage_err"; then
+    _ok=1
+fi
 [ "$_ok" = 1 ] || {
     echo "❌ could not stage the on-box driver after retries"
     echo "─── staging error tail ───"
