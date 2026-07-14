@@ -222,7 +222,7 @@ export function buildFunnelSteps(
 function conversionRate(steps: AdminHealthFunnelStep[], index: number): number | null {
   const count = steps[index]?.count;
   if (count === null || count === undefined) return null;
-  if (index === 0) return 1;
+  if (index === 0 || steps[index - 1]?.source !== steps[index]?.source) return 1;
   const priorCount = steps[index - 1]?.count;
   if (priorCount === null || priorCount === undefined || priorCount === 0) return null;
   if (count > priorCount) return null;
@@ -235,9 +235,11 @@ function relativeChange(current: number | null, previous: number | null): number
   return Number(((current - previous) / previous).toFixed(4));
 }
 
-function endToEndRate(steps: AdminHealthFunnelStep[]): number | null {
-  const first = steps[0]?.count;
-  const last = steps.at(-1)?.count;
+function finalGroupEndToEndRate(steps: AdminHealthFunnelStep[]): number | null {
+  const source = steps.at(-1)?.source;
+  const group = steps.filter((step) => step.source === source);
+  const first = group[0]?.count;
+  const last = group.at(-1)?.count;
   if (first === null || first === undefined || first === 0 || last === null || last === undefined) {
     return null;
   }
@@ -259,8 +261,8 @@ export function compareFunnelSteps(
       conversionRateChange: relativeChange(currentRate, previousRate),
     };
   });
-  const currentEndToEnd = endToEndRate(current);
-  const previousEndToEnd = endToEndRate(previous);
+  const currentEndToEnd = finalGroupEndToEndRate(current);
+  const previousEndToEnd = finalGroupEndToEndRate(previous);
   return {
     steps,
     endToEnd: {
@@ -288,8 +290,14 @@ export function buildSeries(
     if (index >= 0) tasksByPeriod[index].push(task);
   }
   return periods.map((period, index) => {
-    const periodTasks = tasksByPeriod[index];
-    const subscriberPoint = subscribers[index] ?? { userCount: 0, newUsers: 0 };
+    const subscriberPoint = subscribers[index] ?? {
+      userCount: 0,
+      newUsers: 0,
+      userIds: new Set<string>(),
+    };
+    const periodTasks = tasksByPeriod[index].filter((task) =>
+      subscriberPoint.userIds.has(task.userId)
+    );
     return {
       ...period,
       ...revenue[index],
