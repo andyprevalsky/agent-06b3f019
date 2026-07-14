@@ -9,7 +9,7 @@ import { ROUTE_TABLE } from '@/features/app-wiring/config';
  * Renders the full route table from App.tsx inside the test wrapper's MemoryRouter.
  * This tests that the route config correctly maps paths to page components.
  */
-function AppRoutes() {
+export function AppRoutes() {
   return (
     <Routes>
       {ROUTE_TABLE.map(({ path, component: Page }) => (

@@ -82,7 +82,7 @@ function makeContext(): AgentContextValue {
 
 const queryClient = new QueryClient();
 
-function PreviewApp() {
+export function PreviewApp() {
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider delayDuration={100}>

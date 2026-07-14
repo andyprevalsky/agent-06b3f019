@@ -18,9 +18,22 @@
  * coordinates remain the durable fallback for reloads and completed runs.
  */
 
-import { useEffect, useRef, useState, useMemo, useCallback, type RefObject } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  useMemo,
+  useCallback,
+  type MutableRefObject,
+  type RefObject,
+} from 'react';
 import { extractRecord, subscribeToChannel, unsubscribe } from '@/lib/realtime';
 import type { Message } from '../hooks';
+import {
+  useCursorAnimation,
+  type BrowserCursorPayload,
+  type CursorPosition,
+} from './useCursorAnimation';
 
 // Steel browser dimensions
 // Debug view shows full browser window (1288x891), content viewport is 1280x800
@@ -32,9 +45,6 @@ const CONTENT_VIEWPORT_HEIGHT = 800;
 const CHROME_OFFSET_X = 4; // Left border
 const CHROME_OFFSET_Y = 91; // Toolbar height
 const WINDOW_ASPECT = BROWSER_WINDOW_WIDTH / BROWSER_WINDOW_HEIGHT;
-const MIN_CURSOR_ANIMATION_MS = 35;
-const MAX_CURSOR_ANIMATION_MS = 120;
-const DEFAULT_CURSOR_ANIMATION_MS = 70;
 
 // Custom cursor SVG - navigation arrow pointing right (from navigate-v2.png, flipped)
 // Auto-traced using potrace from the actual PNG. Black fill, 4px white stroke.
@@ -54,25 +64,11 @@ interface BrowserCursorOverlayProps {
   messages: Message[];
 }
 
-interface CursorPosition {
-  x: number;
-  y: number;
-}
-
 interface ViewportBounds {
   offsetX: number;
   offsetY: number;
   width: number;
   height: number;
-}
-
-interface BrowserCursorPayload {
-  agentId: string;
-  taskId: string;
-  x: number;
-  y: number;
-  sequence?: number;
-  timestampMs?: number;
 }
 
 function isBrowserCursorPayload(value: unknown): value is BrowserCursorPayload {
@@ -147,92 +143,28 @@ function useCursorPosition(
   taskId: string,
   messages: Message[],
 ): CursorPosition {
-  const [cursorPos, setCursorPos] = useState<CursorPosition>({ x: 640, y: 400 });
-  const cursorPosRef = useRef<CursorPosition>(cursorPos);
-  const animationFrameRef = useRef<number | null>(null);
-  const animationStartRef = useRef<{
-    from: CursorPosition;
-    to: CursorPosition;
-    startedAt: number;
-    durationMs: number;
-  } | null>(null);
-  const lastRealtimeSampleRef = useRef<BrowserCursorPayload | null>(null);
   const lastProcessedMessageRef = useRef<string | null>(null);
+  const { cursorPos, lastRealtimeSampleRef, updateCursorPos, stopAnimation, animateCursorTo } =
+    useCursorAnimation();
 
-  const updateCursorPos = useCallback((next: CursorPosition) => {
-    cursorPosRef.current = next;
-    setCursorPos(next);
-  }, []);
-
-  const stopAnimation = useCallback(() => {
-    if (animationFrameRef.current !== null) {
-      window.cancelAnimationFrame(animationFrameRef.current);
-      animationFrameRef.current = null;
-    }
-    animationStartRef.current = null;
-  }, []);
-
-  const runAnimationFrame = useCallback(
-    (now: number) => {
-      const animation = animationStartRef.current;
-      if (!animation) return;
-
-      const elapsed = now - animation.startedAt;
-      const progress = Math.min(1, Math.max(0, elapsed / animation.durationMs));
-      const next = {
-        x: animation.from.x + (animation.to.x - animation.from.x) * progress,
-        y: animation.from.y + (animation.to.y - animation.from.y) * progress,
-      };
-      updateCursorPos(next);
-
-      if (progress < 1) {
-        animationFrameRef.current = window.requestAnimationFrame(runAnimationFrame);
-      } else {
-        animationFrameRef.current = null;
-        animationStartRef.current = null;
-      }
-    },
-    [updateCursorPos],
+  useRealtimeCursor(agentId, taskId, animateCursorTo, stopAnimation);
+  useMessageCursor(
+    messages,
+    taskId,
+    lastProcessedMessageRef,
+    lastRealtimeSampleRef,
+    stopAnimation,
+    updateCursorPos,
   );
+  return cursorPos;
+}
 
-  const animateCursorTo = useCallback(
-    (record: BrowserCursorPayload) => {
-      const previous = lastRealtimeSampleRef.current;
-      lastRealtimeSampleRef.current = record;
-
-      const to = { x: record.x, y: record.y };
-      if (!previous) {
-        stopAnimation();
-        updateCursorPos(to);
-        return;
-      }
-
-      const sampleDeltaMs =
-        typeof record.timestampMs === 'number' && typeof previous.timestampMs === 'number'
-          ? record.timestampMs - previous.timestampMs
-          : DEFAULT_CURSOR_ANIMATION_MS;
-      const durationMs = Math.min(
-        MAX_CURSOR_ANIMATION_MS,
-        Math.max(
-          MIN_CURSOR_ANIMATION_MS,
-          sampleDeltaMs > 0 ? sampleDeltaMs : DEFAULT_CURSOR_ANIMATION_MS,
-        ),
-      );
-
-      if (animationFrameRef.current !== null) {
-        window.cancelAnimationFrame(animationFrameRef.current);
-      }
-      animationStartRef.current = {
-        from: cursorPosRef.current,
-        to,
-        startedAt: performance.now(),
-        durationMs,
-      };
-      animationFrameRef.current = window.requestAnimationFrame(runAnimationFrame);
-    },
-    [runAnimationFrame, stopAnimation, updateCursorPos],
-  );
-
+function useRealtimeCursor(
+  agentId: string | null | undefined,
+  taskId: string,
+  animateCursorTo: (record: BrowserCursorPayload) => void,
+  stopAnimation: () => void,
+) {
   useEffect(() => {
     if (!agentId) return;
 
@@ -267,7 +199,16 @@ function useCursorPosition(
       unsubscribe(channel);
     };
   }, [agentId, animateCursorTo, stopAnimation, taskId]);
+}
 
+function useMessageCursor(
+  messages: Message[],
+  taskId: string,
+  lastProcessedMessageRef: MutableRefObject<string | null>,
+  lastRealtimeSampleRef: MutableRefObject<BrowserCursorPayload | null>,
+  stopAnimation: () => void,
+  updateCursorPos: (next: CursorPosition) => void,
+) {
   const latestWithCoords = useMemo(() => {
     const browserMessages = messages.filter(
       (m) => m.metadata?.task_id === taskId && m.metadata?.auxiliary?.coordinates,
@@ -288,9 +229,13 @@ function useCursorPosition(
       stopAnimation();
       updateCursorPos({ x: coords.x, y: coords.y });
     }
-  }, [latestWithCoords, stopAnimation, updateCursorPos]);
-
-  return cursorPos;
+  }, [
+    lastProcessedMessageRef,
+    lastRealtimeSampleRef,
+    latestWithCoords,
+    stopAnimation,
+    updateCursorPos,
+  ]);
 }
 
 export default function BrowserCursorOverlay({

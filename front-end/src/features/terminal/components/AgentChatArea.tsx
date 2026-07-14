@@ -11,6 +11,10 @@
  *   pendingApproval === null  → show QueryInput
  *   pendingApproval !== null  → replace QueryInput with ApprovalChip
  *
+ * TEST OBSERVABILITY:
+ *   terminal-input-area[data-chat-mode] mirrors the rendered chat/agent mode
+ *   transition without changing interaction or visual behavior.
+ *
  * MOBILE CHROME:
  *   Legal links sit below the mobile visual viewport so Safari's bottom URL bar
  *   occludes them, while desktop keeps the links visible above the bottom edge.
@@ -163,6 +167,7 @@ function InputArea({
   return (
     <div
       data-testid="terminal-input-area"
+      data-chat-mode={a.isChatMode ? 'true' : 'false'}
       className="pb-1 transition-opacity duration-300 ease-in-out relative md:pb-6"
       style={{
         // A pending gate is actionable (the agent is waiting on the user), so

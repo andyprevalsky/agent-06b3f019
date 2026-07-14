@@ -10,7 +10,7 @@ import { useNavigate } from 'react-router-dom';
 
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { BenchmarksView } from '@/features/benchmarks';
-import { useAppData } from '@/hooks/useAppData';
+import { useAppData } from '@/hooks/appDataContext';
 import { cn } from '@/lib/utils';
 import AdminHealth from '@/pages/AdminHealth';
 import Browse from '@/pages/Browse';

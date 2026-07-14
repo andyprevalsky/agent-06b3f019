@@ -1,5 +1,6 @@
 /**
- * HTTP transport for direct provider calls — Anthropic + OpenRouter.
+ * HTTP transport for direct provider calls — Cerebras, Anthropic, OpenAI,
+ * and OpenRouter.
  *
  * Mirrors agents/providers/rose/transport.py. Returns the raw streaming
  * Response so the SSE parsers can iterate. No retry, no rotation — those
@@ -13,6 +14,7 @@ const log = createLogger('RoseTransport');
 export const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 export const OPENAI_RESPONSES_API_URL = 'https://api.openai.com/v1/responses';
 export const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
+export const CEREBRAS_API_URL = 'https://api.cerebras.ai/v1/chat/completions';
 export const CODEX_API_URL = 'https://chatgpt.com/backend-api/codex/responses';
 
 /**
@@ -107,6 +109,16 @@ function openAiHeaders(openAiKey: string): Record<string, string> {
   };
 }
 
+function cerebrasHeaders(cerebrasKey: string): Record<string, string> {
+  return {
+    Authorization: `Bearer ${cerebrasKey}`,
+    'Content-Type': 'application/json',
+    // Validate against the stricter schema/tool behavior before it becomes
+    // the default Cerebras API version on 2026-07-21.
+    'X-Cerebras-Version-Patch': '2',
+  };
+}
+
 function codexHeaders(gptToken: string, accountId?: string): Record<string, string> {
   return {
     Authorization: `Bearer ${gptToken}`,
@@ -156,6 +168,62 @@ async function withTimeout(
   }
 }
 
+async function withStreamingConnectTimeout(
+  upstream: AbortSignal,
+  timeoutMs: number,
+  fn: (signal: AbortSignal) => Promise<Response>
+): Promise<{ response: Response; cleanup: () => void }> {
+  const controller = new AbortController();
+  const onAbort = (): void => controller.abort(upstream.reason);
+  if (upstream.aborted) controller.abort(upstream.reason);
+  else upstream.addEventListener('abort', onAbort, { once: true });
+
+  const timer = setTimeout(
+    () => controller.abort(new Error(`connect timeout ${timeoutMs}ms`)),
+    timeoutMs
+  );
+  const cleanup = (): void => {
+    clearTimeout(timer);
+    upstream.removeEventListener('abort', onAbort);
+  };
+
+  try {
+    const response = await fn(controller.signal);
+    clearTimeout(timer);
+    return { response, cleanup };
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
+}
+
+function keepAbortConnectedToBody(
+  body: ReadableStream<Uint8Array>,
+  cleanup: () => void
+): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const result = await reader.read();
+        if (result.done) {
+          cleanup();
+          controller.close();
+          return;
+        }
+        controller.enqueue(result.value);
+      } catch (error) {
+        cleanup();
+        controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      cleanup();
+      await reader.cancel(reason);
+    },
+  });
+}
+
 export async function postOpenAIResponsesStream(
   options: PostOptions & { openAiKey: string; abortSignal?: AbortSignal }
 ): Promise<StreamResponse> {
@@ -166,7 +234,7 @@ export async function postOpenAIResponsesStream(
     call_site: options.callSite,
     model: options.body.model,
   });
-  const response = await withTimeout(upstream, timeoutMs, (signal) =>
+  const { response, cleanup } = await withStreamingConnectTimeout(upstream, timeoutMs, (signal) =>
     fetch(OPENAI_RESPONSES_API_URL, {
       method: 'POST',
       headers: openAiHeaders(options.openAiKey),
@@ -177,7 +245,11 @@ export async function postOpenAIResponsesStream(
 
   let errorBody: string | undefined;
   if (!response.ok) {
-    errorBody = await response.text();
+    try {
+      errorBody = await response.text();
+    } finally {
+      cleanup();
+    }
     log.warn('openai.error', {
       request_id: options.requestId,
       status: response.status,
@@ -185,11 +257,61 @@ export async function postOpenAIResponsesStream(
     });
   }
 
+  const body =
+    response.ok && response.body ? keepAbortConnectedToBody(response.body, cleanup) : null;
+  if (!body) cleanup();
+
   return {
     status: response.status,
     ok: response.ok,
     headers: response.headers,
-    body: response.body,
+    body,
+    errorBody,
+  };
+}
+
+export async function postCerebrasStream(
+  options: PostOptions & { cerebrasKey: string; abortSignal?: AbortSignal }
+): Promise<StreamResponse> {
+  const timeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+  const upstream = options.abortSignal ?? new AbortController().signal;
+  log.info('cerebras.start', {
+    request_id: options.requestId,
+    call_site: options.callSite,
+    model: options.body.model,
+  });
+  const { response, cleanup } = await withStreamingConnectTimeout(upstream, timeoutMs, (signal) =>
+    fetch(CEREBRAS_API_URL, {
+      method: 'POST',
+      headers: cerebrasHeaders(options.cerebrasKey),
+      body: JSON.stringify(options.body),
+      signal,
+    })
+  );
+
+  let errorBody: string | undefined;
+  if (!response.ok) {
+    try {
+      errorBody = await response.text();
+    } finally {
+      cleanup();
+    }
+    log.warn('cerebras.error', {
+      request_id: options.requestId,
+      status: response.status,
+      body: errorBody.substring(0, 500),
+    });
+  }
+
+  const body =
+    response.ok && response.body ? keepAbortConnectedToBody(response.body, cleanup) : null;
+  if (!body) cleanup();
+
+  return {
+    status: response.status,
+    ok: response.ok,
+    headers: response.headers,
+    body,
     errorBody,
   };
 }
@@ -280,7 +402,7 @@ export async function postOpenRouterStream(
     call_site: options.callSite,
     model: options.body.model,
   });
-  const response = await withTimeout(upstream, timeoutMs, (signal) =>
+  const { response, cleanup } = await withStreamingConnectTimeout(upstream, timeoutMs, (signal) =>
     fetch(OPENROUTER_API_URL, {
       method: 'POST',
       headers: openrouterHeaders(options.openrouterKey),
@@ -291,7 +413,11 @@ export async function postOpenRouterStream(
 
   let errorBody: string | undefined;
   if (!response.ok) {
-    errorBody = await response.text();
+    try {
+      errorBody = await response.text();
+    } finally {
+      cleanup();
+    }
     log.warn('openrouter.error', {
       request_id: options.requestId,
       status: response.status,
@@ -299,11 +425,15 @@ export async function postOpenRouterStream(
     });
   }
 
+  const body =
+    response.ok && response.body ? keepAbortConnectedToBody(response.body, cleanup) : null;
+  if (!body) cleanup();
+
   return {
     status: response.status,
     ok: response.ok,
     headers: response.headers,
-    body: response.body,
+    body,
     errorBody,
   };
 }

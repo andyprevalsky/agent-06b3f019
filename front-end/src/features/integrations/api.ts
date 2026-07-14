@@ -231,9 +231,12 @@ export async function disconnectPlaidItemApi(itemId: string): Promise<{ ok: true
 }
 
 export async function completePlaidUpdateModeApi(itemId: string): Promise<{ item: PlaidItem }> {
-  const response = await fetch(`${API_BASE_WITH_PATH}/integrations/plaid/items/${itemId}/update-complete`, {
-    method: 'POST',
-    headers: getAuthHeaders(),
-  });
+  const response = await fetch(
+    `${API_BASE_WITH_PATH}/integrations/plaid/items/${itemId}/update-complete`,
+    {
+      method: 'POST',
+      headers: getAuthHeaders(),
+    },
+  );
   return plaidJsonOrThrow<{ item: PlaidItem }>(response, 'Complete Plaid update mode');
 }

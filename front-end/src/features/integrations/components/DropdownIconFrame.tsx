@@ -24,7 +24,7 @@ export const dropdownIconImageClassName = 'h-8 w-8 object-cover';
 const connectedTealGlowGradient =
   'linear-gradient(to bottom left, rgba(45, 212, 191, 0.5), rgba(20, 184, 166, 0.42), rgba(15, 118, 110, 0.46))';
 
-export const dropdownIconPreset = {
+export const DropdownIconPreset = {
   browserMain: { iconScale: 62, iconFit: 'contain' },
   chrome: { iconScale: 100, iconFit: 'cover' },
   brave: { iconScale: 88, iconFit: 'cover' },
@@ -55,30 +55,30 @@ export const dropdownIconPreset = {
   plaid: { iconScale: 64, iconFit: 'contain' },
 } as const;
 
-export function browserDropdownIconPreset(
+export function BrowserDropdownIconPreset(
   type: string,
 ): Pick<DropdownIconFrameProps, 'iconFit' | 'iconScale'> {
   switch (type) {
     case 'chrome':
-      return dropdownIconPreset.chrome;
+      return DropdownIconPreset.chrome;
     case 'brave':
-      return dropdownIconPreset.brave;
+      return DropdownIconPreset.brave;
     case 'safari':
-      return dropdownIconPreset.safari;
+      return DropdownIconPreset.safari;
     case 'edge':
-      return dropdownIconPreset.edge;
+      return DropdownIconPreset.edge;
     case 'arc':
-      return dropdownIconPreset.arc;
+      return DropdownIconPreset.arc;
     case 'opera':
-      return dropdownIconPreset.opera;
+      return DropdownIconPreset.opera;
     case 'vivaldi':
-      return dropdownIconPreset.vivaldi;
+      return DropdownIconPreset.vivaldi;
     case 'chromium':
-      return dropdownIconPreset.chromium;
+      return DropdownIconPreset.chromium;
     case 'atlas':
-      return dropdownIconPreset.atlas;
+      return DropdownIconPreset.atlas;
     default:
-      return dropdownIconPreset.chromium;
+      return DropdownIconPreset.chromium;
   }
 }
 

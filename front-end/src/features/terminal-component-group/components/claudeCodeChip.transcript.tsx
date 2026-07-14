@@ -122,7 +122,7 @@ function createBlock(line: string): TranscriptBlock | null {
   return null;
 }
 
-export function parseCodeAgentTranscript(output: string): TranscriptBlock[] {
+export function ParseCodeAgentTranscript(output: string): TranscriptBlock[] {
   const blocks: TranscriptBlock[] = [];
   const lines = plainTranscriptText(output).split('\n');
   let current: TranscriptBlock | null = null;
@@ -199,7 +199,7 @@ export function CompletedTranscriptSurface({
   codeProvider: CodeProvider;
   className: string;
 }) {
-  const blocks = parseCodeAgentTranscript(output);
+  const blocks = ParseCodeAgentTranscript(output);
   const label = codeProvider === 'codex' ? 'Codex' : 'Claude Code';
   const emptyMessage = output.trim() ? 'No transcript events found.' : 'Transcript unavailable.';
   return (

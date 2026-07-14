@@ -58,7 +58,33 @@ export function detectActionFromPartialJson(json: string): string | null {
   return match ? match[1] : null;
 }
 
+export type ClosedRouterAction = 'direct_answer' | 'web_search' | 'start_superintelligence';
+
+const CLOSED_ROUTER_ACTIONS = new Set<ClosedRouterAction>([
+  'direct_answer',
+  'web_search',
+  'start_superintelligence',
+]);
+
+export function createClosedRouterActionDetector(
+  onDetected?: (action: ClosedRouterAction) => void
+): (json: string) => void {
+  let detected = false;
+  return (json: string): void => {
+    const action = detectActionFromPartialJson(json);
+    if (detected || !action || !CLOSED_ROUTER_ACTIONS.has(action as ClosedRouterAction)) return;
+    detected = true;
+    onDetected?.(action as ClosedRouterAction);
+  };
+}
+
 export function formatWebSearchStreamTitle(query: string): string {
   const displayQuery = query.length > 80 ? `${query.slice(0, 77)}...` : query;
   return `🔍 Searching the web for ${displayQuery}`;
+}
+
+export function getWebSearchStreamTitleFromPartialRouterJson(json: string): string | null {
+  if (detectActionFromPartialJson(json) !== 'web_search') return null;
+  const query = extractCompleteStringField(json, 'query')?.trim();
+  return query ? formatWebSearchStreamTitle(query) : null;
 }

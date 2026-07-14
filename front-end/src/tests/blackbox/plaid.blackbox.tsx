@@ -178,7 +178,7 @@ function makeItem(overrides: Partial<PlaidItem> = {}): PlaidItem {
   };
 }
 
-function PlaidIntegrationHarness() {
+export function PlaidIntegrationHarness() {
   const plaid = usePlaidIntegration();
   return (
     <PlaidSection
@@ -423,9 +423,7 @@ describe('PlaidSection (connect flow)', () => {
     await waitFor(() => expect(linkController.opened).toBe(true));
     linkController.fireSuccess('public-sandbox-token');
     await waitFor(() => expect(exchanged).toBe(true));
-    await waitFor(() =>
-      expect(screen.getByText(/First Platypus Bank/i)).toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.getByText(/First Platypus Bank/i)).toBeInTheDocument());
   });
 
   it('persists the link_token to localStorage for OAuth-bank resume', async () => {
@@ -582,9 +580,7 @@ describe('PlaidSection (non-expandable card)', () => {
       ),
     );
     renderWithProviders(<PlaidIntegrationHarness />);
-    await waitFor(() =>
-      expect(screen.getByText(/First Platypus Bank/i)).toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.getByText(/First Platypus Bank/i)).toBeInTheDocument());
     expect(
       screen.getByRole('button', { name: /disconnect first platypus bank/i }),
     ).toBeInTheDocument();

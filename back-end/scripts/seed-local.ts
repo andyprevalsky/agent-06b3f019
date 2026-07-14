@@ -49,6 +49,7 @@ const SKIP_BROWSER_AUTH_SYNC =
 // agent's claudeAuth fetch fails and every LLM call falls through to the paid
 // waterfall.
 const COMPUTE_TOKENS_ONLY = process.argv.includes('--compute-tokens-only');
+const PASSKEYS_ONLY = process.argv.includes('--passkeys-only');
 const COMPUTE_TOKEN_SYNC_ATTEMPTS = 5;
 
 const remote = new PrismaClient({ datasources: { db: { url: REMOTE_URL } } });
@@ -282,6 +283,10 @@ async function syncBrowserCredentials(failures?: Error[]): Promise<void> {
     failures
   );
 
+  await syncPasskeys(failures);
+}
+
+async function syncPasskeys(failures?: Error[]): Promise<void> {
   // ── Passkey Credentials ──
   await syncRequiredTable(
     'Passkey Credentials',
@@ -324,6 +329,12 @@ async function sync() {
   if (COMPUTE_TOKENS_ONLY) {
     await syncComputeTokensWithRetries();
     console.log('\n🔄 Compute token sync complete.');
+    return;
+  }
+
+  if (PASSKEYS_ONLY) {
+    await syncPasskeys();
+    console.log('\n🔄 Passkey sync complete.');
     return;
   }
 

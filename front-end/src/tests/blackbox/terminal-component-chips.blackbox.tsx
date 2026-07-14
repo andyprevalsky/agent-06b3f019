@@ -9,6 +9,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from './test-wrapper';
+import {
+  makeAgentTreeNode as makeNode,
+  makeChipMessage as makeMsg,
+} from './terminal-component-chips.fixtures';
 
 // ── Mocks (must be hoisted before the module-under-test imports) ─────────────
 
@@ -43,15 +47,15 @@ vi.mock('@/lib/supabase', () => ({
 }));
 
 // Agent context — drive ClaudeCodeChip messages deterministically.
-const messagesRef: { current: any[] } = { current: [] };
+const messagesRef: { current: unknown[] } = { current: [] };
 vi.mock('@/features/agent-context', () => ({
   useAgentContext: () => ({ messages: messagesRef.current }),
 }));
 
 // Agent tree — drive SubAgentTree node map deterministically.
-const treeRef: { current: Map<string, any> } = { current: new Map() };
+const treeRef: { current: Map<string, unknown> } = { current: new Map() };
 vi.mock('@/hooks/useAgentTree', async () => {
-  const actual = await vi.importActual<any>('@/hooks/useAgentTree');
+  const actual = await vi.importActual<Record<string, unknown>>('@/hooks/useAgentTree');
   return {
     ...actual,
     useAgentTree: () => treeRef.current,
@@ -63,22 +67,12 @@ import {
   formatTerminalOutputForDisplay,
   normalizeTerminalWhitespace,
 } from '@/features/terminal-component-group/components/claudeCodeChip.terminal';
-import { parseCodeAgentTranscript } from '@/features/terminal-component-group/components/claudeCodeChip.renderers';
+import { ParseCodeAgentTranscript as parseCodeAgentTranscript } from '@/features/terminal-component-group/components/claudeCodeChip.transcript';
 import SubAgentTree from '@/features/terminal-component-group/components/SubAgentTree';
 
 // ═════════════════════════════════════════════════════════════════════════════
 // ClaudeCodeChip
 // ═════════════════════════════════════════════════════════════════════════════
-
-function makeMsg(overrides: any = {}) {
-  return {
-    message_id: overrides.message_id || Math.random().toString(36).slice(2),
-    timestamp: new Date().toISOString(),
-    text: overrides.text ?? '',
-    role: overrides.role ?? 'TOOL',
-    metadata: overrides.metadata ?? {},
-  };
-}
 
 describe('ClaudeCodeChip', () => {
   const originalWebSocket = globalThis.WebSocket;
@@ -247,30 +241,26 @@ describe('ClaudeCodeChip', () => {
   });
 
   it('does not flash failed from a raw non-zero WebSocket exit before Codex verifier success', async () => {
-    let socket: {
+    const socket: {
       onopen: (() => void) | null;
       onmessage: ((event: { data: string }) => void) | null;
       onclose: (() => void) | null;
       readyState: number;
       close: () => void;
+    } = {
+      onopen: null,
+      onmessage: null,
+      onclose: null,
+      readyState: 1,
+      close: () => {
+        socket.readyState = 3;
+        socket.onclose?.();
+      },
     };
-
-    class MockWebSocket {
-      static OPEN = 1;
-      onopen: (() => void) | null = null;
-      onmessage: ((event: { data: string }) => void) | null = null;
-      onclose: (() => void) | null = null;
-      readyState = MockWebSocket.OPEN;
-
-      constructor() {
-        socket = this;
-      }
-
-      close() {
-        this.readyState = 3;
-        this.onclose?.();
-      }
+    function MockWebSocket() {
+      return socket;
     }
+    Object.assign(MockWebSocket, { OPEN: 1 });
 
     globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
 
@@ -474,22 +464,6 @@ describe('code-agent terminal formatting', () => {
 // SubAgentTree
 // ═════════════════════════════════════════════════════════════════════════════
 
-function makeNode(overrides: any = {}) {
-  return {
-    agentId: overrides.agentId,
-    parentAgentId: overrides.parentAgentId ?? null,
-    goal: overrides.goal ?? 'Some goal',
-    status: overrides.status ?? 'ACTIVE',
-    progress: overrides.progress ?? 0,
-    toolsInUse: overrides.toolsInUse ?? [],
-    messageCount: overrides.messageCount ?? 0,
-    costCents: overrides.costCents ?? 12,
-    outputSchema: overrides.outputSchema,
-    structuredOutput: overrides.structuredOutput,
-    failureContext: overrides.failureContext,
-  };
-}
-
 describe('SubAgentTree', () => {
   beforeEach(() => {
     treeRef.current = new Map();
@@ -546,7 +520,7 @@ describe('SubAgentTree', () => {
         goal: 'Broken',
         status: 'FAILED',
         failureContext: {
-          trajectory: [{ tool_name: 'x', success: false, error_message: 'bad' } as any],
+          trajectory: [{ tool_name: 'x', success: false, error_message: 'bad' } as never],
           progress_estimate: '30%',
           verifier_reasoning: 'Never got signal',
           last_reasoning: 'was thinking',

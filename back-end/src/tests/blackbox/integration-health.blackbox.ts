@@ -123,14 +123,18 @@ async function checkSteel(): Promise<void> {
 async function checkParallel(): Promise<void> {
   const key = requireEnv('PARRALLEL_API_KEY');
   // Smallest possible search probe; any non-auth response proves the key works.
-  const res = await fetchWithTimeout('https://api.parallel.ai/v1beta/search', {
+  const res = await fetchWithTimeout('https://api.parallel.ai/v1/search', {
     method: 'POST',
     headers: {
       'x-api-key': key,
-      'parallel-beta': 'search-extract-2025-10-10',
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ objective: 'ping', search_queries: ['ping'], max_results: 1 }),
+    body: JSON.stringify({
+      mode: 'turbo',
+      objective: 'ping',
+      search_queries: ['ping'],
+      advanced_settings: { max_results: 1 },
+    }),
   });
   if (authFailed(res.status)) {
     const body = await res.text().catch(() => '');

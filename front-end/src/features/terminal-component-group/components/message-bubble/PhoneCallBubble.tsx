@@ -12,9 +12,7 @@ interface PhoneCallBubbleProps {
 
 export function PhoneCallBubble({ message, onTypingComplete }: PhoneCallBubbleProps) {
   const toolStatus = ((message.metadata?.toolStatus as string | undefined) || 'IN_PROGRESS') as
-    | 'IN_PROGRESS'
-    | 'FINISHED'
-    | 'ERROR';
+    'IN_PROGRESS' | 'FINISHED' | 'ERROR';
   const phoneCallMetadata = message.metadata?.phoneCall as PhoneCallMetadata | undefined;
 
   const phoneCall: PhoneCallMetadata =

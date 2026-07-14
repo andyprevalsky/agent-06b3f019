@@ -30,6 +30,8 @@ export interface StreamingAttention {
   tool_call_id: string;
   message: string;
   is_question: boolean;
+  sequence: number;
+  done: boolean;
   subAgentId?: string;
 }
 
@@ -49,12 +51,31 @@ export interface StreamingTool {
 
 export type MessageHandler = (message: Message) => void;
 
+export interface PendingAgentCreationInput {
+  agentId: string;
+  goal: string;
+  model: string;
+  source: AgentDetail['source'];
+  priceLimitCents: number;
+}
+
+export interface PendingAgentCreation {
+  agentId: string;
+  goal: string;
+  messageId: string;
+  agent: AgentDetail;
+  message: Message;
+}
+
 export interface AgentContextValue {
   // Agent data
   agent: AgentDetail | null;
   setAgent: React.Dispatch<React.SetStateAction<AgentDetail | null>>;
   selectedAgentId: string | null;
   setSelectedAgentId: (id: string | null) => void;
+  stagePendingAgentCreation: (input: PendingAgentCreationInput) => void;
+  reconcilePendingAgentCreation: (agentId: string) => Promise<void>;
+  rollbackPendingAgentCreation: (agentId: string) => boolean;
 
   // Messages (history, not buffer - buffer is in MessageList)
   messages: Message[];

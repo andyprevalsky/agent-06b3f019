@@ -51,4 +51,16 @@ cloud_name="$(
 )"
 expect_eq "$cloud_name" "cloud-generated" "cloud-generated workspace name remains authoritative"
 
+explicit_queue="$(
+  TEMPORAL_TASK_QUEUE=semantic-sentinel \
+  bash -c ". '$HELPER_SRC'; resolve_temporal_task_queue yamoussoukro"
+)"
+expect_eq "$explicit_queue" "semantic-sentinel" "explicit Temporal queue survives stack derivation"
+
+default_queue="$(
+  env -u TEMPORAL_TASK_QUEUE \
+  bash -c ". '$HELPER_SRC'; resolve_temporal_task_queue yamoussoukro"
+)"
+expect_eq "$default_queue" "navi-agent-tasks-yamoussoukro" "workspace queue remains the default"
+
 echo "All workspace env tests passed."
