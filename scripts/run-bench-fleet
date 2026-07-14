@@ -16,6 +16,15 @@
 # served on the central hub (no browser window is opened — view runs in the
 # in-app Benchmarks tab, or open the printed URL manually).
 #
+# CONCURRENT WORKSTREAMS: fleets from different workspaces/worktrees run in
+# parallel by design — each fleet only forks the warm source's immutable
+# snapshot and only ever mutates machines it created (ledger + name scoped).
+# The run path is READ-ONLY against shared app state: it VERIFIES the
+# app-level env secrets exist and never stages them. The only serialization
+# left is one controller per workspace (local lock). Refreshing the shared
+# prod-aligned env is an explicit maintenance op:
+#   bash scripts/run-bench-cloud --refresh-secrets
+#
 # Usage:
 #   bash scripts/run-bench <bench> [<bench>...] [flags]        # via the common entry
 #   bash scripts/run-bench-fleet spawn-sub-agents parallel-tool-calls
@@ -25,7 +34,9 @@
 #   --sim-on <a,b>     comma list of benches to run with the WMH simulator ON
 #                      (default: all benches REAL / world model OFF)
 #   --ref <sha|branch> code ref to check out on each clone (default: HEAD)
-#   --dash-base <port> aggregated batch dashboard port; bench i viewer = base+(i+1)*20 (default 8765)
+#   --dash-base <port> aggregated batch dashboard port; bench i viewer = base+(i+1)*20
+#                      (default CONDUCTOR_PORT+5764 → 8765 on the standard 3001 workspace,
+#                       so concurrent workspaces get non-colliding hubs)
 #   --keep-clones      do NOT destroy the per-bench machines on exit (debugging)
 #   --timeout <s>      per-bench ceiling passed to run-bench-cloud (default 3600)
 #   --autoscale        per-bench worker autoscaling, prod params, scoped to the bench queue (DEFAULT ON)
@@ -37,7 +48,7 @@
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT_DIR"
+cd "$ROOT_DIR" || exit 1
 # shellcheck source=lib/cloudbench-env.sh
 source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
 MACHINE_READINESS_SCRIPT="$ROOT_DIR/scripts/cloudbench-machine-readiness.py"
@@ -59,7 +70,10 @@ LOCK_DIR="$ROOT_DIR/.context/cloudbench-controller.lock"
 BENCHES=()
 SIM_ON_CSV=""
 BENCH_REF=""
-DASH_BASE="8765"
+# Per-workspace hub port: the hub scans THIS workspace's runs-root, so two
+# workspaces must not share a port (the second would adopt the first's hub and
+# never see its own runs). CONDUCTOR_PORT=3001 → 8765 (the historical default).
+DASH_BASE="${CLOUDBENCH_DASH_BASE:-$(( ${CONDUCTOR_PORT:-3001} + 5764 ))}"
 KEEP_CLONES="0"
 RUN_TIMEOUT="3600"
 AUTOSCALE="1"           # per-bench worker autoscaling (prod params, scoped to the bench queue) — ON by default
@@ -70,9 +84,7 @@ PROVISION_POOL=""       # --provision-pool N: pre-provision N stopped clones (cu
 POOL_IDS_FILE="$ROOT_DIR/.context/cloudbench-pool.ids"   # persistent pool machine ids (one per line)
 GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null || echo "$ROOT_DIR/.git")"
 case "$GIT_COMMON_DIR" in /*) ;; *) GIT_COMMON_DIR="$ROOT_DIR/$GIT_COMMON_DIR" ;; esac
-APP_ENV_LOCK_FILE="$GIT_COMMON_DIR/cloudbench-app-env.lock"
 POOL_CLAIMS_DIR="$GIT_COMMON_DIR/cloudbench-pool-claims"
-APP_ENV_LOCK_HELD=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --sim-on)         SIM_ON_CSV="${2:-}"; shift 2 ;;
@@ -84,7 +96,7 @@ while [ $# -gt 0 ]; do
         --no-autoscale)   AUTOSCALE="0"; shift ;;   # each bench stays at its single machine
         --autoscale-max)  AUTOSCALE_MAX="${2:-}"; shift 2 ;;
         --provision-pool) PROVISION_POOL="${2:-}"; shift 2 ;;   # one-time: create N stopped clones, then exit
-        -h|--help)        sed -n '2,36p' "$0"; exit 0 ;;
+        -h|--help)        sed -n '2,47p' "$0"; exit 0 ;;
         --*)              echo "❌ Unknown flag: $1" >&2; exit 2 ;;
         *)                BENCHES+=("$1"); shift ;;
     esac
@@ -386,46 +398,24 @@ claim_pool_machine() {  # echo a started, claimed pool machine id (or '' if none
         printf '%s' "$st" | grep -qi "stopped" || continue   # only claim an existing, stopped machine
         machine_storage_ready "$id" || continue
         # claim_pool_machine is called through command substitution, so shell
-        # arrays mutate in a subshell. Files are the cross-subshell and
-        # cross-workspace ownership source of truth while the app lock is held.
-        printf '%s\n' "$$" > "$claim_path"
+        # arrays mutate in a subshell. Claim files are the cross-subshell and
+        # cross-workspace ownership source of truth; creation is ATOMIC
+        # (noclobber) so concurrent controllers can never claim the same
+        # machine — the loser just moves on to the next candidate.
+        ( set -C; printf '%s\n' "$$" > "$claim_path" ) 2>/dev/null || continue
         printf '%s\n' "$id" >> "$CLAIMED_POOL_FILE"
         FLY machine start "$id" -a "$APP" >/dev/null 2>&1 || true
         printf '%s' "$id"; return 0
     done < "$POOL_IDS_FILE"
 }
 
-acquire_app_environment_lock() {
-    local attempt owner
-    command -v shlock >/dev/null 2>&1 || {
-        echo "❌ shlock is required for cross-workspace benchmark environment locking." >&2
-        return 1
-    }
-    for attempt in $(seq 1 60); do
-        if shlock -p "$$" -f "$APP_ENV_LOCK_FILE"; then
-            APP_ENV_LOCK_HELD=1
-            return 0
-        fi
-        owner="$(cat "$APP_ENV_LOCK_FILE" 2>/dev/null || true)"
-        [ "$attempt" -eq 1 ] && echo "⏳ waiting for shared benchmark app environment lock (owner=${owner:-unknown})..."
-        sleep 2
-    done
-    echo "❌ Timed out waiting for shared benchmark app environment lock." >&2
-    return 1
-}
-
-release_app_environment_lock() {
-    local owner
-    [ "$APP_ENV_LOCK_HELD" = "1" ] || return 0
-    owner="$(cat "$APP_ENV_LOCK_FILE" 2>/dev/null || true)"
-    [ "$owner" = "$$" ] && rm -f "$APP_ENV_LOCK_FILE" 2>/dev/null || true
-    APP_ENV_LOCK_HELD=0
-}
-
-# ── One controller lock for the whole fleet (children run with --no-lock) ────
-if ! cloudbench_controller_acquire "$LOCK_DIR" "$APP"; then
+# ── One controller lock PER WORKSPACE (children run with --no-lock) ─────────
+# Deliberately workspace-local: concurrent fleets from OTHER workspaces are
+# supported (each owns only the machines it creates and never mutates shared
+# app state), so no cross-workspace or cross-host lease is taken here.
+if ! cloudbench_controller_lock_acquire "$LOCK_DIR"; then
     old_pid="$(cat "$LOCK_DIR" 2>/dev/null || true)"
-    echo "❌ Another cloud benchmark controller is already running${old_pid:+ (pid $old_pid)}." >&2
+    echo "❌ Another cloud benchmark controller is already running in this workspace${old_pid:+ (pid $old_pid)}." >&2
     exit 1
 fi
 
@@ -438,19 +428,6 @@ CHILD_MODE=()
 CHILD_PORT=()
 CHILD_MACHINE=()
 
-terminate_and_wait() {  # bounded TERM→KILL for controller-owned local children
-    [ "$#" -gt 0 ] || return 0
-    local p watchdog
-    for p in "$@"; do [ -n "$p" ] && kill "$p" 2>/dev/null || true; done
-    (
-        sleep "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}"
-        for p in "$@"; do [ -n "$p" ] && kill -KILL "$p" 2>/dev/null || true; done
-    ) & watchdog=$!
-    for p in "$@"; do [ -n "$p" ] && wait "$p" 2>/dev/null || true; done
-    kill "$watchdog" 2>/dev/null || true
-    wait "$watchdog" 2>/dev/null || true
-}
-
 cleanup() {
     local ec=$? id clone_name name_matches named_id name_deadline failed_names claim_path owner st
     # The poller and terminal can deliver TERM to the same process group. Do not
@@ -462,8 +439,8 @@ cleanup() {
     # dashboard — shared across every run, carrying the user's open tab, resolving
     # "open agent" from local run data long after teardown. The next fleet run
     # REUSES it (never rebinds/kills it), so exactly one hub ever runs.
-    terminate_and_wait "${AUTOSCALER_PIDS[@]:-}"
-    terminate_and_wait "${CHILD_PIDS[@]:-}"
+    cloudbench_terminate_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" "${AUTOSCALER_PIDS[@]:-}"
+    cloudbench_terminate_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" "${CHILD_PIDS[@]:-}"
     # Return only machines this fleet actually claimed. The pool ledger can be
     # shared by sibling workspaces, so stopping every listed ID would interrupt
     # their active runs. Keep the global lease until the machine is stopped.
@@ -482,7 +459,6 @@ cleanup() {
             [ "$owner" = "$$" ] && rm -f "$claim_path" || true
         done < "$CLAIMED_POOL_FILE"
     fi
-    release_app_environment_lock
     if [ "$KEEP_CLONES" != "1" ]; then
         # Autoscaler worker-pool clones (tracked per bench) first, then the primaries.
         # A failed destroy is a billed-forever zombie: keep it tracked (the
@@ -540,7 +516,7 @@ cleanup() {
     # post-run). Per-bench viewers are reaped by their own run-bench-cloud child's
     # exit trap when we SIGTERM CHILD_PIDS above; the batch resolver lives on.
     [ -n "${FLEET_PATCH_FILE:-}" ] && rm -f "$FLEET_PATCH_FILE" 2>/dev/null || true
-    cloudbench_controller_release "$LOCK_DIR" "$APP"
+    cloudbench_controller_lock_release "$LOCK_DIR"
     exit "$ec"
 }
 trap cleanup EXIT
@@ -548,14 +524,14 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-reconcile_pool || exit 1   # stop + verify this workspace's pool before env activation
-acquire_app_environment_lock || exit 1
-echo "🔐 Refreshing + production-verifying the shared benchmark environment before machine start..."
-if ! CLOUDBENCH_PARENT_LOCK_HELD=1 \
-    CLOUDBENCH_APP_ENV_LOCK_HELD=1 \
-    CLOUDBENCH_APP_ENV_LOCK_OWNER_PID="$$" \
-    bash scripts/run-bench-cloud --refresh-secrets; then
-    echo "❌ Cloud benchmark environment refresh failed; no benchmark machine was started." >&2
+reconcile_pool || exit 1   # stop + verify this workspace's pool before machine start
+# READ-ONLY env preflight: the run path never stages/mutates the shared
+# prod-aligned app secrets (that would race concurrent workstreams). It only
+# verifies they exist; refreshing them is an explicit maintenance op.
+echo "🔎 Verifying the shared benchmark app environment (read-only)..."
+if ! bash scripts/run-bench-cloud --verify-secrets; then
+    echo "❌ Cloud benchmark environment is not ready; no benchmark machine was started." >&2
+    echo "   Refresh it explicitly (maintenance op): bash scripts/run-bench-cloud --refresh-secrets" >&2
     exit 1
 fi
 
@@ -596,6 +572,24 @@ if [ -z "$SNAP_ID" ]; then
     exit 1
 fi
 echo "🧊 forking clones from complete snapshot: $SNAP_ID"
+
+# ── App-wide capacity guard (not a lock) ─────────────────────────────────────
+# Concurrent workstreams multiply machine counts (N fleets × benches ×
+# autoscale). Refuse loudly instead of silently stacking Fly spend; raise via
+# CLOUDBENCH_APP_MAX_MACHINES if a bigger burst is intentional.
+MAX_APP_MACHINES="${CLOUDBENCH_APP_MAX_MACHINES:-60}"
+requested_machines="${PROVISION_POOL:-${#BENCHES[@]}}"
+current_machines="$(printf '%s' "$warm_json" | python3 -c '
+import json, sys
+try: print(len(json.load(sys.stdin) or []))
+except Exception: print("")
+' 2>/dev/null || true)"
+if [ -n "$current_machines" ] && [ $((current_machines + requested_machines)) -gt "$MAX_APP_MACHINES" ]; then
+    echo "❌ App capacity guard: $current_machines machines exist and this run adds $requested_machines" >&2
+    echo "   (ceiling CLOUDBENCH_APP_MAX_MACHINES=$MAX_APP_MACHINES). Another workstream may be running large;" >&2
+    echo "   finish/teardown other runs, sweep zombies (flyctl machines list -a $APP), or raise the ceiling." >&2
+    exit 1
+fi
 
 # --provision-pool: one-time pre-provision of N stopped clones, then exit.
 if [ -n "$PROVISION_POOL" ]; then
@@ -700,13 +694,13 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
         [ "$want" -gt $((AUTOSCALE_MAX - 1)) ] && want=$((AUTOSCALE_MAX - 1))
         cur="$(_pool_ids "$out")"
         if [ "$want" -gt "$cur" ]; then
-            local n=$((want - cur)) k
+            local n=$((want - cur))
             echo "  ⤴️  [$bench] scale up +$n (desired=$desired, pool=$cur)"
-            for k in $(seq 1 "$n"); do provision_worker "$bench" "$ws" "$cid" "$pip" "$sim" "$out"; done
+            for _ in $(seq 1 "$n"); do provision_worker "$bench" "$ws" "$cid" "$pip" "$sim" "$out"; done
         elif [ "$want" -lt "$cur" ]; then
-            local n=$((cur - want)) k
+            local n=$((cur - want))
             echo "  ⤵️  [$bench] scale down -$n (desired=$desired, pool=$cur)"
-            for k in $(seq 1 "$n"); do
+            for _ in $(seq 1 "$n"); do
                 local wid; wid="$(tail -1 "$out/worker-clones.ids" 2>/dev/null)"
                 [ -n "$wid" ] || break
                 # Only drop the id from tracking once the destroy is CONFIRMED —
@@ -770,7 +764,7 @@ for bench in "${BENCHES[@]}"; do
     local_ws="$(printf 'flt-%s-%s-%s' "$bench" "$$" "$i" | tr -c 'a-z0-9-' '-' | cut -c1-48)"
     (
         CLOUDBENCH_WORKSPACE_NAME="$local_ws" \
-        CLOUDBENCH_ENV_REFRESHED=1 \
+        CLOUDBENCH_ENV_VERIFIED=1 \
         CLOUDBENCH_START_BARRIER="$([ "$SYNCHRONIZED_START" = "1" ] && printf '%s' "$RUN_ID")" \
         CLOUDBENCH_START_BARRIER_WAIT_SECONDS="$START_BARRIER_WAIT_SECONDS" \
         NO_OPEN=1 \
@@ -799,10 +793,6 @@ for bench in "${BENCHES[@]}"; do
     fi
     i=$((i + 1))
 done
-
-# Every primary now has an immutable environment-bearing source (owned pool VM
-# or fresh warm clone). Other worktrees may safely stage their environment.
-release_app_environment_lock
 
 [ "${#CHILD_PIDS[@]}" -ge 1 ] || { echo "❌ no benches launched (all clones failed)." >&2; exit 1; }
 
@@ -833,7 +823,8 @@ cp -f "$ROOT_DIR/agents/benchmarks/dashboard.html" "$UNIFIED_DIR/dashboard.html"
 } > "$UNIFIED_DIR/benches.json"
 (
     while :; do
-        FLEET_DIR="$FLEET_DIR" UNIFIED_DIR="$UNIFIED_DIR" DASH_BASE="$DASH_BASE" python3 - "$UNIFIED_DIR/report-card.json" <<'PY' 2>/dev/null || true
+        env FLEET_DIR="$FLEET_DIR" UNIFIED_DIR="$UNIFIED_DIR" DASH_BASE="$DASH_BASE" \
+            python3 - "$UNIFIED_DIR/report-card.json" <<'PY' 2>/dev/null || true
 import json, os, sys
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -997,6 +988,9 @@ fi
 
 # ── Wait for all children, then aggregate ────────────────────────────────────
 for p in "${CHILD_PIDS[@]}"; do wait "$p" 2>/dev/null || true; done
+# Normal completion has already reaped every child. Clear the ownership list so
+# EXIT cleanup cannot signal a stale PID that the OS may have since reused.
+CHILD_PIDS=()
 # One final merge so the batch dashboard reflects terminal results, then stop the aggregator.
 kill "$UNIFIED_AGG_PID" 2>/dev/null || true
 python3 "$ROOT_DIR/scripts/cloudbench-aggregate-runs.py" "$FLEET_DIR" "$UNIFIED_DIR/run.json"
