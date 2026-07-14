@@ -132,10 +132,11 @@ cloudbench_machines_api_request() {
   printf '%s|%s|%s|%s\n' "$method" "$path" "$body" "$nonce" >> "$cloud_lease_calls"
   case "$method|$path" in
     'GET|/v1/apps/bench-app/machines')
-      if [ "${cloud_machine_list_transport_error:-0}" = "1" ]; then
+      CLOUDBENCH_API_CURL_STATUS="${cloud_machine_list_curl_status:-0}"
+      if [ "$CLOUDBENCH_API_CURL_STATUS" -ne 0 ]; then
         CLOUDBENCH_API_STATUS=0
         CLOUDBENCH_API_BODY='connect failed'
-        return 7
+        return "$CLOUDBENCH_API_CURL_STATUS"
       fi
       CLOUDBENCH_API_STATUS="${cloud_machine_list_status:-200}"
       if [ -n "${cloud_machine_list_body+x}" ]; then
@@ -183,12 +184,21 @@ cloud_lock_status=0
   fail "a non-contention Fly lease error must remain terminal"
 unset cloud_lease_force_error
 
-cloud_machine_list_transport_error=1
+cloud_machine_list_curl_status=7
 cloud_lock_status=0
 (cloudbench_cloud_lock_acquire bench-app >/dev/null 2>&1) || cloud_lock_status=$?
 [ "$cloud_lock_status" -eq "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE" ] ||
   fail "a Machines API connection failure must remain retryable"
-unset cloud_machine_list_transport_error
+unset cloud_machine_list_curl_status
+
+for permanent_curl_status in 3 60 77; do
+  cloud_machine_list_curl_status="$permanent_curl_status"
+  cloud_lock_status=0
+  (cloudbench_cloud_lock_acquire bench-app >/dev/null 2>&1) || cloud_lock_status=$?
+  [ "$cloud_lock_status" -eq 1 ] ||
+    fail "curl configuration/TLS failure $permanent_curl_status must remain terminal"
+done
+unset cloud_machine_list_curl_status
 
 cloud_machine_list_status=503
 cloud_machine_list_body='{"error":"service unavailable"}'

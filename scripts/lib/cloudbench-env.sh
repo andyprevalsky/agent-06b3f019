@@ -270,7 +270,7 @@ cloudbench_random_token() {
 }
 
 cloudbench_machines_api_request() {
-  local method="$1" path="$2" body="${3:-}" nonce="${4:-}" response
+  local method="$1" path="$2" body="${3:-}" nonce="${4:-}" response curl_status
   local api_host="${FLY_API_HOSTNAME:-https://api.machines.dev}"
   local api_token="${CLOUDBENCH_MACHINES_API_TOKEN:-${FLY_API_TOKEN:-}}"
   [ -n "$api_token" ] || { echo "FATAL: Machines API token is required" >&2; return 1; }
@@ -281,10 +281,13 @@ cloudbench_machines_api_request() {
   )
   [ -n "$nonce" ] && args+=(-H "fly-machine-lease-nonce: $nonce")
   [ -n "$body" ] && args+=(-d "$body")
-  if ! response="$(curl "${args[@]}" -w $'\n%{http_code}' "$api_host$path")"; then
+  curl_status=0
+  response="$(curl "${args[@]}" -w $'\n%{http_code}' "$api_host$path")" || curl_status=$?
+  CLOUDBENCH_API_CURL_STATUS="$curl_status"
+  if [ "$curl_status" -ne 0 ]; then
     CLOUDBENCH_API_STATUS=0
     CLOUDBENCH_API_BODY="$response"
-    return 1
+    return "$curl_status"
   fi
   CLOUDBENCH_API_STATUS="${response##*$'\n'}"
   CLOUDBENCH_API_BODY="${response%$'\n'*}"
@@ -301,9 +304,22 @@ cloudbench_machines_api_token_ensure() {
 }
 
 cloudbench_machines_api_read_failure() {
-  local operation="$1" status="${CLOUDBENCH_API_STATUS:-0}"
+  local operation="$1" status="${CLOUDBENCH_API_STATUS:-0}" curl_status="${CLOUDBENCH_API_CURL_STATUS:-0}"
   case "$status" in
-    0|408|425|429|5??)
+    0)
+      case "$curl_status" in
+        5|6|7|18|28|35|52|55|56)
+          echo "CLOUDBENCH_RETRYABLE_CAPACITY=machines_api_unavailable" >&2
+          echo "Machines API $operation transport failed temporarily (curl $curl_status); waiting is safe." >&2
+          return "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE"
+          ;;
+        *)
+          echo "FATAL: Machines API $operation transport/configuration failed (curl ${curl_status:-unknown})" >&2
+          return 1
+          ;;
+      esac
+      ;;
+    408|425|429|5??)
       echo "CLOUDBENCH_RETRYABLE_CAPACITY=machines_api_unavailable" >&2
       echo "Machines API $operation is temporarily unavailable (HTTP $status); waiting is safe." >&2
       return "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE"
