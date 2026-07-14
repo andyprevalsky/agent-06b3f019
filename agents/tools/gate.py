@@ -7,7 +7,7 @@ from domains.gate.repo import (
     mint_subscription_checkout_activity,
     source_status_activity,
 )
-from domains.gate.service import (
+from domains.gate.handler import (
     GateRejectedError,
     build_kyc_gate,
     build_source_connect_gate,
