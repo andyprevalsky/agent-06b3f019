@@ -1625,3 +1625,30 @@ clone_machine_target "$LEDGER"
     assert result.stdout.strip() == "clone-2", result.stdout
     assert attempt_file.read_text().strip() == "2", "hung clone should be reaped then retried once"
     assert "retrying" in result.stderr
+
+
+def test_fleet_provisions_clones_concurrently() -> None:
+    """All per-bench clones must fan out concurrently, not serialize. Sequential
+    cloning stretched provisioning to 30-50min — the window every clone hang /
+    volume race / cross-workspace contention event aborted the batch in. Phase 1
+    backgrounds each claim-or-clone in its own subshell writing its own per-bench
+    ledger; a barrier waits for all before Phase 2 launches any child."""
+    fleet = FLEET_SCRIPT.read_text()
+    assert "concurrently (claim-or-clone)" in fleet
+    prov = fleet.index("PROVISION_PIDS=()")
+    wait_all = fleet.index('for pp in "${PROVISION_PIDS[@]}"; do wait')
+    phase2 = fleet.index("# ── Phase 2:")
+    # ordering: fan-out → barrier → launch
+    assert prov < wait_all < phase2, "phases out of order"
+    phase1 = fleet[prov:wait_all]
+    # each provision is a backgrounded subshell using its OWN per-bench ledger
+    assert 'clone_machine_target "$out/primary.ids"' in phase1
+    assert ") &" in phase1
+    assert 'PROVISION_PIDS+=("$!")' in phase1
+    # provisioning is decoupled from the run: Phase 1 never launches a child, so
+    # one slow clone cannot block the others (or the whole batch).
+    assert "CHILD_PIDS+=" not in phase1
+    assert "run-bench-cloud" not in phase1
+    # cleanup reaps the per-bench primary ledgers → no leak if killed mid-provision
+    assert '"$FLEET_DIR"/*/primary.ids' in fleet
+    assert '"$FLEET_DIR"/*/primary.names' in fleet

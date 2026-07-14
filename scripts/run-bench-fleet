@@ -511,7 +511,7 @@ cleanup() {
         local failed_reaps=""
         failed_names=""
         name_deadline=$((SECONDS + ${CLOUDBENCH_CLONE_LOOKUP_SECONDS:-10}))
-        for namef in "$FLEET_DIR"/*/worker-clones.names "$FLEET_DIR/owned-clones.names"; do
+        for namef in "$FLEET_DIR"/*/primary.names "$FLEET_DIR"/*/worker-clones.names "$FLEET_DIR/owned-clones.names"; do
             [ -f "$namef" ] || continue
             while read -r clone_name; do
                 [ -n "$clone_name" ] || continue
@@ -527,7 +527,7 @@ cleanup() {
                 done <<< "$name_matches"
             done < "$namef"
         done
-        for idf in "$FLEET_DIR"/*/worker-clones.ids; do
+        for idf in "$FLEET_DIR"/*/primary.ids "$FLEET_DIR"/*/worker-clones.ids; do
             [ -f "$idf" ] || continue
             while read -r wid; do
                 [ -n "$wid" ] || continue
@@ -766,6 +766,35 @@ mkdir -p "$FLEET_DIR"
 : > "$CLAIMED_POOL_FILE"
 echo ""
 echo "═══ run-bench-fleet — ${#BENCHES[@]} bench(es), one isolated machine each ═══"
+# ── Phase 1: provision every bench's isolated machine CONCURRENTLY ───────────
+# Cloning 28 fresh volumes-from-snapshot one-at-a-time serialized provisioning
+# into a 30-50min window — the window where every clone hang, volume race, and
+# cross-workspace contention event landed and aborted the batch. Fan the
+# claim/clone out in parallel: each attempt runs in its own subshell and writes
+# its OWN per-bench ledger (primary.ids/.names — reaped by cleanup's globs), so
+# there is no shared-ledger race. The whole fleet is now provisioned in ~one
+# clone's wall-time (target: < 3 min) instead of the sum of 28.
+echo ""
+echo "⏳ provisioning ${#BENCHES[@]} isolated machine(s) concurrently (claim-or-clone) ..."
+PROVISION_PIDS=()
+for bench in "${BENCHES[@]}"; do
+    out="$FLEET_DIR/$bench"
+    rm -rf "$out" 2>/dev/null || true; mkdir -p "$out"
+    (
+        # Prefer a pre-provisioned pool machine (skips the ~300s volume fork);
+        # fall back to cloning fresh (bounded + retried) if the pool is empty.
+        pcid="$(claim_pool_machine)"
+        if [ -n "$pcid" ]; then
+            printf 'pool %s\n' "$pcid" > "$out/.cid"
+        elif pcid="$(clone_machine_target "$out/primary.ids")"; then
+            printf 'clone %s\n' "$pcid" > "$out/.cid"
+        fi
+    ) &
+    PROVISION_PIDS+=("$!")
+done
+for pp in "${PROVISION_PIDS[@]}"; do wait "$pp" 2>/dev/null || true; done
+
+# ── Phase 2: launch each provisioned bench's isolated run (fast; backgrounded) ─
 i=0
 for bench in "${BENCHES[@]}"; do
     # Default from the catalog's world_model_mode; --sim-on is an explicit override.
@@ -776,20 +805,18 @@ for bench in "${BENCHES[@]}"; do
     # viewers live above it (their /open-agent deep-links back the batch rows).
     port=$((DASH_BASE + (i + 1) * 20))
     out="$FLEET_DIR/$bench"
-    rm -rf "$out" 2>/dev/null || true; mkdir -p "$out"
+    src=""; cid=""
+    read -r src cid < "$out/.cid" 2>/dev/null || true
 
     echo ""
-    # Prefer a pre-provisioned pool machine (skips the ~300s volume fork); fall
-    # back to cloning fresh if the pool is empty/exhausted.
-    cid="$(claim_pool_machine)"
-    if [ -n "$cid" ]; then
-        echo "▶️  [$bench] claimed POOL machine $cid (no fork, mode=$mode_label, dash=$port) — starting ..."
+    if [ -z "$cid" ]; then
+        echo "❌ [$bench] provisioning failed (no machine) — skipping"
+        i=$((i + 1)); continue
+    fi
+    if [ "$src" = "pool" ]; then
+        echo "▶️  [$bench] claimed POOL machine $cid (no fork, mode=$mode_label, dash=$port)"
     else
-        echo "▶️  [$bench] pool empty → cloning fresh isolated machine (mode=$mode_label, dash=$port) ..."
-        if ! cid="$(clone_machine_target "$OWNED_CLONES_FILE")"; then
-            echo "   ❌ clone failed for $bench"
-            i=$((i + 1)); continue
-        fi
+        echo "▶️  [$bench] cloned isolated machine $cid (mode=$mode_label, dash=$port)"
     fi
     case " ${CHILD_MACHINE[*]:-} " in
         *" $cid "*) echo "❌ isolation violation: machine $cid was allocated twice" >&2; exit 1 ;;
