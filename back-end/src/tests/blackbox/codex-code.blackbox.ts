@@ -310,6 +310,35 @@ async function testSmoke_codexCompletesE2bTask() {
       `Expected normalized Codex session event, got: ${JSON.stringify(events).slice(0, 500)}`
     );
 
+    // Runtime-fallback invariant: if the ChatGPT OAuth token hit its usage limit
+    // mid-run, the sandbox MUST have re-logged-in with the funded OpenAI API key
+    // (auth_fallback event) rather than giving up — otherwise CODEX_E2B_DONE above
+    // could never have been produced on an exhausted token. This is exactly the
+    // failure that stalled deploy; it passes trivially when the OAuth token is
+    // healthy (no usage-limit event → no requirement).
+    const sawUsageLimit = events.some((event) => {
+      const typed = event as { type?: string; message?: string };
+      return (
+        typed.type === 'error' &&
+        /usage limit|usage_limit_reached|quota|purchase more credits|hit your usage/i.test(
+          String(typed.message ?? '')
+        )
+      );
+    });
+    const sawAuthFallback = events.some((event) => {
+      const typed = event as { type?: string; to?: string };
+      return typed.type === 'auth_fallback' && typed.to === 'openai_api_key';
+    });
+    if (sawUsageLimit) {
+      assert(
+        sawAuthFallback,
+        `Codex OAuth token hit its usage limit but did NOT fall back to the OpenAI API key. events=${JSON.stringify(events).slice(-1000)}`
+      );
+      console.log('    ↳ codex smoke completed via OPENAI_API_KEY runtime fallback (OAuth usage-limited)');
+    } else {
+      console.log('    ↳ codex smoke completed via ChatGPT OAuth token (no usage limit hit)');
+    }
+
     const { Sandbox } = await import('e2b');
     const sandbox = await Sandbox.connect(sandboxId!, { apiKey: process.env.E2B_API_KEY });
     const promptFile = await sandbox.files.read('/home/user/AGENTS.md', { format: 'text' });
