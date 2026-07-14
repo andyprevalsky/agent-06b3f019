@@ -258,34 +258,53 @@ for machine in machines:
 
 clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id]; echo target id
     local ledger="$1" source_id="${2:-$WARM_ID}" clone_out clone_status target_id target_name diagnostic_log names_ledger deadline
-    target_name="cloudbench-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:24])')"
+    local attempt max_attempts retry_delay
+    # Fly clone-from-snapshot occasionally loses a create-volume→launch-VM race
+    # ("failed to launch VM: volume not found") or leaves the new machine
+    # momentarily unlistable — both transient, both fatal to a synchronized
+    # 28-wide barrier if a single clone aborts the batch. Retry with backoff
+    # (fresh name per attempt; the names-ledger keeps every attempted name so
+    # teardown reaps any machine that did materialize — no new leak path).
+    max_attempts="${CLOUDBENCH_CLONE_MAX_ATTEMPTS:-3}"
+    retry_delay="${CLOUDBENCH_CLONE_RETRY_SECONDS:-8}"
     mkdir -p "$(dirname "$ledger")"
     names_ledger="${ledger%.ids}.names"
-    printf '%s\n' "$target_name" >> "$names_ledger"
-    clone_out="$(FLY machine clone "$source_id" -a "$APP" \
-        --from-snapshot "$SNAP_ID" --region "$REGION" --name "$target_name" --detach 2>&1)"
-    clone_status=$?
     diagnostic_log="${ledger%.ids}.log"
-    {
-        printf 'clone name=%s source=%s status=%s\n' "$target_name" "$source_id" "$clone_status"
-        printf '%s\n' "$clone_out"
-    } >> "$diagnostic_log"
+    attempt=1
+    while :; do
+        target_name="cloudbench-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:24])')"
+        printf '%s\n' "$target_name" >> "$names_ledger"
+        clone_out="$(FLY machine clone "$source_id" -a "$APP" \
+            --from-snapshot "$SNAP_ID" --region "$REGION" --name "$target_name" --detach 2>&1)"
+        clone_status=$?
+        {
+            printf 'clone name=%s source=%s status=%s attempt=%s/%s\n' \
+                "$target_name" "$source_id" "$clone_status" "$attempt" "$max_attempts"
+            printf '%s\n' "$clone_out"
+        } >> "$diagnostic_log"
 
-    deadline=$((SECONDS + ${CLOUDBENCH_CLONE_LOOKUP_SECONDS:-10}))
-    target_id="$(machine_id_for_clone_name "$target_name" "$deadline")" || target_id=""
-    if [ -n "$target_id" ] && [ "$target_id" != "$source_id" ] && [ "$target_id" != "$WARM_ID" ]; then
-        grep -Fxq "$target_id" "$ledger" 2>/dev/null || printf '%s\n' "$target_id" >> "$ledger"
-        grep -Fxv "$target_name" "$names_ledger" > "$names_ledger.tmp" 2>/dev/null || true
-        mv "$names_ledger.tmp" "$names_ledger"
-    else
-        target_id=""
-    fi
-    if [ "$clone_status" -ne 0 ] || [ -z "$target_id" ]; then
-        echo "❌ Fly clone did not return a distinct authoritative target (name=$target_name, source=$source_id, status=$clone_status)" >&2
-        printf '%s\n' "$clone_out" | sed 's/^/   /' >&2
-        return 1
-    fi
-    printf '%s' "$target_id"
+        deadline=$((SECONDS + ${CLOUDBENCH_CLONE_LOOKUP_SECONDS:-10}))
+        target_id="$(machine_id_for_clone_name "$target_name" "$deadline")" || target_id=""
+        if [ -n "$target_id" ] && [ "$target_id" != "$source_id" ] && [ "$target_id" != "$WARM_ID" ]; then
+            grep -Fxq "$target_id" "$ledger" 2>/dev/null || printf '%s\n' "$target_id" >> "$ledger"
+            grep -Fxv "$target_name" "$names_ledger" > "$names_ledger.tmp" 2>/dev/null || true
+            mv "$names_ledger.tmp" "$names_ledger"
+        else
+            target_id=""
+        fi
+        if [ "$clone_status" -eq 0 ] && [ -n "$target_id" ]; then
+            printf '%s' "$target_id"
+            return 0
+        fi
+        if [ "$attempt" -ge "$max_attempts" ]; then
+            echo "❌ Fly clone did not return a distinct authoritative target after $attempt attempt(s) (last name=$target_name, source=$source_id, status=$clone_status)" >&2
+            printf '%s\n' "$clone_out" | sed 's/^/   /' >&2
+            return 1
+        fi
+        echo "⏳ transient clone failure (attempt $attempt/$max_attempts, status=$clone_status); retrying in ${retry_delay}s ..." >&2
+        sleep "$retry_delay"
+        attempt=$((attempt + 1))
+    done
 }
 
 provision_pool() {  # provision_pool <N> — create N stopped clones, record ids, exit

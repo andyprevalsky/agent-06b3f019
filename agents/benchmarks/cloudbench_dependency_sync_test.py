@@ -1256,6 +1256,9 @@ clone_machine_target "$LEDGER"
                 "RETURNED_ID": returned_id,
                 "TARGET_NAME_FILE": str(target_name_file),
                 "CLOUDBENCH_CLONE_LOOKUP_SECONDS": "0",
+                # Isolate identity resolution to a single attempt; retry
+                # behavior is covered by test_clone_retries_transient_*.
+                "CLOUDBENCH_CLONE_MAX_ATTEMPTS": "1",
             },
             text=True,
             capture_output=True,
@@ -1432,3 +1435,119 @@ def test_fleet_aggregate_contains_every_isolated_task(tmp_path: Path) -> None:
     assert aggregated["summary"]["passed"] == 1
     assert aggregated["summary"]["failed"] == 1
     assert aggregated["summary"]["total_duration_seconds"] == 30
+
+
+def _extract_fleet_function(source: str, signature: str) -> str:
+    start = source.index(signature)
+    end = source.index("\n}\n", start) + 3
+    return source[start:end]
+
+
+def test_clone_retries_transient_volume_not_found(tmp_path: Path) -> None:
+    """A single Fly clone-from-snapshot volume race must not abort the batch:
+    clone_machine_target retries with a fresh name and returns the id once the
+    transient failure clears. Guards the 28-wide synchronized-start barrier
+    against one flaky clone tearing down every isolated stack."""
+    fleet = FLEET_SCRIPT.read_text()
+    resolver = _extract_fleet_function(fleet, "machine_id_for_clone_name() {")
+    cloner = _extract_fleet_function(fleet, "clone_machine_target() {")
+    ledger = tmp_path / "owned-clones.ids"
+    attempt_file = tmp_path / "attempts"
+    machines_file = tmp_path / "machines"
+    machines_file.write_text("")
+
+    script = f"""set -uo pipefail
+APP=bench-app
+REGION=iad
+WARM_ID=warm-1
+SNAP_ID=vs_test
+export ATTEMPT_FILE="$ATTEMPT_FILE" MACHINES_FILE="$MACHINES_FILE"
+FLY() {{
+  if [ "$1 $2" = "machine clone" ]; then
+    local name=""
+    while [ $# -gt 0 ]; do
+      if [ "$1" = "--name" ]; then name="$2"; shift 2; continue; fi
+      shift
+    done
+    local n; n=$(( $(cat "$ATTEMPT_FILE" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$ATTEMPT_FILE"
+    if [ "$n" -lt 2 ]; then echo "Error: failed to launch VM: volume not found" >&2; return 1; fi
+    printf '{{"id":"clone-%s","name":"%s"}}\\n' "$n" "$name" >> "$MACHINES_FILE"
+    return 0
+  fi
+  if [ "$1 $2" = "machines list" ]; then
+    python3 -c 'import os; ls=[l.strip() for l in open(os.environ["MACHINES_FILE"]) if l.strip()]; print("["+",".join(ls)+"]")'
+    return 0
+  fi
+  return 0
+}}
+CLOUDBENCH_CLONE_RETRY_SECONDS=0
+CLOUDBENCH_CLONE_LOOKUP_SECONDS=0
+CLOUDBENCH_CLONE_MAX_ATTEMPTS=3
+{resolver}
+{cloner}
+clone_machine_target "$LEDGER"
+"""
+
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={
+            "ATTEMPT_FILE": str(attempt_file),
+            "MACHINES_FILE": str(machines_file),
+            "LEDGER": str(ledger),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    # Second attempt is the one that succeeds → clone-2.
+    assert result.stdout.strip() == "clone-2", result.stdout
+    assert attempt_file.read_text().strip() == "2", "expected exactly one retry"
+    assert "retrying" in result.stderr
+    # The resolved id is recorded once in the ownership ledger.
+    assert ledger.read_text().split() == ["clone-2"]
+
+
+def test_clone_gives_up_after_max_attempts(tmp_path: Path) -> None:
+    """Persistent (non-transient) clone failure still fails closed after the
+    bounded retry budget — retries must not loop forever."""
+    fleet = FLEET_SCRIPT.read_text()
+    resolver = _extract_fleet_function(fleet, "machine_id_for_clone_name() {")
+    cloner = _extract_fleet_function(fleet, "clone_machine_target() {")
+    ledger = tmp_path / "owned-clones.ids"
+    attempt_file = tmp_path / "attempts"
+
+    script = f"""set -uo pipefail
+APP=bench-app
+REGION=iad
+WARM_ID=warm-1
+SNAP_ID=vs_test
+export ATTEMPT_FILE="$ATTEMPT_FILE"
+FLY() {{
+  if [ "$1 $2" = "machine clone" ]; then
+    local n; n=$(( $(cat "$ATTEMPT_FILE" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$ATTEMPT_FILE"
+    echo "Error: failed to launch VM: volume not found" >&2; return 1
+  fi
+  if [ "$1 $2" = "machines list" ]; then echo "[]"; return 0; fi
+  return 0
+}}
+CLOUDBENCH_CLONE_RETRY_SECONDS=0
+CLOUDBENCH_CLONE_LOOKUP_SECONDS=0
+CLOUDBENCH_CLONE_MAX_ATTEMPTS=3
+{resolver}
+{cloner}
+clone_machine_target "$LEDGER"
+"""
+
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={"ATTEMPT_FILE": str(attempt_file), "LEDGER": str(ledger)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1, result.stdout
+    assert attempt_file.read_text().strip() == "3", "should stop at the attempt budget"
+    assert "after 3 attempt(s)" in result.stderr
