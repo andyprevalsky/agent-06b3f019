@@ -31,6 +31,7 @@ function makeSeries() {
     start: '2026-01-01T00:00:00.000Z',
     end: '2026-01-08T00:00:00.000Z',
     revenueCents: 10000 + index * 1000,
+    waitlistSignups: 3 + index,
     userCount: 20 + index,
     newUsers: 2,
     taskCount: 10 + index,
@@ -91,6 +92,7 @@ function adminHealthPayload(timeSlice = 'monthly') {
     },
     summary: {
       revenueCents: 184000,
+      waitlistSignups: 14,
       userCount: 42,
       taskCount: 128,
       tasksIssuedPerUser: 3.05,
@@ -180,6 +182,9 @@ describe('AdminHealth page', () => {
     expect(screen.getByRole('region', { name: 'General health metrics' })).toBeInTheDocument();
     expect(screen.queryByText('How secondary metrics connect to revenue')).not.toBeInTheDocument();
     expect(screen.getByText('$1,840')).toBeInTheDocument();
+    expect(screen.getByText('Waitlist Signups')).toBeInTheDocument();
+    expect(screen.getAllByText('14').length).toBeGreaterThan(0);
+    expect(screen.getByText('Email and phone entries added this month.')).toBeInTheDocument();
     expect(screen.getByText('# of Users')).toBeInTheDocument();
     expect(screen.getAllByText('42').length).toBeGreaterThan(0);
     expect(screen.getByText('2 new subscribers this period.')).toBeInTheDocument();

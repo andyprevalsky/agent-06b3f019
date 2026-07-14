@@ -2,6 +2,7 @@ import type { AdminHealthData, AdminHealthTimeSlice } from '../types';
 
 export type SeriesMetricKey =
   | 'revenueCents'
+  | 'waitlistSignups'
   | 'userCount'
   | 'tasksIssuedPerUser'
   | 'outputTokensPerTask'

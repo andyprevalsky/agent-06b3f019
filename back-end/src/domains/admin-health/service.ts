@@ -66,6 +66,7 @@ async function fetchInputs(periods: AdminHealthPeriod[]) {
     tasks,
     firstTasks,
     usersCreated,
+    waitlistSignups,
     revenue,
     subscribers,
     velocity,
@@ -75,6 +76,7 @@ async function fetchInputs(periods: AdminHealthPeriod[]) {
     repo.findRootTasksBetween(historyStart, historyEnd),
     repo.findFirstRootTasksByUserBetween(startOfWeek(historyStart), historyEnd),
     repo.findUsersCreatedBetween(historyStart, historyEnd),
+    repo.findWaitlistSignupsBetween(historyStart, historyEnd),
     fetchStripeRevenueByPeriod(periods),
     fetchStripeSubscribersByPeriod(periods),
     fetchVelocityByPeriod(periods),
@@ -85,6 +87,7 @@ async function fetchInputs(periods: AdminHealthPeriod[]) {
     tasks,
     firstTasks,
     usersCreated,
+    waitlistSignups,
     revenue,
     subscribers,
     velocity,
@@ -102,6 +105,7 @@ async function loadAdminHealth(timeSlice: AdminHealthTimeSlice): Promise<AdminHe
   const series = buildSeries(
     periods,
     input.tasks,
+    input.waitlistSignups,
     input.subscribers,
     input.revenue,
     input.velocity.buckets
@@ -126,6 +130,7 @@ async function loadAdminHealth(timeSlice: AdminHealthTimeSlice): Promise<AdminHe
     historyRange: { start: periods[0].start, end: currentPeriod.end },
     summary: {
       revenueCents: latest.revenueCents,
+      waitlistSignups: latest.waitlistSignups,
       userCount: latest.userCount,
       taskCount: latest.taskCount,
       tasksIssuedPerUser: latest.tasksIssuedPerUser,

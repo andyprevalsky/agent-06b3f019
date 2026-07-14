@@ -8,7 +8,7 @@
  * Invariants covered:
  *   - auth boundary: no auth returns 401, non-admin JWT returns 403
  *   - authorization: Andy's admin account can read company-health metrics
- *   - response shape: metrics include revenue, users, runs, retention, and velocity
+ *   - response shape: metrics include revenue, waitlist signups, users, runs, retention, and velocity
  *   - parameter handling: supported time slices are accepted
  *   - error-surface: failures return { error: string }
  *
@@ -192,6 +192,24 @@ function assertSchema<T>(schema: z.ZodType<T>, data: unknown, label: string): T 
   return result.data;
 }
 
+function assertWaitlistMetrics(data: unknown): void {
+  const payload = data as {
+    summary?: { waitlistSignups?: unknown };
+    series?: Array<{ waitlistSignups?: unknown }>;
+  };
+  const summaryCount = payload.summary?.waitlistSignups;
+  const latestCount = payload.series?.at(-1)?.waitlistSignups;
+  if (typeof summaryCount !== 'number') {
+    throw new Error('Summary must include a numeric waitlist signup count');
+  }
+  if (typeof latestCount !== 'number') {
+    throw new Error('Each series must include numeric waitlist signup counts');
+  }
+  if (summaryCount !== latestCount) {
+    throw new Error('Summary waitlist signups must match the current weekly period');
+  }
+}
+
 function assertNoImpossibleConversion(body: z.infer<typeof AdminHealthResponseSchema>): void {
   for (const step of body.funnel.steps) {
     if (step.conversionRate !== null && step.conversionRate > 1) {
@@ -278,6 +296,7 @@ async function testAdminHappyWeekly() {
     headers: authHeaders(tokenFor(ANDY_USER_ID, '+19729777432')),
   });
   assertStatus(res.status, 200, res.data);
+  assertWaitlistMetrics(res.data);
   const body = assertSchema(AdminHealthResponseSchema, res.data, 'GET /admin-health weekly');
   if (body.timeSlice !== 'weekly') throw new Error(`Expected weekly, got ${body.timeSlice}`);
   if (body.series.length !== 12)

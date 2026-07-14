@@ -1,6 +1,4 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
-
 import assert from 'node:assert';
 import type { AgentStatus } from '@prisma/client';
 import 'dotenv/config';
@@ -31,6 +29,8 @@ const task = (id: string, createdAt: string) => ({
   status: 'COMPLETED' as AgentStatus,
 });
 
+const waitlistSignup = (createdAt: string) => ({ createdAt: new Date(createdAt) });
+
 const series = buildSeries(
   periods,
   [
@@ -39,6 +39,11 @@ const series = buildSeries(
     task('jun-1', '2026-06-03T00:00:00.000Z'),
     task('jun-2', '2026-06-10T00:00:00.000Z'),
     task('jun-3', '2026-06-20T00:00:00.000Z'),
+  ],
+  [
+    waitlistSignup('2026-05-07T00:00:00.000Z'),
+    waitlistSignup('2026-06-08T00:00:00.000Z'),
+    waitlistSignup('2026-06-21T00:00:00.000Z'),
   ],
   [
     { userCount: 2, newUsers: 2 },
@@ -56,7 +61,12 @@ assert.deepStrictEqual(
   [1, 3],
   "Each bucket must divide only that period's tasks by that period's subscribed users"
 );
+assert.deepStrictEqual(
+  series.map((point) => point.waitlistSignups),
+  [1, 2],
+  'Each bucket must include waitlist entries created during that period'
+);
 assert.strictEqual(parseTimeSlice(undefined), 'monthly');
 assert.strictEqual(parseTimeSlice('weekly'), 'weekly');
 
-console.log('admin-health period metrics: passed');
+process.stdout.write('admin-health period metrics: passed\n');

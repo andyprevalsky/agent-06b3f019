@@ -20,6 +20,10 @@ export interface UserCreatedRecord {
   createdAt: Date;
 }
 
+export interface WaitlistSignupRecord {
+  createdAt: Date;
+}
+
 export async function findUserForAdminCheck(userId: string): Promise<AdminUserRecord | null> {
   return prisma.user.findUnique({
     where: { userId },
@@ -49,6 +53,16 @@ export async function findUsersCreatedBetween(
       userId: true,
       createdAt: true,
     },
+  });
+}
+
+export async function findWaitlistSignupsBetween(
+  start: Date,
+  end: Date
+): Promise<WaitlistSignupRecord[]> {
+  return prisma.waitlist.findMany({
+    where: { createdAt: { gte: start, lt: end } },
+    select: { createdAt: true },
   });
 }
 
