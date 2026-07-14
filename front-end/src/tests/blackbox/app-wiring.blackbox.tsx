@@ -98,7 +98,7 @@ describe('App wiring', () => {
       expect(screen.getByText(/downloading rose for mac/i)).toBeInTheDocument();
     });
 
-    it('"/waitlist" automatically opens the phone login modal', async () => {
+    it('"/waitlist" renders the main Terminal and automatically opens the phone login modal', async () => {
       renderWithProviders(<AppRoutes />, { route: '/waitlist' });
 
       await waitFor(() => {
@@ -110,6 +110,7 @@ describe('App wiring', () => {
         within(screen.getByRole('dialog')).queryByText('Start Building.'),
       ).not.toBeInTheDocument();
       expect(screen.getByLabelText('Phone Number')).toBeInTheDocument();
+      expect(screen.getByTestId('terminal-input-area')).toBeInTheDocument();
 
       fireEvent.keyDown(document, { key: 'Escape' });
       await waitFor(() => {

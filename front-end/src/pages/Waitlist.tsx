@@ -9,13 +9,13 @@
  *       |
  *       +-- global WaitlistGate checks invite status
  *             +-- invite required --> waitlist confirmation
- *             +-- invite redeemed --> landing page remains available
+ *             +-- invite redeemed --> main Terminal remains available
  */
 
 import { useCallback, useState } from 'react';
 
 import { PhoneAuthModal, useAuth } from '@/features/auth';
-import IndexPage from '@/features/index';
+import Terminal from '@/features/terminal';
 
 const Waitlist = () => {
   const [loginDismissed, setLoginDismissed] = useState(false);
@@ -34,7 +34,7 @@ const Waitlist = () => {
 
   return (
     <>
-      <IndexPage />
+      <Terminal />
       <PhoneAuthModal
         open={loginOpen}
         onOpenChange={handleOpenChange}
