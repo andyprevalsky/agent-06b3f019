@@ -1088,6 +1088,11 @@ CHILD_MACHINE=()
 LEASED_PRIMARY_IDS=()
 LEASED_PRIMARY_NONCES=()
 
+track_primary_lease() {
+    LEASED_PRIMARY_IDS+=("$1")
+    LEASED_PRIMARY_NONCES+=("$2")
+}
+
 terminate_and_wait() {  # bounded TERM→KILL for controller-owned local children
     [ "$#" -gt 0 ] || return 0
     local p watchdog
@@ -1423,6 +1428,7 @@ for bench in "${BENCHES[@]}"; do
     cid=""
     primary_nonce=""
     primary_lease_rc=0
+    primary_lease_tracked=0
     while :; do
         cid="$(claim_pool_machine)"
         pool_claim_rc=$?
@@ -1450,9 +1456,13 @@ for bench in "${BENCHES[@]}"; do
     if [ -z "$cid" ]; then
         echo "▶️  [$bench] pool empty → cloning fresh isolated machine (mode=$mode_label, dash=$port) ..."
         if ! cid="$(clone_machine_target "$OWNED_CLONES_FILE")"; then
-            echo "   ❌ clone failed for $bench"
-            i=$((i + 1)); continue
+            echo "   ❌ clone failed for $bench; aborting the incomplete fleet" >&2
+            exit 1
         fi
+    fi
+    if [ -n "$primary_nonce" ]; then
+        track_primary_lease "$cid" "$primary_nonce"
+        primary_lease_tracked=1
     fi
     case " ${CHILD_MACHINE[*]:-} " in
         *" $cid "*) echo "❌ isolation violation: machine $cid was allocated twice" >&2; exit 1 ;;
@@ -1460,10 +1470,8 @@ for bench in "${BENCHES[@]}"; do
     # Snapshot forks are documented above as taking about 300s; allow twice
     # that envelope for Fly to leave the transient `created` state.
     if ! cloudbench_wait_machine_startable fleet_machine_state "$cid" 300 2; then
-        echo "   ❌ machine=$cid never became startable; skipping $bench" >&2
-        release_pool_claim "$cid"
-        i=$((i + 1))
-        continue
+        echo "   ❌ machine=$cid never became startable; aborting the incomplete fleet" >&2
+        exit 1
     fi
     if [ -z "$primary_nonce" ]; then
         primary_nonce="$(cloudbench_machine_lease_acquire_retry "$APP" "$cid" \
@@ -1472,34 +1480,27 @@ for bench in "${BENCHES[@]}"; do
             "${CLOUDBENCH_PRIMARY_LEASE_RETRY_DELAY:-2}")"
     fi
     if [ -z "$primary_nonce" ]; then
-        echo "   ❌ could not acquire platform lease for primary $cid" >&2
-        i=$((i + 1)); continue
+        echo "   ❌ could not acquire platform lease for primary $cid; aborting the incomplete fleet" >&2
+        exit 1
     fi
-    lease_track_index="${#LEASED_PRIMARY_IDS[@]}"
-    LEASED_PRIMARY_IDS+=("$cid")
-    LEASED_PRIMARY_NONCES+=("$primary_nonce")
+    if [ "$primary_lease_tracked" != 1 ]; then
+        track_primary_lease "$cid" "$primary_nonce"
+        primary_lease_tracked=1
+    fi
     echo "   🔐 activating staged environment on leased primary $cid ..."
     if ! cloudbench_activate_machine_environment_with_lease "$APP" "$cid" "$primary_nonce"; then
-        echo "   ❌ could not activate environment on leased primary $cid" >&2
-        if cloudbench_machine_stop_and_release_lease "$APP" "$cid" "$primary_nonce"; then
-            LEASED_PRIMARY_NONCES[$lease_track_index]=""
-            release_pool_claim "$cid"
-        fi
-        i=$((i + 1)); continue
+        echo "   ❌ could not activate environment on leased primary $cid; aborting the incomplete fleet" >&2
+        exit 1
     fi
     if ! cloudbench_machine_start_with_lease "$APP" "$cid" "$primary_nonce"; then
-        echo "   ❌ could not start leased primary $cid" >&2
-        if cloudbench_machine_stop_and_release_lease "$APP" "$cid" "$primary_nonce"; then
-            LEASED_PRIMARY_NONCES[$lease_track_index]=""
-            release_pool_claim "$cid"
-        fi
-        i=$((i + 1)); continue
+        echo "   ❌ could not start leased primary $cid; aborting the incomplete fleet" >&2
+        exit 1
     fi
     echo "   ✅ machine=$cid → leased + launching run-bench-cloud (isolated) ..."
 
     # Deterministic per-bench workspace → deterministic Temporal queue, so the
     # autoscaler knows which queue its worker pool must poll.
-    local_ws="$(printf 'flt-%s-%s-%s' "$bench" "$$" "$i" | tr -c 'a-z0-9-' '-' | cut -c1-48)"
+    local_ws="$(cloudbench_fleet_workspace_name "$bench" "$$" "$i")" || exit 1
     (
         CLOUDBENCH_WORKSPACE_NAME="$local_ws" \
         CLOUDBENCH_ENV_REFRESHED=1 \
@@ -1534,9 +1535,11 @@ done
 
 # Every primary now has an immutable environment-bearing source (owned pool VM
 # or fresh warm clone). Other worktrees may safely stage their environment.
+[ "${#CHILD_PIDS[@]}" -eq "${#BENCHES[@]}" ] || {
+    echo "❌ incomplete fleet launch: ${#CHILD_PIDS[@]}/${#BENCHES[@]} requested benches received runners" >&2
+    exit 1
+}
 release_app_environment_lock
-
-[ "${#CHILD_PIDS[@]}" -ge 1 ] || { echo "❌ no benches launched (all clones failed)." >&2; exit 1; }
 
 echo ""
 echo "⏳ ${#CHILD_PIDS[@]} isolated bench machine(s) running."

@@ -24,6 +24,18 @@ source "$HELPER_SRC"
 # shellcheck source=../lib/ngrok-tunnel.sh
 source "$NGROK_HELPER_SRC"
 
+long_workspace="$(cloudbench_fleet_workspace_name plaid-transactions-dead-subscriptions 32787 21)"
+[ "${#long_workspace}" -le 48 ] || fail "fleet workspace names must fit Fly's 48-character limit"
+case "$long_workspace" in
+  *-32787-21) ;;
+  *) fail "fleet workspace truncation must preserve its run and task-index uniqueness suffix" ;;
+esac
+neighbor_workspace="$(cloudbench_fleet_workspace_name plaid-transactions-dead-subscription-summary 32787 21)"
+[ "$neighbor_workspace" != "$long_workspace" ] || \
+  fail "long task slugs with a shared prefix must retain a distinguishing hash"
+[ "$(cloudbench_fleet_workspace_name plaid-transactions-dead-subscriptions 32787 22)" != "$long_workspace" ] || \
+  fail "separate tasks in one fleet must never share a Temporal workspace"
+
 [ "$(public_tunnel_provider_for_mode 1)" = "cloudflare" ] || \
   fail "ephemeral benchmark mode must dispatch to the per-process Quick Tunnel provider"
 [ "$(public_tunnel_provider_for_mode 0)" = "ngrok" ] || \
@@ -304,7 +316,12 @@ git -C "$patch_repo" apply "$patch_file"
 api_calls="$TMP_ROOT/machines-api-calls"
 api_lease_state="$TMP_ROOT/machines-api-lease-state"
 api_primary_stop_fail="$TMP_ROOT/machines-api-primary-stop-fail"
+api_primary_stop_conflict_state="$TMP_ROOT/machines-api-primary-stop-conflict-state"
+api_primary_release_failure="$TMP_ROOT/machines-api-primary-release-failure"
 api_primary_activation_attempts="$TMP_ROOT/machines-api-primary-activation-attempts"
+api_transport_activation_reads="$TMP_ROOT/machines-api-transport-activation-reads"
+api_transient_activation_reads="$TMP_ROOT/machines-api-transient-activation-reads"
+api_transient_activation_updates="$TMP_ROOT/machines-api-transient-activation-updates"
 api_bad_activation_attempts="$TMP_ROOT/machines-api-bad-activation-attempts"
 api_primary_start_attempts="$TMP_ROOT/machines-api-primary-start-attempts"
 api_bad_start_attempts="$TMP_ROOT/machines-api-bad-start-attempts"
@@ -312,6 +329,9 @@ api_fresh_lease_attempts="$TMP_ROOT/machines-api-fresh-lease-attempts"
 api_bad_lease_attempts="$TMP_ROOT/machines-api-bad-lease-attempts"
 cloud_lease_get_failure="$TMP_ROOT/cloud-lease-get-failure"
 printf '0\n' > "$api_primary_activation_attempts"
+printf '0\n' > "$api_transport_activation_reads"
+printf '0\n' > "$api_transient_activation_reads"
+printf '0\n' > "$api_transient_activation_updates"
 printf '0\n' > "$api_bad_activation_attempts"
 printf '0\n' > "$api_primary_start_attempts"
 printf '0\n' > "$api_bad_start_attempts"
@@ -352,9 +372,15 @@ cloudbench_machines_api_request() {
       CLOUDBENCH_API_BODY='{"status":"success","data":{"nonce":"primary-nonce","owner":"runner"}}'
       ;;
     'GET|/v1/apps/bench-app/machines/primary-machine')
-      activation_attempt="$(cat "$api_primary_activation_attempts")"
-      CLOUDBENCH_API_STATUS=200
-      CLOUDBENCH_API_BODY="{\"id\":\"primary-machine\",\"name\":\"primary\",\"region\":\"ord\",\"version\":\"v$((activation_attempt + 1))\",\"config\":{\"image\":\"example/image:latest\"}}"
+      if [ -s "$api_primary_stop_conflict_state" ]; then
+        state="$(cat "$api_primary_stop_conflict_state")"
+        CLOUDBENCH_API_STATUS=200
+        CLOUDBENCH_API_BODY="{\"id\":\"primary-machine\",\"state\":\"$state\"}"
+      else
+        activation_attempt="$(cat "$api_primary_activation_attempts")"
+        CLOUDBENCH_API_STATUS=200
+        CLOUDBENCH_API_BODY="{\"id\":\"primary-machine\",\"name\":\"primary\",\"region\":\"ord\",\"version\":\"v$((activation_attempt + 1))\",\"config\":{\"image\":\"example/image:latest\"}}"
+      fi
       ;;
     'POST|/v1/apps/bench-app/machines/primary-machine')
       [ "$nonce" = "primary-nonce" ] || fail "primary environment activation omitted its Fly lease nonce"
@@ -371,6 +397,50 @@ cloudbench_machines_api_request() {
         CLOUDBENCH_API_BODY='{"id":"primary-machine","state":"stopped"}'
       fi
       ;;
+    'GET|/v1/apps/bench-app/machines/transport-activation-machine')
+      activation_read="$(cat "$api_transport_activation_reads")"
+      activation_read=$((activation_read + 1))
+      printf '%s\n' "$activation_read" > "$api_transport_activation_reads"
+      if [ "$activation_read" -eq 1 ]; then
+        CLOUDBENCH_API_STATUS=0
+        CLOUDBENCH_API_BODY='connection reset by peer'
+        return 1
+      fi
+      CLOUDBENCH_API_STATUS=200
+      CLOUDBENCH_API_BODY='{"id":"transport-activation-machine","name":"transport","region":"ord","version":"transport-v1","config":{"image":"example/image:latest"}}'
+      ;;
+    'POST|/v1/apps/bench-app/machines/transport-activation-machine')
+      [ "$nonce" = "transport-activation-nonce" ] || \
+        fail "transport-retried Machine activation omitted its Fly lease nonce"
+      CLOUDBENCH_API_STATUS=200
+      CLOUDBENCH_API_BODY='{"id":"transport-activation-machine","state":"stopped"}'
+      ;;
+    'GET|/v1/apps/bench-app/machines/transient-http-activation-machine')
+      activation_read="$(cat "$api_transient_activation_reads")"
+      activation_read=$((activation_read + 1))
+      printf '%s\n' "$activation_read" > "$api_transient_activation_reads"
+      if [ "$activation_read" -eq 1 ]; then
+        CLOUDBENCH_API_STATUS=503
+        CLOUDBENCH_API_BODY='{"error":"control plane temporarily unavailable"}'
+      else
+        CLOUDBENCH_API_STATUS=200
+        CLOUDBENCH_API_BODY="{\"id\":\"transient-http-activation-machine\",\"name\":\"transient-http\",\"region\":\"ord\",\"version\":\"http-v$activation_read\",\"config\":{\"image\":\"example/image:latest\"}}"
+      fi
+      ;;
+    'POST|/v1/apps/bench-app/machines/transient-http-activation-machine')
+      [ "$nonce" = "transient-http-activation-nonce" ] || \
+        fail "HTTP-retried Machine activation omitted its Fly lease nonce"
+      activation_update="$(cat "$api_transient_activation_updates")"
+      activation_update=$((activation_update + 1))
+      printf '%s\n' "$activation_update" > "$api_transient_activation_updates"
+      if [ "$activation_update" -eq 1 ]; then
+        CLOUDBENCH_API_STATUS=502
+        CLOUDBENCH_API_BODY='{"error":"upstream temporarily unavailable"}'
+      else
+        CLOUDBENCH_API_STATUS=200
+        CLOUDBENCH_API_BODY='{"id":"transient-http-activation-machine","state":"stopped"}'
+      fi
+      ;;
     'GET|/v1/apps/bench-app/machines/bad-activation-machine')
       CLOUDBENCH_API_STATUS=200
       CLOUDBENCH_API_BODY='{"id":"bad-activation-machine","name":"bad","region":"ord","version":"bad-v1","config":{"image":"example/image:latest"}}'
@@ -378,7 +448,7 @@ cloudbench_machines_api_request() {
     'POST|/v1/apps/bench-app/machines/bad-activation-machine')
       bad_activation_attempt="$(cat "$api_bad_activation_attempts")"
       printf '%s\n' "$((bad_activation_attempt + 1))" > "$api_bad_activation_attempts"
-      CLOUDBENCH_API_STATUS=500
+      CLOUDBENCH_API_STATUS=422
       CLOUDBENCH_API_BODY='{"error":"permanent activation error"}'
       ;;
     'POST|/v1/apps/bench-app/machines/primary-machine/start')
@@ -399,6 +469,9 @@ cloudbench_machines_api_request() {
       if [ -e "$api_primary_stop_fail" ]; then
         CLOUDBENCH_API_STATUS=500
         CLOUDBENCH_API_BODY='{"error":"stop failed"}'
+      elif [ -s "$api_primary_stop_conflict_state" ]; then
+        CLOUDBENCH_API_STATUS=409
+        CLOUDBENCH_API_BODY='{"error":"machine lifecycle conflict"}'
       else
         CLOUDBENCH_API_STATUS=200
         CLOUDBENCH_API_BODY='{"ok":true}'
@@ -412,8 +485,21 @@ cloudbench_machines_api_request() {
       ;;
     'DELETE|/v1/apps/bench-app/machines/primary-machine/lease')
       [ "$nonce" = "primary-nonce" ] || fail "primary lease release omitted its Fly lease nonce"
-      CLOUDBENCH_API_STATUS=200
-      CLOUDBENCH_API_BODY='{"ok":true}'
+      case "$(cat "$api_primary_release_failure" 2>/dev/null || true)" in
+        transport)
+          CLOUDBENCH_API_STATUS=0
+          CLOUDBENCH_API_BODY='connection reset by peer'
+          return 1
+          ;;
+        http)
+          CLOUDBENCH_API_STATUS=503
+          CLOUDBENCH_API_BODY='{"error":"temporarily unavailable"}'
+          ;;
+        *)
+          CLOUDBENCH_API_STATUS=200
+          CLOUDBENCH_API_BODY='{"ok":true}'
+          ;;
+      esac
       ;;
     'DELETE|/v1/apps/bench-app/machines/primary-machine?force=true')
       [ "$nonce" = "primary-nonce" ] || fail "primary destroy omitted its Fly lease nonce"
@@ -470,13 +556,29 @@ activation_versions="$(awk -F'|' '$1 == "POST" && $2 == "/v1/apps/bench-app/mach
   "$api_calls" | while IFS= read -r update_body; do printf '%s' "$update_body" | jq -r '.current_version'; done | paste -sd, -)"
 [ "$activation_versions" = "v1,v2" ] || \
   fail "Machine activation retries must advance current_version after a 408"
+if ! CLOUDBENCH_MACHINE_ACTIVATION_RETRY_DELAY=0 \
+  cloudbench_activate_machine_environment_with_lease \
+    bench-app transport-activation-machine transport-activation-nonce; then
+  fail "Machine activation dropped a task after one transient Machines API transport failure"
+fi
+[ "$(cat "$api_transport_activation_reads")" -eq 2 ] || \
+  fail "Machine activation must retry a transient Machines API transport failure"
+if ! CLOUDBENCH_MACHINE_ACTIVATION_RETRY_DELAY=0 \
+  cloudbench_activate_machine_environment_with_lease \
+    bench-app transient-http-activation-machine transient-http-activation-nonce; then
+  fail "Machine activation dropped a task after a transient Machines API HTTP failure"
+fi
+[ "$(cat "$api_transient_activation_reads")" -eq 3 ] || \
+  fail "Machine activation must re-read state after transient GET and update HTTP failures"
+[ "$(cat "$api_transient_activation_updates")" -eq 2 ] || \
+  fail "Machine activation must retry transient Machines API update HTTP failures"
 if CLOUDBENCH_MACHINE_ACTIVATION_RETRY_DELAY=0 \
   cloudbench_activate_machine_environment_with_lease \
     bench-app bad-activation-machine bad-activation-nonce >/dev/null 2>&1; then
   fail "non-408 Machine activation failures must fail closed"
 fi
 [ "$(cat "$api_bad_activation_attempts")" -eq 1 ] || \
-  fail "non-408 Machine activation failures must not be retried"
+  fail "permanent Machine activation failures must not be retried"
 CLOUDBENCH_MACHINE_START_RETRY_DELAY=0 \
   cloudbench_machine_start_with_lease bench-app primary-machine "$primary_nonce"
 [ "$(cat "$api_primary_start_attempts")" -eq 2 ] || \
@@ -500,6 +602,48 @@ release_count_after="$(grep -c 'DELETE|/v1/apps/bench-app/machines/primary-machi
 [ "$release_count_after" -eq "$release_count_before" ] || \
   fail "a failed primary stop must retain its live lease for cleanup retry"
 rm -f "$api_primary_stop_fail"
+
+for unsafe_state in started replacing; do
+  printf '%s\n' "$unsafe_state" > "$api_primary_stop_conflict_state"
+  release_count_before="$(grep -c 'DELETE|/v1/apps/bench-app/machines/primary-machine/lease' "$api_calls")"
+  if cloudbench_machine_stop_and_release_lease \
+    bench-app primary-machine primary-nonce >/dev/null 2>&1; then
+    fail "a stop conflict must not release a Machine lease while state is $unsafe_state"
+  fi
+  release_count_after="$(grep -c 'DELETE|/v1/apps/bench-app/machines/primary-machine/lease' "$api_calls")"
+  [ "$release_count_after" -eq "$release_count_before" ] || \
+    fail "an unverified stop conflict must retain its Machine lease"
+done
+
+printf 'stopped\n' > "$api_primary_stop_conflict_state"
+conflict_read_count_before="$(grep -c 'GET|/v1/apps/bench-app/machines/primary-machine' "$api_calls")"
+release_count_before="$(grep -c 'DELETE|/v1/apps/bench-app/machines/primary-machine/lease' "$api_calls")"
+cloudbench_machine_stop_and_release_lease bench-app primary-machine primary-nonce
+conflict_read_count_after="$(grep -c 'GET|/v1/apps/bench-app/machines/primary-machine' "$api_calls")"
+release_count_after="$(grep -c 'DELETE|/v1/apps/bench-app/machines/primary-machine/lease' "$api_calls")"
+[ "$conflict_read_count_after" -eq $((conflict_read_count_before + 1)) ] || \
+  fail "a stopped Machine must be verified after a stop conflict"
+[ "$release_count_after" -eq $((release_count_before + 1)) ] || \
+  fail "a verified-stopped Machine must release its lease exactly once"
+rm -f "$api_primary_stop_conflict_state"
+
+for release_failure in transport http; do
+  printf '%s\n' "$release_failure" > "$api_primary_release_failure"
+  tracked_nonce=primary-nonce
+  local_claim=present
+  if cloudbench_machine_stop_and_release_lease \
+    bench-app primary-machine "$tracked_nonce" >/dev/null 2>&1; then
+    tracked_nonce=""
+    local_claim=""
+  fi
+  [ "$tracked_nonce" = primary-nonce ] || \
+    fail "a $release_failure lease-release failure must retain the nonce for cleanup retry"
+  [ "$local_claim" = present ] || \
+    fail "a $release_failure lease-release failure must retain the local Machine claim"
+done
+rm -f "$api_primary_release_failure"
+cloudbench_machine_stop_and_release_lease bench-app primary-machine primary-nonce
+
 cloudbench_machine_destroy_with_lease bench-app primary-machine "$primary_nonce"
 require_text "$api_calls" \
   'DELETE|/v1/apps/bench-app/machines/primary-machine?force=true||primary-nonce' \
@@ -641,18 +785,39 @@ fresh_clone_line="$(grep -n 'pool empty → cloning fresh isolated machine' "$RO
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'cloudbench_machine_lease_acquire_retry "$APP" "$cid"' \
   "fresh clones must wait for Fly's bootstrap lease handoff"
-lease_record_line="$(grep -n 'LEASED_PRIMARY_IDS+=("$cid")' "$ROOT_DIR/scripts/run-bench-fleet" | cut -d: -f1)"
+lease_record_lines="$(grep -n 'track_primary_lease "$cid" "$primary_nonce"' \
+  "$ROOT_DIR/scripts/run-bench-fleet" | cut -d: -f1)"
+pool_lease_record_line="$(printf '%s\n' "$lease_record_lines" | sed -n '1p')"
+fresh_lease_record_line="$(printf '%s\n' "$lease_record_lines" | sed -n '2p')"
+duplicate_guard_line="$(grep -n 'isolation violation: machine $cid was allocated twice' \
+  "$ROOT_DIR/scripts/run-bench-fleet" | cut -d: -f1)"
+startable_line="$(grep -n 'cloudbench_wait_machine_startable fleet_machine_state "$cid"' \
+  "$ROOT_DIR/scripts/run-bench-fleet" | cut -d: -f1)"
+fresh_lease_acquire_line="$(grep -n 'primary_nonce="$(cloudbench_machine_lease_acquire_retry' \
+  "$ROOT_DIR/scripts/run-bench-fleet" | cut -d: -f1)"
 leased_start_line="$(grep -n 'cloudbench_machine_start_with_lease "$APP" "$cid" "$primary_nonce"' "$ROOT_DIR/scripts/run-bench-fleet" | cut -d: -f1)"
-[ -n "$lease_record_line" ] && [ "$lease_record_line" -lt "$leased_start_line" ] || \
-  fail "fleet must record leased ownership before attempting to start a primary"
 target_activation_line="$(grep -n 'cloudbench_activate_machine_environment_with_lease "$APP" "$cid" "$primary_nonce"' "$ROOT_DIR/scripts/run-bench-fleet" | cut -d: -f1)"
 primary_lease_line="$(grep -n 'primary_nonce="$(cloudbench_machine_lease_acquire' "$ROOT_DIR/scripts/run-bench-fleet" | head -1 | cut -d: -f1)"
+[ -n "$pool_lease_record_line" ] && [ "$pool_lease_record_line" -lt "$duplicate_guard_line" ] && \
+  [ "$duplicate_guard_line" -lt "$startable_line" ] || \
+  fail "fleet must ledger a won pool lease before any later provisioning invariant can abort"
+[ -n "$fresh_lease_record_line" ] && [ "$fresh_lease_acquire_line" -lt "$fresh_lease_record_line" ] && \
+  [ "$fresh_lease_record_line" -lt "$target_activation_line" ] || \
+  fail "fleet must ledger a fresh-clone lease before activation can abort"
 [ -n "$target_activation_line" ] && [ "$primary_lease_line" -lt "$target_activation_line" ] && \
   [ "$target_activation_line" -lt "$leased_start_line" ] || \
   fail "fleet must activate its claimed primary inside the lease before start"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
-  'cloudbench_machine_stop_and_release_lease "$APP" "$cid" "$primary_nonce"' \
-  "an ambiguous leased-start failure must stop before releasing ownership"
+  'cloudbench_fleet_workspace_name "$bench" "$$" "$i"' \
+  "fleet Temporal workspace names must preserve their run and task-index suffix"
+fleet_launch_block="$(sed -n '/# ── Clone one machine per bench/,/# Every primary now has/p' \
+  "$ROOT_DIR/scripts/run-bench-fleet")"
+if printf '%s\n' "$fleet_launch_block" | grep -Fq 'continue'; then
+  fail "a requested bench provisioning failure must abort the fleet instead of launching a partial batch"
+fi
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  '[ "${#CHILD_PIDS[@]}" -eq "${#BENCHES[@]}" ] || {' \
+  "fleet launch must verify every requested bench received an isolated runner"
 if grep -Fq 'reconciling authoritative pool machine' "$ROOT_DIR/scripts/run-bench-fleet"; then
   fail "fleet cleanup must not stop unowned shared pool Machines"
 fi

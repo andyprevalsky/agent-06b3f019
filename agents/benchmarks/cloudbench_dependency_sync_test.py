@@ -1996,8 +1996,11 @@ def test_environment_refresh_serializes_shared_app_and_reconciles_pool_first() -
     assert fleet.index("reconcile_pool || exit 1") < fleet.index(refresh_call)
     assert fleet.index(refresh_call) < fleet.index('cid="$(claim_pool_machine)"')
     allocation_start = fleet.index("# ── Clone one machine per bench")
-    allocation_end = fleet.index('[ "${#CHILD_PIDS[@]}" -ge 1 ]', allocation_start)
+    all_requested_launched = '[ "${#CHILD_PIDS[@]}" -eq "${#BENCHES[@]}" ]'
+    allocation_end = fleet.index('echo "⏳ ${#CHILD_PIDS[@]} isolated', allocation_start)
     allocation = fleet[allocation_start:allocation_end]
+    assert "continue" not in allocation
+    assert all_requested_launched in fleet
     assert "release_app_environment_lock" in allocation
     assert "CLOUDBENCH_APP_ENV_LOCK_OWNER_PID" in fleet
     assert 'clone_machine_target "$out/worker-clones.ids" "$primary_id"' in fleet

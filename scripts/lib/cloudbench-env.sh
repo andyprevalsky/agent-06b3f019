@@ -34,6 +34,28 @@ cloudbench_env_sha256() {
   fi
 }
 
+cloudbench_fleet_workspace_name() {
+  local bench="$1" run_token="$2" index="$3" prefix="flt-" suffix slug digest max_slug head_length
+  suffix="-$run_token-$index"
+  max_slug=$((48 - ${#prefix} - ${#suffix}))
+  [ "$max_slug" -ge 10 ] || {
+    echo "FATAL: cloud benchmark fleet run token is too long for a unique workspace name" >&2
+    return 2
+  }
+  slug="$(printf '%s' "$bench" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-')"
+  [ -n "$slug" ] || slug="bench"
+  if [ "${#slug}" -gt "$max_slug" ]; then
+    if command -v sha256sum >/dev/null 2>&1; then
+      digest="$(printf '%s' "$slug" | sha256sum | awk '{print substr($1, 1, 8)}')"
+    else
+      digest="$(printf '%s' "$slug" | shasum -a 256 | awk '{print substr($1, 1, 8)}')"
+    fi
+    head_length=$((max_slug - ${#digest} - 1))
+    slug="${slug:0:$head_length}-$digest"
+  fi
+  printf '%s%s%s\n' "$prefix" "$slug" "$suffix"
+}
+
 cloudbench_verify_env_file() {
   local path="$1" expected="$2" label="$3" actual
   [ -n "$expected" ] || {
@@ -599,49 +621,121 @@ cloudbench_machine_destroy_with_lease() {
   }
 }
 
+cloudbench_machines_api_status_is_transient() {
+  case "$1" in
+    0|408|409|425|429|500|502|503|504) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 cloudbench_activate_machine_environment_with_lease() {
-  local app="$1" machine_id="$2" nonce="$3" body
+  local app="$1" machine_id="$2" nonce="$3" body failure_stage status
   local attempts="${CLOUDBENCH_MACHINE_ACTIVATION_ATTEMPTS:-3}"
   local delay="${CLOUDBENCH_MACHINE_ACTIVATION_RETRY_DELAY:-2}" attempt=1
   case "$attempts" in ''|*[!0-9]*|0) return 2 ;; esac
   case "$delay" in ''|*[!0-9]*) return 2 ;; esac
   while [ "$attempt" -le "$attempts" ]; do
-    # Re-read on every attempt: an ambiguous 408 may have committed the prior
-    # update, in which case current_version must advance before retrying.
-    cloudbench_machines_api_request GET "/v1/apps/$app/machines/$machine_id" || return 1
-    [ "$CLOUDBENCH_API_STATUS" = "200" ] || return 1
-    body="$(printf '%s' "$CLOUDBENCH_API_BODY" | jq -c '{
+    failure_stage="read"
+    status=0
+    if cloudbench_machines_api_request GET "/v1/apps/$app/machines/$machine_id"; then
+      status="$CLOUDBENCH_API_STATUS"
+    else
+      status="${CLOUDBENCH_API_STATUS:-0}"
+    fi
+
+    if [ "$status" = "200" ]; then
+      if ! body="$(printf '%s' "$CLOUDBENCH_API_BODY" | jq -ce '{
       config: .config,
       name: .name,
       region: .region,
       skip_launch: true
-    } + (if .version then {current_version: .version} else {} end)')"
-    [ -n "$body" ] || return 1
-    cloudbench_machines_api_request POST "/v1/apps/$app/machines/$machine_id" "$body" "$nonce" || return 1
-    [ "$CLOUDBENCH_API_STATUS" = "200" ] && return 0
-    if [ "$CLOUDBENCH_API_STATUS" != "408" ]; then
-      echo "Machine environment activation failed for $machine_id (HTTP $CLOUDBENCH_API_STATUS)" >&2
+      } + (if .version then {current_version: .version} else {} end)')"; then
+        echo "Machine environment activation received an invalid Machine response for $machine_id" >&2
+        return 1
+      fi
+
+      failure_stage="update"
+      status=0
+      if cloudbench_machines_api_request \
+        POST "/v1/apps/$app/machines/$machine_id" "$body" "$nonce"; then
+        status="$CLOUDBENCH_API_STATUS"
+      else
+        status="${CLOUDBENCH_API_STATUS:-0}"
+      fi
+      [ "$status" = "200" ] && return 0
+    fi
+
+    if ! cloudbench_machines_api_status_is_transient "$status"; then
+      echo "Machine environment activation $failure_stage failed for $machine_id (HTTP $status)" >&2
       return 1
     fi
+
     [ "$attempt" -eq "$attempts" ] && break
+    echo "Machine environment activation $failure_stage had a transient failure for $machine_id (HTTP $status, attempt $attempt/$attempts); retrying in ${delay}s" >&2
     sleep "$delay"
     attempt=$((attempt + 1))
   done
-  echo "Machine environment activation timed out for $machine_id after $attempts attempts" >&2
+  echo "Machine environment activation failed for $machine_id after $attempts transient attempts (last_stage=$failure_stage, HTTP $status)" >&2
   return 1
 }
 
 cloudbench_machine_release_lease() {
-  local app="$1" machine_id="$2" nonce="$3"
-  cloudbench_machines_api_request DELETE "/v1/apps/$app/machines/$machine_id/lease" "" "$nonce" >/dev/null 2>&1 || true
+  local app="$1" machine_id="$2" nonce="$3" status
+  if ! cloudbench_machines_api_request \
+    DELETE "/v1/apps/$app/machines/$machine_id/lease" "" "$nonce"; then
+    status="${CLOUDBENCH_API_STATUS:-0}"
+    echo "Machine lease release failed for $machine_id (HTTP $status)" >&2
+    return 1
+  fi
+  status="${CLOUDBENCH_API_STATUS:-0}"
+  case "$status" in
+    2??) return 0 ;;
+    *)
+      echo "Machine lease release failed for $machine_id (HTTP $status)" >&2
+      return 1
+      ;;
+  esac
 }
 
 cloudbench_machine_stop_and_release_lease() {
-  local app="$1" machine_id="$2" nonce="$3" stop_ok=0
-  if cloudbench_machines_api_request POST "/v1/apps/$app/machines/$machine_id/stop" '{}' "$nonce"; then
-    case "$CLOUDBENCH_API_STATUS" in 200|409) stop_ok=1 ;; esac
+  local app="$1" machine_id="$2" nonce="$3" status state
+  if ! cloudbench_machines_api_request \
+    POST "/v1/apps/$app/machines/$machine_id/stop" '{}' "$nonce"; then
+    status="${CLOUDBENCH_API_STATUS:-0}"
+    echo "Machine stop failed for $machine_id (HTTP $status)" >&2
+    return 1
   fi
-  [ "$stop_ok" = "1" ] || return 1
+  status="${CLOUDBENCH_API_STATUS:-0}"
+  case "$status" in
+    200) ;;
+    409)
+      # A stop conflict can mean either "already stopped" or an unsafe
+      # lifecycle transition. Release ownership only after an authoritative
+      # read proves this exact Machine is stopped.
+      if ! cloudbench_machines_api_request \
+        GET "/v1/apps/$app/machines/$machine_id" "" "$nonce"; then
+        status="${CLOUDBENCH_API_STATUS:-0}"
+        echo "Machine state verification failed after stop conflict for $machine_id (HTTP $status)" >&2
+        return 1
+      fi
+      status="${CLOUDBENCH_API_STATUS:-0}"
+      [ "$status" = "200" ] || {
+        echo "Machine state verification failed after stop conflict for $machine_id (HTTP $status)" >&2
+        return 1
+      }
+      state="$(printf '%s' "$CLOUDBENCH_API_BODY" | jq -er \
+        --arg machine_id "$machine_id" \
+        'select(.id == $machine_id) | .state // empty' 2>/dev/null)" || state=""
+      [ "$state" = "stopped" ] || {
+        echo "Machine $machine_id remained ${state:-unknown} after stop conflict; retaining its lease" >&2
+        return 1
+      }
+      ;;
+    *)
+      echo "Machine stop failed for $machine_id (HTTP $status)" >&2
+      return 1
+      ;;
+  esac
   cloudbench_machine_release_lease "$app" "$machine_id" "$nonce"
 }
 
