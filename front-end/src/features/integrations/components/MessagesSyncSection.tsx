@@ -14,7 +14,7 @@ import { Button } from '@/components/ui/button';
 
 import type { ConnectedIntegration, MessageSyncType } from '../types';
 import ConnectedAccountChip from './ConnectedAccountChip';
-import DropdownIconFrame, { dropdownIconPreset } from './DropdownIconFrame';
+import DropdownIconFrame, { DropdownIconPreset } from './DropdownIconFrame';
 import {
   ChatSyncIcon,
   GmailIcon,
@@ -85,7 +85,7 @@ function IMessageRow({
     return (
       <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
         <div className="flex items-center gap-3">
-          <DropdownIconFrame {...dropdownIconPreset.imessage} isSynced={synced}>
+          <DropdownIconFrame {...DropdownIconPreset.imessage} isSynced={synced}>
             <IMessageIcon gradientId="imessageGrad" />
           </DropdownIconFrame>
           <div className="flex min-w-0 items-center">
@@ -99,7 +99,7 @@ function IMessageRow({
   return (
     <div className="px-4 py-2 flex items-center justify-between flex-wrap gap-2 border-b border-border/50">
       <div className="flex items-center gap-3">
-        <DropdownIconFrame {...dropdownIconPreset.imessage}>
+        <DropdownIconFrame {...DropdownIconPreset.imessage}>
           <IMessageIcon gradientId="imessageGradAlt" />
         </DropdownIconFrame>
         <div className="flex items-center gap-2">
@@ -165,7 +165,7 @@ function GmailRow({
   return (
     <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
       <div className="flex items-center gap-3">
-        <DropdownIconFrame {...dropdownIconPreset.gmail} isSynced={isConnected}>
+        <DropdownIconFrame {...DropdownIconPreset.gmail} isSynced={isConnected}>
           <GmailIcon />
         </DropdownIconFrame>
         <div className="flex min-w-0 flex-col">
@@ -213,7 +213,7 @@ export default function MessagesSyncSection({
     <div className="rounded-lg border border-border bg-card/60 overflow-hidden">
       <div className="p-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <DropdownIconFrame {...dropdownIconPreset.messagesMain} isSynced={anyMessageConnected}>
+          <DropdownIconFrame {...DropdownIconPreset.messagesMain} isSynced={anyMessageConnected}>
             <ChatSyncIcon />
           </DropdownIconFrame>
           <div className="flex flex-col">
@@ -240,17 +240,17 @@ export default function MessagesSyncSection({
           />
           <ComingSoonRow
             icon={<WhatsAppIcon />}
-            iconFrameProps={dropdownIconPreset.whatsapp}
+            iconFrameProps={DropdownIconPreset.whatsapp}
             label="WhatsApp"
           />
           <ComingSoonRow
             icon={<TelegramIcon />}
-            iconFrameProps={dropdownIconPreset.telegram}
+            iconFrameProps={DropdownIconPreset.telegram}
             label="Telegram"
           />
           <ComingSoonRow
             icon={<MessengerIcon />}
-            iconFrameProps={dropdownIconPreset.messenger}
+            iconFrameProps={DropdownIconPreset.messenger}
             label="Messenger"
             borderBottom={false}
           />

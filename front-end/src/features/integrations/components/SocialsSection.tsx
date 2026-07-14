@@ -11,7 +11,7 @@
 import { Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
-import DropdownIconFrame, { dropdownIconPreset } from './DropdownIconFrame';
+import DropdownIconFrame, { DropdownIconPreset } from './DropdownIconFrame';
 import SectionToggleButton from './SectionToggleButton';
 
 interface SocialsSectionProps {
@@ -114,7 +114,7 @@ function LinkedInRow({
     return (
       <div className="px-4 py-2 flex items-center justify-between flex-wrap gap-2 border-b border-border/50">
         <div className="flex items-center gap-3">
-          <DropdownIconFrame {...dropdownIconPreset.linkedin}>
+          <DropdownIconFrame {...DropdownIconPreset.linkedin}>
             <LinkedInIcon />
           </DropdownIconFrame>
           <div className="flex items-center gap-2">
@@ -133,7 +133,7 @@ function LinkedInRow({
   return (
     <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
       <div className="flex items-center gap-3">
-        <DropdownIconFrame {...dropdownIconPreset.linkedin}>
+        <DropdownIconFrame {...DropdownIconPreset.linkedin}>
           <LinkedInIcon />
         </DropdownIconFrame>
         <span className="text-sm">LinkedIn</span>
@@ -176,7 +176,7 @@ export default function SocialsSection({
     <div className="rounded-lg border border-border bg-card/60 overflow-hidden">
       <div className="p-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <DropdownIconFrame {...dropdownIconPreset.socialsMain}>
+          <DropdownIconFrame {...DropdownIconPreset.socialsMain}>
             <SocialsIcon />
           </DropdownIconFrame>
           <div className="flex flex-col">
@@ -190,7 +190,7 @@ export default function SocialsSection({
         <div className="border-t border-border">
           <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
             <div className="flex items-center gap-3">
-              <DropdownIconFrame {...dropdownIconPreset.x}>
+              <DropdownIconFrame {...DropdownIconPreset.x}>
                 <XIcon />
               </DropdownIconFrame>
               <span className="text-sm">X</span>
@@ -204,7 +204,7 @@ export default function SocialsSection({
           />
           <div className="px-4 py-2 flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <DropdownIconFrame {...dropdownIconPreset.instagram}>
+              <DropdownIconFrame {...DropdownIconPreset.instagram}>
                 <InstagramIcon />
               </DropdownIconFrame>
               <span className="text-sm">Instagram</span>

@@ -6,6 +6,7 @@
  */
 
 import { useCallback, useEffect, useState, type MouseEvent } from 'react';
+import { getQueryParams } from '@/lib/url';
 import { completeAuthAssistanceRequest, resumeBrowserSession } from '../../hooks';
 
 export interface BrowserStatusBarUi {
@@ -25,7 +26,7 @@ export function useBrowserStatusBarUi(taskId: string, forceMinimized: boolean): 
   const [isExpandedState, setIsExpanded] = useState(false);
   const [isFullscreenState, setIsFullscreen] = useState(() => {
     if (typeof window === 'undefined') return false;
-    return new URLSearchParams(window.location.search).get('browser-id') === taskId;
+    return getQueryParams().get('browser-id') === taskId;
   });
   const [isResuming, setIsResuming] = useState(false);
 
@@ -47,7 +48,7 @@ export function useBrowserStatusBarUi(taskId: string, forceMinimized: boolean): 
     void handleResume();
   }, [handleResume]);
 
-  const onCompleteAuthAssistance = useCallback(async (requestId: string) => {
+  const handleCompleteAuthAssistance = useCallback(async (requestId: string) => {
     setIsResuming(true);
     try {
       await completeAuthAssistanceRequest(requestId);
@@ -57,6 +58,12 @@ export function useBrowserStatusBarUi(taskId: string, forceMinimized: boolean): 
       setIsResuming(false);
     }
   }, []);
+  const onCompleteAuthAssistance = useCallback(
+    (requestId: string) => {
+      void handleCompleteAuthAssistance(requestId);
+    },
+    [handleCompleteAuthAssistance],
+  );
 
   useEffect(() => {
     const handleOpenBrowser = (event: Event) => {

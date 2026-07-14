@@ -14,11 +14,9 @@ export const FRONTEND_URL =
 /** Whether tests are running against production (set by run-semantic-tests.sh --prod). */
 export const IS_PROD = process.env.SEMANTIC_PROD === '1';
 
-/**
- * Pre-generated session JSON from back-end/scripts/generate-test-session.ts.
- * Set by the shell runner when --prod is active.
- */
-const PROD_SESSION = process.env.PROD_SESSION ?? '';
+/** One runner-generated session shared by every Playwright worker. */
+const INJECTED_SESSION = process.env.SEMANTIC_SESSION ?? process.env.PROD_SESSION ?? '';
+export const HAS_INJECTED_SESSION = INJECTED_SESSION !== '';
 
 // Dev-only test credentials. The default key is the shared local-backend
 // dev key (also documented in CLAUDE.md "Test Credentials"); override via
@@ -96,30 +94,32 @@ export async function clearAppSession(page: Page): Promise<void> {
 }
 
 /**
- * Inject a pre-generated session into localStorage so the app boots as
- * an authenticated user. Used in --prod mode where dev auto-login is
- * unavailable.
+ * Inject the runner-generated session into localStorage so the app boots as
+ * the same authenticated user in every worker. This avoids concurrent OTP
+ * churn in local runs and is required because prod has no dev auto-login.
  *
  * Must be called AFTER page.goto() (localStorage requires an origin) but
  * BEFORE the app's auth hook runs — so call it right after goto, then reload.
  */
-export async function injectProdSession(page: Page): Promise<void> {
-  if (!PROD_SESSION) throw new Error('PROD_SESSION env var not set — run with --prod flag');
+export async function injectSemanticSession(page: Page): Promise<void> {
+  if (!INJECTED_SESSION) {
+    throw new Error('SEMANTIC_SESSION env var not set — use run-semantic-tests.sh');
+  }
   await page.addInitScript((session) => {
     window.localStorage.setItem('rose-session', session);
-  }, PROD_SESSION);
+  }, INJECTED_SESSION);
   if (page.url() !== 'about:blank') {
     await page.evaluate((session) => {
       window.localStorage.setItem('rose-session', session);
-    }, PROD_SESSION);
+    }, INJECTED_SESSION);
   }
 }
 
-export async function expectProdSessionRecognized(page: Page): Promise<void> {
-  await injectProdSession(page);
+export async function expectInjectedSessionRecognized(page: Page): Promise<void> {
+  await injectSemanticSession(page);
   await page.evaluate((session) => {
     window.localStorage.setItem('rose-session', session);
-  }, PROD_SESSION);
+  }, INJECTED_SESSION);
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.waitForLoadState('networkidle').catch(() => {});
   const sessionState = await page.evaluate(() => {
@@ -136,7 +136,7 @@ export async function expectProdSessionRecognized(page: Page): Promise<void> {
     }
   });
   if (!sessionState.hasSession || sessionState.isAnonymous !== false) {
-    throw new Error(`Prod session not recognised: ${JSON.stringify(sessionState)}`);
+    throw new Error(`Injected session not recognised: ${JSON.stringify(sessionState)}`);
   }
 }
 
@@ -255,6 +255,44 @@ export async function deleteAgent(agentId: string): Promise<void> {
   } catch (err) {
     console.warn(`deleteAgent(${agentId}) network failure:`, err);
   }
+}
+
+export async function waitForTemporalWorkflow(
+  agentId: string,
+  timeoutMs: number,
+): Promise<string> {
+  const userId = await resolveTestUserId();
+  const deadline = Date.now() + timeoutMs;
+  let lastState = 'not fetched';
+
+  while (Date.now() < deadline) {
+    const res = await fetch(`${BACKEND_URL}/api/agents/${agentId}`, {
+      headers: { 'X-API-Key': TEST_API_KEY, 'X-User-Id': userId },
+    });
+    const data = await parseJsonResponse(res);
+    const agent = data.agent as
+      | { temporal_workflow_id?: unknown; status?: unknown; status_message?: unknown }
+      | undefined;
+    const workflowId = agent?.temporal_workflow_id;
+    if (res.ok && typeof workflowId === 'string' && workflowId !== '') return workflowId;
+
+    lastState = `${res.status} ${JSON.stringify({
+      temporal_workflow_id: workflowId ?? null,
+      status: agent?.status ?? null,
+      status_message: agent?.status_message ?? null,
+    })}`;
+    if (!res.ok && res.status !== 404) {
+      throw new Error(`Agent ${agentId} Temporal-start check failed: ${lastState}`);
+    }
+    if (agent?.status === 'FAILED' || agent?.status === 'CANCELLED') {
+      throw new Error(`Agent ${agentId} terminated before Temporal startup: ${lastState}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+
+  throw new Error(
+    `Agent ${agentId} did not persist temporal_workflow_id within ${timeoutMs}ms; last=${lastState}`,
+  );
 }
 
 export function hasUncaughtErrors(rec: Recorder): string[] {

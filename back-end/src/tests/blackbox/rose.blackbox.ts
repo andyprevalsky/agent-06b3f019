@@ -987,6 +987,150 @@ async function testOpenAiApiKey_failureFallsThroughToAnthropicBeforeOpenRouter()
   }
 }
 
+async function testSharedOpenAiPriorityRoute_isExclusiveAndPreservesRouterConfig() {
+  process.env.GPT_API_KEY = 'sk-proj-router-priority';
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-must-not-run';
+  process.env.OPENROUTER_API_KEY = 'sk-or-must-not-run';
+  let calls = 0;
+  let capturedBody: Record<string, unknown> = {};
+  installFetchStub((url, init) => {
+    calls += 1;
+    assertEqual(url, OPENAI_RESPONSES_API_URL, 'exclusive provider URL');
+    capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return sseResponse(RESPONSES_OK_SSE);
+  });
+
+  try {
+    const stream = await createStreamingCompletion({
+      model: 'rose-labs/rose-1-lite',
+      messages: [
+        { role: 'system', content: 'router-system-prompt' },
+        { role: 'user', content: 'route this request' },
+      ],
+      temperature: 0.3,
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'router_decision',
+          strict: true,
+          schema: {
+            type: 'object',
+            properties: { action: { type: 'string' } },
+            required: ['action'],
+            additionalProperties: false,
+          },
+        },
+      },
+      claude_token: 'claude-oauth-must-not-run',
+      gpt_token: 'gpt-oauth-must-not-run',
+      provider_route: 'shared-openai-priority',
+    });
+    const chunks = await collect(stream);
+
+    assertEqual(calls, 1, 'exactly one shared OpenAI request');
+    assertEqual(capturedBody.model, 'gpt-5.6-terra', 'router provider model');
+    assertEqual(capturedBody.service_tier, 'priority', 'priority service tier');
+    assertEqual(capturedBody.instructions, 'router-system-prompt', 'system prompt');
+    assertEqual(
+      JSON.stringify(capturedBody.reasoning),
+      JSON.stringify({ effort: 'medium', summary: 'auto' }),
+      'reasoning config'
+    );
+    const text = capturedBody.text as { format?: { name?: string; strict?: boolean } };
+    assertEqual(text.format?.name, 'router_decision', 'response schema name');
+    assertEqual(text.format?.strict, true, 'response schema strictness');
+    assertEqual(chunks[0]?.actual_model, 'gpt-5.6-terra-openai', 'actual model provenance');
+    assertEqual(chunks[0]?.pool_name, 'openai-api-key', 'provider provenance');
+  } finally {
+    restoreFetch();
+    delete process.env.GPT_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
+  }
+}
+
+async function testSharedOpenAiPriorityRoute_missingKeyFailsClosedWithoutProviderCalls() {
+  delete process.env.GPT_API_KEY;
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-must-not-run';
+  process.env.OPENROUTER_API_KEY = 'sk-or-must-not-run';
+  let calls = 0;
+  installFetchStub(() => {
+    calls += 1;
+    throw new Error('no provider should be called without GPT_API_KEY');
+  });
+
+  try {
+    const stream = await createStreamingCompletion({
+      model: 'rose-labs/rose-1-lite',
+      messages: [{ role: 'user', content: 'route this request' }],
+      claude_token: 'claude-oauth-must-not-run',
+      gpt_token: 'gpt-oauth-must-not-run',
+      provider_route: 'shared-openai-priority',
+    });
+    let thrown: unknown;
+    try {
+      await collect(stream);
+    } catch (error) {
+      thrown = error;
+    }
+
+    assert(thrown instanceof Error, 'missing key should throw');
+    assertEqual(
+      (thrown as Error).message,
+      'Rose shared-openai-priority route requires GPT_API_KEY',
+      'clear configuration error'
+    );
+    assertEqual(calls, 0, 'zero fallback provider calls');
+  } finally {
+    restoreFetch();
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
+  }
+}
+
+async function testSharedOpenAiPriorityRoute_invalidKeyFailsClosedWithoutFallbackCalls() {
+  process.env.GPT_API_KEY = 'sk-proj-invalid';
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-must-not-run';
+  process.env.OPENROUTER_API_KEY = 'sk-or-must-not-run';
+  const calledUrls: string[] = [];
+  installFetchStub((url) => {
+    calledUrls.push(url);
+    if (url === OPENAI_RESPONSES_API_URL) {
+      return errorResponse(401, '{"error":{"message":"invalid api key"}}');
+    }
+    throw new Error(`fallback provider must not run: ${url}`);
+  });
+
+  try {
+    const stream = await createStreamingCompletion({
+      model: 'rose-labs/rose-1-lite',
+      messages: [{ role: 'user', content: 'route this request' }],
+      claude_token: 'claude-oauth-must-not-run',
+      gpt_token: 'gpt-oauth-must-not-run',
+      provider_route: 'shared-openai-priority',
+    });
+    let thrown: unknown;
+    try {
+      await collect(stream);
+    } catch (error) {
+      thrown = error;
+    }
+
+    assert(thrown instanceof Error, 'invalid key should throw');
+    assert(
+      (thrown as Error).message.includes('OpenAI 401') &&
+        (thrown as Error).message.includes('invalid api key'),
+      `expected clear OpenAI auth error, got ${String(thrown)}`
+    );
+    assertEqual(JSON.stringify(calledUrls), JSON.stringify([OPENAI_RESPONSES_API_URL]), 'calls');
+  } finally {
+    restoreFetch();
+    delete process.env.GPT_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
+  }
+}
+
 // ANTHROPIC_API_KEY funded default: when no compute token is available but the
 // key is configured, the request goes direct to Anthropic via x-api-key (NOT
 // the OpenRouter waterfall), and the call carries the API-key headers — never
@@ -2748,6 +2892,18 @@ async function main(): Promise<void> {
     {
       name: 'openai api-key / failure falls through to Anthropic before OpenRouter',
       fn: testOpenAiApiKey_failureFallsThroughToAnthropicBeforeOpenRouter,
+    },
+    {
+      name: 'shared OpenAI priority / exclusive route preserves router config',
+      fn: testSharedOpenAiPriorityRoute_isExclusiveAndPreservesRouterConfig,
+    },
+    {
+      name: 'shared OpenAI priority / missing key fails closed without provider calls',
+      fn: testSharedOpenAiPriorityRoute_missingKeyFailsClosedWithoutProviderCalls,
+    },
+    {
+      name: 'shared OpenAI priority / invalid key fails closed without fallback calls',
+      fn: testSharedOpenAiPriorityRoute_invalidKeyFailsClosedWithoutFallbackCalls,
     },
     {
       name: 'anthropic api-key / serves as funded default when no compute token',

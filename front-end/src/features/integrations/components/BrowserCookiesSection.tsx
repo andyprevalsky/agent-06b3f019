@@ -14,9 +14,9 @@ import { Button } from '@/components/ui/button';
 
 import BrowserIcon from './BrowserIcon';
 import DropdownIconFrame, {
-  browserDropdownIconPreset,
+  BrowserDropdownIconPreset,
   dropdownIconImageClassName,
-  dropdownIconPreset,
+  DropdownIconPreset,
 } from './DropdownIconFrame';
 import SectionToggleButton from './SectionToggleButton';
 import SyncItemButton from './SyncItemButton';
@@ -53,7 +53,7 @@ function DesktopOnlyFallback() {
   return (
     <div className="flex items-center justify-between flex-wrap gap-2 p-4 border border-border rounded-lg bg-card/60">
       <div className="flex items-center gap-3">
-        <DropdownIconFrame {...dropdownIconPreset.browserMain}>
+        <DropdownIconFrame {...DropdownIconPreset.browserMain}>
           <BrowserCookiesIcon />
         </DropdownIconFrame>
         <div className="flex flex-col">
@@ -91,7 +91,7 @@ export default function BrowserCookiesSection({
       <div className="p-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <DropdownIconFrame
-            {...dropdownIconPreset.browserMain}
+            {...DropdownIconPreset.browserMain}
             isSynced={connectedBrowsers.size > 0}
           >
             <BrowserCookiesIcon />
@@ -124,7 +124,7 @@ export default function BrowserCookiesSection({
               >
                 <div className="flex items-center gap-3">
                   <DropdownIconFrame
-                    {...browserDropdownIconPreset(browser.type)}
+                    {...BrowserDropdownIconPreset(browser.type)}
                     isSynced={connectedBrowsers.has(browser.type)}
                   >
                     <BrowserIcon type={browser.type} className={dropdownIconImageClassName} />

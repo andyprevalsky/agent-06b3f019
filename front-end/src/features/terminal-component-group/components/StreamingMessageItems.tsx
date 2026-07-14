@@ -50,7 +50,13 @@ export function StreamingAttentionBubble({
   onSendMessage,
 }: StreamingAttentionBubbleProps) {
   return (
-    <div className="flex gap-3 mt-4">
+    <div
+      className="flex gap-3 mt-4"
+      data-stream-kind="final-answer"
+      data-stream-state={attention.done ? 'terminal' : 'streaming'}
+      data-stream-id={attention.stream_id}
+      data-tool-call-id={attention.tool_call_id}
+    >
       <MessageBubble
         key={`streaming-attention-${attention.tool_call_id}`}
         message={{
@@ -61,7 +67,7 @@ export function StreamingAttentionBubble({
           metadata: {
             toolCallId: attention.tool_call_id,
             toolName: 'send_message_to_user',
-            toolStatus: 'IN_PROGRESS',
+            toolStatus: attention.done ? 'FINISHED' : 'IN_PROGRESS',
             isUserAttentionMessage: true,
             attentionMessage: attention.message,
           },

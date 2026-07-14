@@ -50,7 +50,11 @@
 # Flags:
 #   --setup            one-time: create volume + persistent machine + git clone
 #   --refresh-wmh      explicit-only: (re)build the cached WMH model on /data/world-model
-#   --refresh-secrets  refresh + verify the app environment, then exit
+#   --refresh-secrets  refresh + verify the app environment, then exit (maintenance
+#                      op — the ONLY path that stages/activates app secrets)
+#   --verify-secrets   READ-ONLY check that the app environment exists, then exit.
+#                      Used by every run path so concurrent workstreams never
+#                      mutate (and therefore never race) the shared environment.
 #   --destroy          explicit-only: destroy the machine + volume
 #   --simulate         pass --simulate to run_benchmark (default for a task run)
 #   --no-simulate      real mode (no WMH); serves nothing, runs the live stack
@@ -58,7 +62,8 @@
 #   --max-concurrency <n>  cap concurrent tasks when running multiple (default 5)
 #   --ref <branch|sha> branch/sha to git-sync + run (default: current HEAD sha)
 #   --no-dashboard     do NOT proxy/open the live dashboard (implied under CI)
-#   --dash-port <n>    local port for the proxied dashboard (default 8765)
+#   --dash-port <n>    local port for the proxied dashboard (default CONDUCTOR_PORT+5764
+#                      → 8765 on the standard 3001 workspace)
 #   --model <name>     WMH model artifact name (default rose-r2-archive-anthropic)
 #   --vm-size <size>   machine size at --setup (default shared-cpu-4x)
 #   --vm-memory <mb>   machine memory at --setup (default 8192)
@@ -87,8 +92,6 @@ POOL_IDS_FILE="$ROOT_DIR/.context/cloudbench-pool.ids"
 GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null || echo "$ROOT_DIR/.git")"
 case "$GIT_COMMON_DIR" in /*) ;; *) GIT_COMMON_DIR="$ROOT_DIR/$GIT_COMMON_DIR" ;; esac
 APP_ENV_LOCK_FILE="$GIT_COMMON_DIR/cloudbench-app-env.lock"
-LOCK_DIR="$(cloudbench_controller_lock_path "$ROOT_DIR" "$APP")"
-LOCK_MACHINE_NAME="$(cloudbench_cloud_lock_machine_name)"
 
 # On-box paths (mirror scripts/cloudbench-run.sh).
 REMOTE_REPO="/data/repo"
@@ -117,7 +120,9 @@ VM_MEMORY="8192"
 VOLUME_SIZE="20"
 RUN_TIMEOUT="3600"      # 60 min per-run ceiling (warm: no WMH build; serve-only).
 DASHBOARD="1"           # proxy + open the live dashboard (auto-off under CI).
-LOCAL_DASH_PORT="8765"
+# Per-workspace default so concurrent workspaces get non-colliding dashboards
+# (CONDUCTOR_PORT=3001 → 8765, the historical default).
+LOCAL_DASH_PORT="${CLOUDBENCH_DASH_BASE:-$(( ${CONDUCTOR_PORT:-3001} + 5764 ))}"
 FLEET_MACHINE_ID=""     # set by run-bench-fleet to pin a per-bench cloned machine.
 OUT_DIR=""              # set by run-bench-fleet to isolate a bench's .context outputs.
 SKIP_CONTROLLER_LOCK="0"  # set by run-bench-fleet (fleet owns one lock for its children).
@@ -129,6 +134,7 @@ while [ $# -gt 0 ]; do
         --setup)          MODE="setup"; shift ;;
         --refresh-wmh)    MODE="refresh-wmh"; shift ;;
         --refresh-secrets) MODE="refresh-secrets"; shift ;;
+        --verify-secrets) MODE="verify-secrets"; shift ;;   # read-only preflight (concurrency-safe)
         --destroy)        MODE="destroy"; shift ;;
         --simulate)       BENCH_SIMULATE="1"; shift ;;
         --no-simulate)    BENCH_SIMULATE="0"; shift ;;
@@ -148,32 +154,11 @@ while [ $# -gt 0 ]; do
         --volume-size)    VOLUME_SIZE="${2:-}"; shift 2 ;;
         --timeout)        RUN_TIMEOUT="${2:-}"; shift 2 ;;
         -h|--help)
-            sed -n '2,72p' "$0"; exit 0 ;;
+            sed -n '2,76p' "$0"; exit 0 ;;
         --*)              echo "❌ Unknown flag: $1" >&2; exit 2 ;;
         *)                BENCH_TASKS+=("$1"); shift ;;
     esac
 done
-
-case "$RUN_TIMEOUT" in
-    ''|*[!0-9]*|0) echo "❌ --timeout must be a positive integer." >&2; exit 2 ;;
-esac
-if [ "${CLOUDBENCH_PARENT_LOCK_HELD:-0}" = "1" ]; then
-    # The authenticated fleet parent owns and watchdogs the lease; this helper
-    # must preserve its remaining ceiling instead of imposing a standalone one.
-    required_lock_ttl=1
-elif [ "$MODE" = "run" ]; then
-    required_lock_ttl=$((RUN_TIMEOUT + 3600))
-else
-    # Maintenance modes are fail-closed by the lease watchdog below; six hours
-    # is their explicit ceiling unless a larger TTL is requested.
-    required_lock_ttl=21600
-fi
-if [ -n "${CLOUDBENCH_CLOUD_LOCK_TTL:-}" ] && [ "$CLOUDBENCH_CLOUD_LOCK_TTL" -lt "$required_lock_ttl" ] 2>/dev/null; then
-    echo "❌ CLOUDBENCH_CLOUD_LOCK_TTL must be at least $required_lock_ttl seconds for this operation." >&2
-    exit 2
-fi
-CLOUDBENCH_CLOUD_LOCK_TTL="${CLOUDBENCH_CLOUD_LOCK_TTL:-$required_lock_ttl}"
-export CLOUDBENCH_CLOUD_LOCK_TTL
 
 # CI never pops a browser / proxy.
 if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ] || [ -n "${CONTINUOUS_INTEGRATION:-}" ]; then
@@ -269,8 +254,10 @@ _machines_json() {
     FLY machines list -a "$APP" --json 2>/dev/null || echo '[]'
 }
 
-# Resolve the persistent machine id: prefer the stored id, else match by name.
-# Fleet mode pins an explicit per-bench machine and skips the warm-box state file.
+# Resolve the persistent warm machine id from the provider-authoritative name.
+# The local state file is only a tie-breaker among exact warm-name matches; it
+# must never redirect warm operations to a live pool/ephemeral machine. Fleet
+# mode pins an explicit per-bench machine and skips the warm-box state file.
 resolve_machine_id() {
     if [ -n "$FLEET_MACHINE_ID" ]; then
         printf '%s' "$FLEET_MACHINE_ID"
@@ -290,14 +277,13 @@ except Exception:
     data=[]
 name=os.environ.get("MACHINE_NAME")
 stored=os.environ.get("STORED") or ""
-ids={m.get("id") for m in data if m.get("id")}
-# stored id still present?
-if stored and stored in ids:
-    print(stored); sys.exit(0)
-# else match by name
-for m in data:
-    if m.get("name")==name and m.get("id"):
-        print(m["id"]); sys.exit(0)
+warm=[m for m in data if m.get("name")==name and m.get("id")]
+if stored:
+    cached=next((m for m in warm if m.get("id")==stored), None)
+    if cached:
+        print(cached["id"]); sys.exit(0)
+if warm:
+    print(warm[0]["id"]); sys.exit(0)
 print("")
 ' 2>/dev/null || echo ""
 }
@@ -445,10 +431,59 @@ print(machine.get("state") or "unknown")
 '
 }
 
-activate_machine_environment() {  # activate_machine_environment <machine_id> [warm|pool]
-    local machine_id="$1" role="${2:-warm}" attempt=1 output status state presence
+machine_has_activation_image() {  # machine_has_activation_image <machine_id> <image_ref>
+    local machine_id="$1" image_ref="$2" machines
+    machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 2
+    printf '%s' "$machines" | MACHINE_ID="$machine_id" IMAGE_REF="$image_ref" python3 -c '
+import json, os, sys
+try:
+    machines = json.load(sys.stdin)
+except (TypeError, ValueError):
+    raise SystemExit(2)
+if not isinstance(machines, list) or any(not isinstance(machine, dict) for machine in machines):
+    raise SystemExit(2)
+machine_id = os.environ["MACHINE_ID"]
+machine = next((item for item in machines if item.get("id") == machine_id), None)
+if machine is None:
+    raise SystemExit(1)
+config = machine.get("config") or {}
+actual = config.get("image") if isinstance(config, dict) else None
+expected = os.environ["IMAGE_REF"]
+if not isinstance(actual, str):
+    raise SystemExit(1)
+if "@" in expected:
+    raise SystemExit(0 if actual == expected else 1)
+raise SystemExit(0 if actual.split("@", 1)[0] == expected else 1)
+'
+}
+
+wait_for_activation_image() {  # wait_for_activation_image <machine_id> <image_ref>
+    local machine_id="$1" image_ref="$2" state presence attempt=1
+    local attempts="${CLOUDBENCH_IMAGE_SETTLE_ATTEMPTS:-15}"
+    local retry_delay="${CLOUDBENCH_IMAGE_SETTLE_RETRY_DELAY:-2}"
+    while [ "$attempt" -le "$attempts" ]; do
+        state="$(machine_state_for_activation "$machine_id")"
+        presence=$?
+        [ "$presence" -eq 0 ] || return 1
+        if [ "$state" = "stopped" ] \
+            && machine_has_activation_image "$machine_id" "$image_ref"; then
+            return 0
+        fi
+        case "$state" in
+            stopped|created|pending|replacing|stopping) ;;
+            *) return 1 ;;
+        esac
+        [ "$attempt" -lt "$attempts" ] && sleep "$retry_delay"
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
+activate_machine_environment() {  # activate_machine_environment <machine_id> [warm|pool] [image_ref]
+    local machine_id="$1" role="${2:-warm}" image_ref="${3:-}" attempt=1 output status state presence
     local attempts="${CLOUDBENCH_UPDATE_ATTEMPTS:-3}"
     local retry_delay="${CLOUDBENCH_UPDATE_RETRY_DELAY:-2}"
+    local -a update_args
     while [ "$attempt" -le "$attempts" ]; do
         state="$(machine_state_for_activation "$machine_id")"
         presence=$?
@@ -477,10 +512,18 @@ activate_machine_environment() {  # activate_machine_environment <machine_id> [w
             return 1
         fi
         assert_app_environment_lock_ownership || return 1
-        output="$(FLY machine update "$machine_id" -a "$APP" --skip-start --yes 2>&1)"
+        update_args=(machine update "$machine_id" -a "$APP")
+        [ -n "$image_ref" ] && update_args+=(--image "$image_ref")
+        update_args+=(--skip-start --yes)
+        output="$(FLY "${update_args[@]}" 2>&1)"
         status=$?
         printf '%s\n' "$output" | sed 's/^/      /'
         [ "$status" -eq 0 ] && return 0
+        if [ -n "$image_ref" ] \
+            && wait_for_activation_image "$machine_id" "$image_ref"; then
+            echo "      Fly CLI reported failure, but provider confirms desired image on stopped machine"
+            return 0
+        fi
         if [ "$role" = "pool" ]; then
             state="$(machine_state_for_activation "$machine_id")"
             presence=$?
@@ -531,16 +574,20 @@ for machine in machines:
 '
 }
 
+activate_owned_machine_images() {  # activate_owned_machine_images <image_ref>
+    local image_ref="$1" activation_targets role machine_id
+    activation_targets="$(environment_activation_targets)" || return 1
+    while IFS=$'\t' read -r role machine_id; do
+        [ -n "$machine_id" ] || continue
+        echo "   activating image on $role machine $machine_id (skip-start)"
+        activate_machine_environment "$machine_id" "$role" "$image_ref" || return 1
+    done <<< "$activation_targets"
+}
+
 assert_app_environment_lock_ownership() {
-    local expected_owner actual_owner
-    if [ "${CLOUDBENCH_APP_ENV_LOCK_HELD:-0}" = "1" ]; then
-        expected_owner="${CLOUDBENCH_APP_ENV_LOCK_OWNER_PID:-}"
-    else
-        expected_owner="$$"
-    fi
+    local actual_owner
     actual_owner="$(cat "$APP_ENV_LOCK_FILE" 2>/dev/null || true)"
-    if [ -z "$expected_owner" ] || [ "$actual_owner" != "$expected_owner" ] || \
-        ! kill -0 "$expected_owner" 2>/dev/null; then
+    if [ "$actual_owner" != "$$" ] || ! kill -0 "$$" 2>/dev/null; then
         echo "❌ Lost ownership of shared benchmark app environment lock." >&2
         return 1
     fi
@@ -550,8 +597,9 @@ assert_app_environment_lock_ownership() {
 # on machine init + in ssh sessions). The benchmark app uses the Machines API,
 # not Fly Launch releases: stage app secrets, then update each stopped machine
 # with --skip-start so staged-only values can never be mistaken for active ones.
-# GITHUB_TOKEN is injected as a secret so on-box private Git operations can use
-# a one-shot askpass stdin channel without storing it on the volume or in argv.
+# GITHUB_TOKEN is injected as a secret so the on-box per-run git-sync (private
+# repo) can authenticate via git http.extraheader without the token ever being
+# stored in .git/config on the volume.
 _inject_secrets_locked() {
     echo "🔐 Injecting secrets into $APP ..."
     if [ ! -f agents/.env ] || [ ! -f back-end/.env ]; then
@@ -568,41 +616,37 @@ _inject_secrets_locked() {
     echo "   env provenance: Render backend + Fly workers → provider=$CLOUDBENCH_PROD_BROWSER_PROVIDER"
     echo "   agents/.env sha256=${agents_sha:0:12} ($(wc -l < agents/.env | tr -d ' ') lines)"
     echo "   back-end/.env sha256=${backend_sha:0:12} ($(wc -l < back-end/.env | tr -d ' ') lines)"
+    local -a set_args=(
+        "AGENTS_ENV_B64=$agents_b64"
+        "BACKEND_ENV_B64=$backend_b64"
+        "AGENTS_ENV_SHA256=$agents_sha"
+        "BACKEND_ENV_SHA256=$backend_sha"
+        "CLOUDBENCH_BROWSER_PROVIDER=$CLOUDBENCH_PROD_BROWSER_PROVIDER"
+    )
     if [ -n "$gh_token" ]; then
+        set_args+=("GITHUB_TOKEN=$gh_token")
         echo "   GITHUB_TOKEN present (for private-repo git-sync)"
     else
         echo "   ⚠️  GITHUB_TOKEN not found — private-repo fetches will fail"
     fi
     assert_app_environment_lock_ownership || exit 1
-    {
-        printf 'AGENTS_ENV_B64=%s\n' "$agents_b64"
-        printf 'BACKEND_ENV_B64=%s\n' "$backend_b64"
-        printf 'AGENTS_ENV_SHA256=%s\n' "$agents_sha"
-        printf 'BACKEND_ENV_SHA256=%s\n' "$backend_sha"
-        printf 'CLOUDBENCH_BROWSER_PROVIDER=%s\n' "$CLOUDBENCH_PROD_BROWSER_PROVIDER"
-        [ -z "$gh_token" ] || printf 'GITHUB_TOKEN=%s\n' "$gh_token"
-    } | FLY secrets import --stage -a "$APP" 2>&1 | sed 's/^/   /' || {
+    FLY secrets set --stage -a "$APP" "${set_args[@]}" 2>&1 | sed 's/^/   /' || {
         echo "❌ Failed to stage benchmark environment secrets"; exit 1
     }
     local activation_targets role machine_id
-    if [ "${CLOUDBENCH_SKIP_MACHINE_ACTIVATION:-0}" = "1" ]; then
-        echo "   staged secrets only; isolated fleet primaries activate after claim"
-    elif activation_targets="$(environment_activation_targets)"; then
-        while IFS=$'\t' read -r role machine_id; do
-            [ -n "$machine_id" ] || continue
-            assert_app_environment_lock_ownership || exit 1
-            echo "   activating env on $role machine $machine_id (skip-start)"
-            activate_machine_environment "$machine_id" "$role" || {
-                echo "❌ Failed to activate environment on machine $machine_id" >&2
-                exit 1
-            }
-        done <<< "$activation_targets"
-    elif [ "${CLOUDBENCH_ALLOW_NO_ACTIVATION_TARGETS:-0}" = "1" ]; then
-        echo "   no benchmark machines exist yet; staged secrets will apply when setup creates one"
-    else
+    activation_targets="$(environment_activation_targets)" || {
         echo "❌ Could not resolve owned benchmark machines for environment activation." >&2
         exit 1
-    fi
+    }
+    while IFS=$'\t' read -r role machine_id; do
+        [ -n "$machine_id" ] || continue
+        assert_app_environment_lock_ownership || exit 1
+        echo "   activating env on $role machine $machine_id (skip-start)"
+        activate_machine_environment "$machine_id" "$role" || {
+            echo "❌ Failed to activate environment on machine $machine_id" >&2
+            exit 1
+        }
+    done <<< "$activation_targets"
     mkdir -p "$ROOT_DIR/.context"
     python3 - "$ROOT_DIR/.context/cloudbench-env-manifest.json" \
         "$agents_sha" "$backend_sha" "$CLOUDBENCH_PROD_BROWSER_PROVIDER" <<'PY'
@@ -625,34 +669,18 @@ PY
 }
 
 acquire_app_environment_lock() {
-    local owner wait_seconds deadline announced=0
+    local attempt owner
     command -v shlock >/dev/null 2>&1 || {
         echo "❌ shlock is required for cross-workspace benchmark environment locking." >&2
         return 1
     }
-    wait_seconds="${CLOUDBENCH_APP_ENV_LOCK_WAIT_SECONDS:-1800}"
-    case "$wait_seconds" in
-        ''|*[!0-9]*)
-            echo "❌ CLOUDBENCH_APP_ENV_LOCK_WAIT_SECONDS must be a positive integer." >&2
-            return 1
-            ;;
-    esac
-    if [ "$wait_seconds" -le 0 ]; then
-        echo "❌ CLOUDBENCH_APP_ENV_LOCK_WAIT_SECONDS must be a positive integer." >&2
-        return 1
-    fi
-    deadline=$((SECONDS + wait_seconds))
-    while :; do
+    for attempt in $(seq 1 60); do
         shlock -p "$$" -f "$APP_ENV_LOCK_FILE" && return 0
         owner="$(cat "$APP_ENV_LOCK_FILE" 2>/dev/null || true)"
-        [ "$SECONDS" -ge "$deadline" ] && break
-        if [ "$announced" = "0" ]; then
-            echo "⏳ waiting for shared benchmark app environment lock (owner=${owner:-unknown}, budget=${wait_seconds}s)..."
-            announced=1
-        fi
+        [ "$attempt" -eq 1 ] && echo "⏳ waiting for shared benchmark app environment lock (owner=${owner:-unknown})..."
         sleep 2
     done
-    echo "❌ Timed out after ${wait_seconds}s waiting for shared benchmark app environment lock." >&2
+    echo "❌ Timed out waiting for shared benchmark app environment lock." >&2
     return 1
 }
 
@@ -663,11 +691,6 @@ release_app_environment_lock() {
 }
 
 inject_secrets() {
-    if [ "${CLOUDBENCH_APP_ENV_LOCK_HELD:-0}" = "1" ]; then
-        assert_app_environment_lock_ownership || exit 1
-        _inject_secrets_locked
-        return $?
-    fi
     acquire_app_environment_lock || exit 1
     ( _inject_secrets_locked )
     local status=$?
@@ -679,29 +702,57 @@ inject_secrets() {
     return "$status"
 }
 
+# READ-ONLY env preflight for every RUN path: assert the prod-aligned app
+# secrets exist WITHOUT staging or activating anything, so concurrent
+# workstreams never race each other's environment. Staging/activation lives
+# only in the explicit maintenance ops (--refresh-secrets/--setup/--refresh-wmh).
+REQUIRED_APP_SECRETS="AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER"
+verify_app_environment() {
+    local listing missing
+    listing="$(FLY secrets list -a "$APP" --json 2>/dev/null)" || {
+        echo "❌ Could not read app secrets for $APP (app missing or no access)." >&2
+        echo "   One-time setup: bash scripts/run-bench-cloud --setup" >&2
+        return 1
+    }
+    if ! missing="$(printf '%s' "$listing" | REQUIRED="$REQUIRED_APP_SECRETS" python3 -c '
+import json, os, sys
+try:
+    secrets = json.load(sys.stdin) or []
+except Exception:
+    raise SystemExit("unreadable secrets listing")
+names = {str(item.get("Name") or item.get("name") or "") for item in secrets if isinstance(item, dict)}
+print(" ".join(key for key in os.environ["REQUIRED"].split() if key not in names))
+')"; then
+        echo "❌ Unreadable app secrets listing for $APP." >&2
+        return 1
+    fi
+    if [ -n "$missing" ]; then
+        echo "❌ Benchmark app environment is missing secrets: $missing" >&2
+        echo "   Refresh explicitly (maintenance op): bash scripts/run-bench-cloud --refresh-secrets" >&2
+        return 1
+    fi
+    echo "✅ Shared benchmark app environment verified (read-only): $REQUIRED_APP_SECRETS"
+}
+
+if [ "$MODE" = "verify-secrets" ]; then
+    verify_app_environment
+    exit $?
+fi
+
 if [ "$MODE" = "refresh-secrets" ]; then
     echo "═══ run-bench-cloud --refresh-secrets ═══"
-    refresh_lock="$LOCK_DIR"
-    refresh_lock_acquired="0"
-    if [ "${CLOUDBENCH_PARENT_LOCK_HELD:-0}" = "1" ]; then
-        if ! cloudbench_controller_parent_valid "$refresh_lock"; then
-            echo "❌ Parent controller lock proof is invalid or stale." >&2
-            exit 1
-        fi
-    else
-        if ! cloudbench_controller_acquire "$refresh_lock" "$APP"; then
-            old_pid="$(cat "$refresh_lock" 2>/dev/null || true)"
-            echo "❌ Another cloud benchmark controller is already running${old_pid:+ (pid $old_pid)}." >&2
-            exit 1
-        fi
-        refresh_lock_acquired="1"
-        cleanup_refresh_lock() {
-            [ "$refresh_lock_acquired" = "1" ] && cloudbench_controller_release "$refresh_lock" "$APP"
-        }
-        trap cleanup_refresh_lock EXIT
-        trap 'cleanup_refresh_lock; exit 130' INT
-        trap 'cleanup_refresh_lock; exit 143' TERM
+    refresh_lock="$ROOT_DIR/.context/cloudbench-controller.lock"
+    if ! cloudbench_controller_lock_acquire "$refresh_lock"; then
+        old_pid="$(cat "$refresh_lock" 2>/dev/null || true)"
+        echo "❌ Another cloud benchmark controller is already running in this workspace${old_pid:+ (pid $old_pid)}." >&2
+        exit 1
     fi
+    cleanup_refresh_lock() {
+        cloudbench_controller_lock_release "$refresh_lock"
+    }
+    trap cleanup_refresh_lock EXIT
+    trap 'cleanup_refresh_lock; exit 130' INT
+    trap 'cleanup_refresh_lock; exit 143' TERM
     ensure_app
     inject_secrets
     echo "✅ Cloud benchmark environment refreshed from current production-aligned sources."
@@ -710,7 +761,7 @@ fi
 
 # SSH-exec a shell snippet on the machine, streaming output. $1 = machine id.
 ssh_exec() {  # ssh_exec <machine_id> <remote-shell-command>
-    cloudbench_ssh_exec "$APP" "$1" "$2"
+    FLY ssh console -a "$APP" --machine "$1" -C "bash -lc $(printf '%q' "$2")"
 }
 
 # Retry-wrapped, QUIET ssh -C read. `flyctl ssh console -C` buffers stdout until
@@ -738,102 +789,6 @@ ssh_read() {  # ssh_read <machine_id> <remote-shell-command>
         fi
         n=$((n + 1))
         sleep 2
-    done
-    return 1
-}
-
-# Append one local file to a self-extracting staging bundle. The bundle is sent
-# with one SFTP command, so a fleet does not multiply Fly's active-VM inventory
-# reads by every helper file. Base64 is used only inside the uploaded file (never
-# in an ssh argv), preserving binary patches and arbitrarily large wrappers.
-append_cloudbench_stage_file() {  # <bundle> <source> <staged-path> <tag>
-    local bundle_path="$1" source_path="$2" staged_path="$3" tag="$4"
-    local delimiter="__CLOUDBENCH_PAYLOAD_${tag}__"
-    printf "base64 -d > %q <<'%s'\n" "$staged_path" "$delimiter" >> "$bundle_path"
-    base64 < "$source_path" >> "$bundle_path" || return 1
-    printf '\n%s\n' "$delimiter" >> "$bundle_path"
-}
-
-write_cloudbench_stage_bundle() {  # <local-bundle> <remote-bundle>
-    local bundle_path="$1" remote_bundle="$2"
-    local payload_dir="${remote_bundle}.payload"
-
-    printf '#!/usr/bin/env bash\nset -euo pipefail\numask 077\n' > "$bundle_path" || return 1
-    printf 'rm -rf -- %q\nmkdir -p -- %q\n' "$payload_dir" "$payload_dir" >> "$bundle_path" || return 1
-    append_cloudbench_stage_file "$bundle_path" "$ROOT_DIR/$REMOTE_RUN_SCRIPT" \
-        "$payload_dir/cloudbench-run.sh" run || return 1
-    append_cloudbench_stage_file "$bundle_path" "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" \
-        "$payload_dir/cloudbench-fetch-ref.sh" fetch || return 1
-    append_cloudbench_stage_file "$bundle_path" "$ROOT_DIR/scripts/cloudbench-sync-deps.sh" \
-        "$payload_dir/cloudbench-sync-deps.sh" deps || return 1
-    append_cloudbench_stage_file "$bundle_path" "$ROOT_DIR/scripts/cloudbench-current-run-artifact.py" \
-        "$payload_dir/cloudbench-current-run-artifact.py" artifact || return 1
-    append_cloudbench_stage_file "$bundle_path" "$ROOT_DIR/scripts/cloudbench-prepare-patch.sh" \
-        "$payload_dir/cloudbench-prepare-patch.sh" prepare || return 1
-    append_cloudbench_stage_file "$bundle_path" "$WRAPPER_LOCAL" \
-        "$payload_dir/rb.sh" wrapper || return 1
-    if [ -n "$LOCAL_PATCH_FILE" ]; then
-        append_cloudbench_stage_file "$bundle_path" "$LOCAL_PATCH_FILE" \
-            "$payload_dir/cloudbench-local.patch" patch || return 1
-    fi
-
-    printf 'install -m 0755 %q /data/cloudbench-run.sh\n' "$payload_dir/cloudbench-run.sh" >> "$bundle_path" || return 1
-    printf 'install -m 0755 %q /data/cloudbench-fetch-ref.sh\n' "$payload_dir/cloudbench-fetch-ref.sh" >> "$bundle_path" || return 1
-    printf 'install -m 0755 %q /data/cloudbench-sync-deps.sh\n' "$payload_dir/cloudbench-sync-deps.sh" >> "$bundle_path" || return 1
-    printf 'install -m 0755 %q /data/cloudbench-current-run-artifact.py\n' "$payload_dir/cloudbench-current-run-artifact.py" >> "$bundle_path" || return 1
-    printf 'install -m 0755 %q /data/cloudbench-prepare-patch.sh\n' "$payload_dir/cloudbench-prepare-patch.sh" >> "$bundle_path" || return 1
-    printf 'install -m 0755 %q %q\n' "$payload_dir/rb.sh" "$REMOTE_TMP_SCRIPT" >> "$bundle_path" || return 1
-    if [ -n "$LOCAL_PATCH_FILE" ]; then
-        printf 'install -m 0644 %q /tmp/cloudbench-local.patch\n' "$payload_dir/cloudbench-local.patch" >> "$bundle_path" || return 1
-    else
-        printf 'rm -f /tmp/cloudbench-local.patch\n' >> "$bundle_path" || return 1
-    fi
-    printf 'test -x /data/cloudbench-run.sh\ngrep -q cloudbench-run %q\n' "$REMOTE_TMP_SCRIPT" >> "$bundle_path" || return 1
-    printf 'rm -rf -- %q\nprintf "WROTE\\n"\n' "$payload_dir" >> "$bundle_path" || return 1
-    chmod 0700 "$bundle_path"
-}
-
-# Retry the single bundle upload independently from its idempotent installation.
-# Once SFTP succeeds, transient SSH/read failures do not fan back out into another
-# upload. A few inconclusive installs force one fresh upload to recover from the
-# unlikely case of a silently incomplete remote file.
-stage_cloudbench_payload() {  # <machine> <local-bundle> <remote-bundle> <error-file>
-    local machine_id="$1" local_bundle="$2" remote_bundle="$3" error_file="$4"
-    local attempts="${CLOUDBENCH_STAGE_ATTEMPTS:-20}"
-    local reupload_after="${CLOUDBENCH_STAGE_REUPLOAD_AFTER:-3}"
-    local base_delay="${CLOUDBENCH_STAGE_RETRY_DELAY_SECONDS:-3}"
-    local upload_complete=0 install_failures=0 attempt=1 delay o
-
-    : > "$error_file"
-    while [ "$attempt" -le "$attempts" ]; do
-        if [ "$upload_complete" != "1" ]; then
-            if FLY ssh sftp put -a "$APP" --machine "$machine_id" -q -m 0700 \
-                "$local_bundle" "$remote_bundle" >> "$error_file" 2>&1; then
-                upload_complete=1
-                install_failures=0
-            else
-                delay=$((base_delay * attempt))
-                [ "$delay" -gt 30 ] && delay=30
-                [ "$delay" -gt 0 ] && sleep "$delay"
-                attempt=$((attempt + 1))
-                continue
-            fi
-        fi
-
-        o="$(ssh_read "$machine_id" "bash $(printf '%q' "$remote_bundle")" \
-            2>> "$error_file" || true)"
-        if printf '%s' "$o" | grep -q WROTE; then
-            return 0
-        fi
-        install_failures=$((install_failures + 1))
-        if [ "$install_failures" -ge "$reupload_after" ]; then
-            upload_complete=0
-            install_failures=0
-        fi
-        delay=$((base_delay * attempt))
-        [ "$delay" -gt 30 ] && delay=30
-        [ "$delay" -gt 0 ] && sleep "$delay"
-        attempt=$((attempt + 1))
     done
     return 1
 }
@@ -898,14 +853,6 @@ wait_for_ssh() {  # wait_for_ssh <id>
 # MODE: --destroy — remove the machine + volume entirely (ends all billing).
 # ═════════════════════════════════════════════════════════════════════════════
 if [ "$MODE" = "destroy" ]; then
-    if ! cloudbench_controller_acquire "$LOCK_DIR" "$APP"; then
-        old_pid="$(cat "$LOCK_DIR" 2>/dev/null || true)"
-        echo "❌ Another cloud benchmark controller is already running${old_pid:+ (pid $old_pid)}." >&2
-        exit 1
-    fi
-    trap 'cloudbench_controller_release "$LOCK_DIR" "$APP"' EXIT
-    trap 'cloudbench_controller_release "$LOCK_DIR" "$APP"; exit 130' INT
-    trap 'cloudbench_controller_release "$LOCK_DIR" "$APP"; exit 143' TERM
     echo "═══ run-bench-cloud --destroy ═══"
     ensure_app
     mid="$(resolve_machine_id)"
@@ -914,10 +861,10 @@ if [ "$MODE" = "destroy" ]; then
         FLY machine destroy --force "$mid" -a "$APP" 2>&1 | sed 's/^/   /' || true
     fi
     # Belt-and-suspenders: sweep any leftover machines in the app.
-    for id in $(_machines_json | LOCK_MACHINE_NAME="$LOCK_MACHINE_NAME" python3 -c 'import json,os,sys
+    for id in $(_machines_json | python3 -c 'import json,sys
 try:
     for m in (json.load(sys.stdin) or []):
-        if m.get("id") and m.get("name") != os.environ["LOCK_MACHINE_NAME"]: print(m["id"])
+        if m.get("id"): print(m["id"])
 except Exception: pass' 2>/dev/null); do
         echo "   destroying leftover machine $id"
         FLY machine destroy --force "$id" -a "$APP" 2>&1 | sed 's/^/   /' || true
@@ -931,10 +878,6 @@ except Exception: pass' 2>/dev/null); do
         echo "   destroying volume $vid"
         FLY volumes destroy "$vid" -a "$APP" --yes 2>&1 | sed 's/^/   /' || true
     done
-    if ! cloudbench_cloud_lock_machine_destroy "$APP"; then
-        echo "❌ Failed to destroy the leased controller sentinel." >&2
-        exit 1
-    fi
     rm -f "$STATE_FILE"
     echo ""
     echo "🔎 Proof — remaining machines / volumes:"
@@ -948,65 +891,16 @@ fi
 # MODE: --setup — one-time: app + secrets + image + volume + machine + git clone.
 # ═════════════════════════════════════════════════════════════════════════════
 if [ "$MODE" = "setup" ]; then
-    SETUP_MACHINE_CLEANUP_ID=""
-    SETUP_MACHINE_LEASE_NONCE=""
-    setup_stop_owned_machine() {
-        [ -n "${SETUP_MACHINE_CLEANUP_ID:-}" ] && \
-            [ -n "${SETUP_MACHINE_LEASE_NONCE:-}" ] || return 0
-        cloudbench_machine_stop_and_release_lease \
-            "$APP" "$SETUP_MACHINE_CLEANUP_ID" "$SETUP_MACHINE_LEASE_NONCE" || return 1
-        SETUP_MACHINE_CLEANUP_ID=""
-        SETUP_MACHINE_LEASE_NONCE=""
-    }
-    setup_cleanup() {
-        local ec=$? stop_failed=0
-        trap - EXIT HUP INT TERM
-        setup_stop_owned_machine || stop_failed=1
-        release_app_environment_lock || true
-        if [ "$stop_failed" = "0" ]; then
-            cloudbench_controller_release "$LOCK_DIR" "$APP"
-        else
-            # Retain the provider sentinel + exact Machine lease until TTL after
-            # an unverified stop. Release only the process-local flock so a later
-            # controller can queue on provider ownership instead of racing it.
-            cloudbench_controller_lock_release "$LOCK_DIR"
-            [ "$ec" -ne 0 ] || ec=1
-            echo "❌ Setup could not verify its warm Machine stopped; provider leases retained." >&2
-        fi
-        return "$ec"
-    }
-    # The sentinel is the distributed lock itself, so first-time bootstrap has no
-    # cloud object to lease yet. Serialize same-clone setup locally, create the
-    # app/sentinel idempotently, then take its Fly lease before touching any
-    # benchmark machine, volume, secret, or image.
-    if ! cloudbench_controller_lock_acquire "$LOCK_DIR"; then
-        old_pid="$(cat "$LOCK_DIR" 2>/dev/null || true)"
-        echo "❌ Another cloud benchmark controller is already running${old_pid:+ (pid $old_pid)}." >&2
-        exit 1
-    fi
-    trap setup_cleanup EXIT
-    trap 'exit 129' HUP
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
-    ensure_app
-    if ! cloudbench_machines_api_token_ensure "$APP"; then
-        echo "❌ Could not mint a short-lived app token for the controller lease." >&2
-        exit 1
-    fi
-    if ! cloudbench_cloud_lock_machine_ensure "$APP" "$REGION" >/dev/null; then
-        echo "❌ Could not create or resolve the cloud benchmark controller sentinel." >&2
-        exit 1
-    fi
-    if ! cloudbench_cloud_lock_acquire "$APP"; then
-        echo "❌ Another host already owns the cloud benchmark app lease." >&2
-        exit 1
-    fi
     echo "═══ run-bench-cloud --setup ═══"
     echo "app=$APP region=$REGION machine=$MACHINE_NAME volume=$VOLUME_NAME vm=$VM_SIZE/${VM_MEMORY}MB volume_size=${VOLUME_SIZE}GB"
     echo ""
 
+    ensure_app
     CLOUDBENCH_HOLD_APP_ENV_LOCK=1
-    CLOUDBENCH_ALLOW_NO_ACTIVATION_TARGETS=1 inject_secrets
+    trap 'release_app_environment_lock' EXIT
+    trap 'release_app_environment_lock; exit 130' INT
+    trap 'release_app_environment_lock; exit 143' TERM
+    inject_secrets
 
     # ── Build + push the KEEP-ALIVE image (deps baked; CMD = sleep infinity) ──
     # Uses the Fly classic remote builder (plain manifest) so `machine run <tag>`
@@ -1062,91 +956,72 @@ print("1" if any(v.get("name")==os.environ["VN"] for v in data) else "0")' 2>/de
     echo ""
     mid="$(resolve_machine_id)"
     if [ -n "$mid" ]; then
-        echo "✅ Persistent machine already exists: $mid (skipping create)"
-    else
-        case "$VM_SIZE" in
-            shared-cpu-[1-9]*x)
-                VM_CPU_KIND=shared
-                VM_CPUS="${VM_SIZE#shared-cpu-}"
-                ;;
-            performance-[1-9]*x)
-                VM_CPU_KIND=performance
-                VM_CPUS="${VM_SIZE#performance-}"
-                ;;
-            *)
-                echo "❌ Safe stopped creation does not support VM size '$VM_SIZE'." >&2
-                exit 2
-                ;;
-        esac
-        VM_CPUS="${VM_CPUS%x}"
-        VOLUME_ID="$(FLY volumes list -a "$APP" --json 2>/dev/null | \
-            VN="$VOLUME_NAME" REGION="$REGION" jq -er \
-            '[.[] | select(.name == env.VN and .region == env.REGION) | .id] | if length == 1 then .[0] else error("expected one setup volume") end' \
-            2>/dev/null)" || {
-            echo "❌ Could not resolve exactly one setup volume in $REGION." >&2
+        echo "🔄 Updating the existing warm source and pool to image $IMAGE_REF ..."
+        activate_owned_machine_images "$IMAGE_REF" || {
+            echo "❌ Failed to activate the rebuilt dependency image" >&2
             exit 1
         }
-        echo "🖥️  Creating stopped persistent machine $MACHINE_NAME ($VM_SIZE / ${VM_MEMORY}MB, volume→/data) ..."
-        if ! mid="$(cloudbench_machine_create_stopped \
-            "$APP" "$MACHINE_NAME" "$REGION" "$IMAGE_REF" "$VOLUME_ID" /data \
-            "$VM_CPU_KIND" "$VM_CPUS" "$VM_MEMORY")"; then
-            echo "❌ Failed to create the stopped persistent machine" >&2
-            exit 1
-        fi
+        echo "✅ Persistent machine already exists: $mid (image refreshed)"
+    else
+        echo "🖥️  Creating persistent machine $MACHINE_NAME ($VM_SIZE / ${VM_MEMORY}MB, volume→/data) ..."
+        RUN_LOG="$(mktemp)"
+        FLY machine run "$IMAGE_REF" \
+            -a "$APP" \
+            --name "$MACHINE_NAME" \
+            --region "$REGION" \
+            --vm-size "$VM_SIZE" \
+            --vm-memory "$VM_MEMORY" \
+            --volume "$VOLUME_NAME:/data" \
+            --restart no \
+            --detach 2>&1 | tee "$RUN_LOG"
+        mid="$(grep -oiE 'Machine ID: [0-9a-f]+' "$RUN_LOG" | tail -1 | awk '{print $3}')"
+        rm -f "$RUN_LOG"
+        [ -z "$mid" ] && mid="$(resolve_machine_id)"
+        [ -z "$mid" ] && { echo "❌ Failed to create the persistent machine"; exit 1; }
         echo "✅ Machine: $mid"
     fi
     write_state "$mid"
 
-    # From this point every exit path owns returning the exact warm source to
-    # authoritative stopped state before controller handoff.
-    SETUP_MACHINE_CLEANUP_ID="$mid"
-    if ! SETUP_MACHINE_LEASE_NONCE="$(cloudbench_machine_lease_acquire_retry \
-        "$APP" "$mid" "cloudbench-setup pid=$$" 45 2)"; then
-        echo "❌ Could not acquire the warm Machine lifecycle lease." >&2
-        exit 1
-    fi
-    echo "▶️  Starting leased machine $mid ..."
-    if ! cloudbench_machine_start_with_lease "$APP" "$mid" "$SETUP_MACHINE_LEASE_NONCE"; then
-        echo "❌ Could not start the leased warm Machine." >&2
-        exit 1
-    fi
+    start_machine "$mid"
     wait_for_ssh "$mid"
 
     # ── git clone the repo into /data/repo (auth via GITHUB_TOKEN) ────────────
     if [ -z "$(resolve_github_token)" ]; then
         echo "❌ GITHUB_TOKEN not found in back-end/.env or agents/.env — cannot clone the repo." >&2
         echo "   Stopping machine; add GITHUB_TOKEN and re-run --setup." >&2
+        stop_machine "$mid"
         exit 1
     fi
     echo ""
     echo "📥 Cloning repo into $REMOTE_REPO on the box (branch $BENCH_REF) ..."
-    # The token comes from the already-injected Machine environment through a
-    # one-shot askpass stdin channel. No credential is stored or put in argv.
-    GIT_AUTH_PRELUDE="$(cloudbench_remote_git_auth_prelude)"
-CLONE_CMD="set -e
+    # GITHUB_TOKEN is already active as a Fly machine secret. The non-secret
+    # script is base64-transported into one remote Bash process so multiline
+    # quoting cannot split the auth setup from the Git commands. The token is
+    # used via http.extraheader rather than embedded in Git argv/config.
+    # The remote stays clean (https://github.com/...) for all future fetches, which
+    # then reuse the same header only when the run/refresh paths re-supply it.
+    CLONE_CMD="set -e
 mkdir -p /data
-$GIT_AUTH_PRELUDE
+AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GITHUB_TOKEN\" | base64 | tr -d '\n')\"
 if [ -d '$REMOTE_REPO/.git' ]; then
   echo 'repo already present — fetching latest'
-  chown -R rose:rose '$REMOTE_REPO'
-  gosu rose env HOME=/home/rose git -C '$REMOTE_REPO' remote set-url origin 'https://github.com/Rose-Ai-Labs/rose.git'
-  cloudbench_git_with_machine_token git -C '$REMOTE_REPO' fetch --quiet origin
+  git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin
 else
-  mkdir -p '$REMOTE_REPO'
-  chown rose:rose '$REMOTE_REPO'
-  cloudbench_git_with_machine_token git clone --quiet 'https://github.com/Rose-Ai-Labs/rose.git' '$REMOTE_REPO'
+  git -c http.extraheader=\"\$AUTH_HDR\" clone --quiet 'https://github.com/Rose-Ai-Labs/rose.git' '$REMOTE_REPO'
 fi
-gosu rose env HOME=/home/rose git -C '$REMOTE_REPO' remote set-url origin 'https://github.com/Rose-Ai-Labs/rose.git'
+git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' remote set-url origin 'https://github.com/Rose-Ai-Labs/rose.git'
+chown -R rose:rose '$REMOTE_REPO' 2>/dev/null || true
 echo 'clone/fetch complete'"
-    ssh_exec "$mid" "$CLONE_CMD" 2>&1 \
-        | grep -av '^Connecting to' | sed 's/^/   /' || {
-        echo "❌ git clone failed"; exit 1
-    }
-
-    if ! setup_stop_owned_machine; then
-        echo "❌ Setup completed Git sync but could not verify the warm Machine stopped." >&2
-        exit 1
+    CLONE_CMD_B64="$(printf '%s' "$CLONE_CMD" | base64 | tr -d '\n')"
+    clone_output=""
+    if ! clone_output="$(FLY ssh console -a "$APP" --machine "$mid" \
+        -C "bash -lc \"printf '%s' '$CLONE_CMD_B64' | base64 -d | bash\"" 2>&1)"; then
+        printf '%s\n' "$clone_output" | grep -av '^Connecting to' | sed 's/^/   /'
+        echo "❌ git clone failed"; stop_machine "$mid"; exit 1
     fi
+    printf '%s\n' "$clone_output" | grep -av '^Connecting to' | sed 's/^/   /'
+
+    stop_machine "$mid"
     echo ""
     echo "✅ Setup complete."
     echo "   Next (one-time, builds the cached WMH model):  bash scripts/run-bench-cloud --refresh-wmh"
@@ -1159,23 +1034,14 @@ fi
 # This is the ONLY place the model is (re)built. NOT per run.
 # ═════════════════════════════════════════════════════════════════════════════
 if [ "$MODE" = "refresh-wmh" ]; then
-    if ! cloudbench_controller_acquire "$LOCK_DIR" "$APP"; then
-        old_pid="$(cat "$LOCK_DIR" 2>/dev/null || true)"
-        echo "❌ Another cloud benchmark controller is already running${old_pid:+ (pid $old_pid)}." >&2
-        exit 1
-    fi
     echo "═══ run-bench-cloud --refresh-wmh ═══"
     echo "model=$WMH_MODEL_NAME target=$REMOTE_WMH"
     echo ""
     ensure_app
     cleanup_refresh_wmh() {
-        [ "${WMH_REFRESH_CLEANED:-0}" = "0" ] || return 0
-        WMH_REFRESH_CLEANED="1"
         stop_machine "${mid:-}"
         release_app_environment_lock
-        cloudbench_controller_release "$LOCK_DIR" "$APP"
     }
-    WMH_REFRESH_CLEANED="0"
     trap cleanup_refresh_wmh EXIT
     trap 'cleanup_refresh_wmh; exit 130' INT
     trap 'cleanup_refresh_wmh; exit 143' TERM
@@ -1190,17 +1056,17 @@ if [ "$MODE" = "refresh-wmh" ]; then
     wait_for_ssh "$mid"
 
     # Sync the repo first so the WMH build uses the current branch's builder code.
-    # Auth the private-repo fetch through the same token-free-argv askpass path.
+    # Auth the private-repo fetch with the box-side GITHUB_TOKEN secret via git
+    # http.extraheader (kept out of .git/config + git argv).
     echo "🔄 git-syncing $REMOTE_REPO → $BENCH_REF (so the WMH build uses current builder code) ..."
-    GIT_AUTH_PRELUDE="$(cloudbench_remote_git_auth_prelude)"
-SYNC_CMD="set -e
-$GIT_AUTH_PRELUDE
-chown -R rose:rose '$REMOTE_REPO'
-gosu rose env HOME=/home/rose git -C '$REMOTE_REPO' remote set-url origin 'https://github.com/Rose-Ai-Labs/rose.git'
-cloudbench_git_with_machine_token git -C '$REMOTE_REPO' fetch --quiet origin '$BENCH_REF' || cloudbench_git_with_machine_token git -C '$REMOTE_REPO' fetch --quiet origin
-gosu rose env HOME=/home/rose git -C '$REMOTE_REPO' checkout -f '$BENCH_REF' 2>/dev/null || gosu rose env HOME=/home/rose git -C '$REMOTE_REPO' checkout -f FETCH_HEAD
-gosu rose env HOME=/home/rose git -C '$REMOTE_REPO' reset --hard
-echo checkout \$(gosu rose env HOME=/home/rose git -C '$REMOTE_REPO' rev-parse --short HEAD)"
+    SYNC_CMD="set -e
+AUTH_HDR=''
+[ -n \"\${GITHUB_TOKEN:-}\" ] && AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GITHUB_TOKEN\" | base64 | tr -d '\n')\"
+git -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin '$BENCH_REF' || git -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin
+git -C '$REMOTE_REPO' checkout -f '$BENCH_REF' 2>/dev/null || git -C '$REMOTE_REPO' checkout -f FETCH_HEAD
+git -C '$REMOTE_REPO' reset --hard
+chown -R rose:rose '$REMOTE_REPO' 2>/dev/null || true
+echo checkout \$(git -C '$REMOTE_REPO' rev-parse --short HEAD)"
     ssh_exec "$mid" "$SYNC_CMD" 2>&1 | grep -av '^Connecting to' | sed 's/^/   /' || true
 
     echo ""
@@ -1290,41 +1156,18 @@ echo "tasks=[$TASKS_DISPLAY] simulate=$BENCH_SIMULATE parallel=$BENCH_PARALLEL m
 echo "ref=${BENCH_REF:-<HEAD>} model=$WMH_MODEL_NAME app=$APP dashboard=$DASHBOARD workspace=$RUN_WORKSPACE_NAME"
 echo ""
 
-LOCK_ACQUIRED="0"
-# Fleet children may bypass acquisition only with the unforgeable owner token
-# written by their still-live parent controller. Direct runs take both the local
-# owner lock and the Fly Machines lease before the first app mutation.
-if [ "$SKIP_CONTROLLER_LOCK" = "1" ]; then
-    if ! cloudbench_controller_parent_valid "$LOCK_DIR"; then
-        echo "❌ --no-lock requires a valid, live fleet controller owner token." >&2
-        exit 1
-    fi
-else
-    if ! cloudbench_controller_acquire "$LOCK_DIR" "$APP"; then
-        old_pid="$(cat "$LOCK_DIR" 2>/dev/null || true)"
-        echo "❌ Another cloud benchmark controller is already running${old_pid:+ (pid $old_pid)}." >&2
-        echo "   Stop that run before starting another one." >&2
-        exit 1
-    fi
-    LOCK_ACQUIRED="1"
-    trap 'cloudbench_controller_release "$LOCK_DIR" "$APP"' EXIT
-    trap 'cloudbench_controller_release "$LOCK_DIR" "$APP"; exit 130' INT
-    trap 'cloudbench_controller_release "$LOCK_DIR" "$APP"; exit 143' TERM
-fi
-
 ensure_app
-# Fleet children must inherit proof that their controller refreshed the shared
-# app secrets once before any clone was started. Direct runs refresh only after
-# taking the controller lock below, so app-level machine updates cannot race.
-DIRECT_ENV_REFRESH="0"
+# READ-ONLY env preflight (concurrent-workstream safe): the run path only
+# verifies the prod-aligned app secrets exist — it never stages them. Fleet
+# children inherit their controller's verification; direct runs verify here.
 if [ -n "$FLEET_MACHINE_ID" ]; then
-    if [ "${CLOUDBENCH_ENV_REFRESHED:-0}" != "1" ]; then
-        echo "❌ Fleet child has no controller environment-refresh proof." >&2
+    if [ "${CLOUDBENCH_ENV_VERIFIED:-0}" != "1" ]; then
+        echo "❌ Fleet child has no controller environment-verification proof." >&2
         exit 1
     fi
-    echo "🔐 Environment refreshed and production-verified by fleet controller."
+    echo "🔎 Environment verified by fleet controller."
 else
-    DIRECT_ENV_REFRESH="1"
+    verify_app_environment || exit 1
 fi
 
 mid="$(resolve_machine_id)"
@@ -1535,12 +1378,21 @@ PY
 # SAFETY: STOP the machine on EVERY exit (success, failure, error, timeout,
 # Ctrl-C) and always kill the local dashboard proxy. Never destroy on the per-run
 # path — only --destroy removes it. A stopped machine bills only for the volume.
-if [ "$DIRECT_ENV_REFRESH" = "1" ]; then
-    CLOUDBENCH_HOLD_APP_ENV_LOCK=1
-    trap 'release_app_environment_lock; cloudbench_controller_lock_release "$LOCK_DIR"' EXIT
-    trap 'release_app_environment_lock; cloudbench_controller_lock_release "$LOCK_DIR"; exit 130' INT
-    trap 'release_app_environment_lock; cloudbench_controller_lock_release "$LOCK_DIR"; exit 143' TERM
-    inject_secrets
+LOCK_DIR="$ROOT_DIR/.context/cloudbench-controller.lock"
+LOCK_ACQUIRED="0"
+# Fleet mode: run-bench-fleet holds a single controller lock for all its children,
+# so each per-bench child skips its own lock (they run concurrently by design).
+if [ "$SKIP_CONTROLLER_LOCK" != "1" ]; then
+    if ! cloudbench_controller_lock_acquire "$LOCK_DIR"; then
+        old_pid="$(cat "$LOCK_DIR" 2>/dev/null || true)"
+        echo "❌ Another cloud benchmark controller is already running${old_pid:+ (pid $old_pid)}." >&2
+        echo "   Stop that run before starting another one." >&2
+        exit 1
+    fi
+    LOCK_ACQUIRED="1"
+    trap 'cloudbench_controller_lock_release "$LOCK_DIR"' EXIT
+    trap 'cloudbench_controller_lock_release "$LOCK_DIR"; exit 130' INT
+    trap 'cloudbench_controller_lock_release "$LOCK_DIR"; exit 143' TERM
 fi
 
 STOP_DONE="0"
@@ -1561,9 +1413,8 @@ stop_on_exit() {
         STOP_DONE="1"
         stop_machine "$mid"
     fi
-    release_app_environment_lock
     if [ "${LOCK_ACQUIRED:-0}" = "1" ]; then
-        cloudbench_controller_release "$LOCK_DIR" "$APP"
+        cloudbench_controller_lock_release "$LOCK_DIR"
     fi
     echo "Original exit code: $ec"
 }
@@ -1575,17 +1426,11 @@ trap 'exit 143' TERM
 # ── 1. Start the warm machine + wait until it is start+ssh-ready ────────────
 # Generous timeout: ~10s warm, minutes on a cold image pull. Gate on BOTH the Fly
 # machine state AND a trivial ssh echo (start != ssh-reachable).
-if [ -n "$FLEET_MACHINE_ID" ]; then
-    echo "▶️  Verifying parent-started leased machine $mid ..."
-else
-    echo "▶️  Starting warm machine $mid ..."
-fi
+echo "▶️  Starting warm machine $mid ..."
 READY_TIMEOUT="${CLOUDBENCH_READY_TIMEOUT:-600}"   # 10 min ceiling for a cold pull.
 start_ts="$(date +%s)"
 last_start_ts=0
-if [ -n "$FLEET_MACHINE_ID" ]; then
-    last_start_ts="$start_ts"
-elif machine_storage_ready "$mid"; then
+if machine_storage_ready "$mid"; then
     request_machine_start "$mid" || true
     last_start_ts="$start_ts"
 else
@@ -1617,8 +1462,7 @@ while :; do
     case "$st" in
         started|starting) : ;;
         *)
-            if [ -z "$FLEET_MACHINE_ID" ] \
-                && machine_storage_ready "$mid" \
+            if machine_storage_ready "$mid" \
                 && { [ "$last_start_ts" -eq 0 ] || [ $((now - last_start_ts)) -ge 20 ]; }; then
                 request_machine_start "$mid" >/dev/null 2>&1 || true
                 last_start_ts="$now"
@@ -1636,7 +1480,7 @@ echo "✅ Machine started + ssh-ready ($mid)"
 # Warm machines can retain a detached driver from an interrupted local
 # controller. Clear it before touching the shared /data/repo checkout.
 echo "🧹 Clearing stale on-box benchmark driver..."
-ssh_read "$mid" "stale_pat='/data/[c]loudbench-run.sh|/tmp/[r]b.sh|benchmarks/[r]un_benchmark.py|[r]un_benchmark.py|scripts/[r]un.sh --benchmark|http.server $REMOTE_DASH_PORT|[g]it -C $REMOTE_REPO fetch|[i]ndex-pack.*fetch-pack'; pkill -TERM -f \"\$stale_pat\" 2>/dev/null || true; sleep 2; pkill -KILL -f \"\$stale_pat\" 2>/dev/null || true; rm -f '$REMOTE_REPO/.context/cloudbench/report-card.json' '$REMOTE_REPO/.context/cloudbench/run.json' 2>/dev/null || true; rm -f '$REMOTE_REPO/.git/index.lock' '$REMOTE_REPO/.git/'*.lock '$REMOTE_REPO/.git/refs/heads/'*.lock 2>/dev/null || true" >/dev/null 2>&1 || true
+ssh_read "$mid" "stale_pat='/data/[c]loudbench-run.sh|/tmp/[r]b.sh|benchmarks/[r]un_benchmark.py|[r]un_benchmark.py|scripts/[r]un.sh --benchmark|http.server $REMOTE_DASH_PORT|[g]it -C $REMOTE_REPO fetch|[i]ndex-pack.*fetch-pack'; pkill -TERM -f \"\$stale_pat\" 2>/dev/null || true; sleep 2; pkill -KILL -f \"\$stale_pat\" 2>/dev/null || true; rm -f '$REMOTE_REPO/.context/cloudbench/report-card.json' '$REMOTE_REPO/.context/cloudbench/run.json' 2>/dev/null || true; rm -f '$REMOTE_REPO/.git/index.lock' '$REMOTE_REPO/.git/'*.lock '$REMOTE_REPO/.git/refs/heads/'*.lock 2>/dev/null || true; git config --global --add safe.directory '$REMOTE_REPO' 2>/dev/null || true" >/dev/null 2>&1 || true
 
 # ── 2. Deliver + launch the on-box driver DETACHED ──────────────────────────
 # Upload the LOCAL cloudbench-run.sh, local git diff, and a small invocation
@@ -1649,7 +1493,7 @@ if [ ! -f "$ROOT_DIR/$REMOTE_RUN_SCRIPT" ]; then
     echo "❌ Missing $REMOTE_RUN_SCRIPT locally." >&2
     exit 1
 fi
-for helper in cloudbench-fetch-ref.sh cloudbench-sync-deps.sh cloudbench-current-run-artifact.py cloudbench-prepare-patch.sh; do
+for helper in cloudbench-fetch-ref.sh cloudbench-sync-deps.sh cloudbench-current-run-artifact.py; do
     [ -f "$ROOT_DIR/scripts/$helper" ] || { echo "❌ Missing scripts/$helper locally." >&2; exit 1; }
 done
 STAGED_LOCAL_FILES=()
@@ -1665,7 +1509,6 @@ if ! git -C "$ROOT_DIR" diff HEAD --quiet --binary; then
     STAGED_LOCAL_FILES+=("$LOCAL_PATCH_FILE")
     git -C "$ROOT_DIR" diff HEAD --binary > "$LOCAL_PATCH_FILE"
 fi
-REMOTE_STAGE_BUNDLE="/tmp/cloudbench-stage-$RUN_LOG_TOKEN.sh"
 
 # Proxy the box BACKEND (not its frontend) to the Mac. The local archive frontend
 # talks to a local archive API which proxies live agent reads here with the
@@ -1703,7 +1546,6 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     echo "export CLOUDBENCH_SYNC_DEPS_SCRIPT=/data/cloudbench-sync-deps.sh"
     echo "export CLOUDBENCH_CURRENT_RUN_ARTIFACT_SCRIPT=/data/cloudbench-current-run-artifact.py"
     echo "export CLOUDBENCH_RUN_TOKEN=$(printf '%q' "$RUN_LOG_TOKEN")"
-    echo "export CLOUDBENCH_PREPARE_PATCH_SCRIPT=/data/cloudbench-prepare-patch.sh"
     echo "export CLOUDBENCH_START_BARRIER=$(printf '%q' "${CLOUDBENCH_START_BARRIER:-}")"
     echo "export CLOUDBENCH_START_BARRIER_WAIT_SECONDS=$(printf '%q' "${CLOUDBENCH_START_BARRIER_WAIT_SECONDS:-$RUN_TIMEOUT}")"
     echo "export WMH_MODEL_NAME=$(printf '%q' "$WMH_MODEL_NAME")"
@@ -1727,7 +1569,7 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     else
         echo "unset LOCAL_PATCH_FILE LOCAL_PATCH_B64"
     fi
-    echo "rm -f $(printf '%q' "$REMOTE_TMP_SCRIPT") $(printf '%q' "$REMOTE_STAGE_BUNDLE")"
+    echo "rm -f $(printf '%q' "$REMOTE_TMP_SCRIPT")"
     echo "exec bash /data/cloudbench-run.sh"
 } > "$WRAPPER_LOCAL"
 
@@ -1750,15 +1592,29 @@ done
 _ok=0
 stage_err="$(mktemp)"
 STAGED_LOCAL_FILES+=("$stage_err")
-STAGE_BUNDLE="$(mktemp)"
-STAGED_LOCAL_FILES+=("$STAGE_BUNDLE")
-if ! write_cloudbench_stage_bundle "$STAGE_BUNDLE" "$REMOTE_STAGE_BUNDLE"; then
-    echo "❌ could not build the local cloud benchmark staging bundle" >&2
-    exit 1
-fi
-if stage_cloudbench_payload "$mid" "$STAGE_BUNDLE" "$REMOTE_STAGE_BUNDLE" "$stage_err"; then
-    _ok=1
-fi
+# Stage the driver + wrapper (+ patch) as separate sftp puts. (A tar-in-one-upload
+# variant was tried to cut SSH round-trips but proved flaky on reused pool boxes;
+# reliability of the staging step matters more than ~30s, so we keep the puts.)
+STAGE_ATTEMPTS="${CLOUDBENCH_STAGE_ATTEMPTS:-20}"
+for _ in $(seq 1 "$STAGE_ATTEMPTS"); do
+    : > "$stage_err"
+    ssh_read "$mid" "rm -f /data/cloudbench-run.sh /data/cloudbench-fetch-ref.sh /data/cloudbench-sync-deps.sh /data/cloudbench-current-run-artifact.py '$REMOTE_TMP_SCRIPT' /tmp/cloudbench-local.patch" >/dev/null 2>&1 || true
+    if FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$ROOT_DIR/$REMOTE_RUN_SCRIPT" /data/cloudbench-run.sh >"$stage_err" 2>&1 \
+        && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" /data/cloudbench-fetch-ref.sh >>"$stage_err" 2>&1 \
+        && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-sync-deps.sh" /data/cloudbench-sync-deps.sh >>"$stage_err" 2>&1 \
+        && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-current-run-artifact.py" /data/cloudbench-current-run-artifact.py >>"$stage_err" 2>&1 \
+        && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$WRAPPER_LOCAL" "$REMOTE_TMP_SCRIPT" >>"$stage_err" 2>&1; then
+        if [ -n "$LOCAL_PATCH_FILE" ]; then
+            FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0644 "$LOCAL_PATCH_FILE" /tmp/cloudbench-local.patch >>"$stage_err" 2>&1 || { sleep 3; continue; }
+        else
+            ssh_read "$mid" "rm -f /tmp/cloudbench-local.patch" >/dev/null 2>&1 || true
+        fi
+        o="$(ssh_read "$mid" "test -x /data/cloudbench-run.sh && grep -q cloudbench-run '$REMOTE_TMP_SCRIPT' && echo WROTE" 2>>"$stage_err")"
+    else
+        o=""
+    fi
+    printf '%s' "$o" | grep -q WROTE && { _ok=1; break; }; sleep 3
+done
 [ "$_ok" = 1 ] || {
     echo "❌ could not stage the on-box driver after retries"
     echo "─── staging error tail ───"
@@ -1766,7 +1622,7 @@ fi
     exit 1
 }
 FLY ssh console -a "$APP" --machine "$mid" -C "bash -c \"setsid bash '$REMOTE_TMP_SCRIPT' >> '$REMOTE_LOG' 2>&1 < /dev/null &\"" >/dev/null 2>&1 || true
-sleep 5
+sleep "${CLOUDBENCH_LAUNCH_SETTLE_SECONDS:-5}"
 o="$(ssh_read "$mid" "pgrep -f cloudbench-run.sh >/dev/null 2>&1 && echo RUNNING")"
 _ok=0
 printf '%s' "$o" | grep -q RUNNING && _ok=1
@@ -1957,7 +1813,7 @@ while :; do
             break
         fi
     fi
-    sleep 10
+    sleep "${CLOUDBENCH_POLL_INTERVAL:-10}"
 done
 
 # ── 5. Retrieve report-card.json + newest runs/*.json directly from the box ──

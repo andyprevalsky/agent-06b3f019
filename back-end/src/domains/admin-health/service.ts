@@ -1,5 +1,10 @@
 import { fetchAmplitudeFunnel } from './amplitude';
-import { ADMIN_PHONE_DIGITS, ADMIN_USER_IDS } from './config';
+import {
+  ADMIN_PHONE_DIGITS,
+  ADMIN_USER_IDS,
+  AMPLITUDE_API_KEY,
+  AMPLITUDE_SECRET_KEY,
+} from './config';
 import {
   buildFunnelSteps,
   buildRetentionCohorts,
@@ -9,15 +14,11 @@ import {
 } from './metrics';
 import * as repo from './repo';
 import { fetchStripeSubscribersByPeriod } from './stripeSubscribers';
-import { buildPeriods, startOfWeek } from './time';
+import { buildPeriods, startOfNextUtcDay, startOfWeek, utcDayKey } from './time';
 import type { AdminHealthPeriod, AdminHealthResponse, AdminHealthTimeSlice } from './types';
 import { fetchVelocityByPeriod } from './velocity';
 
-const CACHE_TTL_MS = 5 * 60 * 1000;
-const responseCache = new Map<
-  AdminHealthTimeSlice,
-  { expiresAt: number; value: Promise<AdminHealthResponse> }
->();
+const responseCache = new Map<string, { expiresAt: number; value: Promise<AdminHealthResponse> }>();
 
 export class AdminHealthForbiddenError extends Error {
   constructor() {
@@ -42,22 +43,29 @@ export function parseTimeSlice(value: unknown): AdminHealthTimeSlice {
   return value === 'weekly' || value === 'quarterly' || value === 'yearly' ? value : 'monthly';
 }
 
-function signupCohort(
+export function buildSignupCohort(
   users: repo.UserCreatedRecord[],
   tasks: repo.RootTaskRecord[],
   period: AdminHealthPeriod
 ): { userIds: Set<string>; tasks: repo.RootTaskRecord[] } {
   const start = new Date(period.start);
   const end = new Date(period.end);
-  const userIds = new Set(
-    users
-      .filter((user) => user.createdAt >= start && user.createdAt < end)
-      .map((user) => user.userId)
-  );
-  return { userIds, tasks: tasks.filter((task) => userIds.has(task.userId)) };
+  const cohortUsers = users.filter((user) => user.createdAt >= start && user.createdAt < end);
+  const userIds = new Set(cohortUsers.map((user) => user.userId));
+  return {
+    userIds,
+    // Attribute every root task a cohort user issued within the period window.
+    // The signup funnel (querybox -> goal submission -> account creation) commits the
+    // first task's root agent moments BEFORE the User row's createdAt, so a task can
+    // legitimately predate its own signup timestamp by milliseconds. Bounding by the
+    // period window (not by each user's createdAt) keeps that first task counted.
+    tasks: tasks.filter(
+      (task) => userIds.has(task.userId) && task.createdAt >= start && task.createdAt < end
+    ),
+  };
 }
 
-async function fetchInputs(periods: AdminHealthPeriod[]) {
+async function fetchInputs(periods: AdminHealthPeriod[], retrievalTime: Date) {
   const historyStart = new Date(periods[0].start);
   const historyEnd = new Date(periods.at(-1)?.end ?? periods[0].end);
   const current = periods[periods.length - 1];
@@ -65,18 +73,18 @@ async function fetchInputs(periods: AdminHealthPeriod[]) {
   const [
     tasks,
     firstTasks,
-    usersCreated,
+    verifiedUsers,
     revenue,
     subscribers,
     velocity,
     currentAmplitude,
     previousAmplitude,
   ] = await Promise.all([
-    repo.findRootTasksBetween(historyStart, historyEnd),
+    repo.findRootTasksBetween(startOfWeek(historyStart), historyEnd),
     repo.findFirstRootTasksByUserBetween(startOfWeek(historyStart), historyEnd),
-    repo.findUsersCreatedBetween(historyStart, historyEnd),
+    repo.findVerifiedUsersCreatedBefore(historyEnd, Array.from(ADMIN_USER_IDS)),
     fetchStripeRevenueByPeriod(periods),
-    fetchStripeSubscribersByPeriod(periods),
+    fetchStripeSubscribersByPeriod(periods, retrievalTime),
     fetchVelocityByPeriod(periods),
     fetchAmplitudeFunnel(new Date(current.start), new Date(current.end)),
     fetchAmplitudeFunnel(new Date(previous.start), new Date(previous.end)),
@@ -84,7 +92,7 @@ async function fetchInputs(periods: AdminHealthPeriod[]) {
   return {
     tasks,
     firstTasks,
-    usersCreated,
+    verifiedUsers,
     revenue,
     subscribers,
     velocity,
@@ -93,12 +101,15 @@ async function fetchInputs(periods: AdminHealthPeriod[]) {
   };
 }
 
-async function loadAdminHealth(timeSlice: AdminHealthTimeSlice): Promise<AdminHealthResponse> {
-  const periods = buildPeriods(timeSlice);
+async function loadAdminHealth(
+  timeSlice: AdminHealthTimeSlice,
+  retrievalTime: Date
+): Promise<AdminHealthResponse> {
+  const periods = buildPeriods(timeSlice, retrievalTime);
   const currentPeriod = periods[periods.length - 1];
   const previousPeriod = periods[periods.length - 2];
-  const generatedAt = new Date();
-  const input = await fetchInputs(periods);
+  const generatedAt = new Date(retrievalTime);
+  const input = await fetchInputs(periods, retrievalTime);
   const series = buildSeries(
     periods,
     input.tasks,
@@ -107,8 +118,12 @@ async function loadAdminHealth(timeSlice: AdminHealthTimeSlice): Promise<AdminHe
     input.velocity.buckets
   );
   const latest = series[series.length - 1];
-  const currentCohort = signupCohort(input.usersCreated, input.tasks, currentPeriod);
-  const previousCohort = signupCohort(input.usersCreated, input.tasks, previousPeriod);
+  const currentCohort = buildSignupCohort(input.verifiedUsers, input.tasks, currentPeriod);
+  const previousCohort = buildSignupCohort(input.verifiedUsers, input.tasks, previousPeriod);
+  const retentionThrough = new Date(new Date(currentPeriod.end).getTime() - 1);
+  const verifiedUserIds = new Set(input.verifiedUsers.map((user) => user.userId));
+  const retentionFirstTasks = input.firstTasks.filter((task) => verifiedUserIds.has(task.userId));
+  const retentionTasks = input.tasks.filter((task) => verifiedUserIds.has(task.userId));
   const currentFunnel = buildFunnelSteps(
     currentCohort.tasks,
     currentCohort.userIds.size,
@@ -133,23 +148,56 @@ async function loadAdminHealth(timeSlice: AdminHealthTimeSlice): Promise<AdminHe
       taskCompletionRate: latest.taskCompletionRate,
     },
     series,
-    retentionCohorts: buildRetentionCohorts(input.firstTasks, input.tasks, generatedAt),
+    retentionCohorts: buildRetentionCohorts(retentionFirstTasks, retentionTasks, retentionThrough),
     funnel: compareFunnelSteps(currentFunnel, previousFunnel),
     velocity: input.velocity.current,
   };
 }
 
+export function isCacheableAdminHealthResponse(
+  response: AdminHealthResponse,
+  amplitudeConfigured = AMPLITUDE_API_KEY !== '' && AMPLITUDE_SECRET_KEY !== ''
+): boolean {
+  if (response.summary.revenueCents === null) return false;
+  if (
+    amplitudeConfigured &&
+    response.funnel.steps.some(
+      (step) => step.source === 'client_analytics' && step.status !== 'ready'
+    )
+  ) {
+    return false;
+  }
+  return (
+    response.velocity.dev.linearPointsCompleted.status !== 'error' &&
+    response.velocity.dev.githubCommitsLanded.status !== 'error' &&
+    response.velocity.ops.linearPointsCompleted.status !== 'error'
+  );
+}
+
 export async function getAdminHealth(
   timeSlice: AdminHealthTimeSlice
 ): Promise<AdminHealthResponse> {
-  const cached = responseCache.get(timeSlice);
-  if (cached !== undefined && cached.expiresAt > Date.now()) return cached.value;
-  const value = loadAdminHealth(timeSlice);
-  responseCache.set(timeSlice, { expiresAt: Date.now() + CACHE_TTL_MS, value });
+  const retrievalTime = new Date();
+  const now = retrievalTime.getTime();
+  for (const [key, entry] of responseCache) {
+    if (entry.expiresAt <= now) responseCache.delete(key);
+  }
+  const cacheKey = `${utcDayKey(retrievalTime)}:${timeSlice}`;
+  const cached = responseCache.get(cacheKey);
+  if (cached !== undefined) return cached.value;
+  const value = loadAdminHealth(timeSlice, retrievalTime);
+  responseCache.set(cacheKey, {
+    expiresAt: startOfNextUtcDay(retrievalTime).getTime(),
+    value,
+  });
   try {
-    return await value;
+    const response = await value;
+    if (!isCacheableAdminHealthResponse(response) && responseCache.get(cacheKey)?.value === value) {
+      responseCache.delete(cacheKey);
+    }
+    return response;
   } catch (error) {
-    responseCache.delete(timeSlice);
+    responseCache.delete(cacheKey);
     throw error;
   }
 }

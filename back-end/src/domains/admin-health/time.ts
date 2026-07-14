@@ -1,4 +1,4 @@
-import { POINTS_BY_SLICE } from './config';
+import { DAYS_BY_SLICE, POINTS_BY_SLICE } from './config';
 import type { AdminHealthPeriod, AdminHealthTimeSlice } from './types';
 
 function startOfUtcDay(date: Date): Date {
@@ -11,48 +11,21 @@ function addDays(date: Date, days: number): Date {
   return next;
 }
 
-function addMonths(date: Date, months: number): Date {
-  // Callers must pass day-1 dates; setUTCMonth overflows month-end dates.
-  const next = new Date(date);
-  next.setUTCMonth(next.getUTCMonth() + months);
-  return next;
-}
-
 export function startOfWeek(date: Date): Date {
   const day = date.getUTCDay();
   return addDays(startOfUtcDay(date), day === 0 ? -6 : 1 - day);
 }
 
-function startForSlice(date: Date, timeSlice: AdminHealthTimeSlice): Date {
-  if (timeSlice === 'monthly') {
-    return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
-  }
-  if (timeSlice === 'quarterly') {
-    const quarterMonth = Math.floor(date.getUTCMonth() / 3) * 3;
-    return new Date(Date.UTC(date.getUTCFullYear(), quarterMonth, 1));
-  }
-  if (timeSlice === 'yearly') return new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
-  return startOfWeek(date);
+export function startOfNextUtcDay(date: Date): Date {
+  return addDays(startOfUtcDay(date), 1);
 }
 
-function addSlice(date: Date, timeSlice: AdminHealthTimeSlice, amount: number): Date {
-  if (timeSlice === 'monthly') return addMonths(date, amount);
-  if (timeSlice === 'quarterly') return addMonths(date, amount * 3);
-  if (timeSlice === 'yearly') {
-    const next = new Date(date);
-    next.setUTCFullYear(next.getUTCFullYear() + amount);
-    return next;
-  }
-  return addDays(date, amount * 7);
+export function utcDayKey(date: Date): string {
+  return startOfUtcDay(date).toISOString().slice(0, 10);
 }
 
-function formatPeriodKey(date: Date, timeSlice: AdminHealthTimeSlice): string {
-  const year = date.getUTCFullYear();
-  if (timeSlice === 'yearly') return String(year);
-  if (timeSlice === 'quarterly') return `${year}-Q${Math.floor(date.getUTCMonth() / 3) + 1}`;
-  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
-  if (timeSlice === 'monthly') return `${year}-${month}`;
-  return `${year}-${month}-${String(date.getUTCDate()).padStart(2, '0')}`;
+function formatPeriodKey(date: Date): string {
+  return utcDayKey(date);
 }
 
 export function formatPeriodLabel(date: Date, timeSlice: AdminHealthTimeSlice): string {
@@ -67,19 +40,29 @@ export function formatPeriodLabel(date: Date, timeSlice: AdminHealthTimeSlice): 
   }).format(date);
 }
 
+function formatRollingPeriodLabel(date: Date, timeSlice: AdminHealthTimeSlice): string {
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    ...(timeSlice === 'weekly' ? {} : { year: '2-digit' as const }),
+    timeZone: 'UTC',
+  }).format(date);
+}
+
 export function buildPeriods(
   timeSlice: AdminHealthTimeSlice,
   now = new Date()
 ): AdminHealthPeriod[] {
-  const currentStart = startForSlice(now, timeSlice);
   const count = POINTS_BY_SLICE[timeSlice];
-  const firstStart = addSlice(currentStart, timeSlice, 1 - count);
+  const days = DAYS_BY_SLICE[timeSlice];
+  const currentEnd = startOfUtcDay(now);
+  const firstStart = addDays(currentEnd, -days * count);
   return Array.from({ length: count }, (_, index) => {
-    const start = addSlice(firstStart, timeSlice, index);
-    const end = addSlice(start, timeSlice, 1);
+    const start = addDays(firstStart, days * index);
+    const end = addDays(start, days);
     return {
-      key: formatPeriodKey(start, timeSlice),
-      label: formatPeriodLabel(start, timeSlice),
+      key: formatPeriodKey(start),
+      label: formatRollingPeriodLabel(start, timeSlice),
       start: start.toISOString(),
       end: end.toISOString(),
     };

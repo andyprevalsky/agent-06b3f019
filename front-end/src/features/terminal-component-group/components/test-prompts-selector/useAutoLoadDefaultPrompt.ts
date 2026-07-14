@@ -10,7 +10,7 @@
  * memoized request with TestPromptsSelector).
  */
 
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { IS_DEV_MODE, IS_VITEST } from '../../config';
 import { fetchTestPromptFiles } from './fetchTestPromptFiles';
 import { DEV_DEFAULT_PROMPT_TITLE, fetchTestPrompts } from './fetchTestPrompts';
@@ -19,7 +19,17 @@ let hasAutoLoaded = false;
 
 type OnSelectPrompt = (prompt: string, files?: File[]) => void;
 
-export function useAutoLoadDefaultPrompt(onSelectPrompt: OnSelectPrompt): void {
+const ALWAYS_AUTO_LOAD = () => true;
+
+export function useAutoLoadDefaultPrompt(
+  onSelectPrompt: OnSelectPrompt,
+  shouldAutoLoadDefaultPrompt: () => boolean = ALWAYS_AUTO_LOAD,
+): void {
+  const onSelectPromptRef = useRef(onSelectPrompt);
+  const shouldAutoLoadDefaultPromptRef = useRef(shouldAutoLoadDefaultPrompt);
+  onSelectPromptRef.current = onSelectPrompt;
+  shouldAutoLoadDefaultPromptRef.current = shouldAutoLoadDefaultPrompt;
+
   useEffect(() => {
     if (IS_VITEST || !IS_DEV_MODE || hasAutoLoaded) return;
     hasAutoLoaded = true;
@@ -33,16 +43,21 @@ export function useAutoLoadDefaultPrompt(onSelectPrompt: OnSelectPrompt): void {
         return;
       }
       if (!defaultPrompt) return;
+      if (!shouldAutoLoadDefaultPromptRef.current()) return;
 
       try {
         const files =
           defaultPrompt.attachmentUrls && defaultPrompt.attachmentUrls.length > 0
             ? await fetchTestPromptFiles(defaultPrompt.attachmentUrls)
             : undefined;
-        onSelectPrompt(defaultPrompt.prompt, files);
+        if (shouldAutoLoadDefaultPromptRef.current()) {
+          onSelectPromptRef.current(defaultPrompt.prompt, files);
+        }
       } catch {
-        onSelectPrompt(defaultPrompt.prompt);
+        if (shouldAutoLoadDefaultPromptRef.current()) {
+          onSelectPromptRef.current(defaultPrompt.prompt);
+        }
       }
     })();
-  }, [onSelectPrompt]);
+  }, []);
 }

@@ -2620,28 +2620,36 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 )
                 session_info = await fetch_session_info(config, task_id, validate_live=True)
                 expected_session_id = write_lock_resume_state.get("session_id") if write_lock_resume_state else None
-                session_matches = (
-                    expected_session_id is None
-                    or session_info.get("session_id") is None
-                    or session_info.get("session_id") == expected_session_id
+                current_session_id = session_info.get("session_id")
+                session_was_refreshed = (
+                    expected_session_id is not None
+                    and current_session_id is not None
+                    and current_session_id != expected_session_id
                 )
-                same_session_available = session_info.get("same_session_available") is True and session_matches
+                # The browser task id is the stable ownership boundary. The auth
+                # handoff page may refresh an expired provider session before the
+                # user signs in, updating this task to a new live session while
+                # the paused worker still holds the old provider session id.
+                # Requiring those ephemeral ids to match would discard the
+                # authenticated browser and launch a second profile writer.
+                same_session_available = session_info.get("same_session_available") is True
                 if same_session_available:
-                    session_info["resume_mode"] = "same_steel_session"
-                    auth_assistance_resume_mode = "same_steel_session"
+                    resume_mode = "backend_refreshed_session" if session_was_refreshed else "same_steel_session"
+                    session_info["resume_mode"] = resume_mode
+                    auth_assistance_resume_mode = resume_mode
                     logger.info(
                         "Reconnecting to live browser session after auth assistance",
                         task_id=task_id,
-                        session_id=session_info.get("session_id"),
+                        session_id=current_session_id,
+                        previous_session_id=expected_session_id if session_was_refreshed else None,
+                        session_was_refreshed=session_was_refreshed,
                     )
                 else:
                     unavailable_reason = session_info.get("same_session_unavailable_reason")
-                    if not session_matches:
-                        unavailable_reason = "session_id_mismatch"
                     logger.warning(
                         "Existing browser session unavailable after auth assistance; creating replacement session",
                         task_id=task_id,
-                        session_id=session_info.get("session_id"),
+                        session_id=current_session_id,
                         expected_session_id=expected_session_id,
                         reason=unavailable_reason,
                     )

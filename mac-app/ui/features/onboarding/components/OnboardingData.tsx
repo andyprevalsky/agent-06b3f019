@@ -14,9 +14,9 @@ import TelegramAuthModal from '../../../components/TelegramAuthModal';
 import PasskeysModal from '@/components/PasskeysModal';
 import ConnectedAccountChip from '@/features/integrations/components/ConnectedAccountChip';
 import DropdownIconFrame, {
-  browserDropdownIconPreset,
+  BrowserDropdownIconPreset,
   dropdownIconImageClassName,
-  dropdownIconPreset,
+  DropdownIconPreset,
 } from '@/features/integrations/components/DropdownIconFrame';
 import PasskeysConnectRow from '@/features/integrations/components/PasskeysConnectRow';
 import PlaidLogoIcon from '@/features/integrations/components/PlaidLogoIcon';
@@ -854,7 +854,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
             <div className="p-4 flex items-center justify-between">
               <div className="flex items-center gap-3">
                 <DropdownIconFrame
-                  {...dropdownIconPreset.browserMain}
+                  {...DropdownIconPreset.browserMain}
                   isSynced={connectedBrowsers.size > 0}
                 >
                   <svg className="w-5 h-5" viewBox="0 0 24 24">
@@ -909,7 +909,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                       >
                         <div className="flex items-center gap-3">
                           <DropdownIconFrame
-                            {...browserDropdownIconPreset(browser.type)}
+                            {...BrowserDropdownIconPreset(browser.type)}
                             isSynced={isConnected}
                           >
                             <BrowserIcon
@@ -947,7 +947,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
             <div className="p-4 flex items-center justify-between">
               <div className="flex items-center gap-3">
                 <DropdownIconFrame
-                  {...dropdownIconPreset.passwordsMain}
+                  {...DropdownIconPreset.passwordsMain}
                   isSynced={
                     chromePasswordsSynced ||
                     applePasswordsSynced ||
@@ -1000,7 +1000,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                 <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
                   <div className="flex items-center gap-3">
                     <DropdownIconFrame
-                      {...dropdownIconPreset.chrome}
+                      {...DropdownIconPreset.chrome}
                       isSynced={chromePasswordsSynced}
                     >
                       <img src={chromeIcon} alt="Chrome" className={dropdownIconImageClassName} />
@@ -1034,7 +1034,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                 <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
                   <div className="flex items-center gap-3">
                     <DropdownIconFrame
-                      {...dropdownIconPreset.atlas}
+                      {...DropdownIconPreset.atlas}
                       isSynced={atlasPasswordsSynced}
                     >
                       <img
@@ -1070,7 +1070,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
             <div className="p-4 flex items-center justify-between">
               <div className="flex items-center gap-3">
                 <DropdownIconFrame
-                  {...dropdownIconPreset.messagesMain}
+                  {...DropdownIconPreset.messagesMain}
                   isSynced={
                     iMessageSynced ||
                     whatsAppConnected ||
@@ -1113,7 +1113,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                 {/* iMessage */}
                 <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
                   <div className="flex items-center gap-3">
-                    <DropdownIconFrame {...dropdownIconPreset.imessage} isSynced={iMessageSynced}>
+                    <DropdownIconFrame {...DropdownIconPreset.imessage} isSynced={iMessageSynced}>
                       <svg className="w-6 h-6" viewBox="0 0 24 24">
                         <defs>
                           <linearGradient id="imessageGrad" x1="0%" y1="0%" x2="0%" y2="100%">
@@ -1150,7 +1150,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                 <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
                   <div className="flex items-center gap-3">
                     <DropdownIconFrame
-                      {...dropdownIconPreset.whatsapp}
+                      {...DropdownIconPreset.whatsapp}
                       isSynced={whatsAppConnected}
                     >
                       <svg className="w-6 h-6" viewBox="0 0 24 24">
@@ -1183,7 +1183,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                 <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
                   <div className="flex items-center gap-3">
                     <DropdownIconFrame
-                      {...dropdownIconPreset.telegram}
+                      {...DropdownIconPreset.telegram}
                       isSynced={telegramConnected}
                     >
                       <svg className="w-6 h-6" viewBox="0 0 24 24">
@@ -1217,7 +1217,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                 <div className="px-4 py-2 flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <DropdownIconFrame
-                      {...dropdownIconPreset.gmail}
+                      {...DropdownIconPreset.gmail}
                       isSynced={connectedEmails.length > 0}
                     >
                       <svg className="w-6 h-6" viewBox="0 0 24 24">
@@ -1260,7 +1260,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
             {/* Main row */}
             <div className="p-4 flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <DropdownIconFrame {...dropdownIconPreset.socialsMain}>
+                <DropdownIconFrame {...DropdownIconPreset.socialsMain}>
                   <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none">
                     <defs>
                       <linearGradient
@@ -1315,7 +1315,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                 {/* X */}
                 <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
                   <div className="flex items-center gap-3">
-                    <DropdownIconFrame {...dropdownIconPreset.x}>
+                    <DropdownIconFrame {...DropdownIconPreset.x}>
                       <svg className="w-6 h-6" viewBox="0 0 24 24">
                         <rect width="24" height="24" rx="5" fill="#000000" />
                         <path
@@ -1333,7 +1333,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                 {/* LinkedIn */}
                 <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
                   <div className="flex items-center gap-3">
-                    <DropdownIconFrame {...dropdownIconPreset.linkedin}>
+                    <DropdownIconFrame {...DropdownIconPreset.linkedin}>
                       <svg className="w-6 h-6" viewBox="0 0 24 24">
                         <rect width="24" height="24" rx="5" fill="#0A66C2" />
                         <path
@@ -1361,7 +1361,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
                 {/* Instagram */}
                 <div className="px-4 py-2 flex items-center justify-between">
                   <div className="flex items-center gap-3">
-                    <DropdownIconFrame {...dropdownIconPreset.instagram}>
+                    <DropdownIconFrame {...DropdownIconPreset.instagram}>
                       <svg className="w-6 h-6" viewBox="0 0 24 24">
                         <defs>
                           <linearGradient id="igGradOnboarding" x1="0%" y1="100%" x2="100%" y2="0%">
@@ -1407,7 +1407,7 @@ const OnboardingData = ({ onComplete }: OnboardingDataProps) => {
             <div className="p-4 flex items-center justify-between">
               <div className="flex items-center gap-3">
                 <DropdownIconFrame
-                  {...dropdownIconPreset.plaid}
+                  {...DropdownIconPreset.plaid}
                   isSynced={connectedBanks.length > 0}
                 >
                   <PlaidLogoIcon />

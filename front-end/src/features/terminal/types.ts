@@ -31,6 +31,14 @@ export type TerminalView =
 
 export type AnimationPhase = 'revealing' | 'paused' | 'fading';
 
+export interface PendingAgentCreationInput {
+  agentId: string;
+  goal: string;
+  model: string;
+  source: AgentDetail['source'];
+  priceLimitCents: number;
+}
+
 // ── Drip styles ───────────────────────────────────────────────────────────
 
 export interface DripStyles {

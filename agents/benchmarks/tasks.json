@@ -2003,5 +2003,200 @@
       "phone-benchmark:payment",
       "user-label:daily-phone-payment"
     ]
+  },
+  {
+    "name": "message-person-agent-sms",
+    "tags": [
+      "approval"
+    ],
+    "bench": "pipeline-e2e",
+    "group": "Daily",
+    "title": "Send Immediately From Agent Phone",
+    "prompt": "Send a short, friendly text to 972-977-7432 saying this is the Rose agent SMS send bench. Use the agent_sms channel from your own agent phone. Do not use the user's iMessage relay and do not use email.",
+    "source": [
+      "regression:5851f75f-9c0b-4287-ba50-5fb0877aac9d",
+      "blackbox:agents/tests/blackbox/message_person.blackbox.py",
+      "blackbox:back-end/src/tests/blackbox/agent-phone.blackbox.ts",
+      "unit:back-end/src/tests/unit/agentphone-provider.test.ts"
+    ],
+    "attachment": null,
+    "evaluators": [
+      {
+        "id": "immediate_agent_sms_send",
+        "checks": [
+          {
+            "type": "message_person_agent_sms_send"
+          }
+        ],
+        "method": "static_check",
+        "criteria": [
+          "Exactly one message_person call is made",
+          "The selected transport is agent_sms",
+          "AgentPhone accepts the outbound message immediately",
+          "The terminal tool event contains provider=agentphone, provider_channel, status=sent, and message_id",
+          "No iMessage queue_id is present"
+        ]
+      }
+    ],
+    "description": "Live regression bench proving agent_sms sends immediately through AgentPhone and never enters the user's iMessage queue",
+    "environment": {
+      "mode": "live",
+      "secrets": [
+        "AGENTPHONE_API_KEY"
+      ],
+      "services": [
+        "message_person",
+        "AgentPhone outbound messages"
+      ],
+      "base_images": [],
+      "db_fixtures": [],
+      "live_targets": [
+        "AgentPhone POST /v1/messages"
+      ],
+      "context_notes": "The evaluator requires a FINISHED agent_sms receipt with provider=agentphone, provider_channel, and message_id, and rejects any iMessage queue_id. AgentPhone acceptance is immediate but does not guarantee recipient-device delivery."
+    },
+    "start_phase": "execute",
+    "is_chat_mode": false,
+    "expected_tools": [
+      "message_person"
+    ],
+    "timeout_seconds": 180,
+    "tool_count_scope": "root",
+    "approval_handling": "auto_approve",
+    "price_limit_cents": 50,
+    "expected_tool_counts": {
+      "message_person": 1
+    },
+    "requires_claude_code": false,
+    "requires_browser_agent": false
+  },
+  {
+    "name": "browser-agent-amazon-passkey",
+    "tags": [
+      "browser",
+      "auth"
+    ],
+    "bench": "rose-bench",
+    "title": "Amazon Kernel Passkey Authentication",
+    "prompt": "Open https://www.amazon.com and first confirm the page visibly shows the signed-out 'Hello, sign in' state. Then sign in using the saved Amazon passkey. Do not use a password, OTP, cookie/session authentication, or ask me to sign in. Once Amazon shows an authenticated account state, stop and report success.",
+    "source": [
+      "commit:8923d6e87",
+      "live-amazon:kernel-passkey"
+    ],
+    "attachment": null,
+    "evaluators": [
+      {
+        "id": "kernel-passkey-authentication",
+        "checks": [
+          {
+            "type": "browser_provider",
+            "value": "kernel"
+          },
+          {
+            "type": "browser_session_metadata_values",
+            "value": {
+              "auth_source": "none",
+              "cookies_count": 0,
+              "profile_source": "new_user_persistent",
+              "cookies_injected": false,
+              "permission_grant_count": 0,
+              "indexed_db_origin_count": 0,
+              "cache_storage_origin_count": 0,
+              "local_storage_origin_count": 0
+            }
+          },
+          {
+            "type": "message_before_credential_contains",
+            "value": [
+              "Hello, sign in"
+            ],
+            "credential_kind": "passkey"
+          },
+          {
+            "type": "credential_ref_kind",
+            "value": "passkey"
+          },
+          {
+            "type": "message_after_credential_contains",
+            "value": [
+              "Hello, Andy"
+            ],
+            "credential_kind": "passkey"
+          },
+          {
+            "type": "forbidden_credential_ref_kinds",
+            "value": [
+              "password",
+              "email_otp",
+              "sms_otp"
+            ]
+          }
+        ],
+        "method": "static_check",
+        "criteria": [
+          "Browser session metadata identifies Kernel as the provider",
+          "Browser session metadata proves a new profile with zero cookie or origin-state injection",
+          "The transcript shows Amazon signed out before passkey use",
+          "A passkey credential_ref is persisted before task completion",
+          "Amazon shows an authenticated account state",
+          "The transcript uses neither password nor OTP"
+        ]
+      }
+    ],
+    "description": "Live Amazon sign-in from a fresh Kernel profile using only the synced passkey",
+    "environment": {
+      "mode": "live",
+      "secrets": [
+        "amazon_passkey"
+      ],
+      "services": [
+        "amazon.com",
+        "kernel"
+      ],
+      "base_images": [],
+      "db_fixtures": [],
+      "live_targets": [
+        "https://www.amazon.com"
+      ],
+      "context_notes": "compute_tokens refreshes only LLM credentials. amazon_passkey syncs only the live passkey, deletes Amazon cookies and origin storage, disables saved-session/password alternatives, and detaches the local Kernel profile mapping so the run proves CDP passkey injection from a fresh profile.",
+      "live_fixtures": [
+        "compute_tokens",
+        "amazon_passkey"
+      ]
+    },
+    "start_phase": "execute",
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "timeout_seconds": 300,
+    "approval_handling": null,
+    "price_limit_cents": 200,
+    "requires_claude_code": false,
+    "requires_browser_agent": true,
+    "expected_browser_provider": "kernel",
+    "expected_credential_ref_kind": "passkey",
+    "forbidden_credential_ref_kinds": [
+      "password",
+      "email_otp",
+      "sms_otp"
+    ],
+    "success_on_browser_auth_evidence": true,
+    "expected_browser_session_metadata_values": {
+      "auth_source": "none",
+      "cookies_count": 0,
+      "profile_source": "new_user_persistent",
+      "cookies_injected": false,
+      "permission_grant_count": 0,
+      "indexed_db_origin_count": 0,
+      "cache_storage_origin_count": 0,
+      "local_storage_origin_count": 0
+    },
+    "expected_pre_credential_message_contains": [
+      "Hello, sign in"
+    ],
+    "expected_post_credential_message_contains": [
+      "Hello, Andy"
+    ]
   }
 ]

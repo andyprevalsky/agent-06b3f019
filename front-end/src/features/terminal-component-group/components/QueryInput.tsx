@@ -169,6 +169,7 @@ function QueryInputBody(props: QueryInputBodyProps) {
           onChange(prompt);
           if (files && files.length > 0) void attachments.processFiles(files);
         }}
+        shouldAutoLoadDefaultPrompt={() => (textareaRef.current?.value ?? '').trim() === ''}
         pendingPriceLimitCents={pendingPriceLimitCents}
         priceLimit={priceLimit}
         contextPercentage={contextPercentage}

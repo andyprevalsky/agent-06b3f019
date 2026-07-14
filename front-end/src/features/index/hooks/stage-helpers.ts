@@ -7,12 +7,7 @@
 import type { FeatureKey, MarkersFile, Segment } from '../types';
 
 export type StageMode =
-  | 'idle'
-  | 'ramping'
-  | 'awaitOutro'
-  | 'seeking'
-  | 'customAwaitWindow'
-  | 'customOutroPlaying';
+  'idle' | 'ramping' | 'awaitOutro' | 'seeking' | 'customAwaitWindow' | 'customOutroPlaying';
 
 export type CustomWindowName = 'anthropic' | 'meta' | 'deepseak' | 'gemini' | 'oai';
 

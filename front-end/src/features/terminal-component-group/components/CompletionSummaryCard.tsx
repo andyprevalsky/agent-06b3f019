@@ -18,15 +18,15 @@
  */
 
 import { memo, useState } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import { cn } from '@/lib/utils';
-import { Check, ChevronDown, Copy } from 'lucide-react';
+import { Check, Copy } from 'lucide-react';
 import { copyToClipboard } from '@/lib/clipboard';
 import { isFilePointer } from './claudeCodeChip.utils';
 import { FilePointerDisplay } from './FilePointerDisplay';
-import type { CompletionSummaryData, OutputField, ToolUsage } from '../types';
+import type { CompletionSummaryData, OutputField } from '../types';
 import type { FilePointer } from '../hooks';
-import { TOOL_DISPLAY_NAMES } from '../config';
+import { CompletionHeader, FooterStats, ToolUsageSection } from './CompletionSummarySections';
 
 export type { CompletionSummaryData } from '../types';
 
@@ -96,47 +96,6 @@ function formatRecord(record: Record<string, unknown>): string {
       return formatted ? `${humanizeKey(key)}: ${formatted}` : humanizeKey(key);
     })
     .join('\n');
-}
-
-function getToolDisplayName(toolName: string): string {
-  return TOOL_DISPLAY_NAMES[toolName] || humanizeKey(toolName);
-}
-
-function HeaderRow({ error }: { error: boolean }) {
-  return (
-    <div className="flex items-center gap-2 px-3 py-2.5 border-b border-border/60">
-      {error ? (
-        <>
-          <svg
-            className="w-4 h-4 text-red-600 dark:text-red-400"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M6 18L18 6M6 6l12 12"
-            />
-          </svg>
-          <span className="text-sm font-medium text-red-600 dark:text-red-400">Task Failed</span>
-        </>
-      ) : (
-        <>
-          <svg
-            className="w-4 h-4 text-emerald-600 dark:text-emerald-400"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-          </svg>
-          <span className="text-sm font-medium text-foreground">Task Complete</span>
-        </>
-      )}
-    </div>
-  );
 }
 
 interface OutputValueProps {
@@ -297,87 +256,6 @@ function OutputRow({ output, copiedField, onCopy }: OutputRowProps) {
   );
 }
 
-interface ToolUsageSectionProps {
-  toolUsage: ToolUsage[];
-  totalTools: number;
-  toolsExpanded: boolean;
-  onToggle: () => void;
-}
-
-function ToolUsageSection({
-  toolUsage,
-  totalTools,
-  toolsExpanded,
-  onToggle,
-}: ToolUsageSectionProps) {
-  return (
-    <div className="px-3 pb-3 border-t border-border/60">
-      <button
-        onClick={onToggle}
-        className="w-full py-2.5 flex items-center justify-between hover:opacity-80 transition-opacity"
-      >
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
-            Tools
-          </span>
-          <span className="text-xs text-muted-foreground">{totalTools}</span>
-        </div>
-        <ChevronDown
-          className={cn(
-            'w-4 h-4 text-muted-foreground transition-transform duration-200',
-            toolsExpanded && 'rotate-180',
-          )}
-        />
-      </button>
-      <AnimatePresence initial={false}>
-        {toolsExpanded && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2, ease: 'easeOut' }}
-            className="overflow-hidden"
-          >
-            <div className="space-y-1.5">
-              {toolUsage
-                .sort((a, b) => b.count - a.count)
-                .map((tool) => (
-                  <div key={tool.name} className="flex items-center justify-between text-sm">
-                    <span className="text-muted-foreground">{getToolDisplayName(tool.name)}</span>
-                    <span className="text-muted-foreground tabular-nums">{tool.count}</span>
-                  </div>
-                ))}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
-  );
-}
-
-function FooterStats({
-  durationSeconds,
-  costDollars,
-}: {
-  durationSeconds?: number;
-  costDollars?: number;
-}) {
-  if (durationSeconds === undefined && costDollars === undefined) return null;
-  return (
-    <div className="px-3 py-2 border-t border-border/60 flex items-center gap-3 text-xs text-muted-foreground">
-      {durationSeconds !== undefined && (
-        <span>
-          {durationSeconds < 60
-            ? `${durationSeconds}s`
-            : `${Math.floor(durationSeconds / 60)}m ${durationSeconds % 60}s`}
-        </span>
-      )}
-      {durationSeconds !== undefined && costDollars !== undefined && <span>·</span>}
-      {costDollars !== undefined && <span>${costDollars.toFixed(3)}</span>}
-    </div>
-  );
-}
-
 /**
  * CompletionSummaryCard - Displays agent completion summary with structured output and tool stats
  */
@@ -410,7 +288,7 @@ export const CompletionSummaryCard = memo(function CompletionSummaryCard({
         )}
         style={{ backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)' }}
       >
-        <HeaderRow error={!!data.error} />
+        <CompletionHeader error={!!data.error} />
         <div className="px-3 py-3">
           <p className="text-sm text-muted-foreground leading-relaxed">{summary}</p>
         </div>

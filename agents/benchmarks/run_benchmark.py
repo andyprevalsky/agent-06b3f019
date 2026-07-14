@@ -124,10 +124,14 @@ MINTED_AGENT_ACCOUNT_TASK_NAMES = {
 }
 MINTED_AGENT_ACCOUNT_X_POST_GOAL = "Make a post on X.com that says, Hello World"
 GREP_EXPLORE_STRESS_TASK_NAME = "grep-explore-stress"
-# Tasks whose setup restores a whole-DB snapshot (drops + recreates tables).
-# The parallel scheduler runs these serially after the batch drains — a
-# mid-batch restore destroys every concurrent task's rows (poll 404 cascade).
-EXCLUSIVE_DB_RESTORE_TASK_NAMES = {GREP_EXPLORE_STRESS_TASK_NAME}
+AMAZON_PASSKEY_TASK_NAME = "browser-agent-amazon-passkey"
+# Tasks whose fixtures destructively mutate shared benchmark DB state. The
+# parallel scheduler runs these serially after the batch drains so they cannot
+# corrupt an in-flight sibling task. Each fixture must also restore its state.
+EXCLUSIVE_SHARED_DB_TASK_NAMES = {
+    GREP_EXPLORE_STRESS_TASK_NAME,
+    AMAZON_PASSKEY_TASK_NAME,
+}
 USER_DATA_PROD_GREP_TASK_NAME = "user-data-prod-grep"
 USER_DATA_PROD_DOCUMENT_SOURCES = {"chatgpt", "claude", "apple_notes", "obsidian"}
 USER_DATA_PROD_CHECKLIST_KEYS = {"provider_validation_checklist", "provider_verification_checklist"}
@@ -2852,7 +2856,7 @@ def _sync_compute_tokens() -> None:
         print("    🔑 Refreshed compute tokens from prod")
 
 
-def _sync_browser_credentials() -> None:
+def _sync_browser_credentials() -> bool:
     """Refresh live browser auth state (cookies + browser context/storage +
     passwords/passkeys) from prod into the isolated benchmark DB. Same pattern as
     _sync_compute_tokens: a one-time setup-db sync goes stale as cookies expire,
@@ -2861,7 +2865,7 @@ def _sync_browser_credentials() -> None:
     database_url = _local_victoria_database_url()
     if not database_url:
         print("    ⚠ Credential sync skipped: local Victoria DB not found")
-        return
+        return False
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     env["DIRECT_URL"] = database_url
@@ -2876,11 +2880,12 @@ def _sync_browser_credentials() -> None:
         )
     except Exception as exc:
         print(f"    ⚠ Credential sync error: {exc}")
-        return
+        return False
     if result.returncode != 0:
         print(f"    ⚠ Credential sync failed: {(result.stderr or result.stdout).strip()[:200]}")
-    else:
-        print("    🍪 Refreshed browser cookies + passwords from prod")
+        return False
+    print("    🍪 Refreshed browser cookies + passwords from prod")
+    return True
 
 
 @dataclass
@@ -2932,11 +2937,146 @@ def _apply_amazon_auth(ctx: LiveFixtureContext) -> dict:
     return {"fixture": "amazon_auth", "bundle_count": bundle_count}
 
 
+def _apply_compute_tokens(_ctx: LiveFixtureContext) -> dict:
+    _sync_compute_tokens()
+    return {"fixture": "compute_tokens"}
+
+
+def _apply_amazon_passkey(ctx: LiveFixtureContext) -> dict:
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        raise RuntimeError("Amazon passkey fixture requires a local Victoria database")
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["DIRECT_URL"] = database_url
+    result = subprocess.run(
+        ["npx", "tsx", "scripts/seed-local.ts", "--passkeys-only"],
+        cwd=REPO_ROOT / "back-end",
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Amazon passkey sync failed: {(result.stderr or result.stdout).strip()[:300]}"
+        )
+
+    user = _sql_literal(ctx.user_id)
+    realm = _sql_literal(ctx.auth_realm)
+    snapshot_sql = (
+        "SELECT json_build_object("
+        "'steel_ids', COALESCE((SELECT json_agg(id) FROM \"SteelSessionAuth\" "
+        f"WHERE \"userId\" = {user} AND \"authRealm\" = {realm} AND \"disabledAt\" IS NULL), '[]'::json), "
+        "'bundle_ids', COALESCE((SELECT json_agg(id) FROM \"CookieBundle\" "
+        f"WHERE \"userId\" = {user} AND \"authRealm\" = {realm} AND \"disabledAt\" IS NULL), '[]'::json), "
+        "'password_ids', COALESCE((SELECT json_agg(id) FROM \"BrowserPassword\" "
+        f"WHERE \"userId\" = {user} AND \"disabledAt\" IS NULL), '[]'::json), "
+        "'profiles', COALESCE((SELECT json_agg(row_to_json(profile)) "
+        'FROM "BrowserProviderProfile" profile JOIN "BrowserContext" context '
+        'ON context.id = profile."contextId" '
+        f"WHERE context.\"userId\" = {user} AND profile.provider = 'kernel'), '[]'::json)"
+        ")::text;"
+    )
+    snapshot = json.loads(_run_local_victoria_sql(snapshot_sql))
+    passkey_sql = (
+        'SELECT COUNT(*) FROM "PasskeyCredential" '
+        f'WHERE "userId" = {user} AND "authRealm" = {realm} AND "disabledAt" IS NULL;'
+    )
+    passkey_count = int(_run_local_victoria_sql(passkey_sql).splitlines()[-1].strip() or "0")
+    if passkey_count <= 0:
+        raise RuntimeError(f"No enabled passkey found for {ctx.auth_realm}")
+
+    disabled_reason = _sql_literal("disabled by passkey-only benchmark fixture")
+    cleanup_sql = (
+        'WITH steel AS (UPDATE "SteelSessionAuth" SET "disabledAt" = NOW(), '
+        f'"disabledReason" = {disabled_reason} WHERE "userId" = {user} '
+        f'AND "authRealm" = {realm} AND "disabledAt" IS NULL RETURNING id), '
+        'bundles AS (UPDATE "CookieBundle" SET "disabledAt" = NOW(), '
+        f'"disabledReason" = {disabled_reason} WHERE "userId" = {user} '
+        f'AND "authRealm" = {realm} AND "disabledAt" IS NULL RETURNING id), '
+        'passwords AS (UPDATE "BrowserPassword" SET "disabledAt" = NOW(), '
+        f'"disabledReason" = {disabled_reason} WHERE "userId" = {user} '
+        'AND "disabledAt" IS NULL RETURNING id), '
+        f'cookies AS (DELETE FROM "Cookie" WHERE "userId" = {user} RETURNING id), '
+        f'local_storage AS (DELETE FROM "LocalStorageOrigin" WHERE "userId" = {user} RETURNING id), '
+        f'indexed_db AS (DELETE FROM "IndexedDBOrigin" WHERE "userId" = {user} RETURNING id), '
+        f'cache_storage AS (DELETE FROM "CacheStorageOrigin" WHERE "userId" = {user} RETURNING id), '
+        f'permissions AS (DELETE FROM "BrowserPermission" WHERE "userId" = {user} RETURNING id), '
+        'profiles AS (DELETE FROM "BrowserProviderProfile" profile USING "BrowserContext" context '
+        f'WHERE profile."contextId" = context.id AND context."userId" = {user} '
+        "AND profile.provider = 'kernel' RETURNING profile.id) "
+        "SELECT (SELECT COUNT(*) FROM cookies) + (SELECT COUNT(*) FROM local_storage) + "
+        "(SELECT COUNT(*) FROM indexed_db) + (SELECT COUNT(*) FROM cache_storage) + "
+        "(SELECT COUNT(*) FROM permissions) + (SELECT COUNT(*) FROM profiles);"
+    )
+    cleared = int(_run_local_victoria_sql(cleanup_sql).splitlines()[-1].strip() or "0")
+    print(f"    🔐 Prepared {passkey_count} Amazon passkey(s); cleared {cleared} saved-state row(s)")
+    return {
+        "fixture": "amazon_passkey",
+        "passkey_count": passkey_count,
+        "cleared": cleared,
+        "user_id": ctx.user_id,
+        "auth_realm": ctx.auth_realm,
+        "restore_snapshot": snapshot,
+    }
+
+
+def _restore_amazon_passkey_fixture(manifest: dict) -> None:
+    """Restore shared browser auth after the destructive passkey-only run."""
+    snapshot = manifest.get("restore_snapshot")
+    if not isinstance(snapshot, dict):
+        raise RuntimeError("Amazon passkey fixture did not capture a restore snapshot")
+    if not _sync_browser_credentials():
+        raise RuntimeError("Amazon passkey fixture could not restore live browser credentials")
+
+    user = _sql_literal(str(manifest["user_id"]))
+
+    def ids_sql(key: str) -> str:
+        values = snapshot.get(key)
+        if not isinstance(values, list):
+            raise RuntimeError(f"Amazon passkey restore snapshot has invalid {key}")
+        return ", ".join(_sql_literal(str(value)) for value in values)
+
+    statements: list[str] = []
+    for table, key in (
+        ("SteelSessionAuth", "steel_ids"),
+        ("CookieBundle", "bundle_ids"),
+        ("BrowserPassword", "password_ids"),
+    ):
+        identifiers = ids_sql(key)
+        if identifiers:
+            statements.append(
+                f'UPDATE "{table}" SET "disabledAt" = NULL, "disabledReason" = NULL '
+                f"WHERE id IN ({identifiers})"
+            )
+
+    statements.append(
+        'DELETE FROM "BrowserProviderProfile" profile USING "BrowserContext" context '
+        'WHERE profile."contextId" = context.id '
+        f'AND context."userId" = {user} AND profile.provider = \'kernel\''
+    )
+    profiles = snapshot.get("profiles")
+    if not isinstance(profiles, list):
+        raise RuntimeError("Amazon passkey restore snapshot has invalid profiles")
+    if profiles:
+        profiles_json = _sql_literal(json.dumps(profiles, separators=(",", ":")))
+        statements.append(
+            'INSERT INTO "BrowserProviderProfile" '
+            'SELECT * FROM json_populate_recordset(NULL::"BrowserProviderProfile", '
+            f"{profiles_json}::json)"
+        )
+    _run_local_victoria_sql("; ".join(statements) + ";")
+    print("    🧹 Restored shared browser auth after Amazon passkey fixture")
+
+
 # Runtime bindings for the metadata registry in live_fixtures.py. Kept in sync by
 # the assertion below so a fixture can never be declared without an applier.
 LIVE_FIXTURE_APPLIERS = {
     "base": _apply_base_live_fixture,
     "amazon_auth": _apply_amazon_auth,
+    "compute_tokens": _apply_compute_tokens,
+    "amazon_passkey": _apply_amazon_passkey,
 }
 assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES), (
     f"live-fixture appliers {sorted(LIVE_FIXTURE_APPLIERS)} must match "
@@ -4653,14 +4793,6 @@ async def run_single_task(
             f"across {provider_count} providers"
         )
 
-    # Live fixtures (compute tokens, browser cookies/passwords, amazon auth) must
-    # always be current from prod at runtime — a frozen DB fixture or whole-DB
-    # snapshot restore above can leave stale/expired tokens/cookies, which would
-    # force claudeAuth into the paid waterfall or log the browser out. Applied
-    # right before the agent starts, after any frozen fixture has touched the DB.
-    # Every live task inherits the `base` fixture; extras compose on top.
-    _apply_live_fixtures(task, base_url)
-
     phone_callee: Optional[PhoneCalleeSession] = None
     if task.phone_persona:
         phone_callee = PhoneCalleeSession(task.name, task.phone_persona)
@@ -4689,6 +4821,7 @@ async def run_single_task(
     world_model_fidelity: Optional[dict] = None
     realtime_monitor: Optional[SupabaseRealtimeSmokeMonitor] = None
     realtime_tree_task: Optional[asyncio.Task] = None
+    live_fixture_manifests: list[dict] = []
 
     temp_csv_paths: list = []  # track temp files for cleanup
 
@@ -4735,6 +4868,11 @@ async def run_single_task(
         print(f"    🔌 Realtime monitor subscribed to agent:{agent_id[:12]}")
 
     try:
+        # Apply live fixtures inside the cleanup boundary. The passkey-only
+        # fixture intentionally removes shared browser state and must restore it
+        # even when agent creation or evaluation fails.
+        live_fixture_manifests = _apply_live_fixtures(task, base_url)
+
         # Handle attachments: create agent first, upload files, then post file messages
         if all_attachments:
             agent_id = await create_agent(base_url, task)
@@ -5244,6 +5382,16 @@ async def run_single_task(
                 _run_plaid_transactions_fixture("cleanup")
             except Exception as exc:
                 print(f"    ⚠ Failed to clean up synthetic Plaid transaction fixture: {exc}")
+        passkey_manifest = next(
+            (
+                manifest
+                for manifest in live_fixture_manifests
+                if manifest.get("fixture") == "amazon_passkey"
+            ),
+            None,
+        )
+        if passkey_manifest is not None:
+            _restore_amazon_passkey_fixture(passkey_manifest)
         if previous_benchmark_user_id is None:
             os.environ.pop("BENCHMARK_RUN_USER_ID", None)
         else:
@@ -6185,16 +6333,16 @@ async def main_async(args):
             if max_concurrency is not None and max_concurrency < 1:
                 raise ValueError("--max-concurrency must be >= 1")
 
-            # Tasks whose setup replays a whole-DB snapshot (psql < dump with
-            # --clean --if-exists) drop and recreate tables, destroying every
-            # concurrent task's Agent rows mid-flight (poll 404 cascade). They
-            # must never share the DB with in-flight tasks — run them serially
-            # after the parallel batch drains.
-            exclusive_db_tasks = [t for t in tasks if t.name in EXCLUSIVE_DB_RESTORE_TASK_NAMES]
-            parallel_batch = [t for t in tasks if t.name not in EXCLUSIVE_DB_RESTORE_TASK_NAMES]
+            # Destructive shared-DB fixtures must never overlap in-flight tasks.
+            # Run them serially after the normal parallel batch drains.
+            exclusive_db_tasks = [t for t in tasks if t.name in EXCLUSIVE_SHARED_DB_TASK_NAMES]
+            parallel_batch = [t for t in tasks if t.name not in EXCLUSIVE_SHARED_DB_TASK_NAMES]
             if exclusive_db_tasks:
                 names = ", ".join(t.name for t in exclusive_db_tasks)
-                print(f"\n  Deferring {len(exclusive_db_tasks)} DB-restore task(s) to a serial phase: {names}")
+                print(
+                    f"\n  Deferring {len(exclusive_db_tasks)} destructive DB fixture task(s) "
+                    f"to a serial phase: {names}"
+                )
 
             if max_concurrency is None or max_concurrency >= len(parallel_batch):
                 print(f"\n  Running {len(parallel_batch)} tasks in parallel...")
@@ -6254,7 +6402,7 @@ async def main_async(args):
                             run.task_results.append(result)
                     _emit_report({pending_results[future].name for future in pending})
                 for task in exclusive_db_tasks:
-                    print(f"\n  Running DB-restore task serially: {task.name}")
+                    print(f"\n  Running destructive DB fixture task serially: {task.name}")
                     _report_running.clear()
                     _report_running.add(task.name)
                     result = await run_single_task(

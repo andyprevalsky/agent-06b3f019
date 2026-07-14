@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { prisma } from './database';
 
 const DEFAULT_BASE_IMAGE = 'base:victoria-prod-sync-v1';
@@ -35,6 +36,10 @@ export const FIXTURE_TABLE_ORDER = [
 
 type FixtureTable = (typeof FIXTURE_TABLE_ORDER)[number];
 type JsonRows = Record<string, unknown[]>;
+type FixtureDbClient = Prisma.TransactionClient;
+type FixtureAgent = Prisma.AgentGetPayload<{
+  select: { id: true; userId: true; goal: true; createdAt: true; status: true };
+}>;
 type ModelDelegate = {
   deleteMany(args: { where: Record<string, unknown> }): Promise<unknown>;
   createMany(args: { data: Record<string, unknown>[]; skipDuplicates?: boolean }): Promise<unknown>;
@@ -69,19 +74,31 @@ function ids(rows: unknown[]): string[] {
     .filter((id): id is string => typeof id === 'string');
 }
 
-async function agentTree(rootAgentId: string) {
-  const root = await prisma.agent.findUnique({
+const AGENT_FIXTURE_SELECT = {
+  id: true,
+  userId: true,
+  goal: true,
+  createdAt: true,
+  status: true,
+} as const;
+
+async function findRootAgent(db: FixtureDbClient, rootAgentId: string): Promise<FixtureAgent> {
+  const root = await db.agent.findUnique({
     where: { id: rootAgentId },
-    select: { id: true, userId: true, goal: true, createdAt: true, status: true },
+    select: AGENT_FIXTURE_SELECT,
   });
   if (root === null) throw new Error(`Unknown root agent ${rootAgentId}`);
+  return root;
+}
+
+async function agentTree(db: FixtureDbClient, root: FixtureAgent) {
   const agents = [root];
   const seen = new Set([root.id]);
   let frontier = [root.id];
   while (frontier.length > 0) {
-    const children = await prisma.agent.findMany({
+    const children = await db.agent.findMany({
       where: { parentAgentId: { in: frontier } },
-      select: { id: true, userId: true, goal: true, createdAt: true, status: true },
+      select: AGENT_FIXTURE_SELECT,
     });
     frontier = [];
     for (const child of children) {
@@ -98,7 +115,51 @@ export async function collectFixture(
   rootAgentId: string,
   phase: 'start' | 'end'
 ): Promise<ScopedDbFixture> {
-  const tree = await agentTree(rootAgentId);
+  const root = await findRootAgent(prisma, rootAgentId);
+  return collectFixtureWithClient(prisma, rootAgentId, phase, root);
+}
+
+/**
+ * Start-fixture snapshot state machine / system context:
+ *
+ * Agent row committed
+ *   -> BEGIN REPEATABLE READ
+ *   -> root Agent SELECT anchors the PostgreSQL MVCC snapshot
+ *   -> onSnapshotReady (the launch critical-path boundary)
+ *   -> all remaining fixture reads use the same transaction client
+ *   -> COMMIT with one point-in-time fixture
+ *
+ * Writes made after `onSnapshotReady` are intentionally absent even though the
+ * remaining reads finish asynchronously after agent launch begins.
+ */
+export async function collectFixtureSnapshot(
+  rootAgentId: string,
+  phase: 'start' | 'end',
+  onSnapshotReady: () => void | Promise<void>
+): Promise<ScopedDbFixture> {
+  return prisma.$transaction(
+    async (tx) => {
+      // PostgreSQL establishes a REPEATABLE READ snapshot on the first query,
+      // not merely at BEGIN. Never move readiness above this SELECT.
+      const root = await findRootAgent(tx, rootAgentId);
+      await onSnapshotReady();
+      return collectFixtureWithClient(tx, rootAgentId, phase, root);
+    },
+    {
+      isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
+      maxWait: 5_000,
+      timeout: 30_000,
+    }
+  );
+}
+
+async function collectFixtureWithClient(
+  db: FixtureDbClient,
+  rootAgentId: string,
+  phase: 'start' | 'end',
+  root: FixtureAgent
+): Promise<ScopedDbFixture> {
+  const tree = await agentTree(db, root);
   const agentIds = tree.agents.map((agent) => agent.id);
   const rows: JsonRows = {};
 
@@ -120,37 +181,37 @@ export async function collectFixture(
     toolSideEffects,
     smsShortcodes,
   ] = await Promise.all([
-    prisma.user.findUnique({ where: { userId: tree.userId } }),
-    prisma.agent.findMany({ where: { id: { in: agentIds } } }),
-    prisma.agentTool.findMany({ where: { agentId: { in: agentIds } } }),
-    prisma.verifier.findMany({ where: { agentId: { in: agentIds } } }),
-    prisma.message.findMany({
+    db.user.findUnique({ where: { userId: tree.userId } }),
+    db.agent.findMany({ where: { id: { in: agentIds } } }),
+    db.agentTool.findMany({ where: { agentId: { in: agentIds } } }),
+    db.verifier.findMany({ where: { agentId: { in: agentIds } } }),
+    db.message.findMany({
       where: { agentId: { in: agentIds } },
       orderBy: { timestamp: 'asc' },
     }),
-    prisma.toolUsage.findMany({ where: { agentId: { in: agentIds } } }),
-    prisma.purchaseSpend.findMany({
+    db.toolUsage.findMany({ where: { agentId: { in: agentIds } } }),
+    db.purchaseSpend.findMany({
       where: { agentId: { in: agentIds } },
     }),
-    prisma.agentAttentionRequest.findMany({
+    db.agentAttentionRequest.findMany({
       where: { agentId: { in: agentIds } },
     }),
-    prisma.browserSession.findMany({
+    db.browserSession.findMany({
       where: { agentId: { in: agentIds } },
     }),
-    prisma.claudeCodeSession.findMany({
+    db.claudeCodeSession.findMany({
       where: { agentId: { in: agentIds } },
     }),
-    prisma.person.findMany({ where: { userId: tree.userId } }),
-    prisma.integration.findMany({ where: { userId: tree.userId } }),
-    collectUserEnvironmentRows(tree.userId),
-    prisma.agentRunCredentialPropagation.findMany({
+    db.person.findMany({ where: { userId: tree.userId } }),
+    db.integration.findMany({ where: { userId: tree.userId } }),
+    collectUserEnvironmentRows(db, tree.userId),
+    db.agentRunCredentialPropagation.findMany({
       where: { agentId: { in: agentIds } },
     }),
-    prisma.toolSideEffect.findMany({
+    db.toolSideEffect.findMany({
       where: { OR: agentIds.map((id) => ({ operationKey: { contains: id } })) },
     }),
-    prisma.smsShortcode.findMany({ where: { agentId: { in: agentIds } } }),
+    db.smsShortcode.findMany({ where: { agentId: { in: agentIds } } }),
   ]);
 
   rows.User = asArray(user);
@@ -182,18 +243,18 @@ export async function collectFixture(
 
   const [tools, userAuthAssistanceRequests, browserContexts, messageRecords, emailCredentials] =
     await Promise.all([
-      toolIds.length > 0 ? prisma.tool.findMany({ where: { id: { in: toolIds } } }) : [],
+      toolIds.length > 0 ? db.tool.findMany({ where: { id: { in: toolIds } } }) : [],
       attentionIds.length > 0
-        ? prisma.userAuthAssistanceRequest.findMany({ where: { id: { in: attentionIds } } })
+        ? db.userAuthAssistanceRequest.findMany({ where: { id: { in: attentionIds } } })
         : [],
       contextIds.length > 0
-        ? prisma.browserContext.findMany({ where: { id: { in: contextIds } } })
+        ? db.browserContext.findMany({ where: { id: { in: contextIds } } })
         : [],
       personIds.length > 0
-        ? prisma.messageRecord.findMany({ where: { personId: { in: personIds } } })
+        ? db.messageRecord.findMany({ where: { personId: { in: personIds } } })
         : [],
       integrationIds.length > 0
-        ? prisma.emailIntegrationCredential.findMany({
+        ? db.emailIntegrationCredential.findMany({
             where: { integrationId: { in: integrationIds } },
           })
         : [],
@@ -207,7 +268,7 @@ export async function collectFixture(
   return buildFixture(rootAgentId, phase, tree.userId, agentIds, rows);
 }
 
-async function collectUserEnvironmentRows(userId: string): Promise<JsonRows> {
+async function collectUserEnvironmentRows(db: FixtureDbClient, userId: string): Promise<JsonRows> {
   const [
     cookies,
     browserPasswords,
@@ -219,15 +280,15 @@ async function collectUserEnvironmentRows(userId: string): Promise<JsonRows> {
     agentPhoneMessages,
     smsSession,
   ] = await Promise.all([
-    prisma.cookie.findMany({ where: { userId } }),
-    prisma.browserPassword.findMany({ where: { userId } }),
-    prisma.cookieBundle.findMany({ where: { userId } }),
-    prisma.steelSessionAuth.findMany({ where: { userId } }),
-    prisma.mintedAccount.findMany({ where: { userId } }),
-    prisma.passkeyCredential.findMany({ where: { userId } }),
-    prisma.agentIdentity.findUnique({ where: { userId } }),
-    prisma.agentPhoneMessage.findMany({ where: { userId } }),
-    prisma.smsSession.findUnique({ where: { userId } }),
+    db.cookie.findMany({ where: { userId } }),
+    db.browserPassword.findMany({ where: { userId } }),
+    db.cookieBundle.findMany({ where: { userId } }),
+    db.steelSessionAuth.findMany({ where: { userId } }),
+    db.mintedAccount.findMany({ where: { userId } }),
+    db.passkeyCredential.findMany({ where: { userId } }),
+    db.agentIdentity.findUnique({ where: { userId } }),
+    db.agentPhoneMessage.findMany({ where: { userId } }),
+    db.smsSession.findUnique({ where: { userId } }),
   ]);
 
   return {

@@ -24,8 +24,6 @@ import {
 } from './claudeCodeChip.shared';
 import { CompletedTranscriptSurface } from './claudeCodeChip.transcript';
 
-export { parseCodeAgentTranscript } from './claudeCodeChip.transcript';
-
 interface FullscreenViewProps {
   state: ChipState;
   outputSchema: { fields: ResponseSchemaField[] } | undefined;

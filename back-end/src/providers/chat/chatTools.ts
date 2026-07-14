@@ -7,6 +7,8 @@ import { createLogger } from '../logger';
 import { cacheGet, cacheSet } from '../fastCacheStore';
 import { goalHash } from '../fastCacheNormalizeCore';
 import { webSearchKey } from '../fastCacheNormalizeKeys';
+import { retryWithBackoff } from '../retry';
+import { runCacheWriteInBackground } from './backgroundCacheWrite';
 
 const log = createLogger('WebSearch');
 
@@ -28,6 +30,53 @@ interface SearchResult {
   snippet?: string;
   url?: string;
   excerpts?: string[];
+}
+
+class ParallelSearchHttpError extends Error {
+  readonly retryable: boolean;
+
+  constructor(status: number, body: string) {
+    super(`Parallel AI Search API error ${status}: ${body}`);
+    this.retryable = RETRYABLE_STATUS_CODES.has(status);
+  }
+}
+
+async function fetchParallelSearch(
+  apiKey: string,
+  query: string
+): Promise<{ results?: SearchResult[] }> {
+  return retryWithBackoff(
+    async () => {
+      const response = await fetch('https://api.parallel.ai/v1/search', {
+        method: 'POST',
+        headers: {
+          'x-api-key': apiKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          mode: 'turbo',
+          objective: query,
+          search_queries: [query],
+          advanced_settings: {
+            max_results: 10,
+            excerpt_settings: { max_chars_per_result: 6000 },
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        throw new ParallelSearchHttpError(response.status, await response.text());
+      }
+      return (await response.json()) as { results?: SearchResult[] };
+    },
+    {
+      maxRetries: MAX_RETRIES,
+      initialBackoffMs: INITIAL_BACKOFF_MS,
+      component: 'ParallelSearch',
+      isRetryable: (error) =>
+        error instanceof TypeError || (error instanceof ParallelSearchHttpError && error.retryable),
+    }
+  );
 }
 
 function formatSearchResults(results: SearchResult[]): string {
@@ -86,66 +135,7 @@ export async function executeWebSearch(
       throw new Error('PARRALLEL_API_KEY not configured');
     }
 
-    let lastError: Error | null = null;
-    let data: { results?: SearchResult[] } | null = null;
-
-    // eslint-disable-next-line no-restricted-syntax -- retry is interleaved with per-attempt HTTP status branching and response parsing
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-      try {
-        const response = await fetch('https://api.parallel.ai/v1beta/search', {
-          method: 'POST',
-          headers: {
-            'x-api-key': apiKey,
-            'parallel-beta': 'search-extract-2025-10-10',
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            objective: query,
-            search_queries: [query],
-            max_results: 10,
-            excerpts: { max_chars_per_result: 6000 },
-          }),
-        });
-
-        if (!response.ok) {
-          const errorText = await response.text();
-          lastError = new Error(`Parallel AI Search API error ${response.status}: ${errorText}`);
-          if (RETRYABLE_STATUS_CODES.has(response.status) && attempt < MAX_RETRIES) {
-            const backoff = INITIAL_BACKOFF_MS * Math.pow(2, attempt - 1);
-            log.warn(
-              `Retryable error ${response.status}, attempt ${attempt}/${MAX_RETRIES}, retrying in ${backoff}ms`
-            );
-            await new Promise((r) => setTimeout(r, backoff));
-            continue;
-          }
-          throw lastError;
-        }
-
-        data = (await response.json()) as { results?: SearchResult[] };
-        if (attempt > 1) {
-          log.info(`Succeeded on attempt ${attempt}/${MAX_RETRIES}`);
-        }
-        break;
-      } catch (error) {
-        lastError = error instanceof Error ? error : new Error(String(error));
-        if (
-          attempt < MAX_RETRIES &&
-          !lastError.message.startsWith('Parallel AI Search API error')
-        ) {
-          const backoff = INITIAL_BACKOFF_MS * Math.pow(2, attempt - 1);
-          log.warn(`Network error, attempt ${attempt}/${MAX_RETRIES}, retrying in ${backoff}ms`, {
-            error: lastError.message,
-          });
-          await new Promise((r) => setTimeout(r, backoff));
-          continue;
-        }
-        throw lastError;
-      }
-    }
-
-    if (!data) {
-      throw lastError || new Error('Web search failed after retries');
-    }
+    const data = await fetchParallelSearch(apiKey, query);
 
     const results = data.results || [];
 
@@ -168,19 +158,21 @@ export async function executeWebSearch(
     };
 
     if (cacheKey !== null && fastModeGoal && fastModeWriteEnabled) {
-      await cacheSet({
-        key: cacheKey,
-        kind: 'web_search',
-        goalHash: goalHash(fastModeGoal),
-        value: result,
-      })
-        .then(() => log.info('fast_cache.chat_web_search_stored', { key: cacheKey }))
-        .catch((error) =>
+      runCacheWriteInBackground(
+        () =>
+          cacheSet({
+            key: cacheKey,
+            kind: 'web_search',
+            goalHash: goalHash(fastModeGoal),
+            value: result,
+          }),
+        () => log.info('fast_cache.chat_web_search_stored', { key: cacheKey }),
+        (error) =>
           log.warn('fast_cache.chat_web_search_store_failed', {
             key: cacheKey,
             error: error instanceof Error ? error.message : String(error),
           })
-        );
+      );
     }
 
     return result;

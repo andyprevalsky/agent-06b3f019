@@ -3,4 +3,3 @@
 export function isBenchmarkArchiveMode(): boolean {
   return import.meta.env.VITE_BENCHMARK_ARCHIVE === '1';
 }
-
