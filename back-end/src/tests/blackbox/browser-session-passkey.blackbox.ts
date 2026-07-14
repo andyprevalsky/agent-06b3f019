@@ -11,6 +11,7 @@ import { config } from 'dotenv';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
 import { reservePasskeysForRealm } from '../../domains/browser-session/repo';
+import { buildBrowserSessionMetadata } from '../../domains/browser-session/service';
 import { getTaskInfo } from '../../domains/browser-session/service.task-info';
 import { serializePasskeys } from '../../domains/browser-session/service.serializers';
 
@@ -88,6 +89,35 @@ test('serializePasskeys maps key material and preserves null userHandle', async 
     'mapping mismatch'
   );
   assert(out[1].userHandle === null, 'expected null userHandle preserved');
+});
+
+test('browser session metadata preserves passkey-only isolation evidence', async () => {
+  const metadata = buildBrowserSessionMetadata(
+    {
+      provider: 'kernel',
+      proxySource: 'kernel_stealth',
+      proxyLocation: { country: 'US' },
+      profileId: 'fresh-profile',
+      profileSource: 'new_user_persistent',
+    },
+    {
+      cookies: { injected: false, cookieCount: 0, authSource: 'none' },
+      localStorage: { originCount: 0 },
+      indexedDB: { originCount: 0 },
+      permissions: { grantCount: 0 },
+      cacheStorage: { originCount: 0 },
+    }
+  );
+
+  assert(metadata.provider === 'kernel', 'expected Kernel provider');
+  assert(metadata.profile_source === 'new_user_persistent', 'expected a newly-created profile');
+  assert(metadata.auth_source === 'none', 'expected no saved cookie/session auth source');
+  assert(metadata.cookies_injected === false, 'expected no cookie injection');
+  assert(metadata.cookies_count === 0, 'expected zero injected cookies');
+  assert(metadata.local_storage_origin_count === 0, 'expected zero localStorage origins');
+  assert(metadata.indexed_db_origin_count === 0, 'expected zero IndexedDB origins');
+  assert(metadata.permission_grant_count === 0, 'expected zero permission grants');
+  assert(metadata.cache_storage_origin_count === 0, 'expected zero cache storage origins');
 });
 
 test('getTaskInfo includes reserved passkeys for resumed browser sessions', async () => {
