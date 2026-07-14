@@ -994,7 +994,7 @@ def test_environment_mutation_is_maintenance_only_and_run_path_read_only() -> No
     # then READ-ONLY verifies the shared environment. It never refreshes it,
     # never inherits another process's lock ownership, and never references
     # the app-environment lock at all.
-    verify_call = "bash scripts/run-bench-cloud --verify-secrets"
+    verify_call = 'bash "$RUN_BENCH_CLOUD_BIN" --verify-secrets'
     assert fleet.index("reconcile_pool || exit 1") < fleet.index(verify_call)
     assert fleet.index(verify_call) < fleet.index('cid="$(claim_pool_machine)"')
     assert "run-bench-cloud --refresh-secrets;" not in fleet
@@ -1918,6 +1918,7 @@ SNAP_ID=snap-current
 BENCH_REF=abc123
 BENCHES=(a b c)
 ROOT_DIR="$ROOT"
+RUN_BENCH_CLOUD_BIN="$ROOT/scripts/run-bench-cloud"
 GIT_COMMON_DIR="$COMMON"
 CLOUDBENCH_WARM_DEPS_AUTOREFRESH={autorefresh}
 export CALLS_FILE="$CALLS_FILE"
@@ -2002,3 +2003,52 @@ def test_refresh_deps_mode_contract() -> None:
     # the fleet preflight exists and runs before cloning begins
     fleet = FLEET_SCRIPT.read_text()
     assert fleet.index("warm_deps_preflight\n") < fleet.index("# ── Phase 1:")
+
+
+def test_controller_execs_from_a_script_snapshot(tmp_path: Path) -> None:
+    """bash reads scripts lazily from disk: editing run-bench-fleet or
+    run-bench-cloud while a controller is mid-run shifts bytes under the
+    interpreter and kills a healthy fleet with a parse error (observed: 28
+    provisioned boxes torn down by "syntax error near unexpected token 'fi'"
+    after an in-flight edit). The controller must re-exec from an immutable
+    per-invocation snapshot before any long-running work, and every child
+    run-bench-cloud invocation must use the snapshot copy."""
+    fleet = FLEET_SCRIPT.read_text()
+    cloud = CLOUD_SCRIPT.read_text()
+
+    # snapshot-exec happens before arg parsing / locks / machines
+    snap_at = fleet.index('exec bash "$CLOUDBENCH_SCRIPT_SNAPSHOT/run-bench-fleet"')
+    assert snap_at < fleet.index('while [ $# -gt 0 ]; do')
+    assert snap_at < fleet.index("cloudbench_controller_lock_acquire")
+    # the snapshot carries all three co-versioned interpreter files
+    for f in ("run-bench-fleet", "run-bench-cloud", "cloudbench-env.sh"):
+        assert f in fleet[fleet.index("cloudbench-scripts.XXXXXX"):snap_at], f"{f} missing from snapshot copy set"
+    # every child/preflight/verify call goes through the snapshot binary —
+    # no direct executable reference to the live checkout remains
+    assert 'RUN_BENCH_CLOUD_BIN="$CLOUDBENCH_SCRIPT_SNAPSHOT/run-bench-cloud"' in fleet
+    for line in fleet.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#") or "echo " in stripped:
+            continue
+        if "bash scripts/run-bench-cloud" in stripped or 'bash "$ROOT_DIR/scripts/run-bench-cloud"' in stripped:
+            raise AssertionError(f"live-checkout invocation must use RUN_BENCH_CLOUD_BIN: {line}")
+    # both interpreters honor the fleet-root override so snapshot copies keep
+    # resolving repo paths correctly
+    assert 'ROOT_DIR="${CLOUDBENCH_FLEET_ROOT:-' in fleet
+    assert 'ROOT_DIR="${CLOUDBENCH_FLEET_ROOT:-' in cloud
+    assert 'source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-env.sh"' in fleet
+    assert 'source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-env.sh"' in cloud
+    # the run's cleanup reaps the snapshot dir
+    assert 'rm -rf "$CLOUDBENCH_SCRIPT_SNAPSHOT"' in fleet
+
+    # functional: the re-exec chain is sound end-to-end (--help flows through
+    # the snapshot exec and still exits 0 with usage text)
+    result = subprocess.run(
+        ["bash", str(FLEET_SCRIPT), "--help"],
+        env={**os.environ, "CLOUDBENCH_SCRIPT_SNAPSHOT": "", "TMPDIR": str(tmp_path)},
+        text=True, capture_output=True, check=False, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "run-bench-fleet" in result.stdout
+    # and the snapshot dir was actually created under our TMPDIR
+    assert any(d.name.startswith("cloudbench-scripts.") for d in tmp_path.iterdir())

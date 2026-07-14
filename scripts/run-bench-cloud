@@ -81,10 +81,10 @@ PROD_APP="navi-whisper-lux"   # NEVER touch this.
 REGION="${CLOUDBENCH_REGION:-iad}"
 MACHINE_NAME="cloudbench-warm"
 VOLUME_NAME="cloudbench_data"     # Fly volume names must be [a-z0-9_].
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="${CLOUDBENCH_FLEET_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$ROOT_DIR" || exit 1
 # shellcheck source=lib/cloudbench-env.sh
-source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
+source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-env.sh"
 MACHINE_READINESS_SCRIPT="$ROOT_DIR/scripts/cloudbench-machine-readiness.py"
 
 STATE_FILE="$ROOT_DIR/.context/cloudbench-machine.json"

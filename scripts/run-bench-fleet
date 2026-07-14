@@ -47,10 +47,27 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="${CLOUDBENCH_FLEET_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$ROOT_DIR" || exit 1
 # shellcheck source=lib/cloudbench-env.sh
-source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
+source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-env.sh"
+
+# ── Run from a script SNAPSHOT, never the live checkout ─────────────────────
+# bash reads scripts lazily from disk: editing run-bench-fleet/run-bench-cloud
+# while a controller is mid-run shifts bytes under the interpreter and kills a
+# healthy fleet with a parse error (observed: 28 provisioned boxes torn down by
+# "syntax error near unexpected token 'fi'" after an in-flight edit). Re-exec
+# from an immutable per-invocation copy so the working tree stays editable.
+if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
+    CLOUDBENCH_SCRIPT_SNAPSHOT="$(mktemp -d "${TMPDIR:-/tmp}/cloudbench-scripts.XXXXXX")"
+    cp "$ROOT_DIR/scripts/run-bench-fleet" \
+       "$ROOT_DIR/scripts/run-bench-cloud" \
+       "$ROOT_DIR/scripts/lib/cloudbench-env.sh" \
+       "$CLOUDBENCH_SCRIPT_SNAPSHOT/"
+    export CLOUDBENCH_SCRIPT_SNAPSHOT CLOUDBENCH_FLEET_ROOT="$ROOT_DIR"
+    exec bash "$CLOUDBENCH_SCRIPT_SNAPSHOT/run-bench-fleet" "$@"
+fi
+RUN_BENCH_CLOUD_BIN="$CLOUDBENCH_SCRIPT_SNAPSHOT/run-bench-cloud"
 MACHINE_READINESS_SCRIPT="$ROOT_DIR/scripts/cloudbench-machine-readiness.py"
 
 APP="navi-whisper-lux-bench"
@@ -584,6 +601,7 @@ cleanup() {
     trap '' HUP INT TERM
     [ -n "${UNIFIED_AGG_PID:-}" ] && kill "$UNIFIED_AGG_PID" 2>/dev/null || true
     [ -n "${SNAPSHOT_LOOP_PID:-}" ] && kill "$SNAPSHOT_LOOP_PID" 2>/dev/null || true
+    [ -n "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ] && rm -rf "$CLOUDBENCH_SCRIPT_SNAPSHOT" 2>/dev/null || true
     # Do NOT kill the central hub (UNIFIED_DASH_PID): it is THE one persistent
     # dashboard — shared across every run, carrying the user's open tab, resolving
     # "open agent" from local run data long after teardown. The next fleet run
@@ -678,7 +696,7 @@ reconcile_pool || exit 1   # stop + verify this workspace's pool before machine 
 # prod-aligned app secrets (that would race concurrent workstreams). It only
 # verifies they exist; refreshing them is an explicit maintenance op.
 echo "🔎 Verifying the shared benchmark app environment (read-only)..."
-if ! bash scripts/run-bench-cloud --verify-secrets; then
+if ! bash "$RUN_BENCH_CLOUD_BIN" --verify-secrets; then
     echo "❌ Cloud benchmark environment is not ready; no benchmark machine was started." >&2
     echo "   Refresh it explicitly (maintenance op): bash scripts/run-bench-cloud --refresh-secrets" >&2
     exit 1
@@ -811,7 +829,7 @@ warm_deps_preflight() {
         return 0
     fi
     echo "♻️  warm snapshot dep trees unproven/stale → central refresh ONCE (instead of ×${#BENCHES[@]} per-clone rsyncs) ..."
-    if bash "$ROOT_DIR/scripts/run-bench-cloud" --refresh-deps --ref "$BENCH_REF" 2>&1 | sed 's/^/   /'; then
+    if bash "$RUN_BENCH_CLOUD_BIN" --refresh-deps --ref "$BENCH_REF" 2>&1 | while IFS= read -r _l; do printf '   %s\n' "$_l"; done; then
         new_snap="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null | \
             python3 "$ROOT_DIR/scripts/cloudbench-select-snapshot.py" 2>/dev/null || true)"
         if [ -n "$new_snap" ]; then
@@ -1044,7 +1062,7 @@ for bench in "${BENCHES[@]}"; do
         CLOUDBENCH_START_BARRIER="$([ "$SYNCHRONIZED_START" = "1" ] && printf '%s' "$RUN_ID")" \
         CLOUDBENCH_START_BARRIER_WAIT_SECONDS="$START_BARRIER_WAIT_SECONDS" \
         NO_OPEN=1 \
-        bash scripts/run-bench-cloud "$bench" \
+        bash "$RUN_BENCH_CLOUD_BIN" "$bench" \
             --machine "$cid" \
             --out-dir "$out" \
             --dash-port "$port" \
