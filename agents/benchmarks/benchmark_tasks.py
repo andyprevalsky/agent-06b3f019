@@ -52,7 +52,7 @@ class BenchmarkTask:
     environment: Optional[dict] = None  # {mode, db_fixtures, base_images, services, secrets, live_targets, context_notes}
     evaluators: List[dict] = field(default_factory=list)  # Declared evaluator contract (static_check | single_turn_llm_judge | agentic_llm_judge)
     source: List[str] = field(default_factory=list)  # Provenance pointers (origin task/test-prompt/smoke/agent_id)
-    group: Optional[str] = None  # Review slice label: Pre-Deploy, Daily, Weekly, Rose Bench, None, etc.
+    group: Optional[str] = None  # Benchmarks-page group label the UI groups off (canonical tokens: pre-deploy | daily | rose-bench | incomplete). Absent → backend derives from status/tags/bench.
     human_time: Optional[str] = None  # Approximate human-equivalent time for capability/complexity bucketing
     world_surface: Optional[str] = None  # "live" or "simulated"; binary world-model surface, independent of DB fixtures
     fast_cache: Optional[str] = None  # "on" or "off" for the intended benchmark run mode

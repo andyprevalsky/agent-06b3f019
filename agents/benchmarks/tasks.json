@@ -20,7 +20,8 @@
     "approval_handling": null,
     "start_phase": null,
     "min_agent_count": 50,
-    "bench": "rose-bench"
+    "bench": "rose-bench",
+    "group": "rose-bench"
   },
   {
     "name": "single-creator-arm",
@@ -41,7 +42,8 @@
     "approval_handling": null,
     "start_phase": "execute",
     "min_agent_count": 0,
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "chat-mode",
@@ -60,7 +62,8 @@
     "attachment": null,
     "approval_handling": null,
     "start_phase": null,
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "pre-deploy"
   },
   {
     "name": "spawn-sub-agents",
@@ -88,7 +91,8 @@
       "spawn_browser_agent": 0,
       "spawn_claude_code_agent": 0
     },
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "pre-deploy"
   },
   {
     "name": "parallel-tool-calls",
@@ -117,7 +121,8 @@
       "spawn_browser_agent",
       "spawn_claude_code_agent"
     ],
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "pre-deploy"
   },
   {
     "name": "response-schema-non-goal-feedback",
@@ -184,7 +189,8 @@
     ],
     "source": [
       "regression:mid-run-response-schema-non-goal-feedback"
-    ]
+    ],
+    "group": "daily"
   },
   {
     "name": "grep-explore-stress",
@@ -216,7 +222,8 @@
       "message_person",
       "send_message_to_user_execute_phase"
     ],
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "user-data-prod-grep",
@@ -261,7 +268,8 @@
       "secrets": [],
       "live_targets": [],
       "context_notes": "Frozen user-data documents (apple_notes, chatgpt, claude, obsidian) seeded by back-end/scripts/user-data-benchmark-fixture.ts from .context/benchmarks/user-data-grep-fixture.json — real prod docs frozen once (gitignored, re-derivable via BENCHMARK_USER_DATA_SOURCE_DATABASE_URL). grep source=documents is the required data path."
-    }
+    },
+    "group": "daily"
   },
   {
     "name": "plaid-transactions-monthly-spend",
@@ -332,7 +340,8 @@
       "main-sync:plaid-transactions-monthly-spend",
       "fixture:back-end/scripts/plaid-transactions-benchmark-fixture.ts"
     ],
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "plaid-transactions-doordash-count",
@@ -403,7 +412,8 @@
       "main-sync:plaid-transactions-doordash-count",
       "fixture:back-end/scripts/plaid-transactions-benchmark-fixture.ts"
     ],
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "plaid-transactions-dead-subscriptions",
@@ -477,7 +487,8 @@
       "main-sync:plaid-transactions-dead-subscriptions",
       "fixture:back-end/scripts/plaid-transactions-benchmark-fixture.ts"
     ],
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "message-person",
@@ -498,7 +509,8 @@
     "attachment": null,
     "approval_handling": "auto_approve",
     "start_phase": "execute",
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "pre-deploy"
   },
   {
     "name": "gate-subscription-free-credit",
@@ -563,7 +575,8 @@
       "sms-onboarding-gates:free-credit-subscription-gate",
       "fixture:back-end/scripts/free-credit-subscription-gate-fixture.ts"
     ],
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "gate-subscription-card-mint",
@@ -630,7 +643,8 @@
       "sms-onboarding-gates:card-mint-subscription-gate",
       "fixture:back-end/scripts/gate-benchmark-fixture.ts"
     ],
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "gate-kyc-card-mint",
@@ -701,7 +715,8 @@
       "sms-onboarding-gates:card-mint-kyc-gate",
       "fixture:back-end/scripts/gate-benchmark-fixture.ts"
     ],
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "gate-source-connect-gmail",
@@ -773,7 +788,8 @@
       "sms-onboarding-gates:source-connect-gmail-gate",
       "fixture:back-end/scripts/gate-benchmark-fixture.ts"
     ],
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "browser-agent",
@@ -832,7 +848,8 @@
       "long-horizon:shopping-black-beanie-live-amazon",
       "test-prompts:Test Browser Agent"
     ],
-    "bench": "rose-bench"
+    "bench": "rose-bench",
+    "group": "rose-bench"
   },
   {
     "name": "browser-agent-amazon-cookie-payment",
@@ -874,7 +891,8 @@
       ],
       "context_notes": "Live Amazon via synced-prod cookie auth. The base live fixture refreshes compute tokens + cookies + passwords from prod; amazon_auth builds the active CookieBundle used to reach the payment write-lock."
     },
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "browser-toast-nopa-write-lock",
@@ -908,7 +926,8 @@
     },
     "success_on_payment_card_request": true,
     "start_phase": "execute",
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "minted-agent-accounts-uber",
@@ -929,7 +948,8 @@
     "attachment": null,
     "approval_handling": null,
     "start_phase": "execute",
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "minted-agent-accounts-x",
@@ -951,7 +971,8 @@
     "attachment": null,
     "approval_handling": null,
     "start_phase": "execute",
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "browser-indeed-account-create",
@@ -1010,7 +1031,8 @@
     ],
     "source": [
       "user-request:indeed-account-create"
-    ]
+    ],
+    "group": "rose-bench"
   },
   {
     "name": "claude-code-agent",
@@ -1031,7 +1053,8 @@
     "attachment": null,
     "approval_handling": null,
     "start_phase": "execute",
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "pre-deploy"
   },
   {
     "name": "browser-smoke",
@@ -1052,7 +1075,8 @@
     "attachment": null,
     "approval_handling": null,
     "start_phase": "execute",
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "pre-deploy"
   },
   {
     "name": "browser-google-search-single-result",
@@ -1109,7 +1133,8 @@
     ],
     "source": [
       "user-request:browser-google-single-result"
-    ]
+    ],
+    "group": "daily"
   },
   {
     "name": "browser-bing-search-single-result",
@@ -1166,7 +1191,8 @@
     ],
     "source": [
       "user-request:browser-bing-single-result"
-    ]
+    ],
+    "group": "daily"
   },
   {
     "name": "agent-payment-test-shop",
@@ -1227,7 +1253,8 @@
         }
       ]
     },
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "browser-biometrics-webdecoy",
@@ -1250,7 +1277,8 @@
     "attachment": null,
     "approval_handling": null,
     "start_phase": "execute",
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "pre-deploy"
   },
   {
     "name": "cache-coverage",
@@ -1282,7 +1310,8 @@
       "message_person": 1
     },
     "tool_count_scope": "root",
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "image-handling",
@@ -1302,7 +1331,8 @@
     "attachment": "rs.jpeg",
     "approval_handling": null,
     "start_phase": "execute",
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "files-in-sub-agents",
@@ -1323,7 +1353,8 @@
     "attachment": "rs.jpeg",
     "approval_handling": null,
     "start_phase": "plan",
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "agent-for-each",
@@ -1344,7 +1375,8 @@
     "attachment": "entities-12.csv",
     "approval_handling": null,
     "start_phase": "plan",
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "family-office-angel-outreach",
@@ -1368,7 +1400,8 @@
     "attachment": "vcs-and-angels.csv",
     "approval_handling": "prompt_user",
     "start_phase": "plan",
-    "bench": "rose-bench"
+    "bench": "rose-bench",
+    "group": "rose-bench"
   },
   {
     "name": "outreach-batch",
@@ -1425,7 +1458,8 @@
       "long-horizon:outreach-angel-feedback-batch",
       "test-prompts:Outreach In Batch"
     ],
-    "bench": "rose-bench"
+    "bench": "rose-bench",
+    "group": "incomplete"
   },
   {
     "name": "load-test-sias",
@@ -1478,7 +1512,8 @@
       "long-horizon:load-test-mass-agent-arithmetic"
     ],
     "bench": "pipeline-e2e",
-    "status": "retired"
+    "status": "retired",
+    "group": "incomplete"
   },
   {
     "name": "build-boxing-payment",
@@ -1547,7 +1582,8 @@
       "long-horizon:site-build-boxing-payment-flow",
       "test-prompts:Build New Boxing Payment Flow"
     ],
-    "bench": "rose-bench"
+    "bench": "rose-bench",
+    "group": "rose-bench"
   },
   {
     "name": "job-applications",
@@ -1601,7 +1637,8 @@
       "long-horizon:job-application-blitz-synthetic",
       "test-prompts:Get Jessie a Job"
     ],
-    "bench": "rose-bench"
+    "bench": "rose-bench",
+    "group": "rose-bench"
   },
   {
     "name": "calendly-schedule-meeting",
@@ -1624,7 +1661,8 @@
     "attachment": null,
     "approval_handling": "auto_approve",
     "start_phase": "plan",
-    "bench": "rose-bench"
+    "bench": "rose-bench",
+    "group": "rose-bench"
   },
   {
     "name": "people-search-criteria",
@@ -1651,7 +1689,8 @@
       "spawn_browser_agent": 0,
       "spawn_claude_code_agent": 0
     },
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "people-search-targeted",
@@ -1678,7 +1717,8 @@
       "spawn_browser_agent": 0,
       "spawn_claude_code_agent": 0
     },
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "linkedin-data-download",
@@ -1704,7 +1744,8 @@
     "source": [
       "test-prompts:Test Automatic LinkedIn Connection"
     ],
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "incomplete"
   },
   {
     "name": "browser-file-upload-tinypng",
@@ -1730,7 +1771,8 @@
     "source": [
       "test-prompts:Test Files in Browser Agent"
     ],
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "wait-for-trigger",
@@ -1757,7 +1799,8 @@
       "test-prompts:Test Wait For",
       "user-label:daily-immediate-bitcoin-trigger"
     ],
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "phone-call-client-intake",
@@ -1831,7 +1874,7 @@
       "provided_mailing_address": "4821 Maplewood Drive, Austin, Texas 78731"
     },
     "description": "Real outbound phone call to a controlled AI callee that provides pinned client name and address.",
-    "group": "Daily",
+    "group": "daily",
     "human_time": "10min",
     "world_surface": "live",
     "fast_cache": "off",
@@ -1948,7 +1991,7 @@
       "total_charged_usd": "34.20"
     },
     "description": "Real outbound phone call to a controlled sandbox merchant AI callee that completes a Stripe test-card payment.",
-    "group": "Daily",
+    "group": "daily",
     "human_time": "15min",
     "world_surface": "live",
     "fast_cache": "off",

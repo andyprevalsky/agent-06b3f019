@@ -186,10 +186,10 @@ async function testCatalog_returnsTasksWithStatsShape(): Promise<void> {
   }
 }
 
-async function testCatalog_groupsAreTheThreeKnown(): Promise<void> {
+async function testCatalog_groupsAreLabelDriven(): Promise<void> {
   const res = await request(`${BASE_URL}/api/benchmarks/tasks`, { headers: internalHeaders });
   assertStatus(res.status, 200, res.data);
-  const tasks = (res.data as { tasks: Array<{ group: string }> }).tasks;
+  const tasks = (res.data as { tasks: Array<{ name: string; group: string }> }).tasks;
   const groups = new Set(tasks.map((t) => t.group));
   for (const g of groups) {
     assert(
@@ -197,8 +197,16 @@ async function testCatalog_groupsAreTheThreeKnown(): Promise<void> {
       `unexpected group: ${g}`
     );
   }
-  // the smoke-tagged suite is the pre-deploy gate — it must be represented
+  // Grouping is driven off the stored `group` label in tasks.json; every ready
+  // runnable bucket must be represented (proves the label resolves, not just
+  // the smoke gate).
   assert(groups.has('pre-deploy'), 'no pre-deploy (smoke) tasks found');
+  assert(groups.has('daily'), 'no daily tasks found');
+  assert(groups.has('rose-bench'), 'no rose-bench tasks found');
+  // Every task must carry a resolvable group (label or derived fallback).
+  for (const t of tasks) {
+    assert(typeof t.group === 'string' && t.group.length > 0, `task ${t.name} has no group`);
+  }
 }
 
 async function testCatalog_statsPresentForTasksWithHistory(): Promise<void> {
@@ -576,7 +584,7 @@ async function runAll(): Promise<void> {
     ['auth: /run-requests rejects unauthenticated', testAuth_runRequestsRejectsUnauthenticated],
     ['auth: POST /runs rejects unauthenticated', testAuth_uploadRejectsUnauthenticated],
     ['catalog: tasks + stats shape', testCatalog_returnsTasksWithStatsShape],
-    ['catalog: groups are the four known', testCatalog_groupsAreTheThreeKnown],
+    ['catalog: groups are label-driven', testCatalog_groupsAreLabelDriven],
     ['catalog: stats present from history ledger', testCatalog_statsPresentForTasksWithHistory],
     ['catalog: retired tasks invisible everywhere', testCatalog_retiredTasksInvisible],
     ['patch: edit + revert description', testPatch_editAndRevertDescription],
