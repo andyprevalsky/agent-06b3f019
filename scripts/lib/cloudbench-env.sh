@@ -300,22 +300,57 @@ cloudbench_machines_api_token_ensure() {
   [ -n "$CLOUDBENCH_MACHINES_API_TOKEN" ] || return 1
 }
 
+cloudbench_machines_api_read_failure() {
+  local operation="$1" status="${CLOUDBENCH_API_STATUS:-0}"
+  case "$status" in
+    0|408|425|429|5??)
+      echo "CLOUDBENCH_RETRYABLE_CAPACITY=machines_api_unavailable" >&2
+      echo "Machines API $operation is temporarily unavailable (HTTP $status); waiting is safe." >&2
+      return "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE"
+      ;;
+    401|403)
+      echo "FATAL: Machines API $operation authentication failed (HTTP $status)" >&2
+      return 1
+      ;;
+    404)
+      echo "FATAL: Machines API $operation target does not exist (HTTP 404)" >&2
+      return 1
+      ;;
+    *)
+      echo "FATAL: Machines API $operation failed (HTTP ${status:-unknown})" >&2
+      return 1
+      ;;
+  esac
+}
+
 cloudbench_cloud_lock_machine_name() {
   printf '%s\n' "${CLOUDBENCH_CLOUD_LOCK_MACHINE_NAME:-cloudbench-controller-lock}"
 }
 
 cloudbench_cloud_lock_machine_id() {
-  local app="$1" machine_name
+  local app="$1" machine_name machine_id request_status parse_status
   machine_name="$(cloudbench_cloud_lock_machine_name)"
-  cloudbench_machines_api_request GET "/v1/apps/$app/machines" || return 1
-  [ "$CLOUDBENCH_API_STATUS" = "200" ] || return 1
-  printf '%s' "$CLOUDBENCH_API_BODY" | jq -r --arg name "$machine_name" \
-    '.[] | select(.name == $name) | .id' | head -1
+  request_status=0
+  cloudbench_machines_api_request GET "/v1/apps/$app/machines" || request_status=$?
+  if [ "$request_status" -ne 0 ] || [ "$CLOUDBENCH_API_STATUS" != "200" ]; then
+    cloudbench_machines_api_read_failure "machine-list read"
+    return $?
+  fi
+  parse_status=0
+  machine_id="$(printf '%s' "$CLOUDBENCH_API_BODY" | jq -r --arg name "$machine_name" \
+    '.[] | select(.name == $name) | .id' | head -1)" || parse_status=$?
+  if [ "$parse_status" -ne 0 ]; then
+    echo "FATAL: Machines API machine-list response is malformed" >&2
+    return 1
+  fi
+  printf '%s\n' "$machine_id"
 }
 
 cloudbench_cloud_lock_acquire() {
-  local app="$1" machine_id body nonce description ttl expires_at now watchdog_delay owner_pid
-  machine_id="$(cloudbench_cloud_lock_machine_id "$app" || true)"
+  local app="$1" machine_id machine_status body nonce description ttl expires_at now watchdog_delay owner_pid
+  machine_status=0
+  machine_id="$(cloudbench_cloud_lock_machine_id "$app")" || machine_status=$?
+  [ "$machine_status" -eq 0 ] || return "$machine_status"
   if [ -z "$machine_id" ]; then
     echo "FATAL: cloud benchmark controller sentinel is missing; run run-bench-cloud --setup" >&2
     return 1

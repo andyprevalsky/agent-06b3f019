@@ -132,8 +132,17 @@ cloudbench_machines_api_request() {
   printf '%s|%s|%s|%s\n' "$method" "$path" "$body" "$nonce" >> "$cloud_lease_calls"
   case "$method|$path" in
     'GET|/v1/apps/bench-app/machines')
-      CLOUDBENCH_API_STATUS=200
-      CLOUDBENCH_API_BODY='[{"id":"lock-machine","name":"cloudbench-controller-lock"}]'
+      if [ "${cloud_machine_list_transport_error:-0}" = "1" ]; then
+        CLOUDBENCH_API_STATUS=0
+        CLOUDBENCH_API_BODY='connect failed'
+        return 7
+      fi
+      CLOUDBENCH_API_STATUS="${cloud_machine_list_status:-200}"
+      if [ -n "${cloud_machine_list_body+x}" ]; then
+        CLOUDBENCH_API_BODY="$cloud_machine_list_body"
+      else
+        CLOUDBENCH_API_BODY='[{"id":"lock-machine","name":"cloudbench-controller-lock"}]'
+      fi
       ;;
     'POST|/v1/apps/bench-app/machines/lock-machine/lease')
       if [ "${cloud_lease_force_error:-0}" = "1" ]; then
@@ -173,6 +182,51 @@ cloud_lock_status=0
 [ "$cloud_lock_status" -eq 1 ] ||
   fail "a non-contention Fly lease error must remain terminal"
 unset cloud_lease_force_error
+
+cloud_machine_list_transport_error=1
+cloud_lock_status=0
+(cloudbench_cloud_lock_acquire bench-app >/dev/null 2>&1) || cloud_lock_status=$?
+[ "$cloud_lock_status" -eq "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE" ] ||
+  fail "a Machines API connection failure must remain retryable"
+unset cloud_machine_list_transport_error
+
+cloud_machine_list_status=503
+cloud_machine_list_body='{"error":"service unavailable"}'
+cloud_lock_status=0
+(cloudbench_cloud_lock_acquire bench-app >/dev/null 2>&1) || cloud_lock_status=$?
+[ "$cloud_lock_status" -eq "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE" ] ||
+  fail "a transient Machines API 5xx must remain retryable"
+unset cloud_machine_list_status cloud_machine_list_body
+
+cloud_machine_list_status=403
+cloud_machine_list_body='{"error":"unauthorized"}'
+cloud_lock_status=0
+(cloudbench_cloud_lock_acquire bench-app >/dev/null 2>&1) || cloud_lock_status=$?
+[ "$cloud_lock_status" -eq 1 ] ||
+  fail "a Machines API authentication failure must remain terminal"
+unset cloud_machine_list_status cloud_machine_list_body
+
+cloud_machine_list_status=404
+cloud_machine_list_body='{"error":"app not found"}'
+cloud_lock_status=0
+(cloudbench_cloud_lock_acquire bench-app >/dev/null 2>&1) || cloud_lock_status=$?
+[ "$cloud_lock_status" -eq 1 ] ||
+  fail "an authoritative Machines API 404 must remain terminal"
+unset cloud_machine_list_status cloud_machine_list_body
+
+cloud_machine_list_body='[]'
+cloud_lock_status=0
+(cloudbench_cloud_lock_acquire bench-app >/dev/null 2>&1) || cloud_lock_status=$?
+[ "$cloud_lock_status" -eq 1 ] ||
+  fail "an authoritative missing sentinel must remain terminal"
+unset cloud_machine_list_body
+
+cloud_machine_list_body='not-json'
+cloud_lock_status=0
+(cloudbench_cloud_lock_acquire bench-app >/dev/null 2>&1) || cloud_lock_status=$?
+[ "$cloud_lock_status" -eq 1 ] ||
+  fail "a malformed successful Machines API response must remain terminal"
+unset cloud_machine_list_body
 require_text "$cloud_lease_calls" \
   'DELETE|/v1/apps/bench-app/machines/lock-machine/lease||lease-nonce' \
   "cloud lock release must authenticate with its provider nonce"
