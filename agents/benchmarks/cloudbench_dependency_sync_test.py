@@ -2356,6 +2356,23 @@ def test_environment_refresh_serializes_shared_app_before_safe_pool_recovery() -
     assert "trap 'exit 129' HUP" in cloud
 
 
+def test_setup_cleanup_composes_environment_and_controller_release() -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    setup_start = cloud.index('if [ "$MODE" = "setup" ]; then')
+    setup_end = cloud.index("# MODE: --refresh-wmh", setup_start)
+    setup = cloud[setup_start:setup_end]
+
+    cleanup_start = setup.index("setup_cleanup() {")
+    cleanup_end = setup.index("\n    }", cleanup_start)
+    cleanup = setup[cleanup_start:cleanup_end]
+    assert cleanup.index("release_app_environment_lock") < cleanup.index(
+        'cloudbench_controller_release "$LOCK_DIR" "$APP"'
+    )
+    assert "trap setup_cleanup EXIT" in setup
+    assert "trap 'release_app_environment_lock' EXIT" not in setup
+    assert "trap 'cloudbench_controller_release" not in setup
+
+
 def test_pool_reconcile_recovers_orphan_after_controller_handoff(tmp_path: Path) -> None:
     fleet = FLEET_SCRIPT.read_text()
     inventory_start = fleet.index("fly_inventory_json() {")

@@ -950,6 +950,13 @@ fi
 # MODE: --setup — one-time: app + secrets + image + volume + machine + git clone.
 # ═════════════════════════════════════════════════════════════════════════════
 if [ "$MODE" = "setup" ]; then
+    setup_cleanup() {
+        local ec=$?
+        trap - EXIT HUP INT TERM
+        release_app_environment_lock || true
+        cloudbench_controller_release "$LOCK_DIR" "$APP"
+        return "$ec"
+    }
     # The sentinel is the distributed lock itself, so first-time bootstrap has no
     # cloud object to lease yet. Serialize same-clone setup locally, create the
     # app/sentinel idempotently, then take its Fly lease before touching any
@@ -959,9 +966,10 @@ if [ "$MODE" = "setup" ]; then
         echo "❌ Another cloud benchmark controller is already running${old_pid:+ (pid $old_pid)}." >&2
         exit 1
     fi
-    trap 'cloudbench_controller_lock_release "$LOCK_DIR"' EXIT
-    trap 'cloudbench_controller_lock_release "$LOCK_DIR"; exit 130' INT
-    trap 'cloudbench_controller_lock_release "$LOCK_DIR"; exit 143' TERM
+    trap setup_cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
     ensure_app
     if ! cloudbench_machines_api_token_ensure "$APP"; then
         echo "❌ Could not mint a short-lived app token for the controller lease." >&2
@@ -975,17 +983,11 @@ if [ "$MODE" = "setup" ]; then
         echo "❌ Another host already owns the cloud benchmark app lease." >&2
         exit 1
     fi
-    trap 'cloudbench_controller_release "$LOCK_DIR" "$APP"' EXIT
-    trap 'cloudbench_controller_release "$LOCK_DIR" "$APP"; exit 130' INT
-    trap 'cloudbench_controller_release "$LOCK_DIR" "$APP"; exit 143' TERM
     echo "═══ run-bench-cloud --setup ═══"
     echo "app=$APP region=$REGION machine=$MACHINE_NAME volume=$VOLUME_NAME vm=$VM_SIZE/${VM_MEMORY}MB volume_size=${VOLUME_SIZE}GB"
     echo ""
 
     CLOUDBENCH_HOLD_APP_ENV_LOCK=1
-    trap 'release_app_environment_lock' EXIT
-    trap 'release_app_environment_lock; exit 130' INT
-    trap 'release_app_environment_lock; exit 143' TERM
     CLOUDBENCH_ALLOW_NO_ACTIVATION_TARGETS=1 inject_secrets
 
     # ── Build + push the KEEP-ALIVE image (deps baked; CMD = sleep infinity) ──
