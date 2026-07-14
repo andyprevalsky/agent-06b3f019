@@ -107,7 +107,10 @@ const CATALOG_GROUPS = ['pre-deploy', 'daily', 'rose-bench', 'incomplete'] as co
  */
 function normalizeStoredGroup(raw: unknown): string | null {
   if (typeof raw !== 'string') return null;
-  const token = raw.trim().toLowerCase().replace(/[\s_]+/g, '-');
+  const token = raw
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_]+/g, '-');
   return (CATALOG_GROUPS as readonly string[]).includes(token) ? token : null;
 }
 
