@@ -156,34 +156,93 @@ FLY() { flyctl "$@"; }
 # per-benchmark child runner.
 machine_storage_ready() {  # machine_storage_ready <id>
     local id="$1" machines volumes
-    machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 1
-    volumes="$(FLY volumes list -a "$APP" --json 2>/dev/null)" || return 1
+    machines="$(fly_inventory_json machines)" || return 2
+    volumes="$(fly_inventory_json volumes)" || return 2
     python3 "$MACHINE_READINESS_SCRIPT" "$id" \
         <(printf '%s' "$machines") <(printf '%s' "$volumes") >/dev/null
 }
 
-fleet_machine_state() {
-    local id="$1"
-    FLY machines list -a "$APP" --json 2>/dev/null | ID="$id" python3 -c '
+fleet_machine_state() {  # 0=state printed, 1=absent, 2=invalid inventory/item
+    local id="$1" machines
+    machines="$(fly_inventory_json machines)" || return 2
+    printf '%s' "$machines" | ID="$id" python3 -c '
 import json, os, sys
-wanted = os.environ["ID"]
-for machine in json.load(sys.stdin) or []:
-    if machine.get("id") == wanted:
-        print(machine.get("state") or "")
-        break
-' 2>/dev/null || true
+machines = json.load(sys.stdin)
+matches = [machine for machine in machines if machine.get("id") == os.environ["ID"]]
+if not matches:
+    raise SystemExit(1)
+if len(matches) != 1 or not isinstance(matches[0].get("state"), str) or not matches[0]["state"]:
+    raise SystemExit(2)
+print(matches[0]["state"])
+'
 }
 
-fleet_machine_image() {
-    local id="$1"
-    FLY machines list -a "$APP" --json 2>/dev/null | ID="$id" python3 -c '
+fly_inventory_json() {  # fly_inventory_json machines|volumes
+    local resource="$1" attempts="${CLOUDBENCH_FLY_INVENTORY_ATTEMPTS:-3}"
+    local delay="${CLOUDBENCH_FLY_INVENTORY_RETRY_DELAY:-2}" attempt=1 output command_status reason
+    case "$resource" in machines|volumes) ;; *) return 2 ;; esac
+    case "$attempts" in ''|*[!0-9]*|0) return 2 ;; esac
+    case "$delay" in ''|*[!0-9]*) return 2 ;; esac
+
+    while [ "$attempt" -le "$attempts" ]; do
+        if output="$(FLY "$resource" list -a "$APP" --json 2>/dev/null)"; then
+            command_status=0
+        else
+            command_status=$?
+        fi
+        if [ "$command_status" -eq 0 ] && printf '%s' "$output" | python3 -c '
+import json, sys
+try:
+    items = json.load(sys.stdin)
+except (TypeError, ValueError):
+    raise SystemExit(1)
+raise SystemExit(0 if isinstance(items, list) and all(isinstance(item, dict) for item in items) else 1)
+'; then
+            printf '%s\n' "$output"
+            return 0
+        fi
+        if [ "$command_status" -eq 0 ]; then
+            reason="invalid JSON inventory"
+        else
+            reason="flyctl exit $command_status"
+        fi
+        if [ "$attempt" -lt "$attempts" ]; then
+            echo "Fly $resource inventory read failed ($reason, attempt $attempt/$attempts); retrying in ${delay}s" >&2
+            sleep "$delay"
+        fi
+        attempt=$((attempt + 1))
+    done
+    echo "Fly $resource inventory remained unreadable after $attempts attempts ($reason)" >&2
+    return 2
+}
+
+fleet_machine_image() {  # 0=image printed, 1=absent, 2=invalid inventory/item
+    local id="$1" machines
+    machines="$(fly_inventory_json machines)" || return 2
+    printf '%s' "$machines" | ID="$id" python3 -c '
 import json, os, sys
-wanted = os.environ["ID"]
-for machine in json.load(sys.stdin) or []:
-    if machine.get("id") == wanted:
-        print((machine.get("config") or {}).get("image") or "")
-        break
-' 2>/dev/null || true
+machines = json.load(sys.stdin)
+matches = [machine for machine in machines if machine.get("id") == os.environ["ID"]]
+if not matches:
+    raise SystemExit(1)
+if len(matches) != 1:
+    raise SystemExit(2)
+image = (matches[0].get("config") or {}).get("image")
+if not isinstance(image, str) or not image:
+    raise SystemExit(2)
+print(image)
+'
+}
+
+fleet_machine_presence() {  # 0=present, 1=absent, 2=invalid inventory
+    local id="$1" machines
+    machines="$(fly_inventory_json machines)" || return 2
+    printf '%s' "$machines" | ID="$id" python3 -c '
+import json, os, sys
+machines = json.load(sys.stdin)
+matches = [machine for machine in machines if machine.get("id") == os.environ["ID"]]
+raise SystemExit(0 if len(matches) == 1 else 1 if not matches else 2)
+'
 }
 
 POOL_PROVENANCE_LINE=""
@@ -319,7 +378,7 @@ print_code_provenance() {
 # no-ops a `--force` destroy (and then auto-starts later → a money-burning
 # zombie), so retry across the transition; last resort, stop then destroy.
 reap_machine() {  # reap_machine <id> — returns non-zero if the machine survived
-    local id="$1" i
+    local id="$1" i presence
     [ -n "$id" ] || return 0
     if [ -n "${WARM_ID:-}" ] && [ "$id" = "$WARM_ID" ]; then
         echo "  ❌ refusing to destroy warm source machine $id" >&2
@@ -327,15 +386,21 @@ reap_machine() {  # reap_machine <id> — returns non-zero if the machine surviv
     fi
     for i in 1 2 3 4 5; do
         FLY machine destroy --force "$id" -a "$APP" >/dev/null 2>&1 || true
-        FLY machines list -a "$APP" --json 2>/dev/null | grep -q "\"$id\"" || return 0
+        fleet_machine_presence "$id"
+        presence=$?
+        [ "$presence" -eq 1 ] && return 0
         [ "$i" = 3 ] && FLY machine stop "$id" -a "$APP" >/dev/null 2>&1 || true
         sleep 3
     done
-    if FLY machines list -a "$APP" --json 2>/dev/null | grep -q "\"$id\""; then
+    fleet_machine_presence "$id"
+    presence=$?
+    if [ "$presence" -eq 0 ]; then
         echo "  ⚠️ could not destroy machine $id — check: flyctl machines list -a $APP" >&2
         return 1
     fi
-    return 0
+    [ "$presence" -eq 1 ] && return 0
+    echo "  ⚠️ could not verify destruction of machine $id because Fly inventory stayed unreadable" >&2
+    return 1
 }
 
 # ── Pre-provisioned pool: stopped clones (current image) claimed on demand ───
@@ -344,17 +409,19 @@ reap_machine() {  # reap_machine <id> — returns non-zero if the machine surviv
 # the CURRENT branch code — the baked image only supplies deps. Stopped pool
 # machines cost $0 compute (volumes only) between runs.
 machine_id_for_clone_name() {  # machine_id_for_clone_name <name> <absolute-seconds-deadline>
-    local target_name="$1" deadline="$2" matches
+    local target_name="$1" deadline="$2" matches machines
     while :; do
-        matches="$(FLY machines list -a "$APP" --json 2>/dev/null \
-            | TARGET_NAME="$target_name" python3 -c '
+        if machines="$(fly_inventory_json machines)"; then
+            matches="$(printf '%s' "$machines" | TARGET_NAME="$target_name" python3 -c '
 import json, os, sys
-try: machines = json.load(sys.stdin) or []
-except Exception: machines = []
+machines = json.load(sys.stdin)
 for machine in machines:
     if machine.get("name") == os.environ["TARGET_NAME"] and machine.get("id"):
         print(machine["id"])
 ' 2>/dev/null || true)"
+        else
+            matches=""
+        fi
         if [ "$(printf '%s\n' "$matches" | grep -c . 2>/dev/null || true)" = "1" ]; then
             printf '%s' "$matches"
             return 0
@@ -400,15 +467,11 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id];
 }
 
 fleet_machine_volume_ids() {  # fleet_machine_volume_ids <machine-id>
-    local id="$1"
-    FLY volumes list -a "$APP" --json 2>/dev/null | MACHINE_ID="$id" python3 -c '
+    local id="$1" volumes
+    volumes="$(fly_inventory_json volumes)" || return 2
+    printf '%s' "$volumes" | MACHINE_ID="$id" python3 -c '
 import json, os, sys
-try:
-    volumes = json.load(sys.stdin)
-except (TypeError, ValueError):
-    raise SystemExit(2)
-if not isinstance(volumes, list) or any(not isinstance(volume, dict) for volume in volumes):
-    raise SystemExit(2)
+volumes = json.load(sys.stdin)
 for volume in volumes:
     if volume.get("attached_machine_id") == os.environ["MACHINE_ID"] and volume.get("id"):
         print(volume["id"])
@@ -417,30 +480,20 @@ for volume in volumes:
 
 fleet_volume_presence() {  # fleet_volume_presence <volume-id>: 0=present, 1=absent, 2=invalid read
     local id="$1" volumes
-    volumes="$(FLY volumes list -a "$APP" --json 2>/dev/null)" || return 2
+    volumes="$(fly_inventory_json volumes)" || return 2
     printf '%s' "$volumes" | VOLUME_ID="$id" python3 -c '
 import json, os, sys
-try:
-    volumes = json.load(sys.stdin)
-except (TypeError, ValueError):
-    raise SystemExit(2)
-if not isinstance(volumes, list) or any(not isinstance(volume, dict) for volume in volumes):
-    raise SystemExit(2)
+volumes = json.load(sys.stdin)
 raise SystemExit(0 if any(volume.get("id") == os.environ["VOLUME_ID"] for volume in volumes) else 1)
 '
 }
 
 fleet_orphan_volume_safe_for_missing_machine() {  # exact recorded volume must be absent or detached
     local id="$1" volumes
-    volumes="$(FLY volumes list -a "$APP" --json 2>/dev/null)" || return 1
+    volumes="$(fly_inventory_json volumes)" || return 1
     printf '%s' "$volumes" | VOLUME_ID="$id" python3 -c '
 import json, os, sys
-try:
-    volumes = json.load(sys.stdin)
-except (TypeError, ValueError):
-    raise SystemExit(1)
-if not isinstance(volumes, list) or any(not isinstance(volume, dict) for volume in volumes):
-    raise SystemExit(1)
+volumes = json.load(sys.stdin)
 matches = [volume for volume in volumes if volume.get("id") == os.environ["VOLUME_ID"]]
 if len(matches) > 1:
     raise SystemExit(1)
@@ -936,24 +989,7 @@ UNAVAILABLE_POOL_IDS=()
 # workspace's pool ledger is orphaned. Stop and verify it before environment
 # activation (avoids "pool empty" → fresh clone → the 5-min volume-fork slow start).
 pool_machine_state() {  # pool_machine_state <id>: prints state; 1=absent, 2=invalid read
-    local id="$1" machines
-    machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 2
-    printf '%s' "$machines" | MACHINE_ID="$id" python3 -c '
-import json, os, sys
-try:
-    machines = json.load(sys.stdin)
-except (TypeError, ValueError):
-    raise SystemExit(2)
-if not isinstance(machines, list) or any(not isinstance(machine, dict) for machine in machines):
-    raise SystemExit(2)
-machine = next((item for item in machines if item.get("id") == os.environ["MACHINE_ID"]), None)
-if machine is None:
-    raise SystemExit(1)
-state = machine.get("state")
-if not isinstance(state, str) or not state:
-    raise SystemExit(2)
-print(state)
-'
+    fleet_machine_state "$1"
 }
 
 reconcile_pool() {
@@ -980,7 +1016,7 @@ reconcile_pool() {
 }
 claim_pool_machine() {  # echo a started, claimed pool machine id (or '' if none free)
     [ -f "$POOL_IDS_FILE" ] || return 0
-    local id st presence claim_path owner
+    local id st presence storage_status claim_path owner
     mkdir -p "$POOL_CLAIMS_DIR" "$(dirname "$CLAIMED_POOL_FILE")"
     while read -r id; do
         [ -n "$id" ] || continue
@@ -1001,7 +1037,13 @@ claim_pool_machine() {  # echo a started, claimed pool machine id (or '' if none
             rm -f "$claim_path"
         fi
         [ "$st" = "stopped" ] || continue   # only claim an existing, stopped machine
-        machine_storage_ready "$id" || continue
+        machine_storage_ready "$id"
+        storage_status=$?
+        case "$storage_status" in
+            0) ;;
+            1) continue ;;
+            *) return 2 ;;
+        esac
         # claim_pool_machine is called through command substitution, so shell
         # arrays mutate in a subshell. Files are the cross-subshell and
         # cross-workspace ownership source of truth while the app lock is held.
@@ -1229,7 +1271,10 @@ if ! CLOUDBENCH_PARENT_LOCK_HELD=1 \
 fi
 
 # ── Resolve the warm machine (clone source) + its volume ────────────────────
-warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null || echo '[]')"
+warm_json="$(fly_inventory_json machines)" || {
+    echo "❌ Could not read Fly machines while resolving the warm source." >&2
+    exit 2
+}
 warm_pair="$(printf '%s' "$warm_json" | MN="$MACHINE_NAME" python3 -c '
 import json,os,sys
 d=json.load(sys.stdin) or []
@@ -1257,14 +1302,17 @@ echo "🏭 warm source machine: $WARM_ID (region $REGION)"
 # stored size, not logical completeness, so a valid current snapshot can be much
 # smaller than an older one. Select by lifecycle status + real creation timestamp;
 # exclude the zero-byte `running` placeholder exposed while upload is in flight.
-VOL_ID="$(FLY volumes list -a "$APP" --json 2>/dev/null | VN="$VOLUME_NAME" python3 -c '
+volume_json="$(fly_inventory_json volumes)" || {
+    echo "❌ Could not read Fly volumes while resolving the warm source." >&2
+    exit 2
+}
+VOL_ID="$(printf '%s' "$volume_json" | VN="$VOLUME_NAME" python3 -c '
 import json,os,sys
-try: d=json.load(sys.stdin) or []
-except Exception: d=[]
+d=json.load(sys.stdin)
 vn=os.environ["VN"]
 for v in d:
     if v.get("name")==vn and v.get("id"): print(v["id"]); break
-' 2>/dev/null || true)"
+' 2>/dev/null)"
 [ -n "$VOL_ID" ] || { echo "❌ Could not find warm volume '$VOLUME_NAME' in $APP" >&2; exit 1; }
 SNAP_ID="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null | python3 "$ROOT_DIR/scripts/cloudbench-select-snapshot.py" 2>/dev/null || true)"
 if [ -z "$SNAP_ID" ]; then
@@ -1305,14 +1353,15 @@ if ! git -C "$ROOT_DIR" diff HEAD --quiet --binary 2>/dev/null; then
 fi
 
 _machine_priv_ip() {  # _machine_priv_ip <machine_id>
-    FLY machines list -a "$APP" --json 2>/dev/null | MID="$1" python3 -c '
+    local machines
+    machines="$(fly_inventory_json machines)" || return 2
+    printf '%s' "$machines" | MID="$1" python3 -c '
 import json,os,sys
-try: d=json.load(sys.stdin) or []
-except Exception: d=[]
+d=json.load(sys.stdin)
 mid=os.environ["MID"]
 for m in d:
     if m.get("id")==mid: print(m.get("private_ip") or ""); break
-' 2>/dev/null || true
+' 2>/dev/null
 }
 
 _box_desired() {  # _box_desired <machine_id> → desired_machine_count or empty

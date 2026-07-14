@@ -558,8 +558,10 @@ def test_fresh_clone_start_paths_honor_storage_readiness_contract() -> None:
     claim_end = fleet.index("\n}\n", claim_start)
     claim = fleet[claim_start:claim_end]
     assert claim.index('pool_machine_provenance_valid "$id"') < claim.index(
-        'machine_storage_ready "$id" || continue'
+        'machine_storage_ready "$id"'
     )
+    assert '1) continue ;;' in claim
+    assert '*) return 2 ;;' in claim
     assert 'FLY machine start "$id"' not in claim
     assert (
         'if machine_storage_ready "$wid"; then\n'
@@ -569,9 +571,11 @@ def test_fresh_clone_start_paths_honor_storage_readiness_contract() -> None:
 
 def test_fleet_machine_state_avoids_pipefail_status_sigpipe() -> None:
     fleet = FLEET_SCRIPT.read_text()
-    function_start = fleet.index("fleet_machine_state() {")
-    function_end = fleet.index("\n}\n", function_start) + 3
-    state_function = fleet[function_start:function_end]
+    inventory_start = fleet.index("fly_inventory_json() {")
+    inventory_end = fleet.index("\n}\n", inventory_start) + 3
+    state_start = fleet.index("fleet_machine_state() {")
+    state_end = fleet.index("\n}\n", state_start) + 3
+    state_function = fleet[inventory_start:inventory_end] + fleet[state_start:state_end]
 
     result = subprocess.run(
         [
@@ -606,9 +610,73 @@ fleet_machine_state machine-1
     assert int(lines[-2].split("=", 1)[1]) != 0
 
 
+def test_fly_inventory_retries_transport_and_invalid_json_before_image_read(
+    tmp_path: Path,
+) -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    assert 'FLY machines list -a "$APP" --json' not in fleet
+    assert 'FLY volumes list -a "$APP" --json' not in fleet
+    assert 'warm_json="$(fly_inventory_json machines)"' in fleet
+    assert 'volume_json="$(fly_inventory_json volumes)"' in fleet
+    inventory_start = fleet.index("fly_inventory_json() {")
+    inventory_end = fleet.index("\n}\n", inventory_start) + 3
+    image_start = fleet.index("fleet_machine_image() {")
+    image_end = fleet.index("\n}\n", image_start) + 3
+    functions = fleet[inventory_start:inventory_end] + fleet[image_start:image_end]
+    calls_file = tmp_path / "calls"
+
+    def read_image(mode: str) -> subprocess.CompletedProcess[str]:
+        calls_file.write_text("0\n")
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"""set -uo pipefail
+APP=bench-app
+CLOUDBENCH_FLY_INVENTORY_ATTEMPTS=3
+CLOUDBENCH_FLY_INVENTORY_RETRY_DELAY=0
+FLY() {{
+  count="$(cat "$CALLS_FILE")"
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$CALLS_FILE"
+  if [ "$MODE" = transport ] && [ "$count" -eq 1 ]; then return 7; fi
+  if [ "$MODE" = invalid ] && [ "$count" -eq 1 ]; then printf '{{invalid\n'; return 0; fi
+  if [ "$MODE" = exhausted ]; then printf '{{invalid\n'; return 0; fi
+  printf '[{{"id":"machine-1","config":{{"image":"registry.example/bench@sha256:abc"}}}}]\n'
+}}
+{functions}
+fleet_machine_image machine-1
+""",
+            ],
+            env={
+                "PATH": f"/usr/bin:/bin",
+                "CALLS_FILE": str(calls_file),
+                "MODE": mode,
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    transport = read_image("transport")
+    assert transport.returncode == 0, transport.stderr
+    assert transport.stdout.strip() == "registry.example/bench@sha256:abc"
+    assert calls_file.read_text().strip() == "2"
+
+    invalid = read_image("invalid")
+    assert invalid.returncode == 0, invalid.stderr
+    assert invalid.stdout.strip() == "registry.example/bench@sha256:abc"
+    assert calls_file.read_text().strip() == "2"
+
+    exhausted = read_image("exhausted")
+    assert exhausted.returncode == 2
+    assert exhausted.stdout == ""
+    assert calls_file.read_text().strip() == "3"
+
+
 def test_pool_provenance_validates_snapshot_and_live_image(tmp_path: Path) -> None:
     fleet = FLEET_SCRIPT.read_text()
-    image_start = fleet.index("fleet_machine_image() {")
+    image_start = fleet.index("fly_inventory_json() {")
     validator_end = fleet.index("\n}\n\nvalidate_tracked_pool_provenance()", image_start) + 3
     functions = fleet[image_start:validator_end]
     provenance = tmp_path / "pool.provenance.tsv"
@@ -662,7 +730,7 @@ def test_normal_startup_migrates_legacy_volume_binding_before_validation(
     tmp_path: Path,
 ) -> None:
     fleet = FLEET_SCRIPT.read_text()
-    image_start = fleet.index("fleet_machine_image() {")
+    image_start = fleet.index("fly_inventory_json() {")
     validator_end = fleet.index("\n}\n\nvalidate_tracked_pool_provenance()", image_start) + 3
     provenance_functions = fleet[image_start:validator_end]
     validate_start = fleet.index("validate_tracked_pool_provenance() {")
@@ -742,7 +810,7 @@ def test_pool_provisioning_rotates_stale_snapshot_capacity_under_lease(
     tmp_path: Path,
 ) -> None:
     fleet = FLEET_SCRIPT.read_text()
-    image_start = fleet.index("fleet_machine_image() {")
+    image_start = fleet.index("fly_inventory_json() {")
     validator_end = fleet.index("\n}\n\nvalidate_tracked_pool_provenance()", image_start) + 3
     provenance_functions = fleet[image_start:validator_end]
     validate_start = fleet.index("validate_tracked_pool_provenance() {")
@@ -870,7 +938,7 @@ def test_pool_provisioning_retires_bound_volume_when_tracked_machine_disappears(
     tmp_path: Path,
 ) -> None:
     fleet = FLEET_SCRIPT.read_text()
-    image_start = fleet.index("fleet_machine_image() {")
+    image_start = fleet.index("fly_inventory_json() {")
     validator_end = fleet.index("\n}\n\nvalidate_tracked_pool_provenance()", image_start) + 3
     provenance_functions = fleet[image_start:validator_end]
     provision_start = fleet.index("provision_pool() {")
@@ -984,7 +1052,7 @@ def test_missing_pool_machine_cannot_resume_retirement_of_volume_attached_elsewh
     tmp_path: Path,
 ) -> None:
     fleet = FLEET_SCRIPT.read_text()
-    image_start = fleet.index("fleet_machine_image() {")
+    image_start = fleet.index("fly_inventory_json() {")
     validator_end = fleet.index("\n}\n\nvalidate_tracked_pool_provenance()", image_start) + 3
     provenance_functions = fleet[image_start:validator_end]
     retirement_start = fleet.index("fleet_machine_volume_ids() {")
@@ -1084,7 +1152,7 @@ def test_partial_pool_retirement_journal_cannot_delete_a_volume_subset(
     tmp_path: Path,
 ) -> None:
     fleet = FLEET_SCRIPT.read_text()
-    image_start = fleet.index("fleet_machine_image() {")
+    image_start = fleet.index("fly_inventory_json() {")
     validator_end = fleet.index("\n}\n\nvalidate_tracked_pool_provenance()", image_start) + 3
     provenance_functions = fleet[image_start:validator_end]
     retirement_start = fleet.index("fleet_machine_volume_ids() {")
@@ -1162,7 +1230,7 @@ def test_pool_retirement_journal_failure_prevents_live_machine_destroy(
     tmp_path: Path,
 ) -> None:
     fleet = FLEET_SCRIPT.read_text()
-    image_start = fleet.index("fleet_machine_image() {")
+    image_start = fleet.index("fly_inventory_json() {")
     validator_end = fleet.index("\n}\n\nvalidate_tracked_pool_provenance()", image_start) + 3
     provenance_functions = fleet[image_start:validator_end]
     retirement_start = fleet.index("fleet_machine_volume_ids() {")
@@ -1233,7 +1301,7 @@ def test_pool_retirement_revalidates_detachment_before_volume_destroy_retry(
     tmp_path: Path,
 ) -> None:
     fleet = FLEET_SCRIPT.read_text()
-    image_start = fleet.index("fleet_machine_image() {")
+    image_start = fleet.index("fly_inventory_json() {")
     validator_end = fleet.index("\n}\n\nvalidate_tracked_pool_provenance()", image_start) + 3
     provenance_functions = fleet[image_start:validator_end]
     retirement_start = fleet.index("fleet_machine_volume_ids() {")
@@ -1313,7 +1381,7 @@ def test_multi_volume_pool_retirement_resumes_with_full_journal_after_partial_fa
     tmp_path: Path,
 ) -> None:
     fleet = FLEET_SCRIPT.read_text()
-    image_start = fleet.index("fleet_machine_image() {")
+    image_start = fleet.index("fly_inventory_json() {")
     validator_end = fleet.index("\n}\n\nvalidate_tracked_pool_provenance()", image_start) + 3
     provenance_functions = fleet[image_start:validator_end]
     retirement_start = fleet.index("fleet_machine_volume_ids() {")
@@ -1408,7 +1476,7 @@ def test_pool_provisioning_rejects_stopped_capacity_with_unready_storage(
     tmp_path: Path,
 ) -> None:
     fleet = FLEET_SCRIPT.read_text()
-    image_start = fleet.index("fleet_machine_image() {")
+    image_start = fleet.index("fly_inventory_json() {")
     validator_end = fleet.index("\n}\n\nvalidate_tracked_pool_provenance()", image_start) + 3
     provenance_functions = fleet[image_start:validator_end]
     provision_start = fleet.index("provision_pool() {")
@@ -1476,7 +1544,7 @@ def test_pool_retirement_resumes_volume_cleanup_after_machine_disappears(
     tmp_path: Path,
 ) -> None:
     fleet = FLEET_SCRIPT.read_text()
-    image_start = fleet.index("fleet_machine_image() {")
+    image_start = fleet.index("fly_inventory_json() {")
     validator_end = fleet.index("\n}\n\nvalidate_tracked_pool_provenance()", image_start) + 3
     provenance_functions = fleet[image_start:validator_end]
     retirement_start = fleet.index("fleet_machine_volume_ids() {")
@@ -1547,7 +1615,7 @@ printf 'remaining=%s\n' "$(grep -c . "$POOL_RETIREMENT_FILE" || true)"
 
 def test_pool_provisioning_never_retires_unverified_machine_ids(tmp_path: Path) -> None:
     fleet = FLEET_SCRIPT.read_text()
-    image_start = fleet.index("fleet_machine_image() {")
+    image_start = fleet.index("fly_inventory_json() {")
     validator_end = fleet.index("\n}\n\nvalidate_tracked_pool_provenance()", image_start) + 3
     provenance_functions = fleet[image_start:validator_end]
     provision_start = fleet.index("provision_pool() {")
@@ -1642,7 +1710,7 @@ printf 'rejected:%s\n' "$CASE_NAME"
 
 def test_corrupt_retirement_record_cannot_delete_machine_or_volume(tmp_path: Path) -> None:
     fleet = FLEET_SCRIPT.read_text()
-    image_start = fleet.index("fleet_machine_image() {")
+    image_start = fleet.index("fly_inventory_json() {")
     validator_end = fleet.index("\n}\n\nvalidate_tracked_pool_provenance()", image_start) + 3
     provenance_functions = fleet[image_start:validator_end]
     retirement_start = fleet.index("fleet_machine_volume_ids() {")
@@ -2034,10 +2102,18 @@ def test_environment_refresh_serializes_shared_app_and_reconciles_pool_first() -
 
 def test_pool_reconcile_leaves_concurrent_owner_untouched(tmp_path: Path) -> None:
     fleet = FLEET_SCRIPT.read_text()
-    function_start = fleet.index("pool_machine_state() {")
-    reconcile_start = fleet.index("reconcile_pool() {", function_start)
+    inventory_start = fleet.index("fly_inventory_json() {")
+    inventory_end = fleet.index("\n}\n", inventory_start) + 3
+    state_start = fleet.index("fleet_machine_state() {")
+    state_end = fleet.index("\n}\n", state_start) + 3
+    pool_state_start = fleet.index("pool_machine_state() {")
+    reconcile_start = fleet.index("reconcile_pool() {", pool_state_start)
     function_end = fleet.index("\n}\n", reconcile_start) + 3
-    reconcile_functions = fleet[function_start:function_end]
+    reconcile_functions = (
+        fleet[inventory_start:inventory_end]
+        + fleet[state_start:state_end]
+        + fleet[pool_state_start:function_end]
+    )
 
     pool_file = tmp_path / "pool.ids"
     states_file = tmp_path / "states"
@@ -2150,10 +2226,18 @@ printf '%s\\n%s\\n' "$first" "$second"
 
 def test_pool_reconcile_fails_closed_on_falsy_non_list_machine_json(tmp_path: Path) -> None:
     fleet = FLEET_SCRIPT.read_text()
-    function_start = fleet.index("pool_machine_state() {")
-    reconcile_start = fleet.index("reconcile_pool() {", function_start)
+    inventory_start = fleet.index("fly_inventory_json() {")
+    inventory_end = fleet.index("\n}\n", inventory_start) + 3
+    state_start = fleet.index("fleet_machine_state() {")
+    state_end = fleet.index("\n}\n", state_start) + 3
+    pool_state_start = fleet.index("pool_machine_state() {")
+    reconcile_start = fleet.index("reconcile_pool() {", pool_state_start)
     function_end = fleet.index("\n}\n", reconcile_start) + 3
-    reconcile_functions = fleet[function_start:function_end]
+    reconcile_functions = (
+        fleet[inventory_start:inventory_end]
+        + fleet[state_start:state_end]
+        + fleet[pool_state_start:function_end]
+    )
     pool_file = tmp_path / "pool.ids"
     stops_file = tmp_path / "stops"
     pool_file.write_text("abc123\n")
@@ -2200,7 +2284,7 @@ def test_fleet_clone_identity_requires_a_distinct_authoritative_target(
     tmp_path: Path,
 ) -> None:
     fleet = FLEET_SCRIPT.read_text()
-    function_start = fleet.index("machine_id_for_clone_name() {")
+    function_start = fleet.index("fly_inventory_json() {")
     clone_start = fleet.index("clone_machine_target() {", function_start)
     function_end = fleet.index("\n}\n", clone_start) + 3
     clone_function = fleet[function_start:function_end]
@@ -2334,9 +2418,11 @@ def test_pool_promotes_only_successful_owned_clone_ids() -> None:
 
 def test_unresolved_clone_name_fails_loudly_without_polling_past_deadline() -> None:
     fleet = FLEET_SCRIPT.read_text()
-    function_start = fleet.index("machine_id_for_clone_name() {")
-    function_end = fleet.index("\n}\n", function_start) + 3
-    resolver_function = fleet[function_start:function_end]
+    inventory_start = fleet.index("fly_inventory_json() {")
+    inventory_end = fleet.index("\n}\n", inventory_start) + 3
+    resolver_start = fleet.index("machine_id_for_clone_name() {")
+    resolver_end = fleet.index("\n}\n", resolver_start) + 3
+    resolver_function = fleet[inventory_start:inventory_end] + fleet[resolver_start:resolver_end]
 
     result = subprocess.run(
         [
