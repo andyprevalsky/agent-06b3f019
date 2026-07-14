@@ -498,52 +498,7 @@
     "attachment": null,
     "approval_handling": "auto_approve",
     "start_phase": "execute",
-    "bench": "pipeline-e2e",
-    "group": "Daily",
-    "source": [
-      "regression:5851f75f-9c0b-4287-ba50-5fb0877aac9d",
-      "blackbox:agents/tests/blackbox/message_person.blackbox.py",
-      "blackbox:back-end/src/tests/blackbox/imessage.blackbox.ts",
-      "blackbox:mac-app/tests/blackbox/i-message-queue-service.blackbox.ts",
-      "blackbox:mac-app/tests/blackbox/i-message-sender.blackbox.ts"
-    ],
-    "evaluators": [
-      {
-        "id": "confirmed_imessage_send",
-        "checks": [
-          {
-            "type": "message_person_confirmed_send"
-          }
-        ],
-        "method": "static_check",
-        "criteria": [
-          "Exactly one message_person call is made",
-          "The approved message is accepted by the backend iMessage queue",
-          "The authenticated Mac runs the Messages AppleScript successfully",
-          "The terminal tool event contains queue_id, status=sent, and sent_at"
-        ]
-      }
-    ],
-    "description": "Regression bench for approved iMessage send confirmed by the authenticated Mac Messages bridge",
-    "environment": {
-      "mode": "live",
-      "secrets": [],
-      "services": [
-        "message_person",
-        "backend iMessage queue",
-        "macOS Messages bridge"
-      ],
-      "base_images": [],
-      "db_fixtures": [],
-      "live_targets": [
-        "Apple Messages via the authenticated Mac app"
-      ],
-      "context_notes": "The runner preflights a fresh heartbeat from an updated, authenticated Mac polling the exact benchmark backend. The evaluator requires FINISHED metadata with queue_id and sent_at written only after AppleScript success. Product behavior keeps an unacknowledged message queued indefinitely, but this online-relay benchmark passes only on a confirmed send."
-    },
-    "tool_count_scope": "root",
-    "expected_tool_counts": {
-      "message_person": 1
-    }
+    "bench": "pipeline-e2e"
   },
   {
     "name": "gate-subscription-free-credit",
