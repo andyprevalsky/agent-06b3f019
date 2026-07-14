@@ -1,16 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { screen, waitFor, cleanup } from '@testing-library/react';
+import { screen, waitFor, cleanup, fireEvent, within } from '@testing-library/react';
 import { Routes, Route } from 'react-router-dom';
 import { renderWithProviders } from './test-wrapper';
-import Index from '@/pages/Index';
-import Privacy from '@/pages/Privacy';
-import Terms from '@/features/terms';
-import NotFound from '@/features/not-found';
-import About from '@/pages/About';
-import Terminal from '@/pages/Terminal';
-import ResearchBlog from '@/pages/ResearchBlog';
-import ResearchBlogPost from '@/pages/ResearchBlogPost';
-import Download from '@/features/download';
+import { capturedRequests, clearCaptures } from './msw/capture';
+import { ROUTE_TABLE } from '@/features/app-wiring/config';
 
 /**
  * Renders the full route table from App.tsx inside the test wrapper's MemoryRouter.
@@ -19,16 +12,9 @@ import Download from '@/features/download';
 export function AppRoutes() {
   return (
     <Routes>
-      <Route path="/" element={<Terminal />} />
-      <Route path="/privacy" element={<Privacy />} />
-      <Route path="/terms" element={<Terms />} />
-      <Route path="/about" element={<About />} />
-      <Route path="/terminal" element={<Index />} />
-      <Route path="/research" element={<ResearchBlog />} />
-      <Route path="/research/:slug" element={<ResearchBlogPost />} />
-      <Route path="/download" element={<Download />} />
-      {/* Catch-all 404 */}
-      <Route path="*" element={<NotFound />} />
+      {ROUTE_TABLE.map(({ path, component: Page }) => (
+        <Route key={path} path={path} element={<Page />} />
+      ))}
     </Routes>
   );
 }
@@ -48,6 +34,7 @@ function mockSession() {
 
 describe('App wiring', () => {
   beforeEach(() => {
+    clearCaptures();
     localStorage.clear();
   });
 
@@ -109,6 +96,39 @@ describe('App wiring', () => {
     it('"/download" renders the Download page', () => {
       renderWithProviders(<AppRoutes />, { route: '/download' });
       expect(screen.getByText(/downloading rose for mac/i)).toBeInTheDocument();
+    });
+
+    it('"/waitlist" renders the main Terminal and automatically opens the phone login modal', async () => {
+      renderWithProviders(<AppRoutes />, { route: '/waitlist' });
+
+      await waitFor(() => {
+        expect(
+          within(screen.getByRole('dialog')).getByRole('heading', { name: 'Join the Waitlist' }),
+        ).toBeInTheDocument();
+      });
+      expect(
+        within(screen.getByRole('dialog')).queryByText('Start Building.'),
+      ).not.toBeInTheDocument();
+      expect(screen.getByLabelText('Phone Number')).toBeInTheDocument();
+      expect(screen.getByTestId('terminal-input-area')).toBeInTheDocument();
+
+      fireEvent.keyDown(document, { key: 'Escape' });
+      await waitFor(() => {
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      });
+    });
+
+    it('"/waitlist" does not reopen login for an authenticated user', async () => {
+      mockSession();
+      renderWithProviders(<AppRoutes />, { route: '/waitlist' });
+
+      await waitFor(() => {
+        const inviteChecks = capturedRequests.filter((request) =>
+          request.url.includes('/invite-codes/check'),
+        );
+        expect(inviteChecks.length).toBeGreaterThanOrEqual(2);
+      });
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     });
   });
 

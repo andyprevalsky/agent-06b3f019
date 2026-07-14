@@ -4,12 +4,24 @@ export const ADMIN_USER_IDS = new Set([
   '1f85ff25-6e29-4c1b-8739-f917bd101a30', // Andy Prevalsky
   '43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9', // Tamara Chayo
 ]);
+export const ADMIN_HEALTH_ADDITIONAL_USER_IDS = new Set([
+  '43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9', // Tamara Chayo; Andy is intentionally excluded.
+]);
+export const ADMIN_HEALTH_EXCLUDED_USER_IDS = new Set([
+  '1f85ff25-6e29-4c1b-8739-f917bd101a30', // Andy Prevalsky; internal usage would skew metrics.
+]);
 export const ADMIN_PHONE_DIGITS = new Set(['19729777432', '9729777432']);
 export const POINTS_BY_SLICE: Record<AdminHealthTimeSlice, number> = {
   weekly: 12,
   monthly: 12,
   quarterly: 8,
   yearly: 5,
+};
+export const DAYS_BY_SLICE: Record<AdminHealthTimeSlice, number> = {
+  weekly: 7,
+  monthly: 30,
+  quarterly: 90,
+  yearly: 365,
 };
 
 export const LINEAR_GRAPHQL_URL = 'https://api.linear.app/graphql';

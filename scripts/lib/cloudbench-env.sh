@@ -103,6 +103,45 @@ cloudbench_retry_command() {
   done
 }
 
+cloudbench_terminate_and_wait() {
+  local timeout_seconds="$1"
+  shift
+
+  local pid deadline live
+  local pids=()
+  for pid in "$@"; do
+    [ -n "$pid" ] && pids+=("$pid")
+  done
+  [ "${#pids[@]}" -gt 0 ] || return 0
+
+  for pid in "${pids[@]}"; do
+    kill "$pid" 2>/dev/null || true
+  done
+
+  deadline=$((SECONDS + timeout_seconds))
+  while :; do
+    live=0
+    for pid in "${pids[@]}"; do
+      if kill -0 "$pid" 2>/dev/null; then
+        live=1
+        break
+      fi
+    done
+    [ "$live" -eq 0 ] && break
+    [ "$SECONDS" -ge "$deadline" ] && break
+    sleep 1
+  done
+
+  for pid in "${pids[@]}"; do
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  done
+  for pid in "${pids[@]}"; do
+    wait "$pid" 2>/dev/null || true
+  done
+}
+
 cloudbench_wait_machine_startable() {
   local state_reader="$1" machine_id="$2" max_attempts="$3" retry_delay_seconds="$4"
   local attempt state
@@ -261,213 +300,10 @@ cloudbench_controller_lock_release() {
   unset CLOUDBENCH_CONTROLLER_LOCK_KIND CLOUDBENCH_CONTROLLER_LOCK_PATH
 }
 
-cloudbench_random_token() {
-  if command -v openssl >/dev/null 2>&1; then
-    openssl rand -hex 32
-  else
-    od -An -N32 -tx1 /dev/urandom | tr -d ' \n'
-  fi
-}
-
-cloudbench_machines_api_request() {
-  local method="$1" path="$2" body="${3:-}" nonce="${4:-}" response curl_status
-  local api_host="${FLY_API_HOSTNAME:-https://api.machines.dev}"
-  local api_token="${CLOUDBENCH_MACHINES_API_TOKEN:-${FLY_API_TOKEN:-}}"
-  [ -n "$api_token" ] || { echo "FATAL: Machines API token is required" >&2; return 1; }
-  local -a args=(
-    -sS -X "$method"
-    -H "Authorization: Bearer $api_token"
-    -H "Content-Type: application/json"
-  )
-  [ -n "$nonce" ] && args+=(-H "fly-machine-lease-nonce: $nonce")
-  [ -n "$body" ] && args+=(-d "$body")
-  curl_status=0
-  response="$(curl "${args[@]}" -w $'\n%{http_code}' "$api_host$path")" || curl_status=$?
-  CLOUDBENCH_API_CURL_STATUS="$curl_status"
-  if [ "$curl_status" -ne 0 ]; then
-    CLOUDBENCH_API_STATUS=0
-    CLOUDBENCH_API_BODY="$response"
-    return "$curl_status"
-  fi
-  CLOUDBENCH_API_STATUS="${response##*$'\n'}"
-  CLOUDBENCH_API_BODY="${response%$'\n'*}"
-}
-
-cloudbench_machines_api_token_ensure() {
-  local app="$1" lease_ttl="${CLOUDBENCH_CLOUD_LOCK_TTL:-7200}" token_json token_expiry token_name
-  [ -n "${CLOUDBENCH_MACHINES_API_TOKEN:-}" ] && return 0
-  token_expiry=$((lease_ttl + 600))
-  token_name="cloudbench-controller-$$-$(cloudbench_random_token | cut -c1-8)"
-  token_json="$(flyctl tokens create deploy -a "$app" -x "${token_expiry}s" -n "$token_name" --json 2>/dev/null)" || return 1
-  CLOUDBENCH_MACHINES_API_TOKEN="$(printf '%s' "$token_json" | jq -r '.token // empty' 2>/dev/null)"
-  [ -n "$CLOUDBENCH_MACHINES_API_TOKEN" ] || return 1
-}
-
-cloudbench_machines_api_read_failure() {
-  local operation="$1" status="${CLOUDBENCH_API_STATUS:-0}" curl_status="${CLOUDBENCH_API_CURL_STATUS:-0}"
-  case "$status" in
-    0)
-      case "$curl_status" in
-        5|6|7|18|28|35|52|55|56)
-          echo "CLOUDBENCH_RETRYABLE_CAPACITY=machines_api_unavailable" >&2
-          echo "Machines API $operation transport failed temporarily (curl $curl_status); waiting is safe." >&2
-          return "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE"
-          ;;
-        *)
-          echo "FATAL: Machines API $operation transport/configuration failed (curl ${curl_status:-unknown})" >&2
-          return 1
-          ;;
-      esac
-      ;;
-    408|425|429|5??)
-      echo "CLOUDBENCH_RETRYABLE_CAPACITY=machines_api_unavailable" >&2
-      echo "Machines API $operation is temporarily unavailable (HTTP $status); waiting is safe." >&2
-      return "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE"
-      ;;
-    401|403)
-      echo "FATAL: Machines API $operation authentication failed (HTTP $status)" >&2
-      return 1
-      ;;
-    404)
-      echo "FATAL: Machines API $operation target does not exist (HTTP 404)" >&2
-      return 1
-      ;;
-    *)
-      echo "FATAL: Machines API $operation failed (HTTP ${status:-unknown})" >&2
-      return 1
-      ;;
-  esac
-}
-
-cloudbench_cloud_lock_machine_name() {
-  printf '%s\n' "${CLOUDBENCH_CLOUD_LOCK_MACHINE_NAME:-cloudbench-controller-lock}"
-}
-
-cloudbench_cloud_lock_machine_id() {
-  local app="$1" machine_name machine_id request_status parse_status
-  machine_name="$(cloudbench_cloud_lock_machine_name)"
-  request_status=0
-  cloudbench_machines_api_request GET "/v1/apps/$app/machines" || request_status=$?
-  if [ "$request_status" -ne 0 ] || [ "$CLOUDBENCH_API_STATUS" != "200" ]; then
-    cloudbench_machines_api_read_failure "machine-list read"
-    return $?
-  fi
-  parse_status=0
-  machine_id="$(printf '%s' "$CLOUDBENCH_API_BODY" | jq -r --arg name "$machine_name" \
-    '.[] | select(.name == $name) | .id' | head -1)" || parse_status=$?
-  if [ "$parse_status" -ne 0 ]; then
-    echo "FATAL: Machines API machine-list response is malformed" >&2
-    return 1
-  fi
-  printf '%s\n' "$machine_id"
-}
-
-cloudbench_cloud_lock_acquire() {
-  local app="$1" machine_id machine_status body nonce description ttl expires_at now watchdog_delay owner_pid
-  machine_status=0
-  machine_id="$(cloudbench_cloud_lock_machine_id "$app")" || machine_status=$?
-  [ "$machine_status" -eq 0 ] || return "$machine_status"
-  if [ -z "$machine_id" ]; then
-    echo "FATAL: cloud benchmark controller sentinel is missing; run run-bench-cloud --setup" >&2
-    return 1
-  fi
-  ttl="${CLOUDBENCH_CLOUD_LOCK_TTL:-7200}"
-  case "$ttl" in ''|*[!0-9]*|0) echo "FATAL: invalid cloud lock TTL" >&2; return 2 ;; esac
-  description="cloudbench-controller pid=$$ host=$(hostname 2>/dev/null || echo unknown)"
-  body="$(jq -cn --arg description "$description" --argjson ttl "$ttl" '{description:$description, ttl:$ttl}')"
-  cloudbench_machines_api_request POST "/v1/apps/$app/machines/$machine_id/lease" "$body" || return 1
-  if [ "$CLOUDBENCH_API_STATUS" = "409" ]; then
-    echo "CLOUDBENCH_RETRYABLE_CAPACITY=lease_busy" >&2
-    echo "Cloud benchmark app is leased by another controller (HTTP 409); waiting is safe." >&2
-    return "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE"
-  fi
-  if [ "$CLOUDBENCH_API_STATUS" != "201" ]; then
-    echo "FATAL: cloud benchmark lease acquisition failed (HTTP $CLOUDBENCH_API_STATUS)" >&2
-    return 1
-  fi
-  nonce="$(printf '%s' "$CLOUDBENCH_API_BODY" | jq -r '.data.nonce // .nonce // empty' 2>/dev/null)"
-  [ -n "$nonce" ] || { echo "FATAL: Fly lease response omitted its nonce" >&2; return 1; }
-  CLOUDBENCH_CLOUD_LOCK_MACHINE_ID="$machine_id"
-  CLOUDBENCH_CLOUD_LOCK_NONCE="$nonce"
-  expires_at="$(printf '%s' "$CLOUDBENCH_API_BODY" | jq -r '.data.expires_at // .expires_at // empty' 2>/dev/null)"
-  now="$(date +%s)"
-  case "$expires_at" in ''|*[!0-9]*) expires_at=$((now + ttl)) ;; esac
-  watchdog_delay=$((expires_at - now - 60))
-  if [ "$watchdog_delay" -le 0 ]; then
-    echo "FATAL: Fly granted a controller lease with less than 60 seconds of safety margin" >&2
-    cloudbench_cloud_lock_release "$app"
-    return 1
-  fi
-  owner_pid="$$"
-  (
-    while [ "$watchdog_delay" -gt 30 ]; do
-      sleep 30
-      [ "$PPID" = "$owner_pid" ] || exit 0
-      watchdog_delay=$((watchdog_delay - 30))
-    done
-    sleep "$watchdog_delay"
-    [ "$PPID" = "$owner_pid" ] || exit 0
-    kill -TERM "$owner_pid" 2>/dev/null || true
-  ) &
-  CLOUDBENCH_CLOUD_LOCK_WATCHDOG_PID="$!"
-  CLOUDBENCH_CLOUD_LOCK_EXPIRES_AT="$expires_at"
-  export CLOUDBENCH_CLOUD_LOCK_MACHINE_ID CLOUDBENCH_CLOUD_LOCK_NONCE \
-    CLOUDBENCH_CLOUD_LOCK_WATCHDOG_PID CLOUDBENCH_CLOUD_LOCK_EXPIRES_AT
-}
-
-cloudbench_cloud_lock_release() {
-  local app="$1" machine_id="${CLOUDBENCH_CLOUD_LOCK_MACHINE_ID:-}" nonce="${CLOUDBENCH_CLOUD_LOCK_NONCE:-}"
-  if [ -n "${CLOUDBENCH_CLOUD_LOCK_WATCHDOG_PID:-}" ]; then
-    kill "$CLOUDBENCH_CLOUD_LOCK_WATCHDOG_PID" 2>/dev/null || true
-    wait "$CLOUDBENCH_CLOUD_LOCK_WATCHDOG_PID" 2>/dev/null || true
-  fi
-  [ -n "$machine_id" ] && [ -n "$nonce" ] || return 0
-  cloudbench_machines_api_request DELETE "/v1/apps/$app/machines/$machine_id/lease" "" "$nonce" >/dev/null 2>&1 || true
-  unset CLOUDBENCH_CLOUD_LOCK_MACHINE_ID CLOUDBENCH_CLOUD_LOCK_NONCE \
-    CLOUDBENCH_CLOUD_LOCK_WATCHDOG_PID CLOUDBENCH_CLOUD_LOCK_EXPIRES_AT \
-    CLOUDBENCH_MACHINES_API_TOKEN
-}
-
-cloudbench_controller_acquire() {
-  local path="$1" app="$2" status
-  status=0
-  cloudbench_controller_lock_acquire "$path" || status=$?
-  [ "$status" -eq 0 ] || return "$status"
-  if ! cloudbench_machines_api_token_ensure "$app"; then
-    cloudbench_controller_lock_release "$path"
-    return 1
-  fi
-  status=0
-  cloudbench_cloud_lock_acquire "$app" || status=$?
-  if [ "$status" -ne 0 ]; then
-    cloudbench_controller_lock_release "$path"
-    return "$status"
-  fi
-}
-
-cloudbench_controller_acquire_wait() {
-  local path="$1" app="$2" retry_seconds="$3" status old_pid
-  case "$retry_seconds" in
-    ''|*[!0-9]*|0)
-      echo "FATAL: cloud benchmark controller retry interval must be a positive integer" >&2
-      return 2
-      ;;
-  esac
-
-  while true; do
-    status=0
-    cloudbench_controller_acquire "$path" "$app" || status=$?
-    [ "$status" -eq 0 ] && return 0
-    [ "$status" -eq "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE" ] || return "$status"
-
-    old_pid="$(cat "$path" 2>/dev/null || true)"
-    echo "Cloud benchmark capacity is busy${old_pid:+ (local pid $old_pid)}; retrying in ${retry_seconds}s..."
-    sleep "$retry_seconds"
-  done
-}
-
-cloudbench_controller_release() {
-  local path="$1" app="$2"
-  cloudbench_cloud_lock_release "$app"
-  cloudbench_controller_lock_release "$path"
-}
+# NOTE: the cross-host Fly "sentinel lease" (a machine lease held on the
+# cloudbench-controller-lock machine for a whole run) was removed on purpose.
+# Concurrent workstreams are supported by construction instead: the run path
+# only READS shared app state (run-bench-cloud --verify-secrets), forks
+# immutable warm-volume snapshots, and mutates nothing but the machines it
+# created. The only lock a run takes is the workspace-local controller lock
+# above.
