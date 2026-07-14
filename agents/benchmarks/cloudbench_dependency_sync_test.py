@@ -1,6 +1,8 @@
 import importlib.util
 import json
+import os
 import subprocess
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -1245,6 +1247,7 @@ FLY() {{
   fi
   return 2
 }}
+fleet_machines_json() {{ FLY machines list -a "$APP" --json; }}
 {clone_function}
 clone_machine_target "$LEDGER"
 """,
@@ -1488,6 +1491,7 @@ CLOUDBENCH_CLONE_RETRY_SECONDS=0
 CLOUDBENCH_CLONE_LOOKUP_SECONDS=0
 CLOUDBENCH_CLONE_MAX_ATTEMPTS=3
 {timeout_fn}
+fleet_machines_json() {{ FLY machines list -a "$APP" --json; }}
 {resolver}
 {cloner}
 clone_machine_target "$LEDGER"
@@ -1542,6 +1546,7 @@ CLOUDBENCH_CLONE_RETRY_SECONDS=0
 CLOUDBENCH_CLONE_LOOKUP_SECONDS=0
 CLOUDBENCH_CLONE_MAX_ATTEMPTS=3
 {timeout_fn}
+fleet_machines_json() {{ FLY machines list -a "$APP" --json; }}
 {resolver}
 {cloner}
 clone_machine_target "$LEDGER"
@@ -1603,6 +1608,7 @@ CLOUDBENCH_CLONE_RETRY_SECONDS=0
 CLOUDBENCH_CLONE_LOOKUP_SECONDS=0
 CLOUDBENCH_CLONE_MAX_ATTEMPTS=3
 {timeout_fn}
+fleet_machines_json() {{ FLY machines list -a "$APP" --json; }}
 {resolver}
 {cloner}
 clone_machine_target "$LEDGER"
@@ -1652,3 +1658,347 @@ def test_fleet_provisions_clones_concurrently() -> None:
     # cleanup reaps the per-bench primary ledgers → no leak if killed mid-provision
     assert '"$FLEET_DIR"/*/primary.ids' in fleet
     assert '"$FLEET_DIR"/*/primary.names' in fleet
+
+
+def test_reap_machine_destroys_the_clones_forked_volume(tmp_path: Path) -> None:
+    """`flyctl machine destroy` never destroys the clone's forked volume — it
+    leaks and bills forever (observed: 42 x 20GB in one day). reap_machine must
+    resolve the volume BEFORE the machine disappears and destroy it after,
+    while never touching the warm source's volume."""
+    fleet = FLEET_SCRIPT.read_text()
+    helpers = "".join(
+        _extract_fleet_function(fleet, sig)
+        for sig in ("machine_volume_id() {", "reap_volume() {", "reap_machine() {")
+    )
+    calls = tmp_path / "calls"
+
+    script = f"""set -uo pipefail
+APP=bench-app
+WARM_ID=warm-1
+WARM_VOLUME_ID=vol_warm
+export CALLS_FILE="$CALLS_FILE"
+FLY() {{
+  echo "$*" >> "$CALLS_FILE"
+  case "$1 $2" in
+    "machines list")
+      # clone-1 exists (with its volume) until it has been destroyed once
+      if grep -q "machine destroy" "$CALLS_FILE"; then echo "[]"; else
+        printf '[{{"id":"clone-1","config":{{"mounts":[{{"volume":"vol_clone"}}]}}}}]\\n'
+      fi ;;
+    "machine destroy") return 0 ;;
+    "volumes destroy") return 0 ;;
+    "volumes list") echo "[]" ;;
+  esac
+  return 0
+}}
+{helpers}
+reap_machine clone-1
+echo "reap_machine_exit=$?"
+reap_volume vol_warm && echo "warm_guard=missing" || echo "warm_guard=held"
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={"CALLS_FILE": str(calls)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    log = calls.read_text()
+    assert "machine destroy --force clone-1" in log
+    assert "volumes destroy vol_clone" in log, "forked volume must be reaped with its machine"
+    # the volume was resolved BEFORE the destroy (list precedes destroy)
+    assert log.index("machines list") < log.index("machine destroy")
+    assert "reap_machine_exit=0" in result.stdout
+    # warm volume is never destroyable through the reap path
+    assert "warm_guard=held" in result.stdout
+    assert "volumes destroy vol_warm" not in log
+
+
+def test_orphan_volume_sweep_reaps_only_aged_unattached_clone_volumes(tmp_path: Path) -> None:
+    """The fleet-start sweep self-heals volumes leaked by killed runs. It must
+    destroy ONLY unattached cloudbench_data volumes older than the grace period
+    — never attached ones, other apps' volume names, fresh in-flight forks
+    (concurrent controller create->attach window), or the warm source volume."""
+    fleet = FLEET_SCRIPT.read_text()
+    helpers = "".join(
+        _extract_fleet_function(fleet, sig)
+        for sig in ("reap_volume() {", "sweep_orphaned_volumes() {")
+    )
+    calls = tmp_path / "calls"
+
+    script = f"""set -uo pipefail
+APP=bench-app
+VOLUME_NAME=cloudbench_data
+WARM_VOLUME_ID=vol_warm
+CLOUDBENCH_VOLUME_ORPHAN_GRACE_SECONDS=3600
+export CALLS_FILE="$CALLS_FILE"
+FLY() {{
+  echo "$*" >> "$CALLS_FILE"
+  case "$1 $2" in
+    "volumes list")
+      python3 - <<'PYJSON'
+import json
+from datetime import datetime, timedelta, timezone
+now = datetime.now(timezone.utc)
+iso = lambda dt: dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+print(json.dumps([
+  {{"id": "vol_old_orphan", "name": "cloudbench_data", "attached_machine_id": None,
+    "created_at": iso(now - timedelta(hours=2))}},
+  {{"id": "vol_fresh_fork", "name": "cloudbench_data", "attached_machine_id": None,
+    "created_at": iso(now - timedelta(minutes=5))}},
+  {{"id": "vol_attached", "name": "cloudbench_data", "attached_machine_id": "m1",
+    "created_at": iso(now - timedelta(hours=9))}},
+  {{"id": "vol_other_app", "name": "captest", "attached_machine_id": None,
+    "created_at": iso(now - timedelta(hours=9))}},
+  {{"id": "vol_warm", "name": "cloudbench_data", "attached_machine_id": None,
+    "created_at": iso(now - timedelta(hours=9))}},
+]))
+PYJSON
+      ;;
+    "volumes destroy") return 0 ;;
+  esac
+  return 0
+}}
+{helpers}
+sweep_orphaned_volumes
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={"CALLS_FILE": str(calls)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    log = calls.read_text()
+    assert "volumes destroy vol_old_orphan" in log
+    for protected in ("vol_fresh_fork", "vol_attached", "vol_other_app", "vol_warm"):
+        assert f"volumes destroy {protected}" not in log, f"{protected} must survive the sweep"
+    # the sweep runs at fleet start, wired in (not just defined)
+    assert "\nsweep_orphaned_volumes\n" in fleet
+
+
+def test_detach_reexec_survives_launcher_session_death(tmp_path: Path) -> None:
+    """cloudbench_detach_reexec must re-exec the command in its OWN session
+    (fork -> setsid -> exec): a fleet controller otherwise dies with the
+    launching terminal/agent session's process group (observed: a 28-machine
+    fleet torn down mid-run by launcher exit). Verified functionally: the
+    detached child reports a different session id than the launcher and keeps
+    running after the launcher is gone."""
+    env_lib = ENV_HELPER_SCRIPT.read_text()
+    start = env_lib.index("cloudbench_detach_reexec() {")
+    end = env_lib.index("\nPY\n}", start) + len("\nPY\n}")
+    helper = env_lib[start:end]
+    log = tmp_path / "detached.log"
+    sid_file = tmp_path / "sids"
+
+    launcher = f"""set -uo pipefail
+{helper}
+sid() {{ python3 -c 'import os; print(os.getsid(0))'; }}
+echo "launcher_sid=$(sid)" >> "$SID_FILE"
+cloudbench_detach_reexec "$LOG" bash -c \
+  'echo "child_sid=$(python3 -c "import os; print(os.getsid(0))")" >> "$SID_FILE"; sleep 2; echo survived >> "$SID_FILE"'
+"""
+    result = subprocess.run(
+        ["bash", "-c", launcher],
+        env={"LOG": str(log), "SID_FILE": str(sid_file), "PATH": os.environ["PATH"]},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    # launcher has fully exited; the detached child must still complete
+    deadline = time.time() + 10
+    while time.time() < deadline and "survived" not in sid_file.read_text():
+        time.sleep(0.2)
+    content = sid_file.read_text()
+    assert "survived" in content, f"detached child died with the launcher: {content!r}"
+    sids = dict(line.split("=") for line in content.splitlines() if "=" in line)
+    assert sids["launcher_sid"] != sids["child_sid"], "child must run in its OWN session"
+    # the fleet wires --detach before any lock/machine acquisition
+    fleet = FLEET_SCRIPT.read_text()
+    assert "--detach)" in fleet
+    assert fleet.index("cloudbench_detach_reexec") < fleet.index("cloudbench_controller_lock_acquire"), (
+        "detach must happen before the controller lock so the surviving process owns it"
+    )
+
+
+def test_read_pollers_share_one_machines_snapshot(tmp_path: Path) -> None:
+    """28 autoscalers + clone resolvers each running their own `flyctl machines
+    list` was ~28x redundant API load per interval — the source of
+    resource_exhausted throttling at fleet width. Read-only pollers must consume
+    the controller-owned snapshot (fleet_machines_json/fleet_volumes_json);
+    mutation-verification paths (reap, pool claims) must stay live for
+    post-write freshness."""
+    fleet = FLEET_SCRIPT.read_text()
+
+    # the snapshot loop exists, starts before Phase 1, and is reaped in cleanup
+    assert "machines_snapshot_loop() {" in fleet
+    assert "machines_snapshot_loop & SNAPSHOT_LOOP_PID=$!" in fleet
+    assert 'kill "$SNAPSHOT_LOOP_PID"' in fleet
+    assert fleet.index("machines_snapshot_loop & SNAPSHOT_LOOP_PID") < fleet.index(
+        "# ── Phase 1:"
+    )
+    # backoff on API failure lives in the loop (single caller = single backoff)
+    loop = _extract_fleet_function(fleet, "machines_snapshot_loop() {")
+    assert "backoff" in loop
+
+    # read-only pollers consume the shared snapshot
+    for fn_sig in ("machine_id_for_clone_name() {", "_machine_priv_ip() {", "machine_storage_ready() {"):
+        body = _extract_fleet_function(fleet, fn_sig)
+        assert "FLY machines list" not in body, f"{fn_sig} must read the shared snapshot"
+        assert "fleet_machines_json" in body
+    ready = _extract_fleet_function(fleet, "machine_storage_ready() {")
+    assert "FLY volumes list" not in ready and "fleet_volumes_json" in ready
+    # the autoscaler liveness check reads the snapshot, not machine status
+    assert 'while fleet_machines_json | grep -q "\\"$cid\\""' in fleet
+
+    # mutation-verification paths stay LIVE (a 5s-stale snapshot would make
+    # reap retry against ghosts and claims race)
+    for fn_sig in ("reap_machine() {", "pool_machine_state() {"):
+        body = _extract_fleet_function(fleet, fn_sig)
+        assert "FLY machines list" in body, f"{fn_sig} must verify against live state"
+
+    # fleet_machines_json: functional — serves fresh snapshot, falls back live
+    helpers = "".join(
+        _extract_fleet_function(fleet, sig)
+        for sig in ("_fresh_snapshot_or() {", "fleet_machines_json() {")
+    )
+    snap = tmp_path / "machines.json"
+    snap.write_text('[{"id":"from-snapshot"}]\n')
+    script = f"""set -uo pipefail
+APP=bench-app
+SNAPSHOT_POLL=5
+MACHINES_SNAPSHOT="$SNAP"
+FLY() {{ echo '[{{"id":"from-live"}}]'; }}
+{helpers}
+fleet_machines_json
+touch -t 202001010000 "$SNAP"   # stale → must fall back to live
+fleet_machines_json
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={"SNAP": str(snap), "PATH": os.environ["PATH"]},
+        text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.strip().splitlines()
+    assert lines[0] == '[{"id":"from-snapshot"}]', lines
+    assert lines[1] == '[{"id":"from-live"}]', lines
+
+
+def _preflight_harness(tmp_path: Path, *, state_line: str | None, dirty: bool,
+                       autorefresh: str, snap_epoch: int) -> tuple:
+    """Run warm_deps_preflight with stubbed FLY/git/refresh; returns (result, calls)."""
+    fleet = FLEET_SCRIPT.read_text()
+    helpers = "".join(
+        _extract_fleet_function(fleet, sig)
+        for sig in ("snapshot_created_epoch() {", "warm_deps_preflight() {")
+    )
+    root = tmp_path / "root"
+    (root / "scripts").mkdir(parents=True)
+    fake_cloud = root / "scripts" / "run-bench-cloud"
+    fake_cloud.write_text('#!/usr/bin/env bash\necho "refresh-deps $*" >> "$CALLS_FILE"\nexit 0\n')
+    fake_cloud.chmod(0o755)
+    (root / "scripts" / "cloudbench-select-snapshot.py").write_text('print("snap-new")\n')
+    common = tmp_path / "common"
+    common.mkdir()
+    if state_line is not None:
+        (common / "cloudbench-warm-deps.fp").write_text(state_line + "\n")
+    calls = tmp_path / "calls"
+    calls.write_text("")
+
+    script = f"""set -uo pipefail
+APP=bench-app
+VOL_ID=vol_warm
+SNAP_ID=snap-current
+BENCH_REF=abc123
+BENCHES=(a b c)
+ROOT_DIR="$ROOT"
+GIT_COMMON_DIR="$COMMON"
+CLOUDBENCH_WARM_DEPS_AUTOREFRESH={autorefresh}
+export CALLS_FILE="$CALLS_FILE"
+FLY() {{
+  echo '[{{"id":"snap-current","created_at":"{__import__("datetime").datetime.fromtimestamp(snap_epoch, __import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}","status":"created","size":9}}]'
+}}
+cloudbench_node_dependency_fingerprint() {{ echo NODEFP; }}
+cloudbench_manifest_fingerprint() {{ echo PYFP; }}
+CLOUDBENCH_PYTHON_MANIFESTS=(agents/requirements.txt)
+git() {{ [ "{int(dirty)}" = "1" ] && return 1 || return 0; }}
+{helpers}
+warm_deps_preflight
+echo "SNAP_AFTER=$SNAP_ID"
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={"ROOT": str(root), "COMMON": str(common), "CALLS_FILE": str(calls),
+             "PATH": os.environ["PATH"]},
+        text=True, capture_output=True, check=False,
+    )
+    return result, calls
+
+
+def test_warm_deps_preflight_fast_path_and_central_heal(tmp_path: Path) -> None:
+    """Stale warm-snapshot dep trees made EVERY clone pay a multi-minute rsync
+    (the fleet's dominant bring-up cost). The preflight must (a) prove
+    freshness from the shared state file and skip healing, (b) heal centrally
+    ONCE via --refresh-deps when the state is absent/stale, and (c) never heal
+    when manifests are dirty vs HEAD (uncommitted deps can't be healed
+    centrally). It must never block the run on failure."""
+    # (a) matching state + fresh snapshot → fast path, no refresh
+    result, calls = _preflight_harness(
+        tmp_path / "a", state_line="NODEFP PYFP 1000 snap-current", dirty=False,
+        autorefresh="1", snap_epoch=2000)
+    assert result.returncode == 0, result.stderr
+    assert "fast bring-up" in result.stdout
+    assert calls.read_text() == ""
+    assert "SNAP_AFTER=snap-current" in result.stdout
+
+    # (b) no state → central heal once, snapshot re-selected
+    result, calls = _preflight_harness(
+        tmp_path / "b", state_line=None, dirty=False, autorefresh="1", snap_epoch=2000)
+    assert result.returncode == 0, result.stderr
+    assert "refresh-deps --refresh-deps --ref abc123" in calls.read_text()
+    assert "SNAP_AFTER=snap-new" in result.stdout
+
+    # (c) dirty manifests → warn, no heal, run continues
+    result, calls = _preflight_harness(
+        tmp_path / "c", state_line=None, dirty=True, autorefresh="1", snap_epoch=2000)
+    assert result.returncode == 0, result.stderr
+    assert "DIRTY" in result.stdout + result.stderr
+    assert calls.read_text() == ""
+
+    # (d) autorefresh off → actionable warning, no heal
+    result, calls = _preflight_harness(
+        tmp_path / "d", state_line=None, dirty=False, autorefresh="0", snap_epoch=2000)
+    assert result.returncode == 0, result.stderr
+    assert "--refresh-deps" in result.stdout + result.stderr
+    assert calls.read_text() == ""
+
+
+def test_refresh_deps_mode_contract() -> None:
+    """--refresh-deps must sync the ref, run the marker-gated dep sync, STOP the
+    machine before snapshotting (quiesced snapshot), wait boundedly for a fresh
+    complete snapshot, and record the shared freshness state file."""
+    cloud = CLOUD_SCRIPT.read_text()
+    start = cloud.index('if [ "$MODE" = "refresh-deps" ]; then')
+    end = cloud.index('# MODE: --refresh-wmh', start)
+    mode = cloud[start:end]
+    assert "cloudbench-sync-deps.sh' /app" in mode
+    assert "::DEPS-REFRESH-DONE::" in mode
+    # stop precedes the snapshot cut
+    assert mode.index('stop_machine "$mid"') < mode.index("volumes snapshots create")
+    # bounded wait for a COMPLETE fresh snapshot
+    assert "for _ in $(seq 1 90)" in mode
+    # shared freshness state recorded for fleet preflights
+    assert 'cloudbench-warm-deps.fp' in mode
+    assert "cloudbench_node_dependency_fingerprint" in mode
+    assert "cloudbench_manifest_fingerprint" in mode
+    # flag is wired
+    assert '--refresh-deps)   MODE="refresh-deps"' in cloud
+    # the fleet preflight exists and runs before cloning begins
+    fleet = FLEET_SCRIPT.read_text()
+    assert fleet.index("warm_deps_preflight\n") < fleet.index("# ── Phase 1:")

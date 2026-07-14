@@ -10,28 +10,6 @@ REPO_DIR="${2:?usage: cloudbench-sync-deps.sh <donor-dir> <repo-dir>}"
 # shellcheck source=lib/cloudbench-env.sh
 source "$REPO_DIR/scripts/lib/cloudbench-env.sh"
 
-fingerprint() {
-    local root="$1"
-    shift
-    python3 - "$root" "$@" <<'PY'
-import hashlib
-import pathlib
-import sys
-
-root = pathlib.Path(sys.argv[1])
-digest = hashlib.sha256()
-for relative in sys.argv[2:]:
-    path = root / relative
-    if not path.is_file():
-        raise SystemExit(f"missing dependency manifest: {path}")
-    digest.update(relative.encode())
-    digest.update(b"\0")
-    digest.update(path.read_bytes())
-    digest.update(b"\0")
-print(digest.hexdigest())
-PY
-}
-
 sync_tree() {
     local label="$1" donor_tree="$2" repo_tree="$3" expected="$4"
     local marker="$repo_tree/.cloudbench-deps-fingerprint"
@@ -99,13 +77,12 @@ if [ "$installed_node" != "$repo_node" ]; then
     fi
 fi
 
-PYTHON_MANIFESTS=(agents/requirements.txt)
-repo_python="$(fingerprint "$REPO_DIR" "${PYTHON_MANIFESTS[@]}")"
+repo_python="$(cloudbench_manifest_fingerprint "$REPO_DIR" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}")"
 python_marker="$REPO_DIR/agents/venv/.cloudbench-deps-fingerprint"
 installed_python=""
 [ -f "$python_marker" ] && installed_python="$(cat "$python_marker" 2>/dev/null || true)"
 if [ "$installed_python" != "$repo_python" ]; then
-    donor_python="$(fingerprint "$DEPS_DIR" "${PYTHON_MANIFESTS[@]}")"
+    donor_python="$(cloudbench_manifest_fingerprint "$DEPS_DIR" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}")"
     if [ "$donor_python" != "$repo_python" ]; then
         echo "[cloudbench] FATAL: warm image/volume Python dependencies do not match the checked-out ref" >&2
         echo "[cloudbench]        rebuild the image or refresh the warm volume before running benchmarks" >&2

@@ -133,6 +133,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --setup)          MODE="setup"; shift ;;
         --refresh-wmh)    MODE="refresh-wmh"; shift ;;
+        --refresh-deps)   MODE="refresh-deps"; shift ;;
         --refresh-secrets) MODE="refresh-secrets"; shift ;;
         --verify-secrets) MODE="verify-secrets"; shift ;;   # read-only preflight (concurrency-safe)
         --destroy)        MODE="destroy"; shift ;;
@@ -1026,6 +1027,112 @@ echo 'clone/fetch complete'"
     echo "✅ Setup complete."
     echo "   Next (one-time, builds the cached WMH model):  bash scripts/run-bench-cloud --refresh-wmh"
     echo "   Then per run:                                  bash scripts/run-bench-cloud <task> --simulate"
+    exit 0
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+# MODE: --refresh-deps — sync the warm VOLUME's baked dependency trees to the
+# current ref and cut a fresh snapshot. Fleet clones fork the warm snapshot;
+# when its node_modules/venv trees are stale vs the ref's manifests, EVERY
+# clone pays the multi-minute rsync refresh on bring-up (the fleet's dominant
+# cost). Refresh centrally ONCE here instead; clones then no-op their dep sync.
+# ═════════════════════════════════════════════════════════════════════════════
+if [ "$MODE" = "refresh-deps" ]; then
+    echo "═══ run-bench-cloud --refresh-deps (ref $BENCH_REF) ═══"
+    ensure_app
+    cleanup_refresh_deps() {
+        stop_machine "${mid:-}"
+        release_app_environment_lock
+    }
+    trap cleanup_refresh_deps EXIT
+    trap 'cleanup_refresh_deps; exit 130' INT
+    trap 'cleanup_refresh_deps; exit 143' TERM
+    CLOUDBENCH_HOLD_APP_ENV_LOCK=1
+    acquire_app_environment_lock || exit 1
+
+    mid="$(resolve_machine_id)"
+    [ -z "$mid" ] && { echo "❌ No persistent machine — run 'run-bench-cloud --setup' first."; exit 1; }
+    write_state "$mid"
+
+    start_machine "$mid"
+    wait_for_ssh "$mid"
+
+    # Sync the repo to the ref whose manifests the trees must match (auth via
+    # the box-side GITHUB_TOKEN secret through git http.extraheader).
+    echo "🔄 git-syncing $REMOTE_REPO → $BENCH_REF ..."
+    SYNC_CMD="set -e
+AUTH_HDR=''
+[ -n \"\${GITHUB_TOKEN:-}\" ] && AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GITHUB_TOKEN\" | base64 | tr -d '\n')\"
+git -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin '$BENCH_REF' || git -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin
+git -C '$REMOTE_REPO' checkout -f '$BENCH_REF' 2>/dev/null || git -C '$REMOTE_REPO' checkout -f FETCH_HEAD
+git -C '$REMOTE_REPO' reset --hard
+chown -R rose:rose '$REMOTE_REPO' 2>/dev/null || true
+echo checkout \$(git -C '$REMOTE_REPO' rev-parse --short HEAD)"
+    ssh_exec "$mid" "$SYNC_CMD" 2>&1 | grep -av '^Connecting to' | sed 's/^/   /' || true
+
+    echo "📦 syncing baked dependency trees /app → $REMOTE_REPO (marker-gated) ..."
+    DEPS_CMD="set -e
+bash '$REMOTE_REPO/scripts/cloudbench-sync-deps.sh' /app '$REMOTE_REPO'
+chown -R rose:rose '$REMOTE_REPO/node_modules' '$REMOTE_REPO/back-end/node_modules' '$REMOTE_REPO/agents/venv' 2>/dev/null || true
+echo '::DEPS-REFRESH-DONE::'"
+    DEPS_LOG="$(mktemp)"
+    ssh_exec "$mid" "$DEPS_CMD" 2>&1 | grep -av '^Connecting to' | tee "$DEPS_LOG" | sed 's/^/   /'
+    if ! grep -q '::DEPS-REFRESH-DONE::' "$DEPS_LOG" 2>/dev/null; then
+        rm -f "$DEPS_LOG"
+        echo "❌ dependency refresh did not report completion (see output above)."
+        exit 1
+    fi
+    rm -f "$DEPS_LOG"
+
+    # Stop before snapshotting so the snapshot is a quiesced, consistent image.
+    stop_machine "$mid"
+    mid=""
+
+    VOL_ID="$(FLY machines list -a "$APP" --json 2>/dev/null | MN="$MACHINE_NAME" python3 -c '
+import json, os, sys
+for m in json.load(sys.stdin) or []:
+    if m.get("name") == os.environ["MN"]:
+        mounts = m.get("config", {}).get("mounts") or []
+        if mounts: print(mounts[0].get("volume", ""))
+        break
+')"
+    [ -n "$VOL_ID" ] || { echo "❌ could not resolve the warm volume id"; exit 1; }
+
+    SNAP_START_EPOCH="$(date +%s)"
+    echo "🧊 cutting a fresh snapshot of $VOL_ID (clones fork the newest complete snapshot) ..."
+    FLY volumes snapshots create "$VOL_ID" -a "$APP" 2>&1 | sed 's/^/   /' || true
+    NEW_SNAP=""
+    for _ in $(seq 1 90); do
+        NEW_SNAP="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null | \
+            SINCE="$SNAP_START_EPOCH" python3 -c '
+import json, os, sys
+from datetime import datetime, timezone
+try: snaps = json.load(sys.stdin) or []
+except Exception: snaps = []
+since = int(os.environ["SINCE"])
+def epoch(s):
+    try: return int(datetime.fromisoformat(str(s.get("created_at","")).replace("Z","+00:00")).timestamp())
+    except ValueError: return 0
+fresh = [s for s in snaps
+         if str(s.get("status") or "").lower() in {"created","complete","completed","ready"}
+         and int(s.get("size") or 0) > 0 and s.get("id") and epoch(s) >= since - 60]
+fresh.sort(key=epoch, reverse=True)
+print(fresh[0]["id"] if fresh else "")
+' 2>/dev/null || true)"
+        [ -n "$NEW_SNAP" ] && break
+        sleep 10
+    done
+    [ -n "$NEW_SNAP" ] || { echo "❌ fresh snapshot did not complete in time"; exit 1; }
+
+    # Record what the snapshot now carries so fleet preflights can prove
+    # freshness without mounting anything. Shared across sibling workspaces
+    # via the git-common dir (same pattern as pool claims).
+    NODE_FP="$(cloudbench_node_dependency_fingerprint "$ROOT_DIR")"
+    PY_FP="$(cloudbench_manifest_fingerprint "$ROOT_DIR" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}")"
+    printf '%s %s %s %s\n' "$NODE_FP" "$PY_FP" "$SNAP_START_EPOCH" "$NEW_SNAP" \
+        > "$GIT_COMMON_DIR/cloudbench-warm-deps.fp"
+    echo "✅ warm volume deps refreshed; fresh snapshot: $NEW_SNAP"
+    echo "   state: $GIT_COMMON_DIR/cloudbench-warm-deps.fp"
     exit 0
 fi
 

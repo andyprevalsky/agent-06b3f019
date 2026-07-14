@@ -86,8 +86,11 @@ POOL_IDS_FILE="$ROOT_DIR/.context/cloudbench-pool.ids"   # persistent pool machi
 GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null || echo "$ROOT_DIR/.git")"
 case "$GIT_COMMON_DIR" in /*) ;; *) GIT_COMMON_DIR="$ROOT_DIR/$GIT_COMMON_DIR" ;; esac
 POOL_CLAIMS_DIR="$GIT_COMMON_DIR/cloudbench-pool-claims"
+ORIG_ARGS=("$@")
+DETACH="0"
 while [ $# -gt 0 ]; do
     case "$1" in
+        --detach)         DETACH="1"; shift ;;
         --sim-on)         SIM_ON_CSV="${2:-}"; shift 2 ;;
         --ref)            BENCH_REF="${2:-}"; shift 2 ;;
         --dash-base)      DASH_BASE="${2:-}"; shift 2 ;;
@@ -106,6 +109,21 @@ done
 [ -n "$PROVISION_POOL" ] || true
 [ -n "$PROVISION_POOL" ] || [ "${#BENCHES[@]}" -ge 1 ] || { echo "usage: run-bench-fleet <bench> [<bench>...] [--sim-on a,b] [--ref X]  |  --provision-pool N" >&2; exit 2; }
 [ -z "$BENCH_REF" ] && BENCH_REF="$(git rev-parse HEAD 2>/dev/null || echo '')"
+
+# --detach: re-exec THIS invocation in its own session before acquiring any
+# lock or machine, so the controller (and its cleanup traps) survive the
+# launching terminal/agent session dying mid-run. The surviving process owns
+# the controller lock, the clones, and the teardown.
+if [ "$DETACH" = "1" ]; then
+    DETACH_ARGS=()
+    for a in "${ORIG_ARGS[@]}"; do [ "$a" = "--detach" ] || DETACH_ARGS+=("$a"); done
+    mkdir -p "$RUNS_ROOT"
+    DETACH_LOG="$RUNS_ROOT/detached-$RUN_ID.log"
+    cloudbench_detach_reexec "$DETACH_LOG" bash "${BASH_SOURCE[0]}" "${DETACH_ARGS[@]}"
+    echo "🛰️  fleet controller detached (own session; survives launcher exit)"
+    echo "    log: tail -f $DETACH_LOG"
+    exit 0
+fi
 
 # A synchronized child begins polling before the controller has finished
 # provisioning the remaining machines. Give the remote barrier the full
@@ -148,13 +166,59 @@ FLY_API_TOKEN="$(resolve_fly_token)"
 export FLY_API_TOKEN
 FLY() { flyctl "$@"; }
 
+# ── ONE shared machines snapshot for every read-only poller ─────────────────
+# 28 autoscalers + clone resolvers each running their own `flyctl machines
+# list` was ~28× redundant Fly API load per interval — the direct source of
+# resource_exhausted throttling at fleet width. A single controller-owned loop
+# refreshes $FLEET_DIR/machines.json atomically on one cadence (with backoff on
+# API failure, keeping the last good snapshot), and every read-only consumer
+# reads the snapshot. Mutating paths that need post-write freshness (reap
+# verification, pool claims) intentionally stay live.
+MACHINES_SNAPSHOT="$FLEET_DIR/machines.json"
+VOLUMES_SNAPSHOT="$FLEET_DIR/volumes.json"
+SNAPSHOT_POLL="${CLOUDBENCH_SNAPSHOT_POLL_SECONDS:-5}"
+machines_snapshot_loop() {
+    local tmp backoff=0 ok
+    while :; do
+        ok=1
+        tmp="$MACHINES_SNAPSHOT.tmp.$$"
+        if FLY machines list -a "$APP" --json > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+            mv "$tmp" "$MACHINES_SNAPSHOT"
+        else rm -f "$tmp"; ok=0; fi
+        tmp="$VOLUMES_SNAPSHOT.tmp.$$"
+        if FLY volumes list -a "$APP" --json > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+            mv "$tmp" "$VOLUMES_SNAPSHOT"
+        else rm -f "$tmp"; ok=0; fi
+        if [ "$ok" = 1 ]; then backoff=0; else
+            # rate-limited/transient API failure: back off (bounded) and keep
+            # serving the last good snapshot rather than hammering the API
+            backoff=$(( backoff < 30 ? backoff + SNAPSHOT_POLL : 30 ))
+        fi
+        sleep $(( SNAPSHOT_POLL + backoff + (RANDOM % 3) ))
+    done
+}
+_fresh_snapshot_or() {  # _fresh_snapshot_or <snapshot-file> <live-cmd...>
+    # Serve the shared snapshot when fresh; fall back to a live call when the
+    # loop hasn't started (early preflight) or died — readers never block on
+    # snapshot plumbing.
+    local f="$1" now mt; shift
+    if [ -f "$f" ]; then
+        now=$(date +%s)
+        mt=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)
+        if [ $(( now - mt )) -le $(( SNAPSHOT_POLL * 4 )) ]; then cat "$f"; return 0; fi
+    fi
+    "$@" 2>/dev/null
+}
+fleet_machines_json() { _fresh_snapshot_or "$MACHINES_SNAPSHOT" FLY machines list -a "$APP" --json; }
+fleet_volumes_json()  { _fresh_snapshot_or "$VOLUMES_SNAPSHOT" FLY volumes list -a "$APP" --json; }
+
 # A clone ID is allocated before its snapshot-backed volume becomes mountable.
 # Keep every clone start behind the same storage lifecycle contract as the
 # per-benchmark child runner.
 machine_storage_ready() {  # machine_storage_ready <id>
     local id="$1" machines volumes
-    machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 1
-    volumes="$(FLY volumes list -a "$APP" --json 2>/dev/null)" || return 1
+    machines="$(fleet_machines_json)" || return 1
+    volumes="$(fleet_volumes_json)" || return 1
     python3 "$MACHINE_READINESS_SCRIPT" "$id" \
         <(printf '%s' "$machines") <(printf '%s' "$volumes") >/dev/null
 }
@@ -207,16 +271,55 @@ print_code_provenance() {
 # Destroy a machine RELIABLY. A clone still in Fly's 'created'/provisioning state
 # no-ops a `--force` destroy (and then auto-starts later → a money-burning
 # zombie), so retry across the transition; last resort, stop then destroy.
+machine_volume_id() {  # machine_volume_id <machine_id> → its mounted volume id (or empty)
+    FLY machines list -a "$APP" --json 2>/dev/null | MID="$1" python3 -c '
+import json, os, sys
+try: machines = json.load(sys.stdin) or []
+except Exception: machines = []
+for m in machines:
+    if m.get("id") == os.environ["MID"]:
+        mounts = m.get("config", {}).get("mounts") or []
+        if mounts and mounts[0].get("volume"):
+            print(mounts[0]["volume"])
+        break
+' 2>/dev/null || true
+}
+
+reap_volume() {  # reap_volume <volume_id> — destroy a clone's forked volume
+    local vol="$1" i
+    [ -n "$vol" ] || return 0
+    if [ -n "${WARM_VOLUME_ID:-}" ] && [ "$vol" = "$WARM_VOLUME_ID" ]; then
+        echo "  ❌ refusing to destroy warm source volume $vol" >&2
+        return 1
+    fi
+    for i in 1 2 3; do
+        if FLY volumes destroy "$vol" -a "$APP" --yes >/dev/null 2>&1; then return 0; fi
+        # already gone? treat as reaped
+        FLY volumes list -a "$APP" --json 2>/dev/null | grep -q "\"$vol\"" || return 0
+        sleep 2
+    done
+    echo "  ⚠️ could not destroy volume $vol — it will bill until swept: flyctl volumes destroy $vol -a $APP" >&2
+    return 1
+}
+
 reap_machine() {  # reap_machine <id> — returns non-zero if the machine survived
-    local id="$1" i
+    local id="$1" i vol=""
     [ -n "$id" ] || return 0
     if [ -n "${WARM_ID:-}" ] && [ "$id" = "$WARM_ID" ]; then
         echo "  ❌ refusing to destroy warm source machine $id" >&2
         return 1
     fi
+    # `machine destroy` never destroys the clone's forked volume — it leaks and
+    # bills forever (a single day once leaked 42 × 20GB). Resolve the volume
+    # BEFORE the machine disappears; destroy it after the machine is confirmed
+    # gone.
+    vol="$(machine_volume_id "$id")"
     for i in 1 2 3 4 5; do
         FLY machine destroy --force "$id" -a "$APP" >/dev/null 2>&1 || true
-        FLY machines list -a "$APP" --json 2>/dev/null | grep -q "\"$id\"" || return 0
+        if ! FLY machines list -a "$APP" --json 2>/dev/null | grep -q "\"$id\""; then
+            reap_volume "$vol" || true
+            return 0
+        fi
         [ "$i" = 3 ] && FLY machine stop "$id" -a "$APP" >/dev/null 2>&1 || true
         sleep 3
     done
@@ -224,6 +327,7 @@ reap_machine() {  # reap_machine <id> — returns non-zero if the machine surviv
         echo "  ⚠️ could not destroy machine $id — check: flyctl machines list -a $APP" >&2
         return 1
     fi
+    reap_volume "$vol" || true
     return 0
 }
 
@@ -235,7 +339,7 @@ reap_machine() {  # reap_machine <id> — returns non-zero if the machine surviv
 machine_id_for_clone_name() {  # machine_id_for_clone_name <name> <absolute-seconds-deadline>
     local target_name="$1" deadline="$2" matches
     while :; do
-        matches="$(FLY machines list -a "$APP" --json 2>/dev/null \
+        matches="$(fleet_machines_json \
             | TARGET_NAME="$target_name" python3 -c '
 import json, os, sys
 try: machines = json.load(sys.stdin) or []
@@ -316,7 +420,7 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id];
             printf '%s\n' "$clone_out"
         } >> "$diagnostic_log"
 
-        deadline=$((SECONDS + ${CLOUDBENCH_CLONE_LOOKUP_SECONDS:-10}))
+        deadline=$((SECONDS + ${CLOUDBENCH_CLONE_LOOKUP_SECONDS:-20}))
         target_id="$(machine_id_for_clone_name "$target_name" "$deadline")" || target_id=""
         if [ -n "$target_id" ] && [ "$target_id" != "$source_id" ] && [ "$target_id" != "$WARM_ID" ]; then
             grep -Fxq "$target_id" "$ledger" 2>/dev/null || printf '%s\n' "$target_id" >> "$ledger"
@@ -479,6 +583,7 @@ cleanup() {
     trap - EXIT
     trap '' HUP INT TERM
     [ -n "${UNIFIED_AGG_PID:-}" ] && kill "$UNIFIED_AGG_PID" 2>/dev/null || true
+    [ -n "${SNAPSHOT_LOOP_PID:-}" ] && kill "$SNAPSHOT_LOOP_PID" 2>/dev/null || true
     # Do NOT kill the central hub (UNIFIED_DASH_PID): it is THE one persistent
     # dashboard — shared across every run, carrying the user's open tab, resolving
     # "open agent" from local run data long after teardown. The next fleet run
@@ -510,7 +615,7 @@ cleanup() {
         # loudly with the ids so a later sweep can retry.
         local failed_reaps=""
         failed_names=""
-        name_deadline=$((SECONDS + ${CLOUDBENCH_CLONE_LOOKUP_SECONDS:-10}))
+        name_deadline=$((SECONDS + ${CLOUDBENCH_CLONE_LOOKUP_SECONDS:-20}))
         for namef in "$FLEET_DIR"/*/primary.names "$FLEET_DIR"/*/worker-clones.names "$FLEET_DIR/owned-clones.names"; do
             [ -f "$namef" ] || continue
             while read -r clone_name; do
@@ -587,14 +692,53 @@ d=json.load(sys.stdin) or []
 mn=os.environ["MN"]
 for m in d:
     if m.get("name")==mn and m.get("id"):
-        print(m["id"], m.get("region") or ""); break
+        mounts=m.get("config",{}).get("mounts") or []
+        vol=mounts[0].get("volume","") if mounts else ""
+        print(m["id"], m.get("region") or "", vol); break
 ' 2>/dev/null || true)"
 WARM_ID="$(printf '%s' "$warm_pair" | awk '{print $1}')"
 warm_region="$(printf '%s' "$warm_pair" | awk '{print $2}')"
+WARM_VOLUME_ID="$(printf '%s' "$warm_pair" | awk '{print $3}')"
 [ -n "$WARM_ID" ] || { echo "❌ No warm machine '$MACHINE_NAME' in $APP — run: bash scripts/run-bench-cloud --setup" >&2; exit 1; }
 # Volume snapshots are region-scoped, so clones MUST land in the warm box's region.
 [ -n "$warm_region" ] && REGION="$warm_region"
 echo "🏭 warm source machine: $WARM_ID (region $REGION)"
+
+# ── Self-heal: sweep orphaned clone volumes ──────────────────────────────────
+# A killed run (session death, SIGKILL, crash) can destroy machines without
+# their forked volumes, or die before reaping anything — leaked volumes bill
+# forever (observed: 42 × 20GB in one day). Any UNATTACHED cloudbench_data
+# volume older than the grace period is definitively orphaned: live clones are
+# attached at creation, and the grace covers a concurrent controller's brief
+# create→attach window. Never touches the warm source volume.
+sweep_orphaned_volumes() {
+    local grace="${CLOUDBENCH_VOLUME_ORPHAN_GRACE_SECONDS:-3600}" swept=0 vid
+    while read -r vid; do
+        [ -n "$vid" ] || continue
+        echo "🧹 sweeping orphaned clone volume $vid"
+        reap_volume "$vid" && swept=$((swept + 1))
+    done < <(FLY volumes list -a "$APP" --json 2>/dev/null | \
+        GRACE="$grace" WARM_VOL="${WARM_VOLUME_ID:-}" VOL_NAME="$VOLUME_NAME" python3 -c '
+import json, os, sys
+from datetime import datetime, timezone
+try: vols = json.load(sys.stdin) or []
+except Exception: vols = []
+grace = int(os.environ["GRACE"]); now = datetime.now(timezone.utc)
+for v in vols:
+    if v.get("attached_machine_id"): continue
+    if v.get("name") != os.environ["VOL_NAME"]: continue
+    if v.get("id") == os.environ["WARM_VOL"]: continue
+    created = v.get("created_at") or ""
+    try:
+        age = (now - datetime.fromisoformat(created.replace("Z", "+00:00"))).total_seconds()
+    except ValueError:
+        continue
+    if age > grace: print(v["id"])
+' 2>/dev/null || true)
+    [ "$swept" -gt 0 ] && echo "✅ swept $swept orphaned volume(s)"
+    return 0
+}
+sweep_orphaned_volumes
 
 # Clones fork the warm volume from a completed snapshot. Fly reports incremental
 # stored size, not logical completeness, so a valid current snapshot can be much
@@ -615,6 +759,71 @@ if [ -z "$SNAP_ID" ]; then
     echo "   flyctl volume snapshots create $VOL_ID -a $APP   # then wait until STORED SIZE ≈ VOL SIZE" >&2
     exit 1
 fi
+# ── Preflight: will clones inherit up-to-date dep trees from this snapshot? ──
+# When the warm snapshot's node_modules/venv are stale vs the current ref's
+# manifests, EVERY clone pays a multi-minute rsync refresh on bring-up — the
+# fleet's dominant cost at width. --refresh-deps records what the snapshot
+# carries in a git-common state file (shared across sibling workspaces); heal
+# centrally ONCE when it drifts.
+snapshot_created_epoch() {  # snapshot_created_epoch <snap_id>
+    FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null | SID="$1" python3 -c '
+import json, os, sys
+from datetime import datetime
+try: snaps = json.load(sys.stdin) or []
+except Exception: snaps = []
+for s in snaps:
+    if s.get("id") == os.environ["SID"]:
+        try:
+            print(int(datetime.fromisoformat(str(s.get("created_at","")).replace("Z","+00:00")).timestamp()))
+        except ValueError:
+            print(0)
+        break
+' 2>/dev/null || true
+}
+warm_deps_preflight() {
+    local state="$GIT_COMMON_DIR/cloudbench-warm-deps.fp"
+    local node_fp py_fp snap_epoch s_node s_py s_epoch _rest new_snap
+    node_fp="$(cloudbench_node_dependency_fingerprint "$ROOT_DIR" 2>/dev/null || true)"
+    py_fp="$(cloudbench_manifest_fingerprint "$ROOT_DIR" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}" 2>/dev/null || true)"
+    if [ -z "$node_fp" ] || [ -z "$py_fp" ]; then
+        echo "⚠️  could not fingerprint dep manifests — skipping warm-deps preflight" >&2
+        return 0
+    fi
+    if [ -f "$state" ]; then
+        read -r s_node s_py s_epoch _rest < "$state" || true
+        snap_epoch="$(snapshot_created_epoch "$SNAP_ID")"
+        if [ "$s_node" = "$node_fp" ] && [ "$s_py" = "$py_fp" ] && \
+           [ "${snap_epoch:-0}" -ge $(( ${s_epoch:-0} - 60 )) ]; then
+            echo "✅ warm snapshot dep trees match the current ref (fast bring-up)"
+            return 0
+        fi
+    fi
+    # Uncommitted manifest edits can't be healed centrally (--refresh-deps syncs
+    # the committed ref) — warn and let the per-box sync pay the refresh.
+    if ! git -C "$ROOT_DIR" diff --quiet HEAD -- agents/requirements.txt \
+        '*package.json' '*package-lock.json' 2>/dev/null; then
+        echo "⚠️  dep manifests are DIRTY vs HEAD — clones will pay a per-box dep rsync (commit deps to heal centrally)" >&2
+        return 0
+    fi
+    if [ "${CLOUDBENCH_WARM_DEPS_AUTOREFRESH:-1}" != "1" ]; then
+        echo "⚠️  warm snapshot dep trees are STALE vs the current ref — every clone pays the node_modules+venv rsync." >&2
+        echo "    heal centrally: bash scripts/run-bench-cloud --refresh-deps --ref $BENCH_REF" >&2
+        return 0
+    fi
+    echo "♻️  warm snapshot dep trees unproven/stale → central refresh ONCE (instead of ×${#BENCHES[@]} per-clone rsyncs) ..."
+    if bash "$ROOT_DIR/scripts/run-bench-cloud" --refresh-deps --ref "$BENCH_REF" 2>&1 | sed 's/^/   /'; then
+        new_snap="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null | \
+            python3 "$ROOT_DIR/scripts/cloudbench-select-snapshot.py" 2>/dev/null || true)"
+        if [ -n "$new_snap" ]; then
+            SNAP_ID="$new_snap"
+            echo "✅ central refresh done — forking from fresh snapshot $SNAP_ID"
+            return 0
+        fi
+    fi
+    echo "⚠️  central dep refresh failed — continuing; clones will pay the per-box rsync" >&2
+    return 0
+}
+warm_deps_preflight
 echo "🧊 forking clones from complete snapshot: $SNAP_ID"
 
 # ── App-wide capacity guard (not a lock) ─────────────────────────────────────
@@ -661,7 +870,7 @@ if ! git -C "$ROOT_DIR" diff HEAD --quiet --binary 2>/dev/null; then
 fi
 
 _machine_priv_ip() {  # _machine_priv_ip <machine_id>
-    FLY machines list -a "$APP" --json 2>/dev/null | MID="$1" python3 -c '
+    fleet_machines_json | MID="$1" python3 -c '
 import json,os,sys
 try: d=json.load(sys.stdin) or []
 except Exception: d=[]
@@ -732,7 +941,7 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
     # Wait for the box /metrics to answer (stack up) before scaling.
     for _ in $(seq 1 60); do pip="$(_machine_priv_ip "$cid")"; [ -n "$pip" ] && break; sleep 5; done
     [ -n "$pip" ] || { echo "  ⚠️ [$bench] autoscaler: no primary IP; disabled" >&2; return 0; }
-    while FLY machine status "$cid" -a "$APP" >/dev/null 2>&1; do
+    while fleet_machines_json | grep -q "\"$cid\""; do
         local desired want cur; desired="$(_box_desired "$cid")"; [ -z "$desired" ] && { sleep "$AUTOSCALE_POLL"; continue; }
         want=$((desired - 1)); [ "$want" -lt 0 ] && want=0
         [ "$want" -gt $((AUTOSCALE_MAX - 1)) ] && want=$((AUTOSCALE_MAX - 1))
@@ -764,6 +973,7 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
 # ── Clone one machine per bench + launch its isolated run ────────────────────
 mkdir -p "$FLEET_DIR"
 : > "$CLAIMED_POOL_FILE"
+machines_snapshot_loop & SNAPSHOT_LOOP_PID=$!
 echo ""
 echo "═══ run-bench-fleet — ${#BENCHES[@]} bench(es), one isolated machine each ═══"
 # ── Phase 1: provision every bench's isolated machine CONCURRENTLY ───────────
