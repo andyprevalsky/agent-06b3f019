@@ -2052,3 +2052,45 @@ def test_controller_execs_from_a_script_snapshot(tmp_path: Path) -> None:
     assert "run-bench-fleet" in result.stdout
     # and the snapshot dir was actually created under our TMPDIR
     assert any(d.name.startswith("cloudbench-scripts.") for d in tmp_path.iterdir())
+
+
+def test_bring_up_report_attributes_time_to_named_steps(tmp_path: Path) -> None:
+    """Every bring-up second must be attributable to a named step: the driver
+    stamps `STEP <name>` boundaries and cloudbench-bring-up-report.py turns a
+    fleet run dir into per-step durations + p50/max + slowest-step callout."""
+    driver = DRIVER_SCRIPT.read_text()
+    # timestamped log + step marker helpers exist and phases are stamped
+    assert 'log() { echo "[cloudbench $(date -u +%H:%M:%S)] $*"; }' in driver
+    assert 'step() { log "STEP $*"; }' in driver
+    for name in ("git_sync", "dep_sync", "postgres", "stack_launch", "services_wait", "benchmark"):
+        assert f"\nstep {name}\n" in driver, f"driver missing STEP stamp: {name}"
+
+    run = tmp_path / "run"
+    (run / "bench-a").mkdir(parents=True)
+    (run / "bench-a" / "fleet-child.log").write_text(
+        "   | [cloudbench 10:00:00] STEP git_sync\n"
+        "   | [cloudbench 10:00:20] STEP dep_sync\n"
+        "   | [cloudbench 10:03:20] STEP postgres\n"
+        "   | [cloudbench 10:03:30] STEP stack_launch\n"
+        "   | [cloudbench 10:04:30] STEP services_wait\n"
+        "   | [cloudbench 10:05:00] STEP benchmark\n"
+    )
+    (run / "bench-b").mkdir(parents=True)
+    (run / "bench-b" / "fleet-child.log").write_text(
+        "   | [cloudbench 10:00:00] STEP git_sync\n"
+        "   | [cloudbench 10:00:10] STEP dep_sync\n"
+        "   | [cloudbench 10:00:15] STEP postgres\n"
+        "   | [cloudbench 10:00:25] STEP stack_launch\n"
+        "   | [cloudbench 10:01:25] STEP services_wait\n"
+        "   | [cloudbench 10:02:00] STEP benchmark\n"
+    )
+    result = subprocess.run(
+        ["python3", str(ROOT / "scripts" / "cloudbench-bring-up-report.py"), str(run)],
+        text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    out = result.stdout
+    assert "bench-a" in out and "bench-b" in out
+    # bench-a's dep_sync is 180s and must surface as the slowest step
+    assert "slowest step: dep_sync on bench-a (180s)" in out
+    assert "p50" in out and "max" in out

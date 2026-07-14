@@ -98,7 +98,10 @@ RESULT_BEGIN="::CLOUDBENCH-RESULT-BEGIN::$MARKER_SUFFIX"
 RESULT_END="::CLOUDBENCH-RESULT-END::$MARKER_SUFFIX"
 DONE_MARKER="::CLOUDBENCH-DONE::$MARKER_SUFFIX"
 
-log() { echo "[cloudbench] $*"; }
+log() { echo "[cloudbench $(date -u +%H:%M:%S)] $*"; }
+# Step markers: STEP <name> lines are machine-parseable timing boundaries for
+# scripts/cloudbench-bring-up-report.py — isolate each bring-up step's cost.
+step() { log "STEP $*"; }
 
 # ── Normalize the task list (comma OR space separated) into an array ────────
 # The controller may pass "a,b,c" or "a b c"; accept both.
@@ -180,6 +183,7 @@ if [ -n "$CLOUDBENCH_START_BARRIER" ]; then
 fi
 
 # ── 1. git-sync the branch/sha under test ───────────────────────────────────
+step git_sync
 # The volume checkout's origin URL already embeds a working repo token (set at
 # box provisioning), so a plain fetch/checkout/reset needs NO token handling here.
 if [ -n "$REF" ]; then
@@ -219,6 +223,7 @@ elif [ -n "${LOCAL_PATCH_B64:-}" ]; then
 fi
 
 # ── 2. Decode injected secrets into the repo .env files the stack reads ─────
+step env_decode
 # Fly secrets are exposed as env vars in the machine init AND in ssh sessions.
 ENV_HELPER="$REPO_DIR/scripts/lib/cloudbench-env.sh"
 [ -f "$ENV_HELPER" ] || { log "FATAL: missing $ENV_HELPER"; finish 1; }
@@ -246,6 +251,7 @@ cloudbench_validate_browser_provider_contract \
     "${CLOUDBENCH_BROWSER_PROVIDER:-}" "${CLOUDBENCH_BROWSER_PROVIDER:-}" || finish 1
 
 # ── 3. Sync baked deps from the image into the volume checkout ──────────────
+step dep_sync
 # A persistent volume can outlive many donor images. Missing-only checks leave
 # old package trees behind after package-lock/requirements changes, so compare
 # fingerprints and refresh atomically from the image. A donor/ref mismatch is a
@@ -269,6 +275,7 @@ chown "$APP_USER:$APP_USER" "$REPO_DIR/.cloud-env"
 WMH_PORT=$((BASE_PORT + 6))   # run.sh: WMH_PORT = base + 6 (3001 → 3007).
 
 # ── 5. System Postgres (no Docker on Fly) ──────────────────────────────────
+step postgres
 log "ensuring system Postgres cluster (victoria on :5432)..."
 PG_VER="$(pg_lsclusters -h 2>/dev/null | head -1 | awk '{print $1}')"
 if [ -z "$PG_VER" ]; then
@@ -337,6 +344,7 @@ DASH_PID=$!
 log "dashboard static server pid=$DASH_PID on :$BENCH_DASHPORT (root $CONTEXT_DIR)"
 
 # ── 8. Launch the stack (run.sh --benchmark) — SERVE the cached WMH ─────────
+step stack_launch
 # WMH_BUILD_DIR points run.sh at the cached model on the volume;
 # BENCHMARK_SKIP_WMH_DELTA=1 makes run.sh SERVE it verbatim with NO R2 read / delta
 # refresh / rebuild. FLY_APP_NAME="" disables the worker's prod-style fleet
@@ -454,6 +462,7 @@ cleanup_stack() {
 trap 'cleanup_stack' EXIT
 
 # ── 9. Wait for services.json (status=running) + WMH health ────────────────
+step services_wait
 MANIFEST="$CONTEXT_DIR/services.json"
 BACKEND_PORT="$BASE_PORT"
 HEALTH_PORT=$((BASE_PORT + 2))
@@ -526,6 +535,7 @@ if [ -n "$CLOUDBENCH_START_BARRIER" ]; then
 fi
 
 # ── 10. Run the benchmark ──────────────────────────────────────────────────
+step benchmark
 if [ "${#BENCH_TASK_LIST[@]}" -eq 0 ]; then
     log "FATAL: BENCH_TASKS is empty"
     finish 1
