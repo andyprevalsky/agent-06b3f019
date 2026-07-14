@@ -685,9 +685,18 @@ def stop_services(process: subprocess.Popen | None = None, *, stack: ServiceStac
 
 def apply_manifest_environment(manifest: dict) -> None:
     urls = manifest.get("urls") if isinstance(manifest, dict) else {}
-    database_url = manifest_database_url(manifest)
-    os.environ["DATABASE_URL"] = f"{database_url}?connection_limit=50&pool_timeout=30"
-    os.environ["DIRECT_URL"] = database_url
+    ports = manifest.get("ports") if isinstance(manifest, dict) else {}
+    database = manifest.get("database") if isinstance(manifest, dict) else {}
+    # Real benchmark manifests always carry a DB port; partial manifests (e.g. the
+    # WMH-only gated-off path) do not — tolerate their absence instead of raising.
+    has_db_port = bool(
+        (isinstance(database, dict) and (database.get("port") or database.get("use_system_postgres")))
+        or (isinstance(ports, dict) and ports.get("local_db"))
+    )
+    if has_db_port:
+        database_url = manifest_database_url(manifest)
+        os.environ["DATABASE_URL"] = f"{database_url}?connection_limit=50&pool_timeout=30"
+        os.environ["DIRECT_URL"] = database_url
     task_queue = manifest.get("temporal_task_queue")
     if task_queue:
         os.environ["TEMPORAL_TASK_QUEUE"] = str(task_queue)
