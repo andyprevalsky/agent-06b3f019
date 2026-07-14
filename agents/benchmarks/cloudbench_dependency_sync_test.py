@@ -2094,3 +2094,47 @@ def test_bring_up_report_attributes_time_to_named_steps(tmp_path: Path) -> None:
     # bench-a's dep_sync is 180s and must surface as the slowest step
     assert "slowest step: dep_sync on bench-a (180s)" in out
     assert "p50" in out and "max" in out
+
+
+def test_run_is_visible_in_hub_from_fire_time(tmp_path: Path) -> None:
+    """A fired run must appear in the central hub IMMEDIATELY with an explicit
+    starting phase — a run waiting on a snapshot/heal/provisioning was invisible
+    until Phase 2 wrote its first real report card. The startup card is written
+    and the hub started right after the controller lock, before any
+    preflight/heal/machine work, and the phase updates at each stage."""
+    fleet = FLEET_SCRIPT.read_text()
+    lock_at = fleet.index('if ! cloudbench_controller_lock_acquire "$LOCK_DIR"')
+    card_at = fleet.index('write_startup_card "controller starting"')
+    hub_at = fleet.index("start_central_hub\n")
+    verify_at = fleet.index('Verifying the shared benchmark app environment')
+    fanout_at = fleet.index("# ── Phase 1:")
+    assert lock_at < card_at < verify_at, "startup card must precede preflight"
+    assert lock_at < hub_at < verify_at, "hub must serve before preflight"
+    assert card_at < fanout_at and hub_at < fanout_at
+    # phase updates at each controller stage
+    for phase in ("verifying environment", "healing warm snapshot", "provisioning"):
+        assert f'write_startup_card "{phase}' in fleet, f"missing phase update: {phase}"
+    # early + late hub starts must stay the SAME server invocation (no drift)
+    assert fleet.count('agents/benchmarks/agent_link_server.py') == 2
+
+    # functional: the card is a valid hub-readable starting card
+    helper_start = fleet.index("write_startup_card() {")
+    helper = fleet[helper_start:fleet.index("\nPY\n}", helper_start) + len("\nPY\n}")]
+    result = subprocess.run(
+        ["bash", "-c", f'''set -uo pipefail
+FLEET_DIR="$FD"
+RUN_ID=test-run
+BENCHES=(alpha beta)
+{helper}
+write_startup_card "healing warm snapshot (dep trees)"
+'''],
+        env={"FD": str(tmp_path), "PATH": os.environ["PATH"]},
+        text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    card = json.loads((tmp_path / "_batch" / "report-card.json").read_text())
+    assert card["status"] == "starting"
+    assert "healing warm snapshot" in card["phase"]
+    assert card["summary"]["total"] == 2
+    assert [t["name"] for t in card["tasks"]] == ["alpha", "beta"]
+    assert all(t["status"] == "starting" for t in card["tasks"])

@@ -584,6 +584,48 @@ if ! cloudbench_controller_lock_acquire "$LOCK_DIR"; then
     exit 1
 fi
 
+# ── Fire-time visibility: the run card exists from the moment the fleet is
+# fired (status=starting + explicit phase), and the central hub is serving it
+# BEFORE any preflight/heal/provisioning — a run waiting on a snapshot or heal
+# is visibly "starting", never invisible. The live aggregator overwrites this
+# card once real per-bench results flow.
+write_startup_card() {  # write_startup_card <phase-text>
+    mkdir -p "$FLEET_DIR/_batch"
+    STARTUP_BENCHES="${BENCHES[*]:-}" PHASE="$1" CARD_RUN_ID="$RUN_ID" \
+    python3 - "$FLEET_DIR/_batch/report-card.json" <<'PY'
+import json, os, sys
+benches = os.environ.get("STARTUP_BENCHES", "").split()
+phase = os.environ["PHASE"]
+card = {
+    "run_id": os.environ["CARD_RUN_ID"],
+    "status": "starting",
+    "phase": phase,
+    "summary": {"total": len(benches), "passed": 0, "failed": 0,
+                "status": f"starting: {phase}"},
+    "tasks": [{"name": b, "status": "starting", "phase": phase} for b in benches],
+}
+json.dump(card, open(sys.argv[1], "w"), indent=1)
+PY
+}
+mkdir -p "$FLEET_DIR"
+write_startup_card "controller starting"
+start_central_hub() {
+    mkdir -p "$HUB_CTX_DIR"
+    if lsof -tiTCP:"$DASH_BASE" -sTCP:LISTEN >/dev/null 2>&1; then
+        echo "📊 reusing the central hub already open on :$DASH_BASE (no new window)"
+    else
+        python3 "$ROOT_DIR/agents/benchmarks/agent_link_server.py" \
+            --root "$RUNS_ROOT" --host 127.0.0.1 --port "$DASH_BASE" \
+            --repo-root "$ROOT_DIR" --context-dir "$HUB_CTX_DIR" \
+            --frontend-dir "$ROOT_DIR/front-end" --hub-runs-dir "$RUNS_ROOT" \
+            --preferred-archive-port "$((DASH_BASE + 200))" \
+            > "$HUB_CTX_DIR/hub.log" 2>&1 & UNIFIED_DASH_PID=$!
+        printf '%s\n' "$UNIFIED_DASH_PID" > "$HUB_CTX_DIR/agent-link-server.pid"
+    fi
+    echo "📊 central hub: http://localhost:$DASH_BASE/ (in-app: Benchmarks tab) — run visible as STARTING"
+}
+start_central_hub
+
 OWNED_CLONES_FILE="$FLEET_DIR/owned-clones.ids"
 AUTOSCALER_PIDS=()
 CHILD_PIDS=()
@@ -695,6 +737,7 @@ reconcile_pool || exit 1   # stop + verify this workspace's pool before machine 
 # READ-ONLY env preflight: the run path never stages/mutates the shared
 # prod-aligned app secrets (that would race concurrent workstreams). It only
 # verifies they exist; refreshing them is an explicit maintenance op.
+write_startup_card "verifying environment"
 echo "🔎 Verifying the shared benchmark app environment (read-only)..."
 if ! bash "$RUN_BENCH_CLOUD_BIN" --verify-secrets; then
     echo "❌ Cloud benchmark environment is not ready; no benchmark machine was started." >&2
@@ -828,6 +871,7 @@ warm_deps_preflight() {
         echo "    heal centrally: bash scripts/run-bench-cloud --refresh-deps --ref $BENCH_REF" >&2
         return 0
     fi
+    write_startup_card "healing warm snapshot (dep trees)"
     echo "♻️  warm snapshot dep trees unproven/stale → central refresh ONCE (instead of ×${#BENCHES[@]} per-clone rsyncs) ..."
     if bash "$RUN_BENCH_CLOUD_BIN" --refresh-deps --ref "$BENCH_REF" 2>&1 | while IFS= read -r _l; do printf '   %s\n' "$_l"; done; then
         new_snap="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null | \
@@ -1003,6 +1047,7 @@ echo "═══ run-bench-fleet — ${#BENCHES[@]} bench(es), one isolated machi
 # there is no shared-ledger race. The whole fleet is now provisioned in ~one
 # clone's wall-time (target: < 3 min) instead of the sum of 28.
 echo ""
+write_startup_card "provisioning ${#BENCHES[@]} isolated machines"
 echo "⏳ provisioning ${#BENCHES[@]} isolated machine(s) concurrently (claim-or-clone) ..."
 PROVISION_PIDS=()
 for bench in "${BENCHES[@]}"; do
