@@ -85,6 +85,7 @@ GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null || echo "$ROOT_DIR/
 case "$GIT_COMMON_DIR" in /*) ;; *) GIT_COMMON_DIR="$ROOT_DIR/$GIT_COMMON_DIR" ;; esac
 POOL_WORKSPACE_KEY="$(printf '%s' "$(basename "$ROOT_DIR")" | tr -c 'a-zA-Z0-9._-' '-')"
 POOL_IDS_FILE="$GIT_COMMON_DIR/cloudbench-pools/$POOL_WORKSPACE_KEY.ids"
+POOL_IDS_LOCK="$POOL_IDS_FILE.lock"
 LEGACY_POOL_IDS_FILE="$ROOT_DIR/.context/cloudbench-pool.ids"
 POOL_CLAIMS_DIR="$GIT_COMMON_DIR/cloudbench-pool-claims"
 # Ephemeral clone ownership must outlive a disposable Conductor workspace and
@@ -412,10 +413,17 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale>
             case $? in
                 0) id="$resolved"; printf 'id=%s\n' "$id" >> "$record" ;;
                 1)
-                    echo "❌ owned clone name '$clone_name' is not provider-visible yet; retaining ownership and refusing to provision" >&2
-                    return 1
+                    # Name-only record whose clone never became provider-visible
+                    # (e.g. a clone that died at volume creation). Preserve the
+                    # record for a future sweep and skip it — one unresolved entry
+                    # must not abort the rest of the recovery or block later runs.
+                    echo "⚠ owned clone name '$clone_name' is not provider-visible; skipping and retaining record for future recovery" >&2
+                    continue
                     ;;
-                *) echo "❌ ambiguous/unreadable stale clone name '$clone_name'; refusing to provision" >&2; return 1 ;;
+                *)
+                    echo "⚠ ambiguous/unreadable clone name '$clone_name'; skipping and retaining record for future recovery" >&2
+                    continue
+                    ;;
             esac
         fi
         if [ -n "${WARM_ID:-}" ] && [ "$id" = "$WARM_ID" ]; then
@@ -481,9 +489,11 @@ acquire_registry_recovery_lock() {  # acquire_registry_recovery_lock <registry-d
                 printf 'host=%s\n' "$FLEET_OWNER_HOST"
                 printf 'pid=%s\n' "$$"
                 printf 'pid_start=%s\n' "$FLEET_OWNER_PID_START"
-            } > "$tmp"
-            mv "$tmp" "$lock/meta"
-            return 0
+            } > "$tmp" && mv "$tmp" "$lock/meta" && return 0
+            # Metadata write/rename failed after mkdir — tear the partial lock
+            # down so we (or a waiter) can retry instead of spinning on a lock
+            # dir with no provable owner.
+            rm -rf "$lock"
         fi
         if [ -f "$lock/meta" ]; then
             registry_owner_alive "$lock/meta"
@@ -610,23 +620,56 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id];
     printf '%s' "$target_id"
 }
 
-pool_ledger_record_id() {  # pool_ledger_record_id <machine-id>; atomic + verified
-    local id="$1" tmp="$POOL_IDS_FILE.tmp.$$"
+pool_ledger_lock_acquire() {  # serialize read-modify-write of the shared pool ledger
+    # Concurrent provisioners each rewrite POOL_IDS_FILE with tmp+mv; without a
+    # lock the later rename silently drops the earlier appender's ID, releasing
+    # that machine from fleet ownership with no durable ledger entry. mkdir is an
+    # atomic cross-process gate on the shared git-common filesystem.
+    local lock="$POOL_IDS_LOCK" tmp
+    for _ in $(seq 1 100); do
+        if mkdir "$lock" 2>/dev/null; then
+            tmp="$lock/meta.tmp.$$"
+            {
+                printf 'host=%s\n' "$FLEET_OWNER_HOST"
+                printf 'pid=%s\n' "$$"
+                printf 'pid_start=%s\n' "$FLEET_OWNER_PID_START"
+            } > "$tmp" && mv "$tmp" "$lock/meta" && return 0
+            rm -rf "$lock"
+        fi
+        # Break a same-host lock whose owner is provably dead so a crashed
+        # provisioner cannot wedge the ledger forever.
+        if [ -f "$lock/meta" ]; then
+            registry_owner_alive "$lock/meta"
+            [ $? -eq 1 ] && { rm -rf "$lock"; continue; }
+        fi
+        sleep 0.1
+    done
+    echo "❌ timed out acquiring pool ledger lock: $lock" >&2
+    return 1
+}
+
+pool_ledger_lock_release() { rm -rf "$POOL_IDS_LOCK"; }
+
+pool_ledger_record_id() {  # pool_ledger_record_id <machine-id>; atomic + verified + serialized
+    local id="$1" tmp="$POOL_IDS_FILE.tmp.$$" rc=0
     case "$id" in ''|*[!0-9a-f]*) return 1 ;; esac
-    [ -f "$POOL_IDS_FILE" ] || return 1
-    if ! {
+    pool_ledger_lock_acquire || return 1
+    if [ ! -f "$POOL_IDS_FILE" ]; then
+        rc=1
+    elif ! {
         grep -Fxv "$id" "$POOL_IDS_FILE" 2>/dev/null || true
         printf '%s\n' "$id"
     } > "$tmp"; then
         rm -f "$tmp"
-        return 1
-    fi
-    if ! mv "$tmp" "$POOL_IDS_FILE" \
+        rc=1
+    elif ! mv "$tmp" "$POOL_IDS_FILE" \
         || [ ! -f "$POOL_IDS_FILE" ] \
         || ! grep -Fxq "$id" "$POOL_IDS_FILE"; then
         rm -f "$tmp"
-        return 1
+        rc=1
     fi
+    pool_ledger_lock_release
+    return "$rc"
 }
 
 provision_pool() {  # provision_pool <N> — create N stopped clones, record ids, exit
