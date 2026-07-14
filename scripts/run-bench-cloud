@@ -550,9 +550,8 @@ assert_app_environment_lock_ownership() {
 # on machine init + in ssh sessions). The benchmark app uses the Machines API,
 # not Fly Launch releases: stage app secrets, then update each stopped machine
 # with --skip-start so staged-only values can never be mistaken for active ones.
-# GITHUB_TOKEN is injected as a secret so the on-box per-run git-sync (private
-# repo) can authenticate via git http.extraheader without the token ever being
-# stored in .git/config on the volume.
+# GITHUB_TOKEN is injected as a secret so on-box private Git operations can use
+# a one-shot askpass stdin channel without storing it on the volume or in argv.
 _inject_secrets_locked() {
     echo "🔐 Injecting secrets into $APP ..."
     if [ ! -f agents/.env ] || [ ! -f back-end/.env ]; then
@@ -569,21 +568,20 @@ _inject_secrets_locked() {
     echo "   env provenance: Render backend + Fly workers → provider=$CLOUDBENCH_PROD_BROWSER_PROVIDER"
     echo "   agents/.env sha256=${agents_sha:0:12} ($(wc -l < agents/.env | tr -d ' ') lines)"
     echo "   back-end/.env sha256=${backend_sha:0:12} ($(wc -l < back-end/.env | tr -d ' ') lines)"
-    local -a set_args=(
-        "AGENTS_ENV_B64=$agents_b64"
-        "BACKEND_ENV_B64=$backend_b64"
-        "AGENTS_ENV_SHA256=$agents_sha"
-        "BACKEND_ENV_SHA256=$backend_sha"
-        "CLOUDBENCH_BROWSER_PROVIDER=$CLOUDBENCH_PROD_BROWSER_PROVIDER"
-    )
     if [ -n "$gh_token" ]; then
-        set_args+=("GITHUB_TOKEN=$gh_token")
         echo "   GITHUB_TOKEN present (for private-repo git-sync)"
     else
         echo "   ⚠️  GITHUB_TOKEN not found — private-repo fetches will fail"
     fi
     assert_app_environment_lock_ownership || exit 1
-    FLY secrets set --stage -a "$APP" "${set_args[@]}" 2>&1 | sed 's/^/   /' || {
+    {
+        printf 'AGENTS_ENV_B64=%s\n' "$agents_b64"
+        printf 'BACKEND_ENV_B64=%s\n' "$backend_b64"
+        printf 'AGENTS_ENV_SHA256=%s\n' "$agents_sha"
+        printf 'BACKEND_ENV_SHA256=%s\n' "$backend_sha"
+        printf 'CLOUDBENCH_BROWSER_PROVIDER=%s\n' "$CLOUDBENCH_PROD_BROWSER_PROVIDER"
+        [ -z "$gh_token" ] || printf 'GITHUB_TOKEN=%s\n' "$gh_token"
+    } | FLY secrets import --stage -a "$APP" 2>&1 | sed 's/^/   /' || {
         echo "❌ Failed to stage benchmark environment secrets"; exit 1
     }
     local activation_targets role machine_id
@@ -712,7 +710,7 @@ fi
 
 # SSH-exec a shell snippet on the machine, streaming output. $1 = machine id.
 ssh_exec() {  # ssh_exec <machine_id> <remote-shell-command>
-    FLY ssh console -a "$APP" --machine "$1" -C "bash -lc $(printf '%q' "$2")"
+    cloudbench_ssh_exec "$APP" "$1" "$2"
 }
 
 # Retry-wrapped, QUIET ssh -C read. `flyctl ssh console -C` buffers stdout until
@@ -950,11 +948,31 @@ fi
 # MODE: --setup — one-time: app + secrets + image + volume + machine + git clone.
 # ═════════════════════════════════════════════════════════════════════════════
 if [ "$MODE" = "setup" ]; then
+    SETUP_MACHINE_CLEANUP_ID=""
+    SETUP_MACHINE_LEASE_NONCE=""
+    setup_stop_owned_machine() {
+        [ -n "${SETUP_MACHINE_CLEANUP_ID:-}" ] && \
+            [ -n "${SETUP_MACHINE_LEASE_NONCE:-}" ] || return 0
+        cloudbench_machine_stop_and_release_lease \
+            "$APP" "$SETUP_MACHINE_CLEANUP_ID" "$SETUP_MACHINE_LEASE_NONCE" || return 1
+        SETUP_MACHINE_CLEANUP_ID=""
+        SETUP_MACHINE_LEASE_NONCE=""
+    }
     setup_cleanup() {
-        local ec=$?
+        local ec=$? stop_failed=0
         trap - EXIT HUP INT TERM
+        setup_stop_owned_machine || stop_failed=1
         release_app_environment_lock || true
-        cloudbench_controller_release "$LOCK_DIR" "$APP"
+        if [ "$stop_failed" = "0" ]; then
+            cloudbench_controller_release "$LOCK_DIR" "$APP"
+        else
+            # Retain the provider sentinel + exact Machine lease until TTL after
+            # an unverified stop. Release only the process-local flock so a later
+            # controller can queue on provider ownership instead of racing it.
+            cloudbench_controller_lock_release "$LOCK_DIR"
+            [ "$ec" -ne 0 ] || ec=1
+            echo "❌ Setup could not verify its warm Machine stopped; provider leases retained." >&2
+        fi
         return "$ec"
     }
     # The sentinel is the distributed lock itself, so first-time bootstrap has no
@@ -1046,65 +1064,89 @@ print("1" if any(v.get("name")==os.environ["VN"] for v in data) else "0")' 2>/de
     if [ -n "$mid" ]; then
         echo "✅ Persistent machine already exists: $mid (skipping create)"
     else
-        echo "🖥️  Creating persistent machine $MACHINE_NAME ($VM_SIZE / ${VM_MEMORY}MB, volume→/data) ..."
-        RUN_LOG="$(mktemp)"
-        FLY machine run "$IMAGE_REF" \
-            -a "$APP" \
-            --name "$MACHINE_NAME" \
-            --region "$REGION" \
-            --vm-size "$VM_SIZE" \
-            --vm-memory "$VM_MEMORY" \
-            --volume "$VOLUME_NAME:/data" \
-            --restart no \
-            --detach 2>&1 | tee "$RUN_LOG"
-        mid="$(grep -oiE 'Machine ID: [0-9a-f]+' "$RUN_LOG" | tail -1 | awk '{print $3}')"
-        rm -f "$RUN_LOG"
-        [ -z "$mid" ] && mid="$(resolve_machine_id)"
-        [ -z "$mid" ] && { echo "❌ Failed to create the persistent machine"; exit 1; }
+        case "$VM_SIZE" in
+            shared-cpu-[1-9]*x)
+                VM_CPU_KIND=shared
+                VM_CPUS="${VM_SIZE#shared-cpu-}"
+                ;;
+            performance-[1-9]*x)
+                VM_CPU_KIND=performance
+                VM_CPUS="${VM_SIZE#performance-}"
+                ;;
+            *)
+                echo "❌ Safe stopped creation does not support VM size '$VM_SIZE'." >&2
+                exit 2
+                ;;
+        esac
+        VM_CPUS="${VM_CPUS%x}"
+        VOLUME_ID="$(FLY volumes list -a "$APP" --json 2>/dev/null | \
+            VN="$VOLUME_NAME" REGION="$REGION" jq -er \
+            '[.[] | select(.name == env.VN and .region == env.REGION) | .id] | if length == 1 then .[0] else error("expected one setup volume") end' \
+            2>/dev/null)" || {
+            echo "❌ Could not resolve exactly one setup volume in $REGION." >&2
+            exit 1
+        }
+        echo "🖥️  Creating stopped persistent machine $MACHINE_NAME ($VM_SIZE / ${VM_MEMORY}MB, volume→/data) ..."
+        if ! mid="$(cloudbench_machine_create_stopped \
+            "$APP" "$MACHINE_NAME" "$REGION" "$IMAGE_REF" "$VOLUME_ID" /data \
+            "$VM_CPU_KIND" "$VM_CPUS" "$VM_MEMORY")"; then
+            echo "❌ Failed to create the stopped persistent machine" >&2
+            exit 1
+        fi
         echo "✅ Machine: $mid"
     fi
     write_state "$mid"
 
-    start_machine "$mid"
+    # From this point every exit path owns returning the exact warm source to
+    # authoritative stopped state before controller handoff.
+    SETUP_MACHINE_CLEANUP_ID="$mid"
+    if ! SETUP_MACHINE_LEASE_NONCE="$(cloudbench_machine_lease_acquire_retry \
+        "$APP" "$mid" "cloudbench-setup pid=$$" 45 2)"; then
+        echo "❌ Could not acquire the warm Machine lifecycle lease." >&2
+        exit 1
+    fi
+    echo "▶️  Starting leased machine $mid ..."
+    if ! cloudbench_machine_start_with_lease "$APP" "$mid" "$SETUP_MACHINE_LEASE_NONCE"; then
+        echo "❌ Could not start the leased warm Machine." >&2
+        exit 1
+    fi
     wait_for_ssh "$mid"
 
     # ── git clone the repo into /data/repo (auth via GITHUB_TOKEN) ────────────
-    gh_token="$(resolve_github_token)"
-    if [ -z "$gh_token" ]; then
+    if [ -z "$(resolve_github_token)" ]; then
         echo "❌ GITHUB_TOKEN not found in back-end/.env or agents/.env — cannot clone the repo." >&2
         echo "   Stopping machine; add GITHUB_TOKEN and re-run --setup." >&2
-        stop_machine "$mid"
         exit 1
     fi
     echo ""
     echo "📥 Cloning repo into $REMOTE_REPO on the box (branch $BENCH_REF) ..."
-    # The token is passed as a transient env var to the remote shell and used via
-    # git's http.extraheader (Basic auth header) rather than embedded in the clone
-    # URL — so it never lands in git's process argv OR in the stored remote URL.
-    # The remote stays clean (https://github.com/...) for all future fetches, which
-    # then reuse the same header only when the run/refresh paths re-supply it.
+    # The token comes from the already-injected Machine environment through a
+    # one-shot askpass stdin channel. No credential is stored or put in argv.
+    GIT_AUTH_PRELUDE="$(cloudbench_remote_git_auth_prelude)"
 CLONE_CMD="set -e
 mkdir -p /data
-AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GH_TOKEN\" | base64 | tr -d '\n')\"
+$GIT_AUTH_PRELUDE
 if [ -d '$REMOTE_REPO/.git' ]; then
   echo 'repo already present — fetching latest'
   chown -R rose:rose '$REMOTE_REPO'
   gosu rose env HOME=/home/rose git -C '$REMOTE_REPO' remote set-url origin 'https://github.com/Rose-Ai-Labs/rose.git'
-  gosu rose env HOME=/home/rose git -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin
+  cloudbench_git_with_machine_token git -C '$REMOTE_REPO' fetch --quiet origin
 else
   mkdir -p '$REMOTE_REPO'
   chown rose:rose '$REMOTE_REPO'
-  gosu rose env HOME=/home/rose git -c http.extraheader=\"\$AUTH_HDR\" clone --quiet 'https://github.com/Rose-Ai-Labs/rose.git' '$REMOTE_REPO'
+  cloudbench_git_with_machine_token git clone --quiet 'https://github.com/Rose-Ai-Labs/rose.git' '$REMOTE_REPO'
 fi
 gosu rose env HOME=/home/rose git -C '$REMOTE_REPO' remote set-url origin 'https://github.com/Rose-Ai-Labs/rose.git'
 echo 'clone/fetch complete'"
-    FLY ssh console -a "$APP" --machine "$mid" \
-        -C "bash -lc $(printf 'GH_TOKEN=%q; %s' "$gh_token" "$CLONE_CMD")" 2>&1 \
+    ssh_exec "$mid" "$CLONE_CMD" 2>&1 \
         | grep -av '^Connecting to' | sed 's/^/   /' || {
-        echo "❌ git clone failed"; stop_machine "$mid"; exit 1
+        echo "❌ git clone failed"; exit 1
     }
 
-    stop_machine "$mid"
+    if ! setup_stop_owned_machine; then
+        echo "❌ Setup completed Git sync but could not verify the warm Machine stopped." >&2
+        exit 1
+    fi
     echo ""
     echo "✅ Setup complete."
     echo "   Next (one-time, builds the cached WMH model):  bash scripts/run-bench-cloud --refresh-wmh"
@@ -1148,15 +1190,14 @@ if [ "$MODE" = "refresh-wmh" ]; then
     wait_for_ssh "$mid"
 
     # Sync the repo first so the WMH build uses the current branch's builder code.
-    # Auth the private-repo fetch with the box-side GITHUB_TOKEN secret via git
-    # http.extraheader (kept out of .git/config + git argv).
+    # Auth the private-repo fetch through the same token-free-argv askpass path.
     echo "🔄 git-syncing $REMOTE_REPO → $BENCH_REF (so the WMH build uses current builder code) ..."
+    GIT_AUTH_PRELUDE="$(cloudbench_remote_git_auth_prelude)"
 SYNC_CMD="set -e
-AUTH_HDR=''
-[ -n \"\${GITHUB_TOKEN:-}\" ] && AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GITHUB_TOKEN\" | base64 | tr -d '\n')\"
+$GIT_AUTH_PRELUDE
 chown -R rose:rose '$REMOTE_REPO'
 gosu rose env HOME=/home/rose git -C '$REMOTE_REPO' remote set-url origin 'https://github.com/Rose-Ai-Labs/rose.git'
-gosu rose env HOME=/home/rose git -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin '$BENCH_REF' || gosu rose env HOME=/home/rose git -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin
+cloudbench_git_with_machine_token git -C '$REMOTE_REPO' fetch --quiet origin '$BENCH_REF' || cloudbench_git_with_machine_token git -C '$REMOTE_REPO' fetch --quiet origin
 gosu rose env HOME=/home/rose git -C '$REMOTE_REPO' checkout -f '$BENCH_REF' 2>/dev/null || gosu rose env HOME=/home/rose git -C '$REMOTE_REPO' checkout -f FETCH_HEAD
 gosu rose env HOME=/home/rose git -C '$REMOTE_REPO' reset --hard
 echo checkout \$(gosu rose env HOME=/home/rose git -C '$REMOTE_REPO' rev-parse --short HEAD)"

@@ -34,6 +34,68 @@ cloudbench_env_sha256() {
   fi
 }
 
+# Execute one command through Fly SSH while preserving it as a single login-shell
+# argument. Callers must keep credentials in the Machine environment rather than
+# interpolating secret values into command, because Fly forwards command in its
+# local and remote process arguments.
+cloudbench_ssh_exec() {
+  local app="$1" machine_id="$2" command="$3" payload decoder
+  payload="$(printf '%s' "$command" | base64 | tr -d '\n')"
+  decoder="printf '%s' '$payload' | base64 -d | bash -s"
+  FLY ssh console -a "$app" --machine "$machine_id" \
+    -C "bash -lc $(printf '%q' "$decoder")"
+}
+
+# Emit a remote-shell prelude for private Git operations. The Machine secret is
+# consumed through a one-shot stdin pipe by GIT_ASKPASS: it never appears in
+# Fly, shell, gosu, or Git argv, and is removed from the rose process environment.
+# A stopped/restarted warm Machine should have no rose processes; fail closed if
+# that isolation precondition is ever violated.
+cloudbench_remote_git_auth_prelude() {
+  cat <<'CLOUDBENCH_GIT_AUTH'
+: "${GITHUB_TOKEN:?GITHUB_TOKEN is missing from the Machine environment}"
+if pgrep -u rose >/dev/null 2>&1; then
+  echo 'refusing private Git auth while an unowned rose process is running' >&2
+  exit 1
+fi
+CLOUDBENCH_GIT_AUTH_DIR="$(mktemp -d /tmp/cloudbench-git-auth.XXXXXX)"
+chmod 0711 "$CLOUDBENCH_GIT_AUTH_DIR"
+CLOUDBENCH_GIT_ASKPASS="$CLOUDBENCH_GIT_AUTH_DIR/askpass"
+cleanup_cloudbench_git_askpass() { rm -rf "$CLOUDBENCH_GIT_AUTH_DIR"; }
+trap cleanup_cloudbench_git_askpass EXIT HUP INT TERM
+cat > "$CLOUDBENCH_GIT_ASKPASS" <<'CLOUDBENCH_ASKPASS'
+#!/bin/sh
+case "$1" in
+  *sername*) printf '%s\n' 'x-access-token' ;;
+  *assword*) IFS= read -r token < "$CLOUDBENCH_GIT_TOKEN_PIPE"; printf '%s\n' "$token" ;;
+  *) exit 1 ;;
+esac
+CLOUDBENCH_ASKPASS
+chmod 0755 "$CLOUDBENCH_GIT_ASKPASS"
+cloudbench_git_with_machine_token() {
+  local token_pipe="$CLOUDBENCH_GIT_AUTH_DIR/token.fifo" writer rc
+  rm -f "$token_pipe"
+  mkfifo "$token_pipe"
+  chown rose:rose "$token_pipe"
+  chmod 0600 "$token_pipe"
+  (printf '%s\n' "$GITHUB_TOKEN" > "$token_pipe") &
+  writer=$!
+  if gosu rose env -u GITHUB_TOKEN HOME=/home/rose \
+      GIT_ASKPASS="$CLOUDBENCH_GIT_ASKPASS" \
+      CLOUDBENCH_GIT_TOKEN_PIPE="$token_pipe" GIT_TERMINAL_PROMPT=0 \
+      timeout 120 "$@" </dev/null; then
+    rc=0
+  else
+    rc=$?
+  fi
+  kill "$writer" 2>/dev/null || true
+  wait "$writer" 2>/dev/null || true
+  rm -f "$token_pipe"
+  return "$rc"
+}
+CLOUDBENCH_GIT_AUTH
+}
+
 cloudbench_fleet_workspace_name() {
   local bench="$1" run_token="$2" index="$3" prefix="flt-" suffix slug digest max_slug head_length
   suffix="-$run_token-$index"
@@ -546,6 +608,34 @@ cloudbench_cloud_lock_machine_destroy() {
   cloudbench_machines_api_request DELETE "/v1/apps/$app/machines/$machine_id?force=true" "" "$nonce" || return 1
   [ "$CLOUDBENCH_API_STATUS" = "200" ] || return 1
   unset CLOUDBENCH_CLOUD_LOCK_MACHINE_ID CLOUDBENCH_CLOUD_LOCK_NONCE
+}
+
+cloudbench_machine_create_stopped() {
+  local app="$1" name="$2" region="$3" image="$4" volume_id="$5" mount_path="$6"
+  local cpu_kind="$7" cpus="$8" memory_mb="$9" body machine_id
+  case "$cpu_kind" in shared|performance) ;; *) return 2 ;; esac
+  case "$cpus" in ''|*[!0-9]*|0) return 2 ;; esac
+  case "$memory_mb" in ''|*[!0-9]*|0) return 2 ;; esac
+  body="$(jq -cn \
+    --arg name "$name" --arg region "$region" --arg image "$image" \
+    --arg volume "$volume_id" --arg path "$mount_path" --arg cpu_kind "$cpu_kind" \
+    --argjson cpus "$cpus" --argjson memory_mb "$memory_mb" '{
+      name: $name,
+      region: $region,
+      config: {
+        image: $image,
+        auto_destroy: false,
+        restart: {policy: "no"},
+        guest: {cpu_kind: $cpu_kind, cpus: $cpus, memory_mb: $memory_mb},
+        mounts: [{volume: $volume, path: $path}]
+      },
+      skip_launch: true
+    }')" || return 1
+  cloudbench_machines_api_request POST "/v1/apps/$app/machines" "$body" || return 1
+  case "$CLOUDBENCH_API_STATUS" in 200|201) ;; *) return 1 ;; esac
+  machine_id="$(printf '%s' "$CLOUDBENCH_API_BODY" | jq -r '.id // empty' 2>/dev/null)"
+  [ -n "$machine_id" ] || return 1
+  printf '%s\n' "$machine_id"
 }
 
 cloudbench_machine_lease_acquire() {

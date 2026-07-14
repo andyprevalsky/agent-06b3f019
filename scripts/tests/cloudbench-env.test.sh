@@ -24,6 +24,91 @@ source "$HELPER_SRC"
 # shellcheck source=../lib/ngrok-tunnel.sh
 source "$NGROK_HELPER_SRC"
 
+# Fly forwards -C through local and remote process arguments. Exercise the same
+# quoting boundary as production while proving Machine-provided secrets are not
+# serialized into that argv and remote failures remain nonzero.
+(
+  ssh_calls="$TMP_ROOT/ssh-calls"
+  FLY() {
+    printf '%s\n' "$@" > "$ssh_calls"
+    local previous="" argument
+    for argument in "$@"; do
+      if [ "$previous" = "-C" ]; then
+        bash -c "$argument"
+        return
+      fi
+      previous="$argument"
+    done
+    return 2
+  }
+  GITHUB_TOKEN='test secret with spaces, $dollars, and '\''quotes'\'''
+  export GITHUB_TOKEN
+  remote_result="$(cloudbench_ssh_exec bench-app machine-one \
+    ': "${GITHUB_TOKEN:?}"; printf "%s" "$GITHUB_TOKEN"')"
+  [ "$remote_result" = "$GITHUB_TOKEN" ] || \
+    fail "Fly SSH must preserve the complete remote command and its Machine environment"
+  if grep -Fq -- "$GITHUB_TOKEN" "$ssh_calls"; then
+    fail "Fly SSH command arguments must not contain Machine secret values"
+  fi
+  if cloudbench_ssh_exec bench-app machine-one 'exit 37'; then
+    fail "Fly SSH must propagate a nonzero remote command status"
+  fi
+)
+
+git_auth_prelude="$(cloudbench_remote_git_auth_prelude)"
+git_test_token='git test secret with spaces, $dollars, and '\''quotes'\'''
+git_test_encoded="$(printf 'x-access-token:%s' "$git_test_token" | base64 | tr -d '\n')"
+case "$git_auth_prelude" in
+  *"$git_test_token"*|*"$git_test_encoded"*)
+    fail "remote Git auth prelude must not serialize raw or encoded credentials"
+    ;;
+esac
+if printf '%s\n' "$git_auth_prelude" | grep -Fq 'http.extraheader'; then
+  fail "remote Git auth must not put a reversible credential in Git argv"
+fi
+(
+  GITHUB_TOKEN="$git_test_token"
+  export GITHUB_TOKEN
+  eval "$git_auth_prelude"
+  fake_auth_bin="$TMP_ROOT/fake-git-auth-bin"
+  fake_git_argv="$TMP_ROOT/fake-git-argv"
+  fake_git_env="$TMP_ROOT/fake-git-env"
+  fake_git_result="$TMP_ROOT/fake-git-result"
+  mkdir -p "$fake_auth_bin"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'shift' \
+    'exec "$@"' \
+    > "$fake_auth_bin/timeout"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'printf "%s\\n" "$@" > "$FAKE_GIT_ARGV"' \
+    'if [ -n "${GITHUB_TOKEN:-}" ]; then echo present > "$FAKE_GIT_ENV"; else echo absent > "$FAKE_GIT_ENV"; fi' \
+    'username="$("$GIT_ASKPASS" "Username for github")"' \
+    'password="$("$GIT_ASKPASS" "Password for github")"' \
+    'printf "%s\\n%s\\n" "$username" "$password" > "$FAKE_GIT_RESULT"' \
+    > "$fake_auth_bin/fake-git"
+  chmod 0755 "$fake_auth_bin/timeout" "$fake_auth_bin/fake-git"
+  export FAKE_GIT_ARGV="$fake_git_argv" FAKE_GIT_ENV="$fake_git_env" FAKE_GIT_RESULT="$fake_git_result"
+  PATH="$fake_auth_bin:$PATH"
+  export PATH
+  gosu() {
+    [ "$1" = rose ] || return 2
+    shift
+    "$@"
+  }
+  chown() { :; }
+  cloudbench_git_with_machine_token "$fake_auth_bin/fake-git" 'argument with spaces'
+  [ "$(cat "$fake_git_env")" = absent ] || \
+    fail "Git process environment must not contain GITHUB_TOKEN"
+  [ "$(sed -n '1p' "$fake_git_result")" = x-access-token ] && \
+    [ "$(sed -n '2p' "$fake_git_result")" = "$GITHUB_TOKEN" ] || \
+    fail "Git wrapper must deliver the exact token only through the askpass FIFO"
+  if grep -Fq -- "$GITHUB_TOKEN" "$fake_git_argv" || grep -Fq -- "$git_test_encoded" "$fake_git_argv"; then
+    fail "Git argv must not contain raw or encoded credentials"
+  fi
+)
+
 long_workspace="$(cloudbench_fleet_workspace_name plaid-transactions-dead-subscriptions 32787 21)"
 [ "${#long_workspace}" -le 48 ] || fail "fleet workspace names must fit Fly's 48-character limit"
 case "$long_workspace" in
@@ -344,6 +429,16 @@ cloudbench_machines_api_request() {
   local method="$1" path="$2" body="${3:-}" nonce="${4:-}"
   printf '%s|%s|%s|%s\n' "$method" "$path" "$body" "$nonce" >> "$api_calls"
   case "$method|$path" in
+    'POST|/v1/apps/bench-app/machines')
+      [ "$(printf '%s' "$body" | jq -r '.skip_launch')" = true ] || \
+        fail "fresh setup Machines must be created stopped"
+      [ "$(printf '%s' "$body" | jq -r '.config.mounts[0].volume + ":" + .config.mounts[0].path')" = \
+        'setup-volume:/data' ] || fail "fresh setup Machine must mount its exact persistent volume"
+      [ "$(printf '%s' "$body" | jq -r '.config.guest.cpu_kind + ":" + (.config.guest.cpus|tostring) + ":" + (.config.guest.memory_mb|tostring)')" = \
+        'shared:4:8192' ] || fail "fresh setup Machine must preserve its requested guest resources"
+      CLOUDBENCH_API_STATUS=201
+      CLOUDBENCH_API_BODY='{"id":"setup-machine","state":"created"}'
+      ;;
     'GET|/v1/apps/bench-app/machines')
       if [ -e "$cloud_lease_get_failure" ]; then
         CLOUDBENCH_API_STATUS=503
@@ -553,6 +648,11 @@ cloudbench_cloud_lock_release bench-app
 require_text "$api_calls" \
   'DELETE|/v1/apps/bench-app/machines/lock-machine/lease||lease-nonce' \
   "cloud lock release must authenticate with the acquired lease nonce"
+
+setup_machine_id="$(cloudbench_machine_create_stopped \
+  bench-app cloudbench-warm iad example/image:latest setup-volume /data shared 4 8192)"
+[ "$setup_machine_id" = setup-machine ] || \
+  fail "safe setup creation must return the exact stopped Machine id"
 
 primary_nonce="$(cloudbench_machine_lease_acquire bench-app primary-machine test-primary)"
 [ "$primary_nonce" = "primary-nonce" ] || fail "primary Machine lease must retain its nonce"
@@ -847,6 +947,30 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'cloudbench_controller_parent_valid "$LOCK_DIR"' \
   "fleet child lock bypass must validate its controller owner token"
+require_text "$HELPER_SRC" \
+  ': "${GITHUB_TOKEN:?GITHUB_TOKEN is missing from the Machine environment}"' \
+  "private Git auth must fail closed when its injected Machine secret is absent"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'ssh_exec "$mid" "$CLONE_CMD"' \
+  "setup must quote the complete authenticated clone command through ssh_exec"
+if grep -Eq 'GH_TOKEN=%q|http\.extraheader' "$ROOT_DIR/scripts/run-bench-cloud"; then
+  fail "private Git auth must not serialize a raw or encoded token into process arguments"
+fi
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'SETUP_MACHINE_CLEANUP_ID="$mid"' \
+  "setup must register its warm machine for exit cleanup before starting it"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'cloudbench_machine_stop_and_release_lease' \
+  "setup exit cleanup must authoritatively stop and release its exact Machine lease"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'cloudbench_machine_start_with_lease "$APP" "$mid" "$SETUP_MACHINE_LEASE_NONCE"' \
+  "setup must start its warm machine under the exact lifecycle lease"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'cloudbench_machine_create_stopped' \
+  "fresh setup must create its warm Machine stopped before ownership registration"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'Setup could not verify its warm Machine stopped; provider leases retained.' \
+  "setup must retain provider ownership after an unverified stop"
 normal_acquire_line="$(grep -n 'cloudbench_controller_acquire "$LOCK_DIR" "$APP"' "$ROOT_DIR/scripts/run-bench-cloud" | tail -1 | cut -d: -f1)"
 normal_ensure_line="$(grep -n '^ensure_app$' "$ROOT_DIR/scripts/run-bench-cloud" | tail -1 | cut -d: -f1)"
 [ -n "$normal_acquire_line" ] && [ -n "$normal_ensure_line" ] && [ "$normal_acquire_line" -lt "$normal_ensure_line" ] || \
@@ -926,8 +1050,8 @@ require_text "$TMP_ROOT/forged-bypass.log" \
   "the actual runner must reject forged lock bypass before app access"
 [ ! -s "$fake_fly_calls" ] || fail "forged lock bypass must be rejected before any Fly mutation or read"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'FLY secrets set --stage -a "$APP"' \
-  "Machines API apps must stage the app-level environment before machine updates"
+  'FLY secrets import --stage -a "$APP"' \
+  "Machines API apps must stage secrets over stdin before machine updates"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'transient Fly update failure; retrying machine $machine_id' \
   "machine environment activation must retry transient Fly API failures"
