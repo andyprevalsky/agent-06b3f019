@@ -291,6 +291,8 @@ sqlite3 ~/Library/Application\ Support/com.conductor.app/conductor.db \
 
 26. **Prompt approval is snapshot-scoped** - Human approval for prompt, instruction, command, skill, or prompt-related changes applies only to the diff that existed when approval was requested. If any later fix or test iteration adds or changes prompt-related files, stop and request fresh approval for those additional hunks before running deploy with the prompt approval flag. Never treat "prompt changes approved" as blanket permission for future prompt edits.
 
+27. **DO NOT KILL OTHER RUN-BENCH TASKS. EVER.** - Cloud benchmark controllers (`run-bench-fleet`, `run-bench-cloud`, `run-bench-hub-poller`) and their children may belong to OTHER workspaces/sessions sharing this machine. Broad kills (`pkill -f run-bench`, `pkill -f flyctl`, `pkill -f benchmark`, killing by port scans, etc.) have repeatedly murdered healthy 28-machine fleets mid-run from the outside. Rules: (a) NEVER pkill by a pattern that could match a benchmark process you did not launch in THIS session; (b) to stop YOUR OWN run, TERM exactly its controller PID (printed at launch; also in its detached log path / run dir) and let its cleanup traps reap machines/volumes — never kill children directly; (c) if a run you don't own looks stuck or abandoned, surface it to the user — killing it is the user's call, not yours. Controllers announce received signals (`⚰️ controller received TERM`) — check the victim's detached log before assuming an infra failure.
+
 ## Plans
 
 All implementation plans live in `docs/plans/` (checked into the repo):
