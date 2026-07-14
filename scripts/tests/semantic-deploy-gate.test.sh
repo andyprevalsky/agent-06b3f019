@@ -45,6 +45,8 @@ require_text "$LIFECYCLE_SPEC" "waitForTemporalWorkflow" "agent lifecycle termin
 # owns a runner and executes samples sequentially so renderer contention cannot
 # become part of the product latency measurement.
 require_text "$WORKFLOW" "workflow_dispatch:" "production semantic gate must support /deploy dispatch"
+require_text "$WORKFLOW" "github.event.deployment.production_environment == true" "automatic semantic runs must be gated to production Vercel deploys"
+require_text "$WORKFLOW" "npm install --ignore-scripts --no-package-lock" "semantic workflow must install without the intentionally untracked package lock"
 require_text "$WORKFLOW" "SEMANTIC_WORKERS: 4" "production semantic gate must use four concurrent workers"
 require_text "$WORKFLOW" "bash front-end/scripts/run-semantic-tests.sh --prod" "production gate must run every semantic spec"
 require_text "$WORKFLOW" "SEMANTIC_GREP_INVERT: chat full-lifecycle latency" "UI semantic job must exclude the separately gated latency spec"
