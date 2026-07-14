@@ -729,7 +729,9 @@ cat "$POOL_PROVENANCE_FILE"
 
 def test_fleet_run_directory_exists_before_provision_mode_dispatch() -> None:
     fleet = FLEET_SCRIPT.read_text()
-    controller_acquire = fleet.index('if ! cloudbench_controller_acquire "$LOCK_DIR" "$APP"; then')
+    controller_acquire = fleet.index(
+        'if ! cloudbench_controller_wait_acquire "$LOCK_DIR" "$APP"; then'
+    )
     provision_dispatch = fleet.index("# --provision-pool:")
     run_dir_create = fleet.index('mkdir -p "$FLEET_DIR"', controller_acquire)
 

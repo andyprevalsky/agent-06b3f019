@@ -310,6 +310,7 @@ api_primary_start_attempts="$TMP_ROOT/machines-api-primary-start-attempts"
 api_bad_start_attempts="$TMP_ROOT/machines-api-bad-start-attempts"
 api_fresh_lease_attempts="$TMP_ROOT/machines-api-fresh-lease-attempts"
 api_bad_lease_attempts="$TMP_ROOT/machines-api-bad-lease-attempts"
+cloud_lease_get_failure="$TMP_ROOT/cloud-lease-get-failure"
 printf '0\n' > "$api_primary_activation_attempts"
 printf '0\n' > "$api_bad_activation_attempts"
 printf '0\n' > "$api_primary_start_attempts"
@@ -323,6 +324,11 @@ cloudbench_machines_api_request() {
   printf '%s|%s|%s|%s\n' "$method" "$path" "$body" "$nonce" >> "$api_calls"
   case "$method|$path" in
     'GET|/v1/apps/bench-app/machines')
+      if [ -e "$cloud_lease_get_failure" ]; then
+        CLOUDBENCH_API_STATUS=503
+        CLOUDBENCH_API_BODY='{"error":"unavailable"}'
+        return 1
+      fi
       CLOUDBENCH_API_STATUS=200
       CLOUDBENCH_API_BODY='[{"id":"lock-machine","name":"cloudbench-controller-lock"}]'
       ;;
@@ -508,6 +514,71 @@ if cloudbench_machine_lease_acquire_retry bench-app bad-machine bad-primary 3 0 
 fi
 [ "$(cat "$api_bad_lease_attempts")" -eq 1 ] || fail "permanent Machine lease errors must not be retried"
 
+# Failure typing must come from the current acquisition stage, never a stale
+# API status left by an earlier 409. Otherwise a real outage loops as "busy".
+stale_status_lock="$TMP_ROOT/stale-status-controller.lock"
+: > "$api_lease_state"
+CLOUDBENCH_MACHINES_API_TOKEN="test-token"
+if cloudbench_controller_acquire "$stale_status_lock" bench-app >/dev/null 2>&1; then
+  fail "an occupied cloud lease must not be acquired"
+fi
+[ "$CLOUDBENCH_CONTROLLER_ACQUIRE_REASON" = "cloud_busy" ] ||
+  fail "an occupied cloud lease must be typed as cloud_busy"
+rm -f "$api_lease_state"
+: > "$cloud_lease_get_failure"
+if cloudbench_controller_acquire "$stale_status_lock" bench-app >/dev/null 2>&1; then
+  fail "a sentinel API outage must not acquire the controller"
+fi
+[ "$CLOUDBENCH_CONTROLLER_ACQUIRE_REASON" = "cloud_api_error" ] ||
+  fail "a sentinel API outage was misclassified using stale 409 state"
+[ ! -e "$stale_status_lock" ] || fail "API failure leaked the local controller lock"
+rm -f "$cloud_lease_get_failure"
+
+# A local lock setup error is not contention and must fail immediately.
+if cloudbench_controller_wait_acquire /dev/null/controller.lock bench-app >/dev/null 2>&1; then
+  fail "a local lock filesystem error must not enter the contention queue"
+fi
+[ "$CLOUDBENCH_CONTROLLER_ACQUIRE_REASON" = "local_error" ] ||
+  fail "a local lock filesystem error must be typed as local_error"
+
+# A legitimate sibling controller holds the app-wide lease while another
+# workspace queues its fleet. The queued controller must wait for handoff
+# instead of turning the Hub request into seven placeholder failures.
+wait_lock_file="$TMP_ROOT/waiting-controller.lock"
+: > "$api_lease_state"
+CLOUDBENCH_MACHINES_API_TOKEN="test-token"
+( sleep 0.05; rm -f "$api_lease_state" ) & lease_releaser_pid=$!
+CLOUDBENCH_CONTROLLER_RETRY_INTERVAL=0.01 \
+  cloudbench_controller_wait_acquire "$wait_lock_file" bench-app >/dev/null
+wait "$lease_releaser_pid"
+[ -e "$api_lease_state" ] || fail "waiting controller never acquired the released cloud lease"
+cloudbench_controller_release "$wait_lock_file" bench-app
+[ ! -e "$wait_lock_file" ] || fail "waiting controller did not release its local lock"
+
+# Signals in the startup window (after lease acquisition but before the fleet's
+# full cleanup trap) must release both the provider lease and local lock.
+signal_lock_file="$TMP_ROOT/signal-controller.lock"
+signal_ready_file="$TMP_ROOT/signal-controller.ready"
+CLOUDBENCH_MACHINES_API_TOKEN="test-token"
+(
+  cloudbench_controller_install_release_guard "$signal_lock_file" bench-app
+  cloudbench_controller_wait_acquire "$signal_lock_file" bench-app >/dev/null
+  : > "$signal_ready_file"
+  while :; do sleep 1; done
+) & signal_controller_pid=$!
+for _ in $(seq 1 100); do
+  [ -e "$signal_ready_file" ] && break
+  sleep 0.01
+done
+[ -e "$signal_ready_file" ] || fail "signal-guard controller never acquired its lease"
+kill -TERM "$signal_controller_pid"
+signal_status=0
+wait "$signal_controller_pid" || signal_status=$?
+[ "$signal_status" -eq 143 ] || fail "signal-guard controller returned $signal_status instead of 143"
+[ ! -e "$api_lease_state" ] || fail "signal guard leaked the provider lease"
+[ ! -e "$signal_lock_file" ] || fail "signal guard leaked the local controller lock"
+unset CLOUDBENCH_MACHINES_API_TOKEN
+
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'bash scripts/run-bench-cloud --refresh-secrets' \
   "fleet controller must refresh the environment once before cloning"
@@ -521,8 +592,11 @@ require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'CLOUDBENCH_ENV_REFRESHED=1' \
   "fleet children must receive proof that the controller refreshed the environment"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
-  'cloudbench_controller_acquire "$LOCK_DIR" "$APP"' \
+  'cloudbench_controller_wait_acquire "$LOCK_DIR" "$APP"' \
   "fleet controllers must acquire the cross-host Fly sentinel lease"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'cloudbench_controller_install_release_guard "$LOCK_DIR" "$APP"' \
+  "fleet startup must guard controller leases before full cleanup is installed"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'cloudbench_controller_release "$LOCK_DIR" "$APP"' \
   "fleet cleanup must release the cross-host Fly sentinel lease"
