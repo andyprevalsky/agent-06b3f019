@@ -501,6 +501,35 @@ cleanup() {
     else
         echo "⚠️  --keep-clones: leaving $(grep -c . "$OWNED_CLONES_FILE" 2>/dev/null || echo 0) fresh clone(s) alive"
     fi
+    # ── Durable orphaned-volume reap (permanent fix for the cloudbench_data leak) ──
+    # reap_machine (and Fly generally) destroys the clone MACHINE but retains its
+    # VOLUME, so every interrupted/failed/crashed run used to leak a 20GB
+    # `cloudbench_data` volume. Left unchecked these accumulate until the region
+    # runs out of volume capacity and `machine clone --from-snapshot` starts
+    # failing with "no capacity available" (observed: ~92 leaked volumes saturating
+    # ord). Sweep every DETACHED cloudbench_data volume on teardown. Attached
+    # volumes — the warm source and any live pool — are never touched, and because
+    # `machine clone --from-snapshot` creates volumes already attached, a detached
+    # cloudbench_data volume is always an orphan (safe under concurrent fleets).
+    if [ "$KEEP_CLONES" != "1" ]; then
+        orphan_vols="$(FLY volumes list -a "$APP" --json 2>/dev/null | python3 -c '
+import sys, json
+try:
+    vols = json.load(sys.stdin) or []
+except Exception:
+    vols = []
+for v in vols:
+    if v.get("name") == "cloudbench_data" and not v.get("attached_machine_id"):
+        print(v["id"])
+' 2>/dev/null || true)"
+        if [ -n "$orphan_vols" ]; then
+            reaped_vols=0
+            for vid in $orphan_vols; do
+                FLY volumes destroy "$vid" -a "$APP" --yes >/dev/null 2>&1 && reaped_vols=$((reaped_vols + 1)) || true
+            done
+            echo "🧹 reaped $reaped_vols orphaned cloudbench_data volume(s)"
+        fi
+    fi
     # NOTE: do NOT pkill viewers by "$FLEET_DIR" — the batch resolver (and the
     # archive Vites it spawns for durable /open-agent) carry $FLEET_DIR in their
     # argv too, so that sweep KILLED the very resolver we persist (→ dead link
