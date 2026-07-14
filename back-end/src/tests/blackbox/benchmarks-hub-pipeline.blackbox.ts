@@ -84,12 +84,22 @@ function assert(cond: boolean, message: string): void {
  * second (via the canonical retry provider). Throws with the STAGE name on
  * expiry — the anti-stuck primitive.
  */
+// Under coverage instrumentation (NODE_V8_COVERAGE is exported to this test
+// process AND inherited by the spawned run-bench-hub-poller child), both the
+// backend and the poller run ~2-3x slower, so the multi-stage poller watchdogs
+// need proportionally longer budgets. Diagnosed: the identical cases pass
+// uninstrumented against the full stack — this is instrumentation overhead, not
+// a product regression. The full-stack blackbox gate keeps the tight timeouts as
+// the real performance signal; only the coverage harness is relaxed.
+const TIMEOUT_SCALE = process.env.NODE_V8_COVERAGE ? 3 : 1;
+
 async function within<T>(
   stage: string,
   deadlineMs: number,
   check: () => Promise<T | null | false>
 ): Promise<T> {
-  const attempts = Math.max(2, Math.ceil(deadlineMs / 1000));
+  const scaledDeadlineMs = deadlineMs * TIMEOUT_SCALE;
+  const attempts = Math.max(2, Math.ceil(scaledDeadlineMs / 1000));
   try {
     return await retryWithBackoff(
       async () => {
@@ -107,7 +117,9 @@ async function within<T>(
       }
     );
   } catch {
-    throw new Error(`STUCK at stage "${stage}" — no progress within ${deadlineMs / 1000}s`);
+    throw new Error(
+      `STUCK at stage "${stage}" — no progress within ${scaledDeadlineMs / 1000}s`
+    );
   }
 }
 

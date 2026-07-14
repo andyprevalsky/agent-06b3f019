@@ -320,7 +320,7 @@ async function testSmoke_codexCompletesE2bTask() {
       const typed = event as { type?: string; message?: string };
       return (
         typed.type === 'error' &&
-        /usage limit|usage_limit_reached|quota|purchase more credits|hit your usage/i.test(
+        /usage[ _]limit|usage_limit_reached|hit your usage limit|purchase more credits/i.test(
           String(typed.message ?? '')
         )
       );

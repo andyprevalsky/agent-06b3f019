@@ -53,7 +53,11 @@ let sawUsageLimit = false;
 const clients = new Set();
 
 function isUsageLimitMessage(message) {
-  return /usage limit|usage_limit_reached|quota|purchase more credits|hit your usage/i.test(
+  // Restricted to explicit ChatGPT/OpenAI plan-exhaustion wording. Broad terms
+  // like "quota" or a bare "hit your usage" can match unrelated sandbox tooling
+  // errors (disk/rate quotas) and would trigger a wasteful funded-key retry that
+  // masks the real failure.
+  return /usage[ _]limit|usage_limit_reached|hit your usage limit|purchase more credits/i.test(
     String(message || ""),
   );
 }
@@ -552,7 +556,11 @@ function runCodex(args) {
   });
 }
 
-let { code, signal } = await runCodex(buildCodexArgs({ useFastModeProxy: true }));
+// An API-key-only session (no OAuth credential) must skip the ChatGPT fast-mode
+// proxy — it targets the ChatGPT backend, which won't authenticate an API key.
+let { code, signal } = await runCodex(
+  buildCodexArgs({ useFastModeProxy: !usingApiKey }),
+);
 
 // Runtime fallback: the ChatGPT OAuth token hit its usage limit mid-run. Re-login
 // with the funded OpenAI API key and retry ONCE against the default OpenAI endpoint
