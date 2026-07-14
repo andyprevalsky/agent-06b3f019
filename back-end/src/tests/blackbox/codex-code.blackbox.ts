@@ -3,6 +3,7 @@ import { config } from 'dotenv';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { resolveCodexCodeAuthEnvs } from '../../providers/e2b';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -197,6 +198,76 @@ async function testTemplate_pinsCodexCliForGpt56() {
   );
 }
 
+// ── resolveCodexCodeAuthEnvs (pure auth-env selection) ───────────────────────
+// The sandbox ws-server logs in with CODEX_AUTH_JSON (OAuth) when present, else
+// `codex login --with-api-key` using OPENAI_API_KEY. These assert the backend
+// actually hands the sandbox one of those — so a rate-limited Codex OAuth token
+// (fetchGptCodeCredentialsWithMeta returns null) falls back to the funded key
+// instead of throwing, which is why the deploy Codex smoke used to stall.
+const CODEX_OAUTH_META = {
+  accessToken: 'sk-codex-oat-xxx',
+  accountId: 'acct_123',
+  source: 'pool',
+  userId: 'u1',
+  poolTokenId: 'p1',
+  credentials: '{"tokens":{"access_token":"a","refresh_token":"r"}}',
+} as unknown as Parameters<typeof resolveCodexCodeAuthEnvs>[0];
+
+function testResolveCodexAuthEnvs_oauthPrimaryWithApiKeyRuntimeFallback() {
+  const envs = resolveCodexCodeAuthEnvs(CODEX_OAUTH_META, 'sk-proj-funded-key');
+  assert(
+    envs.CODEX_AUTH_JSON === '{"tokens":{"access_token":"a","refresh_token":"r"}}',
+    'CODEX_AUTH_JSON set (primary) when OAuth credential present'
+  );
+  // Injected ALONGSIDE the OAuth token so the sandbox can re-login + retry if the
+  // OAuth token hits usage_limit_reached mid-run (the real deploy-stall failure).
+  assert(
+    envs.OPENAI_API_KEY === 'sk-proj-funded-key',
+    'funded key injected alongside OAuth token as a runtime fallback'
+  );
+}
+
+function testResolveCodexAuthEnvs_oauthWithoutFundedKey() {
+  const envs = resolveCodexCodeAuthEnvs(CODEX_OAUTH_META, undefined);
+  assert(
+    envs.CODEX_AUTH_JSON === '{"tokens":{"access_token":"a","refresh_token":"r"}}',
+    'CODEX_AUTH_JSON set when OAuth credential present and no funded key'
+  );
+  assert(
+    envs.OPENAI_API_KEY === undefined,
+    'no OPENAI_API_KEY when funded key is not configured'
+  );
+}
+
+function testResolveCodexAuthEnvs_apiKeyFallback() {
+  const envs = resolveCodexCodeAuthEnvs(null, 'sk-proj-funded-key');
+  assert(
+    envs.OPENAI_API_KEY === 'sk-proj-funded-key',
+    'falls back to OPENAI_API_KEY when no OAuth credential (e.g. token rate-limited/exhausted)'
+  );
+  assert(envs.CODEX_AUTH_JSON === undefined, 'no OAuth auth.json in fallback');
+}
+
+function testResolveCodexAuthEnvs_noCredsNoKeyThrows() {
+  let threw = false;
+  try {
+    resolveCodexCodeAuthEnvs(null, undefined);
+  } catch {
+    threw = true;
+  }
+  assert(threw, 'throws when no OAuth credential and no OPENAI_API_KEY fallback configured');
+}
+
+function testResolveCodexAuthEnvs_emptyKeyThrows() {
+  let threw = false;
+  try {
+    resolveCodexCodeAuthEnvs(null, '');
+  } catch {
+    threw = true;
+  }
+  assert(threw, 'throws when the api-key fallback is an empty string');
+}
+
 async function testSmoke_codexCompletesE2bTask() {
   assert(API_KEY !== '', 'BACKEND_API_KEY is required');
   assert(
@@ -279,6 +350,26 @@ async function runAll() {
     {
       name: 'template -- pins GPT-5.6-compatible Codex CLI',
       fn: testTemplate_pinsCodexCliForGpt56,
+    },
+    {
+      name: 'auth -- OAuth primary + OPENAI_API_KEY runtime fallback injected together',
+      fn: async () => testResolveCodexAuthEnvs_oauthPrimaryWithApiKeyRuntimeFallback(),
+    },
+    {
+      name: 'auth -- OAuth alone when no funded key configured',
+      fn: async () => testResolveCodexAuthEnvs_oauthWithoutFundedKey(),
+    },
+    {
+      name: 'auth -- falls back to OPENAI_API_KEY when token unavailable/rate-limited',
+      fn: async () => testResolveCodexAuthEnvs_apiKeyFallback(),
+    },
+    {
+      name: 'auth -- throws when no credential and no funded key',
+      fn: async () => testResolveCodexAuthEnvs_noCredsNoKeyThrows(),
+    },
+    {
+      name: 'auth -- throws when funded key is empty',
+      fn: async () => testResolveCodexAuthEnvs_emptyKeyThrows(),
     },
   ];
   if (process.env.BACKEND_CODEX_SMOKE_SKIP === '1') {

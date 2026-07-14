@@ -175,6 +175,48 @@ export function resolveClaudeCodeAuthEnvs(
   );
 }
 
+/**
+ * Decide which auth env vars the Codex Code CLI sandbox should receive.
+ *
+ * Mirrors {@link resolveClaudeCodeAuthEnvs} (and the Rose completions fallback)
+ * so the Codex code agent stays usable whenever an OAuth token would be:
+ *   1. A synced/pool ChatGPT/Codex OAuth credential → CODEX_AUTH_JSON (primary).
+ *      When a funded OpenAI key is also configured, it is injected ALONGSIDE the
+ *      OAuth token as OPENAI_API_KEY so the sandbox can re-login and retry if the
+ *      OAuth token hits `usage_limit_reached` MID-RUN. This is the real failure
+ *      mode that stalled deploy: `fetchGptCodeCredentialsWithMeta` only filters
+ *      tokens the DB already marked rate-limited, so a token that is over quota
+ *      but not yet flagged is returned as valid and only fails at runtime inside
+ *      the sandbox — where a null-credential fallback never gets a chance to fire.
+ *   2. No OAuth credential (absent, or every pool token DB-rate-limited → null) →
+ *      the funded OpenAI API key alone → OPENAI_API_KEY, which the sandbox
+ *      ws-server logs in with via `codex login --with-api-key`.
+ *   3. Otherwise throw — nothing usable.
+ *
+ * Pure + exported so the selection is unit-testable without spinning an E2B
+ * sandbox (the real session path isn't otherwise reachable in tests).
+ */
+export function resolveCodexCodeAuthEnvs(
+  credentialMeta: GptCodeCredentialEnvelopeResult | null,
+  openaiApiKey: string | undefined
+): Record<string, string> {
+  const fundedKey = openaiApiKey !== undefined && openaiApiKey !== '' ? openaiApiKey : undefined;
+  if (credentialMeta) {
+    const envs: Record<string, string> = { CODEX_AUTH_JSON: credentialMeta.credentials };
+    if (fundedKey !== undefined) {
+      envs.OPENAI_API_KEY = fundedKey;
+    }
+    return envs;
+  }
+  if (fundedKey !== undefined) {
+    return { OPENAI_API_KEY: fundedKey };
+  }
+  throw new Error(
+    'No GPT Code credentials available: no synced user credentials, no available pool tokens, ' +
+      'and no usable OPENAI_API_KEY (GPT_API_KEY) fallback configured'
+  );
+}
+
 export async function createClaudeCodeSession(
   agentId: string,
   goal: string,
@@ -427,18 +469,23 @@ export async function createCodexCodeSession(
 
   const credentialMeta: GptCodeCredentialEnvelopeResult | null =
     await fetchGptCodeCredentialsWithMeta(userId);
-  if (!credentialMeta) {
-    throw new Error(
-      'No GPT Code credentials available: no synced user credentials and no available pool tokens'
-    );
-  }
+  // No OAuth credential (or every pool token is rate-limited → filtered to
+  // null) falls back to the funded OpenAI API key, mirroring the Claude Code
+  // path and the Rose completions fallback. GPT_API_KEY is the same funded key
+  // the in-process Rose client uses when compute tokens are exhausted.
+  const authEnvs = resolveCodexCodeAuthEnvs(credentialMeta, process.env.GPT_API_KEY);
 
   const envs: Record<string, string> = {
     CODEX_GOAL: goal,
-    CODEX_AUTH_JSON: credentialMeta.credentials,
+    ...authEnvs,
     CODEX_MODEL: model,
     CODE_AGENT_SYSTEM_PROMPT: systemPrompt,
   };
+  if (credentialMeta) {
+    log.info(`Using ${credentialMeta.source} GPT Code credentials for agent ${agentId}`);
+  } else {
+    log.info(`Using OPENAI_API_KEY funded fallback for Codex Code agent ${agentId}`);
+  }
 
   const fastModeWriteEnabled =
     fastModeCacheEnabled === true || shouldWriteFastModeCacheForUser(userId);
@@ -571,9 +618,9 @@ export async function createCodexCodeSession(
       streamUrl: wsUrl,
       goal,
       status: 'ACTIVE',
-      claudeTokenSource: credentialMeta.source,
+      claudeTokenSource: credentialMeta?.source ?? null,
       claudeTokenIntegrationId:
-        credentialMeta.source === 'pool' ? (credentialMeta.poolTokenId ?? null) : null,
+        credentialMeta?.source === 'pool' ? (credentialMeta.poolTokenId ?? null) : null,
     },
   });
 

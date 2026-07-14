@@ -22,16 +22,11 @@ from temporalio.common import RetryPolicy
 
 from tools.base import EventType, MessageStatus, ToolEvent
 
-from domains.request_user_approval.config import REJECTION_SENTINEL
-
+from .config import DEFAULT_KYC_URL, DEFAULT_SUBSCRIBE_URL, REJECTION_SENTINEL, TOOL_NAME
 from .repo import create_gate_request_activity
 from .types import GateRejectedError
 
 logger = structlog.get_logger()
-
-TOOL_NAME = "gate"
-DEFAULT_SUBSCRIBE_URL = "https://roselabs.ai/subscribe"
-DEFAULT_KYC_URL = "https://roselabs.ai/kyc/start"
 
 
 def build_subscription_gate(

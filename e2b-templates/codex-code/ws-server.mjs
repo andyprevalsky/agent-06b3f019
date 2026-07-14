@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { WebSocketServer } from "ws";
-import { appendFileSync, mkdirSync, writeFileSync } from "fs";
+import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { spawn, execFileSync } from "child_process";
 import { createServer } from "http";
 import { homedir } from "os";
@@ -45,7 +45,18 @@ let eventBuffer = [];
 let exitCode = null;
 let processExited = false;
 let stdoutLineBuffer = "";
+// Set when a Codex turn fails with the ChatGPT usage-limit / quota error. Drives
+// the runtime fallback to the funded OpenAI API key (see the run-with-fallback
+// block below). The ChatGPT OAuth token can be DB-valid yet over quota, so this
+// only surfaces mid-run — a null-credential fallback in the backend can't catch it.
+let sawUsageLimit = false;
 const clients = new Set();
+
+function isUsageLimitMessage(message) {
+  return /usage limit|usage_limit_reached|quota|purchase more credits|hit your usage/i.test(
+    String(message || ""),
+  );
+}
 const wss = new WebSocketServer({ port: PORT });
 
 function broadcast(type, data) {
@@ -116,6 +127,7 @@ function renderCodexJsonLine(line) {
   }
   if (event.type === "turn.failed") {
     const message = event.error?.message || event.message || "unknown error";
+    if (isUsageLimitMessage(message)) sawUsageLimit = true;
     appendEvent({
       type: "error",
       raw_type: event.type,
@@ -127,6 +139,7 @@ function renderCodexJsonLine(line) {
   if (event.type === "error") {
     const message =
       event.message || event.error?.message || JSON.stringify(event);
+    if (isUsageLimitMessage(message)) sawUsageLimit = true;
     appendEvent({
       type: "error",
       raw_type: event.type,
@@ -381,16 +394,7 @@ mkdirSync(codexHome, { recursive: true });
 mkdirSync("/home/user/attachments", { recursive: true });
 mkdirSync("/home/user/output", { recursive: true });
 
-if (CODEX_AUTH_JSON) {
-  try {
-    JSON.parse(CODEX_AUTH_JSON);
-    writeFileSync(join(codexHome, "auth.json"), CODEX_AUTH_JSON);
-    log("info", "Wrote Codex ChatGPT auth envelope");
-  } catch (err) {
-    log("error", "CODEX_AUTH_JSON is not valid JSON", { error: err.message });
-    process.exit(1);
-  }
-} else {
+async function loginWithApiKey() {
   const login = spawn("codex", ["login", "--with-api-key"], {
     env: { ...process.env, CODEX_HOME: codexHome, HOME: home },
     stdio: ["pipe", "pipe", "pipe"],
@@ -401,8 +405,27 @@ if (CODEX_AUTH_JSON) {
   const loginCode = await new Promise((resolve) => login.on("close", resolve));
   if (loginCode !== 0) {
     log("error", "Codex API-key login failed", { loginCode });
+    return false;
+  }
+  log("info", "Logged in to Codex with OpenAI API key");
+  return true;
+}
+
+// usingApiKey tracks whether the ACTIVE credential is the funded OpenAI key
+// (vs. the ChatGPT OAuth token). It gates the one-shot runtime fallback below.
+let usingApiKey = false;
+if (CODEX_AUTH_JSON) {
+  try {
+    JSON.parse(CODEX_AUTH_JSON);
+    writeFileSync(join(codexHome, "auth.json"), CODEX_AUTH_JSON);
+    log("info", "Wrote Codex ChatGPT auth envelope");
+  } catch (err) {
+    log("error", "CODEX_AUTH_JSON is not valid JSON", { error: err.message });
     process.exit(1);
   }
+} else {
+  if (!(await loginWithApiKey())) process.exit(1);
+  usingApiKey = true;
 }
 
 let workDir = "/home/user";
@@ -462,67 +485,111 @@ const sanitizedGoal = [
 ]
   .filter(Boolean)
   .join("\n\n");
-const args = [
-  "exec",
-  "--ignore-user-config",
-  "--skip-git-repo-check",
-  "--dangerously-bypass-approvals-and-sandbox",
-  "--json",
-  "--cd",
-  workDir,
-  "-m",
-  CODEX_MODEL,
-  sanitizedGoal,
-];
-if (codexFastModeProxy) {
-  args.splice(
-    1,
-    0,
-    "-c",
-    `chatgpt_base_url="${codexFastModeProxy.baseUrl}"`,
-    "-c",
-    'model_provider="fastmode"',
-    "-c",
-    `model_providers.fastmode={name="fastmode",base_url="${codexFastModeProxy.baseUrl}/backend-api/codex",wire_api="responses"}`,
-  );
+// The ChatGPT fast-mode proxy only makes sense for the OAuth token — it forwards
+// to the ChatGPT codex backend, which won't authenticate an OpenAI API key. So
+// the API-key path (initial or fallback) runs against the default OpenAI endpoint.
+function buildCodexArgs({ useFastModeProxy }) {
+  const args = [
+    "exec",
+    "--ignore-user-config",
+    "--skip-git-repo-check",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--json",
+    "--cd",
+    workDir,
+    "-m",
+    CODEX_MODEL,
+    sanitizedGoal,
+  ];
+  if (useFastModeProxy && codexFastModeProxy) {
+    args.splice(
+      1,
+      0,
+      "-c",
+      `chatgpt_base_url="${codexFastModeProxy.baseUrl}"`,
+      "-c",
+      'model_provider="fastmode"',
+      "-c",
+      `model_providers.fastmode={name="fastmode",base_url="${codexFastModeProxy.baseUrl}/backend-api/codex",wire_api="responses"}`,
+    );
+  }
+  return args;
 }
 
-log("info", "Starting Codex exec", {
-  model: CODEX_MODEL,
-  workDir,
-  goal: sanitizedGoal.slice(0, 120),
-});
-const codex = spawn("codex", args, {
-  cwd: workDir,
-  stdio: ["ignore", "pipe", "pipe"],
-  env: {
-    ...process.env,
-    CODEX_HOME: codexHome,
-    HOME: home,
-    TERM: "xterm-256color",
-  },
-});
+function runCodex(args) {
+  return new Promise((resolve) => {
+    log("info", "Starting Codex exec", {
+      model: CODEX_MODEL,
+      workDir,
+      usingApiKey,
+      goal: sanitizedGoal.slice(0, 120),
+    });
+    const codex = spawn("codex", args, {
+      cwd: workDir,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        CODEX_HOME: codexHome,
+        HOME: home,
+        TERM: "xterm-256color",
+      },
+    });
 
-codex.stdout.on("data", (data) => appendCodexStdout(data.toString()));
-codex.stderr.on("data", (data) => appendOutput("stderr", data.toString()));
-codex.on("error", (err) => {
-  appendOutput("stderr", `[Codex] Failed to start: ${err.message}\n`);
-  log("error", "Codex spawn error", { error: err.message });
-});
-codex.on("close", (code, signal) => {
-  if (stdoutLineBuffer) {
-    appendOutput("stdout", renderCodexJsonLine(stdoutLineBuffer));
-    stdoutLineBuffer = "";
-  }
-  exitCode = code ?? 1;
-  processExited = true;
-  appendEvent({
-    type: "final",
-    status: exitCode === 0 ? "completed" : "failed",
-    exit_code: exitCode,
-    signal,
+    codex.stdout.on("data", (data) => appendCodexStdout(data.toString()));
+    codex.stderr.on("data", (data) => appendOutput("stderr", data.toString()));
+    codex.on("error", (err) => {
+      appendOutput("stderr", `[Codex] Failed to start: ${err.message}\n`);
+      log("error", "Codex spawn error", { error: err.message });
+    });
+    codex.on("close", (code, signal) => {
+      if (stdoutLineBuffer) {
+        appendOutput("stdout", renderCodexJsonLine(stdoutLineBuffer));
+        stdoutLineBuffer = "";
+      }
+      log("info", "Codex run exited", { code, signal, usingApiKey });
+      resolve({ code: code ?? 1, signal: signal ?? null });
+    });
   });
-  log("info", "Codex exited", { code, signal });
-  broadcast("exit", exitCode);
-  setTimeout(() => shutdown(exitCode ?? 0), 120000);
+}
+
+let { code, signal } = await runCodex(buildCodexArgs({ useFastModeProxy: true }));
+
+// Runtime fallback: the ChatGPT OAuth token hit its usage limit mid-run. Re-login
+// with the funded OpenAI API key and retry ONCE against the default OpenAI endpoint
+// (no ChatGPT proxy). Mirrors the Rose completions compute-token→OpenAI-key fallback
+// so the code agent keeps working when the OAuth quota is exhausted.
+if (code !== 0 && !usingApiKey && OPENAI_API_KEY && sawUsageLimit) {
+  log("info", "Codex OAuth hit usage limit; retrying with OPENAI_API_KEY");
+  appendOutput(
+    "stdout",
+    "[Codex] ChatGPT usage limit reached — retrying with funded OpenAI API key\n",
+  );
+  appendEvent({
+    type: "auth_fallback",
+    from: "chatgpt_oauth",
+    to: "openai_api_key",
+    reason: "usage_limit_reached",
+  });
+  try {
+    rmSync(join(codexHome, "auth.json"), { force: true });
+  } catch {
+    // Best-effort: a stale auth.json only matters if the API-key login fails.
+  }
+  if (await loginWithApiKey()) {
+    usingApiKey = true;
+    sawUsageLimit = false;
+    ({ code, signal } = await runCodex(buildCodexArgs({ useFastModeProxy: false })));
+  }
+}
+
+exitCode = code ?? 1;
+processExited = true;
+appendEvent({
+  type: "final",
+  status: exitCode === 0 ? "completed" : "failed",
+  exit_code: exitCode,
+  signal,
 });
+log("info", "Codex exited", { code: exitCode, signal });
+broadcast("exit", exitCode);
+setTimeout(() => shutdown(exitCode ?? 0), 120000);

@@ -651,6 +651,62 @@ activate_machine_environment machine-1
     assert len(exhausted_calls) == 3
 
 
+def test_image_activation_accepts_fly_cli_false_negative_after_update(
+    tmp_path: Path,
+) -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    function_start = cloud.index("machine_state_for_activation() {")
+    activation_start = cloud.index("activate_machine_environment() {", function_start)
+    function_end = cloud.index("\n}\n", activation_start) + 3
+    activation_functions = cloud[function_start:function_end]
+    calls_file = tmp_path / "calls"
+    list_calls_file = tmp_path / "list-calls"
+    list_calls_file.write_text("0")
+    image_ref = "registry.fly.io/bench:current"
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
+APP=bench
+assert_app_environment_lock_ownership() {{ return 0; }}
+FLY() {{
+  if [ "$1 $2" = "machines list" ]; then
+    list_call=$(( $(cat "$LIST_CALLS_FILE") + 1 ))
+    printf '%s' "$list_call" > "$LIST_CALLS_FILE"
+    case "$list_call" in
+      1) state=stopped; image=previous ;;
+      2) state=replacing; image=current ;;
+      *) state=stopped; image=current ;;
+    esac
+    printf '[{{"id":"machine-1","state":"%s","config":{{"image":"registry.fly.io/bench:%s@sha256:abc"}}}}]\n' "$state" "$image"
+    return 0
+  fi
+  printf '%s\n' "$*" >> "$CALLS_FILE"
+  echo "machine failed to reach desired start state, and restart policy was set to no restart"
+  return 1
+}}
+{activation_functions}
+activate_machine_environment machine-1 warm {image_ref}
+""",
+        ],
+        env={
+            "CALLS_FILE": str(calls_file),
+            "LIST_CALLS_FILE": str(list_calls_file),
+            "CLOUDBENCH_IMAGE_SETTLE_RETRY_DELAY": "0",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert len(calls_file.read_text().splitlines()) == 1
+    assert int(list_calls_file.read_text()) >= 4
+    assert "provider confirms desired image" in result.stdout
+
+
 def test_pool_activation_rechecks_state_and_never_updates_concurrent_runs(tmp_path: Path) -> None:
     cloud = CLOUD_SCRIPT.read_text()
     function_start = cloud.index("machine_state_for_activation() {")
@@ -813,16 +869,113 @@ environment_activation_targets
     assert malformed.returncode != 0
 
 
-def test_environment_refresh_serializes_shared_app_and_reconciles_pool_first() -> None:
+def test_setup_refreshes_existing_warm_and_pool_machine_images(tmp_path: Path) -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    function_start = cloud.index("activate_owned_machine_images() {")
+    function_end = cloud.index("\n}\n", function_start) + 3
+    refresh_function = cloud[function_start:function_end]
+    calls_file = tmp_path / "calls"
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
+environment_activation_targets() {{
+  printf 'warm\\twarm-1\\npool\\tpool-1\\n'
+}}
+activate_machine_environment() {{
+  printf '%s|%s|%s\\n' "$1" "$2" "$3" >> "$CALLS_FILE"
+}}
+{refresh_function}
+activate_owned_machine_images registry.fly.io/bench:new
+""",
+        ],
+        env={"CALLS_FILE": str(calls_file)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert calls_file.read_text().splitlines() == [
+        "warm-1|warm|registry.fly.io/bench:new",
+        "pool-1|pool|registry.fly.io/bench:new",
+    ]
+    setup_start = cloud.index('if [ "$MODE" = "setup" ]; then')
+    setup_end = cloud.index("# MODE: --refresh-wmh", setup_start)
+    setup = cloud[setup_start:setup_end]
+    assert setup.index('activate_owned_machine_images "$IMAGE_REF"') < setup.index(
+        'start_machine "$mid"'
+    )
+
+
+def test_warm_resolver_ignores_live_cached_pool_machine(tmp_path: Path) -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    function_start = cloud.index("resolve_machine_id() {")
+    function_end = cloud.index("\n}\n", function_start) + 3
+    resolver = cloud[function_start:function_end]
+    state_file = tmp_path / "cloudbench-machine.json"
+    state_file.write_text(json.dumps({"machine_id": "pool-1"}))
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
+FLEET_MACHINE_ID=
+STATE_FILE="$STATE_FILE_PATH"
+MACHINE_NAME=cloudbench-warm
+_machines_json() {{
+  printf '[{{"id":"pool-1","name":"pool-machine"}},{{"id":"warm-1","name":"cloudbench-warm"}}]\n'
+}}
+{resolver}
+resolve_machine_id
+""",
+        ],
+        env={"STATE_FILE_PATH": str(state_file)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "warm-1"
+
+
+def test_setup_fetch_trusts_only_the_rose_owned_warm_checkout() -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    setup_start = cloud.index('if [ "$MODE" = "setup" ]; then')
+    setup_end = cloud.index("# MODE: --refresh-wmh", setup_start)
+    setup = cloud[setup_start:setup_end]
+
+    assert (
+        setup.count(
+            "git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO'"
+        )
+        >= 2
+    )
+    assert "git config --global --add safe.directory" not in setup
+    assert r'\"\$GITHUB_TOKEN\"' in setup
+    assert 'CLONE_CMD_B64=' in setup
+    assert "base64 -d | bash" in setup
+    assert '-C "bash -lc \\"printf' in setup
+    assert 'if ! clone_output="$(FLY ssh console' in setup
+    assert "GH_TOKEN=%q" not in setup
+
+
+def test_environment_mutation_is_maintenance_only_and_run_path_read_only() -> None:
     cloud = CLOUD_SCRIPT.read_text()
     fleet = FLEET_SCRIPT.read_text()
 
+    # Maintenance ops (--setup / --refresh-wmh / --refresh-secrets) remain the
+    # ONLY paths that mutate the shared app environment, and they still
+    # serialize behind the cross-worktree app-environment lock.
     assert 'APP_ENV_LOCK_FILE="$GIT_COMMON_DIR/cloudbench-app-env.lock"' in cloud
     assert 'shlock -p "$$" -f "$APP_ENV_LOCK_FILE"' in cloud
     wrapper_start = cloud.index("inject_secrets() {")
     wrapper_end = cloud.index("\n}\n", wrapper_start)
     wrapper = cloud[wrapper_start:wrapper_end]
-    assert "assert_app_environment_lock_ownership" in wrapper
     assert wrapper.index("acquire_app_environment_lock") < wrapper.index(
         "( _inject_secrets_locked )"
     )
@@ -832,25 +985,32 @@ def test_environment_refresh_serializes_shared_app_and_reconciles_pool_first() -
     locked_start = cloud.index("_inject_secrets_locked() {")
     locked_end = cloud.index("\n}\n", locked_start)
     assert 'FLY secrets set --stage -a "$APP"' in cloud[locked_start:locked_end]
+    assert "CLOUDBENCH_HOLD_APP_ENV_LOCK=1" in cloud
+    assert cloud.count("assert_app_environment_lock_ownership || exit 1") >= 2
 
-    refresh_call = 'bash scripts/run-bench-cloud --refresh-secrets'
-    assert fleet.index("reconcile_pool || exit 1") < fleet.index(refresh_call)
-    assert fleet.index(refresh_call) < fleet.index('cid="$(claim_pool_machine)"')
-    allocation_start = fleet.index("# ── Clone one machine per bench")
-    allocation_end = fleet.index('[ "${#CHILD_PIDS[@]}" -ge 1 ]', allocation_start)
-    allocation = fleet[allocation_start:allocation_end]
-    assert "release_app_environment_lock" in allocation
-    assert "CLOUDBENCH_APP_ENV_LOCK_OWNER_PID" in fleet
+    # The RUN path is concurrent-workstream safe: it reconciles its own pool,
+    # then READ-ONLY verifies the shared environment. It never refreshes it,
+    # never inherits another process's lock ownership, and never references
+    # the app-environment lock at all.
+    verify_call = "bash scripts/run-bench-cloud --verify-secrets"
+    assert fleet.index("reconcile_pool || exit 1") < fleet.index(verify_call)
+    assert fleet.index(verify_call) < fleet.index('cid="$(claim_pool_machine)"')
+    assert "run-bench-cloud --refresh-secrets;" not in fleet
+    assert "APP_ENV_LOCK" not in fleet
+    assert "acquire_app_environment_lock" not in fleet
+    assert "CLOUDBENCH_APP_ENV_LOCK_OWNER_PID" not in cloud
     assert 'clone_machine_target "$out/worker-clones.ids" "$primary_id"' in fleet
+    verify_start = cloud.index("verify_app_environment() {")
+    verify_end = cloud.index("\n}\n", verify_start)
+    verify = cloud[verify_start:verify_end]
+    assert 'FLY secrets list -a "$APP" --json' in verify
+    assert "secrets set" not in verify
 
     stop_cleanup_start = cloud.index("stop_on_exit() {")
     stop_cleanup_end = cloud.index("\n}", stop_cleanup_start)
     stop_cleanup = cloud[stop_cleanup_start:stop_cleanup_end]
-    assert stop_cleanup.index('stop_machine "$mid"') < stop_cleanup.index(
-        "release_app_environment_lock"
-    )
-    assert "CLOUDBENCH_HOLD_APP_ENV_LOCK=1" in cloud
-    assert cloud.count("assert_app_environment_lock_ownership || exit 1") >= 3
+    assert 'stop_machine "$mid"' in stop_cleanup
+    assert "release_app_environment_lock" not in stop_cleanup
 
     cleanup_start = fleet.index("cleanup() {")
     cleanup_end = fleet.index("\n}", cleanup_start)
@@ -859,13 +1019,18 @@ def test_environment_refresh_serializes_shared_app_and_reconciles_pool_first() -
     assert cleanup.index("trap '' HUP INT TERM") < cleanup.index(
         "terminate_and_wait"
     )
-    assert 'terminate_and_wait "${AUTOSCALER_PIDS[@]:-}"' in cleanup
-    assert 'terminate_and_wait "${CHILD_PIDS[@]:-}"' in cleanup
-    assert cleanup.index("terminate_and_wait") < cleanup.index(
-        "release_app_environment_lock"
-    )
+    assert (
+        'cloudbench_terminate_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" '
+        '"${AUTOSCALER_PIDS[@]:-}"'
+    ) in cleanup
+    assert (
+        'cloudbench_terminate_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" '
+        '"${CHILD_PIDS[@]:-}"'
+    ) in cleanup
     assert 'CLOUDBENCH_CHILD_TERM_SECONDS:-30' in fleet
-    assert 'kill -KILL "$p"' in fleet
+    helper = ENV_HELPER_SCRIPT.read_text()
+    assert "cloudbench_terminate_and_wait() {" in helper
+    assert 'kill -KILL "$pid"' in helper
     assert "trap 'exit 129' HUP" in fleet
     assert "trap 'exit 129' HUP" in cloud
 

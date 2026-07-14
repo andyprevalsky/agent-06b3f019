@@ -61,6 +61,31 @@ if cloudbench_retry_command 3 0 always_fail >/dev/null 2>&1; then
 fi
 [ "$retry_attempts" -eq 3 ] || fail "a permanent failure must exhaust its retry budget"
 
+# A completed child must not leave cleanup waiting on a cancel-resistant timer.
+# The old `(sleep 30; kill -KILL ...) &` watchdog blocked for its full duration
+# under macOS Bash 3.2 even after the controller tried to cancel it.
+termination_ready="$TMP_ROOT/termination-ready"
+perl -e '$SIG{TERM}=sub{exit 0}; open my $fh, ">", $ARGV[0] or die $!; close $fh; sleep 30' "$termination_ready" &
+terminating_pid=$!
+for _ in $(seq 1 100); do
+  [ -e "$termination_ready" ] && break
+  sleep 0.01
+done
+[ -e "$termination_ready" ] || fail "the termination test child must become ready"
+termination_start="$SECONDS"
+cloudbench_terminate_and_wait 5 "$terminating_pid" ""
+termination_elapsed=$((SECONDS - termination_start))
+[ "$termination_elapsed" -lt 5 ] ||
+  fail "a TERM-responsive child must be reaped before the escalation deadline (elapsed=${termination_elapsed}s)"
+if kill -0 "$terminating_pid" 2>/dev/null; then
+  fail "the terminated child must not survive cleanup"
+fi
+termination_start="$SECONDS"
+cloudbench_terminate_and_wait 5 ""
+termination_elapsed=$((SECONDS - termination_start))
+[ "$termination_elapsed" -lt 2 ] ||
+  fail "an empty PID list must return immediately (elapsed=${termination_elapsed}s)"
+
 machine_states="$TMP_ROOT/machine-states"
 printf 'created\ncreated\nstopped\n' > "$machine_states"
 read_machine_state() {
@@ -122,138 +147,37 @@ fi
 cloudbench_controller_lock_release "$lock_file"
 [ ! -e "$lock_file" ] || fail "controller lock must be removed by its owner"
 
-cloud_lease_state="$TMP_ROOT/cloud-lease"
-cloud_lease_calls="$TMP_ROOT/cloud-lease-calls"
-cloud_lease_get_failure="$TMP_ROOT/cloud-lease-get-failure"
-CLOUDBENCH_MACHINES_API_TOKEN="test-token"
-cloudbench_machines_api_request() {
-  local method="$1" path="$2" body="${3:-}" nonce="${4:-}"
-  printf '%s|%s|%s|%s\n' "$method" "$path" "$body" "$nonce" >> "$cloud_lease_calls"
-  case "$method|$path" in
-    'GET|/v1/apps/bench-app/machines')
-      if [ -e "$cloud_lease_get_failure" ]; then
-        CLOUDBENCH_API_STATUS=503
-        CLOUDBENCH_API_BODY='{"error":"unavailable"}'
-        return 1
-      fi
-      CLOUDBENCH_API_STATUS=200
-      CLOUDBENCH_API_BODY='[{"id":"lock-machine","name":"cloudbench-controller-lock"}]'
-      ;;
-    'POST|/v1/apps/bench-app/machines/lock-machine/lease')
-      if [ -e "$cloud_lease_state" ]; then
-        CLOUDBENCH_API_STATUS=409
-        CLOUDBENCH_API_BODY='{"error":"lease held"}'
-      else
-        : > "$cloud_lease_state"
-        CLOUDBENCH_API_STATUS=201
-        CLOUDBENCH_API_BODY='{"data":{"nonce":"lease-nonce"}}'
-      fi
-      ;;
-    'DELETE|/v1/apps/bench-app/machines/lock-machine/lease')
-      [ "$nonce" = "lease-nonce" ] || fail "cloud lock release omitted its lease nonce"
-      rm -f "$cloud_lease_state"
-      CLOUDBENCH_API_STATUS=200
-      CLOUDBENCH_API_BODY='{"ok":true}'
-      ;;
-    *) fail "unexpected mocked Machines API request: $method $path" ;;
-  esac
-}
-cloudbench_cloud_lock_acquire bench-app
-[ "$CLOUDBENCH_CLOUD_LOCK_MACHINE_ID" = "lock-machine" ] ||
-  fail "cloud lock must bind the shared sentinel"
-[ "$CLOUDBENCH_CLOUD_LOCK_NONCE" = "lease-nonce" ] ||
-  fail "cloud lock must retain the provider nonce"
-if (cloudbench_cloud_lock_acquire bench-app >/dev/null 2>&1); then
-  fail "a second controller must not acquire an occupied Fly sentinel lease"
+# Concurrent-workstream contract: the RUN path takes only the workspace-local
+# controller lock and treats shared app state as READ-ONLY. Cross-host leases
+# and per-run env refreshes were removed on purpose — a second workstream must
+# never be blocked by (or race) another's run.
+if grep -Fq -- 'cloudbench_controller_acquire' "$ROOT_DIR/scripts/run-bench-fleet"; then
+  fail "fleet controllers must not take the cross-host Fly sentinel lease (workspace-local lock only)"
 fi
-cloudbench_cloud_lock_release bench-app
-require_text "$cloud_lease_calls" \
-  'DELETE|/v1/apps/bench-app/machines/lock-machine/lease||lease-nonce' \
-  "cloud lock release must authenticate with its provider nonce"
-
-# Failure typing must come from the current acquisition stage, never a stale
-# API status left by an earlier 409. Otherwise a real outage loops as "busy".
-stale_status_lock="$TMP_ROOT/stale-status-controller.lock"
-: > "$cloud_lease_state"
-CLOUDBENCH_MACHINES_API_TOKEN="test-token"
-if cloudbench_controller_acquire "$stale_status_lock" bench-app >/dev/null 2>&1; then
-  fail "an occupied cloud lease must not be acquired"
+if grep -Fq -- 'cloudbench_cloud_lock_acquire' "$HELPER_SRC"; then
+  fail "the removed cross-host sentinel lease must not return to the shared helpers"
 fi
-[ "$CLOUDBENCH_CONTROLLER_ACQUIRE_REASON" = "cloud_busy" ] ||
-  fail "an occupied cloud lease must be typed as cloud_busy"
-rm -f "$cloud_lease_state"
-: > "$cloud_lease_get_failure"
-if cloudbench_controller_acquire "$stale_status_lock" bench-app >/dev/null 2>&1; then
-  fail "a sentinel API outage must not acquire the controller"
+if grep -Fq -- 'run-bench-cloud --refresh-secrets;' "$ROOT_DIR/scripts/run-bench-fleet"; then
+  fail "the fleet run path must not refresh (mutate) the shared environment — verify only"
 fi
-[ "$CLOUDBENCH_CONTROLLER_ACQUIRE_REASON" = "cloud_api_error" ] ||
-  fail "a sentinel API outage was misclassified using stale 409 state"
-[ ! -e "$stale_status_lock" ] || fail "API failure leaked the local controller lock"
-rm -f "$cloud_lease_get_failure"
-
-# A local lock setup error is not contention and must fail immediately.
-if cloudbench_controller_wait_acquire /dev/null/controller.lock bench-app >/dev/null 2>&1; then
-  fail "a local lock filesystem error must not enter the contention queue"
-fi
-[ "$CLOUDBENCH_CONTROLLER_ACQUIRE_REASON" = "local_error" ] ||
-  fail "a local lock filesystem error must be typed as local_error"
-
-# A legitimate sibling controller holds the app-wide lease while another
-# workspace queues its fleet. The queued controller must wait for handoff
-# instead of turning the Hub request into seven placeholder failures.
-wait_lock_file="$TMP_ROOT/waiting-controller.lock"
-: > "$cloud_lease_state"
-CLOUDBENCH_MACHINES_API_TOKEN="test-token"
-( sleep 0.05; rm -f "$cloud_lease_state" ) & lease_releaser_pid=$!
-CLOUDBENCH_CONTROLLER_RETRY_INTERVAL=0.01 \
-  cloudbench_controller_wait_acquire "$wait_lock_file" bench-app >/dev/null
-wait "$lease_releaser_pid"
-[ -e "$cloud_lease_state" ] || fail "waiting controller never acquired the released cloud lease"
-cloudbench_controller_release "$wait_lock_file" bench-app
-[ ! -e "$wait_lock_file" ] || fail "waiting controller did not release its local lock"
-
-# Signals in the startup window (after lease acquisition but before the fleet's
-# full cleanup trap) must release both the provider lease and local lock.
-signal_lock_file="$TMP_ROOT/signal-controller.lock"
-signal_ready_file="$TMP_ROOT/signal-controller.ready"
-CLOUDBENCH_MACHINES_API_TOKEN="test-token"
-(
-  cloudbench_controller_install_release_guard "$signal_lock_file" bench-app
-  cloudbench_controller_wait_acquire "$signal_lock_file" bench-app >/dev/null
-  : > "$signal_ready_file"
-  while :; do sleep 1; done
-) & signal_controller_pid=$!
-for _ in $(seq 1 100); do
-  [ -e "$signal_ready_file" ] && break
-  sleep 0.01
-done
-[ -e "$signal_ready_file" ] || fail "signal-guard controller never acquired its lease"
-kill -TERM "$signal_controller_pid"
-signal_status=0
-wait "$signal_controller_pid" || signal_status=$?
-[ "$signal_status" -eq 143 ] || fail "signal-guard controller returned $signal_status instead of 143"
-[ ! -e "$cloud_lease_state" ] || fail "signal guard leaked the provider lease"
-[ ! -e "$signal_lock_file" ] || fail "signal guard leaked the local controller lock"
-unset CLOUDBENCH_MACHINES_API_TOKEN
-
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
-  'bash scripts/run-bench-cloud --refresh-secrets' \
-  "fleet controller must refresh the environment once before cloning"
+  'bash scripts/run-bench-cloud --verify-secrets' \
+  "fleet controller must read-only verify the environment before cloning"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
-  'CLOUDBENCH_PARENT_LOCK_HELD=1' \
-  "fleet environment refresh must declare the controller lock it already owns"
+  'cloudbench_controller_lock_acquire "$LOCK_DIR"' \
+  "fleet controllers must hold the workspace-local controller lock"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
-  'CLOUDBENCH_ENV_REFRESHED=1' \
-  "fleet children must receive proof that the controller refreshed the environment"
+  'CLOUDBENCH_ENV_VERIFIED=1' \
+  "fleet children must receive proof that the controller verified the environment"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
-  'cloudbench_controller_wait_acquire "$LOCK_DIR" "$APP"' \
-  "fleet controllers must acquire the cross-host Fly sentinel lease"
-require_text "$ROOT_DIR/scripts/run-bench-fleet" \
-  'cloudbench_controller_install_release_guard "$LOCK_DIR" "$APP"' \
-  "fleet startup must guard controller leases before full cleanup is installed"
-require_text "$ROOT_DIR/scripts/run-bench-fleet" \
-  'cloudbench_controller_release "$LOCK_DIR" "$APP"' \
-  "fleet cleanup must release the cross-host Fly sentinel lease"
+  'set -C; printf '"'"'%s\n'"'"' "$$" > "$claim_path"' \
+  "pool claims must be atomic (noclobber) so concurrent controllers cannot double-claim"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'verify_app_environment' \
+  "run-bench-cloud must expose the read-only environment preflight"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'FLY secrets list -a "$APP" --json' \
+  "the environment preflight must be a read-only secrets listing"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'FLY secrets set --stage -a "$APP"' \
   "Machines API apps must stage the app-level environment before machine updates"
@@ -261,8 +185,14 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'transient Fly update failure; retrying machine $machine_id' \
   "machine environment activation must retry transient Fly API failures"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'FLY machine update "$machine_id" -a "$APP" --skip-start --yes' \
+  'update_args=(machine update "$machine_id" -a "$APP")' \
+  "every owned benchmark machine must build a scoped Fly update command"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'update_args+=(--skip-start --yes)' \
   "every owned benchmark machine must activate staged secrets without starting"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'update_args+=(--image "$image_ref")' \
+  "dependency image refresh must reuse the stopped-machine activation boundary"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'activation_targets="$(environment_activation_targets)"' \
   "environment activation must be scoped to the owned warm source and pool"

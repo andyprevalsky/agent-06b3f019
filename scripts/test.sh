@@ -155,8 +155,9 @@ ls -1dt "$REPO_ROOT/.test-logs"/*/ 2>/dev/null | tail -n +11 | xargs -I{} rm -rf
 
 run_suite() {
   local name="$1"
+  local logfile
   shift
-  local logfile="$TMPDIR_BASE/$(echo "$name" | tr ' ()' '___').log"
+  logfile="$TMPDIR_BASE/$(echo "$name" | tr ' ()' '___').log"
 
   if $VERBOSE; then
     echo ""
@@ -190,8 +191,9 @@ BG_LOGS=()
 
 bg_suite() {
   local name="$1"
+  local logfile
   shift
-  local logfile="$TMPDIR_BASE/$(echo "$name" | tr ' ()' '___').log"
+  logfile="$TMPDIR_BASE/$(echo "$name" | tr ' ()' '___').log"
 
   if $VERBOSE; then
     # Use pipefail so tee doesn't mask the command's exit code
@@ -235,6 +237,7 @@ fi
 run_suite "Claude Review Fallback" bash scripts/tests/claude-review-fallback.test.sh
 run_suite "Cloud Benchmark Environment" bash scripts/tests/cloudbench-env.test.sh
 run_suite "Cloud Benchmark Git Fetch" bash scripts/tests/cloudbench-fetch-ref.test.sh
+run_suite "Cloud Benchmark Multi-Workstream" bash scripts/tests/cloudbench-multi-workstream.test.sh
 
 # ── Build checks (run in parallel with blackbox tests) ──
 BUILD_PIDS=()
