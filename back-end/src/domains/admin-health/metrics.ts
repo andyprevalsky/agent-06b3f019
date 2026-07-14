@@ -295,12 +295,9 @@ export function buildSeries(
     const index = findPeriodIndex(periods, signup.createdAt);
     if (index >= 0) waitlistSignupsByPeriod[index] += 1;
   }
+  const emptySubscriber: SubscriberSeriesPoint = { userCount: 0, newUsers: 0, userIds: new Set() };
   return periods.map((period, index) => {
-    const subscriberPoint = subscribers[index] ?? {
-      userCount: 0,
-      newUsers: 0,
-      userIds: new Set<string>(),
-    };
+    const subscriberPoint = subscribers[index] ?? emptySubscriber;
     const periodTasks = tasksByPeriod[index].filter((task) =>
       subscriberPoint.userIds.has(task.userId)
     );
