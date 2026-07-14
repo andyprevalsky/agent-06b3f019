@@ -135,8 +135,17 @@ export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
       }
 
       const attempt = reconnectAttemptRef.current;
-      const delay = Math.min(1000 * Math.pow(2, attempt), MAX_RECONNECT_DELAY_MS);
       reconnectAttemptRef.current += 1;
+
+      // The FIRST reconnect after a drop fires immediately — a transient
+      // CHANNEL_ERROR should self-heal without a visible stall (updates only
+      // resume, and missed messages are backfilled, once we re-subscribe).
+      // Only repeated consecutive failures back off exponentially (with jitter,
+      // to avoid all channels retrying in lockstep) so a real outage doesn't
+      // hot-loop. reconnectAttemptRef resets to 0 on any successful (re)join.
+      const backoff =
+        attempt === 0 ? 0 : Math.min(1000 * Math.pow(2, attempt - 1), MAX_RECONNECT_DELAY_MS);
+      const delay = backoff === 0 ? 0 : backoff + Math.floor(Math.random() * 250);
 
       reconnectTimeoutRef.current = window.setTimeout(() => {
         setForceResubscribeCounter((prev) => prev + 1);
