@@ -54,6 +54,7 @@ const PhoneAuthModal = ({
   onOpenChange,
   onAuthComplete,
   anonymousUserId,
+  title,
 }: PhoneAuthModalProps) => {
   const auth = usePhoneAuth(onOpenChange, onAuthComplete, anonymousUserId);
 
@@ -70,6 +71,7 @@ const PhoneAuthModal = ({
             loading={auth.loading}
             onSubmit={auth.handleSendOTP}
             onClose={auth.handleClose}
+            title={title}
           />
         )}
         {auth.step === 'otp' && (

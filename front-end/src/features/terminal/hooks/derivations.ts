@@ -13,6 +13,7 @@ import type {
   Model,
   BrowserPanelData,
   PendingApproval,
+  PendingGate,
 } from '../types';
 
 // ── Context window helpers ────────────────────────────────────────────────
@@ -114,7 +115,9 @@ export function sortAgents(agents: Agent[]): Agent[] {
 
 const TERMINAL_BROWSER_ACTION_TYPES = new Set(['task_complete', 'session_paused']);
 const TERMINAL_BROWSER_TOOL_STATUSES = new Set(['FINISHED', 'ERROR']);
+const LEGACY_TERMINAL_BROWSER_ACTION_TYPES = new Set(['system']);
 const BROWSER_INIT_ACTION_TYPES = new Set(['browser', 'system', 'session_started']);
+const BROWSER_CLEANUP_ACTION_TYPES = new Set(['diagnostics', 'network_recording', 'recording']);
 
 function isBrowserInitMessage(message: Message): boolean {
   const actionType = message.metadata?.action_type;
@@ -135,9 +138,23 @@ function isBrowserTaskTerminalMessage(message: Message): boolean {
   return (
     message.metadata?.toolName === 'spawn_browser_agent' &&
     message.metadata?.subAgentId == null &&
+    (actionType == null || LEGACY_TERMINAL_BROWSER_ACTION_TYPES.has(actionType)) &&
     typeof message.metadata?.toolStatus === 'string' &&
     TERMINAL_BROWSER_TOOL_STATUSES.has(message.metadata.toolStatus)
   );
+}
+
+function getBrowserMessageTimestamp(message: Message): number {
+  const timestamp = Date.parse(message.timestamp);
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function compareBrowserMessageOrder(a: Message, b: Message): number {
+  const timestampDelta = getBrowserMessageTimestamp(a) - getBrowserMessageTimestamp(b);
+  if (timestampDelta !== 0) return timestampDelta;
+  if (a.message_id < b.message_id) return -1;
+  if (a.message_id > b.message_id) return 1;
+  return 0;
 }
 
 /**
@@ -145,10 +162,13 @@ function isBrowserTaskTerminalMessage(message: Message): boolean {
  *
  * spawn_browser_agent init/browser/system/session_started
  *   -> [VISIBLE_STATUS_CHIP]
+ *   -> browser URL events --sort by persisted event time--> [LATEST_LIVE_VIEW]
+ *      (API hydration/realtime delivery order does not affect the selected URL)
  *   -> task-scoped browser progress messages
  *   -> terminal message:
  *        - action_type task_complete/session_paused, or
- *        - spawn_browser_agent toolStatus FINISHED/ERROR
+ *        - legacy system/untyped spawn_browser_agent toolStatus FINISHED/ERROR
+ *   -> auth_assistance FINISHED remains non-terminal and resumes this task
  *   -> [HIDDEN_STATUS_CHIP]
  */
 export function computeActiveBrowserPanels(messages: Message[]): BrowserPanelData[] {
@@ -172,9 +192,19 @@ export function computeActiveBrowserPanels(messages: Message[]): BrowserPanelDat
   });
 
   browserTaskIds.forEach((taskId) => {
-    const taskMessages = messages.filter((m) => m.metadata?.task_id === taskId);
+    const taskMessages = messages
+      .filter((m) => m.metadata?.task_id === taskId)
+      .sort(compareBrowserMessageOrder);
     const initMessage = taskMessages.find(isBrowserInitMessage);
     const initToolCallId = initMessage?.metadata?.toolCallId;
+    const latestBrowserMessage = [...taskMessages]
+      .reverse()
+      .find(
+        (m) =>
+          typeof m.metadata?.browser_url === 'string' &&
+          m.metadata.browser_url !== '' &&
+          !BROWSER_CLEANUP_ACTION_TYPES.has(m.metadata.action_type ?? ''),
+      );
 
     const hasTerminalTaskMessage = taskMessages.some(isBrowserTaskTerminalMessage);
 
@@ -185,7 +215,8 @@ export function computeActiveBrowserPanels(messages: Message[]): BrowserPanelDat
     if (!isComplete && initMessage) {
       panels.push({
         taskId,
-        browserUrl: initMessage.metadata?.browser_url || '',
+        browserUrl:
+          latestBrowserMessage?.metadata?.browser_url || initMessage.metadata?.browser_url || '',
       });
     }
   });
@@ -247,4 +278,31 @@ export function deriveHasActiveAttentionRequest(messages: Message[]): boolean {
   return Array.from(attentionByToolCallId.values()).some(
     (m) => m.metadata?.toolStatus === 'IN_PROGRESS',
   );
+}
+
+// ── Gate derivation ──────────────────────────────────────────────────────
+
+export function derivePendingGates(messages: Message[]): PendingGate[] {
+  const gateByKey = new Map<string, Message>();
+
+  for (const m of messages) {
+    if (!m.metadata?.gate) continue;
+    const gateRecord = m.metadata.gate as { gateKey?: unknown };
+    const attentionRequestId = m.metadata.attentionRequestId;
+    if (typeof attentionRequestId !== 'string') continue;
+
+    const key = typeof gateRecord.gateKey === 'string' ? gateRecord.gateKey : attentionRequestId;
+    const existing = gateByKey.get(key);
+    if (!existing || new Date(m.timestamp) > new Date(existing.timestamp)) {
+      gateByKey.set(key, m);
+    }
+  }
+
+  return Array.from(gateByKey.values())
+    .filter((m) => m.metadata?.toolStatus === 'IN_PROGRESS')
+    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+    .map((m) => ({
+      attentionRequestId: m.metadata?.attentionRequestId as string,
+      gate: m.metadata?.gate as PendingGate['gate'],
+    }));
 }

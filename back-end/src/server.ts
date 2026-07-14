@@ -40,15 +40,21 @@ import purchasesRouter, { agentCardWebhookHandler } from './domains/purchases/ro
 import agentcardRouter from './domains/agentcard/routes';
 import testPaymentRouter from './domains/test-payment/routes';
 import {
+  PROACTIVE_SMS_CRON_EXPRESSION,
+  PROACTIVE_SMS_TIME_ZONE,
   setSupervisorFixtureOverride,
   clearSupervisorFixtureOverride,
+  runProactiveSmsOutreachJob,
+  runProactiveSmsOutreachJobWithLease,
 } from './providers/smsSupervisor';
 import vcardRouter from './domains/vcard/routes';
 import uploadRouter from './domains/upload/routes';
 import feedbackRouter from './domains/feedback/routes';
+import adminHealthRouter from './domains/admin-health/routes';
 import imessageRouter from './domains/imessage/routes';
 import dataRouter from './domains/data/routes';
 import benchmarksRouter from './domains/benchmarks/routes';
+import { ensureBenchmarkTasksSeeded } from './domains/benchmarks/service';
 import fastCacheRouter from './domains/fast-cache/routes';
 import archiveRouter from './domains/archive/routes';
 import worldModelsRouter from './domains/world-models/routes';
@@ -58,43 +64,8 @@ import { createLogger } from './providers/logger';
 import { installFetchCapture, captureTokenMiddleware } from './providers/fetchCapture';
 import { tracingMiddleware } from './providers/tracing';
 import { getTemporalClient } from './providers/temporal';
-
-// System tools available to all Rose agents (mirrors the live tool registry in
-// agents/tools/). Drives the public Bazaar listing description below.
-const SYSTEM_TOOLS = [
-  { name: 'web_search', description: 'Search the web for information using Perplexity AI' },
-  { name: 'web_fetch', description: 'Fetch and extract content from a specific URL' },
-  { name: 'spawn_sub_agents', description: 'Spawn sub-agents for delegating complex subtasks' },
-  { name: 'spawn_browser_agent', description: 'Spawn autonomous browser agent for web tasks' },
-  {
-    name: 'spawn_claude_code_agent',
-    description: 'Spawn Claude Code or Codex agent in E2B sandbox for coding tasks',
-  },
-  { name: 'call_phone_number', description: 'Place an automated phone call to a target number' },
-  { name: 'knowledge_base', description: 'Search and retrieve from the user knowledge base' },
-  { name: 'read_message_history', description: "Read the user's recent message history" },
-  {
-    name: 'message_person',
-    description: 'Send messages via iMessage or email with AI-generated content',
-  },
-  {
-    name: 'send_message_to_user',
-    description: 'Message the user (optionally blocking for a reply)',
-  },
-  {
-    name: 'request_user_approval',
-    description: 'Request explicit user approval before continuing',
-  },
-  { name: 'wait_for', description: 'Wait for a specific event or condition' },
-  { name: 'wait_seconds', description: 'Pause execution for a specified duration' },
-];
-
-// Build dynamic Bazaar description with all tools
-const BAZAAR_DESCRIPTION = `Spawn an autonomous Rose agent cluster of up to 10,000 agents to complete any arbitrarily complex task. Each Rose agent has access to the following tools:
-
-${SYSTEM_TOOLS.map((t) => `• ${t.name}: ${t.description}`).join('\n')}
-
-Pay with USDC on Base network. Credits are consumed as the agent works. Top up anytime to continue.`;
+import { isCorsOriginAllowed, resolveAllowedOrigins } from './providers/corsConfig';
+import { BAZAAR_DESCRIPTION } from './providers/bazaarDescription';
 import cron from 'node-cron';
 import { runGmailSyncJob } from './services/integrations/gmailSync';
 import { runPlaidTransactionSyncJob } from './domains/integrations/service.plaidTransactions';
@@ -172,19 +143,9 @@ app.use(
   })
 ); // Increased to handle large encrypted payloads
 
-// CORS configuration - allow all localhost origins for development
-const defaultOrigins = [
-  'http://localhost:8080',
-  'http://127.0.0.1:8080',
-  'http://localhost:5173',
-  'http://localhost:5174',
-  'http://localhost:3002',
-  'http://localhost:8081',
-];
-
-const allowedOrigins = process.env.ALLOWED_ORIGINS
-  ? process.env.ALLOWED_ORIGINS.split(',').map((o) => o.trim())
-  : defaultOrigins;
+// Production must explicitly authorize both public web origins. A missing or
+// partial value aborts startup so Render cannot promote a login-breaking release.
+const allowedOrigins = resolveAllowedOrigins(process.env);
 
 log.info('CORS Configuration', { allowed_origins: allowedOrigins.join(', ') });
 
@@ -194,26 +155,10 @@ app.use(
       origin: string | undefined,
       callback: (err: Error | null, allow?: boolean) => void
     ) => {
-      // Allow requests with no origin (like mobile apps or curl)
-      if (!origin) return callback(null, true);
-
-      // Check exact matches
-      if (allowedOrigins.indexOf(origin) !== -1) {
-        return callback(null, true);
-      }
-
-      // In development the frontend, mac app, and semantic tests can run on
-      // different localhost ports. Keep production pinned to the explicit list.
-      if (
-        process.env.NODE_ENV !== 'production' &&
-        /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin)
-      ) {
-        return callback(null, true);
-      }
-
-      // Allow Vercel preview URLs (*.vercel.app)
-      if (origin.endsWith('.vercel.app')) {
-        log.info('Allowed Vercel preview origin', { origin });
+      if (isCorsOriginAllowed(origin, allowedOrigins, process.env.NODE_ENV)) {
+        if (origin?.endsWith('.vercel.app') === true) {
+          log.info('Allowed configured or development Vercel preview origin', { origin });
+        }
         return callback(null, true);
       }
 
@@ -290,6 +235,57 @@ if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1') {
     res.json({ ok: true });
   });
   app.use('/api/test/sms-supervisor-fixture', fixtureRouter);
+
+  const proactiveSmsRouter = express.Router();
+  const parseProactiveSmsJobOptions = (body: unknown) => {
+    if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+      return null;
+    }
+    const { now: nowValue, userIds: userIdsValue } = body as {
+      now?: unknown;
+      userIds?: unknown;
+    };
+    const now =
+      nowValue === undefined
+        ? new Date()
+        : typeof nowValue === 'string'
+          ? new Date(nowValue)
+          : null;
+    const userIds =
+      userIdsValue === undefined
+        ? undefined
+        : Array.isArray(userIdsValue) &&
+            userIdsValue.every((value): value is string => typeof value === 'string')
+          ? userIdsValue
+          : null;
+    return now === null || Number.isNaN(now.getTime()) || userIds === null
+      ? null
+      : { now, candidateUserIds: userIds };
+  };
+  const rejectInvalidProactiveSmsOptions = (res: express.Response): void => {
+    res.status(400).json({ error: 'now must be an ISO date and userIds must be a string array' });
+  };
+  proactiveSmsRouter.post('/run', (req, res, next) => {
+    const options = parseProactiveSmsJobOptions(req.body);
+    if (options === null) {
+      rejectInvalidProactiveSmsOptions(res);
+      return;
+    }
+    runProactiveSmsOutreachJob(options)
+      .then((summary) => res.json(summary))
+      .catch(next);
+  });
+  proactiveSmsRouter.post('/run-leased', (req, res, next) => {
+    const options = parseProactiveSmsJobOptions(req.body);
+    if (options === null) {
+      rejectInvalidProactiveSmsOptions(res);
+      return;
+    }
+    runProactiveSmsOutreachJobWithLease(options)
+      .then((result) => res.json(result))
+      .catch(next);
+  });
+  app.use('/api/test/proactive-sms', proactiveSmsRouter);
 
   log.info('Fetch capture + supervisor fixture override enabled for blackbox tests');
 }
@@ -515,6 +511,7 @@ app.use('/api/billing', billingRouter);
 app.use('/api/api-keys', apiKeysRouter);
 app.use('/api/upload', uploadRouter);
 app.use('/api/feedback', feedbackRouter);
+app.use('/api/admin-health', adminHealthRouter);
 app.use('/api/data', dataRouter);
 app.use('/api/purchases', purchasesRouter);
 // AgentCard "for companies": org-managed cardholder onboarding plus the optional
@@ -578,6 +575,16 @@ app.listen(PORT, () => {
         });
       });
   }
+
+  // Seed the BenchmarkTask table from tasks.json (insert-missing only; the DB
+  // is the catalog's source of truth after seeding — hub edits survive).
+  // Catalog routes await the same memoized promise, so requests arriving
+  // before seeding completes wait instead of reading a partial catalog.
+  ensureBenchmarkTasksSeeded().catch((err: unknown) => {
+    log.warn('Benchmark task seed failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
   // Contract-test backends should not run unrelated background jobs.
   if (process.env.DISABLE_GMAIL_SYNC === '1') {
     createLogger('Cron').info('Gmail sync disabled by DISABLE_GMAIL_SYNC');
@@ -673,6 +680,35 @@ app.listen(PORT, () => {
     runWalletMonitor();
     cron.schedule('* * * * *', runWalletMonitor);
     cronLog.info('AgentCard org-wallet monitor scheduled (every minute)');
+  }
+
+  if (!isProduction || process.env.DISABLE_PROACTIVE_SMS === '1') {
+    createLogger('Cron').info('Proactive SMS outreach disabled', {
+      reason: !isProduction ? 'non-production' : 'DISABLE_PROACTIVE_SMS',
+    });
+  } else {
+    const cronLog = createLogger('Cron');
+    const runProactiveOutreach = () => {
+      cronLog.info('Running proactive SMS outreach job...');
+      runProactiveSmsOutreachJobWithLease()
+        .then((result) => {
+          if (!result.acquired) {
+            cronLog.info('Proactive SMS outreach skipped; another replica owns the lease');
+          }
+        })
+        .catch((err) => {
+          cronLog.error('Proactive SMS outreach job error', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+    };
+    cron.schedule(PROACTIVE_SMS_CRON_EXPRESSION, runProactiveOutreach, {
+      timezone: PROACTIVE_SMS_TIME_ZONE,
+    });
+    cronLog.info('Proactive SMS outreach scheduled', {
+      cron: PROACTIVE_SMS_CRON_EXPRESSION,
+      timezone: PROACTIVE_SMS_TIME_ZONE,
+    });
   }
 });
 

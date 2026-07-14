@@ -85,6 +85,7 @@ function BrowserStatusBarImpl({
         stepProgress={vm.stepProgress}
         isDisconnected={vm.isDisconnected}
         isWaitingForAuthAssistance={isWaitingForAuthAssistance}
+        authAssistanceRequest={vm.pendingAuthAssistance?.request}
         isResuming={ui.isResuming}
         pendingWriteLockApproval={vm.pendingWriteLockApproval}
         onClose={ui.onFullscreenClose}

@@ -98,14 +98,7 @@ export function useVideoStateMachine(cfg: VideoStateMachineConfig): void {
     v.addEventListener('seeked', onTick);
 
     return () => {
-      if (rafId != null) cancelAnimationFrame(rafId);
-      if (vfcId != null && typeof v.cancelVideoFrameCallback === 'function') {
-        try {
-          v.cancelVideoFrameCallback(vfcId);
-        } catch {
-          // ignore — some engines throw if id already cancelled
-        }
-      }
+      cancelScheduledFrame(v, rafId, vfcId);
       scheduled = false;
       v.removeEventListener('timeupdate', onTick);
       v.removeEventListener('seeked', onTick);
@@ -118,4 +111,14 @@ export function useVideoStateMachine(cfg: VideoStateMachineConfig): void {
     cfg.disableRampRef,
     cfg.memoryOffsetFramesRef,
   ]);
+}
+
+function cancelScheduledFrame(video: RVFCVideo, rafId: number | null, vfcId: number | null) {
+  if (rafId != null) cancelAnimationFrame(rafId);
+  if (vfcId == null || typeof video.cancelVideoFrameCallback !== 'function') return;
+  try {
+    video.cancelVideoFrameCallback(vfcId);
+  } catch {
+    // Some engines throw if the frame callback was already cancelled.
+  }
 }

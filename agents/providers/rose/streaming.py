@@ -29,7 +29,6 @@ This keeps them unit-testable in plain `pytest` and avoids circular deps when
 
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import Any, AsyncIterator, Dict, Optional, Protocol
 
@@ -143,6 +142,7 @@ async def parse_anthropic_sse(
     # Per-content-block state. Anthropic streams blocks one-at-a-time so a
     # single mutable slot is sufficient.
     current_block_kind: Optional[str] = None  # "text" | "thinking" | "tool_use"
+    current_block_index = 0
     current_tool_id: Optional[str] = None
     current_tool_name: Optional[str] = None
     current_tool_args: list[str] = []
@@ -207,6 +207,7 @@ async def parse_anthropic_sse(
             if event_type == "content_block_start":
                 block = event.get("content_block") or {}
                 block_type = block.get("type")
+                current_block_index = event.get("index") if isinstance(event.get("index"), int) else 0
                 if block_type == "tool_use":
                     current_block_kind = "tool_use"
                     current_tool_id = block.get("id")
@@ -228,7 +229,16 @@ async def parse_anthropic_sse(
                     text = delta.get("text") or ""
                     if text:
                         emitted_content_or_tool = True
-                        yield StreamChunk(kind="content", data={"text": text})
+                        yield StreamChunk(
+                            kind="content",
+                            data={
+                                "text": text,
+                                "item_id": f"anthropic:{current_block_index}",
+                                "output_index": current_block_index,
+                                "content_index": 0,
+                                "phase": "final_answer",
+                            },
+                        )
                 elif delta_type == "thinking_delta":
                     text = delta.get("thinking") or ""
                     if text:
@@ -239,7 +249,16 @@ async def parse_anthropic_sse(
                         # is gated at the caller via the "No JSON content
                         # received" raise, not here.
                         emitted_content_or_tool = True
-                        yield StreamChunk(kind="reasoning", data={"text": text})
+                        yield StreamChunk(
+                            kind="reasoning",
+                            data={
+                                "text": text,
+                                "item_id": f"anthropic:{current_block_index}",
+                                "output_index": current_block_index,
+                                "content_index": 0,
+                                "phase": "reasoning",
+                            },
+                        )
                 elif delta_type == "input_json_delta":
                     fragment = delta.get("partial_json") or ""
                     if fragment:
@@ -259,6 +278,7 @@ async def parse_anthropic_sse(
                         },
                     )
                 current_block_kind = None
+                current_block_index = 0
                 current_tool_id = None
                 current_tool_name = None
                 current_tool_args = []
@@ -402,11 +422,21 @@ async def parse_openai_sse(
 
             choice = choices[0]
             delta = choice.get("delta") or {}
+            choice_index = choice.get("index") if isinstance(choice.get("index"), int) else 0
 
             content = delta.get("content")
             if content:
                 emitted_content_or_tool = True
-                yield StreamChunk(kind="content", data={"text": content})
+                yield StreamChunk(
+                    kind="content",
+                    data={
+                        "text": content,
+                        "item_id": f"openai:choice:{choice_index}",
+                        "output_index": choice_index,
+                        "content_index": 0,
+                        "phase": "final_answer",
+                    },
+                )
 
             # Two key spellings exist in the wild:
             #   - `reasoning`         (TS edge function transforms to this)
@@ -417,7 +447,16 @@ async def parse_openai_sse(
                 # as emitted so thinking-model JSON-in-reasoning reaches the
                 # caller's extractor instead of stalling prematurely.
                 emitted_content_or_tool = True
-                yield StreamChunk(kind="reasoning", data={"text": reasoning_text})
+                yield StreamChunk(
+                    kind="reasoning",
+                    data={
+                        "text": reasoning_text,
+                        "item_id": f"openai:choice:{choice_index}",
+                        "output_index": choice_index,
+                        "content_index": 0,
+                        "phase": "reasoning",
+                    },
+                )
 
             for tc_delta in delta.get("tool_calls") or []:
                 index = tc_delta.get("index", 0)
@@ -498,19 +537,22 @@ async def parse_responses_sse(
     prompt_tokens = 0
     completion_tokens = 0
     total_tokens = 0
+    cache_write_tokens = 0
     cache_read_tokens = 0
     finish_reason = ""
     emitted_content_or_tool = False
     saw_done = False
+    output_items: Dict[str, Dict[str, Any]] = {}
 
     def apply_usage(usage: Optional[Dict[str, Any]]) -> None:
-        nonlocal prompt_tokens, completion_tokens, total_tokens, cache_read_tokens
+        nonlocal prompt_tokens, completion_tokens, total_tokens, cache_write_tokens, cache_read_tokens
         if not usage:
             return
         prompt_tokens = usage.get("input_tokens", prompt_tokens) or prompt_tokens
         completion_tokens = usage.get("output_tokens", completion_tokens) or completion_tokens
         total_tokens = usage.get("total_tokens", total_tokens) or total_tokens
         details = usage.get("input_tokens_details") or {}
+        cache_write_tokens = details.get("cache_write_tokens", cache_write_tokens) or cache_write_tokens
         cache_read_tokens = details.get("cached_tokens", cache_read_tokens) or cache_read_tokens
 
     try:
@@ -540,6 +582,22 @@ async def parse_responses_sse(
                 continue
 
             event_type = str(event.get("type") or "")
+            if event_type == "response.output_item.added":
+                item = event.get("item") or {}
+                item_id = item.get("id") if isinstance(item, dict) else None
+                if isinstance(item_id, str) and item_id:
+                    item_type = item.get("type")
+                    item_phase = item.get("phase")
+                    output_items[item_id] = {
+                        "item_id": item_id,
+                        "output_index": event.get("output_index") if isinstance(event.get("output_index"), int) else 0,
+                        "content_index": 0,
+                        "phase": item_phase
+                        if isinstance(item_phase, str) and item_phase
+                        else ("reasoning" if item_type == "reasoning" else "final_answer"),
+                    }
+                continue
+
             delta = event.get("delta") or event.get("text")
             if (
                 isinstance(delta, str)
@@ -551,19 +609,37 @@ async def parse_responses_sse(
                 )
             ):
                 emitted_content_or_tool = True
-                yield StreamChunk(kind="content", data={"text": delta})
+                yield StreamChunk(
+                    kind="content",
+                    data={"text": delta, **_responses_output_provenance(event, output_items, "final_answer")},
+                )
                 continue
 
             reasoning_delta = _reasoning_delta_text(event, event_type)
             if reasoning_delta:
                 emitted_content_or_tool = True
-                yield StreamChunk(kind="reasoning", data={"text": reasoning_delta})
+                yield StreamChunk(
+                    kind="reasoning",
+                    data={"text": reasoning_delta, **_responses_output_provenance(event, output_items, "reasoning")},
+                )
                 continue
 
             if event_type == "response.output_item.done":
                 item = event.get("item") or {}
                 if not isinstance(item, dict):
                     continue
+                item_id = item.get("id")
+                if isinstance(item_id, str) and item_id and item_id not in output_items:
+                    item_type = item.get("type")
+                    item_phase = item.get("phase")
+                    output_items[item_id] = {
+                        "item_id": item_id,
+                        "output_index": event.get("output_index") if isinstance(event.get("output_index"), int) else 0,
+                        "content_index": 0,
+                        "phase": item_phase
+                        if isinstance(item_phase, str) and item_phase
+                        else ("reasoning" if item_type == "reasoning" else "final_answer"),
+                    }
                 if item.get("type") == "reasoning":
                     encrypted_content = item.get("encrypted_content")
                     if isinstance(encrypted_content, str) and encrypted_content:
@@ -626,12 +702,37 @@ async def parse_responses_sse(
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens or prompt_tokens + completion_tokens,
-            "cache_creation_input_tokens": max(prompt_tokens - cache_read_tokens, 0),
+            "cache_creation_input_tokens": cache_write_tokens or max(prompt_tokens - cache_read_tokens, 0),
             "cache_read_input_tokens": cache_read_tokens,
             "finish_reason": finish_reason or "stop",
         },
     )
     yield StreamChunk(kind="done", data={})
+
+
+def _responses_output_provenance(
+    event: Dict[str, Any],
+    output_items: Dict[str, Dict[str, Any]],
+    default_phase: str,
+) -> Dict[str, Any]:
+    event_item_id = event.get("item_id")
+    known = output_items.get(event_item_id) if isinstance(event_item_id, str) else None
+    event_output_index = event.get("output_index")
+    output_index = (
+        event_output_index if isinstance(event_output_index, int) else (known.get("output_index", 0) if known else 0)
+    )
+    event_content_index = event.get("content_index")
+    content_index = (
+        event_content_index if isinstance(event_content_index, int) else (known.get("content_index", 0) if known else 0)
+    )
+    return {
+        "item_id": event_item_id
+        if isinstance(event_item_id, str) and event_item_id
+        else (known.get("item_id") if known else f"responses:{default_phase}:{output_index}"),
+        "output_index": output_index,
+        "content_index": content_index,
+        "phase": known.get("phase", default_phase) if known else default_phase,
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Local benchmark orchestrator.
 
-Owns local service startup/teardown, benchmark invocation, load-test isolation,
-and post-failure diagnostics. Benchmark definitions remain in tasks.json.
+Owns local service startup/teardown, benchmark invocation, and post-failure
+diagnostics. Benchmark definitions remain in tasks.json.
 """
 
 from __future__ import annotations
@@ -31,8 +31,8 @@ if str(AGENTS_DIR) not in sys.path:
     sys.path.insert(0, str(AGENTS_DIR))
 
 from benchmarks.benchmark_tasks import all_tasks
+from benchmarks.dashboard import DashboardServer, dashboard_enabled, maybe_launch_dashboard
 
-LOAD_TEST_TASKS = {"load-test-sias"}
 SERVICES_MANIFEST = REPO_ROOT / ".context" / "services.json"
 SERVICE_LOG = REPO_ROOT / ".context" / "local-benchmark-services.log"
 TUNNEL_LOG = REPO_ROOT / ".context" / "local-benchmark-ngrok.log"
@@ -185,20 +185,8 @@ def validate_task_names(names: Sequence[str]) -> list[str]:
     return deduped
 
 
-def split_load_tasks(tasks: Sequence[str]) -> tuple[list[str], list[str]]:
-    non_load = [name for name in tasks if name not in LOAD_TEST_TASKS]
-    load = [name for name in tasks if name in LOAD_TEST_TASKS]
-    return non_load, load
-
-
 def plan_invocations(tasks: Sequence[str]) -> list[BenchmarkInvocation]:
-    non_load, load = split_load_tasks(tasks)
-    invocations: list[BenchmarkInvocation] = []
-    if non_load:
-        invocations.append(BenchmarkInvocation("non-load", list(non_load), is_load=False))
-    for name in load:
-        invocations.append(BenchmarkInvocation(name, [name], is_load=True))
-    return invocations
+    return [BenchmarkInvocation("benchmarks", list(tasks), is_load=False)] if tasks else []
 
 
 def build_task_selector_args(selected_tasks: Sequence[str], all_names: Sequence[str]) -> list[str]:
@@ -212,6 +200,17 @@ def build_task_selector_args(selected_tasks: Sequence[str], all_names: Sequence[
     return args
 
 
+def _benchmark_python() -> str:
+    """Interpreter for the run_benchmark.py subprocess.
+
+    Prefer the agents venv so the subprocess inherits the full dependency set
+    (e.g. boto3 for R2 world-model/trace-archive reads under --simulate), regardless
+    of which interpreter launched local.py. Fall back to the current interpreter.
+    """
+    venv_python = AGENTS_DIR / "venv" / "bin" / "python"
+    return str(venv_python) if venv_python.exists() else sys.executable
+
+
 def build_benchmark_args(
     selected_tasks: Sequence[str],
     *,
@@ -220,8 +219,10 @@ def build_benchmark_args(
     anon: bool = False,
     max_concurrency: int = 5,
     keep_failed_agents: bool = True,
+    simulate: bool = False,
+    world_model_name: str | None = None,
 ) -> list[str]:
-    args = [sys.executable, "-u", "benchmarks/run_benchmark.py"]
+    args = [_benchmark_python(), "-u", "benchmarks/run_benchmark.py"]
     args.extend(build_task_selector_args(selected_tasks, known_task_names()))
     args.extend(["--port", str(port), "--ci"])
     if bootstrap:
@@ -230,6 +231,13 @@ def build_benchmark_args(
         args.append("--anon")
     if keep_failed_agents:
         args.append("--keep-failed-agents")
+    if simulate:
+        # World-model simulate mode. run.sh serves the WMH and exports WMH_BASE_URL
+        # into the manifest; local.py injects it into this subprocess env. The name
+        # defaults to the served model (WMH_MODEL_NAME) when not overridden here.
+        args.append("--simulate")
+        if world_model_name:
+            args.extend(["--world-model-name", world_model_name])
     if len(selected_tasks) > 1:
         args.extend(["--parallel", "--max-concurrency", str(max_concurrency)])
     return args
@@ -567,11 +575,31 @@ def _context_dir_env_value(context_dir: Path) -> str:
         return str(context_dir)
 
 
+def _dashboard_context_dir(stack: ServiceStack) -> Path:
+    """Absolute dir where run_benchmark.py's report_card.py writes report-card.json.
+
+    The report-card emitter (run_benchmark.py) is constructed with the raw
+    BENCHMARK_CONTEXT_DIR env value and resolves it against ITS cwd, which is
+    AGENTS_DIR (run_benchmark_invocation launches it there). For isolated stacks
+    BENCHMARK_CONTEXT_DIR is a REPO_ROOT-relative path, so it lands under
+    AGENTS_DIR — we mirror that exact resolution so the dashboard serves the same
+    directory the report card is written to. The dashboard asset + report card
+    then live side by side and the page can fetch it over HTTP.
+    """
+    raw = os.environ.get("BENCHMARK_CONTEXT_DIR")
+    if raw:
+        candidate = Path(raw)
+        return candidate if candidate.is_absolute() else (AGENTS_DIR / candidate)
+    return stack.context_dir
+
+
 def start_services(
     stack: ServiceStack,
     clean_first: bool = True,
     *,
     anon_steel_profile: bool = False,
+    simulate: bool = False,
+    world_model_name: str | None = None,
 ) -> tuple[subprocess.Popen, dict]:
     stack.context_dir.mkdir(parents=True, exist_ok=True)
     if clean_first and not stack.isolated:
@@ -590,6 +618,15 @@ def start_services(
         env["CONDUCTOR_WORKSPACE_NAME"] = stack.workspace_name
         env["CONDUCTOR_PORT"] = str(stack.base_port)
         env["ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME"] = "1"
+        if simulate:
+            # Put the worker into simulate mode. run.sh forks the agents worker from this
+            # env, so these must be set here (the worker's WMH adapter + fast-cache scope
+            # read them from its process env). WMH_PORT mirrors run.sh's +6 offset.
+            env["BENCHMARK_WORLD_MODEL_MODE"] = "simulate"
+            env["WMH_BASE_URL"] = f"http://localhost:{stack.base_port + 6}"
+            resolved_model = world_model_name or os.environ.get("WMH_MODEL_NAME")
+            if resolved_model:
+                env["WMH_MODEL_NAME"] = resolved_model
     process = subprocess.Popen(
         ["bash", "scripts/run.sh", "--benchmark"],
         cwd=REPO_ROOT,
@@ -662,6 +699,14 @@ def apply_manifest_environment(manifest: dict) -> None:
     if public_url:
         os.environ["PUBLIC_BASE_URL"] = str(public_url).rstrip("/")
         os.environ.setdefault("BENCHMARK_FRONTEND_URL", str(public_url).rstrip("/"))
+    # World Model Harness: when run.sh served the WMH (benchmark/simulate builds),
+    # the manifest carries its URL. Inject WMH_BASE_URL/WMH_MODEL_NAME so the
+    # benchmark subprocess (run_benchmark.py) resolves the auto-served server.
+    wmh_url = (urls.get("wmh") if isinstance(urls, dict) else "") or ""
+    if wmh_url:
+        os.environ["WMH_BASE_URL"] = str(wmh_url).rstrip("/")
+        wmh_model = manifest.get("wmh_model_name") if isinstance(manifest, dict) else None
+        os.environ.setdefault("WMH_MODEL_NAME", str(wmh_model) if wmh_model else "rose-archive")
 
 
 def extract_results_path(output: str) -> Path | None:
@@ -1104,6 +1149,8 @@ def run_benchmark_invocation(
     bootstrap: bool,
     anon: bool,
     max_concurrency: int,
+    simulate: bool = False,
+    world_model_name: str | None = None,
 ) -> Path:
     started = time.time()
     command = build_benchmark_args(
@@ -1113,10 +1160,18 @@ def run_benchmark_invocation(
         anon=anon,
         max_concurrency=max_concurrency,
         keep_failed_agents=True,
+        simulate=simulate,
+        world_model_name=world_model_name,
     )
     print(f"\n== Running {invocation.label}: {', '.join(invocation.tasks)}")
     print("$ " + " ".join(command))
     env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    # Disable fast-cache for local benchmark runs so trajectories are actually executed
+    # rather than replayed from cache. This is required for payment-lifecycle tasks (real
+    # side effects must not be cache-replayed) and also ensures the world model is exercised
+    # during simulate runs. run_benchmark reads this and sets fast_mode_cache_enabled=false
+    # on the created agent. (Sim-scoped caching can be re-enabled once the worker-simulate
+    # path is validated.)
     env.setdefault("BENCHMARK_FAST_MODE_CACHE", "false")
     process = subprocess.Popen(
         command,
@@ -1150,9 +1205,7 @@ def tasks_from_args(args: argparse.Namespace) -> list[str]:
         selected = [task for task in all_tasks() if task.status == "ready"]
         if args.bench:
             selected = [task for task in selected if task.bench == args.bench]
-        if args.agent_only:
-            selected = [task for task in selected if task.runner == "agent"]
-        return validate_task_names([task.name for task in selected if task.runner == "agent"])
+        return validate_task_names([task.name for task in selected])
     if args.rerun_failed:
         run_path = resolve_run_path(args.rerun_failed)
         failures = failed_tasks_from_run(run_path)
@@ -1189,11 +1242,10 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run local benchmarks with managed services and diagnostics")
     parser.add_argument("tasks", nargs="*", help="Benchmark task names, e.g. browser-agent cache-coverage")
     parser.add_argument("--suite", help="Benchmark suite/tag to run, e.g. smoke, rose-bench, pipeline-e2e, all")
-    parser.add_argument("--full", action="store_true", help="Run every benchmark; load-test-sias runs by itself")
+    parser.add_argument("--full", action="store_true", help="Run every benchmark")
     parser.add_argument("--eval-suite", action="store_true", help="Run benchmarks/run_eval_suite.py against isolated services")
     parser.add_argument("--rerun-failed", metavar="RUN", help="Rerun failed tasks from a result JSON or 'latest'")
     parser.add_argument("--only", help="Comma-separated eval task names for --eval-suite")
-    parser.add_argument("--agent-only", action="store_true", help="Pass --agent-only through to run_eval_suite.py")
     parser.add_argument(
         "--bench",
         choices=["rose-bench", "pipeline-e2e"],
@@ -1206,6 +1258,15 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="Pass --anon through to run_benchmark.py so minted-auth benchmarks start without saved auth",
     )
     parser.add_argument("--max-concurrency", type=int, default=5, help="Max concurrent non-load benchmark tasks")
+    parser.add_argument(
+        "--simulate",
+        action="store_true",
+        help="Run in world-model simulate mode (run.sh serves the WMH; env boundaries hit the world model)",
+    )
+    parser.add_argument(
+        "--world-model-name",
+        help="World model to simulate against (defaults to the model run.sh served, i.e. WMH_MODEL_NAME)",
+    )
     parser.add_argument("--keep-services", action="store_true", help="Leave local services running after benchmarks")
     parser.add_argument("--use-existing", action="store_true", help="Use services from .context/services.json")
     parser.add_argument(
@@ -1216,6 +1277,11 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--run-id", help="Stable id for the isolated benchmark stack")
     parser.add_argument("--base-port", type=int, help="Preferred base port for an isolated benchmark stack")
     parser.add_argument("--no-clean", action="store_true", help="Do not call scripts/kill-services.sh before startup")
+    parser.add_argument(
+        "--no-dashboard",
+        action="store_true",
+        help="Do not serve the live benchmark dashboard (also via BENCHMARK_NO_DASHBOARD=1); no browser window is ever auto-opened",
+    )
     parser.add_argument(
         "--checkpoint",
         "--through-index",
@@ -1298,8 +1364,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     )
     if selected_modes != 1:
         parser.error("specify exactly one benchmark selection: tasks, --suite, --full, --rerun-failed, or --eval-suite")
-    if not args.eval_suite and (args.only or args.agent_only or args.bench):
-        parser.error("--only, --agent-only, and --bench require --eval-suite")
+    if not args.eval_suite and (args.only or args.bench):
+        parser.error("--only and --bench require --eval-suite")
     if args.eval_suite and (args.bootstrap or args.anon):
         parser.error("--bootstrap and --anon are task-runner options, not --eval-suite options")
     if args.max_concurrency < 1:
@@ -1331,8 +1397,6 @@ def run_eval_suite_invocation(*, port: int, args: argparse.Namespace) -> int:
     command = [sys.executable, "-u", "benchmarks/run_eval_suite.py", "--port", str(port)]
     if args.only:
         command.extend(["--only", args.only])
-    if args.agent_only:
-        command.append("--agent-only")
     if args.bench:
         command.extend(["--bench", args.bench])
     print("\n== Running eval suite")
@@ -1341,37 +1405,24 @@ def run_eval_suite_invocation(*, port: int, args: argparse.Namespace) -> int:
     return subprocess.run(command, cwd=AGENTS_DIR, env=env).returncode
 
 
-def promote_direct_external_runner_tasks(args: argparse.Namespace) -> None:
-    if args.eval_suite or not args.tasks:
-        return
-    by_name = {task.name: task for task in all_tasks()}
-    selected = [by_name[name] for name in validate_task_names(args.tasks)]
-    external = [task.name for task in selected if task.runner != "agent"]
-    if not external:
-        return
-    args.eval_suite = True
-    args.only = ",".join(task.name for task in selected)
-    print(
-        "Routing through eval suite because the selection includes external runner task(s): "
-        + ", ".join(external)
-    )
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
-    promote_direct_external_runner_tasks(args)
     selected_tasks = tasks_from_args(args)
     configure_task_environment(selected_tasks)
     if checkpoint_requested(args) and len(selected_tasks) != 1:
         raise ValueError("--checkpoint requires exactly one resolved benchmark task")
     process: subprocess.Popen | None = None
     frontend_tunnel: FrontendTunnel | None = None
+    dashboard: DashboardServer | None = None
     result_paths: list[Path] = []
     stack = build_service_stack(args)
 
     def handle_shutdown(signum: int, _frame: object) -> None:
         print(f"\nReceived signal {signum}; tearing down benchmark services...", file=sys.stderr)
         stop_frontend_tunnel(frontend_tunnel)
+        # The dashboard URL stays valid until the server stops here.
+        if dashboard is not None:
+            dashboard.stop()
         if not args.keep_services and not args.use_existing:
             stop_services(process, stack=stack)
         raise SystemExit(128 + signum)
@@ -1393,6 +1444,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 stack,
                 clean_first=not args.no_clean,
                 anon_steel_profile=args.anon,
+                simulate=args.simulate,
+                world_model_name=args.world_model_name,
             )
         apply_manifest_environment(manifest)
         if stack.isolated:
@@ -1414,6 +1467,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"db_name={(manifest.get('database') or {}).get('name') or 'victoria'} "
                 f"queue={manifest.get('temporal_task_queue')}"
             )
+        # Live dashboard: serve the run's context dir (where run_benchmark.py's
+        # report_card.py writes report-card.json); the URL is printed, no
+        # browser window is opened (view runs in the in-app Benchmarks tab). Gated
+        # off under CI / headless / opt-out so deploy+smoke automation never pops
+        # a browser. run_benchmark.py resolves the same dir via BENCHMARK_CONTEXT_DIR.
+        if dashboard_enabled(ci=args.no_dashboard):
+            dashboard = maybe_launch_dashboard(_dashboard_context_dir(stack), enabled=True)
         if needs_payment_fixture(selected_tasks):
             seed_payment_fixture(manifest)
         if needs_frontend_tunnel(selected_tasks):
@@ -1446,6 +1506,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 bootstrap=args.bootstrap,
                 anon=args.anon,
                 max_concurrency=args.max_concurrency,
+                simulate=args.simulate,
+                world_model_name=args.world_model_name,
             )
             result_paths.append(result_path)
             failures = failed_tasks_from_run(result_path)
@@ -1465,6 +1527,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         signal.signal(signal.SIGTERM, previous_sigterm)
         signal.signal(signal.SIGINT, previous_sigint)
         stop_frontend_tunnel(frontend_tunnel)
+        # Stop the dashboard HTTP server; anyone viewing the URL keeps the
+        # final report card remains visible after teardown.
+        if dashboard is not None:
+            dashboard.stop()
         keep_paused_checkpoint_stack = checkpoint_requested(args) and args.checkpoint_no_start
         if keep_paused_checkpoint_stack and not args.keep_services and not args.use_existing:
             print("Keeping benchmark services running so the paused checkpoint FE link remains valid.")

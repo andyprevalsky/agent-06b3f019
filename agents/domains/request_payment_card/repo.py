@@ -5,12 +5,22 @@ from __future__ import annotations
 from typing import Any, Dict
 
 import httpx
+import structlog
 from temporalio import activity
 
 from config import load_config
 from helpers.trace_archive import archive_json
 from helpers.tracing import current_root_agent_id
 from helpers.world_model_runtime import WorldModelToolExecutionAdapter
+
+logger = structlog.get_logger()
+KYC_REQUIRED_CODES = {
+    "kyc_required",
+    "customer_kyc_required",
+    "customers_needed_kyc",
+    "customer_needs_kyc",
+    "cardholder_kyc_required",
+}
 
 
 def _error_payload(response: httpx.Response) -> Dict[str, Any]:
@@ -99,11 +109,33 @@ async def _mint_purchase_card_real(user_id: str, payload: Dict[str, Any]) -> Dic
         )
         if response.status_code >= 400:
             payload = _error_payload(response)
+            # Branch (MCP company-flow): AgentCard per-user setup (connect/KYC/
+            # onboarding/wallet funding) surfaces as a structured setup state the
+            # browser workflow resolves via its own attention request + auto-resume.
             if payload.get("code") == "agentcard_setup_required":
                 return {
                     "status": "agentcard_setup_required",
                     **payload,
                 }
+
+            code = str(payload.get("code") or "").lower()
+            detail = str(payload.get("error") or response.text or "")
+
+            # main (gate feature): org-managed KYC gate — surface as a signal so the
+            # workflow raises a KYC gate and retries rather than failing.
+            if code in KYC_REQUIRED_CODES or (
+                response.status_code in (400, 403, 409, 422)
+                and "kyc" in f"{code} {detail}".lower()
+            ):
+                logger.info("Mint requires KYC", code=code, detail=detail[:200])
+                return {"status": "kyc_required", "error": detail, "code": code or "kyc_required"}
+
+            # 402 = the user needs an active subscription before Rose can spend real
+            # money. Surface it as a signal (not an exception) so the workflow can
+            # raise a subscription gate organically and retry, instead of failing.
+            if response.status_code == 402:
+                logger.info("Mint requires subscription (402)", detail=detail[:200])
+                return {"status": "subscription_required", "error": detail}
             response.raise_for_status()
         result = response.json()
         archive_root_agent_id = current_root_agent_id() or str(payload.get("agentId") or user_id)

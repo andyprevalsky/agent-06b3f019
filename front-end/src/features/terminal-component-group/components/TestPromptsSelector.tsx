@@ -128,7 +128,10 @@ const TestPromptTriggerButton = forwardRef<HTMLButtonElement, TestPromptTriggerB
 );
 TestPromptTriggerButton.displayName = 'TestPromptTriggerButton';
 
-export default function TestPromptsSelector({ onSelectPrompt }: TestPromptsSelectorProps) {
+export default function TestPromptsSelector({
+  onSelectPrompt,
+  shouldAutoLoadDefaultPrompt,
+}: TestPromptsSelectorProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -153,7 +156,7 @@ export default function TestPromptsSelector({ onSelectPrompt }: TestPromptsSelec
     };
   }, []);
 
-  useAutoLoadDefaultPrompt(onSelectPrompt);
+  useAutoLoadDefaultPrompt(onSelectPrompt, shouldAutoLoadDefaultPrompt);
 
   const handleSelectPrompt = async (testPrompt: TestPrompt): Promise<void> => {
     setIsLoading(true);

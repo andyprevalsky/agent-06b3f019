@@ -29,14 +29,14 @@ import fs from 'node:fs';
 
 import {
   FRONTEND_URL,
-  IS_PROD,
+  HAS_INJECTED_SESSION,
   attachRecorder,
   createAgent,
   deleteAgent,
   expectDevAuthenticated,
-  expectProdSessionRecognized,
+  expectInjectedSessionRecognized,
   hasUncaughtErrors,
-  injectProdSession,
+  injectSemanticSession,
   loadBenchmarkTask,
 } from './helpers';
 
@@ -66,8 +66,8 @@ async function waitForDevLogin(
   page: import('@playwright/test').Page,
   rec: ReturnType<typeof attachRecorder>,
 ) {
-  if (IS_PROD) {
-    await expectProdSessionRecognized(page);
+  if (HAS_INJECTED_SESSION) {
+    await expectInjectedSessionRecognized(page);
   } else {
     await expectDevAuthenticated(page, rec);
   }
@@ -78,8 +78,8 @@ async function waitForDevLogin(
 test.describe('mobile-layout', () => {
   test('landing screen — header and query input fit within 390 px viewport', async ({ page }) => {
     const rec = attachRecorder(page);
-    if (IS_PROD) {
-      await injectProdSession(page);
+    if (HAS_INJECTED_SESSION) {
+      await injectSemanticSession(page);
     }
     await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' });
     await waitForDevLogin(page, rec);
@@ -109,8 +109,8 @@ test.describe('mobile-layout', () => {
     const agentId = await createAgent(task.prompt);
 
     try {
-      if (IS_PROD) {
-        await injectProdSession(page);
+      if (HAS_INJECTED_SESSION) {
+        await injectSemanticSession(page);
       }
       await page.goto(`${FRONTEND_URL}/?agent-id=${agentId}`, { waitUntil: 'domcontentloaded' });
       await waitForDevLogin(page, rec);
@@ -185,8 +185,8 @@ test.describe('mobile-layout', () => {
 
   test('header is centered and never wider than the 390 px viewport', async ({ page }) => {
     const rec = attachRecorder(page);
-    if (IS_PROD) {
-      await injectProdSession(page);
+    if (HAS_INJECTED_SESSION) {
+      await injectSemanticSession(page);
     }
     await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' });
     await waitForDevLogin(page, rec);

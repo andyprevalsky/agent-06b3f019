@@ -17,7 +17,7 @@ import geminiIcon from '@/assets/gemini-icon.png';
 
 import DropdownIconFrame, {
   dropdownIconImageClassName,
-  dropdownIconPreset,
+  DropdownIconPreset,
 } from './DropdownIconFrame';
 import SectionToggleButton from './SectionToggleButton';
 import SyncItemButton from './SyncItemButton';
@@ -80,7 +80,7 @@ function ClaudeRow({
     return (
       <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
         <div className="flex items-center gap-3">
-          <DropdownIconFrame {...dropdownIconPreset.claude} isSynced={synced}>
+          <DropdownIconFrame {...DropdownIconPreset.claude} isSynced={synced}>
             <img src={claudeIcon} alt="Claude" className={dropdownIconImageClassName} />
           </DropdownIconFrame>
           <div className="flex min-w-0 items-center">
@@ -94,7 +94,7 @@ function ClaudeRow({
   return (
     <div className="px-4 py-2 flex items-center justify-between flex-wrap gap-2 border-b border-border/50">
       <div className="flex items-center gap-3">
-        <DropdownIconFrame {...dropdownIconPreset.claude}>
+        <DropdownIconFrame {...DropdownIconPreset.claude}>
           <img src={claudeIcon} alt="Claude" className={dropdownIconImageClassName} />
         </DropdownIconFrame>
         <div className="flex items-center gap-2">
@@ -128,7 +128,7 @@ function GptRow({
     return (
       <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
         <div className="flex items-center gap-3">
-          <DropdownIconFrame {...dropdownIconPreset.chatgpt} isSynced={synced}>
+          <DropdownIconFrame {...DropdownIconPreset.chatgpt} isSynced={synced}>
             <ChatGPTIcon />
           </DropdownIconFrame>
           <div className="flex min-w-0 items-center">
@@ -142,7 +142,7 @@ function GptRow({
   return (
     <div className="px-4 py-2 flex items-center justify-between flex-wrap gap-2 border-b border-border/50">
       <div className="flex items-center gap-3">
-        <DropdownIconFrame {...dropdownIconPreset.chatgpt}>
+        <DropdownIconFrame {...DropdownIconPreset.chatgpt}>
           <ChatGPTIcon />
         </DropdownIconFrame>
         <div className="flex items-center gap-2">
@@ -179,7 +179,7 @@ export default function ComputeSection({
       <div className="p-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <DropdownIconFrame
-            {...dropdownIconPreset.computeMain}
+            {...DropdownIconPreset.computeMain}
             isSynced={claudeCodeSynced || gptCodeSynced}
           >
             <ComputeIcon />
@@ -213,7 +213,7 @@ export default function ComputeSection({
           />
           <div className="px-4 py-2 flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <DropdownIconFrame {...dropdownIconPreset.gemini}>
+              <DropdownIconFrame {...DropdownIconPreset.gemini}>
                 <img src={geminiIcon} alt="Gemini" className={dropdownIconImageClassName} />
               </DropdownIconFrame>
               <span className="text-sm">Gemini Subscription</span>

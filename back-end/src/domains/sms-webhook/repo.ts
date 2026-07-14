@@ -5,6 +5,7 @@
  * attention request updates, and agent lifecycle.
  */
 
+import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
 
 /** Look up a user by phone number */
@@ -12,6 +13,28 @@ export async function findUserByPhone(phone: string) {
   return prisma.user.findFirst({
     where: { phone },
   });
+}
+
+/**
+ * Find-or-create a User for an inbound phone number.
+ *
+ * An inbound SMS is itself proof of possession of the number (equivalent to an
+ * OTP), so a first-time texter is provisioned immediately with a generated
+ * `userId` — no OTP, no signup wall. Supabase auth-user creation is deferred
+ * until a web gate needs a session (minted via a short-lived magic link). See
+ * docs/plans/active/sms-onboarding-and-gates.md.
+ *
+ * Idempotent for the common single-inbound case: a concurrent double-send races
+ * on the find, but that is rare and harmless (a follow-up should add a partial
+ * unique index on phone to make it airtight).
+ */
+export async function provisionUserByPhone(phone: string) {
+  const existing = await prisma.user.findFirst({ where: { phone } });
+  if (existing) return { user: existing, created: false };
+  const user = await prisma.user.create({
+    data: { userId: randomUUID(), phone, isAnonymous: false },
+  });
+  return { user, created: true };
 }
 
 /** Update an attention request with the user's response */
@@ -42,17 +65,6 @@ export async function findActiveSmsAgents(userId: string) {
     },
     select: { id: true, temporalWorkflowId: true },
   });
-}
-
-/** Atomically bump the per-user inbound seq counter and return the new value. */
-export async function bumpInboundSeq(userId: string): Promise<number> {
-  const session = await prisma.smsSession.upsert({
-    where: { userId },
-    update: { lastInboundSeq: { increment: 1 } },
-    create: { userId, messages: '[]', lastInboundSeq: 1 },
-    select: { lastInboundSeq: true },
-  });
-  return session.lastInboundSeq;
 }
 
 /** Read the current inbound seq for a user (returns null if no session). */

@@ -1,0 +1,128 @@
+# Cloud-exclusive benchmark box.
+#
+# The ENTIRE isolated Rose stack — backend (Express/tsx) + agents worker
+# (Temporal) + World Model Harness (WMH) + Postgres — runs inside this one
+# container on a Fly.io machine. `scripts/run-bench-cloud` provisions a
+# machine from this image, runs a single benchmark task in --simulate on the
+# box, retrieves the report card, and destroys the machine.
+#
+# Why system Postgres (not Docker-in-Docker): DinD on Fly needs a privileged
+# runtime and is fragile. cloud-build.sh already has a system-Postgres fallback
+# path (apt install postgresql, db "victoria", port 5432); run.sh detects the
+# absence of a Docker daemon and uses that fallback automatically. We install
+# the Postgres server + client here so that path just works.
+#
+# Why bake deps at build time: npm install + prisma generate + the agents venv
+# (pip install, incl. the git+https world-model-harness dep and playwright) are
+# slow. Doing them in the image means the machine boots straight into building
+# the WMH corpus + running the benchmark instead of provisioning.
+#
+# The WMH model artifact itself is NOT baked (.context/ is gitignored and the
+# corpus lives in R2). The container BUILDS the model from the R2 trace corpus
+# at boot — run.sh --benchmark's start_world_model_harness() already does this
+# whenever BENCHMARK_MODE is set and R2 creds are present (injected as secrets).
+
+# ── Base: Node 20 + Debian bookworm (ships Python 3.11.2) ──────────────────
+FROM node:20-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    NODE_ENV=development
+
+# ── System packages ───────────────────────────────────────────────────────
+# postgresql/-client: system-Postgres fallback (run.sh path when no Docker).
+# python3-venv/-dev + build-essential: agents venv + native pip builds
+#   (eth-account/coincurve, etc.). git: the git+https world-model-harness dep.
+# curl/lsof/procps/net-tools/psmisc: run.sh health/port bookkeeping (lsof,
+#   fuser, ps, kill). ca-certificates: TLS to Temporal Cloud/Supabase/R2/Rose.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        postgresql \
+        postgresql-client \
+        python3 \
+        python3-venv \
+        python3-dev \
+        build-essential \
+        pkg-config \
+        libpq-dev \
+        git \
+        curl \
+        ca-certificates \
+        lsof \
+        procps \
+        psmisc \
+        net-tools \
+        gosu \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Non-root user that owns the repo + can drive the Postgres cluster ──────
+# run.sh's system-Postgres fallback uses `su - postgres` / pg_ctlcluster; the
+# entrypoint runs those bits via sudo-less gosu as needed. The app itself runs
+# as `rose`. The postgres system user already exists (created by the postgresql
+# package); we just need a rose user that owns /app.
+# Create /app owned by rose BEFORE WORKDIR/COPY so that `npm install` (run as
+# rose) can create /app/node_modules — WORKDIR alone would create /app as root
+# and COPY --chown only re-owns copied files, not the pre-existing dir.
+RUN useradd --create-home --shell /bin/bash rose \
+    && mkdir -p /app \
+    && chown rose:rose /app
+
+WORKDIR /app
+
+# ── Copy the repo (root build context) ────────────────────────────────────
+# .dockerignore trims node_modules/venv/.context/.git-heavy dirs so the build
+# context stays small; deps are installed fresh below.
+COPY --chown=rose:rose . /app
+
+# ── Bake dependencies (JS + Python) ────────────────────────────────────────
+# Run as rose so the venv + node_modules are owned by the runtime user.
+USER rose
+
+# JS: root npm install covers back-end/front-end/agents (workspaces); back-end
+# postinstall runs `prisma generate`. Belt-and-suspenders explicit generate too.
+# Longer fetch timeout + retries make the install resilient to transient
+# ECONNRESET from the npm registry (common on emulated/amd64 builds).
+RUN npm config set fetch-retries 5 \
+    && npm config set fetch-retry-mintimeout 20000 \
+    && npm config set fetch-retry-maxtimeout 120000 \
+    && npm config set fetch-timeout 600000 \
+    && npm install --no-audit --no-fund \
+    && (cd back-end && npx prisma generate)
+
+# npm workspaces HOIST all deps into /app/node_modules, so back-end/ and agents/
+# get no local node_modules dir. run.sh's pre-flight then re-runs `npm install`
+# per service on the box (a ~3 min waste that also delays the WMH build). Deps
+# resolve fine from the hoisted root node_modules, so a marker dir is enough to
+# satisfy run.sh's `[ ! -d node_modules ]` check and skip the reinstall. (agents
+# is Python — its "node_modules" check is vestigial but we mark it too for parity.)
+RUN mkdir -p back-end/node_modules agents/node_modules \
+    && touch back-end/node_modules/.hoisted-to-root agents/node_modules/.hoisted-to-root
+
+# Python: agents venv + pip install. Installs the git+https WMH dep (public repo,
+# no auth needed) and playwright. Skip playwright browser download — simulate
+# routes browser boundaries through the WMH, so no real Chromium is launched.
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+RUN python3 -m venv agents/venv \
+    && agents/venv/bin/pip install --upgrade pip \
+    && agents/venv/bin/pip install -r agents/requirements.txt
+
+# ── Entrypoint ─────────────────────────────────────────────────────────────
+# The entrypoint (run as root so it can start the Postgres cluster, then drops
+# to rose for the stack) sources secrets, boots Postgres, runs the stack, waits
+# for health, runs the benchmark, and prints the report card between delimiters.
+USER root
+COPY --chown=root:root scripts/cloudbench-entrypoint.sh /usr/local/bin/cloudbench-entrypoint.sh
+RUN chmod +x /usr/local/bin/cloudbench-entrypoint.sh
+
+# Benchmark run is parameterized entirely via env (set by the Fly machine):
+#   BENCH_TASK        task name to run (e.g. spawn-sub-agents, chat-mode)
+#   BENCH_SIMULATE    "1" → pass --simulate (default 1)
+#   BENCH_FLAGS       extra run_benchmark.py flags (optional)
+#   WMH_MODEL_NAME    world-model artifact name (default rose-archive)
+#   WMH_BUILD_DIR     world-model build root (default /app/.context/world-model)
+#   AGENTS_ENV_B64    base64 of agents/.env   (injected as a Fly secret)
+#   BACKEND_ENV_B64   base64 of back-end/.env (injected as a Fly secret)
+ENV BENCH_SIMULATE=1 \
+    WMH_MODEL_NAME=rose-archive
+
+ENTRYPOINT ["/usr/local/bin/cloudbench-entrypoint.sh"]

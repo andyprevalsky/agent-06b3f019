@@ -1,10 +1,10 @@
 ---
-description: "Push current branch, wait for PR review to pass, merge, and wait for deploy to complete."
+description: "Push current branch, obtain a CodeRabbit or Claude fallback review, merge, and wait for deploy to complete."
 ---
 
 # Deploy
 
-Push the current branch, create a PR, wait for CodeRabbit review, merge, and wait for deploys to finish.
+Push the current branch, create a PR, obtain a CodeRabbit review (or Claude Code fallback), merge, and wait for deploys to finish.
 
 **This is a loop. Do NOT stop until the PR is merged and deploys are complete (or the user tells you to stop).**
 
@@ -39,7 +39,7 @@ As you run each step in Phase 1, track the results in a `TEST_REPORT` variable. 
 
 - The step name
 - Pass/fail status
-- A brief summary of the output (e.g., "0 errors", "3 files formatted", "5/5 benchmarks passed")
+- A brief summary of the output (e.g., "0 errors", "3 files formatted", "7/7 benchmarks passed")
 
 Build the report as a markdown table:
 
@@ -51,17 +51,22 @@ Build the report as a markdown table:
 | TypeScript | ✅ Pass | 0 errors |
 | Structural Tests | ✅ Pass | All invariants hold |
 | Blackbox API Tests | ✅ Pass | 12/12 tests passed |
-| Smoke Benchmarks | ✅ Pass | 5/5 passed, $0.42 total cost |
+| Smoke Benchmarks | ✅ Pass | 7/7 passed concurrently, Hub run `hub-...` |
 ```
 
 Carry this report forward into Phase 2 for use in the commit message and PR body.
 
 ## Step 0: Change detection + execution plan
 
-All Phase 1 commands run from the repo root. Compute changed paths once and derive skip flags:
+All Phase 1 commands run from the repo root. Compute changed paths from the complete active worktree: committed branch changes, staged/unstaged tracked changes, and untracked non-ignored files. This prevents pre-commit deploy checks from incorrectly treating a dirty branch as unchanged.
 
 ```bash
-CHANGED=$(git diff --name-only main...HEAD)
+BASE_REF="${DEPLOY_BASE_REF:-origin/main}"
+CHANGED=$({
+  git diff --name-only "$BASE_REF"...HEAD
+  git diff --name-only HEAD
+  git ls-files --others --exclude-standard
+} | sort -u)
 CHANGED_TS=$(echo "$CHANGED" | grep -E '^back-end/src/.*\.ts$' | sed 's|^back-end/||' || true)
 CHANGED_BACKEND=$(echo "$CHANGED" | grep -E '^back-end/' || true)
 CHANGED_AGENTS=$(echo "$CHANGED" | grep -E '^agents/' || true)
@@ -76,6 +81,12 @@ CHANGED_AGENTCARD_PAYMENT=$(echo "$CHANGED" | grep -E '^(back-end/(scripts/setup
 
 Prompt modifications are high-risk behavior changes. **Any prompt modification MUST be approved by a human before deploy proceeds.** This includes system prompts, tool prompts, agent/skill instructions, `CLAUDE.md`, `.claude/commands/*.md`, prompt template files, strategy overrides, and prompt-related diff hunks.
 
+**What "prompt modification" means — LLM-visible text, not file membership.** The rule reviews changes to what an LLM actually reads: prompt/instruction text baked in at compile time (system prompts, tool descriptions, skill/command instructions, tasks.json `prompt`/`description` fields, template files) AND text assembled at runtime (string-building logic, template interpolation, context-chunk selection, truncation — anything that changes the bytes an LLM ultimately sees). The guard script flags candidate FILES, which over-approximates: a validation helper, UI accessibility tweak, or state-handling fix inside a flagged file is NOT a prompt modification. When the guard fires:
+
+1. Examine every flagged hunk and classify it: does it change (or change the construction of) text an LLM ever sees — at compile time or runtime?
+2. If NO hunk changes LLM-visible text: state that determination in the deploy log (per file, one line on why it is code-behavior only), then pass the guard with the mandatory flag WITHOUT waiting for human approval. Record `Prompt Human Approval Guard | Pass | flagged files are code-behavior only (no LLM-visible text changed): <files>` in `TEST_REPORT`.
+3. If ANY hunk changes LLM-visible text — or you are unsure (runtime string construction counts) — stop and request human approval for those hunks. When mixed, list which hunks need review and which are code-behavior-only so the human reviews only what matters.
+
 Run the guard without the approval flag first:
 
 ```bash
@@ -84,9 +95,9 @@ bash scripts/check-prompt-human-approval.sh
 
 If it passes, record `Prompt Human Approval Guard | Pass | no prompt edits detected` in `TEST_REPORT`.
 
-If it fails, stop and ask the human to review the listed prompt modifications. Do not infer approval from silence, prior discussion, or the fact that the branch exists.
+If it fails, apply the classification above. For hunks that change LLM-visible text, stop and ask the human to review them. Do not infer approval from silence, prior discussion, or the fact that the branch exists.
 
-Human approval is scoped only to the prompt diff that exists when approval is requested. If any prompt, instruction, command, skill, or prompt-related file changes later — including changes made to fix tests or smoke benchmarks — re-run the guard without the approval flag, show the new prompt diff, and wait for fresh explicit approval before continuing.
+Human approval is scoped only to the prompt diff that exists when approval is requested. If LLM-visible text in any prompt, instruction, command, skill, or prompt-related file changes later — including changes made to fix tests or smoke benchmarks — re-run the guard without the approval flag, show the new prompt diff, and wait for fresh explicit approval before continuing. Later code-behavior-only changes to flagged files follow rule 2 above (classify, log, proceed).
 
 After the human explicitly approves the current prompt changes, rerun the guard with the mandatory flag:
 
@@ -281,7 +292,7 @@ Static checks (1–4a) are now green. **Do not wait for Steps 5–6 to finish be
 
 ## Step 5: Spin up local services
 
-**Step 5.0 (MANDATORY pre-flight garbage collection):** before spinning up anything, kill any stale run.sh trees + orphaned backend/worker/supabase processes from prior aborted runs in this worktree. Orphans subscribe to the same Temporal task queue the new run will use and will silently steal work from smoke tasks.
+**Step 5.0 (MANDATORY pre-flight garbage collection):** before spinning up anything, kill any stale run.sh trees + orphaned backend/worker/supabase processes from prior aborted runs in this worktree. This guarantees a clean local blackbox/semantic stack; cloud smoke uses separate task-scoped queues.
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
@@ -291,7 +302,7 @@ bash scripts/kill-services.sh           # kill the whole tree; preserves DB cont
 
 `scripts/kill-services.sh` is worktree-scoped (uses `$PWD` as the filter), walks descendants via `pgrep -P`, SIGTERMs then SIGKILLs survivors, and deliberately leaves the Postgres container intact. Re-run it any time you need a clean slate — it is idempotent.
 
-Spin up the local stack through `scripts/run.sh --benchmark`. In benchmark mode, `run.sh` starts only the services smoke tests need (`back-end`, `agents`, `research`) and skips `front-end` + `mac-app`. When this command is used inside Conductor, `run.sh` already derives the backend, worker-health, and research ports from `CONDUCTOR_PORT`, so do not hard-code or pass a separate smoke-test port to the benchmark harness.
+Spin up the local stack through `scripts/run.sh --benchmark`. This stack serves blackbox and semantic gates; Pre-Deploy smoke runs separately in the cloud. In benchmark mode, `run.sh` starts `back-end`, `front-end`, and `agents`, and skips `mac-app`. When this command is used inside Conductor, `run.sh` derives the backend, frontend, and worker-health ports from `CONDUCTOR_PORT`.
 
 ```bash
 # Conductor provides the base port; run.sh fans out backend/frontend/health/research from it.
@@ -304,8 +315,9 @@ export CONDUCTOR_WORKSPACE_NAME="${CONDUCTOR_WORKSPACE_NAME:-$(basename "$(git r
 
 export SMOKE_BASE_URL="http://localhost:$CONDUCTOR_PORT"
 export SMOKE_HEALTH_URL="http://localhost:$((CONDUCTOR_PORT + 2))"
-export SMOKE_RESEARCH_URL="http://localhost:$((CONDUCTOR_PORT + 3))"
 export SMOKE_FRONTEND_URL="http://localhost:$((CONDUCTOR_PORT + 1))"
+SEMANTIC_QUEUE_WORKSPACE="${CONDUCTOR_WORKSPACE_NAME:-local}"
+export TEMPORAL_TASK_QUEUE="navi-agent-tasks-${SEMANTIC_QUEUE_WORKSPACE}-deploy-$(date -u +%Y%m%d%H%M%S)-$$"
 
 cd "$(git rev-parse --show-toplevel)"
 ```
@@ -343,33 +355,35 @@ echo "DB pre-started: $DB_CONTAINER on port $LOCAL_DB_PORT"
 # Keep all service output redirected so the managed session cannot exhaust its output budget.
 # run.sh will detect the DB as already-running and won't stop it on cleanup.
 # Use run_in_background=true for this command:
-BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 \
+BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=1 TRACE_ARCHIVE_ENABLED=0 \
   bash scripts/run.sh --benchmark > .context/deploy-smoke.log 2>&1
 ```
 
-Poll the background Bash call at least every 30 seconds while Steps 5-6b run. This keeps the managed process session active without streaming the high-volume service logs; use `.context/deploy-smoke.log` only for targeted diagnosis.
+Poll the background Bash call at least every 30 seconds while Steps 5-6b run. This keeps the managed process session active without streaming the high-volume service logs; use `.context/deploy-smoke.log` only for targeted diagnosis. `BENCHMARK_BUNDLED_FRONTEND=true` builds and serves the frontend so the browser-agent lifecycle gates have a stable target.
+
+The local latency gate disables trace-archive fixture recording because that
+out-of-band benchmark recorder copies the user's full browser environment and
+is not part of the visible chat lifecycle. The post-deploy production semantic
+gate below runs against the normally configured deployed services, so production
+instrumentation remains covered before `/deploy` can report success.
 
 Then, in separate (foreground) Bash calls, wait for each service:
 
 ```bash
-# Wait for backend, worker health, and research to be ready
+# Wait for backend, frontend, and worker health to be ready
 for i in $(seq 1 60); do curl -s "$SMOKE_BASE_URL/health" > /dev/null 2>&1 && break; sleep 2; done
 for i in $(seq 1 60); do curl -s "$SMOKE_HEALTH_URL/health" > /dev/null 2>&1 && break; sleep 2; done
-for i in $(seq 1 60); do curl -s "$SMOKE_RESEARCH_URL/functions/v1/completions" > /dev/null 2>&1 && break; sleep 2; done
+export SMOKE_FRONTEND_URL="http://localhost:$((CONDUCTOR_PORT + 1))"
+for i in $(seq 1 60); do curl -sf "$SMOKE_FRONTEND_URL" > /dev/null 2>&1 && break; sleep 2; done
 ```
 
 `BENCHMARK_BUNDLED_FRONTEND=true` builds and serves the frontend through Vite preview as part of the managed `run.sh` tree. The bundled server is required for browser-agent lifecycle tests; the module-by-module development server is not reliable through the benchmark tunnel.
 
-```bash
-for i in $(seq 1 60); do curl -sf "$SMOKE_FRONTEND_URL" > /dev/null 2>&1 && break; sleep 2; done
-```
-
-**Teardown (MANDATORY):** after Step 6 finishes (pass OR fail), and any time you abort Step 5/6 mid-way, you MUST tear the stack down before moving on. Skipping this leaves zombie run.sh + grandchildren that (a) subscribe to the Temporal queue and poison the next smoke run, and (b) leak ports, RAM, and worker slots across `/deploy` invocations.
+**Teardown (MANDATORY):** after Step 6b finishes (pass OR fail), and any time you abort the local gates mid-way, you MUST tear the stack down before moving on. Skipping this leaves zombie run.sh + grandchildren that leak ports, RAM, and worker slots across `/deploy` invocations.
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
 bash scripts/kill-services.sh                    # kills run.sh tree, preserves DB
-(cd research/supabase && supabase stop 2>/dev/null) || true   # stop supabase compose stack
 ```
 
 `kill-services.sh` is a superset of the old `pkill -f "scripts/run.sh --benchmark"` approach: `pkill` only signals bash wrappers, so detached node/python grandchildren survive (the real root cause of the zombie-run.sh problem). `kill-services.sh` walks descendants explicitly. Use `scripts/teardown.sh` instead if you also want to delete the DB container + volume (destructive).
@@ -436,56 +450,33 @@ When skipping, record it explicitly in the Test Report:
 
 ### Running smoke
 
-With the local stack from Step 5 still running, run the smoke benchmark suite against that local backend. Do not pass a hard-coded localhost port to the benchmark command; point it at the same base URL `run.sh` is already serving.
+Run the complete Pre-Deploy group through the production Benchmark Hub and the default isolated cloud fleet. The local stack from Step 5 remains available for blackbox and semantic tests, but smoke must not use it.
 
 ```bash
-# Run smoke benchmarks against local backend.
-# TEMPORAL_TASK_QUEUE must match the queue run.sh's worker listens on.
-# ALLOW_TEMPORAL_CLEANUP=true lets the benchmark pre-flight terminate stale workflows
-# from previous runs on Temporal Cloud (otherwise cleanup is skipped for non-local Temporal).
-cd "$(git rev-parse --show-toplevel)/agents" && source venv/bin/activate
-TEMPORAL_TASK_QUEUE=navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME ALLOW_TEMPORAL_CLEANUP=true python benchmarks/run_benchmark.py --suite smoke --port $CONDUCTOR_PORT --ci --parallel
+cd "$(git rev-parse --show-toplevel)"
+bash scripts/run-predeploy-cloud
 ```
 
-This runs 5 e2e tests (chat-mode, spawn-sub-agents, parallel-tool-calls, claude-code-agent, browser-smoke) against the local backend + worker + research. The `--ci` flag exits non-zero on failure. The `--parallel` flag runs all 5 tasks concurrently.
+`scripts/run-predeploy-cloud` derives the task set from every catalog entry tagged `smoke`, creates a visible Hub request, and invokes `scripts/run-bench` through the hub poller. Each task receives its own Fly machine, backend, Postgres database, and Temporal queue. The fleet waits for every isolated stack at the synchronized start barrier and then releases every benchmark together.
 
-Results are saved to `agents/benchmarks/runs/`. Report the pass rate and total cost to the user.
+The command is the gate: it exits non-zero unless the Hub dispatch is `completed`, the final task set exactly matches the catalog's smoke group, and every task is `passed`. It prints the `hub-...` run ID; verify that exact run in **Benchmarks → Runs** and include it in `TEST_REPORT`.
 
-### Timeout history + bootstrap
+### Active-worktree contract
 
-Per-task timeouts are **dynamic** — derived from p95 × 1.5 of past passes in `agents/benchmarks/history/task_durations.jsonl` (tracked in git). `run_benchmark.py` refuses to run if any task has fewer than 5 passes in history.
+The cloud run must test what `/deploy` will ship, not merely `origin/main`:
 
-**Two cases:**
+- Step 4d commits all intended new/untracked files before runtime tests.
+- The fleet checks out the exact current `HEAD` SHA.
+- Any later staged or unstaged changes to tracked files are shipped as a binary patch (`git diff HEAD --binary`) on top of that SHA.
+- The on-box runner verifies the checkout SHA and fails closed if it cannot fetch it.
 
-1. **First run on a fresh checkout** (or any task shows `InsufficientHistoryError`): bootstrap the corpus with `--bootstrap`. This accepts the tasks.json `timeout_seconds` as a ceiling and still records passes. Run 5×:
+Before starting smoke, fail if an intended untracked file remains; commit it and restart the Test Loop so the cloud cannot silently omit it. Gitignored `.context/` artifacts do not count.
 
-   ```bash
-   cd "$(git rev-parse --show-toplevel)/agents" && source venv/bin/activate
-   for i in 1 2 3 4 5; do
-     TEMPORAL_TASK_QUEUE=navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME ALLOW_TEMPORAL_CLEANUP=true \
-       python benchmarks/run_benchmark.py --suite smoke --port $CONDUCTOR_PORT --ci --parallel --bootstrap
-   done
-   git add agents/benchmarks/history/task_durations.jsonl
-   git commit -m "benchmarks: bootstrap smoke timeout history"
-   ```
-
-2. **Normal run** (history exists): the command at the top of Step 6 runs as-is, without `--bootstrap`. On success, passes auto-append to the JSONL.
-
-**After Step 6 passes: stage, commit, AND PUSH the updated history** before Phase 2. The PR was already pushed in Step 4d, so this commit MUST be pushed too — otherwise it stays local-only and never reaches the PR head, so the merge (Step 12) silently drops the recorded durations:
-
-```bash
-if ! git diff --quiet -- agents/benchmarks/history/task_durations.jsonl; then
-  git add agents/benchmarks/history/task_durations.jsonl
-  git commit -m "benchmarks: record smoke pass durations"
-  git push   # land it on the PR head so the merge includes it (the early Step 4d push is stale)
-fi
-```
-
-The JSONL uses `merge=union` (`.gitattributes`) so parallel branches do not conflict on it.
+Timeout history remains catalog-driven on the checked-out ref. Cloud runs do not mutate the controller's tracked history ledger; do not fabricate or manually copy duration rows as part of deploy.
 
 ### Monitoring agent progress during smoke tests
 
-**Do NOT fire-and-forget.** While benchmarks run, actively monitor agent progress by polling each agent's detail endpoint (`GET /api/agents/{id}`) AND tailing the smoke log file.
+**Do NOT fire-and-forget.** Keep `scripts/run-predeploy-cloud` in the foreground. Monitor the printed Hub run in **Benchmarks → Runs**, the current `.context/hub-poller-run-<request-id>.log`, and the matching `.context/fleet/runs/<batch-id>/_batch/report-card.json`.
 
 **Universal background-task cadence (applies here AND to every background task in this repo):**
 
@@ -495,22 +486,23 @@ The JSONL uses `merge=union` (`.gitattributes`) so parallel branches do not conf
 
 At each poll, check:
 
-- Agent status (ACTIVE, COMPLETED, FAILED, ERROR)
-- Message count and latest messages
-- Progress score
-- Any error messages
-- Background PID is still alive (`ps -p <pid>`) — a 0-byte log + dead PID means the task died silently
+- All catalog tasks remain present in the batch (none may disappear while machines boot)
+- Stack/barrier progress for every isolated task
+- Task status (`queued`, `running`, `passed`, `failed`, `error`)
+- Any infrastructure-fatal lines in each task's `fleet-child.log`
+- The hub poller and fleet controller PIDs remain alive until the final upload
 
-**If any agent shows signs of trouble** (stuck at 0 messages for 30s+, ERROR status, backend 500s in logs), immediately:
+**If any task shows signs of trouble** (runner exit, infra fatal, task `failed`/`error`, or no progress beyond its derived timeout), immediately:
 
-1. Kill ALL running benchmark agents (DELETE each agent)
-2. Read logs (backend, worker, research) to diagnose
-3. Fix the root cause
-4. Re-run sequentially (without `--parallel`) to isolate failures
+1. Preserve the per-task cloud artifacts and agent IDs for diagnosis
+2. Let the fleet teardown stop/destroy its owned machines; if the controller itself died, reconcile only the IDs recorded by that batch/pool
+3. Read the retained cloud/backend/worker logs for the failed agent
+4. Fix the root cause
+5. Restart the Test Loop and re-run the entire synchronized Pre-Deploy group; a sequential pass is diagnostic evidence only and never satisfies this gate
 
 ### Pass criteria
 
-**ALL 5 smoke benchmarks must pass — 0 failures.** Timeouts, stalls, wrong tool usage, backend crashes, or any other failure mode must be diagnosed and fixed. You are expected to root-cause every failure and fix it in code. This is not optional — smoke failures are real bugs.
+**ALL Pre-Deploy smoke benchmarks must pass concurrently — currently 7/7, with 0 failures.** The Hub run must be final (`live=false`, dispatch `completed`) and visible in Benchmarks → Runs. Timeouts, stalls, wrong tool usage, backend crashes, or any other failure mode must be diagnosed and fixed. You are expected to root-cause every failure and fix it in code. This is not optional — smoke failures are real bugs.
 
 **Diagnosis process — MUST be delegated to a `general-purpose` sub-agent.**
 
@@ -531,23 +523,21 @@ Agent({
 Smoke task <task-name> just failed in /deploy. Agent ID: <agent_id>.
 Failure reason from benchmark runner: <reason string from results JSON>.
 
-Repo root: <abs path>. Backend at http://localhost:$CONDUCTOR_PORT.
+Repo root: <abs path>. Cloud batch directory: <abs path to .context/fleet/runs/<batch-id>>.
 
 Steps 1–5 — do them all, do not stop early:
 
-1. Read the relevant log files (truncate aggressively as you go, keep only
-   the windows around the failed agent_id):
-   - back-end/backend-logs.log
-   - agents/navi-worker-log.txt
-   - research/research-logs.log
+1. Read the task's `fleet-child.log`, `cloudbench-run.json`, and retained
+   cloud logs for the failed agent_id (truncate aggressively as you go,
+   keeping only relevant windows).
 
 2. Run BOTH diagnostic summaries IN PARALLEL on the failed agent_id, then
    fully expand whichever one points at the smoking gun:
-   - `cd agents && source venv/bin/activate && python benchmarks/agent_latency.py <agent_id>`
+   - `cd agents && source venv/bin/activate && python benchmarks/agent_latency.py <agent_id> --url https://navi-j9a9.onrender.com`
      — span-based waterfall: executive summary, top 10 slowest paths,
      slowest LLM calls, slowest backend HTTP, deduped errors. Best for
      "why was this slow/stalled."
-   - `cd agents && source venv/bin/activate && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics`
+   - `cd agents && source venv/bin/activate && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics --prod`
      — event-timeline tree across worker/backend/research/messages. Best
      for raw error context.
    - For full detail when the summary points at a layer:
@@ -579,8 +569,8 @@ Final report (under 200 words):
 })
 ```
 
-When all spawned agents return, **the main loop** restarts services as
-instructed and re-runs smoke from the top. If the same task fails again with
+When all spawned agents return, **the main loop** re-runs static checks for
+the fix, pushes the updated branch, and re-runs the full cloud smoke group from the top. If the same task fails again with
 a NEW failure mode, spawn a fresh diagnostic agent — never assume a previous
 agent's fix was complete.
 
@@ -600,55 +590,34 @@ exact agent_id, scan the result, then hand the agent_id off.
 
 Everything else — crashes, timeouts, stalls, resource contention, infra issues — is your job to fix.
 
-If a benchmark fails due to local resource contention, try running fewer in parallel or running them sequentially — but you must still get all 5 passing.
+If a benchmark fails due to cloud infrastructure, fix the fleet runner and re-run the synchronized group. A sequential diagnostic run does not satisfy the concurrent 7/7 gate.
 
-### Cleanup: Delete smoke test agents
+### Cloud cleanup
 
-**This must happen BEFORE teardown** — the local backend must still be running to process DELETE requests.
+The fleet runner owns its Fly machines and stops/destroys them on every normal or trapped exit. After the command finishes, verify every ID in `.context/cloudbench-pool.ids` is `stopped` and that no fresh clone IDs recorded by the batch remain alive.
 
-If benchmarks **pass**: delete all agents created during the run, then teardown.
+Failed benchmark agents are intentionally retained long enough for diagnostics. Do not delete them before collecting the three required diagnostic views. The local Step 5 stack is unrelated to cloud smoke and stays up until the local gates finish.
 
-```bash
-RESULTS_FILE=$(ls -t agents/benchmarks/runs/*.json 2>/dev/null | head -1)
-if [ -n "$RESULTS_FILE" ]; then
-  python3 -c "
-import json
-with open('$RESULTS_FILE') as f:
-    data = json.load(f)
-for r in data.get('task_results', []):
-    aid = r.get('agent_id', '')
-    if aid:
-        print(aid)
-" | while read aid; do
-    curl -s -X DELETE "$SMOKE_BASE_URL/api/agents/$aid" \
-      -H "X-API-Key: AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=" \
-      -H "X-User-Id: 1f85ff25-6e29-4c1b-8739-f917bd101a30" > /dev/null
-  done
-fi
-```
-
-If benchmarks **fail**: do NOT delete agents yet — keep them alive for diagnosis. Diagnose and fix the issue first (see below), then delete agents, then teardown, then re-run from the top of the Test Loop.
-
-**After smoke-agent cleanup, keep the stack running for Steps 6a and 6b. Run the Step 5 teardown only after both gates finish, or immediately when either gate fails.**
+**Keep the local Step 5 stack running for Steps 6a and 6b. Run the Step 5 teardown only after both gates finish, or immediately when either gate fails.**
 
 ### Diagnosing failures
 
-When any test or benchmark fails, check these local log files before making code changes:
+When any cloud benchmark fails, start with the batch artifacts before making code changes:
 
-| Service  | Log file                     | What to look for                                        |
-| -------- | ---------------------------- | ------------------------------------------------------- |
-| Backend  | `back-end/backend-logs.log`  | HTTP errors, Temporal client failures, DB errors        |
-| Worker   | `agents/navi-worker-log.txt` | Workflow tracebacks, activity failures, LLM call errors |
-| Research | `research/research-logs.log` | Edge function errors, rate limits, auth failures        |
+| Surface | Artifact | What to look for |
+| ------- | -------- | ---------------- |
+| Fleet controller | `.context/hub-poller-run-<request-id>.log` | claim, barrier, aggregation, upload, teardown errors |
+| Isolated task | `.context/fleet/runs/<batch-id>/<task>/fleet-child.log` | exact SHA/dependency validation, stack boot, infra fatals |
+| Result | `.context/fleet/runs/<batch-id>/<task>/cloudbench-run.json` | failed agent ID and evaluator reason |
 
 For benchmark-specific diagnostics, run ALL three summaries in parallel — they answer different questions:
 
 ```bash
 # "Why was this slow/stalled?" — span waterfall + top-10 bad paths
-cd agents && python benchmarks/agent_latency.py <agent_id>
+cd agents && python benchmarks/agent_latency.py <agent_id> --url https://navi-j9a9.onrender.com
 
 # "What errors happened where?" — event-timeline tree
-cd agents && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics
+cd agents && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics --prod
 
 # "How much did this cost / cache?" — tree-wide token + cache breakdown
 cd agents && python benchmarks/run_benchmark.py --compare <run_a.json> <run_b.json>
@@ -693,7 +662,7 @@ After all four pass, relaunch the Step 5 stack and readiness checks before Step 
 
 Semantic tests exercise real user flows through Playwright/Chromium against the full local stack (backend + worker + research + **frontend**). They are the only gate that proves realtime broadcasts reach the UI and that the login path still works end-to-end.
 
-**Skip criteria are the same as Step 6 (smoke).** If you ran smoke, you run semantic. If smoke was safely skipped per the "When smoke can be skipped" table, record semantic as skipped too with the same reason. **Never skip semantic tests unless smoke was also skipped.**
+**Semantic tests run on every /deploy and may never be skipped.** This is independent of the smoke-benchmark change classifier: documentation-only, test-only, frontend-only, and backend-only deploys all run the complete semantic suite. A deploy changes production state even when the app diff is small, so the user-visible frontend contract is always re-proven.
 
 ### Running semantic tests
 
@@ -701,9 +670,11 @@ With the full stack from Step 5 still running (backend, worker, research, **and 
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-BACKEND_PORT=$CONDUCTOR_PORT FRONTEND_PORT=$((CONDUCTOR_PORT + 1)) \
+SEMANTIC_WORKERS=4 BACKEND_PORT=$CONDUCTOR_PORT FRONTEND_PORT=$((CONDUCTOR_PORT + 1)) \
   bash front-end/scripts/run-semantic-tests.sh
 ```
+
+The runner generates one authenticated session and shares it across all four Playwright workers. Every semantic spec runs. Inside the lifecycle spec, the `direct_answer`, `web_search`, `agent_plan`, and `agent_execute` paths run concurrently; each path takes five independent samples and every sample must complete the full browser lifecycle in under five seconds.
 
 This runs every `.spec.ts` under `front-end/tests-e2e/` via headless Chromium. To run a single test:
 
@@ -759,7 +730,11 @@ After Steps 6a and 6b pass, run the mandatory Step 5 teardown. If either fails, 
 
 # ║ 5. Blackbox API tests: 100% pass (ALL domains) ║
 
-# ║ 6. Smoke benchmarks: 5/5 pass — OR explicitly skipped per the ║
+# ║ 6. Smoke benchmarks: complete synchronized Pre-Deploy group ║
+
+# ║ passes concurrently (currently 7/7), with final Hub run — OR ║
+
+# ║ explicitly skipped per the ║
 
 # ║ "When smoke can be skipped" table in Step 6 (diff must be ║
 
@@ -771,9 +746,11 @@ After Steps 6a and 6b pass, run the mandatory Step 5 teardown. If either fails, 
 
 # ║ lifecycle surface changed ║
 
-# ║ 6b. Semantic tests: 100% pass whenever smoke ran (skip together ║
+# ║ 6b. Semantic tests: 100% pass on every /deploy; never skipped. ║
 
-# ║ with smoke — never skip one without the other) ║
+# ║ Includes four concurrent chat paths × five full-lifecycle samples, ║
+
+# ║ with every sample below the five-second ratchet. ║
 
 # ║ ║
 
@@ -918,7 +895,7 @@ done
 gh pr checks <PR_NUMBER> --watch
 ```
 
-This blocks until CodeRabbit actually reviews the current HEAD. Once it returns, read reviews from ALL three comment locations:
+This blocks until the CodeRabbit check completes for the current HEAD. **A green check alone does not prove a review happened.** Once it returns, read reviews from ALL three comment locations:
 
 ```bash
 gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/reviews
@@ -928,13 +905,63 @@ gh api repos/{owner}/{repo}/issues/<PR_NUMBER>/comments
 
 Filter reviews/comments by `submitted_at > PUSH_TS` (or `commit_id == HEAD_SHA` for inline comments) so you only act on findings for the newest commit.
 
+### Step 9a: Verify CodeRabbit delivered a substantive review
+
+Inspect the newest CodeRabbit-authored content from all three endpoints. Treat CodeRabbit as unavailable and run the Claude fallback when any of these is true:
+
+- The check is missing, failed, or timed out.
+- The newest bot output contains `Review limit reached`, `rate limited`, `usage spending cap`, `review skipped`, or a service/internal error.
+- The check is green but there is no substantive review result for `HEAD_SHA`. A quota/error comment is not a review.
+
+Do not repeatedly request more CodeRabbit reviews during a quota window. Trigger exactly one Claude review for the current HEAD by toggling the opt-in label:
+
+```bash
+FALLBACK_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+gh label create claude-review-fallback \
+  --description "Run Claude Code review when the primary reviewer is unavailable" \
+  --color 7B61FF --force
+gh api repos/{owner}/{repo}/issues/<PR_NUMBER>/labels/claude-review-fallback \
+  -X DELETE >/dev/null 2>&1 || true
+gh api repos/{owner}/{repo}/issues/<PR_NUMBER>/labels \
+  -X POST -f 'labels[]=claude-review-fallback' >/dev/null
+```
+
+Wait for the workflow run created after `FALLBACK_TS` and require it to succeed:
+
+```bash
+FALLBACK_RUN_ID=""
+for i in $(seq 1 40); do
+  FALLBACK_RUN_ID=$(gh run list \
+    --workflow claude-code-review-fallback.yml \
+    --event pull_request \
+    --limit 20 \
+    --json databaseId,createdAt,headSha \
+    --jq ".[] | select(.headSha == \"$HEAD_SHA\" and .createdAt > \"$FALLBACK_TS\") | .databaseId" \
+    | head -1)
+  [ -n "$FALLBACK_RUN_ID" ] && break
+  sleep 15
+done
+[ -n "$FALLBACK_RUN_ID" ] || { echo "Claude fallback did not start" >&2; exit 1; }
+gh run watch "$FALLBACK_RUN_ID" --exit-status
+```
+
+After success, read the three comment endpoints again and filter at `FALLBACK_TS`. The official code-review plugin posts only findings scoring at least 80; a successful workflow with no findings comment means no high-confidence issues were found. If the workflow fails, do not merge—inspect `gh run view "$FALLBACK_RUN_ID" --log-failed`, repair the fallback, and rerun it for the same HEAD.
+
+Remove the fallback label after a successful review so later pushes do not spend Claude quota unless the fallback is explicitly requested again:
+
+```bash
+gh api repos/{owner}/{repo}/issues/<PR_NUMBER>/labels/claude-review-fallback \
+  -X DELETE >/dev/null 2>&1 || true
+```
+
 ## Step 10: Handle review results
 
-Look across all three endpoints for review feedback from CodeRabbit. It may post findings as formal reviews or regular comments.
+Look across all three endpoints for review feedback from CodeRabbit or the Claude fallback. Either reviewer may post findings as formal reviews or regular comments.
 
 - **APPROVED** with no critical issues → proceed to Phase 3.
 - **CHANGES_REQUESTED** or any comment flagging issues → fix them, push, **re-run the full Test Loop (Phase 1)**, then come back to Step 9.
-- **REVIEW SKIPPED** (e.g., "Too many files!") → first try filtering, then escalate only if filtering doesn't fit. CodeRabbit Free caps reviews at 150 files. Add safe path filters to `.coderabbit.yaml`'s `reviews.path_filters` block, push, and let the next CodeRabbit run pick up the new filter. The list below is the canonical safe-filter set — these paths are already gated by /deploy's local checks, so excluding them from CodeRabbit doesn't lose coverage:
+- **CODE RABBIT UNAVAILABLE** (quota, spending cap, rate limit, service failure, or false-green check) → use the Claude fallback from Step 9a.
+- **REVIEW SKIPPED** (e.g., "Too many files!") → first try filtering, then use the Claude fallback if filtering doesn't fit. CodeRabbit Free caps reviews at 150 files. Add safe path filters to `.coderabbit.yaml`'s `reviews.path_filters` block, push, and let the next CodeRabbit run pick up the new filter. The list below is the canonical safe-filter set — these paths are already gated by /deploy's local checks, so excluding them from CodeRabbit doesn't lose coverage:
   ```yaml
   # Tests (gated by Step 5a / Step 6 / Step 6b locally)
   - "!**/tests/**"
@@ -979,7 +1006,7 @@ Look across all three endpoints for review feedback from CodeRabbit. It may post
   If the projected count is still ≥150 after applying the canonical set, escalate to the user — splitting the PR or upgrading CodeRabbit is the only remaining option.
 - **No issues found** → proceed to Phase 3.
 
-**Fix ALL valid issues**, regardless of whether the code was modified in this PR. "Pre-existing" or "not my code" is NOT a valid reason to skip a real bug, security issue, or correctness problem. If CodeRabbit found it, and it's a real issue, fix it. Only skip true style nits (formatting, naming preferences, etc.) that have zero correctness impact.
+**Fix ALL valid issues**, regardless of whether the code was modified in this PR. "Pre-existing" or "not my code" is NOT a valid reason to skip a real bug, security issue, or correctness problem. If CodeRabbit or Claude found it, and it's a real issue, fix it. Only skip true style nits (formatting, naming preferences, etc.) that have zero correctness impact.
 
 **Reply to every review comment** before proceeding. For each comment, reply with one of:
 
@@ -1067,7 +1094,7 @@ Determine which deploy workflows are relevant based on what files changed in the
 - Changes in `agents/` → poll `deploy-agents.yml`
 - Changes in `research/supabase/functions/` or `research/deploy.sh` → poll `deploy-research.yml`
 - Changes in `back-end/` → Render auto-deploys (no workflow to poll). **Do NOT just "wait ~60s" — run Step 13a to confirm the merged commit went live AND the app is functionally healthy.**
-- Changes in `front-end/` → Vercel auto-deploys (no workflow to poll, just wait ~60s)
+- Changes in `front-end/` → Vercel auto-deploys. Wait for a successful GitHub deployment status tied to the merged SHA; a fixed sleep is not proof that the new frontend is live.
 - Changes in `mac-app/` → check if PR had `MAC-APP-RELEASE` label; if so, poll `release-mac-app.yml`
 
 For GitHub Action workflows, wait for the new run to appear then watch it:
@@ -1084,6 +1111,30 @@ gh run watch "$RUN_ID"
 ```
 
 This avoids watching a stale run that started before the merge. Repeat for each relevant workflow.
+
+For a frontend change, wait for Vercel to report the merged commit as live:
+
+```bash
+if [ -n "$CHANGED_FRONTEND" ]; then
+  MERGED_SHA=$(git rev-parse main)
+  VERCEL_OK=""
+  for i in $(seq 1 90); do
+    DEPLOYMENT_ID=$(gh api "repos/{owner}/{repo}/deployments?sha=$MERGED_SHA" \
+      --jq '[.[] | select(.creator.login == "vercel[bot]")][0].id // empty')
+    if [ -n "$DEPLOYMENT_ID" ]; then
+      VERCEL_STATE=$(gh api "repos/{owner}/{repo}/deployments/$DEPLOYMENT_ID/statuses" \
+        --jq '.[0].state // "pending"')
+      echo "  Vercel: state=$VERCEL_STATE deployment=$DEPLOYMENT_ID"
+      case "$VERCEL_STATE" in
+        success) VERCEL_OK=1; break ;;
+        failure|error|inactive) VERCEL_OK=failed; break ;;
+      esac
+    fi
+    sleep 10
+  done
+  [ "$VERCEL_OK" = "1" ] || { echo "❌ Vercel did not bring $MERGED_SHA live"; exit 1; }
+fi
+```
 
 If a deploy fails:
 
@@ -1178,7 +1229,36 @@ If this exits non-zero, the deploy is **unhealthy even though it's live** — tr
 
 **Migration-specific note:** if the error is a Prisma "column/table does not exist", the deployed code expects a schema the prod DB doesn't have. Verify the migration is both present in `back-end/prisma/migrations/` AND actually applied to prod (the migration row in `_prisma_migrations` can be marked applied while the column is absent if a stray `prisma db push` from another workspace dropped it — `back-end/.env` `DATABASE_URL` points at prod). Re-apply the missing DDL idempotently (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS ...`) and re-run Step 2.
 
-## Step 13b: AgentCard production lifecycle gate
+## Step 13b: Production semantic frontend gate (no skip — always runs)
+
+After all changed services are live and Step 13a is green when applicable, dispatch the trusted production semantic workflow. This runs every frontend semantic spec in one job with four Playwright workers and one shared authenticated session. It includes the four-path, five-sample, full-lifecycle chat ratchet.
+
+```bash
+SEMANTIC_DISPATCH_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+gh workflow run chat-lifecycle-ratchet.yml --ref main \
+  -f frontend_url=https://roselabs.ai \
+  -f backend_url=https://navi-j9a9.onrender.com
+
+SEMANTIC_RUN_ID=""
+for i in $(seq 1 40); do
+  SEMANTIC_RUN_ID=$(gh run list \
+    --workflow chat-lifecycle-ratchet.yml \
+    --event workflow_dispatch \
+    --branch main \
+    --limit 20 \
+    --json databaseId,createdAt \
+    --jq ".[] | select(.createdAt >= \"$SEMANTIC_DISPATCH_TS\") | .databaseId" \
+    | head -1)
+  [ -n "$SEMANTIC_RUN_ID" ] && break
+  sleep 5
+done
+[ -n "$SEMANTIC_RUN_ID" ] || { echo "❌ Production semantic workflow did not start"; exit 1; }
+gh run watch "$SEMANTIC_RUN_ID" --exit-status
+```
+
+This is a hard deployment gate. If the workflow fails, the deployment is not complete: inspect its Playwright artifacts and service logs, fix the root cause in a new PR, and repeat the deploy loop. Do not report success or proceed to Step 14 while this check is red.
+
+## Step 13c: AgentCard production lifecycle gate
 
 Skip only when `$CHANGED_AGENTCARD_PAYMENT` is empty. Run after both the backend and frontend merged commits are live:
 

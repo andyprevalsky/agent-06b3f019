@@ -9,11 +9,61 @@ import { createLogger } from './logger';
 const STRIPE_API_VERSION = '2025-02-24.acacia' as const;
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY ?? '';
 
+export function resolveStripeMetricsSecretKey(
+  adminHealthKey: string | undefined,
+  billingKey: string
+): string {
+  return adminHealthKey?.trim() || billingKey;
+}
+
+export function assertStripeMetricsAccountId(expected: string, actual: string): void {
+  if (expected.trim() === '') {
+    throw new Error('ADMIN_HEALTH_STRIPE_ACCOUNT_ID is required');
+  }
+  if (actual !== expected) {
+    throw new Error(`Admin health Stripe account mismatch: expected ${expected}, got ${actual}`);
+  }
+}
+
+const STRIPE_METRICS_SECRET_KEY = resolveStripeMetricsSecretKey(
+  process.env.ADMIN_HEALTH_STRIPE_SECRET_KEY,
+  STRIPE_SECRET_KEY
+);
+const STRIPE_METRICS_ACCOUNT_ID = process.env.ADMIN_HEALTH_STRIPE_ACCOUNT_ID?.trim() ?? '';
+
 const log = createLogger('Stripe');
 
 export const stripe = new Stripe(STRIPE_SECRET_KEY, {
   apiVersion: STRIPE_API_VERSION,
 });
+
+let stripeMetricsClient: Stripe | null = null;
+let stripeMetricsAccountVerification: Promise<void> | null = null;
+
+export function getStripeMetricsClient(): Stripe {
+  if (!/^(sk|rk)_live_/.test(STRIPE_METRICS_SECRET_KEY)) {
+    throw new Error('Admin health requires a live-mode Stripe secret key');
+  }
+  stripeMetricsClient ??= new Stripe(STRIPE_METRICS_SECRET_KEY, {
+    apiVersion: STRIPE_API_VERSION,
+  });
+  return stripeMetricsClient;
+}
+
+export async function getVerifiedStripeMetricsClient(): Promise<Stripe> {
+  const client = getStripeMetricsClient();
+  stripeMetricsAccountVerification ??= client.accounts
+    .retrieve()
+    .then((account) => {
+      assertStripeMetricsAccountId(STRIPE_METRICS_ACCOUNT_ID, account.id);
+    })
+    .catch((error: unknown) => {
+      stripeMetricsAccountVerification = null;
+      throw error;
+    });
+  await stripeMetricsAccountVerification;
+  return client;
+}
 
 export type { Stripe };
 

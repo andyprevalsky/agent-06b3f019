@@ -82,8 +82,14 @@ export function handleInsertMessage(
     setters.setStreamingPlan(null);
   }
 
-  if (message.role === 'TOOL' && message.metadata?.toolName === 'send_message_to_user') {
-    setters.setStreamingAttention(null);
+  if (
+    message.role === 'TOOL' &&
+    message.metadata?.toolName === 'send_message_to_user' &&
+    typeof message.metadata?.toolCallId === 'string'
+  ) {
+    setters.setStreamingAttention((prev) =>
+      prev?.tool_call_id === message.metadata?.toolCallId ? null : prev,
+    );
   }
 
   if (message.role === 'TOOL' && message.metadata?.toolCallId) {
@@ -153,10 +159,12 @@ export function handleAssistantStream(
   selectedAgentId: string,
   streamedTextsRef: React.MutableRefObject<Set<string>>,
   setStreamingBubbles: RealtimeSetters['setStreamingBubbles'],
+  completedStreamIdsRef?: React.MutableRefObject<Set<string>>,
 ) {
   if (chunk.agentId !== selectedAgentId) return;
 
   setStreamingBubbles((prev) => {
+    if (completedStreamIdsRef?.current.has(chunk.stream_id)) return prev;
     const newMap = new Map(prev);
     const existing = newMap.get(chunk.stream_id);
 
@@ -164,6 +172,15 @@ export function handleAssistantStream(
       if (existing?.timeoutId) window.clearTimeout(existing.timeoutId);
 
       const accumulatedText = (existing?.text || '') + chunk.delta;
+
+      if (chunk.done && chunk.clear_on_done) {
+        if (accumulatedText.trim()) {
+          streamedTextsRef.current.add(accumulatedText.trim());
+        }
+        completedStreamIdsRef?.current.add(chunk.stream_id);
+        newMap.delete(chunk.stream_id);
+        return newMap;
+      }
 
       let timeoutId: number | undefined;
       if (chunk.done) {
@@ -225,11 +242,21 @@ export function handleAttentionStream(
 ) {
   if (attention.agentId !== selectedAgentId) return;
 
-  setStreamingAttention({
-    stream_id: attention.stream_id,
-    tool_call_id: attention.tool_call_id,
-    message: attention.message,
-    is_question: false,
+  setStreamingAttention((prev) => {
+    const isMatchingStream = prev?.tool_call_id === attention.tool_call_id;
+    if (isMatchingStream && attention.sequence <= prev.sequence) return prev;
+    if (attention.done && attention.message.length === 0) {
+      return isMatchingStream || prev === null ? null : prev;
+    }
+    if (attention.message.length === 0) return prev;
+    return {
+      stream_id: attention.stream_id,
+      tool_call_id: attention.tool_call_id,
+      message: attention.message,
+      is_question: false,
+      sequence: attention.sequence,
+      done: attention.done,
+    };
   });
 }
 
@@ -252,6 +279,7 @@ export function handleToolStream(
       tool_call_id: tool.tool_call_id,
       tool_name: tool.tool_name,
       title: tool.title,
+      subAgentId: tool.subAgentId ?? prev.get(tool.tool_call_id)?.subAgentId,
       charCount: tool.char_count ?? prev.get(tool.tool_call_id)?.charCount ?? 0,
       startedAtMs: tool.llm_started_at_ms ?? prev.get(tool.tool_call_id)?.startedAtMs ?? Date.now(),
       isClaude: tool.is_claude ?? prev.get(tool.tool_call_id)?.isClaude ?? false,

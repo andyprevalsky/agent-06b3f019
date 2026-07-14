@@ -8,7 +8,7 @@
  * callers iterate. RoseStreamChunk is the typed normalized form used inside
  * the orchestration layer.
  */
-export type MessageRole = 'system' | 'user' | 'assistant';
+export type MessageRole = 'system' | 'user' | 'assistant' | 'tool';
 
 export interface ContentBlock {
   type: string;
@@ -55,6 +55,14 @@ export interface CompletionOptions {
   tool_choice?: unknown;
   effort?: string;
   provider_fast_mode?: boolean;
+  /**
+   * Selects an exclusive provider path. Omitted requests keep the normal
+   * OAuth -> shared keys -> OpenRouter Rose routing contract.
+   */
+  provider_route?:
+    'direct-cerebras' | 'openrouter-cerebras' | 'shared-openai-priority' | 'openrouter-waterfall';
+  /** Internal cancellation used by bounded provider hedges; never serialized. */
+  abort_signal?: AbortSignal;
   claude_token?: string;
   gpt_token?: string;
   gpt_account_id?: string;
@@ -79,6 +87,10 @@ export interface CompletionChunk {
       content?: string;
       reasoning?: string;
       role?: string;
+      item_id?: string;
+      output_index?: number;
+      content_index?: number;
+      phase?: string;
       tool_calls?: Array<{
         id: string;
         type: 'function';
@@ -109,13 +121,20 @@ export interface CompletionChunk {
 export type ChunkKind =
   'metadata' | 'content' | 'tool_call' | 'reasoning' | 'codex_reasoning_item' | 'usage' | 'done';
 
+export interface OutputProvenance {
+  item_id: string;
+  output_index: number;
+  content_index: number;
+  phase: string;
+}
+
 export type RoseStreamChunk =
   | {
       kind: 'metadata';
       data: { actual_model: string; pool_name: string; request_id: string };
     }
-  | { kind: 'content'; data: { text: string } }
-  | { kind: 'reasoning'; data: { text: string } }
+  | { kind: 'content'; data: { text: string } & OutputProvenance }
+  | { kind: 'reasoning'; data: { text: string } & OutputProvenance }
   | { kind: 'tool_call'; data: { id: string; name: string; arguments: string } }
   | { kind: 'codex_reasoning_item'; data: Record<string, unknown> }
   | {

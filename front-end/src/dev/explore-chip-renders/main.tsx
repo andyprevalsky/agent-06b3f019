@@ -136,7 +136,7 @@ function buildLiveSteps(toolsFinished: boolean, finishedAtMs: number): ExploreSt
   ];
 }
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
+export function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="grid min-w-0 gap-3">
       <h2 className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
@@ -147,7 +147,7 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-function Example({ label, children }: { label: string; children: ReactNode }) {
+export function Example({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="grid min-w-0 gap-1.5">
       <div className="min-w-0 text-[11px] text-muted-foreground">{label}</div>
@@ -158,7 +158,7 @@ function Example({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function WaitExample({
+export function WaitExample({
   data,
   status,
   liveSteps,
@@ -216,9 +216,6 @@ function WaitExample({
       },
     ],
     [
-      data.failedResult,
-      data.failedStepResult,
-      data.finishedResult,
       data.finishedStepResult,
       data.goal,
       data.latestAction,
@@ -250,7 +247,7 @@ function WaitExample({
   );
 }
 
-function InlineExample({ data, status }: { data: FixtureData; status: ExploreStatus }) {
+export function InlineExample({ data, status }: { data: FixtureData; status: ExploreStatus }) {
   const terminalResult = status === 'ERROR' ? data.failedResult : data.finishedResult;
   const terminalStepResult = status === 'ERROR' ? data.failedStepResult : data.finishedStepResult;
 
@@ -302,7 +299,7 @@ function useDemoThinkingStream() {
   };
 }
 
-function App() {
+export function App() {
   const { thinkingStreamTokenCount, thinkingStreamStartedAtMs, toolsFinished } =
     useDemoThinkingStream();
   const animatedThinkingTokenCount = useAnimatedCounter(thinkingStreamTokenCount, 0.3);

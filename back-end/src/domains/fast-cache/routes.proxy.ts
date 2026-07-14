@@ -195,22 +195,19 @@ codexProxyRouter.use(
         : cacheable
           ? 'MISS'
           : 'PASS';
-    codexLog.info(
-      `Codex proxy ${cacheStatus}`,
-      {
-        traceHash: trace.traceHash,
-        sessionId: trace.sessionId,
-        path: pathAndQuery.split('?', 1)[0],
-        cacheable: result.cacheable,
-        readEnabled: result.readEnabled,
-        ordinal: result.ordinal,
-        cacheKey: result.cacheKey,
-        cacheHitKind: result.cacheHitKind,
-        fallbackSourceOrdinal: result.fallbackSourceOrdinal,
-        fallbackSourceCacheKey: result.fallbackSourceCacheKey,
-        wrote: result.wrote,
-      }
-    );
+    codexLog.info(`Codex proxy ${cacheStatus}`, {
+      traceHash: trace.traceHash,
+      sessionId: trace.sessionId,
+      path: pathAndQuery.split('?', 1)[0],
+      cacheable: result.cacheable,
+      readEnabled: result.readEnabled,
+      ordinal: result.ordinal,
+      cacheKey: result.cacheKey,
+      cacheHitKind: result.cacheHitKind,
+      fallbackSourceOrdinal: result.fallbackSourceOrdinal,
+      fallbackSourceCacheKey: result.fallbackSourceCacheKey,
+      wrote: result.wrote,
+    });
 
     res.status(result.status);
     res.setHeader('content-type', result.contentType);

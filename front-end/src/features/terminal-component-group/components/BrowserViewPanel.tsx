@@ -45,6 +45,7 @@ import {
   usePendingAuthAssistance,
   usePendingWriteLockApproval,
 } from './browser-view-panel/hooks';
+import type { PendingAuthAssistance } from './browser-status-bar/types';
 
 interface BrowserViewPanelProps {
   taskId: string;
@@ -69,7 +70,6 @@ export default function BrowserViewPanel({
   const { isComplete, isSuccess, completionMessage } = useBrowserCompletion(messages, taskId);
   const pendingWriteLockApproval = usePendingWriteLockApproval(messages);
   const pendingAuthAssistance = usePendingAuthAssistance(messages, taskId);
-  const [isCompletingAuthAssistance, setIsCompletingAuthAssistance] = useState(false);
   const [isDisconnected, setIsDisconnected] = useDisconnectListener(isComplete);
   const actionsPosition = useActionsPanelPosition(browserContainerRef, isAnyBrowserFullscreen);
   const { currentBrowserUrl, isResuming, handleResume } = useBrowserResume(
@@ -77,23 +77,11 @@ export default function BrowserViewPanel({
     browserUrl,
     setIsDisconnected,
   );
+  const { isCompletingAuthAssistance, handleStartAgent } = useStartAgent(
+    pendingAuthAssistance,
+    handleResume,
+  );
   const isWaitingForAuthAssistance = pendingAuthAssistance !== null;
-  const handleStartAgent = async () => {
-    if (pendingAuthAssistance === null) {
-      await handleResume();
-      return;
-    }
-
-    setIsCompletingAuthAssistance(true);
-    try {
-      await completeAuthAssistanceRequest(pendingAuthAssistance.requestId);
-    } catch (error) {
-      console.error('Failed to complete authentication assistance:', error);
-      window.alert('Failed to complete authentication assistance. Please try again.');
-    } finally {
-      setIsCompletingAuthAssistance(false);
-    }
-  };
 
   const toggleFullscreen = () => {
     const next = !isThisFullscreen;
@@ -144,4 +132,24 @@ export default function BrowserViewPanel({
       />
     </>
   );
+}
+
+function useStartAgent(pending: PendingAuthAssistance | null, resume: () => Promise<void>) {
+  const [isCompletingAuthAssistance, setIsCompletingAuthAssistance] = useState(false);
+  const handleStartAgent = async () => {
+    if (pending === null) {
+      await resume();
+      return;
+    }
+    setIsCompletingAuthAssistance(true);
+    try {
+      await completeAuthAssistanceRequest(pending.requestId);
+    } catch (error) {
+      console.error('Failed to complete authentication assistance:', error);
+      window.alert('Failed to complete authentication assistance. Please try again.');
+    } finally {
+      setIsCompletingAuthAssistance(false);
+    }
+  };
+  return { isCompletingAuthAssistance, handleStartAgent };
 }

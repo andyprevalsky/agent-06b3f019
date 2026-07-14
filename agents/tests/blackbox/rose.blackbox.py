@@ -541,7 +541,7 @@ def test_pydantic_response_model_builds_anthropic_native_tools_without_strict_by
     assert "tool" not in wait_schema["required"]
     # Pydantic runtime validators/defaults remain authoritative. The native
     # Anthropic schema should not force defaults/nulls into tool arguments.
-    assert wait_schema["required"] == []
+    assert wait_schema["required"] == ["description"]
     assert wait_schema["properties"]["check_interval_seconds"]["minimum"] == 60
     assert wait_schema["properties"]["check_interval_seconds"]["maximum"] == 86400
 
@@ -1073,10 +1073,63 @@ def test_build_anthropic_body_caps_anthropic_cache_control_blocks():
     )
 
     assert _count_cache_control_blocks(body) == 4
-    assert all("cache_control" in block for block in body["system"][2:])
+    last_content = body["messages"][-1]["content"]
+    assert isinstance(last_content, list)
+    assert last_content[-1]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in body["system"][-1]
+    assert all("cache_control" in block for block in body["system"][2:-1])
     assert body["tools"][-1]["cache_control"] == {"type": "ephemeral"}
-    for block in body["messages"][-1]["content"]:
-        assert "cache_control" not in block
+
+
+def test_param_populator_bodies_share_cached_conversation_prefix():
+    """Different task suffixes leave the marked execute context byte-identical."""
+    from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+
+    system_content = (
+        f"static instructions{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
+        f"user context{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
+        f"execute phase{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
+    )
+    tools = [
+        {"name": "web_search", "description": "search", "input_schema": {"type": "object", "properties": {}}},
+        {"name": "web_fetch", "description": "fetch", "input_schema": {"type": "object", "properties": {}}},
+    ]
+
+    def build(task_prompt):
+        return build_anthropic_body(
+            pool_spec=get_pool("rose-1-lite"),
+            messages=[
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": "original request"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "current plan",
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                },
+                {"role": "user", "content": task_prompt},
+            ],
+            tools=tools,
+            tool_choice="any",
+            response_format=None,
+            max_tokens=256,
+            skip_cache_write=True,
+        )
+
+    first = build("Please execute task 1 of the plan: search")
+    second = build("Please execute task 2 of the plan: fetch")
+
+    assert first["system"] == second["system"]
+    assert first["tools"] == second["tools"]
+    assert first["messages"][:-1] == second["messages"][:-1]
+    stable_block = first["messages"][-2]["content"][-1]
+    assert stable_block["text"] == "current plan"
+    assert stable_block["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in first["messages"][-1]
 
 
 def test_build_anthropic_body_message_cache_breakpoint():
@@ -3028,6 +3081,82 @@ async def test_client_collect_waterfall_only_path():
     assert resp.usage.get("total_tokens") == 6
 
 
+async def test_client_collect_preserves_multiple_unstructured_text_items():
+    async def complete(**_kwargs):
+        yield StreamChunk(
+            kind="content",
+            data={
+                "text": "hello ",
+                "item_id": "text-1",
+                "output_index": 0,
+                "content_index": 0,
+                "phase": "final_answer",
+            },
+        )
+        yield StreamChunk(
+            kind="content",
+            data={
+                "text": "world",
+                "item_id": "text-2",
+                "output_index": 1,
+                "content_index": 0,
+                "phase": "final_answer",
+            },
+        )
+        yield StreamChunk(kind="done", data={})
+
+    client = RoseClient(openrouter_key="ork-x")
+    client.complete = complete
+    response = await client.collect(
+        pool="rose-1-lite",
+        messages=[{"role": "user", "content": "hi"}],
+        call_site="test-collect-multiple-items",
+    )
+
+    assert response.content == "hello world"
+
+
+async def test_client_collect_selects_final_structured_output_item():
+    from pydantic import BaseModel
+
+    class Answer(BaseModel):
+        answer: str
+
+    async def complete(**_kwargs):
+        yield StreamChunk(
+            kind="content",
+            data={
+                "text": '{"answer":"commentary"}',
+                "item_id": "commentary",
+                "output_index": 0,
+                "content_index": 0,
+                "phase": "commentary",
+            },
+        )
+        yield StreamChunk(
+            kind="content",
+            data={
+                "text": '{"answer":"final"}',
+                "item_id": "final",
+                "output_index": 1,
+                "content_index": 0,
+                "phase": "final_answer",
+            },
+        )
+        yield StreamChunk(kind="done", data={})
+
+    client = RoseClient(openrouter_key="ork-x")
+    client.complete = complete
+    response = await client.collect(
+        pool="rose-1-lite",
+        messages=[{"role": "user", "content": "hi"}],
+        response_model=Answer,
+        call_site="test-collect-structured-items",
+    )
+
+    assert response.content == '{"answer":"final"}'
+
+
 async def test_client_collect_emits_common_rose_timing_logs():
     sse_ok = "\n".join(
         _openai_sse(
@@ -3651,7 +3780,7 @@ async def test_client_splits_pydantic_model_to_claude_native_tools():
             "index": 0,
             "delta": {
                 "type": "input_json_delta",
-                "partial_json": '{"condition":"package ships"}',
+                "partial_json": '{"description":"the package to ship","condition":"package ships"}',
             },
         },
     )
@@ -3694,13 +3823,16 @@ async def test_client_splits_pydantic_model_to_claude_native_tools():
     assert "strict" not in tools["wait_for"]
     wait_schema = tools["wait_for"]["input_schema"]
     assert "tool" not in wait_schema["properties"]
-    assert wait_schema["required"] == []
+    assert wait_schema["required"] == ["description"]
     assert wait_schema["properties"]["check_interval_seconds"]["minimum"] == 60
     assert wait_schema["properties"]["check_interval_seconds"]["maximum"] == 86400
 
     tool_call = next(c for c in chunks if c.kind == "tool_call")
     assert tool_call.data["name"] == "wait_for"
-    assert json.loads(tool_call.data["arguments"]) == {"condition": "package ships"}
+    assert json.loads(tool_call.data["arguments"]) == {
+        "description": "the package to ship",
+        "condition": "package ships",
+    }
 
 
 async def test_client_splits_pydantic_model_to_gpt_native_tools():
@@ -3715,7 +3847,7 @@ async def test_client_splits_pydantic_model_to_gpt_native_tools():
                 "type": "function_call",
                 "call_id": "call_wait",
                 "name": "wait_for",
-                "arguments": '{"condition":"package ships"}',
+                "arguments": '{"description":"the package to ship","condition":"package ships"}',
             },
         },
     )
@@ -3759,13 +3891,16 @@ async def test_client_splits_pydantic_model_to_gpt_native_tools():
     assert seen_body["tool_choice"] == "required"
     tools = {tool["name"]: tool for tool in seen_body["tools"]}
     assert set(tools) == {"wait_for", "attempt_completion"}
-    assert tools["wait_for"]["parameters"]["required"] == []
+    assert tools["wait_for"]["parameters"]["required"] == ["description"]
 
     metadata = next(c for c in chunks if c.kind == "metadata")
     assert metadata.data["actual_model"].endswith("-gpt")
     tool_call = next(c for c in chunks if c.kind == "tool_call")
     assert tool_call.data["name"] == "wait_for"
-    assert json.loads(tool_call.data["arguments"]) == {"condition": "package ships"}
+    assert json.loads(tool_call.data["arguments"]) == {
+        "description": "the package to ship",
+        "condition": "package ships",
+    }
 
 
 async def test_client_plain_pydantic_model_uses_claude_output_config():
@@ -4525,6 +4660,10 @@ async def run_all_tests():
     r.record("anthropic_body_static_dynamic_split", test_build_anthropic_body_static_dynamic_split)
     r.record("anthropic_body_multi_boundary_cached", test_build_anthropic_body_multi_boundary_system_blocks_are_cached)
     r.record("anthropic_body_cache_control_cap", test_build_anthropic_body_caps_anthropic_cache_control_blocks)
+    r.record(
+        "anthropic_param_populator_shared_prefix",
+        test_param_populator_bodies_share_cached_conversation_prefix,
+    )
     r.record("anthropic_body_message_breakpoint", test_build_anthropic_body_message_cache_breakpoint)
     r.record("anthropic_body_skip_cache_write", test_build_anthropic_body_skip_cache_write_keeps_system_markers)
     r.record("anthropic_body_provider_fast_mode", test_build_anthropic_body_provider_fast_mode_supported_opus_only)
@@ -4627,6 +4766,14 @@ async def run_all_tests():
     )
 
     await r.record_async("client_collect_waterfall", test_client_collect_waterfall_only_path)
+    await r.record_async(
+        "client_collect_multiple_unstructured_items",
+        test_client_collect_preserves_multiple_unstructured_text_items,
+    )
+    await r.record_async(
+        "client_collect_selects_final_structured_item",
+        test_client_collect_selects_final_structured_output_item,
+    )
     await r.record_async("client_collect_common_timing_logs", test_client_collect_emits_common_rose_timing_logs)
     await r.record_async("client_fallthrough_to_waterfall", test_client_falls_through_from_claude_auth_to_waterfall)
     await r.record_async(

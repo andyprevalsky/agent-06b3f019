@@ -34,6 +34,19 @@ const GrepMatch = z.object({
     field: z.string().optional(),
   }),
   content: z.string(),
+  records: z
+    .array(
+      z.object({
+        message_id: z.string(),
+        channel: z.string(),
+        from: z.string(),
+        to: z.string(),
+        timestamp: z.string(),
+        message: z.string(),
+        relation: z.enum(['before', 'match', 'after']),
+      })
+    )
+    .optional(),
 });
 
 const GrepResponse = z.object({
@@ -41,9 +54,27 @@ const GrepResponse = z.object({
   total_matches: z.number(),
   truncated: z.boolean(),
   pattern: z.string(),
-  sources: z.array(z.enum(['messages', 'network', 'agent_network', 'transactions', 'documents'])),
+  sources: z.array(
+    z.enum([
+      'messages',
+      'gmail',
+      'email',
+      'imessage',
+      'whatsapp',
+      'sms',
+      'network',
+      'agent_network',
+      'transactions',
+      'documents',
+    ])
+  ),
   applied_limit: z.number(),
   applied_offset: z.number(),
+  returned: z.number(),
+  has_more: z.boolean(),
+  next_offset: z.number().nullable(),
+  display_order: z.enum(['oldest_first', 'newest_first']),
+  context_unit: z.enum(['message_record', 'logical_line', 'mixed']),
   summaries: z
     .object({
       transactions: z
@@ -113,6 +144,15 @@ async function requestSummary(userId: string) {
   return { status: response.status, data };
 }
 
+async function requestSourceStatus(userId: string, sources: string) {
+  const response = await fetch(
+    `${BASE_URL}/api/data/source-status?sources=${encodeURIComponent(sources)}`,
+    { headers: apiHeaders(userId) }
+  );
+  const data = await response.json();
+  return { status: response.status, data };
+}
+
 function assertStatus(actual: number, expected: number, data: unknown): void {
   if (actual !== expected) {
     throw new Error(`Expected HTTP ${expected}, got ${actual}: ${JSON.stringify(data)}`);
@@ -147,7 +187,11 @@ async function cleanup(userId: string): Promise<void> {
   await prisma.plaidTransaction.deleteMany({ where: { userId } });
   await prisma.plaidAccount.deleteMany({ where: { userId } });
   await prisma.plaidItem.deleteMany({ where: { userId } });
-  await prisma.integration.deleteMany({ where: { userId, name: 'plaid' } });
+  // Defensive: clear any Integration / email-credential rows for this user.
+  // (source-status no longer mints a Gmail OAuth URL at probe time.)
+  await prisma.emailIntegrationCredential.deleteMany({ where: { userId } });
+  await prisma.integration.deleteMany({ where: { userId } });
+  await prisma.userDataDocument.deleteMany({ where: { userId } });
   await prisma.agent.deleteMany({ where: { userId } });
   await prisma.person.deleteMany({ where: { userId } });
   await prisma.user.deleteMany({ where: { userId } });
@@ -174,13 +218,27 @@ async function seedFixture() {
         channel: 'EMAIL',
         from: 'lighthouse@example.com',
         to: 'benchmark@example.com',
+        timestamp: new Date('2026-01-01T09:00:00Z'),
+        externalId: `before-context-${randomUUID()}`,
+        message: 'Before-context evidence: finance owner noted',
+      },
+      {
+        personId: lighthouse.id,
+        channel: 'EMAIL',
+        from: 'lighthouse@example.com',
+        to: 'benchmark@example.com',
         timestamp: new Date('2026-01-01T10:00:00Z'),
         externalId: `quarterly-${randomUUID()}`,
-        message: [
-          'Before-context evidence: finance owner noted',
-          'Aurora budget: phase-17 approved',
-          'After-context evidence: forecast packet delivered',
-        ].join('\n'),
+        message: 'Aurora budget: phase-17 approved',
+      },
+      {
+        personId: lighthouse.id,
+        channel: 'EMAIL',
+        from: 'lighthouse@example.com',
+        to: 'benchmark@example.com',
+        timestamp: new Date('2026-01-01T11:00:00Z'),
+        externalId: `after-context-${randomUUID()}`,
+        message: 'After-context evidence: forecast packet delivered',
       },
       {
         personId: lighthouse.id,
@@ -628,6 +686,17 @@ async function testFlags(userId: string): Promise<void> {
   const context = assertBody(res.data);
   requireContent(context, 'Before-context evidence');
   requireContent(context, 'After-context evidence');
+  const contextRecords = context.matches[0]?.records;
+  if (
+    contextRecords?.map((record) => record.relation).join(',') !== 'before,match,after' ||
+    contextRecords[0]?.message !== 'Before-context evidence: finance owner noted' ||
+    contextRecords[1]?.message !== 'Aurora budget: phase-17 approved' ||
+    contextRecords[2]?.message !== 'After-context evidence: forecast packet delivered'
+  ) {
+    throw new Error(
+      `Expected aligned oldest-first message records, got ${JSON.stringify(context)}`
+    );
+  }
 
   res = await requestGrep(userId, {
     pattern: 'Aurora budget',
@@ -645,9 +714,20 @@ async function testFlags(userId: string): Promise<void> {
   });
   assertStatus(res.status, 200, res.data);
   const paged = assertBody(res.data);
-  requireContent(paged, 'Ledger entry 10');
+  requireContent(paged, 'Ledger entry 21');
   if (paged.applied_limit !== 5 || paged.applied_offset !== 20) {
     throw new Error(`Expected pagination metadata, got ${JSON.stringify(paged)}`);
+  }
+  if (
+    paged.returned !== 5 ||
+    paged.has_more !== true ||
+    paged.next_offset !== 25 ||
+    paged.display_order !== 'oldest_first' ||
+    paged.context_unit !== 'message_record'
+  ) {
+    throw new Error(
+      `Expected explicit message pagination/order metadata, got ${JSON.stringify(paged)}`
+    );
   }
 }
 
@@ -724,6 +804,22 @@ async function testPersonAndSinceFilters(userId: string): Promise<void> {
     throw new Error(`Expected 0 matches for unknown person, got ${JSON.stringify(res.data)}`);
   }
 
+  // Top-level `person` must also merge on the multi-source `sources` path (a
+  // message-family source selected via `sources`, not singular `source`).
+  // Regression: an unknown person here must still scope to zero — if `person`
+  // were dropped on the plural path the query would return unscoped matches.
+  res = await requestGrep(userId, {
+    pattern: 'Ledger entry',
+    sources: ['messages'],
+    person: 'Nobody Here',
+  });
+  assertStatus(res.status, 200, res.data);
+  if (assertBody(res.data).total_matches !== 0) {
+    throw new Error(
+      `Expected 0 matches for unknown person via sources[], got ${JSON.stringify(res.data)}`
+    );
+  }
+
   // since excludes the 2026-01-01 Aurora message but keeps the 2026-01-03 ledger.
   res = await requestGrep(userId, {
     pattern: 'Aurora budget|Ledger entry',
@@ -758,6 +854,17 @@ async function testSourceSpecificFilterValidation(userId: string): Promise<void>
   });
   assertStatus(res.status, 400, res.data);
   requireInvalidGrepParam(res.data, 'unsupported message filter');
+
+  // Filters against a purely-local `sources` selection (no filterable family)
+  // must be rejected, not silently dropped — the multi-source path had bypassed
+  // rejectUnsupportedFilters entirely.
+  res = await requestGrep(userId, {
+    pattern: 'anything',
+    sources: ['network'],
+    filters: { min_amount: 1 },
+  });
+  assertStatus(res.status, 400, res.data);
+  requireInvalidGrepParam(res.data, 'unsupported local-source filter');
 
   res = await requestGrep(userId, {
     pattern: 'Starbucks',
@@ -944,6 +1051,177 @@ async function testDocumentSummary(userId: string): Promise<void> {
   }
 }
 
+const SourceStatusResponse = z.object({
+  statuses: z.array(
+    z.object({
+      source: z.string(),
+      connector: z.string().nullable(),
+      connected: z.boolean(),
+      connectUrl: z.string().nullable(),
+    })
+  ),
+});
+
+// Multi-source grep: `sources:['email','imessage']` searches MessageRecord and
+// returns 200. The seeded fixture only has EMAIL-channel rows, so email matches
+// (channel-filtered) while imessage returns nothing — proving channel routing.
+async function testMultiSourceGrep(userId: string): Promise<void> {
+  let res = await requestGrep(userId, {
+    pattern: 'Aurora budget',
+    sources: ['email', 'imessage'],
+  });
+  assertStatus(res.status, 200, res.data);
+  const body = assertBody(res.data);
+  if (body.sources.join(',') !== 'email,imessage') {
+    throw new Error(`Expected echoed sources email,imessage, got ${body.sources.join(',')}`);
+  }
+  requireContent(body, 'Aurora budget');
+
+  // imessage alone must find nothing (no IMESSAGE-channel rows in the fixture),
+  // confirming the channel WHERE clause actually restricts the search.
+  res = await requestGrep(userId, { pattern: 'Aurora budget', source: 'imessage' });
+  assertStatus(res.status, 200, res.data);
+  if (assertBody(res.data).total_matches !== 0) {
+    throw new Error(
+      `Expected imessage-only grep to find 0 EMAIL rows, got ${JSON.stringify(res.data)}`
+    );
+  }
+
+  // email alone must find the same EMAIL row that `messages` finds.
+  res = await requestGrep(userId, { pattern: 'Aurora budget', source: 'email' });
+  assertStatus(res.status, 200, res.data);
+  requireContent(assertBody(res.data), 'Aurora budget');
+
+  // unknown source in the array → 400 SOURCE_NOT_FOUND (not a 500).
+  res = await requestGrep(userId, { pattern: 'x', sources: ['email', 'not_a_source'] });
+  assertStatus(res.status, 400, res.data);
+  if ((res.data as { error?: string }).error !== 'SOURCE_NOT_FOUND') {
+    throw new Error(
+      `Expected SOURCE_NOT_FOUND for bad sources entry, got ${JSON.stringify(res.data)}`
+    );
+  }
+}
+
+// Per-source connectivity: local source (network) is always connected with no
+// connectUrl; a connector-backed source with no Integration row (email→gmail)
+// is disconnected with a mintable connectUrl.
+async function testSourceStatus(userId: string): Promise<void> {
+  const res = await requestSourceStatus(userId, 'email,network');
+  assertStatus(res.status, 200, res.data);
+  const body = SourceStatusResponse.parse(res.data);
+
+  const email = body.statuses.find((s) => s.source === 'email');
+  if (
+    email === undefined ||
+    email.connector !== 'gmail' ||
+    email.connected !== false ||
+    email.connectUrl === null ||
+    !email.connectUrl.startsWith('http')
+  ) {
+    throw new Error(`Expected disconnected email with connectUrl, got ${JSON.stringify(body)}`);
+  }
+
+  const network = body.statuses.find((s) => s.source === 'network');
+  if (
+    network === undefined ||
+    network.connector !== null ||
+    network.connected !== true ||
+    network.connectUrl !== null
+  ) {
+    throw new Error(
+      `Expected local network connected with no connectUrl, got ${JSON.stringify(body)}`
+    );
+  }
+
+  // A non-gmail connector-backed source returns the stub connect URL.
+  const smsRes = await requestSourceStatus(userId, 'sms');
+  assertStatus(smsRes.status, 200, smsRes.data);
+  const smsBody = SourceStatusResponse.parse(smsRes.data);
+  const sms = smsBody.statuses[0];
+  if (sms?.connectUrl !== 'https://roselabs.ai/connect/sms' || sms.connected !== false) {
+    throw new Error(`Expected sms stub connect URL, got ${JSON.stringify(smsBody)}`);
+  }
+
+  // Documents is an umbrella grep source; concrete document providers are
+  // separate connector keys for source-connect gates.
+  const notesRes = await requestSourceStatus(userId, 'apple_notes');
+  assertStatus(notesRes.status, 200, notesRes.data);
+  const notesBody = SourceStatusResponse.parse(notesRes.data);
+  const notes = notesBody.statuses[0];
+  if (
+    notes?.source !== 'apple_notes' ||
+    notes.connector !== 'apple_notes' ||
+    notes.connected !== false ||
+    notes.connectUrl !== 'https://roselabs.ai/connect/apple_notes'
+  ) {
+    throw new Error(
+      `Expected apple_notes provider source status, got ${JSON.stringify(notesBody)}`
+    );
+  }
+
+  // Unknown source key → 400, not 500.
+  const badRes = await requestSourceStatus(userId, 'not_a_source');
+  assertStatus(badRes.status, 400, badRes.data);
+  if ((badRes.data as { error?: string }).error !== 'SOURCE_NOT_FOUND') {
+    throw new Error(`Expected SOURCE_NOT_FOUND, got ${JSON.stringify(badRes.data)}`);
+  }
+}
+
+async function requestSnapshot(userId: string) {
+  const response = await fetch(`${BASE_URL}/api/data/snapshot`, {
+    headers: apiHeaders(userId),
+  });
+  const data = await response.json();
+  return { status: response.status, data };
+}
+
+// GET /api/data/snapshot returns the distilled user snapshot plus its recent
+// revision ledger (repo.getUserSnapshot). Seed a snapshot + one revision, then
+// read it back through the authenticated route.
+async function testSnapshotEndpoint(userId: string): Promise<void> {
+  const snapshot = await prisma.userSnapshot.create({
+    data: {
+      userId,
+      content: { headline: 'Lighthouse archive lead', focus: ['signal', 'cartography'] },
+      version: 3,
+    },
+  });
+  await prisma.userSnapshotRevision.create({
+    data: {
+      userId,
+      snapshotId: snapshot.id,
+      source: 'grep-blackbox',
+      changes: { added: ['focus'] },
+      model: 'rose-1-lite',
+      promptKey: 'snapshot.distill',
+    },
+  });
+
+  const res = await requestSnapshot(userId);
+  assertStatus(res.status, 200, res.data);
+  const body = res.data as {
+    snapshot: {
+      content?: { headline?: string };
+      version?: number;
+      revisions?: Array<{ source?: string; model?: string }>;
+    } | null;
+  };
+  if (body.snapshot === null) {
+    throw new Error(`Expected a snapshot, got null: ${JSON.stringify(res.data)}`);
+  }
+  if (
+    body.snapshot.version !== 3 ||
+    body.snapshot.content?.headline !== 'Lighthouse archive lead'
+  ) {
+    throw new Error(`Unexpected snapshot content/version: ${JSON.stringify(body.snapshot)}`);
+  }
+  if (
+    !body.snapshot.revisions?.some((r) => r.source === 'grep-blackbox' && r.model === 'rose-1-lite')
+  ) {
+    throw new Error(`Expected the seeded revision in the ledger: ${JSON.stringify(body.snapshot)}`);
+  }
+}
+
 async function runAll(): Promise<void> {
   const { userId, agentId } = await seedFixture();
   const tests = [
@@ -962,6 +1240,12 @@ async function runAll(): Promise<void> {
     ['transaction grep is tenant isolated', () => testTransactionTenantIsolation(userId)],
     ['summary includes transactions', () => testTransactionSummary(userId)],
     ['summary includes documents', () => testDocumentSummary(userId)],
+    ['multi-source grep with channel routing', () => testMultiSourceGrep(userId)],
+    ['per-source connectivity status', () => testSourceStatus(userId)],
+    [
+      'snapshot endpoint returns distilled snapshot + revisions',
+      () => testSnapshotEndpoint(userId),
+    ],
   ] as const;
 
   try {

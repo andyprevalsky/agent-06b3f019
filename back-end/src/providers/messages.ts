@@ -3,7 +3,8 @@
  * Both worker (via API) and chat handler use the same path for message creation.
  */
 
-import { Prisma } from '@prisma/client';
+import { Prisma, type Message } from '@prisma/client';
+import { createHash } from 'node:crypto';
 import { prisma } from './database';
 import { broadcastMessageInsert } from './chat/supabaseBroadcast';
 import { createLogger } from './logger';
@@ -16,6 +17,8 @@ export interface CreateMessageParams {
   role: 'USER' | 'ASSISTANT' | 'TOOL' | 'SYSTEM';
   metadata?: Record<string, unknown> | null;
   filePointer?: object | null; // FilePointer for file attachment messages (JSON)
+  /** The caller generated a unique toolCallId inside a non-retried request. */
+  skipDuplicateToolCheck?: boolean;
 }
 
 function stringMetadataValue(
@@ -84,6 +87,21 @@ async function findDuplicateToolMessage(params: CreateMessageParams) {
   );
 }
 
+function idempotentMessageId(params: CreateMessageParams): string | null {
+  if (params.role !== 'USER' || params.metadata?.isResponseSchemaUpdate !== true) return null;
+  const key = stringMetadataValue(params.metadata, 'idempotencyKey');
+  if (key === null) return null;
+
+  const hex = createHash('sha256').update(`${params.agentId}:${key}`).digest('hex').slice(0, 32);
+  const variant = ((Number.parseInt(hex[16], 16) & 0x3) | 0x8).toString(16);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-8${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20)}`;
+}
+
+async function findIdempotentMessage(params: CreateMessageParams) {
+  const id = idempotentMessageId(params);
+  return id === null ? null : prisma.message.findUnique({ where: { id } });
+}
+
 /**
  * Create a message in the database.
  * This is the single path for all message creation - used by:
@@ -93,7 +111,18 @@ async function findDuplicateToolMessage(params: CreateMessageParams) {
  * Broadcasts INSERT event to frontend via Supabase Realtime.
  */
 export async function createMessage(params: CreateMessageParams) {
-  const duplicate = await findDuplicateToolMessage(params);
+  const idempotentId = idempotentMessageId(params);
+  const idempotentDuplicate = await findIdempotentMessage(params);
+  if (idempotentDuplicate !== null) {
+    log.info('deduped idempotent message', {
+      agent_id: params.agentId,
+      message_id: idempotentDuplicate.id,
+    });
+    return idempotentDuplicate;
+  }
+
+  const duplicate =
+    params.skipDuplicateToolCheck === true ? null : await findDuplicateToolMessage(params);
   if (duplicate !== null) {
     log.info('deduped duplicate tool message', {
       agent_id: params.agentId,
@@ -104,16 +133,32 @@ export async function createMessage(params: CreateMessageParams) {
     return duplicate;
   }
 
-  const message = await prisma.message.create({
-    data: {
-      agentId: params.agentId,
-      text: params.text,
-      role: params.role,
-      metadata: (params.metadata as Prisma.InputJsonValue) ?? undefined,
-      filePointer: params.filePointer ?? undefined,
-      timestamp: new Date(),
-    },
-  });
+  let message: Message;
+  try {
+    message = await prisma.message.create({
+      data: {
+        ...(idempotentId === null ? {} : { id: idempotentId }),
+        agentId: params.agentId,
+        text: params.text,
+        role: params.role,
+        metadata: (params.metadata as Prisma.InputJsonValue) ?? undefined,
+        filePointer: params.filePointer ?? undefined,
+        timestamp: new Date(),
+      },
+    });
+  } catch (error) {
+    // Identical activity attempts can overlap after a timeout. The primary key
+    // makes creation atomic; the loser returns the winner's durable row.
+    if (
+      idempotentId !== null &&
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === 'P2002'
+    ) {
+      const winner = await prisma.message.findUnique({ where: { id: idempotentId } });
+      if (winner !== null) return winner;
+    }
+    throw error;
+  }
 
   // Broadcast INSERT event to frontend (replaces Supabase DB trigger)
   broadcastMessageInsert(params.agentId, {

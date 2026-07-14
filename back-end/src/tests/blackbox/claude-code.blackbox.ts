@@ -567,6 +567,16 @@ async function testCreate_validBodyE2bBoundary() {
   if (res.status === 500) {
     assertSchema(ErrorResponse, res.data, 'POST /create E2B boundary');
   }
+  // A 200 spawned a real sandbox — close it or it holds an E2B slot for its
+  // full 30-min TTL (concurrent coverage runs exhausted the 20-sandbox cap).
+  const created = res.data as { task_id?: string };
+  if (res.status === 200 && typeof created.task_id === 'string') {
+    await request(`${BASE_URL}/api/claude-code-session/close`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({ task_id: created.task_id }),
+    });
+  }
 }
 
 async function testCreate_invalidGithubUrl() {
@@ -834,8 +844,9 @@ function isE2bBoundaryUrl(url: string): boolean {
 async function testBoundary_createCallsE2bApi() {
   const seeded = await seedClaudeIntegration();
   const captureToken = `claude-create-${crypto.randomUUID()}`;
+  let createdTaskId: string | null = null;
   try {
-    await request(`${BASE_URL}/api/claude-code-session/create`, {
+    const createRes = await request(`${BASE_URL}/api/claude-code-session/create`, {
       method: 'POST',
       headers: { ...apiKeyHeaders(), 'X-Capture-Token': captureToken },
       body: JSON.stringify({
@@ -844,6 +855,10 @@ async function testBoundary_createCallsE2bApi() {
         user_id: seeded.userId,
       }),
     });
+    const createdBody = createRes.data as { task_id?: string };
+    if (createRes.status === 200 && typeof createdBody.task_id === 'string') {
+      createdTaskId = createdBody.task_id;
+    }
     await new Promise((r) => setTimeout(r, 200));
     const calls = await readCapturesForToken(captureToken);
     // E2B SDK may call the control API or a sandbox subdomain depending on sandbox state.
@@ -871,6 +886,15 @@ async function testBoundary_createCallsE2bApi() {
       `Unexpected non-E2B outbound calls: ${nonE2bCalls.map((c) => `${c.method} ${c.url}`).join(', ')}`
     );
   } finally {
+    // Close any real sandbox the create spawned — leaked sandboxes hold E2B
+    // slots for 30 minutes and concurrent coverage runs exhaust the cap.
+    if (createdTaskId !== null) {
+      await request(`${BASE_URL}/api/claude-code-session/close`, {
+        method: 'POST',
+        headers: apiKeyHeaders(),
+        body: JSON.stringify({ task_id: createdTaskId }),
+      });
+    }
     await prisma.integration.deleteMany({ where: { id: seeded.integrationId } });
   }
 }

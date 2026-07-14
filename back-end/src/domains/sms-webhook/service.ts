@@ -15,9 +15,10 @@ import { validateSurgeSignature, parseSurgePayload } from './service.validation'
 import type { SurgeAttachment } from './types';
 import { getTemporalClient } from '../../providers/temporal';
 import { sendSms } from '../../providers/smsQueue';
-import { SMS_TEMPLATES } from '../../providers/smsTemplates';
+import { createSignupBonusCredit } from '../../providers/credits';
 import { handleSmsSupervisorMessage } from '../../providers/smsSupervisor';
 import { createLogger } from '../../providers/logger';
+import { recordInboundSms } from '../../providers/smsSupervisor/sessionStore';
 
 const log = createLogger('SMS Webhook');
 
@@ -133,11 +134,15 @@ export async function routeToSupervisor(
   attachments: SurgeAttachment[],
   requestStart: number
 ): Promise<void> {
-  // Atomically bump the per-user inbound counter and capture the new value as
-  // `mySeq`. The supervisor re-reads this value at attempt_completion time —
-  // if a newer SMS has bumped it past `mySeq`, this run discards its queued
-  // writes and stays silent. See providers/smsSupervisor/supervisorHandler.ts.
-  const mySeq = await repo.bumpInboundSeq(userId);
+  // Persist first, before any asynchronous supervisor work. Advancing the
+  // sequence and appending this exact inbound record happen atomically.
+  const persistedInbound = [
+    messageBody,
+    attachments.length > 0 ? `[${attachments.length} attachment(s)]` : '',
+  ]
+    .filter((part) => part !== '')
+    .join('\n\n');
+  const mySeq = await recordInboundSms(userId, persistedInbound);
 
   log.info('Routing to SMS Supervisor', {
     userId,
@@ -155,6 +160,7 @@ export async function routeToSupervisor(
     phoneNumber: fromPhone,
     inboundMessage: messageBody,
     mySeq,
+    inboundAlreadyPersisted: true,
     attachments,
     abortSignal: abortController.signal,
   })
@@ -282,21 +288,33 @@ export async function handleInboundSms(input: InboundSmsInput): Promise<InboundS
 
   const { fromPhone, messageBody, attachments } = parsed;
 
-  // Look up user by phone number
-  const user = await repo.findUserByPhone(fromPhone);
+  // Resolve (or provision) the user. An inbound SMS proves possession of the
+  // number, so a first-time texter is onboarded SILENTLY — no OTP, no signup
+  // wall, no welcome nag — then handled exactly like a known user. This replaces
+  // the old "please sign up at roselabs.ai first" dead-end.
+  const { user, created } = await repo.provisionUserByPhone(fromPhone);
 
-  if (!user) {
-    log.info('Unknown phone number', {
+  if (created) {
+    log.info('Provisioned new SMS user (first contact)', {
+      userId: user.userId,
       phone: fromPhone?.substring(0, 7) + '****',
     });
-    await sendSms(fromPhone, SMS_TEMPLATES.unknownPhone());
-    return { ok: true };
+    // Free-tier starting credit, mirroring web signup. Non-fatal: the user can
+    // still be served if credit creation fails.
+    try {
+      await createSignupBonusCredit(user.userId);
+    } catch (error) {
+      log.error('Failed to create signup bonus credit for provisioned user', {
+        userId: user.userId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  } else {
+    log.info('User found', {
+      userId: user.userId,
+      phone: fromPhone?.substring(0, 7) + '****',
+    });
   }
-
-  log.info('User found', {
-    userId: user.userId,
-    phone: fromPhone?.substring(0, 7) + '****',
-  });
 
   // FAST PATH: /clear command (reset SMS session)
   if (messageBody.toLowerCase() === '/clear') {

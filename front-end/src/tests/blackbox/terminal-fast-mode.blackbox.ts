@@ -28,6 +28,9 @@ const mocks = vi.hoisted(() => {
     isChatMode: false,
     setAgent: vi.fn(),
     setSelectedAgentId: vi.fn(),
+    stagePendingAgentCreation: vi.fn(),
+    reconcilePendingAgentCreation: vi.fn(async () => {}),
+    rollbackPendingAgentCreation: vi.fn(() => true),
     setMessages: vi.fn(),
     forceResubscribe: vi.fn(),
   };
@@ -95,6 +98,9 @@ function messageSendingArgs(overrides: Partial<Parameters<typeof useMessageSendi
     setLoginModalOpen: vi.fn(),
     setIsLoadingNetwork: vi.fn(),
     loadAgents: vi.fn(async () => {}),
+    stagePendingAgentCreation: vi.fn(),
+    reconcilePendingAgentCreation: vi.fn(async () => {}),
+    rollbackPendingAgentCreation: vi.fn(() => true),
     ...overrides,
   };
 }
@@ -105,9 +111,10 @@ describe('useTerminalAgents Fast Mode bridge', () => {
     mockSession();
     clearCaptures();
     server.use(
-      http.post(`${API_BASE}/agents`, () =>
-        HttpResponse.json({ agent_id: 'agent-fast', status: 'ACTIVE' }),
-      ),
+      http.post(`${API_BASE}/agents`, async ({ request }) => {
+        const body = (await request.json()) as { agent_id: string };
+        return HttpResponse.json({ agent_id: body.agent_id, status: 'ACTIVE' });
+      }),
     );
   });
 
@@ -116,9 +123,7 @@ describe('useTerminalAgents Fast Mode bridge', () => {
   });
 
   it('defaults Andy to Fast Mode on and still allows switching off', async () => {
-    const { result } = renderHook(() =>
-      useTerminalAgents('agents', vi.fn(), vi.fn()),
-    );
+    const { result } = renderHook(() => useTerminalAgents('agents', vi.fn(), vi.fn()));
 
     await waitFor(() => expect(result.current.fastMode).toBe(true));
 
@@ -129,9 +134,7 @@ describe('useTerminalAgents Fast Mode bridge', () => {
 
   it('does not default other allow-listed accounts on', async () => {
     mocks.authState.user.id = '43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9';
-    const { result } = renderHook(() =>
-      useTerminalAgents('agents', vi.fn(), vi.fn()),
-    );
+    const { result } = renderHook(() => useTerminalAgents('agents', vi.fn(), vi.fn()));
 
     await waitFor(() => expect(result.current.fastMode).toBe(false));
   });
@@ -157,7 +160,9 @@ describe('useTerminalAgents Fast Mode bridge', () => {
       await result.current.handleSendMessage();
     });
 
-    const createOff = capturedRequests.find((r) => r.method === 'POST' && r.url.endsWith('/agents'));
+    const createOff = capturedRequests.find(
+      (r) => r.method === 'POST' && r.url.endsWith('/agents'),
+    );
     expect(createOff?.body).toMatchObject({ fast_mode_cache_enabled: false });
   });
 

@@ -2,7 +2,7 @@
 
 from typing import TYPE_CHECKING
 
-from domains.request_payment_card.service import (
+from domains.request_payment_card.handler import (
     build_payment_fingerprint,
     build_payment_question,
     normalize_payment_payload,

@@ -116,6 +116,45 @@ describe('MessageList thinking states', () => {
     );
   });
 
+  it('uses the sole bubble model and start time when a concurrent tool differs', async () => {
+    const now = Date.now();
+    const ctx = makeAgentCtx({
+      agent: makeAgent({ status: 'ACTIVE' }),
+      streamingBubbles: new Map([
+        [
+          'sb-1',
+          {
+            text: 'blue bubble',
+            sequence: 1,
+            done: false,
+            startedAtMs: now - 1000,
+          },
+        ],
+      ]),
+      streamingTools: new Map([
+        [
+          'tool-1',
+          {
+            stream_id: 'stream-tool-1',
+            tool_call_id: 'tool-1',
+            tool_name: 'web_search',
+            title: 'Concurrent GPT tool',
+            startedAtMs: now - 100_000,
+            isGpt: true,
+          },
+        ],
+      ]),
+    });
+
+    renderList(ctx);
+
+    await waitFor(() => expect(screen.getByText('Thinking')).toBeInTheDocument(), {
+      timeout: 1200,
+    });
+    expect(screen.getByTestId('thinking-animation')).toHaveAttribute('data-has-gradient', 'false');
+    expect(document.body.textContent).toMatch(/[0-5]\.\ds·\d+ tokens/);
+  });
+
   it('renders main thinking stream as elapsed time plus token download count', async () => {
     const startedAtMs = Date.now() - 2200;
     const ctx = makeAgentCtx({
@@ -234,6 +273,76 @@ describe('MessageList thinking states', () => {
     renderList(ctx);
     await new Promise((resolve) => setTimeout(resolve, 900));
     expect(screen.queryByText('Thinking')).not.toBeInTheDocument();
+  });
+
+  it('hides browser thinking while an ephemeral browser tool is in progress', async () => {
+    const ctx = makeAgentCtx({
+      agent: makeAgent({ status: 'ACTIVE' }),
+      streamingBubbles: new Map([
+        [
+          'browser-stream',
+          {
+            text: 'choosing the next browser action',
+            sequence: 1,
+            done: false,
+            subAgentId: 'browser-task',
+            startedAtMs: Date.now() - 500,
+          },
+        ],
+      ]),
+      streamingTools: new Map([
+        [
+          'browser-tool',
+          {
+            stream_id: 'browser-stream',
+            tool_call_id: 'browser-tool',
+            tool_name: 'click',
+            title: 'Clicking checkout',
+            subAgentId: 'browser-task',
+            startedAtMs: Date.now() - 300,
+          },
+        ],
+      ]),
+    });
+
+    renderList(ctx, { subAgentId: 'browser-task', compact: true });
+
+    expect(screen.getByText('Clicking checkout')).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(screen.queryByText('Thinking')).not.toBeInTheDocument();
+  });
+
+  it('renders browser thinking metrics as the final visual message-list item', async () => {
+    const ctx = makeAgentCtx({
+      agent: makeAgent({ status: 'ACTIVE' }),
+      streamingBubbles: new Map([
+        [
+          'browser-stream',
+          {
+            text: 'reading the checkout page',
+            sequence: 1,
+            done: false,
+            subAgentId: 'browser-task',
+            startedAtMs: Date.now() - 1400,
+          },
+        ],
+      ]),
+    });
+
+    const { container } = renderList(ctx, { subAgentId: 'browser-task', compact: true });
+
+    await waitFor(() => expect(screen.getByTestId('thinking-indicator')).toBeInTheDocument(), {
+      timeout: 1200,
+    });
+    expect(screen.getByTestId('thinking-indicator')).toHaveTextContent(/Thinking/);
+    expect(screen.getByTestId('thinking-indicator')).toHaveTextContent(/\d+\.\ds·\d+ tokens/);
+
+    const list = container.firstElementChild;
+    const thinking = screen.getByTestId('thinking-indicator');
+    const trailingElements = Array.from(list?.children ?? []).slice(
+      Array.from(list?.children ?? []).indexOf(thinking) + 1,
+    );
+    expect(trailingElements.every((element) => element.textContent === '')).toBe(true);
   });
 
   it('merges general-purpose agent tree messages sharing spawnGroupId into single render', async () => {

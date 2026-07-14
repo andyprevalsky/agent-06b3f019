@@ -1312,6 +1312,54 @@ async def test_world_model_tool_execution_adapter_simulate_and_shadow_modes():
         teardown_mock()
 
 
+async def test_world_model_simulate_can_fallback_on_unavailable_observation():
+    from benchmarks.world_model_harness import WMHHttpClient, WorldModelToolExecutionAdapter
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url).endswith("/world_models/rose-golden/sessions/session-1/step"):
+            return httpx.Response(
+                200,
+                json={
+                    "observation": {
+                        "content": json.dumps(
+                            {
+                                "content": "",
+                                "metadata": {"result_unavailable": True, "source": "llm_dump"},
+                            }
+                        )
+                    }
+                },
+            )
+        return httpx.Response(404, json={"error": "unexpected"})
+
+    real_calls: list[tuple[str, dict, str]] = []
+
+    async def real_executor(tool_name: str, tool_args: dict, tool_call_id: str) -> dict:
+        real_calls.append((tool_name, tool_args, tool_call_id))
+        return {"success": True, "result": {"live": True}}
+
+    setup_mock_fn(handler)
+    old_env = os.environ.get("BENCHMARK_WMH_FALLBACK_ON_UNAVAILABLE")
+    try:
+        os.environ["BENCHMARK_WMH_FALLBACK_ON_UNAVAILABLE"] = "1"
+        simulate = WorldModelToolExecutionAdapter(
+            mode="simulate",
+            client=WMHHttpClient("https://wmh.example.test"),
+            world_model_name="rose-golden",
+            session_id="session-1",
+        )
+        result = await simulate.execute("web_search", {"query": "Lisbon climate"}, "tool-web", real_executor)
+        assert result["result"] == {"live": True}
+        assert result["world_model_unavailable_fallback"] is True
+        assert real_calls == [("web_search", {"query": "Lisbon climate"}, "tool-web")]
+    finally:
+        if old_env is None:
+            os.environ.pop("BENCHMARK_WMH_FALLBACK_ON_UNAVAILABLE", None)
+        else:
+            os.environ["BENCHMARK_WMH_FALLBACK_ON_UNAVAILABLE"] = old_env
+        teardown_mock()
+
+
 async def test_simulated_provider_activities_call_wmh_instead_of_live_services():
     from domains.call_phone_number.handler import call_phone_number_activity
     from domains.request_payment_card.repo import lookup_purchase_activity, mint_purchase_card_activity
@@ -1491,6 +1539,10 @@ async def run_all_tests():
     await r.record_async(
         "world_model_tool_execution_adapter_simulate_and_shadow_modes",
         test_world_model_tool_execution_adapter_simulate_and_shadow_modes,
+    )
+    await r.record_async(
+        "world_model_simulate_can_fallback_on_unavailable_observation",
+        test_world_model_simulate_can_fallback_on_unavailable_observation,
     )
     await r.record_async(
         "simulated_provider_activities_call_wmh_instead_of_live_services",

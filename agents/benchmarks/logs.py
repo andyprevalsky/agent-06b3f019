@@ -786,6 +786,60 @@ async def collect_logs(
     }
 
 
+async def collect_tree_messages(
+    root_agent_id: str,
+    tree_agents: List[dict],
+    get_agent_fn,
+    max_concurrency: int = 8,
+) -> Dict[str, dict]:
+    """Per-agent MESSAGES + structure for an entire tree — for archive rendering
+    of the fan-out (root + all spawned sub-agents).
+
+    This is the lightweight sibling of ``collect_tree_logs``: the archive only
+    needs each agent's message thread + parent link + goal/status to render the
+    spawn tree, NOT the per-agent backend/worker/realtime log fetches (which cost
+    4 API round-trips × N agents — prohibitive for a 50-100 agent fan-out).
+
+    Args:
+        root_agent_id: The tree root (busId).
+        tree_agents: Agent dicts from GET /api/agents/tree?busId=root (each has
+                     agent_id, parent_agent_id, goal, status).
+        get_agent_fn: Async callable(agent_id) -> agent_data (for the transcript).
+        max_concurrency: Cap on concurrent per-agent fetches.
+
+    Returns:
+        {"<agent_id>": {"parent_agent_id", "goal", "status", "messages"}, ...}
+        keyed by EVERY agent in the tree (including the root).
+    """
+    sem = asyncio.Semaphore(max_concurrency)
+
+    async def _one(agent_info: dict):
+        aid = str(agent_info.get("agent_id") or "")
+        if not aid:
+            return None
+        async with sem:
+            try:
+                agent_data = await get_agent_fn(aid)
+            except Exception:
+                agent_data = {}
+        agent_obj = agent_data.get("agent", agent_data) if isinstance(agent_data, dict) else {}
+        return aid, {
+            "parent_agent_id": agent_info.get("parent_agent_id"),
+            "goal": (agent_info.get("goal") or "")[:200],
+            "status": agent_info.get("status") or agent_obj.get("status") or "UNKNOWN",
+            "messages": extract_message_transcript(agent_data),
+        }
+
+    results = await asyncio.gather(*[_one(a) for a in tree_agents], return_exceptions=True)
+    tree: Dict[str, dict] = {}
+    for r in results:
+        if isinstance(r, BaseException) or not r:
+            continue
+        aid, info = r
+        tree[aid] = info
+    return tree
+
+
 # ---------------------------------------------------------------------------
 # Collect logs for an entire agent tree (root + all descendants)
 # ---------------------------------------------------------------------------

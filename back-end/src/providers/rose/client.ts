@@ -5,16 +5,18 @@
  * point, `createStreamingCompletion(options)`, that:
  *
  *   1. Resolves the pool from `options.model` (`rose-labs/rose-1-lite`, etc).
- *   2. Tries claudeAuth (direct Anthropic) when `options.claude_token` is set,
+ *   2. When explicitly selected, routes exclusively through either the pool's
+ *      OpenRouter waterfall or shared OpenAI priority, failing closed on config.
+ *   3. Tries claudeAuth (direct Anthropic) when `options.claude_token` is set,
  *      buffering the metadata chunk so a pre-content failure can fall through
  *      cleanly.
- *   3. Tries gptAuth (direct ChatGPT/Codex) when `options.gpt_token` is set,
+ *   4. Tries gptAuth (direct ChatGPT/Codex) when `options.gpt_token` is set,
  *      using the same pre-content fall-through contract.
- *   4. Tries the shared OpenAI API key path when configured.
- *   5. Tries the shared Anthropic API key path when configured.
- *   6. Falls through to the pool's OpenRouter waterfall on any typed
+ *   5. Tries the shared OpenAI API key path when configured.
+ *   6. Tries the shared Anthropic API key path when configured.
+ *   7. Falls through to the pool's OpenRouter waterfall on any typed
  *      RoseError before first content.
- *   5. Wraps the normalized RoseStreamChunk stream into the OpenAI-shaped
+ *   8. Wraps the normalized RoseStreamChunk stream into the OpenAI-shaped
  *      CompletionChunk DTO chat callers iterate.
  *
  * No top-level deadline / heartbeat — those are agent-side concerns
@@ -28,30 +30,19 @@ import { createLogger } from '../logger';
 import { logJson } from '../../utils/log';
 import { claudeAuthComplete } from './claudeAuth';
 import { isAnthropicApiKeyOnCooldown, markAnthropicApiKeyOnCooldown } from '../computeCredentials';
-import { isFallThroughError, RoseAuthError, RoseError, RosePaymentRequiredError } from './errors';
+import { RoseAuthError, RoseError, RosePaymentRequiredError } from './errors';
 import { gptAuthComplete, openAiApiKeyComplete } from './gptAuth';
 import { getPool, poolForModel } from './pools';
 import { buildOpenAiResponseFormat } from './schema';
 import type { CompletionChunk, CompletionOptions, RoseStreamChunk } from './types';
 import { waterfallComplete } from './waterfall';
 import { dumpLlmContext, updateLlmDump } from '../llmDump';
+import { exclusiveOpenRouterWaterfall } from './openrouterRoute';
+import { PreContentFallThroughError, runWithFallThrough } from './fallThroughStream';
+import { selectExclusiveCerebrasChatRoute } from './exclusiveCerebrasChatRoute';
+import { selectDirectCerebrasFailover } from './directCerebrasFailover';
 
 const log = createLogger('Rose');
-
-/**
- * Internal sentinel — a fall-through RoseError captured *before* any chunk
- * was emitted to the caller. Only these can be swallowed and replaced with
- * waterfall output. A mid-stream fall-through MUST propagate directly so we
- * don't splice partial content from two different models.
- */
-class PreContentFallThroughError extends Error {
-  readonly cause: RoseError;
-  constructor(cause: RoseError) {
-    super(cause.message);
-    this.name = 'PreContentFallThroughError';
-    this.cause = cause;
-  }
-}
 
 const OPENROUTER_API_KEY_ENV = 'OPENROUTER_API_KEY';
 const GPT_API_KEY_ENV = 'GPT_API_KEY';
@@ -128,6 +119,7 @@ export async function createStreamingCompletion(
       response_format: normalizedOptions.response_format?.json_schema?.name,
       response_model: normalizedOptions.response_model?.name,
       temperature: normalizedOptions.temperature,
+      provider_route: normalizedOptions.provider_route,
     }),
   });
 
@@ -191,6 +183,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
           response_format: opts.options.response_format,
           tool_choice: opts.options.tool_choice,
           provider_fast_mode: opts.options.provider_fast_mode,
+          provider_route: opts.options.provider_route,
         },
         ...(opts.options.dump_context.config ?? {}),
       },
@@ -212,7 +205,19 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     if (chunk.kind === 'content') {
       outputParts.push(chunk.data.text);
       return {
-        choices: [{ index: 0, delta: { content: chunk.data.text }, finish_reason: null }],
+        choices: [
+          {
+            index: 0,
+            delta: {
+              content: chunk.data.text,
+              item_id: chunk.data.item_id,
+              output_index: chunk.data.output_index,
+              content_index: chunk.data.content_index,
+              phase: chunk.data.phase,
+            },
+            finish_reason: null,
+          },
+        ],
         requested_model: opts.options.model,
         actual_model: metadata.actual_model,
         pool_name: metadata.pool_name,
@@ -222,7 +227,19 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     if (chunk.kind === 'reasoning') {
       reasoningParts.push(chunk.data.text);
       return {
-        choices: [{ index: 0, delta: { reasoning: chunk.data.text }, finish_reason: null }],
+        choices: [
+          {
+            index: 0,
+            delta: {
+              reasoning: chunk.data.text,
+              item_id: chunk.data.item_id,
+              output_index: chunk.data.output_index,
+              content_index: chunk.data.content_index,
+              phase: chunk.data.phase,
+            },
+            finish_reason: null,
+          },
+        ],
         requested_model: opts.options.model,
         actual_model: metadata.actual_model,
         pool_name: metadata.pool_name,
@@ -312,6 +329,126 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
       },
     });
   };
+
+  // Both Chat routes stay pinned to GLM-4.7 on Cerebras. OpenRouter is the
+  // preferred transport; a failure before caller-visible content may use the
+  // funded direct Cerebras key without changing model or provider.
+  let cerebrasRoute;
+  try {
+    cerebrasRoute = selectExclusiveCerebrasChatRoute({
+      options: opts.options,
+      requestId: opts.requestId,
+      callSite: opts.callSite,
+    });
+  } catch (error) {
+    finalizeDump(error);
+    throw error;
+  }
+  if (cerebrasRoute !== null) {
+    try {
+      yield* runWithFallThrough({ produce: cerebrasRoute.produce, emit: emitChunk });
+    } catch (error) {
+      const cause = error instanceof PreContentFallThroughError ? error.cause : error;
+      const directFailover = selectDirectCerebrasFailover({
+        error,
+        options: opts.options,
+        requestId: opts.requestId,
+        callSite: opts.callSite,
+        pool: opts.pool,
+        startedAt,
+        emit: emitChunk,
+        finalize: finalizeDump,
+      });
+      if (directFailover) {
+        yield* directFailover;
+        return;
+      }
+      finalizeDump(cause);
+      throw cause;
+    }
+    log.info(cerebrasRoute.doneEvent, {
+      request_id: opts.requestId,
+      pool: opts.pool,
+      elapsed_ms: Date.now() - startedAt,
+    });
+    finalizeDump();
+    return;
+  }
+
+  // Exclusive OpenRouter route used by the synchronous Chat Generator. It preserves
+  // the pool's ordered pre-content fallback and bypasses every OAuth/shared-key
+  // provider. Missing configuration fails closed before any provider call.
+  if (opts.options.provider_route === 'openrouter-waterfall') {
+    try {
+      yield* runWithFallThrough({
+        produce: () =>
+          exclusiveOpenRouterWaterfall({
+            poolSpec,
+            options: opts.options,
+            requestId: opts.requestId,
+            callSite: opts.callSite,
+          }),
+        emit: emitChunk,
+      });
+    } catch (error) {
+      const cause = error instanceof PreContentFallThroughError ? error.cause : error;
+      finalizeDump(cause);
+      throw cause;
+    }
+
+    log.info('openrouter_waterfall.done', {
+      request_id: opts.requestId,
+      pool: opts.pool,
+      elapsed_ms: Date.now() - startedAt,
+    });
+    finalizeDump();
+    return;
+  }
+
+  // Exclusive low-latency route used by the synchronous Chat Router. This
+  // branch precedes every user OAuth, shared Anthropic, and OpenRouter path.
+  if (opts.options.provider_route === 'shared-openai-priority') {
+    const sharedOpenAiKey = openAiApiKey();
+    if (!sharedOpenAiKey) {
+      const error = new Error('Rose shared-openai-priority route requires GPT_API_KEY');
+      finalizeDump(error);
+      throw error;
+    }
+
+    try {
+      yield* runWithFallThrough({
+        produce: () =>
+          openAiApiKeyComplete({
+            poolSpec,
+            model: poolSpec.gptAuthModel,
+            messages: opts.options.messages,
+            responseFormat: opts.options.response_format,
+            tools: opts.options.tools,
+            toolChoice: opts.options.tool_choice,
+            temperature: opts.options.temperature,
+            effort: opts.options.effort,
+            openAiKey: sharedOpenAiKey,
+            requestId: opts.requestId,
+            callSite: opts.callSite,
+            providerFastMode: true,
+            abortSignal: opts.options.abort_signal,
+          }),
+        emit: emitChunk,
+      });
+    } catch (error) {
+      const cause = error instanceof PreContentFallThroughError ? error.cause : error;
+      finalizeDump(cause);
+      throw cause;
+    }
+
+    log.info('shared_openai_priority.done', {
+      request_id: opts.requestId,
+      pool: opts.pool,
+      elapsed_ms: Date.now() - startedAt,
+    });
+    finalizeDump();
+    return;
+  }
 
   // 1. claudeAuth attempt (with fall-through buffering)
   let claudeAuthFailed: RoseError | null = null;
@@ -558,59 +695,4 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     anthropic_apikey_failed: anthropicApiKeyFailed?.name ?? null,
   });
   finalizeDump();
-}
-
-interface RunWithFallThroughOptions {
-  produce: () => AsyncIterable<RoseStreamChunk>;
-  emit: (chunk: RoseStreamChunk) => CompletionChunk | null;
-}
-
-/**
- * Iterate `produce()` and yield non-null `emit()` results. Buffers the first
- * metadata chunk so a pre-first-content RoseError can propagate without the
- * caller seeing partial output. Once content has flowed, errors propagate
- * normally (we can't undo what's already been streamed).
- */
-async function* runWithFallThrough(
-  opts: RunWithFallThroughOptions
-): AsyncIterable<CompletionChunk> {
-  let yieldedAny = false;
-  const iterator = opts.produce()[Symbol.asyncIterator]();
-
-  try {
-    while (true) {
-      let result: IteratorResult<RoseStreamChunk>;
-      try {
-        result = await iterator.next();
-      } catch (err) {
-        if (!yieldedAny && err instanceof RoseError && isFallThroughError(err)) {
-          // Caller-visible "no content yet" failure — safe to swap pipelines.
-          throw new PreContentFallThroughError(err);
-        }
-        // Post-content failures must propagate directly: partial output has
-        // already been streamed to the caller, so splicing in a second model's
-        // output would corrupt the response.
-        throw err;
-      }
-      if (result.done) return;
-      const out = opts.emit(result.value);
-      if (out) {
-        yield out;
-        yieldedAny = true;
-      }
-    }
-  } finally {
-    // Close the upstream iterator when the consumer stops early (throw/return)
-    // so `produce()`'s finally blocks — socket cleanup, AbortController signal
-    // tripping, stream cancellation — actually run. Without this, an early
-    // exit (e.g. a consumer break) would leak the underlying fetch response.
-    if (iterator.return) {
-      try {
-        await iterator.return();
-      } catch {
-        // Nothing useful we can do here; the finally's sole purpose was
-        // plumbing cleanup into the upstream generator.
-      }
-    }
-  }
 }

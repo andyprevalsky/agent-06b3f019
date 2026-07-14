@@ -17,8 +17,14 @@ import {
   WalletFundingProviderError,
   type WalletFundingProvider,
 } from '../../providers/wallet-funding';
-import { MAX_PURCHASE_CENTS, PURCHASE_APPROVAL_CACHE_HOURS } from './config';
+import {
+  benchmarkPurchaseKycRequired,
+  MAX_PURCHASE_CENTS,
+  PURCHASE_APPROVAL_CACHE_HOURS,
+} from './config';
 import { PurchaseError } from './errors';
+import { isKycRequiredError, kycRequiredPurchaseError } from './kyc';
+import { getCustomerDefaultPaymentMethodId } from './stripeCustomer';
 import * as repo from './repo';
 import { archivePurchaseBoundary } from './archive';
 import {
@@ -112,29 +118,6 @@ function toPurchaseBoundaryError(error: unknown): Error {
     return new PurchaseError(error.message, statusCode, error.code, error.details);
   }
   return error instanceof Error ? error : new Error(String(error));
-}
-
-async function getCustomerDefaultPaymentMethodId(customerId: string): Promise<string> {
-  const customer = await stripe.customers.retrieve(customerId);
-  if ('deleted' in customer && customer.deleted) {
-    throw new PurchaseError('Stripe billing customer has been deleted', 402);
-  }
-
-  const defaultPaymentMethod = customer.invoice_settings?.default_payment_method;
-  if (typeof defaultPaymentMethod === 'string' && defaultPaymentMethod.trim() !== '') {
-    return defaultPaymentMethod;
-  }
-  if (
-    defaultPaymentMethod !== null &&
-    typeof defaultPaymentMethod === 'object' &&
-    'id' in defaultPaymentMethod &&
-    typeof defaultPaymentMethod.id === 'string' &&
-    defaultPaymentMethod.id.trim() !== ''
-  ) {
-    return defaultPaymentMethod.id;
-  }
-
-  throw new PurchaseError('User does not have a default Stripe payment method', 402);
 }
 
 function isReusableStatus(status: PurchaseSpendStatus): boolean {
@@ -587,6 +570,10 @@ async function chargeAndIssueCard(
         stripePaymentIntentId: paymentIntentId ?? null,
       }
     );
+    // A genuine AgentCard KYC rejection (not the MCP per-user setup flow, whose
+    // error text carries no kyc_required code) surfaces as a typed kyc_required
+    // PurchaseError so the agent workflow can raise a KYC gate and retry.
+    if (isKycRequiredError(error)) throw kycRequiredPurchaseError();
     throw boundaryError;
   }
 }
@@ -619,6 +606,10 @@ export async function mintPurchaseCard(
   }
 
   const purchase = await openPendingPurchase(input, existing);
+  if (benchmarkPurchaseKycRequired(input.userId)) {
+    await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.FAILED);
+    throw kycRequiredPurchaseError();
+  }
 
   const subscription = await repo.findSubscriptionByUserId(input.userId);
   const stripeCustomerId = subscription?.stripeCustomerId;

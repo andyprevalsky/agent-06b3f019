@@ -1,8 +1,22 @@
-import { getAgent, postMessage as postMessageAPI } from '@/lib/api';
+import {
+  benchmarkAgentPreviewEnabled,
+  getAgent,
+  getBenchmarkAgentPreview,
+  postMessage as postMessageAPI,
+} from '@/lib/api';
+
+export { benchmarkAgentPreviewEnabled };
 
 /** Fetch agent detail and messages by agent ID. */
 export async function fetchAgentDetail(agentId: string) {
-  return getAgent(agentId);
+  try {
+    return await getAgent(agentId);
+  } catch (error) {
+    if (!benchmarkAgentPreviewEnabled()) {
+      throw error;
+    }
+    return getBenchmarkAgentPreview(agentId);
+  }
 }
 
 /** Post a user message to the given agent. */

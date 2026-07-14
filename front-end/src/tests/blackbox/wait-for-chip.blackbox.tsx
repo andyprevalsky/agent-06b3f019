@@ -4,7 +4,7 @@
  * expand/collapse toggling, and the embedded InlineExploreChip.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import WaitForChip, {
   type WaitForCheck,
@@ -73,23 +73,29 @@ describe('WaitForChip — condition mode', () => {
     } as WaitForCheck;
   }
 
-  it('renders "Waiting for {condition}" with check count while in progress', () => {
+  it('renders the concise description and real check context while collapsed', () => {
+    const longCondition =
+      'Check recent iMessages for a reply and keep checking until the full condition is satisfied';
     render(
       <WaitForChip
-        title="Waiting for inbox empty"
+        title={`Waiting for ${longCondition}`}
         message=""
         status="IN_PROGRESS"
         checks={[makeCheck({ checkNum: 1 })]}
         metadata={{
           waitForMode: 'condition',
-          condition: 'inbox empty',
+          description: 'Bar Shoji to reply',
+          condition: longCondition,
           checkIntervalSeconds: 60,
+          maxChecks: 20,
+          checkNum: 1,
         }}
       />,
     );
-    expect(screen.getByText('Waiting for inbox empty')).toBeInTheDocument();
-    // '1 check · next in ...' content
+    expect(screen.getByText('Waiting for Bar Shoji to reply')).toBeInTheDocument();
+    expect(screen.queryByText(longCondition)).not.toBeInTheDocument();
     expect(screen.getByText(/1 check/)).toBeInTheDocument();
+    expect(screen.getByText(/every 1m/)).toBeInTheDocument();
   });
 
   it('renders "Waited for {condition}" with green icon on completion', async () => {
@@ -115,17 +121,19 @@ describe('WaitForChip — condition mode', () => {
         ]}
         metadata={{
           waitForMode: 'condition',
+          description: 'the file to upload',
           condition: 'file uploaded',
           conditionMet: true,
           data: { condition_met: true, checks_completed: 3 },
         }}
       />,
     );
-    expect(screen.getByText('Waited for file uploaded')).toBeInTheDocument();
+    expect(screen.getByText('Waited for the file to upload')).toBeInTheDocument();
     expect(document.querySelector('.text-emerald-400')).not.toBeNull();
     expect(screen.getByText(/3 checks/)).toBeInTheDocument();
-    await u.click(screen.getByText('Waited for file uploaded'));
+    await u.click(screen.getByText('Waited for the file to upload'));
     expect(screen.getByText('Explored')).toBeInTheDocument();
+    await u.click(screen.getByText('Explored'));
     expect(container.querySelector('.tool-message-markdown')).not.toBeNull();
   });
 
@@ -153,7 +161,7 @@ describe('WaitForChip — condition mode', () => {
     expect(screen.getByText(/Check 2/)).toBeInTheDocument();
   });
 
-  it('renders InlineExploreChip for a live check and lets it expand', async () => {
+  it('hides a live InlineExploreChip until wait_for expands, then lets Explore expand', async () => {
     const u = userEvent.setup();
     render(
       <WaitForChip
@@ -192,16 +200,26 @@ describe('WaitForChip — condition mode', () => {
         ]}
         metadata={{
           waitForMode: 'condition',
+          description: 'the email to arrive',
           condition: 'email arrives',
           checkIntervalSeconds: 10,
         }}
       />,
     );
-    // Live indicator present
+    expect(screen.queryByText('live')).not.toBeInTheDocument();
+    expect(screen.queryByText('Exploring')).not.toBeInTheDocument();
+
+    await u.click(screen.getByText('Waiting for the email to arrive'));
+
+    // Live indicator present only inside expanded wait_for.
     expect(screen.getByText('live')).toBeInTheDocument();
     // While exploring, the header shows the most recent non-thinking action
     // (here: "Search the web") rather than the static goal.
     expect(screen.getByText('Exploring')).toBeInTheDocument();
+    expect(screen.getByTestId('wait-for-check-1').parentElement).toHaveTextContent(
+      'Check 1 · Checking now',
+    );
+    expect(screen.getByTestId('wait-for-check-1').parentElement).toHaveTextContent('Exploring');
     expect(screen.getAllByText('Search the web').length).toBeGreaterThan(0);
     expect(screen.getByTestId('explore-thinking-icon')).toBeInTheDocument();
     expect(screen.getByTestId('explore-active-tool-icon')).toBeInTheDocument();
@@ -215,7 +233,7 @@ describe('WaitForChip — condition mode', () => {
     expect(screen.getAllByText('Search the web').length).toBeGreaterThan(0);
   });
 
-  it('shows post-tool thinking immediately after the last tool FINISHED even before tokens stream', () => {
+  it('shows post-tool thinking immediately after the last tool FINISHED even before tokens stream', async () => {
     render(
       <WaitForChip
         title="Waiting"
@@ -252,6 +270,7 @@ describe('WaitForChip — condition mode', () => {
       />,
     );
 
+    await userEvent.click(screen.getByText('Waiting for email arrives'));
     expect(screen.getByText('Exploring')).toBeInTheDocument();
     expect(document.body.textContent).toMatch(/\d+\.\ds·0 tokens/);
   });
@@ -295,6 +314,7 @@ describe('WaitForChip — condition mode', () => {
       />,
     );
 
+    fireEvent.click(screen.getByText('Waiting for email arrives'));
     expect(document.body.textContent).toMatch(/0\.0s·0 tokens/);
   });
 
@@ -342,6 +362,7 @@ describe('WaitForChip — condition mode', () => {
 
     expect(screen.getByText('Explored')).toBeInTheDocument();
     expect(screen.queryByText(/Explored -/)).not.toBeInTheDocument();
+    await u.click(screen.getByText('Explored'));
     expect(document.body.textContent).toContain('The production deployment is ready');
   });
 
@@ -385,10 +406,11 @@ describe('WaitForChip — condition mode', () => {
       />,
     );
 
-    await u.click(screen.getByText('Failed waiting for deploy ready'));
+    await u.click(screen.getByText('Stopped waiting for deploy ready'));
 
     expect(screen.getByText('Explore Failed')).toBeInTheDocument();
     expect(screen.queryByText(/Explore Failed -/)).not.toBeInTheDocument();
+    await u.click(screen.getByText('Explore Failed'));
     expect(document.body.textContent).toContain(
       'Parallel AI search returned HTTP 429 Too Many Requests',
     );
@@ -404,7 +426,7 @@ describe('WaitForChip — condition mode', () => {
         metadata={{ waitForMode: 'condition', condition: 'thing' }}
       />,
     );
-    expect(screen.getByText('Hit max checks')).toBeInTheDocument();
+    expect(screen.getByText('Stopped waiting for thing')).toBeInTheDocument();
     expect(document.querySelector('.text-red-400')).not.toBeNull();
   });
 

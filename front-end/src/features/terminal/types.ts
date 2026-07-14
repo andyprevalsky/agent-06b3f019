@@ -15,12 +15,29 @@ import type {
   CreateAgentPayload,
 } from '@/lib/api';
 import type { RequestPaymentCardPayload } from '@/lib/realtime-types';
+import type { GateMetadata } from '@/features/terminal-component-group/components/attention-inbox/types';
 
 // ── View state ────────────────────────────────────────────────────────────
 
-export type TerminalView = 'agents' | 'browse' | 'integrations' | 'settings' | 'usage' | 'network';
+export type TerminalView =
+  | 'agents'
+  | 'browse'
+  | 'integrations'
+  | 'settings'
+  | 'usage'
+  | 'network'
+  | 'admin-health'
+  | 'benchmarks';
 
 export type AnimationPhase = 'revealing' | 'paused' | 'fading';
+
+export interface PendingAgentCreationInput {
+  agentId: string;
+  goal: string;
+  model: string;
+  source: AgentDetail['source'];
+  priceLimitCents: number;
+}
 
 // ── Drip styles ───────────────────────────────────────────────────────────
 
@@ -59,6 +76,11 @@ export interface PendingApproval {
   question: string;
   imageUrl: string | null;
   requestPaymentCard?: RequestPaymentCardPayload;
+}
+
+export interface PendingGate {
+  attentionRequestId: string;
+  gate: GateMetadata;
 }
 
 // ── Opening message tuple: [text, pauseDurationMs] ────────────────────────

@@ -76,6 +76,8 @@ export function isClaudeCodeTool(toolName: string): boolean {
 export const TOOL_ICONS: Record<string, LucideIcon> = {
   // Main agent tools
   spawn_agent: Cloud, // Spawn cloud agent (persistent, fault-tolerant environment)
+  spawn_explore_agent: Search,
+  spawn_code_agent: Code,
   grep: FileSearch, // Local data search (message threads)
   browser_agent: Globe,
   spawn_browser_agent: Globe,
@@ -84,7 +86,13 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   send_email: Mail,
   make_payment: CreditCard,
   call_phone_number: Phone,
+  message_person: MessageSquare,
   send_message_to_user: AlertCircle,
+  send_message_to_user_execute_phase: AlertCircle,
+  read_message_history_with_person: MessageSquare,
+  request_user_approval: AlertCircle,
+  request_user_signup: Users,
+  enable_write_permissions: FileEdit,
   request_user_assistance_for_authentication: LifeBuoy,
   query_blueprints: BookOpen,
   save_blueprint: Save,
@@ -105,6 +113,11 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   claude_code: Code,
   thought: Lightbulb,
   cloud_agent: Cloud,
+  agent_init: Play,
+  set_plan: ListChecks,
+  attempt_completion_with_result: CheckCircle,
+  completion_summary: FileText,
+  credential_failure_classifier: AlertCircle,
 
   // Browser action sub-types (for spawn_browser_agent internal actions)
   'Agent Reasoning': Lightbulb,
@@ -118,6 +131,8 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   'Step Progress': Play,
   'Performing Action': Settings,
   'Task Complete': CheckCircle,
+  'Browser Agent In Progress': CheckCircle,
+  // Retain the old title for historical messages stored before the rename.
   'Browser Ready': CheckCircle,
   'Agent Update': Info,
 

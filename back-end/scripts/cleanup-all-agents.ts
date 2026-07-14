@@ -165,7 +165,7 @@ function waitForContainerPg(name: string): boolean {
 }
 
 interface ServicesManifest {
-  database?: { container?: string; use_system_postgres?: boolean };
+  database?: { container?: string; use_system_postgres?: boolean; runtime_port?: number };
   ports?: { local_db?: number };
 }
 
@@ -251,10 +251,11 @@ function discoverDbTargets(): DbTarget[] {
   }
 
   // System-Postgres fallback stack (run.sh without Docker)
-  if (manifest?.database?.use_system_postgres && manifest.ports?.local_db) {
+  if (manifest?.database?.use_system_postgres) {
+    const systemPostgresPort = manifest.database.runtime_port ?? 5432;
     addTarget({
-      label: `system postgres :${manifest.ports.local_db}`,
-      url: `postgresql://postgres:postgres@localhost:${manifest.ports.local_db}/victoria`,
+      label: `system postgres :${systemPostgresPort}`,
+      url: `postgresql://postgres:postgres@localhost:${systemPostgresPort}/victoria`,
     });
   }
 

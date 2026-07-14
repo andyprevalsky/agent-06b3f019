@@ -65,6 +65,7 @@ from providers.rose.schema import (
     SYNTHETIC_OUTPUT_TOOL_NAME,
     build_openai_response_format,
 )
+from providers.rose.structured_output import StructuredOutputAccumulator
 from providers.rose.transforms import reconstruct_agent_response
 from utils.error_utils import extract_error_message
 from utils.tool_schemas import (
@@ -78,6 +79,10 @@ CLOUD_AGENT_TOOL_NAME = "cloud_agent"
 
 class LLMStructuredOutputError(ValueError):
     """The provider completed, but its structured output violated our contract."""
+
+
+class ResponseSchemaPersistenceError(RuntimeError):
+    """A generated response schema could not be saved durably."""
 
 
 TRAILING_MESSAGE_REFERENCE_RE = re.compile(
@@ -160,6 +165,30 @@ def _is_cloud_agent_lifecycle_tool(metadata: Dict[str, Any]) -> bool:
 # Same-machine optimization: passes large LLM context without Temporal serialization.
 # On cross-machine miss, call_llm_activity falls back to fetching from backend API.
 _pending_llm_context: Dict[str, Any] = {}  # agent_id -> (context, system_prompt, pre_resolved_ids)
+
+
+def _add_cache_breakpoint_before_extra_user_message(messages: List[Dict[str, Any]]) -> bool:
+    """Mark the latest stable conversational block before a per-call suffix.
+
+    The caller invokes this before appending ``extra_user_message``. That keeps
+    the full system+tools+conversation prefix identical across param-populator
+    calls while the task-specific suffix remains outside the cached prefix.
+    """
+    for message in reversed(messages):
+        if message.get("role") in {"system", "tool"}:
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and content:
+            message["content"] = [
+                {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}
+            ]
+            return True
+        if isinstance(content, list):
+            for block in reversed(content):
+                if isinstance(block, dict):
+                    block["cache_control"] = {"type": "ephemeral"}
+                    return True
+    return False
 
 
 def _safe_heartbeat(message: str) -> None:
@@ -1500,7 +1529,7 @@ async def build_llm_messages(  # noqa: C901
         dt = parse_timestamp(ts)
         if dt.year == 1970:
             return ""
-        return f"[{dt.strftime('%Y-%m-%d %H:%M')}] "
+        return f"[{dt.isoformat(timespec='minutes')}] "
 
     messages = [{"role": "system", "content": system_prompt}]
     declared_tool_call_ids: set[str] = set()
@@ -2050,6 +2079,7 @@ async def call_llm_structured_streaming(  # noqa: C901
         accumulated_reasoning = ""  # Reasoning/thinking text (displayed before response)
         codex_reasoning_items: List[Dict[str, Any]] = []  # Encrypted GPT reasoning state for replay only
         accumulated_json = ""  # JSON content for parsing (waterfall path) or filled at end (claudeAuth)
+        structured_output = StructuredOutputAccumulator()
         last_emitted_text = ""  # Track last emitted text to avoid duplicate sends
         last_emitted_for_chunk = ""  # Track what we've actually sent to on_chunk (for 18-char batching)
         token_count = 0
@@ -2324,7 +2354,8 @@ async def call_llm_structured_streaming(  # noqa: C901
                             first_response_chunk = chunk_count
                             logger.info(f"💬 C{chunk_count} RESPONSE started (native text)")
                     else:
-                        accumulated_json += content
+                        structured_output.add_chunk(chunk)
+                        accumulated_json = structured_output.current_text()
                         if first_response_chunk is None and '"response"' in accumulated_json:
                             first_response_chunk = chunk_count
                             logger.info(f"💬 C{chunk_count} RESPONSE started")
@@ -2517,6 +2548,8 @@ async def call_llm_structured_streaming(  # noqa: C901
                 # Native text only (no tool_use) — treat as the JSON envelope
                 # body; existing markdown/balanced-brace extraction handles it.
                 accumulated_json = text_buffer
+        elif structured_output.has_content():
+            accumulated_json = structured_output.final_text()
 
         logger.info(
             f"🏁 [{call_site}] Rose streaming complete, received {chunk_count} chunks, "
@@ -3475,6 +3508,7 @@ async def _call_llm_verifier(  # noqa: C901
 
     accumulated_reasoning = ""
     accumulated_json = ""
+    structured_output = StructuredOutputAccumulator()
     actual_model = "unknown"
     pool_name = "unknown"
     claude_token_error: Optional[str] = None
@@ -3584,7 +3618,8 @@ async def _call_llm_verifier(  # noqa: C901
                     gpt_token_error = chunk.data["gpt_token_error"]
                     logger.warning(f"⚠️ Verifier GPT token error: {gpt_token_error}")
             elif kind == "content":
-                accumulated_json += chunk.data.get("text", "")
+                structured_output.add_chunk(chunk)
+                accumulated_json = structured_output.current_text()
             elif kind == "reasoning":
                 accumulated_reasoning += chunk.data.get("text", "")
             elif kind == "tool_call":
@@ -3624,6 +3659,8 @@ async def _call_llm_verifier(  # noqa: C901
         if not isinstance(first_input, dict):
             raise ValueError(f"Verifier native tool payload must be an object (got {type(first_input).__name__})")
         accumulated_json = json.dumps(first_input)
+    elif structured_output.has_content():
+        accumulated_json = structured_output.final_text()
 
     # llm.cache event is emitted from RoseClient.complete (single source).
     # Still need these locally for the returned usage dict consumed by callers.
@@ -4585,6 +4622,8 @@ async def call_llm_activity(  # noqa: C901
     fast_mode_cache_enabled: bool = False,
     fast_mode_goal: Optional[str] = None,
     fast_mode_step: Optional[int] = None,
+    force_backend_context: bool = False,
+    cache_before_extra_user_message: bool = False,
 ) -> Dict[str, Any]:
     """
     Activity wrapper for LLM calls with structured output and streaming.
@@ -4597,7 +4636,8 @@ async def call_llm_activity(  # noqa: C901
             When agent_id string: reads context from _pending_llm_context shared state,
             builds messages inside the activity (so file downloads work and base64
             content never crosses the Temporal 2MB payload boundary).
-            On cross-machine miss, falls back to fetching context from backend API.
+            On a cross-machine miss, or when force_backend_context is set, fetches
+            context from the backend API.
         model: Model to use
         tool_names: List of tool names for dynamic AgentAction model
         reasoning_max_tokens: Max reasoning tokens (0 disables)
@@ -4612,9 +4652,14 @@ async def call_llm_activity(  # noqa: C901
             without changing system prompt/tools (preserves cache prefix).
         required_tool: If set, validates the LLM called this tool. Raises ValueError
             if the tool is not in the response.
-        skip_cache_write: If True, skips message-level cache breakpoint (avoids
-            writing a cache entry for the unique trailing message) but keeps
-            system+tools markers so the shared prefix can still be read from cache.
+        skip_cache_write: If True, skips the automatic trailing message cache
+            breakpoint. Explicit prefix markers are preserved.
+        force_backend_context: If True, bypasses process-global pending context
+            and fetches the canonical agent messages from the backend.
+        cache_before_extra_user_message: Mark the latest stable conversation
+            block before appending extra_user_message. This lets productive
+            param calls create/read one shared prefix without caching the unique
+            task instruction.
 
     Returns:
         Dict with:
@@ -4646,8 +4691,8 @@ async def call_llm_activity(  # noqa: C901
         _context_key = None
         if isinstance(messages_or_agent_id, str):
             _context_key = messages_or_agent_id
-            pending = _pending_llm_context.get(_context_key)
-            if pending is None:
+            pending = None if force_backend_context else _pending_llm_context.get(_context_key)
+            if pending is None and not force_backend_context:
                 await asyncio.sleep(0.5)
                 pending = _pending_llm_context.get(_context_key)
             if pending is not None:
@@ -4668,7 +4713,11 @@ async def call_llm_activity(  # noqa: C901
                 # Fetch messages from backend; files download live via activity.in_activity().
                 from helpers.fetch_config import _fetch_agent_data_impl
 
-                logger.info("Cross-machine LLM context fallback", agent_id=_context_key)
+                logger.info(
+                    "Backend LLM context fetch",
+                    agent_id=_context_key,
+                    forced=force_backend_context,
+                )
                 data = await _fetch_agent_data_impl(_context_key)
                 context = data.get("messages", [])
                 messages = await build_llm_messages(
@@ -4678,7 +4727,8 @@ async def call_llm_activity(  # noqa: C901
                     llm_only_user_preamble=llm_only_user_preamble,
                     user_id=user_id,
                 )
-                _pending_llm_context[_context_key] = (context, system_prompt, None, user_id)
+                if not force_backend_context:
+                    _pending_llm_context[_context_key] = (context, system_prompt, None, user_id)
             else:
                 raise ValueError(f"No pending LLM context for agent {_context_key} and no system_prompt provided")
         else:
@@ -4686,6 +4736,9 @@ async def call_llm_activity(  # noqa: C901
             messages = messages_or_agent_id
             if llm_only_user_preamble:
                 messages = inject_llm_only_user_preamble(messages, llm_only_user_preamble)
+
+        if cache_before_extra_user_message and extra_user_message:
+            _add_cache_breakpoint_before_extra_user_message(messages)
 
         if extra_user_message:
             messages.append({"role": "user", "content": extra_user_message})
@@ -4858,10 +4911,11 @@ async def call_llm_activity(  # noqa: C901
                     tool_calls_dict.append(tc_dict)
 
         if required_tool:
-            matching = [tc for tc in tool_calls_dict if tc.get("tool") == required_tool]
-            if not matching:
-                got = [tc.get("tool") for tc in tool_calls_dict]
-                raise LLMStructuredOutputError(f"LLM did not call required tool '{required_tool}'. Got: {got}")
+            got = [tc.get("tool") for tc in tool_calls_dict]
+            if len(tool_calls_dict) != 1 or got[0] != required_tool:
+                raise LLMStructuredOutputError(
+                    f"LLM must call exactly one tool, '{required_tool}'. Got: {got}"
+                )
 
         logger.info(
             "LLM activity completed",
@@ -4871,7 +4925,7 @@ async def call_llm_activity(  # noqa: C901
         )
 
         # Clean up shared state on success
-        if _context_key:
+        if _context_key and not force_backend_context:
             _pending_llm_context.pop(_context_key, None)
 
         return {
@@ -5016,11 +5070,16 @@ async def set_response_schema_activity(
 
             # 2. Save schema to agent record
             save_start = time.perf_counter()
-            save_response = await client.patch(
-                f"{backend_url}/api/agents/{agent_id}",
-                headers=backend_api_headers(api_key),
-                json={"response_schema": schema},
-            )
+            try:
+                save_response = await client.patch(
+                    f"{backend_url}/api/agents/{agent_id}",
+                    headers=backend_api_headers(api_key),
+                    json={"response_schema": schema},
+                )
+            except httpx.HTTPError as e:
+                raise ResponseSchemaPersistenceError(
+                    f"Failed to save response schema for agent {agent_id}: {extract_error_message(e)}"
+                ) from e
             save_elapsed = time.perf_counter() - save_start
             logger.info(f"[TIMING] Schema save API call: {save_elapsed * 1000:.1f}ms")
 
@@ -5028,8 +5087,11 @@ async def set_response_schema_activity(
                 logger.warning(
                     "Failed to save response schema", agent_id=agent_id, status_code=save_response.status_code
                 )
-            else:
-                logger.info("Saved response schema to agent", agent_id=agent_id)
+                raise ResponseSchemaPersistenceError(
+                    f"Failed to save response schema for agent {agent_id}: HTTP {save_response.status_code}"
+                )
+
+            logger.info("Saved response schema to agent", agent_id=agent_id)
 
             activity_elapsed = time.perf_counter() - activity_start
             logger.info(
@@ -5052,6 +5114,8 @@ async def set_response_schema_activity(
             response_text=e.response.text[:500],
         )
         return None
+    except ResponseSchemaPersistenceError:
+        raise
     except Exception as e:
         logger.error("Failed to generate response schema", agent_id=agent_id, error=extract_error_message(e))
         return None

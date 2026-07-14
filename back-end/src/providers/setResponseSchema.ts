@@ -29,6 +29,7 @@ import { prisma } from './database';
 import { createLogger } from './logger';
 import { retryWithBackoff } from './retry';
 import { createStreamingCompletion, RoseAuthError, RoseInvalidRequest } from './rose';
+import { StructuredOutputAccumulator } from './rose/structuredOutput';
 
 const log = createLogger('ResponseSchema');
 
@@ -500,14 +501,13 @@ async function attemptSchemaGeneration(opts: StreamAttemptOptions): Promise<Stre
     },
   });
 
-  let content = '';
+  const structuredOutput = new StructuredOutputAccumulator();
   let tokensIn = 0;
   let tokensOut = 0;
   let finishReason: string | null = null;
   for await (const chunk of stream) {
     const choice = chunk.choices[0];
-    const delta = choice?.delta;
-    if (delta?.content) content += delta.content;
+    structuredOutput.addCompletionChunk(chunk);
     // The final chunk carries finish_reason. claudeAuth uses 'length' for
     // max_tokens truncation; the OpenRouter waterfall mirrors that.
     if (choice?.finish_reason) finishReason = choice.finish_reason;
@@ -520,8 +520,10 @@ async function attemptSchemaGeneration(opts: StreamAttemptOptions): Promise<Stre
   if (finishReason === 'length') {
     // The model ran out of tokens mid-emission. Caller decides whether to
     // escalate (one-shot doubling) or surrender.
-    throw new MaxTokensTruncationError(opts.maxTokens, content);
+    throw new MaxTokensTruncationError(opts.maxTokens, structuredOutput.currentText());
   }
+
+  const content = structuredOutput.finalText();
 
   if (!content) {
     throw new Error('LLM returned no content');

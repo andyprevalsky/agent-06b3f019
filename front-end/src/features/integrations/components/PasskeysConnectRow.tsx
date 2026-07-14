@@ -20,7 +20,7 @@ import applePasswordsIcon from '@/assets/apple-passwords-icon.png';
 
 import DropdownIconFrame, {
   dropdownIconImageClassName,
-  dropdownIconPreset,
+  DropdownIconPreset,
 } from './DropdownIconFrame';
 import SyncItemButton from './SyncItemButton';
 
@@ -43,7 +43,7 @@ export default function PasskeysConnectRow({
       className="px-4 py-2 flex items-center justify-between border-b border-border/50"
     >
       <div className="flex items-center gap-3">
-        <DropdownIconFrame {...dropdownIconPreset.applePasswords} isSynced={isSynced}>
+        <DropdownIconFrame {...DropdownIconPreset.applePasswords} isSynced={isSynced}>
           <img
             src={applePasswordsIcon}
             alt=""

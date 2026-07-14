@@ -37,6 +37,7 @@ export interface RealtimeSubscriptionDeps {
   isReconnectingRef: React.MutableRefObject<boolean>;
   initialLoadDoneRef: React.MutableRefObject<string | null>;
   streamedTextsRef: React.MutableRefObject<Set<string>>;
+  completedStreamIdsRef: React.MutableRefObject<Set<string>>;
   setStreamingBubbles: React.Dispatch<React.SetStateAction<Map<string, StreamingBubble>>>;
   setStreamingPlan: React.Dispatch<React.SetStateAction<StreamingPlan | null>>;
   setStreamingAttention: React.Dispatch<React.SetStateAction<StreamingAttention | null>>;
@@ -47,6 +48,16 @@ export interface RealtimeSubscriptionDeps {
   setForceResubscribeCounter: React.Dispatch<React.SetStateAction<number>>;
   dispatchMessage: (message: Message) => void;
   onLoadAgents?: () => void;
+}
+
+function startsCloudAgentMode(data: InsertMessagePayload, selectedAgentId: string): boolean {
+  const metadata = data.metadata;
+  return (
+    data.agentId === selectedAgentId &&
+    metadata?.toolName === 'cloud_agent' &&
+    metadata.toolStatus === 'IN_PROGRESS' &&
+    (metadata.startPhase === 'plan' || metadata.startPhase === 'execute')
+  );
 }
 
 // ─── Main subscription hook ─────────────────────────────────────────────────
@@ -63,6 +74,7 @@ export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
     isReconnectingRef,
     initialLoadDoneRef,
     streamedTextsRef,
+    completedStreamIdsRef,
     setStreamingBubbles,
     setStreamingPlan,
     setStreamingAttention,
@@ -135,6 +147,13 @@ export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
       try {
         const channel = await subscribeToAgent(selectedAgentId, {
           onInsert: (data: InsertMessagePayload) => {
+            if (startsCloudAgentMode(data, selectedAgentId)) {
+              // The router has committed to agent mode and the backend starts
+              // Temporal immediately after persisting this message. Transition
+              // from chat now; AGENT_MODE_STARTED remains the confirmation and
+              // reconnect fallback if this insert was missed.
+              setIsChatMode(false);
+            }
             handleInsertMessage(data, selectedAgentId, {
               setStreamingBubbles,
               setStreamingPlan,
@@ -148,7 +167,13 @@ export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
             handleUpdateAgent(updated, setAgent, setIsChatMode, onLoadAgents);
           },
           onAssistantStream: (chunk: AssistantStreamPayload) => {
-            handleAssistantStream(chunk, selectedAgentId, streamedTextsRef, setStreamingBubbles);
+            handleAssistantStream(
+              chunk,
+              selectedAgentId,
+              streamedTextsRef,
+              setStreamingBubbles,
+              completedStreamIdsRef,
+            );
           },
           onPlanStream: (plan: PlanStreamPayload) => {
             handlePlanStream(plan, selectedAgentId, setStreamingPlan);
@@ -215,6 +240,7 @@ export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
     isReconnectingRef,
     initialLoadDoneRef,
     streamedTextsRef,
+    completedStreamIdsRef,
     setStreamingBubbles,
     setStreamingPlan,
     setStreamingAttention,

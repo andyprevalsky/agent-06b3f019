@@ -26,6 +26,7 @@ export default function SidebarNavButton({
     <SidebarTooltip label={label} isCollapsed={isCollapsed}>
       <button
         onClick={onClick}
+        aria-label={label}
         className={cn(
           'w-full flex items-center gap-3 rounded-lg text-sm transition-all duration-200',
           'hover:bg-gray-100 dark:hover:bg-zinc-800',

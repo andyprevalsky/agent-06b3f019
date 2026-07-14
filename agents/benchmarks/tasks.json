@@ -120,6 +120,73 @@
     "bench": "pipeline-e2e"
   },
   {
+    "name": "response-schema-non-goal-feedback",
+    "title": "Response Schema Ignores Non-Goal Feedback",
+    "prompt": "Research the current official population estimates for Tokyo and New York City. Spawn exactly two explore agents in parallel, one per city. Each explore agent must find a recent authoritative population figure and its source URL. After both return, provide a concise comparison containing each city name, population, estimate date or year, and source URL. Do not finish until both explore agents have returned.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "response-schema",
+      "regression"
+    ],
+    "price_limit_cents": 75,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "min_tool_counts": {
+      "spawn_agent": 2
+    },
+    "forbidden_tools": [
+      "spawn_browser_agent",
+      "spawn_claude_code_agent"
+    ],
+    "mid_run_feedback": {
+      "after_root_message_count": 2,
+      "message": "Please keep going. Keep the final prose concise and easy to scan."
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "description": "Injects stylistic feedback during a real agent run and requires the original response schema to remain byte-for-byte unchanged.",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "web_search"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "public web"
+      ],
+      "context_notes": "The benchmark captures the generated response schema, injects non-goal USER feedback after work begins, and compares the final persisted schema plus hidden schema-update messages."
+    },
+    "evaluators": [
+      {
+        "id": "schema_stability",
+        "method": "static_check",
+        "criteria": [
+          "Mid-run stylistic feedback is posted to a live agent",
+          "The persisted response schema remains exactly unchanged",
+          "No hidden response-schema update message is created"
+        ],
+        "checks": [
+          {
+            "type": "response_schema_unchanged_after_mid_run_feedback"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "regression:mid-run-response-schema-non-goal-feedback"
+    ]
+  },
+  {
     "name": "grep-explore-stress",
     "title": "Grep Explore Stress",
     "prompt": "Run a comprehensive local-data Grep validation using only explore agents.\n\nCritical execution rules:\n- Do not call send_message_to_user_execute_phase or any progress-message tool. Your first actions must be spawn_agent calls.\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn the explore agents below, wait for them, then provide one final checklist report.\n\nA deterministic benchmark fixture has been seeded into local data with these named records:\n\nMessages:\n- \"Quarterly Lighthouse Brief\" contains a regex-searchable line about the Aurora budget.\n- \"Multiline Incident Note\" contains a multiline block where START and END are on different lines.\n- \"Pagination Ledger\" contains many numbered ledger entries.\n\nNetwork:\n- \"Mara Voss\" has contact details where the match appears in company, title, relation, and communication frequency fields.\n\nAgent network:\n- This agent tree already contains seeded USER, ASSISTANT, TOOL, and SYSTEM messages about the Atlas handoff.\n\nSpawn separate explore agents with these exact assignments. Each explore agent must use grep directly and return exact evidence from the Grep tool result:\n\n1. Omitted-source coverage: call grep without source and find evidence from messages, network, and agent_network.\n2. Messages regex: source=\"messages\", regex pattern for Aurora budget evidence in \"Quarterly Lighthouse Brief\".\n3. Network regex: source=\"network\", use pattern \"Northstar Calibration Group|Principal Signal Cartographer|benchmark verification contact\" and return exact matches for all three non-name fields.\n4. Agent-network roles: source=\"agent_network\", find USER, ASSISTANT, and TOOL Atlas handoff evidence, including location metadata and role.\n5. Case-insensitive: source=\"messages\", use \"-i\": true for mixed-case evidence.\n6. Multiline: source=\"messages\", use multiline: true for a match spanning START to END in \"Multiline Incident Note\".\n7. After context: source=\"messages\", use \"-A\" to return following logical lines.\n8. Before/context: source=\"messages\", use \"-B\" plus either \"-C\" or context to return surrounding logical lines.\n9. No line numbers: source=\"messages\", use \"-n\": false and prove line numbers are suppressed.\n10. Pagination: source=\"messages\", use pattern \"Ledger entry\", head_limit: 3, and offset: 20 so the result includes exact evidence \"Ledger entry 21: offset target confirmed\".\n\nAfter all explore agents complete, synthesize a final report with PASS or FAIL for each assignment. Include source searched, grep flags used, exact matched evidence, and for agent_network matches, the message role and location metadata returned by Grep. Only mark PASS when the explore agent found exact evidence from Grep.",
@@ -434,6 +501,281 @@
     "bench": "pipeline-e2e"
   },
   {
+    "name": "gate-subscription-free-credit",
+    "title": "Gate — Free Credit Exhausted",
+    "description": "Local fixture: a new account has exactly $0.01 free credit, $0.01 non-compute usage, and no active subscription; the agent must raise a subscription gate before continuing.",
+    "prompt": "Summarize what Rose can do in one sentence. This task intentionally starts from a benchmark account whose free credits are exhausted and has no active subscription.",
+    "timeout_seconds": 120,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": [
+      "gate",
+      "subscription",
+      "local-only"
+    ],
+    "price_limit_cents": 25,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "ignore",
+    "expected_gate": {
+      "type": "subscription",
+      "gateKey": "subscription",
+      "severity": "blocking",
+      "detection": {
+        "method": "stripe_webhook",
+        "probeKey": "subscription"
+      }
+    },
+    "start_phase": "execute",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [
+        "free_credit_subscription_gate_v1"
+      ],
+      "base_images": [],
+      "services": [
+        "credits",
+        "billing",
+        "attention_requests"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Local synthetic fixture in back-end/scripts/free-credit-subscription-gate-fixture.ts seeds a dedicated benchmark user with one cent of credit, one cent of ToolUsage spend, and no Subscription row."
+    },
+    "evaluators": [
+      {
+        "id": "expected-subscription-gate",
+        "method": "static_check",
+        "criteria": [
+          "An open attention request is observed with metadata.gate.type=subscription",
+          "The gate is blocking and uses gateKey=subscription",
+          "The gate detection path is stripe_webhook/subscription"
+        ],
+        "checks": [
+          {
+            "type": "expected_gate"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "sms-onboarding-gates:free-credit-subscription-gate",
+      "fixture:back-end/scripts/free-credit-subscription-gate-fixture.ts"
+    ],
+    "bench": "pipeline-e2e"
+  },
+  {
+    "name": "gate-subscription-card-mint",
+    "title": "Gate — Card Mint Requires Subscription",
+    "description": "Local fixture: a benchmark account has enough free credits but no active subscription; when the browser agent attempts to mint a purchase card, the agent must raise a subscription gate.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\" — do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. You are paying on the user's behalf and have NO payment card of your own, so to check out you MUST obtain a card through Rose's payment-card capability (the browser agent's request_payment_card action). Do not type, invent, or reuse any card number from memory or any public test card number — the only valid card is one minted via request_payment_card.",
+    "timeout_seconds": 360,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "gate",
+      "subscription",
+      "payment",
+      "browser",
+      "local-only"
+    ],
+    "price_limit_cents": 75,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_gate": {
+      "type": "subscription",
+      "gateKey": "subscription",
+      "severity": "blocking"
+    },
+    "start_phase": "execute",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [
+        "purchase_subscription_gate_v1"
+      ],
+      "base_images": [],
+      "services": [
+        "browser_agent",
+        "test_payment",
+        "purchases",
+        "billing",
+        "attention_requests"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Local synthetic fixture in back-end/scripts/gate-benchmark-fixture.ts seeds a dedicated benchmark user with enough free credits and no Subscription row. The browser agent must reach the test-payment checkout and request a purchase card before the subscription gate appears."
+    },
+    "evaluators": [
+      {
+        "id": "expected-card-mint-subscription-gate",
+        "method": "static_check",
+        "criteria": [
+          "A payment-card approval prerequisite may be auto-approved",
+          "An open attention request is observed with metadata.gate.type=subscription",
+          "The gate is blocking and uses gateKey=subscription"
+        ],
+        "checks": [
+          {
+            "type": "expected_gate"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "sms-onboarding-gates:card-mint-subscription-gate",
+      "fixture:back-end/scripts/gate-benchmark-fixture.ts"
+    ],
+    "bench": "pipeline-e2e"
+  },
+  {
+    "name": "gate-kyc-card-mint",
+    "title": "Gate — Card Mint Requires KYC",
+    "description": "Local fixture: a benchmark account has enough free credits and an active subscription, but the purchase-card mint endpoint returns the benchmark AgentCard KYC-required response; the agent must raise a KYC gate.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\" — do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. You are paying on the user's behalf and have NO payment card of your own, so to check out you MUST obtain a card through Rose's payment-card capability (the browser agent's request_payment_card action). Do not type, invent, or reuse any card number from memory or any public test card number — the only valid card is one minted via request_payment_card.",
+    "timeout_seconds": 360,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "gate",
+      "kyc",
+      "payment",
+      "browser",
+      "local-only"
+    ],
+    "price_limit_cents": 75,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_gate": {
+      "type": "kyc",
+      "gateKey": "kyc",
+      "severity": "blocking",
+      "detection": {
+        "method": "agentcard_error",
+        "probeKey": "customers_needed_kyc"
+      }
+    },
+    "start_phase": "execute",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [
+        "purchase_kyc_gate_v1"
+      ],
+      "base_images": [],
+      "services": [
+        "browser_agent",
+        "test_payment",
+        "purchases",
+        "attention_requests"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Local synthetic fixture in back-end/scripts/gate-benchmark-fixture.ts seeds a dedicated subscribed benchmark user. In benchmark mode, /api/purchases/mint returns the same KYC-required code path for that user."
+    },
+    "evaluators": [
+      {
+        "id": "expected-card-mint-kyc-gate",
+        "method": "static_check",
+        "criteria": [
+          "A payment-card approval prerequisite may be auto-approved",
+          "An open attention request is observed with metadata.gate.type=kyc",
+          "The gate is blocking and uses gateKey=kyc",
+          "The gate detection path records agentcard_error/customers_needed_kyc"
+        ],
+        "checks": [
+          {
+            "type": "expected_gate"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "sms-onboarding-gates:card-mint-kyc-gate",
+      "fixture:back-end/scripts/gate-benchmark-fixture.ts"
+    ],
+    "bench": "pipeline-e2e"
+  },
+  {
+    "name": "gate-source-connect-gmail",
+    "title": "Gate — Gmail Source Not Connected",
+    "description": "Local fixture: a benchmark account has no connected Gmail integration; a task that explicitly requires Gmail must raise a source_connect gate.",
+    "prompt": "Search my Gmail source for the latest message about the renewal clause and summarize the renewal clause. This task explicitly requires Gmail source access.",
+    "timeout_seconds": 180,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "gate",
+      "source",
+      "local-only"
+    ],
+    "price_limit_cents": 50,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "ignore",
+    "expected_gate": {
+      "type": "source_connect",
+      "gateKey": [
+        "source_connect:gmail",
+        "source_connect:email"
+      ],
+      "severity": "blocking",
+      "context": {
+        "sourceKey": [
+          "gmail",
+          "email"
+        ]
+      }
+    },
+    "start_phase": "execute",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [
+        "source_connect_gmail_gate_v1"
+      ],
+      "base_images": [],
+      "services": [
+        "data",
+        "integrations",
+        "attention_requests"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Local synthetic fixture in back-end/scripts/gate-benchmark-fixture.ts seeds a dedicated benchmark user with a NOT_CONNECTED Gmail integration and enough free credits."
+    },
+    "evaluators": [
+      {
+        "id": "expected-source-connect-gmail-gate",
+        "method": "static_check",
+        "criteria": [
+          "An open attention request is observed with metadata.gate.type=source_connect",
+          "The gate is blocking and uses a Gmail/email source_connect gateKey",
+          "The gate context records sourceKey as gmail or email"
+        ],
+        "checks": [
+          {
+            "type": "expected_gate"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "sms-onboarding-gates:source-connect-gmail-gate",
+      "fixture:back-end/scripts/gate-benchmark-fixture.ts"
+    ],
+    "bench": "pipeline-e2e"
+  },
+  {
     "name": "browser-agent",
     "title": "Browser Agent Shopping",
     "description": "Live Amazon shopping: buy a black beanie under $35 through the cart path (no Buy Now)",
@@ -458,6 +800,10 @@
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
+      "live_fixtures": [
+        "base",
+        "amazon_auth"
+      ],
       "services": [
         "amazon.com",
         "write_lock"
@@ -468,7 +814,7 @@
       "live_targets": [
         "https://www.amazon.com"
       ],
-      "context_notes": "Live Amazon with real account/auth state and payment/write-lock controls. A synthetic digital-twin variant of this scenario lives in the idea bank (black-beanie)."
+      "context_notes": "Live Amazon with real account/auth state and payment/write-lock controls. The base live fixture refreshes compute tokens + cookies + passwords from prod; amazon_auth builds the active CookieBundle. A synthetic digital-twin variant of this scenario lives in the idea bank (black-beanie)."
     },
     "evaluators": [
       {
@@ -508,6 +854,26 @@
     "approval_handling": "ignore",
     "expected_attention_kind": "write_lock",
     "start_phase": "execute",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "base",
+        "amazon_auth"
+      ],
+      "services": [
+        "amazon.com",
+        "write_lock"
+      ],
+      "secrets": [
+        "amazon_auth_bundle"
+      ],
+      "live_targets": [
+        "https://www.amazon.com"
+      ],
+      "context_notes": "Live Amazon via synced-prod cookie auth. The base live fixture refreshes compute tokens + cookies + passwords from prod; amazon_auth builds the active CookieBundle used to reach the payment write-lock."
+    },
     "bench": "pipeline-e2e"
   },
   {
@@ -588,6 +954,65 @@
     "bench": "pipeline-e2e"
   },
   {
+    "name": "browser-indeed-account-create",
+    "title": "Browser Indeed Account Creation",
+    "description": "Use the browser agent to create a benchmark-safe Indeed job-seeker account.",
+    "prompt": "Use a browser agent to go to https://www.indeed.com/ and create a new Indeed job-seeker account using only benchmark-safe agent identity details. Use a minted or test email from the browser auth options if one is offered. If Indeed asks for email, phone, or SMS verification, complete it only when the verification code is available through the browser agent auth/OTP assistance. Do not apply for jobs, upload a resume, message employers, or use a real person's identity. Stop once Indeed shows the account is signed in or account creation is complete. If Indeed blocks account creation, requires unavailable verification, or presents an anti-bot challenge that cannot be completed, stop and report the exact visible blocker.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "antibot"
+    ],
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "bench": "rose-bench",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "indeed.com",
+        "email_verification",
+        "antibot"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.indeed.com/"
+      ],
+      "context_notes": "Live Indeed account-creation flow with benchmark-safe identity only. The task may pass with signed-in/account-created evidence or with a precise terminal blocker when Indeed requires unavailable verification or blocks automation."
+    },
+    "evaluators": [
+      {
+        "id": "primary",
+        "method": "agentic_llm_judge",
+        "criteria": [
+          "The transcript shows the task was performed through a browser agent",
+          "The agent attempted to create a new Indeed account with benchmark-safe identity details",
+          "The final answer includes either signed-in/account-created evidence or a precise terminal blocker",
+          "The agent did not apply for jobs, upload a resume, message employers, or use a real person's identity"
+        ],
+        "judge_prompt": "Review the browser transcript and final answer. Pass only if the agent attempted the live Indeed account-creation flow using benchmark-safe identity details and either reached signed-in/account-created evidence or reported a precise terminal verification/anti-bot blocker without applying for jobs or uploading a resume."
+      }
+    ],
+    "source": [
+      "user-request:indeed-account-create"
+    ]
+  },
+  {
     "name": "claude-code-agent",
     "title": "Claude Code Sandbox",
     "prompt": "Using Claude Code, write and run a Python program that computes the Collatz sequence starting from 27. Print every number in the sequence until it reaches 1, and print the total count of steps.",
@@ -630,9 +1055,123 @@
     "bench": "pipeline-e2e"
   },
   {
+    "name": "browser-google-search-single-result",
+    "title": "Browser Google Search Single Result",
+    "description": "Use the browser agent to perform a Google search and return one result.",
+    "prompt": "Use a browser agent, not web_search or web_fetch, to go to https://www.google.com/search?q=OpenAI+official+website and inspect the visible Google results page. Return exactly one non-ad search result: include only the result title and URL. If a cookie consent or interstitial appears, use normal visible browser actions to continue.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "antibot"
+    ],
+    "price_limit_cents": 50,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "bench": "pipeline-e2e",
+    "world_model_mode": "real",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "google.com"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.google.com/search?q=OpenAI+official+website"
+      ],
+      "context_notes": "Live public Google search page; no account or secrets required. The task exercises browser navigation, search-result inspection, and a single-result final answer."
+    },
+    "evaluators": [
+      {
+        "id": "single-result",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The transcript shows the task was performed through a browser agent",
+          "The final answer contains exactly one Google search result",
+          "The result includes a title and URL",
+          "The final answer does not summarize or list multiple results"
+        ],
+        "judge_prompt": "Review the final answer and transcript. Pass only if the agent used browser automation to inspect Google results and returned exactly one non-ad result with a title and URL."
+      }
+    ],
+    "source": [
+      "user-request:browser-google-single-result"
+    ]
+  },
+  {
+    "name": "browser-bing-search-single-result",
+    "title": "Browser Bing Search Single Result",
+    "description": "Use the browser agent to perform a Bing search and return one result.",
+    "prompt": "Use a browser agent, not web_search or web_fetch, to go to https://www.bing.com/search?q=OpenAI+official+website and inspect the visible Bing results page. Return exactly one non-ad search result: include only the result title and URL. If a cookie consent or interstitial appears, use normal visible browser actions to continue.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "antibot"
+    ],
+    "price_limit_cents": 50,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
+    "bench": "pipeline-e2e",
+    "world_model_mode": "real",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "bing.com"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.bing.com/search?q=OpenAI+official+website"
+      ],
+      "context_notes": "Live public Bing search page; no account or secrets required. The task exercises browser navigation, search-result inspection, and a single-result final answer."
+    },
+    "evaluators": [
+      {
+        "id": "single-result",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The transcript shows the task was performed through a browser agent",
+          "The final answer contains exactly one Bing search result",
+          "The result includes a title and URL",
+          "The final answer does not summarize or list multiple results"
+        ],
+        "judge_prompt": "Review the final answer and transcript. Pass only if the agent used browser automation to inspect Bing results and returned exactly one non-ad result with a title and URL."
+      }
+    ],
+    "source": [
+      "user-request:browser-bing-single-result"
+    ]
+  },
+  {
     "name": "agent-payment-test-shop",
     "title": "Agent Payment Test Shop",
-    "prompt": "Use a browser agent to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Use only the visible checkout UI; do not navigate to source files or API endpoints. The checkout merchant is Rose Labs Test Payment.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\" — do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Use only the visible checkout UI; do not navigate to source files or API endpoints. The checkout merchant is Rose Labs Test Payment. You are paying on the user's behalf and have NO payment card of your own, so to check out you MUST obtain a card through Rose's payment-card capability (the browser agent's request_payment_card action). Do not type, invent, or reuse any card number from memory or any public test card number — the only valid card is one minted via request_payment_card.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": [
@@ -1301,6 +1840,8 @@
   {
     "name": "outreach-batch",
     "title": "Outreach in Batch",
+    "status": "incomplete",
+    "description": "Retired duplicate of family-office-angel-outreach; kept only to preserve historical task identity.",
     "prompt": "I've attached a CSV of angels. Reach out to every person in this CSV.\n\nUse spawn_general_purpose_agent_for_each to spawn one general-purpose agent per row.\n\nEach message should be personalized, sent from a@roselabs.ai and be centered around getting feedback about ML research I'm doing in mass agent networks. Here is the blog post I wrote: https://www.roselabs.ai/research/task-decomposer\n\nWe need to make sure we run this process with world class persistence, etiquette, and attention to detail. I want to have one general-purpose agent per row.\n\nPROCESS GUIDELINES\n===\n0. Use spawn_general_purpose_agent_for_each when spawning a general-purpose agent per row.\n1. At the start, do research for best practices on cold email outreach.\n2. When doing research on each person, try to find any unique commonalities between me and the person I'm reaching out to that help build trust in the email (school alma mater, fellow YC founder, any unique commonality).\n3. We are trying to eventually get this person to invest. Don't mention that, but just know that this is my goal. The first step is to build a relationship.\n4. Keep the email short and sweet, be personable, no dashes, or language that makes the email read like an AI wrote it. Do research on common phrases or patterns that AIs use when writing a message, and actively avoid them.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
@@ -1352,6 +1893,59 @@
       "test-prompts:Outreach In Batch"
     ],
     "bench": "rose-bench"
+  },
+  {
+    "name": "load-test-sias",
+    "title": "Load-Test: Fan Out N General-Purpose Agents",
+    "prompt": "LOAD TEST — your only goal is to spawn exactly {n} general-purpose agents in parallel and aggregate their results. Do this:\n\n1. Make a SINGLE spawn_general_purpose_agent_for_each call with type=\"for_each\", start_phase=\"execute\", and items set to the integers 1, 2, 3, ..., {n} (every integer from 1 through {n}, inclusive — no skips).\n2. Set output_schema to {\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"integer\"}},\"required\":[\"value\"]}.\n3. Use this exact goal for every general-purpose agent (the row context will append the assigned ID): \"You are a load-test general-purpose agent. Your assigned integer ID is in the row context above. Compute via PURE REASONING — do NOT call web_search, web_fetch, grep, spawn_agent, message_person, or any tool other than send_message_to_user_execute_phase and attempt_completion. Compute: value = (ID * ID) + (ID * 3) + 7. (a) Call send_message_to_user_execute_phase with the arithmetic shown (e.g. 'ID=7: 7*7 + 7*3 + 7 = 49 + 21 + 7 = 77'). (b) Then call attempt_completion with {\\\"value\\\": <integer>}.\"\n4. Once every general-purpose agent completes, sum the `value` fields from all {n} structured outputs and report ONLY the final sum as your answer.\n\nDo NOT use spawn_explore_agent, browser, code, or any other tool path — only spawn_general_purpose_agent_for_each + send_message_to_user_execute_phase + attempt_completion.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_general_purpose_agent_for_each"
+    ],
+    "tags": [
+      "load-test"
+    ],
+    "price_limit_cents": 300,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "sub_agent_count": 30,
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "No external fixture required; the harness substitutes {n} and {expected_sum} and evaluates deterministic orchestration behavior."
+    },
+    "evaluators": [
+      {
+        "id": "primary",
+        "method": "static_check",
+        "criteria": [
+          "Final answer contains the expected deterministic sum",
+          "At least n sub-agents are created",
+          "No browser or code sandbox detour is used"
+        ],
+        "checks": [
+          {
+            "type": "string_match",
+            "expected_strings": [
+              "{expected_sum}"
+            ]
+          }
+        ]
+      }
+    ],
+    "source": [
+      "long-horizon:load-test-mass-agent-arithmetic"
+    ],
+    "bench": "pipeline-e2e",
+    "status": "retired"
   },
   {
     "name": "build-boxing-payment",
@@ -1477,58 +2071,6 @@
     "bench": "rose-bench"
   },
   {
-    "name": "load-test-sias",
-    "title": "Load-Test: Fan Out N General-Purpose Agents",
-    "prompt": "LOAD TEST — your only goal is to spawn exactly {n} general-purpose agents in parallel and aggregate their results. Do this:\n\n1. Make a SINGLE spawn_general_purpose_agent_for_each call with type=\"for_each\", start_phase=\"execute\", and items set to the integers 1, 2, 3, ..., {n} (every integer from 1 through {n}, inclusive — no skips).\n2. Set output_schema to {\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"integer\"}},\"required\":[\"value\"]}.\n3. Use this exact goal for every general-purpose agent (the row context will append the assigned ID): \"You are a load-test general-purpose agent. Your assigned integer ID is in the row context above. Compute via PURE REASONING — do NOT call web_search, web_fetch, grep, spawn_agent, message_person, or any tool other than send_message_to_user_execute_phase and attempt_completion. Compute: value = (ID * ID) + (ID * 3) + 7. (a) Call send_message_to_user_execute_phase with the arithmetic shown (e.g. 'ID=7: 7*7 + 7*3 + 7 = 49 + 21 + 7 = 77'). (b) Then call attempt_completion with {\\\"value\\\": <integer>}.\"\n4. Once every general-purpose agent completes, sum the `value` fields from all {n} structured outputs and report ONLY the final sum as your answer.\n\nDo NOT use spawn_explore_agent, browser, code, or any other tool path — only spawn_general_purpose_agent_for_each + send_message_to_user_execute_phase + attempt_completion.",
-    "timeout_seconds": 300,
-    "is_chat_mode": false,
-    "expected_tools": [
-      "spawn_general_purpose_agent_for_each"
-    ],
-    "tags": [
-      "load-test"
-    ],
-    "price_limit_cents": 300,
-    "requires_browser_agent": false,
-    "requires_claude_code": false,
-    "attachment": null,
-    "approval_handling": null,
-    "start_phase": "plan",
-    "sub_agent_count": 30,
-    "environment": {
-      "mode": "synthetic",
-      "db_fixtures": [],
-      "base_images": [],
-      "services": [],
-      "secrets": [],
-      "live_targets": [],
-      "context_notes": "No external fixture required; the harness substitutes {n} and {expected_sum} and evaluates deterministic orchestration behavior."
-    },
-    "evaluators": [
-      {
-        "id": "primary",
-        "method": "static_check",
-        "criteria": [
-          "Final answer contains the expected deterministic sum",
-          "At least n sub-agents are created",
-          "No browser or code sandbox detour is used"
-        ],
-        "checks": [
-          {
-            "type": "string_match",
-            "expected_strings": [
-              "{expected_sum}"
-            ]
-          }
-        ]
-      }
-    ],
-    "source": [
-      "long-horizon:load-test-mass-agent-arithmetic"
-    ],
-    "bench": "pipeline-e2e"
-  },
-  {
     "name": "calendly-schedule-meeting",
     "title": "Create Calendly Link & Send Meeting Invite",
     "prompt": "Schedule a meeting with Andy Prevalsky (andyprevalsky@yahoo.com). Go to Calendly (log in with a@roselabs.ai, which is aliased to andy@roselabs.ai), create a new 30-minute one-on-one event type, and send the scheduling link to Andy via email at andyprevalsky@yahoo.com. The email should be short and friendly, just letting him know you'd like to set up a quick 30-min chat and including the Calendly link so he can pick a time that works. IMPORTANT: Don't waste time trying to rename the event — the default name is fine. Focus on setting it to 30 minutes, saving it, copying the link, and sending the email.",
@@ -1632,56 +2174,6 @@
     "bench": "pipeline-e2e"
   },
   {
-    "name": "spawn-depth-debug",
-    "title": "Recursive Spawn Depth Debug",
-    "description": "Tests recursive general-purpose agent spawning with depth parameter",
-    "prompt": "Spawn 2 general-purpose agents with the same goal as yourself, this is for debugging of the systems max depth parameter. Current Depth Left == 2, when spawning a general-purpose agent decrease this count by 1. If Depth Left == 0, then output a random integer between 0 - 10. If Depth > 0 then output the multiplication of each general-purpose agent you spawned.",
-    "timeout_seconds": 300,
-    "is_chat_mode": false,
-    "expected_tools": [
-      "spawn_general_purpose_agent"
-    ],
-    "tags": [
-      "mass-agent"
-    ],
-    "price_limit_cents": 100,
-    "requires_browser_agent": false,
-    "requires_claude_code": false,
-    "attachment": null,
-    "approval_handling": null,
-    "start_phase": "plan",
-    "status": "incomplete",
-    "source": [
-      "test-prompts:Test Spawn General-Purpose Agents"
-    ],
-    "bench": "pipeline-e2e"
-  },
-  {
-    "name": "dag-executor-plan-mode",
-    "title": "DAG Executor Plan Mode",
-    "description": "Tests DAG executor with plan mode (no web searches during planning)",
-    "prompt": "Do 3 parallel web_searches to get data for the best of each of these items\n1. Cities to live in in your 20s\n2. place to vacation\n3. cheapest cost of living in NA\n\nno questions ask\nstart in plan mode\ndont use any websearches in plan mode\nno general-purpose agents",
-    "timeout_seconds": 300,
-    "is_chat_mode": false,
-    "expected_tools": [
-      "spawn_agent"
-    ],
-    "tags": [
-      "eval"
-    ],
-    "price_limit_cents": 100,
-    "requires_browser_agent": false,
-    "requires_claude_code": false,
-    "attachment": null,
-    "approval_handling": null,
-    "start_phase": "plan",
-    "status": "incomplete",
-    "source": [
-      "test-prompts:Test DAG Executor"
-    ],
-    "bench": "pipeline-e2e"
-  },
-  {
     "name": "browser-file-upload-tinypng",
     "title": "Browser File Upload TinyPNG",
     "description": "Tests browser agent file upload with TinyPNG",
@@ -1701,7 +2193,7 @@
     "attachment": "rs.jpeg",
     "approval_handling": null,
     "start_phase": "execute",
-    "status": "incomplete",
+    "status": "ready",
     "source": [
       "test-prompts:Test Files in Browser Agent"
     ],
@@ -1709,10 +2201,10 @@
   },
   {
     "name": "wait-for-trigger",
-    "title": "Wait For Price Trigger",
-    "description": "Tests wait_for with price trigger and phone call action",
-    "prompt": "Once bitcoin reaches 72K, call my phone number and tell me.",
-    "timeout_seconds": 300,
+    "title": "Call When Bitcoin Hits Immediate Price Trigger",
+    "description": "Tests wait_for with an immediately satisfied Bitcoin price trigger and phone call action",
+    "prompt": "Use wait_for to call my phone number when Bitcoin reaches $10. This price threshold should already be satisfied immediately; once the trigger fires, call me and tell me Bitcoin hit the target.",
+    "timeout_seconds": 600,
     "is_chat_mode": false,
     "expected_tools": [
       "wait_for"
@@ -1727,257 +2219,16 @@
     "attachment": null,
     "approval_handling": null,
     "start_phase": "execute",
-    "status": "incomplete",
+    "status": "ready",
     "source": [
-      "test-prompts:Test Wait For"
-    ],
-    "bench": "pipeline-e2e"
-  },
-  {
-    "name": "smoke-backend-claude-code",
-    "title": "Backend Smoke: Claude Code E2B Session",
-    "description": "Backend blackbox smoke: real Claude Code session in an E2B sandbox writes a sentinel file",
-    "prompt": "External vitest smoke — not an agent goal. Runs back-end/src/tests/blackbox/claude-code.blackbox.ts (testSmoke_claudeCodeAnswersQuestion): creates a real Claude Code E2B session, asks it to write /home/user/output/claude-smoke.txt with CLAUDE_E2B_OK, asserts the websocket stream and sandbox file contents.",
-    "timeout_seconds": 300,
-    "is_chat_mode": false,
-    "expected_tools": [],
-    "tags": [
-      "smoke",
-      "claude-code"
-    ],
-    "price_limit_cents": 100,
-    "requires_browser_agent": false,
-    "requires_claude_code": true,
-    "attachment": null,
-    "approval_handling": null,
-    "start_phase": null,
-    "runner": "vitest",
-    "evaluators": [
-      {
-        "id": "primary",
-        "method": "static_check",
-        "criteria": [
-          "Session creation returns ws_url, task_id, sandbox_id",
-          "Stream contains CLAUDE_E2B_DONE within 240s",
-          "Sandbox file /home/user/output/claude-smoke.txt contains exactly CLAUDE_E2B_OK"
-        ],
-        "checks": [
-          {
-            "type": "vitest",
-            "file": "back-end/src/tests/blackbox/claude-code.blackbox.ts",
-            "test": "testSmoke_claudeCodeAnswersQuestion"
-          }
-        ]
-      }
-    ],
-    "source": [
-      "smoke:back-end/src/tests/blackbox/claude-code.blackbox.ts:testSmoke_claudeCodeAnswersQuestion"
-    ],
-    "bench": "pipeline-e2e"
-  },
-  {
-    "name": "smoke-backend-codex-code",
-    "title": "Backend Smoke: Codex E2B Session",
-    "description": "Backend blackbox smoke: real Codex session in an E2B sandbox writes a sentinel file",
-    "prompt": "External vitest smoke — not an agent goal. Runs back-end/src/tests/blackbox/codex-code.blackbox.ts (testSmoke_codexCompletesE2bTask): creates a real Codex E2B session, asks it to write /home/user/output/codex-smoke.txt with CODEX_E2B_OK, asserts the websocket stream and sandbox file contents.",
-    "timeout_seconds": 300,
-    "is_chat_mode": false,
-    "expected_tools": [],
-    "tags": [
-      "smoke"
-    ],
-    "price_limit_cents": 100,
-    "requires_browser_agent": false,
-    "requires_claude_code": false,
-    "attachment": null,
-    "approval_handling": null,
-    "start_phase": null,
-    "runner": "vitest",
-    "evaluators": [
-      {
-        "id": "primary",
-        "method": "static_check",
-        "criteria": [
-          "Session creation returns ws_url, task_id, sandbox_id",
-          "Stream contains CODEX_E2B_DONE within 240s",
-          "Sandbox file /home/user/output/codex-smoke.txt contains exactly CODEX_E2B_OK"
-        ],
-        "checks": [
-          {
-            "type": "vitest",
-            "file": "back-end/src/tests/blackbox/codex-code.blackbox.ts",
-            "test": "testSmoke_codexCompletesE2bTask"
-          }
-        ]
-      }
-    ],
-    "source": [
-      "smoke:back-end/src/tests/blackbox/codex-code.blackbox.ts:testSmoke_codexCompletesE2bTask"
-    ],
-    "bench": "pipeline-e2e"
-  },
-  {
-    "name": "smoke-backend-sms-supervisor",
-    "title": "Backend Smoke: SMS Supervisor Loop",
-    "description": "Backend blackbox smoke: inbound SMS drives the supervisor loop to send the fixture response",
-    "prompt": "External vitest smoke — not an agent goal. Runs back-end/src/tests/blackbox/sms-supervisor.blackbox.ts (testSmoke_knownPhoneSupervisorSendsSmsResponse): posts an inbound SMS for a provisioned user, asserts the supervisor loop sends the configured outbound reply and session state advances.",
-    "timeout_seconds": 300,
-    "is_chat_mode": false,
-    "expected_tools": [],
-    "tags": [
-      "smoke"
-    ],
-    "price_limit_cents": 100,
-    "requires_browser_agent": false,
-    "requires_claude_code": false,
-    "attachment": null,
-    "approval_handling": null,
-    "start_phase": null,
-    "runner": "vitest",
-    "evaluators": [
-      {
-        "id": "primary",
-        "method": "static_check",
-        "criteria": [
-          "POST /api/sms/inbound returns 200",
-          "Outbound Surge SMS call captured with the fixture reply",
-          "SmsSession records both inbound and assistant messages"
-        ],
-        "checks": [
-          {
-            "type": "vitest",
-            "file": "back-end/src/tests/blackbox/sms-supervisor.blackbox.ts",
-            "test": "testSmoke_knownPhoneSupervisorSendsSmsResponse"
-          }
-        ]
-      }
-    ],
-    "source": [
-      "smoke:back-end/src/tests/blackbox/sms-supervisor.blackbox.ts:testSmoke_knownPhoneSupervisorSendsSmsResponse"
-    ],
-    "bench": "pipeline-e2e"
-  },
-  {
-    "name": "eval-sms-supervisor-grep-over-ask",
-    "title": "SMS Supervisor: greps user data instead of asking",
-    "description": "Real-LLM behavior eval: a factual question about a contact is answered from the user's own data via the supervisor's grep tool (source=network, seeded Person DB fixture) instead of texting a clarifying question back. Requires BLACKBOX_SMS_SUPERVISOR_REAL_LLM=1.",
-    "prompt": "External vitest eval — not an agent goal. Runs back-end/src/tests/blackbox/sms-supervisor.blackbox.ts (testRealLlm_answersContactFactViaGrep): seeds a Person row (name + email) as the DB fixture, sends inbound SMS 'What is Jane <LastName>'s email address?' with the real-LLM bypass, asserts the outbound SMS contains the seeded email.",
-    "timeout_seconds": 300,
-    "is_chat_mode": false,
-    "expected_tools": [],
-    "tags": [
-      "eval",
-      "external",
-      "real-llm"
-    ],
-    "price_limit_cents": 100,
-    "requires_browser_agent": false,
-    "requires_claude_code": false,
-    "attachment": null,
-    "approval_handling": null,
-    "start_phase": null,
-    "runner": "vitest",
-    "environment": {
-      "mode": "hybrid",
-      "db_fixtures": [
-        "Person row seeded by the test: firstName Jane, unique lastName, unique email"
-      ],
-      "base_images": [],
-      "services": [
-        "back-end blackbox harness (isolated backend + local Postgres)"
-      ],
-      "secrets": [
-        "BLACKBOX_SMS_SUPERVISOR_REAL_LLM=1"
-      ],
-      "live_targets": [
-        "Rose completions (claudeAuth/waterfall)"
-      ],
-      "context_notes": "Acceptance eval for the supervisor grep tool + search-first prompt rule."
-    },
-    "evaluators": [
-      {
-        "id": "primary",
-        "method": "static_check",
-        "criteria": [
-          "POST /api/sms/inbound returns 200",
-          "Outbound Surge SMS contains the seeded contact email",
-          "No clarifying question sent instead of the answer"
-        ],
-        "checks": [
-          {
-            "type": "vitest",
-            "file": "back-end/src/tests/blackbox/sms-supervisor.blackbox.ts",
-            "test": "testRealLlm_answersContactFactViaGrep"
-          }
-        ]
-      }
-    ],
-    "source": [
-      "eval:back-end/src/tests/blackbox/sms-supervisor.behavior.ts:testRealLlm_answersContactFactViaGrep"
-    ],
-    "bench": "pipeline-e2e"
-  },
-  {
-    "name": "eval-sms-supervisor-purchase-spawns-agent",
-    "title": "SMS Supervisor: clear purchase request spawns agent",
-    "description": "Real-LLM behavior eval: 'get me the best lip balm from amazon' spawns a superintelligence agent (start_new_agent) with a clear purchase goal instead of replying with a clarifying question. Requires BLACKBOX_SMS_SUPERVISOR_REAL_LLM=1.",
-    "prompt": "External vitest eval — not an agent goal. Runs back-end/src/tests/blackbox/sms-supervisor.blackbox.ts (testRealLlm_purchaseRequestSpawnsAgent): sends inbound SMS 'get me the best lip balm from amazon' with the real-LLM bypass, asserts an Agent row is created whose goal mentions lip balm and a purchase intent (amazon/purchase/buy/order).",
-    "timeout_seconds": 300,
-    "is_chat_mode": false,
-    "expected_tools": [],
-    "tags": [
-      "eval",
-      "external",
-      "real-llm"
-    ],
-    "price_limit_cents": 100,
-    "requires_browser_agent": false,
-    "requires_claude_code": false,
-    "attachment": null,
-    "approval_handling": null,
-    "start_phase": null,
-    "runner": "vitest",
-    "environment": {
-      "mode": "live",
-      "db_fixtures": [],
-      "base_images": [],
-      "services": [
-        "back-end blackbox harness (isolated backend + local Postgres)"
-      ],
-      "secrets": [
-        "BLACKBOX_SMS_SUPERVISOR_REAL_LLM=1"
-      ],
-      "live_targets": [
-        "Rose completions (claudeAuth/waterfall)"
-      ],
-      "context_notes": "Acceptance eval for the ported bias-to-action personality block in the supervisor prompt."
-    },
-    "evaluators": [
-      {
-        "id": "primary",
-        "method": "static_check",
-        "criteria": [
-          "POST /api/sms/inbound returns 200",
-          "Agent row created via start_new_agent commit",
-          "Agent goal mentions lip balm and a purchase intent"
-        ],
-        "checks": [
-          {
-            "type": "vitest",
-            "file": "back-end/src/tests/blackbox/sms-supervisor.blackbox.ts",
-            "test": "testRealLlm_purchaseRequestSpawnsAgent"
-          }
-        ]
-      }
-    ],
-    "source": [
-      "eval:back-end/src/tests/blackbox/sms-supervisor.behavior.ts:testRealLlm_purchaseRequestSpawnsAgent"
+      "test-prompts:Test Wait For",
+      "user-label:daily-immediate-bitcoin-trigger"
     ],
     "bench": "pipeline-e2e"
   },
   {
     "name": "phone-call-client-intake",
-    "title": "Phone Call — Client Intake (Name + Address)",
+    "title": "Call Client To Collect Intake Details",
     "prompt": "Call our new client at {callee_phone_number} exactly once and collect their full name and complete mailing address for our records. Do not call back or place a second phone call; if the single call fails, report that failure. When the call is done, report the exact full name and full mailing address back to me.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
@@ -2047,14 +2298,22 @@
       "provided_mailing_address": "4821 Maplewood Drive, Austin, Texas 78731"
     },
     "description": "Real outbound phone call to a controlled AI callee that provides pinned client name and address.",
+    "group": "Daily",
+    "human_time": "10min",
+    "world_surface": "live",
+    "fast_cache": "off",
+    "anti_bot": "no",
+    "label_eval": "Root completes; calls the controlled callee exactly once; collects full name and complete mailing address; final answer reports the exact collected facts.",
+    "label_notes": "Phone harness, approval, and Vapi callee drift check.",
     "bench": "pipeline-e2e",
     "source": [
-      "phone-benchmark:client-intake"
+      "phone-benchmark:client-intake",
+      "user-label:daily-phone-client-intake"
     ]
   },
   {
     "name": "phone-call-payment",
-    "title": "Phone Call — Complete Payment Over the Phone",
+    "title": "Complete Payment Over Phone With Florist",
     "prompt": "Call Rose Test Florist at {callee_phone_number} exactly once and order a dozen red roses with delivery. Do not call back or place a second phone call; if the single call fails, report that failure. Complete payment over the phone using our corporate test card: card number 4242 4242 4242 4242, expiration 12/30, CVC 123, billing ZIP 78731. Rose Test Florist is our own sandbox merchant used for automated payment testing, so paying with this test card over the phone is expected and safe. Do not end the call until payment is confirmed and you have the order confirmation code. Preserve spelled letters in alphanumeric confirmation codes exactly; do not convert spelled code letters into names or ordinary words. Report the confirmation code and the total charged back to me.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
@@ -2156,9 +2415,212 @@
       "total_charged_usd": "34.20"
     },
     "description": "Real outbound phone call to a controlled sandbox merchant AI callee that completes a Stripe test-card payment.",
+    "group": "Daily",
+    "human_time": "15min",
+    "world_surface": "live",
+    "fast_cache": "off",
+    "anti_bot": "no",
+    "label_eval": "Root completes; calls controlled merchant exactly once; orders dozen red roses; provides test card details; payment tool succeeds; final answer reports ROSE-4471 and $34.20.",
+    "label_notes": "Phone and payment-tool harness drift check.",
     "bench": "pipeline-e2e",
     "source": [
-      "phone-benchmark:payment"
+      "phone-benchmark:payment",
+      "user-label:daily-phone-payment"
+    ]
+  },
+  {
+    "name": "message-person-agent-sms",
+    "tags": [
+      "approval"
+    ],
+    "bench": "pipeline-e2e",
+    "group": "Daily",
+    "title": "Send Immediately From Agent Phone",
+    "prompt": "Send a short, friendly text to 972-977-7432 saying this is the Rose agent SMS send bench. Use the agent_sms channel from your own agent phone. Do not use the user's iMessage relay and do not use email.",
+    "source": [
+      "regression:5851f75f-9c0b-4287-ba50-5fb0877aac9d",
+      "blackbox:agents/tests/blackbox/message_person.blackbox.py",
+      "blackbox:back-end/src/tests/blackbox/agent-phone.blackbox.ts",
+      "unit:back-end/src/tests/unit/agentphone-provider.test.ts"
+    ],
+    "attachment": null,
+    "evaluators": [
+      {
+        "id": "immediate_agent_sms_send",
+        "checks": [
+          {
+            "type": "message_person_agent_sms_send"
+          }
+        ],
+        "method": "static_check",
+        "criteria": [
+          "Exactly one message_person call is made",
+          "The selected transport is agent_sms",
+          "AgentPhone accepts the outbound message immediately",
+          "The terminal tool event contains provider=agentphone, provider_channel, status=sent, and message_id",
+          "No iMessage queue_id is present"
+        ]
+      }
+    ],
+    "description": "Live regression bench proving agent_sms sends immediately through AgentPhone and never enters the user's iMessage queue",
+    "environment": {
+      "mode": "live",
+      "secrets": [
+        "AGENTPHONE_API_KEY"
+      ],
+      "services": [
+        "message_person",
+        "AgentPhone outbound messages"
+      ],
+      "base_images": [],
+      "db_fixtures": [],
+      "live_targets": [
+        "AgentPhone POST /v1/messages"
+      ],
+      "context_notes": "The evaluator requires a FINISHED agent_sms receipt with provider=agentphone, provider_channel, and message_id, and rejects any iMessage queue_id. AgentPhone acceptance is immediate but does not guarantee recipient-device delivery."
+    },
+    "start_phase": "execute",
+    "is_chat_mode": false,
+    "expected_tools": [
+      "message_person"
+    ],
+    "timeout_seconds": 180,
+    "tool_count_scope": "root",
+    "approval_handling": "auto_approve",
+    "price_limit_cents": 50,
+    "expected_tool_counts": {
+      "message_person": 1
+    },
+    "requires_claude_code": false,
+    "requires_browser_agent": false
+  },
+  {
+    "name": "browser-agent-amazon-passkey",
+    "tags": [
+      "browser",
+      "auth"
+    ],
+    "bench": "rose-bench",
+    "title": "Amazon Kernel Passkey Authentication",
+    "prompt": "Open https://www.amazon.com and first confirm the page visibly shows the signed-out 'Hello, sign in' state. Then sign in using the saved Amazon passkey. Do not use a password, OTP, cookie/session authentication, or ask me to sign in. Once Amazon shows an authenticated account state, stop and report success.",
+    "source": [
+      "commit:8923d6e87",
+      "live-amazon:kernel-passkey"
+    ],
+    "attachment": null,
+    "evaluators": [
+      {
+        "id": "kernel-passkey-authentication",
+        "checks": [
+          {
+            "type": "browser_provider",
+            "value": "kernel"
+          },
+          {
+            "type": "browser_session_metadata_values",
+            "value": {
+              "auth_source": "none",
+              "cookies_count": 0,
+              "profile_source": "new_user_persistent",
+              "cookies_injected": false,
+              "permission_grant_count": 0,
+              "indexed_db_origin_count": 0,
+              "cache_storage_origin_count": 0,
+              "local_storage_origin_count": 0
+            }
+          },
+          {
+            "type": "message_before_credential_contains",
+            "value": [
+              "Hello, sign in"
+            ],
+            "credential_kind": "passkey"
+          },
+          {
+            "type": "credential_ref_kind",
+            "value": "passkey"
+          },
+          {
+            "type": "message_after_credential_contains",
+            "value": [
+              "Hello, Andy"
+            ],
+            "credential_kind": "passkey"
+          },
+          {
+            "type": "forbidden_credential_ref_kinds",
+            "value": [
+              "password",
+              "email_otp",
+              "sms_otp"
+            ]
+          }
+        ],
+        "method": "static_check",
+        "criteria": [
+          "Browser session metadata identifies Kernel as the provider",
+          "Browser session metadata proves a new profile with zero cookie or origin-state injection",
+          "The transcript shows Amazon signed out before passkey use",
+          "A passkey credential_ref is persisted before task completion",
+          "Amazon shows an authenticated account state",
+          "The transcript uses neither password nor OTP"
+        ]
+      }
+    ],
+    "description": "Live Amazon sign-in from a fresh Kernel profile using only the synced passkey",
+    "environment": {
+      "mode": "live",
+      "secrets": [
+        "amazon_passkey"
+      ],
+      "services": [
+        "amazon.com",
+        "kernel"
+      ],
+      "base_images": [],
+      "db_fixtures": [],
+      "live_targets": [
+        "https://www.amazon.com"
+      ],
+      "context_notes": "compute_tokens refreshes only LLM credentials. amazon_passkey syncs only the live passkey, deletes Amazon cookies and origin storage, disables saved-session/password alternatives, and detaches the local Kernel profile mapping so the run proves CDP passkey injection from a fresh profile.",
+      "live_fixtures": [
+        "compute_tokens",
+        "amazon_passkey"
+      ]
+    },
+    "start_phase": "execute",
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "timeout_seconds": 300,
+    "approval_handling": null,
+    "price_limit_cents": 200,
+    "requires_claude_code": false,
+    "requires_browser_agent": true,
+    "expected_browser_provider": "kernel",
+    "expected_credential_ref_kind": "passkey",
+    "forbidden_credential_ref_kinds": [
+      "password",
+      "email_otp",
+      "sms_otp"
+    ],
+    "success_on_browser_auth_evidence": true,
+    "expected_browser_session_metadata_values": {
+      "auth_source": "none",
+      "cookies_count": 0,
+      "profile_source": "new_user_persistent",
+      "cookies_injected": false,
+      "permission_grant_count": 0,
+      "indexed_db_origin_count": 0,
+      "cache_storage_origin_count": 0,
+      "local_storage_origin_count": 0
+    },
+    "expected_pre_credential_message_contains": [
+      "Hello, sign in"
+    ],
+    "expected_post_credential_message_contains": [
+      "Hello, Andy"
     ]
   }
 ]

@@ -1,5 +1,5 @@
 import { createLogger } from './logger';
-import { collectFixture } from './traceArchiveFixture';
+import { collectFixture, collectFixtureSnapshot } from './traceArchiveFixture';
 import {
   type EncryptedArtifactMetadata,
   archiveJson,
@@ -242,34 +242,97 @@ export async function archiveAgentStartFixture(
   return { fixture: result };
 }
 
+type PreparedArchiveTask<TFixture> = {
+  collect: (markSnapshotReady: () => void) => Promise<TFixture>;
+  archive: (fixture: TFixture) => Promise<void>;
+  onError: (error: unknown) => void;
+};
+
+type FixtureOutcome<TFixture> = { ok: true; fixture: TFixture } | { ok: false; error: unknown };
+
+/**
+ * Splits snapshot acquisition (launch-critical) from fixture completion and
+ * archival (post-launch). The outcome promise always resolves, so a failure
+ * after readiness cannot become an unhandled rejection while launch proceeds.
+ */
+export async function prepareAgentStartArchiveTask<TFixture>(
+  task: PreparedArchiveTask<TFixture>
+): Promise<(() => Promise<void>) | null> {
+  let snapshotReady = false;
+  let resolveSnapshotReady: (() => void) | undefined;
+  let rejectSnapshotReady: ((error: unknown) => void) | undefined;
+  const readiness = new Promise<void>((resolve, reject) => {
+    resolveSnapshotReady = resolve;
+    rejectSnapshotReady = reject;
+  });
+  const markSnapshotReady = () => {
+    if (snapshotReady) return;
+    snapshotReady = true;
+    resolveSnapshotReady?.();
+  };
+
+  const fixtureOutcome: Promise<FixtureOutcome<TFixture>> = Promise.resolve()
+    .then(() => task.collect(markSnapshotReady))
+    .then<FixtureOutcome<TFixture>, FixtureOutcome<TFixture>>(
+      (fixture) => {
+        if (!snapshotReady) {
+          const error = new Error('Start fixture collection completed before snapshot readiness');
+          rejectSnapshotReady?.(error);
+          return { ok: false, error };
+        }
+        return { ok: true, fixture };
+      },
+      (error: unknown) => {
+        if (!snapshotReady) rejectSnapshotReady?.(error);
+        return { ok: false, error };
+      }
+    );
+
+  try {
+    await readiness;
+  } catch (error) {
+    task.onError(error);
+    return null;
+  }
+
+  return async () => {
+    const outcome = await fixtureOutcome;
+    if (!outcome.ok) {
+      task.onError(outcome.error);
+      return;
+    }
+    try {
+      await task.archive(outcome.fixture);
+    } catch (error) {
+      task.onError(error);
+    }
+  };
+}
+
 export async function prepareAgentStartArchive(
   agentId: string
 ): Promise<(() => Promise<void>) | null> {
-  try {
-    const fixture = await collectAgentStartFixture({ agentId });
-    return async () => {
-      try {
-        const result = await archiveAgentStartFixture(agentId, fixture);
-        if (result.fixture !== null) {
-          log.info('Trace archive start fixture captured', {
-            agent_id: agentId,
-            ref: result.fixture.ref,
-          });
-        }
-      } catch (error) {
-        log.warn('Trace archive start fixture unavailable', {
-          agent_id: agentId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    };
-  } catch (error) {
+  if (!archiveEnabled()) return null;
+
+  const reportUnavailable = (error: unknown) => {
     log.warn('Trace archive start fixture unavailable', {
       agent_id: agentId,
       error: error instanceof Error ? error.message : String(error),
     });
-    return null;
-  }
+  };
+  return prepareAgentStartArchiveTask({
+    collect: (markSnapshotReady) => collectFixtureSnapshot(agentId, 'start', markSnapshotReady),
+    archive: async (fixture) => {
+      const result = await archiveAgentStartFixture(agentId, fixture);
+      if (result.fixture !== null) {
+        log.info('Trace archive start fixture captured', {
+          agent_id: agentId,
+          ref: result.fixture.ref,
+        });
+      }
+    },
+    onError: reportUnavailable,
+  });
 }
 
 async function waitForActiveFinalize(rootAgentId: string): Promise<void> {

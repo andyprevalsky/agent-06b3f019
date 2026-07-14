@@ -5,6 +5,7 @@
  * POST /api/browser-session/close                    - Close/pause browser session
  * POST /api/browser-session/resume                   - Resume paused browser task
  * GET  /api/browser-session/task/:taskId             - Get task info
+ * POST /api/browser-session/task/:taskId/viewport    - Match remote viewport to live-view pane
  * GET  /api/browser-session/context/:userId          - Get user's browser context
  * GET  /api/browser-session/:sessionId               - Get session info
  * POST /api/browser-session/:sessionId/files         - Upload file to session
@@ -16,7 +17,7 @@ import { type RequestHandler, type Response, Router } from 'express';
 import { type AuthRequest, authenticate } from '../../providers/auth';
 import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { createLogger } from '../../providers/logger';
-import { SteelRateLimitError } from '../../providers/steel';
+import { BrowserProviderRateLimitError } from '../../providers/browser';
 // eslint-disable-next-line no-restricted-imports -- Express file upload middleware, configured per-route
 import multer from 'multer';
 import { asyncHandler } from '../../utils/asyncHandler';
@@ -31,6 +32,7 @@ import {
   uploadFile,
   listFiles,
   injectLocalStorage,
+  resizeBrowserViewport,
   SessionNotFoundError,
   SessionNoUserError,
   SessionNoWsUrlError,
@@ -42,6 +44,7 @@ import {
   resumeSessionSchema,
   injectLocalStorageSchema,
 } from './types';
+import { registerBrowserDataRoutes } from './routes.files';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -52,6 +55,12 @@ const log = createLogger('BrowserSession');
 
 const router = Router();
 const auth = asyncHandler<HybridAuthRequest>(hybridAuth);
+const MAX_VIEWPORT_WIDTH = 4096;
+const MAX_VIEWPORT_HEIGHT = 2160;
+
+function isValidViewportDimension(value: unknown, maximum: number): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= maximum;
+}
 
 /* c8 ignore start -- init, close, resume require Steel SDK; files + inject require Steel/CDP */
 /**
@@ -76,10 +85,13 @@ router.post(
 
       res.json({ success: true, ...result });
     } catch (error) {
-      if (error instanceof SteelRateLimitError) {
-        log.warn('Steel rate limit hit during session init');
+      if (error instanceof BrowserProviderRateLimitError) {
+        log.warn('Browser provider rate limit hit during session init', {
+          provider: error.provider,
+        });
         res.status(429).json({
-          error: 'steel_rate_limit',
+          error: 'browser_provider_rate_limit',
+          provider: error.provider,
           message: 'Browser session rate limit exceeded. Retry after delay.',
         });
         return;
@@ -134,10 +146,13 @@ router.post(
 
       res.json({ success: true, ...result });
     } catch (error) {
-      if (error instanceof SteelRateLimitError) {
-        log.warn('Steel rate limit hit during session resume');
+      if (error instanceof BrowserProviderRateLimitError) {
+        log.warn('Browser provider rate limit hit during session resume', {
+          provider: error.provider,
+        });
         res.status(429).json({
-          error: 'steel_rate_limit',
+          error: 'browser_provider_rate_limit',
+          provider: error.provider,
           message: 'Browser session rate limit exceeded. Retry after delay.',
         });
         return;
@@ -184,6 +199,48 @@ router.get(
       log.error('Failed to get session info', { error: String(error) });
       res.status(500).json({
         error: error instanceof Error ? error.message : 'Failed to get session info',
+      });
+    }
+  })
+);
+
+/**
+ * POST /api/browser-session/task/:taskId/viewport
+ * Resize the provider-owned remote viewport to the rendered live-view pane.
+ */
+router.post(
+  '/task/:taskId/viewport',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res: Response) => {
+    const { taskId } = req.params;
+    const body =
+      typeof req.body === 'object' && req.body !== null
+        ? (req.body as { width?: unknown; height?: unknown })
+        : {};
+    const { width, height } = body;
+    if (
+      !isValidViewportDimension(width, MAX_VIEWPORT_WIDTH) ||
+      !isValidViewportDimension(height, MAX_VIEWPORT_HEIGHT)
+    ) {
+      res.status(400).json({ error: 'Invalid viewport dimensions' });
+      return;
+    }
+
+    try {
+      const result = await resizeBrowserViewport(
+        taskId,
+        { width, height },
+        req.isInternal === true ? undefined : req.userId
+      );
+      res.json({ success: true, ...result });
+    } catch (error) {
+      if (error instanceof SessionNotFoundError) {
+        res.status(404).json({ error: error.message });
+        return;
+      }
+      log.error('Failed to resize browser viewport', { error: String(error), taskId });
+      res.status(500).json({
+        error: error instanceof Error ? error.message : 'Failed to resize browser viewport',
       });
     }
   })
@@ -300,6 +357,8 @@ router.get(
     }
   })
 );
+
+registerBrowserDataRoutes(router);
 
 /**
  * POST /api/browser-session/:sessionId/inject-localStorage

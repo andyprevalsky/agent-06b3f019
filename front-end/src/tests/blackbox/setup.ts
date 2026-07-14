@@ -4,8 +4,13 @@
  */
 import { beforeAll, afterEach, afterAll } from 'vitest';
 import '@testing-library/jest-dom/vitest';
+import { configure } from '@testing-library/dom';
 import { server } from './msw/server';
 import { clearCaptures, installCapture } from './msw/capture';
+
+// Allow async UI transitions to settle under full coverage instrumentation,
+// while retaining a finite deadline for missing elements and stuck effects.
+configure({ asyncUtilTimeout: 5_000 });
 
 class MemoryStorage implements Storage {
   private readonly store = new Map<string, string>();
@@ -101,6 +106,8 @@ if (!globalThis.visualViewport) {
 }
 
 class MockWebSocket extends EventTarget {
+  private static readonly instances = new Set<MockWebSocket>();
+
   static readonly CONNECTING = 0;
   static readonly OPEN = 1;
   static readonly CLOSING = 2;
@@ -120,31 +127,103 @@ class MockWebSocket extends EventTarget {
   onopen: ((event: Event) => void) | null = null;
   protocol = '';
   readyState = MockWebSocket.CONNECTING;
+  private readonly pendingTimeouts = new Set<ReturnType<typeof setTimeout>>();
+
+  static disposeAll(): void {
+    for (const socket of MockWebSocket.instances) socket.dispose();
+    MockWebSocket.instances.clear();
+  }
 
   constructor(
     readonly url: string | URL,
     protocols?: string | string[],
   ) {
     super();
+    MockWebSocket.instances.add(this);
     if (Array.isArray(protocols)) this.protocol = protocols[0] ?? '';
     else this.protocol = protocols ?? '';
-    setTimeout(() => {
+    this.schedule(() => {
       this.readyState = MockWebSocket.OPEN;
       const event = new Event('open');
       this.onopen?.(event);
       this.dispatchEvent(event);
-    }, 0);
+    });
   }
 
   close(): void {
     if (this.readyState === MockWebSocket.CLOSED) return;
+    this.cancelPendingTimeouts();
     this.readyState = MockWebSocket.CLOSED;
     const event = new CloseEvent('close');
     this.onclose?.(event);
     this.dispatchEvent(event);
+    MockWebSocket.instances.delete(this);
   }
 
-  send(): void {}
+  send(data: string | ArrayBufferLike | Blob | ArrayBufferView): void {
+    if (typeof data !== 'string') return;
+
+    let frame: unknown;
+    try {
+      frame = JSON.parse(data);
+    } catch {
+      return;
+    }
+    if (!Array.isArray(frame) || frame.length !== 5) return;
+
+    const [joinRef, ref, topic, event] = frame as [
+      string | null,
+      string | null,
+      string,
+      string,
+      unknown,
+    ];
+    if (
+      (event !== 'phx_join' &&
+        event !== 'phx_leave' &&
+        event !== 'heartbeat' &&
+        event !== 'access_token') ||
+      ref === null
+    ) {
+      return;
+    }
+
+    const reply = JSON.stringify([
+      joinRef,
+      ref,
+      topic,
+      'phx_reply',
+      { status: 'ok', response: {} },
+    ]);
+    this.schedule(() => {
+      if (this.readyState !== MockWebSocket.OPEN) return;
+      const message = new MessageEvent('message', { data: reply });
+      this.onmessage?.(message);
+      this.dispatchEvent(message);
+    });
+  }
+
+  private schedule(callback: () => void): void {
+    const timeout = setTimeout(() => {
+      this.pendingTimeouts.delete(timeout);
+      callback();
+    }, 0);
+    this.pendingTimeouts.add(timeout);
+  }
+
+  private cancelPendingTimeouts(): void {
+    for (const timeout of this.pendingTimeouts) clearTimeout(timeout);
+    this.pendingTimeouts.clear();
+  }
+
+  private dispose(): void {
+    this.cancelPendingTimeouts();
+    this.readyState = MockWebSocket.CLOSED;
+    this.onclose = null;
+    this.onerror = null;
+    this.onmessage = null;
+    this.onopen = null;
+  }
 }
 
 Object.defineProperty(window, 'WebSocket', {
@@ -208,6 +287,7 @@ beforeAll(() => {
 
 // Reset handlers and clear captures between tests
 afterEach(() => {
+  MockWebSocket.disposeAll();
   server.resetHandlers();
   clearCaptures();
 });

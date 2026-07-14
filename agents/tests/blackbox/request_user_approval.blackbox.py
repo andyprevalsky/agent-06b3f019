@@ -148,9 +148,10 @@ async def test_manager_singleton():
 class _FakeWFModule:
     """Stand-in for temporalio.workflow used by service."""
 
-    def __init__(self, activity_results=None, wait_condition_sets_context=None):
+    def __init__(self, activity_results=None, wait_condition_sets_context=None, patched=True):
         self._activity_results = activity_results or {}
         self._wait_sets_context = wait_condition_sets_context  # callable to mutate wf
+        self._patched = patched
         self.logger = type("L", (), {"info": lambda *a, **kw: None, "error": lambda *a, **kw: None})()
         self.activity_calls = []
 
@@ -159,6 +160,9 @@ class _FakeWFModule:
 
     def uuid4(self):
         return "tool-call-uuid"
+
+    def patched(self, patch_id):
+        return self._patched
 
     async def execute_activity(self, fn, args=None, **kwargs):
         name = getattr(fn, "__name__", "?")
@@ -366,12 +370,11 @@ async def test_direct_rejection_raises_user_rejected():
 
 
 async def test_direct_approval_returns_response_text():
-    """Successful approval returns dict with response text."""
+    """Approval text comes from the request-scoped signal, as it does in production."""
     from domains.request_user_approval.service import request_user_approval_direct
 
     wf = _WFInstance()
-    wf._signal_responses["req-q"] = "ok"
-    wf.context.append({"role": "USER", "text": "Go ahead"})
+    wf._signal_responses["req-q"] = "its 1:45pm local time"
 
     fake = _FakeWFModule(
         activity_results={"create_approval_request_activity": "req-q"},
@@ -386,14 +389,38 @@ async def test_direct_approval_returns_response_text():
     finally:
         restore()
 
-    assert result["response"] == "Go ahead"
+    assert result["response"] == "its 1:45pm local time"
     assert result["question"] == "Send?"
     assert result["attention_request_id"] == "req-q"
     post = next(ev for ev, _, _ in wf.handled_events if ev.status.name == "FINISHED")
     assert "Approval request:" in post.message
     assert "Send?" in post.message
     assert "User response:" in post.message
-    assert "Go ahead" in post.message
+    assert "its 1:45pm local time" in post.message
+
+
+async def test_direct_approval_replays_legacy_message_poll_path():
+    """Pre-patch workflow histories retain their original poll activity sequence."""
+    from domains.request_user_approval.service import request_user_approval_direct
+
+    wf = _WFInstance()
+    wf._signal_responses["req-legacy"] = "ok"
+    wf.context.append({"role": "USER", "text": "Go ahead"})
+    fake = _FakeWFModule(
+        activity_results={"create_approval_request_activity": "req-legacy"},
+        patched=False,
+    )
+    restore = _patch_service_workflow(fake)
+    try:
+        result = await request_user_approval_direct(
+            workflow_instance=wf,
+            question="Send?",
+            metadata={"foo": "bar"},
+        )
+    finally:
+        restore()
+
+    assert result["response"] == "Go ahead"
 
 
 async def test_direct_create_failure_propagates():
@@ -547,6 +574,7 @@ async def run_all_tests():
     await r.record_async("manager_multi_user_msgs", test_manager_multiple_user_messages_collected)
     await r.record_async("direct_rejection", test_direct_rejection_raises_user_rejected)
     await r.record_async("direct_approval", test_direct_approval_returns_response_text)
+    await r.record_async("direct_approval_legacy_replay", test_direct_approval_replays_legacy_message_poll_path)
     await r.record_async("direct_create_fail", test_direct_create_failure_propagates)
     await r.record_async("direct_sms_notify", test_direct_sms_source_attempts_sms_notify)
     await r.record_async("direct_attention", test_direct_attention_returns_without_waiting_and_emits_attention_metadata)

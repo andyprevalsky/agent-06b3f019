@@ -6,6 +6,7 @@ prompt construction, and usage calculation.
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -14,9 +15,9 @@ from urllib.parse import urlparse
 import structlog
 
 from browser_tools.schemas import AVAILABLE_ACTIONS
-from domains.spawn_browser_agent_v3.config import STEEL_COST_CENTS_PER_MS
+from domains.spawn_browser_agent_v3.config import KERNEL_COST_CENTS_PER_MS, STEEL_COST_CENTS_PER_MS
 from domains.spawn_browser_agent_v3.repo import (
-    download_file_from_steel,
+    download_session_file,
     list_session_files,
 )
 from providers.rose.browser_use import build_browser_use_system_prompt
@@ -53,11 +54,7 @@ def select_auth_assistance_current_url(current_url: str, visited_urls: List[str]
             continue
         if not candidate.query:
             continue
-        if (
-            candidate.scheme == current.scheme
-            and candidate.netloc == current.netloc
-            and candidate.path == current.path
-        ):
+        if candidate.scheme == current.scheme and candidate.netloc == current.netloc and candidate.path == current.path:
             return candidate_url
 
     return current_url
@@ -306,16 +303,16 @@ def append_completion_evidence(
 async def extract_session_files(
     session_id: str, user_id: str, config: Any, exclude_paths: Optional[List[str]] = None
 ) -> List[Dict[str, Any]]:
-    """Extract all files from a Steel browser session.
+    """Extract all files from a browser session.
 
-    1. List files in session (direct Steel API call)
-    2. Download each file from Steel (direct Steel API call)
+    1. List files through the provider-neutral backend
+    2. Download each file through the provider-neutral backend
     3. Upload to Supabase storage (direct Supabase API call)
     4. Return list of FilePointer dicts
     """
     from helpers.attachments import upload_to_storage
 
-    session_files = await list_session_files(session_id)
+    session_files = await list_session_files(config, session_id)
     if not session_files:
         logger.info("No files to extract from session", session_id=session_id)
         return []
@@ -338,7 +335,7 @@ async def extract_session_files(
 
         logger.info(f"[Extract] Processing: {file_path}")
 
-        downloaded = await download_file_from_steel(session_id, file_path)
+        downloaded = await download_session_file(config, session_id, file_path)
         if not downloaded:
             logger.warning(f"[Extract] Failed to download: {file_path}")
             continue
@@ -452,6 +449,9 @@ def build_usage_items(
     execution_time_ms: float,
 ) -> List[Dict[str, Any]]:
     """Build standardized usage items for cost tracking."""
+    browser_provider = os.getenv("BROWSER_PROVIDER", "kernel").strip().lower()
+    service_provider = "Kernel Browser" if browser_provider == "kernel" else "Steel.dev Browser"
+    cost_per_ms = KERNEL_COST_CENTS_PER_MS if browser_provider == "kernel" else STEEL_COST_CENTS_PER_MS
     return [
         {
             "type": "llm",
@@ -466,8 +466,8 @@ def build_usage_items(
         },
         {
             "type": "service",
-            "cost_cents": round(execution_time_ms * STEEL_COST_CENTS_PER_MS, 4),
-            "provider": "Steel.dev Browser",
+            "cost_cents": round(execution_time_ms * cost_per_ms, 4),
+            "provider": service_provider,
         },
     ]
 

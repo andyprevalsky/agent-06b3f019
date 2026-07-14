@@ -57,9 +57,9 @@ export interface AnthropicMessages {
  * System messages are concatenated and split at SYSTEM_PROMPT_DYNAMIC_BOUNDARY
  * into static (globally cacheable) and dynamic (per-call) portions.
  *
- * Slim port: chat callers don't have assistant tool_calls or tool-role
- * messages, so we don't handle them. If a caller needs them, copy the
- * Python implementation.
+ * Assistant tool calls and tool results are converted to Anthropic's native
+ * tool_use/tool_result blocks. This lets callers inject run-local runtime
+ * context after a user turn without mislabeling it as user-authored text.
  */
 export function transformMessagesForAnthropic(messages: CompletionMessage[]): AnthropicMessages {
   const systemParts: string[] = [];
@@ -69,6 +69,55 @@ export function transformMessagesForAnthropic(messages: CompletionMessage[]): An
     if (msg.role === 'system') {
       const content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content);
       systemParts.push(content);
+      continue;
+    }
+
+    if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+      const blocks: Array<Record<string, unknown>> = [];
+      const text =
+        typeof msg.content === 'string'
+          ? msg.content
+          : msg.content.map(transformContentBlockForAnthropic);
+      if (typeof text === 'string' ? text.length > 0 : text.length > 0) {
+        if (typeof text === 'string') blocks.push({ type: 'text', text });
+        else blocks.push(...(text as Array<Record<string, unknown>>));
+      }
+      for (const [index, toolCall] of msg.tool_calls.entries()) {
+        const name = toolCall.function?.name ?? toolCall.name ?? 'tool';
+        const rawArguments = toolCall.function?.arguments ?? toolCall.arguments ?? {};
+        let input: unknown = rawArguments;
+        if (typeof rawArguments === 'string') {
+          try {
+            input = JSON.parse(rawArguments);
+          } catch {
+            input = {};
+          }
+        }
+        blocks.push({
+          type: 'tool_use',
+          id: toolCall.id ?? toolCall.call_id ?? `tool-call-${index}`,
+          name,
+          input,
+        });
+      }
+      out.push({ role: 'assistant', content: blocks });
+      continue;
+    }
+
+    if (msg.role === 'tool') {
+      out.push({
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: msg.tool_call_id ?? msg.call_id ?? 'tool-call',
+            content:
+              typeof msg.content === 'string'
+                ? msg.content
+                : msg.content.map(transformContentBlockForAnthropic),
+          },
+        ],
+      });
       continue;
     }
 

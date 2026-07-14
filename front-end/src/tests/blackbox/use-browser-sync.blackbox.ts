@@ -20,19 +20,17 @@ function makeHandlers(overrides: Record<string, unknown> = {}) {
   const base = {
     browserCookies: {
       isAvailable: true,
-      getInstalledBrowsers: vi.fn(
-        async (): Promise<BrowserInfo[]> => [
-          { type: 'chrome', name: 'Chrome', isInstalled: true, needsManualPassword: false },
-          { type: 'atlas', name: 'Atlas', isInstalled: true, needsManualPassword: true },
-        ],
-      ),
+      getInstalledBrowsers: vi.fn(async (): Promise<BrowserInfo[]> => [
+        { type: 'chrome', name: 'Chrome', isInstalled: true, needsManualPassword: false },
+        { type: 'atlas', name: 'Atlas', isInstalled: true, needsManualPassword: true },
+      ]),
       syncBrowser: vi.fn(async () => {}),
       syncBrowserPasswords: vi.fn(async () => ({ success: true })),
       storeAtlasPassword: vi.fn(async () => ({ success: true })),
       openKeychainAccess: vi.fn(async () => ({ success: true })),
     },
   };
-  return { ...base, ...overrides } as any;
+  return { ...base, ...overrides } as never;
 }
 
 describe('useBrowserSync', () => {
@@ -47,7 +45,7 @@ describe('useBrowserSync', () => {
   });
 
   it('skips fetch when browserCookies handler is unavailable', async () => {
-    const handlers = { browserCookies: { isAvailable: false } } as any;
+    const handlers = { browserCookies: { isAvailable: false } } as never;
     const fetchIntegrations = vi.fn();
     const { result } = renderHook(() => useBrowserSync(handlers, fetchIntegrations));
     await waitFor(() => {
@@ -96,7 +94,7 @@ describe('useBrowserSync', () => {
     const { result } = renderHook(() => useBrowserSync(handlers, fetchIntegrations));
     await waitFor(() => expect(result.current.installedBrowsers.length).toBe(2));
     await act(async () => {
-      await result.current.handleBrowserSync('edge' as any);
+      await result.current.handleBrowserSync('edge' as never);
     });
     expect(handlers.browserCookies.syncBrowser).not.toHaveBeenCalled();
   });
@@ -158,7 +156,7 @@ describe('useBrowserSync', () => {
   });
 
   it('handleOpenKeychain no-ops when no browserCookies handler', async () => {
-    const handlers = { browserCookies: undefined } as any;
+    const handlers = { browserCookies: undefined } as never;
     const { result } = renderHook(() => useBrowserSync(handlers, vi.fn()));
     // should not throw
     await act(async () => {

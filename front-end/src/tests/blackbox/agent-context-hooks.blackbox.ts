@@ -12,6 +12,7 @@ import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { clearCaptures, capturedRequests } from './msw/capture';
 import React from 'react';
+import type { AgentContextValue, AgentProviderProps } from '@/features/agent-context/types';
 
 // Mock subs BEFORE importing hook
 vi.mock('@/features/agent-context/hooks/useRealtimeSubscription', () => ({
@@ -36,7 +37,6 @@ vi.mock('@/lib/realtime', async (importOriginal) => {
   };
 });
 
-// eslint-disable-next-line import/first
 import { useAgentProvider, useAgentContext, AgentContext } from '@/features/agent-context/hooks';
 
 const API_BASE = 'http://localhost:3001/api';
@@ -54,7 +54,7 @@ function mockSession() {
   localStorage.setItem('app-user', JSON.stringify({ id: 'test-user', is_anonymous: false }));
 }
 
-function makeAgent(overrides: Partial<any> = {}) {
+function makeAgent(overrides: Record<string, unknown> = {}) {
   return {
     agent_id: 'agent-001',
     goal: 'test goal',
@@ -97,9 +97,9 @@ describe('useAgentProvider', () => {
     window.history.replaceState({}, '', '/');
   });
 
-  function defaultDeps(overrides: Partial<any> = {}) {
+  function defaultDeps(overrides: Partial<AgentProviderProps> = {}) {
     return {
-      user: { id: 'u-1', is_anonymous: false } as any,
+      user: { id: 'u-1', is_anonymous: false },
       isAuthenticated: true,
       realtimeReady: true,
       onLoadAgents: vi.fn(async () => {}),
@@ -131,6 +131,45 @@ describe('useAgentProvider', () => {
       expect(result.current.agent?.agent_id).toBe('agent-999');
     });
     expect(result.current.messages.length).toBeGreaterThan(0);
+    unmount();
+  });
+
+  it('auto-loads benchmark preview links without auth in dev/test mode', async () => {
+    localStorage.clear();
+    window.history.replaceState({}, '', '/?agent-id=bench-agent-001');
+    server.use(
+      http.get(`${API_BASE}/benchmarks/agent-preview/:agentId`, ({ params }) =>
+        HttpResponse.json({
+          agent: makeAgent({
+            agent_id: params.agentId as string,
+            goal: 'benchmark subscription gate',
+          }),
+          messages: [
+            {
+              message_id: 'm-preview',
+              timestamp: 't',
+              text: 'Subscribe to let Rose complete purchases',
+              role: 'TOOL',
+              metadata: {
+                toolName: 'gate',
+                toolStatus: 'IN_PROGRESS',
+                gate: { type: 'subscription', gateKey: 'subscription', status: 'PENDING' },
+              },
+            },
+          ],
+          pagination: { has_more: false, oldest_timestamp: null },
+        }),
+      ),
+    );
+
+    const { result, unmount } = renderHook(() =>
+      useAgentProvider(defaultDeps({ user: null, isAuthenticated: false, realtimeReady: false })),
+    );
+
+    await waitFor(() => {
+      expect(result.current.agent?.agent_id).toBe('bench-agent-001');
+    });
+    expect(result.current.messages[0]?.metadata?.gate).toMatchObject({ type: 'subscription' });
     unmount();
   });
 
@@ -170,6 +209,112 @@ describe('useAgentProvider', () => {
       result.current.setSelectedAgentId(null);
     });
     expect(window.location.search).not.toContain('agent-id');
+    unmount();
+  });
+
+  it('stages a pending creation without a detail GET, then reconciles without duplicate user text', async () => {
+    server.use(
+      http.get(`${API_BASE}/agents/:agentId`, ({ params }) =>
+        HttpResponse.json({
+          agent: makeAgent({ agent_id: params.agentId as string, goal: 'instant goal' }),
+          messages: [
+            {
+              message_id: 'canonical-user',
+              timestamp: '2026-01-01T00:00:00Z',
+              text: 'instant goal',
+              role: 'USER',
+            },
+          ],
+          pagination: { has_more: false, oldest_timestamp: null },
+        }),
+      ),
+    );
+    const { result, unmount } = renderHook(() => useAgentProvider(defaultDeps()));
+
+    act(() => {
+      result.current.stagePendingAgentCreation({
+        agentId: 'pending-agent',
+        goal: 'instant goal',
+        model: 'rose-1-lite',
+        source: 'WEB',
+        priceLimitCents: 500,
+      });
+    });
+
+    expect(result.current.selectedAgentId).toBe('pending-agent');
+    expect(result.current.agent?.agent_id).toBe('pending-agent');
+    expect(result.current.messages).toEqual([
+      expect.objectContaining({ text: 'instant goal', role: 'USER' }),
+    ]);
+    expect(capturedRequests.some((request) => request.method === 'GET')).toBe(false);
+
+    act(() => {
+      result.current.setMessages((previous) => [
+        ...previous,
+        {
+          message_id: 'realtime-assistant',
+          timestamp: '2026-01-01T00:00:00.500Z',
+          text: 'Already streaming',
+          role: 'ASSISTANT',
+        },
+      ]);
+    });
+    await act(async () => {
+      await result.current.reconcilePendingAgentCreation('pending-agent');
+    });
+
+    expect(result.current.messages.map((message) => message.message_id)).toEqual([
+      'canonical-user',
+      'realtime-assistant',
+    ]);
+    expect(
+      result.current.messages.filter((message) => message.text === 'instant goal'),
+    ).toHaveLength(1);
+    unmount();
+  });
+
+  it('rolls back a pending creation only while that exact staged agent is selected', async () => {
+    server.use(
+      http.get(`${API_BASE}/agents/:agentId`, ({ params }) =>
+        HttpResponse.json({
+          agent: makeAgent({ agent_id: params.agentId as string }),
+          messages: [],
+          pagination: { has_more: false, oldest_timestamp: null },
+        }),
+      ),
+    );
+    const { result, unmount } = renderHook(() => useAgentProvider(defaultDeps()));
+
+    act(() => {
+      result.current.stagePendingAgentCreation({
+        agentId: 'pending-agent',
+        goal: 'instant goal',
+        model: 'rose-1-lite',
+        source: 'WEB',
+        priceLimitCents: 500,
+      });
+      result.current.setSelectedAgentId('other-agent');
+    });
+    expect(result.current.rollbackPendingAgentCreation('pending-agent')).toBe(false);
+    expect(result.current.selectedAgentId).toBe('other-agent');
+
+    await waitFor(() => expect(result.current.agent?.agent_id).toBe('other-agent'));
+    act(() => {
+      result.current.stagePendingAgentCreation({
+        agentId: 'second-pending-agent',
+        goal: 'retryable goal',
+        model: 'rose-1-lite',
+        source: 'WEB',
+        priceLimitCents: 500,
+      });
+    });
+    let rolledBack = false;
+    act(() => {
+      rolledBack = result.current.rollbackPendingAgentCreation('second-pending-agent');
+    });
+    expect(rolledBack).toBe(true);
+    expect(result.current.selectedAgentId).toBeNull();
+    expect(result.current.messages).toEqual([]);
     unmount();
   });
 
@@ -246,13 +391,42 @@ describe('useAgentProvider', () => {
     unmount();
   });
 
-  it('does not auto-load when canSubscribe is false (unauthenticated)', async () => {
+  it('keeps unauthenticated URL selection when preview fails, then retries once auth completes', async () => {
+    // Regression: dev auto-login is async, so "not authenticated yet" must
+    // not be treated as "never will be". A failed pre-auth preview attempt
+    // must keep ?agent-id= so the authenticated path can retry after login.
+    localStorage.clear();
     window.history.replaceState({}, '', '/?agent-id=noauth-1');
-    const { result, unmount } = renderHook(() =>
-      useAgentProvider(defaultDeps({ isAuthenticated: false, realtimeReady: false })),
+    server.use(
+      http.get(`${API_BASE}/benchmarks/agent-preview/:agentId`, () =>
+        HttpResponse.json({ error: 'Agent not found' }, { status: 404 }),
+      ),
+      http.get(`${API_BASE}/agents/:agentId`, () =>
+        HttpResponse.json({
+          agent: makeAgent({ agent_id: 'noauth-1', goal: 'post-login goal' }),
+          messages: [{ message_id: 'm1', timestamp: 't', text: 'hi', role: 'USER' }],
+          pagination: { has_more: false, oldest_timestamp: null },
+        }),
+      ),
     );
-    await new Promise((r) => setTimeout(r, 50));
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { result, rerender, unmount } = renderHook(
+      (deps: ReturnType<typeof defaultDeps>) => useAgentProvider(deps),
+      { initialProps: defaultDeps({ user: null, isAuthenticated: false, realtimeReady: false }) },
+    );
+
+    // Pre-auth preview attempt fails -> selection + URL must survive.
+    await waitFor(() => expect(errSpy).toHaveBeenCalled());
+    expect(result.current.selectedAgentId).toBe('noauth-1');
+    expect(window.location.search).toContain('agent-id=noauth-1');
     expect(result.current.agent).toBeNull();
+
+    // Dev auto-login completes -> authenticated retry loads the agent.
+    mockSession();
+    rerender(defaultDeps());
+    await waitFor(() => expect(result.current.agent?.agent_id).toBe('noauth-1'));
+    expect(window.location.search).toContain('agent-id=noauth-1');
+    errSpy.mockRestore();
     unmount();
   });
 
@@ -303,16 +477,19 @@ describe('useAgentContext', () => {
       streamingPlan: null,
       streamingAttention: null,
       streamingTools: new Map(),
-      streamedTextsRef: { current: new Set<string>() } as any,
+      streamedTextsRef: { current: new Set<string>() },
       setAgent: vi.fn(),
       setSelectedAgentId: vi.fn(),
+      stagePendingAgentCreation: vi.fn(),
+      reconcilePendingAgentCreation: vi.fn(async () => {}),
+      rollbackPendingAgentCreation: vi.fn(() => true),
       setMessages: vi.fn(),
       registerMessageHandler: vi.fn(() => () => {}),
       sendMessage: vi.fn(async () => {}),
       isLoadingAgent: false,
       forceResubscribe: vi.fn(),
       isChatMode: true,
-    } as any;
+    } as unknown as AgentContextValue;
     const wrapper = ({ children }: { children: React.ReactNode }) =>
       React.createElement(AgentContext.Provider, { value }, children);
     const { result } = renderHook(() => useAgentContext(), { wrapper });

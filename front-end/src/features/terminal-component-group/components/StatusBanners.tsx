@@ -5,12 +5,13 @@
  *   PAUSED              --> "Rose has stopped..."
  *   OUT_OF_CREDITS      --> "agent ran out of credits" + Add Credits btn
  *   COST_LIMIT_REACHED  --> "agent cost limit reached" + Increase btn
- *   source=WEB          --> "Preview Mode" + Download link (always at bottom)
+ *   web frontend        --> "Preview Mode" + Open Mac App + automatic download fallback
  *
  * Completed state is handled by MessageBubble (CompletionSummaryCard).
  */
 import type { AgentDetail } from '../hooks';
 import { Button } from '@/components/ui/button';
+import { attemptMacAppHandoff } from '@/lib/macAppHandoff';
 
 interface StatusBannersProps {
   agent: AgentDetail | null;
@@ -88,7 +89,16 @@ export function StatusBanners({ agent, onAddCredits, onIncreaseCostLimit }: Stat
   return null;
 }
 
-export function WebPreviewBanner() {
+export function WebPreviewBanner({ agentId }: { agentId: string }) {
+  const openAppUrl = `roselabs://open?agent-id=${encodeURIComponent(agentId)}`;
+  const handleOpenApp = (event: React.MouseEvent<HTMLAnchorElement>) => {
+    event.preventDefault();
+    attemptMacAppHandoff({
+      openApp: () => window.location.assign(openAppUrl),
+      download: () => window.location.assign('/download'),
+    });
+  };
+
   return (
     <div className="flex gap-3" data-testid="web-preview-banner">
       <div
@@ -96,14 +106,14 @@ export function WebPreviewBanner() {
         style={BANNER_STYLE}
       >
         <span className="text-muted-foreground text-sm">
-          Agents spawned via web are in Preview Mode and have restricted functionality. To enable
-          all tools
+          You&apos;re viewing this task on the web in Preview Mode. To enable all tools
         </span>
         <a
-          href="/download"
+          href={openAppUrl}
+          onClick={handleOpenApp}
           className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-foreground text-background hover:opacity-90 transition-opacity whitespace-nowrap flex-shrink-0"
         >
-          Download for Mac
+          Open Mac App
         </a>
       </div>
     </div>

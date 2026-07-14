@@ -89,7 +89,6 @@ if $LIST; then
   echo ""
   echo "  benchmarks"
   (cd agents && source venv/bin/activate && python benchmarks/run_benchmark.py --list 2>/dev/null) | sed 's/^/    /'
-  echo "    (--full runs load-test-sias separately)"
   echo "    (--full prod max concurrency: $FULL_MAX_CONCURRENCY)"
   exit 0
 fi
@@ -133,6 +132,14 @@ if [ -n "$PORT" ]; then
     exit 1
   fi
 fi
+# Validate FULL_MAX_CONCURRENCY (from BENCHMARK_PROD_MAX_CONCURRENCY) the same
+# way — it is handed to the prod benchmark runner and must be a positive integer.
+if $FULL; then
+  if ! [[ "$FULL_MAX_CONCURRENCY" =~ ^[0-9]+$ ]] || [ "$FULL_MAX_CONCURRENCY" -lt 1 ]; then
+    echo "ERROR: invalid BENCHMARK_PROD_MAX_CONCURRENCY '$FULL_MAX_CONCURRENCY' — must be a positive integer."
+    exit 1
+  fi
+fi
 
 # ── Track results ──
 SUITE_NAMES=()
@@ -148,8 +155,9 @@ ls -1dt "$REPO_ROOT/.test-logs"/*/ 2>/dev/null | tail -n +11 | xargs -I{} rm -rf
 
 run_suite() {
   local name="$1"
+  local logfile
   shift
-  local logfile="$TMPDIR_BASE/$(echo "$name" | tr ' ()' '___').log"
+  logfile="$TMPDIR_BASE/$(echo "$name" | tr ' ()' '___').log"
 
   if $VERBOSE; then
     echo ""
@@ -183,8 +191,9 @@ BG_LOGS=()
 
 bg_suite() {
   local name="$1"
+  local logfile
   shift
-  local logfile="$TMPDIR_BASE/$(echo "$name" | tr ' ()' '___').log"
+  logfile="$TMPDIR_BASE/$(echo "$name" | tr ' ()' '___').log"
 
   if $VERBOSE; then
     # Use pipefail so tee doesn't mask the command's exit code
@@ -225,6 +234,11 @@ if $PROMPT_HUMAN_APPROVAL_RETRIEVED; then
 else
   run_suite "Prompt Human Approval Guard" bash scripts/check-prompt-human-approval.sh
 fi
+run_suite "Claude Review Fallback" bash scripts/tests/claude-review-fallback.test.sh
+run_suite "Semantic Deploy Gate" bash scripts/tests/semantic-deploy-gate.test.sh
+run_suite "Cloud Benchmark Environment" bash scripts/tests/cloudbench-env.test.sh
+run_suite "Cloud Benchmark Git Fetch" bash scripts/tests/cloudbench-fetch-ref.test.sh
+run_suite "Cloud Benchmark Multi-Workstream" bash scripts/tests/cloudbench-multi-workstream.test.sh
 
 # ── Build checks (run in parallel with blackbox tests) ──
 BUILD_PIDS=()
@@ -310,10 +324,9 @@ collect_bg_suites
 # ── Smoke tests (parallel, only if --smoke --port=N; --full targets prod) ──
 if $SMOKE; then
   if $FULL; then
-    bg_suite "Full Benchmarks (prod non-load)" bash -c "cd agents && source venv/bin/activate && python benchmarks/run_benchmark.py --suite all --prod --ci --parallel --max-concurrency $FULL_MAX_CONCURRENCY --exclude-task load-test-sias"
-    collect_bg_suites
-
-    bg_suite "Full Load Benchmark (prod)" bash -c "cd agents && source venv/bin/activate && python benchmarks/run_benchmark.py --task load-test-sias --prod --ci"
+    # Pass the concurrency as a positional arg (not string interpolation) so a
+    # hostile/typo'd env value can never be word-split or executed by bash -c.
+    bg_suite "Full Benchmarks (prod)" bash -c 'cd agents && source venv/bin/activate && python benchmarks/run_benchmark.py --suite all --prod --ci --parallel --max-concurrency "$1"' _ "$FULL_MAX_CONCURRENCY"
     collect_bg_suites
   else
     # Frontend semantic tests require a running frontend — guard BEFORE any

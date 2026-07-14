@@ -95,6 +95,8 @@ const TreeAgentItem = z.object({
   progress: z.number(),
   tools_in_use: z.array(z.string()),
   message_count: z.number(),
+  tokens_in: z.number(),
+  tokens_out: z.number(),
   output_schema: z.unknown().nullable(),
   structured_output: z.unknown().nullable(),
   tree_cost_cents: z.number(),
@@ -640,6 +642,14 @@ test('GET /tree — happy path — schema validated', async () => {
   assert(body.agents.length >= 1, 'Expected at least 1 agent in tree');
   const self = body.agents.find((a) => a.agent_id === agentId);
   assert(self, 'Agent should appear in its own tree');
+  assert(
+    typeof self.tokens_in === 'number',
+    `Expected tree tokens_in number, got ${self.tokens_in}`
+  );
+  assert(
+    typeof self.tokens_out === 'number',
+    `Expected tree tokens_out number, got ${self.tokens_out}`
+  );
 
   await deleteTestAgent(agentId, session.user.id);
 });
@@ -1954,8 +1964,26 @@ test('GET /:id/attachments/:fileId/url — wrong user path → 403', async () =>
 test('state: pause → resume round-trip preserves agent data', async () => {
   const session = await createAnonymousSession('state-round-trip');
 
-  // Create agent via HTTP so it's visible to the server
-  const agentId = await createTestAgent(session.user.id, 'State round-trip test');
+  // Seed the state-machine precondition directly. Creating a chat-mode root via
+  // HTTP starts a background LLM request whose terminal failure can race this
+  // route-level transition assertion.
+  const agentId = randomUUID();
+  trackedAgentIds.add(agentId);
+  await withTransientDbRetry('create-state-round-trip', async () => {
+    await prisma.agent.create({
+      data: {
+        id: agentId,
+        userId: session.user.id,
+        goal: 'State round-trip test',
+        status: 'ACTIVE',
+        model: 'rose-labs/rose-1-ultra',
+        busId: agentId,
+      },
+    });
+    await prisma.verifier.create({
+      data: { agentId, type: 'FLOAT_LLM_JUDGE' },
+    });
+  });
 
   // Get initial state
   const before = await request(`${BASE_URL}/api/agents/${agentId}`, {

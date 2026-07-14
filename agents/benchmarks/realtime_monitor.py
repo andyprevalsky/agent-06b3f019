@@ -34,6 +34,9 @@ class OpenToolCall:
     timestamp: str
 
 
+_ASYNC_ORCHESTRATION_TOOLS = {"spawn_agent", "spawn_general_purpose_agent"}
+
+
 def _record_timestamp(record: dict[str, Any]) -> str:
     timestamp = record.get("createdAt") or record.get("created_at") or record.get("timestamp") or ""
     return str(timestamp)
@@ -82,11 +85,17 @@ class NoHangingToolCallsInvariant:
             if not tool_call_id:
                 return
             tool_call_id = str(tool_call_id)
+            tool_name = str(metadata.get("toolName") or "unknown")
+            if tool_name in _ASYNC_ORCHESTRATION_TOOLS:
+                if status in {"FINISHED", "ERROR"}:
+                    self._closed_tool_ids.add(tool_call_id)
+                    self._open_tools.pop(tool_call_id, None)
+                return
             if status == "IN_PROGRESS":
                 if tool_call_id in self._closed_tool_ids:
                     return
                 self._open_tools[tool_call_id] = OpenToolCall(
-                    tool_name=str(metadata.get("toolName") or "unknown"),
+                    tool_name=tool_name,
                     message_id=str(record.get("id") or record.get("message_id") or ""),
                     sequence=self._sequence,
                     timestamp=_record_timestamp(record),

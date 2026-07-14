@@ -35,7 +35,7 @@ class MessagePersonManager(ToolManager):
     tool_name = "message_person"
     requires_approval = False  # Approval handled internally after message generation
 
-    async def execute_tool(  # noqa: C901
+    async def execute_tool(
         self,
         workflow_instance: Any,
         tool_call: dict[str, Any],
@@ -389,9 +389,7 @@ class MessagePersonManager(ToolManager):
             )
             active_gpt_token = getattr(workflow_instance, "_active_gpt_token", None)
             gpt_token = (
-                active_gpt_token()
-                if callable(active_gpt_token)
-                else getattr(workflow_instance, "gpt_code_token", None)
+                active_gpt_token() if callable(active_gpt_token) else getattr(workflow_instance, "gpt_code_token", None)
             )
             active_gpt_account_id = getattr(workflow_instance, "_active_gpt_account_id", None)
             gpt_account_id = (
@@ -512,13 +510,12 @@ class MessagePersonManager(ToolManager):
         gen_usage: dict[str, Any],
         model: str,
     ) -> ToolEvent:
-        preview = generated_message if len(generated_message) <= 200 else generated_message[:197] + "..."
         finished_parts = [f"**To:** {person_display} ({recipient})"]
         if channel == "email":
             finished_parts.append(f"**From:** {from_email}")
             if generated_subject:
                 finished_parts.append(f"**Subject:** {generated_subject}")
-        finished_parts.append(f"\n**Message:**\n{preview}")
+        finished_parts.append(f"\n**Message:**\n{generated_message}")
         finished_data = None
         if gen_usage:
             finished_data = {

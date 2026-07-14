@@ -52,7 +52,7 @@ The symptom is where you NOTICE the bug. The root cause could be upstream, downs
 
 ## Step 3: Create a fast isolated reproduction
 
-Once you have found the most upstream suspicious point, reproduce the failure in the smallest environment that still exercises the same mechanism. This is required before writing the fix whenever the bug can be isolated without losing the behavior under investigation.
+Once you have found the most upstream suspicious point, reproduce the failure locally in the smallest environment that still exercises the same mechanism. This is required before the diagnosis may be called an RCA, whether or not a fix will be written in the current task.
 
 The isolated reproduction should:
 
@@ -61,8 +61,63 @@ The isolated reproduction should:
 - Run quickly enough to iterate repeatedly while fixing
 - Fail before the fix and pass after the fix
 - Preserve the exact behavior being diagnosed, not a similar but different bug
+- Be promoted into the permanent, checked-in blackbox suite for the boundary that owns the bug before the fix is considered complete
 
-If an isolated reproduction is not feasible, state why explicitly and use the narrowest available integration test or benchmark rerun instead. Do not use the benchmark itself as the only reproduction when a smaller one can prove the same causal mechanism.
+If a unit-level reproduction would lose the behavior under investigation, use the narrowest local integration test, recorded-response replay, or benchmark checkpoint that preserves it. Do not use a full benchmark as the only reproduction when a smaller local test can prove the same causal mechanism.
+
+### Permanent deploy regression coverage
+
+A scratch test, executable repro script, benchmark checkpoint, or fixture replay may be useful while reducing the failure, but it is not sufficient regression coverage. Once the reproduction fails for the diagnosed bug, preserve it as a checked-in blackbox test in the suite owned by the first-bad boundary:
+
+| First-bad owned boundary      | Required permanent suite                                         | `/deploy` gate that must run it                     |
+| ----------------------------- | ---------------------------------------------------------------- | --------------------------------------------------- |
+| Back-end API or service       | `back-end/src/tests/blackbox/<domain>.blackbox.ts`               | Step 5a: full back-end blackbox suite               |
+| Agent, Temporal, tool, or LLM | `agents/tests/blackbox/<domain>.blackbox.py`                     | Step 4g: agent coverage runs the blackbox suite     |
+| Front-end component or state  | `front-end/src/tests/blackbox/<domain>.blackbox.tsx`             | Step 4b: front-end coverage runs the blackbox suite |
+| Mac app renderer or main      | `mac-app/tests/blackbox/<domain>.blackbox.ts` or `.blackbox.tsx` | Step 4m: full mac-app blackbox suite                |
+
+The correct suite is determined by the layer that owns the first bad data or violated contract, not by whichever file happened to be edited for the fix. Reuse the captured request, response, event stream, or fixture from the isolated reproduction inside that blackbox test so it exercises the same causal mechanism and retains the same assertion.
+
+The permanent blackbox test itself must be run against the buggy code and observed failing before the production fix is written, then run again unchanged and observed passing after the fix. Do not weaken the assertion, replace the captured failure with friendlier data, or leave the actual regression only in a unit test or scratch artifact.
+
+For a cross-service or UI-visible regression, the owning-boundary blackbox test is mandatory. Add a smoke or semantic test as additional coverage when the user-visible failure cannot be proven at that boundary alone; higher-level coverage supplements rather than replaces the owning blackbox test.
+
+Before closing the RCA, verify that the repository's blackbox runner discovers the new test and that `/deploy` invokes that runner for changes to the affected production surface. If it does not, update the runner or `/deploy` wiring as part of the fix. A passing test that future deploys skip does not satisfy this requirement.
+
+### RCA completion gate
+
+An RCA is **incomplete** until all of the following are true:
+
+1. A deterministic reproduction artifact exists locally (an automated test, fixture replay, or executable repro script).
+2. The artifact exercises the same code path or first-bad boundary identified by the runtime evidence.
+3. The artifact has actually been run locally and demonstrates the observed failure on the buggy code.
+4. The RCA records the exact command and the failure output or assertion that proves the reproduction.
+5. If a fix is made, the same artifact passes after the fix without weakening its assertion.
+6. If a fix is made, the reproduction is preserved as a checked-in test in the owning boundary's permanent blackbox suite; a scratch artifact alone is not sufficient.
+7. The full blackbox runner that `/deploy` uses discovers and passes the new regression test.
+8. `/deploy` is wired to run that blackbox runner whenever the affected production surface changes.
+
+### Fix approval and verification handoff
+
+When the current task is RCA-only, stop after presenting the evidence-backed diagnosis,
+the proposed generalizable fix, and the exact local reproduction command. Do not treat the
+diagnosis itself as approval to implement the fix.
+
+After the user agrees on the fix:
+
+1. Implement the agreed fix without changing the reproduction's asserted behavior.
+2. Run the exact same local reproduction command that demonstrated the pre-fix failure.
+3. Report the post-fix command, exit status, and relevant passing assertion back to the user,
+   alongside the recorded pre-fix failure.
+4. If the reproduction still fails, the fix is not complete; continue the fix-and-test loop
+   rather than reporting success.
+
+Changing or weakening the reproduction so the fix appears to pass does not satisfy this
+handoff. If new evidence proves the original reproduction targeted the wrong boundary, explain
+that evidence to the user and obtain agreement on the corrected reproduction before using it
+as the acceptance test.
+
+There is no “not feasible” exception that turns unreproduced findings into a completed RCA. If production-only or third-party state cannot be recreated directly, capture and replay that state at the owned boundary. If the required request, response, event stream, or state was not captured and therefore cannot be replayed, classify the result as **preliminary findings plus an observability gap**, add the missing capture, and keep the RCA open. Do not present a hypothesis, code inspection, production correlation, or external-state explanation as a completed RCA without an executed local reproduction.
 
 ### Step 3a: Reconstruct failing LLM calls
 
@@ -76,10 +131,9 @@ Required reconstruction evidence:
 - Generation config that can affect behavior, including reasoning budget, max tokens, response schema, tool choice, cache controls, and timeout/deadline settings
 - The captured failure span/log line, including provider, request/span id, duration, timeout type, and any token/auth rotation metadata
 
-The RCA is incomplete until you either:
+The RCA is incomplete until you re-run the reconstructed call through the same local client path and reproduce the failure, then iteratively reduce or vary the request to identify which input/config/provider condition makes it fail.
 
-1. Re-run the reconstructed call through the same local client path and reproduce the failure, then iteratively reduce or vary the request to identify which input/config/provider condition makes it fail; or
-2. Prove the failure cannot be reproduced locally because it depends on an unavailable external state, such as an expired provider token, provider incident, or production-only compute-token lease, and document the narrowest replay that was attempted plus the exact missing state.
+Unavailable external state does not waive the local-reproduction requirement. Replay the captured provider response, token error, timeout sequence, or lease state through the same local boundary. If the evidence needed for that replay was not captured, the result remains preliminary until the observability gap is fixed and a subsequent occurrence or controlled replay provides the missing artifact.
 
 Do not classify an LLM issue as "model/provider timeout" and stop there. Treat the LLM request as data: preserve it, replay it, diff it against nearby successful calls, and identify whether the failing condition is in our prompt/context/schema/config, our provider-routing/auth code, or a third-party service state.
 

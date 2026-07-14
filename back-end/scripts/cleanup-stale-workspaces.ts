@@ -15,7 +15,7 @@
  */
 
 import { Connection, Client } from '@temporalio/client';
-import { execSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 import { config } from 'dotenv';
 import * as path from 'path';
 import * as os from 'os';
@@ -27,45 +27,114 @@ const PROD_QUEUE = 'navi-agent-tasks';
 const QUEUE_PREFIX = 'navi-agent-tasks-';
 const CONDUCTOR_DB = path.join(
   os.homedir(),
-  'Library/Application Support/com.conductor.app/conductor.db',
+  'Library/Application Support/com.conductor.app/conductor.db'
 );
 
 // ── Resolve active workspaces from Conductor DB ──
 
-interface ActiveWorkspaces {
-  /** COALESCE(secondary_directory_name, directory_name) — used in Temporal queue names */
-  conductorNames: Set<string>;
+export interface ActiveWorkspaces {
+  /** Every identity that may own a queue or container. */
+  resourceNames: Set<string>;
   /** directory_name — used in filesystem paths */
   directoryNames: Set<string>;
+  repositoryId: string;
+}
+
+type ConductorQuery = (query: string) => string;
+
+function sqlLiteral(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+function nonEmptyLines(result: string): string[] {
+  return result
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+export function resolveActiveWorkspaces(
+  workspaceName: string,
+  queryConductor: ConductorQuery
+): ActiveWorkspaces {
+  const repositoryIds = new Set(
+    nonEmptyLines(
+      queryConductor(
+        `SELECT DISTINCT repository_id FROM workspaces WHERE repository_id IS NOT NULL AND (directory_name = ${sqlLiteral(workspaceName)} OR secondary_directory_name = ${sqlLiteral(workspaceName)})`
+      )
+    )
+  );
+
+  if (repositoryIds.size === 0) {
+    throw new Error(`Could not resolve a Conductor repository for workspace ${workspaceName}`);
+  }
+  if (repositoryIds.size > 1) {
+    throw new Error(`Workspace ${workspaceName} matched multiple Conductor repositories`);
+  }
+
+  const repositoryId = [...repositoryIds][0];
+  const rows = nonEmptyLines(
+    queryConductor(
+      `SELECT directory_name, COALESCE(secondary_directory_name, '') FROM workspaces WHERE state != 'archived' AND repository_id = ${sqlLiteral(repositoryId)}`
+    )
+  );
+
+  if (rows.length === 0) {
+    throw new Error(`No active Conductor workspaces found for repository ${repositoryId}`);
+  }
+
+  const resourceNames = new Set<string>();
+  const directoryNames = new Set<string>();
+  const identityOwners = new Map<string, string>();
+
+  const addIdentity = (identity: string, directoryName: string) => {
+    if (!identity) return;
+    const existingOwner = identityOwners.get(identity);
+    if (existingOwner && existingOwner !== directoryName) {
+      throw new Error(
+        `Active Conductor identity ${identity} is ambiguous between ${existingOwner} and ${directoryName}`
+      );
+    }
+    identityOwners.set(identity, directoryName);
+    resourceNames.add(identity);
+  };
+
+  for (const row of rows) {
+    const [directoryName, secondaryDirectoryName = '', ...extraColumns] = row.split('|');
+    if (!directoryName || extraColumns.length > 0) {
+      throw new Error(`Malformed active Conductor workspace identity row: ${row}`);
+    }
+    directoryNames.add(directoryName);
+    addIdentity(directoryName, directoryName);
+    addIdentity(secondaryDirectoryName, directoryName);
+  }
+
+  if (directoryNames.size === 0 || resourceNames.size === 0) {
+    throw new Error(
+      `No active Conductor workspace identities found for repository ${repositoryId}`
+    );
+  }
+
+  console.log(
+    `Active workspace identities (${resourceNames.size}): ${[...resourceNames].join(', ')}`
+  );
+  return { resourceNames, directoryNames, repositoryId };
 }
 
 function getActiveWorkspaces(): ActiveWorkspaces {
   const workspaceName =
-    process.env.CONDUCTOR_WORKSPACE_NAME || path.basename(execSync('git rev-parse --show-toplevel', { encoding: 'utf-8' }).trim());
+    process.env.CONDUCTOR_WORKSPACE_NAME ||
+    path.basename(execSync('git rev-parse --show-toplevel', { encoding: 'utf-8' }).trim());
 
-  const query = `SELECT directory_name, COALESCE(secondary_directory_name, directory_name) FROM workspaces WHERE state != 'archived' AND repository_id = (SELECT repository_id FROM workspaces WHERE directory_name = '${workspaceName}' OR secondary_directory_name = '${workspaceName}' LIMIT 1)`;
-
-  const result = execSync(`sqlite3 "${CONDUCTOR_DB}" "${query}"`, {
-    encoding: 'utf-8',
-  }).trim();
-
-  const conductorNames = new Set<string>();
-  const directoryNames = new Set<string>();
-
-  for (const line of result.split('\n').filter(Boolean)) {
-    const [dirName, condName] = line.split('|');
-    directoryNames.add(dirName);
-    conductorNames.add(condName);
-  }
-
-  console.log(`Active workspaces (${conductorNames.size}): ${[...conductorNames].join(', ')}`);
-  return { conductorNames, directoryNames };
+  return resolveActiveWorkspaces(workspaceName, (query) =>
+    execFileSync('sqlite3', [CONDUCTOR_DB, query], { encoding: 'utf-8' }).trim()
+  );
 }
 
 // ── Temporal workflow cleanup ──
 
 async function terminateStaleWorkflows(
-  activeNames: Set<string>,
+  activeNames: Set<string>
 ): Promise<{ terminated: number; skipped: number }> {
   const apiKey = process.env.TEMPORAL_API_KEY;
   if (!apiKey) {
@@ -145,7 +214,7 @@ async function terminateStaleWorkflows(
 
 function killOrphanedProcesses(
   activeDirectoryNames: Set<string>,
-  activeConductorNames: Set<string>,
+  activeResourceNames: Set<string>
 ): number {
   const repoRoot = execSync('git rev-parse --show-toplevel', { encoding: 'utf-8' }).trim();
   const workspacesBase = path.dirname(repoRoot);
@@ -191,8 +260,7 @@ function killOrphanedProcesses(
     for (const name of containers.split('\n').filter(Boolean)) {
       if (isIsolatedBenchmarkResource(name)) continue;
       const containerMatch = name.match(/^victoria-db-(.+)$/);
-      // Container names use CONDUCTOR_WORKSPACE_NAME (= conductorName), not directory_name
-      if (containerMatch && !activeConductorNames.has(containerMatch[1])) {
+      if (containerMatch && !activeResourceNames.has(containerMatch[1])) {
         console.log(`  Stopping orphaned container: ${name}`);
         execSync(`docker stop "${name}" 2>/dev/null || true`);
         killed++;
@@ -207,14 +275,14 @@ function killOrphanedProcesses(
 
 // ── Main ──
 
-async function main() {
+export async function main() {
   console.log('Cleaning up stale workspace resources...\n');
 
-  const { conductorNames, directoryNames } = getActiveWorkspaces();
+  const { resourceNames, directoryNames } = getActiveWorkspaces();
 
   const [temporalResult, processesKilled] = await Promise.all([
-    terminateStaleWorkflows(conductorNames),
-    Promise.resolve(killOrphanedProcesses(directoryNames, conductorNames)),
+    terminateStaleWorkflows(resourceNames),
+    Promise.resolve(killOrphanedProcesses(directoryNames, resourceNames)),
   ]);
 
   console.log('\n' + '='.repeat(50));
@@ -229,7 +297,9 @@ async function main() {
   }
 }
 
-main().catch((e) => {
-  console.error('Cleanup failed:', e);
-  process.exit(1);
-});
+if (require.main === module) {
+  void main().catch((e) => {
+    console.error('Cleanup failed:', e);
+    process.exit(1);
+  });
+}

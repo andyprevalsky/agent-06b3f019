@@ -165,6 +165,7 @@ export function isAssistantStreamPayload(payload: unknown): payload is Assistant
     typeof p.stream_id === 'string' &&
     typeof p.delta === 'string' &&
     typeof p.done === 'boolean' &&
+    (p.clear_on_done === undefined || typeof p.clear_on_done === 'boolean') &&
     typeof p.sequence === 'number'
   );
 }

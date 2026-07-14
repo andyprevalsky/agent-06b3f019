@@ -14,6 +14,7 @@
  *         protocol.
  *   - registerOpenUrlHandler + handleDeepLink:
  *       * `open-url` events call preventDefault() and route by URL host.
+ *       * host=open             -> delegates activation with an optional agent ID.
  *       * host=payment-success  -> shows/focuses the window + sends
  *         payment-complete { success: true }.
  *       * host=payment-cancel   -> sends payment-complete { success: false }.
@@ -128,9 +129,19 @@ describe('deepLinks — registerDeepLinkProtocol', () => {
 // ---------------------------------------------------------------------------
 
 describe('deepLinks — handleDeepLink', () => {
+  it('open: delegates activation with the requested agent ID', () => {
+    const win = makeWindow();
+    const openApp = vi.fn();
+    handleDeepLink('roselabs://open?agent-id=agent-123', () => win as never, openApp);
+
+    expect(openApp).toHaveBeenCalledWith('agent-123');
+    expect(win.show).not.toHaveBeenCalled();
+    expect(win.webContents.send).not.toHaveBeenCalled();
+  });
+
   it('payment-success: focuses the window and sends payment-complete { success: true }', () => {
     const win = makeWindow();
-    handleDeepLink('roselabs://payment-success', () => win as never);
+    handleDeepLink('roselabs://payment-success', () => win as never, vi.fn());
 
     expect(win.show).toHaveBeenCalledTimes(1);
     expect(win.focus).toHaveBeenCalledTimes(1);
@@ -139,14 +150,14 @@ describe('deepLinks — handleDeepLink', () => {
 
   it('payment-cancel: sends payment-complete { success: false }', () => {
     const win = makeWindow();
-    handleDeepLink('roselabs://payment-cancel', () => win as never);
+    handleDeepLink('roselabs://payment-cancel', () => win as never, vi.fn());
 
     expect(win.webContents.send).toHaveBeenCalledWith('payment-complete', { success: false });
   });
 
   it('unknown host: does not focus or send anything', () => {
     const win = makeWindow();
-    handleDeepLink('roselabs://something-else', () => win as never);
+    handleDeepLink('roselabs://something-else', () => win as never, vi.fn());
 
     expect(win.show).not.toHaveBeenCalled();
     expect(win.webContents.send).not.toHaveBeenCalled();
@@ -154,18 +165,18 @@ describe('deepLinks — handleDeepLink', () => {
 
   it('malformed URL: swallows the parse error without throwing or sending', () => {
     const win = makeWindow();
-    expect(() => handleDeepLink('not a url', () => win as never)).not.toThrow();
+    expect(() => handleDeepLink('not a url', () => win as never, vi.fn())).not.toThrow();
     expect(win.webContents.send).not.toHaveBeenCalled();
   });
 
   it('guard: null main window -> no focus/send', () => {
     // getMainWindow returns null: forwardPaymentComplete must bail before send.
-    expect(() => handleDeepLink('roselabs://payment-success', () => null)).not.toThrow();
+    expect(() => handleDeepLink('roselabs://payment-success', () => null, vi.fn())).not.toThrow();
   });
 
   it('guard: destroyed window -> no focus/send', () => {
     const win = makeWindow(true);
-    handleDeepLink('roselabs://payment-success', () => win as never);
+    handleDeepLink('roselabs://payment-success', () => win as never, vi.fn());
 
     expect(win.show).not.toHaveBeenCalled();
     expect(win.webContents.send).not.toHaveBeenCalled();
@@ -179,7 +190,7 @@ describe('deepLinks — handleDeepLink', () => {
 describe('deepLinks — registerOpenUrlHandler', () => {
   it('calls preventDefault and routes the open-url event through handleDeepLink', () => {
     const win = makeWindow();
-    registerOpenUrlHandler(() => win as never);
+    registerOpenUrlHandler(() => win as never, vi.fn());
 
     expect(appState.openUrlListeners).toHaveLength(1);
 

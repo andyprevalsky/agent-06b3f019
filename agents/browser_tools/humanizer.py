@@ -163,7 +163,11 @@ class BrowserHumanizer:
         self._cdp_mouse_transport_enabled = self._input_synthesis_enabled and _env_enabled(
             "BROWSER_AGENT_CDP_MOUSE_TRANSPORT", True
         )
+        self._cdp_keyboard_transport_enabled = self._keyboard_synthesis_enabled and _env_enabled(
+            "BROWSER_AGENT_CDP_KEYBOARD_TRANSPORT", True
+        )
         self._cdp_session: Optional[Any] = None
+        self._cdp_session_lock = asyncio.Lock()
         self._cursor_observer: Optional[Callable[[int, int], Any]] = None
         self._keycap = KeycapTimingSynthesizer(basis_count=500 if fast else 1500)
         self._movement_lock = asyncio.Lock()
@@ -192,6 +196,7 @@ class BrowserHumanizer:
             keyboard_synthesis_enabled=self._keyboard_synthesis_enabled,
             visual_cursor_enabled=self._visual_cursor_enabled,
             cdp_mouse_transport_enabled=self._cdp_mouse_transport_enabled,
+            cdp_keyboard_transport_enabled=self._cdp_keyboard_transport_enabled,
             idle_mouse_enabled=self._idle_mouse_enabled,
         )
 
@@ -387,67 +392,106 @@ class BrowserHumanizer:
         return (1280, 800)
 
     async def _get_cdp_session(self) -> Optional[Any]:
-        if not self._cdp_mouse_transport_enabled:
+        if not self._cdp_mouse_transport_enabled and not self._cdp_keyboard_transport_enabled:
             return None
         if self._cdp_session is not None:
             return self._cdp_session
-        context = getattr(self.input_page, "context", None)
-        if context is None or not hasattr(context, "new_cdp_session"):
-            return None
-        try:
-            self._cdp_session = await context.new_cdp_session(self.input_page)
-        except Exception as exc:
-            logger.debug("CDP mouse transport unavailable", error=str(exc))
-            self._cdp_mouse_transport_enabled = False
-            return None
-        return self._cdp_session
+
+        async with self._cdp_session_lock:
+            if not self._cdp_mouse_transport_enabled and not self._cdp_keyboard_transport_enabled:
+                return None
+            if self._cdp_session is not None:
+                return self._cdp_session
+
+            context = getattr(self.input_page, "context", None)
+            if context is None or not hasattr(context, "new_cdp_session"):
+                return None
+            try:
+                self._cdp_session = await context.new_cdp_session(self.input_page)
+            except Exception as exc:
+                logger.debug("CDP input transport unavailable", error=str(exc))
+                if self._cdp_session is None:
+                    self._cdp_mouse_transport_enabled = False
+                    self._cdp_keyboard_transport_enabled = False
+                return self._cdp_session
+            return self._cdp_session
+
+    async def _invalidate_cdp_session(self, cdp_session: Any) -> None:
+        async with self._cdp_session_lock:
+            if self._cdp_session is cdp_session:
+                self._cdp_session = None
+                self._cdp_mouse_transport_enabled = False
+                self._cdp_keyboard_transport_enabled = False
 
     async def _move_path_with_cdp_fire_and_drain(self, samples: List[Any]) -> bool:
-        cdp_session = await self._get_cdp_session()
+        cdp_session = await self._get_cdp_session() if self._cdp_mouse_transport_enabled else None
         if cdp_session is None:
             return False
 
         await self._schedule_visual_cursor_path(samples)
         pending = []
         timestamp = time.time()
-        for sample in samples:
-            timestamp += max(0, float(sample.delay_s))
-            pending.append(
-                asyncio.create_task(
-                    cdp_session.send(
-                        "Input.dispatchMouseEvent",
-                        {
-                            "type": "mouseMoved",
-                            "x": int(sample.x),
-                            "y": int(sample.y),
-                            "button": "none",
-                            "buttons": 0,
-                            "timestamp": timestamp,
-                        },
+        try:
+            for sample in samples:
+                timestamp += max(0, float(sample.delay_s))
+                pending.append(
+                    asyncio.create_task(
+                        cdp_session.send(
+                            "Input.dispatchMouseEvent",
+                            {
+                                "type": "mouseMoved",
+                                "x": int(sample.x),
+                                "y": int(sample.y),
+                                "button": "none",
+                                "buttons": 0,
+                                "timestamp": timestamp,
+                            },
+                        )
                     )
                 )
-            )
-            await self._notify_cursor_observer(sample.x, sample.y)
-            await asyncio.sleep(sample.delay_s)
+                await self._notify_cursor_observer(sample.x, sample.y)
+                await asyncio.sleep(sample.delay_s)
 
-        if pending:
-            await asyncio.gather(*pending)
+            if pending:
+                await asyncio.gather(*pending)
+        except asyncio.CancelledError:
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            raise
+        except Exception as exc:
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            await self._invalidate_cdp_session(cdp_session)
+            logger.debug("CDP mouse path failed; using Playwright fallback", error=str(exc))
+            return False
+
         return True
 
     async def _dispatch_mouse_position(self, x: int, y: int) -> None:
-        cdp_session = await self._get_cdp_session()
+        cdp_session = await self._get_cdp_session() if self._cdp_mouse_transport_enabled else None
         if cdp_session is not None:
-            await cdp_session.send(
-                "Input.dispatchMouseEvent",
-                {
-                    "type": "mouseMoved",
-                    "x": int(x),
-                    "y": int(y),
-                    "button": "none",
-                    "buttons": 0,
-                    "timestamp": time.time(),
-                },
-            )
+            try:
+                await cdp_session.send(
+                    "Input.dispatchMouseEvent",
+                    {
+                        "type": "mouseMoved",
+                        "x": int(x),
+                        "y": int(y),
+                        "button": "none",
+                        "buttons": 0,
+                        "timestamp": time.time(),
+                    },
+                )
+            except Exception as exc:
+                await self._invalidate_cdp_session(cdp_session)
+                logger.debug("CDP mouse dispatch failed; using Playwright fallback", error=str(exc))
+                await self.input_page.mouse.move(int(x), int(y))
         else:
             await self.input_page.mouse.move(int(x), int(y))
         await self._publish_cursor(int(x), int(y))
@@ -599,6 +643,75 @@ class BrowserHumanizer:
             self._idle_anchor = (x, y)
         logger.debug("Humanized double-click", x=x, y=y)
 
+    async def _type_text_with_cdp_fire_and_drain(self, text: str) -> bool:
+        if not self._cdp_keyboard_transport_enabled:
+            return False
+
+        cdp_session = await self._get_cdp_session()
+        if cdp_session is None:
+            return False
+
+        pending: List[asyncio.Task] = []
+        timestamp = time.time()
+        try:
+            for char in text:
+                timing = self._keycap.next(char)
+                key = " " if char == " " else "Enter" if char == "\n" else char
+                pending.append(
+                    asyncio.create_task(
+                        cdp_session.send(
+                            "Input.dispatchKeyEvent",
+                            {
+                                "type": "rawKeyDown",
+                                "key": key,
+                                "timestamp": timestamp,
+                            },
+                        )
+                    )
+                )
+                await asyncio.sleep(timing.dwell_s)
+                timestamp += timing.dwell_s
+                pending.append(
+                    asyncio.create_task(
+                        cdp_session.send(
+                            "Input.dispatchKeyEvent",
+                            {
+                                "type": "char",
+                                "key": key,
+                                "text": char,
+                                "unmodifiedText": char,
+                                "timestamp": timestamp,
+                            },
+                        )
+                    )
+                )
+                pending.append(
+                    asyncio.create_task(
+                        cdp_session.send(
+                            "Input.dispatchKeyEvent",
+                            {
+                                "type": "keyUp",
+                                "key": key,
+                                "timestamp": timestamp,
+                            },
+                        )
+                    )
+                )
+                await asyncio.sleep(timing.interval_s)
+                timestamp += timing.interval_s
+
+            if pending:
+                await asyncio.gather(*pending)
+        except BaseException:
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            await self._invalidate_cdp_session(cdp_session)
+            raise
+        return True
+
     async def type_text(self, text: str) -> None:
         """Human-like typing at current focus.
 
@@ -610,6 +723,10 @@ class BrowserHumanizer:
         Args:
             text: Text to type
         """
+        if self._keyboard_synthesis_enabled and await self._type_text_with_cdp_fire_and_drain(text):
+            logger.debug("Humanized typing complete", chars=len(text))
+            return
+
         base_delay = 60 / self._cpm  # seconds per character
 
         for i, char in enumerate(text):

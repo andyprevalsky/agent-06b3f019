@@ -58,6 +58,10 @@ vi.mock('electron', () => ({
 // populates `exposeCalls`.
 await import('../../main/preload');
 
+const eagerOpenAgentHandler = rendererOn.mock.calls.find(
+  ([channel]) => channel === 'open-agent'
+)?.[1] as ((event: unknown, agentId: string) => void) | undefined;
+
 type ExposedApi = Record<string, unknown>;
 
 /** The single API object preload registered under `window.api`. */
@@ -118,6 +122,10 @@ describe('contextBridge installation', () => {
     const keys = exposeCalls.map((c) => c.key);
     expect(keys).toEqual(['api']);
   });
+
+  it('exposes an explicit Electron renderer sentinel', () => {
+    expect(exposedApi().isElectron).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -157,6 +165,7 @@ describe('exposed API shape', () => {
     'onUpdateStatus',
     'onUpdateProgress',
     'onFocusInput',
+    'onOpenAgent',
     'onPaymentComplete',
     'removePaymentCompleteListener',
     'onPasskeysImportComplete',
@@ -365,6 +374,35 @@ describe('subscription channel routing', () => {
     expect(channel).toBe('update:progress');
     handler({}, { percent: 42 });
     expect(callback).toHaveBeenCalledWith(42);
+  });
+
+  it('registers the open-agent IPC listener eagerly during preload construction', () => {
+    expect(eagerOpenAgentHandler).toBeTypeOf('function');
+  });
+
+  it('delivers an open-agent event that arrived before the renderer subscribed', () => {
+    expect(eagerOpenAgentHandler).toBeTypeOf('function');
+    eagerOpenAgentHandler?.({}, 'cold-start-agent');
+    const callback = vi.fn();
+    const unsubscribe = (api.onOpenAgent as (cb: (agentId: string) => void) => () => void)(
+      callback
+    );
+
+    expect(callback).toHaveBeenCalledWith('cold-start-agent');
+    unsubscribe();
+  });
+
+  it('forwards live open-agent events and stops after unsubscribe', () => {
+    const callback = vi.fn();
+    const unsubscribe = (api.onOpenAgent as (cb: (agentId: string) => void) => () => void)(
+      callback
+    );
+
+    eagerOpenAgentHandler?.({}, 'live-agent');
+    expect(callback).toHaveBeenCalledWith('live-agent');
+    unsubscribe();
+    eagerOpenAgentHandler?.({}, 'ignored-agent');
+    expect(callback).toHaveBeenCalledTimes(1);
   });
 
   it('onTelegramAuthError forwards the error string payload', () => {

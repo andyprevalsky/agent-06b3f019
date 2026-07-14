@@ -203,18 +203,7 @@ describe('QueryInput (blackbox)', () => {
     expect(onChange.mock.calls.some((c) => c[0] === 'a')).toBe(true);
   });
 
-  it('Cmd+Enter submits (handleSubmitWithAttachments path)', async () => {
-    const onSubmit = vi.fn();
-    const user = userEvent.setup();
-    renderWithProviders(<QueryInput {...defaultProps} value="hello" onSubmit={onSubmit} />);
-
-    const textarea = screen.getByPlaceholderText('Type your message...');
-    textarea.focus();
-    await user.keyboard('{Meta>}{Enter}{/Meta}');
-    expect(onSubmit).toHaveBeenCalledTimes(1);
-  });
-
-  it('plain Enter does NOT submit (multi-line textarea behavior)', async () => {
+  it('plain Enter submits (handleSubmitWithAttachments path)', async () => {
     const onSubmit = vi.fn();
     const user = userEvent.setup();
     renderWithProviders(<QueryInput {...defaultProps} value="hello" onSubmit={onSubmit} />);
@@ -222,6 +211,16 @@ describe('QueryInput (blackbox)', () => {
     const textarea = screen.getByPlaceholderText('Type your message...');
     textarea.focus();
     await user.keyboard('{Enter}');
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+  });
+
+  it('Cmd+Enter and Shift+Enter keep the native multiline behavior', () => {
+    const onSubmit = vi.fn();
+    renderWithProviders(<QueryInput {...defaultProps} value="hello" onSubmit={onSubmit} />);
+
+    const textarea = screen.getByPlaceholderText('Type your message...');
+    expect(fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true })).toBe(true);
+    expect(fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: true })).toBe(true);
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
@@ -242,6 +241,17 @@ describe('QueryInput (blackbox)', () => {
     // Grab the final button — the send button
     await user.click(buttons[buttons.length - 1]);
     expect(onSubmit).toHaveBeenCalled();
+  });
+
+  it('send tooltip advertises plain Enter, not Cmd+Enter', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<QueryInput {...defaultProps} value="query" />);
+    const buttons = screen.getAllByRole('button');
+
+    await user.hover(buttons[buttons.length - 1]);
+
+    expect((await screen.findAllByText('Enter')).length).toBeGreaterThan(0);
+    expect(screen.queryByText('⌘')).not.toBeInTheDocument();
   });
 
   it('when canSubmit=false renders Stop button wired to onPause', async () => {
@@ -486,11 +496,11 @@ describe('QueryInput (blackbox)', () => {
 
   it('saving price limit for existing agent calls PATCH /api/agents/:id', async () => {
     let patched = false;
-    let patchedBody: any = null;
+    let patchedBody: { price_limit_cents?: number } | null = null;
     server.use(
       http.patch(`${API_BASE}/agents/:agentId`, async ({ request }) => {
         patched = true;
-        patchedBody = await request.json();
+        patchedBody = (await request.json()) as { price_limit_cents?: number };
         return HttpResponse.json({
           agent: { price_limit_cents: patchedBody.price_limit_cents },
         });
@@ -513,7 +523,7 @@ describe('QueryInput (blackbox)', () => {
     await user.keyboard('{Enter}');
 
     await waitFor(() => expect(patched).toBe(true));
-    expect(patchedBody.price_limit_cents).toBe(800);
+    expect(patchedBody?.price_limit_cents).toBe(800);
   });
 
   it('rejects saving a limit below current tree cost', async () => {
@@ -999,7 +1009,10 @@ describe('AttentionInbox (blackbox)', () => {
 
     // Stub the Mac-app bridge
     const sendIMessage = vi.fn(async () => ({ success: true }));
-    (window as any).api = { sendIMessage };
+    const bridgeWindow = window as unknown as {
+      api?: { sendIMessage: typeof sendIMessage };
+    };
+    bridgeWindow.api = { sendIMessage };
 
     try {
       const user = userEvent.setup();
@@ -1021,7 +1034,7 @@ describe('AttentionInbox (blackbox)', () => {
       });
       await waitFor(() => expect(respondCalled).toBe(true));
     } finally {
-      delete (window as any).api;
+      delete bridgeWindow.api;
     }
   });
 
@@ -1497,6 +1510,36 @@ describe('BrowserStatusBar (blackbox)', () => {
 
   it('uses auth liveViewUrl for the fullscreen browser iframe while auth assistance is pending', async () => {
     let completedRequestId: string | null = null;
+    const resizedViewports: Array<{ taskId: string; width: number; height: number }> = [];
+    let emitResize: ((width: number, height: number) => void) | null = null;
+    let releaseFirstResize: (() => void) | null = null;
+    const originalResizeObserver = window.ResizeObserver;
+    class ImmediateResizeObserver {
+      private readonly callback: ResizeObserverCallback;
+
+      constructor(callback: ResizeObserverCallback) {
+        this.callback = callback;
+      }
+
+      observe(target: Element) {
+        emitResize = (width, height) => {
+          this.callback(
+            [
+              {
+                target,
+                contentRect: { width, height } as DOMRectReadOnly,
+              } as ResizeObserverEntry,
+            ],
+            this as unknown as ResizeObserver,
+          );
+        };
+        emitResize(1180, 720);
+      }
+
+      unobserve() {}
+      disconnect() {}
+    }
+    window.ResizeObserver = ImmediateResizeObserver as unknown as typeof ResizeObserver;
     server.use(
       http.post(`${API_BASE}/auth-assistance/:id/complete`, ({ params }) => {
         completedRequestId = String(params.id);
@@ -1509,6 +1552,19 @@ describe('BrowserStatusBar (blackbox)', () => {
           liveViewUrl,
           refreshed: false,
         }),
+      ),
+      http.post(
+        `${API_BASE}/browser-session/task/:taskId/viewport`,
+        async ({ params, request }) => {
+          const body = (await request.json()) as { width: number; height: number };
+          resizedViewports.push({ taskId: String(params.taskId), ...body });
+          if (resizedViewports.length === 1) {
+            await new Promise<void>((resolve) => {
+              releaseFirstResize = resolve;
+            });
+          }
+          return HttpResponse.json({ success: true, resized: true, viewport: body });
+        },
       ),
     );
 
@@ -1554,6 +1610,7 @@ describe('BrowserStatusBar (blackbox)', () => {
       const iframe = document.querySelector('iframe[title="Browser"]') as HTMLIFrameElement | null;
       expect(iframe?.src).toBe(liveViewUrl);
     });
+    expect(screen.getByText('Sign in to amazon.com so I can continue')).toBeInTheDocument();
     expect(screen.getByText('Agent waiting for assistance')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Start Agent' })).toBeInTheDocument();
     expect(screen.queryByText('Agent in progress')).toBeNull();
@@ -1561,9 +1618,25 @@ describe('BrowserStatusBar (blackbox)', () => {
     expect(screen.queryByTestId('thinking-animation')).toBeNull();
     expect(screen.queryByTestId('browser-border-glow')).toBeNull();
     expect(screen.queryByTestId('browser-cursor-overlay')).toBeNull();
+    await waitFor(() => {
+      expect(resizedViewports).toEqual([{ taskId: 'task-auth', width: 1180, height: 720 }]);
+    });
+    await act(async () => {
+      emitResize?.(1280, 760);
+      await new Promise((resolve) => window.setTimeout(resolve, 200));
+    });
+    expect(resizedViewports).toHaveLength(1);
+    releaseFirstResize?.();
+    await waitFor(() => {
+      expect(resizedViewports).toEqual([
+        { taskId: 'task-auth', width: 1180, height: 720 },
+        { taskId: 'task-auth', width: 1280, height: 760 },
+      ]);
+    });
 
     await user.click(screen.getByRole('button', { name: 'Start Agent' }));
     await waitFor(() => expect(completedRequestId).toBe('auth-req-1'));
+    window.ResizeObserver = originalResizeObserver;
   });
 
   it('clicking Accept in fullscreen BrowserWriteLockApproval calls respond endpoint', async () => {

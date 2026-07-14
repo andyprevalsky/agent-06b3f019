@@ -24,6 +24,17 @@ import { saveWindowState } from './app/windowState';
 import { getErrorMessage } from '../shared/utils/error';
 
 app.name = 'Rose';
+
+// Dev-only: expose a Chrome DevTools Protocol endpoint so local tooling
+// (playwright/Claude) can attach to the REAL window — screenshot it, drive it,
+// verify which worktree's build is on screen. Never active in packaged builds;
+// only when the launcher explicitly sets MAC_APP_DEBUG_PORT. Must be appended
+// before app ready.
+const debugPort = process.env.MAC_APP_DEBUG_PORT;
+if (!app.isPackaged && debugPort !== undefined && debugPort !== '') {
+  app.commandLine.appendSwitch('remote-debugging-port', debugPort);
+}
+
 initLogger();
 logConsole('Config', `Backend API URL: ${config.apiUrl}`);
 
@@ -44,7 +55,7 @@ const quickQuery = new QuickQueryController({
 });
 
 registerDeepLinkProtocol(PROTOCOL);
-registerOpenUrlHandler(() => mainWindow);
+registerOpenUrlHandler(() => mainWindow, openAppFromDeepLink);
 
 console.log(`🚀 [Mac App] Mode: ${config.isDev ? 'DEVELOPMENT' : 'PRODUCTION'}`);
 
@@ -101,7 +112,7 @@ function initializeWindowsAndIpc(): void {
 function handleInitialDeepLink(): void {
   const deepLinkArg = process.argv.find((arg) => arg.startsWith(`${PROTOCOL}://`));
   if (deepLinkArg !== undefined) {
-    setTimeout(() => handleDeepLink(deepLinkArg, () => mainWindow), 500);
+    setTimeout(() => handleDeepLink(deepLinkArg, () => mainWindow, openAppFromDeepLink), 500);
   }
 }
 
@@ -138,7 +149,7 @@ app.on('window-all-closed', () => {
 });
 
 function handleActivate(): void {
-  if (mainWindow === null) {
+  if (mainWindow === null || mainWindow.isDestroyed()) {
     const window = buildMainWindow();
     setAutoUpdaterWindow(window);
   }
@@ -148,6 +159,27 @@ function handleActivate(): void {
   }
 
   showMainWindow();
+}
+
+function openAppFromDeepLink(agentId: string | null): void {
+  if (!app.isReady()) {
+    void app.whenReady().then(() => openAppFromDeepLink(agentId));
+    return;
+  }
+
+  const mustWaitForRenderer = mainWindow === null || mainWindow.isDestroyed();
+  handleActivate();
+  const window = mainWindow;
+  if (agentId === null || window === null || window.isDestroyed()) return;
+
+  const selectAgent = () => {
+    if (!window.isDestroyed()) window.webContents.send('open-agent', agentId);
+  };
+  if (mustWaitForRenderer || window.webContents.isLoading()) {
+    window.webContents.once('did-finish-load', selectAgent);
+  } else {
+    selectAgent();
+  }
 }
 
 app.on('activate', () => {

@@ -988,8 +988,7 @@ async def _run_all_workflow_tests() -> List[tuple]:
                 captured_goals = FAST_MODE_GOAL_CAPTURE.get(fc_agent_id)
                 assert captured_goals, "Workflow never reached an LLM call"
                 assert captured_goals[0] == "Persisted DB goal", (
-                    f"Fast Mode cache goal must be the persisted agent-row goal, "
-                    f"got {captured_goals[0]!r}"
+                    f"Fast Mode cache goal must be the persisted agent-row goal, got {captured_goals[0]!r}"
                 )
 
                 await _cancel_workflow(handle)
@@ -1376,22 +1375,30 @@ class _FakeExternalHandle:
 class _FakeWorkflowModule:
     """Stand-in for temporalio.workflow inside a workflow method. Captures activities + signals."""
 
-    def __init__(self):
+    def __init__(self, *, patched: bool = True):
         self.logger = _FakeWorkflowLogger()
         self.activity_calls: List[tuple] = []  # (fn_name, args)
         self.signal_calls: List[tuple] = []  # (wf_id, name, data)
         self.activity_fail_for: set = set()  # fn_names that should raise
         self.activity_returns: Dict[str, Any] = {}  # fn_name -> return value override
+        self.activity_blockers: Dict[str, asyncio.Event] = {}
         self.now_value = datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        self._patched = patched
 
     async def execute_activity(self, fn, args=None, **kwargs):
         fn_name = getattr(fn, "__name__", str(fn))
         self.activity_calls.append((fn_name, args))
+        blocker = self.activity_blockers.get(fn_name)
+        if blocker is not None:
+            await blocker.wait()
         if fn_name in self.activity_fail_for:
             raise RuntimeError(f"{fn_name} failed")
         if fn_name in self.activity_returns:
             return self.activity_returns[fn_name]
         return None
+
+    def start_activity(self, fn, args=None, **kwargs):
+        return asyncio.create_task(self.execute_activity(fn, args=args, **kwargs))
 
     def get_external_workflow_handle(self, wf_id):
         return _FakeExternalHandle(wf_id, self.signal_calls)
@@ -1401,6 +1408,9 @@ class _FakeWorkflowModule:
 
     def uuid4(self):
         return "00000000-0000-0000-0000-000000000001"
+
+    def patched(self, patch_id):
+        return self._patched
 
 
 def _patch_workflow(fake: _FakeWorkflowModule):
@@ -1479,6 +1489,8 @@ async def test_workflow_signal_receive_user_response_plain_string():
         await wf.receive_user_response("hello plain")
         assert wf._last_signal_response == "hello plain"
         assert wf._has_new_messages is True
+        assert wf._response_schema_feedback == ["hello plain"]
+        assert wf._response_schema_revision == 1
     finally:
         _restore_workflow(original)
 
@@ -1491,6 +1503,8 @@ async def test_workflow_signal_receive_user_response_with_request_id():
         await wf.receive_user_response(json.dumps({"request_id": "req-123", "response": "yes"}))
         assert wf._signal_responses.get("req-123") == "yes"
         assert wf._has_new_messages is False
+        assert wf._response_schema_feedback == []
+        assert wf._response_schema_revision == 0
     finally:
         _restore_workflow(original)
 
@@ -1504,6 +1518,383 @@ async def test_workflow_signal_receive_user_response_json_without_request_id():
         # Falls through to plain string path
         assert wf._last_signal_response == '{"unrelated": "data"}'
         assert wf._has_new_messages is True
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_signal_wakes_for_generated_schema_update_message():
+    wf = _bare_workflow_instance()
+    wf._response_schema_internal_signal_keys.add("schema-key-1")
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf.receive_user_response(
+            json.dumps(
+                {
+                    "internal_type": "response_schema_update",
+                    "idempotency_key": "schema-key-1",
+                }
+            )
+        )
+
+        assert wf._has_new_messages is True
+        assert wf._response_schema_feedback == []
+        assert wf._response_schema_revision == 0
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_signal_unknown_schema_envelope_is_user_feedback():
+    wf = _bare_workflow_instance()
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        feedback = json.dumps(
+            {
+                "internal_type": "response_schema_update",
+                "idempotency_key": "not-issued-by-workflow",
+            }
+        )
+        await wf.receive_user_response(feedback)
+
+        assert wf._has_new_messages is True
+        assert wf._response_schema_feedback == [feedback]
+        assert wf._response_schema_revision == 1
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_signal_treats_schema_prefix_as_genuine_user_feedback():
+    from workflows.agent_workflow import RESPONSE_SCHEMA_UPDATE_PREFIX
+
+    wf = _bare_workflow_instance()
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        feedback = f"{RESPONSE_SCHEMA_UPDATE_PREFIX}\nBut this was typed by the user"
+        await wf.receive_user_response(feedback)
+
+        assert wf._has_new_messages is True
+        assert wf._response_schema_feedback == [feedback]
+        assert wf._response_schema_revision == 1
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_refreshes_response_schema_from_user_feedback():
+    """Feedback revision runs in parallel and reaches context without delaying the next prompt."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-1"
+    wf.user_id = "user-1"
+    wf.goal = "Research three venues"
+    wf.fast_cache_goal = "Research three venues"
+    wf.current_phase = "EXECUTE"
+    wf.user_context_section = ""
+    wf._cloud_agent_lifecycle_finished = True
+    wf.output_schema = {
+        "fields": [{"name": "venues", "type": "list[str]", "required": True}],
+    }
+    wf._system_prompt_output_schema = wf.output_schema
+    wf._response_schema_initialized = True
+    wf.context = [
+        {"role": "USER", "text": "Research three venues", "metadata": None},
+        {
+            "role": "USER",
+            "text": "Personality instructions: be concise",
+            "metadata": {"hidden": True, "isCustomSystemPrompt": True},
+        },
+    ]
+
+    replacement_schema = {
+        "fields": [
+            {"name": "venues", "type": "list[str]", "required": True},
+            {"name": "venue_prices", "type": "list[int]", "required": True},
+        ],
+    }
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["set_response_schema_activity"] = {
+        "schema": replacement_schema,
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    }
+    schema_blocker = asyncio.Event()
+    fake.activity_blockers["set_response_schema_activity"] = schema_blocker
+    original = _patch_workflow(fake)
+    try:
+        await wf.receive_user_response("Also include the price for each venue")
+        await asyncio.sleep(0)
+
+        # Schema generation is still blocked, but main-agent prompt construction
+        # must complete immediately with its stable initial system prefix.
+        prompt = await asyncio.wait_for(wf.build_system_prompt(), timeout=0.1)
+        assert "venues" in prompt
+        assert "venue_prices" not in prompt
+        assert wf.output_schema != replacement_schema
+
+        schema_blocker.set()
+        await wf._wait_for_response_schema_refresh()
+
+        schema_calls = [c for c in fake.activity_calls if c[0] == "set_response_schema_activity"]
+        assert len(schema_calls) == 1
+        assert schema_calls[0][1][0] == "agent-1"
+        assert schema_calls[0][1][1] == [
+            "Research three venues",
+            'Current output schema (preserve fields unless later user feedback changes them):\n{"fields":[{"name":"venues","required":true,"type":"list[str]"}]}',
+            "Also include the price for each venue",
+        ]
+        assert wf.output_schema == replacement_schema
+        assert wf._response_schema_applied_revision == 1
+        schema_messages = [c for c in fake.activity_calls if c[0] == "post_agent_message" and c[1][2] == "USER"]
+        assert len(schema_messages) == 1
+        assert "venue_prices" in schema_messages[0][1][1]
+        assert schema_messages[0][1][3]["isResponseSchemaUpdate"] is True
+        assert schema_messages[0][1][3]["idempotencyKey"] == "00000000-0000-0000-0000-000000000001"
+
+        # The revised schema lives at the conversation tail, so the system
+        # prefix remains byte-for-byte stable for provider prompt caching.
+        revised_prompt = await wf.build_system_prompt()
+        assert revised_prompt == prompt
+        schema_calls = [c for c in fake.activity_calls if c[0] == "set_response_schema_activity"]
+        assert len(schema_calls) == 1
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_verifier_refreshes_response_schema_from_user_feedback():
+    """Only verification waits for a pending background schema revision."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-1"
+    wf.user_id = "user-1"
+    wf.goal = "Research three venues"
+    wf.fast_cache_goal = "Research three venues"
+    wf.output_schema = {
+        "fields": [{"name": "venues", "type": "list[str]", "required": True}],
+    }
+    wf._system_prompt_output_schema = wf.output_schema
+    wf._response_schema_initialized = True
+    replacement_schema = {
+        "fields": [{"name": "venue_prices", "type": "list[int]", "required": True}],
+    }
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["set_response_schema_activity"] = {"schema": replacement_schema, "usage": {}}
+    schema_blocker = asyncio.Event()
+    fake.activity_blockers["set_response_schema_activity"] = schema_blocker
+    original = _patch_workflow(fake)
+    try:
+        await wf.receive_user_response("Return only the venue prices")
+        await asyncio.sleep(0)
+
+        verifier_task = asyncio.create_task(wf._make_verifier_prompt_generator()())
+        await asyncio.sleep(0)
+        assert verifier_task.done() is False
+
+        schema_blocker.set()
+        verifier_prompt = await verifier_task
+        current_schema = await wf._make_response_schema_getter()()
+
+        assert wf.output_schema == replacement_schema
+        assert current_schema == replacement_schema
+        assert "venue_prices" in verifier_prompt
+        schema_calls = [c for c in fake.activity_calls if c[0] == "set_response_schema_activity"]
+        assert len(schema_calls) == 1
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_schema_refresh_skips_context_message_when_unchanged():
+    """A feedback check that preserves the schema should not add synthetic context."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-1"
+    wf.user_id = "user-1"
+    wf.goal = "Research three venues"
+    wf.fast_cache_goal = wf.goal
+    wf.output_schema = {
+        "fields": [{"name": "venues", "type": "list[str]", "required": True}],
+    }
+    wf._system_prompt_output_schema = wf.output_schema
+    wf._response_schema_initialized = True
+
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["set_response_schema_activity"] = {"schema": wf.output_schema, "usage": {}}
+    original = _patch_workflow(fake)
+    try:
+        await wf.receive_user_response("Please keep going")
+        await wf._wait_for_response_schema_refresh()
+
+        schema_messages = [c for c in fake.activity_calls if c[0] == "post_agent_message" and c[1][2] == "USER"]
+        assert schema_messages == []
+        assert wf._response_schema_applied_revision == 1
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_schema_refresh_failure_falls_back_until_new_feedback():
+    """A terminal refresh failure keeps the last schema and later feedback can retry."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-1"
+    wf.user_id = "user-1"
+    wf.goal = "Research three venues"
+    wf.fast_cache_goal = wf.goal
+    wf.output_schema = {
+        "fields": [{"name": "venues", "type": "list[str]", "required": True}],
+    }
+    wf._system_prompt_output_schema = wf.output_schema
+    wf._response_schema_initialized = True
+
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["set_response_schema_activity"] = None
+    original = _patch_workflow(fake)
+    try:
+        await wf.receive_user_response("Also include prices")
+        await asyncio.sleep(0)
+
+        await wf._wait_for_response_schema_refresh()
+
+        assert wf._response_schema_applied_revision == 1
+        assert wf._response_schema_revision == 1
+        assert wf._response_schema_refresh_failed_revision == 1
+        assert wf._response_schema_refresh_error is None
+        schema_messages = [c for c in fake.activity_calls if c[0] == "post_agent_message"]
+        assert schema_messages == []
+
+        replacement_schema = {
+            "fields": [{"name": "venue_prices", "type": "list[int]", "required": True}],
+        }
+        fake.activity_returns["set_response_schema_activity"] = {
+            "schema": replacement_schema,
+            "usage": {},
+        }
+        await wf.receive_user_response("Prices are now required")
+        await wf._wait_for_response_schema_refresh()
+
+        assert wf.output_schema == replacement_schema
+        assert wf._response_schema_applied_revision == 2
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_schema_refresh_message_failure_falls_back_to_last_schema():
+    """A failed hidden context write keeps the last durable schema without blocking."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-1"
+    wf.user_id = "user-1"
+    wf.goal = "Research three venues"
+    wf.fast_cache_goal = wf.goal
+    wf.output_schema = {
+        "fields": [{"name": "venues", "type": "list[str]", "required": True}],
+    }
+    wf._system_prompt_output_schema = wf.output_schema
+    wf._response_schema_initialized = True
+    replacement_schema = {
+        "fields": [{"name": "venue_prices", "type": "list[int]", "required": True}],
+    }
+
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["set_response_schema_activity"] = {"schema": replacement_schema, "usage": {}}
+    fake.activity_fail_for.add("post_agent_message")
+    original = _patch_workflow(fake)
+    try:
+        await wf.receive_user_response("Return venue prices")
+        await asyncio.sleep(0)
+
+        await wf._wait_for_response_schema_refresh()
+
+        assert wf.output_schema != replacement_schema
+        assert wf._response_schema_applied_revision == 1
+        assert wf._response_schema_refresh_error is None
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_schema_refresh_reloads_prior_feedback_after_continuation():
+    """A fresh workflow run rebuilds revisions from durable USER messages."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-1"
+    wf.user_id = "user-1"
+    wf.goal = "Research three venues"
+    wf.fast_cache_goal = wf.goal
+    wf.output_schema = {
+        "fields": [{"name": "venues", "type": "list[str]", "required": True}],
+    }
+    wf._system_prompt_output_schema = wf.output_schema
+    wf._response_schema_initialized = True
+
+    replacement_schema = {
+        "fields": [{"name": "venue_prices", "type": "list[int]", "required": True}],
+    }
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["poll_new_messages"] = [
+        {
+            "role": "USER",
+            "text": "Earlier feedback: include addresses",
+            "metadata": None,
+        },
+        {
+            "role": "USER",
+            "text": "old generated schema",
+            "metadata": {"hidden": True, "isResponseSchemaUpdate": True},
+        },
+    ]
+    fake.activity_returns["set_response_schema_activity"] = {"schema": replacement_schema, "usage": {}}
+    original = _patch_workflow(fake)
+    try:
+        await wf.receive_user_response("Now include prices")
+        await wf._wait_for_response_schema_refresh()
+
+        schema_call = next(c for c in fake.activity_calls if c[0] == "set_response_schema_activity")
+        assert schema_call[1][1] == [
+            "Research three venues",
+            'Current output schema (preserve fields unless later user feedback changes them):\n{"fields":[{"name":"venues","required":true,"type":"list[str]"}]}',
+            "Earlier feedback: include addresses",
+            "Now include prices",
+        ]
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_schema_refresh_coalesces_rapid_feedback():
+    """Superseded generation results do not add obsolete schema messages."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-1"
+    wf.user_id = "user-1"
+    wf.goal = "Research three venues"
+    wf.fast_cache_goal = wf.goal
+    wf.output_schema = {
+        "fields": [{"name": "venues", "type": "list[str]", "required": True}],
+    }
+    wf._system_prompt_output_schema = wf.output_schema
+    wf._response_schema_initialized = True
+
+    replacement_schema = {
+        "fields": [
+            {"name": "venue_prices", "type": "list[int]", "required": True},
+            {"name": "venue_addresses", "type": "list[str]", "required": True},
+        ],
+    }
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["set_response_schema_activity"] = {"schema": replacement_schema, "usage": {}}
+    schema_blocker = asyncio.Event()
+    fake.activity_blockers["set_response_schema_activity"] = schema_blocker
+    original = _patch_workflow(fake)
+    try:
+        await wf.receive_user_response("Include prices")
+        await asyncio.sleep(0)
+        await wf.receive_user_response("Also include addresses")
+
+        schema_blocker.set()
+        await wf._wait_for_response_schema_refresh()
+
+        schema_calls = [c for c in fake.activity_calls if c[0] == "set_response_schema_activity"]
+        assert len(schema_calls) == 2
+        assert schema_calls[-1][1][1] == [
+            "Research three venues",
+            'Current output schema (preserve fields unless later user feedback changes them):\n{"fields":[{"name":"venues","required":true,"type":"list[str]"}]}',
+            "Include prices",
+            "Also include addresses",
+        ]
+        schema_messages = [c for c in fake.activity_calls if c[0] == "post_agent_message"]
+        assert len(schema_messages) == 1
+        assert schema_messages[0][1][3]["responseSchemaRevision"] == 2
+        assert wf._response_schema_applied_revision == 2
     finally:
         _restore_workflow(original)
 
@@ -2310,12 +2701,23 @@ async def test_workflow_handle_incomplete_max_iterations():
     fake = _FakeWorkflowModule()
     original = _patch_workflow(fake)
     try:
+        events = []
+
+        async def wait_for_refresh():
+            events.append("refresh")
+
+        async def mark_failed(**_kwargs):
+            events.append("failed")
+
+        wf._wait_for_response_schema_refresh = wait_for_refresh
+        wf._mark_failed = mark_failed
         result = await wf._handle_incomplete(
             {"status": "max_iterations", "context": [], "verifier_progress": 0.5},
             phase="EXECUTE",
         )
         assert result["status"] == "failed"
         assert result["reason"] == "max_iterations"
+        assert events == ["refresh", "failed"]
     finally:
         _restore_workflow(original)
 
@@ -2330,12 +2732,23 @@ async def test_workflow_handle_incomplete_error():
     fake = _FakeWorkflowModule()
     original = _patch_workflow(fake)
     try:
+        events = []
+
+        async def wait_for_refresh():
+            events.append("refresh")
+
+        async def mark_failed(**_kwargs):
+            events.append("failed")
+
+        wf._wait_for_response_schema_refresh = wait_for_refresh
+        wf._mark_failed = mark_failed
         result = await wf._handle_incomplete(
             {"status": "error", "context": [], "message": "Bad happened"},
             phase="EXECUTE",
         )
         assert result["status"] == "failed"
         assert result["reason"] == "error"
+        assert events == ["refresh", "failed"]
     finally:
         _restore_workflow(original)
 
@@ -2353,14 +2766,14 @@ async def test_workflow_handle_incomplete_unknown_passthrough():
 
 
 async def test_workflow_check_credits_no_credits_pauses():
-    """_check_credits flips is_paused=True when credits depleted."""
+    """_check_credits flips is_paused=True when subscribed credits are depleted."""
     wf = _bare_workflow_instance()
     wf.user_id = "u"
     fake = _FakeWorkflowModule()
 
     async def fake_exec(fn, args=None, **kwargs):
         if getattr(fn, "__name__", "") == "check_user_usage":
-            return {"has_credits": False}
+            return {"has_credits": False, "tier": 20}
         return None
 
     fake.execute_activity = fake_exec
@@ -2371,6 +2784,50 @@ async def test_workflow_check_credits_no_credits_pauses():
         assert wf._has_credits is False
     finally:
         _restore_workflow(original)
+
+
+async def test_workflow_check_credits_free_credits_exhausted_raises_subscription_gate():
+    """A no-subscription user with exhausted free credits gets a subscription gate."""
+    import workflows.agent_workflow as workflow_module
+
+    wf = _bare_workflow_instance()
+    wf.user_id = "u-free-credit"
+    wf.agent_id = "a-free-credit"
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["check_user_usage"] = {
+        "has_credits": False,
+        "remaining": 0,
+        "used": 0.01,
+        "total": 0.01,
+        "tier": None,
+    }
+    fake.activity_returns["mint_subscription_checkout_activity"] = "https://roselabs.ai/s/free-credit"
+    raised = {}
+
+    async def fake_raise_gate(workflow_instance, gate, gate_key):
+        raised["workflow"] = workflow_instance
+        raised["gate"] = gate
+        raised["gate_key"] = gate_key
+        return "resolved"
+
+    original_workflow = _patch_workflow(fake)
+    original_raise_gate = workflow_module.raise_gate_direct
+    workflow_module.raise_gate_direct = fake_raise_gate
+    try:
+        await wf._check_credits()
+        assert wf._has_credits is False
+        assert wf.is_paused is False
+        assert raised["workflow"] is wf
+        assert raised["gate_key"] == "subscription"
+        assert raised["gate"]["type"] == "subscription"
+        assert raised["gate"]["action"]["url"] == "https://roselabs.ai/s/free-credit"
+        assert raised["gate"]["presentation"]["title"] == "Subscribe to continue this task"
+        assert raised["gate"]["presentation"]["reason"].startswith("Your free credits are exhausted")
+        activity_names = [name for name, _args in fake.activity_calls]
+        assert activity_names == ["check_user_usage", "mint_subscription_checkout_activity"]
+    finally:
+        workflow_module.raise_gate_direct = original_raise_gate
+        _restore_workflow(original_workflow)
 
 
 async def test_workflow_check_credits_has_credits_no_pause():
@@ -2651,9 +3108,7 @@ async def test_workflow_run_covers_chat_agent_startup_and_completion():
         }
         assert "mark_finished" in activity_names
         init_posts = [
-            c
-            for c in fake.activity_calls
-            if c[0] == "post_agent_message" and c[1][3].get("toolName") == "agent_init"
+            c for c in fake.activity_calls if c[0] == "post_agent_message" and c[1][3].get("toolName") == "agent_init"
         ]
         assert len(init_posts) == 2
         assert init_posts[0][1][3]["toolCallId"] == "tc-agent-init"
@@ -2985,6 +3440,94 @@ async def test_workflow_check_parent_state_parent_resumes_clears_inherit():
         _restore_workflow(original)
 
 
+async def test_workflow_check_parent_state_parent_missing_orphans_child():
+    """A child paused by its parent is orphaned (aborts) once the parent is gone,
+    instead of staying paused forever (the busy-spin livelock)."""
+    wf = _bare_workflow_instance()
+    wf.parent_workflow_id = "parent-wf"
+    wf.agent_id = "child"
+    wf.bus_id = "bus-1"
+    wf.goal = "g"
+    wf.is_paused = True
+    wf._paused_by_parent = True
+    fake = _FakeWorkflowModule()
+
+    async def fake_exec(fn, args=None, **kwargs):
+        if getattr(fn, "__name__", "") == "query_parent_state_activity":
+            return {"parent_missing": True}
+        return None
+
+    fake.execute_activity = fake_exec
+    original = _patch_workflow(fake)
+    try:
+        await wf._check_parent_state()
+        assert wf._orphaned is True
+        assert wf.is_paused is False
+        assert wf._paused_by_parent is False
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_check_parent_state_parent_missing_ignores_manual_pause():
+    """parent_missing must NOT abort a child that paused for its own reasons
+    (user/credits) — only one that inherited its pause from the parent."""
+    wf = _bare_workflow_instance()
+    wf.parent_workflow_id = "parent-wf"
+    wf.agent_id = "child"
+    wf.bus_id = "bus-1"
+    wf.goal = "g"
+    wf.is_paused = True
+    wf._paused_by_parent = False  # manual / credits pause, not inherited
+    fake = _FakeWorkflowModule()
+
+    async def fake_exec(fn, args=None, **kwargs):
+        if getattr(fn, "__name__", "") == "query_parent_state_activity":
+            return {"parent_missing": True}
+        return None
+
+    fake.execute_activity = fake_exec
+    original = _patch_workflow(fake)
+    try:
+        await wf._check_parent_state()
+        assert wf._orphaned is False
+        assert wf.is_paused is True  # left as-is
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_check_parent_state_transient_failure_backstop_orphans():
+    """After N consecutive transient parent-read failures while paused-by-parent,
+    the child gives up and orphans — backstop for a parent whose 'gone' state can't
+    be cleanly classified."""
+    from workflows.agent_workflow import _ORPHAN_TRANSIENT_FAILURE_LIMIT
+
+    wf = _bare_workflow_instance()
+    wf.parent_workflow_id = "parent-wf"
+    wf.agent_id = "child"
+    wf.bus_id = "bus-1"
+    wf.goal = "g"
+    wf.is_paused = True
+    wf._paused_by_parent = True
+    fake = _FakeWorkflowModule()
+
+    async def fake_exec(fn, args=None, **kwargs):
+        if getattr(fn, "__name__", "") == "query_parent_state_activity":
+            return {}  # transient failure every time
+        return None
+
+    fake.execute_activity = fake_exec
+    original = _patch_workflow(fake)
+    try:
+        for _ in range(_ORPHAN_TRANSIENT_FAILURE_LIMIT - 1):
+            await wf._check_parent_state()
+        assert wf._orphaned is False  # not yet
+        await wf._check_parent_state()  # hits the limit
+        assert wf._orphaned is True
+        assert wf.is_paused is False
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_mark_complete_happy_path():
     """_mark_complete posts summary, updates tree, signals parent."""
     wf = _bare_workflow_instance()
@@ -3024,9 +3567,7 @@ async def test_workflow_mark_complete_happy_path():
             and (args[3] or {}).get("toolName") == "completion_summary"
             and (args[3] or {}).get("toolStatus") == "FINISHED"
         )
-        mark_finished_index = next(
-            i for i, (name, _args) in enumerate(fake.activity_calls) if name == "mark_finished"
-        )
+        mark_finished_index = next(i for i, (name, _args) in enumerate(fake.activity_calls) if name == "mark_finished")
         assert mark_finished_index < final_summary_index
         # Child-completed signal to parent
         signal_names = [s[1] for s in fake.signal_calls]
@@ -3374,6 +3915,283 @@ async def test_workflow_execute_tool_web_fetch_preserves_fast_mode_kwargs():
     finally:
         workflow_module.TOOL_EXECUTORS["web_fetch"] = original_executor
         _restore_workflow(original)
+
+
+async def test_workflow_approval_text_repopulates_same_tool_then_executes_once():
+    """Approved-with-text refreshes only the pending call's params and does not gate twice."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-approval-jit"
+    wf.user_id = "user-1"
+    wf.current_phase = "EXECUTE"
+    wf.fast_mode_cache_enabled = True
+    wf.fast_cache_goal = "Call the restaurant and book dinner"
+    wf._current_tools = ["call_phone_number", "web_search", "attempt_completion"]
+    wf.context = [
+        {
+            "role": "USER",
+            "text": "Call the restaurant and book dinner",
+            "timestamp": "2026-07-11T20:40:00+00:00",
+        }
+    ]
+    original_args = {
+        "to": "+15555550123",
+        "system_prompt": "Book dinner for 8:44 PM local time.",
+        "output_schema": {
+            "fields": [
+                {
+                    "name": "reservation_status",
+                    "type": "str",
+                    "required": True,
+                    "description": "Whether the reservation was booked",
+                }
+            ]
+        },
+    }
+    updated_args = {
+        **original_args,
+        "system_prompt": "Book dinner for 1:45 PM local time.",
+    }
+    approval_calls: List[str] = []
+    executor_calls: List[Dict[str, Any]] = []
+    token_calls: List[Dict[str, Any]] = []
+
+    import workflows.agent_workflow as workflow_module
+
+    async def fake_approval(workflow_instance, question, metadata=None, **kwargs):
+        approval_calls.append(question)
+        return {
+            "response": "its 1:45pm local time",
+            "question": question,
+            "attention_request_id": "req-approval-jit",
+        }
+
+    async def fake_call_executor(**kwargs):
+        executor_calls.append(kwargs)
+        return {"result": {"status": "queued"}}
+
+    async def fake_build_system_prompt():
+        return "stable system prompt"
+
+    async def fake_on_tokens(*args, **kwargs):
+        token_calls.append({"args": args, "kwargs": kwargs})
+
+    wf.build_system_prompt = fake_build_system_prompt
+    wf._on_tokens = fake_on_tokens
+
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["call_llm_activity"] = {
+        "tool_calls": [{"tool": "call_phone_number", **updated_args}],
+        "usage": {
+            "prompt_tokens": 120,
+            "completion_tokens": 20,
+            "cache_read_input_tokens": 100,
+            "cache_creation_input_tokens": 0,
+            "actual_model": "anthropic/claude-sonnet-4.6",
+        },
+    }
+    original_workflow = _patch_workflow(fake)
+    original_approval = workflow_module.request_user_approval_direct
+    original_executor = workflow_module.TOOL_EXECUTORS["call_phone_number"]
+    workflow_module.request_user_approval_direct = fake_approval
+    workflow_module.TOOL_EXECUTORS["call_phone_number"] = fake_call_executor
+    try:
+        result = await wf._execute_tool("call_phone_number", original_args, "tc-approval-jit")
+
+        assert result["success"] is True
+        assert len(approval_calls) == 1, "The already-approved refreshed call must not be gated again"
+        assert len(executor_calls) == 1
+        assert executor_calls[0]["tool_call"] == {"tool": "call_phone_number", **updated_args}
+
+        llm_calls = [call for call in fake.activity_calls if call[0] == "call_llm_activity"]
+        assert len(llm_calls) == 1
+        llm_args = llm_calls[0][1]
+        import inspect
+
+        positional_params = [
+            parameter
+            for parameter in inspect.signature(workflow_module.call_llm_activity).parameters.values()
+            if parameter.kind
+            in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        assert len(llm_args) <= len(positional_params)
+        assert llm_args[2] == wf._current_tools, "JIT must preserve the execute-phase tool schema"
+        assert llm_args[8] == "approval_param_populator"
+        assert llm_args[9] == "stable system prompt"
+        assert "its 1:45pm local time" in llm_args[10]
+        assert llm_args[11] == "call_phone_number"
+        assert llm_args[12] is True, "JIT calls must read the stable prefix without writing a new cache tail"
+        assert llm_args[25] is True, "JIT calls must inherit the workflow's Fast Mode setting"
+        assert llm_args[26] == "Call the restaurant and book dinner"
+        assert llm_args[28] is True, "JIT calls must force canonical backend context on every worker"
+        assert llm_args[29] is True, "JIT must cache the stable context before its unique feedback suffix"
+        assert len(token_calls) == 1
+        assert token_calls[0]["kwargs"]["cache_read_input_tokens"] == 100
+        assert token_calls[0]["kwargs"]["call_site"] == "approval_param_populator"
+    finally:
+        workflow_module.request_user_approval_direct = original_approval
+        workflow_module.TOOL_EXECUTORS["call_phone_number"] = original_executor
+        _restore_workflow(original_workflow)
+
+
+async def test_workflow_plain_approval_executes_original_params_without_jit():
+    """A plain Approve click remains the direct approval -> execution path."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-plain-approval"
+    wf.user_id = "user-1"
+    wf.current_phase = "EXECUTE"
+    original_args = {
+        "to": "+15555550123",
+        "system_prompt": "Confirm the restaurant's hours.",
+        "output_schema": {
+            "fields": [
+                {
+                    "name": "hours",
+                    "type": "str",
+                    "required": True,
+                    "description": "Restaurant hours",
+                }
+            ]
+        },
+    }
+    executor_calls: List[Dict[str, Any]] = []
+
+    import workflows.agent_workflow as workflow_module
+
+    async def fake_approval(workflow_instance, question, metadata=None, **kwargs):
+        return {"response": "Approved", "question": question, "attention_request_id": "req-plain"}
+
+    async def fake_call_executor(**kwargs):
+        executor_calls.append(kwargs)
+        return {"result": {"status": "queued"}}
+
+    fake = _FakeWorkflowModule()
+    original_workflow = _patch_workflow(fake)
+    original_approval = workflow_module.request_user_approval_direct
+    original_executor = workflow_module.TOOL_EXECUTORS["call_phone_number"]
+    workflow_module.request_user_approval_direct = fake_approval
+    workflow_module.TOOL_EXECUTORS["call_phone_number"] = fake_call_executor
+    try:
+        result = await wf._execute_tool("call_phone_number", original_args, "tc-plain-approval")
+
+        assert result["success"] is True
+        assert len(executor_calls) == 1
+        assert executor_calls[0]["tool_call"] == {"tool": "call_phone_number", **original_args}
+        assert not any(call[0] == "call_llm_activity" for call in fake.activity_calls)
+    finally:
+        workflow_module.request_user_approval_direct = original_approval
+        workflow_module.TOOL_EXECUTORS["call_phone_number"] = original_executor
+        _restore_workflow(original_workflow)
+
+
+async def test_workflow_rejection_fails_tool_with_feedback_without_jit_or_execution():
+    """Reject remains a terminal error and carries typed feedback into tool context."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-rejected-approval"
+    wf.user_id = "user-1"
+    wf.current_phase = "EXECUTE"
+    tool_args = {
+        "to": "+15555550123",
+        "system_prompt": "Book dinner.",
+        "output_schema": {
+            "fields": [
+                {
+                    "name": "status",
+                    "type": "str",
+                    "required": True,
+                    "description": "Booking status",
+                }
+            ]
+        },
+    }
+    executor_calls: List[Dict[str, Any]] = []
+    handled_events = []
+
+    import workflows.agent_workflow as workflow_module
+
+    async def fake_approval(workflow_instance, question, metadata=None, **kwargs):
+        raise workflow_module.UserRejectedError(
+            "User rejected the approval request",
+            rejection_message="the local time is wrong",
+        )
+
+    async def fake_call_executor(**kwargs):
+        executor_calls.append(kwargs)
+        return {"result": {"status": "queued"}}
+
+    async def fake_handle(event, tool_call_id, tool_name):
+        handled_events.append((event, tool_call_id, tool_name))
+
+    wf._handle_tool_event = fake_handle
+    fake = _FakeWorkflowModule()
+    original_workflow = _patch_workflow(fake)
+    original_approval = workflow_module.request_user_approval_direct
+    original_executor = workflow_module.TOOL_EXECUTORS["call_phone_number"]
+    workflow_module.request_user_approval_direct = fake_approval
+    workflow_module.TOOL_EXECUTORS["call_phone_number"] = fake_call_executor
+    try:
+        result = await wf._execute_tool("call_phone_number", tool_args, "tc-rejected-approval")
+
+        assert result["error"] is True
+        assert result["message"] == 'User rejected with feedback: "the local time is wrong"'
+        assert executor_calls == []
+        assert not any(call[0] == "call_llm_activity" for call in fake.activity_calls)
+        assert len(handled_events) == 1
+        assert handled_events[0][0].status.name == "ERROR"
+        assert "the local time is wrong" in handled_events[0][0].message
+    finally:
+        workflow_module.request_user_approval_direct = original_approval
+        workflow_module.TOOL_EXECUTORS["call_phone_number"] = original_executor
+        _restore_workflow(original_workflow)
+
+
+async def test_workflow_pre_patch_replay_skips_new_jit_command():
+    """Old Temporal histories replay their original approval -> executor command order."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-legacy-replay"
+    wf.user_id = "user-1"
+    wf.current_phase = "EXECUTE"
+    tool_args = {
+        "to": "+15555550123",
+        "system_prompt": "Book dinner at the proposed time.",
+        "output_schema": {
+            "fields": [
+                {
+                    "name": "status",
+                    "type": "str",
+                    "required": True,
+                    "description": "Booking status",
+                }
+            ]
+        },
+    }
+    executor_calls: List[Dict[str, Any]] = []
+
+    import workflows.agent_workflow as workflow_module
+
+    async def fake_approval(workflow_instance, question, metadata=None, **kwargs):
+        return {"response": "its 1:45pm local time", "question": question}
+
+    async def fake_call_executor(**kwargs):
+        executor_calls.append(kwargs)
+        return {"result": {"status": "queued"}}
+
+    fake = _FakeWorkflowModule(patched=False)
+    original_workflow = _patch_workflow(fake)
+    original_approval = workflow_module.request_user_approval_direct
+    original_executor = workflow_module.TOOL_EXECUTORS["call_phone_number"]
+    workflow_module.request_user_approval_direct = fake_approval
+    workflow_module.TOOL_EXECUTORS["call_phone_number"] = fake_call_executor
+    try:
+        result = await wf._execute_tool("call_phone_number", tool_args, "tc-legacy-replay")
+
+        assert result["success"] is True
+        assert len(executor_calls) == 1
+        assert executor_calls[0]["tool_call"] == {"tool": "call_phone_number", **tool_args}
+        assert not any(call[0] == "call_llm_activity" for call in fake.activity_calls)
+    finally:
+        workflow_module.request_user_approval_direct = original_approval
+        workflow_module.TOOL_EXECUTORS["call_phone_number"] = original_executor
+        _restore_workflow(original_workflow)
 
 
 async def test_workflow_refresh_claude_token_missing_fetches_and_sets():
@@ -3743,6 +4561,46 @@ async def run_all_tests():
     await r.record_async(
         "wf_signal_recv_user_json_no_req", test_workflow_signal_receive_user_response_json_without_request_id
     )
+    await r.record_async(
+        "wf_signal_wakes_schema_update",
+        test_workflow_signal_wakes_for_generated_schema_update_message,
+    )
+    await r.record_async(
+        "wf_signal_schema_prefix_is_feedback",
+        test_workflow_signal_treats_schema_prefix_as_genuine_user_feedback,
+    )
+    await r.record_async(
+        "wf_signal_unknown_schema_envelope_is_feedback",
+        test_workflow_signal_unknown_schema_envelope_is_user_feedback,
+    )
+    await r.record_async(
+        "wf_refresh_schema_from_feedback",
+        test_workflow_refreshes_response_schema_from_user_feedback,
+    )
+    await r.record_async(
+        "wf_verifier_refreshes_schema_from_feedback",
+        test_workflow_verifier_refreshes_response_schema_from_user_feedback,
+    )
+    await r.record_async(
+        "wf_schema_refresh_unchanged_no_context",
+        test_workflow_schema_refresh_skips_context_message_when_unchanged,
+    )
+    await r.record_async(
+        "wf_schema_refresh_failure_falls_back",
+        test_workflow_schema_refresh_failure_falls_back_until_new_feedback,
+    )
+    await r.record_async(
+        "wf_schema_message_failure_falls_back",
+        test_workflow_schema_refresh_message_failure_falls_back_to_last_schema,
+    )
+    await r.record_async(
+        "wf_schema_refresh_reloads_feedback",
+        test_workflow_schema_refresh_reloads_prior_feedback_after_continuation,
+    )
+    await r.record_async(
+        "wf_schema_refresh_coalesces_feedback",
+        test_workflow_schema_refresh_coalesces_rapid_feedback,
+    )
     await r.record_async("wf_signal_signup", test_workflow_signal_signup_completed_and_dismissed)
     await r.record_async("wf_signal_child_cost_update", test_workflow_signal_child_cost_update_aggregates)
     await r.record_async("wf_signal_child_progress", test_workflow_signal_child_progress_tracks_deltas)
@@ -3797,6 +4655,10 @@ async def run_all_tests():
     await r.record_async("wf_handle_incomplete_error", test_workflow_handle_incomplete_error)
     await r.record_async("wf_handle_incomplete_unknown", test_workflow_handle_incomplete_unknown_passthrough)
     await r.record_async("wf_check_credits_no_credits", test_workflow_check_credits_no_credits_pauses)
+    await r.record_async(
+        "wf_check_credits_free_credit_subscription_gate",
+        test_workflow_check_credits_free_credits_exhausted_raises_subscription_gate,
+    )
     await r.record_async("wf_check_credits_has_credits", test_workflow_check_credits_has_credits_no_pause)
     await r.record_async("wf_check_credits_exception", test_workflow_check_credits_on_exception_continues)
     await r.record_async("wf_post_message", test_workflow_post_message_executes_activity)
@@ -3821,6 +4683,9 @@ async def run_all_tests():
     await r.record_async("wf_check_parent_paused", test_workflow_check_parent_state_parent_paused_inherits)
     await r.record_async("wf_check_parent_cost_limited", test_workflow_check_parent_state_parent_cost_limited_inherits)
     await r.record_async("wf_check_parent_resumes", test_workflow_check_parent_state_parent_resumes_clears_inherit)
+    await r.record_async("wf_check_parent_missing_orphans", test_workflow_check_parent_state_parent_missing_orphans_child)
+    await r.record_async("wf_check_parent_missing_ignores_manual", test_workflow_check_parent_state_parent_missing_ignores_manual_pause)
+    await r.record_async("wf_check_parent_transient_backstop", test_workflow_check_parent_state_transient_failure_backstop_orphans)
     await r.record_async("wf_mark_complete_happy", test_workflow_mark_complete_happy_path)
     await r.record_async("wf_mark_complete_no_parent", test_workflow_mark_complete_no_parent_no_signal)
     await r.record_async("wf_format_outputs_with_schema", test_workflow_format_outputs_with_schema)
@@ -3850,6 +4715,22 @@ async def run_all_tests():
     await r.record_async(
         "wf_execute_tool_web_fetch_fast_mode_kwargs",
         test_workflow_execute_tool_web_fetch_preserves_fast_mode_kwargs,
+    )
+    await r.record_async(
+        "wf_approval_text_repopulates_same_tool",
+        test_workflow_approval_text_repopulates_same_tool_then_executes_once,
+    )
+    await r.record_async(
+        "wf_plain_approval_executes_original_params",
+        test_workflow_plain_approval_executes_original_params_without_jit,
+    )
+    await r.record_async(
+        "wf_rejection_fails_with_feedback",
+        test_workflow_rejection_fails_tool_with_feedback_without_jit_or_execution,
+    )
+    await r.record_async(
+        "wf_pre_patch_replay_skips_jit",
+        test_workflow_pre_patch_replay_skips_new_jit_command,
     )
     await r.record_async("wf_refresh_claude_token_missing", test_workflow_refresh_claude_token_missing_fetches_and_sets)
     await r.record_async(

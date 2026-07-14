@@ -905,6 +905,7 @@ async def generate_completion_summary(
         from providers.fast_cache.context import (
             set_context as set_fast_cache_context,
         )
+        from utils.user_facing_writing_prompt import USER_FACING_WRITING_STYLE
 
         # Build context about structured output (for LLM awareness, not for formatting)
         structured_output_context = ""
@@ -919,6 +920,8 @@ async def generate_completion_summary(
                 structured_output_context += f"- {formatted_key}: {formatted_value}\n"
 
         system_prompt = f"""You are summarizing the work completed by an AI agent.
+
+{USER_FACING_WRITING_STYLE}
 
 ORIGINAL GOAL: {goal}
 {structured_output_context}

@@ -7,6 +7,8 @@
  * Pair them with the dispatcher in supervisorTools.ts.
  */
 
+import { userFacingTextDescription } from '../userFacingWritingPrompt';
+
 export const TOOL_SCHEMAS = [
   {
     name: 'reply_to_agent',
@@ -111,14 +113,14 @@ Usage:
 - \`pattern\` is a regular expression. Plain text works for literal searches.
 - \`source\` is optional. Omit it to search messages and network.
 - Supported sources: messages, network, transactions, documents.
-- Grep-style flags: -A lines after, -B lines before, -C/context both sides, -n line numbers, -i case-insensitive, head_limit, offset, multiline.
+- Grep-style flags: for messages, -A/-B/-C/context return adjacent message records; for text records they return logical lines. -n controls numbering, -i is case-insensitive, head_limit supports up to 100, plus offset and multiline.
 - Use nested \`filters\` for source-specific narrowing. For messages: \`person\` and \`since\`. Legacy top-level \`person\` and \`since\` still work for messages.
 - For transactions: \`filters.since\`, \`filters.until\`, \`filters.account\`, \`filters.min_amount\`, \`filters.max_amount\`, \`filters.status\` (\`posted\`, \`pending\`, or \`all\`), and \`filters.include_pending_in_totals\`.
 - Transaction results include row snippets plus full-result aggregate totals by currency. Pending rows are visible, but excluded from totals unless \`include_pending_in_totals\` is true.
 - Use \`source="documents"\` for synced ChatGPT/Claude exports, Apple Notes, Obsidian vault notes, and generic text documents. For documents: \`filters.document_source\` (\`chatgpt\`, \`claude\`, \`apple_notes\`, \`obsidian\`), \`filters.since\`, \`filters.until\`, \`filters.path\`, and \`filters.tag\`.
 
 Returns:
-- matching records with surrounding context and location metadata.`,
+- matching records with full bodies, aligned per-record metadata, explicit pagination metadata, and oldest-first display for message conversations.`,
     parameters: {
       type: 'object' as const,
       properties: {
@@ -135,20 +137,23 @@ Returns:
         },
         '-B': {
           type: 'number' as const,
-          description: 'Number of logical lines to show before each match.',
+          description:
+            'Context before each match: adjacent message records for messages, logical lines for text records.',
         },
         '-A': {
           type: 'number' as const,
-          description: 'Number of logical lines to show after each match.',
+          description:
+            'Context after each match: adjacent message records for messages, logical lines for text records.',
         },
         '-C': {
           type: 'number' as const,
           description:
-            'Number of logical lines to show before and after each match. Alias for context.',
+            'Context on both sides: adjacent message records for messages, logical lines for text records. Alias for context.',
         },
         context: {
           type: 'number' as const,
-          description: 'Number of logical lines to show before and after each match.',
+          description:
+            'Context on both sides: adjacent message records for messages, logical lines for text records.',
         },
         '-n': {
           type: 'boolean' as const,
@@ -160,7 +165,7 @@ Returns:
         },
         head_limit: {
           type: 'number' as const,
-          description: 'Maximum number of returned result snippets. Defaults to 20.',
+          description: 'Maximum number of returned records (1-100). Defaults to 20.',
         },
         offset: {
           type: 'number' as const,
@@ -206,18 +211,38 @@ Returns:
     },
   },
   {
-    name: 'attempt_completion',
+    name: 'get_environment',
     description:
-      'Send the final SMS reply to the user. This is the only way to reply, and it also commits any queued write-tool calls from this turn. Call exactly once when you have an answer ready.',
+      'Refresh the current runtime environment: current datetime, agent hierarchy, pending requests, and recent agent activity. Takes no arguments. The result is runtime context, not user-authored SMS content, and is not persisted in the SMS conversation.',
+    parameters: {
+      type: 'object' as const,
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: 'send_user_message',
+    description:
+      'Send an SMS to the user now. This does not end the run: continue using tools if more work or a later result is needed, then call attempt_completion when the run is actually complete.',
     parameters: {
       type: 'object' as const,
       properties: {
         message: {
           type: 'string' as const,
-          description: 'The SMS message to send to the user',
+          description: userFacingTextDescription('The exact SMS message to send to the user.'),
         },
       },
       required: ['message'],
+    },
+  },
+  {
+    name: 'attempt_completion',
+    description:
+      'End the current run. This sends no message and accepts no information. The runtime rejects it unless this run has already successfully called send_user_message at least once.',
+    parameters: {
+      type: 'object' as const,
+      properties: {},
+      required: [],
     },
   },
 ];

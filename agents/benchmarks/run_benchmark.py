@@ -38,7 +38,7 @@ import sys
 import tempfile
 import time
 import uuid
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
@@ -59,8 +59,10 @@ from benchmarks.benchmark_tasks import (
     list_all_tasks,
 )
 from benchmarks.context_validator import validate_context
+from benchmarks.live_fixtures import LIVE_FIXTURE_NAMES, resolve_live_fixtures
 from benchmarks.logs import (
     collect_logs,
+    collect_tree_messages,
     load_env_var,
     start_fly_log_collector,
     start_supabase_realtime_collector,
@@ -122,10 +124,14 @@ MINTED_AGENT_ACCOUNT_TASK_NAMES = {
 }
 MINTED_AGENT_ACCOUNT_X_POST_GOAL = "Make a post on X.com that says, Hello World"
 GREP_EXPLORE_STRESS_TASK_NAME = "grep-explore-stress"
-# Tasks whose setup restores a whole-DB snapshot (drops + recreates tables).
-# The parallel scheduler runs these serially after the batch drains — a
-# mid-batch restore destroys every concurrent task's rows (poll 404 cascade).
-EXCLUSIVE_DB_RESTORE_TASK_NAMES = {GREP_EXPLORE_STRESS_TASK_NAME}
+AMAZON_PASSKEY_TASK_NAME = "browser-agent-amazon-passkey"
+# Tasks whose fixtures destructively mutate shared benchmark DB state. The
+# parallel scheduler runs these serially after the batch drains so they cannot
+# corrupt an in-flight sibling task. Each fixture must also restore its state.
+EXCLUSIVE_SHARED_DB_TASK_NAMES = {
+    GREP_EXPLORE_STRESS_TASK_NAME,
+    AMAZON_PASSKEY_TASK_NAME,
+}
 USER_DATA_PROD_GREP_TASK_NAME = "user-data-prod-grep"
 USER_DATA_PROD_DOCUMENT_SOURCES = {"chatgpt", "claude", "apple_notes", "obsidian"}
 USER_DATA_PROD_CHECKLIST_KEYS = {"provider_validation_checklist", "provider_verification_checklist"}
@@ -145,13 +151,10 @@ MINTED_AGENT_ACCOUNT_X_AUTH_HINT = (
     "stop and report that as a terminal phone-auth blocker instead of retrying alternate phone formats."
 )
 AMAZON_AUTH_ASSISTANCE_TASK_NAME = "browser-agent"
-AMAZON_COOKIE_PAYMENT_TASK_NAME = "browser-agent-amazon-cookie-payment"
 AGENT_PAYMENT_TEST_SHOP_TASK_NAME = "agent-payment-test-shop"
 AGENT_PAYMENT_PRODUCTION_TASK_NAME = "agent-payment-production-abandonment"
-AMAZON_COOKIE_BOOTSTRAP_TASK_NAMES = {
-    AMAZON_AUTH_ASSISTANCE_TASK_NAME,
-    AMAZON_COOKIE_PAYMENT_TASK_NAME,
-}
+# Cookie-bundle bootstrap for these tasks is now declared as the `amazon_auth`
+# live fixture in tasks.json (see live_fixtures.py), not a task-name branch.
 BENCHMARK_FORCE_SHOW_PASSWORDS_ENV = "BENCHMARK_FORCE_SHOW_PASSWORDS"
 BAD_AMAZON_PASSWORD_USERNAME = "andyprevalsky@yahoo.com"
 BAD_AMAZON_COOKIE_SOURCE = "benchmark_bad_auth"
@@ -162,6 +165,24 @@ _AGENTS_ENV = os.path.join(os.path.dirname(__file__), "..", ".env")
 _BACKEND_ENV = os.path.join(os.path.dirname(__file__), "..", "..", "back-end", ".env")
 API_KEY = load_env_var("BACKEND_API_KEY", _AGENTS_ENV, _BACKEND_ENV)
 USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
+FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME = "gate-subscription-free-credit"
+FREE_CREDIT_SUBSCRIPTION_GATE_USER_ID = "00000000-0000-4000-8000-000000000101"
+PURCHASE_SUBSCRIPTION_GATE_TASK_NAME = "gate-subscription-card-mint"
+PURCHASE_KYC_GATE_TASK_NAME = "gate-kyc-card-mint"
+SOURCE_CONNECT_GATE_TASK_NAME = "gate-source-connect-gmail"
+PURCHASE_SUBSCRIPTION_GATE_USER_ID = "00000000-0000-4000-8000-000000000102"
+PURCHASE_KYC_GATE_USER_ID = "00000000-0000-4000-8000-000000000103"
+SOURCE_CONNECT_GATE_USER_ID = "00000000-0000-4000-8000-000000000104"
+GATE_FIXTURE_TASK_MODES = {
+    PURCHASE_SUBSCRIPTION_GATE_TASK_NAME: "purchase-subscription",
+    PURCHASE_KYC_GATE_TASK_NAME: "purchase-kyc",
+    SOURCE_CONNECT_GATE_TASK_NAME: "source-connect",
+}
+GATE_FIXTURE_TASK_USER_IDS = {
+    PURCHASE_SUBSCRIPTION_GATE_TASK_NAME: PURCHASE_SUBSCRIPTION_GATE_USER_ID,
+    PURCHASE_KYC_GATE_TASK_NAME: PURCHASE_KYC_GATE_USER_ID,
+    SOURCE_CONNECT_GATE_TASK_NAME: SOURCE_CONNECT_GATE_USER_ID,
+}
 DEFAULT_MINTED_BENCHMARK_AGENT_EMAIL = "rose.harbor47@mail.roselabs.ai"
 DEFAULT_MINTED_BENCHMARK_AGENT_PHONE = "+18159823405"
 SMOKE_MEMORY_MAX_GROWTH_MB = float(os.environ.get("BENCHMARK_SMOKE_MEMORY_MAX_GROWTH_MB", "256"))
@@ -272,6 +293,9 @@ def _attention_request_kind(req: dict) -> str:
     """Classify attention request metadata for typed benchmark assertions."""
     metadata = req.get("metadata") if isinstance(req, dict) else None
     metadata = metadata if isinstance(metadata, dict) else {}
+    gate = metadata.get("gate")
+    if isinstance(gate, dict) and isinstance(gate.get("type"), str):
+        return f"gate:{gate['type']}"
     explicit_kind = metadata.get("attentionKind") or metadata.get("attention_kind")
     if isinstance(explicit_kind, str) and explicit_kind:
         return explicit_kind
@@ -303,6 +327,8 @@ def _attention_request_matches_task(
     req: dict,
     observed_count: int = 0,
 ) -> bool:
+    if task.expected_gate:
+        return _gate_request_matches_task(task, req)
     expected_kind = _expected_attention_kind(task, observed_count)
     if not expected_kind:
         return True
@@ -315,6 +341,38 @@ def _should_auto_approve_attention(task: BenchmarkTask, req: dict) -> bool:
         and _attention_request_kind(req)
         == "agentcard_user_cardholder_onboarding_required"
     )
+
+
+def _gate_request_matches_task(task: BenchmarkTask, req: dict) -> bool:
+    metadata = req.get("metadata") if isinstance(req, dict) else None
+    metadata = metadata if isinstance(metadata, dict) else {}
+    gate = metadata.get("gate")
+    if not isinstance(gate, dict):
+        return False
+    expected = task.expected_gate or {}
+    for key in ("type", "gateKey", "severity"):
+        value = expected.get(key)
+        if value is not None and not _expected_gate_value_matches(gate.get(key), value):
+            return False
+    expected_context = expected.get("context")
+    if isinstance(expected_context, dict):
+        context = gate.get("context") if isinstance(gate.get("context"), dict) else {}
+        for key, value in expected_context.items():
+            if not _expected_gate_value_matches(context.get(key), value):
+                return False
+    expected_detection = expected.get("detection")
+    if isinstance(expected_detection, dict):
+        detection = gate.get("detection") if isinstance(gate.get("detection"), dict) else {}
+        for key, value in expected_detection.items():
+            if not _expected_gate_value_matches(detection.get(key), value):
+                return False
+    return True
+
+
+def _expected_gate_value_matches(actual: Any, expected: Any) -> bool:
+    if isinstance(expected, list):
+        return actual in expected
+    return actual == expected
 
 
 def _digits_only(value: object) -> str:
@@ -332,6 +390,58 @@ def _phone_approval_matches_callee(task: BenchmarkTask, req: dict) -> bool:
     haystack = json.dumps(req, default=str)
     haystack_digits = _digits_only(haystack)
     return bool(expected_digits and expected_digits in haystack_digits)
+
+
+def _fetch_wmh_usage() -> Optional[dict]:
+    """Best-effort cumulative WMH usage (cost + tokens) from the served WMH.
+
+    The served WMH (`benchmarks.serve_world_model`) exposes `GET /rose_usage`, backed
+    by the per-process accumulator every `RoseWMHProvider` step records into. Returns
+    the snapshot dict (`total_cost_usd`, `input_tokens`, `output_tokens`, `calls`), or
+    None when no WMH is served / it's unreachable — the report card then renders "—"
+    rather than an invented number.
+    """
+    base = os.environ.get("WMH_BASE_URL", "").strip().rstrip("/")
+    if not base:
+        return None
+    try:
+        resp = httpx.get(f"{base}/rose_usage", timeout=5.0)
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _fetch_wmh_grounding_usd() -> Optional[float]:
+    """WMH grounding cost (USD) — thin wrapper over `_fetch_wmh_usage`."""
+    payload = _fetch_wmh_usage()
+    cost = payload.get("total_cost_usd") if payload else None
+    if cost is None:
+        return None
+    try:
+        return float(cost)
+    except (TypeError, ValueError):
+        return None
+
+
+def _infra_usd_for_elapsed(elapsed_s: float) -> Optional[float]:
+    """vCPU/machine cost for `elapsed_s` at the run's per-hour rate.
+
+    The controller (run-bench-cloud / run-bench-fleet) sets BENCHMARK_VM_USD_PER_HOUR
+    from the machine size it provisioned. Absent (local runs / not on a billed VM) →
+    None, so the dashboard shows "—" instead of a fabricated $0.
+    """
+    raw = os.environ.get("BENCHMARK_VM_USD_PER_HOUR", "").strip()
+    if not raw:
+        return None
+    try:
+        rate = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if rate <= 0:
+        return None
+    return round(rate * (max(0.0, float(elapsed_s)) / 3600.0), 6)
 
 
 def _benchmark_context_path() -> Path:
@@ -578,6 +688,13 @@ async def _update_world_model_before_simulation(args) -> None:
     global _WORLD_MODEL_UPDATE_RESULT
     if _world_model_mode_from_args(args) != "simulate":
         return
+    # When the WMH is already served (run.sh builds + serves the model and exports
+    # WMH_BASE_URL, which local.py injects here), that served model is authoritative.
+    # Rebuilding/refreshing the corpus from R2 in-process would be redundant work and
+    # could target a different build dir — defer to the served model instead.
+    if os.environ.get("WMH_BASE_URL"):
+        print("\n  World model already served (WMH_BASE_URL set) — skipping pre-run corpus update.")
+        return
     _WORLD_MODEL_UPDATE_EVENTS.clear()
     print("\n  Updating world model before simulated benchmark run...")
     try:
@@ -686,21 +803,48 @@ def _default_timeout_for_task(task: BenchmarkTask, max_seconds: int | None = Non
 # ============================================================
 
 _cached_headers: Optional[dict] = None
+_cached_headers_user_id: Optional[str] = None
 _auth_mode: Optional[str] = None  # "jwt" or "api_key"
+
+
+def _current_benchmark_user_id() -> str:
+    return os.environ.get("BENCHMARK_RUN_USER_ID", "").strip() or USER_ID
+
+
+def _free_credit_subscription_gate_user_id() -> str:
+    return (
+        os.environ.get("BENCHMARK_FREE_CREDIT_SUBSCRIPTION_GATE_USER_ID", "").strip()
+        or FREE_CREDIT_SUBSCRIPTION_GATE_USER_ID
+    )
 
 
 async def _api_headers() -> dict:
     """Get auth headers — JWT for prod, API key fallback. Caches after first success."""
-    global _cached_headers, _auth_mode
+    global _cached_headers, _cached_headers_user_id, _auth_mode
 
-    if _cached_headers and _auth_mode in {"jwt", "api_key"}:
+    user_id = _current_benchmark_user_id()
+
+    if _cached_headers and _cached_headers_user_id == user_id and _auth_mode in {"jwt", "api_key"}:
+        return dict(_cached_headers)
+
+    if user_id != USER_ID:
+        if not API_KEY:
+            raise RuntimeError("BACKEND_API_KEY env var is required for benchmark user overrides.")
+        _auth_mode = "api_key"
+        _cached_headers_user_id = user_id
+        _cached_headers = {
+            "X-API-Key": API_KEY,
+            "X-User-Id": user_id,
+            "Content-Type": "application/json",
+        }
         return dict(_cached_headers)
 
     # If we already know API key is the only option, skip JWT attempts
     if _auth_mode == "api_key":
+        _cached_headers_user_id = user_id
         _cached_headers = {
             "X-API-Key": API_KEY,
-            "X-User-Id": USER_ID,
+            "X-User-Id": user_id,
             "Content-Type": "application/json",
         }
         return dict(_cached_headers)
@@ -717,6 +861,7 @@ async def _api_headers() -> dict:
                 "X-User-Id": user_id,
                 "Content-Type": "application/json",
             }
+            _cached_headers_user_id = user_id
             _auth_mode = "api_key"
             return dict(_cached_headers)
 
@@ -727,6 +872,7 @@ async def _api_headers() -> dict:
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json",
         }
+        _cached_headers_user_id = user_id
         _auth_mode = "jwt"
         return dict(_cached_headers)
     except Exception:
@@ -734,9 +880,10 @@ async def _api_headers() -> dict:
         if not API_KEY:
             raise RuntimeError("BACKEND_API_KEY env var is required when JWT auth is unavailable.")
         _auth_mode = "api_key"
+        _cached_headers_user_id = user_id
         _cached_headers = {
             "X-API-Key": API_KEY,
-            "X-User-Id": USER_ID,
+            "X-User-Id": user_id,
             "Content-Type": "application/json",
         }
         return dict(_cached_headers)
@@ -756,7 +903,7 @@ def _apply_local_agent_source_override(agent_id: str, source: str) -> None:
     _run_local_victoria_sql(
         'UPDATE "Agent" '
         f'SET source = {_sql_literal(source)} '
-        f'WHERE id = {_sql_literal(agent_id)} AND "userId" = {_sql_literal(USER_ID)};'
+        f'WHERE id = {_sql_literal(agent_id)} AND "userId" = {_sql_literal(_current_benchmark_user_id())};'
     )
 
 
@@ -1639,6 +1786,7 @@ async def _fetch_tree_stats(base_url: str, agent_id: str) -> dict:
 
     Returns dict with:
         agent_count, total_messages, total_cost_cents, active_count, failed_count,
+        tree_tokens_in, tree_tokens_out,
         error_agents (list of dicts with agent_id, status, error details),
         all_agents (list of raw agent dicts from tree API)
     """
@@ -1651,12 +1799,15 @@ async def _fetch_tree_stats(base_url: str, agent_id: str) -> dict:
                 "total_cost_cents": 0,
                 "active_count": 0,
                 "failed_count": 0,
+                "tree_tokens_in": 0,
+                "tree_tokens_out": 0,
                 "error_agents": [],
                 "all_agents": [],
             }
 
         total_msgs = sum(a.get("message_count", 0) for a in agents)
         total_cost = sum(a.get("tree_cost_cents", 0) for a in agents)
+        tree_tokens_in, tree_tokens_out = _tree_token_totals_from_agents(agents, agent_id)
         active = [a for a in agents if a.get("status") == "ACTIVE"]
         failed = [a for a in agents if a.get("status") in ("FAILED", "OUT_OF_CREDITS", "COST_LIMIT_REACHED")]
 
@@ -1666,6 +1817,8 @@ async def _fetch_tree_stats(base_url: str, agent_id: str) -> dict:
             "total_cost_cents": total_cost,
             "active_count": len(active),
             "failed_count": len(failed),
+            "tree_tokens_in": tree_tokens_in,
+            "tree_tokens_out": tree_tokens_out,
             "error_agents": [{"agent_id": a.get("agent_id", "")[:12], "status": a.get("status")} for a in failed],
             "all_agents": agents,
         }
@@ -1676,9 +1829,65 @@ async def _fetch_tree_stats(base_url: str, agent_id: str) -> dict:
             "total_cost_cents": 0,
             "active_count": 0,
             "failed_count": 0,
+            "tree_tokens_in": 0,
+            "tree_tokens_out": 0,
             "error_agents": [],
             "all_agents": [],
         }
+
+
+def _as_nonnegative_int(value) -> int:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(parsed, 0)
+
+
+def _tree_token_totals_from_agents(agents: list[dict], root_agent_id: str) -> tuple[int, int]:
+    if not agents:
+        return 0, 0
+    root = next((a for a in agents if a.get("agent_id") == root_agent_id or a.get("id") == root_agent_id), None)
+    candidates = [root] if root else []
+    candidates.extend(agents)
+    best_in = 0
+    best_out = 0
+    for agent in candidates:
+        if not agent:
+            continue
+        tokens_in = _as_nonnegative_int(agent.get("tokens_in", agent.get("tokensIn")))
+        tokens_out = _as_nonnegative_int(agent.get("tokens_out", agent.get("tokensOut")))
+        best_in = max(best_in, tokens_in)
+        best_out = max(best_out, tokens_out)
+        if agent is root and (tokens_in > 0 or tokens_out > 0):
+            return tokens_in, tokens_out
+    return best_in, best_out
+
+
+def _merge_tool_and_tree_tokens(
+    tool_tokens_in: int,
+    tool_tokens_out: int,
+    tree_tokens_in: int,
+    tree_tokens_out: int,
+    *,
+    tool_tokens_cover_tree: bool,
+) -> tuple[int, int]:
+    """Combine tool-usage and root tree counters without dropping chat-loop tokens.
+
+    Current workers write chat-loop calls to ToolUsage, so tool totals usually
+    already cover the root tree counters. Older backends return cache counters
+    without aggregate token fields; in that case cache totals and root tree
+    counters are separate inputs and must be added.
+    """
+    tool_tokens_in = _as_nonnegative_int(tool_tokens_in)
+    tool_tokens_out = _as_nonnegative_int(tool_tokens_out)
+    tree_tokens_in = _as_nonnegative_int(tree_tokens_in)
+    tree_tokens_out = _as_nonnegative_int(tree_tokens_out)
+    if not tool_tokens_cover_tree:
+        return tool_tokens_in + tree_tokens_in, tool_tokens_out + tree_tokens_out
+    tokens_in = max(tool_tokens_in, tree_tokens_in)
+    tokens_out = max(tool_tokens_out, tree_tokens_out)
+    return tokens_in, tokens_out
 
 
 async def _fetch_message_counts(base_url: str, agent_ids: List[str]) -> Dict[str, int]:
@@ -1705,8 +1914,9 @@ def suite_name_for_error(args) -> str:
     """Best-effort suite label for error messages — mirrors what the user ran."""
     if args.suite:
         return args.suite
-    if args.task:
-        return f"--task {args.task}"
+    task_names = task_names_from_args(args)
+    if task_names:
+        return "--task " + ",".join(task_names)
     return "smoke"
 
 
@@ -1778,6 +1988,8 @@ async def poll_agent(
     agentcard_setup_attention_seen = False
     chat_assistant_seen_at: Optional[float] = None
     payment_card_action_completed = False
+    task._mid_run_feedback_posted = False
+    task._mid_run_feedback_initial_schema = None
 
     resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
 
@@ -1855,7 +2067,7 @@ async def poll_agent(
 
         if realtime_monitor and realtime_monitor.failure_reason:
             realtime_failure = realtime_monitor.reconcile_snapshot(messages)
-            if realtime_failure:
+            if realtime_failure and status in TERMINAL_STATUSES:
                 return data, approvals_triggered, approvals_resolved, realtime_failure
 
         # Validate context well-formedness. Any error-severity violation is an
@@ -1878,6 +2090,31 @@ async def poll_agent(
             if errors:
                 reason = f"Context validation error: [{errors[0].rule}] {errors[0].message}"
                 return data, approvals_triggered, approvals_resolved, reason
+
+        # Regression tasks can inject genuine USER feedback after the run has
+        # produced durable work. Capture the already-generated schema first so
+        # evaluation can prove non-goal feedback did not revise it.
+        feedback_config = task.mid_run_feedback or {}
+        if feedback_config and not task._mid_run_feedback_posted and status not in TERMINAL_STATUSES:
+            after_message_count = int(feedback_config.get("after_root_message_count", 1))
+            feedback_message = feedback_config.get("message")
+            initial_schema = agent.get("response_schema")
+            if (
+                root_msg_count >= after_message_count
+                and isinstance(feedback_message, str)
+                and feedback_message.strip()
+                and isinstance(initial_schema, dict)
+                and initial_schema.get("fields")
+            ):
+                if await post_message(base_url, agent_id, feedback_message):
+                    task._mid_run_feedback_initial_schema = json.loads(json.dumps(initial_schema))
+                    task._mid_run_feedback_posted = True
+                    print(
+                        "    💬 Injected mid-run feedback after "
+                        f"{root_msg_count} root messages; captured {len(initial_schema['fields'])} schema field(s)"
+                    )
+                else:
+                    print("    ⚠ Failed to inject configured mid-run feedback; will retry")
 
         # Chat mode: done when we have ASSISTANT responses
         if task.is_chat_mode:
@@ -2118,12 +2355,30 @@ async def poll_agent(
                             expected_kind = _expected_attention_kind(task, approvals_triggered)
                             if not _attention_request_matches_task(task, req, approvals_triggered):
                                 observed_kind = _attention_request_kind(req)
+                                if (
+                                    task.expected_gate
+                                    and task.approval_handling == "auto_approve"
+                                    and observed_kind == "payment_approval"
+                                ):
+                                    await respond_to_attention_request(base_url, req_id, "approved")
+                                    approvals_resolved += 1
+                                    print(
+                                        f"    ✅ Auto-approved payment-card prerequisite {req_id[:8]}"
+                                    )
+                                    continue
                                 data["_benchmark"] = {
                                     **data.get("_benchmark", {}),
                                     "unexpected_attention_kind": observed_kind,
                                     "expected_attention_kind": expected_kind,
                                     "unexpected_attention_request_id": req_id,
                                 }
+                                if task.expected_gate:
+                                    return (
+                                        data,
+                                        approvals_triggered,
+                                        approvals_resolved,
+                                        f"Expected gate {task.expected_gate}, observed {observed_kind}",
+                                    )
                                 return (
                                     data,
                                     approvals_triggered,
@@ -2151,6 +2406,13 @@ async def poll_agent(
                                 data["_benchmark"] = {
                                     **data.get("_benchmark", {}),
                                     "expected_attention_kinds_seen": list(seen_attention_kinds),
+                                }
+                            if task.expected_gate:
+                                data["_benchmark"] = {
+                                    **data.get("_benchmark", {}),
+                                    "expected_gate_seen": True,
+                                    "expected_gate": (req.get("metadata") or {}).get("gate"),
+                                    "expected_gate_request_id": req_id,
                                 }
                             if task.expected_payment_receipt:
                                 data["_benchmark"] = {
@@ -2272,6 +2534,33 @@ async def poll_agent(
 # ============================================================
 
 
+def _validate_mid_run_feedback_schema(task: BenchmarkTask, data: dict) -> Optional[str]:
+    """Require non-goal mid-run feedback to leave the response schema untouched."""
+    if not task.mid_run_feedback:
+        return None
+    if not getattr(task, "_mid_run_feedback_posted", False):
+        return "Configured mid-run feedback was never posted"
+
+    initial_schema = getattr(task, "_mid_run_feedback_initial_schema", None)
+    final_schema = (data.get("agent") or {}).get("response_schema")
+    if initial_schema != final_schema:
+        return (
+            "Response schema changed after non-goal feedback: "
+            f"initial={json.dumps(initial_schema, sort_keys=True)} "
+            f"final={json.dumps(final_schema, sort_keys=True)}"
+        )
+
+    schema_update_messages = [
+        message
+        for message in data.get("messages", []) or []
+        if isinstance(message.get("metadata"), dict)
+        and message["metadata"].get("isResponseSchemaUpdate") is True
+    ]
+    if schema_update_messages:
+        return f"Non-goal feedback created {len(schema_update_messages)} hidden response-schema update message(s)"
+    return None
+
+
 def evaluate_task(
     task: BenchmarkTask,
     data: dict,
@@ -2344,6 +2633,10 @@ def evaluate_task(
             )
         if benchmark_state.get("agentcard_setup_attention_auto_resolved") is not True:
             return False, "AgentCard setup attention did not auto-resolve"
+
+    mid_run_schema_failure = _validate_mid_run_feedback_schema(task, data)
+    if mid_run_schema_failure:
+        return False, mid_run_schema_failure
 
     # Check expected tools were called
     all_metadata = " ".join(json.dumps(m.get("metadata", {})) for m in messages if m.get("metadata")).lower()
@@ -2755,6 +3048,61 @@ def _run_user_data_fixture(action: str) -> dict:
     return _parse_last_json_line(result.stdout)
 
 
+def _free_credit_subscription_fixture_env() -> dict:
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        raise RuntimeError("Local Victoria DB connection not found for free-credit subscription fixture")
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["BENCHMARK_USER_ID"] = _free_credit_subscription_gate_user_id()
+    return env
+
+
+def _run_free_credit_subscription_fixture(action: str) -> dict:
+    result = subprocess.run(
+        ["npx", "tsx", "scripts/free-credit-subscription-gate-fixture.ts", action],
+        cwd=REPO_ROOT / "back-end",
+        env=_free_credit_subscription_fixture_env(),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"free-credit subscription benchmark fixture {action} failed: "
+            f"{(result.stderr or result.stdout).strip()}"
+        )
+    return _parse_last_json_line(result.stdout)
+
+
+def _gate_fixture_env(task_name: str) -> dict:
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        raise RuntimeError("Local Victoria DB connection not found for gate benchmark fixture")
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["BENCHMARK_GATE_FIXTURE_MODE"] = GATE_FIXTURE_TASK_MODES[task_name]
+    env["BENCHMARK_USER_ID"] = GATE_FIXTURE_TASK_USER_IDS[task_name]
+    return env
+
+
+def _run_gate_fixture(task_name: str, action: str) -> dict:
+    result = subprocess.run(
+        ["npx", "tsx", "scripts/gate-benchmark-fixture.ts", action],
+        cwd=REPO_ROOT / "back-end",
+        env=_gate_fixture_env(task_name),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"gate benchmark fixture {action} failed for {task_name}: "
+            f"{(result.stderr or result.stdout).strip()}"
+        )
+    return _parse_last_json_line(result.stdout)
+
+
 def _sync_compute_tokens() -> None:
     """Refresh the compute-token integrations (claude_code / gpt_code + pool)
     from prod into the isolated benchmark DB. Best-effort but loud: a frozen DB
@@ -2784,6 +3132,259 @@ def _sync_compute_tokens() -> None:
         print(f"    ⚠ Compute-token sync failed: {(result.stderr or result.stdout).strip()[:200]}")
     else:
         print("    🔑 Refreshed compute tokens from prod")
+
+
+def _sync_browser_credentials() -> bool:
+    """Refresh live browser auth state (cookies + browser context/storage +
+    passwords/passkeys) from prod into the isolated benchmark DB. Same pattern as
+    _sync_compute_tokens: a one-time setup-db sync goes stale as cookies expire,
+    so the `base` live fixture re-pulls them right before the agent starts.
+    Best-effort but loud. Reads the prod source from back-end/.env."""
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        print("    ⚠ Credential sync skipped: local Victoria DB not found")
+        return False
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["DIRECT_URL"] = database_url
+    try:
+        result = subprocess.run(
+            ["npx", "tsx", "scripts/seed-local.ts", "--credentials-only"],
+            cwd=REPO_ROOT / "back-end",
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    except Exception as exc:
+        print(f"    ⚠ Credential sync error: {exc}")
+        return False
+    if result.returncode != 0:
+        print(f"    ⚠ Credential sync failed: {(result.stderr or result.stdout).strip()[:200]}")
+        return False
+    print("    🍪 Refreshed browser cookies + passwords from prod")
+    return True
+
+
+@dataclass
+class LiveFixtureContext:
+    """Runtime inputs handed to a live-fixture applier."""
+
+    base_url: str
+    user_id: str
+    auth_realm: str
+
+
+def _is_simulate_mode() -> bool:
+    """True when this run's tool execution is served by the World Model Harness.
+    Set once at startup (BENCHMARK_WORLD_MODEL_MODE, run_benchmark.py:478)."""
+    return os.environ.get("BENCHMARK_WORLD_MODEL_MODE") == "simulate"
+
+
+def _apply_base_live_fixture(ctx: LiveFixtureContext) -> dict:
+    """The default live fixture every live task inherits: current compute tokens
+    + browser cookies/passwords, pulled fresh from prod into the isolated DB.
+
+    In simulate mode the World Model Harness intercepts every environment-boundary
+    tool (browser, purchases, messaging), so real browser cookies/passwords are
+    never exercised. Re-syncing all 21k+ cookie/password rows per task is then pure
+    overhead — and on a throttled cloud uplink it blows the 180s sync budget,
+    stalling agent creation. Compute tokens are still refreshed because WMH
+    inference (RoseWMHProvider) and the agent's own LLM waterfall lease them."""
+    _sync_compute_tokens()
+    if _is_simulate_mode():
+        print("    🌍 simulate mode — skipping browser cookie/password sync (WMH mocks env tools)")
+        return {"fixture": "base", "browser_credentials": False}
+    _sync_browser_credentials()
+    return {"fixture": "base", "browser_credentials": True}
+
+
+def _apply_amazon_auth(ctx: LiveFixtureContext) -> dict:
+    """Build active CookieBundle rows for the amazon auth realm from synced
+    prod cookies so the browser agent starts logged in."""
+    if _skip_cookie_bundle_bootstrap():
+        print(f"    🍪 Skipping local CookieBundle bootstrap for {ctx.auth_realm}")
+        return {"fixture": "amazon_auth", "bundle_count": 0, "skipped": True}
+    bundle_count = _ensure_local_cookie_bundle_for_realm(ctx.user_id, ctx.auth_realm)
+    if bundle_count <= 0:
+        raise RuntimeError(
+            f"No usable local cookies found for {ctx.auth_realm}; cannot bootstrap an "
+            f"active CookieBundle. Refresh prod cookies (the `base` live fixture) first."
+        )
+    print(f"    🍪 Ensured {bundle_count} active local CookieBundle row(s) for {ctx.auth_realm}")
+    return {"fixture": "amazon_auth", "bundle_count": bundle_count}
+
+
+def _apply_compute_tokens(_ctx: LiveFixtureContext) -> dict:
+    _sync_compute_tokens()
+    return {"fixture": "compute_tokens"}
+
+
+def _apply_amazon_passkey(ctx: LiveFixtureContext) -> dict:
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        raise RuntimeError("Amazon passkey fixture requires a local Victoria database")
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["DIRECT_URL"] = database_url
+    result = subprocess.run(
+        ["npx", "tsx", "scripts/seed-local.ts", "--passkeys-only"],
+        cwd=REPO_ROOT / "back-end",
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Amazon passkey sync failed: {(result.stderr or result.stdout).strip()[:300]}"
+        )
+
+    user = _sql_literal(ctx.user_id)
+    realm = _sql_literal(ctx.auth_realm)
+    snapshot_sql = (
+        "SELECT json_build_object("
+        "'steel_ids', COALESCE((SELECT json_agg(id) FROM \"SteelSessionAuth\" "
+        f"WHERE \"userId\" = {user} AND \"authRealm\" = {realm} AND \"disabledAt\" IS NULL), '[]'::json), "
+        "'bundle_ids', COALESCE((SELECT json_agg(id) FROM \"CookieBundle\" "
+        f"WHERE \"userId\" = {user} AND \"authRealm\" = {realm} AND \"disabledAt\" IS NULL), '[]'::json), "
+        "'password_ids', COALESCE((SELECT json_agg(id) FROM \"BrowserPassword\" "
+        f"WHERE \"userId\" = {user} AND \"disabledAt\" IS NULL), '[]'::json), "
+        "'profiles', COALESCE((SELECT json_agg(row_to_json(profile)) "
+        'FROM "BrowserProviderProfile" profile JOIN "BrowserContext" context '
+        'ON context.id = profile."contextId" '
+        f"WHERE context.\"userId\" = {user} AND profile.provider = 'kernel'), '[]'::json)"
+        ")::text;"
+    )
+    snapshot = json.loads(_run_local_victoria_sql(snapshot_sql))
+    passkey_sql = (
+        'SELECT COUNT(*) FROM "PasskeyCredential" '
+        f'WHERE "userId" = {user} AND "authRealm" = {realm} AND "disabledAt" IS NULL;'
+    )
+    passkey_count = int(_run_local_victoria_sql(passkey_sql).splitlines()[-1].strip() or "0")
+    if passkey_count <= 0:
+        raise RuntimeError(f"No enabled passkey found for {ctx.auth_realm}")
+
+    disabled_reason = _sql_literal("disabled by passkey-only benchmark fixture")
+    cleanup_sql = (
+        'WITH steel AS (UPDATE "SteelSessionAuth" SET "disabledAt" = NOW(), '
+        f'"disabledReason" = {disabled_reason} WHERE "userId" = {user} '
+        f'AND "authRealm" = {realm} AND "disabledAt" IS NULL RETURNING id), '
+        'bundles AS (UPDATE "CookieBundle" SET "disabledAt" = NOW(), '
+        f'"disabledReason" = {disabled_reason} WHERE "userId" = {user} '
+        f'AND "authRealm" = {realm} AND "disabledAt" IS NULL RETURNING id), '
+        'passwords AS (UPDATE "BrowserPassword" SET "disabledAt" = NOW(), '
+        f'"disabledReason" = {disabled_reason} WHERE "userId" = {user} '
+        'AND "disabledAt" IS NULL RETURNING id), '
+        f'cookies AS (DELETE FROM "Cookie" WHERE "userId" = {user} RETURNING id), '
+        f'local_storage AS (DELETE FROM "LocalStorageOrigin" WHERE "userId" = {user} RETURNING id), '
+        f'indexed_db AS (DELETE FROM "IndexedDBOrigin" WHERE "userId" = {user} RETURNING id), '
+        f'cache_storage AS (DELETE FROM "CacheStorageOrigin" WHERE "userId" = {user} RETURNING id), '
+        f'permissions AS (DELETE FROM "BrowserPermission" WHERE "userId" = {user} RETURNING id), '
+        'profiles AS (DELETE FROM "BrowserProviderProfile" profile USING "BrowserContext" context '
+        f'WHERE profile."contextId" = context.id AND context."userId" = {user} '
+        "AND profile.provider = 'kernel' RETURNING profile.id) "
+        "SELECT (SELECT COUNT(*) FROM cookies) + (SELECT COUNT(*) FROM local_storage) + "
+        "(SELECT COUNT(*) FROM indexed_db) + (SELECT COUNT(*) FROM cache_storage) + "
+        "(SELECT COUNT(*) FROM permissions) + (SELECT COUNT(*) FROM profiles);"
+    )
+    cleared = int(_run_local_victoria_sql(cleanup_sql).splitlines()[-1].strip() or "0")
+    print(f"    🔐 Prepared {passkey_count} Amazon passkey(s); cleared {cleared} saved-state row(s)")
+    return {
+        "fixture": "amazon_passkey",
+        "passkey_count": passkey_count,
+        "cleared": cleared,
+        "user_id": ctx.user_id,
+        "auth_realm": ctx.auth_realm,
+        "restore_snapshot": snapshot,
+    }
+
+
+def _restore_amazon_passkey_fixture(manifest: dict) -> None:
+    """Restore shared browser auth after the destructive passkey-only run."""
+    snapshot = manifest.get("restore_snapshot")
+    if not isinstance(snapshot, dict):
+        raise RuntimeError("Amazon passkey fixture did not capture a restore snapshot")
+    if not _sync_browser_credentials():
+        raise RuntimeError("Amazon passkey fixture could not restore live browser credentials")
+
+    user = _sql_literal(str(manifest["user_id"]))
+
+    def ids_sql(key: str) -> str:
+        values = snapshot.get(key)
+        if not isinstance(values, list):
+            raise RuntimeError(f"Amazon passkey restore snapshot has invalid {key}")
+        return ", ".join(_sql_literal(str(value)) for value in values)
+
+    statements: list[str] = []
+    for table, key in (
+        ("SteelSessionAuth", "steel_ids"),
+        ("CookieBundle", "bundle_ids"),
+        ("BrowserPassword", "password_ids"),
+    ):
+        identifiers = ids_sql(key)
+        if identifiers:
+            statements.append(
+                f'UPDATE "{table}" SET "disabledAt" = NULL, "disabledReason" = NULL '
+                f"WHERE id IN ({identifiers})"
+            )
+
+    statements.append(
+        'DELETE FROM "BrowserProviderProfile" profile USING "BrowserContext" context '
+        'WHERE profile."contextId" = context.id '
+        f'AND context."userId" = {user} AND profile.provider = \'kernel\''
+    )
+    profiles = snapshot.get("profiles")
+    if not isinstance(profiles, list):
+        raise RuntimeError("Amazon passkey restore snapshot has invalid profiles")
+    if profiles:
+        profiles_json = _sql_literal(json.dumps(profiles, separators=(",", ":")))
+        statements.append(
+            'INSERT INTO "BrowserProviderProfile" '
+            'SELECT * FROM json_populate_recordset(NULL::"BrowserProviderProfile", '
+            f"{profiles_json}::json)"
+        )
+    _run_local_victoria_sql("; ".join(statements) + ";")
+    print("    🧹 Restored shared browser auth after Amazon passkey fixture")
+
+
+# Runtime bindings for the metadata registry in live_fixtures.py. Kept in sync by
+# the assertion below so a fixture can never be declared without an applier.
+LIVE_FIXTURE_APPLIERS = {
+    "base": _apply_base_live_fixture,
+    "amazon_auth": _apply_amazon_auth,
+    "compute_tokens": _apply_compute_tokens,
+    "amazon_passkey": _apply_amazon_passkey,
+}
+assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES), (
+    f"live-fixture appliers {sorted(LIVE_FIXTURE_APPLIERS)} must match "
+    f"registry {sorted(LIVE_FIXTURE_NAMES)}"
+)
+
+
+def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dict]:
+    """Apply every live fixture the task's environment resolves to, in order.
+
+    Replaces the old per-task-name credential/cookie branches: compute-token sync
+    and amazon cookie bootstrap are now declared as live_fixtures in tasks.json
+    (the `base` fixture is inherited by every live task). Live fixtures only apply
+    against the local benchmark stack.
+    """
+    fixtures = resolve_live_fixtures(task.environment)
+    if not fixtures:
+        return []
+    if not _is_local_base_url(base_url):
+        # Live fixtures mutate the local isolated DB; never touch a prod base_url.
+        return []
+    auth_realm = os.environ.get("BENCHMARK_BROWSER_AUTH_REALM") or "amazon.com"
+    ctx = LiveFixtureContext(base_url=base_url, user_id=USER_ID, auth_realm=auth_realm)
+    manifests: list[dict] = []
+    for name in fixtures:
+        applier = LIVE_FIXTURE_APPLIERS.get(name)
+        if applier is None:
+            raise RuntimeError(f"{task.name}: unknown live_fixture '{name}'")
+        manifests.append(applier(ctx))
+    return manifests
 
 
 def _run_grep_fixture(action: str, *args: str) -> dict:
@@ -4394,9 +4995,16 @@ async def run_single_task(
     checkpoint_source_boundary: str = "message-index",
     checkpoint_source_out: Path | None = None,
     checkpoint_tree_out: Path | None = None,
+    on_agent_created: Optional[Callable[[str, str], None]] = None,
 ) -> TaskResult:
     """Run a single benchmark task. Returns TaskResult."""
     _validate_task_target(task, base_url)
+    previous_benchmark_user_id = os.environ.get("BENCHMARK_RUN_USER_ID")
+    if task.name == FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME:
+        os.environ["BENCHMARK_RUN_USER_ID"] = _free_credit_subscription_gate_user_id()
+    elif task.name in GATE_FIXTURE_TASK_USER_IDS:
+        os.environ["BENCHMARK_RUN_USER_ID"] = GATE_FIXTURE_TASK_USER_IDS[task.name]
+
     if task.name in MINTED_AGENT_ACCOUNT_TASK_NAMES:
         return await run_minted_agent_account_task(base_url, task, keep_failed_agents)
 
@@ -4414,22 +5022,30 @@ async def run_single_task(
             f"{len(fixture['password_ids'])} bad password row(s)"
         )
 
-    if task.name in AMAZON_COOKIE_BOOTSTRAP_TASK_NAMES and _is_local_base_url(base_url):
-        auth_realm = os.environ.get("BENCHMARK_BROWSER_AUTH_REALM") or "amazon.com"
-        if _skip_cookie_bundle_bootstrap():
-            print(f"    🍪 Skipping local CookieBundle bootstrap for {auth_realm}")
-        else:
-            bundle_count = _ensure_local_cookie_bundle_for_realm(USER_ID, auth_realm)
-            if bundle_count <= 0:
-                raise RuntimeError(
-                    f"No usable local cookies found for {auth_realm}; cannot bootstrap an active CookieBundle "
-                    f"for {task.name}."
-                )
-            print(f"    🍪 Ensured {bundle_count} active local CookieBundle row(s) for {auth_realm}")
-
     grep_fixture_manifest: Optional[dict] = None
     plaid_transactions_manifest: Optional[dict] = None
     plaid_transactions_fixture_action: Optional[str] = None
+    free_credit_subscription_manifest: Optional[dict] = None
+    gate_fixture_manifest: Optional[dict] = None
+    if task.name == FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME:
+        if not _is_local_base_url(base_url):
+            raise RuntimeError(f"{task.name} must run against the local benchmark stack")
+        free_credit_subscription_manifest = _run_free_credit_subscription_fixture("apply")
+        print(
+            "    💳 Prepared free-credit subscription gate fixture: "
+            f"user={free_credit_subscription_manifest.get('user_id')} "
+            f"credit={free_credit_subscription_manifest.get('credit_cents')}c "
+            f"used={free_credit_subscription_manifest.get('used_cents')}c"
+        )
+    if task.name in GATE_FIXTURE_TASK_MODES:
+        if not _is_local_base_url(base_url):
+            raise RuntimeError(f"{task.name} must run against the local benchmark stack")
+        gate_fixture_manifest = _run_gate_fixture(task.name, "apply")
+        print(
+            "    🚧 Prepared gate fixture: "
+            f"mode={gate_fixture_manifest.get('fixture_mode')} "
+            f"user={gate_fixture_manifest.get('user_id')}"
+        )
     if task.name == GREP_EXPLORE_STRESS_TASK_NAME:
         if not _is_local_base_url(base_url):
             raise RuntimeError("grep-explore-stress must run against the local benchmark stack")
@@ -4455,14 +5071,6 @@ async def run_single_task(
             f"    📄 Seeded frozen user-data fixture: {doc_count} documents "
             f"across {provider_count} providers"
         )
-
-    # Compute tokens (claude_code / gpt_code) must always be current from prod at
-    # runtime — a frozen DB fixture or whole-DB snapshot restore above can leave
-    # stale/expired tokens, which would force claudeAuth into the paid waterfall
-    # and make every run miss the $0 compute-token path. Refresh right before the
-    # agent starts, on every local run, after any fixture has touched the DB.
-    if _is_local_base_url(base_url):
-        _sync_compute_tokens()
 
     phone_callee: Optional[PhoneCalleeSession] = None
     if task.phone_persona:
@@ -4492,6 +5100,7 @@ async def run_single_task(
     world_model_fidelity: Optional[dict] = None
     realtime_monitor: Optional[SupabaseRealtimeSmokeMonitor] = None
     realtime_tree_task: Optional[asyncio.Task] = None
+    live_fixture_manifests: list[dict] = []
 
     temp_csv_paths: list = []  # track temp files for cleanup
 
@@ -4545,9 +5154,17 @@ async def run_single_task(
         elif setup_fixture_action == "complete":
             await configure_benchmark_agentcard_setup(base_url, "complete")
             print("    🔐 Seeded connected AgentCard sandbox fixture")
+
+        # Apply live fixtures inside the cleanup boundary. The passkey-only
+        # fixture intentionally removes shared browser state and must restore it
+        # even when agent creation or evaluation fails.
+        live_fixture_manifests = _apply_live_fixtures(task, base_url)
+
         # Handle attachments: create agent first, upload files, then post file messages
         if all_attachments:
             agent_id = await create_agent(base_url, task)
+            if on_agent_created:
+                on_agent_created(task.name, agent_id)
             print(f"    Agent created: {agent_id[:12]}...")
             await start_realtime_capture()
             await start_realtime_monitor()
@@ -4581,6 +5198,8 @@ async def run_single_task(
                 print(f"    🧊 Trace archive start fixture: {start_fixture_ref}")
         else:
             agent_id = await create_agent(base_url, task)
+            if on_agent_created:
+                on_agent_created(task.name, agent_id)
             print(f"    Agent created: {agent_id[:12]}...")
             if task.name == GREP_EXPLORE_STRESS_TASK_NAME:
                 grep_fixture_manifest = _run_grep_fixture("apply-agent-network", agent_id)
@@ -4638,11 +5257,27 @@ async def run_single_task(
         cost_cents = 0.0
         cache_read_input_tokens = 0
         cache_creation_input_tokens = 0
+        llm_call_count = 0
+        tree_agent_count = 0
+        tool_tokens_in = 0
+        tool_tokens_out = 0
+        tool_tokens_cover_tree = False
+        tokens_in = 0
+        tokens_out = 0
         try:
             usage = await get_tool_usage(base_url, agent_id)
             cost_cents = usage.get("total_cost_cents", 0)
             cache_read_input_tokens = usage.get("cache_read_input_tokens", 0)
             cache_creation_input_tokens = usage.get("cache_creation_input_tokens", 0)
+            llm_call_count = int(usage.get("llm_call_count") or 0)
+            tree_agent_count = int(usage.get("agent_count") or 0)
+            raw_tool_tokens_in = usage.get("tokens_in")
+            raw_tool_tokens_out = usage.get("tokens_out")
+            tool_tokens_cover_tree = raw_tool_tokens_in is not None or raw_tool_tokens_out is not None
+            tool_tokens_in = int(raw_tool_tokens_in or 0)
+            tool_tokens_out = int(raw_tool_tokens_out or 0)
+            if not tool_tokens_in:
+                tool_tokens_in = int(cache_read_input_tokens or 0) + int(cache_creation_input_tokens or 0)
         except Exception:
             # Fallback to agent-level cost fields
             cost_cents = agent.get("tree_cost_cents", 0) or agent.get("tool_cost_cents", 0)
@@ -4659,6 +5294,24 @@ async def run_single_task(
                     **data.get("_benchmark", {}),
                     "payment_lifecycle_error": str(e),
                 }
+
+        tree_stats = await _fetch_tree_stats(base_url, agent_id)
+        tree_agent_count = max(tree_agent_count, int(tree_stats.get("agent_count") or 0))
+        tree_tokens_in = max(
+            _as_nonnegative_int(tree_stats.get("tree_tokens_in")),
+            _as_nonnegative_int(agent.get("tokens_in", agent.get("tokensIn"))),
+        )
+        tree_tokens_out = max(
+            _as_nonnegative_int(tree_stats.get("tree_tokens_out")),
+            _as_nonnegative_int(agent.get("tokens_out", agent.get("tokensOut"))),
+        )
+        tokens_in, tokens_out = _merge_tool_and_tree_tokens(
+            tool_tokens_in,
+            tool_tokens_out,
+            tree_tokens_in,
+            tree_tokens_out,
+            tool_tokens_cover_tree=tool_tokens_cover_tree,
+        )
 
         # Evaluate — early-fail reasons (per-agent stall, context error, timeout)
         # override a pass. evaluate_task still runs so post-completion checks
@@ -4706,8 +5359,8 @@ async def run_single_task(
         # (excludes root and explore agents; explore agents have no output_schema)
         if task.min_agent_count and passed:
             try:
-                tree_stats = await _fetch_tree_stats(base_url, agent_id)
                 all_agents = tree_stats.get("all_agents", [])
+                tree_agent_count = max(tree_agent_count, int(tree_stats.get("agent_count") or 0))
                 spawn_agent_count = sum(1 for a in all_agents if a.get("parent_agent_id") and a.get("output_schema"))
                 if spawn_agent_count < task.min_agent_count:
                     passed = False
@@ -4726,6 +5379,8 @@ async def run_single_task(
                     actual_counts = _count_logical_tool_calls_from_messages(data.get("messages", []))
                 else:
                     actual_counts = await count_tree_tool_calls(base_url, agent_id)
+                if not llm_call_count:
+                    llm_call_count = sum(int(v) for v in actual_counts.values() if isinstance(v, int))
                 for tool_name, expected_count in (task.expected_tool_counts or {}).items():
                     actual = actual_counts.get(tool_name, 0)
                     if actual != expected_count:
@@ -4800,6 +5455,20 @@ async def run_single_task(
         # Collect prod logs for diagnostics
         print("    Collecting prod logs...")
         logs = await collect_logs(agent_id, data, start_time)
+        # Capture the FULL agent tree's messages (root + every spawned sub-agent) so
+        # the archive can render the fan-out, not just the root. Without this a
+        # for_each/spawn benchmark opens to a lone root with no visible tree. Only
+        # when the run actually fanned out (>1 agent); best-effort — a capture
+        # failure must never fail the benchmark itself.
+        if tree_agent_count and tree_agent_count > 1:
+            try:
+                tree_agents = await get_agent_tree(base_url, agent_id)
+                logs["tree"] = await collect_tree_messages(
+                    agent_id, tree_agents, lambda a: get_agent(base_url, a)
+                )
+                print(f"    Tree messages captured for {len(logs['tree'])} agent(s)")
+            except Exception as tree_err:
+                print(f"    ⚠ tree-message capture failed (archive shows root only): {tree_err}")
         log_summary = []
         for key, label in [
             ("backend_logs", "backend"),
@@ -4839,6 +5508,20 @@ async def run_single_task(
             cache_read_input_tokens=cache_read_input_tokens,
             cache_creation_input_tokens=cache_creation_input_tokens,
             cache_hit_pct=cache_hit_pct,
+            llm_call_count=llm_call_count,
+            tree_agent_count=tree_agent_count,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            stop_metadata={
+                "llm_call_count": llm_call_count,
+                "tree_agent_count": tree_agent_count,
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "message_count": len(messages),
+                "status": agent.get("status", "UNKNOWN"),
+                "cost_cents": round(cost_cents, 2),
+                "cache_hit_pct": cache_hit_pct,
+            },
             fast_mode_cache_enabled=agent.get("fast_mode_cache_enabled") is True,
             context_violations=context_violation_dicts,
             logs=logs,
@@ -5017,6 +5700,20 @@ async def run_single_task(
                 _run_plaid_transactions_fixture("cleanup")
             except Exception as exc:
                 print(f"    ⚠ Failed to clean up synthetic Plaid transaction fixture: {exc}")
+        passkey_manifest = next(
+            (
+                manifest
+                for manifest in live_fixture_manifests
+                if manifest.get("fixture") == "amazon_passkey"
+            ),
+            None,
+        )
+        if passkey_manifest is not None:
+            _restore_amazon_passkey_fixture(passkey_manifest)
+        if previous_benchmark_user_id is None:
+            os.environ.pop("BENCHMARK_RUN_USER_ID", None)
+        else:
+            os.environ["BENCHMARK_RUN_USER_ID"] = previous_benchmark_user_id
 
 
 def _validate_task_target(task: BenchmarkTask, base_url: str) -> None:
@@ -5037,14 +5734,35 @@ def _agentcard_setup_fixture_action(task: BenchmarkTask, base_url: str) -> Optio
 # ============================================================
 
 
+def task_names_from_args(args) -> list[str]:
+    """Return explicit task names from argparse output.
+
+    `--task` accepts repeated values and comma-separated values so wrappers can
+    pass an exact task set without encoding it as "suite all minus exclusions".
+    """
+    values = getattr(args, "task", None)
+    if not values:
+        return []
+    if isinstance(values, str):
+        values = [values]
+
+    names: list[str] = []
+    for value in values:
+        names.extend(name.strip() for name in str(value).split(",") if name.strip())
+    return names
+
+
 def resolve_tasks(args) -> List[BenchmarkTask]:
     """Resolve which tasks to run from CLI args."""
-    if args.task:
-        tasks = [get_task_by_name(args.task)]
-        if tasks[0].runner != "agent":
+    explicit_task_names = task_names_from_args(args)
+    if explicit_task_names:
+        tasks = [get_task_by_name(name) for name in explicit_task_names]
+        non_agent_tasks = [task for task in tasks if task.runner != "agent"]
+        if non_agent_tasks:
+            names = ", ".join(f"{task.name} ({task.runner})" for task in non_agent_tasks)
             raise ValueError(
-                f"Task '{args.task}' is a {tasks[0].runner} eval — run it via "
-                f"benchmarks/run_eval_suite.py or its own test runner, not run_benchmark.py."
+                f"Task(s) {names} are not agent evals — run them via "
+                f"benchmarks/run_eval_suite.py or their own test runner, not run_benchmark.py."
             )
     elif args.suite:
         if args.suite == "all":
@@ -5067,10 +5785,10 @@ def resolve_tasks(args) -> List[BenchmarkTask]:
     else:
         tasks = all_tasks()
 
-    if not args.task:
-        # Suite selection only runs complete agent evals. `status == "incomplete"` entries
-        # (missing fixtures/judges) and external vitest smokes stay catalogued but are
-        # skipped; explicit --task still targets incomplete agent evals for dev iteration.
+    if not explicit_task_names:
+        # Suite selection only runs complete benchmark evals. `status == "incomplete"`
+        # entries (missing fixtures/judges) are skipped; explicit --task still targets
+        # incomplete agent evals for dev iteration.
         tasks = [t for t in tasks if t.runner == "agent" and t.status == "ready"]
         if not getattr(args, "prod", False):
             tasks = [t for t in tasks if not t.production_only]
@@ -5775,7 +6493,8 @@ async def main_async(args):
         realtime_started = True
     print(f"  📡 {realtime_status}")
 
-    suite_name = args.suite or args.task or "all"
+    task_names = task_names_from_args(args)
+    suite_name = args.suite or (",".join(task_names) if task_names else "all")
     print(f"\n{'=' * 60}")
     print("  Agent Benchmark Harness")
     print(f"  URL:   {base_url}")
@@ -5821,6 +6540,102 @@ async def main_async(args):
             )
         )
 
+    # Live report card: a standardized progress snapshot emitted to stdout + the run's
+    # context dir once per second (and once, forced, at the end). Purely observational —
+    # every emit is wrapped so it can never break a benchmark run.
+    from benchmarks.report_card import Infra, ReportCardEmitter, RunState, TaskCard
+
+    _report_emitter = ReportCardEmitter(os.environ.get("BENCHMARK_CONTEXT_DIR", ".context"))
+    _report_start = time.monotonic()
+    _live_task_agent_ids: dict[str, str] = {}
+
+    def _remember_live_agent(task_name: str, agent_id: str) -> None:
+        if task_name and agent_id:
+            _live_task_agent_ids[task_name] = agent_id
+
+    def _report_snapshot(running_names: set[str]) -> RunState:
+        finished = {r.name for r in run.task_results}
+        fe = _frontend_url_for_benchmark(base_url)
+        try:
+            peak_fly_raw = os.environ.get("BENCHMARK_PEAK_FLY_MACHINES")
+            peak_fly_machines = int(peak_fly_raw) if peak_fly_raw else None
+        except (TypeError, ValueError):
+            peak_fly_machines = None
+        task_world_model_modes = {t.name: t.world_model_mode for t in tasks if t.world_model_mode}
+        per_task: list[TaskCard] = []
+        for r in run.task_results:
+            status = "skipped" if r.status == "SKIPPED" else ("passed" if r.passed else "failed")
+            per_task.append(
+                TaskCard(
+                    name=r.name,
+                    status=status,
+                    duration_s=r.duration_seconds,
+                    cost_usd=(r.cost_cents / 100.0) if r.cost_cents is not None else None,
+                    agent_url=f"{fe}/?agent-id={r.agent_id}" if r.agent_id else None,
+                    llm_call_count=r.llm_call_count,
+                    tree_agent_count=r.tree_agent_count,
+                    tokens_in=r.tokens_in,
+                    tokens_out=r.tokens_out,
+                    world_model_mode=task_world_model_modes.get(r.name),
+                    fast_mode=bool(getattr(r, "fast_mode_cache_enabled", False)),
+                    infra_usd=_infra_usd_for_elapsed(r.duration_seconds)
+                    if r.duration_seconds is not None
+                    else None,
+                )
+            )
+        for name in running_names:
+            if name not in finished:
+                live_agent_id = _live_task_agent_ids.get(name)
+                per_task.append(
+                    TaskCard(
+                        name=name,
+                        status="running",
+                        agent_url=f"{fe}/?agent-id={live_agent_id}" if live_agent_id else None,
+                        world_model_mode=task_world_model_modes.get(name),
+                    )
+                )
+        elapsed = time.monotonic() - _report_start
+        wmh_usage = _fetch_wmh_usage()
+        return RunState(
+            run_id=run.run_id,
+            elapsed_s=elapsed,
+            world_model_mode=os.environ.get("BENCHMARK_WORLD_MODEL_MODE", "real"),
+            total_tasks=len(tasks) + len(skipped_claude_tasks),
+            task_names=[t.name for t in tasks] + [t.name for t in skipped_claude_tasks],
+            per_task=per_task,
+            # WMH grounding cost + tokens are only known when a WMH is served
+            # (simulate/shadow); None for plain real runs so the card renders "—".
+            wmh_grounding_usd=(float(wmh_usage["total_cost_usd"]) if wmh_usage and wmh_usage.get("total_cost_usd") is not None else None),
+            wmh_tokens_in=(int(wmh_usage.get("input_tokens") or 0) if wmh_usage else None),
+            wmh_tokens_out=(int(wmh_usage.get("output_tokens") or 0) if wmh_usage else None),
+            # Whole-run infra cost = machine rate × wallclock (per-bench isolated
+            # machine); per-task infra_usd above attributes it to each bench.
+            infra_usd=_infra_usd_for_elapsed(elapsed),
+            infra=Infra(peak_machines=peak_fly_machines) if peak_fly_machines is not None else None,
+        )
+
+    def _emit_report(running_names: set[str], *, force: bool = False) -> None:
+        try:
+            _report_emitter.maybe_emit(_report_snapshot(running_names), force=force)
+        except Exception as exc:  # observability must never fail the run
+            print(f"  ⚠ report card emit failed: {exc}")
+
+    # Live report card: a background ticker emits on a timer so the dashboard updates
+    # DURING the run. The drain loop only emits on task-completion events, so a single
+    # blocking task (or any long task) would otherwise leave the report screen blank
+    # until the very end. `_report_running` is kept in sync by the branches below.
+    _report_running: set[str] = set()
+
+    async def _report_ticker() -> None:
+        try:
+            while True:
+                await asyncio.sleep(1)
+                _emit_report(set(_report_running))
+        except asyncio.CancelledError:
+            pass
+
+    _report_ticker_task = asyncio.create_task(_report_ticker())
+    _emit_report(set(), force=True)
     try:
         if checkpoint_source_mode:
             if len(tasks) != 1:
@@ -5835,6 +6650,7 @@ async def main_async(args):
                 checkpoint_source_boundary=args.checkpoint_source_boundary,
                 checkpoint_source_out=Path(args.checkpoint_source_out),
                 checkpoint_tree_out=Path(args.checkpoint_tree_out) if args.checkpoint_tree_out else None,
+                on_agent_created=_remember_live_agent,
             )
             run.task_results.append(result)
         elif args.parallel:
@@ -5844,27 +6660,40 @@ async def main_async(args):
             if max_concurrency is not None and max_concurrency < 1:
                 raise ValueError("--max-concurrency must be >= 1")
 
-            # Tasks whose setup replays a whole-DB snapshot (psql < dump with
-            # --clean --if-exists) drop and recreate tables, destroying every
-            # concurrent task's Agent rows mid-flight (poll 404 cascade). They
-            # must never share the DB with in-flight tasks — run them serially
-            # after the parallel batch drains.
-            exclusive_db_tasks = [t for t in tasks if t.name in EXCLUSIVE_DB_RESTORE_TASK_NAMES]
-            parallel_batch = [t for t in tasks if t.name not in EXCLUSIVE_DB_RESTORE_TASK_NAMES]
+            # Destructive shared-DB fixtures must never overlap in-flight tasks.
+            # Run them serially after the normal parallel batch drains.
+            exclusive_db_tasks = [t for t in tasks if t.name in EXCLUSIVE_SHARED_DB_TASK_NAMES]
+            parallel_batch = [t for t in tasks if t.name not in EXCLUSIVE_SHARED_DB_TASK_NAMES]
             if exclusive_db_tasks:
                 names = ", ".join(t.name for t in exclusive_db_tasks)
-                print(f"\n  Deferring {len(exclusive_db_tasks)} DB-restore task(s) to a serial phase: {names}")
+                print(
+                    f"\n  Deferring {len(exclusive_db_tasks)} destructive DB fixture task(s) "
+                    f"to a serial phase: {names}"
+                )
 
             if max_concurrency is None or max_concurrency >= len(parallel_batch):
                 print(f"\n  Running {len(parallel_batch)} tasks in parallel...")
-                task_runners = [run_single_task(base_url, task, args.keep_failed_agents) for task in parallel_batch]
+                task_runners = [
+                    run_single_task(
+                        base_url,
+                        task,
+                        args.keep_failed_agents,
+                        on_agent_created=_remember_live_agent,
+                    )
+                    for task in parallel_batch
+                ]
             else:
                 print(f"\n  Running {len(parallel_batch)} tasks in parallel (max_concurrency={max_concurrency})...")
                 semaphore = asyncio.Semaphore(max_concurrency)
 
                 async def run_limited(task: BenchmarkTask) -> TaskResult:
                     async with semaphore:
-                        return await run_single_task(base_url, task, args.keep_failed_agents)
+                        return await run_single_task(
+                            base_url,
+                            task,
+                            args.keep_failed_agents,
+                            on_agent_created=_remember_live_agent,
+                        )
 
                 task_runners = [run_limited(task) for task in parallel_batch]
 
@@ -5875,6 +6704,8 @@ async def main_async(args):
             pending = set(pending_results)
             try:
                 while pending:
+                    _report_running.clear()
+                    _report_running.update(pending_results[future].name for future in pending)
                     done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
                     for task_future in done:
                         task = pending_results[task_future]
@@ -5896,10 +6727,20 @@ async def main_async(args):
                             )
                         else:
                             run.task_results.append(result)
+                    _emit_report({pending_results[future].name for future in pending})
                 for task in exclusive_db_tasks:
-                    print(f"\n  Running DB-restore task serially: {task.name}")
-                    result = await run_single_task(base_url, task, args.keep_failed_agents)
+                    print(f"\n  Running destructive DB fixture task serially: {task.name}")
+                    _report_running.clear()
+                    _report_running.add(task.name)
+                    result = await run_single_task(
+                        base_url,
+                        task,
+                        args.keep_failed_agents,
+                        on_agent_created=_remember_live_agent,
+                    )
                     run.task_results.append(result)
+                    _report_running.discard(task.name)
+                    _emit_report(set())
             except asyncio.CancelledError:
                 for task_future in pending:
                     task_future.cancel()
@@ -5925,9 +6766,20 @@ async def main_async(args):
                 raise
         else:
             for task in tasks:
-                result = await run_single_task(base_url, task, args.keep_failed_agents)
+                _report_running.clear()
+                _report_running.add(task.name)
+                result = await run_single_task(
+                    base_url,
+                    task,
+                    args.keep_failed_agents,
+                    on_agent_created=_remember_live_agent,
+                )
                 run.task_results.append(result)
+                _report_running.discard(task.name)
+                _emit_report(set())
     finally:
+        _report_ticker_task.cancel()
+        _emit_report(set(), force=True)
         fly_total = await stop_fly_log_collector()
         print(f"\n  📡 Fly.io log stream stopped ({fly_total} lines captured)")
         if realtime_started:
@@ -5960,6 +6812,12 @@ async def main_async(args):
         if run.task_results:
             path = run.save()
             print(f"\n  Results saved: {path}")
+            try:
+                context_dir = Path(os.environ.get("BENCHMARK_CONTEXT_DIR", ".context"))
+                context_dir.mkdir(parents=True, exist_ok=True)
+                (context_dir / "run.json").write_text(Path(path).read_text(), encoding="utf-8")
+            except Exception as exc:
+                print(f"  ⚠ run.json archive write failed (non-fatal): {exc}")
 
     # Print summary
     s = run.summary
@@ -6058,7 +6916,12 @@ async def main_async(args):
 def main():
     parser = argparse.ArgumentParser(description="Agent Benchmark Harness")
     parser.add_argument("--list", action="store_true", help="List all benchmark tasks")
-    parser.add_argument("--task", type=str, help="Run a single task by name")
+    parser.add_argument(
+        "--task",
+        action="append",
+        default=[],
+        help="Run one or more explicit task names. Repeatable; comma-separated names are also accepted.",
+    )
     parser.add_argument(
         "--suite",
         type=str,
@@ -6243,7 +7106,7 @@ def main():
         os.environ["BENCHMARK_KEEP_AGENTS"] = "true"
         args.keep_failed_agents = True
 
-    if not args.list and not args.compare and not args.task and not args.suite:
+    if not args.list and not args.compare and not task_names_from_args(args) and not args.suite:
         parser.print_help()
         sys.exit(1)
 

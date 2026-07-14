@@ -5,7 +5,8 @@
  */
 
 import { z } from 'zod';
-import { createStreamingCompletion, markCacheable } from '../rose';
+import { createStreamingCompletion, markCacheable, type CompletionChunk } from '../rose';
+import { StructuredOutputAccumulator } from '../rose/structuredOutput';
 import { agentFastMode, cacheGet, cacheSet } from '../fastCacheStore';
 import { goalHash } from '../fastCacheNormalizeCore';
 import { contentKey } from '../fastCacheNormalizeKeys';
@@ -19,13 +20,17 @@ import { v4 as uuidv4 } from 'uuid';
 import { createLogger } from '../logger';
 import { isCloudAgentLifecycleTool } from './cloudAgentLifecycleTool';
 import {
-  detectActionFromPartialJson,
-  extractCompleteStringField,
+  createClosedRouterActionDetector,
   extractPartialStringField,
-  formatWebSearchStreamTitle,
+  getWebSearchStreamTitleFromPartialRouterJson,
+  type ClosedRouterAction,
 } from './routerJsonStream';
+import { delayedCacheStreamHedge, type CacheLookupResult } from './delayedCacheStreamHedge';
+import type { ChatProviderRoute } from './phaseModels';
+import { runCacheWriteInBackground } from './backgroundCacheWrite';
 
 const log = createLogger('RouterLLM');
+const ROUTER_CACHE_GRACE_MS = 25;
 
 // ============================================
 // Zod Schema for Router Decision
@@ -264,15 +269,7 @@ async function buildMultimodalContentFromFile(
   return content;
 }
 
-export function getWebSearchStreamTitleFromPartialRouterJson(json: string): string | null {
-  const action = detectActionFromPartialJson(json);
-  if (action !== 'web_search') return null;
-
-  const query = extractCompleteStringField(json, 'query')?.trim();
-  if (!query) return null;
-
-  return formatWebSearchStreamTitle(query);
-}
+export { getWebSearchStreamTitleFromPartialRouterJson } from './routerJsonStream';
 
 // ============================================
 // Extract streamable text from partial JSON (like agent worker)
@@ -299,10 +296,9 @@ export async function callRouterLlm(params: {
   agentId: string;
   messages: ChatMessage[];
   model: string;
-  claudeToken: string | null;
-  gptToken?: string | null;
-  gptAccountId?: string;
-  disableWaterfall?: boolean;
+  providerRoute: ChatProviderRoute;
+  onRouterStarted?: () => void;
+  onActionDetected?: (action: ClosedRouterAction) => void;
 }): Promise<RouterResponse> {
   const streamId = generateStreamId();
 
@@ -366,13 +362,14 @@ export async function callRouterLlm(params: {
   });
 
   await broadcastAssistantStream(params.agentId, streamId, '', false, 0, false, false, startTime);
+  params.onRouterStarted?.();
 
   const fastMode = await agentFastMode(params.agentId);
   const fastModeRead = fastMode.enabled === true && fastMode.goal !== null;
   const fastModeWrite = fastMode.writeEnabled === true && fastMode.goal !== null;
   const providerFastMode = fastModeRead || fastModeWrite;
   let fcKey: string | null = null;
-  let fcCachedJson: string | null = null;
+  let fcCacheWon = false;
   if ((fastModeRead || fastModeWrite) && fastMode.goal) {
     fcKey = contentKey(fastMode.goal, 'chat_router', {
       model: params.model,
@@ -384,53 +381,76 @@ export async function callRouterLlm(params: {
         schema: ROUTER_JSON_SCHEMA,
       },
       provider_fast_mode: providerFastMode,
+      provider_route: params.providerRoute,
       messages: openaiMessages,
     });
   }
-  if (fcKey && fastModeRead) {
-    const hit = await cacheGet(fcKey);
-    if (hit.hit && hit.value) {
-      fcCachedJson = (hit.value as { json?: string }).json ?? null;
-      log.info('fast_cache.chat_router_hit', { agentId: params.agentId, key: fcKey });
-    } else {
-      log.info('fast_cache.chat_router_miss', { agentId: params.agentId, key: fcKey });
-    }
-  } else if (fcKey) {
-    log.info('fast_cache.chat_router_write_only', { agentId: params.agentId, key: fcKey });
-  }
-
-  async function* syntheticChatStream(json: string): AsyncGenerator<unknown> {
+  async function* syntheticChatStream(json: string): AsyncGenerator<CompletionChunk> {
     yield {
+      requested_model: params.model,
       actual_model: 'fast-cache',
-      choices: [{ delta: { content: json }, finish_reason: 'stop' }],
+      pool_name: 'fast-cache',
+      pool_size: 0,
+      choices: [{ index: 0, delta: { content: json }, finish_reason: 'stop' }],
       usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
     };
   }
 
-  // Create streaming completion via the Rose provider (or replay Fast Mode cache).
-  const stream =
-    fcCachedJson !== null
-      ? (syntheticChatStream(fcCachedJson) as unknown as Awaited<
-          ReturnType<typeof createStreamingCompletion>
-        >)
-      : await createStreamingCompletion({
-          model: params.model,
-          messages: openaiMessages,
-          temperature: 0.3,
-          response_format: {
-            type: 'json_schema',
-            json_schema: {
-              name: 'router_decision',
-              strict: true,
-              schema: ROUTER_JSON_SCHEMA,
-            },
-          },
-          claude_token: params.claudeToken ?? undefined,
-          gpt_token: params.gptToken ?? undefined,
-          gpt_account_id: params.gptAccountId,
-          provider_fast_mode: providerFastMode,
-          disable_waterfall: params.disableWaterfall,
-        });
+  const createLiveStream = (abortSignal?: AbortSignal) =>
+    createStreamingCompletion({
+      model: params.model,
+      messages: openaiMessages,
+      temperature: 0.3,
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'router_decision',
+          strict: true,
+          schema: ROUTER_JSON_SCHEMA,
+        },
+      },
+      provider_fast_mode: providerFastMode,
+      provider_route: params.providerRoute,
+      abort_signal: abortSignal,
+    });
+
+  let stream: AsyncIterable<CompletionChunk>;
+  if (fcKey && fastModeRead) {
+    const cacheKey = fcKey;
+    stream = delayedCacheStreamHedge({
+      readCache: async (): Promise<CacheLookupResult<string>> => {
+        const hit = await cacheGet(cacheKey);
+        const json = hit.hit ? (hit.value as { json?: unknown } | null)?.json : undefined;
+        if (typeof json === 'string' && json.length > 0) {
+          log.info('fast_cache.chat_router_hit', { agentId: params.agentId, key: cacheKey });
+          return { hit: true, value: json };
+        }
+        log.info('fast_cache.chat_router_miss', { agentId: params.agentId, key: cacheKey });
+        return { hit: false };
+      },
+      createLive: (abortSignal) => createLiveStream(abortSignal),
+      createCached: syntheticChatStream,
+      isLiveCommitChunk: (chunk) => {
+        const delta = chunk.choices[0]?.delta;
+        return Boolean(delta?.content?.length || delta?.reasoning?.length);
+      },
+      graceMs: ROUTER_CACHE_GRACE_MS,
+      onCacheError: (error) =>
+        log.warn('fast_cache.chat_router_read_failed', {
+          agentId: params.agentId,
+          key: cacheKey,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      onWinner: (winner) => {
+        fcCacheWon = winner === 'cache';
+      },
+    });
+  } else {
+    if (fcKey) {
+      log.info('fast_cache.chat_router_write_only', { agentId: params.agentId, key: fcKey });
+    }
+    stream = await createLiveStream();
+  }
 
   // isClaude = user's own Claude token was used ($0 cost, "-claude" suffix in actual_model)
   let isClaude = false;
@@ -439,11 +459,13 @@ export async function callRouterLlm(params: {
   // Track reasoning and JSON content separately (like agent worker)
   let accumulatedReasoning = ''; // From delta.reasoning (thinking models)
   let accumulatedJson = ''; // From delta.content (JSON structure)
+  const structuredOutput = new StructuredOutputAccumulator();
   let sequence = 1;
   let lastStreamedText = ''; // What we've sent to FE so far
   let chunkCount = 0;
   let webSearchToolCallId: string | undefined;
   let webSearchDetected = false;
+  const detectClosedAction = createClosedRouterActionDetector(params.onActionDetected);
   const usage: ChatLlmUsage = {
     prompt_tokens: 0,
     completion_tokens: 0,
@@ -486,7 +508,6 @@ export async function callRouterLlm(params: {
       log.info('[RouterLLM] User GPT token detected', { actualModel });
     }
 
-    // Get delta from chunk
     const delta = chunk.choices[0]?.delta;
 
     // Handle reasoning from thinking models (delta.reasoning)
@@ -498,7 +519,9 @@ export async function callRouterLlm(params: {
     // Handle JSON content (delta.content)
     const contentDelta = delta?.content || '';
     if (contentDelta) {
-      accumulatedJson += contentDelta;
+      structuredOutput.addCompletionChunk(chunk);
+      accumulatedJson = structuredOutput.currentText();
+      detectClosedAction(accumulatedJson);
     }
 
     // Extract streamable reasoning text
@@ -567,31 +590,26 @@ export async function callRouterLlm(params: {
   }
 
   // Combine for parsing - use accumulatedJson for JSON parsing
-  const fullJson = accumulatedJson;
+  const fullJson = structuredOutput.finalText();
 
-  if (
-    fcKey &&
-    fcCachedJson === null &&
-    fullJson !== '' &&
-    fastMode.goal !== null &&
-    fastModeWrite
-  ) {
-    await cacheSet({
-      key: fcKey,
-      kind: 'llm',
-      goalHash: goalHash(fastMode.goal),
-      value: { json: fullJson },
-    })
-      .then(() =>
-        log.info('fast_cache.chat_router_stored', { agentId: params.agentId, key: fcKey })
-      )
-      .catch((error) =>
+  const cacheGoal = fastMode.goal;
+  if (fcKey && !fcCacheWon && fullJson !== '' && cacheGoal !== null && fastModeWrite) {
+    runCacheWriteInBackground(
+      () =>
+        cacheSet({
+          key: fcKey,
+          kind: 'llm',
+          goalHash: goalHash(cacheGoal),
+          value: { json: fullJson },
+        }),
+      () => log.info('fast_cache.chat_router_stored', { agentId: params.agentId, key: fcKey }),
+      (error) =>
         log.warn('fast_cache.chat_router_store_failed', {
           agentId: params.agentId,
           key: fcKey,
           error: error instanceof Error ? error.message : String(error),
         })
-      );
+    );
   }
 
   // Broadcast final "done" signal for reasoning stream
@@ -603,7 +621,8 @@ export async function callRouterLlm(params: {
     sequence,
     isClaude,
     isGpt,
-    startTime
+    startTime,
+    { clearOnDone: true }
   );
 
   const streamDuration = Date.now() - startTime;
