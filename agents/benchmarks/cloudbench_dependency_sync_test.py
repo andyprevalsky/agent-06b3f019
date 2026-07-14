@@ -2373,6 +2373,29 @@ def test_setup_cleanup_composes_environment_and_controller_release() -> None:
     assert "trap 'cloudbench_controller_release" not in setup
 
 
+def test_warm_repo_git_maintenance_stays_inside_rose_privilege_boundary() -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    setup_start = cloud.index('if [ "$MODE" = "setup" ]; then')
+    setup_end = cloud.index("# MODE: --refresh-wmh", setup_start)
+    setup = cloud[setup_start:setup_end]
+
+    assert "safe.directory" not in cloud
+    assert "gosu rose env HOME=/home/rose git" in setup
+    reuse_start = setup.index("if [ -d '$REMOTE_REPO/.git' ]; then")
+    reuse_end = setup.index("else", reuse_start)
+    reuse = setup[reuse_start:reuse_end]
+    assert reuse.index("remote set-url origin") < reuse.index(
+        "fetch --quiet origin"
+    )
+    root_git_lines = [
+        line.strip()
+        for line in setup.splitlines()
+        if "git -C '$REMOTE_REPO'" in line
+        and "gosu rose env HOME=/home/rose git" not in line
+    ]
+    assert root_git_lines == []
+
+
 def test_pool_reconcile_recovers_orphan_after_controller_handoff(tmp_path: Path) -> None:
     fleet = FLEET_SCRIPT.read_text()
     inventory_start = fleet.index("fly_inventory_json() {")

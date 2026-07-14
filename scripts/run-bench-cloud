@@ -1083,17 +1083,20 @@ print("1" if any(v.get("name")==os.environ["VN"] for v in data) else "0")' 2>/de
     # URL — so it never lands in git's process argv OR in the stored remote URL.
     # The remote stays clean (https://github.com/...) for all future fetches, which
     # then reuse the same header only when the run/refresh paths re-supply it.
-    CLONE_CMD="set -e
+CLONE_CMD="set -e
 mkdir -p /data
 AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GH_TOKEN\" | base64 | tr -d '\n')\"
 if [ -d '$REMOTE_REPO/.git' ]; then
   echo 'repo already present — fetching latest'
-  git -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin
+  chown -R rose:rose '$REMOTE_REPO'
+  gosu rose env HOME=/home/rose git -C '$REMOTE_REPO' remote set-url origin 'https://github.com/Rose-Ai-Labs/rose.git'
+  gosu rose env HOME=/home/rose git -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin
 else
-  git -c http.extraheader=\"\$AUTH_HDR\" clone --quiet 'https://github.com/Rose-Ai-Labs/rose.git' '$REMOTE_REPO'
+  mkdir -p '$REMOTE_REPO'
+  chown rose:rose '$REMOTE_REPO'
+  gosu rose env HOME=/home/rose git -c http.extraheader=\"\$AUTH_HDR\" clone --quiet 'https://github.com/Rose-Ai-Labs/rose.git' '$REMOTE_REPO'
 fi
-git -C '$REMOTE_REPO' remote set-url origin 'https://github.com/Rose-Ai-Labs/rose.git'
-chown -R rose:rose '$REMOTE_REPO' 2>/dev/null || true
+gosu rose env HOME=/home/rose git -C '$REMOTE_REPO' remote set-url origin 'https://github.com/Rose-Ai-Labs/rose.git'
 echo 'clone/fetch complete'"
     FLY ssh console -a "$APP" --machine "$mid" \
         -C "bash -lc $(printf 'GH_TOKEN=%q; %s' "$gh_token" "$CLONE_CMD")" 2>&1 \
@@ -1148,14 +1151,15 @@ if [ "$MODE" = "refresh-wmh" ]; then
     # Auth the private-repo fetch with the box-side GITHUB_TOKEN secret via git
     # http.extraheader (kept out of .git/config + git argv).
     echo "🔄 git-syncing $REMOTE_REPO → $BENCH_REF (so the WMH build uses current builder code) ..."
-    SYNC_CMD="set -e
+SYNC_CMD="set -e
 AUTH_HDR=''
 [ -n \"\${GITHUB_TOKEN:-}\" ] && AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GITHUB_TOKEN\" | base64 | tr -d '\n')\"
-git -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin '$BENCH_REF' || git -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin
-git -C '$REMOTE_REPO' checkout -f '$BENCH_REF' 2>/dev/null || git -C '$REMOTE_REPO' checkout -f FETCH_HEAD
-git -C '$REMOTE_REPO' reset --hard
-chown -R rose:rose '$REMOTE_REPO' 2>/dev/null || true
-echo checkout \$(git -C '$REMOTE_REPO' rev-parse --short HEAD)"
+chown -R rose:rose '$REMOTE_REPO'
+gosu rose env HOME=/home/rose git -C '$REMOTE_REPO' remote set-url origin 'https://github.com/Rose-Ai-Labs/rose.git'
+gosu rose env HOME=/home/rose git -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin '$BENCH_REF' || gosu rose env HOME=/home/rose git -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin
+gosu rose env HOME=/home/rose git -C '$REMOTE_REPO' checkout -f '$BENCH_REF' 2>/dev/null || gosu rose env HOME=/home/rose git -C '$REMOTE_REPO' checkout -f FETCH_HEAD
+gosu rose env HOME=/home/rose git -C '$REMOTE_REPO' reset --hard
+echo checkout \$(gosu rose env HOME=/home/rose git -C '$REMOTE_REPO' rev-parse --short HEAD)"
     ssh_exec "$mid" "$SYNC_CMD" 2>&1 | grep -av '^Connecting to' | sed 's/^/   /' || true
 
     echo ""
@@ -1591,7 +1595,7 @@ echo "✅ Machine started + ssh-ready ($mid)"
 # Warm machines can retain a detached driver from an interrupted local
 # controller. Clear it before touching the shared /data/repo checkout.
 echo "🧹 Clearing stale on-box benchmark driver..."
-ssh_read "$mid" "stale_pat='/data/[c]loudbench-run.sh|/tmp/[r]b.sh|benchmarks/[r]un_benchmark.py|[r]un_benchmark.py|scripts/[r]un.sh --benchmark|http.server $REMOTE_DASH_PORT|[g]it -C $REMOTE_REPO fetch|[i]ndex-pack.*fetch-pack'; pkill -TERM -f \"\$stale_pat\" 2>/dev/null || true; sleep 2; pkill -KILL -f \"\$stale_pat\" 2>/dev/null || true; rm -f '$REMOTE_REPO/.context/cloudbench/report-card.json' '$REMOTE_REPO/.context/cloudbench/run.json' 2>/dev/null || true; rm -f '$REMOTE_REPO/.git/index.lock' '$REMOTE_REPO/.git/'*.lock '$REMOTE_REPO/.git/refs/heads/'*.lock 2>/dev/null || true; git config --global --add safe.directory '$REMOTE_REPO' 2>/dev/null || true" >/dev/null 2>&1 || true
+ssh_read "$mid" "stale_pat='/data/[c]loudbench-run.sh|/tmp/[r]b.sh|benchmarks/[r]un_benchmark.py|[r]un_benchmark.py|scripts/[r]un.sh --benchmark|http.server $REMOTE_DASH_PORT|[g]it -C $REMOTE_REPO fetch|[i]ndex-pack.*fetch-pack'; pkill -TERM -f \"\$stale_pat\" 2>/dev/null || true; sleep 2; pkill -KILL -f \"\$stale_pat\" 2>/dev/null || true; rm -f '$REMOTE_REPO/.context/cloudbench/report-card.json' '$REMOTE_REPO/.context/cloudbench/run.json' 2>/dev/null || true; rm -f '$REMOTE_REPO/.git/index.lock' '$REMOTE_REPO/.git/'*.lock '$REMOTE_REPO/.git/refs/heads/'*.lock 2>/dev/null || true" >/dev/null 2>&1 || true
 
 # ── 2. Deliver + launch the on-box driver DETACHED ──────────────────────────
 # Upload the LOCAL cloudbench-run.sh, local git diff, and a small invocation
