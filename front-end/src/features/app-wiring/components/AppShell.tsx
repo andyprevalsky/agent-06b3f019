@@ -13,6 +13,7 @@
  *   +--> "/research" --> <ResearchBlog />
  *   +--> "/research/:slug" --> <ResearchBlogPost />
  *   +--> "/download" --> <Download />
+ *   +--> "/waitlist" --> main Terminal + automatic phone login
  *   +--> "*" --> <NotFound />
  *
  * WaitlistGate overlays every route: authenticated users without a redeemed
