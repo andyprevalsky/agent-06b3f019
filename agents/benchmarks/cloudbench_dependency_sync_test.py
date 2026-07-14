@@ -237,6 +237,15 @@ def test_fleet_waits_for_every_isolated_stack_before_releasing_benchmarks() -> N
         in fleet
     )
     assert "CHILD_RUN_TIMEOUT=$((RUN_TIMEOUT + START_BARRIER_WAIT_SECONDS))" in fleet
+    assert "required_lock_ttl=$((CHILD_RUN_TIMEOUT + 3600))" in fleet
+    assert fleet.index('CHILD_RUN_TIMEOUT="$RUN_TIMEOUT"') < fleet.index(
+        "required_lock_ttl=$((CHILD_RUN_TIMEOUT + 3600))"
+    )
+    run_timeout = 7200
+    barrier_timeout = 7200
+    child_timeout = run_timeout + barrier_timeout
+    required_lock_ttl = child_timeout + 3600
+    assert required_lock_ttl > child_timeout
     assert (
         'CLOUDBENCH_START_BARRIER_WAIT_SECONDS="$START_BARRIER_WAIT_SECONDS"'
         in fleet
@@ -1957,6 +1966,89 @@ bash -n "$BUNDLE"
             assert "rm -f /tmp/cloudbench-local.patch" in generated
 
 
+def test_exclusive_fleet_controller_recovers_started_pool_capacity(
+    tmp_path: Path,
+) -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    reconcile_start = fleet.index("reconcile_pool() {")
+    reconcile_end = fleet.index("\n}\n", reconcile_start) + 3
+    reconcile_function = fleet[reconcile_start:reconcile_end]
+    pool_file = tmp_path / "pool.ids"
+    claims_dir = tmp_path / "claims"
+    operations_file = tmp_path / "operations"
+    pool_file.write_text("started-machine\nstopped-machine\n")
+    claims_dir.mkdir()
+    (claims_dir / "started-machine").write_text("stale-owner\n")
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
+{reconcile_function}
+APP=bench-app
+RUN_ID=test-run
+POOL_IDS_FILE="$POOL_FILE"
+POOL_CLAIMS_DIR="$CLAIMS_DIR"
+LEASED_PRIMARY_IDS=()
+LEASED_PRIMARY_NONCES=()
+pool_machine_state() {{
+  [ "$1" = started-machine ] && printf 'started\\n' || printf 'stopped\\n'
+}}
+cloudbench_machine_lease_acquire_retry() {{
+  printf 'lease %s\\n' "$2" >> "$OPERATIONS_FILE"
+  printf 'recovery-nonce\\n'
+}}
+track_primary_lease() {{
+  LEASED_PRIMARY_IDS+=("$1")
+  LEASED_PRIMARY_NONCES+=("$2")
+}}
+cloudbench_machine_stop_and_release_lease() {{
+  printf 'stop %s %s\\n' "$2" "$3" >> "$OPERATIONS_FILE"
+}}
+reconcile_pool
+printf 'ids=%s\\n' "${{LEASED_PRIMARY_IDS[*]-}}"
+printf 'nonces=%s\\n' "${{LEASED_PRIMARY_NONCES[*]-}}"
+""",
+        ],
+        env={
+            "POOL_FILE": str(pool_file),
+            "CLAIMS_DIR": str(claims_dir),
+            "OPERATIONS_FILE": str(operations_file),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert operations_file.read_text().splitlines() == [
+        "lease started-machine",
+        "stop started-machine recovery-nonce",
+    ]
+    assert not (claims_dir / "started-machine").exists()
+    assert result.stdout.splitlines()[-2:] == [
+        "ids=started-machine",
+        "nonces=",
+    ]
+
+
+def test_pool_recovery_runs_only_after_global_lock_and_provenance_validation() -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    controller_line = fleet.index('cloudbench_controller_wait_acquire "$LOCK_DIR" "$APP"')
+    provenance_line = fleet.index("validate_tracked_pool_provenance || exit 1")
+    reconcile_line = fleet.index("reconcile_pool || exit 1")
+    launch_line = fleet.index("# ── Clone one machine per bench")
+
+    assert controller_line < provenance_line < reconcile_line < launch_line
+    assert "cloudbench_machine_lease_acquire_retry" in fleet[
+        fleet.index("reconcile_pool() {") : fleet.index("claim_pool_machine() {")
+    ]
+    assert "cloudbench_machine_stop_and_release_lease" in fleet[
+        fleet.index("reconcile_pool() {") : fleet.index("claim_pool_machine() {")
+    ]
+
+
 def test_environment_activation_retries_only_transient_fly_failures(tmp_path: Path) -> None:
     cloud = CLOUD_SCRIPT.read_text()
     function_start = cloud.index("machine_state_for_activation() {")
@@ -2197,7 +2289,7 @@ environment_activation_targets
     assert malformed.returncode != 0
 
 
-def test_environment_refresh_serializes_shared_app_and_reconciles_pool_first() -> None:
+def test_environment_refresh_serializes_shared_app_before_safe_pool_recovery() -> None:
     cloud = CLOUD_SCRIPT.read_text()
     fleet = FLEET_SCRIPT.read_text()
 
@@ -2218,8 +2310,15 @@ def test_environment_refresh_serializes_shared_app_and_reconciles_pool_first() -
     assert 'FLY secrets set --stage -a "$APP"' in cloud[locked_start:locked_end]
 
     refresh_call = 'bash scripts/run-bench-cloud --refresh-secrets'
-    assert fleet.index("reconcile_pool || exit 1") < fleet.index(refresh_call)
-    assert fleet.index(refresh_call) < fleet.index('cid="$(claim_pool_machine)"')
+    assert fleet.index(refresh_call) < fleet.index(
+        "validate_tracked_pool_provenance || exit 1"
+    )
+    assert fleet.index("validate_tracked_pool_provenance || exit 1") < fleet.index(
+        "reconcile_pool || exit 1"
+    )
+    assert fleet.index("reconcile_pool || exit 1") < fleet.index(
+        'cid="$(claim_pool_machine)"'
+    )
     allocation_start = fleet.index("# ── Clone one machine per bench")
     all_requested_launched = '[ "${#CHILD_PIDS[@]}" -eq "${#BENCHES[@]}" ]'
     allocation_end = fleet.index('echo "⏳ ${#CHILD_PIDS[@]} isolated', allocation_start)
@@ -2257,7 +2356,7 @@ def test_environment_refresh_serializes_shared_app_and_reconciles_pool_first() -
     assert "trap 'exit 129' HUP" in cloud
 
 
-def test_pool_reconcile_leaves_concurrent_owner_untouched(tmp_path: Path) -> None:
+def test_pool_reconcile_recovers_orphan_after_controller_handoff(tmp_path: Path) -> None:
     fleet = FLEET_SCRIPT.read_text()
     inventory_start = fleet.index("fly_inventory_json() {")
     inventory_end = fleet.index("\n}\n", inventory_start) + 3
@@ -2285,8 +2384,11 @@ def test_pool_reconcile_leaves_concurrent_owner_untouched(tmp_path: Path) -> Non
             "-c",
             f"""set -uo pipefail
 APP=bench-app
+RUN_ID=test-run
 POOL_IDS_FILE="$POOL_FILE"
-UNAVAILABLE_POOL_IDS=()
+POOL_CLAIMS_DIR="$CLAIMS_DIR"
+LEASED_PRIMARY_IDS=()
+LEASED_PRIMARY_NONCES=()
 FLY() {{
   if [ "$1 $2" = "machines list" ]; then
     state="$(head -1 "$STATES_FILE")"
@@ -2296,20 +2398,27 @@ FLY() {{
     printf '[{{"id":"abc123","state":"%s"}}]\\n' "$state"
     return 0
   fi
-  if [ "$1 $2" = "machine stop" ]; then
-    printf 'stop\\n' >> "$OPERATIONS_FILE"
-    return 0
-  fi
   return 2
 }}
 {reconcile_functions}
+cloudbench_machine_lease_acquire_retry() {{
+  printf 'lease %s\\n' "$2" >> "$OPERATIONS_FILE"
+  printf 'recovery-nonce\\n'
+}}
+track_primary_lease() {{
+  LEASED_PRIMARY_IDS+=("$1")
+  LEASED_PRIMARY_NONCES+=("$2")
+}}
+cloudbench_machine_stop_and_release_lease() {{
+  printf 'stop %s %s\\n' "$2" "$3" >> "$OPERATIONS_FILE"
+}}
 reconcile_pool || exit $?
-printf 'unavailable=%s\\n' "${{UNAVAILABLE_POOL_IDS[*]}}"
 printf 'refresh\\n' >> "$OPERATIONS_FILE"
 """,
         ],
         env={
             "POOL_FILE": str(pool_file),
+            "CLAIMS_DIR": str(tmp_path / "claims"),
             "STATES_FILE": str(states_file),
             "OPERATIONS_FILE": str(operations_file),
             "CLOUDBENCH_POOL_STOP_DELAY": "0",
@@ -2320,9 +2429,10 @@ printf 'refresh\\n' >> "$OPERATIONS_FILE"
     )
 
     assert result.returncode == 0, result.stderr
-    assert "unavailable=abc123" in result.stdout
     assert operations_file.read_text().splitlines() == [
         "list started",
+        "lease abc123",
+        "stop abc123 recovery-nonce",
         "refresh",
     ]
     assert states_file.read_text() == ""
@@ -2350,7 +2460,8 @@ APP=bench-app
 POOL_IDS_FILE="$POOL_FILE"
 CLAIMED_POOL_FILE="$CLAIMS_FILE"
 POOL_CLAIMS_DIR="$GLOBAL_CLAIMS"
-UNAVAILABLE_POOL_IDS=(abc123)
+mkdir -p "$POOL_CLAIMS_DIR"
+printf '%s\\n' "$$" > "$POOL_CLAIMS_DIR/abc123"
 machine_storage_ready() {{ return 0; }}
 pool_machine_provenance_valid() {{ [ "$1" != bad999 ]; }}
 pool_machine_state() {{ [ "$1" = bad999 ] && return 1; printf 'stopped\\n'; }}

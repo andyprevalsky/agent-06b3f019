@@ -101,13 +101,6 @@ if [ -n "$PROVISION_POOL" ]; then
     [ "$PROVISION_POOL" -gt 0 ] \
         || { echo "❌ --provision-pool requires a positive integer." >&2; exit 2; }
 fi
-required_lock_ttl=$((RUN_TIMEOUT + 3600))
-if [ -n "${CLOUDBENCH_CLOUD_LOCK_TTL:-}" ] && [ "$CLOUDBENCH_CLOUD_LOCK_TTL" -lt "$required_lock_ttl" ] 2>/dev/null; then
-    echo "❌ CLOUDBENCH_CLOUD_LOCK_TTL must be at least $required_lock_ttl seconds for this fleet run." >&2
-    exit 2
-fi
-CLOUDBENCH_CLOUD_LOCK_TTL="${CLOUDBENCH_CLOUD_LOCK_TTL:-$required_lock_ttl}"
-export CLOUDBENCH_CLOUD_LOCK_TTL
 # --provision-pool takes no bench args; everything else needs at least one bench.
 [ -n "$PROVISION_POOL" ] || true
 [ -n "$PROVISION_POOL" ] || [ "${#BENCHES[@]}" -ge 1 ] || { echo "usage: run-bench-fleet <bench> [<bench>...] [--sim-on a,b] [--ref X]  |  --provision-pool N" >&2; exit 2; }
@@ -130,6 +123,19 @@ CHILD_RUN_TIMEOUT="$RUN_TIMEOUT"
 if [ "$SYNCHRONIZED_START" = "1" ]; then
     CHILD_RUN_TIMEOUT=$((RUN_TIMEOUT + START_BARRIER_WAIT_SECONDS))
 fi
+
+# The controller lease begins before environment refresh and fleet admission,
+# while each primary lease must survive until its child is terminal and cleanup
+# has authoritatively stopped the Machine. Keep a full lifecycle margin beyond
+# the complete synchronized child ceiling; otherwise a long admission can let
+# controller and primary leases expire before teardown.
+required_lock_ttl=$((CHILD_RUN_TIMEOUT + 3600))
+if [ -n "${CLOUDBENCH_CLOUD_LOCK_TTL:-}" ] && [ "$CLOUDBENCH_CLOUD_LOCK_TTL" -lt "$required_lock_ttl" ] 2>/dev/null; then
+    echo "❌ CLOUDBENCH_CLOUD_LOCK_TTL must be at least $required_lock_ttl seconds for this fleet run." >&2
+    exit 2
+fi
+CLOUDBENCH_CLOUD_LOCK_TTL="${CLOUDBENCH_CLOUD_LOCK_TTL:-$required_lock_ttl}"
+export CLOUDBENCH_CLOUD_LOCK_TTL
 
 # ── flyctl + token (mirror run-bench-cloud) ─────────────────────────────────
 if ! command -v flyctl >/dev/null 2>&1; then
@@ -982,19 +988,20 @@ provision_pool() {  # provision_pool <N> — ensure at least N stopped clones, r
 }
 
 CLAIMED_POOL_FILE="$FLEET_DIR/claimed-pool.ids"
-UNAVAILABLE_POOL_IDS=()
-# Self-heal the pool: a killed run can't run its return-to-stopped step, leaving a
-# claimed machine 'started' and un-claimable (claim only takes 'stopped'). At fleet
-# START this workspace's controller lock is held, so any active machine in this
-# workspace's pool ledger is orphaned. Stop and verify it before environment
-# activation (avoids "pool empty" → fresh clone → the 5-min volume-fork slow start).
+# Self-heal the pool after provider-global controller handoff and provenance
+# validation. A killed run can leave a claimed Machine active and unclaimable;
+# treating that owned capacity as somebody else's forces unnecessary snapshot
+# forks and can fail solely on regional volume capacity. The app-wide sentinel
+# proves no conforming sibling controller is active, the Machine lease serializes
+# the exact lifecycle mutation, and cleanup retains any lease whose stop cannot
+# be authoritatively confirmed.
 pool_machine_state() {  # pool_machine_state <id>: prints state; 1=absent, 2=invalid read
     fleet_machine_state "$1"
 }
 
 reconcile_pool() {
     [ -f "$POOL_IDS_FILE" ] || return 0
-    local id st presence
+    local id st presence nonce lease_index
     while read -r id; do
         [ -n "$id" ] || continue
         st="$(pool_machine_state "$id")"
@@ -1004,9 +1011,24 @@ reconcile_pool() {
         [ "$st" = "stopped" ] && continue
         case "$st" in
             created|replacing|started|starting|stopping)
-                UNAVAILABLE_POOL_IDS+=("$id")
-                echo "  ↪️  pool machine $id is $st; leaving concurrent owner untouched"
-                continue
+                echo "  ♻️ recovering exclusively owned pool machine $id from state $st"
+                nonce="$(cloudbench_machine_lease_acquire_retry "$APP" "$id" \
+                    "cloudbench-pool-recovery run=$RUN_ID" \
+                    "${CLOUDBENCH_PRIMARY_LEASE_ATTEMPTS:-45}" \
+                    "${CLOUDBENCH_PRIMARY_LEASE_RETRY_DELAY:-2}")"
+                if [ -z "$nonce" ]; then
+                    echo "❌ could not acquire recovery lease for pool machine $id" >&2
+                    return 1
+                fi
+                lease_index="${#LEASED_PRIMARY_IDS[@]}"
+                track_primary_lease "$id" "$nonce"
+                if ! cloudbench_machine_stop_and_release_lease "$APP" "$id" "$nonce"; then
+                    echo "❌ could not confirm pool machine $id stopped during recovery" >&2
+                    return 1
+                fi
+                LEASED_PRIMARY_NONCES[$lease_index]=""
+                rm -f "$POOL_CLAIMS_DIR/$id" 2>/dev/null || true
+                echo "  ✅ recovered pool machine $id to stopped capacity"
                 ;;
             *)
             echo "❌ pool machine $id has unsafe pre-refresh state '$st'" >&2
@@ -1021,7 +1043,6 @@ claim_pool_machine() {  # echo a started, claimed pool machine id (or '' if none
     while read -r id; do
         [ -n "$id" ] || continue
         case "$id" in *[!0-9a-f]*) continue ;; esac
-        case " ${UNAVAILABLE_POOL_IDS[*]:-} " in *" $id "*) continue ;; esac
         grep -Fxq "$id" "$CLAIMED_POOL_FILE" 2>/dev/null && continue
         st="$(pool_machine_state "$id")"
         presence=$?
@@ -1258,7 +1279,6 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-reconcile_pool || exit 1   # stop + verify this workspace's pool before env activation
 acquire_app_environment_lock || exit 1
 echo "🔐 Refreshing + production-verifying the shared benchmark environment before machine start..."
 if ! CLOUDBENCH_PARENT_LOCK_HELD=1 \
@@ -1332,6 +1352,7 @@ fi
 # fail-closed path as explicit provisioning before strict consumption checks.
 upgrade_pool_provenance_volume_bindings || exit 1
 validate_tracked_pool_provenance || exit 1
+reconcile_pool || exit 1
 
 CODE_SUMMARY=""
 print_code_provenance

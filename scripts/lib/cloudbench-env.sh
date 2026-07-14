@@ -697,8 +697,47 @@ cloudbench_machine_release_lease() {
   esac
 }
 
+cloudbench_machine_wait_stopped_with_lease() {
+  local app="$1" machine_id="$2" nonce="$3" attempts="$4" delay="$5"
+  local attempt=1 status state
+  case "$attempts" in ''|*[!0-9]*|0) return 2 ;; esac
+  case "$delay" in ''|*[!0-9]*) return 2 ;; esac
+
+  while [ "$attempt" -le "$attempts" ]; do
+    status=0
+    if cloudbench_machines_api_request \
+      GET "/v1/apps/$app/machines/$machine_id" "" "$nonce"; then
+      status="${CLOUDBENCH_API_STATUS:-0}"
+    else
+      status="${CLOUDBENCH_API_STATUS:-0}"
+    fi
+    if [ "$status" = "200" ]; then
+      state="$(printf '%s' "$CLOUDBENCH_API_BODY" | jq -er \
+        --arg machine_id "$machine_id" \
+        'select(.id == $machine_id) | .state // empty' 2>/dev/null)" || state=""
+      case "$state" in
+        stopped) return 0 ;;
+        created|replacing|started|starting|stopping) ;;
+        *)
+          echo "Machine $machine_id returned unsafe state ${state:-unknown} while confirming stop" >&2
+          return 1
+          ;;
+      esac
+    elif ! cloudbench_machines_api_status_is_transient "$status"; then
+      echo "Machine state verification failed while stopping $machine_id (HTTP $status)" >&2
+      return 1
+    fi
+
+    [ "$attempt" -ge "$attempts" ] && break
+    [ "$delay" -gt 0 ] && sleep "$delay"
+    attempt=$((attempt + 1))
+  done
+  echo "Machine $machine_id did not reach authoritative stopped state; retaining its lease" >&2
+  return 1
+}
+
 cloudbench_machine_stop_and_release_lease() {
-  local app="$1" machine_id="$2" nonce="$3" status state
+  local app="$1" machine_id="$2" nonce="$3" status verify_attempts verify_delay
   if ! cloudbench_machines_api_request \
     POST "/v1/apps/$app/machines/$machine_id/stop" '{}' "$nonce"; then
     status="${CLOUDBENCH_API_STATUS:-0}"
@@ -707,35 +746,24 @@ cloudbench_machine_stop_and_release_lease() {
   fi
   status="${CLOUDBENCH_API_STATUS:-0}"
   case "$status" in
-    200) ;;
+    200)
+      verify_attempts="${CLOUDBENCH_MACHINE_STOP_VERIFY_ATTEMPTS:-30}"
+      verify_delay="${CLOUDBENCH_MACHINE_STOP_VERIFY_RETRY_DELAY:-1}"
+      ;;
     409)
       # A stop conflict can mean either "already stopped" or an unsafe
       # lifecycle transition. Release ownership only after an authoritative
       # read proves this exact Machine is stopped.
-      if ! cloudbench_machines_api_request \
-        GET "/v1/apps/$app/machines/$machine_id" "" "$nonce"; then
-        status="${CLOUDBENCH_API_STATUS:-0}"
-        echo "Machine state verification failed after stop conflict for $machine_id (HTTP $status)" >&2
-        return 1
-      fi
-      status="${CLOUDBENCH_API_STATUS:-0}"
-      [ "$status" = "200" ] || {
-        echo "Machine state verification failed after stop conflict for $machine_id (HTTP $status)" >&2
-        return 1
-      }
-      state="$(printf '%s' "$CLOUDBENCH_API_BODY" | jq -er \
-        --arg machine_id "$machine_id" \
-        'select(.id == $machine_id) | .state // empty' 2>/dev/null)" || state=""
-      [ "$state" = "stopped" ] || {
-        echo "Machine $machine_id remained ${state:-unknown} after stop conflict; retaining its lease" >&2
-        return 1
-      }
+      verify_attempts=1
+      verify_delay=0
       ;;
     *)
       echo "Machine stop failed for $machine_id (HTTP $status)" >&2
       return 1
       ;;
   esac
+  cloudbench_machine_wait_stopped_with_lease \
+    "$app" "$machine_id" "$nonce" "$verify_attempts" "$verify_delay" || return 1
   cloudbench_machine_release_lease "$app" "$machine_id" "$nonce"
 }
 

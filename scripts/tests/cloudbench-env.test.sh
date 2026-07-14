@@ -317,6 +317,7 @@ api_calls="$TMP_ROOT/machines-api-calls"
 api_lease_state="$TMP_ROOT/machines-api-lease-state"
 api_primary_stop_fail="$TMP_ROOT/machines-api-primary-stop-fail"
 api_primary_stop_conflict_state="$TMP_ROOT/machines-api-primary-stop-conflict-state"
+api_primary_stop_verify_states="$TMP_ROOT/machines-api-primary-stop-verify-states"
 api_primary_release_failure="$TMP_ROOT/machines-api-primary-release-failure"
 api_primary_activation_attempts="$TMP_ROOT/machines-api-primary-activation-attempts"
 api_transport_activation_reads="$TMP_ROOT/machines-api-transport-activation-reads"
@@ -374,6 +375,12 @@ cloudbench_machines_api_request() {
     'GET|/v1/apps/bench-app/machines/primary-machine')
       if [ -s "$api_primary_stop_conflict_state" ]; then
         state="$(cat "$api_primary_stop_conflict_state")"
+        CLOUDBENCH_API_STATUS=200
+        CLOUDBENCH_API_BODY="{\"id\":\"primary-machine\",\"state\":\"$state\"}"
+      elif [ -s "$api_primary_stop_verify_states" ]; then
+        state="$(head -1 "$api_primary_stop_verify_states")"
+        tail -n +2 "$api_primary_stop_verify_states" > "$api_primary_stop_verify_states.next"
+        mv "$api_primary_stop_verify_states.next" "$api_primary_stop_verify_states"
         CLOUDBENCH_API_STATUS=200
         CLOUDBENCH_API_BODY="{\"id\":\"primary-machine\",\"state\":\"$state\"}"
       else
@@ -473,6 +480,9 @@ cloudbench_machines_api_request() {
         CLOUDBENCH_API_STATUS=409
         CLOUDBENCH_API_BODY='{"error":"machine lifecycle conflict"}'
       else
+        if [ ! -s "$api_primary_stop_verify_states" ]; then
+          printf 'stopped\n' > "$api_primary_stop_verify_states"
+        fi
         CLOUDBENCH_API_STATUS=200
         CLOUDBENCH_API_BODY='{"ok":true}'
       fi
@@ -589,7 +599,17 @@ if CLOUDBENCH_MACHINE_START_RETRY_DELAY=0 \
 fi
 [ "$(cat "$api_bad_start_attempts")" -eq 1 ] || \
   fail "only Fly's exact replacement transition may be retried"
-cloudbench_machine_stop_and_release_lease bench-app primary-machine "$primary_nonce"
+printf 'stopping\nstopped\n' > "$api_primary_stop_verify_states"
+stop_read_count_before="$(grep -c 'GET|/v1/apps/bench-app/machines/primary-machine' "$api_calls")"
+release_count_before="$(grep -c 'DELETE|/v1/apps/bench-app/machines/primary-machine/lease' "$api_calls" || true)"
+CLOUDBENCH_MACHINE_STOP_VERIFY_RETRY_DELAY=0 \
+  cloudbench_machine_stop_and_release_lease bench-app primary-machine "$primary_nonce"
+stop_read_count_after="$(grep -c 'GET|/v1/apps/bench-app/machines/primary-machine' "$api_calls")"
+release_count_after="$(grep -c 'DELETE|/v1/apps/bench-app/machines/primary-machine/lease' "$api_calls")"
+[ "$stop_read_count_after" -eq $((stop_read_count_before + 2)) ] || \
+  fail "a successful stop must wait for authoritative stopped state before lease release"
+[ "$release_count_after" -eq $((release_count_before + 1)) ] || \
+  fail "a confirmed successful stop must release its lease exactly once"
 require_text "$api_calls" \
   'POST|/v1/apps/bench-app/machines/primary-machine/stop|{}|primary-nonce' \
   "primary cleanup must stop through the Machines API before releasing its lease"
@@ -838,6 +858,9 @@ cleanup_release_line="$(grep -n 'cloudbench_controller_release "$LOCK_DIR" "$APP
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'required_lock_ttl=$((RUN_TIMEOUT + 3600))' \
   "direct-run lease TTL must include the configured run timeout and lifecycle margin"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'required_lock_ttl=$((CHILD_RUN_TIMEOUT + 3600))' \
+  "fleet lease TTL must exceed the complete synchronized child lifecycle"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'if [ "${CLOUDBENCH_PARENT_LOCK_HELD:-0}" = "1" ]; then' \
   "authenticated fleet helpers must preserve their parent lease ceiling"
