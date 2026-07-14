@@ -166,6 +166,9 @@ require_text "$ROOT_DIR/scripts/run-bench-fleet" \
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'cloudbench_controller_lock_acquire "$LOCK_DIR"' \
   "fleet controllers must hold the workspace-local controller lock"
+require_text "$ROOT_DIR/scripts/run-predeploy-cloud" \
+  'bash "$ROOT_DIR/scripts/tests/cloudbench-multi-workstream.test.sh"' \
+  "pre-deploy cloud gate must run the permanent concurrency regression"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'CLOUDBENCH_ENV_VERIFIED=1' \
   "fleet children must receive proof that the controller verified the environment"
