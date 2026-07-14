@@ -413,17 +413,10 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale>
             case $? in
                 0) id="$resolved"; printf 'id=%s\n' "$id" >> "$record" ;;
                 1)
-                    # Name-only record whose clone never became provider-visible
-                    # (e.g. a clone that died at volume creation). Preserve the
-                    # record for a future sweep and skip it — one unresolved entry
-                    # must not abort the rest of the recovery or block later runs.
-                    echo "⚠ owned clone name '$clone_name' is not provider-visible; skipping and retaining record for future recovery" >&2
-                    continue
+                    echo "❌ owned clone name '$clone_name' is not provider-visible yet; retaining ownership and refusing to provision" >&2
+                    return 1
                     ;;
-                *)
-                    echo "⚠ ambiguous/unreadable clone name '$clone_name'; skipping and retaining record for future recovery" >&2
-                    continue
-                    ;;
+                *) echo "❌ ambiguous/unreadable stale clone name '$clone_name'; refusing to provision" >&2; return 1 ;;
             esac
         fi
         if [ -n "${WARM_ID:-}" ] && [ "$id" = "$WARM_ID" ]; then
