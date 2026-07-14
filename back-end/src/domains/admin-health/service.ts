@@ -51,14 +51,18 @@ export function buildSignupCohort(
   const start = new Date(period.start);
   const end = new Date(period.end);
   const cohortUsers = users.filter((user) => user.createdAt >= start && user.createdAt < end);
-  const createdAtByUser = new Map(cohortUsers.map((user) => [user.userId, user.createdAt]));
-  const userIds = new Set(createdAtByUser.keys());
+  const userIds = new Set(cohortUsers.map((user) => user.userId));
   return {
     userIds,
-    tasks: tasks.filter((task) => {
-      const userCreatedAt = createdAtByUser.get(task.userId);
-      return userCreatedAt !== undefined && task.createdAt >= userCreatedAt && task.createdAt < end;
-    }),
+    // A cohort user is activated by any root task they issued within the
+    // period window. We deliberately bound tasks by the period start rather
+    // than each user's own createdAt: during onboarding the first Agent row is
+    // frequently written a few milliseconds before the User row's timestamp,
+    // so a per-user `>= createdAt` lower bound silently drops near-simultaneous
+    // signup+first-task events from the activation funnel.
+    tasks: tasks.filter(
+      (task) => userIds.has(task.userId) && task.createdAt >= start && task.createdAt < end
+    ),
   };
 }
 
